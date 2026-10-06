@@ -362,20 +362,33 @@ trustedBodies =
     , "Runtime.tNil"
     , "Runtime.tCons"
 
-    -- runTask pattern-matches the 30 Task ctors. With the per-ctor result
-    -- annotations (src/Runtime.elm `type Task`), 29 of its branches check
-    -- honestly via branch-local result discharge (a ~ (), a ~ String, ...).
-    -- The ONE that still cannot is `TaskExec`: its payload is typed `a` (the
-    -- ctor's existential, absent from the result `Task x ( Int, String,
-    -- String )`), so inside the branch `plan : a` is a rigid skolem — but the
-    -- body applies `execPlanPrim : List a -> List b` to it, requiring
-    -- `a ~ List a` (a rigid violation: "type variable a is rigid ... cannot
-    -- be unified with List a"). The runtime value IS a tagged `List`, but the
-    -- ctor declares it generically, so this branch is a dynamic cast HM
-    -- cannot express. Honest fix = type the payload `List a` (and the
-    -- `taskExec` wrapper `List a -> Task x ( Int, String, String )`), a
-    -- surface change to the Task payload, not something the per-ctor result
-    -- annotations alone provide. Kept trusted for that one cast.
+    -- runTask pattern-matches the 20 Task ctors. With the per-ctor result
+    -- annotations (src/Runtime.elm `type Task`), 16 of its 20 branches check
+    -- honestly via branch-local result discharge (a ~ (), a ~ String, ...);
+    -- FOUR cannot, so the body stays trusted. The count is reproducible
+    -- (tools/withe-recount-runTask.sh, temp-copy bisection) and is taken
+    -- UNDER a `type x a.` binder: the committed signature has none, and the
+    -- per-branch discharge needs the rigid result index. The four:
+    --   * `TaskExec`: its payload is typed `a` (the ctor's existential,
+    --     absent from the result `Task x ( Int, String, String )`), so
+    --     inside the branch `plan : a` is a rigid skolem — but the body
+    --     applies `execPlanPrim : List a -> List b` to it, requiring
+    --     `a ~ List a` (a rigid violation: "type variable a is rigid ...
+    --     cannot be unified with List a"). The runtime value IS a tagged
+    --     `List`, but the ctor declares it generically, so this branch is a
+    --     dynamic cast HM cannot express. Honest fix = type the payload
+    --     `List a` (and the `taskExec` wrapper
+    --     `List a -> Task x ( Int, String, String )`), a surface change to
+    --     the Task payload, not something the per-ctor result annotations
+    --     alone provide.
+    --   * `TaskNow`: the body's `Ok 0` number literal hits a flex-marker
+    --     conflict before the result discharge fires (literal handling).
+    --   * `TaskQuit`: un-annotated nullary ctor; the body's `Ok ()` meets
+    --     the abstract index `a` — the generalization the annotation table
+    --     deliberately keeps (design, not defect).
+    --   * `TaskStat`: the result is a closed record, and the
+    --     record-discharge over-approximation refuses any record body.
+    -- Kept trusted for those four.
     , "Runtime.runTask"
     ]
 

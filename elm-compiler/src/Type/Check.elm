@@ -20,11 +20,13 @@ makes `Prelude`'s unsignatured `map`/`filter`/`compare`/`sum`/... resolvable
 from `Dict`/`Set`/the fixtures even though `run.js` appends `Prelude` AFTER the
 user units.
 
-Reordering: the nine built-in modules (Prelude, Runtime, and the seven
-core-libs) go first in a fixed canonical order (dependencies satisfied:
-Prelude before Runtime/core-libs; JsArray before Array; Dict before Set), then
-the user units are topologically sorted by their parsed `import` lists (CLI
-order preserved for independent modules; a cycle is an error).
+Reordering: the built-in modules go first in a fixed canonical order
+(`canonicalOrder`: Prelude, Runtime, and the core-libs it lists —
+dependencies satisfied: Prelude before Runtime/core-libs; JsArray before
+Array; Dict before Set); a corpus core-lib absent from that list (today
+`Str`) is topologically sorted with the user units instead, by their parsed
+`import` lists (CLI order preserved for independent modules; a cycle is an
+error).
 
 TRUSTED UNITS: `JsArray` and `Array` are trusted-skipped (their bodies are NOT
 checked) for two documented reasons, both discovered during planning:
@@ -149,11 +151,13 @@ insertSchemes schemes env =
 -- ======================= REORDERING =======================
 
 
-{-| The canonical dependency order for the nine built-in modules.  `Prelude`
-first (its unsignatured List/Basics/compare functions are used by every other
-module); `Runtime` next (its unsignatured `worker`/`task*` functions are used
-by the effects fixtures); then the seven core-libs in dependency order
-(`JsArray` before `Array`, `Dict` before `Set`).
+{-| The canonical dependency order for the built-in modules listed here.
+`Prelude` first (its unsignatured List/Basics/compare functions are used by
+every other module); `Runtime` next (its unsignatured `worker`/`task*`
+functions are used by the effects fixtures); then the core-libs below in
+dependency order (`JsArray` before `Array`, `Dict` before `Set`).  The
+corpus's eighth core-lib `Str` is absent from this list: `orderUnits` treats
+any module absent from it as user code and topo-sorts it.
 -}
 canonicalOrder : List String
 canonicalOrder =

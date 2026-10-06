@@ -11,7 +11,7 @@
 // Batch CLI (S8):
 //   node run.js --batch <manifest.json>
 // manifest = { "groups": [ { "sources": ["/abs/a.elm", ...], "output": "/abs/x.csexp" }, ... ] }
-// The fixed corpus (Prelude + Runtime + the seven core-libs) is read ONCE and
+// The fixed corpus (Prelude + Runtime + the eight core-libs) is read ONCE and
 // every group is compiled in this one process; Main.elm emits a JSON ARRAY of
 // per-group bundle strings ("<bundle>" or "err <msg>" per group), which are
 // written to each group's output file.  This pays for the corpus

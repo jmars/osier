@@ -25,8 +25,8 @@ line 2 (or any later line) starts with "-> " — the single-group CLI shape
 (a.b elm out.csexp) has no such line.  (`--batch` is accepted as a no-op
 prefix for run.js symmetry; the manifest argument follows it.)
 
-The fixed corpus (Prelude, Runtime, the 25 core-libs — run.js's exact order,
-see corpusPaths) is compiled ONCE per process and every group compiles
+The fixed corpus (Prelude, Runtime, the eight core-libs — run.js's exact
+order, see corpusPaths) is compiled ONCE per process and every group compiles
 against it, matching run.js's batch behavior byte for byte:
 Lower.Module.compileBatch is called with the same corpus texts in the same
 order and the same per-group source texts in the same order, and its output

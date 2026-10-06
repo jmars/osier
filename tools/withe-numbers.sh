@@ -145,7 +145,7 @@ else
 fi
 
 # --- 5. runTask branch recount (G5 corrected figure) -------------------------
-# Reproduce the 25-of-30 interpreter-branch count by temp-copy bisection (see
+# Reproduce the 16-of-20 interpreter-branch count by temp-copy bisection (see
 # tools/withe-recount-runTask.sh for the method and the honest condition).
 recount_out="$(tools/withe-recount-runTask.sh 2>&1)"
 recount_rc=$?

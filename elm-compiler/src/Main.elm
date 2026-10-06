@@ -4,7 +4,7 @@ port module Main exposing (main)
 --
 -- Receives ALL sources via flags:
 --   {corpusSourcesJson} — a JSON array of the FIXED corpus module sources
---     (Prelude + Runtime + the seven core-libs), parsed+typechecked+lowered
+--     (Prelude + Runtime + the eight core-libs), parsed+typechecked+lowered
 --     ONCE per process.
 --   {groupsJson}        — a JSON array of JSON arrays: one source list per
 --     fixture group (1-2 user modules each).

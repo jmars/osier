@@ -13,7 +13,7 @@
 # rows, run against a renderer-free elmvm.
 #
 # Since S8 the compile step is BATCHED: the fixed corpus (Prelude + Runtime +
-# the seven core-libs) is parsed+typechecked+lowered ONCE, and every fixture
+# the eight core-libs) is parsed+typechecked+lowered ONCE, and every fixture
 # group is compiled in the SAME node run.js process against the cached corpus.
 # The script declares all fixtures up front (registering each (sources, output)
 # group + its post-compile check), calls run.js ONCE with a batch manifest, then

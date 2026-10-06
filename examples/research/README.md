@@ -16,8 +16,9 @@ node elm-compiler/run.js examples/research/<probe>.elm /tmp/out.csexp
 cat /tmp/out.csexp      # a bundle = compiles clean; "err <msg>" = rejected
 ```
 
-Results below were re-measured on the committed tree (`0e5a564`,
-2026-10-05). Expected results are the CURRENT checker output; where a probe's
+Results below were re-measured on the artifact tagged `withe-paper-artifact-1`
+in this repository (the withe tree, after the language left fx-ui). Expected
+results are the CURRENT checker output; where a probe's
 error string or location has drifted from an earlier `/tmp` snapshot, that is
 called out (the rejection itself is unchanged).
 
