@@ -62,14 +62,16 @@ objects and polymorphic variants, and the locally abstract type prefix `type a.`
 maintainers describe the interaction precisely. OCaml's first GADT implementation *restricted*
 the combination outright: "we had to restrict the use of object types and polymorphic variants in
 combination with GADTs, to prevent local equations from breaking the invariant that the same row
-variable may only appear in two record types that are equal" [Garrigue & Rémy 2012]. The
-restriction is still felt as an undocumented idiom with empirical failure modes: "the interaction
+variable may only appear in two record types that are equal" [Garrigue & Rémy 2012]. Its
+residue is still felt as an undocumented idiom with empirical failure modes: "the interaction
 of row variables and GADTs is not well specified. Thus it is common to hit hard to understand
 behaviour, and nothing is guaranteed beyond the fact that the currently implemented interaction is
 safe" [octachron, OCaml maintainer, Jan 2024]. Pattern matching on a polymorphic variant blocks
 refinement entirely ("GADT equations cannot narrow a polymorphic variant constraint"
-[octachron 2024]; ocaml/ocaml #5724), and the recommended workaround restructures the program so
-that no single row variable is ever refined: model each field as its own one-field object type,
+[octachron 2024]; ocaml/ocaml #5724 records an earlier, stronger 4.00-era restriction — no type
+propagation in any match containing a poly-variant pattern — lifted in 4.01 [Garrigue, rev 13221;
+4.01 Changes]), and the recommended workaround restructures the program so that no single row
+variable is ever refined: model each field as its own one-field object type,
 which is a manual membership-witness encoding. Practitioners reach for witness encodings by
 necessity. The one system that met the interaction treated the conflict as unsoundness and
 legislated around it; the dominant GADT-inference framework cannot even state it — OutsideIn(X)'s
@@ -1139,8 +1141,10 @@ new frame.
 strongest single piece of prior-art evidence: restricted in the first implementation (Garrigue &
 Rémy 2012, verbatim, on the same row-variable invariant our discipline protects), still "not
 well specified" per its maintainers (octachron 2024), with poly-variant patterns blocking
-refinement outright (ocaml/ocaml #5724: "types cannot be refined if a pattern-matching contains
-polymorphic variant"), object/GADT invariance ("GADTs are incompatible with object subtyping:
+refinement outright ("GADT equations cannot narrow a polymorphic variant constraint"
+[octachron 2024]; the earlier, stronger 4.00-era restriction — "types cannot be refined if a
+pattern-matching contains polymorphic variant" — was lifted in 4.01 [Garrigue, #5724 rev 13221;
+4.01 Changes]), object/GADT invariance ("GADTs are incompatible with object subtyping:
 they are always invariant with respect to their type parameters"), and the recommended
 workaround — one row variable per field — being a manual membership-witness encoding, the idiom
 practitioners already reach for (the discuss.ocaml.org FSM/reducer threads are the
