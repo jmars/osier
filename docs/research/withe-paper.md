@@ -25,13 +25,13 @@ branch's equations; scoped-label update is domain-preserving, hence sound by con
 insertion, the shape-changing dual, is rejected — a deliberate position on Rémy's extension dial,
 not a discovery. A measured principality boundary carries an inversion: the witness encoding
 *infers* where the native refinement is *checkable, not inferable*. An Elm-family checker
-implements it: the pre-existing corpus compiles byte-identically against a committed manifest, 187
+implements it: the pre-existing corpus compiles byte-identically against a committed manifest, 152
 regression checks pass, and an external state machine translated from an OCaml thread now has its
 impossible match arms refuted at compile time. An adversarial hunt across three passes found five
 unsound accepts — two in the first escape check, two in the shipping checks, one in the coercion
 surface — all fixed, pinned, and mechanized, the last by a class-level repair of the equation
 lifecycle; and the compiler's own effect
-interpreter checks 25 of 30 branches honestly, the five holdouts named and decomposed by kind of
+interpreter checks 16 of 20 branches honestly, the four holdouts named and decomposed by kind of
 lie. Ninety Lean theorems (three explicit axioms) mechanize the row-rewrite commutation under
 duplicate labels — one of them corrects our own specification — the escape domain rule, and the
 update theorem. We do not prove general soundness: progress and preservation are argued, and the
@@ -288,11 +288,10 @@ outline:
    the coercion-surface one closed by a class-level repair of the equation lifecycle (Section 4).
 5. **A working reference implementation, measured against itself and an external program.** The
    discipline runs inside an Elm-family checker: the pre-existing corpus compiles
-   *byte-identically* after the change — 156 artifacts with zero moved — and the committed
-   sha256 manifest now holds 185 entries (the 29 additions are the frontend lambda-lift
-   fixtures, which do not touch the row/GADT surface); the gate passes 187/187, and the
-   compiler's own effect interpreter checks 25 of its 30 branches
-   honestly (reproducible bisection script; the five holdouts named, two of them deliberate) —
+   *byte-identically* after the change — 149 artifacts with zero moved — and the committed
+   sha256 manifest holds 149 entries; the gate passes 152/152, and the
+   compiler's own effect interpreter checks 16 of its 20 branches
+   honestly (reproducible bisection script; the four holdouts named, one of them deliberate) —
    *(Section 6)*. The external program — a state machine translated from an OCaml discussion
    thread — reads per-state fields under branch-local refinement and has its impossible match
    arms **refuted at compile time**, the thread's headline wall answered under the rigidity
@@ -682,9 +681,10 @@ and would crash); and the five unsound accepts of Section 6.2 are the same class
 branch equation that should not survive its branch either escaping it or dying without its occurs
 check. So: the discipline
 is **necessary** (this theorem-shaped statement, with its mechanism measured) and **sufficient
-for every program in the corpus and the designed fixtures** (158 gate checks on the typing
-surface — the gate total is 187, the other 29 being frontend lambda-lift fixtures that cannot
-exercise the escape rule; the three-pass hunt closed all five unsound accepts, and found none
+for every program in the corpus and the designed fixtures** (122 gate checks on the typing
+surface — the gate total is 152, the other 29 being frontend lambda-lift fixtures and one a
+hand-crafted-bundle run, neither of which exercises the escape rule; the three-pass hunt closed
+all five unsound accepts, and found none
 after the final class-level repair) — sufficiency
 over *all* programs is **not** proved, and is not claimed.
 
@@ -776,15 +776,19 @@ should-be-rigid-treated-as-solvable bug class at its root instead of per case.
 The discipline is not a paper design with a sketch: it runs inside a real checker. The substrate
 is an Elm-family compiler with Hindley–Milner inference over Leijen scoped-label rows (the
 pre-existing `elm-compiler/src/Type/*` tree: unification with a row-rewrite, let
-generalization, a 25-library corpus and a self-host track). The change is contained to the
+generalization, an eight-library corpus and a self-host track). The change is contained to the
 pattern path and the unifier state; lowering, codegen, and the VM are untouched (types are
 erased). Everything below is *measured*, and every number is reproducible from the artifact by
 one command (`tools/withe-numbers.sh`, which rebuilds the compiler, runs the gate, checks the
 corpus byte-identity, runs the unit suite, builds the Lean project, and re-derives the
 interpreter recount; its output is the source of every number printed here — run on the current
-tree at commit `c022efa`, eight commits ahead of the paper's freeze tag `withe-paper-freeze-1`
-(commit `9639443`), which recorded the pre-adversarial-pass baseline; the arrow-spelling GADT
-parser fix, the equation-lifecycle repair, and the lambda-lifting pass all post-date that tag).
+tree of `fixpoint-linux/withe`, the language repository the paper now lives in and describes, at
+commit `902972c`. The implementation was split out of fx-ui: withe@`0e5296e` imported the tree
+from fx-ui@`c022efa` — the pre-split fx-ui HEAD, eight commits ahead of the freeze tag
+`withe-paper-freeze-1` (fx-ui@`9639443`, the pre-adversarial-pass baseline) — with `e26ca75` and
+`4a1b420` following; fx-ui@`3594d13` removed the language and fx-ui@`e7018af` parked the UI. The
+arrow-spelling GADT parser fix, the equation-lifecycle repair, and the lambda-lifting pass all
+post-date the freeze tag).
 
 **A substrate fact, recorded as an artifact datum.** The substrate's local `let` is
 *sequential-only*: a local function cannot see its own name, so a self-recursive local helper
@@ -796,16 +800,15 @@ no new instruction and no collector change, which is why a frontend pass was cho
 VM-level `letrec`. It is recorded as a measured datum about what the substrate is and what the
 artifact needed, not as a contribution.
 
-**The non-regression invariant.** The corpus — the compiler's own 25 core libraries, the
+**The non-regression invariant.** The corpus — the compiler's own eight core libraries, the
 prelude, and the runtime, as compiled artifacts — must be **byte-identical** before and after
-the change: the 156 pre-existing artifacts match a committed sha256 manifest entry-for-entry
-with zero moved, and the manifest now holds 185 entries (the 29 additions are the frontend
-lambda-lift fixtures, which do not touch the row/GADT surface) (re-measured, exit 0).
+the change: the 149 compiled artifacts match a committed sha256 manifest entry-for-entry
+with zero moved (re-measured, exit 0).
 This invariant is what makes the discipline's addition safe to *adopt*, and the design pays for
 it deliberately: the historical inference path remains primary; the new machinery (branch-local
 capture, discharge, the declaration-directed retry) engages only where the historical path fails
 — so every pre-existing diagnostic is unchanged by construction. The regression gate passes
-187/187 (the full fixture matrix with expected outcomes is
+152/152 (the full fixture matrix with expected outcomes is
 Appendix A; the gate is `tests/elm-fixtures/run-elm-gate.sh`), and the unit suite passes
 114/114.
 
@@ -941,43 +944,52 @@ Section 1.4 sound at a *bare* index (`refutbare`).
 
 ### 6.4 The compiler's own effect interpreter
 
+**An artifact datum, recorded as such.** The `Task` type now declares only the effects its host
+can perform — the ten UI effect constructors and the `Key`/`Mouse` types left the language and
+park in fx-ui pending a UI redesign — and an effect the host does not implement fails loudly and
+terminates, pinned by a hand-crafted-bundle gate check (`unhandledtask`). It is recorded as a
+datum about what the artifact now is, not as a contribution.
+
 The acid test is not a fixture but the compiler's own `Runtime.runTask` — the free-monad
-interpreter for its 30-constructor effect type, historically a *trusted body* (a function the
+interpreter for its 20-constructor effect type, historically a *trusted body* (a function the
 checker skips, with a lie for a type). The trusted comment stated its own retirement
 precondition: kept trusted "until the per-ctor result table can drive a checked interpreter".
 The machinery of this paper is that table's typability condition, so we tested it.
 
-**The precondition was met, mechanically.** The 30 per-ctor result annotations
+**The precondition was met, mechanically.** The 20 per-ctor result annotations
 (`TaskExec a : Task x (Int, String, String)` — real source syntax in `Runtime.elm`, migrated
 from a hardcoded table) were proven behaviour-preserving by *two independent oracles*: the
-inferred constructor schemes were byte-identical before/after the migration (30/30), and the
+inferred constructor schemes were byte-identical before/after the migration (20/20), and the
 full corpus compiled byte-identically.
 
 **And it was not sufficient — a fail-fast artifact.** Un-trusting `runTask` (removing it from
 the trusted list) reports exactly *one* error, at `TaskExec`, and stops: a checker that halts at
 the first error cannot see the branches behind it. Masking each failing branch in source order
 to reveal the next (a reproducible bisection script, `tools/withe-recount-runTask.sh`, which
-edits only a scratch copy and asserts every step's expected error) gives **five** failing
-branches — so the honest count is **25 of 30 branches check honestly**, and the earlier "29 of
-30" figure was this fail-fast artifact. The five, named:
+edits only a scratch copy and asserts every step's expected error) gives **four** failing
+branches — so the honest count is **16 of 20 branches check honestly**, and the earlier "29 of
+30" figure was this fail-fast artifact (in the 30-constructor era, before the UI effects left
+the `Task` type). The four, named:
 
 | branch | failure | class |
 |---|---|---|
 | `TaskExec` | payload `a` vs `execPlanPrim : List a → List b` needs `a ≐ List a` | **defect**: a dynamic cast |
 | `TaskNow` | `Ok 0` number literal hits flex-marker conflict before discharge fires | **defect**: literal handling |
 | `TaskQuit` | un-annotated nullary; body `Ok ()` vs abstract index `a` | **design**: deliberate generalization |
-| `TaskGuiPoll` | same shape; annotating breaks its use sites' polymorphism | **design**: deliberate generalization |
 | `TaskStat` | result is a *closed record*; the Tier-R over-approximation refuses any record body | **defect (known)**: Section 4's coarseness |
 
-Two of the five are *design, not defect*: `TaskQuit` and `TaskGuiPoll` are the two constructors
-the annotation table deliberately left generalized, and the bisection's own terminal signal
-proves it — after masking the fifth failure the next error is a *call-site* cascade
-(`cannot unify Tea.GuiEv with ()` at a `Task.perform` use), not a branch, which is both the
-no-sixth-branch evidence and the evidence that annotating those constructors would break their
-callers' deliberate polymorphism. The count has one stated condition: it is taken under a
-`type x a.` binder (the committed signature has none; without the binder the flexible index is
-bound by the first concrete-result branch and the later branches cascade — the discharge being
-measured requires the rigid index). The condition is printed by the recount script, not hidden.
+One of the four is *design, not defect*: `TaskQuit` is the one constructor the annotation table
+deliberately left generalized, and the bisection's own terminal signal proves the list is closed
+— after masking the fourth failure the trivial fixture compiles **clean**, the no-fifth-branch
+evidence. The composition of the holdouts moved, and the paper says so rather than reading the
+new figure as a code change: `TaskGuiPoll`, the second deliberate holdout of the 30-constructor
+era, left the `Task` type with the UI effects — and with it went the old terminal signal (a
+`Tea.GuiEv` call-site cascade at a `Task.perform` use), which was the earlier evidence that
+annotating the generalized constructors would break their callers' deliberate polymorphism. The
+count has one stated condition: it is taken under a `type x a.` binder (the committed signature
+has none; without the binder the flexible index is bound by the first concrete-result branch and
+the later branches cascade — the discharge being measured requires the rigid index). The
+condition is printed by the recount script, not hidden.
 
 **The residue is a representation problem, not a refinement one.** `TaskExec`'s payload is
 typed `a` — the constructor's existential, absent from its result — while the runtime value *is*
@@ -1233,7 +1245,7 @@ stated, not hidden.
 ## Appendix A: the fixture matrix (the evidence spine)
 
 Every designed program this paper cites, gate-registered and re-measured on the current tree
-(`tests/elm-fixtures/run-elm-gate.sh`, PASS=187 FAIL=0; the gate also holds the pre-existing
+(`tests/elm-fixtures/run-elm-gate.sh`, PASS=152 FAIL=0; the gate also holds the pre-existing
 corpus fixtures). The oracle is the compiler's output artifact, never the process exit code; the
 `run` rows execute the fixture through the VM and diff its printed value against a pinned
 expected output (Section 6.6), while `clean`/`err` rows assert the compile outcome only.
