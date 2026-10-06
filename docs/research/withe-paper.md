@@ -783,7 +783,9 @@ one command (`tools/withe-numbers.sh`, which rebuilds the compiler, runs the gat
 corpus byte-identity, runs the unit suite, builds the Lean project, and re-derives the
 interpreter recount; its output is the source of every number printed here — run on the current
 tree of `fixpoint-linux/withe`, the language repository the paper now lives in and describes, at
-commit `902972c`. The implementation was split out of fx-ui: withe@`0e5296e` imported the tree
+tag `withe-paper-artifact-1` (annotated; it dereferences to the commit it was made on, so this
+provenance note does not move with later ones). The implementation was split out of fx-ui:
+withe@`0e5296e` imported the tree
 from fx-ui@`c022efa` — the pre-split fx-ui HEAD, eight commits ahead of the freeze tag
 `withe-paper-freeze-1` (fx-ui@`9639443`, the pre-adversarial-pass baseline) — with `e26ca75` and
 `4a1b420` following; fx-ui@`3594d13` removed the language and fx-ui@`e7018af` parked the UI. The
