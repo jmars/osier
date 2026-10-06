@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# withe-recount-runTask.sh — reproduce the G5 "25 of 30" interpreter-branch count.
+# withe-recount-runTask.sh — reproduce the G5 "16 of 20" interpreter-branch count.
 #
 # Gap G5 established that the paper's "29 of 30 branches check honestly" is
 # WRONG.  Removing `Runtime.runTask` from the trusted set reports exactly ONE
 # error (TaskExec) and stops — that fail-fast behaviour is how the 29/30 figure
-# was born.  Masking each failure to reveal the next shows FIVE branches fail,
-# so the honest figure is 25 of 30.  This script makes that recount a
+# was born.  Masking each failure to reveal the next shows FOUR branches fail,
+# so the honest figure is 16 of 20.  This script makes that recount a
 # REPRODUCIBLE measurement rather than a single-source claim.
+#
+# withe-split Phase 3 note: the 10 UI effects left the Task type, so the count
+# is now 20 branches (was 30) and 4 of them fail (was 5) — TaskGuiPoll, the
+# old fifth failure, left with the UI.
 #
 # METHOD — temp-copy bisection (the working tree is NEVER edited):
 #   1. copy elm-compiler/ to a scratch dir (mktemp);
@@ -17,8 +21,8 @@
 #   3. rebuild compiler.js ONCE, then compile a trivial fixture and read the
 #      oracle (the OUTPUT FILE, never the exit code — run.js always exits 0);
 #   4. in source order, mask each revealed failure and re-run, recording the
-#      next error, until all five are named and the next error is a Tea.elm
-#      call-site cascade (proof that no sixth branch fails).
+#      next error, until all four are named and the trivial fixture then
+#      compiles CLEAN (proof that no fifth branch fails).
 #
 # HONEST CONDITION — the measurement is taken UNDER a `type x a.` binder:
 #   the COMMITTED signature is `runTask : Task x a -> Result x a` (no binder).
@@ -37,7 +41,6 @@
 #   TaskStat    ctor/body/wrapper -> `Task x ()`    (record -> unit: the
 #               record-discharge over-approximation cannot be discharged, so
 #               the result type is temporarily made non-record)
-#   TaskGuiPoll ctor  -> `| TaskGuiPoll : Task x ()`
 #
 # USAGE (from the repo root):
 #   tools/withe-recount-runTask.sh
@@ -142,19 +145,17 @@ MASKS = [
 "taskStat : String -> Task x { size : Int, mode : Int, mtimeMs : Int, isDir : Bool, isFile : Bool }\n",
 "taskStat : String -> Task x ()\n"),
     ]),
-    ("TaskGuiPoll", [
-        ("src/Runtime.elm", "    | TaskGuiPoll\n", "    | TaskGuiPoll : Task x ()\n"),
-    ]),
 ]
 
 # What each successive mask REVEALS, in order:
-#   (line, distinctive substring, branch name, classification)
+#   (line, distinctive substring, branch name, classification).  The 4th entry
+#   is the TERMINAL check: after masking all four, the trivial fixture compiles
+#   CLEAN (no "err " prefix) — proof that no fifth branch fails.
 REVEAL = [
-    (265, "number with a",              "TaskNow",     "DEFECT: number literal FlexConflict"),
-    (271, "cannot be unified with ()",  "TaskQuit",    "DESIGN: un-annotated nullary ctor"),
-    (290, "escaping row equation",      "TaskStat",    "OVER-APPROX: closed-record discharge"),
-    (306, "cannot be unified with ()",  "TaskGuiPoll", "DESIGN: un-annotated nullary ctor"),
-    (None, "GuiEv",                     "CASCADE",     "Tea.elm call site — design-not-defect evidence"),
+    (179, "number with a",              "TaskNow",  "DEFECT: number literal FlexConflict"),
+    (185, "cannot be unified with ()",  "TaskQuit", "DESIGN: un-annotated nullary ctor"),
+    (195, "escaping row equation",      "TaskStat", "OVER-APPROX: closed-record discharge"),
+    (None, None,                        "CLEAN",    "no further runTask branch fails"),
 ]
 
 def edit(pairs):
@@ -211,11 +212,11 @@ err = compile_check()
 line = errline(err)
 print("fail-fast (untrusted, no masks):")
 print(f"    {err}")
-if err.startswith("err ") and line == 222 and "List a" in err:
+if err.startswith("err ") and line == 156 and "List a" in err:
     print('    -> exactly ONE error (TaskExec) — this is how "29 of 30" was born')
     print('    class: TaskExec = DEFECT: existential cast a ~ List a')
 else:
-    print("    ^^^ expected the TaskExec error (222:29); measurement FAILED")
+    print("    ^^^ expected the TaskExec error (156:29); measurement FAILED")
     fail = 1
 print()
 
@@ -227,7 +228,7 @@ for i, (name, pairs) in enumerate(MASKS):
     line = errline(err)
     eline, esub, elabel, ewhy = REVEAL[i]
 
-    if i < 4:
+    if i < 3:
         ok = err.startswith("err ") and line == eline and esub in err
         if not ok:
             fail = 1
@@ -236,32 +237,25 @@ for i, (name, pairs) in enumerate(MASKS):
         print(f"        {'OK ' if ok else 'MISMATCH'}: expected line {eline} ({elabel})")
         print(f"        class: {ewhy}")
     else:
-        # After masking all five, the next error must NOT be a runTask branch:
-        # it is the Tea.elm cascade — annotating TaskGuiPoll `: Task x ()`
-        # breaks its deliberate polymorphism at `Task.perform FGui TaskGuiPoll`
-        # (the host completes it with a GuiEv, the sync worker with `()`).
-        in_run = 181 <= (line or 0) <= 309
-        ok = err.startswith("err ") and "GuiEv" in err and not in_run
+        # After masking all four, the trivial fixture must compile CLEAN —
+        # no runTask branch error remains (proof that no fifth branch fails).
+        ok = not err.startswith("err ")
         if not ok:
             fail = 1
         print(f"  [{i+1}] mask {name:12s} -> no runTask branch error remains")
-        print(f"        {err}")
+        print(f"        {err[:60]}{'...' if len(err) > 60 else ''}")
         print(f"        {'OK ' if ok else 'MISMATCH'}: {ewhy}")
-        print(f"        annotating TaskGuiPoll breaks its deliberate polymorphism at")
-        print(f"        `Task.perform FGui TaskGuiPoll` (host completes it with GuiEv);")
-        print(f"        annotating TaskQuit breaks `quit : Cmd msg`/`hasQuit` the same")
-        print(f"        way.  -> no sixth branch fails.")
 print()
 
 # --- verdict -----------------------------------------------------------------
 if fail == 0:
-    print("RESULT: 25 of 30 branches check honestly; 5 fail —")
+    print("RESULT: 16 of 20 branches check honestly; 4 fail —")
     print("  1 existential cast (TaskExec)")
     print("  1 number literal FlexConflict (TaskNow)")
-    print("  2 deliberate generalization (TaskQuit, TaskGuiPoll)")
+    print("  1 deliberate generalization (TaskQuit)")
     print("  1 record-discharge over-approximation (TaskStat)")
     print()
-    print("VERDICT: count reproduced (25/30 under the `type x a.` binder)")
+    print("VERDICT: count reproduced (16/20 under the `type x a.` binder)")
 else:
     print("VERDICT: measurement drifted — re-measure before citing")
 sys.exit(fail)

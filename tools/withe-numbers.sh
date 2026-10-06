@@ -10,7 +10,7 @@
 #   3. TestMain                — assertion count (114/114)
 #   4. `lake build`            — exit code + output bytes, theorem count and
 #                                the axiom list, from lean/
-#   5. the runTask branch recount — the corrected G5 figure (25 of 30 branches
+#   5. the runTask branch recount — the corrected G5 figure (16 of 20 branches
 #                                check honestly under the `type x a.` binder),
 #                                reproduced by tools/withe-recount-runTask.sh
 #
@@ -151,7 +151,7 @@ recount_out="$(tools/withe-recount-runTask.sh 2>&1)"
 recount_rc=$?
 printf '%s\n' "$recount_out"
 if [ "$recount_rc" -ne 0 ]; then
-    note "runTask recount" "FAILED (exit $recount_rc) — the corrected 25/30 figure is NOT reproduced"
+    note "runTask recount" "FAILED (exit $recount_rc) — the corrected 16/20 figure is NOT reproduced"
     fail=1
 fi
 

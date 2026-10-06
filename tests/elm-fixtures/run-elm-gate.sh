@@ -146,6 +146,14 @@ out_cmp() {
   add_check cmp "$1" "" "" "" "" "" ""
 }
 
+# rawrun <name> <fn> <expected>: run elmvm on a CHECKED-IN bundle (not compiled
+# here) — for hand-crafted bundles no Elm source can produce (the synthetic
+# unknown-Task tag, unhandledtask).  $FIX/$name.csexp is a committed .csexp.
+rawrun() {
+  local name="$1" fn="$2" exp="$3"
+  add_check rawrun "$name" "$fn" "$exp" "" "" "$FIX/$name.csexp" "$FIX/$name.csexp"
+}
+
 run fib        fib        "$(read_expected fib)"        10
 run rtl1       main       "$(read_expected rtl1)"
 run rtl2       main       "$(read_expected rtl2)"
@@ -219,23 +227,16 @@ run execglob     main   "$(read_expected execglob)"
 run asyncorder   main   "$(read_expected asyncorder)"
 run fastexec     main   "$(read_expected fastexec)"
 run asyncpure    main   "$(read_expected asyncpure)"
-# --- withe-split Phase 1b: an unhandled effect fails LOUDLY and FAST ---
-# unhandledrender submits Io.renderFrame (TaskRender); the LANGUAGE host has no
-# renderer, so it must throw naming the ctor and TERMINATE — the expected
-# artifact is the elmvm error output, not a silent completion or a hang.
-run unhandledrender main   "$(read_expected unhandledrender)"
 compile_error dup          "duplicate top-level definition in Dup: f"
 compile_error shadowerr    "is both a top-level definition and imported via"
 compile_error shadowtyperr "is both a top-level definition and imported via"
 compile_error ambimperr    "from two different modules"
+# --- withe-split Phase 3: an unhandled effect fails LOUDLY and FAST ---
+# unhandledtask is a hand-crafted bundle (no Elm source can produce an unknown
+# Task ctor) whose Program spawns a Task tagged TaskBogus; the host must throw
+# naming the ctor and TERMINATE, never hang or silently drop it.
+rawrun unhandledtask main   "$(read_expected unhandledtask)"
 
-# --- M1 bubbletea: terminal Key ADT compiler surface (pure, no terminal) ---
-run keyunit     main   "$(read_expected keyunit)"
-# --- M1 STEP 3: Tea core loop — pure renderer, byte-exact ANSI frame stream ---
-run teaunit     main   "$(read_expected teaunit)"
-# --- elm/core 1.0.5 runtime ports: structural Basics.compare + Dict/Set/Maybe/Result ---
-# cmporder runs FIRST: it is the char-code wrapper ARG ORDER smoke test for the
-# structural compare ("ab" vs "b" must be LT via byte 97 < 98).
 run cmporder    main   "$(read_expected cmporder)"
 run resultmaybe main   "$(read_expected resultmaybe)"
 run dictbasic   main   "$(read_expected dictbasic)"
@@ -263,21 +264,7 @@ run strunit     main   "$(read_expected strunit)"
 # padLeft/padRight cell-width interplay that rides it.
 run p2pad       main   "$(read_expected p2pad)"
 
-# --- S2 (M-FOUNDATION): core-libs/Lipgloss.elm faithful v1.1.0 port ---
-# lgunit: byte-exact pure renders (SGR param order incl. the v1.1.0 duplicate
-# underline-4; color parser RGB/ANSI256/ANSI16; padding/width/align; normal+
-# rounded border boxes + the corner-suppression matrix; marginBg margins;
-# maxWidth/maxHeight; joinH/joinV/place; width/height/size; CJK box width).
-run lgunit      main   "$(read_expected lgunit)"
 
-# --- P2 (photon-gui): cell-width parity, Elm vs the Zig renderer ---
-# widthparity: representative Str.width/Str.truncate classes (ASCII, CJK/
-# fullwidth, combining/zero-width, box-drawing borders, control bytes, ANSI
-# CSI/OSC skip, emoji+VS16, ZWJ family, range edges, truncate walk) pinned as
-# ALL-ONES bits — a 0 bit is a live Elm-vs-Zig width divergence.  The same
-# values are asserted Zig-side in src/renderer/width_test.zig, and the tables
-# are byte-gated by tools/genwidth.zig (zig build width-check).
-run widthparity main   "$(read_expected widthparity)"
 
 # --- S3 (M-FOUNDATION): host TaskNow/Sleep/Quit leaves (monotonic time) ---
 # nowunit: sleep 30 then now-diff >= 25 (CLOCK_MONOTONIC, not the wall-clock
@@ -292,119 +279,8 @@ run dirunit     main   "$(read_expected dirunit)"
 # the zero-record failure parity for a missing path.
 run statunit    main   "$(read_expected statunit)"
 
-# --- S1 (M-WIDGETS): bubbles key bindings + Str.contains/cut ---
-# kbunit: keyName over EVERY Runtime.Key ctor (Go key.String() parity), the
-# matches matrix (first/later binding, space, ctrl+c, misses, empty list),
-# disabled/setEnabled/unbind semantics, accessors, Str.contains substring
-# matrix, Str.cut cell windows (escapes verbatim before/after/inside, wide
-# rune straddle, end<=start).
-run kbunit      main   "$(read_expected kbunit)"
 
-# --- S2 (M-WIDGETS): the pure bubbles widgets — help, paginator, progress ---
-# helpunit: short help renders (default dark styles, disabled filtering,
-# item-granular width truncation incl. the strict-< ellipsis-tail rule and
-# the overflow-without-tail case), full help columns (JoinHorizontal Top,
-# disabled columns/members, ellipsis column), view dispatch.
-run helpunit    main   "$(read_expected helpunit)"
-# pagunit: ceil SetTotalPages, GetSliceBounds/ItemsOnPage (incl. Go's
-# negative count past the end), page clamps, key navigation (next before
-# prev, disabled bindings, misses), arabic "%d/%d" (format field FIXED — no
-# printf), default + pre-styled dots.
-run pagunit     main   "$(read_expected pagunit)"
-# progunit: integer permille ViewAs — byte-exact bars (SGR pair per
-# segment, zero-width repeats still emit the pair), truncating fw/pct
-# arithmetic, clamps, percentage reserving bar cells, 256-color fills,
-# custom fill chars.
-run progunit    main   "$(read_expected progunit)"
 
-# --- S3 (M-WIDGETS): the spinner — the FIRST Cmd-producing widget ---
-# spinunit: fpsMs floors of Go's time.Second/N, byte-exact frames of all six
-# presets (Dot's trailing spaces + MiniDot braille are Go parity), the
-# update-fold advance + wrap (line 4-tick, Dot 8-tick), the "(error)" guard,
-# one styled render (fg SGR pair through Lipgloss).
-run spinunit    main   "$(read_expected spinunit)"
-# --- S4 (M-WIDGETS): the viewport — the first COMPLEX interactive widget ---
-# vpunit: byte-exact PLAIN renders at a fixed size (vertical scroll states via
-# `update` key folds + the scroll/mouse ops), x-scroll through the Str.cut
-# window, the frame arithmetic (maxYOffset/maxXOffset), init defaults, and a
-# rounded-border + padding render byte-pinned by eye against the gate-proven
-# Lipgloss border.
-run vpunit      main   "$(read_expected vpunit)"
-# --- S5 (M-WIDGETS): the textarea — the multi-line editor ---
-# taunit: byte-exact PLAIN renders at a fixed size (reverse-video cursor cell
-# on the current char + at EOL, prompt prefix on every row, focus gate,
-# vertical reposition when the cursor is below the fold), cursor/content
-# states driven through `update` key folds (left/right/home/end/up/down/pgup/
-# pgdn, backspace incl. the col-0 merge-line-above, delete incl. EOL
-# merge-below, enter split, ctrl+k/ctrl+u/ctrl+w), and `==` flags pinning the
-# grid arithmetic (value join, row/col, word-delete byte offsets).
-run taunit      main   "$(read_expected taunit)"
-# --- S6 (M-WIDGETS): the list — the filterable, paginated list ---
-# listunit: the page-flip cursor logic (R6) — 12 items at 40x19 -> perPage 4
-# (availHeight = 19 - 7 chrome rows = 12, /3), 3 pages, crossing the page
-# boundary in BOTH directions (j 0->3->page2, k back to the previous page's
-# last index); goToEnd/goToStart; the filter lifecycle ("/"->Filtering,
-# "es"->6 visible, esc->Unfiltered, "/"+"es"+enter->FilterApplied, "zzz"->
-# Nothing-matched); byte-exact views (title/status/body/dots/help joined
-# vertically, selected item's left border, dimmed filtering, the "“es” N
-# items • M filtered" applied status).
-run listunit    main   "$(read_expected listunit)"
-# --- S7 (M-WIDGETS): the table — the data table ---
-# tableunit: the R7 scroll parity (10 rows / 5-high viewport / j / G / g):
-# j walks the cursor to the bottom visible row then scrolls, G jumps to the
-# last row (top = rows-height), g back to the top; the byte-exact views pin
-# the bold header cells (title truncated with a "…" tail INSIDE the width
-# budget), the right-padded cells, the selected row wrapped in bold + fg 212
-# (ColorAnsi256), and the viewport padding each row to the table width.
-run tableunit    main   "$(read_expected tableunit)"
-# --- S9 (M-WIDGETS): timer + stopwatch — Cmd-producing widgets #2/#3 ---
-# timerunit: the Go update semantics over model-only folds — the 5s/1s
-# countdown crossing zero on the 5th accepted tick (6th REJECTED: Running()
-# false), the vestigial tag guard, ID routing with the 0 wildcard, the
-# StartStop flip vs the tick gate, the timed-out state (a StartStop cannot
-# resurrect it), and the byte-exact Go duration formats ("1m30s"/"1h0m0s"
-# zero components, ".5s"/".05s"/".005s" fractions, "750ms", "0s", the
-# negative "-500ms").
-run timerunit     main   "$(read_expected timerunit)"
-# stopwatchunit: New leaves the watch STOPPED at "0s", accepted ticks ADD
-# one interval and BUMP the tag, the tag guard drops a stale tick, the tag-0
-# hole is Go parity (0 > 0 is false), Reset zeroes WITHOUT touching tag/run,
-# and the restart heal (first same-tag tick accepted, duplicate rejected).
-run stopwatchunit main   "$(read_expected stopwatchunit)"
-# --- S10 (M-WIDGETS): tree — the PURE widget (model-only update) ---
-# treeunit: the byte-exact UNSTYLED render (plainStyles + blanked help
-# styles) equal to the ansi-stripped default_tree.golden — the "→ ▼ " cursor
-# + root-indicator line, the "│  "/"   " indenter segments, the "├──"/
-# "└──" enumerators glued to the values, per-parent "▼ " indicators, the
-# 70-column viewport padding, the blank help padding row — plus the
-# close/open/toggle folds, the preorder y-offset walk over VISIBLE nodes,
-# goToBottom/goToTop, the 8-high-viewport scrolloff reveal (off = min 5,
-# 8//2 = 4) with the pageUp reveal-above pin, the cursor column riding the
-# selected row, the key surface (enter/l/h/j/G/g through `update`, an
-# unmatched key a no-op), the help flip (showAll + Go's no-SetSize quirk
-# keeping the 11-row viewport: 17 total rows), the dark styleset painting
-# SGR bytes (bold+212 cursor, #5C5C5C indicator, #EE6FF8+bold selected
-# root), and SetNodes clamping a kept selection into the new tree's size.
-# The wide rows pin the over-wide root value at width 70: the tree block
-# wraps at the FULL width (one row, the viewport cutting the cursor-joined
-# row back to width), not at width - cursor - frame.
-run treeunit main   "$(read_expected treeunit)"
-# --- S11 (M-WIDGETS): filepicker — the RUNTIME-DEPENDENT widget (host listDir
-# + stat through the module's own readDirCmd) ---
-# filepickerunit: the full host round trip over input/dirlist (committed
-# stable files) — the sorted listing (dirs first then name, hidden .keep
-# filtered to n=0 in gamma/), the scripted j j enter k k enter walk (enter
-# records the file path — enter matches open AND select — then descends into
-# gamma pushing the stack) and the h back-out (pop restoration + the sticky
-# path), GotDir id routing, the window folds over a 5-entry/2-high picker
-# (down/up scroll shifts + clamps, g/G, pageDown/pageUp clamps), resize's
-# AutoHeight rows-5 recompute + setHeight, did-/canSelect (kind gate,
-# dirAllowed, AllowedTypes suffixes, the disabled-type didSelect), the pure
-# helpers (permOf modes, joinPath/parentDir shapes, sortEntries), and the
-# byte-exact plainStyles views (cursor column, %7s sizes, disabled row, the
-# padded "Bummer" block) + the default styleset's fg-247 disabled-row SGR.
-run filepickerunit main   "$(read_expected filepickerunit)"
-# --- S7: typechecker extensible-record surface (scoped labels) ---
 run rowpoly     main   "$(read_expected rowpoly)"
 run extrec      main   "$(read_expected extrec)"
 run insrec      main   "$(read_expected insrec)"
@@ -735,6 +611,14 @@ dispatch() {
         echo "PASS $name ($fn $args) -> $got"; pass=$((pass+1))
       else
         echo "FAIL $name ($fn $args): exp[$exp] got[$got]"; fail=$((fail+1))
+      fi
+      ;;
+    rawrun)
+      got=$("$ELMVM" "$fixfile" "$fn" 2>&1)
+      if [ "$got" = "$exp" ]; then
+        echo "PASS $name (raw bundle $fn)"; pass=$((pass+1))
+      else
+        echo "FAIL $name (raw bundle $fn): exp[$exp] got[$got]"; fail=$((fail+1))
       fi
       ;;
   esac

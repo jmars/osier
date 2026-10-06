@@ -16,6 +16,11 @@ module Runtime exposing (worker, program)
 -- — that needs a host event loop the synchronous VM does not have (future
 -- milestone).
 
+-- The Task ctor list IS the host's handled effect set: the language declares
+-- exactly the effects its host (src/effectloop.zig) can perform, and the host
+-- dispatches on these ctor names directly (no separate decode table).  The UI
+-- effects (renderer + terminal input) left the language in withe-split Phase 3
+-- and will return with a different design.
 type Task x a
     = TaskSucceed a
     | TaskFail x
@@ -32,82 +37,11 @@ type Task x a
     | TaskGetcwd : Task x String
     | TaskGetpid : Task x Int
     | TaskGlob String : Task x (List String)
-    | TaskReadKey : Task x Key
-    | TaskWinSize : Task x ( Int, Int )
-    | TaskWaitResize : Task x ( Int, Int )
-    | TaskRawMode Bool : Task x ()
     | TaskNow : Task x Int
     | TaskSleep Int : Task x ()
     | TaskQuit
-    | TaskMouseMode MouseMode : Task x ()
-    | TaskReadMouse : Task x MouseMsg
     | TaskListDir String : Task x (List { name : String, isDir : Bool })
     | TaskStat String : Task x { size : Int, mode : Int, mtimeMs : Int, isDir : Bool, isFile : Bool }
-    | TaskRender a : Task x ()
-    | TaskGuiOpen String Int Int : Task x ()
-    | TaskGuiPoll
-    | TaskGuiClose : Task x ()
-
-
--- A decoded terminal key (M1 tea input surface).  The HOST event loop builds
--- these vectors with the BARE ctor name as tag (tag compare is by name), so
--- the ctor spellings here are the contract for effectloop.zig's decode table.
-type Key
-    = KeyChar String
-    | KeyEnter
-    | KeyTab
-    | KeyBackspace
-    | KeyEsc
-    | KeyUp
-    | KeyDown
-    | KeyLeft
-    | KeyRight
-    | KeyHome
-    | KeyEnd
-    | KeyPgUp
-    | KeyPgDn
-    | KeyIns
-    | KeyDel
-    | KeyCtrl String
-    | KeyOther Int
-    | KeyEof
-
-
--- A decoded SGR mouse event (S4 host surface).  The HOST event loop builds
--- these vectors with the BARE ctor names as tags (tag compare is by name), so
--- the ctor spellings here are the contract for effectloop.zig's decode table.
-type MouseMsg
-    = MouseMsg MouseAction MouseButton Int Int
-    | MouseEof
-
-
-type MouseAction
-    = MousePress
-    | MouseRelease
-    | MouseMotion
-    | MouseWheel
-
-
-type MouseButton
-    = MouseLeft
-    | MouseMiddle
-    | MouseRight
-    | MouseNone
-    | MouseWheelUp
-    | MouseWheelDown
-    | MouseWheelLeft
-    | MouseWheelRight
-
-
--- Mouse tracking mode for TaskMouseMode.  Click = press/release only (1006+
--- 1000), Drag = +drag (1006+1002), AllMotion = +all motion (1006+1003), Off
--- resets everything.  Off is spelled MouseModeOff (not `Off`) to avoid
--- colliding with the bare-name namespace of user modules.
-type MouseMode
-    = MouseModeOff
-    | Click
-    | Drag
-    | AllMotion
 
 
 type alias Cmd msg = List (Task Never msg)
@@ -239,26 +173,6 @@ runTask task =
         TaskGlob pattern ->
             Ok (decodeStringList (globPrim pattern))
 
-        -- M1 terminal effects.  In the SYNC worker (this trusted interpreter)
-        -- they are no-ops: no terminal to poll, so readKey completes with
-        -- KeyEof, winSize reports 0x0, rawMode is ignored.  The HOST event loop
-        -- (src/effectloop.zig, STEP 2) dispatches these same Task tags to real
-        -- nonblocking stdin / ioctl / termios handling.
-        TaskReadKey ->
-            Ok KeyEof
-
-        TaskWinSize ->
-            Ok ( 0, 0 )
-
-        -- M-FOUNDATION resize leaf.  Sync no-op: no signalfd / SIGWINCH here.
-        -- The HOST event loop arms the shared signalfd and completes every
-        -- armed waitResize eval with the fresh size on each SIGWINCH.
-        TaskWaitResize ->
-            Ok ( 0, 0 )
-
-        TaskRawMode _ ->
-            Ok ()
-
         -- M-FOUNDATION time/quit leaves.  Sync no-ops: no monotonic clock /
         -- event loop here.  The HOST event loop dispatches these same tags.
         TaskNow ->
@@ -270,15 +184,6 @@ runTask task =
         TaskQuit ->
             Ok ()
 
-        -- M-FOUNDATION mouse leaves.  Sync no-ops: no terminal to poll, so
-        -- readMouse completes with MouseEof and mouseMode is ignored.  The HOST
-        -- event loop dispatches these same tags.
-        TaskReadMouse ->
-            Ok MouseEof
-
-        TaskMouseMode _ ->
-            Ok ()
-
         -- M-FOUNDATION dir/stat leaves.  Sync no-ops: no filesystem here, so
         -- listDir completes empty and stat completes the ZERO record.  The
         -- HOST event loop dispatches these same tags to getdents64 / fstatat
@@ -288,25 +193,6 @@ runTask task =
 
         TaskStat _ ->
             Ok { size = 0, mode = 0, mtimeMs = 0, isDir = False, isFile = False }
-
-        -- P1 GUI leaves (photon-gui plan).  Sync no-ops: no window host in the
-        -- sync worker.  The HOST event loop (src/effectloop.zig) dispatches the
-        -- same tags: TaskRender decodes the Frame payload host-side
-        -- (leafRender, --render-dump oracle); guiOpen/guiPoll/guiClose become
-        -- the real SDL-window leaves in P2.  TaskRender's payload is
-        -- POLYMORPHIC (arity 1) so Runtime needs no Draw import: the Frame
-        -- crosses the seam opaquely as an ADT ctor vector.
-        TaskRender _ ->
-            Ok ()
-
-        TaskGuiOpen _ _ _ ->
-            Ok ()
-
-        TaskGuiPoll ->
-            Ok ()
-
-        TaskGuiClose ->
-            Ok ()
 
 
 cmdNone : List (Task Never msg)
@@ -433,26 +319,6 @@ taskGlob pattern =
     TaskGlob pattern
 
 
-taskReadKey : Task x Key
-taskReadKey =
-    TaskReadKey
-
-
-taskWinSize : Task x ( Int, Int )
-taskWinSize =
-    TaskWinSize
-
-
-taskWaitResize : Task x ( Int, Int )
-taskWaitResize =
-    TaskWaitResize
-
-
-taskRawMode : Bool -> Task x ()
-taskRawMode enable =
-    TaskRawMode enable
-
-
 taskNow : Task x Int
 taskNow =
     TaskNow
@@ -468,16 +334,6 @@ taskQuit =
     TaskQuit
 
 
-taskMouseMode : MouseMode -> Task x ()
-taskMouseMode mode =
-    TaskMouseMode mode
-
-
-taskReadMouse : Task x MouseMsg
-taskReadMouse =
-    TaskReadMouse
-
-
 taskListDir : String -> Task x (List { name : String, isDir : Bool })
 taskListDir path =
     TaskListDir path
@@ -488,54 +344,8 @@ taskStat path =
     TaskStat path
 
 
-{-| P1 GUI leaves (photon-gui plan): host-call helpers over the four new Task
-ctors, reached from call sites as Io.renderFrame / Io.guiOpen / Io.guiPoll /
-Io.guiClose (platformTable alias rows).  renderFrame submits the DrawList
-Frame (a Draw.* value, opaque here) to the host renderer; guiOpen arms the P2
-window (title, cols, rows); guiPoll is the P2 self-re-arming event read;
-guiClose tears the window down.
-
-Same annotation caveat as `taskExec`: the constructor's own type is
-`a -> Task x a`, but the effect `runTask` produces is `()` (the frame argument
-is submitted, nothing is returned).  The constructor's TRUE result `()` is
-given by its per-ctor result annotation (`TaskRender a : Task x ()`), so this
-body checks honestly.
--}
-taskRender : a -> Task x ()
-taskRender frame =
-    TaskRender frame
-
-
-taskGuiOpen : String -> Int -> Int -> Task x ()
-taskGuiOpen title cols rows =
-    TaskGuiOpen title cols rows
-
-
-taskGuiPoll : Task x ()
-taskGuiPoll =
-    TaskGuiPoll
-
-
-taskGuiClose : Task x ()
-taskGuiClose =
-    TaskGuiClose
-
-
 subNone : ()
 subNone = ()
-
-
-{-| Structural value equality over ANY value, not just comparables.  The body
-`x == y` checks honestly: this compiler's `==` is the UNRESTRICTED structural
-equality `a -> a -> Bool` (Type.Builtins.eqOp), not real Elm's
-`comparable -> comparable -> Bool`, so the annotation `a -> a -> Bool` needs no
-trust.  Lowers to the inline structural `=` prim (primEq), which is deep: cons
-trees, records, tuples — NaN/lambdas compare False, so a false negative just
-means no skip-render.  Sole consumer: Tea.skipRender.
--}
-sameValue : a -> a -> Bool
-sameValue x y =
-    x == y
 
 
 -- ---- stream helpers (prims + stdin/stdout pseudo-globals) ----

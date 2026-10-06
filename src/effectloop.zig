@@ -19,18 +19,20 @@
 //! TaskCd/TaskGetcwd/TaskGetpid/TaskGlob (env/cwd/pid/glob), TaskNow/TaskSleep/
 //! TaskQuit (time/quit), TaskListDir/TaskStat (dir/stat).
 //!
-//! NOT HANDLED (deliberately): the UI effects — TaskRender / TaskGuiOpen /
-//! TaskGuiPoll / TaskGuiClose (renderer) and TaskReadKey / TaskReadMouse /
-//! TaskMouseMode / TaskWinSize / TaskWaitResize / TaskRawMode (terminal input)
-//! — remain in Runtime.elm's Task type but are handled by fx-ui.  Submitting
-//! one FAILS LOUDLY AND FAST: stepEval throws (throwShen) naming the ctor,
-//! never silently completing it (which would make a rendering program appear
+//! NOT HANDLED (deliberately): the UI effects left the language in withe-split
+//! Phase 3 — the Runtime.elm Task type no longer declares TaskRender /
+//! TaskGuiOpen / TaskGuiPoll / TaskGuiClose / TaskReadKey / TaskReadMouse /
+//! TaskMouseMode / TaskWinSize / TaskWaitResize / TaskRawMode, so the host's
+//! handled set is exactly the Task ctor list above (taskArity) and nothing
+//! more.  Any other Task ctor name — unknown, or a UI ctor that returns with a
+//! future design — FAILS LOUDLY AND FAST: stepEval throws (throwShen) naming
+//! the ctor, never silently completing it (which would make a program appear
 //! to work while doing nothing) and never silently dropping it (which would
 //! stall the program).
 //!
-//! THE SEAM (re-attaching UI): a consumer re-adds the gui_model / gui_backend /
-//! terminal imports to the build.zig effectloop module and re-wires those ctor
-//! names to leaves in stepEval's dispatch (see isUiEffect).
+//! THE SEAM (re-attaching UI): when the UI effects return, a consumer re-adds
+//! the gui_model / gui_backend / terminal imports to the build.zig effectloop
+//! module and re-wires those ctor names to leaves in stepEval's dispatch.
 //!
 //! THE TASK LAYOUT CONTRACT (the host owns this): a Task is the MX ADT rep
 //! vector[tag, a1..an] — data[0] is a BARE tag Symbol, data[1..n] are the
@@ -365,11 +367,9 @@ const HostLoop = struct {
                 // Unhandled Task ctor — fail LOUDLY and immediately, never a
                 // silent drop: dropping the eval would leave the continuation
                 // unresumed (the program stalls or silently loses work) with
-                // no diagnostic.  The UI effects (TaskRender / TaskGuiOpen /
-                // TaskGuiPoll / TaskGuiClose / TaskReadKey / TaskReadMouse /
-                // TaskMouseMode / TaskWinSize / TaskWaitResize / TaskRawMode)
-                // remain in Runtime.elm's Task type but are deliberately NOT
-                // handled by this LANGUAGE host — they live in fx-ui.
+                // no diagnostic.  The handled set is exactly taskArity; any
+                // other ctor name (unknown, or a UI effect that left the
+                // language in withe-split Phase 3) lands here.
                 var msgbuf: [160]u8 = undefined;
                 return self.vm.throwShen(unhandledTaskMsg(&msgbuf, name));
             }
@@ -1298,34 +1298,14 @@ fn taskArity(name: []const u8) ?i32 {
     return null;
 }
 
-/// True for the UI effects that remain in Runtime.elm's Task type but are
-/// deliberately NOT handled by this LANGUAGE host — the renderer (TaskRender /
-/// TaskGuiOpen / TaskGuiPoll / TaskGuiClose) and the terminal input (TaskReadKey /
-/// TaskReadMouse / TaskMouseMode / TaskWinSize / TaskWaitResize / TaskRawMode)
-/// left the host in the withe-split and live in fx-ui.
-fn isUiEffect(name: []const u8) bool {
-    return std.mem.eql(u8, name, "TaskRender") or
-        std.mem.eql(u8, name, "TaskGuiOpen") or
-        std.mem.eql(u8, name, "TaskGuiPoll") or
-        std.mem.eql(u8, name, "TaskGuiClose") or
-        std.mem.eql(u8, name, "TaskReadKey") or
-        std.mem.eql(u8, name, "TaskReadMouse") or
-        std.mem.eql(u8, name, "TaskMouseMode") or
-        std.mem.eql(u8, name, "TaskWinSize") or
-        std.mem.eql(u8, name, "TaskWaitResize") or
-        std.mem.eql(u8, name, "TaskRawMode");
-}
-
-/// Diagnostic for a Task ctor this host does not handle.  Names the ctor; the
-/// UI effects say so explicitly.  `buf` is caller-owned and must outlive the
-/// returned slice only until the caller copies it (throwShen does, via
-/// values.valError).  On a hypothetical overflow the raw ctor name is returned
-/// instead of truncating.
+/// Diagnostic for a Task ctor this host does not handle.  The handled set is
+/// exactly taskArity (the Runtime.elm Task ctor list); anything else — an
+/// unknown ctor, or a UI effect that left the language in withe-split Phase 3 —
+/// lands here.  `buf` is caller-owned and must outlive the returned slice only
+/// until the caller copies it (throwShen does, via values.valError).  On a
+/// hypothetical overflow the raw ctor name is returned instead of truncating.
 fn unhandledTaskMsg(buf: []u8, name: []const u8) []const u8 {
-    const r = if (isUiEffect(name))
-        std.fmt.bufPrint(buf, "unhandled UI effect: {s} (renderer and terminal-input effects are unhandled by this host)", .{name})
-    else
-        std.fmt.bufPrint(buf, "unhandled Task effect: {s}", .{name});
+    const r = std.fmt.bufPrint(buf, "unhandled Task effect: {s}", .{name});
     return if (r) |m| m else |_| name;
 }
 

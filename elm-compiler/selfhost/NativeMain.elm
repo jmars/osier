@@ -287,11 +287,7 @@ corpusPaths =
 coreLibs : List String
 coreLibs =
     [ "Dict.elm", "Set.elm", "Maybe.elm", "Result.elm"
-    , "Tuple.elm", "JsArray.elm", "Array.elm", "Tea.elm", "TextInput.elm"
-    , "Str.elm", "Lipgloss.elm", "Draw.elm", "Key.elm", "Help.elm", "Paginator.elm"
-    , "Progress.elm", "Spinner.elm", "Viewport.elm", "Textarea.elm"
-    , "ListBox.elm", "Table.elm", "Timer.elm", "Stopwatch.elm", "Tree.elm"
-    , "FilePicker.elm"
+    , "Tuple.elm", "JsArray.elm", "Array.elm", "Str.elm"
     ]
 
 

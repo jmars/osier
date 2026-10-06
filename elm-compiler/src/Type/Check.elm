@@ -166,8 +166,6 @@ canonicalOrder =
     , "Maybe"
     , "Result"
     , "Tuple"
-    , "Tea"
-    , "TextInput"
     ]
 
 

@@ -252,24 +252,12 @@ platformTable =
     , ( "Io.getcwd", "Runtime.taskGetcwd" )
     , ( "Io.getpid", "Runtime.taskGetpid" )
     , ( "Io.glob", "Runtime.taskGlob" )
-    , ( "Io.readKey", "Runtime.taskReadKey" )
-    , ( "Io.winSize", "Runtime.taskWinSize" )
-    , ( "Io.waitResize", "Runtime.taskWaitResize" )
-    , ( "Io.rawMode", "Runtime.taskRawMode" )
     , ( "Io.now", "Runtime.taskNow" )
     , ( "Io.sleep", "Runtime.taskSleep" )
     , ( "Io.quit", "Runtime.taskQuit" )
-    , ( "Io.mouseMode", "Runtime.taskMouseMode" )
-    , ( "Io.readMouse", "Runtime.taskReadMouse" )
     , ( "Io.listDir", "Runtime.taskListDir" )
     , ( "Io.stat", "Runtime.taskStat" )
 
-    -- P1 photon-gui leaves: the Elm-built DrawList Frame crosses the seam as
-    -- the TaskRender payload (polymorphic — Runtime never imports Draw).
-    , ( "Io.renderFrame", "Runtime.taskRender" )
-    , ( "Io.guiOpen", "Runtime.taskGuiOpen" )
-    , ( "Io.guiPoll", "Runtime.taskGuiPoll" )
-    , ( "Io.guiClose", "Runtime.taskGuiClose" )
     , ( "Plan.str", "Runtime.tStr" )
     , ( "Plan.num", "Runtime.tNum" )
     , ( "Plan.sym", "Runtime.tSym" )
@@ -277,68 +265,6 @@ platformTable =
     , ( "Plan.cons", "Runtime.tCons" )
     , ( "Sub.none", "Runtime.subNone" )
 
-    -- Structural equality over any value (trusted-body Runtime.sameValue):
-    -- bare row so every unit incl. Tea resolves the name; Tea.skipRender uses
-    -- it to skip repaints when the model is unchanged.  Self-shadowed like
-    -- every platform row.
-    , ( "sameValue", "Runtime.sameValue" )
-
-    -- M1 terminal Key ADT (foreign: defined in Runtime).  Fixtures use the
-    -- UNQUALIFIED ctor names in patterns/expressions — qualified foreign ctor
-    -- PATTERNS are rejected (Lower.Pattern), so these bare rows (shared by the
-    -- checker + lowerer) are the only spelling that typechecks.  Self-shadowed
-    -- like every platform row.
-    , ( "KeyChar", "Runtime.KeyChar" )
-    , ( "KeyEnter", "Runtime.KeyEnter" )
-    , ( "KeyTab", "Runtime.KeyTab" )
-    , ( "KeyBackspace", "Runtime.KeyBackspace" )
-    , ( "KeyEsc", "Runtime.KeyEsc" )
-    , ( "KeyUp", "Runtime.KeyUp" )
-    , ( "KeyDown", "Runtime.KeyDown" )
-    , ( "KeyLeft", "Runtime.KeyLeft" )
-    , ( "KeyRight", "Runtime.KeyRight" )
-    , ( "KeyHome", "Runtime.KeyHome" )
-    , ( "KeyEnd", "Runtime.KeyEnd" )
-    , ( "KeyPgUp", "Runtime.KeyPgUp" )
-    , ( "KeyPgDn", "Runtime.KeyPgDn" )
-    , ( "KeyIns", "Runtime.KeyIns" )
-    , ( "KeyDel", "Runtime.KeyDel" )
-    , ( "KeyCtrl", "Runtime.KeyCtrl" )
-    , ( "KeyOther", "Runtime.KeyOther" )
-    , ( "KeyEof", "Runtime.KeyEof" )
-
-    -- S4 mouse ADTs (foreign: defined in Runtime).  Same bare-name mechanism as
-    -- the Key rows — fixtures use the UNQUALIFIED ctor names in patterns.
-    , ( "MouseMsg", "Runtime.MouseMsg" )
-    , ( "MouseEof", "Runtime.MouseEof" )
-    , ( "MousePress", "Runtime.MousePress" )
-    , ( "MouseRelease", "Runtime.MouseRelease" )
-    , ( "MouseMotion", "Runtime.MouseMotion" )
-    , ( "MouseWheel", "Runtime.MouseWheel" )
-    , ( "MouseLeft", "Runtime.MouseLeft" )
-    , ( "MouseMiddle", "Runtime.MouseMiddle" )
-    , ( "MouseRight", "Runtime.MouseRight" )
-    , ( "MouseNone", "Runtime.MouseNone" )
-    , ( "MouseWheelUp", "Runtime.MouseWheelUp" )
-    , ( "MouseWheelDown", "Runtime.MouseWheelDown" )
-    , ( "MouseWheelLeft", "Runtime.MouseWheelLeft" )
-    , ( "MouseWheelRight", "Runtime.MouseWheelRight" )
-    , ( "MouseModeOff", "Runtime.MouseModeOff" )
-    , ( "Click", "Runtime.Click" )
-    , ( "Drag", "Runtime.Drag" )
-    , ( "AllMotion", "Runtime.AllMotion" )
-
-    -- Tea's quit marker rides a bare TaskQuit (S0/Tea v2) so core-libs
-    -- Tea.elm can scan the user's command for it synchronously (quit key =>
-    -- drop the readKey/readMouse re-arm).  The payload-less Runtime.TaskQuit
-    -- ctor is polymorphic in BOTH Task params, so it inhabits any Cmd msg.
-    -- Same bare-name/foreign-ctor mechanism as the Key rows.
-    , ( "TaskQuit", "Runtime.TaskQuit" )
-    , ( "TaskSucceed", "Runtime.TaskSucceed" )
-    -- P2 guiProgram arms its event poll with the same mechanism: the bare
-    -- TaskGuiPoll ctor (polymorphic like TaskQuit) is Tea's ONE poll arm,
-    -- completed by the host with a GuiEv value (leafGuiPoll).
-    , ( "TaskGuiPoll", "Runtime.TaskGuiPoll" )
     ]
 
 

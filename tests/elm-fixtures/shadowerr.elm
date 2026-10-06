@@ -1,23 +1,19 @@
 module Shadowerr exposing (main)
 
--- NEGATIVE fixture pinning the import-shadowing compile error: `update`/`view`
--- are both imported bare from Viewport AND defined top-level here.  This used
--- to resolve SILENTLY to the imported (wrong-typed) functions — a widget demo
--- then "segfaulted" on quit.  Real Elm rejects the clash; the compiler must
--- fail LOUDLY with the shadowing error (never reach typechecking/lowering).
+-- NEGATIVE fixture pinning the import-shadowing compile error: `width` is
+-- imported bare from Str AND defined top-level here.  This used to resolve
+-- SILENTLY to the imported (wrong-typed) function.  Real Elm rejects the
+-- clash; the compiler must fail LOUDLY with the shadowing error (never reach
+-- typechecking/lowering).  (Re-pointed from Viewport.update/view to Str.width
+-- in withe-split Phase 3: Viewport is a parked UI lib.)
 
-import Viewport exposing (update, view)
+import Str exposing (width)
 
 
-update : Int -> Int
-update n =
+width : Int -> Int
+width n =
     n + 1000
 
 
-view : Int -> Int
-view n =
-    n * 2
-
-
 main =
-    update 1
+    width 1
