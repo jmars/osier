@@ -4,7 +4,10 @@ Full literature survey for the Withe paper, consolidating passes `handoff-rowgad
 neighbours), `handoff-rowgadt-lit2` (CORELINKS + Koka), and this pass (`handoff-rowgadt-lit3`),
 plus a targeted retrieval (2026-10-05, no handoff slug) that read the **full extended text** of
 Toohey et al POPL'26 and upgraded its entry (§1 row, §2 quote entry, §3 table row, §4 item 6,
-§6 bullet; §2 line numbers below the entry shifted by that insertion).
+§6 bullet; §2 line numbers below the entry shifted by that insertion),
+and a further retrieval (2026-10-06, `handoff-withe-lit`, gap G7) that read the author's PDF of
+Chen & Erwig POPL'16 and upgraded its entry (§1 row, §2 quote entry, §3 table row; §5 item 2
+resolved; line numbers below the §2 insertion shifted accordingly).
 Organised by **which pair of features is combined** — that organisation is itself the paper's
 contribution to related work. Claims are marked **[M]** measured (read from the primary source,
 URL given) / **[I]** interpretation / **[P]** projection. Second-hand items are flagged
@@ -41,6 +44,7 @@ Three features: **R** = row polymorphism (extensible records/variants), **G** = 
 | **Wobbly types** (PJS+Vytiniotis+Weirich+Washburn ICFP'06) **[M this pass — was SECOND-HAND]** | G | **Rigid vs wobbly** annotation modifiers in the environment; lexically scoped type variables; unification with per-annotation rigidity; "exploit programmer-supplied type annotations to make the type inference task almost embarrassingly easy" | **Rows absent**: `σ ::= ∀a.τ`, monotypes "entirely conventional"; "row" does not occur in the paper (grep-measured); no records as types |
 | **Simonet & Pottier 2007** (HMG(X), TOPLAS) **[M this pass — was SECOND-HAND]** | G (generic framework) | Constraint-based HM(X) extended with guarded ADTs; every branch typechecked "under different assumptions about the type variables in scope"; tractable-constraint restriction; soundness proved | **Rows not instantiateable**: types are `→` + algebraic data constructors `ε(τ̄)`; the only Rémy cite is ML-ART (objects), not the record theory; no row/presence instantiation of X is given |
 | **Ambivalent types** (Garrigue & Rémy APLAS'13) **[M, lit]** | G + A | `ν(a).M` introduces rigid var → quantified flexible at scope exit (the formal `type a.`); ambivalent types `ψ_α` = set of raw types sharing one flexible label; **scoped equations**: `a ~ int` may not leak out of branch | **No R**: source types `τ ::= α \| a \| τ→τ \| eq(τ,τ) \| int` — the grammar cannot state `ρ = {l:t\|ρ′}`. Their 2012 abstract records the OCaml restriction of rows+GADTs (see §2) |
+| **Chen & Erwig POPL'16** ("Chore", choice types) **[M this pass — was SECOND-HAND]** | G | Branch refinements represented by **choice types** `D⟨φ̄⟩` (dimension-name-synchronised alternatives); typing separated from **reconciliation**, which replaces choices by *type index variables*; "Principality comes at the price of having choice types in the type language" | **No row seat at all**: grammar `τ ::= α \| τ→τ \| T τ`, `φ ::= τ \| D⟨φ̄⟩ \| φ→φ \| T φ` — no record type, no row variable, no presence; "record"/"field"/"label" never occur, "row" only inside "arrow" (grep-measured) |
 | **OCaml** (`type a.` + GADTs + objects/poly-variants) **[M, lit + this pass]** | G + A + R-as-idiom | Locally abstract types are rigid inside, flexible at exit; GADT match adds equations to non-local abstract types too; **but**: GADT invariance on object type parameters; poly-variant patterns block refinement entirely | **The combination is an undocumented idiom with failure modes**, not a discipline: "the interaction of row variables and GADTs is not well specified" (octachron 2024, §2); no published account of which record operations are safe under an active equation |
 | **Garrigue & Rémy 1999** (semi-explicit polymorphism) **[M this pass]** | A | Polytypes `[σ]` with **label variables ε**; unification distinguishes user-provided from guessed polytypes; `#point` = `⟨x:int;y:int;ρ⟩` "contains a **hidden row variable that is polymorphic**" | **No G** (1999); but the mechanism that *protects* a row variable from unification (label-quantified polytypes) existed in the same authors' toolbox — the seat for `type ρ.`-style protection predates GADT inference |
 | **Leijen HMF 2008 / HML 2009** **[M this pass]** | A (first-class/higher-rank) | Conservative extension of HM with first-class polymorphism; regular System F types | **No R, no G**: zero row/record occurrences in HMF (grep-measured); GADTs untouched |
@@ -236,6 +240,40 @@ Load-bearing sentences only; each was read in the retrieved full text unless mar
 
   No row/presence instantiation of X; types are arrows + algebraic data constructors
   `ε(τ̄)` [M — read]. The only Rémy citation is ML-ART 1994 (objects) [M — reference list read].
+
+- **Chen & Erwig**, *Principal type inference for GADTs*, POPL'16.
+  https://web.engr.oregonstate.edu/~erwig/papers/TypeInfForGADTs_POPL16b.pdf
+  **[M this pass — was SECOND-HAND]** (author's version, retrieved 2026-10-06 from Erwig's
+  publications page; ACM DL remains CAPTCHA-blocked). Glyph normalisations: PDF-extraction
+  hyphenations joined ("sys-tematically"→"systematically"), arrows/brackets render as `→`/`⟨⟩`,
+  the bar over `φ` in Fig. 2 is lost by extraction; no wording invented.
+  On the mechanism:
+  > "Our method is based on the idea to represent type refinements in pattern-matching branches
+  > by choice types, which facilitate a separation of the typing and reconciliation phases and
+  > thus support case expressions." (abstract)
+
+  > "Here D gives a name to control the variation between two types. All variations under the
+  > same name are synchronized in the sense that the same decision should be made about
+  > choosing variants." (§1)
+
+  The type grammar (Fig. 2): `Monotypes τ ::= α | τ → τ | T τ`; `Variational types φ ::= τ |
+  D⟨φ̄⟩ | φ → φ | T φ`; `Type schemas σ ::= φ | ∀α.φ`.
+
+  **It cannot express a row refinement**: the grammar has no record type, no row variable, no
+  presence; "record", "field", "label" never occur, and "row" occurs only as a substring of
+  "arrow" (grep-measured on the retrieved PDF). Refinement is carried entirely by ordinary GADT
+  type-constructor parameters — reconciliation's replacement targets must live inside them:
+  > "The overall idea is to systematically replace choices by type variables. However, such type
+  > variables must at least appear inside of GADT type constructors, which in turn must be used
+  > as function arguments." (§3.4)
+
+  And the principality price, stated by the authors:
+  > "Principality comes at the price of having choice types in the type language. If we want to
+  > get rid of choice types, we lose principality during reconciliation that converts variational
+  > types to plain types." (§5)
+
+  Whether the choice mechanism would transfer to a grammar *extended* with rows is undiscussed
+  in the paper [I].
 
 - **Ambivalent types** (Garrigue & Rémy APLAS'13) —
   http://gallium.inria.fr/~remy/gadts/Garrigue-Remy:gadts@aplas2013.pdf [M, lit]
@@ -518,6 +556,7 @@ post, the two discuss.ocaml.org threads).
 | GHC HasField/record GADTs | Nominal records; class-triggered unification; no row variables [M] |
 | Omnidirectional inference 2026 | Restores principality by reordering; nominal records `rcd T τ̄`; GADTs explicitly "would be interested in studying" [M] |
 | Toohey et al POPL'26 (rows + type classes) | `All` / `ind` / `Split` / `Lift` constraints over polymorphic rows, dictionary-passing elaboration, Lean 4 mechanized — but **no equations on rows**: zero `GADT`/`refine`/`refinement`/`branch` occurrences in the full 38pp text [M — 2026-10-05] |
+| **Chen & Erwig POPL'16** (choice types) | Branch refinement via choice types over GADT type-constructor parameters only; type grammar has no record/row/presence construct; "row" never occurs as a word, "record"/"field"/"label" never occur (grep-measured) [M — 2026-10-06] |
 | Koka; Frank; Eff; Links | Effect rows unified, never refined; no GADTs [M] |
 | Castagna line (2016, 2025) | Subtyping/tallying; refinement declared "mostly orthogonal"; GADTs named as future work [M] |
 | Wand/Gaster/Ohori/Remy | Rows only; no GADTs, no branch-local anything; several predate GADTs entirely [M] |
@@ -598,14 +637,17 @@ Per item: what it is, what was tried, and what it would settle.
    formatting); **no technical question remains open** — the unrestricted-extension question is
    answered [M]. If exact chapter pagination is needed for the bibliography, fetch the printed
    chapter via a library; settles nothing else.
-2. **Chen & Erwig, *Principal type inference for GADTs* (POPL'16).** ACM DL is CAPTCHA-blocked;
-   no open PDF found. What it would settle: whether "choice types" (their representation of
-   branch refinements) can express row refinements — i.e. whether the empty-cell claim extends to
-   their formalism. Second-hand evidence (search snippets): "represent type refinements in
-   pattern-matching branches by choice types"; "interact with other types … much like choice
-   types can interact with other types" [SECOND-HAND]. Risk: low (choice types are for
-  *type* refinements; no row content is claimed anywhere in the snippets), but the paper should
-   not cite it without reading it.
+2. **Chen & Erwig, *Principal type inference for GADTs* (POPL'16).** — RESOLVED this pass
+   (2026-10-06): retrieved the **author's version** from Erwig's publications page
+   (https://web.engr.oregonstate.edu/~erwig/papers/TypeInfForGADTs_POPL16b.pdf, found via
+   `abstracts.html` on the same site). ACM DL remains CAPTCHA-blocked (not retried); arXiv /
+   CiteSeerX / Semantic Scholar were not needed — the author page was the first route that
+   worked. What it settled: choice types **cannot express a row refinement** — the type grammar
+   is `τ ::= α | τ→τ | T τ` plus choices, with no record/row/presence construct; "record",
+   "field", "label" never occur and "row" occurs only inside "arrow" (grep-measured). Entry
+   added (§1 G-row, §2, §3 table); the [SECOND-HAND] markers are upgraded there. No residual
+   doubt: the earlier snippets ("interact with other types …") were about choice-vs-union-type
+   expressiveness in their §9 related work, not about rows.
 3. **Simonet & Pottier's RR-5462 full version (2005)** — superseded by the TOPLAS version
    retrieved this pass; nothing further needed.
 4. **A manual section documenting OCaml's objects/poly-variants+GADT restriction** — searched
