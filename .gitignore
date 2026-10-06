@@ -1,0 +1,15 @@
+.zig-cache/
+zig-out/
+
+# elm-compiler build artifacts (regenerable via elm-compiler/build.sh)
+elm-compiler/elm-stuff/
+elm-compiler/compiler.js
+elm-compiler/test-compiler.js
+
+# elm-fixtures generated output (iofile test writes this each gate run)
+tests/elm-fixtures/out/hello.out
+
+# zig global cache redirected onto the pool (tools/aot/aot-build.sh)
+.zig-cache-global/
+__pycache__/
+*.pyc

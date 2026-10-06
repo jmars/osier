@@ -1,0 +1,19 @@
+.{
+    .name = .withe,
+    .version = "0.0.0",
+    .fingerprint = 0x8fac7bf9296a0b4, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        // zinc-vm: the shared GC + ZINC VM executor package.  Path dependency
+        // (withe owns vendor/zinc-vm).
+        .zinc_vm = .{
+            .path = "vendor/zinc-vm",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "tests",
+    },
+}

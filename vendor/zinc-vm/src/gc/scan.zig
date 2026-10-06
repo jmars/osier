@@ -1,0 +1,106 @@
+//! src/gc/scan.zig — typed scanning of GC-managed objects (milestone M2).
+//!
+//! C origin: scan_fns_zincvm_excerpt.c (the staged excerpt of the gc_scan_value /
+//! gc_evacuate mode-agnostic scan functions) plus evac_instr (gc.c:471-474) and
+//! value_references_nursery (zincvm.c:112-121).
+//!
+//! These functions are mode-agnostic: they serve both full collect (evacuate to
+//! next_space) and nursery scavenge (nursery->old-gen), dispatched by gc_move
+//! (collect.zig) via in_scavenge.  They rewrite pointer slots in place through
+//! single-machine-word views (plan DECISION 6 / artifact-2 pattern): a slot's
+//! address is cast to `*usize`, the address is read, run through gc_move, and
+//! written back.  All optional-pointer fields on Value/Instr/CallFrame are exactly
+//! one word (null == 0), verified on Zig 0.16.0 / LP64.
+
+const std = @import("std");
+const types = @import("types.zig");
+const heap = @import("heap.zig");
+const collect = @import("collect.zig");
+
+const Gc = heap.Gc;
+
+/// C: scan_fns gc_evacuate — *slot = gc_move(*slot).  Update a single pointer
+/// slot to point to the evacuated copy.  `slot` is the address of a one-word
+/// pointer field viewed as `*usize` (all GC-managed pointer slots are one word).
+pub fn evacuate(gc: *Gc, slot: *usize) void {
+    const addr: usize = slot.*;
+    slot.* = @intFromPtr(collect.gcMove(gc, @ptrFromInt(addr)));
+}
+
+/// C: scan_fns gc_scan_value — evacuate all GC-managed pointers within a Value.
+/// The pointer-bearing tags are VAL_CONS (car/cdr), VAL_LAMBDA (code/env),
+/// VAL_VECTOR (data), VAL_STRING (data), VAL_ERROR (message); the remaining tags
+/// (number, symbol, boolean, nil, mark, prim, stream) contain no GC-managed
+/// pointers and are a no-op.
+pub fn scanValue(gc: *Gc, v: *types.Value) void {
+    switch (v.tag) {
+        .cons => {
+            // P1 DUAL-SHAPE: a fused pair (values.valCons) puts car/cdr in ONE
+            // 2-element value_array with cdr == car + sizeof(Value); a classic
+            // cons is two separate .value cells (48-byte stride: 8-byte header
+            // + 40-byte body), so a classic BODY pointer can never equal
+            // car+40 — that offset is always a header/filler word.  Read both
+            // fields BEFORE evacuating car (evacuation moves the whole array
+            // and forwards it).  For a fused pair, gcMove(car) moves the WHOLE
+            // array (car is the array body HEAD) and cdr is recomputed as the
+            // new interior — NEVER gcMove cdr separately: cdr-1 is element-0
+            // payload (garbage header).  Classic: evacuate each cell normally.
+            const car_addr: usize = @as(*const usize, @ptrCast(&v.payload.cons.car)).*;
+            const cdr_addr: usize = @as(*const usize, @ptrCast(&v.payload.cons.cdr)).*;
+            const fused = car_addr != 0 and cdr_addr == car_addr + @sizeOf(types.Value);
+            evacuate(gc, @ptrCast(&v.payload.cons.car));
+            if (fused) {
+                @as(*usize, @ptrCast(&v.payload.cons.cdr)).* =
+                    @as(*const usize, @ptrCast(&v.payload.cons.car)).* + @sizeOf(types.Value);
+            } else {
+                evacuate(gc, @ptrCast(&v.payload.cons.cdr));
+            }
+        },
+        .lambda => {
+            evacuate(gc, @ptrCast(&v.payload.lambda.code));
+            evacuate(gc, @ptrCast(&v.payload.lambda.env));
+        },
+        .vector => evacuate(gc, @ptrCast(&v.payload.vector.data)),
+        .string => evacuate(gc, @ptrCast(&v.payload.str.data)),
+        .error_ => evacuate(gc, @ptrCast(&v.payload.error_.message)),
+        else => {},
+    }
+}
+
+/// C: gc.c:471-474 evac_instr — scan a single Instr for GC pointers: the operand
+/// Value (via scanValue) and the closure_code pointer (via evacuate).
+pub fn evacInstr(gc: *Gc, in: *types.Instr) void {
+    scanValue(gc, &in.operand);
+    evacuate(gc, @ptrCast(&in.closure_code));
+}
+
+/// Nursery-reference predicate for a single Instr — the barrier mirror of
+/// evacInstr: true iff the operand Value references a nursery object OR
+/// closure_code points into the nursery.  Must mirror evacInstr EXACTLY
+/// (operand via valueReferencesNursery, closure_code via the raw pointer
+/// word; a null closure_code reads as 0 and inNursery(0) is false).
+pub fn instrReferencesNursery(gc: *const Gc, in: *const types.Instr) bool {
+    return valueReferencesNursery(gc, &in.operand) or
+        gc.inNursery(@as(*const usize, @ptrCast(&in.closure_code)).*);
+}
+
+/// C: zincvm.c:112-121 value_references_nursery — true iff `v` references any GC
+/// object in the nursery.  Must mirror EXACTLY the pointer fields gc_scan_value
+/// evacuates.  NULL-safe: cons/lambda fields pass a null pointer through
+/// inNursery (page of 0 < firstheappage, returns false); vector/string/error
+/// check non-null first (C parity).
+pub fn valueReferencesNursery(gc: *const Gc, v: *const types.Value) bool {
+    return switch (v.tag) {
+        .cons => gc.inNursery(@as(*const usize, @ptrCast(&v.payload.cons.car)).*) or
+            gc.inNursery(@as(*const usize, @ptrCast(&v.payload.cons.cdr)).*),
+        .lambda => gc.inNursery(@as(*const usize, @ptrCast(&v.payload.lambda.code)).*) or
+            gc.inNursery(@as(*const usize, @ptrCast(&v.payload.lambda.env)).*),
+        .vector => (v.payload.vector.data != null) and
+            gc.inNursery(@as(*const usize, @ptrCast(&v.payload.vector.data)).*),
+        .string => (v.payload.str.data != null) and
+            gc.inNursery(@as(*const usize, @ptrCast(&v.payload.str.data)).*),
+        .error_ => (v.payload.error_.message != null) and
+            gc.inNursery(@as(*const usize, @ptrCast(&v.payload.error_.message)).*),
+        else => false,
+    };
+}

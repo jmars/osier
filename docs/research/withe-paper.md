@@ -1,0 +1,1306 @@
+# Rows under Refinement: Branch-Local GADT Equations for Extensible Records
+
+*Draft, compiled section by section. Target venue: ICFP full paper, 25 pp ACM Small excluding
+bibliography. Companion material: the calculus specification
+(`docs/research/row-gadt-calculus.md`, λρG), the mechanization (`lean/`, one Lake project),
+the reference implementation (`elm-compiler/src/Type/`), the fixture matrix
+(`tests/elm-fixtures/run-elm-gate.sh`), the reproducibility chain (`tools/withe-numbers.sh`,
+which reprints every number this paper cites), and the survey
+(`docs/research/withe-related-work.md`, which is the bibliography's source).*
+
+---
+
+## Abstract
+
+Row polymorphism and GADTs make opposite demands on the same variable: unification solves an
+equation globally; GADT refinement keeps it branch-local. No published type system refines a row
+variable by a branch-local GADT equation; the one widely used language that ships both documents
+the interaction as "not well specified" and restricted its first GADT implementation. We present
+λρG, a calculus of branch-local row refinement: a scoped equation store *captures*, rather than
+solves, the equations a match puts on rigid variables, and a two-tier result rule, **directed by
+the kind of the equation**, lets a *type* equation coerce at a branch result while a *row*
+equation never escapes — its discharge would move the row's domain out of the branch. The
+discipline yields an operation-level answer: selection is licensed exactly by the heads of the
+branch's equations; scoped-label update is domain-preserving, hence sound by construction;
+insertion, the shape-changing dual, is rejected — a deliberate position on Rémy's extension dial,
+not a discovery. A measured principality boundary carries an inversion: the witness encoding
+*infers* where the native refinement is *checkable, not inferable*. An Elm-family checker
+implements it: the pre-existing corpus compiles byte-identically against a committed manifest, 187
+regression checks pass, and an external state machine translated from an OCaml thread now has its
+impossible match arms refuted at compile time. An adversarial hunt across three passes found five
+unsound accepts — two in the first escape check, two in the shipping checks, one in the coercion
+surface — all fixed, pinned, and mechanized, the last by a class-level repair of the equation
+lifecycle; and the compiler's own effect
+interpreter checks 25 of 30 branches honestly, the five holdouts named and decomposed by kind of
+lie. Ninety Lean theorems (three explicit axioms) mechanize the row-rewrite commutation under
+duplicate labels — one of them corrects our own specification — the escape domain rule, and the
+update theorem. We do not prove general soundness: progress and preservation are argued, and the
+mechanization targets the row algebra rather than the typing judgment.
+
+---
+
+## 1 Introduction
+
+Extensible records with row polymorphism and GADTs with local type refinement are each well
+understood. Row polymorphism [Rémy 1994; Gaster & Jones 1996; Leijen 2005] gives records open
+types — `{ n : Int | ρ }` is a record with an `n` field and an arbitrary tail ρ — and unification
+over row variables preserves principal types. GADTs give pattern matches that *refine* type
+variables branch-locally: matching `IntLit : Expr Int` inside `eval : Expr a → a` learns
+`a ≐ Int` for that branch alone. The two mechanisms make opposite demands on the same object.
+Row unification wants a type variable to be *solvable*: an equation such as
+`ρ ≐ { x : Int | ρ' }` is written back into a single global substitution. GADT refinement wants an
+equation to be *local*: two branches of one match may learn conflicting facts about one variable,
+so no global substitution can hold them both. Every GADT-inference framework resolves this by
+making refined variables rigid — untouchable by the solver [Peyton Jones et al. 2011; Pottier &
+Régis-Gianas 2006] — and every row system resolves it by never putting a row variable under an
+equation at all. The interaction is genuinely unoccupied: no published type system refines a
+*row variable* by a branch-local GADT equation, and no published system therefore says which
+record operations remain typable when such an equation is active.
+
+The gap is documented, not merely empty. OCaml ships all three features — GADTs, row-polymorphic
+objects and polymorphic variants, and the locally abstract type prefix `type a.` — and its
+maintainers describe the interaction precisely. OCaml's first GADT implementation *restricted*
+the combination outright: "we had to restrict the use of object types and polymorphic variants in
+combination with GADTs, to prevent local equations from breaking the invariant that the same row
+variable may only appear in two record types that are equal" [Garrigue & Rémy 2012]. The
+restriction is still felt as an undocumented idiom with empirical failure modes: "the interaction
+of row variables and GADTs is not well specified. Thus it is common to hit hard to understand
+behaviour, and nothing is guaranteed beyond the fact that the currently implemented interaction is
+safe" [octachron, OCaml maintainer, Jan 2024]. Pattern matching on a polymorphic variant blocks
+refinement entirely ("GADT equations cannot narrow a polymorphic variant constraint"
+[octachron 2024]; ocaml/ocaml #5724), and the recommended workaround restructures the program so
+that no single row variable is ever refined: model each field as its own one-field object type,
+which is a manual membership-witness encoding. Practitioners reach for witness encodings by
+necessity. The one system that met the interaction treated the conflict as unsoundness and
+legislated around it; the dominant GADT-inference framework cannot even state it — OutsideIn(X)'s
+type grammar `τ ::= tv | Int | Bool | [τ] | T τ` has no record type, no row variable, and no
+presence [Vytiniotis et al. 2011].
+
+**The contrast this paper turns on: where GADT inference decides solvability by *scope* — a
+touchable/untouchable variable set — λρG decides discharge by the *kind* of the equation.** A type
+equation coerces at a branch result; a row equation never escapes, because it carries a *domain*
+that OutsideIn(X)'s type grammar has no room for.
+
+### 1.1 The crux
+
+The smallest program that needs all three features — rows, GADT refinement, and locally abstract
+types — is a type-indexed row-membership witness (Figure 1). `Has l t ρ` is a GADT proving that
+the row ρ carries a field `l : t`; `select` reads that field through the witness; `setx` replaces
+it.
+
+```elm
+type Has l t rho
+    = Here  : Has l t { l : t | rho }
+    | There : Has l t rho -> Has l t { k : s | rho }
+
+select : type rho l t. { rho | l : t } -> Has l t rho -> t
+select r h =
+    case h of
+        Here  -> r.l
+        There rest -> select r rest
+
+setx : type rho l t. { rho | l : t } -> Has l t rho -> t -> { rho | l : t }
+setx r h v =
+    case h of
+        Here  -> { r | l = v }
+        There rest -> setx r rest v
+```
+
+**Figure 1.** The crux program (gate fixtures `rowgadt_select`, `rowgadt_setx`; both compile
+clean, and `select`'s body is the live fixture verbatim).
+
+Each of the three features is forced:
+
+- **Rows.** `{ rho | l : t }` is an open record; the function must work for every tail ρ, so the
+  record's type *is* a row variable.
+- **GADT refinement.** Matching `Here` learns the equation `ρ ≐ { l : t | ρ₁ }` — which is
+  exactly what makes `r.l` well-typed — and matching `There` learns `ρ ≐ { k : s | ρ₂ }` for
+  labels `k ≠ l`. The readable field set must *grow inside a branch* and shrink back at its end.
+- **Locally abstract types.** The two branches impose *conflicting global* substitutions on ρ.
+  A single substitution cannot hold `ρ ≐ { l : t | ρ₁ }` and `ρ ≐ { k : s | ρ₂ }` for distinct
+  `l`, `k`. Only a rigid ρ — abstract within the body, as the `type rho l t.` prefix declares —
+  keeps each branch's equation local to that branch.
+
+Without locally-abstract rigidity the two branches conflict and `select` has no type — this is
+the necessity of the third feature. (The *measured* rejection is the **signatureless** form, gate
+fixture `rowgadt_l3ii`, which reports `cannot unify {k:a| b} with {| a}`; note it measures signaturelessness
+wholesale rather than a flexible ρ in isolation, since that fixture carries no signature at all.)
+Without refinement capture the `Here` branch's equation has
+nowhere to live; without rows the record cannot stay open.
+
+### 1.2 The design in one paragraph
+
+λρG (Section 2) is a calculus of **branch-local row refinement**. A scoped equation store Δ
+accompanies the judgment `Γ ; Δ ; R ⊢ e : t`, where R is the set of rigid (skolem) variables.
+At a pattern match, the store is *snapshotted*; the pattern-vs-scrutinee unification runs in
+*branch mode*, where a unification that would bind a rigid variable is **captured** as an
+equation in Δ rather than solved — the global substitution θ gains nothing; at branch end the
+store is *truncated* to the snapshot. Inside a branch, the equations *license* operations:
+selection `r.l` is licensed exactly when some equation on ρ exposes `l` at its head; update
+`{ r | l = v }` is licensed the same way and, crucially, is **domain-preserving** — scoped-label
+update replaces the first occurrence of `l` and never extends the row — so the branch result is
+well-typed at the abstract ρ with *no discharge at all*. At the branch result, a **two-tier**
+rule decides what may leave the branch: a *type* equation (`a ≐ Int`) is discharged by a one-way
+coercion of the re-check — the canonical GADT evaluator type-checks — but a *row* equation
+(`ρ ≐ { l : t | ρ' }`) never discharges, because that would move the row's *domain* out of the
+branch; its escape is an error. Insertion, the shape-changing dual of update, never consults the
+store and is rejected under an active equation.
+
+### 1.3 The heterogeneous container
+
+The same discipline unlocks type witnesses — the encoding practitioners use to recover an
+element type a container does not mention. `type Witness a = WInt : Witness Int | WString :
+Witness String`, an existential wrapper `Some : Witness a -> a -> Any`, and a fold over a list
+`[Some WInt 3, Some WString "hi"]` all type-check (gate fixture `rowgadt_het`, clean): the
+existential `a` bound by the `Some` pattern is instantiated *rigid* (the "existentials are
+skolems" rule every GADT system needs; before it, the `a` was a flexible unification variable, a
+nested match bound it globally, and the sibling `WString` branch conflicted — two independently
+measured failures), and each nested branch captures `a ≐ Int` / `a ≐ String` locally, discharging
+at the use of the payload. This is the feature the crux generalizes: the *witness encoding* of
+row membership is what OCaml's own workaround constructs by hand, and the calculus that makes
+`Has` typable also makes the hand encoding unnecessary.
+
+### 1.4 An external program, not a self-referential one
+
+The strongest objection to a paper like this is that its only non-toy evidence is the authors'
+own compiler. We answer with a program written by someone else. A discuss.ocaml.org thread
+("Unable to refute impossible GADT pattern with polymorphic variants", t/13718) models a door
+state machine: states as types, transitions as a GADT-witnessed relation, and a fold over the
+chain of events — and there the author hits the wall this paper characterizes, on all three
+sides: illegal construction is rejected, but the *impossible arms* of the chain match cannot be
+refuted, and the recommended fix is the per-field-object workaround. We retrieved and read the
+thread in full and translated the program into Withe, the surface of λρG (the example lives at
+`examples/research/fsm/door.elm`; gate fixtures `rowgadt_fsm`, `rowgadt_fsm_bad`,
+`rowgadt_fsm_narrow`, `rowgadt_fsm_nested`, `rowgadt_fsm_nested_bad` pin its behaviour).
+
+States are rows — `Locked = {}`, `Closed = { closed : Int }`, `Open = { open : Int }`,
+`Broken = { broken : String }` — each carrying a shared counter:
+
+```elm
+type Event from to
+    = Unlock : Event {} { closed : Int }
+    | Open   : Event { closed : Int } { open : Int }
+    | Close  : Event { open : Int } { closed : Int }
+    | Lock   : Event { closed : Int } {}
+    | Jiggle : Event { closed : Int } { closed : Int }
+    | Break  : Event { open : Int } { broken : String }
+    | Reset  : Event { broken : String } {}
+
+readFrom : type from to. { from | n : Int } -> Event from to -> String
+readFrom rec ev =
+    case ev of
+        Unlock -> "locked#" ++ String.fromInt rec.n
+        Open   -> "closed:" ++ String.fromInt rec.closed
+        Close  -> "open:"   ++ String.fromInt rec.open
+        ...
+```
+
+Where OCaml's equations "cannot narrow a polymorphic variant constraint", Withe's narrowing is
+direct and *per-branch*: in the `Open` branch the from-row is refined to `{ closed : Int }` and
+`rec.closed` is well-typed *only there* — in the `Close` branch (from-row `{ open : Int }`) the
+read `rec.broken` is rejected with `type variable a is rigid (from the signature) and cannot be
+unified with {broken:a| b}` (gate fixture `rowgadt_fsm_narrow`, re-measured), while the *same
+field* is legal in the `Reset` branch (from-row `{ broken : String }`): the rejection is
+per-branch, not per-field. No per-field restructuring is needed: the states *are* rows, and the
+refinement is the mechanism, not the workaround.
+
+The thread's *headline* wall is refutation, and that too is answered. The source author could not
+get OCaml to refute the impossible arms of the chain match (its `-> .` mechanism). Withe now
+checks *exhaustiveness* — a match omitting a possible arm is a compile error, not a runtime
+raise (fixture `adtgaps`) — and *refutes* impossible arms under the branch equations:
+`describeBroken : Step { broken : String } -> String` matching only `Then prev Break` compiles
+clean, because `Start : Step {}` and every other event are impossible at that index (fixture
+`refutpos`; the negative `refutneg` pins that a *possible* arm, `HNil` at an open `HList ρ`, is
+not refuted and must still be matched). Refutation has a stated condition: it fires only where
+the scrutinee's index is *concrete or binder-rigid*; a bare flexible index is never concretized
+to refute a sibling (fixture `refutbare` — a partial `f : Tag a -> Int` matching only one arm
+correctly errors `non-exhaustive case: missing B`).
+
+The translation is honest about three boundaries, stated here rather than hidden. (i) The
+transition GADT is *row-inert*: `Event`'s indices are ordinary type parameters, so the row
+refinement exercised is on the *record argument's* row variable — the honest claim is "an
+external FSM translated to rows where per-state field reads use branch-local row refinement",
+not "the FSM expressed directly". (ii) A reducer whose *result* is a record at the refined row is
+rejected by the escape rule — including the state-*preserving* `Jiggle` update, because the
+refined variable there is the result index; the FSM keeps its state type-level, as the OCaml
+original does. (iii) The membership-witness reducer `read` is definable but not *callable* at a
+concrete witness (`read Here { n = 1, closed = 2 }` errs `cannot unify a with {l:a| b}` — a
+global bare-row-variable gap in the implementation, outside branch mode); the example keeps the
+witness as the shape `readFrom` reduces to, not as a working reducer. The example demonstrates
+capability where it holds and names the boundary where it does not.
+
+### 1.5 Why the cell stayed empty
+
+The empty cell is not an accident of oversight. Rows and GADTs were adopted by disjoint
+language populations — ML-family record calculi in the early 1990s, GADT inference in the
+mid-2000s — and the frameworks that made GADT inference tractable (OutsideIn(X), stratified
+inference, HMG(X)) were built on type grammars without rows. Where the two populations met, rows
+were *secondary*: in OCaml, objects and polymorphic variants are not the primary record
+mechanism, so restricting their interaction with GADTs costs little and the per-field-object
+workaround is cheap. In a language where rows are the primary record mechanism, the same
+restriction removes the core feature. And the interaction is a *kinding* problem as much as an
+equation problem: three of the four implementation blockers we hit building the reference
+implementation were kinding defects (Section 6) — a calculus that does not make row-variable
+kinding explicit cannot predict where a real implementation breaks. Generic local-assumption
+frameworks could in principle host this: HMG(X) is parameterised over a constraint domain X, but
+no published instantiation of it targets a row/record theory, and the two row-specific
+obligations our discipline needs (the rewrite/equation commutation under scoped-label duplicates,
+and the domain escape rule) do not come out of the generic frame for free (Section 4).
+
+### 1.6 Contributions
+
+This paper's claims are of three kinds — *mechanized* (machine-checked in the Lean development),
+*measured* (reproduced by the reference implementation, with fixtures registered in a regression
+gate), and *argued* (stated with their mechanism, not proved) — and the text marks each. In
+outline:
+
+1. **A discipline for an unoccupied cell, built on one principle.** λρG is the first designed
+   account of what happens when a row variable sits under a branch-local GADT equation. The
+   principle is a discharge rule **directed by the kind of the equation**: at a branch result a
+   *type* equation coerces, while a *row* equation never discharges — its discharge would move the
+   row's domain out of the branch. The machinery is a scoped equation store that snapshots,
+   captures would-be rigid bindings as equations, and truncates on branch exit (Sections 2–3).
+   The crux program of Figure 1 type-checks under the discipline; its signatureless form is
+   rejected — the measured face of the rigidity requirement.
+2. **An operation-level answer, with the positive row result mechanized.** Under an active
+   refinement: selection is licensed exactly by the heads of the branch's equations (a field in
+   no head is an error inside the branch); update is sound *by construction*, because
+   scoped-label update is domain-preserving and the branch result is well-typed at the abstract
+   row with no discharge; insertion is rejected — a deliberate position on a dial Rémy set to
+   *unconditional* and Gaster & Jones to *strict*, not a discovery (Section 3; mechanized:
+   `update_domain_preserving`, `update_reflexive_domain`, `update_accepted_at_rho`,
+   `insertion_rejected_under_refinement`).
+3. **A measured principality boundary, and its inversion.** Principality is retained where every
+   refinement's target is a branch-scoped existential — the *witness encoding infers* with no
+   signature — and lost exactly where two sibling branches refine one *signature* row variable
+   whose result mentions it: there the native form is *checkable, not inferable*. The inversion
+   is the result: the encoding does not merely model rows, it **moves the boundary to the other
+   side** of the native form (Section 5, the L3 measurement).
+4. **Mechanized metatheory for the row obligations, validated by an adversarial hunt.** Ninety
+   machine-checked Lean theorems (three explicit axiom parameters; clean build, zero `sorry`)
+   cover the row-rewrite commutation under duplicate labels — including the theorem that
+   *corrected our own specification* (`h1_head_only_vs_full`: the "for every label" form holds
+   only in the rigid-tail regime) — the escape rule as a *domain* rule (exact for fresh labels,
+   coarse for duplicates), the update theorems, and both escape counterexamples. An adversarial
+   hunt across three passes found five *real unsound accepts* — the first escape check's
+   let-laundering through let-generalization and its wildcard sibling leak, two in the shipping
+   checks, and one in the coercion surface — all fixed, all pinned by fixtures, all mechanized,
+   the coercion-surface one closed by a class-level repair of the equation lifecycle (Section 4).
+5. **A working reference implementation, measured against itself and an external program.** The
+   discipline runs inside an Elm-family checker: the pre-existing corpus compiles
+   *byte-identically* after the change — 156 artifacts with zero moved — and the committed
+   sha256 manifest now holds 185 entries (the 29 additions are the frontend lambda-lift
+   fixtures, which do not touch the row/GADT surface); the gate passes 187/187, and the
+   compiler's own effect interpreter checks 25 of its 30 branches
+   honestly (reproducible bisection script; the five holdouts named, two of them deliberate) —
+   *(Section 6)*. The external program — a state machine translated from an OCaml discussion
+   thread — reads per-state fields under branch-local refinement and has its impossible match
+   arms **refuted at compile time**, the thread's headline wall answered under the rigidity
+   guard of Section 1.4.
+
+**Scope, stated once.** We do not prove general soundness: progress and preservation are argued,
+not proved, and the mechanization targets the row algebra and the record operations rather than
+the whole typing judgment. What the mechanization *does* carry are exactly the two row-specific
+obligations the argued soundness rests on (the rewrite/equation commutation, and the update
+domain theorem), plus the escape counterexamples. A paper claim we cannot trace to a theorem
+name, a fixture, or a measurement is cut rather than hedged.
+
+### 1.7 The map of the paper
+
+Section 2 presents λρG: syntax with explicit row kinds, the two unification modes, and the rule
+set. Section 3 gives the two-tier result rule and the operation-level answer: which record
+operations survive an active refinement. Section 4 states the metatheory — mechanized, argued,
+and refuted — and the negative result that unrestricted global row refinement is unsound.
+Section 5 locates the principality boundary and its inversion. Section 6 reports the
+implementation, the measured correspondence, and the adversarial hunt. Section 7 organizes
+related work by the feature-pair map — the organization itself is a contribution, because it
+makes the empty cell visible. Section 8 states limitations; Section 9 concludes.
+
+---
+
+## 2 λρG: a calculus of branch-local row refinement
+
+This section presents the declarative calculus; the full rule set with its implementation seats
+is the companion specification (`docs/research/row-gadt-calculus.md`), and the mechanization of
+its hard lemmas is Section 4. Here we give syntax, the judgment, the two unification modes, the
+store discipline, and the rule inventory with one figure.
+
+### 2.1 Syntax and kinds
+
+```
+k    ::=  Ty | Row                            kinds
+x̂    ::=  (id, k, φ)                          variables: id, kind, flex marker
+φ    ::=  none | number | comparable | appendable
+t    ::=  a  |  T t⃗  |  t → t  |  (t⃗)  |  { r }        types
+r    ::=  ε  |  ℓ : t | r  |  ρ                rows: fields in source order + tail
+s    ::=  ∀ B; x̂⃗. t                           schemes with a bound subset B
+```
+
+Labels ℓ are surface strings (there are no type-level labels). Duplicate labels are legal and
+retained; the **first occurrence** of a label is the one selection, restriction, and update act
+on (Leijen's scoped labels) — this is definitional and load-bearing: the duplicate case is
+exactly where the hard lemma bites (Section 4.2). Substitutions θ are kinded and id-keyed; a
+`Row` variable's image is always a record value (a row variable never maps to a bare type).
+
+**Kinds are explicit, and the build proved they must be** (Section 6.1): three of the four
+implementation blockers were kinding defects. Well-formedness keeps a `Row` variable only in
+tail position (by construction: the row grammar's tail is `ε | ρ`, never a type variable).
+
+Declarations carry per-constructor **annotated result types** — the GADT form:
+
+```
+data Has (l : Ty) (t : Ty) (ρ : Row) where
+  Here   : Has l t { l : t | ρ' }             -- ρ' a fresh per-ctor existential
+  There  : Has l t ρ₀ -> Has l t { k : s | ρ₀ }
+```
+
+A constructor's scheme is `∀` its free variables; the variables *not free in its result* are its
+true existentials.
+
+### 2.2 The judgment and the store
+
+```
+Γ ; Δ ; R ⊢ e : t
+```
+
+Γ types term variables (with schemes); **Δ is the equation store** — a most-recent-first list of
+equations `x̂ ≐ t` (either kind, kind-matched); **R is the set of rigid variable ids** (skolems).
+The **global substitution θ** — the persistent state of inference — is deliberately *separate*:
+equations in Δ are never solved into θ while their target is rigid.
+
+Rigidity has exactly three scoped origins: **signature-bound** (the `type x̂⃗.` prefix, or a
+GADT-index position — Section 6.3); **constructor-existential** (a pattern's constructor
+quantifiers not free in its result are skolems of that branch — OutsideIn's touchables,
+row-aware); and **index-lift** (a signature index free in the scrutinee that a pattern's result
+equates to a structured type is lifted rigid for the branch's duration). Everything else is
+flex.
+
+### 2.3 Unification's two modes
+
+`unify_δ(θ, R; t₁ ≐ t₂)` with δ ∈ {global, branch} is ordinary unification (decomposition,
+occurs check, scoped-label row rewrite) plus one discipline: what happens when unification
+*would bind a rigid variable*.
+
+- **U-RIGID-BIND.** `a ≐ t` with `a` rigid: **global** fails (`RigidVar`); **branch** *captures*
+  the equation `a ≐ t` into Δ and leaves `a` unbound.
+- **U-RIGID-BIND-R.** `ρ ≐ {r}` with `ρ` rigid: same split — with one exception, the **alias
+  case**: if the row is a bare flex variable (`ρ ≐ ρ'`, no fields), the flex variable is bound
+  *to* `{ ε | ρ }` in both modes, and nothing is captured. (The dual direction — rigid bound to
+  flex — never arises: binding direction is always flex-gets-bound.)
+- **U-RIGID-EXTEND.** The row rewrite reaching a rigid tail it would extend: **global** fails;
+  **branch** captures `ρ ≐ { ℓ : γ | β }` (fresh γ, β) and *proceeds*, handing out the exposed
+  field view — the one branch-mode behaviour that continues with a derived fact rather than
+  failing.
+
+**What a rigid row tail may be — the inventory, stated once.** A rigid ρ **may**: (a) be
+aliased *by* a flex row variable; (b) be *locally known*, inside a branch, to have a shape
+`{ ℓ : t | ρ' }` — a captured equation that licenses selection/update discharge within that
+branch only; (c) unify with itself. A rigid ρ **may never — in any mode — be bound in θ**: not
+to a closed row, not to a fielded row, not to another rigid variable outside branch mode, and no
+rewrite may extend it outside branch mode. In branch mode a would-be binding is captured, and
+**θ gains nothing**: this is the invariant that makes the exported scheme honest.
+
+### 2.4 The rules
+
+The rule set (compressed here; full statements with seats in the companion spec):
+
+- **R-VAR** instantiates a scheme's quantifiers with fresh *flex* variables of matching kind.
+- **R-TYPE** checks a signatured declaration's clauses against the declared scheme with the
+  `type`-bound quantifiers rigid; unnamed quantifiers stay flexible, restored by the
+  **too-general police** after the body (Section 6.3).
+- **R-APP** unifies function with argument *globally*; on a rigid failure explained by Δ
+  (**R-APP-DISCH**), the *type* equation is applied one-way (zonked both sides, occurs-guarded)
+  and the unification re-run. This is the variable-use discharge: `String.fromInt x` with
+  `x : a` under `a ≐ Int` succeeds without binding `a`.
+- **R-SEL** selects: unify the record with `{ ℓ : a | β }`; on a rigid-tail failure explained by
+  Δ (**R-SEL-DISCH**) — some equation on ρ zonks to a row whose *head* is ℓ — the selection is
+  licensed and returns the equation's exposed type. **An equation whose head label differs from
+  ℓ licenses nothing**: the readable field set inside a refining branch grows exactly by the
+  heads of the branch's equations (`rowgadt_absentfield`).
+- **R-UPD** updates: restrict the first occurrence of ℓ (requiring it present) and re-prepend;
+  when the label is present only through a refinement (**R-UPD-DISCH**), the same discharge
+  licenses it and the result is the discharged shape re-prepended. **Nothing is bound**: the
+  equation is read, never consumed.
+- **R-UPD-INS (rejection).** Insertion `{ e | ℓ ← v }` — which may extend or shadow — *never*
+  consults the store; if the base's row tail is refined by this branch, the form is rejected
+  outright ("insertion under rigid row refinement").
+- **R-RESTR** restricts (`{ e − ℓ }`): first-occurrence removal, no store consultation.
+- **R-CASE** is the discipline's heart: **snapshot Δ; unify pattern-vs-scrutinee in branch mode
+  (capture); infer the body under Δ ∪ Δᵢ and the branch's lifted rigid set; check the body
+  result (R-RESULT); truncate Δ to the snapshot.** Truncation is by construction exact — restore
+  assigns the snapshot prefix — so nesting is safe at any depth. Two *memories* survive into the
+  clause: the refined targets (every variable a branch of this clause refined) and the refined
+  tail pairs (each captured row equation's head and tail) — they are what the result check
+  enforces (R-RESULT), not a channel by which equations leak.
+- **R-RESULT** is the two-tier rule — Section 3.1.
+- **R-EXISTS** instantiates a pattern's constructor scheme with its true existentials rigid
+  (branch-scoped); non-GADT constructors have every quantifier free in the result, so ordinary
+  ADT patterns are unaffected, and flex-marked quantifiers are never rigidified (this is what
+  keeps a `Dict k v` pattern from skolemizing `k` — the prelude stays green).
+- **R-LET** generalizes the free variables of the bound type not free in the environment — with
+  the refined-tail exclusion that closes the let-laundering hole (Section 4.4).
+
+The implementation's two-pass declaration-directed *retry* is an artifact for corpus
+byte-identity (Section 6.5); **the declarative calculus has only the declaration-directed
+rule**.
+---
+
+## 3 The two-tier result rule and the operation-level answer
+
+### 3.1 The two-tier result rule and the operation inventory
+
+At each branch's result, the body type `t_b` is unified with the expected `t_r`. On a rigid
+failure the decision is two-tier — the asymmetry is the paper's central design claim:
+
+**Tier-T (type equations discharge).** If `a ≐ τ` is in Δ with `a : Ty` and τ not a record type
+(occurs-guarded), the branch result is re-checked with `a` one-way replaced by τ on *both*
+sides — a single pass, never a bind. The equation still dies at branch end. This is the
+standard GADT coercion: a branch knowing `a ≐ Int` may return an `Int` *at* type `a`, so the
+canonical three-branch evaluator type-checks (`rowgadt_eval`), and a wrong body — a `String`
+where the equation says `Int` — still fails the re-check (`rowgadt_evalbad`).
+
+**Tier-R (row equations never discharge).** A row equation `ρ ≐ {r}` never discharges at a
+result. The reason is *domains*: discharging it would identify the abstract row with one
+particular field set, moving a domain change out of the branch — the exported scheme would
+promise a domain the signature does not. Its rigid failure surfaces as the explicit
+*escaping-row-equation* error.
+
+The full decision procedure at a branch result, in order:
+
+1. **Tail-escape pre-check** — did this unification newly identify a refined tail with its
+   head? (`dropIntroduced`: the drop shape.) → reject.
+2. Unify (zonked both sides); success → done.
+3. On rigid failure: does the presented type *rebuild* the head's refinement (unifies with the
+   equation body, head not free in it)? → **accept without binding** (`rebuildMatches`).
+4. Else, is there a usable *type* equation? → Tier-T discharge.
+5. Else, is the rigid variable this branch's constructor existential? → reject (*escaping
+   existential*).
+6. Else, does any equation explain it? → reject (*escaping row equation*).
+7. Else: the historical rigid error.
+
+**The operation-level answer.** The rules decide, for each record operation, whether it survives
+an active refinement `ρ ≐ { ℓ : t | ρ' }` on the base's tail:
+
+| operation | under refinement | why |
+|---|---|---|
+| select ℓ (the equation's head) | **licensed** | R-SEL-DISCH reads the equation's exposed type |
+| select m ∉ equation heads | **rejected** | no equation exposes m (`rowgadt_absentfield`) |
+| update ℓ = v | **licensed, no discharge needed** | update is domain-preserving — Section 3.2 |
+| insert ℓ ← v | **rejected** | insertion is shape-changing; R-UPD-INS never consults Δ |
+
+Selection is *licensed exactly by the heads of the branch's equations*; update is sound *by
+construction*; insertion is the shape-changing dual, rejected *conditionally* — a deliberate
+position on the extension dial, not a discovery (Section 3.3).
+
+### 3.2 Update is safe by construction
+
+Scoped-label update replaces the **first occurrence** of ℓ and requires it present; it never
+extends the row. So under the refinement `ρ ≐ { ℓ : t | ρ' }`:
+
+```
+dom({ ℓ : t_v | ρ' })  =  dom({ ℓ : t | ρ' })  =  dom(ρ)   under the equation
+```
+
+The branch may return the updated record *at the abstract row* `{ ρ }` — the domains are equal,
+no equation is consumed, nothing escapes. Update needs no discharge rule at all: its
+compatibility falls out of its semantics, not out of the type system. The dual makes the claim
+non-vacuous: insertion *can* change the domain, which is exactly why it may never consult the
+store. Both directions are mechanized (`update_reflexive_domain`, `update_accepted_at_rho`,
+`insertion_rejected_under_refinement`; Section 4.5).
+
+### 3.3 Positioning the insertion trade and the update lineage
+
+Insertion is typable in the rows-only world — this paper's rejection exists *only relative to an
+active branch equation*, and the dial has published settings. **Rémy 1994** types unrestricted
+field extension *unconditionally*: `new_a : Π(a:φ;$) → α → Π(a:pre(α);$)`, no lacks predicate, no
+presence check; his `with` never requires the field present and imposes "no constraint between
+the types of the old and the new values". **Gaster & Jones 1996** dial the same operation to
+*strict*: `(l =|) :: (r\l) ⇒ …`, extension under a lacks predicate. **CORELINKS** types insert
+by *quantifying presence* over the needed row. Our rule is the fourth position — *conditional*:
+unrestricted outside refinement, rejected under an active equation — and the first account of
+*why* the condition exists: a discharged insertion is a domain change escaping its branch. We
+give up Rémy's expressiveness exactly where it would break refinement soundness.
+
+Record update has the same lineage, and the contrast is the direction that matters. Rémy's
+update is extension (shadowing; the domain may grow); Gaster & Jones' is restrict-then-extend
+under lacks; Links derives remove-then-extend. Ours is first-occurrence scoped-label replace —
+**domain-preserving by construction** — which is what makes update's discharge free. The
+novelty is being domain-preserving, not being typable at all.
+
+---
+
+## 4 Metatheory: mechanized, argued, refuted
+
+This section separates what is *proved* (machine-checked in the Lean development: 90 theorems,
+zero `sorry`, three explicit axiom parameters — `Unifies`/`Captures` at `Typing.lean:221,229`,
+the unifier abstracted as a parameter of the theory, and `unifies_field_projection` at
+`Preserve.lean:213`; `lake build` clean), what is *measured* (fixtures, re-run in the gate), and
+what is *argued* (stated with its mechanism, not proved). The negative result is *stated, not
+proved*; it is the necessity direction, and its mechanism is measured.
+
+### 4.1 The architecture: unification as a parameter
+
+The typing judgment is mechanized constraint-based (`Typing.lean`): the rules *emit* unification
+constraints against the abstract relation `Unifies R t₁ t₂` and capture equations through the
+abstract `Captures R t_p t_s Δᵢ` — no unification algorithm appears inside the rules, and no
+substitution is threaded through them. Soundness of the calculus then requires the unifier to be
+*sound* (it must not accept inconsistent constraints), not *complete* — which separates the
+row-specific obligations from the (undecidable-complete) unifier problem. The store discipline
+is visible in the rule shapes: `HasTypeBranches` threads one snapshot Δ; each branch body is
+checked under `Δᵢ ++ Δ` with its existentials added to R and its result check run there; the
+recursion and the conclusion are back under the bare Δ. The two-tier rule is verdict-indexed
+(`Result Δ R t_b t_r v` with `v ∈ {ok, escape}`): Tier-T is a productive case (it re-checks and
+may conclude ok); Tier-R is *terminal* — a needed row equation forces escape. The asymmetry is
+in the type of the rule, not merely in its premises. Theorems `tier_R_forces_escape`
+(`TypingStore.lean`) and `tier_T_ok` (`Preserve.lean`) pin both directions.
+
+### 4.2 H1 — rewrite/equation commutation, under duplicates
+
+The genuinely novel formal content — no prior system has the setting. A branch's equation
+`ρ ≐ { ℓ : t | ρ' }` is *consulted* by discharge, which reads the equation's head; the row
+rewrite (scoped-label swap) is the operation that exposes a field of a row. H1 says the two
+commute, and its hard case is **duplicate labels**: a row may legally carry a duplicate ℓ
+*before* the equation's occurrence, in which case the first occurrence — not the equation's —
+is what selection must expose.
+
+The five mechanized theorems (`RowGadt.lean`):
+
+- **`h1_find_commutes`** — first-occurrence search commutes with scoped-label substitution:
+  discharge-then-rewrite and rewrite-then-discharge agree.
+- **`h1_duplicate_shadow`** — a duplicate ℓ before the equation *shadows* it: both routes expose
+  the earlier field, never the equation's type. (This case was the open probe; the theorem is
+  its confirmation.)
+- **`h1_no_shadow`** — with no shadowing duplicate, the equation's head is what is selected
+  (the positive counterpart).
+- **`h1_head_only_vs_full`** — **the theorem that corrects the spec**: H1 read as "for *every*
+  label m" holds only in the **rigid-tail** regime; with a flex tail, the substitution-based
+  search recurses into the tail while head-only discharge stops at the head. The weak form is
+  what the implementation needs (and what we claim); the strong form is false as originally
+  written in the companion spec.
+- **`h1_discharge_head_agrees`** — the discharge's head-reading agrees with the full search on
+  the equation's own label.
+
+The corresponding probes exist and are pinned: `rowgadt_dup_rebuild` (a full-duplicate rebuild
+is *accepted* — the rebuild arm handles duplicate equation bodies) and `rowgadt_dup_fewer`, which
+pins the *boundary* of this story rather than H1 itself: it is a rebuild with *fewer* duplicate
+occurrences, and it is rejected — the known false reject of the H2-b domain rule, discussed under
+the escape coarseness below.
+
+### 4.3 H2-a — store truncation
+
+Truncation is exact and nesting-safe **by construction** — restore assigns the snapshot prefix —
+and the construction is mechanized as three theorems (`h2a_truncation`, `h2a_no_survival`,
+`h2a_snapshot_is_suffix`, plus `h2a_inner_snapshot_suffix` for the nesting shape: an inner
+branch's snapshot is a suffix of the outer store, so restore to a prefix is well-defined at any
+depth).
+
+### 4.4 H2-b — escape as a domain rule, and the two counterexamples
+
+H2-b is the obligation the adversarial hunt shaped (Section 6.2 states the hunt; here is what it
+produced): *no equation on a variable free in the branch's result type may be needed to type
+that result* — including under an alias, which is where the real hole was. The mechanized
+results:
+
+- **The domain rule.** `h2b_proper_subdomain` (a refined tail is a proper sub-row of its head),
+  `h2b_domain_rejects_tail` (the drop is rejected), `h2b_domain_accepts_rebuild` (the legitimate
+  rebuild is accepted), `h2b_domain_shrink`.
+- **Exactness, proved.** `h2b_domain_exactness`: the rule is **exact for fresh labels and coarse
+  for duplicates** — the boundary is a theorem, not a hedge. The over-approximation is itself a
+  theorem: `h2b_overapproximation` proves the *old* syntactic predicate fires on a legitimate
+  full-row rebuild — i.e. the old check's false reject was exactly the shape the domain rule
+  fixes (`rowgadt_shape_rebuild` now compiles clean).
+- **Both counterexamples, mechanized.** The let-laundering hole is closed by
+  `h2b_let_severs_occurs` + `h2b_rigid_preserves_occurs` and
+  **`H2b_no_quantify_refined_tail`** (a refined tail is never quantified, so its occurrence
+  survives generalization — the generalization predicate `GeneralizesRespectsRefined` carries
+  the exclusion, and `letR_excludes_refined_tails` / `letR_excludes_refined_body_tails` consume
+  R-LET's actual premises). The wildcard sibling leak is
+  **`H2b_wildcard_leak_shape`** + `h2b_direct_collapses` (the *symmetric* orientation the old
+  check never tested) + `h2b_wildcard_collapses`. `h2b_alias_identifies` covers the
+  through-an-intermediate-variable aliasing.
+- **The residue is coarseness, not unsoundness.** A rebuild with *fewer* duplicate occurrences
+  than the equation body is a false reject (`rowgadt_dup_fewer` errs `cannot unify a with
+  {x:Int| a}` — the pinned do-not-weaken fixture). An adversarial battery over duplicate shapes
+  (bare tail return, let-laundered tail, wildcard sibling, wrong label, wrong first-occurrence
+  type, wrong field type; re-homed in `examples/research/dup-hunt/`) found **no unsound accept**.
+  The asymmetry is the useful part: H2 errs safe, and the battery bounds what it is missing.
+- **Result-scoping, measured.** The tail-aliasing check is *result-scoped*, and so is the
+  obligation: a branch may perform the same flex-tail-aliases-rigid-head identification in its
+  body — `select`'s `There` branch does, recursing on the tail — provided the result type does
+  not mention the row (`rowgadt_select` stays clean). H2-b as stated is exactly result-scoped;
+  strengthening it to "no aliasing anywhere in the body" is refuted by that fixture.
+
+### 4.5 The update theorem and its dual
+
+The positive row result is mechanized (`Update.lean`, reusing `RowGadt`'s row algebra):
+`update_domain_preserving` (update preserves the row's domain: restrict-then-re-prepend of the
+existing first occurrence), `update_reflexive_domain`, **`update_accepted_at_rho`** (under
+`ρ ≐ { ℓ : t | ρ' }`, update is well-typed at the abstract ρ with no discharge and no binding),
+and — the dual — `insertion_fresh_extends`, `insertion_domain_exactness`,
+**`insertion_rejected_under_refinement`** (a fresh-label insertion strictly extends the domain,
+which is why it may never consult the store), `insertion_shadow_domain_unchanged`. The
+restriction side of R-UPD-INS is itself mechanized in the typing arc:
+`refinedTailVar_iff_insertionRejected` ties the rejection predicate to the store's refined-tail
+lookup, and `insertionRejected_mono_left/right` prove the monotonicity the rule relies on.
+
+### 4.6 Preservation of the record operations
+
+The deadline-grade slice of T2 is mechanized in `Preserve.lean`: a minimal small-step relation
+with exactly the two record reductions (selection by first-occurrence lookup; update by
+cons-prepend-shadow — the *measured* dynamic semantics: records lower to association lists and
+`assoc` is first-match-from-head, the same first-occurrence discipline the rewrite uses), plus
+`record_first_occ` / `record_domain` (the static/dynamic first-occurrence correspondence).
+`sel_preserves`, **`selDisch_preserves`** (the *discharged* selection — the refinement-licensed
+one — preserves types), `upd_preserves`, and the step-level forms
+(`sel_step_preserves`, `selDisch_step_preserves`, `upd_step_preserves`), with
+`firstType_subst_rowvar` as the full-grammar restatement of `h1_no_shadow`. The discharged
+selection and the update cases need **no** unifier axiom; the plain selection case is conditional
+on `unifies_field_projection` (that unifying two record types relates the first-occurrence
+types of a common label) — stated as an axiom parameter alongside `Unifies`/`Captures`.
+
+### 4.7 What is argued, and the negative result
+
+**No general soundness theorem exists for λρG.** T1 (progress) and T2 (preservation) are argued,
+not proved: T1 introduces no new redex shape and its genuinely new obligation — every
+selection licensed by R-SEL-DISCH finds its label at runtime — is *carried by* T2's SELECT
+clause, which is what `selDisch_preserves` mechanizes; T2's two row clauses are exactly what H1
+and the update theorem carry. The mechanization targets the row algebra, the store, the escape
+rule, and the record operations — not the whole calculus. We say this once, plainly, and do not
+let later sections upgrade "argued" to "proved".
+
+**The negative result (stated, not proved).** Let λρG⁻ be the variant in which branch mode is
+replaced by global mode: a branch's would-be capture is solved into θ. Then λρG⁻ types programs
+whose exported scheme lies about row domains. For `select` (Figure 1): the `Here` branch's
+equation is `ρ ≐ { l : t | ρ₁ }`, the `There` branch's is `ρ ≐ { k : s | ρ₂ }`; sequential
+clause checking solves the first into θ, and the second either fails spuriously (the *policy*
+shape — today's rigid guard's rejection) or, with the guard removed, silently overwrites — and
+the exported scheme `∀ρ l t. Has l t ρ → {ρ} → t` keeps promising nothing about `l`, while the
+body's `r.l` was justified by it. The mechanism is measured, twice, in the implementation's own
+history: the pre-discharge classic case bound `a := Int` globally at the definition while call
+sites kept `∀ a. Expr a → a` — silent wrong code (`evalInt (BoolLit True)` typechecked at `Bool`
+and would crash); and the five unsound accepts of Section 6.2 are the same class of defect — a
+branch equation that should not survive its branch either escaping it or dying without its occurs
+check. So: the discipline
+is **necessary** (this theorem-shaped statement, with its mechanism measured) and **sufficient
+for every program in the corpus and the designed fixtures** (158 gate checks on the typing
+surface — the gate total is 187, the other 29 being frontend lambda-lift fixtures that cannot
+exercise the escape rule; the three-pass hunt closed all five unsound accepts, and found none
+after the final class-level repair) — sufficiency
+over *all* programs is **not** proved, and is not claimed.
+
+**Three-way agreement.** The escape boundary is corroborated in three independent places: the
+Lean theorem (`h2b_domain_exactness`: exact for fresh labels, coarse for duplicates), the
+implementation's own exactness note (the rebuild arm accepts exact field-list matches; the
+fewer-duplicate rebuild is a false reject), and the duplicate-shape adversarial battery (no
+unsound accept, the one clean accept being the exact full rebuild `e3_swap`). The proof, the implementation, and the
+probes agree on both the rule and its boundary — that agreement is the paper's metatheory
+story.
+
+---
+
+## 5 The principality boundary
+
+The discipline has a cost, and the cost is *located* — and the location is counterintuitive.
+
+### 5.1 The boundary, stated
+
+Principal types are retained in the fragment we call **P**: programs where every refinement's
+target is either (a) a branch-scoped existential — the constructor's own variable, rigid *within*
+its branch by R-EXISTS — or (b) discharged inside the branch. Plain row code (no GADT) is the
+degenerate case: `f rec = rec.x` infers `∀ r a. { r | x : a } → a`, as Leijen's principality
+result says it must.
+
+Principality is lost in the fragment we call **Q**: exactly when two sibling branches refine the
+same *signature* row variable and the result type mentions it. In Q there is no principal
+monotype. The two clauses of `select` infer monotypes that cannot be unified:
+
+```
+select Here  r = r.l              --  Has l t { l : t | ρ₁ } → { l : t | ρ₁ } → t
+select There h r = select h r     --  Has l t { k : s | ρ₂ } → { k : s | ρ₂ } → t
+```
+
+for distinct `l ≠ k` there is no single row substitution that solves both equations, so the
+inferred monotype does not exist — only the *scheme-with-store* reading, which is to say: the
+signature `∀ ρ l t. Has l t ρ → {ρ} → t` is **checkable, not inferable**. This is precisely the
+locally-abstract-types dependency: rigidity is what makes the signature checkable under
+conflicting branch equations, and the signature is not optional in Q.
+
+### 5.2 The measurement, and the inversion
+
+The L3 table: three presentations of the *same access* — read a field justified by a
+witness — with the signature *omitted*, all three gate-registered and re-measured:
+
+| presentation | signature omitted | measured |
+|---|---|---|
+| (i) witness-encoded (`Some w x` + nested witness match) | **inferred** — `Any → String` | `rowgadt_l3i`: clean |
+| (ii) native row + GADT refinement (Figure 1's `select`) | rejected — the sibling equations conflict on the flexible ρ (`cannot unify {k:a\| b} with {\| a}`) | `rowgadt_l3ii`: `err … cannot unify {k:a\| b} with {\| a}` |
+| (iii) plain row access (no GADT) | **inferred** — `∀ r a. { r \| x : a } → a` | `rowgadt_l3iii`: clean |
+
+The middle row is the boundary of Section 5.1, measured. But the informative comparison is (i)
+vs (ii): the *encoded* presentation sits on the **P side** while its *native translation* sits on
+the **Q side**. The witness encoding does not merely model rows — **it moves the principality
+boundary**. The reason is structural: in the encoded presentation the recovered element type is a
+*constructor existential*, rigid within its branch by R-EXISTS, so inference proceeds without a
+signature; in the native form the recovered row refines a *signature* variable, which must be
+rigid for the sibling branches to agree — and a signature-directed rigidity cannot be recovered
+by inference.
+
+We record the history because it is itself evidence: our pre-measurement guess had the two
+sides **swapped** (we expected witnesses to lack principal types). The measurement is the
+result, and the guess is not published as one.
+
+**The price of the encoding.** The P side is bought at the cost of expressible operations: the
+encoded presentation has no update (an HList cons-cell rebuild is not a record update), no
+domain restriction, and the absent-field negative — the `rowgadt_absentfield` rejection that
+Section 2.4 uses to *bound* what refinement licenses — cannot even be *stated* in it. The
+boundary is a trade, not a ranking: the encoding buys inference and loses the operation
+inventory.
+
+### 5.3 What position-directed rigidity does and does not move
+
+The rigidity work (Section 6.3) was measured against this boundary and does **not** move it:
+`rowgadt_l3ii`'s `select` is *unsignatured*, and a signature-directed rule cannot reach an
+unsignatured definition, so the Q-side rejection stands. What the change did flip is the
+closely-related bare *HList* form — `hget : Has l t rho → HList rho → t` with no binder, which
+conflicted at its recursive `There` call before and now checks clean
+(`rowgadt_hget_bare`). The honest reading: the P/Q line sits where it was — a signature is
+required exactly where two sibling branches need different equations on a signature variable
+whose result mentions it — and the narrow delta (bare `hget` checkable, rigidity systematic
+rather than per-branch) is the *structural* value of the change: it closes the
+should-be-rigid-treated-as-solvable bug class at its root instead of per case.
+
+---
+
+## 6 Implementation and measured correspondence
+
+The discipline is not a paper design with a sketch: it runs inside a real checker. The substrate
+is an Elm-family compiler with Hindley–Milner inference over Leijen scoped-label rows (the
+pre-existing `elm-compiler/src/Type/*` tree: unification with a row-rewrite, let
+generalization, a 25-library corpus and a self-host track). The change is contained to the
+pattern path and the unifier state; lowering, codegen, and the VM are untouched (types are
+erased). Everything below is *measured*, and every number is reproducible from the artifact by
+one command (`tools/withe-numbers.sh`, which rebuilds the compiler, runs the gate, checks the
+corpus byte-identity, runs the unit suite, builds the Lean project, and re-derives the
+interpreter recount; its output is the source of every number printed here — run on the current
+tree at commit `c022efa`, eight commits ahead of the paper's freeze tag `withe-paper-freeze-1`
+(commit `9639443`), which recorded the pre-adversarial-pass baseline; the arrow-spelling GADT
+parser fix, the equation-lifecycle repair, and the lambda-lifting pass all post-date that tag).
+
+**A substrate fact, recorded as an artifact datum.** The substrate's local `let` is
+*sequential-only*: a local function cannot see its own name, so a self-recursive local helper
+fails `type error … unknown name: f` (raised by the checker, before lowering). The compiler's own
+`Type/Exhaustive.elm` (its `resolveScrutinee`) hit this while the compiler's sources were being
+made self-hosting; a frontend lambda-lifting pass now hoists recursive local groups to the top
+level (`elm-compiler/src/Frontend/Lift.elm`, commit `f59b19f`), with the VM substrate untouched —
+no new instruction and no collector change, which is why a frontend pass was chosen over a
+VM-level `letrec`. It is recorded as a measured datum about what the substrate is and what the
+artifact needed, not as a contribution.
+
+**The non-regression invariant.** The corpus — the compiler's own 25 core libraries, the
+prelude, and the runtime, as compiled artifacts — must be **byte-identical** before and after
+the change: the 156 pre-existing artifacts match a committed sha256 manifest entry-for-entry
+with zero moved, and the manifest now holds 185 entries (the 29 additions are the frontend
+lambda-lift fixtures, which do not touch the row/GADT surface) (re-measured, exit 0).
+This invariant is what makes the discipline's addition safe to *adopt*, and the design pays for
+it deliberately: the historical inference path remains primary; the new machinery (branch-local
+capture, discharge, the declaration-directed retry) engages only where the historical path fails
+— so every pre-existing diagnostic is unchanged by construction. The regression gate passes
+187/187 (the full fixture matrix with expected outcomes is
+Appendix A; the gate is `tests/elm-fixtures/run-elm-gate.sh`), and the unit suite passes
+114/114.
+
+### 6.1 What the build surfaced: kinds
+
+The first four implementation blockers the build hit were all *pre-existing substrate defects*,
+reproducible without any GADT, and **three of the four were kinding defects**:
+
+1. ADT generics were forced to `KType`, so a generic used at a row-tail position mis-kinded
+   (`Has l t ρ` with ρ used as a record tail). Fixed by kinding generics from their use
+   position.
+2. Kind inference by first *use* position then broke the other source order — the same
+   declaration mis-kinded depending on whether the tail use preceded the index use. Fixed with
+   a row-tail **prescan** that binds record-tail names to `KRow` before conversion
+   (`collectFileTypeKinds`).
+3. The unifier had no path for a bare `KRow` variable against a record type — exactly the shape
+   a GADT constructor's result index produces. Routed to the row binder in **branch mode only**
+   (the global path keeps its historical behaviour; the bare-`KRow`-vs-record gap is still
+   measureable outside branch mode — see the `read` reducer in Section 1.4).
+4. A flex-alias wrapper bug: the flex row variable was bound to the record *wrapper* rather
+   than to the variable, so a rigid variable meeting its own alias was rejected. Fixed in the
+   identity case.
+
+The finding generalizes: **a calculus without explicit row kinds cannot predict where a real
+implementation breaks.** The declarative spec states the kind of every declaration; the
+implementation *elaborates* it from the surface (because the surface has no kind annotations),
+and the elaboration rules were built precisely because first-use inference mis-kinded
+order-dependent programs. This is why λρG carries kinds in its syntax (Section 2) rather than
+as a periphery.
+
+### 6.2 The escape check's evolution — the section's centrepiece
+
+The branch-result escape rule (Section 3.1's Tier-R) went through three measured stages, and the
+stages are the paper's honesty about its own metatheory.
+
+**(1) The first check was syntactic** — a tail-occurrence test in one orientation: reject when
+the refined row's *tail* variable appears in the body's type while the *head* appears in the
+expected result. It was sound on the shapes its author considered.
+
+**(2) The first of three adversarial passes found two programs the check accepted that are
+unsound** (both are now gate-registered compile errors, `rowgadt_escape_launder` and
+`rowgadt_escape_wildcard`):
+
+- **Let-laundering.** The `Here` branch refines `ρ ≐ { l : t | ρ' }`, the scrutinee is an
+  `HList ρ`, and the branch returns its tail — laundered through a `let`:
+
+  ```elm
+  ( Here, HCons _ rest ) -> let ys = rest in ys
+  ```
+
+  `let`-generalization *quantified the refined tail* ρ', so the use of `ys` instantiates a
+  fresh variable with no link to the tail; the occurrence test sees nothing; the fresh variable
+  then legally aliases the rigid head. The returned list is missing field `l` — an unsound
+  accept (the pre-fix checker compiled it clean).
+
+- **Wildcard sibling leak.** The refining branch returns the tail while a wildcard branch
+  returns the full row:
+
+  ```elm
+  ( Here, HCons _ rest ) -> rest
+  _ -> xs
+  ```
+
+  The shared case-result variable lets the wildcard's full-row result unify *tail := head* — a
+  legal flex alias — zonking the tail away before the clause-level check runs. The check had
+  been written in one orientation only; the sibling branch smuggled the identification past it.
+
+**(3) The rule is now domain-based**, and the domain rule is what the mechanization proves
+sound. At a branch result whose unification fails on a refined rigid row head, the check decides
+on the *domain*, not on syntactic occurrence: **drop** (the unification newly identified the
+tail with the head — `dropIntroduced` compares the tail-reach before and after this step) →
+reject; **rebuild** (the presented row unifies with the equation's body, and the head does not
+occur in it) → *accept*; anything else → reject (code seats: `tailReachesHead`,
+`dropIntroduced`, `rebuildMatches` in `Type/Infer.elm`). The rebuild arm is what makes the rule
+*complete enough to be usable*: returning the scrutinee rebuilt — `HCons x rest` at
+`HList { l : t | ρ' }`, whose domain equals the head's under the equation — is a *legitimate*
+return that the syntactic check false-rejected (`rowgadt_shape_rebuild`, clean). Both fixes and
+the rebuild acceptance are pinned; six further must-error escape shapes were re-verified after
+the change.
+
+**The two passes after the escape check.** The escape rule was only the *first* adversarial
+target. A second pass attacked the checks *as they ship* — the previous pass had only ever
+attacked the rule it replaced — and found two more unsound accepts. **CE-1**, a `dropIntroduced`
+scoping bypass: the body pre-aliased the refined tail to its head *before* the result unify,
+outside the window the check observed (`rowgadt_ce1_prealias`). **CE-2**, a bare-variable
+scrutinee over-generalisation that also hit *plain ADTs*: matching a bare scrutinee lifted and
+then dropped its index equation, over-generalising to `∀a. a → r` and over-refuting the sibling,
+so `f B` compiled clean and crashed at runtime (`rowgadt_ce2_barevar`; the same defect in a
+non-GADT form, `rowgadt_ce2_plain`). A third pass attacked the *coercion surface* — the Tier-T
+result-unify path the whole two-tier rule rests on, which had been assumed correct rather than
+tested — and found the most serious accept so far: a **wrong-typed value**, not a crash.
+`MkBox : a -> Box (List a)` with `get b = case b of MkBox v -> v` accepted `get (MkBox 3)` at
+`List Int` while its value is the `Int` `3`, because the flex→rigid alias bound the equation
+`a ~ List a` without ever occurs-checking it (`rowgadt_ce3_fieldalias`). A per-shape guard
+(`refinedTargetAliasedBy`) closed that one shape, but a review found **three bypasses** of it —
+the alias forming inside a tuple, before the result unify, and through a `let` — each compiling
+clean and printing a wrong-typed value. The real cause was the **equation lifecycle**: a pending
+`KType` equation must be occurs-checked before it is discarded or a result accepted; the repair
+(`pendingTypeOccurs`) does exactly that, and all three bypasses now error `infinite type`
+(`rowgadt_ce3a_tuple`, `rowgadt_ce3b_prealias`, `rowgadt_ce3c_let`). In total: three passes,
+five unsound accepts, one class-level repair.
+
+The stage-(2) lesson is methodological and worth stating: the hunt was run *before* the
+mechanization, and H2 as first conceived was the wrong shape of lemma — a statement constraining
+only the branch-result unification cannot see the let-form leak. Had the theorem been proved
+first, it would have enshrined a property the implementation did not enforce. Section 4 gives
+the mechanized form of both counterexamples (`H2b_no_quantify_refined_tail`,
+`H2b_wildcard_leak_shape`) as part of the metatheory, not as an appendix.
+
+### 6.3 The `type a.` surface and the too-general police
+
+The surface prefix `type x̂₁ … x̂ₙ.` names the signature quantifiers that are **rigid while the
+body is checked**; unnamed quantifiers stay flexible, and soundness is restored *after* the body
+by the **too-general police** — a re-check that skolemizes the declared scheme and unifies it
+against the generalized body type, rejecting "annotation is too general". The measured
+asymmetry is exactly the design's prediction: the binder'd `select` checks; the same body
+without the binder is rejected — either by the conflicting-equations failure
+(`cannot unify {k:a| b} with {| a}`, `rowgadt_l3ii`) or, for classic GADTs, by the police ("annotation is too
+general"). Rigidity is the mechanism; the prefix is its surface.
+
+**Position-directed rigidity.** A signature variable at a *direct GADT-index position*
+(`Has l t ρ`, `Expr a`) is rigid whether or not the surface binds it: the checker collects the
+file's own annotated-result constructors and their index variables
+(`collectGadtNames` / `gadtIndexVars`) into the scheme's bound set, so `hget : Has l t rho ->
+HList rho -> t` — with **no** binder — now checks identically to its binder'd form (this
+specific program flipped from rejected to clean and is pinned: `rowgadt_hget_bare`). The
+measurement was honest about its own narrowness: bare `select`/`eval` *already* compiled clean
+(the per-branch index lift covered them), and the principality boundary of Section 5 does **not**
+move (`rowgadt_l3ii` is an *unsignatured* definition, which a signature-directed rule cannot
+reach). The value of the change is structural — it closes the recurring "should-be-rigid variable
+treated as solvable" bug class at its root, and it is what makes the refutation guard of
+Section 1.4 sound at a *bare* index (`refutbare`).
+
+### 6.4 The compiler's own effect interpreter
+
+The acid test is not a fixture but the compiler's own `Runtime.runTask` — the free-monad
+interpreter for its 30-constructor effect type, historically a *trusted body* (a function the
+checker skips, with a lie for a type). The trusted comment stated its own retirement
+precondition: kept trusted "until the per-ctor result table can drive a checked interpreter".
+The machinery of this paper is that table's typability condition, so we tested it.
+
+**The precondition was met, mechanically.** The 30 per-ctor result annotations
+(`TaskExec a : Task x (Int, String, String)` — real source syntax in `Runtime.elm`, migrated
+from a hardcoded table) were proven behaviour-preserving by *two independent oracles*: the
+inferred constructor schemes were byte-identical before/after the migration (30/30), and the
+full corpus compiled byte-identically.
+
+**And it was not sufficient — a fail-fast artifact.** Un-trusting `runTask` (removing it from
+the trusted list) reports exactly *one* error, at `TaskExec`, and stops: a checker that halts at
+the first error cannot see the branches behind it. Masking each failing branch in source order
+to reveal the next (a reproducible bisection script, `tools/withe-recount-runTask.sh`, which
+edits only a scratch copy and asserts every step's expected error) gives **five** failing
+branches — so the honest count is **25 of 30 branches check honestly**, and the earlier "29 of
+30" figure was this fail-fast artifact. The five, named:
+
+| branch | failure | class |
+|---|---|---|
+| `TaskExec` | payload `a` vs `execPlanPrim : List a → List b` needs `a ≐ List a` | **defect**: a dynamic cast |
+| `TaskNow` | `Ok 0` number literal hits flex-marker conflict before discharge fires | **defect**: literal handling |
+| `TaskQuit` | un-annotated nullary; body `Ok ()` vs abstract index `a` | **design**: deliberate generalization |
+| `TaskGuiPoll` | same shape; annotating breaks its use sites' polymorphism | **design**: deliberate generalization |
+| `TaskStat` | result is a *closed record*; the Tier-R over-approximation refuses any record body | **defect (known)**: Section 4's coarseness |
+
+Two of the five are *design, not defect*: `TaskQuit` and `TaskGuiPoll` are the two constructors
+the annotation table deliberately left generalized, and the bisection's own terminal signal
+proves it — after masking the fifth failure the next error is a *call-site* cascade
+(`cannot unify Tea.GuiEv with ()` at a `Task.perform` use), not a branch, which is both the
+no-sixth-branch evidence and the evidence that annotating those constructors would break their
+callers' deliberate polymorphism. The count has one stated condition: it is taken under a
+`type x a.` binder (the committed signature has none; without the binder the flexible index is
+bound by the first concrete-result branch and the later branches cascade — the discharge being
+measured requires the rigid index). The condition is printed by the recount script, not hidden.
+
+**The residue is a representation problem, not a refinement one.** `TaskExec`'s payload is
+typed `a` — the constructor's existential, absent from its result — while the runtime value *is*
+a tagged list; no refinement of an abstract variable expresses `a ≐ List a`. The honest fix is
+a surface change (type the payload `List a`), not more type theory. The rest of the trusted
+list decomposes the same way: the remaining trusted bodies are lies of *representation* (the VM
+value is uniformly typed; `compare` introspects it), not of refinement. An experiment with an
+honest `Value` datatype (`probeA`/`probeA2` in `examples/research/`) confirms it: with honest
+constructors, the `compare`/`decode*` bodies type-check clean, and a deliberately wrong body is
+still rejected — the checker's discipline is intact; what is missing is an honest datatype, not
+an equation.
+
+### 6.5 The measured correspondence to the calculus
+
+Where the implementation approximates the declarative rules (the calculus's own [U]/[S]
+inventory, compressed):
+
+- **The two-pass retry — [S], soundness-neutral.** The implementation checks a signatured
+  declaration's clauses bottom-up, and only on failure with a directly-case body retries
+  declaration-directed (each branch against the declared result, each with its own discharges).
+  The *declarative calculus has only the declaration-directed rule*. The retry accepts a
+  subset: the canonical evaluator wrapped in a `let` is spuriously rejected
+  (`gNeg_letcase`, re-homed and re-measured: `cannot unify Bool with Int`). No completeness
+  claim is made for the retry path.
+- **Per-file kinding — [U, weakly].** ADT generic kinds are collected per file, so a
+  cross-file bare row parameter could kind as a type variable (turning a row equation into a
+  type equation Tier-T would discharge). Unexercised by the corpus and fixtures; stated as an
+  approximation.
+- **The duplicate-label coarseness — [S], proved and pinned.** The rebuild arm requires an
+  *exact* unification with the equation body, so a body rebuilding with fewer duplicate
+  occurrences is a false reject (`rowgadt_dup_fewer`, with a do-not-weaken comment); the
+  domain rule's exactness boundary is a theorem (`h2b_domain_exactness`, Section 4).
+- **Trusted bodies and surface restrictions — [S].** The fixed trusted list is modelled as an
+  escape, not a rule; the surface has no type-level strings; record literals are closed (an
+  open row can only be *named*, never constructed); `{ | ρ }` bare-open does not parse; the
+  update base must be a local variable.
+- **Exhaustiveness and refutation — [S], an addition.** The calculus's case rule now carries a
+  compile-time exhaustiveness and refutation check (`Type/Exhaustive.elm`): a missing possible
+  arm is an error; an impossible arm under the branch equations is refuted and not required.
+  The check's own boundary is measured and pinned: refutation fires only at a concrete or
+  binder-rigid index (`refutbare`); a *pre-existing* false positive for unsignatured nested
+  patterns (`Just (a, b)` vs `Just _`) remains, and is not a soundness issue.
+
+### 6.6 Runnability: the gate now executes, not just compiles
+
+The `compile_clean` gate check asserts only that compilation *succeeds* — it never runs the
+result — so a lowering or arity bug in the GADT path was invisible for the whole project, until
+one was found: a GADT constructor in the arrow spelling `C : A -> B -> T` parsed with
+`arguments = []`, so the lowerer emitted an arity-0 constructor and *applying* it crashed
+(`apply non-callable`), while the type checker was happy because the result annotation is a
+function type. Seven GADT fixtures were converted from `compile_clean` to real `run` checks with
+pinned outputs — `rowgadt_eval` `[cons 1 . true]`, `rowgadt_het` `"hi3"`, `rowgadt_l3i` `"3"`,
+`rowgadt_l3iii` `1`, `rowgadt_fsm` `"open:42"`, `rowgadt_fsm_nested` `"open:42"`, `refutpos`
+`5` — so the gate now *executes* the GADT path, and this arity class is a regression fixture
+rather than an invisible gap.
+---
+
+## 7 Related work, organized by the feature-pair map
+
+The organization of this section is itself a contribution. Three features — **R** row
+polymorphism, **G** GADT refinement, **A** explicit/locally abstract polymorphism — pick out
+cells by the pairs they combine, and the map (24 works, surveyed with primary-source
+retrievals; the survey with verbatim quotes and URLs is the companion
+`docs/research/withe-related-work.md`) makes two things visible at once: *which adjacent cells
+are occupied* — so that "but X did rows" and "but Y did GADTs" are answered before they are
+asked — and *that one specific cell is empty*. No published type system refines a row variable
+by a branch-local GADT equation, and no published system therefore says which record operations
+remain typable when such an equation is active. The claim is about published systems with a
+*designed discipline*; it is never worded "rows and GADTs have never been combined" — OCaml
+ships the raw combination as an idiom, and its boundary is discovered empirically by its users.
+
+### 7.1 The rows-only lineage (R)
+
+**Wand 1989** types record *concatenation* and loses principality for it — "this calculus does
+not have principal types, but does have finite complete sets of types" — compensating with
+finite complete sets. Our fragment Q loses principality for a different trigger
+(refinement-with-mentioning-result, not concatenation): **the same casualty, a different
+mechanism — we do not conflate the two**, and Wand's compensation suggests a question for future
+work (does Q admit finite complete sets?). **Rémy 1994** is the reference point for the
+operation dial: unrestricted extension unconditionally (`new_a`), presence flags as
+quantification (System Π*), and update-as-extension — the expressiveness maximum our
+conditional insertion rejection trades against (Section 3.3). **Gaster & Jones 1996** dial
+extension to strict under a lacks predicate and type update as restrict-then-extend — the
+second published position on the dial. **Ohori 1995** replaces row variables with *kind
+restrictions* on instantiation — worth citing against our kinding findings (Section 6.1): the
+kinds are load-bearing, but without a row variable there is nothing to refine — the seat itself
+is absent. **Leijen 2005** is the substrate: scoped labels, the eq-swap rewrite, and the
+duplicate-label semantics our H1 commutation is stated over; the paper predates GADT inference
+and contains no occurrence of refinement. **Paszke & Xie 2023, Spanò 2024, Hubers et al. 2025**
+extend the R lineage (infix extension for tabular data, overloading conversion, row-typed
+recursion) with zero GADT content — grep-measured on the retrieved texts. **Toohey, Chen,
+Jamalzadeh & Xie 2026** occupies the adjacent **rows × type-classes** cell, not the R lineage:
+dictionary-passing elaboration of ad-hoc polymorphism over polymorphic rows, with `All` (a
+property across all fields), `ind` (a fold over rows), `Split`/`Lift`, and commutativity
+annotations over a *parameterised* row theory, all mechanized in Lean 4 — and the grep on its
+38-page full text is `GADT` 0, `refine` 0, `refinement` 0, `branch` 0: no equations on rows, so
+its delta from us is exactly the refinement interaction. That cell is **out of scope** here: we
+claim nothing about rows × type classes, and generic structural dispatch over rows is their
+result (`All` + `ind`), not a consequence of our discipline.
+
+### 7.2 Presence: the nearest neighbour in one dimension
+
+**CORELINKS** [Lindley & Cheney 2012] is the closest published system to answering "what must an
+operation know about which fields are present?": it types insert/update/delete against
+`(label × presence × type)` rows by *quantifying* a presence variable over the needed row —
+"presence … is unconstrained as we can infer nothing about it solely from an insert or update
+operation". This is **abstraction** — the opposite direction from our *assumption* on a rigid
+variable inside a branch — and it has no equations, no rigidity, and no branch-local store.
+Its rows also have **distinct labels**, which is precisely the case where our domain rule is
+*exact* (Section 4.4): the duplicate-label coarseness is a genuine expressiveness difference
+between the systems, in both directions. **Castagna & Peyrot 2025** give presence polymorphism
+over optional fields in a set-theoretic system and bracket refinement explicitly: "type cases,
+guards, or type narrowing … seem mostly orthogonal to the introduction of row polymorphism" —
+the live assumption our cell falsifies for the product half.
+
+### 7.3 The GADT-inference lineage (G)
+
+**OutsideIn(X)** [Vytiniotis et al. 2011] is the standard baseline: implication constraints with
+*touchables* — variables the solver may unify inside a given constraint. It cannot state our
+problem: its type grammar `τ ::= tv | Int | Bool | [τ] | T τ` has no record type, no row
+variable, no presence (grep-measured). **Stratified inference** [Pottier & Régis-Gianas 2006]
+introduces type equations at case constructs and propagates them through annotations — the
+annotation-meaning caveat we share ("moving a type annotation into or out of a case construct
+can change its meaning"), with rows never appearing as types. **Wobbly types** [Peyton Jones et
+al. 2006] put rigidity in the environment per annotation; the word "row" does not occur in the
+paper. **Ambivalent types** [Garrigue & Rémy 2013] formalize OCaml's locally abstract types —
+a rigid variable "can be refined by GADT pattern matching" — with scoped equations that may not
+leak out of a branch: the closest *mechanism* to ours, on a grammar (`τ ::= α | a | τ→τ | eq(τ,τ)
+| int`) that cannot state `ρ ≐ {l:t|ρ'}`.
+
+**HMG(X) [Simonet & Pottier 2007] is the un-walked door.** It is a parameterised,
+constraint-based account of guarded ADTs — every branch checked "under different assumptions
+about the type variables in scope" — that could in principle host a row theory: X is a
+parameter. But no published instantiation of it (or of OutsideIn's X) targets a row/record
+theory — the only Rémy citation in HMG(X) is the *object* calculus — and the two row-specific
+obligations our discipline needs, H1's commutation under scoped-label **duplicates** and the
+**domain** escape rule, do not come out of the generic frame for free. λρG is that
+instantiation, with the two obligations carried explicitly (Section 4). This is the strongest
+positioning sentence available: we claim the instantiation and the two row obligations, not a
+new frame.
+
+### 7.4 The combination cell and its occupants
+
+**OCaml** is the one widely used system with all three features, and its record is the paper's
+strongest single piece of prior-art evidence: restricted in the first implementation (Garrigue &
+Rémy 2012, verbatim, on the same row-variable invariant our discipline protects), still "not
+well specified" per its maintainers (octachron 2024), with poly-variant patterns blocking
+refinement outright (ocaml/ocaml #5724: "types cannot be refined if a pattern-matching contains
+polymorphic variant"), object/GADT invariance ("GADTs are incompatible with object subtyping:
+they are always invariant with respect to their type parameters"), and the recommended
+workaround — one row variable per field — being a manual membership-witness encoding, the idiom
+practitioners already reach for (the discuss.ocaml.org FSM/reducer threads are the
+user-demand datapoints, and Section 1.4's program is one of them, translated). **Flix**
+restrictable variants [Madsen et al. 2023] refine a *label-set* index under `choose` while the
+record row index is only ever extended — refinement never flows into the row — and name GADTs as
+"interesting future work". **GHC's `HasField`** on record GADTs is class-triggered unification
+over *nominal* records — no row variables. **Koka** uses rows for effects with duplicate labels
+inherited from Leijen, and its eliminations *unify* the effect row (`catch` unifies μ with
+`(exn|μ')`) — never refine it; we cite it for the effect half of the duality and claim nothing
+about rows-and-effects.
+
+### 7.5 The frontier
+
+**Omnidirectional inference** [O'Brien, Rémy & Scherer 2026] restores principality for fragile
+features (record-label overloading; semi-explicit polymorphism) by reordering constraint
+solving — and names GADTs as the application they "would be interested in studying", over
+*nominal* records. The field is actively rebuilding inference around the principality casualty
+our boundary measures; our result lands the row-side answer next to it. **Fan, Xu & Xie 2025**
+implement touchability as *levels* in production checkers — useful vocabulary for the
+implementability of R (our rigid set) — with GADTs explicitly deferred.
+
+---
+
+## 8 Limitations
+
+We state the limitations as first-class results, not as apology: several of them are theorem-
+or fixture-backed boundaries (marked), and none is silently hedged.
+
+- **No general soundness theorem** *(paper-gap: the wording is the fix)*. Progress and
+  preservation are argued, not proved; the mechanization covers the row algebra, the store, the
+  escape rule, the update theorem, and record-operation preservation — 90 theorems over 3 axiom
+  parameters — not the whole typing judgment. What the mechanization *does* carry are exactly the
+  two row-specific obligations the argued soundness rests on. Later revisions must not upgrade
+  "argued" to "proved".
+- **The escape check is sound but over-approximate — proved, not hedged** (`h2b_overapproximation`):
+  it rejects some legitimate returns. The duplicate-label case is *coarse* — proved
+  (`h2b_domain_exactness`: exact for fresh labels, coarse for duplicates) — and its false reject
+  is pinned by a do-not-weaken fixture (`rowgadt_dup_fewer`). "Fixing" it by weakening the check
+  would reintroduce the unsoundness class the hunt closed.
+- **Fragment Q is checkable, not inferable.** Signatureless native row-GADT code with a
+  result-mentioning refinement is rejected; the signature is not optional there (Section 5).
+  The retry path is additionally incomplete: a GADT case nested under a `let` is spuriously
+  rejected (`gNeg_letcase`) — soundness-neutral, and no completeness claim is made.
+- **Refutation is conditional.** Exhaustiveness and refutation checking exists and is pinned
+  (`adtgaps`, `refutpos`, `refutneg`, `refutbare`), but refutation fires only where the
+  scrutinee's index is **concrete or binder-rigid**; a bare flexible index never licenses
+  refuting a sibling (that condition is itself pinned by `refutbare`, after the check initially
+  accepted a partial function through a flexible index — found and fixed during the work).
+  GADT-ness is classified per file, so a hypothetical cross-module GADT index degrades to the
+  old flexible behaviour (safe, via the too-general police and the refutation guard; unexercised
+  by the corpus). One pre-existing false positive for unsignatured nested patterns remains.
+- **Per-file kinding** *(stated as an approximation)*. ADT generic kinds are collected per file,
+  so a cross-file bare row parameter could kind as a type variable — a soundness-relevant
+  approximation, unexercised by the corpus and fixtures. The declarative spec states kinds;
+  the elaboration is a front-end concern.
+- **Rank-2 / higher-rank types are absent** — the type representation has no quantifier node,
+  so the general handler signature (a polymorphic continuation) cannot be stated. Deliberate:
+  orthogonal to the row×GADT claim, and landing it would move the evidence baseline under the
+  paper.
+- **Surface gaps** *(all completeness, not soundness)*: no type-level strings (labels are
+  surface strings; `Has "x" t ρ` is inexpressible, so the crux fixes `l` by the record's
+  signature instead); record literals are closed (an open row can only be *named*, never
+  constructed); `{ | ρ }` bare-open does not parse; the update base must be a local variable.
+- **The membership-witness reducer is definable but not callable at a concrete witness** —
+  `read Here { n = 1, closed = 2 }` errs `cannot unify a with {l:a| b}`, the global
+  bare-`KRow`-variable-vs-record gap outside branch mode (Section 1.4); the FSM example keeps
+  the witness as a shape, not a working reducer. Relatedly, argument order matters for the
+  FSM reducers (record-first checks; the symmetric event-first form is rejected at its call
+  site) — an inference-order artifact of the implementation, which we report and do not
+  attribute to typing-rule bias.
+- **The trusted-body residue is a representation problem** — the interpreter's holdout is a
+  dynamic cast at the VM boundary (`a ≐ List a`), and the remaining trusted bodies decompose
+  into lies of representation, not of refinement (Section 6.4): the honest fix is a surface
+  change or an honest datatype, not more type theory.
+- **Evaluation is self-corpus plus designed fixtures** — byte-identity is the *non-regression*
+  evidence, not a benchmark claim, and we claim no user-facing benefit; we claim a characterized
+  boundary. The one external program (Section 1.4) is a translation with three stated
+  boundaries, not a corpus study. The adversarial hunt was three passes: five unsound accepts
+  found and fixed (two in the first escape check, two in the shipping checks, one in the coercion
+  surface, the last closed by a class-level repair), and one runnability bug the gate could not
+  see; absence of more is evidence, not proof. No performance numbers are claimed (the
+  retry fires only on the failure path).
+
+---
+
+## 9 Conclusion
+
+The conflict between row polymorphism and GADT refinement is an artifact of eager global
+solving, not of the features: a row variable under a branch-local equation is coherent,
+useful, and *characterizable* once the equation is captured rather than solved, type equations
+are discharged at results while row equations never are, and the discipline's costs are
+located — principality in exactly the fragment that refines a signature variable through two
+sibling branches, expressiveness in the insertion the discipline must reject. The discipline
+is implemented, measured against a byte-identical corpus, mechanized where it is load-bearing,
+and falsifiable where it is not: the fixtures that pin its boundary are the artifact's
+regression gate. What remains open — general soundness, the refutation condition's
+generalization, the restrictable-variant dual (the calculus is phrased so the dual statement
+is a polarity flip), and whether fragment Q admits Wand-style finite complete sets — is
+stated, not hidden.
+
+---
+
+## Appendix A: the fixture matrix (the evidence spine)
+
+Every designed program this paper cites, gate-registered and re-measured on the current tree
+(`tests/elm-fixtures/run-elm-gate.sh`, PASS=187 FAIL=0; the gate also holds the pre-existing
+corpus fixtures). The oracle is the compiler's output artifact, never the process exit code; the
+`run` rows execute the fixture through the VM and diff its printed value against a pinned
+expected output (Section 6.6), while `clean`/`err` rows assert the compile outcome only.
+
+| fixture | claim pinned | measured |
+|---|---|---|
+| `rowgadt_select` | Figure 1's crux: capture + discharge types `select` | clean |
+| `rowgadt_setx` | update under refinement; domain-preserving, no escape | clean |
+| `rowgadt_absentfield` | selection licensed only by equation heads | err `type variable a is rigid … {zz:a\| b}` |
+| `rowgadt_escape` | a row equation needed at the result escapes | err `escaping row equation …` |
+| `rowgadt_eval` | Tier-T discharge; the canonical evaluator | run `[cons 1 . true]` |
+| `rowgadt_evalbad` | Tier-T re-check rejects a wrong body | err `escaping row equation … (to String)` |
+| `rowgadt_het` | heterogeneous container: rigid existentials + use-discharge | run `"hi3"` |
+| `rowgadt_noescape` | a constructor existential may not escape its branch | err `type variable a is rigid … String` |
+| `rowgadt_l3i` | L3 row (i): the witness encoding *infers* | run `"3"` |
+| `rowgadt_l3ii` | L3 row (ii): the native form is *not inferable* | err `cannot unify {k:a\| b} with {\| a}` |
+| `rowgadt_l3iii` | L3 row (iii): plain row access infers | run `1` |
+| `rowgadt_hget` | the witness-encoded HList, recursive case | clean |
+| `rowgadt_hget_bare` | position-directed rigidity's one genuine flip | clean |
+| `rowgadt_hget_escape` | H2-b direct: the tail at the head's type | err `escaping row equation …` |
+| `rowgadt_hget_badhead` | wrong body at the recovered index | err `type variable a is rigid … String` |
+| `rowgadt_escape_launder` | the let-laundering counterexample, closed | err `escaping row equation …` |
+| `rowgadt_escape_wildcard` | the wildcard sibling leak, closed | err `escaping row equation …` |
+| `rowgadt_ce1_prealias` | CE-1: the `dropIntroduced` scoping bypass (pre-alias before the result unify) | err `escaping row equation …` |
+| `rowgadt_ce2_barevar` | CE-2 (GADT form): a bare scrutinee over-generalises and over-refutes | err `cannot unify Int with String` |
+| `rowgadt_ce2_plain` | CE-2 (plain-ADT form, not GADT-specific) | err `cannot unify …Expr with String` |
+| `rowgadt_ce3_fieldalias` | CE-3: the flex→rigid alias drops `a ~ List a` unexamined (a wrong-typed value) | err `type variable a is rigid` |
+| `rowgadt_ce3a_tuple` | CE-3 class (a): the alias forms inside a tuple | err `infinite type` |
+| `rowgadt_ce3b_prealias` | CE-3 class (b): the alias forms before the result unify | err `infinite type` |
+| `rowgadt_ce3c_let` | CE-3 class (c): the alias forms through a `let` | err `infinite type` |
+| `rowgadt_shape_rebuild` | the domain rule accepts the legitimate rebuild | clean |
+| `rowgadt_dup_rebuild` | duplicate-label equation bodies rebuild exactly | clean |
+| `rowgadt_dup_fewer` | the *pinned false reject* (do not weaken) | err `cannot unify a with {x:Int\| a}` |
+| `rowgadt_fsm` | the external FSM compiles and runs | run `"open:42"` |
+| `rowgadt_fsm_bad` | illegal transition rejected at construction | err `missing field closed` |
+| `rowgadt_fsm_narrow` | per-branch narrowing: a wrong-field read errs | err `cannot be unified with {broken:a\| b}` |
+| `rowgadt_fsm_nested` | the source's nested-chain match shape | run `"open:42"` |
+| `rowgadt_fsm_nested_bad` | nested wrong-field read errs | err `cannot be unified with {broken:a\| b}` |
+| `adtgaps` | a missing possible arm is a compile error | err `non-exhaustive case` |
+| `refutpos` | an impossible arm is refuted, not required | run `5` |
+| `refutneg` | a possible arm is NOT refuted | err `non-exhaustive case` |
+| `refutbare` | a bare flexible index never licenses refutation | err `non-exhaustive case: missing B` |
+
+Re-homed probes the paper cites (not gate-registered; reproducible from
+`examples/research/` with the documented one-liner): the typed-representation experiment
+`probeA`/`probeA2` (clean) and `probeA_neg` (a wrong `compare` body is rejected,
+`cannot unify number with String`) — the trusted-body decomposition of Section 6.4;
+`gNeg_letcase.elm` — the retry's completeness boundary (`cannot unify Bool with Int`);
+the duplicate-label
+battery `dup-hunt/e1–e7` (six must-error escape shapes and the one exact-rebuild accept,
+`e3_swap`, clean).
+
+## Appendix B: the mechanization inventory
+
+One Lean project (`lean/`, `lake build` clean; 90 theorems, 3 axiom parameters, 0
+`sorry`/`admit`). Cited by theorem name throughout.
+
+| file | theorems | content |
+|---|---|---|
+| `RowGadt.lean` | 28 | the row algebra; H1 (five theorems, Section 4.2); H2-a truncation; H2-b domain rule, exactness, over-approximation, alias/counterexample lemmas |
+| `RowGadtEscape.lean` | 4 | the two hunt counterexamples mechanized: `H2b_no_quantify_refined_tail`, `H2b_wildcard_leak_shape`, plus the generalization lemmas |
+| `Update.lean` | 11 | the update theorem and its insertion dual (Section 4.5) |
+| `Typing.lean` | — | the constraint-based judgment skeleton: the rule set, with `Unifies`/`Captures` as axiom parameters (no theorems by design) |
+| `TypingStore.lean` | 29 | store lemmas: weakening, monotonicity, the R-LET refined-tail exclusions, `tier_R_forces_escape`, `refinedTailVar_iff_insertionRejected` |
+| `Preserve.lean` | 18 | record-operation preservation (Section 4.6): `sel`/`selDisch`/`upd` preserves, the two-tier soundness, the first-occurrence correspondence; `unifies_field_projection` as the third axiom parameter |
+
+The three axioms are parameters, not gaps in proofs: `Unifies`/`Captures` are the unifier as a
+parameter of the theory (Section 4.1), and `unifies_field_projection` is the one property the
+plain-selection preservation case needs of the abstract unifier. Every other theorem closes
+against the local Lean binary with no sorry.
