@@ -8,6 +8,11 @@ Toohey et al POPL'26 and upgraded its entry (§1 row, §2 quote entry, §3 table
 and a further retrieval (2026-10-06, `handoff-withe-lit`, gap G7) that read the author's PDF of
 Chen & Erwig POPL'16 and upgraded its entry (§1 row, §2 quote entry, §3 table row; §5 item 2
 resolved; line numbers below the §2 insertion shifted accordingly).
+and the G8 retrieval (2026-10-06, `handoff-withe-lit`) that established the currency of the
+OCaml objects/poly-variants+GADT restriction: the 4.00-era block was **lifted in 4.01** (Garrigue,
+rev 13221), the row-level limit is still current (octachron 2024), and no manual section
+documents either (§2, §5 item 4 — resolved; the paper's #5724 citations need the fix recorded
+there, NOT applied here — paper untouched, see the G8 report).
 Organised by **which pair of features is combined** — that organisation is itself the paper's
 contribution to related work. Claims are marked **[M]** measured (read from the primary source,
 URL given) / **[I]** interpretation / **[P]** projection. Second-hand items are flagged
@@ -45,7 +50,7 @@ Three features: **R** = row polymorphism (extensible records/variants), **G** = 
 | **Simonet & Pottier 2007** (HMG(X), TOPLAS) **[M this pass — was SECOND-HAND]** | G (generic framework) | Constraint-based HM(X) extended with guarded ADTs; every branch typechecked "under different assumptions about the type variables in scope"; tractable-constraint restriction; soundness proved | **Rows not instantiateable**: types are `→` + algebraic data constructors `ε(τ̄)`; the only Rémy cite is ML-ART (objects), not the record theory; no row/presence instantiation of X is given |
 | **Ambivalent types** (Garrigue & Rémy APLAS'13) **[M, lit]** | G + A | `ν(a).M` introduces rigid var → quantified flexible at scope exit (the formal `type a.`); ambivalent types `ψ_α` = set of raw types sharing one flexible label; **scoped equations**: `a ~ int` may not leak out of branch | **No R**: source types `τ ::= α \| a \| τ→τ \| eq(τ,τ) \| int` — the grammar cannot state `ρ = {l:t\|ρ′}`. Their 2012 abstract records the OCaml restriction of rows+GADTs (see §2) |
 | **Chen & Erwig POPL'16** ("Chore", choice types) **[M this pass — was SECOND-HAND]** | G | Branch refinements represented by **choice types** `D⟨φ̄⟩` (dimension-name-synchronised alternatives); typing separated from **reconciliation**, which replaces choices by *type index variables*; "Principality comes at the price of having choice types in the type language" | **No row seat at all**: grammar `τ ::= α \| τ→τ \| T τ`, `φ ::= τ \| D⟨φ̄⟩ \| φ→φ \| T φ` — no record type, no row variable, no presence; "record"/"field"/"label" never occur, "row" only inside "arrow" (grep-measured) |
-| **OCaml** (`type a.` + GADTs + objects/poly-variants) **[M, lit + this pass]** | G + A + R-as-idiom | Locally abstract types are rigid inside, flexible at exit; GADT match adds equations to non-local abstract types too; **but**: GADT invariance on object type parameters; poly-variant patterns block refinement entirely | **The combination is an undocumented idiom with failure modes**, not a discipline: "the interaction of row variables and GADTs is not well specified" (octachron 2024, §2); no published account of which record operations are safe under an active equation |
+| **OCaml** (`type a.` + GADTs + objects/poly-variants) **[M, lit + this pass]** | G + A + R-as-idiom | Locally abstract types are rigid inside, flexible at exit; GADT match adds equations to non-local abstract types too; **but**: GADT invariance on object type parameters; GADT equations cannot narrow a poly-variant constraint (octachron 2024 — *not* the stronger 4.00-era "no refinement in any match containing a poly-variant pattern", which was lifted in 4.01; §2 #5724) | **The combination is an undocumented idiom with failure modes**, not a discipline: "the interaction of row variables and GADTs is not well specified" (octachron 2024, §2); no published account of which record operations are safe under an active equation |
 | **Garrigue & Rémy 1999** (semi-explicit polymorphism) **[M this pass]** | A | Polytypes `[σ]` with **label variables ε**; unification distinguishes user-provided from guessed polytypes; `#point` = `⟨x:int;y:int;ρ⟩` "contains a **hidden row variable that is polymorphic**" | **No G** (1999); but the mechanism that *protects* a row variable from unification (label-quantified polytypes) existed in the same authors' toolbox — the seat for `type ρ.`-style protection predates GADT inference |
 | **Leijen HMF 2008 / HML 2009** **[M this pass]** | A (first-class/higher-rank) | Conservative extension of HM with first-class polymorphism; regular System F types | **No R, no G**: zero row/record occurrences in HMF (grep-measured); GADTs untouched |
 | **Scherer-line: Omnidirectional inference** (O'Brien, Rémy, Scherer, arXiv 2511.10343, v2 2026) **[M this pass]** | A + principality-restoration | **Suspended match constraints**: solving may proceed in any order, suspending until information arrives; applied to record-label overloading and semi-explicit polymorphism; "more expressive than OCaml's current typechecker" | **G = explicit future work**: "our omnidirectional recipe could provide a declarative specification: one capable of being principal and complete for GADTs, and we would be interested in studying this application." **Rows**: only as discussion of SML's structural-record overloading; the formalization uses **nominal records** `rcd T τ̄` — no row variables |
@@ -329,6 +334,33 @@ Load-bearing sentences only; each was read in the retrieved full text unless mar
   > typing is specified in the absence of type propagation and GADT type refinement requires type
   > propagation."
 
+  **[CORRECTED 2026-10-06, G8: that 2012 comment is HISTORICAL — superseded by Garrigue himself
+  in the same thread.]** The issue (filed 2012-08, yallop; "propagation was disabled as soon as a
+  pattern contained polymorphic variants") is **closed as fixed**, fixed in 4.01.0+dev, closed by
+  xavierleroy 2015-12-11. Garrigue, same thread, 2013-01-29 [M — GitHub API]:
+  > "At long last I have removed this restriction on the presence of polymorphic variants, but
+  > this has some consequences on typing: … while type information is now propagated, information
+  > about possibly present constructors still has to be discarded. … the propagation of type
+  > information may lead to failure in some cases that where typable before"
+
+  (sic "where"). Shipped in the **4.01.0 Changes** (official release notes, verified on the 4.01
+  branch raw source) [M]:
+  > "* Propagate type information towards pattern-matching, even in the presence of polymorphic
+  > variants (discarding only information about possibly-present constructors). As a result,
+  > matching against absent constructors is no longer allowed for exact and fixed polymorphic
+  > variant types. (Jacques Garrigue)"
+
+  Consequence for our citations: **#5724 may only be cited for the 2012–4.00 history**, never for
+  present-tense behaviour. The current row-level fact is octachron's — "GADT equations cannot
+  narrow a polymorphic variant constraint" (t/13718, Jan 2024) — which is consistent with the
+  4.01 fix: post-4.01, a GADT match refines the GADT's own type index even in a branch containing
+  a poly-variant pattern, but an equation still never narrows the poly-variant row itself.
+
+- **[G8] The interaction is still described as murky in late 2024** — the opener of
+  discuss.ocaml.org/t/15604 (2024-11-13): "I know the interactions between GADTs and polymorphic
+  variants are not very well understood" [M]. Thread content is about `as`-patterns, not our
+  restriction; recorded only as a currency datapoint.
+
 - **octachron**, thread 14042 [M, lit]:
   > "GADTs are incompatible with object subtyping: they are always invariant with respect to their
   > type parameters."
@@ -345,8 +377,16 @@ Load-bearing sentences only; each was read in the retrieved full text unless mar
   > abstract types defined by the local module, are non-instantiable, and as such cause a type
   > error rather than introduce an equation."
 
-  UNRETRIEVED: a manual section documenting the objects/poly-variants+GADT restriction — no such
-  section found in lit or this pass.
+  [RESOLVED 2026-10-06, G8: **no such section exists** — confirmed, not merely unfound.] The 5.3
+  manual was swept at both the rendered pages (ocaml.org/manual/5.3/: gadts.html — a syntax-only
+  stub pointing at the tutorial, gadtexamples/polyvariant/objectexamples/polymorphism.html) and
+  the .etex sources on the `5.3` branch (manual/src/tutorials/{gadtexamples,polyvariant,
+  objectexamples,polymorphism}.etex, manual/src/refman/{patterns,expr,types,typedecl}.etex,
+  manual/src/refman/extensions/locallyabstract.etex): zero restriction statements (grep-measured).
+  The manual documents equations on non-local abstract types and the non-instantiable-type
+  limitation, and nothing about objects/poly-variants×GADTs. The restriction's authority therefore
+  remains: Garrigue & Rémy 2012 (historical), #5724 (2012, lifted 4.01), and the maintainer
+  record (current).
 
 ### Remy 1994 — the must-retrieve answer (the R-UPD-INS trade)
 
@@ -550,7 +590,7 @@ post, the two discuss.ocaml.org threads).
 
 | Candidate | Why it does not break the claim |
 |---|---|
-| OCaml (objects/poly-variants + GADTs) | Combination exists but refinement of the row is **impossible in a poly-variant match** (issue #5724) and object rows must be kept "far away from GADT equations" (octachron); the first implementation **restricted** it (Garrigue & Rémy 2012). Idiom, not discipline [M] |
+| OCaml (objects/poly-variants + GADTs) | Combination exists; GADT equations cannot **narrow a poly-variant constraint** (octachron 2024, t/13718 — current); object rows must be kept "far away from GADT equations" (octachron, t/14042 — current); the 4.00-era stronger block (no type propagation in any poly-variant-containing match, #5724) was **lifted in 4.01** (Garrigue, rev 13221 — historical); the first implementation **restricted** the combination (Garrigue & Rémy 2012). Idiom, not discipline [M — corrected by G8] |
 | CORELINKS | No equations on rows; presence is quantified, not assumed; the branch rule flips a presence flag on a **variant**, and the row variable R is never equated [M] |
 | Flix restrictable variants | Refines the label-set index `s`; the record row index `r` is only extended, never equated; GADTs named as future work [M] |
 | GHC HasField/record GADTs | Nominal records; class-triggered unification; no row variables [M] |
@@ -650,15 +690,24 @@ Per item: what it is, what was tried, and what it would settle.
    expressiveness in their §9 related work, not about rows.
 3. **Simonet & Pottier's RR-5462 full version (2005)** — superseded by the TOPLAS version
    retrieved this pass; nothing further needed.
-4. **A manual section documenting OCaml's objects/poly-variants+GADT restriction** — searched
-   in lit and this pass; does not appear to exist (the restriction is documented only in
-   Garrigue & Rémy 2012 + the issue tracker). What it would settle: whether OCaml's restriction
-   is *currently* official policy or just historical; affects only how §1.1 words the OCaml
-   bullet ("restricted in the first implementation" is the defensible wording either way).
+4. **A manual section documenting OCaml's objects/poly-variants+GADT restriction** — RESOLVED
+   (2026-10-06, G8): **no manual section exists** (swept, see §2's resolution note), and the
+   currency question is answered separately: the restriction is **two-tiered**. (a) The 4.00-era
+   block on type propagation in any match containing a poly-variant pattern (#5724's 2012
+   comment) was **lifted in 4.01** — Garrigue, same thread, 2013-01-29, rev 13221; official 4.01.0
+   Changes entry quoted in §2. (b) The row-level limit is **current**: "GADT equations cannot
+   narrow a polymorphic variant constraint" (octachron, t/13718, Jan 2024, verbatim re-verified
+   this pass), objects invariant under GADT (t/14042, Feb 2024, verbatim re-verified), interaction
+   "not well specified" (same post), still described as "not very well understood" Nov 2024
+   (t/15604). Verdict for wording: cite octachron 2024 for the present, Garrigue & Rémy 2012 +
+   #5724 only for the 4.00 history; the defensible sentence stays "restricted in its first
+   implementation", but **#5724 must never again be cited for present-tense behaviour**. The
+   paper's §1 and §7.4 cite it in the present tense — flagged to the orchestrator, paper NOT
+   rewritten here (G8 STOP clause).
 5. **octachron's discuss.ocaml.org t/14042 post body** — fetched in the earlier pass (quotes
-   recorded in `handoff-rowgadt-result`); this pass did not re-fetch. The recorded quotes are
-   marked [M] from that pass; if the paper quotes them, re-verify the URL renders before
-   camera-ready (discuss.ocaml.org sometimes rate-limits).
+   recorded in `handoff-rowgadt-result`); re-verified rendering 2026-10-06 (G8): both recorded
+   quotes confirmed verbatim on the live page. Re-verify again before camera-ready
+   (discuss.ocaml.org sometimes rate-limits). t/13718 likewise re-verified verbatim (G8).
 6. **Frank (Lindley, Morris, Cheney JFP) full text** — treated second-hand via CORELINKS and
    Koka. What it would settle: whether Frank's effect rows interact with any equation mechanism
    (they don't, per the CORELINKS lineage's design; risk low). Not worth a retrieval pass unless
