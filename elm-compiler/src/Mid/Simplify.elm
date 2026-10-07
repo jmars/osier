@@ -52,6 +52,7 @@ module Mid.Simplify exposing (Config, defaultConfig, off, run, runWithReport)
 
 import Mid.Arity as Arity
 import Mid.ConstFold as ConstFold
+import Mid.DeadGlobals as DeadGlobals
 import Mid.Inline as Inline
 import Mid.Ir exposing (Defun)
 import Mid.Shrink as Shrink
@@ -131,6 +132,7 @@ runWithReport config defuns =
             , ( config.constFold, ConstFold.run )
             , ( config.inline, Inline.run config.inlineThreshold )
             , ( config.arity, Arity.run )
+            , ( config.deadGlobals, DeadGlobals.run )
             ]
 
         step : ( Bool, List Defun -> ( List Defun, String ) ) -> ( List Defun, List String ) -> ( List Defun, List String )
