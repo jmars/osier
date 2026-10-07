@@ -966,7 +966,7 @@ branch-local refinement:
 > selected when the equation's occurrence is the first `ℓ` in the combined
 > row.
 
-**Why this is the crux.** The implementation's discharge reads the
+**Why this is central.** The implementation's discharge reads the
 equation's *head* (`dischargeRow` returns the body's first field, and only
 if its label matches) — it does **not** run the full rewrite under the
 substituted row. So the implementation needs only the *weak* form of H1:

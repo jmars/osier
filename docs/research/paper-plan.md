@@ -116,7 +116,7 @@ without repo URLs; self-reference as "the artifact"). Budget [P]:
 
 | § | content | pp |
 |---|---|---|
-| 1 | Introduction (tension, crux, gap, contributions) | 3.0 |
+| 1 | Introduction (tension, motivating example, gap, contributions) | 3.0 |
 | 2 | λρG: syntax, kinds, judgment, rules | 4.5 |
 | 3 | The two-tier rule and the operation-level answer | 3.0 |
 | 4 | Metatheory: mechanized, argued, refuted | 3.0 |
@@ -266,7 +266,7 @@ the first designed account, and the paper is honest about what is proved.
 
 Contents:
 - The tension in one paragraph (row-gadt.md §1, :15-29 — "what a type variable *is*").
-- **Figure 1** — the crux program: `Has`/`select`/`setX` (row-gadt.md §3, :130-160; live fixture
+- **Figure 1** — the central program: `Has`/`select`/`setX` (row-gadt.md §3, :130-160; live fixture
   `tests/elm-fixtures/rowgadt_select.elm`, `rowgadt_setx.elm`). Necessity walk-through: `Here`
   and `There` impose *conflicting global* row substitutions on ρ; only a rigid ρ plus branch-local
   capture types `select`.
@@ -621,7 +621,7 @@ submission.
 
 REQUIRED (the paper fails without them):
 
-- **F1 — the crux program** (`Has`/`select`/`setX`): from `rowgadt_select.elm`/`rowgadt_setx.elm`
+- **F1 — the motivating program** (`Has`/`select`/`setX`): from `rowgadt_select.elm`/`rowgadt_setx.elm`
   verbatim. §1.
 - **F2 — syntax + kinds + judgment** (`Γ; Δ; R`). §2. Source: calculus §1-2.2.
 - **F3 — the typing rules** (the rule list of §2 above; ~1.5 pp, the paper's largest figure).
@@ -680,7 +680,7 @@ OPTIONAL (cut in the order listed if over budget):
 - **The volatile probes behind C18 (trusted-body decomposition) and parts of C19/C24.** If §6
   keeps the decomposition claim, `probeA*` and the `compare` retirement error must be re-homed
   as fixtures/examples. **G3.**
-- **A second real program.** Everything beyond the crux is either a designed fixture or the
+- **A second real program.** Everything beyond this one program is either a designed fixture or the
   compiler's own internals. The discuss.ocaml.org FSM/reducer pattern is the motivating
   application practitioners already report — encoding it in Withe (it checks: strong §1 datum;
   it fails: the failure is a datum about which operation it needs) is the single best use of a

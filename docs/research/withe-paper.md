@@ -85,7 +85,7 @@ touchable/untouchable variable set — λρG decides discharge by the *kind* of 
 equation coerces at a branch result; a row equation never escapes, because it carries a *domain*
 that OutsideIn(X)'s type grammar has no room for.
 
-### 1.1 The crux
+### 1.1 The motivating example
 
 The smallest program that needs all three features — rows, GADT refinement, and locally abstract
 types — is a type-indexed row-membership witness (Figure 1). `Has l t ρ` is a GADT proving that
@@ -117,7 +117,7 @@ setx r h v =
             setx r rest v
 ```
 
-**Figure 1.** The crux program — the `Has` witness and `select`, verbatim from gate fixture
+**Figure 1.** The central example — the `Has` witness and `select`, verbatim from gate fixture
 `tests/elm-fixtures/rowgadt_select.elm` (lines 8–20), and `setx`, verbatim from
 `tests/elm-fixtures/rowgadt_setx.elm` (lines 13–20; the `Has` block is identical in both
 fixtures); both fixtures compile clean.
@@ -169,7 +169,7 @@ existential `a` bound by the `Some` pattern is instantiated *rigid* (the "existe
 skolems" rule every GADT system needs; before it, the `a` was a flexible unification variable, a
 nested match bound it globally, and the sibling `WString` branch conflicted — two independently
 measured failures), and each nested branch captures `a ≐ Int` / `a ≐ String` locally, discharging
-at the use of the payload. This is the feature the crux generalizes: the *witness encoding* of
+at the use of the payload. This is the feature the witness program generalizes: the *witness encoding* of
 row membership is what OCaml's own workaround constructs by hand, and the calculus that makes
 `Has` typable also makes the hand encoding unnecessary.
 
@@ -280,7 +280,7 @@ outline:
    *type* equation coerces, while a *row* equation never discharges — its discharge would move the
    row's domain out of the branch. The machinery is a scoped equation store that snapshots,
    captures would-be rigid bindings as equations, and truncates on branch exit (Sections 2–3).
-   The crux program of Figure 1 type-checks under the discipline; its signatureless form is
+   The program of Figure 1 type-checks under the discipline; its signatureless form is
    rejected — the measured face of the rigidity requirement.
 2. **An operation-level answer, with the positive row result mechanized.** Under an active
    refinement: selection is licensed exactly by the heads of the branch's equations (a field in
@@ -1490,7 +1490,7 @@ or fixture-backed boundaries (marked), and none is silently hedged.
   orthogonal to the row×GADT claim, and landing it would move the evidence baseline under the
   paper.
 - **Surface gaps** *(all completeness, not soundness)*: no type-level strings (labels are
-  surface strings; `Has "x" t ρ` is inexpressible, so the crux fixes `l` by the record's
+  surface strings; `Has "x" t ρ` is inexpressible, so the example fixes `l` by the record's
   signature instead); record literals are closed (an open row can only be *named*, never
   constructed); `{ | ρ }` bare-open does not parse; the update base must be a local variable.
 - **The membership-witness reducer is definable but not callable at a concrete witness** —
@@ -1549,7 +1549,7 @@ re-derived by `tools/withe-numbers.sh`.
 
 | fixture | claim pinned | measured |
 |---|---|---|
-| `rowgadt_select` | Figure 1's crux: capture + discharge types `select` | clean |
+| `rowgadt_select` | the Figure 1 program: capture + discharge types `select` | clean |
 | `rowgadt_setx` | update under refinement; domain-preserving, no escape | clean |
 | `rowgadt_absentfield` | selection licensed only by equation heads | err `type variable a is rigid … {zz:a\| b}` |
 | `rowgadt_escape` | a row equation needed at the result escapes | err `escaping row equation …` |

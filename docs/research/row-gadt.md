@@ -135,7 +135,7 @@ structured, the rigid guard fires. There is no branch-local refinement and no eq
 
 ---
 
-## 3. The crux example
+## 3. The witness example
 
 A type-indexed **row-membership witness** — this is the smallest program that needs all three
 features at once.
@@ -306,7 +306,7 @@ eval : Expr a -> a
 eval e = case e of IntLit n -> n   -- err: "escaping row equation ... a (to Int)"
 ```
 
-The crux `select` never exposed this, because its result type `t` comes from the *record*, not
+The §3 `select` never exposed this, because its result type `t` comes from the *record*, not
 from the refined variable — so no result-side discharge was ever needed. The fix is to *coerce*
 the branch result through a **type** equation (`a ~ Int`) while still rejecting escape for a
 **row** equation, whose discharge would move the row's domain. Report noted: pre-fix this program
