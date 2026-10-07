@@ -4,6 +4,9 @@ This note is the referee's entry point. It says what the artifact is, which tag 
 numbers are frozen at, the one command that reproduces them, what that command must print, what
 to do when a prerequisite is missing, and what is deliberately not in this repository.
 
+**License:** the code (everything outside `docs/`) is MIT-licensed; `docs/` — the paper and the
+research notes — is CC-BY-4.0. See `LICENSE` and `LICENSE-CC-BY-4.0` at the repository root.
+
 ## 1. What this is
 
 Withe is a small statically-typed functional language, its compiler and its host runtime, plus

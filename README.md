@@ -50,3 +50,6 @@ The expected output, the prerequisites and what each line means live in
 Also in `tools/`: `gen-fixture-matrix.sh` (regenerate/verify the matrix list).
 
 Split from `fx-ui` (see the initial commit message for the exact source hash).
+
+**License:** the code is MIT-licensed and `docs/` (the paper and research notes) is CC-BY-4.0 —
+see [LICENSE](LICENSE) and [LICENSE-CC-BY-4.0](LICENSE-CC-BY-4.0).

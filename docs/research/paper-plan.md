@@ -18,8 +18,8 @@ What this unit re-measured itself (✎, 2026-10-05, tree at `0207dd2`):
   from the typing-judgment arc [M ✎]. Zero `sorry`/`admit`; **3 `axiom`s** -- the explicit
   parameters `Unifies`/`Captures` (Typing.lean:221,229) and `unifies_field_projection`
   (Preserve.lean:213). (This line previously said 43 and "zero axiom"; both were stale.)
-- The 19 rowgadt fixtures registered in the gate (`run-elm-gate.sh:309-450`): 10 `compile_clean`,
-  9+1 `compile_error` (count: 10 error — see the fixture matrix, §7) [M ✎].
+- The 32 rowgadt fixtures registered in the gate (`run-elm-gate.sh:309-450`): 6 `compile_clean`,
+  20 `compile_error`, 6 `run` (see the fixture matrix, §7) [M ✎].
 - Code seats re-grepped: `Type/Unify.elm` (`dropEqsFrom:101`, `dischargeType:135`,
   `dischargeRow:217`, `unifyBranch:289`); `Type/Infer.elm` (`insertion rejection:975`,
   `dischargeSetterM:1046`, `restrictField:1133`, `generalizationRigid:1258`,
@@ -543,7 +543,7 @@ is volatile (`/tmp`) or reported-not-re-measured — each Thin row names its gap
 | C14 | Store truncation is exact and nesting-safe by construction | LEAN `h2a_truncation`/`h2a_no_survival`/`h2a_snapshot_is_suffix`/`h2a_inner_snapshot_suffix` (RowGadt.lean:246-268 ✎); CODE `dropEqsFrom` (Unify.elm:101 ✎) | [M] |
 | C15 | Update is well-typed at the abstract row with no discharge; insertion is domain-changing and rejected under refinement | LEAN `update_reflexive_domain`/`update_accepted_at_rho`/`insertion_rejected_under_refinement`/`insertion_shadow_domain_unchanged` (Update.lean:167-258 ✎); FIX `rowgadt_setx`; CODE Infer.elm:975 ✎ | [M] |
 | C16 | The pre-existing corpus compiles byte-identically; the gate passes 151/151 | Gate re-run ✎ 2026-10-05 (**PASS=151 FAIL=0**); byte-identity against the COMMITTED manifest `tools/withe-corpus-baseline.sha256` (149 artifacts) via `tools/withe-numbers.sh` | [M] — **G2 DONE**: the baseline and the chain are in-repo |
-| C17 | ~~29 of the effect interpreter's 30 branches check honestly~~ **CORRECTED: 25 of 30** — the 29/30 figure was FAIL-FAST (removing `runTask` from `trustedBodies` reports one error and stops). The five that fail: `TaskExec` (existential cast `a ~ List a`), `TaskNow` (`Ok 0` number literal hits FlexConflict before the rigid-var discharge fires), `TaskQuit` + `TaskGuiPoll` (**un-annotated nullary ctors — the two the `taskCtorResults` docstring deliberately left generalized: design, not defect**), `TaskStat` (closed-record result; `dischargeType` refuses any `TRecord` body — the Tier-R over-approximation costing a legitimate type equation) | CODE Runtime.elm:24-44 ✎ (annotation), Builtins.elm:365-391 ✎ (comment); **G5 DONE — recounted by bisection** | **[M] corrected** |
+| C17 | ~~29 of the effect interpreter's 30 branches check honestly~~ ~~25 of 30 (pre-split)~~ **CORRECTED: 16 of 20** — the 29/30 figure was FAIL-FAST (removing `runTask` from `trustedBodies` reports one error and stops); the 25-of-30 figure predates withe-split Phase 3, when the UI effects left the `Task` type, so the interpreter now has **20** constructors and **four** branches fail: `TaskExec` (existential cast `a ~ List a`), `TaskNow` (`Ok 0` number literal hits FlexConflict before the rigid-var discharge fires), `TaskQuit` (**un-annotated nullary ctor deliberately left generalized — design, not defect**; the `taskCtorResults` docstring that recorded it is deleted from the tree, 0 references), `TaskStat` (closed-record result; `dischargeType` refuses any `TRecord` body — the Tier-R over-approximation costing a legitimate type equation). `TaskGuiPoll`, the pre-split fifth failure, left the `Task` type with the UI | CODE Runtime.elm:24-44 ✎ (annotation), Builtins.elm:365-391 ✎ (comment); **G5 DONE — recounted by bisection** (`tools/withe-recount-runTask.sh`, under the `type x a.` binder) | **[M] corrected** |
 | C18 | The trusted-body residue decomposes by kind of lie; only refinement-blocked and dynamically-typed lies are type-system-addressable | The typed-VM experiment (probeA/probeA2/probeA_neg + the `compare` retirement error) — **all in /tmp, zero repo edits** | **Thin** → **G3** (re-home probes) or cut to the runTask instance |
 | C19 | The principality boundary sits on the native-row side, not the witness side; the encoding moves it | FIX `rowgadt_l3i` (clean) / `l3ii` (err) / `l3iii` (clean) / `rowgadt_hget` (clean); the plain-signature `hget` rejection is a `/tmp` probe (`hlist2.elm`) | [M] for the fixtures; the hlist2 data point → **G3** |
 | C20 | No general soundness theorem exists: T1/T2 argued, not proved; the mechanization targets the row algebra, not the typing judgment | Honest absence; LEAN header states the scope (RowGadt.lean:1-27 ✎) | [M-by-absence] |
@@ -628,7 +628,7 @@ REQUIRED (the paper fails without them):
   21 and 17 lines, with
   pre-fix behaviour and post-fix error. §6. Source: fixtures `rowgadt_escape_launder`/`_wildcard`.
 - **F6 — the L3 principality table** (3 rows: witness / native / plain). §5.
-- **T1 — the fixture matrix**: all 19 rowgadt fixtures, expected vs measured (clean or the exact
+- **T1 — the fixture matrix**: all 32 rowgadt fixtures, expected vs measured (clean or the exact
   error string). The evaluation's spine. Source: `run-elm-gate.sh:309-450` ✎ + fixture files.
 
 OPTIONAL (cut in the order listed if over budget):
