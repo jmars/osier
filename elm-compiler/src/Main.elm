@@ -37,6 +37,7 @@ import Json.Decode as JD
 import Json.Encode as JE
 import Lower.Module as Module
 import Mid.Module as MidModule
+import Mid.Simplify as Simplify
 import Platform
 
 
@@ -50,6 +51,23 @@ type alias Flags =
     { corpusSourcesJson : String
     , groupsJson : String
     , midtier : Bool
+    , passes : Passes
+    , inlineThreshold : Int
+    , stats : Bool
+    }
+
+
+{-| The middle tier's per-pass switches (`Mid.Simplify`'s flag scheme, which is
+documented there and in one place only).  `MIDTIER=1` with no flags arrives
+here with every field True — "all passes on" is the zero-configuration shape.
+-}
+type alias Passes =
+    { shrink : Bool
+    , constFold : Bool
+    , inline : Bool
+    , arity : Bool
+    , deadGlobals : Bool
+    , pathCse : Bool
     }
 
 
@@ -68,7 +86,34 @@ main =
 
 init : Flags -> ( (), Cmd Msg )
 init flags =
-    ( (), Cmd.batch [ modeReport (pathName flags.midtier), emit (compileAll flags) ] )
+    let
+        ( payload, report ) =
+            compileAll flags
+    in
+    ( (), Cmd.batch [ modeReport (modeLine flags report), emit payload ] )
+
+
+{-| The mode report, extended with the PASS REPORT when MIDTIER_STATS=1.
+
+The mode word stays FIRST and unmodified (`mode=mid` / `mode=lower`) because
+the differential greps for it to prove that the switch ENGAGED: a byte- or
+behaviour-differential whose subject never ran would otherwise pass vacuously.
+
+The pass report is on the same channel rather than a new port for the same
+reason the port exists at all: it must arrive from the compiler, and a second
+port would be a second thing that can silently fail to fire.
+-}
+modeLine : Flags -> List String -> String
+modeLine flags report =
+    let
+        mode =
+            pathName flags.midtier
+    in
+    if flags.stats && not (List.isEmpty report) then
+        mode ++ " passes=[" ++ String.join " | " report ++ "]"
+
+    else
+        mode
 
 
 pathName : Bool -> String
@@ -80,7 +125,23 @@ pathName midtier =
         "mode=lower"
 
 
-compileAll : Flags -> String
+passConfig : Flags -> Simplify.Config
+passConfig flags =
+    { shrink = flags.passes.shrink
+    , constFold = flags.passes.constFold
+    , inline = flags.passes.inline
+    , arity = flags.passes.arity
+    , deadGlobals = flags.passes.deadGlobals
+    , pathCse = flags.passes.pathCse
+    , inlineThreshold = flags.inlineThreshold
+    }
+
+
+{-| `payload` is the emit-port string (the per-group bundle JSON); `report` is
+the middle tier's pass report (empty on the MIDTIER=0 path, which never reaches
+Mid.Module — that is what keeps the byte-identity anchor structural).
+-}
+compileAll : Flags -> ( String, List String )
 compileAll flags =
     case
         ( JD.decodeString (JD.list JD.string) flags.corpusSourcesJson
@@ -88,24 +149,29 @@ compileAll flags =
         )
     of
         ( Ok corpusSources, Ok groups ) ->
-            let
-                result =
-                    if flags.midtier then
-                        MidModule.compileBatch corpusSources groups
+            if flags.midtier then
+                let
+                    batch =
+                        MidModule.compileBatch (passConfig flags) corpusSources groups
+                in
+                case batch.bundles of
+                    Ok bundles ->
+                        ( encodeStrings bundles, batch.report )
 
-                    else
-                        Module.compileBatch corpusSources groups
-            in
-            case result of
-                Ok bundles ->
-                    encodeStrings bundles
+                    Err msg ->
+                        -- Corpus-level failure: every group reports the same err.
+                        ( encodeStrings (List.map (\_ -> "err " ++ msg) groups), batch.report )
 
-                Err msg ->
-                    -- Corpus-level failure: every group reports the same err.
-                    encodeStrings (List.map (\_ -> "err " ++ msg) groups)
+            else
+                case Module.compileBatch corpusSources groups of
+                    Ok bundles ->
+                        ( encodeStrings bundles, [] )
+
+                    Err msg ->
+                        ( encodeStrings (List.map (\_ -> "err " ++ msg) groups), [] )
 
         _ ->
-            encodeStrings [ "err internal: bad flags" ]
+            ( encodeStrings [ "err internal: bad flags" ], [] )
 
 
 encodeStrings : List String -> String

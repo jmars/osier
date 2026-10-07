@@ -1,4 +1,4 @@
-module Mid.Module exposing (compileBatch)
+module Mid.Module exposing (Batch, compileBatch)
 
 -- Mid.Module — the middle tier's DRIVER: sources -> Mid.Ir.Program -> csexp.
 --
@@ -42,7 +42,8 @@ import Elm.Syntax.Type as Type
 import Lower.Expr as Expr
 import Lower.Resolve as Resolve
 import Mid.FromAst as FromAst
-import Mid.Ir exposing (Defun, Exp(..))
+import Mid.Ir exposing (Defun, Exp(..), Program)
+import Mid.Simplify as Simplify
 import Mid.ToZinc as ToZinc
 import Type.Check as Check
 import Type.Env as Env exposing (Env)
@@ -51,49 +52,76 @@ import Zinc.Csexp as Csexp
 
 
 -- ================================ BATCH API ================================
--- Same shape and same contract as Lower.Module.compileBatch: `Err msg` only
+-- Same shape and same contract as Lower.Module.compileBatch — `Err msg` only
 -- for a corpus-level failure (Main maps that to an `err` entry per group); on
--- corpus success the list has one entry PER GROUP — the full bundle text, or
--- "err <msg>" when that group alone failed.
+-- corpus success the list has one entry PER GROUP, the full bundle text or
+-- "err <msg>" when that group alone failed — PLUS the middle tier's PASS
+-- REPORT (`Mid.Simplify`), one entry per group, which is what MIDTIER_STATS
+-- prints.  The report is deliberately NOT part of the bundle: a pass must
+-- never change what the emitted bytes are for a NON-pass reason, and keeping
+-- the counters out of the program means a bug in the reporting cannot move a
+-- byte of output.
+--
+-- WHY THE PASSES RUN OVER (corpus ++ group) AND NOT PER UNIT: Mid.Simplify's
+-- later passes are whole-program (Inline's reachability, DeadGlobals'
+-- roots), and a group calls corpus defuns while a corpus defun can be
+-- reachable only from a group, so neither half can be optimized alone.  The
+-- corpus is therefore re-optimized once per group — measured cheap relative
+-- to the corpus's parse+typecheck, and paid exactly once for the selfhost
+-- group, which is the only group that matters for the compiler's own
+-- compile time.
 
 
-compileBatch : List String -> List (List String) -> Result String (List String)
-compileBatch corpusSources groups =
-    parseAll corpusSources
-        |> Result.andThen
-            (\corpusFiles ->
-                collectAll corpusFiles
-                    |> Result.andThen
-                        (\_ ->
-                            Check.checkBuiltins corpusFiles
-                                |> Result.andThen
-                                    (\{ env, files } ->
-                                        collectAll files
-                                            |> Result.andThen
-                                                (\corpusUnits ->
-                                                    case mergedGlobals corpusUnits of
-                                                        Err msg ->
-                                                            Err msg
-
-                                                        Ok corpusGlobals ->
-                                                            case sequenceMaps (List.map (compileUnit corpusGlobals) corpusUnits) of
-                                                                Err msg ->
-                                                                    Err msg
-
-                                                                Ok corpusPrograms ->
-                                                                    let
-                                                                        corpusEntries =
-                                                                            List.concatMap ToZinc.entries corpusPrograms
-                                                                    in
-                                                                    Ok (List.map (compileOneGroup env corpusUnits corpusEntries) groups)
-                                                )
-                                    )
-                        )
-            )
+type alias Batch =
+    { bundles : Result String (List String)
+    , report : List String
+    }
 
 
-compileOneGroup : Env -> List Unit -> List String -> List String -> String
-compileOneGroup env corpusUnits corpusEntries groupSources =
+compileBatch : Simplify.Config -> List String -> List (List String) -> Batch
+compileBatch config corpusSources groups =
+    case
+        parseAll corpusSources
+            |> Result.andThen
+                (\corpusFiles ->
+                    collectAll corpusFiles
+                        |> Result.andThen
+                            (\_ ->
+                                Check.checkBuiltins corpusFiles
+                                    |> Result.andThen
+                                        (\{ env, files } ->
+                                            collectAll files
+                                                |> Result.andThen
+                                                    (\corpusUnits ->
+                                                        case mergedGlobals corpusUnits of
+                                                            Err msg ->
+                                                                Err msg
+
+                                                            Ok corpusGlobals ->
+                                                                case sequenceMaps (List.map (compileUnit corpusGlobals) corpusUnits) of
+                                                                    Err msg ->
+                                                                        Err msg
+
+                                                                    Ok corpusPrograms ->
+                                                                        Ok (List.map (compileOneGroup config env corpusUnits corpusPrograms) groups)
+                                                    )
+                                        )
+                            )
+                )
+    of
+        Err msg ->
+            { bundles = Err msg, report = [] }
+
+        Ok compiled ->
+            { bundles = Ok (List.map Tuple.first compiled)
+            , report = List.filter (not << String.isEmpty) (List.map Tuple.second compiled)
+            }
+
+
+-- A group-level failure is reported as its own bundle (`err <msg>`), exactly
+-- as Lower.Module does it, with an empty pass report.
+compileOneGroup : Simplify.Config -> Env -> List Unit -> List Program -> List String -> ( String, String )
+compileOneGroup config env corpusUnits corpusPrograms groupSources =
     case
         parseAll groupSources
             |> Result.andThen
@@ -114,19 +142,23 @@ compileOneGroup env corpusUnits corpusEntries groupSources =
                                                             Ok globals ->
                                                                 sequenceMaps (List.map (compileUnit globals) groupUnits)
                                                                     |> Result.map
-                                                                        (\programs ->
-                                                                            Csexp.list (corpusEntries ++ List.concatMap ToZinc.entries programs)
+                                                                        (\groupPrograms ->
+                                                                            let
+                                                                                ( optimized, report ) =
+                                                                                    Simplify.runWithReport config (List.concat (corpusPrograms ++ groupPrograms))
+                                                                            in
+                                                                            ( Csexp.list (ToZinc.entries optimized), report )
                                                                         )
                                                     )
                                         )
                             )
                 )
     of
-        Ok bundle ->
-            bundle
+        Ok result ->
+            result
 
         Err msg ->
-            "err " ++ msg
+            ( "err " ++ msg, "" )
 
 
 

@@ -52,6 +52,27 @@ const MIDTIER = process.env.MIDTIER === '1';
 // engage (an unsubscribed port is simply dropped otherwise).
 const MIDTIER_TRACE = process.env.MIDTIER_TRACE === '1';
 
+// The middle tier's PASS SWITCHES (Mid.Simplify documents the scheme; this is
+// the only place the environment is read).  One OFF switch per pass, so any
+// single pass can be disabled for bisection while MIDTIER=1 with NO switches
+// means "every pass on".  They are ignored entirely on the MIDTIER=0 path.
+const PASSES = {
+  shrink: process.env.MIDTIER_NOSHRINK !== '1',
+  constFold: process.env.MIDTIER_NOCONSTFOLD !== '1',
+  inline: process.env.MIDTIER_NOINLINE !== '1',
+  arity: process.env.MIDTIER_NOARITY !== '1',
+  deadGlobals: process.env.MIDTIER_NODEADGLOBALS !== '1',
+  pathCse: process.env.MIDTIER_NOPATHCSE !== '1',
+};
+const INLINE_THRESHOLD = Number(process.env.MIDTIER_INLINE_THRESHOLD || '30');
+
+// MIDTIER_STATS=1 append the middle tier's per-pass report to the mode report
+// (stderr, MIDTIER_TRACE gated) — the measurement half of "do not report a
+// speedup you did not measure": the counters are the pass's own account of
+// what it rewrote, and the emitted-byte/instruction delta is measured
+// independently by tools/midtier-emit-stats.py.
+const MIDTIER_STATS = process.env.MIDTIER_STATS === '1';
+
 // V8's stack limit CANNOT be raised once node has started, and the MIDTIER=1
 // path over the compiler's own 58 sources (the selfhost group, whose
 // Char.Extra.unicodeIsAlphaNumOrUnderscoreFast compiles to ~11k instructions in
@@ -83,6 +104,9 @@ function compileGroups(groups) {
       corpusSourcesJson: JSON.stringify(CORPUS),
       groupsJson: JSON.stringify(groups.map((g) => g.sources)),
       midtier: MIDTIER,
+      passes: PASSES,
+      inlineThreshold: Number.isFinite(INLINE_THRESHOLD) ? INLINE_THRESHOLD : 30,
+      stats: MIDTIER_STATS,
     },
   });
 
