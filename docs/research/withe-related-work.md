@@ -168,6 +168,13 @@ Load-bearing sentences only; each was read in the retrieved full text unless mar
   > "Dually, the CASE rule refines the type of the value being matched so that in the type of the
   > variable bound by the default branch, the non-matched label is absent."
 
+  > "Our variants are similar to OCaml's polymorphic variants. The main differences are that we
+  > use explicit row variables, whereas OCaml uses constraints; we support negative presence
+  > information, whereas OCaml does not; and our case construct refines variant types, whereas
+  > OCaml's equivalent does not." (§2.1, variants paragraph; "constraints" dehyphenated from the
+  > PDF render. Grep on the full retrieved text 2026-10-07: `GADT`/`rigid`/`skolem`/`equation` 0
+  > occurrences.)
+
   > "The basis for our row type system is Remy's PiML' [22]."
 
 - **Koka** (Leijen, MSFP'14) — full quote bank in `handoff-rowgadt-lit2`;
@@ -602,7 +609,7 @@ post, the two discuss.ocaml.org threads).
 | Omnidirectional inference 2026 | Restores principality by reordering; nominal records `rcd T τ̄`; GADTs explicitly "would be interested in studying" [M] |
 | Toohey et al POPL'26 (rows + type classes) | `All` / `ind` / `Split` / `Lift` constraints over polymorphic rows, dictionary-passing elaboration, Lean 4 mechanized — but **no equations on rows**: zero `GADT`/`refine`/`refinement`/`branch` occurrences in the full 38pp text [M — 2026-10-05] |
 | **Chen & Erwig POPL'16** (choice types) | Branch refinement via choice types over GADT type-constructor parameters only; type grammar has no record/row/presence construct; "row" never occurs as a word, "record"/"field"/"label" never occur (grep-measured) [M — 2026-10-06] |
-| Koka; Frank; Eff; Links | Effect rows unified, never refined; no GADTs [M] |
+| Koka; Links [M]; Frank; Eff [SECOND-HAND] | Effect rows unified, never refined; no GADTs — [M] for Koka and Links (Links FMCO'06 retrieved and read 2026-10-07); Frank and Eff carried second-hand via the lit2 Links/CORELINKS context, not retrieved |
 | PureScript (language) | Rows only: row-polymorphic records documented first-class [M]; GADTs unimplemented and first-party argued against (proposal #1448 closed; "commit to not adding GADTs", hdgarrood, t/707 2019 — quote verified in the §1 row); existentials open since 2018 (#3492, milestone Ideas); no GADT exists, so no branch can refine a row — the empty cell stands, and the map now carries the row [M this pass] |
 | Castagna line (2016, 2025) | Subtyping/tallying; refinement declared "mostly orthogonal"; GADTs named as future work [M] |
 | Wand/Gaster/Ohori/Remy | Rows only; no GADTs, no branch-local anything; several predate GADTs entirely [M] |

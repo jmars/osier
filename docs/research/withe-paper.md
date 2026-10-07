@@ -1308,7 +1308,9 @@ sources, 2 carried second-hand; the survey with verbatim quotes and URLs is the 
 are occupied* — so that "but X did rows" and "but Y did GADTs" are answered before they are
 asked — and *that one specific cell is empty*. No published type system refines a row variable
 by a branch-local GADT equation, and no published system therefore says which record operations
-remain typable when such an equation is active. The claim is about published systems with a
+remain typable when such an equation is active. (The nearest sounding sentence in the literature —
+CORELINKS' "our case construct refines variant types" — is examined in §7.2: presence flip,
+variant row, no equation.) The claim is about published systems with a
 *designed discipline*; it is never worded "rows and GADTs have never been combined" — OCaml
 ships the raw combination as an idiom, and its boundary is discovered empirically by its users.
 
@@ -1362,7 +1364,14 @@ operation". This is **abstraction** — the opposite direction from our *assumpt
 variable inside a branch — and it has no equations, no rigidity, and no branch-local store.
 Its rows also have **distinct labels**, which is precisely the case where our domain rule is
 *exact* (Section 4.4): the duplicate-label coarseness is a genuine expressiveness difference
-between the systems, in both directions. **Castagna & Peyrot 2025** give presence polymorphism
+between the systems, in both directions. One sentence in CORELINKS sounds close to our cell: "our
+case construct refines variant types, whereas OCaml's equivalent does not" (its §2.1). What that
+case construct does is flip a **presence flag** — the CASE rule refines "the type of the value
+being matched" so that "the non-matched label is absent" in the type of the variable bound by the
+default branch — and it does so on a **variant** row, adopting no equation: the words `GADT`,
+`rigid`, `skolem`, and `equation` never occur in the paper (grep-measured). Our cell is none of
+these: a branch-local equation `ρ ≐ { ℓ : t | ρ' }` on a record's row variable.
+**Castagna & Peyrot 2025** give presence polymorphism
 over optional fields in a set-theoretic system and bracket refinement explicitly: "type cases,
 guards, or type narrowing … seem mostly orthogonal to the introduction of row polymorphism" —
 the live assumption our cell falsifies for the product half.
