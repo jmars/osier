@@ -50,6 +50,7 @@ module Mid.Simplify exposing (Config, defaultConfig, off, run, runWithReport)
 -- config exists), which keeps the byte-identity anchor structural rather than
 -- conditional.
 
+import Mid.Arity as Arity
 import Mid.ConstFold as ConstFold
 import Mid.Inline as Inline
 import Mid.Ir exposing (Defun)
@@ -129,6 +130,7 @@ runWithReport config defuns =
             [ ( config.shrink, Shrink.run )
             , ( config.constFold, ConstFold.run )
             , ( config.inline, Inline.run config.inlineThreshold )
+            , ( config.arity, Arity.run )
             ]
 
         step : ( Bool, List Defun -> ( List Defun, String ) ) -> ( List Defun, List String ) -> ( List Defun, List String )
