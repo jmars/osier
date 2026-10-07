@@ -654,7 +654,9 @@ give up Rémy's expressiveness exactly where it would break refinement soundness
 
 Record update has the same lineage, and the contrast is the direction that matters. Rémy's
 update is extension (shadowing; the domain may grow); Gaster & Jones' is restrict-then-extend
-under lacks; Links derives remove-then-extend. Ours is first-occurrence scoped-label replace —
+under lacks; the Links system derives remove-then-extend — attested in the CORELINKS aside,
+not in Links' own FMCO'06 paper, which defines no record update. Ours is first-occurrence
+scoped-label replace —
 **domain-preserving by construction** — which is what makes update's discharge free. The
 novelty is being domain-preserving, not being typable at all.
 
@@ -1650,10 +1652,17 @@ provenance markers are unchanged: a work the survey carries as [SECOND-HAND] sta
 - **Leijen (2005).** *Extensible records with scoped labels*. TFP'05.
   https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/scopedlabels.pdf [M, lit]
 - **Links.** Cooper, Lindley, Wadler & Yallop, *Links: Web Programming Without Tiers* — the Links
-  language: effect rows; the full language adds subtyping via upcasts; record update is a derived
-  operation (remove-then-extend, or CPS + upcast), per the CORELINKS aside. FMCO'06, LNCS 4709,
-  pp. 266–296, 2007. https://doi.org/10.1007/978-3-540-74792-5_12 [SECOND-HAND — not retrieved;
-  bibliographic detail located via the publisher record; the survey records none]
+  language as published in this paper: HM type inference with row variables for records and
+  variants; the concurrency calculus types functions by the messages they may accept
+  (`Γ;C ⊢ t : A`), not by effects. The paper contains no effect rows, no record update (its
+  `update` is the SQL database operation), and no subtyping — the content earlier recorded in
+  this entry (effect rows; subtyping via upcasts; record update derived remove-then-extend, or
+  CPS + upcast) is attested only in the CORELINKS aside on the later "full version of Links".
+  FMCO'06, LNCS 4709, pp. 266–296, 2007.
+  https://doi.org/10.1007/978-3-540-74792-5_12 (full text read:
+  https://homepages.inf.ed.ac.uk/slindley/papers/links-fmco06.pdf) [M — retrieved and read
+  2026-10-07, author-page version "Submitted to FMCO '06"; the effect-row/update/subtyping
+  characterisation is credited to CORELINKS, not to this paper [M, lit2]]
 - **Lindley & Cheney (2012).** *Row-based Effect Types for Database Integration* (CORELINKS) —
   `(label × presence × type)` rows with distinct labels; insert/update/delete typed by quantifying
   a presence variable over the needed row. TLDI'12 (pp. 91–102).
