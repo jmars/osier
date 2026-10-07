@@ -18,10 +18,10 @@ formalization should take this document as the spec, not the implementation
 The companion paper draft is `docs/research/row-gadt.md` (§7 of that draft is
 the prose sketch this document formalizes and corrects). The judgment is
 written for the implementation surface, which has a few quirks noted inline:
-record literals are closed [M: `Type/Infer.elm:726-733` builds
+record literals are closed [M: `Type/Infer.elm:735-743` builds
 `TRecord {fields, tail = REmpty}`], record labels are surface strings (there
 are no type-level strings), and the update base must be a local variable
-[M: `Type/Infer.elm:787-793`].
+[M: `Type/Infer.elm:795-806`].
 
 ---
 
@@ -35,7 +35,7 @@ k  ::=  Ty | Row
 
 Every type variable carries a kind: `Ty` variables range over value types;
 `Row` variables range over *row tails* and may only stand in the tail position
-of a row. [M: `Type/Representation.elm:52-58` `type Kind = KType | KRow`; the
+of a row. [M: `Type/Representation.elm:52-54` `type Kind = KType | KRow`; the
 `KRow` doc comment: "they only ever appear as the `RVar` tail of a `Row`".]
 
 Kinds are *not* decorative. Three of the four implementation blockers in the
@@ -57,12 +57,12 @@ kind, and a **flex marker**:
 ```
 
 [M: `Type/Representation.elm:60-76` `Flex` and `VarId`; ids are unique across
-kinds (fresh counter shared, `Type/Unify.elm:154-157`)]. Flex markers
+kinds (fresh counter shared, `Type/Unify.elm:66-71`)]. Flex markers
 participate in unification (a `number` variable unifies with `Int`/`Float`;
 conflicting markers fail) but are orthogonal to refinement; we keep them in
 the syntax because they change one rule (R-EXISTS: a flex-marked quantifier is
 never rigidified) and dropping them would misstate the implemented system
-[M: `Type/Env.elm:644-663`, the `q.flex == FNone` guard].
+[M: `Type/Env.elm:744-766`, the `q.flex == FNone` guard at `:760`].
 
 Notation: `a, b, c` range over `Ty` variables, `ρ, σ, τ` (and `β`) over `Row`
 variables, `x̂` (read "x-hat") over a variable of either kind. `x̂ : k`
@@ -86,7 +86,7 @@ r  ::=  ε                                       empty tail (closed row)
 is a finite field list in source order plus a tail; **duplicate labels are
 legal and retained**, and the **first occurrence** of a label in field order
 is the one that selection, restriction, and update act on (Leijen's scoped
-labels) [M: `Type/Representation.elm:100-106`: "Duplicate labels are legal
+labels) [M: `Type/Representation.elm:96-99`: "Duplicate labels are legal
 and retained (scoped labels); the FIRST occurrence of a label is the one
 `select`/`restrict` act on"].
 
@@ -96,9 +96,9 @@ Well-formedness of types and rows, `t ok` / `r ok`:
   cannot occur as a type argument of `T`, as a function domain/codomain, or
   as a field type. Dually a `Ty` variable may not occur as a row tail. [M:
   enforced by construction — `RowTail = REmpty | RVar VarId` where the `RVar`
-  case is created only with `KRow` variables (`Type/Representation.elm:108-112`);
+  case is created only with `KRow` variables (`Type/Representation.elm:108-110`);
   a `KRow` variable in a type position reaches `bindVar`, which rejects with
-  `CannotUnify` (`Type/Unify.elm:420-422`).]
+  `CannotUnify` (`Type/Unify.elm:472-473`).]
 - **WF-TCON.** `T t₁ … tₙ ok` requires `n` = the arity of `T` and `tᵢ ok`.
 - **WF-ROW-DUP.** `ℓ : t | r ok` requires `t ok` and `r ok`. Duplicates in `r`
   are permitted — this is a definitional choice, and it is load-bearing for
@@ -116,7 +116,7 @@ s  ::=  ∀ x̂₁ … x̂ₙ. t                            scheme (n ≥ 0, x̂
 
 A scheme carries a *bound subset* `B ⊆ {x̂₁ … x̂ₙ}` (the variables named by the
 locally-abstract-type prefix; §2 R-TYPE) — in the implementation a `Scheme`
-is a record `{quantifiers, body, bound}` [M: `Type/Env.elm:67-71`]. Write
+is a record `{quantifiers, body, bound}` [M: `Type/Env.elm:70-74`]. Write
 `∀ B; x̂₁ … x̂ₙ. t` when the split matters.
 
 **Substitutions are kinded and id-keyed.** `θ : Subst` is a finite partial map
@@ -126,10 +126,10 @@ from variable *ids* to types, with the side condition:
   some row `r`; if `x̂ : Ty` then `t` is a type whose free row-tail variables
   are unaffected (a `Ty` variable never maps to a bare row). [M: the unifier
   routes every `KRow` binding through `bindRowVar`, whose success path is
-  `addSubst state a (TRecord row)` (`Type/Unify.elm:544-545`) — row variables
-  are only ever mapped to `TRecord` values; `Type/Representation.elm:115-117`:
+  `addSubst state a (TRecord row)` (`Type/Unify.elm:595-596`) — row variables
+  are only ever mapped to `TRecord` values; `Type/Representation.elm:113-114`:
   "Row variables are only ever mapped to `TRecord` values (the unifier
-  enforms this)".]¹
+  enforces this)".]¹
 - **WF-SUBST-SKOLEM-FREE.** θ maps no rigid variable (rigidity is a property
   of the inference state, §2.2, not solved away by substitution).
 
@@ -162,11 +162,11 @@ e  ::=  x                                       variable
 p  ::=  x  |  _  |  C p₁ … pₙ  |  (p₁,…,pₙ)  |  { ℓⱼ = xⱼ }ⱼ  |  literal patterns
 ```
 
-[M on the surface: literals closed `Type/Infer.elm:726-733`; update base must
-be a local variable `Type/Infer.elm:786-793`; insertion is the
-`InsertionValue` setter arm `Type/Infer.elm:952-986`; restriction is
+[M on the surface: literals closed `Type/Infer.elm:735-743`; update base must
+be a local variable `Type/Infer.elm:795-806`; insertion is the
+`InsertionValue` setter arm `Type/Infer.elm:957-994`; restriction is
 `Record.remove`, recognized as a magic two-argument literal application,
-`Type/Infer.elm:888-912`; record *literals* have no open-tail form in the
+`Type/Infer.elm:897-926`; record *literals* have no open-tail form in the
 surface — an open record can only be *named* by a signature, never
 constructed.]
 
@@ -183,18 +183,18 @@ mention the ADT's parameters and *fresh per-constructor existentials*
 is given, `tᶜ = T x̂₁ … x̂ₘ` (all parameters in order). The constructor's
 scheme is `∀ x̂'₁ … x̂'ₖ. t₁ -> … -> tₙ -> tᶜ` over its free variables
 (arguments' and result's), with the ADT parameters shared per declaration
-[M: `Type/Env.elm:241-282` `ctorScheme` converts the result annotation in the
+[M: `Type/Env.elm:251-302` `ctorScheme` converts the result annotation in the
 same context as the arguments so both generics and existentials resolve; the
-unannotated default is `TCon name generics` at `:275-282`; generalization by
-`generalize (foldr TFun resultType argTypes)` at `:281`].
+unannotated default is `TCon name generics` at `:283-290`; generalization by
+`generalize (foldr TFun resultType argTypes)` at `:292`].
 
 **Well-formedness of a GADT declaration** additionally requires: every
 annotated result is kind-correct with respect to the ADT's parameter kinds,
 where a parameter is `Row` iff it stands at a row-tail position in any of the
-type's constructor annotations [M: `Type/Env.elm:399-435`
-`collectFileTypeKinds`; `Type/Env.elm:244-253` `ctorScheme`'s prescan binds
+type's constructor annotations [M: `Type/Env.elm:474-543`
+`collectFileTypeKinds`; `Type/Env.elm:244-249` `ctorScheme`'s prescan binds
 row-tail names `KRow` before conversion]. Kinds are otherwise inferred from
-first use position [M: `Type/Env.elm:1106-1112` `convert`'s `GenericType` arm
+first use position [M: `Type/Env.elm:1218-1223` `convert`'s `GenericType` arm
 starts `KType`, overridden by the prescans] — the declarative spec *states*
 the kind as part of the declaration and treats the prescan as an
 implementation detail of surface-syntax elaboration (§8.6).
@@ -225,7 +225,7 @@ existential `k`, not `l` [M: `tests/elm-fixtures/rowgadt_select.elm:8-10`].
 
 - `Γ` — the term-variable environment: `x : s` with `s` a scheme.
 - `Δ` — the **equation store**: a finite set (implemented as a most-recent-
-  first list [M: `Type/Unify.elm:91-94`]) of **equations** `x̂ ≐ t` where
+  first list [M: `Type/Unify.elm:91-95`]) of **equations** `x̂ ≐ t` where
   `x̂` is a variable of either kind and `t` a type of the matching kind
   (`x̂ ≐ { r }` for `x̂ : Row`).
 - `R` — the set of **rigid** variable ids (skolems). Rigid variables are
@@ -245,17 +245,17 @@ rigidity is **scoped**:
 
 1. **Signature-bound** (locally abstract): the `type x̂₁ … x̂ₙ.` prefix of a
    signature names quantifiers that are rigid while the signature's own body
-   is checked [M: `Type/Env.elm:597-616` `instantiatePartial` /
+   is checked [M: `Type/Env.elm:706-728` `instantiatePartial` /
    `freshPartial` marks `q.flex == FNone && memberById q.id bound` rigid;
-   called at `Type/Infer.elm:2352`].
+   called at `Type/Infer.elm:2724`].
 2. **Constructor-existential**: a constructor quantifier *not free in the
    constructor's result type* is rigid within the branch that matched it
-   (R-EXISTS, §2.10) [M: `Type/Env.elm:635-663`; `Type/Infer.elm:1883-1929`].
+   (R-EXISTS, §2.10) [M: `Type/Env.elm:744-766`; `Type/Infer.elm:2239-2282`].
 3. **Index-lift**: a signature index variable free in the *scrutinee* that
    the branch's pattern result equates to a non-variable type is lifted rigid
    for the branch's duration (the `Witness a` case) [M:
-   `Type/Infer.elm:1360-1428` `liftRefinedIndicesM`/`unliftRigidM`; called at
-   `Type/Infer.elm:1288-1300`].
+   `Type/Infer.elm:1393-1477` `liftRefinedIndicesM`/`unliftRigidM`; called at
+   `Type/Infer.elm:1309`].
 
 Everything else is **flex** (unifiable). `R` is part of the state the rules
 thread; branch entry and exit change it (R-CASE, R-EXISTS).
@@ -263,7 +263,7 @@ thread; branch entry and exit change it (R-CASE, R-EXISTS).
 The **global substitution θ** is the persistent component of the state;
 equations in Δ are *not* in θ and are never solved into it while their
 target is rigid. In the implementation θ and Δ both live in the unifier
-state [M: `Type/Unify.elm:64-69`], but the calculus keeps them separate
+state [M: `Type/Unify.elm:66-71`], but the calculus keeps them separate
 because the store discipline (snapshot / capture / truncate, §2.8) operates
 only on Δ.
 
@@ -276,46 +276,47 @@ unify_δ(θ, R ; t₁ ≐ t₂) ⊳ θ'   or   ⊳ capture(x̂, t)   or   FAIL(e
 ```
 
 where `δ ∈ {global, branch}` selects the behavior on a would-be binding of a
-rigid variable [M: `Type/Unify.elm:244-301` `unifyGeneral` threads exactly
+rigid variable [M: `Type/Unify.elm:295-393` `unifyGeneral` threads exactly
 this flag; `unify = unifyGeneral False`, `unifyBranch = unifyGeneral True`,
-`Type/Unify.elm:225-241`]. Its rules are the standard ones (decompose
+`Type/Unify.elm:276-293`]. Its rules are the standard ones (decompose
 `T`/arrows/tuples/records pointwise, occurs check, flex-marker
 compatibility, row unification with the scoped-label **rewrite** of §5.2)
 plus the rigid discipline:
 
 - **U-RIGID-BIND-T.** `θ ; R ⊢ a ≐ t` with `a` rigid, `a : Ty`:
   in `global` mode FAIL(`RigidVar`); in `branch` mode `capture(a, t)` and
-  `a` stays unbound. [M: `Type/Unify.elm:419-438` `bindVar`: the rigid case
+  `a` stays unbound. [M: `Type/Unify.elm:475-485` `bindVar`: the rigid case
   pushes `Equation {target = v, body = t}` in branch mode, errors in global
   mode.]
 - **U-RIGID-BIND-R.** `θ ; R ⊢ ρ ≐ { r }` with `ρ` rigid, `ρ : Row`:
   in `global` mode FAIL(`RigidVar`); in `branch` mode `capture(ρ, { r })`.
-  [M: `Type/Unify.elm:500-539` `bindRowVar`'s rigid arm — both the
+  [M: `Type/Unify.elm:559-590` `bindRowVar`'s rigid arm — both the
   fielded-row and the bare-tail cases.] **Exception (the alias case):** if
   `r = ρ'` for a *flex* variable `ρ'` (the equation is `ρ ≐ ρ'`, no fields),
   the binding is `θ' = θ[ρ' := { ε | ρ }]` — a flex variable aliased *to* the
   rigid one — in **both** modes, and nothing is captured. [M:
-  `Type/Unify.elm:524-537`: the `([], RVar b)` case with flex `b` does
+  `Type/Unify.elm:569-590`: the `([], RVar b)` case with flex `b` does
   `addSubst state b (TRecord {fields = [], tail = RVar a})`; the same case
   with rigid `b` captures in branch mode / errors in global mode
-  (`:525-527` and `:529-533`).] The dual alias (rigid `ρ` bound *to* flex)
+  (`:570-571` and `:584-585`).] The dual alias (rigid `ρ` bound *to* flex)
   never arises: the binding direction is always flex-gets-bound.
 - **U-RIGID-RIGID.** `θ ; R ⊢ x̂₁ ≐ x̂₂`, distinct, both rigid: FAIL in
   global mode; in branch mode `capture(x̂₁, x̂₂)` [M:
-  `Type/Unify.elm:363-371`; also the `KRow`-`KRow` alias routed through
-  `bindRowVar` at `:349-358`, whose rigid-rigid case captures in branch
-  mode].
+  `Type/Unify.elm:414-423` (`unifyVarVar`'s rigid-rigid case, capture at
+  `:419`); also the `KRow`-`KRow` alias routed through `bindRowVar`
+  (`Type/Unify.elm:400-411`), whose rigid-rigid case captures in branch
+  mode (`:572-573`)].
 - **U-RIGID-EXTEND.** The row rewrite (§5.2) reaching a rigid tail it would
   extend: FAIL(`RigidVar`) in global mode; in branch mode `capture(ρ,
   { ℓ : γ | β })` for fresh `γ : Ty`, `β : Row`, and the rewrite *proceeds*,
-  handing out the fresh-field view. [M: `Type/Unify.elm:606-633` — the
+  handing out the fresh-field view. [M: `Type/Unify.elm:665-687` — the
   `RVar a` + `isRigid` case of `rewrite`.] This is the one branch-mode
   behavior that continues with a *derived fact* rather than failing: the
   equation is captured and the selection site still sees the exposed field
   type.
 - **U-IDENT.** `x̂ ≐ { ε | x̂ }` and `x̂ ≐ x̂` are identities, no state change
-  [M: `Type/Unify.elm:258-264` (`rowIsSameVar` check in `unifyGeneral`),
-  `:505-507` (same in `bindRowVar`)].
+  [M: `Type/Unify.elm:309` (`rowIsSameVar` check in `unifyGeneral`),
+  `:556-557` (same in `bindRowVar`)].
 
 **What a rigid row tail may be, stated once.** [M, the exact code inventory;
 this is the target of H2 and of the negative result in §6.]
@@ -331,15 +332,15 @@ not to a fielded row, not to another rigid variable outside branch mode, and
 no rewrite may extend it outside branch mode. In branch mode a would-be
 binding is captured as an equation, and **θ gains nothing**: the global
 substitution is unchanged by any branch-local capture. [M:
-`Type/Unify.elm:529-539` (global errors on all non-alias rigid-row binds),
-`:614-636` (rewrite's global `RigidRowE`), `:538` comment: "binding it to a
+`Type/Unify.elm:581-590` (global errors on all non-alias rigid-row binds),
+`:687` (rewrite's global `RigidRowE`), `:562-563` comment: "binding it to a
 closed, fielded, or extended row specializes the signature's row variable".]
 
 ### 2.4 Core structural rules
 
 Notation: `⟦s⟧` = instantiation of scheme `s = ∀ B; x̂₁ … x̂ₙ. t` with **fresh
 flex** variables of the same kinds and flex markers substituted for
-`x̂₁ … x̂ₙ` [M: `Type/Env.elm:535-543` `instantiate` via `freshQuant` — fresh
+`x̂₁ … x̂ₙ` [M: `Type/Env.elm:644-659` `instantiate` via `freshQuant` — fresh
 vars preserve kind and flex, no rigidity].
 
 ```
@@ -375,18 +376,19 @@ The re-unification is on **zonked** sides — the calculus states the
 substitution fully applied (the implementation's zonk-before-replaceVar fix;
 see §8.3) — and may itself consult the store recursively for a *different*
 refined variable (one nested recursion in the implementation) [M:
-`Type/Infer.elm:328-378` `unifyUseM`: zonk both sides, on `RigidVar` consult
+`Type/Infer.elm:328-376` `unifyUseM`: zonk both sides, on `RigidVar` consult
 `dischargeType`, occurs-guard, re-unify with `replaceVar target.id body` on
 both sides, recurse once on a rigid failure on a different variable
-(`:361-366`); the application-argument site routes through it
-(`applyStep`, `Type/Infer.elm:838-846`); list literals, if-branches,
-negation and operator applications use it too (`:652`, `:699`, `:642`,
-`:687`)]. The equation is **consumed by nothing**: it stays in Δ and dies at
+(`:360-366`); the application-argument site routes through it
+(`applyStep`, `Type/Infer.elm:847-853`); list literals, if-branches,
+negation and operator applications use it too (`:750`, `:702`, `:655`,
+operators through the same application path `:825-853`)]. The equation is
+**consumed by nothing**: it stays in Δ and dies at
 branch end like every equation.
 
 Side conditions on τ: its free variables must not include the target `a`
 (occurs) — otherwise the discharge could identify `a` with a type mentioning
-`a` [M: the occurs-guard at `Type/Infer.elm:354-356`].
+`a` [M: the occurs-guard at `Type/Infer.elm:352-354`].
 
 ```
 Γ ; Δ ; R ⊢ e : t       fresh a : Ty, β : Row
@@ -411,10 +413,10 @@ store is unchanged:
 ```
 
 An equation whose head label is *different* from `ℓ` does not license the
-selection [M: `Type/Unify.elm:166-188` `dischargeRow` returns `Nothing` when
+selection [M: `Type/Unify.elm:217-239` `dischargeRow` returns `Nothing` when
 `l2 /= l` — "the refinement does not expose `l`"; the reader site is
-`Type/Infer.elm:382-404` `unifyMOrDischarge`, called at the `RecordAccess`
-site `:747-766`: fresh `a`, fresh `β`, wanted `{ ℓ : a | β }`, and on
+`Type/Infer.elm:382-407` `unifyMOrDischarge`, called at the `RecordAccess`
+site `:759-781`: fresh `a`, fresh `β`, wanted `{ ℓ : a | β }`, and on
 success the site's element var is unified to the discharged type]. **The
 selectable set inside a refining branch grows exactly by the heads of the
 branch's equations** — a field in no equation's head is still an error even
@@ -430,7 +432,7 @@ current tree].
 ```
 
 `restrict(r, ℓ)` removes the **first** occurrence of `ℓ` from the field list,
-keeping inner duplicates [M: `Type/Infer.elm:1124-1138` `restrictField`].
+keeping inner duplicates [M: `Type/Infer.elm:1128-1148` `restrictField`].
 When `ℓ` is not present in the *known* fields, **R-UPD-DISCH** consults the
 store — same shape as R-SEL-DISCH, but the result is the discharged shape
 with the new field value prepended:
@@ -443,7 +445,7 @@ with the new field value prepended:
 Γ ; Δ ; R ⊢ { e | ℓ = v } : { ℓ : θ'(t_v) | known ++ ρ''-fields }
 ```
 
-[M: `Type/Infer.elm:1037-1058` `dischargeSetterM`: on a matching equation,
+[M: `Type/Infer.elm:1046-1061` `dischargeSetterM`: on a matching equation,
 unify the value type against the equation's exposed type and return
 `TRecord { fields = ( f, tv ) :: row.fields ++ remainder.fields, tail =
 remainder.tail }` — the discharged shape re-prepended.] **Nothing is
@@ -460,7 +462,7 @@ no discharge, no extension through the equation:
 escaping-error: "insertion under rigid row refinement"
 ```
 
-[M: `Type/Infer.elm:963-976` — the `InsertionValue` arm checks
+[M: `Type/Infer.elm:964-987` — the `InsertionValue` arm checks
 `refinedTailVarM` first and fails with "insertion under rigid row
 refinement: cannot insert …"; the store is never consulted on that path.]
 Rationale: insertion is the shape-*changing* dual (it may extend the domain
@@ -469,11 +471,11 @@ this is the boundary case that keeps the update-is-safe claim (§7) non-vacuous.
 
 **R-RESTR.** `{ e − ℓ }` restricts: requires `ℓ` present in the known fields
 (first occurrence removed); **no discharge** — the store is not consulted
-[M: `Type/Infer.elm:888-912` `inferRecordRemove`: `restrictField` fails to
+[M: `Type/Infer.elm:897-926` `inferRecordRemove`: `restrictField` fails to
 "record does not have field ℓ"; no store access]. It is a trusted-lie
 builtin on the implementation surface (`Record.remove` rewrites to
 `Prelude.removeFieldImpl`, whose body is skipped) [M:
-`Type/Builtins.elm:66-91`, `:95-97`], but the *rule* the checker enforces at
+`Type/Builtins.elm:69-74`, `:95-98`], but the *rule* the checker enforces at
 the rewrite site is the declarative one above.
 
 ```
@@ -508,14 +510,14 @@ unify_global(declared_skolem ≐ body_flex) must SUCCEED
 else FAIL: "annotation is too general"
 ```
 
-[M: `Type/Env.elm:597-616` `instantiatePartial` + `freshPartial`; the body
-check calls it at `Type/Infer.elm:2352`; the police is
-`annotationNotTooGeneral` at `Type/Infer.elm:2505-2532` — generalizes the
+[M: `Type/Env.elm:706-728` `instantiatePartial` + `freshPartial`; the body
+check calls it at `Type/Infer.elm:2724`; the police is
+`annotationNotTooGeneral` at `Type/Infer.elm:2889-2916` — generalizes the
 body's zonked full type, `instantiateRigid` the declared scheme
-(`Type/Env.elm:565-592`, full skolemization), unifies, error "annotation is
+(`Type/Env.elm:674-704`, full skolemization), unifies, error "annotation is
 too general: the definition specializes a type variable the annotation
 promises to keep general".] The police also runs on the retry path (§2.9)
-[M: `Type/Infer.elm:2426`].
+[M: `Type/Infer.elm:2807`].
 
 A `Ty` variable under `type` may be refined by a branch equation and
 discharged at the result (§2.7 Tier-T); a `Row` variable under `type` is the
@@ -551,10 +553,10 @@ The store discipline, stated precisely (this is what "branch-local" means):
   R-UPD-DISCH) and to the branch-result check — and to nothing else.
 - **Truncate on exit.** At branch end the store is restored to the snapshot
   **by truncation**: everything pushed after the snapshot point is dropped,
-  however deeply nested the branch [M: `Type/Unify.elm:99-101`
+  however deeply nested the branch [M: `Type/Unify.elm:101-103`
   `dropEqsFrom snapshot state = { state | eqs = snapshot }` — restore is
-  assignment of the snapshot prefix; `Type/Infer.elm:1699-1706`
-  `snapshotEqsM`/`restoreEqsM`; the sequencing at `Type/Infer.elm:1286-1299`:
+  assignment of the snapshot prefix; `Type/Infer.elm:1933-1941`
+  `snapshotEqsM`/`restoreEqsM`; the sequencing at `Type/Infer.elm:1300-1320`:
   snapshot → lift → `unifyBranchM` → infer body → `unifyResultM` →
   `restoreEqsM` → unlift → restore existentials]. Nesting safety is by
   construction: an inner branch's snapshot is a prefix of the outer store,
@@ -565,12 +567,12 @@ end, but two *memories* survive into the clause — they are the enforcement
 seats of the H2 obligations (§5.4):
 
 - `refinedTargets`: every variable a branch of this clause refined (the ids
-  of all captured equations' targets) [M: `Type/Infer.elm:153-154`
+  of all captured equations' targets) [M: `Type/Infer.elm:154`
   `refinedTargets : List Int`; accumulated in `unifyBranchM`
-  `Type/Infer.elm:1729-1733`].
+  `Type/Infer.elm:1963-2011`].
 - `refinedTails`: for each captured **row** equation, the pair `(head, tail)`
-  = (target id, the tail variable of the zonked body) [M: `Type/Infer.elm:154`,
-  `:1734-1761`].
+  = (target id, the tail variable of the zonked body) [M: `Type/Infer.elm:155`,
+  `:1968-2011`].
 
 Wildcard and no-constructor branches borrow nothing: a branch with no
 captured equation of its own has an empty Δᵢ and its result check is
@@ -604,42 +606,47 @@ out of the branch — the exported scheme would promise a domain the signature
 does not.
 
 The full decision procedure at a branch result, in order [M:
-`Type/Infer.elm:1436-1543` `unifyResultM`]:
+`Type/Infer.elm:1498-1625` `unifyResultM`]:
 
-1. **Tail-escape pre-check** (§5.4 H2-b): if some `(ρ_head, ρ_tail) ∈
-   refinedTails` with `ρ_head ∈ fv(t_r)` and `ρ_tail ∈ fv(t_b)` — reject
-   with the tail-escape error. [M: `:1460-1464` calls `escapeViaTail`
-   first.]
-2. `unify_global(zonk(t_b) ≐ zonk(t_r))` — success: done.
-3. On `RigidVar(a, t)`: if a usable TYPE equation exists (dischargeType:
-   the first equation on `a` whose zonked body is not a `TRecord`
-   [M: `Type/Unify.elm:133-147`]) — Tier-T discharge as above [M:
-   `Type/Infer.elm:1499-1520`, with the occurs-guard at `:1499` and the
-   one-level recursion at `:1510-1516`].
-4. Else if `a` is this branch's **constructor existential** (in the
+1. `unify_global(zonk(t_b) ≐ zonk(t_r))` (both sides zonked first).
+2. On success, three gates before acceptance: the **tail-escape check**
+   (§5.4 H2-b, domain-based) — `dropIntroduced` rejects when THIS result
+   unify newly made a refined tail reach its head (the drop; measured
+   against the post-pattern and pre-unify baselines) [M: `:1511-1512` calls
+   `dropIntroduced` :1842 via `tailReachesHead` :1818; `tailEscapeError`
+   :1806]; the flex→rigid alias gate (`refinedTargetAliasedBy` :1709) [M:
+   `:1515`]; the branch-end occurs check (`pendingTypeOccurs`) [M: `:1526`].
+3. On `RigidVar(a, t)`: if `t` IS the head's refinement **rebuilt**
+   (`rebuildMatches` :1879 — `a` a refined-tail head, `a ∉ fv(t)`, `t` a
+   fielded row unifying with the equation's zonked body) — ACCEPT without
+   binding anything (the domain-preserving rebuild) [M: `:1534-1539`].
+4. Else if a usable TYPE equation exists (dischargeType: the first equation
+   on `a` whose zonked body is not a `TRecord` [M: `Type/Unify.elm:135-150`])
+   — Tier-T discharge as above [M: `Type/Infer.elm:1542-1589`, with the
+   occurs-guard at `:1567-1569` and the one-level recursion at `:1580-1589`].
+5. Else if `a` is this branch's **constructor existential** (in the
    existentials list, §2.10): reject with the *escaping existential* error
-   [M: `:1523-1540`; the fixture `rowgadt_noescape` errors "type variable a
+   [M: `:1592-1607`; the fixture `rowgadt_noescape` errors "type variable a
    is rigid … cannot be unified with String" — re-measured].
-5. Else if `a` is a refined target (`a ∈ refinedTargets`, i.e. *some* branch
-   of this clause refined it) or `a` has any equation in the store
-   (`escapesThrough`): reject with the **escaping row equation** error
-   ("this branch's refinement of a (to t) is needed to type the result, but
-   a branch equation may not escape its branch") [M: `:1541-1557`;
-   `escapesThrough` `:1624-1626`].
-6. Else: the historical rigid error.
+6. Else if `a` has any equation in the store (`escapesThrough` :1694): reject
+   with the **escaping row equation** error ("this branch's refinement of a
+   (to t) is needed to type the result, but a branch equation may not escape
+   its branch") [M: `:1609-1619`; `escapesThrough` `:1694-1696`].
+7. Else: the historical rigid error [M: `:1621-1622`].
 
 The clause-level twin (declaration-directed clauses, §2.9) has the same
-shape but replaces steps 3–4 with the refinedTargets check only
-[M: `Type/Infer.elm:1635-1671` `unifyClauseResultM`: tail-escape pre-check,
-then on `RigidVar(a)` with `a ∈ refinedTargets` → the escape error; no
-Tier-T discharge at the clause level — that is the retry's job, branch by
-branch].
+shape but replaces steps 3–5 with the refinedTargets check only
+[M: `Type/Infer.elm:1733-1816` `unifyClauseResultM`: the tail-escape gates
+(`dropIntroduced` on a successful unify; a `RigidVar` on a refined-tail head
+→ the tail-escape error), then on `RigidVar(a)` with `a ∈ refinedTargets` →
+the escape error; no rebuild arm and no Tier-T discharge at the clause level
+— that is the retry's job, branch by branch].
 
 **What Tier-T is not.** The discharge is a *one-way coercion for the
 re-check only*: the equation is applied by capture-avoiding substitution to
 both sides of the result comparison, never written into θ, and never visible
-after the branch [M: `Type/Infer.elm:1582-1610` `replaceVar` — a single-pass
-substitution; the doc comment at `:1489-1507` states "one-way coercion,
+after the branch [M: `Type/Infer.elm:1644-1691` `replaceVar` — a single-pass
+substitution; the doc comment at `:1485-1497` states "one-way coercion,
 never a bind"]. A wrong body still fails: the re-check compares the coerced
 body against the coerced expected type, so a `String` body under `a ≐ Int`
 fails `String ≐ Int` [M: the fixture `rowgadt_evalbad` errors "escaping row
@@ -663,16 +670,16 @@ Non-GADT constructors (unannotated result `T x̂₁ … x̂ₘ`) have every
 quantifier free in the result, so nothing is rigidified and ordinary ADT
 patterns are unaffected. Flex-marked (`number`/`comparable`/`appendable`)
 quantifiers are never rigidified — this is what keeps the prelude green (a
-`Dict k v` pattern must not skolemize `k`) [M: `Type/Infer.elm:1883-1929`
+`Dict k v` pattern must not skolemize `k`) [M: `Type/Infer.elm:2239-2282`
 `resolveCtorType`: `determined = quantifiers free in freeVars (peelResult
-scheme.body)`; `Type/Env.elm:635-663` `instantiateExistential` /
+scheme.body)`; `Type/Env.elm:744-766` `instantiateExistential` /
 `freshExistential` with the `q.flex == FNone && not (memberById q.id
 determined)` guard; the existential ids accumulate into `state.existentials`
-(`Type/Infer.elm:1912-1928`) and are restored per branch
-(`restoreExistentialsM`, `Type/Infer.elm:1431-1433`)]. This is OutsideIn's
+(`Type/Infer.elm:2282`) and are restored per branch
+(`restoreExistentialsM`, `Type/Infer.elm:1480-1482`)]. This is OutsideIn's
 touchables discipline, row-aware: the existential may be refined by an
 inner match's branch equations and discharged inside, but may not escape
-(R-RESULT step 4).
+(R-RESULT step 5).
 
 ### 2.9 R-LET and the top-level/declaration forms
 
@@ -686,22 +693,23 @@ inner match's branch equations and discharged inside, but may not escape
 
 Let-generalization quantifies the free variables of the bound type not
 free in the environment, excluding `appendable`-flex variables (they are
-resolved at the enclosing declaration's end) [M: `Type/Infer.elm:1188-1231`
+resolved at the enclosing declaration's end) [M: `Type/Infer.elm:1197-1246`
 `inferLetFunction`/`generalizeLet`: `quantifiers = freeVars t |> filter
 (not in rigid(scopeFreeVars)) && v.flex /= FAppendable`; the rigid avoid-set
-is `scopeFreeVars` (`:600-616`) = env + locals + top]. Destructuring `let`
-patterns generalize their binds the same way (`:1167-1186`,
-`generalizeBinds` at `:1213-1232`, with a zonk-first step documented at `:1206-1212`).
+is `scopeFreeVars` (`:603-613`) = env + locals + top]. Destructuring `let`
+patterns generalize their binds the same way (`:1183-1195`,
+`generalizeBinds` at `:1222-1232`, with a zonk-first step documented at
+`:1214-1220`).
 
 **Top-level declarations.** Unsignatued top-level names start as fresh
 monomorphic variables and are generalized per strongly-connected component
-after its clauses check [M: `seedOne` at `Type/Infer.elm:2025-2043`
+after its clauses check [M: `seedOne` at `Type/Infer.elm:2397-2408`
 (`monoScheme (TVar v)` for unsignatured), `generalizeScc`/`generalizeUnsig`
-(`:2241-2243`, `:2039-2051`), checked in SCC dependency order
-(`checkSccs`/`checkScc` `:2217-2240`)]. Signatured names are seeded with
+(`:2613-2615`, `:2411-2423`), checked in SCC dependency order
+(`checkSccs`/`checkScc` `:2589-2612`)]. Signatured names are seeded with
 their declared scheme, so recursive occurrences instantiate polymorphically
 (polymorphic recursion is available with a signature, monomorphic without)
-[M: `seedOne`'s `Env.lookupValue` arm at `:2026-2028`].
+[M: `seedOne`'s `Env.lookupValue` arm at `:2399-2401`].
 
 **R-TOP-RETRY is NOT a rule of this calculus.** The implementation checks a
 declaration's clauses by a historical first pass, then — only when that
@@ -744,14 +752,14 @@ E  ::=  [ ]  |  E a  |  v E  |  E.ℓ  |  { E | ℓ = v, … }  |  { E | ℓ ←
 A record value is an **association list** of label-value pairs in source
 order — this is not a modeling choice: records lower to cons pairs
 `((ℓ, v) :: … )` built right-to-left so field `j` sits at the head
-[M: `elm-compiler/src/Lower/Expr.elm:1115-1130` and `recordExpr`
+[M: `elm-compiler/src/Lower/Expr.elm:1117-1130` and `recordExpr
 `:1130-1141`]. Selection lowers to `assoc` + `snd`, and **`assoc` is
-first-match-wins from the head** [M: `Lower/Expr.elm:1146-1151`
+first-match-wins from the head** [M: `Lower/Expr.elm:1147-1151`
 `recordAccess`; `vendor/zinc-vm/src/vm/prims.zig:267-288` `primAssoc` — the
 loop breaks on the first `deepEqual` key match]. Update lowers to
 **cons-prepend-shadow**: each setter conses a fresh `(ℓ, v)` pair onto the
 front of the base record, so the new pair *shadows* any older same-label
-pair under first-match [M: `Lower/Expr.elm:1122-1129` comment ("PREPEND-
+pair under first-match [M: `Lower/Expr.elm:1127-1129` comment ("PREPEND-
 SHADOW: … assoc's first-match-wins makes it shadow any older same-field
 pair") and `recordUpdate`/`setterCode` `:1141-1146`, `:1135-1139`].
 
@@ -861,7 +869,7 @@ they hold in the implementation:
   whose label the equation's head exposes** (`dischargeRow` matches the
   head label; §2.4), and the equation's head is the first occurrence under
   the swap-preserving rewrite (§5.3 H1) — the same first-occurrence as
-  `primAssoc`'s [M: `Type/Unify.elm:589-601` head-then-swap; the identity
+  `primAssoc`'s [M: `Type/Unify.elm:640-651` head-then-swap; the identity
   of the two disciplines is §3's correspondence].
 - **R-UPD is sound with no discharge at all**: update is shape-preserving on
   domains — `{ e | ℓ = v }` requires `ℓ` present and replaces its first
@@ -871,10 +879,10 @@ they hold in the implementation:
   well-typed **at** `{ ρ }` without binding `ρ` — the domains are equal,
   which is precisely why Tier-R never needs to fire for updates [M: the
   fixture `rowgadt_setx` compiles clean; `dischargeSetterM`'s result shape
-  `Type/Infer.elm:1052-1055`; probes P5b/P10 in `docs/research/row-gadt.md`
+  `Type/Infer.elm:1054-1061`; probes P5b/P10 in `docs/research/row-gadt.md`
   §4]. Insertion is the shape-changing dual and is exactly why it is
   rejected under refinement (R-UPD-INS) [M: the insertion rejection
-  `Type/Infer.elm:963-976`].
+  `Type/Infer.elm:964-987`].
 
 The honest bound: **no general soundness theorem exists for λρG** — T1/T2
 are the statements a mechanization should prove or refute; the paper
@@ -903,17 +911,17 @@ rewrite(ρ, ℓ)              ⊳ (γ, β)  + equation ρ ≐ { ℓ : γ | β } 
 Side condition: when rewriting within `unify` of a left row whose tail is
 `ρ_L`, reaching a tail variable equal to `ρ_L` is rejected (the
 shared-tail/occurs guard — it prevents divergent common-tail unification)
-[M: `Type/Unify.elm:581-604`: the `forbidden` parameter and the
-`SharedTailE` error; `:606-612`]. [M: the row-head/row-swap cases and the
-first-occurrence comment at `:589-601`; row-instantiate for flex at
-`:634-650`.]
+[M: `Type/Unify.elm:629-632`: the `forbidden` parameter and the
+`SharedTailE` error at `:660-663`]. [M: the row-head/row-swap cases and the
+first-occurrence comment at `:640-651`; row-instantiate for flex at
+`:689-701`.]
 
 **Lemma (swap preserves order).** In the `row-swap` recursion, the skipped
 fields are prepended back in their original order, so `r'`'s field sequence
 is a permutation of `r`'s that moves exactly the first `ℓ` to the front and
 preserves the relative order of everything else. Consequently
 `dom₀(r') = dom₀(r)` and the *exposed* occurrence is the first `ℓ` of `r`.
-[M: the recursion at `Type/Unify.elm:596-600` prepends `(l2, t)` onto
+[M: the recursion at `Type/Unify.elm:645-651` prepends `(l2, t)` onto
 `s2.fields`, i.e. in order. Definitional; provable by induction on the
 field list.]
 
@@ -965,7 +973,7 @@ substituted row. So the implementation needs only the *weak* form of H1:
 one zonk of the stored body commutes with the outer substitution, which
 holds because the store's bodies are only ever written at capture time in
 terms of variables live then, and zonk is a substitution homomorphism
-[M: `Type/Unify.elm:166-188` `dischargeRow` zonks the body once and reads
+[M: `Type/Unify.elm:217-239` `dischargeRow` zonks the body once and reads
 its head; the store's writers are exactly the branch-mode capture sites
 §2.3 [M]]. But the **declarative** rule (R-SEL-DISCH as written — "the
 equation's head exposes `ℓ`") is only equivalent to the substitution-based
@@ -1010,7 +1018,7 @@ the real hole was:
 >
 > **Status: proved by construction** in the implementation — restore is
 > assignment of the snapshot prefix, so truncation is exact and nesting is
-> safe (§2.6) [M: `Type/Unify.elm:99-101`; `Type/Infer.elm:1704-1706`].
+> safe (§2.6) [M: `Type/Unify.elm:101-103`; `Type/Infer.elm:1933-1941`].
 
 > **H2-b (no escape of a needed equation).** No equation on a variable free
 > in the branch's *result type* may be *needed* to type that result. I.e.
@@ -1173,9 +1181,9 @@ affecting only completeness or diagnostics.
    checks a signatured declaration's clauses bottom-up (fresh result
    variable, branch joins unified at the clause end), and only when that
    fails *and* the body is directly a `case` re-checks it
-   declaration-directed [M: `Type/Infer.elm:2393-2441`; the retry is
-   `orElse`-wrapped after the historical tail, and on retry failure the
-   *historical* error is reported]. The declarative calculus has only the
+   declaration-directed [M: `Type/Infer.elm:2718-2830`; the retry is
+   `orElse`-wrapped at `:2767`, and on retry failure the
+   *historical* error is reported (`:2822`)]. The declarative calculus has only the
    declaration-directed rule (§2.9). Soundness-neutral: the retry accepts a
    *subset* of the declarative language (a GADT case nested under a `let`
    is not retried and fails spuriously [M: `/tmp/rowgadt/gNeg_letcase.elm`
@@ -1238,21 +1246,21 @@ affecting only completeness or diagnostics.
    `collectRowNames` + `collectFileTypeKinds` for signatures) are
    approximations of "the declared kind" that were built precisely
    because first-use inference mis-kinded source-order-dependent
-   programs [M: `Type/Env.elm:244-253`, `:299-337`, `:399-435`]. A
+   programs [M: `Type/Env.elm:251-302`, `:474-543`, `:1215-1268`]. A
    mechanization takes the stated kind and treats elaboration as a
    front-end concern.
 8. **Trusted bodies — [S].** A fixed list of qualified names
    (`Prelude.removeFieldImpl`, `Runtime.runTask`, 20 total) skip
-   inference entirely [M: `Type/Builtins.elm:95-97`, the trusted list at
-   `:342-379`; `Type/Infer.elm:2340-2345` skips trusted bodies in
+   inference entirely [M: `Type/Builtins.elm:95-98`, the trusted list at
+   `:340-393`; `Type/Infer.elm:2711-2716` skips trusted bodies in
    `inferClause`]. The calculus does not model them (they are escapes,
    not rules); `runTask` is the honest remaining gap (its `TaskExec`
    branch performs a dynamic cast `a ≐ List a` that no type system here
-   can express) [M: the trusted comment at `Type/Builtins.elm:365-379`].
+   can express) [M: the trusted comment at `Type/Builtins.elm:365-391`].
 9. **Flex markers and the `++` resolution — [S].** The implementation
    carries `number`/`comparable`/`appendable` and resolves `++` sites
    after the body [M: `resolveAppends`/`checkNoResidualAppendable`,
-   `Type/Infer.elm:2458-2501`]. The calculus keeps the markers in the
+   `Type/Infer.elm:2842-2880`]. The calculus keeps the markers in the
    syntax (§1.2) but omits the `++`-specific machinery; a mechanization
    may drop markers entirely if it also drops R-EXISTS's flex guard and
    the unification compat rules — dropping only the police would be
@@ -1261,7 +1269,7 @@ affecting only completeness or diagnostics.
    written operate on fully substituted (zonked) types; the
    implementation zonks explicitly at the three discharge sites because
    the rigid variable may only appear after resolving the substitution
-   [M: `Type/Infer.elm:331-340`, `:1439-1446` — both sites comment "Zonk
+   [M: `Type/Infer.elm:334`, `:1501` — both sites comment "Zonk
    BOTH sides first (same reason as `unifyUseM`)"]. In the calculus this
    is a non-issue (the rules are stated on semantic types, not
    syntactic representatives); it is listed because the bug it fixed

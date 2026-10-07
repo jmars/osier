@@ -18,14 +18,14 @@ What this unit re-measured itself (✎, 2026-10-05, tree at `0207dd2`):
   from the typing-judgment arc [M ✎]. Zero `sorry`/`admit`; **3 `axiom`s** -- the explicit
   parameters `Unifies`/`Captures` (Typing.lean:221,229) and `unifies_field_projection`
   (Preserve.lean:213). (This line previously said 43 and "zero axiom"; both were stale.)
-- The 19 rowgadt fixtures registered in the gate (`run-elm-gate.sh:557-623`): 10 `compile_clean`,
+- The 19 rowgadt fixtures registered in the gate (`run-elm-gate.sh:309-450`): 10 `compile_clean`,
   9+1 `compile_error` (count: 10 error — see the fixture matrix, §7) [M ✎].
-- Code seats re-grepped: `Type/Unify.elm` (`dropEqsFrom:99`, `dischargeType:133`,
-  `dischargeRow:166`, `unifyBranch:238`); `Type/Infer.elm` (`insertion rejection:971`,
-  `dischargeSetterM:1037`, `restrictField:1124`, `generalizationRigid:1249`,
-  `unifyClauseResultM:1640`, `tailReachesHead:1708`, `dropIntroduced:1720`, `rebuildMatches:1740`,
-  `findEquation:1773`); `Type/Builtins.elm` (`trustedBodies:340`, runTask entry `:379`);
-  `Runtime.elm` (`type Task:19`, `TaskExec a : Task x (Int,String,String):28`, `runTask:178`) [M ✎].
+- Code seats re-grepped: `Type/Unify.elm` (`dropEqsFrom:101`, `dischargeType:135`,
+  `dischargeRow:217`, `unifyBranch:289`); `Type/Infer.elm` (`insertion rejection:975`,
+  `dischargeSetterM:1046`, `restrictField:1133`, `generalizationRigid:1258`,
+  `unifyClauseResultM:1733`, `tailReachesHead:1818`, `dropIntroduced:1842`, `rebuildMatches:1879`,
+  `findEquation:1912`); `Type/Builtins.elm` (`trustedBodies:340`, runTask entry `:392`);
+  `Runtime.elm` (`type Task:24`, `TaskExec a : Task x (Int,String,String):33`, `runTask:112`) [M ✎].
 
 Companion inputs (read in full by this unit): `docs/research/row-gadt.md` (565 lines, the paper
 seed), `docs/research/row-gadt-calculus.md` (1281 lines, λρG), `docs/research/withe-related-work.md`
@@ -39,18 +39,18 @@ seed), `docs/research/row-gadt-calculus.md` (1281 lines, λρG), `docs/research/
 Lean tree by this unit]
 
 - §5.3 says H1 is "argued, not proved" and "the duplicate-label probe was never built"
-  (row-gadt-calculus.md:981-985). **Superseded**: H1 is mechanized *including* the duplicate case —
+  (row-gadt-calculus.md §5.3, :928-1006). **Superseded**: H1 is mechanized *including* the duplicate case —
   `h1_find_commutes` (RowGadt.lean:151), `h1_duplicate_shadow` (:172), `h1_no_shadow` (:183),
   `h1_head_only_vs_full` (:195 — the theorem that CORRECTS the spec: the "for every label m" form
   holds only in the rigid-tail regime), `h1_discharge_head_agrees` (:205) — and the duplicate-label
   probes exist as gate fixtures `rowgadt_dup_rebuild` (clean) / `rowgadt_dup_fewer` (the pinned
-  false reject) (`run-elm-gate.sh:617-623`).
+  false reject) (`run-elm-gate.sh:383-389`).
 - §5.4/§8.2 describe `escapeViaTail` as the direct-shape check with the transitive-alias hole
-  (row-gadt-calculus.md:1021-1035, 1160-1171). **Superseded twice over**: (a) the adversarial hunt
+  (row-gadt-calculus.md:1024-1041, 1197-1206). **Superseded twice over**: (a) the adversarial hunt
   found and fixed two *real* unsound accepts (let-laundering; wildcard sibling leak) — mechanized in
   `lean/RowGadtEscape.lean` (`H2b_no_quantify_refined_tail:97`, `H2b_wildcard_leak_shape:124`);
   (b) the check is now **domain-based** (`dropIntroduced`/`tailReachesHead`/`rebuildMatches`,
-  `Type/Infer.elm:1708-1760`), and its exactness boundary is *proved*: `h2b_domain_exactness`
+  `Type/Infer.elm:1818-1907`), and its exactness boundary is *proved*: `h2b_domain_exactness`
   (RowGadt.lean:410) — exact for fresh labels, coarse for duplicates — with the over-approximation
   itself a theorem (`h2b_overapproximation`, RowGadt.lean:614).
 - `row-gadt.md` §7.3 inherits the same stale H2 wording (the "coarse … pre-existing false reject
@@ -181,8 +181,8 @@ story early.
 
 (~250 words.) Claims vs evidence: every sentence of this abstract appears with its pointer in
 §5's table (C1–C5, C6–C9, C15–C18, C20). The "not well specified" quote is octachron, Jan 2024
-(withe-related-work.md:267-269); the restriction is Garrigue & Rémy 2012
-(withe-related-work.md:246-248) — both verbatim-verified in the survey.
+(withe-related-work.md:310-312); the restriction is Garrigue & Rémy 2012
+(withe-related-work.md:64-65) — both verbatim-verified in the survey.
 
 ---
 
@@ -193,9 +193,9 @@ story early.
    snapshots, captures rigid bindings as equations, and truncates on branch exit, plus a two-tier
    result rule — Tier-T discharges type equations, Tier-R never discharges row equations because
    that would move a row's *domain* out of the branch.
-   *Evidence*: the rule set (row-gadt-calculus.md §2, seats ✎ `Type/Unify.elm:238-241` `unifyBranch`,
-   `:99-101` `dropEqsFrom`, `:133-147` `dischargeType`); fixtures `rowgadt_select`, `rowgadt_eval`
-   (clean) vs `rowgadt_escape`, `rowgadt_evalbad` (err) — gate `run-elm-gate.sh:557-623` ✎; the
+   *Evidence*: the rule set (row-gadt-calculus.md §2, seats ✎ `Type/Unify.elm:289-293` `unifyBranch`,
+   `:101-103` `dropEqsFrom`, `:135-150` `dischargeType`); fixtures `rowgadt_select`, `rowgadt_eval`
+   (clean) vs `rowgadt_escape`, `rowgadt_evalbad` (err) — gate `run-elm-gate.sh:309-450` ✎; the
    survey's empty-cell verdict (withe-related-work.md §3).
 
 2. **The operation-level answer, with the positive row result mechanized.** Under an active
@@ -204,10 +204,10 @@ story early.
    well-typed at the abstract row with no discharge); insertion is the shape-changing dual and is
    rejected — a deliberate position on Rémy's extension dial, not a discovery.
    *Evidence*: `rowgadt_absentfield` (err) / `rowgadt_setx` (clean) / insertion rejection ✎
-   `Type/Infer.elm:971`; the update/insertion theorems `update_domain_preserving`,
+   `Type/Infer.elm:975`; the update/insertion theorems `update_domain_preserving`,
    `update_reflexive_domain`, `update_accepted_at_rho`, `insertion_rejected_under_refinement`
    (`lean/Update.lean:153,167,180,236` ✎); the trade framing (withe-related-work.md §2
-   "Remy 1994 — the must-retrieve answer", :329-379).
+   "Remy 1994 — the must-retrieve answer", :391-465).
 
 3. **A measured principality boundary with an inversion.** Principality is retained when every
    refinement's target is a branch-scoped existential (the witness encoding *infers*, no
@@ -216,7 +216,7 @@ story early.
    encoding does not merely model rows, it *moves the boundary*.
    *Evidence*: the L3 table — `rowgadt_l3i` (witness, clean), `rowgadt_l3ii` (native, err
    "infinite type"), `rowgadt_l3iii` (plain row, clean), plus `rowgadt_hget` (clean; the binder
-   form) — all gate-registered ✎ (`run-elm-gate.sh:592-601`); boundary statement
+   form) — all gate-registered ✎ (`run-elm-gate.sh:342-359`); boundary statement
    (row-gadt.md §7.4, :442-455).
 
 4. **Mechanized metatheory, validated by an adversarial hunt.** 90 machine-checked
@@ -230,7 +230,7 @@ story early.
    *Evidence*: `lean/RowGadt.lean:151,172,183,195,205,410,614` ✎, `lean/RowGadtEscape.lean:97,124` ✎,
    `lean/Update.lean:153-255` ✎; fixtures `rowgadt_escape_launder`, `rowgadt_escape_wildcard`,
    `rowgadt_shape_rebuild`, `rowgadt_dup_rebuild`, `rowgadt_dup_fewer` ✎
-   (`run-elm-gate.sh:616-623`).
+   (`run-elm-gate.sh:369-389`).
 
 5. **A working reference implementation, measured against itself.** The discipline is implemented
    inside an Elm-family checker; the pre-existing corpus compiles byte-identically after the
@@ -240,12 +240,12 @@ story early.
    precisely, together with a decomposition of the remaining trusted bodies by *kind of lie*.
    *Evidence*: gate PASS=151 FAIL=0 (re-run ✎ 2026-10-05); corpus byte-identity measured across
    every step against the committed manifest (149 groups; orchestrator-verified, and **G2 is now done** — the baseline lives in `tools/withe-corpus-baseline.sha256` and the chain in `tools/withe-numbers.sh`)
-   re-run, G2); `Runtime.elm:28` ✎ (source-level per-ctor result annotations);
-   `Type/Builtins.elm:365-379` ✎ (the trusted comment). The 29/30 branch count is
+   re-run, G2); `Runtime.elm:24-44` ✎ (source-level per-ctor result annotations);
+   `Type/Builtins.elm:365-391` ✎ (the trusted comment). The 29/30 branch count is
    implementer-reported and NOT independently re-measured — G5.
 
-None of these rests on an item of the do-not-publish list (row-gadt.md §9, :469-520 +
-withe-related-work.md §6, :627-667; merged in Appendix A below). Contribution 3 states the
+None of these rests on an item of the do-not-publish list (row-gadt.md §9, :495-565 +
+withe-related-work.md §6, :718-758; merged in Appendix A below). Contribution 3 states the
 *measured inversion*, explicitly reversing the banned guess ("witnesses lack principal types").
 Contribution 2's insertion clause is worded as a trade, per the ban.
 
@@ -269,14 +269,14 @@ Contents:
 - The gap, with the maintainer record: octachron Jan 2024 "not well specified … nothing is
   guaranteed beyond the fact that the currently implemented interaction is safe" and his
   per-field-object workaround — which *is* a manual membership-witness encoding, i.e. the idiom
-  practitioners already reach for (withe-related-work.md:263-300, :441-446); Garrigue & Rémy 2012
+  practitioners already reach for (withe-related-work.md:310-322, :441-446); Garrigue & Rémy 2012
   on the first implementation's restriction (:243-245); issue #5724 (poly-variant patterns block
   refinement, :289-292).
 - **Second motivating example** — the heterogeneous container (`rowgadt_het`: witness GADT +
   existential wrapper + a two-element list at different witness types, folded to String) — the
   feature the *existential-rigidity* rule unlocks.
 - **Third, the payoff example** — the compiler's own effect interpreter: 30 `Task` constructors
-  now carrying honest per-ctor result types in source (`Runtime.elm:17-52` ✎); the branch-checking
+  now carrying honest per-ctor result types in source (`Runtime.elm:24-44` ✎); the branch-checking
   result (G5 number); the residue as a representation problem.
 - "Why has nobody done it" — compressed to one paragraph: rows and GADTs were adopted by disjoint
   language populations; the one system with all three had secondary rows where the cheap
@@ -307,12 +307,12 @@ Contents:
   Source: row-gadt-calculus.md §2.3-2.9, with seats ✎-meta (re-verify at drafting).
 - Unification's two modes and the rigid-row-tail inventory ("may be aliased-by-flex, may be
   locally known, may unify with itself; may NEVER be bound — in any mode") — the single most
-  quotable paragraph of the design (row-gadt-calculus.md:320-336).
+  quotable paragraph of the design (row-gadt-calculus.md:322-337).
 - R-EXISTS as OutsideIn's touchables, row-aware; the flex-marker guard that keeps the prelude
   green (row-gadt-calculus.md §2.8).
 - One paragraph: the implementation's two-pass declaration-directed *retry* is an artifact for
   corpus byte-identity; **the declarative calculus has only the declaration-directed rule**
-  (row-gadt-calculus.md:706-714, §8.1). State it here so §6 can be honest without a digression.
+  (row-gadt-calculus.md:714-725, §8.1). State it here so §6 can be honest without a digression.
 
 Artifact: row-gadt-calculus.md §1-§2; code seats listed in the meta node's verified addendum.
 
@@ -326,14 +326,14 @@ Contents:
   one-way coercion at the re-check (the canonical evaluator types: `rowgadt_eval` clean); a row
   equation never does, because discharge would move the row's **domain** out of the branch
   (`rowgadt_escape`, `rowgadt_hget_escape` err).
-- **Figure 4** — the branch-result decision procedure, in order (the six steps of
-  row-gadt-calculus.md §2.7:606-629), updated to the *domain-based* rule of the current
+- **Figure 4** — the branch-result decision procedure, in order (the seven steps of
+  row-gadt-calculus.md §2.7:608-654), updated to the *domain-based* rule of the current
   implementation: DROP (tail identified with head) → REJECT; REBUILD (unifies with the equation
-  body, head not free in it) → ACCEPT; CHANGE → REJECT (seats ✎ `Type/Infer.elm:1640-1760`).
+  body, head not free in it) → ACCEPT; CHANGE → REJECT (seats ✎ `Type/Infer.elm:1498-1625`).
 - The operation inventory: selection licensed by equation heads only (`rowgadt_absentfield`:
   a field in no equation's head is an error even inside the branch); update safe *by construction*
   — no discharge, no equation consumed (`rowgadt_setx`); insertion rejected under refinement
-  (✎ `Type/Infer.elm:971`).
+  (✎ `Type/Infer.elm:975`).
 - **The negative result** (calculus §6): unrestricted global row refinement λρG⁻ is unsound —
   statement + the mechanism measured pre-fix (the single-branch classic case binding `a := Int`
   globally while call sites kept `∀a. Expr a → a`). Marked *stated, not proved* — it is the
@@ -342,7 +342,7 @@ Contents:
   Gaster & Jones dial it strict under a lacks predicate; CORELINKS quantify presence; we restrict
   it *conditionally* — only under an active branch equation — and give the first account of *why*
   (domain escape breaks refinement soundness). Three published positions on one dial, none
-  conditional (withe-related-work.md:368-379, §4.2).
+  conditional (withe-related-work.md:466-484).
 - The update lineage contrast: Rémy update = shadowing-extension (domain may grow);
   Gaster & Jones = restrict-then-extend under lacks; Links = derived remove-then-extend; ours =
   first-occurrence scoped-label replace, domain-preserving by construction — which is why
@@ -401,7 +401,7 @@ Contents:
 - **Figure 6 / Table** — the L3 table, three presentations of the same access:
   witness-encoded, no signature → **accepted** (infers); native-row witness-style, no signature
   → **rejected** ("infinite type"); plain row access, no GADT → **accepted** (infers
-  `{ r | x : a } -> a`). All gate-registered ✎ (`run-elm-gate.sh:592-601`).
+  `{ r | x : a } -> a`). All gate-registered ✎ (`run-elm-gate.sh:342-359`).
 - Fragment P / fragment Q, stated precisely (row-gadt.md §7.4): principality retained iff every
   refinement's target is (a) branch-scoped existentially or (b) discharged inside the branch;
   broken when a *signature* variable must be refined differently in two sibling branches AND the
@@ -436,9 +436,10 @@ Contents:
   explicit row kinds cannot predict where a real implementation breaks*.
 - **The escape check's evolution** — the section's centrepiece, told as three measurements:
   (1) the first check was syntactic (tail-occurrence, one orientation); (2) the adversarial hunt
-  found two unsound accepts (**Figure 5** — the counterexample pair, each a 6-line program, with
+  found two unsound accepts (**Figure 5** — the counterexample pair, verbatim excerpts of 21 and
+  17 lines, with
   its pre-fix behaviour: `escapeBad Here (HCons 1 HNil)` returned `HNil` at `HList {l:Int|{}}`);
-  (3) the domain-based rule (✎ `Type/Infer.elm:1708-1760`) accepts the legitimate rebuild
+  (3) the domain-based rule (✎ `Type/Infer.elm:1498-1625`) accepts the legitimate rebuild
   (`rowgadt_shape_rebuild` clean) and rejects every escape shape — six must-error probes and
   seven must-error fixtures re-verified after the fix (orchestrator-verified; memory `33c2f4bc`).
 - The `type a.` surface (option B): bound ⇒ rigid, unbound ⇒ flexible + the too-general police —
@@ -495,7 +496,7 @@ Contents (structure = withe-related-work.md §1's table, the 26-work map):
 - **The frontier**: omnidirectional inference 2026 (principality-restoration with nominal
   records; GADTs as "would be interested in studying") — the field is active, cite it, land the
   row-side answer next to it.
-- The safe headline sentence, verbatim from the survey's verdict (withe-related-work.md:532-538):
+- The safe headline sentence, verbatim from the survey's verdict (withe-related-work.md:611-617):
   "No published type system refines a row variable by a branch-local GADT equation, and no
   published system therefore says which record operations remain typable when such an equation is
   active…" — with the qualifier that the claim is about *published systems with a designed
@@ -520,7 +521,7 @@ hidden.
 ## 5. Claim → evidence table (the spine)
 
 Legend: FIX = gate-registered fixture (`tests/elm-fixtures/rowgadt_*.elm`, registrations at
-`run-elm-gate.sh:557-623` ✎); LEAN = theorem in `lean/`; CODE = `elm-compiler/src` seat; DOC =
+`run-elm-gate.sh:309-450` ✎); LEAN = theorem in `lean/`; CODE = `elm-compiler/src` seat; DOC =
 companion doc with verified pointers; SURVEY = withe-related-work.md. "Thin" = evidence exists but
 is volatile (`/tmp`) or reported-not-re-measured — each Thin row names its gap item.
 
@@ -530,26 +531,26 @@ is volatile (`/tmp`) or reported-not-re-measured — each Thin row names its gap
 | C2 | The one widely used language with all three treats the combination as an idiom with empirical failure modes ("not well specified", 2024); its first GADT implementation restricted objects/poly-variants to protect a row-variable invariant | SURVEY :246-248 (G&R 2012 verbatim), :263-300 (octachron/gasche verbatim), :288-292 (#5724) | [M] |
 | C3 | OutsideIn(X) cannot state the problem (grammar lacks rows); HMG(X) could in principle but has never been instantiated with a row/record theory | SURVEY :39, :227-238; "has not been instantiated", never "cannot" unqualified | [M] |
 | C4 | Insertion is typable in rows-only systems (Rémy unconditionally; G&J under lacks; CORELINKS by presence quantification); our rejection exists only relative to an active branch equation | SURVEY :313-379 (Rémy verbatim: `new_a`, strict/unrestricted dial) | [M] |
-| C5 | Our update is domain-preserving by construction — the property that makes discharge free — unlike Rémy/G&J/Links updates | SURVEY :388-405; FIX `rowgadt_setx`; CODE `Type/Infer.elm:1037-1058` ✎-meta; LEAN `update_domain_preserving` (Update.lean:153 ✎) | [M] |
+| C5 | Our update is domain-preserving by construction — the property that makes discharge free — unlike Rémy/G&J/Links updates | SURVEY :388-405; FIX `rowgadt_setx`; CODE `Type/Infer.elm:1046-1061` ✎-meta; LEAN `update_domain_preserving` (Update.lean:153 ✎) | [M] |
 | C6 | Two branches impose conflicting equations on a rigid ρ; only branch-local capture types `select` | FIX `rowgadt_select` (clean), `rowgadt_l3ii` (err "infinite type"); DOC row-gadt.md §3 | [M] |
-| C7 | A type equation discharges at a branch result (the canonical 3-branch evaluator type-checks) | FIX `rowgadt_eval` (clean); CODE `dischargeType` (Unify.elm:133 ✎), tier-1 re-check | [M] |
-| C8 | A row equation never discharges at a result; its escape is an error | FIX `rowgadt_escape`, `rowgadt_hget_escape` (err); CODE `unifyClauseResultM` (Infer.elm:1640 ✎) | [M] |
-| C9 | Selection is licensed exactly by equation heads; a field in no head is an error even inside the branch | FIX `rowgadt_absentfield` (err); CODE `dischargeRow` (Unify.elm:166 ✎) | [M] |
+| C7 | A type equation discharges at a branch result (the canonical 3-branch evaluator type-checks) | FIX `rowgadt_eval` (clean); CODE `dischargeType` (Unify.elm:135 ✎), tier-1 re-check | [M] |
+| C8 | A row equation never discharges at a result; its escape is an error | FIX `rowgadt_escape`, `rowgadt_hget_escape` (err); CODE `unifyClauseResultM` (Infer.elm:1733 ✎) | [M] |
+| C9 | Selection is licensed exactly by equation heads; a field in no head is an error even inside the branch | FIX `rowgadt_absentfield` (err); CODE `dischargeRow` (Unify.elm:217 ✎) | [M] |
 | C10 | The first (syntactic) escape check accepted two unsound programs; both are fixed and pinned | FIX `rowgadt_escape_launder`, `rowgadt_escape_wildcard`; LEAN `H2b_no_quantify_refined_tail` (RowGadtEscape.lean:97 ✎), `H2b_wildcard_leak_shape` (:124 ✎), `h2b_let_severs_occurs` (RowGadt.lean:533 ✎) | [M] |
-| C11 | The escape rule is domain-based: DROP rejected, REBUILD accepted, CHANGE rejected | CODE ✎ Infer.elm:1708-1760; FIX `rowgadt_shape_rebuild` (clean) | [M] |
+| C11 | The escape rule is domain-based: DROP rejected, REBUILD accepted, CHANGE rejected | CODE ✎ Infer.elm:1498-1625 (helpers :1818-1907); FIX `rowgadt_shape_rebuild` (clean) | [M] |
 | C12 | The domain rule is exact for fresh labels and coarse for duplicates — proved, implemented, and probed to agree | LEAN `h2b_domain_exactness` (RowGadt.lean:410 ✎), `h2b_overapproximation` (:614 ✎); FIX `rowgadt_dup_rebuild` (clean), `rowgadt_dup_fewer` (err — the pinned false reject); dup battery e1–e7 in `/tmp/rowgadt/dup-hunt/` | [M] — battery volatile → G3 |
 | C13 | H1: first-occurrence search commutes with scoped-label substitution, including under duplicate labels; the "for every label" form holds only in the rigid-tail regime (spec corrected by proof) | LEAN `h1_find_commutes`/`h1_duplicate_shadow`/`h1_no_shadow`/`h1_head_only_vs_full`/`h1_discharge_head_agrees` (RowGadt.lean:151-218 ✎) | [M] |
-| C14 | Store truncation is exact and nesting-safe by construction | LEAN `h2a_truncation`/`h2a_no_survival`/`h2a_snapshot_is_suffix`/`h2a_inner_snapshot_suffix` (RowGadt.lean:246-268 ✎); CODE `dropEqsFrom` (Unify.elm:99 ✎) | [M] |
-| C15 | Update is well-typed at the abstract row with no discharge; insertion is domain-changing and rejected under refinement | LEAN `update_reflexive_domain`/`update_accepted_at_rho`/`insertion_rejected_under_refinement`/`insertion_shadow_domain_unchanged` (Update.lean:167-258 ✎); FIX `rowgadt_setx`; CODE Infer.elm:971 ✎ | [M] |
+| C14 | Store truncation is exact and nesting-safe by construction | LEAN `h2a_truncation`/`h2a_no_survival`/`h2a_snapshot_is_suffix`/`h2a_inner_snapshot_suffix` (RowGadt.lean:246-268 ✎); CODE `dropEqsFrom` (Unify.elm:101 ✎) | [M] |
+| C15 | Update is well-typed at the abstract row with no discharge; insertion is domain-changing and rejected under refinement | LEAN `update_reflexive_domain`/`update_accepted_at_rho`/`insertion_rejected_under_refinement`/`insertion_shadow_domain_unchanged` (Update.lean:167-258 ✎); FIX `rowgadt_setx`; CODE Infer.elm:975 ✎ | [M] |
 | C16 | The pre-existing corpus compiles byte-identically; the gate passes 151/151 | Gate re-run ✎ 2026-10-05 (**PASS=151 FAIL=0**); byte-identity against the COMMITTED manifest `tools/withe-corpus-baseline.sha256` (149 artifacts) via `tools/withe-numbers.sh` | [M] — **G2 DONE**: the baseline and the chain are in-repo |
-| C17 | ~~29 of the effect interpreter's 30 branches check honestly~~ **CORRECTED: 25 of 30** — the 29/30 figure was FAIL-FAST (removing `runTask` from `trustedBodies` reports one error and stops). The five that fail: `TaskExec` (existential cast `a ~ List a`), `TaskNow` (`Ok 0` number literal hits FlexConflict before the rigid-var discharge fires), `TaskQuit` + `TaskGuiPoll` (**un-annotated nullary ctors — the two the `taskCtorResults` docstring deliberately left generalized: design, not defect**), `TaskStat` (closed-record result; `dischargeType` refuses any `TRecord` body — the Tier-R over-approximation costing a legitimate type equation) | CODE Runtime.elm:28 ✎ (annotation), Builtins.elm:365-379 ✎ (comment); **G5 DONE — recounted by bisection** | **[M] corrected** |
+| C17 | ~~29 of the effect interpreter's 30 branches check honestly~~ **CORRECTED: 25 of 30** — the 29/30 figure was FAIL-FAST (removing `runTask` from `trustedBodies` reports one error and stops). The five that fail: `TaskExec` (existential cast `a ~ List a`), `TaskNow` (`Ok 0` number literal hits FlexConflict before the rigid-var discharge fires), `TaskQuit` + `TaskGuiPoll` (**un-annotated nullary ctors — the two the `taskCtorResults` docstring deliberately left generalized: design, not defect**), `TaskStat` (closed-record result; `dischargeType` refuses any `TRecord` body — the Tier-R over-approximation costing a legitimate type equation) | CODE Runtime.elm:24-44 ✎ (annotation), Builtins.elm:365-391 ✎ (comment); **G5 DONE — recounted by bisection** | **[M] corrected** |
 | C18 | The trusted-body residue decomposes by kind of lie; only refinement-blocked and dynamically-typed lies are type-system-addressable | The typed-VM experiment (probeA/probeA2/probeA_neg + the `compare` retirement error) — **all in /tmp, zero repo edits** | **Thin** → **G3** (re-home probes) or cut to the runTask instance |
 | C19 | The principality boundary sits on the native-row side, not the witness side; the encoding moves it | FIX `rowgadt_l3i` (clean) / `l3ii` (err) / `l3iii` (clean) / `rowgadt_hget` (clean); the plain-signature `hget` rejection is a `/tmp` probe (`hlist2.elm`) | [M] for the fixtures; the hlist2 data point → **G3** |
 | C20 | No general soundness theorem exists: T1/T2 argued, not proved; the mechanization targets the row algebra, not the typing judgment | Honest absence; LEAN header states the scope (RowGadt.lean:1-27 ✎) | [M-by-absence] |
 | C21 | Rank-2/higher-rank is absent (no `TForall` in the type representation); the general handler signature cannot be stated | CODE `Type/Representation.elm` (Type grammar has no quantifier node — ✎-meta; re-verify) | [M] |
 | C22 | ~~No exhaustiveness/refutation checking exists~~ **CORRECTED: both exist and work.** `Type/Exhaustive.elm` rejects a missing POSSIBLE arm at COMPILE time, and REFUTES an impossible arm under branch equations (`eval : Expr Int -> Int` matching only `IntLit` compiles clean, `BoolLit` being impossible at `Expr Int`) — i.e. it does what the external OCaml thread could not (`-> .`) | Gate `adtgaps`/`refutpos`/`refutneg`/`refutbare`; commit 36b93d0 + the over-refutation fix | **[M] corrected** — the old absence claim is now FALSE |
 | C23 | ADT generic kinds are collected per file (a cross-file bare row parameter kinds as `KType`) | CODE `Type/Env.elm:134-137` ✎-meta (typeKinds pre-pass); unexercised by corpus/fixtures | [M] — state as [U]; see §6 |
-| C24 | The implementation checks declarations with a historical first pass and retries declaration-directed only on failure with a case body; the declarative calculus has only the declaration-directed rule | CODE `Type/Infer.elm:2379-2428` ✎-meta; calculus §8.1; the case-under-let spurious reject is a `/tmp` probe (`gNeg_letcase.elm`) | [M] — probe volatile → G3 if the completeness claim is made |
+| C24 | The implementation checks declarations with a historical first pass and retries declaration-directed only on failure with a case body; the declarative calculus has only the declaration-directed rule | CODE `Type/Infer.elm:2718-2830` ✎-meta; calculus §8.1; the case-under-let spurious reject is a `/tmp` probe (`gNeg_letcase.elm`) | [M] — probe volatile → G3 if the completeness claim is made |
 | C25 | Practitioners hit this boundary today (FSM/reducer modelling; the recommended workaround restructures types so no row is refined) | SURVEY :263-300, :441-446 (discuss.ocaml.org threads, fetched JSON; /tmp copies) | [M] — quotes are in the survey (durable); re-verify URLs render at camera-ready (survey §5.5) |
 | C26 | Three of the four implementation blockers were kinding defects | Build history (row-gadt.md §6); the fixed code is the residue (prescans; the KRow-KRow alias path) | [M] as history; fine for §6 prose, not a headline |
 | C27 | **90** machine-checked Lean theorems (row-algebra trio 43 + TypingStore 29 + Preserve 18); `lake build` clean, no `sorry`, **3 `axiom`s** (the explicit unifier parameters) | Re-measured ✎ 2026-10-05 (build exit 0, zero output); the 43 figure was stale before the typing arc | [M] |
@@ -620,14 +621,15 @@ REQUIRED (the paper fails without them):
 - **F2 — syntax + kinds + judgment** (`Γ; Δ; R`). §2. Source: calculus §1-2.2.
 - **F3 — the typing rules** (the rule list of §2 above; ~1.5 pp, the paper's largest figure).
   Source: calculus §2.3-2.9.
-- **F4 — the branch-result decision procedure** (six steps, domain-based: tail-escape pre-check →
-  unify → Tier-T → existential → refined-target escape → historical error). §3. Source: calculus
-  §2.7 + CODE ✎ Infer.elm:1640-1760.
-- **F5 — the counterexample pair** (let-laundering; wildcard sibling leak), each 6 lines, with
+- **F4 — the branch-result decision procedure** (seven steps, domain-based: unify → tail-escape →
+  rebuild → Tier-T → existential → refined-target escape → historical error). §3. Source: calculus
+  §2.7 + CODE ✎ Infer.elm:1498-1625.
+- **F5 — the counterexample pair** (let-laundering; wildcard sibling leak), verbatim excerpts of
+  21 and 17 lines, with
   pre-fix behaviour and post-fix error. §6. Source: fixtures `rowgadt_escape_launder`/`_wildcard`.
 - **F6 — the L3 principality table** (3 rows: witness / native / plain). §5.
 - **T1 — the fixture matrix**: all 19 rowgadt fixtures, expected vs measured (clean or the exact
-  error string). The evaluation's spine. Source: `run-elm-gate.sh:557-623` ✎ + fixture files.
+  error string). The evaluation's spine. Source: `run-elm-gate.sh:309-450` ✎ + fixture files.
 
 OPTIONAL (cut in the order listed if over budget):
 
@@ -657,8 +659,8 @@ OPTIONAL (cut in the order listed if over budget):
 - **Proof/implementation/probe agreement** on the escape boundary in three independent places
   (Lean `h2b_domain_exactness`; the rebuild arm's exact-match acceptance; the duplicate probes).
 - **The compiler's own effect interpreter carries per-ctor result types in source**
-  (`Runtime.elm:17-52` ✎), and `runTask`'s trusted comment states the precise remaining reason
-  (`Builtins.elm:365-379` ✎).
+  (`Runtime.elm:24-44` ✎), and `runTask`'s trusted comment states the precise remaining reason
+  (`Builtins.elm:365-391` ✎).
 
 ### MISSING (and what it costs the paper if not closed)
 
