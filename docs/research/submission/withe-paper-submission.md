@@ -1341,7 +1341,7 @@ finite complete sets. Our fragment Q loses principality for a different trigger
 mechanism — we do not conflate the two**, and Wand's compensation suggests a question for future
 work (does Q admit finite complete sets?). **Rémy 1994** is the reference point for the
 operation dial: unrestricted extension unconditionally (`new_a`), presence flags as
-quantification (System Π*), and update-as-extension — the expressiveness maximum our
+quantification (System Π\*), and update-as-extension — the expressiveness maximum our
 conditional insertion rejection trades against (Section 3.3). **Gaster & Jones 1996** dial
 extension to strict under a lacks predicate and type update as restrict-then-extend — the
 second published position on the dial. **Ohori 1995** replaces row variables with *kind

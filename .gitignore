@@ -14,7 +14,9 @@ tests/elm-fixtures/out/hello.out
 __pycache__/
 *.pyc
 
-# paper PDF build products (the .tex is committed; rebuild with
-# tools/make-paper-pdf.sh).  Everything except the generated .tex is ignored.
+# paper PDF build products.  The .tex IS committed (a referee can read what was
+# typeset); the PDFs are committed too -- the GitHub/Zenodo release archives only
+# what is tracked, and Zenodo cannot accept added files after publication.
 docs/research/build/*
 !docs/research/build/*.tex
+!docs/research/build/*.pdf

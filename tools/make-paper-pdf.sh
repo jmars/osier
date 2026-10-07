@@ -538,39 +538,25 @@ print("  text: title + %d headings + %d paragraphs, all present in the .tex"
 # 7. text defects in the paper itself: reported, never fixed.  An odd number of
 #    emphasis markers in one markdown paragraph cannot pair up, so pandoc pairs
 #    the odd one with the next italic run -- which then swallows text and shows
-#    a literal marker.  The visible counterpart is an asterisk in the typeset
-#    text (outside verbatim and outside inline code).
-odd = [(start, " ".join(b).count("*") - 0) for start, b in blocks
-       if re.sub(r"`[^`]*`", "", " ".join(b)).count("*") % 2]
-outside = re.sub(r"\\begin\{verbatim\}.*?\\end\{verbatim\}", "", tex, flags=re.DOTALL)
-texttt = re.compile(r"\\texttt\{")
-stray = []
-for i, line in enumerate(outside.split("\n"), 1):
-    j, depth = 0, 0
-    while True:
-        m = texttt.search(line, j)
-        if not m:
-            break
-        depth, k = 1, m.end()
-        while k < len(line) and depth:
-            if line[k] == "{":
-                depth += 1
-            elif line[k] == "}":
-                depth -= 1
-            k += 1
-        line = line[:m.start()] + line[k:]
-        j = m.start()
-    line = re.sub(r"\*\s*\\real\{[^}]*\}", "", line)
-    if "*" in line:
-        stray.append((i, line.strip()[:80]))
+#    a literal marker.  This is the CAUSAL check: it reads the markdown, where
+#    an escaped `\*` is still distinguishable from an emphasis `*`.
+#
+#    It deliberately does not also scan the generated .tex for a bare asterisk.
+#    That check cannot be made sound: pandoc renders both `\*` (a literal star,
+#    legitimate -- e.g. Ohori's "System Π\*") and a stray, unpaired marker as
+#    the same character, so the .tex no longer carries the evidence, and the
+#    check fires on correct output.  A detector that cannot fail for the right
+#    reason is worse than no detector.
+def emphasis_markers(paragraph):
+    # drop inline code and the escaped asterisk, then count the rest
+    return re.sub(r"\\\*", "", re.sub(r"`[^`]*`", "", paragraph)).count("*")
+odd = [(start, emphasis_markers(" ".join(b))) for start, b in blocks
+       if emphasis_markers(" ".join(b)) % 2]
 for start, count in odd:
     print("  TEXT DEFECT (in the paper's markdown, not fixed): the paragraph at "
           "line %d of %s has an odd number of emphasis markers (%d), so pandoc "
           "pairs the odd one with the next one and italicises the wrong span."
           % (start, md_path, count))
-for i, line in stray:
-    print("  TEXT DEFECT SYMPTOM: a literal marker reaches the page at %s:%d -- %s"
-          % (tex_path, i, line))
 PYEOF
 
   # ---------------------------------------------- fidelity: the PDF itself
