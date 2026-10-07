@@ -31,12 +31,18 @@ module Door exposing (..)
 -- branch equations. (Pinned generally by the gate fixtures `refutpos` /
 -- `refutneg`; see examples/research/README.md.)
 --
--- States are rows; each state is a record whose row carries a state-specific
--- marker field plus a shared counter `n : Int`:
---   Locked  = {}                  -> { n : Int }
---   Closed  = { closed : Int }    -> { n : Int, closed : Int }
---   Open    = { open : Int }      -> { n : Int, open : Int }
---   Broken  = { broken : String } -> { n : Int, broken : String }
+-- States are rows. `State marker = { marker | n : Int }` names the row
+-- extension once: a state is its marker plus the shared counter `n : Int`.
+--   Locked  = {}                  -> State {}                  = { n : Int }
+--   Closed  = { closed : Int }    -> State { closed : Int }    = { n : Int, closed : Int }
+--   Open    = { open : Int }      -> State { open : Int }      = { n : Int, open : Int }
+--   Broken  = { broken : String } -> State { broken : String } = { n : Int, broken : String }
+
+
+-- The extension above, named: the row variable `marker` is each state's
+-- closed prefix (its marker field), extended with the counter.
+type alias State marker =
+    { marker | n : Int }
 
 
 -- The transition relation as a WITNESS GADT: a value `Event from to` is a
@@ -106,7 +112,7 @@ read w rec =
 -- `from` then makes `rec.closed` / `rec.open` / `rec.broken` each well-typed
 -- only in the branch whose transition departs that state. (The Event's own
 -- indices are KType and play no row-specific role — see the SCOPE note above.)
-readFrom : type from to. { from | n : Int } -> Event from to -> String
+readFrom : type from to. State from -> Event from to -> String
 readFrom rec ev =
     case ev of
         Unlock ->

@@ -188,9 +188,13 @@ thread in full and translated the program into the reference implementation — 
 `rowgadt_fsm_narrow`, `rowgadt_fsm_nested`, `rowgadt_fsm_nested_bad` pin its behaviour).
 
 States are rows — `Locked = {}`, `Closed = { closed : Int }`, `Open = { open : Int }`,
-`Broken = { broken : String }` — each carrying a shared counter:
+`Broken = { broken : String }`. A state is its marker plus a shared counter `n : Int`;
+the alias `State marker = { marker | n : Int }` names that row extension:
 
 ```elm
+type alias State marker =
+    { marker | n : Int }
+
 type Event from to
     = Unlock : Event {} { closed : Int }
     | Open   : Event { closed : Int } { open : Int }
@@ -200,7 +204,7 @@ type Event from to
     | Break  : Event { open : Int } { broken : String }
     | Reset  : Event { broken : String } {}
 
-readFrom : type from to. { from | n : Int } -> Event from to -> String
+readFrom : type from to. State from -> Event from to -> String
 readFrom rec ev =
     case ev of
         Unlock -> "locked#" ++ String.fromInt rec.n
