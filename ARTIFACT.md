@@ -303,3 +303,32 @@ oracle.
   fx-ui toolkit repository; the source commit is recorded in withe's first commit message
   (`Split from fx-ui at c022efa…`, with the intervening fx-ui commits listed in the paper's
   provenance paragraph).
+
+## 8. How this artifact was made (AI use)
+
+Per the ACM Policy on Authorship, AI assistance that *conducts the research* — implementing,
+testing, validating, and archiving the artifacts the conclusions rest on — must be described
+in detail; the paper states the same facts as §6.7 of `docs/research/withe-paper.md`.
+
+- **What was AI-assisted.** The project's own code was written by AI coding agents (several
+  underlying models, dispatched per work unit), working from the author's briefs and reviewed
+  by the author: the compiler (`elm-compiler/`, including the eight core libraries), the host
+  effect loop (`src/effectloop.zig`), the branch-local refinement extension
+  (`elm-compiler/src/Type/`), the frontend lambda-lifting pass
+  (`elm-compiler/src/Frontend/Lift.elm`), the Lean mechanization (`lean/`), the verification
+  harness (`tools/withe-numbers.sh`, `tests/elm-fixtures/run-elm-gate.sh`,
+  `tools/withe-corpus-baseline.sha256`, `tools/withe-recount-runTask.sh`), the adversarial
+  test passes and their fixtures, and this note's own packaging (`ARTIFACT.md`,
+  `tests/elm-fixtures/MATRIX.md`, `tools/gen-fixture-matrix.sh`).
+- **The degree, as the record shows it.** Every commit in this repository is authored by the
+  author, but the project's working records show the code was agent-written and the author
+  committed the results; two early commits in the parent repository (`fx-ui`) carry the
+  coding agents' sandbox identity. No per-line percentage is claimed. Parts of the artifact
+  are ports of third-party code — the vendored elm-syntax parser, the zinc-vm (a Zig port of
+  the Shen ZINC VM), the elm/core core libraries — where the assistance was in the porting.
+- **The human role.** The author directed the work, made the design decisions, constructed
+  the motivating example, and independently re-verified the numbers printed above. No AI
+  system is an author — the ACM policy bars listing generative AI tools as authors under any
+  conditions — and the author is accountable for the content regardless of its source.
+- **Writing.** Drafting and review of the paper's prose were also AI-assisted; the policy
+  does not require that disclosure, and it is stated here for completeness.

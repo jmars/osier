@@ -1215,6 +1215,55 @@ pinned outputs — `rowgadt_eval` `[cons 1 . true]`, `rowgadt_het` `"hi3"`, `row
 `rowgadt_l3iii` `1`, `rowgadt_fsm` `"open:42"`, `rowgadt_fsm_nested` `"open:42"`, `refutpos`
 `5` — so the gate now *executes* the GADT path, and this arity class is a regression fixture
 rather than an invisible gap.
+
+### 6.7 Provenance: AI assistance in building this artifact
+
+The ACM Policy on Authorship requires AI use that *conducts the research* — designing the
+methodology, implementing, testing, validating, and archiving the artifacts the conclusions
+rest on — to be described in detail in the methods section of the work; AI assistance with
+the *writing* no longer requires disclosure. This subsection is that description (§6 is this
+paper's methods section). It is a statement about process, not about the discipline: it
+weakens no claim and adds none.
+
+**Where the assistance was.** AI coding agents, working from the author's briefs and reviewed
+by the author, produced the project's own code, by area: the compiler implementation — the
+Elm-family compiler and its Hindley–Milner checker over scoped-label rows
+(`elm-compiler/src/`, including the eight core libraries), the frontend lambda-lifting pass
+(`elm-compiler/src/Frontend/Lift.elm`), and the host effect loop (`src/effectloop.zig`); the
+research extension itself — the branch-local refinement machinery in `Type/Unify.elm` and
+`Type/Infer.elm`, with its surface (the `type a.` binders, exhaustiveness and refutation
+checking); the Lean mechanization (`lean/`); the verification harness —
+`tools/withe-numbers.sh`, the fixture gate (`tests/elm-fixtures/run-elm-gate.sh`), the corpus
+baseline (`tools/withe-corpus-baseline.sha256`), and the recount script
+(`tools/withe-recount-runTask.sh`); the adversarial test passes — the three-pass
+unsound-accept hunt and the fixtures pinning its findings; and the artifact packaging —
+`ARTIFACT.md`, the generated fixture matrix (`tests/elm-fixtures/MATRIX.md`), and the
+prerequisite preflights. The compiler substrate is *pre-existing* in §6's sense — it predates
+the contribution — but it was built inside this project's sessions, with the same assistance.
+
+**The degree, as the record shows it.** Every commit in this repository is authored by the
+author (`git log --format='%an <%ae>' | sort -u` prints a single name), so the commit record
+alone understates the assistance: the project's working records show the code was written by
+AI coding agents — several underlying models, dispatched per work unit — with the author
+directing and committing the results, and two early commits in the parent repository
+(`fx-ui`, from which this one was split) carry the coding agents' own sandbox identity. The
+record does not support a per-line or per-component percentage, and none is claimed. One
+provenance caveat rather than a smooth "AI wrote everything": parts of the artifact are
+*ports of third-party code*, not original code by anyone — the vendored elm-syntax parser
+(from the Elm compiler), the zinc-vm (a Zig port of the Shen ZINC VM), and the elm/core core
+libraries; there, the assistance was in the porting and adaptation.
+
+**The human role.** The author directed the work, made the design decisions (the discipline
+itself, the naming, the scope, and what not to claim), constructed the motivating example,
+and independently re-verified the headline numbers before they were printed here. No AI
+system is an author: under the ACM policy, generative AI tools cannot be listed as authors
+under any conditions, and the author is accountable for the content regardless of its
+source. The deposit-side note states the same facts for a reader who arrives at the code
+first (`ARTIFACT.md` §8).
+
+For completeness, the non-required half: drafting and review of this paper's prose were also
+AI-assisted. The policy does not require that to be disclosed; it is stated here because the
+boundary between the two halves is this project's actual history.
 ---
 
 ## 7 Related work, organized by the feature-pair map
