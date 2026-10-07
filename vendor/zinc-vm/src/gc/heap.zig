@@ -61,6 +61,16 @@ pub const NURSERY_SCAVENGE_FREE_LOWATER = NURSERY_BYTES / 8;
 pub const MIN_HEAP_PAGES = 32768;
 pub const MIN_HEAP_BYTES = MIN_HEAP_PAGES * PAGEBYTES;
 
+/// NOT C (withe addition, see `Gc.grow_fail_streak`): how many grow_heap
+/// failures in a row make the exhaustion FATAL.  A grow failure is permanent
+/// (the doubling is computed from `heappages`, which never shrinks), and the
+/// anti-thrash callers ignore the false return, so without this the process
+/// livelocks printing `[gc] grow_heap: ...` once per allocation.  3 is above
+/// the 1 failure the M1 grow_heap test asserts on (`!g.grow_heap(1)`, a
+/// deliberate direct call) and is reached within ~2 allocations by a real
+/// exhausted workload.
+pub const GROW_FAIL_STREAK_MAX = 3;
+
 /// C: gc.c:351 DIRTY_VECTORS_MAX — remembered-set capacity valve.
 /// Net-removal (M5): raised 8192 -> 65536.  The remembered set now carries the
 /// full old-gen->nursery edge population that the removed gcMove page queue
@@ -223,6 +233,16 @@ pub const Gc = struct {
     // ---- mmap bookkeeping — C: gc.c:303, 308 (raw_heap_start/heap_mmap_size)
     raw_heap_start: usize,
     heap_mmap_size: usize,
+    /// Consecutive failed grow_heap calls (NOT C — a withe addition, see
+    /// grow_heap).  A grow failure is PERMANENT: the doubling that just
+    /// failed is computed from `heappages`, which never shrinks, so once
+    /// 2*heappages*PAGEBYTES exceeds the reservation every later attempt
+    /// fails too.  The callers that ignore the false return — the anti-thrash
+    /// `_ = grow_heap(1)` in gc_alloc/gc_alloc_oldgen — would then re-collect
+    /// and re-grow on EVERY allocation, printing one line each time and never
+    /// finishing (the M0 trap: 5771 lines and zero output in 45 s).  Counting
+    /// the streak turns that livelock into a loud panic.
+    grow_fail_streak: u32 = 0,
 
     // ---- instrumentation counters — C: gc.c:91-96, 100, 296, 385, 401-402 ----
     collect_seq: u64 = 0, // C: gc.c:100 gc_collect_seq (banners, M3/M4)
@@ -529,6 +549,7 @@ pub const Gc = struct {
                 self.type_page[self.md(i)] = 0;
                 self.page_queued[self.md(i)] = 0;
             }
+            self.grow_fail_streak = 0;
             return true;
         }
 
@@ -537,6 +558,22 @@ pub const Gc = struct {
             "[gc] grow_heap: need {d} MB but reservation is {d} MB\n",
             .{ new_heap_size / (1024 * 1024), self.heap_mmap_size / (1024 * 1024) },
         );
+
+        // withe addition (NOT C): the failure above is permanent, so a caller
+        // that ignores the false return livelocks.  See grow_fail_streak.
+        self.grow_fail_streak += 1;
+        if (self.grow_fail_streak >= GROW_FAIL_STREAK_MAX)
+            std.debug.panic(
+                "gc: heap exhausted — grow_heap failed {d}x in a row; the {d} MB " ++
+                    "reservation cannot hold another doubling of the {d} MB heap " ++
+                    "(this is permanent, not transient). Raise the heap: " ++
+                    "heap.Gc.init(.{{ .heap_bytes = ... }}) / ELMC_HEAP_MB=<N>.",
+                .{
+                    self.grow_fail_streak,
+                    self.heap_mmap_size / (1024 * 1024),
+                    self.heappages * PAGEBYTES / (1024 * 1024),
+                },
+            );
         return false;
     }
 
