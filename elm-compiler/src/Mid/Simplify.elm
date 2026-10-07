@@ -50,6 +50,7 @@ module Mid.Simplify exposing (Config, defaultConfig, off, run, runWithReport)
 -- config exists), which keeps the byte-identity anchor structural rather than
 -- conditional.
 
+import Mid.ConstFold as ConstFold
 import Mid.Ir exposing (Defun)
 import Mid.Shrink as Shrink
 
@@ -115,8 +116,31 @@ run config defuns =
 
 runWithReport : Config -> List Defun -> ( List Defun, String )
 runWithReport config defuns =
-    if config.shrink then
-        Shrink.run defuns
+    -- The pipeline is a fixed-order fold over the enabled passes.  Each pass
+    -- returns the (possibly rewritten) defuns plus a report string; the empty
+    -- reports are dropped and the rest joined with " | ", which is the format
+    -- `Main.modeLine` renders as `passes=[...]`.  The order here IS the pass
+    -- order (plan §(b), documented in this module's header) — never reorder
+    -- it without re-deriving the compounding argument above.
+    let
+        steps : List ( Bool, List Defun -> ( List Defun, String ) )
+        steps =
+            [ ( config.shrink, Shrink.run )
+            , ( config.constFold, ConstFold.run )
+            ]
 
-    else
-        ( defuns, "" )
+        step : ( Bool, List Defun -> ( List Defun, String ) ) -> ( List Defun, List String ) -> ( List Defun, List String )
+        step ( enabled, pass ) ( defuns0, reports ) =
+            if enabled then
+                let
+                    ( defuns1, report ) =
+                        pass defuns0
+                in
+                ( defuns1, reports ++ (if String.isEmpty report then [] else [ report ]))
+
+            else
+                ( defuns0, reports )
+    in
+    case List.foldl step ( defuns, [] ) steps of
+        ( final, reports ) ->
+            ( final, String.join " | " reports )
