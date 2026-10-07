@@ -264,7 +264,7 @@ oracle.
 
 ## 6. What is **not** in this repository
 
-- **The UI/toolkit.** It lives in the sibling `fx-ui` repository
+- **The UI/toolkit.** It lives in the separate `fx-ui` repository
   (`https://github.com/fixpoint-linux/fx-ui`): the renderer, terminal input, the pty/GUI examples
   and the terminal-UI fixtures. This artifact is the language, its host effect loop, the
   mechanization and the language evidence chain.

@@ -2,7 +2,7 @@
 
 The Withe language — compiler, ZINC VM, Lean mechanization, and the language's
 evidence chain — as its own repository. The terminal/GUI toolkit that consumes
-it lives in the sibling [`fx-ui`](https://github.com/fixpoint-linux/fx-ui) repo.
+it lives in the separate [`fx-ui`](https://github.com/fixpoint-linux/fx-ui) repo.
 
 **Artifact evaluation:** what this is, the tag to check out, the one command
 that reproduces the paper's numbers and what they should be, and every

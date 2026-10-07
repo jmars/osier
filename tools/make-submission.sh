@@ -64,7 +64,8 @@ RULES = [
      "(the companion document that is the bibliography's source)"),
     ("is the companion\n`docs/research/withe-related-work.md`)", "is the companion\nsurvey)"),
     (" (`docs/research/withe-related-work.md`)", ""),
-    ("https://github.com/fixpoint-linux/withe", "the artifact repository"),
+    ("https://github.com/jmars/withe", "the artifact repository"),
+    ("fixpoint-linux/withe", "the artifact repository"),
 ]
 
 out = src
@@ -111,8 +112,10 @@ DENY = [
     "tools/withe-recount-runTask.sh",# evidence script
     "tools/withe-corpus-baseline.sha256",
     "docs/research/withe-related-work.md",  # companion-survey filename (repo name)
-    "https://github.com/fixpoint-linux/withe",  # repository URL
+    "https://github.com/jmars/withe",  # repository URL
+    "fixpoint-linux/withe",          # the repository's pre-transfer path
     "fixpoint",                      # repository owner/org name
+    "jmars",                         # repository owner's GitHub account name
     "jaye",                          # author's first name / e-mail local part
     "jaye.ch",                       # author's e-mail domain
     "Jaye Marshall",                 # author's full name
