@@ -1275,8 +1275,8 @@ the contribution — but it was built inside this project's sessions, with the s
 author (`git log --format='%an <%ae>' | sort -u` prints a single name), so the commit record
 alone understates the assistance: the project's working records show the code was written by
 AI coding agents — several underlying models, dispatched per work unit — with the author
-directing and committing the results, and two early commits in the parent repository
-(`fx-ui`, from which this one was split) carry the coding agents' own sandbox identity. The
+directing and committing the results, and two early commits in the parent repository from
+which this one was split carry the coding agents' own sandbox identity. The
 record does not support a per-line or per-component percentage, and none is claimed. One
 provenance caveat rather than a smooth "AI wrote everything": parts of the artifact are
 *ports of third-party code*, not original code by anyone — the vendored elm-syntax parser
