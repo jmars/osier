@@ -13,3 +13,8 @@ tests/elm-fixtures/out/hello.out
 .zig-cache-global/
 __pycache__/
 *.pyc
+
+# paper PDF build products (the .tex is committed; rebuild with
+# tools/make-paper-pdf.sh).  Everything except the generated .tex is ignored.
+docs/research/build/*
+!docs/research/build/*.tex
