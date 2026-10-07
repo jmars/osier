@@ -29,13 +29,15 @@ implements it: the pre-existing corpus compiles byte-identically against a commi
 regression checks pass, and an external state machine translated from an OCaml thread now has its
 impossible match arms refuted at compile time. An adversarial hunt across three passes found five
 unsound accepts — two in the first escape check, two in the shipping checks, one in the coercion
-surface — all fixed, pinned, and mechanized, the last by a class-level repair of the equation
-lifecycle; and the compiler's own effect
+surface — all fixed and pinned by gate fixtures, the two escape-check accepts additionally
+mechanized as theorems, the last closed by a class-level repair of the equation lifecycle; and
+the compiler's own effect
 interpreter checks 16 of 20 branches honestly, the four holdouts named and decomposed by kind of
 lie. Ninety Lean theorems (three explicit axioms) mechanize the row-rewrite commutation under
-duplicate labels — one of them corrects our own specification — the escape domain rule, and the
-update theorem. We do not prove general soundness: progress and preservation are argued, and the
-mechanization targets the row algebra rather than the typing judgment.
+duplicate labels — one of them corrects our own specification — the escape domain rule, the
+update theorem, and the typing judgment's row-specific obligations (the store discipline and
+record-operation preservation), with the unifier abstracted as a parameter. We do not prove
+general soundness: progress and preservation are argued.
 
 ---
 
@@ -51,7 +53,7 @@ Row unification wants a type variable to be *solvable*: an equation such as
 `ρ ≐ { x : Int | ρ' }` is written back into a single global substitution. GADT refinement wants an
 equation to be *local*: two branches of one match may learn conflicting facts about one variable,
 so no global substitution can hold them both. Every GADT-inference framework resolves this by
-making refined variables rigid — untouchable by the solver [Peyton Jones et al. 2011; Pottier &
+making refined variables rigid — untouchable by the solver [Vytiniotis et al. 2011; Pottier &
 Régis-Gianas 2006] — and every row system resolves it by never putting a row variable under an
 equation at all. The interaction is genuinely unoccupied: no published type system refines a
 *row variable* by a branch-local GADT equation, and no published system therefore says which
@@ -162,7 +164,7 @@ store and is rejected under an active equation.
 The same discipline unlocks type witnesses — the encoding practitioners use to recover an
 element type a container does not mention. `type Witness a = WInt : Witness Int | WString :
 Witness String`, an existential wrapper `Some : Witness a -> a -> Any`, and a fold over a list
-`[Some WInt 3, Some WString "hi"]` all type-check (gate fixture `rowgadt_het`, clean): the
+`[Some WInt 3, Some WString "hi"]` all type-check (gate fixture `rowgadt_het`, run `"hi3"`): the
 existential `a` bound by the `Some` pattern is instantiated *rigid* (the "existentials are
 skolems" rule every GADT system needs; before it, the `a` was a flexible unification variable, a
 nested match bound it globally, and the sibling `WString` branch conflicted — two independently
@@ -180,7 +182,8 @@ state machine: states as types, transitions as a GADT-witnessed relation, and a 
 chain of events — and there the author hits the wall this paper characterizes, on all three
 sides: illegal construction is rejected, but the *impossible arms* of the chain match cannot be
 refuted, and the recommended fix is the per-field-object workaround. We retrieved and read the
-thread in full and translated the program into Withe, the surface of λρG (the example lives at
+thread in full and translated the program into the reference implementation — the surface of
+λρG (the example lives at
 `examples/research/fsm/door.elm`; gate fixtures `rowgadt_fsm`, `rowgadt_fsm_bad`,
 `rowgadt_fsm_narrow`, `rowgadt_fsm_nested`, `rowgadt_fsm_nested_bad` pin its behaviour).
 
@@ -206,8 +209,9 @@ readFrom rec ev =
         ...
 ```
 
-Where OCaml's equations "cannot narrow a polymorphic variant constraint", Withe's narrowing is
-direct and *per-branch*: in the `Open` branch the from-row is refined to `{ closed : Int }` and
+Where OCaml's equations "cannot narrow a polymorphic variant constraint", the reference
+implementation's narrowing is direct and *per-branch*: in the `Open` branch the from-row is
+refined to `{ closed : Int }` and
 `rec.closed` is well-typed *only there* — in the `Close` branch (from-row `{ open : Int }`) the
 read `rec.broken` is rejected with `type variable a is rigid (from the signature) and cannot be
 unified with {broken:a| b}` (gate fixture `rowgadt_fsm_narrow`, re-measured), while the *same
@@ -216,8 +220,9 @@ per-branch, not per-field. No per-field restructuring is needed: the states *are
 refinement is the mechanism, not the workaround.
 
 The thread's *headline* wall is refutation, and that too is answered. The source author could not
-get OCaml to refute the impossible arms of the chain match (its `-> .` mechanism). Withe now
-checks *exhaustiveness* — a match omitting a possible arm is a compile error, not a runtime
+get OCaml to refute the impossible arms of the chain match (its `-> .` mechanism). The reference
+implementation now checks *exhaustiveness* — a match omitting a possible arm is a compile error,
+not a runtime
 raise (fixture `adtgaps`) — and *refutes* impossible arms under the branch equations:
 `describeBroken : Step { broken : String } -> String` matching only `Then prev Break` compiles
 clean, because `Start : Step {}` and every other event are impossible at that index (fixture
@@ -295,8 +300,10 @@ outline:
    coarse for duplicates), the update theorems, and both escape counterexamples. An adversarial
    hunt across three passes found five *real unsound accepts* — the first escape check's
    let-laundering through let-generalization and its wildcard sibling leak, two in the shipping
-   checks, and one in the coercion surface — all fixed, all pinned by fixtures, all mechanized,
-   the coercion-surface one closed by a class-level repair of the equation lifecycle (Section 4).
+   checks, and one in the coercion surface — all fixed, all pinned by fixtures; the two
+   escape-check accepts are additionally mechanized as theorems (`H2b_no_quantify_refined_tail`,
+   `H2b_wildcard_leak_shape`), and the coercion-surface one is closed by a class-level repair of
+   the equation lifecycle (Section 6.2).
 5. **A working reference implementation, measured against itself and an external program.** The
    discipline runs inside an Elm-family checker: the pre-existing corpus compiles
    *byte-identically* after the change — 149 artifacts with zero moved — and the committed
@@ -309,10 +316,11 @@ outline:
    guard of Section 1.4.
 
 **Scope, stated once.** We do not prove general soundness: progress and preservation are argued,
-not proved, and the mechanization targets the row algebra and the record operations rather than
-the whole typing judgment. What the mechanization *does* carry are exactly the two row-specific
-obligations the argued soundness rests on (the rewrite/equation commutation, and the update
-domain theorem), plus the escape counterexamples. A paper claim we cannot trace to a theorem
+not proved. What the mechanization *does* prove are exactly the row-specific obligations the
+argued soundness rests on — the rewrite/equation commutation (H1), the update domain theorem,
+the store discipline and escape rule of the typing judgment (`tier_R_forces_escape` and
+companions), and record-operation preservation — plus the escape counterexamples, all with the
+unifier abstracted as a parameter (Section 4.1). A paper claim we cannot trace to a theorem
 name, a fixture, or a measurement is cut rather than hedged.
 
 ### 1.7 The map of the paper
@@ -530,7 +538,7 @@ For each branch i (pattern pᵢ, body eᵢ):
   Δ⁰ = Δ                                (SNAPSHOT the store)
   unify_branch(t_p ≐ t_s) ⊳ Δᵢ          (capture: would-be rigid binds become equations)
   Γ, binds_i ; Δ ∪ Δᵢ ; R ∪ lifted(pᵢ, t_p, t_s) ⊢ eᵢ : t_b
-  branch-result check (§2.7) of t_b against t_r
+  branch-result check (§3.1) of t_b against t_r
   Δ := Δ⁰                              (TRUNCATE: restore the snapshot)
 ────────────────────────────────────── R-CASE
 Γ ; Δ ; R ⊢ case e of { pᵢ ↦ eᵢ } : t_r
@@ -578,9 +586,13 @@ promise a domain the signature does not. Its rigid failure surfaces as the expli
 
 The full decision procedure at a branch result, in order (Figure 4):
 
-1. **Tail-escape pre-check** — did this unification newly identify a refined tail with its
-   head? (`dropIntroduced`: the drop shape.) → reject.
-2. Unify (zonked both sides); success → done.
+1. Unify (both sides zonked first).
+2. On success, three gates before acceptance, in order: the **tail-escape check** — did this
+   unification newly identify a refined tail with its head? (`dropIntroduced`: the drop shape)
+   → reject; the **flex→rigid alias gate** — did it alias a refined target?
+   (`refinedTargetAliasedBy`) → reject; the **branch-end occurs check** — does a pending `KType`
+   equation's body now contain its target? (`pendingTypeOccurs`) → reject (*infinite type*).
+   All three pass → done.
 3. On rigid failure: does the presented type *rebuild* the head's refinement (unifies with the
    equation body, head not free in it)? → **accept without binding** (`rebuildMatches`).
 4. Else, is there a usable *type* equation? → Tier-T discharge.
@@ -591,8 +603,11 @@ The full decision procedure at a branch result, in order (Figure 4):
 
 **Figure 4.** The branch-result decision procedure. Source:
 `docs/research/row-gadt-calculus.md` §2.7 and the code — `unifyResultM`
-(`elm-compiler/src/Type/Infer.elm:1498`), whose domain helpers are `dropIntroduced` (:1842),
-`rebuildMatches` (:1879), and `tailReachesHead` (:1818).
+(`elm-compiler/src/Type/Infer.elm:1498`): unify first (`:1509`), then on success the three gates
+`dropIntroduced` (`:1511`), `refinedTargetAliasedBy` (`:1515`), `pendingTypeOccurs` (`:1526`);
+on rigid failure `rebuildMatches` (`:1534`) and the Tier-T discharge (`:1542`). Helpers:
+`tailReachesHead` (`:1818`), `dropIntroduced` (`:1842`), `rebuildMatches` (`:1879`),
+`refinedTargetAliasedBy` (`:1709`).
 
 **The operation-level answer.** The rules decide, for each record operation, whether it survives
 an active refinement `ρ ≐ { ℓ : t | ρ' }` on the base's tail:
@@ -669,6 +684,18 @@ recursion and the conclusion are back under the bare Δ. The two-tier rule is ve
 may conclude ok); Tier-R is *terminal* — a needed row equation forces escape. The asymmetry is
 in the type of the rule, not merely in its premises. Theorems `tier_R_forces_escape`
 (`TypingStore.lean`) and `tier_T_ok` (`Preserve.lean`) pin both directions.
+
+**The assumption, named.** The theorems about the typing judgment are conditional on the axiom
+parameters — stated, not hidden: the store discipline (`TypingStore.lean`) is conditional on
+`Unifies`/`Captures` and on nothing else; the preservation results (`Preserve.lean`) are
+conditional on the unifier being *sound* (it must not accept inconsistent constraints) and, for
+the plain-selection case, on `unifies_field_projection` (the discharged-selection and update
+cases need no unifier axiom). The row-algebra theorems (H1, the domain rule, the update theorem,
+both counterexamples) never mention the axioms. The correspondence between the abstract relation
+and the implementation's unifier is *measured*, not proved: the gate's 152 checks, the
+approximation inventory of Section 6.5, and the three-way agreement of Section 4.7 stand on the
+same boundary. Mechanizing the concrete row unifier against these axioms is future work; it
+would discharge the assumption, not change any theorem's statement.
 
 ### 4.2 H1 — rewrite/equation commutation, under duplicates
 
@@ -780,8 +807,10 @@ types of a common label) — stated as an axiom parameter alongside `Unifies`/`C
 not proved: T1 introduces no new redex shape and its genuinely new obligation — every
 selection licensed by R-SEL-DISCH finds its label at runtime — is *carried by* T2's SELECT
 clause, which is what `selDisch_preserves` mechanizes; T2's two row clauses are exactly what H1
-and the update theorem carry. The mechanization targets the row algebra, the store, the escape
-rule, and the record operations — not the whole calculus. We say this once, plainly, and do not
+and the update theorem carry. What the mechanization *does* prove are typing-judgment theorems
+— the row algebra, the store discipline (`tier_R_forces_escape` and companions), the escape
+rule, and record-operation preservation — conditional on the unifier abstracted as a parameter
+(Section 4.1); it does not attempt the whole calculus. We say this once, plainly, and do not
 let later sections upgrade "argued" to "proved".
 
 **The negative result (stated, not proved).** Let λρG⁻ be the variant in which branch mode is
@@ -844,16 +873,16 @@ conflicting branch equations, and the signature is not optional in Q.
 
 ### 5.2 The measurement, and the inversion
 
-The L3 table (Figure 6): three presentations of the *same access* — read a field justified
+The L3 table (Figure 5): three presentations of the *same access* — read a field justified
 by a witness — with the signature *omitted*, all three gate-registered and re-measured:
 
 | presentation | signature omitted | measured |
 |---|---|---|
-| (i) witness-encoded (`Some w x` + nested witness match) | **inferred** — `Any → String` | `rowgadt_l3i`: clean |
+| (i) witness-encoded (`Some w x` + nested witness match) | **inferred** — `Any → String` | `rowgadt_l3i`: run `"3"` |
 | (ii) native row + GADT refinement (Figure 1's `select`) | rejected — the sibling equations conflict on the flexible ρ (`cannot unify {k:a\| b} with {\| a}`) | `rowgadt_l3ii`: `err … cannot unify {k:a\| b} with {\| a}` |
-| (iii) plain row access (no GADT) | **inferred** — `∀ r a. { r \| x : a } → a` | `rowgadt_l3iii`: clean |
+| (iii) plain row access (no GADT) | **inferred** — `∀ r a. { r \| x : a } → a` | `rowgadt_l3iii`: run `1` |
 
-**Figure 6.** The L3 principality measurement — three presentations of the same access, the
+**Figure 5.** The L3 principality measurement — three presentations of the same access, the
 signature omitted. Source: gate fixtures `rowgadt_l3i`, `rowgadt_l3ii`, `rowgadt_l3iii`
 (measured column, re-measured by `tools/withe-numbers.sh`; registered rows in
 `tests/elm-fixtures/MATRIX.md`); the P/Q classification is §5.1 above
@@ -905,22 +934,23 @@ erased). Everything below is *measured*, and every number is reproducible from t
 one command (`tools/withe-numbers.sh`, which rebuilds the compiler, runs the gate, checks the
 corpus byte-identity, runs the unit suite, builds the Lean project, and re-derives the
 interpreter recount; its output is the source of every number printed here — run on the current
-tree of `fixpoint-linux/withe`, the language repository the paper now lives in and describes, at
-tag `withe-paper-artifact-1` (annotated; it dereferences to the commit it was made on, so this
-provenance note does not move with later ones). The implementation was split out of fx-ui:
-withe@`0e5296e` imported the tree
-from fx-ui@`c022efa` — the pre-split fx-ui HEAD, eight commits ahead of the freeze tag
-`withe-paper-freeze-1` (fx-ui@`9639443`, the pre-adversarial-pass baseline) — with `e26ca75` and
-`4a1b420` following; fx-ui@`3594d13` removed the language and fx-ui@`e7018af` parked the UI. The
-arrow-spelling GADT parser fix, the equation-lifecycle repair, and the lambda-lifting pass all
-post-date the freeze tag).
+tree of the artifact repository. The artifact tag `withe-paper-artifact-1` (annotated; it
+dereferences to the commit it was made on) predates the final ten commits, which touch the
+documentation, the gate and reproducibility scripts, and the generated fixture registry this
+paper cites — but not the compiler, the Lean project, or the fixture programs, which are
+identical between the tag and the current tree, so no number printed here depends on the lag.
+The implementation was split out of the host project that previously contained it: the import
+brought the tree across from the host's then-HEAD, eight commits ahead of the freeze tag
+marking the pre-adversarial-pass baseline, with two further host-side commits following; the
+language was later removed from the host and the UI parked. The arrow-spelling GADT parser fix,
+the equation-lifecycle repair, and the lambda-lifting pass all post-date the freeze tag).
 
 **A substrate fact, recorded as an artifact datum.** The substrate's local `let` is
 *sequential-only*: a local function cannot see its own name, so a self-recursive local helper
 fails `type error … unknown name: f` (raised by the checker, before lowering). The compiler's own
 `Type/Exhaustive.elm` (its `resolveScrutinee`) hit this while the compiler's sources were being
 made self-hosting; a frontend lambda-lifting pass now hoists recursive local groups to the top
-level (`elm-compiler/src/Frontend/Lift.elm`, commit `f59b19f`), with the VM substrate untouched —
+level (`elm-compiler/src/Frontend/Lift.elm`), with the VM substrate untouched —
 no new instruction and no collector change, which is why a frontend pass was chosen over a
 VM-level `letrec`. It is recorded as a measured datum about what the substrate is and what the
 artifact needed, not as a contribution.
@@ -975,10 +1005,10 @@ expected result. It was sound on the shapes its author considered.
 
 **(2) The first of three adversarial passes found two programs the check accepted that are
 unsound** (both are now gate-registered compile errors, `rowgadt_escape_launder` and
-`rowgadt_escape_wildcard`; both programs in full, verbatim, are Figure 5):
+`rowgadt_escape_wildcard`; both programs in full, verbatim, are Figure 6):
 
 - **Let-laundering.** The `Here` branch refines `ρ ≐ { l : t | ρ' }`, the scrutinee is an
-  `HList ρ`, and the branch returns its tail — laundered through a `let` (Figure 5a).
+  `HList ρ`, and the branch returns its tail — laundered through a `let` (Figure 6a).
 
   `let`-generalization *quantified the refined tail* ρ', so the use of `ys` instantiates a
   fresh variable with no link to the tail; the occurrence test sees nothing; the fresh variable
@@ -986,7 +1016,7 @@ unsound** (both are now gate-registered compile errors, `rowgadt_escape_launder`
   accept (the pre-fix checker compiled it clean).
 
 - **Wildcard sibling leak.** The refining branch returns the tail while a wildcard branch
-  returns the full row (Figure 5b).
+  returns the full row (Figure 6b).
 
   The shared case-result variable lets the wildcard's full-row result unify *tail := head* — a
   legal flex alias — zonking the tail away before the clause-level check runs. The check had
@@ -1042,7 +1072,7 @@ escapeBad h xs =
             xs
 ```
 
-**Figure 5.** The two stage-(2) counterexamples. Pre-fix, both compiled clean (unsound
+**Figure 6.** The two stage-(2) counterexamples. Pre-fix, both compiled clean (unsound
 accepts); post-fix, both are gate-registered compile errors, `err escaping row equation …`
 (Table 1).
 
@@ -1116,9 +1146,9 @@ Section 1.4 sound at a *bare* index (`refutbare`).
 
 **An artifact datum, recorded as such.** The `Task` type now declares only the effects its host
 can perform — the ten UI effect constructors and the `Key`/`Mouse` types left the language and
-park in fx-ui pending a UI redesign — and an effect the host does not implement fails loudly and
-terminates, pinned by a hand-crafted-bundle gate check (`unhandledtask`). It is recorded as a
-datum about what the artifact now is, not as a contribution.
+park in the host project pending a UI redesign — and an effect the host does not implement
+fails loudly and terminates, pinned by a hand-crafted-bundle gate check (`unhandledtask`). It is
+recorded as a datum about what the artifact now is, not as a contribution.
 
 The acid test is not a fixture but the compiler's own `Runtime.runTask` — the free-monad
 interpreter for its 20-constructor effect type, historically a *trusted body* (a function the
@@ -1270,8 +1300,8 @@ boundary between the two halves is this project's actual history.
 
 The organization of this section is itself a contribution. Three features — **R** row
 polymorphism, **G** GADT refinement, **A** explicit/locally abstract polymorphism — pick out
-cells by the pairs they combine, and the map (24 works, surveyed with primary-source
-retrievals; the survey with verbatim quotes and URLs is the companion
+cells by the pairs they combine, and the map (26 works — 24 retrieved from primary
+sources, 2 carried second-hand; the survey with verbatim quotes and URLs is the companion
 `docs/research/withe-related-work.md`) makes two things visible at once: *which adjacent cells
 are occupied* — so that "but X did rows" and "but Y did GADTs" are answered before they are
 asked — and *that one specific cell is empty*. No published type system refines a row variable
@@ -1279,6 +1309,17 @@ by a branch-local GADT equation, and no published system therefore says which re
 remain typable when such an equation is active. The claim is about published systems with a
 *designed discipline*; it is never worded "rows and GADTs have never been combined" — OCaml
 ships the raw combination as an idiom, and its boundary is discovered empirically by its users.
+
+The claim is falsifiable, and the survey that backs it states the method. Every row of the map
+is a published system retrieved from a primary source — paper, language documentation, or
+maintainer record — and classified by the feature pairs it ships; the survey records the query
+terms run and a would-be-breakers table giving each candidate examined and why it falls short of
+the cell. A referee who knows a published system with a *designed discipline* that refines a
+row variable by a branch-local GADT equation is asked to name it: one such system occupies the
+cell and refutes the claim. The rows-only side of the map carries the method's clearest
+positive control: PureScript ships row-polymorphic records and its core team has argued GADTs
+out — "I think we should commit to not adding GADTs" (hdgarrood, 2019) — so the pair cannot
+arise there by first-party decision rather than by oversight.
 
 ### 7.1 The rows-only lineage (R)
 
@@ -1337,7 +1378,14 @@ al. 2006] put rigidity in the environment per annotation; the word "row" does no
 paper. **Ambivalent types** [Garrigue & Rémy 2013] formalize OCaml's locally abstract types —
 a rigid variable "can be refined by GADT pattern matching" — with scoped equations that may not
 leak out of a branch: the closest *mechanism* to ours, on a grammar (`τ ::= α | a | τ→τ | eq(τ,τ)
-| int`) that cannot state `ρ ≐ {l:t|ρ'}`.
+| int`) that cannot state `ρ ≐ {l:t|ρ'}`. **Choice types** [Chen & Erwig 2016] are the nearest
+G-lineage neighbour to our boundary: they carry branch refinements *in the type language* —
+choice types `D⟨φ̄⟩`, alternatives synchronised by name, with a separate reconciliation phase
+that replaces choices by type index variables — and price it in their own words, "principality
+comes at the price of having choice types in the type language". Their grammar
+(`τ ::= α | τ→τ | T τ`) has no record type, no row variable, and no presence (grep-measured on
+the retrieved text): refinement reaches only GADT type-constructor parameters, never a row —
+they stop at the boundary this paper crosses.
 
 **HMG(X) [Simonet & Pottier 2007] is the un-walked door.** It is a parameterised,
 constraint-based account of guarded ADTs — every branch checked "under different assumptions
@@ -1390,10 +1438,11 @@ We state the limitations as first-class results, not as apology: several of them
 or fixture-backed boundaries (marked), and none is silently hedged.
 
 - **No general soundness theorem** *(paper-gap: the wording is the fix)*. Progress and
-  preservation are argued, not proved; the mechanization covers the row algebra, the store, the
-  escape rule, the update theorem, and record-operation preservation — 90 theorems over 3 axiom
-  parameters — not the whole typing judgment. What the mechanization *does* carry are exactly the
-  two row-specific obligations the argued soundness rests on. Later revisions must not upgrade
+  preservation are argued, not proved. The mechanization's 90 theorems — over 3 axiom
+  parameters — are typing-judgment theorems: the row algebra, the store discipline, the escape
+  rule, the update theorem, and record-operation preservation, conditional on the unifier
+  abstracted as a parameter. What they carry are exactly the two row-specific obligations the
+  argued soundness rests on; the whole judgment is not covered. Later revisions must not upgrade
   "argued" to "proved".
 - **The escape check is sound but over-approximate — proved, not hedged** (`h2b_overapproximation`):
   it rejects some legitimate returns. The duplicate-label case is *coarse* — proved
