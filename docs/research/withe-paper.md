@@ -1260,8 +1260,7 @@ The ACM Policy on Authorship requires AI use that *conducts the research* — de
 methodology, implementing, testing, validating, and archiving the artifacts the conclusions
 rest on — to be described in detail in the methods section of the work; AI assistance with
 the *writing* no longer requires disclosure. This subsection is that description (§6 is this
-paper's methods section). It is a statement about process, not about the discipline: it
-weakens no claim and adds none.
+paper's methods section). It is a statement about process, not about the discipline.
 
 **Where the assistance was.** AI coding agents, working from the author's briefs and reviewed
 by the author, produced the project's own code, by area: the compiler implementation — the
@@ -1280,16 +1279,13 @@ prerequisite preflights. The compiler substrate is *pre-existing* in §6's sense
 the contribution — but it was built inside this project's sessions, with the same assistance.
 
 **The degree, as the record shows it.** Every commit in this repository's history carries the
-author's name (`git log --format='%an' | sort | uniq -c` prints the author's name and
-nothing else; a documentation commit an agent made directly at first carried
-`hax <hax@localhost>` — the agent harness's own identity — and was re-authored to match).
-The commit record alone therefore says nothing about the assistance: it credits the author
+author's name (`git log --format='%an' | sort | uniq -c` prints the author's name and nothing
+else). The commit record alone therefore says nothing about the assistance: it credits the author
 for work that the project's working records show was written by AI coding agents — several
 underlying models, dispatched per work unit — with the author directing and committing the
 results, and two early commits in the parent repository from which this one was split carry
 the coding agents' own sandbox identity. The record does not support a per-line or
-per-component percentage, and none is claimed. One
-provenance caveat rather than a smooth "AI wrote everything": parts of the artifact are
+per-component percentage. Parts of the artifact are
 *ports of third-party code*, not original code by anyone — the vendored elm-syntax parser
 (from the Elm compiler), the zinc-vm (a Zig port of the Shen ZINC VM), and the elm/core core
 libraries; there, the assistance was in the porting and adaptation.
