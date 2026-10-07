@@ -566,7 +566,9 @@ instantiate: qⱼ ↦ fresh q̂ⱼ;  q̂ⱼ rigid ⟺ qⱼ ∉ determined ∧ fl
 
 **Figure 3.** The typing rules of λρG, in the order of the inventory above. Source:
 `docs/research/row-gadt-calculus.md` §2.4–2.9, verbatim rule blocks (the prose around them,
-with the implementation seats, remains in the companion spec).
+with the implementation seats, remains in the companion spec) — the one departure is R-CASE's
+internal cross-reference, repointed from the spec's §2.7 to this paper's §3.1, where the
+branch-result rule lives.
 
 ---
 
@@ -1278,12 +1280,14 @@ unsound-accept hunt and the fixtures pinning its findings; and the artifact pack
 prerequisite preflights. The compiler substrate is *pre-existing* in §6's sense — it predates
 the contribution — but it was built inside this project's sessions, with the same assistance.
 
-**The degree, as the record shows it.** Every commit in this repository is authored by the
-author (`git log --format='%an <%ae>' | sort -u` prints a single name), so the commit record
-alone understates the assistance: the project's working records show the code was written by
-AI coding agents — several underlying models, dispatched per work unit — with the author
-directing and committing the results, and two early commits in the parent repository from
-which this one was split carry the coding agents' own sandbox identity. The
+**The degree, as the record shows it.** 27 of this repository's 28 commits carry the author's
+name (`git log --format='%an' | sort | uniq -c` prints the author's name 27 times and
+`hax <hax@localhost>` — the agent harness's own identity — once); the exception is a
+documentation commit an agent made directly. The commit record alone therefore understates
+the assistance: it credits the author for work that the project's working records show was
+written by AI coding agents — several underlying models, dispatched per work unit — with the
+author directing and committing the results, and two early commits in the parent repository
+from which this one was split carry the coding agents' own sandbox identity. The
 record does not support a per-line or per-component percentage, and none is claimed. One
 provenance caveat rather than a smooth "AI wrote everything": parts of the artifact are
 *ports of third-party code*, not original code by anyone — the vendored elm-syntax parser
@@ -1307,7 +1311,7 @@ boundary between the two halves is this project's actual history.
 
 The organization of this section is itself a contribution. Three features — **R** row
 polymorphism, **G** GADT refinement, **A** explicit/locally abstract polymorphism — pick out
-cells by the pairs they combine, and the map (26 works — 24 retrieved from primary
+cells by the pairs they combine, and the map (26 rows — 24 retrieved from primary
 sources, 2 carried second-hand; the survey with verbatim quotes and URLs is the companion
 survey) makes two things visible at once: *which adjacent cells
 are occupied* — so that "but X did rows" and "but Y did GADTs" are answered before they are
@@ -1319,11 +1323,12 @@ variant row, no equation.) The claim is about published systems with a
 *designed discipline*; it is never worded "rows and GADTs have never been combined" — OCaml
 ships the raw combination as an idiom, and its boundary is discovered empirically by its users.
 
-The claim is falsifiable, and the survey that backs it states the method. Every row of the map
-is a published system retrieved from a primary source — paper, language documentation, or
-maintainer record — and classified by the feature pairs it ships; the survey records the query
-terms run and a would-be-breakers table giving each candidate examined and why it falls short of
-the cell. A referee who knows a published system with a *designed discipline* that refines a
+The claim is falsifiable, and the survey that backs it states the method. Every row of the
+map is a published system — 24 of the 26 retrieved from a primary source (paper, language
+documentation, or maintainer record), 2 carried second-hand — and classified by the feature
+pairs it ships; the survey records the query terms run and a would-be-breakers table giving
+each candidate examined and why it falls short of the cell. A referee who knows a published
+system with a *designed discipline* that refines a
 row variable by a branch-local GADT equation is asked to name it: one such system occupies the
 cell and refutes the claim. The rows-only side of the map carries the method's clearest
 positive control: PureScript ships row-polymorphic records and its core team has argued GADTs
