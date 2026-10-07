@@ -92,24 +92,33 @@ it.
 
 ```elm
 type Has l t rho
-    = Here  : Has l t { l : t | rho }
+    = Here : Has l t { l : t | rho }
     | There : Has l t rho -> Has l t { k : s | rho }
+
 
 select : type rho l t. { rho | l : t } -> Has l t rho -> t
 select r h =
     case h of
-        Here  -> r.l
-        There rest -> select r rest
+        Here ->
+            r.l
+
+        There rest ->
+            select r rest
 
 setx : type rho l t. { rho | l : t } -> Has l t rho -> t -> { rho | l : t }
 setx r h v =
     case h of
-        Here  -> { r | l = v }
-        There rest -> setx r rest v
+        Here ->
+            { r | l = v }
+
+        There rest ->
+            setx r rest v
 ```
 
-**Figure 1.** The crux program (gate fixtures `rowgadt_select`, `rowgadt_setx`; both compile
-clean, and `select`'s body is the live fixture verbatim).
+**Figure 1.** The crux program — the `Has` witness and `select`, verbatim from gate fixture
+`tests/elm-fixtures/rowgadt_select.elm` (lines 8–20), and `setx`, verbatim from
+`tests/elm-fixtures/rowgadt_setx.elm` (lines 13–20; the `Has` block is identical in both
+fixtures); both fixtures compile clean.
 
 Each of the three features is forced:
 
@@ -324,7 +333,7 @@ makes the empty cell visible. Section 8 states limitations; Section 9 concludes.
 This section presents the declarative calculus; the full rule set with its implementation seats
 is the companion specification (`docs/research/row-gadt-calculus.md`), and the mechanization of
 its hard lemmas is Section 4. Here we give syntax, the judgment, the two unification modes, the
-store discipline, and the rule inventory with one figure.
+store discipline, and the rule inventory (Figures 2 and 3).
 
 ### 2.1 Syntax and kinds
 
@@ -336,6 +345,10 @@ t    ::=  a  |  T t⃗  |  t → t  |  (t⃗)  |  { r }        types
 r    ::=  ε  |  ℓ : t | r  |  ρ                rows: fields in source order + tail
 s    ::=  ∀ B; x̂⃗. t                           schemes with a bound subset B
 ```
+
+**Figure 2.** Syntax and kinds — kinds, variables with flex markers, types and rows,
+and schemes with a bound subset. Source: `docs/research/row-gadt-calculus.md` §1.1–1.4
+(compressed).
 
 Labels ℓ are surface strings (there are no type-level labels). Duplicate labels are legal and
 retained; the **first occurrence** of a label is the one selection, restriction, and update act
@@ -363,6 +376,9 @@ true existentials.
 ```
 Γ ; Δ ; R ⊢ e : t
 ```
+
+**Figure 2 (continued).** The judgment `Γ ; Δ ; R ⊢ e : t`. Source:
+`docs/research/row-gadt-calculus.md` §2.1.
 
 Γ types term variables (with schemes); **Δ is the equation store** — a most-recent-first list of
 equations `x̂ ≐ t` (either kind, kind-matched); **R is the set of rigid variable ids** (skolems).
@@ -403,7 +419,8 @@ rewrite may extend it outside branch mode. In branch mode a would-be binding is 
 
 ### 2.4 The rules
 
-The rule set (compressed here; full statements with seats in the companion spec):
+The rule set — compressed here; the full rules, verbatim from the companion spec, are
+Figure 3:
 
 - **R-VAR** instantiates a scheme's quantifiers with fresh *flex* variables of matching kind.
 - **R-TYPE** checks a signatured declaration's clauses against the declared scheme with the
@@ -444,6 +461,99 @@ The rule set (compressed here; full statements with seats in the companion spec)
 The implementation's two-pass declaration-directed *retry* is an artifact for corpus
 byte-identity (Section 6.5); **the declarative calculus has only the declaration-directed
 rule**.
+
+```
+──────────────────────── R-VAR
+Γ(x) = s
+─────────────────────────────
+Γ ; Δ ; R ⊢ x : ⟦s⟧
+
+───────────────────────────────────────────── R-TYPE (clause checking)
+Γ(f) = ∀ B; qⱼ. t    B = {x̂₁…x̂ₙ}   (the `type`-prefixed names)
+instantiatePartial: qⱼ ↦ fresh q̂ⱼ;  q̂ⱼ rigid ⟺ qⱼ ∈ B ∧ flex(qⱼ) = none
+Γ ; Δ ; R ∪ {q̂ⱼ | qⱼ ∈ B} ⊢ clauses of f against t[qⱼ := q̂ⱼ]
+
+────────────────────────────────────── R-TYPE-POLICE (annotationNotTooGeneral)
+Γ(f) = s_declared        body inferred at fullType (args → result)
+s_body  = generalize(zonk(fullType))                  (∀-closure of fv)
+skolemize s_declared (ALL none-flex quantifiers rigid), flex-instantiate s_body
+unify_global(declared_skolem ≐ body_flex) must SUCCEED
+else FAIL: "annotation is too general"
+
+Γ ; Δ ; R ⊢ e₀ : t₀        peel t₀ ≐ t₁ -> t'     (t', fresh result)
+Γ ; Δ ; R ⊢ e₁ : t₁'       unify_global(t₁ ≐ t₁') ⊳ θ'
+───────────────────────────── R-APP                     (on failure: R-APP-DISCH)
+Γ ; Δ' ; R' ⊢ e₀ e₁ : θ'(t')
+
+Γ ; Δ ; R ⊢ e₀ e₁ : t    attempted;   unify_global fails RigidVar(a, t)
+a ≐ τ ∈ Δ,  a : Ty,  τ not a row,  a ∉ fv(τ)  (occurs-guard)
+──────────────────────────────────── R-APP-DISCH
+Γ ; Δ ; R ⊢ e₀ e₁ : θ'[a := τ](t)      (one-way re-check, no binding)
+
+Γ ; Δ ; R ⊢ e : t       fresh a : Ty, β : Row
+unify_global(t ≐ { ℓ : a | β }) ⊳ …
+   (on rigid failure: R-SEL-DISCH below)
+───────────────────────────── R-SEL
+Γ ; Δ' ; R' ⊢ e.ℓ : a
+
+Γ ; Δ ; R ⊢ e : { r | ρ }        ρ rigid
+ρ ≐ { ℓ : t' | ρ'' } ∈ Δ  (zonked once; head label is ℓ)
+────────────────────────────────────── R-SEL-DISCH
+Γ ; Δ ; R ⊢ e.ℓ : t'
+
+Γ ; Δ ; R ⊢ e : { r }              restrict(r, ℓ) = (t_ℓ, r')   (ℓ present, first occurrence)
+Γ ; Δ ; R ⊢ v : t_v                unify_global(t_v ≐ t_ℓ) ⊳ θ'
+────────────────────────────────────── R-UPD
+Γ ; Δ' ; R' ⊢ { e | ℓ = v } : { ℓ : θ'(t_v) | r' }
+
+Γ ; Δ ; R ⊢ e : { known | ρ }       ρ rigid, restrict(known, ℓ) fails
+ρ ≐ { ℓ : t' | ρ'' } ∈ Δ  (zonked once)
+Γ ; Δ ; R ⊢ v : t_v               unify_global(t_v ≐ t') ⊳ θ'
+────────────────────────────────────── R-UPD-DISCH
+Γ ; Δ ; R ⊢ { e | ℓ = v } : { ℓ : θ'(t_v) | known ++ ρ''-fields }
+
+Γ ; Δ ; R ⊢ e : { known | ρ }        ρ has an equation in Δ
+────────────────────────────────────── R-UPD-INS (REJECT)
+escaping-error: "insertion under rigid row refinement"
+
+Γ ; Δ ; R ⊢ e : t        t zonks to { r } with restrict(r, ℓ) = (t_ℓ, r')
+────────────────────────────────────── R-RESTR
+Γ ; Δ ; R ⊢ { e − ℓ } : { r' }
+
+Γ ; Δ ; R ⊢ e₁ : t₁          s = ∀ (fv(t₁) − fv(Γ) − appendables). t₁
+────────────────────────────────────── R-LET
+Γ, x : s ; Δ ; R ⊢ let x = e₁ in e₂ : t₂        (where Γ, x : s ; Δ ; R ⊢ e₂ : t₂)
+
+Γ ; Δ ; R ⊢ e : t_s                    (the scrutinee)
+For each branch i (pattern pᵢ, body eᵢ):
+  Γ ⊢ pᵢ : t_p ⊳ binds_i               (pattern inference; ctor arms via R-EXISTS)
+  Δ⁰ = Δ                                (SNAPSHOT the store)
+  unify_branch(t_p ≐ t_s) ⊳ Δᵢ          (capture: would-be rigid binds become equations)
+  Γ, binds_i ; Δ ∪ Δᵢ ; R ∪ lifted(pᵢ, t_p, t_s) ⊢ eᵢ : t_b
+  branch-result check (§2.7) of t_b against t_r
+  Δ := Δ⁰                              (TRUNCATE: restore the snapshot)
+────────────────────────────────────── R-CASE
+Γ ; Δ ; R ⊢ case e of { pᵢ ↦ eᵢ } : t_r
+
+unify_global(t_b ≐ t_r) fails RigidVar(a, t)
+a ≐ τ ∈ Δ  with  a : Ty  (a TYPE equation — τ is not a row)
+a ∉ fv(τ)  (occurs-guard)
+────────────────────────────────────── R-RESULT-Tier-T (discharge)
+re-check: unify_global(t_b[a := τ] ≐ t_r[a := τ]) ⊳ θ'  (one-way, both sides)
+─ on success: branch result ok; τ's equation still dies at branch end
+─ on nested rigid failure on b ≠ a: recurse once (same rule)
+─ on any other failure: the historical error
+
+C : ∀ qⱼ. t₁ -> … -> tₙ -> tᶜ          determined = fv(tᶜ) ∩ {qⱼ}
+instantiate: qⱼ ↦ fresh q̂ⱼ;  q̂ⱼ rigid ⟺ qⱼ ∉ determined ∧ flex(qⱼ) = none
+────────────────────────────────────── R-EXISTS
+Γ ⊢ C p₁ … pₙ : tᶜ[qⱼ := q̂ⱼ] ⊳ binds      existentials += {q̂ⱼ rigid, scoped to branch}
+```
+
+**Figure 3.** The typing rules of λρG, in the order of the inventory above. Source:
+`docs/research/row-gadt-calculus.md` §2.4–2.9, verbatim rule blocks (the prose around them,
+with the implementation seats, remains in the companion spec).
+
 ---
 
 ## 3 The two-tier result rule and the operation-level answer
@@ -466,7 +576,7 @@ particular field set, moving a domain change out of the branch — the exported 
 promise a domain the signature does not. Its rigid failure surfaces as the explicit
 *escaping-row-equation* error.
 
-The full decision procedure at a branch result, in order:
+The full decision procedure at a branch result, in order (Figure 4):
 
 1. **Tail-escape pre-check** — did this unification newly identify a refined tail with its
    head? (`dropIntroduced`: the drop shape.) → reject.
@@ -478,6 +588,11 @@ The full decision procedure at a branch result, in order:
    existential*).
 6. Else, does any equation explain it? → reject (*escaping row equation*).
 7. Else: the historical rigid error.
+
+**Figure 4.** The branch-result decision procedure. Source:
+`docs/research/row-gadt-calculus.md` §2.7 and the code — `unifyResultM`
+(`elm-compiler/src/Type/Infer.elm:1498`), whose domain helpers are `dropIntroduced` (:1842),
+`rebuildMatches` (:1879), and `tailReachesHead` (:1818).
 
 **The operation-level answer.** The rules decide, for each record operation, whether it survives
 an active refinement `ρ ≐ { ℓ : t | ρ' }` on the base's tail:
@@ -729,14 +844,20 @@ conflicting branch equations, and the signature is not optional in Q.
 
 ### 5.2 The measurement, and the inversion
 
-The L3 table: three presentations of the *same access* — read a field justified by a
-witness — with the signature *omitted*, all three gate-registered and re-measured:
+The L3 table (Figure 6): three presentations of the *same access* — read a field justified
+by a witness — with the signature *omitted*, all three gate-registered and re-measured:
 
 | presentation | signature omitted | measured |
 |---|---|---|
 | (i) witness-encoded (`Some w x` + nested witness match) | **inferred** — `Any → String` | `rowgadt_l3i`: clean |
 | (ii) native row + GADT refinement (Figure 1's `select`) | rejected — the sibling equations conflict on the flexible ρ (`cannot unify {k:a\| b} with {\| a}`) | `rowgadt_l3ii`: `err … cannot unify {k:a\| b} with {\| a}` |
 | (iii) plain row access (no GADT) | **inferred** — `∀ r a. { r \| x : a } → a` | `rowgadt_l3iii`: clean |
+
+**Figure 6.** The L3 principality measurement — three presentations of the same access, the
+signature omitted. Source: gate fixtures `rowgadt_l3i`, `rowgadt_l3ii`, `rowgadt_l3iii`
+(measured column, re-measured by `tools/withe-numbers.sh`; registered rows in
+`tests/elm-fixtures/MATRIX.md`); the P/Q classification is §5.1 above
+(`docs/research/row-gadt.md` §5).
 
 The middle row is the boundary of Section 5.1, measured. But the informative comparison is (i)
 vs (ii): the *encoded* presentation sits on the **P side** while its *native translation* sits on
@@ -812,9 +933,9 @@ This invariant is what makes the discipline's addition safe to *adopt*, and the 
 it deliberately: the historical inference path remains primary; the new machinery (branch-local
 capture, discharge, the declaration-directed retry) engages only where the historical path fails
 — so every pre-existing diagnostic is unchanged by construction. The regression gate passes
-152/152 (the full fixture matrix with expected outcomes is
-Appendix A; the gate is `tests/elm-fixtures/run-elm-gate.sh`), and the unit suite passes
-114/114.
+152/152 (the designed-fixture matrix with expected outcomes is Table 1 in
+Appendix A, the complete generated registry is `tests/elm-fixtures/MATRIX.md`, and the gate
+is `tests/elm-fixtures/run-elm-gate.sh`), and the unit suite passes 114/114.
 
 ### 6.1 What the build surfaced: kinds
 
@@ -854,14 +975,10 @@ expected result. It was sound on the shapes its author considered.
 
 **(2) The first of three adversarial passes found two programs the check accepted that are
 unsound** (both are now gate-registered compile errors, `rowgadt_escape_launder` and
-`rowgadt_escape_wildcard`):
+`rowgadt_escape_wildcard`; both programs in full, verbatim, are Figure 5):
 
 - **Let-laundering.** The `Here` branch refines `ρ ≐ { l : t | ρ' }`, the scrutinee is an
-  `HList ρ`, and the branch returns its tail — laundered through a `let`:
-
-  ```elm
-  ( Here, HCons _ rest ) -> let ys = rest in ys
-  ```
+  `HList ρ`, and the branch returns its tail — laundered through a `let` (Figure 5a).
 
   `let`-generalization *quantified the refined tail* ρ', so the use of `ys` instantiates a
   fresh variable with no link to the tail; the occurrence test sees nothing; the fresh variable
@@ -869,16 +986,65 @@ unsound** (both are now gate-registered compile errors, `rowgadt_escape_launder`
   accept (the pre-fix checker compiled it clean).
 
 - **Wildcard sibling leak.** The refining branch returns the tail while a wildcard branch
-  returns the full row:
-
-  ```elm
-  ( Here, HCons _ rest ) -> rest
-  _ -> xs
-  ```
+  returns the full row (Figure 5b).
 
   The shared case-result variable lets the wildcard's full-row result unify *tail := head* — a
   legal flex alias — zonking the tail away before the clause-level check runs. The check had
   been written in one orientation only; the sibling branch smuggled the identification past it.
+
+**(a) Let-laundering** — verbatim from `tests/elm-fixtures/rowgadt_escape_launder.elm`
+(lines 11–31):
+
+```elm
+type Has l t rho
+    = Here : Has l t { l : t | rho }
+    | There : Has l t rho -> Has l t { k : s | rho }
+
+
+type HList rho
+    = HNil : HList {}
+    | HCons : t -> HList rho -> HList { l : t | rho }
+
+
+escapeBad : type l t rho. Has l t rho -> HList rho -> HList rho
+escapeBad h xs =
+    case ( h, xs ) of
+        ( Here, HCons _ rest ) ->
+            let
+                ys = rest
+            in
+            ys
+
+        ( There h2, HCons _ rest ) ->
+            escapeBad h2 rest
+```
+
+**(b) Wildcard sibling leak** — verbatim from `tests/elm-fixtures/rowgadt_escape_wildcard.elm`
+(lines 11–27):
+
+```elm
+type Has l t rho
+    = Here : Has l t { l : t | rho }
+
+
+type HList rho
+    = HNil : HList {}
+    | HCons : t -> HList rho -> HList { l : t | rho }
+
+
+escapeBad : type l t rho. Has l t rho -> HList rho -> HList rho
+escapeBad h xs =
+    case ( h, xs ) of
+        ( Here, HCons _ rest ) ->
+            rest
+
+        _ ->
+            xs
+```
+
+**Figure 5.** The two stage-(2) counterexamples. Pre-fix, both compiled clean (unsound
+accepts); post-fix, both are gate-registered compile errors, `err escaping row equation …`
+(Table 1).
 
 **(3) The rule is now domain-based**, and the domain rule is what the mechanization proves
 sound. At a branch result whose unification fails on a refined rigid row head, the check decides
@@ -1255,6 +1421,13 @@ Every designed program this paper cites, gate-registered and re-measured on the 
 corpus fixtures). The oracle is the compiler's output artifact, never the process exit code; the
 `run` rows execute the fixture through the VM and diff its printed value against a pinned
 expected output (Section 6.6), while `clean`/`err` rows assert the compile outcome only.
+
+**Table 1.** The fixture matrix (the evidence spine). Source: the gate
+`tests/elm-fixtures/run-elm-gate.sh`, whose complete registry is generated as
+`tests/elm-fixtures/MATRIX.md` (152 rows, by `tools/gen-fixture-matrix.sh`; staleness check
+`tools/gen-fixture-matrix.sh --check`) — this table is the paper-cited subset, with the claim
+each row pins; where the two disagree, the registry and the gate win. The `measured` column is
+re-derived by `tools/withe-numbers.sh`.
 
 | fixture | claim pinned | measured |
 |---|---|---|
