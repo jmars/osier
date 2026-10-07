@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# selfhost-compile.sh — M16: compile the compiler's OWN 56 sources (the
+# selfhost-compile.sh — M16: compile the compiler's OWN sources (the
 # selfhost group) as ONE multi-module group into a csexp bundle.
 #
 # This is the "the compiler compiles itself" step: the stock-built compiler
 # (node elm-compiler/run.js --batch, i.e. elm-compiler/compiler.js built by
 # STOCK elm 0.19.2 + the run.js batch driver) compiles
-# elm-compiler/selfhost/manifest.json — the 14 compiler frontend sources
-# (src/{Lower,Type,Zinc}) + the 38 vendored parse-closure files + NativeMain —
+# elm-compiler/selfhost/manifest.json — the compiler frontend sources
+# (src/{Lower,Type,Zinc,Frontend}) + the parse closure pulled into src/Elm**/
+# (stil4m/elm-syntax 7.3.9, Json codecs pruned; formerly selfhost/vendor) +
+# NativeMain —
 # TOGETHER with the fixed corpus (Prelude + Runtime + the core-libs), in one
 # process, into zig-out/selfhost.csexp.
 #

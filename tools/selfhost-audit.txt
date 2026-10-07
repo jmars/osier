@@ -3,13 +3,14 @@
 # fix rows wave-by-wave (parse -> unknown-name -> type -> lowering),
 # re-run the script, watch failure rows drop.
 #
-# Group:    56 sources = 14 compiler frontend (src/{Lower,Type,Zinc})
-#           + 38 vendored parse-closure files (Json codecs pruned; see
-#           elm-compiler/selfhost/PRUNING.md) + NativeMain skeleton
+# Group:    58 sources = the compiler frontend (src/{Lower,Type,
+#           Zinc,Frontend}) + the parse closure pulled into src/Elm**/
+#           (stil4m/elm-syntax 7.3.9, Json codecs pruned; formerly
+#           selfhost/vendor) + NativeMain skeleton
 # Corpus:   src/Prelude.elm + src/Runtime.elm + core-libs/* (fixed side,
 #           NOT audited — always compiled as the corpus)
 # Compiler: node elm-compiler/run.js --batch (stock-built compiler.js)
-# Date:     2026-09-10T13:16:34Z
+# Date:     2026-10-07T18:31:23Z
 #
 # Columns: <RESULT>\t<file>\t<row:col>\t<message>
 # RESULT classes: OK | parse-error | unknown-name | type-error |
@@ -25,60 +26,62 @@ OK	elm-compiler/src/Type/Env.elm
 OK	elm-compiler/src/Type/Representation.elm		
 OK	elm-compiler/src/Type/Unify.elm		
 OK	elm-compiler/src/Type/Error.elm		
+OK	elm-compiler/src/Type/Exhaustive.elm		
 OK	elm-compiler/src/Type/Infer.elm		
+OK	elm-compiler/src/Frontend/Lift.elm		
 OK	elm-compiler/src/Type/Check.elm		
 OK	elm-compiler/src/Zinc/Csexp.elm		
 OK	elm-compiler/src/Zinc/Emit.elm		
 OK	elm-compiler/src/Lower/Module.elm		
-OK	elm-compiler/selfhost/vendor/Char/Extra.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/Comments.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/Declaration.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/Documentation.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/Exposing.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/Expression.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/File.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/Import.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/Infix.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/Module.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/ModuleName.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/Node.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/Pattern.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/Range.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/Signature.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/Type.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/TypeAlias.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Syntax/TypeAnnotation.elm		
-OK	elm-compiler/selfhost/vendor/List/Extra.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Parser/Base.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Parser/Comments.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Parser/Declarations.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Parser/Expose.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Parser/Expression.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Parser/File.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Parser/Imports.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Parser/Layout.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Parser/Modules.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Parser/Patterns.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Parser/Tokens.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Parser/TypeAnnotation.elm		
-OK	elm-compiler/selfhost/vendor/ParserFast.elm		
-OK	elm-compiler/selfhost/vendor/ParserWithComments.elm		
-OK	elm-compiler/selfhost/vendor/Parser.elm		
-OK	elm-compiler/selfhost/vendor/Rope.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Internal/RawFile.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Parser.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Processing.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Dependency.elm		
-OK	elm-compiler/selfhost/vendor/Elm/Interface.elm		
-OK	elm-compiler/selfhost/vendor/Elm/RawFile.elm		
+OK	elm-compiler/src/Char/Extra.elm		
+OK	elm-compiler/src/Elm/Syntax/Comments.elm		
+OK	elm-compiler/src/Elm/Syntax/Declaration.elm		
+OK	elm-compiler/src/Elm/Syntax/Documentation.elm		
+OK	elm-compiler/src/Elm/Syntax/Exposing.elm		
+OK	elm-compiler/src/Elm/Syntax/Expression.elm		
+OK	elm-compiler/src/Elm/Syntax/File.elm		
+OK	elm-compiler/src/Elm/Syntax/Import.elm		
+OK	elm-compiler/src/Elm/Syntax/Infix.elm		
+OK	elm-compiler/src/Elm/Syntax/Module.elm		
+OK	elm-compiler/src/Elm/Syntax/ModuleName.elm		
+OK	elm-compiler/src/Elm/Syntax/Node.elm		
+OK	elm-compiler/src/Elm/Syntax/Pattern.elm		
+OK	elm-compiler/src/Elm/Syntax/Range.elm		
+OK	elm-compiler/src/Elm/Syntax/Signature.elm		
+OK	elm-compiler/src/Elm/Syntax/Type.elm		
+OK	elm-compiler/src/Elm/Syntax/TypeAlias.elm		
+OK	elm-compiler/src/Elm/Syntax/TypeAnnotation.elm		
+OK	elm-compiler/src/List/Extra.elm		
+OK	elm-compiler/src/Elm/Parser/Base.elm		
+OK	elm-compiler/src/Elm/Parser/Comments.elm		
+OK	elm-compiler/src/Elm/Parser/Declarations.elm		
+OK	elm-compiler/src/Elm/Parser/Expose.elm		
+OK	elm-compiler/src/Elm/Parser/Expression.elm		
+OK	elm-compiler/src/Elm/Parser/File.elm		
+OK	elm-compiler/src/Elm/Parser/Imports.elm		
+OK	elm-compiler/src/Elm/Parser/Layout.elm		
+OK	elm-compiler/src/Elm/Parser/Modules.elm		
+OK	elm-compiler/src/Elm/Parser/Patterns.elm		
+OK	elm-compiler/src/Elm/Parser/Tokens.elm		
+OK	elm-compiler/src/Elm/Parser/TypeAnnotation.elm		
+OK	elm-compiler/src/ParserFast.elm		
+OK	elm-compiler/src/ParserWithComments.elm		
+OK	elm-compiler/src/Parser.elm		
+OK	elm-compiler/src/Rope.elm		
+OK	elm-compiler/src/Elm/Internal/RawFile.elm		
+OK	elm-compiler/src/Elm/Parser.elm		
+OK	elm-compiler/src/Elm/Processing.elm		
+OK	elm-compiler/src/Elm/Dependency.elm		
+OK	elm-compiler/src/Elm/Interface.elm		
+OK	elm-compiler/src/Elm/RawFile.elm		
 OK	elm-compiler/selfhost/NativeMain.elm		
 #
-# ===== whole-group pass (all 56 sources as one group) =====
+# ===== whole-group pass (all 58 sources as one group) =====
 WHOLE-GROUP	OK		
 #
 # ===== summary =====
-# files:          56
-# ok:             56
+# files:          58
+# ok:             58
 # parse-error:    0
 # unknown-name:   0
 # type-error:     0

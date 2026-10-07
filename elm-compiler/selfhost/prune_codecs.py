@@ -2,6 +2,13 @@
 """M13 codec prune: strip Json encode/decode codecs from the vendored
 stil4m/elm-syntax parse closure (elm-compiler/selfhost/vendor).
 
+RETIRED (elm-dissolve): the pruned parse closure is no longer a vendored
+copy — it now IS the source, checked in at elm-compiler/src/Elm/** (plus
+ParserFast/ParserWithComments/Rope/Char.Extra/List.Extra), and
+selfhost/vendor is gone.  Running this script would recreate a stale tree;
+it is kept only as the record of how the checked-in sources were derived
+(patched package copy in .elm-cache -> this prune -> src/).
+
 The compiler's parse->typecheck->lower path never serializes the AST, so every
 `encode`/`decoder` in Elm/Syntax/** (and Elm.RawFile) is DEAD for self-hosting.
 Removing them (a) prunes the elm/json dependency surface and (b) deletes the

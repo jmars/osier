@@ -2,8 +2,10 @@
 # selfhost-audit.sh — M13 ground-truth audit of the selfhost group.
 #
 # Compiles every file of the M13 selfhost group (elm-compiler/selfhost/
-# manifest.json: the compiler's own frontend + the vendored parse closure +
-# NativeMain) with the CURRENT stock-built compiler (node elm-compiler/run.js
+# manifest.json: the compiler's own frontend + the parse closure pulled into
+# src/ (formerly selfhost/vendor; stil4m/elm-syntax 7.3.9, Json codecs
+# pruned) + NativeMain) with the CURRENT stock-built compiler (node
+# elm-compiler/run.js
 # --batch), ONE FILE PER GROUP, plus one FINAL WHOLE-GROUP pass, and tabulates
 # per-file, per-class outcomes:
 #
@@ -92,7 +94,7 @@ loc_of() {
 
 # ================ PHASE 1: per-file groups, chunk-batched ================
 # One group PER FILE, including the file's TRANSITIVE SELFHOST-SIBLING DEPS:
-# a lone file cannot resolve names from its vendored/frontend siblings (the
+# a lone file cannot resolve names from its frontend/sibling modules (the
 # corpus side only knows the corpus modules), which would misreport every
 # sibling reference as an unknown name.  Check.topo re-orders each group into
 # dependency order, so the FIRST error a group reports belongs to the deepest
@@ -109,7 +111,7 @@ sources = json.load(open(manifest))["groups"][0]["sources"]
 def module_of(rel):
     # repo-root-relative path -> Elm module name
     p = rel
-    for prefix in ("elm-compiler/selfhost/vendor/", "elm-compiler/selfhost/",
+    for prefix in ("elm-compiler/selfhost/",
                    "elm-compiler/src/"):
         if p.startswith(prefix):
             p = p[len(prefix):]
@@ -263,9 +265,10 @@ fi
   echo "# fix rows wave-by-wave (parse -> unknown-name -> type -> lowering),"
   echo "# re-run the script, watch failure rows drop."
   echo "#"
-  echo "# Group:    $N sources = 14 compiler frontend (src/{Lower,Type,Zinc})"
-  echo "#           + 38 vendored parse-closure files (Json codecs pruned; see"
-  echo "#           elm-compiler/selfhost/PRUNING.md) + NativeMain skeleton"
+  echo "# Group:    $N sources = the compiler frontend (src/{Lower,Type,"
+  echo "#           Zinc,Frontend}) + the parse closure pulled into src/Elm**/"
+  echo "#           (stil4m/elm-syntax 7.3.9, Json codecs pruned; formerly"
+  echo "#           selfhost/vendor) + NativeMain skeleton"
   echo "# Corpus:   src/Prelude.elm + src/Runtime.elm + core-libs/* (fixed side,"
   echo "#           NOT audited — always compiled as the corpus)"
   echo "# Compiler: node elm-compiler/run.js --batch (stock-built compiler.js)"

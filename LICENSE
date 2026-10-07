@@ -9,6 +9,10 @@ This repository is dual-licensed; the table routes each part to its license:
 
 Copyright (c) 2026 Jaye Marshall, for both halves.
 
+Third-party code carried in the repository keeps its own licence — see
+`THIRD-PARTY.md` (currently the pulled-in stil4m/elm-syntax 7.3.9 parse
+closure under `elm-compiler/src/Elm/` and siblings).
+
 ---
 
 MIT License
