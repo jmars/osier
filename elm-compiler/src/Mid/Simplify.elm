@@ -51,6 +51,7 @@ module Mid.Simplify exposing (Config, defaultConfig, off, run, runWithReport)
 -- conditional.
 
 import Mid.ConstFold as ConstFold
+import Mid.Inline as Inline
 import Mid.Ir exposing (Defun)
 import Mid.Shrink as Shrink
 
@@ -127,6 +128,7 @@ runWithReport config defuns =
         steps =
             [ ( config.shrink, Shrink.run )
             , ( config.constFold, ConstFold.run )
+            , ( config.inline, Inline.run config.inlineThreshold )
             ]
 
         step : ( Bool, List Defun -> ( List Defun, String ) ) -> ( List Defun, List String ) -> ( List Defun, List String )

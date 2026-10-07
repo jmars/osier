@@ -1,4 +1,4 @@
-module Mid.Shrink exposing (Stats, run)
+module Mid.Shrink exposing (Stats, run, substAll)
 
 -- Mid.Shrink — the middle tier's FIRST optimization pass: the structural
 -- shrink (Sestoft's algorithm, JFP 1997 / MLton's `xml/shrink.fun`), reduced
