@@ -96,7 +96,7 @@ type Has l t rho
     | There : Has l t rho -> Has l t { k : s | rho }
 
 
-read : type l t rho. Has l t rho -> { rho | n : Int } -> t
+read : type l t rho. Has l t rho -> State rho -> t
 read w rec =
     case w of
         Here ->
@@ -145,7 +145,7 @@ readFrom rec ev =
 -- refinement as `readFrom`, but narrowed AT THE NESTED LEVEL (sub-pattern
 -- unification in branch mode), reading the arrival state rather than the
 -- departure state.
-readCurrent : type from. { from | n : Int } -> Step from -> String
+readCurrent : type from. State from -> Step from -> String
 readCurrent rec step =
     case step of
         Start ->

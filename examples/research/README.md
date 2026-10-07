@@ -4,8 +4,11 @@ These are the probes the paper cites that previously lived only in `/tmp`
 (handoff `rowgadt`, gap G3). Each file is a small, self-contained program
 compiled by the same checker the gate exercises. They are **not** registered
 in `tests/elm-fixtures/run-elm-gate.sh`; they are reproducible here, from a
-clean checkout, with the one-liner below. (The one exception: the external FSM
-example of gap G4, `fsm/door.elm`, **is** gate-registered — see its section.)
+clean checkout, with the one-liner below. (This includes the external FSM
+example of gap G4, `fsm/door.elm`: it is **not** gate-registered either — it is
+verified by hand, compiling clean with `main` printing `"open:42"`, and its
+behaviour is pinned separately by the `rowgadt_fsm*` gate fixtures, which are a
+condensed copy of the same program — see its section.)
 
 Compile any probe and read the artifact (the oracle is the OUTPUT FILE, never
 the exit code — `node elm-compiler/run.js` always exits 0 and writes `err <msg>`
@@ -148,11 +151,15 @@ clause's `Tag Int`. Pinned by `refutbare`. (Before the check, every `case`
 compiled clean and failed only at runtime; this is the completeness boundary
 of the check, not a regression.)
 
-Three gate fixtures pin the example: `rowgadt_fsm` (clean),
-`rowgadt_fsm_bad` (illegal construction errs), and `rowgadt_fsm_narrow` (a
+The example is not itself a gate fixture: `tests/elm-fixtures/rowgadt_fsm.elm`
+(module `RowgadtFsm`) is a separate, condensed copy of the same program, and
+five gate fixtures pin the capabilities it demonstrates: `rowgadt_fsm` (clean),
+`rowgadt_fsm_bad` (illegal construction errs), `rowgadt_fsm_narrow` (a
 wrong-field read in one branch errs — the per-branch field narrowing that
 OCaml's per-field workaround cannot do, pinned as a negative rather than
-asserted). The refutation/exhaustiveness capability is pinned separately by
+asserted), `rowgadt_fsm_nested` (the nested chain match, runs clean), and
+`rowgadt_fsm_nested_bad` (a nested wrong-field read errs). The
+refutation/exhaustiveness capability is pinned separately by
 `adtgaps` (missing possible arm errors), `refutpos` (impossible arm refuted),
 `refutneg` (possible arm NOT refuted), and `refutbare` (a bare flexible index
 never refutes — `Tag a` matching only `A` still errors `missing B`).
