@@ -1593,3 +1593,121 @@ The three axioms are parameters, not gaps in proofs: `Unifies`/`Captures` are th
 parameter of the theory (Section 4.1), and `unifies_field_projection` is the one property the
 plain-selection preservation case needs of the abstract unifier. Every other theorem closes
 against the local Lean binary with no sorry.
+
+---
+
+## References
+
+Provenance follows the companion survey (`docs/research/withe-related-work.md`), which is this
+bibliography's source: **[M]** marks a work retrieved and read from its primary source (a URL is
+given wherever the survey records one), and **[SECOND-HAND]** marks a work carried exactly as the
+survey carries it, not retrieved. The list contains exactly the works this paper cites or names.
+Entries are alphabetical by author surname, or by system name where the paper cites a work by its
+system name (Koka, PureScript, OCaml, Links, GHC); the OCaml language, its release notes, its
+issue tracker, and its maintainers' forum record are grouped under O. Where the survey records no
+title for a work, the entry gives the survey's own descriptor of it; where it records no URL, none
+is given.
+
+- **Castagna & Peyrot (2025).** Presence polymorphism over optional fields in a set-theoretic
+  type system. OOPSLA'25. arXiv:2404.00338. https://arxiv.org/abs/2404.00338 [M, lit]
+- **Chen & Erwig (2016).** *Principal type inference for GADTs* — branch refinements represented
+  by choice types `D⟨φ̄⟩`, typing separated from reconciliation. POPL'16. Author's version,
+  retrieved 2026-10-06: https://web.engr.oregonstate.edu/~erwig/papers/TypeInfForGADTs_POPL16b.pdf
+  (the ACM DL remains CAPTCHA-blocked). [M this pass]
+- **Fan, Xu & Xie (2025).** *Practical Type Inference with Levels*. PLDI'25.
+  https://sec-r.github.io/papers/pldi25level.pdf [M this pass]
+- **Garrigue & Rémy (2012).** *Tracing ambiguity in GADT type inference* (3-page abstract).
+  http://gallium.inria.fr/~remy/gadts/Garrigue-Remy:gadts@abs2012.pdf [M, lit]
+- **Garrigue & Rémy (2013).** Ambivalent types — `ν(a).M` introduces a rigid variable, quantified
+  flexible at scope exit; scoped equations may not leak out of a branch. APLAS'13.
+  http://gallium.inria.fr/~remy/gadts/Garrigue-Remy:gadts@aplas2013.pdf [M, lit]
+- **Garrigue (2013).** OCaml compiler revision 13221 (2013-01-29), posted in ocaml/ocaml issue
+  #5724: "At long last I have removed this restriction on the presence of polymorphic variants…"
+  — the fix that lifted the 4.00-era restriction, shipped in 4.01. [M — GitHub API]
+- **Gaster & Jones (1996).** *A Polymorphic Type System for Extensible Records and Variants*.
+  NOTTCS-TR-96-3. http://web.cecs.pdx.edu/~mpj/pubs/96-3.pdf [M this pass]
+- **GHC.** User's Guide, the `HasField` extension — class-triggered unification on record GADTs
+  (`HasField unGadt (Gadt t) b` reduces by unifying `t ~ [v]` and `b ~ Maybe v`).
+  https://downloads.haskell.org/ghc/latest/docs/users_guide/exts/hasfield.html [M, lit]
+- **hdgarrood (2019).** Comment in the PureScript discussion forum (Discourse), thread 707: "I
+  think we should commit to not adding GADTs." [M — quote verified in the survey]
+- **Hubers et al. (2025).** Extensible recursive functions — row-typed histomorphisms whose
+  results vary with inputs via row constraints on return types. [M, lit]
+- **Koka (Leijen 2014).** The Koka language: effect rows with duplicate labels (from Leijen 2005);
+  eliminations unify the effect row (`catch` unifies μ with `(exn|μ')`), never refine it. MSFP'14.
+  arXiv:1406.2061. https://arxiv.org/abs/1406.2061 [M, lit2]
+- **Leijen (2005).** *Extensible records with scoped labels*. TFP'05.
+  https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/scopedlabels.pdf [M, lit]
+- **Links.** The Links language: effect rows; the full language adds subtyping via upcasts; record
+  update is a derived operation (remove-then-extend, or CPS + upcast), per the CORELINKS aside.
+  [SECOND-HAND — not retrieved; the survey records no authors, venue, year, or URL for this work]
+- **Lindley & Cheney (2012).** CORELINKS — `(label × presence × type)` rows with distinct labels;
+  insert/update/delete typed by quantifying a presence variable over the needed row. TLDI'12.
+  https://homepages.inf.ed.ac.uk/slindley/papers/corelinks.pdf [M, lit2]
+- **Madsen, Starup & Lutze (2023).** Flix restrictable variants — refines a label-set index under
+  `choose` while the record row index is only ever extended; GADTs named as "interesting future
+  work". ECOOP'23 (LIPIcs.ECOOP.2023.17).
+  https://drops.dagstuhl.de/storage/00lipics/lipics-vol263-ecoop2023/LIPIcs.ECOOP.2023.17/LIPIcs.ECOOP.2023.17.pdf
+  [M, lit]
+- **OCaml (language).** The ML-family language whose GADTs, locally abstract types (`type a.`),
+  objects, and polymorphic variants are discussed in §1 and §7.4. Documentation: the OCaml
+  manual, ocaml.org/manual/5.3/ (retrieved; it documents GADT equations on non-local abstract
+  types and states no objects/poly-variants×GADTs restriction). The paper's behavioural claims
+  about the combination are attributed to the maintainer record: octachron (2024), ocaml/ocaml
+  #5724, Garrigue (2013, rev 13221), and the OCaml 4.01.0 Changes. [M, lit + this pass]
+- **OCaml 4.01.0 Changes (official release notes).** "Propagate type information towards
+  pattern-matching, even in the presence of polymorphic variants (discarding only information
+  about possibly-present constructors). As a result, matching against absent constructors is no
+  longer allowed for exact and fixed polymorphic variant types. (Jacques Garrigue)" [M —
+  verified on the 4.01 branch raw source]
+- **ocaml/ocaml issue #5724 (2012).** "This is a documented limitation of GADTs: types cannot be
+  refined if a pattern-matching contains polymorphic variant. This comes from the fact
+  polymorphic variant pattern-matching typing is specified in the absence of type propagation
+  and GADT type refinement requires type propagation." Filed 2012-08 by yallop; closed as fixed
+  2015-12-11 by xavierleroy (fixed in 4.01.0+dev). https://github.com/ocaml/ocaml/issues/5724
+  [M, lit]
+- **octachron (OCaml maintainer) (2024).** "Unable to refute impossible GADT pattern with
+  polymorphic variants", discuss.ocaml.org thread 13718, Jan 3 2024 — "the interaction of row
+  variables and GADTs is not well specified"; "GADT equations cannot narrow a polymorphic variant
+  constraint"; the per-field-object workaround. Cited in the text as [octachron 2024].
+  https://discuss.ocaml.org/t/unable-to-refute-impossible-gadt-pattern-with-polymorphic-variants/13718
+  [M]
+- **octachron (OCaml maintainer) (2024).** discuss.ocaml.org thread 14042, Feb 2024 — "GADTs are
+  incompatible with object subtyping: they are always invariant with respect to their type
+  parameters" (quoted in §7.4). [M, lit]
+- **O'Brien, Rémy & Scherer (2026).** *Omnidirectional type inference for ML: principality any
+  way*. arXiv:2511.10343, v2 May 2026. https://arxiv.org/abs/2511.10343 [M this pass]
+- **Ohori (1995).** *A Polymorphic Record Calculus and its Compilation*. TOPLAS 17(6).
+  https://www.cs.tufts.edu/comp/150FP/archive/atsushi-ohori/record-calc.pdf [M this pass]
+- **Paszke & Xie (2023).** Infix-extensible records — a row-polymorphic record calculus with
+  infix extension, for tabular data. TyDe'23. [M this pass]
+- **Peyton Jones, Vytiniotis, Weirich & Washburn (2006).** Wobbly types — rigid vs wobbly
+  annotation modifiers in the environment, for GADT inference. ICFP'06.
+  https://www.cs.tufts.edu/~nr/cs257/archive/simon-peyton-jones/gadt-icfp.pdf [M this pass]
+- **Pottier & Régis-Gianas (2006).** Stratified inference — two-pass type inference: shape
+  inference (rigid information propagated through annotations), then constraint solving. POPL'06.
+  https://cambium.inria.fr/~fpottier/publis/pottier-regis-gianas-popl06.pdf [M this pass]
+- **PureScript (language).** Documentation and issue tracker, retrieved 2026-10-06:
+  row-polymorphic records documented first-class (rows are "an unordered collection of named
+  types, with duplicates"; open rows via `| r`; kind `Row k`); GADTs an unimplemented sketch
+  (proposal #1448, 2015, closed) and argued against by the core team (hdgarrood, thread 707,
+  2019); existentials open since 2018 (#3492). [M this pass]
+- **Rémy (1994).** *Type inference for records in a natural extension of ML*. UPenn technical
+  report MS-CIS-90-73 (= RR-1431), Oct 1990 — the preprint of the 1994 MIT Press TAOOP chapter.
+  https://repository.upenn.edu/bitstreams/82820b99-74b8-4a44-bd03-0de4b3a91030/download
+  [M this pass]
+- **Simonet & Pottier (2007).** *A constraint-based approach to guarded algebraic data types*
+  (HMG(X)). TOPLAS 29(1). http://www.normalesup.org/~simonet/publis/simonet-pottier-hmg-toplas.pdf
+  [M this pass]
+- **Spanò (2024).** Row polymorphism with overloading — reversible conversion between records and
+  overloading constraints. arXiv:2406.11750. https://arxiv.org/abs/2406.11750 [M this pass]
+- **Toohey, Chen, Jamalzadeh & Xie (2026).** *Extensible Data Types with Ad-Hoc Polymorphism
+  (Extended)*. Proc. ACM Program. Lang. 10, POPL, Article 20, Jan 2026 (38 pp extended version;
+  the retrieved artifact). https://xnning.github.io/papers/popl26extensible-appendix.pdf (ACM DL
+  landing, CAPTCHA-blocked: https://dl.acm.org/doi/10.1145/3776662) [M — full extended PDF
+  retrieved 2026-10-05]
+- **Vytiniotis et al. (2011).** OutsideIn(X) — implication constraints `∃ᾱ.(Qgiven ~> Cwanted)`
+  with touchable vs untouchable variables; the standard GADT-inference framework. JFP'11.
+  https://lirias.kuleuven.be/retrieve/237824 [M, lit]
+- **Wand (1989).** *Type inference for record concatenation and multiple inheritance*. LICS'89.
+  https://www.cs.tufts.edu/comp/150FP/archive/mitch-wand/types-simple-objects.pdf [M this pass]
