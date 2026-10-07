@@ -25,6 +25,13 @@ const interp = vm.interp;
 const streams = vm.streams;
 const effectloop = @import("effectloop");
 
+/// Default heap: 64 MB (reservation 128 MB) — sized for the GATE's use, which
+/// RUNS a compiled fixture (167 elmvm invocations, all of which fit).  It is
+/// NOT sized for the other use: compiling with the selfhost bundle spends
+/// seconds to minutes inside the type-checker and needs ELMC_HEAP_MB=3072 for
+/// the whole compiler (1024 for one fixture).  Exhausting the reservation is
+/// fatal and loud — see heap.GROW_FAIL_STREAK_MAX — instead of the livelock a
+/// 64 MB heap used to produce here.  tools/bootstrap-compile.sh sets it.
 const HEAP_BYTES: usize = 64 * 1024 * 1024;
 const RESERVE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -100,6 +107,10 @@ pub fn main(init: std.process.Init) !void {
     // on an identical bundle, which is the reference implementation the AOT
     // transpile must match.
     const argv_mode = std.c.getenv("AOTRUN_ARGV") != null;
+    // AOTRUN_QUIET (same contract as tools/aot/run.zig): suppress the final
+    // printValue line, so a compiler CLI's stdout stays clean (the app writes
+    // its own files + status).  tools/bootstrap-compile.sh sets it.
+    const quiet = std.c.getenv("AOTRUN_QUIET") != null;
     var app_args: []const []const u8 = &.{};
     if (argv_mode) {
         var list: [64][]const u8 = undefined;
@@ -187,8 +198,11 @@ pub fn main(init: std.process.Init) !void {
     } else {
         try values.printValue(&w, result);
     }
-    try std.Io.File.writeStreamingAll(std.Io.File.stdout(), io, w.buffered());
-    try std.Io.File.writeStreamingAll(std.Io.File.stdout(), io, "\n");
+    // AOTRUN_QUIET: skip the final model print (see the env-knob note above).
+    if (!quiet) {
+        try std.Io.File.writeStreamingAll(std.Io.File.stdout(), io, w.buffered());
+        try std.Io.File.writeStreamingAll(std.Io.File.stdout(), io, "\n");
+    }
 }
 
 fn usage() noreturn {
