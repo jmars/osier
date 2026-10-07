@@ -54,6 +54,7 @@ import Mid.Arity as Arity
 import Mid.ConstFold as ConstFold
 import Mid.DeadGlobals as DeadGlobals
 import Mid.Inline as Inline
+import Mid.PathCse as PathCse
 import Mid.Ir exposing (Defun)
 import Mid.Shrink as Shrink
 
@@ -133,6 +134,7 @@ runWithReport config defuns =
             , ( config.inline, Inline.run config.inlineThreshold )
             , ( config.arity, Arity.run )
             , ( config.deadGlobals, DeadGlobals.run )
+            , ( config.pathCse, PathCse.run )
             ]
 
         step : ( Bool, List Defun -> ( List Defun, String ) ) -> ( List Defun, List String ) -> ( List Defun, List String )
