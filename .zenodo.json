@@ -1,0 +1,24 @@
+{
+  "creators": [
+    {
+      "name": "Marshall, Jaye",
+      "orcid": "0009-0002-5209-8161"
+    }
+  ],
+  "title": "Withe: branch-local row refinement for extensible records with GADTs",
+  "description": "The Withe language: an Elm-family checker and a Lean mechanization for row-polymorphic records under branch-local GADT refinement and locally abstract types. The deposit carries the compiler, the mechanization, the fixture gate and the corpus byte-identity manifest, the artifact documentation, and the paper. Dual-licensed: MIT for the code, CC-BY-4.0 for docs/ (the LICENSE file routes each path).",
+  "version": "1.0.0",
+  "access_right": "open",
+  "upload_type": "software",
+  "license": "mit",
+  "language": "eng",
+  "keywords": [
+    "row polymorphism",
+    "GADTs",
+    "extensible records",
+    "locally abstract types",
+    "type inference",
+    "functional programming"
+  ],
+  "related_identifiers": []
+}
