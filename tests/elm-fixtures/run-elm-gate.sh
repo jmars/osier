@@ -23,6 +23,11 @@
 # Usage:
 #   tests/elm-fixtures/run-elm-gate.sh [elmvm-binary] [elm-compiler-dir] [fixtures-dir]
 #
+# Every check this script REGISTERS is listed, generated from the registration
+# calls below, in tests/elm-fixtures/MATRIX.md
+# (regenerate/verify: tools/gen-fixture-matrix.sh [--check]; raw dump:
+# ELM_GATE_MATRIX=1 tests/elm-fixtures/run-elm-gate.sh).
+#
 # Defaults assume you are running from the fx-ui repo root:
 #   elmvm    -> zig-out/bin/elmvm   (built via `zig build elmvm`)
 #   compiler -> elm-compiler/       (compiler.js built via build.sh)
@@ -42,15 +47,18 @@ CDIR="${2:-$ROOT/elm-compiler}"
 FIX="${3:-$ROOT/tests/elm-fixtures}"
 OUT="$(mktemp -d)"
 
-if [ ! -x "$ELMVM" ]; then
+# ELM_GATE_MATRIX=1 (or a path) dumps the REGISTERED check matrix and stops
+# BEFORE any build/compile step (tools/gen-fixture-matrix.sh uses it), so the
+# elmvm / compiler.js / jq prerequisites are not required in that mode.
+if [ "${ELM_GATE_MATRIX:-0}" != "0" ]; then
+  : # matrix dump mode: no elmvm / compiler.js / jq required (see the dump below)
+elif [ ! -x "$ELMVM" ]; then
   echo "error: elmvm not found at $ELMVM (run: zig build elmvm)" >&2
   exit 2
-fi
-if [ ! -f "$CDIR/compiler.js" ]; then
+elif [ ! -f "$CDIR/compiler.js" ]; then
   echo "error: $CDIR/compiler.js missing (run: build.sh)" >&2
   exit 2
-fi
-if ! command -v jq >/dev/null 2>&1; then
+elif ! command -v jq >/dev/null 2>&1; then
   echo "error: jq required to build the batch manifest" >&2
   exit 2
 fi
@@ -72,7 +80,7 @@ read_expected() { cat "$FIX/expected/$1.txt"; }
 
 ngroup=0; ncheck=0
 declare -a GOUT GSRC
-declare -a CKIND CNAME CFN CEXP CARG CSTDIN CFIX COUT
+declare -a CKIND CNAME CFN CEXP CARG CSTDIN CFIX COUT CHLP
 
 register_group() {
   local out="$1"; shift
@@ -81,10 +89,14 @@ register_group() {
   ngroup=$((ngroup+1))
 }
 
+# add_check <kind> <name> <fn> <expected> <args> <stdin> <fixture> <out> <helper>
+# $9 is the REGISTERING HELPER's name (run / compile_error / ...) — printed by
+# the ELM_GATE_MATRIX dump so the matrix names the check the way a reader of
+# this file does.  The dispatcher keys on $1 only.
 add_check() {
   CKIND[$ncheck]="$1"; CNAME[$ncheck]="$2"; CFN[$ncheck]="$3"
   CEXP[$ncheck]="$4"; CARG[$ncheck]="$5"; CSTDIN[$ncheck]="$6"
-  CFIX[$ncheck]="$7"; COUT[$ncheck]="$8"
+  CFIX[$ncheck]="$7"; COUT[$ncheck]="$8"; CHLP[$ncheck]="$9"
   ncheck=$((ncheck+1))
 }
 
@@ -97,7 +109,7 @@ add_check() {
 run() {
   local name="$1" fn="$2" exp="$3"; shift 3
   register_group "$OUT/$name.csexp" "$FIX/$name.elm"
-  add_check run "$name" "$fn" "$exp" "$*" "" "$FIX/$name.elm" "$OUT/$name.csexp"
+  add_check run "$name" "$fn" "$exp" "$*" "" "$FIX/$name.elm" "$OUT/$name.csexp" run
 }
 
 # run2 <name> <auxname> <fn> <expected>: multi-module fixture — compile
@@ -106,7 +118,7 @@ run() {
 run2() {
   local name="$1" aux="$2" fn="$3" exp="$4"; shift 4
   register_group "$OUT/$name.csexp" "$FIX/$aux.elm" "$FIX/$name.elm"
-  add_check run2 "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "$OUT/$name.csexp"
+  add_check run2 "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "$OUT/$name.csexp" run2
 }
 
 # run_io <name> <fn> <expected> <stdin-file>
@@ -117,7 +129,7 @@ run2() {
 run_io() {
   local name="$1" fn="$2" exp="$3" stdin="$4"
   register_group "$OUT/$name.csexp" "$FIX/$name.elm"
-  add_check io "$name" "$fn" "$exp" "" "$stdin" "$FIX/$name.elm" "$OUT/$name.csexp"
+  add_check io "$name" "$fn" "$exp" "" "$stdin" "$FIX/$name.elm" "$OUT/$name.csexp" run_io
 }
 
 # compile_clean <name>: asserts compilation SUCCEEDS (the artifact is a real
@@ -127,7 +139,7 @@ run_io() {
 compile_clean() {
   local name="$1"
   register_group "$OUT/$name.csexp" "$FIX/$name.elm"
-  add_check ok "$name" "" "" "" "" "$FIX/$name.elm" "$OUT/$name.csexp"
+  add_check ok "$name" "" "" "" "" "$FIX/$name.elm" "$OUT/$name.csexp" compile_clean
 }
 
 # compile_error <name> <expected-substring>: asserts compilation emits
@@ -137,13 +149,13 @@ compile_clean() {
 compile_error() {
   local name="$1" exp="$2"
   register_group "$OUT/$name.csexp" "$FIX/$name.elm"
-  add_check err "$name" "" "$exp" "" "" "$FIX/$name.elm" "$OUT/$name.csexp"
+  add_check err "$name" "" "$exp" "" "" "$FIX/$name.elm" "$OUT/$name.csexp" compile_error
 }
 
 # out_cmp <name>: compare the raw file an elmvm run wrote (iofile's hello.out)
 # against its expected bytes.
 out_cmp() {
-  add_check cmp "$1" "" "" "" "" "" ""
+  add_check cmp "$1" "" "" "" "" "" "" out_cmp
 }
 
 # rawrun <name> <fn> <expected>: run elmvm on a CHECKED-IN bundle (not compiled
@@ -151,7 +163,7 @@ out_cmp() {
 # unknown-Task tag, unhandledtask).  $FIX/$name.csexp is a committed .csexp.
 rawrun() {
   local name="$1" fn="$2" exp="$3"
-  add_check rawrun "$name" "$fn" "$exp" "" "" "$FIX/$name.csexp" "$FIX/$name.csexp"
+  add_check rawrun "$name" "$fn" "$exp" "" "" "$FIX/$name.csexp" "$FIX/$name.csexp" rawrun
 }
 
 run fib        fib        "$(read_expected fib)"        10
@@ -511,6 +523,37 @@ run liftcycshadows  main   "$(read_expected liftcycshadows)"
 # flip a fully-shadowing cycle's ratified answer (even 4 stays 0, so 0 + 3 = 3).
 run liftrelaxleak    main   "$(read_expected liftrelaxleak)"
 run liftdisjointshadow main "$(read_expected liftdisjointshadow)"
+
+# ==================== ELM_GATE_MATRIX: dump the registry ====================
+# ELM_GATE_MATRIX=1 prints every REGISTERED check as TSV (one row per check, in
+# declaration order) and exits WITHOUT compiling or running anything; with any
+# other value (a path) it writes the same TSV to that file.  It is the
+# generator input for tests/elm-fixtures/MATRIX.md (see
+# tools/gen-fixture-matrix.sh); the registration above is the only source of
+# truth, so the matrix cannot drift from the gate.
+if [ "${ELM_GATE_MATRIX:-0}" != "0" ]; then
+  # An expected value may span lines (ioecho, iofile, unhandledtask).  Every
+  # read_expected value carries a trailing newline that the gate's own "$( )"
+  # comparison strips; strip it here too, and escape any remaining tab/newline
+  # so each check stays exactly one row.
+  esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e ':a;N;$!ba;s/\n/\\n/g'; }
+  dump_matrix() {
+    printf 'helper\tname\tentry\tkind\texpected\targs\tstdin\tfixture\n'
+    for ((i=0;i<ncheck;i++)); do
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "${CHLP[$i]}" "${CNAME[$i]}" "${CFN[$i]}" "${CKIND[$i]}" \
+        "$(esc "${CEXP[$i]%$'\n'}")" "${CARG[$i]}" "${CSTDIN[$i]}" \
+        "$(basename "${CFIX[$i]}")"
+    done
+  }
+  if [ "$ELM_GATE_MATRIX" = "1" ]; then
+    dump_matrix
+  else
+    dump_matrix > "$ELM_GATE_MATRIX"
+  fi
+  rm -rf "$OUT"
+  exit 0
+fi
 
 # ============================ PHASE 2: batch compile ============================
 # Build the manifest {groups:[{sources:[...],output:"..."}]} and run.js ONCE.

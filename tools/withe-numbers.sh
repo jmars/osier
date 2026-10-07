@@ -16,25 +16,31 @@
 #
 # It is SELF-CONTAINED (builds elmvm/compiler.js/test-compiler.js and the Lean
 # build on first use) and IDEMPOTENT (re-runs reproduce the same numbers; the
-# corpus diff is empty on an unmodified tree).
+# corpus diff is empty on an unmodified tree).  Verified from a CLEAN CLONE of
+# the artifact tag with no zig-out/, no compiler.js and no lean/.lake: ~45s and
+# exit 0 on the paper's build host.
 #
 # USAGE (from the repo root):
 #   tools/withe-numbers.sh
 #
-# Prerequisites on PATH: node, jq, zig (0.16), git; the elm 0.19.2 binary and
-# the Lean 4 toolchain are located as below if not on PATH.
+# PREREQUISITES — checked up front, each with its own message if missing:
+#   on PATH: node, jq, zig (0.16), rg (ripgrep), python3.
+#   The elm 0.19.2 binary and the Lean 4 toolchain are located as below:
 #
 #   ELM_BIN      elm 0.19.2 binary
 #                (default: ~/.npm-global/lib/node_modules/elm/bin/elm — NOT on
 #                PATH in the paper's build host; elm-compiler/build.sh's PATH
 #                probe finds nothing there)
 #   ELAN_HOME    Lean toolchain home (default: /var/data/workspace/lean/elan;
-#                lake is ELAN_HOME/bin/lake)
+#                lake is ELAN_HOME/bin/lake).  A bare `lean <file>` does NOT
+#                work — lean/ is a Lake project, built with `lake build`.
 #
-# Exit code 0 iff every check passes.  The corpus baseline (one sha256 sum per
-# LANGUAGE-gate artifact — the 19 UI-host fixtures left the corpus in
-# withe-split Phase 1) is the repo-frozen byte-identity oracle; a gate run
-# that adds/removes/changes ANY artifact makes step 2 print a diff.
+# Exit codes: 0 = every check passed; 1 = a check ran and failed; 2 = the
+# environment is incomplete (a prerequisite above is missing).  The corpus
+# baseline (one sha256 sum per LANGUAGE-gate artifact — the 19 UI-host fixtures
+# left the corpus in withe-split Phase 1) is the repo-frozen byte-identity
+# oracle; a gate run that adds/removes/changes ANY artifact makes step 2 print
+# a diff.
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -47,6 +53,54 @@ CDIR="$ROOT/elm-compiler"
 
 fail=0
 note() { printf '%-28s %s\n' "$1:" "$2"; }
+
+# --- prerequisite preflight --------------------------------------------------
+# Every missing tool is named HERE, with the variable to set where there is one,
+# instead of surfacing as "No such file or directory", "command not found", or —
+# worst — a silently ZERO theorem count from a missing `rg`.  Exit 2 = the
+# environment is incomplete (no measured behaviour is involved); exit 1 = a
+# check ran and failed.
+need() {
+    command -v "$1" >/dev/null 2>&1 || {
+        printf 'FAIL: %s is required and was not found on PATH.\n' "$1" >&2
+        printf '      %s\n' "$2" >&2
+        exit 2
+    }
+}
+
+need node   "node (any recent version) runs the compiler driver run.js / test-run.js."
+need jq     "jq builds the fixture gate's batch manifest."
+need zig    "zig 0.16 builds the gate harness (zig build elmvm)."
+need rg     "ripgrep counts the Lean theorems/axioms — WITHOUT it those counts print 0."
+need python3 "python3 runs the runTask recount (tools/withe-recount-runTask.sh)."
+
+if [ ! -x "$ELM_BIN" ]; then
+    cat >&2 <<EOF
+FAIL: the elm 0.19.2 binary was not found.
+      ELM_BIN=$ELM_BIN
+      elm 0.19.2 is NOT on PATH in the paper's build host, so ELM_BIN must be
+      set to your elm binary, e.g.
+
+          ELM_BIN="\$(npm root -g)/elm/bin/elm" tools/withe-numbers.sh
+
+      (the default is \$HOME/.npm-global/lib/node_modules/elm/bin/elm)
+EOF
+    exit 2
+fi
+
+LAKE="$(command -v lake 2>/dev/null || true)"
+if [ -z "$LAKE" ] && [ ! -x "$ELAN_HOME/bin/lake" ]; then
+    cat >&2 <<EOF
+FAIL: the Lean 4 toolchain was not found — no \`lake\` on PATH and none at
+      ELAN_HOME/bin/lake.
+      ELAN_HOME=$ELAN_HOME
+      Set ELAN_HOME to your elan home (the default is
+      /var/data/workspace/lean/elan), or put \`lake\` on PATH.  Note that a bare
+      \`lean <file>\` does NOT work: lean/ is a Lake project and must be built
+      with \`lake build\` from lean/.
+EOF
+    exit 2
+fi
 
 # --- build prerequisites (skip if already present) ---------------------------
 if [ ! -x "$ROOT/zig-out/bin/elmvm" ]; then
@@ -81,21 +135,30 @@ fi
 # output dir in place), compile it once, hash every artifact, and diff the
 # sorted hash list against the committed baseline.
 manifest="$(ELM_GATE_MANIFEST_ONLY=1 tests/elm-fixtures/run-elm-gate.sh 2>/dev/null)"
-outdir="$(dirname "$manifest")"
-node "$CDIR/run.js" --batch "$manifest" 2>/dev/null
-
-n_artifacts="$(ls "$outdir"/*.csexp 2>/dev/null | wc -l | tr -d ' ')"
-n_manifest="$(wc -l < "$BASELINE" | tr -d ' ')"
-(cd "$outdir" && for f in *.csexp; do sha256sum "$f"; done) | sort -k2 > "$outdir/.current.sha"
-sort -k2 "$BASELINE" > "$outdir/.baseline.sha"
-if diff -u "$outdir/.baseline.sha" "$outdir/.current.sha" > "$outdir/.diff" 2>&1; then
-    note "corpus" "BYTE-IDENTICAL ($n_artifacts artifacts = $n_manifest manifest entries)"
-else
-    note "corpus" "DIFFERS ($n_artifacts artifacts vs $n_manifest manifest entries)"
-    sed 's/^/    /' "$outdir/.diff"
+if [ -z "$manifest" ] || [ ! -f "$manifest" ]; then
+    # The gate refuses (exit 2) without jq / elmvm / compiler.js.  Bail HERE:
+    # with an empty path, `dirname` below would resolve to "." and compare the
+    # hashes in the repo root.
+    note "corpus" "FAILED — the gate produced no batch manifest"
+    echo "    (see why: ELM_GATE_MANIFEST_ONLY=1 tests/elm-fixtures/run-elm-gate.sh)"
     fail=1
+else
+    outdir="$(dirname "$manifest")"
+    node "$CDIR/run.js" --batch "$manifest" 2>/dev/null
+
+    n_artifacts="$(ls "$outdir"/*.csexp 2>/dev/null | wc -l | tr -d ' ')"
+    n_manifest="$(wc -l < "$BASELINE" | tr -d ' ')"
+    (cd "$outdir" && for f in *.csexp; do sha256sum "$f"; done) | sort -k2 > "$outdir/.current.sha"
+    sort -k2 "$BASELINE" > "$outdir/.baseline.sha"
+    if diff -u "$outdir/.baseline.sha" "$outdir/.current.sha" > "$outdir/.diff" 2>&1; then
+        note "corpus" "BYTE-IDENTICAL ($n_artifacts artifacts = $n_manifest manifest entries)"
+    else
+        note "corpus" "DIFFERS ($n_artifacts artifacts vs $n_manifest manifest entries)"
+        sed 's/^/    /' "$outdir/.diff"
+        fail=1
+    fi
+    rm -rf "$outdir"
 fi
-rm -rf "$outdir"
 
 # --- 3. TestMain -------------------------------------------------------------
 test_out="$(cd "$CDIR" && node test-run.js 2>&1)"

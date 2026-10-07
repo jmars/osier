@@ -60,12 +60,27 @@ cd "$ROOT"
 ELM_BIN="${ELM_BIN:-$HOME/.npm-global/lib/node_modules/elm/bin/elm}"
 CDIR="$ROOT/elm-compiler"
 
+# Name every missing tool HERE: without node/python3 the measurement dies inside
+# the python block below with a FileNotFoundError traceback.
+for t in node python3; do
+    command -v "$t" >/dev/null 2>&1 || {
+        echo "FAIL: $t is required and was not found on PATH." >&2
+        exit 2
+    }
+done
+
 if [ ! -x "$ELM_BIN" ]; then
-    echo "FAIL: elm binary not found at $ELM_BIN" >&2
+    cat >&2 <<EOF
+FAIL: the elm 0.19.2 binary was not found.
+      ELM_BIN=$ELM_BIN
+      elm 0.19.2 is NOT on PATH in the paper's build host — set ELM_BIN to your
+      elm binary, e.g. ELM_BIN="\$(npm root -g)/elm/bin/elm"
+      (the default is \$HOME/.npm-global/lib/node_modules/elm/bin/elm)
+EOF
     exit 2
 fi
 if [ ! -f "$CDIR/src/Runtime.elm" ] || [ ! -f "$CDIR/src/Type/Builtins.elm" ]; then
-    echo "FAIL: elm-compiler sources not found" >&2
+    echo "FAIL: elm-compiler sources not found under $CDIR" >&2
     exit 2
 fi
 
