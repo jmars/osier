@@ -208,6 +208,7 @@ weeks for a pencil T2 sketch at OOPSLA-R2 scale).
 - **After a mechanism changes, correct the documents describing it in the same arc.**
 - **Invariants outrank cosmetics:** a comment edit that shifts a fixture's error line breaks
   byte-identity, so don't add framing comments to registered fixtures.
-- **Do not dispatch the `glm-coder` preset on this project** (three failures: two runs publishing
-  nothing, one leaving the tree broken). Note the same *model* backs `planner`, which has a good
-  record here — the ban is on the implementer preset.
+- **`glm-coder` is NOT banned on this project — the ban was lifted by the user on 2026-10-07.** The
+  history it rested on stands as history rather than as a rule: three failures, two runs publishing
+  nothing and one leaving the tree broken. The same *model* backs `planner`, which has a good record
+  here. Weight that history when choosing a tier, but it is no longer a prohibition.
