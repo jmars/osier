@@ -41,6 +41,38 @@ const CORPUS = [
     .map((f) => fs.readFileSync(path.join(__dirname, 'core-libs', f), 'utf8')),
 ];
 
+// MIDTIER=1 compiles through the middle tier (Mid.Ir: Mid.FromAst ->
+// Mid.ToZinc); unset / MIDTIER=0 is the direct AST-to-ZINC path, which is the
+// byte-identity anchor.  Stage 1 carries ZERO optimization passes, so the two
+// modes must produce IDENTICAL bytes for every input (tools/midtier-diff.sh).
+const MIDTIER = process.env.MIDTIER === '1';
+
+// MIDTIER_TRACE=1 makes the compiler report which path it took on stderr.  It
+// exists so a differential cannot pass vacuously when the switch fails to
+// engage (an unsubscribed port is simply dropped otherwise).
+const MIDTIER_TRACE = process.env.MIDTIER_TRACE === '1';
+
+// V8's stack limit CANNOT be raised once node has started, and the MIDTIER=1
+// path over the compiler's own 58 sources (the selfhost group, whose
+// Char.Extra.unicodeIsAlphaNumOrUnderscoreFast compiles to ~11k instructions in
+// ONE defun) runs closer to the limit than MIDTIER=0 does under the default
+// optimizing JIT.  MEASURED (tools/midtier-diff.sh step 4 records it): with the
+// JIT the two modes' minimum stacks differ by ~25% for that group, while with
+// --no-opt they are within 50 KB of each other and the emitted bytes are
+// IDENTICAL either way — so it is a V8 tiering/frame-size artifact, not a
+// difference in the instruction stream.  MIDTIER_STACK=<KB> re-executes this
+// driver once with --stack-size=<KB> so a caller that needs the headroom
+// (`MIDTIER=1 MIDTIER_STACK=2400 tools/selfhost-compile.sh`) still uses the
+// ordinary entry points.  Unset => no re-exec, no behaviour change.
+if (process.env.MIDTIER_STACK && !process.env.MIDTIER_STACK_DONE) {
+  const res = require('child_process').spawnSync(
+    process.execPath,
+    ['--stack-size=' + process.env.MIDTIER_STACK].concat(process.argv.slice(1)),
+    { stdio: 'inherit', env: Object.assign({}, process.env, { MIDTIER_STACK_DONE: '1' }) }
+  );
+  process.exit(res.status === null ? 1 : res.status);
+}
+
 const { Elm } = require('./compiler.js');
 
 // Compile `groups` (array of { sources: [String], output: String }) in ONE
@@ -50,7 +82,26 @@ function compileGroups(groups) {
     flags: {
       corpusSourcesJson: JSON.stringify(CORPUS),
       groupsJson: JSON.stringify(groups.map((g) => g.sources)),
+      midtier: MIDTIER,
     },
+  });
+
+  // The runtime delivers a Cmd.batch in an order of its own (the mode report
+  // arrives AFTER the emit payload), so with MIDTIER_TRACE=1 we wait for both
+  // before exiting.  If the report never arrives, the safety-net timeout below
+  // exits nonzero: the trace is the differential's proof that the switch
+  // ENGAGED, and a missing proof must not look like a pass.
+  let emitted = false;
+  let modeSeen = !MIDTIER_TRACE;
+
+  function finish() {
+    if (emitted && modeSeen) process.exit(0);
+  }
+
+  app.ports.modeReport.subscribe((mode) => {
+    modeSeen = true;
+    process.stderr.write(`midtier-trace: ${mode}\n`);
+    finish();
   });
 
   app.ports.emit.subscribe((msg) => {
@@ -71,13 +122,18 @@ function compileGroups(groups) {
     for (let i = 0; i < groups.length; i++) {
       fs.writeFileSync(groups[i].output, bundles[i]);
     }
-    process.exit(0);
+    emitted = true;
+    finish();
   });
 
   // Safety net: if Main.elm never emits, don't hang forever.  Generous for
   // the batch mode (all fixtures in one process).
   setTimeout(() => {
-    console.error('run.js: timed out waiting for emit port');
+    console.error(
+      MIDTIER_TRACE && !modeSeen
+        ? 'run.js: timed out waiting for the mode report port (MIDTIER_TRACE=1)'
+        : 'run.js: timed out waiting for emit port'
+    );
     process.exit(1);
   }, 120000);
 }
