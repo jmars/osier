@@ -493,6 +493,39 @@ fn buildArgvList(nargs: usize, c_argv: [*]?[*:0]u8) Value {
 }
 
 export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
+    // The generated code puts Elm recursion on the C stack (Lower.elm:76-84
+    // documents the limitation), so the default 8MB RLIMIT_STACK kills deep
+    // programs.  MEASURED (handoff-qbe-bug2-improve, complete 9,736-frame
+    // core of the 610s selfhost SEGV): ~9,635 frames of Zinc.Emit.fuse's
+    // NON-tail recursion (`merged :: fuse rest`, Zinc/Emit.elm:134 — one
+    // native call per ZINC instruction of a body; the crashing body,
+    // Char.Extra's unicode dispatch, is ~9.6k instructions) at a 656-byte
+    // stride = 6.32MB, under main's own 1.94MB frame (the effect-loop
+    // HostLoop local, src/effectloop.zig:200-213, inlined via runProgram)
+    // plus the ~0.27MB driver: 8.5MB > 8MB, and the faulting `call` died on
+    // its own return-address push (fault addr rsp-8, 0x138 below the
+    // exactly-8MB stack VMA).  The same workload COMPLETES at
+    // `ulimit -s 262144` (546s, exit 0) and SEGVs at 8192 —
+    // stack-size-dependent, therefore not a GC/rooting bug.  64MB covers
+    // the measured 6.5MB max depth with headroom (GHC defaults to ~80MB
+    // for the same reason).  SCOPE, kept honest: this fixes that crash and
+    // every C-stack exhaustion up to 64MB.  The ARCHITECTURAL fix for
+    // loop-shaped (tail/mutual) recursion is the bounce loop
+    // (tools/aot/runtime.zig's Ret = .done|.tail pattern), a documented
+    // later stage — but it would NOT cover fuse, whose recursion is
+    // non-tail, so the raised limit is the load-bearing fix for that
+    // class, not a temporary stand-in for the bounce loop.  Best-effort:
+    // raise only the soft limit (raising the hard limit needs privileges
+    // and would fail the whole call), never lower a higher one.
+    const want_stack: std.posix.rlim_t = 64 * 1024 * 1024;
+    if (std.posix.getrlimit(.STACK)) |cur_lim| {
+        if (cur_lim.cur < want_stack) {
+            var lim = cur_lim;
+            lim.cur = want_stack;
+            std.posix.setrlimit(.STACK, lim) catch {};
+        }
+    } else |_| {}
+
     const argc: usize = @intCast(c_argc);
     if (argc < 2) {
         werr("usage: <prog> <entry-name> [int-arg ...]\n");
