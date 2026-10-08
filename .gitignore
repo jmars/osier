@@ -20,3 +20,6 @@ __pycache__/
 docs/research/build/*
 !docs/research/build/*.tex
 !docs/research/build/*.pdf
+
+# qbe native-backend build artefact (tools/qbe/qbe-mk.sh builds it on demand)
+tools/qbe/rt.o

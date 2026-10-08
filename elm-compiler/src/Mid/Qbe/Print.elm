@@ -54,7 +54,13 @@ printType t =
 
 printData : DataDef -> String
 printData d =
-    "data $"
+    (if d.export_ then
+        "export "
+
+     else
+        ""
+    )
+        ++ "data $"
         ++ d.name
         ++ (case d.align of
                 Just a ->

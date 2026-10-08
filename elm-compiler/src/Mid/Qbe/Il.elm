@@ -91,6 +91,7 @@ type alias DataDef =
     { name : String
     , align : Maybe Int
     , items : List DataItem
+    , export_ : Bool -- `export data` — needed for symbols the runtime links against
     }
 
 

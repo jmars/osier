@@ -387,12 +387,13 @@ lowerDefun defun sOuter =
                     |> Result.map
                         (\( pending, sInner ) ->
                             { sOuter
-                                | funcs = pending :: sOuter.funcs
+                                | funcs = pending :: List.foldl (::) sOuter.funcs sInner.funcs
                                 , datas = sInner.datas
                                 , dataKeys = sInner.dataKeys
                                 , dataN = sInner.dataN
                                 , cloN = sInner.cloN
                             }
+
                         )
 
         _ ->
@@ -500,6 +501,7 @@ lowerTail exp s =
 
         Lam lambda ->
             lowerClosure lambda 0 s
+                |> Result.map (jumpTo "ret")
 
         _ ->
             lowerVal exp 0 s
@@ -624,7 +626,7 @@ lowerLit lit dest s =
 
                 ( fname, s2 ) =
                     freshData ("flt:" ++ String.fromFloat f)
-                        (\n -> { name = n, align = Just 8, items = [ DDouble f ] })
+                        (\n -> { name = n, align = Just 8, items = [ DDouble f ], export_ = False })
                         s1
             in
             Ok (emit (Load (Just d8) D LoadD (Il.Sym fname)) s2)
@@ -640,7 +642,7 @@ lowerLit lit dest s =
 
                     ( sname, s2 ) =
                         freshData ("sym:" ++ name)
-                            (\n -> { name = n, align = Just 8, items = [ DStr name, DByte 0 ] })
+                            (\n -> { name = n, align = Just 8, items = [ DStr name, DByte 0 ], export_ = False })
                             s1
                 in
                 Ok (emit (Store StoreL (Il.Sym sname) (Il.Tmp d8)) s2)
@@ -653,7 +655,7 @@ lowerLit lit dest s =
                 let
                     ( strname, s1 ) =
                         freshData ("str:" ++ str)
-                            (\n -> { name = n, align = Just 8, items = [ DStr str, DByte 0 ] })
+                            (\n -> { name = n, align = Just 8, items = [ DStr str, DByte 0 ], export_ = False })
                             s
 
                     ( rp, s2 ) =
@@ -813,10 +815,11 @@ lowerSelfTail args s =
 -- EARLIER would leave stale interior pointers under the moving GC.
 
 
-stageArgs : List Exp -> S -> Result String ( List String, String, S )
+stageArgs : List Exp -> S -> Result String ( List String, Int, S )
 stageArgs args s =
     lowerArgsToSlots args s
-        |> Result.andThen (\( slots, s1 ) -> Ok (stageSlots slots s1))
+        |> Result.andThen
+            (\( slots, s1 ) -> Ok (stageSlots slots s1))
 
 
 lowerArgsToSlots : List Exp -> S -> Result String ( List Int, S )
@@ -838,30 +841,38 @@ lowerArgsToSlots args s =
         args
 
 
--- Pure staging: alloc + one blit per slot, in PARAMETER order (arg 1 first —
--- the callee's %a0).  The base is a valid block even for 0 args (never read).
-stageSlots : List Int -> S -> ( List String, String, S )
+-- Pure staging into CONTIGUOUS FRAME SLOTS, in PARAMETER order (arg 1 first
+-- — the callee's %a0).  MEASURED CONSTRAINT: QBE lowers `alloc8 N` as a
+-- DYNAMIC `subq $N, %rsp` (not a prologue slot), so a staging alloc inside a
+-- loop body leaks N bytes of stack per iteration until the guard page kills
+-- the process — churn.ssa's loop proved it.  Frame staging has no per-
+-- iteration cost, and the staged copies are rooted (they sit inside the
+-- ROOT_VALUE_ARRAY range), which is conservative-but-correct for the GC.
+stageSlots : List Int -> S -> ( List String, Int, S )
 stageSlots slots s =
     let
         n =
             List.length slots
 
-        ( asTmp, s1 ) =
-            freshTmp s
+        ( cbase, s1 ) =
+            freshSlots (Basics.max 1 n) s
+
+        base =
+            slotTmp cbase
     in
-    ( List.map (\i -> asTmp ++ "_" ++ String.fromInt i) (List.range 0 (n - 1))
-    , asTmp
+    ( List.map (\i -> base ++ "_" ++ String.fromInt i) (List.range 0 (n - 1))
+    , cbase
     , List.foldl
         (\( slot, i ) acc ->
             let
                 ptmp =
-                    asTmp ++ "_" ++ String.fromInt i
+                    base ++ "_" ++ String.fromInt i
             in
             acc
-                |> emit (Bin (Just ptmp) L Add (Il.Tmp asTmp) (Il.Con (vs * i)))
+                |> emit (Bin (Just ptmp) L Add (Il.Tmp base) (Il.Con (vs * i)))
                 |> emit (Blit (Il.Tmp (slotTmp slot)) (Il.Tmp ptmp) vs)
         )
-        (emit (Alloc asTmp (Basics.max vs (vs * n))) s1)
+        s1
         (List.indexedMap (\i slot -> ( slot, i )) slots)
     )
 
@@ -903,7 +914,7 @@ rtApply : String -> List Exp -> Int -> Bool -> S -> Result String S
 rtApply fslotTmp args dest isTail s =
     stageArgs args s
         |> Result.andThen
-            (\( _, base, s1 ) ->
+            (\( _, baseSlot, s1 ) ->
                 let
                     ( rp, s2 ) =
                         freshTmp s1
@@ -914,7 +925,7 @@ rtApply fslotTmp args dest isTail s =
                             (Agg "val")
                             (Il.Sym "rt_apply")
                             [ ArgVal (Base L) (Il.Tmp fslotTmp)
-                            , ArgVal (Base L) (Il.Tmp base)
+                            , ArgVal (Base L) (Il.Tmp (slotTmp baseSlot))
                             , ArgVal (Base W) (Il.Con (List.length args))
                             ]
                         )
@@ -1398,7 +1409,7 @@ rtPrimSlots prim slots dest s =
     let
         ( pnm, s0 ) =
             freshData ("pnm:" ++ prim)
-                (\n -> { name = n, align = Just 8, items = [ DStr prim, DByte 0 ] })
+                (\n -> { name = n, align = Just 8, items = [ DStr prim, DByte 0 ], export_ = False })
                 s
 
         ( _, base, s1 ) =
@@ -1413,7 +1424,7 @@ rtPrimSlots prim slots dest s =
                 (Agg "val")
                 (Il.Sym "rt_prim")
                 [ ArgVal (Base L) (Il.Sym pnm)
-                , ArgVal (Base L) (Il.Tmp base)
+                , ArgVal (Base L) (Il.Tmp (slotTmp base))
                 , ArgVal (Base W) (Il.Con (List.length slots))
                 ]
             )
@@ -1453,6 +1464,7 @@ lowerClosure lambda dest s =
                                 { name = n
                                 , align = Just 8
                                 , items = [ DRef qname, DWord (List.length lambda.params), DWord k, DZero 8 ]
+                                , export_ = False
                                 }
                             )
                             s1
@@ -1492,7 +1504,15 @@ lowerClosure lambda dest s =
                                                     )
                                                     s4
                                                     |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
-                                                    |> (\s5 -> { s5 | funcs = pending :: s5.funcs })
+                                                    |> (\s5 ->
+                                                            { s5
+                                                                | funcs = pending :: List.foldl (::) s5.funcs sInner.funcs
+                                                                , datas = sInner.datas
+                                                                , dataKeys = sInner.dataKeys
+                                                                , dataN = sInner.dataN
+                                                                , cloN = sInner.cloN
+                                                            }
+                                                       )
                                                 )
                                         )
                             )
@@ -1657,6 +1677,7 @@ finishModule s keys =
                                             , DWord 0
                                             , DZero 8
                                             ]
+                                        , export_ = False
                                         }
 
                                 _ ->
@@ -1722,6 +1743,13 @@ withPrologue pending =
 -- rt_callN: the arity dispatch table entry.  rt_apply cannot call a
 -- generated function directly (it only has the code pointer), so it calls
 -- through these; QBE allows `call %fn(...)` through a temporary.
+--
+-- ABI NOTE (MEASURED, the hard way): a `:val %a` PARAMETER arrives by value
+-- ON THE STACK — a Zig caller passing `*Value` in a register mismatches and
+-- the callee reads garbage.  So these dispatchers take PLAIN `l` pointer
+-- params and pass each as a `:val` CALL ARGUMENT — QBE copies the 40 bytes
+-- from the pointer onto the outgoing stack at the call site, which is
+-- exactly what a C/Zig `*Value` argument is.
 rtCallFuncs : List Func
 rtCallFuncs =
     List.map
@@ -1731,7 +1759,7 @@ rtCallFuncs =
                     List.map (\i -> "a" ++ String.fromInt i) (List.range 0 (n - 1))
 
                 params =
-                    ( "fn", Base L ) :: ( "e", Base L ) :: List.map (\a -> ( a, Agg "val" )) argNames
+                    ( "fn", Base L ) :: ( "e", Base L ) :: List.map (\a -> ( a, Base L )) argNames
 
                 callArgs =
                     ArgEnv (Il.Tmp "e") :: List.map (\a -> ArgVal (Agg "val") (Il.Tmp a)) argNames
@@ -1778,6 +1806,7 @@ metaTable pendings =
                     { name = "mname" ++ String.fromInt i
                     , align = Just 8
                     , items = [ DStr key, DByte 0 ]
+                    , export_ = False
                     }
                 )
                 entries
@@ -1788,6 +1817,7 @@ metaTable pendings =
                     { name = "meta" ++ String.fromInt i
                     , align = Just 8
                     , items = [ DRef ("mname" ++ String.fromInt i), DRef p.func.name, DWord p.nparams ]
+                    , export_ = False
                     }
                 )
                 entries
@@ -1796,10 +1826,12 @@ metaTable pendings =
             [ { name = "qbe_meta"
               , align = Just 8
               , items = List.map (\i -> DRef ("meta" ++ String.fromInt i)) (List.range 0 (n - 1))
+              , export_ = True
               }
             , { name = "qbe_meta_len"
               , align = Just 8
               , items = [ DWord n ]
+              , export_ = True
               }
             ]
     in
