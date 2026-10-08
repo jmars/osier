@@ -20,15 +20,21 @@ module Mid.Simplify exposing (Config, defaultConfig, off, run, runWithReport)
 --   2. ConstFold     fold rules ORACLED on the VM's own prim semantics
 --      + CaseOfKnown case on a statically known constructor
 --   3. Inline        full-arity call sites of small top-level defuns
---   4. Arity         saturation repair (partial-application fusion)
+--   4. Arity         saturation repair (split + eta-expansion + flattening)
 --   5. DeadGlobals   whole-program reachability
---   6. PathCSE       shared scrutinee reads inside one case block
+--
+-- (Pass 6, PathCSE, was REMOVED: it was committed as a measured NO-OP "seat" —
+-- a pass that performs no transform should not be presented as one.  Its own
+-- opportunity counters showed the hoist is a wash or loss for the typical
+-- 2-3-alt case block and only wins at 4+ sharers, and it would need a
+-- Case-prelude IR slot the IR deliberately lacks.  The count it published —
+-- 12,180 duplicate scrutinee-path reads, gross 24,360 instructions — is
+-- recorded in commit 412217c; nothing here depends on the pass.)
 --
 -- The order COMPOUNDS and is not an accident: Shrink creates the beta-reduced
 -- and single-use shapes Inline and ConstFold then see; Arity's fusion needs
 -- the saturated shapes Inline leaves behind; DeadGlobals can only be exact
--- once Inline has stopped referencing a defun; PathCSE reads the case shapes
--- that none of the earlier passes rewrote.
+-- once Inline has stopped referencing a defun.
 --
 -- FLAG SCHEME (one switch per pass, so any single pass can be disabled for
 -- bisection; `MIDTIER=1` with NO flags = every pass ON):
@@ -39,7 +45,6 @@ module Mid.Simplify exposing (Config, defaultConfig, off, run, runWithReport)
 --   MIDTIER_NOINLINE=1             pass 3 off
 --   MIDTIER_NOARITY=1              pass 4 off
 --   MIDTIER_NODEADGLOBALS=1        pass 5 off
---   MIDTIER_NOPATHCSE=1            pass 6 off
 --   MIDTIER_INLINE_THRESHOLD=<n>   pass 3's size budget (default 30)
 --
 -- The switches are OFF-switches on purpose: "all passes on" is then the
@@ -54,7 +59,6 @@ import Mid.Arity as Arity
 import Mid.ConstFold as ConstFold
 import Mid.DeadGlobals as DeadGlobals
 import Mid.Inline as Inline
-import Mid.PathCse as PathCse
 import Mid.Ir exposing (Defun)
 import Mid.Shrink as Shrink
 
@@ -65,7 +69,6 @@ type alias Config =
     , inline : Bool
     , arity : Bool
     , deadGlobals : Bool
-    , pathCse : Bool
     , inlineThreshold : Int
     }
 
@@ -77,7 +80,6 @@ defaultConfig =
     , inline = True
     , arity = True
     , deadGlobals = True
-    , pathCse = True
     , inlineThreshold = 30
     }
 
@@ -96,7 +98,6 @@ off =
         , inline = False
         , arity = False
         , deadGlobals = False
-        , pathCse = False
     }
 
 
@@ -134,7 +135,6 @@ runWithReport config defuns =
             , ( config.inline, Inline.run config.inlineThreshold )
             , ( config.arity, Arity.run )
             , ( config.deadGlobals, DeadGlobals.run )
-            , ( config.pathCse, PathCse.run )
             ]
 
         step : ( Bool, List Defun -> ( List Defun, String ) ) -> ( List Defun, List String ) -> ( List Defun, List String )

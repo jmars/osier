@@ -62,7 +62,6 @@ const PASSES = {
   inline: process.env.MIDTIER_NOINLINE !== '1',
   arity: process.env.MIDTIER_NOARITY !== '1',
   deadGlobals: process.env.MIDTIER_NODEADGLOBALS !== '1',
-  pathCse: process.env.MIDTIER_NOPATHCSE !== '1',
 };
 const INLINE_THRESHOLD = Number(process.env.MIDTIER_INLINE_THRESHOLD || '30');
 

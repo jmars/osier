@@ -67,7 +67,6 @@ type alias Passes =
     , inline : Bool
     , arity : Bool
     , deadGlobals : Bool
-    , pathCse : Bool
     }
 
 
@@ -132,7 +131,6 @@ passConfig flags =
     , inline = flags.passes.inline
     , arity = flags.passes.arity
     , deadGlobals = flags.passes.deadGlobals
-    , pathCse = flags.passes.pathCse
     , inlineThreshold = flags.inlineThreshold
     }
 

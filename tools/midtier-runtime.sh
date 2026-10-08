@@ -69,7 +69,6 @@ declare -a MODES=(
     "MIDTIER=1, no Shrink|MIDTIER=1 MIDTIER_NOSHRINK=1|noshrink"
     "MIDTIER=1, no ConstFold|MIDTIER=1 MIDTIER_NOCONSTFOLD=1|noconstfold"
     "MIDTIER=1, no DeadGlobals|MIDTIER=1 MIDTIER_NODEADGLOBALS=1|nodeadglobals"
-    "MIDTIER=1, no PathCse|MIDTIER=1 MIDTIER_NOPATHCSE=1|nopathcse"
 )
 
 TMP="$(mktemp -d)"
