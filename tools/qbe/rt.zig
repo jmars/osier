@@ -113,6 +113,7 @@ var vm: *state.Vm = undefined;
 
 const FrameHdr = extern struct {
     live: i32, // ROOT_VALUE_ARRAY's live count (== nslots for our use)
+    wm: usize, // shadow-stack watermark at enter (leave pops back to it)
     next: ?*FrameHdr, // active-frame stack
     freelist_next: ?*FrameHdr, // when pooled
     slots: [*]Value, // just past the header
@@ -145,7 +146,7 @@ fn frameBlock(nslots: i32) *FrameHdr {
     const bytes = a.alignedAlloc(u8, .@"8", @sizeOf(FrameHdr) + @sizeOf(Value) * n) catch
         @panic("qbe-rt: frame pool out of memory");
     const hdr: *FrameHdr = @ptrCast(bytes.ptr);
-    hdr.* = .{ .live = 0, .next = null, .freelist_next = null, .slots = @ptrCast(bytes.ptr + @sizeOf(FrameHdr)) };
+    hdr.* = .{ .live = 0, .wm = 0, .next = null, .freelist_next = null, .slots = @ptrCast(bytes.ptr + @sizeOf(FrameHdr)) };
     return hdr;
 }
 
@@ -157,6 +158,7 @@ export fn rt_frame_enter(nslots: i32) callconv(.c) [*]Value {
     // this is a correctness memset, not a nicety.)
     @memset(hdr.slots[0..@intCast(nslots)], zeroValue());
     hdr.live = nslots;
+    hdr.wm = g.rootWatermark();
     hdr.next = frame_top;
     frame_top = hdr;
     g.rootPushValueArray(hdr.slots, &hdr.live);
@@ -166,7 +168,18 @@ export fn rt_frame_enter(nslots: i32) callconv(.c) [*]Value {
 export fn rt_frame_leave() callconv(.c) void {
     const hdr = frame_top orelse @panic("qbe-rt: rt_frame_leave with no frame");
     frame_top = hdr.next;
-    g.rootPop();
+    // Pop back to the enter-time watermark, NOT the top: rt_global_closure
+    // pushes a never-popped root for its cache slot, and when that call
+    // happens between rt_frame_enter and rt_frame_leave the top of the
+    // shadow stack is the cache-slot reg, not this frame's.  A bare
+    // rootPop() then pops the WRONG entry — the frame's ROOT_VALUE_ARRAY
+    // reg LEAKS and every later GC scans the freed block's stale slots
+    // (the qbe-gcbug segfault / 'gcalloc: object too large (-8)' panic).
+    // Dropping the cache-slot root here is safe: the cached closure Value
+    // holds NO GC pointers (static Desc* code, null env), so it never
+    // needed scanning.  Any future forever-root pushed inside a frame must
+    // hold no GC pointers, or this contract breaks.
+    g.rootPopTo(hdr.wm);
     const n = hdr.live;
     if (std.c.getenv("QBE_NO_REUSE") != null) return; // debug: never reuse
     const head = freelists.getOrPut(std.heap.page_allocator, n) catch @panic("qbe-rt: freelist oom");
@@ -418,7 +431,11 @@ export fn rt_prim(name: [*:0]const u8, args: [*]Value, nargs: i32) callconv(.c) 
 
     var stack: types.ValueArray = .{ .data = null, .len = 0, .cap = 0 };
     interp.vaInit(g, &stack);
-    g.rootPushValueArray(stack.data orelse @ptrCast(&emptySlot), &stack.len);
+    // Root the SLOT, not the base: vaInit's array is GC-allocated and moves
+    // on collection; a registration-time copy of its base goes stale (the
+    // effectloop's runPrim uses the same slot-rooting pattern).  ROOT_PTR
+    // skips a null slot, so the pre-vaInit null case is covered.
+    g.rootPushPtr(@ptrCast(&stack.data));
     defer g.rootPop();
     defer interp.vaFree(&stack);
     // Push REVERSED so the first pop is args[0] — the order the ZINC
@@ -436,8 +453,6 @@ export fn rt_prim(name: [*:0]const u8, args: [*]Value, nargs: i32) callconv(.c) 
     };
     return acc;
 }
-
-var emptySlot: Value = .{ .tag = .number, .payload = .{ .number = 0 } };
 
 fn diePrim(e: anyerror, name: [*:0]const u8) noreturn {
     var buf: [256]u8 = undefined;
