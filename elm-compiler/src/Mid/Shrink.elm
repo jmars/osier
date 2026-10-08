@@ -1,4 +1,4 @@
-module Mid.Shrink exposing (Stats, run, substAll)
+module Mid.Shrink exposing (Stats, run, substAll, safeArg)
 
 -- Mid.Shrink — the middle tier's FIRST optimization pass: the structural
 -- shrink (Sestoft's algorithm, JFP 1997 / MLton's `xml/shrink.fun`), reduced
@@ -1001,13 +1001,20 @@ mapSnd f ( a, b ) =
 -- ============================ PURITY / TRIVIALITY ============================
 -- The judgement is about what the VM can OBSERVE, so it is derived from the
 -- prim table in `vendor/zinc-vm/src/vm/prims.zig`, not from Elm-level
--- intuition: the prims left out are the ones that write (`address->` mutates a
--- vector that may be shared), read the world (streams, `getenv`, `glob`,
--- `exec-plan`, `get-time`), are global-stateful (`set`, `value`, `intern`,
--- `gensym`, `newvar`), can RAISE (`simple-error`, `trap-error`, `pos`,
--- `substring`, `repeat`, `char-code`, `string->n`, `shen.fail!`, `wait`,
--- `kill`, `eval-kl`), or can trap (`/` on a zero divisor; `f/` is a float
--- op).  Everything listed in `purePrims` is total and reads no state.
+-- intuition.  A prim is in `purePrims` only if evaluating it and DISCARDING the
+-- result is unobservable: it cannot RAISE, WRITE, or read mutable state.  This
+-- is a TYPE-ERASED judgement — "cannot raise" must hold for EVERY value the VM
+-- can hold, not merely the well-typed inputs a program produces — so the prims
+-- that unwrap with `.?` / `throwShen` / an unchecked index are EXCLUDED even
+-- though well-typed code never produces the crashing input: `hd`/`tl`/`fst`/
+-- `snd` (`.?` on a non-cons null), `assoc`/`append`/`reverse` (throwShen on a
+-- non-list), `<-address` (bounds panic).  The prims left out for the OTHER
+-- reasons are the ones that write (`address->` mutates a vector that may be
+-- shared), read the world (streams, `getenv`, `glob`, `exec-plan`, `get-time`),
+-- are global-stateful (`set`, `value`, `intern`, `gensym`, `newvar`), can RAISE
+-- (`simple-error`, `trap-error`, `pos`, `substring`, `repeat`, `char-code`,
+-- `string->n`, `shen.fail!`, `wait`, `kill`, `eval-kl`), or can trap (`/` on a
+-- zero divisor; `f/` is a float op).
 
 
 isSafe : Exp -> Bool
@@ -1113,8 +1120,9 @@ isVarRef exp =
 {-| R4's argument class: evaluating these can neither raise, write, nor
 diverge, so the App->Let reordering is unobservable.  Narrower than `isSafe`
 on purpose (`absvector` allocates but the ADT path also writes with
-`address->`; `hd`/`tl`/`assoc` are total in this VM only for well-formed
-arguments, so they are left out).
+`address->`; and the `.??`/`throwShen` accessors — `hd`/`tl`/`fst`/`snd`/
+`assoc`/`append`/`reverse`/`<-address` — are total only for well-formed
+arguments, so they are left out of `totalPrims` too).
 -}
 safeArg : Exp -> Bool
 safeArg exp =
@@ -1155,9 +1163,7 @@ purePrims : Set String
 purePrims =
     Set.fromList
         [ "+", "-", "*", "=", "<", "<=", ">", ">="
-        , "@p", "fst", "snd"
-        , "hd", "tl", "cons", "cons?", "empty?"
-        , "absvector", "absvector?", "<-address", "assoc", "append", "reverse"
+        , "@p", "cons", "cons?", "empty?", "absvector", "absvector?"
         , "number?", "string?", "symbol?", "boolean?", "function?", "error?", "element?"
         , "c-strlen", "n->string"
         ]
@@ -1170,6 +1176,5 @@ totalPrims : Set String
 totalPrims =
     Set.fromList
         [ "+", "-", "*", "=", "<", "<=", ">", ">="
-        , "@p", "fst", "snd"
-        , "cons", "cons?", "empty?", "absvector?", "number?", "string?", "symbol?", "boolean?"
+        , "@p", "cons", "cons?", "empty?", "absvector?", "number?", "string?", "symbol?", "boolean?"
         ]
