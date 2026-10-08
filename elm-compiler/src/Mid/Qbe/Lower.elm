@@ -455,7 +455,17 @@ lowerFunBody entry key qname lambda captures sOuter =
             , cloN = sOuter.cloN + 1
             , arities = sOuter.arities
             , defuns = sOuter.defuns
-            , defunKey = key
+            , defunKey =
+                -- The SELF-tail check (lowerApp) must fire only when the
+                -- function being compiled IS that defun.  A closure body
+                -- (entry = False) is a SEPARATE function: tail-calling its
+                -- enclosing defun there is a plain cross-function call, not
+                -- an in-frame loop of the closure — so it gets no self key.
+                if entry then
+                    key
+
+                else
+                    ""
             , qname = qname
             }
 
@@ -808,25 +818,21 @@ lowerApp exp dest isTail s =
 
 lowerSelfTail : List Exp -> S -> Result String S
 lowerSelfTail args s =
-    List.foldl
-        (\( arg, i ) acc ->
-            acc
-                |> Result.andThen
-                    (\s1 ->
-                        let
-                            ( tslot, s2 ) =
-                                freshSlot s1
-                        in
-                        lowerVal arg tslot s2
-                            |> Result.map
-                                (\s3 ->
-                                    emit (Blit (Il.Tmp (slotTmp tslot)) (Il.Tmp (slotTmp (i + 1))) vs) s3
-                                )
+    -- Stage EVERY arg into a fresh rooted slot BEFORE blitting any of them
+    -- into the param slots: the VM's appterm evaluates all args before
+    -- rebinding, and an arg that reads a param (directly or nested) must see
+    -- the OLD value, not one already overwritten by an earlier arg's blit.
+    lowerArgsToSlots args s
+        |> Result.map
+            (\( slots, s1 ) ->
+                List.foldl
+                    (\( slot, i ) acc ->
+                        emit (Blit (Il.Tmp (slotTmp slot)) (Il.Tmp (slotTmp (i + 1))) vs) acc
                     )
-        )
-        (Ok s)
-        (List.indexedMap (\i a -> ( a, i )) args)
-        |> Result.map (jumpTo "body")
+                    s1
+                    (List.indexedMap (\i slot -> ( slot, i )) slots)
+                    |> jumpTo "body"
+            )
 
 
 
@@ -1055,7 +1061,7 @@ lowerIf block dest isTail s =
 
                             else
                                 lowerVal block.elseBranch dest (startBlock elseLbl s12)
-                                    |> Result.map (startBlock joinLbl)
+                                    |> Result.map (jumpTo joinLbl >> startBlock joinLbl)
                         )
             )
 
@@ -1992,7 +1998,7 @@ lowerNumEq args dest s =
                         |> emit (Load (Just xa) L LoadL (Il.Tmp pa))
                         |> emit (Bin (Just pb) L Add (Il.Tmp (slotTmp a2)) (Il.Con 8))
                         |> emit (Load (Just xb) L LoadL (Il.Tmp pb))
-                        |> emit (Cmp (Just c) W Ceq (Il.Tmp xa) (Il.Tmp xb))
+                        |> emit (Cmp (Just c) L Ceq (Il.Tmp xa) (Il.Tmp xb))
                         |> emit (Store StoreW (Il.Con tagBoolean) (Il.Tmp (slotTmp dest)))
                         |> emit (Bin (Just d8) L Add (Il.Tmp (slotTmp dest)) (Il.Con 8))
                         |> emit (Store StoreW (Il.Tmp c) (Il.Tmp d8))
@@ -2427,21 +2433,33 @@ metaTable pendings =
                 )
                 entries
 
-        entryDatas =
-            List.indexedMap
-                (\i ( p, _ ) ->
-                    { name = "meta" ++ String.fromInt i
-                    , align = Just 8
-                    , items = [ DRef ("mname" ++ String.fromInt i), DRef p.func.name, DWord p.nparams ]
-                    , export_ = False
-                    }
+        -- One INLINE array of rows (name ptr, code ptr, arity w + 4 pad =
+        -- 24 B/row — exactly Zig's `extern struct Meta { name, code, arity }`
+        -- at align 8).  The rows live in a SINGLE data symbol so their 24-byte
+        -- stride holds by construction; the old `l $meta0, l $meta1` array of
+        -- per-row POINTERS only resolved because QBE happened to emit the
+        -- 20-byte row symbols contiguously at a 24-byte stride — a layout the
+        -- Zig `[*]const Meta` type did not actually describe.
+        metaRowsItems =
+            List.concatMap
+                (\( i, ( p, _ ) ) ->
+                    [ DRef ("mname" ++ String.fromInt i)
+                    , DRef p.func.name
+                    , DWord p.nparams
+                    , DZero 4
+                    ]
                 )
-                entries
+                (List.indexedMap (\i e -> ( i, e )) entries)
 
         tableDatas =
-            [ { name = "qbe_meta"
+            [ { name = "meta_rows"
               , align = Just 8
-              , items = List.map (\i -> DRef ("meta" ++ String.fromInt i)) (List.range 0 (n - 1))
+              , items = metaRowsItems
+              , export_ = False
+              }
+            , { name = "qbe_meta"
+              , align = Just 8
+              , items = [ DRef "meta_rows" ]
               , export_ = True
               }
             , { name = "qbe_meta_len"
@@ -2451,7 +2469,7 @@ metaTable pendings =
               }
             ]
     in
-    ( nameDatas ++ entryDatas ++ tableDatas, [] )
+    ( nameDatas ++ tableDatas, [] )
 
 
 -- QBE identifiers are [a-zA-Z_$][a-zA-Z0-9_$]*; every other byte becomes

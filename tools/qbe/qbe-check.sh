@@ -41,7 +41,10 @@ run() {
   local vm_out
   vm_out="$("$ROOT/zig-out/bin/elmvm" "$TMP/$name/ref.csexp" "$entry" "${args[@]}" 2>&1)"
   local nat_out
-  nat_out="$("$bin" "$entry" "${args[@]}" 2>&1)"
+  # `timeout` guards the native run: bug-2 (clostail) is an infinite loop
+  # when the closure self-tail miscompiles, and a regression must fail loudly
+  # here rather than wedge the whole check script.
+  nat_out="$(timeout 60 "$bin" "$entry" "${args[@]}" 2>&1)"
 
   if [ "$vm_out" != "$nat_out" ]; then
     echo "FAIL $name: vm='$vm_out' native='$nat_out'"
@@ -79,6 +82,19 @@ run ifx        Ifx.main         tools/qbe/fixtures/ifx.elm
 # reservation; 500k at the default heap is the identity run.
 run churn      Churn.build      tools/qbe/fixtures/churn.elm 150000 0
 run churnbig-nochurn Churn.build tools/qbe/fixtures/churn.elm 500000 0
+
+# ---- the four regression fixtures (the 22/22 suite was structurally blind
+#      to these shapes; one per stage-1 review must-fix) ----
+# bug 1: arity-2 self-tail whose accumulator is OBSERVABLE (the committed
+# churn has this shape but returns 0, hiding the (n-1)::acc miscompile).
+run selftail2  SelfTail2.build  tools/qbe/fixtures/selftail2.elm 3 0
+# bug 4: a non-tail If (every fixture If was in tail position).
+run nontailif  IfElse.main      tools/qbe/fixtures/nontailif.elm
+# bug 2: a closure tail-calling its ENCLOSING defun (VM terminates; the
+# miscompile was an in-frame loop of the closure = hang, hence `timeout`).
+run clostail   ClosTail.main    tools/qbe/fixtures/clostail.elm 5
+# bug 3: i64-boundary equality (32-bit ceqw was wrong on the full payload).
+run eq64       Eq.eq            tools/qbe/fixtures/eq64.elm 4294967296 0
 
 # ---- structural root-store check on fib's assembly ----
 S="$TMP/fib/fib.s"

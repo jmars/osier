@@ -356,6 +356,20 @@ export fn rt_prim(name: [*:0]const u8, args: [*]Value, nargs: i32) callconv(.c) 
     g.rootPushValueArray(&buf, &live);
     defer g.rootPop();
 
+    // trap-error vmExecEnv's a lambda body as a VM *Instr stream
+    // (prims.zig:1087/1141).  Every lambda the native slice produces is
+    // Desc*-coded, never *Instr — handing it to trap-error would execute a
+    // Desc struct as instructions.  Reject loudly rather than silently
+    // misinterpreting (unreachable from today's frontend, but the loudness
+    // contract must not have a silent-UB hole).
+    if (std.mem.eql(u8, std.mem.span(name), "trap-error")) {
+        for (buf[0..n]) |*a| {
+            if (a.tag == .lambda) {
+                dieLoud("prim 'trap-error' received a native closure (Desc* code) — no VM lambda exists in the qbe slice");
+            }
+        }
+    }
+
     var stack: types.ValueArray = .{ .data = null, .len = 0, .cap = 0 };
     interp.vaInit(g, &stack);
     g.rootPushValueArray(stack.data orelse @ptrCast(&emptySlot), &stack.len);
@@ -440,7 +454,11 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     vmem.init(&gg);
     vm = &vmem;
 
-    // find the entry in the meta table
+    // find the entry in the meta table.  $qbe_meta is a POINTER to a single
+    // contiguous array of Meta rows (Mid.Qbe.Lower metaTable emits the rows
+    // inline in one $meta_rows symbol and $qbe_meta as `l $meta_rows`), so
+    // `[*]const Meta` describes the layout exactly — no reliance on QBE's
+    // per-symbol emission order.
     var meta: ?*const Meta = null;
     var i: usize = 0;
     while (i < qbe_meta_len) : (i += 1) {
