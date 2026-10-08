@@ -25,14 +25,17 @@ module Mid.Qbe.Lower exposing (lower)
 --     the VM's own cons/@p/emptylist/assoc/snd prim sequences via rt_prim, so
 --     representation parity is by construction), ShortAnd/ShortOr/NotEqual
 --     (the VM's jmpf semantics), and non-ASCII string/symbol literals (UTF-8
---     encoded, byte-length correct).  Record FIELD PATTERNS (VField) stay out
---     of scope.
+--     encoded, byte-length correct).
 --   stage 4 adds: StreamRef (stdin/stdout/stderr) — lowered EXACTLY like
 --     Mid.ToZinc does (Symbol <varName> + Prim "value"), so the emitted code
 --     reads the SAME value-table slot the VM reads; arity is now 0..maxArity
 --     (16, raised from 8 — the rt_callN dispatch table and the runtime's
 --     value buffers are the only bounds).  The effect loop itself is HOSTED
 --     by tools/qbe/rt.zig (mirroring tools/aot/run.zig), not lowered here.
+--   stage 5 adds: record FIELD PATTERNS (VField) — the only remaining
+--     unsupported construct.  A field pattern is snd (assoc (sym field) rec)
+--     exactly like RecordGet, reached via the same Step machinery; see
+--     lowerPath.
 --
 -- ============================== THE CONTRACTS ==============================
 --
@@ -1423,8 +1426,34 @@ lowerPath path scrutSlot dest s =
         VPath steps ->
             Ok (readSteps steps scrutSlot dest s)
 
-        VField _ _ ->
-            Err "qbe: record field pattern (VField) is not lowered by the native slice yet"
+        VField steps field ->
+            -- A record field pattern reads the record via its steps, then looks
+            -- the field up the VM's way: snd (assoc (sym field) rec) — exactly
+            -- Mid.ToZinc's VField (pathInstrs: readPath ++ [Symbol field, assoc,
+            -- snd]) and this slice's own RecordGet lowering (buildRecordGet), so
+            -- parity is by construction.  The record lands in a ROOTED slot
+            -- before the two rt_prim calls, so an allocation inside assoc/snd
+            -- can never see an unrooted record (the stage-3 aggchurn discipline).
+            let
+                ( p, s1 ) =
+                    freshSlot s
+
+                sRead =
+                    readSteps steps scrutSlot p s1
+
+                ( l, s2 ) =
+                    freshSlot sRead
+            in
+            lowerLit (LSymbol field) l s2
+                |> Result.andThen
+                    (\s3 ->
+                        let
+                            ( r, s4 ) =
+                                freshSlot s3
+                        in
+                        rtPrimSlots "assoc" [ l, p ] r s4
+                            |> Result.andThen (\s5 -> rtPrimSlots "snd" [ r ] dest s5)
+                    )
 
 
 -- Apply `steps` from srcSlot, writing the reached value into dstSlot.  Pure:

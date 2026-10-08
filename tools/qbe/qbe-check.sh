@@ -156,6 +156,18 @@ run aggchurn    AggChurn.main   tools/qbe/fixtures/aggchurn.elm
 run arity9      Arity9.add9     tools/qbe/fixtures/arity9.elm 1 2 3 4 5 6 7 8 9
 run arity9apply Arity9.main9    tools/qbe/fixtures/arity9.elm
 
+# ---- stage 5: record field patterns (VField) ----
+# vfield-let: a destructuring let field pattern ({x,y} = p).  vfield-nested: a
+# field pattern nested inside a ctor pattern (VField [IdxStep 1]).  vfield-mixed:
+# a field-pattern alt alongside literal/wildcard/nullary alts in ONE case.
+# vfield-rooted: a field-pattern value used ACROSS a 200000-cell allocation (the
+# rooting path — under CHURN_MB below the collector runs while x is live).
+run vfield-let    VField.letField   tools/qbe/fixtures/vfield.elm
+run vfield-nested VField.nestedField tools/qbe/fixtures/vfield.elm
+run vfield-mixed  VField.mixedCase  tools/qbe/fixtures/vfield.elm
+run vfield-rooted VField.rootedField tools/qbe/fixtures/vfield.elm
+run vfield-main   VField.main       tools/qbe/fixtures/vfield.elm
+
 # ---- stage 4: the effect loop (StreamRef) + host I/O, native vs elmvm ----
 # io-read: read a file (QBE_IO_IN) and write a stdout sentinel through the
 # StreamRef (*stoutput*) path.  io-write: write QBE_IO_OUT, read it back, AND
@@ -247,18 +259,18 @@ else
   FAIL=1
 fi
 
-# ---- loud-failure check: an out-of-scope construct must NOT compile ----
-# StreamRef (the effect loop) now lowers, so the remaining unsupported
-# construct is a RECORD FIELD PATTERN (`{ x } = r` destructuring -> VField).
-# The message must name it, not claim "StreamRef"/"ListLit"/"Case" (which lower).
+# ---- the last loud-fail is GONE: a record field pattern now LOWERS ----
+# VField was the final unsupported construct (rg -c 'Err "qbe:' Lower.elm == 0).
+# This is a positive regression guard: `{ x } = { x = 1 }` must compile (no
+# `err ` prefix) — if a future regression drops VField, this fails loudly.
 printf 'module Oos exposing (main)\n\nmain =\n    let\n        { x } =\n            { x = 1 }\n    in\n    x\n' \
   > "$TMP/oos.elm"
 (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY=Oos.main node run.js "$TMP/oos.elm" "$TMP/oos.ssa") >/dev/null 2>&1
 if head -c 4 "$TMP/oos.ssa" 2>/dev/null | grep -q '^err '; then
-  echo "PASS loud-fail: record field pattern rejected with: $(head -1 "$TMP/oos.ssa")"
-else
-  echo "FAIL loud-fail: out-of-scope fixture compiled"
+  echo "FAIL vfield-lowers: record field pattern still fails loudly: $(head -1 "$TMP/oos.ssa")"
   FAIL=1
+else
+  echo "PASS vfield-lowers: record field pattern ({ x } = {x=1}) now lowers (no loud failure)"
 fi
 
 # ---- cross-defun tail: how deep before the native stack dies ----
