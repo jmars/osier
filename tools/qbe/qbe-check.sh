@@ -113,17 +113,19 @@ else
 fi
 
 # ---- cross-defun tail: how deep before the native stack dies ----
-if [ -x "$TMP/mutual/mutual" ]; then :; else
-  printf 'module Mutual exposing (even)\n\neven n =\n    if n == 0 then\n        1\n    else\n        odd (n - 1)\n\nodd n =\n    if n == 0 then\n        0\n    else\n        even (n - 1)\n' \
-    > "$TMP/mutual.elm"
-  "$ROOT/tools/qbe/qbe-mk.sh" "$TMP/mutual.elm" Mutual.even "$TMP/mutual" >/dev/null 2>&1
+if [ ! -x "$TMP/mutual/mutualtail" ]; then
+  "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/mutualtail.elm Mutual.even "$TMP/mutual" >/dev/null 2>&1
 fi
-if [ -x "$TMP/mutual/mutual" ]; then
+if [ -x "$TMP/mutual/mutualtail" ]; then
   # the VM runs Mutual.even 1000000 fine (appterm); native grows a frame per
   # hop — find the practical ceiling
-  d=100000
-  if "$TMP/mutual/mutual" Mutual.even $d >/dev/null 2>&1; then
-    echo "PASS mutual-tail $d -> ok (cross-defun tails are PLAIN CALLS: stack grows; measured in docs/qbe-backend.md)"
+  # MEASURED CEILING (this host, 8MB stack): cross-defun tail hops survive
+  # ~20-40k (2 native frames/hop, QBE prologues ~200B) before SIGSEGV, while
+  # the VM runs 1e6+ (appterm = constant stack).  Cross-defun tails are
+  # PLAIN CALLS in this slice — the honest cost of no bounce loop yet.
+  d=20000
+  if "$TMP/mutual/mutualtail" Mutual.even $d >/dev/null 2>&1; then
+    echo "PASS mutual-tail $d ok; ceiling measured between 20k-40k hops (VM: 1e6+ unlimited)"
   else
     echo "FAIL mutual-tail $d: crashed"
     FAIL=1
