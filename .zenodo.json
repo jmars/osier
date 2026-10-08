@@ -7,7 +7,7 @@
   ],
   "title": "Osier: branch-local row refinement for extensible records with GADTs",
   "description": "The Osier language: an Elm-family checker and a Lean mechanization for row-polymorphic records under branch-local GADT refinement and locally abstract types. The deposit carries the compiler, the mechanization, the fixture gate and the corpus byte-identity manifest, the artifact documentation, and the paper. Dual-licensed: MIT for the code, CC-BY-4.0 for docs/ (the LICENSE file routes each path).",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "access_right": "open",
   "upload_type": "software",
   "license": "mit",
