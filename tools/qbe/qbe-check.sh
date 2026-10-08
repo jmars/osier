@@ -128,6 +128,7 @@ run matchlit   MatchLit.main    tools/qbe/fixtures/matchlit.elm
 run record      Record.main     tools/qbe/fixtures/record.elm
 run record-fields Record.fields tools/qbe/fixtures/record.elm
 run record-upd  Record.upd      tools/qbe/fixtures/record.elm
+run record-readupd Record.readUpd tools/qbe/fixtures/record.elm
 # list: ListLit + MEmpty/MCons (stage 2's MEmpty, now fixture-able because
 # `[]` lowers): fold a literal, match an empty literal, head/tail a literal.
 run list        ListAgg.main    tools/qbe/fixtures/list.elm

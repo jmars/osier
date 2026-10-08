@@ -38,5 +38,19 @@ upd =
     { r | x = 30, inner = { a = 40, b = 50 } }
 
 
+-- read the UPDATED record back: the new value must win (first-occurrence),
+-- and the untouched fields must still be present (domain-preserving).
+readUpd : Int
+readUpd =
+    let
+        r0 =
+            mk
+
+        r =
+            { r0 | x = 30 }
+    in
+    r.x + 10 * r.y + 100 * r.inner.a + 1000 * r.inner.b
+
+
 main =
     mk
