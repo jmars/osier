@@ -127,12 +127,52 @@ escapeChar c =
     else if c == '\\' then
         "\\\\"
 
-    else if Char.toCode c < 32 || Char.toCode c > 126 then
-        -- QBE strings are byte strings; emit non-printables as octal
-        "\\" ++ pad3 (toOctal (Char.toCode c))
+    else if isPrintableAscii c then
+        String.fromChar c
 
     else
-        String.fromChar c
+        -- Encode the code point as UTF-8 BYTES, each emitted as a 3-digit
+        -- octal escape.  (A single octal of the code point would be wrong: it
+        -- emits Latin-1 for code points > 127 instead of their UTF-8 bytes —
+        -- the VM stores/compares strings and symbols as UTF-8 bytes, so the
+        -- parity target is the byte sequence, not the code point.)
+        String.concat (List.map octalByte (utf8Bytes c))
+
+
+isPrintableAscii : Char -> Bool
+isPrintableAscii c =
+    let
+        code =
+            Char.toCode c
+    in
+    code >= 32 && code <= 126
+
+
+octalByte : Int -> String
+octalByte b =
+    "\\" ++ pad3 (toOctal b)
+
+
+-- One code point -> its UTF-8 byte sequence (each byte 0..255).  Elm
+-- String.toList yields one Char per Unicode scalar (no surrogate pairs), so
+-- Char.toCode is the full code point and the four UTF-8 widths below cover it.
+utf8Bytes : Char -> List Int
+utf8Bytes c =
+    let
+        code =
+            Char.toCode c
+    in
+    if code <= 0x7F then
+        [ code ]
+
+    else if code <= 0x7FF then
+        [ 0xC0 + (code // 64), 0x80 + modBy 64 code ]
+
+    else if code <= 0xFFFF then
+        [ 0xE0 + (code // 4096), 0x80 + modBy 4096 code // 64, 0x80 + modBy 64 code ]
+
+    else
+        [ 0xF0 + (code // 262144), 0x80 + modBy 262144 code // 4096, 0x80 + modBy 4096 code // 64, 0x80 + modBy 64 code ]
 
 
 pad3 : String -> String

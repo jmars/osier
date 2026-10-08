@@ -21,10 +21,13 @@ module Mid.Qbe.Lower exposing (lower)
 --     `let Some v = o` is "err parse failed"), record is out of scope, and a
 --     tuple pattern needs a Tup expression to construct.  It is NOT full
 --     tuple coverage — it exists so LetDestruct has a binding-bearing shape.
---   excluded (Err): RecordLit/Get/Update, ListLit, StreamRef, ShortAnd/
---     ShortOr/NotEqual, non-ASCII literals — records/lists, the boolean
---     short-circuit nodes and the effect loop are later stages.  Any REACHED
---     defun that needs one of these fails the compile.
+--   stage 3 adds: RecordLit/RecordGet/RecordUpdate and ListLit (desugared to
+--     the VM's own cons/@p/emptylist/assoc/snd prim sequences via rt_prim, so
+--     representation parity is by construction), ShortAnd/ShortOr/NotEqual
+--     (the VM's jmpf semantics), and non-ASCII string/symbol literals (UTF-8
+--     encoded, byte-length correct).  Record FIELD PATTERNS (VField) stay out
+--     of scope.
+--   excluded (Err): StreamRef (the effect loop) — that is its own stage.
 --
 -- ============================== THE CONTRACTS ==============================
 --
@@ -81,6 +84,7 @@ import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), Lambda, LetBinder(..), Lit(
 import Dict exposing (Dict)
 import Mid.Qbe.Il as Il exposing (Module, Func, Block, Inst(..), Jump(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..))
 import Set exposing (Set)
+import Zinc.Csexp exposing (utf8ByteLength)
 
 
 -- sizeof(vm Value) = 40 (gc/types.zig), the `:val` aggregate.
@@ -591,29 +595,29 @@ lowerVal exp dest s =
         Tup es ->
             lowerTup es dest s
 
-        RecordLit _ ->
-            Err "qbe: RecordLit is not lowered by the native slice yet"
+        RecordLit setters ->
+            lowerVal (buildRecord setters) dest s
 
-        RecordGet _ _ ->
-            Err "qbe: RecordGet is not lowered by the native slice yet"
+        RecordGet rec field ->
+            lowerVal (buildRecordGet rec field) dest s
 
-        RecordUpdate _ ->
-            Err "qbe: RecordUpdate is not lowered by the native slice yet"
+        RecordUpdate update ->
+            lowerVal (buildRecordUpdate update) dest s
 
-        ListLit _ ->
-            Err "qbe: ListLit is not lowered by the native slice yet"
+        ListLit es ->
+            lowerVal (buildList es) dest s
 
         StreamRef _ ->
             Err "qbe: StreamRef (effect loop) is not lowered by the native slice yet"
 
-        ShortAnd _ ->
-            Err "qbe: ShortAnd is not lowered by the native slice yet"
+        ShortAnd block ->
+            lowerShortAnd block dest s
 
-        ShortOr _ ->
-            Err "qbe: ShortOr is not lowered by the native slice yet"
+        ShortOr block ->
+            lowerShortOr block dest s
 
-        NotEqual _ ->
-            Err "qbe: NotEqual is not lowered by the native slice yet"
+        NotEqual block ->
+            lowerNotEqual block dest s
 
 
 
@@ -670,45 +674,31 @@ lowerLit lit dest s =
             Ok (emit (Load (Just d8) D LoadD (Il.Sym fname)) s2)
 
         LSymbol name ->
-            if not (isAscii name) then
-                Err "qbe: non-ASCII symbol literal is not supported by the native slice"
+            let
+                ( d8, s1 ) =
+                    afterTag (storeTag tagSymbol)
 
-            else
-                let
-                    ( d8, s1 ) =
-                        afterTag (storeTag tagSymbol)
-
-                    ( sname, s2 ) =
-                        freshData ("sym:" ++ name)
-                            (\n -> { name = n, align = Just 8, items = [ DStr name, DByte 0 ], export_ = False })
-                            s1
-                in
-                Ok (emit (Store StoreL (Il.Sym sname) (Il.Tmp d8)) s2)
+                ( sname, s2 ) =
+                    freshData ("sym:" ++ name)
+                        (\n -> { name = n, align = Just 8, items = [ DStr name, DByte 0 ], export_ = False })
+                        s1
+            in
+            Ok (emit (Store StoreL (Il.Sym sname) (Il.Tmp d8)) s2)
 
         LString str ->
-            if not (isAscii str) then
-                Err "qbe: non-ASCII string literal is not supported by the native slice"
+            let
+                ( strname, s1 ) =
+                    freshData ("str:" ++ str)
+                        (\n -> { name = n, align = Just 8, items = [ DStr str, DByte 0 ], export_ = False })
+                        s
 
-            else
-                let
-                    ( strname, s1 ) =
-                        freshData ("str:" ++ str)
-                            (\n -> { name = n, align = Just 8, items = [ DStr str, DByte 0 ], export_ = False })
-                            s
-
-                    ( rp, s2 ) =
-                        freshTmp s1
-                in
-                Ok
-                    (emit (Call (Just rp) (Agg "val") (Il.Sym "rt_string") [ ArgVal (Base L) (Il.Sym strname), ArgVal (Base W) (Il.Con (String.length str)) ]) s2
-                        |> emit (Blit (Il.Tmp rp) (Il.Tmp d) vs)
-                    )
-
-
-isAscii : String -> Bool
-isAscii str =
-    String.all (\c -> Char.toCode c < 127) str
-
+                ( rp, s2 ) =
+                    freshTmp s1
+            in
+            Ok
+                (emit (Call (Just rp) (Agg "val") (Il.Sym "rt_string") [ ArgVal (Base L) (Il.Sym strname), ArgVal (Base W) (Il.Con (utf8ByteLength str)) ]) s2
+                    |> emit (Blit (Il.Tmp rp) (Il.Tmp d) vs)
+                )
 
 
 -- ============================ GREF AS A VALUE ============================
@@ -1072,6 +1062,103 @@ lowerIf block dest isTail s =
 
 
 
+-- ============================ SHORT-CIRCUIT BOOLEANS ============================
+-- Mid.ToZinc's ShortAnd/ShortOr/NotEqual, transcribed onto the same jmpf
+-- machinery lowerIf uses (jmpfFalse = the VM's exact .jmpf: false branch iff
+-- the value is a boolean with payload 0; anything else falls through).
+--   a && b  : a falsy -> literal False, else the VALUE of b (not coerced).
+--   a || b  : a truthy -> literal True, else the VALUE of b.
+--   a /= b  : `=` is the FULL primEq (deep for cons/vector, name for symbol);
+--             False when a==b, True when a!=b.
+-- The right side is only lowered on its own block reached by a jump, so it is
+-- NOT evaluated when the left side decides (the brief's "must not evaluate"
+-- requirement).
+
+
+lowerShortAnd : { left : Exp, right : Exp, falseLabel : String, endLabel : String } -> Int -> S -> Result String S
+lowerShortAnd block dest s =
+    let
+        ( cslot, s0 ) =
+            freshSlot s
+    in
+    lowerVal block.left cslot s0
+        |> Result.andThen
+            (\s1 ->
+                let
+                    ( falseLbl, s2 ) =
+                        freshLbl "andf" s1
+
+                    ( trueLbl, s3 ) =
+                        freshLbl "andt" s2
+
+                    ( endLbl, s4 ) =
+                        freshLbl "ande" s3
+                in
+                Ok (jmpfFalse cslot falseLbl trueLbl s4)
+                    |> Result.andThen (lowerVal block.right dest)
+                    |> Result.map (jumpTo endLbl >> startBlock falseLbl)
+                    |> Result.andThen (lowerLit (LBoolean False) dest)
+                    |> Result.map (jumpTo endLbl >> startBlock endLbl)
+            )
+
+
+lowerShortOr : { left : Exp, right : Exp, falseLabel : String, endLabel : String } -> Int -> S -> Result String S
+lowerShortOr block dest s =
+    let
+        ( cslot, s0 ) =
+            freshSlot s
+    in
+    lowerVal block.left cslot s0
+        |> Result.andThen
+            (\s1 ->
+                let
+                    ( falseLbl, s2 ) =
+                        freshLbl "orf" s1
+
+                    ( trueLbl, s3 ) =
+                        freshLbl "ort" s2
+
+                    ( endLbl, s4 ) =
+                        freshLbl "ore" s3
+                in
+                Ok (jmpfFalse cslot falseLbl trueLbl s4)
+                    |> Result.andThen (lowerLit (LBoolean True) dest)
+                    |> Result.map (jumpTo endLbl >> startBlock falseLbl)
+                    |> Result.andThen (lowerVal block.right dest)
+                    |> Result.map (jumpTo endLbl >> startBlock endLbl)
+            )
+
+
+lowerNotEqual : { left : Exp, right : Exp, falseLabel : String, endLabel : String } -> Int -> S -> Result String S
+lowerNotEqual block dest s =
+    let
+        ( eqSlot, s0 ) =
+            freshSlot s
+    in
+    -- `=` here is primEq via lowerNumEq (inline i64 compare for number/number,
+    -- rt_prim "=" for every other tag pair), exactly Mid.ToZinc's NotEqual.
+    lowerNumEq [ block.left, block.right ] eqSlot s0
+        |> Result.andThen
+            (\s1 ->
+                let
+                    ( falseLbl, s2 ) =
+                        freshLbl "nef" s1
+
+                    ( trueLbl, s3 ) =
+                        freshLbl "net" s2
+
+                    ( endLbl, s4 ) =
+                        freshLbl "nee" s3
+                in
+                Ok (jmpfFalse eqSlot falseLbl trueLbl s4)
+                    |> Result.andThen (lowerLit (LBoolean False) dest)
+                    |> Result.map (jumpTo endLbl >> startBlock falseLbl)
+                    |> Result.andThen (lowerLit (LBoolean True) dest)
+                    |> Result.map (jumpTo endLbl >> startBlock endLbl)
+            )
+
+
+
 -- ============================ CASE / PATTERNS ============================
 -- The VM's own match semantics, transcribed from Lower.Pattern / Mid.ToZinc
 -- (the ZINC emitter's readPath/matchInstrs/emitBinds) and prims.zig:
@@ -1418,6 +1505,7 @@ lowerHdTl isHd src dst s =
         |> jumpTo doneLbl
         |> startBlock chaseLbl
         |> chaseField (if isHd then 8 else 16) src dst
+        |> jumpTo doneLbl
         |> startBlock doneLbl
 
 
@@ -1561,6 +1649,81 @@ buildTuple es =
 
         [] ->
             Lit (LNumber 0)
+
+
+-- ============================ AGGREGATES ============================
+-- Records, tuples and lists all desugar to the VM's own prim sequences
+-- (Mid.ToZinc's RecordLit/RecordGet/RecordUpdate/ListLit/Tup emission), so
+-- representation parity is BY CONSTRUCTION: `cons`/`@p`/`emptylist`/`assoc`/
+-- `snd` route through rt_prim, which runs the REAL VM primitive.  Every
+-- element is lowered into a ROOTED frame slot before any later allocation
+-- (lowerPrimApp -> lowerArgsToSlots -> rtPrimSlots), and the accumulator of
+-- a right-nested cons chain is always the RESULT of an rt_prim call living in
+-- a rooted slot, so a moving collection can never see an unrooted element or
+-- a stale interior pointer mid-build (see ROOTING AUDIT in the report).
+
+
+-- [a, b, c] = cons a (cons b (cons c nil)) — the VM's ListLit: start from
+-- emptylist, cons each element in source order (right-nested).
+buildList : List Exp -> Exp
+buildList es =
+    case es of
+        x :: xs ->
+            PrimApp { prim = "cons", args = [ x, buildList xs ] }
+
+        [] ->
+            PrimApp { prim = "emptylist", args = [ Lit (LNumber 0) ] }
+
+
+-- {f=e1, g=e2} = cons (@p (sym f) e1) (cons (@p (sym g) e2) nil): an assoc
+-- list in SOURCE order, the first field at the head.  `@p` = cons (prims.zig
+-- primAtP), so a pair is (sym field . value); RecordGet then reads it with
+-- assoc + snd.  This is EXACTLY Mid.ToZinc's RecordLit.
+buildRecord : List ( String, Exp ) -> Exp
+buildRecord setters =
+    case setters of
+        ( field, value ) :: rest ->
+            PrimApp
+                { prim = "cons"
+                , args =
+                    [ PrimApp { prim = "@p", args = [ Lit (LSymbol field), value ] }
+                    , buildRecord rest
+                    ]
+                }
+
+        [] ->
+            PrimApp { prim = "emptylist", args = [ Lit (LNumber 0) ] }
+
+
+-- rec.f = snd (assoc (sym f) rec) — Mid.ToZinc's RecordGet.  assoc takes
+-- (key, list) in pop order (args[0] is the first pop = key), returns the
+-- first (field . value) pair whose car matches by NAME, or nil if absent —
+-- snd of nil then faults exactly as the VM does.
+buildRecordGet : Exp -> String -> Exp
+buildRecordGet rec field =
+    PrimApp
+        { prim = "snd"
+        , args =
+            [ PrimApp { prim = "assoc", args = [ Lit (LSymbol field), rec ] } ]
+        }
+
+
+-- {base | f=e1, g=e2} prepends each (field . value) pair onto base in source
+-- order (Mid.ToZinc RecordUpdate): the result is (g,e2) :: (f,e1) :: base, so
+-- assoc's FIRST-occurrence search finds the new value and the domain is
+-- preserved (the old field, if present, is merely shadowed — the type
+-- checker forbids adding fields, and duplicate labels shadow the same way).
+buildRecordUpdate : { base : Exp, updates : List ( String, Exp ) } -> Exp
+buildRecordUpdate update =
+    List.foldl
+        (\( field, value ) acc ->
+            PrimApp
+                { prim = "cons"
+                , args = [ PrimApp { prim = "@p", args = [ Lit (LSymbol field), value ] }, acc ]
+                }
+        )
+        update.base
+        update.updates
 
 
 -- ============================ PRIMAPPS ============================

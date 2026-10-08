@@ -120,6 +120,33 @@ run match      Match.main       tools/qbe/fixtures/match.elm
 # and a string literal inside a constructor sub-pattern (order matters).
 run matchlit   MatchLit.main    tools/qbe/fixtures/matchlit.elm
 
+# ---- stage 3: aggregates and literals (records / tuples / lists / bools) ----
+# record: RecordLit read back by 3 fields in a DIFFERENT order + a nested
+# record (fields -> 4312); RecordUpdate must be domain-preserving (upd returns
+# the full updated assoc-list structure); main returns the record so the
+# printed assoc-list ORDER is compared against the VM.
+run record      Record.main     tools/qbe/fixtures/record.elm
+run record-fields Record.fields tools/qbe/fixtures/record.elm
+run record-upd  Record.upd      tools/qbe/fixtures/record.elm
+# list: ListLit + MEmpty/MCons (stage 2's MEmpty, now fixture-able because
+# `[]` lowers): fold a literal, match an empty literal, head/tail a literal.
+run list        ListAgg.main    tools/qbe/fixtures/list.elm
+# bool: ShortAnd/ShortOr where the RIGHT side is infinite self-recursion — it
+# must NOT be evaluated (the `timeout` guard fails the run if it is) — and
+# NotEqual on 5/6 vs 5/5.
+run bool        Bool.main       tools/qbe/fixtures/bool.elm
+# tup: a right-nested cons chain to and from a destructuring let, a 2-tuple
+# (snd is a plain value), and a nested tuple pattern.
+run tup         Tup.main        tools/qbe/fixtures/tup.elm
+# utf8: non-ASCII string literals — UTF-8 byte length and byte identity
+# (eq uses `==`'s byte compare; main returns the string for a print compare).
+run utf8        Utf8.main       tools/qbe/fixtures/utf8.elm
+run utf8-eq     Utf8.eq         tools/qbe/fixtures/utf8.elm
+# aggchurn: a ListLit of 4 large lists (each ~2.6MB) built INLINE, so the
+# collector runs DURING the outer list's construction while earlier elements
+# are rooted — the partial-aggregate rooting hazard, under CHURN_MB below.
+run aggchurn    AggChurn.main   tools/qbe/fixtures/aggchurn.elm
+
 # ---- structural root-store check on fib's assembly ----
 S="$TMP/fib/fib.s"
 if [ -f "$S" ]; then
@@ -142,14 +169,14 @@ else
 fi
 
 # ---- loud-failure check: an out-of-scope construct must NOT compile ----
-# ListLit (the scrutinee `[1, 2]`) is still out of scope; `x :: _` (MCons)
-# is IN scope, so the trip is on ListLit — the message must say so, not
-# claim "Case" (which now lowers).
-printf 'module Oos exposing (main)\n\nmain =\n    case [1, 2] of\n        x :: _ ->\n            x\n\n        [] ->\n            0\n' \
+# StreamRef (the effect loop, `stdout`) is still out of scope; records, lists,
+# tuples and the boolean nodes now lower, so the trip is on the effect loop —
+# the message must say so, not claim "ListLit"/"Case" (which lower).
+printf 'module Oos exposing (main)\n\nmain =\n    stdout\n' \
   > "$TMP/oos.elm"
 (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY=Oos.main node run.js "$TMP/oos.elm" "$TMP/oos.ssa") >/dev/null 2>&1
 if head -c 4 "$TMP/oos.ssa" 2>/dev/null | grep -q '^err '; then
-  echo "PASS loud-fail: ListLit rejected with: $(head -1 "$TMP/oos.ssa")"
+  echo "PASS loud-fail: StreamRef rejected with: $(head -1 "$TMP/oos.ssa")"
 else
   echo "FAIL loud-fail: out-of-scope fixture compiled"
   FAIL=1
