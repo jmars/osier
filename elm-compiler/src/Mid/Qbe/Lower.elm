@@ -2472,8 +2472,12 @@ metaTable pendings =
     ( nameDatas ++ tableDatas, [] )
 
 
--- QBE identifiers are [a-zA-Z_$][a-zA-Z0-9_$]*; every other byte becomes
--- _xHH.  Deterministic, collision-free, and never parsed back.
+-- QBE identifiers are [a-zA-Z_$][a-zA-Z0-9_$]*; every other BYTE becomes
+-- _xHH at a FIXED two digits, and any codepoint above a byte becomes _uHHHHHH
+-- at a fixed six.  Fixed width is what makes mangle INJECTIVE on all strings:
+-- a variable-width escape collides — before this fix mangle "_" and
+-- mangle "\u{0005}f" both rendered _x5f (0x5f vs 0x5-then-"f").  Deterministic,
+-- collision-free, and never parsed back.
 mangle : String -> String
 mangle str =
     String.concat (List.map mangleChar (String.toList str))
@@ -2488,17 +2492,22 @@ mangleChar c =
     if (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) then
         String.fromChar c
 
-    else
+    else if code < 256 then
         "_x" ++ hex2 code
+
+    else
+        "_u" ++ hex6 code
 
 
 hex2 : Int -> String
 hex2 code =
-    if code < 16 then
-        String.fromChar (hexDigit code)
+    String.fromChar (hexDigit (code // 16)) ++ String.fromChar (hexDigit (modBy 16 code))
 
-    else
-        hex2 (code // 16) ++ String.fromChar (hexDigit (modBy 16 code))
+
+-- 0x10FFFF (the largest codepoint) fits exactly: top pair <= 0x10.
+hex6 : Int -> String
+hex6 code =
+    hex2 (code // 65536) ++ hex2 (modBy 65536 code // 256) ++ hex2 (modBy 256 code)
 
 
 hexDigit : Int -> Char

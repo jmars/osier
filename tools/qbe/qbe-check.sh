@@ -6,9 +6,9 @@
 # require IDENTICAL stdout.  Also runs the two crux checks:
 #
 #   * GC CHURN: rerun the native binary under a tiny QBE_HEAP_MB so the
-#     moving collector runs constantly (QBE_HEAP_MB=1 => every allocation
-#     pressure point scavenges); output must still match.  This is the
-#     behavioural proof that the pooled-frame roots actually root (a
+#     moving collector runs constantly (the minimum viable heap, so every
+#     allocation pressure point scavenges); output must still match.  This
+#     is the behavioural proof that the pooled-frame roots actually root (a
 #     promotion bug = silently stale pointers, not a crash).
 #   * ROOT STORES SURVIVE: grep the emitted .s for stores/loads through the
 #     pooled frame pointer (%rbx = rt_frame_enter's result) around the
@@ -25,6 +25,12 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TMP="${TMPDIR:-/tmp}/qbe-check"
 mkdir -p "$TMP"
 FAIL=0
+
+# GC-churn heap, in MB: the minimum viable heap (MIN_HEAP_BYTES = 16MB,
+# vendor/zinc-vm/src/gc/heap.zig:61 — a literal 1 fails gc init), so every
+# allocation-pressure point collects.  One definition: the rerun below and
+# every message derive from this, so they cannot drift apart again.
+CHURN_MB=16
 
 # fixture entry args...
 run() {
@@ -51,19 +57,21 @@ run() {
     FAIL=1
     return
   fi
-  echo "PASS $name: identical ($nat_out)"
+  # truncate: a fixture whose RESULT prints large (bigprint) would flood the
+  # log; the comparison above is still on the full outputs.
+  echo "PASS $name: identical (${nat_out:0:80})"
 
-  # GC churn: minimum viable heap (MIN_HEAP_BYTES = 16MB, heap.zig:61 —
-  # smaller inits fail), so every allocation-pressure point collects.
-  # A fixture whose LIVE SET cannot fit 16MB opts out by ending in "-nochurn".
+  # GC churn: CHURN_MB above (the minimum viable heap), so every
+  # allocation-pressure point collects.
+  # A fixture whose LIVE SET cannot fit it opts out by ending in "-nochurn".
   if [[ "$name" != *-nochurn ]]; then
   local churn_out
-  churn_out="$(QBE_HEAP_MB=16 "$bin" "$entry" "${args[@]}" 2>&1)" || true
+  churn_out="$(QBE_HEAP_MB=$CHURN_MB "$bin" "$entry" "${args[@]}" 2>&1)" || true
   if [ "$churn_out" != "$vm_out" ]; then
-    echo "FAIL $name: CHURN mismatch (QBE_HEAP_MB=1): '$churn_out'"
+    echo "FAIL $name: CHURN mismatch (QBE_HEAP_MB=$CHURN_MB): '$churn_out'"
     FAIL=1
   else
-    echo "PASS $name: gc-churn (QBE_HEAP_MB=1) identical"
+    echo "PASS $name: gc-churn (QBE_HEAP_MB=$CHURN_MB) identical"
   fi
   fi
 }
@@ -77,11 +85,17 @@ run closure    Closure.main     tests/elm-fixtures/closure.elm
 run const42    Const42.main     tools/qbe/fixtures/const42.elm
 run idn        Idn.idn          tools/qbe/fixtures/idn.elm 7
 run ifx        Ifx.main         tools/qbe/fixtures/ifx.elm
-# churn: 150k conses = ~13.2MB live, just under the 16MB minimum heap, so the
-# QBE_HEAP_MB=16 stress rerun collects/promotes constantly and still fits the
+# churn: 150k conses = ~13.2MB live, just under the CHURN_MB minimum heap, so
+# the gc-churn stress rerun collects/promotes constantly and still fits the
 # reservation; 500k at the default heap is the identity run.
 run churn      Churn.build      tools/qbe/fixtures/churn.elm 150000 0
 run churnbig-nochurn Churn.build tools/qbe/fixtures/churn.elm 500000 0
+
+# nice-to-have 9: a result whose printed form EXCEEDS the old 16384-byte print
+# buffer (~24KB here).  Both runners stream now, so native and VM must agree
+# at this size; before the fix native died with "print failed" and the VM with
+# "error: WriteFailed".  Same shape as churn (the slice supports `::`).
+run bigprint   BigPrint.build   tools/qbe/fixtures/bigprint.elm 2000 0
 
 # ---- the four regression fixtures (the 22/22 suite was structurally blind
 #      to these shapes; one per stage-1 review must-fix) ----

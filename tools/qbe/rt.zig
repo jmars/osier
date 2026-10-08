@@ -494,13 +494,16 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
 
     const result = callArity(m.arity, m.code, null, &argv_buf);
 
-    var outbuf: [16384]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&outbuf);
-    values.printValue(&w, result) catch {
+    // Print through an ALLOCATING writer, not a fixed one: a result whose
+    // printed form exceeds any fixed buffer must print in full (the VM runner
+    // elmvm does the same), so native and VM output agree at every size.
+    var aw = std.Io.Writer.Allocating.init(std.heap.page_allocator);
+    defer aw.deinit();
+    values.printValue(&aw.writer, result) catch {
         werr("qbe-rt: print failed\n");
         return 1;
     };
-    wout(w.buffered());
+    wout(aw.written());
     wout("\n");
     return 0;
 }

@@ -177,8 +177,13 @@ pub fn main(init: std.process.Init) !void {
     };
     g.rootPop();
 
-    var outbuf: [16384]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&outbuf);
+    // Print through an ALLOCATING writer, not a fixed one: a result whose
+    // printed form exceeds any fixed buffer must print in full (the native
+    // qbe runner rt.zig does the same), so VM and native output agree at
+    // every size.
+    var aw = std.Io.Writer.Allocating.init(a);
+    defer aw.deinit();
+    const w = &aw.writer;
 
     // ---- M9: auto-detect a Program vector and drive the host event loop ----
     // main returns Program m0 c0 update as DATA when the fixture uses
@@ -194,9 +199,9 @@ pub fn main(init: std.process.Init) !void {
         };
         g.rootPushValue(&final);
         defer g.rootPop();
-        try values.printValue(&w, final);
+        try values.printValue(w, final);
     } else {
-        try values.printValue(&w, result);
+        try values.printValue(w, result);
     }
     // AOTRUN_QUIET: skip the final model print (see the env-knob note above).
     if (!quiet) {
