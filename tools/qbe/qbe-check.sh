@@ -110,6 +110,16 @@ run clostail   ClosTail.main    tools/qbe/fixtures/clostail.elm 5
 # bug 3: i64-boundary equality (32-bit ceqw was wrong on the full payload).
 run eq64       Eq.eq            tools/qbe/fixtures/eq64.elm 4294967296 0
 
+# ---- stage 2: pattern matching (Case / Con / match steps / LetDestruct) ----
+# match: constructor patterns with sub-patterns, NESTED ctor patterns, a
+# destructuring let (tuple pattern), ordered alts where order changes the
+# result (Some 0 before Some _), int literal patterns + catch-all, and a Case
+# inside a closure body — all summed into one observable number.
+run match      Match.main       tools/qbe/fixtures/match.elm
+# matchlit: literal patterns beyond Int — Bool, String, Char (a 1-char string),
+# and a string literal inside a constructor sub-pattern (order matters).
+run matchlit   MatchLit.main    tools/qbe/fixtures/matchlit.elm
+
 # ---- structural root-store check on fib's assembly ----
 S="$TMP/fib/fib.s"
 if [ -f "$S" ]; then
@@ -131,12 +141,15 @@ else
   FAIL=1
 fi
 
-# ---- loud-failure check: an out-of-scope fixture must NOT compile ----
+# ---- loud-failure check: an out-of-scope construct must NOT compile ----
+# ListLit (the scrutinee `[1, 2]`) is still out of scope; `x :: _` (MCons)
+# is IN scope, so the trip is on ListLit — the message must say so, not
+# claim "Case" (which now lowers).
 printf 'module Oos exposing (main)\n\nmain =\n    case [1, 2] of\n        x :: _ ->\n            x\n\n        [] ->\n            0\n' \
   > "$TMP/oos.elm"
 (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY=Oos.main node run.js "$TMP/oos.elm" "$TMP/oos.ssa") >/dev/null 2>&1
 if head -c 4 "$TMP/oos.ssa" 2>/dev/null | grep -q '^err '; then
-  echo "PASS loud-fail: Case rejected with: $(head -1 "$TMP/oos.ssa")"
+  echo "PASS loud-fail: ListLit rejected with: $(head -1 "$TMP/oos.ssa")"
 else
   echo "FAIL loud-fail: out-of-scope fixture compiled"
   FAIL=1

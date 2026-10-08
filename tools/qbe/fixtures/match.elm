@@ -70,6 +70,17 @@ makeClassifier threshold =
             _ ->
                 threshold + x
 
+-- NESTED constructor patterns (a ctor pattern inside a ctor pattern), with a
+-- fall-through arm that must fire when the nesting does not match.
+sumNums : Expr -> Int
+sumNums e =
+    case e of
+        Add (Num a) (Num b) ->
+            a + b
+
+        _ ->
+            -1
+
 main =
     eval (Add (Num 3) (Neg (Num 10)))
         + unwrap (Some 5)
@@ -82,3 +93,5 @@ main =
         + lit 9
         + (makeClassifier 100) 0
         + (makeClassifier 100) 5
+        + sumNums (Add (Num 7) (Num 8))
+        + sumNums (Neg (Num 1))

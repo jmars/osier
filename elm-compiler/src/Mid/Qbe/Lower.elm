@@ -14,12 +14,17 @@ module Mid.Qbe.Lower exposing (lower)
 --     inner Lam (closures with captures — the env representation crux).
 --   stage 2 adds: Case (incl. inside a closure body), Con (ADT construction
 --     as the VM's vector[tag, args]), the match steps MCons/MEmpty/MVector/
---     MTagEq/MLitEq with the ordered AltKind tests, LetDestruct, Tup (a cons
---     chain — needed for a real destructuring-let fixture), and the cheap
---     boolean nodes ShortAnd/ShortOr/NotEqual.
---   excluded (Err): RecordLit/Get/Update, ListLit, StreamRef, non-ASCII
---     literals — records/lists and the effect loop are later stages.  Any
---     REACHED defun that needs one of these fails the compile.
+--     MTagEq/MLitEq with the ordered AltKind tests, and LetDestruct.
+--   Tup (a cons chain) is lowered as the MINIMAL route to a real
+--     destructuring-let fixture: this compiler's parser only accepts
+--     irrefutable let-patterns (tuple/record/unit — a constructor pattern
+--     `let Some v = o` is "err parse failed"), record is out of scope, and a
+--     tuple pattern needs a Tup expression to construct.  It is NOT full
+--     tuple coverage — it exists so LetDestruct has a binding-bearing shape.
+--   excluded (Err): RecordLit/Get/Update, ListLit, StreamRef, ShortAnd/
+--     ShortOr/NotEqual, non-ASCII literals — records/lists, the boolean
+--     short-circuit nodes and the effect loop are later stages.  Any REACHED
+--     defun that needs one of these fails the compile.
 --
 -- ============================== THE CONTRACTS ==============================
 --
@@ -601,14 +606,14 @@ lowerVal exp dest s =
         StreamRef _ ->
             Err "qbe: StreamRef (effect loop) is not lowered by the native slice yet"
 
-        ShortAnd block ->
-            lowerShortAnd block dest s
+        ShortAnd _ ->
+            Err "qbe: ShortAnd is not lowered by the native slice yet"
 
-        ShortOr block ->
-            lowerShortOr block dest s
+        ShortOr _ ->
+            Err "qbe: ShortOr is not lowered by the native slice yet"
 
-        NotEqual block ->
-            lowerNotEqual block dest s
+        NotEqual _ ->
+            Err "qbe: NotEqual is not lowered by the native slice yet"
 
 
 
@@ -1498,8 +1503,16 @@ lowerCon con dest s =
                                 n =
                                     List.length slots
 
-                                ( rp, s4 ) =
-                                    freshTmp s3
+                                -- rt_con reads `args` as a CONTIGUOUS [*]Value
+                                -- array, so stage the (rooted, but not
+                                -- necessarily adjacent) arg slots into one
+                                -- contiguous frame block immediately before the
+                                -- call — pure copies, no safepoint between.
+                                ( _, cbase, s4 ) =
+                                    stageSlots slots s3
+
+                                ( rp, s5 ) =
+                                    freshTmp s4
                             in
                             Ok
                                 (emit
@@ -1512,26 +1525,16 @@ lowerCon con dest s =
                                                 Il.Con 0
 
                                              else
-                                                Il.Tmp (slotTmp (firstSlot slots))
+                                                Il.Tmp (slotTmp cbase)
                                             )
                                         , ArgVal (Base W) (Il.Con n)
                                         ]
                                     )
-                                    s4
+                                    s5
                                     |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
                                 )
                         )
             )
-
-
-firstSlot : List Int -> Int
-firstSlot slots =
-    case slots of
-        x :: _ ->
-            x
-
-        [] ->
-            0
 
 
 -- Tuples are the VM's right-nested cons chain (Mid.ToZinc Tup: `@p` = cons),
@@ -1558,96 +1561,6 @@ buildTuple es =
 
         [] ->
             Lit (LNumber 0)
-
-
--- ============================ SHORT-CIRCUIT BOOLEANS ============================
--- Same jmpf machinery as If (Mid.ToZinc's ShortAnd/ShortOr/NotEqual emission,
--- which is itself the Jmpf lowering): the false arm is a literal boolean, the
--- short-circuit evaluates the right operand only on the pass-through arm.
-
-
-lowerShortAnd : { left : Exp, right : Exp, falseLabel : String, endLabel : String } -> Int -> S -> Result String S
-lowerShortAnd block dest s =
-    let
-        ( cslot, s0 ) =
-            freshSlot s
-
-        ( falseLbl, s1 ) =
-            freshLbl "andf" s0
-
-        ( contLbl, s2 ) =
-            freshLbl "andc" s1
-
-        ( endLbl, s3 ) =
-            freshLbl "andj" s2
-    in
-    lowerVal block.left cslot s3
-        |> Result.andThen
-            (\s4 ->
-                lowerVal block.right dest (jmpfFalse cslot falseLbl contLbl s4)
-                    |> Result.andThen
-                        (\s5 ->
-                            lowerLit (LBoolean False) dest (startBlock falseLbl (jumpTo endLbl s5))
-                                |> Result.map (jumpTo endLbl >> startBlock endLbl)
-                        )
-            )
-
-
-lowerShortOr : { left : Exp, right : Exp, falseLabel : String, endLabel : String } -> Int -> S -> Result String S
-lowerShortOr block dest s =
-    let
-        ( cslot, s0 ) =
-            freshSlot s
-
-        ( falseLbl, s1 ) =
-            freshLbl "orf" s0
-
-        ( contLbl, s2 ) =
-            freshLbl "orc" s1
-
-        ( endLbl, s3 ) =
-            freshLbl "orj" s2
-    in
-    lowerVal block.left cslot s3
-        |> Result.andThen
-            (\s4 ->
-                lowerLit (LBoolean True) dest (jmpfFalse cslot falseLbl contLbl s4)
-                    |> Result.andThen
-                        (\s5 ->
-                            lowerVal block.right dest (startBlock falseLbl (jumpTo endLbl s5))
-                                |> Result.map (jumpTo endLbl >> startBlock endLbl)
-                        )
-            )
-
-
--- left /= right  =  not (left = right), via the exact `=` prim (inline number
--- fast path + rt_prim fallback), then jmpf on the result.
-lowerNotEqual : { left : Exp, right : Exp, falseLabel : String, endLabel : String } -> Int -> S -> Result String S
-lowerNotEqual block dest s =
-    let
-        ( eql, s0 ) =
-            freshSlot s
-
-        ( falseLbl, s1 ) =
-            freshLbl "nef" s0
-
-        ( contLbl, s2 ) =
-            freshLbl "nec" s1
-
-        ( endLbl, s3 ) =
-            freshLbl "nej" s2
-    in
-    lowerPrimApp { prim = "=", args = [ block.left, block.right ] } eql s3
-        |> Result.andThen
-            (\s4 ->
-                lowerLit (LBoolean False) dest (jmpfFalse eql falseLbl contLbl s4)
-                    |> Result.andThen
-                        (\s5 ->
-                            lowerLit (LBoolean True) dest (startBlock falseLbl (jumpTo endLbl s5))
-                                |> Result.map (jumpTo endLbl >> startBlock endLbl)
-                        )
-            )
-
 
 
 -- ============================ PRIMAPPS ============================
