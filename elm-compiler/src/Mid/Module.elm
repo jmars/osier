@@ -1,4 +1,4 @@
-module Mid.Module exposing (Batch, compileBatch)
+module Mid.Module exposing (Batch, compileBatch, Unit, parseAll, collectAll, mergedGlobals, compileUnit)
 
 -- Mid.Module — the middle tier's DRIVER: sources -> Mid.Ir.Program -> csexp.
 --
@@ -403,6 +403,11 @@ functionArity fn =
 -- ========================= UNIT COMPILATION =========================
 -- One unit's Program: its function defuns, then its constructor defuns, then
 -- the curried prim wrappers — the same order Lower.Module emits entries in.
+--
+-- (parseAll/collectAll/mergedGlobals/compileUnit are ALSO consumed by the
+-- QBE native-backend driver Mid.QbeModule — exposed here so the native path
+-- shares EXACTLY this orchestration.  Additive exposing only: no logic in
+-- this module changed.)
 
 
 compileUnit : Dict String Int -> Unit -> Result String (List Defun)

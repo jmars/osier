@@ -37,6 +37,7 @@ import Json.Decode as JD
 import Json.Encode as JE
 import Lower.Module as Module
 import Mid.Module as MidModule
+import Mid.QbeModule as QbeModule
 import Mid.Simplify as Simplify
 import Platform
 
@@ -54,6 +55,8 @@ type alias Flags =
     , passes : Passes
     , inlineThreshold : Int
     , stats : Bool
+    , qbe : Bool
+    , qbeEntry : String
     }
 
 
@@ -106,7 +109,11 @@ modeLine : Flags -> List String -> String
 modeLine flags report =
     let
         mode =
-            pathName flags.midtier
+            if flags.qbe then
+                qbeName flags.qbeEntry
+
+            else
+                pathName flags.midtier
     in
     if flags.stats && not (List.isEmpty report) then
         mode ++ " passes=[" ++ String.join " | " report ++ "]"
@@ -122,6 +129,11 @@ pathName midtier =
 
     else
         "mode=lower"
+
+
+qbeName : String -> String
+qbeName entry =
+    "mode=qbe entry=" ++ entry
 
 
 passConfig : Flags -> Simplify.Config
@@ -147,7 +159,26 @@ compileAll flags =
         )
     of
         ( Ok corpusSources, Ok groups ) ->
-            if flags.midtier then
+            if flags.qbe then
+                -- NATIVE backend slice (handoff-qbe-lower): one .ssa text per
+                -- group lowered from the entry defun, or "err <msg>".  The
+                -- ZINC paths below are untouched.
+                ( encodeStrings
+                    (List.map
+                        (\groupSources ->
+                            case QbeModule.compileEntry corpusSources groupSources flags.qbeEntry of
+                                Ok ssa ->
+                                    ssa
+
+                                Err msg ->
+                                    "err " ++ msg
+                        )
+                        groups
+                    )
+                , []
+                )
+
+            else if flags.midtier then
                 let
                     batch =
                         MidModule.compileBatch (passConfig flags) corpusSources groups

@@ -72,6 +72,13 @@ const INLINE_THRESHOLD = Number(process.env.MIDTIER_INLINE_THRESHOLD || '30');
 // independently by tools/midtier-emit-stats.py.
 const MIDTIER_STATS = process.env.MIDTIER_STATS === '1';
 
+// QBE=1 switches on the NATIVE backend slice (handoff-qbe-lower): instead of
+// a csexp bundle, each group's output file receives QBE IL text (.ssa)
+// lowered from QBE_ENTRY's defun, or `err <msg>`.  The ZINC paths (MIDTIER=0
+// and MIDTIER=1) are untouched by this flag.
+const QBE = process.env.QBE === '1';
+const QBE_ENTRY = process.env.QBE_ENTRY || '';
+
 // V8's stack limit CANNOT be raised once node has started, and the MIDTIER=1
 // path over the compiler's own 58 sources (the selfhost group, whose
 // Char.Extra.unicodeIsAlphaNumOrUnderscoreFast compiles to ~11k instructions in
@@ -102,8 +109,10 @@ function compileGroups(groups) {
     flags: {
       corpusSourcesJson: JSON.stringify(CORPUS),
       groupsJson: JSON.stringify(groups.map((g) => g.sources)),
-      midtier: MIDTIER,
+      midtier: MIDTIER || QBE, // the QBE path compiles through Mid.FromAst too
       passes: PASSES,
+      qbe: QBE,
+      qbeEntry: QBE_ENTRY,
       inlineThreshold: Number.isFinite(INLINE_THRESHOLD) ? INLINE_THRESHOLD : 30,
       stats: MIDTIER_STATS,
     },
