@@ -301,21 +301,30 @@ fn applyGo(f: *Value, args: [*]Value, nargs: i32) Value {
     }
 
     if (rem > nargs) {
-        // partial: env' = applied ++ args ++ captures (fresh reads of f's
-        // fields AFTER the alloc — f is rooted by the caller)
+        // partial: env' = applied ++ args ++ captures.  The scalars (napp,
+        // envlen, capslen) are capture-safe, but `env` points into GC-managed
+        // memory: the allocArray below can scavenge, evacuate the env array,
+        // and rewrite f's lambda.env (f IS rooted by the caller) — so root a
+        // COPY of the pointer and read through it after the alloc (same shape
+        // as values.valLambda).  `args` needs no root here: it addresses the
+        // caller's stack array, which rt_apply registered for in-place
+        // scanning.
         const capslen: usize = @intCast(envlen - napp);
         const total: usize = @as(usize, @intCast(napp)) + n + capslen;
+        var env_root: ?[*]Value = env;
+        g.rootPushPtr(@ptrCast(&env_root));
+        defer g.rootPop(); // env_root
         var envv: ?[*]Value = g.allocArray(Value, total);
         g.rootPushPtr(@ptrCast(&envv));
-        defer g.rootPop();
+        defer g.rootPop(); // envv
         const dst = envv.?[0..total];
-        @memcpy(dst[0..@intCast(napp)], env.?[0..@intCast(napp)]);
+        @memcpy(dst[0..@intCast(napp)], env_root.?[0..@intCast(napp)]);
         @memcpy(dst[@intCast(napp)..][0..n], args[0..n]);
         if (capslen > 0) {
             const off: usize = @as(usize, @intCast(napp)) + n;
             const from: usize = @intCast(napp);
             const to: usize = @intCast(envlen);
-            @memcpy(dst[off..], env.?[from..to]);
+            @memcpy(dst[off..], env_root.?[from..to]);
         }
         barrierIfOldgen(envv.?, dst);
         return .{
