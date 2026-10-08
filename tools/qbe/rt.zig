@@ -463,6 +463,20 @@ const RESERVE_BYTES: usize = 64 * 1024 * 1024;
 
 var vmem: state.Vm = undefined;
 
+/// AOTRUN_ARGV: build the *argv* pseudo-global value — a plain cons LIST of
+/// strings (run.js argv[2:] shape), built back-to-front (cdr-first) so each
+/// valCons roots the previous tail.  The empty case returns the nil singleton
+/// (Runtime.argv () -> []).  Mirrors tools/aot/run.zig's buildArgvList.
+fn buildArgvList(nargs: usize, c_argv: [*]?[*:0]u8) Value {
+    var acc: Value = values.valNil();
+    var i: usize = nargs;
+    while (i > 0) {
+        i -= 1;
+        acc = values.valCons(g, values.valString(g, std.mem.span(c_argv[2 + i] orelse "")), acc);
+    }
+    return acc;
+}
+
 export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     const argc: usize = @intCast(c_argc);
     if (argc < 2) {
@@ -471,7 +485,15 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     }
     const entry = std.mem.span(c_argv[1] orelse "");
     const nargs = argc - 2;
-    if (nargs > max_arity) {
+
+    // AOTRUN_ARGV (same contract as tools/elmvm.zig and tools/aot/run.zig):
+    // the trailing args are the APP's command line, exposed as the *argv*
+    // pseudo-global (a plain cons list of strings, run.js argv[2:] shape) —
+    // NOT call arguments, and the entry is invoked with 0 call args.  This is
+    // how a selfhosted CLI driver (NativeMain) reads its inputs.
+    const argv_mode = std.c.getenv("AOTRUN_ARGV") != null;
+
+    if (!argv_mode and nargs > max_arity) {
         var b: [128]u8 = undefined;
         const out = std.fmt.bufPrint(&b, "qbe-rt: >{d} entry args not supported\n", .{max_arity}) catch "qbe-rt: too many entry args\n";
         werr(out);
@@ -525,25 +547,34 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     // args: ints only (the slice's fixtures need nothing else; floats die
     // loudly rather than guessing the VM's float-arg formatting)
     var argv_buf: [max_arity]Value = undefined;
+    var entry_nargs: i32 = 0;
     var j: usize = 0;
-    while (j < nargs) : (j += 1) {
-        const a = std.mem.span(c_argv[2 + j] orelse "");
-        const n = std.fmt.parseInt(i64, a, 10) catch {
-            var buf: [256]u8 = undefined;
-            const out = std.fmt.bufPrint(&buf, "qbe-rt: entry arg '{s}' is not an int (qbe slice)\n", .{a}) catch "qbe-rt: bad entry arg\n";
-            werr(out);
-            return 2;
-        };
-        argv_buf[j] = values.valNumber(n);
+    if (!argv_mode) {
+        while (j < nargs) : (j += 1) {
+            const a = std.mem.span(c_argv[2 + j] orelse "");
+            const n = std.fmt.parseInt(i64, a, 10) catch {
+                var buf: [256]u8 = undefined;
+                const out = std.fmt.bufPrint(&buf, "qbe-rt: entry arg '{s}' is not an int (qbe slice)\n", .{a}) catch "qbe-rt: bad entry arg\n";
+                werr(out);
+                return 2;
+            };
+            argv_buf[j] = values.valNumber(n);
+        }
+        entry_nargs = @intCast(nargs);
     }
-    var live: i32 = @intCast(nargs);
+    var live: i32 = entry_nargs;
     g.rootPushValueArray(&argv_buf, &live);
     defer g.rootPop();
 
-    // *argv* pseudo-global: the QBE driver takes no app-CLI args (elmvm's
-    // AOTRUN_ARGV mode is out of scope), so the app reads the empty list —
-    // the same default tools/aot/run.zig installs when argv_mode is off.
-    vmem.valueSet("*argv*", values.valNil());
+    // *argv* pseudo-global: in argv mode the APP's strings (built back-to-
+    // front, each valCons rooting the previous tail — the same shape
+    // tools/aot/run.zig builds); otherwise the empty list (the default
+    // run.zig installs when argv_mode is off).
+    if (argv_mode) {
+        vmem.valueSet("*argv*", buildArgvList(nargs, c_argv));
+    } else {
+        vmem.valueSet("*argv*", values.valNil());
+    }
 
     // Host the effect loop EXACTLY like tools/aot/run.zig and tools/elmvm.zig:
     // install the native host->Elm dispatcher (the default interpreted

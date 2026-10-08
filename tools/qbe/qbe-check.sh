@@ -76,6 +76,29 @@ run() {
   fi
 }
 
+# like run(), but with AOTRUN_ARGV=1 on BOTH runners: the trailing args are the
+# APP's *argv* pseudo-global (string list), NOT int call args — the selfhost
+# CLI-driver contract (elmvm/aot-run).  Guards the argvPrimThunk arity bug.
+run_argv() {
+  local name="$1" entry="$2" fixture="$3"; shift 3
+  local args=("$@")
+  local bin
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$TMP/$name" "${args[@]}" 2>/dev/null)" || {
+    echo "FAIL $name: qbe-mk"; FAIL=1; return
+  }
+  (cd "$ROOT/elm-compiler" &&
+    MIDTIER=0 node run.js "$ROOT/$fixture" "$TMP/$name/ref.csexp") >/dev/null 2>&1
+  local vm_out nat_out
+  vm_out="$(AOTRUN_ARGV=1 "$ROOT/zig-out/bin/elmvm" "$TMP/$name/ref.csexp" "$entry" "${args[@]}" 2>&1)"
+  nat_out="$(timeout 60 env AOTRUN_ARGV=1 "$bin" "$entry" "${args[@]}" 2>&1)"
+  if [ "$vm_out" != "$nat_out" ]; then
+    echo "FAIL $name: vm='$vm_out' native='$nat_out'"
+    FAIL=1
+    return
+  fi
+  echo "PASS $name: identical (${nat_out:0:80})"
+}
+
 # ---- the slice fixtures (in-scope constructs only) ----
 run fib        Fib.fib          tests/elm-fixtures/fib.elm 10
 run fib20      Fib.fib          tests/elm-fixtures/fib.elm 20
@@ -167,6 +190,14 @@ run vfield-nested VField.nestedField tools/qbe/fixtures/vfield.elm
 run vfield-mixed  VField.mixedCase  tools/qbe/fixtures/vfield.elm
 run vfield-rooted VField.rootedField tools/qbe/fixtures/vfield.elm
 run vfield-main   VField.main       tools/qbe/fixtures/vfield.elm
+
+# ---- stage 5: the argv pseudo-global (found by the selfhost behavioural
+#      run — no fixture used argv, so the suite was blind to it) ----
+# argvPrimThunk was a 0-param Lam read as arity 0 but applied with 1 arg; the
+# fix gives it a real 1-arg binder.  run_argv sets AOTRUN_ARGV=1 on BOTH
+# runners (string list, not int args).
+run_argv argvrepro-empty ArgvRepro.main tools/qbe/fixtures/argvrepro.elm
+run_argv argvrepro-count ArgvRepro.count tools/qbe/fixtures/argvrepro.elm a b c d
 
 # ---- stage 4: the effect loop (StreamRef) + host I/O, native vs elmvm ----
 # io-read: read a file (QBE_IO_IN) and write a stdout sentinel through the
