@@ -131,22 +131,45 @@ resolve instrs =
 -- only ever a first or second element (never matched as the operand of a
 -- pair), so `fusePair` returning Nothing on it blocks the merge naturally;
 -- Cur bodies are recursed into (wrapper bodies are the hottest code).
+--
+-- STACK SAFETY (do not regress this into a non-tail recursion): the walk is
+-- written as a LEFT FOLD WITH AN ACCUMULATOR so that `fuseHelp` is
+-- SELF-TAIL-recursive — the recursive call is the whole result, in tail
+-- position.  A saturated self-tail call is what BOTH build paths turn into
+-- constant-stack code: natively (QBE) into an in-frame loop, on the VM into
+-- frame reuse.  The earlier `merged :: fuse rest` form — the recursive call in
+-- ARGUMENT position — cost ONE native call per ZINC instruction of a body;
+-- MEASURED on the selfhost workload: 9,635 frames of this function at a
+-- 656-byte stride = 6.32 MB, the single largest item in the 8.5 MB C-stack
+-- budget that exhausted the default 8 MB (commit that raised RLIMIT_STACK to
+-- 64MB).  The trailing `List.reverse` is stack-safe on both paths
+-- (Prelude.listRevGo is tail-recursive; elm/core's `reverse` is `foldl cons`),
+-- so it does not reintroduce the growth.
+--
+-- NOTE ON `fuseInstr` BELOW: its recursion into `Cur body` is BY NESTING DEPTH
+-- (Elm wrappers nested in wrappers, a handful), NOT by instruction-list length
+-- — it is a different, bounded recursion and is deliberately left as is.
 fuse : List Instr -> List Instr
 fuse instrs =
+    List.reverse (fuseHelp instrs [])
+
+
+fuseHelp : List Instr -> List Instr -> List Instr
+fuseHelp instrs acc =
     case instrs of
         [] ->
-            []
+            acc
 
         [ single ] ->
-            [ fuseInstr single ]
+            fuseInstr single :: acc
 
         x :: y :: rest ->
             case fusePair x y of
                 Just merged ->
-                    merged :: fuse rest
+                    fuseHelp rest (merged :: acc)
 
                 Nothing ->
-                    fuseInstr x :: fuse (y :: rest)
+                    fuseHelp (y :: rest) (fuseInstr x :: acc)
 
 
 fuseInstr : Instr -> Instr
