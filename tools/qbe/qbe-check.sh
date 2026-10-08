@@ -148,6 +148,84 @@ run utf8-eq     Utf8.eq         tools/qbe/fixtures/utf8.elm
 # are rooted — the partial-aggregate rooting hazard, under CHURN_MB below.
 run aggchurn    AggChurn.main   tools/qbe/fixtures/aggchurn.elm
 
+# ---- stage 4: arity > 8 (the old rt_callN table stopped at rt_call8) ----
+# arity9: a 9-ary defun called DIRECTLY from the driver (rt_call9).  arity9apply:
+# apply9 add9 -> f 1..9 where f is a Var, so the 9-ary call goes through
+# rt_apply's saturation buffer (the generic/partial path the direct shape
+# does not exercise).
+run arity9      Arity9.add9     tools/qbe/fixtures/arity9.elm 1 2 3 4 5 6 7 8 9
+run arity9apply Arity9.main9    tools/qbe/fixtures/arity9.elm
+
+# ---- stage 4: the effect loop (StreamRef) + host I/O, native vs elmvm ----
+# io-read: read a file (QBE_IO_IN) and write a stdout sentinel through the
+# StreamRef (*stoutput*) path.  io-write: write QBE_IO_OUT, read it back, AND
+# compare the on-disk CONTENT (the write path itself, not just the round-trip).
+# io-fail: a missing readFile (empty-string parity) plus a Task.fail ->
+# Task.onError error path — the only failing effect in the host is an explicit
+# Task.fail (leaf readFile completes "" on open failure by design).
+IO_IN="$ROOT/tools/qbe/fixtures/io-read-input.txt"
+IO_OUT="$TMP/io-write-out.txt"
+run_io() {
+  local name="$1" entry="$2" fixture="$3"
+  local bin
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$TMP/$name" 2>/dev/null)" || {
+    echo "FAIL $name: qbe-mk"; FAIL=1; return
+  }
+  (cd "$ROOT/elm-compiler" &&
+    MIDTIER=0 node run.js "$ROOT/$fixture" "$TMP/$name/ref.csexp") >/dev/null 2>&1
+
+  rm -f "$IO_OUT"
+  local vm_out vm_file
+  vm_out="$(QBE_IO_IN="$IO_IN" QBE_IO_OUT="$IO_OUT" "$ROOT/zig-out/bin/elmvm" "$TMP/$name/ref.csexp" "$entry" 2>&1)"
+  vm_file="$(cat "$IO_OUT" 2>/dev/null)"
+  rm -f "$IO_OUT"
+  local nat_out nat_file
+  nat_out="$(timeout 60 env QBE_IO_IN="$IO_IN" QBE_IO_OUT="$IO_OUT" "$bin" "$entry" 2>&1)"
+  nat_file="$(cat "$IO_OUT" 2>/dev/null)"
+
+  if [ "$vm_out" != "$nat_out" ]; then
+    echo "FAIL $name: vm='$vm_out' native='$nat_out'"
+    FAIL=1
+    return
+  fi
+  # the on-disk bytes each run wrote (io-write's real output; a no-op "" for
+  # io-read/io-fail, which write no file): native must write the same bytes
+  # elmvm did, not merely read them back identically.
+  if [ "$vm_file" != "$nat_file" ]; then
+    echo "FAIL $name: file content vm='$vm_file' native='$nat_file'"
+    FAIL=1
+    return
+  fi
+  echo "PASS $name: identical (${nat_out:0:80})"
+
+  # gc churn: same env, minimum-viable heap
+  local churn_out
+  churn_out="$(QBE_HEAP_MB=$CHURN_MB QBE_IO_IN="$IO_IN" QBE_IO_OUT="$IO_OUT" "$bin" "$entry" 2>&1)" || true
+  if [ "$churn_out" != "$vm_out" ]; then
+    echo "FAIL $name: CHURN mismatch (QBE_HEAP_MB=$CHURN_MB): '$churn_out'"
+    FAIL=1
+  else
+    echo "PASS $name: gc-churn (QBE_HEAP_MB=$CHURN_MB) identical"
+  fi
+}
+run_io io-read   IoRead.main  tools/qbe/fixtures/io-read.elm
+run_io io-write  IoWrite.main tools/qbe/fixtures/io-write.elm
+run_io io-fail   IoFail.main  tools/qbe/fixtures/io-fail.elm
+# the write path's on-disk bytes: both runs wrote IO_OUT, and both must equal
+# the exact expected content (a round-trip read could hide a wrong write).
+EXPECTED_IO="hello native
+line2"
+rm -f "$IO_OUT"
+"$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/io-write.elm IoWrite.main "$TMP/io-write" >/dev/null 2>&1
+QBE_IO_OUT="$IO_OUT" "$TMP/io-write/io-write" IoWrite.main >/dev/null 2>&1 || true
+if [ "$(cat "$IO_OUT" 2>/dev/null)" = "$EXPECTED_IO" ]; then
+  echo "PASS io-write-content: on-disk bytes match expected"
+else
+  echo "FAIL io-write-content: got '$(cat "$IO_OUT" 2>/dev/null)'"
+  FAIL=1
+fi
+rm -f "$IO_OUT"
+
 # ---- structural root-store check on fib's assembly ----
 S="$TMP/fib/fib.s"
 if [ -f "$S" ]; then
@@ -170,14 +248,14 @@ else
 fi
 
 # ---- loud-failure check: an out-of-scope construct must NOT compile ----
-# StreamRef (the effect loop, `stdout`) is still out of scope; records, lists,
-# tuples and the boolean nodes now lower, so the trip is on the effect loop —
-# the message must say so, not claim "ListLit"/"Case" (which lower).
-printf 'module Oos exposing (main)\n\nmain =\n    stdout\n' \
+# StreamRef (the effect loop) now lowers, so the remaining unsupported
+# construct is a RECORD FIELD PATTERN (`{ x } = r` destructuring -> VField).
+# The message must name it, not claim "StreamRef"/"ListLit"/"Case" (which lower).
+printf 'module Oos exposing (main)\n\nmain =\n    let\n        { x } =\n            { x = 1 }\n    in\n    x\n' \
   > "$TMP/oos.elm"
 (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY=Oos.main node run.js "$TMP/oos.elm" "$TMP/oos.ssa") >/dev/null 2>&1
 if head -c 4 "$TMP/oos.ssa" 2>/dev/null | grep -q '^err '; then
-  echo "PASS loud-fail: StreamRef rejected with: $(head -1 "$TMP/oos.ssa")"
+  echo "PASS loud-fail: record field pattern rejected with: $(head -1 "$TMP/oos.ssa")"
 else
   echo "FAIL loud-fail: out-of-scope fixture compiled"
   FAIL=1

@@ -27,7 +27,12 @@ module Mid.Qbe.Lower exposing (lower)
 --     (the VM's jmpf semantics), and non-ASCII string/symbol literals (UTF-8
 --     encoded, byte-length correct).  Record FIELD PATTERNS (VField) stay out
 --     of scope.
---   excluded (Err): StreamRef (the effect loop) — that is its own stage.
+--   stage 4 adds: StreamRef (stdin/stdout/stderr) — lowered EXACTLY like
+--     Mid.ToZinc does (Symbol <varName> + Prim "value"), so the emitted code
+--     reads the SAME value-table slot the VM reads; arity is now 0..maxArity
+--     (16, raised from 8 — the rt_callN dispatch table and the runtime's
+--     value buffers are the only bounds).  The effect loop itself is HOSTED
+--     by tools/qbe/rt.zig (mirroring tools/aot/run.zig), not lowered here.
 --
 -- ============================== THE CONTRACTS ==============================
 --
@@ -131,7 +136,7 @@ tagVector =
 
 maxArity : Int
 maxArity =
-    8
+    16
 
 
 
@@ -607,8 +612,17 @@ lowerVal exp dest s =
         ListLit es ->
             lowerVal (buildList es) dest s
 
-        StreamRef _ ->
-            Err "qbe: StreamRef (effect loop) is not lowered by the native slice yet"
+        StreamRef { varName } ->
+            -- Exactly Mid.ToZinc's `Symbol varName; Prim "value"`: materialize
+            -- the stream's NAME as a symbol Value in a ROOTED frame slot, then
+            -- run the REAL `value` primitive via rt_prim (which reads the value
+            -- table the runtime wired — Vm.init's *stinput*/*stoutput*/*sterror*).
+            let
+                ( symSlot, s1 ) =
+                    freshSlot s
+            in
+            lowerLit (LSymbol varName) symSlot s1
+                |> Result.andThen (\s2 -> rtPrimSlots "value" [ symSlot ] dest s2)
 
         ShortAnd block ->
             lowerShortAnd block dest s

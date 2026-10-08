@@ -30,9 +30,10 @@ if [ ! -f "$RT" ] || [ "$ROOT/tools/qbe/rt.zig" -nt "$RT" ] \
    || find "$ROOT/vendor/zinc-vm/src" -name '*.zig' -newer "$RT" 2>/dev/null | head -1 | grep -q .; then
   echo "qbe-mk: building $RT" >&2
   zig build-obj -O ReleaseFast -lc -femit-bin="$RT" \
-    --dep gc --dep vm -Mroot="$ROOT/tools/qbe/rt.zig" \
+    --dep gc --dep vm --dep effectloop -Mroot="$ROOT/tools/qbe/rt.zig" \
     -Mgc="$ROOT/vendor/zinc-vm/src/gc.zig" \
-    --dep gc -Mvm="$ROOT/vendor/zinc-vm/src/vm.zig"
+    --dep gc -Mvm="$ROOT/vendor/zinc-vm/src/vm.zig" \
+    --dep gc --dep vm -Meffectloop="$ROOT/src/effectloop.zig"
 fi
 
 # ---- elm -> .ssa ----

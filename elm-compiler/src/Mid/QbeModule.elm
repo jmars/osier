@@ -104,8 +104,34 @@ lowerAll :
 lowerAll globals corpusUnits groupUnits entryKey =
     compileAll globals (corpusUnits ++ groupUnits)
         |> Result.andThen
-            (\program -> QbeLower.lower globals program entryKey)
+            (\program ->
+                QbeLower.lower (completeArities globals program) program entryKey
+            )
         |> Result.map (QbePeephole.optimize >> QbePrint.print)
+
+
+-- The arity table `mergedGlobals` covers user functions + ctors ONLY; the
+-- curried prim wrappers (cn.curried, c-strlen.curried, ...) that
+-- Mid.Module.compileUnit appends to every unit's Program are ordinary Lam
+-- defuns but NOT in that table.  The QBE lowering's direct-call dispatch
+-- (Lower.lowerApp) reads the static arity from it, so a `String.append`/`++`
+-- use would fail with "no arity for global cn.curried".  Complete the table
+-- from the program itself: every defun is a Lam whose arity is its param
+-- count, so this covers functions, ctors AND wrappers without touching the
+-- shared mergedGlobals the ZINC path also reads.
+completeArities : Dict String Int -> List Defun -> Dict String Int
+completeArities globals program =
+    List.foldl
+        (\defun acc ->
+            case defun.value of
+                Mid.Ir.Lam lambda ->
+                    Dict.insert defun.key (List.length lambda.params) acc
+
+                _ ->
+                    acc
+        )
+        globals
+        program
 
 
 compileAll : Dict String Int -> List MidModule.Unit -> Result String (List Defun)

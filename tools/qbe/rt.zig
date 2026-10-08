@@ -51,9 +51,17 @@ const values = vm_mod.values;
 const state = vm_mod.state;
 const interp = vm_mod.interp;
 const prims = vm_mod.prims;
+const effectloop = @import("effectloop");
 
 const Gc = heap.Gc;
 const Value = types.Value;
+
+/// The static-arity ceiling, mirrored from Mid.Qbe.Lower.maxArity (the
+/// rt_callN dispatch-table bound).  Generated functions of arity <= max_arity
+/// have a dispatcher; rt_apply's saturation buffers are sized to it.  NOT a
+/// QBE/ABI limit — QBE's call takes any fixed arg list; the table is just
+/// how rt_apply bridges a runtime code pointer to a fixed-arity call.
+const max_arity: i32 = 16;
 
 /// Mirrors `type :desc = align 8 { l, w, w }` + the global-closure cache
 /// word emitted by Mid.Qbe.Lower (`{ DRef fn, w arity, w ncaps, z 8 }`).
@@ -83,6 +91,14 @@ extern fn rt_call5(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a
 extern fn rt_call6(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value) callconv(.c) Value;
 extern fn rt_call7(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value) callconv(.c) Value;
 extern fn rt_call8(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value) callconv(.c) Value;
+extern fn rt_call9(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value) callconv(.c) Value;
+extern fn rt_call10(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value) callconv(.c) Value;
+extern fn rt_call11(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value) callconv(.c) Value;
+extern fn rt_call12(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value) callconv(.c) Value;
+extern fn rt_call13(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value, a12: *Value) callconv(.c) Value;
+extern fn rt_call14(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value, a12: *Value, a13: *Value) callconv(.c) Value;
+extern fn rt_call15(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value, a12: *Value, a13: *Value, a14: *Value) callconv(.c) Value;
+extern fn rt_call16(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value, a12: *Value, a13: *Value, a14: *Value, a15: *Value) callconv(.c) Value;
 
 // =====================================================================
 //  Global state (set once in main)
@@ -261,7 +277,7 @@ fn applyGo(f: *Value, args: [*]Value, nargs: i32) Value {
     const n: usize = @intCast(nargs);
 
     if (rem == nargs) {
-        var buf: [8]Value = undefined; // maxArity (Mid.Qbe.Lower)
+        var buf: [max_arity]Value = undefined;
         if (napp > 0) {
             if (env == null) dieLoud("closure env missing for applied args");
             @memcpy(buf[0..@intCast(napp)], env.?[0..@intCast(napp)]);
@@ -301,7 +317,7 @@ fn applyGo(f: *Value, args: [*]Value, nargs: i32) Value {
     }
 
     // over-applied: saturate with the first `rem` args, then recurse
-    var buf: [8]Value = undefined;
+    var buf: [max_arity]Value = undefined;
     const r: usize = @intCast(rem);
     if (napp > 0) @memcpy(buf[0..@intCast(napp)], env.?[0..@intCast(napp)]);
     @memcpy(buf[@intCast(napp)..][0..r], args[0..r]);
@@ -334,8 +350,37 @@ fn callArity(arity: i32, f: *const anyopaque, e: ?[*]Value, buf: [*]Value) Value
         6 => rt_call6(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5]),
         7 => rt_call7(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6]),
         8 => rt_call8(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7]),
-        else => dieLoud("arity > 8 not supported by the qbe slice"),
+        9 => rt_call9(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7], &buf[8]),
+        10 => rt_call10(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7], &buf[8], &buf[9]),
+        11 => rt_call11(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7], &buf[8], &buf[9], &buf[10]),
+        12 => rt_call12(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7], &buf[8], &buf[9], &buf[10], &buf[11]),
+        13 => rt_call13(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7], &buf[8], &buf[9], &buf[10], &buf[11], &buf[12]),
+        14 => rt_call14(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7], &buf[8], &buf[9], &buf[10], &buf[11], &buf[12], &buf[13]),
+        15 => rt_call15(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7], &buf[8], &buf[9], &buf[10], &buf[11], &buf[12], &buf[13], &buf[14]),
+        16 => rt_call16(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7], &buf[8], &buf[9], &buf[10], &buf[11], &buf[12], &buf[13], &buf[14], &buf[15]),
+        else => dieLoud("arity exceeds the qbe rt_callN table"),
     };
+}
+
+// =====================================================================
+//  Host -> Elm apply (the effect loop's seam)
+// =====================================================================
+
+/// The effect loop's `host_apply` hook.  Every lambda the QBE path produces
+/// is Desc*-coded (never *Instr), so the interpreted default
+/// (hostcall.applyClosureN -> vmExecEnv) would execute a Desc as instructions.
+/// This dispatches natively through rt_apply — the exact path generated code
+/// already uses — and rt_apply roots fnv + the arg array across its own
+/// allocations before calling into the generated function.  The effect loop's
+/// call sites are 1 continuation/handler arg or 2 update args (<< max_arity).
+fn hostApply(vm_: *state.Vm, fnv: Value, args: []const Value) state.VmError!Value {
+    _ = vm_;
+    if (args.len > max_arity) dieLoud("host apply exceeds the qbe rt_callN table");
+    var fslot = fnv;
+    var argbuf: [max_arity]Value = undefined;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) argbuf[i] = args[i];
+    return rt_apply(&fslot, &argbuf, @intCast(args.len));
 }
 
 // =====================================================================
@@ -349,8 +394,9 @@ export fn rt_prim(name: [*:0]const u8, args: [*]Value, nargs: i32) callconv(.c) 
     // GC rewrites them in place and every later read is fresh.  Found by
     // qbe-check.sh's churn fixture (a cons loop at the minimum heap): the
     // unrooted staging went stale across vaInit/vaPush allocations.
-    var buf: [8]Value = undefined;
+    var buf: [max_arity]Value = undefined;
     const n: usize = @intCast(nargs);
+    if (n > max_arity) dieLoud("prim arity exceeds the qbe rt_callN table");
     @memcpy(buf[0..n], args[0..n]);
     var live: i32 = nargs;
     g.rootPushValueArray(&buf, &live);
@@ -425,8 +471,10 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     }
     const entry = std.mem.span(c_argv[1] orelse "");
     const nargs = argc - 2;
-    if (nargs > 8) {
-        werr("qbe-rt: >8 entry args not supported\n");
+    if (nargs > max_arity) {
+        var b: [128]u8 = undefined;
+        const out = std.fmt.bufPrint(&b, "qbe-rt: >{d} entry args not supported\n", .{max_arity}) catch "qbe-rt: too many entry args\n";
+        werr(out);
         return 2;
     }
 
@@ -476,7 +524,7 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
 
     // args: ints only (the slice's fixtures need nothing else; floats die
     // loudly rather than guessing the VM's float-arg formatting)
-    var argv_buf: [8]Value = undefined;
+    var argv_buf: [max_arity]Value = undefined;
     var j: usize = 0;
     while (j < nargs) : (j += 1) {
         const a = std.mem.span(c_argv[2 + j] orelse "");
@@ -492,14 +540,41 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     g.rootPushValueArray(&argv_buf, &live);
     defer g.rootPop();
 
-    const result = callArity(m.arity, m.code, null, &argv_buf);
+    // *argv* pseudo-global: the QBE driver takes no app-CLI args (elmvm's
+    // AOTRUN_ARGV mode is out of scope), so the app reads the empty list —
+    // the same default tools/aot/run.zig installs when argv_mode is off.
+    vmem.valueSet("*argv*", values.valNil());
+
+    // Host the effect loop EXACTLY like tools/aot/run.zig and tools/elmvm.zig:
+    // install the native host->Elm dispatcher (the default interpreted
+    // hostcall.applyClosureN would vmExecEnv a Desc* as *Instr), run the entry,
+    // and if it returns a Program vector drive the shared CEK effect manager
+    // to the final model.  The Vm already wired *stinput*/*stoutput*/*sterror*
+    // in initGlobals, so StreamRef reads the same value-table slots elmvm does.
+    effectloop.host_apply = &hostApply;
+
+    var result = callArity(m.arity, m.code, null, &argv_buf);
+    g.rootPushValue(&result);
+    defer g.rootPop();
+
+    var final = result;
+    if (effectloop.isProgram(result)) {
+        final = effectloop.runProgram(&vmem, result) catch {
+            var ebuf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&ebuf, "qbe-rt: error: {s}\n", .{values.errSlice(vmem.err_slot)}) catch "qbe-rt: effect loop failed\n";
+            werr(msg);
+            return 1;
+        };
+        g.rootPushValue(&final);
+        defer g.rootPop();
+    }
 
     // Print through an ALLOCATING writer, not a fixed one: a result whose
     // printed form exceeds any fixed buffer must print in full (the VM runner
     // elmvm does the same), so native and VM output agree at every size.
     var aw = std.Io.Writer.Allocating.init(std.heap.page_allocator);
     defer aw.deinit();
-    values.printValue(&aw.writer, result) catch {
+    values.printValue(&aw.writer, final) catch {
         werr("qbe-rt: print failed\n");
         return 1;
     };
