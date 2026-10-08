@@ -16,9 +16,23 @@ flags:
 
 WHY THIS FILE EXISTS: the project's other oracle is byte identity, and the
 middle tier BREAKS it by design (plan decision D5) — a pass needs a measurement
-that does not depend on the bytes being equal.  Instruction count is the honest
-one: it is what the VM dispatches, it is comparable across modes, and it cannot
-be gamed by re-ordering the same work.
+that does not depend on the bytes being equal.  Instruction count is what the
+VM dispatches, it is comparable across modes, and it cannot be gamed by
+re-ordering the same work.
+
+BUT INSTRUCTION COUNT IS NOT A PROXY FOR RUNTIME HERE, and it must not be the
+acceptance criterion for a pass.  These passes target RUNTIME cost on a closure
+VM, and a representation transform can ADD instructions while REMOVING an
+allocation or a call — the dominant cost in this VM (docs/vm-perf-plan.md):
+a full-arity call allocates a fresh env array and pushes a frame; a partial
+application copies the whole closure body's instruction array; an over-applied
+call runs a nested vmExecEnv that allocates a fresh ~3 MB frame stack.  The
+pass series proved the trap concretely: Inline is +11.6% instructions on the
+inline probe yet -14% wall-clock (it removes the per-call frame/env alloc), and
+Arity's two representation repairs each add ~38 instructions while removing a
+per-call allocation.  Judge representation transforms by RUNTIME, measured with
+tools/midtier-runtime.sh; report the instruction delta alongside as information,
+never as the verdict.
 
 PARSING NOTE: the bundle format is `[len:type]value` atoms with BARE one-letter
 opcodes (Zinc/Emit.elm's `instrText`: `m`, `p`, `t`, `r`, `v`, `e`, `d`, `a`,
