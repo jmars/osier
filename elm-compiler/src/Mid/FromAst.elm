@@ -373,19 +373,23 @@ functionOrValue ctx modName name =
                     pure (StreamRef { varName = "*stoutput*" })
 
                 else if name == "argvPrim" then
-                    pure argvPrimThunk
+                    argvPrimThunk
 
                 else
                     resolveName ctx name
 
 
 -- The argvPrim rewrite body: a 1-arg thunk `\_ -> value *argv*` over the
--- driver-installed plain list of argument strings.  A 1-param Lam emits
--- `Cur` with ZERO grabs (zincArity = leading grabs + 1), which is the arity-1
--- thunk the old zinc shape had.
-argvPrimThunk : Exp
+-- driver-installed plain list of argument strings.  ONE real binder (a fresh
+-- id, so it can never collide with a scope binder) makes the QBE backend's
+-- static arity 1 — the arity-1 shape the ZINC `Cur []` (zero grabs + Return)
+-- has — while ToZinc still emits ZERO grabs for it (`repeat (1-1) Grab`), so
+-- the csexp output is byte-identical.
+argvPrimThunk : Gen Exp
 argvPrimThunk =
-    Lam { params = [], body = PrimApp { prim = "value", args = [ Lit (LSymbol "*argv*") ] } }
+    map
+        (\b -> Lam { params = [ b ], body = PrimApp { prim = "value", args = [ Lit (LSymbol "*argv*") ] } })
+        (freshBinder "$argv")
 
 
 -- THE UNIFIED NAME RESOLUTION ORDER for a reference token t (bare or dotted):
@@ -660,7 +664,7 @@ calleeFunctionOrValue ctx modName name =
 
             Nothing ->
                 if name == "argvPrim" then
-                    pure argvPrimThunk
+                    argvPrimThunk
 
                 else
                     resolveName ctx name
