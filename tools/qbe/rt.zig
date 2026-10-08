@@ -503,37 +503,74 @@ fn buildArgvList(nargs: usize, c_argv: [*]?[*:0]u8) Value {
 
 export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     // The generated code puts Elm recursion on the C stack (Lower.elm:76-84
-    // documents the limitation), so the default 8MB RLIMIT_STACK kills deep
-    // programs.  MEASURED (handoff-qbe-bug2-improve, complete 9,736-frame
-    // core of the 610s selfhost SEGV): ~9,635 frames of Zinc.Emit.fuse's
-    // NON-tail recursion (`merged :: fuse rest`, Zinc/Emit.elm:134 — one
-    // native call per ZINC instruction of a body; the crashing body,
-    // Char.Extra's unicode dispatch, is ~9.6k instructions) at a 656-byte
-    // stride = 6.32MB, under main's own 1.94MB frame (the effect-loop
-    // HostLoop local, src/effectloop.zig:200-213, inlined via runProgram)
-    // plus the ~0.27MB driver: 8.5MB > 8MB, and the faulting `call` died on
-    // its own return-address push (fault addr rsp-8, 0x138 below the
-    // exactly-8MB stack VMA).  The same workload COMPLETES at
-    // `ulimit -s 262144` (546s, exit 0) and SEGVs at 8192 —
-    // stack-size-dependent, therefore not a GC/rooting bug.  64MB covers
-    // the measured 6.5MB max depth with headroom (GHC defaults to ~80MB
-    // for the same reason).  SCOPE, kept honest: this fixes that crash and
-    // every C-stack exhaustion up to 64MB.  The ARCHITECTURAL fix for
-    // loop-shaped (tail/mutual) recursion is the bounce loop
-    // (tools/aot/runtime.zig's Ret = .done|.tail pattern), a documented
-    // later stage — but it would NOT cover fuse, whose recursion is
-    // non-tail, so the raised limit is the load-bearing fix for that
-    // class, not a temporary stand-in for the bounce loop.  Best-effort:
-    // raise only the soft limit (raising the hard limit needs privileges
-    // and would fail the whole call), never lower a higher one.
+    // documents the limitation), so the default 8MB RLIMIT_STACK can kill deep
+    // programs -- hence this net.  Best-effort: raise only the SOFT limit
+    // (raising the hard limit needs privileges and would fail the whole call),
+    // never lower a higher one.
+    //
+    // HISTORY, measured (handoff-qbe-bug2-improve, complete 9,736-frame core of
+    // the 610s selfhost SEGV): ~9,635 frames of Zinc.Emit.fuse's NON-tail
+    // recursion (`merged :: fuse rest`, Zinc/Emit.elm:134 -- one native call per
+    // ZINC instruction of a body; the crashing body, Char.Extra's unicode
+    // dispatch, is ~9.6k instructions) at a 656-byte stride = 6.32MB, under
+    // main's own 1.94MB frame (the effect-loop HostLoop local,
+    // src/effectloop.zig:200-213, inlined via runProgram) plus ~0.27MB of
+    // driver: 8.5MB > 8MB, and the faulting `call` died on its own
+    // return-address push (fault addr rsp-8, 0x138 below the exactly-8MB stack
+    // VMA).  The same workload COMPLETED at `ulimit -s 262144` (546s, exit 0)
+    // and SEGVed at 8192 -- stack-size-dependent, therefore not a GC/rooting
+    // bug.
+    //
+    // THAT BUDGET HAS SINCE FALLEN BY HALF, so for this workload the net is no
+    // longer the thing keeping it alive.  Two changes: `fuse` is now an
+    // iterative left fold whose self-tail call the backend compiles to an
+    // IN-FRAME LOOP (VERIFIED in the emitted assembly: q_Zinc_x2eEmit_x2efuseHelp
+    // has zero callq to itself, where the old q_Zinc_x2eEmit_x2efuse had five),
+    // and the effect-loop HostLoop is HEAP-allocated instead of living in main's
+    // frame (main's prologue went from `sub $0x1d8e68,%rsp` = 1,937,000 bytes to
+    // `sub $0x10ca8,%rsp` = 68,776 bytes -- proven by asymmetry: identical
+    // generated code, one source file toggled).  RE-MEASURED with this raise
+    // SUPPRESSED (see QBE_NO_RLIMIT below) at the DEFAULT `ulimit -s 8192`: the
+    // workload COMPLETES, exit 0, and an ITIMER_PROF rsp sampler puts the
+    // HIGH-WATER at 4,409,776 bytes (4.41MB), against a bisection that SEGVs at
+    // 4096KB and completes at 8192KB.
+    //
+    // SCOPE, kept honest: the net still covers every C-stack exhaustion up to
+    // 64MB, and the residual 4.41MB is NOT either of the two items above.  The
+    // frame chain AT THE PEAK is `Prelude.filterMap` recursing at a 0x260
+    // (608-byte) stride, called from Zinc.Emit.flatten
+    // (`List.filterMap instrText instrs`, Emit.elm:254) via Lower/Module.elm's
+    // `Csexp.bundleEntry (Emit.flatten (Emit.resolve code))` -- the PRODUCTION
+    // encoder for a defun body, i.e. one native call per ZINC instruction, the
+    // same shape as the `fuse` recursion this unit removed; Prelude's own note
+    // lists map/filter/reverse as tail-recursive accumulator walkers and
+    // filterMap (Prelude.elm:659) was missed.  An EARLIER, shallower peak
+    // (>1MB, 77s in) is a different one: the recursive-descent parser
+    // (ParserFast.skipWhileWithoutLinebreakHelp / loopWhileSucceedsHelp /
+    // symbolFollowedBy / map2), where every closure application costs four
+    // native frames (rt_apply 0x610, rt.applyGo 0x320, rt.callArity 0x80,
+    // rt_call1 0x80).  So the budget is still measured in megabytes and a
+    // bigger input could still exhaust 8MB; what is gone is the class that made
+    // it routine.  The architectural fix for loop-shaped (tail/mutual) recursion
+    // remains the bounce loop (tools/aot/runtime.zig's Ret = .done|.tail
+    // pattern), a documented later stage.
+    //
+    // QBE_NO_RLIMIT=1 SKIPS the raise.  It exists so the net is TESTABLE: with
+    // it set, `ulimit -s` decides the budget and one can ask of any workload
+    // whether it still needs the raise at all (a binary that completes under
+    // the DEFAULT 8MB with the net suppressed does not).  Without a way to
+    // turn the raise off, a higher limit silently hides the very regression
+    // the limit was raised for.
     const want_stack: std.posix.rlim_t = 64 * 1024 * 1024;
-    if (std.posix.getrlimit(.STACK)) |cur_lim| {
-        if (cur_lim.cur < want_stack) {
-            var lim = cur_lim;
-            lim.cur = want_stack;
-            std.posix.setrlimit(.STACK, lim) catch {};
-        }
-    } else |_| {}
+    if (std.c.getenv("QBE_NO_RLIMIT") == null) {
+        if (std.posix.getrlimit(.STACK)) |cur_lim| {
+            if (cur_lim.cur < want_stack) {
+                var lim = cur_lim;
+                lim.cur = want_stack;
+                std.posix.setrlimit(.STACK, lim) catch {};
+            }
+        } else |_| {}
+    }
 
     const argc: usize = @intCast(c_argc);
     if (argc < 2) {

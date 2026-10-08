@@ -1154,9 +1154,21 @@ pub fn runProgram(vm: *Vm, prog: Value) VmError!Value {
 
     // Construct via `undefined` + explicit initialization: the struct literal
     // form makes LLVM materialize ~1.5MB of **-repeated array constants into
-    // this (escaping) alloca at ReleaseFast, blowing up opt time (>240s vs 3s
-    // Debug).  @memset lowers to llvm.memset instead (verified: 17s).
-    var loop: HostLoop = undefined;
+    // the loop's (escaping) storage at ReleaseFast, blowing up opt time
+    // (>240s vs 3s Debug).  @memset lowers to llvm.memset instead
+    // (verified: 17s).
+    // HEAP-allocated, not a stack local.  The tables above are ~1.94MB of
+    // fixed storage, and as a local they WERE the whole of a native caller's
+    // frame: MEASURED on the QBE-compiled compiler, `main`'s frame was
+    // 1,937,216 bytes with runProgram inlined into it — half of the 8.5MB
+    // C-stack budget that exhausted the default 8MB RLIMIT_STACK.  Only the
+    // ADDRESS moves: every field is initialized exactly as below, and
+    // rootPushValueArray still registers `slots` as a root array, so the
+    // rooting is unchanged (the tables are pinned by that root, not by the
+    // conservative stack scan that used to see them for free).
+    const loop: *HostLoop = pa.create(HostLoop) catch
+        @panic("effectloop: out of memory allocating the host loop");
+    defer pa.destroy(loop); // after rootPop/cleanupAll (defers run LIFO)
     loop.vm = vm;
     loop.g = vm.gc;
     @memset(&loop.slots, values.valNil());
