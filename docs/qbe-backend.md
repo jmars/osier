@@ -35,18 +35,22 @@ const42, idn, ifx, churn 150000 (13MB live, constant scavenges), churn
 
 ## Coverage (and the loud failures)
 
-Supported: `Lit` (all five), `Var`, `App` with a GRef head (saturated direct
-call; under/over-application via `rt_apply`, exactly the VM's partial
-semantics), `GRef` as value/force, `Let` (plain binders), `If`, 2-ary integer
-`PrimApp` (`+ - * < <= > >= =` inline with VM-exact semantics transcribed
-from prims.zig; every other prim and every non-fast path runs the REAL VM
-primitive via `rt_prim`), and inner `Lam` (closures with captures).
+Supported: `Lit` (all five, incl. non-ASCII strings — UTF-8 encoded), `Var`,
+`App` with a GRef head (saturated direct call; under/over-application via
+`rt_apply`, exactly the VM's partial semantics), `GRef` as value/force, `Let`
+(plain binders + destructuring), `If`, 2-ary integer `PrimApp` (`+ - * < <= >
+>= =` inline with VM-exact semantics transcribed from prims.zig; every other
+prim and every non-fast path runs the REAL VM primitive via `rt_prim`), inner
+`Lam` (closures with captures), `Case`/`Con`/match steps (MCons/MEmpty/MVector/
+MTagEq/MLitEq), `LetDestruct`, `RecordLit`/`RecordGet`/`RecordUpdate`
+(desugared to the VM's assoc-list prim sequence), `Tup` (right-nested cons
+chain), `ListLit`, and `ShortAnd`/`ShortOr`/`NotEqual` (the VM's jmpf
+semantics).  Aggregates reuse `rt_prim`'s cons/@p/emptylist/assoc/snd, so
+their representation is the VM's by construction.
 
-Everything else is a LOUD compile error naming the construct: Case,
-LetDestruct, Con, Tup, RecordLit/Get/Update, ListLit, StreamRef, ShortAnd/
-ShortOr/NotEqual, non-ASCII literals, arity > 8 (rt_callN table), recursive
-let-functions (FromAst itself rejects those).  `Mid/Ir.elm`'s `Case` with
-match steps was NOT reached — no slice fixture needs it.
+Still a LOUD compile error naming the construct: `StreamRef` (the effect loop)
+and arity > 8 (rt_callN table).  Recursive let-functions are rejected by
+FromAst itself.
 
 ## Crux 1 — tail calls: QBE has none; self-tail is a loop, cross-tail grows
 
