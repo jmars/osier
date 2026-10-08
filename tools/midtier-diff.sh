@@ -70,7 +70,7 @@ SEED_SHA="2d1f8998a13e28c0c47cccc46ac5e390572f73cbe2d63e18d3501cde44568c8b"
 # Every pass switch, so "all passes off" stays complete as passes are added.
 # A missing switch here would silently leave that pass ON in the bisection and
 # make the byte-identity check in step 1 lie.
-PASS_OFF="MIDTIER_NOSHRINK=1 MIDTIER_NOCONSTFOLD=1 MIDTIER_NOINLINE=1 MIDTIER_NOARITY=1 MIDTIER_NODEADGLOBALS=1 MIDTIER_NOPATHCSE=1"
+PASS_OFF="MIDTIER_NOSHRINK=1 MIDTIER_NOCONSTFOLD=1 MIDTIER_NOINLINE=1 MIDTIER_NOARITY=1 MIDTIER_NODEADGLOBALS=1"
 
 for tool in node jq cmp sha256sum; do
     command -v "$tool" >/dev/null 2>&1 || { echo "FAIL: $tool not on PATH" >&2; exit 2; }
@@ -116,17 +116,28 @@ fi
 
 # The pass-off bisection: the tier with every pass disabled must be the S1
 # refactor exactly.  This is the ONLY byte-identity claim left in the tier.
+# Checked over a FIXTURE SET, not one file: a pass that silently stayed ON and
+# moved bytes only on a construct fib.elm lacks (ADTs, records, lists,
+# higher-order calls, let+case) must still trip this check.
+PASS_OFF_FIXTURES="fib boolcase adtcase insrec biglist curry closure letcase"
 if [ "$probe_off_rc" -eq 0 ] && grep -q 'mode=mid' "$TMP/off.err"; then
-    # NOTE `env`: the switches are EXPANDED here, and bash only recognises an
-    # assignment prefix in a LITERAL word — `MIDTIER=1 $PASS_OFF node …` finds
-    # no command at all (exit 127) and the cmp below then compares a missing
-    # file, i.e. the check would report a byte difference for a wiring bug.
-    env MIDTIER=1 $PASS_OFF node "$CDIR/run.js" tests/elm-fixtures/fib.elm "$TMP/off.csexp" >/dev/null 2>&1
-    node "$CDIR/run.js" tests/elm-fixtures/fib.elm "$TMP/base.csexp" >/dev/null 2>&1
-    if cmp -s "$TMP/off.csexp" "$TMP/base.csexp"; then
-        step "engagement (passes off)" "mode=mid, bytes == MIDTIER=0"
+    off_bad=0
+    for fx in $PASS_OFF_FIXTURES; do
+        # NOTE `env`: the switches are EXPANDED here, and bash only recognises an
+        # assignment prefix in a LITERAL word — `MIDTIER=1 $PASS_OFF node …` finds
+        # no command at all (exit 127) and the cmp below then compares a missing
+        # file, i.e. the check would report a byte difference for a wiring bug.
+        env MIDTIER=1 $PASS_OFF node "$CDIR/run.js" "tests/elm-fixtures/$fx.elm" "$TMP/off.csexp" >/dev/null 2>&1
+        node "$CDIR/run.js" "tests/elm-fixtures/$fx.elm" "$TMP/base.csexp" >/dev/null 2>&1
+        cmp -s "$TMP/off.csexp" "$TMP/base.csexp" || {
+            off_bad=$((off_bad + 1))
+            [ "$off_bad" -le 3 ] && echo "    PASSES-OFF DIFFERS: $fx"
+        }
+    done
+    if [ "$off_bad" -eq 0 ]; then
+        step "engagement (passes off)" "mode=mid, $PASS_OFF_FIXTURES all bytes == MIDTIER=0"
     else
-        step "engagement (passes off)" "FAILED — the tier moved a byte with every pass disabled"
+        step "engagement (passes off)" "FAILED — the tier moved a byte with every pass disabled on $off_bad fixture(s)"
         fail=1
     fi
 else

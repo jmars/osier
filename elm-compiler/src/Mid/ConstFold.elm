@@ -50,9 +50,11 @@ module Mid.ConstFold exposing (Stats, run)
 -- constructor's arguments, and re-run Shrink).
 --
 -- WHAT FOLDING DOES NOT DO HERE: it does not fold arithmetic that appears
--- inside a `Let` value used once (that is Shrink's job, and the pipeline
--- re-runs Shrink after this pass for exactly that reason), and it does not
--- touch `PrimApp`s whose args are variables.
+-- inside a `Let` value used once (that would be Shrink's dead/trivial rule,
+-- but Shrink runs ONCE, BEFORE this pass — Mid.Simplify's fixed order — and
+-- is not re-run after it, so a let-bound fold it did not already collapse is
+-- left for the emitter), and it does not touch `PrimApp`s whose args are
+-- variables.
 
 import Mid.Ir exposing (Alt, Defun, Exp(..), LetBinder(..), Lit(..))
 

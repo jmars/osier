@@ -47,6 +47,17 @@ module Mid.DeadGlobals exposing (Stats, run)
 -- SPECIFIC entry's view (e.g. an unused helper in the selfhost's 58 sources).
 -- Rooting them is the price of not knowing the entry; a future refinement can
 -- pass the entry-name list in and turn this into a smaller root set.
+--
+-- CORRECTION TO THE S5 COMMIT MESSAGE (recorded, history NOT rewritten): the
+-- message attributes the -10.7% to "the plan's compounding — Inline duplicates
+-- bodies and DeadGlobals then removes the defuns whose calls were all inlined".
+-- MEASURED, that is wrong: the bulk of the -182,224 instructions is the WRAPPER
+-- DEDUP above (460 duplicate wrapper entries removed IDENTICALLY with and
+-- without Inline); Inline's real compounding is 15 EXTRA wrapper removals
+-- (removed=29 with Inline vs 14 without, because inlining a full-arity wrapper
+-- call turns it into a direct PrimApp and drops the last GRef).  DeadGlobals
+-- CANNOT remove inlined USER defuns — they are all roots.  The honest split is
+-- wrapper-dedup (Inline-independent) plus 15 Inline-dependent wrapper drops.
 
 import Dict exposing (Dict)
 import Mid.Ir exposing (Alt, Defun, Exp(..), LetBinder(..))
@@ -127,8 +138,14 @@ report s =
             ++ String.fromInt s.removed
 
 
--- Keep the FIRST occurrence of each key (all copies emit byte-identically, so
--- which copy survives is unobservable in the emitted bytes).
+-- Keep the FIRST occurrence of each key.  The VM's own `defunSet` keeps the
+-- LAST (later-store-wins — see the header), so this pass and the VM disagree
+-- on which copy survives; that asymmetry is UNOBSERVABLE only while same-key
+-- copies emit byte-identical bodies, which the deterministic per-bundle passes
+-- guarantee (every unit regenerates the same wrapper; no pass keys its rewrite
+-- on which duplicate it sees).  If a future pass ever made same-key bodies
+-- diverge, this dedup would silently keep a different body than the VM's
+-- defunSet would have — the invariant to re-check first.
 dedup : List Defun -> List Defun
 dedup defuns =
     let
