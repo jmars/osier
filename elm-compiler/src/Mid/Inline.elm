@@ -42,23 +42,35 @@ module Mid.Inline exposing (run)
 --   I4. the defun's body cost is <= the threshold (`MIDTIER_INLINE_THRESHOLD`,
 --       default 30, plan pass 3's size budget).
 --
--- THE REWRITE IS DIRECT SUBSTITUTION ONLY: every arg must be a `Var` or a
--- `Lit` (a value that evaluates to itself with no side effect and no
--- divergence), and the body is substituted with each parameter replaced by
--- its argument — NO `Let`/`Endlet` is introduced.  This is the ONLY form that
--- can CUT instructions, and it is also the only form whose argument evaluation
--- is order-safe: a `Var`/`Lit` arg has no evaluation to re-order.
+-- THE REWRITE IS EITHER DIRECT SUBSTITUTION, OR A `Let`-BINDING FALLBACK.
 --
---   WHY THERE IS NO `Let`-BINDING FALLBACK (the order trap applies twice).
---   Binding args through a `Let` reorders their evaluation (an `App` emits its
---   args RIGHT-TO-LEFT, a `Let` LEFT-TO-RIGHT — Shrink's header), so it would
---   be legal only for ORDER-INSENSITIVE args; and it always ADDS a `Let_`/
---   `Endlet` pair per parameter, so it can never reduce the emitted
---   instruction count — it trades instruction count for the runtime frame
---   allocation, which is exactly the trade the brief's instruction-count
---   metric cannot see.  Measured on this corpus (before it was dropped) the
---   let-binding fallback was a pure instruction-count regression, so a
---   non-atomic argument leaves the site alone rather than be rewritten.
+--   * DIRECT SUBSTITUTION: every arg is a `Var` or a `Lit` (a value that
+--     evaluates to itself with no side effect and no divergence), and the body
+--     is substituted with each parameter replaced by its argument — NO `Let`/
+--     `Endlet` is introduced.  This is the ONLY form that can CUT instructions,
+--     and it is also the only form whose argument evaluation is order-safe
+--     trivially: a `Var`/`Lit` arg has no evaluation to re-order.  It is a win
+--     in BOTH tail and non-tail positions (it removes the call outright).
+--
+--   * `Let`-BINDING FALLBACK: a full-arity site whose args are non-atomic but
+--     ORDER-INSENSITIVE (Shrink's `safeArg` class — the same class Shrink's R4
+--     beta uses) binds each parameter to its arg through a `Let` and reads the
+--     body from those slots.  This ADDS a `Let_`/`Endlet` pair per parameter
+--     (an instruction-count regression, which is why the metric-driven pass
+--     dropped it) but REMOVES the callee's per-call frame+env-array allocation
+--     — the dominant runtime cost (docs/vm-perf-plan.md).  MEASURED
+--     (tools/midtier-runtime.sh, tools/bench/letfallback.elm): the fallback is
+--     a runtime win ONLY where the call it replaces would push a FRAME, i.e. in
+--     NonTail position (a non-tail apply allocates a frame + exact-size env;
+--     the fallback's per-parameter envPush — with its doubling-growth
+--     allocation — is cheaper than that frame, but MORE expensive than a tail
+--     call's appterm, which reuses the frame).  So the walk threads the emitter
+--     position (Tail/NonTail) and the fallback fires only in NonTail position;
+--     a non-atomic arg in tail position leaves the site alone.  The Let emits
+--     binders LEFT-TO-RIGHT while the App it replaces emitted args
+--     RIGHT-TO-LEFT, which is exactly why the guard is order-insensitivity;
+--     the binder order is SOURCE order, reproducing emitLam's env `[pn, …, p1]`
+--     so `param_i = access(n-i)` keeps holding.
 --
 -- ALPHA-RENAMING IS DONE ONCE, UP FRONT, BY OFFSETTING.  Binder ids are
 -- unique only WITHIN one defun (`Mid.Ir`), so a naive cross-defun
@@ -94,6 +106,7 @@ type alias Stats =
     , sites : Int
     , fullArity : Int
     , inlined : Int
+    , letBound : Int
     , refusedCost : Int
     , refusedRecursive : Int
     , refusedArgOrder : Int
@@ -107,6 +120,7 @@ zero =
     , sites = 0
     , fullArity = 0
     , inlined = 0
+    , letBound = 0
     , refusedCost = 0
     , refusedRecursive = 0
     , refusedArgOrder = 0
@@ -120,6 +134,7 @@ plus a b =
     , sites = a.sites + b.sites
     , fullArity = a.fullArity + b.fullArity
     , inlined = a.inlined + b.inlined
+    , letBound = a.letBound + b.letBound
     , refusedCost = a.refusedCost + b.refusedCost
     , refusedRecursive = a.refusedRecursive + b.refusedRecursive
     , refusedArgOrder = a.refusedArgOrder + b.refusedArgOrder
@@ -170,6 +185,8 @@ report s =
             ++ String.fromInt s.fullArity
             ++ " inlined="
             ++ String.fromInt s.inlined
+            ++ " letBound="
+            ++ String.fromInt s.letBound
             ++ " | left: cost="
             ++ String.fromInt s.refusedCost
             ++ " recursive="
@@ -636,7 +653,7 @@ inlineDefun : Ctx -> Defun -> ( List Defun, WState ) -> ( List Defun, WState )
 inlineDefun ctx defun ( acc, wstate ) =
     let
         ( value, wstate1 ) =
-            inlineExp ctx defun.value wstate
+            inlineExp ctx True defun.value wstate
     in
     ( { defun | value = value } :: acc, wstate1 )
 
@@ -654,13 +671,22 @@ isCandidate ctx defun =
             False
 
 
-inlineExp : Ctx -> Exp -> WState -> ( Exp, WState )
-inlineExp ctx exp wstate =
+-- `inTail` mirrors `Mid.ToZinc`'s Position: it is True exactly where the
+-- emitter would emit `t` (appterm, frame-reusing) rather than `p` (apply,
+-- frame-pushing).  Direct substitution is a win in BOTH positions (it removes
+-- the call outright), but the Let-binding fallback is only a win where the call
+-- it replaces would push a FRAME — i.e. NonTail.  In tail position the call is
+-- an appterm (no frame push) and the fallback's per-parameter envPush (with its
+-- doubling-growth allocation) costs MORE than the callee's exact-size env
+-- array, measured (see the pass's commit message).  So the fallback is gated
+-- on `not inTail`.
+inlineExp : Ctx -> Bool -> Exp -> WState -> ( Exp, WState )
+inlineExp ctx inTail exp wstate =
     case exp of
         App app ->
             let
                 ( fn, w1 ) =
-                    inlineExp ctx app.fn wstate
+                    inlineExp ctx False app.fn wstate
 
                 ( args, w2 ) =
                     inlineAll ctx app.args w1
@@ -668,7 +694,7 @@ inlineExp ctx exp wstate =
             case fn of
                 GRef ref ->
                     if not ref.force then
-                        decideSite ctx ref.key args w2
+                        decideSite ctx inTail ref.key args w2
 
                     else
                         ( App { fn = fn, args = args }, w2 )
@@ -691,14 +717,14 @@ inlineExp ctx exp wstate =
         Lam lam ->
             let
                 ( body, w1 ) =
-                    inlineExp ctx lam.body wstate
+                    inlineExp ctx True lam.body wstate
             in
             ( Lam { lam | body = body }, w1 )
 
         NoTail inner ->
             let
                 ( e, w1 ) =
-                    inlineExp ctx inner wstate
+                    inlineExp ctx False inner wstate
             in
             ( NoTail e, w1 )
 
@@ -715,17 +741,17 @@ inlineExp ctx exp wstate =
                     inlineBinders ctx block.binders wstate
 
                 ( body, w2 ) =
-                    inlineExp ctx block.body w1
+                    inlineExp ctx inTail block.body w1
             in
             ( Let { binders = binders, body = body }, w2 )
 
         Case branch ->
             let
                 ( scrutinee, w1 ) =
-                    inlineExp ctx branch.scrutinee wstate
+                    inlineExp ctx False branch.scrutinee wstate
 
                 ( alts, w2 ) =
-                    inlineAlts ctx branch.alts w1
+                    inlineAlts ctx inTail branch.alts w1
             in
             ( Case { branch | scrutinee = scrutinee, alts = alts }, w2 )
 
@@ -753,14 +779,14 @@ inlineExp ctx exp wstate =
         RecordGet base field ->
             let
                 ( b, w1 ) =
-                    inlineExp ctx base wstate
+                    inlineExp ctx False base wstate
             in
             ( RecordGet b field, w1 )
 
         RecordUpdate upd ->
             let
                 ( base, w1 ) =
-                    inlineExp ctx upd.base wstate
+                    inlineExp ctx False upd.base wstate
 
                 ( updates, w2 ) =
                     inlineSetters ctx upd.updates w1
@@ -777,43 +803,43 @@ inlineExp ctx exp wstate =
         If block ->
             let
                 ( cond, w1 ) =
-                    inlineExp ctx block.cond wstate
+                    inlineExp ctx False block.cond wstate
 
                 ( t, w2 ) =
-                    inlineExp ctx block.thenBranch w1
+                    inlineExp ctx inTail block.thenBranch w1
 
                 ( f, w3 ) =
-                    inlineExp ctx block.elseBranch w2
+                    inlineExp ctx inTail block.elseBranch w2
             in
             ( If { block | cond = cond, thenBranch = t, elseBranch = f }, w3 )
 
         ShortAnd block ->
             let
                 ( left, w1 ) =
-                    inlineExp ctx block.left wstate
+                    inlineExp ctx False block.left wstate
 
                 ( right, w2 ) =
-                    inlineExp ctx block.right w1
+                    inlineExp ctx False block.right w1
             in
             ( ShortAnd { block | left = left, right = right }, w2 )
 
         ShortOr block ->
             let
                 ( left, w1 ) =
-                    inlineExp ctx block.left wstate
+                    inlineExp ctx False block.left wstate
 
                 ( right, w2 ) =
-                    inlineExp ctx block.right w1
+                    inlineExp ctx False block.right w1
             in
             ( ShortOr { block | left = left, right = right }, w2 )
 
         NotEqual block ->
             let
                 ( left, w1 ) =
-                    inlineExp ctx block.left wstate
+                    inlineExp ctx False block.left wstate
 
                 ( right, w2 ) =
-                    inlineExp ctx block.right w1
+                    inlineExp ctx False block.right w1
             in
             ( NotEqual { block | left = left, right = right }, w2 )
 
@@ -827,7 +853,7 @@ inlineAll ctx exps wstate =
         e :: rest ->
             let
                 ( e1, w1 ) =
-                    inlineExp ctx e wstate
+                    inlineExp ctx False e wstate
 
                 ( rest1, w2 ) =
                     inlineAll ctx rest w1
@@ -844,7 +870,7 @@ inlineSetters ctx setters wstate =
         ( field, value ) :: rest ->
             let
                 ( v1, w1 ) =
-                    inlineExp ctx value wstate
+                    inlineExp ctx False value wstate
 
                 ( rest1, w2 ) =
                     inlineSetters ctx rest w1
@@ -875,20 +901,20 @@ inlineBinder ctx b wstate =
         LetBind bind ->
             let
                 ( v, w1 ) =
-                    inlineExp ctx bind.value wstate
+                    inlineExp ctx False bind.value wstate
             in
             ( LetBind { bind | value = v }, w1 )
 
         LetDestruct destruct ->
             let
                 ( v, w1 ) =
-                    inlineExp ctx destruct.value wstate
+                    inlineExp ctx False destruct.value wstate
             in
             ( LetDestruct { destruct | value = v }, w1 )
 
 
-inlineAlts : Ctx -> List Alt -> WState -> ( List Alt, WState )
-inlineAlts ctx alts wstate =
+inlineAlts : Ctx -> Bool -> List Alt -> WState -> ( List Alt, WState )
+inlineAlts ctx inTail alts wstate =
     case alts of
         [] ->
             ( [], wstate )
@@ -896,10 +922,10 @@ inlineAlts ctx alts wstate =
         alt :: rest ->
             let
                 ( body, w1 ) =
-                    inlineExp ctx alt.body wstate
+                    inlineExp ctx inTail alt.body wstate
 
                 ( rest1, w2 ) =
-                    inlineAlts ctx rest w1
+                    inlineAlts ctx inTail rest w1
             in
             ( { alt | body = body } :: rest1, w2 )
 
@@ -1201,6 +1227,7 @@ relabel fresh =
 
 type SiteResult
     = Inlined Exp
+    | InlinedLet Exp
     | RefusedCost
     | RefusedRecursive
     | RefusedArity
@@ -1208,8 +1235,8 @@ type SiteResult
     | RefusedUnknown
 
 
-decideSite : Ctx -> String -> List Exp -> WState -> ( Exp, WState )
-decideSite ctx key args wstate =
+decideSite : Ctx -> Bool -> String -> List Exp -> WState -> ( Exp, WState )
+decideSite ctx inTail key args wstate =
     let
         siteCounted =
             { wstate | stats = bumpSites wstate.stats }
@@ -1221,11 +1248,14 @@ decideSite ctx key args wstate =
         Just info ->
             let
                 ( result, fresh1 ) =
-                    classify ctx info args siteCounted.fresh
+                    classify ctx inTail info args siteCounted.fresh
             in
             case result of
                 Inlined exp ->
                     ( exp, bumpInlined { siteCounted | fresh = fresh1 } )
+
+                InlinedLet exp ->
+                    ( exp, bumpInlinedLet { siteCounted | fresh = fresh1 } )
 
                 RefusedCost ->
                     ( rebuildApp key args, bumpFullArity (bumpRefusedCost siteCounted) )
@@ -1287,8 +1317,23 @@ bumpInlined w =
     }
 
 
-classify : Ctx -> Info -> List Exp -> Int -> ( SiteResult, Int )
-classify ctx info args fresh =
+bumpInlinedLet : WState -> WState
+bumpInlinedLet w =
+    { w
+        | stats =
+            (\s ->
+                { s
+                    | fullArity = s.fullArity + 1
+                    , inlined = s.inlined + 1
+                    , letBound = s.letBound + 1
+                }
+            )
+                w.stats
+    }
+
+
+classify : Ctx -> Bool -> Info -> List Exp -> Int -> ( SiteResult, Int )
+classify ctx inTail info args fresh =
     if info.recursive then
         ( RefusedRecursive, fresh )
 
@@ -1310,6 +1355,35 @@ classify ctx info args fresh =
                             freshenLabels fresh lam.body
                     in
                     ( Inlined (Shrink.substAll (directSubs lam.params args) body), f1 )
+
+                else if not inTail && List.all Shrink.safeArg args then
+                    -- The Let-binding fallback: a non-atomic but
+                    -- ORDER-INSENSITIVE arg cannot be substituted directly (it
+                    -- would be duplicated/re-ordered), but it can be BOUND to
+                    -- the parameter once and the body read from that slot.
+                    -- This trades the direct-substitution's instruction cut
+                    -- for a Let_/Endlet pair per parameter — and REMOVES the
+                    -- callee's per-call frame+env-array allocation, the
+                    -- dominant runtime cost (docs/vm-perf-plan.md).  The Let
+                    -- emits binders LEFT-TO-RIGHT while the App it replaces
+                    -- emitted args RIGHT-TO-LEFT, which is exactly why the
+                    -- guard is safeArg (order-insensitive, the same class
+                    -- Shrink's R4 beta uses) and not merely atomic.  The
+                    -- binder order is SOURCE order, reproducing emitLam's env
+                    -- `[pn, …, p1]` so `param_i = access(n-i)` keeps holding.
+                    let
+                        ( body, f1 ) =
+                            freshenLabels fresh lam.body
+                    in
+                    ( InlinedLet
+                        (Let
+                            { binders =
+                                List.map2 (\p a -> LetBind { binder = p, value = a }) lam.params args
+                            , body = body
+                            }
+                        )
+                    , f1
+                    )
 
                 else
                     ( RefusedArgOrder, fresh )
