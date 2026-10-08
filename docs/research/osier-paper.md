@@ -4,9 +4,9 @@
 bibliography. Companion material: the calculus specification
 (`docs/research/row-gadt-calculus.md`, λρG), the mechanization (`lean/`, one Lake project),
 the reference implementation (`elm-compiler/src/Type/`), the fixture matrix
-(`tests/elm-fixtures/run-elm-gate.sh`), the reproducibility chain (`tools/withe-numbers.sh`,
+(`tests/elm-fixtures/run-elm-gate.sh`), the reproducibility chain (`tools/osier-numbers.sh`,
 which reprints every number this paper cites), and the survey
-(`docs/research/withe-related-work.md`, which is the bibliography's source).*
+(`docs/research/osier-related-work.md`, which is the bibliography's source).*
 
 ---
 
@@ -892,7 +892,7 @@ by a witness — with the signature *omitted*, all three gate-registered and re-
 
 **Figure 5.** The L3 principality measurement — three presentations of the same access, the
 signature omitted. Source: gate fixtures `rowgadt_l3i`, `rowgadt_l3ii`, `rowgadt_l3iii`
-(measured column, re-measured by `tools/withe-numbers.sh`; registered rows in
+(measured column, re-measured by `tools/osier-numbers.sh`; registered rows in
 `tests/elm-fixtures/MATRIX.md`); the P/Q classification is §5.1 above
 (`docs/research/row-gadt.md` §5).
 
@@ -939,10 +939,10 @@ pre-existing `elm-compiler/src/Type/*` tree: unification with a row-rewrite, let
 generalization, an eight-library corpus and a self-host track). The change is contained to the
 pattern path and the unifier state; lowering, codegen, and the VM are untouched (types are
 erased). Everything below is *measured*, and every number is reproducible from the artifact by
-one command (`tools/withe-numbers.sh`, which rebuilds the compiler, runs the gate, checks the
+one command (`tools/osier-numbers.sh`, which rebuilds the compiler, runs the gate, checks the
 corpus byte-identity, runs the unit suite, builds the Lean project, and re-derives the
 interpreter recount; its output is the source of every number printed here — run on the current
-tree of the artifact repository. The artifact tag `withe-paper-artifact-1` (annotated; it
+tree of the artifact repository. The artifact tag `osier-paper-artifact-1` (annotated; it
 dereferences to the commit it was made on) predates the final ten commits, which touch the
 documentation, the gate and reproducibility scripts, and the generated fixture registry this
 paper cites — but not the compiler, the Lean project, or the fixture programs, which are
@@ -1173,7 +1173,7 @@ full corpus compiled byte-identically.
 **And it was not sufficient — a fail-fast artifact.** Un-trusting `runTask` (removing it from
 the trusted list) reports exactly *one* error, at `TaskExec`, and stops: a checker that halts at
 the first error cannot see the branches behind it. Masking each failing branch in source order
-to reveal the next (a reproducible bisection script, `tools/withe-recount-runTask.sh`, which
+to reveal the next (a reproducible bisection script, `tools/osier-recount-runTask.sh`, which
 edits only a scratch copy and asserts every step's expected error) gives **four** failing
 branches — so the honest count is **16 of 20 branches check honestly**, and the earlier "29 of
 30" figure was this fail-fast artifact (in the 30-constructor era, before the UI effects left
@@ -1270,9 +1270,9 @@ Elm-family compiler and its Hindley–Milner checker over scoped-label rows
 research extension itself — the branch-local refinement machinery in `Type/Unify.elm` and
 `Type/Infer.elm`, with its surface (the `type a.` binders, exhaustiveness and refutation
 checking); the Lean mechanization (`lean/`); the verification harness —
-`tools/withe-numbers.sh`, the fixture gate (`tests/elm-fixtures/run-elm-gate.sh`), the corpus
-baseline (`tools/withe-corpus-baseline.sha256`), and the recount script
-(`tools/withe-recount-runTask.sh`); the adversarial test passes — the three-pass
+`tools/osier-numbers.sh`, the fixture gate (`tests/elm-fixtures/run-elm-gate.sh`), the corpus
+baseline (`tools/osier-corpus-baseline.sha256`), and the recount script
+(`tools/osier-recount-runTask.sh`); the adversarial test passes — the three-pass
 unsound-accept hunt and the fixtures pinning its findings; and the artifact packaging —
 `ARTIFACT.md`, the generated fixture matrix (`tests/elm-fixtures/MATRIX.md`), and the
 prerequisite preflights. The compiler substrate is *pre-existing* in §6's sense — it predates
@@ -1309,7 +1309,7 @@ The organization of this section is itself a contribution. Three features — **
 polymorphism, **G** GADT refinement, **A** explicit/locally abstract polymorphism — pick out
 cells by the pairs they combine, and the map (26 rows — 24 retrieved from primary
 sources, 2 carried second-hand; the survey with verbatim quotes and URLs is the companion
-`docs/research/withe-related-work.md`) makes two things visible at once: *which adjacent cells
+`docs/research/osier-related-work.md`) makes two things visible at once: *which adjacent cells
 are occupied* — so that "but X did rows" and "but Y did GADTs" are answered before they are
 asked — and *that one specific cell is empty*. No published type system refines a row variable
 by a branch-local GADT equation, and no published system therefore says which record operations
@@ -1542,7 +1542,7 @@ expected output (Section 6.6), while `clean`/`err` rows assert the compile outco
 `tests/elm-fixtures/MATRIX.md` (152 rows, by `tools/gen-fixture-matrix.sh`; staleness check
 `tools/gen-fixture-matrix.sh --check`) — this table is the paper-cited subset, with the claim
 each row pins; where the two disagree, the registry and the gate win. The `measured` column is
-re-derived by `tools/withe-numbers.sh`.
+re-derived by `tools/osier-numbers.sh`.
 
 | fixture | claim pinned | measured |
 |---|---|---|
@@ -1615,7 +1615,7 @@ against the local Lean binary with no sorry.
 
 ## References
 
-Provenance follows the companion survey (`docs/research/withe-related-work.md`), which is this
+Provenance follows the companion survey (`docs/research/osier-related-work.md`), which is this
 bibliography's source: **[M]** marks a work retrieved and read from its primary source (a URL is
 given wherever the survey records one), and **[SECOND-HAND]** marks a work carried exactly as the
 survey carries it, not retrieved. The list contains exactly the works this paper cites or names.

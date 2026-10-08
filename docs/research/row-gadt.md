@@ -1,9 +1,11 @@
-# Withe — extensible records × GADTs × locally abstract types
+# Osier — extensible records × GADTs × locally abstract types
 
-**Withe** is the language; **λρG** is its core calculus (*the declarative calculus of branch-local
-row refinement*, `row-gadt-calculus.md`). The name is a *withe* — a flexible twig used for binding,
-keeping the botanical lineage from Elm while naming what the language actually does: flexible rows
-that extend and bind. (Chosen after checking collisions: Rowan, Linden, Rho and Facet are all taken.)
+**Osier** is the language; **λρG** is its core calculus (*the declarative calculus of branch-local
+row refinement*, `row-gadt-calculus.md`). The name is an *osier* — the willow whose supple shoots
+are cut for binding, keeping the botanical lineage from Elm while naming what the language actually
+does: flexible rows that extend and bind. (Chosen after checking collisions: Rowan, Linden, Rho and
+Facet are all taken. The collision check was run for the earlier name; it was not re-run for this
+one.)
 
 Working notes for a research paper. Claims are marked **[M]** measured, **[I]** interpretation,
 **[P]** projection. Nothing here is a result until it is marked [M].
@@ -547,7 +549,7 @@ Superseded wording that the measurements contradict — listed so they don't cre
 
 **Added after the exhaustiveness/refutation and position-directed-rigidity work (2026-10-05):**
 
-- "**Withe has no exhaustiveness or refutation checking**" — **FALSE** (commit 36b93d0). Both exist
+- "**Osier has no exhaustiveness or refutation checking**" — **FALSE** (commit 36b93d0). Both exist
   and work. Any earlier text saying otherwise is superseded.
 - "**Refutation is unconditional**" — false. It fires only where the scrutinee index is **concrete or
   binder-rigid**; a bare flexible index must not be concretised (that bug accepted a partial

@@ -29,7 +29,7 @@ no node and no AOT/LLVM step.
 |---|---|
 | manifest | `elm-compiler/selfhost/manifest.json`, sha256 `369e6a735af3de6f6d2b2ad2afc000fc55fec9cab6218a98deec5c4f8e8901eb` |
 | source count | 58 (every path listed in the manifest; all must exist) |
-| source-set digest | `d6e6b67e9d7797d7a2a459ea0264edb6ea26f65cab7c6b3f57c0c891ef3cd07a` |
+| source-set digest | `b0c655da780f9a831c63b03f4d89e57042b40c3eb7afa0c818d08fb805a1a331` |
 | corpus | `elm-compiler/src/Prelude.elm`, `src/Runtime.elm`, `core-libs/{Dict,Set,Maybe,Result,Tuple,JsArray,Array,Str}.elm` (always appended by `run.js`, not in the manifest) |
 
 The source-set digest is the sha256 of `sha256sum`-style lines
@@ -47,7 +47,7 @@ The producer is the **elm 0.19.2 authored frontend**, NOT the VM:
    (elm 0.19.2, `ELM_HOME=elm-compiler/.elm-cache`), sha256
    `e8236bd25af89776fede2804e3dfd1f81077d410199cf817a15041b2869f1ef2`.
    `compiler.js` is gitignored — it is rebuilt by `elm-compiler/build.sh` or
-   `tools/withe-numbers.sh`; the hash is recorded here as informational only,
+   `tools/osier-numbers.sh`; the hash is recorded here as informational only,
    since the elm compiler is not bit-reproducible across elm versions.
 2. the exact command:
 
@@ -67,6 +67,15 @@ Reproducibility check run for this file: `tools/selfhost-compile.sh` was re-run
 on the clean-at-`33e1d5b` tree while writing this file and rewrote
 `zig-out/selfhost.csexp` with the **same** sha256 — i.e. the seed is
 reproducible from HEAD's 58 sources by the stock path.
+
+Re-checked after the Withe→Osier rename (2026-10-08), because that rename edits
+a comment in one manifest source (`elm-compiler/src/Type/Builtins.elm`): the
+source-set digest above therefore changes (it hashes the sources themselves),
+but the **compiled bytes do not**. `tools/selfhost-compile.sh` re-run over the
+renamed sources wrote `zig-out/selfhost.csexp` at sha256
+`2d1f8998a13e28c0c47cccc46ac5e390572f73cbe2d63e18d3501cde44568c8b` — byte-identical
+to the committed seed (`cmp`, exit 0), in 3 s. `src/Type/Builtins.elm`'s *code*
+is untouched; only the comment that names the language changed.
 
 ## The fixed-point fact (why a committed binary is safe to trust)
 

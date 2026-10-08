@@ -5,7 +5,7 @@ module Shadowerr exposing (main)
 -- SILENTLY to the imported (wrong-typed) function.  Real Elm rejects the
 -- clash; the compiler must fail LOUDLY with the shadowing error (never reach
 -- typechecking/lowering).  (Re-pointed from Viewport.update/view to Str.width
--- in withe-split Phase 3: Viewport is a parked UI lib.)
+-- in osier split Phase 3: Viewport is a parked UI lib.)
 
 import Str exposing (width)
 

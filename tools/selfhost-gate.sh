@@ -20,7 +20,7 @@
 #
 # Fixture groups are REUSED from tests/elm-fixtures/run-elm-gate.sh (its
 # ELM_GATE_MANIFEST_ONLY=1 manifest), so the gate compares exactly the groups
-# the LANGUAGE gate compiles (168 checks, 167 groups after the withe-split
+# the LANGUAGE gate compiles (168 checks, 167 groups after the osier split
 # Phase 1 UI-host split) — not a hand-picked subset.
 #
 # Usage: tools/selfhost-gate.sh
@@ -63,7 +63,7 @@ if [ -z "${SELFHOST_BIN:-}" ]; then
   echo "selfhost-gate: aotdump $SELFHOST_CSEXP $ENTRY -> gen.zig"
   "$ROOT/zig-out/bin/aotdump" "$SELFHOST_CSEXP" "$ENTRY" -o "$tmp/gen.zig"
 
-  # build.zig: the generic AOT app wiring.  (withe-split Phase 1: the renderer
+  # build.zig: the generic AOT app wiring.  (osier split Phase 1: the renderer
   # is detached from the host, so the effect loop imports only gc + vm here.)
   cat > "$tmp/build.zig" <<'BZ'
 const std = @import("std");

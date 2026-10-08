@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# run-elm-gate.sh — the Withe LANGUAGE gate (BATCH mode).
+# run-elm-gate.sh — the Osier LANGUAGE gate (BATCH mode).
 #
 # For each fixture under tests/elm-fixtures, compiles it with the elm-compiler
 # (node run.js -> .csexp), loads it into the ZINC VM via elmvm, runs the named
 # function with the given args, and diffs the printed value against
 # expected/<name>.txt.
 #
-# withe-split Phase 1: the 19 UI-host rows (16 pty + the pty_app todos row + the
+# osier split Phase 1: the 19 UI-host rows (16 pty + the pty_app todos row + the
 # renderdump row + the lgstyled fixture) moved to run-ui-gate.sh, which is
 # DEFERRED until the renderer is re-attached to the host effect loop.  This
 # script is now the LANGUAGE gate: the corpus/typing rows + the 29 lambda-lift
@@ -243,7 +243,7 @@ compile_error dup          "duplicate top-level definition in Dup: f"
 compile_error shadowerr    "is both a top-level definition and imported via"
 compile_error shadowtyperr "is both a top-level definition and imported via"
 compile_error ambimperr    "from two different modules"
-# --- withe-split Phase 3: an unhandled effect fails LOUDLY and FAST ---
+# --- osier split Phase 3: an unhandled effect fails LOUDLY and FAST ---
 # unhandledtask is a hand-crafted bundle (no Elm source can produce an unknown
 # Task ctor) whose Program spawns a Task tagged TaskBogus; the host must throw
 # naming the ctor and TERMINATE, never hang or silently drop it.

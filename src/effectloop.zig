@@ -1,4 +1,4 @@
-//! src/effectloop.zig — the Withe LANGUAGE host: the CEK effect-manager event
+//! src/effectloop.zig — the Osier LANGUAGE host: the CEK effect-manager event
 //! loop over the compiler's Task effects (execplan + the stream prims + files
 //! + time).  It is the host side of the language's effect protocol; the UI
 //! (renderer + terminal input) lives in fx-ui and is NOT here.
@@ -19,7 +19,7 @@
 //! TaskCd/TaskGetcwd/TaskGetpid/TaskGlob (env/cwd/pid/glob), TaskNow/TaskSleep/
 //! TaskQuit (time/quit), TaskListDir/TaskStat (dir/stat).
 //!
-//! NOT HANDLED (deliberately): the UI effects left the language in withe-split
+//! NOT HANDLED (deliberately): the UI effects left the language in osier split
 //! Phase 3 — the Runtime.elm Task type no longer declares TaskRender /
 //! TaskGuiOpen / TaskGuiPoll / TaskGuiClose / TaskReadKey / TaskReadMouse /
 //! TaskMouseMode / TaskWinSize / TaskWaitResize / TaskRawMode, so the host's
@@ -369,7 +369,7 @@ const HostLoop = struct {
                 // unresumed (the program stalls or silently loses work) with
                 // no diagnostic.  The handled set is exactly taskArity; any
                 // other ctor name (unknown, or a UI effect that left the
-                // language in withe-split Phase 3) lands here.
+                // language in osier split Phase 3) lands here.
                 var msgbuf: [160]u8 = undefined;
                 return self.vm.throwShen(unhandledTaskMsg(&msgbuf, name));
             }
@@ -1300,7 +1300,7 @@ fn taskArity(name: []const u8) ?i32 {
 
 /// Diagnostic for a Task ctor this host does not handle.  The handled set is
 /// exactly taskArity (the Runtime.elm Task ctor list); anything else — an
-/// unknown ctor, or a UI effect that left the language in withe-split Phase 3 —
+/// unknown ctor, or a UI effect that left the language in osier split Phase 3 —
 /// lands here.  `buf` is caller-owned and must outlive the returned slice only
 /// until the caller copies it (throwShen does, via values.valError).  On a
 /// hypothetical overflow the raw ctor name is returned instead of truncating.

@@ -366,7 +366,7 @@ trustedBodies =
     -- annotations (src/Runtime.elm `type Task`), 16 of its 20 branches check
     -- honestly via branch-local result discharge (a ~ (), a ~ String, ...);
     -- FOUR cannot, so the body stays trusted. The count is reproducible
-    -- (tools/withe-recount-runTask.sh, temp-copy bisection) and is taken
+    -- (tools/osier-recount-runTask.sh, temp-copy bisection) and is taken
     -- UNDER a `type x a.` binder: the committed signature has none, and the
     -- per-branch discharge needs the rigid result index. The four:
     --   * `TaskExec`: its payload is typed `a` (the ctor's existential,

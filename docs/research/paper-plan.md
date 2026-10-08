@@ -1,4 +1,4 @@
-# Paper plan — Withe / λρG (handoff `rowgadt`, stage `plan`)
+# Paper plan — Osier / λρG (handoff `rowgadt`, stage `plan`)
 
 Plan for the paper itself: structure, claims, evidence, venue, gaps. Written so that drafting
 becomes execution rather than design. Every claim carries its evidence pointer and an
@@ -28,7 +28,7 @@ What this unit re-measured itself (✎, 2026-10-05, tree at `0207dd2`):
   `Runtime.elm` (`type Task:24`, `TaskExec a : Task x (Int,String,String):33`, `runTask:112`) [M ✎].
 
 Companion inputs (read in full by this unit): `docs/research/row-gadt.md` (565 lines, the paper
-seed), `docs/research/row-gadt-calculus.md` (1281 lines, λρG), `docs/research/withe-related-work.md`
+seed), `docs/research/row-gadt-calculus.md` (1281 lines, λρG), `docs/research/osier-related-work.md`
 (601 lines, the survey), `lean/*.lean`, and the memory chain `handoff-rowgadt-{ctx,meta,lit3,result}`.
 
 ---
@@ -151,7 +151,7 @@ evidence spine and it is small. [P]
 
 Alternates (decide at drafting; the primary names the phenomenon, which survives double-blind
 better than a language name): (a) *Which Record Operations Survive a GADT Refinement?* — the
-question form, good for the operation-level contribution; (b) *Withe: Extensible Records under
+question form, good for the operation-level contribution; (b) *Osier: Extensible Records under
 Branch-Local GADT Refinement* — leads with the language; use only if §1 leans on the artifact
 story early.
 
@@ -183,8 +183,8 @@ story early.
 
 (~250 words.) Claims vs evidence: every sentence of this abstract appears with its pointer in
 §5's table (C1–C5, C6–C9, C15–C18, C20). The "not well specified" quote is octachron, Jan 2024
-(withe-related-work.md:310-312); the restriction is Garrigue & Rémy 2012
-(withe-related-work.md:64-65) — both verbatim-verified in the survey.
+(osier-related-work.md:310-312); the restriction is Garrigue & Rémy 2012
+(osier-related-work.md:64-65) — both verbatim-verified in the survey.
 
 ---
 
@@ -198,7 +198,7 @@ story early.
    *Evidence*: the rule set (row-gadt-calculus.md §2, seats ✎ `Type/Unify.elm:289-293` `unifyBranch`,
    `:101-103` `dropEqsFrom`, `:135-150` `dischargeType`); fixtures `rowgadt_select`, `rowgadt_eval`
    (clean) vs `rowgadt_escape`, `rowgadt_evalbad` (err) — gate `run-elm-gate.sh:309-450` ✎; the
-   survey's empty-cell verdict (withe-related-work.md §3).
+   survey's empty-cell verdict (osier-related-work.md §3).
 
 2. **The operation-level answer, with the positive row result mechanized.** Under an active
    refinement, selection is licensed exactly by the heads of the branch's equations; update is
@@ -208,7 +208,7 @@ story early.
    *Evidence*: `rowgadt_absentfield` (err) / `rowgadt_setx` (clean) / insertion rejection ✎
    `Type/Infer.elm:975`; the update/insertion theorems `update_domain_preserving`,
    `update_reflexive_domain`, `update_accepted_at_rho`, `insertion_rejected_under_refinement`
-   (`lean/Update.lean:153,167,180,236` ✎); the trade framing (withe-related-work.md §2
+   (`lean/Update.lean:153,167,180,236` ✎); the trade framing (osier-related-work.md §2
    "Remy 1994 — the must-retrieve answer", :391-465).
 
 3. **A measured principality boundary with an inversion.** Principality is retained when every
@@ -242,14 +242,14 @@ story early.
    nullary-ctor generalization, a closed-record discharge), which the trusted-body comment now
    states precisely, together with a decomposition of the remaining trusted bodies by *kind of lie*.
    *Evidence*: gate PASS=152 FAIL=0 (re-run ✎ 2026-10-05); corpus byte-identity measured across
-   every step against the committed manifest (149 groups; orchestrator-verified, and **G2 is now done** — the baseline lives in `tools/withe-corpus-baseline.sha256` and the chain in `tools/withe-numbers.sh`)
+   every step against the committed manifest (149 groups; orchestrator-verified, and **G2 is now done** — the baseline lives in `tools/osier-corpus-baseline.sha256` and the chain in `tools/osier-numbers.sh`)
    re-run, G2); `Runtime.elm:24-44` ✎ (source-level per-ctor result annotations);
    `Type/Builtins.elm:365-391` ✎ (the trusted comment). The 16-of-20 branch count is independently
-   re-measured — **G5 DONE**: `tools/withe-recount-runTask.sh` re-counts by bisection under the
+   re-measured — **G5 DONE**: `tools/osier-recount-runTask.sh` re-counts by bisection under the
    `type x a.` binder.
 
 None of these rests on an item of the do-not-publish list (row-gadt.md §9, :495-565 +
-withe-related-work.md §6, :718-758; merged in Appendix A below). Contribution 3 states the
+osier-related-work.md §6, :718-758; merged in Appendix A below). Contribution 3 states the
 *measured inversion*, explicitly reversing the banned guess ("witnesses lack principal types").
 Contribution 2's insertion clause is worded as a trade, per the ban.
 
@@ -273,7 +273,7 @@ Contents:
 - The gap, with the maintainer record: octachron Jan 2024 "not well specified … nothing is
   guaranteed beyond the fact that the currently implemented interaction is safe" and his
   per-field-object workaround — which *is* a manual membership-witness encoding, i.e. the idiom
-  practitioners already reach for (withe-related-work.md:310-322, :441-446); Garrigue & Rémy 2012
+  practitioners already reach for (osier-related-work.md:310-322, :441-446); Garrigue & Rémy 2012
   on the first implementation's restriction (:243-245); issue #5724 (poly-variant patterns block
   refinement, :289-292).
 - **Second motivating example** — the heterogeneous container (`rowgadt_het`: witness GADT +
@@ -292,7 +292,7 @@ Contents:
 - Contributions list (§3 above) and the honest scope sentence: *a discipline with mechanical
   evidence, not a soundness theorem* (this sentence must survive every revision).
 
-Artifact: row-gadt.md §1-§3; withe-related-work.md §3.
+Artifact: row-gadt.md §1-§3; osier-related-work.md §3.
 
 ### §2 A calculus of branch-local row refinement (4.5 pp)
 
@@ -346,11 +346,11 @@ Contents:
   Gaster & Jones dial it strict under a lacks predicate; CORELINKS quantify presence; we restrict
   it *conditionally* — only under an active branch equation — and give the first account of *why*
   (domain escape breaks refinement soundness). Three published positions on one dial, none
-  conditional (withe-related-work.md:466-484).
+  conditional (osier-related-work.md:466-484).
 - The update lineage contrast: Rémy update = shadowing-extension (domain may grow);
   Gaster & Jones = restrict-then-extend under lacks; Links = derived remove-then-extend; ours =
   first-occurrence scoped-label replace, domain-preserving by construction — which is why
-  discharge is free (withe-related-work.md:388-405).
+  discharge is free (osier-related-work.md:388-405).
 
 Artifact: row-gadt-calculus.md §2.4-2.7, §6, §7; fixtures; `lean/Update.lean`.
 
@@ -476,7 +476,7 @@ Artifact: row-gadt.md §6; calculus §8; `Type/*.elm` seats; gate + corpus scrip
 contribution, because it makes the empty cell visible and pre-empts "but X did rows" / "but Y did
 GADTs".
 
-Contents (structure = withe-related-work.md §1's table, the 26-work map):
+Contents (structure = osier-related-work.md §1's table, the 26-work map):
 - **Rows-only lineage** (R): Wand 1989 (concatenation costs principality — finite complete sets
   instead; *same casualty as ours, different trigger — do not conflate*); Rémy 1994 (unrestricted
   extension; presence flags as quantification); Gaster & Jones 1996 (strict under lacks); Ohori
@@ -501,13 +501,13 @@ Contents (structure = withe-related-work.md §1's table, the 26-work map):
 - **The frontier**: omnidirectional inference 2026 (principality-restoration with nominal
   records; GADTs as "would be interested in studying") — the field is active, cite it, land the
   row-side answer next to it.
-- The safe headline sentence, verbatim from the survey's verdict (withe-related-work.md:611-617):
+- The safe headline sentence, verbatim from the survey's verdict (osier-related-work.md:611-617):
   "No published type system refines a row variable by a branch-local GADT equation, and no
   published system therefore says which record operations remain typable when such an equation is
   active…" — with the qualifier that the claim is about *published systems with a designed
   discipline*, never worded as "rows and GADTs have never been combined".
 
-Artifact: withe-related-work.md (quotes verbatim, URLs in the survey; the survey is the
+Artifact: osier-related-work.md (quotes verbatim, URLs in the survey; the survey is the
 bibliography's source). Do **not** cite Chen & Erwig POPL'16 (unretrieved — survey §5.2).
 
 ### §8 Limitations and future work (1 pp)
@@ -527,7 +527,7 @@ hidden.
 
 Legend: FIX = gate-registered fixture (`tests/elm-fixtures/rowgadt_*.elm`, registrations at
 `run-elm-gate.sh:309-450` ✎); LEAN = theorem in `lean/`; CODE = `elm-compiler/src` seat; DOC =
-companion doc with verified pointers; SURVEY = withe-related-work.md. "Thin" = evidence exists but
+companion doc with verified pointers; SURVEY = osier-related-work.md. "Thin" = evidence exists but
 is volatile (`/tmp`) or reported-not-re-measured — each Thin row names its gap item.
 
 | # | Claim (as the paper will word it) | Evidence | Status |
@@ -547,8 +547,8 @@ is volatile (`/tmp`) or reported-not-re-measured — each Thin row names its gap
 | C13 | H1: first-occurrence search commutes with scoped-label substitution, including under duplicate labels; the "for every label" form holds only in the rigid-tail regime (spec corrected by proof) | LEAN `h1_find_commutes`/`h1_duplicate_shadow`/`h1_no_shadow`/`h1_head_only_vs_full`/`h1_discharge_head_agrees` (RowGadt.lean:151-218 ✎) | [M] |
 | C14 | Store truncation is exact and nesting-safe by construction | LEAN `h2a_truncation`/`h2a_no_survival`/`h2a_snapshot_is_suffix`/`h2a_inner_snapshot_suffix` (RowGadt.lean:246-268 ✎); CODE `dropEqsFrom` (Unify.elm:101 ✎) | [M] |
 | C15 | Update is well-typed at the abstract row with no discharge; insertion is domain-changing and rejected under refinement | LEAN `update_reflexive_domain`/`update_accepted_at_rho`/`insertion_rejected_under_refinement`/`insertion_shadow_domain_unchanged` (Update.lean:167-258 ✎); FIX `rowgadt_setx`; CODE Infer.elm:975 ✎ | [M] |
-| C16 | The pre-existing corpus compiles byte-identically; the gate passes 152/152 | Gate re-run ✎ 2026-10-05 (**PASS=152 FAIL=0**); byte-identity against the COMMITTED manifest `tools/withe-corpus-baseline.sha256` (149 artifacts) via `tools/withe-numbers.sh` | [M] — **G2 DONE**: the baseline and the chain are in-repo |
-| C17 | ~~29 of the effect interpreter's branches check honestly~~ ~~25 of 30 (pre-split)~~ **CORRECTED: 16 of 20** — the original 29-of-30 figure was FAIL-FAST (removing `runTask` from `trustedBodies` reports one error and stops); the 25-of-30 figure predates withe-split Phase 3, when the UI effects left the `Task` type, so the interpreter now has **20** constructors and **four** branches fail: `TaskExec` (existential cast `a ~ List a`), `TaskNow` (`Ok 0` number literal hits FlexConflict before the rigid-var discharge fires), `TaskQuit` (**un-annotated nullary ctor deliberately left generalized — design, not defect**; the `taskCtorResults` docstring that recorded it is deleted from the tree, 0 references), `TaskStat` (closed-record result; `dischargeType` refuses any `TRecord` body — the Tier-R over-approximation costing a legitimate type equation). `TaskGuiPoll`, the pre-split fifth failure, left the `Task` type with the UI | CODE Runtime.elm:24-44 ✎ (annotation), Builtins.elm:365-391 ✎ (comment); **G5 DONE — recounted by bisection** (`tools/withe-recount-runTask.sh`, under the `type x a.` binder) | **[M] corrected** |
+| C16 | The pre-existing corpus compiles byte-identically; the gate passes 152/152 | Gate re-run ✎ 2026-10-05 (**PASS=152 FAIL=0**); byte-identity against the COMMITTED manifest `tools/osier-corpus-baseline.sha256` (149 artifacts) via `tools/osier-numbers.sh` | [M] — **G2 DONE**: the baseline and the chain are in-repo |
+| C17 | ~~29 of the effect interpreter's branches check honestly~~ ~~25 of 30 (pre-split)~~ **CORRECTED: 16 of 20** — the original 29-of-30 figure was FAIL-FAST (removing `runTask` from `trustedBodies` reports one error and stops); the 25-of-30 figure predates osier split Phase 3, when the UI effects left the `Task` type, so the interpreter now has **20** constructors and **four** branches fail: `TaskExec` (existential cast `a ~ List a`), `TaskNow` (`Ok 0` number literal hits FlexConflict before the rigid-var discharge fires), `TaskQuit` (**un-annotated nullary ctor deliberately left generalized — design, not defect**; the `taskCtorResults` docstring that recorded it is deleted from the tree, 0 references), `TaskStat` (closed-record result; `dischargeType` refuses any `TRecord` body — the Tier-R over-approximation costing a legitimate type equation). `TaskGuiPoll`, the pre-split fifth failure, left the `Task` type with the UI | CODE Runtime.elm:24-44 ✎ (annotation), Builtins.elm:365-391 ✎ (comment); **G5 DONE — recounted by bisection** (`tools/osier-recount-runTask.sh`, under the `type x a.` binder) | **[M] corrected** |
 | C18 | The trusted-body residue decomposes by kind of lie; only refinement-blocked and dynamically-typed lies are type-system-addressable | The typed-VM experiment (probeA/probeA2/probeA_neg + the `compare` retirement error) — **all in /tmp, zero repo edits** | **Thin** → **G3** (re-home probes) or cut to the runTask instance |
 | C19 | The principality boundary sits on the native-row side, not the witness side; the encoding moves it | FIX `rowgadt_l3i` (clean) / `l3ii` (err) / `l3iii` (clean) / `rowgadt_hget` (clean); the plain-signature `hget` rejection is a `/tmp` probe (`hlist2.elm`) | [M] for the fixtures; the hlist2 data point → **G3** |
 | C20 | No general soundness theorem exists: T1/T2 argued, not proved; the mechanization targets the row algebra, not the typing judgment | Honest absence; LEAN header states the scope (RowGadt.lean:1-27 ✎) | [M-by-absence] |
@@ -673,7 +673,7 @@ OPTIONAL (cut in the order listed if over budget):
   `/tmp/rowgadt-base` (volatile) by the orchestrator at every step; the paper needs one clean
   re-measurement on the paper-frozen commit with the numbers written into the artifact appendix.
   **G2.**
-- ~~**An independent re-count of the interpreter branches.**~~ **G5 DONE** — `tools/withe-recount-runTask.sh`
+- ~~**An independent re-count of the interpreter branches.**~~ **G5 DONE** — `tools/osier-recount-runTask.sh`
   re-counts by bisection under the `type x a.` binder and reproduces 16 of 20 (four branches
   fail: `TaskExec`, `TaskNow`, `TaskQuit`, `TaskStat`), re-run ✎ 2026-10-07 on `af271da`. A
   referee can check this one line against the artifact.
@@ -682,7 +682,7 @@ OPTIONAL (cut in the order listed if over budget):
   as fixtures/examples. **G3.**
 - **A second real program.** Everything beyond this one program is either a designed fixture or the
   compiler's own internals. The discuss.ocaml.org FSM/reducer pattern is the motivating
-  application practitioners already report — encoding it in Withe (it checks: strong §1 datum;
+  application practitioners already report — encoding it in Osier (it checks: strong §1 datum;
   it fails: the failure is a datum about which operation it needs) is the single best use of a
   spare week. **G4.**
 - **A missing negative result**: there is no adversarial battery against the *domain-based* rule
@@ -696,7 +696,7 @@ OPTIONAL (cut in the order listed if over budget):
 
 1. **G4** the FSM example (external motivating datum; answers objection O3 with a program).
 2. ~~**G2+G5** the durable re-measurement script + the interpreter-branch recount~~ **both done**:
-   `tools/withe-numbers.sh` + `tools/withe-recount-runTask.sh` make every number in the paper
+   `tools/osier-numbers.sh` + `tools/osier-recount-runTask.sh` make every number in the paper
    reproducible from the artifact.
 3. **G3** re-home `probeA*`, `hlist2`, `gNeg_letcase`, the dup battery.
 4. **G13** the fresh adversarial battery against the domain rule.
@@ -774,8 +774,8 @@ Referee attacks, strongest first, each with the pre-empted answer:
 | G1 | Verify the ICFP 2027 CfP when it posts: page limit (assume 25pp ACM Small from 2026), deadline (25 Feb 2027), double-blind policy, artifact track dates | Calibrates the budget; the 2027 numbers are not yet posted | 1 h (web check at write time) | check |
 | G2 | Durable re-measurement: freeze the corpus baseline *inside the repo* (or tag it), write one script that runs gate + batch + corpus diff + `lake build` and prints every number the paper cites; run on the paper-frozen commit; record outputs in the artifact appendix | C16 is currently measured against a volatile `/tmp` baseline; referees (and artifact evaluation) must be able to reproduce | 0.5–1 day | tooling + measure |
 | G3 | Re-home the volatile probes whose claims the paper uses: `probeA/probeA2/probeA_neg` (C18, the typed-representation experiment), `hlist2` (C19, plain-signature rejection), `gNeg_letcase` (C24, retry completeness), the dup battery `e1–e7` (C12) — as registered fixtures or an `examples/` dir. **Do not add framing comments to existing fixtures** (the `l3ii` lesson: a comment shifted the error line and broke byte-identity) | C12/C18/C19/C24 currently rest partly on `/tmp` | 1 day | fixtures |
-| G4 | Build the FSM/reducer example (discuss.ocaml.org t/13718 pattern) in Withe, probe-first in `/tmp`, then register as an example: row-typed state + a witness GADT for the transition relation | The strongest answer to O3; the missing external program | 1–2 days | example |
-| G5 | ~~Independently re-count the interpreter branches on the committed tree~~ **DONE**: `tools/withe-recount-runTask.sh` re-counts by bisection under the `type x a.` binder — **16 of 20** check honestly; four fail: `TaskExec` (existential cast), `TaskNow` (number-literal FlexConflict), `TaskQuit` (deliberate generalization), `TaskStat` (closed-record discharge) | C17 re-measured ✎ 2026-10-07 on `af271da`: VERDICT count reproduced (16/20) | done | measure |
+| G4 | Build the FSM/reducer example (discuss.ocaml.org t/13718 pattern) in Osier, probe-first in `/tmp`, then register as an example: row-typed state + a witness GADT for the transition relation | The strongest answer to O3; the missing external program | 1–2 days | example |
+| G5 | ~~Independently re-count the interpreter branches on the committed tree~~ **DONE**: `tools/osier-recount-runTask.sh` re-counts by bisection under the `type x a.` binder — **16 of 20** check honestly; four fail: `TaskExec` (existential cast), `TaskNow` (number-literal FlexConflict), `TaskQuit` (deliberate generalization), `TaskStat` (closed-record discharge) | C17 re-measured ✎ 2026-10-07 on `af271da`: VERDICT count reproduced (16/20) | done | measure |
 | G6 | Update the stale metatheory wording in the two docs so the drafting units cannot inherit it: calculus §5.3 (H1 now mechanized incl. duplicates; probes exist), §5.4/§8.2 (H2 is the domain rule; both counterexamples mechanized; `escapeViaTail` superseded by `dropIntroduced`/`rebuildMatches`), row-gadt.md §7.3 (the same). **Doc edits only; no code; no fixture edits** | The paper's metatheory must be written from the current state | 0.5–1 day | docs |
 | G7 | Try once more to retrieve Chen & Erwig POPL'16 (choice types) via a non-ACM route; cite only if read, else leave uncited (survey §5.2) | An unread citation is a liability | 1 h | lit |
 | G8 | Check whether OCaml's 2012 objects/poly-variants+GADT restriction is still current (manual/issue tracker); if unverifiable, keep "restricted in its first implementation" (the defensible wording, survey §5.4) | One sentence in §1/§7 depends on it | 2–4 h | lit |
@@ -809,7 +809,7 @@ From row-gadt.md §9 (:469-520):
 - Any claim that our rows have **distinct labels** (scoped duplicates are legal and are H1's source;
   CORELINKS's are distinct — the contrast is the reverse).
 
-From withe-related-work.md §6 (:627-667):
+From osier-related-work.md §6 (:627-667):
 
 - "**Insertion is untypable in row systems**" / R-UPD-INS as a discovery (Rémy types it
   unconditionally) — the trade framing only.
@@ -831,13 +831,13 @@ corrected-in-memory "infinite type via shared-tail side condition" parenthetical
 
 | Paper § | Primary source | Secondary |
 |---|---|---|
-| §1 | row-gadt.md §1-§3; withe-related-work.md §3, quote bank | fixtures (select/setx/het); Runtime.elm |
+| §1 | row-gadt.md §1-§3; osier-related-work.md §3, quote bank | fixtures (select/setx/het); Runtime.elm |
 | §2 | row-gadt-calculus.md §1-§2 | meta node's rule seats (✎-meta) |
 | §3 | row-gadt-calculus.md §2.4-2.7, §6, §7 | lean/Update.lean; SURVEY §2 (Rémy) |
 | §4 | lean/*.lean (theorem statements); row-gadt-calculus.md §4-§5 (status paragraphs REWRITTEN per §0) | meta node B |
 | §5 | fixtures l3i/l3ii/l3iii/hget; row-gadt.md §5, §7.4 | meta node principality |
 | §6 | row-gadt.md §6; calculus §8; memory (hunt, domain fix) | gate + corpus scripts |
-| §7 | withe-related-work.md (whole) | quote bank URLs → bibliography |
+| §7 | osier-related-work.md (whole) | quote bank URLs → bibliography |
 | §8 | this plan's §6 | calculus §8.4-8.7 |
 
 ## Appendix C: verification protocol for the drafting units

@@ -31,7 +31,7 @@ collector runs constantly — the behavioural proof that the pooled-frame roots
 actually root.  Fixtures: fib 10/20, countdown 100000, applytwice, closure,
 const42, idn, ifx, churn 150000 (13MB live, constant scavenges), churn
 500000, mutualtail 20000.  The MIDTIER=0 byte-identity anchor still holds
-(fib.csexp sha256 == `tools/withe-corpus-baseline.sha256`).
+(fib.csexp sha256 == `tools/osier-corpus-baseline.sha256`).
 
 ## Coverage (and the loud failures)
 

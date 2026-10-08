@@ -1,4 +1,4 @@
-# Withe / λρG — re-homed research probes
+# Osier / λρG — re-homed research probes
 
 These are the probes the paper cites that previously lived only in `/tmp`
 (handoff `rowgadt`, gap G3). Each file is a small, self-contained program
@@ -19,8 +19,8 @@ node elm-compiler/run.js examples/research/<probe>.elm /tmp/out.csexp
 cat /tmp/out.csexp      # a bundle = compiles clean; "err <msg>" = rejected
 ```
 
-Results below were re-measured on the artifact tagged `withe-paper-artifact-1`
-in this repository (the withe tree, after the language left fx-ui). Expected
+Results below were re-measured on the artifact tagged `osier-paper-artifact-1`
+in this repository (the osier tree, after the language left fx-ui). Expected
 results are the CURRENT checker output; where a probe's
 error string or location has drifted from an earlier `/tmp` snapshot, that is
 called out (the rejection itself is unchanged).
@@ -28,7 +28,7 @@ called out (the rejection itself is unchanged).
 ## The external FSM example (gap G4)
 
 `fsm/door.elm` is the one program in this directory written by someone else and
-translated into Withe: the state machine from the discuss.ocaml.org thread
+translated into Osier: the state machine from the discuss.ocaml.org thread
 [t/13718](https://discuss.ocaml.org/t/unable-to-refute-impossible-gadt-pattern-with-polymorphic-variants/13718)
 ("Unable to refute impossible GADT pattern with polymorphic variants"). There,
 a practitioner models an FSM as a GADT-witnessed transition relation over
@@ -48,7 +48,7 @@ and its `main` prints `"open:42"`.
 to rows, where the per-state field *reads* use branch-local row refinement** —
 not "the FSM expressed directly" (the transition GADT is row-inert, below).
 The two things the earlier review scoped *out* — the nested-chain match and
-the impossible-arm refutation — are now answered in Withe (see below).
+the impossible-arm refutation — are now answered in Osier (see below).
 
 - **The transition GADT is row-inert.** `Event`'s indices `from`/`to` are
   `KType`; the narrowing `readFrom` performs refines the *record argument's*
@@ -60,7 +60,7 @@ the impossible-arm refutation — are now answered in Withe (see below).
 - **The source's own match shape now typechecks — the nested-pattern fix.** The
   OCaml wall is pattern-matching over the *chain*, with nested patterns like
   `Then (Then (Then Start Unlock) Open) Close` binding per-arm event
-  witnesses. Withe used to reject any pattern with an `Event` constructor
+  witnesses. Osier used to reject any pattern with an `Event` constructor
   nested inside another constructor pattern (`type variable a is rigid ...
   cannot be unified with {}`): sub-pattern types were unified in *global* mode
   (`unifyM` inside `peelCtor`), and only the top-level pattern-vs-scrutinee
@@ -83,13 +83,13 @@ err type error at 25:5: missing field closed
 ```
 
 OCaml rejects this illegal construction too (it is the source's own first
-error, "These two variant types have no intersection"); Withe rejects the same
-thing with a row-typed message. That direction is **not** a Withe-vs-OCaml
+error, "These two variant types have no intersection"); Osier rejects the same
+thing with a row-typed message. That direction is **not** an Osier-vs-OCaml
 difference.
 
 *The refutation wall — answered (the thread's headline question).* The source's
 actual wall is **refutation**: the compiler "refuses to refute such impossible
-cases", i.e. it will not type the `-> .` arm. Withe now does both halves of
+cases", i.e. it will not type the `-> .` arm. Osier now does both halves of
 that capability, and each is pinned in the gate:
 
 - **Exhaustiveness.** A `case` that omits a *possible* arm now errors at
@@ -105,8 +105,8 @@ that capability, and each is pinned in the gate:
 
 That is exactly the `-> .` mechanism the thread's author could not get working
 in OCaml, so on the source's own headline question the comparison is now
-**inverted**: Withe refutes the impossible arm that OCaml-with-the-workaround
-could not be made to refute. The earlier scoping ("Withe has no exhaustiveness
+**inverted**: Osier refutes the impossible arm that OCaml-with-the-workaround
+could not be made to refute. The earlier scoping ("Osier has no exhaustiveness
 checking; OCaml is strictly stronger") is superseded — the refutation wall is
 answered, and the narrowing claim above is scoped to *field reads* only because
 the transition GADT is row-inert, not because refutation is missing.
@@ -127,7 +127,7 @@ inside branch refinement or at an abstract row. It is kept as the crux shape
 `readFrom` reduces to, not as a working reducer. (3) The argument order
 matters as a *kinding + global-mode* artifact of argument-unification order:
 `readFrom` (record *first*) compiles; the symmetric `readTo` (event first) is
-rejected at its call site. This is an inference-order artifact of Withe's
+rejected at its call site. This is an inference-order artifact of Osier's
 implementation, not gasche's left-to-right typing-rule bias, so it is not
 cited to gasche. (4) The `type` binder is used throughout but is only
 *strictly* required where the refinement conflict is forced — the recursive

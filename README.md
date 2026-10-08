@@ -1,6 +1,6 @@
-# withe
+# osier
 
-The Withe language — compiler, ZINC VM, Lean mechanization, and the language's
+The Osier language — compiler, ZINC VM, Lean mechanization, and the language's
 evidence chain — as its own repository. The terminal/GUI toolkit that consumes
 it lives in the separate [`fx-ui`](https://github.com/fixpoint-linux/fx-ui) repo.
 
@@ -19,7 +19,7 @@ Contents:
 - `lean/` — the Lean 4 mechanization.
 - `tests/elm-fixtures/` — the language fixtures + `run-elm-gate.sh` gate
   (`MATRIX.md` lists every registered check, generated from the gate).
-- `tools/` — the evidence chain (`withe-numbers.sh`, the corpus baseline, the
+- `tools/` — the evidence chain (`osier-numbers.sh`, the corpus baseline, the
   runTask recount) and the AOT tooling (`elmvm.zig`, `vmbench.zig`, `aot/`).
 - `docs/` — the paper and research notes.
 
@@ -35,7 +35,7 @@ zig build aot      # the AOT spike exes
 ## Evidence chain
 
 ```sh
-tools/withe-numbers.sh
+tools/osier-numbers.sh
 ```
 
 This runs, from a clean checkout, the whole reproducible measurement chain the

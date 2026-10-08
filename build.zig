@@ -1,6 +1,6 @@
 const std = @import("std");
 
-// withe — the language repo (compiler + ZINC VM + Lean mechanization + the
+// osier — the language repo (compiler + ZINC VM + Lean mechanization + the
 // language's evidence chain).  This build.zig builds the LANGUAGE targets
 // only: elmvm (the gate harness), vmbench, aotdump, the AOT spike exes, and the
 // gc/vm test gates driven by the vendor/zinc-vm path dependency.  The UI
@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
         .small => .ReleaseSmall,
     };
 
-    // ---- zinc-vm package dependency (path dep, owned by withe) ----
+    // ---- zinc-vm package dependency (path dep, owned by osier) ----
     // The collector and the ZINC VM are the vendor/zinc-vm package (the single
     // shared executor); the package exports both modules by name ("gc", "vm"),
     // so consumers keep their `@import("gc")` / `@import("vm")` calls unchanged.

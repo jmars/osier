@@ -6,7 +6,7 @@ module LiftCapConfl exposing (main)
 -- substrate's sequential `let` it is not yet bound) and the SIBLING `t = 700`
 -- at `b`'s position (declared before `b`, so it shadows the parameter).
 -- Sequential truth: b 1 -> a 0 -> a's t = the PARAM 50 -> 50 + 1 = 51.
--- The non-recursive control (same file family, tools/withe-numbers + the
+-- The non-recursive control (same file family, tools/osier-numbers + the
 -- review's /tmp/lr3/src/c3.elm) proves the substrate's reading: a=51, b=52,
 -- c=703 -> 806.
 -- HEAD arm (pre-lift compiler, /tmp/headcomp): REJECTED --

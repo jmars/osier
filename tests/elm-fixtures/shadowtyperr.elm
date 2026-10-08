@@ -5,7 +5,7 @@ module Shadowtyperr exposing (main)
 -- ADT `type Array = ..` behaves identically).  A bare exposing row hides the
 -- local type exactly like it hides a same-named function — real Elm rejects
 -- the clash; the compiler must fail LOUDLY before typechecking/lowering.
--- (Re-pointed from Spinner.Model to Array.Array in withe-split Phase 3:
+-- (Re-pointed from Spinner.Model to Array.Array in osier split Phase 3:
 -- Spinner is a parked UI lib.)
 
 import Array exposing (Array)

@@ -127,7 +127,7 @@ withOpenTypeModules mods ctx =
 -- The explicit threading the plan's addendum calls for: a generator is a
 -- function from the next free binder id to a result plus the next free id.
 -- Nothing clever — a state monad written out by hand, so it ports to a
--- module/functor argument when Withe grows rank-2 first-class modules.
+-- module/functor argument when Osier grows rank-2 first-class modules.
 
 
 type alias Gen a =

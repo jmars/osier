@@ -70,7 +70,7 @@ ELM_GATE_MATRIX=/tmp/matrix.tsv tests/elm-fixtures/run-elm-gate.sh
 \`\`\`
 
 **${n_checks} registered checks.** Run from the repo root, the gate prints
-\`PASS=${n_checks} FAIL=0\` on the frozen artifact. \`docs/research/withe-paper.md\`
+\`PASS=${n_checks} FAIL=0\` on the frozen artifact. \`docs/research/osier-paper.md\`
 **Appendix A** is the paper's prose counterpart: the *designed* programs the
 paper cites, with the claim each one pins. Appendix A is a selected subset;
 this file is the complete registry. Where the two disagree, **this file and the

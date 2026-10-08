@@ -32,7 +32,7 @@ const path = require('path');
 // spans source-directories: a local src/Dict.elm collides with elm/core's
 // Dict for every compiler module that imports it, breaking
 // `elm make src/Main.elm`).  The UI-flavoured libs (Tea, Key, Draw, ...) were
-// parked in fx-ui in withe-split Phase 3 and are no longer part of the corpus.
+// parked in fx-ui in osier split Phase 3 and are no longer part of the corpus.
 const CORPUS = [
   fs.readFileSync(path.join(__dirname, 'src', 'Prelude.elm'), 'utf8'),
   fs.readFileSync(path.join(__dirname, 'src', 'Runtime.elm'), 'utf8'),

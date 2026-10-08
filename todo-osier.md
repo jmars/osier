@@ -1,12 +1,12 @@
-# Withe — research TODO
+# Osier — research TODO
 
-The research project's live tracker. This is the *Withe* workstream (rows × GADTs × locally
+The research project's live tracker. This is the *Osier* workstream (rows × GADTs × locally
 abstract types); the compiler's own deferred-work list is the separate `todo.md` and is not
 duplicated here.
 
 **Authoritative sources, in order:** `docs/research/paper-plan.md` §10 (the ordered gap list —
 G-numbers below are its) · `docs/research/row-gadt.md` (paper seed, incl. §9 do-not-publish) ·
-`docs/research/row-gadt-calculus.md` (λρG) · `docs/research/withe-related-work.md` (survey) ·
+`docs/research/row-gadt-calculus.md` (λρG) · `docs/research/osier-related-work.md` (survey) ·
 `lean/` (the mechanization) · the memory chain `handoff-rowgadt-{ctx,lit,lit2,lit3,plan,meta,
 impl-result,result,paper-plan}`.
 
@@ -16,9 +16,9 @@ impl-result,result,paper-plan}`.
 
 | | |
 |---|---|
-| commit | `0207dd2` "type: branch-local row refinement for extensible records × GADTs (Withe / λρG)", 51 files, +6416/−287 |
+| commit | `0207dd2` "type: branch-local row refinement for extensible records × GADTs (Withe / λρG)", 51 files, +6416/−287 — subject quoted verbatim from fx-ui, where the language was still named Withe |
 | gate | `tests/elm-fixtures/run-elm-gate.sh` → **PASS=151 FAIL=0** (re-run on the committed state) |
-| corpus | 149 artifacts; **byte-identical** against the committed manifest `tools/withe-corpus-baseline.sha256`, checkable via `tools/withe-numbers.sh` |
+| corpus | 149 artifacts; **byte-identical** against the committed manifest `tools/osier-corpus-baseline.sha256`, checkable via `tools/osier-numbers.sh` |
 | tests | TestMain **114/114** |
 | Lean | `lean/` is a **Lake project** (build with `lake build` from `lean/`); **43 unique theorems, zero `sorry`** |
 | tree | dirty only with: `tools/selfhost-audit.txt` (timestamp churn), `elmc.err` (stray), `.elm-cache/0.19.1/` (foreign-version cache) |
@@ -27,7 +27,7 @@ impl-result,result,paper-plan}`.
 proved, and the Lean development mechanizes the **row algebra, not the typing judgment**.
 Fallbacks: OOPSLA 2027 R2, then ML Family / Haskell Symposium.
 
-**Language/calculus naming:** the language is **Withe**; its core calculus is **λρG**.
+**Language/calculus naming:** the language is **Osier**; its core calculus is **λρG**.
 
 ---
 
@@ -44,8 +44,8 @@ Fallbacks: OOPSLA 2027 R2, then ML Family / Haskell Symposium.
 
 ## 1. Evidence hygiene — three load-bearing numbers live only in `/tmp`
 
-- [x] **G2 — durable re-measurement** — **DONE** (`tools/withe-numbers.sh` +
-      `tools/withe-corpus-baseline.sha256`, 139 sha256 sums). The script runs, from a clean
+- [x] **G2 — durable re-measurement** — **DONE** (`tools/osier-numbers.sh` +
+      `tools/osier-corpus-baseline.sha256`, 139 sha256 sums). The script runs, from a clean
       checkout, gate + corpus batch (byte-identity vs the committed manifest) + TestMain +
       `lake build` (theorem count + axiom list) and PRINTS every number. Run on `0e5a564`:
       gate PASS=151 FAIL=0 · corpus BYTE-IDENTICAL (149=149) · TestMain 114/114 ·
@@ -73,7 +73,7 @@ Fallbacks: OOPSLA 2027 R2, then ML Family / Haskell Symposium.
       `hlist2` now `cannot unify a with {l:a| b}` (was `{l:a|b} with {k:a|b}`); `gNeg_letcase`
       now at 19:21 (was 18:17). No existing fixture was touched.
 - [ ] **G4 — build the external program** (the discuss.ocaml.org t/13718 FSM/reducer pattern) in
-      Withe: row-typed state + a witness GADT for the transition relation. Probe-first in `/tmp`,
+      Osier: row-typed state + a witness GADT for the transition relation. Probe-first in `/tmp`,
       then register as an example. This is the **strongest answer to referee objection O3 ("narrow
       program class, self-referential evidence")** — all current evidence is self-referential.
       *Cost: 1–2 days.*

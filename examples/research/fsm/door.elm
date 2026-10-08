@@ -3,10 +3,10 @@ module Door exposing (..)
 -- A door state machine with a ROW-TYPED state and a GADT witness for the
 -- transition relation. This is the program from the discuss.ocaml.org thread
 -- t/13718 ("Unable to refute impossible GADT pattern with polymorphic
--- variants"), expressed in Withe: octachron's recommendation there is to
+-- variants"), expressed in Osier: octachron's recommendation there is to
 -- encode the states as type-level RECORDS (object types, one row variable per
 -- field) because OCaml's GADT equations "cannot narrow a polymorphic variant
--- constraint". In Withe the states ARE rows, so that encoding is native.
+-- constraint". In Osier the states ARE rows, so that encoding is native.
 --
 -- SCOPE (do not overclaim). This is a translation of the source's
 -- DECLARATIONS, its legal-cycle CONSTRUCTION, and its CHAIN match (the
@@ -25,7 +25,7 @@ module Door exposing (..)
 -- use branch-local row refinement", not "the FSM expressed directly".
 --
 -- The source's headline WALL -- refuting an impossible arm (OCaml's `-> .`) --
--- is now ANSWERED in Withe: `describeBroken` below leaves out the six
+-- is now ANSWERED in Osier: `describeBroken` below leaves out the six
 -- impossible arms at the concrete end-state `Step { broken : String }` and
 -- matches only the one possible arm; the checker refutes the rest under the
 -- branch equations. (Pinned generally by the gate fixtures `refutpos` /

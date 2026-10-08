@@ -1,4 +1,4 @@
-# Withe — artifact evaluation note
+# Osier — artifact evaluation note
 
 This note is the referee's entry point. It says what the artifact is, which tag the paper's
 numbers are frozen at, the one command that reproduces them, what that command must print, what
@@ -9,9 +9,9 @@ research notes — is CC-BY-4.0. See `LICENSE` and `LICENSE-CC-BY-4.0` at the re
 
 ## 1. What this is
 
-Withe is a small statically-typed functional language, its compiler and its host runtime, plus
+Osier is a small statically-typed functional language, its compiler and its host runtime, plus
 the machine-checked metatheory behind the row-refinement discipline the paper
-(`docs/research/withe-paper.md`) describes and measures. Concretely:
+(`docs/research/osier-paper.md`) describes and measures. Concretely:
 
 - **`elm-compiler/`** — the compiler and its corpus. Frontend (lexer/parser, arrow-spelling GADT
   constructors), the type checker (`src/Type/`: unification with a row rewrite, branch-local row
@@ -25,21 +25,32 @@ the machine-checked metatheory behind the row-refinement discipline the paper
   **not** handled here — see §6.
 - **`lean/`** — the Lean 4 mechanization of the calculus's metatheory (§4).
 - **`tests/elm-fixtures/`** — the fixture gate: 152 registered checks (`MATRIX.md`, §5).
-- **`tools/`** — the evidence chain: `withe-numbers.sh` (the one command), the committed corpus
-  byte-identity manifest `withe-corpus-baseline.sha256`, the runTask branch recount, the
+- **`tools/`** — the evidence chain: `osier-numbers.sh` (the one command), the committed corpus
+  byte-identity manifest `osier-corpus-baseline.sha256`, the runTask branch recount, the
   fixture-matrix generator.
 - **`docs/research/`** — the paper and its related-work survey.
 
 Nothing in this note is a new claim about the work: every figure below is printed by
-`tools/withe-numbers.sh`, whose output the paper cites as the source of its numbers.
+`tools/osier-numbers.sh`, whose output the paper cites as the source of its numbers.
 
 ## 2. The one command
 
 ```sh
-git clone <this repository's URL> withe
-cd withe
-git checkout withe-paper-artifact-1     # the tag the paper's numbers are frozen at
-tools/withe-numbers.sh
+git clone <this repository's URL> osier
+cd osier
+tools/osier-numbers.sh
+```
+
+The numbers below are frozen at the annotated tag `osier-paper-artifact-1` — **the same commit**
+(`de57bad`) the pre-rename tag `withe-paper-artifact-1` points at, which is kept and not moved
+(an already-published deposit references it). Both tags therefore predate the rename: in the tag's
+tree the language is still called *Withe*, the command above is spelled `tools/withe-numbers.sh`
+and the paper is `docs/research/withe-paper.md`. Nothing else differs — no fixture, expected output
+or measured number moved — which is why the figures below are the same at the tag and at the
+branch tip. To reproduce the freeze exactly:
+
+```sh
+git checkout osier-paper-artifact-1 && tools/withe-numbers.sh
 ```
 
 Run it from the repository root (the script `cd`s there itself). It performs, in order:
@@ -50,16 +61,18 @@ Run it from the repository root (the script `cd`s there itself). It performs, in
    the wrong bytes;
 3. runs the fixture gate (`tests/elm-fixtures/run-elm-gate.sh`) — PASS/FAIL counts;
 4. compiles the corpus once as a batch and sha256-compares **every** artifact against
-   `tools/withe-corpus-baseline.sha256` (byte-identity);
+   `tools/osier-corpus-baseline.sha256` (byte-identity);
 5. runs the compiler's unit suite `TestMain`;
 6. runs `lake build` in `lean/` and counts theorems / axioms / `sorry`;
-7. re-derives the runTask branch recount (`tools/withe-recount-runTask.sh`).
+7. re-derives the runTask branch recount (`tools/osier-recount-runTask.sh`).
 
 ### What a good run prints
 
 Exactly this (verbatim from a clean clone at the tag, cold — no `zig-out/`, no `compiler.js`,
 no `lean/.lake`; the only machine-dependent lines are the `@ <commit>` header and the absolute
-paths on the `lean axioms:` lines):
+paths on the `lean axioms:` lines. It was taken before the rename, so the two `@ <commit>`
+headers and the `/tmp/withe-clean` clone path still carry the pre-rename names; the tip's run
+differs only in those):
 
 ```
 withe-numbers @ de57bad
@@ -188,7 +201,7 @@ FAIL: the elm 0.19.2 binary was not found.
       elm 0.19.2 is NOT on PATH in the paper's build host, so ELM_BIN must be
       set to your elm binary, e.g.
 
-          ELM_BIN="$(npm root -g)/elm/bin/elm" tools/withe-numbers.sh
+          ELM_BIN="$(npm root -g)/elm/bin/elm" tools/osier-numbers.sh
 
       (the default is $HOME/.npm-global/lib/node_modules/elm/bin/elm)
 ```
@@ -280,27 +293,31 @@ oracle.
 
 ## 7. Provenance
 
-- **The tag the numbers are frozen at: `withe-paper-artifact-1`** — the annotated tag the paper's
+- **The tag the numbers are frozen at: `osier-paper-artifact-1`** — the annotated tag the paper's
   §6 provenance line names, and the commit it was made on (`de57bad`) is therefore fixed even as
-  later commits move the branch tip. Its message records the expected figures.
-- **This note's tag: `withe-artifact-eval-1`** — the same tree plus this note, the
+  later commits move the branch tip. Its message records the expected figures. It is the
+  re-minted (renamed) alias of `withe-paper-artifact-1`: **the same commit**, not a new freeze.
+- **This note's tag: `osier-artifact-eval-1`** — the same tree plus this note, the
   fixture matrix, the matrix generator and the prerequisite messages. Only docs and tooling
   differ; you can check that yourself:
 
   ```sh
-  git diff --stat withe-paper-artifact-1 withe-artifact-eval-1
+  git diff --stat osier-paper-artifact-1 osier-artifact-eval-1
   ```
 
   The changes are `README.md`, this file, `tests/elm-fixtures/MATRIX.md` (new),
   `tools/gen-fixture-matrix.sh` (new), and the preflight/dump additions to
   `tests/elm-fixtures/run-elm-gate.sh`, `tools/withe-numbers.sh` and
-  `tools/withe-recount-runTask.sh`. **No fixture, expected output or measured number changed:**
-  the gate's output is byte-identical between the two tags (156 lines, `PASS=152 FAIL=0`), and
-  `tools/gen-fixture-matrix.sh --check` confirms the registered checks and their expected values
-  are unchanged. On `withe-paper-artifact-1` itself, run the command from §2 without checking out
-  anything else: it prints the same numbers.
+  `tools/withe-recount-runTask.sh` (both tags predate the rename, so the diff renders those
+  scripts under their pre-rename names — the same files the tip calls `tools/osier-numbers.sh`
+  and `tools/osier-recount-runTask.sh`). **No fixture, expected output or measured number
+  changed:** the gate's output is byte-identical between the two tags (156 lines,
+  `PASS=152 FAIL=0`), and `tools/gen-fixture-matrix.sh --check` confirms the registered checks
+  and their expected values are unchanged. On `osier-paper-artifact-1` itself, run the command
+  from §2 without checking out anything else — in that tree it is spelled
+  `tools/withe-numbers.sh` — and it prints the same numbers.
 - **Split out of `fx-ui`.** This repository was created by importing the language tree from the
-  fx-ui toolkit repository; the source commit is recorded in withe's first commit message
+  fx-ui toolkit repository; the source commit is recorded in osier's first commit message
   (`Split from fx-ui at c022efa…`, with the intervening fx-ui commits listed in the paper's
   provenance paragraph).
 
@@ -308,7 +325,7 @@ oracle.
 
 Per the ACM Policy on Authorship, AI assistance that *conducts the research* — implementing,
 testing, validating, and archiving the artifacts the conclusions rest on — must be described
-in detail; the paper states the same facts as §6.7 of `docs/research/withe-paper.md`.
+in detail; the paper states the same facts as §6.7 of `docs/research/osier-paper.md`.
 
 - **What was AI-assisted.** The project's own code was written by AI coding agents (several
   underlying models, dispatched per work unit), working from the author's briefs and reviewed
@@ -316,8 +333,8 @@ in detail; the paper states the same facts as §6.7 of `docs/research/withe-pape
   effect loop (`src/effectloop.zig`), the branch-local refinement extension
   (`elm-compiler/src/Type/`), the frontend lambda-lifting pass
   (`elm-compiler/src/Frontend/Lift.elm`), the Lean mechanization (`lean/`), the verification
-  harness (`tools/withe-numbers.sh`, `tests/elm-fixtures/run-elm-gate.sh`,
-  `tools/withe-corpus-baseline.sha256`, `tools/withe-recount-runTask.sh`), the adversarial
+  harness (`tools/osier-numbers.sh`, `tests/elm-fixtures/run-elm-gate.sh`,
+  `tools/osier-corpus-baseline.sha256`, `tools/osier-recount-runTask.sh`), the adversarial
   test passes and their fixtures, and this note's own packaging (`ARTIFACT.md`,
   `tests/elm-fixtures/MATRIX.md`, `tools/gen-fixture-matrix.sh`).
 - **The degree, as the record shows it.** Every commit in this repository is authored by the

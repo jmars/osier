@@ -10,7 +10,7 @@
 #
 #   * MIDTIER=0 IS A BYTE-IDENTITY ANCHOR THAT MUST HOLD FOREVER.  Step 2
 #     hashes every gate artifact compiled with MIDTIER=0 and diffs the list
-#     against `tools/withe-corpus-baseline.sha256`, and step 5 requires the
+#     against `tools/osier-corpus-baseline.sha256`, and step 5 requires the
 #     MIDTIER=0 selfhost bundle to reproduce the committed seed
 #     (`tools/bootstrap/selfhost.csexp`, sha256 2d1f8998…).  The middle tier
 #     cannot reach that path (Main.elm picks `Lower.Module` before a pass
@@ -63,7 +63,7 @@ ELMVM="$ROOT/zig-out/bin/elmvm"
 CDIR="$ROOT/elm-compiler"
 GATE="$ROOT/tests/elm-fixtures/run-elm-gate.sh"
 FIX="$ROOT/tests/elm-fixtures"
-BASELINE="$ROOT/tools/withe-corpus-baseline.sha256"
+BASELINE="$ROOT/tools/osier-corpus-baseline.sha256"
 STATS="$ROOT/tools/midtier-emit-stats.py"
 SEED_SHA="2d1f8998a13e28c0c47cccc46ac5e390572f73cbe2d63e18d3501cde44568c8b"
 
@@ -178,7 +178,7 @@ if [ -n "$manifest" ]; then
     MIDTIER=1 node "$CDIR/run.js" --batch "$TMP/man1.json" >/dev/null 2>&1
     run1_rc=$?
 
-    # The ANCHOR is path-keyed like tools/withe-numbers.sh: the same manifest
+    # The ANCHOR is path-keyed like tools/osier-numbers.sh: the same manifest
     # into THE SAME output basenames, hashed and diffed against the committed
     # baseline.  (The differential below needs index-keyed names instead —
     # the gate registers `sub` twice, so basenames collide — hence two

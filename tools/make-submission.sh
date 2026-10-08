@@ -2,11 +2,11 @@
 # make-submission.sh — derive the ANONYMIZED ICFP 2027 submission source from
 # the repository's paper, and verify the derivation.
 #
-#   input : docs/research/withe-paper.md
+#   input : docs/research/osier-paper.md
 #           (deliberately carries provenance — the artifact tag and the
 #           evidence-script names — because the repo is where a reader
 #           reproduces the work)
-#   output: docs/research/submission/withe-paper-submission.md
+#   output: docs/research/submission/osier-paper-submission.md
 #           (fully double-blind: no artifact tags, no evidence-script names,
 #           no repository URL/name, no author name.  §6.7's AI-use disclosure
 #           and third-party citation URLs are KEPT.)
@@ -18,10 +18,10 @@
 # silently lags the source is worse than none.
 #
 # What is neutralized vs kept, and why:
-#   * Every `withe-*` token (artifact tags, evidence-script names, the
+#   * Every `osier-*` token (artifact tags, evidence-script names, the
 #     companion-survey filename) is neutralized: the repository name survives
 #     in the source only inside these tokens, and a reviewer could look a
-#     tag or filename up.  The LANGUAGE name "Withe" is the paper's subject
+#     tag or filename up.  The LANGUAGE name "Osier" is the paper's subject
 #     and is deliberately NOT denied (it does not occur standalone in the
 #     source; every occurrence is a hyphenated provenance token).
 #   * Artifact-layout paths that name only the artifact's own directories
@@ -36,8 +36,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SRC="docs/research/withe-paper.md"
-OUT="docs/research/submission/withe-paper-submission.md"
+SRC="docs/research/osier-paper.md"
+OUT="docs/research/submission/osier-paper-submission.md"
 
 mkdir -p "$(dirname "$OUT")"
 
@@ -54,18 +54,18 @@ src = Path(src_path).read_text(encoding="utf-8")
 RULES = [
     # §6.7: without the phrase rule the token rule would read
     # "the recount script (the recount script)".
-    ("the recount script\n(`tools/withe-recount-runTask.sh`)", "the recount script"),
-    ("`tools/withe-numbers.sh`", "the artifact's verification script"),
-    ("`tools/withe-recount-runTask.sh`", "the recount script"),
-    ("`tools/withe-corpus-baseline.sha256`", "the committed corpus manifest"),
-    ("The artifact tag `withe-paper-artifact-1`", "The frozen artifact tag"),
-    ("`withe-artifact-eval-1`", "the frozen artifact tag"),
-    ("(`docs/research/withe-related-work.md`, which is the bibliography's source)",
+    ("the recount script\n(`tools/osier-recount-runTask.sh`)", "the recount script"),
+    ("`tools/osier-numbers.sh`", "the artifact's verification script"),
+    ("`tools/osier-recount-runTask.sh`", "the recount script"),
+    ("`tools/osier-corpus-baseline.sha256`", "the committed corpus manifest"),
+    ("The artifact tag `osier-paper-artifact-1`", "The frozen artifact tag"),
+    ("`osier-artifact-eval-1`", "the frozen artifact tag"),
+    ("(`docs/research/osier-related-work.md`, which is the bibliography's source)",
      "(the companion document that is the bibliography's source)"),
-    ("is the companion\n`docs/research/withe-related-work.md`)", "is the companion\nsurvey)"),
-    (" (`docs/research/withe-related-work.md`)", ""),
-    ("https://github.com/jmars/withe", "the artifact repository"),
-    ("fixpoint-linux/withe", "the artifact repository"),
+    ("is the companion\n`docs/research/osier-related-work.md`)", "is the companion\nsurvey)"),
+    (" (`docs/research/osier-related-work.md`)", ""),
+    ("https://github.com/jmars/osier", "the artifact repository"),
+    ("fixpoint-linux/osier", "the artifact repository"),
 ]
 
 out = src
@@ -77,7 +77,7 @@ for old, new in RULES:
     total += n
     print(f"  {n:2d}  {old!r} -> {new!r}")
 
-# Catch-all for any future backticked `withe-*` / `tools/withe-*` token the
+# Catch-all for any future backticked `osier-*` / `tools/osier-*` token the
 # rules above do not name yet.  Expected to fire zero times at this HEAD;
 # when it fires, add a specific rule above so the prose reads well.
 def generic(m):
@@ -91,7 +91,7 @@ def generic(m):
     print(f"  WARNING: unhandled token {tok} -> {rep!r} (add a specific rule)")
     return rep
 
-out, ncatch = re.subn(r"`(?:tools/)?withe-[A-Za-z0-9._-]+`", generic, out)
+out, ncatch = re.subn(r"`(?:tools/)?osier-[A-Za-z0-9._-]+`", generic, out)
 total += ncatch
 
 # Generated-file marker (an HTML comment: invisible in rendered output).
@@ -106,14 +106,14 @@ failures = []
 
 # 1. Every identifying string is ABSENT from the output.
 DENY = [
-    "withe-paper-artifact-1",        # artifact tag
-    "withe-artifact-eval-1",         # artifact tag
-    "tools/withe-numbers.sh",        # evidence script
-    "tools/withe-recount-runTask.sh",# evidence script
-    "tools/withe-corpus-baseline.sha256",
-    "docs/research/withe-related-work.md",  # companion-survey filename (repo name)
-    "https://github.com/jmars/withe",  # repository URL
-    "fixpoint-linux/withe",          # the repository's pre-transfer path
+    "osier-paper-artifact-1",        # artifact tag
+    "osier-artifact-eval-1",         # artifact tag
+    "tools/osier-numbers.sh",        # evidence script
+    "tools/osier-recount-runTask.sh",# evidence script
+    "tools/osier-corpus-baseline.sha256",
+    "docs/research/osier-related-work.md",  # companion-survey filename (repo name)
+    "https://github.com/jmars/osier",  # repository URL
+    "fixpoint-linux/osier",          # the repository's pre-transfer path
     "fixpoint",                      # repository owner/org name
     "jmars",                         # repository owner's GitHub account name
     "jaye",                          # author's first name / e-mail local part
@@ -124,9 +124,9 @@ low = out.lower()
 for s in DENY:
     if s.lower() in low:
         failures.append(f"identifying string PRESENT in output: {s!r}")
-# Any hyphenated `withe-*` token (the repo name survives only in these).
-for m in re.finditer(r"(?i)withe-[A-Za-z0-9._-]*", out):
-    failures.append(f"withe-* token PRESENT in output: {m.group(0)!r}")
+# Any hyphenated `osier-*` token (the repo name survives only in these).
+for m in re.finditer(r"(?i)osier-[A-Za-z0-9._-]*", out):
+    failures.append(f"osier-* token PRESENT in output: {m.group(0)!r}")
 
 # 2. §6.7 and its AI-use disclosure are PRESENT.
 KEEP = [
@@ -153,7 +153,7 @@ if failures:
 
 print(f"\ntotal substitutions: {total}")
 print("self-verification:")
-print(f"  [PASS] {len(DENY)} identifying strings absent + no withe-* token remains")
+print(f"  [PASS] {len(DENY)} identifying strings absent + no osier-* token remains")
 print("  [PASS] §6.7 heading and AI-use disclosure present")
 print("  [PASS] third-party citation URLs kept")
 print(f"  [PASS] output differs from input ({total} substitutions)")

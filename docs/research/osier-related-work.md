@@ -1,6 +1,6 @@
-# Withe — related-work survey (the feature-pair map)
+# Osier — related-work survey (the feature-pair map)
 
-Full literature survey for the Withe paper, consolidating passes `handoff-rowgadt-lit` (8 works +
+Full literature survey for the Osier paper, consolidating passes `handoff-rowgadt-lit` (8 works +
 neighbours), `handoff-rowgadt-lit2` (CORELINKS + Koka), and this pass (`handoff-rowgadt-lit3`),
 plus a targeted retrieval (2026-10-05, no handoff slug) that read the **full extended text** of
 Toohey et al POPL'26 and upgraded its entry (§1 row, §2 quote entry, §3 table row, §4 item 6,

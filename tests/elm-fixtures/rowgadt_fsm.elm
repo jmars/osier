@@ -1,7 +1,7 @@
 module RowgadtFsm exposing (main)
 
 -- G4 external example: the discuss.ocaml.org t/13718 FSM pattern (a door
--- machine) in Withe. States are ROWS (type-level records), the transition
+-- machine) in Osier. States are ROWS (type-level records), the transition
 -- relation is a GADT witness, and the reducers read state-specific fields
 -- under branch-local row refinement (the narrowing OCaml cannot refute).
 -- Must compile CLEAN; the illegal transition is pinned in rowgadt_fsm_bad.

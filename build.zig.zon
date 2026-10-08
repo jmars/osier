@@ -1,11 +1,14 @@
 .{
-    .name = .withe,
+    .name = .osier,
     .version = "0.0.0",
-    .fingerprint = 0x8fac7bf9296a0b4, // Changing this has security and trust implications.
+    // Renaming the package (withe -> osier) changes this: zig derives it from
+    // .name and refuses a stale value.  0x454d67aee8306770 is the value zig
+    // 0.16 prints for `.name = .osier`.
+    .fingerprint = 0x454d67aee8306770, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         // zinc-vm: the shared GC + ZINC VM executor package.  Path dependency
-        // (withe owns vendor/zinc-vm).
+        // (osier owns vendor/zinc-vm).
         .zinc_vm = .{
             .path = "vendor/zinc-vm",
         },

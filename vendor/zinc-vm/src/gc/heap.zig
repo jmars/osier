@@ -61,7 +61,7 @@ pub const NURSERY_SCAVENGE_FREE_LOWATER = NURSERY_BYTES / 8;
 pub const MIN_HEAP_PAGES = 32768;
 pub const MIN_HEAP_BYTES = MIN_HEAP_PAGES * PAGEBYTES;
 
-/// NOT C (withe addition, see `Gc.grow_fail_streak`): how many grow_heap
+/// NOT C (osier addition, see `Gc.grow_fail_streak`): how many grow_heap
 /// failures in a row make the exhaustion FATAL.  A grow failure is permanent
 /// (the doubling is computed from `heappages`, which never shrinks), and the
 /// anti-thrash callers ignore the false return, so without this the process
@@ -233,7 +233,7 @@ pub const Gc = struct {
     // ---- mmap bookkeeping — C: gc.c:303, 308 (raw_heap_start/heap_mmap_size)
     raw_heap_start: usize,
     heap_mmap_size: usize,
-    /// Consecutive failed grow_heap calls (NOT C — a withe addition, see
+    /// Consecutive failed grow_heap calls (NOT C — an osier addition, see
     /// grow_heap).  A grow failure is PERMANENT: the doubling that just
     /// failed is computed from `heappages`, which never shrinks, so once
     /// 2*heappages*PAGEBYTES exceeds the reservation every later attempt
@@ -559,7 +559,7 @@ pub const Gc = struct {
             .{ new_heap_size / (1024 * 1024), self.heap_mmap_size / (1024 * 1024) },
         );
 
-        // withe addition (NOT C): the failure above is permanent, so a caller
+        // osier addition (NOT C): the failure above is permanent, so a caller
         // that ignores the false return livelocks.  See grow_fail_streak.
         self.grow_fail_streak += 1;
         if (self.grow_fail_streak >= GROW_FAIL_STREAK_MAX)

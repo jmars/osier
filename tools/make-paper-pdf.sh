@@ -3,15 +3,15 @@
 # make-paper-pdf.sh — build BOTH PDFs of the paper from source, with the REAL
 # ACM `acmart` class in its `acmsmall` (single-column, 10pt) form.
 #
-#   readable variant   docs/research/withe-paper.md
-#                        -> docs/research/build/withe-paper.tex
-#                        -> docs/research/build/withe-paper.pdf
+#   readable variant   docs/research/osier-paper.md
+#                        -> docs/research/build/osier-paper.tex
+#                        -> docs/research/build/osier-paper.pdf
 #
-#   anonymized         docs/research/submission/withe-paper-submission.md
+#   anonymized         docs/research/submission/osier-paper-submission.md
 #   submission         (re-derived from the source paper first, by
 #                       tools/make-submission.sh, which self-verifies)
-#                        -> docs/research/build/withe-paper-submission.tex
-#                        -> docs/research/build/withe-paper-submission.pdf
+#                        -> docs/research/build/osier-paper-submission.tex
+#                        -> docs/research/build/osier-paper-submission.pdf
 #
 # The .tex of BOTH variants is committed, so a referee can read exactly what was
 # typeset without running pandoc.  The PDFs, the TeX log and the intermediate
@@ -218,7 +218,7 @@ stem = out.rsplit("/", 1)[-1][:-4]
 
 if variant == "paper":
     variant_label = "readable"
-    source = "docs/research/withe-paper.md"
+    source = "docs/research/osier-paper.md"
     class_options = "acmsmall,nonacm"
 else:
     variant_label = "anonymized (double-blind) submission"
@@ -333,7 +333,7 @@ build_variant() {  # $1 = markdown, $2 = stem, $3 = variant label
   # markdown; this checks that the conversion did not reintroduce one.)
   if [ "$variant" != paper ]; then
     local bad
-    bad=$(grep -onE -i 'jmars|fixpoint|jaye|jaye\.ch|Jaye Marshall|github\.com/[a-z]+/withe|withe-[A-Za-z0-9._-]*' "$tex" || true)
+    bad=$(grep -onE -i 'jmars|fixpoint|jaye|jaye\.ch|Jaye Marshall|github\.com/[a-z]+/osier|osier-[A-Za-z0-9._-]*' "$tex" || true)
     if [ -n "$bad" ]; then
       echo "FAIL: identifying string(s) in the anonymized .tex:" >&2
       echo "$bad" >&2
@@ -572,7 +572,7 @@ PYEOF
   if [ "$variant" != paper ]; then
     python3 "$PROBE" absent "$BUILD/$stem.pdf" \
         jmars fixpoint jaye "jaye.ch" "Jaye Marshall" \
-        withe-paper-artifact withe-artifact-eval
+        osier-paper-artifact osier-artifact-eval
   fi
 
   # the log holds one such line per TeX pass; the last is the final pagination
@@ -601,9 +601,9 @@ PYEOF
 echo "== refreshing the anonymized export"
 bash tools/make-submission.sh | tail -4
 
-build_variant docs/research/withe-paper.md withe-paper paper
-build_variant docs/research/submission/withe-paper-submission.md \
-              withe-paper-submission submission
+build_variant docs/research/osier-paper.md osier-paper paper
+build_variant docs/research/submission/osier-paper-submission.md \
+              osier-paper-submission submission
 
 rm -f "$TEMPLATE" "$BUILD"/.*.pandoc.tex
 
@@ -614,7 +614,7 @@ echo "    bibliography starts on is read from the text of the PDF itself, and"
 echo "    cross-checked against the label the document writes for its"
 echo "    References heading -- a label page comes from the previous TeX pass,"
 echo "    so a one-page disagreement is reported rather than hidden.)"
-for stem in withe-paper withe-paper-submission; do
+for stem in osier-paper osier-paper-submission; do
   log="$BUILD/$stem.log"
   pdf="$BUILD/$stem.pdf"
   pages=$(python3 "$PROBE" pages "$pdf")

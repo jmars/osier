@@ -28,7 +28,7 @@ module Mid.Ir exposing
 -- is a pure refactor of how the SAME instructions are produced.  The
 -- differential is `tools/midtier-diff.sh`; the anchor that keeps the refactor
 -- honest is that `MIDTIER=0` (Lower/*) must reproduce
--- `tools/withe-corpus-baseline.sha256` forever.
+-- `tools/osier-corpus-baseline.sha256` forever.
 --
 -- WHY NO SSA/SSA2/RSSA (plan decision D1): those IRs exist in MLton to feed
 -- NATIVE codegen (register allocation, def-use chains, machine-level
@@ -116,7 +116,7 @@ module Mid.Ir exposing
 -- SCAFFOLD STATUS: this is deliberately PROVISIONAL and the plan's addendum
 -- says so — plain variant data, Config-style records for arguments, explicit
 -- threading of the binder-supply counter (`Mid.FromAst.Gen`).  It is intended
--- to be reclaimed verbatim by the cleaner Withe language (GADTs + rank-2
+-- to be reclaimed verbatim by the cleaner Osier language (GADTs + rank-2
 -- first-class modules): the variant data ports as-is, the record arguments
 -- become module/functor arguments, and the explicit counter threading becomes
 -- module state.  Because every ported pass is SINGLE-INSTANTIATION (there is

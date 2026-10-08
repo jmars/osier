@@ -19,7 +19,7 @@ module Runtime exposing (worker, program)
 -- The Task ctor list IS the host's handled effect set: the language declares
 -- exactly the effects its host (src/effectloop.zig) can perform, and the host
 -- dispatches on these ctor names directly (no separate decode table).  The UI
--- effects (renderer + terminal input) left the language in withe-split Phase 3
+-- effects (renderer + terminal input) left the language in osier split Phase 3
 -- and will return with a different design.
 type Task x a
     = TaskSucceed a

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# withe-recount-runTask.sh — reproduce the G5 "16 of 20" interpreter-branch count.
+# osier-recount-runTask.sh — reproduce the G5 "16 of 20" interpreter-branch count.
 #
 # Gap G5 established that the paper's "29 of 30 branches check honestly" is
 # WRONG.  Removing `Runtime.runTask` from the trusted set reports exactly ONE
@@ -8,7 +8,7 @@
 # so the honest figure is 16 of 20.  This script makes that recount a
 # REPRODUCIBLE measurement rather than a single-source claim.
 #
-# withe-split Phase 3 note: the 10 UI effects left the Task type, so the count
+# osier split Phase 3 note: the 10 UI effects left the Task type, so the count
 # is now 20 branches (was 30) and 4 of them fail (was 5) — TaskGuiPoll, the
 # old fifth failure, left with the UI.
 #
@@ -43,9 +43,9 @@
 #               the result type is temporarily made non-record)
 #
 # USAGE (from the repo root):
-#   tools/withe-recount-runTask.sh
+#   tools/osier-recount-runTask.sh
 #
-# Prerequisite on PATH / env (same as tools/withe-numbers.sh):
+# Prerequisite on PATH / env (same as tools/osier-numbers.sh):
 #   ELM_BIN      elm 0.19.2 binary
 #                (default ~/.npm-global/lib/node_modules/elm/bin/elm)
 #
@@ -209,7 +209,7 @@ orig = open(os.path.join(S, "src", "Runtime.elm")).read()
 branches = re.findall(r"^\s{8}(Task\w+)\b[^\n]*->\s*$", orig, re.M)
 fail = 0
 
-print(f"withe-recount-runTask @ {HEAD}")
+print(f"osier-recount-runTask @ {HEAD}")
 print()
 print("CONDITION (honest): runTask is UNTRUSTED (removed from trustedBodies) and")
 print("  its body is checked under a `type x a.` binder.  The committed signature")

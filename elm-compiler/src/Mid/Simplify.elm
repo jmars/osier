@@ -9,8 +9,8 @@ module Mid.Simplify exposing (Config, defaultConfig, off, run, runWithReport)
 -- byte-identity BY DESIGN (plan decision D5, accepted by the user): from here
 -- on `tools/midtier-diff.sh` verifies MIDTIER=1 BEHAVIOURALLY (compile every
 -- gate group under both modes, RUN both bundles on the VM, diff the outputs)
--- while `tools/withe-numbers.sh` still holds the MIDTIER=0 byte-identity
--- ANCHOR against `tools/withe-corpus-baseline.sha256` and the committed
+-- while `tools/osier-numbers.sh` still holds the MIDTIER=0 byte-identity
+-- ANCHOR against `tools/osier-corpus-baseline.sha256` and the committed
 -- bootstrap seed.  The anchor must hold forever: if a middle-tier change moves
 -- a MIDTIER=0 byte, that is a bug, not a re-baseline.
 --

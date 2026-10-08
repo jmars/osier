@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# withe-numbers.sh — the paper's single reproducible measurement chain.
+# osier-numbers.sh — the paper's single reproducible measurement chain.
 #
-# Runs, from a clean checkout, the WHOLE evidence chain for the Withe / λρG
+# Runs, from a clean checkout, the WHOLE evidence chain for the Osier / λρG
 # paper (handoff `rowgadt`, gap G2) and PRINTS every number the paper cites:
 #
 #   1. the fixture gate        — PASS/FAIL count (run-elm-gate.sh)
 #   2. the corpus batch        — byte-identity of every compiled artifact
-#                                against tools/withe-corpus-baseline.sha256
+#                                against tools/osier-corpus-baseline.sha256
 #   3. TestMain                — assertion count (114/114)
 #   4. `lake build`            — exit code + output bytes, theorem count and
 #                                the axiom list, from lean/
 #   5. the runTask branch recount — the corrected G5 figure (16 of 20 branches
 #                                check honestly under the `type x a.` binder),
-#                                reproduced by tools/withe-recount-runTask.sh
+#                                reproduced by tools/osier-recount-runTask.sh
 #
 # It is SELF-CONTAINED (builds elmvm/compiler.js/test-compiler.js and the Lean
 # build on first use) and IDEMPOTENT (re-runs reproduce the same numbers; the
@@ -21,7 +21,7 @@
 # exit 0 on the paper's build host.
 #
 # USAGE (from the repo root):
-#   tools/withe-numbers.sh
+#   tools/osier-numbers.sh
 #
 # PREREQUISITES — checked up front, each with its own message if missing:
 #   on PATH: node, jq, zig (0.16), rg (ripgrep), python3.
@@ -38,7 +38,7 @@
 # Exit codes: 0 = every check passed; 1 = a check ran and failed; 2 = the
 # environment is incomplete (a prerequisite above is missing).  The corpus
 # baseline (one sha256 sum per LANGUAGE-gate artifact — the 19 UI-host fixtures
-# left the corpus in withe-split Phase 1) is the repo-frozen byte-identity
+# left the corpus in osier split Phase 1) is the repo-frozen byte-identity
 # oracle; a gate run that adds/removes/changes ANY artifact makes step 2 print
 # a diff.
 set -u
@@ -48,7 +48,7 @@ cd "$ROOT"
 
 ELM_BIN="${ELM_BIN:-$HOME/.npm-global/lib/node_modules/elm/bin/elm}"
 ELAN_HOME="${ELAN_HOME:-/var/data/workspace/lean/elan}"
-BASELINE="$ROOT/tools/withe-corpus-baseline.sha256"
+BASELINE="$ROOT/tools/osier-corpus-baseline.sha256"
 CDIR="$ROOT/elm-compiler"
 
 fail=0
@@ -72,7 +72,7 @@ need node   "node (any recent version) runs the compiler driver run.js / test-ru
 need jq     "jq builds the fixture gate's batch manifest."
 need zig    "zig 0.16 builds the gate harness (zig build elmvm)."
 need rg     "ripgrep counts the Lean theorems/axioms — WITHOUT it those counts print 0."
-need python3 "python3 runs the runTask recount (tools/withe-recount-runTask.sh)."
+need python3 "python3 runs the runTask recount (tools/osier-recount-runTask.sh)."
 
 if [ ! -x "$ELM_BIN" ]; then
     cat >&2 <<EOF
@@ -81,7 +81,7 @@ FAIL: the elm 0.19.2 binary was not found.
       elm 0.19.2 is NOT on PATH in the paper's build host, so ELM_BIN must be
       set to your elm binary, e.g.
 
-          ELM_BIN="\$(npm root -g)/elm/bin/elm" tools/withe-numbers.sh
+          ELM_BIN="\$(npm root -g)/elm/bin/elm" tools/osier-numbers.sh
 
       (the default is \$HOME/.npm-global/lib/node_modules/elm/bin/elm)
 EOF
@@ -116,7 +116,7 @@ fi
 (cd "$CDIR" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/TestMain.elm --output=test-compiler.js >/dev/null) \
     || { echo "FAIL: elm make test-compiler.js" >&2; exit 1; }
 
-echo "withe-numbers @ $(git rev-parse --short HEAD 2>/dev/null || echo 'no-git')"
+echo "osier-numbers @ $(git rev-parse --short HEAD 2>/dev/null || echo 'no-git')"
 echo
 
 # --- 1. gate -----------------------------------------------------------------
@@ -209,8 +209,8 @@ fi
 
 # --- 5. runTask branch recount (G5 corrected figure) -------------------------
 # Reproduce the 16-of-20 interpreter-branch count by temp-copy bisection (see
-# tools/withe-recount-runTask.sh for the method and the honest condition).
-recount_out="$(tools/withe-recount-runTask.sh 2>&1)"
+# tools/osier-recount-runTask.sh for the method and the honest condition).
+recount_out="$(tools/osier-recount-runTask.sh 2>&1)"
 recount_rc=$?
 printf '%s\n' "$recount_out"
 if [ "$recount_rc" -ne 0 ]; then
