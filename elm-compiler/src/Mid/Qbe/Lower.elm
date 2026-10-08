@@ -12,10 +12,14 @@ module Mid.Qbe.Lower exposing (lower)
 --     (`+ - * < <= > >= =` inline on the VM's exact semantics with an
 --     rt_prim fallback for the float-promotion / non-numeric paths), and
 --     inner Lam (closures with captures — the env representation crux).
---   excluded (Err): Case, LetDestruct, Con, Tup, RecordLit/Get/Update,
---     ListLit, StreamRef, ShortAnd/ShortOr/NotEqual, non-ASCII literals —
---     pattern matching, records/tuples/lists and the effect loop are later
---     stages.  Any REACHED defun that needs one of these fails the compile.
+--   stage 2 adds: Case (incl. inside a closure body), Con (ADT construction
+--     as the VM's vector[tag, args]), the match steps MCons/MEmpty/MVector/
+--     MTagEq/MLitEq with the ordered AltKind tests, LetDestruct, Tup (a cons
+--     chain — needed for a real destructuring-let fixture), and the cheap
+--     boolean nodes ShortAnd/ShortOr/NotEqual.
+--   excluded (Err): RecordLit/Get/Update, ListLit, StreamRef, non-ASCII
+--     literals — records/lists and the effect loop are later stages.  Any
+--     REACHED defun that needs one of these fails the compile.
 --
 -- ============================== THE CONTRACTS ==============================
 --
@@ -68,7 +72,7 @@ module Mid.Qbe.Lower exposing (lower)
 -- (Exp's Con variant is deliberately NOT exposed: Mid.Qbe.Il.Arg also has a
 -- Il.Con (the integer-constant argument), and Elm cannot qualify constructors
 -- in patterns — exposing only one of the two keeps the pattern arms clean.)
-import Mid.Ir exposing (Defun, Exp(..), Lambda, LetBinder(..), Lit(..))
+import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), Lambda, LetBinder(..), Lit(..), Match(..), Step(..), ValuePath(..))
 import Dict exposing (Dict)
 import Mid.Qbe.Il as Il exposing (Module, Func, Block, Inst(..), Jump(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..))
 import Set exposing (Set)
@@ -99,6 +103,21 @@ tagFloat =
 tagSymbol : Int
 tagSymbol =
     2
+
+
+tagCons : Int
+tagCons =
+    4
+
+
+tagNil : Int
+tagNil =
+    5
+
+
+tagVector : Int
+tagVector =
+    10
 
 
 maxArity : Int
@@ -320,6 +339,7 @@ grefsOf exp =
 
         Case branch ->
             grefsOf branch.scrutinee
+                ++ List.concatMap (grefsOf << .body) branch.alts
 
         Con con ->
             List.concatMap grefsOf con.args
@@ -499,6 +519,9 @@ lowerTail exp s =
             lowerLetBinders block.binders s
                 |> Result.andThen (lowerTail block.body)
 
+        Case branch ->
+            lowerCase branch 0 True s
+
         Lam lambda ->
             lowerClosure lambda 0 s
                 |> Result.map (jumpTo "ret")
@@ -544,14 +567,14 @@ lowerVal exp dest s =
         Lam lambda ->
             lowerClosure lambda dest s
 
-        Case _ ->
-            Err "qbe: Case (pattern matching) is not lowered by the native slice yet"
+        Case branch ->
+            lowerCase branch dest False s
 
-        Con _ ->
-            Err "qbe: Il.Con (ADT construction) is not lowered by the native slice yet"
+        Con con ->
+            lowerCon con dest s
 
-        Tup _ ->
-            Err "qbe: Tup is not lowered by the native slice yet"
+        Tup es ->
+            lowerTup es dest s
 
         RecordLit _ ->
             Err "qbe: RecordLit is not lowered by the native slice yet"
@@ -568,14 +591,14 @@ lowerVal exp dest s =
         StreamRef _ ->
             Err "qbe: StreamRef (effect loop) is not lowered by the native slice yet"
 
-        ShortAnd _ ->
-            Err "qbe: ShortAnd is not lowered by the native slice yet"
+        ShortAnd block ->
+            lowerShortAnd block dest s
 
-        ShortOr _ ->
-            Err "qbe: ShortOr is not lowered by the native slice yet"
+        ShortOr block ->
+            lowerShortOr block dest s
 
-        NotEqual _ ->
-            Err "qbe: NotEqual is not lowered by the native slice yet"
+        NotEqual block ->
+            lowerNotEqual block dest s
 
 
 
@@ -958,8 +981,8 @@ lowerLetBinder binder s =
             lowerVal bind.value bslot s1
                 |> Result.map (\s2 -> { s2 | binderSlots = Dict.insert bind.binder.id bslot s2.binderSlots })
 
-        LetDestruct _ ->
-            Err "qbe: LetDestruct (pattern-matching let) is not lowered by the native slice yet"
+        LetDestruct destruct ->
+            lowerLetDestruct destruct s
 
 
 
@@ -1033,6 +1056,589 @@ lowerIf block dest isTail s =
                             else
                                 lowerVal block.elseBranch dest (startBlock elseLbl s12)
                                     |> Result.map (startBlock joinLbl)
+                        )
+            )
+
+
+
+-- ============================ CASE / PATTERNS ============================
+-- The VM's own match semantics, transcribed from Lower.Pattern / Mid.ToZinc
+-- (the ZINC emitter's readPath/matchInstrs/emitBinds) and prims.zig:
+--   * MCons/MEmpty/MVector are TAG tests (cons=4, nil=5, vector=10).
+--   * MTagEq/MLitEq run the REAL `=` primitive via rt_prim (deep/name
+--     equality — a symbol tag is compared by NAME, never pointer: a QBE
+--     symbol's name points at static data while the VM interns, so only the
+--     byte compare in primEq is exact).
+--   * The Steps are ALLOC-FREE pointer chases (fst/snd = car/cdr loads,
+--     hd/tl = nil-guarded car/cdr, IdxStep = vector.data[i] blit), so no
+--     GC can run mid-chase; the result lands in a ROOTED slot before any
+--     later safepoint reads it.
+-- ROOTING AUDIT (the hazard this construct is most prone to): the scrutinee
+-- is lowered ONCE into a rooted slot and every test/bind reads it (or a
+-- sub-value blitted into ANOTHER rooted slot) from there.  Every value live
+-- across a safepoint — rt_prim "=", rt_con, and any alt body's own calls —
+-- sits in a pooled-frame slot, so the GC rewrites it in place.  A sub-value
+-- read into a slot and then followed by an allocation (lowerEqMatch reads the
+-- sub-value BEFORE materializing a string literal via rt_string) is safe
+-- because the slot is rooted the whole time.  Dead scrutinee/bind slots stay
+-- conservative roots (they hold whole tagged Values, never interior
+-- pointers), so the collector never chases a stale address.
+
+
+lowerCase : { scrutinee : Exp, scrutId : Binder, alts : List Alt, endLabel : String } -> Int -> Bool -> S -> Result String S
+lowerCase branch dest isTail s =
+    let
+        ( scrutSlot, s1 ) =
+            freshSlot s
+    in
+    lowerVal branch.scrutinee scrutSlot s1
+        |> Result.andThen
+            (\s2 ->
+                lowerAlts branch.alts scrutSlot dest isTail
+                    { s2 | binderSlots = Dict.insert branch.scrutId.id scrutSlot s2.binderSlots }
+            )
+
+
+lowerAlts : List Alt -> Int -> Int -> Bool -> S -> Result String S
+lowerAlts alts scrutSlot dest isTail s =
+    let
+        ( errLbl, sE ) =
+            freshLbl "cerr" s
+
+        ( endLbl, sEnd ) =
+            freshLbl "cend" sE
+    in
+    lowerAltsLoop alts errLbl endLbl scrutSlot dest isTail sEnd
+        |> Result.andThen
+            (\sA ->
+                Ok (startBlock errLbl sA
+                        |> lowerNonExhaustive "non-exhaustive case"
+                        |> startBlock endLbl
+                   )
+            )
+
+
+-- Emit alts in order: each alt's tests jump to the NEXT alt's entry on
+-- failure (the last alt's to the error label).  A passing alt binds, runs its
+-- body, and (non-tail) joins endLbl.
+lowerAltsLoop : List Alt -> String -> String -> Int -> Int -> Bool -> S -> Result String S
+lowerAltsLoop alts errLbl endLbl scrutSlot dest isTail s =
+    case alts of
+        [] ->
+            Ok s
+
+        alt :: rest ->
+            let
+                ( restFailLbl, s1 ) =
+                    case rest of
+                        [] ->
+                            ( errLbl, s )
+
+                        _ ->
+                            freshLbl "cnext" s
+            in
+            lowerMatchTests alt.matches scrutSlot restFailLbl s1
+                |> Result.andThen (lowerBinds alt.binds scrutSlot)
+                |> Result.andThen
+                    (\s2 ->
+                        if isTail then
+                            lowerTail alt.body s2
+
+                        else
+                            lowerVal alt.body dest s2
+                                |> Result.map (jumpTo endLbl)
+                    )
+                |> Result.andThen
+                    (\s3 ->
+                        case rest of
+                            [] ->
+                                Ok s3
+
+                            _ ->
+                                lowerAltsLoop rest errLbl endLbl scrutSlot dest isTail (startBlock restFailLbl s3)
+                    )
+
+
+-- A destructuring let is the same machinery as a single always-matching alt:
+-- value -> scrutinee slot, ordered tests (any failure -> simple-error), then
+-- the pattern bindings in a block that FALLS THROUGH to the continuation.
+lowerLetDestruct : { scrutId : Binder, value : Exp, matches : List Match, binds : List ( Binder, ValuePath ), badLabel : String, okLabel : String } -> S -> Result String S
+lowerLetDestruct destruct s =
+    let
+        ( scrutSlot, s1 ) =
+            freshSlot s
+    in
+    lowerVal destruct.value scrutSlot s1
+        |> Result.andThen
+            (\s2 ->
+                let
+                    ( errLbl, s3 ) =
+                        freshLbl "lerr" s2
+
+                    ( okLbl, s4 ) =
+                        freshLbl "lok" s3
+
+                    s5 =
+                        { s4 | binderSlots = Dict.insert destruct.scrutId.id scrutSlot s4.binderSlots }
+                in
+                lowerMatchTests destruct.matches scrutSlot errLbl s5
+                    |> Result.andThen
+                        (\s6 ->
+                            Ok (jumpTo okLbl s6
+                                    |> startBlock errLbl
+                                    |> lowerNonExhaustive "non-exhaustive let pattern"
+                                    |> startBlock okLbl
+                               )
+                        )
+                    |> Result.andThen (lowerBinds destruct.binds scrutSlot)
+            )
+
+
+-- Run each test in order; a failing test jumps to failLbl.  Falls through iff
+-- ALL pass (the ZINC emitter's `matchInstrs ++ Jmpf nextLabel` per test).
+lowerMatchTests : List Match -> Int -> String -> S -> Result String S
+lowerMatchTests matches scrutSlot failLbl s =
+    List.foldl
+        (\m acc -> Result.andThen (lowerMatch m scrutSlot failLbl) acc)
+        (Ok s)
+        matches
+
+
+lowerMatch : Match -> Int -> String -> S -> Result String S
+lowerMatch match scrutSlot failLbl s =
+    case match of
+        MCons steps ->
+            Ok (lowerTagMatch steps scrutSlot tagCons failLbl s)
+
+        MEmpty steps ->
+            Ok (lowerTagMatch steps scrutSlot tagNil failLbl s)
+
+        MVector steps ->
+            Ok (lowerTagMatch steps scrutSlot tagVector failLbl s)
+
+        MTagEq steps tag ->
+            lowerEqMatch steps scrutSlot (LSymbol tag) failLbl s
+
+        MLitEq steps lit ->
+            lowerEqMatch steps scrutSlot lit failLbl s
+
+
+-- Read the value at `steps`, test its tag == expected; pass -> passLbl,
+-- fail -> failLbl.
+lowerTagMatch : List Step -> Int -> Int -> String -> S -> S
+lowerTagMatch steps scrutSlot expected failLbl s =
+    let
+        ( p, s1 ) =
+            freshSlot s
+
+        sRead =
+            readSteps steps scrutSlot p s1
+
+        ( tagT, s2 ) =
+            freshTmp sRead
+
+        ( isM, s3 ) =
+            freshTmp s2
+
+        ( passLbl, s4 ) =
+            freshLbl "cpass" s3
+    in
+    emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp p))) s4
+        |> emit (Cmp (Just isM) W Ceq (Il.Tmp tagT) (Il.Con expected))
+        |> closeBlock (Jnz (Il.Tmp isM) passLbl failLbl)
+        |> startBlock passLbl
+
+
+-- Read the value at `steps`, then run the REAL `=` prim against `lit` (the
+-- VM's deep/name equality).  args = [lit, sub-value] so rt_prim's first pop
+-- (a1) is the literal — the same operand order Mid.ToZinc pushes.
+lowerEqMatch : List Step -> Int -> Lit -> String -> S -> Result String S
+lowerEqMatch steps scrutSlot lit failLbl s =
+    let
+        ( p, s1 ) =
+            freshSlot s
+
+        sRead =
+            readSteps steps scrutSlot p s1
+
+        ( l, s2 ) =
+            freshSlot sRead
+    in
+    lowerLit lit l s2
+        |> Result.andThen
+            (\s3 ->
+                let
+                    ( r, s4 ) =
+                        freshSlot s3
+                in
+                rtPrimSlots "=" [ l, p ] r s4
+                    |> Result.map
+                        (\s5 ->
+                            let
+                                ( passLbl, s6 ) =
+                                    freshLbl "cpass" s5
+                            in
+                            jmpfFalse r failLbl passLbl s6
+                        )
+            )
+
+
+-- Bind each pattern variable by reading its path from the scrutinee slot into
+-- a fresh rooted slot.
+lowerBinds : List ( Binder, ValuePath ) -> Int -> S -> Result String S
+lowerBinds binds scrutSlot s =
+    List.foldl
+        (\( binder, path ) acc ->
+            Result.andThen (lowerBind binder path scrutSlot) acc
+        )
+        (Ok s)
+        binds
+
+
+lowerBind : Binder -> ValuePath -> Int -> S -> Result String S
+lowerBind binder path scrutSlot s =
+    let
+        ( bslot, s1 ) =
+            freshSlot s
+    in
+    lowerPath path scrutSlot bslot s1
+        |> Result.map (\s2 -> { s2 | binderSlots = Dict.insert binder.id bslot s2.binderSlots })
+
+
+lowerPath : ValuePath -> Int -> Int -> S -> Result String S
+lowerPath path scrutSlot dest s =
+    case path of
+        VPath steps ->
+            Ok (readSteps steps scrutSlot dest s)
+
+        VField _ _ ->
+            Err "qbe: record field pattern (VField) is not lowered by the native slice yet"
+
+
+-- Apply `steps` from srcSlot, writing the reached value into dstSlot.  Pure:
+-- every step is an alloc-free pointer chase.
+readSteps : List Step -> Int -> Int -> S -> S
+readSteps steps src dst s =
+    case steps of
+        [] ->
+            emit (Blit (Il.Tmp (slotTmp src)) (Il.Tmp (slotTmp dst)) vs) s
+
+        step :: rest ->
+            let
+                ( mid, s1 ) =
+                    freshSlot s
+            in
+            readSteps rest mid dst (lowerStep step src mid s1)
+
+
+lowerStep : Step -> Int -> Int -> S -> S
+lowerStep step src dst s =
+    case step of
+        FstStep ->
+            chaseField 8 src dst s
+
+        SndStep ->
+            chaseField 16 src dst s
+
+        HdStep ->
+            lowerHdTl True src dst s
+
+        TlStep ->
+            lowerHdTl False src dst s
+
+        IdxStep j ->
+            let
+                ( dataT, s1 ) =
+                    freshTmp s
+
+                ( p8, s2 ) =
+                    freshTmp s1
+
+                ( eT, s3 ) =
+                    freshTmp s2
+            in
+            emit (Bin (Just p8) L Add (Il.Tmp (slotTmp src)) (Il.Con 8)) s3
+                |> emit (Load (Just dataT) L LoadL (Il.Tmp p8))
+                |> emit (Bin (Just eT) L Add (Il.Tmp dataT) (Il.Con (vs * j)))
+                |> emit (Blit (Il.Tmp eT) (Il.Tmp (slotTmp dst)) vs)
+
+
+-- fst/snd: blit the car/cdr body (at `off` in the cons Value) into dst.
+chaseField : Int -> Int -> Int -> S -> S
+chaseField off src dst s =
+    let
+        ( ptrT, s1 ) =
+            freshTmp s
+
+        ( p8, s2 ) =
+            freshTmp s1
+    in
+    emit (Bin (Just p8) L Add (Il.Tmp (slotTmp src)) (Il.Con off)) s2
+        |> emit (Load (Just ptrT) L LoadL (Il.Tmp p8))
+        |> emit (Blit (Il.Tmp ptrT) (Il.Tmp (slotTmp dst)) vs)
+
+
+-- hd/tl (prims.zig primHd/primTl): nil -> nil, else car/cdr.  The nil arm is
+-- dead in well-typed patterns (an MCons test precedes) but kept for exact
+-- parity with the VM primitive.
+lowerHdTl : Bool -> Int -> Int -> S -> S
+lowerHdTl isHd src dst s =
+    let
+        ( tagT, s1 ) =
+            freshTmp s
+
+        ( isnil, s2 ) =
+            freshTmp s1
+
+        ( nilLbl, s3 ) =
+            freshLbl "hnil" s2
+
+        ( chaseLbl, s4 ) =
+            freshLbl "hcar" s3
+
+        ( doneLbl, s5 ) =
+            freshLbl "hdone" s4
+    in
+    emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp src))) s5
+        |> emit (Cmp (Just isnil) W Ceq (Il.Tmp tagT) (Il.Con tagNil))
+        |> closeBlock (Jnz (Il.Tmp isnil) nilLbl chaseLbl)
+        |> startBlock nilLbl
+        |> storeNil dst
+        |> jumpTo doneLbl
+        |> startBlock chaseLbl
+        |> chaseField (if isHd then 8 else 16) src dst
+        |> startBlock doneLbl
+
+
+storeNil : Int -> S -> S
+storeNil dst s =
+    let
+        ( d8, s1 ) =
+            freshTmp s
+    in
+    emit (Store StoreW (Il.Con tagNil) (Il.Tmp (slotTmp dst))) s1
+        |> emit (Bin (Just d8) L Add (Il.Tmp (slotTmp dst)) (Il.Con 8))
+        |> emit (Store StoreL (Il.Con 0) (Il.Tmp d8))
+
+
+-- The VM's jmpf test (interp.zig .jmpf): false iff the slot is a boolean with
+-- payload 0; anything else falls through.  Closes the current block and starts
+-- the true branch's block.
+jmpfFalse : Int -> String -> String -> S -> S
+jmpfFalse slot falseLbl trueLbl s =
+    let
+        ( tagT, s1 ) =
+            freshTmp s
+
+        ( isbT, s2 ) =
+            freshTmp s1
+
+        ( pldT, s3 ) =
+            freshTmp s2
+
+        ( p8T, s4 ) =
+            freshTmp s3
+
+        ( iszT, s5 ) =
+            freshTmp s4
+
+        ( jfT, s6 ) =
+            freshTmp s5
+    in
+    emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp slot))) s6
+        |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con tagBoolean))
+        |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp slot)) (Il.Con 8))
+        |> emit (Load (Just pldT) W LoadW (Il.Tmp p8T))
+        |> emit (Cmp (Just iszT) W Ceq (Il.Tmp pldT) (Il.Con 0))
+        |> emit (Bin (Just jfT) W And (Il.Tmp isbT) (Il.Tmp iszT))
+        |> closeBlock (Jnz (Il.Tmp jfT) falseLbl trueLbl)
+        |> startBlock trueLbl
+
+
+-- The unreachable (in well-typed Elm) non-exhaustive failure arm: raise via a
+-- runtime exit.  Loud, never a silent miscompile.
+lowerNonExhaustive : String -> S -> S
+lowerNonExhaustive msg s =
+    let
+        ( msgName, s1 ) =
+            freshData ("msg:" ++ msg)
+                (\n -> { name = n, align = Just 8, items = [ DStr msg, DByte 0 ], export_ = False })
+                s
+    in
+    emit (Call Nothing (Base W) (Il.Sym "rt_die") [ ArgVal (Base L) (Il.Sym msgName) ]) s1
+        |> closeBlock Hlt
+
+
+-- ============================ CON (ADT construction) ============================
+-- The VM's MX representation (Mid.ToZinc Con): a vector[tag, a1..an] — element
+-- 0 is the BARE ctor name as a symbol, then the args in source order.  The tag
+-- and each arg are lowered into ROOTED slots first, then rt_con allocates the
+-- vector and copies them through the write barrier (values.valVector +
+-- writeBarrierVectorStore, exactly the VM's absvector + address-> path), so
+-- the collector sees the VM's own vector layout.
+lowerCon : { tag : String, args : List Exp } -> Int -> S -> Result String S
+lowerCon con dest s =
+    let
+        ( tagSlot, s1 ) =
+            freshSlot s
+    in
+    lowerLit (LSymbol con.tag) tagSlot s1
+        |> Result.andThen
+            (\s2 ->
+                lowerArgsToSlots con.args s2
+                    |> Result.andThen
+                        (\( slots, s3 ) ->
+                            let
+                                n =
+                                    List.length slots
+
+                                ( rp, s4 ) =
+                                    freshTmp s3
+                            in
+                            Ok
+                                (emit
+                                    (Call (Just rp)
+                                        (Agg "val")
+                                        (Il.Sym "rt_con")
+                                        [ ArgVal (Base L) (Il.Tmp (slotTmp tagSlot))
+                                        , ArgVal (Base L)
+                                            (if n == 0 then
+                                                Il.Con 0
+
+                                             else
+                                                Il.Tmp (slotTmp (firstSlot slots))
+                                            )
+                                        , ArgVal (Base W) (Il.Con n)
+                                        ]
+                                    )
+                                    s4
+                                    |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+                                )
+                        )
+            )
+
+
+firstSlot : List Int -> Int
+firstSlot slots =
+    case slots of
+        x :: _ ->
+            x
+
+        [] ->
+            0
+
+
+-- Tuples are the VM's right-nested cons chain (Mid.ToZinc Tup: `@p` = cons),
+-- so `(a, b, c)` = cons(a, cons(b, c)).  Lowered here — rather than left
+-- failing loudly — because a destructuring LET (in scope) is only parseable by
+-- this compiler as a tuple/record/list pattern, and the tuple form is the
+-- minimal route to a real LetDestruct-with-bindings fixture (records and
+-- ListLit stay out of scope).  The tuple PATTERN is MCons + FstStep/SndStep —
+-- the same Step/Match machinery the Case lowering already implements.
+lowerTup : List Exp -> Int -> S -> Result String S
+lowerTup es dest s =
+    lowerVal (buildTuple es) dest s
+
+
+buildTuple : List Exp -> Exp
+buildTuple es =
+    case es of
+        x :: xs ->
+            if List.isEmpty xs then
+                x
+
+            else
+                PrimApp { prim = "cons", args = [ x, buildTuple xs ] }
+
+        [] ->
+            Lit (LNumber 0)
+
+
+-- ============================ SHORT-CIRCUIT BOOLEANS ============================
+-- Same jmpf machinery as If (Mid.ToZinc's ShortAnd/ShortOr/NotEqual emission,
+-- which is itself the Jmpf lowering): the false arm is a literal boolean, the
+-- short-circuit evaluates the right operand only on the pass-through arm.
+
+
+lowerShortAnd : { left : Exp, right : Exp, falseLabel : String, endLabel : String } -> Int -> S -> Result String S
+lowerShortAnd block dest s =
+    let
+        ( cslot, s0 ) =
+            freshSlot s
+
+        ( falseLbl, s1 ) =
+            freshLbl "andf" s0
+
+        ( contLbl, s2 ) =
+            freshLbl "andc" s1
+
+        ( endLbl, s3 ) =
+            freshLbl "andj" s2
+    in
+    lowerVal block.left cslot s3
+        |> Result.andThen
+            (\s4 ->
+                lowerVal block.right dest (jmpfFalse cslot falseLbl contLbl s4)
+                    |> Result.andThen
+                        (\s5 ->
+                            lowerLit (LBoolean False) dest (startBlock falseLbl (jumpTo endLbl s5))
+                                |> Result.map (jumpTo endLbl >> startBlock endLbl)
+                        )
+            )
+
+
+lowerShortOr : { left : Exp, right : Exp, falseLabel : String, endLabel : String } -> Int -> S -> Result String S
+lowerShortOr block dest s =
+    let
+        ( cslot, s0 ) =
+            freshSlot s
+
+        ( falseLbl, s1 ) =
+            freshLbl "orf" s0
+
+        ( contLbl, s2 ) =
+            freshLbl "orc" s1
+
+        ( endLbl, s3 ) =
+            freshLbl "orj" s2
+    in
+    lowerVal block.left cslot s3
+        |> Result.andThen
+            (\s4 ->
+                lowerLit (LBoolean True) dest (jmpfFalse cslot falseLbl contLbl s4)
+                    |> Result.andThen
+                        (\s5 ->
+                            lowerVal block.right dest (startBlock falseLbl (jumpTo endLbl s5))
+                                |> Result.map (jumpTo endLbl >> startBlock endLbl)
+                        )
+            )
+
+
+-- left /= right  =  not (left = right), via the exact `=` prim (inline number
+-- fast path + rt_prim fallback), then jmpf on the result.
+lowerNotEqual : { left : Exp, right : Exp, falseLabel : String, endLabel : String } -> Int -> S -> Result String S
+lowerNotEqual block dest s =
+    let
+        ( eql, s0 ) =
+            freshSlot s
+
+        ( falseLbl, s1 ) =
+            freshLbl "nef" s0
+
+        ( contLbl, s2 ) =
+            freshLbl "nec" s1
+
+        ( endLbl, s3 ) =
+            freshLbl "nej" s2
+    in
+    lowerPrimApp { prim = "=", args = [ block.left, block.right ] } eql s3
+        |> Result.andThen
+            (\s4 ->
+                lowerLit (LBoolean False) dest (jmpfFalse eql falseLbl contLbl s4)
+                    |> Result.andThen
+                        (\s5 ->
+                            lowerLit (LBoolean True) dest (startBlock falseLbl (jumpTo endLbl s5))
+                                |> Result.map (jumpTo endLbl >> startBlock endLbl)
                         )
             )
 
@@ -1600,7 +2206,7 @@ fvExp exp =
                         (setsUnion (List.map fvExp (letValues block.binders)))
                         (fvExp block.body)
             in
-            Result.map (Set.diff binderIds) inner
+            Result.map (\s -> Set.diff s binderIds) inner
 
         If block ->
             setsUnion (List.map fvExp [ block.cond, block.thenBranch, block.elseBranch ])
@@ -1614,8 +2220,18 @@ fvExp exp =
         NotEqual block ->
             setsUnion (List.map fvExp [ block.left, block.right ])
 
-        Case _ ->
-            Err "qbe: Case inside a closure body is not lowered by the native slice yet"
+        Case branch ->
+            let
+                boundIds =
+                    Set.fromList
+                        (branch.scrutId.id
+                            :: List.concatMap
+                                (List.map (Tuple.first >> .id) << .binds)
+                                branch.alts
+                        )
+            in
+            Result.map (\s -> Set.diff s boundIds)
+                (setsUnion (fvExp branch.scrutinee :: List.map (fvExp << .body) branch.alts))
 
         Con con ->
             setsUnion (List.map fvExp con.args)

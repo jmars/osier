@@ -200,6 +200,38 @@ export fn rt_make_closure(desc: *Desc, caps: ?[*]Value, ncaps: i32) callconv(.c)
     return values.valLambda(g, @ptrCast(desc), desc.arity, caps, ncaps);
 }
 
+/// ADT construction — the VM's MX representation (a vector[tag, a1..an]),
+/// built exactly like the ZINC `Con` emission (Symbol tag; absvector n+1;
+/// address-> x n+1): values.valVector for the array, then a write-barrier
+/// store per element.  `tag` and `args` point into the CALLER's pooled frame
+/// (rooted, so their CONTENTS are GC-rewritten in place); the vector is
+/// rooted across the stores.  `args` may be null when `nargs == 0` (the
+/// element loop is never entered).
+export fn rt_con(tag: *Value, args: [*]Value, nargs: i32) callconv(.c) Value {
+    const n: usize = @intCast(nargs);
+    var acc = values.valVector(g, @intCast(n + 1));
+    g.rootPushValue(&acc);
+    defer g.rootPop();
+    const data = acc.payload.vector.data.?;
+    // tag.* is read AFTER valVector's allocArray (the caller's slot was
+    // GC-rewritten in place); writeBarrierVectorStore is alloc-free.
+    g.writeBarrierVectorStore(data, 0, tag.*);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        g.writeBarrierVectorStore(data, i + 1, args[i]);
+    }
+    return acc;
+}
+
+/// The non-exhaustive-pattern failure arm.  Unreachable in well-typed Elm
+/// (the compiler's exhaustiveness check), so this just needs to fail loudly —
+/// never a silent miscompile.
+export fn rt_die(msg: [*:0]const u8) callconv(.c) noreturn {
+    werr(std.mem.span(msg));
+    werr("\n");
+    std.process.exit(1);
+}
+
 // =====================================================================
 //  Application
 // =====================================================================
