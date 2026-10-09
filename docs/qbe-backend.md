@@ -140,6 +140,40 @@ count metric remains a poor proxy either way (docs/aot-spike.md's lesson).
    Caught by the churn fixture at the 16MB heap.  rt_prim now copies its
    args into rooted storage before the first allocation.
 
+## Aggregate flattening — what it buys, and on what
+
+`Mid/Qbe/Flatten.elm` rewrites, per defun, an aggregate (`Con`/`RecordLit`/`Tup`/`ListLit`) that is
+consumed only locally — by a `Case` test, `RecordGet`, `LetDestruct` or `VField` — into its components
+in pooled frame slots, so the heap object and its `rt_con`/`cons`/`@p`/`assoc`/`snd` sequence never
+exist. It is **on by default**; `QBE_NOFLATTEN=1` disables it. It is a Mid→Mid rewrite, so it is
+invisible to the ZINC path (the corpus stays byte-identical) and `Value` boxing stays uniform — only
+the heap objects go — which is why it is far smaller than MLton's flatten: types are unreachable from
+Mid, so nothing can decide to unbox.
+
+**Measured on the compiler's own 58-source corpus, it buys nothing**: `rt_prim` sites 13,830 → 13,819
+(−0.08%), the aggregate prims (`assoc` 1819, `snd` 1819, `@p` 1365, `emptylist` 1120, `rt_con` 197)
+all unchanged, and wall clock 271.107 s → 270.725 s (−0.14%, noise).
+
+**Why — measured, not inferred**: the corpus contains only **9** let-bound record *literals*. Its 667
+record literals are returned, passed or stored, and all 459 `RecordUpdate` sites have *parameter*
+bases. Records here flow **in as parameters and out as results**; they are never born and consumed
+inside one defun.
+
+**That is a statement about this corpus, not about the pass.** The compiler's own code is not a
+representative workload: a program that writes `let r = { a = 1, b = 2 } in r.a + r.b` — the shape the
+pass targets — is exactly what is absent here, so **nothing above measures the case the pass exists
+for**. It is kept on that basis. Two known gaps are where that case most likely lands: nested
+aggregates, and `RecordUpdate` on a flattened base.
+
+Two things the pass did establish. It is the surface a **silent miscompile** came from and was caught
+by: `decideMatch` returned a **decided** `False` for an **undecidable** tag test, and since `Tup
+[Var a, Var b]` put `[]`/`::` on opaque components, `Type/Exhaustive.unifyList`'s whole body collapsed
+to `Nothing` in the self-hosted compiler. Fixed by making undecidable deny by default, plus a
+tuple-vs-list representation fix, and pinned by `tools/qbe/fixtures/flatnest.elm`, whose `zipPair` is
+`unifyList`'s shape verbatim (6915 pre-fix, 4949 == `elmvm` after). And separately: `Mid.Ir.Con` is
+**unreachable from Elm source today** — its only producer (`ctorDefun`) returns its own vector, so it
+always escapes — meaning the `Con`/`rt_con` half is correct but cannot be exercised.
+
 ## Files
 
 - `elm-compiler/src/Mid/Qbe/Il.elm` — the QBE IL subset as Elm data
