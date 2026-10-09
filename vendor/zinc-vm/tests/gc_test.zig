@@ -374,7 +374,8 @@ test "M1 grow_heap doubles, honours min_needed, respects reservation" {
         try std.testing.expectEqual(@as(usize, 0), g.space[g.md(pg)]);
         try std.testing.expectEqual(@as(usize, 0), g.gc_link[g.md(pg)]);
         try std.testing.expectEqual(@as(usize, 0), g.type_page[g.md(pg)]);
-        try std.testing.expectEqual(@as(u8, 0), g.page_queued[g.md(pg)]);
+        try std.testing.expectEqual(@as(u32, 0), g.page_queued[g.md(pg)]);
+        try std.testing.expect(!g.pageIsQueued(pg));
     }
     try std.testing.expect(g.nurseryIsEmpty());
 
@@ -395,6 +396,7 @@ test "M1 cheney queue dedup, links, reset" {
 
     const p1 = g.firstheappage + 5000;
     const p2 = g.firstheappage + 6000;
+    const epoch0 = g.queue_epoch;
     g.queue(p1);
     g.queue(p2);
     g.queue(p1); // DOUBLE-QUEUE MUST BE A NO-OP (would clobber gc_link[p1]).
@@ -403,24 +405,65 @@ test "M1 cheney queue dedup, links, reset" {
     try std.testing.expectEqual(p2, g.queue_tail);
     try std.testing.expectEqual(p2, g.gc_link[g.md(p1)]); // p1 -> p2 preserved
     try std.testing.expectEqual(@as(usize, 0), g.gc_link[g.md(p2)]); // tail terminates
-    try std.testing.expectEqual(@as(u8, 1), g.page_queued[g.md(p1)]);
-    try std.testing.expectEqual(@as(u8, 1), g.page_queued[g.md(p2)]);
+    // Queued == "tagged with the CURRENT cycle's epoch" (not a 1/0 bit).
+    try std.testing.expect(g.pageIsQueued(p1));
+    try std.testing.expect(g.pageIsQueued(p2));
+    try std.testing.expectEqual(epoch0, g.page_queued[g.md(p1)]);
+    try std.testing.expectEqual(epoch0, g.page_queued[g.md(p2)]);
 
     // next_page wraps at lastheappage (C: gc.c:435-437).
     try std.testing.expectEqual(g.firstheappage, g.next_page(g.lastheappage));
     try std.testing.expectEqual(p1 + 1, g.next_page(p1));
 
-    // Reset clears head/tail and the dedup bits.
+    // Reset clears head/tail and retires the dedup tags by bumping the epoch —
+    // it does NOT clear the array, so the retired tag is still physically there
+    // and must be ignored on the strength of the epoch comparison alone.
     g.queue_reset();
     try std.testing.expectEqual(@as(usize, 0), g.queue_head);
     try std.testing.expectEqual(@as(usize, 0), g.queue_tail);
-    try std.testing.expectEqual(@as(u8, 0), g.page_queued[g.md(p1)]);
-    try std.testing.expectEqual(@as(u8, 0), g.page_queued[g.md(p2)]);
+    try std.testing.expectEqual(epoch0 +% 1, g.queue_epoch);
+    try std.testing.expect(!g.pageIsQueued(p1));
+    try std.testing.expect(!g.pageIsQueued(p2));
+    try std.testing.expectEqual(epoch0, g.page_queued[g.md(p1)]); // stale, not cleared
+    try std.testing.expectEqual(epoch0, g.page_queued[g.md(p2)]);
 
-    // After reset the page can legitimately be re-queued.
+    // After reset the page can legitimately be re-queued — this is the
+    // semantic core of the change (a page queued in a PREVIOUS cycle is not
+    // "already queued"), and it must hold WITHOUT the array having been cleared.
+    const epoch1 = g.queue_epoch;
     g.queue(p1);
     try std.testing.expectEqual(p1, g.queue_head);
     try std.testing.expectEqual(p1, g.queue_tail);
+    try std.testing.expect(g.pageIsQueued(p1));
+    try std.testing.expectEqual(epoch1, g.page_queued[g.md(p1)]);
+
+    // A page queued in an EARLIER cycle stays stale across many resets (the
+    // whole point: no per-cycle clear), and an epoch wrap is handled by
+    // clearing rather than aliasing a stale tag with a live one.
+    var k: usize = 0;
+    while (k < 300) : (k += 1) {
+        g.queue_reset();
+        try std.testing.expect(!g.pageIsQueued(p1));
+    }
+    try std.testing.expectEqual(epoch1 + 300, g.queue_epoch);
+    g.queue(p1);
+    try std.testing.expect(g.pageIsQueued(p1));
+
+    // Force the wrap (unreachable in production at 2^32 resets, so the only
+    // way to exercise it is to set the epoch): the stale tag must be cleared,
+    // the epoch restarts at 1 (0 means "never queued"), and no page may be
+    // seen as queued by accident afterwards.
+    g.queue_epoch = std.math.maxInt(u32);
+    try std.testing.expect(!g.pageIsQueued(p1)); // maxInt != epoch1+301
+    g.queue(p2);
+    try std.testing.expectEqual(std.math.maxInt(u32), g.page_queued[g.md(p2)]);
+    g.queue_reset();
+    try std.testing.expectEqual(@as(u32, 1), g.queue_epoch);
+    try std.testing.expectEqual(@as(u32, 0), g.page_queued[g.md(p2)]);
+    try std.testing.expect(!g.pageIsQueued(p2));
+    g.queue(p2); // and the queue is still usable after the wrap
+    try std.testing.expect(g.pageIsQueued(p2));
+    try std.testing.expectEqual(p2, g.queue_head);
 }
 
 test "M1 dirty vectors: dedup, cap + overflow valve, clear" {

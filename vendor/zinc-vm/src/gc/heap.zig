@@ -219,12 +219,25 @@ pub const Gc = struct {
     gc_link: []usize,
     /// C: type_page[] — OBJECT / CONTINUED.
     type_page: []usize,
-    /// C: page_queued[] — 1 iff page currently in the Cheney queue (dedup).
-    page_queued: []u8,
+    /// C: page_queued[] — dedup tag: a page is currently in the Cheney queue
+    /// iff its tag EQUALS `queue_epoch` (see queue/pageIsQueued).
+    ///
+    /// C stores a 1/0 bit and clears the whole array in queue_reset.  This port
+    /// stores the epoch of the cycle that queued the page and BUMPS the epoch
+    /// at reset, so an entry left over from an earlier cycle is simply not
+    /// equal to the current epoch — the same predicate, without the clear.  The
+    /// array and the invariant it encodes are otherwise unchanged (one tag per
+    /// GC page; only the tag width grew, u8 → u32 — see queue_reset).
+    page_queued: []u32,
 
     // ---- Cheney queue — C: gc.c:83-87 ----
     queue_head: usize = 0,
     queue_tail: usize = 0,
+    /// Epoch stamped into page_queued by `queue` (osier addition — see
+    /// page_queued).  NEVER 0: 0 is the "never queued" tag written by init and
+    /// by grow_heap's new-tail zeroing, and `next == 0` is the wrap case
+    /// queue_reset detects.  So a zeroed page can never compare equal to it.
+    queue_epoch: u32 = 1,
     /// C: gc.c:85 in_scavenge — guard against recursive collection.
     in_scavenge: bool = false,
     current_space: usize,
@@ -380,7 +393,7 @@ pub const Gc = struct {
         errdefer pa.free(link);
         const typep = try pa.alloc(usize, page_count);
         errdefer pa.free(typep);
-        const pq = try pa.alloc(u8, page_count);
+        const pq = try pa.alloc(u32, page_count);
         errdefer pa.free(pq);
 
         var g = Gc{
@@ -463,8 +476,8 @@ pub const Gc = struct {
     /// losing every page that follows P (duplicate enqueues happen when
     /// gc_move's "already to-space" branch re-queues a queued page).
     pub fn queue(self: *Gc, page: usize) void {
-        if (self.page_queued[self.md(page)] != 0) return;
-        self.page_queued[self.md(page)] = 1;
+        if (self.pageIsQueued(page)) return;
+        self.page_queued[self.md(page)] = self.queue_epoch;
         if (self.queue_head != 0) {
             self.gc_link[self.md(self.queue_tail)] = page;
             self.gc_link[self.md(page)] = 0;
@@ -476,13 +489,45 @@ pub const Gc = struct {
         }
     }
 
-    /// C: gc.c:458-462 queue_reset.  The slice covers exactly
-    /// [firstheappage, lastheappage], so a whole-slice memset is the C
-    /// `memset(page_queued + firstheappage, 0, ...)` range.
+    /// The dedup predicate itself (C: `page_queued[P] != 0`): a page counts as
+    /// already queued, in the CURRENT cycle, iff its tag is the current epoch.
+    /// Stale tags from previous cycles are ignored by this comparison alone —
+    /// that is what replaces queue_reset's whole-array clear.
+    pub inline fn pageIsQueued(self: *const Gc, page: usize) bool {
+        return self.page_queued[self.md(page)] == self.queue_epoch;
+    }
+
+    /// C: gc.c:458-462 queue_reset.  C clears all of page_queued here.  At the
+    /// measured operating point (QBE_HEAP_MB=16384, 512-byte pages, 18675
+    /// nursery scavenges per 60 s) that clear is a **32 MB memset per
+    /// scavenge**, ~10 GB/s of pure zeroing and 44.7% of the native compiler's
+    /// runtime (handoff-midpass-profile-improve).  Bumping the cycle epoch
+    /// instead invalidates every entry from the previous cycle with one store;
+    /// the array is now only cleared when the epoch would wrap to 0, the
+    /// "never queued" tag — 2^32 resets, i.e. ~158 days of continuous
+    /// scavenging at the measured rate, so the clear is a correctness
+    /// backstop rather than a recurring cost.
+    ///
+    /// WHICH COUNTER, AND WHY: u32 (not u8/u16) because a narrow epoch does not
+    /// eliminate the memset, it only amortises it — a u8 epoch wraps every 255
+    /// resets, i.e. a 32 MB burst every ~0.8 s at the measured scavenge rate,
+    /// which is the same pathology at 1/255 the frequency.  The cost of u32 is
+    /// metadata memory: 4 bytes/page instead of 1, +100 MB at a 16 GB heap
+    /// (+12% on the ~840 MB of non-GC metadata that heap already commits, and
+    /// 0.6% of the heap itself).
     pub fn queue_reset(self: *Gc) void {
         self.queue_head = 0;
         self.queue_tail = 0;
-        @memset(self.page_queued, 0);
+        const next = self.queue_epoch +% 1;
+        if (next == 0) {
+            // Wrap: a tag of 0 means "never queued", so the epoch cannot be
+            // 0.  Clear the stale tags (this is C's queue_reset, once per
+            // 2^32 resets) and restart at 1.
+            @memset(self.page_queued, 0);
+            self.queue_epoch = 1;
+        } else {
+            self.queue_epoch = next;
+        }
     }
 
     // -----------------------------------------------------------------
