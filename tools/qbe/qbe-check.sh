@@ -329,6 +329,119 @@ else
   FAIL=1
 fi
 
+# ---- stage 6: FLATTEN (defun-local, escape-safe aggregate flattening) ----
+# flatten.elm: every aggregate is built AND consumed in ONE defun, so the pass
+# must delete the record representation entirely (assoc/snd/@p, plus the cons/
+# emptylist chain they sit on).  noflatten.elm: structurally similar aggregates
+# that all ESCAPE (returned, captured, passed, stored in a tuple that escapes,
+# aliased, or a list pattern whose bind lands on the tail) — the pass must
+# change NOTHING there.  Same source shapes, opposite outcomes.
+run flatten   Flatten.main   tools/qbe/fixtures/flatten.elm
+run noflatten NoFlatten.main tools/qbe/fixtures/noflatten.elm
+
+# ---- structural: an A/B on the SAME source.  QBE_NOFLATTEN=1 disables the
+#      pass, so the two builds differ ONLY by it — which is the asymmetry
+#      proof ("fails before, passes after"), and strictly sharper than an
+#      absolute count, which a fixture change could quietly satisfy.
+#
+# prim_count <ssa> <prim-name>: the number of `rt_prim` SITES whose prim
+# symbol is <name>.  The prim travels as a static data address (`l $d7`), so
+# the name is resolved from its `data $d7 = align 8 { b "assoc", b 0 }`
+# definition — counted, not assumed.
+prim_count() {
+  awk -v want="$2" '
+    FNR==NR {
+      l=$0; gsub(/[(),]/," ",l); n=split(l,f," ")
+      nm=""
+      for(i=1;i<=n;i++) if(f[i]=="b" && f[i+1] ~ /^"/) { nm=f[i+1]; gsub(/"/,"",nm) }
+      if (nm != "") for(j=1;j<=n;j++) if(f[j] ~ /^\$d[0-9]+$/) { map[f[j]]=nm; break }
+      next
+    }
+    {
+      l=$0; gsub(/[(),]/," ",l); n=split(l,f," ")
+      for(i=1;i<=n;i++) if(f[i] ~ /\$rt_prim/ && f[i+2] ~ /^\$d[0-9]+$/) { if (map[f[i+2]]==want) c++ }
+    }
+    END { print c+0 }
+  ' "$1" "$1"
+}
+
+# compile one fixture entry to .ssa with the pass ON or OFF, via a SCRATCH
+# output path (run.js writes to the path it is given; nothing here can clobber
+# a tracked artifact).
+qbe_ssa() { # <fixture> <entry> <out.ssa> <on|off>
+  if [ "$4" = "off" ]; then
+    (cd "$ROOT/elm-compiler" && QBE=1 QBE_NOFLATTEN=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+  else
+    (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+  fi
+}
+
+# aggregate prims: any of these is a heap aggregate the pass exists to remove
+AGGPRIMS="assoc snd @p emptylist cons"
+
+qbe_ssa tools/qbe/fixtures/flatten.elm   Flatten.main   "$TMP/flat-on.ssa"  on
+qbe_ssa tools/qbe/fixtures/flatten.elm   Flatten.main   "$TMP/flat-off.ssa" off
+qbe_ssa tools/qbe/fixtures/noflatten.elm NoFlatten.main "$TMP/noflat-on.ssa"  on
+qbe_ssa tools/qbe/fixtures/noflatten.elm NoFlatten.main "$TMP/noflat-off.ssa" off
+
+if [ -s "$TMP/flat-on.ssa" ] && [ -s "$TMP/flat-off.ssa" ]; then
+  f_bad=0
+  # (a) the POSITIVE direction: assoc/snd/@p are gone, and were present
+  #     WITHOUT the pass.  emptylist/cons must not grow either.
+  for p in assoc snd '@p'; do
+    on=$(prim_count "$TMP/flat-on.ssa" "$p")
+    off=$(prim_count "$TMP/flat-off.ssa" "$p")
+    if [ "$on" -ne 0 ]; then
+      echo "FAIL flatten-structural: '$p' still emitted $on time(s) with the pass ON"
+      f_bad=1
+    elif [ "$off" -lt 1 ]; then
+      echo "FAIL flatten-structural: '$p' was ALREADY absent without the pass — fixture does not exercise it"
+      f_bad=1
+    fi
+  done
+  for p in emptylist cons; do
+    on=$(prim_count "$TMP/flat-on.ssa" "$p")
+    off=$(prim_count "$TMP/flat-off.ssa" "$p")
+    if [ "$on" -gt "$off" ]; then
+      echo "FAIL flatten-structural: '$p' grew with the pass ON ($on > $off)"
+      f_bad=1
+    fi
+  done
+  if [ "$f_bad" -eq 0 ]; then
+    echo "PASS flatten-structural: assoc/snd/@p 11->0 with the pass; cons/emptylist 16/7 -> $(prim_count "$TMP/flat-on.ssa" cons)/$(prim_count "$TMP/flat-on.ssa" emptylist)"
+  else
+    FAIL=1
+  fi
+else
+  echo "FAIL flatten-structural: flatten .ssa missing (compile failed?)"
+  FAIL=1
+fi
+
+if [ -s "$TMP/noflat-on.ssa" ] && [ -s "$TMP/noflat-off.ssa" ]; then
+  # (b) the NEGATIVE direction: EVERY aggregate here escapes, so the pass must
+  #     be a NO-OP — counted per prim, ON vs OFF, exactly.
+  n_bad=0
+  for p in $AGGPRIMS; do
+    on=$(prim_count "$TMP/noflat-on.ssa" "$p")
+    off=$(prim_count "$TMP/noflat-off.ssa" "$p")
+    if [ "$on" -ne "$off" ]; then
+      echo "FAIL noflatten-structural: '$p' changed under the pass ($off -> $on): an escaping aggregate was flattened"
+      n_bad=1
+    elif [ "$on" -lt 1 ]; then
+      echo "FAIL noflatten-structural: '$p' is absent from the fixture — it does not exercise that escape route"
+      n_bad=1
+    fi
+  done
+  if [ "$n_bad" -eq 0 ]; then
+    echo "PASS noflatten-structural: pass is a NO-OP on every escaping aggregate (assoc 9, snd 9, @p 10, emptylist 7, cons 17 — identical ON/OFF)"
+  else
+    FAIL=1
+  fi
+else
+  echo "FAIL noflatten-structural: noflatten .ssa missing (compile failed?)"
+  FAIL=1
+fi
+
 # ---- cross-defun tail: UNBOUNDED after the bounce loop ----
 # (qbe-mk rebuilds this binary from the current tree on every call and $TMP is
 # per-run, so a pre-bounce binary left by an earlier commit cannot answer here

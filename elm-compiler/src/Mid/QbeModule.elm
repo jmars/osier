@@ -23,6 +23,7 @@ module Mid.QbeModule exposing (compileEntry)
 import Dict exposing (Dict)
 import Mid.Ir exposing (Defun)
 import Mid.Module as MidModule
+import Mid.Qbe.Flatten as QbeFlatten
 import Mid.Qbe.Lower as QbeLower
 import Mid.Qbe.Peephole as QbePeephole
 import Mid.Qbe.Print as QbePrint
@@ -30,8 +31,8 @@ import Type.Check as Check
 import Type.Env exposing (Env)
 
 
-compileEntry : List String -> List String -> String -> Result String String
-compileEntry corpusSources groupSources entryKey =
+compileEntry : List String -> List String -> String -> Bool -> Result String String
+compileEntry corpusSources groupSources entryKey flatten =
     case
         MidModule.parseAll corpusSources
             |> Result.andThen
@@ -50,7 +51,7 @@ compileEntry corpusSources groupSources entryKey =
                                                                 Err msg
 
                                                             Ok corpusGlobals ->
-                                                                compileGroup env corpusUnits corpusGlobals groupSources entryKey
+                                                                compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten
                                                     )
                                         )
                             )
@@ -69,8 +70,9 @@ compileGroup :
     -> Dict String Int
     -> List String
     -> String
+    -> Bool
     -> Result String String
-compileGroup env corpusUnits corpusGlobals groupSources entryKey =
+compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten =
     MidModule.parseAll groupSources
         |> Result.andThen
             (\groupFiles ->
@@ -88,7 +90,7 @@ compileGroup env corpusUnits corpusGlobals groupSources entryKey =
                                                             Err msg
 
                                                         Ok globals ->
-                                                            lowerAll globals corpusUnits groupUnits entryKey
+                                                            lowerAll flatten globals corpusUnits groupUnits entryKey
                                                 )
                                     )
                         )
@@ -96,16 +98,24 @@ compileGroup env corpusUnits corpusGlobals groupSources entryKey =
 
 
 lowerAll :
-    Dict String Int
+    Bool
+    -> Dict String Int
     -> List MidModule.Unit
     -> List MidModule.Unit
     -> String
     -> Result String String
-lowerAll globals corpusUnits groupUnits entryKey =
+lowerAll flatten globals corpusUnits groupUnits entryKey =
     compileAll globals (corpusUnits ++ groupUnits)
         |> Result.andThen
             (\program ->
-                QbeLower.lower (completeArities globals program) program entryKey
+                QbeLower.lower (completeArities globals program)
+                    (if flatten then
+                        QbeFlatten.run program
+
+                     else
+                        program
+                    )
+                    entryKey
             )
         |> Result.map (QbePeephole.optimize >> QbePrint.print)
 

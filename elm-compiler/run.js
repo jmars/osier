@@ -77,6 +77,12 @@ const MIDTIER_STATS = process.env.MIDTIER_STATS === '1';
 // lowered from QBE_ENTRY's defun, or `err <msg>`.  The ZINC paths (MIDTIER=0
 // and MIDTIER=1) are untouched by this flag.
 const QBE = process.env.QBE === '1';
+// QBE_NOFLATTEN=1 DISABLES the defun-local aggregate flattening pass.  It
+// exists so the pass can be A/B'd on the SAME source: the structural gate in
+// tools/qbe/qbe-check.sh compiles both ways and requires the aggregate prims
+// to be GONE in one build and PRESENT in the other, and the selfhost
+// wall-clock measurement needs the same switch.  Default ON.
+const QBE_FLATTEN = process.env.QBE_NOFLATTEN !== '1';
 const QBE_ENTRY = process.env.QBE_ENTRY || '';
 
 // V8's stack limit CANNOT be raised once node has started, and the MIDTIER=1
@@ -113,6 +119,7 @@ function compileGroups(groups) {
       passes: PASSES,
       qbe: QBE,
       qbeEntry: QBE_ENTRY,
+      qbeFlatten: QBE_FLATTEN,
       inlineThreshold: Number.isFinite(INLINE_THRESHOLD) ? INLINE_THRESHOLD : 30,
       stats: MIDTIER_STATS,
     },
