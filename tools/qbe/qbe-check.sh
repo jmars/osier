@@ -515,6 +515,231 @@ else
   FAIL=1
 fi
 
+# ---- S4/M1 + S4f: UNBOXED Int AND Float LOCALS — the structural A/B ------
+# The pass changes the REPRESENTATION of an Int local (a raw `l` operand) and
+# of a Float local (a raw `d` operand) instead of a tagged 40-byte frame slot,
+# and de-tags `+ - *` / `< <= > >=` / `=` when both operands are PROVEN Ints
+# (i64) or both PROVEN Floats (QBE's `add`/`sub`/`mul`/`div` at type `d`, and
+# the `ceqd`/`cltd`/... compare family).  QBE_NOREP=1 disables BOTH halves —
+# one switch, both predicates read it — so the two builds of one source differ
+# ONLY by it: the "fails before, passes after" asymmetry, and sharper than an
+# absolute count a fixture edit could satisfy.
+#
+# THE COUNTERS, not the clock: a structural counter that does not move while
+# the time does is the misattribution this project keeps catching, so the pass
+# has to PROVE it acted on the code, in the .ssa.
+#
+# frame_slots <ssa>: the entry defun's frame-slot count, read off the .ssa's
+# OWN account (`call $rt_frame_enter(w N)`).  The meta table roots only the
+# requested entry, so the first one in the file is the entry's.
+frame_slots() {
+  sed -n 's/.*call \$rt_frame_enter(w \([0-9]*\)).*/\1/p' "$1" | head -1
+}
+# rtprim_sites <ssa>: `rt_prim` CALL sites (the tag-test fallback the Int fast
+# path exists to delete).
+rtprim_sites() {
+  grep -c 'call \$rt_prim' "$1" || true
+}
+qbe_ssa_rep() { # <fixture> <entry> <out.ssa> <on|off>
+  if [ "$4" = "off" ]; then
+    (cd "$ROOT/elm-compiler" && QBE=1 QBE_NOREP=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+  else
+    (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+  fi
+}
+for pair in slotCount:slot chain:chain capture:cap polyLocal:poly boxed:box floatLocal:float floatParam:floatp floatCapture:floatc; do
+  e="${pair%%:*}"; n="${pair##*:}"
+  qbe_ssa_rep tools/qbe/fixtures/norep.elm "NoRep.$e" "$TMP/norep-$n-on.ssa"  on
+  qbe_ssa_rep tools/qbe/fixtures/norep.elm "NoRep.$e" "$TMP/norep-$n-off.ssa" off
+done
+
+if [ -s "$TMP/norep-slot-on.ssa" ] && [ -s "$TMP/norep-slot-off.ssa" ]; then
+  s_on=$(frame_slots "$TMP/norep-slot-on.ssa")
+  s_off=$(frame_slots "$TMP/norep-slot-off.ssa")
+  p_on=$(rtprim_sites "$TMP/norep-slot-on.ssa")
+  p_off=$(rtprim_sites "$TMP/norep-slot-off.ssa")
+  # NoRep.slotCount is 16 chained Int locals over one Int param: without the
+  # pass each takes a slot and each `+` a tag test + an rt_prim fallback.
+  if [ "$s_off" -lt 16 ]; then
+    echo "FAIL norep-structural: slotCount reserved only $s_off slots without the pass — the fixture does not exercise 16 locals"
+    FAIL=1
+  elif [ "$s_on" -ge "$s_off" ]; then
+    echo "FAIL norep-structural: slotCount frame slots did NOT drop ($s_off -> $s_on): no local was unboxed"
+    FAIL=1
+  elif [ "$p_on" -ne 0 ]; then
+    echo "FAIL norep-structural: $p_on rt_prim site(s) survive with the pass ON — the tag test was not removed"
+    FAIL=1
+  elif [ "$p_off" -lt 15 ]; then
+    echo "FAIL norep-structural: only $p_off rt_prim site(s) without the pass — the fixture does not exercise the tagged arith"
+    FAIL=1
+  else
+    echo "PASS norep-structural: slotCount frame slots $s_off -> $s_on, rt_prim sites $p_off -> $p_on"
+  fi
+
+  # the IR half of the type source: `NoRep.polyTwice` is POLYMORPHIC
+  # ((a -> a) -> a -> a), so the checker's monotype gate yields NOTHING inside
+  # it — if the rt_prim sites there do not drop, the pass is only reaching
+  # monotype defuns and this half is untested.
+  pp_on=$(rtprim_sites "$TMP/norep-poly-on.ssa")
+  pp_off=$(rtprim_sites "$TMP/norep-poly-off.ssa")
+  if [ "$pp_on" -lt "$pp_off" ]; then
+    echo "PASS norep-structural: a POLYMORPHIC defun's Int locals are unboxed too (rt_prim $pp_off -> $pp_on)"
+  else
+    echo "FAIL norep-structural: polyTwice rt_prim did not drop ($pp_off -> $pp_on) — only monotype defuns are reached"
+    FAIL=1
+  fi
+
+  # the FLOAT half (S4f): `NoRep.floatLocal`'s Float locals are seeded by
+  # float LITERALS, so they are proven from the tree and must be unboxed.  The
+  # asymmetry here is the INVERSE of the deny control below: this .ssa MUST
+  # differ with the pass on and off.  If it does not, the Float half is not
+  # working — that is the flip this unit was built to produce, not a check to
+  # be adjusted until it passes.
+  fl_on=$(rtprim_sites "$TMP/norep-float-on.ssa")
+  fl_off=$(rtprim_sites "$TMP/norep-float-off.ssa")
+  fs_on=$(frame_slots "$TMP/norep-float-on.ssa")
+  fs_off=$(frame_slots "$TMP/norep-float-off.ssa")
+  if cmp -s "$TMP/norep-float-on.ssa" "$TMP/norep-float-off.ssa"; then
+    echo "FAIL norep-float-fired: floatLocal .ssa is BYTE-IDENTICAL on and off — the Float locals were NOT unboxed"
+    FAIL=1
+  elif [ "$fs_off" -lt 16 ]; then
+    echo "FAIL norep-float-fired: floatLocal reserved only $fs_off slots without the pass — the fixture does not exercise the float locals"
+    FAIL=1
+  elif [ "$fs_on" -ge "$fs_off" ]; then
+    echo "FAIL norep-float-fired: floatLocal frame slots did NOT drop ($fs_off -> $fs_on): no Float local was unboxed"
+    FAIL=1
+  elif [ "$fl_on" -ge "$fl_off" ]; then
+    echo "FAIL norep-float-fired: floatLocal rt_prim did NOT drop ($fl_off -> $fl_on): the tag test was not removed"
+    FAIL=1
+  else
+    echo "PASS norep-float-fired: floatLocal .ssa DIFFERS ON/OFF, frame slots $fs_off -> $fs_on, rt_prim sites $fl_off -> $fl_on"
+  fi
+
+  # the FLOAT DENY control, and the MEASURED reason it exists:
+  # `NoRep.floatParam` is the SAME chain seeded by the Float PARAMETER instead
+  # of by literals.  A Float parameter is not a raw source (an integer token
+  # the checker typed Float is materialized as `tagNumber` by this front end
+  # while the VM PROMOTES it), so this entry must be left ALONE — byte
+  # identical, counters equal.  Paired with the firing check above (same
+  # fixture, same pipeline), so the identity cannot be satisfied by the pass
+  # not running at all.
+  fp_on=$(rtprim_sites "$TMP/norep-floatp-on.ssa")
+  fp_off=$(rtprim_sites "$TMP/norep-floatp-off.ssa")
+  fsp_on=$(frame_slots "$TMP/norep-floatp-on.ssa")
+  fsp_off=$(frame_slots "$TMP/norep-floatp-off.ssa")
+  if cmp -s "$TMP/norep-floatp-on.ssa" "$TMP/norep-floatp-off.ssa" &&
+    [ "$fsp_on" = "$fsp_off" ] && [ "$fp_on" = "$fp_off" ] && [ "$fp_off" -ge 3 ]; then
+    echo "PASS norep-float-denied: floatParam .ssa byte-identical ON/OFF ($fsp_off slots, $fp_off rt_prim sites) — a Float PARAMETER is not a raw source"
+  else
+    echo "FAIL norep-float-denied: floatParam changed under the pass ($fsp_off->$fsp_on slots, $fp_off->$fp_on rt_prim) — a Float parameter was read raw, which is a silent wrong answer"
+    FAIL=1
+  fi
+
+  # the capture boundary: a raw float escaping into a closure goes through
+  # `captureBlits`, the one boundary that does not pass through `lowerVal`.
+  # Its own rebox must fire (rt_prim drops) while the capture slot itself
+  # remains (the slot count is expected NOT to move here).
+  fc_on=$(rtprim_sites "$TMP/norep-floatc-on.ssa")
+  fc_off=$(rtprim_sites "$TMP/norep-floatc-off.ssa")
+  if cmp -s "$TMP/norep-floatc-on.ssa" "$TMP/norep-floatc-off.ssa"; then
+    echo "FAIL norep-float-capture: floatCapture .ssa byte-identical ON/OFF — the raw float did not reach the capture rebox"
+    FAIL=1
+  elif [ "$fc_on" -lt "$fc_off" ]; then
+    echo "PASS norep-float-capture: floatCapture .ssa differs, rt_prim $fc_off -> $fc_on (a raw float is reboxed into its capture slot)"
+  else
+    echo "FAIL norep-float-capture: floatCapture rt_prim did not drop ($fc_off -> $fc_on)"
+    FAIL=1
+  fi
+
+  # ...and the pass must FIRE on the entries it does claim, so the identity
+  # above cannot be satisfied by the pass not running at all.
+  c_on=$(rtprim_sites "$TMP/norep-chain-on.ssa")
+  c_off=$(rtprim_sites "$TMP/norep-chain-off.ssa")
+  if [ "$c_off" -ge 6 ] && [ "$c_on" -eq 0 ]; then
+    echo "PASS norep-fired: chain rt_prim $c_off -> $c_on (the fixture does exercise the pass)"
+  else
+    echo "FAIL norep-fired: chain rt_prim $c_off -> $c_on — the fixture does not exercise the pass"
+    FAIL=1
+  fi
+else
+  echo "FAIL norep-structural: norep .ssa missing (compile failed?)"
+  FAIL=1
+fi
+
+# ---- stage 7: FLOAT (the silent-wrong class) ----
+# The float path was NOT "not expressible" in the mere sense: hand-patching
+# the emitted .ssa past the data-item lexer rejection produced a binary that
+# BUILT, RAN, EXITED 0 and printed 0.0 (tools/bench/suite/mono_float.elm's VM
+# answer is 600000.0).  Two causes: Mid/Qbe/Lower.elm's LFloat arm loaded the
+# double INTO the payload-address temporary instead of storing through it
+# (leaving a tag-only cell — the tag was written and the payload never was),
+# and Mid/Qbe/Print.elm printed the static data item as `d 0.0`, which the
+# vendored QBE's data lexer rejects.  A silent-wrong defect cannot be closed
+# by one happy path, so tools/qbe/fixtures/float.elm is a MATRIX: each entry
+# is a separate build (the meta table roots only the requested entry), and
+# every one of them must match elmvm's stdout byte-for-byte.
+# The inline fast path inlines ONLY the both-Number case, so the operand
+# shapes matter: `add/sub/mul` and `ltc/lec/gtc/gec` exercise BOTH arms (the
+# inline integer op and the rt_prim fallback), `div` is rt_prim-only (`/` is
+# absent from the inline table), `eqc/neq` is lowerNumEq's both-Number arm.
+# The S4f entries at the end of the list are the cases a Float UNBOXING can get
+# wrong: `nanEq`/`nanLt`/`nanGe` (IEEE ordered compares on raw operands),
+# `negZeroEq`/`negZeroInv` (signed zero: `-0.0 == 0.0` is true, and the sign
+# reaches `1.0 / -0.0`), `infArith`/`infCmp` (produced Infinity),
+# `maxF`/`denormSum` (the ends of the f64 range), `recFieldRaw`/`listRaw` (a
+# RAW float crossing a heap aggregate — a rebox boundary plus an unprovable
+# read-back), `floatCmpChain` (every compare on raw operands at once) and
+# `intAtFloat` (an integer TOKEN at a Float parameter position — the measured
+# case that denies the float-parameter half of the pass), and
+# `fdivIntTokens`/`fdivZero`/`fdivMixed` — `/` is Elm's FLOAT division even
+# when its operands are integer tokens (`7 / 2` is 3.5, `1 / 0` is Infinity),
+# so `f/` must never reach an integer arm; the first cut of this pass did
+# exactly that and these entries catch it (3 and SIGFPE respectively).
+# `tiny`/`big`/`bigNeg` pin printFloat's edges, where JS Number::toString
+# switches to exponential ("1e-7" / "-1e+22") and QBE's data lexer runs C's
+# `%lf` over the text; `infLit`/`negInfLit` are the NON-FINITE literals
+# (1.0e400 overflows to "Infinity", which used to get printFloat's ".0"
+# suffix appended and die as `d_Infinity.0`); `denorm` is the other end
+# (5e-324); `nan` is produced (0.0/0.0), which is the only way a NaN can
+# reach printValue at all (there is no literal spelling for it).
+for e in lit neg add sub mul div ltc lec gtc gec eqc neq tiny big bigNeg infLit negInfLit denorm fromIntF recField tupleF listSum viaFn strF strI nan loop negZeroEq negZeroInv infArith infCmp nanEq nanLt nanGe maxF denormSum recFieldRaw listRaw intAtFloat floatCmpChain fdivIntTokens fdivZero fdivMixed; do
+  run "float-$e" "Flt.$e" tools/qbe/fixtures/float.elm
+done
+run float-main Flt.main tools/qbe/fixtures/float.elm
+# the driver's FLOAT ARGUMENT path (tools/qbe/rt.zig isFloatArg): pre-fix the
+# native runner refused `2.5` with "entry arg '2.5' is not an int" while elmvm
+# printed 3.5.  The int-arg control stays, so widening the heuristic cannot
+# have stolen the int path (or vice versa).
+run float-arg      Flt.idF tools/qbe/fixtures/float.elm 2.5
+run float-arg-int  Flt.idF tools/qbe/fixtures/float.elm 3
+run float-arg-tiny Flt.idF tools/qbe/fixtures/float.elm 1e-7
+run float-arg-neg  Flt.idF tools/qbe/fixtures/float.elm -1.5
+
+# ---- S4/M1: UNBOXED Int LOCALS (tools/qbe/fixtures/norep.elm) ----
+# Every entry is a SEPARATE BUILD (the meta table roots only the requested
+# entry) and each one's stdout must match elmvm's byte-for-byte, plus the
+# gc-churn rerun — the representation mismatch this pass can cause is a WRONG
+# ANSWER, not a crash.  `main`/`polyLocal` are arity 0; the rest take one arg.
+run norep-main    NoRep.main      tools/qbe/fixtures/norep.elm
+run norep-poly    NoRep.polyLocal tools/qbe/fixtures/norep.elm
+for e in chain boxed intCase cmp eqInt slotCount; do
+  run "norep-$e" "NoRep.$e" tools/qbe/fixtures/norep.elm 7
+done
+run norep-cap   NoRep.capture    tools/qbe/fixtures/norep.elm 7
+# the FLOAT half, behaviourally: unboxed Float locals must still agree with the
+# VM, incl. at the rebox boundary (`v + x`) and through a closure capture.
+run norep-float      NoRep.floatLocal   tools/qbe/fixtures/norep.elm 1.5
+run norep-floatcap   NoRep.floatCapture tools/qbe/fixtures/norep.elm 1.5
+# ...and the FLOAT PARAMETER deny control, behaviourally, WITH AN INT ARGUMENT:
+# `3` is an integer token typed Float, so this entry is exactly the shape a raw
+# parameter read would get wrong (the VM promotes it).  The float argument is
+# kept beside it so the control cannot pass by refusing all arguments.
+run norep-floatparam-i NoRep.floatParam tools/qbe/fixtures/norep.elm 3
+run norep-floatparam-f NoRep.floatParam tools/qbe/fixtures/norep.elm 1.5
+# THE HATCH, behaviourally: the SAME source with the pass OFF must also build,
+# run and agree.  Off-switch builds that are never executed are not controls.
+QBE_NOREP=1 run norep-main-off NoRep.main tools/qbe/fixtures/norep.elm
+
 # ---- cross-defun tail: UNBOUNDED after the bounce loop ----
 # (qbe-mk rebuilds this binary from the current tree on every call and $TMP is
 # per-run, so a pre-bounce binary left by an earlier commit cannot answer here

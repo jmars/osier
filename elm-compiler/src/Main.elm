@@ -58,6 +58,7 @@ type alias Flags =
     , qbe : Bool
     , qbeEntry : String
     , qbeFlatten : Bool
+    , qbeRep : Bool
     }
 
 
@@ -167,7 +168,7 @@ compileAll flags =
                 ( encodeStrings
                     (List.map
                         (\groupSources ->
-                            case QbeModule.compileEntry corpusSources groupSources flags.qbeEntry flags.qbeFlatten of
+                            case QbeModule.compileEntry corpusSources groupSources flags.qbeEntry flags.qbeFlatten flags.qbeRep of
                                 Ok ssa ->
                                     ssa
 

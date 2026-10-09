@@ -615,6 +615,20 @@ fn buildArgvList(nargs: usize, c_argv: [*]?[*:0]u8) Value {
     return acc;
 }
 
+/// True when a CLI arg is spelled as a float literal.  VERBATIM the heuristic
+/// tools/elmvm.zig and tools/aot/main.zig use, so the VM reference and the
+/// native driver accept the same command line — an arg is a float iff it
+/// contains '.'/'e'/'E' or is one of the canonical non-finite tokens
+/// (parseFloat accepts all four).  Everything else stays on the int path.
+fn isFloatArg(arg: []const u8) bool {
+    if (std.mem.eql(u8, arg, "NaN") or std.mem.eql(u8, arg, "Infinity") or
+        std.mem.eql(u8, arg, "-Infinity")) return true;
+    for (arg) |c| {
+        if (c == '.' or c == 'e' or c == 'E') return true;
+    }
+    return false;
+}
+
 export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     // Read the debug knobs ONCE, here, before any generated code can run.
     // rt_frame_leave used to call getenv on every return (8.4% of the native
@@ -696,7 +710,7 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
 
     const argc: usize = @intCast(c_argc);
     if (argc < 2) {
-        werr("usage: <prog> <entry-name> [int-arg ...]\n");
+        werr("usage: <prog> <entry-name> [int|float-arg ...]\n");
         return 2;
     }
     const entry = std.mem.span(c_argv[1] orelse "");
@@ -760,21 +774,34 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
         return 2;
     };
 
-    // args: ints only (the slice's fixtures need nothing else; floats die
-    // loudly rather than guessing the VM's float-arg formatting)
+    // args: ints, or floats for an arg spelled like a float literal.  The
+    // heuristic is elmvm's/aot's verbatim (tools/elmvm.zig isFloatArg) so the
+    // native driver and the VM reference accept the SAME command line —
+    // `Flt.idF 2.5` must reach the entry as a Value tagged float, exactly as
+    // elmvm's `F[...]` atom builds it.
     var argv_buf: [max_arity]Value = undefined;
     var entry_nargs: i32 = 0;
     var j: usize = 0;
     if (!argv_mode) {
         while (j < nargs) : (j += 1) {
             const a = std.mem.span(c_argv[2 + j] orelse "");
-            const n = std.fmt.parseInt(i64, a, 10) catch {
-                var buf: [256]u8 = undefined;
-                const out = std.fmt.bufPrint(&buf, "qbe-rt: entry arg '{s}' is not an int (qbe slice)\n", .{a}) catch "qbe-rt: bad entry arg\n";
-                werr(out);
-                return 2;
-            };
-            argv_buf[j] = values.valNumber(n);
+            if (isFloatArg(a)) {
+                const f = std.fmt.parseFloat(f64, a) catch {
+                    var buf: [256]u8 = undefined;
+                    const out = std.fmt.bufPrint(&buf, "qbe-rt: entry arg '{s}' is not a float\n", .{a}) catch "qbe-rt: bad entry arg\n";
+                    werr(out);
+                    return 2;
+                };
+                argv_buf[j] = values.valFloat(f);
+            } else {
+                const n = std.fmt.parseInt(i64, a, 10) catch {
+                    var buf: [256]u8 = undefined;
+                    const out = std.fmt.bufPrint(&buf, "qbe-rt: entry arg '{s}' is not an int (qbe slice)\n", .{a}) catch "qbe-rt: bad entry arg\n";
+                    werr(out);
+                    return 2;
+                };
+                argv_buf[j] = values.valNumber(n);
+            }
         }
         entry_nargs = @intCast(nargs);
     }

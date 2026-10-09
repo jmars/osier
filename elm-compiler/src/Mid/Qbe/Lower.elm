@@ -98,6 +98,8 @@ import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), Lambda, LetBinder(..), Lit(
 import Dict exposing (Dict)
 import Mid.Qbe.Il as Il exposing (Module, Func, Block, Inst(..), Jump(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..))
 import Set exposing (Set)
+import Mid.Qbe.Types as QbeTypes
+import Type.Representation as Rep
 import Zinc.Csexp exposing (utf8ByteLength)
 
 
@@ -171,6 +173,11 @@ type alias S =
     , lbl : Int
     , slot : Int -- next frame slot to allocate
     , binderSlots : Dict Int Int -- binder id -> frame slot
+    , rawInt : Dict Int Il.Arg -- binder id -> the RAW `l` operand holding it (S4)
+    , rawFloat : Dict Int Il.Arg -- binder id -> the RAW `d` operand holding it (S4f)
+    , intBinders : Set Int -- binder ids whose value IS an Int (S4; boxed or raw)
+    , table : Dict String QbeTypes.Entry -- the S1 side table (S4 reads it)
+    , rep : Bool -- S4's pass switch (QBE_NOREP=1 -> False)
     , funcs : List PendingFunc -- extra (closure) funcs, REVERSED
     , datas : List DataDef -- REVERSED
     , dataKeys : Dict String String -- content key -> data name (dedup)
@@ -267,8 +274,8 @@ freshData key mk s =
 -- Descs, and the driver's meta table.
 
 
-lower : Dict String Int -> List Defun -> String -> Result String Il.Module
-lower arityTable program entryKey =
+lower : Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
+lower rep table arityTable program entryKey =
     let
         defuns =
             Dict.fromList (List.map (\d -> ( d.key, d )) program)
@@ -281,6 +288,11 @@ lower arityTable program entryKey =
             , lbl = 0
             , slot = 0
             , binderSlots = Dict.empty
+            , rawInt = Dict.empty
+            , rawFloat = Dict.empty
+            , intBinders = Set.empty
+            , table = table.defuns
+            , rep = rep
             , funcs = []
             , datas = []
             , dataKeys = Dict.empty
@@ -468,6 +480,20 @@ lowerFunBody entry key qname lambda captures sOuter =
         ncaps =
             List.length captures
 
+        -- S4: the ONLY binder types the S1 table can give is the defun's own
+        -- MONOTYPE, peeled in parameter order (Mid's `params` is in the
+        -- callee's order, param 1 outermost, and `Rep.TFun` is
+        -- `arg -> result`, so the peel lines up). A polymorphic defun, a
+        -- defun with no scheme, or a non-arrow type yields NOTHING — deny by
+        -- default. Closure bodies (entry = False) get nothing: they are
+        -- separate functions with no scheme of their own.
+        intParams =
+            if entry && sOuter.rep then
+                intParamsOf (Dict.get key sOuter.table) lambda.params
+
+            else
+                Set.empty
+
         s0 =
             { blocks = []
             , curLabel = "start"
@@ -480,6 +506,11 @@ lowerFunBody entry key qname lambda captures sOuter =
                     (List.indexedMap (\i p -> ( p.id, i + 2 )) lambda.params
                         ++ List.indexedMap (\j cid -> ( cid, nparams + 2 + j )) captures
                     )
+            , rawInt = Dict.empty
+            , rawFloat = Dict.empty
+            , intBinders = intParams
+            , table = sOuter.table
+            , rep = sOuter.rep
             , funcs = []
             , datas = sOuter.datas
             , dataKeys = sOuter.dataKeys
@@ -580,12 +611,30 @@ lowerVal exp dest s =
             lowerLit lit dest s
 
         Var id ->
-            case Dict.get id s.binderSlots of
-                Just srcSlot ->
-                    Ok (emit (Blit (Il.Tmp (slotTmp srcSlot)) (Il.Tmp (slotTmp dest)) vs) s)
+            -- S4: a binder whose value is held RAW (unboxed Int local) is
+            -- reconstructed as a tagged Value HERE.  This single place is the
+            -- rebox-at-every-boundary rule: call arguments, aggregate stores,
+            -- returns, tail-call moves and case scrutinees all reach their
+            -- binder through `lowerVal`.
+            case Dict.get id s.rawInt of
+                Just raw ->
+                    Ok (reboxArg dest raw s)
 
                 Nothing ->
-                    Err ("qbe: unbound binder id " ++ String.fromInt id ++ " (corrupt Mid tree)")
+                    -- S4f: the same boundary for a raw FLOAT (`tagFloat` +
+                    -- `stored`) — the one place a raw `d` operand is turned
+                    -- back into a 40-byte value.
+                    case Dict.get id s.rawFloat of
+                        Just raw ->
+                            Ok (reboxFloat dest raw s)
+
+                        Nothing ->
+                            case Dict.get id s.binderSlots of
+                                Just srcSlot ->
+                                    Ok (emit (Blit (Il.Tmp (slotTmp srcSlot)) (Il.Tmp (slotTmp dest)) vs) s)
+
+                                Nothing ->
+                                    Err ("qbe: unbound binder id " ++ String.fromInt id ++ " (corrupt Mid tree)")
 
         GRef ref ->
             lowerGRefValue ref dest s
@@ -695,15 +744,22 @@ lowerLit lit dest s =
 
         LFloat f ->
             let
-                ( d8, s1 ) =
-                    afterTag (storeTag tagFloat)
+                ( fname, s1 ) =
+                    floatData f s
 
-                ( fname, s2 ) =
-                    freshData ("flt:" ++ String.fromFloat f)
-                        (\n -> { name = n, align = Just 8, items = [ DDouble f ], export_ = False })
-                        s1
+                ( x, s2 ) =
+                    freshTmp s1
             in
-            Ok (emit (Load (Just d8) D LoadD (Il.Sym fname)) s2)
+            Ok
+                -- Load the double into a FRESH temp and let `reboxFloat` write
+                -- the tagged cell — the same shape as LNumber above, and the
+                -- only float-store path in the backend.  Targeting the payload
+                -- address with the load itself (the old shape) clobbered that
+                -- address with the loaded double and never wrote the payload at
+                -- all, leaving a tag-only cell that printed as 0.0.
+                (emit (Load (Just x) D LoadD (Il.Sym fname)) s2
+                    |> (\s3 -> reboxFloat dest (Il.Tmp x) s3)
+                )
 
         LSymbol name ->
             let
@@ -731,6 +787,518 @@ lowerLit lit dest s =
                 (emit (Call (Just rp) (Agg "val") (Il.Sym "rt_string") [ ArgVal (Base L) (Il.Sym strname), ArgVal (Base W) (Il.Con (utf8ByteLength str)) ]) s2
                     |> emit (Blit (Il.Tmp rp) (Il.Tmp d) vs)
                 )
+
+
+-- ==================== S4: UNBOXED Int LOCALS (representation v1) ====================
+--
+-- WHAT THIS IS: monomorphisation step S4/M1 — the representation half, at a
+-- scope that needs NO ABI change.  Inside a defun the CHECKER typed as a
+-- CLOSED MONOTYPE, an Int local is held in a RAW QBE `l` operand instead of a
+-- 40-byte frame slot, and `+ - *` / `< <= > >=` / `=` on operands already
+-- KNOWN to be Ints emit the native i64 op with NO tag test and NO `rt_prim`
+-- fallback.
+--
+-- WHERE THE TYPE COMES FROM — and the gap this step had to work around.
+-- The plan's seat is `Dict binderId monotype`, the per-binder half of the S1
+-- table.  THAT HALF DOES NOT EXIST and cannot exist at S1: `Type.Infer`
+-- exposes only `inferUnit`/`CheckedUnit` (Type/Infer.elm:1) and
+-- `CheckedUnit.file` is the UNTYPED elm-syntax `File.File` (Infer.elm:61-67),
+-- so per-binder types live only in an `InferState` nothing exposes —
+-- producing them is the plan's S2 accumulator plus the S3 seed re-freeze,
+-- neither of which has landed.  So this step reads the half the table DOES
+-- have (the defun's closed monotype, `QbeTypes.Monotype`) and derives binder
+-- types from the Mid tree itself:
+--
+--   * PARAMETERS, from the checker: the monotype is peeled in parameter order
+--     (`Rep.TFun arg res`; Mid's `Lambda.params` is in the callee's order,
+--     param 1 outermost), so `Map : (a -> b) -> List a -> List b` yields
+--     nothing while `Fib.fib : Int -> Int` yields exactly param 0.  This is
+--     the brief's gate: a POLYMORPHIC defun (or one with no scheme) gets
+--     NOTHING, which is why the reach is the ~30% of tabled defuns S1
+--     measured as monotypes.
+--   * LET binders, from the IR: deny-by-default, see `isIntKnown`.
+--
+-- WHY THE LOCAL HALF IS SOUND AND NOT A CHEAPER ANALOGUE: it is not a guess
+-- about the checker's answer, it is a fact about the VM's values.  `LNumber n`
+-- lowers to `tagNumber` + an i64 payload (lowerLit), the VM has ONE integer
+-- tag and a separate float tag (gc/types.zig), and primAdd/Sub/Mul promote
+-- only when a FLOAT is present.  So "this operand is an Int" is decidable from
+-- the IR alone, and stays true regardless of what the surrounding scheme says
+-- — a `let x = i + 1` inside a POLYMORPHIC `fold` is an Int too.  The two
+-- halves are complementary: the checker half covers binders whose type comes
+-- from a signature, the IR half covers binders whose defining expression is in
+-- view.
+--
+-- WHAT IS DELIBERATELY NOT DONE (deny by default — the failure mode here is
+-- WRONG BYTES, not a crash):
+--   * FLOAT. `LFloat` locals are NOT unboxed: every float arithmetic route
+--     goes through `rt_prim` (Mid/Qbe/Il.elm has NO `addd`/`subd`/`muld` and
+--     no float compare), so a raw `d` temp would be reboxed into a staging
+--     slot at every single use — churn, no win.  The Float half of this
+--     step's brief needs IL ops in `Mid/Qbe/Il.elm` + `Mid/Qbe/Print.elm`,
+--     which are OUTSIDE this step's write scope.  Reported as a gap, not
+--     silently skipped.
+--   * PARAMETERS as raw temps (no ABI change is the whole point of v1).
+--   * CASE/destructuring-scrutinee binders and CASE alt binds: both are read
+--     back through `slotTmp` by the path machinery (VPath/VField), i.e. as
+--     40-byte Values; unboxing them would need every path step taught the
+--     representation.  Denied.
+--   * INNER LAMBDA parameters: no scheme of their own, so no source.  Denied.
+--   * Anything whose Int-ness is not PROVEN by `isIntKnown`.  A binder that
+--     escapes into a closure IS reboxed — `captureBlits` handles the raw case
+--     explicitly — so escapes are covered, not denied.
+--
+-- GC SAFETY IS STRUCTURAL: a raw `l` operand is not a pointer and is never
+-- placed in a `ROOT_VALUE_ARRAY` (it does not live in a frame slot at all);
+-- the collector's `scanValue` is tag-directed with a total `else => {}` arm,
+-- so nothing new gets scanned.  No new rooting protocol is added, deliberately.
+--
+-- REBOXING IS THE BOUNDARY RULE, and it is applied at ONE place: every use of
+-- a binder as a VALUE goes through `lowerVal`, whose `Var` arm reboxes.  Call
+-- arguments (`stageArgs`), aggregate stores, `:val` returns, tail-call
+-- argument moves, case scrutinees and closure captures all route through
+-- `lowerVal` or through the explicit rebox in `captureBlits`, so an escaping
+-- value is reconstructed as a tagged `Value` exactly as before.
+
+
+{-| The binder ids of `params` the checker says are `Int`, given the defun's
+type.  `Nothing` (no scheme), `Polymorphic` (open — the plan's "wait for the
+specialiser" case), a non-arrow type, and any parameter whose domain is not
+literally `Int []` all yield NOTHING for that position: the peel STOPS rather
+than guessing, so a partially-typed defun contributes only its leading Ints.
+-}
+intParamsOf : Maybe QbeTypes.Entry -> List Binder -> Set Int
+intParamsOf maybeEntry params =
+    case Maybe.map .defunType maybeEntry of
+        Just (QbeTypes.Monotype t) ->
+            peelIntParams t params
+
+        _ ->
+            Set.empty
+
+
+peelIntParams : Rep.Type -> List Binder -> Set Int
+peelIntParams t params =
+    case params of
+        [] ->
+            Set.empty
+
+        p :: rest ->
+            case t of
+                Rep.TFun arg res ->
+                    Set.union
+                        (if isIntType arg then
+                            Set.singleton p.id
+
+                         else
+                            Set.empty
+                        )
+                        (peelIntParams res rest)
+
+                _ ->
+                    Set.empty
+
+
+isIntType : Rep.Type -> Bool
+isIntType t =
+    case t of
+        Rep.TCon "Int" [] ->
+            True
+
+        _ ->
+            False
+
+
+{-| THE PREDICATE, with the pass switch folded in so every consumer reads
+exactly one decision: an expression is Int-known iff the pass is ON and
+`isIntKnown` proves it.  There is no second place to forget `s.rep`.
+-}
+isIntExp : S -> Exp -> Bool
+isIntExp s exp =
+    s.rep && isIntKnown s exp
+
+
+{-| Deny-by-default proof that `exp`'s VALUE is an Int.  Deliberately small:
+each admitted shape is one whose Int-ness is a fact about the VM's values (see
+the section header).  `App`, `GRef`, `Con`, `If`, `Let`, `Case`, record/list
+operations and every prim outside `+ - *` return False, so all of them keep
+their frame slots and their `rt_prim` routes.
+-}
+isIntKnown : S -> Exp -> Bool
+isIntKnown s exp =
+    case exp of
+        Lit (LNumber _) ->
+            True
+
+        Var id ->
+            Set.member id s.intBinders
+
+        NoTail inner ->
+            isIntKnown s inner
+
+        PrimApp app ->
+            List.member app.prim [ "+", "-", "*" ]
+                && List.length app.args == 2
+                && List.all (isIntKnown s) app.args
+
+        _ ->
+            False
+
+
+{-| The RAW `l`-typed operand holding `exp`'s Int value.  DOMAIN: exactly
+`isIntKnown`'s — every admitted shape here is an admitted shape there, and the
+final arms are loud errors rather than a fallback, so a future shape added to
+one and not the other cannot silently pick up a wrong representation.
+
+`Var` covers both halves of the binder world: a raw binder contributes its own
+operand with no instruction at all, and a BOXED Int binder (a parameter of a
+monotype defun, which v1 does not unbox) contributes `loadl (slot + 8)` — the
+tag is provably `tagNumber`, so its payload word IS the Int.
+-}
+rawIntOf : Exp -> S -> Result String ( Il.Arg, S )
+rawIntOf exp s =
+    case exp of
+        Lit (LNumber n) ->
+            Ok ( Il.Con n, s )
+
+        NoTail inner ->
+            rawIntOf inner s
+
+        Var id ->
+            case Dict.get id s.rawInt of
+                Just raw ->
+                    Ok ( raw, s )
+
+                Nothing ->
+                    case Dict.get id s.binderSlots of
+                        Just slot ->
+                            let
+                                ( p, s1 ) =
+                                    freshTmp s
+
+                                ( t, s2 ) =
+                                    freshTmp s1
+                            in
+                            Ok
+                                ( Il.Tmp t
+                                , emit (Bin (Just p) L Add (Il.Tmp (slotTmp slot)) (Il.Con 8)) s2
+                                    |> emit (Load (Just t) L LoadL (Il.Tmp p))
+                                )
+
+                        Nothing ->
+                            Err ("qbe: raw Int operand not in scope: binder " ++ String.fromInt id ++ " (corrupt Mid tree)")
+
+        PrimApp app ->
+            case ( app.prim, app.args ) of
+                ( "+", [ a, b ] ) ->
+                    rawIntBin Add a b s
+
+                ( "-", [ a, b ] ) ->
+                    rawIntBin Sub a b s
+
+                ( "*", [ a, b ] ) ->
+                    rawIntBin Mul a b s
+
+                _ ->
+                    Err ("qbe: deny-by-default violation — isIntKnown admitted a PrimApp with no raw Int form: " ++ app.prim)
+
+        _ ->
+            Err "qbe: deny-by-default violation — isIntKnown admitted an expression with no raw Int form"
+
+
+rawIntBin : BinOp -> Exp -> Exp -> S -> Result String ( Il.Arg, S )
+rawIntBin op a b s =
+    rawInt2 a b s
+        |> Result.map
+            (\( aa, bb, s1 ) ->
+                let
+                    ( r, s2 ) =
+                        freshTmp s1
+                in
+                ( Il.Tmp r, emit (Bin (Just r) L op aa bb) s2 )
+            )
+
+
+{-| Both operands as raw `l` operands, LEFT FIRST (PrimApp args are in POP
+order, so `a` is the VM's first pop = the lhs — the same order the existing
+tag-testing inlines use).
+-}
+rawInt2 : Exp -> Exp -> S -> Result String ( Il.Arg, Il.Arg, S )
+rawInt2 a b s =
+    rawIntOf a s
+        |> Result.andThen
+            (\( aa, s1 ) ->
+                rawIntOf b s1
+                    |> Result.map (\( bb, s2 ) -> ( aa, bb, s2 ))
+            )
+
+
+{-| REBOX: write the raw `l` operand into frame slot `dest` as the tagged
+40-byte Value it would have been — `tagNumber` at offset 0, the payload at
+offset 8, the exact shape `lowerLit`'s `LNumber` arm produces.
+-}
+reboxArg : Int -> Il.Arg -> S -> S
+reboxArg dest raw s =
+    let
+        ( d8, s1 ) =
+            freshTmp s
+    in
+    emit (Store StoreW (Il.Con tagNumber) (Il.Tmp (slotTmp dest))) s1
+        |> emit (Bin (Just d8) L Add (Il.Tmp (slotTmp dest)) (Il.Con 8))
+        |> emit (Store StoreL raw (Il.Tmp d8))
+
+
+{-| REBOX a `w`-typed comparison result as a tagged Boolean Value.  The VM's
+booleans carry a WORD payload (`lowerLit`'s `LBoolean` arm stores `StoreW`), so
+this is that same shape, not a new one.
+-}
+reboxBoolean : Int -> Il.Arg -> S -> S
+reboxBoolean dest raw s =
+    let
+        ( d8, s1 ) =
+            freshTmp s
+    in
+    emit (Store StoreW (Il.Con tagBoolean) (Il.Tmp (slotTmp dest))) s1
+        |> emit (Bin (Just d8) L Add (Il.Tmp (slotTmp dest)) (Il.Con 8))
+        |> emit (Store StoreW raw (Il.Tmp d8))
+
+
+-- ==================== S4f: UNBOXED Float LOCALS ====================
+--
+-- WHAT THIS IS: the Float half of the representation pass.  A Float local whose
+-- Float-ness is PROVEN FROM THE IR is held in a raw QBE `d` operand with NO
+-- frame slot, and `+ - * f/` / `< <= > >= ==` on two such operands emit the
+-- native double op with the tag test and the `rt_prim` CALL deleted.
+--
+-- THE TWO HALVES ARE NOT SYMMETRIC, AND THE MONOTYPE HALF IS DENIED —
+-- MEASURED, NOT ASSUMED.  S4's Int proof has two sources: the checker's defun
+-- monotype (peeled in parameter order, `intParamsOf`) and the IR.  For Int both
+-- are sound because an Int-typed value is ALWAYS `tagNumber`: every integer
+-- token is materialized as `storew tagNumber; storel n` (Mid/FromAst.elm
+-- `Integer`/`Hex` arms), and Int and Float do not unify, so nothing else can
+-- arrive at an Int parameter.
+--
+-- For Float the monotype half is UNSOUND on this front end, and the cause is
+-- that SAME literal materialization: an integer token the checker types FLOAT
+-- is still emitted as `tagNumber`.  MEASURED on the six-line
+-- `f : Float -> Float; f x = x + 1.0; main = f 3`: the call site is
+-- `storew 0; storel 3` (tagNumber = 0).  The VM is TAG-directed and
+-- PROMOTES — `+ - *` take the f64 arm when EITHER operand is `.float`
+-- (vendor/zinc-vm/src/vm/prims.zig:1204-1246) — so the VM answers 4.0, while a
+-- raw `loadd` of that parameter's payload reinterprets the i64 payload bits as
+-- a double.  MEASURED by hand-patching exactly what the monotype half would
+-- emit into that .ssa: 4.0 (elmvm) vs 1.0 (native), BOTH exit 0.  That is the
+-- silent-wrong class this project treats as disqualifying, and it is reachable
+-- from the SOURCE LANGUAGE (`f 3` is well-typed Elm: `3` unifies with Float),
+-- so a Float PARAMETER is not a raw source and `floatParamsOf` deliberately
+-- does not exist.  The gate test for it is `NoRep.floatParam` (byte-identical
+-- ON/OFF) plus `run norep-floatparam-i`, which calls it with an INT argument;
+-- `Flt.intAtFloat` keeps the shape in the differential.
+--
+-- WHAT IS PROVEN INSTEAD, and why it is a fact about the VM's VALUES rather
+-- than a guess about the checker — every admitted shape yields a value the VM
+-- tags `tagFloat` UNCONDITIONALLY:
+--   * `LFloat f` lowers to `storew tagFloat` + the double (lowerLit) — there is
+--     no other way for that bit pattern to get there;
+--   * `+ - * f/` whose operands are BOTH proven Float: the promote rule takes
+--     the f64 arm (one float operand suffices) and returns `valFloat(...)`, so
+--     the result is `tagFloat` too.  The float arithmetic is CLOSED under the
+--     representation, which is what makes a raw chain legal.
+-- Everything else — a Float-monotype parameter (measured above), an `App` (the
+-- callee's tag is not in view), a record/list/tuple field read, a case or
+-- destructure bind, `Basics.toFloat` — is DENIED and keeps its frame slot and
+-- its `rt_prim` route.
+--
+-- CONSEQUENCE FOR THE TYPE SOURCE: unlike Int, there is no boxed-but-proven
+-- Float binder (S4's `intBinders` holds Int-monotype parameters whose payload
+-- is read on demand with `loadl (slot + 8)`), so `rawFloat` IS the binder half
+-- of the predicate.  One map, because there is exactly one way to know.
+--
+-- REBOXING a raw Float at a boundary is `storew tagFloat` + `stored`
+-- (`reboxFloat`, also the ONE place that writes a float Value — `lowerLit`'s
+-- LFloat arm goes through it, so there is no second float-store path).
+-- Escapes reach it through `lowerVal`'s `Var` arm, `rawFloatOf`'s `Nothing` is
+-- a loud error rather than a fallback, and `captureBlits` reboxes explicitly:
+-- the same boundaries, and no NEW `binderSlots` read, that S4's closed
+-- enumeration established (S4 review Q1: exactly three reads of `binderSlots`
+-- exist — lowerVal, rawIntOf's boxed-Var path, captureBlits).
+--
+-- COMPARISON SEMANTICS ARE THE VM'S, NaN INCLUDED.  The VM's primEq on two
+-- floats is `asFloat a1 == asFloat a2` and primLt/Le/Gt/Ge is `asFloat a1 <
+-- asFloat a2` (prims.zig:1328-1405) — IEEE, so `NaN == NaN` is FALSE, `NaN <
+-- x` is FALSE and `-0.0 == 0.0` is TRUE.  QBE's `ceqd`/`cltd`/... are the
+-- ORDERED IEEE compares and give the same answers; the unordered `cuod`/`cod`
+-- pair is used nowhere here.  tools/qbe/fixtures/float.elm pins all of it
+-- (nanEq/nanLt/negZeroEq/nanRel).
+--
+-- GC SAFETY IS STRUCTURAL, as for Int: a raw `d` temp is not a GC pointer and
+-- is never placed in a `ROOT_VALUE_ARRAY` (it does not live in a frame slot at
+-- all), and the collector's `scanValue` is tag-directed with a total
+-- `else => {}` arm.  No new rooting protocol is added, deliberately.
+
+
+{-| ONE definition of the static data item a Float value lives in, shared by
+the literal arm (`lowerLit`) and the raw read (`rawFloatOf`) so that the same
+float always resolves to the same `$dN` — `freshData` dedups on this key.
+-}
+floatData : Float -> S -> ( String, S )
+floatData f s =
+    freshData ("flt:" ++ String.fromFloat f)
+        (\n -> { name = n, align = Just 8, items = [ DDouble f ], export_ = False })
+        s
+
+
+{-| THE PREDICATE, with the pass switch folded in exactly as `isIntExp` does:
+one decision, one place to read `s.rep`.
+-}
+isFloatExp : S -> Exp -> Bool
+isFloatExp s exp =
+    s.rep && isFloatKnown s exp
+
+
+{-| Deny-by-default proof that `exp`'s VALUE is `tagFloat`.  Each admitted
+shape is one whose tag is settled by the VM's own rules (see the section
+header) — NOT by the checker's opinion, which is what denies the parameter
+case.  `App`, `GRef`, `Con`, `If`, `Let`, `Case`, every record/list operation
+and every prim outside the float-arithmetic set return False.
+-}
+isFloatKnown : S -> Exp -> Bool
+isFloatKnown s exp =
+    case exp of
+        Lit (LFloat _) ->
+            True
+
+        Var id ->
+            -- the raw binder IS the proof: nothing else can put a binder here
+            -- (no Float parameter is ever admitted, see the section header)
+            Dict.member id s.rawFloat
+
+        NoTail inner ->
+            isFloatKnown s inner
+
+        PrimApp app ->
+            List.member app.prim [ "+", "-", "*", "f/" ]
+                && List.length app.args == 2
+                && List.all (isFloatKnown s) app.args
+
+        _ ->
+            False
+
+
+{-| The RAW `d`-typed operand holding `exp`'s Float value.  DOMAIN: exactly
+`isFloatKnown`'s, and the final arms are loud errors rather than a fallback, so
+a shape added to one and not the other cannot silently pick up a wrong
+representation.
+-}
+rawFloatOf : Exp -> S -> Result String ( Il.Arg, S )
+rawFloatOf exp s =
+    case exp of
+        Lit (LFloat f) ->
+            let
+                ( fname, s1 ) =
+                    floatData f s
+
+                ( x, s2 ) =
+                    freshTmp s1
+            in
+            Ok ( Il.Tmp x, emit (Load (Just x) D LoadD (Il.Sym fname)) s2 )
+
+        NoTail inner ->
+            rawFloatOf inner s
+
+        Var id ->
+            case Dict.get id s.rawFloat of
+                Just raw ->
+                    Ok ( raw, s )
+
+                Nothing ->
+                    Err ("qbe: raw Float operand not in scope: binder " ++ String.fromInt id ++ " (corrupt Mid tree)")
+
+        PrimApp app ->
+            case ( app.prim, app.args ) of
+                ( "+", [ a, b ] ) ->
+                    rawFloatBin Add a b s
+
+                ( "-", [ a, b ] ) ->
+                    rawFloatBin Sub a b s
+
+                ( "*", [ a, b ] ) ->
+                    rawFloatBin Mul a b s
+
+                ( "f/", [ a, b ] ) ->
+                    rawFloatBin Div a b s
+
+                _ ->
+                    Err ("qbe: deny-by-default violation — isFloatKnown admitted a PrimApp with no raw Float form: " ++ app.prim)
+
+        _ ->
+            Err "qbe: deny-by-default violation — isFloatKnown admitted an expression with no raw Float form"
+
+
+rawFloatBin : BinOp -> Exp -> Exp -> S -> Result String ( Il.Arg, S )
+rawFloatBin op a b s =
+    rawFloat2 a b s
+        |> Result.map
+            (\( aa, bb, s1 ) ->
+                let
+                    ( r, s2 ) =
+                        freshTmp s1
+                in
+                ( Il.Tmp r, emit (Bin (Just r) D op aa bb) s2 )
+            )
+
+
+{-| Both operands as raw `d` operands, LEFT FIRST — the same POP order
+`rawInt2` documents (args[0] is the VM's first pop = the lhs).
+-}
+rawFloat2 : Exp -> Exp -> S -> Result String ( Il.Arg, Il.Arg, S )
+rawFloat2 a b s =
+    rawFloatOf a s
+        |> Result.andThen
+            (\( aa, s1 ) ->
+                rawFloatOf b s1
+                    |> Result.map (\( bb, s2 ) -> ( aa, bb, s2 ))
+            )
+
+
+{-| REBOX: write the raw `d` operand into frame slot `dest` as the tagged
+40-byte Value it would have been — `tagFloat` at offset 0, the double at
+offset 8.  This is the mirror of `reboxArg` and the ONLY place a float Value is
+written.
+-}
+reboxFloat : Int -> Il.Arg -> S -> S
+reboxFloat dest raw s =
+    let
+        ( d8, s1 ) =
+            freshTmp s
+    in
+    emit (Store StoreW (Il.Con tagFloat) (Il.Tmp (slotTmp dest))) s1
+        |> emit (Bin (Just d8) L Add (Il.Tmp (slotTmp dest)) (Il.Con 8))
+        |> emit (Store StoreD raw (Il.Tmp d8))
+
+
+{-| Lift an integer-family `CmpOp` into the float family.  Total by
+construction and the identity on everything else: at operand type `D` the
+equality family already prints the same mnemonic (`ceqd`/`cned`), and the
+`*d` variants were only ever built here.
+-}
+floatCmpOp : CmpOp -> CmpOp
+floatCmpOp op =
+    case op of
+        Cslt ->
+            Cltd
+
+        Csle ->
+            Cled
+
+        Csgt ->
+            Cgtd
+
+        Csge ->
+            Cged
+
+        _ ->
+            op
 
 
 -- ============================ GREF AS A VALUE ============================
@@ -1046,12 +1614,39 @@ lowerLetBinder : LetBinder -> S -> Result String S
 lowerLetBinder binder s =
     case binder of
         LetBind bind ->
-            let
-                ( bslot, s1 ) =
-                    freshSlot s
-            in
-            lowerVal bind.value bslot s1
-                |> Result.map (\s2 -> { s2 | binderSlots = Dict.insert bind.binder.id bslot s2.binderSlots })
+            -- S4: an Int local gets NO FRAME SLOT AT ALL — it is held as a raw
+            -- `l` operand and reboxed only where it escapes.  The slot counter
+            -- does not advance, which is the structural half of this step's
+            -- measurement.
+            if isIntExp s bind.value then
+                rawIntOf bind.value s
+                    |> Result.map
+                        (\( raw, s1 ) ->
+                            { s1
+                                | rawInt = Dict.insert bind.binder.id raw s1.rawInt
+                                , intBinders = Set.insert bind.binder.id s1.intBinders
+                            }
+                        )
+
+            else if isFloatExp s bind.value then
+                -- S4f: the Float half of the same rule — a Float local PROVEN
+                -- from the IR gets no frame slot either.  The two tests are
+                -- disjoint (their base cases are `LNumber` vs `LFloat`, and a
+                -- binder is registered by exactly one of them), so their order
+                -- does not matter; Int is first because it came first.
+                rawFloatOf bind.value s
+                    |> Result.map
+                        (\( raw, s1 ) ->
+                            { s1 | rawFloat = Dict.insert bind.binder.id raw s1.rawFloat }
+                        )
+
+            else
+                let
+                    ( bslot, s1 ) =
+                        freshSlot s
+                in
+                lowerVal bind.value bslot s1
+                    |> Result.map (\s2 -> { s2 | binderSlots = Dict.insert bind.binder.id bslot s2.binderSlots })
 
         LetDestruct destruct ->
             lowerLetDestruct destruct s
@@ -1840,6 +2435,19 @@ lowerPrimApp app dest s =
     if List.length app.args == 2 && List.member app.prim [ "+", "-", "*" ] then
         lowerArith app.prim app.args dest s
 
+    else if List.length app.args == 2 && app.prim == "f/" && List.all (isFloatExp s) app.args then
+        -- S4f: Elm's `/` (prim `f/`) on two PROVEN Floats is QBE's `divd`.
+        -- THIS IS A SEPARATE BRANCH ON PURPOSE: `f/` must NOT be routed
+        -- through `lowerArith`, whose inline's integer arm assumes `+ - *`.
+        -- MEASURED, on the first cut that did route it: `7 / 2` (integer
+        -- TOKENS at type Float) took that arm and answered 3 where the VM's
+        -- primFdiv promotes and answers 3.5, and `1 / 0` — which is Infinity
+        -- in the VM — hit an i64 `div` and died with SIGFPE (no output).  A
+        -- non-float operand pair therefore keeps the ordinary `rt_prim` route
+        -- below, where primFdiv does the promotion.
+        rawFloatBin Div (first app.args) (second app.args) s
+            |> Result.map (\( r, s1 ) -> reboxFloat dest r s1)
+
     else if List.length app.args == 2 && List.member app.prim [ "<", "<=", ">", ">=" ] then
         lowerCompare (cmpOp app.prim) app.args dest s
 
@@ -1865,6 +2473,24 @@ cmpOp prim =
 
         _ ->
             Csge
+
+
+arithOp : String -> BinOp
+arithOp prim =
+    case prim of
+        "+" ->
+            Add
+
+        "-" ->
+            Sub
+
+        _ ->
+            -- `+ - *` only: every caller is inside `lowerArith`, which
+            -- `lowerPrimApp` gates to that set.  `Div` — the float division —
+            -- is built directly in `lowerPrimApp`'s `f/` branch instead,
+            -- because `lowerArith`'s inline integer arm is only correct for
+            -- `+ - *`.
+            Mul
 
 
 lowerArgs2 : List Exp -> S -> Result String ( Int, Int, S )
@@ -1904,7 +2530,32 @@ second list =
 
 lowerArith : String -> List Exp -> Int -> S -> Result String S
 lowerArith prim args dest s =
-    lowerArgs2 args s
+    -- DOMAIN: `+ - *` only (`lowerPrimApp` gates it, and the else-branch below
+    -- — its integer arm — is only correct for those).  `f/` has its OWN branch
+    -- there for exactly that reason.
+    --
+    -- S4f: both operands PROVEN Float -> the native f64 op (`Bin dst D op`
+    -- prints `%r =d add`/`sub`/`mul`, i.e. QBE's addd/subd/muld), with neither
+    -- the tag test nor the `rt_prim` call emitted.  The VM's primAdd/Sub/Mul
+    -- take the f64 arm as soon as ONE operand is a Float, so with both
+    -- operands proven `tagFloat` this is the same arithmetic the fast path
+    -- used to reach through a call.
+    if List.length args == 2 && List.all (isFloatExp s) args then
+        rawFloatBin (arithOp prim) (first args) (second args) s
+            |> Result.map (\( r, s1 ) -> reboxFloat dest r s1)
+
+    else if List.length args == 2 && List.all (isIntExp s) args then
+        -- S4: both operands PROVEN Int -> the native i64 op, with neither the tag
+        -- test nor the `rt_prim` fallback emitted at all.  The VM's primAdd/Sub/Mul
+        -- take the i64 wrapping path exactly when neither operand is a Float, so
+        -- this is the same semantics minus the runtime test.  Any other operand
+        -- pair (a Float anywhere, an unknown type, a non-2-ary app) keeps the whole
+        -- existing shape.
+        rawIntBin (arithOp prim) (first args) (second args) s
+            |> Result.map (\( r, s1 ) -> reboxArg dest r s1)
+
+    else
+        lowerArgs2 args s
         |> Result.andThen
             (\( a1, a2, s1 ) ->
                 let
@@ -1956,16 +2607,8 @@ lowerArith prim args dest s =
                     ( d8, s17 ) =
                         freshTmp s16
 
-                    arithOp =
-                        case prim of
-                            "+" ->
-                                Add
-
-                            "-" ->
-                                Sub
-
-                            _ ->
-                                Mul
+                    op =
+                        arithOp prim
                 in
                 Ok
                     (emit (Load (Just ta) W LoadW (Il.Tmp (slotTmp a1))) s17
@@ -1981,7 +2624,7 @@ lowerArith prim args dest s =
                         |> emit (Load (Just xa) L LoadL (Il.Tmp pa))
                         |> emit (Bin (Just pb) L Add (Il.Tmp (slotTmp a2)) (Il.Con 8))
                         |> emit (Load (Just xb) L LoadL (Il.Tmp pb))
-                        |> emit (Bin (Just r) L arithOp (Il.Tmp xa) (Il.Tmp xb))
+                        |> emit (Bin (Just r) L op (Il.Tmp xa) (Il.Tmp xb))
                         |> emit (Store StoreW (Il.Con tagNumber) (Il.Tmp (slotTmp dest)))
                         |> emit (Bin (Just d8) L Add (Il.Tmp (slotTmp dest)) (Il.Con 8))
                         |> emit (Store StoreL (Il.Tmp r) (Il.Tmp d8))
@@ -1996,7 +2639,39 @@ lowerArith prim args dest s =
 
 lowerCompare : CmpOp -> List Exp -> Int -> S -> Result String S
 lowerCompare op args dest s =
-    lowerArgs2 args s
+    -- S4f: both operands PROVEN Float -> ONE ordered IEEE compare, no tag test
+    -- and no `rt_prim` call.  The VM's primLt/Le/Gt/Ge take the f64 arm as soon
+    -- as one operand is a Float, and it is `asFloat a1 < asFloat a2` — the same
+    -- answer QBE's `cltd`/`cled`/`cgtd`/`cged` give, NaN included (both are
+    -- ordered: NaN compares false).
+    if List.length args == 2 && List.all (isFloatExp s) args then
+        rawFloat2 (first args) (second args) s
+            |> Result.map
+                (\( aa, bb, s1 ) ->
+                    let
+                        ( c, s2 ) =
+                            freshTmp s1
+                    in
+                    reboxBoolean dest (Il.Tmp c) (emit (Cmp (Just c) D (floatCmpOp op) aa bb) s2)
+                )
+
+    else if List.length args == 2 && List.all (isIntExp s) args then
+        -- S4: both operands PROVEN Int -> one i64 compare, no tag test, no
+        -- `rt_prim` fallback.  The VM's primLt/Le/Gt/Ge return False whenever
+        -- either operand is a Float, so the fast path (taken only when NEITHER
+        -- is) is the same answer via the i64 route they already use internally.
+        rawInt2 (first args) (second args) s
+            |> Result.map
+                (\( aa, bb, s1 ) ->
+                    let
+                        ( c, s2 ) =
+                            freshTmp s1
+                    in
+                    reboxBoolean dest (Il.Tmp c) (emit (Cmp (Just c) L op aa bb) s2)
+                )
+
+    else
+        lowerArgs2 args s
         |> Result.andThen
             (\( a1, a2, s1 ) ->
                 let
@@ -2113,7 +2788,36 @@ cmpName op =
 
 lowerNumEq : List Exp -> Int -> S -> Result String S
 lowerNumEq args dest s =
-    lowerArgs2 args s
+    -- S4f: both operands PROVEN Float -> one ordered f64 equality.  primEq on
+    -- two floats is `asFloat a1 == asFloat a2` (IEEE: NaN != NaN, -0.0 == 0.0)
+    -- and QBE's `ceqd` is the same compare.
+    if List.length args == 2 && List.all (isFloatExp s) args then
+        rawFloat2 (first args) (second args) s
+            |> Result.map
+                (\( aa, bb, s1 ) ->
+                    let
+                        ( c, s2 ) =
+                            freshTmp s1
+                    in
+                    reboxBoolean dest (Il.Tmp c) (emit (Cmp (Just c) D Ceqd aa bb) s2)
+                )
+
+    else if List.length args == 2 && List.all (isIntExp s) args then
+        -- S4: both operands PROVEN Int -> a single i64 payload compare.  primEq's
+        -- number/number arm compares payloads, and two Ints are both
+        -- `tagNumber`-tagged, so the tag loads and the branch are redundant.
+        rawInt2 (first args) (second args) s
+            |> Result.map
+                (\( aa, bb, s1 ) ->
+                    let
+                        ( c, s2 ) =
+                            freshTmp s1
+                    in
+                    reboxBoolean dest (Il.Tmp c) (emit (Cmp (Just c) L Ceq aa bb) s2)
+                )
+
+    else
+        lowerArgs2 args s
         |> Result.andThen
             (\( a1, a2, s1 ) ->
                 let
@@ -2311,12 +3015,26 @@ captureBlits captures cbase s =
             acc
                 |> Result.andThen
                     (\s1 ->
-                        case Dict.get cid s.binderSlots of
-                            Just srcSlot ->
-                                Ok (emit (Blit (Il.Tmp (slotTmp srcSlot)) (Il.Tmp (slotTmp (cbase + i))) vs) s1)
+                        -- S4: a RAW binder captured by the closure is REBOXED
+                        -- into its contiguous capture slot — the same boundary
+                        -- rule as everywhere else.  Only after that does the
+                        -- ordinary slot-to-slot blit apply.
+                        case Dict.get cid s1.rawInt of
+                            Just raw ->
+                                Ok (reboxArg (cbase + i) raw s1)
 
                             Nothing ->
-                                Err ("qbe: capture not in scope (corrupt Mid tree): binder " ++ String.fromInt cid)
+                                case Dict.get cid s1.rawFloat of
+                                    Just raw ->
+                                        Ok (reboxFloat (cbase + i) raw s1)
+
+                                    Nothing ->
+                                        case Dict.get cid s1.binderSlots of
+                                            Just srcSlot ->
+                                                Ok (emit (Blit (Il.Tmp (slotTmp srcSlot)) (Il.Tmp (slotTmp (cbase + i))) vs) s1)
+
+                                            Nothing ->
+                                                Err ("qbe: capture not in scope (corrupt Mid tree): binder " ++ String.fromInt cid)
                     )
         )
         (Ok s)

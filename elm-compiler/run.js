@@ -83,6 +83,12 @@ const QBE = process.env.QBE === '1';
 // to be GONE in one build and PRESENT in the other, and the selfhost
 // wall-clock measurement needs the same switch.  Default ON.
 const QBE_FLATTEN = process.env.QBE_NOFLATTEN !== '1';
+// QBE_NOREP=1 DISABLES the S4/M1 representation pass (unboxed Int locals +
+// Native i64 arithmetic on proven-Int operands in a monotype defun).  Same
+// purpose as QBE_NOFLATTEN: it exists so the pass can be A/B'd on the SAME
+// source — the structural gate compiles both ways and the counters must move
+// with the clock.  Default ON.
+const QBE_REP = process.env.QBE_NOREP !== '1';
 const QBE_ENTRY = process.env.QBE_ENTRY || '';
 
 // V8's stack limit CANNOT be raised once node has started, and the MIDTIER=1
@@ -120,6 +126,7 @@ function compileGroups(groups) {
       qbe: QBE,
       qbeEntry: QBE_ENTRY,
       qbeFlatten: QBE_FLATTEN,
+      qbeRep: QBE_REP,
       inlineThreshold: Number.isFinite(INLINE_THRESHOLD) ? INLINE_THRESHOLD : 30,
       stats: MIDTIER_STATS,
     },

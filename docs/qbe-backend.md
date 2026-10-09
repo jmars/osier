@@ -19,7 +19,7 @@ is deliberately non-SSA and exercised on branch joins, loops and nesting).
 ## Commands (the whole proof; read exit codes directly)
 
 ```
-tools/qbe/qbe-check.sh        # 22/22 PASS, exit 0
+tools/qbe/qbe-check.sh        # 153 PASS / 0 FAIL, exit 0
 tools/qbe/qbe-mk.sh tests/elm-fixtures/fib.elm Fib.fib /tmp/out  # -> /tmp/out/fib
 ```
 
@@ -30,8 +30,13 @@ heap (`QBE_HEAP_MB=16`; `MIN_HEAP_BYTES`, heap.zig:61) so the moving
 collector runs constantly — the behavioural proof that the pooled-frame roots
 actually root.  Fixtures: fib 10/20, countdown 100000, applytwice, closure,
 const42, idn, ifx, churn 150000 (13MB live, constant scavenges), churn
-500000, mutualtail 20000.  The MIDTIER=0 byte-identity anchor still holds
-(fib.csexp sha256 == `tools/osier-corpus-baseline.sha256`).
+500000, mutualtail 20000, and the float differential matrix
+(`tools/qbe/fixtures/float.elm` — 27 matrix entries plus `float-main` and
+4 float/int entry-arg runs = 32 builds, each both ways AND at the 16MB
+heap: literals, the inline fast-path ops and the ops that must decline to
+`rt_prim`, non-finite spellings, and float/int entry args through
+`rt.zig:isFloatArg`; 64 of the 153 PASSes).  The MIDTIER=0 byte-identity
+anchor still holds (fib.csexp sha256 == `tools/osier-corpus-baseline.sha256`).
 
 ## Coverage (and the loud failures)
 
@@ -188,7 +193,10 @@ always escapes — meaning the `Con`/`rt_con` half is correct but cannot be exer
   the group output to .ssa text (ZINC paths byte-identical, anchor verified)
 - `tools/qbe/rt.zig` — the runtime (rt.o built on demand by qbe-mk.sh)
 - `tools/qbe/qbe-mk.sh`, `tools/qbe/qbe-check.sh` — build + verification
-- `tools/qbe/fixtures/` — const42, idn, ifx, churn, mutualtail
+- `tools/qbe/fixtures/` — const42, idn, ifx, churn, mutualtail, float (the
+  Float differential matrix, the fix for the old "floats cannot reach this
+  backend" gap; extended with the S4f hostile cases), norep (the unboxed-
+  Int-AND-Float-locals differential, items 6 and 7)
 
 ## What the next stage must settle
 
@@ -202,10 +210,265 @@ always escapes — meaning the `Con`/`rt_con` half is correct but cannot be exer
 3. **Calling-convention cost**: 40-byte blit hops per Value move, by-value
    aggregate args, frame zeroing.  Candidates: register-passed unboxed
    values at known-arity direct calls, live-range-aware `live` counts, the
-   AOT's rooting elision for non-allocating bodies.
-4. **Float args** in the driver (int-only by design here), non-ASCII
-   literals (Elm 0.19 has no byte API — needs an honest length source).
+   AOT's rooting elision for non-allocating bodies.  **PARTLY DONE — see
+   items 6 and 7**: Int LOCALS *and* Float LOCALS now skip the frame slot
+   (item 7 is the Float half, and it also deletes the `rt_prim` call that
+   every float op used to make).  The "register-passed unboxed values at
+   known-arity direct calls" candidate is the *parameter* half; for Int it is
+   still open because it IS the ABI change, and for Float it is BLOCKED on a
+   measured semantic ground — see item 7 (b).
+4. **~~Float args~~** — CLOSED: float entry args and Float values end to end
+   now work on this backend (was "int-only by design here";
+   `tools/qbe/fixtures/float.elm` is the differential matrix, `rt.zig` takes
+   float args, and the suite's `mono_float` measures on both backends).
+   Still open from this item: non-ASCII literals (Elm 0.19 has no byte
+   API — needs an honest length source).
 5. **Whether the mid-tier passes help or hurt this backend** — they were
    tuned to the ZINC cost model and are deliberately OFF on this path; the
    arity/saturation repairs the reviewer flagged are exactly what a native
    path wants.
+6. **Unboxed Int locals (monomorphisation step S4/M1)** — LANDED.  Inside a
+   defun the checker typed as a CLOSED MONOTYPE, an Int local is held in a raw
+   `l` QBE operand instead of a 40-byte frame slot, and `+ - *` /
+   `< <= > >=` / `=` on operands PROVEN Int emit the native i64 op with no tag
+   test and no `rt_prim` fallback.  Switch `QBE_NOREP=1` (default ON, mirroring
+   `QBE_NOFLATTEN`); differential `tools/qbe/fixtures/norep.elm`; the gate grew
+   153 -> 179 PASS / 0 FAIL.
+
+   MEASURED, structural (the .ssa's own counters, pass ON vs OFF —
+   `NoRep.slotCount` is 16 chained Int locals plus one Int parameter):
+   frame slots 83 -> 3 and `rt_prim` sites 16 -> 0; `NoRep.chain` 32 -> 3 and
+   6 -> 0; `NoRep.boxed` 24 -> 12 and 15 -> 8.  MEASURED, byte-level: built the
+   PRE-PASS compiler (the working tree with only this step's hunks reversed)
+   and dumped all 83 (fixture, entry, flags) pairs `qbe-check.sh` drives from
+   both — with `QBE_NOREP=1` the two are BYTE-IDENTICAL on all 83, and with
+   the pass on 25 differ.
+
+   MEASURED, wall clock, `tools/osier-bench.sh` at `OSIER_BENCH_RUNS=5`
+   median-of-5, 10 repetitions per arm with the ARM ORDER ALTERNATED (the
+   first five ran ON-then-OFF, the next five OFF-then-ON — an arm always
+   measured second is systematically penalised, and the VM column is the
+   control that exposes it).  QBE ms, median of the ten; the two right-hand
+   columns are the `.ssa` counters from the SAME source, summed over every
+   function in the build:
+
+     program       qbe ON   qbe OFF   wall    frame slots   rt_prim sites
+     numloop           19        51   -62%      47 -> 17        7 -> 0
+     localrec          12        29   -59%      29 -> 13        4 -> 0
+     deepnontail       74       109   -32%      42 -> 26        6 -> 2
+     mono_float       121       140   -14%     206 -> 190      33 -> 29
+     mono_int         102       117   -13%     150 -> 142      25 -> 23
+     listbuild         57        61    -7%      71 -> 55        8 -> 4
+     adtmatch         149       157    -5%     148 -> 140      11 -> 9
+     nestagg          252       260    -3%     117 -> 109      17 -> 15
+     recupd_local     500       514    -3%     102 -> 94       23 -> 21
+     mono_record      339       346    -2%     213 -> 197      41 -> 37
+     recupd_param     406       414    -2%      92 -> 84       21 -> 19
+     recflow          383       379    +1%      92 -> 92       23 -> 23  <- UNREACHED
+     TOTAL           2417      2580    -6%
+
+   THE MECHANISM CONFIRMS, which is what the two counter columns are for: the
+   programs that move are the ones whose counters move (the `rt_prim`-site
+   count removed tracks the wall delta's ordering exactly), and `recflow` is
+   the internal control — the pass does not reach it at all, its counters are
+   IDENTICAL, and its clock reads +1% with the VM column at +1.3%.  So the
+   -32..-62% band is attributable while the -2..-5% band sits inside the
+   instrument's spread and is reported as a NULL, not as a win: `mono_int`,
+   `mono_float` and `mono_record` weight a POLYMORPHIC `fold` body, so only
+   their monomorphic call sites benefit — reaching those bodies is S5's job,
+   not this step's, and a null result here is what the plan predicted rather
+   than a number reached for.  `numloop` is the predicted mover and it moved:
+   its loop body is `let k = inv * 3 + 7; j = k * k + inv in ...` under an
+   all-Int monotype signature, so both locals and all three arith sites leave
+   the frame on every iteration.
+
+   HONEST LIMITS, named rather than papered over:
+   (a) **Int only** — SUPERSEDED BY ITEM 7 (S4f landed the Float half; the
+       claim below was true of THIS step and is kept, not rewritten, because
+       it is the record of what was measured then).  Float locals were DENIED
+       by construction: every float arithmetic route goes through `rt_prim`,
+       so a raw `d` temp would be reboxed into a staging slot at each use and
+       buy nothing.  Native float arithmetic needs `addd`/`subd`/`muld` and
+       float compares in `Mid/Qbe/Il.elm`/`Print.elm`, which this step did not
+       own.  `NoRep.floatLocal`'s `.ssa` was byte-identical ON/OFF — that
+       identity was the control that the pass did not overreach.  ITEM 7
+       REVERSED THAT EXPECTATION DELIBERATELY: `NoRep.floatLocal` now DIFFERS
+       ON/OFF (the flip is the S4f entry test) and the byte-identical control
+       moved to `NoRep.floatParam`.
+   (b) **Where the type comes from.**  The plan's seat was the per-BINDER half
+       of `Mid/Qbe/Types`.  That half does not exist and cannot at S1:
+       `Type.Infer` exposes only `inferUnit`/`CheckedUnit`, and
+       `CheckedUnit.file` is the UNTYPED elm-syntax `File.File`, so per-binder
+       types live only in an `InferState` nothing exposes (that is the plan's
+       S2 accumulator plus the S3 seed re-freeze).  This step therefore reads
+       the half the table HAS — the defun's closed monotype — peeled in
+       parameter order for PARAMETER types, plus a deny-by-default proof over
+       the Mid tree for `let` binders.  The second half is not a guess about
+       the checker: the VM has one integer tag and a separate float tag, so
+       "this operand is an Int" is decidable from the IR, and it holds inside a
+       POLYMORPHIC defun too (measured: `NoRep.polyLocal`'s `rt_prim` 3 -> 1 —
+       the monotype gate alone would have missed it).
+   (c) **The trust boundary this introduces**: the tag test it deletes WAS a
+       runtime check, and the static claim that replaces it is only as strong
+       as the checker's word.  Across units that word is the rigid signature;
+       the exposure is a caller in the SAME group whose re-inference failed
+       (`Qbe.Types.Table.notes` records the group failure but not which defun).
+       S5's refusal predicate is where the sharper handling belongs.
+   (d) **What it does not buy**: parameters stay boxed (no ABI change, by
+       design), so the win is the locals and the tag tests, not the call
+       boundary.  Under a uniform 40-byte Value representation is the payoff
+       and specialisation is what extends it past monomorphic bodies.
+
+7. **Unboxed Float locals (S4f, the Float half of S4/M1)** — LANDED.  A Float
+   local whose Float-ness is PROVEN is held in a raw `d` QBE operand with no
+   frame slot, `+ - *` and `f/` on two such operands emit the native f64 op
+   (`%r =d add`/`sub`/`mul`/`div`), `< <= > >= ==` on two such operands emit
+   one `cltd`/`cled`/`cgtd`/`cged`/`ceqd`, and every one of those sites loses
+   both the tag test and the `rt_prim` CALL.  Switch: the SAME `QBE_NOREP=1`
+   (both predicates read `s.rep`; there is no second switch).  Gate grew
+   179 -> 213 PASS / 0 FAIL; differential `tools/qbe/fixtures/norep.elm`
+   (`floatLocal`/`floatParam`/`floatCapture`) plus 13 new hostile entries in
+   `tools/qbe/fixtures/float.elm`.
+
+   WHAT THE IL NEEDED, MEASURED RATHER THAN ASSUMED: `Bin dst D Add` ALREADY
+   prints `%r =d add` — QBE's `addd` with the type letter supplied by the
+   assignment — so no `Addd`/`Subd`/`Muld` variant was added (verified by
+   compiling the emitted IL through `vendor/qbe/qbe`).  The float arithmetic
+   was NOT the gap.  The gaps were (i) `div` (`f/` is Elm's float division;
+   `Bin dst D Div` is the only `div` this backend builds) and (ii) the FLOAT
+   COMPARE FAMILY, which is a different QBE instruction family and cannot be
+   reached by reusing `Cslt`: QBE's op table has `cltd`/`cged` and NO `csltd`
+   (`vendor/qbe/doc/il.txt:1126-1163`), so `Cmp _ D Cslt` would misprint.  The
+   six `Ceqd/Cned/Cltd/Cled/Cgtd/Cged` variants were added; the printer is
+   unchanged (mnemonic + operand-type suffix), and a `w`/`l` operand type with
+   one of them misprints into a mnemonic QBE does not know — loud, not silent.
+
+   ONE ROUTING TRAP, FOUND BY PROBE AND FIXED: `f/` must NOT be sent through
+   `lowerArith`.  Its inline's integer arm is correct only for `+ - *`, so
+   routing `/` there computed an i64 divide for `7 / 2` (3 where the VM's
+   primFdiv promotes to 3.5) and for `1 / 0` (Infinity in the VM, SIGFPE with
+   no output on the native side).  `f/` therefore has its OWN branch in
+   `lowerPrimApp`, taken only when both operands are proven Float (otherwise
+   the ordinary `rt_prim` route does the promotion), and `arithOp` stays
+   `+ - *`.  `Flt.fdivIntTokens` (7 / 2), `Flt.fdivZero` (1 / 0) and
+   `Flt.fdivMixed` (a raw float over an integer token — the fast path must
+   DECLINE) are in the gate as the regression cases.
+
+   COMPARISON SEMANTICS ARE THE VM'S, NOT "IEEE BY ASSUMPTION": the VM's
+   primEq on two floats is `asFloat a1 == asFloat a2` and primLt/Le/Gt/Ge is
+   `asFloat a1 < asFloat a2` (vendor/zinc-vm/src/vm/prims.zig:1283-1405), i.e.
+   the ORDERED compares — so `NaN == NaN` is false, `NaN < x` is false and
+   `-0.0 == 0.0` is true, which is what QBE's `ceqd`/`cltd`/... answer.  Pinned
+   by `nanEq`/`nanLt`/`nanGe`, `negZeroEq` (`(-1.0 * 0.0) == 0.0`),
+   `negZeroInv` (`1.0 / -0.0` = -Infinity), `infArith`/`infCmp`,
+   `maxF`/`denormSum` and `floatCmpChain` — every one byte-identical to elmvm
+   on both arms, plus the `QBE_HEAP_MB=16` churn rerun.
+
+   (a) **THE FLOAT-PARAMETER HALF IS DENIED, AND THIS IS MEASURED, NOT A
+   SCOPING PLEA.**  S4's Int proof has two halves; mirroring the monotype half
+   for Float produces a SILENT WRONG ANSWER on this front end.  Every integer
+   TOKEN is materialized as `storew tagNumber; storel n` (Mid/FromAst.elm) —
+   including a token the checker types FLOAT, because `3` unifies with Float.
+   The VM is tag-directed and PROMOTES (`+ - *` take the f64 arm when EITHER
+   operand is `.float`), so `f : Float -> Float; f x = x + 1.0; main = f 3` is
+   4.0 in the VM.  MEASURED: that program's call site is
+   `storew 0; storel 3` (tagNumber = 0), and hand-patching into its .ssa the
+   raw `loadd` of the parameter payload — exactly what the monotype half would
+   emit — gives native `1.0` against elmvm's `4.0`, BOTH exit 0.  A raw read
+   reinterprets the i64 payload bits.  So there is no `floatParamsOf`, and a
+   Float parameter keeps its slot.  `NoRep.floatParam` is that deny control
+   (byte-identical ON/OFF, 17 slots and 3 `rt_prim` sites in both arms), run
+   BEHAVIOURALLY with an INT argument (`norep-floatparam-i`, 8.5) beside a
+   float one, and `Flt.intAtFloat` (`addF 3 1.0` = 4.0) keeps the shape in the
+   differential.  A tag-safe parameter half would need an entry-time
+   normalization (tag test + an int->f64 conversion op) or S2's per-binder
+   types; neither is in this step, and the second would not reach a
+   POLYMORPHIC body anyway.
+
+   (b) **What IS proven, and why it is a fact about the VM's values** (the
+   posture `isIntKnown` has): `LFloat` lowers to `storew tagFloat` + the
+   double, and `+ - * f/` over proven-Float operands returns `valFloat(...)`
+   because the promote rule takes the f64 arm — float arithmetic is CLOSED
+   under the representation.  Everything else (parameters, `App` results,
+   record/list/tuple reads, case and destructure binds, `Basics.toFloat`) is
+   denied with its slot and its `rt_prim` route.  Since no boxed binder can be
+   proven Float, one map (`S.rawFloat`) is the whole binder half.
+
+   MEASURED, structural (`.ssa` counters, pass ON vs OFF; `f64ops` is the
+   count of native `=d add/sub/mul/div`):
+
+     entry (fixtures)        frame slots   rt_prim sites   f64ops OFF -> ON
+     Flt.main                  19 -> 11       35 -> 28         0 -> 5
+     Flt.add/sub/mul/div        6 ->  2        1 ->  0         0 -> 1 each
+     Flt.ltc/lec/gtc/gec        6 ->  2        1 ->  0         0 -> 0 (cmp)
+     Flt.eqc/neq                6 ->  2        1 ->  0         0 -> 1 (cmp)
+     Flt.nanEq                 14 ->  2        3 ->  0         0 -> 2 + 1 cmp
+     Flt.nan / infArith / infCmp / denormSum   6 -> 2, 1 -> 0   0 -> 1
+     Flt.floatCmpChain          4 ->  4        8 ->  0         0 -> 6 cmps
+     Flt.recFieldRaw           11 ->  2        2 ->  0         0 -> 1
+     Flt.listRaw               16 -> 16        5 ->  4         0 -> 1
+     NoRep.floatLocal          23 ->  7        4 ->  1         0 -> 3
+     NoRep.floatCapture         8 ->  8        2 ->  1         0 -> 0
+     NoRep.floatParam          17 -> 17        3 ->  3         0 -> 0  <- DENY
+     Flt.viaFn                  8 ->  8        1 ->  1         0 -> 0  <- DENY
+     Flt.intAtFloat             8 ->  8        1 ->  1         0 -> 0  <- DENY
+
+   NOTE the OFF column: it is ZERO f64 ops EVERYWHERE, including the suite —
+   before this step every float operation in every program on this backend was
+   an `rt_prim` call.
+
+   THE CONTROL FLIP, which is the point of the unit: `NoRep.floatLocal` used to
+   be the byte-identical DENY control (item 6 (a)).  It now DIFFERS ON/OFF,
+   and the identity moved to `NoRep.floatParam`.  The gate asserts BOTH, so
+   neither can be satisfied by the pass simply not running: `norep-float-fired`
+   (differs, slots 23 -> 7, `rt_prim` 4 -> 1), `norep-float-denied`
+   (byte-identical, 17/3 both arms), `norep-float-capture` (differs, 2 -> 1) —
+   alongside the pre-existing `norep-structural`/`norep-fired` Int checks in the
+   same fixture.
+
+   MEASURED, wall clock, `tools/osier-bench.sh` — and THE HONEST RESULT IS A
+   NULL ON THE SUITE.  Ten runs (five ON/OFF pairs; best of 3 per run, heap
+   512MB): every run exit 0, 12/12 measured, and "12 VM/native cross-check(s)
+   compared byte-identical" — `mono_float` included.  Per program ms, the five
+   QBE reps ON against the five OFF:
+
+     program        ON reps                     OFF reps
+     numloop        14 14 14 14 14               44 44 44 43 43
+     localrec       11 11 11 11 11               19 19 19 19 20
+     deepnontail    63 66 56 58 55              101 96 90 91 94
+     listbuild      49 50 50 50 49               52 52 52 52 52
+     nestagg       232 243 237 237 231          256 251 239 238 237
+     mono_int       82 81 81 80 79              220 83 82 83 85
+     mono_float    105 101 103 102 104          170 106 105 109 105
+     mono_record   310 829 308 306 309          308 310 312 305 328
+     adtmatch      137 138 135 136 137          137 138 136 136 139
+     recupd_param  338 338 337 337 335          349 330 331 330 333
+     recupd_local  482 505 478 480 478          482 478 480 479 496
+     recflow       355 351 346 346 344          349 350 348 354 346
+
+   TWO things are visible and both are reported rather than smoothed:
+   (i) the OFF column carries single-rep LOAD SPIKES — `mono_int` 220,
+   `mono_float` 170, `mono_record` 829 and `recupd_local` 496 are windows where
+   the machine was busy (my own concurrent verification work), against
+   83/105/306/478 in the neighbouring rep — so a single pair of runs is not a
+   measurement; (ii) the run TOTALs are ON 2178 2727 2156 2157 2146 against OFF
+   2487 2257 2238 2239 2278, i.e. the instrument's spread is LARGER than the
+   effect being reported, so the TOTAL is not evidence of anything here.  What
+   IS evidence is the pairing of each program's clock with its counters below.
+
+   THE STRUCTURAL COUNTER SAYS WHY: all twelve programs' counter pairs are
+   IDENTICAL to item 6's row (numloop 47 -> 17 slots, 7 -> 0 `rt_prim`;
+   mono_float 206 -> 190, 33 -> 29; recflow 92 -> 92, 23 -> 23; ...) and the
+   new counter reads ZERO native f64 ops in all twelve, ON and OFF.  So the
+   Float half moves NO suite program — the -68/-42/-34% band is item 6's Int
+   half, `mono_float`'s -4.7% sits inside the spread, and `recflow` remains the
+   named control: `.ssa` BYTE-IDENTICAL ON/OFF, counters identical, clock
+   +0.6%.  The reason is structural and was visible before the code was
+   written: every float operand in the suite is either a Float PARAMETER
+   (`Floats.iter`'s accumulator: denied by (a)) or a POLYMORPHIC lambda
+   parameter (`fold (\x acc -> x + acc)`: S5's specialiser, not this step).
+   The Float half's measured payoff is therefore at the FIXTURE level — one
+   removed `rt_prim` call per float op, and a frame slot per Float local — and
+   it is reported as a NULL on the suite rather than dressed up as a win.  The
+   ZINC path is untouched: `tools/osier-numbers.sh` exit 0, corpus
+   BYTE-IDENTICAL (149 = 149), gate PASS=152 FAIL=0, TestMain 114 assertions.

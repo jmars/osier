@@ -203,15 +203,34 @@ type Inst
       Cmt String
 
 
+-- `Div` is the only op whose QBE spelling is not shared between the integer
+-- and the float forms: `Bin dst L Add` prints `%r =l add` (QBE's `add` at type
+-- `l`) and `Bin dst D Add` prints `%r =d add` (QBE's `add` at type `d`, i.e.
+-- `addd` in QBE's internal op table) — the MNEMONIC is the same and the type
+-- letter selects the float one.  Integer `div` never reaches this backend
+-- (Elm's `//` goes to `rt_prim`), so `Div` is only ever built at `D`.
 type BinOp
     = Add
     | Sub
     | Mul
+    | Div
     | And
     | Or
     | Xor
 
 
+-- Ceq/Cne/Cslt/Csle/Csgt/Csge are the SIGNED INTEGER family: with the operand
+-- type appended they spell `ceqw`/`ceql`/`csltw`/`csltl`/... .  The `*d`
+-- variants below are a DIFFERENT QBE instruction family — the float compares,
+-- which drop the `s` (`cltd`, `cged`) and, at type `d`, are the only ones QBE
+-- accepts: `cslt` + `d` is `csltd`, which is NOT in QBE's op table
+-- (vendor/qbe/doc/il.txt:1126-1163) and is a parse error, not a retag — so a
+-- float compare cannot be expressed by reusing Cslt.
+--
+-- The operand type still supplies the suffix (Mid.Qbe.Print), so these carry
+-- the type `d` in every use this backend builds; at `s` they would spell
+-- `ceqs`/`clts`/... which QBE also accepts.  A `w`/`l` operand type with one
+-- of these is misprinted into a mnemonic QBE does not know — loud, not silent.
 type CmpOp
     = Ceq
     | Cne
@@ -219,6 +238,12 @@ type CmpOp
     | Csle
     | Csgt
     | Csge
+    | Ceqd
+    | Cned
+    | Cltd
+    | Cled
+    | Cgtd
+    | Cged
 
 
 type LoadOp
@@ -230,6 +255,7 @@ type LoadOp
 type StoreTy
     = StoreW
     | StoreL
+    | StoreD -- stored (64-bit float payloads; the load/store mirror of LoadD)
 
 
 type CallArg

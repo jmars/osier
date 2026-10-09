@@ -86,7 +86,12 @@ printItem item =
             "l " ++ fromInt n
 
         DDouble f ->
-            "d " ++ printFloat f
+            -- `d` here is the DATAITEM's extended type (8 bytes); the CONST
+            -- itself carries the `d_` sigil (doc/il.txt CONST :175-179:
+            -- `'d_' FP`).  Emitting `d 0.0` puts a decimal where the data
+            -- lexer expects a field letter, and QBE answers
+            -- `unknown keyword .0`.
+            "d d_" ++ printFloat f
 
         DStr s ->
             "b \"" ++ escapeStr s ++ "\""
@@ -101,6 +106,15 @@ printItem item =
 -- Doubles print in a form QBE parses and JS round-trips: shortest
 -- round-trip decimal (Elm/JS String.fromFloat guarantees the round trip),
 -- with an explicit ".0"/exponent so the token stays a float literal.
+--
+-- NON-FINITE IS ALREADY A FLOAT TOKEN, SO IT GETS NO ".0": String.fromFloat
+-- renders an overflowed literal as "Infinity" (and a NaN as "NaN"), and
+-- appending the suffix produced `d_Infinity.0`.  QBE's data lexer runs C's
+-- `fscanf("_%lf")` (vendor/qbe/parse.c:266), i.e. strtod, which reads
+-- INF/INFINITY/NAN but STOPS AT THE '.' — leaving ".0" for the lexer, which
+-- answers `unknown keyword .0` and kills a build that has nothing to do with
+-- the float arithmetic.  MEASURED on `1.0e400`: `d d_Infinity.0` ->
+-- `qbe: ...ssa:5: unknown keyword .0`.
 printFloat : Float -> String
 printFloat f =
     let
@@ -108,6 +122,9 @@ printFloat f =
             String.fromFloat f
     in
     if String.any (\c -> c == '.' || c == 'e' || c == 'E') s then
+        s
+
+    else if s == "Infinity" || s == "-Infinity" || s == "NaN" then
         s
 
     else
@@ -364,6 +381,9 @@ opName op =
         Mul ->
             "mul"
 
+        Div ->
+            "div"
+
         And ->
             "and"
 
@@ -395,6 +415,27 @@ cmpName op =
         Csge ->
             "csge"
 
+        -- the FLOAT family: the mnemonic drops the `s` and `printTy oty`
+        -- supplies the operand-type suffix, so at oty = D these print
+        -- `ceqd`/`cned`/`cltd`/`cled`/`cgtd`/`cged`.
+        Ceqd ->
+            "ceq"
+
+        Cned ->
+            "cne"
+
+        Cltd ->
+            "clt"
+
+        Cled ->
+            "cle"
+
+        Cgtd ->
+            "cgt"
+
+        Cged ->
+            "cge"
+
 
 loadName : LoadOp -> String
 loadName op =
@@ -417,3 +458,6 @@ storeName st =
 
         StoreL ->
             "storel"
+
+        StoreD ->
+            "stored"
