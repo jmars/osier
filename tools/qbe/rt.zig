@@ -156,6 +156,17 @@ var freelists: std.AutoHashMapUnmanaged(i32, ?*FrameHdr) = .{};
 var frame_alloc: std.heap.ArenaAllocator = undefined;
 var rt_inited = false;
 
+/// QBE_NO_REUSE, read ONCE at startup (main) instead of per call.
+///
+/// It used to be `std.c.getenv("QBE_NO_REUSE")` INSIDE rt_frame_leave, i.e. an
+/// env lookup on every generated-function return — measured at 8.4% of the
+/// native compiler's runtime (libc `getenv` walking `environ`;
+/// handoff-midpass-profile-improve).  main() sets this before any generated
+/// code runs, so the debug behaviour is identical.  Kept as a mutable global
+/// (not comptime) so the runtime is buildable once and steered by the
+/// environment, which is how the debug knob is used.
+var no_frame_reuse: bool = false;
+
 fn rtInit() void {
     if (!rt_inited) {
         frame_alloc = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -211,7 +222,7 @@ export fn rt_frame_leave() callconv(.c) void {
     // hold no GC pointers, or this contract breaks.
     g.rootPopTo(hdr.wm);
     const n = hdr.live;
-    if (std.c.getenv("QBE_NO_REUSE") != null) return; // debug: never reuse
+    if (no_frame_reuse) return; // debug: never reuse (flag set in main)
     const head = freelists.getOrPut(std.heap.page_allocator, n) catch @panic("qbe-rt: freelist oom");
     if (!head.found_existing) head.value_ptr.* = null;
     hdr.freelist_next = head.value_ptr.*;
@@ -605,6 +616,12 @@ fn buildArgvList(nargs: usize, c_argv: [*]?[*:0]u8) Value {
 }
 
 export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
+    // Read the debug knobs ONCE, here, before any generated code can run.
+    // rt_frame_leave used to call getenv on every return (8.4% of the native
+    // compiler's runtime — see no_frame_reuse); nothing below this line may
+    // start calling generated code before the flag is set.
+    no_frame_reuse = std.c.getenv("QBE_NO_REUSE") != null;
+
     // The generated code puts Elm recursion on the C stack (Lower.elm:76-84
     // documents the limitation), so the default 8MB RLIMIT_STACK can kill deep
     // programs -- hence this net.  Best-effort: raise only the SOFT limit
