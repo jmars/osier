@@ -656,19 +656,28 @@ all f xs =
             True
 
 
-filterMap : (a -> Maybe b) -> List a -> List b
-filterMap f xs =
+-- Tail-recursive accumulator walker (see `map`/`filter`): the earlier
+-- `v :: filterMap f rest` put the recursive call in ARGUMENT position, so the
+-- native (QBE) backend paid one C frame per element — the same shape as the
+-- `fuse` recursion fixed in Zinc.Emit.  The trailing `reverse` is safe on both
+-- build paths (Prelude.listRevGo is tail-recursive).
+listFilterMapGo f acc xs =
     case xs of
         y :: rest ->
             case f y of
                 Just v ->
-                    v :: filterMap f rest
+                    listFilterMapGo f (v :: acc) rest
 
                 Nothing ->
-                    filterMap f rest
+                    listFilterMapGo f acc rest
 
         [] ->
-            []
+            acc
+
+
+filterMap : (a -> Maybe b) -> List a -> List b
+filterMap f xs =
+    reverse (listFilterMapGo f [] xs)
 
 
 concatMap : (a -> List b) -> List a -> List b
