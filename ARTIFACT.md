@@ -62,6 +62,19 @@ Run it from the repository root (the script `cd`s there itself). It performs, in
 3. runs the fixture gate (`tests/elm-fixtures/run-elm-gate.sh`) — PASS/FAIL counts;
 4. compiles the corpus once as a batch and sha256-compares **every** artifact against
    `tools/osier-corpus-baseline.sha256` (byte-identity);
+
+   **Scope of this check — it is narrower than it looks.** The baseline is a snapshot of the
+   bytes the compiler emits, and the fixed corpus (`Prelude.elm`, `Runtime.elm`, `core-libs/*`)
+   is *folded into every artifact*. So the check proves "the compiler's output did not change",
+   and it holds only while neither the corpus text nor the emitter's semantics change. Editing
+   `Prelude.elm` — even to make a helper tail-recursive — changes all 149 artifacts **by
+   construction**, as does any semantic change to `Zinc/Emit.elm`. When that is deliberate, the
+   baseline must be **re-frozen on purpose** and the reason recorded; a bare `DIFFERS` is how a
+   real regression and a legitimate corpus edit arrive looking identical. Last re-frozen
+   2026-10-09, for `Prelude.filterMap` becoming a tail-recursive accumulator walker (one of the
+   two stack-exhaustion fixes); 115 of 149 artifacts moved. Note also that a name added to
+   `Prelude.elm` becomes visible to compiled programs, because that file *is* the prelude
+   compiled into every program.
 5. runs the compiler's unit suite `TestMain`;
 6. runs `lake build` in `lean/` and counts theorems / axioms / `sorry`;
 7. re-derives the runTask branch recount (`tools/osier-recount-runTask.sh`).
