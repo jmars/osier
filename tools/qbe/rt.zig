@@ -9,6 +9,9 @@
 //!   rt_global_closure(desc) -> Value    the (cached) closure of a defun
 //!   rt_make_closure(desc, caps, n) -> Value   closure with captured env
 //!   rt_apply(fslot, args, n) -> Value   generic/partial/over application
+//!   rt_apply_tail(fslot, args, n) -> Ret   the tail-position twin (returns .tail)
+//!   rt_tail_known(code, argblock, n) -> Ret   direct saturated tail call
+//!   rt_bounce(ret) -> Value             chase a .tail chain to a .done value
 //!   rt_prim(name, args, n) -> Value     the EXACT VM primitive (fallback)
 //!   main(entry, args...)                the driver (elmvm-shaped output)
 //!
@@ -79,26 +82,53 @@ pub const Meta = extern struct {
     arity: i32,
 };
 
+/// The call-result shape every generated function returns — the bounce-loop
+/// convention transcribed from tools/aot/runtime.zig's `Ret = .done | .tail`.
+/// MUST be ABI-identical to the QBE `:ret` aggregate (Il.retType:
+/// `type :ret = align 8 { :val, w, l, l, l, w }`), i.e. 80 bytes:
+///   val   @0   (40) the finished value when kind == 0 (`.done`);
+///   kind  @40  (4)  discriminator: 0 = done, 1 = tail;
+///   f     @48  (8)  the callee code pointer (`.tail`);
+///   e     @56  (8)  the captures array (env), or null;
+///   args  @64  (8)  a fresh GC array of `arity` Value structs;
+///   arity @72  (4)  the static arity == `args` length.
+/// A `.tail`'s `args`/`e` are freshly allocated by rt_tail_known / rt_apply_tail
+/// and survive the caller's rt_frame_leave because NO collection runs between
+/// the .tail build and the next callee's prologue blitting them into its own
+/// rooted frame (the AOT's single-referee buildEnv invariant).
+pub const Ret = extern struct {
+    val: Value,
+    kind: i32,
+    f: ?*const anyopaque,
+    e: ?[*]Value,
+    args: ?[*]Value,
+    arity: i32,
+};
+
+comptime {
+    if (@sizeOf(Ret) != 80) @compileError("qbe rt: Ret must be 80 bytes to match the QBE :ret aggregate");
+}
+
 extern const qbe_meta: [*]const Meta;
 extern const qbe_meta_len: usize;
 
-extern fn rt_call0(f: ?*const anyopaque, e: ?[*]Value) callconv(.c) Value;
-extern fn rt_call1(f: ?*const anyopaque, e: ?[*]Value, a0: *Value) callconv(.c) Value;
-extern fn rt_call2(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value) callconv(.c) Value;
-extern fn rt_call3(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value) callconv(.c) Value;
-extern fn rt_call4(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value) callconv(.c) Value;
-extern fn rt_call5(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value) callconv(.c) Value;
-extern fn rt_call6(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value) callconv(.c) Value;
-extern fn rt_call7(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value) callconv(.c) Value;
-extern fn rt_call8(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value) callconv(.c) Value;
-extern fn rt_call9(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value) callconv(.c) Value;
-extern fn rt_call10(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value) callconv(.c) Value;
-extern fn rt_call11(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value) callconv(.c) Value;
-extern fn rt_call12(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value) callconv(.c) Value;
-extern fn rt_call13(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value, a12: *Value) callconv(.c) Value;
-extern fn rt_call14(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value, a12: *Value, a13: *Value) callconv(.c) Value;
-extern fn rt_call15(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value, a12: *Value, a13: *Value, a14: *Value) callconv(.c) Value;
-extern fn rt_call16(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value, a12: *Value, a13: *Value, a14: *Value, a15: *Value) callconv(.c) Value;
+extern fn rt_call0(f: ?*const anyopaque, e: ?[*]Value) callconv(.c) Ret;
+extern fn rt_call1(f: ?*const anyopaque, e: ?[*]Value, a0: *Value) callconv(.c) Ret;
+extern fn rt_call2(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value) callconv(.c) Ret;
+extern fn rt_call3(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value) callconv(.c) Ret;
+extern fn rt_call4(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value) callconv(.c) Ret;
+extern fn rt_call5(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value) callconv(.c) Ret;
+extern fn rt_call6(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value) callconv(.c) Ret;
+extern fn rt_call7(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value) callconv(.c) Ret;
+extern fn rt_call8(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value) callconv(.c) Ret;
+extern fn rt_call9(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value) callconv(.c) Ret;
+extern fn rt_call10(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value) callconv(.c) Ret;
+extern fn rt_call11(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value) callconv(.c) Ret;
+extern fn rt_call12(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value) callconv(.c) Ret;
+extern fn rt_call13(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value, a12: *Value) callconv(.c) Ret;
+extern fn rt_call14(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value, a12: *Value, a13: *Value) callconv(.c) Ret;
+extern fn rt_call15(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value, a12: *Value, a13: *Value, a14: *Value) callconv(.c) Ret;
+extern fn rt_call16(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value, a12: *Value, a13: *Value, a14: *Value, a15: *Value) callconv(.c) Ret;
 
 // =====================================================================
 //  Global state (set once in main)
@@ -277,10 +307,28 @@ export fn rt_apply(fslot: *Value, args: [*]Value, nargs: i32) callconv(.c) Value
     var live: i32 = nargs;
     g.rootPushValueArray(args, &live); // over-application re-reads after GCs
     defer g.rootPop();
-    return applyGo(&f, args, nargs);
+    return applyGo(&f, args, nargs, false).val;
 }
 
-fn applyGo(f: *Value, args: [*]Value, nargs: i32) Value {
+/// The tail-position twin of rt_apply: identical arity dispatch, but a
+/// saturated full call returns a `.tail` (whose env/args live in ONE fresh
+/// self-contained array, surviving the caller's rt_frame_leave) instead of
+/// bouncing internally.  rt_bounce chases it to a .done.
+export fn rt_apply_tail(fslot: *Value, args: [*]Value, nargs: i32) callconv(.c) Ret {
+    var f = fslot.*;
+    g.rootPushValue(&f);
+    defer g.rootPop();
+    var live: i32 = nargs;
+    g.rootPushValueArray(args, &live);
+    defer g.rootPop();
+    return applyGo(&f, args, nargs, true);
+}
+
+fn done(v: Value) Ret {
+    return .{ .val = v, .kind = 0, .f = null, .e = null, .args = null, .arity = 0 };
+}
+
+fn applyGo(f: *Value, args: [*]Value, nargs: i32, tail: bool) Ret {
     if (f.tag != .lambda) dieLoud("apply of a non-function value");
     const desc: *Desc = @ptrCast(@alignCast(f.payload.lambda.code));
     const rem = f.payload.lambda.code_len;
@@ -290,6 +338,28 @@ fn applyGo(f: *Value, args: [*]Value, nargs: i32) Value {
     const n: usize = @intCast(nargs);
 
     if (rem == nargs) {
+        if (tail) {
+            // Build ONE self-contained env: [applied ++ new args ++ captures],
+            // `args` = base, `e` = base + arity.  Root a COPY of env across the
+            // alloc — a collect moves the env array and rewrites f's lambda.env
+            // in place, so the raw `env` read is stale afterwards.
+            const arity: usize = @intCast(desc.arity);
+            const capslen: usize = @intCast(envlen - napp);
+            const total = arity + capslen;
+            var env_root: ?[*]Value = env;
+            g.rootPushPtr(@ptrCast(&env_root));
+            defer g.rootPop(); // env_root
+            var buf = g.allocArray(Value, total);
+            if (napp > 0) {
+                if (env_root == null) dieLoud("closure env missing for applied args");
+                @memcpy(buf[0..@intCast(napp)], env_root.?[0..@intCast(napp)]);
+            }
+            @memcpy(buf[@intCast(napp)..arity], args[0..n]);
+            if (capslen > 0)
+                @memcpy(buf[arity..total], env_root.?[@intCast(napp)..@intCast(envlen)]);
+            const e: ?[*]Value = if (capslen > 0) buf + arity else null;
+            return .{ .val = zeroValue(), .kind = 1, .f = desc.code, .e = e, .args = buf, .arity = desc.arity };
+        }
         var buf: [max_arity]Value = undefined;
         if (napp > 0) {
             if (env == null) dieLoud("closure env missing for applied args");
@@ -297,7 +367,7 @@ fn applyGo(f: *Value, args: [*]Value, nargs: i32) Value {
         }
         @memcpy(buf[@intCast(napp)..][0..n], args[0..n]);
         const caps: ?[*]Value = if (envlen > napp) env.? + @as(usize, @intCast(napp)) else null;
-        return callArity(desc.arity, desc.code, caps, buf[0..].ptr);
+        return done(callArity(desc.arity, desc.code, caps, buf[0..].ptr));
     }
 
     if (rem > nargs) {
@@ -327,7 +397,7 @@ fn applyGo(f: *Value, args: [*]Value, nargs: i32) Value {
             @memcpy(dst[off..], env_root.?[from..to]);
         }
         barrierIfOldgen(envv.?, dst);
-        return .{
+        return done(.{
             .tag = .lambda,
             .payload = .{ .lambda = .{
                 .code = @ptrCast(desc),
@@ -335,10 +405,12 @@ fn applyGo(f: *Value, args: [*]Value, nargs: i32) Value {
                 .env = envv,
                 .env_len = @intCast(total),
             } },
-        };
+        });
     }
 
-    // over-applied: saturate with the first `rem` args, then recurse
+    // over-applied: saturate with the first `rem` args (a NON-tail call,
+    // bounced internally), then recurse on the result with the rest — `tail`
+    // carries over to the remaining application.
     var buf: [max_arity]Value = undefined;
     const r: usize = @intCast(rem);
     if (napp > 0) @memcpy(buf[0..@intCast(napp)], env.?[0..@intCast(napp)]);
@@ -347,7 +419,34 @@ fn applyGo(f: *Value, args: [*]Value, nargs: i32) Value {
     var res = callArity(desc.arity, desc.code, caps, buf[0..].ptr);
     g.rootPushValue(&res);
     defer g.rootPop();
-    return applyGo(&res, args + r, nargs - rem);
+    return applyGo(&res, args + r, nargs - rem, tail);
+}
+
+/// Chases a `.tail` chain to its `.done` value at constant native stack — the
+/// trampoline that makes cross-defun tails unbounded (the AOT's `bounce`).
+fn bounce(r: Ret) Value {
+    var rr = r;
+    while (true) {
+        if (rr.kind == 0) return rr.val;
+        rr = callArityRet(rr.arity, rr.f.?, rr.e, rr.args.?);
+    }
+}
+
+/// The generated-code entry point for a non-tail call: `%r =:ret call q_<key>`
+/// then `%v =:val call rt_bounce(l %r)`.  `r` is a pointer to the 80-byte
+/// `:ret` the callee returned through sret.
+export fn rt_bounce(r: *const Ret) callconv(.c) Value {
+    return bounce(r.*);
+}
+
+/// A direct saturated tail call to a known defun (no captures): copy the
+/// staged args (in the caller's rooted frame) into a fresh GC array so they
+/// survive the caller's rt_frame_leave, and return the `.tail`.
+export fn rt_tail_known(code: *const anyopaque, argblock: [*]Value, nargs: i32) callconv(.c) Ret {
+    const n: usize = @intCast(nargs);
+    var buf = g.allocArray(Value, n);
+    @memcpy(buf[0..n], argblock[0..n]);
+    return .{ .val = zeroValue(), .kind = 1, .f = code, .e = null, .args = buf, .arity = nargs };
 }
 
 /// Write barrier for a hand-built env array (mirrors values.valLambda).
@@ -362,6 +461,10 @@ fn barrierIfOldgen(arr: [*]Value, elems: []Value) void {
 }
 
 fn callArity(arity: i32, f: *const anyopaque, e: ?[*]Value, buf: [*]Value) Value {
+    return bounce(callArityRet(arity, f, e, buf));
+}
+
+fn callArityRet(arity: i32, f: *const anyopaque, e: ?[*]Value, buf: [*]Value) Ret {
     return switch (arity) {
         0 => rt_call0(f, e),
         1 => rt_call1(f, e, @ptrCast(buf)),
@@ -551,9 +654,11 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     // native frames (rt_apply 0x610, rt.applyGo 0x320, rt.callArity 0x80,
     // rt_call1 0x80).  So the budget is still measured in megabytes and a
     // bigger input could still exhaust 8MB; what is gone is the class that made
-    // it routine.  The architectural fix for loop-shaped (tail/mutual) recursion
-    // remains the bounce loop (tools/aot/runtime.zig's Ret = .done|.tail
-    // pattern), a documented later stage.
+    // it routine.  The loop-shaped (tail/mutual) recursion fix has SINCE LANDED:
+    // the bounce loop above (Ret = .done|.tail, rt_bounce / rt_tail_known /
+    // rt_apply_tail) makes cross-defun tails constant-stack.  What remains is
+    // NON-tail deep recursion (the recursive-descent parser above) — the AOT's
+    // nat_depth guard is the known fix and is still a later stage.
     //
     // QBE_NO_RLIMIT=1 SKIPS the raise.  It exists so the net is TESTABLE: with
     // it set, `ulimit -s` decides the budget and one can ask of any workload

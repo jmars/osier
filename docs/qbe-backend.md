@@ -61,16 +61,18 @@ has no tail form; jump targets are intra-function only.
 - **Saturated self-call in tail position → an IN-FRAME LOOP** (args blitted
   into the param slots, `jmp @body`): REAL tail-call behaviour, constant
   native stack.  Proven by countdown 1000000 (12ms, no stack growth) and
-  churn 500000 (an allocating self-tail loop at the 16MB heap).
+  churn 500000 (an allocating self-tail loop at the 16MB heap).  This stays
+  the hot path.
 - **Every other tail position — cross-defun calls, `rt_apply`, thunk forces —
-  is a PLAIN CALL and grows the native stack.**  MEASURED: `Mutual.even`
-  (mutual tail recursion) survives between 20k and 40k hops on this host's
-  8MB stack (2 native frames/hop, QBE prologues ~200B) then SIGSEGVs; the VM
-  runs 1e6+ hops fine (`appterm` = constant stack).  The AOT's fix (bounce
-  loop returning a `.tail` request + a native-depth guard,
-  tools/aot/runtime.zig) is the known design for the next stage; it maps
-  cleanly onto this backend (rt_apply's saturation path is the natural
-  bounce point), but it was out of slice scope.
+  returns a `.tail` and is bounced.**  Every generated function returns the
+  80-byte `:ret` aggregate (`{ :val, w, l, l, l, w }` = `.done` value |
+  `.tail` request), transcribed from the AOT's `Ret = .done | .tail`
+  (tools/aot/runtime.zig).  `rt_bounce` chases a `.tail` chain at constant
+  native stack; `rt_tail_known` / `rt_apply_tail` build the `.tail` (fresh
+  self-contained env array, surviving the caller's `rt_frame_leave`).  The
+  mutual-tail check (`qbe-check.sh`) now ASSERTS unboundedness: `Mutual.even
+  1000000` completes, where the pre-bounce ceiling was 20k-40k hops (2
+  native frames/hop, QBE prologues ~200B).
 
 ## Crux 2 — GC rooting: pooled runtime frames, with both proofs
 
@@ -156,9 +158,10 @@ count metric remains a poor proxy either way (docs/aot-spike.md's lesson).
 
 ## What the next stage must settle
 
-1. **The bounce loop + depth guard** for cross-defun tails (the 20-40k hop
-   ceiling is the slice's hardest limitation).  The AOT's Ret/.tail design
-   maps onto rt_apply's saturation path.
+1. **~~The bounce loop + depth guard~~** — DONE: cross-defun tails now bounce
+   (see Crux 1).  What remains is a **native-depth guard** for NON-tail deep
+   recursion (the AOT's nat_depth cap, which falls back to the interpreter),
+   still out of scope.
 2. **Case/pattern matching** (the biggest coverage gap; `Mid.Ir.Case` with
    MEmpty/MVector/MTagEq/MLitEq was never reached).  Records/tuples/lists
    follow (Con/ListLit are straightforward vector/cons work on this runtime).

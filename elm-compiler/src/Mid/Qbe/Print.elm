@@ -29,7 +29,7 @@ import String exposing (fromInt)
 print : Module -> String
 print m =
     String.join "\n"
-        (List.map printType (m.types ++ [ valType, descType ])
+        (List.map printType (valType :: retType :: m.types ++ [ descType ])
             ++ [ "" ]
             ++ List.map printData m.datas
             ++ [ "" ]

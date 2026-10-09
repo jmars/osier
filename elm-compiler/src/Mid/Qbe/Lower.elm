@@ -44,11 +44,13 @@ module Mid.Qbe.Lower exposing (lower)
 -- :val params as POINTERS and returns them through sret, exactly like a C
 -- struct by value.  A function of arity N with K captures compiles to
 --
---     function :val $q_<mangled> [(env %env),] :val %a0 .. :val %a{N-1}
+--     function :ret $q_<mangled> [(env %env),] :val %a0 .. :val %a{N-1}
 --
--- (`env` only when K > 0 — QBE passes it in a register invisible to C; the
--- generated rt_callN dispatchers pass env to env-less top-level defuns too,
--- which just ignore it).  %a_i POINTS at the caller's staging copy; the
+-- — it RETURNS the 80-byte `:ret` (`.done` value | `.tail` request) rather
+-- than a bare `:val`, which is what carries the bounce loop (see TAIL CALLS
+-- below).  (`env` only when K > 0 — QBE passes it in a register invisible to
+-- C; the generated rt_callN dispatchers pass env to env-less top-level defuns
+-- too, which just ignore it).  %a_i POINTS at the caller's staging copy; the
 -- prologue blits each param into the frame before anything else can run.
 --
 -- GC ROOTING (crux 2): every local lives in a RUNTIME-POOLED frame block
@@ -58,10 +60,11 @@ module Mid.Qbe.Lower exposing (lower)
 -- store/load pair into a callee-saved register (MEASURED on the vendored
 -- qbe: a non-escaping stack slot's store+reload ARE deleted across a call;
 -- the pooled-frame loop shape keeps them — evidence in the handoff node and
--- docs/qbe-backend.md).  Slot 0 = result, 1..N params, N+1..N+K captures,
--- then expression temporaries.  A per-function GLOBAL frame would also
--- defeat promotion but CANNOT nest under recursion (a callee would zero its
--- caller's frame) — hence the pool.
+-- docs/qbe-backend.md).  Slot 0 = the `.done` value, slot 1 = the `.tail`
+-- metadata (kind/f/e/args/arity — the second half of `:ret`), 2..N+1 params,
+-- N+2..N+1+K captures, then expression temporaries.  A per-function GLOBAL
+-- frame would also defeat promotion but CANNOT nest under recursion (a
+-- callee would zero its caller's frame) — hence the pool.
 --
 -- CLOSURES (env representation crux): a first-class function is the VM's own
 -- `.lambda` Value with `code` = a static Desc (the GC passes non-heap
@@ -78,10 +81,13 @@ module Mid.Qbe.Lower exposing (lower)
 -- no tail form; jump targets are intra-function).  So:
 --   * a saturated App to the SAME defun in tail position = an IN-FRAME LOOP:
 --     args into temp slots, blit temps into the param slots, `jmp @body`.
---   * every other tail position (cross-defun call, rt_apply, thunk force of
---     another global) is a PLAIN CALL and therefore GROWS THE NATIVE STACK.
---     Honest slice answer — measured in docs/qbe-backend.md; the AOT's
---     bounce loop (tools/aot/runtime.zig Ret/.tail) is the known next stage.
+--     This stays the hot path — generality must not cost it.
+--   * every other tail position (cross-defun call, rt_apply, thunk force)
+--     returns a `.tail` via the `:ret` aggregate and is chased by the runtime
+--     bounce loop (tools/qbe/rt.zig rt_bounce) — the AOT's Ret/.tail pattern
+--     (tools/aot/runtime.zig) transcribed onto this backend.  A `.done` is
+--     kind 0 + the value; a `.tail` is kind 1 + (f, e, args, arity), built by
+--     rt_tail_known / rt_apply_tail so its args survive rt_frame_leave.
 --
 -- NO SSA: temporaries are assigned freely; QBE builds SSA itself.
 
@@ -99,6 +105,13 @@ import Zinc.Csexp exposing (utf8ByteLength)
 vs : Int
 vs =
     40
+
+
+-- sizeof(:ret) = 80 (Il.retType): `{ :val, w, l, l, l, w }` = two pooled-frame
+-- slots — slot 0 the finished value, slot 1 the .tail discriminator + payload.
+rvs : Int
+rvs =
+    80
 
 
 -- VM ValTag numbers this lowering switches on (gc/types.zig ValTag order).
@@ -439,9 +452,11 @@ lowerDefun defun sOuter =
 
 
 -- ============================ FUNCTION BODY ============================
--- Frame layout: slot 0 result, 1..N params, N+1..N+K captures, then temps.
--- Blocks: @start (prologue; jump @body), @body (loop head for self-tail),
--- ... interior ..., @ret (rt_frame_leave; ret %s0).
+-- Frame layout: slot 0 result `:val`, slot 1 the `.tail` metadata (kind/f/e/
+-- args/arity — the second half of the 80-byte `:ret` return), 2..N+1 params,
+-- N+2..N+1+K captures, then temps.  Blocks: @start (prologue; jump @body),
+-- @body (loop head for self-tail), ... interior ..., @ret (rt_frame_leave;
+-- ret %s0 — returns the whole 80-byte `:ret` at slot 0).
 
 
 lowerFunBody : Bool -> String -> String -> Lambda -> List Int -> S -> Result String ( PendingFunc, S )
@@ -459,11 +474,11 @@ lowerFunBody entry key qname lambda captures sOuter =
             , curBody = []
             , tmp = 0
             , lbl = 0
-            , slot = 1 + nparams + ncaps
+            , slot = 2 + nparams + ncaps
             , binderSlots =
                 Dict.fromList
-                    (List.indexedMap (\i p -> ( p.id, i + 1 )) lambda.params
-                        ++ List.indexedMap (\j cid -> ( cid, nparams + 1 + j )) captures
+                    (List.indexedMap (\i p -> ( p.id, i + 2 )) lambda.params
+                        ++ List.indexedMap (\j cid -> ( cid, nparams + 2 + j )) captures
                     )
             , funcs = []
             , datas = sOuter.datas
@@ -505,7 +520,7 @@ lowerFunBody entry key qname lambda captures sOuter =
                         { func =
                             Func qname
                                 False
-                                (Agg "val")
+                                (Agg "ret")
                                 (ncaps > 0)
                                 (List.map (\i -> ( "a" ++ String.fromInt i, Agg "val" )) (List.range 0 (nparams - 1)))
                                 (List.reverse sRet.blocks)
@@ -776,23 +791,23 @@ lowerApp exp dest isTail s =
     case head of
         GRef ref ->
             if ref.force then
-                -- 0-arg thunk head: force it, then apply any spine args to
-                -- the result through the generic path.
-                directCall ref.key [] dest False s
-                    |> Result.andThen
-                        (\s1 ->
-                            if List.isEmpty args then
-                                Ok
-                                    (if isTail then
-                                        jumpTo "ret" s1
+                -- 0-arg thunk head: force it.  With no spine args in tail
+                -- position the force IS the tail call; otherwise force as a
+                -- plain value and apply the spine args through the generic
+                -- path.
+                if List.isEmpty args && isTail then
+                    directCall ref.key [] dest True s
 
-                                     else
-                                        s1
-                                    )
+                else
+                    directCall ref.key [] dest False s
+                        |> Result.andThen
+                            (\s1 ->
+                                if List.isEmpty args then
+                                    Ok s1
 
-                            else
-                                rtApply (slotTmp dest) args dest isTail s1
-                        )
+                                else
+                                    rtApply (slotTmp dest) args dest isTail s1
+                            )
 
             else
                 case Dict.get ref.key s.arities of
@@ -839,7 +854,7 @@ lowerSelfTail args s =
             (\( slots, s1 ) ->
                 List.foldl
                     (\( slot, i ) acc ->
-                        emit (Blit (Il.Tmp (slotTmp slot)) (Il.Tmp (slotTmp (i + 1))) vs) acc
+                        emit (Blit (Il.Tmp (slotTmp slot)) (Il.Tmp (slotTmp (i + 2))) vs) acc
                     )
                     s1
                     (List.indexedMap (\i slot -> ( slot, i )) slots)
@@ -918,61 +933,100 @@ stageSlots slots s =
     )
 
 
-finishCallResult : String -> Int -> Bool -> S -> S
-finishCallResult rp dest isTail =
-    emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
-        >> (if isTail then
-                jumpTo "ret"
-
-            else
-                identity
-           )
-
-
--- Direct saturated call to a known defun.  The returned :val points into the
--- CALLEE's (already-left) frame block — blitted into our rooted slot before
--- anything else can run, which is the only safe window (the block is
--- unread-but-stable until the next rt_frame_enter).
+-- Direct saturated call to a known defun.  NON-TAIL: `%r =:ret call q_<key>`
+-- then `rt_bounce(l %r)` chases any .tail the callee returned up to a .done
+-- value (constant native stack across the tail chain).  TAIL (cross-defun):
+-- `rt_tail_known(code, argblock, nargs)` builds a .tail whose args live in a
+-- fresh GC array (surviving our rt_frame_leave) and returns the :ret, blitted
+-- into the return area (slot 0) for the @ret block to hand upward.
 directCall : String -> List Exp -> Int -> Bool -> S -> Result String S
 directCall key args dest isTail s =
     stageArgs args s
         |> Result.andThen
-            (\( ptrs, _, s1 ) ->
-                let
-                    ( rp, s2 ) =
-                        freshTmp s1
-                in
-                Ok
-                    (emit (Call (Just rp) (Agg "val") (Il.Sym ("q_" ++ mangle key)) (List.map (\p -> ArgVal (Agg "val") (Il.Tmp p)) ptrs)) s2
-                        |> finishCallResult rp dest isTail
-                    )
+            (\( ptrs, base, s1 ) ->
+                if isTail then
+                    let
+                        ( rp, s2 ) =
+                            freshTmp s1
+                    in
+                    Ok
+                        (emit
+                            (Call (Just rp)
+                                (Agg "ret")
+                                (Il.Sym "rt_tail_known")
+                                [ ArgVal (Base L) (Il.Sym ("q_" ++ mangle key))
+                                , ArgVal (Base L) (Il.Tmp (slotTmp base))
+                                , ArgVal (Base W) (Il.Con (List.length args))
+                                ]
+                            )
+                            s2
+                            |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp 0)) rvs)
+                            |> jumpTo "ret"
+                        )
+
+                else
+                    let
+                        ( rp, s2 ) =
+                            freshTmp s1
+
+                        ( vp, s3 ) =
+                            freshTmp s2
+                    in
+                    Ok
+                        (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\p -> ArgVal (Agg "val") (Il.Tmp p)) ptrs)) s3
+                            |> emit (Call (Just vp) (Agg "val") (Il.Sym "rt_bounce") [ ArgVal (Base L) (Il.Tmp rp) ])
+                            |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
+                        )
             )
 
 
 -- Generic application through the runtime (first-class closures, partials,
--- over-application): rt_apply(fslot, argsBlock, nargs).
+-- over-application).  NON-TAIL: rt_apply bounces internally and returns a
+-- .done value.  TAIL: rt_apply_tail returns the :ret (.tail or .done), blitted
+-- into the return area.
 rtApply : String -> List Exp -> Int -> Bool -> S -> Result String S
 rtApply fslotTmp args dest isTail s =
     stageArgs args s
         |> Result.andThen
             (\( _, baseSlot, s1 ) ->
-                let
-                    ( rp, s2 ) =
-                        freshTmp s1
-                in
-                Ok
-                    (emit
-                        (Call (Just rp)
-                            (Agg "val")
-                            (Il.Sym "rt_apply")
-                            [ ArgVal (Base L) (Il.Tmp fslotTmp)
-                            , ArgVal (Base L) (Il.Tmp (slotTmp baseSlot))
-                            , ArgVal (Base W) (Il.Con (List.length args))
-                            ]
+                if isTail then
+                    let
+                        ( rp, s2 ) =
+                            freshTmp s1
+                    in
+                    Ok
+                        (emit
+                            (Call (Just rp)
+                                (Agg "ret")
+                                (Il.Sym "rt_apply_tail")
+                                [ ArgVal (Base L) (Il.Tmp fslotTmp)
+                                , ArgVal (Base L) (Il.Tmp (slotTmp baseSlot))
+                                , ArgVal (Base W) (Il.Con (List.length args))
+                                ]
+                            )
+                            s2
+                            |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp 0)) rvs)
+                            |> jumpTo "ret"
                         )
-                        s2
-                        |> finishCallResult rp dest isTail
-                    )
+
+                else
+                    let
+                        ( rp, s2 ) =
+                            freshTmp s1
+                    in
+                    Ok
+                        (emit
+                            (Call (Just rp)
+                                (Agg "val")
+                                (Il.Sym "rt_apply")
+                                [ ArgVal (Base L) (Il.Tmp fslotTmp)
+                                , ArgVal (Base L) (Il.Tmp (slotTmp baseSlot))
+                                , ArgVal (Base W) (Il.Con (List.length args))
+                                ]
+                            )
+                            s2
+                            |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+                        )
             )
 
 
@@ -2455,14 +2509,14 @@ withPrologue pending =
 
         paramBlits =
             List.map
-                (\i -> Blit (Il.Tmp ("a" ++ String.fromInt i)) (Il.Tmp (slotTmp (i + 1))) vs)
+                (\i -> Blit (Il.Tmp ("a" ++ String.fromInt i)) (Il.Tmp (slotTmp (i + 2))) vs)
                 (List.range 0 (pending.nparams - 1))
 
         capBlitsPro =
             List.concatMap
                 (\j ->
                     [ Bin (Just ("e" ++ String.fromInt j)) L Add (Il.Tmp "env") (Il.Con (vs * j))
-                    , Blit (Il.Tmp ("e" ++ String.fromInt j)) (Il.Tmp (slotTmp (pending.nparams + 1 + j))) vs
+                    , Blit (Il.Tmp ("e" ++ String.fromInt j)) (Il.Tmp (slotTmp (pending.nparams + 2 + j))) vs
                     ]
                 )
                 (List.range 0 (pending.ncaps - 1))
@@ -2507,12 +2561,12 @@ rtCallFuncs =
             in
             Func ("rt_call" ++ String.fromInt n)
                 True
-                (Agg "val")
+                (Agg "ret")
                 False
                 params
                 [ { label = "start"
                   , body =
-                        [ Call (Just "r") (Agg "val") (Il.Tmp "fn") callArgs
+                        [ Call (Just "r") (Agg "ret") (Il.Tmp "fn") callArgs
                         ]
                   , jump = Ret (Just (Il.Tmp "r"))
                   }

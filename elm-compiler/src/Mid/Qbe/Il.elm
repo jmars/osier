@@ -16,6 +16,7 @@ module Mid.Qbe.Il exposing
     , DataDef
     , DataItem(..)
     , descType
+    , retType
     , valType
     )
 
@@ -64,6 +65,28 @@ valType =
     { name = "val"
     , align = Just 8
     , fields = "w" :: List.repeat 4 "l"
+    }
+
+
+-- `type :ret = align 8 { :val, w, l, l, l, w }` — the call-result shape every
+-- generated function returns (the bounce-loop convention, transcribed from
+-- tools/aot/runtime.zig's `Ret = .done | .tail`).  Field layout (80 bytes,
+-- ABI-matched by tools/qbe/rt.zig `Ret`):
+--   :val  @0   the finished value (`.done`) — slot 0 of the pooled frame;
+--   w     @40  the discriminator (0 = done, 1 = tail) — slot 1 offset 0;
+--   l     @48  f: the callee code pointer (`.tail`);
+--   l     @56  e: the captures array (env) or null;
+--   l     @64  args: a fresh GC array of `arity` Value structs;
+--   w     @72  arity: the static arity (== length of `args`).
+-- `.tail` is built by the runtime (rt_tail_known / rt_apply_tail) so its env
+-- and args survive the caller's rt_frame_leave, and chased by rt_bounce —
+-- which is why deep tail chains no longer grow the native stack.
+-- MUST BE DEFINED AFTER `:val` (QBE requires a type to precede its uses).
+retType : TypeDef
+retType =
+    { name = "ret"
+    , align = Just 8
+    , fields = ":val" :: "w" :: "l" :: "l" :: "l" :: "w" :: []
     }
 
 

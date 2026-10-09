@@ -304,22 +304,25 @@ else
   echo "PASS vfield-lowers: record field pattern ({ x } = {x=1}) now lowers (no loud failure)"
 fi
 
-# ---- cross-defun tail: how deep before the native stack dies ----
-if [ ! -x "$TMP/mutual/mutualtail" ]; then
-  "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/mutualtail.elm Mutual.even "$TMP/mutual" >/dev/null 2>&1
-fi
-if [ -x "$TMP/mutual/mutualtail" ]; then
-  # the VM runs Mutual.even 1000000 fine (appterm); native grows a frame per
-  # hop — find the practical ceiling
-  # MEASURED CEILING (this host, 8MB stack): cross-defun tail hops survive
-  # ~20-40k (2 native frames/hop, QBE prologues ~200B) before SIGSEGV, while
-  # the VM runs 1e6+ (appterm = constant stack).  Cross-defun tails are
-  # PLAIN CALLS in this slice — the honest cost of no bounce loop yet.
-  d=20000
-  if "$TMP/mutual/mutualtail" Mutual.even $d >/dev/null 2>&1; then
-    echo "PASS mutual-tail $d ok; ceiling measured between 20k-40k hops (VM: 1e6+ unlimited)"
+# ---- cross-defun tail: UNBOUNDED after the bounce loop ----
+# Always (re)build: the pre-bounce binary and the post-bounce one share a name,
+# and a stale pre-bounce binary would SIGSEGV at this depth (the exact ceiling
+# this check asserts is gone).
+if "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/mutualtail.elm Mutual.even "$TMP/mutual" >/dev/null 2>&1; then
+  # Mutual.even n -> odd (n-1) -> even (n-2) is MUTUAL tail recursion.  Before
+  # the bounce loop these cross-defun tails were PLAIN CALLS and died between
+  # 20k-40k hops on an 8MB stack (2 native frames/hop).  After it, a tail call
+  # returns a .tail chased by rt_bounce at constant native stack, so 1e6 hops —
+  # the same depth the VM's appterm handles — must COMPLETE with the VM's answer.
+  d=1000000
+  (cd "$ROOT/elm-compiler" &&
+    MIDTIER=0 node run.js "$ROOT/tools/qbe/fixtures/mutualtail.elm" "$TMP/mutual/ref.csexp") >/dev/null 2>&1
+  vm_out="$("$ROOT/zig-out/bin/elmvm" "$TMP/mutual/ref.csexp" Mutual.even "$d" 2>&1)"
+  nat_out="$(timeout 120 "$TMP/mutual/mutualtail" Mutual.even "$d" 2>&1)"
+  if [ "$nat_out" = "$vm_out" ] && [ "$vm_out" = "1" ]; then
+    echo "PASS mutual-tail $d hops: unbounded (identical to VM; pre-bounce ceiling was 20k-40k)"
   else
-    echo "FAIL mutual-tail $d: crashed"
+    echo "FAIL mutual-tail $d hops: vm='$vm_out' native='$nat_out'"
     FAIL=1
   fi
 fi
