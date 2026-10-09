@@ -19,8 +19,8 @@ The dump it is rendered from (no elm/elmvm/node/jq needed in that mode):
 ELM_GATE_MATRIX=/tmp/matrix.tsv tests/elm-fixtures/run-elm-gate.sh
 ```
 
-**152 registered checks.** Run from the repo root, the gate prints
-`PASS=152 FAIL=0` on the frozen artifact. `docs/research/osier-paper.md`
+**153 registered checks.** Run from the repo root, the gate prints
+`PASS=153 FAIL=0` on the frozen artifact. `docs/research/osier-paper.md`
 **Appendix A** is the paper's prose counterpart: the *designed* programs the
 paper cites, with the claim each one pins. Appendix A is a selected subset;
 this file is the complete registry. Where the two disagree, **this file and the
@@ -48,6 +48,7 @@ fails loudly rather than letting this listing go stale.
 | `compile_error` | `err` | compilation must emit `err <message>` containing `expected` |
 | `out_cmp` | `cmp` | the raw file an earlier run wrote must equal its `expected/*.txt` bytes |
 | `rawrun` | `rawrun` | runs a committed `.csexp` bundle no Elm source can produce (e.g. an unknown Task ctor) |
+| `depth` | `depth` | deep NON-tail recursion past `CALL_STACK_DEPTH` must be LOUD (compiles its own bundle; `args` = control-depth past-cap-margin): control depth and `CAP-1` print `expected`; past the cap the process exits non-zero with the `call stack depth exceeded` diagnostic on stderr and no value on stdout |
 
 ## The registered checks
 
@@ -205,6 +206,7 @@ fails loudly rather than letting this listing go stale.
 | 150 | `liftcycshadows` | `run` | `main` | `0` | — | — | `liftcycshadows.elm` |
 | 151 | `liftrelaxleak` | `run` | `main` | `999` | — | — | `liftrelaxleak.elm` |
 | 152 | `liftdisjointshadow` | `run` | `main` | `3` | — | — | `liftdisjointshadow.elm` |
+| 153 | `calloverflow` | `depth` | `main` | `500500` | `1000 5000` | — | `calloverflow.elm` |
 
 ---
-Generated from `tests/elm-fixtures/run-elm-gate.sh`; 152 checks.
+Generated from `tests/elm-fixtures/run-elm-gate.sh`; 153 checks.

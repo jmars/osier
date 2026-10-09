@@ -686,15 +686,21 @@ pub fn vmExecEnv(
     g.rootPushPtr(@ptrCast(&frame_stack)); // (8) ROOT_PTR — CallFrame** — C:3202
 
     run: while (true) {
-        // C:3204-3208 — hard instruction limit.
+        // C:3204-3208 — hard instruction limit.  C prints and leaves the loop,
+        // returning whatever `acc` holds with exit status 0 — a wrong answer
+        // presented as the answer.  The diagnostic below preserves the C text,
+        // but the exit status is deliberately NO LONGER a success: like the
+        // CALL_STACK_DEPTH guard in this function, an exhausted VM resource
+        // limit is a fatal interpreter condition, so it uses the VM's own
+        // fatal idiom (std.debug.panic — stderr message + abort).  Stated
+        // deviation from C:3204-3208.
         instr_count += 1;
         vm.instr_exec += 1;
         if (instr_count >= instr_limit) {
-            std.debug.print(
-                "[HARD LIMIT] {d} instructions, aborting at pc={d} frames={d}\n",
+            std.debug.panic(
+                "fatal: hard instruction limit exceeded — [HARD LIMIT] {d} instructions, aborting at pc={d} frames={d}",
                 .{ instr_limit, pc, frames_sp },
             );
-            break :run; // goto done
         }
 
         // C:3209-3228 — pc out of range: pop a CallFrame and resume in the
@@ -870,7 +876,27 @@ pub fn vmExecEnv(
                         // are CALLED with nargs==0 via `mm <name> p` — the
                         // identity rule would break them, and the old path
                         // is the byte-compat requirement of this unit.
-                        if (frames_sp >= types.CALL_STACK_DEPTH) break :run; // C:3296
+                        // C:3296 left the run loop SILENTLY here: exit status
+                        // 0, empty stderr, and whatever `acc` held returned
+                        // as the result — a wrong value presented as the
+                        // answer.  Out of frames is a fatal interpreter
+                        // resource limit, not a program-visible Shen
+                        // condition, so it uses the VM's own fatal idiom —
+                        // std.debug.panic, as vaPop above (:140) and
+                        // gc's assertWordsFits / "table full" — rather than a
+                        // new catchable VmError member: hostcall.callBundled0/1
+                        // catch EVERY error into vm.err_slot, so a catchable
+                        // overflow would be swallowed back into a value again
+                        // on the bootstrap path.
+                        if (frames_sp >= types.CALL_STACK_DEPTH) {
+                            std.debug.panic(
+                                "fatal: call stack depth exceeded — {d} call frames " ++
+                                    "(CALL_STACK_DEPTH, vendor/zinc-vm/src/gc/types.zig): " ++
+                                    "non-tail recursion deeper than the VM's frame stack; " ++
+                                    "restructure it to a tail call or raise the cap.",
+                                .{types.CALL_STACK_DEPTH},
+                            );
+                        }
                         const cf = &frame_stack[@intCast(frames_sp)];
                         frames_sp += 1;
                         cf.code = cur_code;

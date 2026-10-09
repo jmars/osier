@@ -166,6 +166,46 @@ rawrun() {
   add_check rawrun "$name" "$fn" "$exp" "" "" "$FIX/$name.csexp" "$FIX/$name.csexp" rawrun
 }
 
+# depth <name> <fn> <control-depth> <past-cap-margin> <expected-control-value>
+#
+# THE OUT-OF-FRAMES CHECK (handoff osier-vmdepth).  `run`/`rawrun` compare
+# stdout text and cannot see an EXIT STATUS, which is the whole point here: the
+# VM's call-frame stack (CALL_STACK_DEPTH, vendor/zinc-vm/src/gc/types.zig) used
+# to run out SILENTLY — exit 0, empty stderr, and whatever `acc` held printed as
+# the answer.  A user must never get a wrong answer with a success status, so
+# this check asserts on the process instead of on the value:
+#
+#   1. CONTROL — <fn> at <control-depth> (a legal depth, far below the cap):
+#      must print <expected-control-value> AND exit 0.  Same source, same
+#      shape, only the depth differs, so the failure below can only be the cap.
+#   2. NEAR-CAP — <fn> at CALL_STACK_DEPTH-1 (the LAST usable frame): must
+#      still print the correct sum.  This is the half that keeps the check from
+#      "fixing" the defect by refusing work it should do, and it fails loudly
+#      if a change to the entry path ever moves the boundary.
+#   3. PAST-CAP — <fn> at CALL_STACK_DEPTH + <past-cap-margin>: must exit
+#      NON-ZERO with the named diagnostic on stderr ($DEPTH_MSG), and must not
+#      print a value on stdout.
+#
+# CALL_STACK_DEPTH is READ FROM THE SOURCE here (not baked in), so raising the
+# cap cannot silently turn this check into a no-op — the probe follows it.
+#
+# It is registered WITHOUT a compile group: tools/osier-corpus-baseline.sha256
+# pins the batch's artifact set, so this fixture is compiled on demand instead
+# (one extra node process, ~0.4s).  It runs at $DEPTH_HEAP_MB because the frame
+# cap has to be reached BEFORE the heap runs out — at elmvm's default 64MB heap
+# this probe aborts in grow_heap instead, which is a DIFFERENT failure and would
+# make the row pass vacuously.
+depth() {
+  local name="$1" fn="$2" ctl="$3" margin="$4" exp="$5"
+  add_check depth "$name" "$fn" "$exp" "$ctl $margin" "" "$FIX/$name.elm" "$OUT/$name.depth.csexp" depth
+}
+
+# The named diagnostic the VM must print when it runs out of call frames —
+# asserted verbatim (see vendor/zinc-vm/src/vm/interp.zig, the CALL_STACK_DEPTH
+# guard) so the check cannot be satisfied by an unrelated abort.
+DEPTH_MSG="call stack depth exceeded"
+DEPTH_HEAP_MB=1024
+
 run fib        fib        "$(read_expected fib)"        10
 run rtl1       main       "$(read_expected rtl1)"
 run rtl2       main       "$(read_expected rtl2)"
@@ -524,6 +564,21 @@ run liftcycshadows  main   "$(read_expected liftcycshadows)"
 run liftrelaxleak    main   "$(read_expected liftrelaxleak)"
 run liftdisjointshadow main "$(read_expected liftdisjointshadow)"
 
+# --- osier-vmdepth: running OUT of call frames must be LOUD.  The VM used to
+# break out of its run loop silently at CALL_STACK_DEPTH (65536, gc/types.zig)
+# and return whatever `acc` held: exit 0, EMPTY stderr, and a printed value
+# that is not the answer.  calloverflow is a non-tail recursion whose depth IS
+# the workload (cf. countcase above, which pins the TAIL path at 100000 — a tail
+# call reuses its frame and is unbounded — and tools/bench/suite/deepnontail.elm,
+# whose `main` deliberately stays at depth 50000 because that is the deepest
+# depth correct on BOTH backends: the VM dies at 65536, the native path is
+# correct past 100000).
+#
+# Registered by depth(), NOT by run(): it asserts on the process (non-zero exit
+# + the named diagnostic, and NO value on stdout), which is the half `run`
+# cannot see.  See the depth() helper for the three invocations it makes.
+depth calloverflow main 1000 5000 500500
+
 # ==================== ELM_GATE_MATRIX: dump the registry ====================
 # ELM_GATE_MATRIX=1 prints every REGISTERED check as TSV (one row per check, in
 # declaration order) and exits WITHOUT compiling or running anything; with any
@@ -663,6 +718,77 @@ dispatch() {
       else
         echo "FAIL $name (raw bundle $fn): exp[$exp] got[$got]"; fail=$((fail+1))
       fi
+      ;;
+    depth)
+      # See the depth() helper: this is the ONE check that compiles its own
+      # bundle (no register_group — the corpus baseline pins the batch set) and
+      # the ONE check that asserts on the EXIT STATUS, both because the defect
+      # it pins is a silent wrong answer with a SUCCESS status.
+      if ! node "$CDIR/run.js" "$fixfile" "$outfile" >/dev/null 2>&1 || [ ! -s "$outfile" ]; then
+        echo "FAIL $name: on-demand compile failed: $fixfile"; fail=$((fail+1)); return
+      fi
+      if head -c 4 "$outfile" | grep -q '^err '; then
+        echo "FAIL $name: compile error: $(cat "$outfile")"; fail=$((fail+1)); return
+      fi
+      cap="$(sed -n 's/.*CALL_STACK_DEPTH *= *\([0-9][0-9]*\).*/\1/p' \
+               "$ROOT/vendor/zinc-vm/src/gc/types.zig" | head -1)"
+      if [ -z "$cap" ]; then
+        echo "FAIL $name: cannot read CALL_STACK_DEPTH from vendor/zinc-vm/src/gc/types.zig"; fail=$((fail+1)); return
+      fi
+      read -r ctl margin <<< "$args"
+      mod=$(module_name "$fixfile")
+      qname="$mod.$fn"
+      near=$((cap - 1))
+      past=$((cap + margin))
+      # (2) the last usable frame — expected sum 1+2+...+near.
+      near_exp=$(( near * (near + 1) / 2 ))
+      # (1) the control at a legal depth.
+      ctl_out=$(ELMC_HEAP_MB="$DEPTH_HEAP_MB" "$ELMVM" "$outfile" "$qname" "$ctl" 2>&1); ctl_rc=$?
+      if [ "$ctl_rc" -ne 0 ] || [ "$ctl_out" != "$exp" ]; then
+        echo "FAIL $name $qname $ctl (control): exp rc=0 out[$exp], got rc=$ctl_rc out[$ctl_out]"
+        fail=$((fail+1)); return
+      fi
+      near_out=$(ELMC_HEAP_MB="$DEPTH_HEAP_MB" "$ELMVM" "$outfile" "$qname" "$near" 2>&1); near_rc=$?
+      if [ "$near_rc" -ne 0 ] || [ "$near_out" != "$near_exp" ]; then
+        echo "FAIL $name $qname $near (CALL_STACK_DEPTH-1): exp rc=0 out[$near_exp], got rc=$near_rc out[$near_out]"
+        fail=$((fail+1)); return
+      fi
+      # (3) past the cap: non-zero exit, the named diagnostic on stderr, and
+      # NO value on stdout (a printed value here is the old silent-wrong-answer
+      # defect, whatever the exit status says).
+      #
+      # THIS IS THE ONE INVOCATION IN THE GATE THAT CRASHES ITS CHILD ON
+      # PURPOSE, and bash reports a signal-killed job with
+      #   "<script>: line N: <PID> Aborted (core dumped) <the command>"
+      # on the SHELL's stderr -- not the child's, so the `2>` on the command
+      # below does NOT capture it.  That line lands in the gate TRANSCRIPT
+      # carrying a fresh PID on every run, which makes the transcript
+      # non-deterministic and makes `tools/midtier-diff.sh`'s transcript
+      # comparison fail spuriously (it compares MIDTIER=0 against MIDTIER=1).
+      # So redirect the shell's own stderr around this ONE invocation to a
+      # file (the child's stderr still goes to its own, which the asserts
+      # below read), and drop core dumps -- this check exists to panic the VM.
+      ulimit -c 0 2>/dev/null || true
+      exec 3>&2
+      exec 2>"$OUT/$name.past.shellstderr"
+      ELMC_HEAP_MB="$DEPTH_HEAP_MB" "$ELMVM" "$outfile" "$qname" "$past" \
+        >"$OUT/$name.past.stdout" 2>"$OUT/$name.past.stderr"
+      past_rc=$?
+      exec 2>&3 3>&-
+      if [ "$past_rc" -eq 0 ]; then
+        echo "FAIL $name $qname $past (past CALL_STACK_DEPTH=$cap): exit 0 — stdout=$(head -c 80 "$OUT/$name.past.stdout")"
+        fail=$((fail+1)); return
+      fi
+      if ! grep -q "$DEPTH_MSG" "$OUT/$name.past.stderr"; then
+        echo "FAIL $name $qname $past (past CALL_STACK_DEPTH=$cap): exit $past_rc but stderr lacks [$DEPTH_MSG]: $(head -c 200 "$OUT/$name.past.stderr" | tr '\n' ' ')"
+        fail=$((fail+1)); return
+      fi
+      if [ -s "$OUT/$name.past.stdout" ]; then
+        echo "FAIL $name $qname $past (past CALL_STACK_DEPTH=$cap): exit $past_rc with a value on stdout: $(head -c 80 "$OUT/$name.past.stdout")"
+        fail=$((fail+1)); return
+      fi
+      echo "PASS $name ($qname: $ctl -> $exp, $near -> $near_exp, $past -> exit $past_rc + \"$DEPTH_MSG\")"
+      pass=$((pass+1))
       ;;
   esac
 }

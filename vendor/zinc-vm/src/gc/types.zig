@@ -202,6 +202,33 @@ pub const Instr = extern struct {
 //  Call frame (for GC scanning)
 // ---------------------------------------------------------------------
 
+/// C: #define CALL_STACK_DEPTH 65536.  Deepest NON-TAIL recursion the VM can
+/// be in: interp.zig pushes one CallFrame per non-tail apply, and the guard
+/// there (vmExecEnv) now dies LOUDLY on overflow — C:3296 broke out of the run
+/// loop silently and returned whatever `acc` held (exit 0, empty stderr, a
+/// wrong answer), which is fixed; see the guard in interp.zig vmExecEnv for
+/// why the fix is a panic and not a catchable VmError.
+///
+/// COST, and why the value is what it is: one frame stack is this many
+/// CallFrames x @sizeOf(CallFrame)=48 = exactly 3 MiB of OLD-GEN per vmExecEnv
+/// entry (interp.zig:537 allocArrayOldgen), retained by the frame pool
+/// (state.FRAME_POOL_MAX=2) — and every deep run also pays an @memset of the
+/// used range on release (interp.zig frameStackRelease).
+///
+/// DECIDED (osier-vmdepth, 2026-10-09): the VALUE STAYS 65536 in this unit.
+/// Raising it resizes that old-gen array, i.e. it changes the VM's allocation
+/// and timing profile, and a parallel unit is taking VM-vs-native performance
+/// measurements — a silent confound. What exhaustion DOES was changed instead:
+/// it is a loud fatal now (fatal: call stack depth exceeded). If it is raised
+/// later: +48 bytes of old-gen per frame per live frame stack (+48 MiB per +1M
+/// frames), and the VM's depth ceiling then differs from the native path's,
+/// which is correct past 100000 (tools/bench/suite/README.md). MEASURED
+/// deepest legitimate non-tail recursion in this tree: ~50010 frames
+/// (tools/bench/suite/deepnontail.elm, depth 50000 — itself pinned at 50000
+/// because that is the deepest BOTH backends agree on), 20000 in the language
+/// gate (tests/elm-fixtures/letdeeprec.elm) and <=11263 for the compiler
+/// compiling its own 58 sources under the VM — so ~24% headroom, and nothing
+/// that reaches the cap today is correct.
 pub const CALL_STACK_DEPTH = 65536; // C: #define CALL_STACK_DEPTH 65536
 
 /// C: typedef struct { Value *data; int len; int cap; } ValueArray;

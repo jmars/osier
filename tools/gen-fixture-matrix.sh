@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # gen-fixture-matrix.sh — render tests/elm-fixtures/MATRIX.md from the GATE'S
 # OWN REGISTRY (the run / run2 / run_io / compile_clean / compile_error /
-# out_cmp / rawrun calls at the foot of tests/elm-fixtures/run-elm-gate.sh).
+# out_cmp / rawrun / depth calls at the foot of tests/elm-fixtures/run-elm-gate.sh).
 #
 # The matrix is never hand-copied: the gate dumps its registered checks
 # (ELM_GATE_MATRIX=<path>) and this script formats that dump, so the file
@@ -98,6 +98,7 @@ fails loudly rather than letting this listing go stale.
 | \`compile_error\` | \`err\` | compilation must emit \`err <message>\` containing \`expected\` |
 | \`out_cmp\` | \`cmp\` | the raw file an earlier run wrote must equal its \`expected/*.txt\` bytes |
 | \`rawrun\` | \`rawrun\` | runs a committed \`.csexp\` bundle no Elm source can produce (e.g. an unknown Task ctor) |
+| \`depth\` | \`depth\` | deep NON-tail recursion past \`CALL_STACK_DEPTH\` must be LOUD (compiles its own bundle; \`args\` = control-depth past-cap-margin): control depth and \`CAP-1\` print \`expected\`; past the cap the process exits non-zero with the \`call stack depth exceeded\` diagnostic on stderr and no value on stdout |
 
 ## The registered checks
 
