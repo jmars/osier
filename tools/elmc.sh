@@ -28,12 +28,58 @@ BIN="${ELMC_BIN:-$ROOT/zig-out/bin/elmc}"
 export ZIG_GLOBAL_CACHE_DIR
 mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
 
+# Freshness-invalidated cache (the tools/qbe/qbe-mk.sh pattern).  zig-out/bin/
+# elmc is NOT content-addressed -- aot-build.sh copies it out of a private zig
+# build into a fixed path -- so mere existence proves nothing: without this
+# guard the first build answers forever, however much the compiler sources
+# change afterwards.  Rebuild whenever anything it was compiled from is newer
+# than it: the compiler sources (src/ + the core-libs corpus + run.js and the
+# compiled compiler.js they produce), the selfhost group it compiles, the AOT
+# runtime/driver, the VM/GC the driver links, and the aotdump that produced
+# its gen.zig.  The probe FAILS SAFE: if `find` cannot run, rebuild.  The
+# cost of a false positive is one aot-build (~9 min, see below); the cost of
+# a false negative is a compiler binary answering for sources it was not
+# built from -- the stale-artifact class qbe-mk.sh's rt.o guard exists for.
+need_build=0
+reason=""
 if [ ! -x "$BIN" ]; then
+  need_build=1
+  reason="missing"
+else
+  elmc_newer="$(find \
+    "$ROOT/elm-compiler/src" "$ROOT/elm-compiler/core-libs" "$ROOT/elm-compiler/selfhost" \
+    "$ROOT/elm-compiler/run.js" "$ROOT/elm-compiler/compiler.js" \
+    "$ROOT/tools/aot" "$ROOT/vendor/zinc-vm/src" "$ROOT/src/effectloop.zig" \
+    "$ROOT/zig-out/bin/aotdump" \
+    -newer "$BIN" -print -quit 2>/dev/null)" || elmc_newer="PROBE_FAILED"
+  if [ -n "$elmc_newer" ]; then
+    need_build=1
+    reason="stale (newer input: $elmc_newer)"
+  fi
+fi
+
+if [ "$need_build" -eq 1 ]; then
   if [ "${ELMC_SKIP_BUILD:-0}" = "1" ]; then
-    echo "elmc: no binary at $BIN (set ELMC_BIN or drop ELMC_SKIP_BUILD)" >&2
+    echo "elmc: no fresh binary at $BIN ($reason); set ELMC_BIN or drop ELMC_SKIP_BUILD" >&2
     exit 2
   fi
-  echo "elmc: building $BIN (aot-build NativeMain + selfhost group)..." >&2
+  echo "elmc: building $BIN ($reason; aot-build NativeMain + selfhost group)..." >&2
+  # compiler.js is the input a rebuild would bake.  If the compiler sources are
+  # newer than it, building now would produce a binary compiled from a STALE
+  # compiler -- refuse with the fix instead of proceeding (the same rule as
+  # qbe-mk's rt.o: a cached artifact must never answer for inputs it was not
+  # built from).  TestMain.elm is excluded: it is the test runner, not part of
+  # the compiler (selfhost/manifest.json excludes it for the same reason).
+  if [ -f "$ROOT/elm-compiler/compiler.js" ]; then
+    cj_newer="$(find "$ROOT/elm-compiler/src" -name '*.elm' ! -name 'TestMain.elm' \
+                 -newer "$ROOT/elm-compiler/compiler.js" -print -quit 2>/dev/null)" \
+      || cj_newer="PROBE_FAILED"
+    if [ -n "$cj_newer" ]; then
+      echo "elmc: elm-compiler/compiler.js may be stale (newer source: $cj_newer) --" >&2
+      echo "elmc: run (cd elm-compiler && ./build.sh) first, then retry; not building from a stale compiler" >&2
+      exit 2
+    fi
+  fi
   # ELMC_BUILD_MODE: -O for aot-build.  Default ReleaseFast: the compiler is a
   # binary you RUN (often repeatedly), and a Debug build is ~10x slower at
   # runtime (it is the whole point of elmc to be usable); the one-time ~9 min

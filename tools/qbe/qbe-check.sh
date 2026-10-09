@@ -22,9 +22,29 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-TMP="${TMPDIR:-/tmp}/qbe-check"
-mkdir -p "$TMP"
+# Per-run scratch dir (mktemp, NOT a fixed path).  A fixed path persists across
+# runs, so anything that reads it without rebuilding tests whatever the
+# PREVIOUS run left behind: a stale pre-bounce binary was once reused here and
+# the suite reported an old crash ceiling as a current measurement.  qbe-mk
+# rebuilds its outputs on every call, but the checks that read an artifact
+# WITHOUT rebuilding it first -- root-stores' fib.s, vfield-lowers' oos.ssa,
+# the structural mutual-tail binary -- would otherwise answer from the last
+# run's tree after a failed build.  rt.o, the one artifact meant to survive,
+# lives in tools/qbe/ under qbe-mk's own freshness guard.
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/qbe-check.XXXXXX")" || {
+  echo "qbe-check: mktemp failed" >&2
+  exit 2
+}
+trap 'rm -rf "$TMP"' EXIT
 FAIL=0
+
+# Fail loud before ~50 cryptic per-fixture mismatches: the VM reference runner
+# is a zig build product this script does not build itself.
+[ -x "$ROOT/zig-out/bin/elmvm" ] || {
+  echo "qbe-check: zig-out/bin/elmvm missing (run: zig build elmvm)" >&2
+  exit 2
+}
+echo "qbe-check: artifacts in $TMP" >&2
 
 # GC-churn heap, in MB: the minimum viable heap (MIN_HEAP_BYTES = 16MB,
 # vendor/zinc-vm/src/gc/heap.zig:61 — a literal 1 fails gc init), so every
@@ -296,18 +316,24 @@ fi
 # `err ` prefix) — if a future regression drops VField, this fails loudly.
 printf 'module Oos exposing (main)\n\nmain =\n    let\n        { x } =\n            { x = 1 }\n    in\n    x\n' \
   > "$TMP/oos.elm"
-(cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY=Oos.main node run.js "$TMP/oos.elm" "$TMP/oos.ssa") >/dev/null 2>&1
-if head -c 4 "$TMP/oos.ssa" 2>/dev/null | grep -q '^err '; then
-  echo "FAIL vfield-lowers: record field pattern still fails loudly: $(head -1 "$TMP/oos.ssa")"
-  FAIL=1
-else
+# The compile's own status decides, not the old artifact's absence: with no
+# build this run there is no oos.ssa, and "no err prefix in a missing file"
+# must not read as a pass.
+if (cd "$ROOT/elm-compiler" &&
+      QBE=1 QBE_ENTRY=Oos.main node run.js "$TMP/oos.elm" "$TMP/oos.ssa") >/dev/null 2>&1 \
+   && [ -f "$TMP/oos.ssa" ] \
+   && ! head -c 4 "$TMP/oos.ssa" | grep -q '^err '; then
   echo "PASS vfield-lowers: record field pattern ({ x } = {x=1}) now lowers (no loud failure)"
+else
+  echo "FAIL vfield-lowers: record field pattern still fails loudly: $(head -c 200 "$TMP/oos.ssa" 2>/dev/null)"
+  FAIL=1
 fi
 
 # ---- cross-defun tail: UNBOUNDED after the bounce loop ----
-# Always (re)build: the pre-bounce binary and the post-bounce one share a name,
-# and a stale pre-bounce binary would SIGSEGV at this depth (the exact ceiling
-# this check asserts is gone).
+# (qbe-mk rebuilds this binary from the current tree on every call and $TMP is
+# per-run, so a pre-bounce binary left by an earlier commit cannot answer here
+# -- that reuse via a fixed-path existence-guard was this check's stale-artifact
+# bug.)
 if "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/mutualtail.elm Mutual.even "$TMP/mutual" >/dev/null 2>&1; then
   # Mutual.even n -> odd (n-1) -> even (n-2) is MUTUAL tail recursion.  Before
   # the bounce loop these cross-defun tails were PLAIN CALLS and died between

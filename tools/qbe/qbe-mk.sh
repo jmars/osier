@@ -24,16 +24,27 @@ ARGS=("$@")
 mkdir -p "$OUTDIR"
 BASE="$OUTDIR/$(basename "$FIXTURE" .elm)"
 
-# ---- runtime object (cached) ----
+# ---- runtime object (cached, freshness-invalidated) ----
+# A cached rt.o answers only while NOTHING it was built from is newer than it.
+# The freshness probe must FAIL SAFE: if `find` itself errors (missing dir,
+# permissions), "no newer input found" would silently reuse an rt.o built from
+# different inputs -- treat "cannot tell" as stale and rebuild.  And if the
+# rebuild fails, refuse loudly: a stale rt.o here is worse than none (it is
+# exactly how a suite reports an old binary's behaviour as a measurement).
 RT="$ROOT/tools/qbe/rt.o"
-if [ ! -f "$RT" ] || [ "$ROOT/tools/qbe/rt.zig" -nt "$RT" ] \
-   || find "$ROOT/vendor/zinc-vm/src" -name '*.zig' -newer "$RT" 2>/dev/null | head -1 | grep -q .; then
+rt_newer="$(find "$ROOT/tools/qbe/rt.zig" "$ROOT/vendor/zinc-vm/src" "$ROOT/src/effectloop.zig" \
+              -newer "$RT" -print -quit 2>/dev/null)" || rt_newer="PROBE_FAILED"
+if [ "$rt_newer" = "PROBE_FAILED" ]; then
+  echo "qbe-mk: rt.o freshness probe FAILED -- rebuilding rather than trusting it" >&2
+fi
+if [ ! -f "$RT" ] || [ -n "$rt_newer" ]; then
   echo "qbe-mk: building $RT" >&2
   zig build-obj -O ReleaseFast -lc -femit-bin="$RT" \
     --dep gc --dep vm --dep effectloop -Mroot="$ROOT/tools/qbe/rt.zig" \
     -Mgc="$ROOT/vendor/zinc-vm/src/gc.zig" \
     --dep gc -Mvm="$ROOT/vendor/zinc-vm/src/vm.zig" \
-    --dep gc --dep vm -Meffectloop="$ROOT/src/effectloop.zig"
+    --dep gc --dep vm -Meffectloop="$ROOT/src/effectloop.zig" \
+    || { echo "qbe-mk: rt.o rebuild FAILED -- refusing to answer from a stale $RT" >&2; exit 1; }
 fi
 
 # ---- elm -> .ssa ----
