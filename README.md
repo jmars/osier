@@ -32,6 +32,37 @@ zig build vmbench  # the throughput benchmark
 zig build aot      # the AOT spike exes
 ```
 
+## Recursion and the native stack
+
+The QBE native backend gives **proper tail calls**. A saturated self-call in
+tail position compiles to an in-frame loop, and every other tail position
+(cross-defun calls, partial applications, thunk forces) returns a `.tail` that
+a bounce loop chases — so tail recursion, **including mutual tail recursion**,
+runs in constant native stack. This is verified, not asserted:
+`tools/qbe/qbe-check.sh`'s mutual-tail check runs `Mutual.even 1000000` —
+1,000,000 hops of mutual recursion — to completion, identical to the VM; before
+the bounce loop the same shape died between 20k–40k hops on an 8 MB stack. This
+is stronger than Elm's own treatment, which optimises self-tail calls only.
+
+**Non-tail recursion is not optimised and consumes native stack — one frame per
+call.** That is inherent, not a defect of this implementation: a non-tail call
+must be resumed after the callee returns, so no tail-call optimisation can
+remove it, in any ML-family language including Elm.
+
+The idiom is the usual one: **build the result in an accumulator parameter and
+reverse at the end.** Both examples in this repo were real: `Zinc/Emit.elm`'s
+`fuse` and `Prelude.elm`'s `filterMap` were non-tail list walkers that
+exhausted the native stack on large inputs, and both are now tail-recursive
+accumulator walks. The finishing reverse is cheap on both build paths:
+`Prelude.elm`'s `listRevGo` (behind `List.reverse`) is already tail-recursive,
+as is elm/core's (`foldl cons [] list`).
+
+As a mitigation — explicitly **not** a guarantee — the native runtime raises
+the stack soft limit to 64 MB at startup (`tools/qbe/rt.zig`). That net covers
+every C-stack exhaustion up to 64 MB, and deep non-tail recursion can still
+exhaust it and crash. The backend mechanism (in-frame loops, the bounce loop,
+frame rooting) is described in [docs/qbe-backend.md](docs/qbe-backend.md).
+
 ## Evidence chain
 
 ```sh
