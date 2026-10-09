@@ -65,7 +65,7 @@ GATE="$ROOT/tests/elm-fixtures/run-elm-gate.sh"
 FIX="$ROOT/tests/elm-fixtures"
 BASELINE="$ROOT/tools/osier-corpus-baseline.sha256"
 STATS="$ROOT/tools/midtier-emit-stats.py"
-SEED_SHA="2d1f8998a13e28c0c47cccc46ac5e390572f73cbe2d63e18d3501cde44568c8b"
+SEED_SHA="ac8acd77aab6353507736c158c9a184f62b46d1080050069d0c3959f0ce1cb4c"
 
 # Every pass switch, so "all passes off" stays complete as passes are added.
 # A missing switch here would silently leave that pass ON in the bisection and

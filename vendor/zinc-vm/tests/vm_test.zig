@@ -612,6 +612,45 @@ test "M3 parse+print round-trip of zinctest built-in literals" {
     try std.testing.expectEqualStrings("pushmark\nstring \"hi\"\nglobal string?\napply\n", printInstrOf(code3.?, 4));
 }
 
+test "M3 an 'n' atom outside i64 is a parse error, not 0" {
+    var g = try testInit();
+    defer g.deinit();
+    var sym = symbols.SymbolInterner.init();
+    defer sym.deinit();
+
+    // An `n` atom is a SIGNED 64-BIT DECIMAL: the emitters render an Int with
+    // String.fromInt and every backend reads that text back as i64, so a
+    // decimal that does not fit is a broken bundle, not a number.  `catch 0`
+    // used to make this reader silently TOTAL -- the frontend's rounded
+    // 9223372036854775807 atom loaded as 0, so `big + 1` printed 1 with exit 0
+    // and nothing reported.  This test FAILS before that fix (the atom loads)
+    // and passes after it.
+    var code: ?[*]types.Instr = null;
+    try std.testing.expectError(
+        error.ParseError,
+        parser.parseBytecode(&g, &sym, "(c(a[19:n]9223372036854775808v))", &code),
+    );
+
+    // The boundary is exact -- both i64 extremes still load, and i64 max
+    // round-trips its own decimal.
+    var code_max: ?[*]types.Instr = null;
+    _ = try parser.parseBytecode(&g, &sym, "(c(a[19:n]9223372036854775807v))", &code_max);
+    const body_max: [*]types.Instr = @ptrCast(code_max.?[0].closure_code.?);
+    try std.testing.expectEqual(types.Opcode.access, body_max[0].op);
+    try std.testing.expectEqual(
+        @as(i64, 9223372036854775807),
+        body_max[0].operand.payload.number,
+    );
+
+    var code_min: ?[*]types.Instr = null;
+    _ = try parser.parseBytecode(&g, &sym, "(c(a[20:n]-9223372036854775808v))", &code_min);
+    const body_min: [*]types.Instr = @ptrCast(code_min.?[0].closure_code.?);
+    try std.testing.expectEqual(
+        @as(i64, -9223372036854775808),
+        body_min[0].operand.payload.number,
+    );
+}
+
 test "M3 nested cur parse (test 36 appterm-in-apply)" {
     var g = try testInit();
     defer g.deinit();

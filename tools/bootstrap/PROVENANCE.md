@@ -17,10 +17,10 @@ no node and no AOT/LLVM step.
 | | |
 |---|---|
 | path | `tools/bootstrap/selfhost.csexp` |
-| bytes | 1460820 |
-| sha256 | `2d1f8998a13e28c0c47cccc46ac5e390572f73cbe2d63e18d3501cde44568c8b` |
+| bytes | 1466335 |
+| sha256 | `ac8acd77aab6353507736c158c9a184f62b46d1080050069d0c3959f0ce1cb4c` |
 | checksum file | `tools/bootstrap/selfhost.csexp.sha256` (verified by `tools/bootstrap-compile.sh` before every run) |
-| built from commit | `33e1d5bba463671f0154545f0b5133537db6c0c6` (HEAD) |
+| built from commit | `33e1d5bba463671f0154545f0b5133537db6c0c6` (HEAD) **plus the uncommitted `src/ParserFast.elm` integer-literal change — see "Re-freeze 2026-10-09" below** |
 | entry point | `NativeMain.main` |
 
 ## Inputs
@@ -29,7 +29,7 @@ no node and no AOT/LLVM step.
 |---|---|
 | manifest | `elm-compiler/selfhost/manifest.json`, sha256 `369e6a735af3de6f6d2b2ad2afc000fc55fec9cab6218a98deec5c4f8e8901eb` |
 | source count | 58 (every path listed in the manifest; all must exist) |
-| source-set digest | `b0c655da780f9a831c63b03f4d89e57042b40c3eb7afa0c818d08fb805a1a331` |
+| source-set digest | `05e1d476b410f99a6b148440ddb81a5a09d01e36b44158acc6d337043e9d559f` |
 | corpus | `elm-compiler/src/Prelude.elm`, `src/Runtime.elm`, `core-libs/{Dict,Set,Maybe,Result,Tuple,JsArray,Array,Str}.elm` (always appended by `run.js`, not in the manifest) |
 
 The source-set digest is the sha256 of `sha256sum`-style lines
@@ -76,6 +76,76 @@ renamed sources wrote `zig-out/selfhost.csexp` at sha256
 `2d1f8998a13e28c0c47cccc46ac5e390572f73cbe2d63e18d3501cde44568c8b` — byte-identical
 to the committed seed (`cmp`, exit 0), in 3 s. `src/Type/Builtins.elm`'s *code*
 is untouched; only the comment that names the language changed.
+
+## Re-freeze 2026-10-09 — integer literals above 2^53 are now a hard error
+
+**This is a byte-changing re-freeze, not a comment-only one.** The 58 sources
+now contain a real change to `elm-compiler/src/ParserFast.elm` (an integer
+literal the frontend cannot reproduce exactly is now a parse error instead of
+being silently rounded by the host's arithmetic — the stock frontend runs under
+node, where an `Int` is an IEEE double). Adding code to a manifest source
+changes the compiled bundle, so unlike the rename above the bytes MOVE.
+
+MEASURED on this host, 2026-10-09, at HEAD `33e1d5b` + that uncommitted edit:
+
+    tools/selfhost-compile.sh            # exit 0, 2.1 s
+    # wrote zig-out/selfhost.csexp (1466335 bytes)
+    cmp zig-out/selfhost.csexp tools/bootstrap/selfhost.csexp
+    # zig-out/selfhost.csexp tools/bootstrap/selfhost.csexp differ: byte 12183
+    # exit 1  (the previous committed copy, 1460820 bytes — the size alone
+    #          rules out identity)
+    sha256sum zig-out/selfhost.csexp tools/bootstrap/selfhost.csexp
+    # ac8acd77aab6353507736c158c9a184f62b46d1080050069d0c3959f0ce1cb4c  zig-out/selfhost.csexp
+    # 2d1f8998a13e28c0c47cccc46ac5e390572f73cbe2d63e18d3501cde44568c8b  selfhost.csexp BEFORE this re-freeze
+
+Only ONE manifest source differs from HEAD (`git diff --name-only HEAD -- $(jq
+-r '.groups[].sources[]' elm-compiler/selfhost/manifest.json)` lists exactly
+`elm-compiler/src/ParserFast.elm`), so the whole byte delta is attributable to
+it: the first differing byte (12183) sits in the defun region, and the added
+`String.fromInt` / `String.toLower` / `String.startsWith` / `String.dropLeft`
+calls also move the emitted global order.
+
+The seed was re-frozen (`cp zig-out/selfhost.csexp tools/bootstrap/selfhost.csexp`,
+`selfhost.csexp.sha256` regenerated, identity and source-set digest updated
+above). It was then VALIDATED as a compiler, cheaply: run on the VM over
+`tests/elm-fixtures/fib.elm` it produces a bundle byte-identical to the stock
+compiler's for the same source, and over
+`9223372036854775807` it produces `err parse failed` (i.e. the re-frozen seed
+carries the new check):
+
+    AOTRUN_ARGV=1 AOTRUN_QUIET=1 ELMC_HEAP_MB=1024 \
+      zig-out/bin/elmvm zig-out/selfhost.csexp NativeMain.main <manifest>
+    # exit 0, 50 s, two groups
+    cmp <seed's fib.csexp> <stock fib.csexp>     # identical, exit 0
+    sha256sum …   # 092798f5f0e40426ee0783d636f64b4499e0321bdb261915b5e57950261e766a (both)
+
+The full M16 gate was then run over the re-frozen seed and PASSED:
+
+    tools/selfhost-gate.sh
+    # exit 0, 12 m 51 s (aotdump + ReleaseFast build + 150 groups)
+    # selfhost-gate: PASS=150 FAIL=0
+
+i.e. for all 150 gate groups the SELF-COMPILED compiler's `.csexp` is
+byte-identical to the stock compiler's — the M16 equivalence property, on the
+real fixture manifest and not just one fixture.
+
+**OUTSTANDING — the fixed-point verification has NOT been re-run.** The
+`## The fixed-point fact` run below (807 s, whole compiler) was deliberately
+NOT executed for this re-freeze. So for THIS bundle the strongest statement
+available is the M16 gate above (equivalence to the stock compiler on 150
+groups) plus the one-fixture VM run, NOT the fixed point — the two are
+different claims, and only the 807 s run establishes the second. It must be
+scheduled deliberately before this seed is treated as verified in the sense the
+rest of this file means.
+
+Two stale references are known and are NOT updated here (outside the change's
+write scope — see the handoff `handoff-osier-bigint-result`):
+
+  * `tools/midtier-diff.sh:68` pins `SEED_SHA="2d1f8998…"` and asserts that a
+    `MIDTIER=0` selfhost release reproduces it; that step now reports
+    `FAILED — MIDTIER=0 moved the seed` until the constant is set to
+    `ac8acd77…`.
+  * `elm-compiler/src/Mid/Module.elm`'s header comment cites the old digest.
 
 ## The fixed-point fact (why a committed binary is safe to trust)
 

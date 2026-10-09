@@ -108,7 +108,20 @@ pub fn parseCsexpAtom(ps: *ParseState, g: *Gc, sym: *SymbolInterner) ParseError!
     var v: Value = undefined;
     switch (ty) {
         's' => v = symbols.valSymbol(sym, buf[0..ulen]),
-        'n' => v = values.valNumber(std.fmt.parseInt(i64, buf[0..ulen], 10) catch 0),
+        // An `n` atom is a SIGNED 64-BIT DECIMAL: the emitters render an Int with
+        // `String.fromInt` (Zinc/Csexp.elm's `atom 'n'`) and both backends read
+        // that text back as i64, so a decimal that does not fit is a broken
+        // bundle, not a number.  `catch 0` used to make this reader silently
+        // TOTAL -- MEASURED: the frontend's rounded big-literal atom
+        // `9223372036854778000` loaded as 0, so `big + 1` printed 1 with exit 0
+        // and nothing reported.  Refuse it, and name the atom.
+        'n' => v = values.valNumber(std.fmt.parseInt(i64, buf[0..ulen], 10) catch {
+            std.debug.print(
+                "csexp error: 'n' atom is not a signed 64-bit decimal: {s}\n",
+                .{buf[0..ulen]},
+            );
+            return error.ParseError;
+        }),
         'S' => {
             if (ps.scratch != 0) {
                 // scratch mode: C-heap, non-moving operand string.

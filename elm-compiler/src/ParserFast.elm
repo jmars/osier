@@ -1615,24 +1615,29 @@ integerDecimalMapWithRange rangeAndIntToRes =
                 Bad False (ExpectingNumber s0.row s0.col)
 
             else
-                let
-                    newColumn : Int
-                    newColumn =
-                        s0.col + (s1.offset - s0.offset)
-                in
-                Good
-                    (rangeAndIntToRes
-                        { start = { row = s0.row, column = s0.col }
-                        , end = { row = s0.row, column = newColumn }
-                        }
-                        s1.int
-                    )
-                    { src = s0.src
-                    , offset = s1.offset
-                    , indent = s0.indent
-                    , row = s0.row
-                    , col = newColumn
-                    }
+                case decimalExactnessProblem s0 s0.offset s1.offset s1.int of
+                    Just rejection ->
+                        Bad True rejection
+
+                    Nothing ->
+                        let
+                            newColumn : Int
+                            newColumn =
+                                s0.col + (s1.offset - s0.offset)
+                        in
+                        Good
+                            (rangeAndIntToRes
+                                { start = { row = s0.row, column = s0.col }
+                                , end = { row = s0.row, column = newColumn }
+                                }
+                                s1.int
+                            )
+                            { src = s0.src
+                            , offset = s1.offset
+                            , indent = s0.indent
+                            , row = s0.row
+                            , col = newColumn
+                            }
         )
 
 
@@ -1668,31 +1673,36 @@ integerDecimalOrHexadecimalMapWithRange rangeAndIntDecimalToRes rangeAndIntHexad
                 Bad False (ExpectingNumber s0.row s0.col)
 
             else
-                let
-                    newColumn : Int
-                    newColumn =
-                        s0.col + (s1.offsetAndInt.offset - s0.offset)
+                case literalExactnessProblem s0 s1.base s1.offsetAndInt.offset s1.offsetAndInt.int of
+                    Just rejection ->
+                        Bad True rejection
 
-                    range : Range
-                    range =
-                        { start = { row = s0.row, column = s0.col }
-                        , end = { row = s0.row, column = newColumn }
-                        }
-                in
-                Good
-                    (case s1.base of
-                        Decimal ->
-                            rangeAndIntDecimalToRes range s1.offsetAndInt.int
+                    Nothing ->
+                        let
+                            newColumn : Int
+                            newColumn =
+                                s0.col + (s1.offsetAndInt.offset - s0.offset)
 
-                        Hexadecimal ->
-                            rangeAndIntHexadecimalToRes range s1.offsetAndInt.int
-                    )
-                    { src = s0.src
-                    , offset = s1.offsetAndInt.offset
-                    , indent = s0.indent
-                    , row = s0.row
-                    , col = newColumn
-                    }
+                            range : Range
+                            range =
+                                { start = { row = s0.row, column = s0.col }
+                                , end = { row = s0.row, column = newColumn }
+                                }
+                        in
+                        Good
+                            (case s1.base of
+                                Decimal ->
+                                    rangeAndIntDecimalToRes range s1.offsetAndInt.int
+
+                                Hexadecimal ->
+                                    rangeAndIntHexadecimalToRes range s1.offsetAndInt.int
+                            )
+                            { src = s0.src
+                            , offset = s1.offsetAndInt.offset
+                            , indent = s0.indent
+                            , row = s0.row
+                            , col = newColumn
+                            }
         )
 
 
@@ -1734,31 +1744,36 @@ floatOrIntegerDecimalOrHexadecimalMapWithRange rangeAndFloatToRes rangeAndIntDec
                         skipFloatAfterIntegerDecimal s1.offsetAndInt.offset s0.src
                 in
                 if offsetAfterFloat == -1 then
-                    let
-                        newColumn : Int
-                        newColumn =
-                            s0.col + (s1.offsetAndInt.offset - s0.offset)
+                    case literalExactnessProblem s0 s1.base s1.offsetAndInt.offset s1.offsetAndInt.int of
+                        Just rejection ->
+                            Bad True rejection
 
-                        range : Range
-                        range =
-                            { start = { row = s0.row, column = s0.col }
-                            , end = { row = s0.row, column = newColumn }
-                            }
-                    in
-                    Good
-                        (case s1.base of
-                            Decimal ->
-                                rangeAndIntDecimalToRes range s1.offsetAndInt.int
+                        Nothing ->
+                            let
+                                newColumn : Int
+                                newColumn =
+                                    s0.col + (s1.offsetAndInt.offset - s0.offset)
 
-                            Hexadecimal ->
-                                rangeAndIntHexadecimalToRes range s1.offsetAndInt.int
-                        )
-                        { src = s0.src
-                        , offset = s1.offsetAndInt.offset
-                        , indent = s0.indent
-                        , row = s0.row
-                        , col = newColumn
-                        }
+                                range : Range
+                                range =
+                                    { start = { row = s0.row, column = s0.col }
+                                    , end = { row = s0.row, column = newColumn }
+                                    }
+                            in
+                            Good
+                                (case s1.base of
+                                    Decimal ->
+                                        rangeAndIntDecimalToRes range s1.offsetAndInt.int
+
+                                    Hexadecimal ->
+                                        rangeAndIntHexadecimalToRes range s1.offsetAndInt.int
+                                )
+                                { src = s0.src
+                                , offset = s1.offsetAndInt.offset
+                                , indent = s0.indent
+                                , row = s0.row
+                                , col = newColumn
+                                }
 
                 else
                     case String.toFloat (String.slice s0.offset offsetAfterFloat s0.src) of
@@ -2109,6 +2124,162 @@ convertIntegerDecimalOrHexadecimal offset src =
 errorAsBaseOffsetAndInt : { base : Base, offsetAndInt : { int : number, offset : number } }
 errorAsBaseOffsetAndInt =
     { base = Decimal, offsetAndInt = { int = 0, offset = -1 } }
+
+
+-- ============== integer literals must be reproduced EXACTLY ==============
+--
+-- Every integer literal below is built by repeated `soFar * base + digit`,
+-- which is exact integer arithmetic in INTENT.  It is not exact in fact: the
+-- frontend runs on a HOST, and the stock compiler (`node elm-compiler/run.js`)
+-- runs under node, where an Elm `Int` is an IEEE double.  Above 2^53 the
+-- accumulator therefore SILENTLY ROUNDS the literal, and the rounded value is
+-- what gets emitted -- in both the .csexp and the .ssa.  MEASURED at fcbe722:
+-- `9223372036854775807` accumulates to 9223372036854778000, which elmvm reads
+-- as 0 (parser.zig's `parseInt(i64, ...) catch 0`) and native QBE's strtoll
+-- reads as -9223372036854773615: three different answers, exit 0, nothing
+-- reported, and the two backends disagree with each other.
+--
+-- THE ANSWER IS TO REJECT, NOT TO COMPUTE HARDER.  There is no arithmetic to
+-- get right here -- the value cannot be held exactly in the host the compiler
+-- runs on, so no amount of care inside this parser recovers it.  A literal the
+-- parser cannot reproduce exactly is a hard parse error naming the literal and
+-- its location; a silently different number is not an outcome.
+--
+-- The test is the parse's own inverse.  An Int literal reaches the backends as
+-- the text `String.fromInt n` (Zinc/Csexp.elm's `atom 'n'`; the .ssa printer
+-- renders the same decimal), so a literal is safe exactly when rendering the
+-- parsed Int gives back the characters that were written.  At or below
+-- `maxExactInteger` that rendering is exact -- every integer up to 2^53 is a
+-- double and prints as itself -- so passing means the emitted atom IS the
+-- user's literal.  `maxExactInteger` itself is accepted (2^53 is exactly
+-- representable in both hosts); 2^53 + 1 is not, because the accumulator
+-- rounds it to 2^53.
+--
+-- THE BOUND IS WHAT MAKES THE TWO HOSTS AGREE.  The inverse test alone is
+-- host-dependent: on the VM/AOT hosts Ints are int64, so a 19-digit literal
+-- would pass there and fail under node -- i.e. two compilers for the same
+-- source, with different accept sets.  `value <= maxExactInteger` is exact on
+-- BOTH hosts, and is what pins the accept set to one language.  It costs the
+-- literals in (2^53, 2^63] that a double can hold exactly (2^60, say); they
+-- are rejected deliberately, because they are exactly the literals whose
+-- parse the two hosts do NOT agree on.
+maxExactInteger : Int
+maxExactInteger =
+    9007199254740992
+
+
+{-| `Just problem` when `value` is not exactly the integer spelled by the
+decimal digits of `src[startOffset..endOffset)`.
+-}
+decimalExactnessProblem : State -> Int -> Int -> Int -> Maybe Problem
+decimalExactnessProblem state startOffset endOffset value =
+    let
+        digits : String
+        digits =
+            String.slice startOffset endOffset state.src
+    in
+    if value <= maxExactInteger && String.fromInt value == digits then
+        Nothing
+
+    else
+        Just (ExpectingCustom state.row state.col (inexactLiteralMessage digits state.row state.col))
+
+
+{-| The same test for `0x...`.  Hex is a power-of-two base, so whether the
+accumulator stayed exact is decidable from the DIGITS ALONE: every prefix of a
+literal whose value is at most `maxExactInteger` is itself at most that value,
+and every integer up to 2^53 is a double, so the accumulation is exact -- and
+therefore the value is the literal's value.  So the test is "is the written
+value at most 2^53", and nothing else.
+
+It has to be decided lexically, not by rendering the value back to hex: `//`
+and `modBy` are NOT host-independent for large Ints (stock Elm's `//` is
+`(a/b)|0`, which is a 32-bit truncation -- MEASURED: 9007199254740991 // 16
+is -1 under node and 562949953421311 on the VM), so a division-based check
+would make the two fronts disagree, which is the bug being fixed.  The
+comparison folds case and drops leading zeros, which the literal may carry
+(`0x0300` IS `0x300`; `core-libs/Str.elm` writes its ranges that way).
+-}
+hexadecimalExactnessProblem : State -> Int -> Int -> Int -> Maybe Problem
+hexadecimalExactnessProblem state startOffset endOffset value =
+    let
+        digits : String
+        digits =
+            String.slice startOffset endOffset state.src
+    in
+    if value <= maxExactInteger && hexDigitsAtMostMax digits then
+        Nothing
+
+    else
+        Just (ExpectingCustom state.row state.col (inexactLiteralMessage ("0x" ++ digits) state.row state.col))
+
+
+{-| Is the value the hex digits spell at most `maxExactInteger` (2^53)?
+
+    2^53 is 0x20000000000000 -- 14 hex digits, leading '2' and thirteen zeros.
+    A shorter literal is below it; a longer one is above it; at 14 digits only
+    a leading '1' (anything, since 0x1FF.. < 2^53) or exactly 0x20000000000000
+    is at most it.
+-}
+hexDigitsAtMostMax : String -> Bool
+hexDigitsAtMostMax digits =
+    let
+        significant : String
+        significant =
+            stripLeadingZeros (String.toLower digits)
+
+        len : Int
+        len =
+            String.length significant
+    in
+    if len < 14 then
+        True
+
+    else if len > 14 then
+        False
+
+    else
+        case String.slice 0 1 significant of
+            "1" ->
+                True
+
+            "2" ->
+                stripLeadingZeros (String.dropLeft 1 significant) == "0"
+
+            _ ->
+                False
+
+
+stripLeadingZeros : String -> String
+stripLeadingZeros digits =
+    if String.length digits > 1 && String.startsWith "0" digits then
+        stripLeadingZeros (String.dropLeft 1 digits)
+
+    else
+        digits
+
+
+literalExactnessProblem : State -> Base -> Int -> Int -> Maybe Problem
+literalExactnessProblem state base endOffset value =
+    case base of
+        Decimal ->
+            decimalExactnessProblem state state.offset endOffset value
+
+        Hexadecimal ->
+            hexadecimalExactnessProblem state (state.offset + 2) endOffset value
+
+
+inexactLiteralMessage : String -> Int -> Int -> String
+inexactLiteralMessage literal row col =
+    "integer literal `"
+        ++ literal
+        ++ "` at row "
+        ++ String.fromInt row
+        ++ " column "
+        ++ String.fromInt col
+        ++ " cannot be represented exactly: it is above the largest integer this frontend holds exactly ("
+        ++ String.fromInt maxExactInteger
+        ++ "), and accepting it would silently change the program's value"
 
 
 convertIntegerDecimal : Int -> String -> { int : Int, offset : Int }
