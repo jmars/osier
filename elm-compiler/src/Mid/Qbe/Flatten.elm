@@ -138,7 +138,12 @@ type alias Shape =
 type Kind
     = KindRecord (List String) -- field names, source order
     | KindCon String -- ctor tag (the ADT vector's element 0)
-    | KindList -- a cons chain of length (List.length parts)
+    | KindList -- buildList: cons(e1, .. cons(en, NIL))  — n parts, NIL tail
+    | KindTuple -- buildTuple: cons(e1, .. cons(e_{n-1}, en)) — n parts, the
+      --            LAST PART IS THE RAW TAIL of the last cell (Lower.buildTuple
+      --            [ a, b ] = cons(a, b), NOT cons(a, cons(b, nil))).  A tuple
+      --            and a list of the same length therefore have DIFFERENT
+      --            shapes, and conflating them walks off the end of the chain.
 
 
 type Sub
@@ -513,7 +518,7 @@ shapeOf exp =
                     shapeOf only
 
                 _ ->
-                    Just { kind = KindList, parts = es }
+                    Just { kind = KindTuple, parts = es }
 
         ListLit es ->
             Just { kind = KindList, parts = es }
@@ -554,10 +559,10 @@ resolveSteps shape steps =
                     firstPart shape rest
 
                 SndStep ->
-                    tailShape shape rest
+                    tailStep shape rest
 
                 TlStep ->
-                    tailShape shape rest
+                    tailStep shape rest
 
                 IdxStep j ->
                     case shape.kind of
@@ -578,15 +583,38 @@ firstPart shape rest =
         KindList ->
             Maybe.andThen (\e -> valAt e rest) (List.head shape.parts)
 
+        KindTuple ->
+            Maybe.andThen (\e -> valAt e rest) (List.head shape.parts)
+
         _ ->
             Nothing
 
 
-tailShape : Shape -> List Step -> Maybe Sub
-tailShape shape rest =
+-- The cdr of the chain.  `KindList`'s tail is the rest of the chain (another
+-- cons cell, or the nil the list ends with).  `KindTuple`'s tail of a TWO-part
+-- tuple is the second element ITSELF — there is no further cell — while a
+-- longer tuple's tail is the shorter tuple built from the remaining parts.
+tailStep : Shape -> List Step -> Maybe Sub
+tailStep shape rest =
     case shape.kind of
         KindList ->
             case shape.parts of
+                _ :: t ->
+                    resolveSteps { shape | parts = t } rest
+
+                [] ->
+                    Nothing
+
+        KindTuple ->
+            -- `parts` is the WHOLE tuple, so the last cell of the chain is the
+            -- one carrying the SECOND-TO-LAST part and the last part is its
+            -- raw tail: `( a, b )` = cons(a, b) -> SndStep is `b` ITSELF, and
+            -- `( a, b, c )` = cons(a, cons(b, c)) -> SndStep is the pair
+            -- `( b, c )`.
+            case shape.parts of
+                [ _, last ] ->
+                    valAt last rest
+
                 _ :: t ->
                     resolveSteps { shape | parts = t } rest
 
@@ -621,13 +649,13 @@ decideMatch : Shape -> Match -> Maybe Bool
 decideMatch shape match =
     case match of
         MCons steps ->
-            Maybe.map isConsSub (resolveSteps shape steps)
+            decideTag isConsLike shape steps
 
         MEmpty steps ->
-            Maybe.map isNilSub (resolveSteps shape steps)
+            decideTag isNilLike shape steps
 
         MVector steps ->
-            Maybe.map isVectorSub (resolveSteps shape steps)
+            decideTag isVectorLike shape steps
 
         MTagEq steps tag ->
             case resolveSteps shape steps of
@@ -646,39 +674,71 @@ decideMatch shape match =
                     Nothing
 
 
+-- *** THE ONLY PLACE A TAG TEST MAY BE DECIDED ***
+-- A `SubShape` is a structure the shape knows exactly; a `SubVal` is an opaque
+-- COMPONENT (`Var`) or a literal.
+--   * `SubShape sh` -> decided by `test sh`.
+--   * `SubVal (Lit _)` -> the value is a literal, so it is DEFINITELY not a
+--     cons, not nil and not a vector: decided FALSE.
+--   * `SubVal (Var _)` -> NOTHING IS KNOWN ABOUT IT.  Answering `Just False`
+--     here is the bug this function exists to prevent: it claims a decided
+--     verdict about an unknown value, so an alt that could have matched is
+--     skipped and a LATER alt is selected — the classic nested-pattern shape
+--     (`foo (a, b) (c, d) = ...`, whose desugared match is `MCons [FstStep]`
+--     onto the component `Var arg0`).  UNDECIDABLE -> `Nothing` -> the whole
+--     flattening is denied.
+decideTag : (Shape -> Bool) -> Shape -> List Step -> Maybe Bool
+decideTag test shape steps =
+    case resolveSteps shape steps of
+        Just (SubShape sh) ->
+            Just (test sh)
+
+        Just (SubVal (Lit _)) ->
+            Just False
+
+        _ ->
+            Nothing
+
+
 -- An ADT vector is tag 10; a cons chain is tag 4 and its nil end is tag 5.
-isConsSub : Sub -> Bool
-isConsSub sub =
-    case sub of
-        SubShape shape ->
-            shape.kind == KindList && not (List.isEmpty shape.parts)
+-- A RECORD is an assoc list, i.e. also a cons chain (an empty record is the
+-- nil `emptylist`), and a TUPLE is a cons chain whose last part is a raw tail.
+isConsLike : Shape -> Bool
+isConsLike shape =
+    case shape.kind of
+        KindList ->
+            not (List.isEmpty shape.parts)
 
-        SubVal _ ->
+        KindTuple ->
+            True
+
+        KindRecord _ ->
+            not (List.isEmpty shape.parts)
+
+        KindCon _ ->
             False
 
 
-isNilSub : Sub -> Bool
-isNilSub sub =
-    case sub of
-        SubShape shape ->
-            shape.kind == KindList && List.isEmpty shape.parts
+isNilLike : Shape -> Bool
+isNilLike shape =
+    case shape.kind of
+        KindList ->
+            List.isEmpty shape.parts
 
-        SubVal _ ->
+        KindRecord _ ->
+            List.isEmpty shape.parts
+
+        _ ->
             False
 
 
-isVectorSub : Sub -> Bool
-isVectorSub sub =
-    case sub of
-        SubShape shape ->
-            case shape.kind of
-                KindCon _ ->
-                    True
+isVectorLike : Shape -> Bool
+isVectorLike shape =
+    case shape.kind of
+        KindCon _ ->
+            True
 
-                _ ->
-                    False
-
-        SubVal _ ->
+        _ ->
             False
 
 

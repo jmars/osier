@@ -338,6 +338,14 @@ fi
 # change NOTHING there.  Same source shapes, opposite outcomes.
 run flatten   Flatten.main   tools/qbe/fixtures/flatten.elm
 run noflatten NoFlatten.main tools/qbe/fixtures/noflatten.elm
+# flatnest: patterns that walk PAST a component, where nothing is known about
+# the value — the pass must DENY.  This is the fixture that reproduces the
+# miscompile the selfhost run caught: a tag test whose path lands on a `Var`
+# answered FALSE (a decided verdict about an unknown value), so BOTH real alts
+# were skipped and the catch-all was selected — `Type/Exhaustive.unifyList`'s
+# whole body became `Nothing`.  `zipPair` is that shape verbatim: the wrong
+# answer is 999 instead of 1/31.
+run flatnest  FlatNest.main  tools/qbe/fixtures/flatnest.elm
 
 # ---- structural: an A/B on the SAME source.  QBE_NOFLATTEN=1 disables the
 #      pass, so the two builds differ ONLY by it — which is the asymmetry
@@ -383,6 +391,8 @@ qbe_ssa tools/qbe/fixtures/flatten.elm   Flatten.main   "$TMP/flat-on.ssa"  on
 qbe_ssa tools/qbe/fixtures/flatten.elm   Flatten.main   "$TMP/flat-off.ssa" off
 qbe_ssa tools/qbe/fixtures/noflatten.elm NoFlatten.main "$TMP/noflat-on.ssa"  on
 qbe_ssa tools/qbe/fixtures/noflatten.elm NoFlatten.main "$TMP/noflat-off.ssa" off
+qbe_ssa tools/qbe/fixtures/flatnest.elm  FlatNest.main  "$TMP/flatnest-on.ssa"  on
+qbe_ssa tools/qbe/fixtures/flatnest.elm  FlatNest.main  "$TMP/flatnest-off.ssa" off
 
 if [ -s "$TMP/flat-on.ssa" ] && [ -s "$TMP/flat-off.ssa" ]; then
   f_bad=0
@@ -439,6 +449,69 @@ if [ -s "$TMP/noflat-on.ssa" ] && [ -s "$TMP/noflat-off.ssa" ]; then
   fi
 else
   echo "FAIL noflatten-structural: noflatten .ssa missing (compile failed?)"
+  FAIL=1
+fi
+
+if [ -s "$TMP/flatnest-on.ssa" ] && [ -s "$TMP/flatnest-off.ssa" ]; then
+  # (c) UNDECIDABLE paths: `zipPair`'s alts test `[]` / `::` at a path that
+  #     lands on a COMPONENT (`Var a`), which carries no structure, so the pass
+  #     must leave the whole function ALONE.  `fn_body` prints the function's
+  #     instructions with every static data symbol ($dN — the prim/error-name
+  #     table) replaced by the NAME it refers to, because the pass shifts those
+  #     INDICES without changing what they mean; comparing the raw text would
+  #     fail on that shift alone.  This is the regression probe for the
+  #     miscompile above, and it is sharper than a prim count: the failure mode
+  #     was WRONG ALT SELECTION (the whole case collapsed to the catch-all),
+  #     which a count of surviving prims does not see.
+  fn_body() { # <ssa> <name-substring>
+    awk -v want="$2" '
+      FNR==NR {
+        l=$0; gsub(/[(),]/," ",l); n=split(l,w," ")
+        nm=""
+        for(i=1;i<=n;i++) if(w[i]=="b" && w[i+1] ~ /^"/) { nm=w[i+1]; gsub(/"/,"",nm) }
+        if (nm!="") for(j=1;j<=n;j++) if(w[j] ~ /^\$d[0-9]+$/) { map[w[j]]=nm; break }
+        next
+      }
+      /^function / { infn = (index($0, want) > 0) }
+      !infn { next }
+      {
+        line=$0
+        sub(/^[ \t]+/, "", line)
+        n=split(line, g, " ")
+        for (i=1;i<=n;i++) {
+          tok=g[i]; trail=""
+          while (length(tok)>0 && (substr(tok,length(tok))=="," || substr(tok,length(tok))==")")) {
+            trail=substr(tok,length(tok)) trail; tok=substr(tok,1,length(tok)-1)
+          }
+          if (tok in map) g[i]=(map[tok]) trail
+        }
+        out=""
+        for (i=1;i<=n;i++) out=out g[i] " "
+        print out
+        if ($0 ~ /^\}$/) exit
+      }
+    ' "$1" "$1"
+  }
+  off_body="$(fn_body "$TMP/flatnest-off.ssa" zipPair)"
+  on_body="$(fn_body "$TMP/flatnest-on.ssa" zipPair)"
+  if [ -n "$on_body" ] && [ "$on_body" = "$off_body" ]; then
+    echo "PASS flatnest-undecidable: zipPair unchanged with the pass ON (a tag test past a component does not decide)"
+  else
+    echo "FAIL flatnest-undecidable: zipPair changed under the pass — an undecidable tag test was decided"
+    FAIL=1
+  fi
+  # ...and the pass must still FIRE on the decidable entries of the same
+  # fixture, so the identity above cannot be satisfied by the pass not running.
+  fn_on=$(prim_count "$TMP/flatnest-on.ssa" cons)
+  fn_off=$(prim_count "$TMP/flatnest-off.ssa" cons)
+  if [ "$fn_on" -lt "$fn_off" ]; then
+    echo "PASS flatnest-decidable: cons $fn_off -> $fn_on (the decidable tuple/list scratch cases do flatten)"
+  else
+    echo "FAIL flatnest-decidable: the pass changed nothing on flatnest ($fn_off -> $fn_on) — the gate above is vacuous"
+    FAIL=1
+  fi
+else
+  echo "FAIL flatnest-undecidable: flatnest .ssa missing (compile failed?)"
   FAIL=1
 fi
 
