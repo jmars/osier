@@ -13,16 +13,19 @@
 #                                against tools/osier-corpus-baseline.ssa.sha256
 #                                (the corpus byte anchor since P8; see
 #                                tools/osier-corpus-ssa.sh);
-#   2c. seed status            — REPORT ONLY: does the committed bootstrap
-#                                seed still match what the current tree
-#                                emits?  Never fails — a drifted seed is a
-#                                fact to report (the load-bearing freshness
-#                                oracles are qbe-selfhost.sh's two FIXED
-#                                POINTS, both current-vs-current comparisons;
-#                                a check that fails on legitimate source
-#                                movement is a check that generates re-freeze
-#                                rituals, which this chain refuses to add);
-#   3. TestMain                — assertion count (114/114)
+#   2c. seed status            — REPORT ONLY: is a committed bootstrap seed
+#                                present, and can this tree re-derive it?
+#                                Since P8 the answer is "no" on both counts
+#                                (the seed and the csexp compiler that
+#                                produced it are deleted; a Lua backend is
+#                                planned to become the next one).  Never
+#                                fails — the load-bearing freshness oracles
+#                                are qbe-selfhost.sh's two FIXED POINTS, both
+#                                current-vs-current comparisons; a check that
+#                                fails on legitimate source movement is a
+#                                check that generates re-freeze rituals,
+#                                which this chain refuses to add);
+#   3. TestMain                — assertion count
 #   4. `lake build`            — exit code + output bytes, theorem count and
 #                                the axiom list, from lean/
 #   5. the runTask branch recount — the corrected G5 figure (16 of 20 branches
@@ -159,26 +162,19 @@ else
 fi
 
 # --- seed status (REPORT ONLY — never a failure) -----------------------------
-# P8 (osier-delete-zinc): the committed csexp seed is DELETED — it was a
-# csexp artifact and no emitter for the format survives.  This step reports
-# that fact (a Lua backend is planned to become the next seed); what IS
-# load-bearing lives in tools/qbe/qbe-selfhost.sh's .ssa FIXED POINT, which
-# compares two CURRENT products of the same tree.
+# P8 (osier-delete-zinc): the committed csexp seed is DELETED, and so is the
+# stock compiler that re-derived it (tools/selfhost-compile.sh) — the seed was
+# a csexp artifact and no emitter for that format survives, so nothing in this
+# tree can regenerate or verify one.  This step reports that state honestly
+# instead of reaching for a deleted script.  A Lua backend is planned to become
+# the next seed; what IS load-bearing today lives in tools/qbe/qbe-selfhost.sh's
+# .ssa FIXED POINT, which compares two CURRENT products of the same tree.
 if [ -s tools/bootstrap/selfhost.csexp ] && [ -f tools/bootstrap/selfhost.csexp.sha256 ]; then
-    if tools/selfhost-compile.sh >/dev/null 2>&1 && [ -s zig-out/selfhost.csexp ]; then
-        seed_now="$(sha256sum zig-out/selfhost.csexp | cut -d' ' -f1)"
-        seed_committed="$(sha256sum tools/bootstrap/selfhost.csexp | cut -d' ' -f1)"
-        if [ "$seed_now" = "$seed_committed" ]; then
-            note "seed status" "FRESH — the committed seed matches the current tree's emit ($seed_committed)"
-        else
-            note "seed status" "DRIFTED — committed $seed_committed != current emit $seed_now (reported, not gated;"
-            echo "               re-freeze deliberately or leave it; qbe-selfhost.sh is the oracle)"
-        fi
-    else
-        note "seed status" "UNKNOWN — the stock compiler failed to emit a fresh reference"
-    fi
+    seed_committed="$(sha256sum tools/bootstrap/selfhost.csexp | cut -d' ' -f1)"
+    note "seed status" "UNVERIFIABLE — a seed is present ($seed_committed) but nothing in"
+    echo "               this tree can re-derive it; qbe-selfhost.sh is the oracle"
 else
-    note "seed status" "no committed seed found (tools/bootstrap/selfhost.csexp absent)"
+    note "seed status" "none — retired at P8 pending the Lua backend (report-only; nothing gates it)"
 fi
 
 # --- 3. TestMain -------------------------------------------------------------

@@ -1,5 +1,16 @@
 # AOT-to-Zig — design and results
 
+> **RETIRED AT P8 (handoff `osier-delete-zinc`).** Every tool named below —
+> `tools/aot/{dump,runtime,main,run}.zig`, `tools/aot/aot-build.sh`,
+> `tools/aot/spike.sh`, `tools/elmc.sh`, and the `aotdump`/`aotbench` exes —
+> was deleted along with the ZINC interpreter package (`vendor/zinc-vm`) they
+> linked, because the AOT path consumed csexp bundles and the csexp emitter is
+> gone too. The **measurements** below are kept: they are evidence for design
+> decisions this tree still rests on (tail-call bounding, GC rooting, the cost
+> model that motivated the QBE backend), and the QBE native path is the live
+> successor of the AOT spike. Read it as a historical design note, not as a
+> description of the current tree — and do not run the commands in it.
+
 Compiles a small Elm program to Zig, links the existing zinc-vm GC+VM as a
 library, and runs it **correctly** and **measurably faster** than the
 interpreted VM — while handling the two design cruxes (tail calls, GC rooting).

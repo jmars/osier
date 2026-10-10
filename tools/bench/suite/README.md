@@ -1,5 +1,15 @@
 # tools/bench/suite — the representative workload suite
 
+> **P8 (osier-delete-zinc) — what in this document is historical.** The ZINC
+> interpreter and the AOT spike were deleted, so this suite now times **one**
+> backend (QBE native, `tools/osier-bench.sh`); the VM and AOT columns, the
+> VM-vs-native cross-check and the `depth`/`elmvm` findings below are a record
+> of what was **measured while the differential was alive**, kept because the
+> numbers are evidence. The live cross-check is now against the frozen goldens
+> in `tools/bench/golden/` (written by the differential's last agreeing run).
+> Deleted with the interpreter: `tools/vmbench.zig`, `tools/elmvm.zig`,
+> `tools/aot/`, `tools/midtier-runtime.sh`, `tools/midtier-diff.sh`.
+
 ## Why this directory exists
 
 Every optimisation in this tree was, until now, measured on **one** workload: the
@@ -29,9 +39,10 @@ Run it with `tools/osier-bench.sh`.
 
 ## The programs
 
-`main` is the timed entry (heavy enough to be measurable, ≈0.3–1.1 s on the VM).
-`once` is the per-call unit for `zig-out/bin/vmbench`, following the idiom of
-`tools/bench/*.elm` (see `tools/midtier-runtime.sh`).
+`main` is the timed entry (heavy enough to be measurable — ≈0.3–1.1 s, measured
+on the VM while it existed and faster than that natively). `once` is the
+per-call unit that the (now deleted) `zig-out/bin/vmbench` timed, following the
+idiom of `tools/bench/*.elm` (see the banner above).
 
 | program | shape | the corpus gap it fills |
 | --- | --- | --- |
@@ -83,15 +94,15 @@ Stated explicitly, because a suite that cannot say what it omits invites exactly
 the mistake that created it.
 
 * **Not an A/B of any pass.** The runner times each backend's **default**
-  build. Its only explicit flag is `MIDTIER=0` on the VM compile
-  (`tools/osier-bench.sh`), which is the compiler's default anyway; nothing
-  sets `QBE_NOFLATTEN` or any other flag. To attribute
+  build; nothing sets `QBE_NOFLATTEN` or any other flag. (While the VM existed
+  its compile also carried the compiler-default `MIDTIER=0`.) To attribute
   a change to `Flatten`, re-run with the flag toggled (`QBE_NOFLATTEN=1`); the
   suite tells you a shape *moved*, not *why*.
-* **Not correctness beyond `main`'s stdout.** The runner requires the VM and the
-  native binary to print byte-identical stdout for the same entry, and requires
-  every repetition to print the same bytes. It does not compare intermediate
-  state, and the `once` entries are not exercised.
+* **Not correctness beyond `main`'s stdout.** The runner requires every
+  repetition of a row to print the same bytes and, where a golden exists,
+  requires the native binary's stdout to match the golden for the same entry
+  (`tools/bench/golden/`, frozen from the differential's last agreeing run). It
+  does not compare intermediate state, and the `once` entries are not exercised.
 * **Not a representative program.** Twelve shapes are an instrument for the
   named gaps, not a workload distribution. Nothing here says how often real
   Osier code writes a local record literal.
@@ -101,17 +112,19 @@ the mistake that created it.
 * **Not compile time.** By design: every program is compiled **once per
   backend** and the compile is never inside the timer. Compile-time cost of a
   pass is not measured here at all.
-* **Not the AOT backend.** `zig-out/bin/aotbench` is not produced by this
-  tree's `build.zig` (it imports a per-app generated module), so the AOT column
-  is `MISSING-TOOL` for every row. The runner measures it if the binary exists;
-  it cannot build it.
+* **Not the AOT backend.** `tools/aot/` and `zig-out/bin/aotbench` were deleted
+  at P8 with the interpreter they linked; the runner no longer has an AOT column
+  at all (it used to be `MISSING-TOOL` on every row, because `build.zig` never
+  produced `aotbench` — `tools/aot/main.zig` imported a per-app generated
+  module).
 * **Not effects, IO, Strings, or multi-module programs.** One module, `Int`
   results (except `mono_float`, `Float`), no `StreamRef`, no `argv`.
 * ~~**Not Float on native.**~~ CLOSED 2026-10-09: Float **is** measured on the
   native backend — finding 1 below is RESOLVED, `mono_float` has a QBE row,
   and the runner's declared-not-expressible array is empty by design.
-* **Not the `once` entries.** They are timed by `tools/vmbench.zig`
-  (`tools/midtier-runtime.sh`), not by this runner.
+* **Not the `once` entries.** They were timed by `tools/vmbench.zig`
+  (driven by `tools/midtier-runtime.sh`), both deleted at P8, and not by this
+  runner.
 
 ## Measured findings that came out of building this suite
 
@@ -312,22 +325,22 @@ tools/osier-bench.sh localrec numloop
 | --- | --- | --- |
 | `OSIER_BENCH_RUNS` | 3 | runs per (program, backend) |
 | `OSIER_BENCH_STAT` | `best` | `best` or `median` (lower median); printed in the output |
-| `OSIER_BENCH_HEAP_MB` | 512 | `ELMC_HEAP_MB` (VM/AOT) and `QBE_HEAP_MB` (native) |
+| `OSIER_BENCH_HEAP_MB` | 512 | `QBE_HEAP_MB` (the one surviving backend) |
 | `OSIER_BENCH_TIMEOUT` | 300 | per-run timeout, seconds; a timeout is a RUN-FAIL |
 | `OSIER_BENCH_STRICT` | 0 | `1` ignores the declared-not-expressible pair |
-| `OSIER_BENCH_XCHECK` | 1 | `0` skips the VM-vs-native stdout cross-check |
+| `OSIER_BENCH_XCHECK` | 1 | `0` skips the golden stdout cross-check |
 
 **Exit status.** `0` only if every non-declared (program, backend) pair
-compiled, ran, was not heap-bounded, was deterministic, and agreed with the VM.
+compiled, ran, was not heap-bounded, was deterministic, and matched its golden.
 
-* a backend whose **tool is absent** (`elmvm` absent is exit 2; `qbe`/`aotbench`
-  absent is a `MISSING-TOOL` skip) is **not** a failure;
+* a backend whose **tool is absent** (`qbe` absent is a `MISSING-TOOL` skip;
+  under the deleted VM, `elmvm` absent was exit 2) is **not** a failure;
 * a program that **did not compile**, **did not run**, **ran out of heap**, or
-  **disagreed with the VM** **is** a failure.
+  **disagreed with its golden** **is** a failure.
 
 **Heap.** 512 MB by default because `deepnontail` (10 × 50 000 live non-tail
-frames) needs it: at `ELMC_HEAP_MB=256` the VM answers
-`[gc] grow_heap: need 512 MB but reservation is 512 MB` and then panics. The
+frames) needs it: at `ELMC_HEAP_MB=256` the VM answered
+`[gc] grow_heap: need 512 MB but reservation is 512 MB` and then panicked. The
 runner treats a `grow_heap` or panic line on stderr as RUN-FAIL, so a
 heap-bounded run can never be reported as a time. Every other program in the
 suite completes at 256 MB.
@@ -342,20 +355,23 @@ answers from the **previous** run — the bug documented in the header of
 1. Add `tools/bench/suite/<name>.elm`. Keep the header conventions: the
    `-- SHAPE: <token> -- …` line is parsed by the runner and printed in the
    workload-mix table. Export `main` (the timed entry) and, where it fits the
-   `tools/bench/*.elm` idiom, `once` (the `vmbench` unit).
+   `tools/bench/*.elm` idiom, `once` (the deleted `vmbench` unit; the runner
+   does not time it).
 2. That is all — the runner globs `tools/bench/suite/*.elm`. Do **not** put
-   files directly in `tools/bench/`: `tools/midtier-runtime.sh` globs
-   `tools/bench/*.elm` (non-recursive) and those four files are pass-specific
-   microbenchmarks for a different purpose.
+   files directly in `tools/bench/`: those four files (`eta`, `inline`,
+   `letfallback`, `overapp`) were pass-specific microbenchmarks globbed by the
+   deleted `tools/midtier-runtime.sh`, for a different purpose.
 
 ## Relations
 
 * `tools/osier-bench.sh` — the runner.
 * `tools/qbe/fixtures/` — the native backend's *correctness* fixtures, whose
-  job is VM/native parity and structural pass assertions, not wall clock.
-* `tools/midtier-runtime.sh` + `tools/bench/*.elm` — the pass-specific
+  job is output parity against the goldens and structural pass assertions, not
+  wall clock.
+* ~~`tools/midtier-runtime.sh` + `tools/bench/*.elm`~~ — the pass-specific
   microbenchmarks (`Inline`, `Arity`, `eta`, `letfallback`, `overapp`), one
-  pass each, MIDTIER flag matrix. Complementary: those answer "does this pass
-  help its own shape", this suite answers "which shapes exist at all".
+  pass each behind the MIDTIER flag matrix. **Deleted at P8** (the flag matrix,
+  the passes it toggled and the VM the timings were taken on are all gone), kept
+  here only as a pointer to what the four files in `tools/bench/` were for.
 * `docs/qbe-backend.md`, "Aggregate flattening — what it buys, and on what" —
   the measurement this directory is the instrument for.

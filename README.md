@@ -1,8 +1,9 @@
 # osier
 
-The Osier language — compiler, ZINC VM, Lean mechanization, and the language's
-evidence chain — as its own repository. The terminal/GUI toolkit that consumes
-it lives in the separate [`fx-ui`](https://github.com/fixpoint-linux/fx-ui) repo.
+The Osier language — the Elm→QBE compiler, the Lean mechanization, and the
+language's evidence chain — as its own repository. The terminal/GUI toolkit
+that consumes it lives in the separate
+[`fx-ui`](https://github.com/fixpoint-linux/fx-ui) repo.
 
 **Artifact evaluation:** what this is, the tag to check out, the one command
 that reproduces the paper's numbers and what they should be, and every
@@ -10,9 +11,10 @@ prerequisite — see **[ARTIFACT.md](ARTIFACT.md)**.
 
 Contents:
 
-- `elm-compiler/` — the Elm→ZINC compiler (corpus `Prelude`/`Runtime`/core-libs,
+- `elm-compiler/` — the Elm→QBE compiler (corpus `Prelude`/`Runtime`/core-libs,
   the `run.js` batch driver, and the selfhost group).
-- `vendor/zinc-vm/` — the shared GC + ZINC VM executor package (path dep).
+- `vendor/osier-rt/` — the shared GC package (path dep), linked by the QBE
+  runtime (`tools/qbe/rt.zig`) and by `zig build gate`.
 - `src/effectloop.zig` — the language host: the CEK effect-manager over the
   compiler's Task effects (execplan + stream/file prims + time + Quit). The UI
   effects (renderer + terminal input) are not handled here; they live in fx-ui.
@@ -20,17 +22,21 @@ Contents:
 - `tests/elm-fixtures/` — the language fixtures + `run-elm-gate.sh` gate
   (`MATRIX.md` lists every registered check, generated from the gate).
 - `tools/` — the evidence chain (`osier-numbers.sh`, the corpus baseline, the
-  runTask recount) and the AOT tooling (`elmvm.zig`, `vmbench.zig`, `aot/`).
+  runTask recount) and the QBE native backend (`tools/qbe/`: the gate's native
+  twins, `qbe-check.sh`, `qbe-selfhost.sh`).
 - `docs/` — the paper and research notes.
 
 ## Build
 
 ```sh
-zig build elmvm    # build the gate harness (zig-out/bin/elmvm)
-zig build          # same (elmvm is the default install target)
-zig build vmbench  # the throughput benchmark
-zig build aot      # the AOT spike exes
+zig build gate     # the GC suite (vendor/osier-rt) in Debug + ReleaseSafe + ReleaseFast
+zig build test     # the gc suite, Debug only
 ```
+
+There is deliberately no compiler build step here. `elm-compiler/run.js` drives
+the Elm→QBE front end (`elm-compiler/build.sh` builds `compiler.js`), and the
+native backend is built on demand by `tools/qbe/qbe-mk.sh`
+(`zig build-obj` for `tools/qbe/rt.o` + the vendored qbe + `cc`).
 
 ## Recursion and the native stack
 
@@ -40,9 +46,10 @@ tail position compiles to an in-frame loop, and every other tail position
 a bounce loop chases — so tail recursion, **including mutual tail recursion**,
 runs in constant native stack. This is verified, not asserted:
 `tools/qbe/qbe-check.sh`'s mutual-tail check runs `Mutual.even 1000000` —
-1,000,000 hops of mutual recursion — to completion, identical to the VM; before
-the bounce loop the same shape died between 20k–40k hops on an 8 MB stack. This
-is stronger than Elm's own treatment, which optimises self-tail calls only.
+1,000,000 hops of mutual recursion — to completion against a pinned golden;
+before the bounce loop the same shape died between 20k–40k hops on an 8 MB
+stack. This is stronger than Elm's own treatment, which optimises self-tail
+calls only.
 
 **Non-tail recursion is not optimised and consumes native stack — one frame per
 call.** That is inherent, not a defect of this implementation: a non-tail call
@@ -50,8 +57,8 @@ must be resumed after the callee returns, so no tail-call optimisation can
 remove it, in any ML-family language including Elm.
 
 The idiom is the usual one: **build the result in an accumulator parameter and
-reverse at the end.** Both examples in this repo were real: `Zinc/Emit.elm`'s
-`fuse` and `Prelude.elm`'s `filterMap` were non-tail list walkers that
+reverse at the end.** Both examples in this repo were real: the retired csexp
+emitter's `fuse` and `Prelude.elm`'s `filterMap` were non-tail list walkers that
 exhausted the native stack on large inputs, and both are now tail-recursive
 accumulator walks. The finishing reverse is cheap on both build paths:
 `Prelude.elm`'s `listRevGo` (behind `List.reverse`) is already tail-recursive,

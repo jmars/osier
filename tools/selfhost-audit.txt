@@ -3,14 +3,16 @@
 # fix rows wave-by-wave (parse -> unknown-name -> type -> lowering),
 # re-run the script, watch failure rows drop.
 #
-# Group:    64 sources = the compiler frontend (src/{Lower,Type,
-#           Zinc,Frontend}) + the parse closure pulled into src/Elm**/
+# Group:    64 sources = the compiler's own frontend (src/{Lower,Type,
+#           Mid,Frontend} + the top-level helpers src/{Parser,
+#           ParserFast,ParserWithComments,Rope}.elm + src/{Char,List}/
+#           Extra.elm) + the parse closure pulled into src/Elm**/
 #           (stil4m/elm-syntax 7.3.9, Json codecs pruned; formerly
 #           selfhost/vendor) + NativeMain driver
 # Corpus:   src/Prelude.elm + src/Runtime.elm + core-libs/* (fixed side,
 #           NOT audited — always compiled as the corpus)
 # Compiler: node elm-compiler/run.js --batch (stock-built compiler.js)
-# Date:     2026-10-10T18:46:52Z
+# Date:     2026-10-10T19:12:19Z
 #
 # Columns: <RESULT>\t<file>\t<row:col>\t<message>
 # RESULT classes: OK | parse-error | unknown-name | type-error |

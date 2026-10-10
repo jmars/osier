@@ -1,5 +1,21 @@
 # QBE native backend — stage 1 slice (design, evidence, open questions)
 
+> **STATUS AFTER P8 (handoff `osier-delete-zinc`, 2026-10-10).** This document
+> is a **development log**: it records the backend's state at each stage, and
+> most of the file/flag names in it (CSEXP, `MIDTIER`, `vendor/zinc-vm`,
+> `elmvm`, `tools/aot`, `tools/elmc.sh`) name things that were deleted when the
+> ZINC interpreter went. The stages are kept verbatim because the measurements
+> are evidence. Two anchors moved **after** the last stage recorded here, so
+> read the stage text with these corrections:
+> - the corpus byte anchor is now `tools/osier-corpus-baseline.ssa.sha256`
+>   (`tools/osier-corpus-ssa.sh`), not the retired csexp
+>   `tools/osier-corpus-baseline.sha256`;
+> - `qbe-check.sh` is no longer a VM/native **differential** — it compares the
+>   native run against committed goldens (`tools/qbe/golden/`); `PASS=221`, not
+>   the 153 quoted in stage 1;
+> - the interpreter, all mid-tier passes, `vendor/zinc-vm` and the csexp
+>   emitter are gone, so `MIDTIER=*` and `.csexp` invocations below cannot run.
+
 STAGE 1 VERTICAL SLICE, committed as the proof that the pipeline works and
 both design cruxes are solvable.  NOT full coverage — the point was the
 pipeline, the cruxes, and honest numbers, not a backend.
@@ -19,24 +35,30 @@ is deliberately non-SSA and exercised on branch joins, loops and nesting).
 ## Commands (the whole proof; read exit codes directly)
 
 ```
-tools/qbe/qbe-check.sh        # 153 PASS / 0 FAIL, exit 0
+tools/qbe/qbe-check.sh        # 221 PASS / 0 FAIL, exit 0
 tools/qbe/qbe-mk.sh tests/elm-fixtures/fib.elm Fib.fib /tmp/out  # -> /tmp/out/fib
+tools/qbe/qbe-selfhost.sh     # the .ssa FIXED POINT
 ```
 
-`qbe-check.sh` compiles every slice fixture BOTH ways from the same source,
-runs the SAME entry+args on `zig-out/bin/elmvm` and on the native binary, and
-requires IDENTICAL stdout; then reruns the native binary at the 16MB minimum
+`qbe-check.sh` compiles every slice fixture from the same source, runs the
+SAME entry+args on the native binary, and requires stdout IDENTICAL to that
+check's **committed golden** (`tools/qbe/golden/`, 104 files — frozen at P8
+from the last agreeing run of the retired VM/native differential, see the
+status note above); then reruns the native binary at the 16MB minimum
 heap (`QBE_HEAP_MB=16`; `MIN_HEAP_BYTES`, heap.zig:61) so the moving
 collector runs constantly — the behavioural proof that the pooled-frame roots
 actually root.  Fixtures: fib 10/20, countdown 100000, applytwice, closure,
 const42, idn, ifx, churn 150000 (13MB live, constant scavenges), churn
-500000, mutualtail 20000, and the float differential matrix
+500000, mutualtail 20000, and the float matrix
 (`tools/qbe/fixtures/float.elm` — 27 matrix entries plus `float-main` and
-4 float/int entry-arg runs = 32 builds, each both ways AND at the 16MB
+4 float/int entry-arg runs = 32 builds, each also at the 16MB
 heap: literals, the inline fast-path ops and the ops that must decline to
 `rt_prim`, non-finite spellings, and float/int entry args through
-`rt.zig:isFloatArg`; 64 of the 153 PASSes).  The MIDTIER=0 byte-identity
-anchor still holds (fib.csexp sha256 == `tools/osier-corpus-baseline.sha256`).
+`rt.zig:isFloatArg`).  The MIDTIER=0 byte-identity anchor that used to be
+quoted here (fib.csexp sha256 vs `tools/osier-corpus-baseline.sha256`) is
+**gone** with the CSEXP backend and that manifest; its successor is the `.ssa`
+anchor `tools/osier-corpus-baseline.ssa.sha256`, checked by
+`tools/osier-numbers.sh` step 2.
 
 ## Coverage (and the loud failures)
 

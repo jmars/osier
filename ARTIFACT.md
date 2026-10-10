@@ -365,6 +365,10 @@ in detail; the paper states the same facts as §6.7 of `docs/research/osier-pape
 
 ## 9. The evidence chain after the ZINC retirement (P7, 2026-10-10) — what changed, and what was LOST
 
+> **Superseded in one respect — see §9.5.** The caveat below ("still exist and still pass at
+> this commit") was true when written and is **no longer**: the deletion has since been
+> carried out and the tip's figures are in §9.5.
+
 *Appended on 2026-10-10, before any deletion: this section describes the tip of the branch; the
 frozen-tag figures in §2 are untouched. The ZINC interpreter, the csexp backend and their tooling
 still exist and still pass at this commit — the replacements below were built and proven while the
@@ -460,3 +464,47 @@ fast lane is not retired.
 - The `.ssa` corpus freeze re-derived the old csexp baseline's discipline for free: a
   compile-error group's payload is byte-identical in both formats (`adtgaps`'s hash is the
   same in both baseline files), which is the err-payload pinning working as intended.
+
+### 9.5 The deletion is now DONE — the tip's figures (P8, `osier-delete-zinc`, 2026-10-10)
+
+*Appended after the fact. §9.1–9.4 above were written **before** any deletion, when the ZINC
+interpreter and the csexp backend still existed and still passed; their "still exist and still
+pass at this commit" caveat and their future tense are now history. This is what actually
+happened and what the tip measures. The frozen-tag figures in §2 remain untouched and correct
+**for the tag**.*
+
+**What left the tree.** The ZINC interpreter package `vendor/zinc-vm` (and, separately, the
+`.zig-cache` ghost directory it left behind); everything that linked it — `tools/elmvm.zig`,
+`tools/vmbench.zig`, `tools/aot/` (all of it), `tools/elmc.sh`, `tools/bootstrap-compile.sh`,
+`tools/selfhost-compile.sh`, `tools/selfhost-gate.sh`; the csexp backend
+(`elm-compiler/src/Zinc/{Emit,Csexp}.elm`, `Mid/ToZinc.elm`, `Lower/{Module,Pattern}.elm`) and
+the ZINC-only mid-tier passes (`Mid/{Arity,ConstFold,DeadGlobals,Inline,Shrink,Simplify}.elm`);
+the MIDTIER=0-vs-1 differential and its measurement tooling (`tools/midtier-{diff,runtime}.sh`,
+`tools/midtier-emit-stats.py`); the committed bootstrap seed
+(`tools/bootstrap/selfhost.csexp` + provenance); and — the point of the whole exercise — the
+**differential** itself. `vendor/osier-rt` is the runtime and stays.
+
+**What the anchors became.**
+
+| anchor | before P8 | at the tip |
+| --- | --- | --- |
+| fixture gate | `PASS=268 FAIL=0` (156 VM rows + 112 native twins) | **`PASS=154 FAIL=0`** — the 114 VM-exec rows are gone; `rawrun` (hand-csexp, no native twin) and `depth` (it asserted the *interpreter's* call cap; its native twin `natdepth` stays) went with them, and `ELM_GATE_NATIVE` (which selected the VM-only mode) with those |
+| `qbe-check.sh` | 219-row VM/native differential | **221 PASS / 0 FAIL** — no row lost; the differential became 104 committed goldens + 2 cross-target IL-compile rows |
+| corpus byte anchor | `osier-corpus-baseline.sha256` (csexp, 149) | **`osier-corpus-baseline.ssa.sha256`** (149), `BYTE-IDENTICAL 149 = 149`; the csexp manifest is deleted |
+| self-host fixed point | csexp fixed point **and** `.ssa` fixed point | **the `.ssa` FIXED POINT only** — the csexp one died with the csexp output path it compared, and the script says so |
+| seed status | `FRESH`/`DRIFTED` vs a committed seed | **`none — retired at P8 pending the Lua backend`**, report-only; the step no longer calls the deleted `tools/selfhost-compile.sh` |
+| `TestMain` | `All 114 assertions passed.` | **`All 95 assertions passed.`** — the 19 lost assertions were all ZINC unit tests (the `Csexp` atom/utf8 helpers, `Emit.addressMap`/`flatten`, the nine `Emit.fuse` cases, jump-retargeting); the 3 `utf8ByteLength` cases moved to `Char.Extra` and survive |
+| `zig build gate` | gc suite + VM suite | **gc suite only** (Debug + ReleaseSafe + ReleaseFast); the VM suite lived in the deleted package |
+
+**The honest cost, restated for the tip.** §9.2's loss stands and is now unmitigated by any VM:
+there is ONE backend, so a backend disagreement on an unpinned shape is invisible. The
+replacements are a regression net, not a differential. The restoration path is unchanged and
+is the reason the seed is *retired* rather than *replaced*: a **Lua backend** would be a second
+backend again (two value representations, Lua's own GC) and would become the next committed
+seed. Nothing here precludes it.
+
+**Verified at the tip** (each read from the command's own output, exit code included, on
+x86_64 Linux): `zig build` 0 · `zig build gate` 0 · `zig build test` 0 ·
+`run-elm-gate.sh` exit 0, `PASS=154 FAIL=0` · `qbe-check.sh` exit 0, 221 PASS / 0 FAIL ·
+`qbe-selfhost.sh` exit 0, the `.ssa` FIXED POINT byte-identical · `osier-numbers.sh` exit 0,
+`VERDICT: all checks pass`, corpus `.ssa` byte-identical 149 = 149.

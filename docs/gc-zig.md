@@ -169,8 +169,9 @@ at 128 MB, 512 MB and 32768 MB alike.  New relationship, MEASURED with
       2 x heap + 1027 x PAGEBYTES - 1   (2H + 525823 B at H = 512 MB)
     — measured to land exactly at that floor and to be REFUSED at 2H + 1 MB.
 
-The four heap-derived call sites (`tools/qbe/rt.zig`, `tools/elmvm.zig`,
-`tools/aot/run.zig`, `tools/aot/main.zig`) now pass `max(heap x 16, 64 MB)`.
+The heap-derived call sites (`tools/qbe/rt.zig`, and — before P8 — `tools/elmvm.zig`,
+`tools/aot/run.zig`, `tools/aot/main.zig`, all deleted with the interpreter) pass
+`max(heap x 16, 64 MB)`.
 16x, not a smaller multiplier: at `QBE_HEAP_MB=16` the fixture
 `tools/qbe/fixtures/vfield.elm` reaches a live set of 16.1 MB, which needs a
 threshold just above 16 MB, i.e. a heap over 64.4 MB — outside an 8x

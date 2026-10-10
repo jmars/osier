@@ -84,11 +84,11 @@ fails loudly rather than letting this listing go stale.
 |---|---|
 | \`check\` | the name the gate prints (\`PASS <name> …\`) |
 | \`kind\` | the gate function that registered it (see the mapping below) |
-| \`entry point\` | the function the VM calls; \`<Module>.<fn>\` is resolved from the fixture's \`module\` header |
+| \`entry point\` | the function the gate calls; \`<Module>.<fn>\` is resolved from the fixture's \`module\` header |
 | \`expected\` | what must be observed: a single-line printed value, an escaped multi-line value (\`\\n\`), or a substring the compile error must contain |
 | \`args\` | argv passed to the entry point |
-| \`stdin\` | file under \`input/\` redirected into the VM |
-| \`fixture\` | the fixture source (or the committed \`.csexp\` bundle for \`rawrun\`) |
+| \`stdin\` | file under \`input/\` redirected into the compiled binary |
+| \`fixture\` | the fixture source |
 
 | \`kind\` (registered by) | dispatcher kind | what it asserts |
 |---|---|---|

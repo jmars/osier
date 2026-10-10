@@ -1,5 +1,15 @@
 # zinc-vm performance plan (interactive TUI rendering)
 
+> **RETIRED AT P8 (handoff `osier-delete-zinc`).** The ZINC interpreter
+> (`vendor/zinc-vm`, including `interp.zig` and `heap.zig` cited throughout) and
+> the `elmvm` harness it was measured in were deleted; the language now runs on
+> the QBE native backend only. This document is kept as the **measurement
+> record** behind that decision — the per-call allocation churn, the build-mode
+> factor and the `CALL_STACK_DEPTH` guard were all real, measured findings, and
+> the QBE path inherited the lesson (native execution, no per-call frame-stack
+> allocation). The file/line references below point at deleted sources and
+> cannot be followed.
+
 Audit by strategist (DeepSeek V4 Pro) + independent reviewer, authorized VM
 unfreeze. Goal: make interactive Lipgloss-heavy TUI rendering playable.
 Baseline gate: PASS=106 FAIL=0, TestMain 90/90, HEAD 701e68b.
