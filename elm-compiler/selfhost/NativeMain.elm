@@ -189,8 +189,9 @@ revGo xs acc =
 -- `elmc --ssa <entry> <manifest>` drives the QBE backend (Mid.QbeModule):
 -- read the corpus ONCE, then compile each group against it and write QBE IL
 -- (.ssa) — or "err <msg>" — to that group's output path.  flatten/rep are
--- True, matching run.js's QBE defaults (QBE_NOFLATTEN / QBE_NOREP are both
--- UNSET on the stock emit this must reproduce byte-for-byte).
+-- True, matching run.js's QBE defaults (QBE_NOFLATTEN / QBE_NOREP /
+-- QBE_NOPRIMDIRECT are all UNSET on the stock emit this must reproduce
+-- byte-for-byte).
 
 
 runSsa : String -> String -> Runtime.Task x String
@@ -257,7 +258,7 @@ ssaJobs entryKey jobs texts =
                 writeBundles
                     (zipJobs jobs
                         (List.map2
-                            (\job srcs -> renderSsa (QbeModule.compileEntry corpus srcs entryKey True True))
+                            (\job srcs -> renderSsa (QbeModule.compileEntry corpus srcs entryKey True True True))
                             jobs
                             (regroup jobs texts)
                         )

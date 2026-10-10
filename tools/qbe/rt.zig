@@ -568,6 +568,108 @@ export fn rt_prim(name: [*:0]const u8, args: [*]Value, nargs: i32) callconv(.c) 
     return acc;
 }
 
+// =====================================================================
+//  Direct per-prim entries (handoff osier-passa)
+// =====================================================================
+//
+// `rt_prim` above is the GENERIC entry: it is handed the prim's NAME as a
+// string and pays, per call, the name dispatch (`std.mem.span` + strlen +
+// StaticStringMap hash + memcmp) plus a vaInit'd GC-allocated staging array
+// (STACK_INIT_CAP = 12 Values = 480 B) with one write-barrier scan per
+// vaPush.  MEASURED (the osier-midpasses plan, on the five slowest suite
+// programs): 48-54% of wall clock sits in this call mechanism, of which
+// ~10% is the name dispatch alone, and the vaInit staging array is ~85% of
+// the workload's allocation volume.
+//
+// The entries below are the same primitives through a DIRECT C symbol,
+// generated AT COMPTIME from prims.prim_table so there is still exactly ONE
+// implementation of every prim's semantics (the handler bodies in
+// rt/prims.zig): a wrapper points its ValueArray at a ROOTED C-stack copy of
+// the pointer args and calls the handler through the table's own fn pointer —
+// what `prims.execPrimitive` would do after its lookup, with the lookup
+// resolved at compile time.  Nothing about prim SEMANTICS is duplicated here.
+//
+// THE ABI IS UNIFORM: three `*const Value` argument pointers plus the arg
+// count.  That is deliberate, and it is what keeps the two sides of this
+// contract from drifting: the wrappers are generated from the table, but the
+// COMPILER only ever emits a call once it knows the name, and the count it
+// passes IS the count `execPrimitive` would have been handed — the arity
+// stays the call site's, exactly as before, so no second arity table exists
+// to disagree with prims.zig.  The unused pointers of an arity-1 call are
+// never read.  The only cross-language contract left is the SYMBOL NAME,
+// which is a pure function of the prim name (symSuffix below, mirrored in
+// Mid.Qbe.Lower.manglePrim): a mismatch is an undefined symbol at link time,
+// i.e. loud, never silent.
+//
+// Arity 0 is NOT routed here (the compiler keeps the generic entry for it):
+// the C ABI has no way to say "no argument pointers", so a 0-ary direct call
+// would pass undefined registers.
+const direct_arity: usize = 3;
+
+/// One BYTE of a prim name -> its symbol-safe spelling: the SAME mangler
+/// Mid.Qbe.Lower already puts every defun key through (`mangle`/`mangleChar`
+/// there — [a-zA-Z0-9] pass through, every other byte becomes `_xHH` at a
+/// fixed two digits, which is what makes it injective).  Every name in
+/// `prims.prim_table` is ASCII, so Elm's codepoint walk and this byte walk
+/// agree; a name that is not would be a link error, not a silent divergence.
+fn symChar(comptime c: u8) []const u8 {
+    if ((c >= '0' and c <= '9') or (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z'))
+        return comptime std.fmt.comptimePrint("{c}", .{c});
+    return comptime std.fmt.comptimePrint("_x{x:0>2}", .{c});
+}
+
+fn symSuffix(comptime name: []const u8) []const u8 {
+    var out: []const u8 = "";
+    inline for (name) |c| out = out ++ symChar(c);
+    return out;
+}
+
+/// The comptime-generated wrapper for one table entry.
+fn Direct(comptime name: []const u8, comptime func: prims.PrimFn) type {
+    return struct {
+        fn call(a0: *const Value, a1: *const Value, a2: *const Value, nargs: i32) callconv(.c) Value {
+            const n: usize = @intCast(nargs);
+            if (n == 0 or n > direct_arity) dieLoud("qbe-rt: direct prim entry called out of range");
+            const src = [direct_arity]*const Value{ a0, a1, a2 };
+            // Stage into ROOTED C-stack storage: the caller's frame slots are
+            // the same Values, but they are at arbitrary (non-contiguous)
+            // addresses and the handler POPS (vaPop nils the vacated slot), so
+            // it cannot be handed the caller's frame.  REVERSED, because the
+            // first pop must be args[0] (PrimApp args are in pop order) — the
+            // same reversal rt_prim's vaPush loop performs.
+            var buf: [direct_arity]Value = undefined;
+            var i: usize = 0;
+            while (i < n) : (i += 1) buf[i] = src[n - 1 - i].*;
+            var live: i32 = nargs;
+            g.rootPushValueArray(&buf, &live);
+            defer g.rootPop();
+            // `buf` is C-stack, so (unlike rt_prim's vaInit array) its base
+            // cannot move and needs no ROOT_PTR slot: `&buf` IS the live base
+            // for the whole call.
+            var stack: types.ValueArray = .{ .data = &buf, .len = nargs, .cap = nargs };
+            var acc: Value = zeroValue();
+            g.rootPushValue(&acc);
+            defer g.rootPop();
+            func(vm, &acc, &stack) catch |e| diePrimDirect(e, name);
+            return acc;
+        }
+    };
+}
+
+comptime {
+    @setEvalBranchQuota(200000);
+    for (prims.prim_table) |def| {
+        @export(&Direct(def.name, def.func).call, .{ .name = "rt_prim_" ++ symSuffix(def.name) });
+    }
+}
+
+fn diePrimDirect(e: anyerror, name: []const u8) noreturn {
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "qbe-rt: prim {s} failed: {s}\n", .{ name, @errorName(e) }) catch "qbe-rt: prim failed\n";
+    werr(msg);
+    std.process.exit(1);
+}
+
 fn diePrim(e: anyerror, name: [*:0]const u8) noreturn {
     var buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "qbe-rt: prim {s} failed: {s}\n", .{ std.mem.span(name), @errorName(e) }) catch "qbe-rt: prim failed\n";

@@ -88,8 +88,8 @@ import Type.Error as Error
 import Type.Infer as Infer
 
 
-compileEntry : List String -> List String -> String -> Bool -> Bool -> Result String String
-compileEntry corpusSources groupSources entryKey flatten rep =
+compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Result String String
+compileEntry corpusSources groupSources entryKey flatten rep primDirect =
     case
         MidModule.parseAll corpusSources
             |> Result.andThen
@@ -108,7 +108,7 @@ compileEntry corpusSources groupSources entryKey flatten rep =
                                                                 Err msg
 
                                                             Ok corpusGlobals ->
-                                                                compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep
+                                                                compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect
                                                     )
                                         )
                             )
@@ -129,8 +129,9 @@ compileGroup :
     -> String
     -> Bool
     -> Bool
+    -> Bool
     -> Result String String
-compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep =
+compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect =
     MidModule.parseAll groupSources
         |> Result.andThen
             (\groupFiles ->
@@ -148,7 +149,7 @@ compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep =
                                                             Err msg
 
                                                         Ok globals ->
-                                                            lowerAll rep flatten globals (groupSchemes env groupUnits0) corpusUnits groupUnits entryKey
+                                                            lowerAll rep primDirect flatten globals (groupSchemes env groupUnits0) corpusUnits groupUnits entryKey
                                                 )
                                     )
                         )
@@ -211,13 +212,14 @@ inferInOrder env files schemes failures =
 lowerAll :
     Bool
     -> Bool
+    -> Bool
     -> Dict String Int
     -> GroupSchemes
     -> List MidModule.Unit
     -> List MidModule.Unit
     -> String
     -> Result String String
-lowerAll rep flatten globals groupTypes corpusUnits groupUnits entryKey =
+lowerAll rep primDirect flatten globals groupTypes corpusUnits groupUnits entryKey =
     compileAll globals (corpusUnits ++ groupUnits)
         |> Result.andThen
             (\program ->
@@ -245,6 +247,7 @@ lowerAll rep flatten globals groupTypes corpusUnits groupUnits entryKey =
                         (\flatProgram ->
                             QbeLower.lower
                                 rep
+                                primDirect
                                 typeTable
                                 (completeArities globals program)
                                 flatProgram

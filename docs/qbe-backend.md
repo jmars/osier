@@ -1088,3 +1088,143 @@ The committed seed is still REPORTED (present / matches its recorded sha256)
 but no longer decides the exit code, so it may drift harmlessly.  This is
 exactly the change that lets a backend change like the one above land without a
 false failure, which is also why it was kept when the clearing itself was not.
+
+## Direct per-prim call entries — pass A (handoff osier-passa, 2026-10-10)
+
+`QBE_NOPRIMDIRECT=1` disables it (the `QBE_NOREP` / `QBE_NOFLATTEN` shape: one
+switch, both builds of one source differ only by it).
+
+### What it changes
+
+Every prim call used to go through ONE generic entry:
+
+```
+%t1 =:val call $rt_prim(l $d1, l %s7, w 2)     ; $d1 = the prim's NAME bytes
+```
+
+`rt_prim` copies the caller's staged args into a rooted C-stack buffer, then
+`vaInit`s a GC-allocated `ValueArray` (`STACK_INIT_CAP` = 12 Values = **480 B
+and one collection's worth of promotion per call**), pushes the args one at a
+time (`vaPush` each running an `inOldgen` + `valueReferencesNursery` barrier
+scan), and finally hands the name to `prims.execPrimitive`, i.e. `std.mem.span`
++ `strlen` + a `StaticStringMap` hash + `memcmp`.  The CALLER pays for it too:
+`Lower.stageSlots` copies each argument into a fresh contiguous block of frame
+slots (`2n` instructions and `n` frame slots per call site).
+
+Pass A emits a per-prim C entry instead:
+
+```
+%t1 =:val call $rt_prim_cons(l %s5, l %s6, l %s6, w 2)
+```
+
+The entries are **comptime-generated from `prims.prim_table`** in
+`tools/qbe/rt.zig` (`Direct`/`@export`, one symbol per table row, 58 of them),
+so there is still exactly ONE implementation of every prim's semantics: the
+generated wrapper points a `ValueArray` at a rooted C-stack copy of its pointer
+arguments and calls the table's OWN handler — what `execPrimitive` does after
+its lookup, with the lookup resolved at compile time.  It deletes the name
+dispatch outright rather than indexing it.
+
+### The ABI, and why it does not need a second table
+
+The wrapper signature is fixed at **three `*const Value` arguments plus the arg
+count**, whatever the prim's arity.  `nargs` is the count the generic call would
+have passed, so the callee hands the handler exactly the stack it would have
+got from `rt_prim` — the arity stays the CALL SITE's and no second arity table
+exists to drift from `prims.zig`.  Unused pointers are passed (the .ssa needs a
+defined `l` operand) and never read.  The only cross-language contract left is
+the SYMBOL NAME, which is a pure char-by-char function of the prim name — the
+SAME mangler `Lower.mangle` already applies to every defun key, mirrored in
+`rt.zig`'s `symChar`/`symSuffix`; a disagreement is an undefined symbol at link
+time, and `tools/qbe/qbe-check.sh`'s `primdirect-symbols` row checks every
+emitted `$rt_prim_*` against `nm` on `rt.o` before the linker has to.
+
+Arity 0 and arity > 3 keep the generic route (the C ABI cannot express "no
+argument pointers"); so does any name the runtime has no entry for.
+
+### The counters, and the corpus re-freeze (deliberate, 8da6fd7 discipline)
+
+Twelve suite programs, `.ssa` compiled with the pass ON and OFF: **every prim
+call site converts** (`generic` = 0 with the pass ON, `generic` = N with it OFF,
+identical totals), and each program's `.ssa` shrinks 10-15% (the staging blits
+and the `pnm:` name blobs are gone).
+
+`tools/osier-corpus-ssa.sh` compares 149 group hashes; the pass moves **103 of
+them** and the baseline was re-frozen for it.  The re-freeze is safe for a
+reason that was CHECKED rather than assumed: compiling the whole corpus with
+`QBE_NOPRIMDIRECT=1` reproduces the COMMITTED baseline **byte-for-byte, 149 of
+149** — so the entire corpus delta is attributable to this pass and to nothing
+else that moved in the tree.
+
+### MEASURED (this host, `OSIER_BENCH_RUNS=7 OSIER_BENCH_STAT=median`, arms alternated, 3 ON + 4 OFF runs)
+
+Suite total: **2136 ms -> 1316 ms (-38.4%)**.  A/A spread, same arm across
+runs: OFF 2120/2124/2149/2178 (2.7%), ON 1315/1316/1325 (0.8%) — the effect is
+more than an order of magnitude outside the spread.
+
+| program | OFF median (ms) | ON median (ms) | delta |
+|---|---|---|---|
+| recupd_local | 460 | 251 | -46% |
+| recflow | 341 | 172 | -50% |
+| mono_record | 300 | 180 | -40% |
+| nestagg | 222 | 133 | -40% |
+| recupd_param | 361 | 232 | -36% |
+| mono_int | 79 | 64 | -19% |
+| mono_float | 100 | 71 | -29% |
+| adtmatch | 137 | 97 | -29% |
+| listbuild | 46 | 32 | -31% |
+| localrec / numloop | 11 / 14 | 11 / 14 | 0% (no prim calls at all) |
+| deepnontail | 58 | 62 | inside that program's own 30-40% spread — not a claim |
+
+Scavenges (`QBE_GC_STATS=1`, 512 MB; the OFF arm reproduces the published
+baselines 697/474/390/390/306 exactly, so this is the configuration the
+midpasses plan profiled): recupd_local **697 -> 44**, recflow **474 -> 22**,
+mono_record **390 -> 25**, nestagg **306 -> 27**, recupd_param **390 -> 22**,
+mono_int 55 -> 5, listbuild 55 -> 5.
+
+### The compiler's own workload (the selfhost guard)
+
+THE WHOLE COMPILER, one group, 64 sources (`elm-compiler/selfhost/manifest.json`
+with the entry `NativeMain.main` — exactly `qbe-selfhost.sh`'s stage 1, run
+directly so the `run` stage's 32 GB booking is not paid):
+
+| | OFF | ON |
+|---|---|---|
+| emit wall clock | 6.41 s, 6.41 s | 6.51 s, 5.94 s |
+| `.ssa` | **12,618,502 B** | **11,114,730 B (-11.9%)** |
+| prim call sites | 15,864 generic | 15,864 direct, 0 generic |
+
+So the pass pays for itself on the artifact's own workload: the same
+15,864 sites, 11.9% less IL to parse and compile, and no emit-time regression
+(documented post-Peephole-fix baseline: 5.7 s).  The committed seed
+(`tools/bootstrap/compiler.ssa`, 12,597,185 B) is REPORTED as DRIFTED by
+`tools/osier-numbers.sh` — expected, report-only, and **not** re-frozen here.
+
+The 149-group gate corpus batch (`node run.js`, J=8) is consistent: 8.04/8.06 s
+OFF vs 8.01/8.06 s ON, total emitted `.ssa` **4,547,689 -> 4,172,678 bytes
+(-8.2%)**; one large single group (`arraybasic`) 0.50-0.53 s OFF vs 0.50-0.52 s
+ON and 519,063 -> 469,746 bytes (-9.5%).
+
+The `.ssa` FIXED POINT (`tools/qbe/qbe-selfhost.sh`) is **not** run here: its
+default books 32768 MB (and 16384 was recorded as panicking) against a hard
+8 GB budget on this host.  The emit-stage numbers above are the same-budget
+comparison instead; the fixed point remains the orchestrator's to run.
+
+### Oracles re-pointed by this pass (not weakened)
+
+- `rtprim_sites` counts BOTH call forms.  What the rows using it measure is
+  "how many prim calls does this defun still make", and that must not change
+  meaning when the CALL FORM changes; the pass-A rows split the two forms.
+- `prim_count` resolves a prim from EITHER form — the generic one from its
+  `$dN` name blob, the direct one by DEMANGLING the symbol.  Counting only the
+  generic form would have made every "the pass removed this prim" row pass for
+  the wrong reason (the site would simply have changed shape).
+- The norep fixture-STRENGTH guards (`slotCount` >= 16, `floatLocal` >= 16
+  frame slots "without the pass") are now measured on a BOTH-PASSES-OFF build,
+  because pass A itself deletes staging frame slots (floatLocal: 23 slots
+  pre-pass-A, 15 with it).  The guards keep their threshold and their meaning;
+  only the emitter they are measured on changed.
+- `tools/bench/golden/` and `tools/qbe/golden/` are untouched — if the pass is
+  correct the programs print what they printed.  The two new golden files are
+  COPIES of the `flatten` and `churn` goldens for the hatch rows that run the
+  same source, entry and arguments (no golden was re-frozen).

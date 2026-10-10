@@ -426,12 +426,35 @@ run flatnest  FlatNest.main  tools/qbe/fixtures/flatnest.elm
 #      proof ("fails before, passes after"), and strictly sharper than an
 #      absolute count, which a fixture change could quietly satisfy.
 #
-# prim_count <ssa> <prim-name>: the number of `rt_prim` SITES whose prim
-# symbol is <name>.  The prim travels as a static data address (`l $d7`), so
-# the name is resolved from its `data $d7 = align 8 { b "assoc", b 0 }`
-# definition — counted, not assumed.
+# prim_count <ssa> <prim-name>: the number of PRIM CALL SITES whose prim is
+# <name>, in EITHER emission form.  Pass A (osier-passa) gave every prim a
+# direct C entry, so a site is now one of
+#   * pass-A ON : `call $rt_prim_<mangled>(l ..., w n)`  — the name is in the
+#                 SYMBOL, so it is demangled back (`_xHH` -> byte);
+#   * pass-A OFF / arity 0 / arity > direct_arity: `call $rt_prim(l $d7, ...)`
+#                 — the prim travels as a static data address, resolved from
+#                 its `data $d7 = align 8 { b "assoc", b 0 }` definition.
+# Both are counted, so a structural row keeps measuring the SAME thing across
+# the hatch (counting only the generic form would have made every "the pass
+# removed this prim" row pass for the wrong reason).  The demangler is a
+# second, independent implementation of Mid.Qbe.Lower.mangle: if the emission
+# side ever changes the mangling, these counters fall to 0 and the rows FAIL.
 prim_count() {
   awk -v want="$2" '
+    function hexval(h,   j,c,v) {
+      v=0
+      for(j=1;j<=length(h);j++) { c=tolower(substr(h,j,1)); v=v*16+index("0123456789abcdef",c)-1 }
+      return v
+    }
+    function demangle(s,   i,out) {
+      sub(/^\$rt_prim_/,"",s)
+      out=""; i=1
+      while (i <= length(s)) {
+        if (substr(s,i,2)=="_x" && length(substr(s,i,4))==4) { out=out sprintf("%c",hexval(substr(s,i+2,2))); i+=4 }
+        else { out=out substr(s,i,1); i+=1 }
+      }
+      return out
+    }
     FNR==NR {
       l=$0; gsub(/[(),]/," ",l); n=split(l,f," ")
       nm=""
@@ -441,7 +464,12 @@ prim_count() {
     }
     {
       l=$0; gsub(/[(),]/," ",l); n=split(l,f," ")
-      for(i=1;i<=n;i++) if(f[i] ~ /\$rt_prim/ && f[i+2] ~ /^\$d[0-9]+$/) { if (map[f[i+2]]==want) c++ }
+      for(i=1;i<=n;i++) {
+        if (f[i] !~ /^\$rt_prim/) continue
+        if (f[i] == "$rt_prim") {
+          for(j=i+1;j<=n;j++) if (f[j] ~ /^\$d[0-9]+$/) { if (map[f[j]]==want) c++; break }
+        } else if (demangle(f[i]) == want) c++
+      }
     }
     END { print c+0 }
   ' "$1" "$1"
@@ -609,10 +637,33 @@ fi
 frame_slots() {
   sed -n 's/.*call \$rt_frame_enter(w \([0-9]*\)).*/\1/p' "$1" | head -1
 }
-# rtprim_sites <ssa>: `rt_prim` CALL sites (the tag-test fallback the Int fast
-# path exists to delete).
+# rtprim_sites <ssa>: PRIM CALL sites — the tag-test fallback the Int fast
+# path exists to delete.  BOTH emission forms count (pass A's direct entries
+# are `call $rt_prim_<name>(`, the generic one is `call $rt_prim(`), because
+# what these rows measure is "how many prim calls does this defun still make",
+# which must not change meaning when the CALL FORM changes.  The pass-A rows
+# below split the two forms apart.
 rtprim_sites() {
   grep -c 'call \$rt_prim' "$1" || true
+}
+
+# rtprim_generic_sites <ssa>: the GENERIC (`call $rt_prim(`) form alone.
+rtprim_generic_sites() {
+  grep -c 'call \$rt_prim(' "$1" || true
+}
+
+# primdirect_sites <ssa>: pass-A DIRECT (`call $rt_prim_<name>(`) sites alone.
+primdirect_sites() {
+  grep -c 'call \$rt_prim_' "$1" || true
+}
+
+# primdirect_arities <ssa>: the `w N` argument count of every DIRECT call
+# site.  Pass A's runtime ABI is a fixed three pointer arguments plus this
+# count (tools/qbe/rt.zig Direct), so a site outside 1..3 would hand the
+# wrapper a count it refuses or a pointer it never got — this is the static
+# half of that contract.
+primdirect_arities() {
+  sed -n 's/.*call \$rt_prim_[A-Za-z0-9_]*(.*, w \([0-9]*\)).*/\1/p' "$1"
 }
 qbe_ssa_rep() { # <fixture> <entry> <out.ssa> <on|off>
   if [ "$4" = "off" ]; then
@@ -626,16 +677,30 @@ for pair in slotCount:slot chain:chain capture:cap polyLocal:poly boxed:box floa
   qbe_ssa_rep tools/qbe/fixtures/norep.elm "NoRep.$e" "$TMP/norep-$n-on.ssa"  on
   qbe_ssa_rep tools/qbe/fixtures/norep.elm "NoRep.$e" "$TMP/norep-$n-off.ssa" off
 done
+# pass A DELETES the per-call staging block, so it deletes FRAME SLOTS too
+# (stageSlots reserves one slot per argument, per call).  The FIXTURE-STRENGTH
+# guards below are thresholds on "how many frame slots does this entry reserve
+# WITHOUT the pass being checked" — a quantity pass A itself moves.  So the
+# guard is measured on the emitter pass A REPLACED (both passes off), while
+# every asymmetry above/below stays on the ordinary ON/OFF pair.  Measuring it
+# on the pass-A build would silently weaken a guard instead of preserving it.
+# <fixture> <entry> <out.ssa> — BOTH passes off, so the frame-slot count is
+# the one the pre-pass-A emitter produced for the same entry.
+qbe_ssa_norep_offpd() {
+  (cd "$ROOT/elm-compiler" && QBE=1 QBE_NOREP=1 QBE_NOPRIMDIRECT=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+}
 
 if [ -s "$TMP/norep-slot-on.ssa" ] && [ -s "$TMP/norep-slot-off.ssa" ]; then
   s_on=$(frame_slots "$TMP/norep-slot-on.ssa")
   s_off=$(frame_slots "$TMP/norep-slot-off.ssa")
+  qbe_ssa_norep_offpd tools/qbe/fixtures/norep.elm NoRep.slotCount "$TMP/norep-slot-offpd.ssa"
+  s_off_pd=$(frame_slots "$TMP/norep-slot-offpd.ssa")
   p_on=$(rtprim_sites "$TMP/norep-slot-on.ssa")
   p_off=$(rtprim_sites "$TMP/norep-slot-off.ssa")
   # NoRep.slotCount is 16 chained Int locals over one Int param: without the
   # pass each takes a slot and each `+` a tag test + an rt_prim fallback.
-  if [ "$s_off" -lt 16 ]; then
-    echo "FAIL norep-structural: slotCount reserved only $s_off slots without the pass — the fixture does not exercise 16 locals"
+  if [ "$s_off_pd" -lt 16 ]; then
+    echo "FAIL norep-structural: slotCount reserved only $s_off_pd slots without the pass (both passes off) — the fixture does not exercise 16 locals"
     FAIL=1
   elif [ "$s_on" -ge "$s_off" ]; then
     echo "FAIL norep-structural: slotCount frame slots did NOT drop ($s_off -> $s_on): no local was unboxed"
@@ -673,11 +738,13 @@ if [ -s "$TMP/norep-slot-on.ssa" ] && [ -s "$TMP/norep-slot-off.ssa" ]; then
   fl_off=$(rtprim_sites "$TMP/norep-float-off.ssa")
   fs_on=$(frame_slots "$TMP/norep-float-on.ssa")
   fs_off=$(frame_slots "$TMP/norep-float-off.ssa")
+  qbe_ssa_norep_offpd tools/qbe/fixtures/norep.elm NoRep.floatLocal "$TMP/norep-float-offpd.ssa"
+  fs_off_pd=$(frame_slots "$TMP/norep-float-offpd.ssa")
   if cmp -s "$TMP/norep-float-on.ssa" "$TMP/norep-float-off.ssa"; then
     echo "FAIL norep-float-fired: floatLocal .ssa is BYTE-IDENTICAL on and off — the Float locals were NOT unboxed"
     FAIL=1
-  elif [ "$fs_off" -lt 16 ]; then
-    echo "FAIL norep-float-fired: floatLocal reserved only $fs_off slots without the pass — the fixture does not exercise the float locals"
+  elif [ "$fs_off_pd" -lt 16 ]; then
+    echo "FAIL norep-float-fired: floatLocal reserved only $fs_off_pd slots without the pass (both passes off) — the fixture does not exercise the float locals"
     FAIL=1
   elif [ "$fs_on" -ge "$fs_off" ]; then
     echo "FAIL norep-float-fired: floatLocal frame slots did NOT drop ($fs_off -> $fs_on): no Float local was unboxed"
@@ -815,6 +882,117 @@ run norep-floatparam-f NoRep.floatParam tools/qbe/fixtures/norep.elm 1.5
 # THE HATCH, behaviourally: the SAME source with the pass OFF must also build,
 # run and agree.  Off-switch builds that are never executed are not controls.
 QBE_NOREP=1 run norep-main-off NoRep.main tools/qbe/fixtures/norep.elm
+
+# ---- PASS A: DIRECT PER-PRIM CALLS (QBE_NOPRIMDIRECT=1) ----
+# The pass replaces `call $rt_prim(l $d7, l %sN, w k)` (a NAME dispatch plus a
+# vaInit'd GC staging array) with `call $rt_prim_<mangled>(l ..., w k)` — one
+# comptime-generated C entry per prim in the runtime's table, all of them
+# calling the SAME handler bodies in rt/prims.zig.  Same source, two builds:
+# the counters must MOVE (the PathCSE lesson — a pass whose counters do not
+# move is not firing) and the emitted symbol set must stay inside what rt.o
+# actually defines (the one cross-language contract left is the name mangle,
+# and this row is the net under it).
+qbe_ssa_prim() { # <fixture> <entry> <out.ssa> <on|off>
+  if [ "$4" = "off" ]; then
+    (cd "$ROOT/elm-compiler" && QBE=1 QBE_NOPRIMDIRECT=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+  else
+    (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+  fi
+}
+# flatten.elm is the fixture with the widest prim mix already on the row list
+# above (assoc/snd/@p/cons/emptylist); norep.elm's `chain` supplies the
+# arithmetic prims (`+`) and a second, independent shape.
+qbe_ssa_prim tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/pd-flat-on.ssa"  on
+qbe_ssa_prim tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/pd-flat-off.ssa" off
+# `chain` is arithmetic, and S4's unboxing DELETES its `+` sites on its own —
+# so this pair is compiled with QBE_NOREP=1 in BOTH arms, which is what keeps
+# a real prim call in the fixture for pass A to convert (the ON/OFF difference
+# is then pass A's alone).
+QBE_NOREP=1 qbe_ssa_prim tools/qbe/fixtures/norep.elm NoRep.chain "$TMP/pd-chain-on.ssa" on
+QBE_NOREP=1 qbe_ssa_prim tools/qbe/fixtures/norep.elm NoRep.chain "$TMP/pd-chain-off.ssa" off
+
+pd_bad=0
+for pair in "pd-flat:flatten" "pd-chain:chain"; do
+  t="${pair%%:*}"; lbl="${pair##*:}"
+  on_ssa="$TMP/$t-on.ssa"; off_ssa="$TMP/$t-off.ssa"
+  [ -s "$on_ssa" ] && [ -s "$off_ssa" ] || {
+    echo "FAIL primdirect-$lbl: .ssa missing (compile failed?)"; FAIL=1; pd_bad=1; continue; }
+  d_on=$(primdirect_sites "$on_ssa")
+  d_off=$(primdirect_sites "$off_ssa")
+  g_on=$(rtprim_generic_sites "$on_ssa")
+  g_off=$(rtprim_generic_sites "$off_ssa")
+  if [ "$d_off" -ne 0 ]; then
+    echo "FAIL primdirect-$lbl: $d_off direct site(s) survive with the pass OFF — the hatch does not gate the emission"
+    pd_bad=1
+  elif [ "$d_on" -lt 1 ]; then
+    echo "FAIL primdirect-$lbl: the pass emitted NO direct call — it does not fire on this fixture"
+    pd_bad=1
+  elif [ "$g_on" -ne 0 ]; then
+    echo "FAIL primdirect-$lbl: $g_on generic site(s) survive with the pass ON (arity 0/>3 only should keep the generic route)"
+    pd_bad=1
+  elif [ "$g_off" -ne "$((d_on + g_on))" ]; then
+    echo "FAIL primdirect-$lbl: the call sites did not CONVERT but changed count ($d_on direct + $g_on generic ON vs $g_off generic OFF)"
+    pd_bad=1
+  else
+    echo "PASS primdirect-$lbl: same source, $g_off generic sites OFF -> $d_on direct + $g_on generic ON (counters move, count identical)"
+  fi
+  # the runtime ABI is 3 pointer args + the count: every direct site's count
+  # must be inside what tools/qbe/rt.zig Direct accepts.
+  bad_ar=""
+  for k in $(primdirect_arities "$on_ssa"); do
+    [ "$k" -ge 1 ] && [ "$k" -le 3 ] || bad_ar="$bad_ar $k"
+  done
+  if [ -n "$bad_ar" ]; then
+    echo "FAIL primdirect-$lbl: direct site(s) with an out-of-ABI arg count:$bad_ar (rt.zig Direct accepts 1..3)"
+    pd_bad=1
+  fi
+done
+if [ "$pd_bad" -eq 0 ]; then
+  echo "PASS primdirect-abis: every direct site's arg count is inside the wrapper ABI (1..3)"
+fi
+
+# THE NAME CONTRACT: every `$rt_prim_*` symbol the compiler can emit must be
+# one rt.o DEFINES, and rt.o must define exactly one per prim-table entry.
+# (The failure this catches is a mangling/table disagreement between
+# Mid.Qbe.Lower.mangle and tools/qbe/rt.zig symSuffix — which is otherwise
+# only caught by a LINK error on whatever fixture happens to be built.)
+RTO="$ROOT/tools/qbe/rt.o"
+if [ -s "$RTO" ]; then
+  nm --defined-only "$RTO" 2>/dev/null | awk '$3 ~ /^rt_prim_/ { print $3 }' | sort -u > "$TMP/pd-defined.txt"
+  cat "$TMP"/pd-*.ssa 2>/dev/null | grep -ho '\$rt_prim_[A-Za-z0-9_]*' | sed 's/^\$//' | sort -u > "$TMP/pd-referenced.txt"
+  n_def=$(wc -l < "$TMP/pd-defined.txt")
+  n_ref=$(wc -l < "$TMP/pd-referenced.txt")
+  missing="$(comm -13 "$TMP/pd-defined.txt" "$TMP/pd-referenced.txt" | tr '\n' ' ')"
+  if [ -n "$missing" ]; then
+    echo "FAIL primdirect-symbols: emitted direct symbol(s) rt.o does NOT define: $missing"
+    FAIL=1
+  elif [ "$n_ref" -lt 1 ]; then
+    echo "FAIL primdirect-symbols: no direct symbol referenced by the pass-A .ssa — nothing was checked"
+    FAIL=1
+  elif [ "$n_def" -ne 58 ]; then
+    echo "FAIL primdirect-symbols: rt.o defines $n_def direct entries, expected one per prims.prim_table row (58)"
+    FAIL=1
+  else
+    echo "PASS primdirect-symbols: all $n_ref emitted direct symbol(s) are defined in rt.o ($n_def entries = prims.prim_table)"
+  fi
+else
+  echo "FAIL primdirect-symbols: $RTO missing"
+  FAIL=1
+fi
+
+# BEHAVIOUR under the hatch: the OFF build must still run and agree — an
+# off-switch that is never executed is not a control.
+# GOLDEN PROVENANCE (not a re-freeze): these two rows run the SAME source,
+# entry and arguments as the pre-existing `flatten` and `churn` rows, so their
+# goldens are those rows' already-pinned bytes COPIED under the new row names.
+# Nothing was re-measured and no existing golden was overwritten; the check
+# below is a real comparison of the hatch build's output against the pinned
+# bytes, so a hatch that changes behaviour fails here.
+QBE_NOPRIMDIRECT=1 run primdirect-off Flatten.main tools/qbe/fixtures/flatten.elm
+# ...and under GC CHURN, on the cons-shaped stress fixture whose unrooted
+# staging historically went stale (the rooting this pass rewrites is exactly
+# that code path).
+QBE_NOPRIMDIRECT=1 run primdirect-churn-off Churn.build tools/qbe/fixtures/churn.elm 150000 0
 
 # ---- cross-defun tail: UNBOUNDED after the bounce loop ----
 # (qbe-mk rebuilds this binary from the current tree on every call and $TMP is

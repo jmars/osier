@@ -60,6 +60,13 @@ const QBE_FLATTEN = process.env.QBE_NOFLATTEN !== '1';
 // source — the structural gate compiles both ways and the counters must move
 // with the clock.  Default ON.
 const QBE_REP = process.env.QBE_NOREP !== '1';
+// QBE_NOPRIMDIRECT=1 DISABLES pass A (the DIRECT per-prim call entries:
+// `call $rt_prim_<name>(...)` instead of the name-dispatched generic
+// `rt_prim`).  Same purpose as QBE_NOFLATTEN/QBE_NOREP: it exists so the pass
+// can be A/B'd on the SAME source — the structural gate compiles both ways
+// and the direct call sites must be PRESENT in one build and ABSENT in the
+// other, while the programs still print what they printed.  Default ON.
+const QBE_PRIMDIRECT = process.env.QBE_NOPRIMDIRECT !== '1';
 // QBE_ENTRY: the defun key the QBE backend roots reachability from
 // ("<Mod>.<fn>").  REQUIRED in the single-fixture CLI; the batch mode reads
 // one entry PER GROUP from the manifest instead.
@@ -97,6 +104,7 @@ function compileGroups(groups) {
       entriesJson: JSON.stringify(groups.map((g) => g.entry)),
       qbeFlatten: QBE_FLATTEN,
       qbeRep: QBE_REP,
+      qbePrimDirect: QBE_PRIMDIRECT,
     },
   });
 

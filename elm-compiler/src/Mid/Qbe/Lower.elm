@@ -178,6 +178,7 @@ type alias S =
     , intBinders : Set Int -- binder ids whose value IS an Int (S4; boxed or raw)
     , table : Dict String QbeTypes.Entry -- the S1 side table (S4 reads it)
     , rep : Bool -- S4's pass switch (QBE_NOREP=1 -> False)
+    , primDirect : Bool -- A's switch (QBE_NOPRIMDIRECT=1 -> False)
     , funcs : List PendingFunc -- extra (closure) funcs, REVERSED
     , datas : List DataDef -- REVERSED
     , dataKeys : Dict String String -- content key -> data name (dedup)
@@ -291,8 +292,8 @@ freshData key mk s =
 -- Descs, and the driver's meta table.
 
 
-lower : Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
-lower rep table arityTable program entryKey =
+lower : Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
+lower rep primDirect table arityTable program entryKey =
     let
         defuns =
             Dict.fromList (List.map (\d -> ( d.key, d )) program)
@@ -310,6 +311,7 @@ lower rep table arityTable program entryKey =
             , intBinders = Set.empty
             , table = table.defuns
             , rep = rep
+            , primDirect = primDirect
             , funcs = []
             , datas = []
             , dataKeys = Dict.empty
@@ -528,6 +530,7 @@ lowerFunBody entry key qname lambda captures sOuter =
             , intBinders = intParams
             , table = sOuter.table
             , rep = sOuter.rep
+            , primDirect = sOuter.primDirect
             , funcs = []
             , datas = sOuter.datas
             , dataKeys = sOuter.dataKeys
@@ -2911,33 +2914,128 @@ lowerNumEq args dest s =
 -- order the ZINC emitter's RTL pushes produce).  STAGES FROM SLOTS: the args
 -- were lowered once, into rooted frame slots; re-lowering an expression here
 -- would duplicate calls and mis-order effects.
+--
+-- PASS A (QBE_NOPRIMDIRECT=1 disables it): when the prim is one of the
+-- runtime's table entries and the arity is 1..3, emit the DIRECT per-prim C
+-- entry instead of the name-dispatched generic one —
+--
+--   %r =:val call $rt_prim_<mangled>(l %sA, l %sB, l %sC, w n)
+--
+-- with one `l` argument per staged slot padded to the runtime's uniform
+-- 3-pointer ABI (the padding is passed, never read — see tools/qbe/rt.zig
+-- Direct).  THE DIRECT FORM NEVER VARIES WITH ARITY: `n` is the count the
+-- generic call would have passed, so the callee hands the handler exactly the
+-- stack it would have got from `rt_prim` — the arity is the CALL SITE's, as
+-- before, and there is no second arity table anywhere to drift from
+-- prims.zig's.
+--
+-- WHAT IT DELETES, per call: the name-dispatch (std.mem.span + strlen + the
+-- StaticStringMap hash), the vaInit `allocArray(Value, 12)` 480-byte GC array
+-- and its ROOT_PTR slot, and the per-arg vaPush (each with an
+-- inOldgen + valueReferencesNursery write-barrier scan); plus, at the call
+-- site, the n-slot contiguous staging block stageSlots emits (2n
+-- instructions).  MEASURED share of this mechanism: 48-54% of wall on the
+-- five slowest suite programs (osier-midpasses plan).
+--
+-- FALLBACKS (the generic path is PRESERVED, unchanged): arity 0 (the C ABI
+-- cannot express "no argument pointers"), arity > 3 (beyond the runtime's
+-- direct_arity; no table prim is), and any name the runtime has no direct
+-- entry for — which now fails at LINK time with the exact undefined symbol,
+-- loudly, instead of at run time through unknownPrim.
 rtPrimSlots : String -> List Int -> Int -> S -> Result String S
 rtPrimSlots prim slots dest s =
-    let
-        ( pnm, s0 ) =
-            freshData ("pnm:" ++ prim)
-                (\n -> { name = n, align = Just 8, items = [ DStr prim, DByte 0 ], export_ = False })
-                s
+    if s.primDirect && List.length slots >= 1 && List.length slots <= maxDirectArity then
+        let
+            ( rp, s1 ) =
+                freshTmp s
 
-        ( _, base, s1 ) =
-            stageSlots slots s0
+            -- The uniform ABI is 3 pointers: pass the staged slots and pad
+            -- with the last one.  Padding is never read by the wrapper.
+            ptrs =
+                List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots
 
-        ( rp, s2 ) =
-            freshTmp s1
-    in
-    Ok
-        (emit
-            (Call (Just rp)
-                (Agg "val")
-                (Il.Sym "rt_prim")
-                [ ArgVal (Base L) (Il.Sym pnm)
-                , ArgVal (Base L) (Il.Tmp (slotTmp base))
-                , ArgVal (Base W) (Il.Con (List.length slots))
-                ]
+            pad =
+                ArgVal (Base L) (Il.Tmp (slotTmp (lastSlot slots)))
+
+            padded =
+                ptrs ++ List.repeat (maxDirectArity - List.length ptrs) pad
+        in
+        Ok
+            (emit
+                (Call (Just rp)
+                    (Agg "val")
+                    (Il.Sym ("rt_prim_" ++ manglePrim prim))
+                    (padded ++ [ ArgVal (Base W) (Il.Con (List.length slots)) ])
+                )
+                s1
+                |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
             )
-            s2
-            |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
-        )
+
+    else
+        let
+            ( pnm, s0 ) =
+                freshData ("pnm:" ++ prim)
+                    (\n -> { name = n, align = Just 8, items = [ DStr prim, DByte 0 ], export_ = False })
+                    s
+
+            ( _, base, s1 ) =
+                stageSlots slots s0
+
+            ( rp, s2 ) =
+                freshTmp s1
+        in
+        Ok
+            (emit
+                (Call (Just rp)
+                    (Agg "val")
+                    (Il.Sym "rt_prim")
+                    [ ArgVal (Base L) (Il.Sym pnm)
+                    , ArgVal (Base L) (Il.Tmp (slotTmp base))
+                    , ArgVal (Base W) (Il.Con (List.length slots))
+                    ]
+                )
+                s2
+                |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+            )
+
+
+-- The 3-pointer ABI's padding value: the LAST staged slot, reused.  Never
+-- read by the wrapper (it only touches the first `nargs`), but it must be a
+-- DEFINED `l` operand or the .ssa is malformed.  Only ever called with a
+-- non-empty list — the direct branch requires at least one slot.
+lastSlot : List Int -> Int
+lastSlot slots =
+    case slots of
+        [] ->
+            0
+
+        [ x ] ->
+            x
+
+        _ :: rest ->
+            lastSlot rest
+
+
+-- The runtime's uniform direct-entry ABI width (tools/qbe/rt.zig
+-- `direct_arity`).  A call site with more staged slots than this keeps the
+-- generic route; no prim in the runtime's table is wider.
+maxDirectArity : Int
+maxDirectArity =
+    3
+
+
+-- Prim name -> the C symbol suffix of its direct entry.  REUSES `mangle`
+-- below (the QBE-identifier mangler the defun keys already go through:
+-- [a-zA-Z0-9] pass through, every other BYTE becomes `_xHH` at a fixed two
+-- digits) — one mangler, one injective mapping, no second convention to keep
+-- in step.  tools/qbe/rt.zig's `symChar`/`symSuffix` implement the SAME
+-- function over the same table names (all 58 are ASCII, so Elm's codepoint
+-- walk and Zig's byte walk agree); the two sides are held together by the
+-- LINKER — a disagreement is an undefined symbol, never a silent
+-- mis-dispatch.
+manglePrim : String -> String
+manglePrim prim =
+    mangle prim
 
 
 -- ============================ CLOSURES ============================
