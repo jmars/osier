@@ -192,10 +192,16 @@ pub fn main(init: std.process.Init) !void {
     // ---- init Gc + Vm ----
     var g = try heap.Gc.init(.{
         .heap_bytes = heap_bytes,
-        // Reservation must exceed the initial heap or grow_heap can never
-        // extend (a fixed 64MB cap made ELMC_HEAP_MB and even the default
-        // 64->128MB growth spin forever); same policy as tools/aot/main.zig.
-        .reserve_bytes = @max(heap_bytes * 2, RESERVE_BYTES),
+        // GC-FIX C: C's own policy (16x the heap), not the 2x that made every
+        // grow fail BY CONSTRUCTION (a doubling needs
+        // `2 x heappages x PAGEBYTES + PAGEBYTES - 1 <= reservation`, i.e. the
+        // "need N MB but reservation is N MB" abort).  k x heap gives a heap
+        // CEILING of (k/2) x heap; 16x also keeps the minimum-heap churn runs
+        // out of a collect-per-allocation thrash (MEASURED — see the full note
+        // in tools/qbe/rt.zig).  Gc.init shrinks it toward
+        // 2x + 1027*PAGEBYTES only if the address space cannot map it.
+        // Same policy as tools/aot/main.zig and tools/qbe/rt.zig.
+        .reserve_bytes = @max(heap_bytes * 16, RESERVE_BYTES),
     });
     defer g.deinit();
     var v: state.Vm = undefined;

@@ -606,6 +606,12 @@ pub fn collect(gc: *Gc, trigger: Trigger) void {
     }
     gc.current_space = gc.next_space; // C: gc.c:728
 
+    // NOT C (gc-fix B, osier): record the LIVE old-gen footprint this collect
+    // settled on — every page handed out since the flip (line above) holds a
+    // surviving object, so `allocatedpages` is the post-collect live count.
+    // Read only by the scan-exhausted panic in allocatepage.
+    gc.last_collect_live_pages = gc.allocatedpages;
+
     // SAFETY-ENFORCEMENT (unit A): auto-verify hook.  debugVerifyHeap is
     // test-only and its walk is gated on the current build mode so it is
     // compiled OUT of ReleaseFast/ReleaseSmall even if verify_collects is

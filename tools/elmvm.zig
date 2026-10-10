@@ -26,7 +26,8 @@ const streams = vm.streams;
 const hostcall = vm.hostcall;
 const effectloop = @import("effectloop");
 
-/// Default heap: 64 MB (reservation 128 MB) — sized for the GATE's use, which
+/// Default heap: 64 MB (reservation 1 GB = 16x, see the GC-FIX C note at the
+/// init below) — sized for the GATE's use, which
 /// RUNS a compiled fixture (167 elmvm invocations, all of which fit).  It is
 /// NOT sized for the other use: compiling with the selfhost bundle spends
 /// seconds to minutes inside the type-checker and needs ELMC_HEAP_MB=3072 for
@@ -69,7 +70,17 @@ pub fn main(init: std.process.Init) !void {
     };
     var g = try heap.Gc.init(.{
         .heap_bytes = heap_bytes,
-        .reserve_bytes = @max(heap_bytes * 2, RESERVE_BYTES),
+        // GC-FIX C: C's own policy (16x the heap), not the 2x that made every
+        // grow_heap doubling fail BY CONSTRUCTION (a success needs
+        // `2 x heappages x PAGEBYTES + PAGEBYTES - 1 <= reservation` — the
+        // "need N MB but reservation is N MB" abort).  k x heap gives a heap
+        // ceiling of (k/2) x heap; 16x also keeps the minimum-heap churn runs
+        // out of a collect-per-allocation thrash (MEASURED — see the note in
+        // tools/qbe/rt.zig).  Gc.init shrinks it toward
+        // 2x + 1027*PAGEBYTES only if the address space cannot map it.
+        // Same policy as tools/aot/run.zig, tools/aot/main.zig and
+        // tools/qbe/rt.zig.
+        .reserve_bytes = @max(heap_bytes * 16, RESERVE_BYTES),
     });
     defer g.deinit();
     var v: state.Vm = undefined;

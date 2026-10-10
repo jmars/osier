@@ -82,7 +82,13 @@ pub fn main(init: std.process.Init) !void {
     };
     var g = try heap.Gc.init(.{
         .heap_bytes = heap_bytes,
-        .reserve_bytes = @max(heap_bytes * 2, RESERVE_BYTES),
+        // GC-FIX C: C's own policy (16x the heap) — a 2x reservation makes
+        // every grow_heap doubling fail by construction (see heap.Options'
+        // "THE GROW ARITHMETIC" and the measured note in tools/qbe/rt.zig).
+        // Same policy as run.zig, elmvm.zig and qbe/rt.zig: the fourth copy of
+        // this formula is fixed with them, since main.zig is what
+        // tools/selfhost-gate.sh drives with a multi-GB heap (ELMC_HEAP_MB).
+        .reserve_bytes = @max(heap_bytes * 16, RESERVE_BYTES),
         // Compiled out in ReleaseFast/ReleaseSmall; in Debug/ReleaseSafe this
         // re-verifies the heap (precise-root contract) after every collection.
         .verify_collects = true,

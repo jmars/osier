@@ -943,7 +943,21 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     rtInit();
     var gg = Gc.init(.{
         .heap_bytes = heap_bytes,
-        .reserve_bytes = @max(heap_bytes * 2, RESERVE_BYTES),
+        // GC-FIX C: C's OWN reservation policy (16x the heap), not the 2x the
+        // drivers used to pass.  grow_heap asks for a heap of 2 x heappages and
+        // needs `new_size + PAGEBYTES - 1 <= reservation`, so a 2x reservation
+        // made every grow fail BY CONSTRUCTION ("need N MB but reservation is N
+        // MB" — the arithmetic behind the abort at 128 MB, 512 MB and 32768 MB
+        // alike).  k x heap gives a heap CEILING of (k/2) x heap, and 16x is
+        // MEASURED as the smallest multiplier that keeps a real fixture out of a
+        // collect-per-allocation thrash at the minimum heap: at QBE_HEAP_MB=16,
+        // tools/qbe/fixtures/vfield.elm's live set reaches 16.1 MB, which needs
+        // a threshold just above 16 MB, i.e. a heap over 64.4 MB — unreachable
+        // under an 8x reservation (64 MB ceiling), comfortable under a 16x one
+        // (128 MB).  Gc.init shrinks the request toward 2x + 1027*PAGEBYTES only
+        // if the address space cannot map it.  See heap.Options' "THE GROW
+        // ARITHMETIC".
+        .reserve_bytes = @max(heap_bytes * 16, RESERVE_BYTES),
         .verbose = std.c.getenv("QBE_GC_VERBOSE") != null,
         .verify_collects = std.c.getenv("QBE_GC_VERIFY") != null,
     }) catch {
@@ -952,6 +966,31 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     };
     g = &gg;
     defer g.deinit();
+    // QBE_GC_STATS=1: one exit-time line of collector counters and old-gen
+    // occupancy, on STDERR (so no stdout oracle can ever see it) and gated (so
+    // the default run is byte-for-byte and cycle-for-cycle what it was).
+    //
+    // Added by the dead-slot-clearing unit because the counters ALREADY
+    // available cannot answer its question: the full-collect banner prints
+    // `allocatedpages` at the TRIGGER, and the trigger is `heappages/4`, so
+    // that figure is invariant under any change to what stays reachable.
+    // `last_collect_live_pages` and the final `allocatedpages` are what move
+    // when a rooted-but-dead reference stops promoting garbage, and only the
+    // panic path used to expose them.
+    const gc_stats: bool = std.c.getenv("QBE_GC_STATS") != null;
+    defer if (gc_stats) {
+        const s = gg.stats();
+        std.debug.print(
+            "[GC STATS] scavenges={d} full_collects={d} heap_mb={d} oldgen_in_use_mb={d} last_collect_live_mb={d}\n",
+            .{
+                s.nursery_scavenge_count,
+                s.full_collect_count,
+                gg.heappages * heap.PAGEBYTES / (1024 * 1024),
+                s.allocated_pages * heap.PAGEBYTES / (1024 * 1024),
+                gg.last_collect_live_pages * heap.PAGEBYTES / (1024 * 1024),
+            },
+        );
+    };
     vmem.init(&gg);
     vm = &vmem;
 

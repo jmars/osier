@@ -63,12 +63,19 @@ pub const MIN_HEAP_BYTES = MIN_HEAP_PAGES * PAGEBYTES;
 
 /// NOT C (osier addition, see `Gc.grow_fail_streak`): how many grow_heap
 /// failures in a row make the exhaustion FATAL.  A grow failure is permanent
-/// (the doubling is computed from `heappages`, which never shrinks), and the
-/// anti-thrash callers ignore the false return, so without this the process
-/// livelocks printing `[gc] grow_heap: ...` once per allocation.  3 is above
-/// the 1 failure the M1 grow_heap test asserts on (`!g.grow_heap(1)`, a
-/// deliberate direct call) and is reached within ~2 allocations by a real
-/// exhausted workload.
+/// (the doubling is computed from `heappages`, which never shrinks), and a
+/// critical caller that ignores the false return livelocks, so without this
+/// the process livelocks printing `[gc] grow_heap: ...` once per allocation.
+/// 3 is above the 1 failure the M1 grow_heap test asserts on
+/// (`!g.grow_heap(1)`, a deliberate direct call) and is reached within ~2
+/// allocations by a real exhausted workload.
+///
+/// SCOPE (gc-fix C follow-up): this streak, the failure print and the panic
+/// belong to the CRITICAL kind only — allocatepage, where the heap cannot
+/// serve the allocation without growing.  The anti-thrash THRESHOLD arms go
+/// through `grow_heap_antithrash`, which is deliberately silent and
+/// non-fatal: there the heap can still serve every allocation, and a failed
+/// anti-thrash grow costs collection FREQUENCY, not liveness.
 pub const GROW_FAIL_STREAK_MAX = 3;
 
 /// C: gc.c:351 DIRTY_VECTORS_MAX — remembered-set capacity valve.
@@ -140,6 +147,21 @@ fn dirtyVectorHash(ptr: usize) u64 {
 /// reserve_bytes is the VAS reservation that grow_heap grows into (C: gc.c
 /// :2064-2070 — max(heap*16, 4GB) by default; tests pass a small explicit
 /// reserve to avoid 4GB VAS on constrained hosts).
+///
+/// THE GROW ARITHMETIC (osier, gc-fix C — read this before choosing a
+/// reserve): grow_heap asks for a heap of max(2 x heappages, ...) pages, so a
+/// successful grow needs `2 x heappages x PAGEBYTES + PAGEBYTES - 1 <=
+/// reserve`.  A reserve of exactly 2 x heap_bytes therefore makes EVERY grow
+/// fail by construction (2H + 511 > 2H): the reservation is a hard VAS ceiling
+/// and the doubling cannot fit under it.  The drivers used to pass exactly
+/// that, which is why 128 MB, 512 MB and 32768 MB heaps all aborted with
+/// "grow_heap: need N MB but reservation is N MB".  `reserve_bytes = k *
+/// heap_bytes` gives growth headroom up to a heap of `k/2 x heap_bytes`
+/// (8x => the heap can reach 4x, i.e. two doublings).  The default (C's
+/// max(heap*16, 4GB)) gives 8x.  An exhausted-scan grow asks for a little more
+/// than the bare doubling (`(allocatedpages + pages_needed + 512) * 2` pages —
+/// see the `min_reserve` floor in init), so a reserve chosen for exactly one
+/// doubling must include that slack.
 pub const Options = struct {
     heap_bytes: usize = MIN_HEAP_BYTES,
     reserve_bytes: ?usize = null,
@@ -202,6 +224,16 @@ pub const Gc = struct {
     /// every dereference is guarded by freewords != 0).
     freep: [*]usize,
     allocatedpages: usize = 0,
+    /// High-water mark of `allocatedpages` (NOT C — diagnostics only).  Set in
+    /// allocatepage; read by the scan-exhausted panic so the peak old-gen
+    /// footprint is visible at the abort.
+    peak_allocatedpages: usize = 0,
+    /// `allocatedpages` immediately after the last full collect — the LIVE
+    /// old-gen in-use count in to-space (NOT C — diagnostics only).  Written by
+    /// collect() at its semi-space flip.  The scan-exhausted panic prints it:
+    /// "heap FULL" was twice misread as live-set overflow, and this is the
+    /// figure that refutes or confirms that reading.
+    last_collect_live_pages: usize = 0,
     freepage: usize,
 
     // ---- nursery region + bump cursor — C: gc.c:69, 74-75 ----
@@ -363,18 +395,65 @@ pub const Gc = struct {
         else
             four_gb + PAGEBYTES - 1;
         const reserve_raw = opts.reserve_bytes orelse default_reserve;
-        const reserve = (reserve_raw + std.heap.page_size_min - 1) /
+        const requested = (reserve_raw + std.heap.page_size_min - 1) /
             std.heap.page_size_min * std.heap.page_size_min;
 
         // C: gc.c:2080-2089 mmap(PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON).
-        const mapping = try std.posix.mmap(
-            null,
-            reserve,
-            .{ .READ = true, .WRITE = true },
-            .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
-            -1,
-            0,
-        );
+        //
+        // osier addition (NOT C, gc-fix C): the drivers size the reservation
+        // from the heap (8x, for the growth headroom the Options doc describes)
+        // and at a large heap that exceeds what the address space will map —
+        // MEASURED on this host (overcommit_memory=0, 125 GB RAM, no swap):
+        // mmap succeeds at 64 GiB and fails at 128 GiB.  A non-mappable
+        // reservation is otherwise a hard init failure for every caller, so
+        // shrink toward the smallest reservation that still fits ONE doubling
+        // (`min_reserve`) and say so.  Shrinking only removes headroom ABOVE
+        // the floor: the anti-thrash grow_heap(1) still lands, and a later
+        // grow failure is the loud, named `heap exhausted` panic rather than a
+        // silent impossibility.  An explicit reserve_bytes is honoured EXACTLY
+        // whenever it maps (the M1 init test asserts heap_mmap_size == the
+        // requested 64 MB).
+        //
+        // The floor is the growth request at its WORST: grow_heap asks for
+        // max(2 x heappages, (allocatedpages + pages_needed + 512) * 2) pages
+        // and the second term dominates when the scan is exhausted
+        // (allocatedpages == heappages, pages_needed == 1), so a success needs
+        //   (heappages + 513) * 2 * PAGEBYTES + PAGEBYTES - 1 <= reserve
+        //     = 2 x heap_bytes + 1027 * PAGEBYTES - 1
+        // A bare 2 x heap_bytes + 512 B would still refuse the exhausted-scan
+        // retry (MEASURED — see "The reservation arithmetic" in docs/gc-zig.md).
+        const grow_slack = 1027 * PAGEBYTES - 1;
+        const min_reserve = opts.heap_bytes * 2 + grow_slack;
+        var reserve = requested;
+        var mapping: []align(std.heap.page_size_min) u8 = undefined;
+        while (true) {
+            if (std.posix.mmap(
+                null,
+                reserve,
+                .{ .READ = true, .WRITE = true },
+                .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+                -1,
+                0,
+            )) |m| {
+                mapping = m;
+                break;
+            } else |err| {
+                if (reserve <= min_reserve) return err;
+                reserve = @max(min_reserve, reserve / 2);
+            }
+        }
+        if (reserve != requested)
+            std.debug.print(
+                "[gc] reserve: {d} MB requested, {d} MB mapped — the address space " ++
+                    "refuses the larger mapping; growth headroom is {d}x the {d} MB " ++
+                    "heap (floor 2x, enough for one doubling)\n",
+                .{
+                    requested / (1024 * 1024),
+                    reserve / (1024 * 1024),
+                    reserve / opts.heap_bytes,
+                    opts.heap_bytes / (1024 * 1024),
+                },
+            );
         errdefer std.posix.munmap(mapping);
 
         // C: gc.c:2093-2096 — page-align the heap start to PAGEBYTES (mmap
@@ -555,7 +634,43 @@ pub const Gc = struct {
     /// returns -1 (OOM or reservation exhausted); prints the same message
     /// on reservation exhaustion (C: gc.c:1843-1844).
     /// (pub for M1 tests / future tuning; C keeps it static.)
+    ///
+    /// This is the CRITICAL kind (see GrowKind): a failure is permanent and
+    /// armed, so every caller must either handle false or be the last resort
+    /// before an OOM panic.
     pub fn grow_heap(self: *Gc, pages_needed: usize) bool {
+        return self.growHeapInner(pages_needed, .critical);
+    }
+
+    /// gc-fix C follow-up (NOT C): the ANTI-THRASH grow, called from the
+    /// gc_alloc / gc_alloc_oldgen THRESHOLD arms after a full collect that
+    /// left the live set above `oldgen_collect_threshold`.
+    ///
+    /// Semantics that differ from `grow_heap`, and why they must:
+    ///   - SILENT on failure.  A reservation that cannot hold the doubling
+    ///     while the heap still serves every allocation is not an error, and
+    ///     the caller's environment owns stdout/stderr (the QBE churn gate
+    ///     compares the run's stdout+stderr against the VM's byte-for-byte,
+    ///     so any stray line is a FAIL).
+    ///   - NON-FATAL: it must not arm `grow_fail_streak`.  That streak exists
+    ///     to turn "a caller ignores the false return and re-collects forever"
+    ///     into a loud abort; with gc-fix A the THRESHOLD trigger is on the
+    ///     HOT path, so three failed anti-thrash grows now arrive within three
+    ///     allocations — MEASURED aborting VField.rootedField at
+    ///     QBE_HEAP_MB=16, a run that had done nothing wrong.  A failed
+    ///     anti-thrash grow degrades collection FREQUENCY only: the trigger
+    ///     keeps collecting at the current threshold, and the heap still
+    ///     serves every allocation.  Genuine exhaustion is still loud — it
+    ///     comes from allocatepage (the CRITICAL kind, which panics with the
+    ///     full collector state).
+    pub fn grow_heap_antithrash(self: *Gc) void {
+        _ = self.growHeapInner(1, .antithrash);
+    }
+
+    /// Which kind of grow request this is — see `grow_heap_antithrash`.
+    const GrowKind = enum { critical, antithrash };
+
+    fn growHeapInner(self: *Gc, pages_needed: usize, kind: GrowKind) bool {
         var new_heappages = self.heappages * 2;
         var new_heap_size = new_heappages * PAGEBYTES;
 
@@ -597,6 +712,11 @@ pub const Gc = struct {
             self.grow_fail_streak = 0;
             return true;
         }
+
+        // The reservation cannot hold the doubling.  Anti-thrash callers take
+        // the false return silently (see grow_heap_antithrash); the critical
+        // ones get the C message, the streak and the fatal panic.
+        if (kind == .antithrash) return false;
 
         // C: gc.c:1843-1845.
         std.debug.print(
@@ -689,6 +809,8 @@ pub const Gc = struct {
 
                         self.freewords = pages * PAGEWORDS;
                         self.allocatedpages += pages;
+                        if (self.allocatedpages > self.peak_allocatedpages)
+                            self.peak_allocatedpages = self.allocatedpages;
                         self.freepage = self.next_page(self.freepage);
 
                         self.space[self.md(firstpage)] = self.next_space;
@@ -720,10 +842,33 @@ pub const Gc = struct {
                 continue :retry;
             }
 
-            // C: gc.c:1942-1945.
+            // C: gc.c:1942-1945, EXTENDED (gc-fix B, osier): the two-page
+            // count alone was read — twice, by different agents, and by the
+            // brief's author — as "the live set does not fit".  It is not:
+            // this panic fires when the free-page SCAN finds no `pages`
+            // consecutive free pages, which happens both when the live set is
+            // genuinely large AND when a full collect has not been scheduled
+            // for long enough that dead promoted pages are still tagged in the
+            // current semi-space.  Print the figures that distinguish the two.
             std.debug.panic(
-                "gcalloc - Unable to allocate {d} pages in a {d} page heap",
-                .{ pages, self.heappages },
+                "gcalloc - Unable to allocate {d} pages in a {d} page heap " ++
+                    "[old-gen in use {d} pages = {d} MB (peak {d} pages = {d} MB); " ++
+                    "live after the last full collect {d} pages = {d} MB; " ++
+                    "full collects {d}, nursery scavenges {d}; reservation {d} MB] " ++
+                    "— the scan is out of free pages, NOT necessarily out of live set",
+                .{
+                    pages,
+                    self.heappages,
+                    self.allocatedpages,
+                    self.allocatedpages * PAGEBYTES / (1024 * 1024),
+                    self.peak_allocatedpages,
+                    self.peak_allocatedpages * PAGEBYTES / (1024 * 1024),
+                    self.last_collect_live_pages,
+                    self.last_collect_live_pages * PAGEBYTES / (1024 * 1024),
+                    self.full_collect_count,
+                    self.nursery_scavenge_count,
+                    self.heap_mmap_size / (1024 * 1024),
+                },
             );
         }
     }
@@ -797,9 +942,22 @@ pub const Gc = struct {
     // -----------------------------------------------------------------
 
     /// C: gc.c:2155-2277 gc_alloc — public entry: per-class histogram,
-    /// nursery fast path for single-page objects, old-gen THRESHOLD
-    /// collect + anti-thrash grow, then gcalloc_internal.
+    /// old-gen THRESHOLD full collect + anti-thrash grow, nursery fast path
+    /// for single-page objects, then gcalloc_internal.
     /// Marked noinline for C parity (spill caller registers — gc.c:2155).
+    ///
+    /// OSIER FIX (gc-fix A, NOT C — see the THRESHOLD block below): the block
+    /// is HOISTED above the nursery fast path.  In C (and in the port until
+    /// this fix) it sat only on the old-gen fall-through arm, i.e. it was
+    /// reachable only by an allocation the nursery REFUSED — bytes >
+    /// NURSERY_BYTES/8 (1 MB) or a full nursery.  A mutator whose allocations
+    /// are nearly all nursery-sized (this compiler's) therefore never
+    /// scheduled a full collect at all: old-gen accumulated promoted dead
+    /// data, allocatepage's LASTRESORT is gated `!in_scavenge` and promotions
+    /// happen INSIDE a scavenge, so nothing else could fire one.  MEASURED
+    /// pre-fix on the 4-file fixture manifest: 7345 scavenges / 0 full
+    /// collects @512 MB (abort), 11566 / 1 @1024 MB.  Collection TIMING only:
+    /// reachability, object layout and the emitted `.ssa` are unchanged.
     pub noinline fn gc_alloc(self: *Gc, bytes: usize, type_tag: types.GcTypeTag) [*]u8 {
         // C: gc.c:2160 — count at the public entry by class (the enum is
         // always in [0,4]; C guards against stray int tags).
@@ -809,6 +967,26 @@ pub const Gc = struct {
         // in ReleaseFast/Small — the elided-fn assert reads the field but the
         // increment is comptime-gated, keeping release allocation unchanged).
         if (@import("builtin").mode == .Debug) self.debug_allocs += 1;
+
+        // C: gc.c:2262-2274 — old-gen THRESHOLD collect + anti-thrash grow
+        // (if the LIVE set still sits above the threshold after collecting,
+        // grow so the threshold rises above the live set).  HOISTED (gc-fix A)
+        // from the old-gen fall-through arm below to HERE, so the trigger is
+        // evaluated for every public allocation and not only for the ones the
+        // nursery refused.  `allocatedpages` only ever grows through
+        // allocatepage (promotions included), so this is the collector's one
+        // scheduling point for a small-object workload.  The grow is the
+        // ANTI-THRASH kind (gc-fix C follow-up): silent and non-fatal, because
+        // on this hot path a failure is a collection-rate question, not an
+        // allocation failure.
+        if (self.allocatedpages > 0 and
+            self.allocatedpages > self.oldgen_collect_threshold() and
+            !self.in_scavenge)
+        {
+            collect_mod.collect(self, .threshold);
+            if (self.allocatedpages > self.oldgen_collect_threshold())
+                self.grow_heap_antithrash();
+        }
 
         // C: gc.c:2171-2172 — nursery eligibility: bytes <= NURSERY_BYTES/8
         // AND the padded total (header + body, words) fits in ONE page.
@@ -893,19 +1071,10 @@ pub const Gc = struct {
             }
         }
 
-        // C: gc.c:2262-2274 — old-gen THRESHOLD collect + anti-thrash grow
-        // (if the LIVE set still sits above the threshold after collecting,
-        // grow so the threshold rises above the live set).
-        if (self.allocatedpages > 0 and
-            self.allocatedpages > self.oldgen_collect_threshold() and
-            !self.in_scavenge)
-        {
-            collect_mod.collect(self, .threshold);
-            if (self.allocatedpages > self.oldgen_collect_threshold())
-                _ = self.grow_heap(1);
-        }
-
-        // C: gc.c:2276.
+        // C: gc.c:2262-2274 — old-gen THRESHOLD collect + anti-thrash grow:
+        // HOISTED to the top of gc_alloc (gc-fix A) so it also covers the
+        // nursery fast path.  This arm is the nursery's fall-through
+        // (nursery full or object too large) and now only allocates.
         return @ptrCast(self.gcalloc_internal(bytes, type_tag));
     }
 
@@ -928,7 +1097,7 @@ pub const Gc = struct {
         {
             collect_mod.collect(self, .alloc);
             if (self.allocatedpages > self.oldgen_collect_threshold())
-                _ = self.grow_heap(1);
+                self.grow_heap_antithrash();
         }
 
         return @ptrCast(self.gcalloc_internal(bytes, type_tag));
