@@ -54,6 +54,7 @@ const values = rt_mod.values;
 const state = rt_mod.state;
 const varray = rt_mod.varray;
 const prims = rt_mod.prims;
+const streams = rt_mod.streams;
 const effectloop = @import("effectloop");
 
 const Gc = heap.Gc;
@@ -993,6 +994,16 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     };
     vmem.init(&gg);
     vm = &vmem;
+
+    // Wire the standard I/O streams (M6) — the SAME three value variables
+    // tools/elmvm.zig:107-109 sets.  initGlobals only registers the PRIM
+    // globals; the *stinput*/*stoutput*/*sterror* slots are the HOST's to
+    // install, and a native program that reads stdin (Cmd.readLine ->
+    // read-byte on *stinput*) died with "prim read-byte failed: Halt" before
+    // this — the gate's ioecho row is the fixture that catches its absence.
+    vmem.valueSet("*stinput*", streams.valStreamInFd(0));
+    vmem.valueSet("*stoutput*", streams.valStreamOutFd(1));
+    vmem.valueSet("*sterror*", streams.valStreamOutFd(2));
 
     // find the entry in the meta table.  $qbe_meta is a POINTER to a single
     // contiguous array of Meta rows (Mid.Qbe.Lower metaTable emits the rows

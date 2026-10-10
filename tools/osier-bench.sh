@@ -65,6 +65,22 @@
 #        OSIER_BENCH_TIMEOUT=s     per-run timeout, seconds      [300]
 #        OSIER_BENCH_STRICT=1      ignore declared-not-expressible
 #        OSIER_BENCH_XCHECK=0      skip the VM-vs-native output cross-check
+#        OSIER_BENCH_REF=golden    cross-check the native output against the
+#                                  FROZEN goldens in tools/bench/golden/
+#                                  instead of a live VM (the post-VM mode;
+#                                  auto-selected when elmvm is absent)
+#        OSIER_BENCH_FREEZE=1      (with the VM present) re-freeze the goldens
+#                                  from the VM's output after the live
+#                                  differential agrees — the only legitimate
+#                                  way a golden appears
+#
+# THE CROSS-CHECK AFTER THE VM (P7, handoff osier-evidence): the VM reference
+# is what made the xcheck a DIFFERENTIAL (two backends, two value
+# representations).  With the ZINC retirement there is one backend, and the
+# successor is a REGRESSION net: per-program golden outputs, frozen from the
+# VM's last verified run (OSIER_BENCH_FREEZE=1 writes a golden only where the
+# live differential agreed byte-for-byte).  A wrong-but-plausible output on an
+# unpinned shape is invisible to it — see ARTIFACT.md section 9.2.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -100,8 +116,19 @@ HAVE_VM=0; HAVE_QBE=0; HAVE_AOT=0
 if [ -x "$ELMVM" ]; then HAVE_VM=1; fi
 if [ -x "$ROOT/vendor/qbe/qbe" ] && [ -x "$QBE_MK" ]; then HAVE_QBE=1; fi
 if [ -x "$AOTBENCH" ]; then HAVE_AOT=1; fi
-if [ "$HAVE_VM" = 0 ]; then
-  echo "osier-bench: $ELMVM missing (run: zig build elmvm) — the VM is the REFERENCE backend" >&2
+GOLDEN_DIR="$ROOT/tools/bench/golden"
+REF="${OSIER_BENCH_REF:-auto}"
+case "$REF" in auto|vm|golden) ;; *)
+  echo "osier-bench: OSIER_BENCH_REF must be auto|vm|golden (got '$REF')" >&2; exit 2 ;; esac
+if [ "$REF" = auto ]; then
+  if [ "$HAVE_VM" = 1 ]; then REF=vm; else REF=golden; fi
+fi
+if [ "$REF" = vm ] && [ "$HAVE_VM" = 0 ]; then
+  echo "osier-bench: $ELMVM missing (run: zig build elmvm) and OSIER_BENCH_REF=vm" >&2
+  exit 2
+fi
+if [ "$REF" = golden ] && [ ! -d "$GOLDEN_DIR" ]; then
+  echo "osier-bench: no goldens at $GOLDEN_DIR — freeze them first: OSIER_BENCH_FREEZE=1 (VM present)" >&2
   exit 2
 fi
 
@@ -134,7 +161,7 @@ fi
 vm_yes=NO; [ "$HAVE_VM" = 1 ] && vm_yes=yes
 qbe_yes=NO; [ "$HAVE_QBE" = 1 ] && qbe_yes=yes
 aot_yes=NO; [ "$HAVE_AOT" = 1 ] && aot_yes=yes
-echo "osier-bench: ${#selected[@]} programs, backends VM=$vm_yes QBE=$qbe_yes AOT=$aot_yes, $STAT of $RUNS run(s), heap ${HEAP_MB}MB, scratch $TMP"
+echo "osier-bench: ${#selected[@]} programs, backends VM=$vm_yes QBE=$qbe_yes AOT=$aot_yes, $STAT of $RUNS run(s), heap ${HEAP_MB}MB, reference=$REF, scratch $TMP"
 
 # ---- the timer ------------------------------------------------------------
 LAST_MS=0
@@ -265,7 +292,10 @@ for src in "${selected[@]}"; do
   mkdir -p "$work"
   R_NAME+=("$name"); R_SHAPE+=("$shape")
 
-  # ---------- VM (the reference) ----------
+  # ---------- VM (the reference; post-VM trees skip this whole backend) ------
+  if [ "$REF" != vm ]; then
+    RES_VM["$name"]="$(enc '' NO-VM "OSIER_BENCH_REF=$REF: no live VM reference")"
+  else
   vmb="$work/vm.csexp"
   ( cd "$CDIR" && MIDTIER=0 node run.js "$src" "$vmb" ) >"$work/vm.compile.log" 2>&1 || true
   # THE ORACLE IS THE FILE, NOT THE EXIT STATUS: run.js exits 0 on a type
@@ -297,6 +327,7 @@ for src in "${selected[@]}"; do
       RES_VM["$name"]="$(enc "$ms" OK "$note")"
     fi
   fi
+  fi   # REF=vm
 
   # ---------- QBE (native) ----------
   if [ "$HAVE_QBE" = 0 ]; then
@@ -363,13 +394,13 @@ for src in "${selected[@]}"; do
     fi
   fi
 
-  # ---------- cross-check VM vs native ----------
-  # Only when both produced a number: a disagreement means one of the two is
-  # miscompiling, and a benchmark built on a wrong answer measures nothing.
-  # An EMPTY stdout is not agreement either: a measured pair that prints
-  # nothing has measured nothing, so it fails instead of comparing equal to
-  # itself.
-  if [ "$XCHECK" = 1 ] && [ "$(enc_st "${RES_VM[$name]:-}")" = OK ] && [ "$(enc_st "${RES_QBE[$name]:-}")" = OK ]; then
+  # ---------- cross-check: live VM, or the FROZEN GOLDen (post-VM) ----------
+  # Only when the reference and native both produced a number: a disagreement
+  # means one of the two is miscompiling, and a benchmark built on a wrong
+  # answer measures nothing.  An EMPTY stdout is not agreement either: a
+  # measured pair that prints nothing has measured nothing, so it fails
+  # instead of comparing equal to itself.
+  if [ "$XCHECK" = 1 ] && [ "$REF" = vm ] && [ "$(enc_st "${RES_VM[$name]:-}")" = OK ] && [ "$(enc_st "${RES_QBE[$name]:-}")" = OK ]; then
     if [ ! -s "$work/vm.rep.out" ] || [ ! -s "$work/qbe.rep.out" ]; then
       WARN+=("$name: VM/native cross-check FAILED: empty stdout on a measured pair — empty is a FAILURE, not agreement")
       RES_VM["$name"]="$(enc "${RES_VM[$name]%%|*}" EMPTY-STDOUT "measured pair printed nothing")"
@@ -382,6 +413,28 @@ for src in "${selected[@]}"; do
       RES_VM["$name"]="$(enc "${RES_VM[$name]%%|*}" MISMATCH "native='$(head -c 50 "$work/qbe.rep.out")'")"
       RES_QBE["$name"]="$(enc "${RES_QBE[$name]%%|*}" MISMATCH "vm='$(head -c 50 "$work/vm.rep.out")'")"
       note_fail "$name: VM/native output mismatch"
+    else
+      XC_N=$((XC_N + 1))
+      # FREEZE (only on an AGREEING pair — a golden is never born from a
+      # disagreement): pin the VM's output as the post-VM reference.
+      if [ "${OSIER_BENCH_FREEZE:-0}" = 1 ]; then
+        mkdir -p "$GOLDEN_DIR"
+        cp "$work/vm.rep.out" "$GOLDEN_DIR/$name.expected"
+        echo "osier-bench: FROZE $name golden <- vm==native ($(head -c 40 "$work/vm.rep.out"))" >&2
+      fi
+    fi
+  fi
+  # The golden cross-check runs whenever the LIVE one did not (REF=golden, or
+  # the VM row failed for its own reasons while a golden exists).
+  if [ "$XCHECK" = 1 ] && [ "$REF" != vm ] && [ "$(enc_st "${RES_QBE[$name]:-}")" = OK ]; then
+    g="$GOLDEN_DIR/$name.expected"
+    if [ ! -f "$g" ]; then
+      WARN+=("$name: no golden at $g — freeze deliberately (OSIER_BENCH_FREEZE=1 with the VM)")
+      note_fail "$name: golden cross-check has nothing to compare"
+    elif ! cmp -s "$g" "$work/qbe.rep.out"; then
+      WARN+=("$name: native DISAGREES with the frozen golden: golden='$(head -c 50 "$g")' native='$(head -c 50 "$work/qbe.rep.out")'")
+      RES_QBE["$name"]="$(enc "${RES_QBE[$name]%%|*}" MISMATCH "golden='$(head -c 50 "$g")'")"
+      note_fail "$name: golden output mismatch"
     else
       XC_N=$((XC_N + 1))
     fi

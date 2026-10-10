@@ -1,0 +1,1 @@
+[cons [cons inner . [cons [cons a . 40] . [cons [cons b . 50] . []]]] . [cons [cons x . 30] . [cons [cons name . "ada"] . [cons [cons x . 1] . [cons [cons y . 2] . [cons [cons inner . [cons [cons a . 3] . [cons [cons b . 4] . []]]] . []]]]]]]

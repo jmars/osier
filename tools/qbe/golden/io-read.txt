@@ -1,0 +1,5 @@
+STREAM-OK
+"read:25:alpha
+beta
+héllo wörld
+"

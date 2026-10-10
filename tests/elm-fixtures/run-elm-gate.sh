@@ -6,6 +6,27 @@
 # function with the given args, and diffs the printed value against
 # expected/<name>.txt.
 #
+# P7 (osier-evidence): every EXECUTABLE row (run / run2 / io / sigdeath) now
+# ALSO has a NATIVE twin, registered by the same helper: the same sources are
+# compiled through the QBE backend (qbe-mk.sh: elm -> .ssa -> vendored qbe ->
+# cc + rt.o) and the native binary must produce the SAME pinned expected
+# value.  This is the successor for the gate's execution model: the ZINC
+# bundle rows still run (they are removed by P8, the retirement step), but the
+# native rows already prove the gate survives with the VM deleted — same
+# fixtures, same pinned expected/*.txt, one binary per row.
+#
+# The twin set is exactly the rows whose CHECK is behavioural on a value the
+# program prints: rawrun (a committed .csexp hand-bundle no Elm source can
+# produce) has NO native twin — it dies with the bundle format at P8, a
+# recorded loss (see ARTIFACT.md).  depth (the interpreter's CALL_STACK_DEPTH
+# cap) has no twin either; its native counterpart already exists as the
+# separate natdepth row.
+#
+# Native twins build in PARALLEL (ELM_GATE_J jobs, default 8) in a build phase
+# between the batch compile and the checks, so the PASS/FAIL transcript stays
+# in declaration order.  ELM_GATE_NATIVE=0 disables every native row (VM-only,
+# the pre-P7 gate: PASS=156 FAIL=0).
+#
 # osier split Phase 1: the 19 UI-host rows (16 pty + the pty_app todos row + the
 # renderdump row + the lgstyled fixture) moved to run-ui-gate.sh, which is
 # DEFERRED until the renderer is re-attached to the host effect loop.  This
@@ -52,6 +73,17 @@ OUT="$(mktemp -d)"
 # elmvm / compiler.js / jq prerequisites are not required in that mode.
 if [ "${ELM_GATE_MATRIX:-0}" != "0" ]; then
   : # matrix dump mode: no elmvm / compiler.js / jq required (see the dump below)
+elif [ "${ELM_GATE_MANIFEST_ONLY:-0}" = "1" ]; then
+  # manifest-only mode (the .ssa corpus baseline consumes this): the manifest
+  # is built from the REGISTRY alone, so elmvm / qbe / cc are not needed —
+  # only compiler.js (whose path the manifest names) and jq.
+  if [ ! -f "$CDIR/compiler.js" ]; then
+    echo "error: $CDIR/compiler.js missing (run: build.sh)" >&2
+    exit 2
+  elif ! command -v jq >/dev/null 2>&1; then
+    echo "error: jq required to build the batch manifest" >&2
+    exit 2
+  fi
 elif [ ! -x "$ELMVM" ]; then
   echo "error: elmvm not found at $ELMVM (run: zig build elmvm)" >&2
   exit 2
@@ -85,8 +117,13 @@ read_expected() { cat "$FIX/expected/$1.txt"; }
 # elmvm yet; the checks fire in declaration order after the one batch compile.
 
 ngroup=0; ncheck=0
-declare -a GOUT GSRC
-declare -a CKIND CNAME CFN CEXP CARG CSTDIN CFIX COUT CHLP
+declare -a GOUT GSRC GENTRY
+declare -a CKIND CNAME CFN CEXP CARG CSTDIN CFIX COUT CHLP CNAT
+
+# The native twins (P7, see the header).  ELM_GATE_NATIVE=0 registers none —
+# the gate is then exactly the pre-P7 VM-only gate (PASS=156 FAIL=0).
+NATIVE="${ELM_GATE_NATIVE:-1}"
+NATJ="${ELM_GATE_J:-8}"
 
 register_group() {
   local out="$1"; shift
@@ -95,14 +132,17 @@ register_group() {
   ngroup=$((ngroup+1))
 }
 
-# add_check <kind> <name> <fn> <expected> <args> <stdin> <fixture> <out> <helper>
+# add_check <kind> <name> <fn> <expected> <args> <stdin> <fixture> <out> <helper> [nat-sources]
 # $9 is the REGISTERING HELPER's name (run / compile_error / ...) — printed by
 # the ELM_GATE_MATRIX dump so the matrix names the check the way a reader of
-# this file does.  The dispatcher keys on $1 only.
+# this file does.  The dispatcher keys on $1 only.  ${10}, when non-empty, is
+# the SOURCE LIST of the row's NATIVE twin (the QBE build of the same
+# program); empty = no twin (compile_error, rawrun, depth, ...).
 add_check() {
   CKIND[$ncheck]="$1"; CNAME[$ncheck]="$2"; CFN[$ncheck]="$3"
   CEXP[$ncheck]="$4"; CARG[$ncheck]="$5"; CSTDIN[$ncheck]="$6"
   CFIX[$ncheck]="$7"; COUT[$ncheck]="$8"; CHLP[$ncheck]="$9"
+  CNAT[$ncheck]="${10:-}"
   ncheck=$((ncheck+1))
 }
 
@@ -115,7 +155,11 @@ add_check() {
 run() {
   local name="$1" fn="$2" exp="$3"; shift 3
   register_group "$OUT/$name.csexp" "$FIX/$name.elm"
+  GENTRY[$((ngroup-1))]="$(module_name "$FIX/$name.elm").$fn"
   add_check run "$name" "$fn" "$exp" "$*" "" "$FIX/$name.elm" "$OUT/$name.csexp" run
+  if [ "$NATIVE" = 1 ]; then
+    add_check natrun "$name" "$fn" "$exp" "$*" "" "$FIX/$name.elm" "" run "$FIX/$name.elm"
+  fi
 }
 
 # run2 <name> <auxname> <fn> <expected>: multi-module fixture — compile
@@ -124,7 +168,11 @@ run() {
 run2() {
   local name="$1" aux="$2" fn="$3" exp="$4"; shift 4
   register_group "$OUT/$name.csexp" "$FIX/$aux.elm" "$FIX/$name.elm"
+  GENTRY[$((ngroup-1))]="$(module_name "$FIX/$name.elm").$fn"
   add_check run2 "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "$OUT/$name.csexp" run2
+  if [ "$NATIVE" = 1 ]; then
+    add_check natrun2 "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "" run2 "$FIX/$aux.elm $FIX/$name.elm"
+  fi
 }
 
 # run_io <name> <fn> <expected> <stdin-file>
@@ -135,7 +183,11 @@ run2() {
 run_io() {
   local name="$1" fn="$2" exp="$3" stdin="$4"
   register_group "$OUT/$name.csexp" "$FIX/$name.elm"
+  GENTRY[$((ngroup-1))]="$(module_name "$FIX/$name.elm").$fn"
   add_check io "$name" "$fn" "$exp" "" "$stdin" "$FIX/$name.elm" "$OUT/$name.csexp" run_io
+  if [ "$NATIVE" = 1 ]; then
+    add_check natio "$name" "$fn" "$exp" "" "$stdin" "$FIX/$name.elm" "" run_io "$FIX/$name.elm"
+  fi
 }
 
 # compile_clean <name>: asserts compilation SUCCEEDS (the artifact is a real
@@ -145,6 +197,7 @@ run_io() {
 compile_clean() {
   local name="$1"
   register_group "$OUT/$name.csexp" "$FIX/$name.elm"
+  GENTRY[$((ngroup-1))]="$(module_name "$FIX/$name.elm").main"
   add_check ok "$name" "" "" "" "" "$FIX/$name.elm" "$OUT/$name.csexp" compile_clean
 }
 
@@ -155,6 +208,9 @@ compile_clean() {
 compile_error() {
   local name="$1" exp="$2"
   register_group "$OUT/$name.csexp" "$FIX/$name.elm"
+  # the entry never runs (the compile errs first); <Mod>.main keeps the .ssa
+  # baseline's rule uniform over every group.
+  GENTRY[$((ngroup-1))]="$(module_name "$FIX/$name.elm").main"
   add_check err "$name" "" "$exp" "" "" "$FIX/$name.elm" "$OUT/$name.csexp" compile_error
 }
 
@@ -201,6 +257,9 @@ rawrun() {
 sigdeath() {
   local name="$1" fn="$2" exp="$3"
   add_check sigdeath "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "" sigdeath
+  if [ "$NATIVE" = 1 ]; then
+    add_check natsig "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "" sigdeath "$FIX/$name.elm"
+  fi
 }
 
 # depth <name> <fn> <control-depth> <past-cap-margin> <expected-control-value>
@@ -705,8 +764,9 @@ fi
 for ((i=0;i<ngroup;i++)); do
   read -r -a srcs <<< "${GSRC[$i]}"
   jq -n --arg out "${GOUT[$i]}" \
+        --arg entry "${GENTRY[$i]:-}" \
         --argjson srcs "$(printf '%s\n' "${srcs[@]}" | jq -R . | jq -s .)" \
-        '{sources: $srcs, output: $out}' >> "$OUT/groups.jsonl"
+        '{sources: $srcs, output: $out, entry: $entry}' >> "$OUT/groups.jsonl"
 done
 jq -s '{groups: .}' "$OUT/groups.jsonl" > "$OUT/manifest.json"
 
@@ -722,6 +782,49 @@ if [ $? -ne 0 ]; then
   echo "FAIL: node run.js --batch failed" >&2
   rm -rf "$OUT"
   exit 1
+fi
+
+# ============================ PHASE 2.5: native twin builds ============================
+# Every registered native twin (CNAT non-empty) builds HERE, in parallel, so
+# PHASE 3 only RUNS binaries: the transcript stays in declaration order, and a
+# build failure is a per-row FAIL carrying the build error — never a silently
+# missing row.  The FIRST build runs SERIALLY: if tools/qbe/rt.o is stale,
+# qbe-mk rebuilds it, and two concurrent `zig build-obj` writes to the same
+# rt.o path would race — after the serial warm-up every parallel job finds it
+# fresh (the freshness probe is read-only).
+if [ "$NATIVE" = 1 ]; then
+  mkdir -p "$OUT/nat"
+  : > "$OUT/nat.plan"
+  for ((i=0;i<ncheck;i++)); do
+    [ -n "${CNAT[$i]}" ] || continue
+    mod="$(module_name "${CFIX[$i]}")"
+    printf '%d|%s|%s.%s|%s\n' "$i" "${CNAT[$i]}" "$mod" "${CFN[$i]}" "$OUT/nat/$i" >> "$OUT/nat.plan"
+  done
+  cat > "$OUT/nat-one.sh" <<'EOJ'
+#!/usr/bin/env bash
+# One native twin build (spawned by the gate's PHASE 2.5 via xargs).
+# $1 = "<idx>|<src...>|<Entry.key>|<outdir>".  Success writes the binary's
+# path to <outdir>.binpath; failure leaves .builderr for the check to print.
+IFS='|' read -r idx srcs entry outdir <<< "$1"
+if bin="$("$OSIER_ROOT/tools/qbe/qbe-mk.sh" $srcs "$entry" "$outdir" 2>"$outdir.builderr")"; then
+  printf '%s\n' "$bin" > "$outdir.binpath"
+else
+  rm -f "$outdir.binpath"
+fi
+EOJ
+  chmod +x "$OUT/nat-one.sh"
+  first=1
+  while IFS= read -r job; do
+    [ -n "$job" ] || continue
+    if [ "$first" = 1 ]; then
+      OSIER_ROOT="$ROOT" "$OUT/nat-one.sh" "$job" || :
+      first=0
+    else
+      printf '%s\n' "$job"
+    fi
+  done < "$OUT/nat.plan" > "$OUT/nat.jobs"
+  # -r: an empty jobs file (only one twin) is legal, not an error.
+  OSIER_ROOT="$ROOT" xargs -r -P "$NATJ" -I{} "$OUT/nat-one.sh" "{}" < "$OUT/nat.jobs" 2>/dev/null || :
 fi
 
 # ============================ PHASE 3: checks ============================
@@ -961,6 +1064,30 @@ dispatch() {
       fi
       echo "PASS $name ($qname native: $ctl -> $exp @1MiB, $past -> exit $past_rc + \"$NAT_DEPTH_MSG\", $deep -> $deep_exp @raised)"
       pass=$((pass+1))
+      ;;
+    nat*)
+      # The native twin (P7): the binary PHASE 2.5 built from this row's own
+      # sources must produce the SAME pinned expected value the VM row asserts
+      # — the replacement execution model for the gate.  `timeout` guards the
+      # run exactly like qbe-check.sh: a miscompile that loops must fail
+      # loudly here, not wedge the gate.
+      bin="$(cat "$OUT/nat/$i.binpath" 2>/dev/null || true)"
+      if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+        echo "FAIL $name (native build): $(head -c 200 "$OUT/nat/$i.builderr" 2>/dev/null || echo 'no build output')"
+        fail=$((fail+1)); return
+      fi
+      mod=$(module_name "$fixfile")
+      qname="$mod.$fn"
+      if [ "$kind" = natio ]; then
+        got="$(timeout 60 "$bin" "$qname" < "$FIX/input/$stdin" 2>&1)"
+      else
+        got="$(timeout 60 "$bin" "$qname" $args 2>&1)"
+      fi
+      if [ "$got" = "$exp" ]; then
+        echo "PASS $name (native $qname $args) -> $got"; pass=$((pass+1))
+      else
+        echo "FAIL $name (native $qname $args): exp[$exp] got[$got]"; fail=$((fail+1))
+      fi
       ;;
   esac
 }

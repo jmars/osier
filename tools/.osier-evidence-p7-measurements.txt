@@ -1,0 +1,15 @@
+# osier-evidence measurements (2026-10-10)
+gate (VM, current): 17.7s wall PASS=156 FAIL=0
+per-fixture native build: fib 0.43s arraystress 0.91s dictstress 0.69s
+all 112 executable rows build natively -P8: 8.0s wall / 80s CPU
+native vs expected/*.txt: 111/112; ioecho fixed by rt.zig *stinput* wiring
+qbe-check old differential (27 rows failing fast at qbe-mk): 82.6s -> compare mode: 56.1s PASS=221 FAIL=0
+qbe-check freeze run (old differential + harvest): 109s, FROZE 104, 0 refused
+gate native: 28.1s PASS=268; gate VM-only: 17.8s PASS=156
+corpus .ssa: freeze 9.6s, check 9.6s BYTE-IDENTICAL 149=149
+selfhost-compile (seed freshness probe): 2.8s, committed seed MATCHES current emit (ad36cbab)
+qbe-selfhost (final): exit 0, 20m55.9s — emit 6.9s x2 IDENTICAL (13,569,941 B .ssa), qbe 17.3s, cc 3.1s, run 393.6s, ssa-emit 825.2s; CSEXP FP PASS; .ssa FP PASS
+qbe-check final: PASS=221 FAIL=0 rc=0, 56.2s (freeze run: 109s, 104 goldens, 0 refused)
+numbers final: exit 0, 46.9s, VERDICT all checks pass (gate 268, corpus csexp 149=149, corpus .ssa 149=149, seed FRESH, TestMain 114, lean, recount 16/20)
+zig build gate: exit 0, ~8.3s
+osier-bench: freeze 20.2s rc=0 (12 goldens); REF=golden 8.8s rc=0

@@ -2,7 +2,11 @@
 # qbe-mk.sh — one command from an .elm fixture to a NATIVE executable
 # (native-backend stage 1; handoff-qbe-lower).
 #
-#   tools/qbe/qbe-mk.sh <fixture.elm> <Entry.key> <outdir> [entry-args...]
+#   tools/qbe/qbe-mk.sh <src1.elm> [src2.elm ...] <Entry.key> <outdir> [entry-args...]
+#
+# One or MORE sources: the last two non-args are <Entry.key> and <outdir>, the
+# rest are compiled TOGETHER as one group (the gate's run2 rows need the aux
+# module beside the main one).  Callers passing exactly one source keep working.
 #
 # Pipeline:  node run.js (QBE=1 QBE_ENTRY) -> <out>.ssa
 #            vendor/qbe/qbe <out>.ssa      -> <out>.s   (exit checked)
@@ -17,13 +21,36 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-FIXTURE="$1"; ENTRY="$2"; OUTDIR="$3"; shift 3 || true
-ARGS=("$@")
+# Args: <src1.elm> [src2.elm ...] <Entry.key> <outdir>.  The last two are the
+# entry and the output dir; everything before them is the SOURCE GROUP,
+# compiled together as one program (each path made absolute — the node step
+# below runs from elm-compiler).  A single source is the common case.
+[ "$#" -ge 3 ] || {
+  echo "qbe-mk: usage: qbe-mk.sh <src1.elm> [src2.elm ...] <Entry.key> <outdir>" >&2
+  exit 2
+}
+N="$#"
+J=$((N - 1))
+ENTRY="${!J}"
+OUTDIR="${!N}"
+SRCS=()
+i=1
+while [ "$i" -le $((N - 2)) ]; do
+  a="${!i}"
+  case "$a" in
+    /*) SRCS+=("$a") ;;
+    *)  SRCS+=("$ROOT/$a") ;;
+  esac
+  i=$((i + 1))
+done
+LAST_SRC="${SRCS[${#SRCS[@]} - 1]}"
 
-[ -f "$FIXTURE" ] || { echo "qbe-mk: no fixture: $FIXTURE" >&2; exit 2; }
 [ -n "$ENTRY" ] || { echo "qbe-mk: entry key required (e.g. Fib.fib)" >&2; exit 2; }
+for s in "${SRCS[@]}"; do
+  [ -f "$s" ] || { echo "qbe-mk: no source: $s" >&2; exit 2; }
+done
 mkdir -p "$OUTDIR"
-BASE="$OUTDIR/$(basename "$FIXTURE" .elm)"
+BASE="$OUTDIR/$(basename "$LAST_SRC" .elm)"
 
 # ---- runtime object (cached, freshness-invalidated) ----
 # A cached rt.o answers only while NOTHING it was built from is newer than it.
@@ -50,7 +77,7 @@ fi
 
 # ---- elm -> .ssa ----
 (cd "$ROOT/elm-compiler" &&
-  QBE=1 QBE_ENTRY="$ENTRY" node run.js "$ROOT/$FIXTURE" "$BASE.ssa") >&2
+  QBE=1 QBE_ENTRY="$ENTRY" node run.js "${SRCS[@]}" "$BASE.ssa") >&2
 
 case "$(head -c 4 "$BASE.ssa")" in
   "err "*) echo "qbe-mk: compile failed: $(cat "$BASE.ssa")" >&2; exit 1;;

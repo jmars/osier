@@ -1761,3 +1761,26 @@ provenance markers are unchanged: a work the survey carries as [SECOND-HAND] sta
   https://lirias.kuleuven.be/retrieve/237824 [M, lit]
 - **Wand (1989).** *Type inference for record concatenation and multiple inheritance*. LICS'89.
   https://www.cs.tufts.edu/comp/150FP/archive/mitch-wand/types-simple-objects.pdf [M this pass]
+
+---
+
+### Appendix A correction (2026-10-10, evidence-chain re-aim)
+
+*Appended, not reworded — the paragraph above still describes the tree it was measured on.
+Correction:* as of this date the fixture gate no longer runs its executable rows through the
+ZINC VM alone. Every `run` / `run2` / `io` / `sigdeath` row (112 rows) now has a **native
+twin**: the same sources are compiled through the QBE backend (elm → `.ssa` → vendored qbe →
+cc + `rt.o`) and the native binary must print the *same pinned expected output* the VM row
+asserts (`PASS=268 FAIL=0` at the tip; `ELM_GATE_NATIVE=0` reproduces the VM-only gate
+verbatim, `PASS=156 FAIL=0`). The `run` rows above therefore hold on **both** engines. Two
+rows remain single-engine by construction and are stated as losses, not hidden: `rawrun`
+(a hand-written csexp bundle no Elm source can produce) has no native twin and dies with the
+bundle format; `depth` asserts the interpreter's `CALL_STACK_DEPTH` cap and its native
+counterpart is the separate `natdepth` row. The VM-vs-native **differential** that motivated
+this appendix's trust story — two backends agreeing byte-for-byte on the same input — is
+being retired with the ZINC backend; its replacements (golden outputs harvested from the VM's
+last verified run, a frozen `.ssa` corpus baseline, GC-churn reruns, structural counters, and
+the whole-compiler `.ssa` fixed point) are a **regression net, not a differential**: a
+wrong-but-plausible output on an unpinned shape is no longer caught by construction. The
+planned Lua backend would restore a true differential (two backends, two value
+representations, Lua's own GC). See `ARTIFACT.md` §9 for the full statement.

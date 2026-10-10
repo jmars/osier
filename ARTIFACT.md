@@ -362,3 +362,101 @@ in detail; the paper states the same facts as §6.7 of `docs/research/osier-pape
   conditions — and the author is accountable for the content regardless of its source.
 - **Writing.** Drafting and review of the paper's prose were also AI-assisted; the policy
   does not require that disclosure, and it is stated here for completeness.
+
+## 9. The evidence chain after the ZINC retirement (P7, 2026-10-10) — what changed, and what was LOST
+
+*Appended on 2026-10-10, before any deletion: this section describes the tip of the branch; the
+frozen-tag figures in §2 are untouched. The ZINC interpreter, the csexp backend and their tooling
+still exist and still pass at this commit — the replacements below were built and proven while the
+old chain was alive, which is the only way to prove they are replacements rather than holes.*
+
+### 9.1 The four replacements (each proven to FIRE — a check that cannot fail is not a check)
+
+1. **The gate's execution model goes native.** Every executable row of the language gate
+   (`run` / `run2` / `io` / `sigdeath` — 112 rows) now has a **native twin**: the same sources
+   are compiled through the QBE backend (`tools/qbe/qbe-mk.sh`: elm → `.ssa` → the vendored qbe
+   → cc + `rt.o`) and the native binary must print the row's pinned `expected/*.txt`. The twins
+   build in parallel (`ELM_GATE_J`, default 8; the first build is serial so a stale `rt.o` is
+   rebuilt without a write race). The gate prints `PASS=268 FAIL=0` (156 VM rows + 112 native
+   twins) in **~28 s** measured (the VM-only gate is 17.7 s; `ELM_GATE_NATIVE=0` reproduces it
+   verbatim, `PASS=156 FAIL=0`). The batch *compile* of the gate stays on the elm+node fast
+   lane (~3 s, unchanged) — only execution is native. Failure proof: a native-only runtime
+   defect leaves all 155 VM rows green and fails all 113 native rows (112 twins + `natdepth`).
+2. **The corpus baseline is re-anchored on the QBE emit.** `tools/osier-corpus-baseline.ssa.sha256`
+   pins the sha256 of the `.ssa` (or the `err …` payload — compile-error groups are pinned too)
+   that `QBE=1 QBE_ENTRY=<group entry> node run.js` emits for **every one of the 149 gate
+   groups** (`tools/osier-corpus-ssa.sh`, ~10 s at -P8). *Why the `.ssa` text and not the
+   native binaries' outputs:* it is the direct analogue of the old anchor (the compiler's own
+   output bytes — lowering drift is caught at emit time, independent of qbe/cc and of the
+   runtime); behaviour is already pinned by the gate's `expected/*.txt`; and the `.ssa` is
+   deterministic and target-neutral. *What this baseline cannot see that the csexp one could:*
+   it pins the **entry-reachable** defun graph per group, not the whole serialized bundle — a
+   change to code unreachable from every group's entry moves nothing — and it says nothing
+   about the ZINC emitter (which dies with the backend). A moved hash is a bug or a deliberate
+   re-freeze (`--freeze`), the 8da6fd7 discipline.
+3. **`qbe-check.sh`'s differential became golden outputs.** The VM-vs-native byte identity
+   (219 checks) is replaced by **104 golden output files** (`tools/qbe/golden/`) harvested from
+   the differential's *last* run: `QBE_CHECK_FREEZE=1` runs the old differential one final time
+   and writes a golden **only where native and VM agreed byte-for-byte** (104 frozen, 0
+   refused). Compare mode (no elmvm anywhere): `PASS=221 FAIL=0` in ~56 s — the 219 original
+   rows as goldens, plus two new cross-target smoke rows (`qbe -t arm64` / `-t rv64` must
+   *compile* the emitted `.ssa`; the IL is target-neutral by construction). The GC-churn arm,
+   the structural root-store check, the flatten/norep A/B counters and the mutual-tail bound
+   all survive unchanged (churn now compares against the golden).
+4. **`osier-numbers.sh` chains the new anchors** (exit 0, `VERDICT: all checks pass`, ~47 s):
+   gate 268 → corpus csexp 149 = 149 (until the csexp baseline retires) → **corpus `.ssa`
+   149 = 149** → a **seed-status report** (`FRESH`/`DRIFTED`, report-only by design — the
+   load-bearing freshness oracles are `qbe-selfhost.sh`'s two fixed points, which compare two
+   CURRENT products of the same tree rather than a frozen past artifact; a check that fails on
+   legitimate source movement is a check that generates re-freeze rituals) → TestMain → Lean →
+   the runTask recount.
+
+### 9.2 The differential is gone — say so plainly
+
+The strongest net this repository ever had was **two backends disagreeing on the same input**:
+`qbe-check.sh`'s 219 byte-identity checks and `osier-bench.sh`'s 12 cross-checks ran the same
+program on the ZINC VM (an emitted csexp bundle) and on a native binary (emitted `.ssa`), and
+required identical output. That net caught the pre-fix float `0.0`, the argvPrimThunk arity
+bug, the TCO/closure bugs, and pinned the depth guard. **After the retirement there is ONE
+backend, so a same-input backend disagreement on an unpinned shape is invisible.** The
+replacements above are a **regression net, not a differential**: goldens catch what is pinned,
+the `.ssa` baseline catches emit drift, the fixed point catches whole-compiler divergence —
+none of them can notice that the one backend computes something wrong in a way no fixture
+pins. The eventual restoration is the planned **Lua backend**: lua-vs-native would be a true
+differential again (two backends, two value representations, Lua's own GC), and nothing in
+this chain precludes it — the golden/corpus machinery compares artifacts any correct backend
+must produce.
+
+`osier-bench.sh`'s 12 cross-checks get the same treatment as `qbe-check.sh`'s: per-program
+golden outputs (`tools/bench/golden/*.expected`, 12 files frozen from the live differential's
+agreeing pairs via `OSIER_BENCH_FREEZE=1`), selected automatically once elmvm is absent
+(`OSIER_BENCH_REF=golden`; the VM rows then report `NO-VM` honestly instead of aborting).
+Proven to fire both ways: a perturbed golden mismatches exactly that program, and a native-only
+runtime defect mismatches all 12.
+
+Also lost, and not replaced (stated rather than hidden): the gate's `rawrun` row (a
+hand-written csexp bundle no Elm source can produce — it cannot survive the format) and the
+`depth` row's interpreter-cap assertion (its native counterpart, `natdepth`, already existed).
+
+### 9.3 Architecture posture (the honest wording)
+
+The gate's native execution is **architecture-bound**: the pipeline is elm+node (host-neutral)
+→ QBE IL (target-neutral by construction) → vendored qbe (targets amd64/arm64/rv64) → cc (the
+host's). So the chain is **structurally portable** across qbe's three targets, but every
+number in this note was **measured on x86_64 Linux only**; the `qbe -t arm64`/`-t rv64` rows
+prove the IL *compiles* for the other targets, not that it runs there. Two build lanes exist
+and both are load-bearing: the elm+node fast lane (the gate's batch compile, TestMain, ~3 s)
+and the native lane (execution, the corpus `.ssa`, the fixed point). The 200× compile-cost
+regression of the self-hosted native compiler (~590 s/corpus vs node's 3 s) is exactly why the
+fast lane is not retired.
+
+### 9.4 Two incidental finds this work surfaced
+
+- `tools/qbe/rt.zig` never wired `*stinput*`/`*stoutput*`/`*sterror*` (its comment claimed
+  `initGlobals` did; `initGlobals` registers only the prim globals — `tools/elmvm.zig:107` did
+  the wiring on the VM side). A native program reading stdin died with
+  `prim read-byte failed: Halt`. The gate's `ioecho` native twin is the fixture that catches
+  its absence; the fix wires the three streams exactly as elmvm does.
+- The `.ssa` corpus freeze re-derived the old csexp baseline's discipline for free: a
+  compile-error group's payload is byte-identical in both formats (`adtgaps`'s hash is the
+  same in both baseline files), which is the err-payload pinning working as intended.

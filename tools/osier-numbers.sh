@@ -4,9 +4,25 @@
 # Runs, from a clean checkout, the WHOLE evidence chain for the Osier / λρG
 # paper (handoff `rowgadt`, gap G2) and PRINTS every number the paper cites:
 #
-#   1. the fixture gate        — PASS/FAIL count (run-elm-gate.sh)
+#   1. the fixture gate        — PASS/FAIL count (run-elm-gate.sh).  Since P7
+#                                (osier-evidence) every executable row ALSO
+#                                runs through the QBE native backend (268
+#                                checks = 156 VM rows + 112 native twins);
 #   2. the corpus batch        — byte-identity of every compiled artifact
-#                                against tools/osier-corpus-baseline.sha256
+#                                against tools/osier-corpus-baseline.sha256;
+#   2b. the corpus .ssa batch  — byte-identity of every group's QBE emit
+#                                against tools/osier-corpus-baseline.ssa.sha256
+#                                (the P7 anchor that survives the ZINC
+#                                retirement; see tools/osier-corpus-ssa.sh);
+#   2c. seed status            — REPORT ONLY: does the committed bootstrap
+#                                seed still match what the current tree
+#                                emits?  Never fails — a drifted seed is a
+#                                fact to report (the load-bearing freshness
+#                                oracles are qbe-selfhost.sh's two FIXED
+#                                POINTS, both current-vs-current comparisons;
+#                                a check that fails on legitimate source
+#                                movement is a check that generates re-freeze
+#                                rituals, which this chain refuses to add);
 #   3. TestMain                — assertion count (114/114)
 #   4. `lake build`            — exit code + output bytes, theorem count and
 #                                the axiom list, from lean/
@@ -158,6 +174,46 @@ else
         fail=1
     fi
     rm -rf "$outdir"
+fi
+
+# --- 2b. corpus .ssa batch + byte-identity (the P7 anchor) -------------------
+# The same 149 groups, compiled through the QBE backend and hashed against the
+# frozen .ssa baseline — the anchor that SURVIVES the ZINC/csexp retirement
+# (the step-2 csexp baseline above dies with the backend it pins).  Re-freeze
+# deliberately (tools/osier-corpus-ssa.sh --freeze) and say why in the commit.
+ssa_out="$(tools/osier-corpus-ssa.sh 2>&1)"
+ssa_rc=$?
+if [ "$ssa_rc" -ne 0 ]; then
+    printf '%s\n' "$ssa_out" | sed 's/^/    /'
+    note "corpus .ssa" "FAILED (exit $ssa_rc)"
+    fail=1
+else
+    note "corpus .ssa" "$(printf '%s\n' "$ssa_out" | tail -1 | sed 's/^corpus \.ssa: //')"
+fi
+
+# --- 2c. seed status (REPORT ONLY — never a failure) -------------------------
+# The committed csexp seed is a BUILD INPUT, not an oracle: comparing against
+# it was the failure mode qbe-selfhost.sh removed (a legitimate source change
+# moves the seed and a frozen-past check then demands a re-freeze ritual).
+# What IS load-bearing lives in tools/qbe/qbe-selfhost.sh: the csexp and .ssa
+# FIXED POINTS both compare two CURRENT products of the same tree.  This step
+# reports where the committed seed stands so drift is VISIBLE without being
+# gated.
+if [ -s tools/bootstrap/selfhost.csexp ] && [ -f tools/bootstrap/selfhost.csexp.sha256 ]; then
+    if tools/selfhost-compile.sh >/dev/null 2>&1 && [ -s zig-out/selfhost.csexp ]; then
+        seed_now="$(sha256sum zig-out/selfhost.csexp | cut -d' ' -f1)"
+        seed_committed="$(sha256sum tools/bootstrap/selfhost.csexp | cut -d' ' -f1)"
+        if [ "$seed_now" = "$seed_committed" ]; then
+            note "seed status" "FRESH — the committed seed matches the current tree's emit ($seed_committed)"
+        else
+            note "seed status" "DRIFTED — committed $seed_committed != current emit $seed_now (reported, not gated;"
+            echo "               re-freeze deliberately or leave it; qbe-selfhost.sh is the oracle)"
+        fi
+    else
+        note "seed status" "UNKNOWN — the stock compiler failed to emit a fresh reference"
+    fi
+else
+    note "seed status" "no committed seed found (tools/bootstrap/selfhost.csexp absent)"
 fi
 
 # --- 3. TestMain -------------------------------------------------------------

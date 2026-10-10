@@ -101,6 +101,10 @@ fails loudly rather than letting this listing go stale.
 | \`rawrun\` | \`rawrun\` | runs a committed \`.csexp\` bundle no Elm source can produce (e.g. an unknown Task ctor) |
 | \`sigdeath\` | \`sigdeath\` | a child that dies BY SIGNAL must be reported as \`128+signum\` (compiles its own bundle; \`expected\` = the \`<code>|<out>|<err>\` tuple): \`sh -c 'kill -9 \$\$'\` is reaped WIFSIGNALED, so the code must be 137 — a decoder without \`waitStatusCode\`'s signal arm answers \`EXITSTATUS(9) = 0\` |
 | \`depth\` | \`depth\` | deep NON-tail recursion past \`CALL_STACK_DEPTH\` must be LOUD (compiles its own bundle; \`args\` = control-depth past-cap-margin): control depth and \`CAP-1\` print \`expected\`; past the cap the process exits non-zero with the \`call stack depth exceeded\` diagnostic on stderr and no value on stdout |
+| \`natrun\` (registered by \`run\`) | \`natrun\` | P7 native twin of \`run\`: the same sources build through the QBE backend (elm \`->\` .ssa \`->\` vendored qbe \`->\` cc + rt.o) and the binary must print \`expected\` — the successor execution model; \`ELM_GATE_NATIVE=0\` registers none |
+| \`natrun2\` (by \`run2\`) | \`natrun2\` | native twin of \`run2\` (aux module + fixture compiled together) |
+| \`natio\` (by \`run_io\`) | \`natio\` | native twin of \`run_io\` (stdin redirected from \`input/<stdin>\`) |
+| \`natsig\` (by \`sigdeath\`) | \`natsig\` | native twin of \`sigdeath\` (signal-death reap on the native effect loop) |
 | \`natdepth\` | \`natdepth\` | the NATIVE twin of \`depth\`: deep NON-tail recursion past the C-stack budget must be LOUD (builds its own binary via \`tools/qbe/qbe-mk.sh\`; \`args\` = control-depth past-depth deep-depth): the control prints \`expected\` under the check's own 1 MiB \`ulimit -s\` (\`QBE_NO_RLIMIT=1\`); past the boundary the process exits non-zero with the \`native stack depth exceeded\` diagnostic on stderr and no value on stdout; deep-depth must still complete at the driver's raised 64 MiB limit |
 
 ## The registered checks
