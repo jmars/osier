@@ -23,6 +23,7 @@ const state = vm.state;
 const parser = vm.parser;
 const interp = vm.interp;
 const streams = vm.streams;
+const hostcall = vm.hostcall;
 const effectloop = @import("effectloop");
 
 /// Default heap: 64 MB (reservation 128 MB) — sized for the GATE's use, which
@@ -82,10 +83,16 @@ pub fn main(init: std.process.Init) !void {
         return error.BadBundle;
     }
 
+    // ---- install the effect-loop host_apply seam (interpreted flavour) ----
+    // The seam's default is a loud stub (src/effectloop.zig links only the
+    // interpreter-free runtime); the INTERPRETED driver installs the
+    // vmExecEnv-based applier — closures in a csexp bundle are *Instr-coded.
+    effectloop.host_apply = &hostcall.applyClosureN;
+
     // ---- wire the standard I/O streams (M6) ----
-    // elmvm uses parseBundle directly (not Vm.loadBundle), so the *stinput*/
-    // *stoutput*/*sterror* value variables must be set here — the self-hosted
-    // runtime reads/writes fd 0/1/2 through them.
+    // elmvm uses parseBundle directly (not parser.loadBundle), so the
+    // *stinput*/*stoutput*/*sterror* value variables must be set here — the
+    // self-hosted runtime reads/writes fd 0/1/2 through them.
     v.valueSet("*stinput*", streams.valStreamInFd(0));
     v.valueSet("*stoutput*", streams.valStreamOutFd(1));
     v.valueSet("*sterror*", streams.valStreamOutFd(2));

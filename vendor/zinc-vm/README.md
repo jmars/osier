@@ -1,13 +1,25 @@
 # zinc-vm
 
-The shared ZINC VM executor for fixpoint-linux — a single, high-throughput
-interpreter + moving generational GC consumed by the language stacks that run
-on the system.
+The ZINC VM INTERPRETER for fixpoint-linux — the bytecode eval loop, the
+csexp parser/bundle loader, and the host-call shims that drive bundled
+closures.  This is the half that DIES at P8 of the retire-the-VM plan
+(handoff-osier-rtsplit): the runtime it executes lives in the sibling
+**osier-rt** package (`../osier-rt`), which this package depends on and
+re-exports.
 
-A Zig 0.16 native library package. Exposes two modules:
+A Zig 0.16 native library package. Exposes one module:
 
-- `gc` — the moving generational collector (`src/gc.zig`: types/heap/collect/scan/roots)
-- `vm` — the ZINC interpreter + prims (`src/vm.zig`: state/values/symbols/tables/parser/interp/prims/streams/execplan/hostcall/marshal)
+- `vm` — the interpreter (`src/vm.zig`: parser + interp + hostcall) plus
+  re-exports of osier-rt's runtime modules (state/values/symbols/tables/
+  varray/prims/streams/execplan) so existing `@import("vm").values`-style
+  references keep working until P8.
+
+Not here anymore (moved to osier-rt with the split): the GC, the value
+model, the Vm state + global tables, the primitives, streams, and the
+exec-plan layer.  Deleted with the split: `marshal.zig` (only the
+Osier-unreachable `eval-kl` prim used it) and the Shen catch machinery
+(`CatchSite`/`catch_chain`/`in_trap_error`) that existed only for
+`trap-error`, which the Elm front end cannot emit.
 
 ## Consumers
 

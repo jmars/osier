@@ -14,6 +14,10 @@
 //! END (reverse-index lookup) — appending the args after env_len makes the
 //! last arg access 0 exactly like a normal call would have pushed it.
 //!
+//! INTERPRETER-ONLY (dies with the VM, P8): both flavors run the closure
+//! through interp.vmExecEnv — a bytecode call.  The QBE path installs its own
+//! native host_apply (tools/qbe/rt.zig) and never reaches this file.
+//!
 //! TWO FLAVORS (plan M9):
 //!   - applyBundledN — by-NAME: resolve the global defun and call it (the
 //!     `main` entry the host drives).  Returns null when `name` does not
@@ -23,20 +27,17 @@
 //!     continuation/update closures as Values).  Same body minus the
 //!     defunGet/resolve step; asserts the value is a .lambda.
 //!
-//! Both are NON-catching: error.ShenError propagates to the caller (which may
-//! push its own CatchSite), error.Halt is contained inside vmExecEnv.
-//!
-//! A THIRD flavor (ported from shen, the Shen OS front-end) is CATCHING:
-//!   - callBundled0/1/3 — push a CatchSite, run the same by-NAME call, and on
-//!     a throw return the error VALUE (vm.err_slot, rooted once at Vm.init);
-//!     missing closure -> valNil.  The caller distinguishes an error via the
-//!     .error_ tag.  shensh.c:220-287 call_bundled_0/1/3.
+//! Both are NON-catching: error.ShenError propagates to the caller, error.Halt
+//! is contained inside vmExecEnv.  (The CATCHING flavors callBundled0/1/3 —
+//! shensh.c:220-287 — are DELETED with trap-error: nothing outside this file
+//! referenced them, and Osier has no exceptions.)
 
 const std = @import("std");
 const gc = @import("gc");
 const types = gc.types;
-const state = @import("state.zig");
-const values = @import("values.zig");
+const rt = @import("rt");
+const state = rt.state;
+const values = rt.values;
 const interp = @import("interp.zig");
 
 const Gc = gc.Gc;
@@ -123,53 +124,4 @@ pub fn applyClosureN(vm: *Vm, fnv_in: Value, args: []const Value) VmError!Value 
         env,
         total,
     );
-}
-
-// =====================================================================
-//  Catching flavors — C: shensh.c:220-287 call_bundled_0/1/3
-// =====================================================================
-
-/// C: shensh.c:262-287 call_bundled_0 — nullary bundled call (e.g.
-/// tc-hm-init).  The env gets a valNumber(0) DUMMY operand slot (the removed
-/// --tc-hm driver convention; a grab on an empty stack is a no-op, so the
-/// dummy is never read).  Catching: error.ShenError → vm.err_slot; missing
-/// closure → nil.  (In practice only ShenError can escape applyBundledN —
-/// vmExecEnv contains error.Halt at its own call sites — so the bare `catch`
-/// never swallows a hard stop.)
-pub fn callBundled0(vm: *Vm, name: []const u8) Value {
-    var site = state.CatchSite{ .in_trap_error = false, .parent = vm.catch_chain };
-    vm.catch_chain = &site;
-    const r = applyBundledN(vm, name, &.{values.valNumber(0)}) catch {
-        vm.catch_chain = site.parent;
-        return vm.err_slot;
-    };
-    vm.catch_chain = site.parent;
-    return r orelse values.valNil();
-}
-
-/// C: shensh.c:220-252 call_bundled_1 — single-argument bundled call, with
-/// the CatchFrame (CatchSite here) around the vmExecEnv only.  On a throw
-/// the error value is caught and returned (caller decides warn/abort).
-pub fn callBundled1(vm: *Vm, name: []const u8, arg: Value) Value {
-    var site = state.CatchSite{ .in_trap_error = false, .parent = vm.catch_chain };
-    vm.catch_chain = &site;
-    const r = applyBundledN(vm, name, &.{arg}) catch {
-        vm.catch_chain = site.parent;
-        return vm.err_slot;
-    };
-    vm.catch_chain = site.parent;
-    return r orelse values.valNil();
-}
-
-/// C: shensh.c:292-313 call_closure3 — three-argument bundled call (the
-/// reader convention: shen-parse-exprs takes Str Pos Len).
-pub fn callBundled3(vm: *Vm, name: []const u8, a: Value, b: Value, c: Value) Value {
-    var site = state.CatchSite{ .in_trap_error = false, .parent = vm.catch_chain };
-    vm.catch_chain = &site;
-    const r = applyBundledN(vm, name, &.{ a, b, c }) catch {
-        vm.catch_chain = site.parent;
-        return vm.err_slot;
-    };
-    vm.catch_chain = site.parent;
-    return r orelse values.valNil();
 }

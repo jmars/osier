@@ -8,9 +8,10 @@
 #            vendor/qbe/qbe <out>.ssa      -> <out>.s   (exit checked)
 #            cc <out>.s tools/qbe/rt.o     -> <out>     (linked, -lc)
 #
-# rt.o is built once (rebuilt when tools/qbe/rt.zig or the vendored VM is
-# newer) with `zig build-obj` against the SAME gc/vm modules the repo's
-# build.zig uses — no QBE or VM source is modified.
+# rt.o is built once (rebuilt when tools/qbe/rt.zig or the vendored runtime
+# is newer) with `zig build-obj` against the osier-rt package's gc/rt modules
+# (the SAME modules the repo's build.zig uses).  It links NO interpreter: the
+# ZINC VM package is not part of the QBE path at all.
 #
 # Exit: 0 success.  Prints the built binary's path.
 set -euo pipefail
@@ -32,7 +33,7 @@ BASE="$OUTDIR/$(basename "$FIXTURE" .elm)"
 # rebuild fails, refuse loudly: a stale rt.o here is worse than none (it is
 # exactly how a suite reports an old binary's behaviour as a measurement).
 RT="$ROOT/tools/qbe/rt.o"
-rt_newer="$(find "$ROOT/tools/qbe/rt.zig" "$ROOT/vendor/zinc-vm/src" "$ROOT/src/effectloop.zig" \
+rt_newer="$(find "$ROOT/tools/qbe/rt.zig" "$ROOT/vendor/osier-rt/src" "$ROOT/src/effectloop.zig" \
               -newer "$RT" -print -quit 2>/dev/null)" || rt_newer="PROBE_FAILED"
 if [ "$rt_newer" = "PROBE_FAILED" ]; then
   echo "qbe-mk: rt.o freshness probe FAILED -- rebuilding rather than trusting it" >&2
@@ -40,10 +41,10 @@ fi
 if [ ! -f "$RT" ] || [ -n "$rt_newer" ]; then
   echo "qbe-mk: building $RT" >&2
   zig build-obj -O ReleaseFast -lc -femit-bin="$RT" \
-    --dep gc --dep vm --dep effectloop -Mroot="$ROOT/tools/qbe/rt.zig" \
-    -Mgc="$ROOT/vendor/zinc-vm/src/gc.zig" \
-    --dep gc -Mvm="$ROOT/vendor/zinc-vm/src/vm.zig" \
-    --dep gc --dep vm -Meffectloop="$ROOT/src/effectloop.zig" \
+    --dep gc --dep rt --dep effectloop -Mroot="$ROOT/tools/qbe/rt.zig" \
+    -Mgc="$ROOT/vendor/osier-rt/src/gc.zig" \
+    --dep gc -Mrt="$ROOT/vendor/osier-rt/src/rt.zig" \
+    --dep gc --dep rt -Meffectloop="$ROOT/src/effectloop.zig" \
     || { echo "qbe-mk: rt.o rebuild FAILED -- refusing to answer from a stale $RT" >&2; exit 1; }
 fi
 

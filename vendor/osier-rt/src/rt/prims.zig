@@ -1,21 +1,30 @@
-//! src/vm/prims.zig — the C primitives: table + dispatch + the pure subset
-//! handlers (milestone M5).
+//! src/rt/prims.zig — the C primitives: table + dispatch + the pure subset
+//! handlers (milestone M5; vendored into the osier runtime by
+//! handoff-osier-rtsplit).
 //!
 //! C origin: zincvm.c:1780-2794 (exec_primitive, PURE cases only),
 //! zincvm.c:957-974 (prim_names[] / exec_primitive_valid — the prims.def
-//! X-macro becomes the comptime `prim_table` below), zincvm.c:3752-3758
-//! (init_globals, driven from state.zig), and the trap-error case
-//! (zincvm.c:2600-2651) with the DECISION-A CatchSite chain.
+//! X-macro becomes the comptime `prim_table` below) and zincvm.c:3752-3758
+//! (init_globals, driven from state.zig).
 //!
 //! SCOPE (plan PRIMS deliverable — the pure subset of the ~70 prims.def
 //! entries): the INCLUDE list is the plan's exact list (hot list ops,
 //! arithmetic/comparison, predicates, strings+chars, vectors, control,
 //! tuples/symbols/misc), plus the M6 stream I/O prims (write-byte/read-byte/
-//! read-file-as-string/open/close).  DEFERRED to later milestones: eval-kl
-//! (bundle/metacircular milestone).  OMITTED: the process subsystem
-//! (exec-plan/wait/kill/cd/getcwd/getpid/getenv/setenv/glob) and the dead
-//! dispatch cases (length/nth/fail/stinput/stoutput — namespace-2 OS defuns,
-//! never reachable via a prims.def name).
+//! read-file-as-string/open/close) and the M8 process prims (exec-plan/cd/
+//! getcwd/getpid/getenv/setenv/glob via execplan.zig).
+//!
+//! THE OSIER PRUNE (handoff-osier-rtsplit): 22 Shen-only prims are DELETED —
+//! boolean? element? error? error-to-string eval-kl function? gensym
+//! get-time hdstr kill newvar n->string pos set shen.fail! stream? string->n
+//! symbol? tlstr trap-error variable? wait.  None is emission-reachable from
+//! the Elm front end (no "call this prim" escape exists; the only source
+//! mentions are a purity table in Mid/Shrink.elm, which is not an emission
+//! path).  The two structural wins: trap-error took the CatchSite chain and
+//! BOTH interpreter-loop calls with it, and eval-kl took marshal.zig with
+//! it (it called three bundle functions by name that exist only in a Shen
+//! image Osier never loads).  The oracle: the corpus and qbe-check stay
+//! byte-identical because none of the 22 is ever emitted.
 //!
 //! ROOTING (plan exec_primitive ROOTING observation, ported VERBATIM — the C
 //! audit note at zincvm.c:1772-1779 applies unchanged): every popped Value
@@ -24,12 +33,6 @@
 //! per-prim discipline is annotated at each handler.  Alloc-free prims take
 //! no roots.  Write barriers fire on every store of a possibly-nursery Value
 //! into a possibly-oldgen Value array (address-> via gc.writeBarrierVectorStore).
-//!
-//! PORT-FIX (plan-mandated deviation from a latent C bug): error-to-string
-//! copies the message through the slot-rooted valStringFromErr pattern
-//! (values.zig) instead of C's raw `a.error.message` pointer pass into
-//! val_string, whose GC_STR can move the message and leave the memcpy stale
-//! (zincvm.c:1973).  See primErrorToString.
 
 const std = @import("std");
 const gc = @import("gc");
@@ -37,23 +40,15 @@ const types = gc.types;
 const state = @import("state.zig");
 const values = @import("values.zig");
 const symbols = @import("symbols.zig");
-const interp = @import("interp.zig");
+const varray = @import("varray.zig");
 const streams = @import("streams.zig");
 const execplan = @import("execplan.zig");
-const marshal = @import("marshal.zig");
-const hostcall = @import("hostcall.zig");
 
 const Gc = gc.Gc;
 const Value = types.Value;
 const ValueArray = types.ValueArray;
 const Vm = state.Vm;
 const VmError = state.VmError;
-
-/// wait/kill libc externs (the Shen OS wait/kill prims, ported here because
-/// execplan.zig's copies are file-private and out of scope this phase).
-/// Native-only: the vm module links libc.
-extern "c" fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
-extern "c" fn kill(pid: c_int, sig: c_int) c_int;
 
 /// The handler shape shared by the table and the dispatcher.
 pub const PrimFn = *const fn (vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void;
@@ -102,22 +97,11 @@ pub const prim_table = [_]PrimDef{
     // ---- predicates ----
     .{ .name = "number?", .arity = 1, .func = primNumberP },
     .{ .name = "string?", .arity = 1, .func = primStringP },
-    .{ .name = "symbol?", .arity = 1, .func = primSymbolP },
-    .{ .name = "boolean?", .arity = 1, .func = primBooleanP },
     .{ .name = "cons?", .arity = 1, .func = primConsP },
     .{ .name = "absvector?", .arity = 1, .func = primAbsvectorP },
-    .{ .name = "function?", .arity = 1, .func = primFunctionP },
-    .{ .name = "error?", .arity = 1, .func = primErrorP },
-    .{ .name = "stream?", .arity = 1, .func = primStreamP },
-    .{ .name = "variable?", .arity = 1, .func = primVariableP },
     // ---- strings + chars ----
-    .{ .name = "pos", .arity = 2, .func = primPos },
-    .{ .name = "tlstr", .arity = 1, .func = primTlstr },
-    .{ .name = "hdstr", .arity = 1, .func = primHdstr },
     .{ .name = "cn", .arity = 2, .func = primCn },
     .{ .name = "str", .arity = 1, .func = primStr },
-    .{ .name = "string->n", .arity = 1, .func = primStringToN },
-    .{ .name = "n->string", .arity = 1, .func = primNToString },
     .{ .name = "repeat", .arity = 2, .func = primRepeat },
     .{ .name = "c-strlen", .arity = 1, .func = primCStrlen },
     .{ .name = "char-code", .arity = 2, .func = primCharCode },
@@ -135,36 +119,22 @@ pub const prim_table = [_]PrimDef{
     .{ .name = "read-file-as-string", .arity = 1, .func = streams.primReadFileAsString },
     .{ .name = "open", .arity = 2, .func = streams.primOpen },
     .{ .name = "close", .arity = 1, .func = streams.primClose },
-    // ---- process execution (M8, execplan.zig; wait/kill are Shen OS-only,
-    //      ported from shen into prims.zig since execplan.zig is frozen) ----
+    // ---- process execution (M8, execplan.zig) ----
     .{ .name = "exec-plan", .arity = 1, .func = execplan.primExecPlan },
-    .{ .name = "wait", .arity = 1, .func = primWait },
-    .{ .name = "kill", .arity = 2, .func = primKill },
     .{ .name = "cd", .arity = 1, .func = execplan.primCd },
     .{ .name = "getcwd", .arity = 0, .func = execplan.primGetcwd },
     .{ .name = "getpid", .arity = 0, .func = execplan.primGetpid },
     .{ .name = "getenv", .arity = 1, .func = execplan.primGetenv },
     .{ .name = "setenv", .arity = 2, .func = execplan.primSetenv },
     .{ .name = "glob", .arity = 1, .func = execplan.primGlob },
-    // ---- control / eval ----
-    .{ .name = "trap-error", .arity = 2, .func = primTrapError },
+    // ---- control ----
     .{ .name = "simple-error", .arity = 1, .func = primSimpleError },
-    .{ .name = "error-to-string", .arity = 1, .func = primErrorToString },
-    // ---- eval-kl (Shen OS M2, marshal.zig + hostcall.zig): the
-    //      bundle-driven compile+run chain.
-    .{ .name = "eval-kl", .arity = 1, .func = primEvalKl },
-    .{ .name = "get-time", .arity = 1, .func = primGetTime },
     .{ .name = "intern", .arity = 1, .func = primIntern },
-    .{ .name = "set", .arity = 2, .func = primSet },
     .{ .name = "value", .arity = 1, .func = primValue },
     // ---- tuples / symbols / misc ----
     .{ .name = "@p", .arity = 2, .func = primAtP },
     .{ .name = "fst", .arity = 1, .func = primFst },
     .{ .name = "snd", .arity = 1, .func = primSnd },
-    .{ .name = "gensym", .arity = 1, .func = primGensym },
-    .{ .name = "newvar", .arity = 0, .func = primNewvar },
-    .{ .name = "element?", .arity = 2, .func = primElementP },
-    .{ .name = "shen.fail!", .arity = 1, .func = primShenFail },
 };
 
 /// Comptime name -> handler map (the dispatch half of the table).
@@ -236,7 +206,7 @@ pub fn execPrimitive(vm: *Vm, name: []const u8, acc: *Value, stack: *ValueArray)
 /// C: zincvm.c:1785-1788 absvector.  val_vector allocates the element array;
 /// the popped arg is a number (no interior pointers) — no root needed.
 fn primAbsvector(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     // C casts `(int)a.number` — truncating mod 2^32 (no range panic).
     const size: i32 = @truncate(a.payload.number);
     acc.* = values.valVector(vm.gc, size);
@@ -245,7 +215,7 @@ fn primAbsvector(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// C: zincvm.c:1789-1791 absvector?.
 fn primAbsvectorP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     acc.* = values.valBoolean(a.tag == .vector);
 }
 
@@ -254,9 +224,9 @@ fn primAbsvectorP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// site exactly; the null `data` guard is the .? unwrap parity with C's UB).
 fn primAddressSet(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     const g = vm.gc;
-    const vec = interp.vaPop(stack);
-    const idx = interp.vaPop(stack);
-    const val = interp.vaPop(stack);
+    const vec = varray.vaPop(stack);
+    const idx = varray.vaPop(stack);
+    const val = varray.vaPop(stack);
     const i: usize = @intCast(idx.payload.number);
     g.writeBarrierVectorStore(vec.payload.vector.data.?, i, val);
     acc.* = vec;
@@ -266,8 +236,8 @@ fn primAddressSet(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// parity with C:1811-1812.
 fn primAssoc(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     const g = vm.gc;
-    var key = interp.vaPop(stack);
-    var l = interp.vaPop(stack);
+    var key = varray.vaPop(stack);
+    var l = varray.vaPop(stack);
     g.rootPushValue(&key);
     g.rootPushValue(&l);
     var found = false;
@@ -295,8 +265,8 @@ fn primAssoc(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// args + rev + out rooted across the valCons loops (C parity: 4 roots).
 fn primAppend(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     const g = vm.gc;
-    var a1 = interp.vaPop(stack);
-    var a2 = interp.vaPop(stack);
+    var a1 = varray.vaPop(stack);
+    var a2 = varray.vaPop(stack);
     if (a1.tag != .nil and a1.tag != .cons)
         return vm.throwShen("attempt to append a non-list");
     g.rootPushValue(&a1);
@@ -327,32 +297,21 @@ fn primAppend(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 }
 
 // =====================================================================
-//  'b': boolean?
-// =====================================================================
-
-/// C: zincvm.c:1859-1861 boolean?.
-fn primBooleanP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    _ = vm;
-    const a = interp.vaPop(stack);
-    acc.* = values.valBoolean(a.tag == .boolean);
-}
-
-// =====================================================================
 //  'c': cons, cons?, cn, c-strlen, char-code
 // =====================================================================
 
 /// C: zincvm.c:1867-1870 cons.  valCons roots its by-value params internally
 /// (values.zig, C:274-294) — safe by construction.
 fn primCons(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     acc.* = values.valCons(vm.gc, a1, a2);
 }
 
 /// C: zincvm.c:1871-1873 cons?.
 fn primConsP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     acc.* = values.valBoolean(a.tag == .cons);
 }
 
@@ -390,8 +349,8 @@ fn cnWrite(buf: []u8, v: Value, l: usize, t: *const [32]u8) void {
 /// the alloc go through the rooted locals (C:1900-1921).
 fn primCn(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     const g = vm.gc;
-    var a1 = interp.vaPop(stack);
-    var a2 = interp.vaPop(stack);
+    var a1 = varray.vaPop(stack);
+    var a2 = varray.vaPop(stack);
     var t1: [32]u8 = undefined;
     var t2: [32]u8 = undefined;
     const l1 = cnMeasure(a1, &t1);
@@ -421,8 +380,8 @@ fn primCn(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// doubling memcpy (each byte copied O(log n) times).
 fn primRepeat(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     const g = vm.gc;
-    const a1 = interp.vaPop(stack); // count
-    var a2 = interp.vaPop(stack); // string
+    const a1 = varray.vaPop(stack); // count
+    var a2 = varray.vaPop(stack); // string
     const n: i64 = a1.payload.number;
     const slen: i64 = a2.payload.str.len;
     if (n <= 0 or slen <= 0) {
@@ -452,15 +411,15 @@ fn primRepeat(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// C: zincvm.c:1937-1939 c-strlen (O(1) string length).
 fn primCStrlen(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     acc.* = values.valNumber(a.payload.str.len);
 }
 
 /// C: zincvm.c:1943-1952 char-code (byte at index; -1 out of bounds).
 fn primCharCode(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a = interp.vaPop(stack); // string
-    const n = interp.vaPop(stack); // index
+    const a = varray.vaPop(stack); // string
+    const n = varray.vaPop(stack); // index
     const i = n.payload.number;
     const len: i64 = a.payload.str.len;
     if (i >= 0 and i < len) {
@@ -472,152 +431,14 @@ fn primCharCode(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 }
 
 // =====================================================================
-//  'e': error?, error-to-string, element?, emptylist, empty?
+//  'e': emptylist, empty?
 // =====================================================================
-
-/// C: zincvm.c:1962-1964 error?.
-fn primErrorP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    _ = vm;
-    const a = interp.vaPop(stack);
-    acc.* = values.valBoolean(a.tag == .error_);
-}
-
-/// C: zincvm.c:1967-1975 error-to-string — PORT-FIX: C passes the raw
-/// `a.error.message` pointer into val_string, whose GC alloc can move the
-/// message and leave the memcpy stale.  The port copies through the
-/// slot-rooted valStringFromErr (values.zig) instead.  `a` is rooted across
-/// the copy (C parity: gc_root_push_value(&a)).
-fn primErrorToString(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const g = vm.gc;
-    var a = interp.vaPop(stack);
-    var guard = g.rootValue(&a);
-    defer guard.end();
-    if (a.tag == .error_) {
-        acc.* = values.valStringFromErr(g, &a);
-    } else if (a.tag == .string) {
-        acc.* = a;
-    } else {
-        acc.* = values.valString(g, "unknown error");
-    }
-}
-
-// =====================================================================
-//  'e': eval-kl — the bundle-driven compile+run chain (Shen OS M2)
-// =====================================================================
-
-/// One eval-kl chain stage (C:2012-2017 extract-kl / :2028-2033 kl->zinc /
-/// :2044-2049 toplevel-interp): resolve the bundled closure; a non-lambda
-/// resolution warns on stderr and reports missing (null), else the stage
-/// runs through the shared hostcall env-extend pattern.  `arg` must be a
-/// rooted slot (the caller's chain roots).
-fn evalKlStage(vm: *Vm, name: []const u8, arg: *Value) VmError!?Value {
-    if (vm.defunGet(name).tag != .lambda) {
-        std.debug.print("runtime: eval-kl: {s} not found in bundle\n", .{name});
-        return null;
-    }
-    return hostcall.applyBundledN(vm, name, &.{arg.*});
-}
-
-/// The compile+run chain (C:2009-2060): marshal_to_tagged → extract-kl →
-/// kl->zinc → toplevel-interp → demarshal_from_tagged — the first
-/// bundle-scale execution path.  `a` (the input form) must ALREADY be rooted
-/// by the caller.  Every intermediate is rooted exactly as C roots it
-/// (tagged C:2010, the three closures ride applyBundledN's internal fn
-/// root, klambda C:2026, zinc_code C:2042, tagged_result C:2058); the roots
-/// are deliberately NOT popped here — the caller's single defer
-/// rootPopTo(entry_wm) is the pop site (C's one gc_root_pop_to(eval_kl_wm)
-/// at eval_kl_done, :2063/:2068 — a Zig defer replaces C's two-path pop_to
-/// since error unwinding runs intermediate defers).  Returns null when a
-/// bundle closure is missing (warned in evalKlStage; C jumps to
-/// eval_kl_done with result = a).
-fn evalKlChain(vm: *Vm, a: *Value) VmError!?Value {
-    const g = vm.gc;
-    var tagged = marshal.marshalToTagged(vm, a.*);
-    g.rootPushValue(&tagged); // C:2010
-
-    var klambda = (try evalKlStage(vm, "extract-kl", &tagged)) orelse return null;
-    g.rootPushValue(&klambda); // C:2026
-
-    var zinc_code = (try evalKlStage(vm, "kl->zinc", &klambda)) orelse return null;
-    g.rootPushValue(&zinc_code); // C:2042
-
-    var tagged_result = (try evalKlStage(vm, "toplevel-interp", &zinc_code)) orelse return null;
-    g.rootPushValue(&tagged_result); // C:2058
-
-    return marshal.demarshalFromTagged(vm, tagged_result); // C:2060
-}
-
-/// C: zincvm.c:1999-2082 eval-kl — THE bundle-scale execution path.  C's
-/// volatile-locals + setjmp/longjmp dance collapses to plain locals + roots
-/// + `catch` (plan DECISION A):
-///   - CatchSite with in_trap_error = 0 wraps the WHOLE chain (C:2001-2004)
-///     so a throw anywhere lands here, not in an outer handler;
-///   - the popped form is rooted and the entry watermark + defer rootPopTo
-///     replace C's eval_kl_wm + two-path pop_to (:2006/:2063/:2068);
-///   - CRITICAL SEMANTIC (C:2070-2081): eval-kl RETURNS error values — on a
-///     thrown ShenError, acc = vm.err_slot (the once-rooted DECISION-A
-///     replacement for C's cf.error_val + S3 root dance) and the prim
-///     SUCCEEDS; the error is never re-propagated as a VmError.  shensh's
-///     eval_kl_form relies on this (exec_primitive's return is ignored).
-/// PORT-FIX (deliberate deviation): C leaves the input form `a` unrooted —
-/// its own :2070-2076 comment documents how the old `*acc = result = a`
-/// echo read garbage after a collection moved the form's cells.  The port
-/// roots `a`, so the missing-closure fallback (result = a, C goto
-/// eval_kl_done) is collector-safe.
-fn primEvalKl(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const g = vm.gc;
-    var a = interp.vaPop(stack);
-    const entry_wm = g.rootWatermark(); // C:2006 eval_kl_wm
-    var site = state.CatchSite{ .in_trap_error = false, .parent = vm.catch_chain }; // C:2001-2003
-    vm.catch_chain = &site;
-    g.rootPushValue(&a); // PORT-FIX root (see doc)
-    defer g.rootPopTo(entry_wm); // the ONE pop site — runs LAST (C:2063/:2068)
-    defer vm.catch_chain = site.parent; // C:2064/:2069
-
-    // C:2005 `volatile Value result = a` — the missing-closure fallback,
-    // now read through the rooted `a`.
-    var result: Value = a;
-    if (evalKlChain(vm, &a)) |maybe| {
-        if (maybe) |v| result = v;
-        // null: a bundle closure missing — result stays the input form
-        // (warned in evalKlStage; C goto eval_kl_done).
-    } else |e| switch (e) {
-        // C:2077-2081: propagate the real error VALUE, not the input form.
-        error.ShenError => result = vm.err_slot,
-        // vmExecEnv never propagates Halt (the eval loop contains it at its
-        // own call sites); C has no equivalent arm.  Kept for exhaustiveness.
-        error.Halt => return error.Halt,
-    }
-    acc.* = result; // C:2065/:2079 `*acc = result/errv; return 0`
-}
-
-/// C: zincvm.c:1984-1998 element? — deep_equal list membership.  Alloc-free;
-/// x/l rooted for parity with C:1987-1988.
-fn primElementP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const g = vm.gc;
-    var x = interp.vaPop(stack); // needle
-    var l = interp.vaPop(stack); // haystack
-    g.rootPushValue(&x);
-    g.rootPushValue(&l);
-    var found = false;
-    var cur = l;
-    while (cur.tag == .cons) {
-        if (values.deepEqual(x, cur.payload.cons.car.?.*, 0)) {
-            found = true;
-            break;
-        }
-        cur = cur.payload.cons.cdr.?.*;
-    }
-    g.rootPop(); // l
-    g.rootPop(); // x
-    acc.* = values.valBoolean(found);
-}
 
 /// C: zincvm.c:2087-2091 emptylist: (number 0) -> nil; anything else falls
 /// through the C dispatch to `unknown` -> return -1 (error.Halt here).
 fn primEmptylist(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     if (a.tag == .number and a.payload.number == 0) {
         acc.* = values.valNil();
         return;
@@ -628,7 +449,7 @@ fn primEmptylist(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// C: zincvm.c:2094-2096 empty?.
 fn primEmptyP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     acc.* = values.valBoolean(a.tag == .nil);
 }
 
@@ -640,91 +461,23 @@ fn primEmptyP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// is the parity crash.
 fn primFst(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     acc.* = a.payload.cons.car.?.*;
 }
 
-/// C: zincvm.c:2156-2158 function?.
-fn primFunctionP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    _ = vm;
-    const a = interp.vaPop(stack);
-    acc.* = values.valBoolean(a.tag == .lambda or a.tag == .prim);
-}
-
 // =====================================================================
-//  'g': gensym, get-time
-// =====================================================================
-
-/// C: zincvm.c:2164-2171 gensym (counter is a C static; the port keeps it on
-/// Vm).  Pops a spurious arg if present (nullary-call convention).
-fn primGensym(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    if (stack.len > 0) _ = interp.vaPop(stack);
-    var buf: [64]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, "shen.gensym_{d}", .{vm.gensym_counter}) catch unreachable;
-    vm.gensym_counter += 1;
-    acc.* = symbols.valSymbol(&vm.symbols, s);
-}
-
-/// Wall-clock seconds since epoch (C time(NULL)).  Zig 0.16's std.time
-/// exposes no clock functions (constants only), so this reads the raw
-/// clock_gettime syscall — the VM targets Linux (the GC's mmap heap).
-/// Non-Linux targets (cross-checks only) get a deterministic 0.
-fn wallSeconds() i64 {
-    if (comptime @import("builtin").os.tag != .linux) return 0;
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.syscall2(.clock_gettime, @intFromEnum(std.os.linux.CLOCK.REALTIME), @intFromPtr(&ts));
-    return @intCast(ts.sec);
-}
-
-/// Wall-clock milliseconds — the "run" mode source (C clock() has no Zig
-/// counterpart; the value only feeds numeric comparisons).
-fn wallMillis() i64 {
-    if (comptime @import("builtin").os.tag != .linux) return 0;
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.syscall2(.clock_gettime, @intFromEnum(std.os.linux.CLOCK.REALTIME), @intFromPtr(&ts));
-    return @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), 1_000_000);
-}
-
-/// C: zincvm.c:2172-2178 get-time.  unix/real -> seconds since epoch;
-/// run -> C's clock() mapped to wall-clock milliseconds (see wallMillis).
-/// An unknown mode falls through the C dispatch to unknown.
-fn primGetTime(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    _ = vm;
-    const mode = interp.vaPop(stack);
-    if (mode.tag == .symbol) {
-        const nm = values.symSlice(mode);
-        if (std.mem.eql(u8, nm, "unix") or std.mem.eql(u8, nm, "real")) {
-            acc.* = values.valNumber(wallSeconds());
-            return;
-        }
-        if (std.mem.eql(u8, nm, "run")) {
-            acc.* = values.valNumber(wallMillis());
-            return;
-        }
-    }
-    return error.Halt; // C falls through to unknown
-}
-
-// =====================================================================
-//  'h': hd, hdstr
+//  'h': hd
 // =====================================================================
 
 /// C: zincvm.c:2264-2269 hd (nil -> nil; else car).
 fn primHd(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     if (a.tag == .nil) {
         acc.* = values.valNil();
         return;
     }
     acc.* = a.payload.cons.car.?.*;
-}
-
-/// C: zincvm.c:2270-2273 hdstr.  valStringFrom roots the popped slot across
-/// its allocRaw internally — pass the popped local by pointer.
-fn primHdstr(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    var a = interp.vaPop(stack);
-    acc.* = values.valStringFrom(vm.gc, &a, 0, 1);
 }
 
 // =====================================================================
@@ -733,7 +486,7 @@ fn primHdstr(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 
 /// C: zincvm.c:2279-2286 intern (string -> symbol; 255-byte cap).
 fn primIntern(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     var buf: [256]u8 = undefined;
     const raw_len: usize = @intCast(@max(a.payload.str.len, 0));
     const n = @min(raw_len, 255);
@@ -742,54 +495,15 @@ fn primIntern(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 }
 
 // =====================================================================
-//  'n': n->string, number?, newvar
+//  'n': number?
 // =====================================================================
-
-/// C: zincvm.c:2334-2337 n->string — single byte from the number.  The
-/// `(char)` cast truncates (C parity via bitCast+truncate).
-fn primNToString(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const a = interp.vaPop(stack);
-    var buf: [1]u8 = .{@truncate(@as(u64, @bitCast(a.payload.number)))};
-    acc.* = values.valString(vm.gc, buf[0..1]);
-}
 
 /// C: zincvm.c:2339-2341 number?.
 /// M4: floats are numbers too (Elm `number?`/`isNumber` parity).
 fn primNumberP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     acc.* = values.valBoolean(a.tag == .number or a.tag == .float);
-}
-
-/// C: zincvm.c:2343-2350 newvar (counter on Vm; pops a spurious arg).
-fn primNewvar(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    if (stack.len > 0) _ = interp.vaPop(stack);
-    var buf: [64]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, "V_{d}", .{vm.newvar_counter}) catch unreachable;
-    vm.newvar_counter += 1;
-    acc.* = symbols.valSymbol(&vm.symbols, s);
-}
-
-// =====================================================================
-//  'p': pos
-// =====================================================================
-
-/// C: zincvm.c:2435-2446 pos — bounds-checked 1-char slice; out of bounds
-/// throws inside trap-error, else an empty string.  valStringFrom roots a1
-/// internally.
-fn primPos(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const g = vm.gc;
-    var a1 = interp.vaPop(stack); // string
-    const a2 = interp.vaPop(stack); // index
-    const pl = a2.payload.number;
-    const slen: i64 = a1.payload.str.len;
-    if (pl < 0 or pl >= slen) {
-        if (vm.catch_chain != null and vm.catch_chain.?.in_trap_error)
-            return vm.throwShen("pos out of bounds");
-        acc.* = values.valString(g, "");
-    } else {
-        acc.* = values.valStringFrom(g, &a1, @intCast(pl), 1);
-    }
 }
 
 // =====================================================================
@@ -800,7 +514,7 @@ fn primPos(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// across the valCons loop (C:2418-2426 rooting, 2 roots).
 fn primReverse(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     const g = vm.gc;
-    var a = interp.vaPop(stack);
+    var a = varray.vaPop(stack);
     if (a.tag != .nil and a.tag != .cons)
         return vm.throwShen("attempt to reverse a non-list");
     g.rootPushValue(&a);
@@ -816,21 +530,14 @@ fn primReverse(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 }
 
 // =====================================================================
-//  's': symbol?, string?, simple-error, str, stream?, set, string->n,
-//       shen.fail!, snd, substring, shen.str->bytes, shen.bytes->string
+//  's': string?, simple-error, str, snd, substring, shen.str->bytes,
+//       shen.bytes->string
 // =====================================================================
-
-/// C: zincvm.c:2287-2289 symbol?.
-fn primSymbolP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    _ = vm;
-    const a = interp.vaPop(stack);
-    acc.* = values.valBoolean(a.tag == .symbol);
-}
 
 /// C: zincvm.c:2290-2292 string?.
 fn primStringP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     acc.* = values.valBoolean(a.tag == .string);
 }
 
@@ -840,7 +547,7 @@ fn primStringP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// repl_mode's longjmp exit is omitted with the meta REPL.
 fn primSimpleError(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = acc; // C overwrites acc's slot only via the error path
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     var buf: [256]u8 = undefined;
     var msg: []const u8 = "simple-error called";
     if (a.tag == .string) {
@@ -858,7 +565,7 @@ fn primSimpleError(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// valString CONTRACT holds).
 fn primStr(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     const g = vm.gc;
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     switch (a.tag) {
         .symbol => acc.* = values.valString(g, values.symSlice(a)),
         .string => acc.* = a,
@@ -899,53 +606,10 @@ fn primStr(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     }
 }
 
-/// C: zincvm.c:2481-2483 stream?.
-fn primStreamP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    _ = vm;
-    const a = interp.vaPop(stack);
-    acc.* = values.valBoolean(a.tag == .stream);
-}
-
-/// C: zincvm.c:2495-2497 set.  value_set stores into the GC-registered
-/// values table; no alloc between pop and store (no root needed).
-fn primSet(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const sym = interp.vaPop(stack);
-    const v = interp.vaPop(stack);
-    vm.valueSet(values.symSlice(sym), v);
-    acc.* = v;
-}
-
-/// C: zincvm.c:2498-2500 string->n (first byte as number; 0 on empty).
-fn primStringToN(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    _ = vm;
-    const a = interp.vaPop(stack);
-    acc.* = values.valNumber(if (a.payload.str.len > 0)
-        @intCast(a.payload.str.data.?[0])
-    else
-        0);
-}
-
-/// C: zincvm.c:2502-2509 shen.fail! — with an arg: (fail Arg); without: throw.
-/// valCons roots its params internally (safe by construction).
-fn primShenFail(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const g = vm.gc;
-    if (stack.len > 0) {
-        const arg = interp.vaPop(stack);
-        const inner = values.valCons(g, arg, values.valNil());
-        acc.* = values.valCons(
-            g,
-            symbols.valSymbol(&vm.symbols, "fail"),
-            inner,
-        );
-        return;
-    }
-    return vm.throwShen("fail");
-}
-
 /// C: zincvm.c:2511-2513 snd — no nil guard (parity crash via .?).
 fn primSnd(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     acc.* = a.payload.cons.cdr.?.*;
 }
 
@@ -954,9 +618,9 @@ fn primSnd(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// copy may alias s's buffer and s may be in the nursery).
 fn primSubstring(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     const g = vm.gc;
-    var s = interp.vaPop(stack); // string
-    const st = interp.vaPop(stack); // start
-    const ln = interp.vaPop(stack); // len
+    var s = varray.vaPop(stack); // string
+    const st = varray.vaPop(stack); // start
+    const ln = varray.vaPop(stack); // len
     var start = st.payload.number;
     var len = ln.payload.number;
     const slen: i64 = s.payload.str.len;
@@ -975,7 +639,7 @@ fn primSubstring(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// across the valCons loop, interior reads through the rooted `a`.
 fn primStrToBytes(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     const g = vm.gc;
-    var a = interp.vaPop(stack);
+    var a = varray.vaPop(stack);
     if (a.tag != .string)
         return vm.throwShen("attempt to convert a non-string with str->bytes");
     g.rootPushValue(&a);
@@ -997,7 +661,7 @@ fn primStrToBytes(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// moved during the alloc).
 fn primBytesToStr(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     const g = vm.gc;
-    var a = interp.vaPop(stack);
+    var a = varray.vaPop(stack);
     if (a.tag != .nil and a.tag != .cons)
         return vm.throwShen("attempt to convert a non-list with bytes->string");
     g.rootPushValue(&a);
@@ -1024,13 +688,13 @@ fn primBytesToStr(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 }
 
 // =====================================================================
-//  't': tl, trap-error, tlstr
+//  't': tl
 // =====================================================================
 
 /// C: zincvm.c:2625-2630 tl (nil -> nil; else cdr).
 fn primTl(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     if (a.tag == .nil) {
         acc.* = values.valNil();
         return;
@@ -1038,155 +702,14 @@ fn primTl(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     acc.* = a.payload.cons.cdr.?.*;
 }
 
-/// C: zincvm.c:2632-2682 trap-error — the DECISION-A port of the setjmp/
-/// longjmp CatchFrame dance:
-///   - body/handler pushed as VALUE roots and kept rooted through BOTH the
-///     body run and the error path (the C `volatile` + watermark pair);
-///   - body_wm is taken AFTER the two pushes, so rootPopTo(body_wm) on the
-///     error path drops only the garbage the body run left above them;
-///   - the CatchSite is pushed on vm.catch_chain with in_trap_error armed
-///     only around the body run (conditional throw sites consult it);
-///   - the error value lives in the once-rooted vm.err_slot (C cf.error_val).
-///
-/// Zig error returns unwind intermediate vmExecEnv frames WITH their defers
-/// (rootPopTo(entry_wm)) running — every intermediate root is balanced
-/// before the error reaches this handler, exactly what C's longjmp sites
-/// popped manually.
-fn primTrapError(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const g = vm.gc;
-    var body = interp.vaPop(stack);
-    var handler = interp.vaPop(stack);
-    g.rootPushValue(&body);
-    g.rootPushValue(&handler);
-    var site = state.CatchSite{ .in_trap_error = false, .parent = vm.catch_chain };
-    vm.catch_chain = &site;
-    const body_wm = g.rootWatermark(); // ABOVE the body/handler roots
-
-    var body_val: Value = undefined;
-    var threw = false;
-    site.in_trap_error = true;
-    if (body.tag == .lambda) {
-        const lambda_env_len = body.payload.lambda.env_len;
-        const new_len = lambda_env_len + 1;
-        // body is rooted, so its env read after the alloc is fresh.
-        const new_env = g.allocArray(Value, @intCast(new_len));
-        if (lambda_env_len > 0) {
-            const lel: usize = @intCast(lambda_env_len);
-            @memcpy(new_env[0..lel], body.payload.lambda.env.?[0..lel]);
-            if (g.inOldgen(@intFromPtr(new_env))) {
-                var j: usize = 0;
-                while (j < lel) : (j += 1) {
-                    if (gc.scan.valueReferencesNursery(g, &body.payload.lambda.env.?[j])) {
-                        g.dirtyVectorsAdd(new_env);
-                        break;
-                    }
-                }
-            }
-        }
-        new_env[@intCast(lambda_env_len)] = values.valNil();
-        if (interp.vmExecEnv(vm, body.payload.lambda.code, body.payload.lambda.code_len, new_env, new_len)) |v| {
-            body_val = v;
-        } else |_| {
-            threw = true;
-        }
-    } else {
-        body_val = body;
-    }
-    site.in_trap_error = false;
-
-    if (!threw) {
-        vm.catch_chain = site.parent;
-        g.rootPop(); // handler
-        g.rootPop(); // body
-        acc.* = body_val;
-        return;
-    }
-
-    // Error path (C's setjmp != 0 arm): restore the chain, drop everything
-    // the body run pushed, then build the handler env with body/handler/err
-    // all still rooted across the henv alloc.
-    vm.catch_chain = site.parent;
-    g.rootPopTo(body_wm);
-    var err = vm.err_slot;
-    const env_len = handler.payload.lambda.env_len;
-    const new_env_len = env_len + 1;
-    g.rootPushValue(&err);
-    const henv = g.allocArray(Value, @intCast(new_env_len));
-    if (env_len > 0) {
-        const hel: usize = @intCast(env_len);
-        @memcpy(henv[0..hel], handler.payload.lambda.env.?[0..hel]);
-        if (g.inOldgen(@intFromPtr(henv))) {
-            var j: usize = 0;
-            while (j < hel) : (j += 1) {
-                if (gc.scan.valueReferencesNursery(g, &handler.payload.lambda.env.?[j])) {
-                    g.dirtyVectorsAdd(henv);
-                    break;
-                }
-            }
-        }
-    }
-    henv[@intCast(env_len)] = err;
-    // Net-removal barrier (M5): `err` can hold nursery refs and `henv` can be
-    // old-gen (env_len+1 >= 13); this err store is the LAST store into henv
-    // (the handler-env copy above barriers its own batch) and has no barrier.
-    // Without it, a scavenge recycles err's nursery refs while the old-gen
-    // henv still references them.
-    if (g.inOldgen(@intFromPtr(henv)) and gc.scan.valueReferencesNursery(g, &err))
-        g.dirtyVectorsAdd(henv);
-    const hc = handler.payload.lambda.code;
-    const hl = handler.payload.lambda.code_len;
-    g.rootPop(); // err
-    g.rootPop(); // handler
-    g.rootPop(); // body
-    acc.* = try interp.vmExecEnv(vm, hc, hl, henv, new_env_len);
-}
-
-/// C: zincvm.c:2684-2687 tlstr.  valStringFrom roots the popped slot; a
-/// len<=1 string yields "" (C would underflow len-1 to a huge size_t and
-/// crash on the empty string — deliberate safe deviation).
-fn primTlstr(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    var a = interp.vaPop(stack);
-    const n: usize = if (a.payload.str.len > 1) @intCast(a.payload.str.len - 1) else 0;
-    acc.* = values.valStringFrom(vm.gc, &a, 1, n);
-}
-
 // =====================================================================
-//  'v': value, variable?
+//  'v': value
 // =====================================================================
 
 /// C: zincvm.c:2692-2694 value (value_get carries the symbol fallback).
 fn primValue(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     acc.* = vm.valueGet(values.symSlice(a));
-}
-
-/// C: zincvm.c:2695-2716 variable? — uppercase-initial symbol whose
-/// continuation chars are alphanumeric or symbol punctuation.
-fn primVariableP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    _ = vm;
-    const a = interp.vaPop(stack);
-    if (a.tag != .symbol) {
-        acc.* = values.valBoolean(false);
-        return;
-    }
-    const s = values.symSlice(a);
-    if (s.len == 0 or s[0] < 'A' or s[0] > 'Z') {
-        acc.* = values.valBoolean(false);
-        return;
-    }
-    for (s[1..]) |c| {
-        const ok = (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or
-            (c >= '0' and c <= '9') or
-            (c == '`' or c == '=' or c == '*' or c == '/' or c == '+' or
-                c == '_' or c == '?' or c == '$' or c == '!' or c == '@' or
-                c == '~' or c == '.' or c == '>' or c == '<' or c == '&' or
-                c == '%' or c == '\'' or c == '#');
-        if (!ok) {
-            acc.* = values.valBoolean(false);
-            return;
-        }
-    }
-    acc.* = values.valBoolean(true);
 }
 
 // =====================================================================
@@ -1203,8 +726,8 @@ fn primVariableP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// on it), while Float operands promote as fx-ui's M4 requires.
 fn primAdd(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     // Bare arithmetic (shen semantics, AGENTS.md): NO type guard — the
     // metacircular interpreter passes Shen-level values the safe-wrapper
     // layer has validated, and shen's VM reads the number bits directly.
@@ -1219,8 +742,8 @@ fn primAdd(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// C: zincvm.c:2748-2751 -.
 fn primSub(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     // Bare arithmetic (shen semantics, AGENTS.md): no type guard.
     if (a1.tag == .float or a2.tag == .float) {
         acc.* = values.valFloat(asFloat(a1) - asFloat(a2));
@@ -1232,8 +755,8 @@ fn primSub(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// C: zincvm.c:2753-2756 *.
 fn primMul(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     // Bare arithmetic (shen semantics, AGENTS.md): no type guard.
     if (a1.tag == .float or a2.tag == .float) {
         acc.* = values.valFloat(asFloat(a1) * asFloat(a2));
@@ -1247,8 +770,8 @@ fn primMul(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// zero traps (C: SIGFPE; Zig: panic).
 fn primDiv(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     // Bare integer division (shen semantics, AGENTS.md): no type guard.
     acc.* = values.valNumber(@divTrunc(a1.payload.number, a2.payload.number));
 }
@@ -1257,8 +780,8 @@ fn primDiv(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// 0.666... (and x / 0.0 = Infinity, matching Elm's float division).
 fn primFdiv(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     // ALWAYS float division (fx-ui M4); no int type guard — f/ is the
     // dedicated float-division prim (shen has no f/; this is fx-ui-only).
     acc.* = values.valFloat(asFloat(a1) / asFloat(a2));
@@ -1282,8 +805,8 @@ fn asFloat(v: Value) f64 {
 /// SYMBOL-vs-PRIM name comparison in BOTH directions.
 fn primEq(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     if (a1.tag == .number and a2.tag == .number) {
         acc.* = values.valBoolean(a1.payload.number == a2.payload.number);
     } else if (a1.tag == .string and a2.tag == .string) {
@@ -1327,8 +850,8 @@ fn primEq(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// is true); non-numeric operands compare False (unchanged).
 fn primLt(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     if ((a1.tag == .float or a1.tag == .number) and
         (a2.tag == .float or a2.tag == .number))
     {
@@ -1345,8 +868,8 @@ fn primLt(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// C: zincvm.c:2793-2796 <=.
 fn primLe(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     if ((a1.tag == .float or a1.tag == .number) and
         (a2.tag == .float or a2.tag == .number))
     {
@@ -1363,8 +886,8 @@ fn primLe(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// C: zincvm.c:2797-2801 <-address (no bounds guard — parity crash).
 fn primAddressGet(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const vec = interp.vaPop(stack);
-    const idx = interp.vaPop(stack);
+    const vec = varray.vaPop(stack);
+    const idx = varray.vaPop(stack);
     const i: usize = @intCast(idx.payload.number);
     acc.* = vec.payload.vector.data.?[i];
 }
@@ -1372,8 +895,8 @@ fn primAddressGet(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// C: zincvm.c:2803-2806 >.
 fn primGt(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     if ((a1.tag == .float or a1.tag == .number) and
         (a2.tag == .float or a2.tag == .number))
     {
@@ -1390,8 +913,8 @@ fn primGt(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// C: zincvm.c:2807-2810 >=.
 fn primGe(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     if ((a1.tag == .float or a1.tag == .number) and
         (a2.tag == .float or a2.tag == .number))
     {
@@ -1429,29 +952,29 @@ fn shiftAmount(v: Value) u5 {
 
 fn primBitwiseAnd(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     // Ops stay in i32 range, so the i64 result is exact.
     acc.* = values.valNumber(@as(i64, bitOperand(a1) & bitOperand(a2)));
 }
 
 fn primBitwiseOr(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     acc.* = values.valNumber(@as(i64, bitOperand(a1) | bitOperand(a2)));
 }
 
 fn primBitwiseXor(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     acc.* = values.valNumber(@as(i64, bitOperand(a1) ^ bitOperand(a2)));
 }
 
 fn primBitwiseNot(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a = interp.vaPop(stack);
+    const a = varray.vaPop(stack);
     acc.* = values.valNumber(@as(i64, ~bitOperand(a)));
 }
 
@@ -1459,8 +982,8 @@ fn primBitwiseNot(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// value).  u32 << u5 discards the high bits (plain Zig <<), matching JS.
 fn primShiftLeft(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     const r: u32 = @as(u32, @bitCast(bitOperand(a2))) << shiftAmount(a1);
     acc.* = values.valNumber(@as(i64, @as(i32, @bitCast(r))));
 }
@@ -1468,8 +991,8 @@ fn primShiftLeft(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// Arithmetic right shift (sign-extending).
 fn primShiftRight(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     acc.* = values.valNumber(@as(i64, bitOperand(a2) >> shiftAmount(a1)));
 }
 
@@ -1477,8 +1000,8 @@ fn primShiftRight(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// shiftRightZfBy 1 -32 == 2147483632).
 fn primShiftRightZf(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     const r: u32 = @as(u32, @bitCast(bitOperand(a2))) >> shiftAmount(a1);
     acc.* = values.valNumber(@as(i64, r));
 }
@@ -1489,33 +1012,7 @@ fn primShiftRightZf(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 
 /// C: zincvm.c:2814-2817 @p — valCons roots its params internally.
 fn primAtP(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const a1 = interp.vaPop(stack);
-    const a2 = interp.vaPop(stack);
+    const a1 = varray.vaPop(stack);
+    const a2 = varray.vaPop(stack);
     acc.* = values.valCons(vm.gc, a1, a2);
-}
-
-// =====================================================================
-//  wait / kill — the Shen OS process prims (C: zincvm.c:2693-2700 /
-//  :2294-2299).  Ported into prims.zig (not execplan.zig) because
-//  execplan.zig is frozen this phase; the libc externs are declared at the
-//  top of this file and waitStatusCode is shared via execplan.
-// =====================================================================
-
-/// C: zincvm.c:2294-2299 kill.  ZINC RTL: a1 = leftmost = Pid (popped
-/// FIRST), a2 = Sig.
-fn primKill(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    _ = vm;
-    const pidv = interp.vaPop(stack);
-    const sigv = interp.vaPop(stack);
-    _ = kill(@truncate(pidv.payload.number), @truncate(sigv.payload.number));
-    acc.* = values.valBoolean(true);
-}
-
-/// C: zincvm.c:2693-2700 wait: Pid -> exit status (raw number).
-fn primWait(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const pidv = interp.vaPop(stack);
-    if (pidv.tag != .number) return vm.throwShen("wait: pid must be a number");
-    var st: c_int = 0;
-    _ = waitpid(@truncate(pidv.payload.number), &st, 0);
-    acc.* = values.valNumber(execplan.waitStatusCode(@bitCast(st)));
 }

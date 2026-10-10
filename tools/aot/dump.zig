@@ -1812,8 +1812,6 @@ fn emitApply(a: Allocator, out: *std.ArrayList(u8), next: i32, known: ?KnownTarg
     try out.print(a, "                pc = {d};\n", .{next});
     try out.appendSlice(a,
         \\            } else {
-        \\                if (vm.catch_chain != null and vm.catch_chain.?.in_trap_error)
-        \\                    return vm.throwShen("apply non-callable");
         \\                std.debug.print("runtime: apply non-callable tag={d}", .{@intFromEnum(acc.tag)});
         \\                return .{ .done = acc };
         \\            }
@@ -1886,8 +1884,6 @@ fn emitAppterm(a: Allocator, out: *std.ArrayList(u8), next: i32, known: ?KnownTa
     try out.print(a, "                pc = {d};\n", .{next});
     try out.appendSlice(a,
         \\            } else {
-        \\                if (vm.catch_chain != null and vm.catch_chain.?.in_trap_error)
-        \\                    return vm.throwShen("appterm non-lambda");
         \\                std.debug.print("runtime: appterm non-lambda\n", .{});
         \\                return .{ .done = acc };
         \\            }

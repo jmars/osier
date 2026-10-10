@@ -3,7 +3,8 @@ const std = @import("std");
 // osier — the language repo (compiler + ZINC VM + Lean mechanization + the
 // language's evidence chain).  This build.zig builds the LANGUAGE targets
 // only: elmvm (the gate harness), vmbench, aotdump, the AOT spike exes, and the
-// gc/vm test gates driven by the vendor/zinc-vm path dependency.  The UI
+// gc/vm test gates driven by the vendor/osier-rt + vendor/zinc-vm path
+// dependencies (the runtime/GC package and the interpreter package).  The UI
 // (fx_ui exe, src/renderer/*, gui_*/terminal, ptytest, genwidth) lives in the
 // fx-ui repo and is deliberately NOT here.
 //
@@ -11,7 +12,7 @@ const std = @import("std");
 //   zig build vmbench   build the throughput benchmark
 //   zig build aotdump   build the AOT emitter
 //   zig build aot       build the AOT spike exes
-//   zig build test      gc + vm suites (zinc-vm package) via the path dep
+//   zig build test      gc (osier-rt) + vm (zinc-vm) suites via the path deps
 //   zig build gate      gc + vm suites in Debug + ReleaseSafe + ReleaseFast
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -28,19 +29,27 @@ pub fn build(b: *std.Build) void {
         .small => .ReleaseSmall,
     };
 
-    // ---- zinc-vm package dependency (path dep, owned by osier) ----
-    // The collector and the ZINC VM are the vendor/zinc-vm package (the single
-    // shared executor); the package exports both modules by name ("gc", "vm"),
-    // so consumers keep their `@import("gc")` / `@import("vm")` calls unchanged.
+    // ---- osier-rt + zinc-vm package dependencies (path deps, owned by osier) ----
+    // osier-rt is the RUNTIME (GC + values/state/prims/varray/streams/
+    // execplan) — what every backend links and what survives the VM's
+    // retirement.  zinc-vm is the INTERPRETER (interp/parser/hostcall); it
+    // depends on osier-rt and dies at P8.  Each package exports its modules
+    // by name, so consumers keep their `@import("gc")` / `@import("rt")` /
+    // `@import("vm")` calls.
+    const osier_rt = b.dependency("osier_rt", .{ .target = target, .optimize = optimize });
+    const gc_mod = osier_rt.module("gc");
+    const rt_mod = osier_rt.module("rt");
     const zinc = b.dependency("zinc_vm", .{ .target = target, .optimize = optimize });
-    const gc_mod = zinc.module("gc");
     const vm_mod = zinc.module("vm");
 
     // ---- the language host (src/effectloop.zig) ----
     // The CEK effect-manager over the compiler's Task effects (execplan +
-    // stream/file prims + time + Quit).  It imports only gc + vm: the 10 UI
-    // effect ctors remain in Runtime.elm's Task type but are unhandled here
-    // (they fail loudly), and the renderer/terminal host lives in fx-ui.
+    // stream/file prims + time + Quit).  It imports only gc + rt (the
+    // RUNTIME — never the interpreter): the 10 UI effect ctors remain in
+    // Runtime.elm's Task type but are unhandled here (they fail loudly), and
+    // the renderer/terminal host lives in fx-ui.  Its host_apply seam
+    // defaults to a loud stub; the driver installs the real one (elmvm/aot:
+    // hostcall.applyClosureN, the QBE runtime: its native rt_apply wrapper).
     const effectloop_mod = b.createModule(.{
         .root_source_file = b.path("src/effectloop.zig"),
         .target = target,
@@ -48,7 +57,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "gc", .module = gc_mod },
-            .{ .name = "vm", .module = vm_mod },
+            .{ .name = "rt", .module = rt_mod },
         },
     });
 
@@ -182,7 +191,7 @@ pub fn build(b: *std.Build) void {
         aot_build_step.dependOn(addAotApp(b, target, optimize, gc_mod, vm_mod, aotrt_app_mod, effectloop_mod, aotdump, out_name, &.{app_path}, entry));
     }
 
-    // ---- tests: the zinc-vm GC + VM suites via the path dep ----
+    // ---- tests: the GC (osier-rt) + VM (zinc-vm) suites via the path deps ----
     const test_step = b.step("test", "Run tests");
     const gc_test_step = b.step("gc-test", "Run Shen GC tests (honours -Doptimize)");
     gc_test_step.dependOn(addGcTestSet(b, target, optimize));
@@ -323,19 +332,19 @@ fn addAotApp(
     return &install.step;
 }
 
-/// SAFETY-ENFORCEMENT (unit C): build one self-contained Shen GC test set
+/// SAFETY-ENFORCEMENT (unit C): build one self-contained GC test set
 /// compiled at `opt` and return its run step.  Each mode resolves its OWN
-/// zinc-vm dependency instance so the package's "gc" module carries `opt`.
+/// osier-rt dependency instance so the package's "gc" module carries `opt`.
 fn addGcTestSet(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     opt: std.builtin.OptimizeMode,
 ) *std.Build.Step {
-    const zinc = b.dependency("zinc_vm", .{ .target = target, .optimize = opt });
-    const gc_mod = zinc.module("gc");
+    const osier_rt = b.dependency("osier_rt", .{ .target = target, .optimize = opt });
+    const gc_mod = osier_rt.module("gc");
 
     const gc_test_mod = b.createModule(.{
-        .root_source_file = zinc.path("tests/gc_test.zig"),
+        .root_source_file = osier_rt.path("tests/gc_test.zig"),
         .target = target,
         .optimize = opt,
         .imports = &.{ .{ .name = "gc", .module = gc_mod } },
@@ -346,7 +355,7 @@ fn addGcTestSet(
     // T9: expected-panic executable — the ROOT_PTR interior-pointer defense is
     // proven by a tiny exe that overrides its root panic handler and exits 42.
     const t9_mod = b.createModule(.{
-        .root_source_file = zinc.path("tests/root_ptr_panic.zig"),
+        .root_source_file = osier_rt.path("tests/root_ptr_panic.zig"),
         .target = target,
         .optimize = opt,
         .imports = &.{ .{ .name = "gc", .module = gc_mod } },
@@ -363,16 +372,19 @@ fn addGcTestSet(
     return &run_gc_tests.step;
 }
 
-/// Build one self-contained Shen VM test set compiled at `opt` and return its
-/// run step (mirroring addGcTestSet).  Each mode gets its OWN zinc-vm
-/// dependency instance.
+/// Build one self-contained VM test set compiled at `opt` and return its run
+/// step (mirroring addGcTestSet).  The gc module comes from the osier-rt
+/// dependency (the runtime owns it now); the vm module from zinc-vm — the
+/// same dependency instances zinc-vm's own "vm" module links, so the Vm
+/// type in the test is the one under test.
 fn addVmTestSet(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     opt: std.builtin.OptimizeMode,
 ) *std.Build.Step {
+    const osier_rt = b.dependency("osier_rt", .{ .target = target, .optimize = opt });
+    const gc_mod = osier_rt.module("gc");
     const zinc = b.dependency("zinc_vm", .{ .target = target, .optimize = opt });
-    const gc_mod = zinc.module("gc");
     const vm_mod = zinc.module("vm");
 
     const vm_test_mod = b.createModule(.{

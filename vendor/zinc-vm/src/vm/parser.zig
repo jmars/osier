@@ -32,10 +32,12 @@
 const std = @import("std");
 const gc = @import("gc");
 const types = gc.types;
-const values = @import("values.zig");
-const symbols = @import("symbols.zig");
-const state = @import("state.zig");
-const prims = @import("prims.zig");
+const rt = @import("rt");
+const values = rt.values;
+const symbols = rt.symbols;
+const state = rt.state;
+const prims = rt.prims;
+const streams = rt.streams;
 
 const Gc = gc.Gc;
 const Instr = types.Instr;
@@ -612,4 +614,88 @@ pub fn printInstr(writer: anytype, code: [*]Instr, len: i32, indent: usize) !voi
             else => try writer.print("??? (op={d})\n", .{@intFromEnum(in.op)}),
         }
     }
+}
+
+// =====================================================================
+//  vm_load_bundle — C: zincvm.c:4015-4102 (M6).  Moved here from state.zig
+//  with the interpreter split (handoff-osier-rtsplit): bundle loading is
+//  Shen-image support, not runtime state.  Interpreter-side only — the QBE
+//  path never loads a csexp bundle.
+// =====================================================================
+
+/// C: zincvm.c:4015-4102 vm_load_bundle.  Loads a bundle string into
+/// the global table (parseBundle), then sets up the global-table
+/// environment: ZINC pattern keywords as bare symbols (never over a
+/// bundled closure), the standard I/O stream variables, the empty-alist
+/// global-table / value-table vars, and the rooted primitive?-names
+/// list built forward from the prim table (head = LAST name, C parity).
+///
+/// Deviations (deliberate): C's trailing defun_freeze() perfect-hash
+/// build has no counterpart — DECISION B keeps the open-addressed table
+/// as the runtime structure.  The stream file handles are null: the I/O
+/// milestone owns them.  C's stdout printf goes to std.debug.print.
+/// Returns the number of closures loaded (0 on the outer shape error).
+pub fn loadBundle(vm: *state.Vm, buf: [:0]const u8) i32 {
+    // A bundle starts with '((' after optional whitespace (C:4016-4021).
+    // The [:0] sentinel terminates the whitespace scan at end-of-input.
+    var p: usize = 0;
+    while (std.ascii.isWhitespace(buf[p])) p += 1;
+    if (p + 1 >= buf.len or buf[p] != '(' or buf[p + 1] != '(') {
+        std.debug.print("bundle error: not a bundle (expected ((...)))\n", .{});
+        return 0;
+    }
+
+    const n = parseBundle(vm.gc, &vm.symbols, vm, buf);
+    std.debug.print("Loaded {d} closures into global table\n", .{n});
+
+    // Register ZINC pattern keywords as symbols (C:4033-4051) — ONLY
+    // when the bundle did not itself provide the entry: the bundled
+    // metacircular interpreter needs e.g. [global lookup] to resolve to
+    // its closure, while structural matching needs the tag symbols.
+    // Prim names (e.g. `cons`) already hold VAL_PRIM entries from
+    // initGlobals and are skipped by the same defunHas guard — exact C
+    // behavior, since C registers prim_names before loading too.
+    const keywords = [_][]const u8{
+        "number",     "symbol",     "string",     "boolean", "cons",
+        "lambda",     "function",   "error",      "absvector",
+        "stream in",  "stream out", "let",        "if",
+        "lookup",     "freeze",     "type",       "defun",
+        "define",     "cond",       "and",        "or",
+        "do",         "fn",         "list",       "where",
+    };
+    for (keywords) |kw| {
+        if (!vm.defunHas(kw))
+            vm.defunSet(kw, symbols.valSymbol(&vm.symbols, kw));
+    }
+
+    // Standard I/O stream variables (C:4057-4069): the bundled
+    // stinput/stoutput closures read (value *stinput*) etc.;
+    // shen.initialise-environment does not set them — the host must.
+    // M6: wire the REAL std fds 0/1/2 (the I/O milestone owns these) —
+    // stinput = fd 0 (stdin), stoutput = fd 1 (stdout), sterror = fd 2.
+    vm.valueSet("*stinput*", streams.valStreamInFd(0));
+    vm.valueSet("*stoutput*", streams.valStreamOutFd(1));
+    vm.valueSet("*sterror*", streams.valStreamOutFd(2));
+
+    // The metacircular interpreter's global-table / value-table vars
+    // must start as empty alists (C:4075, 4081), not the bare symbol
+    // that an unset value_get would return.
+    vm.valueSet("global-table", values.valNil());
+    vm.valueSet("value-table", values.valNil());
+
+    // primitive?-names (C:4088-4095), built forward from the single
+    // source prim table so C's primitive set and Shen's primitive?
+    // stay in sync.  pn is rooted across the valCons churn; the head
+    // of the finished list is the LAST table name (C forward-loop
+    // parity).
+    {
+        var pn = values.valNil();
+        vm.gc.rootPushValue(&pn);
+        defer vm.gc.rootPop();
+        for (prims.primNames()) |def|
+            pn = values.valCons(vm.gc, symbols.valSymbol(&vm.symbols, def.name), pn);
+        vm.valueSet("primitive?-names", pn);
+    }
+
+    return n;
 }

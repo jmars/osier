@@ -47,7 +47,7 @@ FAIL=0
 echo "qbe-check: artifacts in $TMP" >&2
 
 # GC-churn heap, in MB: the minimum viable heap (MIN_HEAP_BYTES = 16MB,
-# vendor/zinc-vm/src/gc/heap.zig:61 — a literal 1 fails gc init), so every
+# vendor/osier-rt/src/gc/heap.zig:61 — a literal 1 fails gc init), so every
 # allocation-pressure point collects.  One definition: the rerun below and
 # every message derive from this, so they cannot drift apart again.
 CHURN_MB=16

@@ -8,8 +8,9 @@
 //! returns a Program as DATA — a vector[Program, model0, cmd0, updateFn] with
 //! tag = bare symbol 'Program'.  This module interprets each Task natively
 //! (a CEK machine over the Task ADT) with nonblocking I/O via std.posix.poll,
-//! applies continuation closures via hostcall.applyClosureN (a FRESH vmExecEnv
-//! call), feeds completed msgs to update, and loops until the work set is
+//! applies continuation closures through the host_apply seam (a FRESH
+//! application of the closure), feeds completed msgs to update, and loops
+//! until the work set is
 //! empty and no effects are pending.  The CEK scheduler, the poll loop, the
 //! suspension/work-set machinery and the out-of-order interleaving stay.
 //!
@@ -57,13 +58,13 @@
 const std = @import("std");
 const gc = @import("gc");
 const types = gc.types;
-const state = @import("vm").state;
-const values = @import("vm").values;
-const interp = @import("vm").interp;
-const prims = @import("vm").prims;
-const symbols = @import("vm").symbols;
-const execplan = @import("vm").execplan;
-const hostcall = @import("vm").hostcall;
+const rt = @import("rt");
+const state = rt.state;
+const values = rt.values;
+const prims = rt.prims;
+const varray = rt.varray;
+const symbols = rt.symbols;
+const execplan = rt.execplan;
 
 const Gc = gc.Gc;
 const Value = types.Value;
@@ -72,12 +73,23 @@ const Vm = state.Vm;
 const VmError = state.VmError;
 
 /// Host -> Elm apply dispatcher — the ONLY seam where the host calls Elm
-/// (continuation/handler/update closures).  Defaults to the interpreted
-/// hostcall.applyClosureN; an AOT driver swaps it to aotrt.applyHost at
-/// aotInit, so REGISTERED closures native-dispatch (registry lookup-first)
-/// while unregistered ones fall back to the same vmExecEnv.  A plain fn
-/// pointer keeps this module AOT-optional: it never imports the aotrt module.
-pub var host_apply: *const fn (vm: *Vm, fnv: Value, args: []const Value) VmError!Value = &hostcall.applyClosureN;
+/// (continuation/handler/update closures).  The DEFAULT is a loud stub: this
+/// module links only the interpreter-free runtime (osier-rt), so the DRIVER
+/// installs the real dispatcher at startup — interpreted drivers (elmvm,
+/// tools/aot/run.zig with AOTRUN_INTERP=1) install hostcall.applyClosureN
+/// from the zinc-vm package; native drivers install their own (the QBE
+/// runtime's hostApply dispatches through rt_apply; a registered AOT driver
+/// installs aotrt.applyHost).  A plain fn pointer keeps this module
+/// backend-optional: it never imports any driver's module.
+pub var host_apply: *const fn (vm: *Vm, fnv: Value, args: []const Value) VmError!Value = &hostApplyUninstalled;
+
+/// The uninstalled-seam failure: LOUD, never a silent no-op (a program that
+/// appeared to work while its continuations were dropped would be worse).
+fn hostApplyUninstalled(vm: *Vm, fnv: Value, args: []const Value) VmError!Value {
+    _ = fnv;
+    _ = args;
+    return vm.throwShen("effectloop: host_apply seam not installed — the driver must set effectloop.host_apply before driving a Program (interpreted: vm.hostcall.applyClosureN; native: the backend's applier)");
+}
 
 const pa = std.heap.page_allocator;
 
@@ -692,12 +704,12 @@ const HostLoop = struct {
         var stack: ValueArray = .{ .data = null, .len = 0, .cap = 0 };
         g.rootPushPtr(@ptrCast(&stack.data));
         defer g.rootPop();
-        interp.vaInit(g, &stack);
-        defer interp.vaFree(&stack);
+        varray.vaInit(g, &stack);
+        defer varray.vaFree(&stack);
         var i: usize = @intCast(nargs);
         while (i > 0) {
             i -= 1;
-            interp.vaPush(g, &stack, argbuf[i]);
+            varray.vaPush(g, &stack, argbuf[i]);
         }
         var acc: Value = values.valNil();
         try prims.execPrimitive(self.vm, name, &acc, &stack);

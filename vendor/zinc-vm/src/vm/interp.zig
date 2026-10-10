@@ -1,8 +1,11 @@
-//! src/vm/interp.zig — the ZINC eval loop (milestone M4).
+//! src/vm/interp.zig — the ZINC eval loop (milestone M4).  INTERPRETER-ONLY:
+//! this file dies with the VM (P8); the runtime it drives lives in the
+//! osier-rt package (state/values/prims/varray/...).
 //!
-//! C origin: zincvm.c:406-437 (ValueArray va_init/va_push/va_pop/va_peek/
-//! va_free), zincvm.c:3107-3137 (lookup_env / env_push / env_pop), and
-//! zincvm.c:3154-3474 (vm_exec_env, vm_exec).
+//! C origin: zincvm.c:3107-3137 (lookup_env / env_push / env_pop) and
+//! zincvm.c:3154-3474 (vm_exec_env, vm_exec).  The ValueArray stack ops
+//! (va_init/va_push/va_pop/va_peek/va_free, C:406-437) moved to the runtime
+//! package's varray.zig; this module aliases them.
 //!
 //! M4 SCOPE: the eval loop with full per-opcode rooting discipline, LAMBDA
 //! paths only.  exec_primitive is NOT yet linked (plan M5 ports the pure
@@ -13,8 +16,9 @@
 //! propagates to the enclosing CatchSite chain).
 //!
 //! ERROR MODEL (plan DECISION A): C's setjmp/longjmp + CatchFrame chain
-//! becomes VmError = error{ShenError, Halt} (state.zig) plus a linked chain
-//! of stack-allocated CatchSites on Vm.  vm_throw → vm.throwShen(msg)
+//! becomes VmError = error{ShenError, Halt} (state.zig).  The CatchFrame
+//! chain itself is DELETED with trap-error — ShenError now unwinds to the
+//! host, which reports it.  vm_throw → vm.throwShen(msg)
 //! (builds valError into the permanently-rooted vm.err_slot, returns
 //! error.ShenError).  Because Zig error returns unwind frames WITH defers
 //! running (longjmp skips them), ONE `defer gc.rootPopTo(entry_wm)` per
@@ -68,96 +72,26 @@
 const std = @import("std");
 const gc = @import("gc");
 const types = gc.types;
-const state = @import("state.zig");
-const values = @import("values.zig");
-const prims = @import("prims.zig");
-const tables = @import("tables.zig");
+const rt = @import("rt");
+const state = rt.state;
+const values = rt.values;
+const prims = rt.prims;
+const tables = rt.tables;
+const varray = rt.varray;
+
+// The ValueArray stack ops moved to the runtime package (osier-rt's
+// varray.zig); these local aliases keep the eval loop's ~200 unqualified
+// vaPush/vaPop/... call sites unchanged.
+const vaInit = varray.vaInit;
+const vaPush = varray.vaPush;
+const vaPop = varray.vaPop;
+const vaPeek = varray.vaPeek;
+const vaFree = varray.vaFree;
 
 const Gc = gc.Gc;
 const Value = types.Value;
 const Vm = state.Vm;
 const VmError = state.VmError;
-
-// =====================================================================
-//  Value stack — C: zincvm.c:406-437
-// =====================================================================
-
-/// C: zincvm.c:407 STACK_INIT_CAP.
-pub const STACK_INIT_CAP: i32 = 12;
-
-/// C: zincvm.c:410-413 va_init.  Must only be called once the caller's
-/// stable slots for a->data (and anything read during the alloc) are rooted
-/// — vmExecEnv's prologue does this before its va_init.
-pub fn vaInit(g: *Gc, a: *types.ValueArray) void {
-    a.data = g.allocArray(Value, @intCast(STACK_INIT_CAP));
-    a.len = 0;
-    a.cap = STACK_INIT_CAP;
-}
-
-/// C: zincvm.c:414-432 va_push.  On grow, v is rooted across the
-/// GC_VALUE_ARRAY (v may carry interior pointers — lambda.code/env,
-/// cons.car/cdr, str.data — that a collection fired during the grow would
-/// otherwise leave stale in this local, C:416-421); after the store, the
-/// write barrier records the element array in the remembered set iff it is
-/// old-gen AND the stored Value references the nursery (C:429-431).
-pub fn vaPush(g: *Gc, a: *types.ValueArray, v: Value) void {
-    var vv = v;
-    if (a.len >= a.cap) {
-        const new_cap: i32 = a.cap * 2;
-        var guard = g.rootValue(&vv); // root v across GC_VALUE_ARRAY — C:422
-        defer guard.end();
-        const new_data = g.allocArray(Value, @intCast(new_cap));
-        const ln: usize = @intCast(a.len);
-        @memcpy(new_data[0..ln], a.data.?[0..ln]);
-        // M5 fix: the grow copies the OLD elements into a possibly-oldgen
-        // array; barrier them (a copied nursery reference would otherwise go
-        // stale at the next scavenge).  Mirrors applyBundledN / interp apply.
-        if (g.inOldgen(@intFromPtr(new_data))) {
-            var j: usize = 0;
-            while (j < ln) : (j += 1) {
-                if (gc.scan.valueReferencesNursery(g, &a.data.?[j])) {
-                    g.dirtyVectorsAdd(new_data);
-                    break;
-                }
-            }
-        }
-        a.data = new_data;
-        a.cap = new_cap;
-    }
-    const idx: usize = @intCast(a.len);
-    a.data.?[idx] = vv;
-    a.len += 1;
-    // C checks &v (the stored copy); &a->data[a->len-1] is now that copy and
-    // valueReferencesNursery is read-only — identical behaviour.
-    if (g.inOldgen(@intFromPtr(a.data.?)) and
-        gc.scan.valueReferencesNursery(g, &a.data.?[idx]))
-        g.dirtyVectorsAdd(a.data.?);
-}
-
-/// C: zincvm.c:433-436 va_pop — pop from an empty stack is fatal
-/// (C fprintf + exit(1) → std.debug.panic).
-pub fn vaPop(a: *types.ValueArray) Value {
-    if (a.len <= 0) std.debug.panic("fatal: pop from empty stack", .{});
-    a.len -= 1;
-    // Clear the vacated slot: the GC scans value_arrays by full capacity,
-    // so a stale ref here would retain popped Values (closure envs).
-    const v = a.data.?[@intCast(a.len)];
-    a.data.?[@intCast(a.len)] = values.valNil();
-    return v;
-}
-
-/// C: zincvm.c:437 va_peek.
-pub fn vaPeek(a: *types.ValueArray) Value {
-    return a.data.?[@intCast(a.len - 1)];
-}
-
-/// C: zincvm.c:438 va_free — release the slots only (the array itself is
-/// GC-managed); the rooted &stack.data slot now pins nothing.
-pub fn vaFree(a: *types.ValueArray) void {
-    a.data = null;
-    a.len = 0;
-    a.cap = 0;
-}
 
 // =====================================================================
 //  Environment access — C: zincvm.c:3107-3137
@@ -210,13 +144,11 @@ pub fn envPush(g: *Gc, env: *?[*]Value, env_len: *i32, env_cap: *i32, v: Value) 
         g.dirtyVectorsAdd(env.*.?);
 }
 
-/// C: zincvm.c:3130-3137 env_pop.  Inside a trap-error catch site
-/// (in_trap_error) a pop of an empty environment throws — catchable;
-/// anywhere else it is fatal.
+/// C: zincvm.c:3130-3137 env_pop.  A pop of an empty environment is fatal
+/// (C's catchable-throw arm existed only for trap-error, which is deleted).
 pub fn envPop(vm: *Vm, env: *?[*]Value, env_len: *i32) VmError!Value {
+    _ = vm;
     if (env_len.* <= 0) {
-        if (vm.catch_chain != null and vm.catch_chain.?.in_trap_error)
-            return vm.throwShen("runtime: pop empty environment");
         std.debug.panic("runtime: pop empty environment", .{});
     }
     env_len.* -= 1;
@@ -234,7 +166,7 @@ pub fn envPop(vm: *Vm, env: *?[*]Value, env_len: *i32) VmError!Value {
 /// lives in prims.zig (M5).  DECISION A contract:
 ///   error.Halt       → caught at the call site → break to done, acc
 ///                      preserved (C: `exec_primitive(...) < 0 → goto done`);
-///   error.ShenError  → propagates up to the enclosing CatchSite chain.
+///   error.ShenError  → propagates up to the host.
 fn execPrimitive(vm: *Vm, name: []const u8, acc: *Value, stack: *types.ValueArray) VmError!void {
     return prims.execPrimitive(vm, name, acc, stack);
 }
@@ -974,10 +906,8 @@ pub fn vmExecEnv(
                     vaPush(g, &stack, acc);
                     pc += 1;
                 } else {
-                    // C:3332-3345 — non-callable: catchable inside
-                    // trap-error, hard stop otherwise.
-                    if (vm.catch_chain != null and vm.catch_chain.?.in_trap_error)
-                        return vm.throwShen("apply non-callable");
+                    // C:3332-3345 — non-callable: hard stop (the catchable
+                    // arm existed only for trap-error, which is deleted).
                     std.debug.print("runtime: apply non-callable tag={d}", .{@intFromEnum(acc.tag)});
                     if (acc.tag == .symbol)
                         std.debug.print(" sym='{s}'", .{values.symSlice(acc)});
@@ -1337,8 +1267,6 @@ pub fn vmExecEnv(
                     vaPush(g, &stack, acc);
                     pc += 1;
                 } else {
-                    if (vm.catch_chain != null and vm.catch_chain.?.in_trap_error)
-                        return vm.throwShen("appterm non-lambda");
                     std.debug.print("runtime: appterm non-lambda\n", .{});
                     break :run;
                 }

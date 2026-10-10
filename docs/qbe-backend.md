@@ -815,3 +815,50 @@ NO constant from the tree: the boundary is a byte budget, so the check owns
 the budget.  `NAT_DEPTH_MSG` ("native stack depth exceeded") is distinct
 from the VM's `DEPTH_MSG` ("call stack depth exceeded") so neither arm's
 grep can match the other backend's message.
+
+## The runtime split: rt.o links osier-rt, never the interpreter (2026-10-10)
+
+`tools/qbe/rt.o` is now built against the **osier-rt** package
+(`vendor/osier-rt`) instead of the old `vendor/zinc-vm` monolith:
+
+```
+zig build-obj -O ReleaseFast -lc -femit-bin=rt.o \
+  --dep gc --dep rt --dep effectloop -Mroot=tools/qbe/rt.zig \
+  -Mgc=vendor/osier-rt/src/gc.zig \
+  --dep gc -Mrt=vendor/osier-rt/src/rt.zig \
+  --dep gc --dep rt -Meffectloop=src/effectloop.zig
+```
+
+`vendor/zinc-vm` is not on the QBE path at all anymore.  The runtime package
+(gc + values/state/symbols/tables/varray/prims/streams/execplan) imports
+nothing but `std` and `gc` — no interpreter — and `src/effectloop.zig` links
+only `gc` + `rt` too.  The interpreter (interp/parser/hostcall, the csexp
+bundle loader) stays in `vendor/zinc-vm`, which now *depends on* osier-rt;
+it dies at P8.
+
+Consequences visible in this file's domain:
+
+- **rt_prim calls the same prims the interpreter did**, but through
+  `osier-rt`'s prims table, which now has **58 rows** (was 80): the 22
+  Shen-only prims are deleted (`boolean? element? error? error-to-string
+  eval-kl function? gensym get-time hdstr kill newvar n->string pos set
+  shen.fail! stream? string->n symbol? tlstr trap-error variable? wait`) —
+  none is emission-reachable from the Elm front end, so the corpus stayed
+  BYTE-IDENTICAL (149 = 149) and qbe-check stayed 219/219.  `trap-error` is
+  gone outright (Osier has no exceptions; the old loud rejection branch in
+  rt.zig went with it — an unreachable name now dies through the ordinary
+  unknownPrim path), and `eval-kl` took `marshal.zig` with it.
+- **The effect-loop seam** (`effectloop.host_apply`) defaults to a LOUD stub:
+  the host module cannot link the interpreter's applier, so each driver
+  installs its own at startup — elmvm and the AOT driver install
+  `hostcall.applyClosureN` (from zinc-vm), the QBE runtime installs its
+  native `hostApply` (unchanged behaviour, new plumbing).
+- **The depth-guard message** no longer claims "this runtime raises it to
+  64 MiB unless QBE_NO_RLIMIT=1" unconditionally: the raise clause prints
+  only when the raise actually took effect (a hard RLIMIT_STACK cap or
+  QBE_NO_RLIMIT=1 means it did not, and the live numbers speak for
+  themselves).
+
+The va* stack helpers (`vaInit`/`vaPush`/`vaPop`/`vaFree`) the runtime stages
+prim args through moved from `interp.zig` to `osier-rt`'s `varray.zig`;
+`rt.zig` and `effectloop.zig` import them from there.

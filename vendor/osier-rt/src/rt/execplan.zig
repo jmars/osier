@@ -41,7 +41,7 @@ const types = gc.types;
 const state = @import("state.zig");
 const values = @import("values.zig");
 const symbols = @import("symbols.zig");
-const interp = @import("interp.zig");
+const varray = @import("varray.zig");
 
 const Gc = gc.Gc;
 const Value = types.Value;
@@ -1142,7 +1142,7 @@ fn slurpFd(fd: i32) ?Slurp {
 /// per-path gc_root_pop).
 pub fn primExecPlan(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     const g = vm.gc;
-    var plan = interp.vaPop(stack);
+    var plan = varray.vaPop(stack);
     g.rootPushValue(&plan); // C:2102
     defer g.rootPop(); // every C exit path pops exactly once
 
@@ -1228,7 +1228,7 @@ fn strToBufZ(v: Value, buf: []u8) [:0]u8 {
 
 /// C: zincvm.c:1955-1962 cd: chdir to Path.  Returns raw boolean.
 pub fn primCd(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const path = interp.vaPop(stack);
+    const path = varray.vaPop(stack);
     if (path.tag != .string) return vm.throwShen("cd: path must be a string");
     var buf: [PATH_MAX]u8 = undefined;
     const p = strToBufZ(path, &buf);
@@ -1239,7 +1239,7 @@ pub fn primCd(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// C: zincvm.c:2191-2199 getcwd.  Arity 0 — pop spurious arg if present
 /// (newvar precedent).
 pub fn primGetcwd(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    if (stack.len > 0) _ = interp.vaPop(stack);
+    if (stack.len > 0) _ = varray.vaPop(stack);
     var buf: [PATH_MAX]u8 = undefined;
     if (getcwd(&buf, buf.len)) |p| {
         acc.* = values.valString(vm.gc, std.mem.sliceTo(p, 0));
@@ -1252,7 +1252,7 @@ pub fn primGetcwd(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// (nullary prim calls cannot compile; used by $$ shell expansion).
 pub fn primGetpid(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm; // no vm use once the is_wasm stub is stripped (native-only port)
-    if (stack.len > 0) _ = interp.vaPop(stack);
+    if (stack.len > 0) _ = varray.vaPop(stack);
     acc.* = values.valNumber(getpid());
 }
 
@@ -1262,7 +1262,7 @@ pub fn primGetpid(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 
 /// C: zincvm.c:2211-2219 getenv: value or "".
 pub fn primGetenv(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const name_v = interp.vaPop(stack);
+    const name_v = varray.vaPop(stack);
     if (name_v.tag != .string) return vm.throwShen("getenv: name must be a string");
     var buf: [PATH_MAX]u8 = undefined;
     const n = strToBufZ(name_v, &buf);
@@ -1276,8 +1276,8 @@ pub fn primGetenv(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// C: zincvm.c:2580-2595 setenv: Name Val -> true.  ZINC RTL: a1 = Name
 /// (popped FIRST), a2 = Val.
 pub fn primSetenv(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const name_v = interp.vaPop(stack);
-    const val_v = interp.vaPop(stack);
+    const name_v = varray.vaPop(stack);
+    const val_v = varray.vaPop(stack);
     if (name_v.tag != .string) return vm.throwShen("setenv: name must be a string");
     if (val_v.tag != .string) return vm.throwShen("setenv: value must be a string");
     var nbuf: [PATH_MAX]u8 = undefined;
@@ -1308,7 +1308,7 @@ fn strLessThan(_: void, a: [:0]const u8, b: [:0]const u8) bool {
 /// roots its args; `result` is rooted across iterations — C:2256-2262).
 pub fn primGlob(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     const g = vm.gc;
-    const pat = interp.vaPop(stack);
+    const pat = varray.vaPop(stack);
     if (pat.tag != .string) return vm.throwShen("glob: pattern must be a string");
 
     // pattern copy (C truncates at PATH_MAX-1).

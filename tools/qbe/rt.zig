@@ -49,11 +49,11 @@ const gc = @import("gc");
 const types = gc.types;
 const heap = gc.heap;
 const scan = gc.scan;
-const vm_mod = @import("vm");
-const values = vm_mod.values;
-const state = vm_mod.state;
-const interp = vm_mod.interp;
-const prims = vm_mod.prims;
+const rt_mod = @import("rt");
+const values = rt_mod.values;
+const state = rt_mod.state;
+const varray = rt_mod.varray;
+const prims = rt_mod.prims;
 const effectloop = @import("effectloop");
 
 const Gc = heap.Gc;
@@ -503,12 +503,12 @@ fn callArityRet(arity: i32, f: *const anyopaque, e: ?[*]Value, buf: [*]Value) Re
 // =====================================================================
 
 /// The effect loop's `host_apply` hook.  Every lambda the QBE path produces
-/// is Desc*-coded (never *Instr), so the interpreted default
-/// (hostcall.applyClosureN -> vmExecEnv) would execute a Desc as instructions.
-/// This dispatches natively through rt_apply — the exact path generated code
-/// already uses — and rt_apply roots fnv + the arg array across its own
-/// allocations before calling into the generated function.  The effect loop's
-/// call sites are 1 continuation/handler arg or 2 update args (<< max_arity).
+/// is Desc*-coded (never a VM *Instr), so an interpreted applier would
+/// execute a Desc as instructions.  This dispatches natively through
+/// rt_apply — the exact path generated code already uses — and rt_apply
+/// roots fnv + the arg array across its own allocations before calling into
+/// the generated function.  The effect loop's call sites are 1
+/// continuation/handler arg or 2 update args (<< max_arity).
 fn hostApply(vm_: *state.Vm, fnv: Value, args: []const Value) state.VmError!Value {
     _ = vm_;
     if (args.len > max_arity) dieLoud("host apply exceeds the qbe rt_callN table");
@@ -538,35 +538,25 @@ export fn rt_prim(name: [*:0]const u8, args: [*]Value, nargs: i32) callconv(.c) 
     g.rootPushValueArray(&buf, &live);
     defer g.rootPop();
 
-    // trap-error vmExecEnv's a lambda body as a VM *Instr stream
-    // (prims.zig:1087/1141).  Every lambda the native slice produces is
-    // Desc*-coded, never *Instr — handing it to trap-error would execute a
-    // Desc struct as instructions.  Reject loudly rather than silently
-    // misinterpreting (unreachable from today's frontend, but the loudness
-    // contract must not have a silent-UB hole).
-    if (std.mem.eql(u8, std.mem.span(name), "trap-error")) {
-        for (buf[0..n]) |*a| {
-            if (a.tag == .lambda) {
-                dieLoud("prim 'trap-error' received a native closure (Desc* code) — no VM lambda exists in the qbe slice");
-            }
-        }
-    }
-
+    // (trap-error used to need a special rejection here — it vmExecEnv'd its
+    // body as VM *Instr, which a Desc*-coded native closure is not.  The prim
+    // is deleted outright now: an unreachable name hits unknownPrim below and
+    // dies loudly through diePrim.)
     var stack: types.ValueArray = .{ .data = null, .len = 0, .cap = 0 };
-    interp.vaInit(g, &stack);
+    varray.vaInit(g, &stack);
     // Root the SLOT, not the base: vaInit's array is GC-allocated and moves
     // on collection; a registration-time copy of its base goes stale (the
     // effectloop's runPrim uses the same slot-rooting pattern).  ROOT_PTR
     // skips a null slot, so the pre-vaInit null case is covered.
     g.rootPushPtr(@ptrCast(&stack.data));
     defer g.rootPop();
-    defer interp.vaFree(&stack);
+    defer varray.vaFree(&stack);
     // Push REVERSED so the first pop is args[0] — the order the ZINC
     // emitter's RTL pushes produce (PrimApp args are in pop order).
     var i: usize = n;
     while (i > 0) {
         i -= 1;
-        interp.vaPush(g, &stack, buf[i]);
+        varray.vaPush(g, &stack, buf[i]);
     }
     var acc: Value = zeroValue();
     g.rootPushValue(&acc);
@@ -654,6 +644,9 @@ const PAGE_BYTES: usize = 4096;
 var guard_stack_top: usize = 0; // [stack] VMA high end
 var guard_stack_low: usize = 0; // top - rlimit_soft: the growth floor
 var guard_limit: std.posix.rlim_t = 0; // the rlimit the floor came from
+/// Whether main's 64 MiB RLIMIT_STACK raise ACTUALLY took effect (the
+/// segvHandler's message conditions its raise clause on this — see below).
+var rlimit_raised: bool = false;
 
 /// The alternate signal stack — static storage, NOT on the guarded stack,
 /// big enough for a handler that only arithmetic + write(2).
@@ -775,9 +768,19 @@ fn segvHandler(sig: std.posix.SIG, info: *const std.posix.siginfo_t, ctx: ?*anyo
     // buffer, werr is a raw write(2), exit_group is a raw syscall.
     var buf: [512]u8 = undefined;
     const used = guard_stack_top -| rsp;
-    const msg = std.fmt.bufPrint(&buf, "qbe-rt: native stack depth exceeded: deep non-tail recursion exhausted the C stack ({d}.{d} MiB in use of a {d}.{d} MiB limit) — rewrite the recursion as tail-recursive, or raise the stack limit (ulimit -s; this runtime raises it to 64 MiB unless QBE_NO_RLIMIT=1).  See docs/qbe-backend.md.\n", .{
+    // The raise clause is printed ONLY when the raise actually took effect
+    // (rlimit_raised below): with QBE_NO_RLIMIT=1, or when a hard cap
+    // refused the raise, saying "this runtime raises it to 64 MiB" would
+    // describe an action that did not happen — a message that lies is worse
+    // than no message.  The limit numbers themselves are read live above.
+    const raise_note = if (rlimit_raised)
+        "; this runtime raised it to 64 MiB (set QBE_NO_RLIMIT=1 to test the default)"
+    else
+        "";
+    const msg = std.fmt.bufPrint(&buf, "qbe-rt: native stack depth exceeded: deep non-tail recursion exhausted the C stack ({d}.{d} MiB in use of a {d}.{d} MiB limit{s}) — rewrite the recursion as tail-recursive, or raise the stack limit (ulimit -s).  See docs/qbe-backend.md.\n", .{
         used >> 20,        ((used & 0xfffff) * 10) >> 20,
         guard_limit >> 20, ((guard_limit & 0xfffff) * 10) >> 20,
+        raise_note,
     }) catch "qbe-rt: native stack depth exceeded (C stack exhausted)\n";
     werr(msg);
     std.os.linux.exit_group(1);
@@ -895,7 +898,9 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
             if (cur_lim.cur < want_stack) {
                 var lim = cur_lim;
                 lim.cur = want_stack;
-                std.posix.setrlimit(.STACK, lim) catch {};
+                if (std.posix.setrlimit(.STACK, lim)) |_| {
+                    rlimit_raised = true; // the raise took effect
+                } else |_| {}
             }
         } else |_| {}
     }
@@ -1016,9 +1021,9 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     }
 
     // Host the effect loop EXACTLY like tools/aot/run.zig and tools/elmvm.zig:
-    // install the native host->Elm dispatcher (the default interpreted
-    // hostcall.applyClosureN would vmExecEnv a Desc* as *Instr), run the entry,
-    // and if it returns a Program vector drive the shared CEK effect manager
+    // install the native host->Elm dispatcher (the seam's default is a loud
+    // stub — only a native applier can execute Desc*-coded closures), run the
+    // entry, and if it returns a Program vector drive the shared CEK effect manager
     // to the final model.  The Vm already wired *stinput*/*stoutput*/*sterror*
     // in initGlobals, so StreamRef reads the same value-table slots elmvm does.
     effectloop.host_apply = &hostApply;

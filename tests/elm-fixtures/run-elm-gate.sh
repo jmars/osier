@@ -176,7 +176,7 @@ rawrun() {
 #
 # THE OUT-OF-FRAMES CHECK (handoff osier-vmdepth).  `run`/`rawrun` compare
 # stdout text and cannot see an EXIT STATUS, which is the whole point here: the
-# VM's call-frame stack (CALL_STACK_DEPTH, vendor/zinc-vm/src/gc/types.zig) used
+# VM's call-frame stack (CALL_STACK_DEPTH, vendor/osier-rt/src/gc/types.zig) used
 # to run out SILENTLY — exit 0, empty stderr, and whatever `acc` held printed as
 # the answer.  A user must never get a wrong answer with a success status, so
 # this check asserts on the process instead of on the value:
@@ -784,9 +784,9 @@ dispatch() {
         echo "FAIL $name: compile error: $(cat "$outfile")"; fail=$((fail+1)); return
       fi
       cap="$(sed -n 's/.*CALL_STACK_DEPTH *= *\([0-9][0-9]*\).*/\1/p' \
-               "$ROOT/vendor/zinc-vm/src/gc/types.zig" | head -1)"
+               "$ROOT/vendor/osier-rt/src/gc/types.zig" | head -1)"
       if [ -z "$cap" ]; then
-        echo "FAIL $name: cannot read CALL_STACK_DEPTH from vendor/zinc-vm/src/gc/types.zig"; fail=$((fail+1)); return
+        echo "FAIL $name: cannot read CALL_STACK_DEPTH from vendor/osier-rt/src/gc/types.zig"; fail=$((fail+1)); return
       fi
       read -r ctl margin <<< "$args"
       mod=$(module_name "$fixfile")

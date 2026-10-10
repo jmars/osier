@@ -189,7 +189,7 @@ fi
 # different inputs — treat "cannot tell" as stale and rebuild), and a failed
 # rebuild must refuse LOUDLY rather than answer from a stale object.  A stale
 # rt.o is exactly this repo's documented stale-artifact class.
-rt_newer="$(find "$ROOT/tools/qbe/rt.zig" "$ROOT/vendor/zinc-vm/src" "$ROOT/src/effectloop.zig" \
+rt_newer="$(find "$ROOT/tools/qbe/rt.zig" "$ROOT/vendor/osier-rt/src" "$ROOT/src/effectloop.zig" \
               -newer "$RT" -print -quit 2>/dev/null)" || rt_newer="PROBE_FAILED"
 if [ "$rt_newer" = "PROBE_FAILED" ]; then
   say "qbe-selfhost: rt.o freshness probe FAILED — rebuilding rather than trusting it" >&2

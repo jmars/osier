@@ -1,24 +1,32 @@
-//! src/vm.zig — module root for the Shen ZINC VM port.
+//! src/vm.zig — module root for the ZINC VM INTERPRETER (the half that dies
+//! at P8; handoff-osier-rtsplit).
 //!
-//! Layout (plan DECISION / ARCHITECTURE):
-//!   vm/state.zig    — Vm struct (owns *Gc, err slot, symbol interner, ...)
-//!   vm/values.zig   — value model (val_* constructors, print_value, str_value,
-//!                     deep_equal) — M0
-//!   vm/symbols.zig  — symbol interner (sym_intern_hash / sym_dyn_get /
-//!                     sym_dyn_resize) + val_symbol sans static store — M1
-//!   vm/tables.zig   — defun/values global tables + GC registration glue — M2
-//!   vm/parser.zig   — csexp parser + resolve_jumps + print_instr debug aid — M3
-//!   vm/interp.zig   — ValueArray + env + the eval loop (vm_exec_env) — M4
-//!   vm/prims.zig    — prim table + dispatch + the pure-subset exec_primitive — M5
+//! The runtime (GC, values, state, tables, varray, prims, streams, execplan)
+//! was split into the osier-rt package ("rt"), which this package depends on
+//! and re-exports below so existing `@import("vm").values`-style references
+//! keep working.  What is INTERPRETER-ONLY here:
+//!   vm/parser.zig   — csexp parser + resolve_jumps + print_instr + the
+//!                     bundle loader (loadBundle) — M3/M6
+//!   vm/interp.zig   — the eval loop (vm_exec_env / vm_exec) — M4
+//!   vm/hostcall.zig — host-side calls into BUNDLED closures via vmExecEnv
+//!
+//! DELETED with the split: vm/marshal.zig (its only consumer was the
+//! eval-kl prim, unreachable from Osier) and the Shen catch machinery
+//! (CatchSite/catch_chain/in_trap_error) with the trap-error prim.
 
-pub const state = @import("vm/state.zig");
-pub const values = @import("vm/values.zig");
-pub const symbols = @import("vm/symbols.zig");
-pub const tables = @import("vm/tables.zig");
+const rt = @import("rt");
+
+// ---- the runtime package, re-exported (osier-rt) ----
+pub const state = rt.state;
+pub const values = rt.values;
+pub const symbols = rt.symbols;
+pub const tables = rt.tables;
+pub const varray = rt.varray;
+pub const prims = rt.prims;
+pub const streams = rt.streams;
+pub const execplan = rt.execplan;
+
+// ---- the interpreter (this package's own content) ----
 pub const parser = @import("vm/parser.zig");
 pub const interp = @import("vm/interp.zig");
-pub const prims = @import("vm/prims.zig");
-pub const streams = @import("vm/streams.zig");
-pub const execplan = @import("vm/execplan.zig");
 pub const hostcall = @import("vm/hostcall.zig");
-pub const marshal = @import("vm/marshal.zig");

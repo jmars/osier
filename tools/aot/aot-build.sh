@@ -125,12 +125,13 @@ pub fn build(b: *std.Build) void {
     const count_instrs_opt = b.option(bool, "count-instrs", "AOT: emit the per-block instruction counter") orelse false;
     const count_instrs = b.addOptions();
     count_instrs.addOption(bool, "count_instrs", count_instrs_opt);
-    const gc_mod = b.createModule(.{ .root_source_file = b.path("vendor/zinc-vm/src/gc.zig"), .target = target, .optimize = optimize });
-    const vm_mod = b.createModule(.{ .root_source_file = b.path("vendor/zinc-vm/src/vm.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "gc", .module = gc_mod }} });
+    const gc_mod = b.createModule(.{ .root_source_file = b.path("vendor/osier-rt/src/gc.zig"), .target = target, .optimize = optimize });
+    const rt_mod = b.createModule(.{ .root_source_file = b.path("vendor/osier-rt/src/rt.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "gc", .module = gc_mod }} });
+    const vm_mod = b.createModule(.{ .root_source_file = b.path("vendor/zinc-vm/src/vm.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "gc", .module = gc_mod }, .{ .name = "rt", .module = rt_mod }} });
     const aotrt_mod = b.createModule(.{ .root_source_file = b.path("tools/aot/runtime.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "gc", .module = gc_mod }, .{ .name = "vm", .module = vm_mod }} });
     aotrt_mod.addOptions("count_instrs", count_instrs);
     const gen_mod = b.createModule(.{ .root_source_file = b.path("gen.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "gc", .module = gc_mod }, .{ .name = "vm", .module = vm_mod }, .{ .name = "runtime.zig", .module = aotrt_mod }} });
-    const effectloop_mod = b.createModule(.{ .root_source_file = b.path("src/effectloop.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "gc", .module = gc_mod }, .{ .name = "vm", .module = vm_mod }} });
+    const effectloop_mod = b.createModule(.{ .root_source_file = b.path("src/effectloop.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "gc", .module = gc_mod }, .{ .name = "rt", .module = rt_mod }} });
     const exe_mod = b.createModule(.{ .root_source_file = b.path("tools/aot/run.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "gc", .module = gc_mod }, .{ .name = "vm", .module = vm_mod }, .{ .name = "runtime.zig", .module = aotrt_mod }, .{ .name = "aot_gen", .module = gen_mod }, .{ .name = "effectloop", .module = effectloop_mod }} });
     const exe = b.addExecutable(.{ .name = "aot-app", .root_module = exe_mod });
     b.installArtifact(exe);

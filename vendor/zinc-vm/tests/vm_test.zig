@@ -16,6 +16,7 @@ const state = vm.state;
 const tables = vm.tables;
 const parser = vm.parser;
 const prims = vm.prims;
+const varray = vm.varray;
 
 /// 16 MB heap (the C minimum) with a 64 MB reservation (avoids the 4 GB
 /// default VAS), mirroring tests/gc_test.zig's testInit.
@@ -939,10 +940,6 @@ test "M4 over-applying a 1-param closure throws (old zinctest-35 shape)" {
     const len = try parser.parseBytecode(&g, &sym, "(mn[2:n]99n[2:n]42c(a[1:n]0v)t)", &code);
     parser.resolveJumps(code.?, len);
 
-    var site = state.CatchSite{ .in_trap_error = true };
-    site.parent = v.catch_chain;
-    v.catch_chain = &site;
-    defer v.catch_chain = site.parent;
 
     g.rootPushPtr(@ptrCast(&code));
     err: {
@@ -1138,7 +1135,7 @@ test "M11 .global single-probe: bundled defun resolves, missing throws" {
     try std.testing.expectEqual(wm0, g.rootWatermark());
 }
 
-test "M4 apply non-callable: hard stop outside trap, throw inside trap" {
+test "M4 apply non-callable: hard stop (the catchable arm died with trap-error)" {
     var g = try testInit();
     defer g.deinit();
     var v: state.Vm = undefined;
@@ -1149,28 +1146,6 @@ test "M4 apply non-callable: hard stop outside trap, throw inside trap" {
     // the number 42 comes back normally (stderr noise is expected).
     try expectRunNum(&g, &v, "(n[2:n]42p)", 42);
 
-    // Inside a trap-error catch site: the same program throws (catchable).
-    var sym = symbols.SymbolInterner.init();
-    defer sym.deinit();
-    var code: ?[*]types.Instr = null;
-    const len = try parser.parseBytecode(&g, &sym, "(n[2:n]42p)", &code);
-    parser.resolveJumps(code.?, len);
-
-    var site = state.CatchSite{ .in_trap_error = true };
-    site.parent = v.catch_chain;
-    v.catch_chain = &site;
-    defer v.catch_chain = site.parent;
-
-    g.rootPushPtr(@ptrCast(&code));
-    err: {
-        defer g.rootPop();
-        try std.testing.expectError(error.ShenError, interp.vmExec(&v, @ptrCast(code.?), len));
-        break :err;
-    }
-    try std.testing.expectEqualStrings(
-        "apply non-callable",
-        std.mem.sliceTo(v.err_slot.payload.error_.message.?, 0),
-    );
 }
 
 test "M4 endlet on an empty env is a guarded no-op (C:3387)" {
@@ -1184,12 +1159,7 @@ test "M4 endlet on an empty env is a guarded no-op (C:3387)" {
 
     // C guards OP_ENDLET with `if (env_len > 0) env_pop(...)` — so (d) on
     // an empty env neither throws nor dies; it is a no-op and the program
-    // simply runs off the end.  envPop's trap-site throw branch is purely
-    // defensive (unreachable from the eval loop).
-    var site = state.CatchSite{ .in_trap_error = true };
-    site.parent = v.catch_chain;
-    v.catch_chain = &site;
-    defer v.catch_chain = site.parent;
+    // simply runs off the end.
 
     const wm0 = g.rootWatermark();
     var code: ?[*]types.Instr = null;
@@ -1421,13 +1391,8 @@ test "T4 N>A apply: peel continuation, non-callable/prim throw" {
     // (2) Over-application to a fn returning a NON-callable, inside
     // trap-error: 2-param fn returning a1; the peel leaves the number 0
     // with arg 2 remaining -> catchable ShenError -> handler returns 77.
-    try expectRunNum(
-        &g,
-        &v,
-        "(mc(n[2:n]77v)c(mn[1:n]2n[1:n]1n[1:n]0c(ra[1:n]1v)pv)g[10:s]trap-errorp)",
-        77,
-    );
-    // ... and the error message outside the trap path:
+    // (The trap-error snippet that used to run here is deleted with the
+    // prim; peel's over-application throws are unconditional and stay.)
     {
         var sym = symbols.SymbolInterner.init();
         defer sym.deinit();
@@ -1435,10 +1400,6 @@ test "T4 N>A apply: peel continuation, non-callable/prim throw" {
         var code: ?[*]types.Instr = null;
         const len = try parser.parseBytecode(&g, &sym, "(mn[1:n]2n[1:n]1n[1:n]0c(ra[1:n]1v)p)", &code);
         parser.resolveJumps(code.?, len);
-        var site = state.CatchSite{ .in_trap_error = true };
-        site.parent = v.catch_chain;
-        v.catch_chain = &site;
-        defer v.catch_chain = site.parent;
         g.rootPushPtr(@ptrCast(&code));
         err: {
             defer g.rootPop();
@@ -1460,10 +1421,6 @@ test "T4 N>A apply: peel continuation, non-callable/prim throw" {
         var code: ?[*]types.Instr = null;
         const len = try parser.parseBytecode(&g, &sym, "(mn[1:n]2n[1:n]1n[1:n]0c(rg[1:s]+v)p)", &code);
         parser.resolveJumps(code.?, len);
-        var site = state.CatchSite{ .in_trap_error = true };
-        site.parent = v.catch_chain;
-        v.catch_chain = &site;
-        defer v.catch_chain = site.parent;
         g.rootPushPtr(@ptrCast(&code));
         err: {
             defer g.rootPop();
@@ -1600,12 +1557,12 @@ fn primExec(
     const wm0 = g.rootWatermark();
     var stack: types.ValueArray = .{ .data = null, .len = 0, .cap = 0 };
     g.rootPushPtr(@ptrCast(&stack.data));
-    interp.vaInit(g, &stack);
+    varray.vaInit(g, &stack);
     // Push in REVERSE so args[0] lands on top (popped first, = a1).
     var i: usize = args.len;
     while (i > 0) {
         i -= 1;
-        interp.vaPush(g, &stack, args[i]);
+        varray.vaPush(g, &stack, args[i]);
     }
     try prims.execPrimitive(v, name, acc, &stack);
     g.rootPop(); // stack.data
@@ -1662,11 +1619,9 @@ test "M5 zinctest 12-16: type predicates" {
     v.init(&g);
     defer v.deinit();
     try expectRunBool(&g, &v, "(mn[2:n]42g[7:s]number?p)", true);
-    try expectRunBool(&g, &v, "(ms[5:s]hellog[7:s]symbol?p)", true);
     // M4: number? recognizes floats (review fix-2).
     try expectRunBool(&g, &v, "(mF[3:F]2.0g[7:s]number?p)", true);
     try expectRunBool(&g, &v, "(mS[3:S]2.0g[7:s]number?p)", false);
-    try expectRunBool(&g, &v, "(mb[4:b]trueg[8:s]boolean?p)", true);
     try expectRunBool(&g, &v, "(mS[2:S]hig[7:s]string?p)", true);
     try expectRunBool(&g, &v, "(mn[2:n]42g[7:s]string?p)", false);
 }
@@ -1683,17 +1638,14 @@ test "M5 zinctest 17: cons" {
     try std.testing.expect(values.deepEqual(r, want, 0));
 }
 
-test "M5 zinctest 18-23: string prims cn/n->string/string->n/str/tlstr/intern" {
+test "M5 string prims cn/str/intern (the Shen-only string prims are pruned)" {
     var g = try testInit();
     defer g.deinit();
     var v: state.Vm = undefined;
     v.init(&g);
     defer v.deinit();
     try expectRunStr(&g, &v, "(mS[5:S]worldS[5:S]hellog[2:s]cnp)", "helloworld");
-    try expectRunStr(&g, &v, "(mn[2:n]42g[9:s]n->stringp)", "*"); // ASCII 42
-    try expectRunNum(&g, &v, "(mS[2:S]42g[9:s]string->np)", 52); // ASCII '4'
     try expectRunStr(&g, &v, "(ms[5:s]hellog[3:s]strp)", "hello");
-    try expectRunStr(&g, &v, "(mS[3:S]abcg[5:s]tlstrp)", "bc");
     const r = try expectRunVal(&g, &v, "(mS[3:S]foog[6:s]internp)");
     try std.testing.expectEqual(types.ValTag.symbol, r.tag);
     try std.testing.expectEqualStrings("foo", values.symSlice(r));
@@ -1739,58 +1691,6 @@ test "M5 zinctest 26: simple-error throws ShenError with the message" {
     );
 }
 
-test "M5 zinctest 27: trap-error runs the handler on the error" {
-    var g = try testInit();
-    defer g.deinit();
-    var v: state.Vm = undefined;
-    v.init(&g);
-    defer v.deinit();
-    // (trap-error (simple-error "oops") (lambda E "caught")) — handler pushed
-    // FIRST (bottom), body LAST (top), exactly the zinctest RTL comment.
-    try expectRunStr(
-        &g,
-        &v,
-        "(mc(S[6:S]caughtv)c(mS[4:S]oopsg[12:s]simple-errorpv)g[10:s]trap-errorp)",
-        "caught",
-    );
-    // Non-throwing body: trap-error returns the body value untouched.
-    try expectRunNum(
-        &g,
-        &v,
-        "(mc(S[6:S]caughtv)c(mn[1:n]7v)g[10:s]trap-errorp)",
-        7,
-    );
-}
-
-test "M5 trap-error handler sees the error: error-to-string through the trap path" {
-    var g = try testInit();
-    defer g.deinit();
-    var v: state.Vm = undefined;
-    v.init(&g);
-    defer v.deinit();
-    // Handler = (lambda E (error-to-string E)): access 0 reads the appended
-    // error from the handler env, primErrorToString copies it through the
-    // slot-rooted valStringFromErr (the C:1973 latent-bug port-fix).
-    try expectRunStr(
-        &g,
-        &v,
-        "(mc(ma[1:n]0g[15:s]error-to-stringpv)c(mS[4:S]boomg[12:s]simple-errorpv)g[10:s]trap-errorp)",
-        "boom",
-    );
-}
-
-test "M5 zinctest 28: get-time unix returns a sane epoch-seconds number" {
-    var g = try testInit();
-    defer g.deinit();
-    var v: state.Vm = undefined;
-    v.init(&g);
-    defer v.deinit();
-    const r = try expectRunVal(&g, &v, "(ms[4:s]unixg[8:s]get-timep)");
-    try std.testing.expectEqual(types.ValTag.number, r.tag);
-    try std.testing.expect(r.payload.number > 1_600_000_000); // > 2020-09
-    try std.testing.expect(r.payload.number < 4_000_000_000); // < 2096
-}
-
 test "M5 zinctest 33: appterm to a primitive" {
     var g = try testInit();
     defer g.deinit();
@@ -1825,9 +1725,9 @@ test "P3 superinstruction parity: fused == unfused for every op" {
     v.init(&g);
     defer v.deinit();
 
-    // A = access + prim (closure body: a 0; P hdstr; v over "hi" -> "h").
-    try expectRunStr(&g, &v, "(mS[2:S]hic(a[1:n]0P[5:s]hdstrv)t)", "h");
-    try expectRunStr(&g, &v, "(mS[2:S]hic(A[1:n]0[5:s]hdstrv)t)", "h");
+    // A = access + prim (closure body: a 0; P str; v over "hi" -> "hi").
+    try expectRunStr(&g, &v, "(mS[2:S]hic(a[1:n]0P[3:s]strv)t)", "hi");
+    try expectRunStr(&g, &v, "(mS[2:S]hic(A[1:n]0[3:s]strv)t)", "hi");
 
     // K = const + prim (number 42 then number? -> true).
     try expectRunBool(&g, &v, "(n[2:n]42P[7:s]number?v)", true);
@@ -1916,7 +1816,8 @@ test "M5 unknown prim hard-stops (C: print + return -1)" {
     // isValid/lookupDef agree with the table.
     try std.testing.expect(prims.isValid("+"));
     try std.testing.expect(!prims.isValid("frobnicate"));
-    try std.testing.expect(prims.lookupDef("trap-error") != null);
+    // trap-error is deleted with the Shen-only prims — lookupDef misses.
+    try std.testing.expect(prims.lookupDef("trap-error") == null);
 }
 
 test "M5 initGlobals registers every prim: defunGet falls back to valPrim" {
@@ -1938,7 +1839,7 @@ test "M5 initGlobals registers every prim: defunGet falls back to valPrim" {
     }
 }
 
-test "M5 hd/tl/empty? and list ops reverse/append/assoc/element?" {
+test "M5 hd/tl/empty? and list ops reverse/append/assoc" {
     var g = try testInit();
     defer g.deinit();
     var v: state.Vm = undefined;
@@ -1993,11 +1894,6 @@ test "M5 hd/tl/empty? and list ops reverse/append/assoc/element?" {
         primExec(&g, &v, "assoc", &.{ values.valNumber(1), values.valNumber(7) }, &acc),
     );
 
-    // element?
-    try primExec(&g, &v, "element?", &.{ values.valNumber(2), list }, &acc);
-    try std.testing.expectEqual(@as(i64, 1), acc.payload.boolean);
-    try primExec(&g, &v, "element?", &.{ values.valNumber(9), list }, &acc);
-    try std.testing.expectEqual(@as(i64, 0), acc.payload.boolean);
 }
 
 test "M5 vectors: absvector/address->/<-address with a forced scavenge (write barrier)" {
@@ -2041,13 +1937,9 @@ test "M5 vectors: absvector/address->/<-address with a forced scavenge (write ba
     try std.testing.expectEqual(types.ValTag.nil, got.tag);
 }
 
-test "M5 error-to-string port-fix: message copy survives churn (valStringFromErr)" {
+test "M5 port-fix: valStringFromErr's message copy survives churn" {
     var g = try testInit();
     defer g.deinit();
-    var v: state.Vm = undefined;
-    v.init(&g);
-    defer v.deinit();
-    var acc: types.Value = undefined;
 
     // An error whose message sits in the NURSERY; churn the nursery, then
     // copy the message through the slot-rooted helper and check content.
@@ -2066,17 +1958,12 @@ test "M5 error-to-string port-fix: message copy survives churn (valStringFromErr
     try std.testing.expectEqual(types.ValTag.string, s.tag);
     try std.testing.expectEqualStrings("stale-pointer probe message", values.strSlice(s));
 
-    // And through the prim: error->string, string passes through, anything
-    // else becomes "unknown error".
-    try primExec(&g, &v, "error-to-string", &.{err}, &acc);
-    try std.testing.expectEqualStrings("stale-pointer probe message", values.strSlice(acc));
-    try primExec(&g, &v, "error-to-string", &.{values.valNumber(1)}, &acc);
-    try std.testing.expectEqualStrings("unknown error", values.strSlice(acc));
-    try primExec(&g, &v, "error?", &.{err}, &acc);
-    try std.testing.expectEqual(@as(i64, 1), acc.payload.boolean);
+    // (The error-to-string/error? prim half of this test is deleted with the
+    // Shen-only prims; the slot-rooted valStringFromErr helper it exercised
+    // stays part of the vendored value model.)
 }
 
-test "M5 string prims unit: pos/hdstr/substring/char-code/c-strlen/cn/str/bytes" {
+test "M5 string prims unit: substring/char-code/c-strlen/cn/str/bytes" {
     var g = try testInit();
     defer g.deinit();
     var v: state.Vm = undefined;
@@ -2085,14 +1972,6 @@ test "M5 string prims unit: pos/hdstr/substring/char-code/c-strlen/cn/str/bytes"
     var acc: types.Value = undefined;
 
     const abc = values.valString(&g, "abc");
-    try primExec(&g, &v, "pos", &.{ abc, values.valNumber(1) }, &acc);
-    try std.testing.expectEqualStrings("b", values.strSlice(acc));
-    try primExec(&g, &v, "pos", &.{ abc, values.valNumber(9) }, &acc);
-    try std.testing.expectEqualStrings("", values.strSlice(acc)); // OOB outside trap
-    try primExec(&g, &v, "hdstr", &.{abc}, &acc);
-    try std.testing.expectEqualStrings("a", values.strSlice(acc));
-    try primExec(&g, &v, "tlstr", &.{values.valString(&g, "a")}, &acc);
-    try std.testing.expectEqualStrings("", values.strSlice(acc)); // safe len<=1 deviation
     try primExec(&g, &v, "substring", &.{ abc, values.valNumber(1), values.valNumber(5) }, &acc);
     try std.testing.expectEqualStrings("bc", values.strSlice(acc)); // clamped
     try primExec(&g, &v, "substring", &.{ abc, values.valNumber(-3), values.valNumber(2) }, &acc);
@@ -2124,7 +2003,7 @@ test "M5 string prims unit: pos/hdstr/substring/char-code/c-strlen/cn/str/bytes"
     try std.testing.expectEqualStrings("hi", values.strSlice(acc));
 }
 
-test "M5 set/value, gensym/newvar, @p/fst/snd, shen.fail!, variable?" {
+test "M5 value, @p/fst/snd, cons? (set/gensym/newvar/shen.fail!/variable? are pruned)" {
     var g = try testInit();
     defer g.deinit();
     var v: state.Vm = undefined;
@@ -2132,23 +2011,15 @@ test "M5 set/value, gensym/newvar, @p/fst/snd, shen.fail!, variable?" {
     defer v.deinit();
     var acc: types.Value = undefined;
 
-    // (set "counter" 42) returns the value; (value "counter") reads it back.
+    // (value "counter") reads back what the host stored via valueSet (the
+    // set prim is Shen-only and pruned; the table is the runtime's).
     const sym = symbols.valSymbol(&v.symbols, "counter");
-    try primExec(&g, &v, "set", &.{ sym, values.valNumber(42) }, &acc);
-    try std.testing.expectEqual(@as(i64, 42), acc.payload.number);
+    v.valueSet("counter", values.valNumber(42));
     try primExec(&g, &v, "value", &.{sym}, &acc);
     try std.testing.expectEqual(@as(i64, 42), acc.payload.number);
     // Unset (value X): symbol fallback (value_get has no prim fallback).
     try primExec(&g, &v, "value", &.{symbols.valSymbol(&v.symbols, "nope")}, &acc);
     try std.testing.expectEqual(types.ValTag.symbol, acc.tag);
-
-    // gensym / newvar counters.
-    try primExec(&g, &v, "gensym", &.{}, &acc);
-    try std.testing.expectEqualStrings("shen.gensym_0", values.symSlice(acc));
-    try primExec(&g, &v, "gensym", &.{}, &acc);
-    try std.testing.expectEqualStrings("shen.gensym_1", values.symSlice(acc));
-    try primExec(&g, &v, "newvar", &.{}, &acc);
-    try std.testing.expectEqualStrings("V_0", values.symSlice(acc));
 
     // @p / fst / snd.
     try primExec(&g, &v, "@p", &.{ values.valNumber(1), values.valNumber(2) }, &acc);
@@ -2159,27 +2030,7 @@ test "M5 set/value, gensym/newvar, @p/fst/snd, shen.fail!, variable?" {
     try primExec(&g, &v, "snd", &.{acc}, &acc);
     try std.testing.expectEqual(@as(i64, 4), acc.payload.number);
 
-    // shen.fail! with an arg builds (fail Arg); without one it throws.
-    try primExec(&g, &v, "shen.fail!", &.{values.valNumber(7)}, &acc);
-    try std.testing.expectEqual(types.ValTag.cons, acc.tag);
-    try std.testing.expectEqualStrings("fail", values.symSlice(acc.payload.cons.car.?.*));
-    try std.testing.expectError(error.ShenError, primExec(&g, &v, "shen.fail!", &.{}, &acc));
-
-    // variable?: uppercase-initial alnum/punct continuation.
-    try primExec(&g, &v, "variable?", &.{symbols.valSymbol(&v.symbols, "X2?")}, &acc);
-    try std.testing.expectEqual(@as(i64, 1), acc.payload.boolean);
-    try primExec(&g, &v, "variable?", &.{symbols.valSymbol(&v.symbols, "x")}, &acc);
-    try std.testing.expectEqual(@as(i64, 0), acc.payload.boolean);
-    try primExec(&g, &v, "variable?", &.{values.valNumber(1)}, &acc);
-    try std.testing.expectEqual(@as(i64, 0), acc.payload.boolean);
-
-    // function? sees both lambdas and prims; stream? sees streams.
-    try primExec(&g, &v, "function?", &.{values.valPrim("+")}, &acc);
-    try std.testing.expectEqual(@as(i64, 1), acc.payload.boolean);
-    try primExec(&g, &v, "function?", &.{values.valNumber(1)}, &acc);
-    try std.testing.expectEqual(@as(i64, 0), acc.payload.boolean);
-    try primExec(&g, &v, "stream?", &.{values.valStreamIn(null)}, &acc);
-    try std.testing.expectEqual(@as(i64, 1), acc.payload.boolean);
+    // cons? (the other predicates in this test were Shen-only and pruned).
     try primExec(&g, &v, "cons?", &.{values.valNil()}, &acc);
     try std.testing.expectEqual(@as(i64, 0), acc.payload.boolean);
 }
@@ -2227,7 +2078,7 @@ test "M6 loadBundle: entry parsed, defun-registered, callable" {
     // [pushmark 2 1 global + apply ret] — a 0-arg closure computing 2+1.
     // The ret lives INSIDE the cur parens (the bundle cur convention); the
     // name atom is csexp form [5:s]plus2.
-    const n = v.loadBundle("(([5:s]plus2 (c(mn[1:n]2n[1:n]1g[1:s]+pv))))");
+    const n = parser.loadBundle(&v, "(([5:s]plus2 (c(mn[1:n]2n[1:n]1g[1:s]+pv))))");
     try std.testing.expectEqual(@as(i32, 1), n);
     try std.testing.expectEqual(wm0, g.rootWatermark());
 
@@ -2400,7 +2251,7 @@ test "M6 loadBundle: keywords, streams, tables, primitive?-names" {
     var v: state.Vm = undefined;
     v.init(&g);
     defer v.deinit();
-    _ = v.loadBundle("(([5:s]plus2 (c(mn[1:n]2n[1:n]1g[1:s]+pv))))");
+    _ = parser.loadBundle(&v, "(([5:s]plus2 (c(mn[1:n]2n[1:n]1g[1:s]+pv))))");
 
     // Pattern keywords resolve to bare symbols (structural matching);
     // bundled entries keep their closures.
@@ -2416,7 +2267,7 @@ test "M6 loadBundle: keywords, streams, tables, primitive?-names" {
     var v2: state.Vm = undefined;
     v2.init(&g2);
     defer v2.deinit();
-    try std.testing.expectEqual(@as(i32, 2), v2.loadBundle(
+    try std.testing.expectEqual(@as(i32, 2), parser.loadBundle(&v2, 
         "(([6:s]lookup (c(mn[1:n]2n[1:n]1g[1:s]+pv))) ([5:s]plus2 (c(mn[1:n]2n[1:n]1g[1:s]+pv))))",
     ));
     try std.testing.expectEqual(types.ValTag.lambda, v2.defunGet("lookup").tag);
@@ -2459,7 +2310,7 @@ test "M6 loadBundle: nested curs, scavenge survival, error paths" {
     // Three entries: a plain body, a nested cur (inner closure applied at
     // runtime — the parser's cc-slot rooting across bundle entries), and a
     // string body.
-    try std.testing.expectEqual(@as(i32, 3), v.loadBundle(
+    try std.testing.expectEqual(@as(i32, 3), parser.loadBundle(&v, 
         "(([5:s]plus2 (c(mn[1:n]2n[1:n]1g[1:s]+pv))) ([5:s]seven (c(mc(mn[1:n]7v)pv))) ([2:s]hi (c(mS[2:S]hiv))))",
     ));
     try std.testing.expectEqual(wm0, g.rootWatermark());
@@ -2477,13 +2328,13 @@ test "M6 loadBundle: nested curs, scavenge survival, error paths" {
     // Error paths (C semantics: print + partial count, never throw), each
     // leaving the shadow stack balanced.
     // Not a bundle (no '((*').
-    try std.testing.expectEqual(@as(i32, 0), v.loadBundle("(mn[1:n]1g[1:s]+p)"));
+    try std.testing.expectEqual(@as(i32, 0), parser.loadBundle(&v, "(mn[1:n]1g[1:s]+p)"));
     // Name atom is not a symbol.
-    try std.testing.expectEqual(@as(i32, 0), v.loadBundle("(([1:n]5 (c(mn[1:n]1v))))"));
+    try std.testing.expectEqual(@as(i32, 0), parser.loadBundle(&v, "(([1:n]5 (c(mn[1:n]1v))))"));
     // Code list has no cur wrapper.
-    try std.testing.expectEqual(@as(i32, 0), v.loadBundle("(([1:s]f (mn[1:n]1v)))"));
+    try std.testing.expectEqual(@as(i32, 0), parser.loadBundle(&v, "(([1:s]f (mn[1:n]1v)))"));
     // Mid-bundle failure after one good entry: partial count.
-    try std.testing.expectEqual(@as(i32, 1), v.loadBundle(
+    try std.testing.expectEqual(@as(i32, 1), parser.loadBundle(&v, 
         "(([5:s]plus2 (c(mn[1:n]2n[1:n]1g[1:s]+pv))) (bad",
     ));
     try std.testing.expectEqual(wm0, g.rootWatermark());
@@ -2511,8 +2362,8 @@ fn primExecRooted(
     g.rootPushValue(acc);
     var stack: types.ValueArray = .{ .data = null, .len = 0, .cap = 0 };
     g.rootPushPtr(@ptrCast(&stack.data));
-    interp.vaInit(g, &stack);
-    interp.vaPush(g, &stack, arg.*); // fresh read through the root
+    varray.vaInit(g, &stack);
+    varray.vaPush(g, &stack, arg.*); // fresh read through the root
     try prims.execPrimitive(v, name, acc, &stack);
     g.rootPop(); // stack.data
     g.rootPop(); // acc
@@ -2536,10 +2387,10 @@ fn primExecRooted2(
     g.rootPushValue(acc);
     var stack: types.ValueArray = .{ .data = null, .len = 0, .cap = 0 };
     g.rootPushPtr(@ptrCast(&stack.data));
-    interp.vaInit(g, &stack);
+    varray.vaInit(g, &stack);
     // Push in REVERSE so a1 lands on top (popped first = first Shen arg).
-    interp.vaPush(g, &stack, a2.*);
-    interp.vaPush(g, &stack, a1.*);
+    varray.vaPush(g, &stack, a2.*);
+    varray.vaPush(g, &stack, a1.*);
     try prims.execPrimitive(v, name, acc, &stack);
     g.rootPop(); // stack.data
     g.rootPop(); // acc
@@ -3031,7 +2882,7 @@ test "M10 frame-stack pool: error unwind clears the used range (retention regres
     try std.testing.expectEqual(wm0, g.rootWatermark());
 }
 
-test "M10 frame-stack pool: reentrancy (trap-error + peel) keeps the pool bounded" {
+test "M10 frame-stack pool: reentrancy (peel) keeps the pool bounded" {
     var g = try testInit();
     defer g.deinit();
     var v: state.Vm = undefined;
@@ -3043,22 +2894,6 @@ test "M10 frame-stack pool: reentrancy (trap-error + peel) keeps the pool bounde
     try expectRunNum(&g, &v, "(mn[1:n]2n[1:n]1g[1:s]+t)", 3);
     try std.testing.expectEqual(@as(u64, 1), v.frame_pool_misses);
     try std.testing.expectEqual(@as(usize, 1), v.frame_pool_live);
-
-    // trap-error nests vmExecEnv twice (throwing body, then handler),
-    // SEQUENTIALLY — the handler reuses the body's released array.  Misses
-    // cap at 2 (nesting depth), never growing with the number of calls, and
-    // the LIFO free-list means a nested call can never alias an outer frame.
-    var i: usize = 0;
-    while (i < 20) : (i += 1) {
-        try expectRunStr(
-            &g,
-            &v,
-            "(mc(S[6:S]caughtv)c(mS[4:S]oopsg[12:s]simple-errorpv)g[10:s]trap-errorp)",
-            "caught",
-        );
-    }
-    try std.testing.expectEqual(@as(u64, 2), v.frame_pool_misses);
-    try std.testing.expectEqual(@as(usize, 2), v.frame_pool_live);
 
     // N>A peel nests one extra vmExecEnv per over-application step; a single
     // step (3 args into a 2-param fn returning a 1-param fn) keeps the pool
@@ -3344,7 +3179,7 @@ test "M11 tail-env reuse: mutual recursion with differing arities" {
     try std.testing.expectEqual(wm0, g.rootWatermark());
 }
 
-test "M11 tail-env reuse: interactions (peel, trap-error, partial)" {
+test "M11 tail-env reuse: interactions (peel, partial)" {
     var g = try testInit();
     defer g.deinit();
     var v: state.Vm = undefined;
@@ -3361,14 +3196,7 @@ test "M11 tail-env reuse: interactions (peel, trap-error, partial)" {
     v.defunSet("loop", loop);
     try expectRunNum(&g, &v, "(mn[1:n]0n[3:n]100g[4:s]loopp)", 700);
 
-    // (2) trap-error inside a tail-loop body: each iteration catches a
-    // simple-error (handler returns 1) and adds it — loop2(50, 0) == 50.
-    const loop2 = try expectRunVal(&g, &v,
-        "(c(rn[1:n]0a[1:n]1P[1:s]=f[1:n]7a[1:n]0j[2:n]19ma[1:n]0c(n[1:n]1v)c(mS[4:S]oopsg[12:s]simple-errorpv)g[10:s]trap-errorpP[1:s]+n[1:n]1a[1:n]1P[1:s]-g[5:s]loop2tv))");
-    v.defunSet("loop2", loop2);
-    try expectRunNum(&g, &v, "(mn[1:n]0n[2:n]50g[5:s]loop2p)", 50);
-
-    // (3) N<A partial built in TAIL position then applied later: mk(x) tail-
+    // (2) N<A partial built in TAIL position then applied later: mk(x) tail-
     // calls add with 1 arg (buildPartialClosure copies the env), returning
     // add(x); applying it to 6 yields 11.
     const add = try expectRunVal(&g, &v, "(c(rma[1:n]1a[1:n]0g[1:s]+pv))");
@@ -3381,251 +3209,4 @@ test "M11 tail-env reuse: interactions (peel, trap-error, partial)" {
     try expectRunNum(&g, &v, "(mn[1:n]6g[2:s]p5p)", 11);
 
     try std.testing.expectEqual(wm0, g.rootWatermark());
-}
-
-// =====================================================================
-//  Ported from shen — M2 marshal/demarshal + eval-kl (no-bundle) and the
-//  M3 wait/kill process gate.  Self-contained (no bundle artifact); the
-//  bundle-driven M2 zinctest parity cases stay shen-side.
-// =====================================================================
-
-// ---- raw libc for the M3 wait/kill test ----
-// fork/_exit/nanosleep: the test binary links libc (via the vm module).  The
-// fork/_exit externs are file-private in execplan.zig, so re-declare here.
-const Timespec = extern struct { sec: isize, nsec: isize };
-extern "c" fn nanosleep(req: *const Timespec, rem: ?*Timespec) c_int;
-extern "c" fn fork() c_int;
-extern "c" fn _exit(code: c_int) noreturn;
-
-fn sleepSec(sec: isize) void {
-    const ts = Timespec{ .sec = sec, .nsec = 0 };
-    _ = nanosleep(&ts, null);
-}
-
-fn sleepMs(ms: u64) void {
-    const ts = Timespec{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * 1_000_000) };
-    _ = nanosleep(&ts, null);
-}
-
-/// Deterministic LCG for the property test (std.rand is thread-scoped and
-/// heavyweight for a test; a plain PCG-style step is enough here).
-fn m2NextRand(rng: *u64) u64 {
-    rng.* = rng.* *% 6364136223846793005 +% 1442695040888963407;
-    return rng.* >> 33;
-}
-
-/// Build a random tree with leaves from {number, string, boolean, nil,
-/// symbol foo|bar|quux} and cons nodes.  SYMBOLS ARE SAFE IN CAR POSITIONS:
-/// the demarshal protocol only special-cases the five reserved tag symbols
-/// (number/symbol/string/boolean/cons) and 'mark' — none of which this
-/// generator can emit — so every generated tree is a fixed point of
-/// demarshal∘marshal (the round-trip property under test).  The car is
-/// rooted across the cdr build (valCons roots its own params internally).
-fn m2BuildTree(v: *state.Vm, rng: *u64, depth: u32, counter: *u32) types.Value {
-    const g = v.gc;
-    if (depth == 0 or m2NextRand(rng) % 5 == 0) {
-        switch (m2NextRand(rng) % 5) {
-            0 => return values.valNumber(@intCast(m2NextRand(rng) % 1000)),
-            1 => {
-                var buf: [24]u8 = undefined;
-                const s = std.fmt.bufPrint(&buf, "s{d}", .{counter.*}) catch unreachable;
-                counter.* += 1;
-                return values.valString(g, s);
-            },
-            2 => return values.valBoolean(m2NextRand(rng) % 2 == 0),
-            3 => return values.valNil(),
-            else => return switch (m2NextRand(rng) % 3) {
-                0 => symbols.valSymbol(&v.symbols, "foo"),
-                1 => symbols.valSymbol(&v.symbols, "bar"),
-                else => symbols.valSymbol(&v.symbols, "quux"),
-            },
-        }
-    }
-    var car = m2BuildTree(v, rng, depth - 1, counter);
-    var car_guard = g.rootValue(&car);
-    defer car_guard.end();
-    const cdr = m2BuildTree(v, rng, depth - 1, counter);
-    return values.valCons(g, car, cdr);
-}
-
-/// Build a proper list [i0 i1 ... ik] from values (the eval-kl form
-/// builder).  The items are copied into a rooted buffer so string items
-/// survive the valCons churn (numbers/symbols carry no GC interiors, but
-/// strings do).
-fn m2List(g: *heap.Gc, items: []const types.Value) types.Value {
-    var buf: [16]types.Value = undefined;
-    var n: i32 = @intCast(items.len);
-    for (items, 0..) |it, idx| buf[idx] = it;
-    g.rootPushValueArray(&buf, &n);
-    defer g.rootPop();
-    var head = values.valNil();
-    var guard = g.rootValue(&head);
-    defer guard.end();
-    var i: usize = items.len;
-    while (i > 0) {
-        i -= 1;
-        head = values.valCons(g, buf[i], head);
-    }
-    return head;
-}
-
-test "M2 marshal/demarshal: scalar tags, [cons] empty, mark, passthroughs" {
-    var g = try testInit();
-    defer g.deinit();
-    var v: state.Vm = undefined;
-    v.init(&g);
-    defer v.deinit();
-
-    // [number 5] shape: cons(symbol number, cons(5, nil)); round-trips.
-    const m5 = vm.marshal.marshalToTagged(&v, values.valNumber(5));
-    try std.testing.expectEqual(types.ValTag.cons, m5.tag);
-    try std.testing.expectEqualStrings("number", values.symSlice(m5.payload.cons.car.?.*));
-    const cdr5 = m5.payload.cons.cdr.?.*;
-    try std.testing.expectEqual(@as(i64, 5), cdr5.payload.cons.car.?.payload.number);
-    try std.testing.expectEqual(types.ValTag.nil, cdr5.payload.cons.cdr.?.tag);
-    try std.testing.expectEqual(@as(i64, 5), vm.marshal.demarshalFromTagged(&v, m5).payload.number);
-
-    // Strings / symbols / booleans round-trip through their tags.
-    const ms = vm.marshal.marshalToTagged(&v, values.valString(&g, "ab"));
-    try std.testing.expectEqualStrings("ab", values.strSlice(vm.marshal.demarshalFromTagged(&v, ms)));
-    const msym = vm.marshal.marshalToTagged(&v, symbols.valSymbol(&v.symbols, "foo"));
-    try std.testing.expectEqualStrings("foo", values.symSlice(vm.marshal.demarshalFromTagged(&v, msym)));
-    const mb = vm.marshal.marshalToTagged(&v, values.valBoolean(true));
-    try std.testing.expectEqual(@as(i64, 1), vm.marshal.demarshalFromTagged(&v, mb).payload.boolean);
-
-    // nil marshals to [cons] (symbol cons + nil cdr) and demarshals back.
-    const mnil = vm.marshal.marshalToTagged(&v, values.valNil());
-    try std.testing.expectEqualStrings("cons", values.symSlice(mnil.payload.cons.car.?.*));
-    try std.testing.expectEqual(types.ValTag.nil, mnil.payload.cons.cdr.?.tag);
-    try std.testing.expectEqual(types.ValTag.nil, vm.marshal.demarshalFromTagged(&v, mnil).tag);
-
-    // mark marshals to the SYMBOL 'mark; the symbol 'mark demarshals to nil.
-    const mmark = vm.marshal.marshalToTagged(&v, values.valMark());
-    try std.testing.expectEqual(types.ValTag.symbol, mmark.tag);
-    try std.testing.expectEqualStrings("mark", values.symSlice(mmark));
-    try std.testing.expectEqual(types.ValTag.nil, vm.marshal.demarshalFromTagged(&v, symbols.valSymbol(&v.symbols, "mark")).tag);
-
-    // Lambdas / vectors / errors pass through BOTH directions unchanged.
-    const lam = values.valLambda(&g, null, 0, null, 0);
-    try std.testing.expectEqual(types.ValTag.lambda, vm.marshal.marshalToTagged(&v, lam).tag);
-    try std.testing.expectEqual(types.ValTag.lambda, vm.marshal.demarshalFromTagged(&v, lam).tag);
-    const vec = values.valVector(&g, 2);
-    try std.testing.expectEqual(types.ValTag.vector, vm.marshal.marshalToTagged(&v, vec).tag);
-    const errv = values.valError(&g, "boom");
-    try std.testing.expectEqual(types.ValTag.error_, vm.marshal.demarshalFromTagged(&v, errv).tag);
-
-    // marshal of a cons is the 3-ELEMENT LIST [cons X Y] with RAW car/cdr
-    // (the no-recursion rule, C:763-767): cadr is the raw number 1, and the
-    // actual cdr rides in a SINGLETON wrapper (the 3rd element is (2 nil)).
-    var pair = values.valCons(&g, values.valNumber(1), values.valNumber(2));
-    var pair_guard = g.rootValue(&pair);
-    defer pair_guard.end();
-    const mp = vm.marshal.marshalToTagged(&v, pair);
-    try std.testing.expectEqualStrings("cons", values.symSlice(mp.payload.cons.car.?.*));
-    const mp_cdr = mp.payload.cons.cdr.?.*; // (1 (2 nil))
-    try std.testing.expectEqual(@as(i64, 1), mp_cdr.payload.cons.car.?.payload.number); // RAW 1
-    const wrapper = mp_cdr.payload.cons.cdr.?.*; // ((2 nil))
-    try std.testing.expectEqual(types.ValTag.cons, wrapper.tag);
-    try std.testing.expectEqual(@as(i64, 2), wrapper.payload.cons.car.?.payload.number); // RAW 2
-    try std.testing.expectEqual(types.ValTag.nil, wrapper.payload.cons.cdr.?.tag);
-    // ...and demarshal rebuilds the DOTTED pair cons(1 . 2).
-    const back = vm.marshal.demarshalFromTagged(&v, mp);
-    try std.testing.expect(values.deepEqual(pair, back, 0));
-    try std.testing.expectEqual(types.ValTag.number, back.payload.cons.cdr.?.tag);
-}
-
-test "M2 marshal/demarshal round-trip property: random nested cons trees" {
-    var g = try testInit();
-    defer g.deinit();
-    var v: state.Vm = undefined;
-    v.init(&g);
-    defer v.deinit();
-
-    var rng: u64 = 0x5eed_cafe_f00d;
-    var counter: u32 = 0;
-    var iter: usize = 0;
-    while (iter < 64) : (iter += 1) {
-        var tree = m2BuildTree(&v, &rng, 4, &counter);
-        var tree_guard = g.rootValue(&tree);
-        defer tree_guard.end();
-
-        var tagged = vm.marshal.marshalToTagged(&v, tree);
-        var tagged_guard = g.rootValue(&tagged);
-        defer tagged_guard.end();
-
-        // Churn + a forced scavenge BETWEEN marshal and demarshal: the
-        // tagged form survives only via its root (its cons car/cdr interior
-        // pointers must be re-read fresh through the rooted slot).
-        var junk = values.valNil();
-        var junk_guard = g.rootValue(&junk);
-        defer junk_guard.end();
-        var k: usize = 0;
-        while (k < 200) : (k += 1)
-            junk = values.valCons(&g, values.valNumber(@intCast(k)), junk);
-        g.collectNursery(.@"test");
-
-        var back = vm.marshal.demarshalFromTagged(&v, tagged);
-        var back_guard = g.rootValue(&back);
-        defer back_guard.end();
-        try std.testing.expect(values.deepEqual(tree, back, 0));
-    }
-}
-
-test "M2 eval-kl without a bundle: missing closure returns the input form" {
-    var g = try testInit();
-    defer g.deinit();
-    var v: state.Vm = undefined;
-    v.init(&g);
-    defer v.deinit();
-
-    // No loadBundle: extract-kl resolves to a bare symbol (defunGet's
-    // fallback), the stage warns on stderr, and eval-kl's acc is the INPUT
-    // FORM (C goto eval_kl_done with result = a).
-    var form = m2List(&g, &.{ symbols.valSymbol(&v.symbols, "+"), values.valNumber(1), values.valNumber(2) });
-    var acc: types.Value = values.valNil();
-    try primExecRooted(&g, &v, "eval-kl", &form, &acc);
-    try std.testing.expect(values.deepEqual(form, acc, 0));
-
-    // Scalar forms too (marshal still runs first, then the fallback).
-    var form2 = values.valNumber(42);
-    try primExecRooted(&g, &v, "eval-kl", &form2, &acc);
-    try std.testing.expectEqual(@as(i64, 42), acc.payload.number);
-}
-
-test "M3 gate: wait returns the child's exit code; kill -> 128+sig" {
-    var g = try testInit();
-    defer g.deinit();
-    var v: state.Vm = undefined;
-    v.init(&g);
-    defer v.deinit();
-
-    // wait: fork -> child _exit(42) -> primWait reports 42.
-    {
-        const pid = fork();
-        try std.testing.expect(pid != -1);
-        if (pid == 0) _exit(42);
-        var acc: types.Value = values.valNil();
-        try primExec(&g, &v, "wait", &.{values.valNumber(pid)}, &acc);
-        try std.testing.expectEqual(types.ValTag.number, acc.tag);
-        try std.testing.expectEqual(@as(i64, 42), acc.payload.number);
-    }
-
-    // kill: fork -> child sleeps 30s -> SIGKILL (9) -> wait -> 128+9 = 137.
-    {
-        const pid = fork();
-        try std.testing.expect(pid != -1);
-        if (pid == 0) {
-            // The child never touches the GC heap — it only sleeps (the
-            // same discipline the runner's children follow).
-            sleepSec(30);
-            _exit(0);
-        }
-        sleepMs(100); // let the child reach nanosleep
-        var kacc: types.Value = values.valNil();
-        try primExec(&g, &v, "kill", &.{ values.valNumber(pid), values.valNumber(9) }, &kacc);
-        try std.testing.expectEqual(types.ValTag.boolean, kacc.tag);
-        var wacc: types.Value = values.valNil();
-        try primExec(&g, &v, "wait", &.{values.valNumber(pid)}, &wacc);
-        try std.testing.expectEqual(@as(i64, 137), wacc.payload.number);
-    }
 }

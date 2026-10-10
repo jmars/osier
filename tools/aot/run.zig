@@ -20,9 +20,11 @@
 //!
 //! MEASUREMENT (env-gated, so the frame stream on stdout stays byte-clean for
 //! the byte-identical diff):
-//!   AOTRUN_INTERP=1      leave host_apply at the interpreted default
+//!   AOTRUN_INTERP=1      install the interpreted applier
 //!                        (hostcall.applyClosureN) — the elmvm baseline, timed
-//!                        on an IDENTICAL driver+pty+workload.
+//!                        on an IDENTICAL driver+pty+workload.  (The seam's
+//!                        default is a loud stub; this driver always installs
+//!                        one of the two real flavors explicitly.)
 //!   AOTRUN_STATS_FILE=   wrap host_apply in a timing counter and write
 //!                        "calls=… total_ns=… max_ns=… vmexec_fb=…" to that
 //!                        file at exit.

@@ -31,7 +31,7 @@ const gc = @import("gc");
 const types = gc.types;
 const state = @import("state.zig");
 const values = @import("values.zig");
-const interp = @import("interp.zig");
+const varray = @import("varray.zig");
 
 const Gc = gc.Gc;
 const Value = types.Value;
@@ -135,8 +135,8 @@ pub fn valStreamOutFd(fd: i32) Value {
 /// are unbuffered by construction.
 pub fn primWriteByte(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     _ = vm;
-    const byte = interp.vaPop(stack);
-    const s = interp.vaPop(stack);
+    const byte = varray.vaPop(stack);
+    const s = varray.vaPop(stack);
     const fd = streamFd(s);
     const b: [1]u8 = .{@truncate(@as(u64, @bitCast(byte.payload.number)))};
     _ = std.posix.system.write(fd, &b, 1);
@@ -152,7 +152,7 @@ pub fn primWriteByte(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// EINTR retry (std.posix.read retries EINTR internally), EOF -> -1.  A hard
 /// bad string-stream idx is error.Halt (the C `return -1`).
 pub fn primReadByte(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const s = interp.vaPop(stack);
+    const s = varray.vaPop(stack);
     if (s.payload.stream.is_string != 0) {
         const idx: i64 = @as(i64, @intCast(@intFromPtr(s.payload.stream.file.?))) - 1;
         if (idx < 0 or idx >= vm.streams.n_string_streams) return error.Halt;
@@ -190,7 +190,7 @@ pub fn primReadByte(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// allocation; buf.items is page_allocator so it never goes stale.
 pub fn primReadFileAsString(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     const g = vm.gc;
-    const path = interp.vaPop(stack);
+    const path = varray.vaPop(stack);
     const p = values.strSlice(path);
     const fd = std.posix.openat(std.posix.AT.FDCWD, p, .{}, 0) catch {
         std.debug.print("runtime: cannot open file for read-file-as-string\n", .{});
@@ -227,8 +227,8 @@ pub fn primReadFileAsString(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!vo
 /// path to openat (strictly more correct; no observable difference for paths
 /// < 255, the only regime C supports).
 pub fn primOpen(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const path = interp.vaPop(stack);
-    const dir = interp.vaPop(stack);
+    const path = varray.vaPop(stack);
+    const dir = varray.vaPop(stack);
     const p = values.strSlice(path);
     const d = values.strSlice(dir);
     if (std.mem.eql(u8, d, "in")) {
@@ -264,7 +264,7 @@ pub fn primOpen(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
 /// fd only when the file pointer is non-null (C's `if (s.stream.file)`, which
 /// skips null=fd0/stdin) — matching C's guard against closing an absent file.
 pub fn primClose(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
-    const s = interp.vaPop(stack);
+    const s = varray.vaPop(stack);
     if (s.payload.stream.is_string != 0) {
         const idx: i64 = @as(i64, @intCast(@intFromPtr(s.payload.stream.file.?))) - 1;
         if (idx < 0 or idx >= vm.streams.n_string_streams) {

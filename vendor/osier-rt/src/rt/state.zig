@@ -1,4 +1,4 @@
-//! src/vm/state.zig — the Vm struct (M0 skeleton + M1 interner + M2 tables
+//! src/rt/state.zig — the Vm struct (M0 skeleton + M1 interner + M2 tables
 //! + M4 DECISION-A error model).
 //!
 //! C origin: the VM's global interpreter state (zincvm.c statics) gathered
@@ -6,8 +6,14 @@
 //! ONCE at init (this is the C "S3 cf.error_val rooting handled once" —
 //! plan DECISION A).  M1 adds the symbol interner.  M2 adds the defun/values
 //! global tables (tables.zig) plus their GC registration and the initGlobals
-//! stub.  M4 adds the CatchSite chain + VmError + throwShen + instr_limit
-//! (see interp.zig).
+//! stub.  M4 adds VmError + throwShen + instr_limit.
+//!
+//! The csexp bundle loader (loadBundle) moved to vendor/zinc-vm's parser.zig
+//! with the interpreter: it is Shen-image support only.  The Shen catch
+//! machinery (CatchSite/catch_chain/in_trap_error) is DELETED with
+//! trap-error (Osier has no exceptions and its front end cannot emit
+//! trap-error); VmError keeps error.ShenError as the error-REPORTING channel
+//! (throwShen + the once-rooted err_slot).
 //!
 //! err_slot is rooted via rootPushValue at init and popped at deinit, so it
 //! never needs re-rooting: every ShenError message built by a future throw
@@ -25,23 +31,19 @@ const tables = @import("tables.zig");
 const values = @import("values.zig");
 const prims = @import("prims.zig");
 const streams = @import("streams.zig");
-const parser = @import("parser.zig");
 
 const Gc = gc.Gc;
 
 /// Plan DECISION A: C's setjmp/longjmp CatchFrame chain (zincvm.c:706-720
-/// vm_catch_chain / vm_throw) becomes Zig error unions plus this linked
-/// chain of stack-allocated CatchSites.  error.Halt is the C
+/// vm_catch_chain / vm_throw) becomes Zig error unions.  error.Halt is the C
 /// `exec_primitive() < 0` hard stop (non-catchable, acc preserved);
-/// error.ShenError is the longjmp (catchable at a CatchSite).
+/// error.ShenError is the longjmp (the catch chain itself is DELETED with
+/// trap-error — ShenError now unwinds to the host, which reports it).
 pub const VmError = error{ ShenError, Halt };
 
 /// M10 frame-stack pool: max idle old-gen CALLFRAME_ARRAYs held for reuse
 /// across vmExecEnv entries (see interp.zig frameStackAcquire/Release).
-/// Bounded to real vmExecEnv nesting depth — outer entry + trap-error body,
-/// or outer entry + N>A peel = 2 (a trap-error body is sequential with its
-/// handler, so trap-error alone never nests past 2; the depth-3 case of a
-/// peel inside a trap-error body degrades gracefully by dropping one array).
+/// Bounded to real vmExecEnv nesting depth — outer entry + N>A peel = 2.
 /// Retaining more than the nesting depth never pays off (the LIFO free-list
 /// can only hand them back at that depth) and pins ~3 MB per extra array:
 /// at 3 idle arrays (9 MB) the base live set exceeds the grown 32 MB heap's
@@ -66,16 +68,8 @@ pub const StackPoolSlot = struct {
     cap: i32 = 0,
 };
 
-/// C: zincvm.h CatchFrame — DECISION A shape.  Stack-allocated at each
-/// catch site (trap-error in M5, the host harness): push by setting
-/// `.parent = vm.catch_chain; vm.catch_chain = &site;` and restore the
-/// parent on exit.  `in_trap_error` gates the throw-vs-hard-stop routing at
-/// the CONDITIONAL throw sites (env_pop, apply/appterm non-callable).  The
-/// C per-site `error_val` field is replaced by the ONCE-rooted vm.err_slot.
-pub const CatchSite = struct {
-    in_trap_error: bool = false,
-    parent: ?*CatchSite = null,
-};
+/// C: zincvm.c:706 vm_catch_chain — DELETED with trap-error (the Shen catch
+/// machinery; see the module doc).
 
 pub const Vm = struct {
     /// Owned *Gc — the collector this VM allocates from.
@@ -96,9 +90,6 @@ pub const Vm = struct {
     values_table: [*]types.TableEntry = undefined,
     /// C: zincvm.c:480 values_table_cap.
     values_table_cap: i32 = @intCast(tables.VALUES_TABLE_CAP),
-    /// C: zincvm.c:706 vm_catch_chain — head of the stack-allocated
-    /// CatchSite chain (DECISION A; null outside catch regions).
-    catch_chain: ?*CatchSite = null,
     /// C: zincvm.c:3146-3153 get_instr_limit — hard instruction budget,
     /// default 5e9.  C caches the $ZINCVM_INSTR_LIMIT env override per
     /// vm_exec_env entry; the port keeps the constant default and exposes
@@ -107,13 +98,6 @@ pub const Vm = struct {
     /// Cumulative instructions executed across all vmExec calls (harness
     /// instrumentation; no C counterpart).
     instr_exec: u64 = 0,
-    /// C: zincvm.c:2250-2258 gensym — the static counter behind
-    /// "shen.gensym_N" (never reset; symbols are interned so distinct N =>
-    /// distinct symbols for the life of the VM).
-    gensym_counter: u64 = 0,
-    /// C: zincvm.c:2565-2575 newvar — the static counter behind "V_N"
-    /// (0-based, same never-reset contract).
-    newvar_counter: u32 = 0,
     /// M6 string-stream registry (streams.zig): fixed array of 8 slots + a
     /// count, zero-initialized (`.{ }`), so a fresh Vm needs no setup.
     streams: streams.StreamRegistry = .{},
@@ -296,86 +280,6 @@ pub const Vm = struct {
         for (prims.primNames()) |def| self.defunSet(def.name, values.valPrim(def.name));
     }
 
-    // -----------------------------------------------------------------
-    //  vm_load_bundle — C: zincvm.c:4015-4102 (M6)
-    // -----------------------------------------------------------------
-
-    /// C: zincvm.c:4015-4102 vm_load_bundle.  Loads a bundle string into
-    /// the global table (parser.parseBundle), then sets up the global-table
-    /// environment: ZINC pattern keywords as bare symbols (never over a
-    /// bundled closure), the standard I/O stream variables, the empty-alist
-    /// global-table / value-table vars, and the rooted primitive?-names
-    /// list built forward from the prim table (head = LAST name, C parity).
-    ///
-    /// Deviations (deliberate): C's trailing defun_freeze() perfect-hash
-    /// build has no counterpart — DECISION B keeps the open-addressed table
-    /// as the runtime structure.  The stream file handles are null: the I/O
-    /// milestone owns them.  C's stdout printf goes to std.debug.print.
-    /// Returns the number of closures loaded (0 on the outer shape error).
-    pub fn loadBundle(self: *Vm, buf: [:0]const u8) i32 {
-        // A bundle starts with '((' after optional whitespace (C:4016-4021).
-        // The [:0] sentinel terminates the whitespace scan at end-of-input.
-        var p: usize = 0;
-        while (std.ascii.isWhitespace(buf[p])) p += 1;
-        if (p + 1 >= buf.len or buf[p] != '(' or buf[p + 1] != '(') {
-            std.debug.print("bundle error: not a bundle (expected ((...)))\n", .{});
-            return 0;
-        }
-
-        const n = parser.parseBundle(self.gc, &self.symbols, self, buf);
-        std.debug.print("Loaded {d} closures into global table\n", .{n});
-
-        // Register ZINC pattern keywords as symbols (C:4033-4051) — ONLY
-        // when the bundle did not itself provide the entry: the bundled
-        // metacircular interpreter needs e.g. [global lookup] to resolve to
-        // its closure, while structural matching needs the tag symbols.
-        // Prim names (e.g. `cons`) already hold VAL_PRIM entries from
-        // initGlobals and are skipped by the same defunHas guard — exact C
-        // behavior, since C registers prim_names before loading too.
-        const keywords = [_][]const u8{
-            "number",     "symbol",     "string",     "boolean", "cons",
-            "lambda",     "function",   "error",      "absvector",
-            "stream in",  "stream out", "let",        "if",
-            "lookup",     "freeze",     "type",       "defun",
-            "define",     "cond",       "and",        "or",
-            "do",         "fn",         "list",       "where",
-        };
-        for (keywords) |kw| {
-            if (!self.defunHas(kw))
-                self.defunSet(kw, symbols.valSymbol(&self.symbols, kw));
-        }
-
-        // Standard I/O stream variables (C:4057-4069): the bundled
-        // stinput/stoutput closures read (value *stinput*) etc.;
-        // shen.initialise-environment does not set them — the host must.
-        // M6: wire the REAL std fds 0/1/2 (the I/O milestone owns these) —
-        // stinput = fd 0 (stdin), stoutput = fd 1 (stdout), sterror = fd 2.
-        self.valueSet("*stinput*", streams.valStreamInFd(0));
-        self.valueSet("*stoutput*", streams.valStreamOutFd(1));
-        self.valueSet("*sterror*", streams.valStreamOutFd(2));
-
-        // The metacircular interpreter's global-table / value-table vars
-        // must start as empty alists (C:4075, 4081), not the bare symbol
-        // that an unset value_get would return.
-        self.valueSet("global-table", values.valNil());
-        self.valueSet("value-table", values.valNil());
-
-        // primitive?-names (C:4088-4095), built forward from the single
-        // source prim table so C's primitive set and Shen's primitive?
-        // stay in sync.  pn is rooted across the valCons churn; the head
-        // of the finished list is the LAST table name (C forward-loop
-        // parity).
-        {
-            var pn = values.valNil();
-            self.gc.rootPushValue(&pn);
-            defer self.gc.rootPop();
-            for (prims.primNames()) |def|
-                pn = values.valCons(self.gc, symbols.valSymbol(&self.symbols, def.name), pn);
-            self.valueSet("primitive?-names", pn);
-        }
-
-        return n;
-    }
 };
 
 /// A zeroed TableEntry (C `memset(&e,0,sizeof e)` — name=NULL, value tag 0).

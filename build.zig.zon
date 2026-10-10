@@ -7,8 +7,14 @@
     .fingerprint = 0x454d67aee8306770, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        // zinc-vm: the shared GC + ZINC VM executor package.  Path dependency
-        // (osier owns vendor/zinc-vm).
+        // osier-rt: the RUNTIME package (the GC + values/state/prims/varray/
+        // streams/execplan) — what every backend links.  Path dependency
+        // (osier owns vendor/osier-rt); vendored per the user's ruling.
+        .osier_rt = .{
+            .path = "vendor/osier-rt",
+        },
+        // zinc-vm: the ZINC interpreter package (interp/parser/hostcall),
+        // which depends on osier-rt and dies at P8.
         .zinc_vm = .{
             .path = "vendor/zinc-vm",
         },
