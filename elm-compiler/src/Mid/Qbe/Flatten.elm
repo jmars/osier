@@ -155,21 +155,30 @@ type alias Env =
     Dict Int Shape
 
 
-run : List Defun -> List Defun
+run : List Defun -> Result String (List Defun)
 run defuns =
-    List.map flattenDefun defuns
+    sequence (List.map flattenDefun defuns)
 
 
 -- A Defun's value is always a Lam (Mid.Ir's contract); `rw` seeds the env
--- EMPTY, so a flattened binder can never cross a closure boundary.
-flattenDefun : Defun -> Defun
+-- EMPTY, so a flattened binder can never cross a closure boundary.  The Err
+-- is an INTERNAL pass bug (a leaked reference `usesOK` should have denied):
+-- it propagates as a compile error instead of `Debug.todo` (which the
+-- selfhost compiler has no equivalent for) so the native path still fails
+-- LOUD, never silent.
+flattenDefun : Defun -> Result String Defun
 flattenDefun defun =
     case rw Dict.empty (maxId defun.value + 1) defun.value of
         Ok ( out, _ ) ->
-            { defun | value = out }
+            Ok { defun | value = out }
 
         Err msg ->
-            { defun | value = Debug.todo msg }
+            Err msg
+
+
+sequence : List (Result String a) -> Result String (List a)
+sequence results =
+    List.foldr (Result.map2 (::)) (Ok []) results
 
 
 -- ============================ WALK ============================
@@ -642,7 +651,7 @@ valAt e rest =
 
 decideMatches : Shape -> List Match -> Maybe Bool
 decideMatches shape matches =
-    List.foldl (\m acc -> Maybe.map2 (&&) acc (decideMatch shape m)) (Just True) matches
+    List.foldl (\m acc -> Maybe.map2 (\a b -> a && b) acc (decideMatch shape m)) (Just True) matches
 
 
 decideMatch : Shape -> Match -> Maybe Bool
@@ -946,11 +955,11 @@ usesOK env x shape exp =
                             |> Maybe.withDefault False
 
                     else
-                        List.all (usesOK env x shape << .body) branch.alts
+                        List.all (\a -> usesOK env x shape a.body) branch.alts
 
                 _ ->
                     usesOK env x shape branch.scrutinee
-                        && List.all (usesOK env x shape << .body) branch.alts
+                        && List.all (\a -> usesOK env x shape a.body) branch.alts
 
         Con con ->
             List.all (usesOK env x shape) con.args
@@ -959,7 +968,7 @@ usesOK env x shape exp =
             List.all (usesOK env x shape) es
 
         RecordLit setters ->
-            List.all (usesOK env x shape << Tuple.second) setters
+            List.all (\p -> usesOK env x shape (Tuple.second p)) setters
 
         RecordGet rec field ->
             case rec of
@@ -971,7 +980,7 @@ usesOK env x shape exp =
 
         RecordUpdate update ->
             usesOK env x shape update.base
-                && List.all (usesOK env x shape << Tuple.second) update.updates
+                && List.all (\p -> usesOK env x shape (Tuple.second p)) update.updates
 
         ListLit es ->
             List.all (usesOK env x shape) es
@@ -1044,7 +1053,7 @@ occurs x exp =
             List.any (occursBinder x) block.binders || occurs x block.body
 
         Case branch ->
-            occurs x branch.scrutinee || List.any (occurs x << .body) branch.alts
+            occurs x branch.scrutinee || List.any (\a -> occurs x a.body) branch.alts
 
         Con con ->
             List.any (occurs x) con.args
@@ -1053,13 +1062,13 @@ occurs x exp =
             List.any (occurs x) es
 
         RecordLit setters ->
-            List.any (occurs x << Tuple.second) setters
+            List.any (\p -> occurs x (Tuple.second p)) setters
 
         RecordGet rec _ ->
             occurs x rec
 
         RecordUpdate update ->
-            occurs x update.base || List.any (occurs x << Tuple.second) update.updates
+            occurs x update.base || List.any (\p -> occurs x (Tuple.second p)) update.updates
 
         ListLit es ->
             List.any (occurs x) es
@@ -1144,21 +1153,21 @@ maxId exp =
             maxId inner
 
         Lam lam ->
-            List.foldl (\p acc -> Basics.max acc p.id) (maxId lam.body) lam.params
+            List.foldl (\p acc -> max acc p.id) (maxId lam.body) lam.params
 
         App app ->
-            Basics.max (maxId app.fn) (maxIds app.args)
+            max (maxId app.fn) (maxIds app.args)
 
         PrimApp app ->
             maxIds app.args
 
         Let block ->
-            List.foldl (\b acc -> Basics.max acc (maxIdBinder b)) (maxId block.body) block.binders
+            List.foldl (\b acc -> max acc (maxIdBinder b)) (maxId block.body) block.binders
 
         Case branch ->
-            Basics.max (maxId branch.scrutinee)
-                (Basics.max branch.scrutId.id
-                    (List.foldl (\alt acc -> Basics.max acc (maxIdAlt alt)) 0 branch.alts)
+            max (maxId branch.scrutinee)
+                (max branch.scrutId.id
+                    (List.foldl (\alt acc -> max acc (maxIdAlt alt)) 0 branch.alts)
                 )
 
         Con con ->
@@ -1168,48 +1177,48 @@ maxId exp =
             maxIds es
 
         RecordLit setters ->
-            List.foldl (\( _, e ) acc -> Basics.max acc (maxId e)) 0 setters
+            List.foldl (\( _, e ) acc -> max acc (maxId e)) 0 setters
 
         RecordGet rec _ ->
             maxId rec
 
         RecordUpdate update ->
-            List.foldl (\( _, e ) acc -> Basics.max acc (maxId e)) (maxId update.base) update.updates
+            List.foldl (\( _, e ) acc -> max acc (maxId e)) (maxId update.base) update.updates
 
         ListLit es ->
             maxIds es
 
         If block ->
-            Basics.max (maxId block.cond) (Basics.max (maxId block.thenBranch) (maxId block.elseBranch))
+            max (maxId block.cond) (max (maxId block.thenBranch) (maxId block.elseBranch))
 
         ShortAnd block ->
-            Basics.max (maxId block.left) (maxId block.right)
+            max (maxId block.left) (maxId block.right)
 
         ShortOr block ->
-            Basics.max (maxId block.left) (maxId block.right)
+            max (maxId block.left) (maxId block.right)
 
         NotEqual block ->
-            Basics.max (maxId block.left) (maxId block.right)
+            max (maxId block.left) (maxId block.right)
 
 
 maxIds : List Exp -> Int
 maxIds es =
-    List.foldl (\e acc -> Basics.max acc (maxId e)) 0 es
+    List.foldl (\e acc -> max acc (maxId e)) 0 es
 
 
 maxIdAlt : Alt -> Int
 maxIdAlt alt =
-    List.foldl (\p acc -> Basics.max acc p.id) (maxId alt.body) (List.map Tuple.first alt.binds)
+    List.foldl (\p acc -> max acc p.id) (maxId alt.body) (List.map Tuple.first alt.binds)
 
 
 maxIdBinder : LetBinder -> Int
 maxIdBinder b =
     case b of
         LetBind { binder, value } ->
-            Basics.max binder.id (maxId value)
+            max binder.id (maxId value)
 
         LetDestruct destruct ->
-            Basics.max destruct.scrutId.id
-                (Basics.max (maxId destruct.value)
-                    (List.foldl (\p acc -> Basics.max acc p.id) 0 (List.map Tuple.first destruct.binds))
+            max destruct.scrutId.id
+                (max (maxId destruct.value)
+                    (List.foldl (\p acc -> max acc p.id) 0 (List.map Tuple.first destruct.binds))
                 )

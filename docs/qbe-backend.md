@@ -481,10 +481,13 @@ always escapes — meaning the `Con`/`rt_con` half is correct but cannot be exer
 `tools/qbe/qbe-selfhost.sh` is the SCRIPTED form of the QBE self-host
 milestone.  The milestone itself was proved once by hand; nothing committed
 reproduced it and no gate exercised it, so it could rot silently — and it is
-load-bearing: the 58-source self-host manifest contains NO `Mid/*` module, so
-the compiler that `NativeMain` drives can emit CSEXP ONLY, and the csexp
-output path cannot be retired until the QBE backend is proven able to compile
-the compiler itself.
+load-bearing.  AS OF THE 2026-10-10 RE-FREEZE the self-host manifest DOES
+contain the `Mid/*` tier (75 sources, the QBE backend among them), so the
+compiler that `NativeMain` drives can emit QBE IL via its new `--ssa <entry>
+<manifest>` mode — the csexp output path can now be retired once the `.ssa`
+fixed point below is the seed (P6).  The historical form of the claim is kept
+below for the record: before that re-freeze the manifest held NO `Mid/*`
+module, so the compiler could emit CSEXP ONLY.
 
 ```
 tools/qbe/qbe-selfhost.sh
@@ -909,3 +912,153 @@ same pass:
   and require `137`.  The rows are asymmetry-proven — mutating the arm to
   `EXITSTATUS` in a scratch tree turns both into `0||` (see the `sigdeath`
   helper in `tests/elm-fixtures/run-elm-gate.sh`).
+
+## Dead frame slots: implemented, measured, and REVERTED (2026-10-10)
+
+`rt_frame_enter(nslots)` roots ALL `nslots` slots of a pooled frame for the
+frame's whole life and slots were never cleared when their value died, so every
+scavenge scans and promotes the whole slot set of the active call chain
+(`docs/gc-zig.md`, "NOT done here: the conservative-rooting multiplier":
+~53-69 KB promoted per scavenge, and a post-collect live old-gen read as
+tracking `heap/4`).  The clearing was implemented here, verified, and then
+**taken back out**: it does not reduce the compiler's memory.  The measurement
+is below, and the exact patch is preserved (`/tmp/Peephole-with-slotclear.elm`
+at the time of writing) so it can be re-applied deliberately.
+
+### What was implemented
+
+`Mid/Qbe/Peephole.elm` pass 4 (`clearDeadSlots`): a backward CFG liveness
+fixpoint over frame-slot indices, then one `storew tagNumber, %sK`
+(`storew 0`, the same non-pointer tag word the lowering's own rebox emits)
+immediately after each slot's last read.  Three things that are NOT optional,
+each found by a control rather than by reasoning:
+
+- **Derived addresses must resolve back to their slot.**  The lowering takes a
+  slot's address constantly — `%t =l add %sK, 8` for an unboxed Int/Float
+  payload, and `%sK_i =l add %sK, 40*i` from `stageSlots`, which IS the
+  address of slot K+i.  There are **83,432** such derived temporaries in the
+  corpus `.ssa`.  A name-only liveness clears `%sK` while `%sK_i` still holds
+  the only reference.  A census of every other instruction shape that mentions
+  a slot temp found **none** outside `=l add`, so the alias model is complete
+  for this emitter.
+- **A whole-cell overwrite is a DEFINITION, not a read.**  `blit _, %sK, 40`
+  and `storew _, %sK` at offset 0 kill the cell's old value; a partial write
+  (`n /= 40`, or an interior offset) is left conservative.
+- **The clear must not name a slot pointer the emit no longer has.**
+  `dropDeadDefs` drops a pure def whose result is unused, and a slot whose
+  address is only ever taken through a staging alias leaves `%sK` unused and
+  dropped while the slot is alive.  Naming it emits a reference to an undefined
+  temp and QBE refuses: MEASURED, `qbe: ...: invalid type for second operand
+  %s36 in storew`, on 8 fixtures (`match`, `aggchurn`, `vfield-rooted`,
+  `vfield-main`, `io-read`, `io-write`, `io-fail`, `flatten`, `flatnest`, the
+  float entries, `norep-main`, `norep-boxed`, `norep-main-off`).  A clear is
+  now emitted only for slots whose `%sK` is defined in the FIRST block (where
+  `Lower.withPrologue` puts it, so it dominates every use site); an ALIAS is not
+  a substitute, because an alias is defined wherever its staging block sits and
+  a clear in an earlier block would be a use before its def.
+
+`tools/qbe/rt.zig` gained a gated `QBE_GC_STATS=1` exit line (stderr): scavenge
+count, full-collect count, heap MB, old-gen in use, and
+`last_collect_live_pages`.  It exists because the figures ALREADY available
+cannot answer the question — the full-collect banner prints `allocatedpages` at
+the TRIGGER, and the trigger is `heappages/4`, so that number is invariant
+under any change to what stays reachable.
+
+Census over the corpus `.ssa` (same 75 sources, one group): 512,138
+instructions and 137,133 frame slots before; **+116,204 clears** after, i.e.
++19.1% on the compiler's own `$q_*` defuns (73,469 clears on 385,256
+instructions).  Shape (b) — lowering `hdr.live` when the dead slots are a
+suffix — was rejected on two measured grounds: a static census over the same
+`.ssa` gives it 4,579 update points and 270,663 of the 321,625 dead slot-scans
+at call sites (84%), but it is **unsound alone** (a slot excluded from `live` is
+not scanned, so a nursery pointer in it is left dangling by the scavenge, and
+the next call that raises `live` re-includes it, where `gcMove` chases the
+dangling pointer); and it is only sound on cells that are already non-pointer,
+so it REQUIRES (a) rather than replacing it.
+
+### The measurement — the clearing does not reduce memory
+
+Three workloads, all `QBE_HEAP_MB=4096` unless stated.  In every pair the
+WORKLOAD is fixed — same sources, same manifest, same entry, same mode — so an
+arm differs from its partner only in the code generator, or (last two rows)
+only in whether the RUNNING code carries the clears.  What was CHECKED, exactly:
+both fixture pairs' program stdout is byte-identical (the `fxcmp.sh` control
+line); the corpus `--ssa` pair's emitted `.ssa` differs BY DESIGN (that is the
+mechanism) and each arm's `.ssa` was checked against the stock emit for its own
+tree; and for the corpus csexp pair the evidence that both arms did the same
+work is the IDENTICAL scavenge count and the IDENTICAL full-collect count below
+— NOT a byte comparison of the two bundles, which was NOT done: both arms write
+the single path the manifest names, so the second overwrote the first.  Claiming
+that second comparison would be claiming a control that was not run.
+
+| workload | arm | scavenges | full collects | live old-gen | old-gen in use | RSS | wall |
+|---|---|---|---|---|---|---|---|
+| corpus `--ssa`, same 75 sources | pass OFF | 562,344 | 491 | 479 MB | 742 MB | 4439.8 MiB | 910.0 s |
+| corpus `--ssa`, same 75 sources | pass ON | 883,932 | 627 | **498 MB** | 691 MB | 4460.1 MiB | 1413.2 s |
+| corpus csexp, same 75 sources | clears OFF | 279,387 | 40 | 187 MB | 637 MB | 4363.7 MiB | 399.1 s |
+| corpus csexp, same 75 sources | clears ON | 279,387 | 40 | **185 MB** | 271 MB | 4364.7 MiB | 415.0 s |
+| `vfield.rootedField` @ QBE_HEAP_MB=16 | pass OFF / ON | 27 / 27 | 3 / 3 | 16 / 16 MB | 18 / 18 MB | equal | 66 / 65 ms |
+| `aggchurn.main` @ QBE_HEAP_MB=16 | pass OFF / ON | 16 / 16 | 2 / 2 | 8 / 8 MB | 11 / 11 MB | equal | 46 / 46 ms |
+
+The `--ssa` rows: the BEFORE arm reproduces the figures this repo already
+recorded for that workload (556,075 scavenges / 472 full collects / 4441 MiB /
+944.2 s) to within 1-4%, so the protocol is the one the earlier unit used.  Its
+`+116,204` clears cover essentially every dead frame slot at every safepoint of
+the compiled program — if conservative frame-slot rooting dominated the live
+set, the fall would be unmistakable.  There is none (479 -> 498 MB).
+
+The two `--ssa` rows also differ in that the AFTER compiler EXECUTES the new
+pass (alias maps and a liveness fixpoint per function), which allocates
+heavily: scavenges +57%.  **That confound is why the last two rows exist.**
+They run the CSEXP path, which never executes `Mid.Qbe.Peephole` at all, from
+two binaries built out of the two emits: nothing in either arm pays the pass's
+cost, and the only difference is the clears in the compiler's OWN generated
+code — the mechanism by itself.  There:
+
+- the scavenge count is **identical to the digit** (279,387), i.e. the clears
+  change no allocation at all, and the +57% in the row above is entirely the
+  pass's own data structures;
+- the full-collect count is identical (40).  That is the integral measure of
+  promotion volume for a fixed workload: the trigger is `allocatedpages >
+  heappages/4`, so an unchanged collect count with an unchanged live set means
+  an unchanged promoted-byte total.  **The dead slots were promoting
+  essentially nothing**;
+- the live set moves by 2 MB out of 187 (1%), RSS by 1 MiB out of 4364;
+- the `old-gen in use` column is a POINT SAMPLE at process exit (`Gc.allocatedpages`
+  at that instant), and it oscillates between the post-collect live set and the
+  1024 MB full-collect trigger on every cycle — 637 and 271 MB are both inside
+  that band, so the 637 -> 271 entry is NOT evidence of anything. The integral
+  measure is the full-collect COUNT, and it is identical (40);
+- the wall clock is **+4.0%** (399.1 -> 415.0 s), which is the clears' own cost
+  on the hot path.
+
+VERDICT: **the conservative frame-slot rooting is not the dominant term in this
+runtime's live set.**  The earlier "post-collect live old-gen tracks `heap/4`"
+reading was a signature of the anti-thrash GROWTH policy, not evidence that
+frame slots dominated retention: at this heap the live set is ~1/22 of the heap
+(187 MB of 4096 MB), and it is the same with and without the clears.  The
+mechanism that would have explained the memory profile is elsewhere, and the
+clearing was reverted rather than landed as a measured 4% regression with no
+memory benefit.  What survives from this unit is the instrument, the
+measurement, and the re-pointed oracle below.
+
+### The self-host oracle now compares two compilers built from ONE tree
+
+`tools/qbe/qbe-selfhost.sh`'s csexp oracle used to be
+`tools/bootstrap/selfhost.csexp`, a FROZEN past artifact.  `Mid/Qbe/Lower.elm`
+and `Mid/Qbe/Peephole.elm` are themselves entries in `elm-compiler/selfhost/
+manifest.json`, so any real change to the backend changes the compiled
+compiler, hence the csexp — the strongest check in the repo would fail for a
+LEGITIMATE change and the only route back to green would be to re-freeze the
+seed, i.e. to re-record whatever the tree now emits as "the truth".
+
+The oracle is now a FRESHLY COMPILED reference of the SAME current sources
+(stage 1c: `tools/selfhost-compile.sh`, the stock elm+node compiler over the
+same manifest, snapshotted into scratch).  The claim it checks is stronger in
+the sense that matters — two different compilers, built from one tree, agreeing
+byte-for-byte on a whole-corpus 75-source bundle, one of them a binary the QBE
+backend itself produced — and it can no longer be broken by a source change.
+The committed seed is still REPORTED (present / matches its recorded sha256)
+but no longer decides the exit code, so it may drift harmlessly.  This is
+exactly the change that lets a backend change like the one above land without a
+false failure, which is also why it was kept when the clearing itself was not.

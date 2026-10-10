@@ -5,21 +5,40 @@
 #   vendor/qbe/qbe selfhost.ssa                            -> selfhost.s
 #   cc selfhost.s tools/qbe/rt.o                           -> a NATIVE compiler
 #   AOTRUN_ARGV=1 <native compiler> NativeMain.main <manifest> -> out.csexp
-#   cmp out.csexp tools/bootstrap/selfhost.csexp           <- BYTE IDENTITY
+#   tools/selfhost-compile.sh (stock compiler, same sources)   -> ref.csexp
+#   cmp out.csexp ref.csexp                                <- CSEXP FIXED POINT
+#   AOTRUN_ARGV=1 <native compiler> NativeMain.main --ssa NativeMain.main <m> -> selfhost2.ssa
+#   cmp selfhost2.ssa selfhost.ssa                         <- .ssa FIXED POINT
 #
-# THE POINT.  The 58-source self-host manifest contains NO `Mid/*` module, so
-# the compiler that NativeMain drives can emit CSEXP ONLY — the csexp output
-# path cannot be retired until the QBE backend is proven able to compile the
-# compiler itself.  This script is that proof, reproducibly: the stock
-# (elm+node) compiler lowers the whole compiler to ONE QBE IL module; the
-# vendored QBE backend and cc turn it into a native binary; that binary, run
-# over the same manifest, must reproduce the committed bootstrap seed BYTE FOR
-# BYTE.  A byte-identity failure here is the most important possible finding —
-# the script reports it and stops; it never adjusts the comparison.
+# THE POINT.  The self-host manifest NOW CONTAINS the `Mid/*` tier (75 sources,
+# the QBE backend among them), so the compiler the QBE backend builds can emit
+# QBE IL — `NativeMain`'s `--ssa <entry> <manifest>` mode drives
+# `Mid.QbeModule.compileEntry`.  The two oracles together are the retirement
+# claim, and BOTH are now about the CURRENT SOURCES rather than about a frozen
+# artifact from a past tree: the stock (elm+node) compiler lowers the whole
+# compiler to ONE QBE IL module; the vendored QBE backend and cc turn it into a
+# native binary; that binary (a) reproduces the STOCK compiler's own csexp for
+# these very sources — two compilers, one tree, one byte-identical whole-corpus
+# bundle — AND (b) re-emits its OWN `.ssa`, byte-identical to the stock emit,
+# the whole-corpus `.ssa` fixed point.  A byte-identity failure on EITHER is the
+# most important possible finding — the script reports it and stops; it never
+# adjusts the comparison.
+#
+# WHY (a) IS A FRESH REFERENCE AND NOT `tools/bootstrap/selfhost.csexp`.  The
+# committed seed WAS the oracle, and that made the repo's strongest check a
+# function of a frozen past artifact: `Mid/Qbe/Lower.elm` and
+# `Mid/Qbe/Peephole.elm` are entries in $MANIFEST themselves, so ANY real change
+# to the backend changes the compiled compiler and therefore the csexp.  The
+# check would fail for a legitimate change and the only route back to green
+# would be to RE-FREEZE THE SEED — i.e. to re-record whatever the tree now
+# emits as "the truth".  Comparing two compilers built from one tree instead
+# keeps the entire strength of the check (a whole-corpus byte identity over 75
+# sources, on a binary the QBE backend itself produced) and removes the false
+# failure, so the seed may drift harmlessly.
 #
 # This is the analogue of tools/selfhost-gate.sh for the QBE path (that one
 # uses the AOT/zig driver, this one qbe+cc), and of tools/qbe/qbe-mk.sh for a
-# single fixture.  The milestone this reproduces was done BY HAND and its
+# single fixture.  The csexp milestone this reproduces was done BY HAND and its
 # scripted form is the deliverable.
 #
 # Usage: tools/qbe/qbe-selfhost.sh
@@ -33,7 +52,12 @@
 #   1. the .ssa is emitted TWICE and the two are byte-identical (determinism);
 #   2. vendor/qbe/qbe exits 0 and cc links a native compiler;
 #   3. that compiler, run over the manifest, writes out.csexp;
-#   4. cmp out.csexp tools/bootstrap/selfhost.csexp -> exit 0 (BYTE IDENTITY).
+#   4. cmp out.csexp <fresh csexp reference> -> exit 0 (CSEXP FIXED POINT): the
+#      reference is `tools/selfhost-compile.sh`'s whole-corpus bundle, emitted by
+#      the stock compiler from the SAME manifest in the same run (stage 1c).
+#   5. that compiler, run over the manifest with `--ssa NativeMain.main`, writes
+#      selfhost2.ssa; cmp selfhost2.ssa selfhost.ssa -> exit 0 (the `.ssa`
+#      FIXED POINT: a compiler built from the .ssa re-emits its own .ssa).
 # Per-stage wall clock is printed for every stage (emit / qbe / cc / run) so
 # the later phases of the retire-the-VM plan have real numbers.
 #
@@ -61,9 +85,12 @@
 # ~28 min script.  The pre-fix headline is retained above rather than reworded.
 #
 # Env:
-#   QBE_HEAP_MB          GC heap in MB for the native compiler.  DEFAULT 16384
-#                        (the value every recorded whole-compiler run used;
-#                        3072 is recorded as panicking with heap exhaustion).
+#   QBE_HEAP_MB          GC heap in MB for the native compiler.  DEFAULT 32768
+#                        (16384 — the value every pre-mid-tier whole-compiler
+#                        run used — is recorded as panicking with heap
+#                        exhaustion ONCE the manifest holds the 75-source
+#                        middle tier: the corpus's live set grew past the
+#                        16-GB heap's 32-GB reservation).
 #                        This is a knob because the corpus's live set is
 #                        multi-GB: too small a heap is a loud panic, not a
 #                        wrong answer, but it still costs the run.
@@ -94,7 +121,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
 ENTRY="${QBE_SELFHOST_ENTRY:-NativeMain.main}"
-HEAP_MB="${QBE_HEAP_MB:-16384}"
+HEAP_MB="${QBE_HEAP_MB:-32768}"
 # One emit's wall-clock budget, in seconds (see the Env: note above).
 EMIT_BUDGET="${QBE_SELFHOST_EMIT_BUDGET:-60}"
 BIN="${QBE_SELFHOST_BIN:-$ROOT/zig-out/bin/qelmc}"
@@ -154,17 +181,32 @@ command -v cc   >/dev/null 2>&1 || die "cc not found"
 [ -f "$ROOT/elm-compiler/compiler.js" ] \
   || die "elm-compiler/compiler.js missing (run elm-compiler/build.sh once)"
 [ -f "$MANIFEST" ] || die "manifest missing: $MANIFEST"
-[ -s "$SEED" ] || die "seed missing: $SEED"
 
-# The seed is a committed artifact whose whole trust story is the fixed point:
-# verify it against its recorded sha256 before using it as the oracle.  A
-# missing .sha256 is a warning, not a failure (same posture as
-# tools/bootstrap-compile.sh) — but a MISMATCH is fatal.
-if [ -f "$SEED.sha256" ]; then
-  ( cd "$(dirname "$SEED")" && sha256sum -c --quiet "$(basename "$SEED").sha256" ) \
-    || die "$SEED does NOT match $SEED.sha256 — refusing to compare against it"
+# THE COMMITTED SEED IS NO LONGER THIS SCRIPT'S ORACLE.  It used to be, and the
+# comparison was a FROZEN PAST ARTIFACT: `Mid/Qbe/Lower.elm` and
+# `Mid/Qbe/Peephole.elm` are themselves entries in $MANIFEST, so any real
+# change to the backend changes the compiled compiler and therefore the csexp —
+# the strongest check in the repo would fail for a LEGITIMATE change, and the
+# only way back to green would be to re-freeze the seed.  That is exactly the
+# temptation this re-pointing removes.  The oracle is now a FRESHLY COMPILED
+# reference of the SAME CURRENT SOURCES (stage 1c, below), so a source change
+# cannot break the check and the committed seed may drift harmlessly.
+#
+# The seed is a committed artifact `tools/bootstrap/PROVENANCE.md` and
+# `tools/midtier-diff.sh` still pin, so this script REPORTS where it stands —
+# never fails on it, and never fixes it.
+if [ -s "$SEED" ] && [ -f "$SEED.sha256" ]; then
+  if ( cd "$(dirname "$SEED")" && sha256sum -c --quiet "$(basename "$SEED").sha256" ); then
+    say "qbe-selfhost: note: the committed seed still matches its sha256 — it is NOT the"
+  else
+    say "qbe-selfhost: NOTE: the committed seed no longer matches its recorded sha256." >&2
+    say "qbe-selfhost:   That is EXPECTED once a manifest source moves, and it is NOT this" >&2
+    say "qbe-selfhost:   script's oracle (see above). Do NOT re-freeze it as a 'fix'." >&2
+  fi
+  say "   oracle here (see above); it is only reported, so a manifest source cannot"
+  say "   fail this script."
 else
-  say "qbe-selfhost: warning: $SEED.sha256 missing, oracle seed UNVERIFIED"
+  say "qbe-selfhost: note: committed seed absent or unhashed — irrelevant, it is not the oracle"
 fi
 
 # One group exactly: this script's whole shape (one .ssa, one output) assumes
@@ -253,6 +295,23 @@ else
   fi
 fi
 
+# ---- 1c. THE FRESH REFERENCE: the SAME sources, the STOCK compiler ----
+# `tools/selfhost-compile.sh` compiles the SAME $MANIFEST with the stock
+# (elm+node) compiler to a csexp bundle at the manifest's own output path
+# (zig-out/selfhost.csexp, a gitignored build product).  Snapshot it into
+# scratch and compare against THAT: the oracle is now "the stock compiler and
+# the QBE-built compiler agree on the CURRENT sources" — a byte-identity claim
+# between two compilers built from one tree, instead of a claim about a frozen
+# artifact from a past one.
+say "== 1c. tools/selfhost-compile.sh (the fresh csexp reference, stock compiler)"
+REF_SRC="$ROOT/zig-out/selfhost.csexp"
+REF="$WORK/ref.csexp"
+t_ref0=$(now)
+"$ROOT/tools/selfhost-compile.sh" "$REF_SRC" || die "the stock compiler failed to emit the fresh csexp reference"
+cp "$REF_SRC" "$REF" || die "cannot snapshot the fresh reference at $REF"
+t_ref1=$(now)
+say "   fresh reference: $(stat -c %s "$REF") bytes"
+
 # ============================ 2. .ssa -> .s ============================
 say "== 2. vendor/qbe/qbe $SSA -> $WORK/selfhost.s"
 t1=$(now)
@@ -299,16 +358,54 @@ if head -c 4 "$OUT" | grep -q '^err '; then
   die "the native compiler FAILED: $(head -c 300 "$OUT")"
 fi
 
-# ============================ the oracle: BYTE IDENTITY ============================
-say "== 5. cmp $OUT $SEED"
-say "   $(sha256sum "$OUT" | cut -d' ' -f1)  out.csexp"
-say "   $(sha256sum "$SEED" | cut -d' ' -f1)  tools/bootstrap/selfhost.csexp ($(stat -c %s "$SEED") bytes)"
+# ============================ the oracle: the CSEXP FIXED POINT ============================
+# The claim: the compiler the QBE backend builds, run over the manifest,
+# reproduces what the STOCK compiler emits for the SAME CURRENT SOURCES.  Two
+# compilers, one tree, one byte-identical whole-corpus bundle — no frozen
+# artifact in the loop.
+say "== 5. cmp $OUT $REF   (CSEXP FIXED POINT: QBE-built == stock, same sources)"
+say "   $(sha256sum "$OUT" | cut -d' ' -f1)  out.csexp     ($(stat -c %s "$OUT") bytes)"
+say "   $(sha256sum "$REF" | cut -d' ' -f1)  ref.csexp     ($(stat -c %s "$REF") bytes)"
+if [ -s "$REF_SRC" ]; then
+  say "   $(sha256sum "$REF_SRC" | cut -d' ' -f1)  tools/bootstrap/selfhost.csexp (NOT the oracle; reported only)"
+fi
 
 BOTH="FAIL"
 cmp_rc=0
-cmp "$OUT" "$SEED" || cmp_rc=$?
+cmp "$OUT" "$REF" || cmp_rc=$?
 if [ "$cmp_rc" = 0 ]; then
   BOTH="PASS"
+fi
+
+# ============================ 5. the .ssa FIXED POINT ============================
+# The native compiler re-emits its OWN .ssa: `--ssa <entry> <manifest>` drives
+# Mid.QbeModule.compileEntry (the same reachability+lower+peephole+print the
+# stock emit used), so a compiler built from selfhost.ssa must reproduce
+# selfhost.ssa byte-for-byte.  Same heap budget as the csexp run (the corpus
+# pass dominates both).  Output goes to SCRATCH, never the manifest's own path.
+SSA_MANIFEST="$WORK/run-ssa.manifest"
+SSA_OUT="$WORK/selfhost2.ssa"
+jq -r --arg out "$SSA_OUT" '.groups[] | (.sources[] | .), "-> \($out)"' \
+  "$MANIFEST" > "$SSA_MANIFEST"
+
+say "== 6. AOTRUN_ARGV=1 QBE_HEAP_MB=$HEAP_MB $BIN $ENTRY --ssa $ENTRY <manifest>"
+t7=$(now)
+AOTRUN_ARGV=1 AOTRUN_QUIET=1 QBE_HEAP_MB="$HEAP_MB" \
+  "$BIN" "$ENTRY" --ssa "$ENTRY" "$SSA_MANIFEST"
+ssa_rc=$?
+t8=$(now)
+[ "$ssa_rc" = 0 ] || die "the native compiler's --ssa run exited $ssa_rc"
+[ -s "$SSA_OUT" ] || die "the native compiler wrote no .ssa to $SSA_OUT"
+if head -c 4 "$SSA_OUT" | grep -q '^err '; then
+  die "the native compiler's --ssa run FAILED: $(head -c 300 "$SSA_OUT")"
+fi
+
+say "== 7. cmp $SSA_OUT $SSA  (the .ssa fixed point)"
+SSA_FP="FAIL"
+ssa_cmp_rc=0
+cmp "$SSA_OUT" "$SSA" || ssa_cmp_rc=$?
+if [ "$ssa_cmp_rc" = 0 ]; then
+  SSA_FP="PASS"
 fi
 
 # ============================ report ============================
@@ -320,8 +417,10 @@ fi
 say "qbe-selfhost: qbe        $(secs "$t1" "$t2") s  ($(stat -c %s "$WORK/selfhost.s") bytes .s)"
 say "qbe-selfhost: cc         $(secs "$t3" "$t4") s  ($(stat -c %s "$BIN") bytes native compiler)"
 say "qbe-selfhost: run        $(secs "$t5" "$t6") s  (QBE_HEAP_MB=$HEAP_MB)"
+say "qbe-selfhost: ssa-emit   $(secs "$t7" "$t8") s  ($(stat -c %s "$SSA_OUT") bytes .ssa)"
 say "qbe-selfhost: determinism (--batch selfhost.ssa emitted twice): $determinism"
-say "qbe-selfhost: BYTE IDENTITY vs tools/bootstrap/selfhost.csexp: $BOTH (cmp exit $cmp_rc)"
+say "qbe-selfhost: CSEXP FIXED POINT (out.csexp == the fresh reference): $BOTH (cmp exit $cmp_rc)"
+say "qbe-selfhost: .ssa FIXED POINT (selfhost2.ssa == selfhost.ssa): $SSA_FP (cmp exit $ssa_cmp_rc)"
 [ "$CLEAN" = 1 ] || say "qbe-selfhost: scratch kept at $WORK"
 
 # A nondeterministic .ssa is a FINDING (it changes the plan's seed story — a
@@ -332,8 +431,15 @@ if [ "$determinism" = "DIFFERENT" ]; then
   exit 1
 fi
 if [ "$BOTH" != "PASS" ]; then
-  say "qbe-selfhost: BYTE IDENTITY FAILED (cmp exit $cmp_rc) — the QBE-built" >&2
-  say "   compiler does NOT reproduce the committed seed.  Reporting, not fixing." >&2
+  say "qbe-selfhost: CSEXP FIXED POINT FAILED (cmp exit $cmp_rc) — the QBE-built" >&2
+  say "   compiler does NOT reproduce the STOCK compiler's output for these very" >&2
+  say "   sources.  Reporting, not fixing." >&2
   exit 1
 fi
-say "qbe-selfhost: OK — the QBE-built compiler reproduces the committed seed"
+if [ "$SSA_FP" != "PASS" ]; then
+  say "qbe-selfhost: .ssa FIXED POINT FAILED (cmp exit $ssa_cmp_rc) — the" >&2
+  say "   QBE-built compiler's OWN .ssa does NOT match the stock emit.  This is" >&2
+  say "   the whole-corpus divergence the plan cannot proceed past.  Reporting." >&2
+  exit 1
+fi
+say "qbe-selfhost: OK — the QBE-built compiler reproduces the stock compiler's csexp AND its own .ssa"

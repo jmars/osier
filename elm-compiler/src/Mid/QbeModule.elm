@@ -235,19 +235,23 @@ lowerAll rep flatten globals groupTypes corpusUnits groupUnits entryKey =
                             (QbeTypes.fromSchemes (Set.fromList (List.map .key program)) groupTypes.schemes)
                             groupTypes.failures
                 in
-                QbeLower.lower
-                    rep
-                    typeTable
-                    (completeArities globals program)
-                    (if flatten then
-                        QbeFlatten.run program
+                (if flatten then
+                    QbeFlatten.run program
 
-                     else
-                        program
-                    )
-                    entryKey
+                 else
+                    Ok program
+                )
+                    |> Result.andThen
+                        (\flatProgram ->
+                            QbeLower.lower
+                                rep
+                                typeTable
+                                (completeArities globals program)
+                                flatProgram
+                                entryKey
+                        )
             )
-        |> Result.map (QbePeephole.optimize >> QbePrint.print)
+        |> Result.map (\il -> QbePrint.print (QbePeephole.optimize il))
 
 
 -- The arity table `mergedGlobals` covers user functions + ctors ONLY; the

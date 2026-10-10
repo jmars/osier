@@ -12,7 +12,7 @@
 #     hashes every gate artifact compiled with MIDTIER=0 and diffs the list
 #     against `tools/osier-corpus-baseline.sha256`, and step 5 requires the
 #     MIDTIER=0 selfhost bundle to reproduce the committed seed
-#     (`tools/bootstrap/selfhost.csexp`, sha256 2d1f8998…).  The middle tier
+#     (`tools/bootstrap/selfhost.csexp`, sha256 ad36cbab…).  The middle tier
 #     cannot reach that path (Main.elm picks `Lower.Module` before a pass
 #     config exists), so a MIDTIER=0 byte that moves is a BUG, never a
 #     re-baseline.
@@ -65,7 +65,7 @@ GATE="$ROOT/tests/elm-fixtures/run-elm-gate.sh"
 FIX="$ROOT/tests/elm-fixtures"
 BASELINE="$ROOT/tools/osier-corpus-baseline.sha256"
 STATS="$ROOT/tools/midtier-emit-stats.py"
-SEED_SHA="ac8acd77aab6353507736c158c9a184f62b46d1080050069d0c3959f0ce1cb4c"
+SEED_SHA="ad36cbab7d53d97c6d6c4610bc13d37e53b355da1f78878b11292780a4789224"
 
 # Every pass switch, so "all passes off" stays complete as passes are added.
 # A missing switch here would silently leave that pass ON in the bisection and
@@ -360,8 +360,9 @@ fi
 
 # 5b. SECOND GENERATION: run the OPTIMIZED compiler (still a VM bundle) over
 # the whole gate manifest and require the UNSOPHISTICATED bytes back.  The
-# self-hosted compiler drives `Lower.Module` (Mid is not one of the 58 manifest
-# sources until S7), so its output must be the MIDTIER=0 bytes exactly: this is
+# self-hosted compiler's CSEXP mode drives `Lower.Module` (the `Mid/*` tier IS
+# now in the manifest, but NativeMain's csexp path never reaches it), so its
+# output must be the MIDTIER=0 bytes exactly: this is
 # a semantic check of the optimized compiler binary, not a byte check of the
 # optimized bytes.
 if [ "${MIDTIER_DIFF_FAST:-0}" = "1" ]; then

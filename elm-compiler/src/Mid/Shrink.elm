@@ -244,7 +244,11 @@ fixpoint fuel value acc =
 
 rewritesOnly : Stats -> Stats
 rewritesOnly s =
-    { zero
+    let
+        base =
+            zero
+    in
+    { base
         | deadBindings = s.deadBindings
         , copyProps = s.copyProps
         , trivialInlines = s.trivialInlines
@@ -544,12 +548,16 @@ localBeta app =
                 ( App app, zero )
 
             else if List.all safeArg app.args then
+                let
+                    base =
+                        zero
+                in
                 ( Let
                     { binders =
                         List.map2 (\p a -> LetBind { binder = p, value = a }) lam.params app.args
                     , body = lam.body
                     }
-                , { zero | betas = 1 }
+                , { base | betas = 1 }
                 )
 
             else

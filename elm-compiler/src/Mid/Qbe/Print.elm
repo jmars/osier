@@ -22,8 +22,7 @@ module Mid.Qbe.Print exposing (print)
 -- plain ASCII by construction).
 
 import Char
-import Mid.Qbe.Il exposing (..)
-import String exposing (fromInt)
+import Mid.Qbe.Il exposing (Module, Func, Block, Inst(..), Jump(..), Arg(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..), descType, retType, valType)
 
 
 print : Module -> String
@@ -33,7 +32,7 @@ print m =
             ++ [ "" ]
             ++ List.map printData m.datas
             ++ [ "" ]
-            ++ List.intersperse "" (List.map printFunc m.funcs)
+            ++ intersperse "" (List.map printFunc m.funcs)
         )
 
 
@@ -43,7 +42,7 @@ printType t =
         ++ t.name
         ++ (case t.align of
                 Just a ->
-                    " = align " ++ fromInt a ++ " { "
+                    " = align " ++ String.fromInt a ++ " { "
 
                 Nothing ->
                     " = { "
@@ -64,7 +63,7 @@ printData d =
         ++ d.name
         ++ (case d.align of
                 Just a ->
-                    " = align " ++ fromInt a ++ " { "
+                    " = align " ++ String.fromInt a ++ " { "
 
                 Nothing ->
                     " = { "
@@ -77,13 +76,13 @@ printItem : DataItem -> String
 printItem item =
     case item of
         DByte n ->
-            "b " ++ fromInt n
+            "b " ++ String.fromInt n
 
         DWord n ->
-            "w " ++ fromInt n
+            "w " ++ String.fromInt n
 
         DLong n ->
-            "l " ++ fromInt n
+            "l " ++ String.fromInt n
 
         DDouble f ->
             -- `d` here is the DATAITEM's extended type (8 bytes); the CONST
@@ -97,7 +96,7 @@ printItem item =
             "b \"" ++ escapeStr s ++ "\""
 
         DZero n ->
-            "z " ++ fromInt n
+            "z " ++ String.fromInt n
 
         DRef name ->
             "l $" ++ name
@@ -133,7 +132,7 @@ printFloat f =
 
 escapeStr : String -> String
 escapeStr s =
-    String.concat (List.map escapeChar (String.toList s))
+    String.join "" (List.map escapeChar (String.toList s))
 
 
 escapeChar : Char -> String
@@ -147,13 +146,25 @@ escapeChar c =
     else if isPrintableAscii c then
         String.fromChar c
 
+    else if stringIsByteIndexed then
+        -- BYTE-indexed runtime (the self-host compiler): `String.toList` yields
+        -- one Char per BYTE, so `Char.toCode c` is already a raw UTF-8 byte.
+        -- Emit its octal DIRECTLY — running it through `utf8Bytes` would
+        -- re-encode the byte as a code point and double the width (the
+        -- \342\200\224 vs \303\242\302\200\302\224 divergence).
+        octalByte (Char.toCode c)
+
     else
-        -- Encode the code point as UTF-8 BYTES, each emitted as a 3-digit
-        -- octal escape.  (A single octal of the code point would be wrong: it
-        -- emits Latin-1 for code points > 127 instead of their UTF-8 bytes —
-        -- the VM stores/compares strings and symbols as UTF-8 bytes, so the
-        -- parity target is the byte sequence, not the code point.)
-        String.concat (List.map octalByte (utf8Bytes c))
+        -- CODE-POINT-indexed runtime (stock elm on node): `String.toList` yields
+        -- one Char per Unicode scalar; decode each scalar to its UTF-8 bytes.
+        String.join "" (List.map octalByte (utf8Bytes c))
+
+
+-- Probe which string semantics the runtime has, exactly like Zinc.Csexp:
+-- byte-indexed (`String.length "é" == 2`) or code-point-indexed (`== 1`).
+stringIsByteIndexed : Bool
+stringIsByteIndexed =
+    String.length "é" == 2
 
 
 isPrintableAscii : Char -> Bool
@@ -194,16 +205,16 @@ utf8Bytes c =
 
 pad3 : String -> String
 pad3 s =
-    String.repeat (3 - String.length s) "0" ++ s
+    String.join "" (List.repeat (3 - String.length s) "0") ++ s
 
 
 toOctal : Int -> String
 toOctal n =
     if n < 8 then
-        fromInt n
+        String.fromInt n
 
     else
-        toOctal (n // 8) ++ fromInt (modBy 8 n)
+        toOctal (n // 8) ++ String.fromInt (modBy 8 n)
 
 
 printFunc : Func -> String
@@ -288,7 +299,7 @@ printInst inst =
             "\t" ++ storeName st ++ " " ++ printArg v ++ ", " ++ printArg addr
 
         Blit src dst n ->
-            "\tblit " ++ printArg src ++ ", " ++ printArg dst ++ ", " ++ fromInt n
+            "\tblit " ++ printArg src ++ ", " ++ printArg dst ++ ", " ++ String.fromInt n
 
         Call dst ty target args ->
             (case dst of
@@ -305,7 +316,7 @@ printInst inst =
                 ++ ")"
 
         Alloc r n ->
-            "\t%" ++ r ++ " =l alloc8 " ++ fromInt n
+            "\t%" ++ r ++ " =l alloc8 " ++ String.fromInt n
 
 
 tab : Maybe String -> Ty -> String -> String
@@ -360,7 +371,7 @@ printArg : Arg -> String
 printArg arg =
     case arg of
         Con n ->
-            fromInt n
+            String.fromInt n
 
         Tmp t ->
             "%" ++ t
@@ -461,3 +472,19 @@ storeName st =
 
         StoreD ->
             "stored"
+
+
+-- List.intersperse, local: the selfhost alias table has no `List.intersperse`
+-- row, and this is the only call site.  Semantics match elm/core exactly:
+-- `intersperse sep [a, b, c] = [a, sep, b, sep, c]`.
+intersperse : a -> List a -> List a
+intersperse sep xs =
+    case xs of
+        [] ->
+            []
+
+        [ x ] ->
+            [ x ]
+
+        x :: rest ->
+            x :: sep :: intersperse sep rest

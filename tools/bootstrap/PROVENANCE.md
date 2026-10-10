@@ -3,9 +3,9 @@
 **This is the one generated artifact in this repo that MUST be committed.** A
 fresh clone has no compiler: the source of truth is
 `elm-compiler/src/*.elm` (the frontend) plus `elm-compiler/selfhost/manifest.json`
-(58 sources), and turning those into a compiler normally needs **elm 0.19.2**
+(75 sources), and turning those into a compiler normally needs **elm 0.19.2**
 (`elm make`) and **node**. The committed bundle removes both: it is the
-compiler's own 58 sources, already compiled into a csexp program whose entry is
+compiler's own 75 sources, already compiled into a csexp program whose entry is
 `NativeMain.main`, and it runs on the ZINC VM (`zig build elmvm`) with no elm,
 no node and no AOT/LLVM step.
 
@@ -17,23 +17,23 @@ no node and no AOT/LLVM step.
 | | |
 |---|---|
 | path | `tools/bootstrap/selfhost.csexp` |
-| bytes | 1466335 |
-| sha256 | `ac8acd77aab6353507736c158c9a184f62b46d1080050069d0c3959f0ce1cb4c` |
+| bytes | 2126056 |
+| sha256 | `ad36cbab7d53d97c6d6c4610bc13d37e53b355da1f78878b11292780a4789224` |
 | checksum file | `tools/bootstrap/selfhost.csexp.sha256` (verified by `tools/bootstrap-compile.sh` before every run) |
-| built from commit | `33e1d5bba463671f0154545f0b5133537db6c0c6` (HEAD) **plus the uncommitted `src/ParserFast.elm` integer-literal change — see "Re-freeze 2026-10-09" below** |
+| built from commit | `a7755b80e136a8feac6e4c7240e936aa3ed11f81` (HEAD) **plus the uncommitted "middle tier becomes self-compiled" change — see "Re-freeze 2026-10-10" below** |
 | entry point | `NativeMain.main` |
 
 ## Inputs
 
 | | |
 |---|---|
-| manifest | `elm-compiler/selfhost/manifest.json`, sha256 `369e6a735af3de6f6d2b2ad2afc000fc55fec9cab6218a98deec5c4f8e8901eb` |
-| source count | 58 (every path listed in the manifest; all must exist) |
-| source-set digest | `05e1d476b410f99a6b148440ddb81a5a09d01e36b44158acc6d337043e9d559f` |
+| manifest | `elm-compiler/selfhost/manifest.json`, sha256 `8f6bbfb05efd258a4e2d64f86a80c4ce56f6cb1ffed914a329b449b5873f12cf` |
+| source count | 75 (every path listed in the manifest; all must exist) |
+| source-set digest | `8cada8b44f6651e366abe1f177f027ffc82488c449523f2f4ef39d8e48f4c6d9` |
 | corpus | `elm-compiler/src/Prelude.elm`, `src/Runtime.elm`, `core-libs/{Dict,Set,Maybe,Result,Tuple,JsArray,Array,Str}.elm` (always appended by `run.js`, not in the manifest) |
 
 The source-set digest is the sha256 of `sha256sum`-style lines
-(`<sha256>  <path>`) for the 58 manifest sources **in manifest order**:
+(`<sha256>  <path>`) for the 75 manifest sources **in manifest order**:
 
     jq -r '.groups[].sources[]' elm-compiler/selfhost/manifest.json \
       | while read -r f; do printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"; done \
@@ -66,7 +66,7 @@ node v26.8.1, zig 0.16.0. Measured cost of step 2: **3 s**.
 Reproducibility check run for this file: `tools/selfhost-compile.sh` was re-run
 on the clean-at-`33e1d5b` tree while writing this file and rewrote
 `zig-out/selfhost.csexp` with the **same** sha256 — i.e. the seed is
-reproducible from HEAD's 58 sources by the stock path.
+reproducible from HEAD's 75 sources by the stock path.
 
 Re-checked after the Withe→Osier rename (2026-10-08), because that rename edits
 a comment in one manifest source (`elm-compiler/src/Type/Builtins.elm`): the
@@ -146,6 +146,61 @@ write scope — see the handoff `handoff-osier-bigint-result`):
     `FAILED — MIDTIER=0 moved the seed` until the constant is set to
     `ac8acd77…`.
   * `elm-compiler/src/Mid/Module.elm`'s header comment cites the old digest.
+
+(Both of those stale references were in fact updated at HEAD `a7755b8` and
+again by the 2026-10-10 re-freeze below — the note above is the historical
+record of the state this file described at the time of the bigint re-freeze.)
+
+## Re-freeze 2026-10-10 — the middle tier becomes self-compiled
+
+**This is the byte-changing re-freeze the whole retirement plan is sequenced
+around.** The 58-source manifest contained **no `Mid/*` source**, so the
+compiler the QBE backend builds could emit CSEXP only.  This change adds the
+middle tier — the QBE backend and everything `Mid/QbeModule` pulls in — to the
+self-host manifest, so a compiler built from the manifest can now emit its own
+QBE IL.
+
+What moved (all uncommitted, on HEAD `a7755b8`):
+
+  * `elm-compiler/selfhost/manifest.json` — 58 → **75 sources** (the 17 `Mid/*`
+    modules: `Ir`, `FromAst`, `ToZinc`, `Shrink`, `Arity`, `ConstFold`,
+    `DeadGlobals`, `Inline`, `Simplify`, `Module`, `Qbe/{Il,Types,Flatten,
+    Lower,Peephole,Print}`, `QbeModule`).
+  * `elm-compiler/selfhost/NativeMain.elm` — a `.ssa` batch mode
+    (`elmc --ssa <entryKey> <manifest>`) that drives `Mid.QbeModule.compileEntry`
+    and writes QBE IL per group instead of csexp; the csexp shapes are untouched.
+  * `elm-compiler/src/Mid/*` — rewritten into the SELF-HOST typechecker's subset
+    so the tier is compilable BY the compiler it builds.  Semantically-equivalent
+    rewrites only, so the emitted `.ssa` is byte-identical to the pre-change
+    compiler's: `>>`/`<<` composition → lambdas; `Block`/`Func` record-constructor
+    calls → record literals; `exposing (..)` (which brings no types) → explicit
+    lists; multi-field record updates on a fresh base → named/annotated helpers;
+    `Debug.todo` → `Result` propagation (`Qbe.Flatten.run` now `Result`-returning);
+    `String.concat`/`String.repeat`/`String.uncons`/`String.all`/`Basics.max`/
+    `List.intersperse` → self-host spellings.
+  * `elm-compiler/src/Mid/Qbe/Print.elm` — `escapeStr` made BYTE-CONSISTENT across
+    the two runtimes.  The self-host compiler's `String.toList`/`Char.toCode` are
+    BYTE-oriented (one Char per UTF-8 byte) while stock elm's are CODE-POINT
+    oriented, so the original `escapeChar` (scalar → `utf8Bytes` → octal)
+    re-encoded each byte on the self-host path — the non-ASCII error strings
+    (`… — …`) in `Flatten`/`Lower` emitted `\303\242\302\200\302\224` where the
+    stock emit wrote `\342\200\224`.  A `stringIsByteIndexed` probe (the same one
+    `Zinc.Csexp` uses) now emits each byte's octal DIRECTLY under byte semantics,
+    reproducing the stock `.ssa` byte-for-byte.
+
+MEASURED (this host, 2026-10-10, HEAD `a7755b8` + the change):
+
+    tools/selfhost-compile.sh            # exit 0, ~2 s
+    # wrote zig-out/selfhost.csexp (2126056 bytes; was 1466335 — the middle
+    # tier is ~660 KB of compiled bundle)
+    sha256sum zig-out/selfhost.csexp
+    # ad36cbab7d53d97c6d6c4610bc13d37e53b355da1f78878b11292780a4789224
+
+The seed was re-frozen (`cp zig-out/selfhost.csexp tools/bootstrap/selfhost.csexp`,
+`selfhost.csexp.sha256` regenerated, identity and source-set digest updated
+above), and `tools/selfhost-audit.sh` is green: **75 files, 75 ok, 0 of every
+failure class, whole-group OK** — i.e. every added `Mid/*` source parses,
+resolves, typechecks and lowers through the self-host compiler.
 
 ## The fixed-point fact (why a committed binary is safe to trust)
 

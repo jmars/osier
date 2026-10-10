@@ -230,7 +230,7 @@ slotTmp i =
 closeBlock : Jump -> S -> S
 closeBlock jump s =
     { s
-        | blocks = Block s.curLabel (List.reverse s.curBody) jump :: s.blocks
+        | blocks = { label = s.curLabel, body = List.reverse s.curBody, jump = jump } :: s.blocks
         , curBody = []
     }
 
@@ -243,6 +243,23 @@ startBlock label s =
 jumpTo : String -> S -> S
 jumpTo label s =
     closeBlock (Jmp label) s
+
+
+{-| Merge a closure body-walk's results into the caller's state: the closure's
+own pending func and its datas/key supplies come from the body walk, every
+other field carries over from the caller.  A NAMED function (not a lambda) so
+the update base is an ANNOTATED closed `S`: the checker cannot discharge a
+second setter from a fresh lambda-bound base.
+-}
+mergeClosureResult : PendingFunc -> S -> S -> S
+mergeClosureResult pending sInner s5 =
+    { s5
+        | funcs = pending :: List.foldl (::) s5.funcs sInner.funcs
+        , datas = sInner.datas
+        , dataKeys = sInner.dataKeys
+        , dataN = sInner.dataN
+        , cloN = sInner.cloN
+    }
 
 
 -- Deduplicated static data: same content -> same symbol.
@@ -381,7 +398,7 @@ grefsOf exp =
 
         Case branch ->
             grefsOf branch.scrutinee
-                ++ List.concatMap (grefsOf << .body) branch.alts
+                ++ List.concatMap (\a -> grefsOf a.body) branch.alts
 
         Con con ->
             List.concatMap grefsOf con.args
@@ -390,14 +407,14 @@ grefsOf exp =
             List.concatMap grefsOf es
 
         RecordLit setters ->
-            List.concatMap (grefsOf << Tuple.second) setters
+            List.concatMap (\p -> grefsOf (Tuple.second p)) setters
 
         RecordGet rec _ ->
             grefsOf rec
 
         RecordUpdate update ->
             grefsOf update.base
-                ++ List.concatMap (grefsOf << Tuple.second) update.updates
+                ++ List.concatMap (\p -> grefsOf (Tuple.second p)) update.updates
 
         ListLit es ->
             List.concatMap grefsOf es
@@ -549,12 +566,13 @@ lowerFunBody entry key qname lambda captures sOuter =
 
                     pending =
                         { func =
-                            Func qname
-                                False
-                                (Agg "ret")
-                                (ncaps > 0)
-                                (List.map (\i -> ( "a" ++ String.fromInt i, Agg "val" )) (List.range 0 (nparams - 1)))
-                                (List.reverse sRet.blocks)
+                            { name = qname
+                            , export_ = False
+                            , ret = Agg "ret"
+                            , envParam = ncaps > 0
+                            , params = List.map (\i -> ( "a" ++ String.fromInt i, Agg "val" )) (List.range 0 (nparams - 1))
+                            , blocks = List.reverse sRet.blocks
+                            }
                         , nslots = s1.slot
                         , nparams = nparams
                         , ncaps = ncaps
@@ -1479,7 +1497,7 @@ stageSlots slots s =
             List.length slots
 
         ( cbase, s1 ) =
-            freshSlots (Basics.max 1 n) s
+            freshSlots (max 1 n) s
 
         base =
             slotTmp cbase
@@ -1722,7 +1740,7 @@ lowerIf block dest isTail s =
 
                             else
                                 lowerVal block.elseBranch dest (startBlock elseLbl s12)
-                                    |> Result.map (jumpTo joinLbl >> startBlock joinLbl)
+                                    |> Result.map (\st -> startBlock joinLbl (jumpTo joinLbl st))
                         )
             )
 
@@ -1762,9 +1780,9 @@ lowerShortAnd block dest s =
                 in
                 Ok (jmpfFalse cslot falseLbl trueLbl s4)
                     |> Result.andThen (lowerVal block.right dest)
-                    |> Result.map (jumpTo endLbl >> startBlock falseLbl)
+                    |> Result.map (\st -> startBlock falseLbl (jumpTo endLbl st))
                     |> Result.andThen (lowerLit (LBoolean False) dest)
-                    |> Result.map (jumpTo endLbl >> startBlock endLbl)
+                    |> Result.map (\st -> startBlock endLbl (jumpTo endLbl st))
             )
 
 
@@ -1789,9 +1807,9 @@ lowerShortOr block dest s =
                 in
                 Ok (jmpfFalse cslot falseLbl trueLbl s4)
                     |> Result.andThen (lowerLit (LBoolean True) dest)
-                    |> Result.map (jumpTo endLbl >> startBlock falseLbl)
+                    |> Result.map (\st -> startBlock falseLbl (jumpTo endLbl st))
                     |> Result.andThen (lowerVal block.right dest)
-                    |> Result.map (jumpTo endLbl >> startBlock endLbl)
+                    |> Result.map (\st -> startBlock endLbl (jumpTo endLbl st))
             )
 
 
@@ -1818,9 +1836,9 @@ lowerNotEqual block dest s =
                 in
                 Ok (jmpfFalse eqSlot falseLbl trueLbl s4)
                     |> Result.andThen (lowerLit (LBoolean False) dest)
-                    |> Result.map (jumpTo endLbl >> startBlock falseLbl)
+                    |> Result.map (\st -> startBlock falseLbl (jumpTo endLbl st))
                     |> Result.andThen (lowerLit (LBoolean True) dest)
-                    |> Result.map (jumpTo endLbl >> startBlock endLbl)
+                    |> Result.map (\st -> startBlock endLbl (jumpTo endLbl st))
             )
 
 
@@ -2993,15 +3011,7 @@ lowerClosure lambda dest s =
                                                     )
                                                     s4
                                                     |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
-                                                    |> (\s5 ->
-                                                            { s5
-                                                                | funcs = pending :: List.foldl (::) s5.funcs sInner.funcs
-                                                                , datas = sInner.datas
-                                                                , dataKeys = sInner.dataKeys
-                                                                , dataN = sInner.dataN
-                                                                , cloN = sInner.cloN
-                                                            }
-                                                       )
+                                                    |> mergeClosureResult pending sInner
                                                 )
                                         )
                             )
@@ -3093,7 +3103,7 @@ fvExp exp =
                                         [ bind.binder.id ]
 
                                     LetDestruct d ->
-                                        d.scrutId.id :: List.map (Tuple.first >> .id) d.binds
+                                        d.scrutId.id :: List.map (\p -> (Tuple.first p).id) d.binds
                             )
                             block.binders
                         )
@@ -3123,12 +3133,12 @@ fvExp exp =
                     Set.fromList
                         (branch.scrutId.id
                             :: List.concatMap
-                                (List.map (Tuple.first >> .id) << .binds)
+                                (\a -> List.map (\p -> (Tuple.first p).id) a.binds)
                                 branch.alts
                         )
             in
             Result.map (\s -> Set.diff s boundIds)
-                (setsUnion (fvExp branch.scrutinee :: List.map (fvExp << .body) branch.alts))
+                (setsUnion (fvExp branch.scrutinee :: List.map (\a -> fvExp a.body) branch.alts))
 
         Con con ->
             setsUnion (List.map fvExp con.args)
@@ -3137,7 +3147,7 @@ fvExp exp =
             setsUnion (List.map fvExp es)
 
         RecordLit setters ->
-            setsUnion (List.map (fvExp << Tuple.second) setters)
+            setsUnion (List.map (\p -> fvExp (Tuple.second p)) setters)
 
         RecordGet rec _ ->
             fvExp rec
@@ -3277,11 +3287,12 @@ rtCallFuncs =
                 callArgs =
                     ArgEnv (Il.Tmp "e") :: List.map (\a -> ArgVal (Agg "val") (Il.Tmp a)) argNames
             in
-            Func ("rt_call" ++ String.fromInt n)
-                True
-                (Agg "ret")
-                False
-                params
+            { name = "rt_call" ++ String.fromInt n
+            , export_ = True
+            , ret = Agg "ret"
+            , envParam = False
+            , params = params
+            , blocks =
                 [ { label = "start"
                   , body =
                         [ Call (Just "r") (Agg "ret") (Il.Tmp "fn") callArgs
@@ -3289,6 +3300,7 @@ rtCallFuncs =
                   , jump = Ret (Just (Il.Tmp "r"))
                   }
                 ]
+            }
         )
         (List.range 0 maxArity)
 
@@ -3371,7 +3383,7 @@ metaTable pendings =
 -- collision-free, and never parsed back.
 mangle : String -> String
 mangle str =
-    String.concat (List.map mangleChar (String.toList str))
+    String.join "" (List.map mangleChar (String.toList str))
 
 
 mangleChar : Char -> String

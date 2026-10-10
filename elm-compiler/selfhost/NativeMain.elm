@@ -7,6 +7,12 @@ CLI (identical to run.js, minus the leading `node run.js`):
 
     elmc <input1.elm> [input2.elm ...] <output.csexp>
     elmc <manifest>
+    elmc --ssa <entryKey> <manifest>
+
+The third shape is the QBE backend batch mode: instead of a csexp bundle, each
+group's output file receives QBE IL text (.ssa) lowered from `<entryKey>`'s
+defun (run.js's QBE=1 QBE_ENTRY=<key>), or `err <msg>`.  The csexp shapes are
+untouched by it.
 
 The manifest is LINE-ORIENTED (no Json.Decode in the selfhost corpus): one
 source path per line; each group terminated by an output marker line.
@@ -47,6 +53,7 @@ argv[2:] shape: the binary path is NOT an element).
 -}
 
 import Lower.Module as Module
+import Mid.QbeModule as QbeModule
 
 
 type Msg
@@ -89,7 +96,13 @@ start () =
             errLine msg
 
         Ok [] ->
-            errLine "usage: elmc <in1.elm> [in2.elm ...] <out.csexp> | elmc <manifest>"
+            errLine "usage: elmc <in1.elm> [in2.elm ...] <out.csexp> | elmc <manifest> | elmc --ssa <entry> <manifest>"
+
+        Ok ("--ssa" :: entry :: path :: []) ->
+            -- .ssa batch mode: drive the QBE backend (Mid.QbeModule.compileEntry)
+            -- and write QBE IL per group instead of csexp.  `entry` is the defun
+            -- key the lowering roots reachability from (run.js's QBE_ENTRY).
+            Task.andThen (runSsa entry) (Io.readFile path)
 
         Ok [ path ] ->
             -- A single argument is a MANIFEST (tools/selfhost-gate.sh's
@@ -326,6 +339,60 @@ zipJobs jobs bundles =
 
                 [] ->
                     []
+
+
+
+-- ======================= the .ssa pipeline =======================
+-- `elmc --ssa <entry> <manifest>` drives the QBE backend (Mid.QbeModule)
+-- instead of the csexp lowerer: read the corpus ONCE, then compile each group
+-- against it and write QBE IL (.ssa) — or "err <msg>" — to that group's output
+-- path.  flatten/rep are True, matching run.js's QBE defaults (QBE_NOFLATTEN /
+-- QBE_NOREP are both UNSET on the stock emit this must reproduce byte-for-byte).
+
+
+runSsa : String -> String -> Runtime.Task x String
+runSsa entryKey text =
+    case manifestJobs (Str.lines text) of
+        Err msg ->
+            errLine msg
+
+        Ok [] ->
+            errLine "manifest has no groups"
+
+        Ok jobs ->
+            runSsaJobs entryKey jobs
+
+
+runSsaJobs : String -> List Job -> Runtime.Task x String
+runSsaJobs entryKey jobs =
+    Task.andThen (ssaJobs entryKey jobs) (readAll (allSources jobs))
+
+
+ssaJobs : String -> List Job -> List String -> Runtime.Task x String
+ssaJobs entryKey jobs texts =
+    readCorpus
+        |> Task.andThen
+            (\corpus ->
+                writeBundles
+                    (zipJobs jobs
+                        (List.map2
+                            (\job srcs -> renderSsa (QbeModule.compileEntry corpus srcs entryKey True True))
+                            jobs
+                            (regroup jobs texts)
+                        )
+                    )
+                    []
+            )
+
+
+renderSsa : Result String String -> String
+renderSsa result =
+    case result of
+        Ok ssa ->
+            ssa
+
+        Err msg ->
+            "err " ++ msg
 
 
 

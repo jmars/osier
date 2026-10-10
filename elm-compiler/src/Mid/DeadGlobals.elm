@@ -93,7 +93,7 @@ run defuns =
 
         roots =
             deduped
-                |> List.filter (not << isWrapper)
+                |> List.filter (\d -> not (isWrapper d))
                 |> List.map .key
                 |> Set.fromList
 

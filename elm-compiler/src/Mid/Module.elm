@@ -14,7 +14,7 @@ module Mid.Module exposing (Batch, compileBatch, Unit, parseAll, collectAll, mer
 -- somewhere, and every legal place inside the existing driver is one of the 58
 -- sources listed in `elm-compiler/selfhost/manifest.json` — whose compiled
 -- form IS the committed bootstrap seed
--- (`tools/bootstrap/selfhost.csexp`, sha256 ac8acd77…).  Editing any of them
+-- (`tools/bootstrap/selfhost.csexp`, sha256 ad36cbab…).  Editing any of them
 -- changes the seed by construction, and re-freezing the seed is a deliberate
 -- user decision (plan decision D5/D6), not this stage's.  So the switch lives
 -- OUTSIDE the 58: `src/Main.elm` (not a manifest source) picks between
@@ -114,7 +114,7 @@ compileBatch config corpusSources groups =
 
         Ok compiled ->
             { bundles = Ok (List.map Tuple.first compiled)
-            , report = List.filter (not << String.isEmpty) (List.map Tuple.second compiled)
+            , report = List.filter (\x -> not (x == "")) (List.map Tuple.second compiled)
             }
 
 

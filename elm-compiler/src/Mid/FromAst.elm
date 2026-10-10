@@ -1177,7 +1177,7 @@ recordExpr ctx setters =
     -- is built right-to-left), which also fixes which setter's error is
     -- reported first; the IR stores them in SOURCE order and the emitter
     -- reverses again.
-    map (List.reverse >> RecordLit) (gatherSetters ctx (List.reverse setters) [])
+    map (\xs -> RecordLit (List.reverse xs)) (gatherSetters ctx (List.reverse setters) [])
 
 
 gatherSetters : Context -> List (Node Expression.RecordSetter) -> List ( String, Exp ) -> Gen (List ( String, Exp ))
@@ -1228,7 +1228,7 @@ listExpr : Context -> List (Node Expression) -> Gen Exp
 listExpr ctx es =
     -- buildList lowers the tail first (error priority: last element first) and
     -- emits right-to-left; the IR keeps SOURCE order.
-    map (List.reverse >> ListLit) (fromArgs ctx (List.reverse es))
+    map (\xs -> ListLit (List.reverse xs)) (fromArgs ctx (List.reverse es))
 
 
 tupledExpr : Context -> List (Node Expression) -> Gen Exp
@@ -1242,7 +1242,7 @@ tupledExpr ctx es =
 
         _ ->
             -- tupleCode lowers the tail first, like buildList.
-            map (List.reverse >> Tup) (fromArgs ctx (List.reverse es))
+            map (\xs -> Tup (List.reverse xs)) (fromArgs ctx (List.reverse es))
 
 
 

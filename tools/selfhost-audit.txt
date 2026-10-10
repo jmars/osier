@@ -3,14 +3,14 @@
 # fix rows wave-by-wave (parse -> unknown-name -> type -> lowering),
 # re-run the script, watch failure rows drop.
 #
-# Group:    58 sources = the compiler frontend (src/{Lower,Type,
+# Group:    75 sources = the compiler frontend (src/{Lower,Type,
 #           Zinc,Frontend}) + the parse closure pulled into src/Elm**/
 #           (stil4m/elm-syntax 7.3.9, Json codecs pruned; formerly
 #           selfhost/vendor) + NativeMain skeleton
 # Corpus:   src/Prelude.elm + src/Runtime.elm + core-libs/* (fixed side,
 #           NOT audited — always compiled as the corpus)
 # Compiler: node elm-compiler/run.js --batch (stock-built compiler.js)
-# Date:     2026-10-07T18:31:23Z
+# Date:     2026-10-10T08:25:54Z
 #
 # Columns: <RESULT>\t<file>\t<row:col>\t<message>
 # RESULT classes: OK | parse-error | unknown-name | type-error |
@@ -74,14 +74,31 @@ OK	elm-compiler/src/Elm/Processing.elm
 OK	elm-compiler/src/Elm/Dependency.elm		
 OK	elm-compiler/src/Elm/Interface.elm		
 OK	elm-compiler/src/Elm/RawFile.elm		
+OK	elm-compiler/src/Mid/Ir.elm		
+OK	elm-compiler/src/Mid/FromAst.elm		
+OK	elm-compiler/src/Mid/ToZinc.elm		
+OK	elm-compiler/src/Mid/Shrink.elm		
+OK	elm-compiler/src/Mid/Arity.elm		
+OK	elm-compiler/src/Mid/ConstFold.elm		
+OK	elm-compiler/src/Mid/DeadGlobals.elm		
+OK	elm-compiler/src/Mid/Inline.elm		
+OK	elm-compiler/src/Mid/Simplify.elm		
+OK	elm-compiler/src/Mid/Module.elm		
+OK	elm-compiler/src/Mid/Qbe/Il.elm		
+OK	elm-compiler/src/Mid/Qbe/Types.elm		
+OK	elm-compiler/src/Mid/Qbe/Flatten.elm		
+OK	elm-compiler/src/Mid/Qbe/Lower.elm		
+OK	elm-compiler/src/Mid/Qbe/Peephole.elm		
+OK	elm-compiler/src/Mid/Qbe/Print.elm		
+OK	elm-compiler/src/Mid/QbeModule.elm		
 OK	elm-compiler/selfhost/NativeMain.elm		
 #
-# ===== whole-group pass (all 58 sources as one group) =====
+# ===== whole-group pass (all 75 sources as one group) =====
 WHOLE-GROUP	OK		
 #
 # ===== summary =====
-# files:          58
-# ok:             58
+# files:          75
+# ok:             75
 # parse-error:    0
 # unknown-name:   0
 # type-error:     0

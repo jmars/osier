@@ -92,7 +92,11 @@ check lives in `tools/midtier-diff.sh`; as of pass 1 the same property is what
 -}
 off : Config
 off =
-    { defaultConfig
+    let
+        base =
+            defaultConfig
+    in
+    { base
         | shrink = False
         , constFold = False
         , inline = False
@@ -144,7 +148,7 @@ runWithReport config defuns =
                     ( defuns1, report ) =
                         pass defuns0
                 in
-                ( defuns1, reports ++ (if String.isEmpty report then [] else [ report ]))
+                ( defuns1, reports ++ (if report == "" then [] else [ report ]))
 
             else
                 ( defuns0, reports )

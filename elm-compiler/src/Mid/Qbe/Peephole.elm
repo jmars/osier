@@ -25,7 +25,7 @@ module Mid.Qbe.Peephole exposing (optimize)
 
 import Char
 import Dict exposing (Dict)
-import Mid.Qbe.Il as Il exposing (..)
+import Mid.Qbe.Il as Il exposing (Module, Func, Block, Inst(..), Jump(..), Arg(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..), descType, retType, valType)
 import Set exposing (Set)
 
 
@@ -107,9 +107,9 @@ track dst src sources =
 
 isSlotName : String -> Bool
 isSlotName t =
-    case String.uncons t of
-        Just ( 's', rest ) ->
-            rest /= "" && String.all Char.isDigit rest
+    case String.toList t of
+        's' :: rest ->
+            rest /= [] && List.all Char.isDigit rest
 
         _ ->
             False
