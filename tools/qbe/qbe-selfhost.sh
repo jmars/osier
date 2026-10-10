@@ -185,6 +185,12 @@ if [ ! -x "$QBE" ]; then
 fi
 
 # ---- the runtime object (cached, freshness-invalidated) ----
+# The SAME graph now lives as a shared script, tools/qbe/rt-o.sh (qbe-mk.sh
+# and tools/qbe-bootstrap.sh call it).  It is deliberately NOT called from
+# here: this script is the load-bearing whole-corpus oracle and its rt-failure
+# exit code is 2 (its "tooling failure" class) where rt-o.sh exits 1.  Keep
+# the two copies in step -- if you change the probe or the build command here,
+# change rt-o.sh with it.
 # Verbatim the guard tools/qbe/qbe-mk.sh uses.  A cached rt.o answers only
 # while NOTHING it was built from is newer than it; the probe must FAIL SAFE
 # (if `find` errors, "no newer input" would silently reuse an rt.o built from

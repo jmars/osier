@@ -1,0 +1,13 @@
+# compiler.ssa.abi — the ABI marker + provenance for compiler.ssa.
+# Regenerate the two together:  tools/qbe-bootstrap.sh --freeze
+# Written by tools/qbe/abi-fingerprint.sh --write; the components are
+# digests of DECLARATIONS (comments/whitespace stripped), so a comment
+# edit in rt.zig does NOT move the marker.
+seed-bytes=12597185
+seed-sha256=dfa17db58432c1e67ff83df35da5089af0218713f005be4949f999ecf6231670
+abi-marker=97e135eb4b3bfdde6e328fe2df08fc4c8c977c93049b4559b152c344b9d71731
+abi-rt-exports=8d3e3eab8d6d1765f02429ca8ec44c460d10511d634e25e6a87cc8409decd04e
+abi-rt-callN=3737e4e13ed53de03398f934b2577a42aa4c4e0da92a9813a86016b2e7db830d
+abi-rt-types=d2f38829f090edf6c7049dce01ba617c3f93f8087a513ab0b7b72c12f493869e
+abi-gc-layout=8443d9b128bfc0e959f354db284cb6171cce396aa53ce5e1fb6e38b72d73b9c8
+emit-inputs=ea6b83546d9cfb39a610147429a6f129258fcfe1e6818f4b114ea8b969172b78

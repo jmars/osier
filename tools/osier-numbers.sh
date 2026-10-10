@@ -13,15 +13,14 @@
 #                                against tools/osier-corpus-baseline.ssa.sha256
 #                                (the corpus byte anchor since P8; see
 #                                tools/osier-corpus-ssa.sh);
-#   2c. seed status            — REPORT ONLY: is a committed bootstrap seed
-#                                present, and can this tree re-derive it?
-#                                Since P8 the answer is "no" on both counts
-#                                (the seed and the csexp compiler that
-#                                produced it are deleted; a Lua backend is
-#                                planned to become the next one).  Never
-#                                fails — the load-bearing freshness oracles
-#                                are qbe-selfhost.sh's two FIXED POINTS, both
-#                                current-vs-current comparisons; a check that
+#   2c. seed status            — REPORT ONLY: is the committed bootstrap seed
+#                                (the whole-compiler .ssa, tools/bootstrap/)
+#                                fresh, drifted, or ABI-stale against this
+#                                tree, and does the node-free bootstrap
+#                                (tools/qbe-bootstrap.sh) still build a
+#                                compiler out of it?  Never fails — the
+#                                load-bearing oracles are qbe-selfhost.sh's
+#                                .ssa FIXED POINT and the suites; a check that
 #                                fails on legitimate source movement is a
 #                                check that generates re-freeze rituals,
 #                                which this chain refuses to add);
@@ -38,11 +37,19 @@
 # the artifact tag with no zig-out/, no compiler.js and no lean/.lake: ~45s and
 # exit 0 on the paper's build host.
 #
+# P6 (osier-ssaseed) adds step 2c's bootstrap check, which builds a compiler
+# out of the committed .ssa (rt.o + qbe + cc): MEASURED ~22 s here on a shared
+# host, so a clean-clone run is correspondingly longer than the figure above
+# (the figure itself is left as measured — a clean clone was not re-timed).
+#
 # USAGE (from the repo root):
 #   tools/osier-numbers.sh
 #
 # PREREQUISITES — checked up front, each with its own message if missing:
 #   on PATH: node, jq, zig (0.16), rg (ripgrep), python3.
+#   Step 2c additionally wants cc (and make, if the vendored qbe is not built
+#   yet); it is the ONE step whose prerequisites are not preflighted, because
+#   its failure is REPORTED and never gates this chain.
 #   The elm 0.19.2 binary and the Lean 4 toolchain are located as below:
 #
 #   ELM_BIN      elm 0.19.2 binary
@@ -162,19 +169,40 @@ else
 fi
 
 # --- seed status (REPORT ONLY — never a failure) -----------------------------
-# P8 (osier-delete-zinc): the committed csexp seed is DELETED, and so is the
-# stock compiler that re-derived it (tools/selfhost-compile.sh) — the seed was
-# a csexp artifact and no emitter for that format survives, so nothing in this
-# tree can regenerate or verify one.  This step reports that state honestly
-# instead of reaching for a deleted script.  A Lua backend is planned to become
-# the next seed; what IS load-bearing today lives in tools/qbe/qbe-selfhost.sh's
-# .ssa FIXED POINT, which compares two CURRENT products of the same tree.
-if [ -s tools/bootstrap/selfhost.csexp ] && [ -f tools/bootstrap/selfhost.csexp.sha256 ]; then
-    seed_committed="$(sha256sum tools/bootstrap/selfhost.csexp | cut -d' ' -f1)"
-    note "seed status" "UNVERIFIABLE — a seed is present ($seed_committed) but nothing in"
-    echo "               this tree can re-derive it; qbe-selfhost.sh is the oracle"
+# P6 (osier-ssaseed): the committed seed is the WHOLE COMPILER as one .ssa
+# (tools/bootstrap/compiler.ssa) — the fixed point of the compiler under
+# itself, and the root of the node-free, elm-free bootstrap: that file plus
+# the vendored qbe plus cc rebuild the compiler (tools/qbe-bootstrap.sh).
+# The deleted csexp seed died with the csexp output path; this one is the seed
+# for the QBE-only tree.  TWO things are reported here and NEITHER may gate:
+#
+#   * DRIFTED/FRESH.  The seed WILL drift as sources change, and that is
+#     acceptable: a stale seed still bootstraps, and the compiler it builds
+#     compiles the CURRENT sources.  The correctness oracle is the .ssa FIXED
+#     POINT plus the suites, not this file's age.
+#   * the ABI marker.  A .ssa and an rt.o from different runtime revisions
+#     link cleanly and then read each other's structs at the wrong offsets —
+#     so tools/qbe-bootstrap.sh REFUSES on a mismatch (that is the gate, in
+#     the bootstrap, where it is actionable).  HERE it is only reported.
+#
+# The bootstrap is RUN (its build half: qbe + cc, ~20s), because "does the
+# node-free bootstrap still work" is worth a real answer rather than a
+# prediction.  A failure is NOT a failure of this chain.
+SEED="tools/bootstrap/compiler.ssa"
+SEED_ABI="$SEED.abi"
+if [ -s "$SEED" ] && [ -f "$SEED_ABI" ]; then
+    seed_state="$(tools/qbe/abi-fingerprint.sh --status "$SEED_ABI" 2>/dev/null)"
+    note "seed status" "${seed_state%%$'\n'*}"
+    echo "                             $(stat -c %s "$SEED") B, sha256 $(sha256sum "$SEED" | cut -c1-16)…, marker $(grep -E '^abi-marker=' "$SEED_ABI" | cut -d= -f2 | cut -c1-16)…"
+    bs_out="$(tools/qbe-bootstrap.sh 2>&1)"
+    bs_rc=$?
+    if [ "$bs_rc" -eq 0 ]; then
+        note "bootstrap (no node/elm)" "$(printf '%s\n' "$bs_out" | tail -1)"
+    else
+        note "bootstrap (no node/elm)" "NOT RUNNABLE (exit $bs_rc, report-only) — $(printf '%s\n' "$bs_out" | grep -m1 '^qbe-bootstrap:' | cut -c1-90)"
+    fi
 else
-    note "seed status" "none — retired at P8 pending the Lua backend (report-only; nothing gates it)"
+    note "seed status" "none — no committed .ssa seed (report-only; nothing gates it)"
 fi
 
 # --- 3. TestMain -------------------------------------------------------------
