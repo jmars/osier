@@ -18,17 +18,15 @@ module Mid.Ir exposing
 --
 -- LAYERING (handoff mid-tier-plan-result, stage S1):
 --
---     parse -> Type.Check.checkUnits -> Mid.FromAst -> [Mid passes: NONE in S1]
---           -> Mid.ToZinc -> Zinc.Emit (untouched) -> csexp
+--     parse -> Type.Check.checkUnits -> Mid.FromAst -> Mid.Qbe.* -> .ssa
 --
 -- Mid sits STRICTLY AFTER `Type.Check.checkUnits` and must never disturb
--- `Type/*` (the project's research contribution).  In stage 1 there are ZERO
--- optimization passes: `MIDTIER=1` must emit BYTE-IDENTICAL output to
--- `MIDTIER=0` for every fixture and for the whole corpus, so this whole tier
--- is a pure refactor of how the SAME instructions are produced.  The
--- differential is `tools/midtier-diff.sh`; the anchor that keeps the refactor
--- honest is that `MIDTIER=0` (Lower/*) must reproduce
--- `tools/osier-corpus-baseline.sha256` forever.
+-- `Type/*` (the project's research contribution).  P8 (osier-delete-zinc):
+-- the retired csexp output tier (Mid.ToZinc -> Zinc.Emit -> csexp, and the
+-- Mid optimization-pass set behind the MIDTIER switch) is deleted; the QBE
+-- backend (Mid.QbeModule) is this IR's only consumer, and the byte-identity
+-- anchor is the per-fixture .ssa corpus baseline
+-- (tools/osier-corpus-baseline.ssa.sha256).
 --
 -- WHY NO SSA/SSA2/RSSA (plan decision D1): those IRs exist in MLton to feed
 -- NATIVE codegen (register allocation, def-use chains, machine-level
@@ -60,19 +58,15 @@ module Mid.Ir exposing
 --     which is why MLton's monomorphise/simplify-types/split-types/poly-equal
 --     are all unnecessary here (plan §(a)).
 --   * `Con` / `Tup` / `RecordLit` / `RecordUpdate` are REP-PRESERVING: they
---     name the source-level constructor, and `Mid.ToZinc` maps them to the
---     existing ZINC representations (per-ctor absvector+address-> MX ADT,
---     cons chains, assoc-list records).  THE REPRESENTATION IS A LOWER-LEVEL
---     CHOICE AND IS NOT CHANGED BY THIS STAGE: a middle-tier pass must not
---     silently alter it.
+--     name the source-level constructor, and `Mid.Qbe.Lower` maps them to
+--     the runtime's value representations (per-ctor Desc vectors, cons
+--     chains, assoc-list records).  THE REPRESENTATION IS A LOWER-LEVEL
+--     CHOICE AND IS NOT CHANGED BY THE TIER: a pass must not silently alter
+--     it.
 --
--- LABELS: `Label` is a String and label names are INVISIBLE in the emitted
--- bytes (`Zinc.Emit.flatten` drops `Label_`; jumps are rewritten to absolute
--- pcs).  What matters for byte-identity is the POSITION of each `Label_`,
--- because `Zinc.Emit.fuse` refuses to fuse across one.  `Mid.FromAst` names
--- them from the source range exactly as `Lower.Expr` does, which gives the
--- same names (and therefore the same collision/uniqueness properties) as the
--- MIDTIER=0 path.
+-- LABELS: `Label` is a String; names matter only for uniqueness (a case
+-- expression keys its jump targets by them).  `Mid.FromAst` names them from
+-- the source range, which keeps them site-unique within a defun.
 --
 -- GC-REFERENCE INFORMATION — THE DOOR THIS IR MUST NOT CLOSE (plan §(a)
 -- design constraint, recorded here, with NO machinery added in stage 1).
@@ -164,22 +158,20 @@ type Lit
 
 
 -- ============================ EXPRESSIONS ============================
--- `NoTail` pins an expression's EMISSION POSITION to NonTail whatever the
--- context: a PIPE application (`f <| x`, `x |> f`) is lowered by
--- `Lower.Expr.pipeApply` with a hardcoded non-tail apply, so it emits `p`
--- even at the tail of a function body.  That is a real A==N-vs-N<A cost site,
--- so it is visible in the tree rather than hidden in the emitter.
+-- `NoTail` pins an expression's EMISSION POSITION to non-tail whatever the
+-- context: a PIPE application (`f <| x`, `x |> f`) completes its callee's
+-- argument list with the piped value and applies NON-tail, so it is a call
+-- even at the tail of a function body.  That is a real cost site, so it is
+-- visible in the tree rather than hidden in the backend.
 --
--- Argument order convention (this is the contract `Mid.ToZinc` implements):
+-- Argument order convention (the backend's contract):
 --   * `App.args` are in SOURCE order, i.e. the CALLEE's parameter order
---     (arg 1 first).  The ZINC emitter pushes them right-to-left, so the VM's
---     argbuf[0] is arg 1.
+--     (arg 1 first).
 --   * `PrimApp.args` are in POP order — the order the VM primitive pops them
 --     (first-popped first).  The emitter pushes them in REVERSE.  For an
 --     infix operator `lhs OP rhs` that means `[ lhs, rhs ]`; for `substring`
 --     (which pops string, start, len) it means `[ str, start, len ]`.
---   * `Con.args` are in SOURCE order and the emitter pushes them in source
---     order, interleaved with their vector indices (see Mid.ToZinc.Con).
+--   * `Con.args` are in SOURCE order.
 
 
 type Exp
@@ -250,9 +242,8 @@ type AltKind
 
 
 -- ============================ PATTERN TESTS ============================
--- A match test, in the same shape and ORDER `Lower.Pattern` produces them
--- today (the order is what makes the emitted tests byte-identical).  Each test
--- reads a value out of the scrutinee by `ValuePath` and tests it.
+-- A match test: each test reads a value out of the scrutinee by `ValuePath`
+-- and tests it (source order, first-match-wins).
 
 
 type Match
@@ -265,9 +256,9 @@ type Match
 
 -- A value path locates a (sub-)value inside the scrutinee: a sequence of
 -- de-structuring steps from the scrutinee root.  `VField` additionally treats
--- the reached value as a record and looks `f` up in it (assoc + snd).  This
--- mirrors `Lower.Pattern.Step`/`ValuePath` deliberately — the encoding is the
--- ZINC runtime's, and stage 1 moves no representations.
+-- the reached value as a record and looks `f` up in it (assoc + snd).  The
+-- encoding is the runtime's own value decomposition, unchanged from the
+-- retired ZINC path that first carried it.
 type Step
     = FstStep
     | SndStep

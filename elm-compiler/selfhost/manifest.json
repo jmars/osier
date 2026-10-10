@@ -6,7 +6,6 @@
         "elm-compiler/src/Lower/Resolve.elm",
         "elm-compiler/src/Lower/Scope.elm",
         "elm-compiler/src/Lower/Expr.elm",
-        "elm-compiler/src/Lower/Pattern.elm",
         "elm-compiler/src/Type/Builtins.elm",
         "elm-compiler/src/Type/Env.elm",
         "elm-compiler/src/Type/Representation.elm",
@@ -16,9 +15,6 @@
         "elm-compiler/src/Type/Infer.elm",
         "elm-compiler/src/Frontend/Lift.elm",
         "elm-compiler/src/Type/Check.elm",
-        "elm-compiler/src/Zinc/Csexp.elm",
-        "elm-compiler/src/Zinc/Emit.elm",
-        "elm-compiler/src/Lower/Module.elm",
         "elm-compiler/src/Char/Extra.elm",
         "elm-compiler/src/Elm/Syntax/Comments.elm",
         "elm-compiler/src/Elm/Syntax/Declaration.elm",
@@ -62,13 +58,6 @@
         "elm-compiler/src/Elm/RawFile.elm",
         "elm-compiler/src/Mid/Ir.elm",
         "elm-compiler/src/Mid/FromAst.elm",
-        "elm-compiler/src/Mid/ToZinc.elm",
-        "elm-compiler/src/Mid/Shrink.elm",
-        "elm-compiler/src/Mid/Arity.elm",
-        "elm-compiler/src/Mid/ConstFold.elm",
-        "elm-compiler/src/Mid/DeadGlobals.elm",
-        "elm-compiler/src/Mid/Inline.elm",
-        "elm-compiler/src/Mid/Simplify.elm",
         "elm-compiler/src/Mid/Module.elm",
         "elm-compiler/src/Mid/Qbe/Il.elm",
         "elm-compiler/src/Mid/Qbe/Types.elm",
@@ -79,7 +68,8 @@
         "elm-compiler/src/Mid/QbeModule.elm",
         "elm-compiler/selfhost/NativeMain.elm"
       ],
-      "output": "zig-out/selfhost.csexp"
+      "output": "zig-out/selfhost.ssa",
+      "entry": "NativeMain.main"
     }
   ]
 }

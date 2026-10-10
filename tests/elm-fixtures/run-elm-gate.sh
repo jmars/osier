@@ -2,55 +2,44 @@
 # run-elm-gate.sh — the Osier LANGUAGE gate (BATCH mode).
 #
 # For each fixture under tests/elm-fixtures, compiles it with the elm-compiler
-# (node run.js -> .csexp), loads it into the ZINC VM via elmvm, runs the named
-# function with the given args, and diffs the printed value against
+# (node run.js), and — for every EXECUTABLE row — builds the fixture through
+# the QBE backend (tools/qbe/qbe-mk.sh: elm -> .ssa -> vendored qbe -> cc +
+# rt.o) and runs the native binary, diffing the printed value against
 # expected/<name>.txt.
 #
-# P7 (osier-evidence): every EXECUTABLE row (run / run2 / io / sigdeath) now
-# ALSO has a NATIVE twin, registered by the same helper: the same sources are
-# compiled through the QBE backend (qbe-mk.sh: elm -> .ssa -> vendored qbe ->
-# cc + rt.o) and the native binary must produce the SAME pinned expected
-# value.  This is the successor for the gate's execution model: the ZINC
-# bundle rows still run (they are removed by P8, the retirement step), but the
-# native rows already prove the gate survives with the VM deleted — same
-# fixtures, same pinned expected/*.txt, one binary per row.
+# P8 (osier-delete-zinc): the ZINC interpreter rows are GONE — the VM package
+# (the vendored zinc-vm package) and its harness binary were deleted, and the gate's
+# execution model is the P7 native rows, which had already been proving the
+# same fixtures against the same pinned expected/*.txt values beside the VM
+# rows.  Each group's batch output is the group's .ssa (QBE IL text, or its
+# "err ..." payload) — the compile-only rows (ok/err) check that payload.
+# What
+# died with the interpreter and is NOT replaced here, recorded losses:
+#   * rawrun (a committed hand-crafted .csexp bundle no Elm source can
+#     produce — the unknown-Task-tag fixture): the bundle format's own check;
+#   * depth (the interpreter's CALL_STACK_DEPTH cap): its native counterpart
+#     is the natdepth row (the C-stack budget guard), which stays.
 #
-# The twin set is exactly the rows whose CHECK is behavioural on a value the
-# program prints: rawrun (a committed .csexp hand-bundle no Elm source can
-# produce) has NO native twin — it dies with the bundle format at P8, a
-# recorded loss (see ARTIFACT.md).  depth (the interpreter's CALL_STACK_DEPTH
-# cap) has no twin either; its native counterpart already exists as the
-# separate natdepth row.
-#
-# Native twins build in PARALLEL (ELM_GATE_J jobs, default 8) in a build phase
-# between the batch compile and the checks, so the PASS/FAIL transcript stays
-# in declaration order.  ELM_GATE_NATIVE=0 disables every native row (VM-only,
-# the pre-P7 gate: PASS=156 FAIL=0).
-#
-# osier split Phase 1: the 19 UI-host rows (16 pty + the pty_app todos row + the
-# renderdump row + the lgstyled fixture) moved to run-ui-gate.sh, which is
-# DEFERRED until the renderer is re-attached to the host effect loop.  This
-# script is now the LANGUAGE gate: the corpus/typing rows + the 29 lambda-lift
-# rows, run against a renderer-free elmvm.
+# Native binaries build in PARALLEL (ELM_GATE_J jobs, default 8) in a build
+# phase between the batch compile and the checks, so the PASS/FAIL transcript
+# stays in declaration order.
 #
 # Since S8 the compile step is BATCHED: the fixed corpus (Prelude + Runtime +
 # the eight core-libs) is parsed+typechecked+lowered ONCE, and every fixture
 # group is compiled in the SAME node run.js process against the cached corpus.
 # The script declares all fixtures up front (registering each (sources, output)
 # group + its post-compile check), calls run.js ONCE with a batch manifest, then
-# runs the elmvm/diff checks in declaration order — the PASS/FAIL output and
-# counts are byte-identical to the pre-batch runner.
+# runs the checks in declaration order.
 #
 # Usage:
-#   tests/elm-fixtures/run-elm-gate.sh [elmvm-binary] [elm-compiler-dir] [fixtures-dir]
+#   tests/elm-fixtures/run-elm-gate.sh [elm-compiler-dir] [fixtures-dir]
 #
 # Every check this script REGISTERS is listed, generated from the registration
 # calls below, in tests/elm-fixtures/MATRIX.md
 # (regenerate/verify: tools/gen-fixture-matrix.sh [--check]; raw dump:
 # ELM_GATE_MATRIX=1 tests/elm-fixtures/run-elm-gate.sh).
 #
-# Defaults assume you are running from the fx-ui repo root:
-#   elmvm    -> zig-out/bin/elmvm   (built via `zig build elmvm`)
+# Defaults assume you are running from the repo root:
 #   compiler -> elm-compiler/       (compiler.js built via build.sh)
 #   fixtures -> tests/elm-fixtures
 #
@@ -63,20 +52,19 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
-ELMVM="${1:-$ROOT/zig-out/bin/elmvm}"
-CDIR="${2:-$ROOT/elm-compiler}"
-FIX="${3:-$ROOT/tests/elm-fixtures}"
+CDIR="${1:-$ROOT/elm-compiler}"
+FIX="${2:-$ROOT/tests/elm-fixtures}"
 OUT="$(mktemp -d)"
 
 # ELM_GATE_MATRIX=1 (or a path) dumps the REGISTERED check matrix and stops
 # BEFORE any build/compile step (tools/gen-fixture-matrix.sh uses it), so the
-# elmvm / compiler.js / jq prerequisites are not required in that mode.
+# compiler.js / jq prerequisites are not required in that mode.
 if [ "${ELM_GATE_MATRIX:-0}" != "0" ]; then
-  : # matrix dump mode: no elmvm / compiler.js / jq required (see the dump below)
+  : # matrix dump mode: no compiler.js / jq required (see the dump below)
 elif [ "${ELM_GATE_MANIFEST_ONLY:-0}" = "1" ]; then
   # manifest-only mode (the .ssa corpus baseline consumes this): the manifest
-  # is built from the REGISTRY alone, so elmvm / qbe / cc are not needed —
-  # only compiler.js (whose path the manifest names) and jq.
+  # is built from the REGISTRY alone, so qbe / cc are not needed — only
+  # compiler.js (whose path the manifest names) and jq.
   if [ ! -f "$CDIR/compiler.js" ]; then
     echo "error: $CDIR/compiler.js missing (run: build.sh)" >&2
     exit 2
@@ -84,9 +72,6 @@ elif [ "${ELM_GATE_MANIFEST_ONLY:-0}" = "1" ]; then
     echo "error: jq required to build the batch manifest" >&2
     exit 2
   fi
-elif [ ! -x "$ELMVM" ]; then
-  echo "error: elmvm not found at $ELMVM (run: zig build elmvm)" >&2
-  exit 2
 elif [ ! -f "$CDIR/compiler.js" ]; then
   echo "error: $CDIR/compiler.js missing (run: build.sh)" >&2
   exit 2
@@ -113,16 +98,15 @@ read_expected() { cat "$FIX/expected/$1.txt"; }
 
 # ============================ PHASE 1: declare ============================
 # Every fixture call registers (a) its compile GROUP (user source file(s) +
-# output .csexp) and (b) its post-compile CHECK.  Nothing compiles or runs
-# elmvm yet; the checks fire in declaration order after the one batch compile.
+# output) and (b) its post-compile CHECK.  Nothing compiles or builds yet;
+# the checks fire in declaration order after the one batch compile.
 
 ngroup=0; ncheck=0
 declare -a GOUT GSRC GENTRY
 declare -a CKIND CNAME CFN CEXP CARG CSTDIN CFIX COUT CHLP CNAT
 
-# The native twins (P7, see the header).  ELM_GATE_NATIVE=0 registers none —
-# the gate is then exactly the pre-P7 VM-only gate (PASS=156 FAIL=0).
-NATIVE="${ELM_GATE_NATIVE:-1}"
+# Parallel jobs for the native builds — P7's native twins are the ONLY
+# executable rows since the interpreter retired at P8.
 NATJ="${ELM_GATE_J:-8}"
 
 register_group() {
@@ -136,8 +120,8 @@ register_group() {
 # $9 is the REGISTERING HELPER's name (run / compile_error / ...) — printed by
 # the ELM_GATE_MATRIX dump so the matrix names the check the way a reader of
 # this file does.  The dispatcher keys on $1 only.  ${10}, when non-empty, is
-# the SOURCE LIST of the row's NATIVE twin (the QBE build of the same
-# program); empty = no twin (compile_error, rawrun, depth, ...).
+# the SOURCE LIST of the row's NATIVE build (the QBE binary of the same
+# program); empty = no native row (compile_error, ...).
 add_check() {
   CKIND[$ncheck]="$1"; CNAME[$ncheck]="$2"; CFN[$ncheck]="$3"
   CEXP[$ncheck]="$4"; CARG[$ncheck]="$5"; CSTDIN[$ncheck]="$6"
@@ -148,46 +132,36 @@ add_check() {
 
 # run <name> <fn> <expected> [args...]
 #
-# Entry resolution: since M3 keys defuns under QUALIFIED names ("<Mod>.<fn>",
-# e.g. "Fib.fib"), the runner first calls "<Mod>.<fn>" with the module name
-# scanned from the fixture header; bundles from older-style/anonymous content
-# still fall back to the bare name.
+# Registers the compile group and the NATIVE row: the fixture builds through
+# the QBE backend and the binary runs "<Mod>.<fn>" (module scanned from the
+# fixture header) with the given args.
 run() {
   local name="$1" fn="$2" exp="$3"; shift 3
-  register_group "$OUT/$name.csexp" "$FIX/$name.elm"
+  register_group "$OUT/$name.ssa" "$FIX/$name.elm"
   GENTRY[$((ngroup-1))]="$(module_name "$FIX/$name.elm").$fn"
-  add_check run "$name" "$fn" "$exp" "$*" "" "$FIX/$name.elm" "$OUT/$name.csexp" run
-  if [ "$NATIVE" = 1 ]; then
-    add_check natrun "$name" "$fn" "$exp" "$*" "" "$FIX/$name.elm" "" run "$FIX/$name.elm"
-  fi
+  add_check natrun "$name" "$fn" "$exp" "$*" "" "$FIX/$name.elm" "" run "$FIX/$name.elm"
 }
 
-# run2 <name> <auxname> <fn> <expected>: multi-module fixture — compile
-# <aux>.elm TOGETHER WITH <name>.elm (cross-module import); entry is looked
-# up under "<NameModule>.<fn>" scanned from the MAIN fixture header.
+# run2 <name> <auxname> <fn> <expected>: multi-module fixture — <aux>.elm is
+# compiled TOGETHER WITH <name>.elm (cross-module import); the native binary
+# runs "<NameModule>.<fn>" scanned from the MAIN fixture header.
 run2() {
   local name="$1" aux="$2" fn="$3" exp="$4"; shift 4
-  register_group "$OUT/$name.csexp" "$FIX/$aux.elm" "$FIX/$name.elm"
+  register_group "$OUT/$name.ssa" "$FIX/$aux.elm" "$FIX/$name.elm"
   GENTRY[$((ngroup-1))]="$(module_name "$FIX/$name.elm").$fn"
-  add_check run2 "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "$OUT/$name.csexp" run2
-  if [ "$NATIVE" = 1 ]; then
-    add_check natrun2 "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "" run2 "$FIX/$aux.elm $FIX/$name.elm"
-  fi
+  add_check natrun2 "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "" run2 "$FIX/$aux.elm $FIX/$name.elm"
 }
 
 # run_io <name> <fn> <expected> <stdin-file>
 #
-# Like run(), but elmvm's stdin is redirected from "$FIX/input/<stdin-file>"
-# instead of being inherited — the M6 stream-prims fixtures (Cmd.readLine via
-# read-byte on fd 0) consume stdin.  Still checks the printed FINAL MODEL.
+# Like run(), but the native binary's stdin is redirected from
+# "$FIX/input/<stdin-file>" instead of being inherited — the M6 stream-prims
+# fixtures (Cmd.readLine via read-byte on fd 0) consume stdin.
 run_io() {
   local name="$1" fn="$2" exp="$3" stdin="$4"
-  register_group "$OUT/$name.csexp" "$FIX/$name.elm"
+  register_group "$OUT/$name.ssa" "$FIX/$name.elm"
   GENTRY[$((ngroup-1))]="$(module_name "$FIX/$name.elm").$fn"
-  add_check io "$name" "$fn" "$exp" "" "$stdin" "$FIX/$name.elm" "$OUT/$name.csexp" run_io
-  if [ "$NATIVE" = 1 ]; then
-    add_check natio "$name" "$fn" "$exp" "" "$stdin" "$FIX/$name.elm" "" run_io "$FIX/$name.elm"
-  fi
+  add_check natio "$name" "$fn" "$exp" "" "$stdin" "$FIX/$name.elm" "" run_io "$FIX/$name.elm"
 }
 
 # compile_clean <name>: asserts compilation SUCCEEDS (the artifact is a real
@@ -196,9 +170,9 @@ run_io() {
 # taking record arguments).
 compile_clean() {
   local name="$1"
-  register_group "$OUT/$name.csexp" "$FIX/$name.elm"
+  register_group "$OUT/$name.ssa" "$FIX/$name.elm"
   GENTRY[$((ngroup-1))]="$(module_name "$FIX/$name.elm").main"
-  add_check ok "$name" "" "" "" "" "$FIX/$name.elm" "$OUT/$name.csexp" compile_clean
+  add_check ok "$name" "" "" "" "" "$FIX/$name.elm" "$OUT/$name.ssa" compile_clean
 }
 
 # compile_error <name> <expected-substring>: asserts compilation emits
@@ -207,25 +181,17 @@ compile_clean() {
 # run through the value gate.
 compile_error() {
   local name="$1" exp="$2"
-  register_group "$OUT/$name.csexp" "$FIX/$name.elm"
+  register_group "$OUT/$name.ssa" "$FIX/$name.elm"
   # the entry never runs (the compile errs first); <Mod>.main keeps the .ssa
   # baseline's rule uniform over every group.
   GENTRY[$((ngroup-1))]="$(module_name "$FIX/$name.elm").main"
-  add_check err "$name" "" "$exp" "" "" "$FIX/$name.elm" "$OUT/$name.csexp" compile_error
+  add_check err "$name" "" "$exp" "" "" "$FIX/$name.elm" "$OUT/$name.ssa" compile_error
 }
 
-# out_cmp <name>: compare the raw file an elmvm run wrote (iofile's hello.out)
+# out_cmp <name>: compare the raw file the fixture's native run wrote (iofile's hello.out)
 # against its expected bytes.
 out_cmp() {
   add_check cmp "$1" "" "" "" "" "" "" out_cmp
-}
-
-# rawrun <name> <fn> <expected>: run elmvm on a CHECKED-IN bundle (not compiled
-# here) — for hand-crafted bundles no Elm source can produce (the synthetic
-# unknown-Task tag, unhandledtask).  $FIX/$name.csexp is a committed .csexp.
-rawrun() {
-  local name="$1" fn="$2" exp="$3"
-  add_check rawrun "$name" "$fn" "$exp" "" "" "$FIX/$name.csexp" "$FIX/$name.csexp" rawrun
 }
 
 # sigdeath <name> <fn> <expected>
@@ -250,66 +216,28 @@ rawrun() {
 # which also rules the fixtures out as vacuous, because a child that exited
 # NORMALLY with code 137 would have kept passing under the mutation.
 #
-# Registered WITHOUT a compile group, like `depth`/`natdepth`:
-# tools/osier-corpus-baseline.sha256 pins the batch's artifact set
-# (149 artifacts = 149 manifest entries), so these rows compile their bundle on
-# demand instead (one extra node process each, ~0.4s).
+# Registered WITHOUT a compile group (like `natdepth`):
+# tools/osier-corpus-baseline.ssa.sha256 pins the batch's artifact set
+# (149 artifacts = 149 manifest entries), so this row builds its binary on
+# demand instead.
 sigdeath() {
   local name="$1" fn="$2" exp="$3"
-  add_check sigdeath "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "" sigdeath
-  if [ "$NATIVE" = 1 ]; then
-    add_check natsig "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "" sigdeath "$FIX/$name.elm"
-  fi
-}
-
-# depth <name> <fn> <control-depth> <past-cap-margin> <expected-control-value>
-#
-# THE OUT-OF-FRAMES CHECK (handoff osier-vmdepth).  `run`/`rawrun` compare
-# stdout text and cannot see an EXIT STATUS, which is the whole point here: the
-# VM's call-frame stack (CALL_STACK_DEPTH, vendor/osier-rt/src/gc/types.zig) used
-# to run out SILENTLY — exit 0, empty stderr, and whatever `acc` held printed as
-# the answer.  A user must never get a wrong answer with a success status, so
-# this check asserts on the process instead of on the value:
-#
-#   1. CONTROL — <fn> at <control-depth> (a legal depth, far below the cap):
-#      must print <expected-control-value> AND exit 0.  Same source, same
-#      shape, only the depth differs, so the failure below can only be the cap.
-#   2. NEAR-CAP — <fn> at CALL_STACK_DEPTH-1 (the LAST usable frame): must
-#      still print the correct sum.  This is the half that keeps the check from
-#      "fixing" the defect by refusing work it should do, and it fails loudly
-#      if a change to the entry path ever moves the boundary.
-#   3. PAST-CAP — <fn> at CALL_STACK_DEPTH + <past-cap-margin>: must exit
-#      NON-ZERO with the named diagnostic on stderr ($DEPTH_MSG), and must not
-#      print a value on stdout.
-#
-# CALL_STACK_DEPTH is READ FROM THE SOURCE here (not baked in), so raising the
-# cap cannot silently turn this check into a no-op — the probe follows it.
-#
-# It is registered WITHOUT a compile group: tools/osier-corpus-baseline.sha256
-# pins the batch's artifact set, so this fixture is compiled on demand instead
-# (one extra node process, ~0.4s).  It runs at $DEPTH_HEAP_MB because the frame
-# cap has to be reached BEFORE the heap runs out — at elmvm's default 64MB heap
-# this probe aborts in grow_heap instead, which is a DIFFERENT failure and would
-# make the row pass vacuously.
-depth() {
-  local name="$1" fn="$2" ctl="$3" margin="$4" exp="$5"
-  add_check depth "$name" "$fn" "$exp" "$ctl $margin" "" "$FIX/$name.elm" "$OUT/$name.depth.csexp" depth
+  add_check natsig "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "" sigdeath "$FIX/$name.elm"
 }
 
 # natdepth <name> <fn> <control-depth> <past-depth> <deep-depth> <expected-control-value>
 #
-# THE NATIVE OUT-OF-STACK CHECK (handoff osier-natdepth) — the native twin of
-# `depth` above, and the arm that SURVIVES the interpreter's retirement: the
-# VM check asserts the interpreter's CALL_STACK_DEPTH cap; this one asserts
-# the QBE native path's OWN resource boundary, the C stack.  Before the guard
+# THE NATIVE OUT-OF-STACK CHECK (handoff osier-natdepth) — the arm that
+# SURVIVES the interpreter's retirement (P8): it asserts the
+# QBE native path's OWN resource boundary, the C stack.  Before the guard
 # (tools/qbe/rt.zig), a non-tail recursion deep enough to exhaust
 # RLIMIT_STACK died with a BARE SIGSEGV — non-zero, so never a silent wrong
 # answer, but unnamed and unassertable.  The guard installs sigaltstack + a
 # SIGSEGV handler that recognises a stack-exhaustion fault and exits 1 with
 # the NAT_DEPTH_MSG diagnostic; this check pins that property.
 #
-# Like `depth` it registers NO compile group (the corpus baseline pins the
-# batch artifact set): it builds its own native binary on demand via
+# Like `sigdeath` it registers NO compile group (the corpus baseline pins
+# the batch artifact set): it builds its own native binary on demand via
 # tools/qbe/qbe-mk.sh.  And because the native boundary is a BYTE budget,
 # not a frame count, the check OWNS the budget instead of reading a constant:
 # every budgeted arm runs with QBE_NO_RLIMIT=1 (the driver's 64 MiB raise
@@ -322,12 +250,6 @@ natdepth() {
   local name="$1" fn="$2" ctl="$3" past="$4" deep="$5" exp="$6"
   add_check natdepth "$name" "$fn" "$exp" "$ctl $past $deep" "" "$FIX/$name.elm" "$OUT/$name.nat.ssa" natdepth
 }
-
-# The named diagnostic the VM must print when it runs out of call frames —
-# asserted verbatim (see vendor/zinc-vm/src/vm/interp.zig, the CALL_STACK_DEPTH
-# guard) so the check cannot be satisfied by an unrelated abort.
-DEPTH_MSG="call stack depth exceeded"
-DEPTH_HEAP_MB=1024
 
 # The named diagnostic the QBE NATIVE runtime prints when the C stack is
 # exhausted (tools/qbe/rt.zig's stack-depth guard: sigaltstack + a SIGSEGV
@@ -418,11 +340,6 @@ compile_error dup          "duplicate top-level definition in Dup: f"
 compile_error shadowerr    "is both a top-level definition and imported via"
 compile_error shadowtyperr "is both a top-level definition and imported via"
 compile_error ambimperr    "from two different modules"
-# --- osier split Phase 3: an unhandled effect fails LOUDLY and FAST ---
-# unhandledtask is a hand-crafted bundle (no Elm source can produce an unknown
-# Task ctor) whose Program spawns a Task tagged TaskBogus; the host must throw
-# naming the ctor and TERMINATE, never hang or silently drop it.
-rawrun unhandledtask main   "$(read_expected unhandledtask)"
 
 run cmporder    main   "$(read_expected cmporder)"
 run resultmaybe main   "$(read_expected resultmaybe)"
@@ -431,7 +348,7 @@ run setops      main   "$(read_expected setops)"
 run dictstress  main   "$(read_expected dictstress)"
 
 # --- elm/core Bitwise + Array port (vector JsArray substitute, RRB tree) ---
-# bitwise: int32 semantics pins for the 7 zinc-vm prims (truncation, count
+# bitwise: int32 semantics pins for the 7 runtime prims (truncation, count
 # &31 masking, arithmetic vs zero-fill right shift, doc examples).
 run bitwise     main   "$(read_expected bitwise)"
 # arraybasic: sizes 0/1/5/32/33/64/100 (first Leaf at 32) — length/foldl/get
@@ -699,24 +616,8 @@ run liftcycshadows  main   "$(read_expected liftcycshadows)"
 run liftrelaxleak    main   "$(read_expected liftrelaxleak)"
 run liftdisjointshadow main "$(read_expected liftdisjointshadow)"
 
-# --- osier-vmdepth: running OUT of call frames must be LOUD.  The VM used to
-# break out of its run loop silently at CALL_STACK_DEPTH (65536, gc/types.zig)
-# and return whatever `acc` held: exit 0, EMPTY stderr, and a printed value
-# that is not the answer.  calloverflow is a non-tail recursion whose depth IS
-# the workload (cf. countcase above, which pins the TAIL path at 100000 — a tail
-# call reuses its frame and is unbounded — and tools/bench/suite/deepnontail.elm,
-# whose `main` deliberately stays at depth 50000 because that is the deepest
-# depth correct on BOTH backends: the VM dies at 65536, the native path is
-# correct past 100000).
-#
-# Registered by depth(), NOT by run(): it asserts on the process (non-zero exit
-# + the named diagnostic, and NO value on stdout), which is the half `run`
-# cannot see.  See the depth() helper for the three invocations it makes.
-depth calloverflow main 1000 5000 500500
-
-# --- osier-natdepth: running out of NATIVE stack must be LOUD too.  The VM
-# arm above dies with the interpreter (its cap constant lives in
-# vendor/zinc-vm); this arm pins the same PROPERTY on the QBE native path —
+# --- osier-natdepth: running out of NATIVE stack must be LOUD.  This arm
+# pins the property the interpreter's CALL_STACK_DEPTH cap used to cover —
 # a deep non-tail recursion past the C-stack budget must fail with a NAMED
 # diagnostic and no stdout value — using the native guard in tools/qbe/rt.zig
 # (see the natdepth helper for the three invocations it makes: a control at
@@ -784,15 +685,15 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-# ============================ PHASE 2.5: native twin builds ============================
-# Every registered native twin (CNAT non-empty) builds HERE, in parallel, so
+# ============================ PHASE 2.5: native builds ============================
+# Every registered native row (CNAT non-empty) builds HERE, in parallel, so
 # PHASE 3 only RUNS binaries: the transcript stays in declaration order, and a
 # build failure is a per-row FAIL carrying the build error — never a silently
 # missing row.  The FIRST build runs SERIALLY: if tools/qbe/rt.o is stale,
 # qbe-mk rebuilds it, and two concurrent `zig build-obj` writes to the same
 # rt.o path would race — after the serial warm-up every parallel job finds it
 # fresh (the freshness probe is read-only).
-if [ "$NATIVE" = 1 ]; then
+{
   mkdir -p "$OUT/nat"
   : > "$OUT/nat.plan"
   for ((i=0;i<ncheck;i++)); do
@@ -802,7 +703,7 @@ if [ "$NATIVE" = 1 ]; then
   done
   cat > "$OUT/nat-one.sh" <<'EOJ'
 #!/usr/bin/env bash
-# One native twin build (spawned by the gate's PHASE 2.5 via xargs).
+# One native build (spawned by the gate's PHASE 2.5 via xargs).
 # $1 = "<idx>|<src...>|<Entry.key>|<outdir>".  Success writes the binary's
 # path to <outdir>.binpath; failure leaves .builderr for the check to print.
 IFS='|' read -r idx srcs entry outdir <<< "$1"
@@ -823,9 +724,9 @@ EOJ
       printf '%s\n' "$job"
     fi
   done < "$OUT/nat.plan" > "$OUT/nat.jobs"
-  # -r: an empty jobs file (only one twin) is legal, not an error.
+  # -r: an empty jobs file (only one native row) is legal, not an error.
   OSIER_ROOT="$ROOT" xargs -r -P "$NATJ" -I{} "$OUT/nat-one.sh" "{}" < "$OUT/nat.jobs" 2>/dev/null || :
-fi
+}
 
 # ============================ PHASE 3: checks ============================
 dispatch() {
@@ -855,155 +756,8 @@ dispatch() {
         *) echo "FAIL $name: expected err containing [$exp], got [$out]"; fail=$((fail+1));;
       esac
       ;;
-    run2)
-      if head -c 4 "$outfile" | grep -q '^err '; then
-        echo "FAIL $name: compile error: $(cat "$outfile")"; fail=$((fail+1)); return
-      fi
-      mod=$(module_name "$fixfile")
-      got=$("$ELMVM" "$outfile" "$mod.$fn" 2>&1)
-      if [ "$got" = "$exp" ]; then
-        echo "PASS $name ($mod.$fn multi) -> $got"; pass=$((pass+1))
-      else
-        echo "FAIL $name ($mod.$fn multi): exp[$exp] got[$got]"; fail=$((fail+1))
-      fi
-      ;;
-    io)
-      if head -c 4 "$outfile" | grep -q '^err '; then
-        echo "FAIL $name: compile error: $(cat "$outfile")"; fail=$((fail+1)); return
-      fi
-      mod=$(module_name "$fixfile")
-      qname="$mod.$fn"
-      got=$("$ELMVM" "$outfile" "$qname" < "$FIX/input/$stdin" 2>&1)
-      if [ "$got" = "$exp" ]; then
-        echo "PASS $name ($qname < input/$stdin) -> $(echo "$got" | tail -1)"; pass=$((pass+1))
-      else
-        echo "FAIL $name ($qname < input/$stdin): exp[$exp] got[$got]"; fail=$((fail+1))
-      fi
-      ;;
-    run)
-      if head -c 4 "$outfile" | grep -q '^err '; then
-        echo "FAIL $name: compile error: $(cat "$outfile")"; fail=$((fail+1)); return
-      fi
-      mod=$(module_name "$fixfile")
-      qname="$mod.$fn"
-      got=$("$ELMVM" "$outfile" "$qname" $args 2>&1)
-      if [ "$got" != "unknown global: $qname" ] && [ "$got" != "unknown name: $qname" ]; then
-        if [ "$got" = "$exp" ]; then
-          echo "PASS $name ($qname $args) -> $got"; pass=$((pass+1))
-        else
-          echo "FAIL $name ($qname $args): exp[$exp] got[$got]"; fail=$((fail+1))
-        fi
-        return
-      fi
-      # fallback to the bare fn name (legacy single-module bundles)
-      got=$("$ELMVM" "$outfile" "$fn" $args 2>&1)
-      if [ "$got" = "$exp" ]; then
-        echo "PASS $name ($fn $args) -> $got"; pass=$((pass+1))
-      else
-        echo "FAIL $name ($fn $args): exp[$exp] got[$got]"; fail=$((fail+1))
-      fi
-      ;;
-    rawrun)
-      got=$("$ELMVM" "$fixfile" "$fn" 2>&1)
-      if [ "$got" = "$exp" ]; then
-        echo "PASS $name (raw bundle $fn)"; pass=$((pass+1))
-      else
-        echo "FAIL $name (raw bundle $fn): exp[$exp] got[$got]"; fail=$((fail+1))
-      fi
-      ;;
-    sigdeath)
-      # See the sigdeath() helper: no compile group (the corpus baseline pins
-      # the batch artifact set), so compile the bundle on demand — the same
-      # shape as `depth`, and the reason the batch stays at 149 artifacts.
-      if ! node "$CDIR/run.js" "$fixfile" "$OUT/$name.csexp" >/dev/null 2>&1 || [ ! -s "$OUT/$name.csexp" ]; then
-        echo "FAIL $name: on-demand compile failed: $fixfile"; fail=$((fail+1)); return
-      fi
-      if head -c 4 "$OUT/$name.csexp" | grep -q '^err '; then
-        echo "FAIL $name: compile error: $(cat "$OUT/$name.csexp")"; fail=$((fail+1)); return
-      fi
-      mod=$(module_name "$fixfile")
-      qname="$mod.$fn"
-      got=$("$ELMVM" "$OUT/$name.csexp" "$qname" 2>&1)
-      if [ "$got" = "$exp" ]; then
-        echo "PASS $name ($qname -> $got)"; pass=$((pass+1))
-      else
-        echo "FAIL $name ($qname): exp[$exp] got[$got]"; fail=$((fail+1))
-      fi
-      ;;
-    depth)
-      # See the depth() helper: this is one of the checks that compile their
-      # own bundle (no register_group — the corpus baseline pins the batch
-      # set; see also `sigdeath` and `natdepth`) and
-      # the ONE check that asserts on the EXIT STATUS, both because the defect
-      # it pins is a silent wrong answer with a SUCCESS status.
-      if ! node "$CDIR/run.js" "$fixfile" "$outfile" >/dev/null 2>&1 || [ ! -s "$outfile" ]; then
-        echo "FAIL $name: on-demand compile failed: $fixfile"; fail=$((fail+1)); return
-      fi
-      if head -c 4 "$outfile" | grep -q '^err '; then
-        echo "FAIL $name: compile error: $(cat "$outfile")"; fail=$((fail+1)); return
-      fi
-      cap="$(sed -n 's/.*CALL_STACK_DEPTH *= *\([0-9][0-9]*\).*/\1/p' \
-               "$ROOT/vendor/osier-rt/src/gc/types.zig" | head -1)"
-      if [ -z "$cap" ]; then
-        echo "FAIL $name: cannot read CALL_STACK_DEPTH from vendor/osier-rt/src/gc/types.zig"; fail=$((fail+1)); return
-      fi
-      read -r ctl margin <<< "$args"
-      mod=$(module_name "$fixfile")
-      qname="$mod.$fn"
-      near=$((cap - 1))
-      past=$((cap + margin))
-      # (2) the last usable frame — expected sum 1+2+...+near.
-      near_exp=$(( near * (near + 1) / 2 ))
-      # (1) the control at a legal depth.
-      ctl_out=$(ELMC_HEAP_MB="$DEPTH_HEAP_MB" "$ELMVM" "$outfile" "$qname" "$ctl" 2>&1); ctl_rc=$?
-      if [ "$ctl_rc" -ne 0 ] || [ "$ctl_out" != "$exp" ]; then
-        echo "FAIL $name $qname $ctl (control): exp rc=0 out[$exp], got rc=$ctl_rc out[$ctl_out]"
-        fail=$((fail+1)); return
-      fi
-      near_out=$(ELMC_HEAP_MB="$DEPTH_HEAP_MB" "$ELMVM" "$outfile" "$qname" "$near" 2>&1); near_rc=$?
-      if [ "$near_rc" -ne 0 ] || [ "$near_out" != "$near_exp" ]; then
-        echo "FAIL $name $qname $near (CALL_STACK_DEPTH-1): exp rc=0 out[$near_exp], got rc=$near_rc out[$near_out]"
-        fail=$((fail+1)); return
-      fi
-      # (3) past the cap: non-zero exit, the named diagnostic on stderr, and
-      # NO value on stdout (a printed value here is the old silent-wrong-answer
-      # defect, whatever the exit status says).
-      #
-      # THIS IS THE ONE INVOCATION IN THE GATE THAT CRASHES ITS CHILD ON
-      # PURPOSE, and bash reports a signal-killed job with
-      #   "<script>: line N: <PID> Aborted (core dumped) <the command>"
-      # on the SHELL's stderr -- not the child's, so the `2>` on the command
-      # below does NOT capture it.  That line lands in the gate TRANSCRIPT
-      # carrying a fresh PID on every run, which makes the transcript
-      # non-deterministic and makes `tools/midtier-diff.sh`'s transcript
-      # comparison fail spuriously (it compares MIDTIER=0 against MIDTIER=1).
-      # So redirect the shell's own stderr around this ONE invocation to a
-      # file (the child's stderr still goes to its own, which the asserts
-      # below read), and drop core dumps -- this check exists to panic the VM.
-      ulimit -c 0 2>/dev/null || true
-      exec 3>&2
-      exec 2>"$OUT/$name.past.shellstderr"
-      ELMC_HEAP_MB="$DEPTH_HEAP_MB" "$ELMVM" "$outfile" "$qname" "$past" \
-        >"$OUT/$name.past.stdout" 2>"$OUT/$name.past.stderr"
-      past_rc=$?
-      exec 2>&3 3>&-
-      if [ "$past_rc" -eq 0 ]; then
-        echo "FAIL $name $qname $past (past CALL_STACK_DEPTH=$cap): exit 0 — stdout=$(head -c 80 "$OUT/$name.past.stdout")"
-        fail=$((fail+1)); return
-      fi
-      if ! grep -q "$DEPTH_MSG" "$OUT/$name.past.stderr"; then
-        echo "FAIL $name $qname $past (past CALL_STACK_DEPTH=$cap): exit $past_rc but stderr lacks [$DEPTH_MSG]: $(head -c 200 "$OUT/$name.past.stderr" | tr '\n' ' ')"
-        fail=$((fail+1)); return
-      fi
-      if [ -s "$OUT/$name.past.stdout" ]; then
-        echo "FAIL $name $qname $past (past CALL_STACK_DEPTH=$cap): exit $past_rc with a value on stdout: $(head -c 80 "$OUT/$name.past.stdout")"
-        fail=$((fail+1)); return
-      fi
-      echo "PASS $name ($qname: $ctl -> $exp, $near -> $near_exp, $past -> exit $past_rc + \"$DEPTH_MSG\")"
-      pass=$((pass+1))
-      ;;
     natdepth)
-      # See the natdepth helper: the native twin of `depth`.  Builds its own
+      # See the natdepth helper: the out-of-stack check.  Builds its own
       # binary via qbe-mk (no compile group), owns the budget with
       # QBE_NO_RLIMIT=1 + its own `ulimit -s 1024`, and asserts on the
       # PROCESS like `depth` does — the defect class is a bare fault with no
@@ -1029,7 +783,8 @@ dispatch() {
         fail=$((fail+1)); return
       fi
       # (2) past the boundary: non-zero exit, the named diagnostic on stderr,
-      # and NO value on stdout.  Same shell-stderr discipline as `depth`: the
+      # and NO value on stdout.  Same shell-stderr discipline as the retired
+      # VM `depth` check had: the
       # guard exits cleanly, but a REGRESSED guard dies by signal and bash
       # would print a PID-bearing line on the SHELL's own stderr.
       ulimit -c 0 2>/dev/null || true
@@ -1066,9 +821,9 @@ dispatch() {
       pass=$((pass+1))
       ;;
     nat*)
-      # The native twin (P7): the binary PHASE 2.5 built from this row's own
-      # sources must produce the SAME pinned expected value the VM row asserts
-      # — the replacement execution model for the gate.  `timeout` guards the
+      # The native row (P7; the ONLY execution model since P8): the binary
+      # PHASE 2.5 built from this row's own sources must produce the pinned
+      # expected value.  `timeout` guards the
       # run exactly like qbe-check.sh: a miscompile that loops must fail
       # loudly here, not wedge the gate.
       bin="$(cat "$OUT/nat/$i.binpath" 2>/dev/null || true)"

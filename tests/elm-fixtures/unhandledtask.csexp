@@ -1,1 +1,0 @@
-(([4:s]main (c(s [7:s]Program n [1:n]0 K [1:n]0 [9:s]emptylist n [1:n]1 K [1:n]0 [9:s]emptylist s [9:s]TaskBogus n [1:n]0 K [1:n]1 [9:s]absvector P [9:s]address-> P [4:s]cons n [1:n]2 K [1:n]0 [9:s]emptylist n [1:n]3 K [1:n]4 [9:s]absvector P [9:s]address-> P [9:s]address-> P [9:s]address-> V [9:s]address->))))

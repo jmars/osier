@@ -13,7 +13,7 @@
 //!   rt_tail_known(code, argblock, n) -> Ret   direct saturated tail call
 //!   rt_bounce(ret) -> Value             chase a .tail chain to a .done value
 //!   rt_prim(name, args, n) -> Value     the EXACT VM primitive (fallback)
-//!   main(entry, args...)                the driver (elmvm-shaped output)
+//!   main(entry, args...)                the driver (the gate-harness CLI shape)
 //!
 //! GC CONTRACT (docs/gc-zig.md mutator rules): the collector is precise and
 //! moving; anything held across an allocating call must be reachable from a
@@ -84,7 +84,7 @@ pub const Meta = extern struct {
 };
 
 /// The call-result shape every generated function returns — the bounce-loop
-/// convention transcribed from tools/aot/runtime.zig's `Ret = .done | .tail`.
+/// convention transcribed from the retired AOT runtime's `Ret = .done | .tail`
 /// MUST be ABI-identical to the QBE `:ret` aggregate (Il.retType:
 /// `type :ret = align 8 { :val, w, l, l, l, w }`), i.e. 80 bytes:
 ///   val   @0   (40) the finished value when kind == 0 (`.done`);
@@ -788,8 +788,8 @@ fn segvHandler(sig: std.posix.SIG, info: *const std.posix.siginfo_t, ctx: ?*anyo
 }
 
 // =====================================================================
-//  Driver — elmvm-shaped: <entry-name> [int-arg ...]; prints the result
-//  exactly like tools/elmvm.zig (values.printValue + "\n").
+//  Driver: <entry-name> [int-arg ...]; prints the result with
+//  values.printValue + "\n" (the gate-harness CLI contract).
 // =====================================================================
 
 const HEAP_BYTES: usize = 64 * 1024 * 1024;
@@ -800,7 +800,7 @@ var vmem: state.Vm = undefined;
 /// AOTRUN_ARGV: build the *argv* pseudo-global value — a plain cons LIST of
 /// strings (run.js argv[2:] shape), built back-to-front (cdr-first) so each
 /// valCons roots the previous tail.  The empty case returns the nil singleton
-/// (Runtime.argv () -> []).  Mirrors tools/aot/run.zig's buildArgvList.
+/// (Runtime.argv () -> []).  Mirrors the retired AOT driver's buildArgvList.
 fn buildArgvList(nargs: usize, c_argv: [*]?[*:0]u8) Value {
     var acc: Value = values.valNil();
     var i: usize = nargs;
@@ -812,7 +812,7 @@ fn buildArgvList(nargs: usize, c_argv: [*]?[*:0]u8) Value {
 }
 
 /// True when a CLI arg is spelled as a float literal.  VERBATIM the heuristic
-/// tools/elmvm.zig and tools/aot/main.zig use, so the VM reference and the
+/// the retired VM/AOT harnesses used, so the former VM reference and the
 /// native driver accept the same command line — an arg is a float iff it
 /// contains '.'/'e'/'E' or is one of the canonical non-finite tokens
 /// (parseFloat accepts all four).  Everything else stays on the int path.
@@ -918,7 +918,7 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     const entry = std.mem.span(c_argv[1] orelse "");
     const nargs = argc - 2;
 
-    // AOTRUN_ARGV (same contract as tools/elmvm.zig and tools/aot/run.zig):
+    // AOTRUN_ARGV (the contract the former VM/AOT drivers installed):
     // the trailing args are the APP's command line, exposed as the *argv*
     // pseudo-global (a plain cons list of strings, run.js argv[2:] shape) —
     // NOT call arguments, and the entry is invoked with 0 call args.  This is
@@ -996,7 +996,7 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     vm = &vmem;
 
     // Wire the standard I/O streams (M6) — the SAME three value variables
-    // tools/elmvm.zig:107-109 sets.  initGlobals only registers the PRIM
+    // the former VM harness set at the same point.  initGlobals only registers the PRIM
     // globals; the *stinput*/*stoutput*/*sterror* slots are the HOST's to
     // install, and a native program that reads stdin (Cmd.readLine ->
     // read-byte on *stinput*) died with "prim read-byte failed: Halt" before
@@ -1026,10 +1026,10 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     };
 
     // args: ints, or floats for an arg spelled like a float literal.  The
-    // heuristic is elmvm's/aot's verbatim (tools/elmvm.zig isFloatArg) so the
+    // heuristic is the former harnesses' verbatim (their isFloatArg) so the
     // native driver and the VM reference accept the SAME command line —
     // `Flt.idF 2.5` must reach the entry as a Value tagged float, exactly as
-    // elmvm's `F[...]` atom builds it.
+    // the VM reference's `F[...]` atom built it.
     var argv_buf: [max_arity]Value = undefined;
     var entry_nargs: i32 = 0;
     var j: usize = 0;
@@ -1062,7 +1062,7 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
 
     // *argv* pseudo-global: in argv mode the APP's strings (built back-to-
     // front, each valCons rooting the previous tail — the same shape
-    // tools/aot/run.zig builds); otherwise the empty list (the default
+    // the retired AOT driver built); otherwise the empty list (the default
     // run.zig installs when argv_mode is off).
     if (argv_mode) {
         vmem.valueSet("*argv*", buildArgvList(nargs, c_argv));
@@ -1070,12 +1070,12 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
         vmem.valueSet("*argv*", values.valNil());
     }
 
-    // Host the effect loop EXACTLY like tools/aot/run.zig and tools/elmvm.zig:
+    // Host the effect loop EXACTLY like the retired harnesses did:
     // install the native host->Elm dispatcher (the seam's default is a loud
     // stub — only a native applier can execute Desc*-coded closures), run the
     // entry, and if it returns a Program vector drive the shared CEK effect manager
     // to the final model.  The Vm already wired *stinput*/*stoutput*/*sterror*
-    // in initGlobals, so StreamRef reads the same value-table slots elmvm does.
+    // in initGlobals, so StreamRef reads the same value-table slots the VM did.
     effectloop.host_apply = &hostApply;
 
     var result = callArity(m.arity, m.code, null, &argv_buf);
@@ -1096,7 +1096,7 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
 
     // Print through an ALLOCATING writer, not a fixed one: a result whose
     // printed form exceeds any fixed buffer must print in full (the VM runner
-    // elmvm does the same), so native and VM output agree at every size.
+    // the VM did the same), so native and VM output agreed at every size.
     var aw = std.Io.Writer.Allocating.init(std.heap.page_allocator);
     defer aw.deinit();
     values.printValue(&aw.writer, final) catch {

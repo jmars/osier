@@ -3,7 +3,7 @@ whose src/ carries miniBill/elm-unicode code — the upstream notice
 retained below applies to that code. Unmodified from the package copy this
 project carried. -}
 
-module Char.Extra exposing (isLatinAlphaNumOrUnderscoreFast, isUtf16Surrogate, unicodeIsAlphaNumOrUnderscoreFast, unicodeIsLowerFast, unicodeIsUpperFast)
+module Char.Extra exposing (isLatinAlphaNumOrUnderscoreFast, isUtf16Surrogate, unicodeIsAlphaNumOrUnderscoreFast, unicodeIsLowerFast, unicodeIsUpperFast, utf8ByteLength)
 
 {-| Edited from [minibill/elm-unicode](https://package.elm-lang.org/packages/miniBill/elm-unicode/latest/)
 
@@ -387,3 +387,55 @@ leading to NaN being returned.
 isUtf16Surrogate : Char -> Bool
 isUtf16Surrogate c =
     Basics.isNaN (Basics.toFloat (Char.toCode c))
+
+
+-- ============================ UTF-8 BYTE LENGTH ============================
+-- The byte length of a string's UTF-8 encoding, the quantity length-prefixed
+-- text formats (and the QBE emitter's rt_string calls) need.  Under real Elm
+-- (compiler.js on node) String.length counts CODE POINTS and is wrong for the
+-- prefix whenever the value contains a multi-byte character (é = 2 bytes, 🦀
+-- = 4 bytes), so the bytes must be summed per character.  This module runs
+-- under TWO runtimes with opposite String semantics (moved here from
+-- Zinc/Csexp when the csexp format was retired; the QBE backend
+-- Mid/Qbe/Lower.elm and TestMain consume it):
+--
+--   - real Elm: Strings are CODE-POINT indexed — String.length "é" == 1,
+--     String.toList yields one Char per code point.
+--   - the Osier runtime (the selfhost compiler): Strings are BYTE indexed —
+--     String.length "é" == 2 already IS the UTF-8 byte count, and summing
+--     charUtf8Length over it would count every continuation byte as 2 and
+--     over-count.
+--
+-- Probe which runtime we are in by measuring a string whose two measures
+-- differ.
+stringIsByteIndexed : Bool
+stringIsByteIndexed =
+    String.length "é" == 2
+
+
+utf8ByteLength : String -> Int
+utf8ByteLength str =
+    if stringIsByteIndexed then
+        String.length str
+
+    else
+        List.sum (List.map charUtf8Length (String.toList str))
+
+
+charUtf8Length : Char -> Int
+charUtf8Length char =
+    let
+        code =
+            Char.toCode char
+    in
+    if code <= 0x007F then
+        1
+
+    else if code <= 0x07FF then
+        2
+
+    else if code <= 0xFFFF then
+        3
+
+    else
+        4

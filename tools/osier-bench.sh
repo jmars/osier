@@ -23,13 +23,14 @@
 # shapes WERE measured and which were NOT (declared-not-expressible, tool
 # missing, compile failure, run failure, backend disagreement).
 #
-# BACKENDS
-#   VM   (reference) node elm-compiler/run.js <src> <out.csexp>   MIDTIER=0
-#                    zig-out/bin/elmvm <out.csexp> <Entry>        ELMC_HEAP_MB
+# BACKENDS (P8, osier-delete-zinc): QBE (native) is the ONLY backend.
 #   QBE  (native)    tools/qbe/qbe-mk.sh <src> <Entry> <outdir>   (repo-rel src)
 #                    <outdir>/<basename> <Entry>                  QBE_HEAP_MB
-#   AOT  (if built)  zig-out/bin/aotbench <bundle.csexp> <Entry>  ELMC_HEAP_MB
-#
+# The VM and AOT backends this suite also timed (a live VM reference whose
+# output was cross-checked against the native run, and the AOT driver) died
+# with the interpreter; the cross-check against the frozen goldens in
+# tools/bench/golden/ (written by the differential's last agreeing run,
+# 2026-10-10) is what remains.
 # EXIT: 0 only if every non-declared (program, backend) pair compiled AND ran
 # AND agreed with the VM.  A backend whose TOOL is absent is a skip, not a
 # failure — it is reported as MISSING-TOOL and named in the summary.  A
@@ -64,31 +65,21 @@
 #        OSIER_BENCH_HEAP_MB=n     VM + native heap, MB          [512]
 #        OSIER_BENCH_TIMEOUT=s     per-run timeout, seconds      [300]
 #        OSIER_BENCH_STRICT=1      ignore declared-not-expressible
-#        OSIER_BENCH_XCHECK=0      skip the VM-vs-native output cross-check
-#        OSIER_BENCH_REF=golden    cross-check the native output against the
-#                                  FROZEN goldens in tools/bench/golden/
-#                                  instead of a live VM (the post-VM mode;
-#                                  auto-selected when elmvm is absent)
-#        OSIER_BENCH_FREEZE=1      (with the VM present) re-freeze the goldens
-#                                  from the VM's output after the live
-#                                  differential agrees — the only legitimate
-#                                  way a golden appears
+#        OSIER_BENCH_XCHECK=0      skip the golden output cross-check
 #
 # THE CROSS-CHECK AFTER THE VM (P7, handoff osier-evidence): the VM reference
 # is what made the xcheck a DIFFERENTIAL (two backends, two value
 # representations).  With the ZINC retirement there is one backend, and the
 # successor is a REGRESSION net: per-program golden outputs, frozen from the
-# VM's last verified run (OSIER_BENCH_FREEZE=1 writes a golden only where the
-# live differential agreed byte-for-byte).  A wrong-but-plausible output on an
+# VM's last verified run, 2026-10-10 — the last day the live differential
+# ran; a golden was written only where it agreed byte-for-byte).  A
+# wrong-but-plausible output on an
 # unpinned shape is invisible to it — see ARTIFACT.md section 9.2.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SUITE="$ROOT/tools/bench/suite"
-ELMVM="$ROOT/zig-out/bin/elmvm"
-AOTBENCH="$ROOT/zig-out/bin/aotbench"
 QBE_MK="$ROOT/tools/qbe/qbe-mk.sh"
-CDIR="$ROOT/elm-compiler"
 
 RUNS="${OSIER_BENCH_RUNS:-3}"
 STAT="${OSIER_BENCH_STAT:-best}"
@@ -112,23 +103,11 @@ for tool in node awk sed sort date head grep wc cmp; do
   command -v "$tool" >/dev/null 2>&1 || { echo "osier-bench: $tool not on PATH" >&2; exit 2; }
 done
 
-HAVE_VM=0; HAVE_QBE=0; HAVE_AOT=0
-if [ -x "$ELMVM" ]; then HAVE_VM=1; fi
+HAVE_QBE=0
 if [ -x "$ROOT/vendor/qbe/qbe" ] && [ -x "$QBE_MK" ]; then HAVE_QBE=1; fi
-if [ -x "$AOTBENCH" ]; then HAVE_AOT=1; fi
 GOLDEN_DIR="$ROOT/tools/bench/golden"
-REF="${OSIER_BENCH_REF:-auto}"
-case "$REF" in auto|vm|golden) ;; *)
-  echo "osier-bench: OSIER_BENCH_REF must be auto|vm|golden (got '$REF')" >&2; exit 2 ;; esac
-if [ "$REF" = auto ]; then
-  if [ "$HAVE_VM" = 1 ]; then REF=vm; else REF=golden; fi
-fi
-if [ "$REF" = vm ] && [ "$HAVE_VM" = 0 ]; then
-  echo "osier-bench: $ELMVM missing (run: zig build elmvm) and OSIER_BENCH_REF=vm" >&2
-  exit 2
-fi
-if [ "$REF" = golden ] && [ ! -d "$GOLDEN_DIR" ]; then
-  echo "osier-bench: no goldens at $GOLDEN_DIR — freeze them first: OSIER_BENCH_FREEZE=1 (VM present)" >&2
+if [ ! -d "$GOLDEN_DIR" ]; then
+  echo "osier-bench: no goldens at $GOLDEN_DIR — they are committed files; check the tree" >&2
   exit 2
 fi
 
@@ -158,10 +137,8 @@ if [ "${#selected[@]}" -eq 0 ]; then
   exit 2
 fi
 
-vm_yes=NO; [ "$HAVE_VM" = 1 ] && vm_yes=yes
 qbe_yes=NO; [ "$HAVE_QBE" = 1 ] && qbe_yes=yes
-aot_yes=NO; [ "$HAVE_AOT" = 1 ] && aot_yes=yes
-echo "osier-bench: ${#selected[@]} programs, backends VM=$vm_yes QBE=$qbe_yes AOT=$aot_yes, $STAT of $RUNS run(s), heap ${HEAP_MB}MB, reference=$REF, scratch $TMP"
+echo "osier-bench: ${#selected[@]} programs, backend QBE=$qbe_yes, $STAT of $RUNS run(s), heap ${HEAP_MB}MB, reference=golden, scratch $TMP"
 
 # ---- the timer ------------------------------------------------------------
 LAST_MS=0
@@ -241,9 +218,9 @@ first_stderr_any() { # stderr of the representative run, or the first non-empty
 
 # ---- result accumulation --------------------------------------------------
 R_NAME=(); R_SHAPE=()
-declare -A RES_VM=() RES_QBE=() RES_AOT=()
+declare -A RES_QBE=()
 FAIL=0
-XC_N=0   # VM/native cross-checks that actually compared byte-identical
+XC_N=0   # golden cross-checks that compared byte-identical
 WARN=()
 
 note_fail() { echo "osier-bench: FAIL $1" >&2; FAIL=1; }
@@ -291,43 +268,6 @@ for src in "${selected[@]}"; do
   work="$TMP/$name"
   mkdir -p "$work"
   R_NAME+=("$name"); R_SHAPE+=("$shape")
-
-  # ---------- VM (the reference; post-VM trees skip this whole backend) ------
-  if [ "$REF" != vm ]; then
-    RES_VM["$name"]="$(enc '' NO-VM "OSIER_BENCH_REF=$REF: no live VM reference")"
-  else
-  vmb="$work/vm.csexp"
-  ( cd "$CDIR" && MIDTIER=0 node run.js "$src" "$vmb" ) >"$work/vm.compile.log" 2>&1 || true
-  # THE ORACLE IS THE FILE, NOT THE EXIT STATUS: run.js exits 0 on a type
-  # error and writes "err ..." into the csexp (the QBE path checks the same
-  # prefix — this is the VM's copy of that check).
-  if [ ! -s "$vmb" ]; then
-    RES_VM["$name"]="$(enc '' COMPILE-FAIL "no bundle written: $(tail -1 "$work/vm.compile.log" | head -c 120)")"
-    note_fail "$name (vm): no bundle written"
-  elif head -c 4 "$vmb" | grep -q '^err '; then
-    RES_VM["$name"]="$(enc '' COMPILE-FAIL "$(head -c 160 "$vmb")")"
-    note_fail "$name (vm): compile failed"
-  else
-    run_n_times "$work/vm" env ELMC_HEAP_MB="$HEAP_MB" "$ELMVM" "$vmb" "$entry"
-    if [ "$(n_ok_runs "$work/vm")" -ne "$RUNS" ]; then
-      RES_VM["$name"]="$(enc "$(pick_stat "$work/vm" | awk '{print $1}')" RUN-FAIL "rc!=0 or timeout (${RUN_TIMEOUT}s): $(first_stderr_any "$work/vm" | head -c 100)")"
-      note_fail "$name (vm): run failed"
-    elif ! same_output_every_run "$work/vm"; then
-      RES_VM["$name"]="$(enc "$(pick_stat "$work/vm" | awk '{print $1}')" RUN-FAIL "stdout differs between runs")"
-      note_fail "$name (vm): nondeterministic"
-    elif ! benign_stderr "$work/vm"; then
-      RES_VM["$name"]="$(enc "$(pick_stat "$work/vm" | awk '{print $1}')" RUN-FAIL "heap-bounded/panicking stderr: $(first_stderr_any "$work/vm" | head -c 90)")"
-      note_fail "$name (vm): heap-bounded"
-    else
-      read -r ms idx <<<"$(pick_stat "$work/vm")"
-      cp "$work/vm.$idx.out" "$work/vm.rep.out"
-      cp "$work/vm.$idx.err" "$work/vm.rep.err"
-      note=""
-      if [ -s "$work/vm.rep.err" ]; then note="stderr:$(head -c 60 "$work/vm.rep.err" | tr '\n' ' ')"; fi
-      RES_VM["$name"]="$(enc "$ms" OK "$note")"
-    fi
-  fi
-  fi   # REF=vm
 
   # ---------- QBE (native) ----------
   if [ "$HAVE_QBE" = 0 ]; then
@@ -394,42 +334,19 @@ for src in "${selected[@]}"; do
     fi
   fi
 
-  # ---------- cross-check: live VM, or the FROZEN GOLDen (post-VM) ----------
-  # Only when the reference and native both produced a number: a disagreement
-  # means one of the two is miscompiling, and a benchmark built on a wrong
-  # answer measures nothing.  An EMPTY stdout is not agreement either: a
-  # measured pair that prints nothing has measured nothing, so it fails
-  # instead of comparing equal to itself.
-  if [ "$XCHECK" = 1 ] && [ "$REF" = vm ] && [ "$(enc_st "${RES_VM[$name]:-}")" = OK ] && [ "$(enc_st "${RES_QBE[$name]:-}")" = OK ]; then
-    if [ ! -s "$work/vm.rep.out" ] || [ ! -s "$work/qbe.rep.out" ]; then
-      WARN+=("$name: VM/native cross-check FAILED: empty stdout on a measured pair — empty is a FAILURE, not agreement")
-      RES_VM["$name"]="$(enc "${RES_VM[$name]%%|*}" EMPTY-STDOUT "measured pair printed nothing")"
-      RES_QBE["$name"]="$(enc "${RES_QBE[$name]%%|*}" EMPTY-STDOUT "measured pair printed nothing")"
-      note_fail "$name: empty stdout on a measured pair"
-    elif ! cmp -s "$work/vm.rep.out" "$work/qbe.rep.out"; then
-      vm_val="$(head -c 60 "$work/vm.rep.out")"
-      qb_val="$(head -c 60 "$work/qbe.rep.out")"
-      WARN+=("$name: VM and native DISAGREE: vm='$vm_val' native='$qb_val'")
-      RES_VM["$name"]="$(enc "${RES_VM[$name]%%|*}" MISMATCH "native='$(head -c 50 "$work/qbe.rep.out")'")"
-      RES_QBE["$name"]="$(enc "${RES_QBE[$name]%%|*}" MISMATCH "vm='$(head -c 50 "$work/vm.rep.out")'")"
-      note_fail "$name: VM/native output mismatch"
-    else
-      XC_N=$((XC_N + 1))
-      # FREEZE (only on an AGREEING pair — a golden is never born from a
-      # disagreement): pin the VM's output as the post-VM reference.
-      if [ "${OSIER_BENCH_FREEZE:-0}" = 1 ]; then
-        mkdir -p "$GOLDEN_DIR"
-        cp "$work/vm.rep.out" "$GOLDEN_DIR/$name.expected"
-        echo "osier-bench: FROZE $name golden <- vm==native ($(head -c 40 "$work/vm.rep.out"))" >&2
-      fi
-    fi
-  fi
-  # The golden cross-check runs whenever the LIVE one did not (REF=golden, or
-  # the VM row failed for its own reasons while a golden exists).
-  if [ "$XCHECK" = 1 ] && [ "$REF" != vm ] && [ "$(enc_st "${RES_QBE[$name]:-}")" = OK ]; then
+  # ---------- cross-check: the FROZEN GOLDEN ----------
+  # Only when the native run produced a number: a disagreement means a wrong
+  # answer, and a benchmark built on it measures nothing.  An EMPTY stdout is
+  # not agreement either: a measured program that prints nothing has measured
+  # nothing, so it fails instead of comparing equal to itself.
+  if [ "$XCHECK" = 1 ] && [ "$(enc_st "${RES_QBE[$name]:-}")" = OK ]; then
     g="$GOLDEN_DIR/$name.expected"
-    if [ ! -f "$g" ]; then
-      WARN+=("$name: no golden at $g — freeze deliberately (OSIER_BENCH_FREEZE=1 with the VM)")
+    if [ ! -s "$work/qbe.rep.out" ]; then
+      WARN+=("$name: golden cross-check FAILED: empty stdout on a measured program — empty is a FAILURE, not agreement")
+      RES_QBE["$name"]="$(enc "${RES_QBE[$name]%%|*}" EMPTY-STDOUT "measured program printed nothing")"
+      note_fail "$name: empty stdout on a measured program"
+    elif [ ! -f "$g" ]; then
+      WARN+=("$name: no golden at $g — goldens are committed files frozen from the VM's last verified run (2026-10-10)")
       note_fail "$name: golden cross-check has nothing to compare"
     elif ! cmp -s "$g" "$work/qbe.rep.out"; then
       WARN+=("$name: native DISAGREES with the frozen golden: golden='$(head -c 50 "$g")' native='$(head -c 50 "$work/qbe.rep.out")'")
@@ -440,27 +357,11 @@ for src in "${selected[@]}"; do
     fi
   fi
 
-  # ---------- AOT (only if the driver is built) ----------
-  if [ "$HAVE_AOT" = 0 ]; then
-    RES_AOT["$name"]="$(enc '' MISSING-TOOL 'no zig-out/bin/aotbench (the AOT driver builds per-fixture exes: zig build aotbench-<fixture>, build.zig:161-166)')"
-  elif [ ! -s "$work/vm.csexp" ] || head -c 4 "$work/vm.csexp" | grep -q '^err '; then
-    RES_AOT["$name"]="$(enc '' SKIPPED 'no VM bundle for this program to load')"
-  else
-    run_n_times "$work/aot" env ELMC_HEAP_MB="$HEAP_MB" "$AOTBENCH" "$work/vm.csexp" "$entry"
-    if [ "$(n_ok_runs "$work/aot")" -ne "$RUNS" ]; then
-      RES_AOT["$name"]="$(enc '' RUN-FAIL "rc!=0 or timeout (${RUN_TIMEOUT}s): $(first_stderr_any "$work/aot" | head -c 100)")"
-      note_fail "$name (aot): run failed"
-    else
-      RES_AOT["$name"]="$(enc "$(pick_stat "$work/aot" | awk '{print $1}')" OK "")"
-    fi
-  fi
-
   # ---------- row ----------
-  printf '%-14s %-11s vm=%-11s qbe=%-11s aot=%-11s\n' \
+  printf '%-14s %-11s qbe=%-11s\n' \
     "$name" "$shape" \
-    "$(enc_ms "${RES_VM[$name]:-}") $(enc_st "${RES_VM[$name]:-}")" \
-    "$(enc_ms "${RES_QBE[$name]:-}") $(enc_st "${RES_QBE[$name]:-}")" \
-    "$(enc_ms "${RES_AOT[$name]:-}") $(enc_st "${RES_AOT[$name]:-}")"
+    "$(enc_ms "${RES_QBE[$name]:-}") $(enc_st "${RES_QBE[$name]:-}")"
+
 done
 
 # ---- the mono generic must be ONE source, not three copies ---------------
@@ -493,21 +394,18 @@ printf '%-14s %-11s %9s %9s %9s  %s\n' program shape vm_ms qbe_ms aot_ms status
 for i in "${!R_NAME[@]}"; do
   n="${R_NAME[$i]}"
 
-  printf '%-14s %-11s %9s %9s %9s  vm=%s qbe=%s aot=%s\n' "$n" "${R_SHAPE[$i]}" \
-    "$(enc_ms "${RES_VM[$n]:-}")" "$(enc_ms "${RES_QBE[$n]:-}")" "$(enc_ms "${RES_AOT[$n]:-}")" \
-    "$(enc_st "${RES_VM[$n]:-}")" "$(enc_st "${RES_QBE[$n]:-}")" "$(enc_st "${RES_AOT[$n]:-}")"
+  printf '%-14s %-11s %9s  qbe=%s\n' "$n" "${R_SHAPE[$i]}" \
+    "$(enc_ms "${RES_QBE[$n]:-}")" "$(enc_st "${RES_QBE[$n]:-}")"
 done
 echo "times are $STAT of $RUNS run(s), in ms, heap ${HEAP_MB}MB; '-' = no number (see the status)"
 
 echo
 echo "---- per-backend coverage and totals ----"
-for be in VM QBE AOT; do
+for be in QBE; do
   ok=0; tot=0; sum=0; notok=()
   for n in "${R_NAME[@]}"; do
     tot=$((tot + 1))
-    case "$be" in
-      VM) e="${RES_VM[$n]:-}";; QBE) e="${RES_QBE[$n]:-}";; AOT) e="${RES_AOT[$n]:-}";;
-    esac
+    e="${RES_QBE[$n]:-}"
     st="$(enc_st "$e")"
     if [ "$st" = "OK" ]; then
       ok=$((ok + 1))
@@ -529,14 +427,12 @@ echo
 echo "---- shapes NOT measured, and why ----"
 any=0
 for n in "${R_NAME[@]}"; do
-  for be in VM QBE AOT; do
-    case "$be" in VM) e="${RES_VM[$n]:-}";; QBE) e="${RES_QBE[$n]:-}";; AOT) e="${RES_AOT[$n]:-}";; esac
-    st="$(enc_st "$e")"
-    if [ "$st" != "OK" ]; then
-      any=1
-      printf '  %-14s %-4s %-15s %s\n' "$n" "$be" "$st" "$(enc_note "$e")"
-    fi
-  done
+  e="${RES_QBE[$n]:-}"
+  st="$(enc_st "$e")"
+  if [ "$st" != "OK" ]; then
+    any=1
+    printf '  %-14s %-4s %-15s %s\n' "$n" QBE "$st" "$(enc_note "$e")"
+  fi
 done
 if [ "$any" = 0 ]; then echo "  (none: every shape measured on every backend present)"; fi
 
@@ -549,9 +445,9 @@ fi
 echo
 if [ "$FAIL" = 0 ]; then
   if [ "$XC_N" -gt 0 ]; then
-    echo "osier-bench: OK — every present backend compiled, ran and agreed ($XC_N VM/native cross-check(s) compared byte-identical)"
+    echo "osier-bench: OK — every program compiled, ran and matched its golden ($XC_N golden cross-check(s) byte-identical)"
   else
-    echo "osier-bench: OK — every present backend compiled and ran (0 VM/native cross-checks ran — no agreement is claimed)"
+    echo "osier-bench: OK — every program compiled and ran (0 golden cross-checks ran — OSIER_BENCH_XCHECK=0)"
   fi
 else
   echo "osier-bench: FAIL — see the rows above" >&2

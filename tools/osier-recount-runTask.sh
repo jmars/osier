@@ -194,10 +194,14 @@ def elm_make():
         sys.exit(1)
 
 def compile_check():
-    out = os.path.join(os.path.dirname(TRIV), "out.csexp")
-    # run.js ALWAYS exits 0 and writes the verdict into the output file.
+    out = os.path.join(os.path.dirname(TRIV), "out.ssa")
+    # run.js ALWAYS exits 0 and writes the verdict into the output file
+    # (QBE IL text on success, "err <msg>" on a checker failure — the verdict
+    # channel is the payload either way; P8 made the QBE path the only one).
+    env = dict(os.environ)
+    env["QBE_ENTRY"] = "Main.main"
     subprocess.run(["node", os.path.join(S, "run.js"), TRIV, out],
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, env=env)
     return open(out).read().strip()
 
 def errline(err):

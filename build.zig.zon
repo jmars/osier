@@ -10,13 +10,10 @@
         // osier-rt: the RUNTIME package (the GC + values/state/prims/varray/
         // streams/execplan) — what every backend links.  Path dependency
         // (osier owns vendor/osier-rt); vendored per the user's ruling.
+        // (The zinc-vm INTERPRETER package that also lived here was deleted
+        // at P8, osier-delete-zinc: nothing in the tree links it.)
         .osier_rt = .{
             .path = "vendor/osier-rt",
-        },
-        // zinc-vm: the ZINC interpreter package (interp/parser/hostcall),
-        // which depends on osier-rt and dies at P8.
-        .zinc_vm = .{
-            .path = "vendor/zinc-vm",
         },
     },
     .paths = .{

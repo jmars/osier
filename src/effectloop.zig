@@ -4,7 +4,7 @@
 //! (renderer + terminal input) lives in fx-ui and is NOT here.
 //!
 //! Design A (plan M9): effects run in the HOST, not by suspending a half-run
-//! vmExecEnv (which is a deep native recursion — see interp.zig).  `main`
+//! interpreter recursion.  `main`
 //! returns a Program as DATA — a vector[Program, model0, cmd0, updateFn] with
 //! tag = bare symbol 'Program'.  This module interprets each Task natively
 //! (a CEK machine over the Task ADT) with nonblocking I/O via std.posix.poll,
@@ -75,12 +75,10 @@ const VmError = state.VmError;
 /// Host -> Elm apply dispatcher — the ONLY seam where the host calls Elm
 /// (continuation/handler/update closures).  The DEFAULT is a loud stub: this
 /// module links only the interpreter-free runtime (osier-rt), so the DRIVER
-/// installs the real dispatcher at startup — interpreted drivers (elmvm,
-/// tools/aot/run.zig with AOTRUN_INTERP=1) install hostcall.applyClosureN
-/// from the zinc-vm package; native drivers install their own (the QBE
-/// runtime's hostApply dispatches through rt_apply; a registered AOT driver
-/// installs aotrt.applyHost).  A plain fn pointer keeps this module
-/// backend-optional: it never imports any driver's module.
+/// installs the real dispatcher at startup — native drivers install their
+/// own (the QBE runtime's hostApply dispatches through rt_apply).  A plain
+/// fn pointer keeps this module backend-optional: it never imports any
+/// driver's module.
 pub var host_apply: *const fn (vm: *Vm, fnv: Value, args: []const Value) VmError!Value = &hostApplyUninstalled;
 
 /// The uninstalled-seam failure: LOUD, never a silent no-op (a program that
@@ -88,7 +86,7 @@ pub var host_apply: *const fn (vm: *Vm, fnv: Value, args: []const Value) VmError
 fn hostApplyUninstalled(vm: *Vm, fnv: Value, args: []const Value) VmError!Value {
     _ = fnv;
     _ = args;
-    return vm.throwShen("effectloop: host_apply seam not installed — the driver must set effectloop.host_apply before driving a Program (interpreted: vm.hostcall.applyClosureN; native: the backend's applier)");
+    return vm.throwShen("effectloop: host_apply seam not installed — the driver must set effectloop.host_apply before driving a Program (native: the backend's applier)");
 }
 
 const pa = std.heap.page_allocator;

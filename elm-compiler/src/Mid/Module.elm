@@ -1,33 +1,20 @@
-module Mid.Module exposing (Batch, compileBatch, Unit, parseAll, collectAll, mergedGlobals, compileUnit)
+module Mid.Module exposing (Unit, parseAll, collectAll, mergedGlobals, compileUnit, sequenceMaps, collectTypeNames)
 
--- Mid.Module — the middle tier's DRIVER: sources -> Mid.Ir.Program -> csexp.
+-- Mid.Module — the middle tier's ORCHESTRATION (sources -> Mid.Ir.Program).
 --
--- This is `Lower.Module`'s pipeline with the lowering step REPLACED by
--- `Mid.FromAst`, and the bundle rendering moved to `Mid.ToZinc`.  The
--- orchestration is deliberately a line-for-line copy of `Lower.Module`'s:
--- parse, collect (with the SAME loud import-shadowing / ambiguous-import /
--- duplicate-definition checks, in the same order), typecheck via
--- `Type.Check`, merge the qualified global arity table, and lower each unit
--- against the MERGED view.
+-- Split (P8/P4): the ZINC-csexp OUTPUT half of this module — the batch
+-- driver that ran the Simplify pass set over the programs and rendered them
+-- to csexp — moved out when the surviving tree needed a backend-neutral
+-- module here, and died with the format at P8.  What REMAINS is exactly the
+-- orchestration every backend shares: parse, collect (with the loud
+-- import-shadowing / ambiguous-import / duplicate-definition checks, in
+-- order), the qualified global arity merge, and the per-unit lowering to
+-- `Mid.Ir` via `Mid.FromAst`.  `Mid.QbeModule` (the QBE backend, the tree's
+-- only backend since P8) builds on exactly these functions.
 --
--- WHY A COPY RATHER THAN A SHARED DRIVER: the MIDTIER switch has to live
--- somewhere, and every legal place inside the existing driver is one of the 58
--- sources listed in `elm-compiler/selfhost/manifest.json` — whose compiled
--- form IS the committed bootstrap seed
--- (`tools/bootstrap/selfhost.csexp`, sha256 ad36cbab…).  Editing any of them
--- changes the seed by construction, and re-freezing the seed is a deliberate
--- user decision (plan decision D5/D6), not this stage's.  So the switch lives
--- OUTSIDE the 58: `src/Main.elm` (not a manifest source) picks between
--- `Lower.Module.compileBatch` and this module, and `MIDTIER=1` therefore
--- reproduces the seed's bytes exactly (see the stage report / tools/midtier-diff.sh).
--- The duplication is the plan's own trajectory: the addendum calls the port a
--- scaffold, and S7 flips the default and deletes the Lower path.
---
--- THE CORPUS CACHE, the group handling and the byte-identity reasoning in
--- `Lower.Module.compileBatch`'s header all apply unchanged here: the corpus is
--- parsed/typechecked/lowered ONCE and every group's bundle is
--- `corpusEntries ++ groupEntries` wrapped once, so the emitted bytes are the
--- same whether the corpus was compiled in this process or in another.
+-- The corpus is parsed/typechecked/lowered ONCE and every group's program is
+-- `corpusEntries ++ groupEntries`, so the emitted bytes are the same whether
+-- the corpus was compiled in this process or in another.
 
 import Dict exposing (Dict)
 import Elm.Parser
@@ -43,123 +30,13 @@ import Lower.Expr as Expr
 import Lower.Resolve as Resolve
 import Mid.FromAst as FromAst
 import Mid.Ir exposing (Defun, Exp(..), Program)
-import Mid.Simplify as Simplify
-import Mid.ToZinc as ToZinc
-import Type.Check as Check
-import Type.Env as Env exposing (Env)
-import Zinc.Csexp as Csexp
 
 
 
 -- ================================ BATCH API ================================
--- Same shape and same contract as Lower.Module.compileBatch — `Err msg` only
--- for a corpus-level failure (Main maps that to an `err` entry per group); on
--- corpus success the list has one entry PER GROUP, the full bundle text or
--- "err <msg>" when that group alone failed — PLUS the middle tier's PASS
--- REPORT (`Mid.Simplify`), one entry per group, which is what MIDTIER_STATS
--- prints.  The report is deliberately NOT part of the bundle: a pass must
--- never change what the emitted bytes are for a NON-pass reason, and keeping
--- the counters out of the program means a bug in the reporting cannot move a
--- byte of output.
---
--- WHY THE PASSES RUN OVER (corpus ++ group) AND NOT PER UNIT: Mid.Simplify's
--- later passes are whole-program (Inline's reachability, DeadGlobals'
--- roots), and a group calls corpus defuns while a corpus defun can be
--- reachable only from a group, so neither half can be optimized alone.  The
--- corpus is therefore re-optimized once per group — measured cheap relative
--- to the corpus's parse+typecheck, and paid exactly once for the selfhost
--- group, which is the only group that matters for the compiler's own
--- compile time.
-
-
-type alias Batch =
-    { bundles : Result String (List String)
-    , report : List String
-    }
-
-
-compileBatch : Simplify.Config -> List String -> List (List String) -> Batch
-compileBatch config corpusSources groups =
-    case
-        parseAll corpusSources
-            |> Result.andThen
-                (\corpusFiles ->
-                    collectAll corpusFiles
-                        |> Result.andThen
-                            (\_ ->
-                                Check.checkBuiltins corpusFiles
-                                    |> Result.andThen
-                                        (\{ env, files } ->
-                                            collectAll files
-                                                |> Result.andThen
-                                                    (\corpusUnits ->
-                                                        case mergedGlobals corpusUnits of
-                                                            Err msg ->
-                                                                Err msg
-
-                                                            Ok corpusGlobals ->
-                                                                case sequenceMaps (List.map (compileUnit corpusGlobals) corpusUnits) of
-                                                                    Err msg ->
-                                                                        Err msg
-
-                                                                    Ok corpusPrograms ->
-                                                                        Ok (List.map (compileOneGroup config env corpusUnits corpusPrograms) groups)
-                                                    )
-                                        )
-                            )
-                )
-    of
-        Err msg ->
-            { bundles = Err msg, report = [] }
-
-        Ok compiled ->
-            { bundles = Ok (List.map Tuple.first compiled)
-            , report = List.filter (\x -> not (x == "")) (List.map Tuple.second compiled)
-            }
-
-
--- A group-level failure is reported as its own bundle (`err <msg>`), exactly
--- as Lower.Module does it, with an empty pass report.
-compileOneGroup : Simplify.Config -> Env -> List Unit -> List Program -> List String -> ( String, String )
-compileOneGroup config env corpusUnits corpusPrograms groupSources =
-    case
-        parseAll groupSources
-            |> Result.andThen
-                (\groupFiles ->
-                    collectAll groupFiles
-                        |> Result.andThen
-                            (\groupUnits0 ->
-                                Check.checkUserGroup env (List.map .file groupUnits0)
-                                    |> Result.andThen
-                                        (\checkedGroupFiles ->
-                                            collectAll checkedGroupFiles
-                                                |> Result.andThen
-                                                    (\groupUnits ->
-                                                        case mergedGlobals (corpusUnits ++ groupUnits) of
-                                                            Err msg ->
-                                                                Err msg
-
-                                                            Ok globals ->
-                                                                sequenceMaps (List.map (compileUnit globals) groupUnits)
-                                                                    |> Result.map
-                                                                        (\groupPrograms ->
-                                                                            let
-                                                                                ( optimized, report ) =
-                                                                                    Simplify.runWithReport config (List.concat (corpusPrograms ++ groupPrograms))
-                                                                            in
-                                                                            ( Csexp.list (ToZinc.entries optimized), report )
-                                                                        )
-                                                    )
-                                        )
-                            )
-                )
-    of
-        Ok result ->
-            result
-
-        Err msg ->
-            ( "err " ++ msg, "" )
-
+-- No batch driver lives here anymore: the csexp one died with the format at
+-- P8, and the QBE backend's driver is Mid.QbeModule.compileEntry, called
+-- once per group by src/Main.elm (run.js) with the corpus paid for once.
 
 
 -- ============================ PARSING / COLLECTION ============================

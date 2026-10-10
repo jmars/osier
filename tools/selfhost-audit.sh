@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # selfhost-audit.sh — M13 ground-truth audit of the selfhost group.
 #
-# Compiles every file of the M13 selfhost group (elm-compiler/selfhost/
+# Compiles every file of the selfhost group (elm-compiler/selfhost/
 # manifest.json: the compiler's own frontend + the parse closure pulled into
 # src/ (formerly selfhost/vendor; stil4m/elm-syntax 7.3.9, Json codecs
 # pruned) + NativeMain) with the CURRENT stock-built compiler (node
-# elm-compiler/run.js
-# --batch), ONE FILE PER GROUP, plus one FINAL WHOLE-GROUP pass, and tabulates
+# elm-compiler/run.js --batch, one QBE ENTRY per group), ONE FILE PER GROUP,
+# plus one FINAL WHOLE-GROUP pass, and tabulates
 # per-file, per-class outcomes:
 #
 #   parse-error / unknown-name / type-error / lowering-error
@@ -21,8 +21,9 @@
 #                      idiomatic Elm (no typeclasses, row-record limits...).
 #                      Fix = typechecker waves.  EXPECTED here and wanted:
 #                      this is ground truth, not noise.
-#   * lowering-error — resolution/typecheck OK, Zinc emission lacks the
-#                      construct (pattern-compiler gaps, forbidden decls).
+#   * lowering-error — resolution/typecheck OK, the tree lowering (FromAst)
+#                      lacks the construct (pattern-compiler gaps, forbidden
+#                      decls).
 #
 # Cost control: every node process pays the fixed corpus pass (~6s), so the
 # per-file pass runs as CHUNKED batched invocations (AUDIT_CHUNK groups per
@@ -129,6 +130,47 @@ for rel in sources:
     text = Path(rel).read_text()
     imports[mod_of[rel]] = [m for m in IMPORT.findall(text) if m in file_of]
 
+def first_entry_of(rel):
+    # module + first top-level definition, or None (a type-only module like
+    # Elm/Syntax/Comments has no defuns after the codec prune).  Comment
+    # lines are skipped: a doc comment can contain a line that LOOKS like a
+    # definition (Mid/Qbe/Types.elm's header has "upheld: this module ...",
+    # which once routed the entry at a nonexistent global).
+    in_block = False
+    for line in Path(rel).read_text().splitlines():
+        if in_block:
+            if "-}" in line:
+                in_block = False
+            continue
+        if line.lstrip().startswith("--"):
+            continue
+        if line.lstrip().startswith("{-"):
+            if "-}" not in line:
+                in_block = True
+            continue
+        m = re.match(r"^([a-z][A-Za-z0-9_']*)\s*(:|=)", line)
+        if m:
+            return module_of(rel) + "." + m.group(1)
+    return None
+
+def first_entry(rel, members):
+    # The QBE backend roots reachability at an entry defun that must EXIST in
+    # the group.  The audit only asks "does this file compile clean" (every
+    # group member is parsed/typechecked whatever the root), so when the
+    # audited file is type-only, root at the first member (in manifest order)
+    # that has a definition.  A group with NO defuns anywhere cannot be rooted
+    # at all and is skipped with an explicit message (only type-only modules
+    # with type-only deps can hit this).
+    for candidate in [rel] + members:
+        e = first_entry_of(candidate)
+        if e:
+            return e
+    # A type-only group (only type aliases, all the way down): root at a
+    # CORPUS defun instead — the corpus is always compiled alongside, and the
+    # audit's question (does this file parse/typecheck clean) is answered
+    # before reachability even starts.
+    return "Prelude.map"
+
 groups = []
 for idx, rel in enumerate(sources):
     root = mod_of[rel]
@@ -143,7 +185,8 @@ for idx, rel in enumerate(sources):
                for d in sorted(closure, key=lambda m: sources.index(file_of[m]))]
     # audited file first in the LIST (Check re-toposorts for checking order)
     groups.append({"i": idx, "file": rel, "deps": members,
-                   "sources": [rel] + members})
+                   "sources": [rel] + members,
+                   "entry": first_entry(rel, members)})
 
 for g in groups:
     print(json.dumps(g))
@@ -153,7 +196,8 @@ open(tmp + "/groups_meta.json", "w").write(json.dumps(groups))
 for c, start in enumerate(range(0, len(groups), chunk)):
     part = groups[start:start + chunk]
     man = {"groups": [{"sources": g["sources"],
-                       "output": "%s/one_%d.csexp" % (tmp, g["i"])}
+                       "output": "%s/one_%d.ssa" % (tmp, g["i"]),
+                       "entry": g["entry"]}
                       for g in part]}
     json.dump(man, open("%s/chunk_%02d.json" % (tmp, c), "w"))
 PYEOF
@@ -161,7 +205,11 @@ chunk_fail=0
 for chunk in "$TMP"/chunk_*.json; do
   # run.js exits nonzero only on TOOLING failure (bad manifest, timeout);
   # per-group compile failures still write "err ..." payloads and exit 0.
-  if ! node "$CDIR/run.js" --batch "$chunk" 2>"$TMP/node.err" >/dev/null; then
+  # RUN_STACK_KB: the QBE backend's non-tail-recursive Peephole pass can
+  # exceed V8's default stack on per-file groups rooted at a deep defun
+  # (Elm.Parser.Declarations.declaration is the recorded case); run.js
+  # re-execs itself with --stack-size when this is set.
+  if ! RUN_STACK_KB=16000 node "$CDIR/run.js" --batch "$chunk" 2>"$TMP/node.err" >/dev/null; then
     chunk_fail=$((chunk_fail + 1))
     echo "audit: chunk tooling failure: $(tail -c 200 "$TMP/node.err" | tr '\n' ' ')" >&2
   fi
@@ -175,7 +223,7 @@ total_ok=0 total_parse=0 total_unknown=0 total_type=0 total_lower=0 total_tool=0
 declare -A R_CLS R_LOC R_DET
 i=0
 for src in "${SOURCES[@]}"; do
-  out="$TMP/one_$i.csexp"
+  out="$TMP/one_$i.ssa"
   i=$((i + 1))
   payload="$(cat "$out" 2>/dev/null || true)"
   if [ -z "$payload" ]; then
@@ -232,17 +280,17 @@ for g in meta:
 # ================ PHASE 2: whole-group pass ================
 # All sources as ONE group — the true self-compile shape (corpus paid once;
 # cross-module resolution live).  Its FIRST error is the deepest blocker.
-jq --arg out "$TMP/group.csexp" '.groups[0].output = $out' "$MANIFEST" >"$TMP/group.json"
-if ! node "$CDIR/run.js" --batch "$TMP/group.json" 2>"$TMP/g.err" >/dev/null; then
+jq --arg out "$TMP/group.ssa" '.groups[0].output = $out' "$MANIFEST" >"$TMP/group.json"
+if ! RUN_STACK_KB=16000 node "$CDIR/run.js" --batch "$TMP/group.json" 2>"$TMP/g.err" >/dev/null; then
   chunk_fail=$((chunk_fail + 1))
 fi
-payload="$(cat "$TMP/group.csexp" 2>/dev/null || true)"
+payload="$(cat "$TMP/group.ssa" 2>/dev/null || true)"
 if [ -n "$payload" ]; then
-  # A successful whole-group compile writes the bundle (leading "("), NOT an
-  # "err " payload.  `classify` only understands failure payloads, and its
-  # substring probes would false-positive on the compiler's OWN embedded
-  # error-message STRING LITERALS inside a successful bundle — so the success
-  # case is detected here, exactly like the per-file tabulation's `*)` -> OK.
+  # A successful whole-group compile writes QBE IL text, NOT an "err "
+  # payload.  `classify` only understands failure payloads, and its substring
+  # probes would false-positive on the compiler's OWN embedded error-message
+  # STRING LITERALS inside successful IL — so the success case is detected
+  # here, exactly like the per-file tabulation's `*)` -> OK.
   case "$payload" in
   err\ *)
     group_result="$(classify "$payload")"
@@ -268,7 +316,7 @@ fi
   echo "# Group:    $N sources = the compiler frontend (src/{Lower,Type,"
   echo "#           Zinc,Frontend}) + the parse closure pulled into src/Elm**/"
   echo "#           (stil4m/elm-syntax 7.3.9, Json codecs pruned; formerly"
-  echo "#           selfhost/vendor) + NativeMain skeleton"
+  echo "#           selfhost/vendor) + NativeMain driver"
   echo "# Corpus:   src/Prelude.elm + src/Runtime.elm + core-libs/* (fixed side,"
   echo "#           NOT audited — always compiled as the corpus)"
   echo "# Compiler: node elm-compiler/run.js --batch (stock-built compiler.js)"

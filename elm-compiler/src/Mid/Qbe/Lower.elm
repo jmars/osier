@@ -100,7 +100,7 @@ import Mid.Qbe.Il as Il exposing (Module, Func, Block, Inst(..), Jump(..), Ty(..
 import Set exposing (Set)
 import Mid.Qbe.Types as QbeTypes
 import Type.Representation as Rep
-import Zinc.Csexp exposing (utf8ByteLength)
+import Char.Extra exposing (utf8ByteLength)
 
 
 -- sizeof(vm Value) = 40 (gc/types.zig), the `:val` aggregate.

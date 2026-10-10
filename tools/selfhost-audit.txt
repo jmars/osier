@@ -3,14 +3,14 @@
 # fix rows wave-by-wave (parse -> unknown-name -> type -> lowering),
 # re-run the script, watch failure rows drop.
 #
-# Group:    75 sources = the compiler frontend (src/{Lower,Type,
+# Group:    64 sources = the compiler frontend (src/{Lower,Type,
 #           Zinc,Frontend}) + the parse closure pulled into src/Elm**/
 #           (stil4m/elm-syntax 7.3.9, Json codecs pruned; formerly
-#           selfhost/vendor) + NativeMain skeleton
+#           selfhost/vendor) + NativeMain driver
 # Corpus:   src/Prelude.elm + src/Runtime.elm + core-libs/* (fixed side,
 #           NOT audited — always compiled as the corpus)
 # Compiler: node elm-compiler/run.js --batch (stock-built compiler.js)
-# Date:     2026-10-10T08:25:54Z
+# Date:     2026-10-10T18:46:52Z
 #
 # Columns: <RESULT>\t<file>\t<row:col>\t<message>
 # RESULT classes: OK | parse-error | unknown-name | type-error |
@@ -20,7 +20,6 @@
 OK	elm-compiler/src/Lower/Resolve.elm		
 OK	elm-compiler/src/Lower/Scope.elm		
 OK	elm-compiler/src/Lower/Expr.elm		
-OK	elm-compiler/src/Lower/Pattern.elm		
 OK	elm-compiler/src/Type/Builtins.elm		
 OK	elm-compiler/src/Type/Env.elm		
 OK	elm-compiler/src/Type/Representation.elm		
@@ -30,9 +29,6 @@ OK	elm-compiler/src/Type/Exhaustive.elm
 OK	elm-compiler/src/Type/Infer.elm		
 OK	elm-compiler/src/Frontend/Lift.elm		
 OK	elm-compiler/src/Type/Check.elm		
-OK	elm-compiler/src/Zinc/Csexp.elm		
-OK	elm-compiler/src/Zinc/Emit.elm		
-OK	elm-compiler/src/Lower/Module.elm		
 OK	elm-compiler/src/Char/Extra.elm		
 OK	elm-compiler/src/Elm/Syntax/Comments.elm		
 OK	elm-compiler/src/Elm/Syntax/Declaration.elm		
@@ -76,13 +72,6 @@ OK	elm-compiler/src/Elm/Interface.elm
 OK	elm-compiler/src/Elm/RawFile.elm		
 OK	elm-compiler/src/Mid/Ir.elm		
 OK	elm-compiler/src/Mid/FromAst.elm		
-OK	elm-compiler/src/Mid/ToZinc.elm		
-OK	elm-compiler/src/Mid/Shrink.elm		
-OK	elm-compiler/src/Mid/Arity.elm		
-OK	elm-compiler/src/Mid/ConstFold.elm		
-OK	elm-compiler/src/Mid/DeadGlobals.elm		
-OK	elm-compiler/src/Mid/Inline.elm		
-OK	elm-compiler/src/Mid/Simplify.elm		
 OK	elm-compiler/src/Mid/Module.elm		
 OK	elm-compiler/src/Mid/Qbe/Il.elm		
 OK	elm-compiler/src/Mid/Qbe/Types.elm		
@@ -93,12 +82,12 @@ OK	elm-compiler/src/Mid/Qbe/Print.elm
 OK	elm-compiler/src/Mid/QbeModule.elm		
 OK	elm-compiler/selfhost/NativeMain.elm		
 #
-# ===== whole-group pass (all 75 sources as one group) =====
+# ===== whole-group pass (all 64 sources as one group) =====
 WHOLE-GROUP	OK		
 #
 # ===== summary =====
-# files:          75
-# ok:             75
+# files:          64
+# ok:             64
 # parse-error:    0
 # unknown-name:   0
 # type-error:     0

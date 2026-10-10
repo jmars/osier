@@ -4,9 +4,9 @@
 # P7 (handoff osier-evidence): THE VM-vs-NATIVE DIFFERENTIAL IS GONE FROM THIS
 # SCRIPT — replaced, while the VM still exists, by GOLDEN OUTPUTS HARVESTED
 # FROM IT.  What the differential was: for every slice fixture, compile BOTH
-# ways from the same source, run the SAME entry with the same args on elmvm
-# (an emitted csexp bundle) and on the native binary (emitted .ssa through
-# vendored qbe + cc), and require IDENTICAL stdout.  That net — TWO backends,
+# ways from the same source, run the SAME entry with the same args on the VM
+# reference (an emitted csexp bundle) and on the native binary (emitted .ssa
+# through vendored qbe + cc), and require IDENTICAL stdout.  That net — TWO backends,
 # TWO value representations — caught the pre-fix float `0.0`, the argvPrimThunk
 # arity bug, the TCO/closure bugs, and pinned the depth guard.  With the ZINC
 # backend retired there is ONE backend, and a same-input backend disagreement
@@ -39,12 +39,13 @@
 #     target only (amd64 here); this is the cheap half of the multi-target
 #     claim — structurally portable, x86_64-MEASURED (see ARTIFACT.md).
 #
-# FREEZING.  A golden is (re)frozen ON PURPOSE:
-#     QBE_CHECK_FREEZE=1 tools/qbe/qbe-check.sh
-# runs the OLD differential one more time (VM reference and all) and writes a
-# golden ONLY where native and VM agree — then commits deserve a message that
-# says what moved and why (the corpus-baseline 8da6fd7 discipline).  A missing
-# golden in compare mode is a FAIL, never an auto-freeze.
+# FREEZING.  The goldens are committed files (tools/qbe/golden/*.txt);
+# re-freezing one is a deliberate edit of that file plus a commit message
+# that says what moved and why (the corpus-baseline 8da6fd7 discipline).
+# The freeze-from-VM mode that originally wrote them (write-only-where-
+# native-and-VM-agreed) died with the interpreter at P8 — a golden no longer
+# has a second engine to agree with, which is the recorded loss the header
+# above states.  A missing golden is a FAIL, never an auto-freeze.
 #
 # Usage: tools/qbe/qbe-check.sh    (exit 0 = all checks pass)
 set -uo pipefail
@@ -67,12 +68,11 @@ trap 'rm -rf "$TMP"' EXIT
 FAIL=0
 
 GOLDEN="$ROOT/tools/qbe/golden"
-FREEZE="${QBE_CHECK_FREEZE:-0}"
 
 # Fail loud before ~50 cryptic per-fixture mismatches: the native pipeline
 # needs the vendored qbe and cc (rt.o is built by qbe-mk under its own
-# freshness guard).  elmvm is NOT a prerequisite anymore — compare mode never
-# runs it; freeze mode checks for it itself.
+# freshness guard).  Nothing runs a VM anymore — the interpreter is deleted
+# (P8) and this suite is single-backend by construction.
 [ -x "$ROOT/vendor/qbe/qbe" ] || {
   echo "qbe-check: vendored qbe missing at $ROOT/vendor/qbe/qbe (run: tools/qbe-build.sh)" >&2
   exit 2
@@ -86,10 +86,8 @@ echo "qbe-check: artifacts in $TMP" >&2
 # every message derive from this, so they cannot drift apart again.
 CHURN_MB=16
 
-# golden_read <name>: the pinned expected stdout for a row.  In freeze mode
-# the golden does not exist yet on a first freeze — echo a sentinel the caller
-# replaces; in compare mode a MISSING golden is a FAIL (never an auto-freeze:
-# a check that heals itself is not a check).
+# golden_read <name>: the pinned expected stdout for a row.  A MISSING golden
+# is a FAIL (never an auto-freeze: a check that heals itself is not a check).
 golden_read() {
   cat "$GOLDEN/$1.txt" 2>/dev/null || echo "__NO_GOLDEN__"
 }
@@ -103,40 +101,15 @@ run() {
     echo "FAIL $name: qbe-mk"; FAIL=1; return
   }
   local exp
-  if [ "$FREEZE" = 1 ]; then
-    # The differential's LAST RUN, recorded: the VM reference compiles the
-    # same source (MIDTIER=0 -> csexp) and runs the same entry; a golden is
-    # written ONLY where native and VM agree byte-for-byte.
-    [ -x "$ROOT/zig-out/bin/elmvm" ] || {
-      echo "qbe-check: freeze mode needs zig-out/bin/elmvm (the VM reference)" >&2
-      exit 2
-    }
-    (cd "$ROOT/elm-compiler" &&
-      MIDTIER=0 node run.js "$ROOT/$fixture" "$TMP/$name/ref.csexp") >/dev/null 2>&1
-    local vm_out
-    vm_out="$("$ROOT/zig-out/bin/elmvm" "$TMP/$name/ref.csexp" "$entry" "${args[@]}" 2>&1)"
-  fi
-  local nat_out
   # `timeout` guards the native run: bug-2 (clostail) is an infinite loop
   # when the closure self-tail miscompiles, and a regression must fail loudly
   # here rather than wedge the whole check script.
+  local nat_out
   nat_out="$(timeout 60 "$bin" "$entry" "${args[@]}" 2>&1)"
-
-  if [ "$FREEZE" = 1 ]; then
-    if [ "$vm_out" != "$nat_out" ]; then
-      echo "FAIL $name: FREEZE REFUSED — vm='$vm_out' native='$nat_out' (no golden written)"
-      FAIL=1; return
-    fi
-    mkdir -p "$GOLDEN"
-    printf '%s\n' "$nat_out" > "$GOLDEN/$name.txt"
-    echo "FROZE $name: golden <- vm==native (${nat_out:0:60})"
-    exp="$nat_out"
-  else
-    exp="$(golden_read "$name")"
-    if [ "$exp" = "__NO_GOLDEN__" ]; then
-      echo "FAIL $name: no golden at $GOLDEN/$name.txt (freeze deliberately: QBE_CHECK_FREEZE=1)"
-      FAIL=1; return
-    fi
+  exp="$(golden_read "$name")"
+  if [ "$exp" = "__NO_GOLDEN__" ]; then
+    echo "FAIL $name: no golden at $GOLDEN/$name.txt (a golden is frozen deliberately, in a commit that says why)"
+    FAIL=1; return
   fi
   if [ "$nat_out" != "$exp" ]; then
     echo "FAIL $name: golden='$exp' native='$nat_out'"
@@ -173,33 +146,12 @@ run_argv() {
   bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$TMP/$name")" || {
     echo "FAIL $name: qbe-mk"; FAIL=1; return
   }
-  if [ "$FREEZE" = 1 ]; then
-    [ -x "$ROOT/zig-out/bin/elmvm" ] || {
-      echo "qbe-check: freeze mode needs zig-out/bin/elmvm (the VM reference)" >&2
-      exit 2
-    }
-    (cd "$ROOT/elm-compiler" &&
-      MIDTIER=0 node run.js "$ROOT/$fixture" "$TMP/$name/ref.csexp") >/dev/null 2>&1
-  fi
   local nat_out exp
   nat_out="$(timeout 60 env AOTRUN_ARGV=1 "$bin" "$entry" "${args[@]}" 2>&1)"
-  if [ "$FREEZE" = 1 ]; then
-    local vm_out
-    vm_out="$(AOTRUN_ARGV=1 "$ROOT/zig-out/bin/elmvm" "$TMP/$name/ref.csexp" "$entry" "${args[@]}" 2>&1)"
-    if [ "$vm_out" != "$nat_out" ]; then
-      echo "FAIL $name: FREEZE REFUSED — vm='$vm_out' native='$nat_out'"
-      FAIL=1; return
-    fi
-    mkdir -p "$GOLDEN"
-    printf '%s\n' "$nat_out" > "$GOLDEN/$name.txt"
-    echo "FROZE $name: golden <- vm==native (${nat_out:0:60})"
-    exp="$nat_out"
-  else
-    exp="$(golden_read "$name")"
-    if [ "$exp" = "__NO_GOLDEN__" ]; then
-      echo "FAIL $name: no golden at $GOLDEN/$name.txt"
-      FAIL=1; return
-    fi
+  exp="$(golden_read "$name")"
+  if [ "$exp" = "__NO_GOLDEN__" ]; then
+    echo "FAIL $name: no golden at $GOLDEN/$name.txt"
+    FAIL=1; return
   fi
   if [ "$nat_out" != "$exp" ]; then
     echo "FAIL $name: golden='$exp' native='$nat_out'"
@@ -324,39 +276,14 @@ run_io() {
     echo "FAIL $name: qbe-mk"; FAIL=1; return
   }
   local exp=""
-  if [ "$FREEZE" = 1 ]; then
-    [ -x "$ROOT/zig-out/bin/elmvm" ] || {
-      echo "qbe-check: freeze mode needs zig-out/bin/elmvm (the VM reference)" >&2
-      exit 2
-    }
-    (cd "$ROOT/elm-compiler" &&
-      MIDTIER=0 node run.js "$ROOT/$fixture" "$TMP/$name/ref.csexp") >/dev/null 2>&1
-  fi
-
   rm -f "$IO_OUT"
   local nat_out nat_file
   nat_out="$(timeout 60 env QBE_IO_IN="$IO_IN" QBE_IO_OUT="$IO_OUT" "$bin" "$entry" 2>&1)"
   nat_file="$(cat "$IO_OUT" 2>/dev/null)"
-  if [ "$FREEZE" = 1 ]; then
-    local vm_out vm_file
-    rm -f "$IO_OUT"
-    vm_out="$(QBE_IO_IN="$IO_IN" QBE_IO_OUT="$IO_OUT" "$ROOT/zig-out/bin/elmvm" "$TMP/$name/ref.csexp" "$entry" 2>&1)"
-    vm_file="$(cat "$IO_OUT" 2>/dev/null)"
-    rm -f "$IO_OUT"
-    if [ "$vm_out" != "$nat_out" ] || [ "$vm_file" != "$nat_file" ]; then
-      echo "FAIL $name: FREEZE REFUSED — vm='$vm_out'/'$vm_file' native='$nat_out'/'$nat_file'"
-      FAIL=1; return
-    fi
-    mkdir -p "$GOLDEN"
-    printf '%s\n' "$nat_out" > "$GOLDEN/$name.txt"
-    echo "FROZE $name: golden <- vm==native (${nat_out:0:60})"
-    exp="$nat_out"
-  else
-    exp="$(golden_read "$name")"
-    if [ "$exp" = "__NO_GOLDEN__" ]; then
-      echo "FAIL $name: no golden at $GOLDEN/$name.txt"
-      FAIL=1; return
-    fi
+  exp="$(golden_read "$name")"
+  if [ "$exp" = "__NO_GOLDEN__" ]; then
+    echo "FAIL $name: no golden at $GOLDEN/$name.txt"
+    FAIL=1; return
   fi
   if [ "$nat_out" != "$exp" ]; then
     echo "FAIL $name: golden='$exp' native='$nat_out'"
@@ -782,7 +709,8 @@ fi
 # by one happy path, so tools/qbe/fixtures/float.elm is a MATRIX: each entry
 # is a separate build (the meta table roots only the requested entry), and
 # every one of them must match its frozen golden byte-for-byte (the values
-# were elmvm's, harvested 2026-10-10 while the differential still ran).
+# were the VM reference's, harvested 2026-10-10 while the differential still
+# ran — before the interpreter retired at P8).
 # The inline fast path inlines ONLY the both-Number case, so the operand
 # shapes matter: `add/sub/mul` and `ltc/lec/gtc/gec` exercise BOTH arms (the
 # inline integer op and the rt_prim fallback), `div` is rt_prim-only (`/` is

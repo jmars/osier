@@ -7,11 +7,10 @@
 # manifest, ELM_GATE_MANIFEST_ONLY=1, now carries each group's native ENTRY),
 # compile the group's sources through the QBE backend
 #
-#     QBE=1 QBE_ENTRY=<Mod>.<fn> node run.js <sources...> <out>.ssa
+#     QBE_ENTRY=<Mod>.<fn> node run.js <sources...> <out>.ssa
 #
 # and sha256 the emitted .ssa — or its "err ..." payload: a group that must
-# FAIL to compile (the gate's compile_error rows) has its error bytes pinned
-# exactly as the csexp baseline pinned them.  A moved hash is either a bug or
+# FAIL to compile (the gate's compile_error rows) has its error bytes pinned.  A moved hash is either a bug or
 # a DELIBERATE re-freeze (--freeze, with the reason recorded in the commit —
 # the 8da6fd7 discipline).
 #
@@ -27,7 +26,7 @@
 #     serialized bundle — a change to code unreachable from every group's
 #     entry moves nothing (across 149 groups the reachable set is nearly all
 #     of it, but "nearly" is the honest word);
-#   * it says nothing about the ZINC emitter (which dies at P8 anyway).
+#   * it says nothing about any other backend (there is none since P8).
 #
 # COST: one node process per group (the QBE path re-typechecks the corpus per
 # group), MEASURED ~0.4-0.9 s each; -P OSIER_CORPUS_J (default 8) parallel.
@@ -65,7 +64,7 @@ MANIFEST="$(ELM_GATE_MANIFEST_ONLY=1 "$GATE" 2>/dev/null)" || {
 # One plan line per group: <name>|<src1 elm> <src2 elm> ...|<entry>
 # (the output file the manifest names is IGNORED — every .ssa goes to scratch,
 # so nothing can clobber a committed artifact; see the stage-4 lesson).
-jq -r '.groups[] | [(.output | split("/")[-1] | sub("\\.csexp$"; "")),
+jq -r '.groups[] | [(.output | split("/")[-1] | sub("\\.(csexp|ssa)$"; "")),
                    (.sources | join(" ")), .entry] | join("|")' \
   "$MANIFEST" > "$WORK/plan.tsv"
 [ -s "$WORK/plan.tsv" ] || { echo "osier-corpus-ssa: empty plan" >&2; exit 2; }

@@ -1,40 +1,37 @@
 module NativeMain exposing (main)
 
-{-| M15: the node-free compiler driver — a pure `Runtime.program` Task app
-that replaces `elm-compiler/run.js` for BOTH of its CLI shapes.
+{-| M15 → P8: the node-free compiler driver — a pure `Runtime.program` Task
+app that replaces `elm-compiler/run.js` for the QBE batch shape.
 
-CLI (identical to run.js, minus the leading `node run.js`):
+CLI:
 
-    elmc <input1.elm> [input2.elm ...] <output.csexp>
-    elmc <manifest>
     elmc --ssa <entryKey> <manifest>
 
-The third shape is the QBE backend batch mode: instead of a csexp bundle, each
-group's output file receives QBE IL text (.ssa) lowered from `<entryKey>`'s
-defun (run.js's QBE=1 QBE_ENTRY=<key>), or `err <msg>`.  The csexp shapes are
-untouched by it.
+The QBE backend batch mode: each group's output file receives QBE IL text
+(.ssa) lowered from `<entryKey>`'s defun (run.js's QBE_ENTRY=<key>), or
+`err <msg>`.  (The csexp shapes this driver once had — the bare manifest
+compile and the single-group CLI — died with the ZINC-csexp output path at
+P8, osier-delete-zinc; this is now the driver's only mode.)
 
 The manifest is LINE-ORIENTED (no Json.Decode in the selfhost corpus): one
 source path per line; each group terminated by an output marker line.
-tools/selfhost-gate.sh generates it from the gate's JSON manifest with
+tools/qbe/qbe-selfhost.sh generates it from the gate's JSON manifest with
 
     jq -r '.groups[] | (.sources[] | .), "-> " + .output'
 
     <src1.elm>
     <src2.elm>
-    -> <out1.csexp>
+    -> <out1.ssa>
     <src3.elm>
-    -> <out2.csexp>
+    -> <out2.ssa>
 
-A lone argument that is not `--batch`-like is treated as a manifest iff its
-line 2 (or any later line) starts with "-> " — the single-group CLI shape
-(a.b elm out.csexp) has no such line.  (`--batch` is accepted as a no-op
-prefix for run.js symmetry; the manifest argument follows it.)
+(`--batch` is accepted as a no-op prefix for run.js symmetry; the manifest
+argument follows it.)
 
 The fixed corpus (Prelude, Runtime, the eight core-libs — run.js's exact
 order, see corpusPaths) is compiled ONCE per process and every group compiles
 against it, matching run.js's batch behavior byte for byte:
-Lower.Module.compileBatch is called with the same corpus texts in the same
+Mid.QbeModule.compileEntry is called with the same corpus texts in the same
 order and the same per-group source texts in the same order, and its output
 is a pure function of those inputs.
 
@@ -52,7 +49,6 @@ Runtime.argv () (the *argv* pseudo-global the driver installs — run.js
 argv[2:] shape: the binary path is NOT an element).
 -}
 
-import Lower.Module as Module
 import Mid.QbeModule as QbeModule
 
 
@@ -86,7 +82,6 @@ update msg model =
             ( status, Cmd.none )
 
 
-
 -- ============================ entry ============================
 
 
@@ -96,48 +91,16 @@ start () =
             errLine msg
 
         Ok [] ->
-            errLine "usage: elmc <in1.elm> [in2.elm ...] <out.csexp> | elmc <manifest> | elmc --ssa <entry> <manifest>"
+            errLine "usage: elmc --ssa <entry> <manifest>"
 
         Ok ("--ssa" :: entry :: path :: []) ->
             -- .ssa batch mode: drive the QBE backend (Mid.QbeModule.compileEntry)
-            -- and write QBE IL per group instead of csexp.  `entry` is the defun
-            -- key the lowering roots reachability from (run.js's QBE_ENTRY).
+            -- and write QBE IL per group.  `entry` is the defun key the
+            -- lowering roots reachability from (run.js's QBE_ENTRY).
             Task.andThen (runSsa entry) (Io.readFile path)
 
-        Ok [ path ] ->
-            -- A single argument is a MANIFEST (tools/selfhost-gate.sh's
-            -- contract: `$BIN <manifest>`); the single-group CLI shape needs
-            -- at least in+out, so it can never collide.
-            Task.andThen runManifest (Io.readFile path)
-
-        Ok args ->
-            runJobs [ { sources = butLast args, output = last args "" } ]
-
-
-butLast : List a -> List a
-butLast xs =
-    case xs of
-        [] ->
-            []
-
-        _ :: rest ->
-            case rest of
-                [] ->
-                    []
-
-                _ ->
-                    lead xs rest
-
-
-lead : List a -> List a -> List a
-lead xs rest =
-    case xs of
-        x :: _ ->
-            x :: butLast rest
-
-        [] ->
-            []
-
+        Ok _ ->
+            errLine "usage: elmc --ssa <entry> <manifest>"
 
 
 -- run.js accepts `--batch <manifest>`; keep the spelling working.
@@ -159,38 +122,10 @@ parseArgs argv_ =
     Ok argv_
 
 
-last : List a -> a -> a
-last xs dflt =
-    case xs of
-        [] ->
-            dflt
-
-        x :: rest ->
-            case rest of
-                [] ->
-                    x
-
-                _ ->
-                    last rest dflt
-
-
-
 -- ======================= manifest -> jobs =======================
 -- One job per "-> <out>" line; the lines above it (since the previous marker
 -- or the start) are that job's sources, in file order.  Blank lines and
 -- lines between a marker and the next source are skipped.
-
-
-runManifest text =
-    case manifestJobs (Str.lines text) of
-        Err msg ->
-            errLine msg
-
-        Ok [] ->
-            errLine "manifest has no groups"
-
-        Ok jobs ->
-            runJobs jobs
 
 
 manifestJobs : List String -> Result String (List Job)
@@ -250,15 +185,30 @@ revGo xs acc =
             acc
 
 
+-- ======================= the .ssa pipeline =======================
+-- `elmc --ssa <entry> <manifest>` drives the QBE backend (Mid.QbeModule):
+-- read the corpus ONCE, then compile each group against it and write QBE IL
+-- (.ssa) — or "err <msg>" — to that group's output path.  flatten/rep are
+-- True, matching run.js's QBE defaults (QBE_NOFLATTEN / QBE_NOREP are both
+-- UNSET on the stock emit this must reproduce byte-for-byte).
 
--- ======================= the compile pipeline =======================
--- Mirrors run.js: read every source ONCE (group texts in group order),
--- compile the corpus once via Module.compileBatch, write each bundle (or its
--- "err <msg>" payload) to the job's output path.
+
+runSsa : String -> String -> Runtime.Task x String
+runSsa entryKey text =
+    case manifestJobs (Str.lines text) of
+        Err msg ->
+            errLine msg
+
+        Ok [] ->
+            errLine "manifest has no groups"
+
+        Ok jobs ->
+            runSsaJobs entryKey jobs
 
 
-runJobs jobs =
-    Task.andThen (compileJobs jobs) (readAll (allSources jobs))
+runSsaJobs : String -> List Job -> Runtime.Task x String
+runSsaJobs entryKey jobs =
+    Task.andThen (ssaJobs entryKey jobs) (readAll (allSources jobs))
 
 
 allSources : List Job -> List String
@@ -268,21 +218,6 @@ allSources jobs =
 
 readAll paths =
     seqMap (List.map Io.readFile paths)
-
-
-compileJobs jobs texts =
-    readCorpus
-        |> Task.andThen
-            (\corpus ->
-                case Module.compileBatch corpus (regroup jobs texts) of
-                    Ok bundles ->
-                        writeBundles (zipJobs jobs bundles) []
-
-                    Err msg ->
-                        -- corpus-level failure: every group gets the payload
-                        -- (run.js parity via Main.elm's Err branch)
-                        writeBundles (zipJobs jobs (List.map (\_ -> "err " ++ msg) jobs)) []
-            )
 
 
 readCorpus =
@@ -314,60 +249,6 @@ regroup jobs texts =
     splitAt (List.map (\j -> count (j.sources)) jobs) texts
 
 
-writeBundles : List ( Job, String ) -> List String -> Runtime.Task x String
-writeBundles pairs done =
-    case pairs of
-        [] ->
-            Task.succeed ("elmc: wrote " ++ String.fromInt (count done) ++ " bundles")
-
-        ( job, bundle ) :: rest ->
-            Task.andThen
-                (\_ -> writeBundles rest (job.output :: done))
-                (Io.writeFile job.output bundle)
-
-
-zipJobs : List Job -> List String -> List ( Job, String )
-zipJobs jobs bundles =
-    case jobs of
-        [] ->
-            []
-
-        j :: jrest ->
-            case bundles of
-                b :: brest ->
-                    ( j, b ) :: zipJobs jrest brest
-
-                [] ->
-                    []
-
-
-
--- ======================= the .ssa pipeline =======================
--- `elmc --ssa <entry> <manifest>` drives the QBE backend (Mid.QbeModule)
--- instead of the csexp lowerer: read the corpus ONCE, then compile each group
--- against it and write QBE IL (.ssa) — or "err <msg>" — to that group's output
--- path.  flatten/rep are True, matching run.js's QBE defaults (QBE_NOFLATTEN /
--- QBE_NOREP are both UNSET on the stock emit this must reproduce byte-for-byte).
-
-
-runSsa : String -> String -> Runtime.Task x String
-runSsa entryKey text =
-    case manifestJobs (Str.lines text) of
-        Err msg ->
-            errLine msg
-
-        Ok [] ->
-            errLine "manifest has no groups"
-
-        Ok jobs ->
-            runSsaJobs entryKey jobs
-
-
-runSsaJobs : String -> List Job -> Runtime.Task x String
-runSsaJobs entryKey jobs =
-    Task.andThen (ssaJobs entryKey jobs) (readAll (allSources jobs))
-
-
 ssaJobs : String -> List Job -> List String -> Runtime.Task x String
 ssaJobs entryKey jobs texts =
     readCorpus
@@ -394,6 +275,32 @@ renderSsa result =
         Err msg ->
             "err " ++ msg
 
+
+writeBundles : List ( Job, String ) -> List String -> Runtime.Task x String
+writeBundles pairs done =
+    case pairs of
+        [] ->
+            Task.succeed ("elmc: wrote " ++ String.fromInt (count done) ++ " outputs")
+
+        ( job, bundle ) :: rest ->
+            Task.andThen
+                (\_ -> writeBundles rest (job.output :: done))
+                (Io.writeFile job.output bundle)
+
+
+zipJobs : List Job -> List String -> List ( Job, String )
+zipJobs jobs bundles =
+    case jobs of
+        [] ->
+            []
+
+        j :: jrest ->
+            case bundles of
+                b :: brest ->
+                    ( j, b ) :: zipJobs jrest brest
+
+                [] ->
+                    []
 
 
 -- ======================= tiny List helpers =======================
