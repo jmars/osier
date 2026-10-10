@@ -19,8 +19,8 @@ The dump it is rendered from (no elm/elmvm/node/jq needed in that mode):
 ELM_GATE_MATRIX=/tmp/matrix.tsv tests/elm-fixtures/run-elm-gate.sh
 ```
 
-**153 registered checks.** Run from the repo root, the gate prints
-`PASS=153 FAIL=0` on the frozen artifact. `docs/research/osier-paper.md`
+**154 registered checks.** Run from the repo root, the gate prints
+`PASS=154 FAIL=0` on the frozen artifact. `docs/research/osier-paper.md`
 **Appendix A** is the paper's prose counterpart: the *designed* programs the
 paper cites, with the claim each one pins. Appendix A is a selected subset;
 this file is the complete registry. Where the two disagree, **this file and the
@@ -49,6 +49,7 @@ fails loudly rather than letting this listing go stale.
 | `out_cmp` | `cmp` | the raw file an earlier run wrote must equal its `expected/*.txt` bytes |
 | `rawrun` | `rawrun` | runs a committed `.csexp` bundle no Elm source can produce (e.g. an unknown Task ctor) |
 | `depth` | `depth` | deep NON-tail recursion past `CALL_STACK_DEPTH` must be LOUD (compiles its own bundle; `args` = control-depth past-cap-margin): control depth and `CAP-1` print `expected`; past the cap the process exits non-zero with the `call stack depth exceeded` diagnostic on stderr and no value on stdout |
+| `natdepth` | `natdepth` | the NATIVE twin of `depth`: deep NON-tail recursion past the C-stack budget must be LOUD (builds its own binary via `tools/qbe/qbe-mk.sh`; `args` = control-depth past-depth deep-depth): the control prints `expected` under the check's own 1 MiB `ulimit -s` (`QBE_NO_RLIMIT=1`); past the boundary the process exits non-zero with the `native stack depth exceeded` diagnostic on stderr and no value on stdout; deep-depth must still complete at the driver's raised 64 MiB limit |
 
 ## The registered checks
 
@@ -207,6 +208,7 @@ fails loudly rather than letting this listing go stale.
 | 151 | `liftrelaxleak` | `run` | `main` | `999` | — | — | `liftrelaxleak.elm` |
 | 152 | `liftdisjointshadow` | `run` | `main` | `3` | — | — | `liftdisjointshadow.elm` |
 | 153 | `calloverflow` | `depth` | `main` | `500500` | `1000 5000` | — | `calloverflow.elm` |
+| 154 | `natcalloverflow` | `natdepth` | `main` | `500500` | `1000 20000 100000` | — | `natcalloverflow.elm` |
 
 ---
-Generated from `tests/elm-fixtures/run-elm-gate.sh`; 153 checks.
+Generated from `tests/elm-fixtures/run-elm-gate.sh`; 154 checks.

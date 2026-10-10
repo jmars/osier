@@ -592,6 +592,198 @@ fn dieLoud(msg: []const u8) noreturn {
 }
 
 // =====================================================================
+//  Native stack-depth guard (handoff osier-natdepth)
+// =====================================================================
+//
+// The generated code puts Elm's NON-tail recursion on the C stack (the
+// bounce loop above makes TAIL calls constant-stack; a non-tail `n + deep
+// (n-1)` cannot).  Before this guard, a recursion deep enough to exhaust
+// RLIMIT_STACK died with a BARE SIGSEGV: exit 139, empty stderr — non-zero,
+// so never a silent wrong answer, but UNNAMED, unassertable, and silent
+// about the remedy.  This is the native twin of the VM's CALL_STACK_DEPTH
+// guard (the calloverflow fixture pins that one); unlike the AOT's
+// nat_depth there is no interpreter to fall back to, so the only honest
+// behaviour is a LOUD failure at the real resource boundary.
+//
+// DESIGN (option b: sigaltstack + an SA_SIGINFO SIGSEGV handler that
+// CLASSIFIES the fault; no per-call counter).  Reasons over a codegen
+// counter: (1) ZERO change to the emitted .ssa — the byte-identity oracle
+// (qbe-selfhost.sh's cmp, the corpus, qbe-check's 219) keeps working as-is;
+// (2) no 2-instruction-per-call tax on every generated call; (3) NO CAP TO
+// TUNE — it fires at the kernel's actual refusal to grow the stack, so it
+// composes with whatever budget is in force (default 8MB, this driver's
+// 64MB raise, or QBE_NO_RLIMIT=1 + an external `ulimit -s`, which is how
+// the gate owns the number for its natdepth check).
+//
+// SOUNDNESS — the handler must never NAME a different crash.  A fault is a
+// stack exhaustion iff BOTH hold:
+//     rsp      in [stack_low - SLACK, stack_low + RSP_MARGIN]
+//     si_addr  in [stack_low - SLACK, rsp + PAGE]
+// where stack_low = ([stack] VMA top) - rlimit_soft is the furthest down
+// the kernel will grow the main stack.  The exhaustion fault itself is a
+// push or a downward frame probe by code running AT that boundary, so the
+// faulting rsp is at the bottom and the fault address is at/below it.  Each
+// condition alone is weak — rsp is inside the stack region on every healthy
+// frame, and a wild pointer can point anywhere — but a NON-overflow SEGV
+// from a healthy frame has rsp megabytes above stack_low, failing the first
+// condition; a wild store cannot satisfy both unless it strikes inside the
+// 1MiB window below stack_low WHILE rsp is already at the boundary, i.e.
+// while the stack is genuinely exhausted.  That window is the stack's own
+// growth reserve — unmapped — because the default x86_64 layout keeps the
+// mmap region at least max(rlimit, 128MB) below the stack top (MEASURED on
+// this host: the nearest mapping below [stack] in /proc/self/maps is
+// terabytes away; the GC heap is mmap'd in that region).  SLACK (1MiB)
+// bounds the largest single-frame overshoot below the limit a sound
+// classification admits: QBE frames are nslots*40B + fixed (tens of KB at
+// worst); a >1MiB frame would fault outside the window and stay a bare
+// SIGSEGV, which is the honest answer for an alloca that large.
+//
+// DEACTIVATION (deliberate, never a guess): if the soft limit is
+// RLIM_INFINITY there is no computable stack_low, and if /proc/self/maps
+// cannot be read there is no [stack] top — in both cases the guard is NOT
+// installed and a crash stays today's bare SIGSEGV rather than risk naming
+// a different fault.  Single-threaded by construction (the GC and the
+// effect loop are); a future thread's stack would need its own bounds.
+
+/// How far below stack_low a single frame may probe and still be classified.
+const OVERFLOW_SLACK: usize = 1024 * 1024;
+/// How far above stack_low the faulting rsp may run (stride + one frame).
+const RSP_MARGIN: usize = 64 * 1024;
+const PAGE_BYTES: usize = 4096;
+
+var guard_stack_top: usize = 0; // [stack] VMA high end
+var guard_stack_low: usize = 0; // top - rlimit_soft: the growth floor
+var guard_limit: std.posix.rlim_t = 0; // the rlimit the floor came from
+
+/// The alternate signal stack — static storage, NOT on the guarded stack,
+/// big enough for a handler that only arithmetic + write(2).
+var guard_altstack: [64 * 1024]u8 align(16) = undefined;
+
+/// glibc/kernel ucontext_t for x86_64, read exactly as far as the faulting
+/// RSP.  uc_mcontext sits at +40 (uc_flags 8, uc_link 8, uc_stack 24) and
+/// the gregs are sigcontext field order — rsp is greg 15, offset 40+15*8.
+/// There is no std ucontext_t; this overlay asserts its own offsets at
+/// comptime so a field edit cannot silently move them.
+const Ucontext = extern struct {
+    uc_flags: u64,
+    uc_link: ?*anyopaque,
+    uc_stack: std.posix.stack_t,
+    mcontext: Mcontext,
+};
+
+const Mcontext = extern struct {
+    r8: u64,
+    r9: u64,
+    r10: u64,
+    r11: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    rdi: u64,
+    rsi: u64,
+    rbp: u64,
+    rbx: u64,
+    rdx: u64,
+    rax: u64,
+    rcx: u64,
+    rsp: u64,
+    rip: u64,
+    eflags: u64,
+};
+
+comptime {
+    if (@import("builtin").target.cpu.arch != .x86_64)
+        @compileError("qbe-rt stack guard: the ucontext overlay is x86_64-only (as is vendored QBE)");
+    if (@offsetOf(Ucontext, "mcontext") != 40 or @offsetOf(Mcontext, "rsp") != 15 * 8)
+        @compileError("qbe-rt stack guard: ucontext overlay drifted (rsp must be mcontext+15*8)");
+}
+
+/// Parse the [stack] line of /proc/self/maps for the VMA high end.  Plain
+/// openat/read/close — runs once at startup, before any generated code.
+fn readStackTop() ?usize {
+    var buf: [16384]u8 = undefined;
+    const fd = std.posix.openat(std.posix.AT.FDCWD, "/proc/self/maps", .{ .ACCMODE = .RDONLY }, 0) catch return null;
+    defer _ = std.os.linux.close(fd);
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = std.posix.read(fd, buf[total..]) catch return null;
+        if (n == 0) break;
+        total += n;
+    }
+    var rest = buf[0..total];
+    while (std.mem.indexOf(u8, rest, "[stack]")) |tag| {
+        const line_start = if (std.mem.lastIndexOfScalar(u8, rest[0..tag], '\n')) |p| p + 1 else 0;
+        const line = rest[line_start..tag];
+        // "lo-hi rw-p ...": two hex bounds split by '-', hi ends at ' '.
+        const dash = std.mem.indexOfScalar(u8, line, '-') orelse return null;
+        const sp = std.mem.indexOfScalar(u8, line, ' ') orelse return null;
+        if (sp <= dash + 1) return null;
+        const hi = std.fmt.parseInt(usize, line[dash + 1 .. sp], 16) catch return null;
+        return hi;
+    }
+    return null;
+}
+
+/// Install the guard.  Called from main right AFTER the RLIMIT_STACK raise
+/// so the computed floor matches the budget actually in force.
+fn stackGuardInit() void {
+    const lim = std.posix.getrlimit(.STACK) catch return;
+    if (lim.cur == std.posix.RLIM.INFINITY) return; // no computable floor
+    const top = readStackTop() orelse return; // no [stack] VMA found
+    guard_stack_top = top;
+    guard_stack_low = top -| @as(usize, @intCast(lim.cur));
+    guard_limit = lim.cur;
+    var ss: std.posix.stack_t = .{ .sp = &guard_altstack, .flags = 0, .size = guard_altstack.len };
+    std.posix.sigaltstack(&ss, null) catch return;
+    var act: std.posix.Sigaction = .{
+        .handler = .{ .sigaction = &segvHandler },
+        .mask = std.posix.sigemptyset(),
+        .flags = std.posix.SA.ONSTACK | std.posix.SA.SIGINFO,
+    };
+    std.posix.sigaction(.SEGV, &act, null);
+}
+
+fn segvHandler(sig: std.posix.SIG, info: *const std.posix.siginfo_t, ctx: ?*anyopaque) callconv(.c) void {
+    const fault_addr: usize = @intFromPtr(info.fields.sigfault.addr);
+    const rsp: usize = if (ctx) |c|
+        (@as(*const Ucontext, @ptrCast(@alignCast(c))).mcontext.rsp)
+    else
+        0;
+    const low = guard_stack_low;
+    const overflow =
+        rsp >= low -| OVERFLOW_SLACK and rsp <= low + RSP_MARGIN and
+        fault_addr >= low -| OVERFLOW_SLACK and fault_addr <= rsp + PAGE_BYTES;
+    if (!overflow) {
+        // Not a stack exhaustion: restore the default disposition and
+        // re-send the signal.  The pending delivery at handler-return kills
+        // the process by DEFAULT action — the SAME bare SIGSEGV it would
+        // have died with had the guard never been installed (a guard that
+        // misreports a genuinely different crash is worse than none; and a
+        // merely SENT signal must not become survivable just because a
+        // handler exists).  kill(2) is async-signal-safe.
+        var dfl: std.posix.Sigaction = .{
+            .handler = .{ .handler = null },
+            .mask = std.posix.sigemptyset(),
+            .flags = 0,
+        };
+        std.posix.sigaction(sig, &dfl, null);
+        _ = std.os.linux.kill(std.os.linux.getpid(), sig);
+        return;
+    }
+    // Async-signal-safe from here: bufPrint is pure arithmetic into a stack
+    // buffer, werr is a raw write(2), exit_group is a raw syscall.
+    var buf: [512]u8 = undefined;
+    const used = guard_stack_top -| rsp;
+    const msg = std.fmt.bufPrint(&buf, "qbe-rt: native stack depth exceeded: deep non-tail recursion exhausted the C stack ({d}.{d} MiB in use of a {d}.{d} MiB limit) — rewrite the recursion as tail-recursive, or raise the stack limit (ulimit -s; this runtime raises it to 64 MiB unless QBE_NO_RLIMIT=1).  See docs/qbe-backend.md.\n", .{
+        used >> 20,        ((used & 0xfffff) * 10) >> 20,
+        guard_limit >> 20, ((guard_limit & 0xfffff) * 10) >> 20,
+    }) catch "qbe-rt: native stack depth exceeded (C stack exhausted)\n";
+    werr(msg);
+    std.os.linux.exit_group(1);
+}
+
+// =====================================================================
 //  Driver — elmvm-shaped: <entry-name> [int-arg ...]; prints the result
 //  exactly like tools/elmvm.zig (values.printValue + "\n").
 // =====================================================================
@@ -707,6 +899,10 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
             }
         } else |_| {}
     }
+
+    // Install the native stack-depth guard AFTER the raise so its computed
+    // floor matches the budget actually in force (see the guard section).
+    stackGuardInit();
 
     const argc: usize = @intCast(c_argc);
     if (argc < 2) {

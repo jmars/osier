@@ -201,9 +201,11 @@ always escapes — meaning the `Con`/`rt_con` half is correct but cannot be exer
 ## What the next stage must settle
 
 1. **~~The bounce loop + depth guard~~** — DONE: cross-defun tails now bounce
-   (see Crux 1).  What remains is a **native-depth guard** for NON-tail deep
-   recursion (the AOT's nat_depth cap, which falls back to the interpreter),
-   still out of scope.
+   (see Crux 1), and NON-tail deep recursion fails LOUD at the real C-stack
+   boundary — see "The native stack-depth guard" at the foot of this file
+   (handoff osier-natdepth).  Unlike the AOT's nat_depth cap there is no
+   interpreter to fall back to, so the guard names the failure instead of
+   capping it.
 2. **Case/pattern matching** (the biggest coverage gap; `Mid.Ir.Case` with
    MEmpty/MVector/MTagEq/MLitEq was never reached).  Records/tuples/lists
    follow (Con/ListLit are straightforward vector/cons work on this runtime).
@@ -713,3 +715,103 @@ to; it exists because the "before" numbers have to be reproducible. Note the
 fixture ladder stops at the 400 scale: a 1500-let chain overflows the JS stack
 inside `Mid.Qbe.Flatten.rwList` — MEASURED to do so with the PRE-FIX compiler.js
 too, i.e. a pre-existing frontend recursion limit, unrelated to this fix.
+
+## The native stack-depth guard (handoff osier-natdepth)
+
+NON-tail recursion runs on the C stack — that is the documented limitation the
+bounce loop cannot remove (`n + deep (n-1)` keeps every frame live).  Until
+this stage, a recursion deep enough to exhaust `RLIMIT_STACK` died with a BARE
+SIGSEGV: exit 139, empty stderr.  Non-zero, so never a silent wrong answer,
+but unnamed, unassertable by any gate, and silent about the remedy — and the
+plan retires the interpreter whose `CALL_STACK_DEPTH` cap used to carry this
+semantic (`tests/elm-fixtures/calloverflow.elm` pins the VM side; the gate's
+`depth` check reads the constant out of `vendor/zinc-vm`).  The native path
+has no frame cap and NO interpreter to fall back to (the AOT's `nat_depth`
+cap falls back; we cannot), so the only honest behaviour is a LOUD failure at
+the real resource boundary.
+
+**Design — option (b) of the plan: classify the fault, don't count the
+calls.**  `tools/qbe/rt.zig` installs a 64 KiB static `sigaltstack` and an
+`SA_ONSTACK | SA_SIGINFO` SIGSEGV handler at startup, right AFTER the
+RLIMIT_STACK raise so the computed floor matches the budget actually in
+force.  The handler classifies a fault as a stack exhaustion iff BOTH hold:
+
+```
+rsp      in [stack_low - 1 MiB, stack_low + 64 KiB]
+si_addr  in [stack_low - 1 MiB, rsp + 4 KiB]
+```
+
+where `stack_low = ([stack] VMA top, parsed from /proc/self/maps) -
+rlimit_soft` is the furthest down the kernel will grow the main stack.  A
+real exhaustion fault is a push or a downward frame probe by code already
+running AT that boundary; each condition alone is weak (rsp is inside the
+stack region on every healthy frame; a wild pointer can point anywhere), but
+a non-overflow SEGV from a healthy frame has rsp megabytes above
+`stack_low` and fails the first condition, and the 1 MiB slack window below
+`stack_low` is the stack's own unmapped growth reserve — the mmap region
+(where the GC heap lives) sits at least `max(rlimit, 128 MiB)` below the
+stack top on the default x86_64 layout, MEASURED on this host to be terabytes
+away in `/proc/self/maps`.  The slack also bounds the largest single-frame
+overshoot a sound classification admits: QBE frames are `nslots*40 B` +
+fixed (tens of KiB at worst); a >1 MiB frame faults outside the window and
+stays a bare SIGSEGV, which is the honest answer for an alloca that large.
+
+Why not a per-call counter (the AOT's shape, option a): it changes the
+emitted `.ssa` BY DESIGN, forfeiting the byte-identity oracle
+(`qbe-selfhost.sh`'s `cmp`, the corpus 149=149, `qbe-check.sh`'s 219), costs
+two instructions on EVERY generated call, and needs a cap tuned to a guessed
+stride.  The handler costs nothing per call, changes zero emitted bytes, and
+fires at the kernel's actual refusal to grow the stack — so it composes with
+whatever budget is in force: the default 8 MiB, this driver's 64 MiB raise,
+or `QBE_NO_RLIMIT=1` + an external `ulimit -s` (which is how the gate owns
+the number).
+
+**What happens to everything else.**  A SIGSEGV that fails the
+classification is NOT named: the handler restores the default disposition and
+re-sends the signal, so the process dies with the SAME bare SIGSEGV it would
+have died with had the guard never existed — proven live by sending
+`kill -SEGV` to a waiting native binary (rc 139, empty stderr, no
+diagnostic).  Two honest deactivations: a soft limit of `RLIM_INFINITY`
+gives no computable floor, and an unreadable `/proc/self/maps` gives no
+`[stack]` top — in both cases the guard is not installed and crashes stay
+bare rather than risk naming a different fault.  The guard is
+single-threaded by construction (the GC and the effect loop are); a future
+thread's stack would need its own bounds.  The x86_64 `ucontext_t` is read
+through a local `extern struct` overlay with comptime offset assertions
+(there is no std `ucontext_t`).
+
+**MEASURED, before -> after** (bisected on `natcalloverflow.elm`,
+`deep n = n + deep (n-1)`, exactly **256 B of stack per level** — the stride
+falls out of the three budgets agreeing):
+
+| budget | last-good depth | first-fault, BEFORE | first-fault, AFTER |
+|---|---:|---|---|
+| raised 64 MiB (default) | ~261,800 | rc 139, stderr empty | rc 1, diagnostic |
+| 8 MiB (`QBE_NO_RLIMIT=1`) | ~32,400 | rc 139, stderr empty | rc 1, diagnostic |
+| 1 MiB (`ulimit -s 1024`) | ~3,780 | rc 139, stderr empty | rc 1, diagnostic |
+
+(The exact boundary wobbles a few tens of levels with the size of
+argv/environ — base usage, not stride; the guard's window is 1 MiB, four
+orders wider.)  The diagnostic, one line, all numbers live:
+
+```
+qbe-rt: native stack depth exceeded: deep non-tail recursion exhausted the C stack (64.0 MiB in use of a 64.0 MiB limit) — rewrite the recursion as tail-recursive, or raise the stack limit (ulimit -s; this runtime raises it to 64 MiB unless QBE_NO_RLIMIT=1).  See docs/qbe-backend.md.
+```
+
+stdout is EMPTY on the failure — a printed value there would be the
+wrong-answer-with-success-status class this project has been bitten by twice.
+
+**The gate arm** (`natdepth`, `tests/elm-fixtures/natcalloverflow.elm`):
+same non-tail shape and same control value as the VM fixture (`deep 1000 ==
+500500`), depth from argv, compiled on demand via `qbe-mk.sh` (no compile
+group — the corpus baseline pins the batch artifact set).  Three invocations:
+a control at depth 1000 under the check's OWN budget (`QBE_NO_RLIMIT=1` +
+`ulimit -s 1024`, boundary ~3.8k levels) must print the sum; depth 20000
+(far past that budget) must exit non-zero with `native stack depth exceeded`
+on stderr and NO value on stdout; and depth 100000 (25.6 MiB of stack) must
+still print `5000050000` at the driver's RAISED limit — the guard must not
+refuse work the raise exists to allow.  Unlike the VM arm this check reads
+NO constant from the tree: the boundary is a byte budget, so the check owns
+the budget.  `NAT_DEPTH_MSG` ("native stack depth exceeded") is distinct
+from the VM's `DEPTH_MSG` ("call stack depth exceeded") so neither arm's
+grep can match the other backend's message.

@@ -61,6 +61,12 @@ elif [ ! -f "$CDIR/compiler.js" ]; then
 elif ! command -v jq >/dev/null 2>&1; then
   echo "error: jq required to build the batch manifest" >&2
   exit 2
+elif [ ! -x "$ROOT/vendor/qbe/qbe" ]; then
+  echo "error: vendored qbe missing at $ROOT/vendor/qbe/qbe (the natdepth check builds natively)" >&2
+  exit 2
+elif ! command -v cc >/dev/null 2>&1; then
+  echo "error: cc required to link the natdepth check's native binary" >&2
+  exit 2
 fi
 
 pass=0; fail=0
@@ -200,11 +206,45 @@ depth() {
   add_check depth "$name" "$fn" "$exp" "$ctl $margin" "" "$FIX/$name.elm" "$OUT/$name.depth.csexp" depth
 }
 
+# natdepth <name> <fn> <control-depth> <past-depth> <deep-depth> <expected-control-value>
+#
+# THE NATIVE OUT-OF-STACK CHECK (handoff osier-natdepth) — the native twin of
+# `depth` above, and the arm that SURVIVES the interpreter's retirement: the
+# VM check asserts the interpreter's CALL_STACK_DEPTH cap; this one asserts
+# the QBE native path's OWN resource boundary, the C stack.  Before the guard
+# (tools/qbe/rt.zig), a non-tail recursion deep enough to exhaust
+# RLIMIT_STACK died with a BARE SIGSEGV — non-zero, so never a silent wrong
+# answer, but unnamed and unassertable.  The guard installs sigaltstack + a
+# SIGSEGV handler that recognises a stack-exhaustion fault and exits 1 with
+# the NAT_DEPTH_MSG diagnostic; this check pins that property.
+#
+# Like `depth` it registers NO compile group (the corpus baseline pins the
+# batch artifact set): it builds its own native binary on demand via
+# tools/qbe/qbe-mk.sh.  And because the native boundary is a BYTE budget,
+# not a frame count, the check OWNS the budget instead of reading a constant:
+# every budgeted arm runs with QBE_NO_RLIMIT=1 (the driver's 64 MiB raise
+# suppressed) under its own `ulimit -s 1024` — a 1 MiB stack under which the
+# boundary sits near 3.8k levels (256 B/level, MEASURED; see
+# docs/qbe-backend.md), so <control-depth> (1000) is comfortably inside and
+# <past-depth> (20000) far beyond, whatever small drift the per-level stride
+# later takes.
+natdepth() {
+  local name="$1" fn="$2" ctl="$3" past="$4" deep="$5" exp="$6"
+  add_check natdepth "$name" "$fn" "$exp" "$ctl $past $deep" "" "$FIX/$name.elm" "$OUT/$name.nat.ssa" natdepth
+}
+
 # The named diagnostic the VM must print when it runs out of call frames —
 # asserted verbatim (see vendor/zinc-vm/src/vm/interp.zig, the CALL_STACK_DEPTH
 # guard) so the check cannot be satisfied by an unrelated abort.
 DEPTH_MSG="call stack depth exceeded"
 DEPTH_HEAP_MB=1024
+
+# The named diagnostic the QBE NATIVE runtime prints when the C stack is
+# exhausted (tools/qbe/rt.zig's stack-depth guard: sigaltstack + a SIGSEGV
+# handler that recognises a stack-exhaustion fault).  Deliberately distinct
+# from DEPTH_MSG ("native" vs "call") so neither arm's grep can match the
+# other backend's message.
+NAT_DEPTH_MSG="native stack depth exceeded"
 
 run fib        fib        "$(read_expected fib)"        10
 run rtl1       main       "$(read_expected rtl1)"
@@ -579,6 +619,19 @@ run liftdisjointshadow main "$(read_expected liftdisjointshadow)"
 # cannot see.  See the depth() helper for the three invocations it makes.
 depth calloverflow main 1000 5000 500500
 
+# --- osier-natdepth: running out of NATIVE stack must be LOUD too.  The VM
+# arm above dies with the interpreter (its cap constant lives in
+# vendor/zinc-vm); this arm pins the same PROPERTY on the QBE native path —
+# a deep non-tail recursion past the C-stack budget must fail with a NAMED
+# diagnostic and no stdout value — using the native guard in tools/qbe/rt.zig
+# (see the natdepth helper for the three invocations it makes: a control at
+# depth 1000 under the check's own 1 MiB budget, a past-boundary run at 20000
+# that must exit non-zero with NAT_DEPTH_MSG, and a deep LEGAL run at 100000
+# — 25.6 MiB of stack — that must still complete at the driver's RAISED
+# 64 MiB limit, proving the guard did not make the runtime refuse work the
+# raise exists to allow).
+natdepth natcalloverflow main 1000 20000 100000 500500
+
 # ==================== ELM_GATE_MATRIX: dump the registry ====================
 # ELM_GATE_MATRIX=1 prints every REGISTERED check as TSV (one row per check, in
 # declaration order) and exits WITHOUT compiling or running anything; with any
@@ -788,6 +841,69 @@ dispatch() {
         fail=$((fail+1)); return
       fi
       echo "PASS $name ($qname: $ctl -> $exp, $near -> $near_exp, $past -> exit $past_rc + \"$DEPTH_MSG\")"
+      pass=$((pass+1))
+      ;;
+    natdepth)
+      # See the natdepth helper: the native twin of `depth`.  Builds its own
+      # binary via qbe-mk (no compile group), owns the budget with
+      # QBE_NO_RLIMIT=1 + its own `ulimit -s 1024`, and asserts on the
+      # PROCESS like `depth` does — the defect class is a bare fault with no
+      # diagnostic, which `run` cannot see.
+      mod=$(module_name "$fixfile")
+      qname="$mod.$fn"
+      # qbe-mk joins "$ROOT/<fixture>", so hand it the path RELATIVE to the
+      # repo root ($fixfile is absolute here); a doubled absolute path is
+      # what its node step ENOENTs on.
+      rel_fix="${fixfile#"$ROOT"/}"
+      bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$rel_fix" "$qname" "$OUT/$name.nat" 2>/dev/null)" || {
+        echo "FAIL $name: native build failed (tools/qbe/qbe-mk.sh $rel_fix $qname)"
+        fail=$((fail+1)); return
+      }
+      read -r ctl past deep <<< "$args"
+      deep_exp=$(( deep * (deep + 1) / 2 ))
+      # (1) control: a legal depth under the 1 MiB budget must print the sum.
+      ( ulimit -c 0; ulimit -s 1024; QBE_NO_RLIMIT=1 "$bin" "$qname" "$ctl" \
+          >"$OUT/$name.ctl.out" 2>"$OUT/$name.ctl.err" ); ctl_rc=$?
+      ctl_out="$(cat "$OUT/$name.ctl.out")"
+      if [ "$ctl_rc" -ne 0 ] || [ "$ctl_out" != "$exp" ]; then
+        echo "FAIL $name $qname $ctl (native control @1MiB): exp rc=0 out[$exp], got rc=$ctl_rc out[$ctl_out]"
+        fail=$((fail+1)); return
+      fi
+      # (2) past the boundary: non-zero exit, the named diagnostic on stderr,
+      # and NO value on stdout.  Same shell-stderr discipline as `depth`: the
+      # guard exits cleanly, but a REGRESSED guard dies by signal and bash
+      # would print a PID-bearing line on the SHELL's own stderr.
+      ulimit -c 0 2>/dev/null || true
+      exec 3>&2
+      exec 2>"$OUT/$name.past.shellstderr"
+      ( ulimit -s 1024; QBE_NO_RLIMIT=1 "$bin" "$qname" "$past" \
+          >"$OUT/$name.past.stdout" 2>"$OUT/$name.past.stderr" )
+      past_rc=$?
+      exec 2>&3 3>&-
+      if [ "$past_rc" -eq 0 ]; then
+        echo "FAIL $name $qname $past (past the 1MiB stack budget): exit 0 — stdout=$(head -c 80 "$OUT/$name.past.stdout")"
+        fail=$((fail+1)); return
+      fi
+      if ! grep -q "$NAT_DEPTH_MSG" "$OUT/$name.past.stderr"; then
+        echo "FAIL $name $qname $past (past the 1MiB stack budget): exit $past_rc but stderr lacks [$NAT_DEPTH_MSG]: $(head -c 200 "$OUT/$name.past.stderr" | tr '\n' ' ')"
+        fail=$((fail+1)); return
+      fi
+      if [ -s "$OUT/$name.past.stdout" ]; then
+        echo "FAIL $name $qname $past (past the 1MiB stack budget): exit $past_rc with a value on stdout: $(head -c 80 "$OUT/$name.past.stdout")"
+        fail=$((fail+1)); return
+      fi
+      # (3) deep LEGAL work at the driver's RAISED limit (no QBE_NO_RLIMIT,
+      # no ulimit): $deep levels of stack must still complete with the exact
+      # sum — the guard must not refuse work the raise exists to allow.  This
+      # arm needs the raise to actually reach 64 MiB (a hard limit below
+      # $deep * 256 B fails here for a different reason than the guard).
+      "$bin" "$qname" "$deep" >"$OUT/$name.deep.out" 2>"$OUT/$name.deep.err"; deep_rc=$?
+      deep_out="$(cat "$OUT/$name.deep.out")"
+      if [ "$deep_rc" -ne 0 ] || [ "$deep_out" != "$deep_exp" ]; then
+        echo "FAIL $name $qname $deep (raised-limit deep control): exp rc=0 out[$deep_exp], got rc=$deep_rc out[$deep_out] err[$(head -c 80 "$OUT/$name.deep.err")]"
+        fail=$((fail+1)); return
+      fi
+      echo "PASS $name ($qname native: $ctl -> $exp @1MiB, $past -> exit $past_rc + \"$NAT_DEPTH_MSG\", $deep -> $deep_exp @raised)"
       pass=$((pass+1))
       ;;
   esac
