@@ -472,3 +472,244 @@ always escapes — meaning the `Con`/`rt_con` half is correct but cannot be exer
    it is reported as a NULL on the suite rather than dressed up as a win.  The
    ZINC path is untouched: `tools/osier-numbers.sh` exit 0, corpus
    BYTE-IDENTICAL (149 = 149), gate PASS=152 FAIL=0, TestMain 114 assertions.
+
+## Self-host: the QBE backend compiles the WHOLE compiler
+
+`tools/qbe/qbe-selfhost.sh` is the SCRIPTED form of the QBE self-host
+milestone.  The milestone itself was proved once by hand; nothing committed
+reproduced it and no gate exercised it, so it could rot silently — and it is
+load-bearing: the 58-source self-host manifest contains NO `Mid/*` module, so
+the compiler that `NativeMain` drives can emit CSEXP ONLY, and the csexp
+output path cannot be retired until the QBE backend is proven able to compile
+the compiler itself.
+
+```
+tools/qbe/qbe-selfhost.sh
+  node run.js --batch (QBE=1 QBE_ENTRY=NativeMain.main)  -> selfhost.ssa
+  vendor/qbe/qbe selfhost.ssa                            -> selfhost.s
+  cc selfhost.s tools/qbe/rt.o                           -> zig-out/bin/qelmc
+  AOTRUN_ARGV=1 QBE_HEAP_MB=16384 zig-out/bin/qelmc NativeMain.main <manifest>
+                                                         -> out.csexp
+  cmp out.csexp tools/bootstrap/selfhost.csexp           -> BYTE IDENTITY
+```
+
+THE INVOCATION, settled from the source rather than guessed.  The emit takes
+the BATCH-JSON manifest with `.groups[0].output` forced to a SCRATCH path: the
+manifest's own output is `zig-out/selfhost.csexp`, so writing QBE IL there
+clobbers an artifact (the by-hand milestone re-paid exactly this).  The
+compile must run from the REPO ROOT — `run.js` resolves manifest source paths
+and `NativeMain` resolves the fixed corpus against the process CWD, and the
+wrong directory yields a bogus `err parse failed` that looks like a compiler
+bug.  The RUN takes the LINE manifest (`<source>` lines, then `-> <out>`) that
+`NativeMain.manifestJobs` parses; `rt.zig:716` reads the entry name from
+`c_argv[1]` and the app's arguments from `c_argv[2..]`, and only under
+`AOTRUN_ARGV`.  `AOTRUN_QUIET` is a NO-OP on this runner (`rt.zig` reads only
+`AOTRUN_ARGV` and `QBE_HEAP_MB`), so the driver's final model line still lands
+on stdout: the oracle is the OUTPUT FILE and the exit code read directly,
+never stdout and never a pipeline's `$?`.
+
+MEASURED (2026-10-09, HEAD 1df8530, x86_64, default env; a peer agent ran the
+same whole-compiler emit concurrently on 1 core of 32):
+
+  stage                     wall      artifact
+  emit (#1)               1636.1 s   10,613,899-byte .ssa (whole compiler, 1 group)
+  emit (#2)               1631.3 s   IDENTICAL to #1 — the .ssa IS deterministic
+  qbe                       17.3 s   32,977,198-byte .s
+  cc                         3.2 s   12,789,832-byte native compiler
+  run (QBE_HEAP_MB=16384)  281.5 s   out.csexp == the committed seed
+
+  both files sha256 `ac8acd77aab6353507736c158c9a184f62b46d1080050069d0c3959f0ce1cb4c`,
+  1,466,335 bytes; `cmp` exit 0; whole script 59m32s, exit 0.
+  For scale, the SAME 58 sources compiled by the OTHER engine: the csexp seed
+  run under the VM takes 807 s per `tools/bootstrap/PROVENANCE` and 11m29.8 s
+  (690 s) as last re-measured, against this native run's 281.5 s.
+
+TWO THINGS TO KNOW BEFORE THIS GOES ON A GATE.  (i) STAGE 1 DOMINATES: the
+stock emit is ~27 min — ~6x the native compile of the same corpus and 85% of
+the script's wall clock.  The day-to-day cost of the proof is the tail
+(qbe + cc + run ≈ 5 min).  `elm-compiler/compiler.js` is a DEV-mode elm build
+(the driver prints "Compiled in DEV mode"; `elm make` without `--optimize`),
+and an optimized build was NOT measured here, so that headroom is
+unquantified.  (ii) THE HEAP IS NOT SMALL, and the recorded values conflicted
+(16384 for the full native compile; 3072 said to panic).  MEASURED on this
+workload: `QBE_HEAP_MB=3072` panics after 1m57s ("gcalloc - Unable to allocate
+1 pages in a 6291456 page heap") and `QBE_HEAP_MB=8192` panics after 4m12s
+("... in a 16777216 page heap") — both exit 134 (SIGABRT) with NO output file
+written, i.e. loud, never a wrong answer, and both matching the recorded
+`grow_heap` accounting (`reservation = 2x heap`).  16384 works.  The exact
+lower bound is bracketed only to (8192, 16384], so the script's default is
+16384, overridable with `QBE_HEAP_MB`.
+
+The determinism oracle (emit twice, `cmp`) is not a formality: a .ssa that did
+not reproduce byte-for-byte would break the "commit the .ssa as the seed"
+option, whose fixed point IS a byte comparison — so the script reports
+DIFFERENT as a FINDING, in the manner of a failed byte identity, rather than
+retrying.
+
+Note on the counts above: `qbe-check.sh` is 219 PASS / 0 FAIL at this commit
+(the Commands section near the top of this document still says 153 — that is a
+measurement from before the float / norep fixtures landed, left as written
+rather than silently reworded), and `tools/osier-numbers.sh` exits 0 with
+`corpus: BYTE-IDENTICAL (149 artifacts = 149 manifest entries)`.
+
+## The emit was quadratic: one argument flip, 293x (MEASURED 2026-10-09/10)
+
+`elm-compiler/src/Mid/Qbe/Peephole.elm:248` — one line, inside `usedInBlock`:
+
+```elm
+Set.union condTmps (List.foldl (\i a -> Set.union a (readsTmps i)) acc b.body)
+                                                        ^^^^^^^^^^^^^^^^^^^^^^^^  THE BUG
+```
+
+`acc` is the ACCUMULATED used-temp set threaded across blocks by `dropDeadDefs`
+(`Peephole.elm:161-180`) and grown to a function's TOTAL DISTINCT TEMPS.
+elm/core's `Set.union t1 t2` **iterates `t1`** — MEASURED in the generated
+driver, `elm-compiler/compiler.js:6861`:
+
+```js
+var $elm$core$Dict$union = F2(function (t1, t2) { return A3($elm$core$Dict$foldl, $elm$core$Dict$insert, t2, t1); });
+```
+
+so `Set.union acc (readsTmps i)` iterated the whole accumulated set once per
+instruction, to fold in a 1-2 element per-instruction set: O(n_instrs x
+k_temps) per function, quadratic in the function's own size — and
+`dropDeadDefs` re-runs `usedInBlock` as a FIXPOINT (`:160-180`), multiplying it
+again. THE FIX is the argument flip, `Set.union (readsTmps i) a`: provably
+output-preserving, because union is content-commutative and `used` is only ever
+read through `Set.member` (the set's SHAPE changes, its content cannot).
+
+MEASURED, whole-compiler emit, same manifest, same host, the flip reverted by
+rebuilding `compiler.js` (`elm-compiler/build.sh`; `elm` must be on PATH) and
+back:
+
+```
+emit (pre-fix)   1674.5 s  10,613,899 B  sha c75ce616b9192563052822e2876c408b65922bfff89f7cd19bbb35e34beba3e4
+emit (post-fix)     5.7 s  same sha, same size   -> cmp exit 0, BYTE IDENTICAL   293x
+emit (in script)    9.2 s / 10.7 s (the two emits, identical to each other)
+```
+
+(The 1674.5 s re-measures the 1636.1 s / 1631.3 s recorded above on the same
+input and the same byte size; the spread is a shared 32-core host. The 293x is
+the pre/post ratio of the SAME input — it is not the frontend getting faster,
+it is 27 minutes of quadratic disappearing.)
+
+The fix is visible in the field as a TWO-LINE, same-size delta of the built
+`compiler.js` (1,371,530 B before and after, `diff` = exactly `a, readsTmps(i)`
+-> `readsTmps(i), a` at `compiler.js:41448-41449`).
+
+FULL SCRIPT, MEASURED (`tools/qbe/qbe-selfhost.sh`):
+
+```
+                        pre-fix      post-fix
+emit (x2, identical)    59m32s      9.2 + 10.7 s
+qbe                     17.3 s       16.8 s
+cc                       3.2 s        2.5 s
+run (HEAP_MB=16384)    281.5 s      291.2 s
+whole script           59m32s        5m30.4 s   exit 0
+cmp out.csexp seed     exit 0        exit 0 (both sha ac8acd77aab6353507736c158c9a184f62b46d1080050069d0c3959f0ce1cb4c, 1,466,335 B)
+```
+
+BYTE IDENTITY held at three levels: the whole-compiler `.ssa` before vs after
+(`cmp` exit 0), the `.ssa` emitted twice in one run (the determinism oracle),
+and the final `out.csexp` vs the committed seed. `tools/qbe/qbe-check.sh` is
+still 219 PASS / 0 FAIL (exit 0) and `tools/osier-numbers.sh` still exits 0 with
+`corpus: BYTE-IDENTICAL (149 artifacts = 149 manifest entries)`,
+`gate: PASS=153 FAIL=0`, `TestMain: All 114 assertions passed.` — the ZINC path
+is untouched, as a Peephole change must leave it.
+
+### The emit now has a BUDGET (oracle 0)
+
+`tools/qbe/qbe-selfhost.sh` fails LOUDLY (exit 1) if one emit exceeds
+`QBE_SELFHOST_EMIT_BUDGET` seconds, default **60** — ~10x the measured 5.7 s
+baseline, ~4x the worst (13.9 s) seen on this loaded shared host, and ~28x
+BELOW the 1674.5 s the quadratic cost, so the accident above is caught in
+seconds instead of costing half an hour. The message prints the 5.7 s baseline
+AND the 1674.5 s pre-fix figure, so a reader can tell a regression from a
+budget set too low. PROVEN TO FIRE, not merely written: with
+`QBE_SELFHOST_EMIT_BUDGET=1` the script exits 1 at
+
+```
+qbe-selfhost: EMIT BUDGET EXCEEDED — the first emit took 13.9 s, budget 1 s
+```
+
+### The `--optimize` probe: REFUSES, and would not have helped
+
+`compiler.js` is built by `elm make` in DEV mode (the driver prints the DEV-mode
+banner). MEASURED: `elm make src/Main.elm --output=<scratch> --optimize` exits
+**1** in 0.3 s and writes NO output file —
+
+```
+There are uses of the `Debug` module in the following modules:  Mid.Qbe.Flatten
+```
+
+— root: `elm-compiler/src/Mid/Qbe/Flatten.elm:172` (`{ defun | value = Debug.todo
+msg }`; the only real `Debug` use in `src/`, `ParserFast.elm:2083` is inside a
+comment). When that ONE unreachable site (`Err` from `rw`; the DEV build
+completed, so the path is never taken on this corpus — MEASURED) is replaced by
+`Var 0` in a SCRATCH COPY, `--optimize` BUILDS (exit 0, 1,301,862 B vs
+1,371,530 B) and its whole-compiler emit is **byte-identical** — but **9.1 s,
+i.e. no faster** than the DEV build's 5.7-9.2 s. So `--optimize` is NOT a free
+multiplier here, and it is definitely not a substitute for the flip: an
+optimized build of the UNFLIPPED source was left running 12m33s and killed
+still burning CPU, quadratic intact. Recommendation: do not switch the emit to
+`--optimize` on this evidence.
+
+### The post-flip profile: the rest of the optional sweep is NOT worth doing
+
+`node --cpu-prof` over the whole-compiler emit, post-fix (7,800 ms sampled):
+
+```
+elm/core Dict/Set path   none measurable — every such frame reads 0.00 ms self
+                                  (PRE-fix profile put this path at 86.9%)
+_Utils_update           22.22%   (record copies; 13.9% attributed under compileAll,
+                                  4.8% under Lower.freshTmp, 2.3% under freshSlot)
+_Utils_eqHelp           11.50%   (6.4% under Elm.Parser.parseToFile, 3.3% under Print.escapeChar)
+A2 / A3 (curried apply)  7.07% / 4.23% (self)
+_Utils_cmp               3.96%   (2.1% under Peephole.dropDeadDefs)
+GC                       7.79%
+Peephole (all)           1.38%     Lower (all) 0.46%   Print (all) 1.27%   Flatten 0.04%
+```
+
+With the quadratic gone the emit is 19.9 s of a 5m30s script — **6%** — and the
+291 s native run is **88%**. One caveat on reading any of this: elm/core's small
+helpers (`List.append`, `_List_appendHelp`, `List.member`, `Dict.insert`,
+`Set.union`, ...) all read 0.00 ms self time in the post-fix profile because V8
+INLINES them, so an absent frame is not evidence of an absent cost — only of an
+inlined one. The measurements below therefore lean on (a) the inlining-proof
+wall clock and (b) the NAMED, non-inlinable callers, whose own self time absorbs
+the inlined work. Verdicts (the ceiling is the whole bucket, and the bucket is a
+few percent of a stage that is now 6% of the script):
+
+- **`S` hot/cold split (`Lower.elm:168-190`)** — the `_Utils_update` bucket is
+  22.2% and `S`'s per-instruction copy is a large part of it, so the ceiling is
+  ~1-1.5 s of a 330 s script. NOT WORTH a refactor of a large file.
+- **`freshTmp`/`freshLbl`/`slotTmp` string building (`Lower.elm:210-227`)** —
+  `_String_fromNumber` 0.36%, `Mid.Qbe.Il.Tmp` 0.28%. NOT WORTH it.
+- **`acc ++ [x]` sites** — bounded by their CALLERS' self time, which absorbs
+  the inlined append: `Flatten` (all) 0.04%, `Mid.QbeModule` 0.00%, `Types`
+  0.02% of samples. NOT WORTH it.
+- **`dropDeadDefs` fixpoint -> one reverse-pass liveness** — `Peephole` is 1.38%
+  in total, of which the fixpoint's remaining `_Utils_cmp` is 2.1%. NOT WORTH it
+  (and a rewrite that must reproduce the same result set is the riskier half of
+  a 1% win).
+- **`reach` (`Lower.elm:334-349`) Set-visited** — its `foldl` defines the output
+  order, and the profile does not support it: `reach` itself (a named,
+  non-inlinable recursive function) registers NO measurable self time, and the
+  `_Utils_eqHelp` bucket that a `List.member` over a growing `List String` would
+  produce is NOT that site — it is attributed to the frontend PARSER and to the
+  printer (above). An O(V^2) `List.member` there is still real in principle; it
+  is not measurable here. NOT WORTH it on this evidence.
+
+If the emit is ever the bottleneck again (it was 85% of this script; it is 6%
+now), the profile to re-run is the one above — the first question is whether
+`elm/core`'s Dict/Set path is back, and the gate that answers it in seconds is
+oracle 0.
+
+INSTRUMENT: `tools/qbe/perf-emit.sh <fixture.elm> <Entry.key> <out.ssa>` is the
+emit-only slice of `qbe-mk.sh` (timed, sha256, size) used for the fixture
+before/after ladder `d400` 8.37 s -> 7.21 s and `b400` 7.55 s -> 7.72 s, both
+`.ssa` byte-identical. It is an addition beyond the files this fix was scoped
+to; it exists because the "before" numbers have to be reproducible. Note the
+fixture ladder stops at the 400 scale: a 1500-let chain overflows the JS stack
+inside `Mid.Qbe.Flatten.rwList` — MEASURED to do so with the PRE-FIX compiler.js
+too, i.e. a pre-existing frontend recursion limit, unrelated to this fix.

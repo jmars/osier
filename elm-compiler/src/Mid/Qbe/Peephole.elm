@@ -245,7 +245,7 @@ usedInBlock b acc =
                 _ ->
                     Set.empty
     in
-    Set.union condTmps (List.foldl (\i a -> Set.union a (readsTmps i)) acc b.body)
+    Set.union condTmps (List.foldl (\i a -> Set.union (readsTmps i) a) acc b.body)
 
 
 readsTmps : Il.Inst -> Set String
