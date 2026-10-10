@@ -16,12 +16,12 @@ impl-result,result,paper-plan}`.
 
 | | |
 |---|---|
-| commit | `0207dd2` "type: branch-local row refinement for extensible records × GADTs (Withe / λρG)", 51 files, +6416/−287 — subject quoted verbatim from fx-ui, where the language was still named Withe |
-| gate | `tests/elm-fixtures/run-elm-gate.sh` → **PASS=151 FAIL=0** (re-run on the committed state) |
-| corpus | 149 artifacts; **byte-identical** against the committed manifest `tools/osier-corpus-baseline.sha256`, checkable via `tools/osier-numbers.sh` |
-| tests | TestMain **114/114** |
-| Lean | `lean/` is a **Lake project** (build with `lake build` from `lean/`); **43 unique theorems, zero `sorry`** |
-| tree | dirty only with: `tools/selfhost-audit.txt` (timestamp churn), `elmc.err` (stray), `.elm-cache/0.19.1/` (foreign-version cache) |
+| commit | `8af7fb0` "P8 part 2: the remaining ZINC residue, and two record corrections" — the tree at the time of writing. The language change itself is `0207dd2` "type: branch-local row refinement for extensible records × GADTs (Withe / λρG)", 51 files, +6416/−287 — subject quoted verbatim from fx-ui, where the language was still named Withe |
+| gate | `tests/elm-fixtures/run-elm-gate.sh` → **PASS=154 FAIL=0** (re-run on the committed state). Since P8 every executable row runs a natively compiled binary (elm → `.ssa` → vendored qbe → cc + `rt.o`); there is no interpreter |
+| corpus | 149 gate groups; the compiler's QBE emit is **byte-identical** against the committed manifest `tools/osier-corpus-baseline.ssa.sha256` (check with `tools/osier-corpus-ssa.sh`; `tools/osier-numbers.sh` reports it) |
+| tests | TestMain **95 assertions passed** (the 19 that went with P8 were all ZINC unit tests) |
+| Lean | `lean/` is a **Lake project** (build with `lake build` from `lean/`); **90 theorem declarations, 3 axiom parameters, zero `sorry`** (per-file counts in `ARTIFACT.md` §4) |
+| tree | dirty only with `elm-compiler/.elm-cache/0.19.2/packages/registry.dat` — the elm 0.19.2 cache rewrite `ARTIFACT.md` §2 documents |
 
 **Venue call (plane §1): ICFP 2027 research track** — *not* POPL, because T1/T2 are argued, not
 proved, and the Lean development mechanizes the **row algebra, not the typing judgment**.

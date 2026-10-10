@@ -14,7 +14,11 @@
 >   native run against committed goldens (`tools/qbe/golden/`); `PASS=221`, not
 >   the 153 quoted in stage 1;
 > - the interpreter, all mid-tier passes, `vendor/zinc-vm` and the csexp
->   emitter are gone, so `MIDTIER=*` and `.csexp` invocations below cannot run.
+>   emitter are gone, so `MIDTIER=*` and `.csexp` invocations below cannot run;
+> - the fixture gate registers **154** checks, not the 152/153 the stages
+>   quote (every executable row now runs a natively built binary), and
+>   `TestMain` passes **95** assertions, not 114 — the 19 that went were all
+>   ZINC unit tests.
 
 STAGE 1 VERTICAL SLICE, committed as the proof that the pipeline works and
 both design cruxes are solvable.  NOT full coverage — the point was the

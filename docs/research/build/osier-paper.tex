@@ -60,7 +60,7 @@ position on Rémy's extension dial, not a discovery. A measured
 principality boundary carries an inversion: the witness encoding
 \emph{infers} where the native refinement is \emph{checkable, not
 inferable}. An Elm-family checker implements it: the pre-existing corpus
-compiles byte-identically against a committed manifest, 152 regression
+compiles byte-identically against a committed manifest, 154 regression
 checks pass, and an external state machine translated from an OCaml
 thread now has its impossible match arms refuted at compile time. An
 adversarial hunt across three passes found five unsound accepts --- two
@@ -476,7 +476,7 @@ proved) --- and the text marks each. In outline:
   and an external program.} The discipline runs inside an Elm-family
   checker: the pre-existing corpus compiles \emph{byte-identically}
   after the change --- 149 artifacts with zero moved --- and the
-  committed sha256 manifest holds 149 entries; the gate passes 152/\allowbreak{}152,
+  committed sha256 manifest holds 149 entries; the gate passes 154/\allowbreak{}154,
   and the compiler's own effect interpreter checks 16 of its 20 branches
   honestly (reproducible bisection script; the four holdouts named, one
   of them deliberate) --- \emph{(Section 6)}. The external program --- a
@@ -1016,7 +1016,7 @@ discharged-selection and update cases need no unifier axiom). The
 row-algebra theorems (H1, the domain rule, the update theorem, both
 counterexamples) never mention the axioms. The correspondence between
 the abstract relation and the implementation's unifier is
-\emph{measured}, not proved: the gate's 152 checks, the approximation
+\emph{measured}, not proved: the gate's 154 checks, the approximation
 inventory of Section 6.5, and the three-way agreement of Section 4.7
 stand on the same boundary. Mechanizing the concrete row unifier against
 these axioms is future work; it would discharge the assumption, not
@@ -1227,12 +1227,12 @@ class of defect --- a branch equation that should not survive its branch
 either escaping it or dying without its occurs check. So: the discipline
 is \textbf{necessary} (this theorem-shaped statement, with its mechanism
 measured) and \textbf{sufficient for every program in the corpus and the
-designed fixtures} (122 gate checks on the typing surface --- the gate
-total is 152, the other 29 being frontend lambda-lift fixtures and one a
-hand-crafted-bundle run, neither of which exercises the escape rule; the
-three-pass hunt closed all five unsound accepts, and found none after
-the final class-level repair) --- sufficiency over \emph{all} programs
-is \textbf{not} proved, and is not claimed.
+designed fixtures} (125 gate checks on the typing surface --- the gate
+total is 154, the other 29 being frontend lambda-lift fixtures, which do
+not exercise the escape rule; the three-pass hunt closed all five
+unsound accepts, and found none after the final class-level repair) ---
+sufficiency over \emph{all} programs is \textbf{not} proved, and is not
+claimed.
 
 \textbf{Three-way agreement.} The escape boundary is corroborated in
 three independent places: the Lean theorem
@@ -1378,22 +1378,23 @@ Hindley--Milner inference over Leijen scoped-label rows (the
 pre-existing \texttt{elm-\allowbreak{}compiler/\allowbreak{}src/\allowbreak{}Type/\allowbreak{}*} tree: unification with a
 row-rewrite, let generalization, an eight-library corpus and a self-host
 track). The change is contained to the pattern path and the unifier
-state; lowering, codegen, and the VM are untouched (types are erased).
-Everything below is \emph{measured}, and every number is reproducible
-from the artifact by one command (\texttt{tools/\allowbreak{}osier-\allowbreak{}numbers.\allowbreak{}sh}, which
-rebuilds the compiler, runs the gate, checks the corpus byte-identity,
-runs the unit suite, builds the Lean project, and re-derives the
-interpreter recount; its output is the source of every number printed
-here --- run on the current tree of the artifact repository. The
-artifact tag \texttt{osier-\allowbreak{}paper-\allowbreak{}artifact-\allowbreak{}1} (annotated; it dereferences
-to the commit it was made on) predates the final ten commits, which
-touch the documentation, the gate and reproducibility scripts, and the
-generated fixture registry this paper cites --- but not the compiler,
-the Lean project, or the fixture programs, which are identical between
-the tag and the current tree, so no number printed here depends on the
-lag. The implementation was split out of the host project that
-previously contained it: the import brought the tree across from the
-host's then-HEAD, eight commits ahead of the freeze tag marking the
+state; lowering and codegen are untouched (types are erased) --- nor was
+the interpreter back end, while it existed. Everything below is
+\emph{measured}, and every number is reproducible from the artifact by
+one command (\texttt{tools/\allowbreak{}osier-\allowbreak{}numbers.\allowbreak{}sh}, which rebuilds the
+compiler, runs the gate, checks the corpus byte-identity, runs the unit
+suite, builds the Lean project, and re-derives the interpreter recount;
+its output is the source of every number printed here --- run on the
+current tree of the artifact repository. The artifact tag
+\texttt{osier-\allowbreak{}paper-\allowbreak{}artifact-\allowbreak{}1} (annotated; it dereferences to the
+commit it was made on) predates the final commits, which touch the
+documentation, the gate and reproducibility scripts, and the generated
+fixture registry this paper cites, and the codegen backend, whose ZINC
+interpreter was retired; the counts printed here are the current tree's,
+not the tag's, and the Appendix A correction records both. The
+implementation was split out of the host project that previously
+contained it: the import brought the tree across from the host's
+then-HEAD, eight commits ahead of the freeze tag marking the
 pre-adversarial-pass baseline, with two further host-side commits
 following; the language was later removed from the host and the UI
 parked. The arrow-spelling GADT parser fix, the equation-lifecycle
@@ -1423,11 +1424,11 @@ design pays for it deliberately: the historical inference path remains
 primary; the new machinery (branch-local capture, discharge, the
 declaration-directed retry) engages only where the historical path fails
 --- so every pre-existing diagnostic is unchanged by construction. The
-regression gate passes 152/\allowbreak{}152 (the designed-fixture matrix with
+regression gate passes 154/\allowbreak{}154 (the designed-fixture matrix with
 expected outcomes is Table 1 in Appendix A, the complete generated
 registry is \texttt{tests/\allowbreak{}elm-\allowbreak{}fixtures/\allowbreak{}MATRIX.\allowbreak{}md}, and the gate is
 \texttt{tests/\allowbreak{}elm-\allowbreak{}fixtures/\allowbreak{}run-\allowbreak{}elm-\allowbreak{}gate.\allowbreak{}sh}), and the unit suite passes
-114/\allowbreak{}114.
+95/\allowbreak{}95.
 
 \subsection{6.1 What the build surfaced:
 kinds}\label{what-the-build-surfaced-kinds}
@@ -1891,9 +1892,9 @@ in the parent repository from which this one was split carry the coding
 agents' own sandbox identity. The record does not support a per-line or
 per-component percentage. Parts of the artifact are \emph{ports of
 third-party code}, not original code by anyone --- the vendored
-elm-syntax parser (from the Elm compiler), the zinc-vm (a Zig port of
-the Shen ZINC VM), and the elm/\allowbreak{}core core libraries; there, the
-assistance was in the porting and adaptation.
+elm-syntax parser (from the Elm compiler), \texttt{vendor/\allowbreak{}osier-\allowbreak{}rt}
+(descended from a Zig port of the Shen ZINC VM), and the elm/\allowbreak{}core
+libraries; there, the assistance was in the porting and adaptation.
 
 \textbf{The human role.} The author directed the work, made the design
 decisions (the discipline itself, the naming, the scope, and what not to
@@ -2236,15 +2237,15 @@ spine)}\label{appendix-a-the-fixture-matrix-the-evidence-spine}
 
 Every designed program this paper cites, gate-registered and re-measured
 on the current tree (\texttt{tests/\allowbreak{}elm-\allowbreak{}fixtures/\allowbreak{}run-\allowbreak{}elm-\allowbreak{}gate.\allowbreak{}sh},
-PASS=152 FAIL=0; the gate also holds the pre-existing corpus fixtures).
+PASS=154 FAIL=0; the gate also holds the pre-existing corpus fixtures).
 The oracle is the compiler's output artifact, never the process exit
-code; the \texttt{run} rows execute the fixture through the VM and diff
-its printed value against a pinned expected output (Section 6.6), while
-\texttt{clean}/\allowbreak{}\texttt{err} rows assert the compile outcome only.
+code; the \texttt{run} rows execute the fixture natively and diff its
+printed value against the same pinned expected output (Section 6.6),
+while \texttt{clean}/\allowbreak{}\texttt{err} rows assert the compile outcome only.
 
 \textbf{Table 1.} The fixture matrix (the evidence spine). Source: the
 gate \texttt{tests/\allowbreak{}elm-\allowbreak{}fixtures/\allowbreak{}run-\allowbreak{}elm-\allowbreak{}gate.\allowbreak{}sh}, whose complete
-registry is generated as \texttt{tests/\allowbreak{}elm-\allowbreak{}fixtures/\allowbreak{}MATRIX.\allowbreak{}md} (152
+registry is generated as \texttt{tests/\allowbreak{}elm-\allowbreak{}fixtures/\allowbreak{}MATRIX.\allowbreak{}md} (154
 rows, by \texttt{tools/\allowbreak{}gen-\allowbreak{}fixture-\allowbreak{}matrix.\allowbreak{}sh}; staleness check
 \texttt{tools/\allowbreak{}gen-\allowbreak{}fixture-\allowbreak{}matrix.\allowbreak{}sh\ -\allowbreak{}\/\allowbreak{}-\allowbreak{}check}) --- this table is the
 paper-cited subset, with the claim each row pins; where the two
@@ -2672,6 +2673,151 @@ located, because locating a work is not reading it.
   https:\allowbreak{}/\allowbreak{}/\allowbreak{}www.\allowbreak{}cs.\allowbreak{}tufts.\allowbreak{}edu/\allowbreak{}comp/\allowbreak{}150FP/\allowbreak{}archive/\allowbreak{}mitch-\allowbreak{}wand/\allowbreak{}types-\allowbreak{}simple-\allowbreak{}objects.\allowbreak{}pdf
   {[}M this pass{]}
 \end{itemize}
+
+
+\subsection{Appendix A correction (2026-10-10, evidence-chain
+re-aim)}\label{appendix-a-correction-2026-10-10-evidence-chain-re-aim}
+
+\textbf{SUPERSEDED IN FULL by the 2026-10-11 correction below.} This
+correction was measured while the ZINC interpreter still existed: its
+\texttt{PASS=268}/\allowbreak{}\texttt{PASS=156} counts, its
+\texttt{ELM\_\allowbreak{}GATE\_\allowbreak{}NATIVE} switch and its two ``single-engine for now''
+rows (\texttt{rawrun}, \texttt{depth}) all describe a tree that was
+deleted at P8. It is kept as the record of what was true on 2026-10-10
+and must not be read as a statement about the current tree.
+
+\emph{Appended, not reworded --- the paragraph above still describes the
+tree it was measured on. Correction:} as of this date the fixture gate
+no longer runs its executable rows through the ZINC VM alone. Every
+\texttt{run} /\allowbreak{} \texttt{run2} /\allowbreak{} \texttt{io} /\allowbreak{} \texttt{sigdeath} row (112
+rows) now has a \textbf{native twin}: the same sources are compiled
+through the QBE backend (elm → \texttt{.\allowbreak{}ssa} → vendored qbe → cc +
+\texttt{rt.\allowbreak{}o}) and the native binary must print the \emph{same pinned
+expected output} the VM row asserts (\texttt{PASS=268\ FAIL=0} at the
+tip; \texttt{ELM\_\allowbreak{}GATE\_\allowbreak{}NATIVE=0} reproduces the VM-only gate verbatim,
+\texttt{PASS=156\ FAIL=0}). The \texttt{run} rows above therefore hold
+on \textbf{both} engines. Two rows remain single-engine by construction
+and are stated as losses, not hidden: \texttt{rawrun} (a hand-written
+csexp bundle no Elm source can produce) has no native twin and dies with
+the bundle format; \texttt{depth} asserts the interpreter's
+\texttt{CALL\_\allowbreak{}STACK\_\allowbreak{}DEPTH} cap and its native counterpart is the
+separate \texttt{natdepth} row. The VM-vs-native \textbf{differential}
+that motivated this appendix's trust story --- two backends agreeing
+byte-for-byte on the same input --- is being retired with the ZINC
+backend; its replacements (golden outputs harvested from the VM's last
+verified run, a frozen \texttt{.\allowbreak{}ssa} corpus baseline, GC-churn reruns,
+structural counters, and the whole-compiler \texttt{.\allowbreak{}ssa} fixed point)
+are a \textbf{regression net, not a differential}: a wrong-but-plausible
+output on an unpinned shape is no longer caught by construction. The
+planned Lua backend would restore a true differential (two backends, two
+value representations, Lua's own GC). See \texttt{ARTIFACT.\allowbreak{}md} §9 for
+the full statement.
+
+
+\subsection{Appendix A correction (2026-10-11, P8: the ZINC interpreter
+is
+gone)}\label{appendix-a-correction-2026-10-11-p8-the-zinc-interpreter-is-gone}
+
+\textbf{This correction SUPERSEDES the whole of the 2026-10-10
+correction above.} That one was measured while the ZINC interpreter
+still existed; it is kept here, figures and all, as the record of what
+was true on 2026-10-10, and nothing in it states anything about the
+current tree. What follows is measured on the tip \emph{after} the
+deletion.
+
+\textbf{What left the tree.} The interpreter package
+\texttt{vendor/\allowbreak{}zinc-\allowbreak{}vm}, everything that linked it (the \texttt{elmvm}
+driver, the benchmark driver, \texttt{tools/\allowbreak{}aot/\allowbreak{}}, the self-host compile
+and gate scripts), the csexp backend (\texttt{Zinc/\allowbreak{}Emit.\allowbreak{}elm},
+\texttt{Zinc/\allowbreak{}Csexp.\allowbreak{}elm}, \texttt{Mid/\allowbreak{}To\allowbreak{}Zinc.\allowbreak{}elm} and the ZINC-only
+mid-tier passes), the \texttt{MIDTIER=0}-vs-\texttt{1} differential and
+its tooling, and the committed csexp bootstrap seed. What stays is what
+the earlier correction already named as the replacement: the frontend,
+the checker, the Lean mechanization, \texttt{vendor/\allowbreak{}osier-\allowbreak{}rt}, and the
+QBE backend the fixtures now execute through.
+
+\textbf{The execution model is native, and only native.} The gate's
+executable rows (\texttt{run}, \texttt{run2}, \texttt{run\_\allowbreak{}io},
+\texttt{sigdeath} --- 112 rows) compile the fixture through the QBE
+backend (elm → \texttt{.\allowbreak{}ssa} → the vendored qbe → cc + \texttt{rt.\allowbreak{}o})
+and run the resulting binary. There is no interpreter in the tree and no
+interpreter-only mode, so the previous correction's claim that the
+\texttt{run} rows hold on both engines no longer has a second engine
+behind it: the rows hold, and the bytes they are held against are the
+\emph{same pinned \texttt{expected/\allowbreak{}*.\allowbreak{}txt} files}, but the sentence that
+said they execute \emph{through the VM} is false and has been corrected
+in place in Appendix A rather than reworded here.
+
+\textbf{The counts at the tip.} Gate \texttt{PASS=154\ FAIL=0}. Corpus
+byte-identity 149 = 149 against the \texttt{.\allowbreak{}ssa} anchor.
+\texttt{Test\allowbreak{}Main} 95 assertions. The native slice runner
+\texttt{tools/\allowbreak{}qbe/\allowbreak{}qbe-\allowbreak{}check.\allowbreak{}sh} 221 PASS /\allowbreak{} 0 FAIL (104 committed goldens
+plus the cross-target rows). The whole-compiler \texttt{.\allowbreak{}ssa} fixed
+point byte-identical. Seed status
+\texttt{none\ —\ retired\ at\ P8,\ pending\ the\ Lua\ backend}. The
+environment switch the previous correction's recipe used,
+\texttt{ELM\_\allowbreak{}GATE\_\allowbreak{}NATIVE}, no longer exists, so that recipe cannot be
+run at all.
+
+\textbf{The two rows the previous correction named as its single-engine
+losses are themselves gone.} \texttt{rawrun} (a hand-written csexp
+bundle no Elm source can produce) died with the format, and
+\texttt{depth} (which asserted the interpreter's call-stack cap) died
+with the interpreter; its native counterpart \texttt{natdepth} stays,
+and is registered.
+
+\textbf{The paper's own figures, corrected in the body.} The
+load-bearing numbers this deletion moved were corrected where they are
+claimed, not only in this appendix --- the counts, the execution-method
+sentence, and the reproducibility claim:
+
+{
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\linewidth - 4\tabcolsep) * \real{0.3333}}@{}}
+\toprule\noalign{}
+\begin{minipage}[b]{\linewidth}\raggedright
+where it is claimed
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+was
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+is
+\end{minipage} \\
+\midrule\noalign{}
+\endhead
+\bottomrule\noalign{}
+\endlastfoot
+the abstract; the contribution list; the correspondence section; the
+necessity-and-sufficiency argument & 152 regression checks & 154 \\
+the implementation section's unit-suite figure & 114/\allowbreak{}114 & 95/\allowbreak{}95 \\
+the Appendix A preamble and the Table 1 caption & \texttt{PASS=152}; 152
+rows & \texttt{PASS=154}; 154 rows \\
+the Appendix A preamble's method sentence & ``the \texttt{run} rows
+execute the fixture through the VM'' & they execute through the native
+backend \\
+the provenance disclosure's list of vendored third-party code & ``the
+zinc-vm (a Zig port of the Shen ZINC VM)'' & the vendored native
+runtime, descended from a Zig port of the Shen ZINC VM \\
+\end{longtable}
+}
+
+The \texttt{necessary}/\allowbreak{}\texttt{sufficient} argument's decomposition
+moved with the total: the gate registers 154 checks, of which 29 are the
+frontend lambda-lift fixtures (\texttt{MATRIX.\allowbreak{}md} rows 125--153, the
+\texttt{lift*} names); the third category that decomposition named, a
+hand-crafted-bundle run, is gone with the csexp format.
+
+\textbf{What did not change.} The differential loss the previous
+correction states stands, and stands unmitigated: there is one backend,
+so a same-input backend disagreement on a shape no fixture pins is
+invisible. The anchors that replaced it --- golden outputs, the
+\texttt{.\allowbreak{}ssa} corpus baseline, the GC-churn reruns, the structural
+counters, the whole-compiler \texttt{.\allowbreak{}ssa} fixed point --- are a
+\textbf{regression net, not a differential}. \texttt{ARTIFACT.\allowbreak{}md}
+sections 9.5 and 9.6 carry the full statement, including what a golden
+can and cannot be evidence for now that it has no second implementation
+to agree with.
 
 \makeatletter
 % \r@references is {<section>}{<page>}{<title>}{<anchor>}{...}; take the page

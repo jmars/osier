@@ -9,6 +9,18 @@ must be re-grepped against the paper-frozen commit at drafting time (the `l3ii` 
 edit shifted a fixture's error line 20:13 → 24:13; **the byte-identity invariant outranks
 comments, and line numbers drift**).
 
+**STATUS AFTER P8 (handoff `osier-delete-zinc`, 2026-10-10; banner appended 2026-10-11).** Every
+figure below is the one measured on **2026-10-05** and is kept as the record of what the plan was
+built on — but read the ✎ figures as *dated*, not current. The tree has moved: the ZINC
+interpreter and the csexp backend were deleted at P8, so the gate now registers **154** checks
+(every executable row runs a natively compiled binary, not the interpreter) and the unit suite
+passes **95** assertions; the corpus byte anchor is now the compiler's QBE emit,
+`tools/osier-corpus-baseline.ssa.sha256` (149 groups, `tools/osier-corpus-ssa.sh`), not the
+retired csexp manifest named at C16. The Lean figures (**90** theorems, **3** axiom parameters,
+zero `sorry`) are unchanged. The paper's own counts were corrected in place and its superseded
+Appendix A correction is banner-ed; `ARTIFACT.md` §9.5 tabulates old against new, and
+`todo-osier.md`'s "Current state" table carries the tip's figures.
+
 What this unit re-measured itself (✎, 2026-10-05, tree at `0207dd2`):
 
 - `tests/elm-fixtures/run-elm-gate.sh` → **PASS=152 FAIL=0** [M ✎ 2026-10-05, after the exhaustiveness/refutation work].

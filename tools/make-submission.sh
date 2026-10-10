@@ -58,6 +58,10 @@ RULES = [
     ("`tools/osier-numbers.sh`", "the artifact's verification script"),
     ("`tools/osier-recount-runTask.sh`", "the recount script"),
     ("`tools/osier-corpus-baseline.sha256`", "the committed corpus manifest"),
+    # The vendored runtime's package name is an `osier-*` token (the DENY list
+    # below rejects any that survives, backticked or not), so the source paper
+    # may name it and the export must not.
+    ("`vendor/osier-rt`", "the vendored native runtime"),
     ("The artifact tag `osier-paper-artifact-1`", "The frozen artifact tag"),
     ("`osier-artifact-eval-1`", "the frozen artifact tag"),
     ("(`docs/research/osier-related-work.md`, which is the bibliography's source)",

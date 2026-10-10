@@ -23,9 +23,12 @@ module Flt exposing
 -- that spelling too, so the data item read `d_Infinity.0` and C's strtod
 -- stopped at the '.' — `unknown keyword .0` again.
 --
--- So a single happy path is not evidence here.  Every entry below is run on
--- elmvm AND on the native binary with IDENTICAL stdout required (see
--- tools/qbe/qbe-check.sh): the literal alone, everything the inline fast path
+-- So a single happy path is not evidence here.  Every entry below runs on the
+-- native binary and its stdout must equal its committed GOLDEN byte-for-byte
+-- (tools/qbe/qbe-check.sh; the goldens were frozen on 2026-10-10, where the VM
+-- and the native binary agreed byte-for-byte — the interpreter is gone, so the
+-- golden is now a regression anchor, not a second engine to agree with): the
+-- literal alone, everything the inline fast path
 -- handles (+ - * and the < <= == branches), the operands where the fast path
 -- must DECLINE to rt_prim (a float on either side, and `/`), negatives,
 -- magnitudes at both ends of `printFloat`'s text (1e-7 / 1e22, where JS's
@@ -205,7 +208,8 @@ viaFn =
 
 
 -- the CLI-argument entry: `Flt.idF 2.5` exercises the driver's float
--- argument path (tools/qbe/rt.zig) against elmvm's.
+-- argument path (tools/qbe/rt.zig) against the golden's, which was frozen from
+-- elmvm's.
 idF : Float -> Float
 idF x =
     x + 1.0
@@ -243,7 +247,8 @@ main =
 -- ================== S4f: the HOSTILE float cases ==================
 -- Unboxing a Float local deletes the tag test, so every case below is one
 -- where the tag or the IEEE edge case is the whole answer.  Each entry is its
--- own build and its stdout must match elmvm's byte-for-byte (qbe-check.sh).
+-- own build and its stdout must match its committed golden byte-for-byte
+-- (qbe-check.sh) — that golden was frozen from elmvm's last agreeing run.
 --
 -- `a f/ b` and `a + b` on two raw floats are now ONE QBE `d` op; a comparison
 -- on two raw floats is ONE `ceqd`/`cltd`/`cled`/`cgtd`/`cged`.  NaN and the

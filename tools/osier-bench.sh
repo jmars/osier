@@ -59,13 +59,20 @@
 # persists across runs, and anything read back without being rebuilt then
 # answers from the PREVIOUS run — the bug documented in tools/qbe/qbe-check.sh.
 #
-# Usage: tools/osier-bench.sh [program-name ...]      (default: all in the suite)
+# Usage: tools/osier-bench.sh [--freeze[=DIR]] [program-name ...]   (default: all in the suite)
 # Env:   OSIER_BENCH_RUNS=n        runs per (program, backend)   [3]
 #        OSIER_BENCH_STAT=best|median                            [best]
 #        OSIER_BENCH_HEAP_MB=n     VM + native heap, MB          [512]
 #        OSIER_BENCH_TIMEOUT=s     per-run timeout, seconds      [300]
 #        OSIER_BENCH_STRICT=1      ignore declared-not-expressible
 #        OSIER_BENCH_XCHECK=0      skip the golden output cross-check
+#
+# FREEZING.  `--freeze[=DIR]` (DIR default tools/bench/golden) writes each
+# program's golden from the ONE backend's CURRENT output.  Nothing verifies a
+# value being frozen — the VM reference that made the old freeze a
+# write-only-where-both-agreed operation died with the interpreter at P8 — so
+# a freeze records what this tree prints today, not that it is right, and
+# re-freezing discards the only thing the golden was holding.
 #
 # THE CROSS-CHECK AFTER THE VM (P7, handoff osier-evidence): the VM reference
 # is what made the xcheck a DIFFERENTIAL (two backends, two value
@@ -105,9 +112,33 @@ done
 
 HAVE_QBE=0
 if [ -x "$ROOT/vendor/qbe/qbe" ] && [ -x "$QBE_MK" ]; then HAVE_QBE=1; fi
-GOLDEN_DIR="$ROOT/tools/bench/golden"
-if [ ! -d "$GOLDEN_DIR" ]; then
-  echo "osier-bench: no goldens at $GOLDEN_DIR — they are committed files; check the tree" >&2
+
+# ---- freeze mode (see FREEZING in the header) ------------------------------
+# `--freeze[=DIR]` writes each program's golden from the ONE backend's CURRENT
+# output.  Nothing verifies the value written — the second engine died at P8 —
+# so a freeze records what this tree prints today, not that it is right.
+FREEZE=0
+FREEZE_DIR=""
+programs=()
+for a in "$@"; do
+  case "$a" in
+    --freeze)   FREEZE=1 ;;
+    --freeze=*) FREEZE=1; FREEZE_DIR="${a#--freeze=}" ;;
+    -*)         echo "osier-bench: unknown option '$a' (usage: osier-bench.sh [--freeze[=DIR]] [program ...])" >&2; exit 2 ;;
+    *)          programs+=("$a") ;;
+  esac
+done
+want=()
+[ "${#programs[@]}" -eq 0 ] || want=("${programs[@]}")
+
+GOLDEN_DIR="${FREEZE_DIR:-$ROOT/tools/bench/golden}"
+if [ "$FREEZE" = 1 ]; then
+  mkdir -p "$GOLDEN_DIR" || { echo "osier-bench: cannot create golden dir $GOLDEN_DIR" >&2; exit 2; }
+  echo "osier-bench: FREEZE MODE — writing goldens into $GOLDEN_DIR from the ONE backend." >&2
+  echo "osier-bench:   nothing verifies a value being frozen (the second engine died at P8)," >&2
+  echo "osier-bench:   so a golden pins 'the output did not change', not 'the output is right'." >&2
+elif [ ! -d "$GOLDEN_DIR" ]; then
+  echo "osier-bench: no goldens at $GOLDEN_DIR — they are committed files; check the tree (or freeze: --freeze)" >&2
   exit 2
 fi
 
@@ -115,7 +146,6 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/osier-bench.XXXXXX")" || { echo "osier-bench: 
 trap 'rm -rf "$TMP"' EXIT
 
 # ---- program selection ----------------------------------------------------
-want=("$@")
 selected=()
 for src in "$SUITE"/*.elm; do
   [ -f "$src" ] || continue
@@ -221,6 +251,7 @@ R_NAME=(); R_SHAPE=()
 declare -A RES_QBE=()
 FAIL=0
 XC_N=0   # golden cross-checks that compared byte-identical
+FROZE_N=0  # goldens written this run (--freeze; nothing verified them)
 WARN=()
 
 note_fail() { echo "osier-bench: FAIL $1" >&2; FAIL=1; }
@@ -345,8 +376,13 @@ for src in "${selected[@]}"; do
       WARN+=("$name: golden cross-check FAILED: empty stdout on a measured program — empty is a FAILURE, not agreement")
       RES_QBE["$name"]="$(enc "${RES_QBE[$name]%%|*}" EMPTY-STDOUT "measured program printed nothing")"
       note_fail "$name: empty stdout on a measured program"
+    elif [ "$FREEZE" = 1 ]; then
+      cp "$work/qbe.rep.out" "$g"
+      XC_N=$((XC_N + 1))
+      FROZE_N=$((FROZE_N + 1))
+      echo "osier-bench: FROZE $name: golden <- the one backend's current output"
     elif [ ! -f "$g" ]; then
-      WARN+=("$name: no golden at $g — goldens are committed files frozen from the VM's last verified run (2026-10-10)")
+      WARN+=("$name: no golden at $g — goldens are committed files; freeze deliberately (--freeze)")
       note_fail "$name: golden cross-check has nothing to compare"
     elif ! cmp -s "$g" "$work/qbe.rep.out"; then
       WARN+=("$name: native DISAGREES with the frozen golden: golden='$(head -c 50 "$g")' native='$(head -c 50 "$work/qbe.rep.out")'")
@@ -444,7 +480,11 @@ fi
 
 echo
 if [ "$FAIL" = 0 ]; then
-  if [ "$XC_N" -gt 0 ]; then
+  if [ "$FROZE_N" -gt 0 ]; then
+    echo "osier-bench: OK — froze $FROZE_N golden(s) from the ONE backend's current output;"
+    echo "             nothing verified them (the second engine died at P8) — a golden pins"
+    echo "             'the output did not change', not 'the output is right'."
+  elif [ "$XC_N" -gt 0 ]; then
     echo "osier-bench: OK — every program compiled, ran and matched its golden ($XC_N golden cross-check(s) byte-identical)"
   else
     echo "osier-bench: OK — every program compiled and ran (0 golden cross-checks ran — OSIER_BENCH_XCHECK=0)"

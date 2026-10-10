@@ -4,8 +4,8 @@ module ExecEnv exposing (main)
 -- -> getenv -> "hello"; getpid delivers a NUMBER (String.fromInt proves it
 -- stringifies, and the gate checks it is positive — the raw pid is
 -- process-specific so it cannot appear in a deterministic expected file);
--- cd /tmp -> getcwd -> "/tmp" (the gate spawns a fresh elmvm per fixture, so
--- mutating the process CWD is safe).
+-- cd /tmp -> getcwd -> "/tmp" (the gate gives each fixture its own freshly
+-- built native binary and process, so mutating the process CWD is safe).
 
 type Msg
     = Got ( String, Int, String )

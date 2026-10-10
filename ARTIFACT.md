@@ -9,7 +9,7 @@ research notes — is CC-BY-4.0. See `LICENSE` and `LICENSE-CC-BY-4.0` at the re
 
 ## 1. What this is
 
-Osier is a small statically-typed functional language, its compiler and its host runtime, plus
+Osier is a small statically-typed functional language, its compiler and its native runtime, plus
 the machine-checked metatheory behind the row-refinement discipline the paper
 (`docs/research/osier-paper.md`) describes and measures. Concretely:
 
@@ -19,19 +19,32 @@ the machine-checked metatheory behind the row-refinement discipline the paper
   the escape/discharge checks), the lowerer, the corpus it is built from (`src/Prelude.elm`,
   `src/Runtime.elm`, and the eight core libraries in `core-libs/`), the batch driver `run.js`,
   and the compiler's own unit suite `src/TestMain.elm`.
-- **`src/effectloop.zig` + `vendor/zinc-vm/`** — the language host: a CEK effect manager over
-  exec plans (stream/file prims, monotonic time, `stat`/`listDir` leaves, `Quit`) that runs
-  compiled bundles. Built as `zig-out/bin/elmvm`. The UI effects (renderer, terminal input) are
-  **not** handled here — see §6.
+- **`vendor/osier-rt/` + `src/effectloop.zig`** — the language host, and the runtime every
+  compiled program links: a CEK effect manager over exec plans (stream/file prims, monotonic
+  time, `stat`/`listDir` leaves, `Quit`) on top of the pool allocator and the prims. The gate's
+  fixtures are compiled to a native binary and run against it (`tools/qbe/qbe-mk.sh`: elm →
+  `.ssa` → vendored qbe → cc + `rt.o`); there is no interpreter to build and `zig-out/bin/elmvm`
+  no longer exists. The UI effects (renderer, terminal input) are **not** handled here — see §6.
+  *Until P8 this bullet described a third component, the ZINC interpreter
+  (`vendor/zinc-vm/`, built as `zig-out/bin/elmvm`); it and the csexp backend were deleted on
+  2026-10-10 — see §9.*
 - **`lean/`** — the Lean 4 mechanization of the calculus's metatheory (§4).
-- **`tests/elm-fixtures/`** — the fixture gate: 152 registered checks (`MATRIX.md`, §5).
+- **`tests/elm-fixtures/`** — the fixture gate: 154 registered checks (`MATRIX.md`, §5) — 113
+  rows execute a natively built binary, 41 assert a compile outcome only.
 - **`tools/`** — the evidence chain: `osier-numbers.sh` (the one command), the committed corpus
-  byte-identity manifest `osier-corpus-baseline.sha256`, the runTask branch recount, the
-  fixture-matrix generator.
+  byte-identity manifest `osier-corpus-baseline.ssa.sha256` (one hash per gate group over the
+  compiler's QBE emit), `qbe/qbe-check.sh` (the native slice runner, against its committed
+  goldens), the runTask branch recount, the fixture-matrix generator.
 - **`docs/research/`** — the paper and its related-work survey.
 
-Nothing in this note is a new claim about the work: every figure below is printed by
-`tools/osier-numbers.sh`, whose output the paper cites as the source of its numbers.
+**Read §9 before trusting any count in this note.** §9 records the ZINC retirement (P8,
+2026-10-10): which anchors replaced which, the tip's own figures, and the one thing that was
+**lost rather than replaced** — with a single backend, the VM-vs-native differential is gone.
+
+Nothing in this note is a new claim about the work: every figure here that describes the current
+tree is printed by `tools/osier-numbers.sh`, whose output the paper cites as the source of its
+numbers. (The §2 figures are the frozen tag's, printed by the tag's own copy of that script —
+§9.5 says how they differ from the tip's.)
 
 ## 2. The one command
 
@@ -45,15 +58,17 @@ The numbers below are frozen at the annotated tag `osier-paper-artifact-1` — *
 (`de57bad`) the pre-rename tag `withe-paper-artifact-1` points at, which is kept and not moved
 (an already-published deposit references it). Both tags therefore predate the rename: in the tag's
 tree the language is still called *Withe*, the command above is spelled `tools/withe-numbers.sh`
-and the paper is `docs/research/withe-paper.md`. Nothing else differs — no fixture, expected output
-or measured number moved — which is why the figures below are the same at the tag and at the
-branch tip. To reproduce the freeze exactly:
+and the paper is `docs/research/withe-paper.md`. They also predate the ZINC retirement, so the
+figures below are **the tag's alone**: the tip registers 154 gate checks and 95 unit-suite
+assertions, not 152 and 114, and its gate executes natively instead of on the interpreter. What
+moved and what did not is tabulated in §9.5 — read it before quoting any number here. To
+reproduce the tag's figures exactly:
 
 ```sh
 git checkout osier-paper-artifact-1 && tools/withe-numbers.sh
 ```
 
-Run it from the repository root (the script `cd`s there itself). It performs, in order:
+Run it from the repository root (the script `cd`s there itself). At the tag it performs, in order:
 
 1. builds the gate harness `zig-out/bin/elmvm` (skipped if already built);
 2. rebuilds **both** compiler artifacts from source (`elm-compiler/compiler.js` and
@@ -61,23 +76,38 @@ Run it from the repository root (the script `cd`s there itself). It performs, in
    the wrong bytes;
 3. runs the fixture gate (`tests/elm-fixtures/run-elm-gate.sh`) — PASS/FAIL counts;
 4. compiles the corpus once as a batch and sha256-compares **every** artifact against
-   `tools/osier-corpus-baseline.sha256` (byte-identity);
-
-   **Scope of this check — it is narrower than it looks.** The baseline is a snapshot of the
-   bytes the compiler emits, and the fixed corpus (`Prelude.elm`, `Runtime.elm`, `core-libs/*`)
-   is *folded into every artifact*. So the check proves "the compiler's output did not change",
-   and it holds only while neither the corpus text nor the emitter's semantics change. Editing
-   `Prelude.elm` — even to make a helper tail-recursive — changes all 149 artifacts **by
-   construction**, as does any semantic change to `Zinc/Emit.elm`. When that is deliberate, the
-   baseline must be **re-frozen on purpose** and the reason recorded; a bare `DIFFERS` is how a
-   real regression and a legitimate corpus edit arrive looking identical. Last re-frozen
-   2026-10-09, for `Prelude.filterMap` becoming a tail-recursive accumulator walker (one of the
-   two stack-exhaustion fixes); 115 of 149 artifacts moved. Note also that a name added to
-   `Prelude.elm` becomes visible to compiled programs, because that file *is* the prelude
-   compiled into every program.
+   `tools/osier-corpus-baseline.sha256` (csexp byte-identity; that manifest is deleted at the
+   tip — see the note below);
 5. runs the compiler's unit suite `TestMain`;
 6. runs `lake build` in `lean/` and counts theorems / axioms / `sorry`;
 7. re-derives the runTask branch recount (`tools/osier-recount-runTask.sh`).
+
+**The same command at the tip** differs in exactly two places inside the numbered list, both from
+the ZINC retirement (§9.5). The harness in step 1 no longer exists and is no longer built: the
+gate compiles each executable row to a native binary on demand through `tools/qbe/qbe-mk.sh`.
+And step 4's anchor is the QBE emit — `tools/osier-corpus-baseline.ssa.sha256`, one hash per gate
+group, written by `tools/osier-corpus-ssa.sh`. Steps 2, 3, 5, 6 and 7 are as listed. Its printed
+output additionally carries a `seed status:` line that the tag's output above does not have
+(`none — retired at P8 pending the Lua backend`, report-only by design).
+
+**Scope of step 4's check — it is narrower than it looks.** The baseline is a snapshot of the
+bytes the compiler emits, and the fixed corpus (`Prelude.elm`, `Runtime.elm`, `core-libs/*`)
+is *folded into every artifact*. So the check proves "the compiler's output did not change",
+and it holds only while neither the corpus text nor the emitter's semantics change. Editing
+`Prelude.elm` — even to make a helper tail-recursive — changes all 149 artifacts **by
+construction**, as does any semantic change to the QBE emitter
+(`elm-compiler/src/Mid/Qbe/Lower.elm`, `Print.elm`). When that is deliberate, the baseline
+must be **re-frozen on purpose** (`tools/osier-corpus-ssa.sh --freeze`) and the reason
+recorded; a bare `DIFFERS` is how a real regression and a legitimate corpus edit arrive
+looking identical. Last re-frozen 2026-10-09, for `Prelude.filterMap` becoming a
+tail-recursive accumulator walker (one of the two stack-exhaustion fixes); 115 of 149
+artifacts moved. Note also that a name added to `Prelude.elm` becomes visible to compiled
+programs, because that file *is* the prelude compiled into every program.
+
+One consequence of the `.ssa` anchor, stated rather than hidden: it pins the **entry-reachable**
+defun graph per group, not the whole serialized bundle, and it says nothing about any other
+backend — there is none left (`tools/osier-corpus-ssa.sh`'s header). The `.ssa` manifest's
+`--freeze` regenerates from the compiler's own output and never needed a VM.
 
 ### What a good run prints
 
@@ -160,9 +190,9 @@ code and the final `VERDICT:` line decide.
 
 | line | what it is |
 |---|---|
-| `gate: PASS=152 FAIL=0` | all 152 registered fixture checks passed — the language gate (`MATRIX.md`, §5) |
-| `corpus: BYTE-IDENTICAL (149 artifacts = 149 manifest entries)` | the corpus (Prelude + Runtime + eight core-libs) compiled once, and each of the 149 compiled artifacts matches the committed sha256 manifest entry-for-entry |
-| `TestMain: All 114 assertions passed.` | the compiler's own unit suite |
+| `gate: PASS=152 FAIL=0` | all 152 registered fixture checks passed — the tag's gate, which still executed its `run` rows on the interpreter. The tip registers **154** and executes them natively (§9.5) |
+| `corpus: BYTE-IDENTICAL (149 artifacts = 149 manifest entries)` | the corpus (Prelude + Runtime + eight core-libs) compiled once, and each of the 149 compiled artifacts matches the committed sha256 manifest entry-for-entry. At the tag the manifest is the csexp one; the tip's line is spelled `corpus .ssa:` and compares the same 149 groups against `tools/osier-corpus-baseline.ssa.sha256` (§9.5) |
+| `TestMain: All 114 assertions passed.` | the compiler's own unit suite, at the tag. The tip's suite is **95** assertions: the 19 that went were all ZINC unit tests (§9.5) |
 | `lake build: exit 0, output 0 bytes` | `lake build -q` from `lean/`: no errors, no warnings, no output |
 | per-file counts, `lean theorems: 90 total` | theorems per mechanization file (§4) |
 | `lean axioms: 3 declared:` … | the three axiom **parameters**, listed with file:line (§4) |
@@ -174,7 +204,8 @@ code and the final `VERDICT:` line decide.
 
 - **Runtime: ~45 s cold** (clean clone, everything built from scratch, paper's build host) and
   **~20 s warm**. The Lean project is the slowest part.
-- **Self-contained**: it builds `elmvm`, both compiler artifacts and the Lean project itself. Nothing
+- **Self-contained**: it builds the runtime and every native fixture binary (the gate's `qbe-mk.sh`
+  lane does this on demand), both compiler artifacts and the Lean project itself. Nothing
   is downloaded, and no network access is needed — verified by running the whole chain inside
   `unshare -rn` (a network namespace with no interfaces) from a checkout stripped of
   `zig-out/`, `compiler.js` and `lean/.lake`: same numbers, exit 0. The elm package cache is
@@ -270,7 +301,8 @@ other theorem closes against the local Lean binary with no `sorry`.
 ## 5. The fixture matrix
 
 `tests/elm-fixtures/MATRIX.md` lists **every** check the gate registers — name, kind (`run` /
-`compile_clean` / `compile_error` / `run_io` / `run2` / `out_cmp` / `rawrun`), entry point, expected
+`compile_clean` / `compile_error` / `run_io` / `run2` / `out_cmp` / `sigdeath` / `natdepth`), entry
+point, expected
 value or expected error substring, argv, stdin, fixture — with the count printed by the gate.
 
 It is **generated from the gate's own registration calls**, never hand-copied, and can be
@@ -283,7 +315,7 @@ tools/gen-fixture-matrix.sh --stdout  # print it
 ```
 
 The raw dump it is rendered from is `ELM_GATE_MATRIX=1 tests/elm-fixtures/run-elm-gate.sh` (TSV;
-no elm, elmvm, node or jq needed in that mode). The paper's **Appendix A** is the prose
+no elm, node or jq needed in that mode). The paper's **Appendix A** is the prose
 counterpart: the *designed* programs the paper cites and the claim each one pins. Appendix A is a
 selected subset; `MATRIX.md` is the complete registry, and where the two disagree the gate is the
 oracle.
@@ -297,7 +329,7 @@ oracle.
 - **The terminal-UI fixtures — deferred, and they do not run.** The 19 UI-host rows that used to
   be part of the gate were moved out to `fx-ui`'s `tests/elm-fixtures/run-ui-gate.sh`, which
   **exits 1 on purpose** (`run-ui-gate: DEFERRED — all rows require the re-attached renderer /
-  UI libs`). They require a renderer that is not part of this artifact; the 152 checks here do not
+  UI libs`). They require a renderer that is not part of this artifact; the 154 checks here do not
   cover them, and nothing in this note claims they pass.
 - **UI effects in the host.** `src/effectloop.zig` handles exec plans, stream/file prims, time and
   the `stat`/dir leaves; an effect the host does not implement fails loudly and fast by design.
@@ -347,15 +379,17 @@ in detail; the paper states the same facts as §6.7 of `docs/research/osier-pape
   (`elm-compiler/src/Type/`), the frontend lambda-lifting pass
   (`elm-compiler/src/Frontend/Lift.elm`), the Lean mechanization (`lean/`), the verification
   harness (`tools/osier-numbers.sh`, `tests/elm-fixtures/run-elm-gate.sh`,
-  `tools/osier-corpus-baseline.sha256`, `tools/osier-recount-runTask.sh`), the adversarial
+  `tools/osier-corpus-ssa.sh` and `tools/osier-corpus-baseline.ssa.sha256`,
+  `tools/osier-recount-runTask.sh`), the adversarial
   test passes and their fixtures, and this note's own packaging (`ARTIFACT.md`,
   `tests/elm-fixtures/MATRIX.md`, `tools/gen-fixture-matrix.sh`).
 - **The degree, as the record shows it.** Every commit in this repository is authored by the
   author, but the project's working records show the code was agent-written and the author
   committed the results; two early commits in the parent repository (`fx-ui`) carry the
   coding agents' sandbox identity. No per-line percentage is claimed. Parts of the artifact
-  are ports of third-party code — the vendored elm-syntax parser, the zinc-vm (a Zig port of
-  the Shen ZINC VM), the elm/core core libraries — where the assistance was in the porting.
+  are ports of third-party code — the vendored elm-syntax parser, `vendor/osier-rt` (descended
+  from a Zig port of the Shen ZINC VM; `vendor/osier-rt/README.md` records the lineage), the
+  elm/core core libraries — where the assistance was in the porting.
 - **The human role.** The author directed the work, made the design decisions, constructed
   the motivating example, and independently re-verified the numbers printed above. No AI
   system is an author — the ACM policy bars listing generative AI tools as authors under any
@@ -400,8 +434,9 @@ old chain was alive, which is the only way to prove they are replacements rather
    re-freeze (`--freeze`), the 8da6fd7 discipline.
 3. **`qbe-check.sh`'s differential became golden outputs.** The VM-vs-native byte identity
    (219 checks) is replaced by **104 golden output files** (`tools/qbe/golden/`) harvested from
-   the differential's *last* run: `QBE_CHECK_FREEZE=1` runs the old differential one final time
-   and writes a golden **only where native and VM agreed byte-for-byte** (104 frozen, 0
+   the differential's *last* run: its freeze mode (`QBE_CHECK_FREEZE=1`, deleted with the VM it
+   required) ran the old differential one final time
+   and wrote a golden **only where native and VM agreed byte-for-byte** (104 frozen, 0
    refused). Compare mode (no elmvm anywhere): `PASS=221 FAIL=0` in ~56 s — the 219 original
    rows as goldens, plus two new cross-target smoke rows (`qbe -t arm64` / `-t rv64` must
    *compile* the emitted `.ssa`; the IL is target-neutral by construction). The GC-churn arm,
@@ -433,8 +468,8 @@ must produce.
 
 `osier-bench.sh`'s 12 cross-checks get the same treatment as `qbe-check.sh`'s: per-program
 golden outputs (`tools/bench/golden/*.expected`, 12 files frozen from the live differential's
-agreeing pairs via `OSIER_BENCH_FREEZE=1`), selected automatically once elmvm is absent
-(`OSIER_BENCH_REF=golden`; the VM rows then report `NO-VM` honestly instead of aborting).
+agreeing pairs by that run's freeze mode, `OSIER_BENCH_FREEZE=1`, also deleted with the VM it
+required; the VM rows themselves are gone, so every row is a native row now).
 Proven to fire both ways: a perturbed golden mismatches exactly that program, and a native-only
 runtime defect mismatches all 12.
 
@@ -508,3 +543,53 @@ x86_64 Linux): `zig build` 0 · `zig build gate` 0 · `zig build test` 0 ·
 `run-elm-gate.sh` exit 0, `PASS=154 FAIL=0` · `qbe-check.sh` exit 0, 221 PASS / 0 FAIL ·
 `qbe-selfhost.sh` exit 0, the `.ssa` FIXED POINT byte-identical · `osier-numbers.sh` exit 0,
 `VERDICT: all checks pass`, corpus `.ssa` byte-identical 149 = 149.
+
+The goldens those runs compare against can be re-derived again — from the one backend that is
+left. What that makes them, and what it does not, is §9.6.
+
+### 9.6 What a golden means now — and what it costs to keep one
+
+*Appended 2026-10-11, with the freeze path restored. §9.1 item 3 and §9.2 above describe the
+goldens as they were **created**; this says what they are now.*
+
+The 104 goldens in `tools/qbe/golden/` and the 12 in `tools/bench/golden/` were harvested while
+the differential was still alive: each file was written only where the VM and the native binary
+agreed byte-for-byte. That was the only moment at which a golden was verified by something other
+than itself. The freeze mode that did it (`QBE_CHECK_FREEZE=1`, `OSIER_BENCH_FREEZE=1`) required
+the interpreter and died with it, so afterwards no route existed to re-derive a golden at all —
+a missing golden was a hard FAIL. The 116 committed files were therefore frozen evidence that no
+*deliberate* behaviour change could legally be recorded against.
+
+**What a golden is, now.** Both runners have their freeze path back, and it takes the only engine
+left:
+
+```sh
+tools/qbe/qbe-check.sh --freeze[=DIR]     # default DIR: tools/qbe/golden
+tools/osier-bench.sh   --freeze[=DIR]     # default DIR: tools/bench/golden
+```
+
+Freeze mode writes each golden from **the current native pipeline's own output**. Nothing
+verifies the value written — there is no second implementation to agree with it — so what a
+golden now pins is exactly one thing: **the output did not change**, for the shapes that were
+pinned on 2026-10-10. That is a legitimate regression anchor: a lowering, emitter or runtime
+regression that moves a pinned shape still fails loudly, and the GC-churn reruns, the structural
+root-store check and the A/B counters fire independently of the golden. It is **not evidence that
+the output is right**, and it is not a substitute for the differential §9.2 records as lost. A
+golden must not be read as agreement between two engines; there is one engine.
+
+**The maintenance consequence.** A golden you cannot re-derive is a liability the moment
+behaviour deliberately changes — the alternatives were to hand-edit committed files, or to leave
+the suite red. `--freeze` restores the named, reviewable route (a commit that says what moved and
+why, the `8da6fd7` discipline), but note what freezing destroys: re-freezing **is** discarding the
+only thing the golden was holding. Nothing else in this chain notices that an unpinned shape
+changed, so a freeze should be per-shape and justified, never a bulk "make it green". Both
+runners say this in the freeze run itself — the qbe runner on stderr as it starts, the bench
+runner in its summary — so the record of a freeze carries its own caveat. Freeze into a scratch
+directory (`--freeze=DIR`) to diff a candidate set against the committed one before touching it;
+that is how the restored path was proven, and `diff -rq` of the committed goldens against a
+freshly frozen copy is empty.
+
+Also unchanged and worth repeating: the **corpus** `.ssa` baseline is a different instrument.
+`tools/osier-corpus-ssa.sh --freeze` regenerates from the compiler's own output and never needed
+a VM, so it always had a live re-derivation route — and it is still not independent evidence
+either, for the same single-backend reason.

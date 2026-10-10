@@ -12,8 +12,10 @@ A Zig 0.16 native library package. Exposes two modules:
   (`src/gc.zig`: types/heap/collect/scan/roots).  Imports nothing outside
   itself and std.
 - `rt` — the runtime (`src/rt.zig`: state/values/symbols/tables/varray/
-  prims/streams/execplan).  Imports `gc` only — NEVER the ZINC interpreter;
-  that lives in `../zinc-vm` and depends on this package, not the reverse.
+  prims/streams/execplan).  Imports `gc` only — NEVER the ZINC interpreter,
+  which lived in the sibling `../zinc-vm` package and depended on this one, not
+  the reverse.  The interpreter was retired at P8 (2026-10-10) and that package
+  is gone; nothing here ever imported it.
 
 ## The split (handoff-osier-rtsplit)
 

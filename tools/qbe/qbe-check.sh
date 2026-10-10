@@ -42,12 +42,19 @@
 # FREEZING.  The goldens are committed files (tools/qbe/golden/*.txt);
 # re-freezing one is a deliberate edit of that file plus a commit message
 # that says what moved and why (the corpus-baseline 8da6fd7 discipline).
-# The freeze-from-VM mode that originally wrote them (write-only-where-
-# native-and-VM-agreed) died with the interpreter at P8 — a golden no longer
-# has a second engine to agree with, which is the recorded loss the header
-# above states.  A missing golden is a FAIL, never an auto-freeze.
 #
-# Usage: tools/qbe/qbe-check.sh    (exit 0 = all checks pass)
+#     tools/qbe/qbe-check.sh --freeze[=DIR]     (DIR default: tools/qbe/golden)
+#
+# writes every golden from the ONE backend's CURRENT output.  Read what that
+# means before using it: the freeze-from-VM mode that originally wrote these
+# (write-only-where-native-and-VM-agreed) died with the interpreter at P8, so
+# NOTHING verifies a value being frozen — a freeze records what this tree
+# prints today, not that it is right.  A golden is therefore a regression
+# anchor ("this output did not change"), never independent evidence, and
+# re-freezing discards the only thing it was holding.  A missing golden in
+# compare mode is a FAIL, never an auto-freeze.
+#
+# Usage: tools/qbe/qbe-check.sh [--freeze[=DIR]]   (exit 0 = all checks pass)
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -68,6 +75,24 @@ trap 'rm -rf "$TMP"' EXIT
 FAIL=0
 
 GOLDEN="$ROOT/tools/qbe/golden"
+
+# ---- freeze mode (see FREEZING in the header) ------------------------------
+FREEZE=0
+FREEZE_DIR=""
+case "${1:-}" in
+  "")           ;;
+  --freeze)     FREEZE=1 ;;
+  --freeze=*)   FREEZE=1; FREEZE_DIR="${1#--freeze=}" ;;
+  *) echo "qbe-check: unknown argument '$1' (usage: qbe-check.sh [--freeze[=DIR]])" >&2; exit 2 ;;
+esac
+[ "$#" -le 1 ] || { echo "qbe-check: at most one argument (usage: qbe-check.sh [--freeze[=DIR]])" >&2; exit 2; }
+[ -z "$FREEZE_DIR" ] || GOLDEN="$FREEZE_DIR"
+if [ "$FREEZE" = 1 ]; then
+  mkdir -p "$GOLDEN" || { echo "qbe-check: cannot create golden dir $GOLDEN" >&2; exit 2; }
+  echo "qbe-check: FREEZE MODE — writing goldens into $GOLDEN from the ONE backend." >&2
+  echo "qbe-check:   nothing verifies a value being frozen (the second engine died at P8)," >&2
+  echo "qbe-check:   so a golden pins 'the output did not change', not 'the output is right'." >&2
+fi
 
 # Fail loud before ~50 cryptic per-fixture mismatches: the native pipeline
 # needs the vendored qbe and cc (rt.o is built by qbe-mk under its own
@@ -100,16 +125,22 @@ run() {
   bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$TMP/$name")" || {
     echo "FAIL $name: qbe-mk"; FAIL=1; return
   }
-  local exp
+  local nat_out
   # `timeout` guards the native run: bug-2 (clostail) is an infinite loop
   # when the closure self-tail miscompiles, and a regression must fail loudly
   # here rather than wedge the whole check script.
-  local nat_out
   nat_out="$(timeout 60 "$bin" "$entry" "${args[@]}" 2>&1)"
-  exp="$(golden_read "$name")"
-  if [ "$exp" = "__NO_GOLDEN__" ]; then
-    echo "FAIL $name: no golden at $GOLDEN/$name.txt (a golden is frozen deliberately, in a commit that says why)"
-    FAIL=1; return
+  local exp
+  if [ "$FREEZE" = 1 ]; then
+    printf '%s\n' "$nat_out" > "$GOLDEN/$name.txt"
+    exp="$nat_out"
+    echo "FROZE $name: golden <- the one backend's current output (${nat_out:0:80})"
+  else
+    exp="$(golden_read "$name")"
+    if [ "$exp" = "__NO_GOLDEN__" ]; then
+      echo "FAIL $name: no golden at $GOLDEN/$name.txt (a golden is frozen deliberately, in a commit that says why)"
+      FAIL=1; return
+    fi
   fi
   if [ "$nat_out" != "$exp" ]; then
     echo "FAIL $name: golden='$exp' native='$nat_out'"
@@ -148,10 +179,16 @@ run_argv() {
   }
   local nat_out exp
   nat_out="$(timeout 60 env AOTRUN_ARGV=1 "$bin" "$entry" "${args[@]}" 2>&1)"
-  exp="$(golden_read "$name")"
-  if [ "$exp" = "__NO_GOLDEN__" ]; then
-    echo "FAIL $name: no golden at $GOLDEN/$name.txt"
-    FAIL=1; return
+  if [ "$FREEZE" = 1 ]; then
+    printf '%s\n' "$nat_out" > "$GOLDEN/$name.txt"
+    exp="$nat_out"
+    echo "FROZE $name: golden <- the one backend's current output (${nat_out:0:80})"
+  else
+    exp="$(golden_read "$name")"
+    if [ "$exp" = "__NO_GOLDEN__" ]; then
+      echo "FAIL $name: no golden at $GOLDEN/$name.txt"
+      FAIL=1; return
+    fi
   fi
   if [ "$nat_out" != "$exp" ]; then
     echo "FAIL $name: golden='$exp' native='$nat_out'"
@@ -280,10 +317,16 @@ run_io() {
   local nat_out nat_file
   nat_out="$(timeout 60 env QBE_IO_IN="$IO_IN" QBE_IO_OUT="$IO_OUT" "$bin" "$entry" 2>&1)"
   nat_file="$(cat "$IO_OUT" 2>/dev/null)"
-  exp="$(golden_read "$name")"
-  if [ "$exp" = "__NO_GOLDEN__" ]; then
-    echo "FAIL $name: no golden at $GOLDEN/$name.txt"
-    FAIL=1; return
+  if [ "$FREEZE" = 1 ]; then
+    printf '%s\n' "$nat_out" > "$GOLDEN/$name.txt"
+    exp="$nat_out"
+    echo "FROZE $name: golden <- the one backend's current output (${nat_out:0:80})"
+  else
+    exp="$(golden_read "$name")"
+    if [ "$exp" = "__NO_GOLDEN__" ]; then
+      echo "FAIL $name: no golden at $GOLDEN/$name.txt"
+      FAIL=1; return
+    fi
   fi
   if [ "$nat_out" != "$exp" ]; then
     echo "FAIL $name: golden='$exp' native='$nat_out'"

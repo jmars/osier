@@ -25,7 +25,7 @@ branch's equations; scoped-label update is domain-preserving, hence sound by con
 insertion, the shape-changing dual, is rejected — a deliberate position on Rémy's extension dial,
 not a discovery. A measured principality boundary carries an inversion: the witness encoding
 *infers* where the native refinement is *checkable, not inferable*. An Elm-family checker
-implements it: the pre-existing corpus compiles byte-identically against a committed manifest, 152
+implements it: the pre-existing corpus compiles byte-identically against a committed manifest, 154
 regression checks pass, and an external state machine translated from an OCaml thread now has its
 impossible match arms refuted at compile time. An adversarial hunt across three passes found five
 unsound accepts — two in the first escape check, two in the shipping checks, one in the coercion
@@ -311,7 +311,7 @@ outline:
 5. **A working reference implementation, measured against itself and an external program.** The
    discipline runs inside an Elm-family checker: the pre-existing corpus compiles
    *byte-identically* after the change — 149 artifacts with zero moved — and the committed
-   sha256 manifest holds 149 entries; the gate passes 152/152, and the
+   sha256 manifest holds 149 entries; the gate passes 154/154, and the
    compiler's own effect interpreter checks 16 of its 20 branches
    honestly (reproducible bisection script; the four holdouts named, one of them deliberate) —
    *(Section 6)*. The external program — a state machine translated from an OCaml discussion
@@ -700,7 +700,7 @@ conditional on the unifier being *sound* (it must not accept inconsistent constr
 the plain-selection case, on `unifies_field_projection` (the discharged-selection and update
 cases need no unifier axiom). The row-algebra theorems (H1, the domain rule, the update theorem,
 both counterexamples) never mention the axioms. The correspondence between the abstract relation
-and the implementation's unifier is *measured*, not proved: the gate's 152 checks, the
+and the implementation's unifier is *measured*, not proved: the gate's 154 checks, the
 approximation inventory of Section 6.5, and the three-way agreement of Section 4.7 stand on the
 same boundary. Mechanizing the concrete row unifier against these axioms is future work; it
 would discharge the assumption, not change any theorem's statement.
@@ -835,9 +835,9 @@ and would crash); and the five unsound accepts of Section 6.2 are the same class
 branch equation that should not survive its branch either escaping it or dying without its occurs
 check. So: the discipline
 is **necessary** (this theorem-shaped statement, with its mechanism measured) and **sufficient
-for every program in the corpus and the designed fixtures** (122 gate checks on the typing
-surface — the gate total is 152, the other 29 being frontend lambda-lift fixtures and one a
-hand-crafted-bundle run, neither of which exercises the escape rule; the three-pass hunt closed
+for every program in the corpus and the designed fixtures** (125 gate checks on the typing
+surface — the gate total is 154, the other 29 being frontend lambda-lift fixtures, which do not
+exercise the escape rule; the three-pass hunt closed
 all five unsound accepts, and found none
 after the final class-level repair) — sufficiency
 over *all* programs is **not** proved, and is not claimed.
@@ -937,16 +937,17 @@ The discipline is not a paper design with a sketch: it runs inside a real checke
 is an Elm-family compiler with Hindley–Milner inference over Leijen scoped-label rows (the
 pre-existing `elm-compiler/src/Type/*` tree: unification with a row-rewrite, let
 generalization, an eight-library corpus and a self-host track). The change is contained to the
-pattern path and the unifier state; lowering, codegen, and the VM are untouched (types are
-erased). Everything below is *measured*, and every number is reproducible from the artifact by
+pattern path and the unifier state; lowering and codegen are untouched (types are
+erased) — nor was the interpreter back end, while it existed. Everything below is *measured*,
+and every number is reproducible from the artifact by
 one command (`tools/osier-numbers.sh`, which rebuilds the compiler, runs the gate, checks the
 corpus byte-identity, runs the unit suite, builds the Lean project, and re-derives the
 interpreter recount; its output is the source of every number printed here — run on the current
 tree of the artifact repository. The artifact tag `osier-paper-artifact-1` (annotated; it
-dereferences to the commit it was made on) predates the final ten commits, which touch the
+dereferences to the commit it was made on) predates the final commits, which touch the
 documentation, the gate and reproducibility scripts, and the generated fixture registry this
-paper cites — but not the compiler, the Lean project, or the fixture programs, which are
-identical between the tag and the current tree, so no number printed here depends on the lag.
+paper cites, and the codegen backend, whose ZINC interpreter was retired; the counts printed
+here are the current tree's, not the tag's, and the Appendix A correction records both.
 The implementation was split out of the host project that previously contained it: the import
 brought the tree across from the host's then-HEAD, eight commits ahead of the freeze tag
 marking the pre-adversarial-pass baseline, with two further host-side commits following; the
@@ -971,9 +972,9 @@ This invariant is what makes the discipline's addition safe to *adopt*, and the 
 it deliberately: the historical inference path remains primary; the new machinery (branch-local
 capture, discharge, the declaration-directed retry) engages only where the historical path fails
 — so every pre-existing diagnostic is unchanged by construction. The regression gate passes
-152/152 (the designed-fixture matrix with expected outcomes is Table 1 in
+154/154 (the designed-fixture matrix with expected outcomes is Table 1 in
 Appendix A, the complete generated registry is `tests/elm-fixtures/MATRIX.md`, and the gate
-is `tests/elm-fixtures/run-elm-gate.sh`), and the unit suite passes 114/114.
+is `tests/elm-fixtures/run-elm-gate.sh`), and the unit suite passes 95/95.
 
 ### 6.1 What the build surfaced: kinds
 
@@ -1287,8 +1288,8 @@ results, and two early commits in the parent repository from which this one was 
 the coding agents' own sandbox identity. The record does not support a per-line or
 per-component percentage. Parts of the artifact are
 *ports of third-party code*, not original code by anyone — the vendored elm-syntax parser
-(from the Elm compiler), the zinc-vm (a Zig port of the Shen ZINC VM), and the elm/core core
-libraries; there, the assistance was in the porting and adaptation.
+(from the Elm compiler), `vendor/osier-rt` (descended from a Zig port of the Shen ZINC VM), and
+the elm/core libraries; there, the assistance was in the porting and adaptation.
 
 **The human role.** The author directed the work, made the design decisions (the discipline
 itself, the naming, the scope, and what not to claim), constructed the motivating example,
@@ -1532,14 +1533,14 @@ stated, not hidden.
 ## Appendix A: the fixture matrix (the evidence spine)
 
 Every designed program this paper cites, gate-registered and re-measured on the current tree
-(`tests/elm-fixtures/run-elm-gate.sh`, PASS=152 FAIL=0; the gate also holds the pre-existing
+(`tests/elm-fixtures/run-elm-gate.sh`, PASS=154 FAIL=0; the gate also holds the pre-existing
 corpus fixtures). The oracle is the compiler's output artifact, never the process exit code; the
-`run` rows execute the fixture through the VM and diff its printed value against a pinned
+`run` rows execute the fixture natively and diff its printed value against the same pinned
 expected output (Section 6.6), while `clean`/`err` rows assert the compile outcome only.
 
 **Table 1.** The fixture matrix (the evidence spine). Source: the gate
 `tests/elm-fixtures/run-elm-gate.sh`, whose complete registry is generated as
-`tests/elm-fixtures/MATRIX.md` (152 rows, by `tools/gen-fixture-matrix.sh`; staleness check
+`tests/elm-fixtures/MATRIX.md` (154 rows, by `tools/gen-fixture-matrix.sh`; staleness check
 `tools/gen-fixture-matrix.sh --check`) — this table is the paper-cited subset, with the claim
 each row pins; where the two disagree, the registry and the gate win. The `measured` column is
 re-derived by `tools/osier-numbers.sh`.
@@ -1766,6 +1767,12 @@ provenance markers are unchanged: a work the survey carries as [SECOND-HAND] sta
 
 ### Appendix A correction (2026-10-10, evidence-chain re-aim)
 
+**SUPERSEDED IN FULL by the 2026-10-11 correction below.** This correction was measured while
+the ZINC interpreter still existed: its `PASS=268`/`PASS=156` counts, its `ELM_GATE_NATIVE`
+switch and its two "single-engine for now" rows (`rawrun`, `depth`) all describe a tree that
+was deleted at P8. It is kept as the record of what was true on 2026-10-10 and must not be
+read as a statement about the current tree.
+
 *Appended, not reworded — the paragraph above still describes the tree it was measured on.
 Correction:* as of this date the fixture gate no longer runs its executable rows through the
 ZINC VM alone. Every `run` / `run2` / `io` / `sigdeath` row (112 rows) now has a **native
@@ -1784,3 +1791,66 @@ the whole-compiler `.ssa` fixed point) are a **regression net, not a differentia
 wrong-but-plausible output on an unpinned shape is no longer caught by construction. The
 planned Lua backend would restore a true differential (two backends, two value
 representations, Lua's own GC). See `ARTIFACT.md` §9 for the full statement.
+
+---
+
+### Appendix A correction (2026-10-11, P8: the ZINC interpreter is gone)
+
+**This correction SUPERSEDES the whole of the 2026-10-10 correction above.** That one was
+measured while the ZINC interpreter still existed; it is kept here, figures and all, as the
+record of what was true on 2026-10-10, and nothing in it states anything about the current
+tree. What follows is measured on the tip *after* the deletion.
+
+**What left the tree.** The interpreter package `vendor/zinc-vm`, everything that linked it
+(the `elmvm` driver, the benchmark driver, `tools/aot/`, the self-host compile and gate
+scripts), the csexp backend (`Zinc/Emit.elm`, `Zinc/Csexp.elm`, `Mid/ToZinc.elm` and the
+ZINC-only mid-tier passes), the `MIDTIER=0`-vs-`1` differential and its tooling, and the
+committed csexp bootstrap seed. What stays is what the earlier correction already named as
+the replacement: the frontend, the checker, the Lean mechanization, `vendor/osier-rt`, and the
+QBE backend the fixtures now execute through.
+
+**The execution model is native, and only native.** The gate's executable rows (`run`,
+`run2`, `run_io`, `sigdeath` — 112 rows) compile the fixture through the QBE backend
+(elm → `.ssa` → the vendored qbe → cc + `rt.o`) and run the resulting binary. There is no
+interpreter in the tree and no interpreter-only mode, so the previous correction's claim that
+the `run` rows hold on both engines no longer has a second engine behind it: the rows hold,
+and the bytes they are held against are the *same pinned `expected/*.txt` files*, but the
+sentence that said they execute *through the VM* is false and has been corrected in place in
+Appendix A rather than reworded here.
+
+**The counts at the tip.** Gate `PASS=154 FAIL=0`. Corpus byte-identity 149 = 149 against the
+`.ssa` anchor. `TestMain` 95 assertions. The native slice runner `tools/qbe/qbe-check.sh`
+221 PASS / 0 FAIL (104 committed goldens plus the cross-target rows). The whole-compiler
+`.ssa` fixed point byte-identical. Seed status `none — retired at P8, pending the Lua
+backend`. The environment switch the previous correction's recipe used, `ELM_GATE_NATIVE`,
+no longer exists, so that recipe cannot be run at all.
+
+**The two rows the previous correction named as its single-engine losses are themselves
+gone.** `rawrun` (a hand-written csexp bundle no Elm source can produce) died with the
+format, and `depth` (which asserted the interpreter's call-stack cap) died with the
+interpreter; its native counterpart `natdepth` stays, and is registered.
+
+**The paper's own figures, corrected in the body.** The load-bearing numbers this deletion
+moved were corrected where they are claimed, not only in this appendix — the counts, the
+execution-method sentence, and the reproducibility claim:
+
+| where it is claimed | was | is |
+|---|---|---|
+| the abstract; the contribution list; the correspondence section; the necessity-and-sufficiency argument | 152 regression checks | 154 |
+| the implementation section's unit-suite figure | 114/114 | 95/95 |
+| the Appendix A preamble and the Table 1 caption | `PASS=152`; 152 rows | `PASS=154`; 154 rows |
+| the Appendix A preamble's method sentence | "the `run` rows execute the fixture through the VM" | they execute through the native backend |
+| the provenance disclosure's list of vendored third-party code | "the zinc-vm (a Zig port of the Shen ZINC VM)" | the vendored native runtime, descended from a Zig port of the Shen ZINC VM |
+
+The `necessary`/`sufficient` argument's decomposition moved with the total: the gate registers
+154 checks, of which 29 are the frontend lambda-lift fixtures (`MATRIX.md` rows 125–153, the
+`lift*` names); the third category that decomposition named, a hand-crafted-bundle run, is
+gone with the csexp format.
+
+**What did not change.** The differential loss the previous correction states stands, and
+stands unmitigated: there is one backend, so a same-input backend disagreement on a shape no
+fixture pins is invisible. The anchors that replaced it — golden outputs, the `.ssa` corpus
+baseline, the GC-churn reruns, the structural counters, the whole-compiler `.ssa` fixed point
+— are a **regression net, not a differential**. `ARTIFACT.md` sections 9.5 and 9.6 carry the
+full statement, including what a golden can and cannot be evidence for now that it has no
+second implementation to agree with.
