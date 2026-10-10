@@ -35,8 +35,10 @@ mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
 # change afterwards.  Rebuild whenever anything it was compiled from is newer
 # than it: the compiler sources (src/ + the core-libs corpus + run.js and the
 # compiled compiler.js they produce), the selfhost group it compiles, the AOT
-# runtime/driver, the VM/GC the driver links, and the aotdump that produced
-# its gen.zig.  The probe FAILS SAFE: if `find` cannot run, rebuild.  The
+# runtime/driver, the runtime package it links (vendor/osier-rt: gc + rt, the
+# post-split home of the GC/values the QBE and AOT paths share) and the VM it
+# still links (vendor/zinc-vm, the interpreter side), and the aotdump that
+# produced its gen.zig.  The probe FAILS SAFE: if `find` cannot run, rebuild.  The
 # cost of a false positive is one aot-build (~9 min, see below); the cost of
 # a false negative is a compiler binary answering for sources it was not
 # built from -- the stale-artifact class qbe-mk.sh's rt.o guard exists for.
@@ -49,7 +51,8 @@ else
   elmc_newer="$(find \
     "$ROOT/elm-compiler/src" "$ROOT/elm-compiler/core-libs" "$ROOT/elm-compiler/selfhost" \
     "$ROOT/elm-compiler/run.js" "$ROOT/elm-compiler/compiler.js" \
-    "$ROOT/tools/aot" "$ROOT/vendor/zinc-vm/src" "$ROOT/src/effectloop.zig" \
+    "$ROOT/tools/aot" "$ROOT/vendor/zinc-vm/src" "$ROOT/vendor/osier-rt/src" \
+    "$ROOT/src/effectloop.zig" \
     "$ROOT/zig-out/bin/aotdump" \
     -newer "$BIN" -print -quit 2>/dev/null)" || elmc_newer="PROBE_FAILED"
   if [ -n "$elmc_newer" ]; then

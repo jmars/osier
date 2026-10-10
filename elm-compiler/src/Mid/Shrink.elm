@@ -1000,7 +1000,7 @@ mapSnd f ( a, b ) =
 
 -- ============================ PURITY / TRIVIALITY ============================
 -- The judgement is about what the VM can OBSERVE, so it is derived from the
--- prim table in `vendor/zinc-vm/src/vm/prims.zig`, not from Elm-level
+-- prim table in `vendor/osier-rt/src/rt/prims.zig`, not from Elm-level
 -- intuition.  A prim is in `purePrims` only if evaluating it and DISCARDING the
 -- result is unobservable: it cannot RAISE, WRITE, or read mutable state.  This
 -- is a TYPE-ERASED judgement — "cannot raise" must hold for EVERY value the VM

@@ -134,7 +134,7 @@ fixtures) after each item. ReleaseFast compiles out the GC verify hook
 
 ## Minimal file set
 
-vendor/zinc-vm/src/vm/interp.zig, vendor/zinc-vm/src/gc/heap.zig,
-vendor/zinc-vm/src/vm/values.zig, vendor/zinc-vm/src/gc/{types,collect}.zig
+vendor/zinc-vm/src/vm/interp.zig, vendor/osier-rt/src/gc/heap.zig,
+vendor/osier-rt/src/rt/values.zig, vendor/osier-rt/src/gc/{types,collect}.zig
 (only if valCons), vendor/zinc-vm/src/vm/parser.zig, tools/elmvm.zig + app
 heap-size sites, build.zig (ReleaseFast default).

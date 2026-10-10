@@ -172,6 +172,37 @@ rawrun() {
   add_check rawrun "$name" "$fn" "$exp" "" "" "$FIX/$name.csexp" "$FIX/$name.csexp" rawrun
 }
 
+# sigdeath <name> <fn> <expected>
+#
+# THE SIGNAL-DEATH CHECK (osier-rtsplit follow-up).  waitStatusCode's SIGNAL
+# ARM (vendor/osier-rt/src/rt/execplan.zig:904-906, `if WIFEXITED -> EXITSTATUS;
+# else 128 + (st & 0x7f)`) translates a child reaped WIFSIGNALED into 128+signum.
+# Its only test was the deleted `wait/kill` prim test, and the arm SURVIVES on
+# two live paths: execplan.zig's runPipeline (:970 the fork/waitpid path, :1092
+# the pipeline reap) and src/effectloop.zig's reapChildren (:1042) /
+# reapBlocking (:1073), the M9 event loop.  The two
+# fixtures cover those two call sites — signaldeath.elm (Platform.worker ->
+# synchronous) and signaldeathasync.elm (Platform.program -> effect loop) —
+# and both expect 137: their plan is `sh -c 'kill -9 $$'`, so the child dies
+# by SIGKILL, the status WORD is 9, and the arm must answer 128+9.
+#
+# WHY THE EXPECTED VALUE DISCRIMINATES: a decoder with the signal arm dropped
+# answers EXITSTATUS(9) = (9 >> 8) & 0xff = 0, so it prints "0||" and cannot
+# produce "137||".  That asymmetry was MEASURED, not assumed: waitStatusCode
+# was mutated to the exit-only form in a scratch copy of the tree, and both
+# rows failed there ("exp[137||] got[0||]") while the unmutated tree passes —
+# which also rules the fixtures out as vacuous, because a child that exited
+# NORMALLY with code 137 would have kept passing under the mutation.
+#
+# Registered WITHOUT a compile group, like `depth`/`natdepth`:
+# tools/osier-corpus-baseline.sha256 pins the batch's artifact set
+# (149 artifacts = 149 manifest entries), so these rows compile their bundle on
+# demand instead (one extra node process each, ~0.4s).
+sigdeath() {
+  local name="$1" fn="$2" exp="$3"
+  add_check sigdeath "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "" sigdeath
+}
+
 # depth <name> <fn> <control-depth> <past-cap-margin> <expected-control-value>
 #
 # THE OUT-OF-FRAMES CHECK (handoff osier-vmdepth).  `run`/`rawrun` compare
@@ -319,6 +350,11 @@ run execglob     main   "$(read_expected execglob)"
 run asyncorder   main   "$(read_expected asyncorder)"
 run fastexec     main   "$(read_expected fastexec)"
 run asyncpure    main   "$(read_expected asyncpure)"
+# --- osier-rtsplit follow-up: a child that dies BY SIGNAL is 128+sig ---
+# The two call sites of waitStatusCode's signal arm (see the sigdeath helper):
+# the synchronous runner and the M9 effect-loop reap.
+sigdeath signaldeath      main "$(read_expected signaldeath)"
+sigdeath signaldeathasync main "$(read_expected signaldeathasync)"
 compile_error dup          "duplicate top-level definition in Dup: f"
 compile_error shadowerr    "is both a top-level definition and imported via"
 compile_error shadowtyperr "is both a top-level definition and imported via"
@@ -772,9 +808,29 @@ dispatch() {
         echo "FAIL $name (raw bundle $fn): exp[$exp] got[$got]"; fail=$((fail+1))
       fi
       ;;
+    sigdeath)
+      # See the sigdeath() helper: no compile group (the corpus baseline pins
+      # the batch artifact set), so compile the bundle on demand — the same
+      # shape as `depth`, and the reason the batch stays at 149 artifacts.
+      if ! node "$CDIR/run.js" "$fixfile" "$OUT/$name.csexp" >/dev/null 2>&1 || [ ! -s "$OUT/$name.csexp" ]; then
+        echo "FAIL $name: on-demand compile failed: $fixfile"; fail=$((fail+1)); return
+      fi
+      if head -c 4 "$OUT/$name.csexp" | grep -q '^err '; then
+        echo "FAIL $name: compile error: $(cat "$OUT/$name.csexp")"; fail=$((fail+1)); return
+      fi
+      mod=$(module_name "$fixfile")
+      qname="$mod.$fn"
+      got=$("$ELMVM" "$OUT/$name.csexp" "$qname" 2>&1)
+      if [ "$got" = "$exp" ]; then
+        echo "PASS $name ($qname -> $got)"; pass=$((pass+1))
+      else
+        echo "FAIL $name ($qname): exp[$exp] got[$got]"; fail=$((fail+1))
+      fi
+      ;;
     depth)
-      # See the depth() helper: this is the ONE check that compiles its own
-      # bundle (no register_group — the corpus baseline pins the batch set) and
+      # See the depth() helper: this is one of the checks that compile their
+      # own bundle (no register_group — the corpus baseline pins the batch
+      # set; see also `sigdeath` and `natdepth`) and
       # the ONE check that asserts on the EXIT STATUS, both because the defect
       # it pins is a silent wrong answer with a SUCCESS status.
       if ! node "$CDIR/run.js" "$fixfile" "$outfile" >/dev/null 2>&1 || [ ! -s "$outfile" ]; then

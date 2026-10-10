@@ -755,7 +755,7 @@ order — this is not a modeling choice: records lower to cons pairs
 [M: `elm-compiler/src/Lower/Expr.elm:1117-1130` and `recordExpr
 `:1130-1141`]. Selection lowers to `assoc` + `snd`, and **`assoc` is
 first-match-wins from the head** [M: `Lower/Expr.elm:1147-1151`
-`recordAccess`; `vendor/zinc-vm/src/vm/prims.zig:267-288` `primAssoc` — the
+`recordAccess`; `vendor/osier-rt/src/rt/prims.zig:237-262` `primAssoc` — the
 loop breaks on the first `deepEqual` key match]. Update lowers to
 **cons-prepend-shadow**: each setter conses a fresh `(ℓ, v)` pair onto the
 front of the base record, so the new pair *shadows* any older same-label

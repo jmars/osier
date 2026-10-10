@@ -358,7 +358,8 @@ always escapes — meaning the `Con`/`rt_con` half is correct but cannot be exer
 
    COMPARISON SEMANTICS ARE THE VM'S, NOT "IEEE BY ASSUMPTION": the VM's
    primEq on two floats is `asFloat a1 == asFloat a2` and primLt/Le/Gt/Ge is
-   `asFloat a1 < asFloat a2` (vendor/zinc-vm/src/vm/prims.zig:1283-1405), i.e.
+   `asFloat a1 < asFloat a2` (vendor/osier-rt/src/rt/prims.zig:806-925,
+   primEq/primLt/primLe/primGt/primGe), i.e.
    the ORDERED compares — so `NaN == NaN` is false, `NaN < x` is false and
    `-0.0 == 0.0` is true, which is what QBE's `ceqd`/`cltd`/... answer.  Pinned
    by `nanEq`/`nanLt`/`nanGe`, `negZeroEq` (`(-1.0 * 0.0) == 0.0`),
@@ -862,3 +863,49 @@ Consequences visible in this file's domain:
 The va* stack helpers (`vaInit`/`vaPush`/`vaPop`/`vaFree`) the runtime stages
 prim args through moved from `interp.zig` to `osier-rt`'s `varray.zig`;
 `rt.zig` and `effectloop.zig` import them from there.
+
+### Follow-up: the split's second rt.o site, and the coverage it cost (2026-10-10)
+
+The P3 review (`handoff-osier-rtsplit-review`) landed one blocker on this
+section's own account: the split re-pointed `tools/qbe/qbe-mk.sh`'s rt.o build
+line but **missed the duplicate in `tools/qbe/qbe-selfhost.sh`**, whose
+freshness guard already watched `vendor/osier-rt/src` while the command it
+then ran still named `vendor/zinc-vm/src/gc.zig` (gone) and `vm.zig` (not
+imported by `rt.zig` any more).  MEASURED: that graph fails
+`vendor/zinc-vm/src/gc.zig:1:1: error: unable to load 'gc.zig': FileNotFound`;
+the script now runs the command quoted above verbatim.
+
+A correction to the review's account of *why* it hid, worth recording because
+it changes how the failure is classified.  The review says `tools/qbe/rt.o` is
+**TRACKED**, so a checkout gives it the checkout timestamp.  MEASURED: it is
+**not** tracked — `git check-ignore -v tools/qbe/rt.o` reports
+`.gitignore:25:tools/qbe/rt.o`, `git ls-tree HEAD tools/qbe/` holds only
+`rt.zig`, and `git log --all -- tools/qbe/rt.o` is empty.  MEASURED: the repo
+has no active git hooks (`core.hooksPath` unset; `.git/hooks/` holds no
+executable hook), so a checkout does not produce the object either.  Together
+those give the stronger reading — on a FRESH CLONE the object is **absent**,
+the guard's `[ ! -f "$RT" ]` arm fires **deterministically**, and the pre-fix
+script died on every fresh clone rather than only when mtimes happened to order
+the wrong way.  (Marked as a reading: the fresh clone itself was not cut here;
+what was measured is the untracked-ness, the absence of hooks, the missing-file
+arm firing, and the old graph's failure — the deleted-object run below exercises
+exactly the state a fresh clone is in.)  VERIFIED end to end
+after the fix, with the object deleted first: `qbe-selfhost.sh` exit 0,
+`BYTE IDENTITY vs tools/bootstrap/selfhost.csexp: PASS (cmp exit 0)`,
+sha256 `ac8acd77…` on both sides.
+
+Two things the same review found that were *not* about this file, fixed in the
+same pass:
+
+- `tools/elmc.sh`'s freshness probe watched `vendor/zinc-vm/src` but not
+  `vendor/osier-rt/src`, while its build compiles `osier-rt`'s gc + rt into
+  `elmc` — an edit to the runtime left the compiler answering from a stale
+  binary.  The probe now watches both packages.
+- `waitStatusCode`'s 128+sig arm — the translation this whole file depends on
+  when a QBE-built binary's child dies by signal — lost its only test with the
+  deleted `wait/kill` prim test.  The gate now pins it at BOTH of its live call
+  sites (`tests/elm-fixtures/signaldeath.elm` for the synchronous runner,
+  `signaldeathasync.elm` for the effect loop): both run `sh -c 'kill -9 $$'`
+  and require `137`.  The rows are asymmetry-proven — mutating the arm to
+  `EXITSTATUS` in a scratch tree turns both into `0||` (see the `sigdeath`
+  helper in `tests/elm-fixtures/run-elm-gate.sh`).

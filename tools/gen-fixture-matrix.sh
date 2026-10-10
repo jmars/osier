@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # gen-fixture-matrix.sh — render tests/elm-fixtures/MATRIX.md from the GATE'S
 # OWN REGISTRY (the run / run2 / run_io / compile_clean / compile_error /
-# out_cmp / rawrun / depth calls at the foot of tests/elm-fixtures/run-elm-gate.sh).
+# out_cmp / rawrun / sigdeath / depth / natdepth calls at the foot of
+# tests/elm-fixtures/run-elm-gate.sh).
 #
 # The matrix is never hand-copied: the gate dumps its registered checks
 # (ELM_GATE_MATRIX=<path>) and this script formats that dump, so the file
@@ -98,6 +99,7 @@ fails loudly rather than letting this listing go stale.
 | \`compile_error\` | \`err\` | compilation must emit \`err <message>\` containing \`expected\` |
 | \`out_cmp\` | \`cmp\` | the raw file an earlier run wrote must equal its \`expected/*.txt\` bytes |
 | \`rawrun\` | \`rawrun\` | runs a committed \`.csexp\` bundle no Elm source can produce (e.g. an unknown Task ctor) |
+| \`sigdeath\` | \`sigdeath\` | a child that dies BY SIGNAL must be reported as \`128+signum\` (compiles its own bundle; \`expected\` = the \`<code>|<out>|<err>\` tuple): \`sh -c 'kill -9 \$\$'\` is reaped WIFSIGNALED, so the code must be 137 — a decoder without \`waitStatusCode\`'s signal arm answers \`EXITSTATUS(9) = 0\` |
 | \`depth\` | \`depth\` | deep NON-tail recursion past \`CALL_STACK_DEPTH\` must be LOUD (compiles its own bundle; \`args\` = control-depth past-cap-margin): control depth and \`CAP-1\` print \`expected\`; past the cap the process exits non-zero with the \`call stack depth exceeded\` diagnostic on stderr and no value on stdout |
 | \`natdepth\` | \`natdepth\` | the NATIVE twin of \`depth\`: deep NON-tail recursion past the C-stack budget must be LOUD (builds its own binary via \`tools/qbe/qbe-mk.sh\`; \`args\` = control-depth past-depth deep-depth): the control prints \`expected\` under the check's own 1 MiB \`ulimit -s\` (\`QBE_NO_RLIMIT=1\`); past the boundary the process exits non-zero with the \`native stack depth exceeded\` diagnostic on stderr and no value on stdout; deep-depth must still complete at the driver's raised 64 MiB limit |
 

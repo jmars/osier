@@ -5,7 +5,7 @@ module Mid.ConstFold exposing (Stats, run)
 --
 -- WHY THE ORACLE RULE IS THE WHOLE PASS.  A fold rule is a claim about what
 -- the ZINC VM would have computed at run time, so the rule must be read off
--- `vendor/zinc-vm/src/vm/prims.zig` — not off Elm's semantics and not off the
+-- `vendor/osier-rt/src/rt/prims.zig` — not off Elm's semantics and not off the
 -- source language's.  The three places the two disagree, and which therefore
 -- shape this pass's rule set:
 --

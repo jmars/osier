@@ -1,7 +1,7 @@
 module CallOverflow exposing (deep, main)
 
 -- NON-TAIL recursion driven PAST the VM's call-frame cap (CALL_STACK_DEPTH =
--- 65536, vendor/zinc-vm/src/gc/types.zig:205).  This fixture pins the VM's
+-- 65536, vendor/osier-rt/src/gc/types.zig:205).  This fixture pins the VM's
 -- OUT-OF-FRAMES failure MODE, not a value: a user must never get a wrong
 -- answer with a success status.
 --

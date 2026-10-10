@@ -197,10 +197,10 @@ fi
 if [ ! -f "$RT" ] || [ -n "$rt_newer" ]; then
   say "qbe-selfhost: building $RT (tools/qbe/rt.zig is newer than it)"
   zig build-obj -O ReleaseFast -lc -femit-bin="$RT" \
-    --dep gc --dep vm --dep effectloop -Mroot="$ROOT/tools/qbe/rt.zig" \
-    -Mgc="$ROOT/vendor/zinc-vm/src/gc.zig" \
-    --dep gc -Mvm="$ROOT/vendor/zinc-vm/src/vm.zig" \
-    --dep gc --dep vm -Meffectloop="$ROOT/src/effectloop.zig" \
+    --dep gc --dep rt --dep effectloop -Mroot="$ROOT/tools/qbe/rt.zig" \
+    -Mgc="$ROOT/vendor/osier-rt/src/gc.zig" \
+    --dep gc -Mrt="$ROOT/vendor/osier-rt/src/rt.zig" \
+    --dep gc --dep rt -Meffectloop="$ROOT/src/effectloop.zig" \
     || die "rt.o rebuild FAILED — refusing to answer from a stale $RT"
 fi
 

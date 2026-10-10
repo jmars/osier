@@ -1084,7 +1084,7 @@ reboxBoolean dest raw s =
 -- `f : Float -> Float; f x = x + 1.0; main = f 3`: the call site is
 -- `storew 0; storel 3` (tagNumber = 0).  The VM is TAG-directed and
 -- PROMOTES — `+ - *` take the f64 arm when EITHER operand is `.float`
--- (vendor/zinc-vm/src/vm/prims.zig:1204-1246) — so the VM answers 4.0, while a
+-- (vendor/osier-rt/src/rt/prims.zig:727-764, primAdd/primSub/primMul) — so the VM answers 4.0, while a
 -- raw `loadd` of that parameter's payload reinterprets the i64 payload bits as
 -- a double.  MEASURED by hand-patching exactly what the monotype half would
 -- emit into that .ssa: 4.0 (elmvm) vs 1.0 (native), BOTH exit 0.  That is the
