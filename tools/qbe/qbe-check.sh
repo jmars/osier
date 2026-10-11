@@ -1014,6 +1014,23 @@ if "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/mutualtail.elm Mutual.even "$T
     echo "FAIL mutual-tail $d hops: golden='1' native='$nat_out'"
     FAIL=1
   fi
+  # GC-CHURN counterpart (handoff osier-passc): every hop builds a .tail, and
+  # rt_tail_known stages an arity<=3 call's args in a STATIC buffer instead of a
+  # fresh GC array (rt.zig).  That buffer is unrooted, and sound only because no
+  # collection can run between the .tail build and the callee's prologue blit
+  # (the blit and rt_frame_enter allocate nothing in the GC heap).  What this row
+  # checks is the honest half: the whole path runs at the minimum heap, where the
+  # collector works constantly around it, and the pinned answer must be
+  # unchanged.  It CANNOT prove that window is collection-free — only the
+  # argument in rt.zig does that — so a green row here is a regression net, not
+  # evidence for the invariant.
+  churn_out="$(QBE_HEAP_MB=$CHURN_MB timeout 120 "$TMP/mutual/mutualtail" Mutual.even "$d" 2>&1)"
+  if [ "$churn_out" = "1" ]; then
+    echo "PASS mutual-tail gc-churn (QBE_HEAP_MB=$CHURN_MB, $d hops): staged tail args, minimum heap"
+  else
+    echo "FAIL mutual-tail gc-churn (QBE_HEAP_MB=$CHURN_MB): golden='1' native='$churn_out'"
+    FAIL=1
+  fi
 fi
 
 # ---- cross-target smoke: the .ssa is target-NEUTRAL IL, so it must also

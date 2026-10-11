@@ -5,12 +5,16 @@
 //!
 //!   rt_frame_enter(nslots) -> *Value   pooled, ROOTED frame slots
 //!   rt_frame_leave()                    pop the frame + its root
-//!   rt_string(ptr, len) -> Value        GC string from static bytes
+//!   rt_string(ptr, len) -> Value        the (interned) GC string of a static
+//!                                      literal symbol — one GC string per
+//!                                      symbol, not per evaluation
 //!   rt_global_closure(desc) -> Value    the (cached) closure of a defun
 //!   rt_make_closure(desc, caps, n) -> Value   closure with captured env
 //!   rt_apply(fslot, args, n) -> Value   generic/partial/over application
 //!   rt_apply_tail(fslot, args, n) -> Ret   the tail-position twin (returns .tail)
 //!   rt_tail_known(code, argblock, n) -> Ret   direct saturated tail call
+//!                                      (arity <= 3 stages its args in a
+//!                                      static buffer, no GC array)
 //!   rt_bounce(ret) -> Value             chase a .tail chain to a .done value
 //!   rt_prim(name, args, n) -> Value     the EXACT VM primitive (fallback)
 //!   main(entry, args...)                the driver (the gate-harness CLI shape)
@@ -91,10 +95,12 @@ pub const Meta = extern struct {
 ///   kind  @40  (4)  discriminator: 0 = done, 1 = tail;
 ///   f     @48  (8)  the callee code pointer (`.tail`);
 ///   e     @56  (8)  the captures array (env), or null;
-///   args  @64  (8)  a fresh GC array of `arity` Value structs;
+///   args  @64  (8)  the `arity` Value structs, in a fresh GC array OR — for
+///                  arity <= rt_tail_known's tail_stage_len — the runtime's
+///                  static staging buffer (same lifetime contract);
 ///   arity @72  (4)  the static arity == `args` length.
-/// A `.tail`'s `args`/`e` are freshly allocated by rt_tail_known / rt_apply_tail
-/// and survive the caller's rt_frame_leave because NO collection runs between
+/// A `.tail`'s `args`/`e` are built by rt_tail_known / rt_apply_tail and
+/// survive the caller's rt_frame_leave because NO collection runs between
 /// the .tail build and the next callee's prologue blitting them into its own
 /// rooted frame (the AOT's single-referee buildEnv invariant).
 pub const Ret = extern struct {
@@ -220,7 +226,13 @@ export fn rt_frame_leave() callconv(.c) void {
     // Dropping the cache-slot root here is safe: the cached closure Value
     // holds NO GC pointers (static Desc* code, null env), so it never
     // needed scanning.  Any future forever-root pushed inside a frame must
-    // hold no GC pointers, or this contract breaks.
+    // hold no GC pointers, or this contract breaks.  THE ONE FOREVER-ROOT
+    // THAT DOES HOLD GC POINTERS — the rt_string intern table (internInit) —
+    // is therefore pushed from main BEFORE any generated code can enter a
+    // frame, so it sits below every frame's watermark and survives every
+    // rootPopTo.  Do not move that push into rtInit: rtInit also runs from
+    // inside a frame (rt_frame_enter), and a root pushed there would be
+    // popped by the very next leave.
     g.rootPopTo(hdr.wm);
     const n = hdr.live;
     if (no_frame_reuse) return; // debug: never reuse (flag set in main)
@@ -235,12 +247,101 @@ fn zeroValue() Value {
 }
 
 // =====================================================================
+//  Static-literal caches: rt_string interning + rt_tail_known staging
+// =====================================================================
+
+// QBE_RT_COUNTS=1 prints one exit-time line of RUNTIME mechanism counters on
+// stderr (the QBE_GC_STATS precedent: stdout is never touched, and the
+// default run is unchanged).  These count the two mechanisms THIS pass
+// changes; the static `.ssa` census (rt_string / rt_tail_known SITE counts)
+// is invariant by construction — no emitter was touched — so the runtime
+// counters are the ones that can move.
+var rt_string_calls: u64 = 0; // every rt_string entry
+var intern_hits: u64 = 0; // already-interned symbol (no allocation)
+var intern_misses: u64 = 0; // first evaluation of a symbol (ONE allocation, then cached)
+var intern_fallbacks: u64 = 0; // hatch off / table full — the old per-call allocation
+var tail_known_calls: u64 = 0; // every rt_tail_known entry
+var tail_staged: u64 = 0; // arity <= tail_stage_len: args in the static buffer
+var tail_gcarray: u64 = 0; // arity > tail_stage_len: the fresh GC array
+
+// ---- rt_string interning, per static data symbol ----
+//
+// MEASURED (handoff-osier-midpasses-plan, 2026-10-10): rt_string is called
+// PER LITERAL EVALUATION — every time a string literal's code path runs, a
+// fresh GC string is allocated.  A literal's bytes live in ONE static data
+// symbol per source SITE (Mid.Qbe.Lower's `strname`), and that symbol's
+// address is passed here, so the address IS the site's identity: intern once
+// per site and hand back the SAME Value for the rest of the run.
+//
+// WHY THIS IS OBSERVABLE-SAFE: string values are compared by CONTENT
+// everywhere in this runtime (prims.primEq and values.deepEqual both memcmp
+// `strSlice`), never by identity — so returning one object where there used
+// to be many cannot change what a program prints or computes.
+//
+// ROOTING, and why this is NOT rt_global_closure's shape.  A closure cache
+// slot holds NO GC pointers, so rt_frame_leave's rootPopTo may unroot it (see
+// rt_frame_leave).  An interned string IS a heap pointer and must stay rooted
+// for the life of the program, so the value array is registered as ONE
+// ROOT_VALUE_ARRAY with a live count — pushed by internInit from MAIN, before
+// any generated code can enter a frame, and never lazily from inside one.
+const intern_cap: usize = 2048; // interned symbols; 2.7x the whole compiler's 747
+const intern_slots: usize = intern_cap * 2; // power of two, never more than half full
+var intern_vals: [intern_cap]Value = undefined;
+var intern_live: i32 = 0;
+// ONE 16-byte entry per slot (key + value index), not two parallel arrays:
+// the probe is a random access into this table on every rt_string call, and
+// two arrays means two cache lines per probe.  Sized so the table (64 KB at
+// intern_cap 2048) stays near-resident; a table that overflows L2 makes the
+// hit path cost roughly what the allocation it replaces did — measured on the
+// earlier 655 KB shape, where the interning was a wash on a string-hot probe.
+const InternEnt = extern struct { key: usize, idx: u32 };
+var intern_tab: [intern_slots]InternEnt = [_]InternEnt{.{ .key = 0, .idx = 0 }} ** intern_slots; // key 0 = empty (a data symbol is never at address 0)
+var intern_rooted = false;
+var no_string_intern = false; // QBE_NOSTRINGINTERN=1: the A/B hatch (set in main)
+
+fn internInit() void {
+    if (intern_rooted) return;
+    g.rootPushValueArray(&intern_vals, &intern_live);
+    intern_rooted = true;
+}
+
+fn internHash(key: usize) usize {
+    var h = key *% 0x9E3779B97F4A7C15;
+    h ^= h >> 29;
+    return h & (intern_slots - 1);
+}
+
+// =====================================================================
 //  Constructors
 // =====================================================================
 
 export fn rt_string(data: [*]const u8, len: i32) callconv(.c) Value {
     rtInit();
-    return values.valString(g, data[0..@intCast(len)]);
+    rt_string_calls += 1;
+    // The table is only sound once its root array exists (internInit, main).
+    std.debug.assert(intern_rooted);
+    const key = @intFromPtr(data);
+    var i = internHash(key);
+    // insertions stop at intern_cap == intern_slots/2, so the probe always
+    // meets an empty slot and terminates.
+    while (intern_tab[i].key != 0) : (i = (i + 1) & (intern_slots - 1)) {
+        if (intern_tab[i].key == key) {
+            intern_hits += 1;
+            return intern_vals[intern_tab[i].idx];
+        }
+    }
+    if (no_string_intern or intern_live >= intern_cap) {
+        intern_fallbacks += 1;
+        return values.valString(g, data[0..@intCast(len)]);
+    }
+    const v = values.valString(g, data[0..@intCast(len)]);
+    // no allocation between the probe above and these stores, so `i` is still
+    // this key's empty slot (the table is not GC memory and cannot move).
+    intern_tab[i] = .{ .key = key, .idx = @intCast(intern_live) };
+    intern_vals[@intCast(intern_live)] = v;
+    intern_live += 1;
+    intern_misses += 1;
+    return v;
 }
 
 /// The closure Value of a top-level defun — CACHED per descriptor in a
@@ -451,13 +552,52 @@ export fn rt_bounce(r: *const Ret) callconv(.c) Value {
     return bounce(r.*);
 }
 
-/// A direct saturated tail call to a known defun (no captures): copy the
-/// staged args (in the caller's rooted frame) into a fresh GC array so they
-/// survive the caller's rt_frame_leave, and return the `.tail`.
+/// A direct saturated tail call to a known defun (no captures): stage the args
+/// (in the caller's rooted frame) somewhere they survive the caller's
+/// rt_frame_leave, and return the `.tail`.
+///
+/// SMALL ARITIES DO NOT GET A GC ARRAY.  The pre-change shape allocated a fresh
+/// GC array per tail call; for `nargs <= tail_stage_len` the args are copied
+/// into ONE static staging buffer instead, and only larger arities fall back
+/// to `allocArray`.  What that removes is the allocation itself (nursery bump +
+/// the scavenge pressure behind it), not the copy.
+///
+/// WHY ONE STATIC BUFFER IS SOUND (the whole argument — read it before
+/// changing anything here): the args of a `.tail` are read EXACTLY ONCE, by
+/// the CALLEE's prologue, before any of that callee's code can run.  bounce
+/// passes `rr.args` straight to callArityRet -> rt_callN, which hands it to
+/// the generated function as its `:val` params, and that function's first
+/// action is the blit into its OWN rooted frame.  The BUILDER cannot run
+/// again in between: after rt_tail_known returns, the builder's only remaining
+/// actions are the blit of the 80-byte :ret into frame slot 0, rt_frame_leave
+/// and `ret`.  So at most ONE `.tail` is ever in flight, and the buffer is
+/// dead by the time the next rt_tail_known overwrites it.  (rt_apply_tail's
+/// `.tail` uses its own fresh GC env array and never touches this buffer.)
+///
+/// The args are NOT GC-rooted here — and were not rooted before either: the
+/// old `allocArray` result was equally unreachable from any root.  Both shapes
+/// rest on the invariant the ABI already documents (Lower.elm TAIL CALLS): NO
+/// collection runs between the `.tail` build and the callee's prologue blit.
+/// A rooted staging area cannot be built without a frame that outlives the
+/// caller's, which is exactly what this convention does not have.
+const tail_stage_len: usize = 3;
+var tail_stage: [tail_stage_len]Value = undefined;
+var no_tail_stage = false; // QBE_NOTTAILSTAGE=1: the A/B hatch (set in main)
+
 export fn rt_tail_known(code: *const anyopaque, argblock: [*]Value, nargs: i32) callconv(.c) Ret {
     const n: usize = @intCast(nargs);
-    var buf = g.allocArray(Value, n);
-    @memcpy(buf[0..n], argblock[0..n]);
+    tail_known_calls += 1;
+    var buf: [*]Value = undefined;
+    if (n <= tail_stage_len and !no_tail_stage) {
+        @memcpy(tail_stage[0..n], argblock[0..n]);
+        buf = &tail_stage;
+        tail_staged += 1;
+    } else {
+        const a = g.allocArray(Value, n);
+        @memcpy(a[0..n], argblock[0..n]);
+        buf = a;
+        tail_gcarray += 1;
+    }
     return .{ .val = zeroValue(), .kind = 1, .f = code, .e = null, .args = buf, .arity = nargs };
 }
 
@@ -933,6 +1073,13 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     // compiler's runtime — see no_frame_reuse); nothing below this line may
     // start calling generated code before the flag is set.
     no_frame_reuse = std.c.getenv("QBE_NO_REUSE") != null;
+    // The two A/B hatches for this pass's runtime mechanisms.  An env knob (not
+    // a run.js flag like QBE_NOPRIMDIRECT): both mechanisms live in rt.zig, so
+    // ONE binary carries both arms and the A/B is a same-binary comparison
+    // rather than a rebuild.  Same reading discipline as no_frame_reuse —
+    // before anything can call them.
+    no_string_intern = std.c.getenv("QBE_NOSTRINGINTERN") != null;
+    no_tail_stage = std.c.getenv("QBE_NOTTAILSTAGE") != null;
 
     // The generated code puts Elm recursion on the C stack (Lower.elm:76-84
     // documents the limitation), so the default 8MB RLIMIT_STACK can kill deep
@@ -1069,6 +1216,12 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     };
     g = &gg;
     defer g.deinit();
+    // The rt_string intern table's root array.  HERE, not in rtInit: rtInit
+    // also runs from rt_frame_enter, i.e. AFTER a frame's watermark is taken,
+    // and a root pushed there would be popped by the next rt_frame_leave
+    // (see rt_frame_leave).  This is the last point that is provably before
+    // any generated code — the entry call is far below.
+    internInit();
     // QBE_GC_STATS=1: one exit-time line of collector counters and old-gen
     // occupancy, on STDERR (so no stdout oracle can ever see it) and gated (so
     // the default run is byte-for-byte and cycle-for-cycle what it was).
@@ -1091,6 +1244,27 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
                 gg.heappages * heap.PAGEBYTES / (1024 * 1024),
                 s.allocated_pages * heap.PAGEBYTES / (1024 * 1024),
                 gg.last_collect_live_pages * heap.PAGEBYTES / (1024 * 1024),
+            },
+        );
+    };
+    // QBE_RT_COUNTS=1: the runtime MECHANISM counters for this pass (rt_string
+    // interning + rt_tail_known staging), on STDERR and gated like QBE_GC_STATS
+    // so the default run is untouched.  They are counted unconditionally (one
+    // u64 increment on paths that cost tens of cycles), so BOTH arms of a hatch
+    // pay the same instrumentation and the A/B stays honest.
+    const rt_counts: bool = std.c.getenv("QBE_RT_COUNTS") != null;
+    defer if (rt_counts) {
+        std.debug.print(
+            "[RT COUNTS] rt_string={d} intern_hits={d} intern_misses={d} intern_fallbacks={d} intern_live={d} tail_known={d} tail_staged={d} tail_gcarray={d}\n",
+            .{
+                rt_string_calls,
+                intern_hits,
+                intern_misses,
+                intern_fallbacks,
+                intern_live,
+                tail_known_calls,
+                tail_staged,
+                tail_gcarray,
             },
         );
     };

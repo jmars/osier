@@ -1228,3 +1228,123 @@ comparison instead; the fixed point remains the orchestrator's to run.
   correct the programs print what they printed.  The two new golden files are
   COPIES of the `flatten` and `churn` goldens for the hatch rows that run the
   same source, entry and arguments (no golden was re-frozen).
+
+## The runtime call-machinery bundle — pass C (handoff osier-passc, 2026-10-10)
+
+The rest of the call machinery pass A left behind, both halves in
+`tools/qbe/rt.zig` ONLY (no emitter change, so the corpus `.ssa` oracle is
+untouched and NO re-freeze epoch was opened):
+
+1. **`rt_string` interning.** The plan measured `rt_string` as called PER
+   LITERAL EVALUATION — a fresh GC string per execution of a literal's code
+   path.  A literal's bytes live in ONE static data symbol per source site and
+   that symbol's address is passed in, so the address is the site's identity:
+   a hash table keyed on it (16-byte entries, 2048 symbols, 64 KB — sized to
+   stay near-resident) hands back the same `Value` forever after.  Observable
+   safety: strings are compared by CONTENT everywhere in this runtime
+   (`prims.primEq`, `values.deepEqual` both memcmp `strSlice`), never by
+   identity.  Rooting: the value array is ONE `ROOT_VALUE_ARRAY` with a live
+   count, pushed by `internInit` from `main` BEFORE generated code can enter a
+   frame — the obvious shape (push lazily from inside `rt_string`, exactly
+   `rt_global_closure`'s) would sit above that frame's watermark and the next
+   `rt_frame_leave` would silently unroot the whole table.
+
+2. **`rt_tail_known` staging for arity <= 3.** A `.tail`'s args are read
+   exactly once — by the CALLEE's prologue, before any of its code runs — and
+   the builder cannot run again in between (after `rt_tail_known` returns its
+   caller only blits the `:ret`, calls `rt_frame_leave` and rets).  So one
+   static staging buffer replaces the per-call GC array; arity > 3 keeps the
+   array.  The args were never GC-rooted in either shape; both rest on the
+   invariant the ABI already documents (no collection between the `.tail`
+   build and the callee's prologue blit).
+
+### Hatches (A/B on the same source, better: the same BINARY)
+
+`QBE_NOSTRINGINTERN=1` and `QBE_NOTTAILSTAGE=1`, read once in `main` beside
+`QBE_NO_REUSE`.  Both mechanisms are runtime-side, where a `run.js` flag
+(`QBE_NOPRIMDIRECT`'s style) cannot reach: no emitter was touched, so the A/B
+is a same-binary comparison.  `QBE_RT_COUNTS=1` prints the mechanism counters
+on stderr (the `QBE_GC_STATS` precedent).
+
+### Which instrument can see which half (all MEASURED, this host)
+
+- **The suite sees NEITHER.**  All 12 programs have **0 `rt_string` sites**,
+  and their tail sites are cold: `mono_record` executes `rt_tail_known` **3**
+  times and `numloop` **1** time in a whole run (QBE_RT_COUNTS).  A flat suite
+  is the expected result, not a refutation.
+- **The JS emit cannot see `rt_string` at all.**  `node elm-compiler/run.js`
+  links no `rt.o`; the whole-compiler emit is unchanged by construction
+  (1726 call sites over 747 symbols, `.ssa` 11,114,730 B, sha `7a2ce2eb…`,
+  emit 6.35/6.16 s — byte-identical to the pre-pass baseline).  Its role here
+  is a regression guard only; the string half's instrument has to be a NATIVE
+  binary.
+- **The native compiler** (the emitted whole-compiler `.ssa` + `rt.o`, run
+  under `ulimit -v` 6 GB, `QBE_HEAP_MB=1024`, compiling two suite fixtures;
+  peak RSS 330-380 MB) is the cap-compliant stand-in for the selfhost run —
+  `tools/qbe/qbe-selfhost.sh`'s run stage peaked far over the cap (a 15-minute
+  attempt at a 1 GB heap did not finish).  Arms: OFF2 / STRING / TAIL / ON,
+  order rotated every rep, 5 reps, output `.ssa` sha256 identical in all four
+  arms and to the pre-change binary.
+- **`tools/qbe/fixtures/mutualtail.elm`** is the tail half's own instrument: a
+  HOT cross-defun tail loop (1e6 hops are gate-pinned; timed at 1e7).
+
+### MEASURED
+
+| instrument | counters | scavenges | wall |
+|---|---|---|---|
+| mutualtail 1e7 hops, 7 alternating pairs | `tail_known=10,000,000`; staged 10M/0 ON, 0/10M OFF | 69 -> **0** (64 MB heap); 6 -> 0 at 1e6 | OFF 595 ms median (590-671) vs ON 533 (530-580) = **-10.4%** (paired median -10.3%) |
+| native compiler, OFF2 vs ON (5 reps, order rotated) | string 4,820,201 evals: 4,819,709 hits / 492 misses ON vs 4,820,201 fallbacks OFF; tail 26,115,146 calls: 14,802,479 staged / 11,312,667 arrays ON vs 0 / 26,115,148 OFF | 1485 -> 1235 (**-16.8%**; STRING alone 1476, TAIL alone 1242) | -1.8% (TAIL) / -1.8% (ON) / **-0.0% (STRING)**; peak RSS 378 -> 327 MB |
+| string-hot probe (scratch, 60M `rt_string` evals) | 5,999,999 hits / 2 misses ON vs 6,000,001 fallbacks OFF | 24 -> **0** | a wash: -1.5% median, paired median **+1.7%** (ON slower) |
+
+Verdicts (the pre-stated rule, reported, never rounded):
+
+- **`rt_tail_known` staging: CONFIRM.**  Counters move as predicted (100% of
+  arity<=3 calls staged; the >3 remainder keeps its array by design), the
+  targeted program improves 7/7 pairs and far beyond the same-arm spread
+  (OFF 590-671 vs ON 530-580), and the scavenges drop proportionally — to ZERO
+  on the fixture, -16.8% on the compiler, -13.5% peak RSS.
+- **`rt_string` interning: UNDECIDED.**  The counters limb holds (the 4.82M
+  allocations per compile become 492) and churn falls -100% where literals
+  dominate the allocation volume — but the WALL does not move: -0.0% median
+  paired on the compiler, a wash (slightly negative) on the string-hot probe.
+  Not REFUTE (no counter stalls, no >3% regression), not CONFIRM (the
+  improvement is inside the spread).  Diagnosis: a short literal's nursery
+  bump + memcpy costs about what a hash probe into a near-resident table does;
+  the interning removes REAL allocation (and, in string-dominated programs,
+  real scavenges) but that allocation was cheap.  The unexploited design is a
+  per-site cache word inside the literal's own data symbol (one hot load, no
+  hash) — it needs a Lower change, a new ABI and a deliberate corpus re-freeze
+  epoch; this pass deliberately did not open that epoch, and the probe says the
+  allocation being replaced is cheap enough that there is no evidence it would
+  clear the spread either.
+
+### Premise refuted by the artifact
+
+The brief for this pass said numloop's residual cost is `rt_tail_known`'s
+per-iteration GC array.  `numloop.ssa` has exactly ONE `rt_tail_known` site, in
+`$q_NumLoop_x2emain`, executed once; the 1e6-iteration loop is the S4 IN-FRAME
+self-tail (`jmp @body`) and runs with `scavenges=0`.  The hot shape the
+mechanism actually serves is a cross-defun tail loop (mutualtail), where it is
+worth ~10%.
+
+### Oracles
+
+`tools/qbe/qbe-check.sh` exit 0, 230 PASS / 0 FAIL — no EXISTING row needed
+changing (nothing is emitted differently by this pass); the ONE new row is the
+tail half's GC-churn counterpart (mutualtail at `QBE_HEAP_MB=16`, 1e6 hops, the
+pinned answer), which is a regression net for the staged path under maximum
+churn and explicitly NOT evidence for the collection-free-window argument (only
+that argument, in rt.zig, carries it); `tests/elm-fixtures/run-elm-gate.sh` exit 0,
+PASS=154 FAIL=0; `tools/osier-corpus-ssa.sh` exit 0, **BYTE-IDENTICAL (149
+artifacts = 149 baseline entries)** — no re-freeze, no baseline file touched;
+`tools/osier-numbers.sh` exit 0, "VERDICT: all checks pass"; `tools/qbe/golden/`
+and `tools/bench/golden/` untouched (`git status` shows only `tools/qbe/rt.zig`).
+
+### Known follow-up (not done here)
+
+`elm-compiler/src/Mid/Qbe/Lower.elm`'s `directCall` docstring still says a
+`.tail`'s args "live in a fresh GC array".  That is now true only for arity > 3.
+It was left alone deliberately: editing it would leave the build artifact
+`elm-compiler/compiler.js` stale (nothing in the gates rebuilds it), and this
+pass changes no emission — the next unit that touches the emitter should fix
+the phrase in the same commit that rebuilds `compiler.js`.
