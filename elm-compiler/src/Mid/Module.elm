@@ -1,4 +1,4 @@
-module Mid.Module exposing (Unit, parseAll, collectAll, mergedGlobals, compileUnit, sequenceMaps, collectTypeNames)
+module Mid.Module exposing (Unit, parseAll, collectAll, mergedGlobals, compileUnit, compileUnitJoin, sequenceMaps, collectTypeNames)
 
 -- Mid.Module — the middle tier's ORCHESTRATION (sources -> Mid.Ir.Program).
 --
@@ -24,7 +24,7 @@ import Elm.Syntax.File as File
 import Elm.Syntax.Module as SyntaxModule
 import Elm.Syntax.Node as Node exposing (Node(..))
 import Elm.Syntax.Pattern as Pattern exposing (Pattern(..))
-import Elm.Syntax.Range as Range
+import Elm.Syntax.Range as Range exposing (Range)
 import Elm.Syntax.Type as Type
 import Lower.Expr as Expr
 import Lower.Resolve as Resolve
@@ -277,18 +277,29 @@ functionArity fn =
 
 
 
--- ========================= UNIT COMPILATION =========================
--- One unit's Program: its function defuns, then its constructor defuns, then
--- the curried prim wrappers — the same order Lower.Module emits entries in.
---
--- (parseAll/collectAll/mergedGlobals/compileUnit are ALSO consumed by the
--- QBE native-backend driver Mid.QbeModule — exposed here so the native path
--- shares EXACTLY this orchestration.  Additive exposing only: no logic in
--- this module changed.)
+{-| One unit's Program: its function defuns, then its constructor defuns, then
+the curried prim wrappers — the same order Lower.Module emits entries in.
 
+(parseAll/collectAll/mergedGlobals/compileUnit are ALSO consumed by the
+QBE native-backend driver Mid.QbeModule — exposed here so the native path
+shares EXACTLY this orchestration.  Additive exposing only: no logic in
+this module changed.)
 
+S2/M0b ADDITION: `compileUnitJoin` is `compileUnit` plus the defun-keyed
+BINDER JOIN — for every defun, the per-defun map `binderId -> Range` its
+`FromAst` run recorded (empty for synthetic-only defuns: wrappers, ctors).
+`compileUnit` is exactly this with the join dropped, so the ZINC path's
+behaviour is unchanged and the two cannot drift.  The join is how the QBE
+driver resolves a binder's CHECKER type: the checker's node-type record is
+keyed by `Range`, the Mid tree by binder id, and this map is the only bridge.
+-}
 compileUnit : Dict String Int -> Unit -> Result String (List Defun)
 compileUnit globals unit =
+    Result.map Tuple.first (compileUnitJoin globals unit)
+
+
+compileUnitJoin : Dict String Int -> Unit -> Result String ( List Defun, Dict String (Dict Int Range) )
+compileUnitJoin globals unit =
     let
         modName =
             unit.moduleName
@@ -310,20 +321,33 @@ compileUnit globals unit =
     in
     compileFuns baseCtx unit.funs
         |> Result.andThen
-            (\fnDefuns ->
-                sequenceMaps (List.map (\ctor -> FromAst.runGen (ctorDefun modName ctor)) unit.ctors)
+            (\( fnDefuns, fnJoin ) ->
+                sequenceMaps (List.map (\ctor -> FromAst.runGenJoin (ctorDefun modName ctor)) unit.ctors)
                     |> Result.andThen
-                        (\ctorDefuns ->
+                        (\ctorPairs ->
                             wrapperDefuns
-                                |> Result.map (\wrapperDefs -> fnDefuns ++ ctorDefuns ++ wrapperDefs)
+                                |> Result.map
+                                    (\wrapperDefs ->
+                                        ( fnDefuns ++ List.map Tuple.first ctorPairs ++ wrapperDefs
+                                        , let
+                                            joined =
+                                                List.foldl (\( defun, ranges ) acc -> Dict.insert defun.key ranges acc) fnJoin ctorPairs
+                                          in
+                                          -- Wrappers' binders are all synthetic (no
+                                          -- source ranges exist): EMPTY join entries,
+                                          -- so the table's domain is every defun and
+                                          -- "absent" is reserved for "unit not checked".
+                                          List.foldl (\d a -> Dict.insert d.key Dict.empty a) joined wrapperDefs
+                                        )
+                                    )
                         )
             )
 
 
-compileFuns : FromAst.Context -> List ( String, Function ) -> Result String (List Defun)
+compileFuns : FromAst.Context -> List ( String, Function ) -> Result String ( List Defun, Dict String (Dict Int Range) )
 compileFuns baseCtx funs =
     groupByName funs
-        |> List.foldl (compileGroup baseCtx) (Ok [])
+        |> List.foldl (compileGroup baseCtx) (Ok ( [], Dict.empty ))
 
 
 groupByName : List ( String, Function ) -> List ( String, List Function )
@@ -340,22 +364,22 @@ groupByName pairs =
             ( name, fn :: List.map Tuple.second same ) :: groupByName others
 
 
-compileGroup : FromAst.Context -> ( String, List Function ) -> Result String (List Defun) -> Result String (List Defun)
+compileGroup : FromAst.Context -> ( String, List Function ) -> Result String ( List Defun, Dict String (Dict Int Range) ) -> Result String ( List Defun, Dict String (Dict Int Range) )
 compileGroup baseCtx ( name, funs ) accResult =
     case accResult of
         Err msg ->
             Err msg
 
-        Ok acc ->
+        Ok ( defuns, join ) ->
             case compileGroupOne baseCtx name funs of
                 Err msg ->
                     Err msg
 
-                Ok defun ->
-                    Ok (acc ++ [ defun ])
+                Ok ( defun, ranges ) ->
+                    Ok ( defuns ++ [ defun ], Dict.insert defun.key ranges join )
 
 
-compileGroupOne : FromAst.Context -> String -> List Function -> Result String Defun
+compileGroupOne : FromAst.Context -> String -> List Function -> Result String ( Defun, Dict Int Range )
 compileGroupOne baseCtx name funs =
     case funs of
         [ single ] ->
@@ -370,9 +394,12 @@ compileGroupOne baseCtx name funs =
             desugarAndCompile baseCtx name funs
 
 
-desugarAndCompile : FromAst.Context -> String -> List Function -> Result String Defun
+-- S2/M0b: the desugared defun's $argN params are SYNTHETIC (no source range ->
+-- no join entry, deny-by-default); its case-arm pattern binders DO record
+-- ranges via the pattern walker, so a pattern-arg defun still joins.
+desugarAndCompile : FromAst.Context -> String -> List Function -> Result String ( Defun, Dict Int Range )
 desugarAndCompile baseCtx name funs =
-    FromAst.runGen
+    FromAst.runGenJoin
         (FromAst.clauseCase baseCtx (List.map clauseOf funs)
             |> FromAst.andThen
                 (\( params, caseExp ) ->
@@ -391,7 +418,10 @@ clauseOf fn =
             ( impl.arguments, impl.expression )
 
 
-compileOne : FromAst.Context -> String -> Function -> Result String Defun
+-- S2/M0b: each param's binder records its argument pattern node's range —
+-- the same nodes the checker's `inferPatterns` types — so a simple defun's
+-- params join exactly.
+compileOne : FromAst.Context -> String -> Function -> Result String ( Defun, Dict Int Range )
 compileOne baseCtx name fn =
     case fn.declaration of
         Node _ impl ->
@@ -400,8 +430,8 @@ compileOne baseCtx name fn =
                     Err msg
 
                 Ok argNames ->
-                    FromAst.runGen
-                        (FromAst.freshBinders argNames
+                    FromAst.runGenJoin
+                        (FromAst.freshBindersAt (List.map2 (\n nm -> ( Node.range n, nm )) impl.arguments argNames)
                             |> FromAst.andThen
                                 (\params ->
                                     FromAst.fromExpression (FromAst.withScope baseCtx params) impl.expression

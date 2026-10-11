@@ -41,13 +41,16 @@ checked) for two documented reasons, both discovered during planning:
 
 -}
 
+import Dict exposing (Dict)
 import Elm.Syntax.File as File
 import Elm.Syntax.Module as SyntaxModule
 import Elm.Syntax.Node as Node exposing (Node(..))
+import Elm.Syntax.Range exposing (Range)
 import Frontend.Lift as Lift
 import Type.Env as Env exposing (Env, Scheme)
 import Type.Error as Error
 import Type.Infer as Infer
+import Type.Representation exposing (Type)
 
 
 {-| Check all units in dependency order; return the rewritten files (same
@@ -76,8 +79,16 @@ return BOTH the final environment (env0 ++ every inferred builtin scheme, e.g.
 `Prelude`'s unsignatured `map`/`compare`, `Runtime`'s `worker`/`task*`) and the
 checker-rewritten corpus files.  The environment is what every user group is
 then checked against — built ONCE per process, not per fixture.
+
+`nodeTypes` (monomorphisation S2/M0b) is ADDITIVE: the per-node/per-binder type
+record `Type.Infer` now attaches to every checked unit, keyed by MODULE NAME
+(ranges are only unique within one file — a `Range` alone cannot name a corpus
+unit's node).  Trusted-skipped units (`JsArray`, `Array` — see above) are
+ABSENT from the dict: no inference ran for them, so no node-type source exists,
+which is the deny-by-default fact a consumer must see (a missing key means "no
+source", never "checked and empty").  `env`/`files` are unchanged.
 -}
-checkBuiltins : List File.File -> Result String { env : Env, files : List File.File }
+checkBuiltins : List File.File -> Result String { env : Env, files : List File.File, nodeTypes : Dict String (List ( Range, Type )) }
 checkBuiltins files =
     let
         lifted =
@@ -88,7 +99,38 @@ checkBuiltins files =
     in
     orderUnits lifted
         |> Result.andThen (\ordered -> checkInOrderEnv env0 ordered [])
-        |> Result.map (\( env, checked ) -> { env = env, files = checked })
+        |> Result.map
+            (\( env, checked ) ->
+                { env = env
+                , files = List.map .file checked
+                , nodeTypes = collectNodeTypes checked
+                }
+            )
+
+
+{-| One ordered unit as checked: the rewritten file plus its node-type record.
+`nodeTypes = Nothing` marks a TRUSTED-SKIPPED unit (no inference ran — the
+absence-of-source case, distinct from a checked unit that recorded no nodes).
+-}
+type alias CheckedUnitInOrder =
+    { file : File.File
+    , nodeTypes : Maybe (List ( Range, Type ))
+    }
+
+
+collectNodeTypes : List CheckedUnitInOrder -> Dict String (List ( Range, Type ))
+collectNodeTypes checked =
+    List.foldl
+        (\c acc ->
+            case c.nodeTypes of
+                Just nts ->
+                    Dict.insert (moduleNameStr c.file) nts acc
+
+                Nothing ->
+                    acc
+        )
+        Dict.empty
+        checked
 
 
 {-| Check ONE user group (1-2 fixture modules) against the GIVEN builtin
@@ -113,14 +155,18 @@ checkUserGroup env files =
 
 checkInOrder : Env -> List File.File -> List File.File -> Result String (List File.File)
 checkInOrder env files acc =
-    checkInOrderEnv env files acc
-        |> Result.map Tuple.second
+    checkInOrderEnv env files []
+        |> Result.map (\( _, checked ) -> List.map .file checked ++ acc)
 
 
 {-| Like `checkInOrder`, but also returns the FINAL environment (the up-front
 env plus every inferred scheme), so `checkBuiltins` can hand it to user groups.
+S2/M0b: the accumulator is now `List CheckedUnitInOrder` so each unit's
+node-type record can travel WITH its file (checkInOrder's own `acc` is
+unchanged — it holds the caller's file list, which this helper no longer
+consumes).
 -}
-checkInOrderEnv : Env -> List File.File -> List File.File -> Result String ( Env, List File.File )
+checkInOrderEnv : Env -> List File.File -> List CheckedUnitInOrder -> Result String ( Env, List CheckedUnitInOrder )
 checkInOrderEnv env files acc =
     case files of
         [] ->
@@ -131,7 +177,9 @@ checkInOrderEnv env files acc =
                 -- Body skipped; signatures/ctors/aliases are already in the
                 -- (up-front) environment.  Keep the ORIGINAL file — no
                 -- rewrites are needed because the body is never checked.
-                checkInOrderEnv env rest (f :: acc)
+                -- S2/M0b: nodeTypes = Nothing (no inference ran: the
+                -- absence-of-source case, see `collectNodeTypes`).
+                checkInOrderEnv env rest ({ file = f, nodeTypes = Nothing } :: acc)
 
             else
                 case Infer.inferUnit env f of
@@ -139,7 +187,7 @@ checkInOrderEnv env files acc =
                         Err (Error.render err)
 
                     Ok checked ->
-                        checkInOrderEnv (insertSchemes checked.schemes env) rest (checked.file :: acc)
+                        checkInOrderEnv (insertSchemes checked.schemes env) rest ({ file = checked.file, nodeTypes = Just checked.nodeTypes } :: acc)
 
 
 insertSchemes : List ( String, Scheme ) -> Env -> Env

@@ -6,8 +6,11 @@ module Mid.Qbe.Types exposing
     , empty
     , envSchemes
     , fromSchemes
+    , joinBinders
+    , nodeTypeMap
     , note
     , typeOf
+    , withBinders
     )
 
 {-| Mid.Qbe.Types — the TYPE-INFORMATION SIDE TABLE for the QBE lowering
@@ -53,31 +56,47 @@ predicate reads. Dropping a polymorphic defun instead of recording it would
 trade an honest "not a monotype" for a silent absence, so it is not done.
 
 
-## THE GAP — the per-binder half is NOT obtainable at S1, and is named here
+## THE GAP IS CLOSED (S2/M0b) — the per-binder half, and the join it rides on
 
-The plan's sketch of this table is
-`Dict defunKey (monotype, Dict binderId monotype)`. The SECOND half cannot be
-built without editing `Type/*`: `Infer.CheckedUnit` and `Infer.inferUnit` are
-the only names `Type.Infer` exposes (Type/Infer.elm:1), and they hand back the
-rewritten `File` plus the unit's TOP-LEVEL schemes (Type/Infer.elm:61-73).
-Per-binder (Lam param / Let binder / Case alt binds / scrutinee) types live
-only in the `InferState` threaded through inference and are exposed by no name.
-Producing them means an additive accumulator inside `Type/Infer.elm` — a
-58-source seed file — which is the plan's S2 probe plus the user's S3 decision
-to re-freeze the seed, NOT this step's.
+S1 named two blockers: the per-binder types lived only inside `Type.Infer`'s
+state, and there was NO Mid-binder-id <-> checker-Range correspondence. Both
+are now built (ADDITIVELY — see below):
 
-So `Binders` has one constructor and carries no map. That is deliberate over an
-empty `Dict binderId Type`: an empty Dict reads as "no binder types are KNOWN",
-which cannot be told apart from "no source for binder types exists" — the
-distinction this whole step is about. `BindersAbsent` cannot be misread, and a
-consumer must handle it EXPLICITLY (deny-by-default), so the missing half
-cannot be walked past by accident.
+  * `Type.Infer` accumulates `nodeTypes : List (Range, Type)` — one entry per
+    `inferExpr` visit plus one per pattern binder (VarPattern node,
+    RecordPattern field node, AsPattern alias node) and per let-function NAME
+    node — zonked ONCE at unit end, and exposes it on `CheckedUnit`.
+    `Type.Check.checkBuiltins` hands out the corpus half keyed by module name;
+    `Mid.QbeModule.groupSchemes` collects the group half the same way.
+  * THE JOIN is `binderId -> Range`, emitted by `Mid.FromAst` itself at the
+    exact `freshBinderAt` sites that issue a binder FROM a source pattern node
+    (defun params, lambda params, case-arm pattern binds, let-destructuring
+    binds, let-function names), keyed per defun by
+    `Mid.Module.compileUnitJoin` (`Dict defunKey (Dict binderId Range)`).
 
-SECOND, INDEPENDENT REASON the binder half is out of reach even WITH exposed
-types: there is no binder-ID correspondence to key a map on. Mid binder ids are
-issued by `Mid.FromAst.Gen`'s supply, while Infer keys every node by its source
-`Range`; joining Mid ids to Infer's node types is itself an unsolved step
-(plan S2, including its UNMEASURED duplicate-Range hazard).
+TOTALITY of the join, on the shapes that reach it: both sides walk the SAME
+(lifted, checker-rewritten) file and key the SAME pattern nodes — a binder
+FromAst issues from a source pattern node is a node the checker's
+`inferPattern`/`inferPatterns` typed, so its range has a record. DENY-BY-
+DEFAULT, and this is the exhaustive list of denials:
+
+  * synthetic binders (`$case`, `$argN`, `$argv`, `rec`, curried-prim wrapper
+    params, ctor defun params) have NO source node — they record no range and
+    get NO type, which is the honest answer;
+  * a binder whose range is AMBIGUOUS in the checker's record (two DIFFERENT
+    zonked types at one range — Lift's snapshot nodes all share the let-block
+    range; a snapshot PARAM row shares the declaration range) is dropped by
+    `nodeTypeMap`'s deny-on-conflict rule rather than guessed at;
+  * a defun whose unit was never checked (trusted JsArray/Array bodies, or a
+    group re-inference failure) keeps `BindersAbsent` — "no source", the
+    S1 doctrine;
+  * a binder whose recorded type does not exist at all (the checker trusted
+    the body, or the range simply never recorded) simply lacks a dict entry.
+
+SEED NOTE: at the 2d127d1 HEAD this file, like the whole `Mid/*` tree, IS one
+of the selfhost seed's sources, so filling the half is seed-bearing — the S2
+epoch re-freezes the seed with the rest of this change. (The S1-era claim
+"Mid/* is seed-free" described the pre-flip manifest and is STALE.)
 
 
 ## Domain
@@ -92,6 +111,7 @@ schemes and type aliases, which are not defuns).
 -}
 
 import Dict exposing (Dict)
+import Elm.Syntax.Range exposing (Range)
 import Set exposing (Set)
 import Type.Env as Env exposing (Env, Scheme)
 import Type.Representation exposing (Type)
@@ -111,19 +131,24 @@ type DefunType
     | Polymorphic Scheme
 
 
-{-| The per-binder half of the side table. `BindersAbsent` is not a transient
-failure state and not a placeholder to be filled by a caller: it is the MEASURED
-state of S1, since no exposed name in `Type/*` reports a binder's type (see the
-module header's THE GAP section). A consumer that needs per-binder types must
-first land the `Type/Infer` accumulator (S2) and the seed re-freeze (S3) that
-unblocks it.
+{-| The per-binder half of the side table (S2/M0b).
+
+  - `Binders` — the defun's unit WAS checked: the map is `binderId -> Type`
+    for every binder whose source pattern node's range joined UNAMBIGUOUSLY
+    to the checker's record. An ABSENT id in the map is a denial (synthetic
+    binder, or a range whose recorded types conflicted), never "unknown
+    source".
+  - `BindersAbsent` — the S1 doctrine, unchanged: NO inference ran for this
+    defun's unit (a trusted body, or a group re-inference failure), so there
+    is no source for binder types at all. Cannot be misread for an empty map.
+
 -}
 type Binders
     = BindersAbsent
+    | Binders (Dict Int Type)
 
 
-{-| One defun's entry: its type, and (S1: always) the absence of per-binder
-types.
+{-| One defun's entry: its type, and the per-binder half (see `Binders`).
 -}
 type alias Entry =
     { defunType : DefunType
@@ -214,3 +239,103 @@ could not reach — check `Table.notes` before reading it as "untyped").
 typeOf : String -> Table -> Maybe DefunType
 typeOf key table =
     Maybe.map .defunType (Dict.get key table.defuns)
+
+
+
+-- ======================= S2/M0b: THE BINDER HALF =======================
+
+
+{-| A `Range` encoded as a comparable key (Elm 0.19 records have no ordering,
+so a `Range` cannot key a `Dict` directly; this is the usual row/column
+quadruple, total and injective on real ranges).
+-}
+type alias RangeKey =
+    ( ( Int, Int ), ( Int, Int ) )
+
+
+rangeKey : Range -> RangeKey
+rangeKey r =
+    ( ( r.start.row, r.start.column ), ( r.end.row, r.end.column ) )
+
+
+{-| The checker's per-unit node-type record as a `RangeKey -> Type` map, with
+the ONE policy this module owns: DENY ON CONFLICT. The record is a LIST with
+duplicates by design (`Type.Infer.CheckedUnit.nodeTypes`), because a source
+range genuinely can carry two different zonked types — Lift's synthetic
+snapshot nodes all share the let-block's range, and a snapshot param row shares
+its declaration range. A range whose recorded types DISAGREE is dropped
+entirely (a wrong type is worse than no type); agreeing duplicates collapse to
+one entry. This is the collision gate: whatever reads this map can never be
+handed a silently-guessed type.
+-}
+nodeTypeMap : List ( Range, Type ) -> Dict RangeKey Type
+nodeTypeMap entries =
+    let
+        -- Ok = one agreeing type; Err () = conflicted (denied).
+        insert : ( Range, Type ) -> Dict RangeKey (Result () Type) -> Dict RangeKey (Result () Type)
+        insert ( r, t ) acc =
+            case Dict.get (rangeKey r) acc of
+                Nothing ->
+                    Dict.insert (rangeKey r) (Ok t) acc
+
+                Just (Ok u) ->
+                    if u == t then
+                        acc
+
+                    else
+                        Dict.insert (rangeKey r) (Err ()) acc
+
+                Just (Err ()) ->
+                    acc
+    in
+    List.foldl insert Dict.empty entries
+        |> Dict.toList
+        |> List.filterMap
+            (\( r, v ) ->
+                case v of
+                    Ok t ->
+                        Just ( r, t )
+
+                    Err () ->
+                        Nothing
+            )
+        |> Dict.fromList
+
+
+{-| THE JOIN'S SECOND HALF: a defun's `binderId -> Range` map (from
+`Mid.Module.compileUnitJoin`) against a unit's `RangeKey -> Type` map (from
+`nodeTypeMap`). Total on the binders that recorded a range: a binder with no
+range entry (synthetic) or a conflicted range is simply ABSENT from the result
+— deny-by-default, never a guess.
+-}
+joinBinders : Dict Int Range -> Dict RangeKey Type -> Dict Int Type
+joinBinders binderRanges rangeTypes =
+    Dict.toList binderRanges
+        |> List.filterMap
+            (\( id, r ) ->
+                Maybe.map (\t -> ( id, t )) (Dict.get (rangeKey r) rangeTypes)
+            )
+        |> Dict.fromList
+
+
+{-| Fill the per-binder half of every tabled defun whose key the given map
+covers. `BindersAbsent` (no source — trusted body, failed re-inference) is
+OVERWRITTEN only for defuns the map actually covers, i.e. defuns whose unit
+was checked; everything else keeps the S1 doctrine. Later calls win, so a
+caller can seed corpus binders first and group binders second.
+-}
+withBinders : Dict String (Dict Int Type) -> Table -> Table
+withBinders perDefun table =
+    { table
+        | defuns =
+            Dict.map
+                (\key entry ->
+                    case Dict.get key perDefun of
+                        Just binderMap ->
+                            { entry | binders = Binders binderMap }
+
+                        Nothing ->
+                            entry
+                )
+                table.defuns
+    }

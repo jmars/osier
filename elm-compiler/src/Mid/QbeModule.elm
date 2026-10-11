@@ -73,6 +73,7 @@ module Mid.QbeModule exposing (compileEntry)
 
 import Dict exposing (Dict)
 import Elm.Syntax.File as File
+import Elm.Syntax.Range exposing (Range)
 import Frontend.Lift as Lift
 import Mid.Audit as Audit
 import Mid.Ir exposing (Defun)
@@ -88,6 +89,7 @@ import Type.Check as Check
 import Type.Env as Env exposing (Env, Scheme)
 import Type.Error as Error
 import Type.Infer as Infer
+import Type.Representation exposing (Type)
 
 
 compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Result String String
@@ -101,7 +103,7 @@ compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt mi
                             (\_ ->
                                 Check.checkBuiltins corpusFiles
                                     |> Result.andThen
-                                        (\{ env, files } ->
+                                        (\{ env, files, nodeTypes } ->
                                             MidModule.collectAll files
                                                 |> Result.andThen
                                                     (\corpusUnits ->
@@ -110,7 +112,7 @@ compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt mi
                                                                 Err msg
 
                                                             Ok corpusGlobals ->
-                                                                compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean
+                                                                compileGroup env nodeTypes corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean
                                                     )
                                         )
                             )
@@ -125,6 +127,7 @@ compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt mi
 
 compileGroup :
     Env
+    -> Dict String (List ( Range, Type ))
     -> List MidModule.Unit
     -> Dict String Int
     -> List String
@@ -136,7 +139,7 @@ compileGroup :
     -> Bool
     -> Bool
     -> Result String String
-compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean =
+compileGroup env corpusNodeTypes corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean =
     MidModule.parseAll groupSources
         |> Result.andThen
             (\groupFiles ->
@@ -154,54 +157,74 @@ compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep pri
                                                             Err msg
 
                                                         Ok globals ->
-                                                            lowerAll rep primDirect midRt midCons rtLean flatten globals (groupSchemes env groupUnits0) corpusUnits groupUnits entryKey
+                                                            let
+                                                                groupTypes =
+                                                                    groupSchemes env groupUnits0
+
+                                                                -- S2/M0b: the checker's per-node/per-binder
+                                                                -- record for BOTH halves, keyed by module
+                                                                -- name (a Range is unique only within one
+                                                                -- file). Corpus: from checkBuiltins; group:
+                                                                -- from the same re-inference that recovered
+                                                                -- the schemes.
+                                                                nodeTypesByModule =
+                                                                    Dict.union groupTypes.nodeTypes corpusNodeTypes
+                                                            in
+                                                            lowerAll rep primDirect midRt midCons rtLean flatten globals nodeTypesByModule groupTypes corpusUnits groupUnits entryKey
                                                 )
                                     )
                         )
             )
 
 
-{-| The group's schemes plus what the RECOVERY pass could not infer. This is
-`Qbe.Types`' input, not its output: the table itself is built in `lowerAll`,
-where the program's defun keys are known.
+{-| The group's schemes plus what the RECOVERY pass could not infer, plus the
+group's node-type record (S2/M0b). This is `Qbe.Types`' input, not its output:
+the table itself is built in `lowerAll`, where the program's defun keys are
+known.
 -}
 type alias GroupSchemes =
     { schemes : List ( String, Scheme )
     , failures : List String
+    , nodeTypes : Dict String (List ( Range, Type ))
     }
 
 
-{-| The GROUP's defun schemes, recovered a SECOND time (see the header's THE
-TYPE SEAT section for the cost and the failure policy). `units` are the group's
-units as PARSED — they are LIFTED here exactly as `Check.checkUserGroup` lifts
-them, so the scheme keys name the same (lifted) functions the program will
-contain. The result also carries the corpus half: `env0` is the group-checking
-environment, i.e. the corpus env plus every group signature.
+{-| The GROUP's defun schemes and node types, recovered a SECOND time (see the
+header's THE TYPE SEAT section for the cost and the failure policy). `units`
+are the group's units as PARSED — they are LIFTED here exactly as
+`Check.checkUserGroup` lifts them, so the scheme keys name the same (lifted)
+functions the program will contain. The result also carries the corpus half:
+`env0` is the group-checking environment, i.e. the corpus env plus every group
+signature. The node-type record is keyed by MODULE NAME because a `Range` is
+unique only within one file — the join resolves a binder against its OWN
+unit's record.
 -}
 groupSchemes : Env -> List MidModule.Unit -> GroupSchemes
 groupSchemes env units =
     let
         lifted =
-            List.map (\unit -> Lift.liftFile unit.file) units
+            List.map (\unit -> ( String.join "." unit.moduleName, Lift.liftFile unit.file )) units
 
         env0 =
-            List.foldl (\f e -> Env.merge e (Env.collectFile f)) env lifted
+            List.foldl (\( _, f ) e -> Env.merge e (Env.collectFile f)) env lifted
     in
-    inferInOrder env0 lifted (QbeTypes.envSchemes env0) []
+    inferInOrder env0 lifted (QbeTypes.envSchemes env0) [] Dict.empty
 
 
-{-| `Check.checkInOrder`'s loop, for the schemes only: infer each unit against
-the env accumulated so far, folding its schemes in for the next unit. An error
-is recorded and does not propagate (the group has already been checked by
-`Check.checkUserGroup`, and this pass only ADDS information).
+{-| `Check.checkInOrder`'s loop, for the schemes and node types only: infer
+each unit against the env accumulated so far, folding its schemes in for the
+next unit. An error is recorded and does not propagate (the group has already
+been checked by `Check.checkUserGroup`, and this pass only ADDS information).
+A unit whose re-inference fails contributes NO node types either (deny: a
+defun of that unit keeps `BindersAbsent`).
 -}
-inferInOrder : Env -> List File.File -> List ( String, Scheme ) -> List String -> GroupSchemes
-inferInOrder env files schemes failures =
+inferInOrder : Env -> List ( String, File.File ) -> List ( String, Scheme ) -> List String -> Dict String (List ( Range, Type )) -> GroupSchemes
+inferInOrder env files schemes failures nodeTypes =
     case files of
         [] ->
-            { schemes = schemes, failures = failures }
+            { schemes = schemes, failures = failures, nodeTypes = nodeTypes }
 
-        f :: rest ->
+        ( modName, f ) :: rest ->
             case Infer.inferUnit env f of
                 Ok checked ->
                     inferInOrder
@@ -209,9 +232,10 @@ inferInOrder env files schemes failures =
                         rest
                         (schemes ++ checked.schemes)
                         failures
+                        (Dict.insert modName checked.nodeTypes nodeTypes)
 
                 Err err ->
-                    inferInOrder env rest schemes (failures ++ [ Error.render err ])
+                    inferInOrder env rest schemes (failures ++ [ Error.render err ]) nodeTypes
 
 
 lowerAll :
@@ -222,22 +246,23 @@ lowerAll :
     -> Bool
     -> Bool
     -> Dict String Int
+    -> Dict String (List ( Range, Type ))
     -> GroupSchemes
     -> List MidModule.Unit
     -> List MidModule.Unit
     -> String
     -> Result String String
-lowerAll rep primDirect midRt midCons rtLean flatten globals groupTypes corpusUnits groupUnits entryKey =
+lowerAll rep primDirect midRt midCons rtLean flatten globals nodeTypesByModule groupTypes corpusUnits groupUnits entryKey =
     reserveRtName (corpusUnits ++ groupUnits)
-        |> Result.andThen (\_ -> compileAll globals (corpusUnits ++ groupUnits))
+        |> Result.andThen (\_ -> compileAllJoin globals (corpusUnits ++ groupUnits) nodeTypesByModule)
         -- The unsafe-node audit (osier-rawnodes): EVERY compile fails loudly
         -- if an `Unsafe` node appears outside the Rt.* namespace — i.e. if the
         -- front end ever emits one.  Passes nothing through unchanged-but-
         -- unaudited; on Ok the program is the SAME value, so byte identity of
         -- the emitted .ssa is this seat's inertness proof.
-        |> Result.andThen (\program0 -> Audit.run program0)
+        |> Result.andThen (\( program0, binderPerDefun ) -> Result.map (\p -> ( p, binderPerDefun )) (Audit.run program0))
         |> Result.andThen
-            (\program ->
+            (\( program, binderPerDefun ) ->
                 -- THE Rt INJECTION (osier-consspike): the Mid-written runtime
                 -- joins HERE — after the audit (which would pass it trivially:
                 -- every Rt key is legal) and after Flatten (whose rewriter
@@ -255,17 +280,22 @@ lowerAll rep primDirect midRt midCons rtLean flatten globals groupTypes corpusUn
                         else
                             []
 
-                    -- S1's TYPE TABLE (monomorphisation S1/M0a). BUILT AND READ BY
-                    -- NOTHING: this is the step's contract, and it is why every
-                    -- fixture `.ssa` must stay byte-identical. It is built HERE
-                    -- because `program` fixes the table's domain — the defun keys
-                    -- the passes below actually see — and it sits one call short
-                    -- of its consumer: S4's unboxing is a `QbeLower.lower`
-                    -- argument, which is the single call site a later dispatch
-                    -- touches.
+                    -- THE TYPE TABLE (monomorphisation S1 + S2). Built HERE
+                    -- because `program` fixes the table's domain — the defun
+                    -- keys the passes below actually see. S1: the defun-granular
+                    -- half (schemes). S2: the per-BINDER half — every defun of a
+                    -- CHECKED unit gets `Binders <binderId -> Type>` from the
+                    -- FromAst binder join against the checker's node-type
+                    -- record (see Mid.Qbe.Types's header for the totality and
+                    -- deny-by-default doctrine); defuns of unchecked units keep
+                    -- `BindersAbsent`. STILL READ BY NOTHING: S5's specialiser
+                    -- is the consumer, and the byte-identity oracle below is
+                    -- the proof this step changes no emitted output.
                     typeTable =
                         List.foldl QbeTypes.note
-                            (QbeTypes.fromSchemes (Set.fromList (List.map .key (program ++ rtProgram))) groupTypes.schemes)
+                            (QbeTypes.fromSchemes (Set.fromList (List.map .key (program ++ rtProgram))) groupTypes.schemes
+                                |> QbeTypes.withBinders binderPerDefun
+                            )
                             groupTypes.failures
                 in
                 (if flatten then
@@ -342,10 +372,43 @@ completeArities globals program =
         program
 
 
-compileAll : Dict String Int -> List MidModule.Unit -> Result String (List Defun)
-compileAll globals units =
-    sequence (List.map (MidModule.compileUnit globals) units)
-        |> Result.map List.concat
+{-| S2/M0b: `compileAll` plus the binder join. Every unit compiles through
+`Mid.Module.compileUnitJoin` (same defuns, same order — `compileUnit` IS that
+function with the join dropped), and each defun's `binderId -> Range` join is
+resolved against ITS OWN unit's node-type record (keyed by module name: a
+Range is unique only within one file), through `Qbe.Types`'s deny-on-conflict
+policy. A defun of a unit with NO record (trusted body, failed re-inference)
+gets no entry in `binderPerDefun` and therefore keeps `BindersAbsent`.
+-}
+compileAllJoin :
+    Dict String Int
+    -> List MidModule.Unit
+    -> Dict String (List ( Range, Type ))
+    -> Result String ( List Defun, Dict String (Dict Int Type) )
+compileAllJoin globals units nodeTypesByModule =
+    sequence (List.map (\u -> Result.map (\( ds, rs ) -> ( u.moduleName, ds, rs )) (MidModule.compileUnitJoin globals u)) units)
+        |> Result.map
+            (\triples ->
+                ( List.concatMap (\( _, ds, _ ) -> ds) triples
+                , List.foldl
+                    (\( modName, defuns, ranges ) acc ->
+                        let
+                            rangeTypes =
+                                QbeTypes.nodeTypeMap (Maybe.withDefault [] (Dict.get (String.join "." modName) nodeTypesByModule))
+                        in
+                        List.foldl
+                            (\d a ->
+                                Dict.insert d.key
+                                    (QbeTypes.joinBinders (Maybe.withDefault Dict.empty (Dict.get d.key ranges)) rangeTypes)
+                                    a
+                            )
+                            acc
+                            defuns
+                    )
+                    Dict.empty
+                    triples
+                )
+            )
 
 
 sequence : List (Result String a) -> Result String (List a)

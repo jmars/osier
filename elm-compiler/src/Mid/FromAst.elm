@@ -3,12 +3,15 @@ module Mid.FromAst exposing
     , Gen
     , newContext
     , runGen
+    , runGenJoin
     , pure
     , map
     , andThen
     , fail
     , freshBinder
     , freshBinders
+    , freshBinderAt
+    , freshBindersAt
     , withScope
     , withImport
     , withModuleAliases
@@ -125,18 +128,47 @@ withOpenTypeModules mods ctx =
 
 -- ============================ BINDER SUPPLY ============================
 -- The explicit threading the plan's addendum calls for: a generator is a
--- function from the next free binder id to a result plus the next free id.
+-- function from the generator STATE to a result plus the next state.
 -- Nothing clever — a state monad written out by hand, so it ports to a
 -- module/functor argument when Osier grows rank-2 first-class modules.
+--
+-- S2/M0b (monomorphisation): the generator state now carries, beside the
+-- supply counter, the BINDER-ID <-> SOURCE-RANGE JOIN — the second half of the
+-- correspondence `Mid.Qbe.Types` needs (the checker records types keyed by
+-- `Range`; the Mid tree keys binders by unique-per-defun id; this map is the
+-- only bridge).  `freshBinderAt` records the range of the SOURCE PATTERN NODE
+-- a binder is issued from; `freshBinder` (synthetic binders: `$case`, `$argN`,
+-- `$argv`, `rec`, wrappers, ctor params) records NOTHING, so a synthetic
+-- binder is DENIED BY DEFAULT — a consumer looking up its type finds no entry,
+-- which is the honest answer (no source node exists).  The ids and every
+-- emitted instruction are UNCHANGED by this threading: only the side map
+-- grows.  Because `runGen` restarts the supply at 0 per defun, the join is
+-- PER-DEFUN; `runGenJoin` returns it so `Mid.Module.compileUnitJoin` can key
+-- it by the defun's qualified key.
+
+
+type alias GenState =
+    { supply : Int
+    , ranges : Dict Int Range
+    }
 
 
 type alias Gen a =
-    Int -> Result String ( a, Int )
+    GenState -> Result String ( a, GenState )
 
 
 runGen : Gen a -> Result String a
 runGen gen =
-    Result.map Tuple.first (gen 0)
+    Result.map Tuple.first (gen { supply = 0, ranges = Dict.empty })
+
+
+{-| Run a generator and return BOTH its result and the binder-id -> Range join
+it built (S2/M0b; empty where no `freshBinderAt` fired). `runGen` is exactly
+this with the join dropped, so the two cannot drift.
+-}
+runGenJoin : Gen a -> Result String ( a, Dict Int Range )
+runGenJoin gen =
+    Result.map (\( a, st ) -> ( a, st.ranges )) (gen { supply = 0, ranges = Dict.empty })
 
 
 pure : a -> Gen a
@@ -167,7 +199,20 @@ fail msg =
 
 freshBinder : String -> Gen Binder
 freshBinder name =
-    \s -> Ok ( { id = s, name = name }, s + 1 )
+    \s -> Ok ( { id = s.supply, name = name }, { s | supply = s.supply + 1 } )
+
+
+{-| A binder issued from a SOURCE PATTERN NODE: record its range in the join
+(S2/M0b — see the BINDER SUPPLY header). Same id the plain `freshBinder` would
+issue; only the side map grows.
+-}
+freshBinderAt : Range -> String -> Gen Binder
+freshBinderAt r name =
+    \s ->
+        Ok
+            ( { id = s.supply, name = name }
+            , { s | supply = s.supply + 1, ranges = Dict.insert s.supply r s.ranges }
+            )
 
 
 freshBinders : List String -> Gen (List Binder)
@@ -178,6 +223,19 @@ freshBinders names =
 
         name :: rest ->
             andThen (\binder -> map (\binders -> binder :: binders) (freshBinders rest)) (freshBinder name)
+
+
+{-| `freshBinders` for argument lists: each name paired with its argument
+pattern node's range (the caller zips `argNames`' output with the node ranges).
+-}
+freshBindersAt : List ( Range, String ) -> Gen (List Binder)
+freshBindersAt pairs =
+    case pairs of
+        [] ->
+            pure []
+
+        ( r, name ) :: rest ->
+            andThen (\binder -> map (\binders -> binder :: binders) (freshBindersAt rest)) (freshBinderAt r name)
 
 
 
@@ -693,7 +751,9 @@ emitLambda ctx argNodes bodyNode =
                     map (\body -> Lam { params = params, body = body })
                         (fromExpression (withScope ctx params) bodyNode)
                 )
-                (freshBinders names)
+                -- S2/M0b: each lambda param's binder records its argument
+                -- pattern node's range (the checker records the same node).
+                (freshBindersAt (List.map2 (\n name -> ( Node.range n, name )) argNodes names))
 
 
 letExpr : Context -> Expression.LetBlock -> Gen Exp
@@ -729,7 +789,7 @@ bindOne ctx (Node _ decl) =
                             (\value ->
                                 map
                                     (\binder -> ( LetBind { binder = binder, value = value }, withScope ctx [ binder ] ))
-                                    (freshBinder name)
+                                    (freshBinderAt (Node.range patNode) name)
                             )
                             (fromExpression ctx eNode)
 
@@ -785,11 +845,13 @@ lowerLetFunction ctx fn =
             if List.isEmpty impl.arguments then
                 -- `let a = <value>` parses as a 0-arg LetFunction: a VALUE
                 -- binding (no Cur), so references Access the value.
+                -- S2/M0b: the binder records the let-function NAME node's
+                -- range (the checker's inferLetFunction records the same).
                 andThen
                     (\value ->
                         map
                             (\binder -> ( LetBind { binder = binder, value = value }, withScope ctx [ binder ] ))
-                            (freshBinder name)
+                            (freshBinderAt (Node.range impl.name) name)
                     )
                     (fromExpression ctx impl.expression)
 
@@ -800,7 +862,7 @@ lowerLetFunction ctx fn =
                     (\value ->
                         map
                             (\binder -> ( LetBind { binder = binder, value = value }, withScope ctx [ binder ] ))
-                            (freshBinder name)
+                            (freshBinderAt (Node.range impl.name) name)
                     )
                     (lambdaExp ctx { args = impl.arguments, expression = impl.expression })
 
@@ -984,17 +1046,22 @@ wrapPattern n args range =
 -- Mid.Ir.Match values instead of instruction lists; the ORDER of the tests and
 -- of the bindings is identical to Lower.Pattern's (that order is what makes
 -- the emitted tests byte-identical).
+--
+-- S2/M0b: each pattern BIND now carries the range of the source pattern node
+-- it was issued from (`binds : List ( String, ValuePath, Range )`), so
+-- `bindPatternNames` can record the binder-id -> Range join.  Tests, order
+-- and binder names are UNCHANGED.
 
 
 type alias MatchResult =
     { matches : List Match
-    , binds : List ( String, ValuePath )
+    , binds : List ( String, ValuePath, Range )
     }
 
 
 caseMatches : Node Pattern.Pattern -> Result String MatchResult
-caseMatches (Node _ pat) =
-    goPattern pat []
+caseMatches node =
+    goPattern node []
 
 
 emptyMatch : MatchResult
@@ -1002,14 +1069,14 @@ emptyMatch =
     { matches = [], binds = [] }
 
 
-goPattern : Pattern.Pattern -> List Step -> Result String MatchResult
-goPattern pat path =
+goPattern : Node Pattern.Pattern -> List Step -> Result String MatchResult
+goPattern (Node r pat) path =
     case pat of
         AllPattern ->
             Ok emptyMatch
 
         VarPattern name ->
-            Ok { matches = [], binds = [ ( name, VPath path ) ] }
+            Ok { matches = [], binds = [ ( name, VPath path, r ) ] }
 
         UnitPattern ->
             Ok { matches = [ MLitEq path (LSymbol "()") ], binds = [] }
@@ -1045,16 +1112,16 @@ goPattern pat path =
             namedMatch qref subs path
 
         AsPattern inner alias ->
-            Result.map (\res -> { res | binds = res.binds ++ [ ( nodeString alias, VPath path ) ] })
-                (goPattern (nodeValue inner) path)
+            Result.map (\res -> { res | binds = res.binds ++ [ ( nodeString alias, VPath path, Node.range alias ) ] })
+                (goPattern inner path)
 
         ParenthesizedPattern inner ->
-            goPattern (nodeValue inner) path
+            goPattern inner path
 
         RecordPattern fields ->
             Ok
                 { matches = []
-                , binds = List.map (\f -> ( nodeString f, VField path (nodeString f) )) fields
+                , binds = List.map (\f -> ( nodeString f, VField path (nodeString f), Node.range f )) fields
                 }
 
 
@@ -1084,8 +1151,8 @@ unConsMatch left right path =
             , binds = lres.binds ++ rres.binds
             }
         )
-        (goPattern (nodeValue left) (path ++ [ HdStep ]))
-        (goPattern (nodeValue right) (path ++ [ TlStep ]))
+        (goPattern left (path ++ [ HdStep ]))
+        (goPattern right (path ++ [ TlStep ]))
 
 
 listMatch : List (Node Pattern.Pattern) -> List Step -> Result String MatchResult
@@ -1143,7 +1210,7 @@ recurseIndexedHelp idx subs pathOf =
 
         sub :: rest ->
             Result.map2 mergeResults
-                (goPattern (nodeValue sub) (pathOf idx))
+                (goPattern sub (pathOf idx))
                 (recurseIndexedHelp (idx + 1) rest pathOf)
 
 
@@ -1156,16 +1223,18 @@ mergeResults a b =
 
 -- Allocate one binder per pattern variable, in source order (so binding j sits
 -- j slots above the scrutinee temp, which is the index the emitter reads it at).
-bindPatternNames : List ( String, ValuePath ) -> Gen (List ( Binder, ValuePath ))
+-- S2/M0b: each binder is issued with `freshBinderAt` — the id -> Range join
+-- entry — so its type can be looked up by the source pattern node's range.
+bindPatternNames : List ( String, ValuePath, Range ) -> Gen (List ( Binder, ValuePath ))
 bindPatternNames pairs =
     case pairs of
         [] ->
             pure []
 
-        ( name, path ) :: rest ->
+        ( name, path, r ) :: rest ->
             andThen
                 (\binder -> map (\tail -> ( binder, path ) :: tail) (bindPatternNames rest))
-                (freshBinder name)
+                (freshBinderAt r name)
 
 
 -- ============================ RECORDS / LISTS / TUPLES ============================

@@ -57,10 +57,24 @@ import Type.Unify as Uni
 {-| A checked + rewritten unit: the rewritten `File` (ready to lower) and the
 unit's value schemes (qualified `"Mod.name"` keys) for merging into the global
 environment for downstream units.
+
+`nodeTypes` (monomorphisation S2/M0b) is a PURELY ADDITIVE instrumentation
+record: every expression node's inferred type (one entry per `inferExpr` visit)
+and every pattern binder's type, each zonked ONCE at unit end against the
+unit's final substitution. It is built where the checker already computes the
+type, changes no judgment, no unification, and no rewrite, and changes nothing
+about the existing fields — `file`/`schemes` are bit-for-bit what they
+were before this field existed. A range with TWO DIFFERENT zonked types in the
+list is a real possibility (Lift's synthetic snapshot nodes share one range; a
+GADT re-check re-infers a body), so the list is EXPOSED AS A LIST, duplicates
+and all — turning it into a `Dict Range Type` is a POLICY (deny-on-conflict)
+that belongs to the consumer, not to this module. S5's key decision (range vs
+range+occurrence) reads this list.
 -}
 type alias CheckedUnit =
     { file : File.File
     , schemes : List ( String, Scheme )
+    , nodeTypes : List ( Range, Type )
     }
 
 
@@ -128,12 +142,14 @@ inferUnit env file =
     -- each non-recursive SCC before its dependents are checked — the authentic
     -- HM/Elm treatment (a helper used at many types, like `show`, must be
     -- polymorphic at its use sites; only mutually-recursive SCCs stay mono).
-    checkSccs ctx unsignatured groups sccs { uni = state0, appends = [], refinedTargets = [], refinedTails = [], refinedTypeEqs = [], existentials = [], nonExhaustive = Nothing }
+    checkSccs ctx unsignatured groups sccs { uni = state0, appends = [], refinedTargets = [], refinedTails = [], refinedTypeEqs = [], existentials = [], nonExhaustive = Nothing, nodeTypes = [] }
         |> Result.map
-            (\( rewritten, finalTop, _ ) ->
+            (\( rewritten, finalTop, finalState ) ->
                 { file = rebuildFile rewritten file
                 , schemes =
                     List.map (\( n, s ) -> ( selfStr ++ "." ++ n, s )) (Dict.toList finalTop)
+                , nodeTypes =
+                    List.map (\( r, t ) -> ( r, Rep.zonk finalState.uni.subst t )) finalState.nodeTypes
                 }
             )
 
@@ -156,6 +172,7 @@ type alias InferState =
     , refinedTypeEqs : List ( VarId, Type )
     , existentials : List Int
     , nonExhaustive : Maybe ( Range, String )
+    , nodeTypes : List ( Range, Type )
     }
 
 
@@ -178,7 +195,17 @@ type alias M a =
 
 emptyInferState : InferState
 emptyInferState =
-    { uni = Uni.emptyState, appends = [], refinedTargets = [], refinedTails = [], refinedTypeEqs = [], existentials = [], nonExhaustive = Nothing }
+    { uni = Uni.emptyState, appends = [], refinedTargets = [], refinedTails = [], refinedTypeEqs = [], existentials = [], nonExhaustive = Nothing, nodeTypes = [] }
+
+
+{-| Record one node's/binder's type (monomorphisation S2/M0b — see
+`CheckedUnit.nodeTypes`). The type is stored RAW (pre-zonk): a later unification
+may still bind its variables, and the ONE zonk at unit end resolves them all —
+so this is a pure accumulation with no effect on any judgment.
+-}
+recordNode : Range -> Type -> M ()
+recordNode r t state =
+    Ok ( (), { state | nodeTypes = ( r, t ) :: state.nodeTypes } )
 
 
 ok : a -> M a
@@ -617,8 +644,25 @@ scopeFreeVars ctx =
 -- ======================= EXPRESSIONS =======================
 
 
+{-| Infer one expression node's type (S2/M0b): the S1-era body now lives in
+`inferExprGo`, and this wrapper is the ONE hook that records the node's type
+after the body computes it. Every recursive `inferExpr` call site in this
+module (including the ones inside `inferExprGo`'s own arms) therefore records
+its node too — one hook, all 30+ sites, no arm touched. ADDITIVE: the returned
+type and the threaded unification state are exactly `inferExprGo`'s.
+-}
 inferExpr : Ctx -> Node Expression -> M Type
-inferExpr ctx (Node range expr) =
+inferExpr ctx node =
+    inferExprGo ctx node
+        |> andThen
+            (\t ->
+                recordNode (Node.range node) t
+                    |> map (\_ -> t)
+            )
+
+
+inferExprGo : Ctx -> Node Expression -> M Type
+inferExprGo ctx (Node range expr) =
     case expr of
         UnitExpr ->
             ok Rep.tUnit
@@ -1206,7 +1250,15 @@ inferLetFunction ctx fn =
                 |> andThen
                     (\bt ->
                         zonkM (List.foldr TFun bt argTypes)
-                            |> andThen (\zt state -> ok (generalizeLet (generalizationRigid ctx state) zt) state)
+                            |> andThen
+                                (\zt state ->
+                                    -- S2/M0b: record the let-function's own binder
+                                    -- (its NAME node) at the type the checker just
+                                    -- computed for it. Additive: the returned
+                                    -- scheme is unchanged.
+                                    recordNode (Node.range impl.name) zt state
+                                        |> Result.map (\( (), state2 ) -> ( generalizeLet (generalizationRigid ctx state) zt, state2 ))
+                                )
                     )
         )
 
@@ -2054,7 +2106,12 @@ inferPattern branchMode ctx (Node r pat) =
             ok ( [], Rep.tFloat )
 
         VarPattern name ->
-            fresh KType FNone |> map (\v -> ( [ ( name, Env.monoScheme (TVar v) ) ], TVar v ))
+            fresh KType FNone
+                |> andThen
+                    (\v ->
+                        recordNode r (TVar v)
+                            |> map (\_ -> ( [ ( name, Env.monoScheme (TVar v) ) ], TVar v ))
+                    )
 
         TuplePattern ps ->
             inferPatterns branchMode ctx ps |> map (\( pts, binds ) -> ( binds, TTuple pts ))
@@ -2066,11 +2123,15 @@ inferPattern branchMode ctx (Node r pat) =
                         foldM
                             (\field ( fieldTypes, binds ) ->
                                 fresh KType FNone
-                                    |> map
+                                    |> andThen
                                         (\v ->
-                                            ( fieldTypes ++ [ ( nodeString field, TVar v ) ]
-                                            , binds ++ [ ( nodeString field, Env.monoScheme (TVar v) ) ]
-                                            )
+                                            recordNode (Node.range field) (TVar v)
+                                                |> map
+                                                    (\_ ->
+                                                        ( fieldTypes ++ [ ( nodeString field, TVar v ) ]
+                                                        , binds ++ [ ( nodeString field, Env.monoScheme (TVar v) ) ]
+                                                        )
+                                                    )
                                         )
                             )
                             ( [], [] )
@@ -2111,7 +2172,11 @@ inferPattern branchMode ctx (Node r pat) =
 
         AsPattern inner nameNode ->
             inferPattern branchMode ctx inner
-                |> map (\( binds, t ) -> ( binds ++ [ ( nodeString nameNode, Env.monoScheme t ) ], t ))
+                |> andThen
+                    (\( binds, t ) ->
+                        recordNode (Node.range nameNode) t
+                            |> map (\_ -> ( binds ++ [ ( nodeString nameNode, Env.monoScheme t ) ], t ))
+                    )
 
         ParenthesizedPattern inner ->
             inferPattern branchMode ctx inner
