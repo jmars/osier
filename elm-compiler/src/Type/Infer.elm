@@ -75,7 +75,26 @@ type alias CheckedUnit =
     { file : File.File
     , schemes : List ( String, Scheme )
     , nodeTypes : List ( Range, Type )
+    , refinedVars : List Int
     }
+
+
+{-| S5/M2 (monomorphisation) — the `refinedVars` field's value: the VARIABLES
+MENTIONED BY THE UNIT'S `refinedTypeEqs` — the union, over every branch-local equation pushed while
+checking this unit, of the equation TARGET id and the free variables of its
+body. This is the refusal-predicate input the specialiser cannot derive from
+`nodeTypes`: the zonked types SHOW a refined variable (as a `TVar`) but do not
+MARK it as refinement-touched, and equation-store identities are gone by unit
+end (each branch rolls its equations back). ADDITIVE for exactly the reason
+`nodeTypes` is: it is a pure recording of state the checker already computed,
+read once at unit end; no judgment, no unification, no error, and no existing
+field changes. THE VAR-ID NAMESPACE IS PER-UNIT (every `inferUnit` call starts
+a fresh supply), so a consumer MUST intersect these ids with the types of the
+SAME unit only.
+-}
+refinedVarsOf : InferState -> List Int
+refinedVarsOf finalState =
+    finalState.refinedVars
 
 
 {-| Infer + rewrite one module. `env` is the MERGED environment (all units'
@@ -142,7 +161,7 @@ inferUnit env file =
     -- each non-recursive SCC before its dependents are checked — the authentic
     -- HM/Elm treatment (a helper used at many types, like `show`, must be
     -- polymorphic at its use sites; only mutually-recursive SCCs stay mono).
-    checkSccs ctx unsignatured groups sccs { uni = state0, appends = [], refinedTargets = [], refinedTails = [], refinedTypeEqs = [], existentials = [], nonExhaustive = Nothing, nodeTypes = [] }
+    checkSccs ctx unsignatured groups sccs { uni = state0, appends = [], refinedTargets = [], refinedTails = [], refinedTypeEqs = [], existentials = [], nonExhaustive = Nothing, nodeTypes = [], refinedVars = [] }
         |> Result.map
             (\( rewritten, finalTop, finalState ) ->
                 { file = rebuildFile rewritten file
@@ -150,6 +169,7 @@ inferUnit env file =
                     List.map (\( n, s ) -> ( selfStr ++ "." ++ n, s )) (Dict.toList finalTop)
                 , nodeTypes =
                     List.map (\( r, t ) -> ( r, Rep.zonk finalState.uni.subst t )) finalState.nodeTypes
+                , refinedVars = refinedVarsOf finalState
                 }
             )
 
@@ -173,6 +193,7 @@ type alias InferState =
     , existentials : List Int
     , nonExhaustive : Maybe ( Range, String )
     , nodeTypes : List ( Range, Type )
+    , refinedVars : List Int
     }
 
 
@@ -195,7 +216,7 @@ type alias M a =
 
 emptyInferState : InferState
 emptyInferState =
-    { uni = Uni.emptyState, appends = [], refinedTargets = [], refinedTails = [], refinedTypeEqs = [], existentials = [], nonExhaustive = Nothing, nodeTypes = [] }
+    { uni = Uni.emptyState, appends = [], refinedTargets = [], refinedTails = [], refinedTypeEqs = [], existentials = [], nonExhaustive = Nothing, nodeTypes = [], refinedVars = [] }
 
 
 {-| Record one node's/binder's type (monomorphisation S2/M0b — see
@@ -2017,6 +2038,14 @@ unifyBranchM range t1 t2 state =
                         state.refinedTargets
                         pushed
 
+                -- S5/M2: every variable a pushed equation mentions joins the
+                -- unit-level `refinedVars` record (see `refinedVarsOf`).
+                newRefinedVars =
+                    List.foldl
+                        (\v acc -> if List.member v acc then acc else v :: acc)
+                        state.refinedVars
+                        (List.concatMap (\eq -> eq.target.id :: List.map .id (Env.freeVars (Rep.zonk uni2.subst eq.body))) pushed)
+
                 newTails =
                     List.foldl
                         (\eq acc ->
@@ -2060,7 +2089,7 @@ unifyBranchM range t1 t2 state =
                         state.refinedTypeEqs
                         pushed
             in
-            Ok ( (), { state | uni = uni2, refinedTargets = newTargets, refinedTails = newTails, refinedTypeEqs = newTypeEqs } )
+            Ok ( (), { state | uni = uni2, refinedTargets = newTargets, refinedTails = newTails, refinedTypeEqs = newTypeEqs, refinedVars = newRefinedVars } )
 
 
 

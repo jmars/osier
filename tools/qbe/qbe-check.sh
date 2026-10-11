@@ -862,6 +862,198 @@ else
   FAIL=1
 fi
 
+# ---- S5/M2: MONOMORPHISATION (tools/qbe/fixtures/mono.elm, monorefuse.elm) --
+# The specialiser CLONES a polymorphic defun at the instantiations its
+# saturated direct call sites use (QBE_NOMONO=1 disables it, on the SAME
+# source).  Two things must hold, and neither is a clock:
+#
+#   * the MECHANISM: a clone lands in the type table as a CLOSED MONOTYPE, so
+#     S4/M1's `intParamsOf` can prove its parameters and the tag tests and
+#     `q_Rt_*` fallbacks INSIDE the clone disappear.  The counters below are
+#     per-FUNCTION, read out of the emitted .ssa by symbol, because a global
+#     site count would be satisfied by the original defun simply falling out of
+#     reachability;
+#   * the REFUSAL: a site whose instantiation is unclosed (a), rigid (b) or
+#     refinement-touched (c) must NOT be cloned, and the pass's own note line
+#     (`# mono: candidates=... refused_b=...`) is what distinguishes "refused"
+#     from "never looked at".  Each refusing entry's .ssa must then be
+#     BYTE-IDENTICAL to its QBE_NOMONO=1 arm once the note line is removed —
+#     the pass saw the site and changed nothing else.
+#
+# The note is emitted IFF the pass made any decision, which is also what makes
+# `mono-inert` a real check: an entry with no candidate at all must be
+# byte-identical INCLUDING its first line.
+qbe_ssa_mono() { # <fixture> <entry> <out.ssa> <on|off>
+  if [ "$4" = "off" ]; then
+    (cd "$ROOT/elm-compiler" && QBE=1 QBE_NOMONO=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+  else
+    (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+  fi
+}
+# mono_note <ssa>: the pass's one-line report ("" when it decided nothing).  A
+# mangle-escaped `$` in a symbol is `_x24`, and only a clone key can contain
+# one, so `_x24` is the clone marker (a surface identifier cannot contain `$`).
+mono_note() {
+  sed -n 's/^# mono: //p' "$1" | head -1
+}
+# mono_field <ssa> <key>: one counter out of that line.
+mono_field() {
+  printf '%s\n' "$(mono_note "$1")" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1
+}
+mono_clones() {
+  grep -c '^function :ret \$[A-Za-z0-9_]*_x24' "$1" || true
+}
+# num <str>: a counter as an INTEGER. An empty or non-numeric capture becomes
+# 0 so a comparison can never pass just because a helper failed (an empty
+# string tests as 0 in `[ ... -lt ...]`, which is how a broken probe reads as a
+# green row).
+num() {
+  case "${1:-}" in
+    ''|*[!0-9]*) echo 0 ;;
+    *) echo "$1" ;;
+  esac
+}
+# mono_fn_prim <ssa> <name-regex>: `rt_prim`/`q_Rt_*` CALL SITES inside the
+# functions whose emitted symbol matches the regex.
+mono_fn_prim() {
+  awk -v re="$2" '
+    /^function |^export function / {
+      n=$0; sub(/^.*\$/, "", n); sub(/\(.*/, "", n); cur=n
+    }
+    cur ~ re && $0 ~ /call \$(rt_prim|q_Rt_)/ { c++ }
+    END { print c+0 }
+  ' "$1"
+}
+
+# mono_fn_sym <ssa> <name-regex> <call-substring>: the call sites to ONE
+# runtime symbol inside those functions — the sharpest form of the mechanism
+# claim ("this fallback is gone from the clone and still present in the
+# polymorphic original").
+mono_fn_sym() {
+  awk -v re="$2" -v sym="$3" '
+    /^function |^export function / {
+      n=$0; sub(/^.*\$/, "", n); sub(/\(.*/, "", n); cur=n
+    }
+    cur ~ re && $0 ~ /call / && index($0, sym) > 0 { c++ }
+    END { print c+0 }
+  ' "$1"
+}
+qbe_ssa_mono tools/qbe/fixtures/mono.elm Mono.main "$TMP/mono-main-on.ssa" on
+qbe_ssa_mono tools/qbe/fixtures/mono.elm Mono.main "$TMP/mono-main-off.ssa" off
+# the FIRING entry: two clones (fib at Int, foldPair at Int), and the clone's
+# own body must have LOST the arithmetic fallbacks while the still-polymorphic
+# original keeps them.
+if [ -s "$TMP/mono-main-on.ssa" ] && [ -s "$TMP/mono-main-off.ssa" ]; then
+  mn_on=$(num "$(mono_clones "$TMP/mono-main-on.ssa")")
+  mn_off=$(num "$(mono_clones "$TMP/mono-main-off.ssa")")
+  # the clone marker in the OFF arm would mean the pass ran with the hatch on.
+  cp_on=$(num "$(mono_fn_prim "$TMP/mono-main-on.ssa" 'x2efib_x24')")
+  cp_off=$(num "$(mono_fn_prim "$TMP/mono-main-off.ssa" 'x2efib_x24')")
+  # the original `fib` — kept by clone-do-not-replace, because its own
+  # recursive calls are instantiated at its own type variables and refused.
+  # `mono_fn_prim` strips the parameter list, so the original's symbol is
+  # exactly this name while a clone's carries the `_x24` suffix.
+  fp_on=$(num "$(mono_fn_prim "$TMP/mono-main-on.ssa" '^q_Mono_x2efib$')")
+  fp_off=$(num "$(mono_fn_prim "$TMP/mono-main-off.ssa" '^q_Mono_x2efib$')")
+  if [ "$mn_off" -ne 0 ]; then
+    echo "FAIL mono-hatch: $mn_off clone function(s) in the QBE_NOMONO=1 arm — the hatch does not restore the pre-S5 emission"
+    FAIL=1
+  elif [ "$mn_on" -lt 2 ]; then
+    echo "FAIL mono-fired: only $mn_on clone(s) with the pass on — fib/foldPair were not specialised"
+    FAIL=1
+  elif [ "$cp_off" -ne 0 ] || [ "$fp_off" -lt 3 ]; then
+    echo "FAIL mono-fired: OFF arm counters look wrong (clone sites $cp_off, original fib rt_prim $fp_off)"
+    FAIL=1
+  elif [ "$cp_on" -ge "$fp_on" ]; then
+    echo "FAIL mono-fired: the clone did not lose its fallbacks ($cp_on vs the original's $fp_on)"
+    FAIL=1
+  elif [ "$fp_on" -lt 3 ]; then
+    echo "FAIL mono-fired: the ORIGINAL fib lost sites too ($fp_on) — clone-do-not-replace did not hold"
+    FAIL=1
+  else
+    # the specific fallbacks: `<` and `-` must be GONE from the clone (their
+    # operands are the INT parameter, which the clone's monotype entry proves)
+    # and still present in the polymorphic original, which nothing can prove.
+    cl_lt=$(num "$(mono_fn_sym "$TMP/mono-main-on.ssa" 'x2efib_x24' '$q_Rt_x2e_x3c')")
+    cl_sub=$(num "$(mono_fn_sym "$TMP/mono-main-on.ssa" 'x2efib_x24' '$q_Rt_x2e_x2d')")
+    og_lt=$(num "$(mono_fn_sym "$TMP/mono-main-on.ssa" '^q_Mono_x2efib$' '$q_Rt_x2e_x3c')")
+    og_sub=$(num "$(mono_fn_sym "$TMP/mono-main-on.ssa" '^q_Mono_x2efib$' '$q_Rt_x2e_x2d')")
+    if [ "$cl_lt" -ne 0 ] || [ "$cl_sub" -ne 0 ] || [ "$og_lt" -lt 1 ] || [ "$og_sub" -lt 2 ]; then
+      echo "FAIL mono-fired: the clone still calls the tag-test fallback (< $cl_lt, - $cl_sub) or the original lost it (< $og_lt, - $og_sub)"
+      FAIL=1
+    else
+      echo "PASS mono-fired: $mn_on clones ON / $mn_off OFF; clone rt_prim $cp_on vs original $fp_on, clone's < / - fallbacks $cl_lt/$cl_sub vs the original's $og_lt/$og_sub"
+    fi
+  fi
+  # the note line is the pass's own account, and it must AGREE with the .ssa.
+  mn_cand=$(num "$(mono_field "$TMP/mono-main-on.ssa" candidates)")
+  if [ "$mn_cand" -ge "$mn_on" ] && [ "$mn_on" -ge 2 ]; then
+    echo "PASS mono-note: candidates=$mn_cand clones=$(mono_field "$TMP/mono-main-on.ssa" clones) converted=$(mono_field "$TMP/mono-main-on.ssa" converted) untyped=$(mono_field "$TMP/mono-main-on.ssa" untyped)"
+  else
+    echo "FAIL mono-note: the note line disagrees with the emitted clones (candidates=$mn_cand, clones=$mn_on)"
+    FAIL=1
+  fi
+else
+  echo "FAIL mono-fired: mono .ssa missing (compile failed?)"
+  FAIL=1
+fi
+
+# the REFUSAL entries: each must report its clause in the note AND leave the
+# emitted code alone (byte-identical once the note line is dropped).
+mono_refuse_row() { # <name> <entry> <key>
+  qbe_ssa_mono tools/qbe/fixtures/monorefuse.elm "MonoRefuse.$2" "$TMP/mr-$1-on.ssa" on
+  qbe_ssa_mono tools/qbe/fixtures/monorefuse.elm "MonoRefuse.$2" "$TMP/mr-$1-off.ssa" off
+  if [ ! -s "$TMP/mr-$1-on.ssa" ] || [ ! -s "$TMP/mr-$1-off.ssa" ]; then
+    echo "FAIL mono-refuse-$1: .ssa missing (compile failed?)"
+    FAIL=1
+    return
+  fi
+  local n_clones n_key n_cand
+  n_clones=$(num "$(mono_clones "$TMP/mr-$1-on.ssa")")
+  n_key=$(num "$(mono_field "$TMP/mr-$1-on.ssa" "$3")")
+  n_cand=$(num "$(mono_field "$TMP/mr-$1-on.ssa" candidates)")
+  if [ "$n_clones" -ne 0 ]; then
+    echo "FAIL mono-refuse-$1: $n_clones clone(s) were emitted for a refused entry"
+    FAIL=1
+  elif [ "$n_cand" -lt 1 ]; then
+    echo "FAIL mono-refuse-$1: candidates=$n_cand — the entry does not exercise the trigger at all, so the refusal is vacuous"
+    FAIL=1
+  elif [ "$n_key" -lt 1 ]; then
+    echo "FAIL mono-refuse-$1: the note reports $3=$n_key — a different clause refused the site"
+    FAIL=1
+  elif ! cmp -s <(tail -n +2 "$TMP/mr-$1-on.ssa") "$TMP/mr-$1-off.ssa"; then
+    echo "FAIL mono-refuse-$1: the .ssa differs from the QBE_NOMONO=1 arm by more than the note line"
+    FAIL=1
+  else
+    echo "PASS mono-refuse-$1: candidates=$n_cand clones=0 $3=$n_key, and the emission is identical to the hatch arm"
+  fi
+}
+mono_refuse_row rigid  hget      refused_b
+mono_refuse_row refined hgetPlain refused_c
+mono_refuse_row unclosed apply2  refused_a
+mono_refuse_row untyped  fold     untyped
+# the FIRING control in the same file: the pass must act on this compile, so
+# the refusals above cannot be satisfied by the pass simply not running.
+qbe_ssa_mono tools/qbe/fixtures/monorefuse.elm MonoRefuse.plainAt "$TMP/mr-plain-on.ssa" on
+mn_ctl=$(num "$(mono_clones "$TMP/mr-plain-on.ssa")")
+if [ "$mn_ctl" -ge 1 ]; then
+  echo "PASS mono-refuse-control: MonoRefuse.plainAt clones $mn_ctl defun(s) — the pass runs on this fixture"
+else
+  echo "FAIL mono-refuse-control: no clone for MonoRefuse.plainAt — every refusal row above is vacuous"
+  FAIL=1
+fi
+# INERTNESS: an entry with no candidate at all must be byte-identical INCLUDING
+# the first line (no note is emitted).  This is the corpus-attribution property
+# (QBE_NOMONO=1 must reproduce the committed baseline) at fixture scale.
+qbe_ssa_mono tools/qbe/fixtures/monorefuse.elm MonoRefuse.twice "$TMP/mr-inert-on.ssa" on
+qbe_ssa_mono tools/qbe/fixtures/monorefuse.elm MonoRefuse.twice "$TMP/mr-inert-off.ssa" off
+if [ -s "$TMP/mr-inert-on.ssa" ] && cmp -s "$TMP/mr-inert-on.ssa" "$TMP/mr-inert-off.ssa"; then
+  echo "PASS mono-inert: an entry with no candidate is BYTE-IDENTICAL on and off ($(wc -c <"$TMP/mr-inert-on.ssa") bytes)"
+else
+  echo "FAIL mono-inert: an entry with no candidate changed under the pass"
+  FAIL=1
+fi
+
 # ---- stage 7: FLOAT (the silent-wrong class) ----
 # The float path was NOT "not expressible" in the mere sense: hand-patching
 # the emitted .ssa past the data-item lexer rejection produced a binary that
@@ -912,6 +1104,14 @@ run float-arg      Flt.idF tools/qbe/fixtures/float.elm 2.5
 run float-arg-int  Flt.idF tools/qbe/fixtures/float.elm 3
 run float-arg-tiny Flt.idF tools/qbe/fixtures/float.elm 1e-7
 run float-arg-neg  Flt.idF tools/qbe/fixtures/float.elm -1.5
+
+# ---- S5/M2: MONOMORPHISATION, behaviourally (tools/qbe/fixtures/mono*.elm) ---
+# The specialiser changes REPRESENTATIONS inside a clone, so a wrong answer is
+# a wrong NUMBER, not a crash: each entry runs against its golden and again
+# under QBE_HEAP_MB=16.
+run mono-main       Mono.main       tools/qbe/fixtures/mono.elm
+run mono-refuse     MonoRefuse.main tools/qbe/fixtures/monorefuse.elm
+run mono-refuse-arg MonoRefuse.plainAt tools/qbe/fixtures/monorefuse.elm 3
 
 # ---- S4/M1: UNBOXED Int LOCALS (tools/qbe/fixtures/norep.elm) ----
 # Every entry is a SEPARATE BUILD (the meta table roots only the requested

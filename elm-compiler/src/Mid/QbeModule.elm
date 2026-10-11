@@ -80,6 +80,7 @@ import Mid.Ir exposing (Defun)
 import Mid.Module as MidModule
 import Mid.Qbe.Flatten as QbeFlatten
 import Mid.Qbe.Lower as QbeLower
+import Mid.Qbe.Monomorphise as QbeMono
 import Mid.Qbe.Peephole as QbePeephole
 import Mid.Qbe.Print as QbePrint
 import Mid.Qbe.Types as QbeTypes
@@ -92,8 +93,8 @@ import Type.Infer as Infer
 import Type.Representation exposing (Type)
 
 
-compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Result String String
-compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt midCons rtLean =
+compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Result String String
+compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt midCons rtLean mono =
     case
         MidModule.parseAll corpusSources
             |> Result.andThen
@@ -103,7 +104,7 @@ compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt mi
                             (\_ ->
                                 Check.checkBuiltins corpusFiles
                                     |> Result.andThen
-                                        (\{ env, files, nodeTypes } ->
+                                        (\{ env, files, nodeTypes, refinedVars } ->
                                             MidModule.collectAll files
                                                 |> Result.andThen
                                                     (\corpusUnits ->
@@ -112,7 +113,7 @@ compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt mi
                                                                 Err msg
 
                                                             Ok corpusGlobals ->
-                                                                compileGroup env nodeTypes corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean
+                                                                compileGroup env nodeTypes refinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono
                                                     )
                                         )
                             )
@@ -128,6 +129,7 @@ compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt mi
 compileGroup :
     Env
     -> Dict String (List ( Range, Type ))
+    -> Dict String (List Int)
     -> List MidModule.Unit
     -> Dict String Int
     -> List String
@@ -138,8 +140,9 @@ compileGroup :
     -> Bool
     -> Bool
     -> Bool
+    -> Bool
     -> Result String String
-compileGroup env corpusNodeTypes corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean =
+compileGroup env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono =
     MidModule.parseAll groupSources
         |> Result.andThen
             (\groupFiles ->
@@ -169,8 +172,14 @@ compileGroup env corpusNodeTypes corpusUnits corpusGlobals groupSources entryKey
                                                                 -- the schemes.
                                                                 nodeTypesByModule =
                                                                     Dict.union groupTypes.nodeTypes corpusNodeTypes
+
+                                                                -- S5/M2 clause (c): the per-UNIT refined
+                                                                -- variable sets, merged the same way (a
+                                                                -- module name is unique per half).
+                                                                refinedVarsByModule =
+                                                                    Dict.union groupTypes.refinedVars corpusRefinedVars
                                                             in
-                                                            lowerAll rep primDirect midRt midCons rtLean flatten globals nodeTypesByModule groupTypes corpusUnits groupUnits entryKey
+                                                            lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey
                                                 )
                                     )
                         )
@@ -186,6 +195,7 @@ type alias GroupSchemes =
     { schemes : List ( String, Scheme )
     , failures : List String
     , nodeTypes : Dict String (List ( Range, Type ))
+    , refinedVars : Dict String (List Int)
     }
 
 
@@ -208,7 +218,7 @@ groupSchemes env units =
         env0 =
             List.foldl (\( _, f ) e -> Env.merge e (Env.collectFile f)) env lifted
     in
-    inferInOrder env0 lifted (QbeTypes.envSchemes env0) [] Dict.empty
+    inferInOrder env0 lifted (QbeTypes.envSchemes env0) [] Dict.empty Dict.empty
 
 
 {-| `Check.checkInOrder`'s loop, for the schemes and node types only: infer
@@ -218,11 +228,11 @@ been checked by `Check.checkUserGroup`, and this pass only ADDS information).
 A unit whose re-inference fails contributes NO node types either (deny: a
 defun of that unit keeps `BindersAbsent`).
 -}
-inferInOrder : Env -> List ( String, File.File ) -> List ( String, Scheme ) -> List String -> Dict String (List ( Range, Type )) -> GroupSchemes
-inferInOrder env files schemes failures nodeTypes =
+inferInOrder : Env -> List ( String, File.File ) -> List ( String, Scheme ) -> List String -> Dict String (List ( Range, Type )) -> Dict String (List Int) -> GroupSchemes
+inferInOrder env files schemes failures nodeTypes refinedVars =
     case files of
         [] ->
-            { schemes = schemes, failures = failures, nodeTypes = nodeTypes }
+            { schemes = schemes, failures = failures, nodeTypes = nodeTypes, refinedVars = refinedVars }
 
         ( modName, f ) :: rest ->
             case Infer.inferUnit env f of
@@ -233,9 +243,10 @@ inferInOrder env files schemes failures nodeTypes =
                         (schemes ++ checked.schemes)
                         failures
                         (Dict.insert modName checked.nodeTypes nodeTypes)
+                        (Dict.insert modName checked.refinedVars refinedVars)
 
                 Err err ->
-                    inferInOrder env rest schemes (failures ++ [ Error.render err ]) nodeTypes
+                    inferInOrder env rest schemes (failures ++ [ Error.render err ]) nodeTypes refinedVars
 
 
 lowerAll :
@@ -245,24 +256,29 @@ lowerAll :
     -> Bool
     -> Bool
     -> Bool
+    -> Bool
     -> Dict String Int
     -> Dict String (List ( Range, Type ))
     -> GroupSchemes
+    -> Dict String (List Int)
     -> List MidModule.Unit
     -> List MidModule.Unit
     -> String
     -> Result String String
-lowerAll rep primDirect midRt midCons rtLean flatten globals nodeTypesByModule groupTypes corpusUnits groupUnits entryKey =
+lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey =
     reserveRtName (corpusUnits ++ groupUnits)
-        |> Result.andThen (\_ -> compileAllJoin globals (corpusUnits ++ groupUnits) nodeTypesByModule)
+        |> Result.andThen (\_ -> compileAllJoin globals (corpusUnits ++ groupUnits) nodeTypesByModule refinedVarsByModule)
         -- The unsafe-node audit (osier-rawnodes): EVERY compile fails loudly
         -- if an `Unsafe` node appears outside the Rt.* namespace — i.e. if the
         -- front end ever emits one.  Passes nothing through unchanged-but-
         -- unaudited; on Ok the program is the SAME value, so byte identity of
         -- the emitted .ssa is this seat's inertness proof.
-        |> Result.andThen (\( program0, binderPerDefun ) -> Result.map (\p -> ( p, binderPerDefun )) (Audit.run program0))
         |> Result.andThen
-            (\( program, binderPerDefun ) ->
+            (\( program0, binderPerDefun, refinedPerDefun ) ->
+                Result.map (\p -> ( p, binderPerDefun, refinedPerDefun )) (Audit.run program0)
+            )
+        |> Result.andThen
+            (\( program, binderPerDefun, refinedPerDefun ) ->
                 -- THE Rt INJECTION (osier-consspike): the Mid-written runtime
                 -- joins HERE — after the audit (which would pass it trivially:
                 -- every Rt key is legal) and after Flatten (whose rewriter
@@ -306,18 +322,62 @@ lowerAll rep primDirect midRt midCons rtLean flatten globals nodeTypesByModule g
                 )
                     |> Result.andThen
                         (\flatProgram ->
-                            QbeLower.lower
-                                rep
-                                primDirect
-                                midCons
-                                rtLean
-                                typeTable
-                                (completeArities globals (program ++ rtProgram))
-                                (flatProgram ++ rtProgram)
-                                entryKey
+                            let
+                                emitProgram =
+                                    flatProgram ++ rtProgram
+
+                                arities =
+                                    completeArities globals (program ++ rtProgram)
+                            in
+                            (if mono then
+                                -- S5/M2: the specialiser runs LAST (on the
+                                -- flattened program the emitter will see) and
+                                -- hands down a program with the clones
+                                -- appended plus a type table carrying one
+                                -- MONOTYPE entry per clone.
+                                QbeMono.run typeTable refinedPerDefun arities emitProgram entryKey
+
+                             else
+                                -- QBE_NOMONO=1: the pre-S5 emission, byte for
+                                -- byte — no clone exists, no table entry is
+                                -- added, and no pass decision is reported.
+                                Ok { program = emitProgram, table = typeTable, note = "" }
+                            )
+                                |> Result.andThen
+                                    (\specialised ->
+                                        QbeLower.lower
+                                            rep
+                                            primDirect
+                                            midCons
+                                            rtLean
+                                            specialised.table
+                                            (completeArities globals specialised.program)
+                                            specialised.program
+                                            entryKey
+                                            |> Result.map
+                                                (\il ->
+                                                    prependNote specialised.note (QbePrint.print (QbePeephole.optimize il))
+                                                )
+                                    )
                         )
             )
-        |> Result.map (\il -> QbePrint.print (QbePeephole.optimize il))
+
+
+{-| The specialiser's ONE-LINE report, prepended to the emitted `.ssa` when
+the pass decided anything at all. It is a `#` comment (the vendored qbe's
+lexer skips it to end of line, VERIFIED by running `qbe -o` on a copy of a
+mono_int `.ssa` with a prepended comment: exit 0), and an EMPTY note prepends
+NOTHING — which is what keeps a fixture the pass does not touch BYTE-IDENTICAL
+on and off, the property the corpus attribution and the gate's inertness row
+both rest on.
+-}
+prependNote : String -> String -> String
+prependNote note ssa =
+    if note == "" then
+        ssa
+
+    else
+        "# " ++ note ++ "\n" ++ ssa
 
 
 -- THE `Rt` MODULE NAME IS RESERVED for the compiler-internal runtime
@@ -384,8 +444,9 @@ compileAllJoin :
     Dict String Int
     -> List MidModule.Unit
     -> Dict String (List ( Range, Type ))
-    -> Result String ( List Defun, Dict String (Dict Int Type) )
-compileAllJoin globals units nodeTypesByModule =
+    -> Dict String (List Int)
+    -> Result String ( List Defun, Dict String (Dict Int Type), Dict String (List Int) )
+compileAllJoin globals units nodeTypesByModule refinedVarsByModule =
     sequence (List.map (\u -> Result.map (\( ds, rs ) -> ( u.moduleName, ds, rs )) (MidModule.compileUnitJoin globals u)) units)
         |> Result.map
             (\triples ->
@@ -404,6 +465,30 @@ compileAllJoin globals units nodeTypesByModule =
                             )
                             acc
                             defuns
+                    )
+                    Dict.empty
+                    triples
+                , List.foldl
+                    (\( modName, defuns, _ ) acc ->
+                        -- S5/M2 clause (c): the unit's refined-variable set,
+                        -- RESOLVED TO DEFUN KEYS here because this is the one
+                        -- place the module name is structural (the pass keys
+                        -- everything by defun and must never re-derive a unit
+                        -- name by splitting a string). A unit with no record
+                        -- contributes nothing, which is the deny-by-default
+                        -- answer — `refinedVars` is a LIST and the empty list
+                        -- for a unit that WAS checked also contributes
+                        -- nothing, because both mean "no variable here is
+                        -- refinement-touched".
+                        let
+                            unitVars =
+                                Maybe.withDefault [] (Dict.get (String.join "." modName) refinedVarsByModule)
+                        in
+                        if List.isEmpty unitVars then
+                            acc
+
+                        else
+                            List.foldl (\d a -> Dict.insert d.key unitVars a) acc defuns
                     )
                     Dict.empty
                     triples

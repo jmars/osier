@@ -11,7 +11,8 @@ port module Main exposing (main)
 --   {entriesJson}       — a JSON array of strings, one ENTRY DEFUN KEY per
 --     group ("<Mod>.<fn>"): the QBE backend roots reachability at the
 --     group's own entry, so a batch can lower every group in one process.
---   {qbeFlatten}/{qbeRep} — the QBE backend's A/B switches (see run.js).
+--   {qbeFlatten}/{qbeRep}/{...}/{qbeMono} — the QBE backend's A/B switches
+--     (see run.js).
 --
 -- P8 (osier-delete-zinc): this driver is QBE-ONLY.  The ZINC-csexp output
 -- paths (the direct AST lowerer `Lower.Module` and the middle-tier driver
@@ -45,6 +46,7 @@ type alias Flags =
     , qbeMidRt : Bool
     , qbeMidCons : Bool
     , qbeRtLean : Bool
+    , qbeMono : Bool
     }
 
 
@@ -82,7 +84,7 @@ compileAll flags =
                 encodeStrings
                     (List.map2
                         (\groupSources entry ->
-                            case QbeModule.compileEntry corpusSources groupSources entry flags.qbeFlatten flags.qbeRep flags.qbePrimDirect flags.qbeMidRt flags.qbeMidCons flags.qbeRtLean of
+                            case QbeModule.compileEntry corpusSources groupSources entry flags.qbeFlatten flags.qbeRep flags.qbePrimDirect flags.qbeMidRt flags.qbeMidCons flags.qbeRtLean flags.qbeMono of
                                 Ok ssa ->
                                     ssa
 

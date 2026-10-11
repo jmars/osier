@@ -88,7 +88,7 @@ ABSENT from the dict: no inference ran for them, so no node-type source exists,
 which is the deny-by-default fact a consumer must see (a missing key means "no
 source", never "checked and empty").  `env`/`files` are unchanged.
 -}
-checkBuiltins : List File.File -> Result String { env : Env, files : List File.File, nodeTypes : Dict String (List ( Range, Type )) }
+checkBuiltins : List File.File -> Result String { env : Env, files : List File.File, nodeTypes : Dict String (List ( Range, Type )), refinedVars : Dict String (List Int) }
 checkBuiltins files =
     let
         lifted =
@@ -104,6 +104,7 @@ checkBuiltins files =
                 { env = env
                 , files = List.map .file checked
                 , nodeTypes = collectNodeTypes checked
+                , refinedVars = collectRefinedVars checked
                 }
             )
 
@@ -115,6 +116,7 @@ absence-of-source case, distinct from a checked unit that recorded no nodes).
 type alias CheckedUnitInOrder =
     { file : File.File
     , nodeTypes : Maybe (List ( Range, Type ))
+    , refinedVars : Maybe (List Int)
     }
 
 
@@ -125,6 +127,27 @@ collectNodeTypes checked =
             case c.nodeTypes of
                 Just nts ->
                     Dict.insert (moduleNameStr c.file) nts acc
+
+                Nothing ->
+                    acc
+        )
+        Dict.empty
+        checked
+
+
+{-| S5/M2: the per-unit `refinedTypeEqs` variable sets (see
+`Type.Infer.refinedVarsOf`), keyed by module name exactly like `nodeTypes` —
+the var-id namespace is per-unit, so the specialiser intersects a defun's
+binder-type variables with ITS OWN unit's set only. Trusted-skipped units are
+ABSENT (no inference ran).
+-}
+collectRefinedVars : List CheckedUnitInOrder -> Dict String (List Int)
+collectRefinedVars checked =
+    List.foldl
+        (\c acc ->
+            case c.refinedVars of
+                Just vs ->
+                    Dict.insert (moduleNameStr c.file) vs acc
 
                 Nothing ->
                     acc
@@ -179,7 +202,7 @@ checkInOrderEnv env files acc =
                 -- rewrites are needed because the body is never checked.
                 -- S2/M0b: nodeTypes = Nothing (no inference ran: the
                 -- absence-of-source case, see `collectNodeTypes`).
-                checkInOrderEnv env rest ({ file = f, nodeTypes = Nothing } :: acc)
+                checkInOrderEnv env rest ({ file = f, nodeTypes = Nothing, refinedVars = Nothing } :: acc)
 
             else
                 case Infer.inferUnit env f of
@@ -187,7 +210,7 @@ checkInOrderEnv env files acc =
                         Err (Error.render err)
 
                     Ok checked ->
-                        checkInOrderEnv (insertSchemes checked.schemes env) rest ({ file = checked.file, nodeTypes = Just checked.nodeTypes } :: acc)
+                        checkInOrderEnv (insertSchemes checked.schemes env) rest ({ file = checked.file, nodeTypes = Just checked.nodeTypes, refinedVars = Just checked.refinedVars } :: acc)
 
 
 insertSchemes : List ( String, Scheme ) -> Env -> Env

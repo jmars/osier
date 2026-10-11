@@ -101,6 +101,14 @@ const QBE_MIDCONS = process.env.QBE_MIDZIG !== '1';
 // reproduces the pre-midabi committed baseline byte-for-byte).  Default OFF
 // (the lean ABI is the point of the flip's recovery).
 const QBE_RTLEAN = process.env.QBE_NORTLEAN !== '1';
+// QBE_NOMONO=1 DISABLES the S5/M2 specialiser (Mid/Qbe/Monomorphise.elm):
+// no polymorphic defun is cloned at its call sites' instantiations, so the
+// emitted .ssa is the pre-S5 emission on the SAME source.  Same purpose as
+// QBE_NOFLATTEN/QBE_NOREP: it exists so the pass can be A/B'd on one source —
+// the corpus attribution hatch (QBE_NOMONO=1 must reproduce the pre-S5
+// committed baseline byte-for-byte), and the structural gate's off arm.
+// Default ON.
+const QBE_MONO = process.env.QBE_NOMONO !== '1';
 // QBE_ENTRY: the defun key the QBE backend roots reachability from
 // ("<Mod>.<fn>").  REQUIRED in the single-fixture CLI; the batch mode reads
 // one entry PER GROUP from the manifest instead.
@@ -142,6 +150,7 @@ function compileGroups(groups) {
       qbeMidRt: QBE_MIDRT,
       qbeMidCons: QBE_MIDCONS,
       qbeRtLean: QBE_RTLEAN,
+      qbeMono: QBE_MONO,
     },
   });
 
