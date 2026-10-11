@@ -312,41 +312,75 @@ type ValuePath
 --      (it is not a corpus unit), so the only route to a violating tree is a
 --      FromAst bug — which the audit catches at the very next compile.
 --
--- THE NODE SET IS A HYPOTHESIS, sized for `cons` and no more (the plan is
--- explicit: the FINAL set is sized by the cons spike, step 4).  Semantics are
--- the runtime's own contracts, unchanged:
+-- THE NODE SET was a hypothesis sized for `cons`; the cons spike (handoff
+-- osier-consspike) sized it for real and CORRECTED it in three places, all
+-- recorded at the seats:
+--   * `RawMkValue` takes a WORD LIST, not one payload — `cons`'s payload is
+--     TWO pointers into a 2-element GC array (values.zig valCons), and a
+--     word list sizes every constructor in gc/types.zig (number/boolean 1,
+--     cons/string/vector 2, stream 3, lambda 4; word i lands at Value offset
+--     8 + 8i, the extern union behind the u32 tag).
+--   * `RawVecAddr` is NEW — the ADDRESS of element i.  `RawVecLoad` loads
+--     the element's VALUE, but a cons Value's car/cdr are INTERIOR POINTERS
+--     `&pair[0]`/`&pair[1]`; without an address-of form the fused-pair
+--     representation is unexpressible at this level.
+--   * `RawPayload` gained a word index, mirroring the widened constructor.
+-- THE REGISTER-CLASS SPLIT the spike found: raw nodes are VALUE producers
+-- (`RawMkValue`, `RawVecLoad`) or WORD producers (`RawAllocVector`,
+-- `RawVecAddr`, `RawTagOf`, `RawPayload`, `RawStrByte`).  A word cannot live
+-- in a frame slot (a slot IS a 40-byte Value the collector scans — a bare
+-- address in one is a garbage tag away from a crash), so word-producing
+-- binders are held in raw TEMPS (Mid.Qbe.Lower's `rawWord` side table, the
+-- S4 `rawInt` precedent) and reading one in a value position is a LOUD
+-- error, never a rebox.
 --   * `RawCall` — call a runtime SYMBOL directly (QBE: a C symbol; Lua: a
 --     host function) with full-arity args in source order.  This is the ONE
 --     seam both ways (host->program is `host_apply`, program->host is this).
---   * `RawTagOf` / `RawPayload` / `RawMkValue` — read/build a Value's
---     tag/payload (gc/types.zig: `Value` = `ValTag` + 32-byte union).
---     CAVEAT THE SPIKE MUST SETTLE: `RawMkValue` writes ONE payload word,
---     which covers number/boolean-style payloads but NOT cons (its payload
---     is TWO pointers into a 2-element GC array — values.zig valCons); how a
---     cons Value is assembled at this level is the first thing step 4 sizes.
---   * `RawAllocVector` / `RawVecLoad` / `RawVecStore` — the GC array level
---     (allocArray of Values; the barrier contract is heap.zig
---     `writeBarrierVectorStore`: store, then record the array in the
---     remembered set iff the array is old-gen AND the stored Value references
---     the nursery — the LOWERING of RawVecStore carries that barrier; a node
---     without it is a silent-corruption bug, not a style choice).
---   * `RawStrByte` — byte i of a string Value (str.data[i]).
+--     NOT YET LOWERED: no Rt body uses it (the host seam is effectloop's,
+--     not a pure prim's), so Mid.Qbe.Lower fails loudly on it rather than
+--     carry an unexercised lowering that could be silently wrong.
+--   * `RawTagOf` / `RawPayload` — read a Value's tag / payload word i
+--     (gc/types.zig: `Value` = `ValTag` + 32-byte union).
+--   * `RawAllocVector` / `RawVecLoad` / `RawVecAddr` / `RawVecStore` — the
+--     GC array level (allocArray of Values; `RawVecStore`'s barrier contract
+--     is heap.zig `writeBarrierVectorStore`: store, then record the array in
+--     the remembered set iff the array is old-gen AND the stored Value
+--     references the nursery — the LOWERING routes the store through that
+--     one runtime seat, so a node without the barrier is unrepresentable).
+--     A raw array address is INVALID across a safepoint (it is a register
+--     temp, not a root): the builder fills/stores before the next
+--     allocation, and an unfilled element must never be scanned — the same
+--     contract values.zig's valVector/valCons bodies obey.
+--   * `RawStrByte` — byte i of a string Value (str.data[i]).  NOT YET
+--     LOWERED (no Rt body uses it; QBE Il has no byte load seat yet — it
+--     errs loudly until the first string prim sizes it).
 --   * `WithRoots` — STRUCTURAL ROOTING: the listed binders are live GC roots
 --     across `body` (roots.zig ROOT_VALUE shape), so an allocation inside
 --     `body` cannot stale them (the dd19b36 unrooted-staging class, made
---     unrepresentable at this level).
--- Nothing in the compiler constructs these nodes yet (step 4's Rt builder is
--- the first and, for now, only future producer), which is why this step's
--- oracle is that NOTHING moves: the corpus `.ssa` stays byte-identical.
+--     unrepresentable at this level).  ON THE QBE BACKEND THIS LOWERS TO A
+--     DOCUMENTED NO-OP (the spike's finding): `rt_frame_enter` already
+--     registers the WHOLE pooled frame as one ROOT_VALUE_ARRAY, so every
+--     Value binder is rooted for the entire body by construction.  The node
+--     stays because the discipline is backend-INDEPENDENT — a backend
+--     without the rooted-frame convention (and the phase-2 Mid-written GC)
+--     lowers it to real root pushes.
+-- REACHABILITY CAVEAT (why Rt.elm owns a seed list): `RawCall` crosses the
+-- Mid-level call graph as an opaque SYMBOL, so Rt->Rt references are
+-- invisible to the GRef walk — Mid.Rt.seeds declares each prim's Rt-key
+-- closure (transitively closed by the builder that issued the RawCalls).
+-- Nothing else in the compiler constructs these nodes (Mid.Rt is the only
+-- producer), and with injection hatched off (QBE_NOMIDRT=1) none exist at
+-- all — the corpus `.ssa` reproduces the pre-Rt baseline byte-for-byte.
 
 
 type UnsafeNode
     = RawCall { sym : String, args : List Exp }
     | RawTagOf Exp
-    | RawPayload Exp
-    | RawMkValue { tag : Int, payload : Exp }
+    | RawPayload { value : Exp, word : Int }
+    | RawMkValue { tag : Int, words : List Exp }
     | RawAllocVector Exp
     | RawVecLoad { vec : Exp, index : Exp }
+    | RawVecAddr { vec : Exp, index : Exp }
     | RawVecStore { vec : Exp, index : Exp, value : Exp }
     | RawStrByte { str : Exp, index : Exp }
     | WithRoots { binders : List Binder, body : Exp }

@@ -258,7 +258,12 @@ ssaJobs entryKey jobs texts =
                 writeBundles
                     (zipJobs jobs
                         (List.map2
-                            (\job srcs -> renderSsa (QbeModule.compileEntry corpus srcs entryKey True True True))
+                            -- run.js's DEFAULT flag vector (flatten, rep,
+                            -- primDirect, midRt inject ON, midCons route OFF —
+                            -- the route is step 6's flip): the selfhost lane
+                            -- injects the Rt program like every other compile,
+                            -- pruned per group by the used-prim census.
+                            (\job srcs -> renderSsa (QbeModule.compileEntry corpus srcs entryKey True True True True False))
                             jobs
                             (regroup jobs texts)
                         )

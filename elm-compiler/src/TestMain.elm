@@ -22,6 +22,10 @@ import Char.Extra exposing (utf8ByteLength)
 import Mid.Audit as Audit
 import Mid.Ir exposing (AltKind(..), Defun, Exp(..), LetBinder(..), Lit(..), UnsafeNode(..))
 import Mid.Module as MidModule
+import Mid.Qbe.Il as Il
+import Mid.Qbe.Lower as QbeLower
+import Mid.Qbe.Types as QbeTypes
+import Mid.Rt as Rt
 import Type.Builtins as Builtins
 import Type.Env as Env
 import Type.Error as Error
@@ -857,6 +861,62 @@ checks =
         )
     , check "audit passes a clean program through UNCHANGED (inertness)"
         (Audit.run auditClean == Ok auditClean)
+
+    -- Mid.Rt / the raw lowering (osier-consspike): the seats this step
+    -- added, each with a must-fail twin.  The Rt program is the runtime's
+    -- Mid-side entry; the census seeds and the register-class checks are
+    -- what keep "one prim end-to-end" honest.
+    , check "rt program is exactly Rt.cons (2 params, Rt.* key)"
+        (case Rt.program of
+            [ defun ] ->
+                defun.key == "Rt.cons"
+                    && (case defun.value of
+                            Lam lambda ->
+                                List.length lambda.params == 2
+
+                            _ ->
+                                False
+                       )
+
+            _ ->
+                False
+        )
+    , check "rt seeds: a used cons seeds Rt.cons; an unused prim seeds nothing"
+        (Rt.seeds (Set.fromList [ "cons", "+", "=" ]) == [ "Rt.cons" ]
+            && Rt.seeds (Set.fromList [ "+" ]) == []
+        )
+    , check "rt cons lowers to a QBE function named q_Rt_x2econs"
+        (case QbeLower.lower False False False QbeTypes.empty Dict.empty Rt.program "Rt.cons" of
+            Ok mod ->
+                List.any (\f -> f.name == "q_Rt_x2econs") mod.funcs
+
+            Err _ ->
+                False
+        )
+    , check "rt lowering REJECTS a raw-word binder read in a value position (must-fail)"
+        (case QbeLower.lower False False False QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
+            Err msg ->
+                String.contains "raw word binder" msg
+
+            Ok _ ->
+                False
+        )
+    , check "rt lowering REJECTS a word node in a value position (must-fail)"
+        (case QbeLower.lower False False False QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
+            Err msg ->
+                String.contains "value position" msg
+
+            Ok _ ->
+                False
+        )
+    , check "rt lowering REJECTS a value binder in a raw-argument position (must-fail)"
+        (case QbeLower.lower False False False QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
+            Err msg ->
+                String.contains "not a raw word" msg
+
+            Ok _ ->
+                False
+        )
     ]
 
 
@@ -1041,3 +1101,57 @@ isRemoveCall expr =
 
         _ ->
             False
+
+
+-- The register-class misuse trees (osier-consspike must-fail rows): each is
+-- a WELL-FORMED Mid tree under a legal Rt.* key — the audit lets all three
+-- through by design (they are Rt-internal), and the LOWERING is the seat
+-- that must refuse them.  Built exactly as a Mid.RtPrims bug would leave
+-- them.
+
+rtRawBinderMisuse : Defun
+rtRawBinderMisuse =
+    { key = "Rt.bad"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body =
+                Let
+                    { binders =
+                        [ LetBind
+                            { binder = { id = 1, name = "pair" }
+                            , value = Unsafe (RawAllocVector (Lit (LNumber 2)))
+                            }
+                        ]
+                    , body = Var 1
+                    }
+            }
+    }
+
+
+rtWordInValuePosition : Defun
+rtWordInValuePosition =
+    { key = "Rt.bad2"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body = Unsafe (RawAllocVector (Lit (LNumber 2)))
+            }
+    }
+
+
+rtValueInRawPosition : Defun
+rtValueInRawPosition =
+    { key = "Rt.bad3"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body =
+                Unsafe
+                    (RawMkValue
+                        { tag = 0
+                        , words = [ Var 0 ]
+                        }
+                    )
+            }
+    }

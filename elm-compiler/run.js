@@ -67,6 +67,21 @@ const QBE_REP = process.env.QBE_NOREP !== '1';
 // and the direct call sites must be PRESENT in one build and ABSENT in the
 // other, while the programs still print what they printed.  Default ON.
 const QBE_PRIMDIRECT = process.env.QBE_NOPRIMDIRECT !== '1';
+// QBE_NOMIDRT=1 DISABLES the Mid-written runtime injection (osier-consspike):
+// the Rt.* defuns (Rt.cons today) are withheld from the compile entirely, so
+// no used-prim seed fires and the emitted .ssa is byte-identical to the
+// pre-Rt baseline.  It exists so the injection can be A/B'd on the SAME
+// source — the corpus attribution proof, and the structural gate's off arm.
+// Default ON (inject).
+const QBE_MIDRT = process.env.QBE_NOMIDRT !== '1';
+// QBE_MIDCONS=1 ROUTES the staged cons prim sites to the Mid implementation
+// (a saturated call to the injected Rt.cons defun) instead of the Zig
+// rt_prim_cons entry.  This is the differential's vehicle (the flip, step 6,
+// makes it the default and re-shapes the ABI); with it unset the route stays
+// Zig and the goldens/corpus move only by the injected defun.  Requires the
+// injection (QBE_NOMIDRT=1 removes the defun and the route falls back to
+// Zig rather than calling an absent function).
+const QBE_MIDCONS = process.env.QBE_MIDCONS === '1';
 // QBE_ENTRY: the defun key the QBE backend roots reachability from
 // ("<Mod>.<fn>").  REQUIRED in the single-fixture CLI; the batch mode reads
 // one entry PER GROUP from the manifest instead.
@@ -105,6 +120,8 @@ function compileGroups(groups) {
       qbeFlatten: QBE_FLATTEN,
       qbeRep: QBE_REP,
       qbePrimDirect: QBE_PRIMDIRECT,
+      qbeMidRt: QBE_MIDRT,
+      qbeMidCons: QBE_MIDCONS,
     },
   });
 

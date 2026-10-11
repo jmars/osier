@@ -1019,6 +1019,140 @@ QBE_NOPRIMDIRECT=1 run primdirect-off Flatten.main tools/qbe/fixtures/flatten.el
 # that code path).
 QBE_NOPRIMDIRECT=1 run primdirect-churn-off Churn.build tools/qbe/fixtures/churn.elm 150000 0
 
+# ---- MID-WRITTEN RUNTIME: ONE PRIM END-TO-END (osier-consspike) ----
+# Rt.cons is the runtime's first Mid-implemented defun: injected by
+# QbeModule (seeded ONLY through the used-prim census — a program that never
+# conses carries none of it), lowered from the raw node set, and — under
+# QBE_MIDCONS=1 — CALLED at every cons site instead of the Zig entry.
+# BEHAVIOURAL rows first: the same sources, entry and arguments as the
+# pre-existing `flatten` and `churn` rows above, compiled with the route
+# hatch, must print those rows' already-pinned golden bytes COPIED under the
+# new names (the primdirect-off provenance discipline: nothing re-measured,
+# no existing golden overwritten, the check a real comparison against the
+# pinned bytes).  run()'s built-in churn sub-row is the QBE_HEAP_MB=16 row:
+# the cons loop at the minimum viable heap through the MID cons.
+# The ZIG-vs-MID FUZZ DIFFERENTIAL over generated vectors is a separate,
+# heavier oracle: tools/qbe/consdiff/consdiff.sh (its header states what it
+# covers and what it deliberately does not).
+QBE_MIDCONS=1 run midcons Flatten.main tools/qbe/fixtures/flatten.elm
+QBE_MIDCONS=1 run midcons-churn Churn.build tools/qbe/fixtures/churn.elm 150000 0
+# The cons-STRUCTURE rows (the pair that can FAIL on a broken cons): the
+# fixture's printed result IS a nested list/record spine, so a wrong tag or a
+# stale interior pointer in ANY cons implementation changes the printed
+# bytes.  `conslist` freezes the DEFAULT (Zig rt_prim_cons) build's output;
+# `midcons-list` runs the Mid-routed build against the SAME bytes (golden
+# COPIED from conslist.txt, the primdirect-off provenance discipline) — the
+# in-gate Zig-vs-Mid comparison.  MEASURED while sizing these rows: a
+# corrupted Rt.cons (tag 4 -> 0) left the churn/flatten goldens green (their
+# printed results never traverse a cons) and flipped this fixture's output
+# to a pointer-sized number — the mutation proof that these are the
+# load-bearing behavioural rows.
+run conslist ConsList.a tools/qbe/fixtures/conslist.elm
+QBE_MIDCONS=1 run midcons-list ConsList.a tools/qbe/fixtures/conslist.elm
+
+# STRUCTURAL A/B rows (the counters must MOVE — a row that cannot fail is
+# not a row):
+#   * midrt-injected: the DEFAULT build of the cons-using fixture carries the
+#     injected defun (`function :ret $q_Rt_x2econs`), and carries NO global
+#     Desc / meta row for it (Rt defuns are internal);
+#   * midrt-route: with the hatch ON every cons site calls the Rt defun
+#     (`call $q_Rt_x2econs(` >= 1) and NO `rt_prim_cons` site survives;
+#   * midrt-pruned: the hatch ON a cons-FREE entry (NoRep.chain is pure
+#     arithmetic) emits NO Rt defun at all — the pruning claim, measured;
+#   * midrt-hatch: QBE_NOMIDRT=1 removes the injection from the cons-using
+#     fixture — the same-source control that attributes every .ssa move
+#     above to the injection (the corpus-ssa attribution's in-gate twin).
+qbe_ssa_midrt() { # <fixture> <entry> <out.ssa> <mode: on|off|route>
+  local flags=""
+  case "$4" in
+    off)  flags="QBE_NOMIDRT=1" ;;
+    route) flags="QBE_MIDCONS=1" ;;
+  esac
+  (cd "$ROOT/elm-compiler" && env QBE=1 $flags QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+}
+midrt_ssa() { grep -c 'q_Rt_x2econs' "$1" 2>/dev/null || true; }
+midrt_calls() { grep -c 'call \$q_Rt_x2econs(' "$1" 2>/dev/null || true; }
+midrt_zigcons() { grep -c 'rt_prim_cons' "$1" 2>/dev/null || true; }
+
+qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-on.ssa"  on
+qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-off.ssa" off
+qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-route.ssa" route
+QBE_NOREP=1 qbe_ssa_midrt tools/qbe/fixtures/norep.elm NoRep.chain "$TMP/midrt-chain-route.ssa" route
+
+midrt_bad=0
+if [ -s "$TMP/midrt-flat-on.ssa" ]; then
+  n=$(midrt_ssa "$TMP/midrt-flat-on.ssa")
+  if [ "$n" -lt 1 ]; then
+    echo "FAIL midrt-injected: the default build carries no q_Rt_x2econs defun — the injection does not fire"
+    midrt_bad=1
+  elif grep -q 'gd_Rt_x2econs\|mname.*Rt_x2econs' "$TMP/midrt-flat-on.ssa"; then
+    echo "FAIL midrt-injected: the Rt defun leaked into the surface tables (Desc/meta) — Rt defuns are internal"
+    midrt_bad=1
+  else
+    echo "PASS midrt-injected: default build carries the injected q_Rt_x2econs ($n mention(s)), no Desc/meta leak"
+  fi
+else
+  echo "FAIL midrt-injected: .ssa missing (compile failed?)"; midrt_bad=1
+fi
+if [ -s "$TMP/midrt-flat-route.ssa" ]; then
+  c=$(midrt_calls "$TMP/midrt-flat-route.ssa")
+  z=$(midrt_zigcons "$TMP/midrt-flat-route.ssa")
+  if [ "$c" -lt 1 ]; then
+    echo "FAIL midrt-route: no call \$q_Rt_x2econs site — the route does not fire on this fixture"
+    midrt_bad=1
+  elif [ "$z" -ne 0 ]; then
+    echo "FAIL midrt-route: $z rt_prim_cons site(s) survive with the route ON — cons did not convert"
+    midrt_bad=1
+  else
+    echo "PASS midrt-route: $c cons site(s) -> q_Rt_x2econs, 0 rt_prim_cons left"
+  fi
+else
+  echo "FAIL midrt-route: .ssa missing (compile failed?)"; midrt_bad=1
+fi
+if [ -s "$TMP/midrt-chain-route.ssa" ]; then
+  n=$(midrt_ssa "$TMP/midrt-chain-route.ssa")
+  if [ "$n" -ne 0 ]; then
+    echo "FAIL midrt-pruned: a cons-free entry carries $n q_Rt_x2econs mention(s) — the used-prim census over-seeds"
+    midrt_bad=1
+  else
+    echo "PASS midrt-pruned: the cons-free entry carries NO Rt defun (used-prim seeding prunes it)"
+  fi
+else
+  echo "FAIL midrt-pruned: .ssa missing (compile failed?)"; midrt_bad=1
+fi
+if [ -s "$TMP/midrt-flat-off.ssa" ]; then
+  n=$(midrt_ssa "$TMP/midrt-flat-off.ssa")
+  if [ "$n" -ne 0 ]; then
+    echo "FAIL midrt-hatch: QBE_NOMIDRT=1 build still carries the Rt defun — the hatch does not gate the injection"
+    midrt_bad=1
+  else
+    echo "PASS midrt-hatch: QBE_NOMIDRT=1 removes the injection from the cons-using fixture"
+  fi
+else
+  echo "FAIL midrt-hatch: .ssa missing (compile failed?)"; midrt_bad=1
+fi
+
+# THE `Rt` MODULE-NAME RESERVATION (the audit's residual hole, closed by this
+# step): a surface module named Rt would emit keys under the whitelisted
+# Rt.* prefix and never be audited, so every compile rejects it loudly.
+printf 'module Rt exposing (f)\n\nf x =\n    x + 1\n' > "$TMP/rtmod.elm"
+if (cd "$ROOT/elm-compiler" &&
+      QBE=1 QBE_ENTRY=Rt.f node run.js "$TMP/rtmod.elm" "$TMP/rtmod.ssa") >/dev/null 2>&1 \
+   && head -c 200 "$TMP/rtmod.ssa" 2>/dev/null | grep -q 'module name Rt is reserved'; then
+  echo "PASS rt-name-reserved: a surface module named Rt is rejected loudly at collect time"
+else
+  echo "FAIL rt-name-reserved: the Rt module name is not reserved (the audit's prefix hole is open)"
+  midrt_bad=1
+fi
+if [ "$midrt_bad" -eq 0 ]; then
+  echo "PASS midrt-seats: injected + routed + pruned + hatched + reserved (all counters move)"
+else
+  # The gate is the EXIT CODE, not the transcript: a printed FAIL that does
+  # not fail the run is not a check (this exact bug shipped with the first
+  # cut of these rows and was caught by the mutation proof's exit 0).
+  FAIL=1
+fi
+
 # ---- cross-defun tail: UNBOUNDED after the bounce loop ----
 # (qbe-mk rebuilds this binary from the current tree on every call and $TMP is
 # per-run, so a pre-bounce binary left by an earlier commit cannot answer here

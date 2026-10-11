@@ -82,6 +82,7 @@ import Mid.Qbe.Lower as QbeLower
 import Mid.Qbe.Peephole as QbePeephole
 import Mid.Qbe.Print as QbePrint
 import Mid.Qbe.Types as QbeTypes
+import Mid.Rt as MidRt
 import Set exposing (Set)
 import Type.Check as Check
 import Type.Env as Env exposing (Env, Scheme)
@@ -89,8 +90,8 @@ import Type.Error as Error
 import Type.Infer as Infer
 
 
-compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Result String String
-compileEntry corpusSources groupSources entryKey flatten rep primDirect =
+compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Result String String
+compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt midCons =
     case
         MidModule.parseAll corpusSources
             |> Result.andThen
@@ -109,7 +110,7 @@ compileEntry corpusSources groupSources entryKey flatten rep primDirect =
                                                                 Err msg
 
                                                             Ok corpusGlobals ->
-                                                                compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect
+                                                                compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons
                                                     )
                                         )
                             )
@@ -131,8 +132,10 @@ compileGroup :
     -> Bool
     -> Bool
     -> Bool
+    -> Bool
+    -> Bool
     -> Result String String
-compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect =
+compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons =
     MidModule.parseAll groupSources
         |> Result.andThen
             (\groupFiles ->
@@ -150,7 +153,7 @@ compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep pri
                                                             Err msg
 
                                                         Ok globals ->
-                                                            lowerAll rep primDirect flatten globals (groupSchemes env groupUnits0) corpusUnits groupUnits entryKey
+                                                            lowerAll rep primDirect midRt midCons flatten globals (groupSchemes env groupUnits0) corpusUnits groupUnits entryKey
                                                 )
                                     )
                         )
@@ -214,14 +217,17 @@ lowerAll :
     Bool
     -> Bool
     -> Bool
+    -> Bool
+    -> Bool
     -> Dict String Int
     -> GroupSchemes
     -> List MidModule.Unit
     -> List MidModule.Unit
     -> String
     -> Result String String
-lowerAll rep primDirect flatten globals groupTypes corpusUnits groupUnits entryKey =
-    compileAll globals (corpusUnits ++ groupUnits)
+lowerAll rep primDirect midRt midCons flatten globals groupTypes corpusUnits groupUnits entryKey =
+    reserveRtName (corpusUnits ++ groupUnits)
+        |> Result.andThen (\_ -> compileAll globals (corpusUnits ++ groupUnits))
         -- The unsafe-node audit (osier-rawnodes): EVERY compile fails loudly
         -- if an `Unsafe` node appears outside the Rt.* namespace — i.e. if the
         -- front end ever emits one.  Passes nothing through unchanged-but-
@@ -230,18 +236,34 @@ lowerAll rep primDirect flatten globals groupTypes corpusUnits groupUnits entryK
         |> Result.andThen (\program0 -> Audit.run program0)
         |> Result.andThen
             (\program ->
-                -- S1's TYPE TABLE (monomorphisation S1/M0a). BUILT AND READ BY
-                -- NOTHING: this is the step's contract, and it is why every
-                -- fixture `.ssa` must stay byte-identical. It is built HERE
-                -- because `program` fixes the table's domain — the defun keys
-                -- the passes below actually see — and it sits one call short
-                -- of its consumer: S4's unboxing is a `QbeLower.lower`
-                -- argument, which is the single call site a later dispatch
-                -- touches.
+                -- THE Rt INJECTION (osier-consspike): the Mid-written runtime
+                -- joins HERE — after the audit (which would pass it trivially:
+                -- every Rt key is legal) and after Flatten (whose rewriter
+                -- rightly rejects raw nodes; Rt code is already final), but
+                -- BEFORE Lower, where the used-prim census seeds the injected
+                -- defuns into reachability.  QBE_NOMIDRT=1 withholds the whole
+                -- program: no Rt defun exists, no seed fires, and the emitted
+                -- .ssa is byte-identical to the pre-Rt baseline (the corpus
+                -- attribution proof).
                 let
+                    rtProgram =
+                        if midRt then
+                            MidRt.program
+
+                        else
+                            []
+
+                    -- S1's TYPE TABLE (monomorphisation S1/M0a). BUILT AND READ BY
+                    -- NOTHING: this is the step's contract, and it is why every
+                    -- fixture `.ssa` must stay byte-identical. It is built HERE
+                    -- because `program` fixes the table's domain — the defun keys
+                    -- the passes below actually see — and it sits one call short
+                    -- of its consumer: S4's unboxing is a `QbeLower.lower`
+                    -- argument, which is the single call site a later dispatch
+                    -- touches.
                     typeTable =
                         List.foldl QbeTypes.note
-                            (QbeTypes.fromSchemes (Set.fromList (List.map .key program)) groupTypes.schemes)
+                            (QbeTypes.fromSchemes (Set.fromList (List.map .key (program ++ rtProgram))) groupTypes.schemes)
                             groupTypes.failures
                 in
                 (if flatten then
@@ -255,13 +277,42 @@ lowerAll rep primDirect flatten globals groupTypes corpusUnits groupUnits entryK
                             QbeLower.lower
                                 rep
                                 primDirect
+                                midCons
                                 typeTable
-                                (completeArities globals program)
-                                flatProgram
+                                (completeArities globals (program ++ rtProgram))
+                                (flatProgram ++ rtProgram)
                                 entryKey
                         )
             )
         |> Result.map (\il -> QbePrint.print (QbePeephole.optimize il))
+
+
+-- THE `Rt` MODULE NAME IS RESERVED for the compiler-internal runtime
+-- (osier-rawnodes' residual hole, closed by the namespace's first real
+-- occupant in osier-consspike): a surface module actually named `Rt` would
+-- emit defun keys under the same `Rt.` prefix Mid.Audit whitelists, so its
+-- (safe, front-end-produced) trees would never be audited.  One seat, every
+-- compile, corpus and group alike.
+reserveRtName : List MidModule.Unit -> Result String ()
+reserveRtName units =
+    case List.filter (\u -> u.moduleName == [ "Rt" ]) units of
+        [] ->
+            Ok ()
+
+        offenders ->
+            let
+                first =
+                    case offenders of
+                        u :: _ ->
+                            String.join "." u.moduleName
+
+                        [] ->
+                            "?"
+            in
+            Err
+                ("qbe: the module name Rt is reserved for the compiler-internal runtime (Mid.Audit whitelists the Rt.* key namespace); rename module "
+                    ++ first
+                )
 
 
 -- The arity table `mergedGlobals` covers user functions + ctors ONLY; the

@@ -94,7 +94,8 @@ module Mid.Qbe.Lower exposing (lower)
 -- (Exp's Con variant is deliberately NOT exposed: Mid.Qbe.Il.Arg also has a
 -- Il.Con (the integer-constant argument), and Elm cannot qualify constructors
 -- in patterns — exposing only one of the two keeps the pattern arms clean.)
-import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), Lambda, LetBinder(..), Lit(..), Match(..), Step(..), ValuePath(..))
+import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), Lambda, LetBinder(..), Lit(..), Match(..), Step(..), UnsafeNode(..), ValuePath(..))
+import Mid.Rt as MidRt
 import Dict exposing (Dict)
 import Mid.Qbe.Il as Il exposing (Module, Func, Block, Inst(..), Jump(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..))
 import Set exposing (Set)
@@ -175,10 +176,12 @@ type alias S =
     , binderSlots : Dict Int Int -- binder id -> frame slot
     , rawInt : Dict Int Il.Arg -- binder id -> the RAW `l` operand holding it (S4)
     , rawFloat : Dict Int Il.Arg -- binder id -> the RAW `d` operand holding it (S4f)
+    , rawWord : Dict Int Il.Arg -- binder id -> raw word temp (Rt raw nodes; see lowerRawArg)
     , intBinders : Set Int -- binder ids whose value IS an Int (S4; boxed or raw)
     , table : Dict String QbeTypes.Entry -- the S1 side table (S4 reads it)
     , rep : Bool -- S4's pass switch (QBE_NOREP=1 -> False)
     , primDirect : Bool -- A's switch (QBE_NOPRIMDIRECT=1 -> False)
+    , midCons : Bool -- the Mid-cons route switch (QBE_MIDCONS=1 -> True)
     , funcs : List PendingFunc -- extra (closure) funcs, REVERSED
     , datas : List DataDef -- REVERSED
     , dataKeys : Dict String String -- content key -> data name (dedup)
@@ -292,8 +295,8 @@ freshData key mk s =
 -- Descs, and the driver's meta table.
 
 
-lower : Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
-lower rep primDirect table arityTable program entryKey =
+lower : Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
+lower rep primDirect midCons table arityTable program entryKey =
     let
         defuns =
             Dict.fromList (List.map (\d -> ( d.key, d )) program)
@@ -308,10 +311,12 @@ lower rep primDirect table arityTable program entryKey =
             , binderSlots = Dict.empty
             , rawInt = Dict.empty
             , rawFloat = Dict.empty
+            , rawWord = Dict.empty
             , intBinders = Set.empty
             , table = table.defuns
             , rep = rep
             , primDirect = primDirect
+            , midCons = midCons
             , funcs = []
             , datas = []
             , dataKeys = Dict.empty
@@ -327,7 +332,40 @@ lower rep primDirect table arityTable program entryKey =
         Err msg ->
             Err msg
 
-        Ok keys ->
+        Ok surfaceKeys ->
+            -- USED-PRIM SEEDING (osier-consspike): the Rt program (if any was
+            -- injected) joins the reachable set ONLY through the prims the
+            -- REACHED surface defuns actually call — the census mirrors this
+            -- lowering's own desugars (a ListLit is a cons chain, a record
+            -- literal/update is cons + @p), so a program that never conses
+            -- carries no cons machinery and its .ssa is byte-identical to the
+            -- pre-Rt baseline.  Rt keys cannot arrive any other way: surface
+            -- code cannot GRef them, and grefsOf deliberately ignores Unsafe
+            -- nodes (Mid.Rt.seeds owns the Rt->Rt closure instead).
+            let
+                usedPrims =
+                    List.foldl
+                        (\key acc ->
+                            case Dict.get key defuns of
+                                Just defun ->
+                                    Set.union acc (calledPrims defun.value)
+
+                                Nothing ->
+                                    acc
+                        )
+                        Set.empty
+                        surfaceKeys
+
+                rtKeys =
+                    if List.any (\d -> isRtKey d.key) program then
+                        List.filter (\k -> not (List.member k surfaceKeys)) (MidRt.seeds usedPrims)
+
+                    else
+                        []
+
+                keys =
+                    surfaceKeys ++ rtKeys
+            in
             List.foldl
                 (\key acc ->
                     acc
@@ -433,15 +471,117 @@ grefsOf exp =
         NotEqual block ->
             grefsOf block.left ++ grefsOf block.right
 
-        -- Unsafe (osier-rawnodes): STEP-4 SEAT, marked not silent: this feeds
-        -- entry-reachability seeding, and a raw node's args may GRef an Rt.*
-        -- helper.  Returning [] today is inert (the audit rejects every
-        -- Unsafe node in a non-Rt defun, and no Rt defuns exist yet); when
-        -- step 4 injects them it must either seed Rt keys directly (the
-        -- used-prim census) or walk raw args here — silently leaving this []
-        -- would prune Rt->Rt references.
+        -- Unsafe (osier-rawnodes / osier-consspike): [] stays DELIBERATE.  A
+        -- raw node cannot GRef anything — RawCall crosses the call graph as
+        -- an opaque SYMBOL — so Rt->Rt references are invisible here BY
+        -- DESIGN and Mid.Rt.seeds declares each prim's Rt-key closure
+        -- instead (the used-prim seeding in `lower` is the only way an Rt
+        -- defun becomes reachable; this arm returning [] is why it has to).
         Unsafe _ ->
             []
+
+
+-- The reserved runtime namespace (Mid.Audit tests the same prefix; a surface
+-- module named Rt is rejected at collect time by Mid.QbeModule).
+isRtKey : String -> Bool
+isRtKey key =
+    String.startsWith "Rt." key
+
+
+{-| The prim names a defun's lowering will CALL — the used-prim census the Rt
+seeding reads.  This MIRRORS this module's own desugars (buildList /
+buildRecord / buildRecordUpdate), because the Mid tree carries a `ListLit`
+where the emitted code carries a `cons` chain: a census over `PrimApp` alone
+would undercount and leave the pruning claim true for the wrong reason, while
+a desugar this lowering does not perform would seed Rt defuns a program never
+runs.  Every new prim ported to Mid (step 5) extends BOTH sides: its entry in
+Mid.Rt.impls and, if a new CONSTRUCT desugars to it, the arm here.  Matches
+and paths are deliberately absent: they call `=`/`hd`/`tl`-shape prims, never
+a constructor prim.
+-}
+calledPrims : Exp -> Set.Set String
+calledPrims exp =
+    case exp of
+        Lit _ ->
+            Set.empty
+
+        Var _ ->
+            Set.empty
+
+        GRef _ ->
+            Set.empty
+
+        StreamRef _ ->
+            Set.empty
+
+        Lam lambda ->
+            calledPrims lambda.body
+
+        NoTail inner ->
+            calledPrims inner
+
+        App app ->
+            List.foldl (\e acc -> Set.union acc (calledPrims e)) (calledPrims app.fn) app.args
+
+        PrimApp app ->
+            List.foldl (\e acc -> Set.union acc (calledPrims e)) (Set.singleton app.prim) app.args
+
+        Let block ->
+            List.foldl
+                (\e acc -> Set.union acc (calledPrims e))
+                (calledPrims block.body)
+                (letValues block.binders)
+
+        Case branch ->
+            List.foldl
+                (\a acc -> Set.union acc (calledPrims a.body))
+                (calledPrims branch.scrutinee)
+                branch.alts
+
+        Con con ->
+            List.foldl (\e acc -> Set.union acc (calledPrims e)) Set.empty con.args
+
+        Tup es ->
+            -- (a, b) lowers to the `@p` prim (lowerTup).
+            Set.insert "@p" (List.foldl (\e acc -> Set.union acc (calledPrims e)) Set.empty es)
+
+        RecordLit setters ->
+            -- {f = e} = cons (@p (sym f) e) ... (buildRecord).
+            Set.insert "cons" <|
+                Set.insert "@p" <|
+                    List.foldl (\p acc -> Set.union acc (calledPrims (Tuple.second p))) Set.empty setters
+
+        RecordGet rec _ ->
+            calledPrims rec
+
+        RecordUpdate update ->
+            -- {r | f = e} prepends cons @p pairs (buildRecordUpdate).
+            Set.insert "cons" <|
+                Set.insert "@p" <|
+                    List.foldl (\p acc -> Set.union acc (calledPrims (Tuple.second p))) (calledPrims update.base) update.updates
+
+        ListLit es ->
+            -- [a, b] = cons a (cons b (emptylist)) (buildList).
+            Set.insert "cons" <|
+                Set.insert "emptylist" <|
+                    List.foldl (\e acc -> Set.union acc (calledPrims e)) Set.empty es
+
+        If block ->
+            List.foldl (\e acc -> Set.union acc (calledPrims e))
+                Set.empty
+                [ block.cond, block.thenBranch, block.elseBranch ]
+
+        ShortAnd block ->
+            Set.union (calledPrims block.left) (calledPrims block.right)
+
+        ShortOr block ->
+            Set.union (calledPrims block.left) (calledPrims block.right)
+
+        NotEqual block ->
+            Set.union (calledPrims block.left) (calledPrims block.right)
+
+        Unsafe _ ->
+            Set.empty
 
 
 letValues : List LetBinder -> List Exp
@@ -537,10 +677,12 @@ lowerFunBody entry key qname lambda captures sOuter =
                     )
             , rawInt = Dict.empty
             , rawFloat = Dict.empty
+            , rawWord = Dict.empty
             , intBinders = intParams
             , table = sOuter.table
             , rep = sOuter.rep
             , primDirect = sOuter.primDirect
+            , midCons = sOuter.midCons
             , funcs = []
             , datas = sOuter.datas
             , dataKeys = sOuter.dataKeys
@@ -642,30 +784,15 @@ lowerVal exp dest s =
             lowerLit lit dest s
 
         Var id ->
-            -- S4: a binder whose value is held RAW (unboxed Int local) is
-            -- reconstructed as a tagged Value HERE.  This single place is the
-            -- rebox-at-every-boundary rule: call arguments, aggregate stores,
-            -- returns, tail-call moves and case scrutinees all reach their
-            -- binder through `lowerVal`.
-            case Dict.get id s.rawInt of
-                Just raw ->
-                    Ok (reboxArg dest raw s)
+            -- Rt raw nodes (osier-consspike): a WORD binder (a raw address,
+            -- tag or byte held in a temp) is NOT a Value and cannot be read
+            -- in a value position — reboxing it as, say, a number would be a
+            -- silent type confusion.  Loud, like every register-class error.
+            if Dict.member id s.rawWord then
+                Err ("qbe: raw word binder read in a VALUE position (binder id " ++ String.fromInt id ++ ") — raw binders are legal only inside raw node arguments")
 
-                Nothing ->
-                    -- S4f: the same boundary for a raw FLOAT (`tagFloat` +
-                    -- `stored`) — the one place a raw `d` operand is turned
-                    -- back into a 40-byte value.
-                    case Dict.get id s.rawFloat of
-                        Just raw ->
-                            Ok (reboxFloat dest raw s)
-
-                        Nothing ->
-                            case Dict.get id s.binderSlots of
-                                Just srcSlot ->
-                                    Ok (emit (Blit (Il.Tmp (slotTmp srcSlot)) (Il.Tmp (slotTmp dest)) vs) s)
-
-                                Nothing ->
-                                    Err ("qbe: unbound binder id " ++ String.fromInt id ++ " (corrupt Mid tree)")
+            else
+                lowerValValue id dest s
 
         GRef ref ->
             lowerGRefValue ref dest s
@@ -731,14 +858,350 @@ lowerVal exp dest s =
         NotEqual block ->
             lowerNotEqual block dest s
 
-        -- Unsafe (osier-rawnodes): no lowering exists yet (step 4 writes the
-        -- Rt-program lowering).  Per this module's output contract an
-        -- unsupported construct inside a REACHED defun is a LOUD compile
-        -- error, never a silent miscompile; today the audit makes this
-        -- unreachable for every non-Rt defun, and no Rt defuns exist.
-        Unsafe _ ->
-            Err "qbe: unsafe node reached the value lowering — only Rt.* runtime defuns may carry one, and their lowering is step 4 (osier-rawnodes)"
+        -- Unsafe (osier-rawnodes / osier-consspike): the Rt-program
+        -- lowering — legal only under Rt.* keys (Mid.Audit enforces that on
+        -- every compile), and only VALUE producers reach here (RawMkValue,
+        -- RawVecLoad, WithRoots; word producers are a loud error: they bind
+        -- to raw temps in `let` positions, never to value destinations).
+        Unsafe node ->
+            lowerRawVal node dest s
 
+
+-- The original `Var` body (everything except the raw-word check above).
+lowerValValue : Int -> Int -> S -> Result String S
+lowerValValue id dest s =
+    -- S4: a binder whose value is held RAW (unboxed Int local) is
+    -- reconstructed as a tagged Value HERE.  This single place is the
+    -- rebox-at-every-boundary rule: call arguments, aggregate stores,
+    -- returns, tail-call moves and case scrutinees all reach their
+    -- binder through `lowerVal`.
+    case Dict.get id s.rawInt of
+        Just raw ->
+            Ok (reboxArg dest raw s)
+
+        Nothing ->
+            -- S4f: the same boundary for a raw FLOAT (`tagFloat` +
+            -- `stored`) — the one place a raw `d` operand is turned
+            -- back into a 40-byte value.
+            case Dict.get id s.rawFloat of
+                Just raw ->
+                    Ok (reboxFloat dest raw s)
+
+                Nothing ->
+                    case Dict.get id s.binderSlots of
+                        Just srcSlot ->
+                            Ok (emit (Blit (Il.Tmp (slotTmp srcSlot)) (Il.Tmp (slotTmp dest)) vs) s)
+
+                        Nothing ->
+                            Err ("qbe: unbound binder id " ++ String.fromInt id ++ " (corrupt Mid tree)")
+
+
+
+-- ============================ RT RAW NODES (osier-consspike) ============================
+-- The Unsafe-node lowering — Rt.* defuns only (Mid.Audit holds that on every
+-- compile).  THE REGISTER CLASS: value producers land in an ordinary rooted
+-- frame slot through `dest`; word producers (addresses, tags, payload words)
+-- are computed into raw TEMPS and reach this section only through
+-- `rawWordArg` (raw-argument positions of other raw nodes) or through a
+-- `let` binder recorded in `s.rawWord` (lowerLetBinder's isRawWordExp arm).
+--
+-- GC CONTRACT, restated from Mid.Ir's header: a raw array address is a
+-- register temp, INVALID across any safepoint; `rt_vec_alloc` is the only
+-- safepoint these nodes can introduce, and a well-formed Rt body fills and
+-- consumes before the next one.  Values live in rooted frame slots (the
+-- pooled ROOT_VALUE_ARRAY), which is also why `WithRoots` needs no code
+-- here — see its arm.
+
+
+lowerRawVal : UnsafeNode -> Int -> S -> Result String S
+lowerRawVal node dest s =
+    case node of
+        RawMkValue mk ->
+            -- Build a Value cell in the dest slot: the u32 tag, then payload
+            -- word i at offset 8 + 8i (gc/types.zig's extern union behind the
+            -- tag — :val = align 8 { w, l 4 }, word 0 at 8).  Unwritten
+            -- payload words stay ZERO (the slot was zeroed at rt_frame_enter),
+            -- which is a valid number-0-shaped tail — the caller writes every
+            -- word its constructor has.
+            rawWordArgs mk.words s
+                |> Result.map (\( words, s1 ) -> storeValueCell mk.tag words dest s1)
+
+        RawVecLoad load ->
+            -- Element i's VALUE, blitted into the dest slot (a load never
+            -- barriers).
+            rawWordArg load.vec s
+                |> Result.andThen
+                    (\( vecT, s1 ) ->
+                        rawWordArg load.index s1
+                            |> Result.map
+                                (\( idxT, s2 ) ->
+                                    let
+                                        ( eT, s3 ) =
+                                            elemAddr vecT idxT s2
+                                    in
+                                    emit (Blit (Il.Tmp eT) (Il.Tmp (slotTmp dest)) vs) s3
+                                )
+                    )
+
+        RawVecStore store ->
+            -- Store the VALUE at vec[i] THROUGH the runtime's one barrier
+            -- seat (tools/qbe/rt.zig rt_vec_store -> heap.zig
+            -- writeBarrierVectorStore: store, then remember iff an old-gen
+            -- array holds a nursery reference).  The stored value is lowered
+            -- into a fresh ROOTED slot first — its address is the argument.
+            -- `dest` is deliberately IGNORED: this node is an effect, and its
+            -- let binder's slot stays zero (a valid Value; nothing reads it).
+            rawWordArg store.vec s
+                |> Result.andThen
+                    (\( vecT, s1 ) ->
+                        rawWordArg store.index s1
+                            |> Result.andThen
+                                (\( idxT, s2 ) ->
+                                    let
+                                        ( vslot, s3 ) =
+                                            freshSlot s2
+                                    in
+                                    lowerVal store.value vslot s3
+                                        |> Result.map
+                                            (\s4 ->
+                                                -- The `w` index argument: an `l` value in a `w`
+                                                -- context is legal QBE (il.txt Subtyping — the 32
+                                                -- low bits are used), and indices are small
+                                                -- non-negative words by contract.
+                                                emit
+                                                    (Call Nothing (Base W) (Il.Sym "rt_vec_store")
+                                                        [ ArgVal (Base L) vecT
+                                                        , ArgVal (Base W) idxT
+                                                        , ArgVal (Base L) (Il.Tmp (slotTmp vslot))
+                                                        ]
+                                                    )
+                                                    s4
+                                            )
+                                )
+                    )
+
+        WithRoots rooted ->
+            -- DOCUMENTED NO-OP on this backend: rt_frame_enter already
+            -- registered the WHOLE pooled frame as one ROOT_VALUE_ARRAY, so
+            -- every Value binder of `rooted.binders` is a live root for the
+            -- entire body — the node is the backend-INDEPENDENT statement of
+            -- the discipline (Mid.Ir's header), and a backend without the
+            -- rooted-frame convention lowers it to real pushes.  The body is
+            -- lowered in place, into the same dest.
+            lowerVal rooted.body dest s
+
+        RawCall _ ->
+            Err "qbe: rawCall is not lowered yet — no Rt body uses it (the host seam belongs to effectloop, not a pure prim); lower it when the first Rt defun needs one"
+
+        RawStrByte _ ->
+            Err "qbe: rawStrByte is not lowered yet — no Rt body uses it and QBE Il has no byte-load seat; lower it when the first string prim needs one"
+
+        RawTagOf _ ->
+            Err wordProducerMessage
+
+        RawPayload _ ->
+            Err wordProducerMessage
+
+        RawAllocVector _ ->
+            Err wordProducerMessage
+
+        RawVecAddr _ ->
+            Err wordProducerMessage
+
+
+wordProducerMessage : String
+wordProducerMessage =
+    "qbe: raw WORD node in a value position — word producers (rawAllocVector, rawVecAddr, rawTagOf, rawPayload) bind to let binders and are legal only in raw-argument positions"
+
+
+-- The tag + payload words of a Value cell into the dest slot, temp supply
+-- threaded (each word's payload-address temp is fresh — a first cut
+-- allocated them all from one frozen state and every word shared a name).
+storeValueCell : Int -> List Il.Arg -> Int -> S -> S
+storeValueCell tag words dest s0 =
+    let
+        s1 =
+            emit (Store StoreW (Il.Con tag) (Il.Tmp (slotTmp dest))) s0
+
+        go : Int -> S -> List Il.Arg -> S
+        go i acc ws =
+            case ws of
+                [] ->
+                    acc
+
+                w :: rest ->
+                    let
+                        ( pT, acc1 ) =
+                            freshTmp acc
+
+                        acc2 =
+                            acc1
+                                |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp dest)) (Il.Con (8 + 8 * i)))
+                                |> emit (Store StoreL w (Il.Tmp pT))
+                    in
+                    go (i + 1) acc2 rest
+    in
+    go 0 s1 words
+
+
+
+-- Evaluate a list of raw-word expressions (RawMkValue's payload words) in
+-- order, threading the temp supply.
+rawWordArgs : List Exp -> S -> Result String ( List Il.Arg, S )
+rawWordArgs exps s =
+    case exps of
+        [] ->
+            Ok ( [], s )
+
+        e :: rest ->
+            rawWordArg e s
+                |> Result.andThen
+                    (\( a, s1 ) ->
+                        rawWordArgs rest s1
+                            |> Result.map (\( as_, s2 ) -> ( a :: as_, s2 ))
+                    )
+
+
+{-| Evaluate ONE raw-word expression (a raw node argument position): a word
+constant, a raw-word binder's temp, or a word-producing raw node computed
+into a fresh temp.  Anything else — a Value binder, a value expression — is a
+LOUD register-class error, never an implicit rebox or address-of.
+-}
+rawWordArg : Exp -> S -> Result String ( Il.Arg, S )
+rawWordArg exp s =
+    case exp of
+        Lit (LNumber n) ->
+            Ok ( Il.Con n, s )
+
+        Var id ->
+            case Dict.get id s.rawWord of
+                Just a ->
+                    Ok ( a, s )
+
+                Nothing ->
+                    Err ("qbe: binder id " ++ String.fromInt id ++ " is not a raw word — value binders cannot appear in raw-argument positions")
+
+        Unsafe (RawAllocVector len) ->
+            rawWordArg len s
+                |> Result.map
+                    (\( lenA, s1 ) ->
+                        let
+                            ( t, s2 ) =
+                                freshTmp s1
+                        in
+                        ( Il.Tmp t
+                        , emit (Call (Just t) (Base L) (Il.Sym "rt_vec_alloc") [ ArgVal (Base W) lenA ]) s2
+                        )
+                    )
+
+        Unsafe (RawVecAddr addr) ->
+            rawWordArg addr.vec s
+                |> Result.andThen
+                    (\( vecT, s1 ) ->
+                        rawWordArg addr.index s1
+                            |> Result.map
+                                (\( idxT, s2 ) ->
+                                    let
+                                        ( eT, s3 ) =
+                                            elemAddr vecT idxT s2
+                                    in
+                                    ( Il.Tmp eT, s3 )
+                                )
+                    )
+
+        Unsafe (RawTagOf v) ->
+            let
+                ( vslot, s1 ) =
+                    freshSlot s
+            in
+            lowerVal v vslot s1
+                |> Result.map
+                    (\s2 ->
+                        let
+                            ( t, s3 ) =
+                                freshTmp s2
+                        in
+                        ( Il.Tmp t, emit (Load (Just t) W LoadW (Il.Tmp (slotTmp vslot))) s3 )
+                    )
+
+        Unsafe (RawPayload p) ->
+            let
+                ( vslot, s1 ) =
+                    freshSlot s
+            in
+            lowerVal p.value vslot s1
+                |> Result.map
+                (\s2 ->
+                    let
+                        ( aT, s3 ) =
+                            freshTmp s2
+
+                        ( t, s4 ) =
+                            freshTmp s3
+                    in
+                    ( Il.Tmp t
+                    , emit (Bin (Just aT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con (8 + 8 * p.word))) s3
+                        |> emit (Load (Just t) L LoadL (Il.Tmp aT))
+                    )
+                )
+
+        Unsafe other ->
+            Err ("qbe: raw argument position holds a value-producing raw node (" ++ rawNodeName other ++ ") — only word producers are legal there")
+
+        _ ->
+            Err "qbe: raw argument position holds a value expression — only word constants, raw-word binders and word-producing raw nodes are legal"
+
+
+rawNodeName : UnsafeNode -> String
+rawNodeName node =
+    case node of
+        RawCall _ ->
+            "rawCall"
+
+        RawTagOf _ ->
+            "rawTagOf"
+
+        RawPayload _ ->
+            "rawPayload"
+
+        RawMkValue _ ->
+            "rawMkValue"
+
+        RawAllocVector _ ->
+            "rawAllocVector"
+
+        RawVecLoad _ ->
+            "rawVecLoad"
+
+        RawVecAddr _ ->
+            "rawVecAddr"
+
+        RawVecStore _ ->
+            "rawVecStore"
+
+        RawStrByte _ ->
+            "rawStrByte"
+
+        WithRoots _ ->
+            "withRoots"
+
+
+-- &vec[index] — a fresh `l` temp holding vec + vs*index (the index may be a
+-- constant or a computed word; either way it enters as an `l` operand).
+elemAddr : Il.Arg -> Il.Arg -> S -> ( String, S )
+elemAddr vecT idxT s =
+    let
+        ( offT, s1 ) =
+            freshTmp s
+
+        ( t, s2 ) =
+            freshTmp s1
+    in
+    ( t
+    , s2
+        |> emit (Bin (Just offT) L Mul (Il.Con vs) idxT)
+        |> emit (Bin (Just t) L Add vecT (Il.Tmp offT))
+    )
 
 
 -- ============================ LITERALS ============================
@@ -1679,6 +2142,19 @@ lowerLetBinder binder s =
                             { s1 | rawFloat = Dict.insert bind.binder.id raw s1.rawFloat }
                         )
 
+            else if isRawWordExp bind.value then
+                -- Rt raw nodes (osier-consspike): a WORD-producing node binds
+                -- to a raw temp, not a frame slot — a slot IS a 40-byte Value
+                -- the collector scans, and a bare address in one is a garbage
+                -- tag away from a crash.  The S4 rawInt shape, one register
+                -- class over; reads go through rawWordArg, and lowerVal's Var
+                -- arm rejects the value-position read.
+                rawWordOf bind.value s
+                    |> Result.map
+                        (\( raw, s1 ) ->
+                            { s1 | rawWord = Dict.insert bind.binder.id raw s1.rawWord }
+                        )
+
             else
                 let
                     ( bslot, s1 ) =
@@ -1689,6 +2165,43 @@ lowerLetBinder binder s =
 
         LetDestruct destruct ->
             lowerLetDestruct destruct s
+
+
+-- The word-producing raw nodes (Mid.Ir's register-class split): exactly these
+-- may bind a `let` binder to a raw temp.  RawVecStore is deliberately ABSENT
+-- — it is an effect whose (ignored) result is the stored value's shape, and
+-- it takes the ordinary slot path so its dummy binder's slot stays a valid
+-- zeroed Value.
+isRawWordExp : Exp -> Bool
+isRawWordExp exp =
+    case exp of
+        Unsafe node ->
+            case node of
+                RawAllocVector _ ->
+                    True
+
+                RawVecAddr _ ->
+                    True
+
+                RawTagOf _ ->
+                    True
+
+                RawPayload _ ->
+                    True
+
+                _ ->
+                    False
+
+        _ ->
+            False
+
+
+-- Compute a word-producing raw node into a fresh `l` temp — the binder-side
+-- entry into rawWordArg's node cases (isRawWordExp has already gated the
+-- call, so the value-binder error paths there are unreachable here).
+rawWordOf : Exp -> S -> Result String ( Il.Arg, S )
+rawWordOf exp s =
+    rawWordArg exp s
 
 
 
@@ -2962,6 +3475,58 @@ lowerNumEq args dest s =
 -- loudly, instead of at run time through unknownPrim.
 rtPrimSlots : String -> List Int -> Int -> S -> Result String S
 rtPrimSlots prim slots dest s =
+    -- THE MID ROUTE (osier-consspike, QBE_MIDCONS=1): when the prim has a
+    -- Mid implementation AND its Rt defun was injected, the staged slots call
+    -- the Rt DEFUN through the ordinary saturated-call ABI instead of the Zig
+    -- entry — the same shape directCall emits (call -> :ret -> rt_bounce ->
+    -- dest).  The args are already in ROOTED frame slots, which is exactly
+    -- what the callee's :val-pointer params expect.  Step 6 (the flip) makes
+    -- this the DEFAULT and re-shapes it to A's lean ABI; today it is the
+    -- differential's vehicle, OFF by default so the committed goldens and
+    -- corpus move only by the INJECTED defun, with output provably unchanged
+    -- (the fuzz differential + the midcons gate rows carry the behavioural
+    -- proof).
+    case ( s.midCons, midPrimRoute prim slots s ) of
+        ( True, Just key ) ->
+            let
+                ( rp, s1 ) =
+                    freshTmp s
+
+                ( vp, s2 ) =
+                    freshTmp s1
+            in
+            Ok
+                (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Agg "val") (Il.Tmp (slotTmp sl))) slots)) s2
+                    |> emit (Call (Just vp) (Agg "val") (Il.Sym "rt_bounce") [ ArgVal (Base L) (Il.Tmp rp) ])
+                    |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
+                )
+
+        _ ->
+            rtPrimSlotsZig prim slots dest s
+
+
+-- The Rt defun key to route `prim` through, if the hatch is worth taking:
+-- the prim must HAVE a Mid implementation, that defun must be present in
+-- this compile (injected — QBE_NOMIDRT=1 removes it and the route quietly
+-- falls back to the Zig entry rather than emitting a call to an absent
+-- function), and the staged arity must be the implementation's (cons is
+-- 2-ary; every other arity keeps the ordinary route).
+midPrimRoute : String -> List Int -> S -> Maybe String
+midPrimRoute prim slots s =
+    case MidRt.primImpl prim of
+        Just key ->
+            if List.length slots == 2 && Dict.member key s.defuns then
+                Just key
+
+            else
+                Nothing
+
+        Nothing ->
+            Nothing
+
+
+rtPrimSlotsZig : String -> List Int -> Int -> S -> Result String S
+rtPrimSlotsZig prim slots dest s =
     if s.primDirect && List.length slots >= 1 && List.length slots <= maxDirectArity then
         let
             ( rp, s1 ) =
@@ -3274,14 +3839,16 @@ fvExp exp =
         ListLit es ->
             setsUnion (List.map fvExp es)
 
-        -- Unsafe (osier-rawnodes): free-variable computation over a raw body
-        -- is NOT sound to approximate — a raw node's args reference binders,
-        -- and closure capture built on an under-approximation is a silent
-        -- miscompile.  Loud Err instead; step 4 either proves Rt defun bodies
-        -- never need closure capture (top-level Lams take the Defun path, not
-        -- this one) or implements the raw-aware walk.
+        -- Unsafe (osier-rawnodes / osier-consspike): free-variable computation
+        -- over a raw body is NOT sound to approximate — a raw node's args
+        -- reference binders, and closure capture built on an
+        -- under-approximation is a silent miscompile.  Loud Err instead.
+        -- DECIDED by the spike: Rt defuns are TOP-LEVEL Lams (the lowerDefun
+        -- path — this walker never sees their bodies), and Rt bodies close
+        -- over nothing (every Rt defun's inputs are its params); a future Rt
+        -- defun wanting an inner closure hits this loud seat and must decide.
         Unsafe _ ->
-            Err "qbe: freeVars over an unsafe node — closure capture of raw bodies is a step 4 seat (osier-rawnodes)"
+            Err "qbe: freeVars over an unsafe node — closure capture of raw bodies is not supported (Rt defuns are top-level by construction; osier-consspike)"
 
 
 setsUnion : List (Result String (Set Int)) -> Result String (Set Int)
@@ -3309,6 +3876,14 @@ finishModule s keys =
             List.map withPrologue pendings
                 ++ rtCallFuncs
 
+        -- Rt.* defuns (osier-consspike) are INTERNAL: no global Desc (only a
+        -- GRef'd defun needs one, and surface code cannot GRef an Rt key), no
+        -- meta-table row (the driver's entry table is the SURFACE program's
+        -- callable surface — Rt defuns are called by emitted call sites, not
+        -- by name from the command line).
+        surfaceKeys =
+            List.filter (\k -> not (isRtKey k)) keys
+
         globalDescs =
             List.filterMap
                 (\key ->
@@ -3334,15 +3909,27 @@ finishModule s keys =
                         Nothing ->
                             Nothing
                 )
-                keys
+                surfaceKeys
 
         ( metaDatas, metaFuncs ) =
-            metaTable pendings
+            metaTable (List.filter (\p -> surfaceEntry p.entryKey) pendings)
     in
     { types = []
     , datas = List.reverse s.datas ++ globalDescs ++ metaDatas
     , funcs = funcs ++ metaFuncs
     }
+
+
+-- A pending's entry key names a SURFACE defun (Rt.* entries are internal —
+-- see finishModule's Rt filter).
+surfaceEntry : Maybe String -> Bool
+surfaceEntry mkey =
+    case mkey of
+        Just k ->
+            not (isRtKey k)
+
+        Nothing ->
+            True
 
 
 -- @start gets: %f =l call rt_frame_enter(w F); one %s<i> per slot; param

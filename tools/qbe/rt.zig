@@ -395,6 +395,39 @@ export fn rt_con(tag: *Value, args: [*]Value, nargs: i32) callconv(.c) Value {
     return acc;
 }
 
+// =====================================================================
+//  Rt raw-node seats (handoff osier-consspike) — the two C symbols the
+//  Unsafe-node lowering (Mid.Qbe.Lower's RT RAW NODES section) calls.
+//  These are the GC level under Mid.RtPrims' bodies: exactly what
+//  values.zig's constructors do, exported once so the lowering carries no
+//  second copy of the contracts.
+// =====================================================================
+
+/// `RawAllocVector n` — the GC array level: allocate `n` Value elements
+/// (g.allocArray, the same seat values.valVector/valCons allocate through).
+/// This is the ONE safepoint the raw nodes introduce: the caller's live
+/// Values must be rooted across it (the QBE lowering keeps every Value in
+/// the rooted pooled frame, so they are), and the RETURN is a raw address
+/// held in a generated temp — invalid across any LATER safepoint, by the
+/// discipline documented at Mid.Ir's UnsafeNode header.  The array's
+/// contents are NOT zeroed: the builder fills every element before the next
+/// safepoint (valVector/valCons obey the same contract on the Zig side).
+export fn rt_vec_alloc(n: i32) callconv(.c) [*]Value {
+    return g.allocArray(Value, @intCast(n));
+}
+
+/// `RawVecStore vec i val` — element store behind the collector's ONE
+/// barrier seat, heap.zig writeBarrierVectorStore: the store, then the
+/// remembered-set record iff the array is old-gen AND the stored value
+/// references the nursery.  `val` points into the caller's rooted frame
+/// slot (read immediately — nothing allocates in here, including
+/// dirtyVectorsAdd, which is page_allocator/malloc-class: MEASURED at
+/// heap.zig dirtyVectorsAdd — so the caller's raw vec temp also stays
+/// valid across this call).
+export fn rt_vec_store(vec: [*]Value, i: i32, val: *const Value) callconv(.c) void {
+    g.writeBarrierVectorStore(vec, @intCast(i), val.*);
+}
+
 /// The non-exhaustive-pattern failure arm.  Unreachable in well-typed Elm
 /// (the compiler's exhaustiveness check), so this just needs to fail loudly —
 /// never a silent miscompile.
