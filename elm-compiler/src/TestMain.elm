@@ -919,7 +919,7 @@ checks =
          List.all ok allKeys
         )
     , check "rt cons lowers to a QBE function named q_Rt_x2econs"
-        (case QbeLower.lower False False False QbeTypes.empty Dict.empty Rt.program "Rt.cons" of
+        (case QbeLower.lower False False False True QbeTypes.empty Dict.empty Rt.program "Rt.cons" of
             Ok mod ->
                 List.any (\f -> f.name == "q_Rt_x2econs") mod.funcs
 
@@ -927,7 +927,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a raw-word binder read in a value position (must-fail)"
-        (case QbeLower.lower False False False QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
+        (case QbeLower.lower False False False True QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
             Err msg ->
                 String.contains "raw word binder" msg
 
@@ -935,7 +935,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a word node in a value position (must-fail)"
-        (case QbeLower.lower False False False QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
+        (case QbeLower.lower False False False True QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
             Err msg ->
                 String.contains "value position" msg
 
@@ -943,11 +943,80 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a value binder in a raw-argument position (must-fail)"
-        (case QbeLower.lower False False False QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
+        (case QbeLower.lower False False False True QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
             Err msg ->
                 String.contains "not a raw word" msg
 
             Ok _ ->
+                False
+        )
+
+    -- THE LEAN ABI (osier-midabi).  The classification is the soundness
+    -- fact (a frame-free callee must never reach a safepoint); pin BOTH
+    -- sides of the partition so a new RtPrims body or node form that moves a
+    -- defun across it fails HERE, not at a churn fixture.
+    , check "rt allocation classification: the pure-read defuns are frame-free, the builders are framed"
+        (Set.member "Rt.cons" Rt.allocating
+            && Set.member "Rt.@p" Rt.allocating
+            && Set.member "Rt.cn" Rt.allocating
+            && Set.member "Rt.repeat" Rt.allocating
+            && Set.member "Rt.substring" Rt.allocating
+            && Set.member "Rt.strOf" Rt.allocating
+            && Set.member "Rt.shen.bytes->string" Rt.allocating
+            && Set.member "Rt.absvector" Rt.allocating
+            && not (Set.member "Rt.=" Rt.allocating)
+            && not (Set.member "Rt.+" Rt.allocating)
+            && not (Set.member "Rt.<" Rt.allocating)
+            && not (Set.member "Rt.deepEq" Rt.allocating)
+            && not (Set.member "Rt.bytesEqGo" Rt.allocating)
+            && not (Set.member "Rt.symEq" Rt.allocating)
+            && not (Set.member "Rt.vecEq" Rt.allocating)
+            && not (Set.member "Rt.asF" Rt.allocating)
+            && not (Set.member "Rt.toI32" Rt.allocating)
+            && not (Set.member "Rt.assoc" Rt.allocating)
+            && not (Set.member "Rt.assocGo" Rt.allocating)
+            && not (Set.member "Rt.address->" Rt.allocating)
+            && not (Set.member "Rt.countL" Rt.allocating)
+        )
+    , check "rt lean ABI: a frame-free callee has pointer params, :val return and NO frame enter/leave"
+        (case QbeLower.lower False False False True QbeTypes.empty Dict.empty Rt.program "Rt.+" of
+            Ok mod ->
+                case List.filter (\f -> f.name == "q_Rt_x2e_x2b") mod.funcs of
+                    f :: _ ->
+                        List.map Tuple.second f.params == [ Il.Base Il.L, Il.Base Il.L, Il.Base Il.L, Il.Base Il.W ]
+                            && f.ret == Il.Agg "val"
+                            && not (callsSym "rt_frame_enter" f)
+                            && not (callsSym "rt_frame_leave" f)
+                            && frameBaseIsAlloc f
+
+                    [] ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "rt lean ABI: a framing callee (cons) keeps rt_frame_enter/leave and the lean signature"
+        (case QbeLower.lower False False False True QbeTypes.empty Dict.empty Rt.program "Rt.cons" of
+            Ok mod ->
+                case List.filter (\f -> f.name == "q_Rt_x2econs") mod.funcs of
+                    f :: _ ->
+                        List.map Tuple.second f.params == [ Il.Base Il.L, Il.Base Il.L, Il.Base Il.L, Il.Base Il.W ]
+                            && f.ret == Il.Agg "val"
+                            && callsSym "rt_frame_enter" f
+                            && callsSym "rt_frame_leave" f
+
+                    [] ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "rt lean ABI: rt_bounce appears NOWHERE in a lean emit, and the fat hatch restores it"
+        (case QbeLower.lower False False False True QbeTypes.empty Dict.empty Rt.program "Rt.+" of
+            Ok mod ->
+                not (List.any (callsSym "rt_bounce") mod.funcs)
+
+            Err _ ->
                 False
         )
     ]
@@ -1195,6 +1264,42 @@ only needs membership).  The seed-closure skew detector: a RawCall to a key
 missing from Rt.program or from Rt.rtDeps makes that defun unreachable or
 unseedable, and this row fails before any .ssa is emitted.
 -}
+callsSym : String -> Il.Func -> Bool
+callsSym sym f =
+    List.any
+        (\b ->
+            List.any
+                (\i ->
+                    case i of
+                        Il.Call _ _ (Il.Sym s) _ ->
+                            s == sym
+
+                        _ ->
+                            False
+                )
+                b.body
+        )
+        f.blocks
+
+
+frameBaseIsAlloc : Il.Func -> Bool
+frameBaseIsAlloc f =
+    List.any
+        (\b ->
+            List.any
+                (\i ->
+                    case i of
+                        Il.Alloc r _ ->
+                            r == "f"
+
+                        _ ->
+                            False
+                )
+                b.body
+        )
+        f.blocks
+
+
 rawCallSyms : Exp -> List String
 rawCallSyms exp =
     case exp of

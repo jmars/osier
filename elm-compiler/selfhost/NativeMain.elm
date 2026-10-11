@@ -258,12 +258,21 @@ ssaJobs entryKey jobs texts =
                 writeBundles
                     (zipJobs jobs
                         (List.map2
-                            -- run.js's DEFAULT flag vector (flatten, rep,
-                            -- primDirect, midRt inject ON, midCons route OFF —
-                            -- the route is step 6's flip): the selfhost lane
-                            -- injects the Rt program like every other compile,
-                            -- pruned per group by the used-prim census.
-                            (\job srcs -> renderSsa (QbeModule.compileEntry corpus srcs entryKey True True True True False))
+                            -- run.js's DEFAULT flag vector, ALL SIX ON
+                            -- (flatten, rep, primDirect, midRt inject,
+                            -- midCons route, rtLean lean ABI).  midCons was
+                            -- False here while the route was step 6's
+                            -- OPT-IN; the flip made the Mid route the
+                            -- default and deleted the flipped prims' Zig
+                            -- handlers, so False now means "emit calls to
+                            -- rt_prim_* symbols that rt.o no longer defines"
+                            -- — a vector that cannot link, and one that can
+                            -- never match run.js's own emit, i.e. the
+                            -- bootstrap --verify fixed point could not hold.
+                            -- The selfhost lane injects the Rt program like
+                            -- every other compile, pruned per group by the
+                            -- used-prim census.
+                            (\job srcs -> renderSsa (QbeModule.compileEntry corpus srcs entryKey True True True True True True))
                             jobs
                             (regroup jobs texts)
                         )

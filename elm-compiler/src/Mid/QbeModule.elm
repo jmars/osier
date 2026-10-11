@@ -90,8 +90,8 @@ import Type.Error as Error
 import Type.Infer as Infer
 
 
-compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Result String String
-compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt midCons =
+compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Result String String
+compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt midCons rtLean =
     case
         MidModule.parseAll corpusSources
             |> Result.andThen
@@ -110,7 +110,7 @@ compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt mi
                                                                 Err msg
 
                                                             Ok corpusGlobals ->
-                                                                compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons
+                                                                compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean
                                                     )
                                         )
                             )
@@ -134,8 +134,9 @@ compileGroup :
     -> Bool
     -> Bool
     -> Bool
+    -> Bool
     -> Result String String
-compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons =
+compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean =
     MidModule.parseAll groupSources
         |> Result.andThen
             (\groupFiles ->
@@ -153,7 +154,7 @@ compileGroup env corpusUnits corpusGlobals groupSources entryKey flatten rep pri
                                                             Err msg
 
                                                         Ok globals ->
-                                                            lowerAll rep primDirect midRt midCons flatten globals (groupSchemes env groupUnits0) corpusUnits groupUnits entryKey
+                                                            lowerAll rep primDirect midRt midCons rtLean flatten globals (groupSchemes env groupUnits0) corpusUnits groupUnits entryKey
                                                 )
                                     )
                         )
@@ -219,13 +220,14 @@ lowerAll :
     -> Bool
     -> Bool
     -> Bool
+    -> Bool
     -> Dict String Int
     -> GroupSchemes
     -> List MidModule.Unit
     -> List MidModule.Unit
     -> String
     -> Result String String
-lowerAll rep primDirect midRt midCons flatten globals groupTypes corpusUnits groupUnits entryKey =
+lowerAll rep primDirect midRt midCons rtLean flatten globals groupTypes corpusUnits groupUnits entryKey =
     reserveRtName (corpusUnits ++ groupUnits)
         |> Result.andThen (\_ -> compileAll globals (corpusUnits ++ groupUnits))
         -- The unsafe-node audit (osier-rawnodes): EVERY compile fails loudly
@@ -278,6 +280,7 @@ lowerAll rep primDirect midRt midCons flatten globals groupTypes corpusUnits gro
                                 rep
                                 primDirect
                                 midCons
+                                rtLean
                                 typeTable
                                 (completeArities globals (program ++ rtProgram))
                                 (flatProgram ++ rtProgram)

@@ -92,6 +92,15 @@ const QBE_MIDRT = process.env.QBE_NOMIDRT !== '1';
 // injection (QBE_NOMIDRT=1 removes the defun and the route falls back to
 // Zig rather than calling an absent function).
 const QBE_MIDCONS = process.env.QBE_MIDZIG !== '1';
+// QBE_NORTLEAN=1 DISABLES the Rt lean ABI (osier-midabi): every Rt.* defun
+// goes back to the generic closure-ABI shape — :val BY-VALUE args, an 80-byte
+// :ret return, rt_bounce at every call site, and rt_frame_enter machinery on
+// every callee — which is the pre-midabi (fat) emission.  It exists for the
+// same purpose as QBE_NOFLATTEN/QBE_NOREP: A/B the ABI on the SAME source —
+// it is the corpus attribution hatch for the lean re-freeze (hatch ON
+// reproduces the pre-midabi committed baseline byte-for-byte).  Default OFF
+// (the lean ABI is the point of the flip's recovery).
+const QBE_RTLEAN = process.env.QBE_NORTLEAN !== '1';
 // QBE_ENTRY: the defun key the QBE backend roots reachability from
 // ("<Mod>.<fn>").  REQUIRED in the single-fixture CLI; the batch mode reads
 // one entry PER GROUP from the manifest instead.
@@ -132,6 +141,7 @@ function compileGroups(groups) {
       qbePrimDirect: QBE_PRIMDIRECT,
       qbeMidRt: QBE_MIDRT,
       qbeMidCons: QBE_MIDCONS,
+      qbeRtLean: QBE_RTLEAN,
     },
   });
 

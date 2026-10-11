@@ -182,6 +182,7 @@ type alias S =
     , rep : Bool -- S4's pass switch (QBE_NOREP=1 -> False)
     , primDirect : Bool -- A's switch (QBE_NOPRIMDIRECT=1 -> False)
     , midCons : Bool -- the Mid-cons route switch (QBE_MIDCONS=1 -> True)
+    , rtLean : Bool -- the Rt LEAN ABI switch (osier-midabi; QBE_NORTLEAN=1 -> False)
     , funcs : List PendingFunc -- extra (closure) funcs, REVERSED
     , datas : List DataDef -- REVERSED
     , dataKeys : Dict String String -- content key -> data name (dedup)
@@ -203,8 +204,22 @@ type alias PendingFunc =
     , nslots : Int
     , nparams : Int
     , ncaps : Int
+    , pro : Pro
     , entryKey : Maybe String -- Just key for top-level defuns (meta table)
     }
+
+
+{-| How the function's frame base `%f` materializes (osier-midabi).  `PFrame`
+is the pooled, ROOTED, ZEROED block from `rt_frame_enter` — the generic
+closure ABI, and every body that can reach a GC safepoint.  `PAlloc` is the
+lean frame-FREE arm: a plain `alloc8` scratch block (a COMPILE-TIME QBE frame
+slot — vendor/qbe amd64/isel.c turns a constant-size alloc8 into Onop plus a
+slot assignment), unzeroed and unregistered as a root, which is sound exactly
+because the classification proved no safepoint is reachable in this body.
+-}
+type Pro
+    = PFrame
+    | PAlloc
 
 
 emit : Il.Inst -> S -> S
@@ -296,8 +311,8 @@ freshData key mk s =
 -- Descs, and the driver's meta table.
 
 
-lower : Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
-lower rep primDirect midCons table arityTable program entryKey =
+lower : Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
+lower rep primDirect midCons rtLean table arityTable program entryKey =
     let
         defuns =
             Dict.fromList (List.map (\d -> ( d.key, d )) program)
@@ -356,6 +371,7 @@ lower rep primDirect midCons table arityTable program entryKey =
                     , rep = rep
                     , primDirect = primDirect
                     , midCons = midCons
+                    , rtLean = rtLean
                     , funcs = []
                     , datas = []
                     , dataKeys = Dict.empty
@@ -700,12 +716,31 @@ lowerDefun defun sOuter =
             let
                 qname =
                     "q_" ++ mangle defun.key
+
+                -- THE Rt LEAN ABI (osier-midabi): every Rt.* defun lowers
+                -- with pass A's calling convention instead of the generic
+                -- closure ABI — 3 pointer params + a count word, a DIRECT
+                -- :val return (no :ret, so no rt_bounce at any call site),
+                -- and a frame ONLY when the body can reach a GC safepoint
+                -- (Mid.Rt.allocating, the classification that owns the
+                -- fact).  `rt` here: Nothing = the generic ABI (surface
+                -- defuns, and the whole Rt program when QBE_NORTLEAN=1
+                -- restores the fat shape for a bisect); Just True = lean
+                -- with the pooled ROOTED frame; Just False = lean and
+                -- FRAME-FREE (a plain alloc8 scratch block — sound because
+                -- the classification proves no allocation is reachable).
+                rt =
+                    if sOuter.rtLean && isRtKey defun.key then
+                        Just (Set.member defun.key MidRt.allocating)
+
+                    else
+                        Nothing
             in
             if List.length lambda.params > maxArity then
                 Err ("qbe: defun " ++ defun.key ++ " has arity > " ++ String.fromInt maxArity ++ " (rt_callN table limit)")
 
             else
-                lowerFunBody True defun.key qname lambda [] sOuter
+                lowerFunBody True defun.key qname lambda [] rt sOuter
                     |> Result.map
                         (\( pending, sInner ) ->
                             { sOuter
@@ -729,16 +764,50 @@ lowerDefun defun sOuter =
 -- N+2..N+1+K captures, then temps.  Blocks: @start (prologue; jump @body),
 -- @body (loop head for self-tail), ... interior ..., @ret (rt_frame_leave;
 -- ret %s0 — returns the whole 80-byte `:ret` at slot 0).
+--
+-- THE Rt LEAN ARM (osier-midabi): when `rt` is Just _ the SAME slot layout
+-- addresses off a DIFFERENT base (the function's signature, return type and
+-- @ret block all switch — see lowerFunBody's body): the generic-ABI
+-- machinery (slot defs, param blits, Var reads, dest slot 0) is reused
+-- verbatim, which is what keeps the lean callee a small delta rather than a
+-- second lowering.
 
 
-lowerFunBody : Bool -> String -> String -> Lambda -> List Int -> S -> Result String ( PendingFunc, S )
-lowerFunBody entry key qname lambda captures sOuter =
+lowerFunBody : Bool -> String -> String -> Lambda -> List Int -> Maybe Bool -> S -> Result String ( PendingFunc, S )
+lowerFunBody entry key qname lambda captures rt sOuter =
     let
         nparams =
             List.length lambda.params
 
         ncaps =
             List.length captures
+
+        -- The lean ABI's hard bound: 3 pointer params is the whole register
+        -- argument budget A's direct entries standardized on (rt.zig
+        -- direct_arity), and a count-less arity-0 call cannot be spelled in
+        -- the C ABI.  Both are compile-time facts about the Rt program, so
+        -- they fail the COMPILE naming the defun — never the linker.
+        rtArityErr =
+            if nparams < 1 || nparams > maxDirectArity then
+                Err
+                    ("qbe: Rt defun "
+                        ++ key
+                        ++ " has arity "
+                        ++ String.fromInt nparams
+                        ++ " — the lean ABI passes 1.."
+                        ++ String.fromInt maxDirectArity
+                        ++ " pointer args (A's direct_arity bound; extend the ABI before adding such a defun)"
+                    )
+
+            else
+                Ok ()
+
+        rtCapsErr =
+            if ncaps /= 0 then
+                Err ("qbe: Rt defun " ++ key ++ " captures " ++ String.fromInt ncaps ++ " binders — the lean ABI has no env param (an Rt defun is never a closure)")
+
+            else
+                Ok ()
 
         -- S4: the ONLY binder types the S1 table can give is the defun's own
         -- MONOTYPE, peeled in parameter order (Mid's `params` is in the
@@ -774,6 +843,7 @@ lowerFunBody entry key qname lambda captures sOuter =
             , rep = sOuter.rep
             , primDirect = sOuter.primDirect
             , midCons = sOuter.midCons
+            , rtLean = sOuter.rtLean
             , funcs = []
             , datas = sOuter.datas
             , dataKeys = sOuter.dataKeys
@@ -799,30 +869,80 @@ lowerFunBody entry key qname lambda captures sOuter =
         -- the (empty) @start block, closed by its fallthrough to @body
         sStart =
             closeBlock (Jmp "body") s0
+
+        -- the LEAN ARM (osier-midabi): the signature, the return type and
+        -- the prologue kind all switch on `rt` — Nothing is the GENERIC
+        -- (closure-ABI) shape, byte-identical to the pre-midabi emission
+        -- (the QBE_NORTLEAN=1 bisect hatch pins that identity).
+        retTy =
+            case rt of
+                Just _ ->
+                    Agg "val"
+
+                Nothing ->
+                    Agg "ret"
+
+        paramsList =
+            case rt of
+                Just _ ->
+                    -- A's uniform direct shape: 3 pointer args (the caller
+                    -- pads unused ones with the LAST REAL arg's pointer,
+                    -- exactly rtPrimSlotsZig's convention — the padding is
+                    -- never blitted) plus the count word, which the callee
+                    -- ignores (the arity is static in the tree).
+                    [ ( "a0", Base L ), ( "a1", Base L ), ( "a2", Base L ), ( "an", Base W ) ]
+
+                Nothing ->
+                    List.map (\i -> ( "a" ++ String.fromInt i, Agg "val" )) (List.range 0 (nparams - 1))
+
+        proKind =
+            case rt of
+                Just False ->
+                    PAlloc
+
+                _ ->
+                    PFrame
+
+        rtChecks =
+            case rt of
+                Just _ ->
+                    rtArityErr |> Result.andThen (\_ -> rtCapsErr)
+
+                Nothing ->
+                    Ok ()
     in
-    startBlock "body" sStart
-        |> lowerTail lambda.body
+    rtChecks
+        |> Result.andThen (\_ -> startBlock "body" sStart |> lowerTail lambda.body)
         |> Result.map
             (\s1 ->
                 let
                     -- every tail path ended in a closed block (jmp @ret/@body)
                     sRet =
-                        startBlock "ret" s1
-                            |> emit (Call Nothing (Base W) (Il.Sym "rt_frame_leave") [])
-                            |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
+                        case rt of
+                            -- FRAME-FREE lean: no pooled frame was entered,
+                            -- so there is nothing to pop — the scratch block
+                            -- dies with this C frame at `ret`.
+                            Just False ->
+                                startBlock "ret" s1 |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
+
+                            _ ->
+                                startBlock "ret" s1
+                                    |> emit (Call Nothing (Base W) (Il.Sym "rt_frame_leave") [])
+                                    |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
 
                     pending =
                         { func =
                             { name = qname
                             , export_ = False
-                            , ret = Agg "ret"
+                            , ret = retTy
                             , envParam = ncaps > 0
-                            , params = List.map (\i -> ( "a" ++ String.fromInt i, Agg "val" )) (List.range 0 (nparams - 1))
+                            , params = paramsList
                             , blocks = List.reverse sRet.blocks
                             }
                         , nslots = s1.slot
                         , nparams = nparams
                         , ncaps = ncaps
+                        , pro = proKind
                         , entryKey =
                             if entry then
                                 Just key
@@ -1110,27 +1230,65 @@ lowerRawVal node dest s =
         RawCall call ->
             -- STEP 5 (osier-midprims): Rt->Rt calls, the recursive helpers'
             -- voice (deepEqual, numberText, the list walks).  Lowered for
-            -- `Rt.*` keys ONLY: args are VALUES lowered into fresh rooted
-            -- slots, then the exact shape the route hatch emits — call the
-            -- q_-mangled defun (:val args, :ret result), rt_bounce, move to
-            -- dest.  A non-Rt symbol errs loudly: word-level C seats are
-            -- RawCallRaw's, and the Value-level host seam is effectloop's.
+            -- `Rt.*` keys ONLY: args are VALUES lowered into fresh slots,
+            -- then the call.  THE LEAN ABI (osier-midabi): the same shape
+            -- rtPrimSlots' mid route emits — 3 pointer args padded with the
+            -- last real slot, plus the count word, DIRECT :val return, one
+            -- blit to dest — no rt_bounce anywhere on an Rt->Rt edge.
+            -- SOUNDNESS: the staged slots live in the CALLER's frame, and
+            -- the classification guarantees the pairing — if the CALLEE can
+            -- allocate, this caller is `allocating` too, so these slots are
+            -- ROOTED (rt_frame_enter); if the callee is frame-free, no GC
+            -- can run anywhere under this call.  QBE_NORTLEAN=1 restores
+            -- the fat :val-args/:ret/rt_bounce shape.
             if String.startsWith "Rt." call.sym then
                 if Dict.member call.sym s.defuns then
                     lowerArgsToSlots call.args s
-                        |> Result.map
+                        |> Result.andThen
                             (\( slots, s1 ) ->
-                                let
-                                    ( rp, s2 ) =
-                                        freshTmp s1
+                                if s.rtLean then
+                                    if List.length slots >= 1 && List.length slots <= maxDirectArity then
+                                        let
+                                            ( vp, s2 ) =
+                                                freshTmp s1
 
-                                    ( vp, s3 ) =
-                                        freshTmp s2
-                                in
-                                s3
-                                    |> emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle call.sym)) (List.map (\sl -> ArgVal (Agg "val") (Il.Tmp (slotTmp sl))) slots))
-                                    |> emit (Call (Just vp) (Agg "val") (Il.Sym "rt_bounce") [ ArgVal (Base L) (Il.Tmp rp) ])
-                                    |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
+                                            ptrs =
+                                                List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots
+
+                                            pad =
+                                                ArgVal (Base L) (Il.Tmp (slotTmp (lastSlot slots)))
+
+                                            padded =
+                                                ptrs ++ List.repeat (maxDirectArity - List.length ptrs) pad
+                                        in
+                                        Ok
+                                            (emit
+                                                (Call (Just vp)
+                                                    (Agg "val")
+                                                    (Il.Sym ("q_" ++ mangle call.sym))
+                                                    (padded ++ [ ArgVal (Base W) (Il.Con (List.length slots)) ])
+                                                )
+                                                s2
+                                                |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
+                                            )
+
+                                    else
+                                        Err ("qbe: rawCall to " ++ call.sym ++ " stages arity " ++ String.fromInt (List.length slots) ++ " — the lean ABI passes 1.." ++ String.fromInt maxDirectArity ++ " pointer args")
+
+                                else
+                                    let
+                                        ( rp, s2 ) =
+                                            freshTmp s1
+
+                                        ( vp, s3 ) =
+                                            freshTmp s2
+                                    in
+                                    Ok
+                                        (s3
+                                            |> emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle call.sym)) (List.map (\sl -> ArgVal (Agg "val") (Il.Tmp (slotTmp sl))) slots))
+                                            |> emit (Call (Just vp) (Agg "val") (Il.Sym "rt_bounce") [ ArgVal (Base L) (Il.Tmp rp) ])
+                                            |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
+                                        )
                             )
 
                 else
@@ -4280,34 +4438,66 @@ rtPrimSlots : String -> List Int -> Int -> S -> Result String S
 rtPrimSlots prim slots dest s =
     -- THE MID ROUTE (osier-consspike; THE FLIP, osier-flip step 6): when the
     -- prim has a Mid implementation AND its Rt defun was injected, the staged
-    -- slots call the Rt DEFUN through the ordinary saturated-call ABI instead
-    -- of the Zig entry — the same shape directCall emits (call -> :ret ->
-    -- rt_bounce -> dest).  The args are already in ROOTED frame slots, which
-    -- is exactly what the callee's :val-pointer params expect.  THE FLIP MADE
-    -- THIS THE DEFAULT (run.js: the Mid route unless QBE_MIDZIG=1 selects the
-    -- old Zig path for a bisect); the whole-gate rehearsal proved the route
-    -- byte-identical (154/0 under the old QBE_MIDCONS=1 hatch, pre-flip), and
-    -- the flip then DELETED the flipped prims' Zig handlers, so QBE_MIDZIG=1
-    -- is emit-only on this tree (its .ssa references rt_prim_* symbols rt.o
-    -- no longer defines — a loud link failure, never a silent fallback).
-    -- NOTE: the plan's step-6 line "re-shapes it to A's lean ABI" is
-    -- DELIBERATELY DEFERRED — the flipped route is exactly the shape the
-    -- rehearsal and the 92/92 differential proved; adopting A's lean prologue
-    -- is future work (D-inlining's neighbourhood) with its own differential.
+    -- slots call the Rt DEFUN.  THE FLIP MADE THIS THE DEFAULT (run.js: the
+    -- Mid route unless QBE_MIDZIG=1 selects the old Zig path for a bisect);
+    -- QBE_MIDZIG=1 is emit-only on this tree (its .ssa references rt_prim_*
+    -- symbols rt.o no longer defines — a loud link failure, never a silent
+    -- fallback).
+    --
+    -- THE LEAN ABI (osier-midabi): the call is the EXACT SHAPE pass A
+    -- established against the Zig wrappers (rtPrimSlotsZig below) — 3
+    -- POINTER args padded with the last real slot's address, plus the count
+    -- word, DIRECT :val return, one blit to dest — with the Rt defun's q_
+    -- symbol in place of rt_prim_*.  No :val by-value argument copies, no
+    -- 80-byte :ret staging, no rt_bounce call.  The args are already in the
+    -- CALLER's ROOTED frame slots, which is precisely what the callee's
+    -- pointer params read (a lean callee's prologue blits them before its
+    -- first safepoint, and a frame-free callee has none).  QBE_NORTLEAN=1
+    -- restores the fat generic-ABI emission for a bisect.
     case ( s.midCons, midPrimRoute prim slots s ) of
         ( True, Ok (Just key) ) ->
-            let
-                ( rp, s1 ) =
-                    freshTmp s
+            if s.rtLean then
+                if List.length slots >= 1 && List.length slots <= maxDirectArity then
+                    let
+                        ( vp, s1 ) =
+                            freshTmp s
 
-                ( vp, s2 ) =
-                    freshTmp s1
-            in
-            Ok
-                (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Agg "val") (Il.Tmp (slotTmp sl))) slots)) s2
-                    |> emit (Call (Just vp) (Agg "val") (Il.Sym "rt_bounce") [ ArgVal (Base L) (Il.Tmp rp) ])
-                    |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
-                )
+                        ptrs =
+                            List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots
+
+                        pad =
+                            ArgVal (Base L) (Il.Tmp (slotTmp (lastSlot slots)))
+
+                        padded =
+                            ptrs ++ List.repeat (maxDirectArity - List.length ptrs) pad
+                    in
+                    Ok
+                        (emit
+                            (Call (Just vp)
+                                (Agg "val")
+                                (Il.Sym ("q_" ++ mangle key))
+                                (padded ++ [ ArgVal (Base W) (Il.Con (List.length slots)) ])
+                            )
+                            s1
+                            |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
+                        )
+
+                else
+                    Err ("qbe: prim " ++ prim ++ " stages arity " ++ String.fromInt (List.length slots) ++ " — the lean ABI passes 1.." ++ String.fromInt maxDirectArity ++ " pointer args (A's direct_arity bound)")
+
+            else
+                let
+                    ( rp, s1 ) =
+                        freshTmp s
+
+                    ( vp, s2 ) =
+                        freshTmp s1
+                in
+                Ok
+                    (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Agg "val") (Il.Tmp (slotTmp sl))) slots)) s2
+                        |> emit (Call (Just vp) (Agg "val") (Il.Sym "rt_bounce") [ ArgVal (Base L) (Il.Tmp rp) ])
+                        |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
+                    )
 
         ( True, Err msg ) ->
             Err msg
@@ -4498,7 +4688,7 @@ lowerClosure lambda dest s =
                     Err ("qbe: closure has arity > " ++ String.fromInt maxArity ++ " (rt_callN table limit)")
 
                 else
-                    lowerFunBody False s1.defunKey qname lambda captures s2
+                    lowerFunBody False s1.defunKey qname lambda captures Nothing s2
                         |> Result.andThen
                             (\( pending, sInner ) ->
                                 -- blit each capture's CURRENT slot into its
@@ -4798,8 +4988,19 @@ withPrologue pending =
                 )
                 (List.range 0 (pending.ncaps - 1))
 
+        -- The frame base.  PFrame: the pooled ROOTED block (zeroed before
+        -- rooting — a reused block's stale slots must never be scanned).
+        -- PAlloc: the lean frame-FREE scratch block (osier-midabi) — no
+        -- runtime call, no zeroing, no root push; unzeroed slot TAILS are
+        -- never interpreted (every read is tag-directed, the block is
+        -- never registered as a root, and blit is a raw copy).
         enter =
-            Call (Just "f") (Base L) (Il.Sym "rt_frame_enter") [ ArgVal (Base W) (Il.Con pending.nslots) ]
+            case pending.pro of
+                PFrame ->
+                    Call (Just "f") (Base L) (Il.Sym "rt_frame_enter") [ ArgVal (Base W) (Il.Con pending.nslots) ]
+
+                PAlloc ->
+                    Alloc "f" (vs * pending.nslots)
 
         prologue =
             case f.blocks of
