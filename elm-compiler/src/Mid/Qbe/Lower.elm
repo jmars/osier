@@ -94,10 +94,10 @@ module Mid.Qbe.Lower exposing (lower)
 -- (Exp's Con variant is deliberately NOT exposed: Mid.Qbe.Il.Arg also has a
 -- Il.Con (the integer-constant argument), and Elm cannot qualify constructors
 -- in patterns — exposing only one of the two keeps the pattern arms clean.)
-import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), Lambda, LetBinder(..), Lit(..), Match(..), Step(..), UnsafeNode(..), ValuePath(..))
+import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), Lambda, LetBinder(..), Lit(..), Match(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), Step(..), UnsafeNode(..), ValuePath(..))
 import Mid.Rt as MidRt
 import Dict exposing (Dict)
-import Mid.Qbe.Il as Il exposing (Module, Func, Block, Inst(..), Jump(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..))
+import Mid.Qbe.Il as Il exposing (Module, Func, Block, Inst(..), Jump(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), UnaryOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..))
 import Set exposing (Set)
 import Mid.Qbe.Types as QbeTypes
 import Type.Representation as Rep
@@ -511,8 +511,14 @@ calledPrims exp =
         GRef _ ->
             Set.empty
 
-        StreamRef _ ->
-            Set.empty
+        StreamRef { varName } ->
+            -- Materializing a stream's NAME and calling the `value` prim on
+            -- it (lowerVal's StreamRef arm) IS a prim call — the census must
+            -- mirror it (step 5's hand-off #2: this function mirrors every
+            -- desugar that calls a prim).  `value` has no Mid impl today, so
+            -- this seeds nothing yet — but a future Mid `value` port must
+            -- not find its desugar missing here.
+            Set.insert "value" (calledPrims (Lit (LString varName)))
 
         Lam lambda ->
             calledPrims lambda.body
@@ -922,9 +928,9 @@ lowerRawVal node dest s =
             -- tag — :val = align 8 { w, l 4 }, word 0 at 8).  Unwritten
             -- payload words stay ZERO (the slot was zeroed at rt_frame_enter),
             -- which is a valid number-0-shaped tail — the caller writes every
-            -- word its constructor has.
-            rawWordArgs mk.words s
-                |> Result.map (\( words, s1 ) -> storeValueCell mk.tag words dest s1)
+            -- word its constructor has.  Float-typed words (isFloatWordExp)
+            -- lower into `d` temps and store with `stored`.
+            storeValueWords mk.tag mk.words dest s
 
         RawVecLoad load ->
             -- Element i's VALUE, blitted into the dest slot (a load never
@@ -990,11 +996,65 @@ lowerRawVal node dest s =
             -- lowered in place, into the same dest.
             lowerVal rooted.body dest s
 
-        RawCall _ ->
-            Err "qbe: rawCall is not lowered yet — no Rt body uses it (the host seam belongs to effectloop, not a pure prim); lower it when the first Rt defun needs one"
+        RawByteStore bs ->
+            -- One byte into a raw buffer (effect; dest ignored like
+            -- RawVecStore's).  NO write barrier — raw bytes hold no GC
+            -- pointers by construction (Mid.Ir's node contract).
+            rawWordArg bs.ptr s
+                |> Result.andThen
+                    (\( pT, s1 ) ->
+                        rawWordArg bs.index s1
+                            |> Result.andThen
+                                (\( iT, s2 ) ->
+                                    rawWordArg bs.value s2
+                                        |> Result.map
+                                            (\( vT, s3 ) ->
+                                                let
+                                                    ( aT, s4 ) =
+                                                        freshTmp s3
+                                                in
+                                                emit
+                                                    (Bin (Just aT) L Add pT iT)
+                                                    s4
+                                                    |> emit (Store StoreB vT (Il.Tmp aT))
+                                            )
+                                )
+                    )
+
+        RawCall call ->
+            -- STEP 5 (osier-midprims): Rt->Rt calls, the recursive helpers'
+            -- voice (deepEqual, numberText, the list walks).  Lowered for
+            -- `Rt.*` keys ONLY: args are VALUES lowered into fresh rooted
+            -- slots, then the exact shape the route hatch emits — call the
+            -- q_-mangled defun (:val args, :ret result), rt_bounce, move to
+            -- dest.  A non-Rt symbol errs loudly: word-level C seats are
+            -- RawCallRaw's, and the Value-level host seam is effectloop's.
+            if String.startsWith "Rt." call.sym then
+                if Dict.member call.sym s.defuns then
+                    lowerArgsToSlots call.args s
+                        |> Result.map
+                            (\( slots, s1 ) ->
+                                let
+                                    ( rp, s2 ) =
+                                        freshTmp s1
+
+                                    ( vp, s3 ) =
+                                        freshTmp s2
+                                in
+                                s3
+                                    |> emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle call.sym)) (List.map (\sl -> ArgVal (Agg "val") (Il.Tmp (slotTmp sl))) slots))
+                                    |> emit (Call (Just vp) (Agg "val") (Il.Sym "rt_bounce") [ ArgVal (Base L) (Il.Tmp rp) ])
+                                    |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
+                            )
+
+                else
+                    Err ("qbe: rawCall to Rt defun " ++ call.sym ++ " — not in this compile (Mid.Rt.seeds must close the defun's Rt-key closure)")
+
+            else
+                Err ("qbe: rawCall to non-Rt symbol " ++ call.sym ++ " — Rt.* defun calls only (word-level C seats are rawCallRaw)")
 
         RawStrByte _ ->
-            Err "qbe: rawStrByte is not lowered yet — no Rt body uses it and QBE Il has no byte-load seat; lower it when the first string prim needs one"
+            Err wordProducerMessage
 
         RawTagOf _ ->
             Err wordProducerMessage
@@ -1006,6 +1066,44 @@ lowerRawVal node dest s =
             Err wordProducerMessage
 
         RawVecAddr _ ->
+            Err wordProducerMessage
+
+        -- step 5's word producers (and the float words, a class over) never
+        -- appear in value positions either:
+        RawPayload32 _ ->
+            Err wordProducerMessage
+
+        RawTagIs _ ->
+            Err wordProducerMessage
+
+        RawBin _ ->
+            Err wordProducerMessage
+
+        RawUn _ ->
+            Err wordProducerMessage
+
+        RawCmp _ ->
+            Err wordProducerMessage
+
+        RawFltBin _ ->
+            Err "qbe: raw FLOAT-word node in a value position — float words are legal only nested in float-argument positions and RawMkValue word lists"
+
+        RawFltCmp _ ->
+            Err "qbe: raw FLOAT-word node in a value position — float words are legal only nested in float-argument positions and RawMkValue word lists"
+
+        RawIToF _ ->
+            Err "qbe: raw FLOAT-word node in a value position — float words are legal only nested in float-argument positions and RawMkValue word lists"
+
+        RawLoadFlt _ ->
+            Err "qbe: raw FLOAT-word node in a value position — float words are legal only nested in float-argument positions and RawMkValue word lists"
+
+        RawAllocRaw _ ->
+            Err wordProducerMessage
+
+        RawByteLoad _ ->
+            Err wordProducerMessage
+
+        RawCallRaw _ ->
             Err wordProducerMessage
 
 
@@ -1042,6 +1140,56 @@ storeValueCell tag words dest s0 =
                     go (i + 1) acc2 rest
     in
     go 0 s1 words
+
+
+{-| The Exp-level RawMkValue path: lower each word (float-typed words into
+`d` temps stored with `stored`, integer words into the l class with
+`storel`), then the same cell stores as storeValueCell.
+-}
+storeValueWords : Int -> List Exp -> Int -> S -> Result String S
+storeValueWords tag words dest s0 =
+    List.foldl
+        (\e acc ->
+            Result.andThen
+                (\( ws, st ) ->
+                    if isFloatWordExp e then
+                        rawFltArg e st
+                            |> Result.map (\( a, st2 ) -> ( ws ++ [ ( a, True ) ], st2 ))
+
+                    else
+                        rawWordArg e st
+                            |> Result.map (\( a, st2 ) -> ( ws ++ [ ( a, False ) ], st2 ))
+                )
+                acc
+        )
+        (Ok ( [], s0 ))
+        words
+        |> Result.map
+            (\( ws, s1 ) ->
+                let
+                    sTag =
+                        emit (Store StoreW (Il.Con tag) (Il.Tmp (slotTmp dest))) s1
+
+                    go : Int -> S -> List ( Il.Arg, Bool ) -> S
+                    go i st rest =
+                        case rest of
+                            [] ->
+                                st
+
+                            ( w, isFlt ) :: more ->
+                                let
+                                    ( pT, st1 ) =
+                                        freshTmp st
+
+                                    st2 =
+                                        st1
+                                            |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp dest)) (Il.Con (8 + 8 * i)))
+                                            |> emit (Store (if isFlt then StoreD else StoreL) w (Il.Tmp pT))
+                                in
+                                go (i + 1) st2 more
+                in
+                go 0 sTag ws
+            )
 
 
 
@@ -1140,16 +1288,516 @@ rawWordArg exp s =
                             freshTmp s3
                     in
                     ( Il.Tmp t
-                    , emit (Bin (Just aT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con (8 + 8 * p.word))) s3
+                    , emit (Bin (Just aT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con (8 + 8 * p.word))) s4
                         |> emit (Load (Just t) L LoadL (Il.Tmp aT))
                     )
                 )
+
+        -- ===== STEP 5 (osier-midprims): the scalar + string word producers
+        Unsafe (RawPayload32 p) ->
+            -- the i32 FIELDS (str.len, vector.len, boolean): loadsw at the
+            -- word's low half + extsw to the l word class.  A 64-bit read
+            -- here would compare garbage high halves against Zig-built
+            -- Values (the extern-struct store never writes them).
+            let
+                ( vslot, s1 ) =
+                    freshSlot s
+            in
+            lowerVal p.value vslot s1
+                |> Result.map
+                (\s2 ->
+                    let
+                        ( aT, s3 ) =
+                            freshTmp s2
+
+                        ( wT, s4 ) =
+                            freshTmp s3
+
+                        ( t, s5 ) =
+                            freshTmp s4
+                    in
+                    ( Il.Tmp t
+                    , emit (Bin (Just aT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con (8 + 8 * p.word))) s5
+                        |> emit (Load (Just wT) W LoadW (Il.Tmp aT))
+                        |> emit (Unary (Just t) L Extsw (Il.Tmp wT))
+                    )
+                )
+
+        Unsafe (RawTagIs ti) ->
+            -- tag == n as 0/1 (w), extended to the l word class — box it with
+            -- RawMkValue tag 3 to branch (`If` reads a boolean Value).
+            let
+                ( vslot, s1 ) =
+                    freshSlot s
+            in
+            lowerVal ti.value vslot s1
+                |> Result.map
+                (\s2 ->
+                    let
+                        ( tagT, s3 ) =
+                            freshTmp s2
+
+                        ( isT, s4 ) =
+                            freshTmp s3
+
+                        ( t, s5 ) =
+                            freshTmp s4
+                    in
+                    ( Il.Tmp t
+                    , emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp vslot))) s5
+                        |> emit (Cmp (Just isT) W Ceq (Il.Tmp tagT) (Il.Con ti.tag))
+                        |> emit (Unary (Just t) L Extsw (Il.Tmp isT))
+                    )
+                )
+
+        Unsafe (RawBin bin) ->
+            -- RAdd..RDiv at `l` (i64 wrap/trunc); the Bitwise family at `w`
+            -- with the JS contract: and/or/xor + shl/sar SIGN-extend back
+            -- (extsw), shr ZERO-extends (extuw).  The shift count masking is
+            -- the CALLER's (RtPrims) — the node is the bare op.
+            rawWordArg bin.a s
+                |> Result.andThen (\( aT, s1 ) -> rawWordArg bin.b s1 |> Result.map (\( bT, s2 ) -> ( aT, bT, s2 )))
+                |> Result.map
+                    (\( aT, bT, s3 ) ->
+                        case bin.op of
+                            RAdd ->
+                                let
+                                    ( t, s4 ) =
+                                        freshTmp s3
+                                in
+                                ( Il.Tmp t, emit (Bin (Just t) L Add aT bT) s4 )
+
+                            RSub ->
+                                let
+                                    ( t, s4 ) =
+                                        freshTmp s3
+                                in
+                                ( Il.Tmp t, emit (Bin (Just t) L Sub aT bT) s4 )
+
+                            RMul ->
+                                let
+                                    ( t, s4 ) =
+                                        freshTmp s3
+                                in
+                                ( Il.Tmp t, emit (Bin (Just t) L Mul aT bT) s4 )
+
+                            RDiv ->
+                                let
+                                    ( t, s4 ) =
+                                        freshTmp s3
+                                in
+                                ( Il.Tmp t, emit (Bin (Just t) L Div aT bT) s4 )
+
+                            _ ->
+                                -- the i32 family: op at `w` into t, then the
+                                -- extension INTO the l result temp (extuw for
+                                -- the zero-fill shift, extsw elsewhere)
+                                let
+                                    ( t, s4 ) =
+                                        freshTmp s3
+
+                                    ( rT, s5 ) =
+                                        freshTmp s4
+
+                                    wop =
+                                        case bin.op of
+                                            RBitAnd ->
+                                                And
+
+                                            RBitOr ->
+                                                Or
+
+                                            RBitXor ->
+                                                Xor
+
+                                            RShl ->
+                                                Shl
+
+                                            RShAr ->
+                                                Sar
+
+                                            _ ->
+                                                Shr
+                                in
+                                ( Il.Tmp rT
+                                , emit (Bin (Just t) W wop aT bT) s5
+                                    |> emit (Unary (Just rT) L (if bin.op == RShR then Extuw else Extsw) (Il.Tmp t))
+                                )
+                    )
+
+        Unsafe (RawUn un) ->
+            rawWordArg un.v s
+                |> Result.map
+                    (\( vT, s1 ) ->
+                        case un.op of
+                            RBitNot ->
+                                -- ~i32: xor -1 at `w`, sign-extended back
+                                let
+                                    ( t, s2 ) =
+                                        freshTmp s1
+
+                                    ( rT, s3 ) =
+                                        freshTmp s2
+                                in
+                                ( Il.Tmp rT
+                                , emit (Bin (Just t) W Xor vT (Il.Con -1)) s3
+                                    |> emit (Unary (Just rT) L Extsw (Il.Tmp t))
+                                )
+
+                            RSext ->
+                                let
+                                    ( rT, s2 ) =
+                                        freshTmp s1
+                                in
+                                ( Il.Tmp rT, emit (Unary (Just rT) L Extsw vT) s2 )
+
+                            RUext ->
+                                let
+                                    ( rT, s2 ) =
+                                        freshTmp s1
+                                in
+                                ( Il.Tmp rT, emit (Unary (Just rT) L Extuw vT) s2 )
+
+                            RFToI32 ->
+                                -- f64 word -> i32: stosi at `w` (truncate
+                                -- toward zero), THEN extsw into the l class
+                                -- (the ToInt32 result re-enters word math
+                                -- sign-extended).
+                                let
+                                    ( t, s2 ) =
+                                        freshTmp s1
+
+                                    ( rT, s3 ) =
+                                        freshTmp s2
+                                in
+                                ( Il.Tmp rT
+                                , emit (Unary (Just t) W Dtosi vT) s3
+                                    |> emit (Unary (Just rT) L Extsw (Il.Tmp t))
+                                )
+                    )
+
+        Unsafe (RawCmp cmp) ->
+            -- signed i64 compare -> 0/1: the Cmp lands at `w`, extsw widens
+            -- (0/1 unchanged) into the l word class so RawMkValue can box it.
+            rawWordArg cmp.a s
+                |> Result.andThen (\( aT, s1 ) -> rawWordArg cmp.b s1 |> Result.map (\( bT, s2 ) -> ( aT, bT, s2 )))
+                |> Result.map
+                    (\( aT, bT, s3 ) ->
+                        let
+                            ( t, s4 ) =
+                                freshTmp s3
+
+                            ( rT, s5 ) =
+                                freshTmp s4
+                        in
+                        ( Il.Tmp rT
+                        , emit (Cmp (Just t) L (rawCmpOp cmp.op) aT bT) s5
+                            |> emit (Unary (Just rT) L Extsw (Il.Tmp t))
+                        )
+                    )
+
+        Unsafe (RawAllocRaw len) ->
+            -- GC_STR safepoint (Mid.Ir's node contract): n raw bytes via the
+            -- runtime's allocRaw seat.  The result is a raw temp, invalid
+            -- across the NEXT safepoint — the same discipline RawAllocVector
+            -- states.
+            rawWordArg len s
+                |> Result.map
+                    (\( lenA, s1 ) ->
+                        let
+                            ( t, s2 ) =
+                                freshTmp s1
+                        in
+                        ( Il.Tmp t
+                        , emit (Call (Just t) (Base L) (Il.Sym "rt_raw_alloc") [ ArgVal (Base W) lenA ]) s2
+                        )
+                    )
+
+        Unsafe (RawByteLoad bl) ->
+            -- loadub + extuw: a byte is 0..255 (zero-extend; there is no
+            -- sign in a byte).
+            rawWordArg bl.ptr s
+                |> Result.andThen
+                    (\( pT, s1 ) ->
+                        rawWordArg bl.index s1
+                            |> Result.map
+                                (\( iT, s2 ) ->
+                                    let
+                                        ( aT, s3 ) =
+                                            freshTmp s2
+
+                                        ( t, s4 ) =
+                                            freshTmp s3
+
+                                        ( rT, s5 ) =
+                                            freshTmp s4
+                                    in
+                                    ( Il.Tmp rT
+                                    , emit (Bin (Just aT) L Add pT iT) s5
+                                        |> emit (Load (Just t) W LoadUb (Il.Tmp aT))
+                                        |> emit (Unary (Just rT) L Extuw (Il.Tmp t))
+                                    )
+                                )
+                    )
+
+        Unsafe (RawCallRaw seat) ->
+            -- alloc-FREE C seat, word args -> word result (Base L both
+            -- sides).  rt_halt's `l` result is never defined (the seat exits)
+            -- but nothing reads a halt's binder — dead-in-practice, valid IL.
+            List.foldl
+                (\e acc ->
+                    Result.andThen
+                        (\( args, st ) ->
+                            rawWordArg e st
+                                |> Result.map (\( a, st2 ) -> ( args ++ [ ArgVal (Base L) a ], st2 ))
+                        )
+                        acc
+                )
+                (Ok ( [], s ))
+                seat.args
+                |> Result.map
+                    (\( args, s1 ) ->
+                        let
+                            ( t, s2 ) =
+                                freshTmp s1
+                        in
+                        ( Il.Tmp t, emit (Call (Just t) (Base L) (Il.Sym seat.sym) args) s2 )
+                    )
+
+        Unsafe (RawFltBin bin) ->
+            -- f64 word binop -> `d` temp.  Operands are FLOAT-word
+            -- expressions (rawFltArg); landing one in an integer-word
+            -- position is a QBE type error at parse time — loud, by design.
+            rawFltArg bin.a s
+                |> Result.andThen (\( aT, s1 ) -> rawFltArg bin.b s1 |> Result.map (\( bT, s2 ) -> ( aT, bT, s2 )))
+                |> Result.map
+                    (\( aT, bT, s3 ) ->
+                        let
+                            ( t, s4 ) =
+                                freshTmp s3
+                        in
+                        ( Il.Tmp t
+                        , emit (Bin (Just t) D (rawFltBinOp bin.op) aT bT) s4
+                        )
+                    )
+
+        Unsafe (RawFltCmp cmp) ->
+            -- f64 compare -> 0/1 in an l word temp (the `*d` Cmp family,
+            -- extsw-widened like RawCmp).
+            rawFltArg cmp.a s
+                |> Result.andThen (\( aT, s1 ) -> rawFltArg cmp.b s1 |> Result.map (\( bT, s2 ) -> ( aT, bT, s2 )))
+                |> Result.map
+                    (\( aT, bT, s3 ) ->
+                        let
+                            ( t, s4 ) =
+                                freshTmp s3
+
+                            ( rT, s5 ) =
+                                freshTmp s4
+                        in
+                        ( Il.Tmp rT
+                        , emit (Cmp (Just t) D (rawFltCmpOp cmp.op) aT bT) s5
+                            |> emit (Unary (Just rT) L Extsw (Il.Tmp t))
+                        )
+                    )
+
+        Unsafe (RawIToF v) ->
+            -- i64 word -> f64 (asFloat's number arm): sltof.
+            rawWordArg v s
+                |> Result.map
+                    (\( vT, s1 ) ->
+                        let
+                            ( t, s2 ) =
+                                freshTmp s1
+                        in
+                        ( Il.Tmp t, emit (Unary (Just t) D Sltof vT) s2 )
+                    )
+
+        Unsafe (RawLoadFlt v) ->
+            -- payload word 0 of a VALUE as f64: loadd at slot+8.  A safe bit
+            -- read of ANY Value (no trap on a mistagged arg).
+            let
+                ( vslot, s1 ) =
+                    freshSlot s
+            in
+            lowerVal v vslot s1
+                |> Result.map
+                    (\s2 ->
+                        let
+                            ( aT, s3 ) =
+                                freshTmp s2
+
+                            ( t, s4 ) =
+                                freshTmp s3
+                        in
+                        ( Il.Tmp t
+                        , emit (Bin (Just aT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con 8)) s4
+                            |> emit (Load (Just t) D LoadD (Il.Tmp aT))
+                        )
+                    )
+
+        Unsafe (RawStrByte sb) ->
+            -- byte i of a string Value (str.data[i]) as a WORD: the data
+            -- pointer is payload word 0 (a full 64-bit pointer — RawPayload),
+            -- the read is loadub at ptr + index, widened ZERO (bytes are
+            -- 0..255; extuw — char-code's -1 out-of-range answer is built by
+            -- the CALLER's bounds test, not by sign bits).
+            rawWordArg sb.index s
+                |> Result.andThen
+                    (\( idxT, s1 ) ->
+                        let
+                            ( vslot, s2 ) =
+                                freshSlot s1
+                        in
+                        lowerVal sb.str vslot s2
+                            |> Result.map
+                                (\s3 ->
+                                    let
+                                        ( pT, s4 ) =
+                                            freshTmp s3
+
+                                        ( aT, s5 ) =
+                                            freshTmp s4
+
+                                        ( bT, s6 ) =
+                                            freshTmp s5
+
+                                        ( wT, s7 ) =
+                                            freshTmp s6
+
+                                        ( rT, s8 ) =
+                                            freshTmp s7
+                                    in
+                                    ( Il.Tmp rT
+                                    , s8
+                                        |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con 8))
+                                        |> emit (Load (Just aT) L LoadL (Il.Tmp pT))
+                                        |> emit (Bin (Just bT) L Add (Il.Tmp aT) idxT)
+                                        |> emit (Load (Just wT) W LoadUb (Il.Tmp bT))
+                                        |> emit (Unary (Just rT) L Extuw (Il.Tmp wT))
+                                    )
+                                )
+                    )
 
         Unsafe other ->
             Err ("qbe: raw argument position holds a value-producing raw node (" ++ rawNodeName other ++ ") — only word producers are legal there")
 
         _ ->
             Err "qbe: raw argument position holds a value expression — only word constants, raw-word binders and word-producing raw nodes are legal"
+
+
+{-| Evaluate ONE float-word expression (the `d` register class): a
+float-producing raw node, nested.  A Var never appears — float words are not
+let-bindable (recompute; they are pure) — and a Value or integer word is a
+loud register-class error.
+-}
+rawFltArg : Exp -> S -> Result String ( Il.Arg, S )
+rawFltArg exp s =
+    case exp of
+        Unsafe node ->
+            case node of
+                RawFltBin _ ->
+                    rawWordArg exp s
+
+                RawFltCmp _ ->
+                    rawWordArg exp s
+
+                RawIToF _ ->
+                    rawWordArg exp s
+
+                RawLoadFlt _ ->
+                    rawWordArg exp s
+
+                _ ->
+                    Err ("qbe: float-word position holds a non-float raw node (" ++ rawNodeName node ++ ")")
+
+        _ ->
+            Err "qbe: float-word position holds a non-raw expression — only the float-producing raw nodes are legal"
+
+
+rawCmpOp : RawCmpOp -> CmpOp
+rawCmpOp op =
+    case op of
+        RCeq ->
+            Ceq
+
+        RCne ->
+            Cne
+
+        RClts ->
+            Cslt
+
+        RCles ->
+            Csle
+
+        RCgts ->
+            Csgt
+
+        RCges ->
+            Csge
+
+
+rawFltBinOp : RawFltBinOp -> BinOp
+rawFltBinOp op =
+    case op of
+        RFAdd ->
+            Add
+
+        RFSub ->
+            Sub
+
+        RFMul ->
+            Mul
+
+        RFDiv ->
+            Div
+
+
+rawFltCmpOp : RawFltCmpOp -> CmpOp
+rawFltCmpOp op =
+    case op of
+        RFLt ->
+            Cltd
+
+        RFLe ->
+            Cled
+
+        RFGt ->
+            Cgtd
+
+        RFGe ->
+            Cged
+
+        RFEq ->
+            Ceqd
+
+        RFNe ->
+            Cned
+
+
+{-| A RawMkValue word is FLOAT-typed when it is one of the float-producing
+nodes — storeValueCell writes those with `stored` (8 bytes at the word
+offset), everything else with `storel`.
+-}
+isFloatWordExp : Exp -> Bool
+isFloatWordExp exp =
+    case exp of
+        Unsafe node ->
+            case node of
+                RawFltBin _ ->
+                    True
+
+                RawIToF _ ->
+                    True
+
+                RawLoadFlt _ ->
+                    True
+
+                _ ->
+                    False
+
+        _ ->
+            False
 
 
 rawNodeName : UnsafeNode -> String
@@ -1184,6 +1832,45 @@ rawNodeName node =
 
         WithRoots _ ->
             "withRoots"
+
+        RawPayload32 _ ->
+            "rawPayload32"
+
+        RawTagIs _ ->
+            "rawTagIs"
+
+        RawBin _ ->
+            "rawBin"
+
+        RawUn _ ->
+            "rawUn"
+
+        RawCmp _ ->
+            "rawCmp"
+
+        RawFltBin _ ->
+            "rawFltBin"
+
+        RawFltCmp _ ->
+            "rawFltCmp"
+
+        RawIToF _ ->
+            "rawIToF"
+
+        RawLoadFlt _ ->
+            "rawLoadFlt"
+
+        RawAllocRaw _ ->
+            "rawAllocRaw"
+
+        RawByteLoad _ ->
+            "rawByteLoad"
+
+        RawByteStore _ ->
+            "rawByteStore"
+
+        RawCallRaw seat ->
+            "rawCallRaw " ++ seat.sym
 
 
 -- &vec[index] — a fresh `l` temp holding vec + vs*index (the index may be a
@@ -2187,6 +2874,34 @@ isRawWordExp exp =
                     True
 
                 RawPayload _ ->
+                    True
+
+                -- ===== STEP 5 word producers
+                RawPayload32 _ ->
+                    True
+
+                RawTagIs _ ->
+                    True
+
+                RawBin _ ->
+                    True
+
+                RawUn _ ->
+                    True
+
+                RawCmp _ ->
+                    True
+
+                RawAllocRaw _ ->
+                    True
+
+                RawByteLoad _ ->
+                    True
+
+                RawStrByte _ ->
+                    True
+
+                RawCallRaw _ ->
                     True
 
                 _ ->
@@ -3506,17 +4221,19 @@ rtPrimSlots prim slots dest s =
 
 
 -- The Rt defun key to route `prim` through, if the hatch is worth taking:
--- the prim must HAVE a Mid implementation, that defun must be present in
--- this compile (injected — QBE_NOMIDRT=1 removes it and the route quietly
+-- the prim must HAVE a Mid implementation, the STAGED ARITY must be that
+-- implementation's (read from Mid.Rt.impls, not hardcoded — step 5's
+-- hand-off: a literal arity silently mis-handles every non-binary prim,
+-- e.g. empty? 1, substring 3, absvector 1), and that defun must be present
+-- in this compile (injected — QBE_NOMIDRT=1 removes it and the route quietly
 -- falls back to the Zig entry rather than emitting a call to an absent
--- function), and the staged arity must be the implementation's (cons is
--- 2-ary; every other arity keeps the ordinary route).
+-- function).
 midPrimRoute : String -> List Int -> S -> Maybe String
 midPrimRoute prim slots s =
     case MidRt.primImpl prim of
-        Just key ->
-            if List.length slots == 2 && Dict.member key s.defuns then
-                Just key
+        Just impl ->
+            if List.length slots == impl.arity && Dict.member impl.key s.defuns then
+                Just impl.key
 
             else
                 Nothing

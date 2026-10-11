@@ -3,6 +3,11 @@ module Mid.Ir exposing
     , Defun
     , Exp(..)
     , UnsafeNode(..)
+    , RawBinOp(..)
+    , RawUnOp(..)
+    , RawCmpOp(..)
+    , RawFltBinOp(..)
+    , RawFltCmpOp(..)
     , Lambda
     , Binder
     , Lit(..)
@@ -334,11 +339,12 @@ type ValuePath
 -- S4 `rawInt` precedent) and reading one in a value position is a LOUD
 -- error, never a rebox.
 --   * `RawCall` — call a runtime SYMBOL directly (QBE: a C symbol; Lua: a
---     host function) with full-arity args in source order.  This is the ONE
---     seam both ways (host->program is `host_apply`, program->host is this).
---     NOT YET LOWERED: no Rt body uses it (the host seam is effectloop's,
---     not a pure prim's), so Mid.Qbe.Lower fails loudly on it rather than
---     carry an unexercised lowering that could be silently wrong.
+--     host function) with full-arity args in source order.  LOWERED since
+--     step 5 for `Rt.*` keys (the direct defun call: q_-mangled symbol,
+--     :val args, :ret result, rt_bounce — the same shape the route hatch
+--     emits), which is what makes the recursive Rt helpers (deepEqual,
+--     numberText, the list walks) expressible; a NON-Rt symbol still errs
+--     loudly (the word-level C seats are RawCallRaw's).
 --   * `RawTagOf` / `RawPayload` — read a Value's tag / payload word i
 --     (gc/types.zig: `Value` = `ValTag` + 32-byte union).
 --   * `RawAllocVector` / `RawVecLoad` / `RawVecAddr` / `RawVecStore` — the
@@ -351,9 +357,9 @@ type ValuePath
 --     temp, not a root): the builder fills/stores before the next
 --     allocation, and an unfilled element must never be scanned — the same
 --     contract values.zig's valVector/valCons bodies obey.
---   * `RawStrByte` — byte i of a string Value (str.data[i]).  NOT YET
---     LOWERED (no Rt body uses it; QBE Il has no byte load seat yet — it
---     errs loudly until the first string prim sizes it).
+--   * `RawStrByte` — byte i of a string Value (str.data[i]).  LOWERED since
+--     step 5 (data pointer via RawPayload word 0, loadub, zero-extended —
+--     the first string prim sized it, exactly as the spike predicted).
 --   * `WithRoots` — STRUCTURAL ROOTING: the listed binders are live GC roots
 --     across `body` (roots.zig ROOT_VALUE shape), so an allocation inside
 --     `body` cannot stale them (the dd19b36 unrooted-staging class, made
@@ -384,3 +390,108 @@ type UnsafeNode
     | RawVecStore { vec : Exp, index : Exp, value : Exp }
     | RawStrByte { str : Exp, index : Exp }
     | WithRoots { binders : List Binder, body : Exp }
+    | -- ===== STEP 5 (osier-midprims): the SCALAR + STRING nodes the prim
+      -- enumeration demanded.  The spike's set could build and walk Values but
+      -- could not COMPUTE — `+`, `<`, bitwise, string bytes and the Rt->Rt
+      -- calls the recursive helpers need were all unexpressible.  These forms
+      -- close that at the same register-class discipline (word producers bind
+      -- to raw temps; float words are a second class, `d` temps).
+      -- 32-bit SIGNED payload read: str.len / vector.len / boolean are i32
+      -- FIELDS (gc/types.zig extern struct) — a 64-bit RawPayload read of a
+      -- ZIG-built Value's word reads GARBAGE in the high half (the extern
+      -- struct store writes only 12 payload bytes; heap memory is recycled).
+      -- Number payloads are i64 and keep RawPayload.
+      RawPayload32 { value : Exp, word : Int }
+    | -- tag == n as a BOOLEAN WORD (0/1, raw): the tag dispatch that must NOT
+      -- go through Case MLitEq/MTagEq — those lower through rtPrimSlots "=",
+      -- which ROUTES to Rt.eq when the route hatch is on, an infinite regress
+      -- inside Rt.eq's own body.  Boxing it (RawMkValue tag 3) makes it an
+      -- `If`/`ShortAnd` condition.
+      RawTagIs { value : Exp, tag : Int }
+    | -- semantic word ops (word x word -> word, raw).  The integer family
+      -- (RAdd..RDiv) is i64 wrapping/truncating; the Bitwise family is i32
+      -- (JS/Elm Bitwise: RBitAnd/Or/Xor at w, sign-extended back; RShl/RShAr
+      -- sign-extended, RShR zero-extended; the count is masked mod 32 HERE,
+      -- matching bitwise-shift-*'s shiftAmount) — the QBE widths live in the
+      -- lowering, keeping this IR backend-neutral.
+      RawBin { op : RawBinOp, a : Exp, b : Exp }
+    | RawUn { op : RawUnOp, v : Exp }
+    | -- signed i64 word compare -> 0/1 word (RClts RCles RCgts RCges, plus
+      -- RCeq/RCne; equality on garbage-wide reads is exact, so no 32-bit
+      -- compare form exists — use RawPayload32 first).
+      RawCmp { op : RawCmpOp, a : Exp, b : Exp }
+    | -- f64 word ops + compares (the M4 promote arms; operands are
+      -- float-word EXPRESSIONS: RawLoadFlt/RawIToF or a nested bin — never a
+      -- value or an integer word, register class loud on violation)
+      RawFltBin { op : RawFltBinOp, a : Exp, b : Exp }
+    | RawFltCmp { op : RawFltCmpOp, a : Exp, b : Exp }
+    | -- i64 word -> f64 word (asFloat's number arm)
+      RawIToF Exp
+    | -- payload word 0 of a VALUE read as f64 (asFloat's float arm; a safe
+      -- bit-read of any Value's payload — no trap on a mistagged arg, same
+      -- class as the Zig `else => unreachable` in ReleaseFast)
+      RawLoadFlt Exp
+    | -- n raw BYTES (g.allocRaw — the GC_STR level, a SAFEPOINT like
+      -- RawAllocVector: live Values must be rooted across it, and the
+      -- returned address is a raw temp valid only to the next safepoint).
+      -- The string-building seat under cn/substring/bytes->string.
+      RawAllocRaw Exp
+    | -- byte i of the RAW buffer at ptr (NOT of a string Value — that is
+      -- RawStrByte; a string's data pointer arrives as RawPayload word 0)
+      RawByteLoad { ptr : Exp, index : Exp }
+    | -- store one byte into a raw buffer (effect, like RawVecStore; NO
+      -- barrier — raw bytes hold no GC pointers by construction)
+      RawByteStore { ptr : Exp, index : Exp, value : Exp }
+    | -- call a C runtime seat with WORD args and a WORD result (raw register
+      -- class on both sides — rt_bytes_copy/rt_halt-class seats; alloc-FREE
+      -- by contract, the allocating seats go through RawAllocVector /
+      -- RawAllocRaw so the safepoint discipline stays stated at the node).
+      -- Rt.* DEFUN calls are the OTHER constructor: RawCall above.
+      RawCallRaw { sym : String, args : List Exp }
+
+
+-- The semantic word-op enums (backend-neutral: QBE's widths and mnemonics
+-- are chosen in Mid.Qbe.Lower; a Lua backend maps each to its native op).
+type RawBinOp
+    = RAdd
+    | RSub
+    | RMul
+    | RDiv
+    | RBitAnd
+    | RBitOr
+    | RBitXor
+    | RShl
+    | RShAr
+    | RShR
+
+
+type RawUnOp
+    = RBitNot -- i32 complement, sign-extended back to the word class
+    | RSext -- w -> l sign-extend (the i32 result of a bitwise op)
+    | RUext -- w -> l zero-extend (shift-right-zf's 0..2^32-1)
+    | RFToI32 -- f64 word -> i32 (JS ToInt32: truncate toward zero), i32 result
+
+
+type RawCmpOp
+    = RCeq
+    | RCne
+    | RClts
+    | RCles
+    | RCgts
+    | RCges
+
+
+type RawFltBinOp
+    = RFAdd
+    | RFSub
+    | RFMul
+    | RFDiv
+
+
+type RawFltCmpOp
+    = RFLt
+    | RFLe
+    | RFGt
+    | RFGe
+    | RFEq
+    | RFNe

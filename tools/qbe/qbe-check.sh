@@ -1050,6 +1050,16 @@ QBE_MIDCONS=1 run midcons-churn Churn.build tools/qbe/fixtures/churn.elm 150000 
 run conslist ConsList.a tools/qbe/fixtures/conslist.elm
 QBE_MIDCONS=1 run midcons-list ConsList.a tools/qbe/fixtures/conslist.elm
 
+# The STEP-5 prim-structure rows (osier-midprims), the conslist lesson
+# extended: this fixture's printed result TRAVERSES what the Mid-implemented
+# string/vector prims build — strToBytes walks every byte of the Mid cn/
+# repeat/substring-constructed string, the vector reads walk the Mid
+# absvector array — so a wrong tag, a stale buffer pointer or a mis-sized len
+# in ANY of them changes the printed bytes.  Golden frozen from the DEFAULT
+# (Zig rt_prim) build; the Mid-routed twin must match byte-for-byte.
+run primstruct PrimStruct.a tools/qbe/fixtures/primstruct.elm
+QBE_MIDCONS=1 run midprim-struct PrimStruct.a tools/qbe/fixtures/primstruct.elm
+
 # STRUCTURAL A/B rows (the counters must MOVE — a row that cannot fail is
 # not a row):
 #   * midrt-injected: the DEFAULT build of the cons-using fixture carries the

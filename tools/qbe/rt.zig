@@ -428,6 +428,32 @@ export fn rt_vec_store(vec: [*]Value, i: i32, val: *const Value) callconv(.c) vo
     g.writeBarrierVectorStore(vec, @intCast(i), val.*);
 }
 
+// =====================================================================
+//  Rt raw-node seats, step 5 (handoff osier-midprims) — the byte-level
+//  and halt seats under the string prims.  Same contract class as the two
+//  above: the lowering carries no second copy of it.
+// =====================================================================
+
+/// `RawAllocRaw n` — the GC_STR level: n raw bytes (g.allocRaw).  The ONE
+/// string-prim safepoint: the caller's live Values must be rooted across it
+/// (the QBE lowering keeps every Value in the rooted pooled frame), and the
+/// returned address is a raw temp valid only to the next safepoint.  The
+/// buffer is NOT zeroed — the builder writes every byte before the next
+/// safepoint (values.valString/valStringFrom obey the same contract).
+export fn rt_raw_alloc(n: i32) callconv(.c) [*]u8 {
+    return g.allocRaw(@intCast(n));
+}
+
+/// The Mid prims' halt arm (emptylist's non-0 arm — C falls through to
+/// unknown -> error.Halt; on QBE error.Halt IS process death via diePrim,
+/// so the Mid arm exits the same way).  Declared `i64` so the word-level
+/// call shape stays valid IL; the result temp is never read.  NOT a
+/// catchable Shen error — that is the documented gap (primSimpleError's
+/// throwShen stays host-side this step).
+export fn rt_halt() callconv(.c) i64 {
+    dieLoud("qbe-rt: halt (a Mid prim reached its halt arm)");
+}
+
 /// The non-exhaustive-pattern failure arm.  Unreachable in well-typed Elm
 /// (the compiler's exhaustiveness check), so this just needs to fail loudly —
 /// never a silent miscompile.

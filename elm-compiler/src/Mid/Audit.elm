@@ -212,3 +212,42 @@ describe node =
 
         WithRoots _ ->
             "withRoots"
+
+        RawPayload32 _ ->
+            "rawPayload32 (i32 payload field read)"
+
+        RawTagIs _ ->
+            "rawTagIs"
+
+        RawBin _ ->
+            "rawBin"
+
+        RawUn _ ->
+            "rawUn"
+
+        RawCmp _ ->
+            "rawCmp"
+
+        RawFltBin _ ->
+            "rawFltBin"
+
+        RawFltCmp _ ->
+            "rawFltCmp"
+
+        RawIToF _ ->
+            "rawIToF"
+
+        RawLoadFlt _ ->
+            "rawLoadFlt"
+
+        RawAllocRaw _ ->
+            "rawAllocRaw (GC safepoint)"
+
+        RawByteLoad _ ->
+            "rawByteLoad"
+
+        RawByteStore _ ->
+            "rawByteStore"
+
+        RawCallRaw call ->
+            "raw call word seat " ++ call.sym

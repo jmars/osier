@@ -866,24 +866,57 @@ checks =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program is exactly Rt.cons (2 params, Rt.* key)"
-        (case Rt.program of
-            [ defun ] ->
-                defun.key == "Rt.cons"
-                    && (case defun.value of
-                            Lam lambda ->
-                                List.length lambda.params == 2
+    , check "rt program: 58 defuns, all Rt.*; cons 2-ary, substring 3-ary (step 5 widened the program)"
+        (List.length Rt.program == 58
+            && List.all (\d -> String.startsWith "Rt." d.key) Rt.program
+            && List.any
+                (\d ->
+                    d.key == "Rt.cons"
+                        && (case d.value of
+                                Lam lambda ->
+                                    List.length lambda.params == 2
 
-                            _ ->
-                                False
-                       )
+                                _ ->
+                                    False
+                           )
+                )
+                Rt.program
+            && List.any
+                (\d ->
+                    d.key == "Rt.substring"
+                        && (case d.value of
+                                Lam lambda ->
+                                    List.length lambda.params == 3
 
-            _ ->
-                False
+                                _ ->
+                                    False
+                           )
+                )
+                Rt.program
         )
-    , check "rt seeds: a used cons seeds Rt.cons; an unused prim seeds nothing"
-        (Rt.seeds (Set.fromList [ "cons", "+", "=" ]) == [ "Rt.cons" ]
-            && Rt.seeds (Set.fromList [ "+" ]) == []
+    , check "rt seeds closure: cons/=/+ pull the 8-key deepEq closure; + alone pulls just Rt.+"
+        (Rt.seeds (Set.fromList [ "cons", "+", "=" ])
+            == [ "Rt.+", "Rt.asF", "Rt.=", "Rt.deepEq", "Rt.bytesEqGo", "Rt.symEq", "Rt.vecEq", "Rt.cons" ]
+            && Rt.seeds (Set.fromList [ "+" ]) == [ "Rt.+", "Rt.asF" ]
+        )
+    , check "rt call graph: every RawCall target is a program key AND declared in rtDeps (the seed-closure skew must-fail)"
+        (let
+            syms key =
+                case List.filter (\d -> d.key == key) Rt.program of
+                    d :: _ ->
+                        rawCallSyms d.value
+
+                    [] ->
+                        []
+
+            allKeys =
+                List.map .key Rt.program
+
+            ok key =
+                List.all (\sym -> List.member sym allKeys && List.member sym (Maybe.withDefault [] (Dict.get key Rt.rtDeps)))
+                    (syms key)
+         in
+         List.all ok allKeys
         )
     , check "rt cons lowers to a QBE function named q_Rt_x2econs"
         (case QbeLower.lower False False False QbeTypes.empty Dict.empty Rt.program "Rt.cons" of
@@ -1155,3 +1188,157 @@ rtValueInRawPosition =
                     )
             }
     }
+
+
+{-| Every `Rt.*` key a body RawCalls, in order (duplicates kept — the check
+only needs membership).  The seed-closure skew detector: a RawCall to a key
+missing from Rt.program or from Rt.rtDeps makes that defun unreachable or
+unseedable, and this row fails before any .ssa is emitted.
+-}
+rawCallSyms : Exp -> List String
+rawCallSyms exp =
+    case exp of
+        Lit _ ->
+            []
+
+        Var _ ->
+            []
+
+        GRef _ ->
+            []
+
+        StreamRef _ ->
+            []
+
+        Lam lambda ->
+            rawCallSyms lambda.body
+
+        NoTail inner ->
+            rawCallSyms inner
+
+        App app ->
+            rawCallSyms app.fn ++ List.concatMap rawCallSyms app.args
+
+        PrimApp app ->
+            List.concatMap rawCallSyms app.args
+
+        Let block ->
+            List.concatMap
+                (\binder ->
+                    case binder of
+                        LetBind bind ->
+                            rawCallSyms bind.value
+
+                        LetDestruct d ->
+                            rawCallSyms d.value
+                )
+                block.binders
+                ++ rawCallSyms block.body
+
+        Case branch ->
+            rawCallSyms branch.scrutinee
+                ++ List.concatMap (\a -> rawCallSyms a.body) branch.alts
+
+        Con con ->
+            List.concatMap rawCallSyms con.args
+
+        Tup es ->
+            List.concatMap rawCallSyms es
+
+        RecordLit setters ->
+            List.concatMap (\p -> rawCallSyms (Tuple.second p)) setters
+
+        RecordGet rec _ ->
+            rawCallSyms rec
+
+        RecordUpdate update ->
+            rawCallSyms update.base
+                ++ List.concatMap (\p -> rawCallSyms (Tuple.second p)) update.updates
+
+        ListLit es ->
+            List.concatMap rawCallSyms es
+
+        If block ->
+            rawCallSyms block.cond
+                ++ rawCallSyms block.thenBranch
+                ++ rawCallSyms block.elseBranch
+
+        ShortAnd block ->
+            rawCallSyms block.left ++ rawCallSyms block.right
+
+        ShortOr block ->
+            rawCallSyms block.left ++ rawCallSyms block.right
+
+        NotEqual block ->
+            rawCallSyms block.left ++ rawCallSyms block.right
+
+        Unsafe node ->
+            case node of
+                RawCall call ->
+                    call.sym :: List.concatMap rawCallSyms call.args
+
+                RawTagOf inner ->
+                    rawCallSyms inner
+
+                RawPayload p ->
+                    rawCallSyms p.value
+
+                RawPayload32 p ->
+                    rawCallSyms p.value
+
+                RawMkValue mk ->
+                    List.concatMap rawCallSyms mk.words
+
+                RawAllocVector len ->
+                    rawCallSyms len
+
+                RawVecLoad l ->
+                    rawCallSyms l.vec ++ rawCallSyms l.index
+
+                RawVecAddr a ->
+                    rawCallSyms a.vec ++ rawCallSyms a.index
+
+                RawVecStore st ->
+                    rawCallSyms st.vec ++ rawCallSyms st.index ++ rawCallSyms st.value
+
+                RawStrByte sb ->
+                    rawCallSyms sb.str ++ rawCallSyms sb.index
+
+                WithRoots rooted ->
+                    rawCallSyms rooted.body
+
+                RawTagIs ti ->
+                    rawCallSyms ti.value
+
+                RawBin bin ->
+                    rawCallSyms bin.a ++ rawCallSyms bin.b
+
+                RawUn un ->
+                    rawCallSyms un.v
+
+                RawCmp c ->
+                    rawCallSyms c.a ++ rawCallSyms c.b
+
+                RawFltBin f ->
+                    rawCallSyms f.a ++ rawCallSyms f.b
+
+                RawFltCmp f ->
+                    rawCallSyms f.a ++ rawCallSyms f.b
+
+                RawIToF inner ->
+                    rawCallSyms inner
+
+                RawLoadFlt inner ->
+                    rawCallSyms inner
+
+                RawAllocRaw len ->
+                    rawCallSyms len
+
+                RawByteLoad bl ->
+                    rawCallSyms bl.ptr ++ rawCallSyms bl.index
+
+                RawByteStore bs ->
+                    rawCallSyms bs.ptr ++ rawCallSyms bs.index ++ rawCallSyms bs.value
+
+                RawCallRaw seat ->
+                    List.concatMap rawCallSyms seat.args

@@ -9,6 +9,7 @@ module Mid.Qbe.Il exposing
     , AbiTy(..)
     , BinOp(..)
     , CmpOp(..)
+    , UnaryOp(..)
     , LoadOp(..)
     , StoreTy(..)
     , CallArg(..)
@@ -201,6 +202,22 @@ type Inst
     | -- a pure marker kept for readability of the printed IL; prints as a
       -- comment and is ignored by every consumer.
       Cmt String
+    | -- %r =ty uop a   (conversions: the result type is the DESTINATION, the
+      -- operand carries its own type — extsw/extuw read `w`, sltof reads `l`,
+      -- stosi reads `d` and lands at `w` per its dst)
+      Unary (Maybe String) Ty UnaryOp Arg
+
+
+-- QBE's conversion mnemonics this backend builds (Mid.Qbe.Lower's Rt
+-- raw-word lowering).  `extsw`/`extuw` widen w->l signed/zero (the i32
+-- Bitwise results re-entering i64 land); `sltof` widens an i64 payload to
+-- f64 (the M4 numeric promote); `stosi` narrows a double to a signed int at
+-- the DESTINATION type (`w` = ToInt32, truncating toward zero).
+type UnaryOp
+    = Extsw
+    | Extuw
+    | Sltof
+    | Dtosi
 
 
 -- `Div` is the only op whose QBE spelling is not shared between the integer
@@ -217,6 +234,14 @@ type BinOp
     | And
     | Or
     | Xor
+    | -- the SHIFT family (QBE `shl`/`sar`/`shr`): both operands and the
+      -- result share one type.  Built only by the Rt raw-word lowering
+      -- (Mid.Qbe.Lower's RawBin), which applies the JS/Elm-Bitwise contract
+      -- (w-typed operand, mask the count to 5 bits, sign- or zero-extend the
+      -- result) before these ever print.
+      Shl
+    | Sar
+    | Shr
 
 
 -- Ceq/Cne/Cslt/Csle/Csgt/Csge are the SIGNED INTEGER family: with the operand
@@ -250,12 +275,14 @@ type LoadOp
     = LoadW -- loadw (32-bit, sign/zero-extension irrelevant for tags)
     | LoadL -- loadl (64-bit payloads)
     | LoadD -- loadd (float payloads, from static data)
+    | LoadUb -- loadub (8-bit, ZERO-extended; the string-byte read)
 
 
 type StoreTy
     = StoreW
     | StoreL
     | StoreD -- stored (64-bit float payloads; the load/store mirror of LoadD)
+    | StoreB -- storeb (the string-byte write)
 
 
 type CallArg
@@ -288,6 +315,9 @@ readsTmps inst =
             List.filterMap tmpName [ a, b ]
 
         Load _ _ _ a ->
+            List.filterMap tmpName [ a ]
+
+        Unary _ _ _ a ->
             List.filterMap tmpName [ a ]
 
         Store _ v addr ->

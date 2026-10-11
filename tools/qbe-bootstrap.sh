@@ -117,7 +117,11 @@ if [ "$MODE" = freeze ]; then
   jq --arg out "$SEED" --arg entry "$ENTRY" \
      '.groups[0].output = $out | .groups[0].entry = $entry' "$MANIFEST" > "$WORK/emit.json"
   t0=$(now)
-  node "$ROOT/elm-compiler/run.js" --batch "$WORK/emit.json" || die "the stock emit failed"
+  # RUN_STACK_KB: the stock emit compiles the compiler's own sources, whose
+  # Mid.RtPrims trees are deep nested Ifs — Mid.Audit's walker (and the
+  # lowering behind it) recurses past node's default V8 stack.  run.js's own
+  # re-exec knob (its header documents exactly this class).
+  RUN_STACK_KB="${RUN_STACK_KB:-131072}" node "$ROOT/elm-compiler/run.js" --batch "$WORK/emit.json" || die "the stock emit failed"
   t1=$(now)
   case "$(head -c 4 "$SEED")" in
     "err "*) die "the stock emit FAILED: $(head -c 300 "$SEED")";;

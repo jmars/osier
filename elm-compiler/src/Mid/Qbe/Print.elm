@@ -22,7 +22,7 @@ module Mid.Qbe.Print exposing (print)
 -- plain ASCII by construction).
 
 import Char
-import Mid.Qbe.Il exposing (Module, Func, Block, Inst(..), Jump(..), Arg(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..), descType, retType, valType)
+import Mid.Qbe.Il exposing (Module, Func, Block, Inst(..), Jump(..), Arg(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), UnaryOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..), descType, retType, valType)
 
 
 print : Module -> String
@@ -286,6 +286,9 @@ printInst inst =
         Cmt s ->
             "\t# " ++ s
 
+        Unary dst ty uop a ->
+            tab dst ty (unaryName uop ++ " " ++ printArg a)
+
         Bin dst ty op a b ->
             tab dst ty (opName op ++ " " ++ printArg a ++ ", " ++ printArg b)
 
@@ -404,6 +407,31 @@ opName op =
         Xor ->
             "xor"
 
+        Shl ->
+            "shl"
+
+        Sar ->
+            "sar"
+
+        Shr ->
+            "shr"
+
+
+unaryName : UnaryOp -> String
+unaryName op =
+    case op of
+        Extsw ->
+            "extsw"
+
+        Extuw ->
+            "extuw"
+
+        Sltof ->
+            "sltof"
+
+        Dtosi ->
+            "dtosi"
+
 
 cmpName : CmpOp -> String
 cmpName op =
@@ -460,6 +488,9 @@ loadName op =
         LoadD ->
             "loadd"
 
+        LoadUb ->
+            "loadub"
+
 
 storeName : StoreTy -> String
 storeName st =
@@ -472,6 +503,9 @@ storeName st =
 
         StoreD ->
             "stored"
+
+        StoreB ->
+            "storeb"
 
 
 -- List.intersperse, local: the selfhost alias table has no `List.intersperse`

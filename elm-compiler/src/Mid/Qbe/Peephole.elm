@@ -224,6 +224,9 @@ isPure inst =
         Load _ _ _ _ ->
             True
 
+        Unary _ _ _ _ ->
+            True
+
         Alloc _ _ ->
             True
 
@@ -258,6 +261,9 @@ readsTmps inst =
             Set.union (argTmps a) (argTmps b)
 
         Load _ _ _ a ->
+            argTmps a
+
+        Unary _ _ _ a ->
             argTmps a
 
         Store _ v addr ->
