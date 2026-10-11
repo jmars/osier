@@ -97,7 +97,12 @@ fn parseSpec(sp: *Spec, arena: std.mem.Allocator) Parsed {
     }
     const c = sp.advance();
     switch (c) {
-        'n', 'f', 'b', 's' => {
+        // 'y' = SYMBOL (the golden specs only): interned through the
+        // reference entry, exactly what the surface's sym literals are.  No
+        // generated batch uses it — surface Elm has no symbol literal — so it
+        // exists for the committed goldens of the `=` arms that stay
+        // unreachable from the typed surface (see tools/qbe/primsdiff/golden).
+        'n', 'f', 'b', 's', 'y' => {
             std.debug.assert(sp.advance() == ':');
             const text = sp.until(",)|\n");
             return .{ .kind = c, .text = text, .elems = &.{} };
@@ -174,6 +179,7 @@ fn buildValue(p: *const Parsed) Value {
             return values.valBoolean(v);
         },
         's' => return values.valString(g, p.text),
+        'y' => return symValue(p.text),
         '0' => return values.valNil(),
         'l' => {
             var acc = values.valNil();
@@ -233,6 +239,96 @@ fn executeOp(op: []const u8, args: []Value) Value {
         defer _ = g.rootPop();
         var one = [1]Value{hit};
         return runPrim("snd", &one);
+    }
+    if (std.mem.eql(u8, op, "churn-str")) {
+        // String.length (Str.repeat n s): repeat's allocation volume is the
+        // point; the printed result is one number (the churn batches must not
+        // print 40MB).
+        var rep = runPrim("repeat", &[_]Value{ args[0], args[1] });
+        g.rootPushValue(&rep);
+        defer _ = g.rootPop();
+        var one = [1]Value{rep};
+        return runPrim("c-strlen", &one);
+    }
+    if (std.mem.eql(u8, op, "churn-cons")) {
+        // churnbuild n n nil: a tail-recursive cons accumulator, the list kept
+        // REACHABLE across every iteration (promotion churn), result = m = n
+        // (the fixture returns the second argument, NOT the list).  The
+        // accumulator is rooted exactly as the Mid arm's frame slot is: a root
+        // the collector must trace and update on every scavenge.
+        const n = args[0].payload.number;
+        var acc = values.valNil();
+        g.rootPushValue(&acc);
+        defer _ = g.rootPop();
+        var i: i64 = n;
+        while (i > 0) : (i -= 1) {
+            const cell = consRef(values.valNumber(i), acc);
+            g.rootPop();
+            acc = cell;
+            g.rootPushValue(&acc);
+        }
+        return values.valNumber(n);
+    }
+    if (std.mem.eql(u8, op, "assoc-g")) {
+        // The `assoc` composite, but reading field g: assoc's FIRST-pair arm
+        // returns before the recursion, so only a DEFERRED key reaches
+        // Rt.assocGo (and its symbol deepEq).  The Mid fixture's odd-numbered
+        // vectors read `.g`, so the reference arm must read g too.
+        var fa = runPrim("@p", &[_]Value{ symValue("f"), args[0] });
+        g.rootPushValue(&fa);
+        defer _ = g.rootPop();
+        var gb = runPrim("@p", &[_]Value{ symValue("g"), args[1] });
+        g.rootPushValue(&gb);
+        defer _ = g.rootPop();
+        var tail = consRef(gb, values.valNil());
+        g.rootPushValue(&tail);
+        defer _ = g.rootPop();
+        var rec = consRef(fa, tail);
+        g.rootPushValue(&rec);
+        defer _ = g.rootPop();
+        var hit = runPrim("assoc", &[_]Value{ symValue("g"), rec });
+        g.rootPushValue(&hit);
+        defer _ = g.rootPop();
+        var one = [1]Value{hit};
+        return runPrim("snd", &one);
+    }
+    if (std.mem.eql(u8, op, "eq-cn-same")) {
+        // (String.append a b) == (String.append a b): the `=` TRUE path over
+        // strings — both sides built by the SAME runtime expression, so the
+        // byte walk agrees to the end and the answer is TRUE.  (The harness's
+        // first cut compared a with b, which is a DIFFERENT claim.)
+        var s1 = runPrim("cn", &[_]Value{ args[0], args[1] });
+        g.rootPushValue(&s1);
+        defer _ = g.rootPop();
+        var s2 = runPrim("cn", &[_]Value{ args[0], args[1] });
+        g.rootPushValue(&s2);
+        defer _ = g.rootPop();
+        var pair = [2]Value{ s1, s2 };
+        return runPrim("=", &pair);
+    }
+    if (std.mem.eql(u8, op, "vec-eq")) {
+        // mkvec n x twice, then the `=` prim on the two vectors: vecEq's
+        // ELEMENTWISE walk (equal length, so the short-circuit does not fire).
+        // Every slot is written on both sides.
+        const n: i64 = args[0].payload.number;
+        var v1 = runPrim("absvector", &[_]Value{args[0]});
+        g.rootPushValue(&v1);
+        defer _ = g.rootPop();
+        var i: i64 = 0;
+        while (i < n) : (i += 1) {
+            var step = [3]Value{ v1, values.valNumber(i), args[1] };
+            v1 = runPrim("address->", &step);
+        }
+        var v2 = runPrim("absvector", &[_]Value{args[0]});
+        g.rootPushValue(&v2);
+        defer _ = g.rootPop();
+        i = 0;
+        while (i < n) : (i += 1) {
+            var step = [3]Value{ v2, values.valNumber(i), args[2] };
+            v2 = runPrim("address->", &step);
+        }
+        var pair = [2]Value{ v1, v2 };
+        return runPrim("=", &pair);
     }
     if (std.mem.eql(u8, op, "emptylist")) {
         return runPrim("emptylist", &.{values.valNumber(0)});
@@ -358,5 +454,21 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     };
     wout(aw.written());
     wout("\n");
+    // The churn batches' evidence, on STDERR in rt.zig's own format+gate: the
+    // differential asserts the REFERENCE arm collected too, so "the churn arm
+    // really churns" is checked on BOTH sides (should-fix 3).
+    if (std.c.getenv("QBE_GC_STATS") != null) {
+        const s = gg.stats();
+        std.debug.print(
+            "[GC STATS] scavenges={d} full_collects={d} heap_mb={d} oldgen_in_use_mb={d} last_collect_live_mb={d}\n",
+            .{
+                s.nursery_scavenge_count,
+                s.full_collect_count,
+                gg.heappages * heap.PAGEBYTES / (1024 * 1024),
+                s.allocated_pages * heap.PAGEBYTES / (1024 * 1024),
+                gg.last_collect_live_pages * heap.PAGEBYTES / (1024 * 1024),
+            },
+        );
+    }
     return 0;
 }

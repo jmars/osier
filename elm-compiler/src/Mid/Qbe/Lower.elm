@@ -189,6 +189,7 @@ type alias S =
     , cloN : Int -- closure-name supply
     , arities : Dict String Int
     , defuns : Dict String Defun
+    , seeded : Set.Set String
     , defunKey : String
     , qname : String
     }
@@ -300,33 +301,6 @@ lower rep primDirect midCons table arityTable program entryKey =
     let
         defuns =
             Dict.fromList (List.map (\d -> ( d.key, d )) program)
-
-        s0 =
-            { blocks = []
-            , curLabel = "start"
-            , curBody = []
-            , tmp = 0
-            , lbl = 0
-            , slot = 0
-            , binderSlots = Dict.empty
-            , rawInt = Dict.empty
-            , rawFloat = Dict.empty
-            , rawWord = Dict.empty
-            , intBinders = Set.empty
-            , table = table.defuns
-            , rep = rep
-            , primDirect = primDirect
-            , midCons = midCons
-            , funcs = []
-            , datas = []
-            , dataKeys = Dict.empty
-            , dataN = 0
-            , cloN = 0
-            , arities = arityTable
-            , defuns = defuns
-            , defunKey = ""
-            , qname = ""
-            }
     in
     case reach defuns entryKey [] of
         Err msg ->
@@ -365,6 +339,34 @@ lower rep primDirect midCons table arityTable program entryKey =
 
                 keys =
                     surfaceKeys ++ rtKeys
+
+                s0 =
+                    { blocks = []
+                    , curLabel = "start"
+                    , curBody = []
+                    , tmp = 0
+                    , lbl = 0
+                    , slot = 0
+                    , binderSlots = Dict.empty
+                    , rawInt = Dict.empty
+                    , rawFloat = Dict.empty
+                    , rawWord = Dict.empty
+                    , intBinders = Set.empty
+                    , table = table.defuns
+                    , rep = rep
+                    , primDirect = primDirect
+                    , midCons = midCons
+                    , funcs = []
+                    , datas = []
+                    , dataKeys = Dict.empty
+                    , dataN = 0
+                    , cloN = 0
+                    , arities = arityTable
+                    , defuns = defuns
+                    , seeded = Set.fromList keys
+                    , defunKey = ""
+                    , qname = ""
+                    }
             in
             List.foldl
                 (\key acc ->
@@ -489,15 +491,25 @@ isRtKey key =
 
 
 {-| The prim names a defun's lowering will CALL — the used-prim census the Rt
-seeding reads.  This MIRRORS this module's own desugars (buildList /
-buildRecord / buildRecordUpdate), because the Mid tree carries a `ListLit`
-where the emitted code carries a `cons` chain: a census over `PrimApp` alone
-would undercount and leave the pruning claim true for the wrong reason, while
-a desugar this lowering does not perform would seed Rt defuns a program never
-runs.  Every new prim ported to Mid (step 5) extends BOTH sides: its entry in
-Mid.Rt.impls and, if a new CONSTRUCT desugars to it, the arm here.  Matches
-and paths are deliberately absent: they call `=`/`hd`/`tl`-shape prims, never
-a constructor prim.
+seeding reads.  This is the ONE place a desugar must be declared, and the
+seats below are wired so it cannot drift:
+
+  * every CONSTRUCT arm walks the SAME builder function `lowerVal` calls
+    (buildTuple / buildRecord / buildRecordGet / buildRecordUpdate /
+    buildList), so "what the census sees" IS "what the lowering emits" — not
+    a restatement of it;
+  * the two arms with no builder (alt/binder PATHS, and the match TESTS) run
+    through `pathPrims` / `matchPrims`, one function per seat;
+  * anything the census still misses is caught at the call site by
+    `midPrimRoute`'s SEED GUARD, which fails the COMPILE naming the prim
+    instead of emitting a call to a defun this compile will not emit.
+
+The step-5 review (handoff osier-midrt-review) is why: the restated lists
+were wrong in SIX of the seven seats — a tuple seeded `@p` and missed `cons`,
+a record literal missed `emptylist`, a record get missed `assoc`+`snd`, and
+BOTH pattern seats (case alt binds, let-destructure binds) missed `assoc`+
+`snd` while BOTH match seats (MTagEq/MLitEq -> lowerEqMatch) missed `=`.
+Each one built a binary that failed to LINK on an undefined `q_Rt_*`.
 -}
 calledPrims : Exp -> Set.Set String
 calledPrims exp =
@@ -535,12 +547,16 @@ calledPrims exp =
         Let block ->
             List.foldl
                 (\e acc -> Set.union acc (calledPrims e))
-                (calledPrims block.body)
+                (List.foldl
+                    (\b acc -> Set.union acc (letBinderPrims b))
+                    (calledPrims block.body)
+                    block.binders
+                )
                 (letValues block.binders)
 
         Case branch ->
             List.foldl
-                (\a acc -> Set.union acc (calledPrims a.body))
+                (\a acc -> Set.union acc (altPrims a))
                 (calledPrims branch.scrutinee)
                 branch.alts
 
@@ -548,29 +564,28 @@ calledPrims exp =
             List.foldl (\e acc -> Set.union acc (calledPrims e)) Set.empty con.args
 
         Tup es ->
-            -- (a, b) lowers to the `@p` prim (lowerTup).
-            Set.insert "@p" (List.foldl (\e acc -> Set.union acc (calledPrims e)) Set.empty es)
+            -- (a, b) lowers through lowerTup -> buildTuple, which is a CONS
+            -- chain (`@p` is NOT what a surface tuple compiles to).  The
+            -- census walks the SAME expression the lowering does, so the two
+            -- cannot drift.
+            calledPrims (buildTuple es)
 
         RecordLit setters ->
-            -- {f = e} = cons (@p (sym f) e) ... (buildRecord).
-            Set.insert "cons" <|
-                Set.insert "@p" <|
-                    List.foldl (\p acc -> Set.union acc (calledPrims (Tuple.second p))) Set.empty setters
+            -- {f = e} = cons (@p (sym f) e) ... (buildRecord), whose terminator
+            -- is `emptylist 0` — walking the builder picks that up too.
+            calledPrims (buildRecord setters)
 
-        RecordGet rec _ ->
-            calledPrims rec
+        RecordGet rec field ->
+            -- rec.f = snd (assoc (sym f) rec) — buildRecordGet IS the lowering.
+            calledPrims (buildRecordGet rec field)
 
         RecordUpdate update ->
             -- {r | f = e} prepends cons @p pairs (buildRecordUpdate).
-            Set.insert "cons" <|
-                Set.insert "@p" <|
-                    List.foldl (\p acc -> Set.union acc (calledPrims (Tuple.second p))) (calledPrims update.base) update.updates
+            calledPrims (buildRecordUpdate update)
 
         ListLit es ->
             -- [a, b] = cons a (cons b (emptylist)) (buildList).
-            Set.insert "cons" <|
-                Set.insert "emptylist" <|
-                    List.foldl (\e acc -> Set.union acc (calledPrims e)) Set.empty es
+            calledPrims (buildList es)
 
         If block ->
             List.foldl (\e acc -> Set.union acc (calledPrims e))
@@ -588,6 +603,76 @@ calledPrims exp =
 
         Unsafe _ ->
             Set.empty
+
+
+{-| The prims one case alt stages ON TOP of its body: its pattern TESTS
+(lowerMatchTests -> lowerMatch: MTagEq/MLitEq run the REAL `=` via
+lowerEqMatch) and its pattern BINDS (lowerBinds -> lowerPath: a VField bind
+runs assoc then snd).  The census walked only `alt.body` until the step-5
+review; both seats were missing.
+-}
+altPrims : Alt -> Set.Set String
+altPrims alt =
+    Set.union (calledPrims alt.body)
+        (Set.union (matchPrims alt.matches) (pathPrims (List.map Tuple.second alt.binds)))
+
+
+{-| Same two seats for a `let` destructure (lowerLetDestruct calls the same
+lowerMatchTests / lowerBinds).
+-}
+letBinderPrims : LetBinder -> Set.Set String
+letBinderPrims b =
+    case b of
+        LetBind _ ->
+            Set.empty
+
+        LetDestruct d ->
+            Set.union (matchPrims d.matches) (pathPrims (List.map Tuple.second d.binds))
+
+
+{-| lowerMatch's own prim calls: the tag tests (MCons/MEmpty/MVector) are
+inline loads, but MTagEq and MLitEq run the `=` prim (Lower.elm's lowerEqMatch).
+-}
+matchPrims : List Match -> Set.Set String
+matchPrims matches =
+    List.foldl
+        (\m acc ->
+            case m of
+                MTagEq _ _ ->
+                    Set.insert "=" acc
+
+                MLitEq _ _ ->
+                    Set.insert "=" acc
+
+                MCons _ ->
+                    acc
+
+                MEmpty _ ->
+                    acc
+
+                MVector _ ->
+                    acc
+        )
+        Set.empty
+        matches
+
+
+{-| lowerPath's prim calls: VPath is a pure pointer chase, VField is
+`snd (assoc (sym field) rec)`.
+-}
+pathPrims : List ValuePath -> Set.Set String
+pathPrims paths =
+    List.foldl
+        (\p acc ->
+            case p of
+                VPath _ ->
+                    acc
+
+                VField _ _ ->
+                    Set.insert "snd" (Set.insert "assoc" acc)
+        )
+        Set.empty
+        paths
 
 
 letValues : List LetBinder -> List Exp
@@ -696,6 +781,7 @@ lowerFunBody entry key qname lambda captures sOuter =
             , cloN = sOuter.cloN + 1
             , arities = sOuter.arities
             , defuns = sOuter.defuns
+            , seeded = sOuter.seeded
             , defunKey =
                 -- The SELF-tail check (lowerApp) must fire only when the
                 -- function being compiled IS that defun.  A closure body
@@ -1459,10 +1545,12 @@ rawWordArg exp s =
                                 ( Il.Tmp rT, emit (Unary (Just rT) L Extuw vT) s2 )
 
                             RFToI32 ->
-                                -- f64 word -> i32: stosi at `w` (truncate
-                                -- toward zero), THEN extsw into the l class
-                                -- (the ToInt32 result re-enters word math
-                                -- sign-extended).
+                                -- f64 word -> i32: Dtosi at `w` (DOUBLE to
+                                -- int — `stosi` is the SINGLE variant, the
+                                -- stale spelling this comment carried), then
+                                -- truncate toward zero, THEN extsw into the l
+                                -- class (the ToInt32 result re-enters word
+                                -- math sign-extended).
                                 let
                                     ( t, s2 ) =
                                         freshTmp s1
@@ -4202,7 +4290,7 @@ rtPrimSlots prim slots dest s =
     -- (the fuzz differential + the midcons gate rows carry the behavioural
     -- proof).
     case ( s.midCons, midPrimRoute prim slots s ) of
-        ( True, Just key ) ->
+        ( True, Ok (Just key) ) ->
             let
                 ( rp, s1 ) =
                     freshTmp s
@@ -4216,6 +4304,9 @@ rtPrimSlots prim slots dest s =
                     |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
                 )
 
+        ( True, Err msg ) ->
+            Err msg
+
         _ ->
             rtPrimSlotsZig prim slots dest s
 
@@ -4228,18 +4319,41 @@ rtPrimSlots prim slots dest s =
 -- in this compile (injected — QBE_NOMIDRT=1 removes it and the route quietly
 -- falls back to the Zig entry rather than emitting a call to an absent
 -- function).
-midPrimRoute : String -> List Int -> S -> Maybe String
+--
+-- THE SEED GUARD (step-5 review): when the defun IS injected but is NOT in
+-- the set this compile will EMIT (s.seeded, from used-prim seeding), the call
+-- this seat is about to make could never resolve — that is exactly a census
+-- miss (calledPrims did not report a prim the lowering stages), and it must
+-- FAIL THE COMPILE naming the prim rather than reach the linker as an
+-- undefined `q_Rt_*`.  A census miss is otherwise invisible on every default
+-- (Zig-route) oracle and only shows up as a link error on the Mid route; six
+-- such seats were found by reading after step 5 landed.
+midPrimRoute : String -> List Int -> S -> Result String (Maybe String)
 midPrimRoute prim slots s =
     case MidRt.primImpl prim of
         Just impl ->
-            if List.length slots == impl.arity && Dict.member impl.key s.defuns then
-                Just impl.key
+            if List.length slots /= impl.arity then
+                Ok Nothing
+
+            else if not (Dict.member impl.key s.defuns) then
+                Ok Nothing
+
+            else if Set.member impl.key s.seeded then
+                Ok (Just impl.key)
 
             else
-                Nothing
+                Err
+                    ("qbe: the prim \""
+                        ++ prim
+                        ++ "\" has a Mid implementation ("
+                        ++ impl.key
+                        ++ ") and that defun is injected, but the used-prim census (calledPrims) does not report the prim as called — so "
+                        ++ impl.key
+                        ++ " would never be emitted and this call would not link. Add the missing census arm in Mid.Qbe.Lower (see calledPrims' doc comment)."
+                    )
 
         Nothing ->
-            Nothing
+            Ok Nothing
 
 
 rtPrimSlotsZig : String -> List Int -> Int -> S -> Result String S

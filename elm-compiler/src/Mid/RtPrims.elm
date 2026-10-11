@@ -1197,11 +1197,6 @@ eqDefun =
         )
 
 
-mkBoolArm : Exp -> Exp
-mkBoolArm e =
-    e
-
-
 {-| `Rt.+ a b` — primAdd: EITHER float promotes and computes in f64;
 otherwise the BARE i64 wrap (no numeric guard — shen semantics, AGENTS.md;
 the metacircular interpreter relies on it).  `-`/`*` identical modulo the

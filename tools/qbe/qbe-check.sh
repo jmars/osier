@@ -1060,6 +1060,53 @@ QBE_MIDCONS=1 run midcons-list ConsList.a tools/qbe/fixtures/conslist.elm
 run primstruct PrimStruct.a tools/qbe/fixtures/primstruct.elm
 QBE_MIDCONS=1 run midprim-struct PrimStruct.a tools/qbe/fixtures/primstruct.elm
 
+# THE USED-PRIM CENSUS' SIX SEATS (handoff osier-midrt-fix, the step-5
+# pre-flip review).  `calledPrims` decides which Rt.* defuns a compile SEEDS
+# and emits; the review found it wrong in six seats (a non-inlinable record
+# get, record-field patterns on BOTH the let-destructure and the case-alt
+# path, literal patterns (which run the REAL `=`), a 2+-element tuple, and
+# record/list literals), and each wrong seat produced a binary that failed to
+# LINK on an undefined `q_Rt_*` the moment QBE_MIDCONS=1 routed the prim.
+# This fixture puts all six in one committed program and PRINTS the result as
+# a structure, so a wrong tag or a mis-sized payload in any of them changes
+# the printed bytes.  Golden frozen from the DEFAULT (Zig rt_prim) build;
+# `midcons-censusseats` runs the Mid-routed build against the SAME bytes
+# (golden COPIED from censusseats.txt, the primdirect-off provenance
+# discipline — nothing re-measured, no existing golden overwritten).
+# MEASURED while adding these rows: with the RecordGet census arm alone
+# reverted, this row's Mid twin FAILS (the compiler now refuses it with the
+# seed guard's named error) and the whole language gate drops to
+# PASS=124 FAIL=30 — the row is load-bearing, not decorative.
+run censusseats CensusSeats.a tools/qbe/fixtures/censusseats.elm
+QBE_MIDCONS=1 run midcons-censusseats CensusSeats.a tools/qbe/fixtures/censusseats.elm
+
+# PINNED POST-FLIP DIVERGENCE: deepEqual's depth-1000 CYCLE GUARD (capture
+# item 4).  values.zig:346 answers FALSE past 1000 levels so a cyclic
+# structure terminates; the Mid deepEq has NO counter, so with the route ON a
+# self-referential vector recurses until the native stack is exhausted.  The
+# DEFAULT row is a normal golden (`false` — the reference behaviour).  The
+# second block is NOT a golden comparison: it asserts the Mid route DIES
+# LOUDLY, so this known divergence cannot change in EITHER direction
+# unnoticed — if a later step ports the depth counter, this row fails and must
+# be re-pointed deliberately.
+run cycleeq CycleEq.main tools/qbe/fixtures/cycleeq.elm
+# QBE_MIDCONS=1 at COMPILE time is what routes the prims; the runtime does not
+# read it (the default build above is the same source, unrouted).
+cyc_bin="$(QBE_MIDCONS=1 RUN_STACK_KB=131072 "$ROOT/tools/qbe/qbe-mk.sh" "$ROOT/tools/qbe/fixtures/cycleeq.elm" CycleEq.main "$TMP/cycleeq-mid" 2>/dev/null)"
+if [ -n "$cyc_bin" ] && [ -x "$cyc_bin" ]; then
+  cyc_out="$(QBE_MIDCONS=1 RUN_STACK_KB=131072 timeout 60 "$cyc_bin" CycleEq.main 2>&1)"
+  cyc_rc=$?
+  if [ "$cyc_rc" -ne 0 ] && printf '%s' "$cyc_out" | grep -q "native stack depth exceeded"; then
+    echo "PASS cycleeq-mid-dies-loudly: the Mid \`=\` has no cycle guard (exit $cyc_rc, loud stack message) — the KNOWN divergence, pinned"
+  else
+    echo "FAIL cycleeq-mid-dies-loudly: expected a LOUD native-stack death under the Mid route, got rc=$cyc_rc out='${cyc_out:0:120}' — if the cycle guard was ported, re-point this row"
+    FAIL=1
+  fi
+else
+  echo "FAIL cycleeq-mid-dies-loudly: the Mid-route build failed (qbe-mk) — the row no longer measures what it names"
+  FAIL=1
+fi
+
 # STRUCTURAL A/B rows (the counters must MOVE — a row that cannot fail is
 # not a row):
 #   * midrt-injected: the DEFAULT build of the cons-using fixture carries the
