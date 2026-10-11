@@ -301,6 +301,17 @@ rw env gen exp =
         NotEqual block ->
             rw2 (\l r -> NotEqual { block | left = l, right = r }) env gen block.left block.right
 
+        -- Unsafe (osier-rawnodes): flattening is UNSOUND to apply around raw
+        -- nodes — a renamed binder inside a raw arg or a WithRoots body breaks
+        -- the rooting discipline the raw code states by hand — so the pass
+        -- REFUSES rather than rewriting blindly.  Step 4 (the Rt defuns) picks
+        -- the real policy: skip Rt.* defuns wholesale or rewrite raw-aware.
+        -- Until then this branch is unreachable (the audit rejects every
+        -- Unsafe node in a non-Rt defun before Flatten runs), and LOUD if it
+        -- ever is.
+        Unsafe _ ->
+            Err "qbe: flatten: unsafe node — raw subtrees are not flattened (step 4 seat, osier-rawnodes)"
+
 
 rw2 : (Exp -> Exp -> Exp) -> Env -> Int -> Exp -> Exp -> Result String ( Exp, Int )
 rw2 build env gen a b =
@@ -999,6 +1010,13 @@ usesOK env x shape exp =
         NotEqual block ->
             usesOK env x shape block.left && usesOK env x shape block.right
 
+        -- Unsafe (osier-rawnodes): deny-by-default — a raw use is never a
+        -- "resolvable consumer", so the binder keeps its slot.  (rw rejects
+        -- Unsafe nodes outright; this arm exists so the predicate cannot
+        -- silently ADMIT a shape the rewriter would then have to handle.)
+        Unsafe _ ->
+            False
+
 
 usesOkBinders : Env -> Int -> Shape -> List LetBinder -> Bool
 usesOkBinders env x shape binders =
@@ -1084,6 +1102,13 @@ occurs x exp =
 
         NotEqual block ->
             occurs x block.left || occurs x block.right
+
+        -- Unsafe (osier-rawnodes): deny-by-default — treat raw code as using
+        -- every binder, so no rewrite around it is admitted.  Moot in
+        -- practice: `rw` below REJECTS any Unsafe node, so a defun carrying
+        -- one never flattens past the point this answer matters.
+        Unsafe _ ->
+            True
 
 
 occursBinder : Int -> LetBinder -> Bool
@@ -1199,6 +1224,12 @@ maxId exp =
 
         NotEqual block ->
             max (maxId block.left) (maxId block.right)
+
+        -- Unsafe (osier-rawnodes): irrelevant by ordering — `rw` rejects any
+        -- Unsafe node, and maxId only seeds rw's fresh-id supply, so a defun
+        -- carrying one fails loudly before a fresh id is ever allocated.
+        Unsafe _ ->
+            0
 
 
 maxIds : List Exp -> Int

@@ -433,6 +433,16 @@ grefsOf exp =
         NotEqual block ->
             grefsOf block.left ++ grefsOf block.right
 
+        -- Unsafe (osier-rawnodes): STEP-4 SEAT, marked not silent: this feeds
+        -- entry-reachability seeding, and a raw node's args may GRef an Rt.*
+        -- helper.  Returning [] today is inert (the audit rejects every
+        -- Unsafe node in a non-Rt defun, and no Rt defuns exist yet); when
+        -- step 4 injects them it must either seed Rt keys directly (the
+        -- used-prim census) or walk raw args here — silently leaving this []
+        -- would prune Rt->Rt references.
+        Unsafe _ ->
+            []
+
 
 letValues : List LetBinder -> List Exp
 letValues binders =
@@ -720,6 +730,14 @@ lowerVal exp dest s =
 
         NotEqual block ->
             lowerNotEqual block dest s
+
+        -- Unsafe (osier-rawnodes): no lowering exists yet (step 4 writes the
+        -- Rt-program lowering).  Per this module's output contract an
+        -- unsupported construct inside a REACHED defun is a LOUD compile
+        -- error, never a silent miscompile; today the audit makes this
+        -- unreachable for every non-Rt defun, and no Rt defuns exist.
+        Unsafe _ ->
+            Err "qbe: unsafe node reached the value lowering — only Rt.* runtime defuns may carry one, and their lowering is step 4 (osier-rawnodes)"
 
 
 
@@ -3255,6 +3273,15 @@ fvExp exp =
 
         ListLit es ->
             setsUnion (List.map fvExp es)
+
+        -- Unsafe (osier-rawnodes): free-variable computation over a raw body
+        -- is NOT sound to approximate — a raw node's args reference binders,
+        -- and closure capture built on an under-approximation is a silent
+        -- miscompile.  Loud Err instead; step 4 either proves Rt defun bodies
+        -- never need closure capture (top-level Lams take the Defun path, not
+        -- this one) or implements the raw-aware walk.
+        Unsafe _ ->
+            Err "qbe: freeVars over an unsafe node — closure capture of raw bodies is a step 4 seat (osier-rawnodes)"
 
 
 setsUnion : List (Result String (Set Int)) -> Result String (Set Int)

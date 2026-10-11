@@ -403,6 +403,31 @@ else
   FAIL=1
 fi
 
+# ---- raw/unsafe node set (osier-rawnodes): the front end NEVER emits one ----
+# Two TEXTUAL rows in the rg -c precedent shape (the `rg -c 'Err "qbe:' ==
+# 0 full-construct-coverage pin).  The MECHANICAL seat is Mid.Audit, wired
+# into Mid.QbeModule.lowerAll so every compile fails loudly on an Unsafe
+# node outside Rt.*; its must-fail fixture is TestMain's audit rows (a
+# violating tree is not producible from surface code, by construction).
+# Row 1: the front end must not even NAME the raw surface — any `Unsafe`/`Raw`
+# token in FromAst.elm is a front end that can emit one.
+n="$(rg -c 'Unsafe|Raw' "$ROOT/elm-compiler/src/Mid/FromAst.elm" || true)"
+if [ -z "$n" ]; then
+  echo "PASS rawnodes-front-end: FromAst.elm names no Unsafe/Raw constructor (the front end cannot emit one)"
+else
+  echo "FAIL rawnodes-front-end: FromAst.elm mentions Unsafe/Raw $n time(s) — the front end must never touch the raw surface"
+  FAIL=1
+fi
+# Row 2: the wiring pin — the audit must be CALLED on every compile, not
+# merely exist (a seat never called is indistinguishable from an absent one).
+n="$(rg -c 'Audit\.run' "$ROOT/elm-compiler/src/Mid/QbeModule.elm" || true)"
+if [ "$n" = "1" ]; then
+  echo "PASS rawnodes-audit-wired: Mid.QbeModule runs Mid.Audit on every compile"
+else
+  echo "FAIL rawnodes-audit-wired: QbeModule.elm calls Audit.run $n time(s), expected exactly 1 — the audit is not on the compile path"
+  FAIL=1
+fi
+
 # ---- stage 6: FLATTEN (defun-local, escape-safe aggregate flattening) ----
 # flatten.elm: every aggregate is built AND consumed in ONE defun, so the pass
 # must delete the record representation entirely (assoc/snd/@p, plus the cons/

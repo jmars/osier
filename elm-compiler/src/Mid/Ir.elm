@@ -2,6 +2,7 @@ module Mid.Ir exposing
     ( Program
     , Defun
     , Exp(..)
+    , UnsafeNode(..)
     , Lambda
     , Binder
     , Lit(..)
@@ -195,6 +196,7 @@ type Exp
     | ShortAnd { left : Exp, right : Exp, falseLabel : String, endLabel : String }
     | ShortOr { left : Exp, right : Exp, falseLabel : String, endLabel : String }
     | NotEqual { left : Exp, right : Exp, falseLabel : String, endLabel : String }
+    | Unsafe UnsafeNode
 
 
 -- A closure body: n-ary parameters plus the body.  Parameter 1 is the OUTERMOST
@@ -270,3 +272,81 @@ type Step
 type ValuePath
     = VPath (List Step)
     | VField (List Step) String
+
+
+-- ============================ UNSAFE (RAW) NODES ============================
+-- The RUNTIME-FROM-MID seat (handoff osier-midruntime-plan TRACK 2 step 3 /
+-- handoff osier-rawnodes).  The project decision: the runtime (primitives
+-- first, the GC later) is written AT THIS LEVEL, as compiler-internal defuns
+-- under the reserved `Rt.*` key namespace, using nodes THE FRONT END NEVER
+-- EMITS.  That is what makes the runtime one implementation for every backend
+-- (QBE today, Lua later) with no ABI skew, while the SURFACE language keeps
+-- its clean rows-under-refinement type story — it gains no unsafe tier.
+--
+-- THE INVARIANT: `Mid.FromAst` (and everything upstream of it) never emits an
+-- `Unsafe` node.  It is enforced MECHANICALLY, in three seats, and it is NOT
+-- enforced at the Elm type level — that was evaluated and MEASURED out
+-- (handoff osier-rawnodes, /tmp/elm-probe, elm 0.19.2):
+--
+--   * a module CANNOT re-expose another module's constructors (BAD EXPORT:
+--     "(..) cannot be used with a type alias"), so `UnsafeNode`'s home must be
+--     the one module that can see both itself and `Exp`;
+--   * a SECOND home is an IMPORT CYCLE (`UnsafeNode` embeds `List Exp` in
+--     RawCall's args, so `Mid.Ir.Raw` would import `Mid.Ir` while `Mid.Ir`
+--     imports `Mid.Ir.Raw` — elm rejects the cycle outright), so the opaque-
+--     payload sketch from the plan review does not compile;
+--   * the buildable residue (constructors private here + exposed builder
+--     functions) confines DESTRUCTION only: any builder is callable by ANY
+--     importer of `Mid.Ir` — and `Mid.FromAst` imports `Mid.Ir` today, so
+--     construction has no Elm-0.19 wall.  No friend modules, no per-importer
+--     visibility, and a capability value must leave its home through some
+--     exposed definition that FromAst can read just as well.
+-- The intended END STATE remains a GADT (`type Exp mode = ... | Raw : ... ->
+-- Exp Unsafe`), which real `elm make` rejects today (MEASURED: syntax problem
+-- at the `:`) and which would strand `compiler.js` while sources are
+-- dual-compiled.  Until that lane opens, the seats are:
+--   1. `Mid.Audit` — wired into `Mid.QbeModule.lowerAll` so EVERY compile
+--      fails loudly on an `Unsafe` node outside the `Rt.*` namespace;
+--   2. the qbe-check TEXTUAL row `rg -c 'Unsafe|Raw' FromAst.elm == 0`;
+--   3. name-level unreachability: surface code cannot NAME an `Rt.*` defun
+--      (it is not a corpus unit), so the only route to a violating tree is a
+--      FromAst bug — which the audit catches at the very next compile.
+--
+-- THE NODE SET IS A HYPOTHESIS, sized for `cons` and no more (the plan is
+-- explicit: the FINAL set is sized by the cons spike, step 4).  Semantics are
+-- the runtime's own contracts, unchanged:
+--   * `RawCall` — call a runtime SYMBOL directly (QBE: a C symbol; Lua: a
+--     host function) with full-arity args in source order.  This is the ONE
+--     seam both ways (host->program is `host_apply`, program->host is this).
+--   * `RawTagOf` / `RawPayload` / `RawMkValue` — read/build a Value's
+--     tag/payload (gc/types.zig: `Value` = `ValTag` + 32-byte union).
+--     CAVEAT THE SPIKE MUST SETTLE: `RawMkValue` writes ONE payload word,
+--     which covers number/boolean-style payloads but NOT cons (its payload
+--     is TWO pointers into a 2-element GC array — values.zig valCons); how a
+--     cons Value is assembled at this level is the first thing step 4 sizes.
+--   * `RawAllocVector` / `RawVecLoad` / `RawVecStore` — the GC array level
+--     (allocArray of Values; the barrier contract is heap.zig
+--     `writeBarrierVectorStore`: store, then record the array in the
+--     remembered set iff the array is old-gen AND the stored Value references
+--     the nursery — the LOWERING of RawVecStore carries that barrier; a node
+--     without it is a silent-corruption bug, not a style choice).
+--   * `RawStrByte` — byte i of a string Value (str.data[i]).
+--   * `WithRoots` — STRUCTURAL ROOTING: the listed binders are live GC roots
+--     across `body` (roots.zig ROOT_VALUE shape), so an allocation inside
+--     `body` cannot stale them (the dd19b36 unrooted-staging class, made
+--     unrepresentable at this level).
+-- Nothing in the compiler constructs these nodes yet (step 4's Rt builder is
+-- the first and, for now, only future producer), which is why this step's
+-- oracle is that NOTHING moves: the corpus `.ssa` stays byte-identical.
+
+
+type UnsafeNode
+    = RawCall { sym : String, args : List Exp }
+    | RawTagOf Exp
+    | RawPayload Exp
+    | RawMkValue { tag : Int, payload : Exp }
+    | RawAllocVector Exp
+    | RawVecLoad { vec : Exp, index : Exp }
+    | RawVecStore { vec : Exp, index : Exp, value : Exp }
+    | RawStrByte { str : Exp, index : Exp }
+    | WithRoots { binders : List Binder, body : Exp }

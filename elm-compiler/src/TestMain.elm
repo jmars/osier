@@ -19,6 +19,8 @@ import Elm.Syntax.Range as Range
 import Platform
 import Set
 import Char.Extra exposing (utf8ByteLength)
+import Mid.Audit as Audit
+import Mid.Ir exposing (AltKind(..), Defun, Exp(..), LetBinder(..), Lit(..), UnsafeNode(..))
 import Mid.Module as MidModule
 import Type.Builtins as Builtins
 import Type.Env as Env
@@ -827,6 +829,113 @@ checks =
         (inferPasses "module Main exposing (..)\n\nf : { a | x : Int } -> Int\nf r =\n    r.x\n")
     , check "skolem: record update preserves the open row passes"
         (inferPasses "module Main exposing (..)\n\nf : { a | x : Int } -> { a | x : Int }\nf r =\n    { r | x = 1 }\n")
+
+    -- Mid.Audit (osier-rawnodes): THE INVARIANT'S MUST-FAIL SEAT.  A violating
+    -- tree is NOT producible from surface code by construction (surface code
+    -- cannot name an Rt.* defun; and `rg -c 'Unsafe|Raw' FromAst.elm == 0` is
+    -- a qbe-check row), so the fixture builds the exact tree a FROMAST BUG
+    -- would leave behind — an Unsafe node under a non-Rt key — and the audit
+    -- must reject it.  If this row ever stops failing-on-violation, the
+    -- invariant's load-bearing seat is gone.
+    , check "audit REJECTS an Unsafe node under a non-Rt key (must-fail)"
+        (Audit.run auditViolating
+            == Err "qbe: unsafe node (withRoots) reached key Main.main — unsafe nodes are legal only inside Rt.* runtime defuns (front end must never emit one; Mid.Audit)"
+        )
+    , check "audit rejects a NESTED Unsafe node (walker descends)"
+        (Result.toMaybe (Audit.run auditNested) == Nothing)
+    , check "audit names the offending node kind (raw call)"
+        (case Audit.run auditRawCall of
+            Err msg ->
+                String.contains "raw call rt_cons" msg
+
+            Ok _ ->
+                False
+        )
+    , check "audit ALLOWS the same node under an Rt.* key (the legal seat)"
+        (Audit.run [ { key = "Rt.cons", value = auditBody } ]
+            == Ok [ { key = "Rt.cons", value = auditBody } ]
+        )
+    , check "audit passes a clean program through UNCHANGED (inertness)"
+        (Audit.run auditClean == Ok auditClean)
+    ]
+
+
+-- The tree a FromAst bug would leave: a defun whose body carries a raw
+-- rooting form and a raw call — exactly the `cons` shape step 4 will build
+-- LEGALLY under Rt.*.
+auditBody : Exp
+auditBody =
+    Lam
+        { params = [ { id = 0, name = "hd" }, { id = 1, name = "tl" } ]
+        , body =
+            Unsafe
+                (WithRoots
+                    { binders = [ { id = 0, name = "hd" }, { id = 1, name = "tl" } ]
+                    , body = Unsafe (RawCall { sym = "rt_cons", args = [ Var 0, Var 1 ] })
+                    }
+                )
+        }
+
+
+auditViolating : List Defun
+auditViolating =
+    [ { key = "Main.main", value = auditBody } ]
+
+
+auditRawCall : List Defun
+auditRawCall =
+    [ { key = "Prelude.map"
+      , value = Lam { params = [], body = Unsafe (RawCall { sym = "rt_cons", args = [] }) }
+      }
+    ]
+
+
+auditNested : List Defun
+auditNested =
+    [ { key = "Main.main"
+      , value =
+            Lam
+                { params = []
+                , body =
+                    Let
+                        { binders =
+                            [ LetBind { binder = { id = 7, name = "x" }, value = Lit (LNumber 3) } ]
+                        , body =
+                            Case
+                                { scrutinee = Var 7
+                                , scrutId = { id = 8, name = "$case" }
+                                , alts =
+                                    [ { kind = AltOther
+                                      , matches = []
+                                      , binds = []
+                                      , body = Unsafe (RawTagOf (Var 8))
+                                      , nextLabel = "$alt1"
+                                      }
+                                    ]
+                                , endLabel = "$end"
+                                }
+                        }
+                }
+      }
+    ]
+
+
+auditClean : List Defun
+auditClean =
+    [ { key = "Prelude.id"
+      , value = Lam { params = [ { id = 0, name = "x" } ], body = Var 0 }
+      }
+    , { key = "Main.main"
+      , value =
+            Lam
+                { params = []
+                , body =
+                    App
+                        { fn = GRef { key = "Prelude.id", force = False }
+                        , args = [ Lit (LNumber 42) ]
+                        }
+                }
+      }
     ]
 
 

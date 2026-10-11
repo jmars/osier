@@ -74,6 +74,7 @@ module Mid.QbeModule exposing (compileEntry)
 import Dict exposing (Dict)
 import Elm.Syntax.File as File
 import Frontend.Lift as Lift
+import Mid.Audit as Audit
 import Mid.Ir exposing (Defun)
 import Mid.Module as MidModule
 import Mid.Qbe.Flatten as QbeFlatten
@@ -221,6 +222,12 @@ lowerAll :
     -> Result String String
 lowerAll rep primDirect flatten globals groupTypes corpusUnits groupUnits entryKey =
     compileAll globals (corpusUnits ++ groupUnits)
+        -- The unsafe-node audit (osier-rawnodes): EVERY compile fails loudly
+        -- if an `Unsafe` node appears outside the Rt.* namespace — i.e. if the
+        -- front end ever emits one.  Passes nothing through unchanged-but-
+        -- unaudited; on Ok the program is the SAME value, so byte identity of
+        -- the emitted .ssa is this seat's inertness proof.
+        |> Result.andThen (\program0 -> Audit.run program0)
         |> Result.andThen
             (\program ->
                 -- S1's TYPE TABLE (monomorphisation S1/M0a). BUILT AND READ BY
