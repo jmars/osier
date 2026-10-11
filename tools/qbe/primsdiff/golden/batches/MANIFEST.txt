@@ -1,0 +1,3 @@
+frozen 2026-10-11T08:45:48Z from git 8f581b8b71ab4ae43ffb78600c5ccd7b8ad0943e (prims.zig still carries the flipped handlers)
+n=200 seed=20261011
+ops=add-int add-float sub-int mul-int div-int fdiv-float lt-int le-int gt-int ge-float eq-int eq-mixed eq-string eq-string-same eq-bool eq-list eq-vec and-int or-int xor-int not-int shl-int shr-int shrzf-int isnum isstr iscons isnil cn-str cn-num strlen repeat-str substring-str charcode-str strbytes bytestr vec atp assoc-int assoc-str assoc-pat cons-int nil churn-str churn-cons churn-vec

@@ -68,20 +68,30 @@ const QBE_REP = process.env.QBE_NOREP !== '1';
 // other, while the programs still print what they printed.  Default ON.
 const QBE_PRIMDIRECT = process.env.QBE_NOPRIMDIRECT !== '1';
 // QBE_NOMIDRT=1 DISABLES the Mid-written runtime injection (osier-consspike):
-// the Rt.* defuns (Rt.cons today) are withheld from the compile entirely, so
-// no used-prim seed fires and the emitted .ssa is byte-identical to the
-// pre-Rt baseline.  It exists so the injection can be A/B'd on the SAME
-// source — the corpus attribution proof, and the structural gate's off arm.
-// Default ON (inject).
+// the Rt.* defuns are withheld from the compile entirely, so no used-prim
+// seed fires and the emitted .ssa is byte-identical to the pre-Rt baseline.
+// It exists so the injection can be A/B'd on the SAME source — the corpus
+// attribution proof, and the structural gate's off arm.  Default ON (inject).
+// POST-FLIP (osier-flip) this arm is EMIT-ONLY: the Mid route is now the
+// default, so a withheld Rt program makes midPrimRoute fall back to the Zig
+// route for every prim whose Zig handler the flip DELETED — the emitted .ssa
+// references rt_prim_* symbols rt.o no longer defines and cannot LINK.  That
+// is deliberate and loud (a missing symbol at ld), never a silent wrong
+// answer; the hatch survives for emit-level attribution.
 const QBE_MIDRT = process.env.QBE_NOMIDRT !== '1';
-// QBE_MIDCONS=1 ROUTES the staged cons prim sites to the Mid implementation
-// (a saturated call to the injected Rt.cons defun) instead of the Zig
-// rt_prim_cons entry.  This is the differential's vehicle (the flip, step 6,
-// makes it the default and re-shapes the ABI); with it unset the route stays
-// Zig and the goldens/corpus move only by the injected defun.  Requires the
+// THE FLIP (osier-flip, step 6): the Mid route IS the default — every prim
+// with a Mid implementation (Mid.Rt.impls, the 36 differentially-proven
+// defuns) is CALLED as its Rt.* defun, not through rt.o's Zig entry; this is
+// the route the whole-gate rehearsal proved byte-identical (154/0 under the
+// old QBE_MIDCONS=1 hatch).  The old Zig route stays selectable for a bisect
+// with QBE_MIDZIG=1 — an EMIT-level hatch on this tree, because the flip
+// deleted the flipped prims' Zig handlers: a QBE_MIDZIG=1 build's .ssa
+// references rt_prim_* symbols that no longer exist and fails at LINK time,
+// loudly.  The pre-flip opt-in name QBE_MIDCONS is RETIRED (scripts that set
+// it now get the default, which is what they asked for).  Requires the
 // injection (QBE_NOMIDRT=1 removes the defun and the route falls back to
 // Zig rather than calling an absent function).
-const QBE_MIDCONS = process.env.QBE_MIDCONS === '1';
+const QBE_MIDCONS = process.env.QBE_MIDZIG !== '1';
 // QBE_ENTRY: the defun key the QBE backend roots reachability from
 // ("<Mod>.<fn>").  REQUIRED in the single-fixture CLI; the batch mode reads
 // one entry PER GROUP from the manifest instead.

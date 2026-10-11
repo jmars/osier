@@ -104,7 +104,9 @@
 #     (constructible from the surface through the vectorSet alias) makes Rt.=
 #     recurse until the native stack dies — "qbe-rt: native stack depth
 #     exceeded ... 64.0 MiB limit", exit 1 — where the reference prints false.
-#     PINNED by qbe-check's cycleeq / cycleeq-mid-dies-loudly rows.  It is a
+#     PINNED by qbe-check's cycleeq-dies-loudly row (post-flip: the DEFAULT
+#     route dies; the pre-flip `false` golden is frozen evidence of the
+#     deleted Zig behaviour).  It is a
 #     LOUD divergence (never a silently wrong answer); the fix is a depth
 #     parameter threaded through Mid deepEq/vecEq/assocGo, which re-shapes
 #     Rt.='s helper ABI and belongs to the flip.
@@ -145,9 +147,26 @@
 #
 # Usage: tools/qbe/primsdiff/primsdiff.sh [--n=200] [--seed=20261011] [--ops=LIST]
 #        tools/qbe/primsdiff/primsdiff.sh --golden[=freeze]
+#        tools/qbe/primsdiff/primsdiff.sh --freeze-batch-ref   (PRE-FLIP ONLY)
 # Exit: 0 = every comparison identical (and every instrumentation contract
 #       satisfied); 1 = a divergence or a batch that does not exercise its
 #       prims; 2 = tooling.
+#
+# ---- THE FLIP (osier-flip, step 6) --------------------------------------
+# The flip DELETES the Zig handlers these batches drove, so the reference arm
+# becomes the evidence captured BEFORE the deletion:
+#   --freeze-batch-ref  runs the full pipeline WITH the live Zig arm and
+#                       copies every batch's reference stdout (both modes)
+#                       plus the reference GC STATS lines into
+#                       golden/batches/ — the frozen reference.  It exists
+#                       ONLY while prims.zig still has the handlers.
+# After the flip the DEFAULT mode compares the Mid arm's output against those
+# frozen bytes (see the POST-FLIP REFERENCE section in the loop below): the
+# differential still falsifies any FUTURE change to the Mid implementations
+# (they must keep printing what the pre-flip Zig reference printed), and it
+# can NO LONGER falsify a live Zig-vs-Mid divergence — there is no live Zig
+# arm, and the reference side of the churn assertion is frozen evidence, not
+# a measurement.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -159,47 +178,30 @@ FAIL=0
 trap '[ "${FAIL:-1}" -eq 0 ] && rm -rf "$WORK"' EXIT
 
 # ---- REFERENCE GOLDENS (pre-flip): verify or re-capture ------------------
+# RETIRED AT THE FLIP: this mode re-ran the live Zig reference arm against the
+# committed specs, and the flip DELETED the handlers those specs drive ("=",
+# the symbol arms).  golden/*.spec + *.out remain the frozen evidence of the
+# behaviours no surface spelling can reach; nothing on this tree can
+# re-derive them.  The batch reference (the 46 differential batches) is the
+# frozen golden/batches/ the default mode compares against.
 if [ "${1:-}" = "--golden" ] || [ "${1:-}" = "--golden=freeze" ]; then
-  GDIR="$ROOT/tools/qbe/primsdiff/golden"
-  GFREEZE=0
-  [ "$1" = "--golden=freeze" ] && GFREEZE=1
-  zig build-obj -O ReleaseFast -lc -femit-bin="$WORK/goldref.o" \
-    --dep gc --dep rt -Mroot="$ROOT/tools/qbe/primsdiff/primsdiff-zig.zig" \
-    -Mgc="$ROOT/vendor/osier-rt/src/gc.zig" \
-    --dep gc -Mrt="$ROOT/vendor/osier-rt/src/rt.zig" || {
-    echo "primsdiff: golden mode needs the Zig reference arm (it exists pre-flip only)" >&2; exit 2; }
-  cc "$WORK/goldref.o" -lc -o "$WORK/goldref" || exit 2
-  GRC=0
-  for spec in "$GDIR"/*.spec; do
-    [ -e "$spec" ] || continue
-    name="$(basename "$spec" .spec)"
-    "$WORK/goldref" "$spec" > "$WORK/$name.out" 2>"$WORK/$name.err" || {
-      echo "FAIL golden $name: the reference arm exited nonzero: $(head -c 200 "$WORK/$name.err")"
-      GRC=1; continue
-    }
-    if [ "$GFREEZE" = 1 ]; then
-      cp "$WORK/$name.out" "$GDIR/$name.out"
-      echo "FROZE golden $name ($(wc -c < "$GDIR/$name.out") bytes)"
-    elif cmp -s "$WORK/$name.out" "$GDIR/$name.out"; then
-      echo "PASS golden $name: the reference arm reproduces the committed bytes"
-    else
-      echo "FAIL golden $name: reference output DIFFERS from the committed golden"
-      GRC=1
-    fi
-  done
-  [ "$GRC" -eq 0 ] && echo "primsdiff: goldens OK" || echo "primsdiff: GOLDEN MISMATCH"
-  exit "$GRC"
+  echo "primsdiff: --golden is RETIRED at the flip — the Zig reference arm no longer exists;" >&2
+  echo "primsdiff: golden/{*.spec,*.out} are frozen pre-flip evidence (git 8f581b8), verified by nothing on this tree;" >&2
+  echo "primsdiff: the batch reference the default mode uses is golden/batches/ (also frozen pre-flip)." >&2
+  exit 2
 fi
 
 
 N=200
 SEED=20261011
 OPS="add-int add-float sub-int mul-int div-int fdiv-float lt-int le-int gt-int ge-float eq-int eq-mixed eq-string eq-string-same eq-bool eq-list eq-vec and-int or-int xor-int not-int shl-int shr-int shrzf-int isnum isstr iscons isnil cn-str cn-num strlen repeat-str substring-str charcode-str strbytes bytestr vec atp assoc-int assoc-str assoc-pat cons-int nil churn-str churn-cons churn-vec"
+FREEZE_REF=0
 for a in "$@"; do
   case "$a" in
     --n=*)     N="${a#--n=}" ;;
     --seed=*)  SEED="${a#--seed=}" ;;
     --ops=*)   OPS="${a#--ops=}" ;;
+    --freeze-batch-ref) FREEZE_REF=1 ;;
     *) echo "primsdiff: unknown argument '$a'" >&2; exit 2 ;;
   esac
 done
@@ -210,13 +212,41 @@ command -v cc   >/dev/null 2>&1 || { echo "primsdiff: cc not found" >&2; exit 2;
 [ -x "$ROOT/vendor/qbe/qbe" ] || { echo "primsdiff: vendored qbe missing" >&2; exit 2; }
 [ -f "$ROOT/elm-compiler/compiler.js" ] || { echo "primsdiff: compiler.js missing (run build.sh)" >&2; exit 2; }
 
-echo "primsdiff: building the Zig reference arm"
-zig build-obj -O ReleaseFast -lc -femit-bin="$WORK/primref.o" \
-  --dep gc --dep rt -Mroot="$ROOT/tools/qbe/primsdiff/primsdiff-zig.zig" \
-  -Mgc="$ROOT/vendor/osier-rt/src/gc.zig" \
-  --dep gc -Mrt="$ROOT/vendor/osier-rt/src/rt.zig" || {
-  echo "primsdiff: zig build-obj FAILED" >&2; exit 2; }
-cc "$WORK/primref.o" -lc -o "$WORK/primref" || { echo "primsdiff: cc link FAILED" >&2; exit 2; }
+# ---- THE REFERENCE, POST-FLIP ----------------------------------------------
+# The flip DELETED the Zig handlers, so the reference is the FROZEN bytes the
+# Zig arm printed BEFORE the deletion (golden/batches/, captured at git
+# 8f581b8 with the handlers present; same generator, same n/seed).  The
+# default mode runs ONLY the Mid arm and compares against those files.  What
+# this still falsifies: any future change to the Mid implementations (they
+# must keep printing the pre-flip reference bytes), the exercise contracts,
+# and the Mid arm's churn behaviour.  What it can NO LONGER falsify: a LIVE
+# Zig-vs-Mid divergence — there is no live Zig arm, and the reference side of
+# the churn assertion is frozen evidence (printed, not measured).
+# --freeze-batch-ref is the PRE-FLIP capture mode: it builds the live Zig
+# arm, runs BOTH, compares live, and copies the reference out.  Post-flip its
+# reference runs die loudly ("unknown primitive") — it self-retires.
+REFDIR="$ROOT/tools/qbe/primsdiff/golden/batches"
+if [ "$FREEZE_REF" = 1 ]; then
+  echo "primsdiff: building the Zig reference arm (pre-flip freeze mode)"
+  zig build-obj -O ReleaseFast -lc -femit-bin="$WORK/primref.o" \
+    --dep gc --dep rt -Mroot="$ROOT/tools/qbe/primsdiff/primsdiff-zig.zig" \
+    -Mgc="$ROOT/vendor/osier-rt/src/gc.zig" \
+    --dep gc -Mrt="$ROOT/vendor/osier-rt/src/rt.zig" || {
+    echo "primsdiff: zig build-obj FAILED" >&2; exit 2; }
+  cc "$WORK/primref.o" -lc -o "$WORK/primref" || { echo "primsdiff: cc link FAILED" >&2; exit 2; }
+  mkdir -p "$REFDIR"
+  {
+    echo "frozen $(date -u +%Y-%m-%dT%H:%M:%SZ) from git $(git -C "$ROOT" rev-parse HEAD)"
+    echo "n=$N seed=$SEED"
+    echo "ops=$OPS"
+  } > "$REFDIR/MANIFEST.txt"
+else
+  [ -s "$REFDIR/MANIFEST.txt" ] || {
+    echo "primsdiff: no frozen reference at $REFDIR (the flip deleted the Zig arm; re-capturing needs the pre-flip tree + --freeze-batch-ref)" >&2; exit 2; }
+  echo "primsdiff: reference = the FROZEN pre-flip Zig arm ($REFDIR, $(head -1 "$REFDIR/MANIFEST.txt"))"
+  nfrozen="$(ls "$REFDIR"/*.out 2>/dev/null | wc -l)"
+  echo "primsdiff: $nfrozen frozen reference output(s); no live Zig arm is built (deleted at the flip)"
+fi
 
 # Call sites in the Mid arm's .ssa, ATTRIBUTED to the calling function:
 # "<callee> <count>" for every callee called from a defun that is NOT q_Rt_*.
@@ -286,62 +316,76 @@ for op in $OPS; do
     # divergence IN the nulls must not be invisible).  stderr is kept out of
     # the compared stream but its presence fails the exit-code check — EXCEPT
     # for the churn batches, whose GC STATS line is REQUIRED on stderr.
-    env "${ENVV[@]}" timeout 120 "$WORK/primref" "$B/vectors.spec" > "$B/zig.$mode.out" 2> "$B/zig.$mode.err"
-    zrc=$?
+    if [ "$FREEZE_REF" = 1 ]; then
+      env "${ENVV[@]}" timeout 120 "$WORK/primref" "$B/vectors.spec" > "$B/zig.$mode.out" 2> "$B/zig.$mode.err"
+      zrc=$?
+      REF="$B/zig.$mode.out"
+      REFNAME="live zig arm"
+    else
+      # POST-FLIP: the reference is the FROZEN pre-flip bytes.
+      REF="$REFDIR/$op.$mode.out"
+      REFNAME="frozen pre-flip reference"
+      if [ ! -s "$REF" ]; then
+        echo "FAIL $mode op=$op: no frozen reference at $REF"
+        FAIL=1
+        continue
+      fi
+      zrc=0
+    fi
     env "${ENVV[@]}" timeout 120 "$BIN" PrimDiff.all > "$B/mid.$mode.out" 2> "$B/mid.$mode.err"
     mrc=$?
+    if [ "$FREEZE_REF" = 1 ] && [ "$zrc" -eq 0 ]; then
+      cp "$B/zig.$mode.out" "$REFDIR/$op.$mode.out"
+      grep -h '\[GC STATS\]' "$B/zig.$mode.err" > "$REFDIR/$op.$mode.gcstats" 2>/dev/null || true
+    fi
     if [ "$zrc" -ne 0 ] || [ "$mrc" -ne 0 ]; then
-      echo "FAIL $mode op=$op: exit codes zig=$zrc mid=$mrc"
-      echo "  zig: $(head -c 200 "$B/zig.$mode.out" 2>/dev/null)"
+      echo "FAIL $mode op=$op: exit codes ref=$zrc mid=$mrc"
+      echo "  ref: $(head -c 200 "$REF" 2>/dev/null)"
       echo "  mid: $(head -c 200 "$B/mid.$mode.out" 2>/dev/null)"
       FAIL=1
       continue
     fi
-    if ! cmp -s "$B/zig.$mode.out" "$B/mid.$mode.out"; then
-      echo "FAIL $mode op=$op: outputs DIVERGE — first difference:"
-      cmp "$B/zig.$mode.out" "$B/mid.$mode.out" | head -c 200
+    if ! cmp -s "$REF" "$B/mid.$mode.out"; then
+      echo "FAIL $mode op=$op: the Mid arm DIVERGES from the $REFNAME — first difference:"
+      cmp "$REF" "$B/mid.$mode.out" | head -c 200
       echo
-      echo "  (full outputs kept: $B/{zig,mid}.$mode.out)"
+      echo "  (reference: $REF; mid output kept: $B/mid.$mode.out)"
       FAIL=1
       continue
     fi
     if [ -n "$CHURN_MARK" ] && [ "$mode" = heap16-rerun ]; then
-      # The churn claim is CHECKED on BOTH arms: the reference arm's own
-      # counters must move too, or "the churn arm churns" is one-sided.
-      # Level 2 (churn-cons) additionally requires NURSERY SCAVENGES on both
-      # arms; level 1 (churn-str / churn-vec) requires the collector to have
-      # run at all — a >504-byte allocation is OLD-GEN by construction
-      # (heap.gc_alloc's nursery eligibility: bytes <= NURSERY_BYTES/8 AND one
-      # 512-byte page), so a batch of large buffers can fill the old
-      # generation without ever scavenging the nursery.  MEASURED, and the
-      # reason churn-str's two arms differ is recorded in the header.
-      ztot=$(gc_total "$B/zig.$mode.err"); mtot=$(gc_total "$B/mid.$mode.err")
-      zsc=$(gc_scav "$B/zig.$mode.err"); msc=$(gc_scav "$B/mid.$mode.err")
+      # POST-FLIP the churn claim is CHECKED ON THE MID ARM ONLY: the
+      # reference arm's counters are FROZEN EVIDENCE (printed below as
+      # frozen-zig=...), not a live measurement — the flip deleted the Zig
+      # handlers.  Level 2 (churn-cons) requires NURSERY SCAVENGES; level 1
+      # (churn-str / churn-vec) requires the collector to have run at all (a
+      # >504-byte allocation is OLD-GEN by construction, so a batch of large
+      # buffers can fill the old generation without ever scavenging).
+      mtot=$(gc_total "$B/mid.$mode.err"); msc=$(gc_scav "$B/mid.$mode.err")
       if [ "$CHURN_MARK" = 2 ]; then
         okc=1
-        [ "$zsc" -gt 0 ] && [ "$msc" -gt 0 ] || okc=0
-        what="SCAVENGES on both arms (zig=$zsc mid=$msc)"
+        [ "$msc" -gt 0 ] || okc=0
+        what="SCAVENGES on the Mid arm (mid=$msc)"
       else
         okc=1
-        [ "$ztot" -gt 0 ] && [ "$mtot" -gt 0 ] || okc=0
-        what="a real collection on both arms (totals zig=$ztot mid=$mtot)"
+        [ "$mtot" -gt 0 ] || okc=0
+        what="a real collection on the Mid arm (mid total=$mtot)"
       fi
       if [ "$okc" -ne 1 ]; then
-        echo "FAIL $mode op=$op: CHURN batch shows NO $what — the churn claim is false (see the counters below)"
-        echo "  zig: $(grep -h '\[GC STATS\]' "$B/zig.$mode.err" 2>/dev/null)"
+        echo "FAIL $mode op=$op: CHURN batch shows NO $what — the churn claim is false"
         echo "  mid: $(grep -h '\[GC STATS\]' "$B/mid.$mode.err" 2>/dev/null)"
         FAIL=1
         continue
       fi
-      echo "PASS $mode op=$op: identical ($(wc -c < "$B/zig.$mode.out") bytes), CHURNED ($what): mid=$(grep -h '\[GC STATS\]' "$B/mid.$mode.err") | zig=$(grep -h '\[GC STATS\]' "$B/zig.$mode.err")"
+      echo "PASS $mode op=$op: identical with the $REFNAME ($(wc -c < "$B/mid.$mode.out") bytes), CHURNED ($what): mid=$(grep -h '\[GC STATS\]' "$B/mid.$mode.err") | frozen-zig=$(cat "$REFDIR/$op.heap16-rerun.gcstats" 2>/dev/null | head -c 120)"
     else
-      echo "PASS $mode op=$op: identical ($(wc -c < "$B/zig.$mode.out") bytes)"
+      echo "PASS $mode op=$op: identical with the $REFNAME ($(wc -c < "$B/mid.$mode.out") bytes)"
     fi
   done
 done
 
 if [ "$FAIL" -eq 0 ]; then
-  echo "primsdiff: VERDICT — the Mid implementations agree with the Zig execPrimitive entries on $TOTAL comparisons ($OPS batches x plain + QBE_HEAP_MB=16), n=$N vectors per batch, seed $SEED; every batch CALLS the prims it names (checked in the Mid arm's .ssa) and the churn batches are proven to have collected"
+  echo "primsdiff: VERDICT — the Mid implementations still print what the FROZEN pre-flip Zig reference printed, on $TOTAL comparisons ($OPS batches x plain + QBE_HEAP_MB=16; reference golden/batches/, captured at git 8f581b8 before the flip deleted the Zig handlers), n=$N vectors per batch, seed $SEED; every batch CALLS the prims it names (checked in the Mid arm's .ssa) and the churn batches are proven to have collected on the Mid arm.  NO LIVE ZIG ARM EXISTS: a live Zig-vs-Mid divergence is no longer falsifiable here"
   exit 0
 fi
 echo "primsdiff: VERDICT — DIVERGENCE or an unexercised batch (see FAIL lines above)"

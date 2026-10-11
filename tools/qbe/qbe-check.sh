@@ -452,18 +452,26 @@ run flatnest  FlatNest.main  tools/qbe/fixtures/flatnest.elm
 #      absolute count, which a fixture change could quietly satisfy.
 #
 # prim_count <ssa> <prim-name>: the number of PRIM CALL SITES whose prim is
-# <name>, in EITHER emission form.  Pass A (osier-passa) gave every prim a
-# direct C entry, so a site is now one of
-#   * pass-A ON : `call $rt_prim_<mangled>(l ..., w n)`  — the name is in the
-#                 SYMBOL, so it is demangled back (`_xHH` -> byte);
-#   * pass-A OFF / arity 0 / arity > direct_arity: `call $rt_prim(l $d7, ...)`
-#                 — the prim travels as a static data address, resolved from
-#                 its `data $d7 = align 8 { b "assoc", b 0 }` definition.
-# Both are counted, so a structural row keeps measuring the SAME thing across
-# the hatch (counting only the generic form would have made every "the pass
-# removed this prim" row pass for the wrong reason).  The demangler is a
-# second, independent implementation of Mid.Qbe.Lower.mangle: if the emission
-# side ever changes the mangling, these counters fall to 0 and the rows FAIL.
+# <name>, in ANY emission form.  A prim site is one of
+#   * Zig route  : `call $rt_prim_<mangled>(l ..., w n)`  — the name is in
+#                 the SYMBOL, so it is demangled back (`_xHH` -> byte);
+#   * Zig generic (pass-A OFF / arity 0 / arity > direct_arity):
+#                 `call $rt_prim(l $d7, ...)` — the prim travels as a static
+#                 data address, resolved from its `data $d7 = ... { b "assoc"
+#                 }` definition;
+#   * Mid route  : `call $q_Rt_<mangled>(` — POST-FLIP THE DEFAULT.  The
+#                 seeded Rt program carries its OWN internal `call $q_Rt_*`
+#                 edges (Rt.+ -> Rt.asF etc.) the moment it is seeded, so
+#                 these sites count ONLY from defuns that are NOT q_Rt_*
+#                 (the fixture's own code) — the same attribution rule
+#                 primsdiff's exercise contract uses.  Without it every
+#                 seeded program would count every prim it merely carries.
+# All three are counted, so a structural row keeps measuring the SAME thing
+# across the route hatch (counting only the Zig forms would have made every
+# "the pass removed this prim" row pass for the wrong reason post-flip).  The
+# demangler is a second, independent implementation of Mid.Qbe.Lower.mangle:
+# if the emission side ever changes the mangling, these counters fall to 0
+# and the rows FAIL.
 prim_count() {
   awk -v want="$2" '
     function hexval(h,   j,c,v) {
@@ -472,7 +480,6 @@ prim_count() {
       return v
     }
     function demangle(s,   i,out) {
-      sub(/^\$rt_prim_/,"",s)
       out=""; i=1
       while (i <= length(s)) {
         if (substr(s,i,2)=="_x" && length(substr(s,i,4))==4) { out=out sprintf("%c",hexval(substr(s,i+2,2))); i+=4 }
@@ -487,13 +494,20 @@ prim_count() {
       if (nm != "") for(j=1;j<=n;j++) if(f[j] ~ /^\$d[0-9]+$/) { map[f[j]]=nm; break }
       next
     }
+    /^function / { cur=$3; sub(/^\$/,"",cur) }
     {
       l=$0; gsub(/[(),]/," ",l); n=split(l,f," ")
       for(i=1;i<=n;i++) {
-        if (f[i] !~ /^\$rt_prim/) continue
+        if (f[i] !~ /^\$rt_prim/ && f[i] !~ /^\$q_Rt_/) continue
         if (f[i] == "$rt_prim") {
-          for(j=i+1;j<=n;j++) if (f[j] ~ /^\$d[0-9]+$/) { if (map[f[j]]==want) c++; break }
-        } else if (demangle(f[i]) == want) c++
+          for(j=i+1;j<=n;j++) if(f[j] ~ /^\$d[0-9]+$/) { if (map[f[j]]==want) c++; break }
+        } else if (index(f[i],"$rt_prim_")==1) {
+          if (demangle(substr(f[i],10)) == want) c++
+        } else if (index(f[i],"$q_Rt_")==1 && cur !~ /^q_Rt_/) {
+          # "$q_" is 3 chars; the rest is mangle("Rt." ++ prim), e.g.
+          # $q_Rt_x2econs -> "Rt_x2econs" -> demangle -> "Rt.cons"
+          if (demangle(substr(f[i],4)) == "Rt." want) c++
+        }
       }
     }
     END { print c+0 }
@@ -669,7 +683,18 @@ frame_slots() {
 # which must not change meaning when the CALL FORM changes.  The pass-A rows
 # below split the two forms apart.
 rtprim_sites() {
-  grep -c 'call \$rt_prim' "$1" || true
+  # BOTH routes count: the Zig forms (`call $rt_prim` / `call $rt_prim_*`)
+  # and the Mid route's `call $q_Rt_*` sites ATTRIBUTED to non-q_Rt_ defuns
+  # (the seeded Rt program's internal edges are not the entry's prim calls —
+  # without the attribution filter every seeded fixture would count every
+  # prim it merely carries).  POST-FLIP the Mid form is what a DEFAULT build
+  # emits.
+  awk '
+    /^function / { cur=$3; sub(/^\$/,"",cur) }
+    /call \$rt_prim/ { c++ }
+    /call \$q_Rt_/ && cur !~ /^q_Rt_/ { c++ }
+    END { print c+0 }
+  ' "$1"
 }
 
 # rtprim_generic_sites <ssa>: the GENERIC (`call $rt_prim(`) form alone.
@@ -711,8 +736,13 @@ done
 # on the pass-A build would silently weaken a guard instead of preserving it.
 # <fixture> <entry> <out.ssa> — BOTH passes off, so the frame-slot count is
 # the one the pre-pass-A emitter produced for the same entry.
+# POST-FLIP (osier-flip): this build additionally selects the ZIG ROUTE
+# (QBE_MIDZIG=1) — the guard is calibrated to the PRE-PASS-A ZIG emitter's
+# slot count, and the flip's default (Mid) route stages FEWER slots per prim
+# call (MEASURED: floatLocal 23 slots Zig-route vs 15 Mid-route), which would
+# silently weaken the fixture-strength bound.
 qbe_ssa_norep_offpd() {
-  (cd "$ROOT/elm-compiler" && QBE=1 QBE_NOREP=1 QBE_NOPRIMDIRECT=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+  (cd "$ROOT/elm-compiler" && QBE=1 QBE_MIDZIG=1 QBE_NOREP=1 QBE_NOPRIMDIRECT=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
 }
 
 if [ -s "$TMP/norep-slot-on.ssa" ] && [ -s "$TMP/norep-slot-off.ssa" ]; then
@@ -917,11 +947,16 @@ QBE_NOREP=1 run norep-main-off NoRep.main tools/qbe/fixtures/norep.elm
 # move is not firing) and the emitted symbol set must stay inside what rt.o
 # actually defines (the one cross-language contract left is the name mangle,
 # and this row is the net under it).
+# POST-FLIP (osier-flip): both arms run on the ZIG ROUTE (QBE_MIDZIG=1) —
+# the Mid route is the DEFAULT now and emits NO rt_prim site for a flipped
+# prim, so pass A has nothing to convert in a default build.  The Zig route
+# is EMIT-ONLY post-flip (its .ssa cannot LINK — the handlers are deleted),
+# which is exactly what these rows do with it: they EMIT and count.
 qbe_ssa_prim() { # <fixture> <entry> <out.ssa> <on|off>
   if [ "$4" = "off" ]; then
-    (cd "$ROOT/elm-compiler" && QBE=1 QBE_NOPRIMDIRECT=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+    (cd "$ROOT/elm-compiler" && QBE=1 QBE_MIDZIG=1 QBE_NOPRIMDIRECT=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
   else
-    (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+    (cd "$ROOT/elm-compiler" && QBE=1 QBE_MIDZIG=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
   fi
 }
 # flatten.elm is the fixture with the widest prim mix already on the row list
@@ -976,29 +1011,53 @@ if [ "$pd_bad" -eq 0 ]; then
   echo "PASS primdirect-abis: every direct site's arg count is inside the wrapper ABI (1..3)"
 fi
 
-# THE NAME CONTRACT: every `$rt_prim_*` symbol the compiler can emit must be
-# one rt.o DEFINES, and rt.o must define exactly one per prim-table entry.
-# (The failure this catches is a mangling/table disagreement between
-# Mid.Qbe.Lower.mangle and tools/qbe/rt.zig symSuffix — which is otherwise
-# only caught by a LINK error on whatever fixture happens to be built.)
+# THE NAME CONTRACT, POST-FLIP: the pass-A .ssa above is emitted on the ZIG
+# route (QBE_MIDZIG=1, emit-only), so it REFERENCES wrappers the flip deleted
+# — by design.  The row therefore splits the referenced set:
+#   * every symbol rt.o DOES define is fine;
+#   * every symbol rt.o does NOT define must demangle to one of the FLIP'S
+#     DELETED PRIMS (the list below mirrors prims.zig's header) — a missing
+#     symbol outside that list is a mangling/table disagreement between
+#     Mid.Qbe.Lower.mangle and tools/qbe/rt.zig symSuffix on a KEPT row,
+#     which is otherwise only caught by a LINK error on whatever LINKABLE
+#     fixture happens to be built;
+#   * rt.o must define exactly one wrapper per prim-table entry (23 post-flip).
+FLIP_DELETED="assoc cons = empty? + / f/ * - > < >= <= bitwise-and bitwise-or bitwise-xor bitwise-not bitwise-shift-left bitwise-shift-right bitwise-shift-right-zf number? string? cons? cn repeat c-strlen char-code substring shen.str->bytes shen.bytes->string absvector address-> <-address emptylist snd"
 RTO="$ROOT/tools/qbe/rt.o"
 if [ -s "$RTO" ]; then
   nm --defined-only "$RTO" 2>/dev/null | awk '$3 ~ /^rt_prim_/ { print $3 }' | sort -u > "$TMP/pd-defined.txt"
   cat "$TMP"/pd-*.ssa 2>/dev/null | grep -ho '\$rt_prim_[A-Za-z0-9_]*' | sed 's/^\$//' | sort -u > "$TMP/pd-referenced.txt"
   n_def=$(wc -l < "$TMP/pd-defined.txt")
   n_ref=$(wc -l < "$TMP/pd-referenced.txt")
-  missing="$(comm -13 "$TMP/pd-defined.txt" "$TMP/pd-referenced.txt" | tr '\n' ' ')"
-  if [ -n "$missing" ]; then
-    echo "FAIL primdirect-symbols: emitted direct symbol(s) rt.o does NOT define: $missing"
+  bad_missing=""
+  n_deleted=0
+  while read -r sym; do
+    [ -n "$sym" ] || continue
+    grep -qx "$sym" "$TMP/pd-defined.txt" && continue
+    prim="$(printf '%s' "$sym" | sed 's/^rt_prim_//' | awk '{ out=""; i=1; s=$0
+      while (i <= length(s)) { if (substr(s,i,2)=="_x" && length(s) >= i+3) { h=substr(s,i+2,2); c=0; for(j=1;j<=2;j++){d=tolower(substr(h,j,1)); c=c*16+index("0123456789abcdef",d)-1}; out=out sprintf("%c",c); i+=4 } else { out=out substr(s,i,1); i+=1 } } ; print out }')"
+    # (QUOTED + tr: an unquoted $FLIP_DELETED would GLOB the '*'/'?' words
+    # against the repo's files — the flip's own prim names are glob chars.)
+    if printf '%s' "$FLIP_DELETED" | tr ' ' '\n' | grep -qxF -- "$prim"; then
+      n_deleted=$((n_deleted + 1))
+    else
+      bad_missing="$bad_missing $sym"
+    fi
+  done < "$TMP/pd-referenced.txt"
+  if [ -n "$bad_missing" ]; then
+    echo "FAIL primdirect-symbols: emitted direct symbol(s) outside rt.o AND outside the flip-deleted set:$bad_missing — a mangle/table disagreement on a KEPT row"
     FAIL=1
   elif [ "$n_ref" -lt 1 ]; then
     echo "FAIL primdirect-symbols: no direct symbol referenced by the pass-A .ssa — nothing was checked"
     FAIL=1
-  elif [ "$n_def" -ne 58 ]; then
-    echo "FAIL primdirect-symbols: rt.o defines $n_def direct entries, expected one per prims.prim_table row (58)"
+  elif [ "$n_deleted" -lt 1 ]; then
+    echo "FAIL primdirect-symbols: the QBE_MIDZIG arms referenced no deleted wrapper — they no longer emit the old path"
+    FAIL=1
+  elif [ "$n_def" -ne 23 ]; then
+    echo "FAIL primdirect-symbols: rt.o defines $n_def direct entries, expected one per prims.prim_table row (23 post-flip: the host surface + the no-spelling prims; the flip deleted the 35 flipped rows)"
     FAIL=1
   else
-    echo "PASS primdirect-symbols: all $n_ref emitted direct symbol(s) are defined in rt.o ($n_def entries = prims.prim_table)"
+    echo "PASS primdirect-symbols: $((n_ref - n_deleted)) emitted symbol(s) defined in rt.o ($n_def entries = the post-flip table) + $n_deleted flip-deleted symbol(s) the emit-only Zig route still references, all inside the deleted set"
   fi
 else
   echo "FAIL primdirect-symbols: $RTO missing"
@@ -1013,6 +1072,11 @@ fi
 # Nothing was re-measured and no existing golden was overwritten; the check
 # below is a real comparison of the hatch build's output against the pinned
 # bytes, so a hatch that changes behaviour fails here.
+# POST-FLIP NOTE (osier-flip): QBE_NOPRIMDIRECT only acts on the ZIG route,
+# which a LINKABLE build no longer uses (the Mid route is the default and the
+# flipped Zig handlers are deleted) — these rows now build-and-run the
+# no-op-flag default as build-path sanity rows; pass A's conversion itself is
+# checked STRUCTURALLY on the emit-only QBE_MIDZIG arms above.
 QBE_NOPRIMDIRECT=1 run primdirect-off Flatten.main tools/qbe/fixtures/flatten.elm
 # ...and under GC CHURN, on the cons-shaped stress fixture whose unrooted
 # staging historically went stale (the rooting this pass rewrites is exactly
@@ -1022,8 +1086,10 @@ QBE_NOPRIMDIRECT=1 run primdirect-churn-off Churn.build tools/qbe/fixtures/churn
 # ---- MID-WRITTEN RUNTIME: ONE PRIM END-TO-END (osier-consspike) ----
 # Rt.cons is the runtime's first Mid-implemented defun: injected by
 # QbeModule (seeded ONLY through the used-prim census — a program that never
-# conses carries none of it), lowered from the raw node set, and — under
-# QBE_MIDCONS=1 — CALLED at every cons site instead of the Zig entry.
+# conses carries none of it), lowered from the raw node set, and — since THE
+# FLIP (osier-flip), by DEFAULT — CALLED at every cons site instead of the
+# Zig entry (whose handler is deleted; the QBE_MIDCONS=1 prefixes below are
+# retired no-ops kept for row-name stability, the builds are the default).
 # BEHAVIOURAL rows first: the same sources, entry and arguments as the
 # pre-existing `flatten` and `churn` rows above, compiled with the route
 # hatch, must print those rows' already-pinned golden bytes COPIED under the
@@ -1081,29 +1147,28 @@ run censusseats CensusSeats.a tools/qbe/fixtures/censusseats.elm
 QBE_MIDCONS=1 run midcons-censusseats CensusSeats.a tools/qbe/fixtures/censusseats.elm
 
 # PINNED POST-FLIP DIVERGENCE: deepEqual's depth-1000 CYCLE GUARD (capture
-# item 4).  values.zig:346 answers FALSE past 1000 levels so a cyclic
-# structure terminates; the Mid deepEq has NO counter, so with the route ON a
-# self-referential vector recurses until the native stack is exhausted.  The
-# DEFAULT row is a normal golden (`false` — the reference behaviour).  The
-# second block is NOT a golden comparison: it asserts the Mid route DIES
-# LOUDLY, so this known divergence cannot change in EITHER direction
-# unnoticed — if a later step ports the depth counter, this row fails and must
-# be re-pointed deliberately.
-run cycleeq CycleEq.main tools/qbe/fixtures/cycleeq.elm
-# QBE_MIDCONS=1 at COMPILE time is what routes the prims; the runtime does not
-# read it (the default build above is the same source, unrouted).
-cyc_bin="$(QBE_MIDCONS=1 RUN_STACK_KB=131072 "$ROOT/tools/qbe/qbe-mk.sh" "$ROOT/tools/qbe/fixtures/cycleeq.elm" CycleEq.main "$TMP/cycleeq-mid" 2>/dev/null)"
+# item 4).  values.zig:346 answered FALSE past 1000 levels so a cyclic
+# structure terminated; the Mid deepEq has NO counter, so a self-referential
+# vector recurses until the native stack is exhausted.  PRE-FLIP there were
+# two rows (the default printed `false`, the QBE_MIDCONS=1 build died
+# loudly); THE FLIP made the Mid route the DEFAULT and deleted the Zig `=`
+# handler, so the `false` golden is FROZEN EVIDENCE of the deleted reference
+# behaviour (tools/qbe/golden/cycleeq.txt) and the DEFAULT build now dies
+# loudly.  The row asserts that death in BOTH directions: a Mid deepEq that
+# silently answered wrong, or one that grew a cycle counter, both fail here
+# and must re-point deliberately.
+cyc_bin="$(RUN_STACK_KB=131072 "$ROOT/tools/qbe/qbe-mk.sh" "$ROOT/tools/qbe/fixtures/cycleeq.elm" CycleEq.main "$TMP/cycleeq-mid" 2>/dev/null)"
 if [ -n "$cyc_bin" ] && [ -x "$cyc_bin" ]; then
-  cyc_out="$(QBE_MIDCONS=1 RUN_STACK_KB=131072 timeout 60 "$cyc_bin" CycleEq.main 2>&1)"
+  cyc_out="$(RUN_STACK_KB=131072 timeout 60 "$cyc_bin" CycleEq.main 2>&1)"
   cyc_rc=$?
   if [ "$cyc_rc" -ne 0 ] && printf '%s' "$cyc_out" | grep -q "native stack depth exceeded"; then
-    echo "PASS cycleeq-mid-dies-loudly: the Mid \`=\` has no cycle guard (exit $cyc_rc, loud stack message) — the KNOWN divergence, pinned"
+    echo "PASS cycleeq-dies-loudly: the default (Mid) \`=\` has no cycle guard (exit $cyc_rc, loud stack message) — the KNOWN post-flip divergence, pinned"
   else
-    echo "FAIL cycleeq-mid-dies-loudly: expected a LOUD native-stack death under the Mid route, got rc=$cyc_rc out='${cyc_out:0:120}' — if the cycle guard was ported, re-point this row"
+    echo "FAIL cycleeq-dies-loudly: expected a LOUD native-stack death on the default route, got rc=$cyc_rc out='${cyc_out:0:120}' — if the cycle guard was ported, re-point this row"
     FAIL=1
   fi
 else
-  echo "FAIL cycleeq-mid-dies-loudly: the Mid-route build failed (qbe-mk) — the row no longer measures what it names"
+  echo "FAIL cycleeq-dies-loudly: the default-route build failed (qbe-mk) — the row no longer measures what it names"
   FAIL=1
 fi
 
@@ -1112,18 +1177,28 @@ fi
 #   * midrt-injected: the DEFAULT build of the cons-using fixture carries the
 #     injected defun (`function :ret $q_Rt_x2econs`), and carries NO global
 #     Desc / meta row for it (Rt defuns are internal);
-#   * midrt-route: with the hatch ON every cons site calls the Rt defun
-#     (`call $q_Rt_x2econs(` >= 1) and NO `rt_prim_cons` site survives;
+#   * midrt-route: THE FLIP'S OWN ROW — the DEFAULT build (no flag) routes
+#     every cons site to the Rt defun (`call $q_Rt_x2econs(` >= 1) and NO
+#     `rt_prim_cons` site survives;
+#   * midrt-zig: the OLD path is still selectable (QBE_MIDZIG=1) and emits
+#     `call $rt_prim_cons(` sites again — the bisect hatch, measured at the
+#     emission level (post-flip it cannot link; see qbe_ssa_midrt);
 #   * midrt-pruned: the hatch ON a cons-FREE entry (NoRep.chain is pure
 #     arithmetic) emits NO Rt defun at all — the pruning claim, measured;
 #   * midrt-hatch: QBE_NOMIDRT=1 removes the injection from the cons-using
 #     fixture — the same-source control that attributes every .ssa move
 #     above to the injection (the corpus-ssa attribution's in-gate twin).
-qbe_ssa_midrt() { # <fixture> <entry> <out.ssa> <mode: on|off|route>
+# POST-FLIP (osier-flip): `route` is the DEFAULT (no flag — the Mid route IS
+# the compile default now); `zig` selects the OLD path with QBE_MIDZIG=1 (an
+# EMIT-ONLY arm on this tree: the deleted Zig handlers mean the emitted
+# rt_prim_cons sites cannot link — the row asserts the EMISSION, which is
+# what a bisect needs).  `off` stays QBE_NOMIDRT=1 (also emit-only post-flip).
+qbe_ssa_midrt() { # <fixture> <entry> <out.ssa> <mode: on|off|route|zig>
   local flags=""
   case "$4" in
-    off)  flags="QBE_NOMIDRT=1" ;;
-    route) flags="QBE_MIDCONS=1" ;;
+    off)   flags="QBE_NOMIDRT=1" ;;
+    route) flags="" ;;
+    zig)   flags="QBE_MIDZIG=1" ;;
   esac
   (cd "$ROOT/elm-compiler" && env QBE=1 $flags QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
 }
@@ -1134,6 +1209,7 @@ midrt_zigcons() { grep -c 'rt_prim_cons' "$1" 2>/dev/null || true; }
 qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-on.ssa"  on
 qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-off.ssa" off
 qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-route.ssa" route
+qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-zig.ssa"  zig
 QBE_NOREP=1 qbe_ssa_midrt tools/qbe/fixtures/norep.elm NoRep.chain "$TMP/midrt-chain-route.ssa" route
 
 midrt_bad=0
@@ -1161,10 +1237,25 @@ if [ -s "$TMP/midrt-flat-route.ssa" ]; then
     echo "FAIL midrt-route: $z rt_prim_cons site(s) survive with the route ON — cons did not convert"
     midrt_bad=1
   else
-    echo "PASS midrt-route: $c cons site(s) -> q_Rt_x2econs, 0 rt_prim_cons left"
+    echo "PASS midrt-route: $c cons site(s) -> q_Rt_x2econs, 0 rt_prim_cons left (the DEFAULT route)"
   fi
 else
   echo "FAIL midrt-route: .ssa missing (compile failed?)"; midrt_bad=1
+fi
+if [ -s "$TMP/midrt-flat-zig.ssa" ]; then
+  zc=$(midrt_zigcons "$TMP/midrt-flat-zig.ssa")
+  zq=$(midrt_calls "$TMP/midrt-flat-zig.ssa")
+  if [ "$zc" -lt 1 ]; then
+    echo "FAIL midrt-zig: QBE_MIDZIG=1 emitted no rt_prim_cons site — the old path is not selectable"
+    midrt_bad=1
+  elif [ "$zq" -ne 0 ]; then
+    echo "FAIL midrt-zig: $zq q_Rt_x2econs call site(s) under QBE_MIDZIG=1 — the hatch does not gate the route"
+    midrt_bad=1
+  else
+    echo "PASS midrt-zig: QBE_MIDZIG=1 emits $zc rt_prim_cons site(s), 0 q_Rt cons calls (the seeded defun may still be present, uncalled)"
+  fi
+else
+  echo "FAIL midrt-zig: .ssa missing (compile failed?)"; midrt_bad=1
 fi
 if [ -s "$TMP/midrt-chain-route.ssa" ]; then
   n=$(midrt_ssa "$TMP/midrt-chain-route.ssa")

@@ -4278,17 +4278,22 @@ lowerNumEq args dest s =
 -- loudly, instead of at run time through unknownPrim.
 rtPrimSlots : String -> List Int -> Int -> S -> Result String S
 rtPrimSlots prim slots dest s =
-    -- THE MID ROUTE (osier-consspike, QBE_MIDCONS=1): when the prim has a
-    -- Mid implementation AND its Rt defun was injected, the staged slots call
-    -- the Rt DEFUN through the ordinary saturated-call ABI instead of the Zig
-    -- entry — the same shape directCall emits (call -> :ret -> rt_bounce ->
-    -- dest).  The args are already in ROOTED frame slots, which is exactly
-    -- what the callee's :val-pointer params expect.  Step 6 (the flip) makes
-    -- this the DEFAULT and re-shapes it to A's lean ABI; today it is the
-    -- differential's vehicle, OFF by default so the committed goldens and
-    -- corpus move only by the INJECTED defun, with output provably unchanged
-    -- (the fuzz differential + the midcons gate rows carry the behavioural
-    -- proof).
+    -- THE MID ROUTE (osier-consspike; THE FLIP, osier-flip step 6): when the
+    -- prim has a Mid implementation AND its Rt defun was injected, the staged
+    -- slots call the Rt DEFUN through the ordinary saturated-call ABI instead
+    -- of the Zig entry — the same shape directCall emits (call -> :ret ->
+    -- rt_bounce -> dest).  The args are already in ROOTED frame slots, which
+    -- is exactly what the callee's :val-pointer params expect.  THE FLIP MADE
+    -- THIS THE DEFAULT (run.js: the Mid route unless QBE_MIDZIG=1 selects the
+    -- old Zig path for a bisect); the whole-gate rehearsal proved the route
+    -- byte-identical (154/0 under the old QBE_MIDCONS=1 hatch, pre-flip), and
+    -- the flip then DELETED the flipped prims' Zig handlers, so QBE_MIDZIG=1
+    -- is emit-only on this tree (its .ssa references rt_prim_* symbols rt.o
+    -- no longer defines — a loud link failure, never a silent fallback).
+    -- NOTE: the plan's step-6 line "re-shapes it to A's lean ABI" is
+    -- DELIBERATELY DEFERRED — the flipped route is exactly the shape the
+    -- rehearsal and the 92/92 differential proved; adopting A's lean prologue
+    -- is future work (D-inlining's neighbourhood) with its own differential.
     case ( s.midCons, midPrimRoute prim slots s ) of
         ( True, Ok (Just key) ) ->
             let
@@ -4311,14 +4316,15 @@ rtPrimSlots prim slots dest s =
             rtPrimSlotsZig prim slots dest s
 
 
--- The Rt defun key to route `prim` through, if the hatch is worth taking:
+-- The Rt defun key to route `prim` through, if it has one:
 -- the prim must HAVE a Mid implementation, the STAGED ARITY must be that
 -- implementation's (read from Mid.Rt.impls, not hardcoded — step 5's
 -- hand-off: a literal arity silently mis-handles every non-binary prim,
 -- e.g. empty? 1, substring 3, absvector 1), and that defun must be present
--- in this compile (injected — QBE_NOMIDRT=1 removes it and the route quietly
--- falls back to the Zig entry rather than emitting a call to an absent
--- function).
+-- in this compile (injected — QBE_NOMIDRT=1 removes it and the route falls
+-- back to the Zig entry; POST-FLIP that fallback is EMIT-ONLY, because the
+-- flip deleted the flipped prims' Zig handlers — the emitted rt_prim_* call
+-- fails at LINK time, loudly, rather than reaching an absent function).
 --
 -- THE SEED GUARD (step-5 review): when the defun IS injected but is NOT in
 -- the set this compile will EMIT (s.seeded, from used-prim seeding), the call

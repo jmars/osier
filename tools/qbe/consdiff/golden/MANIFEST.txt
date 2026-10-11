@@ -1,0 +1,2 @@
+frozen 2026-10-11T08:46:12Z from git 8f581b8b71ab4ae43ffb78600c5ccd7b8ad0943e (prims.zig still carries primCons)
+n=200 seed=20261010 batches=int:0 float:0 bool:0 string:0 int:1 string:1 bool:2

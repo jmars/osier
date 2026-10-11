@@ -48,3 +48,19 @@ runs the reference arm on every `*.spec` here and diffs against the committed
 longer exists, so the mode will fail to build it — that is expected; the `.out`
 files then stand as the frozen record (they are read by humans and by any
 future Mid-side check written against them).
+
+## POST-FLIP (handoff osier-flip): `batches/` is the batch reference
+
+`batches/` holds the FROZEN reference outputs of the 46 differential batches
+(2 modes each: `default` + `heap16-rerun`), captured at git `8f581b8` with the
+Zig handlers still present (`--freeze-batch-ref`; `MANIFEST.txt` records the
+tree, n, seed and the op list).  After the flip deleted the handlers, the
+default mode of `primsdiff.sh` runs ONLY the Mid arm and compares against
+these bytes; the `.gcstats` files carry the reference arm's collection
+counters at freeze time (frozen evidence, printed by the churn PASS lines,
+not re-measured).
+
+Nothing on the post-flip tree can re-derive either directory: `--golden` is
+retired (exit 2) and `--freeze-batch-ref` dies loudly on the deleted names.
+What these files still falsify: any future change to the Mid implementations.
+What they can no longer falsify: a live Zig-vs-Mid divergence.
