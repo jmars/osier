@@ -109,6 +109,17 @@ const QBE_RTLEAN = process.env.QBE_NORTLEAN !== '1';
 // committed baseline byte-for-byte), and the structural gate's off arm.
 // Default ON.
 const QBE_MONO = process.env.QBE_NOMONO !== '1';
+// QBE_NOCONSARR=1 RESTORES the pre-(A) two-word cons representation (cons as
+// two interior pointers into a 2-element array, the old fused-pair shape).
+// It is the corpus attribution hatch for (A): QBE_NOCONSARR=1 must reproduce
+// the 00cc7da corpus byte-for-byte.  Default OFF (cons is ONE pointer).
+const QBE_CONSARR = process.env.QBE_NOCONSARR !== '1';
+// QBE_NOREC=1 RESTORES the pre-(E) assoc-chain record representation: every
+// record build/get/update site emits the old cons/@p/emptylist/assoc/snd
+// chain route.  It is the corpus attribution hatch for (E): QBE_NOREC=1 +
+// QBE_NOCONSARR=1 must reproduce the 00cc7da corpus byte-for-byte.  Default
+// OFF (records are positional).
+const QBE_REC = process.env.QBE_NOREC !== '1';
 // QBE_ENTRY: the defun key the QBE backend roots reachability from
 // ("<Mod>.<fn>").  REQUIRED in the single-fixture CLI; the batch mode reads
 // one entry PER GROUP from the manifest instead.
@@ -151,6 +162,8 @@ function compileGroups(groups) {
       qbeMidCons: QBE_MIDCONS,
       qbeRtLean: QBE_RTLEAN,
       qbeMono: QBE_MONO,
+      qbeConsArr: QBE_CONSARR,
+      qbeRec: QBE_REC,
     },
   });
 

@@ -32,6 +32,12 @@ pub const ValTag = enum(u32) {
     vector = 10, // VAL_VECTOR
     stream = 11, // VAL_STREAM
     float = 12, // VAL_FLOAT (M4)
+    // Phase 3/E: positional records (the corrected design, handoff
+    // osier-phase3-ea-plan).  Deliberately 14, NOT 13: the refinement
+    // corrected the first pass's record=13.  The gap at 13 is harmless —
+    // every ValTag switch is exhaustive over the enum's VALUES, never the
+    // integer range, and no consumer does @intFromEnum arithmetic on it.
+    record = 14, // VAL_RECORD (E)
 
     pub fn char(self: ValTag) u8 {
         return switch (self) {
@@ -48,6 +54,7 @@ pub const ValTag = enum(u32) {
             .vector => 'v',
             .stream => 's',
             .float => 'F',
+            .record => 'R',
         };
     }
 };
@@ -72,6 +79,12 @@ pub const Value = extern struct {
         prim: extern struct { name: ?[*:0]const u8 }, // const char *name;
         error_: extern struct { message: ?[*]u8 }, // char *message;
         vector: extern struct { data: ?[*]Value, len: i32 }, // struct Value *data; int len;
+        // Phase 3/E positional record: payload [data, len, names] — data is
+        // the n field VALUES in canonical (sorted) order, len is n, names is
+        // the address of a STATIC array of `sym:<field>` DRefs (align 8).
+        // Layout MUST match Mid.Qbe.Lower's storeValueWords (word i at Value
+        // offset 8+8i): data@8, len@16 (i32, the LOW half of word 1), names@24.
+        record: extern struct { data: ?[*]Value, len: i32, names: ?[*]const u8 },
         stream: extern struct { // FILE *file; int is_input; int is_string;
             file: ?*anyopaque, // FILE* (NULL for string streams)
             is_input: i32,

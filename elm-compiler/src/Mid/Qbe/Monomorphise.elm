@@ -1344,6 +1344,9 @@ unsafeChildren node =
         RawCallRaw call ->
             call.args
 
+        RawDataAddr _ ->
+            []
+
 
 unsafeRebuild : UnsafeNode -> List Exp -> UnsafeNode
 unsafeRebuild node parts =
@@ -1416,6 +1419,9 @@ unsafeRebuild node parts =
 
         ( WithRoots r, e :: _ ) ->
             WithRoots { r | body = e }
+
+        ( RawDataAddr _, _ ) ->
+            node
 
         _ ->
             node

@@ -514,6 +514,16 @@ prim_count() {
   ' "$1" "$1"
 }
 
+# count an aggregate's presence: the Rt prims go through prim_count; the
+# tag-14 RawMkValue (`storew 14`) is a raw instruction, so grep for it.
+agg_count() {
+  if [ "$2" = "storew 14" ]; then
+    grep -c -- "storew 14" "$1"
+  else
+    prim_count "$1" "$2"
+  fi
+}
+
 # compile one fixture entry to .ssa with the pass ON or OFF, via a SCRATCH
 # output path (run.js writes to the path it is given; nothing here can clobber
 # a tracked artifact).
@@ -525,8 +535,12 @@ qbe_ssa() { # <fixture> <entry> <out.ssa> <on|off>
   fi
 }
 
-# aggregate prims: any of these is a heap aggregate the pass exists to remove
-AGGPRIMS="assoc snd @p emptylist cons"
+# aggregate prims: any of these is a heap aggregate the pass exists to remove.
+# Under E (positional records) the record heap object is the tag-14 RawMkValue
+# (`storew 14`); tuples/lists stay cons/emptylist chains.
+AGGPRIMS="storew 14
+cons
+emptylist"
 
 qbe_ssa tools/qbe/fixtures/flatten.elm   Flatten.main   "$TMP/flat-on.ssa"  on
 qbe_ssa tools/qbe/fixtures/flatten.elm   Flatten.main   "$TMP/flat-off.ssa" off
@@ -537,19 +551,19 @@ qbe_ssa tools/qbe/fixtures/flatnest.elm  FlatNest.main  "$TMP/flatnest-off.ssa" 
 
 if [ -s "$TMP/flat-on.ssa" ] && [ -s "$TMP/flat-off.ssa" ]; then
   f_bad=0
-  # (a) the POSITIVE direction: assoc/snd/@p are gone, and were present
-  #     WITHOUT the pass.  emptylist/cons must not grow either.
-  for p in assoc snd '@p'; do
-    on=$(prim_count "$TMP/flat-on.ssa" "$p")
-    off=$(prim_count "$TMP/flat-off.ssa" "$p")
-    if [ "$on" -ne 0 ]; then
-      echo "FAIL flatten-structural: '$p' still emitted $on time(s) with the pass ON"
-      f_bad=1
-    elif [ "$off" -lt 1 ]; then
-      echo "FAIL flatten-structural: '$p' was ALREADY absent without the pass — fixture does not exercise it"
-      f_bad=1
-    fi
-  done
+  # (a) the POSITIVE direction: under E a record is a tag-14 positional
+  #     vector, so the heap object Flatten deletes is the `storew 14`
+  #     RawMkValue — gone with the pass, present without it.  cons/emptylist
+  #     (tuples/lists) must not grow either.
+  on=$(agg_count "$TMP/flat-on.ssa" "storew 14")
+  off=$(agg_count "$TMP/flat-off.ssa" "storew 14")
+  if [ "$on" -ne 0 ]; then
+    echo "FAIL flatten-structural: 'storew 14' still emitted $on time(s) with the pass ON"
+    f_bad=1
+  elif [ "$off" -lt 1 ]; then
+    echo "FAIL flatten-structural: 'storew 14' was ALREADY absent without the pass — fixture does not exercise it"
+    f_bad=1
+  fi
   for p in emptylist cons; do
     on=$(prim_count "$TMP/flat-on.ssa" "$p")
     off=$(prim_count "$TMP/flat-off.ssa" "$p")
@@ -559,7 +573,7 @@ if [ -s "$TMP/flat-on.ssa" ] && [ -s "$TMP/flat-off.ssa" ]; then
     fi
   done
   if [ "$f_bad" -eq 0 ]; then
-    echo "PASS flatten-structural: assoc/snd/@p 11->0 with the pass; cons/emptylist 16/7 -> $(prim_count "$TMP/flat-on.ssa" cons)/$(prim_count "$TMP/flat-on.ssa" emptylist)"
+    echo "PASS flatten-structural: storew-14 $off->0 with the pass; cons/emptylist $(prim_count "$TMP/flat-off.ssa" cons)/$(prim_count "$TMP/flat-off.ssa" emptylist) -> $(prim_count "$TMP/flat-on.ssa" cons)/$(prim_count "$TMP/flat-on.ssa" emptylist)"
   else
     FAIL=1
   fi
@@ -572,9 +586,10 @@ if [ -s "$TMP/noflat-on.ssa" ] && [ -s "$TMP/noflat-off.ssa" ]; then
   # (b) the NEGATIVE direction: EVERY aggregate here escapes, so the pass must
   #     be a NO-OP — counted per prim, ON vs OFF, exactly.
   n_bad=0
-  for p in $AGGPRIMS; do
-    on=$(prim_count "$TMP/noflat-on.ssa" "$p")
-    off=$(prim_count "$TMP/noflat-off.ssa" "$p")
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    on=$(agg_count "$TMP/noflat-on.ssa" "$p")
+    off=$(agg_count "$TMP/noflat-off.ssa" "$p")
     if [ "$on" -ne "$off" ]; then
       echo "FAIL noflatten-structural: '$p' changed under the pass ($off -> $on): an escaping aggregate was flattened"
       n_bad=1
@@ -582,9 +597,9 @@ if [ -s "$TMP/noflat-on.ssa" ] && [ -s "$TMP/noflat-off.ssa" ]; then
       echo "FAIL noflatten-structural: '$p' is absent from the fixture — it does not exercise that escape route"
       n_bad=1
     fi
-  done
+  done <<< "$AGGPRIMS"
   if [ "$n_bad" -eq 0 ]; then
-    echo "PASS noflatten-structural: pass is a NO-OP on every escaping aggregate (assoc 9, snd 9, @p 10, emptylist 7, cons 17 — identical ON/OFF)"
+    echo "PASS noflatten-structural: pass is a NO-OP on every escaping aggregate (storew-14 5, emptylist 3, cons 8 — identical ON/OFF)"
   else
     FAIL=1
   fi

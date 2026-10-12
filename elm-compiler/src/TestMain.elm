@@ -498,8 +498,8 @@ checks =
         (not (Builtins.isTrusted "Prelude.map"))
     , check "every prim-wrapper alias row has a builtin scheme"
         (Builtins.uncoveredPrimRows == [])
-    , check "35 prim-wrapper schemes registered"
-        (Dict.size Builtins.primWrapperSchemes == 35)
+    , check "36 prim-wrapper schemes registered"
+        (Dict.size Builtins.primWrapperSchemes == 36)
 
     -- Type.Infer: Algorithm W over expressions/patterns, record operations,
     -- let-generalization, top-level group, and the ++/Record.remove rewrites.
@@ -866,9 +866,9 @@ checks =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 58 defuns, all Rt.*; cons 2-ary, substring 3-ary (step 5 widened the program)"
-        (List.length Rt.program == 58
-            && List.all (\d -> String.startsWith "Rt." d.key) Rt.program
+    , check "rt program: 71 defuns, all Rt.*; cons 2-ary, substring 3-ary (E added the record walk/rebuild defuns)"
+        (List.length (Rt.program True True) == 71
+            && List.all (\d -> String.startsWith "Rt." d.key) (Rt.program True True)
             && List.any
                 (\d ->
                     d.key == "Rt.cons"
@@ -880,7 +880,7 @@ checks =
                                     False
                            )
                 )
-                Rt.program
+                (Rt.program True True)
             && List.any
                 (\d ->
                     d.key == "Rt.substring"
@@ -892,7 +892,7 @@ checks =
                                     False
                            )
                 )
-                Rt.program
+                (Rt.program True True)
         )
     , check "rt seeds closure: cons/=/+ pull the 8-key deepEq closure; + alone pulls just Rt.+"
         (Rt.seeds (Set.fromList [ "cons", "+", "=" ])
@@ -902,7 +902,7 @@ checks =
     , check "rt call graph: every RawCall target is a program key AND declared in rtDeps (the seed-closure skew must-fail)"
         (let
             syms key =
-                case List.filter (\d -> d.key == key) Rt.program of
+                case List.filter (\d -> d.key == key) (Rt.program True True) of
                     d :: _ ->
                         rawCallSyms d.value
 
@@ -910,7 +910,7 @@ checks =
                         []
 
             allKeys =
-                List.map .key Rt.program
+                List.map .key (Rt.program True True)
 
             ok key =
                 List.all (\sym -> List.member sym allKeys && List.member sym (Maybe.withDefault [] (Dict.get key Rt.rtDeps)))
@@ -919,7 +919,7 @@ checks =
          List.all ok allKeys
         )
     , check "rt cons lowers to a QBE function named q_Rt_x2econs"
-        (case QbeLower.lower False False False True QbeTypes.empty Dict.empty Rt.program "Rt.cons" of
+        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True) "Rt.cons" of
             Ok mod ->
                 List.any (\f -> f.name == "q_Rt_x2econs") mod.funcs
 
@@ -927,7 +927,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a raw-word binder read in a value position (must-fail)"
-        (case QbeLower.lower False False False True QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
+        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
             Err msg ->
                 String.contains "raw word binder" msg
 
@@ -935,7 +935,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a word node in a value position (must-fail)"
-        (case QbeLower.lower False False False True QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
+        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
             Err msg ->
                 String.contains "value position" msg
 
@@ -943,7 +943,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a value binder in a raw-argument position (must-fail)"
-        (case QbeLower.lower False False False True QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
+        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
             Err msg ->
                 String.contains "not a raw word" msg
 
@@ -979,7 +979,7 @@ checks =
             && not (Set.member "Rt.countL" Rt.allocating)
         )
     , check "rt lean ABI: a frame-free callee has pointer params, :val return and NO frame enter/leave"
-        (case QbeLower.lower False False False True QbeTypes.empty Dict.empty Rt.program "Rt.+" of
+        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True) "Rt.+" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2e_x2b") mod.funcs of
                     f :: _ ->
@@ -996,7 +996,7 @@ checks =
                 False
         )
     , check "rt lean ABI: a framing callee (cons) keeps rt_frame_enter/leave and the lean signature"
-        (case QbeLower.lower False False False True QbeTypes.empty Dict.empty Rt.program "Rt.cons" of
+        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True) "Rt.cons" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2econs") mod.funcs of
                     f :: _ ->
@@ -1012,7 +1012,7 @@ checks =
                 False
         )
     , check "rt lean ABI: rt_bounce appears NOWHERE in a lean emit, and the fat hatch restores it"
-        (case QbeLower.lower False False False True QbeTypes.empty Dict.empty Rt.program "Rt.+" of
+        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True) "Rt.+" of
             Ok mod ->
                 not (List.any (callsSym "rt_bounce") mod.funcs)
 
@@ -1261,7 +1261,7 @@ rtValueInRawPosition =
 
 {-| Every `Rt.*` key a body RawCalls, in order (duplicates kept — the check
 only needs membership).  The seed-closure skew detector: a RawCall to a key
-missing from Rt.program or from Rt.rtDeps makes that defun unreachable or
+missing from (Rt.program True True) or from Rt.rtDeps makes that defun unreachable or
 unseedable, and this row fails before any .ssa is emitted.
 -}
 callsSym : String -> Il.Func -> Bool
@@ -1447,3 +1447,6 @@ rawCallSyms exp =
 
                 RawCallRaw seat ->
                     List.concatMap rawCallSyms seat.args
+
+                RawDataAddr _ ->
+                    []

@@ -238,6 +238,7 @@ primWrapperSchemes =
         , ( "getpid", mono (func [ tUnit ] tInt) )
         , ( "glob", mono (func [ tString ] (tList tString)) )
         , ( "intern", mono (func [ tString ] tString) )
+        , ( "recToChain", poly [ a, b ] (func [ TVar a ] (TVar b) ) )
 
         -- Structural-compare predicates (Prelude.compare dispatcher).
         , ( "number?", poly [ a ] (func [ TVar a ] tBool) )

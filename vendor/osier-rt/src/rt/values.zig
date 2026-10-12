@@ -112,14 +112,13 @@ pub fn valStringFromErr(g: *Gc, src_slot: *Value) Value {
     return .{ .tag = .string, .payload = .{ .str = .{ .data = @ptrCast(dst), .len = @intCast(len) } } };
 }
 
-/// C: zincvm.c:274-294 val_cons — FUSED PAIR (P1): ONE 2-element .value_array
-/// instead of two .value cells (2 root ops instead of 4).  car = &pair[0],
-/// cdr = &pair[1] — interior pointers into the SAME array, so the scan-time
-/// discriminator is cdr == car + sizeof(Value) (see module doc + scan.zig).
-/// The 88-byte body is always nursery-eligible, so no construction write
-/// barrier is needed (same as the classic two-cell form).  carv/cdrv are
-/// rooted as Value slots across the single alloc; pair[0..2] are then filled
-/// from the rooted copies.
+/// C: zincvm.c:274-294 val_cons — (A) ONE pointer to a 2-element .value_array:
+/// car = &pair[0], the cdr VALUE is pair[1] (derived as *(car+40) by every
+/// reader).  The Value's cdr field is set to NULL — nothing reads it, and the
+/// collector no longer chases a second interior pointer (scan.zig cons arm
+/// evacuates car only; the whole 2-element array moves with it).  carv/cdrv
+/// are rooted as Value slots across the single alloc; pair[0..2] are then
+/// filled from the rooted copies.
 pub fn valCons(g: *Gc, car: Value, cdr: Value) Value {
     var carv = car;
     var cdrv = cdr;
@@ -132,7 +131,7 @@ pub fn valCons(g: *Gc, car: Value, cdr: Value) Value {
     pair[0] = carv;
     pair[1] = cdrv;
 
-    return .{ .tag = .cons, .payload = .{ .cons = .{ .car = &pair[0], .cdr = &pair[1] } } };
+    return .{ .tag = .cons, .payload = .{ .cons = .{ .car = &pair[0], .cdr = null } } };
 }
 
 /// C: zincvm.c:299-321 val_lambda — roots &code and &env across the
@@ -235,6 +234,14 @@ pub fn errSlice(v: Value) []const u8 {
     return std.mem.sliceTo(v.payload.error_.message.?, 0);
 }
 
+/// (A) the cdr of a cons — element 1 of the 2-element pair array `car` heads.
+/// `car` is a single-item pointer (the C ABI shape), so it is cast to a
+/// many-item pointer to reach element 1 (*(car + sizeof(Value))).  The
+/// Value's own cdr field is always NULL now; the cdr VALUE lives in pair[1].
+pub inline fn consCdr(v: Value) *Value {
+    return &@as([*]Value, @ptrCast(v.payload.cons.car.?))[1];
+}
+
 // ---------------------------------------------------------------------
 //  Printing — C: zincvm.c:383-404 print_value, 901-955 str_value
 // ---------------------------------------------------------------------
@@ -272,7 +279,20 @@ pub fn printValue(writer: anytype, v: Value) !void {
             try writer.writeAll("[cons ");
             try printValue(writer, v.payload.cons.car.?.*);
             try writer.writeAll(" . ");
-            try printValue(writer, v.payload.cons.cdr.?.*);
+            try printValue(writer, consCdr(v).*);
+            try writer.writeAll("]");
+        },
+        .record => {
+            // E positional record: [record v0 v1 ...] over data[0..n-1] in
+            // canonical (sorted) order — field names are no longer printable
+            // from the vector.
+            try writer.writeAll("[record");
+            var i: usize = 0;
+            const n: usize = @intCast(v.payload.record.len);
+            while (i < n) : (i += 1) {
+                try writer.writeAll(" ");
+                try printValue(writer, v.payload.record.data.?[i]);
+            }
             try writer.writeAll("]");
         },
         .nil => try writer.writeAll("[]"),
@@ -311,10 +331,11 @@ pub fn strValue(writer: anytype, v: Value, depth: u32) !void {
             var cur: *const Value = &v;
             var first = true;
             try writer.writeAll("[");
-            while (cur.tag == .cons) : (cur = cur.payload.cons.cdr.?) {
+            while (cur.tag == .cons) {
                 if (!first) try writer.writeAll(" ");
                 first = false;
                 try strValue(writer, cur.payload.cons.car.?.*, depth + 1);
+                cur = consCdr(cur.*);
             }
             if (cur.tag != .nil) {
                 try writer.writeAll(" . ");
@@ -322,6 +343,7 @@ pub fn strValue(writer: anytype, v: Value, depth: u32) !void {
             }
             try writer.writeAll("]");
         },
+        .record => try writer.writeAll("<record>"),
         .error_ => try writer.print("<error {s}>", .{errSlice(v)}),
         .lambda => try writer.writeAll("<lambda>"),
         .prim => try writer.print("<prim {s}>", .{primSlice(v)}),
@@ -354,7 +376,21 @@ pub fn deepEqual(a: Value, b: Value, depth: u32) bool {
         .float => return a.payload.float == b.payload.float,
         .nil => return true,
         .cons => return deepEqual(a.payload.cons.car.?.*, b.payload.cons.car.?.*, depth + 1) and
-            deepEqual(a.payload.cons.cdr.?.*, b.payload.cons.cdr.?.*, depth + 1),
+            deepEqual(consCdr(a).*, consCdr(b).*, depth + 1),
+        .record => {
+            // E record equality is over VALUES ONLY (exactly Elm's
+            // order-insensitive ==): same length, then elementwise over the
+            // canonical-order data array — no name compare (the names array is
+            // static, shared program-wide, and the tag already matched).
+            if (a.payload.record.len != b.payload.record.len) return false;
+            var i: usize = 0;
+            const n: usize = @intCast(a.payload.record.len);
+            while (i < n) : (i += 1) {
+                if (!deepEqual(a.payload.record.data.?[i], b.payload.record.data.?[i], depth + 1))
+                    return false;
+            }
+            return true;
+        },
         .vector => {
             if (a.payload.vector.len != b.payload.vector.len) return false;
             var i: usize = 0;

@@ -93,8 +93,8 @@ import Type.Infer as Infer
 import Type.Representation exposing (Type)
 
 
-compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Result String String
-compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt midCons rtLean mono =
+compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Result String String
+compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt midCons rtLean mono consArr rec =
     case
         MidModule.parseAll corpusSources
             |> Result.andThen
@@ -113,7 +113,7 @@ compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt mi
                                                                 Err msg
 
                                                             Ok corpusGlobals ->
-                                                                compileGroup env nodeTypes refinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono
+                                                                compileGroup env nodeTypes refinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono consArr rec
                                                     )
                                         )
                             )
@@ -141,8 +141,10 @@ compileGroup :
     -> Bool
     -> Bool
     -> Bool
+    -> Bool
+    -> Bool
     -> Result String String
-compileGroup env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono =
+compileGroup env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono consArr rec =
     MidModule.parseAll groupSources
         |> Result.andThen
             (\groupFiles ->
@@ -179,7 +181,7 @@ compileGroup env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals gro
                                                                 refinedVarsByModule =
                                                                     Dict.union groupTypes.refinedVars corpusRefinedVars
                                                             in
-                                                            lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey
+                                                            lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey consArr rec
                                                 )
                                     )
                         )
@@ -264,8 +266,10 @@ lowerAll :
     -> List MidModule.Unit
     -> List MidModule.Unit
     -> String
+    -> Bool
+    -> Bool
     -> Result String String
-lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey =
+lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey consArr rec =
     reserveRtName (corpusUnits ++ groupUnits)
         |> Result.andThen (\_ -> compileAllJoin globals (corpusUnits ++ groupUnits) nodeTypesByModule refinedVarsByModule)
         -- The unsafe-node audit (osier-rawnodes): EVERY compile fails loudly
@@ -291,7 +295,7 @@ lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByMod
                 let
                     rtProgram =
                         if midRt then
-                            MidRt.program
+                            MidRt.program consArr rec
 
                         else
                             []
@@ -350,6 +354,8 @@ lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByMod
                                             primDirect
                                             midCons
                                             rtLean
+                                            consArr
+                                            rec
                                             specialised.table
                                             (completeArities globals specialised.program)
                                             specialised.program

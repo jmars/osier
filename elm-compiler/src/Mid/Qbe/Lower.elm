@@ -153,6 +153,11 @@ tagVector =
     10
 
 
+tagRecord : Int
+tagRecord =
+    14
+
+
 maxArity : Int
 maxArity =
     16
@@ -183,11 +188,14 @@ type alias S =
     , primDirect : Bool -- A's switch (QBE_NOPRIMDIRECT=1 -> False)
     , midCons : Bool -- the Mid-cons route switch (QBE_MIDCONS=1 -> True)
     , rtLean : Bool -- the Rt LEAN ABI switch (osier-midabi; QBE_NORTLEAN=1 -> False)
+    , rec : Bool -- E's switch (QBE_NOREC=1 -> False = the assoc-chain route)
+    , consArr : Bool -- (A)'s switch (QBE_NOCONSARR=1 -> False = the 2-word cons)
     , funcs : List PendingFunc -- extra (closure) funcs, REVERSED
     , datas : List DataDef -- REVERSED
     , dataKeys : Dict String String -- content key -> data name (dedup)
     , dataN : Int
     , cloN : Int -- closure-name supply
+    , binderN : Int -- E's synthetic-binder supply (negative ids; see freshBinder)
     , arities : Dict String Int
     , defuns : Dict String Defun
     , seeded : Set.Set String
@@ -245,6 +253,33 @@ freshSlot s =
 slotTmp : Int -> String
 slotTmp i =
     "s" ++ String.fromInt i
+
+
+-- E's synthetic binder supply: a NEGATIVE id (FromAst issues positive ids from
+-- a per-defun counter, so negatives can never collide) for the transient
+-- binders Lower's record lowering builds (the record subexpression is bound
+-- once and read through the tag test and its branches).
+freshBinder : S -> ( Binder, S )
+freshBinder s =
+    ( { id = -1 - s.binderN, name = "rec" ++ String.fromInt s.binderN }
+    , { s | binderN = s.binderN + 1 }
+    )
+
+
+freshBinders : Int -> S -> ( List Binder, S )
+freshBinders n s =
+    if n <= 0 then
+        ( [], s )
+
+    else
+        let
+            ( b, s1 ) =
+                freshBinder s
+
+            ( rest, s2 ) =
+                freshBinders (n - 1) s1
+        in
+        ( b :: rest, s2 )
 
 
 closeBlock : Jump -> S -> S
@@ -311,8 +346,8 @@ freshData key mk s =
 -- Descs, and the driver's meta table.
 
 
-lower : Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
-lower rep primDirect midCons rtLean table arityTable program entryKey =
+lower : Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
+lower rep primDirect midCons rtLean consArr rec table arityTable program entryKey =
     let
         defuns =
             Dict.fromList (List.map (\d -> ( d.key, d )) program)
@@ -337,7 +372,7 @@ lower rep primDirect midCons rtLean table arityTable program entryKey =
                         (\key acc ->
                             case Dict.get key defuns of
                                 Just defun ->
-                                    Set.union acc (calledPrims defun.value)
+                                    Set.union acc (calledPrims rec defun.value)
 
                                 Nothing ->
                                     acc
@@ -372,11 +407,14 @@ lower rep primDirect midCons rtLean table arityTable program entryKey =
                     , primDirect = primDirect
                     , midCons = midCons
                     , rtLean = rtLean
+                    , rec = rec
+                    , consArr = consArr
                     , funcs = []
                     , datas = []
                     , dataKeys = Dict.empty
                     , dataN = 0
                     , cloN = 0
+                    , binderN = 0
                     , arities = arityTable
                     , defuns = defuns
                     , seeded = Set.fromList keys
@@ -527,123 +565,164 @@ BOTH pattern seats (case alt binds, let-destructure binds) missed `assoc`+
 `snd` while BOTH match seats (MTagEq/MLitEq -> lowerEqMatch) missed `=`.
 Each one built a binary that failed to LINK on an undefined `q_Rt_*`.
 -}
-calledPrims : Exp -> Set.Set String
-calledPrims exp =
-    case exp of
-        Lit _ ->
-            Set.empty
+calledPrims : Bool -> Exp -> Set.Set String
+calledPrims rec exp =
+    let
+        go : Exp -> Set.Set String
+        go e =
+            case e of
+                Lit _ ->
+                    Set.empty
 
-        Var _ ->
-            Set.empty
+                Var _ ->
+                    Set.empty
 
-        GRef _ ->
-            Set.empty
+                GRef _ ->
+                    Set.empty
 
-        StreamRef { varName } ->
-            -- Materializing a stream's NAME and calling the `value` prim on
-            -- it (lowerVal's StreamRef arm) IS a prim call — the census must
-            -- mirror it (step 5's hand-off #2: this function mirrors every
-            -- desugar that calls a prim).  `value` has no Mid impl today, so
-            -- this seeds nothing yet — but a future Mid `value` port must
-            -- not find its desugar missing here.
-            Set.insert "value" (calledPrims (Lit (LString varName)))
+                StreamRef { varName } ->
+                    -- Materializing a stream's NAME and calling the `value` prim on
+                    -- it (lowerVal's StreamRef arm) IS a prim call — the census must
+                    -- mirror it (step 5's hand-off #2: this function mirrors every
+                    -- desugar that calls a prim).  `value` has no Mid impl today, so
+                    -- this seeds nothing yet — but a future Mid `value` port must
+                    -- not find its desugar missing here.
+                    Set.insert "value" (go (Lit (LString varName)))
 
-        Lam lambda ->
-            calledPrims lambda.body
+                Lam lambda ->
+                    go lambda.body
 
-        NoTail inner ->
-            calledPrims inner
+                NoTail inner ->
+                    go inner
 
-        App app ->
-            List.foldl (\e acc -> Set.union acc (calledPrims e)) (calledPrims app.fn) app.args
+                App app ->
+                    List.foldl (\arg acc -> Set.union acc (go arg)) (go app.fn) app.args
 
-        PrimApp app ->
-            List.foldl (\e acc -> Set.union acc (calledPrims e)) (Set.singleton app.prim) app.args
+                PrimApp app ->
+                    List.foldl (\arg acc -> Set.union acc (go arg)) (Set.singleton app.prim) app.args
 
-        Let block ->
-            List.foldl
-                (\e acc -> Set.union acc (calledPrims e))
-                (List.foldl
-                    (\b acc -> Set.union acc (letBinderPrims b))
-                    (calledPrims block.body)
-                    block.binders
-                )
-                (letValues block.binders)
+                Let block ->
+                    List.foldl
+                        (\val acc -> Set.union acc (go val))
+                        (List.foldl
+                            (\b acc -> Set.union acc (letBinderPrims rec b))
+                            (go block.body)
+                            block.binders
+                        )
+                        (letValues block.binders)
 
-        Case branch ->
-            List.foldl
-                (\a acc -> Set.union acc (altPrims a))
-                (calledPrims branch.scrutinee)
-                branch.alts
+                Case branch ->
+                    List.foldl
+                        (\a acc -> Set.union acc (altPrims rec a))
+                        (go branch.scrutinee)
+                        branch.alts
 
-        Con con ->
-            List.foldl (\e acc -> Set.union acc (calledPrims e)) Set.empty con.args
+                Con con ->
+                    List.foldl (\arg acc -> Set.union acc (go arg)) Set.empty con.args
 
-        Tup es ->
-            -- (a, b) lowers through lowerTup -> buildTuple, which is a CONS
-            -- chain (`@p` is NOT what a surface tuple compiles to).  The
-            -- census walks the SAME expression the lowering does, so the two
-            -- cannot drift.
-            calledPrims (buildTuple es)
+                Tup es ->
+                    -- (a, b) lowers through lowerTup -> buildTuple, which is a CONS
+                    -- chain (`@p` is NOT what a surface tuple compiles to).
+                    go (buildTuple es)
 
-        RecordLit setters ->
-            -- {f = e} = cons (@p (sym f) e) ... (buildRecord), whose terminator
-            -- is `emptylist 0` — walking the builder picks that up too.
-            calledPrims (buildRecord setters)
+                RecordLit setters ->
+                    if rec then
+                        if hasDuplicateLabels setters then
+                            -- scoped labels: the lowering takes the CHAIN route
+                            -- (buildRecord); the census must mirror it.
+                            go (buildRecord setters)
 
-        RecordGet rec field ->
-            -- rec.f = snd (assoc (sym f) rec) — buildRecordGet IS the lowering.
-            calledPrims (buildRecordGet rec field)
+                        else
+                            -- positional build: the VALUES' prims only; {}
+                            -- keeps the emptylist route.
+                            List.foldl
+                                (\p acc -> Set.union acc (go (Tuple.second p)))
+                                (if List.isEmpty (recordFields setters) then
+                                    Set.singleton "emptylist"
 
-        RecordUpdate update ->
-            -- {r | f = e} prepends cons @p pairs (buildRecordUpdate).
-            calledPrims (buildRecordUpdate update)
+                                 else
+                                    Set.empty
+                                )
+                                setters
 
-        ListLit es ->
-            -- [a, b] = cons a (cons b (emptylist)) (buildList).
-            calledPrims (buildList es)
+                    else
+                        go (buildRecord setters)
 
-        If block ->
-            List.foldl (\e acc -> Set.union acc (calledPrims e))
-                Set.empty
-                [ block.cond, block.thenBranch, block.elseBranch ]
+                RecordGet recExpr field ->
+                    if rec then
+                        -- tag test: walk (recGet) + chain (snd/assoc).  recGet
+                        -- is seeded even where the positional arm fires (a
+                        -- closed row still carries the walk as the defensive
+                        -- else) — over-seeding dead code, never a missing seed.
+                        Set.union (Set.fromList [ "snd", "assoc", "recGet" ]) (go recExpr)
 
-        ShortAnd block ->
-            Set.union (calledPrims block.left) (calledPrims block.right)
+                    else
+                        go (buildRecordGet recExpr field)
 
-        ShortOr block ->
-            Set.union (calledPrims block.left) (calledPrims block.right)
+                RecordUpdate update ->
+                    if rec then
+                        -- tag test: walk (recInsert, the insert-or-update) +
+                        -- chain (cons/@p prepend — the host-built fallback;
+                        -- not assoc/snd, which is the READ route).  recInsert
+                        -- is seeded even where the positional arm fires
+                        -- (defensive else) — over-seeding, never a miss.
+                        Set.union
+                            (Set.fromList [ "cons", "@p", "recInsert" ])
+                            (Set.union
+                                (go update.base)
+                                (List.foldl (\p acc -> Set.union acc (go (Tuple.second p))) Set.empty update.updates)
+                            )
 
-        NotEqual block ->
-            Set.union (calledPrims block.left) (calledPrims block.right)
+                    else
+                        go (buildRecordUpdate update)
 
-        Unsafe _ ->
-            Set.empty
+                ListLit es ->
+                    -- [a, b] = cons a (cons b (emptylist)) (buildList).
+                    go (buildList es)
+
+                If block ->
+                    List.foldl (\sub acc -> Set.union acc (go sub))
+                        Set.empty
+                        [ block.cond, block.thenBranch, block.elseBranch ]
+
+                ShortAnd block ->
+                    Set.union (go block.left) (go block.right)
+
+                ShortOr block ->
+                    Set.union (go block.left) (go block.right)
+
+                NotEqual block ->
+                    Set.union (go block.left) (go block.right)
+
+                Unsafe _ ->
+                    Set.empty
+    in
+    go exp
 
 
 {-| The prims one case alt stages ON TOP of its body: its pattern TESTS
 (lowerMatchTests -> lowerMatch: MTagEq/MLitEq run the REAL `=` via
 lowerEqMatch) and its pattern BINDS (lowerBinds -> lowerPath: a VField bind
-runs assoc then snd).  The census walked only `alt.body` until the step-5
-review; both seats were missing.
+runs assoc then snd — or recGet under E).  The census walked only `alt.body`
+until the step-5 review; both seats were missing.
 -}
-altPrims : Alt -> Set.Set String
-altPrims alt =
-    Set.union (calledPrims alt.body)
-        (Set.union (matchPrims alt.matches) (pathPrims (List.map Tuple.second alt.binds)))
+altPrims : Bool -> Alt -> Set.Set String
+altPrims rec alt =
+    Set.union (calledPrims rec alt.body)
+        (Set.union (matchPrims alt.matches) (pathPrims rec (List.map Tuple.second alt.binds)))
 
 
 {-| Same two seats for a `let` destructure (lowerLetDestruct calls the same
 lowerMatchTests / lowerBinds).
 -}
-letBinderPrims : LetBinder -> Set.Set String
-letBinderPrims b =
+letBinderPrims : Bool -> LetBinder -> Set.Set String
+letBinderPrims rec b =
     case b of
         LetBind _ ->
             Set.empty
 
         LetDestruct d ->
-            Set.union (matchPrims d.matches) (pathPrims (List.map Tuple.second d.binds))
+            Set.union (matchPrims d.matches) (pathPrims rec (List.map Tuple.second d.binds))
 
 
 {-| lowerMatch's own prim calls: the tag tests (MCons/MEmpty/MVector) are
@@ -673,11 +752,11 @@ matchPrims matches =
         matches
 
 
-{-| lowerPath's prim calls: VPath is a pure pointer chase, VField is
-`snd (assoc (sym field) rec)`.
+{-| lowerPath's prim calls: VPath is a pure pointer chase; VField is
+`snd (assoc (sym field) rec)` — or `recGet` under E (the tag-14 walk).
 -}
-pathPrims : List ValuePath -> Set.Set String
-pathPrims paths =
+pathPrims : Bool -> List ValuePath -> Set.Set String
+pathPrims rec paths =
     List.foldl
         (\p acc ->
             case p of
@@ -685,7 +764,11 @@ pathPrims paths =
                     acc
 
                 VField _ _ ->
-                    Set.insert "snd" (Set.insert "assoc" acc)
+                    if rec then
+                        Set.insert "recGet" (Set.insert "snd" (Set.insert "assoc" acc))
+
+                    else
+                        Set.insert "snd" (Set.insert "assoc" acc)
         )
         Set.empty
         paths
@@ -844,11 +927,14 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , primDirect = sOuter.primDirect
             , midCons = sOuter.midCons
             , rtLean = sOuter.rtLean
+            , rec = sOuter.rec
+            , consArr = sOuter.consArr
             , funcs = []
             , datas = sOuter.datas
             , dataKeys = sOuter.dataKeys
             , dataN = sOuter.dataN
             , cloN = sOuter.cloN + 1
+            , binderN = sOuter.binderN
             , arities = sOuter.arities
             , defuns = sOuter.defuns
             , seeded = sOuter.seeded
@@ -1038,13 +1124,13 @@ lowerVal exp dest s =
             lowerTup es dest s
 
         RecordLit setters ->
-            lowerVal (buildRecord setters) dest s
+            lowerRecordLit setters dest s
 
         RecordGet rec field ->
-            lowerVal (buildRecordGet rec field) dest s
+            lowerRecordGet rec field dest s
 
         RecordUpdate update ->
-            lowerVal (buildRecordUpdate update) dest s
+            lowerRecordUpdate update dest s
 
         ListLit es ->
             lowerVal (buildList es) dest s
@@ -1348,6 +1434,9 @@ lowerRawVal node dest s =
             Err wordProducerMessage
 
         RawCallRaw _ ->
+            Err wordProducerMessage
+
+        RawDataAddr _ ->
             Err wordProducerMessage
 
 
@@ -1810,6 +1899,51 @@ rawWordArg exp s =
                         ( Il.Tmp t, emit (Call (Just t) (Base L) (Il.Sym seat.sym) args) s2 )
                     )
 
+        Unsafe (RawDataAddr names) ->
+            -- (E) the STATIC names array of a positional record: first ensure
+            -- each name's `sym:` data def exists (freshData is idempotent —
+            -- the SAME defs LSymbol lowering creates), COLLECTING each def's
+            -- ACTUAL symbol (freshData names it "dN"; a DRef must point at
+            -- that generated name, NOT the "sym:" content key — a DRef to an
+            -- undefined symbol fails qbe assembly), then freshData a
+            -- content-keyed array of those DRefs and return Il.Sym of it
+            -- (Il.Sym IS an Arg — lowerLit LSymbol stores the same class).
+            let
+                ensure : String -> ( List String, S ) -> ( List String, S )
+                ensure name ( acc, st ) =
+                    let
+                        ( symName, st1 ) =
+                            freshData ("sym:" ++ name)
+                                (\n -> { name = n, align = Just 8, items = [ DStr name, DByte 0 ], export_ = False })
+                                st
+                    in
+                    ( symName :: acc, st1 )
+
+                ( symNamesRev, s1 ) =
+                    List.foldl ensure ( [], s ) names
+
+                ( arrName, s2 ) =
+                    freshData ("recnames:" ++ String.join "," names)
+                        (\n ->
+                            { name = n
+                            , align = Just 8
+                            , -- the names array is an array of SYMBOL Value
+                              -- structs (40 B each: tag 2, pad, name pointer,
+                              -- union padding) — the SAME layout a runtime
+                              -- dynamic names array (RawAllocVector of symbol
+                              -- Values) has, so Rt.recGet walks both with
+                              -- RawVecLoad.  Must match gc/types.zig's Value
+                              -- extern struct (tag u32@0, union@8).
+                              items =
+                                List.concatMap
+                                    (\sn -> [ DWord 2, DZero 4, DRef sn, DZero 24 ])
+                                    (List.reverse symNamesRev)
+                            , export_ = False
+                            }
+                        )
+                        s1
+            in
+            Ok ( Il.Sym arrName, s2 )
         Unsafe (RawFltBin bin) ->
             -- f64 word binop -> `d` temp.  Operands are FLOAT-word
             -- expressions (rawFltArg); landing one in an integer-word
@@ -2117,6 +2251,9 @@ rawNodeName node =
 
         RawCallRaw seat ->
             "rawCallRaw " ++ seat.sym
+
+        RawDataAddr _ ->
+            "rawDataAddr"
 
 
 -- &vec[index] — a fresh `l` temp holding vec + vs*index (the index may be a
@@ -3150,6 +3287,9 @@ isRawWordExp exp =
                 RawCallRaw _ ->
                     True
 
+                RawDataAddr _ ->
+                    True
+
                 _ ->
                     False
 
@@ -3589,13 +3729,13 @@ lowerPath path scrutSlot dest s =
             Ok (readSteps steps scrutSlot dest s)
 
         VField steps field ->
-            -- A record field pattern reads the record via its steps, then looks
-            -- the field up the VM's way: snd (assoc (sym field) rec) — exactly
-            -- Mid.ToZinc's VField (pathInstrs: readPath ++ [Symbol field, assoc,
-            -- snd]) and this slice's own RecordGet lowering (buildRecordGet), so
-            -- parity is by construction.  The record lands in a ROOTED slot
-            -- before the two rt_prim calls, so an allocation inside assoc/snd
-            -- can never see an unrooted record (the stage-3 aggchurn discipline).
+            -- A record field pattern reads the record via its steps into a
+            -- ROOTED slot, then (E) tag-tests it: tag 14 -> Rt.recGet (the
+            -- name walk — pattern sites do not take the positional arm, whose
+            -- rank needs the scrutinee's binder type, which lowerPath does not
+            -- carry); tag 4 -> the old assoc/snd chain.  The record is in a
+            -- rooted slot before any call, so an allocation inside recGet/
+            -- assoc/snd can never see an unrooted record.
             let
                 ( p, s1 ) =
                     freshSlot s
@@ -3603,19 +3743,30 @@ lowerPath path scrutSlot dest s =
                 sRead =
                     readSteps steps scrutSlot p s1
 
-                ( l, s2 ) =
-                    freshSlot sRead
+                ( recB, s2 ) =
+                    freshBinder sRead
+
+                s3 =
+                    { s2 | binderSlots = Dict.insert recB.id p s2.binderSlots }
             in
-            lowerLit (LSymbol field) l s2
-                |> Result.andThen
-                    (\s3 ->
-                        let
-                            ( r, s4 ) =
-                                freshSlot s3
-                        in
-                        rtPrimSlots "assoc" [ l, p ] r s4
-                            |> Result.andThen (\s5 -> rtPrimSlots "snd" [ r ] dest s5)
-                    )
+            if s.rec then
+                lowerVal (recordAccessBody recB Nothing field) dest s3
+
+            else
+                let
+                    ( l, s4 ) =
+                        freshSlot s3
+                in
+                lowerLit (LSymbol field) l s4
+                    |> Result.andThen
+                        (\s5 ->
+                            let
+                                ( r, s6 ) =
+                                    freshSlot s5
+                            in
+                            rtPrimSlots "assoc" [ l, p ] r s6
+                                |> Result.andThen (\s7 -> rtPrimSlots "snd" [ r ] dest s7)
+                        )
 
 
 -- Apply `steps` from srcSlot, writing the reached value into dstSlot.  Pure:
@@ -3641,7 +3792,11 @@ lowerStep step src dst s =
             chaseField 8 src dst s
 
         SndStep ->
-            chaseField 16 src dst s
+            if s.consArr then
+                chaseCdr src dst s
+
+            else
+                chaseField 16 src dst s
 
         HdStep ->
             lowerHdTl True src dst s
@@ -3666,7 +3821,7 @@ lowerStep step src dst s =
                 |> emit (Blit (Il.Tmp eT) (Il.Tmp (slotTmp dst)) vs)
 
 
--- fst/snd: blit the car/cdr body (at `off` in the cons Value) into dst.
+-- fst/snd: blit the car body (at `off` in the cons Value) into dst.
 chaseField : Int -> Int -> Int -> S -> S
 chaseField off src dst s =
     let
@@ -3679,6 +3834,27 @@ chaseField off src dst s =
     emit (Bin (Just p8) L Add (Il.Tmp (slotTmp src)) (Il.Con off)) s2
         |> emit (Load (Just ptrT) L LoadL (Il.Tmp p8))
         |> emit (Blit (Il.Tmp ptrT) (Il.Tmp (slotTmp dst)) vs)
+
+
+-- (A) the cdr of a cons: element 1 of the 2-element array `car` heads
+-- (*(car + vs)).  The cons Value's cdr payload word is now NULL, so the cdr
+-- VALUE is derived through the car pointer, exactly like the Zig readers.
+chaseCdr : Int -> Int -> S -> S
+chaseCdr src dst s =
+    let
+        ( carT, s1 ) =
+            freshTmp s
+
+        ( p8, s2 ) =
+            freshTmp s1
+
+        ( cdrT, s3 ) =
+            freshTmp s2
+    in
+    emit (Bin (Just p8) L Add (Il.Tmp (slotTmp src)) (Il.Con 8)) s3
+        |> emit (Load (Just carT) L LoadL (Il.Tmp p8))
+        |> emit (Bin (Just cdrT) L Add (Il.Tmp carT) (Il.Con vs))
+        |> emit (Blit (Il.Tmp cdrT) (Il.Tmp (slotTmp dst)) vs)
 
 
 -- hd/tl (prims.zig primHd/primTl): nil -> nil, else car/cdr.  The nil arm is
@@ -3709,7 +3885,15 @@ lowerHdTl isHd src dst s =
         |> storeNil dst
         |> jumpTo doneLbl
         |> startBlock chaseLbl
-        |> chaseField (if isHd then 8 else 16) src dst
+        |> (if isHd then
+                chaseField 8 src dst
+
+            else if s.consArr then
+                chaseCdr src dst
+
+            else
+                chaseField 16 src dst
+           )
         |> jumpTo doneLbl
         |> startBlock doneLbl
 
@@ -3929,6 +4113,584 @@ buildRecordUpdate update =
         )
         update.base
         update.updates
+
+
+-- ============================ E: POSITIONAL RECORDS ============================
+-- The corrected design (handoff osier-phase3-ea-plan, Variant B): a record is
+-- tag 14 (ValTag `record`) with payload [data, len, names] — data = the n
+-- field VALUES in canonical order; len = n; names = the address of a STATIC,
+-- content-keyed array of `sym:<field>` DRefs (RawDataAddr).  Equality is over
+-- VALUES only (len + Rt.vecEq), exactly Elm's order-insensitive `==`.  Every
+-- access site tag-tests: tag 14 -> positional data[rank] (closed row) or
+-- Rt.recGet/Rt.recUpd (open/absent/non-Var); tag 4 -> the old assoc/snd chain
+-- (host-built records).  QBE_NOREC=1 restores the assoc-chain route everywhere
+-- (the hatch must reproduce the 00cc7da corpus byte-for-byte).
+
+
+-- The canonical field order: first-occurrence dedup (scoped labels keep the
+-- assoc first-match semantics), then a stable sort by name.  The selfhost
+-- subset has NO List.sort (Basics.compare is numeric-only in this lane), so the
+-- order is an insertion sort over Prelude.compare (byte-lexicographic).
+dedupFirst : List String -> List String
+dedupFirst names =
+    List.foldl (\n acc -> if List.member n acc then acc else acc ++ [ n ]) [] names
+
+
+-- Byte-lexicographic string comparison, expressible in the selfhost subset:
+-- String.toList + Char.toCode + integer `<` (Prelude.compare is NOT importable
+-- into Lower — the real-elm build refuses to compile Prelude's own prim names).
+compareCharLists : List Char -> List Char -> Order
+compareCharLists xs ys =
+    case ( xs, ys ) of
+        ( [], [] ) ->
+            EQ
+
+        ( [], _ ) ->
+            LT
+
+        ( _, [] ) ->
+            GT
+
+        ( x :: xr, y :: yr ) ->
+            let
+                cx =
+                    Char.toCode x
+
+                cy =
+                    Char.toCode y
+            in
+            if cx < cy then
+                LT
+
+            else if cx > cy then
+                GT
+
+            else
+                compareCharLists xr yr
+
+
+compareStrings : String -> String -> Order
+compareStrings a b =
+    compareCharLists (String.toList a) (String.toList b)
+
+
+insertString : String -> List String -> List String
+insertString x acc =
+    case acc of
+        [] ->
+            [ x ]
+
+        y :: rest ->
+            case compareStrings x y of
+                LT ->
+                    x :: acc
+
+                _ ->
+                    y :: insertString x rest
+
+
+sortStrings : List String -> List String
+sortStrings names =
+    List.foldl insertString [] names
+
+
+canonicalNames : List String -> List String
+canonicalNames names =
+    sortStrings (dedupFirst names)
+
+
+-- A record literal's canonical (name, value) pairs: first-occurrence dedup,
+-- stable sort by name.
+recordFields : List ( String, Exp ) -> List ( String, Exp )
+recordFields setters =
+    let
+        dedup =
+            List.foldl
+                (\p acc ->
+                    if List.any (\q -> Tuple.first q == Tuple.first p) acc then
+                        acc
+
+                    else
+                        acc ++ [ p ]
+                )
+                []
+                setters
+    in
+    sortByFirst dedup
+
+
+sortByFirst : List ( String, Exp ) -> List ( String, Exp )
+sortByFirst pairs =
+    List.foldl insertPair [] pairs
+
+
+insertPair : ( String, Exp ) -> List ( String, Exp ) -> List ( String, Exp )
+insertPair p acc =
+    case acc of
+        [] ->
+            [ p ]
+
+        q :: rest ->
+            case compareStrings (Tuple.first p) (Tuple.first q) of
+                LT ->
+                    p :: acc
+
+                _ ->
+                    q :: insertPair p rest
+
+
+rankOf : String -> List String -> Maybe Int
+rankOf field names =
+    case List.indexedMap (\i n -> ( i, n )) names |> List.filter (\( _, n ) -> n == field) of
+        ( i, _ ) :: _ ->
+            Just i
+
+        [] ->
+            Nothing
+
+
+-- The canonical sorted field names of a record subexpression, when it is a Var
+-- whose binderId has a zonked TRecord with a CLOSED tail in the defun's
+-- per-binder table (Lower's S already carries table + defunKey).  Anything else
+-- (absent binder, non-Var subexpression, open-tail row) -> Nothing, i.e. the
+-- walk (recGet/recUpd), never the positional arm.
+closedRecordNames : S -> Exp -> Maybe (List String)
+closedRecordNames s rec =
+    case rec of
+        Var id ->
+            Dict.get s.defunKey s.table
+                |> Maybe.andThen
+                    (\entry ->
+                        case entry.binders of
+                            QbeTypes.Binders binderMap ->
+                                Dict.get id binderMap
+                                    |> Maybe.andThen
+                                        (\ty ->
+                                            case ty of
+                                                Rep.TRecord row ->
+                                                    case row.tail of
+                                                        Rep.REmpty ->
+                                                            Just (canonicalNames (List.map Tuple.first row.fields))
+
+                                                        Rep.RVar _ ->
+                                                            Nothing
+
+                                                _ ->
+                                                    Nothing
+                                        )
+
+                            QbeTypes.BindersAbsent ->
+                                Nothing
+                    )
+
+        _ ->
+            Nothing
+
+
+boxTagIs : Exp -> Int -> Exp
+boxTagIs value tag =
+    Unsafe (RawMkValue { tag = tagBoolean, words = [ Unsafe (RawTagIs { value = value, tag = tag }) ] })
+
+
+-- The shared access body: tag 14 -> positional (Just rank) or recGet walk;
+-- tag 4 -> assoc/snd chain; else (defensive) -> recGet walk.  `recB` is the
+-- binder the record subexpression was bound to (evaluated ONCE).
+recordAccessBody : Binder -> Maybe Int -> String -> Exp
+recordAccessBody recB rank field =
+    let
+        recV =
+            Var recB.id
+
+        positional =
+            Unsafe (RawVecLoad { vec = Unsafe (RawPayload { value = recV, word = 0 }), index = Lit (LNumber (Maybe.withDefault 0 rank)) })
+
+        walk =
+            PrimApp { prim = "recGet", args = [ recV, Lit (LSymbol field) ] }
+
+        chain =
+            PrimApp { prim = "snd", args = [ PrimApp { prim = "assoc", args = [ Lit (LSymbol field), recV ] } ] }
+    in
+    If
+        { cond = boxTagIs recV tagRecord
+        , thenBranch = Maybe.withDefault walk (Maybe.map (\_ -> positional) rank)
+        , elseBranch =
+            If
+                { cond = boxTagIs recV tagCons
+                , thenBranch = chain
+                , elseBranch = walk
+                , falseLabel = "r4"
+                , endLabel = "rg4"
+                }
+        , falseLabel = "r14"
+        , endLabel = "rg"
+        }
+
+
+-- Bind the record subexpression ONCE, then the access body (its evaluation can
+-- allocate; the Let slot roots it across the tag test and both arms).
+recordAccessExp : Binder -> Exp -> Maybe Int -> String -> Exp
+recordAccessExp recB rec rank field =
+    Let { binders = [ LetBind { binder = recB, value = rec } ], body = recordAccessBody recB rank field }
+
+
+lowerRecordLit : List ( String, Exp ) -> Int -> S -> Result String S
+lowerRecordLit setters dest s =
+    if s.rec then
+        lowerRecordLitPos setters dest s
+
+    else
+        lowerVal (buildRecord setters) dest s
+
+
+hasDuplicateLabels : List ( String, Exp ) -> Bool
+hasDuplicateLabels setters =
+    let
+        names =
+            List.map Tuple.first setters
+    in
+    List.length names /= List.length (dedupFirst names)
+
+
+lowerRecordLitPos : List ( String, Exp ) -> Int -> S -> Result String S
+lowerRecordLitPos setters dest s =
+    if hasDuplicateLabels setters then
+        -- scoped labels ({ x = 1, x = 2 }): the positional vector holds ONE
+        -- value per name and cannot represent the duplicate, so keep the
+        -- assoc-chain route (Record.remove's removeFieldImpl needs the chain).
+        lowerVal (buildRecord setters) dest s
+
+    else
+        case recordFields setters of
+            [] ->
+                -- {} stays the old emptylist route (nil) — avoids allocArray(Value, 0).
+                lowerVal (PrimApp { prim = "emptylist", args = [ Lit (LNumber 0) ] }) dest s
+
+            fields ->
+                let
+                    n =
+                        List.length fields
+
+                    names =
+                        List.map Tuple.first fields
+                in
+                -- All values FIRST (their lowering can allocate), THEN the data
+                -- array, then alloc-free stores + wrap — the data temp stays valid
+                -- because nothing between the alloc and the wrap can move the heap.
+                lowerArgsToSlots (List.map Tuple.second fields) s
+                    |> Result.andThen
+                        (\( slots, s1 ) ->
+                            let
+                                ( dataT, s2 ) =
+                                    let
+                                        ( t, st ) =
+                                            freshTmp s1
+                                    in
+                                    ( t, emit (Call (Just t) (Base L) (Il.Sym "rt_vec_alloc") [ ArgVal (Base W) (Il.Con n) ]) st )
+
+                                s3 =
+                                    List.foldl
+                                        (\( i, slot ) st ->
+                                            emit
+                                                (Call Nothing (Base W) (Il.Sym "rt_vec_store")
+                                                    [ ArgVal (Base L) (Il.Tmp dataT)
+                                                    , ArgVal (Base W) (Il.Con i)
+                                                    , ArgVal (Base L) (Il.Tmp (slotTmp slot))
+                                                    ]
+                                                )
+                                                st
+                                        )
+                                        s2
+                                        (List.indexedMap (\i slot -> ( i, slot )) slots)
+                            in
+                            rawWordArg (Unsafe (RawDataAddr names)) s3
+                                |> Result.map
+                                    (\( namesArg, s4 ) ->
+                                        storeValueCell tagRecord [ Il.Tmp dataT, Il.Con n, namesArg ] dest s4
+                                    )
+                        )
+
+
+lowerRecordGet : Exp -> String -> Int -> S -> Result String S
+lowerRecordGet rec field dest s =
+    if s.rec then
+        let
+            ( recB, s0 ) =
+                freshBinder s
+
+            rank =
+                rankOf field (Maybe.withDefault [] (closedRecordNames s rec))
+        in
+        lowerVal (recordAccessExp recB rec rank field) dest s0
+
+    else
+        lowerVal (buildRecordGet rec field) dest s
+
+
+-- recInsert applied once per update, left to right (the walk form; no
+-- positional copy — recInsert handles BOTH `=` update and `<-` insertion:
+-- find-and-overwrite when present, append when absent).
+applyUpdates : Exp -> List ( String, Exp ) -> Exp
+applyUpdates base updates =
+    List.foldl (\( f, e ) acc -> PrimApp { prim = "recInsert", args = [ acc, Lit (LSymbol f), e ] }) base updates
+
+
+-- The update's walk form: tag 14 -> recUpd fold; tag 4 -> the old chain
+-- prepend (host-built base); else -> recUpd fold (defensive).
+recordUpdateWalkExp : Binder -> Exp -> List ( String, Exp ) -> Exp
+recordUpdateWalkExp baseB base updates =
+    let
+        baseV =
+            Var baseB.id
+
+        walk =
+            applyUpdates baseV updates
+
+        chain =
+            buildRecordUpdate { base = baseV, updates = updates }
+    in
+    Let
+        { binders = [ LetBind { binder = baseB, value = base } ]
+        , body =
+            If
+                { cond = boxTagIs baseV tagRecord
+                , thenBranch = walk
+                , elseBranch =
+                    If
+                        { cond = boxTagIs baseV tagCons
+                        , thenBranch = chain
+                        , elseBranch = walk
+                        , falseLabel = "u4"
+                        , endLabel = "ug4"
+                        }
+                , falseLabel = "u14"
+                , endLabel = "ug"
+                }
+        }
+
+
+-- The update's positional form (closed+Var): 1 alloc + one store per canonical
+-- field (the update's pre-lowered slot, or a copy of base.data[rank]) + wrap,
+-- reusing base's names pointer.  Direct IL so the update VALUES lower BEFORE
+-- the data array allocates (their lowering can allocate; the data temp is only
+-- live across alloc-free stores).
+lowerRecordUpdateClosed : Binder -> List String -> List String -> List ( String, Binder ) -> Int -> S -> Result String S
+lowerRecordUpdateClosed baseB baseNames resultNames updPairs dest s =
+    let
+        n =
+            List.length resultNames
+
+        baseV =
+            Var baseB.id
+
+        baseRankOf : String -> Maybe Int
+        baseRankOf f =
+            rankOf f baseNames
+
+        slotFor : String -> Maybe Int
+        slotFor f =
+            case List.filter (\( uf, _ ) -> uf == f) updPairs of
+                ( _, b ) :: _ ->
+                    -- the update value's ROOTED slot (updB.id was mapped to it
+                    -- in lowerRecordUpdate); NOT b.id itself, which is a
+                    -- negative synthetic binder id.
+                    Dict.get b.id s.binderSlots
+
+                [] ->
+                    Nothing
+
+        ( baseSlot, s1 ) =
+            freshSlot s
+    in
+    lowerVal baseV baseSlot s1
+        |> Result.andThen
+            (\s2 ->
+                let
+                    ( tagT, s3 ) =
+                        freshTmp s2
+
+                    ( is14T, s4 ) =
+                        freshTmp s3
+
+                    ( recLbl, s5 ) =
+                        freshLbl "updrec" s4
+
+                    ( notRecLbl, s6 ) =
+                        freshLbl "updchain" s5
+
+                    ( joinLbl, s7 ) =
+                        freshLbl "updjoin" s6
+
+                    s8 =
+                        s7
+                            |> emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp baseSlot)))
+                            |> emit (Cmp (Just is14T) W Ceq (Il.Tmp tagT) (Il.Con tagRecord))
+                            |> closeBlock (Jnz (Il.Tmp is14T) recLbl notRecLbl)
+
+                    -- tag-14 arm: allocate, copy/store, wrap.
+                    ( ndT, s9 ) =
+                        freshTmp s8
+
+                    s10 =
+                        emit (Call (Just ndT) (Base L) (Il.Sym "rt_vec_alloc") [ ArgVal (Base W) (Il.Con n) ]) (startBlock recLbl s9)
+
+                    storeOne : Int -> String -> S -> Result String S
+                    storeOne rank name st =
+                        case slotFor name of
+                            Just uslot ->
+                                Ok
+                                    (emit
+                                        (Call Nothing (Base W) (Il.Sym "rt_vec_store")
+                                            [ ArgVal (Base L) (Il.Tmp ndT)
+                                            , ArgVal (Base W) (Il.Con rank)
+                                            , ArgVal (Base L) (Il.Tmp (slotTmp uslot))
+                                            ]
+                                        )
+                                        st
+                                    )
+
+                            Nothing ->
+                                -- copy base's value for this field: read
+                                -- base.data[baseRankOf name] (the base's data
+                                -- array is in the BASE's canonical order, which
+                                -- differs from the RESULT's when `<-` inserted
+                                -- a field).
+                                case baseRankOf name of
+                                    Nothing ->
+                                        Err ("qbe: record update field " ++ name ++ " is absent from a closed base row (corrupt Mid tree)")
+
+                                    Just brank ->
+                                        let
+                                            ( dataT, st1 ) =
+                                                freshTmp st
+
+                                            ( p8T, st2 ) =
+                                                freshTmp st1
+
+                                            ( elemT, st3 ) =
+                                                freshTmp st2
+                                        in
+                                        Ok
+                                            (st3
+                                                |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp baseSlot)) (Il.Con 8))
+                                                |> emit (Load (Just dataT) L LoadL (Il.Tmp p8T))
+                                                |> emit (Bin (Just elemT) L Add (Il.Tmp dataT) (Il.Con (vs * brank)))
+                                                |> emit
+                                                    (Call Nothing (Base W) (Il.Sym "rt_vec_store")
+                                                        [ ArgVal (Base L) (Il.Tmp ndT)
+                                                        , ArgVal (Base W) (Il.Con rank)
+                                                        , ArgVal (Base L) (Il.Tmp elemT)
+                                                        ]
+                                                    )
+                                            )
+
+                    wrap : S -> Result String S
+                    wrap st =
+                        -- The result's names array is content-keyed on the
+                        -- RESULT field set (base ++ `<-`-inserted fields), NOT
+                        -- the base's — an insertion extends the row.
+                        rawWordArg (Unsafe (RawDataAddr resultNames)) st
+                            |> Result.map
+                                (\( namesArg, st1 ) ->
+                                    storeValueCell tagRecord [ Il.Tmp ndT, Il.Con n, namesArg ] dest st1
+                                        |> jumpTo joinLbl
+                                )
+                in
+                List.foldl
+                    (\( rank, name ) acc -> Result.andThen (storeOne rank name) acc)
+                    (Ok s10)
+                    (List.indexedMap (\rank name -> ( rank, name )) resultNames)
+                    |> Result.andThen wrap
+                    |> Result.andThen
+                        (\sRec ->
+                            -- not-rec arm: tag 4 -> chain prepend; else -> recUpd walk.
+                            let
+                                ( tagT2, s11 ) =
+                                    freshTmp sRec
+
+                                ( is4T, s12 ) =
+                                    freshTmp s11
+
+                                ( chainLbl, s13 ) =
+                                    freshLbl "updassoc" s12
+
+                                ( walkLbl, s14 ) =
+                                    freshLbl "updwalk" s13
+
+                                s15 =
+                                    s14
+                                        |> startBlock notRecLbl
+                                        |> emit (Load (Just tagT2) W LoadW (Il.Tmp (slotTmp baseSlot)))
+                                        |> emit (Cmp (Just is4T) W Ceq (Il.Tmp tagT2) (Il.Con tagCons))
+                                        |> closeBlock (Jnz (Il.Tmp is4T) chainLbl walkLbl)
+
+                                chain =
+                                    buildRecordUpdate { base = baseV, updates = List.map (\( f, b ) -> ( f, Var b.id )) updPairs }
+
+                                walk =
+                                    applyUpdates baseV (List.map (\( f, b ) -> ( f, Var b.id )) updPairs)
+                            in
+                            lowerVal chain dest (startBlock chainLbl s15)
+                                |> Result.map (jumpTo joinLbl)
+                                |> Result.andThen
+                                    (\s16 ->
+                                        lowerVal walk dest (startBlock walkLbl s16)
+                                            |> Result.map (\s17 -> startBlock joinLbl (jumpTo joinLbl s17))
+                                    )
+                        )
+            )
+
+
+lowerRecordUpdate : { base : Exp, updates : List ( String, Exp ) } -> Int -> S -> Result String S
+lowerRecordUpdate update dest s =
+    if s.rec then
+        case closedRecordNames s update.base of
+            Just baseNames ->
+                -- pre-lower base and the update values into rooted slots, bind
+                -- them, then the positional (closed) form.  The RESULT's field
+                -- set is the base's row UNION the updates (a `<-` insertion
+                -- ADDS fields), canonicalized.
+                let
+                    resultNames =
+                        canonicalNames (baseNames ++ List.map Tuple.first update.updates)
+
+                    ( baseSlot, s0 ) =
+                        freshSlot s
+
+                    ( baseB, s1 ) =
+                        freshBinder s0
+                in
+                lowerVal update.base baseSlot s1
+                    |> Result.andThen
+                        (\s2 ->
+                            lowerArgsToSlots (List.map Tuple.second update.updates) s2
+                                |> Result.andThen
+                                    (\( updSlots, s3 ) ->
+                                        let
+                                            ( updBs, s4 ) =
+                                                freshBinders (List.length updSlots) s3
+
+                                            updPairs =
+                                                List.map2 (\( f, _ ) b -> ( f, b )) update.updates updBs
+
+                                            s5 =
+                                                List.foldl
+                                                    (\( b, slot ) st -> { st | binderSlots = Dict.insert b.id slot st.binderSlots })
+                                                    { s4 | binderSlots = Dict.insert baseB.id baseSlot s4.binderSlots }
+                                                    (List.map2 (\b slot -> ( b, slot )) updBs updSlots)
+                                        in
+                                        lowerRecordUpdateClosed baseB baseNames resultNames updPairs dest s5
+                                    )
+                        )
+
+            Nothing ->
+                let
+                    ( baseB, s0 ) =
+                        freshBinder s
+                in
+                lowerVal (recordUpdateWalkExp baseB update.base update.updates) dest s0
+
+    else
+        lowerVal (buildRecordUpdate update) dest s
 
 
 -- ============================ PRIMAPPS ============================

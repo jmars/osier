@@ -595,7 +595,10 @@ take n xs =
 -- list, which the TRecord-typed checker must never see.
 
 removeFieldImpl name rec =
-    case rec of
+    -- (E) a positional (tag-14) record is converted to an assoc chain first —
+    -- this trusted body's walk is over the chain representation; a chain
+    -- argument (host-built) passes through recToChain unchanged.
+    case recToChain rec of
         ( k, v ) :: rest ->
             if k == intern name then
                 rest

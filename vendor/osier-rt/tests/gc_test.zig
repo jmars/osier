@@ -947,30 +947,26 @@ test "M3 T5 deep graph + old-gen cycle terminates" {
     var g = try testInit();
     defer g.deinit();
 
-    // Old-gen cycle: a -> b -> a (two cons cells in old-gen).  The drain must
-    // terminate despite the cycle: forwarding pointers short-circuit
-    // re-visits and page_queued dedup blocks re-queueing.
-    const a = g.allocOldgen(@sizeOf(types.Value), .value);
-    const a_v: *types.Value = @ptrCast(@alignCast(a));
-    const b = g.allocOldgen(@sizeOf(types.Value), .value);
-    const b_v: *types.Value = @ptrCast(@alignCast(b));
-    a_v.* = .{ .tag = .cons, .payload = .{ .cons = .{ .car = null, .cdr = b_v } } };
-    b_v.* = .{ .tag = .cons, .payload = .{ .cons = .{ .car = null, .cdr = a_v } } };
+    // Old-gen fused-pair cycle: a -> b -> a (a's cdr VALUE is b, b's is a).
+    // The drain must terminate despite the cycle: forwarding pointers
+    // short-circuit re-visits and page_queued dedup blocks re-queueing.
+    const a_arr = g.allocArrayOldgen(types.Value, 2);
+    const b_arr = g.allocArrayOldgen(types.Value, 2);
+    const a_v: types.Value = .{ .tag = .cons, .payload = .{ .cons = .{ .car = &a_arr[0], .cdr = null } } };
+    const b_v: types.Value = .{ .tag = .cons, .payload = .{ .cons = .{ .car = &b_arr[0], .cdr = null } } };
+    a_arr[0] = valNil();
+    b_arr[0] = valNil();
+    a_arr[1] = b_v;
+    b_arr[1] = a_v;
 
-    // 500-node cons chain in the nursery, head's far end reaching into the
-    // old-gen cycle (nursery-references-old-gen again).
-    var head: *types.Value = g.alloc(types.Value);
+    // 500-node fused cons chain in the nursery, head's far end reaching into
+    // the old-gen cycle (nursery-references-old-gen again).
+    var head: types.Value = valCons(&g, a_v, valNil());
     const wm0 = g.rootWatermark();
-    g.rootPushPtr(@ptrCast(&head));
-    head.* = .{ .tag = .cons, .payload = .{ .cons = .{ .car = a_v, .cdr = null } } };
-
+    g.rootPushValue(&head);
     var i: usize = 1;
     while (i < 500) : (i += 1) {
-        var node: *types.Value = g.alloc(types.Value);
-        g.rootPushPtr(@ptrCast(&node));
-        node.* = .{ .tag = .cons, .payload = .{ .cons = .{ .car = null, .cdr = head } } };
-        head = node;
-        g.rootPop();
+        head = valCons(&g, valNil(), head);
     }
 
     // Completing the collect at all proves the drain terminates over the
@@ -979,25 +975,30 @@ test "M3 T5 deep graph + old-gen cycle terminates" {
     try std.testing.expectEqual(@as(u64, 1), g.full_collect_count);
 
     // The whole chain survived: walk it, count nodes, land on the cycle.
-    try std.testing.expect(g.inOldgen(@intFromPtr(head)));
+    try std.testing.expect(g.inOldgen(@intFromPtr(head.payload.cons.car)));
     var count: usize = 0;
-    var cur: ?*types.Value = head;
+    var cur: types.Value = head;
     var tail_car: ?*types.Value = null;
-    while (cur) |c| : (cur = c.payload.cons.cdr) {
+    while (cur.tag == types.ValTag.cons) {
         count += 1;
-        if (c.payload.cons.car) |car| tail_car = car;
+        if (cur.payload.cons.car) |car| {
+            if (car.tag == types.ValTag.cons) tail_car = car;
+        }
+        cur = consCdr(&cur).*;
     }
     try std.testing.expectEqual(@as(usize, 500), count);
 
-    // The tail's car is the (evacuated) cycle entry a'; a' -> b' -> a'.
+    // The tail's car is the (evacuated) cycle entry a'; walking a' -> b' ->
+    // a' returns to the same cons (the cycle survived).
     const cycle = tail_car.?;
     try std.testing.expect(g.inOldgen(@intFromPtr(cycle)));
-    const b_evac = cycle.payload.cons.cdr.?;
-    try std.testing.expect(g.inOldgen(@intFromPtr(b_evac)));
-    try std.testing.expectEqual(
-        @intFromPtr(cycle),
-        @intFromPtr(b_evac.payload.cons.cdr.?),
-    );
+    const b_evac = consCdr(cycle).*;
+    try std.testing.expect(g.inOldgen(@intFromPtr(b_evac.payload.cons.car)));
+    const back_to_a = consCdr(&b_evac).*;
+    try std.testing.expectEqual(types.ValTag.cons, back_to_a.tag);
+    // a' -> b' -> a': both the chain's copy of a' and the cycle's own a' carry
+    // the SAME (evacuated) a_arr car pointer.
+    try std.testing.expectEqual(@intFromPtr(cycle.payload.cons.car.?), @intFromPtr(back_to_a.payload.cons.car.?));
 
     try std.testing.expectEqual(@as(usize, 0), gc.collect.debugVerifyHeap(&g, .post_collect));
     g.rootPopTo(wm0);
@@ -1266,26 +1267,26 @@ inline fn valNil() types.Value {
     return .{ .tag = .nil, .payload = .{ .number = 0 } };
 }
 
-/// Faithful port of C: zincvm.c val_cons — allocates a heap `car` cell and a
-/// heap `cdr` cell (both GC_TYPE_VALUE) and returns a cons Value whose car/cdr
-/// point at them.  Roots car, cdr, and car_cell across the two gc_alloc calls
-/// (C's val_cons rooting): a natural preemptive/reactive scavenge CAN fire
-/// between the two allocs, and the pinned slots keep the intermediates valid.
+/// Fused-pair cons, matching values.valCons (the (A) shape): ONE 2-element
+/// value_array, car = &pair[0], cdr = NULL; the cdr VALUE is pair[1], derived
+/// via consCdr.  Roots car/cdr across the single allocArray.
 fn valCons(g: *gc.Gc, car: types.Value, cdr: types.Value) types.Value {
     var car_copy = car;
     var cdr_copy = cdr;
     g.rootPushValue(&car_copy);
     g.rootPushValue(&cdr_copy);
-    const car_cell = g.alloc(types.Value);
-    var car_root: ?*types.Value = car_cell;
-    g.rootPushPtr(@ptrCast(&car_root));
-    const cdr_cell = g.alloc(types.Value);
-    car_root.?.* = car;
-    cdr_cell.* = cdr;
-    g.rootPop(); // car_root
-    g.rootPop(); // cdr
-    g.rootPop(); // car
-    return .{ .tag = .cons, .payload = .{ .cons = .{ .car = car_root, .cdr = cdr_cell } } };
+    const pair = g.allocArray(types.Value, 2);
+    pair[0] = car_copy;
+    pair[1] = cdr_copy;
+    g.rootPop();
+    g.rootPop();
+    return .{ .tag = .cons, .payload = .{ .cons = .{ .car = &pair[0], .cdr = null } } };
+}
+
+/// (A) the cdr of a fused-pair cons — element 1 of the 2-element array `car`
+/// heads.  The Value's cdr field is always NULL.
+fn consCdr(v: *const types.Value) *types.Value {
+    return &@as([*]types.Value, @ptrCast(v.payload.cons.car.?))[1];
 }
 
 /// Walk the ROOT_VALUE-rooted cons tree and confirm every node's car is the
@@ -1300,8 +1301,7 @@ fn treeVerify(root: *const types.Value, node_count: usize) bool {
         const car = cur.payload.cons.car orelse return false;
         if (car.tag != types.ValTag.number) return false;
         if (car.payload.number != @as(i64, @intCast(count))) return false;
-        const cdr = cur.payload.cons.cdr orelse return false;
-        cur = cdr.*;
+        cur = consCdr(&cur).*;
         count += 1;
     }
     return cur.tag == types.ValTag.nil and count == node_count;

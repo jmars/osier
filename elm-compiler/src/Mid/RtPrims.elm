@@ -195,6 +195,28 @@ lenOf x =
     Unsafe (RawPayload32 { value = x, word = 1 })
 
 
+{-| The record-helpers' length: a NIL base (the `{}` literal, which E keeps on
+the emptylist route) has UNZEROED payload words 1/2 in a frame-free defun's
+scratch slot, so a plain `lenOf` reads garbage and a huge `rt_vec_alloc`
+follows.  Only the record walk/rebuild defuns use this — they are emitted
+ONLY under rec=True, so the QBE_NOREC=1 hatch (which never emits them) keeps
+mkNil's 0-word shape byte-identical to pre-E.
+-}
+recLenOf : Exp -> Exp
+recLenOf x =
+    -- WORD-level nil-aware length: len * (1 - isNil).  A nil base (the `{}`
+    -- literal) has UNZEROED payload words 1/2 in a frame-free defun's scratch
+    -- slot, so a plain lenOf reads garbage; this forces 0 for tag 5.  Stays a
+    -- WORD producer (usable in RawAllocVector/cmpW), unlike an If branch.
+    Unsafe
+        (RawBin
+            { op = RMul
+            , a = Unsafe (RawPayload32 { value = x, word = 1 })
+            , b = Unsafe (RawBin { op = RSub, a = n 1, b = Unsafe (RawTagIs { value = x, tag = 5 }) })
+            }
+        )
+
+
 -- ---- values ----
 iadd x y =
     Unsafe (RawBin { op = RAdd, a = x, b = y })
@@ -383,8 +405,8 @@ key test.  depth is structurally bounded by the heap, as in Zig (its depth
 counter guards only against malformed cycles, which the fused-pair
 representation cannot produce).
 -}
-deepEqDefun : Defun
-deepEqDefun =
+deepEqDefun : Bool -> Defun
+deepEqDefun rec =
     let
         a =
             p1
@@ -392,11 +414,43 @@ deepEqDefun =
         bb =
             p2
     in
-    lam "Rt.deepEq" [ a, bb ] (deepEqArms a bb)
+    lam "Rt.deepEq" [ a, bb ] (deepEqArms rec a bb)
 
 
-deepEqArms : Binder -> Binder -> Exp
-deepEqArms a bb =
+deepEqArms : Bool -> Binder -> Binder -> Exp
+deepEqArms rec a bb =
+    let
+        -- E's tag-14 arm exists ONLY when records are positional (QBE_NOREC=1
+        -- restores the pre-E chain where tag 14 is never produced).
+        -- BOUNDARY (documented, plan risk 6): a compiled record (tag 14) == a
+        -- host-built chain (tag 4) of the SAME content is FALSE — the tags
+        -- differ and this switch short-circuits on `a.tag != b.tag` before any
+        -- arm runs.  Reachable for host-only record types (Io.stat) and via
+        -- Record.remove (recToChain returns a CHAIN), so e.g.
+        --   Record.remove "x" { x = 1, y = 2 } == { y = 2 }
+        -- is false under E where Elm's assoc-list semantics said true.
+        aggTail =
+            if rec then
+                (iff (and2 (mkBool (tagIs (v a) 14)) (mkBool (tagIs (v bb) 14)))
+                    (and2 (mkBool (cmpW RCeq (lenOf (v a)) (lenOf (v bb))))
+                        (callR "Rt.vecEq" [ v a, v bb, mkNum (n 0) ])
+                    )
+                    (iff (and2 (mkBool (tagIs (v a) 10)) (mkBool (tagIs (v bb) 10)))
+                        (and2 (mkBool (cmpW RCeq (lenOf (v a)) (lenOf (v bb))))
+                            (callR "Rt.vecEq" [ v a, v bb, mkNum (n 0) ])
+                        )
+                        falseV
+                    )
+                )
+
+            else
+                (iff (and2 (mkBool (tagIs (v a) 10)) (mkBool (tagIs (v bb) 10)))
+                    (and2 (mkBool (cmpW RCeq (lenOf (v a)) (lenOf (v bb))))
+                        (callR "Rt.vecEq" [ v a, v bb, mkNum (n 0) ])
+                    )
+                    falseV
+                )
+    in
     iff (and2 (mkBool (tagIs (v a) 0)) (mkBool (tagIs (v bb) 0)))
         (mkBool (cmpW RCeq (wOf (v a)) (wOf (v bb))))
         (iff (and2 (mkBool (tagIs (v a) 1)) (mkBool (tagIs (v bb) 1)))
@@ -415,12 +469,7 @@ deepEqArms a bb =
                                 (and2 (callR "Rt.deepEq" [ carV (v a), carV (v bb) ])
                                     (callR "Rt.deepEq" [ cdrV (v a), cdrV (v bb) ])
                                 )
-                                (iff (and2 (mkBool (tagIs (v a) 10)) (mkBool (tagIs (v bb) 10)))
-                                    (and2 (mkBool (cmpW RCeq (lenOf (v a)) (lenOf (v bb))))
-                                        (callR "Rt.vecEq" [ v a, v bb, mkNum (n 0) ])
-                                    )
-                                    falseV
-                                )
+                                aggTail
                             )
                         )
                     )
@@ -985,9 +1034,525 @@ bytesBuildDefun =
         )
 
 
-helperDefuns : List Defun
-helperDefuns =
-    [ deepEqDefun
+{-| `Rt.recGet rec field` — E's tag-14 record read, the WALK form (closed-row
+sites load data[rank] directly; this is the open/absent/non-Var fallback).
+Walks the static names array (word 2) and byte-compares each name against
+`field` (a symbol Value) via symEq, boxing the 8-byte name pointer as a symbol
+Value (tag 2, word 0 = the pointer — the SAME layout symEq already reads).
+-}
+recGetDefun : Defun
+recGetDefun =
+    let
+        rec =
+            p1
+
+        field =
+            p2
+    in
+    lam "Rt.recGet" [ rec, field ]
+        (callR "Rt.recGetGo" [ v rec, v field, mkNum (n 0) ])
+
+
+recGetGoDefun : Defun
+recGetGoDefun =
+    let
+        rec =
+            p1
+
+        field =
+            p2
+
+        i =
+            p3
+
+        nameSym =
+            b 4
+
+        nameSymVal =
+            Unsafe (RawVecLoad { vec = Unsafe (RawPayload { value = v rec, word = 2 }), index = wOf (v i) })
+    in
+    lam "Rt.recGetGo" [ rec, field, i ]
+        (iff (mkBool (cmpW RCges (wOf (v i)) (recLenOf (v rec))))
+            haltV
+            (lets [ ( nameSym, nameSymVal ) ]
+                (iff (callR "Rt.symEq" [ v nameSym, v field, mkNum (n 0) ])
+                    (Unsafe (RawVecLoad { vec = Unsafe (RawPayload { value = v rec, word = 0 }), index = wOf (v i) }))
+                    (callR "Rt.recGetGo" [ v rec, v field, mkNum (iadd (wOf (v i)) (n 1)) ])
+                )
+            )
+        )
+
+
+{-| `Rt.recUpd rec field newv` — E's tag-14 record update (the walk form):
+find the field's index (recUpdFind), allocate the copy, copy all values
+(recUpdCopy), overwrite the found slot, wrap reusing the base's names pointer.
+Every defun here is <= 3 params (the lean ABI's direct_arity bound), so the
+walk is split into two 3-param passes rather than one 5-param loop.
+-}
+recUpdDefun : Defun
+recUpdDefun =
+    let
+        rec =
+            p1
+
+        field =
+            p2
+
+        newv =
+            p3
+
+        find =
+            b 4
+
+        nd =
+            b 5
+
+        ndN =
+            b 6
+
+        copied =
+            b 7
+
+        overwrote =
+            b 8
+    in
+    lam "Rt.recUpd" [ rec, field, newv ]
+        (lets
+            [ ( find, callR "Rt.recUpdFind" [ v rec, v field, mkNum (n 0) ] )
+            , ( nd, Unsafe (RawAllocVector (recLenOf (v rec))) )
+            , ( ndN, mkNum (v nd) )
+            , ( copied, callR "Rt.recUpdCopy" [ v rec, v ndN, mkNum (n 0) ] )
+            , ( overwrote
+              , Unsafe (RawVecStore { vec = wOf (v ndN), index = wOf (v find), value = v newv })
+              )
+            ]
+            (Unsafe
+                (RawMkValue
+                    { tag = 14
+                    , words =
+                        [ Unsafe (RawVecAddr { vec = wOf (v ndN), index = n 0 })
+                        , recLenOf (v rec)
+                        , Unsafe (RawPayload { value = v rec, word = 2 })
+                        ]
+                    }
+                )
+            )
+        )
+
+
+recUpdFindDefun : Defun
+recUpdFindDefun =
+    let
+        rec =
+            p1
+
+        field =
+            p2
+
+        i =
+            p3
+
+        nameSym =
+            b 4
+
+        nameSymVal =
+            Unsafe (RawVecLoad { vec = Unsafe (RawPayload { value = v rec, word = 2 }), index = wOf (v i) })
+    in
+    lam "Rt.recUpdFind" [ rec, field, i ]
+        (iff (mkBool (cmpW RCges (wOf (v i)) (recLenOf (v rec))))
+            (mkNum (n -1))
+            (lets [ ( nameSym, nameSymVal ) ]
+                (iff (callR "Rt.symEq" [ v nameSym, v field, mkNum (n 0) ])
+                    (mkNum (wOf (v i)))
+                    (callR "Rt.recUpdFind" [ v rec, v field, mkNum (iadd (wOf (v i)) (n 1)) ])
+                )
+            )
+        )
+
+
+recUpdCopyDefun : Defun
+recUpdCopyDefun =
+    let
+        rec =
+            p1
+
+        newdata =
+            p2
+
+        i =
+            p3
+
+        stored =
+            b 4
+
+        storedVal =
+            Unsafe
+                (RawVecStore
+                    { vec = wOf (v newdata)
+                    , index = wOf (v i)
+                    , value = Unsafe (RawVecLoad { vec = Unsafe (RawPayload { value = v rec, word = 0 }), index = wOf (v i) })
+                    }
+                )
+    in
+    lam "Rt.recUpdCopy" [ rec, newdata, i ]
+        (iff (mkBool (cmpW RCges (wOf (v i)) (recLenOf (v rec))))
+            mkNil
+            (lets [ ( stored, storedVal ) ]
+                (callR "Rt.recUpdCopy" [ v rec, v newdata, mkNum (iadd (wOf (v i)) (n 1)) ])
+            )
+        )
+
+
+{-| `Rt.symLess a b i` — byte-lexicographic LESS-THAN of two symbol Values'
+names (symEq tests equality only; the sorted-insert path needs `<`).  Mirrors
+symEq's walk: byte at i, null-termination decides prefix order.
+-}
+symLessDefun : Defun
+symLessDefun =
+    let
+        a =
+            p1
+
+        bb =
+            p2
+
+        i =
+            p3
+
+        ca =
+            b 4
+
+        cb =
+            b 5
+    in
+    lam "Rt.symLess" [ a, bb, i ]
+        (lets
+            [ ( ca, mkNum (byteOf (v a) (wOf (v i))) )
+            , ( cb, mkNum (byteOf (v bb) (wOf (v i))) )
+            ]
+            (iff (mkBool (cmpW RCeq (wOf (v ca)) (n 0)))
+                (mkBool (cmpW RCne (wOf (v cb)) (n 0)))
+                (iff (mkBool (cmpW RCeq (wOf (v cb)) (n 0)))
+                    falseV
+                    (iff (mkBool (cmpW RClts (wOf (v ca)) (wOf (v cb))))
+                        trueV
+                        (iff (mkBool (cmpW RCgts (wOf (v ca)) (wOf (v cb))))
+                            falseV
+                            (callR "Rt.symLess" [ v a, v bb, mkNum (iadd (wOf (v i)) (n 1)) ])
+                        )
+                    )
+                )
+            )
+        )
+
+
+{-| `Rt.recAppendFind rec field i` — the SORTED position the new field must
+take: the first index i whose name sorts after `field` (symLess field
+names[i]), else len.  Keeps every tag-14 data/names array in canonical order.
+-}
+recAppendFindDefun : Defun
+recAppendFindDefun =
+    let
+        rec =
+            p1
+
+        field =
+            p2
+
+        i =
+            p3
+
+        nameSym =
+            b 4
+
+        nameSymVal =
+            Unsafe (RawVecLoad { vec = Unsafe (RawPayload { value = v rec, word = 2 }), index = wOf (v i) })
+    in
+    lam "Rt.recAppendFind" [ rec, field, i ]
+        (iff (mkBool (cmpW RCges (wOf (v i)) (recLenOf (v rec))))
+            (mkNum (wOf (v i)))
+            (lets [ ( nameSym, nameSymVal ) ]
+                (iff (callR "Rt.symLess" [ v field, v nameSym, mkNum (n 0) ])
+                    (mkNum (wOf (v i)))
+                    (callR "Rt.recAppendFind" [ v rec, v field, mkNum (iadd (wOf (v i)) (n 1)) ])
+                )
+            )
+        )
+
+
+{-| `Rt.recAppendDataGo rec newdata packed` — copy the base's data into the
+one-longer array, leaving a HOLE at the sorted insert position.  `packed` =
+pos*65536 + j (the destination slot 0..len; records have < 65536 fields).
+-}
+recAppendDataGoDefun : Defun
+recAppendDataGoDefun =
+    let
+        rec =
+            p1
+
+        newdata =
+            p2
+
+        packed =
+            p3
+
+        j =
+            b 4
+
+        pos =
+            b 5
+
+        store =
+            b 6
+    in
+    lam "Rt.recAppendDataGo" [ rec, newdata, packed ]
+        (lets
+            [ ( j, mkNum (iand (wOf (v packed)) (n 65535)) )
+            , ( pos, mkNum (shrW (wOf (v packed)) (n 16)) )
+            ]
+            (iff (mkBool (cmpW RCgts (wOf (v j)) (recLenOf (v rec))))
+                mkNil
+                (lets
+                    [ ( store
+                      , iff (mkBool (cmpW RClts (wOf (v j)) (wOf (v pos))))
+                            (Unsafe
+                                (RawVecStore
+                                    { vec = wOf (v newdata)
+                                    , index = wOf (v j)
+                                    , value = Unsafe (RawVecLoad { vec = Unsafe (RawPayload { value = v rec, word = 0 }), index = wOf (v j) })
+                                    }
+                                )
+                            )
+                            (iff (mkBool (cmpW RCeq (wOf (v j)) (wOf (v pos))))
+                                mkNil
+                                (Unsafe
+                                    (RawVecStore
+                                        { vec = wOf (v newdata)
+                                        , index = wOf (v j)
+                                        , value = Unsafe (RawVecLoad { vec = Unsafe (RawPayload { value = v rec, word = 0 }), index = isub (wOf (v j)) (n 1) })
+                                        }
+                                    )
+                                )
+                            )
+                      )
+                    ]
+                    (callR "Rt.recAppendDataGo" [ v rec, v newdata, mkNum (iadd (wOf (v packed)) (n 1)) ])
+                )
+            )
+        )
+
+
+{-| `Rt.recAppendNamesGo rec newnames packed` — the names-array twin of
+recAppendDataGo (word 2 instead of word 0).
+-}
+recAppendNamesGoDefun : Defun
+recAppendNamesGoDefun =
+    let
+        rec =
+            p1
+
+        newnames =
+            p2
+
+        packed =
+            p3
+
+        j =
+            b 4
+
+        pos =
+            b 5
+
+        store =
+            b 6
+    in
+    lam "Rt.recAppendNamesGo" [ rec, newnames, packed ]
+        (lets
+            [ ( j, mkNum (iand (wOf (v packed)) (n 65535)) )
+            , ( pos, mkNum (shrW (wOf (v packed)) (n 16)) )
+            ]
+            (iff (mkBool (cmpW RCgts (wOf (v j)) (recLenOf (v rec))))
+                mkNil
+                (lets
+                    [ ( store
+                      , iff (mkBool (cmpW RClts (wOf (v j)) (wOf (v pos))))
+                            (Unsafe
+                                (RawVecStore
+                                    { vec = wOf (v newnames)
+                                    , index = wOf (v j)
+                                    , value = Unsafe (RawVecLoad { vec = Unsafe (RawPayload { value = v rec, word = 2 }), index = wOf (v j) })
+                                    }
+                                )
+                            )
+                            (iff (mkBool (cmpW RCeq (wOf (v j)) (wOf (v pos))))
+                                mkNil
+                                (Unsafe
+                                    (RawVecStore
+                                        { vec = wOf (v newnames)
+                                        , index = wOf (v j)
+                                        , value = Unsafe (RawVecLoad { vec = Unsafe (RawPayload { value = v rec, word = 2 }), index = isub (wOf (v j)) (n 1) })
+                                        }
+                                    )
+                                )
+                            )
+                      )
+                    ]
+                    (callR "Rt.recAppendNamesGo" [ v rec, v newnames, mkNum (iadd (wOf (v packed)) (n 1)) ])
+                )
+            )
+        )
+
+
+{-| `Rt.recAppend rec field newv` — INSERT a NEW field (the `<-` insertion's
+absent case) at its SORTED position, keeping the data/names arrays canonical.
+Allocates one-longer arrays, shifts around the insert position, stores the
+value and the field symbol, wraps.
+-}
+recAppendDefun : Defun
+recAppendDefun =
+    let
+        rec =
+            p1
+
+        field =
+            p2
+
+        newv =
+            p3
+
+        pos =
+            b 4
+
+        nd =
+            b 5
+
+        ndN =
+            b 6
+
+        nn =
+            b 7
+
+        nnN =
+            b 8
+
+        packed =
+            b 9
+
+        dataCopied =
+            b 10
+
+        namesCopied =
+            b 11
+
+        storeNewv =
+            b 12
+
+        storeField =
+            b 13
+    in
+    lam "Rt.recAppend" [ rec, field, newv ]
+        (lets
+            [ ( pos, callR "Rt.recAppendFind" [ v rec, v field, mkNum (n 0) ] )
+            , ( nd, Unsafe (RawAllocVector (iadd (recLenOf (v rec)) (n 1))) )
+            , ( ndN, mkNum (v nd) )
+            , ( nn, Unsafe (RawAllocVector (iadd (recLenOf (v rec)) (n 1))) )
+            , ( nnN, mkNum (v nn) )
+            , ( packed, mkNum (imul (wOf (v pos)) (n 65536)) )
+            , ( dataCopied, callR "Rt.recAppendDataGo" [ v rec, v ndN, v packed ] )
+            , ( namesCopied, callR "Rt.recAppendNamesGo" [ v rec, v nnN, v packed ] )
+            , ( storeNewv
+              , Unsafe (RawVecStore { vec = wOf (v ndN), index = wOf (v pos), value = v newv })
+              )
+            , ( storeField
+              , Unsafe (RawVecStore { vec = wOf (v nnN), index = wOf (v pos), value = v field })
+              )
+            ]
+            (Unsafe
+                (RawMkValue
+                    { tag = 14
+                    , words =
+                        [ Unsafe (RawVecAddr { vec = wOf (v ndN), index = n 0 })
+                        , iadd (recLenOf (v rec)) (n 1)
+                        , Unsafe (RawVecAddr { vec = wOf (v nnN), index = n 0 })
+                        ]
+                    }
+                )
+            )
+        )
+
+
+{-| `Rt.recInsert rec field newv` — the `<-` INSERTION-or-update: if the field
+is present, update (recUpd); if absent, append (recAppend).
+-}
+recInsertDefun : Defun
+recInsertDefun =
+    let
+        rec =
+            p1
+
+        field =
+            p2
+
+        newv =
+            p3
+
+        find =
+            b 4
+    in
+    lam "Rt.recInsert" [ rec, field, newv ]
+        (lets [ ( find, callR "Rt.recUpdFind" [ v rec, v field, mkNum (n 0) ] ) ]
+            (iff (mkBool (cmpW RCges (wOf (v find)) (n 0)))
+                (callR "Rt.recUpd" [ v rec, v field, v newv ])
+                (callR "Rt.recAppend" [ v rec, v field, v newv ])
+            )
+        )
+
+
+{-| `Rt.recToChain rec` — convert a positional record to an assoc chain (the
+representation `Prelude.removeFieldImpl` walks).  Used by the trusted
+removeFieldImpl body so `Record.remove` works on compiled (tag-14) records.
+-}
+recToChainDefun : Defun
+recToChainDefun =
+    let
+        rec =
+            p1
+    in
+    lam "Rt.recToChain" [ rec ]
+        (iff (mkBool (tagIs (v rec) 14))
+            (callR "Rt.recToChainGo" [ v rec, mkNum (n 0), mkNil ])
+            (v rec)
+        )
+
+
+recToChainGoDefun : Defun
+recToChainGoDefun =
+    let
+        rec =
+            p1
+
+        i =
+            p2
+
+        acc =
+            p3
+
+        pair =
+            callR "Rt.@p"
+                [ Unsafe (RawVecLoad { vec = Unsafe (RawPayload { value = v rec, word = 2 }), index = wOf (v i) })
+                , Unsafe (RawVecLoad { vec = Unsafe (RawPayload { value = v rec, word = 0 }), index = wOf (v i) })
+                ]
+    in
+    lam "Rt.recToChainGo" [ rec, i, acc ]
+        (iff (mkBool (cmpW RCges (wOf (v i)) (recLenOf (v rec))))
+            (v acc)
+            (callR "Rt.recToChainGo" [ v rec, mkNum (iadd (wOf (v i)) (n 1)), consV pair (v acc) ])
+        )
+
+
+helperDefuns : Bool -> List Defun
+helperDefuns rec =
+    [ deepEqDefun rec
     , bytesEqGoDefun
     , symEqDefun
     , vecEqDefun
@@ -1009,6 +1574,19 @@ helperDefuns =
     , subGoDefun
     , repGoDefun
     , bytesBuildDefun
+    , recGetDefun
+    , recGetGoDefun
+    , recUpdDefun
+    , recUpdFindDefun
+    , recUpdCopyDefun
+    , symLessDefun
+    , recAppendFindDefun
+    , recAppendDataGoDefun
+    , recAppendNamesGoDefun
+    , recAppendDefun
+    , recInsertDefun
+    , recToChainDefun
+    , recToChainGoDefun
     ]
 
 
@@ -1032,9 +1610,15 @@ the end of the body.
 
 Binder ids are unique within the defun (params 1, 2; then 3, 4, 5) — the
 same convention FromAst's per-defun counter produces.
+
+`consArr` selects the representation: True = (A) ONE pointer (the RawMkValue
+carries only the pair head; the cdr word stays ZERO — storeValueWords zeroes
+unwritten words — and every cdr reader derives it as pair[1]); False = the
+pre-(A) two-word fused pair (the QBE_NOCONSARR=1 hatch, which reproduces the
+00cc7da corpus byte-for-byte).
 -}
-consDefun : Defun
-consDefun =
+consDefun : Bool -> Defun
+consDefun consArr =
     let
         car =
             { id = 1, name = "car" }
@@ -1048,6 +1632,16 @@ consDefun =
         word : Int -> Exp
         word m =
             Lit (LNumber m)
+
+        consWords : List Exp
+        consWords =
+            if consArr then
+                [ Unsafe (RawVecAddr { vec = Var pair.id, index = word 0 }) ]
+
+            else
+                [ Unsafe (RawVecAddr { vec = Var pair.id, index = word 0 })
+                , Unsafe (RawVecAddr { vec = Var pair.id, index = word 1 })
+                ]
 
         body : Exp
         body =
@@ -1088,10 +1682,7 @@ consDefun =
                                 Unsafe
                                     (RawMkValue
                                         { tag = 4
-                                        , words =
-                                            [ Unsafe (RawVecAddr { vec = Var pair.id, index = word 0 })
-                                            , Unsafe (RawVecAddr { vec = Var pair.id, index = word 1 })
-                                            ]
+                                        , words = consWords
                                         }
                                     )
                             }
@@ -1115,11 +1706,11 @@ calls (stat/listdir/glob result building) keep the Zig body — the flip's
 deletion list must exclude primAtP, or first rewrite those three host call
 sites to values.valCons directly.
 -}
-atpDefun : Defun
-atpDefun =
+atpDefun : Bool -> Defun
+atpDefun consArr =
     let
         c =
-            consDefun
+            consDefun consArr
     in
     { c | key = "Rt.@p" }
 
@@ -1146,8 +1737,8 @@ byte walk), symbols (name walk), booleans (payload32), the Int/Float
 promote pair, cons-vs-symbol false, symbol/prim both ways (the name walk),
 cons/cons and vector/vector through deepEq, else both-nil.
 -}
-eqDefun : Defun
-eqDefun =
+eqDefun : Bool -> Defun
+eqDefun rec =
     let
         a =
             p1
@@ -1182,9 +1773,20 @@ eqDefun =
                                         (callR "Rt.symEq" [ v a, v bb, mkNum (n 0) ])
                                         (iff (and2 (mkBool (tagIs (v a) 4)) (mkBool (tagIs (v bb) 4)))
                                             (callR "Rt.deepEq" [ v a, v bb ])
-                                            (iff (and2 (mkBool (tagIs (v a) 10)) (mkBool (tagIs (v bb) 10)))
-                                                (callR "Rt.deepEq" [ v a, v bb ])
-                                                (and2 (mkBool (tagIs (v a) 5)) (mkBool (tagIs (v bb) 5)))
+                                            (if rec then
+                                                (iff (and2 (mkBool (tagIs (v a) 14)) (mkBool (tagIs (v bb) 14)))
+                                                    (callR "Rt.deepEq" [ v a, v bb ])
+                                                    (iff (and2 (mkBool (tagIs (v a) 10)) (mkBool (tagIs (v bb) 10)))
+                                                        (callR "Rt.deepEq" [ v a, v bb ])
+                                                        (and2 (mkBool (tagIs (v a) 5)) (mkBool (tagIs (v bb) 5)))
+                                                    )
+                                                )
+
+                                             else
+                                                (iff (and2 (mkBool (tagIs (v a) 10)) (mkBool (tagIs (v bb) 10)))
+                                                    (callR "Rt.deepEq" [ v a, v bb ])
+                                                    (and2 (mkBool (tagIs (v a) 5)) (mkBool (tagIs (v bb) 5)))
+                                                )
                                             )
                                         )
                                     )
@@ -1648,12 +2250,12 @@ sndDefun =
     lam "Rt.snd" [ x ] (cdrV (v x))
 
 
-primDefuns : List Defun
-primDefuns =
-    [ consDefun
-    , atpDefun
+primDefuns : Bool -> Bool -> List Defun
+primDefuns consArr rec =
+    [ consDefun consArr
+    , atpDefun consArr
     , emptylistDefun
-    , eqDefun
+    , eqDefun rec
     , addDefun
     , subDefun
     , mulDefun

@@ -35,26 +35,23 @@ pub fn evacuate(gc: *Gc, slot: *usize) void {
 pub fn scanValue(gc: *Gc, v: *types.Value) void {
     switch (v.tag) {
         .cons => {
-            // P1 DUAL-SHAPE: a fused pair (values.valCons) puts car/cdr in ONE
-            // 2-element value_array with cdr == car + sizeof(Value); a classic
-            // cons is two separate .value cells (48-byte stride: 8-byte header
-            // + 40-byte body), so a classic BODY pointer can never equal
-            // car+40 — that offset is always a header/filler word.  Read both
-            // fields BEFORE evacuating car (evacuation moves the whole array
-            // and forwards it).  For a fused pair, gcMove(car) moves the WHOLE
-            // array (car is the array body HEAD) and cdr is recomputed as the
-            // new interior — NEVER gcMove cdr separately: cdr-1 is element-0
-            // payload (garbage header).  Classic: evacuate each cell normally.
-            const car_addr: usize = @as(*const usize, @ptrCast(&v.payload.cons.car)).*;
-            const cdr_addr: usize = @as(*const usize, @ptrCast(&v.payload.cons.cdr)).*;
-            const fused = car_addr != 0 and cdr_addr == car_addr + @sizeOf(types.Value);
+            // (A) cons is ONE pointer to a 2-element value array: car =
+            // &pair[0], and the cdr VALUE is pair[1] (derived as *(data+40)).
+            // The Value's cdr field is ALWAYS null (zero producers of the
+            // classic two-cell shape), so only car is evacuated — gcMove(car)
+            // moves the WHOLE 2-element array and pair[1] moves with it.
             evacuate(gc, @ptrCast(&v.payload.cons.car));
-            if (fused) {
-                @as(*usize, @ptrCast(&v.payload.cons.cdr)).* =
-                    @as(*const usize, @ptrCast(&v.payload.cons.car)).* + @sizeOf(types.Value);
-            } else {
-                evacuate(gc, @ptrCast(&v.payload.cons.cdr));
-            }
+        },
+        .record => {
+            // E positional record: [data, len, names].  `len` is a scalar;
+            // `data` and `names` are both pointers to arrays of Values — `data`
+            // is the field values, `names` is the symbol-Value names array
+            // (STATIC for a closed build, DYNAMIC for `<-` insertion /
+            // Record.remove).  A static address is outside the heap so
+            // evacuate no-ops on it; the dynamic array must be evacuated like
+            // any value_array.
+            evacuate(gc, @ptrCast(&v.payload.record.data));
+            evacuate(gc, @ptrCast(&v.payload.record.names));
         },
         .lambda => {
             evacuate(gc, @ptrCast(&v.payload.lambda.code));
@@ -91,8 +88,11 @@ pub fn instrReferencesNursery(gc: *const Gc, in: *const types.Instr) bool {
 /// check non-null first (C parity).
 pub fn valueReferencesNursery(gc: *const Gc, v: *const types.Value) bool {
     return switch (v.tag) {
-        .cons => gc.inNursery(@as(*const usize, @ptrCast(&v.payload.cons.car)).*) or
-            gc.inNursery(@as(*const usize, @ptrCast(&v.payload.cons.cdr)).*),
+        .cons => gc.inNursery(@as(*const usize, @ptrCast(&v.payload.cons.car)).*),
+        .record => ((v.payload.record.data != null) and
+            gc.inNursery(@as(*const usize, @ptrCast(&v.payload.record.data)).*))
+            or ((v.payload.record.names != null) and
+                gc.inNursery(@as(*const usize, @ptrCast(&v.payload.record.names)).*)),
         .lambda => gc.inNursery(@as(*const usize, @ptrCast(&v.payload.lambda.code)).*) or
             gc.inNursery(@as(*const usize, @ptrCast(&v.payload.lambda.env)).*),
         .vector => (v.payload.vector.data != null) and

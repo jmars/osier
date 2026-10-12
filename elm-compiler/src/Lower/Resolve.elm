@@ -318,6 +318,7 @@ processPrimAliases =
     , ( "getpidPrim", Expr.wrapperGlobalName "getpid" )
     , ( "globPrim", Expr.wrapperGlobalName "glob" )
     , ( "intern", Expr.wrapperGlobalName "intern" )
+    , ( "recToChain", Expr.wrapperGlobalName "recToChain" )
     ]
 
 

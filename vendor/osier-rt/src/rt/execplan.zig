@@ -217,7 +217,7 @@ fn tdlIsEmpty(v: Value) TdlState {
     const car = v.payload.cons.car orelse return .malformed;
     if (car.tag != .symbol) return .malformed;
     if (!std.mem.eql(u8, values.symSlice(car.*), "cons")) return .malformed;
-    const cdr = v.payload.cons.cdr.?.*;
+    const cdr = values.consCdr(v).*;
     if (cdr.tag == .nil) return .empty;
     if (cdr.tag == .cons) return .node;
     return .malformed;
@@ -226,8 +226,8 @@ fn tdlIsEmpty(v: Value) TdlState {
 /// C: zincvm.c:1123-1131 tdl_pop: head + rest through the singleton wrapper.
 fn tdlPop(v: Value, head: *Value, rest: *Value) bool {
     if (tdlIsEmpty(v) != .node) return false;
-    const cdr = v.payload.cons.cdr.?.*; // (H . (T . nil))
-    const t1 = cdr.payload.cons.cdr.?.*; // cons(T, nil) singleton wrapper
+    const cdr = values.consCdr(v).*; // (H . (T . nil))
+    const t1 = values.consCdr(cdr).*; // cons(T, nil) singleton wrapper
     if (t1.tag != .cons) return false;
     head.* = cdr.payload.cons.car.?.*;
     rest.* = t1.payload.cons.car.?.*;
@@ -311,7 +311,7 @@ fn tdString(v: Value) DecodeError![:0]u8 {
     const tag = v.payload.cons.car orelse return error.Malformed;
     if (tag.tag != .symbol or !std.mem.eql(u8, values.symSlice(tag.*), "string"))
         return error.Malformed;
-    const cdr = v.payload.cons.cdr.?.*;
+    const cdr = values.consCdr(v).*;
     if (cdr.tag != .cons) return error.Malformed;
     const s = cdr.payload.cons.car.?.*;
     if (s.tag != .string) return error.Malformed;
@@ -324,7 +324,7 @@ fn tdNumber(v: Value) DecodeError!i64 {
     const tag = v.payload.cons.car orelse return error.Malformed;
     if (tag.tag != .symbol or !std.mem.eql(u8, values.symSlice(tag.*), "number"))
         return error.Malformed;
-    const cdr = v.payload.cons.cdr.?.*;
+    const cdr = values.consCdr(v).*;
     if (cdr.tag != .cons) return error.Malformed;
     const s = cdr.payload.cons.car.?.*;
     if (s.tag != .number) return error.Malformed;
@@ -339,7 +339,7 @@ fn tdSymbol(v: Value) DecodeError![]const u8 {
     const tag = v.payload.cons.car orelse return error.Malformed;
     if (tag.tag != .symbol or !std.mem.eql(u8, values.symSlice(tag.*), "symbol"))
         return error.Malformed;
-    const cdr = v.payload.cons.cdr.?.*;
+    const cdr = values.consCdr(v).*;
     if (cdr.tag != .cons) return error.Malformed;
     const s = cdr.payload.cons.car.?.*;
     if (s.tag != .symbol) return error.Malformed;

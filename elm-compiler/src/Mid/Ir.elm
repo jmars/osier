@@ -332,7 +332,8 @@ type ValuePath
 --   * `RawPayload` gained a word index, mirroring the widened constructor.
 -- THE REGISTER-CLASS SPLIT the spike found: raw nodes are VALUE producers
 -- (`RawMkValue`, `RawVecLoad`) or WORD producers (`RawAllocVector`,
--- `RawVecAddr`, `RawTagOf`, `RawPayload`, `RawStrByte`).  A word cannot live
+-- `RawVecAddr`, `RawTagOf`, `RawPayload`, `RawStrByte`, and E's
+-- `RawDataAddr`).  A word cannot live
 -- in a frame slot (a slot IS a 40-byte Value the collector scans — a bare
 -- address in one is a garbage tag away from a crash), so word-producing
 -- binders are held in raw TEMPS (Mid.Qbe.Lower's `rawWord` side table, the
@@ -374,9 +375,13 @@ type ValuePath
 -- Mid-level call graph as an opaque SYMBOL, so Rt->Rt references are
 -- invisible to the GRef walk — Mid.Rt.seeds declares each prim's Rt-key
 -- closure (transitively closed by the builder that issued the RawCalls).
--- Nothing else in the compiler constructs these nodes (Mid.Rt is the only
--- producer), and with injection hatched off (QBE_NOMIDRT=1) none exist at
--- all — the corpus `.ssa` reproduces the pre-Rt baseline byte-for-byte.
+-- Nothing else in the compiler constructs these nodes EXCEPT Lower, a
+-- second, TRANSIENT producer (E's record lowering builds RawDataAddr /
+-- RawVecLoad / RawMkValue trees and lowers them in place —
+-- they never enter the audited program, so Mid.Audit's rule is unaffected).
+-- Mid.Rt is the only producer of the nodes that persist in a program, and
+-- with injection hatched off (QBE_NOMIDRT=1) none exist at all — the corpus
+-- `.ssa` reproduces the pre-Rt baseline byte-for-byte.
 
 
 type UnsafeNode
@@ -448,6 +453,12 @@ type UnsafeNode
       -- RawAllocRaw so the safepoint discipline stays stated at the node).
       -- Rt.* DEFUN calls are the OTHER constructor: RawCall above.
       RawCallRaw { sym : String, args : List Exp }
+    | -- (E) the ADDRESS of a static data def, built in Lower — an `Unsafe`
+      -- WORD producer yielding the address of a content-keyed freshData
+      -- array of `sym:<field>` DRefs (the names array of a positional
+      -- record).  Transient: constructed by Lower's record lowering, never
+      -- by Mid.Rt (Mid.Rt is the only producer of the other raw nodes).
+      RawDataAddr (List String)
 
 
 -- The semantic word-op enums (backend-neutral: QBE's widths and mnemonics

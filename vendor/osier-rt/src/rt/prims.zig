@@ -223,13 +223,13 @@ fn primAppend(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     g.rootPushValue(&rev);
     while (a1.tag == .cons) {
         rev = values.valCons(g, a1.payload.cons.car.?.*, rev);
-        a1 = a1.payload.cons.cdr.?.*;
+        a1 = values.consCdr(a1).*;
     }
     var out = a2;
     g.rootPushValue(&out);
     while (rev.tag == .cons) {
         out = values.valCons(g, rev.payload.cons.car.?.*, out);
-        rev = rev.payload.cons.cdr.?.*;
+        rev = values.consCdr(rev).*;
     }
     acc.* = out;
     g.rootPop();
@@ -308,7 +308,7 @@ fn primReverse(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     g.rootPushValue(&out);
     while (a.tag == .cons) {
         out = values.valCons(g, a.payload.cons.car.?.*, out);
-        a = a.payload.cons.cdr.?.*;
+        a = values.consCdr(a).*;
     }
     acc.* = out;
     g.rootPop();
@@ -410,7 +410,7 @@ fn primTl(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
         acc.* = values.valNil();
         return;
     }
-    acc.* = a.payload.cons.cdr.?.*;
+    acc.* = values.consCdr(a).*;
 }
 
 // =====================================================================

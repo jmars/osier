@@ -277,7 +277,7 @@ const HostLoop = struct {
         while (cur.tag == .cons) {
             const task = cur.payload.cons.car.?.*;
             self.spawn(task);
-            cur = cur.payload.cons.cdr.?.*;
+            cur = values.consCdr(cur).*;
         }
     }
 
@@ -454,7 +454,7 @@ const HostLoop = struct {
             return;
         }
         self.slots[model_slot] = pair.payload.cons.car.?.*;
-        const cmd = pair.payload.cons.cdr.?.*;
+        const cmd = values.consCdr(pair).*;
         self.deactivate(eval);
         self.spawnFromCmd(cmd);
     }

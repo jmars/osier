@@ -786,8 +786,9 @@ fn verifyPtr(gc: *const Gc, addr: usize, phase: VerifyPhase) usize {
 /// (must mirror scan.zig exactly).
 fn verifyValue(gc: *const Gc, v: *const types.Value, phase: VerifyPhase) usize {
     return switch (v.tag) {
-        .cons => verifyPtr(gc, ptrWord(&v.payload.cons.car), phase) +
-            verifyPtr(gc, ptrWord(&v.payload.cons.cdr), phase),
+        .cons => verifyPtr(gc, ptrWord(&v.payload.cons.car), phase),
+        .record => verifyPtr(gc, ptrWord(&v.payload.record.data), phase) +
+            verifyPtr(gc, ptrWord(&v.payload.record.names), phase),
         .lambda => verifyPtr(gc, ptrWord(&v.payload.lambda.code), phase) +
             verifyPtr(gc, ptrWord(&v.payload.lambda.env), phase),
         .vector => verifyPtr(gc, ptrWord(&v.payload.vector.data), phase),

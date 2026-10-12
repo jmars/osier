@@ -177,12 +177,12 @@ mkrec a b =
     { f = a, g = b }
 
 
-getf : { f : Int, g : Int } -> Int
+getf : { f : Int, g : Int | r } -> Int
 getf r =
     r.f
 
 
-getg : { f : Int, g : Int } -> Int
+getg : { f : Int, g : Int | r } -> Int
 getg r =
     r.g
 `;
@@ -193,12 +193,12 @@ mkrec a b =
     { f = a, g = b }
 
 
-getf : { f : String, g : String } -> String
+getf : { f : String, g : String | r } -> String
 getf r =
     r.f
 
 
-getg : { f : String, g : String } -> String
+getg : { f : String, g : String | r } -> String
 getg r =
     r.g
 `;
@@ -214,7 +214,7 @@ mkrec a b =
     { f = a, g = b }
 
 
-patf : { f : Int, g : Int } -> Int
+patf : { f : Int, g : Int | r } -> Int
 patf r =
     let
         { f } =
@@ -223,7 +223,7 @@ patf r =
     f
 
 
-patg : { f : Int, g : Int } -> Int
+patg : { f : Int, g : Int | r } -> Int
 patg r =
     case r :: [] of
         { g } :: _ ->
@@ -379,14 +379,14 @@ const OPS = {
     line: ([a, b], i) => `${i % 2 === 0 ? 'getf' : 'getg'} (mkrec (${a.elm}) (${b.elm}))`,
     zig: (i) => (i % 2 === 0 ? 'assoc' : 'assoc-g'),
     helpers: REC_HELPERS_INT,
-    require: ['q_Rt_x2eassoc', 'q_Rt_x2esnd'],
+    require: ['q_Rt_x2erecGet'],
   },
   'assoc-str': {
     args: [strSpec, strSpec],
     line: ([a, b], i) => `${i % 2 === 0 ? 'getf' : 'getg'} (mkrec (${a.elm}) (${b.elm}))`,
     zig: (i) => (i % 2 === 0 ? 'assoc' : 'assoc-g'),
     helpers: REC_HELPERS_STR,
-    require: ['q_Rt_x2eassoc', 'q_Rt_x2esnd'],
+    require: ['q_Rt_x2erecGet'],
   },
   // the SECOND entry point of the census (Lower.elm's VField seat): field
   // PATTERNS through both paths that reach lowerPath — a let destructure and a
@@ -396,7 +396,7 @@ const OPS = {
     line: ([a, b], i) => `${i % 2 === 0 ? 'patf' : 'patg'} (mkrec (${a.elm}) (${b.elm}))`,
     zig: (i) => (i % 2 === 0 ? 'assoc' : 'assoc-g'),
     helpers: REC_HELPERS_PAT,
-    require: ['q_Rt_x2eassoc', 'q_Rt_x2esnd'],
+    require: ['q_Rt_x2erecGet'],
   },
   'cons-int': { args: [numSpec, () => listIntSpec(0)], line: ([a, b]) => `(${a.elm}) :: (${b.elm})`, zig: 'cons', require: ['q_Rt_x2econs'] },
   // [] as a literal: ListLit [] -> the `emptylist 0` desugar

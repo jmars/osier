@@ -111,6 +111,7 @@ unaryPrims : List String
 unaryPrims =
     [ "c-strlen", "read-byte", "read-file-as-string", "close", "shen.str->bytes", "shen.bytes->string"
     , "intern", "exec-plan", "cd", "getenv", "glob", "getcwd", "getpid"
+    , "recToChain"
 
     -- Vector make + Bitwise complement (Array port): both 1-ARG, so the
     -- 1-arg wrapper is the right shape (see the c-strlen note above).

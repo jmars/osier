@@ -32,11 +32,12 @@ import Set exposing (Set)
 
 
 {-| The Rt program: every Mid-implemented runtime defun.  Injected whole by
-QbeModule; Lower keeps only the SEEDED (used) subset.
+QbeModule; Lower keeps only the SEEDED (used) subset.  `consArr` selects the
+cons representation (QBE_NOCONSARR=1 -> False = the pre-(A) two-word cons).
 -}
-program : List Defun
-program =
-    primDefuns ++ helperDefuns
+program : Bool -> Bool -> List Defun
+program consArr rec =
+    primDefuns consArr rec ++ helperDefuns rec
 
 
 {-| One Mid prim implementation: the Rt defun key AND its arity — the arity
@@ -94,6 +95,10 @@ impls =
         , ( "<-address", { key = "Rt.<-address", arity = 2 } )
         , ( "assoc", { key = "Rt.assoc", arity = 2 } )
         , ( "snd", { key = "Rt.snd", arity = 1 } )
+        , ( "recGet", { key = "Rt.recGet", arity = 2 } )
+        , ( "recUpd", { key = "Rt.recUpd", arity = 3 } )
+        , ( "recInsert", { key = "Rt.recInsert", arity = 3 } )
+        , ( "recToChain", { key = "Rt.recToChain", arity = 1 } )
         ]
 
 
@@ -169,6 +174,19 @@ rtDeps =
         , ( "Rt.shen.str->bytes", [ "Rt.bytesBuild" ] )
         , ( "Rt.bytesBuild", [ "Rt.bytesBuild", "Rt.cons" ] )
         , ( "Rt.shen.bytes->string", [ "Rt.bytesToStr" ] )
+        , ( "Rt.recGet", [ "Rt.recGetGo" ] )
+        , ( "Rt.recGetGo", [ "Rt.recGetGo", "Rt.symEq" ] )
+        , ( "Rt.recUpd", [ "Rt.recUpdFind", "Rt.recUpdCopy" ] )
+        , ( "Rt.recUpdFind", [ "Rt.recUpdFind", "Rt.symEq" ] )
+        , ( "Rt.recUpdCopy", [ "Rt.recUpdCopy" ] )
+        , ( "Rt.symLess", [ "Rt.symLess" ] )
+        , ( "Rt.recAppendFind", [ "Rt.recAppendFind", "Rt.symLess" ] )
+        , ( "Rt.recAppendDataGo", [ "Rt.recAppendDataGo" ] )
+        , ( "Rt.recAppendNamesGo", [ "Rt.recAppendNamesGo" ] )
+        , ( "Rt.recAppend", [ "Rt.recAppendFind", "Rt.recAppendDataGo", "Rt.recAppendNamesGo" ] )
+        , ( "Rt.recInsert", [ "Rt.recUpdFind", "Rt.recUpd", "Rt.recAppend" ] )
+        , ( "Rt.recToChain", [ "Rt.recToChainGo" ] )
+        , ( "Rt.recToChainGo", [ "Rt.recToChainGo", "Rt.@p", "Rt.cons" ] )
         ]
 
 
@@ -228,6 +246,12 @@ which prims allocate):
 allocating : Set String
 allocating =
     let
+        -- The cons representation does not change which Rt defuns allocate
+        -- (cons is allocating either way), so the set is computed over the
+        -- default program (consArr = True, rec = True).
+        rtProgram =
+            program True True
+
         -- fixed point: k allocates iff k has a DIRECT safepoint or any
         -- rtDeps edge of k lands in the set.
         grow : Set String -> Set String
@@ -248,7 +272,7 @@ allocating =
                                     set
                         )
                         acc
-                        program
+                        rtProgram
             in
             if Set.size new == Set.size acc then
                 acc
@@ -256,7 +280,7 @@ allocating =
             else
                 grow new
     in
-    grow (Set.fromList (List.filter direct program |> List.map .key))
+    grow (Set.fromList (List.filter direct rtProgram |> List.map .key))
 
 
 
@@ -437,6 +461,9 @@ unsafeSafepoint node =
 
         RawByteStore b ->
             safepoint b.ptr || safepoint b.index || safepoint b.value
+
+        RawDataAddr _ ->
+            False
 
 letValue : LetBinder -> Exp
 letValue b =
