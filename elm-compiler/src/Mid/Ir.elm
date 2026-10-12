@@ -332,7 +332,8 @@ type ValuePath
 --   * `RawPayload` gained a word index, mirroring the widened constructor.
 -- THE REGISTER-CLASS SPLIT the spike found: raw nodes are VALUE producers
 -- (`RawMkValue`, `RawVecLoad`) or WORD producers (`RawAllocVector`,
--- `RawVecAddr`, `RawTagOf`, `RawPayload`, `RawStrByte`, and E's
+-- `RawVecAddr`, `RawTagOf`, `RawPayload`, `RawStrByte`, `RawByteLoad`,
+-- `RawWordLoad`, and E's
 -- `RawDataAddr`).  A word cannot live
 -- in a frame slot (a slot IS a 40-byte Value the collector scans — a bare
 -- address in one is a garbage tag away from a crash), so word-producing
@@ -447,6 +448,15 @@ type UnsafeNode
     | -- store one byte into a raw buffer (effect, like RawVecStore; NO
       -- barrier — raw bytes hold no GC pointers by construction)
       RawByteStore { ptr : Exp, index : Exp, value : Exp }
+    | -- word i of the RAW buffer at ptr: an 8-BYTE load at ptr + 8*index (the
+      -- index is a WORD offset here, not a byte offset — a mark-sweep walks
+      -- headers/page descriptors/free-list links a word at a time).  A WORD
+      -- producer, like RawByteLoad.  Not a safepoint: a plain load allocates
+      -- nothing and reads no Value.
+      RawWordLoad { ptr : Exp, index : Exp }
+    | -- store one 8-byte word at ptr + 8*index (effect, like RawByteStore;
+      -- NO barrier — the word is host bookkeeping, not a GC Value reference)
+      RawWordStore { ptr : Exp, index : Exp, value : Exp }
     | -- call a C runtime seat with WORD args and a WORD result (raw register
       -- class on both sides — rt_bytes_copy/rt_halt-class seats; alloc-FREE
       -- by contract, the allocating seats go through RawAllocVector /

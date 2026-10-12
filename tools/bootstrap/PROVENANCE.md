@@ -57,7 +57,10 @@ view of three aggregates
 ```
 type :val  = align 8 { w, l, l, l, l }        (the runtime's Value, 40 B)
 type :ret  = align 8 { :val, w, l, l, l, w }  (the runtime's Ret,   80 B)
-type :desc = align 8 { l, w, w }              (the runtime's Desc,  16 B)
+type :desc = align 8 { l, w, w }              (the Desc PREFIX, 16 B; the
+                                              descriptor OBJECT is 24 B — the
+                                              emitted data carries one more
+                                              word, the global-closure cache)
 ```
 
 and DEFINES the arity table (`export function :ret $rt_call0..$rt_call16`) that
@@ -76,7 +79,7 @@ it):
 | `rt:exports` | every `export fn` signature in `tools/qbe/rt.zig`, sorted |
 | `rt:callN` | every `extern fn rt_callN` signature in `tools/qbe/rt.zig`, sorted |
 | `rt:types` | `max_arity`, `Desc`, `Meta`, `Ret` in `tools/qbe/rt.zig` |
-| `gc:layout` | the `ValTag` enum and the `Value` struct in `vendor/osier-rt/src/gc/types.zig` |
+| `gc:layout` | the LAYOUT CENSUS: the digest of `elm-compiler/src/Mid/RtLayout.elm`, the single definition of every cross-ABI number (`tools/qbe/layout-census.sh --marker`). `types.zig` and `rt.zig` are checked *against* it — see below |
 
 `tools/qbe-bootstrap.sh` recomputes it before it builds anything and **refuses**
 on a mismatch, naming the component that moved. To watch the guard fire, see
@@ -84,12 +87,13 @@ on a mismatch, naming the component that moved. To watch the guard fire, see
 
 **What the marker does NOT cover, and what covers it instead:**
 
-- *The seed's own mirror of the layout.* If `Mid/Qbe/Il.elm` ever declares
-  `:val`/`:ret`/`:desc` differently from the runtime, the marker does not move.
-  This is the `Il`-revision half of the hazard, and it is caught by the seed
-  *bytes*: the seed is pinned, the emit is not re-derived, and the fixed-point
-  oracle (`--verify`, and `qbe-selfhost.sh` in the full form) compares a
-  *current* compiler's emit against it.
+- ~~*The seed's own mirror of the layout.*~~ **CLOSED by the layout census
+  (handoff-osier-zigretire-plan STAGE 2).** The emitted `:val`/`:ret`/`:desc`
+  are no longer a mirror: `Mid.Qbe.Il` DERIVES them from `Mid.RtLayout`, which
+  is also what `gc:layout` digests, so an `Il` that disagreed with the runtime
+  would disagree with `RtLayout` and the marker would move. The remaining
+  half — the seed *bytes* being a fixed point — is still the `--verify` /
+  `qbe-selfhost.sh` oracle.
 - *Missing symbols.* The linker already refuses an undefined reference —
   including a `rt_callN` the seed fails to define, because `rt.zig` externs all
   of them. An explicit symbol cross-check would be redundant with `cc`, so

@@ -90,6 +90,7 @@ shared `asF`/`toI32` machinery the arithmetic differential does cover.
 -}
 
 import Mid.Ir exposing (Binder, Defun, Exp(..), LetBinder(..), Lit(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), UnsafeNode(..))
+import Mid.RtLayout as RtLayout
 
 
 -- ============================ BUILDER DSL ============================
@@ -212,7 +213,7 @@ recLenOf x =
         (RawBin
             { op = RMul
             , a = Unsafe (RawPayload32 { value = x, word = 1 })
-            , b = Unsafe (RawBin { op = RSub, a = n 1, b = Unsafe (RawTagIs { value = x, tag = 5 }) })
+            , b = Unsafe (RawBin { op = RSub, a = n 1, b = Unsafe (RawTagIs { value = x, tag = RtLayout.tagNil }) })
             }
         )
 
@@ -306,32 +307,32 @@ toI32F x =
 
 mkNum : Exp -> Exp
 mkNum we =
-    Unsafe (RawMkValue { tag = 0, words = [ we ] })
+    Unsafe (RawMkValue { tag = RtLayout.tagNumber, words = [ we ] })
 
 
 mkBool : Exp -> Exp
 mkBool we =
-    Unsafe (RawMkValue { tag = 3, words = [ we ] })
+    Unsafe (RawMkValue { tag = RtLayout.tagBoolean, words = [ we ] })
 
 
 mkNil : Exp
 mkNil =
-    Unsafe (RawMkValue { tag = 5, words = [] })
+    Unsafe (RawMkValue { tag = RtLayout.tagNil, words = [] })
 
 
 mkStr : Exp -> Exp -> Exp
 mkStr dataW lenW =
-    Unsafe (RawMkValue { tag = 1, words = [ dataW, lenW ] })
+    Unsafe (RawMkValue { tag = RtLayout.tagString, words = [ dataW, lenW ] })
 
 
 mkFlt : Exp -> Exp
 mkFlt fwe =
-    Unsafe (RawMkValue { tag = 12, words = [ fwe ] })
+    Unsafe (RawMkValue { tag = RtLayout.tagFloat, words = [ fwe ] })
 
 
 mkVec : Exp -> Exp -> Exp
 mkVec dataW lenW =
-    Unsafe (RawMkValue { tag = 10, words = [ dataW, lenW ] })
+    Unsafe (RawMkValue { tag = RtLayout.tagVector, words = [ dataW, lenW ] })
 
 
 trueV : Exp
@@ -1128,7 +1129,7 @@ recUpdDefun =
             ]
             (Unsafe
                 (RawMkValue
-                    { tag = 14
+                    { tag = RtLayout.tagRecord
                     , words =
                         [ Unsafe (RawVecAddr { vec = wOf (v ndN), index = n 0 })
                         , recLenOf (v rec)
@@ -1469,7 +1470,7 @@ recAppendDefun =
             ]
             (Unsafe
                 (RawMkValue
-                    { tag = 14
+                    { tag = RtLayout.tagRecord
                     , words =
                         [ Unsafe (RawVecAddr { vec = wOf (v ndN), index = n 0 })
                         , iadd (recLenOf (v rec)) (n 1)
@@ -1681,7 +1682,7 @@ consDefun consArr =
                             , body =
                                 Unsafe
                                     (RawMkValue
-                                        { tag = 4
+                                        { tag = RtLayout.tagCons
                                         , words = consWords
                                         }
                                     )

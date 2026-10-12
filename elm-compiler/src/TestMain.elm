@@ -1445,6 +1445,12 @@ rawCallSyms exp =
                 RawByteStore bs ->
                     rawCallSyms bs.ptr ++ rawCallSyms bs.index ++ rawCallSyms bs.value
 
+                RawWordLoad wl ->
+                    rawCallSyms wl.ptr ++ rawCallSyms wl.index
+
+                RawWordStore ws ->
+                    rawCallSyms ws.ptr ++ rawCallSyms ws.index ++ rawCallSyms ws.value
+
                 RawCallRaw seat ->
                     List.concatMap rawCallSyms seat.args
 

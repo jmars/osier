@@ -96,6 +96,7 @@ module Mid.Qbe.Lower exposing (lower)
 -- in patterns — exposing only one of the two keeps the pattern arms clean.)
 import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), Lambda, LetBinder(..), Lit(..), Match(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), Step(..), UnsafeNode(..), ValuePath(..))
 import Mid.Rt as MidRt
+import Mid.RtLayout as RtLayout
 import Dict exposing (Dict)
 import Mid.Qbe.Il as Il exposing (Module, Func, Block, Inst(..), Jump(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), UnaryOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..))
 import Set exposing (Set)
@@ -104,63 +105,67 @@ import Type.Representation as Rep
 import Char.Extra exposing (utf8ByteLength)
 
 
+-- THE LAYOUT IS DEFINED ONCE, IN Mid.RtLayout (handoff-osier-zigretire-plan
+-- STAGE 2).  These are the names this module's ~3500 lines already used; each
+-- one is now READ from that single definition rather than restated here, so
+-- the emitted IL and the Zig runtime cannot describe different bytes.
 -- sizeof(vm Value) = 40 (gc/types.zig), the `:val` aggregate.
 vs : Int
 vs =
-    40
+    RtLayout.valSizeBytes
 
 
 -- sizeof(:ret) = 80 (Il.retType): `{ :val, w, l, l, l, w }` = two pooled-frame
 -- slots — slot 0 the finished value, slot 1 the .tail discriminator + payload.
 rvs : Int
 rvs =
-    80
+    RtLayout.retSizeBytes
 
 
 -- VM ValTag numbers this lowering switches on (gc/types.zig ValTag order).
 tagNumber : Int
 tagNumber =
-    0
+    RtLayout.tagNumber
 
 
 tagBoolean : Int
 tagBoolean =
-    3
+    RtLayout.tagBoolean
 
 
 tagFloat : Int
 tagFloat =
-    12
+    RtLayout.tagFloat
 
 
 tagSymbol : Int
 tagSymbol =
-    2
+    RtLayout.tagSymbol
 
 
 tagCons : Int
 tagCons =
-    4
+    RtLayout.tagCons
 
 
 tagNil : Int
 tagNil =
-    5
+    RtLayout.tagNil
 
 
 tagVector : Int
 tagVector =
-    10
+    RtLayout.tagVector
 
 
 tagRecord : Int
 tagRecord =
-    14
+    RtLayout.tagRecord
 
 
 maxArity : Int
 maxArity =
-    16
+    RtLayout.maxArity
 
 
 
@@ -1313,6 +1318,29 @@ lowerRawVal node dest s =
                                 )
                     )
 
+        RawWordStore ws ->
+            -- One 8-byte word at ptr + 8*index (effect; dest ignored like
+            -- RawByteStore's).  NO write barrier — the word is host
+            -- bookkeeping (a header, a page descriptor, a free-list link),
+            -- not a GC Value (Mid.Ir's node contract).
+            rawWordArg ws.ptr s
+                |> Result.andThen
+                    (\( pT, s1 ) ->
+                        rawWordArg ws.index s1
+                            |> Result.andThen
+                                (\( iT, s2 ) ->
+                                    rawWordArg ws.value s2
+                                        |> Result.map
+                                            (\( vT, s3 ) ->
+                                                let
+                                                    ( aT, s4 ) =
+                                                        wordAddr pT iT s3
+                                                in
+                                                emit (Store StoreL vT (Il.Tmp aT)) s4
+                                            )
+                                )
+                    )
+
         RawCall call ->
             -- STEP 5 (osier-midprims): Rt->Rt calls, the recursive helpers'
             -- voice (deepEqual, numberText, the list walks).  Lowered for
@@ -1433,6 +1461,9 @@ lowerRawVal node dest s =
         RawByteLoad _ ->
             Err wordProducerMessage
 
+        RawWordLoad _ ->
+            Err wordProducerMessage
+
         RawCallRaw _ ->
             Err wordProducerMessage
 
@@ -1467,7 +1498,7 @@ storeValueCell tag words dest s0 =
 
                         acc2 =
                             acc1
-                                |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp dest)) (Il.Con (8 + 8 * i)))
+                                |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp dest)) (Il.Con (RtLayout.payloadWordOffset i)))
                                 |> emit (Store StoreL w (Il.Tmp pT))
                     in
                     go (i + 1) acc2 rest
@@ -1516,7 +1547,7 @@ storeValueWords tag words dest s0 =
 
                                     st2 =
                                         st1
-                                            |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp dest)) (Il.Con (8 + 8 * i)))
+                                            |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp dest)) (Il.Con (RtLayout.payloadWordOffset i)))
                                             |> emit (Store (if isFlt then StoreD else StoreL) w (Il.Tmp pT))
                                 in
                                 go (i + 1) st2 more
@@ -1621,7 +1652,7 @@ rawWordArg exp s =
                             freshTmp s3
                     in
                     ( Il.Tmp t
-                    , emit (Bin (Just aT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con (8 + 8 * p.word))) s4
+                    , emit (Bin (Just aT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con (RtLayout.payloadWordOffset p.word))) s4
                         |> emit (Load (Just t) L LoadL (Il.Tmp aT))
                     )
                 )
@@ -1650,7 +1681,7 @@ rawWordArg exp s =
                             freshTmp s4
                     in
                     ( Il.Tmp t
-                    , emit (Bin (Just aT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con (8 + 8 * p.word))) s5
+                    , emit (Bin (Just aT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con (RtLayout.payloadWordOffset p.word))) s5
                         |> emit (Load (Just wT) W LoadW (Il.Tmp aT))
                         |> emit (Unary (Just t) L Extsw (Il.Tmp wT))
                     )
@@ -1875,6 +1906,28 @@ rawWordArg exp s =
                                 )
                     )
 
+        Unsafe (RawWordLoad wl) ->
+            -- loadl at ptr + 8*index (the index is a WORD offset — Mid.Ir's
+            -- node contract).  No extension: an `l` word IS the class.
+            rawWordArg wl.ptr s
+                |> Result.andThen
+                    (\( pT, s1 ) ->
+                        rawWordArg wl.index s1
+                            |> Result.map
+                                (\( iT, s2 ) ->
+                                    let
+                                        ( aT, s3 ) =
+                                            wordAddr pT iT s2
+
+                                        ( t, s4 ) =
+                                            freshTmp s3
+                                    in
+                                    ( Il.Tmp t
+                                    , emit (Load (Just t) L LoadL (Il.Tmp aT)) s4
+                                    )
+                                )
+                    )
+
         Unsafe (RawCallRaw seat) ->
             -- alloc-FREE C seat, word args -> word result (Base L both
             -- sides).  rt_halt's `l` result is never defined (the seat exits)
@@ -1936,7 +1989,13 @@ rawWordArg exp s =
                               -- extern struct (tag u32@0, union@8).
                               items =
                                 List.concatMap
-                                    (\sn -> [ DWord 2, DZero 4, DRef sn, DZero 24 ])
+                                    (\sn ->
+                                        [ DWord RtLayout.tagSymbol
+                                        , DZero (RtLayout.abiAlign - RtLayout.valueTagBytes)
+                                        , DRef sn
+                                        , DZero (RtLayout.valSizeBytes - RtLayout.payloadBase - RtLayout.wordBytes)
+                                        ]
+                                    )
                                     (List.reverse symNamesRev)
                             , export_ = False
                             }
@@ -2249,6 +2308,12 @@ rawNodeName node =
         RawByteStore _ ->
             "rawByteStore"
 
+        RawWordLoad _ ->
+            "rawWordLoad"
+
+        RawWordStore _ ->
+            "rawWordStore"
+
         RawCallRaw seat ->
             "rawCallRaw " ++ seat.sym
 
@@ -2271,6 +2336,24 @@ elemAddr vecT idxT s =
     , s2
         |> emit (Bin (Just offT) L Mul (Il.Con vs) idxT)
         |> emit (Bin (Just t) L Add vecT (Il.Tmp offT))
+    )
+
+
+-- &ptr[index] at WORD stride — elemAddr one size down, for the raw word
+-- buffer (RawWordLoad/RawWordStore): ptr + 8*index, the index a word offset.
+wordAddr : Il.Arg -> Il.Arg -> S -> ( String, S )
+wordAddr ptrT idxT s =
+    let
+        ( offT, s1 ) =
+            freshTmp s
+
+        ( t, s2 ) =
+            freshTmp s1
+    in
+    ( t
+    , s2
+        |> emit (Bin (Just offT) L Mul (Il.Con 8) idxT)
+        |> emit (Bin (Just t) L Add ptrT (Il.Tmp offT))
     )
 
 
@@ -3279,6 +3362,9 @@ isRawWordExp exp =
                     True
 
                 RawByteLoad _ ->
+                    True
+
+                RawWordLoad _ ->
                     True
 
                 RawStrByte _ ->
@@ -5440,7 +5526,12 @@ lowerClosure lambda dest s =
                             (\n ->
                                 { name = n
                                 , align = Just 8
-                                , items = [ DRef qname, DWord (List.length lambda.params), DWord k, DZero 8 ]
+                                , items =
+                                    [ DRef qname
+                                    , DWord (List.length lambda.params)
+                                    , DWord k
+                                    , DZero (RtLayout.descTotalBytes - RtLayout.descCacheOffset)
+                                    ]
                                 , export_ = False
                                 }
                             )
@@ -5682,12 +5773,12 @@ finishModule s keys =
                                 Lam lambda ->
                                     Just
                                         { name = globalDescName key
-                                        , align = Just 8
+                                        , align = Just RtLayout.abiAlign
                                         , items =
                                             [ DRef ("q_" ++ mangle key)
                                             , DWord (List.length lambda.params)
                                             , DWord 0
-                                            , DZero 8
+                                            , DZero (RtLayout.descTotalBytes - RtLayout.descCacheOffset)
                                             ]
                                         , export_ = False
                                         }
@@ -5861,7 +5952,7 @@ metaTable pendings =
                     [ DRef ("mname" ++ String.fromInt i)
                     , DRef p.func.name
                     , DWord p.nparams
-                    , DZero 4
+                    , DZero (RtLayout.metaSizeBytes - RtLayout.metaArityOffset - RtLayout.i32Bytes)
                     ]
                 )
                 (List.indexedMap (\i e -> ( i, e )) entries)

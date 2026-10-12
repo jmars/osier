@@ -21,9 +21,14 @@
 #   rt:types    the `max_arity` / `Desc` / `Meta` / `Ret` declarations in
 #               tools/qbe/rt.zig (braces-literal typed / returned across the
 #               ABI or written by generated `data` blocks).
-#   gc:layout   the `ValTag` enum and the `Value` struct in
-#               vendor/osier-rt/src/gc/types.zig (the layout the collector
-#               scans and the .ssa reads at fixed offsets).
+#   gc:layout   the LAYOUT CENSUS (handoff-osier-zigretire-plan STAGE 2): the
+#               digest of the ONE definition, `Mid/RtLayout.elm`, as parsed by
+#               tools/qbe/layout-census.sh.  It is deliberately NOT a
+#               sed-extraction of the Zig declarations any more — the layout
+#               lives in exactly one place, and deriving the marker from the
+#               census is what makes a change to ANY of those numbers move it
+#               (the census's own Zig leg and the comptime rows in types.zig /
+#               rt.zig are what then say WHICH seat is wrong).
 #
 # Comments are stripped and whitespace squeezed BEFORE hashing, so the marker
 # tracks declarations, not formatting.
@@ -67,10 +72,10 @@ blocks() { # $1 file, $2 start-line ERE
 rt_exports() { grep -E '^export fn ' "$RT" | norm | sort | sha; }
 rt_calln()   { grep -E '^extern fn rt_call' "$RT" | norm | sort | sha; }
 rt_types()   { { blocks "$RT" '^const max_arity'; blocks "$RT" '^pub const (Desc|Meta|Ret)'; } | norm | sha; }
-# ValTag's block is cut at its first inner `pub fn` (char(): the legacy
-# tag->char table is not LAYOUT, so a change to it must not move the marker).
-gc_layout()  { { blocks "$TYPES" '^pub const ValTag =' | sed '/^[[:space:]]*pub fn /,$d'
-                 blocks "$TYPES" '^pub const Value ='; } | norm | sha; }
+# THE LAYOUT, FROM THE CENSUS — not from the Zig declaration text.  The
+# census parses Mid/RtLayout.elm (the single definition) and is what the
+# generated `gc/layout_gen.zig` is built from; see tools/qbe/layout-census.sh.
+gc_layout()  { "$ROOT/tools/qbe/layout-census.sh" --marker; }
 
 # ---- emit inputs (REPORT-ONLY freshness, never a gate) ----------------------
 # Everything ONE emission of the whole-compiler .ssa reads: the manifest's 64

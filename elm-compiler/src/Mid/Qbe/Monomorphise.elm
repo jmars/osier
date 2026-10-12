@@ -1341,6 +1341,12 @@ unsafeChildren node =
         RawByteStore r ->
             [ r.ptr, r.index, r.value ]
 
+        RawWordLoad r ->
+            [ r.ptr, r.index ]
+
+        RawWordStore r ->
+            [ r.ptr, r.index, r.value ]
+
         RawCallRaw call ->
             call.args
 
@@ -1389,6 +1395,12 @@ unsafeRebuild node parts =
 
         ( RawByteStore r, a :: b :: c :: _ ) ->
             RawByteStore { r | ptr = a, index = b, value = c }
+
+        ( RawWordLoad r, a :: b :: _ ) ->
+            RawWordLoad { r | ptr = a, index = b }
+
+        ( RawWordStore r, a :: b :: c :: _ ) ->
+            RawWordStore { r | ptr = a, index = b, value = c }
 
         ( RawTagOf _, e :: _ ) ->
             RawTagOf e

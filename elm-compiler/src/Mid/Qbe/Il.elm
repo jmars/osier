@@ -21,6 +21,8 @@ module Mid.Qbe.Il exposing
     , valType
     )
 
+import Mid.RtLayout as RtLayout
+
 -- Mid.Qbe.Il — QBE's intermediate language as an ELM DATATYPE (native-backend
 -- stage 1; handoff-qbe-lower).
 --
@@ -57,50 +59,54 @@ type alias Module =
     }
 
 
--- `type :val = align 8 { w, l 4 }` — the VM's 40-byte tagged Value
+-- THE LAYOUT IS DEFINED ONCE, IN Mid.RtLayout (handoff-osier-zigretire-plan
+-- STAGE 2); these three type definitions are DERIVED from it — the emitted
+-- IL cannot describe a different layout from the one that module states.
+--
+-- `type :val = align 8 { w, l, l, l, l }` — the VM's 40-byte tagged Value
 -- (gc/types.zig: Value = extern struct { tag: ValTag, payload: union }),
 -- ABI-verified against the vendored qbe: aggregate params arrive as
 -- POINTERS, aggregate returns go through sret.
 valType : TypeDef
 valType =
     { name = "val"
-    , align = Just 8
-    , fields = "w" :: List.repeat 4 "l"
+    , align = Just RtLayout.abiAlign
+    , fields = RtLayout.valQbeFields
     }
 
 
 -- `type :ret = align 8 { :val, w, l, l, l, w }` — the call-result shape every
 -- generated function returns (the bounce-loop convention, transcribed from
--- tools/aot/runtime.zig's `Ret = .done | .tail`).  Field layout (80 bytes,
--- ABI-matched by tools/qbe/rt.zig `Ret`):
---   :val  @0   the finished value (`.done`) — slot 0 of the pooled frame;
---   w     @40  the discriminator (0 = done, 1 = tail) — slot 1 offset 0;
---   l     @48  f: the callee code pointer (`.tail`);
---   l     @56  e: the captures array (env) or null;
---   l     @64  args: a fresh GC array of `arity` Value structs;
---   w     @72  arity: the static arity (== length of `args`).
--- `.tail` is built by the runtime (rt_tail_known / rt_apply_tail) so its env
--- and args survive the caller's rt_frame_leave, and chased by rt_bounce —
--- which is why deep tail chains no longer grow the native stack.
+-- tools/aot/runtime.zig's `Ret = .done | .tail`).  80 bytes, ABI-matched by
+-- tools/qbe/rt.zig `Ret`; the FIELD OFFSETS are stated once, in
+-- Mid.RtLayout (`retValOffset`/`retKindOffset`/`retFOffset`/`retEOffset`/
+-- `retArgsOffset`/`retArityOffset`), and rt.zig asserts its own `Ret` against
+-- them at comptime.  `.tail` is built by the runtime (rt_tail_known /
+-- rt_apply_tail) so its env and args survive the caller's rt_frame_leave, and
+-- chased by rt_bounce — which is why deep tail chains no longer grow the
+-- native stack.
 -- MUST BE DEFINED AFTER `:val` (QBE requires a type to precede its uses).
 retType : TypeDef
 retType =
     { name = "ret"
-    , align = Just 8
-    , fields = ":val" :: "w" :: "l" :: "l" :: "l" :: "w" :: []
+    , align = Just RtLayout.abiAlign
+    , fields = RtLayout.retQbeFields
     }
 
 
 -- `type :desc = align 8 { l, w, w }` — a static function descriptor:
--- { code: *const fn, arity: i32, ncaps: i32 } (see tools/qbe/rt.zig Desc).
+-- { code: *const fn, arity: i32, ncaps: i32 } (see tools/qbe/rt.zig Desc and
+-- Mid.RtLayout's `descTotalBytes`/`desc*Offset`; the emitted descriptor DATA
+-- carries one more word than this TYPE, the global-closure cache — see
+-- Mid.RtLayout).
 -- A closure Value's `code` field points at one of these; the GC passes
 -- non-heap pointers through unchanged (collect.zig gcMove), so a static
 -- descriptor is never moved or scanned.
 descType : TypeDef
 descType =
     { name = "desc"
-    , align = Just 8
-    , fields = "l" :: "w" :: "w" :: []
+    , align = Just RtLayout.abiAlign
+    , fields = RtLayout.descQbeFields
     }
 
 

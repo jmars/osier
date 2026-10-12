@@ -8,6 +8,10 @@
 //!   gc/roots.zig  — precise-root shadow stack + registrations (M3)
 
 pub const types = @import("gc/types.zig");
+/// The layout census (Mid/RtLayout.elm as Zig constants) — see
+/// tools/qbe/layout-census.sh.  types.zig and tools/qbe/rt.zig assert their
+/// own declarations against it at comptime.
+pub const layout_gen = @import("gc/layout_gen.zig");
 pub const heap = @import("gc/heap.zig");
 pub const collect = @import("gc/collect.zig");
 pub const scan = @import("gc/scan.zig");

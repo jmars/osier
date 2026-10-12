@@ -462,6 +462,12 @@ unsafeSafepoint node =
         RawByteStore b ->
             safepoint b.ptr || safepoint b.index || safepoint b.value
 
+        RawWordLoad w ->
+            safepoint w.ptr || safepoint w.index
+
+        RawWordStore w ->
+            safepoint w.ptr || safepoint w.index || safepoint w.value
+
         RawDataAddr _ ->
             False
 

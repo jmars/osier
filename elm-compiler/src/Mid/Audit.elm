@@ -249,6 +249,12 @@ describe node =
         RawByteStore _ ->
             "rawByteStore"
 
+        RawWordLoad _ ->
+            "rawWordLoad"
+
+        RawWordStore _ ->
+            "rawWordStore"
+
         RawCallRaw call ->
             "raw call word seat " ++ call.sym
 
