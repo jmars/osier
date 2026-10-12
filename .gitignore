@@ -23,3 +23,9 @@ docs/research/build/*
 
 # qbe native-backend build artefact (tools/qbe/qbe-mk.sh builds it on demand)
 tools/qbe/rt.o
+
+# fetched third-party Elm sources (tools/bench/fetch-elm-corpus.sh) — the script and
+# MANIFEST.tsv are the committed record; the sources are reproducible, not vendored.
+tools/bench/elm-corpus/*/
+tools/bench/elm-corpus/.all-packages.json
+tools/bench/elm-corpus/.fetch-one.sh
