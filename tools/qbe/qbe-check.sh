@@ -166,6 +166,41 @@ run() {
   fi
 }
 
+# like run(), but QBE_MIDGC=1: the fixture compiles through the MID mark-sweep
+# collector (the raw allocating nodes route to Rt.allocVector/Rt.allocRaw) and
+# runs at the minimum heap, where the collector actually collects.  The golden
+# is the value any correct backend must print — midgc-live's use-after-free
+# shape (a live list survives the churn) and midgc-reclaim's leak shape
+# (allocation >> heap must be observably reclaimed, else "midgc: out of
+# memory" lands in the output and the comparison fails).
+run_midgc() {
+  local name="$1" entry="$2" fixture="$3"; shift 3
+  local args=("$@")
+  local bin
+  bin="$(QBE_MIDGC=1 "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$TMP/$name")" || {
+    echo "FAIL $name: qbe-mk (QBE_MIDGC=1)"; FAIL=1; return
+  }
+  local nat_out exp
+  nat_out="$(QBE_HEAP_MB=$CHURN_MB timeout 60 "$bin" "$entry" "${args[@]}" 2>&1)" || true
+  if [ "$FREEZE" = 1 ]; then
+    printf '%s\n' "$nat_out" > "$GOLDEN/$name.txt"
+    exp="$nat_out"
+    echo "FROZE $name: golden <- the Mid collector's current output (${nat_out:0:80})"
+  else
+    exp="$(golden_read "$name")"
+    if [ "$exp" = "__NO_GOLDEN__" ]; then
+      echo "FAIL $name: no golden at $GOLDEN/$name.txt"
+      FAIL=1; return
+    fi
+  fi
+  if [ "$nat_out" != "$exp" ]; then
+    echo "FAIL $name: midgc golden='$exp' native='$nat_out'"
+    FAIL=1
+  else
+    echo "PASS $name: midgc (QBE_MIDGC=1 QBE_HEAP_MB=$CHURN_MB) identical (${nat_out:0:60})"
+  fi
+}
+
 # like run(), but with AOTRUN_ARGV=1: the trailing args are the APP's *argv*
 # pseudo-global (string list), NOT int call args — the selfhost CLI-driver
 # contract.  Guards the argvPrimThunk arity bug (the class the old
@@ -211,6 +246,17 @@ run ifx        Ifx.main         tools/qbe/fixtures/ifx.elm
 # reservation; 500k at the default heap is the identity run.
 run churn      Churn.build      tools/qbe/fixtures/churn.elm 150000 0
 run churnbig-nochurn Churn.build tools/qbe/fixtures/churn.elm 500000 0
+
+# zigretire stage 4 — the Mid mark-sweep collector's memory-safety probes
+# (QBE_MIDGC=1; the Zig collector stays the oracle and is untouched).  Two of
+# the five probes the brief requires, chosen because they catch the two
+# classes a mark-sweep cannot recover from: a USE-AFTER-FREE (midgc-live —
+# a live list survives a collection) and a LEAK (midgc-reclaim — allocation
+# >> heap must be observably reclaimed).  Each was proven fail-before /
+# pass-after (the cons-mark arm and the free-list link removed in turn make
+# the matching probe go red).
+run_midgc midgc-live    MidgcLive.main    tools/qbe/fixtures/midgc-live.elm
+run_midgc midgc-reclaim MidgcReclaim.main tools/qbe/fixtures/midgc-reclaim.elm
 
 # nice-to-have 9: a result whose printed form EXCEEDS the old 16384-byte print
 # buffer (~24KB here).  Both runners stream now, so native and VM must agree

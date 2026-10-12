@@ -480,6 +480,88 @@ export fn rt_raw_alloc(n: i32) callconv(.c) [*]u8 {
     return g.allocRaw(@intCast(n));
 }
 
+// =====================================================================
+//  Mid mark-sweep collector seats (zigretire stage 4)
+// =====================================================================
+// The Mid-written collector (QBE_MIDGC=1) owns a SEPARATE mmap'd heap and
+// routes the two raw allocating nodes through its Mid seats Rt.allocVector /
+// Rt.allocRaw.  The ROOT SET stays Zig-managed: the shadow stack below is
+// still pushed by rt_frame_enter / rt_apply / rt_con etc., and these seats
+// expose it to the Mid walker as alloc-free word->word calls.  The Zig GC
+// remains untouched as the differential oracle.
+
+/// The plain (NO write-barrier) vector store the Mid collector's non-moving
+/// heap needs.  `rt_vec_store` above goes through writeBarrierVectorStore,
+/// whose `inOldgen` page test indexes the ZIG heap's metadata by
+/// (addr/512 - firstheappage) — for a Mid-heap address that index is garbage
+/// and the barrier reads out of bounds.  A mark-sweep has no remembered set,
+/// so the store is the whole of the contract.
+export fn rt_vec_store_plain(vec: [*]Value, i: i32, val: *const Value) callconv(.c) void {
+    vec[@intCast(i)] = val.*;
+}
+
+/// The configured heap size (main's QBE_HEAP_MB, in bytes).  The Mid
+/// collector mmaps its own region of this size so the churn differential's
+/// QBE_HEAP_MB sweeps steer both arms alike.
+export fn rt_gc_heap_bytes() callconv(.c) i64 {
+    return @intCast(gc_heap_bytes);
+}
+
+var gc_heap_bytes: usize = 0;
+var midgc_region: i64 = 0;
+
+/// The Mid collector's heap-region base (an opaque 64-bit word).  0 = not yet
+/// initialised; Rt.allocVector mmaps and sets it on first use.
+export fn rt_midgc_region() callconv(.c) i64 {
+    return midgc_region;
+}
+
+export fn rt_midgc_set_region(p: i64) callconv(.c) i64 {
+    midgc_region = p;
+    return p;
+}
+
+/// The Mid collector's LOUD failure seat (zigretire stage 4).  The code is
+/// the Mid.RtGc die-code table index; each message names the failure mode so
+/// a probe can tell "unknown tag" from "mark stack overflow" from "OOM".
+/// Never returns (the Mid code binds the result to a dead temp).
+export fn rt_midgc_die(code: i64) callconv(.c) i64 {
+    const msgs = [_][]const u8{
+        "midgc: unknown value tag in mark walk",
+        "midgc: unknown root kind",
+        "midgc: mark stack overflow",
+        "midgc: out of memory",
+        "midgc: mmap failed",
+        "midgc: collect before init",
+    };
+    if (code >= 0 and code < msgs.len) dieLoud(msgs[@intCast(code)]);
+    dieLoud("midgc: unknown failure");
+    return 0;
+}
+
+/// Shadow-stack bridge: the Mid mark walk reads the SAME precise roots the
+/// Zig collector's scanRoots walks, entry by entry.  RootKind is u32:
+/// ROOT_PTR=0 (slot is *usize), ROOT_VALUE=1 (slot is *Value),
+/// ROOT_VALUE_ARRAY=2 (slot is [*]Value, count read from *np),
+/// ROOT_VALUE_VOLATILE=3 (slot is *Value), ROOT_CALLFRAME_ARRAY=4 (VM-only,
+/// unreachable on the native path — the Mid walker fails loudly on it).
+export fn rt_gc_roots_len() callconv(.c) i64 {
+    return @intCast(g.shadow_len);
+}
+
+export fn rt_gc_root_kind(i: i64) callconv(.c) i64 {
+    return @intCast(@intFromEnum(g.shadow_stack[@intCast(i)].kind));
+}
+
+export fn rt_gc_root_slot(i: i64) callconv(.c) i64 {
+    return @bitCast(@intFromPtr(g.shadow_stack[@intCast(i)].slot));
+}
+
+export fn rt_gc_root_np(i: i64) callconv(.c) i64 {
+    const np = g.shadow_stack[@intCast(i)].np orelse return 0;
+    return @bitCast(@intFromPtr(np));
+}
+
 /// The Mid prims' halt arm (emptylist's non-0 arm — C falls through to
 /// unknown -> error.Halt; on QBE error.Halt IS process death via diePrim,
 /// so the Mid arm exits the same way).  Declared `i64` so the word-level
@@ -1284,6 +1366,7 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
         if (mb == 0) break :blk HEAP_BYTES;
         break :blk mb * 1024 * 1024;
     };
+    gc_heap_bytes = heap_bytes;
 
     rtInit();
     var gg = Gc.init(.{

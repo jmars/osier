@@ -85,6 +85,7 @@ import Mid.Qbe.Peephole as QbePeephole
 import Mid.Qbe.Print as QbePrint
 import Mid.Qbe.Types as QbeTypes
 import Mid.Rt as MidRt
+import Mid.RtGc as RtGc
 import Set exposing (Set)
 import Type.Check as Check
 import Type.Env as Env exposing (Env, Scheme)
@@ -93,7 +94,7 @@ import Type.Infer as Infer
 import Type.Representation exposing (Type)
 
 
-compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( Bool, Bool, Bool ) -> Bool -> Result String String
+compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( Bool, ( Bool, Bool, Bool ) ) -> Bool -> Result String String
 compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt midCons rtLean mono consArrRec eqPtrFast =
     case
         MidModule.parseAll corpusSources
@@ -141,7 +142,7 @@ compileGroup :
     -> Bool
     -> Bool
     -> Bool
-    -> ( Bool, Bool, Bool )
+    -> ( Bool, ( Bool, Bool, Bool ) )
     -> Bool
     -> Result String String
 compileGroup env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono consArrRec eqPtrFast =
@@ -266,12 +267,12 @@ lowerAll :
     -> List MidModule.Unit
     -> List MidModule.Unit
     -> String
-    -> ( Bool, Bool, Bool )
+    -> ( Bool, ( Bool, Bool, Bool ) )
     -> Bool
     -> Result String String
 lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey consArrRec eqPtrFast =
     let
-        ( consArr, rec, typeSpec ) =
+        ( consArr, ( rec, typeSpec, midGc ) ) =
             consArrRec
     in
     reserveRtName (corpusUnits ++ groupUnits)
@@ -300,6 +301,12 @@ lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByMod
                     rtProgram =
                         if midRt then
                             MidRt.program consArr rec eqPtrFast
+                                ++ (if midGc then
+                                        RtGc.gcProgram
+
+                                    else
+                                        []
+                                   )
 
                         else
                             []
@@ -361,6 +368,7 @@ lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByMod
                                             consArr
                                             rec
                                             typeSpec
+                                            midGc
                                             specialised.table
                                             (completeArities globals specialised.program)
                                             specialised.program

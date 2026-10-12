@@ -273,7 +273,7 @@ ssaJobs entryKey jobs texts =
                             -- hold.  The selfhost lane injects the Rt program
                             -- like every other compile, pruned per group by
                             -- the used-prim census.
-                            (\job srcs -> renderSsa (QbeModule.compileEntry corpus srcs entryKey True True True True True True True ( True, True, True ) True))
+                            (\job srcs -> renderSsa (QbeModule.compileEntry corpus srcs entryKey True True True True True True True ( True, ( True, True, False ) ) True))
                             jobs
                             (regroup jobs texts)
                         )

@@ -132,6 +132,13 @@ const QBE_EQPTRFAST = process.env.QBE_NOEQPTRFAST !== '1';
 // corpus attribution hatch for that unit — QBE_NOTYPESPEC=1 must reproduce the
 // pre-change corpus byte-for-byte.  Default OFF (type specialization ON).
 const QBE_TYPESPEC = process.env.QBE_NOTYPESPEC !== '1';
+// QBE_MIDGC=1 ENABLES the Mid-written mark-sweep collector (zigretire stage 4):
+// the two raw allocating nodes (RawAllocVector/RawAllocRaw) route to the Mid
+// seats Rt.allocVector/Rt.allocRaw (which own a separate mmap'd heap and
+// trigger Rt.collect), instead of the Zig rt_vec_alloc/rt_raw_alloc seats.
+// Default OFF (the Zig collector stays the allocation path) — the hatch must
+// reproduce the pre-change corpus byte-for-byte when unset.
+const QBE_MIDGC = process.env.QBE_MIDGC === '1';
 // QBE_ENTRY: the defun key the QBE backend roots reachability from
 // ("<Mod>.<fn>").  REQUIRED in the single-fixture CLI; the batch mode reads
 // one entry PER GROUP from the manifest instead.
@@ -178,6 +185,7 @@ function compileGroups(groups) {
       qbeRec: QBE_REC,
       qbeEqPtrFast: QBE_EQPTRFAST,
       qbeTypeSpec: QBE_TYPESPEC,
+      qbeMidGc: QBE_MIDGC,
     },
   });
 

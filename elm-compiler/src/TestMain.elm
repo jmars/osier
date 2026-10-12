@@ -26,6 +26,7 @@ import Mid.Qbe.Il as Il
 import Mid.Qbe.Lower as QbeLower
 import Mid.Qbe.Types as QbeTypes
 import Mid.Rt as Rt
+import Mid.RtGc as RtGc
 import Type.Builtins as Builtins
 import Type.Env as Env
 import Type.Error as Error
@@ -919,7 +920,7 @@ checks =
          List.all ok allKeys
         )
     , check "rt cons lowers to a QBE function named q_Rt_x2econs"
-        (case QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.cons" of
+        (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.cons" of
             Ok mod ->
                 List.any (\f -> f.name == "q_Rt_x2econs") mod.funcs
 
@@ -927,7 +928,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a raw-word binder read in a value position (must-fail)"
-        (case QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
+        (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
             Err msg ->
                 String.contains "raw word binder" msg
 
@@ -935,7 +936,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a word node in a value position (must-fail)"
-        (case QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
+        (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
             Err msg ->
                 String.contains "value position" msg
 
@@ -943,7 +944,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a value binder in a raw-argument position (must-fail)"
-        (case QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
+        (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
             Err msg ->
                 String.contains "not a raw word" msg
 
@@ -978,8 +979,45 @@ checks =
             && not (Set.member "Rt.address->" Rt.allocating)
             && not (Set.member "Rt.countL" Rt.allocating)
         )
+    , check "rt gc (midgc) classification: the collector is FRAME-FREE by construction (a frame-free callee must never reach a safepoint)"
+        (not (Set.member "Rt.collect" Rt.allocating)
+            && not (Set.member "Rt.allocVector" Rt.allocating)
+            && not (Set.member "Rt.allocRaw" Rt.allocating)
+            && not (Set.member "Rt.gcMarkPtr" Rt.allocating)
+            && not (Set.member "Rt.gcMarkValue" Rt.allocating)
+            && not (Set.member "Rt.gcMarkRoots" Rt.allocating)
+            && not (Set.member "Rt.gcDrain" Rt.allocating)
+            && not (Set.member "Rt.gcSweep" Rt.allocating)
+            && not (Set.member "Rt.gcAlloc" Rt.allocating)
+            && not (Set.member "Rt.gcAllocGo" Rt.allocating)
+            && not (Set.member "Rt.gcScanValueArray" Rt.allocating)
+            && not (Set.member "Rt.gcInit" Rt.allocating)
+        )
+    , check "rt gc call graph: every RawCall target in the collector is a program key AND declared in rtDeps"
+        (let
+            gcSyms key =
+                case List.filter (\d -> d.key == key) RtGc.gcProgram of
+                    d :: _ ->
+                        rawCallSyms d.value
+
+                    [] ->
+                        []
+
+            gcKeys =
+                List.map .key RtGc.gcProgram
+
+            ok key =
+                List.all (\sym -> List.member sym gcKeys && List.member sym (Maybe.withDefault [] (Dict.get key Rt.rtDeps)))
+                    (gcSyms key)
+         in
+         List.all ok gcKeys
+        )
+    , check "rt gc seeds: the collector seeds are exactly the two seats plus their transitive closure"
+        (Rt.gcSeeds
+            == [ "Rt.allocVector", "Rt.gcInit", "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.collect", "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkValue", "Rt.gcMarkPtr", "Rt.gcDrain", "Rt.gcSweep", "Rt.allocRaw" ]
+        )
     , check "rt lean ABI: a frame-free callee has pointer params, :val return and NO frame enter/leave"
-        (case QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.+" of
+        (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.+" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2e_x2b") mod.funcs of
                     f :: _ ->
@@ -996,7 +1034,7 @@ checks =
                 False
         )
     , check "rt lean ABI: a framing callee (cons) keeps rt_frame_enter/leave and the lean signature"
-        (case QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.cons" of
+        (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.cons" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2econs") mod.funcs of
                     f :: _ ->
@@ -1012,7 +1050,7 @@ checks =
                 False
         )
     , check "rt lean ABI: rt_bounce appears NOWHERE in a lean emit, and the fat hatch restores it"
-        (case QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.+" of
+        (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.+" of
             Ok mod ->
                 not (List.any (callsSym "rt_bounce") mod.funcs)
 
@@ -1026,8 +1064,8 @@ checks =
     -- (a pointer-only regression would drop it), and (b) the hatch emit
     -- differs from it (a deleted fast path would make them identical).
     , check "rt = symbol fast path: emitted as a pointer short-circuit that KEEPS the symEq fallback, and the hatch removes it"
-        (case ( QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.="
-              , QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty (Rt.program True True False) "Rt.="
+        (case ( QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.="
+              , QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty (Rt.program True True False) "Rt.="
               ) of
             ( Ok onMod, Ok offMod ) ->
                 case ( funcByName "q_Rt_x2e_x3d" onMod, funcByName "q_Rt_x2e_x3d" offMod ) of

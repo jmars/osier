@@ -1,4 +1,4 @@
-module Mid.Rt exposing (Impl, allocating, program, primImpl, rtDeps, seeds)
+module Mid.Rt exposing (Impl, allocating, gcSeeds, program, primImpl, rtDeps, seeds)
 
 -- Mid.Rt — the MID-WRITTEN RUNTIME's program assembly (handoff
 -- osier-consspike, TRACK 2 step 4).
@@ -27,6 +27,7 @@ module Mid.Rt exposing (Impl, allocating, program, primImpl, rtDeps, seeds)
 
 import Dict exposing (Dict)
 import Mid.Ir exposing (Defun, Exp(..), LetBinder(..), Lit(..), Match, UnsafeNode(..), ValuePath(..))
+import Mid.RtGc exposing (gcProgram)
 import Mid.RtPrims exposing (helperDefuns, primDefuns)
 import Set exposing (Set)
 
@@ -187,6 +188,19 @@ rtDeps =
         , ( "Rt.recInsert", [ "Rt.recUpdFind", "Rt.recUpd", "Rt.recAppend" ] )
         , ( "Rt.recToChain", [ "Rt.recToChainGo" ] )
         , ( "Rt.recToChainGo", [ "Rt.recToChainGo", "Rt.@p", "Rt.cons" ] )
+        , -- ===== the mark-sweep collector (zigretire stage 4, Mid.RtGc)
+          ( "Rt.allocVector", [ "Rt.gcInit", "Rt.gcAlloc" ] )
+        , ( "Rt.allocRaw", [ "Rt.gcInit", "Rt.gcAlloc" ] )
+        , ( "Rt.gcAlloc", [ "Rt.gcAllocGo", "Rt.collect" ] )
+        , ( "Rt.gcAllocGo", [ "Rt.gcAllocGo" ] )
+        , ( "Rt.gcInit", [] )
+        , ( "Rt.collect", [ "Rt.gcMarkRoots", "Rt.gcDrain", "Rt.gcSweep" ] )
+        , ( "Rt.gcMarkRoots", [ "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkPtr", "Rt.gcMarkValue" ] )
+        , ( "Rt.gcScanValueArray", [ "Rt.gcScanValueArray", "Rt.gcMarkValue" ] )
+        , ( "Rt.gcDrain", [ "Rt.gcDrain", "Rt.gcScanValueArray" ] )
+        , ( "Rt.gcSweep", [ "Rt.gcSweep" ] )
+        , ( "Rt.gcMarkPtr", [] )
+        , ( "Rt.gcMarkValue", [ "Rt.gcMarkPtr" ] )
         ]
 
 
@@ -212,6 +226,16 @@ keepRtDependencies roots =
                                 step (key :: acc) rest
     in
     step [] roots
+
+
+{-| The Rt defun keys the collector needs, transitively closed over the
+`rtDeps` edges above.  Seeded by Mid.Qbe.Lower when QBE_MIDGC=1: the two
+allocating seats (`Rt.allocVector`/`Rt.allocRaw`) are the only roots, and
+the mark/sweep machinery (`Rt.collect` and its walkers) follows them.
+-}
+gcSeeds : List String
+gcSeeds =
+    keepRtDependencies [ "Rt.allocVector", "Rt.allocRaw" ]
 
 
 {-| The Rt defuns whose execution can reach a GC SAFEPOINT — the fact the
@@ -252,7 +276,7 @@ allocating =
         -- computed over the default program (consArr = True, rec = True,
         -- eqPtrFast = True).
         rtProgram =
-            program True True True
+            program True True True ++ gcProgram
 
         -- fixed point: k allocates iff k has a DIRECT safepoint or any
         -- rtDeps edge of k lands in the set.

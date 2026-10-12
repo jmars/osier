@@ -196,6 +196,7 @@ type alias S =
     , rec : Bool -- E's switch (QBE_NOREC=1 -> False = the assoc-chain route)
     , consArr : Bool -- (A)'s switch (QBE_NOCONSARR=1 -> False = the 2-word cons)
     , typeSpec : Bool -- Unit B's switch (QBE_NOTYPESPEC=1 -> False = no binder-map type specialization)
+    , midGc : Bool -- zigretire stage 4's switch (QBE_MIDGC=1 -> the Mid mark-sweep collector)
     , funcs : List PendingFunc -- extra (closure) funcs, REVERSED
     , datas : List DataDef -- REVERSED
     , dataKeys : Dict String String -- content key -> data name (dedup)
@@ -353,8 +354,8 @@ freshData key mk s =
 -- Descs, and the driver's meta table.
 
 
-lower : Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
-lower rep primDirect midCons rtLean consArr rec typeSpec table arityTable program entryKey =
+lower : Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
+lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable program entryKey =
     let
         defuns =
             Dict.fromList (List.map (\d -> ( d.key, d )) program)
@@ -390,6 +391,12 @@ lower rep primDirect midCons rtLean consArr rec typeSpec table arityTable progra
                 rtKeys =
                     if List.any (\d -> isRtKey d.key) program then
                         List.filter (\k -> not (List.member k surfaceKeys)) (MidRt.seeds usedPrims)
+                            ++ (if midGc then
+                                    List.filter (\k -> not (List.member k surfaceKeys)) MidRt.gcSeeds
+
+                                else
+                                    []
+                               )
 
                     else
                         []
@@ -417,6 +424,7 @@ lower rep primDirect midCons rtLean consArr rec typeSpec table arityTable progra
                     , rec = rec
                     , consArr = consArr
                     , typeSpec = typeSpec
+                    , midGc = midGc
                     , funcs = []
                     , datas = []
                     , dataKeys = Dict.empty
@@ -939,6 +947,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , rec = sOuter.rec
             , consArr = sOuter.consArr
             , typeSpec = sOuter.typeSpec
+            , midGc = sOuter.midGc
             , funcs = []
             , datas = sOuter.datas
             , dataKeys = sOuter.dataKeys
@@ -1087,6 +1096,23 @@ lowerTail exp s =
         Lam lambda ->
             lowerClosure lambda 0 s
                 |> Result.map (jumpTo "ret")
+
+        Unsafe (RawCall call) ->
+            -- RawCall self-tail (zigretire stage 4): the collector's mark/sweep
+            -- loops recurse through RawCall (Rt->Rt), and a 150k-deep list must
+            -- not build 150k C frames.  When the call is THIS defun (the same
+            -- key s.defunKey names) and QBE_MIDGC=1, compile it as the in-frame
+            -- loop the `App` self-tail already gets (stage args, blit to the
+            -- param slots 2+i, jump @body).  Gated on midGc so the default emit
+            -- stays byte-identical (the pre-existing Rt helpers never put a
+            -- self-RawCall in tail position, but the gate keeps that a
+            -- non-assumption).
+            if s.midGc && call.sym == s.defunKey then
+                lowerSelfTail call.args s
+
+            else
+                lowerVal exp 0 s
+                    |> Result.map (jumpTo "ret")
 
         _ ->
             lowerVal exp 0 s
@@ -1284,8 +1310,21 @@ lowerRawVal node dest s =
                                                 -- context is legal QBE (il.txt Subtyping — the 32
                                                 -- low bits are used), and indices are small
                                                 -- non-negative words by contract.
+                                                -- QBE_MIDGC=1: the store goes to the PLAIN seat
+                                                -- (rt_vec_store_plain) — the barrier's `inOldgen`
+                                                -- page test reads the ZIG heap's metadata by
+                                                -- (addr/512 - firstheappage), which is out of
+                                                -- bounds for a Mid-heap address (a mark-sweep has
+                                                -- no remembered set, so the plain store IS the
+                                                -- whole contract).
                                                 emit
-                                                    (Call Nothing (Base W) (Il.Sym "rt_vec_store")
+                                                    (Call Nothing (Base W)
+                                                        (if s.midGc then
+                                                            Il.Sym "rt_vec_store_plain"
+
+                                                         else
+                                                            Il.Sym "rt_vec_store"
+                                                        )
                                                         [ ArgVal (Base L) vecT
                                                         , ArgVal (Base W) idxT
                                                         , ArgVal (Base L) (Il.Tmp (slotTmp vslot))
@@ -1587,6 +1626,44 @@ rawWordArgs exps s =
                     )
 
 
+{-| The QBE_MIDGC=1 routing for the two raw allocating nodes: box the length
+word into a number Value slot, call the Mid seat's lean-ABI `q_Rt_*` entry
+(one pointer arg, direct `:val` return), and read the body address back out
+of the result's payload word 0 into a raw temp.  The seat is `Rt.allocVector`
+/ `Rt.allocRaw` — the Mid allocating seats whose bodies own the heap and
+trigger `Rt.collect` (Mid.RtGc).
+-}
+midGcAllocSeat : String -> Il.Arg -> S -> ( Il.Arg, S )
+midGcAllocSeat seatKey lenA s =
+    let
+        ( slot, s1 ) =
+            freshSlot s
+
+        s2 =
+            storeValueCell tagNumber [ lenA ] slot s1
+
+        ( vp, s3 ) =
+            freshTmp s2
+
+        slotArg =
+            ArgVal (Base L) (Il.Tmp (slotTmp slot))
+
+        padded =
+            slotArg :: List.repeat (maxDirectArity - 1) slotArg
+
+        ( aT, s4 ) =
+            freshTmp s3
+
+        ( t, _ ) =
+            freshTmp s4
+    in
+    ( Il.Tmp t
+    , emit (Call (Just vp) (Agg "val") (Il.Sym ("q_" ++ mangle seatKey)) (padded ++ [ ArgVal (Base W) (Il.Con 1) ])) s3
+        |> emit (Bin (Just aT) L Add (Il.Tmp vp) (Il.Con (RtLayout.payloadWordOffset 0)))
+        |> emit (Load (Just t) L LoadL (Il.Tmp aT))
+    )
+
+
 {-| Evaluate ONE raw-word expression (a raw node argument position): a word
 constant, a raw-word binder's temp, or a word-producing raw node computed
 into a fresh temp.  Anything else — a Value binder, a value expression — is a
@@ -1610,13 +1687,17 @@ rawWordArg exp s =
             rawWordArg len s
                 |> Result.map
                     (\( lenA, s1 ) ->
-                        let
-                            ( t, s2 ) =
-                                freshTmp s1
-                        in
-                        ( Il.Tmp t
-                        , emit (Call (Just t) (Base L) (Il.Sym "rt_vec_alloc") [ ArgVal (Base W) lenA ]) s2
-                        )
+                        if s.midGc then
+                            midGcAllocSeat "Rt.allocVector" lenA s1
+
+                        else
+                            let
+                                ( t, s2 ) =
+                                    freshTmp s1
+                            in
+                            ( Il.Tmp t
+                            , emit (Call (Just t) (Base L) (Il.Sym "rt_vec_alloc") [ ArgVal (Base W) lenA ]) s2
+                            )
                     )
 
         Unsafe (RawVecAddr addr) ->
@@ -1883,13 +1964,17 @@ rawWordArg exp s =
             rawWordArg len s
                 |> Result.map
                     (\( lenA, s1 ) ->
-                        let
-                            ( t, s2 ) =
-                                freshTmp s1
-                        in
-                        ( Il.Tmp t
-                        , emit (Call (Just t) (Base L) (Il.Sym "rt_raw_alloc") [ ArgVal (Base W) lenA ]) s2
-                        )
+                        if s.midGc then
+                            midGcAllocSeat "Rt.allocRaw" lenA s1
+
+                        else
+                            let
+                                ( t, s2 ) =
+                                    freshTmp s1
+                            in
+                            ( Il.Tmp t
+                            , emit (Call (Just t) (Base L) (Il.Sym "rt_raw_alloc") [ ArgVal (Base W) lenA ]) s2
+                            )
                     )
 
         Unsafe (RawByteLoad bl) ->
