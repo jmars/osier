@@ -120,6 +120,12 @@ const QBE_CONSARR = process.env.QBE_NOCONSARR !== '1';
 // QBE_NOCONSARR=1 must reproduce the 00cc7da corpus byte-for-byte.  Default
 // OFF (records are positional).
 const QBE_REC = process.env.QBE_NOREC !== '1';
+// QBE_NOEQPTRFAST=1 DISABLES the `Rt.=` name-pointer fast path (stage 3,
+// zigretire): the symbol/symbol and symbol/prim equality arms fall back to the
+// pure byte walk (`Rt.symEq`) with no pointer-identity short-circuit.  It is
+// the corpus attribution hatch for that change — QBE_NOEQPTRFAST=1 must
+// reproduce the pre-change corpus byte-for-byte.  Default OFF (fast path ON).
+const QBE_EQPTRFAST = process.env.QBE_NOEQPTRFAST !== '1';
 // QBE_ENTRY: the defun key the QBE backend roots reachability from
 // ("<Mod>.<fn>").  REQUIRED in the single-fixture CLI; the batch mode reads
 // one entry PER GROUP from the manifest instead.
@@ -164,6 +170,7 @@ function compileGroups(groups) {
       qbeMono: QBE_MONO,
       qbeConsArr: QBE_CONSARR,
       qbeRec: QBE_REC,
+      qbeEqPtrFast: QBE_EQPTRFAST,
     },
   });
 

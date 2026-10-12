@@ -867,8 +867,8 @@ checks =
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
     , check "rt program: 71 defuns, all Rt.*; cons 2-ary, substring 3-ary (E added the record walk/rebuild defuns)"
-        (List.length (Rt.program True True) == 71
-            && List.all (\d -> String.startsWith "Rt." d.key) (Rt.program True True)
+        (List.length (Rt.program True True True) == 71
+            && List.all (\d -> String.startsWith "Rt." d.key) (Rt.program True True True)
             && List.any
                 (\d ->
                     d.key == "Rt.cons"
@@ -880,7 +880,7 @@ checks =
                                     False
                            )
                 )
-                (Rt.program True True)
+                (Rt.program True True True)
             && List.any
                 (\d ->
                     d.key == "Rt.substring"
@@ -892,7 +892,7 @@ checks =
                                     False
                            )
                 )
-                (Rt.program True True)
+                (Rt.program True True True)
         )
     , check "rt seeds closure: cons/=/+ pull the 8-key deepEq closure; + alone pulls just Rt.+"
         (Rt.seeds (Set.fromList [ "cons", "+", "=" ])
@@ -902,7 +902,7 @@ checks =
     , check "rt call graph: every RawCall target is a program key AND declared in rtDeps (the seed-closure skew must-fail)"
         (let
             syms key =
-                case List.filter (\d -> d.key == key) (Rt.program True True) of
+                case List.filter (\d -> d.key == key) (Rt.program True True True) of
                     d :: _ ->
                         rawCallSyms d.value
 
@@ -910,7 +910,7 @@ checks =
                         []
 
             allKeys =
-                List.map .key (Rt.program True True)
+                List.map .key (Rt.program True True True)
 
             ok key =
                 List.all (\sym -> List.member sym allKeys && List.member sym (Maybe.withDefault [] (Dict.get key Rt.rtDeps)))
@@ -919,7 +919,7 @@ checks =
          List.all ok allKeys
         )
     , check "rt cons lowers to a QBE function named q_Rt_x2econs"
-        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True) "Rt.cons" of
+        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.cons" of
             Ok mod ->
                 List.any (\f -> f.name == "q_Rt_x2econs") mod.funcs
 
@@ -979,7 +979,7 @@ checks =
             && not (Set.member "Rt.countL" Rt.allocating)
         )
     , check "rt lean ABI: a frame-free callee has pointer params, :val return and NO frame enter/leave"
-        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True) "Rt.+" of
+        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.+" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2e_x2b") mod.funcs of
                     f :: _ ->
@@ -996,7 +996,7 @@ checks =
                 False
         )
     , check "rt lean ABI: a framing callee (cons) keeps rt_frame_enter/leave and the lean signature"
-        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True) "Rt.cons" of
+        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.cons" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2econs") mod.funcs of
                     f :: _ ->
@@ -1012,11 +1012,34 @@ checks =
                 False
         )
     , check "rt lean ABI: rt_bounce appears NOWHERE in a lean emit, and the fat hatch restores it"
-        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True) "Rt.+" of
+        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.+" of
             Ok mod ->
                 not (List.any (callsSym "rt_bounce") mod.funcs)
 
             Err _ ->
+                False
+        )
+    -- THE = SYMBOL FAST PATH (stage-3 zigretire): the pointer-identity
+    -- short-circuit must be emitted as an OR over a byte-walk fallback, never
+    -- a replacement.  Structural pin (the BEHAVIOURAL pin is the gate's
+    -- symeq.elm): (a) the fast-path emit keeps the symEq fallback reachable
+    -- (a pointer-only regression would drop it), and (b) the hatch emit
+    -- differs from it (a deleted fast path would make them identical).
+    , check "rt = symbol fast path: emitted as a pointer short-circuit that KEEPS the symEq fallback, and the hatch removes it"
+        (case ( QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.="
+              , QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True False) "Rt.="
+              ) of
+            ( Ok onMod, Ok offMod ) ->
+                case ( funcByName "q_Rt_x2e_x3d" onMod, funcByName "q_Rt_x2e_x3d" offMod ) of
+                    ( Just onF, Just offF ) ->
+                        callsSym "q_Rt_x2esymEq" onF
+                            && callsSym "q_Rt_x2esymEq" offF
+                            && onF.blocks /= offF.blocks
+
+                    _ ->
+                        False
+
+            _ ->
                 False
         )
     ]
@@ -1261,7 +1284,7 @@ rtValueInRawPosition =
 
 {-| Every `Rt.*` key a body RawCalls, in order (duplicates kept — the check
 only needs membership).  The seed-closure skew detector: a RawCall to a key
-missing from (Rt.program True True) or from Rt.rtDeps makes that defun unreachable or
+missing from (Rt.program True True True) or from Rt.rtDeps makes that defun unreachable or
 unseedable, and this row fails before any .ssa is emitted.
 -}
 callsSym : String -> Il.Func -> Bool
@@ -1280,6 +1303,11 @@ callsSym sym f =
                 b.body
         )
         f.blocks
+
+
+funcByName : String -> Il.Module -> Maybe Il.Func
+funcByName name mod =
+    List.head (List.filter (\f -> f.name == name) mod.funcs)
 
 
 frameBaseIsAlloc : Il.Func -> Bool

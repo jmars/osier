@@ -1737,15 +1737,38 @@ emptylistDefun =
 byte walk), symbols (name walk), booleans (payload32), the Int/Float
 promote pair, cons-vs-symbol false, symbol/prim both ways (the name walk),
 cons/cons and vector/vector through deepEq, else both-nil.
+
+eqPtrFast (QBE_NOEQPTRFAST=1 turns it off) adds a pointer-identity fast path
+to every name-walk arm: two symbols (or a symbol and a prim) whose word-0
+name POINTERS are equal are equal, full stop — same pointer is same bytes.
+The byte walk (`Rt.symEq`) stays as the exact fallback for the intern-vs-
+static case (a runtime-interned symbol has a different pointer than a static
+`sym:` data item for the same name, and still compares equal through the
+walk).  Zig's primEq reached the same answer with an inlined `std.mem.eql`
+byte compare, not a pointer compare; the interned canonical pointers are what
+make the pointer compare EXACT here — per-byte walk only where pointers differ.
+Strings are DELIBERATELY left out: runtime strings are always copied (never
+interned), so two static `str:` items are the only pointer-stable case and a
+string fast path would buy almost nothing while complicating the fallback.
 -}
-eqDefun : Bool -> Defun
-eqDefun rec =
+eqDefun : Bool -> Bool -> Defun
+eqDefun rec eqPtrFast =
     let
         a =
             p1
 
         bb =
             p2
+
+        -- word 0 of a symbol or prim Value is its name pointer; equal
+        -- pointers are equal names (the byte walk is the exact fallback).
+        symFast l r =
+            if eqPtrFast then
+                or2 (mkBool (cmpW RCeq (wOf l) (wOf r)))
+                    (callR "Rt.symEq" [ l, r, mkNum (n 0) ])
+
+            else
+                callR "Rt.symEq" [ l, r, mkNum (n 0) ]
     in
     lam "Rt.=" [ a, bb ]
         (iff (and2 (mkBool (tagIs (v a) 0)) (mkBool (tagIs (v bb) 0)))
@@ -1755,7 +1778,7 @@ eqDefun rec =
                     (callR "Rt.bytesEqGo" [ v a, v bb, mkNum (n 0) ])
                 )
                 (iff (and2 (mkBool (tagIs (v a) 2)) (mkBool (tagIs (v bb) 2)))
-                    (callR "Rt.symEq" [ v a, v bb, mkNum (n 0) ])
+                    (symFast (v a) (v bb))
                     (iff (and2 (mkBool (tagIs (v a) 3)) (mkBool (tagIs (v bb) 3)))
                         (mkBool (cmpW RCeq (w32Of (v a)) (w32Of (v bb))))
                         (iff (and2
@@ -1769,9 +1792,9 @@ eqDefun rec =
                                  )
                                 falseV
                                 (iff (and2 (mkBool (tagIs (v a) 2)) (mkBool (tagIs (v bb) 8)))
-                                    (callR "Rt.symEq" [ v a, v bb, mkNum (n 0) ])
+                                    (symFast (v a) (v bb))
                                     (iff (and2 (mkBool (tagIs (v a) 8)) (mkBool (tagIs (v bb) 2)))
-                                        (callR "Rt.symEq" [ v a, v bb, mkNum (n 0) ])
+                                        (symFast (v a) (v bb))
                                         (iff (and2 (mkBool (tagIs (v a) 4)) (mkBool (tagIs (v bb) 4)))
                                             (callR "Rt.deepEq" [ v a, v bb ])
                                             (if rec then
@@ -2251,12 +2274,12 @@ sndDefun =
     lam "Rt.snd" [ x ] (cdrV (v x))
 
 
-primDefuns : Bool -> Bool -> List Defun
-primDefuns consArr rec =
+primDefuns : Bool -> Bool -> Bool -> List Defun
+primDefuns consArr rec eqPtrFast =
     [ consDefun consArr
     , atpDefun consArr
     , emptylistDefun
-    , eqDefun rec
+    , eqDefun rec eqPtrFast
     , addDefun
     , subDefun
     , mulDefun

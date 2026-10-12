@@ -258,11 +258,11 @@ ssaJobs entryKey jobs texts =
                 writeBundles
                     (zipJobs jobs
                         (List.map2
-                            -- run.js's DEFAULT flag vector, ALL SEVEN ON
+                            -- run.js's DEFAULT flag vector, ALL TEN ON
                             -- (flatten, rep, primDirect, midRt inject,
                             -- midCons route, rtLean lean ABI, mono
-                            -- specialiser).  midCons was
-                            -- False here while the route was step 6's
+                            -- specialiser, consArr, rec, eqPtrFast).  midCons
+                            -- was False here while the route was step 6's
                             -- OPT-IN; the flip made the Mid route the
                             -- default and deleted the flipped prims' Zig
                             -- handlers, so False now means "emit calls to
@@ -273,7 +273,7 @@ ssaJobs entryKey jobs texts =
                             -- The selfhost lane injects the Rt program like
                             -- every other compile, pruned per group by the
                             -- used-prim census.
-                            (\job srcs -> renderSsa (QbeModule.compileEntry corpus srcs entryKey True True True True True True True True True))
+                            (\job srcs -> renderSsa (QbeModule.compileEntry corpus srcs entryKey True True True True True True True ( True, True ) True))
                             jobs
                             (regroup jobs texts)
                         )

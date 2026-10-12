@@ -65,12 +65,18 @@
 #
 # STATED GAPS (the cons-spike discipline — a stated gap is a result):
 #   * x/0 and x/0.0-as-SIGFPE: both arms die; untestable same-process.
-#   * The `=` prim's SYMBOL arms (sym/sym, sym/prim) and `str`'s composite
-#     printer are NOT reachable from surface Elm (no symbol literals;
-#     `str` stays host-side over floatText).  The symbol path IS exercised
-#     indirectly — assoc/assocGo compare field-name SYMBOLS through the same
-#     deepEq/symEq machinery — but `Rt.symEq`'s own arm pair is covered only
-#     by that indirect route, and `str` not at all.
+#   * The `=` prim's SYMBOL arms: sym/sym IS reachable and is now covered
+#     BEHAVIOURALLY by the gate fixture tests/elm-fixtures/symeq.elm (stage-3
+#     zigretire: case dispatch on nullary constructors lowers to Rt.= on two
+#     bare symbol Values, and Record.remove's trusted body does `k == intern
+#     "x"` = static sym: vs runtime-interned — the same-name-different-pointer
+#     byte-walk fallback).  Its failure mode IS the pointer-identity fast path
+#     being wrong (proved by asymmetry: always-True and pointer-only mutations
+#     both flip it).  sym/prim and prim/sym are UNREACHABLE from compiled Elm
+#     (no surface spelling builds a prim Value), so they have no behavioural
+#     coverage — their soundness rests on the same word-0-name-pointer layout
+#     argument.  `str`'s composite printer is NOT reachable (no symbol
+#     literals; `str` stays host-side over floatText).
 #   * The Bitwise float arms (ToInt32 of a float) cannot type at the surface;
 #     `asF`/`toI32` machinery is covered by the arithmetic/float batches.
 #   * hd/tl/fst/reverse/append/absvector? have NO surface spelling

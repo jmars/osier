@@ -93,8 +93,8 @@ import Type.Infer as Infer
 import Type.Representation exposing (Type)
 
 
-compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Result String String
-compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt midCons rtLean mono consArr rec =
+compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( Bool, Bool ) -> Bool -> Result String String
+compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt midCons rtLean mono consArrRec eqPtrFast =
     case
         MidModule.parseAll corpusSources
             |> Result.andThen
@@ -113,7 +113,7 @@ compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt mi
                                                                 Err msg
 
                                                             Ok corpusGlobals ->
-                                                                compileGroup env nodeTypes refinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono consArr rec
+                                                                compileGroup env nodeTypes refinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono consArrRec eqPtrFast
                                                     )
                                         )
                             )
@@ -141,10 +141,10 @@ compileGroup :
     -> Bool
     -> Bool
     -> Bool
-    -> Bool
+    -> ( Bool, Bool )
     -> Bool
     -> Result String String
-compileGroup env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono consArr rec =
+compileGroup env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono consArrRec eqPtrFast =
     MidModule.parseAll groupSources
         |> Result.andThen
             (\groupFiles ->
@@ -181,7 +181,7 @@ compileGroup env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals gro
                                                                 refinedVarsByModule =
                                                                     Dict.union groupTypes.refinedVars corpusRefinedVars
                                                             in
-                                                            lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey consArr rec
+                                                            lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey consArrRec eqPtrFast
                                                 )
                                     )
                         )
@@ -266,10 +266,14 @@ lowerAll :
     -> List MidModule.Unit
     -> List MidModule.Unit
     -> String
-    -> Bool
+    -> ( Bool, Bool )
     -> Bool
     -> Result String String
-lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey consArr rec =
+lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey consArrRec eqPtrFast =
+    let
+        ( consArr, rec ) =
+            consArrRec
+    in
     reserveRtName (corpusUnits ++ groupUnits)
         |> Result.andThen (\_ -> compileAllJoin globals (corpusUnits ++ groupUnits) nodeTypesByModule refinedVarsByModule)
         -- The unsafe-node audit (osier-rawnodes): EVERY compile fails loudly
@@ -295,7 +299,7 @@ lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByMod
                 let
                     rtProgram =
                         if midRt then
-                            MidRt.program consArr rec
+                            MidRt.program consArr rec eqPtrFast
 
                         else
                             []

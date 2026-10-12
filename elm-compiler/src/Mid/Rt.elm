@@ -35,9 +35,9 @@ import Set exposing (Set)
 QbeModule; Lower keeps only the SEEDED (used) subset.  `consArr` selects the
 cons representation (QBE_NOCONSARR=1 -> False = the pre-(A) two-word cons).
 -}
-program : Bool -> Bool -> List Defun
-program consArr rec =
-    primDefuns consArr rec ++ helperDefuns rec
+program : Bool -> Bool -> Bool -> List Defun
+program consArr rec eqPtrFast =
+    primDefuns consArr rec eqPtrFast ++ helperDefuns rec
 
 
 {-| One Mid prim implementation: the Rt defun key AND its arity — the arity
@@ -247,10 +247,12 @@ allocating : Set String
 allocating =
     let
         -- The cons representation does not change which Rt defuns allocate
-        -- (cons is allocating either way), so the set is computed over the
-        -- default program (consArr = True, rec = True).
+        -- (cons is allocating either way), and neither does the equality
+        -- fast path (it adds a pointer compare, no safepoint), so the set is
+        -- computed over the default program (consArr = True, rec = True,
+        -- eqPtrFast = True).
         rtProgram =
-            program True True
+            program True True True
 
         -- fixed point: k allocates iff k has a DIRECT safepoint or any
         -- rtDeps edge of k lands in the set.
