@@ -919,7 +919,7 @@ checks =
          List.all ok allKeys
         )
     , check "rt cons lowers to a QBE function named q_Rt_x2econs"
-        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.cons" of
+        (case QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.cons" of
             Ok mod ->
                 List.any (\f -> f.name == "q_Rt_x2econs") mod.funcs
 
@@ -927,7 +927,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a raw-word binder read in a value position (must-fail)"
-        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
+        (case QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
             Err msg ->
                 String.contains "raw word binder" msg
 
@@ -935,7 +935,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a word node in a value position (must-fail)"
-        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
+        (case QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
             Err msg ->
                 String.contains "value position" msg
 
@@ -943,7 +943,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a value binder in a raw-argument position (must-fail)"
-        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
+        (case QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
             Err msg ->
                 String.contains "not a raw word" msg
 
@@ -979,7 +979,7 @@ checks =
             && not (Set.member "Rt.countL" Rt.allocating)
         )
     , check "rt lean ABI: a frame-free callee has pointer params, :val return and NO frame enter/leave"
-        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.+" of
+        (case QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.+" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2e_x2b") mod.funcs of
                     f :: _ ->
@@ -996,7 +996,7 @@ checks =
                 False
         )
     , check "rt lean ABI: a framing callee (cons) keeps rt_frame_enter/leave and the lean signature"
-        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.cons" of
+        (case QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.cons" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2econs") mod.funcs of
                     f :: _ ->
@@ -1012,7 +1012,7 @@ checks =
                 False
         )
     , check "rt lean ABI: rt_bounce appears NOWHERE in a lean emit, and the fat hatch restores it"
-        (case QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.+" of
+        (case QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.+" of
             Ok mod ->
                 not (List.any (callsSym "rt_bounce") mod.funcs)
 
@@ -1026,8 +1026,8 @@ checks =
     -- (a pointer-only regression would drop it), and (b) the hatch emit
     -- differs from it (a deleted fast path would make them identical).
     , check "rt = symbol fast path: emitted as a pointer short-circuit that KEEPS the symEq fallback, and the hatch removes it"
-        (case ( QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.="
-              , QbeLower.lower False False False True True True QbeTypes.empty Dict.empty (Rt.program True True False) "Rt.="
+        (case ( QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.="
+              , QbeLower.lower False False False True True True True QbeTypes.empty Dict.empty (Rt.program True True False) "Rt.="
               ) of
             ( Ok onMod, Ok offMod ) ->
                 case ( funcByName "q_Rt_x2e_x3d" onMod, funcByName "q_Rt_x2e_x3d" offMod ) of

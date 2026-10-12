@@ -383,6 +383,12 @@ run dirunit     main   "$(read_expected dirunit)"
 # statunit: Io.stat size + isDir/isFile + mode S_IFMT type bits (NOT mtime) +
 # the zero-record failure parity for a missing path.
 run statunit    main   "$(read_expected statunit)"
+# statplus (unit-B item 3 blocker-1): ARITHMETIC (+ - *) on a HOST-BUILT
+# Io.stat record field — the Zig-built assoc CHAIN (tag 4) the item-3 raw read
+# wrongly treated as a positional vector.  statunit only compares/bitands
+# (prims isIntKnown does not admit), so this is the fixture that fails loud if
+# the raw read loses its tag-14 test.
+run statplus    main   "$(read_expected statplus)"
 
 
 
@@ -390,6 +396,12 @@ run rowpoly     main   "$(read_expected rowpoly)"
 run extrec      main   "$(read_expected extrec)"
 run insrec      main   "$(read_expected insrec)"
 run remrec      main   "$(read_expected remrec)"
+# rmprobe (unit-B item 3 blocker-1): arithmetic on a Record.remove RESULT — a
+# chain (tag 4) typed as a CLOSED {n:Int} by f's signature, the second host
+# boundary the item-3 raw read's static licence got wrong.  remrec reads
+# remove results too but its fields are unannotated number TVars (denied), so
+# this is the fixture that fails loud if the raw read loses its tag-14 test.
+run rmprobe     main   "$(read_expected rmprobe)"
 run scopedup    main   "$(read_expected scopedup)"
 run recalias    main   "$(read_expected recalias)"
 run appendres   main   "$(read_expected appendres)"

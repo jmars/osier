@@ -126,6 +126,12 @@ const QBE_REC = process.env.QBE_NOREC !== '1';
 // the corpus attribution hatch for that change — QBE_NOEQPTRFAST=1 must
 // reproduce the pre-change corpus byte-for-byte.  Default OFF (fast path ON).
 const QBE_EQPTRFAST = process.env.QBE_NOEQPTRFAST !== '1';
+// QBE_NOTYPESPEC=1 DISABLES the binder-map type specialization (unit B): the
+// MTagEq payload-pointer inline, the Int binder-map operands, and the record
+// field-type operands all fall back to the pre-change emission.  It is the
+// corpus attribution hatch for that unit — QBE_NOTYPESPEC=1 must reproduce the
+// pre-change corpus byte-for-byte.  Default OFF (type specialization ON).
+const QBE_TYPESPEC = process.env.QBE_NOTYPESPEC !== '1';
 // QBE_ENTRY: the defun key the QBE backend roots reachability from
 // ("<Mod>.<fn>").  REQUIRED in the single-fixture CLI; the batch mode reads
 // one entry PER GROUP from the manifest instead.
@@ -171,6 +177,7 @@ function compileGroups(groups) {
       qbeConsArr: QBE_CONSARR,
       qbeRec: QBE_REC,
       qbeEqPtrFast: QBE_EQPTRFAST,
+      qbeTypeSpec: QBE_TYPESPEC,
     },
   });
 

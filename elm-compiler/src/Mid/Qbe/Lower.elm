@@ -195,6 +195,7 @@ type alias S =
     , rtLean : Bool -- the Rt LEAN ABI switch (osier-midabi; QBE_NORTLEAN=1 -> False)
     , rec : Bool -- E's switch (QBE_NOREC=1 -> False = the assoc-chain route)
     , consArr : Bool -- (A)'s switch (QBE_NOCONSARR=1 -> False = the 2-word cons)
+    , typeSpec : Bool -- Unit B's switch (QBE_NOTYPESPEC=1 -> False = no binder-map type specialization)
     , funcs : List PendingFunc -- extra (closure) funcs, REVERSED
     , datas : List DataDef -- REVERSED
     , dataKeys : Dict String String -- content key -> data name (dedup)
@@ -204,7 +205,8 @@ type alias S =
     , arities : Dict String Int
     , defuns : Dict String Defun
     , seeded : Set.Set String
-    , defunKey : String
+    , defunKey : String -- the SELF-TAIL key ("" for closures — lowerApp's self-call check)
+    , binderKey : String -- the BINDER-MAP key (the enclosing defun's key for closures, whose params' types live in ITS binder map)
     , qname : String
     }
 
@@ -351,8 +353,8 @@ freshData key mk s =
 -- Descs, and the driver's meta table.
 
 
-lower : Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
-lower rep primDirect midCons rtLean consArr rec table arityTable program entryKey =
+lower : Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
+lower rep primDirect midCons rtLean consArr rec typeSpec table arityTable program entryKey =
     let
         defuns =
             Dict.fromList (List.map (\d -> ( d.key, d )) program)
@@ -414,6 +416,7 @@ lower rep primDirect midCons rtLean consArr rec table arityTable program entryKe
                     , rtLean = rtLean
                     , rec = rec
                     , consArr = consArr
+                    , typeSpec = typeSpec
                     , funcs = []
                     , datas = []
                     , dataKeys = Dict.empty
@@ -424,6 +427,7 @@ lower rep primDirect midCons rtLean consArr rec table arityTable program entryKe
                     , defuns = defuns
                     , seeded = Set.fromList keys
                     , defunKey = ""
+                    , binderKey = ""
                     , qname = ""
                     }
             in
@@ -934,6 +938,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , rtLean = sOuter.rtLean
             , rec = sOuter.rec
             , consArr = sOuter.consArr
+            , typeSpec = sOuter.typeSpec
             , funcs = []
             , datas = sOuter.datas
             , dataKeys = sOuter.dataKeys
@@ -954,6 +959,14 @@ lowerFunBody entry key qname lambda captures rt sOuter =
 
                 else
                     ""
+            , binderKey =
+                -- The BINDER-MAP key is the `key` handed to lowerFunBody in
+                -- BOTH cases: a top-level defun's own key, or — for a closure
+                -- — its ENCLOSING defun's key (lowerClosure passes s.defunKey),
+                -- which is exactly whose binder map holds the closure params'
+                -- types.  A nested closure passes "" (its enclosing closure had
+                -- no self key), so its lookups deny.
+                key
             , qname = qname
             }
 
@@ -2564,6 +2577,44 @@ isIntType t =
             False
 
 
+{-| UNIT B: the checker's zonked type for a binder id, read ONLY through the
+per-defun binder map (`table[binderKey].binders`) — the same seat
+`closedRecordNames` reads, but keyed by `binderKey` (the enclosing defun's key
+for a closure, whose params' types live in ITS map).  `Nothing` is the
+deny-by-default answer: a synthetic binder, a conflicted range, or a unit whose
+inference never ran.  NEVER a guessed type.
+-}
+typeOfBinder : S -> Int -> Maybe Rep.Type
+typeOfBinder s id =
+    Dict.get s.binderKey s.table
+        |> Maybe.andThen
+            (\entry ->
+                case entry.binders of
+                    QbeTypes.Binders binderMap ->
+                        Dict.get id binderMap
+
+                    QbeTypes.BindersAbsent ->
+                        Nothing
+            )
+
+
+{-| The MTagEq-inline license: a type whose VALUES are compiler-emitted `Con`
+vectors (element 0 a content-keyed `sym:` pointer), so payload-pointer equality
+== name equality.  Builtin value types (`Int`/`Float`/`Bool`/`Char`/`String`/
+`List`/`Never`/`()`) are NOT `Con` vectors; user ADTs (and Prelude's
+`Maybe`/`Result`/`Order`, qualified `"Mod.Name"`) are.  Anything else (TVar,
+tuple, record, function) denies.
+-}
+isUserAdt : Rep.Type -> Bool
+isUserAdt t =
+    case t of
+        Rep.TCon name _ ->
+            not (List.member name [ "Int", "Float", "Bool", "Char", "String", "List", "Never", "()" ])
+
+        _ ->
+            False
+
+
 {-| THE PREDICATE, with the pass switch folded in so every consumer reads
 exactly one decision: an expression is Int-known iff the pass is ON and
 `isIntKnown` proves it.  There is no second place to forget `s.rep`.
@@ -2587,6 +2638,13 @@ isIntKnown s exp =
 
         Var id ->
             Set.member id s.intBinders
+                || (s.typeSpec && typeOfBinder s id == Just (Rep.TCon "Int" []))
+
+        RecordGet rec field ->
+            -- UNIT B item 3: a closed-tail record Var whose FIELD is Int —
+            -- the checker's type, not the field value's spelling.  `s.rec`
+            -- because the raw positional read only exists under E's layout.
+            s.rec && s.typeSpec && closedRecordFieldType s rec field == Just (Rep.TCon "Int" [])
 
         NoTail inner ->
             isIntKnown s inner
@@ -2642,6 +2700,89 @@ rawIntOf exp s =
 
                         Nothing ->
                             Err ("qbe: raw Int operand not in scope: binder " ++ String.fromInt id ++ " (corrupt Mid tree)")
+
+        RecordGet rec field ->
+            case closedRecordField s rec field of
+                Just ( rank, Rep.TCon "Int" [] ) ->
+                    -- UNIT B item 3: the field is Int by the checker's type, so
+                    -- its boxed payload IS the i64 — but ONLY for a positional
+                    -- tag-14 vector.  A closed-TRecord binder is NOT always a
+                    -- vector (blocker-1): host-built records (Io.stat/TaskStat)
+                    -- are assoc CHAINS (tag 4), and Record.remove returns a chain
+                    -- through the trusted-lie scheme.  So tag-test the base slot:
+                    -- tag 14 -> the raw data[rank]+8 read; anything else -> the
+                    -- existing boxed route (assoc+snd / recGet walk), whose
+                    -- tagNumber payload is the Int.  One predicted branch; the
+                    -- compiler-built case stays on the raw arm.
+                    case rec of
+                        Var id ->
+                            case Dict.get id s.binderSlots of
+                                Just rslot ->
+                                    let
+                                        ( jt, s0 ) =
+                                            freshTmp s
+
+                                        ( tagT, s1 ) =
+                                            freshTmp s0
+
+                                        ( is14T, s2 ) =
+                                            freshTmp s1
+
+                                        ( rawLbl, s3 ) =
+                                            freshLbl "rfieldraw" s2
+
+                                        ( fallLbl, s4 ) =
+                                            freshLbl "rfieldwalk" s3
+
+                                        ( joinLbl, s5 ) =
+                                            freshLbl "rfieldjoin" s4
+
+                                        sTest =
+                                            emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp rslot))) s5
+                                                |> emit (Cmp (Just is14T) W Ceq (Il.Tmp tagT) (Il.Con tagRecord))
+                                                |> closeBlock (Jnz (Il.Tmp is14T) rawLbl fallLbl)
+
+                                        ( d8, s6 ) =
+                                            freshTmp sTest
+
+                                        ( d, s7 ) =
+                                            freshTmp s6
+
+                                        ( p, s8 ) =
+                                            freshTmp s7
+
+                                        sRaw =
+                                            emit (Bin (Just d8) L Add (Il.Tmp (slotTmp rslot)) (Il.Con 8)) (startBlock rawLbl s8)
+                                                |> emit (Load (Just d) L LoadL (Il.Tmp d8))
+                                                |> emit (Bin (Just p) L Add (Il.Tmp d) (Il.Con (vs * rank + 8)))
+                                                |> emit (Load (Just jt) L LoadL (Il.Tmp p))
+                                                |> jumpTo joinLbl
+
+                                        ( fbSlot, s9 ) =
+                                            freshSlot sRaw
+
+                                        ( fp, s9b ) =
+                                            freshTmp s9
+                                    in
+                                    lowerVal (RecordGet rec field) fbSlot (startBlock fallLbl s9b)
+                                        |> Result.map
+                                            (\s10 ->
+                                                ( Il.Tmp jt
+                                                , emit (Bin (Just fp) L Add (Il.Tmp (slotTmp fbSlot)) (Il.Con 8)) s10
+                                                    |> emit (Load (Just jt) L LoadL (Il.Tmp fp))
+                                                    |> jumpTo joinLbl
+                                                    |> startBlock joinLbl
+                                                )
+                                            )
+
+                                Nothing ->
+                                    Err ("qbe: raw Int record base not in scope: binder " ++ String.fromInt id ++ " (corrupt Mid tree)")
+
+                        _ ->
+                            Err "qbe: deny-by-default violation — isIntKnown admitted a RecordGet with no raw Int form"
+
+                _ ->
+                    Err "qbe: deny-by-default violation — isIntKnown admitted a RecordGet with no raw Int form"
 
         PrimApp app ->
             case ( app.prim, app.args ) of
@@ -3591,19 +3732,29 @@ lowerNotEqual block dest s =
 lowerCase : { scrutinee : Exp, scrutId : Binder, alts : List Alt, endLabel : String } -> Int -> Bool -> S -> Result String S
 lowerCase branch dest isTail s =
     let
+        -- UNIT B item 1's license, computed ONCE: the scrutinee's checker type,
+        -- only for a Var scrutinee (a non-Var scrutinee is Gap E — deny).
+        scrutType =
+            case branch.scrutinee of
+                Var id ->
+                    typeOfBinder s id
+
+                _ ->
+                    Nothing
+
         ( scrutSlot, s1 ) =
             freshSlot s
     in
     lowerVal branch.scrutinee scrutSlot s1
         |> Result.andThen
             (\s2 ->
-                lowerAlts branch.alts scrutSlot dest isTail
+                lowerAlts branch.alts scrutSlot scrutType dest isTail
                     { s2 | binderSlots = Dict.insert branch.scrutId.id scrutSlot s2.binderSlots }
             )
 
 
-lowerAlts : List Alt -> Int -> Int -> Bool -> S -> Result String S
-lowerAlts alts scrutSlot dest isTail s =
+lowerAlts : List Alt -> Int -> Maybe Rep.Type -> Int -> Bool -> S -> Result String S
+lowerAlts alts scrutSlot scrutType dest isTail s =
     let
         ( errLbl, sE ) =
             freshLbl "cerr" s
@@ -3611,7 +3762,7 @@ lowerAlts alts scrutSlot dest isTail s =
         ( endLbl, sEnd ) =
             freshLbl "cend" sE
     in
-    lowerAltsLoop alts errLbl endLbl scrutSlot dest isTail sEnd
+    lowerAltsLoop alts errLbl endLbl scrutSlot scrutType dest isTail sEnd
         |> Result.andThen
             (\sA ->
                 Ok (startBlock errLbl sA
@@ -3624,8 +3775,8 @@ lowerAlts alts scrutSlot dest isTail s =
 -- Emit alts in order: each alt's tests jump to the NEXT alt's entry on
 -- failure (the last alt's to the error label).  A passing alt binds, runs its
 -- body, and (non-tail) joins endLbl.
-lowerAltsLoop : List Alt -> String -> String -> Int -> Int -> Bool -> S -> Result String S
-lowerAltsLoop alts errLbl endLbl scrutSlot dest isTail s =
+lowerAltsLoop : List Alt -> String -> String -> Int -> Maybe Rep.Type -> Int -> Bool -> S -> Result String S
+lowerAltsLoop alts errLbl endLbl scrutSlot scrutType dest isTail s =
     case alts of
         [] ->
             Ok s
@@ -3640,7 +3791,7 @@ lowerAltsLoop alts errLbl endLbl scrutSlot dest isTail s =
                         _ ->
                             freshLbl "cnext" s
             in
-            lowerMatchTests alt.matches scrutSlot restFailLbl s1
+            lowerMatchTests alt.matches scrutSlot scrutType restFailLbl s1
                 |> Result.andThen (lowerBinds alt.binds scrutSlot)
                 |> Result.andThen
                     (\s2 ->
@@ -3658,7 +3809,7 @@ lowerAltsLoop alts errLbl endLbl scrutSlot dest isTail s =
                                 Ok s3
 
                             _ ->
-                                lowerAltsLoop rest errLbl endLbl scrutSlot dest isTail (startBlock restFailLbl s3)
+                                lowerAltsLoop rest errLbl endLbl scrutSlot scrutType dest isTail (startBlock restFailLbl s3)
                     )
 
 
@@ -3668,6 +3819,14 @@ lowerAltsLoop alts errLbl endLbl scrutSlot dest isTail s =
 lowerLetDestruct : { scrutId : Binder, value : Exp, matches : List Match, binds : List ( Binder, ValuePath ), badLabel : String, okLabel : String } -> S -> Result String S
 lowerLetDestruct destruct s =
     let
+        scrutType =
+            case destruct.value of
+                Var id ->
+                    typeOfBinder s id
+
+                _ ->
+                    Nothing
+
         ( scrutSlot, s1 ) =
             freshSlot s
     in
@@ -3684,7 +3843,7 @@ lowerLetDestruct destruct s =
                     s5 =
                         { s4 | binderSlots = Dict.insert destruct.scrutId.id scrutSlot s4.binderSlots }
                 in
-                lowerMatchTests destruct.matches scrutSlot errLbl s5
+                lowerMatchTests destruct.matches scrutSlot scrutType errLbl s5
                     |> Result.andThen
                         (\s6 ->
                             Ok (jumpTo okLbl s6
@@ -3699,16 +3858,16 @@ lowerLetDestruct destruct s =
 
 -- Run each test in order; a failing test jumps to failLbl.  Falls through iff
 -- ALL pass (the ZINC emitter's `matchInstrs ++ Jmpf nextLabel` per test).
-lowerMatchTests : List Match -> Int -> String -> S -> Result String S
-lowerMatchTests matches scrutSlot failLbl s =
+lowerMatchTests : List Match -> Int -> Maybe Rep.Type -> String -> S -> Result String S
+lowerMatchTests matches scrutSlot scrutType failLbl s =
     List.foldl
-        (\m acc -> Result.andThen (lowerMatch m scrutSlot failLbl) acc)
+        (\m acc -> Result.andThen (lowerMatch m scrutSlot scrutType failLbl) acc)
         (Ok s)
         matches
 
 
-lowerMatch : Match -> Int -> String -> S -> Result String S
-lowerMatch match scrutSlot failLbl s =
+lowerMatch : Match -> Int -> Maybe Rep.Type -> String -> S -> Result String S
+lowerMatch match scrutSlot scrutType failLbl s =
     case match of
         MCons steps ->
             Ok (lowerTagMatch steps scrutSlot tagCons failLbl s)
@@ -3720,7 +3879,20 @@ lowerMatch match scrutSlot failLbl s =
             Ok (lowerTagMatch steps scrutSlot tagVector failLbl s)
 
         MTagEq steps tag ->
-            lowerEqMatch steps scrutSlot (LSymbol tag) failLbl s
+            -- UNIT B item 1: inline the payload-pointer compare when the
+            -- scrutinee is a USER-ADT Var and the tag is read straight from the
+            -- Con's element 0 (steps == [IdxStep 0] — the shape namedMatch
+            -- emits for a bare-constructor pattern, e.g. adtmatch's `case e of
+            -- Lit n -> ...`).  Under the user-ADT type the only reachable
+            -- symbol value is a compiler-emitted content-keyed `sym:` pointer,
+            -- so pointer equality == name equality.  Anything else (a non-Var
+            -- scrutinee — Gap E; a nested path; a non-ADT scrutinee) keeps the
+            -- real `=` call.
+            if s.typeSpec && steps == [ IdxStep 0 ] && (Maybe.map isUserAdt scrutType == Just True) then
+                lowerPtrEqMatch steps scrutSlot tag failLbl s
+
+            else
+                lowerEqMatch steps scrutSlot (LSymbol tag) failLbl s
 
         MLitEq steps lit ->
             lowerEqMatch steps scrutSlot lit failLbl s
@@ -3783,6 +3955,55 @@ lowerEqMatch steps scrutSlot lit failLbl s =
                             in
                             jmpfFalse r failLbl passLbl s6
                         )
+            )
+
+
+-- UNIT B item 1: the MTagEq inline.  Read the Con's tag symbol at `steps`
+-- (a bare symbol Value: tag at +0, content-keyed `sym:` pointer at +8) and the
+-- materialized `LSymbol tag` literal, then compare the PAYLOAD POINTERS — not
+-- the tags — and jump on equality.  Licensed by lowerMatch: only a user-ADT
+-- scrutinee at `steps == [IdxStep 0]`, where pointer equality == name equality.
+lowerPtrEqMatch : List Step -> Int -> String -> String -> S -> Result String S
+lowerPtrEqMatch steps scrutSlot tag failLbl s =
+    let
+        ( p, s1 ) =
+            freshSlot s
+
+        sRead =
+            readSteps steps scrutSlot p s1
+
+        ( l, s2 ) =
+            freshSlot sRead
+    in
+    lowerLit (LSymbol tag) l s2
+        |> Result.map
+            (\s3 ->
+                let
+                    ( pp, s4 ) =
+                        freshTmp s3
+
+                    ( lp, s5 ) =
+                        freshTmp s4
+
+                    ( sp, s6 ) =
+                        freshTmp s5
+
+                    ( lp2, s7 ) =
+                        freshTmp s6
+
+                    ( eq, s8 ) =
+                        freshTmp s7
+
+                    ( passLbl, s9 ) =
+                        freshLbl "cpass" s8
+                in
+                emit (Bin (Just pp) L Add (Il.Tmp (slotTmp p)) (Il.Con 8)) s9
+                    |> emit (Bin (Just lp) L Add (Il.Tmp (slotTmp l)) (Il.Con 8))
+                    |> emit (Load (Just sp) L LoadL (Il.Tmp pp))
+                    |> emit (Load (Just lp2) L LoadL (Il.Tmp lp))
+                    |> emit (Cmp (Just eq) L Ceq (Il.Tmp sp) (Il.Tmp lp2))
+                    |> closeBlock (Jnz (Il.Tmp eq) passLbl failLbl)
+                    |> startBlock passLbl
             )
 
 
@@ -4371,6 +4592,61 @@ closedRecordNames s rec =
 
         _ ->
             Nothing
+
+
+{-| UNIT B item 3: the `(rank, field-type)` of a record field read, for a
+closed-tail, DUPLICATE-LABEL-FREE `TRecord` Var in the binder map.  `Nothing` —
+the walk or the ordinary boxed read, never a raw positional read — for an
+absent binder, a non-Var base, an open-tail row, a duplicate-label row (whose
+value is an assoc CHAIN, not a positional vector, even under E), or a field not
+in the row.  Keyed by `binderKey` (not `defunKey`), so a closure's record base
+resolves against its ENCLOSING defun's binder map.
+-}
+closedRecordField : S -> Exp -> String -> Maybe ( Int, Rep.Type )
+closedRecordField s rec field =
+    case rec of
+        Var id ->
+            typeOfBinder s id
+                |> Maybe.andThen
+                    (\ty ->
+                        case ty of
+                            Rep.TRecord row ->
+                                case row.tail of
+                                    Rep.REmpty ->
+                                        let
+                                            names =
+                                                List.map Tuple.first row.fields
+                                        in
+                                        if List.length names /= List.length (dedupFirst names) then
+                                            -- duplicate labels -> a scoped-label
+                                            -- chain, never a positional vector.
+                                            Nothing
+
+                                        else
+                                            case List.filter (\( n, _ ) -> n == field) row.fields of
+                                                ( _, ft ) :: _ ->
+                                                    rankOf field (canonicalNames names)
+                                                        |> Maybe.map (\r -> ( r, ft ))
+
+                                                [] ->
+                                                    Nothing
+
+                                    _ ->
+                                        Nothing
+
+                            _ ->
+                                Nothing
+                    )
+
+        _ ->
+            Nothing
+
+
+{-| The field TYPE only (drop the rank).
+-}
+closedRecordFieldType : S -> Exp -> String -> Maybe Rep.Type
+closedRecordFieldType s rec field =
+    Maybe.map Tuple.second (closedRecordField s rec field)
 
 
 boxTagIs : Exp -> Int -> Exp
