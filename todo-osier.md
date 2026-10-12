@@ -10,16 +10,20 @@ G-numbers below are its) · `docs/research/row-gadt.md` (paper seed, incl. §9 d
 `lean/` (the mechanization) · the memory chain `handoff-rowgadt-{ctx,lit,lit2,lit3,plan,meta,
 impl-result,result,paper-plan}`.
 
+**Refreshed 2026-10-11** against `00cc7da` (HEAD at the time): the state table, G4 (now done), §5
+housekeeping and §6's tier roster were brought current. The dated run records in §1/§2 are left as
+written (they are that run's evidence, not the current state).
+
 ---
 
 ## Current state — [M] verified
 
 | | |
 |---|---|
-| commit | `8af7fb0` "P8 part 2: the remaining ZINC residue, and two record corrections" — the tree at the time of writing. The language change itself is `0207dd2` "type: branch-local row refinement for extensible records × GADTs (Withe / λρG)", 51 files, +6416/−287 — subject quoted verbatim from fx-ui, where the language was still named Withe |
-| gate | `tests/elm-fixtures/run-elm-gate.sh` → **PASS=154 FAIL=0** (re-run on the committed state). Since P8 every executable row runs a natively compiled binary (elm → `.ssa` → vendored qbe → cc + `rt.o`); there is no interpreter |
-| corpus | 149 gate groups; the compiler's QBE emit is **byte-identical** against the committed manifest `tools/osier-corpus-baseline.ssa.sha256` (check with `tools/osier-corpus-ssa.sh`; `tools/osier-numbers.sh` reports it) |
-| tests | TestMain **95 assertions passed** (the 19 that went with P8 were all ZINC unit tests) |
+| commit | **`00cc7da`** "mono S5/M2 (sequence step 2): the specialiser — REFUTE on the pre-stated bar, KEPT…" — HEAD as of 2026-10-11. The research-relevant language change is still `0207dd2` "type: branch-local row refinement for extensible records × GADTs (Withe / λρG)", 51 files, +6416/−287 (subject verbatim from fx-ui, where the language was still named Withe); the commits since are compiler perf/representation work (see the compiler plan) |
+| gate | `tests/elm-fixtures/run-elm-gate.sh` → **PASS=154 FAIL=0**. Every executable row runs a natively compiled binary (elm → `.ssa` → vendored qbe → cc + `rt.o`); there is no interpreter |
+| corpus | 149 gate groups; the compiler's QBE emit is **byte-identical** against the committed manifest `tools/osier-corpus-baseline.ssa.sha256` (check with `tools/osier-corpus-ssa.sh`; `tools/osier-numbers.sh` reports it, and the check is **gating**) |
+| tests | TestMain **111 assertions passed** |
 | Lean | `lean/` is a **Lake project** (build with `lake build` from `lean/`); **90 theorem declarations, 3 axiom parameters, zero `sorry`** (per-file counts in `ARTIFACT.md` §4) |
 | tree | dirty only with `elm-compiler/.elm-cache/0.19.2/packages/registry.dat` — the elm 0.19.2 cache rewrite `ARTIFACT.md` §2 documents |
 
@@ -45,9 +49,12 @@ Fallbacks: OOPSLA 2027 R2, then ML Family / Haskell Symposium.
 ## 1. Evidence hygiene — three load-bearing numbers live only in `/tmp`
 
 - [x] **G2 — durable re-measurement** — **DONE** (`tools/osier-numbers.sh` +
-      `tools/osier-corpus-baseline.sha256`, 139 sha256 sums). The script runs, from a clean
+      `tools/osier-corpus-baseline.ssa.sha256` — this row records that run; the corpus check is now
+      **gating** in `tools/osier-numbers.sh`. 139 sha256 sums). The script runs, from a clean
       checkout, gate + corpus batch (byte-identity vs the committed manifest) + TestMain +
-      `lake build` (theorem count + axiom list) and PRINTS every number. Run on `0e5a564`:
+      `lake build` (theorem count + axiom list) and PRINTS every number. **The counts below are
+      `0e5a564`'s**, kept as that run's record; current numbers are in the state table above. Run on
+      `0e5a564`:
       gate PASS=151 FAIL=0 · corpus BYTE-IDENTICAL (149=149) · TestMain 114/114 ·
       lake build exit 0/0 bytes · **90 theorems** (RowGadt 28, RowGadtEscape 4, Update 11,
       TypingStore 29, Preserve 18) · 3 axioms (Unifies/Captures/unifies_field_projection) ·
@@ -72,11 +79,16 @@ Fallbacks: OOPSLA 2027 R2, then ML Family / Haskell Symposium.
       **Two drifted** (rejections unchanged, message/location shifted — recorded in the README):
       `hlist2` now `cannot unify a with {l:a| b}` (was `{l:a|b} with {k:a|b}`); `gNeg_letcase`
       now at 19:21 (was 18:17). No existing fixture was touched.
-- [ ] **G4 — build the external program** (the discuss.ocaml.org t/13718 FSM/reducer pattern) in
-      Osier: row-typed state + a witness GADT for the transition relation. Probe-first in `/tmp`,
-      then register as an example. This is the **strongest answer to referee objection O3 ("narrow
-      program class, self-referential evidence")** — all current evidence is self-referential.
-      *Cost: 1–2 days.*
+- [x] **G4 — build the external program** (the discuss.ocaml.org t/13718 FSM/reducer pattern) in
+      Osier: row-typed state + a witness GADT for the transition relation. **DONE** —
+      `examples/research/fsm/door.elm` (the one program in that directory written by someone else;
+      the discuss.ocaml.org t/13718 FSM/reducer pattern), documented at
+      `examples/research/README.md` §"The external FSM example (gap G4)". It is **not** gate-registered
+      as itself; its behaviour is pinned by the five `rowgadt_fsm*` gate fixtures (`rowgadt_fsm`,
+      `rowgadt_fsm_bad`, `rowgadt_fsm_narrow`, `rowgadt_fsm_nested`, `rowgadt_fsm_nested_bad`).
+      This is the **strongest answer to referee objection O3 ("narrow program class, self-referential
+      evidence")** — the remaining evidence is still self-referential, so this one external program
+      carries the load for O3.
 
 ---
 
@@ -167,8 +179,9 @@ weeks for a pencil T2 sketch at OOPSLA-R2 scale).
 
 - [ ] **G9 — decide the T1/T2 presentation** (see §2). *1 h decision.*
 - [ ] **G10 — drafting, in this order:** §1+§2 → §6 → §3+§4 → §5 → §7 → §8 → **abstract last**.
-      Then run the `reviewer` preset on the full draft, then a `strategist` pass on the contribution
-      list and abstract. *2–3 weeks of units.*
+      Then run the `reviewer` preset on the full draft, then a **deep** `reviewer` pass (go deep) on
+      the contribution list and abstract — the `strategist` preset was **removed** on 2026-10-11, so
+      that pass folds into a deeper `reviewer`. *2–3 weeks of units.*
 - [ ] **G12 — figures:** F1 (verbatim from fixtures), F2/F3 (from the calculus doc), F4 (from code
       comments), F5 (the counterexample pair), F6 (the L3 principality table), T1 (fixture matrix).
       Required: F1–F6 + T1. *1–2 days.*
@@ -189,11 +202,11 @@ weeks for a pencil T2 sketch at OOPSLA-R2 scale).
 
 ## 5. Housekeeping in the tree
 
-- [ ] Add `tools/selfhost-audit.txt` to `.gitignore` — it is **regenerated**, and its only diff is a
-      `Date:` line (timestamp churn).
-- [ ] Delete `elmc.err` (stray 27-byte file: `err manifest has no groups`).
-- [ ] Decide on `elm-compiler/.elm-cache/0.19.1/` (untracked; a cache dir for a *different* elm
-      version) — gitignore or remove.
+- [x] `tools/selfhost-audit.txt` — **RESOLVED**: it is now a tracked, clean file (git status shows no
+      diff), so the timestamp churn that motivated the `.gitignore` note is gone; no action.
+- [x] Delete `elmc.err` — **DONE** (no longer present).
+- [x] `elm-compiler/.elm-cache/0.19.1/` — **RESOLVED**: the tree now has only
+      `elm-compiler/.elm-cache/0.19.2/`; the other elm version's cache dir is gone.
 
 ---
 
@@ -208,7 +221,10 @@ weeks for a pencil T2 sketch at OOPSLA-R2 scale).
 - **After a mechanism changes, correct the documents describing it in the same arc.**
 - **Invariants outrank cosmetics:** a comment edit that shifts a fixture's error line breaks
   byte-identity, so don't add framing comments to registered fixtures.
-- **`glm-coder` is NOT banned on this project — the ban was lifted by the user on 2026-10-07.** The
-  history it rested on stands as history rather than as a rule: three failures, two runs publishing
-  nothing and one leaving the tree broken. The same *model* backs `planner`, which has a good record
-  here. Weight that history when choosing a tier, but it is no longer a prohibition.
+- **The tier roster changed on 2026-10-11.** The old named tiers (`glm-coder`, `fast-coder`,
+  `pro-coder`, `claude-coder`, and the `strategist`/`security`/`reverse-engineer` subagents) were
+  **REMOVED**. The implementer ladder is now linear and cheapest-first — **`coder` → `engineer` →
+  `kimi-coder`** — climbed one rung at a time, and only after the rung below has actually failed;
+  `kimi-coder` (the top rung) needs the user's explicit approval per dispatch. `planner` and
+  `reviewer` remain. (The old note here — "`glm-coder` is NOT banned, the ban was lifted
+  2026-10-07" — is superseded: the tier no longer exists.)
