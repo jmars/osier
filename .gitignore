@@ -29,3 +29,4 @@ tools/qbe/rt.o
 tools/bench/elm-corpus/*/
 tools/bench/elm-corpus/.all-packages.json
 tools/bench/elm-corpus/.fetch-one.sh
+tools/bench/elm-corpus/MODINDEX.tsv
