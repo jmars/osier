@@ -1,4 +1,4 @@
-module Mid.Rt exposing (Impl, allocating, gcSeeds, program, primImpl, rtDeps, seeds)
+module Mid.Rt exposing (Impl, allocating, conSeeds, gcSeeds, program, primImpl, rtDeps, seeds)
 
 -- Mid.Rt — the MID-WRITTEN RUNTIME's program assembly (handoff
 -- osier-consspike, TRACK 2 step 4).
@@ -201,6 +201,9 @@ rtDeps =
         , ( "Rt.gcSweep", [ "Rt.gcSweep" ] )
         , ( "Rt.gcMarkPtr", [] )
         , ( "Rt.gcMarkValue", [ "Rt.gcMarkPtr" ] )
+        , -- ===== the Mid ADT constructor (zigretire stage 5)
+          ( "Rt.con", [ "Rt.conFill" ] )
+        , ( "Rt.conFill", [ "Rt.conFill" ] )
         ]
 
 
@@ -236,6 +239,17 @@ the mark/sweep machinery (`Rt.collect` and its walkers) follows them.
 gcSeeds : List String
 gcSeeds =
     keepRtDependencies [ "Rt.allocVector", "Rt.allocRaw" ]
+
+
+{-| The Mid-routed CONSTRUCTOR seeds (zigretire stage 5): the Rt defuns Lower
+retargets a surface construct to under QBE_MIDGC=1 — `Rt.con` (the ADT
+constructor) and its transitive closure.  Seeded alongside `gcSeeds` when the
+hatch is on, because Lower's `lowerCon` names `q_Rt_con` directly (it is not
+a prim, so the used-prim census does not seed it).
+-}
+conSeeds : List String
+conSeeds =
+    keepRtDependencies [ "Rt.con" ]
 
 
 {-| The Rt defuns whose execution can reach a GC SAFEPOINT — the fact the

@@ -1716,6 +1716,95 @@ atpDefun consArr =
     { c | key = "Rt.@p" }
 
 
+{-| `Rt.con tag argsPtr n` — the Mid ADT constructor (zigretire stage 5):
+allocate a vector of n+1 Values through `RawAllocVector` (which QBE_MIDGC=1
+routes to the Mid collector's seat `Rt.allocVector`), store the tag at index
+0, copy the n args from the caller's STAGED block (argsPtr, a contiguous
+[*]Value array in the caller's ROOTED frame), and wrap as a tag-10 vector
+Value.  The args survive the allocation because they live in the caller's
+rooted frame — the Zig `rt_con` contract, unchanged; tag and the two boxed
+words live in Rt.con's OWN rooted frame (Rt.con is `allocating`).  Rt.conFill
+does the copy alloc-free, so it is frame-free.
+-}
+conDefun : Defun
+conDefun =
+    let
+        tag =
+            p1
+
+        argsPtr =
+            p2
+
+        cnt =
+            p3
+
+        dataW =
+            b 4
+
+        cntW =
+            b 5
+    in
+    lam "Rt.con" [ tag, argsPtr, cnt ]
+        (lets
+            [ ( dataW, Unsafe (RawAllocVector (iadd (wOf (v cnt)) (n 1))) )
+            , ( cntW, wOf (v cnt) )
+            , ( b 6, Unsafe (RawVecStore { vec = Var dataW.id, index = n 0, value = v tag }) )
+            , ( b 7, callR "Rt.conFill" [ mkNum (Var dataW.id), v argsPtr, mkNum (v cntW) ] )
+            ]
+            (mkVec (Var dataW.id) (iadd (v cntW) (n 1)))
+        )
+
+
+{-| `Rt.conFill data argsPtr i` — fill vector element i from staged arg i-1,
+then recurse.  Frame-free: RawVecLoad/RawVecStore allocate nothing (the
+plain store, no barrier — the collector is non-moving).
+-}
+conFillDefun : Defun
+conFillDefun =
+    let
+        data =
+            p1
+
+        argsPtr =
+            p2
+
+        idx =
+            p3
+
+        dataW =
+            b 4
+
+        argsW =
+            b 5
+
+        idxW =
+            b 6
+    in
+    lam "Rt.conFill" [ data, argsPtr, idx ]
+        (lets
+            [ ( dataW, wOf (v data) )
+            , ( argsW, wOf (v argsPtr) )
+            , ( idxW, wOf (v idx) )
+            ]
+            (iff (mkBool (cmpW RCeq (v idxW) (n 0)))
+                mkNil
+                (lets
+                    [ ( b 7
+                      , Unsafe
+                            (RawVecStore
+                                { vec = Var dataW.id
+                                , index = Var idxW.id
+                                , value = Unsafe (RawVecLoad { vec = Var argsW.id, index = isub (v idxW) (n 1) })
+                                }
+                            )
+                      )
+                    ]
+                    (callR "Rt.conFill" [ mkNum (Var dataW.id), mkNum (Var argsW.id), mkNum (isub (v idxW) (n 1)) ])
+                )
+            )
+        )
+
+
 {-| `Rt.emptylist a` — primEmptylist: (number 0) -> nil; anything else is
 error.Halt in Zig (C falls through to unknown) -> the rt_halt seat here
 (module header GAPS).
@@ -2278,6 +2367,8 @@ primDefuns : Bool -> Bool -> Bool -> List Defun
 primDefuns consArr rec eqPtrFast =
     [ consDefun consArr
     , atpDefun consArr
+    , conDefun
+    , conFillDefun
     , emptylistDefun
     , eqDefun rec eqPtrFast
     , addDefun

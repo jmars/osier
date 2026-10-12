@@ -867,8 +867,8 @@ checks =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 71 defuns, all Rt.*; cons 2-ary, substring 3-ary (E added the record walk/rebuild defuns)"
-        (List.length (Rt.program True True True) == 71
+    , check "rt program: 73 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor)"
+        (List.length (Rt.program True True True) == 73
             && List.all (\d -> String.startsWith "Rt." d.key) (Rt.program True True True)
             && List.any
                 (\d ->
@@ -885,6 +885,18 @@ checks =
             && List.any
                 (\d ->
                     d.key == "Rt.substring"
+                        && (case d.value of
+                                Lam lambda ->
+                                    List.length lambda.params == 3
+
+                                _ ->
+                                    False
+                           )
+                )
+                (Rt.program True True True)
+            && List.any
+                (\d ->
+                    d.key == "Rt.con"
                         && (case d.value of
                                 Lam lambda ->
                                     List.length lambda.params == 3
@@ -959,6 +971,7 @@ checks =
     , check "rt allocation classification: the pure-read defuns are frame-free, the builders are framed"
         (Set.member "Rt.cons" Rt.allocating
             && Set.member "Rt.@p" Rt.allocating
+            && Set.member "Rt.con" Rt.allocating
             && Set.member "Rt.cn" Rt.allocating
             && Set.member "Rt.repeat" Rt.allocating
             && Set.member "Rt.substring" Rt.allocating
@@ -978,6 +991,7 @@ checks =
             && not (Set.member "Rt.assocGo" Rt.allocating)
             && not (Set.member "Rt.address->" Rt.allocating)
             && not (Set.member "Rt.countL" Rt.allocating)
+            && not (Set.member "Rt.conFill" Rt.allocating)
         )
     , check "rt gc (midgc) classification: the collector is FRAME-FREE by construction (a frame-free callee must never reach a safepoint)"
         (not (Set.member "Rt.collect" Rt.allocating)
@@ -1015,6 +1029,9 @@ checks =
     , check "rt gc seeds: the collector seeds are exactly the two seats plus their transitive closure"
         (Rt.gcSeeds
             == [ "Rt.allocVector", "Rt.gcInit", "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.collect", "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkValue", "Rt.gcMarkPtr", "Rt.gcDrain", "Rt.gcSweep", "Rt.allocRaw" ]
+        )
+    , check "rt con seeds: the Mid ADT constructor and its fill helper"
+        (Rt.conSeeds == [ "Rt.con", "Rt.conFill" ]
         )
     , check "rt lean ABI: a frame-free callee has pointer params, :val return and NO frame enter/leave"
         (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.+" of

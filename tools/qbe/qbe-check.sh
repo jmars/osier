@@ -257,6 +257,10 @@ run churnbig-nochurn Churn.build tools/qbe/fixtures/churn.elm 500000 0
 # the matching probe go red).
 run_midgc midgc-live    MidgcLive.main    tools/qbe/fixtures/midgc-live.elm
 run_midgc midgc-reclaim MidgcReclaim.main tools/qbe/fixtures/midgc-reclaim.elm
+# zigretire stage 5 — the ADT-construction cross-heap probe: a Mid cons list
+# whose elements are ADT constructors must share the MID heap (Rt.con).  The
+# fail-before/pass-after asymmetry is scripted in tools/qbe/probe-midgc-adt.sh.
+run_midgc midgc-adt     MidgcAdt.main     tools/qbe/fixtures/midgc-adt.elm
 
 # nice-to-have 9: a result whose printed form EXCEEDS the old 16384-byte print
 # buffer (~24KB here).  Both runners stream now, so native and VM must agree

@@ -392,7 +392,7 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                     if List.any (\d -> isRtKey d.key) program then
                         List.filter (\k -> not (List.member k surfaceKeys)) (MidRt.seeds usedPrims)
                             ++ (if midGc then
-                                    List.filter (\k -> not (List.member k surfaceKeys)) MidRt.gcSeeds
+                                    List.filter (\k -> not (List.member k surfaceKeys)) (MidRt.gcSeeds ++ MidRt.conSeeds)
 
                                 else
                                     []
@@ -1654,11 +1654,11 @@ midGcAllocSeat seatKey lenA s =
         ( aT, s4 ) =
             freshTmp s3
 
-        ( t, _ ) =
+        ( t, s5 ) =
             freshTmp s4
     in
     ( Il.Tmp t
-    , emit (Call (Just vp) (Agg "val") (Il.Sym ("q_" ++ mangle seatKey)) (padded ++ [ ArgVal (Base W) (Il.Con 1) ])) s3
+    , emit (Call (Just vp) (Agg "val") (Il.Sym ("q_" ++ mangle seatKey)) (padded ++ [ ArgVal (Base W) (Il.Con 1) ])) s5
         |> emit (Bin (Just aT) L Add (Il.Tmp vp) (Il.Con (RtLayout.payloadWordOffset 0)))
         |> emit (Load (Just t) L LoadL (Il.Tmp aT))
     )
@@ -4372,8 +4372,8 @@ lowerCon con dest s =
                                 n =
                                     List.length slots
 
-                                -- rt_con reads `args` as a CONTIGUOUS [*]Value
-                                -- array, so stage the (rooted, but not
+                                -- rt_con / Rt.con read `args` as a CONTIGUOUS
+                                -- [*]Value array, so stage the (rooted, but not
                                 -- necessarily adjacent) arg slots into one
                                 -- contiguous frame block immediately before the
                                 -- call — pure copies, no safepoint between.
@@ -4383,25 +4383,62 @@ lowerCon con dest s =
                                 ( rp, s5 ) =
                                     freshTmp s4
                             in
-                            Ok
-                                (emit
-                                    (Call (Just rp)
-                                        (Agg "val")
-                                        (Il.Sym "rt_con")
-                                        [ ArgVal (Base L) (Il.Tmp (slotTmp tagSlot))
-                                        , ArgVal (Base L)
-                                            (if n == 0 then
-                                                Il.Con 0
+                            if s.midGc then
+                                -- QBE_MIDGC=1: route Con through the Mid defun
+                                -- Rt.con (tag, argsPtr, n) — the allocation is
+                                -- Rt.allocVector (the Mid collector), so the ADT
+                                -- vector lands in the MID heap (no cross-heap
+                                -- edge).  argsPtr and n are boxed as number
+                                -- Values in fresh slots (the lean ABI passes
+                                -- POINTERS to Value slots, plus a count word).
+                                let
+                                    ( argsPtrSlot, sA ) =
+                                        freshSlot s5
 
-                                             else
-                                                Il.Tmp (slotTmp cbase)
-                                            )
-                                        , ArgVal (Base W) (Il.Con n)
-                                        ]
+                                    ( nSlot, sB ) =
+                                        freshSlot sA
+
+                                    sC =
+                                        storeValueCell tagNumber [ Il.Tmp (slotTmp cbase) ] argsPtrSlot sB
+
+                                    sD =
+                                        storeValueCell tagNumber [ Il.Con n ] nSlot sC
+                                in
+                                Ok
+                                    (emit
+                                        (Call (Just rp)
+                                            (Agg "val")
+                                            (Il.Sym ("q_" ++ mangle "Rt.con"))
+                                            [ ArgVal (Base L) (Il.Tmp (slotTmp tagSlot))
+                                            , ArgVal (Base L) (Il.Tmp (slotTmp argsPtrSlot))
+                                            , ArgVal (Base L) (Il.Tmp (slotTmp nSlot))
+                                            , ArgVal (Base W) (Il.Con 3)
+                                            ]
+                                        )
+                                        sD
+                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
                                     )
-                                    s5
-                                    |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
-                                )
+
+                            else
+                                Ok
+                                    (emit
+                                        (Call (Just rp)
+                                            (Agg "val")
+                                            (Il.Sym "rt_con")
+                                            [ ArgVal (Base L) (Il.Tmp (slotTmp tagSlot))
+                                            , ArgVal (Base L)
+                                                (if n == 0 then
+                                                    Il.Con 0
+
+                                                 else
+                                                    Il.Tmp (slotTmp cbase)
+                                                )
+                                            , ArgVal (Base W) (Il.Con n)
+                                            ]
+                                        )
+                                        s5
+                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+                                    )
                         )
             )
 
