@@ -160,9 +160,21 @@ const QBE_MIDGC = process.env.QBE_MIDGC === '1';
 //      cross-heap edge that SEGVs with no diagnostic.  (stage-5 PART 2 review)
 //
 // The tools/qbe/qbe-check.sh "midgc-guard" row greps THIS list and re-runs
-// run.js with each `off` flag, asserting exit 2 — so adding a dependency to
-// the code WITHOUT adding it here is caught by that row (the enumeration and
-// the check share one source; the check cannot drift from the guard).
+// run.js with each `off` flag, asserting exit 2.  WHAT THAT ROW ACTUALLY PINS
+// (and does not pin — corrected 2026-10-12, stage-5 PART 3 review):
+//   * it pins DELETION: the row asserts the list is non-empty, so a refactor
+//     that deletes the enumeration fails there, not silently;
+//   * it pins LIST<->LOOP CONSISTENCY: list and loop are the same variable, so
+//     the check cannot drift from the guard;
+//   * it CANNOT see an OMITTED flag — a dependency added to the code without a
+//     list entry compiles on, and the row re-tests only what it NAMES.
+// COMPLETENESS of the enumeration is therefore a REVIEW obligation, not a
+// mechanical one — and the string hole that motivated this correction shows
+// the structural limit: QBE_NOSTRINGINTERN is read in rt.zig main, not run.js,
+// so NO list here could enumerate it.  That hole is closed STRUCTURALLY (under
+// QBE_MIDGC=1, string literals are emitted as static data — rt_string is not
+// called at all), pinned by probe-midgc-string.sh's zero-rt_string-emission
+// assert, not by this guard.
 const MIDGC_DEPENDS_ON = [
   { off: 'QBE_NORTLEAN', dep: 'the lean ABI', why: 'the Mid routes hard-code the lean call shape (3 pointer args + a count word, direct :val return), which mixes with the FAT QBE_NORTLEAN callees into a link-and-read-the-wrong-registers' },
   { off: 'QBE_NOMIDRT', dep: 'the Mid runtime', why: 'withholding the Rt program removes the q_Rt_* seats the collector and routes call, so the partial-application path silently reverts to the Zig allocator (a cross-heap edge that SEGVs)' },

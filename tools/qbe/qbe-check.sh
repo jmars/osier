@@ -201,6 +201,39 @@ run_midgc() {
   fi
 }
 
+# like run_midgc(), but with QBE_NOSTRINGINTERN=1 in the runtime env: the
+# zigretire stage-5 PART 4 STRING probe's hole is the rt_string FALLBACK, which
+# fires on QBE_NOSTRINGINTERN=1 (and at run time once intern_live >= 2048).  A
+# plain run_midgc row would intern the strings (rooted -> safe) and pass on the
+# broken tree too, so the golden row must drive the flag.
+run_midgc_nsi() {
+  local name="$1" entry="$2" fixture="$3"; shift 3
+  local args=("$@")
+  local bin
+  bin="$(QBE_MIDGC=1 "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$TMP/$name")" || {
+    echo "FAIL $name: qbe-mk (QBE_MIDGC=1)"; FAIL=1; return
+  }
+  local nat_out exp
+  nat_out="$(QBE_HEAP_MB=$CHURN_MB QBE_NOSTRINGINTERN=1 timeout 60 "$bin" "$entry" "${args[@]}" 2>&1)" || true
+  if [ "$FREEZE" = 1 ]; then
+    printf '%s\n' "$nat_out" > "$GOLDEN/$name.txt"
+    exp="$nat_out"
+    echo "FROZE $name: golden <- the Mid collector's current output (${nat_out:0:80})"
+  else
+    exp="$(golden_read "$name")"
+    if [ "$exp" = "__NO_GOLDEN__" ]; then
+      echo "FAIL $name: no golden at $GOLDEN/$name.txt"
+      FAIL=1; return
+    fi
+  fi
+  if [ "$nat_out" != "$exp" ]; then
+    echo "FAIL $name: midgc golden='$exp' native='$nat_out'"
+    FAIL=1
+  else
+    echo "PASS $name: midgc (QBE_MIDGC=1 QBE_NOSTRINGINTERN=1 QBE_HEAP_MB=$CHURN_MB) identical (${nat_out:0:60})"
+  fi
+}
+
 # like run(), but with AOTRUN_ARGV=1: the trailing args are the APP's *argv*
 # pseudo-global (string list), NOT int call args — the selfhost CLI-driver
 # contract.  Guards the argvPrimThunk arity bug (the class the old
@@ -274,6 +307,12 @@ run_midgc midgc-partial MidgcPartial.main tools/qbe/fixtures/midgc-partial.elm
 # Record.remove, must all live in the MID heap.  The fail-before/pass-after
 # asymmetry is scripted in tools/qbe/probe-midgc-record.sh.
 run_midgc midgc-record MidgcRecord.main tools/qbe/fixtures/midgc-record.elm
+# zigretire stage 5 PART 4 — the STRING-LITERAL cross-heap probe (the
+# corrected-criterion hole: rt_string's Zig-nursery fallback, reachable only
+# from Mid, reclaimed by the Zig scavenge).  Driven under QBE_NOSTRINGINTERN=1
+# because the hole is the FALLBACK path.  The fail-before/pass-after asymmetry
+# + the zero-rt_string-emission pin are scripted in tools/qbe/probe-midgc-string.sh.
+run_midgc_nsi midgc-string MidgcString.main tools/qbe/fixtures/midgc-string.elm
 
 # nice-to-have 9: a result whose printed form EXCEEDS the old 16384-byte print
 # buffer (~24KB here).  Both runners stream now, so native and VM must agree

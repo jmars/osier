@@ -143,6 +143,11 @@ tagSymbol =
     RtLayout.tagSymbol
 
 
+tagString : Int
+tagString =
+    RtLayout.tagString
+
+
 tagCons : Int
 tagCons =
     RtLayout.tagCons
@@ -2556,14 +2561,28 @@ lowerLit lit dest s =
                     freshData ("str:" ++ str)
                         (\n -> { name = n, align = Just 8, items = [ DStr str, DByte 0 ], export_ = False })
                         s
-
-                ( rp, s2 ) =
-                    freshTmp s1
             in
-            Ok
-                (emit (Call (Just rp) (Agg "val") (Il.Sym "rt_string") [ ArgVal (Base L) (Il.Sym strname), ArgVal (Base W) (Il.Con (utf8ByteLength str)) ]) s2
-                    |> emit (Blit (Il.Tmp rp) (Il.Tmp d) vs)
-                )
+            if s.midGc then
+                -- Mid: the string data IS the static data symbol (immutable,
+                -- null-terminated, the `str:` freshData key) — no Zig-nursery
+                -- copy, so no cross-heap edge and nothing the Zig scavenge can
+                -- reclaim.  rt_string's
+                -- interning/fallback (rt.zig:405-408) allocates the data in the
+                -- Zig nursery, which the scavenge re-claims while a Mid object
+                -- references it — the corrected-criterion hole this fixes (both
+                -- the QBE_NOSTRINGINTERN flag AND the intern_live >= 2048
+                -- runtime fallback are unreachable because rt_string is not
+                -- called at all under the hatch).
+                Ok (storeValueCell tagString [ Il.Sym strname, Il.Con (utf8ByteLength str) ] dest s1)
+            else
+                let
+                    ( rp, s2 ) =
+                        freshTmp s1
+                in
+                Ok
+                    (emit (Call (Just rp) (Agg "val") (Il.Sym "rt_string") [ ArgVal (Base L) (Il.Sym strname), ArgVal (Base W) (Il.Con (utf8ByteLength str)) ]) s2
+                        |> emit (Blit (Il.Tmp rp) (Il.Tmp d) vs)
+                    )
 
 
 -- ==================== S4: UNBOXED Int LOCALS (representation v1) ====================
