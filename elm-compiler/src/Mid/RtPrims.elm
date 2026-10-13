@@ -1551,6 +1551,348 @@ recToChainGoDefun =
         )
 
 
+-- ============================ FD PRIMS (zigretire stage 3 GROUP 1) ============================
+-- The fd layer (write-byte, read-byte, open, close) as Mid bodies over
+-- RawCallRaw libc seats (write/read/openat/close/__errno_location) plus three
+-- Zig registry seats (rt_ss_in/rt_ss_readbyte/rt_ss_close, tools/qbe/rt.zig)
+-- for the string-stream arms.  read-file-as-string is the NEXT landing (its
+-- copy-on-grow page-allocator accumulator is a distinct mechanism).
+--
+-- The stream Value layout (gc/types.zig stream extern struct): payload word 0
+-- = file (?*anyopaque, an fd-int-in-pointer; null = fd 0), payload word 1 =
+-- is_input (LOW half) | is_string (HIGH half).  is_string is read by shifting
+-- the packed word right 32 (is_input is the RawPayload32 half).
+
+
+{-| The stream Value's `is_string` i32 field as a 0/1 word.  Payload word 1 is
+is_input (LOW half) | is_string (HIGH half); is_input is always 0 or 1, so the
+packed word is > 1 exactly when is_string is set (no 64-bit shift exists in
+Mid — the i32 family is 32-bit only).
+-}
+isStringOf : Exp -> Exp
+isStringOf x =
+    cmpW RCgts (Unsafe (RawPayload { value = x, word = 1 })) (n 1)
+
+
+{-| Build a stream Value (tag 11): the file word plus the packed
+is_input/is_string word (is_input low, is_string high — `is_string * 2^32`
+computed as a 64-bit multiply, since the shift family is 32-bit).
+-}
+mkStream : Exp -> Exp -> Exp -> Exp
+mkStream fileW isInW isStrW =
+    Unsafe (RawMkValue { tag = RtLayout.tagStream, words = [ fileW, iadd isInW (imul (n 4294967296) isStrW) ] })
+
+
+{-| errno as a word: __errno_location() then the low byte.  Linux errnos are
+all < 256 and this target is little-endian, so the low byte IS the value.
+-}
+errnoOf : Exp
+errnoOf =
+    Unsafe (RawByteLoad { ptr = callW "__errno_location" [], index = n 0 })
+
+
+{-| readFull fdN bufN countN — `read` with the EINTR retry Zig's std.posix.read
+gives (raw libc read does not).  All args boxed as numbers (the recursive
+helpers' discipline).  Returns the byte count as a number, -1 on a non-EINTR
+error.  Non-allocating: the bufN pointer stays valid through the recursion.
+-}
+readFullDefun : Defun
+readFullDefun =
+    let
+        fdN =
+            p1
+
+        bufN =
+            p2
+
+        countN =
+            p3
+
+        nW =
+            b 4
+    in
+    lam "Rt.readFull" [ fdN, bufN, countN ]
+        (lets
+            [ ( nW, callW "read" [ wOf (v fdN), wOf (v bufN), wOf (v countN) ] ) ]
+            (iff (mkBool (cmpW RClts (v nW) (n 0)))
+                (iff (mkBool (cmpW RCeq errnoOf (n 4)))
+                    (callR "Rt.readFull" [ v fdN, v bufN, v countN ])
+                    (mkNum (n (-1)))
+                )
+                (mkNum (v nW))
+            )
+        )
+
+
+{-| cStrFill bufN str i — fill buf[0..len] with str's bytes and buf[len] with
+the NUL terminator.  `bufN` boxes the raw buffer pointer (a number the
+collector never chases); `str` is re-read fresh each step (RawStrByte) so a
+post-alloc move of the string is handled.  Returns bufN.  Non-allocating.
+-}
+cStrFillDefun : Defun
+cStrFillDefun =
+    let
+        bufN =
+            p1
+
+        str =
+            p2
+
+        i =
+            p3
+    in
+    lam "Rt.cStrFill" [ bufN, str, i ]
+        (iff (mkBool (cmpW RCges (wOf (v i)) (lenOf (v str))))
+            (lets
+                [ ( b 4, Unsafe (RawByteStore { ptr = wOf (v bufN), index = wOf (v i), value = n 0 })) ]
+                (v bufN)
+            )
+            (lets
+                [ ( b 5, Unsafe (RawByteStore { ptr = wOf (v bufN), index = wOf (v i), value = Unsafe (RawStrByte { str = v str, index = wOf (v i) }) })) ]
+                (callR "Rt.cStrFill" [ v bufN, v str, mkNum (iadd (wOf (v i)) (n 1)) ])
+            )
+        )
+
+
+{-| The null-terminated copy of a string: the binders to prepend plus the
+buffer WORD (a raw `Var`, usable directly in a raw argument position).  Alloc
+len+1, re-read the data pointer AFTER the alloc (the Zig GC is moving), fill
++ NUL.  `base` supplies four fresh binder ids so a defun can inline this
+twice (the open arms) without an id collision.
+-}
+cStrOf : Int -> Exp -> ( List ( Binder, Exp ), Exp )
+cStrOf base path =
+    let
+        lenW =
+            { id = base, name = "t" ++ String.fromInt base }
+
+        bufW =
+            { id = base + 1, name = "t" ++ String.fromInt (base + 1) }
+
+        bufN =
+            { id = base + 2, name = "t" ++ String.fromInt (base + 2) }
+
+        fill =
+            { id = base + 3, name = "t" ++ String.fromInt (base + 3) }
+    in
+    ( [ ( lenW, lenOf path )
+      , ( bufW, Unsafe (RawAllocRaw (iadd (v lenW) (n 1))) )
+      , ( bufN, mkNum (v bufW) )
+      , ( fill, callR "Rt.cStrFill" [ v bufN, path, mkNum (n 0) ] )
+      ]
+    , v bufW
+    )
+
+
+{-| write-byte (2 args: byte, stream) — raw one-byte write to the stream's fd,
+returns the byte.  The byte is the number payload's low byte (Zig's
+`@truncate(@bitCast(number))`); the write result is ignored exactly as Zig
+ignores it (`_ = std.posix.system.write`).
+-}
+writeByteDefun : Defun
+writeByteDefun =
+    let
+        byte =
+            p1
+
+        stream =
+            p2
+
+        bufW =
+            b 3
+    in
+    lam "Rt.write-byte" [ byte, stream ]
+        (lets
+            [ ( bufW, Unsafe (RawAllocRaw (n 1)) )
+            , ( b 4, Unsafe (RawByteStore { ptr = v bufW, index = n 0, value = wOf (v byte) }) )
+            , ( b 5, callW "write" [ wOf (v stream), v bufW, n 1 ] )
+            ]
+            (v byte)
+        )
+
+
+{-| read-byte (1 arg: stream).  String stream: the registry seat; file stream:
+one read with EINTR retry, EOF/error -> -1.
+-}
+readByteDefun : Defun
+readByteDefun =
+    let
+        stream =
+            p1
+
+        isStr =
+            b 3
+
+        fileArm =
+            let
+                fd =
+                    b 4
+
+                bufW =
+                    b 5
+
+                nVal =
+                    b 6
+            in
+            lets
+                [ ( fd, wOf (v stream) )
+                , ( bufW, Unsafe (RawAllocRaw (n 1)) )
+                , ( nVal, callR "Rt.readFull" [ mkNum (v fd), mkNum (v bufW), mkNum (n 1) ] )
+                ]
+                (iff (mkBool (cmpW RCeq (wOf (v nVal)) (n 1)))
+                    (mkNum (Unsafe (RawByteLoad { ptr = v bufW, index = n 0 })))
+                    (mkNum (n (-1)))
+                )
+
+        stringArm =
+            let
+                i =
+                    b 7
+
+                r =
+                    b 8
+            in
+            lets
+                [ ( i, wOf (v stream) )
+                , ( r, callW "rt_ss_readbyte" [ v i ] )
+                ]
+                (iff (mkBool (cmpW RCeq (v r) (n (-2))))
+                    haltV
+                    (mkNum (v r))
+                )
+    in
+    lam "Rt.read-byte" [ stream ]
+        (lets
+            [ ( isStr, isStringOf (v stream) ) ]
+            (iff (mkBool (v isStr))
+                stringArm
+                fileArm
+            )
+        )
+
+
+{-| open (2 args: path, dir).  dir is "in" (O_RDONLY; ENOENT -> a string
+stream of the path) or "out" (O_WRONLY|O_CREAT|O_TRUNC 0666); neither leaves
+the accumulator as number 0 (C's fall-through on a zeroed acc).
+-}
+openDefun : Defun
+openDefun =
+    let
+        path =
+            p1
+
+        dir =
+            p2
+
+        dirIsIn =
+            callR "Rt.=" [ v dir, Lit (LString "in") ]
+
+        dirIsOut =
+            callR "Rt.=" [ v dir, Lit (LString "out") ]
+
+        inArm =
+            let
+                ( cstrBinds, cstr ) =
+                    cStrOf 10 (v path)
+
+                fd =
+                    b 14
+            in
+            lets
+                (cstrBinds ++ [ ( fd, callW "openat" [ n (-100), cstr, n 0, n 0 ] ) ])
+                (iff (mkBool (cmpW RClts (v fd) (n 0)))
+                    (iff (mkBool (cmpW RCeq errnoOf (n 2)))
+                        (let
+                            idx =
+                                b 15
+                         in
+                         lets
+                            [ ( idx, callW "rt_ss_in" [ cstr, lenOf (v path) ] ) ]
+                            (iff (mkBool (cmpW RClts (v idx) (n 0)))
+                                haltV
+                                (mkStream (v idx) (n 1) (n 1))
+                            )
+                        )
+                        falseV
+                    )
+                    (mkStream (v fd) (n 1) (n 0))
+                )
+
+        outArm =
+            let
+                ( cstrBinds, cstr ) =
+                    cStrOf 20 (v path)
+
+                fd =
+                    b 24
+            in
+            lets
+                (cstrBinds ++ [ ( fd, callW "openat" [ n (-100), cstr, n 577, n 438 ] ) ])
+                (iff (mkBool (cmpW RClts (v fd) (n 0)))
+                    falseV
+                    (mkStream (v fd) (n 0) (n 0))
+                )
+    in
+    lam "Rt.open" [ path, dir ]
+        (iff dirIsIn
+            inArm
+            (iff dirIsOut
+                outArm
+                (mkNum (n 0))
+            )
+        )
+
+
+{-| close (1 arg: stream).  String stream: free the registry slot (idempotent;
+the slot index stays consumed); file stream: close only when the file pointer
+is non-null (C's guard against closing the absent stdin).  Returns nil.
+-}
+closeDefun : Defun
+closeDefun =
+    let
+        stream =
+            p1
+
+        isStr =
+            b 3
+
+        stringArm =
+            let
+                r =
+                    b 4
+            in
+            lets
+                [ ( r, callW "rt_ss_close" [ wOf (v stream) ] ) ]
+                (iff (mkBool (cmpW RCeq (v r) (n (-2))))
+                    haltV
+                    mkNil
+                )
+
+        fileArm =
+            let
+                f =
+                    b 5
+            in
+            lets
+                [ ( f, wOf (v stream) ) ]
+                (iff (mkBool (cmpW RCne (v f) (n 0)))
+                    (lets
+                        [ ( b 6, callW "close" [ v f ] ) ]
+                        mkNil
+                    )
+                    mkNil
+                )
+    in
+    lam "Rt.close" [ stream ]
+        (lets
+            [ ( isStr, isStringOf (v stream) ) ]
+            (iff (mkBool (v isStr))
+                stringArm
+                fileArm
+            )
+        )
+
+
 helperDefuns : Bool -> List Defun
 helperDefuns rec =
     [ deepEqDefun rec
@@ -1588,6 +1930,8 @@ helperDefuns rec =
     , recInsertDefun
     , recToChainDefun
     , recToChainGoDefun
+    , readFullDefun
+    , cStrFillDefun
     ]
 
 
@@ -2527,4 +2871,8 @@ primDefuns consArr rec eqPtrFast =
     , addressGetDefun
     , assocDefun
     , sndDefun
+    , writeByteDefun
+    , readByteDefun
+    , openDefun
+    , closeDefun
     ]

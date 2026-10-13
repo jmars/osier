@@ -100,6 +100,10 @@ impls =
         , ( "recUpd", { key = "Rt.recUpd", arity = 3 } )
         , ( "recInsert", { key = "Rt.recInsert", arity = 3 } )
         , ( "recToChain", { key = "Rt.recToChain", arity = 1 } )
+        , ( "write-byte", { key = "Rt.write-byte", arity = 2 } )
+        , ( "read-byte", { key = "Rt.read-byte", arity = 1 } )
+        , ( "open", { key = "Rt.open", arity = 2 } )
+        , ( "close", { key = "Rt.close", arity = 1 } )
         ]
 
 
@@ -207,6 +211,13 @@ rtDeps =
         , -- ===== the Mid closure (zigretire stage 5 PART 2)
           ( "Rt.closure", [ "Rt.closureFill" ] )
         , ( "Rt.closureFill", [ "Rt.closureFill" ] )
+        , -- ===== the fd prims (zigretire stage 3 GROUP 1)
+          ( "Rt.write-byte", [] )
+        , ( "Rt.read-byte", [ "Rt.readFull" ] )
+        , ( "Rt.open", [ "Rt.=", "Rt.cStrFill" ] )
+        , ( "Rt.close", [] )
+        , ( "Rt.readFull", [ "Rt.readFull" ] )
+        , ( "Rt.cStrFill", [ "Rt.cStrFill" ] )
         ]
 
 
