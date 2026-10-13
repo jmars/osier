@@ -4888,19 +4888,42 @@ lowerRecordLitPos setters dest s =
                     |> Result.andThen
                         (\( slots, s1 ) ->
                             let
-                                ( dataT, s2 ) =
-                                    let
-                                        ( t, st ) =
-                                            freshTmp s1
-                                    in
-                                    ( t, emit (Call (Just t) (Base L) (Il.Sym "rt_vec_alloc") [ ArgVal (Base W) (Il.Con n) ]) st )
+                                -- All field values are in slots FIRST (their lowering
+                                -- can allocate), THEN the data array, then alloc-free
+                                -- stores + wrap — the data temp stays valid because
+                                -- nothing between the alloc and the wrap moves the
+                                -- heap.  QBE_MIDGC=1 allocates the data array through
+                                -- the Mid seat Rt.allocVector (no cross-heap edge);
+                                -- the default stays rt_vec_alloc.
+                                ( dataArg, s2 ) =
+                                    if s.midGc then
+                                        midGcAllocSeat "Rt.allocVector" (Il.Con n) s1
+
+                                    else
+                                        let
+                                            ( t, st ) =
+                                                freshTmp s1
+                                        in
+                                        ( Il.Tmp t, emit (Call (Just t) (Base L) (Il.Sym "rt_vec_alloc") [ ArgVal (Base W) (Il.Con n) ]) st )
+
+                                -- QBE_MIDGC=1: the store goes to the PLAIN seat
+                                -- (rt_vec_store_plain) — the barrier's inOldgen page
+                                -- test reads ZIG-heap metadata, out of bounds for a
+                                -- Mid-heap address (a mark-sweep needs no remembered
+                                -- set, so the plain store IS the whole contract).
+                                storeSym =
+                                    if s.midGc then
+                                        Il.Sym "rt_vec_store_plain"
+
+                                    else
+                                        Il.Sym "rt_vec_store"
 
                                 s3 =
                                     List.foldl
                                         (\( i, slot ) st ->
                                             emit
-                                                (Call Nothing (Base W) (Il.Sym "rt_vec_store")
-                                                    [ ArgVal (Base L) (Il.Tmp dataT)
+                                                (Call Nothing (Base W) storeSym
+                                                    [ ArgVal (Base L) dataArg
                                                     , ArgVal (Base W) (Il.Con i)
                                                     , ArgVal (Base L) (Il.Tmp (slotTmp slot))
                                                     ]
@@ -4913,7 +4936,7 @@ lowerRecordLitPos setters dest s =
                             rawWordArg (Unsafe (RawDataAddr names)) s3
                                 |> Result.map
                                     (\( namesArg, s4 ) ->
-                                        storeValueCell tagRecord [ Il.Tmp dataT, Il.Con n, namesArg ] dest s4
+                                        storeValueCell tagRecord [ dataArg, Il.Con n, namesArg ] dest s4
                                     )
                         )
 
@@ -5034,12 +5057,30 @@ lowerRecordUpdateClosed baseB baseNames resultNames updPairs dest s =
                             |> emit (Cmp (Just is14T) W Ceq (Il.Tmp tagT) (Il.Con tagRecord))
                             |> closeBlock (Jnz (Il.Tmp is14T) recLbl notRecLbl)
 
-                    -- tag-14 arm: allocate, copy/store, wrap.
-                    ( ndT, s9 ) =
-                        freshTmp s8
+                    -- tag-14 arm: allocate, copy/store, wrap.  The update values
+                    -- were pre-lowered into rooted slots, so the data array allocates
+                    -- AFTER them (same load-bearing order as lowerRecordLitPos).
+                    -- QBE_MIDGC=1 allocates through the Mid seat Rt.allocVector.
+                    ( ndArg, s10 ) =
+                        if s.midGc then
+                            midGcAllocSeat "Rt.allocVector" (Il.Con n) (startBlock recLbl s8)
 
-                    s10 =
-                        emit (Call (Just ndT) (Base L) (Il.Sym "rt_vec_alloc") [ ArgVal (Base W) (Il.Con n) ]) (startBlock recLbl s9)
+                        else
+                            let
+                                ( ndT, s9 ) =
+                                    freshTmp s8
+                            in
+                            ( Il.Tmp ndT
+                            , emit (Call (Just ndT) (Base L) (Il.Sym "rt_vec_alloc") [ ArgVal (Base W) (Il.Con n) ]) (startBlock recLbl s9)
+                            )
+
+                    -- QBE_MIDGC=1: the plain store seat (see lowerRecordLitPos).
+                    storeSym =
+                        if s.midGc then
+                            Il.Sym "rt_vec_store_plain"
+
+                        else
+                            Il.Sym "rt_vec_store"
 
                     storeOne : Int -> String -> S -> Result String S
                     storeOne rank name st =
@@ -5047,8 +5088,8 @@ lowerRecordUpdateClosed baseB baseNames resultNames updPairs dest s =
                             Just uslot ->
                                 Ok
                                     (emit
-                                        (Call Nothing (Base W) (Il.Sym "rt_vec_store")
-                                            [ ArgVal (Base L) (Il.Tmp ndT)
+                                        (Call Nothing (Base W) storeSym
+                                            [ ArgVal (Base L) ndArg
                                             , ArgVal (Base W) (Il.Con rank)
                                             , ArgVal (Base L) (Il.Tmp (slotTmp uslot))
                                             ]
@@ -5083,8 +5124,8 @@ lowerRecordUpdateClosed baseB baseNames resultNames updPairs dest s =
                                                 |> emit (Load (Just dataT) L LoadL (Il.Tmp p8T))
                                                 |> emit (Bin (Just elemT) L Add (Il.Tmp dataT) (Il.Con (vs * brank)))
                                                 |> emit
-                                                    (Call Nothing (Base W) (Il.Sym "rt_vec_store")
-                                                        [ ArgVal (Base L) (Il.Tmp ndT)
+                                                    (Call Nothing (Base W) storeSym
+                                                        [ ArgVal (Base L) ndArg
                                                         , ArgVal (Base W) (Il.Con rank)
                                                         , ArgVal (Base L) (Il.Tmp elemT)
                                                         ]
@@ -5099,7 +5140,7 @@ lowerRecordUpdateClosed baseB baseNames resultNames updPairs dest s =
                         rawWordArg (Unsafe (RawDataAddr resultNames)) st
                             |> Result.map
                                 (\( namesArg, st1 ) ->
-                                    storeValueCell tagRecord [ Il.Tmp ndT, Il.Con n, namesArg ] dest st1
+                                    storeValueCell tagRecord [ ndArg, Il.Con n, namesArg ] dest st1
                                         |> jumpTo joinLbl
                                 )
                 in

@@ -268,6 +268,12 @@ run_midgc midgc-adt     MidgcAdt.main     tools/qbe/fixtures/midgc-adt.elm
 # tools/qbe/probe-midgc-closure.sh and tools/qbe/probe-midgc-partial.sh.
 run_midgc midgc-closure MidgcClosure.main tools/qbe/fixtures/midgc-closure.elm
 run_midgc midgc-partial MidgcPartial.main tools/qbe/fixtures/midgc-partial.elm
+# zigretire stage 5 PART 3 — the RECORD-construction cross-heap probe (the
+# LAST live pointer-bearing Zig allocation): a Mid cons list whose elements
+# are positional records, plus an open-row INSERT (dynamic names array) and a
+# Record.remove, must all live in the MID heap.  The fail-before/pass-after
+# asymmetry is scripted in tools/qbe/probe-midgc-record.sh.
+run_midgc midgc-record MidgcRecord.main tools/qbe/fixtures/midgc-record.elm
 
 # nice-to-have 9: a result whose printed form EXCEEDS the old 16384-byte print
 # buffer (~24KB here).  Both runners stream now, so native and VM must agree
@@ -1633,5 +1639,34 @@ for tgt in arm64 rv64; do
     echo "PASS cross-$tgt: fib.ssa and float.ssa compile under qbe -t $tgt (the IL is target-neutral)"
   fi
 done
+
+# ---- zigretire stage 5 PART 3: THE MIDGC GUARD'S COMPLETENESS ----
+# The guard that names ONE incompatible flag is not a guard (this arc paid for
+# that twice: NORTLEAN then NOMIDRT).  run.js's MIDGC_DEPENDS_ON list is the
+# single source of truth; this row re-derives its entries from THAT list (not
+# a hand-written copy) and re-runs run.js with each `off` flag under
+# QBE_MIDGC=1, asserting a LOUD exit 2.  A future flag QBE_MIDGC newly depends
+# on but forgets to add to the list keeps compiling silently — and the only
+# instrument that sees it is the probe for that shape, so this row also pins
+# that the list is non-empty (a refactor that deletes the enumeration fails
+# here, not silently).
+midgc_guard_offs="$(grep -o "off: 'QBE_[A-Z]*'" "$ROOT/elm-compiler/run.js" | sed "s/off: '//; s/'//")"
+if [ -z "$midgc_guard_offs" ]; then
+  echo "FAIL midgc-guard: MIDGC_DEPENDS_ON in run.js lists no flags — the enumeration was deleted"
+  FAIL=1
+else
+  mg_ok=1
+  for off in $midgc_guard_offs; do
+    (cd "$ROOT/elm-compiler" && env QBE_MIDGC=1 "$off=1" node run.js >/dev/null 2>&1)
+    mg_rc=$?
+    if [ "$mg_rc" -ne 2 ]; then
+      echo "FAIL midgc-guard: QBE_MIDGC=1 $off=1 exited $mg_rc, want 2 (the incompatible combination is no longer refused loudly)"
+      FAIL=1; mg_ok=0
+    fi
+  done
+  if [ "$mg_ok" = 1 ]; then
+    echo "PASS midgc-guard: QBE_MIDGC=1 refuses each of its $(echo "$midgc_guard_offs" | wc -w) incompatible flag(s) — $midgc_guard_offs (enumerated from run.js, not hand-copied)"
+  fi
+fi
 
 exit $FAIL

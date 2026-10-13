@@ -139,25 +139,39 @@ const QBE_TYPESPEC = process.env.QBE_NOTYPESPEC !== '1';
 // Default OFF (the Zig collector stays the allocation path) — the hatch must
 // reproduce the pre-change corpus byte-for-byte when unset.
 const QBE_MIDGC = process.env.QBE_MIDGC === '1';
-// The Mid routes (lowerCon/lowerClosure/midGcAllocSeat) hard-code the LEAN
-// call shape (3 pointer args + a count word, direct :val return).  With
-// QBE_NORTLEAN=1 the Rt callees lower FAT (:val-by-value args, :ret return),
-// so the two cannot be mixed: fail LOUDLY instead of emitting an ABI
-// mismatch that links and then reads the wrong registers.  (The stage-5
-// review's finding 5 — the combination was previously silent-wrong.)
-if (QBE_MIDGC && !QBE_RTLEAN) {
-  console.error('run.js: QBE_MIDGC=1 requires the lean ABI (QBE_NORTLEAN=1 is incompatible — the Mid seats hard-code the lean call shape)');
-  process.exit(2);
-}
-// QBE_NOMIDRT=1 withholds the Rt program, so the Mid seats the collector
-// depends on are never emitted — no q_Rt_x2eallocVector export, so the weak
-// extern resolves to 0 and applyGo's partial arm silently falls back to the
-// Zig g.allocArray route: a cross-heap edge the collector cannot see, which
-// SEGVs with no diagnostic.  Refuse it by name rather than failing at run
-// time.  (The stage-5 PART 2 review reproduced that silent failure.)
-if (QBE_MIDGC && !QBE_MIDRT) {
-  console.error('run.js: QBE_MIDGC=1 requires the Mid runtime (QBE_NOMIDRT=1 withholds the Rt program, so the collector\'s seats are never emitted and the partial-application path silently reverts to the Zig allocator)');
-  process.exit(2);
+// THE MIDGC GUARD, data-driven (zigretire stage 5 PART 3 — the lesson: a
+// guard that names ONE incompatible flag is not a guard; this arc paid for
+// that twice).  QBE_MIDGC=1 is sound iff every flag the Mid seats DEPEND on
+// is present.  MIDGC_DEPENDS_ON is the COMPLETE enumeration of those flags:
+// each entry names the env that turns the dependency OFF, what the dependency
+// is, and why the combination is a SILENT wrong answer (never a loud link
+// error, which is why a by-hand `if` per flag keeps leaking holes).
+//
+// DEPENDENCIES (complete, 2026-10-12):
+//   1. the LEAN ABI — the Mid routes (lowerCon / lowerClosure /
+//      midGcAllocSeat / lowerRecordLitPos / lowerRecordUpdateClosed)
+//      hard-code the lean call shape (3 pointer args + a count word, direct
+//      :val return).  With QBE_NORTLEAN=1 the Rt callees lower FAT, so the
+//      mix links and then reads the wrong registers.  (stage-5 review finding 5)
+//   2. the MID RUNTIME — QBE_NOMIDRT=1 withholds the Rt program, so the
+//      q_Rt_* seats the collector and routes call are never emitted: no
+//      q_Rt_x2eallocVector export, the weak extern resolves to 0, and
+//      applyGo's partial arm silently reverts to the Zig allocator — a
+//      cross-heap edge that SEGVs with no diagnostic.  (stage-5 PART 2 review)
+//
+// The tools/qbe/qbe-check.sh "midgc-guard" row greps THIS list and re-runs
+// run.js with each `off` flag, asserting exit 2 — so adding a dependency to
+// the code WITHOUT adding it here is caught by that row (the enumeration and
+// the check share one source; the check cannot drift from the guard).
+const MIDGC_DEPENDS_ON = [
+  { off: 'QBE_NORTLEAN', dep: 'the lean ABI', why: 'the Mid routes hard-code the lean call shape (3 pointer args + a count word, direct :val return), which mixes with the FAT QBE_NORTLEAN callees into a link-and-read-the-wrong-registers' },
+  { off: 'QBE_NOMIDRT', dep: 'the Mid runtime', why: 'withholding the Rt program removes the q_Rt_* seats the collector and routes call, so the partial-application path silently reverts to the Zig allocator (a cross-heap edge that SEGVs)' },
+];
+for (const d of MIDGC_DEPENDS_ON) {
+  if (QBE_MIDGC && process.env[d.off] === '1') {
+    console.error(`run.js: QBE_MIDGC=1 requires ${d.dep} (${d.off}=1 is incompatible — ${d.why})`);
+    process.exit(2);
+  }
 }
 // QBE_ENTRY: the defun key the QBE backend roots reachability from
 // ("<Mod>.<fn>").  REQUIRED in the single-fixture CLI; the batch mode reads

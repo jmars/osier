@@ -709,7 +709,8 @@ collectDefun =
                     [ ( b 3, wstore (v region) (n offMarkTop) (n metaWords) )
                     , ( b 4, callR "Rt.gcMarkRoots" [ mkNum (n 0) ] )
                     , ( b 5, callR "Rt.gcDrain" [ mkNum (n 0) ] )
-                    , ( b 6, callR "Rt.gcSweep" [ mkNum (wload (v region) (n offHeapStart)) ] )
+                    , ( b 6, wstore (v region) (n offFreeHead) (n 0) )
+                    , ( b 7, callR "Rt.gcSweep" [ mkNum (wload (v region) (n offHeapStart)) ] )
                     ]
                     mkNil
                 )
