@@ -442,7 +442,7 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                 -- nurseryHostPrims is the enumeration (verified by reading
                 -- each Zig handler) of the prims whose RESULT payload was built
                 -- in the GC nursery via values.valString / valCons:
-                --   read-file-as-string (streams.zig), glob/exec-plan
+                --   read-file-as-string (streams.zig), exec-plan
                 --   (execplan.zig), value (the *argv* registry list,
                 --   rt.zig buildArgvList — still Zig-nursery even though the
                 --   ROUTE is now Mid: Rt.value blits the registered Value
@@ -458,7 +458,11 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                 --   `getcwd`/`getenv` left it in stage 3 GROUP 3A: their Mid
                 --   bodies (Rt.getcwd/Rt.getenv) allocate via RawAllocRaw (or
                 --   return a static empty string), never values.valString, so
-                --   the worker route no longer builds a nursery string.  The
+                --   the worker route no longer builds a nursery string.  `glob`
+                --   left it in stage 3 GROUP 3B for the same reason: Rt.glob
+                --   dupes matches onto the C HEAP (malloc) and builds the
+                --   result list via RawAllocRaw+mkStr / Rt.cons, never
+                --   values.valString/valCons.  The
                 --   OTHER no-Mid-implementation prims are SAFE and deliberately
                 --   NOT refused: intern (Rt.intern -> valSymbol, a page_allocator
                 --   symbol, never GC-reclaimed), getpid/cd/setenv/close/
@@ -480,7 +484,6 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                 nurseryHostPrims =
                     Set.fromList
                         [ "read-file-as-string"
-                        , "glob"
                         , "exec-plan"
                         , "value"
                         ]

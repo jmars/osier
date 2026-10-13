@@ -25,6 +25,8 @@ pub const descNcapsOffset = 12;
 
 pub const descTotalBytes = 24;
 
+pub const direntNameOffset = 19;
+
 pub const i32Bytes = 4;
 
 pub const lenFieldOffset = 16;

@@ -2,7 +2,7 @@ module Mid.RtLayout exposing
     ( abiAlign
     , i32Bytes
     , descArityOffset, descCacheOffset, descCodeOffset, descNcapsOffset, descQbeFields
-    , descTotalBytes
+    , descTotalBytes, direntNameOffset
     , lenFieldOffset, lenFieldWord
     , maxArity
     , metaArityOffset, metaCodeOffset, metaNameOffset, metaSizeBytes
@@ -321,6 +321,24 @@ retArgsOffset =
 retArityOffset : Int
 retArityOffset =
     72
+
+
+
+-- ============================ libc `struct dirent` ============================
+-- `readdir`'s result.  glibc lays `struct dirent { d_ino u64; d_off i64;
+-- d_reclen u16; d_type u8; d_name [256]u8 }` down with `d_name` at 19 — one
+-- layout on every 64-bit Linux ABI (x86-64/aarch64/rv64), not per-arch.
+-- The Mid `glob` body (zigretire stage 3 GROUP 3B) reads match names through
+-- this offset; `vendor/osier-rt/src/rt/execplan.zig`'s own `Dirent`
+-- declaration carries a comptime row against `gc/layout_gen.zig` (the same
+-- leg as rt.zig's rows — no probe can import it), so a layout edit that
+-- moves one side without the other fails `zig build gate` instead of reading
+-- another struct's bytes at the wrong offset.
+
+
+direntNameOffset : Int
+direntNameOffset =
+    19
 
 
 

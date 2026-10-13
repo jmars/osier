@@ -130,6 +130,16 @@ p3 =
     { id = 3, name = "a3" }
 
 
+p4 : Binder
+p4 =
+    { id = 4, name = "a4" }
+
+
+p5 : Binder
+p5 =
+    { id = 5, name = "a5" }
+
+
 {-| Sequential `let`s, threaded left to right like the Zig body's lines.
 -}
 lets : List ( Binder, Exp ) -> Exp -> Exp
@@ -2337,6 +2347,507 @@ setenvDefun =
         )
 
 
+-- ===================== glob (zigretire stage 3 GROUP 3B) =====================
+-- primGlob (execplan.zig:1309) as a Mid body: split the pattern at the LAST
+-- '/', opendir/readdir/fnmatch the base over the directory's names, cap at
+-- 1024 matches, sort strcmp-order (unsigned bytes), and build the tagged
+-- list inside-out.  No new Zig seat — opendir/readdir/closedir/fnmatch AND
+-- malloc/free are plain libc symbols under RawCallRaw (no whitelist).
+--
+-- THE ALLOCATOR SPLIT (the whole design): the match table and every matched
+-- name live on the C HEAP (malloc/free) — NON-MOVING, so raw pointers into
+-- them stay valid across EVERY safepoint, exactly the page_allocator shape
+-- of the Zig original (dupeZ / ca.alloc).  The GC heap holds only the
+-- pattern's NUL-copy (cStrOf) and the final strings/list.  The moving-GC
+-- window is therefore bounded and mechanical: from cStrOf's alloc to the
+-- end of the scan loop there is NO GC safepoint (scan/sort/helpers are
+-- frame-free; malloc/readdir/fnmatch are raw calls), so the base/dir raw
+-- temps into the pattern buffer cannot go stale; the build loop's only raw
+-- temps are C-heap pointers.
+--
+-- PARITY NOTES (deliberate divergences, the group-3A getenv/setenv
+-- precedent — "more correct", documented, unreachable from sane patterns):
+-- the Zig pattern copy truncated at PATH_MAX-1 and the dir copy at
+-- PATH_MAX; the Mid body passes the FULL pattern (cStrOf is exact-length),
+-- and a too-long dir simply fails opendir (ENAMETOOLONG -> NULL -> nil,
+-- the same observable result as the truncation path).  The 1024-match cap
+-- is kept EXACTLY (the loop bound).  The dotfile guard rewrites Zig's
+-- `!fm(base, ".") && !fm(base, "..")` as byte equality on `base`: the
+-- patterns "." / ".." contain no wildcards, so fnmatch(base, ".") == 0
+-- holds IFF base == "." byte-for-byte (same for "..") — provably the same
+-- predicate with no literal buffers.
+
+
+{-| globLastSlash ptrN iN — the index of the LAST '/' in the pattern
+(NUL-copied at ptrN), searching BACKWARD from iN (entered at len-1): the
+first hit walking back is the last slash, or -1 at the top (the strrchr of
+the Zig split).  SELF-TAIL LOOP (the SF2 pattern: App on this defun's own
+key = the in-frame jmp @body loop), so the walk is O(1) native stack;
+frame-free and non-allocating.  `ptrN` is the NUL-copied pattern buffer —
+valid across the walk because the caller's window has no safepoint.
+(Backward, not forward, so TWO params fit the RawCall 3-arg lean-ABI cap.)
+-}
+globLastSlashDefun : Defun
+globLastSlashDefun =
+    let
+        ptrN =
+            p1
+
+        iN =
+            p2
+
+        byte =
+            b 4
+    in
+    lam "Rt.globLastSlash" [ ptrN, iN ]
+        (iff (mkBool (cmpW RClts (wOf (v iN)) (n 0)))
+            (mkNum (n (-1)))
+            (lets
+                [ ( byte, Unsafe (RawByteLoad { ptr = wOf (v ptrN), index = wOf (v iN) }) ) ]
+                (iff (mkBool (cmpW RCeq (v byte) (n 47)))
+                    (mkNum (wOf (v iN)))
+                    (App { fn = GRef { key = "Rt.globLastSlash", force = False }, args = [ v ptrN, mkNum (isub (wOf (v iN)) (n 1)) ] })
+                )
+            )
+        )
+
+
+{-| globIsDot ptrN / globIsDotDot ptrN — byte-exact "." / ".." tests on a
+NUL-terminated C string (the dotfile guard's operands).  Non-recursive,
+frame-free, non-allocating; reading one byte past a 1-byte name is safe
+(readdir's d_name is a 256-byte array, NUL-terminated by contract).
+-}
+globIsDotDefun : Defun
+globIsDotDefun =
+    let
+        ptrN =
+            p1
+
+        c0 =
+            b 4
+
+        c1 =
+            b 5
+    in
+    lam "Rt.globIsDot" [ ptrN ]
+        (lets
+            [ ( c0, Unsafe (RawByteLoad { ptr = wOf (v ptrN), index = n 0 }) )
+            , ( c1, Unsafe (RawByteLoad { ptr = wOf (v ptrN), index = n 1 }) )
+            ]
+            (and2 (mkBool (cmpW RCeq (v c0) (n 46)))
+                (mkBool (cmpW RCeq (v c1) (n 0)))
+            )
+        )
+
+
+globIsDotDotDefun : Defun
+globIsDotDotDefun =
+    let
+        ptrN =
+            p1
+
+        c0 =
+            b 4
+
+        c1 =
+            b 5
+
+        c2 =
+            b 6
+    in
+    lam "Rt.globIsDotDot" [ ptrN ]
+        (lets
+            [ ( c0, Unsafe (RawByteLoad { ptr = wOf (v ptrN), index = n 0 }) )
+            , ( c1, Unsafe (RawByteLoad { ptr = wOf (v ptrN), index = n 1 }) )
+            , ( c2, Unsafe (RawByteLoad { ptr = wOf (v ptrN), index = n 2 }) )
+            ]
+            (and2 (mkBool (cmpW RCeq (v c0) (n 46)))
+                (and2 (mkBool (cmpW RCeq (v c1) (n 46)))
+                    (mkBool (cmpW RCeq (v c2) (n 0)))
+                )
+            )
+        )
+
+
+{-| globScanGo stateN — the readdir/fnmatch loop, all live state in a
+5-word C-heap STATE BLOCK (slot 0 the DIR*, 1 the base pointer, 2 the
+table pointer, 3 the skip-dotfiles flag, 4 the match count) so the defun
+takes ONE param (the RawCall lean-ABI cap is 3).  Walks entries while
+n < 1024 (the Zig cap), fnmatch(base, d_name, 0), skips the dotfile pair
+unless the base IS "." / ".." byte-exactly (see the parity note above),
+and dupes each match onto the C HEAP (malloc len+1, cStrCopyGo — which
+re-terminates at dst[len]) storing the pointer at tbl[n] (raw WORD
+slots).  SELF-TAIL LOOP; frame-free and non-allocating end to end —
+malloc/readdir/fnmatch are raw calls, the helpers are frame-free — which
+is what keeps the caller's pattern-buffer raw temps valid for the whole
+loop (state[1] names bytes inside the GC pattern buffer).  Never allocate
+here.
+-}
+globScanGoDefun : Defun
+globScanGoDefun =
+    let
+        stateN =
+            p1
+
+        dW =
+            b 4
+
+        baseW =
+            b 5
+
+        tblW =
+            b 6
+
+        guardW =
+            b 7
+
+        nW =
+            b 8
+
+        entW =
+            b 9
+
+        nameW =
+            b 10
+
+        fmW =
+            b 11
+
+        nameDot =
+            b 12
+
+        nameDD =
+            b 13
+
+        lenN =
+            b 14
+
+        pW =
+            b 15
+    in
+    lam "Rt.globScanGo" [ stateN ]
+        (lets
+            [ ( dW, Unsafe (RawWordLoad { ptr = wOf (v stateN), index = n 0 }) )
+            , ( baseW, Unsafe (RawWordLoad { ptr = wOf (v stateN), index = n 1 }) )
+            , ( tblW, Unsafe (RawWordLoad { ptr = wOf (v stateN), index = n 2 }) )
+            , ( guardW, Unsafe (RawWordLoad { ptr = wOf (v stateN), index = n 3 }) )
+            , ( nW, Unsafe (RawWordLoad { ptr = wOf (v stateN), index = n 4 }) )
+            ]
+            (iff (mkBool (cmpW RCges (v nW) (n 1024)))
+                (mkNum (v nW))
+                (lets
+                    [ ( entW, callW "readdir" [ v dW ] ) ]
+                    (iff (mkBool (cmpW RCeq (v entW) (n 0)))
+                        (mkNum (v nW))
+                        (lets
+                            [ ( nameW, iadd (v entW) (n RtLayout.direntNameOffset) )
+                            , ( fmW, callW "fnmatch" [ v baseW, v nameW, n 0 ] )
+                            ]
+                            (iff (mkBool (cmpW RCne (v fmW) (n 0)))
+                                (App { fn = GRef { key = "Rt.globScanGo", force = False }, args = [ v stateN ] })
+                                (lets
+                                    [ ( nameDot, callR "Rt.globIsDot" [ mkNum (v nameW) ] )
+                                    , ( nameDD, callR "Rt.globIsDotDot" [ mkNum (v nameW) ] )
+                                    ]
+                                    (iff (and2 (or2 (v nameDot) (v nameDD)) (mkBool (cmpW RCne (v guardW) (n 0))))
+                                        (App { fn = GRef { key = "Rt.globScanGo", force = False }, args = [ v stateN ] })
+                                        (lets
+                                            [ ( lenN, callR "Rt.cStrLenGo" [ mkNum (v nameW), mkNum (n 0) ] )
+                                            , ( pW, callW "malloc" [ iadd (wOf (v lenN)) (n 1) ] )
+                                            , ( b 16, callR "Rt.cStrCopyGo" [ mkNum (v nameW), mkNum (v pW), mkNum (n 0) ] )
+                                            , ( b 17, Unsafe (RawWordStore { ptr = v tblW, index = v nW, value = v pW }) )
+                                            , ( b 18, Unsafe (RawWordStore { ptr = wOf (v stateN), index = n 4, value = iadd (v nW) (n 1) }) )
+                                            ]
+                                            (App { fn = GRef { key = "Rt.globScanGo", force = False }, args = [ v stateN ] })
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+
+
+{-| globStrLess aN bN iN — strcmp order (unsigned bytes, RawByteLoad is
+zero-extended) on two NUL-terminated C strings: a prefix sorts before its
+extensions, equals are not less.  Frame-free SELF-TAIL LOOP; the pointers
+are C-heap (stable), but no safepoint exists here regardless.
+-}
+globStrLessDefun : Defun
+globStrLessDefun =
+    let
+        aN =
+            p1
+
+        bN =
+            p2
+
+        iN =
+            p3
+
+        ca =
+            b 4
+
+        cb =
+            b 5
+    in
+    lam "Rt.globStrLess" [ aN, bN, iN ]
+        (lets
+            [ ( ca, Unsafe (RawByteLoad { ptr = wOf (v aN), index = wOf (v iN) }) )
+            , ( cb, Unsafe (RawByteLoad { ptr = wOf (v bN), index = wOf (v iN) }) )
+            ]
+            (iff (mkBool (cmpW RClts (v ca) (v cb)))
+                trueV
+                (iff (mkBool (cmpW RCgts (v ca) (v cb)))
+                    falseV
+                    (iff (mkBool (cmpW RCeq (v ca) (n 0)))
+                        falseV
+                        (App { fn = GRef { key = "Rt.globStrLess", force = False }, args = [ v aN, v bN, mkNum (iadd (wOf (v iN)) (n 1)) ] })
+                    )
+                )
+            )
+        )
+
+
+{-| globSortShift tblN jN keyN — the insertion-sort inner shift: while
+tbl[j] > key, slide it right; returns the index key belongs at (j+1).
+Frame-free SELF-TAIL LOOP over C-heap slots only.
+-}
+globSortShiftDefun : Defun
+globSortShiftDefun =
+    let
+        tblN =
+            p1
+
+        jN =
+            p2
+
+        keyN =
+            p3
+
+        curW =
+            b 4
+
+        lessB =
+            b 5
+
+        stW =
+            b 6
+    in
+    lam "Rt.globSortShift" [ tblN, jN, keyN ]
+        (iff (mkBool (cmpW RClts (wOf (v jN)) (n 0)))
+            (mkNum (wOf (v jN)))
+            (lets
+                [ ( curW, Unsafe (RawWordLoad { ptr = wOf (v tblN), index = wOf (v jN) }) )
+                , ( lessB, callR "Rt.globStrLess" [ v keyN, mkNum (v curW), mkNum (n 0) ] )
+                ]
+                (iff (v lessB)
+                    (lets
+                        [ ( stW, Unsafe (RawWordStore { ptr = wOf (v tblN), index = iadd (wOf (v jN)) (n 1), value = v curW }) ) ]
+                        (App { fn = GRef { key = "Rt.globSortShift", force = False }, args = [ v tblN, mkNum (isub (wOf (v jN)) (n 1)), v keyN ] })
+                    )
+                    (mkNum (wOf (v jN)))
+                )
+            )
+        )
+
+
+{-| globSortGo tblN iN nN — insertion sort of tbl[0..nN) (Zig's
+std.sort.block; directory names are unique so any correct sort agrees).
+The key rides a raw word across the globSortShift call — sound because
+shift is non-allocating (and the table is C-heap regardless).  Frame-free
+SELF-TAIL LOOP.
+-}
+globSortGoDefun : Defun
+globSortGoDefun =
+    let
+        tblN =
+            p1
+
+        iN =
+            p2
+
+        nN =
+            p3
+
+        keyW =
+            b 4
+
+        jN =
+            b 5
+
+        stW =
+            b 6
+    in
+    lam "Rt.globSortGo" [ tblN, iN, nN ]
+        (iff (mkBool (cmpW RCges (wOf (v iN)) (wOf (v nN))))
+            (mkNum (wOf (v nN)))
+            (lets
+                [ ( keyW, Unsafe (RawWordLoad { ptr = wOf (v tblN), index = wOf (v iN) }) )
+                , ( jN, callR "Rt.globSortShift" [ v tblN, mkNum (isub (wOf (v iN)) (n 1)), mkNum (v keyW) ] )
+                , ( stW, Unsafe (RawWordStore { ptr = wOf (v tblN), index = iadd (wOf (v jN)) (n 1), value = v keyW }) )
+                ]
+                (App { fn = GRef { key = "Rt.globSortGo", force = False }, args = [ v tblN, mkNum (iadd (wOf (v iN)) (n 1)), v nN ] })
+            )
+        )
+
+
+{-| globBuildGo tblN iN acc — the result list, inside-out from the sorted
+table (Zig's root dance as one loop): for each i (descending), copy the
+C-heap match into a fresh GC string (the getenv shape: len, alloc len+1,
+cStrCopyGo, mkStr — the fresh block is the string's own data, no interior
+pointer), free the C copy, cons onto acc.  ALLOCATING (Rt.cons, RawAllocRaw)
+— this is the loop where safepoints live; every raw temp it holds is a
+C-heap pointer (stable across collections) and `acc` rides a PARAM slot of
+a framed defun (rooted).  SELF-TAIL LOOP (App on its own key): the pooled
+frame stays entered across the jmp @body, so the re-blitted param slots
+stay rooted.
+-}
+globBuildGoDefun : Defun
+globBuildGoDefun =
+    let
+        tblN =
+            p1
+
+        iN =
+            p2
+
+        acc =
+            p3
+
+        pW =
+            b 4
+
+        lenN =
+            b 5
+
+        bufW =
+            b 6
+    in
+    lam "Rt.globBuildGo" [ tblN, iN, acc ]
+        (iff (mkBool (cmpW RClts (wOf (v iN)) (n 0)))
+            (v acc)
+            (lets
+                [ ( pW, Unsafe (RawWordLoad { ptr = wOf (v tblN), index = wOf (v iN) }) )
+                , ( lenN, callR "Rt.cStrLenGo" [ mkNum (v pW), mkNum (n 0) ] )
+                , ( bufW, Unsafe (RawAllocRaw (iadd (wOf (v lenN)) (n 1))) )
+                , ( b 7, callR "Rt.cStrCopyGo" [ mkNum (v pW), mkNum (v bufW), mkNum (n 0) ] )
+                , ( b 8, callW "free" [ v pW ] )
+                ]
+                -- The TAGGED shape (makeTaggedCons/makeTaggedString/
+                -- makeTaggedNil, execplan.zig:168-210): [cons H T] is the
+                -- 3-element list (cons . (H . (T . nil))), [string S] is
+                -- (string . (S . nil)), the empty tagged list is (cons).
+                -- decodeStringList walks EXACTLY this — a plain Elm list
+                -- would decode as empty.
+                (App { fn = GRef { key = "Rt.globBuildGo", force = False }, args = [ v tblN, mkNum (isub (wOf (v iN)) (n 1)), consV (callR "Rt.intern" [ Lit (LString "cons") ]) (consV (consV (callR "Rt.intern" [ Lit (LString "string") ]) (consV (mkStr (v bufW) (wOf (v lenN))) mkNil)) (consV (v acc) mkNil)) ] })
+            )
+        )
+
+
+{-| `Rt.glob pattern` — primGlob: the sorted tagged list of matches.
+Layout of the ONE C scratch block (8240 bytes): [0..2) the "." literal for
+the no-slash dir default, [8..8200) the 1024-slot pointer table (word
+slots), [8200..8240) the 5-word scan STATE BLOCK (DIR*, base, table,
+skip-dotfiles, count — one param for the lean-ABI cap).  The pattern's
+NUL-copy is a GC buffer (cStrOf); the LAST-slash split NULs over the '/'
+in place (base starts past it, so the fill is dead bytes to fnmatch) —
+the no-slash case leaves the pattern intact and dirs to the block's "."
+literal.  opendir failure -> nil (Zig's opendir("")-fails quirk for a
+leading '/' included: dlen==0 dirs to the NUL'd pattern head, an empty
+string, which opendir rejects).
+-}
+globDefun : Defun
+globDefun =
+    let
+        pattern =
+            p1
+
+        ( patBinds, patW ) =
+            cStrOf 40 (v pattern)
+
+        siN =
+            b 44
+
+        cbufW =
+            b 45
+
+        tblW =
+            b 46
+
+        hasS =
+            b 47
+
+        dirN =
+            b 48
+
+        baseN =
+            b 49
+
+        dW =
+            b 52
+
+        baseDot =
+            b 53
+
+        baseDD =
+            b 54
+
+        stateW =
+            b 55
+
+        nN =
+            b 56
+
+        res =
+            b 60
+    in
+    lam "Rt.glob" [ pattern ]
+        (lets
+            (patBinds
+                ++ [ ( siN, callR "Rt.globLastSlash" [ mkNum patW, mkNum (isub (lenOf (v pattern)) (n 1)) ] )
+                   , ( cbufW, callW "malloc" [ n 8240 ] )
+                   , ( b 50, Unsafe (RawByteStore { ptr = v cbufW, index = n 0, value = n 46 }) )
+                   , ( b 51, Unsafe (RawByteStore { ptr = v cbufW, index = n 1, value = n 0 }) )
+                   , ( tblW, iadd (v cbufW) (n 8) )
+                   , ( stateW, iadd (v cbufW) (n 8200) )
+                   , ( hasS, mkBool (cmpW RCges (wOf (v siN)) (n 0)) )
+                   , ( dirN, iff (v hasS) (mkNum patW) (mkNum (v cbufW)) )
+                   , ( baseN, iff (v hasS) (mkNum (iadd patW (iadd (wOf (v siN)) (n 1)))) (mkNum patW) )
+                   , -- NUL over the LAST '/', in the slash arm only (si == -1
+                     -- would write one byte BEFORE the buffer): the dir
+                     -- prefix becomes a C string, and base (si+1..] never
+                     -- reads it back.
+                     ( b 110, iff (v hasS) (lets [ ( b 111, Unsafe (RawByteStore { ptr = patW, index = wOf (v siN), value = n 0 }) ) ] (mkNum (n 0))) (mkNum (n 0)) )
+                   , ( dW, callW "opendir" [ wOf (v dirN) ] )
+                   ]
+            )
+            (iff (mkBool (cmpW RCeq (v dW) (n 0)))
+                (lets [ ( b 57, callW "free" [ v cbufW ] ) ] mkNil)
+                (lets
+                    [ ( baseDot, callR "Rt.globIsDot" [ v baseN ] )
+                    , ( baseDD, callR "Rt.globIsDotDot" [ v baseN ] )
+                    , -- state[0..4] = DIR*, base, table, skip-dotfiles
+                      -- (1 iff the base is NOT "." / ".."), 0 matches.
+                      ( b 62, Unsafe (RawWordStore { ptr = v stateW, index = n 0, value = v dW }) )
+                    , ( b 63, Unsafe (RawWordStore { ptr = v stateW, index = n 1, value = wOf (v baseN) }) )
+                    , ( b 64, Unsafe (RawWordStore { ptr = v stateW, index = n 2, value = v tblW }) )
+                    , ( b 65, Unsafe (RawWordStore { ptr = v stateW, index = n 3, value = wOf (iff (or2 (v baseDot) (v baseDD)) (mkNum (n 0)) (mkNum (n 1))) }) )
+                    , ( b 66, Unsafe (RawWordStore { ptr = v stateW, index = n 4, value = n 0 }) )
+                    , ( nN, callR "Rt.globScanGo" [ mkNum (v stateW) ] )
+                    , ( b 58, callW "closedir" [ v dW ] )
+                    , ( b 59, callR "Rt.globSortGo" [ mkNum (v tblW), mkNum (n 1), v nN ] )
+                    , ( res, callR "Rt.globBuildGo" [ mkNum (v tblW), mkNum (isub (wOf (v nN)) (n 1)), consV (callR "Rt.intern" [ Lit (LString "cons") ]) mkNil ] )
+                    , ( b 61, callW "free" [ v cbufW ] )
+                    ]
+                    (v res)
+                )
+            )
+        )
+
+
 helperDefuns : Bool -> List Defun
 helperDefuns rec =
     [ deepEqDefun rec
@@ -2378,6 +2889,14 @@ helperDefuns rec =
     , cStrFillDefun
     , floatCopyDefun
     , cStrLenGoDefun
+    , globLastSlashDefun
+    , globIsDotDefun
+    , globIsDotDotDefun
+    , globScanGoDefun
+    , globStrLessDefun
+    , globSortShiftDefun
+    , globSortGoDefun
+    , globBuildGoDefun
     , cStrCopyGoDefun
     ]
 
@@ -3330,4 +3849,5 @@ primDefuns consArr rec eqPtrFast =
     , cdDefun
     , getenvDefun
     , setenvDefun
+    , globDefun
     ]

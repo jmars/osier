@@ -1,4 +1,4 @@
-port module TestMain exposing (main)
+port module TestMain exposing (main, rawCallSyms)
 
 -- M1a unit-test harness for the emitter infrastructure.  NOT part of the
 -- compiler (Main.elm stays the M0 parse driver).  Built separately with:
@@ -868,8 +868,8 @@ checks =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 92 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo)"
-        (List.length (Rt.program True True True) == 92
+    , check "rt program: 101 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers)"
+        (List.length (Rt.program True True True) == 101
             && List.all (\d -> String.startsWith "Rt." d.key) (Rt.program True True True)
             && List.any
                 (\d ->
@@ -925,6 +925,18 @@ checks =
                         && (case d.value of
                                 Lam lambda ->
                                     List.length lambda.params == 2
+
+                                _ ->
+                                    False
+                           )
+                )
+                (Rt.program True True True)
+            && List.any
+                (\d ->
+                    d.key == "Rt.glob"
+                        && (case d.value of
+                                Lam lambda ->
+                                    List.length lambda.params == 1
 
                                 _ ->
                                     False

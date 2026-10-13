@@ -112,6 +112,7 @@ impls =
         , ( "cd", { key = "Rt.cd", arity = 1 } )
         , ( "getenv", { key = "Rt.getenv", arity = 1 } )
         , ( "setenv", { key = "Rt.setenv", arity = 2 } )
+        , ( "glob", { key = "Rt.glob", arity = 1 } )
         ]
 
 
@@ -236,6 +237,29 @@ rtDeps =
         , ( "Rt.cd", [ "Rt.cStrFill" ] )
         , ( "Rt.getenv", [ "Rt.cStrFill", "Rt.cStrLenGo", "Rt.cStrCopyGo" ] )
         , ( "Rt.setenv", [ "Rt.cStrFill" ] )
+        , -- ===== glob (zigretire stage 3 GROUP 3B)
+          -- The match table and dupes live on the C heap (malloc/free via
+          -- RawCallRaw — non-moving, so the scan/sort loops hold their raw
+          -- pointers across every safepoint by construction).
+          ( "Rt.glob"
+          , [ "Rt.globLastSlash"
+            , "Rt.globIsDot"
+            , "Rt.globIsDotDot"
+            , "Rt.globScanGo"
+            , "Rt.globSortGo"
+            , "Rt.globBuildGo"
+            , "Rt.cStrFill"
+            , "Rt.intern"
+            , "Rt.cons"
+            ]
+          )
+        , ( "Rt.globScanGo", [ "Rt.globIsDot", "Rt.globIsDotDot", "Rt.cStrLenGo", "Rt.cStrCopyGo" ] )
+        , ( "Rt.globSortGo", [ "Rt.globSortShift" ] )
+        , ( "Rt.globSortShift", [ "Rt.globStrLess" ] )
+        , ( "Rt.globBuildGo", [ "Rt.cStrLenGo", "Rt.cStrCopyGo", "Rt.cons", "Rt.intern" ] )
+        -- globLastSlash/globScanGo/globStrLess/globSortShift/globSortGo/
+        -- globBuildGo recurse through `App` on their OWN key (the SF2
+        -- pattern: the in-frame loop), so they name no self RawCall edge.
         -- cStrFill/cStrLenGo/cStrCopyGo recurse through `App` on their OWN
         -- key (the SF2 fix: App self-tail = the in-frame loop on the
         -- DEFAULT route; the RawCall self-tail is midGc-gated), so they

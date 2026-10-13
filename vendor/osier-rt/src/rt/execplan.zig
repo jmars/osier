@@ -89,6 +89,15 @@ const Dirent = extern struct {
     d_name: [256]u8,
 };
 
+// The layout census (stage 2's one-place rule): d_name's offset is a
+// cross-ABI number the Mid `glob` body also reads, so it is DEFINED in
+// Mid.RtLayout.elm and this declaration asserts against it — a mismatch is
+// a COMPILE ERROR here (rt-o.sh), not a silently wrong offset at run time.
+comptime {
+    if (@offsetOf(Dirent, "d_name") != gc.layout_gen.direntNameOffset)
+        @compileError("rt/execplan.zig: @offsetOf(Dirent, \"d_name\") != Mid.RtLayout.direntNameOffset");
+}
+
 // Flag constants (Linux x86-64 values — same as the artifact-1 probe).
 const O_RDONLY: c_int = 0;
 const O_WRONLY: c_int = 1;

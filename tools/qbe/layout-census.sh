@@ -62,9 +62,14 @@ need() { command -v "$1" >/dev/null 2>&1 || { printf 'layout-census: %s not foun
 # ---- the expected name set (the parse contract), split by which leg ---------
 # MID_ONLY: no Zig declaration exists at all (see NAMES WITH NO ZIG COUNTERPART).
 MID_ONLY_NAMES=""
-# COMPTIME: attested inside rt.zig against layout_gen.zig (the probe cannot
-# import rt.zig — its `export fn main` collides with an executable's).
+# COMPTIME: attested by a comptime row against layout_gen.zig, in a file the
+# probe cannot import (an `export fn main`/`pub fn main` collides with an
+# executable's): rt.zig carries the Desc/Meta/Ret rows;
+# vendor/osier-rt/src/rt/execplan.zig carries direntNameOffset (its own
+# `Dirent` declaration — the one Zig statement of the libc struct's layout).
+COMPTIME_FILES="tools/qbe/rt.zig vendor/osier-rt/src/rt/execplan.zig"
 COMPTIME_NAMES="descArityOffset descCacheOffset descCodeOffset descNcapsOffset descTotalBytes \
+direntNameOffset \
 metaArityOffset metaCodeOffset metaNameOffset metaSizeBytes \
 retArgsOffset retArityOffset retEOffset retFOffset retKindOffset retSizeBytes retValOffset"
 # REGEX: read from rt.zig's own declaration text (a non-pub const no probe can see).
@@ -186,21 +191,27 @@ check_zig() {
   echo "layout-census: zig    OK — $probed probed constant(s) agree with Mid.RtLayout.elm"
   echo "layout-census: zig    OK — $(printf '%s\n' $REGEX_NAMES | grep -c .) read from rt.zig's declaration, agree"
   # The COMPTIME_NAMES leg — the census CANNOT verify these VALUES (its probe
-  # cannot import rt.zig: `main` collides), so the assertion lives in rt.zig's
-  # own comptime row, compiled by rt-o.sh.  What this script CAN and MUST check
-  # is that the row still NAMES each constant: without this, deleting an
-  # assertion from rt.zig would leave the census GREEN over an unasserted
-  # constant — a false pass over exactly the seat this leg exists to cover.
+  # cannot import the asserting file: `main` collides), so the assertion lives
+  # in each file's own comptime row, compiled by rt-o.sh.  What this script
+  # CAN and MUST check is that some row still NAMES each constant: without
+  # this, deleting an assertion would leave the census GREEN over an
+  # unasserted constant — a false pass over exactly the seat this leg exists
+  # to cover.
   local missing="" name
   for name in $COMPTIME_NAMES; do
-    grep -q "Mid\.RtLayout\.$name" "$RTZ" || missing="$missing $name"
+    local found=""
+    local f
+    for f in $COMPTIME_FILES; do
+      grep -q "Mid\.RtLayout\.$name" "$ROOT/$f" && found=1 && break
+    done
+    [ -n "$found" ] || missing="$missing $name"
   done
   if [ -n "$missing" ]; then
-    printf 'layout-census: FAIL: rt.zig no longer asserts:%s\n' "$missing" >&2
-    printf '  (its comptime row must name Mid.RtLayout.<constant> for each — see tools/qbe/rt.zig)\n' >&2
+    printf 'layout-census: FAIL: no comptime row asserts:%s\n' "$missing" >&2
+    printf '  (a row in %s must name Mid.RtLayout.<constant> for each — see tools/qbe/rt.zig)\n' "$COMPTIME_FILES" >&2
     exit 1
   fi
-  echo "layout-census: rt.zig OK — ${COMPTIME_NAMES// /, } (Desc/Meta/Ret offsets + sizes) are named by rt.zig's comptime row; that row is compiled by rt-o.sh, NOT by zig build gate"
+  echo "layout-census: comptime OK — ${COMPTIME_NAMES// /, } are named by a comptime row in: $COMPTIME_FILES; those rows are compiled by rt-o.sh, NOT by zig build gate"
   if [ -n "$MID_ONLY_NAMES" ]; then
     echo "layout-census: mid    OK — $MID_ONLY_NAMES has no Zig counterpart (checked where it is read instead)"
   else
