@@ -398,13 +398,18 @@ run_midgc midgc-rawstr MidgcRawstr.main tools/qbe/fixtures/midgc-rawstr.elm
 # default-path golden in the gate.
 run_midgc_refusal midgc-io MidgcIo.main tools/qbe/fixtures/midgc-io.elm 'Runtime.program'
 run_midgc_io midgc-io MidgcIo.main tools/qbe/fixtures/midgc-io.elm
-# zigretire stage 5 PART 5 FIX 1 — THE CENSUS-ARM PIN: a PURE program whose
-# census trips the `str` entry (String.fromFloat of NaN kept through a
-# function boundary).  Its refusal row + the run_midgc_refusal grep pin the
-# DELETION of the nurseryHostPrims list: empty the list and THIS row goes red
-# while every other gate stays green (the seam rows still fire).  The
+# zigretire stage 3 GROUP 2 — THE `str` CENSUS-ARM CLOSED: a PURE program whose
+# census used to trip the `str` entry (String.fromFloat of NaN kept through a
+# function boundary).  Since GROUP 2 routed `str` to the Mid body Rt.str (which
+# renders the float into a GC string, not the Zig-nursery string primStr
+# produced), the `str` entry left nurseryHostPrims and the program now COMPILES
+# under QBE_MIDGC=1 and prints "100" — the kept "NaN" is Mid-allocated, so the
+# churn's Zig scavenge cannot reclaim it.  This run_midgc row (plus the default
+# `run` row below) pins BOTH arms: a reversion that re-adds the `str` refusal
+# makes THIS row go red (refusal at compile time), and a Rt.str that still
+# returned the nursery string makes it go red (prints "0").  The
 # fail-before/pass-after asymmetry is scripted in tools/qbe/probe-midgc-str.sh.
-run_midgc_refusal midgc-str MidgcStr.main tools/qbe/fixtures/midgc-str.elm '`str`'
+run_midgc midgc-str MidgcStr.main tools/qbe/fixtures/midgc-str.elm
 run midgc-str MidgcStr.main tools/qbe/fixtures/midgc-str.elm
 
 # nice-to-have 9: a result whose printed form EXCEEDS the old 16384-byte print

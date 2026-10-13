@@ -104,6 +104,9 @@ impls =
         , ( "read-byte", { key = "Rt.read-byte", arity = 1 } )
         , ( "open", { key = "Rt.open", arity = 2 } )
         , ( "close", { key = "Rt.close", arity = 1 } )
+        , ( "intern", { key = "Rt.intern", arity = 1 } )
+        , ( "value", { key = "Rt.value", arity = 1 } )
+        , ( "str", { key = "Rt.str", arity = 1 } )
         ]
 
 
@@ -218,6 +221,9 @@ rtDeps =
         , ( "Rt.close", [] )
         , ( "Rt.readFull", [ "Rt.readFull" ] )
         , ( "Rt.cStrFill", [ "Rt.cStrFill" ] )
+        , -- ===== the VM-state + str prims (zigretire stage 3 GROUP 2)
+          ( "Rt.str", [ "Rt.floatCopy", "Rt.numText" ] )
+        , ( "Rt.floatCopy", [ "Rt.floatCopy" ] )
         ]
 
 

@@ -867,8 +867,8 @@ checks =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 81 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill)"
-        (List.length (Rt.program True True True) == 81
+    , check "rt program: 85 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy)"
+        (List.length (Rt.program True True True) == 85
             && List.all (\d -> String.startsWith "Rt." d.key) (Rt.program True True True)
             && List.any
                 (\d ->
@@ -989,6 +989,7 @@ checks =
             && Set.member "Rt.repeat" Rt.allocating
             && Set.member "Rt.substring" Rt.allocating
             && Set.member "Rt.strOf" Rt.allocating
+            && Set.member "Rt.str" Rt.allocating
             && Set.member "Rt.shen.bytes->string" Rt.allocating
             && Set.member "Rt.absvector" Rt.allocating
             && not (Set.member "Rt.=" Rt.allocating)
@@ -1006,6 +1007,9 @@ checks =
             && not (Set.member "Rt.countL" Rt.allocating)
             && not (Set.member "Rt.conFill" Rt.allocating)
             && not (Set.member "Rt.closureFill" Rt.allocating)
+            && not (Set.member "Rt.intern" Rt.allocating)
+            && not (Set.member "Rt.value" Rt.allocating)
+            && not (Set.member "Rt.floatCopy" Rt.allocating)
         )
     , check "rt gc (midgc) classification: the collector is FRAME-FREE by construction (a frame-free callee must never reach a safepoint)"
         (not (Set.member "Rt.collect" Rt.allocating)

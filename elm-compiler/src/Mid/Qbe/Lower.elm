@@ -440,39 +440,39 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                 -- whatever the census actually names.
                 --
                 -- nurseryHostPrims is the enumeration (verified by reading
-                -- each Zig handler) of the prims whose handler RETURNs a value
-                -- whose payload was built in the GC nursery via values.valString
-                -- / valCons:
+                -- each Zig handler) of the prims whose RESULT payload was built
+                -- in the GC nursery via values.valString / valCons:
                 --   read-file-as-string (streams.zig), getcwd/getenv/glob/
                 --   exec-plan (execplan.zig), value (the *argv* registry list,
-                --   rt.zig buildArgvList), str (primStr — NARROWED: only the
+                --   rt.zig buildArgvList — still Zig-nursery even though the
+                --   ROUTE is now Mid: Rt.value blits the registered Value
+                --   verbatim, and *argv* is still a valCons list in the Zig
+                --   nursery).  `str` was REFUSED here until zigretire stage 3
+                --   GROUP 2: it now has a Mid body (Rt.str) that renders the
+                --   float through rt_float_text into a GC string, so the
                 --   NaN/±Infinity pass-through arms of Prelude.stringFromFloat
-                --   return the nursery string; canonical decimals are REBUILT
-                --   through Mid cn by jsFloatText/jsFloatDigits, so they are
-                --   SAFE — but str is refused anyway because NaN-ness is
-                --   compile-time unknowable).  The OTHER no-Mid-implementation
-                --   prims are SAFE and deliberately NOT refused: intern
-                --   (valSymbol -> a page_allocator symbol, never GC-reclaimed),
-                --   getpid/cd/setenv/close/write-byte/read-byte (scalar
-                --   results), open (a libc stream), simple-error (aborts), and
-                --   hd/tl/fst/reverse/append/absvector? (no surface spelling,
-                --   so they can never appear in the census).
+                --   no longer return a Zig-nursery string — the last CENSUS-ARM
+                --   entry of the host-IO hole is CLOSED, and `str` left this
+                --   list (the midgc-str probe now asserts the FIXED behaviour:
+                --   it compiles under QBE_MIDGC=1 and prints "100").  The OTHER
+                --   no-Mid-implementation prims are SAFE and deliberately NOT
+                --   refused: intern (Rt.intern -> valSymbol, a page_allocator
+                --   symbol, never GC-reclaimed), getpid/cd/setenv/close/
+                --   write-byte/read-byte (scalar results), open (a libc stream),
+                --   simple-error (aborts), and hd/tl/fst/reverse/append/
+                --   absvector? (no surface spelling, so they can never appear in
+                --   the census).
                 -- THE BOUNDARY IS COARSER THAN THE HOLES: stdin/stdout are
                 --   fd-int Values (streams.valStreamInFd/OutFd — SAFE, yet
-                --   refused via the `value` entry) and finite fromFloat is
-                --   Mid-rebuilt (SAFE, yet refused via `str`).  Over-refusal is
-                --   the right interim call — the unsound shape is unknowable
-                --   until run time — and it is documented so no reader mistakes
-                --   the boundary for exact.  WHAT IT DOES NOT COVER: it refuses
-                --   the nursery-building host prims the census NAMES; it does
-                --   NOT prove the REMAINING (Mid-implemented) prims are
-                --   Mid-sound — that is the corrected-criterion audit
-                --   (plan.md §2.2).  DELETION of this list is pinned in-tree by
-                --   probe-midgc-str.sh / the midgc-str qbe-check row (a pure
-                --   String.fromFloat NaN fixture trips the `str` entry): empty
-                --   the list and that row goes red.  COMPLETENESS of the
-                --   enumeration remains a REVIEW obligation, not a mechanical
-                --   pin.
+                --   refused via the `value` entry).  Over-refusal is the right
+                --   interim call — the unsound shape is unknowable until run
+                --   time — and it is documented so no reader mistakes the
+                --   boundary for exact.  WHAT IT DOES NOT COVER: it refuses the
+                --   nursery-building host prims the census NAMES; it does NOT
+                --   prove the REMAINING (Mid-implemented) prims are Mid-sound —
+                --   that is the corrected-criterion audit (plan.md §2.2).
+                --   COMPLETENESS of the enumeration remains a REVIEW obligation,
+                --   not a mechanical pin.
                 nurseryHostPrims =
                     Set.fromList
                         [ "read-file-as-string"
@@ -481,7 +481,6 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                         , "glob"
                         , "exec-plan"
                         , "value"
-                        , "str"
                         ]
 
                 hostOnlyPrims =

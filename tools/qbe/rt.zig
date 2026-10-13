@@ -56,6 +56,8 @@ const scan = gc.scan;
 const rt_mod = @import("rt");
 const values = rt_mod.values;
 const state = rt_mod.state;
+const symbols = rt_mod.symbols;
+const tables = rt_mod.tables;
 const varray = rt_mod.varray;
 const prims = rt_mod.prims;
 const streams = rt_mod.streams;
@@ -671,6 +673,77 @@ export fn rt_ss_close(i: i64) callconv(.c) i64 {
     }
     vm.streams.freeStringStream(@intCast(idx));
     return 0;
+}
+
+// =====================================================================
+//  value / intern / str seats (zigretire stage 3 GROUP 2)
+// =====================================================================
+// The compiled Mid `value`/`intern`/`str` bodies reach the Vm-owned values
+// table, the symbol interner and the float-text renderer through these
+// alloc-free word->word seats.  The STATE stays in Zig until the host ports
+// at stage 7 (values table, symbols); the float render is values.floatText
+// (std.fmt's shortest-round-trip `{d}`), only reachable through rt.zig until
+// then.  Page-allocator / static BSS only — NO GC inside — so the RawCallRaw
+// contract (alloc-free, no safepoint) holds and the caller lowers frame-free.
+// These seats die with rt.zig at the swap (BRIDGES-table entry in plan.md §3
+// Phase 4b).
+
+/// intern's seat: intern data[0..min(len,255)] into the symbol table and
+/// return the canonical name pointer.  len < 0 means the input is a
+/// null-terminated C string (the `value` fallback's symbol name) — sliceTo.
+/// Mirrors prims.primIntern (the 255-byte cap) + symbols.valSymbol.
+export fn rt_sym_intern(data: [*]const u8, len: i64) callconv(.c) [*:0]const u8 {
+    const src: []const u8 = if (len < 0)
+        std.mem.sliceTo(data, 0)
+    else
+        data[0..@intCast(@min(@max(len, 0), 255))];
+    var buf: [256]u8 = undefined;
+    const n = @min(src.len, 255);
+    @memcpy(buf[0..n], src[0..n]);
+    return symbols.valSymbol(&vm.symbols, buf[0..n]).payload.sym.name.?;
+}
+
+/// value's seat: the open-addressed values-table lookup (hashName + linear
+/// probe, mirroring tables.valueLookup but returning the STABLE slot pointer
+/// rather than a copy).  The fallback — valSymbol, the `(value +)` bare-symbol
+/// arm — writes a symbol into a static slot whose name is page-allocator
+/// (never a GC pointer), so the static is invisible to the GC and safe.
+var value_fallback_slot: Value = undefined;
+export fn rt_value_slot(name: [*:0]const u8) callconv(.c) ?[*]const Value {
+    const n = std.mem.sliceTo(name, 0);
+    var h = tables.hashName(n, tables.VALUES_TABLE_CAP);
+    var i: usize = 0;
+    while (i < tables.VALUES_TABLE_CAP) : (i += 1) {
+        const e = &vm.values_table[h];
+        if (e.name == null) break;
+        if (std.mem.eql(u8, std.mem.sliceTo(e.name.?, 0), n)) return @ptrCast(&e.value);
+        h = (h + 1) % tables.VALUES_TABLE_CAP;
+    }
+    value_fallback_slot = symbols.valSymbol(&vm.symbols, n);
+    return @ptrCast(&value_fallback_slot);
+}
+
+/// str's float-arm seat: render `bits` (an f64's raw bits) through
+/// values.floatText into a static BSS buffer and return a pointer to a
+/// { len: i64, data: [64]u8 } the Mid body copies into a GC string.  The 64-
+/// byte data is primStr's own buf[64] bound (a `{d}` text longer than it
+/// panics — the Zig reference behaviour, kept).  Static BSS: not moved by the
+/// GC, so the pointer stays valid across the Mid body's RawAllocRaw.
+const FloatTextOut = extern struct { len: i64, data: [64]u8 };
+var float_text_out: FloatTextOut = .{ .len = 0, .data = undefined };
+export fn rt_float_text(bits: i64) callconv(.c) [*]const FloatTextOut {
+    const u: u64 = @bitCast(bits);
+    const v: f64 = @bitCast(u);
+    const s = values.floatText(float_text_out.data[0..], v);
+    // values.floatText returns a STATIC literal ("NaN"/"Infinity"/"-Infinity")
+    // for the non-finite arms — NOT a slice into `data` — so copy those in;
+    // finite floats already render into `data` (a self-copy would be @memcpy
+    // UB).  Then set the length last.
+    if (@intFromPtr(s.ptr) != @intFromPtr(&float_text_out.data)) {
+        @memcpy(float_text_out.data[0..s.len], s);
+    }
+    float_text_out.len = @intCast(s.len);
+    return @ptrCast(&float_text_out);
 }
 
 /// The non-exhaustive-pattern failure arm.  Unreachable in well-typed Elm

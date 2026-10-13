@@ -1893,6 +1893,172 @@ closeDefun =
         )
 
 
+-- ============================ VM STATE + str (GROUP 2) ============================
+-- The value / intern / str prims as Mid bodies over alloc-free Zig seats in
+-- tools/qbe/rt.zig (rt_value_slot / rt_sym_intern / rt_float_text — the
+-- BRIDGES-table entries).  All three are frame-free reads (page_allocator /
+-- static BSS only in the seats) EXCEPT Rt.str, which RawAllocRaw's a GC string
+-- and is therefore framed.  The Zig handlers they port are prims.primValue /
+-- primIntern / primStr's float arm (vendor/osier-rt/src/rt/prims.zig).
+
+
+{-| `Rt.intern s` — primIntern: intern the string's bytes (255-byte cap) into
+the symbol table and return the symbol Value (tag 2, the canonical name
+pointer).  `rt_sym_intern` owns the open-addressed interner (page_allocator,
+immortal names, never GC-reclaimed).
+-}
+internDefun : Defun
+internDefun =
+    let
+        str =
+            p1
+
+        dataPtr =
+            b 3
+
+        len =
+            b 4
+
+        canon =
+            b 5
+    in
+    lam "Rt.intern" [ str ]
+        (lets
+            [ ( dataPtr, wOf (v str) )
+            , ( len, lenOf (v str) )
+            , ( canon, callW "rt_sym_intern" [ v dataPtr, v len ] )
+            ]
+            (Unsafe (RawMkValue { tag = RtLayout.tagSymbol, words = [ v canon ] }))
+        )
+
+
+{-| `Rt.value sym` — primValue: the open-addressed values-table lookup, blitting
+the slot's Value out of the table (a stable page_allocator slot), with the
+valSymbol bare-symbol fallback when the name is absent.  The result is whatever
+the host registered (a stream fd-int Value, or the *argv* cons list); the
+host-IO soundness hole for *argv* is unchanged by this port (the refusal stays
+in Lower's nurseryHostPrims under QBE_MIDGC=1).
+-}
+valueDefun : Defun
+valueDefun =
+    let
+        sym =
+            p1
+
+        namePtr =
+            b 3
+
+        slotPtr =
+            b 4
+    in
+    lam "Rt.value" [ sym ]
+        (lets
+            [ ( namePtr, wOf (v sym) )
+            , ( slotPtr, callW "rt_value_slot" [ v namePtr ] )
+            ]
+            (iff (mkBool (cmpW RCne (v slotPtr) (n 0)))
+                (Unsafe (RawVecLoad { vec = v slotPtr, index = n 0 }))
+                (lets
+                    [ ( b 5, callW "rt_sym_intern" [ v namePtr, n (-1) ] ) ]
+                    (Unsafe (RawMkValue { tag = RtLayout.tagSymbol, words = [ v (b 5) ] }))
+                )
+            )
+        )
+
+
+{-| `Rt.str x` — primStr's two REACHABLE arms (compiled Elm can only pass a
+Float-typed value, which at run time is either a FLOAT or a NUMBER — the
+`basicsToFloat n = n` identity in Prelude.elm:1395 lets an integer token reach
+`str` tagged 0).  FLOAT: render the f64 through rt_float_text
+(values.floatText: shortest-round-trip `{d}` + the mandatory ".0" on
+integrals; NaN/±Infinity pass through) into a STATIC BSS buffer, then COPY the
+bytes into a GC string — the copy is what closes the host-IO hole: the final
+string is GC-allocated, never the Zig-nursery string primStr's `valString`
+produced, so a kept NaN/±Infinity text survives the scavenge (the midgc-str
+probe's pinned shape).  NUMBER: Rt.numText (the `{d}` integer render, no ".0").
+The other primStr arms (string/symbol/boolean/composite) are unreachable from
+String.fromFloat.  Allocates -> framed.
+-}
+strDefun : Defun
+strDefun =
+    let
+        x =
+            p1
+
+        outPtr =
+            b 3
+
+        lenN =
+            b 4
+
+        outN =
+            b 5
+
+        bufW =
+            b 6
+
+        bufN =
+            b 7
+
+        floatArm =
+            lets
+                [ ( outPtr, callW "rt_float_text" [ wOf (v x) ] )
+                , ( lenN, mkNum (Unsafe (RawWordLoad { ptr = v outPtr, index = n 0 })) )
+                , ( outN, mkNum (v outPtr) )
+                , ( bufW, Unsafe (RawAllocRaw (wOf (v lenN))) )
+                , ( bufN, mkNum (v bufW) )
+                , ( b 8, callR "Rt.floatCopy" [ v outN, v bufN, mkNum (isub (wOf (v lenN)) (n 1)) ] )
+                ]
+                (mkStr (v bufW) (wOf (v lenN)))
+    in
+    lam "Rt.str" [ x ]
+        (iff (mkBool (tagIs (v x) 12))
+            floatArm
+            (iff (mkBool (tagIs (v x) 0))
+                (callR "Rt.numText" [ v x ])
+                haltV
+            )
+        )
+
+
+{-| Rt.floatCopy outN bufN i — copy byte i of the static float-text buffer
+(`outN` boxes the buffer pointer + 8 = data start) into the GC string at
+`bufN`, counting DOWN from len-1 to 0 (arity 3: the lean ABI's direct bound).
+`outN`/`bufN` box pointers as numbers (the collector never chases them); the
+static BSS source is not moved by the GC, so it stays valid across the
+caller's alloc.  Non-allocating -> frame-free.
+-}
+floatCopyDefun : Defun
+floatCopyDefun =
+    let
+        outN =
+            p1
+
+        bufN =
+            p2
+
+        i =
+            p3
+    in
+    lam "Rt.floatCopy" [ outN, bufN, i ]
+        (iff (mkBool (cmpW RClts (wOf (v i)) (n 0)))
+            mkNil
+            (lets
+                [ ( b 4
+                  , Unsafe
+                        (RawByteStore
+                            { ptr = wOf (v bufN)
+                            , index = wOf (v i)
+                            , value = Unsafe (RawByteLoad { ptr = iadd (wOf (v outN)) (n 8), index = wOf (v i) })
+                            }
+                        )
+                  )
+                ]
+                (callR "Rt.floatCopy" [ v outN, v bufN, mkNum (isub (wOf (v i)) (n 1)) ])
+            )
+        )
+
+
 helperDefuns : Bool -> List Defun
 helperDefuns rec =
     [ deepEqDefun rec
@@ -1932,6 +2098,7 @@ helperDefuns rec =
     , recToChainGoDefun
     , readFullDefun
     , cStrFillDefun
+    , floatCopyDefun
     ]
 
 
@@ -2875,4 +3042,7 @@ primDefuns consArr rec eqPtrFast =
     , readByteDefun
     , openDefun
     , closeDefun
+    , internDefun
+    , valueDefun
+    , strDefun
     ]
