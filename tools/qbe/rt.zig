@@ -689,17 +689,13 @@ export fn rt_ss_close(i: i64) callconv(.c) i64 {
 // Phase 4b).
 
 /// intern's seat: intern data[0..min(len,255)] into the symbol table and
-/// return the canonical name pointer.  len < 0 means the input is a
-/// null-terminated C string (the `value` fallback's symbol name) — sliceTo.
-/// Mirrors prims.primIntern (the 255-byte cap) + symbols.valSymbol.
+/// return the canonical name pointer.  `len` is the byte count (negative
+/// clamped to 0, matching primIntern's @max(len,0); 255-byte cap).  Mirrors
+/// prims.primIntern (vendor/osier-rt/src/rt/prims.zig) + symbols.valSymbol.
 export fn rt_sym_intern(data: [*]const u8, len: i64) callconv(.c) [*:0]const u8 {
-    const src: []const u8 = if (len < 0)
-        std.mem.sliceTo(data, 0)
-    else
-        data[0..@intCast(@min(@max(len, 0), 255))];
+    const n: usize = @intCast(@min(@max(len, 0), 255));
     var buf: [256]u8 = undefined;
-    const n = @min(src.len, 255);
-    @memcpy(buf[0..n], src[0..n]);
+    @memcpy(buf[0..n], data[0..n]);
     return symbols.valSymbol(&vm.symbols, buf[0..n]).payload.sym.name.?;
 }
 
@@ -729,6 +725,16 @@ export fn rt_value_slot(name: [*:0]const u8) callconv(.c) ?[*]const Value {
 /// byte data is primStr's own buf[64] bound (a `{d}` text longer than it
 /// panics — the Zig reference behaviour, kept).  Static BSS: not moved by the
 /// GC, so the pointer stays valid across the Mid body's RawAllocRaw.
+///
+/// RE-ENTRANCY (why ONE static scratch is sound): the bytes are valid only
+/// from the render until the Mid body's Rt.floatCopy has copied them out.
+/// That window contains exactly ONE safepoint — the RawAllocRaw itself, whose
+/// collectors cannot call Rt.str (the VM is single-threaded and a collection
+/// runs no generated code) — and Rt.floatCopy is frame-free (no safepoint).
+/// So no second `str` call can interleave and overwrite `float_text_out`
+/// before the copy is done.  Any future Rt.str body that adds a second
+/// safepoint between this seat and the copy BREAKS this invariant (a nested
+/// String.fromFloat would clobber the first call's bytes).
 const FloatTextOut = extern struct { len: i64, data: [64]u8 };
 var float_text_out: FloatTextOut = .{ .len = 0, .data = undefined };
 export fn rt_float_text(bits: i64) callconv(.c) [*]const FloatTextOut {

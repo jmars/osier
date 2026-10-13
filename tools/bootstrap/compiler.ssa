@@ -504066,7 +504066,7 @@ function :ret $q_Mid_x2eRtPrims_x2estrDefun() {
 
 function :ret $q_Mid_x2eRtPrims_x2evalueDefun() {
 @start
-	%f =l call $rt_frame_enter(w 112)
+	%f =l call $rt_frame_enter(w 55)
 	%s0 =l add %f, 0
 	%s2 =l add %f, 80
 	%s4 =l add %f, 160
@@ -504107,6 +504107,7 @@ function :ret $q_Mid_x2eRtPrims_x2evalueDefun() {
 	%s40 =l add %f, 1600
 	%s41 =l add %f, 1640
 	%s42 =l add %f, 1680
+	%s43 =l add %f, 1720
 	%s44 =l add %f, 1760
 	%s45 =l add %f, 1800
 	%s46 =l add %f, 1840
@@ -504114,57 +504115,7 @@ function :ret $q_Mid_x2eRtPrims_x2evalueDefun() {
 	%s48 =l add %f, 1920
 	%s49 =l add %f, 1960
 	%s50 =l add %f, 2000
-	%s53 =l add %f, 2120
-	%s54 =l add %f, 2160
-	%s55 =l add %f, 2200
-	%s56 =l add %f, 2240
-	%s57 =l add %f, 2280
-	%s58 =l add %f, 2320
-	%s59 =l add %f, 2360
-	%s60 =l add %f, 2400
-	%s61 =l add %f, 2440
-	%s62 =l add %f, 2480
-	%s63 =l add %f, 2520
-	%s64 =l add %f, 2560
-	%s65 =l add %f, 2600
-	%s66 =l add %f, 2640
-	%s67 =l add %f, 2680
-	%s68 =l add %f, 2720
-	%s69 =l add %f, 2760
-	%s70 =l add %f, 2800
-	%s71 =l add %f, 2840
-	%s72 =l add %f, 2880
-	%s73 =l add %f, 2920
-	%s74 =l add %f, 2960
-	%s75 =l add %f, 3000
-	%s76 =l add %f, 3040
-	%s77 =l add %f, 3080
-	%s78 =l add %f, 3120
-	%s79 =l add %f, 3160
-	%s80 =l add %f, 3200
-	%s81 =l add %f, 3240
-	%s82 =l add %f, 3280
-	%s83 =l add %f, 3320
-	%s85 =l add %f, 3400
-	%s86 =l add %f, 3440
-	%s87 =l add %f, 3480
-	%s88 =l add %f, 3520
-	%s89 =l add %f, 3560
-	%s90 =l add %f, 3600
-	%s92 =l add %f, 3680
-	%s93 =l add %f, 3720
-	%s94 =l add %f, 3760
-	%s95 =l add %f, 3800
-	%s96 =l add %f, 3840
-	%s97 =l add %f, 3880
-	%s98 =l add %f, 3920
-	%s99 =l add %f, 3960
-	%s100 =l add %f, 4000
-	%s101 =l add %f, 4040
-	%s102 =l add %f, 4080
-	%s104 =l add %f, 4160
-	%s107 =l add %f, 4280
-	%s109 =l add %f, 4360
+	%s52 =l add %f, 2080
 	# (fallthrough)
 @body
 	%t0 =:ret call $q_Mid_x2eRtPrims_x2ep1()
@@ -504244,194 +504195,55 @@ function :ret $q_Mid_x2eRtPrims_x2evalueDefun() {
 	blit %t28, %s24, 40
 	%t29 =:val call $q_Rt_x2econs(l %s17, l %s24, l %s24, w 2)
 	blit %t29, %s16, 40
-	%t30 =:ret call $q_Mid_x2eIr_x2eRCne()
-	%t31 =:val call $rt_bounce(l %t30)
-	blit %t31, %s42, 40
-	blit %s7, %s45, 40
-	%s46_0 =l add %s46, 0
-	blit %s45, %s46_0, 40
-	%t32 =:ret call $q_Mid_x2eRtPrims_x2ev(:val %s46_0)
-	%t33 =:val call $rt_bounce(l %t32)
-	blit %t33, %s44, 40
-	storew 0, %s48
-	%t34 =l add %s48, 8
-	storel 0, %t34
-	%s49_0 =l add %s49, 0
-	blit %s48, %s49_0, 40
-	%t35 =:ret call $q_Mid_x2eRtPrims_x2en(:val %s49_0)
-	%t36 =:val call $rt_bounce(l %t35)
-	blit %t36, %s47, 40
-	%s50_0 =l add %s50, 0
-	blit %s42, %s50_0, 40
-	%s50_1 =l add %s50, 40
-	blit %s44, %s50_1, 40
-	%s50_2 =l add %s50, 80
-	blit %s47, %s50_2, 40
-	%t37 =:ret call $q_Mid_x2eRtPrims_x2ecmpW(:val %s50_0, :val %s50_1, :val %s50_2)
-	%t38 =:val call $rt_bounce(l %t37)
-	blit %t38, %s41, 40
-	%s53_0 =l add %s53, 0
-	blit %s41, %s53_0, 40
-	%t39 =:ret call $q_Mid_x2eRtPrims_x2emkBool(:val %s53_0)
+	storew 0, %s43
+	%t30 =l add %s43, 8
+	storel 0, %t30
+	%s44_0 =l add %s44, 0
+	blit %s43, %s44_0, 40
+	%t31 =:ret call $q_Mid_x2eRtPrims_x2en(:val %s44_0)
+	%t32 =:val call $rt_bounce(l %t31)
+	blit %t32, %s42, 40
+	blit %s7, %s46, 40
+	%s47_0 =l add %s47, 0
+	blit %s46, %s47_0, 40
+	%t33 =:ret call $q_Mid_x2eRtPrims_x2ev(:val %s47_0)
+	%t34 =:val call $rt_bounce(l %t33)
+	blit %t34, %s45, 40
+	%t35 =l call $rt_vec_alloc(w 2)
+	call $rt_vec_store(l %t35, w 0, l %s42)
+	call $rt_vec_store(l %t35, w 1, l %s45)
+	storew 14, %s41
+	%t36 =l add %s41, 8
+	storel %t35, %t36
+	%t37 =l add %s41, 16
+	storel 2, %t37
+	%t38 =l add %s41, 24
+	storel $d1192, %t38
+	%s48_0 =l add %s48, 0
+	blit %s41, %s48_0, 40
+	%t39 =:ret call $q_Mid_x2eIr_x2eRawVecLoad(:val %s48_0)
 	%t40 =:val call $rt_bounce(l %t39)
 	blit %t40, %s40, 40
-	storew 0, %s58
-	%t41 =l add %s58, 8
-	storel 0, %t41
-	%s59_0 =l add %s59, 0
-	blit %s58, %s59_0, 40
-	%t42 =:ret call $q_Mid_x2eRtPrims_x2en(:val %s59_0)
-	%t43 =:val call $rt_bounce(l %t42)
-	blit %t43, %s57, 40
-	blit %s7, %s61, 40
-	%s62_0 =l add %s62, 0
-	blit %s61, %s62_0, 40
-	%t44 =:ret call $q_Mid_x2eRtPrims_x2ev(:val %s62_0)
-	%t45 =:val call $rt_bounce(l %t44)
-	blit %t45, %s60, 40
-	%t46 =l call $rt_vec_alloc(w 2)
-	call $rt_vec_store(l %t46, w 0, l %s57)
-	call $rt_vec_store(l %t46, w 1, l %s60)
-	storew 14, %s56
-	%t47 =l add %s56, 8
-	storel %t46, %t47
-	%t48 =l add %s56, 16
-	storel 2, %t48
-	%t49 =l add %s56, 24
-	storel $d1192, %t49
-	%s63_0 =l add %s63, 0
-	blit %s56, %s63_0, 40
-	%t50 =:ret call $q_Mid_x2eIr_x2eRawVecLoad(:val %s63_0)
-	%t51 =:val call $rt_bounce(l %t50)
-	blit %t51, %s55, 40
-	%s64_0 =l add %s64, 0
-	blit %s55, %s64_0, 40
-	%t52 =:ret call $q_Mid_x2eIr_x2eUnsafe(:val %s64_0)
-	%t53 =:val call $rt_bounce(l %t52)
-	blit %t53, %s54, 40
-	storew 0, %s69
-	%t54 =l add %s69, 8
-	storel 5, %t54
-	%s70_0 =l add %s70, 0
-	blit %s69, %s70_0, 40
-	%t55 =:ret call $q_Mid_x2eRtPrims_x2eb(:val %s70_0)
-	%t56 =:val call $rt_bounce(l %t55)
-	blit %t56, %s68, 40
-	%t57 =:val call $rt_string(l $d2072, w 13)
-	blit %t57, %s72, 40
-	blit %s4, %s75, 40
-	%s76_0 =l add %s76, 0
-	blit %s75, %s76_0, 40
-	%t58 =:ret call $q_Mid_x2eRtPrims_x2ev(:val %s76_0)
-	%t59 =:val call $rt_bounce(l %t58)
-	blit %t59, %s74, 40
-	storew 0, %s79
-	%t60 =l add %s79, 8
-	storel -1, %t60
-	%s80_0 =l add %s80, 0
-	blit %s79, %s80_0, 40
-	%t61 =:ret call $q_Mid_x2eRtPrims_x2en(:val %s80_0)
-	%t62 =:val call $rt_bounce(l %t61)
-	blit %t62, %s78, 40
-	storew 0, %s82
-	%t63 =l add %s82, 8
-	storel 0, %t63
-	%t64 =:val call $q_Rt_x2eemptylist(l %s82, l %s82, l %s82, w 1)
-	blit %t64, %s81, 40
-	%t65 =:val call $q_Rt_x2econs(l %s78, l %s81, l %s81, w 2)
-	blit %t65, %s77, 40
-	%t66 =:val call $q_Rt_x2econs(l %s74, l %s77, l %s77, w 2)
-	blit %t66, %s73, 40
-	%s83_0 =l add %s83, 0
-	blit %s72, %s83_0, 40
-	%s83_1 =l add %s83, 40
-	blit %s73, %s83_1, 40
-	%t67 =:ret call $q_Mid_x2eRtPrims_x2ecallW(:val %s83_0, :val %s83_1)
-	%t68 =:val call $rt_bounce(l %t67)
-	blit %t68, %s71, 40
-	%t69 =:val call $q_Rt_x2econs(l %s68, l %s71, l %s71, w 2)
-	blit %t69, %s67, 40
-	storew 0, %s86
-	%t70 =l add %s86, 8
-	storel 0, %t70
-	%t71 =:val call $q_Rt_x2eemptylist(l %s86, l %s86, l %s86, w 1)
-	blit %t71, %s85, 40
-	%t72 =:val call $q_Rt_x2econs(l %s67, l %s85, l %s85, w 2)
-	blit %t72, %s66, 40
-	%t73 =:ret call $q_Mid_x2eRtLayout_x2etagSymbol()
-	%t74 =:val call $rt_bounce(l %t73)
-	blit %t74, %s90, 40
-	storew 0, %s95
-	%t75 =l add %s95, 8
-	storel 5, %t75
-	%s96_0 =l add %s96, 0
-	blit %s95, %s96_0, 40
-	%t76 =:ret call $q_Mid_x2eRtPrims_x2eb(:val %s96_0)
-	%t77 =:val call $rt_bounce(l %t76)
-	blit %t77, %s94, 40
-	%s97_0 =l add %s97, 0
-	blit %s94, %s97_0, 40
-	%t78 =:ret call $q_Mid_x2eRtPrims_x2ev(:val %s97_0)
-	%t79 =:val call $rt_bounce(l %t78)
-	blit %t79, %s93, 40
-	storew 0, %s99
-	%t80 =l add %s99, 8
-	storel 0, %t80
-	%t81 =:val call $q_Rt_x2eemptylist(l %s99, l %s99, l %s99, w 1)
-	blit %t81, %s98, 40
-	%t82 =:val call $q_Rt_x2econs(l %s93, l %s98, l %s98, w 2)
-	blit %t82, %s92, 40
-	%t83 =l call $rt_vec_alloc(w 2)
-	call $rt_vec_store(l %t83, w 0, l %s90)
-	call $rt_vec_store(l %t83, w 1, l %s92)
-	storew 14, %s89
-	%t84 =l add %s89, 8
-	storel %t83, %t84
-	%t85 =l add %s89, 16
-	storel 2, %t85
-	%t86 =l add %s89, 24
-	storel $d1184, %t86
-	%s100_0 =l add %s100, 0
-	blit %s89, %s100_0, 40
-	%t87 =:ret call $q_Mid_x2eIr_x2eRawMkValue(:val %s100_0)
-	%t88 =:val call $rt_bounce(l %t87)
-	blit %t88, %s88, 40
-	%s101_0 =l add %s101, 0
-	blit %s88, %s101_0, 40
-	%t89 =:ret call $q_Mid_x2eIr_x2eUnsafe(:val %s101_0)
-	%t90 =:val call $rt_bounce(l %t89)
-	blit %t90, %s87, 40
-	%s102_0 =l add %s102, 0
-	blit %s66, %s102_0, 40
-	%s102_1 =l add %s102, 40
-	blit %s87, %s102_1, 40
-	%t91 =:ret call $q_Mid_x2eRtPrims_x2elets(:val %s102_0, :val %s102_1)
-	%t92 =:val call $rt_bounce(l %t91)
-	blit %t92, %s65, 40
-	%s104_0 =l add %s104, 0
-	blit %s40, %s104_0, 40
-	%s104_1 =l add %s104, 40
-	blit %s54, %s104_1, 40
-	%s104_2 =l add %s104, 80
-	blit %s65, %s104_2, 40
-	%t93 =:ret call $q_Mid_x2eRtPrims_x2eiff(:val %s104_0, :val %s104_1, :val %s104_2)
-	%t94 =:val call $rt_bounce(l %t93)
-	blit %t94, %s39, 40
-	%s107_0 =l add %s107, 0
-	blit %s16, %s107_0, 40
-	%s107_1 =l add %s107, 40
-	blit %s39, %s107_1, 40
-	%t95 =:ret call $q_Mid_x2eRtPrims_x2elets(:val %s107_0, :val %s107_1)
-	%t96 =:val call $rt_bounce(l %t95)
-	blit %t96, %s15, 40
-	%s109_0 =l add %s109, 0
-	blit %s10, %s109_0, 40
-	%s109_1 =l add %s109, 40
-	blit %s11, %s109_1, 40
-	%s109_2 =l add %s109, 80
-	blit %s15, %s109_2, 40
-	%t97 =:ret call $rt_tail_known(l $q_Mid_x2eRtPrims_x2elam, l %s109, w 3)
-	blit %t97, %s0, 80
+	%s49_0 =l add %s49, 0
+	blit %s40, %s49_0, 40
+	%t41 =:ret call $q_Mid_x2eIr_x2eUnsafe(:val %s49_0)
+	%t42 =:val call $rt_bounce(l %t41)
+	blit %t42, %s39, 40
+	%s50_0 =l add %s50, 0
+	blit %s16, %s50_0, 40
+	%s50_1 =l add %s50, 40
+	blit %s39, %s50_1, 40
+	%t43 =:ret call $q_Mid_x2eRtPrims_x2elets(:val %s50_0, :val %s50_1)
+	%t44 =:val call $rt_bounce(l %t43)
+	blit %t44, %s15, 40
+	%s52_0 =l add %s52, 0
+	blit %s10, %s52_0, 40
+	%s52_1 =l add %s52, 40
+	blit %s11, %s52_1, 40
+	%s52_2 =l add %s52, 80
+	blit %s15, %s52_2, 40
+	%t45 =:ret call $rt_tail_known(l $q_Mid_x2eRtPrims_x2elam, l %s52, w 3)
+	blit %t45, %s0, 80
 	# (fallthrough)
 @ret
 	call $rt_frame_leave()
@@ -734243,11 +734055,10 @@ function :val $q_Rt_x2esubGo(l %a0, l %a1, l %a2, w %an) {
 
 function :val $q_Rt_x2evalue(l %a0, l %a1, l %a2, w %an) {
 @start
-	%f =l alloc8 200
+	%f =l alloc8 160
 	%s0 =l add %f, 0
 	%s2 =l add %f, 80
 	%s3 =l add %f, 120
-	%s4 =l add %f, 160
 	blit %a0, %s2, 40
 	# (fallthrough)
 @body
@@ -734255,28 +734066,9 @@ function :val $q_Rt_x2evalue(l %a0, l %a1, l %a2, w %an) {
 	%t0 =l add %s3, 8
 	%t1 =l loadl %t0
 	%t2 =l call $rt_value_slot(l %t1)
-	%t3 =w cnel %t2, 0
-	%t4 =l extsw %t3
-	storew 3, %s4
-	%t5 =l add %s4, 8
-	storel %t4, %t5
-	%t6 =w loadw %s4
-	%t7 =w ceqw %t6, 3
-	%t9 =l add %s4, 8
-	%t8 =w loadw %t9
-	%t10 =w ceqw %t8, 0
-	%t11 =w and %t7, %t10
-	jnz %t11, @else_1, @then_0
-@then_0
-	%t12 =l mul 40, 0
-	%t13 =l add %t2, %t12
-	blit %t13, %s0, 40
-	jmp @ret
-@else_1
-	%t14 =l call $rt_sym_intern(l %t1, l -1)
-	storew 2, %s0
-	%t15 =l add %s0, 8
-	storel %t14, %t15
+	%t3 =l mul 40, 0
+	%t4 =l add %t2, %t3
+	blit %t4, %s0, 40
 	# (fallthrough)
 @ret
 	ret %s0

@@ -1933,11 +1933,15 @@ internDefun =
 
 
 {-| `Rt.value sym` — primValue: the open-addressed values-table lookup, blitting
-the slot's Value out of the table (a stable page_allocator slot), with the
-valSymbol bare-symbol fallback when the name is absent.  The result is whatever
-the host registered (a stream fd-int Value, or the *argv* cons list); the
-host-IO soundness hole for *argv* is unchanged by this port (the refusal stays
-in Lower's nurseryHostPrims under QBE_MIDGC=1).
+the slot's Value out of the table (a stable page_allocator slot).  The result
+is whatever the host registered (a stream fd-int Value, or the *argv* cons
+list); the host-IO soundness hole for *argv* is unchanged by this port (the
+refusal stays in Lower's nurseryHostPrims under QBE_MIDGC=1).
+
+The seat NEVER returns null: found -> `&e.value`; absent -> `&value_fallback_slot`
+(the valSymbol bare-symbol fallback, done INSIDE the seat — rt.zig rt_value_slot).
+So the body blits the slot unconditionally; there is no second fallback path
+here (a null would be a loud SEGV on the blit, not a silent mis-dispatch).
 -}
 valueDefun : Defun
 valueDefun =
@@ -1956,13 +1960,7 @@ valueDefun =
             [ ( namePtr, wOf (v sym) )
             , ( slotPtr, callW "rt_value_slot" [ v namePtr ] )
             ]
-            (iff (mkBool (cmpW RCne (v slotPtr) (n 0)))
-                (Unsafe (RawVecLoad { vec = v slotPtr, index = n 0 }))
-                (lets
-                    [ ( b 5, callW "rt_sym_intern" [ v namePtr, n (-1) ] ) ]
-                    (Unsafe (RawMkValue { tag = RtLayout.tagSymbol, words = [ v (b 5) ] }))
-                )
-            )
+            (Unsafe (RawVecLoad { vec = v slotPtr, index = n 0 }))
         )
 
 
@@ -1977,7 +1975,9 @@ string is GC-allocated, never the Zig-nursery string primStr's `valString`
 produced, so a kept NaN/±Infinity text survives the scavenge (the midgc-str
 probe's pinned shape).  NUMBER: Rt.numText (the `{d}` integer render, no ".0").
 The other primStr arms (string/symbol/boolean/composite) are unreachable from
-String.fromFloat.  Allocates -> framed.
+String.fromFloat.  Allocates -> framed.  (The single static-BSS scratch's
+re-entrancy invariant — valid only render-through-copy, one safepoint — is
+named at rt.zig's rt_float_text seat.)
 -}
 strDefun : Defun
 strDefun =

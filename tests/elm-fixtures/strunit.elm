@@ -100,6 +100,13 @@ main =
                 -- fromFloat: shortest-roundtrip + mandatory ".0" when integral
                 , f (Str.fromFloat 42.5 == "42.5")
                 , f (Str.fromFloat 2.0 == "2.0")
+
+                -- fromFloat on an INTEGER token typed Float (the S4f trap):
+                -- `3` reaches `str` tagged 0 (a NUMBER, via Prelude.basicsToFloat's
+                -- identity), exercising Rt.str's NUMBER arm (Rt.numText) — NOT
+                -- the tag-12 float arm the two rows above exercise.
+                , f (Str.fromFloat 3 == "3")
+                , f (Str.fromFloat -3 == "-3")
                 ]
     in
     String.join "|"
