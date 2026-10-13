@@ -149,6 +149,16 @@ if (QBE_MIDGC && !QBE_RTLEAN) {
   console.error('run.js: QBE_MIDGC=1 requires the lean ABI (QBE_NORTLEAN=1 is incompatible — the Mid seats hard-code the lean call shape)');
   process.exit(2);
 }
+// QBE_NOMIDRT=1 withholds the Rt program, so the Mid seats the collector
+// depends on are never emitted — no q_Rt_x2eallocVector export, so the weak
+// extern resolves to 0 and applyGo's partial arm silently falls back to the
+// Zig g.allocArray route: a cross-heap edge the collector cannot see, which
+// SEGVs with no diagnostic.  Refuse it by name rather than failing at run
+// time.  (The stage-5 PART 2 review reproduced that silent failure.)
+if (QBE_MIDGC && !QBE_MIDRT) {
+  console.error('run.js: QBE_MIDGC=1 requires the Mid runtime (QBE_NOMIDRT=1 withholds the Rt program, so the collector\'s seats are never emitted and the partial-application path silently reverts to the Zig allocator)');
+  process.exit(2);
+}
 // QBE_ENTRY: the defun key the QBE backend roots reachability from
 // ("<Mod>.<fn>").  REQUIRED in the single-fixture CLI; the batch mode reads
 // one entry PER GROUP from the manifest instead.
