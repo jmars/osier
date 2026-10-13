@@ -234,6 +234,65 @@ run_midgc_nsi() {
   fi
 }
 
+# run_midgc_refusal — the HOST-IO CENSUS REFUSAL row (zigretire stage 5 PART 5):
+# the fixture MUST be refused at COMPILE time under QBE_MIDGC=1 (qbe-mk exits
+# non-zero, the .ssa begins "err " and names Runtime.program — the effect-loop
+# seam).  This is the IN-TREE documented-fail row for the host-IO hole: the
+# gate asserts the refusal rather than letting a host-IO program silently run
+# to corruption under the hatch.
+run_midgc_refusal() {
+  local name="$1" entry="$2" fixture="$3"
+  local out
+  out="$TMP/$name-refusal"
+  mkdir -p "$out"
+  if QBE_MIDGC=1 "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$out" >/dev/null 2>&1; then
+    echo "FAIL $name: QBE_MIDGC=1 compiled a host-IO program — the census/effect-loop refusal is missing"
+    FAIL=1; return
+  fi
+  local ssa
+  ssa="$out/$(basename "$fixture" .elm).ssa"
+  if ! head -c 4 "$ssa" | grep -q '^err '; then
+    echo "FAIL $name: QBE_MIDGC=1 failed but not with an 'err' refusal"
+    FAIL=1; return
+  fi
+  if ! grep -q 'Runtime.program' "$ssa"; then
+    echo "FAIL $name: the refusal does not name the effect-loop seam (Runtime.program)"
+    FAIL=1; return
+  fi
+  echo "PASS $name: QBE_MIDGC=1 refuses the host-IO program (names Runtime.program, the effect-loop seam)"
+}
+
+# run_midgc_io — the DEFAULT-path control for the host-IO fixture: with the Zig
+# collector (no MIDGC) the kept string is rooted -> evacuated, not reclaimed,
+# so the fixture prints the golden.  Proves the refusal did not change the
+# default path.
+run_midgc_io() {
+  local name="$1" entry="$2" fixture="$3"
+  local bin
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$TMP/$name")" || {
+    echo "FAIL $name: qbe-mk (default)"; FAIL=1; return
+  }
+  local nat_out exp
+  nat_out="$(MIDGC_IO_IN="$ROOT/tools/qbe/fixtures/input/midgc-io.txt" QBE_HEAP_MB=$CHURN_MB timeout 60 "$bin" "$entry" 2>&1)"
+  if [ "$FREEZE" = 1 ]; then
+    printf '%s\n' "$nat_out" > "$GOLDEN/$name.txt"
+    exp="$nat_out"
+    echo "FROZE $name: golden <- the default path's output (${nat_out:0:80})"
+  else
+    exp="$(golden_read "$name")"
+    if [ "$exp" = "__NO_GOLDEN__" ]; then
+      echo "FAIL $name: no golden at $GOLDEN/$name.txt"
+      FAIL=1; return
+    fi
+  fi
+  if [ "$nat_out" != "$exp" ]; then
+    echo "FAIL $name: golden='$exp' native='$nat_out'"
+    FAIL=1
+  else
+    echo "PASS $name: default path golden (${nat_out:0:80})"
+  fi
+}
+
 # like run(), but with AOTRUN_ARGV=1: the trailing args are the APP's *argv*
 # pseudo-global (string list), NOT int call args — the selfhost CLI-driver
 # contract.  Guards the argvPrimThunk arity bug (the class the old
@@ -313,6 +372,31 @@ run_midgc midgc-record MidgcRecord.main tools/qbe/fixtures/midgc-record.elm
 # because the hole is the FALLBACK path.  The fail-before/pass-after asymmetry
 # + the zero-rt_string-emission pin are scripted in tools/qbe/probe-midgc-string.sh.
 run_midgc_nsi midgc-string MidgcString.main tools/qbe/fixtures/midgc-string.elm
+# zigretire stage 5 PART 5 — THE OTHER HALF of the census refusal: a PURE
+# program churning a >3-arg MUTUAL tail recursion must NOT corrupt.  The
+# transient tail array (rt_tail_known's nargs>3 fallback, rt.zig:817) is a
+# Zig-scavenge TRIGGER (tail_gcarray=3,000,000) but not itself live across a
+# safepoint — so it is not a hole by itself.  The kept string is Mid-allocated
+# (++ -> cn -> Rt.cn -> RawAllocRaw), so it is NOT reclaimable by the Zig
+# collector and survives.  This is the probe that distinguishes THE TRIGGER
+# from THE HOLE (the hole is the host-IO fixture, refused at compile time).
+run_midgc midgc-tail MidgcTail.main tools/qbe/fixtures/midgc-tail.elm
+# zigretire stage 5 PART 5 nice-to-have 4 — THE MID-RAW STRING MARKING PROBE:
+# a concat/++-built (Rt.cn -> RawAllocRaw -> Mid) string kept across a MID
+# COLLECT (the churn's 150k conses force the collector).  Every prior string
+# fixture kept STATIC literals, whose mark is a no-op; this one makes gcMarkValue's
+# tag-1 (data-pointer) marking falsifiable (verified: disabling that one mark
+# prints "0|150" — the sweep reclaims the kept data bytes).
+run_midgc midgc-rawstr MidgcRawstr.main tools/qbe/fixtures/midgc-rawstr.elm
+# zigretire stage 5 PART 5 — THE HOST-IO CENSUS REFUSAL: a host-IO program
+# (Io.readFile -> keeper -> 4-arg mutual tail churn) must be REFUSED under
+# QBE_MIDGC=1 (its effect-loop seam builds Zig-nursery strings/conses the
+# scavenge reclaims — the reproduced cross-heap hole), while its DEFAULT path
+# prints the golden.  The fail-before/pass-after asymmetry is scripted in
+# tools/qbe/probe-midgc-io.sh; this row re-asserts the refusal and the
+# default-path golden in the gate.
+run_midgc_refusal midgc-io MidgcIo.main tools/qbe/fixtures/midgc-io.elm
+run_midgc_io midgc-io MidgcIo.main tools/qbe/fixtures/midgc-io.elm
 
 # nice-to-have 9: a result whose printed form EXCEEDS the old 16384-byte print
 # buffer (~24KB here).  Both runners stream now, so native and VM must agree

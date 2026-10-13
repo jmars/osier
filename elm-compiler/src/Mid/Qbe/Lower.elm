@@ -427,6 +427,73 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                 keys =
                     surfaceKeys ++ rtKeys
 
+                -- THE CENSUS REFUSAL (zigretire stage 5 PART 5): under
+                -- QBE_MIDGC=1, a used prim whose Zig host handler builds a
+                -- Zig-NURSERY string/conses routes through rt_prim (no Mid
+                -- implementation), and the result lands in a Mid object whose
+                -- pointer the Zig scavenge then reclaims while still live —
+                -- the reproduced cross-heap hole (churn a host-IO program's
+                -- 4-arg MUTUAL tail recursion at QBE_MIDGC=1: content equality
+                -- prints 0 while String.length prints 150).  DERIVED from the
+                -- census, not from a "is this program host-IO" flag: the
+                -- refusal is `usedPrims ∩ nurseryHostPrims`, i.e. it fires on
+                -- whatever the census actually names.
+                --
+                -- nurseryHostPrims is the COMPLETE enumeration (verified by
+                -- reading each Zig handler) of the prims that RETURN a value
+                -- whose payload the handler built in the GC nursery via
+                -- values.valString / valCons:
+                --   read-file-as-string (streams.zig), getcwd/getenv/glob/
+                --   exec-plan (execplan.zig), value (the *argv* registry list,
+                --   rt.zig buildArgvList), str (primStr's floatText/composite
+                --   printer).  The OTHER no-Mid-implementation prims are SAFE
+                --   and deliberately NOT refused: intern (valSymbol -> a
+                --   page_allocator symbol, never GC-reclaimed), getpid/cd/
+                --   setenv/close/write-byte/read-byte (scalar results), open
+                --   (a libc stream), simple-error (aborts), and hd/tl/fst/
+                --   reverse/append/absvector? (no surface spelling, so they
+                --   can never appear in the census).  WHAT IT DOES NOT COVER:
+                --   it refuses the nursery-building host prims the census
+                --   names; it does NOT prove the REMAINING (Mid-implemented)
+                --   prims are Mid-sound — that is the corrected-criterion
+                --   audit (plan.md §2.2).
+                nurseryHostPrims =
+                    Set.fromList
+                        [ "read-file-as-string"
+                        , "getcwd"
+                        , "getenv"
+                        , "glob"
+                        , "exec-plan"
+                        , "value"
+                        , "str"
+                        ]
+
+                hostOnlyPrims =
+                    Set.intersect usedPrims nurseryHostPrims
+
+                -- THE EFFECT-LOOP REFUSAL (the OTHER arm — this one is what
+                -- the reproduced hole actually exercises).  A Platform.program
+                -- (-> Runtime.program) does NOT reach runTask, so its census
+                -- contains NO host prim (verified by emission: the repro .ssa
+                -- references zero rt_prim/read-file-as-string/getenv/getcwd).
+                -- Instead the ZIG effect loop (src/effectloop.zig) dispatches
+                -- the host leaves ITSELF (leafReadFile/leafPrim -> prims.
+                -- execPrimitive) and builds the results with values.valString
+                -- / valCons in the ZIG nursery, then passes them to compiled
+                -- code through host_apply -> rt_apply — into Mid objects.  The
+                -- census cannot see that, so the refusal keys on the reached
+                -- surface instead: Runtime.program / Runtime.worker are the
+                -- ONLY two host-seam entry points (Lower/Resolve.elm
+                -- platformTable), DERIVED from surfaceKeys, not a hand list.
+                hostSeam =
+                    List.any (\k -> k == "Runtime.program" || k == "Runtime.worker") surfaceKeys
+
+                -- WHAT THE REFUSAL DOES NOT COVER (both arms): it refuses the
+                -- host seam and the host prims the census names; it does NOT
+                -- prove the REMAINING (Mid-implemented) prims are Mid-sound —
+                -- that is the corrected-criterion audit (plan.md §2.2), whose
+                -- pure-program half is pinned by probe-midgc-tail.sh (the
+                -- transient tail array is a scavenge trigger but not a hole).
                 s0 =
                     { blocks = []
                     , curLabel = "start"
@@ -462,22 +529,47 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                     , qname = ""
                     }
             in
-            List.foldl
-                (\key acc ->
-                    acc
-                        |> Result.andThen
-                            (\s ->
-                                case Dict.get key defuns of
-                                    Nothing ->
-                                        Err ("qbe: unknown global " ++ key)
+            case ( midGc, Set.toList hostOnlyPrims, hostSeam ) of
+                ( True, p :: rest, _ ) ->
+                    let
+                        others =
+                            if List.isEmpty rest then
+                                ""
 
-                                    Just defun ->
-                                        lowerDefun defun s
-                            )
-                )
-                (Ok s0)
-                keys
-                |> Result.map (\sFinal -> finishModule sFinal keys)
+                            else
+                                " (and " ++ String.fromInt (List.length rest) ++ " more: " ++ String.join ", " rest ++ ")"
+                    in
+                    Err
+                        (String.concat
+                            [ "QBE_MIDGC=1 refuses this program: the prim census uses `"
+                            , p
+                            , "`"
+                            , others
+                            , " — no Mid implementation, so it routes through rt_prim (the Zig host path), which builds Zig-nursery strings/conses (effectloop valString/valCons) that the Zig scavenge reclaims while a Mid object still references them (the reproduced cross-heap hole). QBE_MIDGC=1 is for pure programs only."
+                            ]
+                        )
+
+                ( True, [], True ) ->
+                    Err
+                        "QBE_MIDGC=1 refuses this program: it is driven by the Zig host effect loop (Platform.program -> Runtime.program), whose leaves build Zig-nursery strings/conses (effectloop valString/valCons) passed into compiled code via host_apply — reclaimed by the Zig scavenge while a Mid object still references them (the reproduced cross-heap hole). QBE_MIDGC=1 is for pure programs only."
+
+                _ ->
+                    List.foldl
+                        (\key acc ->
+                            acc
+                                |> Result.andThen
+                                    (\s ->
+                                        case Dict.get key defuns of
+                                            Nothing ->
+                                                Err ("qbe: unknown global " ++ key)
+
+                                            Just defun ->
+                                                lowerDefun defun s
+                                    )
+                        )
+                        (Ok s0)
+                        keys
+                        |> Result.map (\sFinal -> finishModule sFinal keys)
 
 
 
