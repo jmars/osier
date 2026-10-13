@@ -107,6 +107,11 @@ impls =
         , ( "intern", { key = "Rt.intern", arity = 1 } )
         , ( "value", { key = "Rt.value", arity = 1 } )
         , ( "str", { key = "Rt.str", arity = 1 } )
+        , ( "getpid", { key = "Rt.getpid", arity = 1 } )
+        , ( "getcwd", { key = "Rt.getcwd", arity = 1 } )
+        , ( "cd", { key = "Rt.cd", arity = 1 } )
+        , ( "getenv", { key = "Rt.getenv", arity = 1 } )
+        , ( "setenv", { key = "Rt.setenv", arity = 2 } )
         ]
 
 
@@ -224,6 +229,14 @@ rtDeps =
         , -- ===== the VM-state + str prims (zigretire stage 3 GROUP 2)
           ( "Rt.str", [ "Rt.floatCopy", "Rt.numText" ] )
         , ( "Rt.floatCopy", [ "Rt.floatCopy" ] )
+        , -- ===== the simple process prims (zigretire stage 3 GROUP 3A)
+          ( "Rt.getpid", [] )
+        , ( "Rt.getcwd", [ "Rt.cStrLenGo" ] )
+        , ( "Rt.cd", [ "Rt.cStrFill" ] )
+        , ( "Rt.getenv", [ "Rt.cStrFill", "Rt.cStrLenGo", "Rt.cStrCopyGo" ] )
+        , ( "Rt.setenv", [ "Rt.cStrFill" ] )
+        , ( "Rt.cStrLenGo", [ "Rt.cStrLenGo" ] )
+        , ( "Rt.cStrCopyGo", [ "Rt.cStrCopyGo" ] )
         ]
 
 

@@ -2059,6 +2059,252 @@ floatCopyDefun =
         )
 
 
+-- ============================ PROCESS LAYER (GROUP 3A) ============================
+-- The simple libc-backed process prims (getpid, getcwd, cd, getenv, setenv)
+-- as Mid bodies over RawCallRaw libc seats (getpid/getcwd/chdir/getenv/
+-- setenv).  The Zig originals are vendor/osier-rt/src/rt/execplan.zig
+-- primGetpid/primGetcwd/primCd/primGetenv/primSetenv.  No new Zig seat: the
+-- name buffers are GC-allocated + cStrFill'd (used before any further alloc),
+-- and the getcwd result reuses its own PATH_MAX buffer as the string (a
+-- second alloc would move it — see cStrLenGo's contract).
+--
+-- THE NON-STRING ARMS: primCd/primGetenv/primSetenv throw Shen errors on a
+-- non-string arg (the host effect loop's defensive dispatch).  Those arms are
+-- UNREACHABLE from compiled Elm (`cd`/`getenv`/`setenv` are String-typed at
+-- the surface), so the Mid bodies assume the tag, exactly as Rt.open/
+-- Rt.write-byte/Rt.intern do.  The HOST dispatch path stays Zig until stage 7.
+--
+-- The empty-result strings use `Lit (LString "")` (a STATIC empty string)
+-- where the Zig used `valString(g, "")` — behaviourally identical (a String
+-- Value, len 0), and the static literal is never GC-reclaimed, so it is no
+-- soundness concern under the hatch gate.
+
+
+{-| cStrLenGo ptrN i — the length of the NUL-terminated C string at `ptrN`,
+counted from index i (entered at 0): walk RawByteLoad until the 0 byte.  The
+pointer is boxed as a NUMBER Value (the collector never chases it) and must be
+STABLE across the walk — a libc-owned pointer (getenv's result) or a GC buffer
+with no intervening allocation (getcwd's own buffer).  Frame-free.
+-}
+cStrLenGoDefun : Defun
+cStrLenGoDefun =
+    let
+        ptrN =
+            p1
+
+        i =
+            p2
+
+        byte =
+            b 4
+    in
+    lam "Rt.cStrLenGo" [ ptrN, i ]
+        (lets
+            [ ( byte, Unsafe (RawByteLoad { ptr = wOf (v ptrN), index = wOf (v i) }) ) ]
+            (iff (mkBool (cmpW RCeq (v byte) (n 0)))
+                (mkNum (wOf (v i)))
+                (callR "Rt.cStrLenGo" [ v ptrN, mkNum (iadd (wOf (v i)) (n 1)) ])
+            )
+        )
+
+
+{-| cStrCopyGo srcN dstN i — copy byte i of the NUL-terminated C string at
+`srcN` into the GC string buffer at `dstN`, stopping AFTER the NUL (which is
+NOT copied — the Value's len excludes it).  `srcN` is stable (libc-owned)
+across the copy; `dstN` is the freshly-allocated GC buffer, used before any
+further allocation.  Frame-free.
+-}
+cStrCopyGoDefun : Defun
+cStrCopyGoDefun =
+    let
+        srcN =
+            p1
+
+        dstN =
+            p2
+
+        i =
+            p3
+
+        byte =
+            b 4
+    in
+    lam "Rt.cStrCopyGo" [ srcN, dstN, i ]
+        (lets
+            [ ( byte, Unsafe (RawByteLoad { ptr = wOf (v srcN), index = wOf (v i) }) ) ]
+            (iff (mkBool (cmpW RCeq (v byte) (n 0)))
+                mkNil
+                (lets
+                    [ ( b 5, Unsafe (RawByteStore { ptr = wOf (v dstN), index = wOf (v i), value = v byte })) ]
+                    (callR "Rt.cStrCopyGo" [ v srcN, v dstN, mkNum (iadd (wOf (v i)) (n 1)) ])
+                )
+            )
+        )
+
+
+{-| `Rt.getpid _` — primGetpid: getpid() as a number.  Arity 1: the nullary
+surface prim stages a dummy slot (the Zig handler pops it if present); the
+dummy is ignored here.
+-}
+getpidDefun : Defun
+getpidDefun =
+    let
+        dummy =
+            p1
+    in
+    lam "Rt.getpid" [ dummy ]
+        (mkNum (callW "getpid" []))
+
+
+{-| `Rt.cd path` — primCd: chdir to the NUL-terminated copy of `path`, return
+the boolean success.  The copy is a GC buffer filled via cStrFill (which
+re-reads `path` fresh, so a prior move is handled); chdir runs before any
+further allocation, so the buffer is valid at the call.
+-}
+cdDefun : Defun
+cdDefun =
+    let
+        path =
+            p1
+
+        ( cstrBinds, cstr ) =
+            cStrOf 10 (v path)
+
+        rc =
+            b 14
+    in
+    lam "Rt.cd" [ path ]
+        (lets
+            (cstrBinds ++ [ ( rc, callW "chdir" [ cstr ] ) ])
+            (mkBool (cmpW RCeq (v rc) (n 0)))
+        )
+
+
+{-| `Rt.getcwd _` — primGetcwd: getcwd into a PATH_MAX (4096) GC buffer and
+return it AS the string with its NUL-measured length.  Reusing the same buffer
+avoids a second allocation (which would MOVE the buffer under the moving Zig
+GC — cStrLenGo's contract).  Failure (getcwd NULL) -> "".
+-}
+getcwdDefun : Defun
+getcwdDefun =
+    let
+        dummy =
+            p1
+
+        bufW =
+            b 3
+
+        r =
+            b 4
+
+        len =
+            b 5
+    in
+    lam "Rt.getcwd" [ dummy ]
+        (lets
+            [ ( bufW, Unsafe (RawAllocRaw (n 4096)) )
+            , ( r, callW "getcwd" [ v bufW, n 4096 ] )
+            ]
+            (iff (mkBool (cmpW RCeq (v r) (n 0)))
+                (Lit (LString ""))
+                (lets
+                    [ ( len, callR "Rt.cStrLenGo" [ mkNum (v bufW), mkNum (n 0) ] ) ]
+                    (mkStr (v bufW) (wOf (v len)))
+                )
+            )
+        )
+
+
+{-| `Rt.getenv name` — primGetenv: getenv of the NUL-terminated copy of
+`name`, copied into a GC string (the env pointer is libc-owned and stable
+across the alloc); absent -> "".
+-}
+getenvDefun : Defun
+getenvDefun =
+    let
+        name =
+            p1
+
+        ( cstrBinds, cstr ) =
+            cStrOf 10 (v name)
+
+        r =
+            b 14
+
+        len =
+            b 15
+
+        dstW =
+            b 16
+
+        dstN =
+            b 17
+    in
+    lam "Rt.getenv" [ name ]
+        (lets
+            (cstrBinds ++ [ ( r, callW "getenv" [ cstr ] ) ])
+            (iff (mkBool (cmpW RCeq (v r) (n 0)))
+                (Lit (LString ""))
+                (lets
+                    [ ( len, callR "Rt.cStrLenGo" [ mkNum (v r), mkNum (n 0) ] )
+                    , ( dstW, Unsafe (RawAllocRaw (iadd (wOf (v len)) (n 1))) )
+                    , ( dstN, mkNum (v dstW) )
+                    , ( b 18, callR "Rt.cStrCopyGo" [ mkNum (v r), v dstN, mkNum (n 0) ] )
+                    ]
+                    (mkStr (v dstW) (wOf (v len)))
+                )
+            )
+        )
+
+
+{-| `Rt.setenv name value` — primSetenv: setenv(name, value, 1) with BOTH
+copies packed into ONE GC buffer (name at 0, value at nameLen+1), so the two
+NUL-terminated pointers are live at the single call without a second
+allocation (which would move the first buffer).  Always returns true.
+-}
+setenvDefun : Defun
+setenvDefun =
+    let
+        name =
+            p1
+
+        value =
+            p2
+
+        nameLen =
+            b 3
+
+        valueLen =
+            b 4
+
+        bufW =
+            b 5
+
+        bufN =
+            b 6
+
+        valPtrW =
+            b 7
+
+        valPtrN =
+            b 8
+    in
+    lam "Rt.setenv" [ name, value ]
+        (lets
+            [ ( nameLen, lenOf (v name) )
+            , ( valueLen, lenOf (v value) )
+            , ( bufW, Unsafe (RawAllocRaw (iadd (iadd (v nameLen) (v valueLen)) (n 2))) )
+            , ( bufN, mkNum (v bufW) )
+            , ( b 9, callR "Rt.cStrFill" [ v bufN, v name, mkNum (n 0) ] )
+            , ( valPtrW, iadd (v bufW) (iadd (v nameLen) (n 1)) )
+            , ( valPtrN, mkNum (v valPtrW) )
+            , ( b 10, callR "Rt.cStrFill" [ v valPtrN, v value, mkNum (n 0) ] )
+            , ( b 11, callW "setenv" [ v bufW, v valPtrW, n 1 ] )
+            ]
+            trueV
+        )
+
+
 helperDefuns : Bool -> List Defun
 helperDefuns rec =
     [ deepEqDefun rec
@@ -2099,6 +2345,8 @@ helperDefuns rec =
     , readFullDefun
     , cStrFillDefun
     , floatCopyDefun
+    , cStrLenGoDefun
+    , cStrCopyGoDefun
     ]
 
 
@@ -3045,4 +3293,9 @@ primDefuns consArr rec eqPtrFast =
     , internDefun
     , valueDefun
     , strDefun
+    , getpidDefun
+    , getcwdDefun
+    , cdDefun
+    , getenvDefun
+    , setenvDefun
     ]

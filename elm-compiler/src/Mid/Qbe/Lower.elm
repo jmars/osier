@@ -442,8 +442,8 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                 -- nurseryHostPrims is the enumeration (verified by reading
                 -- each Zig handler) of the prims whose RESULT payload was built
                 -- in the GC nursery via values.valString / valCons:
-                --   read-file-as-string (streams.zig), getcwd/getenv/glob/
-                --   exec-plan (execplan.zig), value (the *argv* registry list,
+                --   read-file-as-string (streams.zig), glob/exec-plan
+                --   (execplan.zig), value (the *argv* registry list,
                 --   rt.zig buildArgvList — still Zig-nursery even though the
                 --   ROUTE is now Mid: Rt.value blits the registered Value
                 --   verbatim, and *argv* is still a valCons list in the Zig
@@ -454,9 +454,13 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                 --   no longer return a Zig-nursery string — the last CENSUS-ARM
                 --   entry of the host-IO hole is CLOSED, and `str` left this
                 --   list (the midgc-str probe now asserts the FIXED behaviour:
-                --   it compiles under QBE_MIDGC=1 and prints "100").  The OTHER
-                --   no-Mid-implementation prims are SAFE and deliberately NOT
-                --   refused: intern (Rt.intern -> valSymbol, a page_allocator
+                --   it compiles under QBE_MIDGC=1 and prints "100").
+                --   `getcwd`/`getenv` left it in stage 3 GROUP 3A: their Mid
+                --   bodies (Rt.getcwd/Rt.getenv) allocate via RawAllocRaw (or
+                --   return a static empty string), never values.valString, so
+                --   the worker route no longer builds a nursery string.  The
+                --   OTHER no-Mid-implementation prims are SAFE and deliberately
+                --   NOT refused: intern (Rt.intern -> valSymbol, a page_allocator
                 --   symbol, never GC-reclaimed), getpid/cd/setenv/close/
                 --   write-byte/read-byte (scalar results), open (a libc stream),
                 --   simple-error (aborts), and hd/tl/fst/reverse/append/
@@ -476,8 +480,6 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                 nurseryHostPrims =
                     Set.fromList
                         [ "read-file-as-string"
-                        , "getcwd"
-                        , "getenv"
                         , "glob"
                         , "exec-plan"
                         , "value"
