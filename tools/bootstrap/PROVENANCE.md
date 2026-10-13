@@ -128,7 +128,7 @@ bootstraps, and the compiler it builds compiles the **current** sources.
 So staleness is reported and nothing more:
 
 ```
-tools/qbe-bootstrap.sh --status          # FRESH | DRIFTED | ABI-STALE
+tools/qbe-bootstrap.sh --status          # FRESH | STALE (exact emit+cmp) | ABI-STALE
 ```
 
 and `tools/osier-numbers.sh` prints the same as its `seed status:` line
@@ -136,6 +136,16 @@ and `tools/osier-numbers.sh` prints the same as its `seed status:` line
 load-bearing correctness oracle is the `.ssa` fixed point plus the test suites;
 a check that a legitimate source change breaks is a check that generates
 re-freeze rituals, and this project has paid for those twice.
+
+Since 2026-10-12 the `STALE` verdict is the **exact check**: `--status` emits
+the current manifest (the same work `--freeze` does minus the write) and
+`cmp`s the result against the committed seed.  The previous status hashed the
+manifest INPUTS — a proxy that reported FRESH for four units while the emit
+had been impossible since stage 4 (a missing manifest source made `--freeze`
+die with `unknown name: gcProgram`).  Hashing inputs cannot see an emit that
+fails or produces different bytes; only running the emit can.  The cheap ABI
+marker (`abi-fingerprint.sh --status`) is kept as a second, cheaper signal —
+it is not wrong, it is just insufficient.
 
 ## Regeneration — one command, both halves together
 

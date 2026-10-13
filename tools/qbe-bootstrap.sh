@@ -43,11 +43,16 @@
 # THE SEED IS A SEED, NOT A CURRENCY.  It WILL drift as sources change, and
 # that is fine: a stale seed still bootstraps, and the compiler it builds
 # compiles the CURRENT sources.  `--status` (and tools/osier-numbers.sh's
-# `seed status:` line) reports FRESH/DRIFTED and NEVER fails.  The load-bearing
-# correctness oracle is the .ssa fixed point and the test suites — not this
-# file's age.  Do not add a gate on staleness.
+# `seed status:` line) reports FRESH/STALE and NEVER fails — and, since
+# 2026-10-12, the STALE verdict comes from the EXACT CHECK (emit the manifest
+# and cmp against the committed seed, the work --freeze does minus the write),
+# not from hashing the manifest inputs: a source-hash proxy cannot see an emit
+# that fails or produces different bytes.  The load-bearing correctness oracle
+# is still the .ssa fixed point and the test suites — not this file's age.
+# Do not add a gate on staleness.
 #
-# REGENERATION (the only path here that touches node; see PROVENANCE.md):
+# REGENERATION (the only path here that touches node besides --status; see
+# PROVENANCE.md):
 #   tools/qbe-bootstrap.sh --freeze
 # re-emits the seed from the CURRENT manifest with the stock compiler and
 # re-freezes the marker with it.  Both must move together.
@@ -114,7 +119,11 @@ if [ "$MODE" = freeze ]; then
   mkdir -p "$(dirname "$SEED")"
   WORK="$(mktemp -d "${TMPDIR:-/tmp}/qbe-freeze.XXXXXX")"
   trap 'rm -rf "$WORK"' EXIT
-  jq --arg out "$SEED" --arg entry "$ENTRY" \
+  # FOOTGUN (plan.md §6): a failed emit used to write its `err ...` payload
+  # straight ONTO the committed seed and truncate it (hit three times).  Emit
+  # to a temp path and rename only on success, so a failed freeze can never
+  # touch the committed seed.
+  jq --arg out "$WORK/emit.ssa" --arg entry "$ENTRY" \
      '.groups[0].output = $out | .groups[0].entry = $entry' "$MANIFEST" > "$WORK/emit.json"
   t0=$(now)
   # RUN_STACK_KB: the stock emit compiles the compiler's own sources, whose
@@ -123,10 +132,11 @@ if [ "$MODE" = freeze ]; then
   # re-exec knob (its header documents exactly this class).
   RUN_STACK_KB="${RUN_STACK_KB:-131072}" node "$ROOT/elm-compiler/run.js" --batch "$WORK/emit.json" || die "the stock emit failed"
   t1=$(now)
-  case "$(head -c 4 "$SEED")" in
-    "err "*) die "the stock emit FAILED: $(head -c 300 "$SEED")";;
+  case "$(head -c 4 "$WORK/emit.ssa")" in
+    "err "*) die "the stock emit FAILED: $(head -c 300 "$WORK/emit.ssa")";;
   esac
-  [ -s "$SEED" ] || die "the stock emit produced no output"
+  [ -s "$WORK/emit.ssa" ] || die "the stock emit produced no output"
+  mv "$WORK/emit.ssa" "$SEED"
   "$ROOT/tools/qbe/abi-fingerprint.sh" --write "$ABI" "$SEED" >&2
   say "qbe-bootstrap: seed frozen — $(stat -c %s "$SEED") bytes in $(secs "$t0" "$t1") s, marker in $ABI"
   exit 0
@@ -135,6 +145,51 @@ fi
 # ---- the seed + its marker must both be present ---------------------------
 [ -s "$SEED" ] || die "no committed seed at $SEED"
 [ -f "$ABI" ]  || die "no ABI marker at $ABI (regenerate: tools/qbe-bootstrap.sh --freeze)"
+
+# ---- REPORT-ONLY STATUS (never a gate, never refuses) ---------------------
+# The seed status answers TWO questions.
+#   (1) ABI: does the seed's view of the runtime interface match this tree's
+#       rt.o — abi-fingerprint.sh --status (cheap, no node).
+#   (2) EXACT: would the stock emit of the current manifest reproduce the
+#       committed seed byte-for-byte?  This is the work --freeze does minus
+#       the write (~7-8 s), and it is the ONLY check that can say "the seed
+#       does not correspond to these sources".  The old status hashed the
+#       manifest INPUTS (a proxy) and could report FRESH while the emit had
+#       been IMPOSSIBLE since stage 4 — a missing manifest source made --freeze
+#       die with "unknown name: gcProgram" — because hashing inputs cannot see
+#       an emit that fails or produces different bytes.  A status line that
+#       cannot detect the failure it names is the class plan.md §6 has fought
+#       four times.  This stays REPORT-ONLY (a stale seed still bootstraps;
+#       the load-bearing oracle is the .ssa fixed point), but it now tells the
+#       truth.
+if [ "$MODE" = status ]; then
+  command -v node >/dev/null 2>&1 || die "node not found (--status runs the exact emit)"
+  command -v jq   >/dev/null 2>&1 || die "jq not found (--status builds the batch manifest)"
+  [ -f "$MANIFEST" ] || die "manifest missing: $MANIFEST"
+  printf 'seed %s bytes, %s\n' "$(stat -c %s "$SEED")" "$(sha256sum "$SEED" | cut -c1-16)…"
+  printf 'abi-marker %s\n' "$(grep -E '^abi-marker=' "$ABI" | cut -d= -f2)"
+  printf 'abi  %s\n' "$("$ROOT/tools/qbe/abi-fingerprint.sh" --status "$ABI")"
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/qbe-status.XXXXXX")"
+  trap 'rm -rf "$WORK"' EXIT
+  jq --arg out "$WORK/emit.ssa" --arg entry "$ENTRY" \
+     '.groups[0].output = $out | .groups[0].entry = $entry' "$MANIFEST" > "$WORK/emit.json"
+  if ! RUN_STACK_KB="${RUN_STACK_KB:-131072}" node "$ROOT/elm-compiler/run.js" --batch "$WORK/emit.json" 2>"$WORK/node.err"; then
+    printf 'exact STALE — the selfhost emit FAILED (tooling): %s\n' \
+      "$(tail -c 200 "$WORK/node.err" | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//')"
+    exit 0
+  fi
+  case "$(head -c 4 "$WORK/emit.ssa")" in
+    "err "*) printf 'exact STALE — the selfhost emit FAILED: %s\n' "$(head -c 300 "$WORK/emit.ssa")"; exit 0;;
+  esac
+  [ -s "$WORK/emit.ssa" ] || { printf 'exact STALE — the selfhost emit produced no output\n'; exit 0; }
+  if cmp -s "$WORK/emit.ssa" "$SEED"; then
+    printf 'exact FRESH — the selfhost emit reproduces the committed seed byte-for-byte\n'
+  else
+    printf 'exact STALE — the selfhost emit differs from the committed seed (%s vs %s bytes); re-freeze: tools/qbe-bootstrap.sh --freeze\n' \
+      "$(stat -c %s "$WORK/emit.ssa")" "$(stat -c %s "$SEED")"
+  fi
+  exit 0
+fi
 
 # ---- 1. THE ABI GUARD -----------------------------------------------------
 # Fails LOUDLY and SPECIFICALLY: abi-fingerprint.sh names which component of
@@ -149,13 +204,6 @@ if [ "$guard_rc" = 3 ]; then
   exit 1
 elif [ "$guard_rc" != 0 ]; then
   die "the ABI guard could not run (exit $guard_rc)"
-fi
-
-if [ "$MODE" = status ]; then
-  printf 'seed %s bytes, %s\n' "$(stat -c %s "$SEED")" "$(sha256sum "$SEED" | cut -c1-16)…"
-  printf 'abi %s\n' "$(grep -E '^abi-marker=' "$ABI" | cut -d= -f2)"
-  printf '%s\n' "$("$ROOT/tools/qbe/abi-fingerprint.sh" --status "$ABI")"
-  exit 0
 fi
 
 # ---- preflight (before anything expensive, and before any output) ---------

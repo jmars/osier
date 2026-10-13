@@ -193,9 +193,20 @@ fi
 SEED="tools/bootstrap/compiler.ssa"
 SEED_ABI="$SEED.abi"
 if [ -s "$SEED" ] && [ -f "$SEED_ABI" ]; then
-    seed_state="$(tools/qbe/abi-fingerprint.sh --status "$SEED_ABI" 2>/dev/null)"
-    note "seed status" "${seed_state%%$'\n'*}"
+    # THE SEED STATUS IS NOW THE EXACT CHECK: qbe-bootstrap.sh --status emits
+    # the selfhost manifest and cmp's against the committed seed (the work
+    # --freeze does minus the write).  REPORT-ONLY, but the line now TELLS THE
+    # TRUTH — the old source-hash proxy reported FRESH while the emit had been
+    # impossible since stage 4 (a missing manifest source made --freeze die
+    # with "unknown name: gcProgram").  See plan.md §6.
+    seed_out="$(tools/qbe-bootstrap.sh --status 2>/dev/null)"
+    exact_line="$(printf '%s\n' "$seed_out" | grep -m1 '^exact ' || true)"
+    abi_line="$(printf '%s\n' "$seed_out" | grep -m1 '^abi  ' || true)"
+    note "seed status" "${exact_line:-exact UNKNOWN — qbe-bootstrap.sh --status produced no verdict}"
     echo "                             $(stat -c %s "$SEED") B, sha256 $(sha256sum "$SEED" | cut -c1-16)…, marker $(grep -E '^abi-marker=' "$SEED_ABI" | cut -d= -f2 | cut -c1-16)…"
+    if [ -n "$abi_line" ]; then
+        echo "                             ${abi_line#abi  }"
+    fi
     bs_out="$(tools/qbe-bootstrap.sh 2>&1)"
     bs_rc=$?
     if [ "$bs_rc" -eq 0 ]; then

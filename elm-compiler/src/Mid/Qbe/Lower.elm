@@ -556,7 +556,15 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                                 " (and " ++ String.fromInt (List.length rest) ++ " more: " ++ String.join ", " rest ++ ")"
                     in
                     Err
-                        (String.concat
+                        -- `String.join ""` NOT `String.concat`: the tree's OWN alias
+                        -- table (Lower/Resolve.elm) maps `String.concat` to
+                        -- `Prelude.concat` (the LIST flatten, `List (List a) -> List a`),
+                        -- not to a string concat — so the tree's typechecker rejects
+                        -- `String.concat ["a","b"]` with "cannot unify List a with
+                        -- String", where elm 0.19.2 accepts it.  This is a WORKAROUND
+                        -- at the use site, not a fix of the alias table; the two are
+                        -- semantically identical (String.concat == String.join "").
+                        (String.join ""
                             [ "QBE_MIDGC=1 refuses this program: the prim census uses `"
                             , p
                             , "`"
