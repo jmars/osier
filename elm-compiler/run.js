@@ -139,6 +139,16 @@ const QBE_TYPESPEC = process.env.QBE_NOTYPESPEC !== '1';
 // Default OFF (the Zig collector stays the allocation path) — the hatch must
 // reproduce the pre-change corpus byte-for-byte when unset.
 const QBE_MIDGC = process.env.QBE_MIDGC === '1';
+// The Mid routes (lowerCon/lowerClosure/midGcAllocSeat) hard-code the LEAN
+// call shape (3 pointer args + a count word, direct :val return).  With
+// QBE_NORTLEAN=1 the Rt callees lower FAT (:val-by-value args, :ret return),
+// so the two cannot be mixed: fail LOUDLY instead of emitting an ABI
+// mismatch that links and then reads the wrong registers.  (The stage-5
+// review's finding 5 — the combination was previously silent-wrong.)
+if (QBE_MIDGC && !QBE_RTLEAN) {
+  console.error('run.js: QBE_MIDGC=1 requires the lean ABI (QBE_NORTLEAN=1 is incompatible — the Mid seats hard-code the lean call shape)');
+  process.exit(2);
+}
 // QBE_ENTRY: the defun key the QBE backend roots reachability from
 // ("<Mod>.<fn>").  REQUIRED in the single-fixture CLI; the batch mode reads
 // one entry PER GROUP from the manifest instead.

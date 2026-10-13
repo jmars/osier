@@ -174,6 +174,42 @@ extern fn rt_call15(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, 
 extern fn rt_call16(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value, a12: *Value, a13: *Value, a14: *Value, a15: *Value) callconv(.c) Ret;
 
 // =====================================================================
+//  The Zig -> Mid bridge (zigretire stage 5 PART 2)
+// =====================================================================
+// QBE_MIDGC=1 compiles the Mid allocating seat `Rt.allocVector` into the
+// generated .ssa AND exports it (Mid.Qbe.Lower marks `export_` on exactly
+// that defun under the hatch).  When MIDGC is off the symbol is absent, so
+// this reference is WEAK and the ON/OFF test is the resolved ADDRESS: an
+// undefined weak symbol resolves to a null-ish pointer whose address is 0
+// (Zig's `?*const fn` extern quirk — NON-null, address 0 — so the test must
+// be on `@intFromPtr`, never on the optional's null state).
+//
+// The lean ABI of the exported seat is `export function :val
+// $q_Rt_x2eallocVector(l %a0, l %a1, l %a2, w %an)`: three POINTER args
+// (a1/a2 are the padding a Mid caller repeats, never read) plus a count word,
+// returning the 40-byte Value through the C ABI's sret.  a0 must point at a
+// NUMBER Value whose payload word is the element count; the result's payload
+// word 0 is the array body address.
+const midgc_alloc_vector: ?*const fn (*Value, *Value, *Value, u32) callconv(.c) Value = @extern(
+    ?*const fn (*Value, *Value, *Value, u32) callconv(.c) Value,
+    .{ .name = "q_Rt_x2eallocVector", .linkage = .weak },
+);
+
+/// Set once in main from the resolved weak address; read by applyGo.
+var midgc_active: bool = false;
+
+/// Allocate `n` Values from the MID collector (QBE_MIDGC=1 only — the caller
+/// checks `midgc_active` first).  The seat triggers Rt.collect inside, so the
+/// caller's live Values must already be rooted in the shadow stack (they are:
+/// applyGo roots env/args/f before reaching here).
+fn midgcVecAlloc(n: usize) [*]Value {
+    const seat = midgc_alloc_vector orelse @panic("qbe-rt: Mid allocator called with QBE_MIDGC off");
+    var cnt = Value{ .tag = .number, .payload = .{ .number = @intCast(n) } };
+    const r = seat(&cnt, &cnt, &cnt, 1);
+    return @ptrFromInt(@as(usize, @intCast(r.payload.number)));
+}
+
+// =====================================================================
 //  Global state (set once in main)
 // =====================================================================
 
@@ -674,7 +710,15 @@ fn applyGo(f: *Value, args: [*]Value, nargs: i32, tail: bool) Ret {
         var env_root: ?[*]Value = env;
         g.rootPushPtr(@ptrCast(&env_root));
         defer g.rootPop(); // env_root
-        var envv: ?[*]Value = g.allocArray(Value, total);
+        // QBE_MIDGC=1: the partial's env array must live in the MID heap (the
+        // partial is consed onto a Mid-allocated list — a cross-heap edge the
+        // stage-5 review proved by emission).  `env_root`/`args`/`f` are already
+        // rooted in the SHARED shadow stack, so the Mid collect inside
+        // midgcVecAlloc marks them exactly as the Zig collect would.  The barrier
+        // stays unconditional: for a Mid array barrierIfOldgen's `inOldgen` page
+        // test excludes the Mid region (a separate mmap), so it is a natural
+        // no-op — one less branch for the hatch to get wrong.
+        var envv: ?[*]Value = if (midgc_active) midgcVecAlloc(total) else g.allocArray(Value, total);
         g.rootPushPtr(@ptrCast(&envv));
         defer g.rootPop(); // envv
         const dst = envv.?[0..total];
@@ -1257,6 +1301,10 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     // before anything can call them.
     no_string_intern = std.c.getenv("QBE_NOSTRINGINTERN") != null;
     no_tail_stage = std.c.getenv("QBE_NOTTAILSTAGE") != null;
+    // QBE_MIDGC is a COMPILE-time hatch (it selects the emitted .ssa); the
+    // runtime sees it as the resolved weak address of the exported Mid
+    // allocating seat — present iff the .ssa was built with the hatch on.
+    midgc_active = if (midgc_alloc_vector) |seat| @intFromPtr(seat) != 0 else false;
 
     // The generated code puts Elm recursion on the C stack (Lower.elm:76-84
     // documents the limitation), so the default 8MB RLIMIT_STACK can kill deep

@@ -1,4 +1,4 @@
-module Mid.Rt exposing (Impl, allocating, conSeeds, gcSeeds, program, primImpl, rtDeps, seeds)
+module Mid.Rt exposing (Impl, allocating, closureSeeds, conSeeds, gcSeeds, program, primImpl, rtDeps, seeds)
 
 -- Mid.Rt — the MID-WRITTEN RUNTIME's program assembly (handoff
 -- osier-consspike, TRACK 2 step 4).
@@ -204,6 +204,9 @@ rtDeps =
         , -- ===== the Mid ADT constructor (zigretire stage 5)
           ( "Rt.con", [ "Rt.conFill" ] )
         , ( "Rt.conFill", [ "Rt.conFill" ] )
+        , -- ===== the Mid closure (zigretire stage 5 PART 2)
+          ( "Rt.closure", [ "Rt.closureFill" ] )
+        , ( "Rt.closureFill", [ "Rt.closureFill" ] )
         ]
 
 
@@ -250,6 +253,17 @@ a prim, so the used-prim census does not seed it).
 conSeeds : List String
 conSeeds =
     keepRtDependencies [ "Rt.con" ]
+
+
+{-| The Mid-routed CLOSURE seed (zigretire stage 5 PART 2): `Rt.closure` (the
+closure env allocator) and its transitive closure — Rt.closureFill, the
+0-based copy loop.  Seeded alongside `conSeeds` when the hatch is on, because
+Lower's `lowerClosure` names `q_Rt_closure` directly (it is not a prim, so the
+used-prim census does not seed it).
+-}
+closureSeeds : List String
+closureSeeds =
+    keepRtDependencies [ "Rt.closure" ]
 
 
 {-| The Rt defuns whose execution can reach a GC SAFEPOINT — the fact the

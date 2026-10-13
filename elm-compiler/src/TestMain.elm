@@ -867,8 +867,8 @@ checks =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 73 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor)"
-        (List.length (Rt.program True True True) == 73
+    , check "rt program: 75 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure)"
+        (List.length (Rt.program True True True) == 75
             && List.all (\d -> String.startsWith "Rt." d.key) (Rt.program True True True)
             && List.any
                 (\d ->
@@ -972,6 +972,7 @@ checks =
         (Set.member "Rt.cons" Rt.allocating
             && Set.member "Rt.@p" Rt.allocating
             && Set.member "Rt.con" Rt.allocating
+            && Set.member "Rt.closure" Rt.allocating
             && Set.member "Rt.cn" Rt.allocating
             && Set.member "Rt.repeat" Rt.allocating
             && Set.member "Rt.substring" Rt.allocating
@@ -992,6 +993,7 @@ checks =
             && not (Set.member "Rt.address->" Rt.allocating)
             && not (Set.member "Rt.countL" Rt.allocating)
             && not (Set.member "Rt.conFill" Rt.allocating)
+            && not (Set.member "Rt.closureFill" Rt.allocating)
         )
     , check "rt gc (midgc) classification: the collector is FRAME-FREE by construction (a frame-free callee must never reach a safepoint)"
         (not (Set.member "Rt.collect" Rt.allocating)
@@ -1032,6 +1034,9 @@ checks =
         )
     , check "rt con seeds: the Mid ADT constructor and its fill helper"
         (Rt.conSeeds == [ "Rt.con", "Rt.conFill" ]
+        )
+    , check "rt closure seeds: the Mid closure and its 0-based fill helper"
+        (Rt.closureSeeds == [ "Rt.closure", "Rt.closureFill" ]
         )
     , check "rt lean ABI: a frame-free callee has pointer params, :val return and NO frame enter/leave"
         (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.+" of

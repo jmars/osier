@@ -1805,6 +1805,128 @@ conFillDefun =
         )
 
 
+{-| `Rt.closure desc capBase K` — the Mid closure (zigretire stage 5 PART 2):
+allocate a K-Value env array through `RawAllocVector` (under QBE_MIDGC=1 the
+Mid collector's seat `Rt.allocVector`), copy the K captures from the caller's
+STAGED contiguous block (capBase), and wrap as a tag-6 lambda Value whose
+`code` is the static Desc pointer and whose `code_len` is the Desc's arity.
+Mirrors values.valLambda (the Zig seat rt_make_closure calls) word for word.
+The captures survive the allocation because they live in the caller's ROOTED
+frame — the Zig contract, unchanged; desc/capBase/K live in Rt.closure's OWN
+rooted frame (Rt.closure is `allocating`).  The copy is Rt.closureFill —
+conFill's 0-BASED twin (the env array has NO tag slot, so env[i] = cap[i],
+whereas Con's vector stores args at [1..n] past the tag at [0]); alloc-free,
+so the copy is not itself a safepoint.
+
+code_len comes from the Desc's arity WORD (offset 8 = `{ w arity, w ncaps }`:
+arity in the low 32 bits, ncaps in the high 32).  Storing the full word as
+lambda payload word 1 puts arity in the low half — read as the i32 `code_len`
+field — and ncaps in the high half, which is the Value's padding that Zig's
+struct store leaves UNWRITTEN and no reader (applyGo, the collectors, the
+nursery predicate) ever reads.
+-}
+closureDefun : Defun
+closureDefun =
+    let
+        desc =
+            p1
+
+        capBase =
+            p2
+
+        cnt =
+            p3
+
+        dataW =
+            b 4
+
+        cntW =
+            b 5
+
+        descW =
+            b 6
+
+        arityW =
+            b 7
+    in
+    lam "Rt.closure" [ desc, capBase, cnt ]
+        (lets
+            [ ( dataW, Unsafe (RawAllocVector (wOf (v cnt))) )
+            , ( cntW, wOf (v cnt) )
+            , ( descW, wOf (v desc) )
+            , ( arityW, Unsafe (RawWordLoad { ptr = Var descW.id, index = n 1 }) )
+            , ( b 8, callR "Rt.closureFill" [ mkNum (Var dataW.id), v capBase, mkNum (v cntW) ] )
+            ]
+            (Unsafe
+                (RawMkValue
+                    { tag = RtLayout.tagLambda
+                    , words = [ Var descW.id, Var arityW.id, Var dataW.id, Var cntW.id ]
+                    }
+                )
+            )
+        )
+
+
+{-| `Rt.closureFill data capBase idx` — fill env element idx-1 from staged
+capture idx-1, then recurse.  Frame-free: RawVecLoad/RawVecStore allocate
+nothing (the plain store, no barrier — the collector is non-moving).  This is
+Rt.conFill's 0-BASED twin: the closure env array has NO tag slot, so
+env[i] = cap[i], where Con stores args at [1..n] past the tag at [0].
+
+THE BOUND (named, per the stage-5 review's ask): the recursion depth is the
+closure's CAPTURE COUNT K, a finite number of free binders — not the arity
+ceiling, and doubly moot because the self-tail lowers to an IN-FRAME LOOP
+(the same gate that makes conFill's "recursion" loop-shaped).  The arity
+itself (read into code_len) is bounded by `maxArity` = 16, enforced where
+the closure's defun is rejected (`Lower.elm` lowerClosure: "closure has arity
+> 16 (rt_callN table limit)").
+-}
+closureFillDefun : Defun
+closureFillDefun =
+    let
+        data =
+            p1
+
+        capBase =
+            p2
+
+        idx =
+            p3
+
+        dataW =
+            b 4
+
+        capW =
+            b 5
+
+        idxW =
+            b 6
+    in
+    lam "Rt.closureFill" [ data, capBase, idx ]
+        (lets
+            [ ( dataW, wOf (v data) )
+            , ( capW, wOf (v capBase) )
+            , ( idxW, wOf (v idx) )
+            ]
+            (iff (mkBool (cmpW RCeq (v idxW) (n 0)))
+                mkNil
+                (lets
+                    [ ( b 7
+                      , Unsafe
+                            (RawVecStore
+                                { vec = Var dataW.id
+                                , index = isub (v idxW) (n 1)
+                                , value = Unsafe (RawVecLoad { vec = Var capW.id, index = isub (v idxW) (n 1) })
+                                }
+                            )
+                      )
+                    ]
+                    (callR "Rt.closureFill" [ mkNum (Var dataW.id), mkNum (Var capW.id), mkNum (isub (v idxW) (n 1)) ])
+                )
+            )
+        )
+
+
 {-| `Rt.emptylist a` — primEmptylist: (number 0) -> nil; anything else is
 error.Halt in Zig (C falls through to unknown) -> the rt_halt seat here
 (module header GAPS).
@@ -2369,6 +2491,8 @@ primDefuns consArr rec eqPtrFast =
     , atpDefun consArr
     , conDefun
     , conFillDefun
+    , closureDefun
+    , closureFillDefun
     , emptylistDefun
     , eqDefun rec eqPtrFast
     , addDefun

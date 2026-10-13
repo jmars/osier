@@ -261,6 +261,13 @@ run_midgc midgc-reclaim MidgcReclaim.main tools/qbe/fixtures/midgc-reclaim.elm
 # whose elements are ADT constructors must share the MID heap (Rt.con).  The
 # fail-before/pass-after asymmetry is scripted in tools/qbe/probe-midgc-adt.sh.
 run_midgc midgc-adt     MidgcAdt.main     tools/qbe/fixtures/midgc-adt.elm
+# zigretire stage 5 PART 2 — the CLOSURE and PARTIAL-APPLICATION cross-heap
+# probes: a Mid cons list whose elements are closures-with-a-capture /
+# partials must share the MID heap (Rt.closure / the rt.zig weak-extern
+# bridge).  The fail-before/pass-after asymmetries are scripted in
+# tools/qbe/probe-midgc-closure.sh and tools/qbe/probe-midgc-partial.sh.
+run_midgc midgc-closure MidgcClosure.main tools/qbe/fixtures/midgc-closure.elm
+run_midgc midgc-partial MidgcPartial.main tools/qbe/fixtures/midgc-partial.elm
 
 # nice-to-have 9: a result whose printed form EXCEEDS the old 16384-byte print
 # buffer (~24KB here).  Both runners stream now, so native and VM must agree

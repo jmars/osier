@@ -354,6 +354,24 @@ freshData key mk s =
 -- Descs, and the driver's meta table.
 
 
+-- Order-preserving dedupe (the concatenated seed lists can overlap when two
+-- hatches share a helper — emitting a defun twice is a duplicate QBE symbol,
+-- a class this unit hit once before Rt.closure grew its own 0-based fill).
+unique : List String -> List String
+unique xs =
+    List.foldl
+        (\x ( seen, acc ) ->
+            if Set.member x seen then
+                ( seen, acc )
+
+            else
+                ( Set.insert x seen, acc ++ [ x ] )
+        )
+        ( Set.empty, [] )
+        xs
+        |> Tuple.second
+
+
 lower : Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
 lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable program entryKey =
     let
@@ -392,7 +410,7 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                     if List.any (\d -> isRtKey d.key) program then
                         List.filter (\k -> not (List.member k surfaceKeys)) (MidRt.seeds usedPrims)
                             ++ (if midGc then
-                                    List.filter (\k -> not (List.member k surfaceKeys)) (MidRt.gcSeeds ++ MidRt.conSeeds)
+                                    List.filter (\k -> not (List.member k surfaceKeys)) (unique (MidRt.gcSeeds ++ MidRt.conSeeds ++ MidRt.closureSeeds))
 
                                 else
                                     []
@@ -1046,7 +1064,13 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                     pending =
                         { func =
                             { name = qname
-                            , export_ = False
+                            , export_ =
+                                -- QBE_MIDGC=1: export the allocating seat so the
+                                -- Zig applyGo can call it for the partial-application
+                                -- env array (the bridge in tools/qbe/rt.zig's weak
+                                -- extern).  Off the hatch the symbol is absent, which
+                                -- is what keeps the default .ssa byte-identical.
+                                sOuter.midGc && key == "Rt.allocVector"
                             , ret = retTy
                             , envParam = ncaps > 0
                             , params = paramsList
@@ -5953,24 +5977,74 @@ lowerClosure lambda dest s =
                                                     freshTmp s3
                                             in
                                             Ok
-                                                (emit
-                                                    (Call (Just rp)
-                                                        (Agg "val")
-                                                        (Il.Sym "rt_make_closure")
-                                                        [ ArgVal (Base L) (Il.Sym descName)
-                                                        , ArgVal (Base L)
-                                                            (if k == 0 then
-                                                                Il.Con 0
+                                                (if s2.midGc then
+                                                    -- QBE_MIDGC=1: route the closure through the Mid
+                                                    -- defun Rt.closure (desc, capBase, K) — the env array
+                                                    -- is Rt.allocVector (the Mid collector), so the
+                                                    -- closure's captures land in the MID heap (no
+                                                    -- cross-heap edge).  desc/capBase/K are boxed as number
+                                                    -- Values in fresh slots (the lean ABI passes POINTERS to
+                                                    -- Value slots + a count word).
+                                                    let
+                                                        ( descSlot, sA ) =
+                                                            freshSlot s4
 
-                                                             else
-                                                                Il.Tmp (slotTmp cbase)
-                                                            )
-                                                        , ArgVal (Base W) (Il.Con k)
-                                                        ]
-                                                    )
-                                                    s4
-                                                    |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
-                                                    |> mergeClosureResult pending sInner
+                                                        ( capBaseSlot, sB ) =
+                                                            freshSlot sA
+
+                                                        ( kSlot, sC ) =
+                                                            freshSlot sB
+
+                                                        sD =
+                                                            storeValueCell tagNumber [ Il.Sym descName ] descSlot sC
+
+                                                        sE =
+                                                            storeValueCell tagNumber
+                                                                [ if k == 0 then
+                                                                    Il.Con 0
+
+                                                                  else
+                                                                    Il.Tmp (slotTmp cbase)
+                                                                ]
+                                                                capBaseSlot
+                                                                sD
+
+                                                        sF =
+                                                            storeValueCell tagNumber [ Il.Con k ] kSlot sE
+                                                    in
+                                                    emit
+                                                        (Call (Just rp)
+                                                            (Agg "val")
+                                                            (Il.Sym ("q_" ++ mangle "Rt.closure"))
+                                                            [ ArgVal (Base L) (Il.Tmp (slotTmp descSlot))
+                                                            , ArgVal (Base L) (Il.Tmp (slotTmp capBaseSlot))
+                                                            , ArgVal (Base L) (Il.Tmp (slotTmp kSlot))
+                                                            , ArgVal (Base W) (Il.Con 3)
+                                                            ]
+                                                        )
+                                                        sF
+                                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+                                                        |> mergeClosureResult pending sInner
+
+                                                 else
+                                                    emit
+                                                        (Call (Just rp)
+                                                            (Agg "val")
+                                                            (Il.Sym "rt_make_closure")
+                                                            [ ArgVal (Base L) (Il.Sym descName)
+                                                            , ArgVal (Base L)
+                                                                (if k == 0 then
+                                                                    Il.Con 0
+
+                                                                 else
+                                                                    Il.Tmp (slotTmp cbase)
+                                                                )
+                                                            , ArgVal (Base W) (Il.Con k)
+                                                            ]
+                                                        )
+                                                        s4
+                                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+                                                        |> mergeClosureResult pending sInner
                                                 )
                                         )
                             )
