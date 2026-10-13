@@ -6,6 +6,12 @@ module ExecEnv exposing (main)
 -- process-specific so it cannot appear in a deterministic expected file);
 -- cd /tmp -> getcwd -> "/tmp" (the gate gives each fixture its own freshly
 -- built native binary and process, so mutating the process CWD is safe).
+--
+-- COVERAGE NOTE (the g3 review's residual): getpid is pinned here only as
+-- assert-nonzero — a wrong-but-positive seat (e.g. getppid) stays GREEN
+-- behaviourally.  What actually pins getpid's emission is the corpus .ssa
+-- byte-hash (tools/osier-corpus-baseline.ssa.sha256), which fails on ANY
+-- emission change.
 
 type Msg
     = Got ( String, Int, String )

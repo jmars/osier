@@ -1004,6 +1004,19 @@ checks =
     -- fact (a frame-free callee must never reach a safepoint); pin BOTH
     -- sides of the partition so a new RtPrims body or node form that moves a
     -- defun across it fails HERE, not at a churn fixture.
+    --
+    -- THE GROUP-3A ROWS protect a specific window: cStrLenGo/cStrCopyGo/
+    -- cStrFill walk/copy bytes inside the callers' RAW-BUFFER windows — the
+    -- raw temp from rt_raw_alloc/RawAllocRaw is valid only to the NEXT
+    -- SAFEPOINT, so getcwd (strlen then wrap the same buffer), getenv
+    -- (copy env->fresh buffer) and setenv/open/cd (fill then one libc call)
+    -- are sound ONLY while those helpers contain no safepoint.  A future
+    -- edit that adds an allocation (or a RawCall to an allocating defun) to
+    -- any of them moves it INTO Rt.allocating and fails THIS row — the
+    -- alternative failure mode is a GC-timing bug no fixture can catch.
+    -- (They ARE rt_frame_enter'd since the SF2 loop fix — a pooled frame is
+    -- root registration, NOT a safepoint; the pinned property is the absence
+    -- of a reachable allocation.)
     , check "rt allocation classification: the pure-read defuns are frame-free, the builders are framed"
         (Set.member "Rt.cons" Rt.allocating
             && Set.member "Rt.@p" Rt.allocating
@@ -1034,6 +1047,21 @@ checks =
             && not (Set.member "Rt.intern" Rt.allocating)
             && not (Set.member "Rt.value" Rt.allocating)
             && not (Set.member "Rt.floatCopy" Rt.allocating)
+            -- stage 3 groups 1 + 3A: the fd/process prim bodies and their
+            -- byte-walk helpers (the windows named above).
+            && not (Set.member "Rt.getpid" Rt.allocating)
+            && not (Set.member "Rt.cStrLenGo" Rt.allocating)
+            && not (Set.member "Rt.cStrCopyGo" Rt.allocating)
+            && not (Set.member "Rt.cStrFill" Rt.allocating)
+            && not (Set.member "Rt.readFull" Rt.allocating)
+            && not (Set.member "Rt.close" Rt.allocating)
+            && Set.member "Rt.getcwd" Rt.allocating
+            && Set.member "Rt.cd" Rt.allocating
+            && Set.member "Rt.getenv" Rt.allocating
+            && Set.member "Rt.setenv" Rt.allocating
+            && Set.member "Rt.open" Rt.allocating
+            && Set.member "Rt.write-byte" Rt.allocating
+            && Set.member "Rt.read-byte" Rt.allocating
         )
     , check "rt gc (midgc) classification: the collector is FRAME-FREE by construction (a frame-free callee must never reach a safepoint)"
         (not (Set.member "Rt.collect" Rt.allocating)

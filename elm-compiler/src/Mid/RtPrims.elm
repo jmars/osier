@@ -1627,7 +1627,16 @@ readFullDefun =
 {-| cStrFill bufN str i — fill buf[0..len] with str's bytes and buf[len] with
 the NUL terminator.  `bufN` boxes the raw buffer pointer (a number the
 collector never chases); `str` is re-read fresh each step (RawStrByte) so a
-post-alloc move of the string is handled.  Returns bufN.  Non-allocating.
+post-alloc move of the string is handled.  Returns bufN.
+
+SELF-TAIL LOOP (the SF2 fix): the recursion goes through `App` on this
+defun's own key — the in-frame loop (`countdown`'s mechanism), not the
+per-byte native frame `callR` compiles to on the default route (MEASURED:
+one ~800 B frame per byte; a path longer than the old Zig 4095 truncation
+bound exhausted the driver's 64 MiB stack).  Stays FRAME-FREE (alloc8
+scratch — the classifier treats the self-App as an edge) and non-allocating:
+no safepoint in the loop, which is what keeps cd/getenv/setenv/open's
+raw-buffer windows sound.  Never allocate here.
 -}
 cStrFillDefun : Defun
 cStrFillDefun =
@@ -1649,7 +1658,7 @@ cStrFillDefun =
             )
             (lets
                 [ ( b 5, Unsafe (RawByteStore { ptr = wOf (v bufN), index = wOf (v i), value = Unsafe (RawStrByte { str = v str, index = wOf (v i) }) })) ]
-                (callR "Rt.cStrFill" [ v bufN, v str, mkNum (iadd (wOf (v i)) (n 1)) ])
+                (App { fn = GRef { key = "Rt.cStrFill", force = False }, args = [ v bufN, v str, mkNum (iadd (wOf (v i)) (n 1)) ] })
             )
         )
 
@@ -2084,7 +2093,19 @@ floatCopyDefun =
 counted from index i (entered at 0): walk RawByteLoad until the 0 byte.  The
 pointer is boxed as a NUMBER Value (the collector never chases it) and must be
 STABLE across the walk — a libc-owned pointer (getenv's result) or a GC buffer
-with no intervening allocation (getcwd's own buffer).  Frame-free.
+with no intervening allocation (getcwd's own buffer).
+
+SELF-TAIL LOOP (the SF2 fix): the recursion goes through `App` on THIS defun's
+own key, which Lower compiles as the in-frame loop (`countdown`'s mechanism —
+stage args, blit into the param slots, `jmp @body`), NOT the per-byte native
+frame the `callR` shape compiles to on the default route (the RawCall
+self-tail is midGc-gated).  The byte count is therefore O(1) native stack
+(MEASURED: the `callR` shape died at a ~100 KB env value against the driver's
+64 MiB stack raise; the loop shape has no per-element cost).  The defun
+stays FRAME-FREE (alloc8 scratch, no pooled frame: the classifier treats the
+self-App as an edge — Mid.Rt safepoint's App arm — so `Rt.allocating` keeps
+it out) and NON-ALLOCATING: no safepoint anywhere in the loop, which is what
+keeps the callers' raw-buffer windows sound.  Never allocate here.
 -}
 cStrLenGoDefun : Defun
 cStrLenGoDefun =
@@ -2103,16 +2124,20 @@ cStrLenGoDefun =
             [ ( byte, Unsafe (RawByteLoad { ptr = wOf (v ptrN), index = wOf (v i) }) ) ]
             (iff (mkBool (cmpW RCeq (v byte) (n 0)))
                 (mkNum (wOf (v i)))
-                (callR "Rt.cStrLenGo" [ v ptrN, mkNum (iadd (wOf (v i)) (n 1)) ])
+                (App { fn = GRef { key = "Rt.cStrLenGo", force = False }, args = [ v ptrN, mkNum (iadd (wOf (v i)) (n 1)) ] })
             )
         )
 
 
 {-| cStrCopyGo srcN dstN i — copy byte i of the NUL-terminated C string at
-`srcN` into the GC string buffer at `dstN`, stopping AFTER the NUL (which is
-NOT copied — the Value's len excludes it).  `srcN` is stable (libc-owned)
-across the copy; `dstN` is the freshly-allocated GC buffer, used before any
-further allocation.  Frame-free.
+`srcN` into the GC string buffer at `dstN`, stopping AT the NUL: the NUL
+itself is NOT copied into [0..len) (the Value's len excludes it) but IS
+written at dst[len], restoring Zig valString's terminator parity
+(values.zig wrote dst[data.len] = 0; the caller allocates len+1).  `srcN` is
+stable (libc-owned) across the copy; `dstN` is the freshly-allocated GC
+buffer, used before any further allocation.  SELF-TAIL LOOP like cStrLenGo
+(App on its own key — O(1) native stack); non-allocating, never allocate
+here.
 -}
 cStrCopyGoDefun : Defun
 cStrCopyGoDefun =
@@ -2133,10 +2158,13 @@ cStrCopyGoDefun =
         (lets
             [ ( byte, Unsafe (RawByteLoad { ptr = wOf (v srcN), index = wOf (v i) }) ) ]
             (iff (mkBool (cmpW RCeq (v byte) (n 0)))
-                mkNil
                 (lets
-                    [ ( b 5, Unsafe (RawByteStore { ptr = wOf (v dstN), index = wOf (v i), value = v byte })) ]
-                    (callR "Rt.cStrCopyGo" [ v srcN, v dstN, mkNum (iadd (wOf (v i)) (n 1)) ])
+                    [ ( b 5, Unsafe (RawByteStore { ptr = wOf (v dstN), index = wOf (v i), value = n 0 })) ]
+                    mkNil
+                )
+                (lets
+                    [ ( b 6, Unsafe (RawByteStore { ptr = wOf (v dstN), index = wOf (v i), value = v byte })) ]
+                    (App { fn = GRef { key = "Rt.cStrCopyGo", force = False }, args = [ v srcN, v dstN, mkNum (iadd (wOf (v i)) (n 1)) ] })
                 )
             )
         )
@@ -2183,7 +2211,11 @@ cdDefun =
 {-| `Rt.getcwd _` — primGetcwd: getcwd into a PATH_MAX (4096) GC buffer and
 return it AS the string with its NUL-measured length.  Reusing the same buffer
 avoids a second allocation (which would MOVE the buffer under the moving Zig
-GC — cStrLenGo's contract).  Failure (getcwd NULL) -> "".
+GC — cStrLenGo's contract).  Failure (getcwd NULL) -> "".  TRADE, named: the
+result string PINS the full 4096-byte block for its lifetime (Zig allocated
+len+1) — the sound alternative (the getenv shape: strlen, alloc len+1, copy)
+costs one more allocation; the cwd is short-lived and 4 KiB is cheap, so the
+single-alloc shape is kept deliberately.
 -}
 getcwdDefun : Defun
 getcwdDefun =
