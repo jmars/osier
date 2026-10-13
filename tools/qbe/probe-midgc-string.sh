@@ -40,6 +40,7 @@ LOWER="elm-compiler/src/Mid/Qbe/Lower.elm"
 FIXTURE="tools/qbe/fixtures/midgc-string.elm"
 ENTRY="MidgcString.main"
 GOLDEN=31200200
+FAIL_BEFORE=31200100
 CHURN_MB=16
 ELM_BIN="${ELM_BIN:-$HOME/.npm-global/lib/node_modules/elm/bin/elm}"
 
@@ -131,12 +132,12 @@ PY
     trap restore EXIT
     rebuild
     out="$(run_probe 0)"
-    if [ "$out" = "$GOLDEN" ]; then
-      echo "FAIL-BEFORE NOT REPRODUCED: midgc-string still prints $GOLDEN with the Zig rt_string route restored — the probe does not catch the cross-heap edge" >&2
-      exit 1
-    else
-      echo "FAIL-BEFORE REPRODUCED: midgc-string printed '$out' (!= $GOLDEN) with string data on the Zig rt_string route (cross-heap edge, freed string data)"
+    if [ "$out" = "$FAIL_BEFORE" ]; then
+      echo "FAIL-BEFORE REPRODUCED: midgc-string printed '$out' (== $FAIL_BEFORE) with string data on the Zig rt_string route (cross-heap edge, freed string data)"
       exit 0
+    else
+      echo "FAIL-BEFORE NOT REPRODUCED: printed '$out', want the exact signature '$FAIL_BEFORE' — the probe does not pin the mechanism" >&2
+      exit 1
     fi
     ;;
   *)

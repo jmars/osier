@@ -234,19 +234,20 @@ run_midgc_nsi() {
   fi
 }
 
-# run_midgc_refusal — the HOST-IO CENSUS REFUSAL row (zigretire stage 5 PART 5):
+# run_midgc_refusal — the QBE_MIDGC=1 REFUSAL row (zigretire stage 5 PART 5):
 # the fixture MUST be refused at COMPILE time under QBE_MIDGC=1 (qbe-mk exits
-# non-zero, the .ssa begins "err " and names Runtime.program — the effect-loop
-# seam).  This is the IN-TREE documented-fail row for the host-IO hole: the
-# gate asserts the refusal rather than letting a host-IO program silently run
-# to corruption under the hatch.
+# non-zero, the .ssa begins "err " and names `$expect` — the effect-loop seam
+# "Runtime.program" for host-IO programs, or the refused prim (backtick-quoted,
+# e.g. `str`) for the CENSUS arm).  This is the IN-TREE documented-fail row:
+# the gate asserts the refusal rather than letting the program silently run to
+# corruption under the hatch.
 run_midgc_refusal() {
-  local name="$1" entry="$2" fixture="$3"
+  local name="$1" entry="$2" fixture="$3" expect="$4"
   local out
   out="$TMP/$name-refusal"
   mkdir -p "$out"
   if QBE_MIDGC=1 "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$out" >/dev/null 2>&1; then
-    echo "FAIL $name: QBE_MIDGC=1 compiled a host-IO program — the census/effect-loop refusal is missing"
+    echo "FAIL $name: QBE_MIDGC=1 compiled the program — the refusal (naming $expect) is missing"
     FAIL=1; return
   fi
   local ssa
@@ -255,11 +256,11 @@ run_midgc_refusal() {
     echo "FAIL $name: QBE_MIDGC=1 failed but not with an 'err' refusal"
     FAIL=1; return
   fi
-  if ! grep -q 'Runtime.program' "$ssa"; then
-    echo "FAIL $name: the refusal does not name the effect-loop seam (Runtime.program)"
+  if ! grep -q "$expect" "$ssa"; then
+    echo "FAIL $name: the refusal does not name $expect"
     FAIL=1; return
   fi
-  echo "PASS $name: QBE_MIDGC=1 refuses the host-IO program (names Runtime.program, the effect-loop seam)"
+  echo "PASS $name: QBE_MIDGC=1 refuses the program (names $expect)"
 }
 
 # run_midgc_io — the DEFAULT-path control for the host-IO fixture: with the Zig
@@ -395,8 +396,16 @@ run_midgc midgc-rawstr MidgcRawstr.main tools/qbe/fixtures/midgc-rawstr.elm
 # prints the golden.  The fail-before/pass-after asymmetry is scripted in
 # tools/qbe/probe-midgc-io.sh; this row re-asserts the refusal and the
 # default-path golden in the gate.
-run_midgc_refusal midgc-io MidgcIo.main tools/qbe/fixtures/midgc-io.elm
+run_midgc_refusal midgc-io MidgcIo.main tools/qbe/fixtures/midgc-io.elm 'Runtime.program'
 run_midgc_io midgc-io MidgcIo.main tools/qbe/fixtures/midgc-io.elm
+# zigretire stage 5 PART 5 FIX 1 — THE CENSUS-ARM PIN: a PURE program whose
+# census trips the `str` entry (String.fromFloat of NaN kept through a
+# function boundary).  Its refusal row + the run_midgc_refusal grep pin the
+# DELETION of the nurseryHostPrims list: empty the list and THIS row goes red
+# while every other gate stays green (the seam rows still fire).  The
+# fail-before/pass-after asymmetry is scripted in tools/qbe/probe-midgc-str.sh.
+run_midgc_refusal midgc-str MidgcStr.main tools/qbe/fixtures/midgc-str.elm '`str`'
+run midgc-str MidgcStr.main tools/qbe/fixtures/midgc-str.elm
 
 # nice-to-have 9: a result whose printed form EXCEEDS the old 16384-byte print
 # buffer (~24KB here).  Both runners stream now, so native and VM must agree

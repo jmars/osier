@@ -38,6 +38,7 @@ RT="tools/qbe/rt.zig"
 FIXTURE="tools/qbe/fixtures/midgc-partial.elm"
 ENTRY="MidgcPartial.main"
 GOLDEN=22100
+FAIL_BEFORE=49900
 CHURN_MB=16
 
 # The one reverted line, anchored on its unique full text.
@@ -99,12 +100,12 @@ PY
     trap restore EXIT
     rebuild_rt
     out="$(run_probe)"
-    if [ "$out" = "$GOLDEN" ]; then
-      echo "FAIL-BEFORE NOT REPRODUCED: midgc-partial still prints $GOLDEN with the Zig g.allocArray route restored — the probe does not catch the cross-heap edge" >&2
-      exit 1
-    else
-      echo "FAIL-BEFORE REPRODUCED: midgc-partial printed '$out' (!= $GOLDEN) with the partial env array on the Zig g.allocArray route (cross-heap edge, freed env arrays)"
+    if [ "$out" = "$FAIL_BEFORE" ]; then
+      echo "FAIL-BEFORE REPRODUCED: midgc-partial printed '$out' (== $FAIL_BEFORE) with the partial env array on the Zig g.allocArray route (cross-heap edge, freed env arrays)"
       exit 0
+    else
+      echo "FAIL-BEFORE NOT REPRODUCED: printed '$out', want the exact signature '$FAIL_BEFORE' — the probe does not pin the mechanism" >&2
+      exit 1
     fi
     ;;
   *)

@@ -439,24 +439,40 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                 -- refusal is `usedPrims ∩ nurseryHostPrims`, i.e. it fires on
                 -- whatever the census actually names.
                 --
-                -- nurseryHostPrims is the COMPLETE enumeration (verified by
-                -- reading each Zig handler) of the prims that RETURN a value
-                -- whose payload the handler built in the GC nursery via
-                -- values.valString / valCons:
+                -- nurseryHostPrims is the enumeration (verified by reading
+                -- each Zig handler) of the prims whose handler RETURNs a value
+                -- whose payload was built in the GC nursery via values.valString
+                -- / valCons:
                 --   read-file-as-string (streams.zig), getcwd/getenv/glob/
                 --   exec-plan (execplan.zig), value (the *argv* registry list,
-                --   rt.zig buildArgvList), str (primStr's floatText/composite
-                --   printer).  The OTHER no-Mid-implementation prims are SAFE
-                --   and deliberately NOT refused: intern (valSymbol -> a
-                --   page_allocator symbol, never GC-reclaimed), getpid/cd/
-                --   setenv/close/write-byte/read-byte (scalar results), open
-                --   (a libc stream), simple-error (aborts), and hd/tl/fst/
-                --   reverse/append/absvector? (no surface spelling, so they
-                --   can never appear in the census).  WHAT IT DOES NOT COVER:
-                --   it refuses the nursery-building host prims the census
-                --   names; it does NOT prove the REMAINING (Mid-implemented)
-                --   prims are Mid-sound — that is the corrected-criterion
-                --   audit (plan.md §2.2).
+                --   rt.zig buildArgvList), str (primStr — NARROWED: only the
+                --   NaN/±Infinity pass-through arms of Prelude.stringFromFloat
+                --   return the nursery string; canonical decimals are REBUILT
+                --   through Mid cn by jsFloatText/jsFloatDigits, so they are
+                --   SAFE — but str is refused anyway because NaN-ness is
+                --   compile-time unknowable).  The OTHER no-Mid-implementation
+                --   prims are SAFE and deliberately NOT refused: intern
+                --   (valSymbol -> a page_allocator symbol, never GC-reclaimed),
+                --   getpid/cd/setenv/close/write-byte/read-byte (scalar
+                --   results), open (a libc stream), simple-error (aborts), and
+                --   hd/tl/fst/reverse/append/absvector? (no surface spelling,
+                --   so they can never appear in the census).
+                -- THE BOUNDARY IS COARSER THAN THE HOLES: stdin/stdout are
+                --   fd-int Values (streams.valStreamInFd/OutFd — SAFE, yet
+                --   refused via the `value` entry) and finite fromFloat is
+                --   Mid-rebuilt (SAFE, yet refused via `str`).  Over-refusal is
+                --   the right interim call — the unsound shape is unknowable
+                --   until run time — and it is documented so no reader mistakes
+                --   the boundary for exact.  WHAT IT DOES NOT COVER: it refuses
+                --   the nursery-building host prims the census NAMES; it does
+                --   NOT prove the REMAINING (Mid-implemented) prims are
+                --   Mid-sound — that is the corrected-criterion audit
+                --   (plan.md §2.2).  DELETION of this list is pinned in-tree by
+                --   probe-midgc-str.sh / the midgc-str qbe-check row (a pure
+                --   String.fromFloat NaN fixture trips the `str` entry): empty
+                --   the list and that row goes red.  COMPLETENESS of the
+                --   enumeration remains a REVIEW obligation, not a mechanical
+                --   pin.
                 nurseryHostPrims =
                     Set.fromList
                         [ "read-file-as-string"
@@ -545,7 +561,7 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                             , p
                             , "`"
                             , others
-                            , " — no Mid implementation, so it routes through rt_prim (the Zig host path), which builds Zig-nursery strings/conses (effectloop valString/valCons) that the Zig scavenge reclaims while a Mid object still references them (the reproduced cross-heap hole). QBE_MIDGC=1 is for pure programs only."
+                            , " — its Zig host handler (no Mid implementation) builds Zig-nursery strings/conses (values.valString/valCons) that the Zig scavenge reclaims while a Mid object still references them (the reproduced cross-heap hole). This refusal keys on the HANDLER, not on purity: the program may be pure, but its handler's result is unsound to keep in a Mid object."
                             ]
                         )
 

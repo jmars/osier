@@ -43,6 +43,7 @@ FIXTURE="tools/qbe/fixtures/midgc-io.elm"
 INPUT="tools/qbe/fixtures/input/midgc-io.txt"
 ENTRY="MidgcIo.main"
 GOLDEN='"100|150"'
+FAIL_BEFORE='"0|150"'
 CHURN_MB=16
 ELM_BIN="${ELM_BIN:-$HOME/.npm-global/lib/node_modules/elm/bin/elm}"
 
@@ -144,12 +145,12 @@ PY
     out="$(midgc_compile 0)"
     corrupt="$(MIDGC_IO_IN="$ROOT/$INPUT" QBE_HEAP_MB=$CHURN_MB timeout 120 "$out/midgc-io" "$ENTRY" 2>&1)"
     rm -rf "$out"
-    if [ "$corrupt" = "$GOLDEN" ]; then
-      echo "FAIL-BEFORE NOT REPRODUCED: with the effect-loop refusal reverted, the host-IO program still prints $GOLDEN under QBE_MIDGC=1 — the probe does not catch the cross-heap edge" >&2
-      exit 1
-    else
-      echo "FAIL-BEFORE REPRODUCED: with the refusal reverted, the host-IO program printed '$corrupt' (!= $GOLDEN) — content equality failed while the length field survived (the Zig scavenge reclaimed the kept string's data)"
+    if [ "$corrupt" = "$FAIL_BEFORE" ]; then
+      echo "FAIL-BEFORE REPRODUCED: with the refusal reverted, the host-IO program printed '$corrupt' (== $FAIL_BEFORE, the exact cross-heap signature) — content equality failed while the length field survived (the Zig scavenge reclaimed the kept string's data)"
       exit 0
+    else
+      echo "FAIL-BEFORE NOT REPRODUCED: printed '$corrupt', want the exact cross-heap signature '$FAIL_BEFORE' — the probe does not pin the mechanism" >&2
+      exit 1
     fi
     ;;
   *)
