@@ -19,6 +19,7 @@ import Elm.Syntax.Range as Range
 import Platform
 import Set
 import Char.Extra exposing (utf8ByteLength)
+import Dict exposing (Dict)
 import Mid.Audit as Audit
 import Mid.Ir exposing (AltKind(..), Defun, Exp(..), LetBinder(..), Lit(..), UnsafeNode(..))
 import Mid.Module as MidModule
@@ -1014,9 +1015,11 @@ checks =
     -- edit that adds an allocation (or a RawCall to an allocating defun) to
     -- any of them moves it INTO Rt.allocating and fails THIS row — the
     -- alternative failure mode is a GC-timing bug no fixture can catch.
-    -- (They ARE rt_frame_enter'd since the SF2 loop fix — a pooled frame is
-    -- root registration, NOT a safepoint; the pinned property is the absence
-    -- of a reachable allocation.)
+    -- (The three helpers are FRAME-FREE by emission — alloc8 scratch, no
+    -- pooled frame; being framed would not itself be a safepoint (a frame
+    -- is root registration), but frame-free is what the lean ABI grants
+    -- ONLY on the strength of this classification, so the pinned property
+    -- is the absence of a reachable allocation.)
     , check "rt allocation classification: the pure-read defuns are frame-free, the builders are framed"
         (Set.member "Rt.cons" Rt.allocating
             && Set.member "Rt.@p" Rt.allocating
@@ -1153,6 +1156,56 @@ checks =
     -- symeq.elm): (a) the fast-path emit keeps the symEq fallback reachable
     -- (a pointer-only regression would drop it), and (b) the hatch emit
     -- differs from it (a deleted fast path would make them identical).
+    -- SF2 (the g3-fix review): the STACK property itself has no pin until
+    -- this row.  The partition rows above protect the GC window
+    -- (no reachable safepoint); they are BLIND to a self-App that leaves
+    -- TAIL position — a non-tail saturated self-App allocates nothing (so
+    -- the classification stays 'edge', sound) but Lower compiles it as a
+    -- NATIVE call per iteration, and the ~100 KB per-byte stack-overflow
+    -- crash RETURNS with every suite green (only the corpus hash moves,
+    -- and a deliberate re-freeze masks that).  What makes the loop a loop
+    -- is the shape `jmp @body` with NO call to the defun's own q_ symbol —
+    -- pin exactly that, structurally, for the three byte-walk helpers.
+    , check "rt self-tail loops: cStrLenGo/cStrCopyGo/cStrFill emit jmp @body and NO native call to their own symbol (the O(1)-stack property)"
+        (List.all
+            (\( key, qname ) ->
+                case QbeLower.lower False False False True True True True False QbeTypes.empty (rtArities (Rt.program True True True)) (Rt.program True True True) key of
+                    Ok mod ->
+                        case funcByName qname mod of
+                            Just f ->
+                                selfLoopIsLoop ( qname, f )
+
+                            Nothing ->
+                                False
+
+                    Err _ ->
+                        False
+            )
+            [ ( "Rt.cStrLenGo", "q_Rt_x2ecStrLenGo" )
+            , ( "Rt.cStrCopyGo", "q_Rt_x2ecStrCopyGo" )
+            , ( "Rt.cStrFill", "q_Rt_x2ecStrFill" )
+            ]
+        )
+
+    -- SF1 (the g3-fix review): the classifier's self-GRef-App EDGE rule is
+    -- valid ONLY for saturated non-forced heads — an under-/over-applied or
+    -- forced one routes lowerGRefValue + rtApply, and rt_apply BUILDS A
+    -- PARTIAL CLOSURE (a real GC safepoint) inside a defun the edge rule
+    -- would keep frame-free.  Latent (no Rt body has these shapes), so the
+    -- row CONSTRUCTS them: three probe defuns whose ONLY suspicious node is
+    -- the malformed self-App, each asserted to lower FRAMED (rt_frame_enter
+    -- present = classified allocating).  Under the pre-fix rule these
+    -- lowered frame-free — the exact unsoundness.
+    , check "rt classifier: an UNDER-/OVER-applied or FORCED self-GRef App is a DIRECT SAFEPOINT (rt_apply builds a partial closure), not an edge"
+        (Rt.direct probeUnderSelfApp
+            && Rt.direct probeOverSelfApp
+            && Rt.direct probeForcedSelfApp
+            -- positive control: the SATURATED non-forced self-App that the
+            -- real helpers use stays an EDGE (Rt.direct False) — the rule
+            -- was narrowed, not disabled.
+            && not (Rt.direct cStrLenGoDefunForControl)
+        )
+
     , check "rt = symbol fast path: emitted as a pointer short-circuit that KEEPS the symEq fallback, and the hatch removes it"
         (case ( QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty (Rt.program True True True) "Rt.="
               , QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty (Rt.program True True False) "Rt.="
@@ -1201,6 +1254,53 @@ auditRawCall =
       , value = Lam { params = [], body = Unsafe (RawCall { sym = "rt_cons", args = [] }) }
       }
     ]
+
+
+{-| The SF1 probes: malformed self-Apps an Rt body must never contain today —
+under-applied (0 args, 1 param), over-applied (2 args, 1 param), and forced
+(saturated args but force=True).  Lower routes all three through
+lowerGRefValue + rtApply (a partial-closure BUILD, a real safepoint), so the
+classifier must mark the defun allocating (framed), never 'edge'.
+-}
+probeUnderSelfApp : Defun
+probeUnderSelfApp =
+    { key = "Rt.probeUnder"
+    , value =
+        Lam
+            { params = [ { id = 1, name = "a1" } ]
+            , body = App { fn = GRef { key = "Rt.probeUnder", force = False }, args = [] }
+            }
+    }
+
+
+probeOverSelfApp : Defun
+probeOverSelfApp =
+    { key = "Rt.probeOver"
+    , value =
+        Lam
+            { params = [ { id = 1, name = "a1" } ]
+            , body =
+                App
+                    { fn = GRef { key = "Rt.probeOver", force = False }
+                    , args = [ Lit (LNumber 0), Lit (LNumber 1) ]
+                    }
+            }
+    }
+
+
+probeForcedSelfApp : Defun
+probeForcedSelfApp =
+    { key = "Rt.probeForced"
+    , value =
+        Lam
+            { params = [ { id = 1, name = "a1" } ]
+            , body =
+                App
+                    { fn = GRef { key = "Rt.probeForced", force = True }
+                    , args = [ Lit (LNumber 0) ]
+                    }
+            }
+    }
 
 
 auditNested : List Defun
@@ -1436,6 +1536,70 @@ callsSym sym f =
 funcByName : String -> Il.Module -> Maybe Il.Func
 funcByName name mod =
     List.head (List.filter (\f -> f.name == name) mod.funcs)
+
+
+{-| The arity table a standalone `QbeLower.lower` call needs for the Rt
+program's self-GRef Apps (QbeModule normally completes this; the scratch
+lowerings here must pass it themselves).
+-}
+rtArities : List Defun -> Dict String Int
+rtArities program =
+    Dict.fromList
+        (List.filterMap
+            (\d ->
+                case d.value of
+                    Lam l ->
+                        Just ( d.key, List.length l.params )
+
+                    _ ->
+                        Nothing
+            )
+            program
+        )
+
+
+{-| The SATURATED, non-forced self-App shape the real helpers use — the
+positive control for the narrowed edge rule (must stay an EDGE, i.e.
+Rt.direct False).
+-}
+cStrLenGoDefunForControl : Defun
+cStrLenGoDefunForControl =
+    { key = "Rt.controlLoop"
+    , value =
+        Lam
+            { params = [ { id = 1, name = "a1" }, { id = 2, name = "a2" } ]
+            , body =
+                If
+                    { cond = Lit (LNumber 0)
+                    , thenBranch = Lit (LNumber 0)
+                    , elseBranch =
+                        App
+                            { fn = GRef { key = "Rt.controlLoop", force = False }
+                            , args = [ Var 1, Lit (LNumber 1) ]
+                            }
+                    , falseLabel = "F"
+                    , endLabel = "E"
+                    }
+            }
+    }
+
+
+{-| The SF2 structural property: the emitted body loops in-frame (a block
+whose jump is `jmp @body`) and NEVER calls its own q_ symbol (which would be
+one native frame per iteration — the ~100 KB stack crash).
+-}
+selfLoopIsLoop : ( String, Il.Func ) -> Bool
+selfLoopIsLoop ( selfSym, f ) =
+    List.any (\b -> b.jump == Il.Jmp "body") f.blocks
+        && not (callsSym selfSym f)
+
+
+{-| Framed = the pooled-frame enter seat is emitted (the lean ABI grants a
+frame exactly when the defun is classified allocating).
+-}
+callsFrameEnter : Il.Func -> Bool
+callsFrameEnter f =
+    callsSym "rt_frame_enter" f
 
 
 frameBaseIsAlloc : Il.Func -> Bool

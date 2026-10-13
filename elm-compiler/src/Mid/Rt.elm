@@ -1,4 +1,4 @@
-module Mid.Rt exposing (Impl, allocating, closureSeeds, conSeeds, gcSeeds, program, primImpl, rtDeps, seeds)
+module Mid.Rt exposing (Impl, allocating, closureSeeds, conSeeds, direct, gcSeeds, program, primImpl, rtDeps, seeds)
 
 -- Mid.Rt — the MID-WRITTEN RUNTIME's program assembly (handoff
 -- osier-consspike, TRACK 2 step 4).
@@ -396,13 +396,13 @@ direct : Defun -> Bool
 direct d =
     case d.value of
         Lam l ->
-            safepoint d.key l.body
+            safepoint d.key (List.length l.params) l.body
 
         _ ->
             True
 
-safepoint : String -> Exp -> Bool
-safepoint selfKey e =
+safepoint : String -> Int -> Exp -> Bool
+safepoint selfKey selfArity e =
     case e of
         Lit (LString _) ->
             True
@@ -423,26 +423,36 @@ safepoint selfKey e =
             True
 
         NoTail inner ->
-            safepoint selfKey inner
+            safepoint selfKey selfArity inner
 
         App app ->
-            -- A GRef-App on THIS defun's own key is an EDGE, not a direct
-            -- safepoint, exactly like RawCall below.  In TAIL position it
-            -- is the SELF-TAIL LOOP (Lower's lowerSelfTail: stage the args
-            -- into slots, blit the params, jmp @body — no call, no
-            -- rt_tail_known, so no staging allocation at ANY arity); out of
-            -- tail position it is the direct call + rt_bounce chase, which
-            -- allocate nothing themselves (the .tail staging allocation
-            -- lives in rt_tail_known, the CROSS-defun tail path, never
-            -- taken here).  The args are walked; the callee is SELF, and a
-            -- loop re-runs THIS body, so any allocation the body can reach
-            -- is already caught by this very walk — no cycle is
-            -- introduced.  Any OTHER App can reach an allocating callee or
-            -- the apply/closure machinery: conservatively a safepoint.
+            -- A SATURATED, NON-FORCED GRef-App on THIS defun's own key is
+            -- an EDGE, not a direct safepoint, exactly like RawCall below.
+            -- In TAIL position it is the SELF-TAIL LOOP (Lower's
+            -- lowerSelfTail: stage the args into slots, blit the params,
+            -- jmp @body — no call, no rt_tail_known, so no staging
+            -- allocation at ANY arity); out of tail position it is the
+            -- saturated direct call + rt_bounce chase, which allocate
+            -- nothing themselves (the .tail staging allocation lives in
+            -- rt_tail_known, the CROSS-defun tail path, never taken here).
+            -- The args are walked; the callee is SELF, and a loop re-runs
+            -- THIS body, so any allocation the body can reach is already
+            -- caught by this very walk — no cycle is introduced.
+            --
+            -- EVERY OTHER SHAPE IS A DIRECT SAFEPOINT, deny-by-default:
+            -- an UNDER-/OVER-applied head, or a forced one, routes
+            -- lowerGRefValue + rtApply (Lower.elm lowerApp's GRef arm),
+            -- and rt_apply BUILDS A PARTIAL CLOSURE (applyGo's env
+            -- allocArray — a real GC safepoint) — so treating those as an
+            -- edge would keep an allocating defun classified frame-free,
+            -- the exact unsoundness the partition exists to prevent.  The
+            -- arity is the walked Lam's OWN param count (always known
+            -- here); had it been unavailable, the rule denies (safepoint)
+            -- — the conservative direction.
             case app.fn of
                 GRef r ->
-                    if r.key == selfKey then
-                        List.any (safepoint selfKey) app.args
+                    if r.key == selfKey && not r.force && List.length app.args == selfArity then
+                        List.any (safepoint selfKey selfArity) app.args
 
                     else
                         True
@@ -454,10 +464,10 @@ safepoint selfKey e =
             True
 
         Let b ->
-            List.any (\v -> safepoint selfKey (letValue v)) b.binders || safepoint selfKey b.body
+            List.any (\v -> safepoint selfKey selfArity (letValue v)) b.binders || safepoint selfKey selfArity b.body
 
         Case c ->
-            safepoint selfKey c.scrutinee || List.any (\alt -> List.any (safepointMatch) alt.matches || List.any (\( _, p ) -> safepointPath p) alt.binds || safepoint selfKey alt.body) c.alts
+            safepoint selfKey selfArity c.scrutinee || List.any (\alt -> List.any (safepointMatch) alt.matches || List.any (\( _, p ) -> safepointPath p) alt.binds || safepoint selfKey selfArity alt.body) c.alts
 
         Con _ ->
             True
@@ -469,37 +479,37 @@ safepoint selfKey e =
             True
 
         RecordGet root _ ->
-            safepoint selfKey root
+            safepoint selfKey selfArity root
 
         RecordUpdate r ->
-            safepoint selfKey r.base || List.any (\( _, v ) -> safepoint selfKey v) r.updates
+            safepoint selfKey selfArity r.base || List.any (\( _, v ) -> safepoint selfKey selfArity v) r.updates
 
         ListLit _ ->
             True
 
         If b ->
-            safepoint selfKey b.cond || safepoint selfKey b.thenBranch || safepoint selfKey b.elseBranch
+            safepoint selfKey selfArity b.cond || safepoint selfKey selfArity b.thenBranch || safepoint selfKey selfArity b.elseBranch
 
         ShortAnd b ->
-            safepoint selfKey b.left || safepoint selfKey b.right
+            safepoint selfKey selfArity b.left || safepoint selfKey selfArity b.right
 
         ShortOr b ->
-            safepoint selfKey b.left || safepoint selfKey b.right
+            safepoint selfKey selfArity b.left || safepoint selfKey selfArity b.right
 
         NotEqual b ->
-            safepoint selfKey b.left || safepoint selfKey b.right
+            safepoint selfKey selfArity b.left || safepoint selfKey selfArity b.right
 
         Unsafe node ->
-            unsafeSafepoint selfKey node
+            unsafeSafepoint selfKey selfArity node
 
-unsafeSafepoint : String -> UnsafeNode -> Bool
-unsafeSafepoint selfKey node =
+unsafeSafepoint : String -> Int -> UnsafeNode -> Bool
+unsafeSafepoint selfKey selfArity node =
     case node of
         RawCall c ->
             -- edge, not a direct safepoint: the FIXED POINT below
             -- resolves it (a call to a non-allocating helper is
             -- allocation-free).
-            List.any (safepoint selfKey) c.args
+            List.any (safepoint selfKey selfArity) c.args
 
         RawCallRaw _ ->
             False
@@ -508,75 +518,75 @@ unsafeSafepoint selfKey node =
             False
 
         RawPayload p ->
-            safepoint selfKey p.value
+            safepoint selfKey selfArity p.value
 
         RawMkValue m ->
-            List.any (safepoint selfKey) m.words
+            List.any (safepoint selfKey selfArity) m.words
 
         RawAllocVector _ ->
             True
 
         RawVecLoad v ->
-            safepoint selfKey v.vec || safepoint selfKey v.index
+            safepoint selfKey selfArity v.vec || safepoint selfKey selfArity v.index
 
         RawVecAddr v ->
-            safepoint selfKey v.vec || safepoint selfKey v.index
+            safepoint selfKey selfArity v.vec || safepoint selfKey selfArity v.index
 
         RawVecStore v ->
             -- the write-barrier seat is malloc-class, NOT a GC
-            -- safepoint selfKey (MEASUREDED in heap.zig dirtyVectorsAdd;
+            -- safepoint (MEASUREDED in heap.zig dirtyVectorsAdd;
             -- the consspike record), so the store alone does not
             -- frame a defun — address-> stores into an existing
             -- vector frame-free.
-            safepoint selfKey v.vec || safepoint selfKey v.index || safepoint selfKey v.value
+            safepoint selfKey selfArity v.vec || safepoint selfKey selfArity v.index || safepoint selfKey selfArity v.value
 
         RawStrByte b ->
-            safepoint selfKey b.str || safepoint selfKey b.index
+            safepoint selfKey selfArity b.str || safepoint selfKey selfArity b.index
 
         WithRoots _ ->
             True
 
         RawPayload32 p ->
-            safepoint selfKey p.value
+            safepoint selfKey selfArity p.value
 
         RawTagIs t ->
-            safepoint selfKey t.value
+            safepoint selfKey selfArity t.value
 
         RawBin r ->
-            safepoint selfKey r.a || safepoint selfKey r.b
+            safepoint selfKey selfArity r.a || safepoint selfKey selfArity r.b
 
         RawUn r ->
-            safepoint selfKey r.v
+            safepoint selfKey selfArity r.v
 
         RawCmp r ->
-            safepoint selfKey r.a || safepoint selfKey r.b
+            safepoint selfKey selfArity r.a || safepoint selfKey selfArity r.b
 
         RawFltBin r ->
-            safepoint selfKey r.a || safepoint selfKey r.b
+            safepoint selfKey selfArity r.a || safepoint selfKey selfArity r.b
 
         RawFltCmp r ->
-            safepoint selfKey r.a || safepoint selfKey r.b
+            safepoint selfKey selfArity r.a || safepoint selfKey selfArity r.b
 
         RawIToF x ->
-            safepoint selfKey x
+            safepoint selfKey selfArity x
 
         RawLoadFlt x ->
-            safepoint selfKey x
+            safepoint selfKey selfArity x
 
         RawAllocRaw _ ->
             True
 
         RawByteLoad b ->
-            safepoint selfKey b.ptr || safepoint selfKey b.index
+            safepoint selfKey selfArity b.ptr || safepoint selfKey selfArity b.index
 
         RawByteStore b ->
-            safepoint selfKey b.ptr || safepoint selfKey b.index || safepoint selfKey b.value
+            safepoint selfKey selfArity b.ptr || safepoint selfKey selfArity b.index || safepoint selfKey selfArity b.value
 
         RawWordLoad w ->
-            safepoint selfKey w.ptr || safepoint selfKey w.index
+            safepoint selfKey selfArity w.ptr || safepoint selfKey selfArity w.index
 
         RawWordStore w ->
-            safepoint selfKey w.ptr || safepoint selfKey w.index || safepoint selfKey w.value
+            safepoint selfKey selfArity w.ptr || safepoint selfKey selfArity w.index || safepoint selfKey selfArity w.value
 
         RawDataAddr _ ->
             False
