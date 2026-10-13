@@ -1070,6 +1070,19 @@ checks =
             && not (Set.member "Rt.cStrFill" Rt.allocating)
             && not (Set.member "Rt.readFull" Rt.allocating)
             && not (Set.member "Rt.close" Rt.allocating)
+            -- stage 3 GROUP 3B (glob): globScanGo's soundness RESTS on
+            -- staying frame-free — state[1] is a raw pointer into the GC
+            -- pattern buffer, which a pooled frame cannot root (the C
+            -- block's contents are not Values).  A future edit adding an
+            -- allocation to ANY of these breaks the scan window with no
+            -- other instrument — it must fail THIS row.
+            && not (Set.member "Rt.globLastSlash" Rt.allocating)
+            && not (Set.member "Rt.globIsDot" Rt.allocating)
+            && not (Set.member "Rt.globIsDotDot" Rt.allocating)
+            && not (Set.member "Rt.globScanGo" Rt.allocating)
+            && not (Set.member "Rt.globStrLess" Rt.allocating)
+            && not (Set.member "Rt.globSortShift" Rt.allocating)
+            && not (Set.member "Rt.globSortGo" Rt.allocating)
             && Set.member "Rt.getcwd" Rt.allocating
             && Set.member "Rt.cd" Rt.allocating
             && Set.member "Rt.getenv" Rt.allocating
@@ -1077,6 +1090,8 @@ checks =
             && Set.member "Rt.open" Rt.allocating
             && Set.member "Rt.write-byte" Rt.allocating
             && Set.member "Rt.read-byte" Rt.allocating
+            && Set.member "Rt.glob" Rt.allocating
+            && Set.member "Rt.globBuildGo" Rt.allocating
         )
     , check "rt gc (midgc) classification: the collector is FRAME-FREE by construction (a frame-free callee must never reach a safepoint)"
         (not (Set.member "Rt.collect" Rt.allocating)
@@ -1177,8 +1192,11 @@ checks =
     -- crash RETURNS with every suite green (only the corpus hash moves,
     -- and a deliberate re-freeze masks that).  What makes the loop a loop
     -- is the shape `jmp @body` with NO call to the defun's own q_ symbol —
-    -- pin exactly that, structurally, for the three byte-walk helpers.
-    , check "rt self-tail loops: cStrLenGo/cStrCopyGo/cStrFill emit jmp @body and NO native call to their own symbol (the O(1)-stack property)"
+    -- pin exactly that, structurally, for the three byte-walk helpers AND
+    -- glob's per-entry loops (group 3B: a directory with N entries runs the
+    -- scan/sort/build loops N times — a reverted loop shape is one native
+    -- frame per ENTRY).
+    , check "rt self-tail loops: cStrLenGo/cStrCopyGo/cStrFill + the glob loops emit jmp @body and NO native call to their own symbol (the O(1)-stack property)"
         (List.all
             (\( key, qname ) ->
                 case QbeLower.lower False False False True True True True False QbeTypes.empty (rtArities (Rt.program True True True)) (Rt.program True True True) key of
@@ -1196,6 +1214,12 @@ checks =
             [ ( "Rt.cStrLenGo", "q_Rt_x2ecStrLenGo" )
             , ( "Rt.cStrCopyGo", "q_Rt_x2ecStrCopyGo" )
             , ( "Rt.cStrFill", "q_Rt_x2ecStrFill" )
+            , ( "Rt.globLastSlash", "q_Rt_x2eglobLastSlash" )
+            , ( "Rt.globScanGo", "q_Rt_x2eglobScanGo" )
+            , ( "Rt.globStrLess", "q_Rt_x2eglobStrLess" )
+            , ( "Rt.globSortShift", "q_Rt_x2eglobSortShift" )
+            , ( "Rt.globSortGo", "q_Rt_x2eglobSortGo" )
+            , ( "Rt.globBuildGo", "q_Rt_x2eglobBuildGo" )
             ]
         )
 

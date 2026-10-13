@@ -2371,11 +2371,22 @@ setenvDefun =
 -- PATH_MAX; the Mid body passes the FULL pattern (cStrOf is exact-length),
 -- and a too-long dir simply fails opendir (ENAMETOOLONG -> NULL -> nil,
 -- the same observable result as the truncation path).  The 1024-match cap
--- is kept EXACTLY (the loop bound).  The dotfile guard rewrites Zig's
--- `!fm(base, ".") && !fm(base, "..")` as byte equality on `base`: the
--- patterns "." / ".." contain no wildcards, so fnmatch(base, ".") == 0
--- holds IFF base == "." byte-for-byte (same for "..") — provably the same
--- predicate with no literal buffers.
+-- is kept EXACTLY (the loop bound).
+--
+-- THE DOTFILE GUARD is Zig's `!fm(base, ".") && !fm(base, "..")` with
+-- fm(PATTERN, string) — the BASE IS THE PATTERN, so any wildcard base that
+-- happens to match "." / ".." ("?", ".*", "[.]", "\.") ADMITS the dotfile
+-- pair.  The Mid body reproduces this with REAL fnmatch calls against the
+-- two NUL literals in the cbuf (fix-1: the first cut rewrote it as byte
+-- equality on base, which inverted the argument roles and silently DROPPED
+-- ./.. for every wildcard base — a measured wrong answer on the most
+-- common patterns).  The NAME-side tests (name is "." / "..") stay byte
+-- equality, as in Zig (std.mem.eql).
+--
+-- OOM DIVERGENCE, loud not silent: Zig threw "glob: out of memory" when
+-- dupeZ/the match alloc failed (freeing the dupes first); Mid has no error
+-- mechanism, so both malloc failure points (the cbuf, each dupe) branch to
+-- the rt_halt seat instead — a loud abort, never a NULL deref.
 
 
 {-| globLastSlash ptrN iN — the index of the LAST '/' in the pattern
@@ -2554,6 +2565,10 @@ globScanGoDefun =
                                         (lets
                                             [ ( lenN, callR "Rt.cStrLenGo" [ mkNum (v nameW), mkNum (n 0) ] )
                                             , ( pW, callW "malloc" [ iadd (wOf (v lenN)) (n 1) ] )
+                                            , -- dupe OOM: LOUD halt (rt_halt is
+                                              -- a raw call — scanGo stays
+                                              -- non-allocating).
+                                              ( b 19, iff (mkBool (cmpW RCeq (v pW) (n 0))) haltV (mkNum (n 0)) )
                                             , ( b 16, callR "Rt.cStrCopyGo" [ mkNum (v nameW), mkNum (v pW), mkNum (n 0) ] )
                                             , ( b 17, Unsafe (RawWordStore { ptr = v tblW, index = v nW, value = v pW }) )
                                             , ( b 18, Unsafe (RawWordStore { ptr = wOf (v stateN), index = n 4, value = iadd (v nW) (n 1) }) )
@@ -2699,11 +2714,19 @@ table (Zig's root dance as one loop): for each i (descending), copy the
 C-heap match into a fresh GC string (the getenv shape: len, alloc len+1,
 cStrCopyGo, mkStr — the fresh block is the string's own data, no interior
 pointer), free the C copy, cons onto acc.  ALLOCATING (Rt.cons, RawAllocRaw)
-— this is the loop where safepoints live; every raw temp it holds is a
-C-heap pointer (stable across collections) and `acc` rides a PARAM slot of
-a framed defun (rooted).  SELF-TAIL LOOP (App on its own key): the pooled
-frame stays entered across the jmp @body, so the re-blitted param slots
-stay rooted.
+— this is the loop where safepoints live; `acc` rides a PARAM slot of a
+framed defun (rooted), and every raw temp EXCEPT bufW is a C-heap pointer
+(stable across collections).  bufW (the RawAllocRaw result) is a NURSERY
+raw temp — valid only to the next safepoint — and the body is sound ONLY
+because mkStr consumes it into a ROOTED frame slot (RawMkValue stores the
+data word, no allocation) BEFORE the first Rt.cons allocation, and App
+args lower head-to-tail innermost-first.  THE EVALUATION ORDER IS
+LOAD-BEARING: a purely local reorder of the consV argument tree (moving a
+consV to the LEFT of the mkStr chain) would hold bufW across a scavenge
+and silently reintroduce a stale data pointer — no instrument catches a
+reorder, so do not make one.  SELF-TAIL LOOP (App on its own key): the
+pooled frame stays entered across the jmp @body, so the re-blitted param
+slots stay rooted.
 -}
 globBuildGoDefun : Defun
 globBuildGoDefun =
@@ -2809,8 +2832,16 @@ globDefun =
             (patBinds
                 ++ [ ( siN, callR "Rt.globLastSlash" [ mkNum patW, mkNum (isub (lenOf (v pattern)) (n 1)) ] )
                    , ( cbufW, callW "malloc" [ n 8240 ] )
+                   , -- OOM is LOUD (Zig threw "glob: out of memory"; Mid
+                     -- has no error mechanism — halt, never a NULL deref).
+                     ( b 115, iff (mkBool (cmpW RCeq (v cbufW) (n 0))) haltV (mkNum (n 0)) )
                    , ( b 50, Unsafe (RawByteStore { ptr = v cbufW, index = n 0, value = n 46 }) )
                    , ( b 51, Unsafe (RawByteStore { ptr = v cbufW, index = n 1, value = n 0 }) )
+                   , -- the ".." literal for the dotfile guard's fnmatch
+                     -- (review B1): [2..5) = '.', '.', NUL; [5..8) pad.
+                     ( b 112, Unsafe (RawByteStore { ptr = v cbufW, index = n 2, value = n 46 }) )
+                   , ( b 113, Unsafe (RawByteStore { ptr = v cbufW, index = n 3, value = n 46 }) )
+                   , ( b 114, Unsafe (RawByteStore { ptr = v cbufW, index = n 4, value = n 0 }) )
                    , ( tblW, iadd (v cbufW) (n 8) )
                    , ( stateW, iadd (v cbufW) (n 8200) )
                    , ( hasS, mkBool (cmpW RCges (wOf (v siN)) (n 0)) )
@@ -2827,8 +2858,14 @@ globDefun =
             (iff (mkBool (cmpW RCeq (v dW) (n 0)))
                 (lets [ ( b 57, callW "free" [ v cbufW ] ) ] mkNil)
                 (lets
-                    [ ( baseDot, callR "Rt.globIsDot" [ v baseN ] )
-                    , ( baseDD, callR "Rt.globIsDotDot" [ v baseN ] )
+                    -- B1 (review): Zig's guard is !fm(base, ".") &&
+                    -- !fm(base, "..") with fm(PATTERN, string) — the BASE is
+                    -- the pattern, so a WILDCARD base that matches "." / ".."
+                    -- (e.g. "?", ".*", "[.]") ADMITS the dotfiles.  Real
+                    -- fnmatch calls against the two cbuf literals, byte
+                    -- equality only covered the literal bases.
+                    [ ( baseDot, mkBool (cmpW RCeq (callW "fnmatch" [ wOf (v baseN), v cbufW, n 0 ]) (n 0)) )
+                    , ( baseDD, mkBool (cmpW RCeq (callW "fnmatch" [ wOf (v baseN), iadd (v cbufW) (n 2), n 0 ]) (n 0)) )
                     , -- state[0..4] = DIR*, base, table, skip-dotfiles
                       -- (1 iff the base is NOT "." / ".."), 0 matches.
                       ( b 62, Unsafe (RawWordStore { ptr = v stateW, index = n 0, value = v dW }) )
