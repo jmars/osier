@@ -27,6 +27,62 @@ pub const descTotalBytes = 24;
 
 pub const direntNameOffset = 19;
 
+pub const epChainOpIdx = 0;
+
+pub const epChainPipeIdx = 1;
+
+pub const epChainWords = 2;
+
+pub const epCmdArgcIdx = 1;
+
+pub const epCmdArgvIdx = 0;
+
+pub const epCmdNredirsIdx = 3;
+
+pub const epCmdRedirsIdx = 2;
+
+pub const epCmdSubIdx = 4;
+
+pub const epCmdWords = 5;
+
+pub const epKindAppend = 2;
+
+pub const epKindDup = 3;
+
+pub const epKindHdoc = 4;
+
+pub const epKindHstr = 5;
+
+pub const epKindIn = 0;
+
+pub const epKindOut = 1;
+
+pub const epOpAnd = 1;
+
+pub const epOpOr = 2;
+
+pub const epOpSeq = 0;
+
+pub const epPipeCmdArrIdx = 1;
+
+pub const epPipeCmdCountIdx = 0;
+
+pub const epProgChainsIdx = 1;
+
+pub const epProgCountIdx = 0;
+
+pub const epRedirBodyIdx = 4;
+
+pub const epRedirDupfdIdx = 3;
+
+pub const epRedirFdIdx = 1;
+
+pub const epRedirKindIdx = 0;
+
+pub const epRedirPathIdx = 2;
+
+pub const epRedirWords = 5;
+
 pub const i32Bytes = 4;
 
 pub const lenFieldOffset = 16;

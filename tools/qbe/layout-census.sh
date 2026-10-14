@@ -66,10 +66,19 @@ MID_ONLY_NAMES=""
 # probe cannot import (an `export fn main`/`pub fn main` collides with an
 # executable's): rt.zig carries the Desc/Meta/Ret rows;
 # vendor/osier-rt/src/rt/execplan.zig carries direntNameOffset (its own
-# `Dirent` declaration — the one Zig statement of the libc struct's layout).
+# `Dirent` declaration — the one Zig statement of the libc struct's layout);
+# rt.zig also carries the ep* exec-plan DECODE-blob rows (stage 3 GROUP
+# 3B-2a: Mid.RtLayout defines the blob, the rt_exec_run seat reads it).
 COMPTIME_FILES="tools/qbe/rt.zig vendor/osier-rt/src/rt/execplan.zig"
 COMPTIME_NAMES="descArityOffset descCacheOffset descCodeOffset descNcapsOffset descTotalBytes \
 direntNameOffset \
+epChainOpIdx epChainPipeIdx epChainWords \
+epCmdArgcIdx epCmdArgvIdx epCmdNredirsIdx epCmdRedirsIdx epCmdSubIdx epCmdWords \
+epKindAppend epKindDup epKindHdoc epKindHstr epKindIn epKindOut \
+epOpAnd epOpOr epOpSeq \
+epPipeCmdArrIdx epPipeCmdCountIdx \
+epProgChainsIdx epProgCountIdx \
+epRedirBodyIdx epRedirDupfdIdx epRedirFdIdx epRedirKindIdx epRedirPathIdx epRedirWords \
 metaArityOffset metaCodeOffset metaNameOffset metaSizeBytes \
 retArgsOffset retArityOffset retEOffset retFOffset retKindOffset retSizeBytes retValOffset"
 # REGEX: read from rt.zig's own declaration text (a non-pub const no probe can see).

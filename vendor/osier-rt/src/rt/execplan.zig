@@ -1141,26 +1141,13 @@ fn slurpFd(fd: i32) ?Slurp {
 //  exec-plan — C: zincvm.c:2100-2151
 // =====================================================================
 
-/// C: zincvm.c:2100-2151 exec-plan — run a decoded command PLAN natively
-/// (fork/dup2/execvp, no /bin/sh).  Plan arrives as ONE tagged zinc-value
-/// argument; stdout+stderr default to two unlinked tmpfiles; the result is
-/// the TAGGED [exit stdout stderr] list built with the makeTagged* helpers
-/// (rooted across each helper's allocations — the exact C:2133-2148 root
-/// dance).  The plan Value is rooted once at entry; decode/run perform no
-/// GC allocation, and every exit path pops (the single defer is C's
-/// per-path gc_root_pop).
-pub fn primExecPlan(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
+/// primExecPlan's tail, factored (zigretire stage 3 GROUP 3B-2a) so the
+/// rt_exec_run seat can run the SAME code from the MID-decoded blob:
+/// tmpfiles, runProgram, slurp, and the TAGGED [code out err] result
+/// (the C:2133-2148 root dance, verbatim).  The plan is already decoded
+/// and page_allocator-owned by the CALLER; this function frees it.
+pub fn execRunDecoded(vm: *Vm, prog: *RProg) VmError!Value {
     const g = vm.gc;
-    var plan = varray.vaPop(stack);
-    g.rootPushValue(&plan); // C:2102
-    defer g.rootPop(); // every C exit path pops exactly once
-
-    var prog: RProg = .{};
-    if (!planDecode(plan, &prog)) {
-        planFree(&prog);
-        return vm.throwShen("exec-plan: malformed plan");
-    }
-
     var otmpl = "/tmp/shensh-out.XXXXXX".*;
     var etmpl = "/tmp/shensh-err.XXXXXX".*;
     const outfd = mkstemp(&otmpl);
@@ -1174,14 +1161,14 @@ pub fn primExecPlan(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
             _ = close(errfd);
             _ = unlink(&etmpl);
         }
-        planFree(&prog);
+        planFree(prog);
         return vm.throwShen("exec-plan: tmpfile failed");
     }
     _ = unlink(&otmpl);
     _ = unlink(&etmpl);
 
-    const code = runProgram(&prog, outfd, errfd, false);
-    planFree(&prog);
+    const code = runProgram(prog, outfd, errfd, false);
+    planFree(prog);
     if (code < 0) {
         _ = close(outfd);
         _ = close(errfd);
@@ -1216,9 +1203,29 @@ pub fn primExecPlan(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     g.rootPop(); // empty
     g.rootPop(); // tag_err
     g.rootPop(); // tag_out
-    // (the deferred rootPop for `plan` fires on return)
+    return final;
+}
 
-    acc.* = final;
+/// C: zincvm.c:2100-2151 exec-plan — run a decoded command PLAN natively
+/// (fork/dup2/execvp, no /bin/sh).  Plan arrives as ONE tagged zinc-value
+/// argument; the result is the TAGGED [exit stdout stderr] list built with
+/// the makeTagged* helpers.  The plan Value is rooted once at entry; decode
+/// and run perform no GC allocation of their own, and every exit path pops
+/// (the single defer is C's per-path gc_root_pop).  The RUN+RESULT half is
+/// execRunDecoded above (shared with the rt_exec_run seat).
+pub fn primExecPlan(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
+    const g = vm.gc;
+    var plan = varray.vaPop(stack);
+    g.rootPushValue(&plan); // C:2102
+    defer g.rootPop(); // every C exit path pops exactly once
+
+    var prog: RProg = .{};
+    if (!planDecode(plan, &prog)) {
+        planFree(&prog);
+        return vm.throwShen("exec-plan: malformed plan");
+    }
+
+    acc.* = try execRunDecoded(vm, &prog);
 }
 
 // =====================================================================

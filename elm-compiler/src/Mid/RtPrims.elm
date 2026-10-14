@@ -2885,6 +2885,1681 @@ globDefun =
         )
 
 
+{-| exec-plan DECODE (zigretire stage 3 GROUP 3B-2a) — planDecode as Mid.
+
+execplan.zig's planDecode walks the TAGGED plan Value (the Shen demarshal
+shape the Plan.* builders produce: EMPTY = [cons] = cons(sym"cons", nil),
+NODE = [cons H T] = cons(sym"cons", cons(H, cons(T, nil))) with T the tagged
+tail — a plain Elm list decodes as EMPTY-or-MALFORMED, never as a plan) and
+builds a C-heap RProg blob per Mid.RtLayout's ep* constants.  The blob is
+handed to the rt_exec_run seat (tools/qbe/rt.zig), which rebuilds the Zig
+RProg tree, runs/slurps/builds the tagged result — the parts that stay Zig
+until GROUP 3B-2b/3B-2c.
+
+THE WHOLE DECODE IS SAFEPOINT-FREE (Zig INVARIANT 1's Mid form: decode
+performs zero GC allocation): no Lit LString (an interning safepoint — the
+tag names ride as BYTES in a malloc'd cbuf instead), no RawAllocRaw, no
+Rt.cons/intern.  That is what makes every raw temp below — the blob
+pointers, the cbuf, and the string DATA pointers read while dupeZ'ing —
+valid for the entire decode; malloc/free via RawCallRaw allocate nothing on
+the GC heap.  Never allocate in any ep* helper.
+
+MALLOC/FREE PAIRING (the brief's named rule): every level owns its own
+allocations, keeps its running COUNT in the blob (prog[0]/pipe[0]/argc/
+nredirs are updated after each successfully decoded element — Zig's
+`n = i + 1` discipline), and frees EXACTLY the decoded prefix on failure
+(epFreeChains/epFreeCmds/epFreeCmd/epFreeArgv/epFreeRedirs).  Decode failure
+therefore leaks nothing before the loud halt.  The two OOM arms (cbuf/st/
+arrays) halt immediately — process death, the glob precedent.
+
+THE MID/ERROR-MODEL GAP, stated: Zig's decode failures throw ShenError,
+which the old rt_prim route turned into "qbe-rt: prim exec-plan failed:
+ShenError" + exit 1; Mid's arm is rt_halt ("qbe-rt: halt (a Mid prim
+reached its halt arm)" + exit 1) — equally loud, different text, the same
+documented class as every other halt arm.
+-}
+execPlanDefun : Defun
+execPlanDefun =
+    let
+        plan =
+            p1
+
+        cbufW =
+            b 40
+
+        stW =
+            b 41
+
+        progN =
+            b 42
+
+        res =
+            b 45
+
+        chainsW =
+            b 46
+
+        -- One word per tag/op name, NUL padded to 8 bytes (the high bytes
+        -- stay zero, so every value fits a JS-safe Int).  The FIRST byte of
+        -- the name is the LOW byte of the word (little-endian stores).  The
+        -- BYTE offsets are Mid-private (the seat never reads the cbuf).
+        lit : List Int -> Int
+        lit bytes =
+            List.foldl (\byte acc -> acc * 256 + byte) 0 (List.reverse bytes)
+
+        litStores =
+            [ ( "cons", lit [ 99, 111, 110, 115 ] )
+            , ( "string", lit [ 115, 116, 114, 105, 110, 103 ] )
+            , ( "number", lit [ 110, 117, 109, 98, 101, 114 ] )
+            , ( "symbol", lit [ 115, 121, 109, 98, 111, 108 ] )
+            , ( "seq", lit [ 115, 101, 113 ] )
+            , ( "and", lit [ 97, 110, 100 ] )
+            , ( "or", lit [ 111, 114 ] )
+            , ( "in", lit [ 105, 110 ] )
+            , ( "out", lit [ 111, 117, 116 ] )
+            , ( "append", lit [ 97, 112, 112, 101, 110, 100 ] )
+            , ( "dup", lit [ 100, 117, 112 ] )
+            , ( "hdoc", lit [ 104, 100, 111, 99 ] )
+            , ( "hstr", lit [ 104, 115, 116, 114 ] )
+            ]
+
+        litBinds =
+            litStores
+                |> List.indexedMap
+                    (\i ( _, word ) ->
+                        ( b (50 + i)
+                        , Unsafe
+                            (RawWordStore
+                                { ptr = v cbufW
+                                , index = n i
+                                , value = n word
+                                }
+                            )
+                        )
+                    )
+
+        stBinds =
+            [ ( b 63, Unsafe (RawWordStore { ptr = v stW, index = n 0, value = v cbufW }) )
+            , ( b 64, Unsafe (RawWordStore { ptr = v stW, index = n 1, value = n 0 }) )
+            , ( b 65, Unsafe (RawWordStore { ptr = v stW, index = n 2, value = n 0 }) )
+            ]
+    in
+    lam "Rt.exec-plan" [ plan ]
+        (lets
+            ([ ( cbufW, callW "malloc" [ n 104 ] )
+               , -- OOM is LOUD (glob's precedent: halt, never a NULL write).
+                 ( b 43, iff (mkBool (cmpW RCeq (v cbufW) (n 0))) haltV (mkNum (n 0)) )
+               , ( stW, callW "malloc" [ n 24 ] )
+               , ( b 44, iff (mkBool (cmpW RCeq (v stW) (n 0))) haltV (mkNum (n 0)) )
+               ]
+                ++ litBinds
+                ++ stBinds
+                ++ [ ( progN, callR "Rt.epProg" [ v plan, mkNum (v stW) ] )
+                   ]
+            )
+            (iff (mkBool (cmpW RClts (wOf (v progN)) (n 0)))
+                -- malformed: every level already freed its decoded prefix on
+                -- the way out; free the scratch blocks, then the LOUD halt
+                -- (the module header's error-model gap note).
+                (lets
+                    [ ( b 70, callW "free" [ v stW ] )
+                    , ( b 71, callW "free" [ v cbufW ] )
+                    ]
+                    haltV
+                )
+                (lets
+                    [ ( res
+                      , Unsafe
+                            (RawVecLoad
+                                { vec = callW "rt_exec_run" [ wOf (v progN) ]
+                                , index = n 0
+                                }
+                            )
+                      )
+                    , ( chainsW
+                      , Unsafe
+                            (RawWordLoad
+                                { ptr = wOf (v progN)
+                                , index = n RtLayout.epProgChainsIdx
+                                }
+                            )
+                      )
+                    , ( b 67
+                      , callR "Rt.epFreeChains"
+                            [ v progN
+                            , mkNum (v chainsW)
+                            , mkNum (n 0)
+                            ]
+                      )
+                    , ( b 68, callW "free" [ v stW ] )
+                    , ( b 69, callW "free" [ v cbufW ] )
+                    ]
+                    (v res)
+                )
+            )
+        )
+
+
+{-| epSymIs sym litN i — the symbol's name vs the NUL-terminated literal at
+litN (a cbuf offset), byte for byte from i: full std.mem.eql parity
+(length-sensitive — a longer name whose prefix matches is NOT equal).
+-}
+epSymIsDefun : Defun
+epSymIsDefun =
+    let
+        sym =
+            p1
+
+        litN =
+            p2
+
+        i =
+            p3
+
+        la =
+            b 4
+
+        lb =
+            b 5
+    in
+    lam "Rt.epSymIs" [ sym, litN, i ]
+        (lets
+            [ ( la, byteOf (v sym) (wOf (v i)) )
+            , ( lb, Unsafe (RawByteLoad { ptr = wOf (v litN), index = wOf (v i) }) )
+            ]
+            (iff (mkBool (cmpW RCeq (v lb) (n 0)))
+                (mkBool (cmpW RCeq (v la) (n 0)))
+                (iff (mkBool (cmpW RCeq (v la) (v lb)))
+                    (App
+                        { fn = GRef { key = "Rt.epSymIs", force = False }
+                        , args = [ v sym, v litN, mkNum (iadd (wOf (v i)) (n 1)) ]
+                        }
+                    )
+                    falseV
+                )
+            )
+        )
+
+
+{-| epCount v stN accN — the tagged list's length (Zig tdlLen/tdlCollect's
+count), or -1 malformed.  st = [cbuf, depth, limit]: the walk BAILS at
+acc > limit (returning acc, i.e. a count strictly greater than the caller's
+bound) so absurd inputs cannot walk unbounded — the verdict is Zig-parity
+either way, because a bail means "more elements than the caller accepts".
+The ==2/==3 callers set limit 8; the collect sites set 64/256/64.
+-}
+epCountDefun : Defun
+epCountDefun =
+    let
+        vv =
+            p1
+
+        stN =
+            p2
+
+        accN =
+            p3
+
+        cbufW =
+            b 4
+
+        limW =
+            b 5
+
+        stV =
+            b 10
+
+        t1 =
+            b 7
+    in
+    lam "Rt.epCount" [ vv, stN, accN ]
+        (lets
+            [ ( cbufW, Unsafe (RawWordLoad { ptr = wOf (v stN), index = n 0 }) )
+            , ( limW, Unsafe (RawWordLoad { ptr = wOf (v stN), index = n 2 }) )
+            ]
+            (lets
+                [ ( stV, tagCountState (v vv) (v cbufW) ) ]
+                (iff (mkBool (cmpW RCeq (wOf (v stV)) (n 2)))
+                (mkNum (n (-1)))
+                (iff (mkBool (cmpW RCeq (wOf (v stV)) (n 0)))
+                    (v accN)
+                    (lets
+                        [ ( t1, cdrV (cdrV (v vv)) )
+                        ]
+                        (iff (mkBool (cmpW RCgts (wOf (v accN)) (v limW)))
+                            (v accN)
+                            (iff (mkBool (cmpW RCeq (tagIs (v t1) RtLayout.tagCons) (n 0)))
+                                (mkNum (n (-1)))
+                                (App
+                                    { fn = GRef { key = "Rt.epCount", force = False }
+                                    , args =
+                                        [ carV (v t1)
+                                        , v stN
+                                        , mkNum (iadd (wOf (v accN)) (n 1))
+                                        ]
+                                    }
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+            )
+        )
+
+
+{-| The tdlIsEmpty state as a WORD: 0 empty, 1 node, 2 malformed.  Shared by
+epCount (and inlined nowhere else — the fill loops spell their own checks).
+-}
+tagCountState : Exp -> Exp -> Exp
+tagCountState vv cbufW =
+    iff (mkBool (cmpW RCeq (tagIs vv RtLayout.tagCons) (n 0)))
+        (mkNum (n 2))
+        (iff (mkBool (cmpW RCeq (tagIs (carV vv) RtLayout.tagSymbol) (n 0)))
+            (mkNum (n 2))
+            (iff (callR "Rt.epSymIs" [ carV vv, mkNum cbufW, mkNum (n 0) ])
+                (iff (mkBool (cmpW RCne (tagIs (cdrV vv) RtLayout.tagNil) (n 0)))
+                    (mkNum (n 0))
+                    (iff (mkBool (cmpW RCne (tagIs (cdrV vv) RtLayout.tagCons) (n 0)))
+                        (mkNum (n 1))
+                        (mkNum (n 2))
+                    )
+                )
+                (mkNum (n 2))
+            )
+        )
+
+
+{-| epElem v iN tgtN — the tgt'th element of the tagged list, or mkNil (a
+sentinel every consumer's tag check rejects).  STRUCTURAL walk only: no
+head-symbol re-check, sound because every caller ran epCount over the same
+immutable spine first (Zig's tdlElem re-checks, but the verdict cannot
+differ — the spine cannot change between the two walks).
+-}
+epElemDefun : Defun
+epElemDefun =
+    let
+        vv =
+            p1
+
+        iN =
+            p2
+
+        tgtN =
+            p3
+
+        t1 =
+            b 4
+    in
+    lam "Rt.epElem" [ vv, iN, tgtN ]
+        (iff (mkBool (cmpW RCeq (tagIs (v vv) RtLayout.tagCons) (n 0)))
+            mkNil
+            (iff (mkBool (cmpW RCne (tagIs (cdrV (v vv)) RtLayout.tagNil) (n 0)))
+                mkNil
+                (iff (mkBool (cmpW RCeq (tagIs (cdrV (v vv)) RtLayout.tagCons) (n 0)))
+                    mkNil
+                    (iff (mkBool (cmpW RCeq (wOf (v iN)) (wOf (v tgtN))))
+                        (carV (cdrV (v vv)))
+                        (lets
+                            [ ( t1, cdrV (cdrV (v vv)) ) ]
+                            (iff (mkBool (cmpW RCeq (tagIs (v t1) RtLayout.tagCons) (n 0)))
+                                mkNil
+                                (App
+                                    { fn = GRef { key = "Rt.epElem", force = False }
+                                    , args = [ carV (v t1), mkNum (iadd (wOf (v iN)) (n 1)), v tgtN ]
+                                    }
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+
+
+{-| epNum v cbufN — [number N] -> N's Value, or mkNil (Zig tdNumber).
+epStr v cbufN — [string S] -> S's Value (NOT copied; callers dupeZ it), or
+mkNil (Zig tdString).  epSymOf v cbufN — [symbol X] -> X's symbol Value, or
+mkNil (Zig tdSymbol).-}
+epUnwrapDefun : String -> Int -> Int -> Defun
+epUnwrapDefun key litOff wantTag =
+    let
+        vv =
+            p1
+
+        cbufN =
+            p2
+    in
+    lam key [ vv, cbufN ]
+        (iff (mkBool (cmpW RCeq (tagIs (v vv) RtLayout.tagCons) (n 0)))
+            mkNil
+            (iff (mkBool (cmpW RCeq (tagIs (carV (v vv)) RtLayout.tagSymbol) (n 0)))
+                mkNil
+                (iff (callR "Rt.epSymIs" [ carV (v vv), mkNum (iadd (wOf (v cbufN)) (n litOff)), mkNum (n 0) ])
+                    (iff (mkBool (cmpW RCeq (tagIs (cdrV (v vv)) RtLayout.tagCons) (n 0)))
+                        mkNil
+                        (iff (mkBool (cmpW RCeq (tagIs (carV (cdrV (v vv))) wantTag) (n 0)))
+                            mkNil
+                            (carV (cdrV (v vv)))
+                        )
+                    )
+                    mkNil
+                )
+            )
+        )
+
+
+{-| epProg v stN — decodeProgram: the tagged chain list -> a malloc'd prog
+record [nchains, chains*] (Mid.RtLayout ep* layout), or -1 malformed (every
+failure path frees its own decoded prefix first).  An EMPTY program is legal
+(runs nothing, exit 0) — chains* stays 0.
+-}
+epProgDefun : Defun
+epProgDefun =
+    let
+        vv =
+            p1
+
+        stN =
+            p2
+
+        limStore =
+            b 4
+
+        cnt =
+            b 5
+
+        progW =
+            b 6
+
+        chainsW =
+            b 8
+
+        go =
+            b 9
+    in
+    lam "Rt.epProg" [ vv, stN ]
+        (lets
+            [ ( limStore, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 2, value = n 256 }) )
+            , ( cnt, callR "Rt.epCount" [ v vv, v stN, mkNum (n 0) ] )
+            ]
+            (iff (or2 (mkBool (cmpW RClts (wOf (v cnt)) (n 0))) (mkBool (cmpW RCgts (wOf (v cnt)) (n 256))))
+                (mkNum (n (-1)))
+                (lets
+                    [ ( progW, callW "malloc" [ n 16 ] )
+                    , ( b 7, iff (mkBool (cmpW RCeq (v progW) (n 0))) haltV (mkNum (n 0)) )
+                    , ( b 10, Unsafe (RawWordStore { ptr = v progW, index = n RtLayout.epProgCountIdx, value = n 0 }) )
+                    , ( b 11, Unsafe (RawWordStore { ptr = v progW, index = n RtLayout.epProgChainsIdx, value = n 0 }) )
+                    ]
+                    (iff (mkBool (cmpW RCeq (wOf (v cnt)) (n 0)))
+                        (mkNum (v progW))
+                        (lets
+                            [ ( chainsW, callW "malloc" [ imul (wOf (v cnt)) (n (8 * RtLayout.epChainWords)) ] )
+                            , ( b 12, iff (mkBool (cmpW RCeq (v chainsW) (n 0))) haltV (mkNum (n 0)) )
+                            , ( b 13
+                              , Unsafe
+                                    (RawWordStore
+                                        { ptr = v progW
+                                        , index = n RtLayout.epProgChainsIdx
+                                        , value = v chainsW
+                                        }
+                                    )
+                              )
+                            , ( go, callR "Rt.epProgGo" [ v vv, v stN, mkNum (v progW) ] )
+                            ]
+                            (iff (mkBool (cmpW RClts (wOf (v go)) (n 0)))
+                                (lets
+                                    [ ( b 14
+                                      , callR "Rt.epFreeChains"
+                                            [ mkNum (v progW)
+                                            , mkNum (v chainsW)
+                                            , mkNum (n 0)
+                                            ]
+                                      )
+                                    ]
+                                    (mkNum (n (-1)))
+                                )
+                                (mkNum (v progW))
+                            )
+                        )
+                    )
+                )
+            )
+        )
+
+
+{-| epProgGo v stN progN — the chain fill loop.  prog[0] IS the running
+count (the partial-free discipline): the chain record address is re-derived
+from it each iteration, and epFreeChains frees exactly chains[0..prog[0]).
+SELF-TAIL LOOP; frame-free, non-allocating.
+-}
+epProgGoDefun : Defun
+epProgGoDefun =
+    let
+        vv =
+            p1
+
+        stN =
+            p2
+
+        progN =
+            p3
+
+        cbufW =
+            b 4
+
+        iW =
+            b 5
+
+        chainsW =
+            b 6
+
+        chAddr =
+            b 7
+
+        r =
+            b 8
+
+        t1 =
+            b 9
+        stV =
+            b 11
+
+    in
+    lam "Rt.epProgGo" [ vv, stN, progN ]
+        (lets
+            [ ( cbufW, Unsafe (RawWordLoad { ptr = wOf (v stN), index = n 0 }) )
+            , ( iW, Unsafe (RawWordLoad { ptr = wOf (v progN), index = n RtLayout.epProgCountIdx }) )
+            , ( chainsW, Unsafe (RawWordLoad { ptr = wOf (v progN), index = n RtLayout.epProgChainsIdx }) )
+            ]
+            (lets
+                [ ( stV, tagCountState (v vv) (v cbufW) ) ]
+                (iff (mkBool (cmpW RCeq (wOf (v stV)) (n 2)))
+                (mkNum (n (-1)))
+                (iff (mkBool (cmpW RCeq (wOf (v stV)) (n 0)))
+                    (mkNum (n 0))
+                    (lets
+                        [ ( t1, cdrV (cdrV (v vv)) )
+                        , ( chAddr, iadd (v chainsW) (imul (v iW) (n (8 * RtLayout.epChainWords))) )
+                        , ( r, callR "Rt.epChain" [ carV (cdrV (v vv)), v stN, mkNum (v chAddr) ] )
+                        ]
+                        (iff (mkBool (cmpW RClts (wOf (v r)) (n 0)))
+                            (mkNum (n (-1)))
+                            (lets
+                                [ ( b 10
+                                  , Unsafe
+                                        (RawWordStore
+                                            { ptr = wOf (v progN)
+                                            , index = n RtLayout.epProgCountIdx
+                                            , value = iadd (v iW) (n 1)
+                                            }
+                                        )
+                                  )
+                                ]
+                                (App
+                                    { fn = GRef { key = "Rt.epProgGo", force = False }
+                                    , args = [ carV (v t1), v stN, v progN ]
+                                    }
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+            )
+        )
+
+
+{-| epChain e stN chAddrN — decodeChain: [op Pipeline], len 2, op one of
+seq/and/or (Mid.RtLayout epOp* codes, stored at chAddr[epChainOpIdx]); the
+pipe record pointer is stored only on success.  Zig's order: the op is
+validated BEFORE the pipeline decode, so a bad-op chain never allocates.
+The three literal offsets are cbuf words 4/5/6 (seq/and/or).
+-}
+epChainDefun : Defun
+epChainDefun =
+    let
+        e =
+            p1
+
+        stN =
+            p2
+
+        chAddrN =
+            p3
+
+        limStore =
+            b 4
+
+        cnt =
+            b 5
+
+        cbufW =
+            b 8
+
+        opv =
+            b 6
+
+        pipev =
+            b 7
+
+        xsym =
+            b 9
+
+        isSeq =
+            b 10
+
+        isAnd =
+            b 11
+
+        isOr =
+            b 12
+
+        opV =
+            b 13
+
+        pipeN =
+            b 14
+    in
+    lam "Rt.epChain" [ e, stN, chAddrN ]
+        (lets
+            [ ( limStore, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 2, value = n 8 }) )
+            , ( cnt, callR "Rt.epCount" [ v e, v stN, mkNum (n 0) ] )
+            , ( cbufW, Unsafe (RawWordLoad { ptr = wOf (v stN), index = n 0 }) )
+            ]
+            (iff (mkBool (cmpW RCne (wOf (v cnt)) (n 2)))
+                (mkNum (n (-1)))
+                (lets
+                    [ ( opv, callR "Rt.epElem" [ v e, mkNum (n 0), mkNum (n 0) ] )
+                    , ( pipev, callR "Rt.epElem" [ v e, mkNum (n 0), mkNum (n 1) ] )
+                    , ( xsym, callR "Rt.epSymOf" [ v opv, mkNum (v cbufW) ] )
+                    ]
+                    (iff (mkBool (cmpW RCeq (tagIs (v xsym) RtLayout.tagSymbol) (n 0)))
+                        (mkNum (n (-1)))
+                        (lets
+                            [ ( isSeq, callR "Rt.epSymIs" [ v xsym, mkNum (iadd (v cbufW) (n 32)), mkNum (n 0) ] )
+                            , ( isAnd, callR "Rt.epSymIs" [ v xsym, mkNum (iadd (v cbufW) (n 40)), mkNum (n 0) ] )
+                            , ( isOr, callR "Rt.epSymIs" [ v xsym, mkNum (iadd (v cbufW) (n 48)), mkNum (n 0) ] )
+                            , ( opV
+                              , iff (v isSeq)
+                                    (mkNum (n RtLayout.epOpSeq))
+                                    (iff (v isAnd)
+                                        (mkNum (n RtLayout.epOpAnd))
+                                        (iff (v isOr)
+                                            (mkNum (n RtLayout.epOpOr))
+                                            (mkNum (n (-1)))
+                                        )
+                                    )
+                              )
+                            ]
+                            (iff (mkBool (cmpW RClts (wOf (v opV)) (n 0)))
+                                (mkNum (n (-1)))
+                                (lets
+                                    [ ( pipeN, callR "Rt.epPipeline" [ v pipev, v stN ] )
+                                    ]
+                                    (iff (mkBool (cmpW RClts (wOf (v pipeN)) (n 0)))
+                                        (mkNum (n (-1)))
+                                        (lets
+                                            [ ( b 15
+                                              , Unsafe
+                                                    (RawWordStore
+                                                        { ptr = wOf (v chAddrN)
+                                                        , index = n RtLayout.epChainOpIdx
+                                                        , value = wOf (v opV)
+                                                        }
+                                                    )
+                                              )
+                                            , ( b 16
+                                              , Unsafe
+                                                    (RawWordStore
+                                                        { ptr = wOf (v chAddrN)
+                                                        , index = n RtLayout.epChainPipeIdx
+                                                        , value = wOf (v pipeN)
+                                                        }
+                                                    )
+                                              )
+                                            ]
+                                            (mkNum (n 0))
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+
+
+{-| epPipeline v stN — decodePipeline: >= 1 command, <= 64; returns the
+malloc'd pipe record [ncmds, cmds*] or -1 (own partial state freed).
+-}
+epPipelineDefun : Defun
+epPipelineDefun =
+    let
+        vv =
+            p1
+
+        stN =
+            p2
+
+        limStore =
+            b 4
+
+        cnt =
+            b 5
+
+        pipeW =
+            b 6
+
+        cmdsW =
+            b 7
+
+        go =
+            b 9
+    in
+    lam "Rt.epPipeline" [ vv, stN ]
+        (lets
+            [ ( limStore, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 2, value = n 64 }) )
+            , ( cnt, callR "Rt.epCount" [ v vv, v stN, mkNum (n 0) ] )
+            ]
+            (iff (or2 (mkBool (cmpW RClts (wOf (v cnt)) (n 1))) (mkBool (cmpW RCgts (wOf (v cnt)) (n 64))))
+                (mkNum (n (-1)))
+                (lets
+                    [ ( pipeW, callW "malloc" [ n 16 ] )
+                    , ( b 8, iff (mkBool (cmpW RCeq (v pipeW) (n 0))) haltV (mkNum (n 0)) )
+                    , ( b 10, Unsafe (RawWordStore { ptr = v pipeW, index = n RtLayout.epPipeCmdCountIdx, value = n 0 }) )
+                    , ( b 11, Unsafe (RawWordStore { ptr = v pipeW, index = n RtLayout.epPipeCmdArrIdx, value = n 0 }) )
+                    , ( cmdsW, callW "malloc" [ imul (wOf (v cnt)) (n (8 * RtLayout.epCmdWords)) ] )
+                    , ( b 12, iff (mkBool (cmpW RCeq (v cmdsW) (n 0))) haltV (mkNum (n 0)) )
+                    , ( b 13, Unsafe (RawWordStore { ptr = v pipeW, index = n RtLayout.epPipeCmdArrIdx, value = v cmdsW }) )
+                    , ( go, callR "Rt.epPipeGo" [ v vv, v stN, mkNum (v pipeW) ] )
+                    ]
+                    (iff (mkBool (cmpW RClts (wOf (v go)) (n 0)))
+                        (lets
+                            [ ( b 14, callR "Rt.epFreeCmds" [ mkNum (v pipeW), mkNum (v cmdsW), mkNum (n 0) ] ) ]
+                            (mkNum (n (-1)))
+                        )
+                        (mkNum (v pipeW))
+                    )
+                )
+            )
+        )
+
+
+{-| epPipeGo v stN pipeN — the command fill loop; pipe[0] IS the running
+count (the partial-free discipline).  SELF-TAIL; frame-free.
+-}
+epPipeGoDefun : Defun
+epPipeGoDefun =
+    let
+        vv =
+            p1
+
+        stN =
+            p2
+
+        pipeN =
+            p3
+
+        cbufW =
+            b 4
+
+        iW =
+            b 5
+
+        cmdsW =
+            b 6
+
+        cAddr =
+            b 7
+
+        r =
+            b 8
+
+        t1 =
+            b 9
+        stV =
+            b 11
+
+    in
+    lam "Rt.epPipeGo" [ vv, stN, pipeN ]
+        (lets
+            [ ( cbufW, Unsafe (RawWordLoad { ptr = wOf (v stN), index = n 0 }) )
+            , ( iW, Unsafe (RawWordLoad { ptr = wOf (v pipeN), index = n RtLayout.epPipeCmdCountIdx }) )
+            , ( cmdsW, Unsafe (RawWordLoad { ptr = wOf (v pipeN), index = n RtLayout.epPipeCmdArrIdx }) )
+            ]
+            (lets
+                [ ( stV, tagCountState (v vv) (v cbufW) ) ]
+                (iff (mkBool (cmpW RCeq (wOf (v stV)) (n 2)))
+                (mkNum (n (-1)))
+                (iff (mkBool (cmpW RCeq (wOf (v stV)) (n 0)))
+                    (mkNum (n 0))
+                    (lets
+                        [ ( t1, cdrV (cdrV (v vv)) )
+                        , ( cAddr, iadd (v cmdsW) (imul (v iW) (n (8 * RtLayout.epCmdWords))) )
+                        , ( r, callR "Rt.epCmd" [ carV (cdrV (v vv)), v stN, mkNum (v cAddr) ] )
+                        ]
+                        (iff (mkBool (cmpW RClts (wOf (v r)) (n 0)))
+                            (mkNum (n (-1)))
+                            (lets
+                                [ ( b 10
+                                  , Unsafe
+                                        (RawWordStore
+                                            { ptr = wOf (v pipeN)
+                                            , index = n RtLayout.epPipeCmdCountIdx
+                                            , value = iadd (v iW) (n 1)
+                                            }
+                                        )
+                                  )
+                                ]
+                                (App
+                                    { fn = GRef { key = "Rt.epPipeGo", force = False }
+                                    , args = [ carV (v t1), v stN, v pipeN ]
+                                    }
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+            )
+        )
+
+
+{-| epCmd e stN cAddrN — decodeCmd: [Argv Redirs Sub], len 3.  Argv strings
+are dupeZ'd onto the C heap into a char*[argc] (argc doubles as the running
+fill count); redirs into word records; sub recurses into epProg with depth+1
+(st[1] is bumped and restored in place — the block is decode-private).
+Every failure arm frees exactly what this level built, in reverse order
+(Zig's cmdFree discipline).
+-}
+epCmdDefun : Defun
+epCmdDefun =
+    let
+        e =
+            p1
+
+        stN =
+            p2
+
+        cAddrN =
+            p3
+
+        lim8 =
+            b 4
+
+        cnt =
+            b 5
+
+        argvv =
+            b 6
+
+        redirsv =
+            b 7
+
+        subv =
+            b 8
+
+        cbufW =
+            b 9
+
+        limArgv =
+            b 10
+
+        acnt =
+            b 11
+
+        argvW =
+            b 12
+
+        ago =
+            b 13
+
+        limRedir =
+            b 14
+
+        rcnt =
+            b 15
+
+        redirsW =
+            b 16
+
+        rgo =
+            b 17
+
+        subState =
+            b 18
+
+        depthW =
+            b 19
+
+        subN =
+            b 21
+
+        t1 =
+            b 22
+
+        nstdin =
+            b 23
+
+        -- free this level's argv (strings + array), then clear the slots.
+        freeArgv =
+            callR "Rt.epFreeArgv"
+                [ mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx }))
+                , mkNum (n 0)
+                , mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgcIdx }))
+                ]
+
+        freeRedirs =
+            callR "Rt.epFreeRedirs"
+                [ mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx }))
+                , mkNum (n 0)
+                , mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdNredirsIdx }))
+                ]
+
+        clearArgv =
+            Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = n 0 })
+
+        clearRedirs =
+            Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx, value = n 0 })
+
+        freeSub =
+            lets
+                [ ( b 24
+                  , callR "Rt.epFreeChains"
+                        [ mkNum (Unsafe (RawWordLoad { ptr = Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx }), index = n RtLayout.epProgChainsIdx }))
+                        , mkNum (Unsafe (RawWordLoad { ptr = Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx }), index = n RtLayout.epProgChainsIdx }))
+                        , mkNum (n 0)
+                        ]
+                  )
+                , ( b 25, callW "free" [ Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx }) ] )
+                ]
+                mkNil
+
+        unwindAll =
+            -- reverse build order: sub, redirs, argv
+            lets
+                [ ( b 26, iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx })) (n 0))) (freeSub) mkNil)
+                , ( b 27, iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx })) (n 0))) (freeRedirs) mkNil)
+                , ( b 28, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx, value = n 0 }) )
+                , ( b 29, iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0))) (freeArgv) mkNil)
+                , ( b 30, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = n 0 }) )
+                ]
+                (mkNum (n (-1)))
+    in
+    lam "Rt.epCmd" [ e, stN, cAddrN ]
+        (lets
+            [ ( lim8, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 2, value = n 8 }) )
+            , ( cnt, callR "Rt.epCount" [ v e, v stN, mkNum (n 0) ] )
+            , ( cbufW, Unsafe (RawWordLoad { ptr = wOf (v stN), index = n 0 }) )
+            ]
+            (iff (mkBool (cmpW RCne (wOf (v cnt)) (n 3)))
+                (mkNum (n (-1)))
+                (lets
+                    [ ( argvv, callR "Rt.epElem" [ v e, mkNum (n 0), mkNum (n 0) ] )
+                    , ( redirsv, callR "Rt.epElem" [ v e, mkNum (n 0), mkNum (n 1) ] )
+                    , ( subv, callR "Rt.epElem" [ v e, mkNum (n 0), mkNum (n 2) ] )
+                    , ( b 31, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = n 0 }) )
+                    , ( b 32, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgcIdx, value = n 0 }) )
+                    , ( b 33, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx, value = n 0 }) )
+                    , ( b 34, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdNredirsIdx, value = n 0 }) )
+                    , ( b 35, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx, value = n 0 }) )
+                    , ( limArgv, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 2, value = n 256 }) )
+                    , ( acnt, callR "Rt.epCount" [ v argvv, v stN, mkNum (n 0) ] )
+                    ]
+                    (iff (or2 (mkBool (cmpW RClts (wOf (v acnt)) (n 0))) (mkBool (cmpW RCgts (wOf (v acnt)) (n 256))))
+                        (mkNum (n (-1)))
+                        (iff (mkBool (cmpW RCeq (wOf (v acnt)) (n 0)))
+                            (mkNum (n 0))
+                            (lets
+                                [ ( argvW, callW "malloc" [ imul (wOf (v acnt)) (n 8) ] )
+                                , ( b 36, iff (mkBool (cmpW RCeq (v argvW) (n 0))) haltV (mkNum (n 0)) )
+                                , ( b 37, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = v argvW }) )
+                                , ( ago, callR "Rt.epArgvGo" [ v argvv, v stN, v cAddrN ] )
+                                ]
+                                (iff (mkBool (cmpW RClts (wOf (v ago)) (n 0)))
+                                    -- epArgvGo already freed the strings and
+                                    -- the array; clear the slot and stop.
+                                    (lets [ ( b 38, clearArgv ) ] (mkNum (n (-1))))
+                                    (lets
+                                        [ ( limRedir, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 2, value = n 64 }) )
+                                        , ( rcnt, callR "Rt.epCount" [ v redirsv, v stN, mkNum (n 0) ] )
+                                        ]
+                                        (iff (or2 (mkBool (cmpW RClts (wOf (v rcnt)) (n 0))) (mkBool (cmpW RCgts (wOf (v rcnt)) (n 64))))
+                                            (lets
+                                                [ ( b 39, iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0))) (freeArgv) mkNil)
+                                                , ( b 40, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = n 0 }) )
+                                                ]
+                                                (mkNum (n (-1)))
+                                            )
+                                            (iff (mkBool (cmpW RCeq (wOf (v rcnt)) (n 0)))
+                                                (mkNum (n 0))
+                                                (lets
+                                                    [ ( redirsW, callW "malloc" [ imul (wOf (v rcnt)) (n (8 * RtLayout.epRedirWords)) ] )
+                                                    , ( b 41, iff (mkBool (cmpW RCeq (v redirsW) (n 0))) haltV (mkNum (n 0)) )
+                                                    , ( b 42, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx, value = v redirsW }) )
+                                                    , ( rgo, callR "Rt.epRedirsGo" [ v redirsv, v stN, v cAddrN ] )
+                                                    ]
+                                                    (iff (mkBool (cmpW RClts (wOf (v rgo)) (n 0)))
+                                                        -- epRedirsGo freed the
+                                                        -- redir prefix + array;
+                                                        -- then argv too.
+                                                        (lets
+                                                            [ ( b 43, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx, value = n 0 }) )
+                                                            , ( b 44, iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0))) (freeArgv) mkNil)
+                                                            , ( b 45, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = n 0 }) )
+                                                            ]
+                                                            (mkNum (n (-1)))
+                                                        )
+                                                        (lets
+                                                            [ ( subState, tagCountState (v subv) (v cbufW) )
+                                                            ]
+                                                            (iff (mkBool (cmpW RCeq (wOf (v subState)) (n 2)))
+                                                                (unwindAll)
+                                                                (iff (mkBool (cmpW RCeq (wOf (v subState)) (n 0)))
+                                                                    -- plain command: empty argv is illegal (C:1343)
+                                                                    (iff (mkBool (cmpW RCeq (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0)))
+                                                                        (unwindAll)
+                                                                        (mkNum (n 0))
+                                                                    )
+                                                                    -- subshell: no argv allowed, depth < 32
+                                                                    (iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0)))
+                                                                        (unwindAll)
+                                                                        (lets
+                                                                            [ ( depthW, Unsafe (RawWordLoad { ptr = wOf (v stN), index = n 1 }) )
+                                                                            ]
+                                                                            (iff (mkBool (cmpW RCges (v depthW) (n 32)))
+                                                                                (unwindAll)
+                                                                                (lets
+                                                                                    [ ( t1, cdrV (cdrV (v subv)) )
+                                                                                    , ( b 46, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 1, value = iadd (v depthW) (n 1) }) )
+                                                                                    , ( subN, callR "Rt.epProg" [ v subv, v stN ] )
+                                                                                    , ( b 47, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 1, value = v depthW }) )
+                                                                                    ]
+                                                                                    (iff (mkBool (cmpW RClts (wOf (v subN)) (n 0)))
+                                                                                        (unwindAll)
+                                                                                        (lets
+                                                                                            [ ( b 48, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx, value = wOf (v subN) }) )
+                                                                                            , ( nstdin
+                                                                                              , callR "Rt.epCountStdin"
+                                                                                                    [ mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx }))
+                                                                                                    , mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdNredirsIdx }))
+                                                                                                    , mkNum (n 0)
+                                                                                                    ]
+                                                                                              )
+                                                                                            ]
+                                                                                            (iff (mkBool (cmpW RCgts (wOf (v nstdin)) (n 1)))
+                                                                                                (unwindAll)
+                                                                                                (mkNum (n 0))
+                                                                                            )
+                                                                                        )
+                                                                                    )
+                                                                                )
+                                                                            )
+                                                                        )
+                                                                    )
+                                                                )
+                                                            )
+                                                        )
+                                                    )
+                                                )
+                                            )
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+
+
+{-| epArgvGo v stN cAddrN — dupeZ each argv string into cmd's char* array
+(argc at cAddr[epCmdArgcIdx] is the running count).  On a malformed element
+it frees the decoded prefix (strings + array) itself and returns -1.
+SELF-TAIL; frame-free, non-allocating.  Zig parity note: tdlCollect counted
+first and copied after; here the dupe happens inline — same verdicts, same
+bytes, one pass.
+-}
+epArgvGoDefun : Defun
+epArgvGoDefun =
+    let
+        vv =
+            p1
+
+        stN =
+            p2
+
+        cAddrN =
+            p3
+
+        cbufW =
+            b 4
+
+        argvW =
+            b 5
+
+        jW =
+            b 6
+
+        sN =
+            b 7
+
+        bufW =
+            b 8
+
+        t1 =
+            b 9
+
+        bad =
+            lets
+                [ ( b 10
+                  , callR "Rt.epFreeArgv"
+                        [ mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx }))
+                        , mkNum (n 0)
+                        , mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgcIdx }))
+                        ]
+                  )
+                , ( b 11, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = n 0 }) )
+                ]
+                (mkNum (n (-1)))
+        stV =
+            b 20
+
+    in
+    lam "Rt.epArgvGo" [ vv, stN, cAddrN ]
+        (lets
+            [ ( cbufW, Unsafe (RawWordLoad { ptr = wOf (v stN), index = n 0 }) )
+            , ( argvW, Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx }) )
+            , ( jW, Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgcIdx }) )
+            ]
+            (lets
+                [ ( stV, tagCountState (v vv) (v cbufW) ) ]
+                (iff (mkBool (cmpW RCeq (wOf (v stV)) (n 2)))
+                (bad)
+                (iff (mkBool (cmpW RCeq (wOf (v stV)) (n 0)))
+                    (mkNum (n 0))
+                    (lets
+                        [ ( sN, callR "Rt.epStr" [ carV (cdrV (v vv)), mkNum (v cbufW) ] )
+                        ]
+                        (iff (mkBool (cmpW RCeq (tagIs (v sN) RtLayout.tagString) (n 0)))
+                            (bad)
+                            (lets
+                                [ ( bufW, callW "malloc" [ iadd (lenOf (v sN)) (n 1) ] )
+                                , ( b 12, iff (mkBool (cmpW RCeq (v bufW) (n 0))) haltV (mkNum (n 0)) )
+                                , ( b 13, callR "Rt.cStrFill" [ mkNum (v bufW), v sN, mkNum (n 0) ] )
+                                , ( b 14, Unsafe (RawWordStore { ptr = v argvW, index = v jW, value = v bufW }) )
+                                , ( b 15, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgcIdx, value = iadd (v jW) (n 1) }) )
+                                , ( t1, cdrV (cdrV (v vv)) )
+                                ]
+                                (iff (mkBool (cmpW RCeq (tagIs (v t1) RtLayout.tagCons) (n 0)))
+                                    (bad)
+                                    (App
+                                        { fn = GRef { key = "Rt.epArgvGo", force = False }
+                                        , args = [ carV (v t1), v stN, v cAddrN ]
+                                        }
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+            )
+        )
+
+
+{-| epRedirsGo v stN cAddrN — decode each redir into cmd's word array
+(nredirs at cAddr[epCmdNredirsIdx] is the running count); frees its own
+prefix + array on failure.  SELF-TAIL; frame-free.
+-}
+epRedirsGoDefun : Defun
+epRedirsGoDefun =
+    let
+        vv =
+            p1
+
+        stN =
+            p2
+
+        cAddrN =
+            p3
+
+        cbufW =
+            b 4
+
+        arrW =
+            b 5
+
+        jW =
+            b 6
+
+        rAddr =
+            b 7
+
+        r =
+            b 8
+
+        t1 =
+            b 9
+
+        bad =
+            lets
+                [ ( b 10
+                  , callR "Rt.epFreeRedirs"
+                        [ mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx }))
+                        , mkNum (n 0)
+                        , mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdNredirsIdx }))
+                        ]
+                  )
+                , ( b 11, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx, value = n 0 }) )
+                ]
+                (mkNum (n (-1)))
+        stV =
+            b 13
+
+    in
+    lam "Rt.epRedirsGo" [ vv, stN, cAddrN ]
+        (lets
+            [ ( cbufW, Unsafe (RawWordLoad { ptr = wOf (v stN), index = n 0 }) )
+            , ( arrW, Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx }) )
+            , ( jW, Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdNredirsIdx }) )
+            ]
+            (lets
+                [ ( stV, tagCountState (v vv) (v cbufW) ) ]
+                (iff (mkBool (cmpW RCeq (wOf (v stV)) (n 2)))
+                (bad)
+                (iff (mkBool (cmpW RCeq (wOf (v stV)) (n 0)))
+                    (mkNum (n 0))
+                    (lets
+                        [ ( rAddr, iadd (v arrW) (imul (v jW) (n (8 * RtLayout.epRedirWords))) )
+                        , ( r, callR "Rt.epRedir" [ carV (cdrV (v vv)), v stN, mkNum (v rAddr) ] )
+                        , ( t1, cdrV (cdrV (v vv)) )
+                        ]
+                        (iff (mkBool (cmpW RClts (wOf (v r)) (n 0)))
+                            (bad)
+                            (lets
+                                [ ( b 12, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdNredirsIdx, value = iadd (v jW) (n 1) }) )
+                                ]
+                                (iff (mkBool (cmpW RCeq (tagIs (v t1) RtLayout.tagCons) (n 0)))
+                                    (bad)
+                                    (App
+                                        { fn = GRef { key = "Rt.epRedirsGo", force = False }
+                                        , args = [ carV (v t1), v stN, v cAddrN ]
+                                        }
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+            )
+        )
+
+
+{-| epRedir e stN rAddrN — decodeRedir: [op fd target], len 3, op one of
+in/out/append/dup/hdoc/hstr; fd must be 0 for in/hdoc/hstr and 1|2 for
+out/append/dup (Zig's exact validation); a dup targets a NUMBER fd 1|2, the
+others target [string S], dupeZ'd — hstr appends the trailing newline Zig's
+decode writes (one malloc where Zig used two, the same bytes out).  All five
+words are stored only on success, so a failed entry holds nothing malloc'd.
+The literal offsets are cbuf words 7..12 (in/out/append/dup/hdoc/hstr).
+-}
+epRedirDefun : Defun
+epRedirDefun =
+    let
+        e =
+            p1
+
+        stN =
+            p2
+
+        rAddrN =
+            p3
+
+        limStore =
+            b 4
+
+        cnt =
+            b 5
+
+        cbufW =
+            b 6
+
+        opv =
+            b 7
+
+        fdv =
+            b 8
+
+        tgv =
+            b 9
+
+        xsym =
+            b 10
+
+        isIn =
+            b 11
+
+        isOut =
+            b 12
+
+        isAppend =
+            b 13
+
+        isDup =
+            b 14
+
+        isHdoc =
+            b 15
+
+        isHstr =
+            b 16
+
+        kindV =
+            b 17
+
+        fdN =
+            b 18
+
+        fdOk =
+            b 19
+
+        dfdN =
+            b 20
+
+        sN =
+            b 21
+
+        bufW =
+            b 22
+
+        inHdocHstr =
+            or2 (v isIn) (or2 (v isHdoc) (v isHstr))
+
+        hdocHstr =
+            or2 (v isHdoc) (v isHstr)
+
+        storeDup =
+            lets
+                [ ( b 23, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirKindIdx, value = wOf (v kindV) }) )
+                , ( b 24, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirFdIdx, value = wOf (v fdN) }) )
+                , ( b 25, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirPathIdx, value = n 0 }) )
+                , ( b 26, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirDupfdIdx, value = wOf (v dfdN) }) )
+                , ( b 27, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirBodyIdx, value = n 0 }) )
+                ]
+                (mkNum (n 0))
+
+        storeBody =
+            lets
+                [ ( b 28, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirKindIdx, value = wOf (v kindV) }) )
+                , ( b 29, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirFdIdx, value = wOf (v fdN) }) )
+                , ( b 30, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirPathIdx, value = n 0 }) )
+                , ( b 31, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirDupfdIdx, value = n 0 }) )
+                , ( b 32, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirBodyIdx, value = v bufW }) )
+                ]
+                (mkNum (n 0))
+
+        storePath =
+            lets
+                [ ( b 33, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirKindIdx, value = wOf (v kindV) }) )
+                , ( b 34, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirFdIdx, value = wOf (v fdN) }) )
+                , ( b 35, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirPathIdx, value = v bufW }) )
+                , ( b 36, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirDupfdIdx, value = n 0 }) )
+                , ( b 37, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirBodyIdx, value = n 0 }) )
+                ]
+                (mkNum (n 0))
+    in
+    lam "Rt.epRedir" [ e, stN, rAddrN ]
+        (lets
+            [ ( limStore, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 2, value = n 8 }) )
+            , ( cnt, callR "Rt.epCount" [ v e, v stN, mkNum (n 0) ] )
+            , ( cbufW, Unsafe (RawWordLoad { ptr = wOf (v stN), index = n 0 }) )
+            ]
+            (iff (mkBool (cmpW RCne (wOf (v cnt)) (n 3)))
+                (mkNum (n (-1)))
+                (lets
+                    [ ( opv, callR "Rt.epElem" [ v e, mkNum (n 0), mkNum (n 0) ] )
+                    , ( fdv, callR "Rt.epElem" [ v e, mkNum (n 0), mkNum (n 1) ] )
+                    , ( tgv, callR "Rt.epElem" [ v e, mkNum (n 0), mkNum (n 2) ] )
+                    , ( xsym, callR "Rt.epSymOf" [ v opv, mkNum (v cbufW) ] )
+                    ]
+                    (iff (mkBool (cmpW RCeq (tagIs (v xsym) RtLayout.tagSymbol) (n 0)))
+                        (mkNum (n (-1)))
+                        (lets
+                            [ ( isIn, callR "Rt.epSymIs" [ v xsym, mkNum (iadd (v cbufW) (n 56)), mkNum (n 0) ] )
+                            , ( isOut, callR "Rt.epSymIs" [ v xsym, mkNum (iadd (v cbufW) (n 64)), mkNum (n 0) ] )
+                            , ( isAppend, callR "Rt.epSymIs" [ v xsym, mkNum (iadd (v cbufW) (n 72)), mkNum (n 0) ] )
+                            , ( isDup, callR "Rt.epSymIs" [ v xsym, mkNum (iadd (v cbufW) (n 80)), mkNum (n 0) ] )
+                            , ( isHdoc, callR "Rt.epSymIs" [ v xsym, mkNum (iadd (v cbufW) (n 88)), mkNum (n 0) ] )
+                            , ( isHstr, callR "Rt.epSymIs" [ v xsym, mkNum (iadd (v cbufW) (n 96)), mkNum (n 0) ] )
+                            , ( kindV
+                              , iff (v isIn)
+                                    (mkNum (n RtLayout.epKindIn))
+                                    (iff (v isOut)
+                                        (mkNum (n RtLayout.epKindOut))
+                                        (iff (v isAppend)
+                                            (mkNum (n RtLayout.epKindAppend))
+                                            (iff (v isDup)
+                                                (mkNum (n RtLayout.epKindDup))
+                                                (iff (v isHdoc)
+                                                    (mkNum (n RtLayout.epKindHdoc))
+                                                    (iff (v isHstr)
+                                                        (mkNum (n RtLayout.epKindHstr))
+                                                        (mkNum (n (-1)))
+                                                    )
+                                                )
+                                            )
+                                        )
+                                    )
+                              )
+                            , ( fdN, callR "Rt.epNum" [ v fdv, mkNum (v cbufW) ] )
+                            , ( fdOk
+                              , iff (inHdocHstr)
+                                    (mkBool (cmpW RCeq (wOf (v fdN)) (n 0)))
+                                    (or2 (mkBool (cmpW RCeq (wOf (v fdN)) (n 1))) (mkBool (cmpW RCeq (wOf (v fdN)) (n 2))))
+                              )
+                            ]
+                            (iff (mkBool (cmpW RClts (wOf (v kindV)) (n 0)))
+                                (mkNum (n (-1)))
+                                (iff (mkBool (cmpW RCeq (tagIs (v fdN) RtLayout.tagNumber) (n 0)))
+                                    (mkNum (n (-1)))
+                                    (iff (v fdOk)
+                                        (iff (v isDup)
+                                            (lets
+                                                [ ( dfdN, callR "Rt.epNum" [ v tgv, mkNum (v cbufW) ] ) ]
+                                                (iff (mkBool (cmpW RCeq (tagIs (v dfdN) RtLayout.tagNumber) (n 0)))
+                                                    (mkNum (n (-1)))
+                                                    (iff (or2 (mkBool (cmpW RCeq (wOf (v dfdN)) (n 1))) (mkBool (cmpW RCeq (wOf (v dfdN)) (n 2))))
+                                                        (storeDup)
+                                                        (mkNum (n (-1)))
+                                                    )
+                                                )
+                                            )
+                                            (lets
+                                                [ ( sN, callR "Rt.epStr" [ v tgv, mkNum (v cbufW) ] ) ]
+                                                (iff (mkBool (cmpW RCeq (tagIs (v sN) RtLayout.tagString) (n 0)))
+                                                    (mkNum (n (-1)))
+                                                    (lets
+                                                        [ ( bufW
+                                                          , callW "malloc"
+                                                                [ iadd (lenOf (v sN))
+                                                                        (wOf (iff (v isHstr) (mkNum (n 1)) (mkNum (n 0))))
+                                                                ]
+                                                          )
+                                                        , ( b 38, iff (mkBool (cmpW RCeq (v bufW) (n 0))) haltV (mkNum (n 0)) )
+                                                        , ( b 39, callR "Rt.cStrFill" [ mkNum (v bufW), v sN, mkNum (n 0) ] )
+                                                        , ( b 40
+                                                          , iff (v isHstr)
+                                                                (lets
+                                                                    [ ( b 41, Unsafe (RawByteStore { ptr = v bufW, index = lenOf (v sN), value = n 10 }) ) ]
+                                                                    (lets
+                                                                        [ ( b 42, Unsafe (RawByteStore { ptr = v bufW, index = iadd (lenOf (v sN)) (n 1), value = n 0 }) ) ]
+                                                                        mkNil
+                                                                    )
+                                                                )
+                                                                mkNil
+                                                          )
+                                                        ]
+                                                        (iff (hdocHstr)
+                                                            (storeBody)
+                                                            (storePath)
+                                                        )
+                                                    )
+                                                )
+                                            )
+                                        )
+                                        (mkNum (n (-1)))
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+
+
+
+
+{-| epCountStdin arrN jN accN — redirs[0..j) with fd == 0, counting j DOWN
+(the caller passes nredirs).  TAIL; a NULL array is legal (count 0).
+-}
+epCountStdinDefun : Defun
+epCountStdinDefun =
+    let
+        arrN =
+            p1
+
+        jN =
+            p2
+
+        accN =
+            p3
+
+        fdW =
+            b 4
+    in
+    lam "Rt.epCountStdin" [ arrN, jN, accN ]
+        (iff (mkBool (cmpW RCles (wOf (v jN)) (n 1)))
+            (v accN)
+            (lets
+                [ ( fdW, Unsafe (RawWordLoad { ptr = wOf (v arrN), index = iadd (imul (isub (wOf (v jN)) (n 1)) (n RtLayout.epRedirWords)) (n RtLayout.epRedirFdIdx) }) ) ]
+                (App
+                    { fn = GRef { key = "Rt.epCountStdin", force = False }
+                    , args =
+                        [ v arrN
+                        , mkNum (isub (wOf (v jN)) (n 1))
+                        , mkNum (iadd (wOf (v accN)) (cmpW RCeq (v fdW) (n 0)))
+                        ]
+                    }
+                )
+            )
+        )
+
+
+{-| The decode-tree free walk — Zig's planFree/pipeFree/cmdFree over the
+flat blob, reading each level's COUNT so exactly the decoded prefix is
+freed (the running-count discipline above).  free(0) is a C no-op; a NULL
+array is never walked.  All three loops are SELF-TAIL; frame-free,
+non-allocating (free is a raw call).
+-}
+epFreeChainsDefun : Defun
+epFreeChainsDefun =
+    let
+        progN =
+            p1
+
+        chainsN =
+            p2
+
+        iN =
+            p3
+
+        nW =
+            b 4
+
+        pipeW =
+            b 5
+    in
+    lam "Rt.epFreeChains" [ progN, chainsN, iN ]
+        (lets
+            [ ( nW, Unsafe (RawWordLoad { ptr = wOf (v progN), index = n RtLayout.epProgCountIdx }) ) ]
+            (iff (mkBool (cmpW RCges (wOf (v iN)) (v nW)))
+                (lets
+                    [ ( b 6, callW "free" [ wOf (v chainsN) ] )
+                    , ( b 7, callW "free" [ wOf (v progN) ] )
+                    ]
+                    mkNil
+                )
+                (lets
+                    [ ( pipeW, Unsafe (RawWordLoad { ptr = wOf (v chainsN), index = iadd (imul (wOf (v iN)) (n RtLayout.epChainWords)) (n RtLayout.epChainPipeIdx) }) ) ]
+                    (iff (mkBool (cmpW RCne (v pipeW) (n 0)))
+                        (lets
+                            [ ( b 8
+                              , callR "Rt.epFreeCmds"
+                                    [ mkNum (v pipeW)
+                                    , mkNum (Unsafe (RawWordLoad { ptr = v pipeW, index = n RtLayout.epPipeCmdArrIdx }))
+                                    , mkNum (n 0)
+                                    ]
+                              )
+                            ]
+                            (App { fn = GRef { key = "Rt.epFreeChains", force = False }, args = [ v progN, v chainsN, mkNum (iadd (wOf (v iN)) (n 1)) ] })
+                        )
+                        (App { fn = GRef { key = "Rt.epFreeChains", force = False }, args = [ v progN, v chainsN, mkNum (iadd (wOf (v iN)) (n 1)) ] })
+                    )
+                )
+            )
+        )
+
+
+epFreeCmdsDefun : Defun
+epFreeCmdsDefun =
+    let
+        pipeN =
+            p1
+
+        cmdsN =
+            p2
+
+        iN =
+            p3
+
+        nW =
+            b 4
+    in
+    lam "Rt.epFreeCmds" [ pipeN, cmdsN, iN ]
+        (lets
+            [ ( nW, Unsafe (RawWordLoad { ptr = wOf (v pipeN), index = n RtLayout.epPipeCmdCountIdx }) ) ]
+            (iff (mkBool (cmpW RCges (wOf (v iN)) (v nW)))
+                (lets
+                    [ ( b 5, callW "free" [ wOf (v cmdsN) ] )
+                    , ( b 6, callW "free" [ wOf (v pipeN) ] )
+                    ]
+                    mkNil
+                )
+                (lets
+                    [ ( b 7
+                      , callR "Rt.epFreeCmd"
+                            [ mkNum (iadd (wOf (v cmdsN)) (imul (wOf (v iN)) (n (8 * RtLayout.epCmdWords)))) ]
+                      )
+                    ]
+                    (App { fn = GRef { key = "Rt.epFreeCmds", force = False }, args = [ v pipeN, v cmdsN, mkNum (iadd (wOf (v iN)) (n 1)) ] })
+                )
+            )
+        )
+
+
+epFreeCmdDefun : Defun
+epFreeCmdDefun =
+    let
+        cmdAddrN =
+            p1
+
+        argvW =
+            b 4
+
+        redirsW =
+            b 6
+
+        subW =
+            b 8
+    in
+    lam "Rt.epFreeCmd" [ cmdAddrN ]
+        (lets
+            [ ( argvW, Unsafe (RawWordLoad { ptr = wOf (v cmdAddrN), index = n RtLayout.epCmdArgvIdx }) )
+            , ( b 5
+              , iff (mkBool (cmpW RCne (v argvW) (n 0)))
+                    (callR "Rt.epFreeArgv"
+                        [ mkNum (v argvW)
+                        , mkNum (n 0)
+                        , mkNum (Unsafe (RawWordLoad { ptr = wOf (v cmdAddrN), index = n RtLayout.epCmdArgcIdx }))
+                        ]
+                    )
+                    mkNil
+              )
+            , ( redirsW, Unsafe (RawWordLoad { ptr = wOf (v cmdAddrN), index = n RtLayout.epCmdRedirsIdx }) )
+            , ( b 7
+              , iff (mkBool (cmpW RCne (v redirsW) (n 0)))
+                    (callR "Rt.epFreeRedirs"
+                        [ mkNum (v redirsW)
+                        , mkNum (n 0)
+                        , mkNum (Unsafe (RawWordLoad { ptr = wOf (v cmdAddrN), index = n RtLayout.epCmdNredirsIdx }))
+                        ]
+                    )
+                    mkNil
+              )
+            , ( subW, Unsafe (RawWordLoad { ptr = wOf (v cmdAddrN), index = n RtLayout.epCmdSubIdx }) )
+            , ( b 9
+              , iff (mkBool (cmpW RCne (v subW) (n 0)))
+                    (lets
+                        [ ( b 10
+                          , callR "Rt.epFreeChains"
+                                [ mkNum (v subW)
+                                , mkNum (Unsafe (RawWordLoad { ptr = v subW, index = n RtLayout.epProgChainsIdx }))
+                                , mkNum (n 0)
+                                ]
+                          )
+                        , ( b 11, callW "free" [ v subW ] )
+                        ]
+                        mkNil
+                    )
+                    mkNil
+              )
+            ]
+            mkNil
+        )
+
+
+epFreeArgvDefun : Defun
+epFreeArgvDefun =
+    let
+        arrN =
+            p1
+
+        jN =
+            p2
+
+        nN =
+            p3
+    in
+    lam "Rt.epFreeArgv" [ arrN, jN, nN ]
+        (iff (mkBool (cmpW RCges (wOf (v jN)) (wOf (v nN))))
+            (lets [ ( b 4, callW "free" [ wOf (v arrN) ] ) ] mkNil)
+            (lets
+                [ ( b 5, callW "free" [ Unsafe (RawWordLoad { ptr = wOf (v arrN), index = wOf (v jN) }) ] ) ]
+                (App { fn = GRef { key = "Rt.epFreeArgv", force = False }, args = [ v arrN, mkNum (iadd (wOf (v jN)) (n 1)), v nN ] })
+            )
+        )
+
+
+epFreeRedirsDefun : Defun
+epFreeRedirsDefun =
+    let
+        arrN =
+            p1
+
+        jN =
+            p2
+
+        nN =
+            p3
+    in
+    lam "Rt.epFreeRedirs" [ arrN, jN, nN ]
+        (iff (mkBool (cmpW RCges (wOf (v jN)) (wOf (v nN))))
+            (lets [ ( b 4, callW "free" [ wOf (v arrN) ] ) ] mkNil)
+            (lets
+                [ ( b 5, callW "free" [ Unsafe (RawWordLoad { ptr = wOf (v arrN), index = iadd (imul (wOf (v jN)) (n RtLayout.epRedirWords)) (n RtLayout.epRedirPathIdx) }) ] )
+                , ( b 6, callW "free" [ Unsafe (RawWordLoad { ptr = wOf (v arrN), index = iadd (imul (wOf (v jN)) (n RtLayout.epRedirWords)) (n RtLayout.epRedirBodyIdx) }) ] )
+                ]
+                (App { fn = GRef { key = "Rt.epFreeRedirs", force = False }, args = [ v arrN, mkNum (iadd (wOf (v jN)) (n 1)), v nN ] })
+            )
+        )
+
+
 helperDefuns : Bool -> List Defun
 helperDefuns rec =
     [ deepEqDefun rec
@@ -2935,6 +4610,27 @@ helperDefuns rec =
     , globSortGoDefun
     , globBuildGoDefun
     , cStrCopyGoDefun
+    , epUnwrapDefun "Rt.epNum" 16 RtLayout.tagNumber
+    , epUnwrapDefun "Rt.epStr" 8 RtLayout.tagString
+    , epUnwrapDefun "Rt.epSymOf" 24 RtLayout.tagSymbol
+    , epSymIsDefun
+    , epCountDefun
+    , epElemDefun
+    , epProgDefun
+    , epProgGoDefun
+    , epChainDefun
+    , epPipelineDefun
+    , epPipeGoDefun
+    , epCmdDefun
+    , epArgvGoDefun
+    , epRedirsGoDefun
+    , epRedirDefun
+    , epCountStdinDefun
+    , epFreeChainsDefun
+    , epFreeCmdsDefun
+    , epFreeCmdDefun
+    , epFreeArgvDefun
+    , epFreeRedirsDefun
     ]
 
 
@@ -3887,4 +5583,5 @@ primDefuns consArr rec eqPtrFast =
     , getenvDefun
     , setenvDefun
     , globDefun
+    , execPlanDefun
     ]

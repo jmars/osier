@@ -868,8 +868,8 @@ checks =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 101 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers)"
-        (List.length (Rt.program True True True) == 101
+    , check "rt program: 123 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers)"
+        (List.length (Rt.program True True True) == 123
             && List.all (\d -> String.startsWith "Rt." d.key) (Rt.program True True True)
             && List.any
                 (\d ->
@@ -963,6 +963,7 @@ checks =
         )
     , check "rt call graph: every RawCall target is a program key AND declared in rtDeps (the seed-closure skew must-fail)"
         (let
+
             syms key =
                 case List.filter (\d -> d.key == key) (Rt.program True True True) of
                     d :: _ ->

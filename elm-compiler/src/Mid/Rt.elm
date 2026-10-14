@@ -113,6 +113,7 @@ impls =
         , ( "getenv", { key = "Rt.getenv", arity = 1 } )
         , ( "setenv", { key = "Rt.setenv", arity = 2 } )
         , ( "glob", { key = "Rt.glob", arity = 1 } )
+        , ( "exec-plan", { key = "Rt.exec-plan", arity = 1 } )
         ]
 
 
@@ -257,6 +258,50 @@ rtDeps =
         , ( "Rt.globSortGo", [ "Rt.globSortShift" ] )
         , ( "Rt.globSortShift", [ "Rt.globStrLess" ] )
         , ( "Rt.globBuildGo", [ "Rt.cStrLenGo", "Rt.cStrCopyGo", "Rt.cons", "Rt.intern" ] )
+        , -- ===== exec-plan DECODE (zigretire stage 3 GROUP 3B-2a).  The
+          -- ep* helpers are ALL non-allocating (the whole decode is
+          -- safepoint-free — see RtPrims' execPlanDefun doc); the ep* ->
+          -- ep* edges below are plain callR closures, and epCmd <-> epProg
+          -- is a genuine CYCLE (the subshell recursion) — fine for both the
+          -- seeds closure and the allocating fixed point, both of which are
+          -- fixed points over this table.  The five loop bodies that INLINE
+          -- tagCountState (epProgGo/epPipeGo/epCmd/epArgvGo/epRedirsGo)
+          -- carry its epSymIs edge here too — the call sits in THEIR body
+          -- after inlining, so the call-graph row reads it there.
+          ( "Rt.exec-plan", [ "Rt.epProg", "Rt.epFreeChains" ] )
+        , ( "Rt.epProg", [ "Rt.epCount", "Rt.epProgGo", "Rt.epFreeChains" ] )
+        , ( "Rt.epProgGo", [ "Rt.epSymIs", "Rt.epChain" ] )
+        , ( "Rt.epChain", [ "Rt.epCount", "Rt.epElem", "Rt.epSymOf", "Rt.epSymIs", "Rt.epPipeline" ] )
+        , ( "Rt.epPipeline", [ "Rt.epCount", "Rt.epPipeGo", "Rt.epFreeCmds" ] )
+        , ( "Rt.epPipeGo", [ "Rt.epSymIs", "Rt.epCmd" ] )
+        , ( "Rt.epCmd"
+          , [ "Rt.epSymIs"
+            , "Rt.epCount"
+            , "Rt.epElem"
+            , "Rt.epArgvGo"
+            , "Rt.epRedirsGo"
+            , "Rt.epProg"
+            , "Rt.epFreeArgv"
+            , "Rt.epFreeRedirs"
+            , "Rt.epFreeChains"
+            , "Rt.epCountStdin"
+            ]
+          )
+        , ( "Rt.epArgvGo", [ "Rt.epSymIs", "Rt.epStr", "Rt.cStrFill", "Rt.epFreeArgv" ] )
+        , ( "Rt.epRedirsGo", [ "Rt.epSymIs", "Rt.epRedir", "Rt.epFreeRedirs" ] )
+        , ( "Rt.epRedir", [ "Rt.epCount", "Rt.epElem", "Rt.epSymOf", "Rt.epSymIs", "Rt.epNum", "Rt.epStr", "Rt.cStrFill" ] )
+        , ( "Rt.epCount", [ "Rt.epSymIs" ] )
+        , ( "Rt.epSymIs", [] )
+        , ( "Rt.epElem", [] )
+        , ( "Rt.epNum", [ "Rt.epSymIs" ] )
+        , ( "Rt.epStr", [ "Rt.epSymIs" ] )
+        , ( "Rt.epSymOf", [ "Rt.epSymIs" ] )
+        , ( "Rt.epCountStdin", [] )
+        , ( "Rt.epFreeChains", [ "Rt.epFreeCmds" ] )
+        , ( "Rt.epFreeCmds", [ "Rt.epFreeCmd" ] )
+        , ( "Rt.epFreeCmd", [ "Rt.epFreeArgv", "Rt.epFreeRedirs", "Rt.epFreeChains" ] )
+        , ( "Rt.epFreeArgv", [] )
+        , ( "Rt.epFreeRedirs", [] )
         -- globLastSlash/globScanGo/globStrLess/globSortShift/globSortGo/
         -- globBuildGo recurse through `App` on their OWN key (the SF2
         -- pattern: the in-frame loop), so they name no self RawCall edge.
@@ -364,6 +409,20 @@ allocating =
         rtProgram =
             program True True True ++ gcProgram
 
+        -- (zigretire stage 3 GROUP 3B-2a) THE ONE MANUAL OVERRIDE: Rt.exec-plan's
+        -- only allocating operation is the rt_exec_run C seat, and the walker
+        -- cannot see through C — RawCallRaw is classified alloc-free BY
+        -- CONTRACT, which every other seat honours and this one CANNOT (the
+        -- seat runs the program and builds the TAGGED result in the ZIG GC —
+        -- that is the whole point of the 3B-2a/3B-2b/3B-2c split).  Declaring
+        -- it allocating here keeps the pairing the classification exists to
+        -- guarantee: the defun gets a ROOTED frame, so the plan Value param
+        -- survives the seat's collections.  Only C-heap raw temps (the blob,
+        -- the cbuf, st) cross the seat call, which is what makes the frame
+        -- sufficient.  The TestMain partition row pins membership.
+        manualAllocating =
+            Set.fromList [ "Rt.exec-plan" ]
+
         -- fixed point: k allocates iff k has a DIRECT safepoint or any
         -- rtDeps edge of k lands in the set.
         grow : Set String -> Set String
@@ -392,7 +451,7 @@ allocating =
             else
                 grow new
     in
-    grow (Set.fromList (List.filter direct rtProgram |> List.map .key))
+    grow (Set.union manualAllocating (Set.fromList (List.filter direct rtProgram |> List.map .key)))
 
 
 

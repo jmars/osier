@@ -3,6 +3,13 @@ module Mid.RtLayout exposing
     , i32Bytes
     , descArityOffset, descCacheOffset, descCodeOffset, descNcapsOffset, descQbeFields
     , descTotalBytes, direntNameOffset
+    , epChainOpIdx, epChainPipeIdx, epChainWords
+    , epCmdArgcIdx, epCmdArgvIdx, epCmdNredirsIdx, epCmdRedirsIdx, epCmdSubIdx, epCmdWords
+    , epKindAppend, epKindDup, epKindHdoc, epKindHstr, epKindIn, epKindOut
+    , epOpAnd, epOpOr, epOpSeq
+    , epPipeCmdArrIdx, epPipeCmdCountIdx
+    , epProgChainsIdx, epProgCountIdx
+    , epRedirBodyIdx, epRedirDupfdIdx, epRedirFdIdx, epRedirKindIdx, epRedirPathIdx, epRedirWords
     , lenFieldOffset, lenFieldWord
     , maxArity
     , metaArityOffset, metaCodeOffset, metaNameOffset, metaSizeBytes
@@ -339,6 +346,171 @@ retArityOffset =
 direntNameOffset : Int
 direntNameOffset =
     19
+
+
+
+-- ============================ the exec-plan DECODE blob ============================
+-- (zigretire stage 3 GROUP 3B-2a.)  The Mid `exec-plan` body (Rt.exec-plan +
+-- the RtPrims ep* helpers) decodes the TAGGED plan Value into a flat C-heap
+-- word blob that the rt_exec_run seat (tools/qbe/rt.zig) reads back and
+-- rebuilds the Zig RProg tree from — so these offsets are a cross-ABI
+-- contract exactly like Desc/Meta/Ret, asserted by rt.zig's comptime rows
+-- (the seat's file; the census's COMPTIME leg names them there).  All
+-- indexes are WORD offsets into a malloc'd record; every "pointer" slot is
+-- a char* or a record pointer with 0 = absent.
+--
+--   prog   = [ nchains, chains* ]                    (chains* 0 iff nchains 0)
+--   chain  = { op, pipe* }        op: epOpSeq/And/Or
+--   pipe   = [ ncmds, cmds* ]                        (>= 1 by decode)
+--   cmd    = { argv*, argc, redirs*, nredirs, sub* } argc doubles as the
+--            running fill count (the partial-free discipline); argv*/sub*
+--            0 = empty, redirs* 0 = none
+--   redir  = { kind, fd, path*, dup_fd, body* }      kind: epKindIn..epKindHstr
+--   argv   = char*[argc]  (NUL-terminated strings, Mid-malloc'd)
+--
+-- The op/kind CODES are part of the same contract: Mid writes the integer,
+-- the seat maps it back to the Zig enum, so they are constants here too and
+-- asserted against @intFromEnum on the Zig side.
+
+
+epProgCountIdx : Int
+epProgCountIdx =
+    0
+
+
+epProgChainsIdx : Int
+epProgChainsIdx =
+    1
+
+
+epChainWords : Int
+epChainWords =
+    2
+
+
+epChainOpIdx : Int
+epChainOpIdx =
+    0
+
+
+epChainPipeIdx : Int
+epChainPipeIdx =
+    1
+
+
+epPipeCmdCountIdx : Int
+epPipeCmdCountIdx =
+    0
+
+
+epPipeCmdArrIdx : Int
+epPipeCmdArrIdx =
+    1
+
+
+epCmdWords : Int
+epCmdWords =
+    5
+
+
+epCmdArgvIdx : Int
+epCmdArgvIdx =
+    0
+
+
+epCmdArgcIdx : Int
+epCmdArgcIdx =
+    1
+
+
+epCmdRedirsIdx : Int
+epCmdRedirsIdx =
+    2
+
+
+epCmdNredirsIdx : Int
+epCmdNredirsIdx =
+    3
+
+
+epCmdSubIdx : Int
+epCmdSubIdx =
+    4
+
+
+epRedirWords : Int
+epRedirWords =
+    5
+
+
+epRedirKindIdx : Int
+epRedirKindIdx =
+    0
+
+
+epRedirFdIdx : Int
+epRedirFdIdx =
+    1
+
+
+epRedirPathIdx : Int
+epRedirPathIdx =
+    2
+
+
+epRedirDupfdIdx : Int
+epRedirDupfdIdx =
+    3
+
+
+epRedirBodyIdx : Int
+epRedirBodyIdx =
+    4
+
+
+epOpSeq : Int
+epOpSeq =
+    0
+
+
+epOpAnd : Int
+epOpAnd =
+    1
+
+
+epOpOr : Int
+epOpOr =
+    2
+
+
+epKindIn : Int
+epKindIn =
+    0
+
+
+epKindOut : Int
+epKindOut =
+    1
+
+
+epKindAppend : Int
+epKindAppend =
+    2
+
+
+epKindDup : Int
+epKindDup =
+    3
+
+
+epKindHdoc : Int
+epKindHdoc =
+    4
+
+
+epKindHstr : Int
+epKindHstr =
+    5
 
 
 
