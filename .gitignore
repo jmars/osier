@@ -31,3 +31,4 @@ tools/bench/elm-corpus/.all-packages.json
 tools/bench/elm-corpus/.fetch-one.sh
 tools/bench/elm-corpus/MODINDEX.tsv
 tools/bench/elm-corpus/.sweep-one.sh
+tools/qbe/.wip/
