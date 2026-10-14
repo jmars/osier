@@ -3361,9 +3361,9 @@ execPlanDefun =
                , -- OOM is LOUD (glob's precedent: halt, never a NULL write).
                  ( b 49, iff (mkBool (cmpW RCeq (v cbufW) (n 0))) haltV (mkNum (n 0)) )
                , ( stW, callW "malloc" [ n 24 ] )
-               , ( b 51, iff (mkBool (cmpW RCeq (v stW) (n 0))) haltV (mkNum (n 0)) )
+               , ( b 66, iff (mkBool (cmpW RCeq (v stW) (n 0))) haltV (mkNum (n 0)) )
                , ( rstW, callW "malloc" [ n (8 * rStWords) ] )
-               , ( b 52, iff (mkBool (cmpW RCeq (v rstW) (n 0))) haltV (mkNum (n 0)) )
+               , ( b 67, iff (mkBool (cmpW RCeq (v rstW) (n 0))) haltV (mkNum (n 0)) )
                ]
                 ++ litBinds
                 ++ runLitStores
@@ -5266,7 +5266,8 @@ rScrB = 16
 rStatus = 17
 rScrC = 18
 rJ = 19
-rStWords = 20
+rEchoI = 20
+rStWords = 21
 
 
 rLoad : Binder -> Int -> Exp
@@ -5439,8 +5440,11 @@ isChildBuiltinDefun =
 
 
 {-| echoGo argvN argcN stN — childBuiltin's echo loop.  Loop state lives in
-stN: rI = current arg index, rScrA = first arg index, rScrB = nl (0/1).
-Self-tail; returns 0 when the args are written.
+stN: rEchoI = current arg index, rScrA = first arg index, rScrB = nl (0/1).
+rEchoI is a DEDICATED slot — rI is the program-loop chain cursor, and this
+loop runs inside it (in-process builtin arm); sharing them ends a subshell
+program after its first echo chain.  Self-tail; returns 0 when the args are
+written.
 -}
 echoGoDefun : Defun
 echoGoDefun =
@@ -5459,7 +5463,7 @@ echoGoDefun =
     in
     lam "Rt.echoGo" [ argvN, argcN, stN ]
         (lets
-            [ ( iW, rLoad stN rI )
+            [ ( iW, rLoad stN rEchoI )
             , ( cbufW, rLoad stN rCbuf )
             ]
             (iff (mkBool (cmpW RCges (v iW) (wOf (v argcN))))
@@ -5478,7 +5482,7 @@ echoGoDefun =
                       )
                     , ( argN, Unsafe (RawWordLoad { ptr = wOf (v argvN), index = v iW }) )
                     , ( b 9, callR "Rt.wStr" [ mkNum (n 1), mkNum (v argN) ] )
-                    , ( b 10, rStore stN rI (iadd (v iW) (n 1)) )
+                    , ( b 10, rStore stN rEchoI (iadd (v iW) (n 1)) )
                     ]
                     (App { fn = GRef { key = "Rt.echoGo", force = False }, args = [ v argvN, v argcN, v stN ] })
                 )
@@ -5646,7 +5650,7 @@ childBuiltinDefun =
                     (lets
                         [ ( b 20, rStore stN rScrB (n 1) )
                         , ( b 21, rStore stN rScrA (n 1) )
-                        , ( b 22, rStore stN rI (n 1) )
+                        , ( b 22, rStore stN rEchoI (n 1) )
                         , ( arg1, Unsafe (RawWordLoad { ptr = wOf (v argvN), index = n 1 }) )
                         , ( isMinusN, iff (mkBool (cmpW RCgts (wOf (v argcN)) (n 1)))
                                     (callR "Rt.cStrEqLit" [ mkNum (v arg1), mkNum (iadd (v cbufW) (n (runOff "-n"))) , mkNum (n 0) ])
@@ -5656,7 +5660,7 @@ childBuiltinDefun =
                                     (lets
                                         [ ( b 24, rStore stN rScrB (n 0) )
                                         , ( b 25, rStore stN rScrA (n 2) )
-                                        , ( b 26, rStore stN rI (n 2) )
+                                        , ( b 26, rStore stN rEchoI (n 2) )
                                         ]
                                         mkNil
                                     )
@@ -6395,7 +6399,7 @@ execGoDefun =
                                                         (lets [ ( b 137, (callW "close" [ v outfdW ]) ) ] mkNil)
                                                         mkNil
                                                         )
-                                                    , ( b 138, iff (mkBool (cmpW RCgts (v errfdW) (n 2)))
+                                                    , ( b 138, iff (and2 (mkBool (cmpW RCgts (v errfdW) (n 2))) (mkBool (cmpW RCne (v errfdW) (v outfdW))))
                                                         (lets [ ( b 138, (callW "close" [ v errfdW ]) ) ] mkNil)
                                                         mkNil
                                                         )
@@ -6646,7 +6650,7 @@ execGoDefun =
                                             (lets [ ( b 223, (callW "close" [ v outfdW ]) ) ] mkNil)
                                             mkNil
                                             )
-                                        , ( b 224, iff (mkBool (cmpW RCgts (v errfdW) (n 2)))
+                                        , ( b 224, iff (and2 (mkBool (cmpW RCgts (v errfdW) (n 2))) (mkBool (cmpW RCne (v errfdW) (v outfdW))))
                                             (lets [ ( b 224, (callW "close" [ v errfdW ]) ) ] mkNil)
                                             mkNil
                                             )
@@ -6664,7 +6668,7 @@ execGoDefun =
                                             (lets [ ( b 231, (callW "close" [ v outfdW ]) ) ] mkNil)
                                             mkNil
                                             )
-                                        , ( b 232, iff (mkBool (cmpW RCgts (v errfdW) (n 2)))
+                                        , ( b 232, iff (and2 (mkBool (cmpW RCgts (v errfdW) (n 2))) (mkBool (cmpW RCne (v errfdW) (v outfdW))))
                                             (lets [ ( b 232, (callW "close" [ v errfdW ]) ) ] mkNil)
                                             mkNil
                                             )

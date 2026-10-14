@@ -351,6 +351,11 @@ run execmal      main   "$(read_expected execmal)"
 # single-chain plans where the op never fires.  Expected = the ZIG arm's own
 # output on this fixture (the implementation being replaced).
 run execchain    main   "$(read_expected execchain)"
+# --- exec-plan fix round: the IN-PROCESS ECHO SLOT (rEchoI) — a subshell
+# whose inner program has TWO chains with an ECHO BUILTIN in chain 0; the
+# builtin arm runs inside the program loop, and a cursor shared with the
+# loop's rI ends the program after the echo chain (RED printed "0|a\n|").
+run execsubchain main   "$(read_expected execsubchain)"
 # --- 3B-2c (exec-plan SLURP+RESULT in Mid): the slurp GROW arm through
 # exec — captured output beyond the 64 KiB read chunk (168894 bytes, two
 # grows), with stderr EOF-ing empty AFTER the out slurp's grow (the shared
