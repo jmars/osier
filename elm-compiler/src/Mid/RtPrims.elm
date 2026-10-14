@@ -3737,11 +3737,14 @@ epCmdDefun =
         subN =
             b 21
 
-        t1 =
-            b 22
-
         nstdin =
             b 23
+
+        agoGo =
+            b 20
+
+        rgoGo =
+            b 49
 
         -- free this level's argv (strings + array), then clear the slots.
         freeArgv =
@@ -3765,17 +3768,13 @@ epCmdDefun =
             Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx, value = n 0 })
 
         freeSub =
-            lets
-                [ ( b 24
-                  , callR "Rt.epFreeChains"
-                        [ mkNum (Unsafe (RawWordLoad { ptr = Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx }), index = n RtLayout.epProgChainsIdx }))
-                        , mkNum (Unsafe (RawWordLoad { ptr = Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx }), index = n RtLayout.epProgChainsIdx }))
-                        , mkNum (n 0)
-                        ]
-                  )
-                , ( b 25, callW "free" [ Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx }) ] )
+            -- epFreeChains frees BOTH the sub's chains array AND the sub prog
+            -- record (its `free progN` leg) — no separate free of the record.
+            callR "Rt.epFreeChains"
+                [ mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx }))
+                , mkNum (Unsafe (RawWordLoad { ptr = Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx }), index = n RtLayout.epProgChainsIdx }))
+                , mkNum (n 0)
                 ]
-                mkNil
 
         unwindAll =
             -- reverse build order: sub, redirs, argv
@@ -3787,6 +3786,25 @@ epCmdDefun =
                 , ( b 30, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = n 0 }) )
                 ]
                 (mkNum (n (-1)))
+
+        stdinGuard =
+            -- the stdin-exclusivity check (Zig decodeCmd's tail, C:1358-1366):
+            -- applies to BOTH plain commands and subshells, after the sub
+            -- dispatch (the first cut nested it in the subshell arm only,
+            -- so a plain `cat <a <b` was accepted — wrong, not loud).
+            lets
+                [ ( nstdin
+                  , callR "Rt.epCountStdin"
+                        [ mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx }))
+                        , mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdNredirsIdx }))
+                        , mkNum (n 0)
+                        ]
+                  )
+                ]
+                (iff (mkBool (cmpW RCgts (wOf (v nstdin)) (n 1)))
+                    (unwindAll)
+                    (mkNum (n 0))
+                )
     in
     lam "Rt.epCmd" [ e, stN, cAddrN ]
         (lets
@@ -3810,91 +3828,94 @@ epCmdDefun =
                     ]
                     (iff (or2 (mkBool (cmpW RClts (wOf (v acnt)) (n 0))) (mkBool (cmpW RCgts (wOf (v acnt)) (n 256))))
                         (mkNum (n (-1)))
-                        (iff (mkBool (cmpW RCeq (wOf (v acnt)) (n 0)))
-                            (mkNum (n 0))
-                            (lets
-                                [ ( argvW, callW "malloc" [ imul (wOf (v acnt)) (n 8) ] )
-                                , ( b 36, iff (mkBool (cmpW RCeq (v argvW) (n 0))) haltV (mkNum (n 0)) )
-                                , ( b 37, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = v argvW }) )
-                                , ( ago, callR "Rt.epArgvGo" [ v argvv, v stN, v cAddrN ] )
-                                ]
-                                (iff (mkBool (cmpW RClts (wOf (v ago)) (n 0)))
-                                    -- epArgvGo already freed the strings and
-                                    -- the array; clear the slot and stop.
-                                    (lets [ ( b 38, clearArgv ) ] (mkNum (n (-1))))
+                        (lets
+                            [ ( ago
+                              , iff (mkBool (cmpW RCeq (wOf (v acnt)) (n 0)))
+                                    (mkNum (n 0))
                                     (lets
-                                        [ ( limRedir, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 2, value = n 64 }) )
-                                        , ( rcnt, callR "Rt.epCount" [ v redirsv, v stN, mkNum (n 0) ] )
+                                        [ ( argvW, callW "malloc" [ imul (wOf (v acnt)) (n 8) ] )
+                                        , ( b 36, iff (mkBool (cmpW RCeq (v argvW) (n 0))) haltV (mkNum (n 0)) )
+                                        , ( b 37, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = v argvW }) )
+                                        , ( agoGo, callR "Rt.epArgvGo" [ v argvv, v stN, v cAddrN ] )
                                         ]
-                                        (iff (or2 (mkBool (cmpW RClts (wOf (v rcnt)) (n 0))) (mkBool (cmpW RCgts (wOf (v rcnt)) (n 64))))
-                                            (lets
-                                                [ ( b 39, iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0))) (freeArgv) mkNil)
-                                                , ( b 40, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = n 0 }) )
-                                                ]
-                                                (mkNum (n (-1)))
-                                            )
-                                            (iff (mkBool (cmpW RCeq (wOf (v rcnt)) (n 0)))
-                                                (mkNum (n 0))
-                                                (lets
-                                                    [ ( redirsW, callW "malloc" [ imul (wOf (v rcnt)) (n (8 * RtLayout.epRedirWords)) ] )
-                                                    , ( b 41, iff (mkBool (cmpW RCeq (v redirsW) (n 0))) haltV (mkNum (n 0)) )
-                                                    , ( b 42, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx, value = v redirsW }) )
-                                                    , ( rgo, callR "Rt.epRedirsGo" [ v redirsv, v stN, v cAddrN ] )
-                                                    ]
-                                                    (iff (mkBool (cmpW RClts (wOf (v rgo)) (n 0)))
-                                                        -- epRedirsGo freed the
-                                                        -- redir prefix + array;
-                                                        -- then argv too.
-                                                        (lets
-                                                            [ ( b 43, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx, value = n 0 }) )
-                                                            , ( b 44, iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0))) (freeArgv) mkNil)
-                                                            , ( b 45, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = n 0 }) )
-                                                            ]
-                                                            (mkNum (n (-1)))
+                                        (iff (mkBool (cmpW RClts (wOf (v agoGo)) (n 0)))
+                                            -- epArgvGo already freed the strings and
+                                            -- the array; clear the slot and stop.
+                                            (lets [ ( b 38, clearArgv ) ] (mkNum (n (-1))))
+                                            (mkNum (n 0))
+                                        )
+                                    )
+                              )
+                            ]
+                            (iff (mkBool (cmpW RClts (wOf (v ago)) (n 0)))
+                                (mkNum (n (-1)))
+                                (lets
+                                    [ ( limRedir, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 2, value = n 64 }) )
+                                    , ( rcnt, callR "Rt.epCount" [ v redirsv, v stN, mkNum (n 0) ] )
+                                    ]
+                                    (iff (or2 (mkBool (cmpW RClts (wOf (v rcnt)) (n 0))) (mkBool (cmpW RCgts (wOf (v rcnt)) (n 64))))
+                                        (lets
+                                            [ ( b 39, iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0))) (freeArgv) mkNil)
+                                            , ( b 40, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = n 0 }) )
+                                            ]
+                                            (mkNum (n (-1)))
+                                        )
+                                        (lets
+                                            [ ( rgo
+                                              , iff (mkBool (cmpW RCeq (wOf (v rcnt)) (n 0)))
+                                                    (mkNum (n 0))
+                                                    (lets
+                                                        [ ( redirsW, callW "malloc" [ imul (wOf (v rcnt)) (n (8 * RtLayout.epRedirWords)) ] )
+                                                        , ( b 41, iff (mkBool (cmpW RCeq (v redirsW) (n 0))) haltV (mkNum (n 0)) )
+                                                        , ( b 42, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx, value = v redirsW }) )
+                                                        , ( rgoGo, callR "Rt.epRedirsGo" [ v redirsv, v stN, v cAddrN ] )
+                                                        ]
+                                                        (iff (mkBool (cmpW RClts (wOf (v rgoGo)) (n 0)))
+                                                            -- epRedirsGo freed the
+                                                            -- redir prefix + array;
+                                                            -- then argv too.
+                                                            (lets
+                                                                [ ( b 43, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx, value = n 0 }) )
+                                                                , ( b 44, iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0))) (freeArgv) mkNil)
+                                                                , ( b 45, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = n 0 }) )
+                                                                ]
+                                                                (mkNum (n (-1)))
+                                                            )
+                                                            (mkNum (n 0))
                                                         )
-                                                        (lets
-                                                            [ ( subState, tagCountState (v subv) (v cbufW) )
-                                                            ]
-                                                            (iff (mkBool (cmpW RCeq (wOf (v subState)) (n 2)))
+                                                    )
+                                              )
+                                            ]
+                                            (iff (mkBool (cmpW RClts (wOf (v rgo)) (n 0)))
+                                                (mkNum (n (-1)))
+                                                (lets
+                                                    [ ( subState, tagCountState (v subv) (v cbufW) ) ]
+                                                    (iff (mkBool (cmpW RCeq (wOf (v subState)) (n 2)))
+                                                        (unwindAll)
+                                                        (iff (mkBool (cmpW RCeq (wOf (v subState)) (n 0)))
+                                                            -- plain command: empty argv is illegal (C:1343)
+                                                            (iff (mkBool (cmpW RCeq (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0)))
                                                                 (unwindAll)
-                                                                (iff (mkBool (cmpW RCeq (wOf (v subState)) (n 0)))
-                                                                    -- plain command: empty argv is illegal (C:1343)
-                                                                    (iff (mkBool (cmpW RCeq (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0)))
-                                                                        (unwindAll)
-                                                                        (mkNum (n 0))
-                                                                    )
-                                                                    -- subshell: no argv allowed, depth < 32
-                                                                    (iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0)))
+                                                                stdinGuard
+                                                            )
+                                                            -- subshell: no argv allowed, depth < 32
+                                                            (iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0)))
+                                                                (unwindAll)
+                                                                (lets
+                                                                    [ ( depthW, Unsafe (RawWordLoad { ptr = wOf (v stN), index = n 1 }) )
+                                                                    ]
+                                                                    (iff (mkBool (cmpW RCges (v depthW) (n 32)))
                                                                         (unwindAll)
                                                                         (lets
-                                                                            [ ( depthW, Unsafe (RawWordLoad { ptr = wOf (v stN), index = n 1 }) )
+                                                                            [ ( b 46, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 1, value = iadd (v depthW) (n 1) }) )
+                                                                            , ( subN, callR "Rt.epProg" [ v subv, v stN ] )
+                                                                            , ( b 47, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 1, value = v depthW }) )
                                                                             ]
-                                                                            (iff (mkBool (cmpW RCges (v depthW) (n 32)))
+                                                                            (iff (mkBool (cmpW RClts (wOf (v subN)) (n 0)))
                                                                                 (unwindAll)
                                                                                 (lets
-                                                                                    [ ( t1, cdrV (cdrV (v subv)) )
-                                                                                    , ( b 46, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 1, value = iadd (v depthW) (n 1) }) )
-                                                                                    , ( subN, callR "Rt.epProg" [ v subv, v stN ] )
-                                                                                    , ( b 47, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 1, value = v depthW }) )
-                                                                                    ]
-                                                                                    (iff (mkBool (cmpW RClts (wOf (v subN)) (n 0)))
-                                                                                        (unwindAll)
-                                                                                        (lets
-                                                                                            [ ( b 48, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx, value = wOf (v subN) }) )
-                                                                                            , ( nstdin
-                                                                                              , callR "Rt.epCountStdin"
-                                                                                                    [ mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx }))
-                                                                                                    , mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdNredirsIdx }))
-                                                                                                    , mkNum (n 0)
-                                                                                                    ]
-                                                                                              )
-                                                                                            ]
-                                                                                            (iff (mkBool (cmpW RCgts (wOf (v nstdin)) (n 1)))
-                                                                                                (unwindAll)
-                                                                                                (mkNum (n 0))
-                                                                                            )
-                                                                                        )
-                                                                                    )
+                                                                                    [ ( b 48, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx, value = wOf (v subN) }) ) ]
+                                                                                    stdinGuard
                                                                                 )
                                                                             )
                                                                         )
@@ -4344,7 +4365,10 @@ epCountStdinDefun =
             b 4
     in
     lam "Rt.epCountStdin" [ arrN, jN, accN ]
-        (iff (mkBool (cmpW RCles (wOf (v jN)) (n 1)))
+        -- count DOWN to 0 (index jN-1 .. 0); the first cut stopped at jN <= 1,
+        -- which skipped redirs[0] and so accepted two-stdin plans (wrong, not
+        -- loud) — Zig counts every redir with fd 0.
+        (iff (mkBool (cmpW RCles (wOf (v jN)) (n 0)))
             (v accN)
             (lets
                 [ ( fdW, Unsafe (RawWordLoad { ptr = wOf (v arrN), index = iadd (imul (isub (wOf (v jN)) (n 1)) (n RtLayout.epRedirWords)) (n RtLayout.epRedirFdIdx) }) ) ]
@@ -4495,17 +4519,15 @@ epFreeCmdDefun =
             , ( subW, Unsafe (RawWordLoad { ptr = wOf (v cmdAddrN), index = n RtLayout.epCmdSubIdx }) )
             , ( b 9
               , iff (mkBool (cmpW RCne (v subW) (n 0)))
-                    (lets
-                        [ ( b 10
-                          , callR "Rt.epFreeChains"
-                                [ mkNum (v subW)
-                                , mkNum (Unsafe (RawWordLoad { ptr = v subW, index = n RtLayout.epProgChainsIdx }))
-                                , mkNum (n 0)
-                                ]
-                          )
-                        , ( b 11, callW "free" [ v subW ] )
+                    -- epFreeChains frees BOTH the sub's chains array AND the
+                    -- sub prog record — no separate free (the first cut's
+                    -- `free subW` double-freed it, glibc-aborting every
+                    -- subshell run).
+                    (callR "Rt.epFreeChains"
+                        [ mkNum (v subW)
+                        , mkNum (Unsafe (RawWordLoad { ptr = v subW, index = n RtLayout.epProgChainsIdx }))
+                        , mkNum (n 0)
                         ]
-                        mkNil
                     )
                     mkNil
               )
