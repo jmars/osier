@@ -114,6 +114,7 @@ impls =
         , ( "setenv", { key = "Rt.setenv", arity = 2 } )
         , ( "glob", { key = "Rt.glob", arity = 1 } )
         , ( "exec-plan", { key = "Rt.exec-plan", arity = 1 } )
+        , ( "read-file-as-string", { key = "Rt.read-file-as-string", arity = 1 } )
         ]
 
 
@@ -358,6 +359,23 @@ rtDeps =
         -- DEFAULT route; the RawCall self-tail is midGc-gated), so they
         -- name NO RawCall edge — no entries here.  A future revert to
         -- callR fails TestMain's rt-call-graph check loudly, by design.
+        , -- ===== read-file-as-string (zigretire stage 3 GROUP 3B-3).  The
+          -- C-heap read loop and the byte memcpy are non-allocating (the
+          -- loop state is a malloc'd block; readFull/memGo/malloc/free are
+          -- raw), so Rt.readFileGo and Rt.memGo stay frame-free — the
+          -- acc/tmp raw pointers are sound across iterations exactly while
+          -- no safepoint can intervene, which the partition row pins.  The
+          -- prim itself allocates DIRECTLY (cStrOf, the result RawAllocRaw)
+          -- — no manual override needed, unlike Rt.exec-plan.
+          ( "Rt.read-file-as-string"
+          , [ "Rt.cStrFill"
+            , "Rt.readFull"
+            , "Rt.readFileGo"
+            , "Rt.memGo"
+            ]
+          )
+        , ( "Rt.readFileGo", [ "Rt.readFull", "Rt.memGo" ] )
+        , ( "Rt.memGo", [] )
         ]
 
 

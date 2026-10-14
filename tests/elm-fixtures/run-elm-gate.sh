@@ -321,6 +321,11 @@ run_io iofile  main   "$(read_expected iofile)" hello.txt
 out_cmp iofile
 # ioecho: readLine echo-until-quit — echoed lines + the final Int count.
 run_io ioecho  main   "$(read_expected ioecho)" echo.txt
+# readfile (GROUP 3B-3): read-file-as-string's four arms in one chain —
+# existing / missing (the stderr note IS in the golden via 2>&1) / empty /
+# 70000-byte (chunk 2 + the accumulator grow).  The golden is the ZIG arm's
+# own output (the pre-conversion rt_prim route).
+run readfile  main   "$(read_expected readfile)"
 # --- M7: async Kernel (Task monad + effect-manager loop) ---
 run taskpure     main   "$(read_expected taskpure)"
 run taskseq      main   "$(read_expected taskseq)"

@@ -1912,6 +1912,308 @@ closeDefun =
         )
 
 
+-- ================== read-file-as-string (GROUP 3B-3) ==================
+-- streams.primReadFileAsString (streams.zig:191) as a Mid body — the LAST
+-- prim that still routed through rt_prim, so this closes stage 3's zero-
+-- rt_prim exit condition.  No new Zig seat: openat/read/close/write AND
+-- malloc/free are plain libc symbols under RawCallRaw (the glob precedent).
+--
+-- THE ALLOCATOR SPLIT (why this was deferred until malloc/free were proven
+-- seats): Zig accumulates into a page_allocator ArrayList — NON-MOVING — and
+-- valString's alloc is the ONE GC operation.  A GC-allocRaw copy-on-grow
+-- accumulator is UNSOUND under the moving Zig GC (the boxed pointer goes
+-- stale at the grow safepoint), so the Mid accumulator lives on the C HEAP:
+-- malloc-new + memGo copy + free-old (realloc never needed, and its classic
+-- failure leak — the old pointer lost when realloc returns NULL — is
+-- structurally impossible: the OOM arm keeps the OLD buffer as the result).
+-- The GC heap holds only the path's NUL copy (cStrOf) and the final string.
+--
+-- ZIG PARITY, arm by arm (streams.zig:191-216): ANY openat failure prints
+-- "runtime: cannot open file for read-file-as-string\n" to stderr (fd 2,
+-- write(2) on the interned literal's data+len) and returns "" — the note is
+-- part of the observable contract (the gate's 2>&1 capture pins it); the
+-- read loop is Zig's 65536-byte tmp + appendSlice chunking EXACTLY (there is
+-- NO length cap — the 65536 is the CHUNK size; growth is geometric:
+-- max(2*cap, needed)); read goes through Rt.readFull because Zig's
+-- std.posix.read RETRIES EINTR internally (a bare read would return -1 where
+-- Zig retried); a read error BREAKS with the partial buffer (the rfa-dir
+-- probe: EISDIR on the first read -> ""); append OOM breaks with the old
+-- buffer INTACT (Zig's `catch break` — ArrayList keeps the old allocation on
+-- a failed append, then deinit frees it); the result is valString's exact
+-- shape — alloc len+1, copy len bytes, NUL at [len], tag string with
+-- [data, len] (binary-safe: file bytes may include NULs; nothing reads a
+-- terminator on this path); fd closed and every C allocation freed on the
+-- SINGLE success exit (free(NULL) is a no-op for the empty-file case).
+
+
+{-| `Rt.read-file-as-string path` — primReadFileAsString.  Arity 1, FRAMED
+(allocates: cStrOf, the result RawAllocRaw, and the "" literals).  The loop
+state (fd/tmp/acc/len/cap at words 0..4) and the memcpy block (words 6..8)
+share ONE 72-byte C-heap block; mblk = block+48 is passed to memGo.  All
+state crossing the loop is C-heap or int — the two GC allocations (path copy,
+result) sit OUTSIDE the loop's raw-pointer window, and the result buffer is
+consumed by mkStr before any further allocation (the moving-GC discipline:
+the raw temp is valid only to the next safepoint, and there is none between
+the RawAllocRaw and the mkStr).
+-}
+readFileAsStringDefun : Defun
+readFileAsStringDefun =
+    let
+        path =
+            p1
+
+        -- cStrOf 3: binders 3..6
+        ( cstrBinds, cstr ) =
+            cStrOf 3 (v path)
+
+        fdW =
+            b 7
+
+        blkW =
+            b 8
+
+        blkN =
+            b 9
+
+        tmpW =
+            b 10
+
+        msg =
+            b 11
+
+        blkOOM =
+            b 13
+
+        tmpOOM =
+            b 14
+
+        stStores =
+            [ ( b 16, Unsafe (RawWordStore { ptr = v blkW, index = n 0, value = v fdW }) )
+            , ( b 17, Unsafe (RawWordStore { ptr = v blkW, index = n 1, value = v tmpW }) )
+            , ( b 18, Unsafe (RawWordStore { ptr = v blkW, index = n 2, value = n 0 }) )
+            , ( b 19, Unsafe (RawWordStore { ptr = v blkW, index = n 3, value = n 0 }) )
+            , ( b 20, Unsafe (RawWordStore { ptr = v blkW, index = n 4, value = n 0 }) )
+            ]
+
+        lenW =
+            b 22
+
+        accW =
+            b 23
+
+        dstW =
+            b 24
+    in
+    lam "Rt.read-file-as-string" [ path ]
+        (lets
+            (cstrBinds ++ [ ( fdW, callW "openat" [ n (-100), cstr, n 0, n 0 ] ) ])
+            (iff (mkBool (cmpW RClts (v fdW) (n 0)))
+                -- open failure: the stderr note + "" (Zig's catch arm — ANY
+                -- open error, not just ENOENT)
+                (lets
+                    [ ( msg, Lit (LString "runtime: cannot open file for read-file-as-string\n") )
+                    , ( b 12, callW "write" [ n 2, wOf (v msg), lenOf (v msg) ] )
+                    ]
+                    (Lit (LString ""))
+                )
+                -- success: state block, the read loop, then the ONE exit
+                -- (build the result, free everything, close)
+                (lets
+                    ([ ( blkW, callW "malloc" [ n 72 ] )
+                     , -- OOM is LOUD (glob's precedent: halt, never a NULL
+                       -- write) — nothing else is allocated yet at this point.
+                       ( blkOOM, iff (mkBool (cmpW RCeq (v blkW) (n 0))) haltV (mkNum (n 0)) )
+                     , ( blkN, mkNum (v blkW) )
+                     , ( tmpW, callW "malloc" [ n 65536 ] )
+                     , -- tmp OOM: free the block FIRST (the pairing), then halt.
+                       ( tmpOOM, iff (mkBool (cmpW RCeq (v tmpW) (n 0))) (lets [ ( b 15, callW "free" [ v blkW ] ) ] haltV) (mkNum (n 0)) )
+                     ]
+                        ++ stStores
+                        ++ [ ( b 21, callR "Rt.readFileGo" [ v blkN ] ) ]
+                    )
+                    (lets
+                        [ ( lenW, Unsafe (RawWordLoad { ptr = v blkW, index = n 3 }) )
+                        , ( accW, Unsafe (RawWordLoad { ptr = v blkW, index = n 2 }) )
+                        , ( dstW, Unsafe (RawAllocRaw (iadd (v lenW) (n 1))) )
+                        , ( b 25, Unsafe (RawWordStore { ptr = v blkW, index = n 6, value = v accW }) )
+                        , ( b 26, Unsafe (RawWordStore { ptr = v blkW, index = n 7, value = v dstW }) )
+                        , ( b 27, Unsafe (RawWordStore { ptr = v blkW, index = n 8, value = v lenW }) )
+                        , ( b 28, callR "Rt.memGo" [ mkNum (iadd (v blkW) (n 48)), mkNum (n 0) ] )
+                        , -- valString parity: dst[len] = 0 (the length stays
+                          -- the observable bound; nothing reads past it)
+                          ( b 29, Unsafe (RawByteStore { ptr = v dstW, index = v lenW, value = n 0 }) )
+                        , -- frees BEFORE the mkStr consume: they are raw
+                          -- calls, no safepoint, so dstW stays valid.
+                          ( b 30, callW "free" [ v accW ] )
+                        , ( b 31, callW "free" [ v tmpW ] )
+                        , ( b 32, callW "free" [ v blkW ] )
+                        , ( b 33, callW "close" [ v fdW ] )
+                        ]
+                        (mkStr (v dstW) (v lenW))
+                    )
+                )
+            )
+        )
+
+
+{-| `Rt.readFileGo blkN` — Zig's `while (true)` read loop, one self-tail
+in-frame loop over the 72-byte C block (blkN boxes the block pointer):
+word 0 = fd, 1 = tmp, 2 = acc, 3 = len, 4 = cap.  Each iteration:
+readFull(fd, tmp, 65536) -> nV; nV < 0 -> STOP (read error: Zig's
+`catch break`, partial buffer kept); nV == 0 -> STOP (EOF); else append
+tmp[0..n) to acc (grow first when len+n > cap: newcap = max(2*cap, needed),
+malloc, memGo the old content, free the OLD buffer — on malloc OOM STOP with
+the old buffer INTACT, Zig's `appendSlice catch break`), then the loop.
+FRAME-FREE and non-allocating: no safepoint anywhere (readFull/memGo/
+malloc/free are raw; the state is C-heap), which is what makes the acc/tmp
+raw pointers sound across iterations — the TestMain partition row pins it.
+-}
+readFileGoDefun : Defun
+readFileGoDefun =
+    let
+        blkN =
+            p1
+
+        fdW =
+            b 3
+
+        tmpW =
+            b 4
+
+        nV =
+            b 5
+
+        lenW =
+            b 6
+
+        capW =
+            b 7
+
+        neededW =
+            b 8
+
+        growB =
+            b 9
+    in
+    lam "Rt.readFileGo" [ blkN ]
+        (lets
+            [ ( fdW, Unsafe (RawWordLoad { ptr = wOf (v blkN), index = n 0 }) )
+            , ( tmpW, Unsafe (RawWordLoad { ptr = wOf (v blkN), index = n 1 }) )
+            , ( nV, callR "Rt.readFull" [ mkNum (v fdW), mkNum (v tmpW), mkNum (n 65536) ] )
+            ]
+            (iff (mkBool (cmpW RClts (wOf (v nV)) (n 0)))
+                -- read error: break (partial content is the answer)
+                mkNil
+                (iff (mkBool (cmpW RCeq (wOf (v nV)) (n 0)))
+                    -- EOF: break
+                    mkNil
+                    (lets
+                        [ ( lenW, Unsafe (RawWordLoad { ptr = wOf (v blkN), index = n 3 }) )
+                        , ( capW, Unsafe (RawWordLoad { ptr = wOf (v blkN), index = n 4 }) )
+                        , ( neededW, iadd (v lenW) (wOf (v nV)) )
+                        , ( growB, iff (mkBool (cmpW RCgts (v neededW) (v capW)))
+                            -- grow arm: newcap = max(2*cap, needed)
+                            (lets
+                                -- newcap = max(2*cap, needed), as ARITHMETIC
+                                -- (an iff's branches are VALUE positions and
+                                -- a raw word binder cannot appear there):
+                                -- needed + (2*cap - needed) * [2*cap > needed]
+                                [ ( b 10, iadd (v neededW) (imul (isub (imul (v capW) (n 2)) (v neededW)) (cmpW RCgts (imul (v capW) (n 2)) (v neededW))) )
+                                , ( b 11, callW "malloc" [ v (b 10) ] )
+                                ]
+                                (iff (mkBool (cmpW RCeq (v (b 11)) (n 0)))
+                                    -- OOM: flag 1 = stop WITHOUT freeing the
+                                    -- old buffer (it IS the partial answer;
+                                    -- the exit path frees it)
+                                    (mkNum (n 1))
+                                    (lets
+                                        [ ( b 12, Unsafe (RawWordLoad { ptr = wOf (v blkN), index = n 2 }) )
+                                        , ( b 13, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 6, value = v (b 12) }) )
+                                        , ( b 14, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 7, value = v (b 11) }) )
+                                        , ( b 15, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 8, value = v lenW }) )
+                                        , ( b 16, callR "Rt.memGo" [ mkNum (iadd (wOf (v blkN)) (n 48)), mkNum (n 0) ] )
+                                        , ( b 17, callW "free" [ v (b 12) ] )
+                                        , ( b 18, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 2, value = v (b 11) }) )
+                                        , ( b 19, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 4, value = v (b 10) }) )
+                                        ]
+                                        (mkNum (n 0))
+                                    )
+                                )
+                            )
+                            -- needed <= cap: nothing to do
+                            (mkNum (n 0))
+                        )
+                        ]
+                        (iff (mkBool (cmpW RCeq (wOf (v growB)) (n 1)))
+                            -- the OOM stop
+                            mkNil
+                            (lets
+                                [ ( b 20, Unsafe (RawWordLoad { ptr = wOf (v blkN), index = n 2 }) )
+                                , ( b 21, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 6, value = v tmpW }) )
+                                , -- the append lands at acc + len (the
+                                  -- memGo block's dst BASE — offset 0 here
+                                  -- would overwrite the first chunk, the
+                                  -- exact bug the tail-BAD differential
+                                  -- caught).
+                                  ( b 22, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 7, value = iadd (v (b 20)) (v lenW) }) )
+                                , ( b 23, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 8, value = wOf (v nV) }) )
+                                , ( b 24, callR "Rt.memGo" [ mkNum (iadd (wOf (v blkN)) (n 48)), mkNum (n 0) ] )
+                                , ( b 25, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 3, value = v neededW }) )
+                                ]
+                                (App { fn = GRef { key = "Rt.readFileGo", force = False }, args = [ v blkN ] })
+                            )
+                        )
+                    )
+                )
+            )
+        )
+
+
+{-| `Rt.memGo blkN iN` — a generic byte memcpy over a 3-word C-block:
+[0]=src, [1]=dst, [2]=end; copies byte i (boxed iN) and self-tail loops until
+i >= end.  Used three ways by the read path: old-acc -> grown-acc (C -> C),
+tmp -> acc (C -> C), and acc -> the GC result buffer (C -> GC, sound because
+memGo is frame-free and non-allocating — dst cannot move under it).  Length-
+based, NOT NUL-based: file content may contain NULs.  SELF-TAIL LOOP (the
+SF2 pattern: App on this defun's own key = the in-frame jmp @body loop), so
+a 70 KB file costs O(1) native stack.  Never allocate here.
+-}
+memGoDefun : Defun
+memGoDefun =
+    let
+        blkN =
+            p1
+
+        iN =
+            p2
+
+        srcW =
+            b 3
+
+        dstW =
+            b 4
+
+        endW =
+            b 5
+    in
+    lam "Rt.memGo" [ blkN, iN ]
+        (lets
+            [ ( srcW, Unsafe (RawWordLoad { ptr = wOf (v blkN), index = n 0 }) )
+            , ( dstW, Unsafe (RawWordLoad { ptr = wOf (v blkN), index = n 1 }) )
+            , ( endW, Unsafe (RawWordLoad { ptr = wOf (v blkN), index = n 2 }) )
+            ]
+            (iff (mkBool (cmpW RCges (wOf (v iN)) (v endW)))
+                mkNil
+                (lets
+                    [ ( b 6, Unsafe (RawByteLoad { ptr = v srcW, index = wOf (v iN) }) )
+                    , ( b 7, Unsafe (RawByteStore { ptr = v dstW, index = wOf (v iN), value = v (b 6) }) )
+                    ]
+                    (App { fn = GRef { key = "Rt.memGo", force = False }, args = [ v blkN, mkNum (iadd (wOf (v iN)) (n 1)) ] })
+                )
+            )
+        )
+
+
 -- ============================ VM STATE + str (GROUP 2) ============================
 -- The value / intern / str prims as Mid bodies over alloc-free Zig seats in
 -- tools/qbe/rt.zig (rt_value_slot / rt_sym_intern / rt_float_text — the
@@ -6382,6 +6684,8 @@ helperDefuns rec =
     , recToChainDefun
     , recToChainGoDefun
     , readFullDefun
+    , readFileGoDefun
+    , memGoDefun
     , cStrFillDefun
     , floatCopyDefun
     , cStrLenGoDefun
@@ -7391,4 +7695,5 @@ primDefuns consArr rec eqPtrFast =
     , setenvDefun
     , globDefun
     , execPlanDefun
+    , readFileAsStringDefun
     ]

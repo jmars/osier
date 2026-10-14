@@ -868,8 +868,8 @@ checks =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 146 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers)"
-        (List.length (Rt.program True True True) == 146
+    , check "rt program: 149 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route)"
+        (List.length (Rt.program True True True) == 149
             && List.all (\d -> String.startsWith "Rt." d.key) (Rt.program True True True)
             && List.any
                 (\d ->
@@ -946,6 +946,18 @@ checks =
             && List.any
                 (\d ->
                     d.key == "Rt.getpid"
+                        && (case d.value of
+                                Lam lambda ->
+                                    List.length lambda.params == 1
+
+                                _ ->
+                                    False
+                           )
+                )
+                (Rt.program True True True)
+            && List.any
+                (\d ->
+                    d.key == "Rt.read-file-as-string"
                         && (case d.value of
                                 Lam lambda ->
                                     List.length lambda.params == 1
@@ -1159,6 +1171,17 @@ checks =
             && not (Set.member "Rt.epFreeCmd" Rt.allocating)
             && not (Set.member "Rt.epFreeArgv" Rt.allocating)
             && not (Set.member "Rt.epFreeRedirs" Rt.allocating)
+            -- GROUP 3B-3 (read-file-as-string): the prim allocates directly
+            -- (cStrOf, the result RawAllocRaw) so it is a MEMBER; the C-heap
+            -- read loop and the byte memcpy MUST stay frame-free — their
+            -- acc/tmp/mblk raw pointers (and, in the final copy, the GC dst
+            -- pointer stored as a raw word in the C block) are sound exactly
+            -- while no safepoint can intervene under them.  A future edit
+            -- adding an allocation to either breaks that window with no
+            -- other instrument — it must fail THIS row.
+            && Set.member "Rt.read-file-as-string" Rt.allocating
+            && not (Set.member "Rt.readFileGo" Rt.allocating)
+            && not (Set.member "Rt.memGo" Rt.allocating)
         )
     , check "rt gc (midgc) classification: the collector is FRAME-FREE by construction (a frame-free callee must never reach a safepoint)"
         (not (Set.member "Rt.collect" Rt.allocating)
@@ -1323,6 +1346,11 @@ checks =
             , ( "Rt.epFreeCmds", "q_Rt_x2eepFreeCmds" )
             , ( "Rt.epFreeArgv", "q_Rt_x2eepFreeArgv" )
             , ( "Rt.epFreeRedirs", "q_Rt_x2eepFreeRedirs" )
+            -- GROUP 3B-3 (read-file-as-string): the read loop iterates once
+            -- per 64 KiB chunk and memGo once per BYTE — a reverted loop
+            -- shape is one native frame per byte (the cStrFill crash class).
+            , ( "Rt.readFileGo", "q_Rt_x2ereadFileGo" )
+            , ( "Rt.memGo", "q_Rt_x2ememGo" )
             ]
         )
 

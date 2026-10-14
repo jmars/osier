@@ -442,34 +442,40 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                 -- nurseryHostPrims is the enumeration (verified by reading
                 -- each Zig handler) of the prims whose RESULT payload was built
                 -- in the GC nursery via values.valString / valCons:
-                --   read-file-as-string (streams.zig), exec-plan
-                --   (execplan.zig), value (the *argv* registry list,
-                --   rt.zig buildArgvList — still Zig-nursery even though the
-                --   ROUTE is now Mid: Rt.value blits the registered Value
-                --   verbatim, and *argv* is still a valCons list in the Zig
-                --   nursery).  `str` was REFUSED here until zigretire stage 3
-                --   GROUP 2: it now has a Mid body (Rt.str) that renders the
-                --   float through rt_float_text into a GC string, so the
-                --   NaN/±Infinity pass-through arms of Prelude.stringFromFloat
-                --   no longer return a Zig-nursery string — the last CENSUS-ARM
-                --   entry of the host-IO hole is CLOSED, and `str` left this
-                --   list (the midgc-str probe now asserts the FIXED behaviour:
-                --   it compiles under QBE_MIDGC=1 and prints "100").
-                --   `getcwd`/`getenv` left it in stage 3 GROUP 3A: their Mid
-                --   bodies (Rt.getcwd/Rt.getenv) allocate via RawAllocRaw (or
-                --   return a static empty string), never values.valString, so
-                --   the worker route no longer builds a nursery string.  `glob`
-                --   left it in stage 3 GROUP 3B for the same reason: Rt.glob
-                --   dupes matches onto the C HEAP (malloc) and builds the
-                --   result list via RawAllocRaw+mkStr / Rt.cons, never
-                --   values.valString/valCons.  The
-                --   OTHER no-Mid-implementation prims are SAFE and deliberately
-                --   NOT refused: intern (Rt.intern -> valSymbol, a page_allocator
-                --   symbol, never GC-reclaimed), getpid/cd/setenv/close/
-                --   write-byte/read-byte (scalar results), open (a libc stream),
-                --   simple-error (aborts), and hd/tl/fst/reverse/append/
-                --   absvector? (no surface spelling, so they can never appear in
-                --   the census).
+                --   exec-plan (execplan.zig), value (the *argv* registry
+                --   list, rt.zig buildArgvList — still Zig-nursery even
+                --   though the ROUTE is now Mid: Rt.value blits the
+                --   registered Value verbatim, and *argv* is still a valCons
+                --   list in the Zig nursery).  `str` was REFUSED here until
+                --   zigretire stage 3 GROUP 2: it now has a Mid body (Rt.str)
+                --   that renders the float through rt_float_text into a GC
+                --   string, so the NaN/±Infinity pass-through arms of
+                --   Prelude.stringFromFloat no longer return a Zig-nursery
+                --   string — the last CENSUS-ARM entry of the host-IO hole
+                --   is CLOSED, and `str` left this list (the midgc-str
+                --   probe now asserts the FIXED behaviour: it compiles under
+                --   QBE_MIDGC=1 and prints "100").  `getcwd`/`getenv` left
+                --   it in stage 3 GROUP 3A: their Mid bodies (Rt.getcwd/
+                --   Rt.getenv) allocate via RawAllocRaw (or return a static
+                --   empty string), never values.valString, so the worker
+                --   route no longer builds a nursery string.  `glob` left it
+                --   in stage 3 GROUP 3B for the same reason: Rt.glob dupes
+                --   matches onto the C HEAP (malloc) and builds the result
+                --   list via RawAllocRaw+mkStr / Rt.cons, never
+                --   values.valString/valCons.  `read-file-as-string` left it
+                --   in stage 3 GROUP 3B-3 (the LAST prim on the list with a
+                --   route): Rt.read-file-as-string accumulates on the C heap
+                --   (malloc/memGo/free) and builds the final string via
+                --   RawAllocRaw+mkStr, never values.valString — the worker
+                --   route is Zig-nursery-free, and with it the MID route has
+                --   NO rt_prim fallback left at all (zero rt_prim emission).
+                --   The OTHER no-Mid-implementation prims are SAFE and
+                --   deliberately NOT refused: intern (Rt.intern ->
+                --   valSymbol, a page_allocator symbol, never GC-reclaimed),
+                --   getpid/cd/setenv/close/write-byte/read-byte (scalar
+                --   results), open (a libc stream), simple-error (aborts),
+                --   and hd/tl/fst/reverse/append/absvector? (no surface
+                --   spelling, so they can never appear in the census).
                 -- THE BOUNDARY IS COARSER THAN THE HOLES: stdin/stdout are
                 --   fd-int Values (streams.valStreamInFd/OutFd — SAFE, yet
                 --   refused via the `value` entry).  Over-refusal is the right
@@ -483,8 +489,7 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                 --   not a mechanical pin.
                 nurseryHostPrims =
                     Set.fromList
-                        [ "read-file-as-string"
-                        , "exec-plan"
+                        [ "exec-plan"
                         , "value"
                         ]
 
