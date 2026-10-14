@@ -1093,6 +1093,40 @@ checks =
             && Set.member "Rt.read-byte" Rt.allocating
             && Set.member "Rt.glob" Rt.allocating
             && Set.member "Rt.globBuildGo" Rt.allocating
+            -- stage 3 GROUP 3B-2a (exec-plan decode): the decode itself is
+            -- safepoint-free BY CONSTRUCTION (tag names are BYTES in a
+            -- malloc'd cbuf — an LString literal is a safepoint and cannot
+            -- appear), so all 21 ep* helpers are frame-free; the ONE member
+            -- is Rt.exec-plan itself, via the MANUAL OVERRIDE in Mid/Rt.elm
+            -- (rt_exec_run is a C seat the walker cannot see through —
+            -- declaring it allocating roots the plan Value param across the
+            -- seat's collections).  A future edit that adds an allocation
+            -- (a string literal, an allocating callR) to any ep* helper
+            -- moves it INTO the set and fails THIS row — the decode's raw
+            -- temps (the blob, the cbuf, st) are C-heap and survive only
+            -- while no safepoint intervenes.
+            && Set.member "Rt.exec-plan" Rt.allocating
+            && not (Set.member "Rt.epSymIs" Rt.allocating)
+            && not (Set.member "Rt.epCount" Rt.allocating)
+            && not (Set.member "Rt.epElem" Rt.allocating)
+            && not (Set.member "Rt.epNum" Rt.allocating)
+            && not (Set.member "Rt.epStr" Rt.allocating)
+            && not (Set.member "Rt.epSymOf" Rt.allocating)
+            && not (Set.member "Rt.epProg" Rt.allocating)
+            && not (Set.member "Rt.epProgGo" Rt.allocating)
+            && not (Set.member "Rt.epChain" Rt.allocating)
+            && not (Set.member "Rt.epPipeline" Rt.allocating)
+            && not (Set.member "Rt.epPipeGo" Rt.allocating)
+            && not (Set.member "Rt.epCmd" Rt.allocating)
+            && not (Set.member "Rt.epArgvGo" Rt.allocating)
+            && not (Set.member "Rt.epRedirsGo" Rt.allocating)
+            && not (Set.member "Rt.epRedir" Rt.allocating)
+            && not (Set.member "Rt.epCountStdin" Rt.allocating)
+            && not (Set.member "Rt.epFreeChains" Rt.allocating)
+            && not (Set.member "Rt.epFreeCmds" Rt.allocating)
+            && not (Set.member "Rt.epFreeCmd" Rt.allocating)
+            && not (Set.member "Rt.epFreeArgv" Rt.allocating)
+            && not (Set.member "Rt.epFreeRedirs" Rt.allocating)
         )
     , check "rt gc (midgc) classification: the collector is FRAME-FREE by construction (a frame-free callee must never reach a safepoint)"
         (not (Set.member "Rt.collect" Rt.allocating)
@@ -1221,6 +1255,27 @@ checks =
             , ( "Rt.globSortShift", "q_Rt_x2eglobSortShift" )
             , ( "Rt.globSortGo", "q_Rt_x2eglobSortGo" )
             , ( "Rt.globBuildGo", "q_Rt_x2eglobBuildGo" )
+            -- GROUP 3B-2a (exec-plan decode): the ep* walk/free loops are
+            -- per-ELEMENT loops (one iteration per argv entry, per redir,
+            -- per chain) over plans that can legally carry hundreds of
+            -- elements — a reverted loop shape is one native frame per
+            -- element.  The 12 SELF-RECURSIVE ep* defuns (App GRef
+            -- own-key, saturated non-forced); epNum/epStr/epSymOf share
+            -- epUnwrapDefun and epProg/epChain/epPipeline/epCmd/epRedir/
+            -- epFreeCmd recurse only CROSS-defun, so they are correctly
+            -- absent here.
+            , ( "Rt.epSymIs", "q_Rt_x2eepSymIs" )
+            , ( "Rt.epCount", "q_Rt_x2eepCount" )
+            , ( "Rt.epElem", "q_Rt_x2eepElem" )
+            , ( "Rt.epProgGo", "q_Rt_x2eepProgGo" )
+            , ( "Rt.epPipeGo", "q_Rt_x2eepPipeGo" )
+            , ( "Rt.epArgvGo", "q_Rt_x2eepArgvGo" )
+            , ( "Rt.epRedirsGo", "q_Rt_x2eepRedirsGo" )
+            , ( "Rt.epCountStdin", "q_Rt_x2eepCountStdin" )
+            , ( "Rt.epFreeChains", "q_Rt_x2eepFreeChains" )
+            , ( "Rt.epFreeCmds", "q_Rt_x2eepFreeCmds" )
+            , ( "Rt.epFreeArgv", "q_Rt_x2eepFreeArgv" )
+            , ( "Rt.epFreeRedirs", "q_Rt_x2eepFreeRedirs" )
             ]
         )
 

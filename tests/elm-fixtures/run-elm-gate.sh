@@ -332,6 +332,14 @@ run execglob     main   "$(read_expected execglob)"
 # --- M9: TRUE nonblocking async (host event loop drives a Program) ---
 run asyncorder   main   "$(read_expected asyncorder)"
 run fastexec     main   "$(read_expected fastexec)"
+# --- 3B-2a (exec-plan decode in Mid): a MALFORMED plan must fail LOUDLY ---
+# ExecMal's chain op is "bogus" — not seq/and/or — so Rt.epChain's OP GUARD
+# rejects it and the run halts; the expected value IS the halt diagnostic
+# (the gate's $(... 2>&1) captures it).  The silent-accept failure mode
+# (decode as seq, run the pipeline, print "0|hi\n|") is the RED this row
+# exists to catch — the row went red exactly that way when epChain's
+# unknown-op arm was mutated to epOpSeq (handoff-osier-stage3-g3b2a-ii).
+run execmal      main   "$(read_expected execmal)"
 run asyncpure    main   "$(read_expected asyncpure)"
 # --- osier-rtsplit follow-up: a child that dies BY SIGNAL is 128+sig ---
 # The two call sites of waitStatusCode's signal arm (see the sigdeath helper):

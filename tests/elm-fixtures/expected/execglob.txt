@@ -1,4 +1,4 @@
 "tests/elm-fixtures/globdir/?|.
 tests/elm-fixtures/globdir/*|.,..,x.txt
 tests/elm-fixtures/globdir/.*|.,..
-execenv.txt,execglob.txt,execpipe.txt"
+execenv.txt,execglob.txt,execmal.txt,execpipe.txt"
