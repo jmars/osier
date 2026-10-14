@@ -868,8 +868,8 @@ checks =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 123 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers)"
-        (List.length (Rt.program True True True) == 123
+    , check "rt program: 146 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers)"
+        (List.length (Rt.program True True True) == 146
             && List.all (\d -> String.startsWith "Rt." d.key) (Rt.program True True True)
             && List.any
                 (\d ->
@@ -1106,7 +1106,39 @@ checks =
             -- temps (the blob, the cbuf, st) are C-heap and survive only
             -- while no safepoint intervenes.
             && Set.member "Rt.exec-plan" Rt.allocating
-            && not (Set.member "Rt.epSymIs" Rt.allocating)
+            -- GROUP 3B-2b (exec-plan RUN): every run defun is frame-free —
+            -- the whole point of the port's child-after-fork discipline is
+            -- that the run performs NO GC allocation (fork/exec/wait and the
+            -- blob/cbuf/state walks are RawCallRaw + raw loads over C-heap
+            -- memory); the ONE allocating operation is the rt_exec_run C
+            -- seat, pinned as the manual member on Rt.exec-plan below.  A
+            -- future edit adding an allocation to any of these reintroduces
+            -- a GC safepoint into the fork'd child (INVARIANT 2) — it must
+            -- fail THIS row.
+            && not (Set.member "Rt.execGo" Rt.allocating)
+            && not (Set.member "Rt.mkTmpAt" Rt.allocating)
+            && not (Set.member "Rt.cStrEqLit" Rt.allocating)
+            && not (Set.member "Rt.wStr" Rt.allocating)
+            && not (Set.member "Rt.wRaw" Rt.allocating)
+            && not (Set.member "Rt.waitStatusCode" Rt.allocating)
+            && not (Set.member "Rt.envHome" Rt.allocating)
+            && not (Set.member "Rt.isChildBuiltin" Rt.allocating)
+            && not (Set.member "Rt.echoGo" Rt.allocating)
+            && not (Set.member "Rt.childCd" Rt.allocating)
+            && not (Set.member "Rt.childPwd" Rt.allocating)
+            && not (Set.member "Rt.childBuiltin" Rt.allocating)
+            && not (Set.member "Rt.applyOneRedir" Rt.allocating)
+            && not (Set.member "Rt.applyRedirects" Rt.allocating)
+            && not (Set.member "Rt.bodyWriteGo" Rt.allocating)
+            && not (Set.member "Rt.openBodyTmpfile" Rt.allocating)
+            && not (Set.member "Rt.wireCmdGo" Rt.allocating)
+            && not (Set.member "Rt.wirePipeGo" Rt.allocating)
+            && not (Set.member "Rt.closeCmdTmpfds" Rt.allocating)
+            && not (Set.member "Rt.closePipeTmpfds" Rt.allocating)
+            && not (Set.member "Rt.closePipesGo" Rt.allocating)
+            && not (Set.member "Rt.closeOthersGo" Rt.allocating)
+            && not (Set.member "Rt.runBuiltinInprocess" Rt.allocating)
+            && not (Set.member "Rt.epCount" Rt.allocating)
             && not (Set.member "Rt.epCount" Rt.allocating)
             && not (Set.member "Rt.epElem" Rt.allocating)
             && not (Set.member "Rt.epNum" Rt.allocating)
@@ -1231,7 +1263,7 @@ checks =
     -- glob's per-entry loops (group 3B: a directory with N entries runs the
     -- scan/sort/build loops N times — a reverted loop shape is one native
     -- frame per ENTRY).
-    , check "rt self-tail loops: cStrLenGo/cStrCopyGo/cStrFill + the glob loops emit jmp @body and NO native call to their own symbol (the O(1)-stack property)"
+    , check "rt self-tail loops: cStrLenGo/cStrCopyGo/cStrFill + the glob + ep* + RUN loops emit jmp @body and NO native call to their own symbol (the O(1)-stack property)"
         (List.all
             (\( key, qname ) ->
                 case QbeLower.lower False False False True True True True False QbeTypes.empty (rtArities (Rt.program True True True)) (Rt.program True True True) key of
@@ -1264,6 +1296,21 @@ checks =
             -- epUnwrapDefun and epProg/epChain/epPipeline/epCmd/epRedir/
             -- epFreeCmd recurse only CROSS-defun, so they are correctly
             -- absent here.
+            -- GROUP 3B-2b (exec-plan RUN): the run loops iterate per chain,
+            -- per cmd, per redir and per pipe over the same plans, and
+            -- execGo's mode machine is THE whole run — a reverted loop shape
+            -- is one native frame per element again.
+            , ( "Rt.execGo", "q_Rt_x2eexecGo" )
+            , ( "Rt.cStrEqLit", "q_Rt_x2ecStrEqLit" )
+            , ( "Rt.echoGo", "q_Rt_x2eechoGo" )
+            , ( "Rt.applyRedirects", "q_Rt_x2eapplyRedirects" )
+            , ( "Rt.bodyWriteGo", "q_Rt_x2ebodyWriteGo" )
+            , ( "Rt.wireCmdGo", "q_Rt_x2ewireCmdGo" )
+            , ( "Rt.wirePipeGo", "q_Rt_x2ewirePipeGo" )
+            , ( "Rt.closeCmdTmpfds", "q_Rt_x2ecloseCmdTmpfds" )
+            , ( "Rt.closePipeTmpfds", "q_Rt_x2eclosePipeTmpfds" )
+            , ( "Rt.closePipesGo", "q_Rt_x2eclosePipesGo" )
+            , ( "Rt.closeOthersGo", "q_Rt_x2ecloseOthersGo" )
             , ( "Rt.epSymIs", "q_Rt_x2eepSymIs" )
             , ( "Rt.epCount", "q_Rt_x2eepCount" )
             , ( "Rt.epElem", "q_Rt_x2eepElem" )

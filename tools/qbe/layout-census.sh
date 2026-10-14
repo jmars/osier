@@ -60,25 +60,22 @@ need() { command -v "$1" >/dev/null 2>&1 || { printf 'layout-census: %s not foun
 [ -f "$MID" ] || { echo "layout-census: no $MID" >&2; exit 2; }
 
 # ---- the expected name set (the parse contract), split by which leg ---------
-# MID_ONLY: no Zig declaration exists at all (see NAMES WITH NO ZIG COUNTERPART).
-MID_ONLY_NAMES=""
+# MID_ONLY: no Zig declaration is asserted (see NAMES WITH NO ZIG COUNTERPART).
+# The ep* exec-plan blob constants moved here at 3B-2b: the blob is now
+# MID-INTERNAL (the Mid decode writes it, the Mid Rt.execGo run reads it; the
+# rt_exec_run seat stopped reading it when the RUN half moved into Mid), so
+# there is no Zig counterpart to assert against anymore.
+MID_ONLY_NAMES="epChainOpIdx epChainPipeIdx epChainWords epCmdArgcIdx epCmdArgvIdx epCmdNredirsIdx epCmdRedirsIdx epCmdSubIdx epCmdWords epKindAppend epKindDup epKindHdoc epKindHstr epKindIn epKindOut epOpAnd epOpOr epOpSeq epPipeCmdArrIdx epPipeCmdCountIdx epProgChainsIdx epProgCountIdx epRedirBodyIdx epRedirDupfdIdx epRedirFdIdx epRedirKindIdx epRedirPathIdx epRedirTmpfdIdx epRedirWords"
 # COMPTIME: attested by a comptime row against layout_gen.zig, in a file the
 # probe cannot import (an `export fn main`/`pub fn main` collides with an
 # executable's): rt.zig carries the Desc/Meta/Ret rows;
 # vendor/osier-rt/src/rt/execplan.zig carries direntNameOffset (its own
 # `Dirent` declaration — the one Zig statement of the libc struct's layout);
-# rt.zig also carries the ep* exec-plan DECODE-blob rows (stage 3 GROUP
-# 3B-2a: Mid.RtLayout defines the blob, the rt_exec_run seat reads it).
+# (the ep* exec-plan blob rows lived here from 3B-2a until 3B-2b moved the
+# RUN into Mid and the seat stopped reading the blob).
 COMPTIME_FILES="tools/qbe/rt.zig vendor/osier-rt/src/rt/execplan.zig"
 COMPTIME_NAMES="descArityOffset descCacheOffset descCodeOffset descNcapsOffset descTotalBytes \
 direntNameOffset \
-epChainOpIdx epChainPipeIdx epChainWords \
-epCmdArgcIdx epCmdArgvIdx epCmdNredirsIdx epCmdRedirsIdx epCmdSubIdx epCmdWords \
-epKindAppend epKindDup epKindHdoc epKindHstr epKindIn epKindOut \
-epOpAnd epOpOr epOpSeq \
-epPipeCmdArrIdx epPipeCmdCountIdx \
-epProgChainsIdx epProgCountIdx \
-epRedirBodyIdx epRedirDupfdIdx epRedirFdIdx epRedirKindIdx epRedirPathIdx epRedirWords \
 metaArityOffset metaCodeOffset metaNameOffset metaSizeBytes \
 retArgsOffset retArityOffset retEOffset retFOffset retKindOffset retSizeBytes retValOffset"
 # REGEX: read from rt.zig's own declaration text (a non-pub const no probe can see).

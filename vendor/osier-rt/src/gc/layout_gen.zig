@@ -81,7 +81,9 @@ pub const epRedirKindIdx = 0;
 
 pub const epRedirPathIdx = 2;
 
-pub const epRedirWords = 5;
+pub const epRedirTmpfdIdx = 5;
+
+pub const epRedirWords = 6;
 
 pub const i32Bytes = 4;
 

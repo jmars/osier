@@ -42,6 +42,9 @@ const std = @import("std");
 // is no initialized std.Io to write through).
 extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
 
+/// Raw libc close (Zig 0.16 std.posix has no close; the execplan precedent).
+extern "c" fn close(fd: c_int) c_int;
+
 fn werr(msg: []const u8) void {
     _ = write(2, msg.ptr, msg.len);
 }
@@ -1027,204 +1030,62 @@ fn hostApply(vm_: *state.Vm, fnv: Value, args: []const Value) state.VmError!Valu
 }
 
 // ---------------------------------------------------------------------
-//  exec-plan DECODE bridge (zigretire stage 3 GROUP 3B-2a)
+//  exec-plan bridge (zigretire stage 3 GROUP 3B-2a; SHRUNK by 3B-2b)
 // ---------------------------------------------------------------------
-// The compiled Mid `exec-plan` body (Rt.exec-plan + the RtPrims ep*
-// helpers) DECODES the tagged plan Value itself into a flat C-heap word
-// blob and hands it here; this seat REBUILDS the Zig RProg tree
-// (page_allocator, its OWN dupeZ'd strings so execplan.planFree stays
-// symmetric with what it frees), runs the program, slurps both captures
-// and builds the TAGGED [code out err] result — primExecPlan's tail,
-// verbatim, through execplan.execRunDecoded.  Decode stays in Zig ONLY for
-// the host's own callers (effectloop's complex-plan fallback, the
-// QBE_NOMIDRT=1 hatch route) and dies with them.
-//
-// THE BLOB LAYOUT is DEFINED IN MID (Mid.RtLayout.ep*, the stage-2
-// one-place rule): prog [nchains, chains*], chain {op, pipe*}, pipe
-// [ncmds, cmds*], cmd {argv*, argc, redirs*, nredirs, sub*}, redir
-// {kind, fd, path*, dup_fd, body*} — word offsets, 0 = absent.  The local
-// consts below are the ONLY numbers the rebuild reads, and the comptime
-// rows assert each equals its Mid definition, so a Mid edit that moves a
-// field without this file fails the rt.o BUILD instead of reading another
-// record's words at the wrong offset.
+// The Mid `exec-plan` body now DECODES the plan into the flat C-heap blob
+// AND RUNS it (Rt.execGo over RawCallRaw libc seats) itself; this seat is
+// only the SLURP+RESULT half of Zig's execRunDecoded — slurp both capture
+// tmpfiles, close them, build the TAGGED [code out err] result Value.  The
+// blob-rebuild half died with the run's move into Mid (the blob is now
+// Mid-internal: no Zig code reads it).  The seat dies at 3B-2c, when the
+// slurp and the result builder move into Mid too.
 //
 // THE SEAT ALLOCATES (Zig GC) — the ONE RawCallRaw-seat exception: the
 // Mid classifier treats RawCallRaw as alloc-free by contract, so
 // Mid.Rt.allocating carries a MANUAL override for Rt.exec-plan (the defun
 // is FRAMED, its plan param rooted).  Only C-heap raw temps cross the
-// call — the blob, its strings and the decode's scratch blocks — which is
-// what makes the frame sufficient; a GC-heap raw temp held across this
-// seat would go stale.  BRIDGES row: removed by stage 3 GROUP 3B-2c.
-
-const EpProgCountIdx = 0;
-const EpProgChainsIdx = 1;
-const EpChainWords = 2;
-const EpChainOpIdx = 0;
-const EpChainPipeIdx = 1;
-const EpPipeCmdCountIdx = 0;
-const EpPipeCmdArrIdx = 1;
-const EpCmdWords = 5;
-const EpCmdArgvIdx = 0;
-const EpCmdArgcIdx = 1;
-const EpCmdRedirsIdx = 2;
-const EpCmdNredirsIdx = 3;
-const EpCmdSubIdx = 4;
-const EpRedirWords = 5;
-const EpRedirKindIdx = 0;
-const EpRedirFdIdx = 1;
-const EpRedirPathIdx = 2;
-const EpRedirDupfdIdx = 3;
-const EpRedirBodyIdx = 4;
-comptime {
-    const L = gc.layout_gen;
-    if (EpProgCountIdx != L.epProgCountIdx) @compileError("qbe rt: EpProgCountIdx != Mid.RtLayout.epProgCountIdx");
-    if (EpProgChainsIdx != L.epProgChainsIdx) @compileError("qbe rt: EpProgChainsIdx != Mid.RtLayout.epProgChainsIdx");
-    if (EpChainWords != L.epChainWords) @compileError("qbe rt: EpChainWords != Mid.RtLayout.epChainWords");
-    if (EpChainOpIdx != L.epChainOpIdx) @compileError("qbe rt: EpChainOpIdx != Mid.RtLayout.epChainOpIdx");
-    if (EpChainPipeIdx != L.epChainPipeIdx) @compileError("qbe rt: EpChainPipeIdx != Mid.RtLayout.epChainPipeIdx");
-    if (EpPipeCmdCountIdx != L.epPipeCmdCountIdx) @compileError("qbe rt: EpPipeCmdCountIdx != Mid.RtLayout.epPipeCmdCountIdx");
-    if (EpPipeCmdArrIdx != L.epPipeCmdArrIdx) @compileError("qbe rt: EpPipeCmdArrIdx != Mid.RtLayout.epPipeCmdArrIdx");
-    if (EpCmdWords != L.epCmdWords) @compileError("qbe rt: EpCmdWords != Mid.RtLayout.epCmdWords");
-    if (EpCmdArgvIdx != L.epCmdArgvIdx) @compileError("qbe rt: EpCmdArgvIdx != Mid.RtLayout.epCmdArgvIdx");
-    if (EpCmdArgcIdx != L.epCmdArgcIdx) @compileError("qbe rt: EpCmdArgcIdx != Mid.RtLayout.epCmdArgcIdx");
-    if (EpCmdRedirsIdx != L.epCmdRedirsIdx) @compileError("qbe rt: EpCmdRedirsIdx != Mid.RtLayout.epCmdRedirsIdx");
-    if (EpCmdNredirsIdx != L.epCmdNredirsIdx) @compileError("qbe rt: EpCmdNredirsIdx != Mid.RtLayout.epCmdNredirsIdx");
-    if (EpCmdSubIdx != L.epCmdSubIdx) @compileError("qbe rt: EpCmdSubIdx != Mid.RtLayout.epCmdSubIdx");
-    if (EpRedirWords != L.epRedirWords) @compileError("qbe rt: EpRedirWords != Mid.RtLayout.epRedirWords");
-    if (EpRedirKindIdx != L.epRedirKindIdx) @compileError("qbe rt: EpRedirKindIdx != Mid.RtLayout.epRedirKindIdx");
-    if (EpRedirFdIdx != L.epRedirFdIdx) @compileError("qbe rt: EpRedirFdIdx != Mid.RtLayout.epRedirFdIdx");
-    if (EpRedirPathIdx != L.epRedirPathIdx) @compileError("qbe rt: EpRedirPathIdx != Mid.RtLayout.epRedirPathIdx");
-    if (EpRedirDupfdIdx != L.epRedirDupfdIdx) @compileError("qbe rt: EpRedirDupfdIdx != Mid.RtLayout.epRedirDupfdIdx");
-    if (EpRedirBodyIdx != L.epRedirBodyIdx) @compileError("qbe rt: EpRedirBodyIdx != Mid.RtLayout.epRedirBodyIdx");
-    if (@intFromEnum(execplan.ChainOp.seq) != L.epOpSeq) @compileError("qbe rt: ChainOp.seq != Mid.RtLayout.epOpSeq");
-    if (@intFromEnum(execplan.ChainOp.and_) != L.epOpAnd) @compileError("qbe rt: ChainOp.and_ != Mid.RtLayout.epOpAnd");
-    if (@intFromEnum(execplan.ChainOp.or_) != L.epOpOr) @compileError("qbe rt: ChainOp.or_ != Mid.RtLayout.epOpOr");
-    if (@intFromEnum(execplan.RedirKind.in) != L.epKindIn) @compileError("qbe rt: RedirKind.in != Mid.RtLayout.epKindIn");
-    if (@intFromEnum(execplan.RedirKind.out) != L.epKindOut) @compileError("qbe rt: RedirKind.out != Mid.RtLayout.epKindOut");
-    if (@intFromEnum(execplan.RedirKind.append) != L.epKindAppend) @compileError("qbe rt: RedirKind.append != Mid.RtLayout.epKindAppend");
-    if (@intFromEnum(execplan.RedirKind.dup) != L.epKindDup) @compileError("qbe rt: RedirKind.dup != Mid.RtLayout.epKindDup");
-    if (@intFromEnum(execplan.RedirKind.hdoc) != L.epKindHdoc) @compileError("qbe rt: RedirKind.hdoc != Mid.RtLayout.epKindHdoc");
-    if (@intFromEnum(execplan.RedirKind.hstr) != L.epKindHstr) @compileError("qbe rt: RedirKind.hstr != Mid.RtLayout.epKindHstr");
-}
-
-/// The rebuild CANNOT fail except OOM (the Mid decode already validated
-/// every field the blob carries), and OOM dies loudly — so there is no
-/// partial-unwind path: every allocation below is freed by planFree after
-/// the run.
-fn epDupe(p: i64) [:0]u8 {
-    const src: [*:0]const u8 = @ptrFromInt(@as(usize, @intCast(p)));
-    const len = std.mem.len(src);
-    const buf = std.heap.page_allocator.alloc(u8, len + 1) catch
-        dieLoud("qbe rt: exec-plan: rebuild out of memory");
-    @memcpy(buf[0..len], src[0..len]);
-    buf[len] = 0;
-    return buf[0..len :0];
-}
-
-fn epOpOf(w: i64) execplan.ChainOp {
-    return switch (w) {
-        0 => .seq,
-        1 => .and_,
-        2 => .or_,
-        else => dieLoud("qbe rt: exec-plan: bad chain op in blob"),
-    };
-}
-
-fn epKindOf(w: i64) execplan.RedirKind {
-    return switch (w) {
-        0 => .in,
-        1 => .out,
-        2 => .append,
-        3 => .dup,
-        4 => .hdoc,
-        5 => .hstr,
-        else => dieLoud("qbe rt: exec-plan: bad redir kind in blob"),
-    };
-}
-
-fn epRebuildRedir(rec: [*]const i64) execplan.RRedir {
-    var r = execplan.RRedir{};
-    r.kind = epKindOf(rec[EpRedirKindIdx]);
-    r.fd = @intCast(rec[EpRedirFdIdx]);
-    r.dup_fd = @intCast(rec[EpRedirDupfdIdx]);
-    if (rec[EpRedirPathIdx] != 0) r.path = epDupe(rec[EpRedirPathIdx]);
-    if (rec[EpRedirBodyIdx] != 0) r.body = epDupe(rec[EpRedirBodyIdx]);
-    return r;
-}
-
-fn epRebuildCmd(rec: [*]const i64, depth: u32) error{OutOfMemory}!execplan.RCmd {
-    var c = execplan.RCmd{};
-    const argc: usize = @intCast(rec[EpCmdArgcIdx]);
-    if (rec[EpCmdArgvIdx] != 0 and argc > 0) {
-        const src: [*]const i64 = @ptrFromInt(@as(usize, @intCast(rec[EpCmdArgvIdx])));
-        const raw = try std.heap.page_allocator.alloc(?[*:0]const u8, argc + 1);
-        var i: usize = 0;
-        while (i < argc) : (i += 1) raw[i] = epDupe(src[i]).ptr;
-        raw[argc] = null;
-        c.argv = raw[0..argc :null];
-    }
-    const nredirs: usize = @intCast(rec[EpCmdNredirsIdx]);
-    if (rec[EpCmdRedirsIdx] != 0 and nredirs > 0) {
-        const src: [*]const i64 = @ptrFromInt(@as(usize, @intCast(rec[EpCmdRedirsIdx])));
-        const arr = try std.heap.page_allocator.alloc(execplan.RRedir, nredirs);
-        var i: usize = 0;
-        while (i < nredirs) : (i += 1) arr[i] = epRebuildRedir(src + EpRedirWords * i);
-        c.redirs = arr;
-    }
-    if (rec[EpCmdSubIdx] != 0) {
-        const sp = try std.heap.page_allocator.create(execplan.RProg);
-        sp.* = try epRebuildProg(@ptrFromInt(@as(usize, @intCast(rec[EpCmdSubIdx]))), depth + 1);
-        c.sub = sp;
-    }
-    return c;
-}
-
-fn epRebuildProg(blob: [*]const i64, depth: u32) error{OutOfMemory}!execplan.RProg {
-    var prog = execplan.RProg{};
-    const nchains: usize = @intCast(blob[EpProgCountIdx]);
-    if (blob[EpProgChainsIdx] != 0 and nchains > 0) {
-        const chains: [*]const i64 = @ptrFromInt(@as(usize, @intCast(blob[EpProgChainsIdx])));
-        const arr = try std.heap.page_allocator.alloc(execplan.RChain, nchains);
-        var i: usize = 0;
-        while (i < nchains) : (i += 1) {
-            const rec = chains + EpChainWords * i;
-            arr[i] = .{ .op = epOpOf(rec[EpChainOpIdx]), .pipe = try epRebuildPipe(@ptrFromInt(@as(usize, @intCast(rec[EpChainPipeIdx]))), depth) };
-        }
-        prog.chains = arr;
-    }
-    return prog;
-}
-
-fn epRebuildPipe(blob: [*]const i64, depth: u32) error{OutOfMemory}!execplan.RPipe {
-    var pipe = execplan.RPipe{};
-    const ncmds: usize = @intCast(blob[EpPipeCmdCountIdx]);
-    if (blob[EpPipeCmdArrIdx] != 0 and ncmds > 0) {
-        const cmds: [*]const i64 = @ptrFromInt(@as(usize, @intCast(blob[EpPipeCmdArrIdx])));
-        const arr = try std.heap.page_allocator.alloc(execplan.RCmd, ncmds);
-        var i: usize = 0;
-        while (i < ncmds) : (i += 1) arr[i] = try epRebuildCmd(cmds + EpCmdWords * i, depth);
-        pipe.cmds = arr;
-    }
-    return pipe;
-}
+// call, which is what makes the frame sufficient.
 
 /// The seat's RESULT slot (static storage, the rt_value_slot pattern): the
-/// seat roots the finished Value during execRunDecoded's own allocations
-/// and copies it here just before returning; nothing between the return
-/// and the caller's blit can allocate, so the unrooted window is exactly
-/// one raw load.  NOT re-entrant — a second exec running before the first
-/// caller's blit would overwrite it, which the single-threaded runtime
-/// cannot do.
+/// seat roots the finished Value during its own allocations and copies it
+/// here just before returning; nothing between the return and the caller's
+/// blit can allocate, so the unrooted window is exactly one raw load.
+/// NOT re-entrant — a second exec running before the first caller's blit
+/// would overwrite it, which the single-threaded runtime cannot do.
 var ep_result_slot: types.Value = std.mem.zeroes(types.Value);
 
-/// blob -> rebuilt RProg -> runProgram -> slurp -> the TAGGED result Value,
-/// by address.  Word-word per the RawCallRaw contract's REGISTER shape
-/// (the allocation exception is the one named above).
-export fn rt_exec_run(blob: i64) callconv(.c) i64 {
-    const rec: [*]const i64 = @ptrFromInt(@as(usize, @intCast(blob)));
-    var prog = epRebuildProg(rec, 0) catch dieLoud("qbe rt: exec-plan: rebuild out of memory");
-    const final = execplan.execRunDecoded(vm, &prog) catch |e|
-        diePrimDirect(e, "exec-plan");
+/// outfd/errfd/code -> slurp both captures -> close -> the TAGGED result
+/// Value, by address.  Word-word per the RawCallRaw contract's REGISTER
+/// shape (the allocation exception is the one named above).
+export fn rt_exec_run(outfd: i64, errfd: i64, code: i64) callconv(.c) i64 {
+    const out_s = execplan.slurpFd(@intCast(outfd));
+    const err_s = execplan.slurpFd(@intCast(errfd));
+    _ = close(@intCast(outfd));
+    _ = close(@intCast(errfd));
+    defer if (out_s) |s| std.heap.page_allocator.free(s.buf);
+    defer if (err_s) |s| std.heap.page_allocator.free(s.buf);
+
+    // The C:2133-2148 root dance, verbatim: each intermediate is rooted
+    // across the next helper's allocations, all popped before returning.
+    var tag_out = execplan.makeTaggedString(vm, if (out_s) |s| s.buf[0..s.n] else "");
+    g.rootPushValue(&tag_out);
+    var tag_err = execplan.makeTaggedString(vm, if (err_s) |s| s.buf[0..s.n] else "");
+    g.rootPushValue(&tag_err);
+    var empty = execplan.makeTaggedNil(vm);
+    g.rootPushValue(&empty);
+    var err_list = execplan.makeTaggedCons(vm, tag_err, empty);
+    g.rootPushValue(&err_list);
+    var out_list = execplan.makeTaggedCons(vm, tag_out, err_list);
+    g.rootPushValue(&out_list);
+    var tag_code = execplan.makeTaggedNumber(vm, @intCast(code));
+    g.rootPushValue(&tag_code);
+    const final = execplan.makeTaggedCons(vm, tag_code, out_list);
+    g.rootPop(); // tag_code
+    g.rootPop(); // out_list
+    g.rootPop(); // err_list
+    g.rootPop(); // empty
+    g.rootPop(); // tag_err
+    g.rootPop(); // tag_out
     ep_result_slot = final;
     return @intCast(@intFromPtr(&ep_result_slot));
 }

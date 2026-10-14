@@ -340,6 +340,16 @@ run fastexec     main   "$(read_expected fastexec)"
 # exists to catch — the row went red exactly that way when epChain's
 # unknown-op arm was mutated to epOpSeq (handoff-osier-stage3-g3b2a-ii).
 run execmal      main   "$(read_expected execmal)"
+# --- 3B-2b (exec-plan RUN in Mid): the CHAIN short-circuit (&& skips its
+# chain when the previous code is nonzero; || when zero) — no earlier fixture
+# reaches the multi-chain path, and the 3B-2a probes' and/or rows are
+# single-chain plans where the op never fires.  Expected = the ZIG arm's own
+# output on this fixture (the implementation being replaced).
+run execchain    main   "$(read_expected execchain)"
+# --- 3B-2b: the redirect-OPEN-FAILURE path — a valid `in` redirect naming a
+# nonexistent file must answer 1 + the captured childW2 message (the only
+# fixture exercising applyOneRedir's open-failure arm and its error string).
+run execnofile   main   "$(read_expected execnofile)"
 run asyncpure    main   "$(read_expected asyncpure)"
 # --- osier-rtsplit follow-up: a child that dies BY SIGNAL is 128+sig ---
 # The two call sites of waitStatusCode's signal arm (see the sigdeath helper):

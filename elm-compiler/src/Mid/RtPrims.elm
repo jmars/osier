@@ -2885,16 +2885,16 @@ globDefun =
         )
 
 
-{-| exec-plan DECODE (zigretire stage 3 GROUP 3B-2a) — planDecode as Mid.
+{- exec-plan DECODE (zigretire stage 3 GROUP 3B-2a) — planDecode as Mid.
 
 execplan.zig's planDecode walks the TAGGED plan Value (the Shen demarshal
 shape the Plan.* builders produce: EMPTY = [cons] = cons(sym"cons", nil),
 NODE = [cons H T] = cons(sym"cons", cons(H, cons(T, nil))) with T the tagged
 tail — a plain Elm list decodes as EMPTY-or-MALFORMED, never as a plan) and
 builds a C-heap RProg blob per Mid.RtLayout's ep* constants.  The blob is
-handed to the rt_exec_run seat (tools/qbe/rt.zig), which rebuilds the Zig
-RProg tree, runs/slurps/builds the tagged result — the parts that stay Zig
-until GROUP 3B-2b/3B-2c.
+decoded by Rt.exec-plan itself; the RUN half (GROUP 3B-2b) walks the blob
+directly via Rt.execGo, and only the SLURP+RESULT half stays in the
+rt_exec_run seat until GROUP 3B-2c.
 
 THE WHOLE DECODE IS SAFEPOINT-FREE (Zig INVARIANT 1's Mid form: decode
 performs zero GC allocation): no Lit LString (an interning safepoint — the
@@ -2918,6 +2918,41 @@ ShenError" + exit 1; Mid's arm is rt_halt ("qbe-rt: halt (a Mid prim
 reached its halt arm)" + exit 1) — equally loud, different text, the same
 documented class as every other halt arm.
 -}
+
+
+{-| mkTmpAt litPtrN — mkstemp a copy of the template literal at litPtrN,
+unlink it, return the fd (Zig's execRunDecoded/openBodyTmpfile tmpfile step).
+The malloc'd template copy is freed on BOTH paths (a leak is invisible to
+every oracle).
+-}
+mkTmpAtDefun : Defun
+mkTmpAtDefun =
+    let
+        litPtrN = p1
+
+        tpl = b 4
+
+        fd = b 5
+    in
+    lam "Rt.mkTmpAt" [ litPtrN ]
+        (lets
+            [ ( tpl, callW "malloc" [ n 24 ] )
+            , ( b 6, iff (mkBool (cmpW RCeq (v tpl) (n 0))) haltV (mkNum (n 0)) )
+            , ( b 7, callR "Rt.cStrCopyGo" [ v litPtrN, mkNum (v tpl), mkNum (n 0) ] )
+            , ( fd, callW "mkstemp" [ v tpl ] )
+            , ( b 8, callW "unlink" [ v tpl ] )
+            , ( b 9, callW "free" [ v tpl ] )
+            ]
+            (mkNum (v fd))
+        )
+
+
+{-| exec-plan (1 arg: the tagged plan Value).  DECODE (3B-2a) into the C-heap
+blob, then the RUN (3B-2b) via Rt.execGo over RawCallRaw libc seats, then the
+SLURP+RESULT through the rt_exec_run seat (3B-2c's remainder).  The run state
+block, the literal cbuf and the blob are all C-heap, so no safepoint can move
+them; the seat's Zig-GC allocation is why this defun stays FRAMED (Rt.elm's
+manual override).-}
 execPlanDefun : Defun
 execPlanDefun =
     let
@@ -2930,14 +2965,26 @@ execPlanDefun =
         stW =
             b 41
 
-        progN =
+        rstW =
             b 42
 
-        res =
+        progN =
+            b 43
+
+        outfdW =
+            b 44
+
+        errfdW =
             b 45
 
-        chainsW =
+        codeN =
             b 46
+
+        res =
+            b 47
+
+        chainsW =
+            b 48
 
         -- One word per tag/op name, NUL padded to 8 bytes (the high bytes
         -- stay zero, so every value fits a JS-safe Int).  The FIRST byte of
@@ -2978,6 +3025,26 @@ execPlanDefun =
                         )
                     )
 
+        -- the RUN literals, packed NUL-terminated after the decode words
+        runLitStores =
+            List.concatMap
+                (\( name, off, _ ) ->
+                    List.indexedMap
+                        (\k byte ->
+                            ( b (500 + off + k)
+                            , Unsafe
+                                (RawByteStore
+                                    { ptr = v cbufW
+                                    , index = n (off + k)
+                                    , value = n byte
+                                    }
+                                )
+                            )
+                        )
+                        (List.map Char.toCode (String.toList name) ++ [ 0 ])
+                )
+                runLitsPacked
+
         stBinds =
             [ ( b 63, Unsafe (RawWordStore { ptr = v stW, index = n 0, value = v cbufW }) )
             , ( b 64, Unsafe (RawWordStore { ptr = v stW, index = n 1, value = n 0 }) )
@@ -2986,64 +3053,101 @@ execPlanDefun =
     in
     lam "Rt.exec-plan" [ plan ]
         (lets
-            ([ ( cbufW, callW "malloc" [ n 104 ] )
+            ([ ( cbufW, callW "malloc" [ n runCbufSize ] )
                , -- OOM is LOUD (glob's precedent: halt, never a NULL write).
-                 ( b 43, iff (mkBool (cmpW RCeq (v cbufW) (n 0))) haltV (mkNum (n 0)) )
+                 ( b 49, iff (mkBool (cmpW RCeq (v cbufW) (n 0))) haltV (mkNum (n 0)) )
                , ( stW, callW "malloc" [ n 24 ] )
-               , ( b 44, iff (mkBool (cmpW RCeq (v stW) (n 0))) haltV (mkNum (n 0)) )
+               , ( b 51, iff (mkBool (cmpW RCeq (v stW) (n 0))) haltV (mkNum (n 0)) )
+               , ( rstW, callW "malloc" [ n (8 * rStWords) ] )
+               , ( b 52, iff (mkBool (cmpW RCeq (v rstW) (n 0))) haltV (mkNum (n 0)) )
                ]
                 ++ litBinds
+                ++ runLitStores
                 ++ stBinds
                 ++ [ ( progN, callR "Rt.epProg" [ v plan, mkNum (v stW) ] )
+                   , ( outfdW, callR "Rt.mkTmpAt" [ mkNum (iadd (v cbufW) (n (runOff "/tmp/shensh-out.XXXXXX"))) ] )
+                   , ( errfdW, iff (mkBool (cmpW RCges (wOf (v outfdW)) (n 0)))
+                                (callR "Rt.mkTmpAt" [ mkNum (iadd (v cbufW) (n (runOff "/tmp/shensh-err.XXXXXX"))) ])
+                                (mkNum (n (-1)))
+                     )
                    ]
             )
             (iff (mkBool (cmpW RClts (wOf (v progN)) (n 0)))
                 -- malformed: every level already freed its decoded prefix on
-                -- the way out; free the scratch blocks, then the LOUD halt
-                -- (the module header's error-model gap note).
+                -- the way out; free the scratch blocks, then the LOUD halt.
                 (lets
-                    [ ( b 70, callW "free" [ v stW ] )
-                    , ( b 71, callW "free" [ v cbufW ] )
+                    [ ( b 70, callW "free" [ v rstW ] )
+                    , ( b 71, callW "free" [ v stW ] )
+                    , ( b 72, callW "free" [ v cbufW ] )
                     ]
                     haltV
                 )
-                (lets
-                    [ ( res
-                      , Unsafe
-                            (RawVecLoad
-                                { vec = callW "rt_exec_run" [ wOf (v progN) ]
-                                , index = n 0
-                                }
+                (iff (or2 (mkBool (cmpW RClts (wOf (v outfdW)) (n 0))) (mkBool (cmpW RClts (wOf (v errfdW)) (n 0))))
+                    -- tmpfile failure (Zig: close + throw; Mid: close + halt)
+                    (lets
+                        [ ( b 73, iff (mkBool (cmpW RCges (wOf (v outfdW)) (n 0)))
+                            (lets [ ( b 73, (callW "close" [ wOf (v outfdW) ]) ) ] mkNil)
+                            mkNil
                             )
-                      )
-                    , ( chainsW
-                      , Unsafe
-                            (RawWordLoad
-                                { ptr = wOf (v progN)
-                                , index = n RtLayout.epProgChainsIdx
-                                }
+                        , ( b 74, iff (mkBool (cmpW RCges (wOf (v errfdW)) (n 0)))
+                            (lets [ ( b 74, (callW "close" [ wOf (v errfdW) ]) ) ] mkNil)
+                            mkNil
                             )
-                      )
-                    , ( b 67
-                      , callR "Rt.epFreeChains"
-                            [ v progN
-                            , mkNum (v chainsW)
-                            , mkNum (n 0)
-                            ]
-                      )
-                    , ( b 68, callW "free" [ v stW ] )
-                    , ( b 69, callW "free" [ v cbufW ] )
-                    ]
-                    (v res)
+                        , ( chainsW, Unsafe (RawWordLoad { ptr = wOf (v progN), index = n RtLayout.epProgChainsIdx }) )
+                        , ( b 75, callR "Rt.epFreeChains" [ v progN, mkNum (v chainsW), mkNum (n 0) ] )
+                        , ( b 76, callW "free" [ v rstW ] )
+                        , ( b 77, callW "free" [ v stW ] )
+                        , ( b 78, callW "free" [ v cbufW ] )
+                        ]
+                        haltV
+                    )
+                    (lets
+                        [ ( b 80, rStoreW rstW rCbuf (v cbufW) )
+                        , ( b 81, rStoreW rstW rOutfd (wOf (v outfdW)) )
+                        , ( b 82, rStoreW rstW rErrfd (wOf (v errfdW)) )
+                        , ( b 83, rStoreW rstW rInChild (n 0) )
+                        , ( b 84, rStoreW rstW rProg (wOf (v progN)) )
+                        , ( b 85, rStoreW rstW rLast (n 0) )
+                        , ( b 86, rStoreW rstW rI (n 0) )
+                        , ( codeN, callR "Rt.execGo" [ mkNum (v rstW), mkNum (n 0) ] )
+                        , ( chainsW, Unsafe (RawWordLoad { ptr = wOf (v progN), index = n RtLayout.epProgChainsIdx }) )
+                        , ( b 87, callR "Rt.epFreeChains"
+                                [ v progN
+                                , mkNum (v chainsW)
+                                , mkNum (n 0)
+                                ]
+                          )
+                        , ( b 88, callW "free" [ v rstW ] )
+                        , ( b 89, callW "free" [ v stW ] )
+                        , ( b 90, callW "free" [ v cbufW ] )
+                        ]
+                        (iff (mkBool (cmpW RClts (wOf (v codeN)) (n 0)))
+                            -- fork/pipe failure (Zig: close + throw; Mid: close + halt)
+                            (lets
+                                [ ( b 91, callW "close" [ wOf (v outfdW) ] )
+                                , ( b 92, callW "close" [ wOf (v errfdW) ] )
+                                ]
+                                haltV
+                            )
+                            (lets
+                                [ ( res
+                                  , Unsafe
+                                        (RawVecLoad
+                                            { vec = callW "rt_exec_run" [ wOf (v outfdW), wOf (v errfdW), wOf (v codeN) ]
+                                            , index = n 0
+                                            }
+                                        )
+                                  )
+                                ]
+                                (v res)
+                            )
+                        )
+                    )
                 )
             )
         )
 
 
-{-| epSymIs sym litN i — the symbol's name vs the NUL-terminated literal at
-litN (a cbuf offset), byte for byte from i: full std.mem.eql parity
-(length-sensitive — a longer name whose prefix matches is NOT equal).
--}
 epSymIsDefun : Defun
 epSymIsDefun =
     let
@@ -3833,7 +3937,7 @@ epCmdDefun =
                               , iff (mkBool (cmpW RCeq (wOf (v acnt)) (n 0)))
                                     (mkNum (n 0))
                                     (lets
-                                        [ ( argvW, callW "malloc" [ imul (wOf (v acnt)) (n 8) ] )
+                                        [ ( argvW, callW "malloc" [ iadd (imul (wOf (v acnt)) (n 8)) (n 8) ] )
                                         , ( b 36, iff (mkBool (cmpW RCeq (v argvW) (n 0))) haltV (mkNum (n 0)) )
                                         , ( b 37, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = v argvW }) )
                                         , ( agoGo, callR "Rt.epArgvGo" [ v argvv, v stN, v cAddrN ] )
@@ -3842,7 +3946,12 @@ epCmdDefun =
                                             -- epArgvGo already freed the strings and
                                             -- the array; clear the slot and stop.
                                             (lets [ ( b 38, clearArgv ) ] (mkNum (n (-1))))
-                                            (mkNum (n 0))
+                                            -- (3B-2b) the argv array carries the NULL
+                                            -- terminator Zig's [:null] slice gave the
+                                            -- rebuilt RCmd: execvp reads argv[argc].
+                                            (lets [ ( b 39, Unsafe (RawWordStore { ptr = v argvW, index = wOf (v acnt), value = n 0 }) ) ]
+                                                (mkNum (n 0))
+                                            )
                                         )
                                     )
                               )
@@ -4211,6 +4320,7 @@ epRedirDefun =
                 , ( b 25, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirPathIdx, value = n 0 }) )
                 , ( b 26, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirDupfdIdx, value = wOf (v dfdN) }) )
                 , ( b 27, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirBodyIdx, value = n 0 }) )
+                , ( b 43, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirTmpfdIdx, value = n (-1) }) )
                 ]
                 (mkNum (n 0))
 
@@ -4221,6 +4331,7 @@ epRedirDefun =
                 , ( b 30, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirPathIdx, value = n 0 }) )
                 , ( b 31, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirDupfdIdx, value = n 0 }) )
                 , ( b 32, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirBodyIdx, value = v bufW }) )
+                , ( b 44, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirTmpfdIdx, value = n (-1) }) )
                 ]
                 (mkNum (n 0))
 
@@ -4231,6 +4342,7 @@ epRedirDefun =
                 , ( b 35, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirPathIdx, value = v bufW }) )
                 , ( b 36, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirDupfdIdx, value = n 0 }) )
                 , ( b 37, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirBodyIdx, value = n 0 }) )
+                , ( b 45, Unsafe (RawWordStore { ptr = wOf (v rAddrN), index = n RtLayout.epRedirTmpfdIdx, value = n (-1) }) )
                 ]
                 (mkNum (n 0))
     in
@@ -4582,6 +4694,1656 @@ epFreeRedirsDefun =
         )
 
 
+-- ============================ exec-plan RUN (zigretire stage 3 GROUP 3B-2b) ============================
+-- The RUN half of execRunDecoded (runProgram/runPipeline/applyRedirects/
+-- childBuiltin + the tmpfile wiring) as Mid defuns over RawCallRaw libc seats
+-- (fork/execvp/waitpid/_exit/pipe/dup2/close/openat/mkstemp/unlink/write/
+-- lseek/chdir/getcwd/getpid/kill/getenv/malloc/free), operating DIRECTLY on
+-- the decode blob (no Zig rebuild).  The SLURP+RESULT half stays in the
+-- rt_exec_run seat until 3B-2c.
+--
+-- THE 3-ARG LEAN-ABI BOUND (Lower.elm rtArityErr): EVERY Rt defun has 1..3
+-- params, and a saturated self-tail `App` (GRef own-key) is the ONLY loop.
+-- All loop state therefore lives in a malloc'd STATE BLOCK threaded by its
+-- one pointer param (the stage-4 collector-state pattern).  The state block
+-- and every scratch the run mallocs are C-heap (RawCallRaw malloc), so they
+-- are non-moving across every safepoint and fork.
+--
+-- THE CHILD-AFTER-FORK DISCIPLINE (execplan.zig INVARIANT 2, preserved): the
+-- fork'd child's only work is RawCallRaw (libc) + reads of the C-heap
+-- blob/cbuf/state block + _exit — NEVER a GC safepoint.  Every defun below
+-- is therefore frame-free and allocation-free except where it mallocs a
+-- C-heap scratch (a RawCallRaw, not a GC safepoint).
+--
+-- MALLOC/FREE PAIRING: pfds/pids and every scratch buffer are freed on EVERY
+-- exit path including the fork-fail and pipe-fail unwinds; a leak is
+-- invisible to every oracle.
+
+-- run-path literals, packed NUL-terminated after the decode's 13 word-aligned
+-- tag names (byte 104).  ASCII only, so String.length == byte length.
+runLits : List String
+runLits =
+    [ "echo", "true", "false", ":", "cd", "pwd", "-n", "HOME", " ", "/"
+    , "Input redirect file not found: ", "\n", "Output redirect failed: "
+    , "shensh: ", ": not found\n", ": cannot execute\n", "cd: "
+    , "pwd: cannot get cwd\n"
+    , "/tmp/shensh-out.XXXXXX", "/tmp/shensh-err.XXXXXX", "/tmp/shensh-hdoc.XXXXXX"
+    ]
+
+
+runLitsPacked : List ( String, Int, Int )
+runLitsPacked =
+    let
+        step s ( off, acc ) =
+            ( off + String.length s + 1, ( s, off, String.length s ) :: acc )
+    in
+    List.foldl step ( 104, [] ) runLits |> Tuple.second |> List.reverse
+
+
+runOff : String -> Int
+runOff name =
+    case List.filter (\( nm, _, _ ) -> nm == name) runLitsPacked of
+        ( _, off, _ ) :: _ ->
+            off
+
+        [] ->
+            0
+
+
+runCbufSize : Int
+runCbufSize =
+    List.foldl (\s acc -> acc + String.length s + 1) 104 runLits
+
+
+-- run-state block word slots (malloc'd in Rt.exec-plan)
+rCbuf = 0
+rOutfd = 1
+rErrfd = 2
+rInChild = 3
+rProg = 4
+rPipe = 5
+rLast = 6
+rI = 7
+rN = 8
+rNpipes = 9
+rPfds = 10
+rPids = 11
+rForked = 12
+rForkFail = 13
+rExit = 14
+rScrA = 15
+rScrB = 16
+rStatus = 17
+rScrC = 18
+rJ = 19
+rStWords = 20
+
+
+rLoad : Binder -> Int -> Exp
+rLoad stN idx =
+    Unsafe (RawWordLoad { ptr = wOf (v stN), index = n idx })
+
+
+rStore : Binder -> Int -> Exp -> Exp
+rStore stN idx val =
+    Unsafe (RawWordStore { ptr = wOf (v stN), index = n idx, value = val })
+
+
+{-| Same, for a state block held as a RAW word binder (exec-plan's own
+malloc result): the pointer is the binder itself, no payload read.
+-}
+rStoreW : Binder -> Int -> Exp -> Exp
+rStoreW stW idx val =
+    Unsafe (RawWordStore { ptr = v stW, index = n idx, value = val })
+
+
+{-| cStrEqLit ptrN litN i — byte-compare the NUL-terminated C string at ptrN
+against the cbuf literal at byte offset litN, from index i.  Self-tail.
+-}
+cStrEqLitDefun : Defun
+cStrEqLitDefun =
+    let
+        ptrN = p1
+
+        litN = p2
+
+        i = p3
+
+        pb = b 4
+
+        lb = b 5
+    in
+    lam "Rt.cStrEqLit" [ ptrN, litN, i ]
+        (lets
+            [ ( pb, Unsafe (RawByteLoad { ptr = wOf (v ptrN), index = wOf (v i) }) )
+            , ( lb, Unsafe (RawByteLoad { ptr = wOf (v litN), index = wOf (v i) }) )
+            ]
+            (iff (mkBool (cmpW RCeq (v lb) (n 0)))
+                (mkBool (cmpW RCeq (v pb) (n 0)))
+                (iff (mkBool (cmpW RCeq (v pb) (v lb)))
+                    (App { fn = GRef { key = "Rt.cStrEqLit", force = False }, args = [ v ptrN, v litN, mkNum (iadd (wOf (v i)) (n 1)) ] })
+                    falseV
+                )
+            )
+        )
+
+
+{-| wStr fdN ptrN — write the NUL-terminated C string at ptrN to fdN (the
+result is ignored, exactly Zig's `_ = write`).  Non-allocating.
+-}
+wStrDefun : Defun
+wStrDefun =
+    let
+        fdN = p1
+
+        ptrN = p2
+
+        lenN = b 4
+    in
+    lam "Rt.wStr" [ fdN, ptrN ]
+        (lets
+            [ ( lenN, callR "Rt.cStrLenGo" [ v ptrN, mkNum (n 0) ] ) ]
+            (lets
+                [ ( b 5, callW "write" [ wOf (v fdN), wOf (v ptrN), wOf (v lenN) ] ) ]
+                mkNil
+            )
+        )
+
+
+{-| wRaw fdN ptrN lenN — write lenN bytes at ptrN to fdN.  Non-allocating.
+-}
+wRawDefun : Defun
+wRawDefun =
+    let
+        fdN = p1
+
+        ptrN = p2
+
+        lenN = p3
+    in
+    lam "Rt.wRaw" [ fdN, ptrN, lenN ]
+        (lets
+            [ ( b 4, callW "write" [ wOf (v fdN), wOf (v ptrN), wOf (v lenN) ] ) ]
+            mkNil
+        )
+
+
+{-| waitStatusCode stN — W.IFEXITED -> EXITSTATUS, else 128 + (st & 0x7f).
+st is a 32-bit waitpid status, so the 32-bit shift family is exact.
+-}
+waitStatusCodeDefun : Defun
+waitStatusCodeDefun =
+    let
+        stN = p1
+    in
+    lam "Rt.waitStatusCode" [ stN ]
+        (iff (mkBool (cmpW RCeq (iand (wOf (v stN)) (n 127)) (n 0)))
+            (mkNum (iand (shrW (wOf (v stN)) (n 8)) (n 255)))
+            (mkNum (iadd (n 128) (iand (wOf (v stN)) (n 127))))
+        )
+
+
+{-| envHome stN — getenv("HOME") or 0 (unset/empty), as a raw pointer boxed.
+-}
+envHomeDefun : Defun
+envHomeDefun =
+    let
+        stN = p1
+
+        cbufW = b 4
+
+        h = b 5
+
+        ln = b 6
+    in
+    lam "Rt.envHome" [ stN ]
+        (lets
+            [ ( cbufW, rLoad stN rCbuf )
+            , ( h, callW "getenv" [ iadd (v cbufW) (n (runOff "HOME")) ] )
+            ]
+            (iff (mkBool (cmpW RCeq (v h) (n 0)))
+                (mkNum (n 0))
+                (lets
+                    [ ( ln, callR "Rt.cStrLenGo" [ mkNum (v h), mkNum (n 0) ] ) ]
+                    (iff (mkBool (cmpW RCeq (wOf (v ln)) (n 0)))
+                        (mkNum (n 0))
+                        (mkNum (v h))
+                    )
+                )
+            )
+        )
+
+
+{-| isChildBuiltin a0N stN — a0 is one of echo/true/false/:/cd/pwd (the exact
+names Zig's is_child_builtin matches; no path parts).
+-}
+isChildBuiltinDefun : Defun
+isChildBuiltinDefun =
+    let
+        a0N = p1
+
+        stN = p2
+
+        cbufW = b 4
+    in
+    lam "Rt.isChildBuiltin" [ a0N, stN ]
+        (lets
+            [ ( cbufW, rLoad stN rCbuf ) ]
+            (or2
+                (callR "Rt.cStrEqLit" [ v a0N, mkNum (iadd (v cbufW) (n (runOff "echo"))) , mkNum (n 0) ])
+                (or2
+                    (callR "Rt.cStrEqLit" [ v a0N, mkNum (iadd (v cbufW) (n (runOff "true"))) , mkNum (n 0) ])
+                    (or2
+                        (callR "Rt.cStrEqLit" [ v a0N, mkNum (iadd (v cbufW) (n (runOff "false"))) , mkNum (n 0) ])
+                        (or2
+                            (callR "Rt.cStrEqLit" [ v a0N, mkNum (iadd (v cbufW) (n (runOff ":"))) , mkNum (n 0) ])
+                            (or2
+                                (callR "Rt.cStrEqLit" [ v a0N, mkNum (iadd (v cbufW) (n (runOff "cd"))) , mkNum (n 0) ])
+                                (callR "Rt.cStrEqLit" [ v a0N, mkNum (iadd (v cbufW) (n (runOff "pwd"))) , mkNum (n 0) ])
+                            )
+                        )
+                    )
+                )
+            )
+        )
+
+
+{-| echoGo argvN argcN stN — childBuiltin's echo loop.  Loop state lives in
+stN: rI = current arg index, rScrA = first arg index, rScrB = nl (0/1).
+Self-tail; returns 0 when the args are written.
+-}
+echoGoDefun : Defun
+echoGoDefun =
+    let
+        argvN = p1
+
+        argcN = p2
+
+        stN = p3
+
+        iW = b 4
+
+        argN = b 5
+
+        cbufW = b 6
+    in
+    lam "Rt.echoGo" [ argvN, argcN, stN ]
+        (lets
+            [ ( iW, rLoad stN rI )
+            , ( cbufW, rLoad stN rCbuf )
+            ]
+            (iff (mkBool (cmpW RCges (v iW) (wOf (v argcN))))
+                (lets
+                    [ ( b 7, iff (mkBool (cmpW RCeq (rLoad stN rScrB) (n 1)))
+                                (callR "Rt.wRaw" [ mkNum (n 1), mkNum (iadd (v cbufW) (n (runOff "\n"))) , mkNum (n 1) ])
+                                mkNil
+                      )
+                    ]
+                    (mkNum (n 0))
+                )
+                (lets
+                    [ ( b 8, iff (mkBool (cmpW RCgts (v iW) (rLoad stN rScrA)))
+                                (callR "Rt.wRaw" [ mkNum (n 1), mkNum (iadd (v cbufW) (n (runOff " "))) , mkNum (n 1) ])
+                                mkNil
+                      )
+                    , ( argN, Unsafe (RawWordLoad { ptr = wOf (v argvN), index = v iW }) )
+                    , ( b 9, callR "Rt.wStr" [ mkNum (n 1), mkNum (v argN) ] )
+                    , ( b 10, rStore stN rI (iadd (v iW) (n 1)) )
+                    ]
+                    (App { fn = GRef { key = "Rt.echoGo", force = False }, args = [ v argvN, v argcN, v stN ] })
+                )
+            )
+        )
+
+
+{-| childCd argvN argcN stN — the cd builtin arm (Zig's two-pass dir
+resolution: argv[1] or HOME, then "/"; PATH_MAX guard; chdir).
+-}
+childCdDefun : Defun
+childCdDefun =
+    let
+        argvN = p1
+
+        argcN = p2
+
+        stN = p3
+
+        cbufW = b 4
+
+        dirN = b 5
+
+        ln = b 6
+
+        bufW = b 7
+
+        rc = b 8
+    in
+    lam "Rt.childCd" [ argvN, argcN, stN ]
+        (lets
+            [ ( cbufW, rLoad stN rCbuf )
+            , ( dirN, iff (mkBool (cmpW RCgts (wOf (v argcN)) (n 1)))
+                        (mkNum (Unsafe (RawWordLoad { ptr = wOf (v argvN), index = n 1 })))
+                        (mkNum (n 0))
+              )
+            , ( dirN, iff (mkBool (cmpW RCeq (wOf (v dirN)) (n 0)))
+                        (callR "Rt.envHome" [ v stN ])
+                        (lets
+                            [ ( ln, callR "Rt.cStrLenGo" [ v dirN, mkNum (n 0) ] ) ]
+                            (iff (mkBool (cmpW RCeq (wOf (v ln)) (n 0)))
+                                (callR "Rt.envHome" [ v stN ])
+                                (v dirN)
+                            )
+                        )
+              )
+            , ( dirN, iff (mkBool (cmpW RCeq (wOf (v dirN)) (n 0)))
+                        (mkNum (iadd (v cbufW) (n (runOff "/"))))
+                        (v dirN)
+              )
+            , ( ln, callR "Rt.cStrLenGo" [ v dirN, mkNum (n 0) ] )
+            ]
+            (iff (mkBool (cmpW RCges (wOf (v ln)) (n 4096)))
+                (mkNum (n 1))
+                (lets
+                    [ ( bufW, callW "malloc" [ n 4096 ] )
+                    , ( b 9, iff (mkBool (cmpW RCeq (v bufW) (n 0))) haltV (mkNum (n 0)) )
+                    , ( b 10, callR "Rt.cStrCopyGo" [ v dirN, mkNum (v bufW), mkNum (n 0) ] )
+                    , ( rc, callW "chdir" [ v bufW ] )
+                    , ( b 11, callW "free" [ v bufW ] )
+                    ]
+                    (iff (mkBool (cmpW RCeq (v rc) (n 0)))
+                        (mkNum (n 0))
+                        (lets
+                            [ ( b 12, callR "Rt.wStr" [ mkNum (n 2), mkNum (iadd (v cbufW) (n (runOff "cd: "))) ] )
+                            , ( b 13, callR "Rt.wStr" [ mkNum (n 2), v dirN ] )
+                            , ( b 14, callR "Rt.wRaw" [ mkNum (n 2), mkNum (iadd (v cbufW) (n (runOff "\n"))) , mkNum (n 1) ] )
+                            ]
+                            (mkNum (n 1))
+                        )
+                    )
+                )
+            )
+        )
+
+
+{-| childPwd stN — the pwd builtin arm (getcwd into a 4096 buf; PATH_MAX here
+is 4096 like every other Mid buffer).
+-}
+childPwdDefun : Defun
+childPwdDefun =
+    let
+        stN = p1
+
+        cbufW = b 4
+
+        pbuf = b 5
+
+        got = b 6
+
+        plen = b 7
+    in
+    lam "Rt.childPwd" [ stN ]
+        (lets
+            [ ( cbufW, rLoad stN rCbuf )
+            , ( pbuf, callW "malloc" [ n 4096 ] )
+            , ( b 8, iff (mkBool (cmpW RCeq (v pbuf) (n 0))) haltV (mkNum (n 0)) )
+            , ( got, callW "getcwd" [ v pbuf, n 4096 ] )
+            ]
+            (iff (mkBool (cmpW RCne (v got) (n 0)))
+                (lets
+                    [ ( plen, callR "Rt.cStrLenGo" [ mkNum (v pbuf), mkNum (n 0) ] )
+                    , ( b 9, callR "Rt.wRaw" [ mkNum (n 1), mkNum (v pbuf), v plen ] )
+                    , ( b 10, callR "Rt.wRaw" [ mkNum (n 1), mkNum (iadd (v cbufW) (n (runOff "\n"))) , mkNum (n 1) ] )
+                    , ( b 11, callW "free" [ v pbuf ] )
+                    ]
+                    (mkNum (n 0))
+                )
+                (lets
+                    [ ( b 12, callR "Rt.wRaw" [ mkNum (n 2), mkNum (iadd (v cbufW) (n (runOff "pwd: cannot get cwd\n"))) , mkNum (n 20) ] )
+                    , ( b 13, callW "free" [ v pbuf ] )
+                    ]
+                    (mkNum (n 1))
+                )
+            )
+        )
+
+
+{-| childBuiltin argcN argvN stN — echo/true/false/:/cd/pwd in-process.  -1
+when argv[0] is not a builtin (the caller falls through to execvp).
+-}
+childBuiltinDefun : Defun
+childBuiltinDefun =
+    let
+        argcN = p1
+
+        argvN = p2
+
+        stN = p3
+
+        a0 = b 4
+
+        cbufW = b 5
+
+        isEcho = b 6
+
+        isTrue = b 7
+
+        isFalse = b 8
+
+        isColon = b 9
+
+        isCd = b 10
+
+        isPwd = b 11
+
+        arg1 = b 12
+
+        isMinusN = b 13
+    in
+    lam "Rt.childBuiltin" [ argcN, argvN, stN ]
+        (iff (mkBool (cmpW RCeq (wOf (v argcN)) (n 0)))
+            (mkNum (n (-1)))
+            (lets
+                [ ( a0, Unsafe (RawWordLoad { ptr = wOf (v argvN), index = n 0 }) )
+                , ( cbufW, rLoad stN rCbuf )
+                , ( isEcho, callR "Rt.cStrEqLit" [ mkNum (v a0), mkNum (iadd (v cbufW) (n (runOff "echo"))) , mkNum (n 0) ] )
+                , ( isTrue, callR "Rt.cStrEqLit" [ mkNum (v a0), mkNum (iadd (v cbufW) (n (runOff "true"))) , mkNum (n 0) ] )
+                , ( isFalse, callR "Rt.cStrEqLit" [ mkNum (v a0), mkNum (iadd (v cbufW) (n (runOff "false"))) , mkNum (n 0) ] )
+                , ( isColon, callR "Rt.cStrEqLit" [ mkNum (v a0), mkNum (iadd (v cbufW) (n (runOff ":"))) , mkNum (n 0) ] )
+                , ( isCd, callR "Rt.cStrEqLit" [ mkNum (v a0), mkNum (iadd (v cbufW) (n (runOff "cd"))) , mkNum (n 0) ] )
+                , ( isPwd, callR "Rt.cStrEqLit" [ mkNum (v a0), mkNum (iadd (v cbufW) (n (runOff "pwd"))) , mkNum (n 0) ] )
+                ]
+                (iff (v isEcho)
+                    (lets
+                        [ ( b 20, rStore stN rScrB (n 1) )
+                        , ( b 21, rStore stN rScrA (n 1) )
+                        , ( b 22, rStore stN rI (n 1) )
+                        , ( arg1, Unsafe (RawWordLoad { ptr = wOf (v argvN), index = n 1 }) )
+                        , ( isMinusN, iff (mkBool (cmpW RCgts (wOf (v argcN)) (n 1)))
+                                    (callR "Rt.cStrEqLit" [ mkNum (v arg1), mkNum (iadd (v cbufW) (n (runOff "-n"))) , mkNum (n 0) ])
+                                    falseV
+                          )
+                        , ( b 23, iff (v isMinusN)
+                                    (lets
+                                        [ ( b 24, rStore stN rScrB (n 0) )
+                                        , ( b 25, rStore stN rScrA (n 2) )
+                                        , ( b 26, rStore stN rI (n 2) )
+                                        ]
+                                        mkNil
+                                    )
+                                    mkNil
+                          )
+                        ]
+                        (callR "Rt.echoGo" [ v argvN, v argcN, v stN ])
+                    )
+                    (iff (v isTrue)
+                        (mkNum (n 0))
+                        (iff (v isFalse)
+                            (mkNum (n 1))
+                            (iff (v isColon)
+                                (mkNum (n 0))
+                                (iff (v isCd)
+                                    (callR "Rt.childCd" [ v argvN, v argcN, v stN ])
+                                    (iff (v isPwd)
+                                        (callR "Rt.childPwd" [ v stN ])
+                                        (mkNum (n (-1)))
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+
+
+{-| applyOneRedir redirN stN — one redir record's apply (in/out/append/dup/
+hdoc/hstr), Zig's apply_redirects switch.  Reads the literal base from stN.
+0 ok / -1 failure (the caller _exits or returns 1).
+-}
+applyOneRedirDefun : Defun
+applyOneRedirDefun =
+    let
+        redirN = p1
+
+        stN = p2
+
+        kindW = b 4
+
+        fdN = b 5
+
+        pathN = b 6
+
+        dupN = b 7
+
+        tmpN = b 8
+
+        ofd = b 9
+
+        cbufW = b 10
+
+        inArm =
+            let
+                rc1 = b 20
+
+                rc2 = b 21
+            in
+            lets
+                [ ( pathN, Unsafe (RawWordLoad { ptr = wOf (v redirN), index = n RtLayout.epRedirPathIdx }) )
+                , ( ofd, callW "openat" [ n (-100), v pathN, n 0, n 0 ] )
+                ]
+                (iff (mkBool (cmpW RClts (v ofd) (n 0)))
+                    (lets
+                        [ ( rc1, callR "Rt.wStr" [ mkNum (n 2), mkNum (iadd (v cbufW) (n (runOff "Input redirect file not found: "))) ] )
+                        , ( b 22, callR "Rt.wStr" [ mkNum (n 2), mkNum (v pathN) ] )
+                        , ( b 23, callR "Rt.wRaw" [ mkNum (n 2), mkNum (iadd (v cbufW) (n (runOff "\n"))) , mkNum (n 1) ] )
+                        ]
+                        (mkNum (n (-1)))
+                    )
+                    (lets
+                        [ ( rc2, callW "dup2" [ v ofd, v fdN ] )
+                        , ( b 24, callW "close" [ v ofd ] )
+                        ]
+                        (iff (mkBool (cmpW RClts (v rc2) (n 0)))
+                            (mkNum (n (-1)))
+                            (mkNum (n 0))
+                        )
+                    )
+                )
+
+        outAppendArm flagsN =
+            let
+                rc1 = b 25
+
+                rc2 = b 26
+            in
+            lets
+                [ ( pathN, Unsafe (RawWordLoad { ptr = wOf (v redirN), index = n RtLayout.epRedirPathIdx }) )
+                , ( ofd, callW "openat" [ n (-100), v pathN, flagsN, n 438 ] )
+                ]
+                (iff (mkBool (cmpW RClts (v ofd) (n 0)))
+                    (lets
+                        [ ( rc1, callR "Rt.wStr" [ mkNum (n 2), mkNum (iadd (v cbufW) (n (runOff "Output redirect failed: "))) ] )
+                        , ( b 27, callR "Rt.wStr" [ mkNum (n 2), mkNum (v pathN) ] )
+                        , ( b 28, callR "Rt.wRaw" [ mkNum (n 2), mkNum (iadd (v cbufW) (n (runOff "\n"))) , mkNum (n 1) ] )
+                        ]
+                        (mkNum (n (-1)))
+                    )
+                    (lets
+                        [ ( rc2, callW "dup2" [ v ofd, v fdN ] )
+                        , ( b 29, callW "close" [ v ofd ] )
+                        ]
+                        (iff (mkBool (cmpW RClts (v rc2) (n 0)))
+                            (mkNum (n (-1)))
+                            (mkNum (n 0))
+                        )
+                    )
+                )
+
+        dupArm =
+            let
+                rc = b 30
+            in
+            lets
+                [ ( dupN, Unsafe (RawWordLoad { ptr = wOf (v redirN), index = n RtLayout.epRedirDupfdIdx }) )
+                , ( rc, callW "dup2" [ v dupN, v fdN ] )
+                ]
+                (iff (mkBool (cmpW RClts (v rc) (n 0)))
+                    (mkNum (n (-1)))
+                    (mkNum (n 0))
+                )
+
+        hArm =
+            let
+                rc = b 31
+            in
+            lets
+                [ ( tmpN, Unsafe (RawWordLoad { ptr = wOf (v redirN), index = n RtLayout.epRedirTmpfdIdx }) )
+                , ( rc, callW "dup2" [ v tmpN, v fdN ] )
+                , ( b 32, callW "close" [ v tmpN ] )
+                , ( b 33, Unsafe (RawWordStore { ptr = wOf (v redirN), index = n RtLayout.epRedirTmpfdIdx, value = n (-1) }) )
+                ]
+                (iff (mkBool (cmpW RClts (v rc) (n 0)))
+                    (mkNum (n (-1)))
+                    (mkNum (n 0))
+                )
+    in
+    lam "Rt.applyOneRedir" [ redirN, stN ]
+        (lets
+            [ ( kindW, Unsafe (RawWordLoad { ptr = wOf (v redirN), index = n RtLayout.epRedirKindIdx }) )
+            , ( fdN, Unsafe (RawWordLoad { ptr = wOf (v redirN), index = n RtLayout.epRedirFdIdx }) )
+            , ( cbufW, rLoad stN rCbuf )
+            ]
+            (iff (mkBool (cmpW RCeq (v kindW) (n RtLayout.epKindIn)))
+                inArm
+                (iff (mkBool (cmpW RCeq (v kindW) (n RtLayout.epKindOut)))
+                    (outAppendArm (n 577))
+                    (iff (mkBool (cmpW RCeq (v kindW) (n RtLayout.epKindAppend)))
+                        (outAppendArm (n 1089))
+                        (iff (mkBool (cmpW RCeq (v kindW) (n RtLayout.epKindDup)))
+                            dupArm
+                            hArm
+                        )
+                    )
+                )
+            )
+        )
+
+
+{-| applyRedirects cmdN stN iN — walk cmd.redirs[0..nredirs) left-to-right
+(Zig's sequential dup2 application).  Self-tail over i; 0 / -1.
+-}
+applyRedirectsDefun : Defun
+applyRedirectsDefun =
+    let
+        cmdN = p1
+
+        stN = p2
+
+        iN = p3
+
+        nredirs = b 4
+
+        arrN = b 5
+
+        redirN = b 6
+
+        rc = b 7
+    in
+    lam "Rt.applyRedirects" [ cmdN, stN, iN ]
+        (lets
+            [ ( nredirs, Unsafe (RawWordLoad { ptr = wOf (v cmdN), index = n RtLayout.epCmdNredirsIdx }) ) ]
+            (iff (mkBool (cmpW RCges (wOf (v iN)) (v nredirs)))
+                (mkNum (n 0))
+                (lets
+                    [ ( arrN, Unsafe (RawWordLoad { ptr = wOf (v cmdN), index = n RtLayout.epCmdRedirsIdx }) )
+                    , ( redirN, iadd (v arrN) (imul (wOf (v iN)) (n (8 * RtLayout.epRedirWords))) )
+                    , ( rc, callR "Rt.applyOneRedir" [ mkNum (v redirN), v stN ] )
+                    ]
+                    (iff (mkBool (cmpW RClts (wOf (v rc)) (n 0)))
+                        (mkNum (n (-1)))
+                        (App { fn = GRef { key = "Rt.applyRedirects", force = False }, args = [ v cmdN, v stN, mkNum (iadd (wOf (v iN)) (n 1)) ] })
+                    )
+                )
+            )
+        )
+
+
+{-| bodyWriteGo bodyN bodyLenN stN — openBodyTmpfile's write loop.  stN[rScrA]
+= byte offset, stN[rScrB] = tmpfile fd.  Self-tail; returns the fd (rewound)
+or -1.
+-}
+bodyWriteGoDefun : Defun
+bodyWriteGoDefun =
+    let
+        bodyN = p1
+
+        bodyLenN = p2
+
+        stN = p3
+
+        offW = b 4
+
+        fdW = b 5
+
+        w = b 6
+    in
+    lam "Rt.bodyWriteGo" [ bodyN, bodyLenN, stN ]
+        (lets
+            [ ( offW, rLoad stN rScrA )
+            , ( fdW, rLoad stN rScrB )
+            ]
+            (iff (mkBool (cmpW RCges (v offW) (wOf (v bodyLenN))))
+                (lets
+                    [ ( b 7, callW "lseek" [ v fdW, n 0, n 0 ] ) ]
+                    (mkNum (v fdW))
+                )
+                (lets
+                    [ ( w, callW "write" [ v fdW, iadd (wOf (v bodyN)) (v offW), isub (wOf (v bodyLenN)) (v offW) ] ) ]
+                    (iff (mkBool (cmpW RClts (v w) (n 0)))
+                        (iff (mkBool (cmpW RCeq errnoOf (n 4)))
+                            (App { fn = GRef { key = "Rt.bodyWriteGo", force = False }, args = [ v bodyN, v bodyLenN, v stN ] })
+                            (lets
+                                [ ( b 8, callW "close" [ v fdW ] ) ]
+                                (mkNum (n (-1)))
+                            )
+                        )
+                        (lets
+                            [ ( b 9, rStore stN rScrA (iadd (v offW) (v w)) ) ]
+                            (App { fn = GRef { key = "Rt.bodyWriteGo", force = False }, args = [ v bodyN, v bodyLenN, v stN ] })
+                        )
+                    )
+                )
+            )
+        )
+
+
+{-| openBodyTmpfile bodyN stN — pre-open a heredoc/herestring body as an
+unlinked tmpfile, rewound.  bodyN is the blob's body C string; the template
+literal is in the cbuf.  -1 on failure.
+-}
+openBodyTmpfileDefun : Defun
+openBodyTmpfileDefun =
+    let
+        bodyN = p1
+
+        stN = p2
+
+        cbufW = b 4
+
+        tpl = b 5
+
+        fd = b 6
+
+        blen = b 7
+    in
+    lam "Rt.openBodyTmpfile" [ bodyN, stN ]
+        (lets
+            [ ( cbufW, rLoad stN rCbuf )
+            , ( tpl, callW "malloc" [ n 24 ] )
+            , ( b 8, iff (mkBool (cmpW RCeq (v tpl) (n 0))) haltV (mkNum (n 0)) )
+            , ( b 9, callR "Rt.cStrCopyGo" [ mkNum (iadd (v cbufW) (n (runOff "/tmp/shensh-hdoc.XXXXXX"))) , mkNum (v tpl), mkNum (n 0) ] )
+            , ( fd, callW "mkstemp" [ v tpl ] )
+            , ( b 10, callW "unlink" [ v tpl ] )
+            , ( b 11, callW "free" [ v tpl ] )
+            , ( blen, callR "Rt.cStrLenGo" [ v bodyN, mkNum (n 0) ] )
+            ]
+            (iff (mkBool (cmpW RClts (v fd) (n 0)))
+                (mkNum (n (-1)))
+                (lets
+                    [ ( b 12, rStore stN rScrA (n 0) )
+                    , ( b 13, rStore stN rScrB (v fd) )
+                    ]
+                    (callR "Rt.bodyWriteGo" [ v bodyN, v blen, v stN ])
+                )
+            )
+        )
+
+
+{-| wireCmdGo cmdN stN jN — wire one cmd's hdoc/hstr bodies.  Self-tail over j.
+0 ok / -1 tmpfile failure (the already-opened fds stay owned by the redirs;
+the caller closes via closePipeTmpfds).
+-}
+wireCmdGoDefun : Defun
+wireCmdGoDefun =
+    let
+        cmdN = p1
+
+        stN = p2
+
+        jN = p3
+
+        nredirs = b 4
+
+        arrN = b 5
+
+        redirN = b 6
+
+        kindW = b 7
+
+        bodyN = b 8
+
+        fd = b 9
+
+        isH = b 10
+    in
+    lam "Rt.wireCmdGo" [ cmdN, stN, jN ]
+        (lets
+            [ ( nredirs, Unsafe (RawWordLoad { ptr = wOf (v cmdN), index = n RtLayout.epCmdNredirsIdx }) ) ]
+            (iff (mkBool (cmpW RCges (wOf (v jN)) (v nredirs)))
+                (mkNum (n 0))
+                (lets
+                    [ ( arrN, Unsafe (RawWordLoad { ptr = wOf (v cmdN), index = n RtLayout.epCmdRedirsIdx }) )
+                    , ( redirN, iadd (v arrN) (imul (wOf (v jN)) (n (8 * RtLayout.epRedirWords))) )
+                    , ( kindW, Unsafe (RawWordLoad { ptr = v redirN, index = n RtLayout.epRedirKindIdx }) )
+                    , ( isH, or2 (mkBool (cmpW RCeq (v kindW) (n RtLayout.epKindHdoc))) (mkBool (cmpW RCeq (v kindW) (n RtLayout.epKindHstr))) )
+                    ]
+                    (iff (v isH)
+                        (lets
+                            [ ( bodyN, Unsafe (RawWordLoad { ptr = v redirN, index = n RtLayout.epRedirBodyIdx }) )
+                            , ( fd, callR "Rt.openBodyTmpfile" [ mkNum (v bodyN), v stN ] )
+                            , ( b 11, Unsafe (RawWordStore { ptr = v redirN, index = n RtLayout.epRedirTmpfdIdx, value = wOf (v fd) }) )
+                            ]
+                            (iff (mkBool (cmpW RClts (wOf (v fd)) (n 0)))
+                                (mkNum (n (-1)))
+                                (App { fn = GRef { key = "Rt.wireCmdGo", force = False }, args = [ v cmdN, v stN, mkNum (iadd (wOf (v jN)) (n 1)) ] })
+                            )
+                        )
+                        (App { fn = GRef { key = "Rt.wireCmdGo", force = False }, args = [ v cmdN, v stN, mkNum (iadd (wOf (v jN)) (n 1)) ] })
+                    )
+                )
+            )
+        )
+
+
+{-| wirePipeGo pipeN stN iN — wire every cmd's hdoc/hstr bodies (pre-fork).
+Self-tail over cmds; 0 / -1.
+-}
+wirePipeGoDefun : Defun
+wirePipeGoDefun =
+    let
+        pipeN = p1
+
+        stN = p2
+
+        iN = p3
+
+        ncmds = b 4
+
+        arrN = b 5
+
+        cmdN = b 6
+
+        rc = b 7
+    in
+    lam "Rt.wirePipeGo" [ pipeN, stN, iN ]
+        (lets
+            [ ( ncmds, Unsafe (RawWordLoad { ptr = wOf (v pipeN), index = n RtLayout.epPipeCmdCountIdx }) ) ]
+            (iff (mkBool (cmpW RCges (wOf (v iN)) (v ncmds)))
+                (mkNum (n 0))
+                (lets
+                    [ ( arrN, Unsafe (RawWordLoad { ptr = wOf (v pipeN), index = n RtLayout.epPipeCmdArrIdx }) )
+                    , ( cmdN, iadd (v arrN) (imul (wOf (v iN)) (n (8 * RtLayout.epCmdWords))) )
+                    , ( rc, callR "Rt.wireCmdGo" [ mkNum (v cmdN), v stN, mkNum (n 0) ] )
+                    ]
+                    (iff (mkBool (cmpW RClts (wOf (v rc)) (n 0)))
+                        (mkNum (n (-1)))
+                        (App { fn = GRef { key = "Rt.wirePipeGo", force = False }, args = [ v pipeN, v stN, mkNum (iadd (wOf (v iN)) (n 1)) ] })
+                    )
+                )
+            )
+        )
+
+
+{-| closeCmdTmpfds cmdN iN — close (and -1) a cmd's opened tmpfds.  Self-tail
+over redirs.
+-}
+closeCmdTmpfdsDefun : Defun
+closeCmdTmpfdsDefun =
+    let
+        cmdN = p1
+
+        iN = p2
+
+        nredirs = b 4
+
+        arrN = b 5
+
+        redirN = b 6
+
+        tmpN = b 7
+    in
+    lam "Rt.closeCmdTmpfds" [ cmdN, iN ]
+        (lets
+            [ ( nredirs, Unsafe (RawWordLoad { ptr = wOf (v cmdN), index = n RtLayout.epCmdNredirsIdx }) ) ]
+            (iff (mkBool (cmpW RCges (wOf (v iN)) (v nredirs)))
+                mkNil
+                (lets
+                    [ ( arrN, Unsafe (RawWordLoad { ptr = wOf (v cmdN), index = n RtLayout.epCmdRedirsIdx }) )
+                    , ( redirN, iadd (v arrN) (imul (wOf (v iN)) (n (8 * RtLayout.epRedirWords))) )
+                    , ( tmpN, Unsafe (RawWordLoad { ptr = v redirN, index = n RtLayout.epRedirTmpfdIdx }) )
+                    , ( b 8, iff (mkBool (cmpW RCges (v tmpN) (n 0)))
+                                (lets
+                                    [ ( b 9, callW "close" [ v tmpN ] )
+                                    , ( b 10, Unsafe (RawWordStore { ptr = v redirN, index = n RtLayout.epRedirTmpfdIdx, value = n (-1) }) )
+                                    ]
+                                    mkNil
+                                )
+                                mkNil
+                      )
+                    ]
+                    (App { fn = GRef { key = "Rt.closeCmdTmpfds", force = False }, args = [ v cmdN, mkNum (iadd (wOf (v iN)) (n 1)) ] })
+                )
+            )
+        )
+
+
+{-| closePipeTmpfds pipeN iN — close every cmd's tmpfds.  Self-tail over cmds.
+-}
+closePipeTmpfdsDefun : Defun
+closePipeTmpfdsDefun =
+    let
+        pipeN = p1
+
+        iN = p2
+
+        ncmds = b 4
+
+        arrN = b 5
+
+        cmdN = b 6
+    in
+    lam "Rt.closePipeTmpfds" [ pipeN, iN ]
+        (lets
+            [ ( ncmds, Unsafe (RawWordLoad { ptr = wOf (v pipeN), index = n RtLayout.epPipeCmdCountIdx }) ) ]
+            (iff (mkBool (cmpW RCges (wOf (v iN)) (v ncmds)))
+                mkNil
+                (lets
+                    [ ( arrN, Unsafe (RawWordLoad { ptr = wOf (v pipeN), index = n RtLayout.epPipeCmdArrIdx }) )
+                    , ( cmdN, iadd (v arrN) (imul (wOf (v iN)) (n (8 * RtLayout.epCmdWords))) )
+                    , ( b 7, callR "Rt.closeCmdTmpfds" [ mkNum (v cmdN), mkNum (n 0) ] )
+                    ]
+                    (App { fn = GRef { key = "Rt.closePipeTmpfds", force = False }, args = [ v pipeN, mkNum (iadd (wOf (v iN)) (n 1)) ] })
+                )
+            )
+        )
+
+
+{-| runBuiltinInprocess cmdN stN — save fds 0/1/2, dup2 outfd/errfd, apply
+redirects, run the builtin, restore.  Only ever called with inChild (the
+subshell single-builtin arm).
+-}
+runBuiltinInprocessDefun : Defun
+runBuiltinInprocessDefun =
+    let
+        cmdN = p1
+
+        stN = p2
+
+        sav0 = b 4
+
+        sav1 = b 5
+
+        sav2 = b 6
+
+        outfdW = b 7
+
+        errfdW = b 8
+
+        rc = b 9
+
+        argcN = b 10
+
+        argvN = b 11
+
+        fin = b 17
+    in
+    lam "Rt.runBuiltinInprocess" [ cmdN, stN ]
+        (lets
+            [ ( sav0, callW "dup" [ n 0 ] )
+            , ( sav1, callW "dup" [ n 1 ] )
+            , ( sav2, callW "dup" [ n 2 ] )
+            ]
+            (iff (or2 (mkBool (cmpW RClts (v sav0) (n 0))) (or2 (mkBool (cmpW RClts (v sav1) (n 0))) (mkBool (cmpW RClts (v sav2) (n 0)))))
+                (lets
+                    [ ( b 12, iff (mkBool (cmpW RCges (v sav0) (n 0)))
+                        (lets [ ( b 12, (callW "close" [ v sav0 ]) ) ] mkNil)
+                        mkNil
+                        )
+                    , ( b 13, iff (mkBool (cmpW RCges (v sav1) (n 0)))
+                        (lets [ ( b 13, (callW "close" [ v sav1 ]) ) ] mkNil)
+                        mkNil
+                        )
+                    , ( b 14, iff (mkBool (cmpW RCges (v sav2) (n 0)))
+                        (lets [ ( b 14, (callW "close" [ v sav2 ]) ) ] mkNil)
+                        mkNil
+                        )
+                    ]
+                    (mkNum (n (-1)))
+                )
+                (lets
+                    [ ( outfdW, rLoad stN rOutfd )
+                    , ( errfdW, rLoad stN rErrfd )
+                    , ( b 15, callW "dup2" [ v outfdW, n 1 ] )
+                    , ( b 16, callW "dup2" [ v errfdW, n 2 ] )
+                    , ( rc, callR "Rt.applyRedirects" [ v cmdN, v stN, mkNum (n 0) ] )
+                    , ( argcN, Unsafe (RawWordLoad { ptr = wOf (v cmdN), index = n RtLayout.epCmdArgcIdx }) )
+                    , ( argvN, Unsafe (RawWordLoad { ptr = wOf (v cmdN), index = n RtLayout.epCmdArgvIdx }) )
+                    , ( rc, iff (mkBool (cmpW RClts (wOf (v rc)) (n 0)))
+                                (mkNum (n 1))
+                                (callR "Rt.childBuiltin" [ mkNum (v argcN), mkNum (v argvN), v stN ])
+                      )
+                    , ( fin, iff (mkBool (cmpW RClts (wOf (v rc)) (n 0)))
+                                (mkNum (n 127))
+                                (v rc)
+                      )
+                    , ( b 18, callW "dup2" [ v sav0, n 0 ] )
+                    , ( b 19, callW "close" [ v sav0 ] )
+                    , ( b 20, callW "dup2" [ v sav1, n 1 ] )
+                    , ( b 21, callW "close" [ v sav1 ] )
+                    , ( b 22, callW "dup2" [ v sav2, n 2 ] )
+                    , ( b 23, callW "close" [ v sav2 ] )
+                    ]
+                    (v fin)
+                )
+            )
+        )
+
+
+{-| closePipesGo pfdsN jN boundN — close pipe fd pair j (pfds word j holds
+[fd0 | fd1] packed, fd0 in the low 32 bits).  Self-tail over j < bound.
+-}
+closePipesGoDefun : Defun
+closePipesGoDefun =
+    let
+        pfdsN = p1
+
+        jN = p2
+
+        boundN = p3
+
+        w = b 4
+    in
+    lam "Rt.closePipesGo" [ pfdsN, jN, boundN ]
+        (iff (mkBool (cmpW RCges (wOf (v jN)) (wOf (v boundN))))
+            mkNil
+            (lets
+                [ ( w, Unsafe (RawWordLoad { ptr = wOf (v pfdsN), index = wOf (v jN) }) )
+                , ( b 5, callW "close" [ iand (v w) (n 4294967295) ] )
+                , ( b 6, callW "close" [ idiv (v w) (n 4294967296) ] )
+                ]
+                (App { fn = GRef { key = "Rt.closePipesGo", force = False }, args = [ v pfdsN, mkNum (iadd (wOf (v jN)) (n 1)), v boundN ] })
+            )
+        )
+
+
+
+
+{-| closeOthersGo cmdsArrN stN jN — the child's "close other stages' heredoc
+tmpfds": closeCmdTmpfds on every cmd except stN[rScrC].  ncmds comes from
+stN[rN].  Self-tail over j.
+-}
+closeOthersGoDefun : Defun
+closeOthersGoDefun =
+    let
+        cmdsArrN = p1
+
+        stN = p2
+
+        jN = p3
+
+        cmdN = b 4
+    in
+    lam "Rt.closeOthersGo" [ cmdsArrN, stN, jN ]
+        (iff (mkBool (cmpW RCges (wOf (v jN)) (rLoad p2 rN)))
+            mkNil
+            (lets
+                [ ( cmdN, iadd (wOf (v cmdsArrN)) (imul (wOf (v jN)) (n (8 * RtLayout.epCmdWords))) )
+                , ( b 5, iff (mkBool (cmpW RCne (wOf (v jN)) (rLoad p2 rScrC)))
+                            (callR "Rt.closeCmdTmpfds" [ mkNum (v cmdN), mkNum (n 0) ])
+                            mkNil
+                  )
+                ]
+                (App { fn = GRef { key = "Rt.closeOthersGo", force = False }, args = [ v cmdsArrN, v stN, mkNum (iadd (wOf (v jN)) (n 1)) ] })
+            )
+        )
+
+
+{-| execGo stN modeN — the RUN state machine (Zig runProgram/runPipeline as
+ONE self-tail defun, because the 3-arg lean ABI forbids the mutually
+recursive pair as separate defun calls with their 5-word state).  Modes:
+0 program loop (chains, &&/||/; short-circuit) · 1 pipeline dispatch
+(subshell / in-process builtin / multi-cmd) · 2 pipe-creation loop ·
+3 fork loop (the child work is INLINE and ends in _exit) · 4 wait loop ·
+5 funnel (exitCode -> mode 0 or return/_exit) · 6 kill loop (fork-fail
+cleanup).  THE CHILD-AFTER-FORK discipline: the pid==0 branches touch only
+libc + the C-heap blob/state and end in _exit — no GC safepoint.
+-}
+execGoDefun : Defun
+execGoDefun =
+    let
+        stN = p1
+
+        modeN = p2
+
+        self m =
+            App { fn = GRef { key = "Rt.execGo", force = False }, args = [ v stN, mkNum (n m) ] }
+
+        -- MODE 0: program loop
+        mode0 =
+            let
+                progW = b 100
+
+                nchains = b 101
+
+                chainsArr = b 102
+
+                chainN = b 103
+
+                opW = b 104
+
+                pipeNw = b 105
+            in
+            lets
+                [ ( progW, rLoad stN rProg )
+                , ( nchains, Unsafe (RawWordLoad { ptr = v progW, index = n RtLayout.epProgCountIdx }) )
+                ]
+                (iff (mkBool (cmpW RCges (rLoad stN rI) (v nchains)))
+                    (iff (mkBool (cmpW RCeq (rLoad stN rInChild) (n 0)))
+                        (mkNum (rLoad stN rLast))
+                        (lets [ ( b 106, callW "_exit" [ rLoad stN rLast ] ) ] mkNil)
+                    )
+                    (lets
+                        [ ( chainsArr, Unsafe (RawWordLoad { ptr = v progW, index = n RtLayout.epProgChainsIdx }) )
+                        , ( chainN, iadd (v chainsArr) (imul (rLoad stN rI) (n (8 * RtLayout.epChainWords))) )
+                        , ( opW, Unsafe (RawWordLoad { ptr = v chainN, index = n RtLayout.epChainOpIdx }) )
+                        , ( pipeNw, Unsafe (RawWordLoad { ptr = v chainN, index = n RtLayout.epChainPipeIdx }) )
+                        ]
+                        (iff
+                            (and2
+                                (mkBool (cmpW RCgts (rLoad stN rI) (n 0)))
+                                (or2
+                                    (and2 (mkBool (cmpW RCeq (v opW) (n RtLayout.epOpAnd))) (mkBool (cmpW RCne (rLoad stN rLast) (n 0))))
+                                    (and2 (mkBool (cmpW RCeq (v opW) (n RtLayout.epOpOr))) (mkBool (cmpW RCeq (rLoad stN rLast) (n 0))))
+                                )
+                            )
+                            (lets
+                                [ ( b 107, rStore stN rI (iadd (rLoad stN rI) (n 1)) ) ]
+                                (self 0)
+                            )
+                            (lets
+                                [ ( b 108, rStore stN rPipe (v pipeNw) ) ]
+                                (self 1)
+                            )
+                        )
+                    )
+                )
+
+        -- MODE 1: pipeline dispatch
+        mode1 =
+            let
+                pipeW = b 110
+
+                ncmds = b 111
+
+                cmdsArr = b 112
+
+                sub0 = b 113
+
+                argc0 = b 114
+
+                argv0 = b 115
+
+                a0 = b 116
+
+                inChildW = b 117
+
+                wireRc = b 118
+
+                pid = b 119
+
+                arrRc = b 120
+
+                code = b 121
+
+                outfdW = b 122
+
+                errfdW = b 124
+
+                isB = b 125
+
+                subArm =
+                    lets
+                        [ ( wireRc, callR "Rt.wirePipeGo" [ mkNum (v pipeW), v stN, mkNum (n 0) ] ) ]
+                        (iff (mkBool (cmpW RClts (wOf (v wireRc)) (n 0)))
+                            (lets
+                                [ ( b 130, callR "Rt.closePipeTmpfds" [ mkNum (v pipeW), mkNum (n 0) ] )
+                                , ( b 131, rStore stN rExit (n (-1)) )
+                                ]
+                                (self 5)
+                            )
+                            (lets
+                                [ ( pid, callW "fork" [] ) ]
+                                (iff (mkBool (cmpW RClts (v pid) (n 0)))
+                                    (lets
+                                        [ ( b 132, callR "Rt.closePipeTmpfds" [ mkNum (v pipeW), mkNum (n 0) ] )
+                                        , ( b 133, rStore stN rExit (n (-1)) )
+                                        ]
+                                        (self 5)
+                                    )
+                                    (iff (mkBool (cmpW RCeq (v pid) (n 0)))
+                                        (lets
+                                            [ ( outfdW, rLoad stN rOutfd )
+                                            , ( errfdW, rLoad stN rErrfd )
+                                            , ( b 134, callW "dup2" [ v outfdW, n 1 ] )
+                                            , ( b 135, callW "dup2" [ v errfdW, n 2 ] )
+                                            , ( arrRc, callR "Rt.applyRedirects" [ mkNum (v cmdsArr), v stN, mkNum (n 0) ] )
+                                            ]
+                                            (iff (mkBool (cmpW RClts (wOf (v arrRc)) (n 0)))
+                                                (lets [ ( b 136, callW "_exit" [ n 1 ] ) ] mkNil)
+                                                (lets
+                                                    [ ( b 137, iff (mkBool (cmpW RCgts (v outfdW) (n 2)))
+                                                        (lets [ ( b 137, (callW "close" [ v outfdW ]) ) ] mkNil)
+                                                        mkNil
+                                                        )
+                                                    , ( b 138, iff (mkBool (cmpW RCgts (v errfdW) (n 2)))
+                                                        (lets [ ( b 138, (callW "close" [ v errfdW ]) ) ] mkNil)
+                                                        mkNil
+                                                        )
+                                                    , ( b 139, rStore stN rOutfd (n 1) )
+                                                    , ( b 140, rStore stN rErrfd (n 2) )
+                                                    , ( b 141, rStore stN rInChild (n 1) )
+                                                    , ( b 142, rStore stN rProg (v sub0) )
+                                                    , ( b 143, rStore stN rLast (n 0) )
+                                                    , ( b 144, rStore stN rI (n 0) )
+                                                    ]
+                                                    (self 0)
+                                                )
+                                            )
+                                        )
+                                        (lets
+                                            [ ( b 145, callR "Rt.closePipeTmpfds" [ mkNum (v pipeW), mkNum (n 0) ] )
+                                            , ( b 146, rStore stN rStatus (n 0) )
+                                            , ( b 147, callW "waitpid" [ v pid, iadd (wOf (v stN)) (n (8 * rStatus)), n 0 ] )
+                                            , ( code, callR "Rt.waitStatusCode" [ mkNum (rLoad stN rStatus) ] )
+                                            , ( b 148, rStore stN rExit (wOf (v code)) )
+                                            ]
+                                            (self 5)
+                                        )
+                                    )
+                                )
+                            )
+                        )
+
+                builtinArm =
+                    lets
+                        [ ( wireRc, callR "Rt.wirePipeGo" [ mkNum (v pipeW), v stN, mkNum (n 0) ] ) ]
+                        (iff (mkBool (cmpW RClts (wOf (v wireRc)) (n 0)))
+                            (lets
+                                [ ( b 150, callR "Rt.closePipeTmpfds" [ mkNum (v pipeW), mkNum (n 0) ] )
+                                , ( b 151, rStore stN rExit (n (-1)) )
+                                ]
+                                (self 5)
+                            )
+                            (lets
+                                [ ( code, callR "Rt.runBuiltinInprocess" [ mkNum (v cmdsArr), v stN ] )
+                                , ( b 152, callR "Rt.closeCmdTmpfds" [ mkNum (v cmdsArr), mkNum (n 0) ] )
+                                , ( b 153, rStore stN rExit (wOf (v code)) )
+                                ]
+                                (self 5)
+                            )
+                        )
+
+                multiArm =
+                    let
+                        npipes = b 160
+
+                        pfds = b 161
+                    in
+                    lets
+                        [ ( wireRc, callR "Rt.wirePipeGo" [ mkNum (v pipeW), v stN, mkNum (n 0) ] ) ]
+                        (iff (mkBool (cmpW RClts (wOf (v wireRc)) (n 0)))
+                            (lets
+                                [ ( b 162, callR "Rt.closePipeTmpfds" [ mkNum (v pipeW), mkNum (n 0) ] )
+                                , ( b 163, rStore stN rExit (n (-1)) )
+                                ]
+                                (self 5)
+                            )
+                            (lets
+                                [ ( npipes, isub (v ncmds) (n 1) )
+                                , ( pfds, callW "malloc" [ imul (v npipes) (n 8) ] )
+                                , ( b 164, iff (mkBool (cmpW RCeq (v pfds) (n 0))) haltV (mkNum (n 0)) )
+                                , ( b 165, rStore stN rNpipes (v npipes) )
+                                , ( b 166, rStore stN rPfds (v pfds) )
+                                , ( b 167, rStore stN rJ (n 0) )
+                                ]
+                                (self 2)
+                            )
+                        )
+            in
+            lets
+                [ ( pipeW, rLoad stN rPipe )
+                , ( ncmds, Unsafe (RawWordLoad { ptr = v pipeW, index = n RtLayout.epPipeCmdCountIdx }) )
+                , ( cmdsArr, Unsafe (RawWordLoad { ptr = v pipeW, index = n RtLayout.epPipeCmdArrIdx }) )
+                , ( b 168, rStore stN rN (v ncmds) )
+                , ( sub0, Unsafe (RawWordLoad { ptr = v cmdsArr, index = n RtLayout.epCmdSubIdx }) )
+                , ( argc0, Unsafe (RawWordLoad { ptr = v cmdsArr, index = n RtLayout.epCmdArgcIdx }) )
+                , ( argv0, Unsafe (RawWordLoad { ptr = v cmdsArr, index = n RtLayout.epCmdArgvIdx }) )
+                , ( a0, iff (mkBool (cmpW RCgts (v argc0) (n 0)))
+                        (mkNum (Unsafe (RawWordLoad { ptr = v argv0, index = n 0 })))
+                        (mkNum (n 0))
+                  )
+                -- GUARDED: a subshell cmd (argc 0, argv NULL) must not reach
+                -- cStrEqLit's byte walk on a NULL name pointer.
+                , ( isB, iff (mkBool (cmpW RCgts (v argc0) (n 0)))
+                            (callR "Rt.isChildBuiltin" [ v a0, v stN ])
+                            falseV
+                  )
+                , ( inChildW, rLoad stN rInChild )
+                ]
+                (iff (and2 (mkBool (cmpW RCeq (v ncmds) (n 1))) (mkBool (cmpW RCne (v sub0) (n 0))))
+                    subArm
+                    (iff (and2
+                            (mkBool (cmpW RCeq (v inChildW) (n 1)))
+                            (and2
+                                (mkBool (cmpW RCeq (v ncmds) (n 1)))
+                                (and2
+                                    (mkBool (cmpW RCeq (v sub0) (n 0)))
+                                    (and2
+                                        (mkBool (cmpW RCgts (v argc0) (n 0)))
+                                        (v isB)
+                                    )
+                                )
+                            )
+                         )
+                        builtinArm
+                        multiArm
+                    )
+                )
+
+        -- MODE 2: pipe-creation loop
+        mode2 =
+            let
+                npipes = b 170
+
+                pfds = b 171
+
+                r = b 172
+
+                pids = b 173
+            in
+            lets
+                [ ( npipes, rLoad stN rNpipes )
+                , ( pfds, rLoad stN rPfds )
+                ]
+                (iff (mkBool (cmpW RCges (rLoad stN rJ) (v npipes)))
+                    (lets
+                        [ ( pids, callW "malloc" [ imul (rLoad stN rN) (n 8) ] )
+                        , ( b 174, iff (mkBool (cmpW RCeq (v pids) (n 0))) haltV (mkNum (n 0)) )
+                        , ( b 175, rStore stN rPids (v pids) )
+                        , ( b 176, rStore stN rForked (n 0) )
+                        , ( b 177, rStore stN rForkFail (n 0) )
+                        , ( b 178, rStore stN rJ (n 0) )
+                        ]
+                        (self 3)
+                    )
+                    (lets
+                        [ ( r, callW "pipe" [ iadd (v pfds) (imul (rLoad stN rJ) (n 8)) ] ) ]
+                        (iff (mkBool (cmpW RClts (v r) (n 0)))
+                            (lets
+                                [ ( b 179, callR "Rt.closePipesGo" [ mkNum (v pfds), mkNum (n 0), mkNum (rLoad stN rJ) ] )
+                                , ( b 180, callR "Rt.closePipeTmpfds" [ mkNum (rLoad stN rPipe), mkNum (n 0) ] )
+                                , ( b 181, callW "free" [ v pfds ] )
+                                , ( b 182, rStore stN rExit (n (-1)) )
+                                ]
+                                (self 5)
+                            )
+                            (lets
+                                [ ( b 183, rStore stN rJ (iadd (rLoad stN rJ) (n 1)) ) ]
+                                (self 2)
+                            )
+                        )
+                    )
+                )
+
+        -- MODE 3: fork loop
+        mode3 =
+            let
+                cmdsArr = b 190
+
+                iW = b 191
+
+                nW = b 192
+
+                pid = b 193
+
+                pids = b 194
+
+                cmdN = b 195
+
+                outfdW = b 196
+
+                errfdW = b 197
+
+                pfds = b 198
+
+                npipes = b 199
+
+                prevPair = b 200
+
+                curPair = b 201
+
+                arrRc = b 202
+
+                subW = b 203
+
+                argcW = b 204
+
+                argvW = b 205
+
+                bcode = b 206
+
+                a0 = b 207
+
+                cbufW = b 208
+
+                parentCleanup =
+                    lets
+                        [ ( b 210, callR "Rt.closePipesGo" [ mkNum (rLoad stN rPfds), mkNum (n 0), mkNum (rLoad stN rNpipes) ] )
+                        , ( b 211, callR "Rt.closePipeTmpfds" [ mkNum (rLoad stN rPipe), mkNum (n 0) ] )
+                        , ( b 212, callW "free" [ rLoad stN rPfds ] )
+                        ]
+                        (iff (mkBool (cmpW RCeq (rLoad stN rForkFail) (n 1)))
+                            (lets
+                                [ ( b 213, rStore stN rJ (n 0) ) ]
+                                (self 6)
+                            )
+                            (lets
+                                [ ( b 214, rStore stN rJ (n 0) ) ]
+                                (self 4)
+                            )
+                        )
+
+                childWork =
+                    lets
+                        [ ( cmdN, iadd (v cmdsArr) (imul (v iW) (n (8 * RtLayout.epCmdWords))) )
+                        , ( outfdW, rLoad stN rOutfd )
+                        , ( errfdW, rLoad stN rErrfd )
+                        , ( pfds, rLoad stN rPfds )
+                        , ( npipes, rLoad stN rNpipes )
+                        , ( b 215, callW "dup2" [ v outfdW, n 1 ] )
+                        , ( b 216, callW "dup2" [ v errfdW, n 2 ] )
+                        , ( b 217, iff (mkBool (cmpW RCgts (v iW) (n 0)))
+                            (lets [ ( b 217, (callW "dup2" [ iand (Unsafe (RawWordLoad { ptr = v pfds, index = isub (v iW) (n 1) })) (n 4294967295), n 0 ]) ) ] mkNil)
+                            mkNil
+                            )
+                        , ( b 218, iff (mkBool (cmpW RClts (v iW) (isub (v nW) (n 1))))
+                            (lets [ ( b 218, (callW "dup2" [ idiv (Unsafe (RawWordLoad { ptr = v pfds, index = v iW })) (n 4294967296), n 1 ]) ) ] mkNil)
+                            mkNil
+                            )
+                        , ( b 219, callR "Rt.closePipesGo" [ mkNum (v pfds), mkNum (n 0), mkNum (v npipes) ] )
+                        , ( b 220, rStore stN rScrC (v iW) )
+                        , ( b 221, callR "Rt.closeOthersGo" [ mkNum (v cmdsArr), v stN, mkNum (n 0) ] )
+                        , ( arrRc, callR "Rt.applyRedirects" [ mkNum (v cmdN), v stN, mkNum (n 0) ] )
+                        ]
+                        (iff (mkBool (cmpW RClts (wOf (v arrRc)) (n 0)))
+                            (lets [ ( b 222, callW "_exit" [ n 1 ] ) ] mkNil)
+                            (lets
+                                [ ( subW, Unsafe (RawWordLoad { ptr = v cmdN, index = n RtLayout.epCmdSubIdx }) )
+                                ]
+                                (iff (mkBool (cmpW RCne (v subW) (n 0)))
+                                    (lets
+                                        [ ( b 223, iff (mkBool (cmpW RCgts (v outfdW) (n 2)))
+                                            (lets [ ( b 223, (callW "close" [ v outfdW ]) ) ] mkNil)
+                                            mkNil
+                                            )
+                                        , ( b 224, iff (mkBool (cmpW RCgts (v errfdW) (n 2)))
+                                            (lets [ ( b 224, (callW "close" [ v errfdW ]) ) ] mkNil)
+                                            mkNil
+                                            )
+                                        , ( b 225, rStore stN rOutfd (n 1) )
+                                        , ( b 226, rStore stN rErrfd (n 2) )
+                                        , ( b 227, rStore stN rInChild (n 1) )
+                                        , ( b 228, rStore stN rProg (v subW) )
+                                        , ( b 229, rStore stN rLast (n 0) )
+                                        , ( b 230, rStore stN rI (n 0) )
+                                        ]
+                                        (self 0)
+                                    )
+                                    (lets
+                                        [ ( b 231, iff (mkBool (cmpW RCgts (v outfdW) (n 2)))
+                                            (lets [ ( b 231, (callW "close" [ v outfdW ]) ) ] mkNil)
+                                            mkNil
+                                            )
+                                        , ( b 232, iff (mkBool (cmpW RCgts (v errfdW) (n 2)))
+                                            (lets [ ( b 232, (callW "close" [ v errfdW ]) ) ] mkNil)
+                                            mkNil
+                                            )
+                                        , ( argcW, Unsafe (RawWordLoad { ptr = v cmdN, index = n RtLayout.epCmdArgcIdx }) )
+                                        , ( argvW, Unsafe (RawWordLoad { ptr = v cmdN, index = n RtLayout.epCmdArgvIdx }) )
+                                        , ( bcode, callR "Rt.childBuiltin" [ mkNum (v argcW), mkNum (v argvW), v stN ] )
+                                        ]
+                                        (iff (mkBool (cmpW RCges (wOf (v bcode)) (n 0)))
+                                            (lets [ ( b 233, callW "_exit" [ wOf (v bcode) ] ) ] mkNil)
+                                            (lets
+                                                [ ( a0, Unsafe (RawWordLoad { ptr = v argvW, index = n 0 }) )
+                                                , ( cbufW, rLoad stN rCbuf )
+                                                , ( b 234, callW "execvp" [ v a0, v argvW ] )
+                                                ]
+                                                (iff (mkBool (cmpW RCeq errnoOf (n 2)))
+                                                    (lets
+                                                        [ ( b 235, callR "Rt.wStr" [ mkNum (n 2), mkNum (iadd (v cbufW) (n (runOff "shensh: "))) ] )
+                                                        , ( b 236, callR "Rt.wStr" [ mkNum (n 2), mkNum (v a0) ] )
+                                                        , ( b 237, callR "Rt.wStr" [ mkNum (n 2), mkNum (iadd (v cbufW) (n (runOff ": not found\n"))) ] )
+                                                        ]
+                                                        (lets [ ( b 238, callW "_exit" [ n 127 ] ) ] mkNil)
+                                                    )
+                                                    (lets
+                                                        [ ( b 239, callR "Rt.wStr" [ mkNum (n 2), mkNum (iadd (v cbufW) (n (runOff "shensh: "))) ] )
+                                                        , ( b 240, callR "Rt.wStr" [ mkNum (n 2), mkNum (v a0) ] )
+                                                        , ( b 241, callR "Rt.wStr" [ mkNum (n 2), mkNum (iadd (v cbufW) (n (runOff ": cannot execute\n"))) ] )
+                                                        ]
+                                                        (lets [ ( b 242, callW "_exit" [ n 126 ] ) ] mkNil)
+                                                    )
+                                                )
+                                            )
+                                        )
+                                    )
+                                )
+                            )
+                        )
+            in
+            lets
+                [ ( cmdsArr, Unsafe (RawWordLoad { ptr = rLoad stN rPipe, index = n RtLayout.epPipeCmdArrIdx }) )
+                , ( nW, rLoad stN rN )
+                , ( iW, rLoad stN rJ )
+                ]
+                (iff (mkBool (cmpW RCges (v iW) (v nW)))
+                    parentCleanup
+                    (lets
+                        [ ( pid, callW "fork" [] ) ]
+                        (iff (mkBool (cmpW RClts (v pid) (n 0)))
+                            (lets
+                                [ ( b 243, rStore stN rForkFail (n 1) )
+                                , ( b 244, rStore stN rJ (v nW) )
+                                ]
+                                (self 3)
+                            )
+                            (iff (mkBool (cmpW RCeq (v pid) (n 0)))
+                                childWork
+                                (lets
+                                    [ ( pids, rLoad stN rPids )
+                                    , ( b 245, Unsafe (RawWordStore { ptr = v pids, index = v iW, value = v pid }) )
+                                    , ( b 246, rStore stN rForked (iadd (rLoad stN rForked) (n 1)) )
+                                    , ( b 247, rStore stN rJ (iadd (v iW) (n 1)) )
+                                    ]
+                                    (self 3)
+                                )
+                            )
+                        )
+                    )
+                )
+
+        -- MODE 4: wait loop
+        mode4 =
+            let
+                iW = b 250
+
+                nW = b 251
+
+                pidW = b 252
+
+                code = b 253
+            in
+            lets
+                [ ( iW, rLoad stN rJ )
+                , ( nW, rLoad stN rN )
+                ]
+                (iff (mkBool (cmpW RCges (v iW) (v nW)))
+                    (lets
+                        [ ( b 254, callW "free" [ rLoad stN rPids ] ) ]
+                        (self 5)
+                    )
+                    (lets
+                        [ ( pidW, Unsafe (RawWordLoad { ptr = rLoad stN rPids, index = v iW }) )
+                        , ( b 255, rStore stN rStatus (n 0) )
+                        , ( b 256, callW "waitpid" [ v pidW, iadd (wOf (v stN)) (n (8 * rStatus)), n 0 ] )
+                        , ( code, callR "Rt.waitStatusCode" [ mkNum (rLoad stN rStatus) ] )
+                        , ( b 257, iff (mkBool (cmpW RCeq (v iW) (isub (v nW) (n 1))))
+                                    (lets [ ( b 259, rStore stN rExit (wOf (v code)) ) ] mkNil)
+                                    mkNil
+                          )
+                        , ( b 258, rStore stN rJ (iadd (v iW) (n 1)) )
+                        ]
+                        (self 4)
+                    )
+                )
+
+        -- MODE 5: funnel
+        mode5 =
+            iff (mkBool (cmpW RClts (rLoad stN rExit) (n 0)))
+                (iff (mkBool (cmpW RCeq (rLoad stN rInChild) (n 0)))
+                    (mkNum (n (-1)))
+                    (lets [ ( b 260, callW "_exit" [ n (-1) ] ) ] mkNil)
+                )
+                (lets
+                    [ ( b 261, rStore stN rLast (rLoad stN rExit) )
+                    , ( b 262, rStore stN rI (iadd (rLoad stN rI) (n 1)) )
+                    ]
+                    (self 0)
+                )
+
+        -- MODE 6: kill loop (fork-fail cleanup)
+        mode6 =
+            let
+                iW = b 270
+
+                forkedW = b 271
+
+                pW = b 272
+            in
+            lets
+                [ ( iW, rLoad stN rJ )
+                , ( forkedW, rLoad stN rForked )
+                ]
+                (iff (mkBool (cmpW RCges (v iW) (v forkedW)))
+                    (lets
+                        [ ( b 273, callW "free" [ rLoad stN rPids ] )
+                        , ( b 274, rStore stN rExit (n (-1)) )
+                        ]
+                        (self 5)
+                    )
+                    (lets
+                        [ ( pW, Unsafe (RawWordLoad { ptr = rLoad stN rPids, index = v iW }) )
+                        , ( b 275, callW "kill" [ v pW, n 9 ] )
+                        , ( b 276, callW "waitpid" [ v pW, n 0, n 0 ] )
+                        , ( b 277, rStore stN rJ (iadd (v iW) (n 1)) )
+                        ]
+                        (self 6)
+                    )
+                )
+    in
+    lam "Rt.execGo" [ stN, modeN ]
+        (iff (mkBool (cmpW RCeq (wOf (v modeN)) (n 0)))
+            mode0
+            (iff (mkBool (cmpW RCeq (wOf (v modeN)) (n 1)))
+                mode1
+                (iff (mkBool (cmpW RCeq (wOf (v modeN)) (n 2)))
+                    mode2
+                    (iff (mkBool (cmpW RCeq (wOf (v modeN)) (n 3)))
+                        mode3
+                        (iff (mkBool (cmpW RCeq (wOf (v modeN)) (n 4)))
+                            mode4
+                            (iff (mkBool (cmpW RCeq (wOf (v modeN)) (n 6)))
+                                mode6
+                                mode5
+                            )
+                        )
+                    )
+                )
+            )
+        )
+
+
 helperDefuns : Bool -> List Defun
 helperDefuns rec =
     [ deepEqDefun rec
@@ -4653,6 +6415,29 @@ helperDefuns rec =
     , epFreeCmdDefun
     , epFreeArgvDefun
     , epFreeRedirsDefun
+    , cStrEqLitDefun
+    , wStrDefun
+    , wRawDefun
+    , waitStatusCodeDefun
+    , envHomeDefun
+    , isChildBuiltinDefun
+    , echoGoDefun
+    , childCdDefun
+    , childPwdDefun
+    , childBuiltinDefun
+    , applyOneRedirDefun
+    , applyRedirectsDefun
+    , bodyWriteGoDefun
+    , openBodyTmpfileDefun
+    , wireCmdGoDefun
+    , wirePipeGoDefun
+    , closeCmdTmpfdsDefun
+    , closePipeTmpfdsDefun
+    , closePipesGoDefun
+    , closeOthersGoDefun
+    , runBuiltinInprocessDefun
+    , execGoDefun
+    , mkTmpAtDefun
     ]
 
 

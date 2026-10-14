@@ -9,7 +9,7 @@ module Mid.RtLayout exposing
     , epOpAnd, epOpOr, epOpSeq
     , epPipeCmdArrIdx, epPipeCmdCountIdx
     , epProgChainsIdx, epProgCountIdx
-    , epRedirBodyIdx, epRedirDupfdIdx, epRedirFdIdx, epRedirKindIdx, epRedirPathIdx, epRedirWords
+    , epRedirBodyIdx, epRedirDupfdIdx, epRedirFdIdx, epRedirKindIdx, epRedirPathIdx, epRedirTmpfdIdx, epRedirWords
     , lenFieldOffset, lenFieldWord
     , maxArity
     , metaArityOffset, metaCodeOffset, metaNameOffset, metaSizeBytes
@@ -365,7 +365,8 @@ direntNameOffset =
 --   cmd    = { argv*, argc, redirs*, nredirs, sub* } argc doubles as the
 --            running fill count (the partial-free discipline); argv*/sub*
 --            0 = empty, redirs* 0 = none
---   redir  = { kind, fd, path*, dup_fd, body* }      kind: epKindIn..epKindHstr
+--   redir  = { kind, fd, path*, dup_fd, body*, tmpfd }  kind: epKindIn..epKindHstr;
+--            tmpfd is RUNTIME (the pre-opened heredoc body fd, -1 until wired)
 --   argv   = char*[argc]  (NUL-terminated strings, Mid-malloc'd)
 --
 -- The op/kind CODES are part of the same contract: Mid writes the integer,
@@ -440,7 +441,7 @@ epCmdSubIdx =
 
 epRedirWords : Int
 epRedirWords =
-    5
+    6
 
 
 epRedirKindIdx : Int
@@ -466,6 +467,11 @@ epRedirDupfdIdx =
 epRedirBodyIdx : Int
 epRedirBodyIdx =
     4
+
+
+epRedirTmpfdIdx : Int
+epRedirTmpfdIdx =
+    5
 
 
 epOpSeq : Int

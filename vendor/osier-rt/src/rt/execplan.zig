@@ -1107,9 +1107,11 @@ fn runPipeline(pp: *RPipe, outfd: i32, errfd: i32, in_child: bool) i32 {
 /// C: zincvm.c:1749-1769 slurp_fd — lseek(0) + read a captured tmpfile to
 /// EOF.  Returns the FULL allocated slice (free with page_allocator) plus
 /// the byte count; null on failure (mirrors C's NULL + *outlen = 0).
-const Slurp = struct { buf: []u8, n: usize };
+pub const Slurp = struct { buf: []u8, n: usize };
 
-fn slurpFd(fd: i32) ?Slurp {
+/// (pub for rt.zig's rt_exec_run seat, 3B-2b: the seat keeps the SLURP half
+/// while the RUN half lives in Mid.)
+pub fn slurpFd(fd: i32) ?Slurp {
     var cap: usize = 8192;
     var buf = ca.alloc(u8, cap + 1) catch return null;
     if (lseek(fd, 0, SEEK_SET) < 0) {

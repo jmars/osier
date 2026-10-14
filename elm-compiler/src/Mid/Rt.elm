@@ -268,7 +268,55 @@ rtDeps =
           -- tagCountState (epProgGo/epPipeGo/epCmd/epArgvGo/epRedirsGo)
           -- carry its epSymIs edge here too — the call sits in THEIR body
           -- after inlining, so the call-graph row reads it there.
-          ( "Rt.exec-plan", [ "Rt.epProg", "Rt.epFreeChains" ] )
+          ( "Rt.exec-plan"
+          , [ "Rt.epProg"
+            , "Rt.epFreeChains"
+            , "Rt.mkTmpAt"
+            , "Rt.execGo"
+            ]
+          )
+        , -- ===== exec-plan RUN (zigretire stage 3 GROUP 3B-2b).  Like the
+          -- ep* decode helpers, every run defun is NON-ALLOCATING (the whole
+          -- run is safepoint-free: fork/exec/wait and the blob/cbuf/state
+          -- walks are RawCallRaw + raw loads over C-heap memory) -- the ONE
+          -- allocating operation stays the rt_exec_run C seat, covered by
+          -- the manual override on Rt.exec-plan.
+          ( "Rt.execGo"
+          , [ "Rt.wirePipeGo"
+            , "Rt.closePipeTmpfds"
+            , "Rt.applyRedirects"
+            , "Rt.runBuiltinInprocess"
+            , "Rt.isChildBuiltin"
+            , "Rt.waitStatusCode"
+            , "Rt.closePipesGo"
+            , "Rt.closeOthersGo"
+            , "Rt.closeCmdTmpfds"
+            , "Rt.childBuiltin"
+            , "Rt.wStr"
+            ]
+          )
+        , ( "Rt.mkTmpAt", [ "Rt.cStrCopyGo" ] )
+        , ( "Rt.cStrEqLit", [] )
+        , ( "Rt.wStr", [ "Rt.cStrLenGo" ] )
+        , ( "Rt.wRaw", [] )
+        , ( "Rt.waitStatusCode", [] )
+        , ( "Rt.envHome", [ "Rt.cStrLenGo" ] )
+        , ( "Rt.isChildBuiltin", [ "Rt.cStrEqLit" ] )
+        , ( "Rt.echoGo", [ "Rt.wRaw", "Rt.wStr" ] )
+        , ( "Rt.childCd", [ "Rt.envHome", "Rt.cStrLenGo", "Rt.cStrCopyGo", "Rt.wStr", "Rt.wRaw" ] )
+        , ( "Rt.childPwd", [ "Rt.cStrLenGo", "Rt.wRaw" ] )
+        , ( "Rt.childBuiltin", [ "Rt.cStrEqLit", "Rt.echoGo", "Rt.childCd", "Rt.childPwd" ] )
+        , ( "Rt.applyOneRedir", [ "Rt.wStr", "Rt.wRaw" ] )
+        , ( "Rt.applyRedirects", [ "Rt.applyOneRedir" ] )
+        , ( "Rt.bodyWriteGo", [] )
+        , ( "Rt.openBodyTmpfile", [ "Rt.cStrCopyGo", "Rt.cStrLenGo", "Rt.bodyWriteGo" ] )
+        , ( "Rt.wireCmdGo", [ "Rt.openBodyTmpfile" ] )
+        , ( "Rt.wirePipeGo", [ "Rt.wireCmdGo" ] )
+        , ( "Rt.closeCmdTmpfds", [] )
+        , ( "Rt.closePipeTmpfds", [ "Rt.closeCmdTmpfds" ] )
+        , ( "Rt.closePipesGo", [] )
+        , ( "Rt.closeOthersGo", [ "Rt.closeCmdTmpfds" ] )
+        , ( "Rt.runBuiltinInprocess", [ "Rt.applyRedirects", "Rt.childBuiltin" ] )
         , ( "Rt.epProg", [ "Rt.epCount", "Rt.epProgGo", "Rt.epFreeChains" ] )
         , ( "Rt.epProgGo", [ "Rt.epSymIs", "Rt.epChain" ] )
         , ( "Rt.epChain", [ "Rt.epCount", "Rt.epElem", "Rt.epSymOf", "Rt.epSymIs", "Rt.epPipeline" ] )
