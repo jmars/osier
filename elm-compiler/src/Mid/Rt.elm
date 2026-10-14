@@ -274,14 +274,28 @@ rtDeps =
             , "Rt.epFreeChains"
             , "Rt.mkTmpAt"
             , "Rt.execGo"
+            , "Rt.exec-run"
+            ]
+          )
+        , -- ===== exec-plan SLURP+RESULT (zigretire stage 3 GROUP 3B-2c).  The
+          -- rt_exec_run Zig seat is DELETED; Rt.exec-run allocates DIRECTLY
+          -- (the two result RawAllocRaws, the intern literals, the cons
+          -- tree), so it is a natural `allocating` member and Rt.exec-plan
+          -- reaches a safepoint through this edge — the fixed point's
+          -- load-bearing rule, no manual override.
+          ( "Rt.exec-run"
+          , [ "Rt.readFileGo"
+            , "Rt.memGo"
+            , "Rt.cons"
+            , "Rt.intern"
             ]
           )
         , -- ===== exec-plan RUN (zigretire stage 3 GROUP 3B-2b).  Like the
           -- ep* decode helpers, every run defun is NON-ALLOCATING (the whole
           -- run is safepoint-free: fork/exec/wait and the blob/cbuf/state
-          -- walks are RawCallRaw + raw loads over C-heap memory) -- the ONE
-          -- allocating operation stays the rt_exec_run C seat, covered by
-          -- the manual override on Rt.exec-plan.
+          -- walks are RawCallRaw + raw loads over C-heap memory) — the
+          -- allocating half now lives in Rt.exec-run (3B-2c), and Rt.exec-plan
+          -- is classified through that edge.
           ( "Rt.execGo"
           , [ "Rt.wirePipeGo"
             , "Rt.closePipeTmpfds"
@@ -475,19 +489,12 @@ allocating =
         rtProgram =
             program True True True ++ gcProgram
 
-        -- (zigretire stage 3 GROUP 3B-2a) THE ONE MANUAL OVERRIDE: Rt.exec-plan's
-        -- only allocating operation is the rt_exec_run C seat, and the walker
-        -- cannot see through C — RawCallRaw is classified alloc-free BY
-        -- CONTRACT, which every other seat honours and this one CANNOT (the
-        -- seat runs the program and builds the TAGGED result in the ZIG GC —
-        -- that is the whole point of the 3B-2a/3B-2b/3B-2c split).  Declaring
-        -- it allocating here keeps the pairing the classification exists to
-        -- guarantee: the defun gets a ROOTED frame, so the plan Value param
-        -- survives the seat's collections.  Only C-heap raw temps (the blob,
-        -- the cbuf, st) cross the seat call, which is what makes the frame
-        -- sufficient.  The TestMain partition row pins membership.
-        manualAllocating =
-            Set.fromList [ "Rt.exec-plan" ]
+        -- (zigretire stage 3 GROUP 3B-2a) THE MANUAL OVERRIDE IS GONE (3B-2c
+        -- deleted the rt_exec_run C seat): Rt.exec-plan no longer needs a
+        -- walker-blind override because its callee Rt.exec-run allocates
+        -- DIRECTLY in Mid (RawAllocRaw + the intern literals + the cons
+        -- tree), so the fixed point reaches Rt.exec-plan over the
+        -- rtDeps edge and roots its plan Value param the same way.
 
         -- fixed point: k allocates iff k has a DIRECT safepoint or any
         -- rtDeps edge of k lands in the set.
@@ -517,7 +524,7 @@ allocating =
             else
                 grow new
     in
-    grow (Set.union manualAllocating (Set.fromList (List.filter direct rtProgram |> List.map .key)))
+    grow (Set.fromList (List.filter direct rtProgram |> List.map .key))
 
 
 

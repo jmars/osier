@@ -442,11 +442,16 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                 -- nurseryHostPrims is the enumeration (verified by reading
                 -- each Zig handler) of the prims whose RESULT payload was built
                 -- in the GC nursery via values.valString / valCons:
-                --   exec-plan (execplan.zig), value (the *argv* registry
+                --   value (the *argv* registry
                 --   list, rt.zig buildArgvList — still Zig-nursery even
                 --   though the ROUTE is now Mid: Rt.value blits the
                 --   registered Value verbatim, and *argv* is still a valCons
-                --   list in the Zig nursery).  `str` was REFUSED here until
+                --   list in the Zig nursery).  `exec-plan` was REFUSED here
+                --   until zigretire stage 3 GROUP 3B-2c: with the rt_exec_run
+                --   seat deleted, Rt.exec-run builds the whole TAGGED result
+                --   GC-side in Mid (RawAllocRaw+mkStr strings, Rt.cons/
+                --   Rt.intern tree — the glob/getcwd precedent shapes), so
+                --   the worker route no longer builds a nursery value.  `str` was REFUSED here until
                 --   zigretire stage 3 GROUP 2: it now has a Mid body (Rt.str)
                 --   that renders the float through rt_float_text into a GC
                 --   string, so the NaN/±Infinity pass-through arms of
@@ -489,8 +494,7 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                 --   not a mechanical pin.
                 nurseryHostPrims =
                     Set.fromList
-                        [ "exec-plan"
-                        , "value"
+                        [ "value"
                         ]
 
                 hostOnlyPrims =

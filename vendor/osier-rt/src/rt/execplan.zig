@@ -1107,11 +1107,11 @@ fn runPipeline(pp: *RPipe, outfd: i32, errfd: i32, in_child: bool) i32 {
 /// C: zincvm.c:1749-1769 slurp_fd — lseek(0) + read a captured tmpfile to
 /// EOF.  Returns the FULL allocated slice (free with page_allocator) plus
 /// the byte count; null on failure (mirrors C's NULL + *outlen = 0).
-pub const Slurp = struct { buf: []u8, n: usize };
+const Slurp = struct { buf: []u8, n: usize };
 
-/// (pub for rt.zig's rt_exec_run seat, 3B-2b: the seat keeps the SLURP half
-/// while the RUN half lives in Mid.)
-pub fn slurpFd(fd: i32) ?Slurp {
+/// (private again since 3B-2c: the rt_exec_run seat that imported it is
+/// deleted — execRunDecoded is the only caller.)
+fn slurpFd(fd: i32) ?Slurp {
     var cap: usize = 8192;
     var buf = ca.alloc(u8, cap + 1) catch return null;
     if (lseek(fd, 0, SEEK_SET) < 0) {
@@ -1143,11 +1143,13 @@ pub fn slurpFd(fd: i32) ?Slurp {
 //  exec-plan — C: zincvm.c:2100-2151
 // =====================================================================
 
-/// primExecPlan's tail, factored (zigretire stage 3 GROUP 3B-2a) so the
-/// rt_exec_run seat can run the SAME code from the MID-decoded blob:
-/// tmpfiles, runProgram, slurp, and the TAGGED [code out err] result
-/// (the C:2133-2148 root dance, verbatim).  The plan is already decoded
-/// and page_allocator-owned by the CALLER; this function frees it.
+/// primExecPlan's tail, factored (zigretire stage 3 GROUP 3B-2a) for the
+/// (now deleted) rt_exec_run seat; the Mid route (Rt.execGo + Rt.exec-run)
+/// replaced it at 3B-2b/3B-2c, and this function remains as the HOST arm's
+/// implementation (leafExec/primExecPlan): tmpfiles, runProgram, slurp, and
+/// the TAGGED [code out err] result (the C:2133-2148 root dance, verbatim).
+/// The plan is already decoded and page_allocator-owned by the CALLER; this
+/// function frees it.
 pub fn execRunDecoded(vm: *Vm, prog: *RProg) VmError!Value {
     const g = vm.gc;
     var otmpl = "/tmp/shensh-out.XXXXXX".*;
@@ -1214,7 +1216,8 @@ pub fn execRunDecoded(vm: *Vm, prog: *RProg) VmError!Value {
 /// the makeTagged* helpers.  The plan Value is rooted once at entry; decode
 /// and run perform no GC allocation of their own, and every exit path pops
 /// (the single defer is C's per-path gc_root_pop).  The RUN+RESULT half is
-/// execRunDecoded above (shared with the rt_exec_run seat).
+/// execRunDecoded above (the compiled Mid route no longer calls this — it is
+/// the HOST effect loop's arm).
 pub fn primExecPlan(vm: *Vm, acc: *Value, stack: *ValueArray) VmError!void {
     const g = vm.gc;
     var plan = varray.vaPop(stack);

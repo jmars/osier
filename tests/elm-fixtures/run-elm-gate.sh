@@ -351,6 +351,12 @@ run execmal      main   "$(read_expected execmal)"
 # single-chain plans where the op never fires.  Expected = the ZIG arm's own
 # output on this fixture (the implementation being replaced).
 run execchain    main   "$(read_expected execchain)"
+# --- 3B-2c (exec-plan SLURP+RESULT in Mid): the slurp GROW arm through
+# exec — captured output beyond the 64 KiB read chunk (168894 bytes, two
+# grows), with stderr EOF-ing empty AFTER the out slurp's grow (the shared
+# C block's acc/len/cap reset between the two slurps).  Expected = the ZIG
+# seat's own output on this fixture (the implementation being replaced).
+run execbig      main   "$(read_expected execbig)"
 # --- 3B-2b: the redirect-OPEN-FAILURE path — a valid `in` redirect naming a
 # nonexistent file must answer 1 + the captured childW2 message (the only
 # fixture exercising applyOneRedir's open-failure arm and its error string).

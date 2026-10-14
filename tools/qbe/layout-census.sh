@@ -63,8 +63,8 @@ need() { command -v "$1" >/dev/null 2>&1 || { printf 'layout-census: %s not foun
 # MID_ONLY: no Zig declaration is asserted (see NAMES WITH NO ZIG COUNTERPART).
 # The ep* exec-plan blob constants moved here at 3B-2b: the blob is now
 # MID-INTERNAL (the Mid decode writes it, the Mid Rt.execGo run reads it; the
-# rt_exec_run seat stopped reading it when the RUN half moved into Mid), so
-# there is no Zig counterpart to assert against anymore.
+# rt_exec_run seat that once read it is DELETED as of 3B-2c), so there
+# is no Zig counterpart to assert against anymore.
 MID_ONLY_NAMES="epChainOpIdx epChainPipeIdx epChainWords epCmdArgcIdx epCmdArgvIdx epCmdNredirsIdx epCmdRedirsIdx epCmdSubIdx epCmdWords epKindAppend epKindDup epKindHdoc epKindHstr epKindIn epKindOut epOpAnd epOpOr epOpSeq epPipeCmdArrIdx epPipeCmdCountIdx epProgChainsIdx epProgCountIdx epRedirBodyIdx epRedirDupfdIdx epRedirFdIdx epRedirKindIdx epRedirPathIdx epRedirTmpfdIdx epRedirWords"
 # COMPTIME: attested by a comptime row against layout_gen.zig, in a file the
 # probe cannot import (an `export fn main`/`pub fn main` collides with an

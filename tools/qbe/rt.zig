@@ -42,9 +42,6 @@ const std = @import("std");
 // is no initialized std.Io to write through).
 extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
 
-/// Raw libc close (Zig 0.16 std.posix has no close; the execplan precedent).
-extern "c" fn close(fd: c_int) c_int;
-
 fn werr(msg: []const u8) void {
     _ = write(2, msg.ptr, msg.len);
 }
@@ -64,7 +61,6 @@ const tables = rt_mod.tables;
 const varray = rt_mod.varray;
 const prims = rt_mod.prims;
 const streams = rt_mod.streams;
-const execplan = rt_mod.execplan;
 const effectloop = @import("effectloop");
 
 const Gc = heap.Gc;
@@ -1030,65 +1026,14 @@ fn hostApply(vm_: *state.Vm, fnv: Value, args: []const Value) state.VmError!Valu
 }
 
 // ---------------------------------------------------------------------
-//  exec-plan bridge (zigretire stage 3 GROUP 3B-2a; SHRUNK by 3B-2b)
+//  exec-plan bridge (zigretire stage 3 GROUP 3B-2a..3B-2c): CLOSED.
 // ---------------------------------------------------------------------
-// The Mid `exec-plan` body now DECODES the plan into the flat C-heap blob
-// AND RUNS it (Rt.execGo over RawCallRaw libc seats) itself; this seat is
-// only the SLURP+RESULT half of Zig's execRunDecoded — slurp both capture
-// tmpfiles, close them, build the TAGGED [code out err] result Value.  The
-// blob-rebuild half died with the run's move into Mid (the blob is now
-// Mid-internal: no Zig code reads it).  The seat dies at 3B-2c, when the
-// slurp and the result builder move into Mid too.
-//
-// THE SEAT ALLOCATES (Zig GC) — the ONE RawCallRaw-seat exception: the
-// Mid classifier treats RawCallRaw as alloc-free by contract, so
-// Mid.Rt.allocating carries a MANUAL override for Rt.exec-plan (the defun
-// is FRAMED, its plan param rooted).  Only C-heap raw temps cross the
-// call, which is what makes the frame sufficient.
-
-/// The seat's RESULT slot (static storage, the rt_value_slot pattern): the
-/// seat roots the finished Value during its own allocations and copies it
-/// here just before returning; nothing between the return and the caller's
-/// blit can allocate, so the unrooted window is exactly one raw load.
-/// NOT re-entrant — a second exec running before the first caller's blit
-/// would overwrite it, which the single-threaded runtime cannot do.
-var ep_result_slot: types.Value = std.mem.zeroes(types.Value);
-
-/// outfd/errfd/code -> slurp both captures -> close -> the TAGGED result
-/// Value, by address.  Word-word per the RawCallRaw contract's REGISTER
-/// shape (the allocation exception is the one named above).
-export fn rt_exec_run(outfd: i64, errfd: i64, code: i64) callconv(.c) i64 {
-    const out_s = execplan.slurpFd(@intCast(outfd));
-    const err_s = execplan.slurpFd(@intCast(errfd));
-    _ = close(@intCast(outfd));
-    _ = close(@intCast(errfd));
-    defer if (out_s) |s| std.heap.page_allocator.free(s.buf);
-    defer if (err_s) |s| std.heap.page_allocator.free(s.buf);
-
-    // The C:2133-2148 root dance, verbatim: each intermediate is rooted
-    // across the next helper's allocations, all popped before returning.
-    var tag_out = execplan.makeTaggedString(vm, if (out_s) |s| s.buf[0..s.n] else "");
-    g.rootPushValue(&tag_out);
-    var tag_err = execplan.makeTaggedString(vm, if (err_s) |s| s.buf[0..s.n] else "");
-    g.rootPushValue(&tag_err);
-    var empty = execplan.makeTaggedNil(vm);
-    g.rootPushValue(&empty);
-    var err_list = execplan.makeTaggedCons(vm, tag_err, empty);
-    g.rootPushValue(&err_list);
-    var out_list = execplan.makeTaggedCons(vm, tag_out, err_list);
-    g.rootPushValue(&out_list);
-    var tag_code = execplan.makeTaggedNumber(vm, @intCast(code));
-    g.rootPushValue(&tag_code);
-    const final = execplan.makeTaggedCons(vm, tag_code, out_list);
-    g.rootPop(); // tag_code
-    g.rootPop(); // out_list
-    g.rootPop(); // err_list
-    g.rootPop(); // empty
-    g.rootPop(); // tag_err
-    g.rootPop(); // tag_out
-    ep_result_slot = final;
-    return @intCast(@intFromPtr(&ep_result_slot));
-}
+// The Mid `Rt.exec-plan` body now DECODES the plan into the flat C-heap
+// blob, RUNS it (Rt.execGo over RawCallRaw libc seats), and SLURPS+BUILDs
+// the TAGGED result itself (Rt.exec-run: lseek+readFileGo per capture fd,
+// RawAllocRaw+memGo+mkStr strings, the cons/intern tree).  The rt_exec_run
+// seat and the static ep_result_slot are DELETED (3B-2c) — nothing in this
+// file reads the exec-plan blob anymore.
 
 // =====================================================================
 //  Prim fallback — the EXACT VM primitive

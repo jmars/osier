@@ -352,10 +352,10 @@ direntNameOffset =
 -- ============================ the exec-plan DECODE blob ============================
 -- (zigretire stage 3 GROUP 3B-2a.)  The Mid `exec-plan` body (Rt.exec-plan +
 -- the RtPrims ep* helpers) decodes the TAGGED plan Value into a flat C-heap
--- word blob that the rt_exec_run seat (tools/qbe/rt.zig) reads back and
--- rebuilds the Zig RProg tree from — so these offsets are a cross-ABI
--- contract exactly like Desc/Meta/Ret, asserted by rt.zig's comptime rows
--- (the seat's file; the census's COMPTIME leg names them there).  All
+-- word blob that the Mid RUN walks directly (Rt.execGo; the rt_exec_run
+-- seat that used to rebuild the Zig RProg tree from it is DELETED, 3B-2c) —
+-- so these offsets are MID-INTERNAL now (the census's MID_ONLY leg names
+-- them; no Zig counterpart remains to assert against).  All
 -- indexes are WORD offsets into a malloc'd record; every "pointer" slot is
 -- a char* or a record pointer with 0 = absent.
 --

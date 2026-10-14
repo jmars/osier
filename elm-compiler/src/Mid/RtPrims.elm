@@ -3195,8 +3195,8 @@ NODE = [cons H T] = cons(sym"cons", cons(H, cons(T, nil))) with T the tagged
 tail — a plain Elm list decodes as EMPTY-or-MALFORMED, never as a plan) and
 builds a C-heap RProg blob per Mid.RtLayout's ep* constants.  The blob is
 decoded by Rt.exec-plan itself; the RUN half (GROUP 3B-2b) walks the blob
-directly via Rt.execGo, and only the SLURP+RESULT half stays in the
-rt_exec_run seat until GROUP 3B-2c.
+directly via Rt.execGo, and the SLURP+RESULT half (GROUP 3B-2c) is
+Rt.exec-run — no Zig seat remains.
 
 THE WHOLE DECODE IS SAFEPOINT-FREE (Zig INVARIANT 1's Mid form: decode
 performs zero GC allocation): no Lit LString (an interning safepoint — the
@@ -3251,10 +3251,12 @@ mkTmpAtDefun =
 
 {-| exec-plan (1 arg: the tagged plan Value).  DECODE (3B-2a) into the C-heap
 blob, then the RUN (3B-2b) via Rt.execGo over RawCallRaw libc seats, then the
-SLURP+RESULT through the rt_exec_run seat (3B-2c's remainder).  The run state
-block, the literal cbuf and the blob are all C-heap, so no safepoint can move
-them; the seat's Zig-GC allocation is why this defun stays FRAMED (Rt.elm's
-manual override).-}
+SLURP+RESULT via Rt.exec-run (3B-2c — the rt_exec_run seat is DELETED).  The
+run state block, the literal cbuf and the blob are all C-heap, so no
+safepoint can move them across the run; the Rt.exec-run call's allocations
+(slurp GC strings + the tagged tree) are why this defun stays FRAMED (its
+rtDeps edge to the allocating Rt.exec-run classifies it — the manual
+override the seat needed is gone).-}
 execPlanDefun : Defun
 execPlanDefun =
     let
@@ -3432,21 +3434,207 @@ execPlanDefun =
                                 haltV
                             )
                             (lets
-                                [ ( res
-                                  , Unsafe
-                                        (RawVecLoad
-                                            { vec = callW "rt_exec_run" [ wOf (v outfdW), wOf (v errfdW), wOf (v codeN) ]
-                                            , index = n 0
-                                            }
-                                        )
-                                  )
-                                ]
+                                [ ( res, callR "Rt.exec-run" [ v outfdW, v errfdW, v codeN ] ) ]
                                 (v res)
                             )
                         )
                     )
                 )
             )
+        )
+
+
+{-| `Rt.exec-run outfd errfd code` — the SLURP+RESULT half of Zig's
+execRunDecoded/rt_exec_run seat (3B-2c): slurp both capture tmpfiles, close
+them, build the TAGGED `[code out err]` result.  Arity 3 (the lean-ABI cap).
+ALLOCATION MODEL (the read-file-as-string discipline, group 3B-3): the
+slurp accumulators live on the C HEAP — the state block (words 0..4 =
+fd/tmp/acc/len/cap) and the memGo block (words 6..8) share ONE 72-byte
+malloc plus ONE 65536 tmp, reused for BOTH slurps (words 2/3/4 RESET before
+each — a stale cap would let readFileGo's grow check skip and write past the
+fresh small acc); Rt.readFileGo is called as-is (its grow/append/EINTR/read-
+error arms are the readfile fixture's pinned defun — only the CAPACITY
+schedule differs from Zig's slurpFd realloc loop, which is unobservable).
+Each slurp: lseek(fd,0,0) first (the tmpfile offset sits at EOF after the
+run — without the rewind every result would read as EMPTY); lseek failure
+skips the read (Zig's slurpFd null) so buf/len stay 0.  The result build:
+ONE RawAllocRaw(len+1) + memGo copy + NUL store per stream (free(buf) — a
+no-op free(0) on the empty arm — then mkStr consumes the dst into a FRAME
+SLOT before the next allocation; the moving-GC window has NO safepoint
+inside it), then the cons tree in Zig's root-dance ORDER (tag_out, tag_err,
+empty, err_list, out_list, tag_code, final) — each intermediate a lets
+binder of this FRAMED defun, i.e. a rooted frame slot, the direct Mid form
+of Zig's rootPushValue dance.  blk/tmp malloc OOM is LOUD (rt_halt, the
+glob/readFile precedent — Zig has no such arm, its slurpFd returns null;
+stated, unreachable).
+-}
+execRunDefun : Defun
+execRunDefun =
+    let
+        outfdN =
+            p1
+
+        errfdN =
+            p2
+
+        codeN =
+            p3
+
+        blkW =
+            b 4
+
+        blkN =
+            b 5
+
+        tmpW =
+            b 6
+
+        oLS =
+            b 7
+
+        oBuf =
+            b 12
+
+        oLen =
+            b 13
+
+        eLS =
+            b 14
+
+        eBuf =
+            b 19
+
+        eLen =
+            b 20
+
+        oDst =
+            b 23
+
+        oStr =
+            b 50
+
+        eDst =
+            b 31
+
+        eStr =
+            b 51
+
+        tagOut =
+            b 52
+
+        tagErr =
+            b 53
+
+        emptyV =
+            b 54
+
+        errLst =
+            b 55
+
+        outLst =
+            b 56
+
+        tagCode =
+            b 57
+
+        -- acc/len/cap reset (the shared block's slurp state): MUST precede
+        -- each readFileGo call — the failure arm skips the read and leaves
+        -- buf=0/len=0 (Zig's slurpFd null), the success arm overwrites.
+        slurpStores =
+            [ ( b 8, Unsafe (RawWordStore { ptr = v blkW, index = n 2, value = n 0 }) )
+            , ( b 9, Unsafe (RawWordStore { ptr = v blkW, index = n 3, value = n 0 }) )
+            , ( b 10, Unsafe (RawWordStore { ptr = v blkW, index = n 4, value = n 0 }) )
+            ]
+
+        slurpErrStores =
+            [ ( b 15, Unsafe (RawWordStore { ptr = v blkW, index = n 2, value = n 0 }) )
+            , ( b 16, Unsafe (RawWordStore { ptr = v blkW, index = n 3, value = n 0 }) )
+            , ( b 17, Unsafe (RawWordStore { ptr = v blkW, index = n 4, value = n 0 }) )
+            ]
+    in
+    lam "Rt.exec-run" [ outfdN, errfdN, codeN ]
+        (lets
+            ([ ( blkW, callW "malloc" [ n 72 ] )
+               , -- OOM is LOUD (glob's precedent: halt, never a NULL write).
+                 ( b 58, iff (mkBool (cmpW RCeq (v blkW) (n 0))) haltV (mkNum (n 0)) )
+               , ( blkN, mkNum (v blkW) )
+               , ( tmpW, callW "malloc" [ n 65536 ] )
+               , -- tmp OOM: free the block FIRST (the pairing), then halt.
+                 ( b 59, iff (mkBool (cmpW RCeq (v tmpW) (n 0))) (lets [ ( b 60, callW "free" [ v blkW ] ) ] haltV) (mkNum (n 0)) )
+               ]
+                ++ slurpStores
+                ++ [ -- OUT slurp: rewind, then (iff the rewind held) read to
+                     -- EOF into the block's accumulator.
+                     ( oLS, callW "lseek" [ wOf (v outfdN), n 0, n 0 ] )
+                   , ( b 11, iff (mkBool (cmpW RCges (v oLS) (n 0)))
+                        (lets
+                            [ ( b 61, Unsafe (RawWordStore { ptr = v blkW, index = n 0, value = wOf (v outfdN) }) )
+                            , ( b 62, Unsafe (RawWordStore { ptr = v blkW, index = n 1, value = v tmpW }) )
+                            , ( b 63, callR "Rt.readFileGo" [ v blkN ] )
+                            ]
+                            mkNil
+                        )
+                        mkNil
+                     )
+                   , ( oBuf, Unsafe (RawWordLoad { ptr = v blkW, index = n 2 }) )
+                   , ( oLen, Unsafe (RawWordLoad { ptr = v blkW, index = n 3 }) )
+                   ]
+                ++ slurpErrStores
+                ++ [ ( eLS, callW "lseek" [ wOf (v errfdN), n 0, n 0 ] )
+                   , ( b 18, iff (mkBool (cmpW RCges (v eLS) (n 0)))
+                        (lets
+                            [ ( b 64, Unsafe (RawWordStore { ptr = v blkW, index = n 0, value = wOf (v errfdN) }) )
+                            , ( b 65, Unsafe (RawWordStore { ptr = v blkW, index = n 1, value = v tmpW }) )
+                            , ( b 66, callR "Rt.readFileGo" [ v blkN ] )
+                            ]
+                            mkNil
+                        )
+                        mkNil
+                     )
+                   , ( eBuf, Unsafe (RawWordLoad { ptr = v blkW, index = n 2 }) )
+                   , ( eLen, Unsafe (RawWordLoad { ptr = v blkW, index = n 3 }) )
+                   , -- close both captures (Zig's order: out then err), THEN
+                     -- build — the fds are dead from here on.
+                     ( b 21, callW "close" [ wOf (v outfdN) ] )
+                   , ( b 22, callW "close" [ wOf (v errfdN) ] )
+                   , -- out string: ONE GC block, copy, NUL, free the C acc
+                     -- (free(0) is a no-op on the empty arm), mkStr into a
+                     -- frame slot.  No safepoint inside the raw window.
+                     ( oDst, Unsafe (RawAllocRaw (iadd (v oLen) (n 1))) )
+                   , ( b 24, Unsafe (RawWordStore { ptr = v blkW, index = n 6, value = v oBuf }) )
+                   , ( b 25, Unsafe (RawWordStore { ptr = v blkW, index = n 7, value = v oDst }) )
+                   , ( b 26, Unsafe (RawWordStore { ptr = v blkW, index = n 8, value = v oLen }) )
+                   , ( b 27, callR "Rt.memGo" [ mkNum (iadd (v blkW) (n 48)), mkNum (n 0) ] )
+                   , ( b 28, Unsafe (RawByteStore { ptr = v oDst, index = v oLen, value = n 0 }) )
+                   , ( b 29, callW "free" [ v oBuf ] )
+                   , ( oStr, mkStr (v oDst) (v oLen) )
+                   , -- err string: same shape, its own raw window.
+                     ( eDst, Unsafe (RawAllocRaw (iadd (v eLen) (n 1))) )
+                   , ( b 32, Unsafe (RawWordStore { ptr = v blkW, index = n 6, value = v eBuf }) )
+                   , ( b 33, Unsafe (RawWordStore { ptr = v blkW, index = n 7, value = v eDst }) )
+                   , ( b 34, Unsafe (RawWordStore { ptr = v blkW, index = n 8, value = v eLen }) )
+                   , ( b 35, callR "Rt.memGo" [ mkNum (iadd (v blkW) (n 48)), mkNum (n 0) ] )
+                   , ( b 36, Unsafe (RawByteStore { ptr = v eDst, index = v eLen, value = n 0 }) )
+                   , ( b 37, callW "free" [ v eBuf ] )
+                   , ( eStr, mkStr (v eDst) (v eLen) )
+                   , -- scratch frees (raw, no safepoint): nothing raw
+                     -- remains alive past this point.
+                     ( b 39, callW "free" [ v tmpW ] )
+                   , ( b 40, callW "free" [ v blkW ] )
+                   ]
+                ++ [ -- the TAGGED tree (makeTagged* shape, execplan.zig:168-210;
+                     -- a plain Elm list would decode as EMPTY, silently), in
+                     -- Zig's root-dance order — each intermediate lands in a
+                     -- rooted frame slot before the next allocation.
+                     ( tagOut, consV (callR "Rt.intern" [ Lit (LString "string") ]) (consV (v oStr) mkNil) )
+                   , ( tagErr, consV (callR "Rt.intern" [ Lit (LString "string") ]) (consV (v eStr) mkNil) )
+                   , ( emptyV, consV (callR "Rt.intern" [ Lit (LString "cons") ]) mkNil )
+                   , ( errLst, consV (callR "Rt.intern" [ Lit (LString "cons") ]) (consV (v tagErr) (consV (v emptyV) mkNil)) )
+                   , ( outLst, consV (callR "Rt.intern" [ Lit (LString "cons") ]) (consV (v tagOut) (consV (v errLst) mkNil)) )
+                   , ( tagCode, consV (callR "Rt.intern" [ Lit (LString "number") ]) (consV (mkNum (wOf (v codeN))) mkNil) )
+                   ]
+            )
+            (consV (callR "Rt.intern" [ Lit (LString "cons") ]) (consV (v tagCode) (consV (v outLst) mkNil)))
         )
 
 
@@ -5001,8 +5189,8 @@ epFreeRedirsDefun =
 -- childBuiltin + the tmpfile wiring) as Mid defuns over RawCallRaw libc seats
 -- (fork/execvp/waitpid/_exit/pipe/dup2/close/openat/mkstemp/unlink/write/
 -- lseek/chdir/getcwd/getpid/kill/getenv/malloc/free), operating DIRECTLY on
--- the decode blob (no Zig rebuild).  The SLURP+RESULT half stays in the
--- rt_exec_run seat until 3B-2c.
+-- the decode blob (no Zig rebuild).  The SLURP+RESULT half is Rt.exec-run
+-- (3B-2c); the rt_exec_run seat is deleted.
 --
 -- THE 3-ARG LEAN-ABI BOUND (Lower.elm rtArityErr): EVERY Rt defun has 1..3
 -- params, and a saturated self-tail `App` (GRef own-key) is the ONLY loop.
@@ -7695,5 +7883,6 @@ primDefuns consArr rec eqPtrFast =
     , setenvDefun
     , globDefun
     , execPlanDefun
+    , execRunDefun
     , readFileAsStringDefun
     ]

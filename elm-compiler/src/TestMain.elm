@@ -868,8 +868,8 @@ checks =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 149 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route)"
-        (List.length (Rt.program True True True) == 149
+    , check "rt program: 150 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
+        (List.length (Rt.program True True True) == 150
             && List.all (\d -> String.startsWith "Rt." d.key) (Rt.program True True True)
             && List.any
                 (\d ->
@@ -961,6 +961,18 @@ checks =
                         && (case d.value of
                                 Lam lambda ->
                                     List.length lambda.params == 1
+
+                                _ ->
+                                    False
+                           )
+                )
+                (Rt.program True True True)
+            && List.any
+                (\d ->
+                    d.key == "Rt.exec-run"
+                        && (case d.value of
+                                Lam lambda ->
+                                    List.length lambda.params == 3
 
                                 _ ->
                                     False
@@ -1109,21 +1121,27 @@ checks =
             -- safepoint-free BY CONSTRUCTION (tag names are BYTES in a
             -- malloc'd cbuf — an LString literal is a safepoint and cannot
             -- appear), so all 21 ep* helpers are frame-free; the ONE member
-            -- is Rt.exec-plan itself, via the MANUAL OVERRIDE in Mid/Rt.elm
-            -- (rt_exec_run is a C seat the walker cannot see through —
-            -- declaring it allocating roots the plan Value param across the
-            -- seat's collections).  A future edit that adds an allocation
+            -- is Rt.exec-plan itself — since 3B-2c via the rtDeps edge to
+            -- Rt.exec-run (the MANUAL OVERRIDE the rt_exec_run C seat needed
+            -- is deleted; the fixed point's caller-of-an-allocating-helper
+            -- rule now roots the plan Value param across the result build's
+            -- collections).  A future edit that adds an allocation
             -- (a string literal, an allocating callR) to any ep* helper
             -- moves it INTO the set and fails THIS row — the decode's raw
             -- temps (the blob, the cbuf, st) are C-heap and survive only
             -- while no safepoint intervenes.
             && Set.member "Rt.exec-plan" Rt.allocating
+            -- GROUP 3B-2c (exec-plan SLURP+RESULT): Rt.exec-run allocates
+            -- DIRECTLY (the two result RawAllocRaws, the intern literals,
+            -- the cons tree) so it is a MEMBER; the slurp loop and the byte
+            -- memcpy it reuses (Rt.readFileGo/Rt.memGo) stay frame-free
+            -- below.
+            && Set.member "Rt.exec-run" Rt.allocating
             -- GROUP 3B-2b (exec-plan RUN): every run defun is frame-free —
             -- the whole point of the port's child-after-fork discipline is
             -- that the run performs NO GC allocation (fork/exec/wait and the
             -- blob/cbuf/state walks are RawCallRaw + raw loads over C-heap
-            -- memory); the ONE allocating operation is the rt_exec_run C
-            -- seat, pinned as the manual member on Rt.exec-plan below.  A
+            -- memory); the allocating half is Rt.exec-run above.  A
             -- future edit adding an allocation to any of these reintroduces
             -- a GC safepoint into the fork'd child (INVARIANT 2) — it must
             -- fail THIS row.
