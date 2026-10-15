@@ -1350,6 +1350,11 @@ unsafeChildren node =
         RawCallRaw call ->
             call.args
 
+        RawCallAgg call ->
+            -- the callee is a child too (it is lowered with the raw-word
+            -- path), so the walk covers fn + args.
+            call.fn :: call.args
+
         RawDataAddr _ ->
             []
 
@@ -1365,6 +1370,9 @@ unsafeRebuild node parts =
 
         ( RawCallRaw call, _ ) ->
             RawCallRaw { call | args = parts }
+
+        ( RawCallAgg call, fn :: rest ) ->
+            RawCallAgg { call | fn = fn, args = rest }
 
         ( RawBin r, a :: b :: _ ) ->
             RawBin { r | a = a, b = b }

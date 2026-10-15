@@ -96,6 +96,7 @@ module Mid.Qbe.Lower exposing (lower)
 -- in patterns — exposing only one of the two keeps the pattern arms clean.)
 import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), Lambda, LetBinder(..), Lit(..), Match(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), Step(..), UnsafeNode(..), ValuePath(..))
 import Mid.Rt as MidRt
+import Mid.RtGc as RtGc
 import Mid.RtLayout as RtLayout
 import Dict exposing (Dict)
 import Mid.Qbe.Il as Il exposing (Module, Func, Block, Inst(..), Jump(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), UnaryOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..))
@@ -1677,6 +1678,9 @@ lowerRawVal node dest s =
         RawCallRaw _ ->
             Err wordProducerMessage
 
+        RawCallAgg _ ->
+            Err wordProducerMessage
+
         RawDataAddr _ ->
             Err wordProducerMessage
 
@@ -2208,6 +2212,53 @@ rawWordArg exp s =
                         ( Il.Tmp t, emit (Call (Just t) (Base L) (Il.Sym seat.sym) args) s2 )
                     )
 
+        Unsafe (RawCallAgg call) ->
+            -- Call through a RUNTIME WORD with an AGGREGATE result (stage 6
+            -- U1a; Mid.Ir's node contract).  The callee and every arg take
+            -- the raw-word path; the result is the sret buffer ADDRESS as a
+            -- word — the caller reads the fields with RawWordLoad at
+            -- +0/+40/+48/... .  Shape "ret" emits `:ret` (80 B, the
+            -- bounce-loop call-result shape), "val" emits `:val` (40 B, the
+            -- tagged Value).  Legality MEASURED on the vendored qbe:
+            -- `%r =:ret call %f(l %argv, w 2)` assembles exit 0 and the
+            -- sret temp is addressable (movq %rax,%rcx; movq 40(%rcx),%rcx).
+            -- NOT a safepoint-free seat — the callee is unknown generated
+            -- code (Mid.Rt classifies the node conservatively allocating).
+            if call.shape /= "ret" && call.shape /= "val" then
+                Err ("qbe: rawCallAgg shape \"" ++ call.shape ++ "\" — only \"ret\" and \"val\" are legal")
+
+            else
+                rawWordArg call.fn s
+                    |> Result.andThen
+                        (\( fnA, s1 ) ->
+                            case fnA of
+                                Il.Tmp fnT ->
+                                    List.foldl
+                                        (\e acc ->
+                                            Result.andThen
+                                                (\( args, st ) ->
+                                                    rawWordArg e st
+                                                        |> Result.map (\( a, st2 ) -> ( args ++ [ ArgVal (Base L) a ], st2 ))
+                                                )
+                                                acc
+                                        )
+                                        (Ok ( [], s1 ))
+                                        call.args
+                                        |> Result.map
+                                            (\( args, s2 ) ->
+                                                let
+                                                    ( t, s3 ) =
+                                                        freshTmp s2
+                                                in
+                                                ( Il.Tmp t
+                                                , emit (Call (Just t) (Agg call.shape) (Il.Tmp fnT) args) s3
+                                                )
+                                            )
+
+                                _ ->
+                                    Err "qbe: rawCallAgg callee must be a raw-word TEMP (a loaded code pointer), not a constant"
+                        )
+
         Unsafe (RawDataAddr names) ->
             -- (E) the STATIC names array of a positional record: first ensure
             -- each name's `sym:` data def exists (freshData is idempotent —
@@ -2572,6 +2623,9 @@ rawNodeName node =
 
         RawCallRaw seat ->
             "rawCallRaw " ++ seat.sym
+
+        RawCallAgg call ->
+            "rawCallAgg " ++ call.shape
 
         RawDataAddr _ ->
             "rawDataAddr"
@@ -3769,6 +3823,9 @@ isRawWordExp exp =
                     True
 
                 RawCallRaw _ ->
+                    True
+
+                RawCallAgg _ ->
                     True
 
                 RawDataAddr _ ->
@@ -6400,6 +6457,43 @@ setsUnion results =
         results
 
 
+-- THE MID-OWNED GLOBALS BLOCK (stage 6 U1c, plan correction C3): the
+-- mutable state Mid cannot keep in a frame lives in one `export data
+-- $rt_glob = { z N }` — .bss, WRITABLE (`vendor/qbe/emit.c:92`) — addressed
+-- through this 0-arg accessor whose body is `ret $rt_glob` (a global symbol
+-- IS a legal `l` ret operand — MEASURED: the /tmp probe assembles and runs,
+-- the address is a link-time constant).  RtGc's slots go through the
+-- EXISTING RawCallRaw (callW emits the symbol verbatim, word->word — the
+-- same ABI the deleted `rt_midgc_region`/`rt_midgc_set_region` Zig seats
+-- had) + RawWordLoad/RawWordStore.  GATED on midGc (the sole consumer until
+-- the U5a driver joins the same gate): the DEFAULT route emits neither def,
+-- so the corpus stays byte-identical.  The layout table (what each slot is
+-- FOR) is Mid.RtGc's GLOBALS BLOCK section.
+globBlockData : DataDef
+globBlockData =
+    { name = RtGc.globDataSym
+    , align = Just 8
+    , items = [ DZero (8 * RtGc.globWords) ]
+    , export_ = True
+    }
+
+
+globBlockFunc : Func
+globBlockFunc =
+    { name = RtGc.globAddrSym
+    , export_ = True
+    , ret = Base L
+    , envParam = False
+    , params = []
+    , blocks =
+        [ { label = "start"
+          , body = []
+          , jump = Ret (Just (Il.Sym RtGc.globDataSym))
+          }
+        ]
+    }
+
+
 -- ============================ FINISH ============================
 -- Assemble the final Module: inject each function's prologue into @start
 -- (frame size is known only after the body walk), add the global Descs, the
@@ -6415,7 +6509,12 @@ finishModule s keys =
 
         funcs =
             List.map withPrologue pendings
-                ++ rtCallFuncs
+                ++ (if s.midGc then
+                        globBlockFunc :: rtCallFuncs
+
+                    else
+                        rtCallFuncs
+                   )
 
         -- Rt.* defuns (osier-consspike) are INTERNAL: no global Desc (only a
         -- GRef'd defun needs one, and surface code cannot GRef an Rt key), no
@@ -6456,7 +6555,16 @@ finishModule s keys =
             metaTable (List.filter (\p -> surfaceEntry p.entryKey) pendings)
     in
     { types = []
-    , datas = List.reverse s.datas ++ globalDescs ++ metaDatas
+    , datas =
+        List.reverse s.datas
+            ++ globalDescs
+            ++ metaDatas
+            ++ (if s.midGc then
+                    [ globBlockData ]
+
+                else
+                    []
+               )
     , funcs = funcs ++ metaFuncs
     }
 

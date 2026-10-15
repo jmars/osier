@@ -546,18 +546,14 @@ export fn rt_gc_heap_bytes() callconv(.c) i64 {
 }
 
 var gc_heap_bytes: usize = 0;
-var midgc_region: i64 = 0;
 
-/// The Mid collector's heap-region base (an opaque 64-bit word).  0 = not yet
-/// initialised; Rt.allocVector mmaps and sets it on first use.
-export fn rt_midgc_region() callconv(.c) i64 {
-    return midgc_region;
-}
-
-export fn rt_midgc_set_region(p: i64) callconv(.c) i64 {
-    midgc_region = p;
-    return p;
-}
+// (stage 6 U1c) The Mid collector's region pointer no longer lives here:
+// the two seats that served it are DELETED.  It moved to the Mid-owned
+// globals block (`$rt_glob`, .bss) at word 0, addressed through the
+// Lower-built `rt_glob_addr` accessor — plan correction C3 (the "no
+// mutable-global-state facility" gap is refuted).  The BRIDGES row is
+// updated to REMOVED in the same change; this file must not carry the old
+// seat names (the row asserts `rg` finds none).
 
 /// The Mid collector's LOUD failure seat (zigretire stage 4).  The code is
 /// the Mid.RtGc die-code table index; each message names the failure mode so
@@ -598,6 +594,54 @@ export fn rt_gc_root_slot(i: i64) callconv(.c) i64 {
 export fn rt_gc_root_np(i: i64) callconv(.c) i64 {
     const np = g.shadow_stack[@intCast(i)].np orelse return 0;
     return @bitCast(@intFromPtr(np));
+}
+
+/// Stage-6 U1b root seats: the Mid frame machinery's root-registration
+/// surface.  Each is a thin C-ABI word->word bridge over the vendored
+/// shadow-stack API (vendor/osier-rt/src/gc/roots.zig — rootPushPtr :85,
+/// rootPushValue :94, rootPushValueArray :120, rootPop :149, rootPopTo :159,
+/// rootWatermark :167).  Alloc-free BY CONTRACT from the collector's view:
+/// a push may grow the shadow stack, but shadowStackGrow uses the page
+/// allocator and runs NO collect (roots.zig:120-128 — rootPushValueArray's
+/// body; the grow fn is :59-83), so Mid bodies may call
+/// these under RawCallRaw's no-safepoint contract.  Each seat is a BRIDGE
+/// removed at stage 7 (BRIDGES table, plan.md §3 Phase 4b).
+///
+/// rt_root_watermark / rt_root_pop_to carry the shadow-stack DEPTH the frame
+/// machinery snapshots at enter and truncates back to at leave — popTo(wm),
+/// never a bare pop: when anything (e.g. rt_global_closure's forever-root)
+/// pushed between enter and leave, a bare rootPop pops the WRONG entry, the
+/// frame's ROOT_VALUE_ARRAY LEAKS, and every later GC scans the freed
+/// block's stale slots (the historical qbe-gcbug; rt_frame_leave's comment
+/// below is the spec).  The i64 results are never read (the rt_halt
+/// convention: the word-level call shape stays valid IL).
+export fn rt_root_push_value_array(base: i64, np: i64) callconv(.c) i64 {
+    gc.roots.rootPushValueArray(g, @ptrFromInt(@as(usize, @bitCast(base))), @ptrFromInt(@as(usize, @bitCast(np))));
+    return 0;
+}
+
+export fn rt_root_push_value(ptr: i64) callconv(.c) i64 {
+    gc.roots.rootPushValue(g, @ptrFromInt(@as(usize, @bitCast(ptr))));
+    return 0;
+}
+
+export fn rt_root_push_ptr(ptr: i64) callconv(.c) i64 {
+    gc.roots.rootPushPtr(g, @ptrFromInt(@as(usize, @bitCast(ptr))));
+    return 0;
+}
+
+export fn rt_root_pop() callconv(.c) i64 {
+    gc.roots.rootPop(g);
+    return 0;
+}
+
+export fn rt_root_watermark() callconv(.c) i64 {
+    return @intCast(gc.roots.rootWatermark(g));
+}
+
+export fn rt_root_pop_to(wm: i64) callconv(.c) i64 {
+    gc.roots.rootPopTo(g, @intCast(wm));
+    return 0;
 }
 
 /// The Mid prims' halt arm (emptylist's non-0 arm — C falls through to

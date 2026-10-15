@@ -258,5 +258,8 @@ describe node =
         RawCallRaw call ->
             "raw call word seat " ++ call.sym
 
+        RawCallAgg call ->
+            "raw call aggregate " ++ call.shape
+
         RawDataAddr _ ->
             "rawDataAddr (static data address)"

@@ -1,4 +1,8 @@
-module Mid.RtGc exposing (gcProgram)
+module Mid.RtGc exposing
+    ( gcProgram
+    , globAddrSym, globDataSym, globFreelistSlot, globKnobSlot, globRegionSlot
+    , globTailScratchSlot, globWords
+    )
 
 {-| Mid.RtGc — the FRESH non-moving, non-generational MARK-SWEEP collector
 (zigretire stage 4, plan.md §2.2).  NOT a port of the moving generational
@@ -66,6 +70,65 @@ silent leak or a stale read.
 
 import Mid.Ir exposing (Binder, Defun, Exp(..), LetBinder(..), Lit(..), RawBinOp(..), RawCmpOp(..), UnsafeNode(..))
 import Mid.RtLayout as RtLayout
+
+
+-- ============================ GLOBALS BLOCK ============================
+-- The Mid-owned mutable globals (stage 6 U1c, plan correction C3 — the
+-- recorded gap "Mid has no mutable-global-state facility" is REFUTED:
+-- `vendor/qbe/emit.c:92` puts an all-zero data def in .bss, WRITABLE).  The
+-- block is one `export data $rt_glob = { z N }` plus a 0-arg accessor func
+-- whose body is `ret $rt_glob` (a global symbol is a legal `l` ret operand —
+-- MEASURED, /tmp probe: assembles and runs; the address is a link-time
+-- constant).  Both are built by Mid.Qbe.Lower's finishModule, GATED on the
+-- midgc flag so the DEFAULT route emits neither and the corpus stays
+-- byte-identical.  Mid reads/writes slots with the EXISTING RawCallRaw +
+-- RawWordLoad/RawWordStore — which is how the `rt_midgc_region` /
+-- `rt_midgc_set_region` Zig seats DIED (their 6 callW sites re-pointed here;
+-- the block's word 0 is the old `var midgc_region` Zig global's job).
+--
+-- LAYOUT (word slots; the reserved slots name their landing unit so U3/U4a/
+-- U5a join the same block instead of growing new globals):
+--   word 0         the Mid collector's region pointer (THIS unit)
+--   words 8..11    driver knobs, getenv read once (U5a)
+--   word 12        the single .tail-in-flight scratch (U4a)
+--   words 16..     the frame freelist heads, indexed by nslots (U3)
+-- The freelist bound is 8192 (MEASURED: the seed's max frame nslots is
+-- 4,354; giants never pool).  The block is .bss: reserving the words costs
+-- nothing on disk.
+
+globDataSym : String
+globDataSym =
+    "rt_glob"
+
+
+globAddrSym : String
+globAddrSym =
+    "rt_glob_addr"
+
+
+globRegionSlot : Int
+globRegionSlot =
+    0
+
+
+globKnobSlot : Int
+globKnobSlot =
+    8
+
+
+globTailScratchSlot : Int
+globTailScratchSlot =
+    12
+
+
+globFreelistSlot : Int
+globFreelistSlot =
+    16
+
+
+globWords : Int
+globWords =
+    globFreelistSlot + 8192
 
 
 -- ============================ BUILDERS ============================
@@ -375,7 +438,8 @@ die code =
 
 {-| `Rt.gcInit _` — lazily mmap the heap region and lay down its header
 words, once per process.  Idempotent: a second call returns the existing
-region unchanged (the `rt_midgc_region` seat keeps the base across calls).
+region unchanged (the globals block's region slot keeps the base across
+calls).
 -}
 gcInitDefun : Defun
 gcInitDefun =
@@ -400,10 +464,15 @@ gcInitDefun =
 
         markEnd =
             b 7
+
+        glob =
+            b 18
     in
     lam "Rt.gcInit" [ dummy ]
         (lets
-            [ ( region, callW "rt_midgc_region" [] ) ]
+            [ ( glob, callW globAddrSym [] )
+            , ( region, wload (v glob) (n globRegionSlot) )
+            ]
             (iff (neW (v region) (n 0))
                 (mkNum (v region))
                 (lets
@@ -417,7 +486,7 @@ gcInitDefun =
                             [ ( heapStart, iadd (v base) (iadd (n 528) (idiv (v heapBytes) (n 8))) )
                             , ( markEnd, iadd (n metaWords) (idiv (idiv (v heapBytes) (n 8)) (n 8)) )
                             ]
-                            (lets [ ( b 8, callW "rt_midgc_set_region" [ v base ] ) ]
+                            (lets [ ( b 8, wstore (v glob) (n globRegionSlot) (v base) ) ]
                                 (lets
                                     [ ( b 9, wstore (v base) (n 0) (n magic) )
                                     , ( b 10, wstore (v base) (n offFreeHead) (n 0) )
@@ -700,10 +769,15 @@ collectDefun =
 
         region =
             b 2
+
+        glob =
+            b 8
     in
     lam "Rt.collect" [ dummy ]
         (lets
-            [ ( region, callW "rt_midgc_region" [] ) ]
+            [ ( glob, callW globAddrSym [] )
+            , ( region, wload (v glob) (n globRegionSlot) )
+            ]
             (iff (eqW (wload (v region) (n 0)) (n magic))
                 (lets
                     [ ( b 3, wstore (v region) (n offMarkTop) (n metaWords) )
@@ -846,10 +920,14 @@ gcDrainDefun =
 
         count =
             b 8
+
+        glob =
+            b 11
     in
     lam "Rt.gcDrain" [ dummy ]
         (lets
-            [ ( region, callW "rt_midgc_region" [] )
+            [ ( glob, callW globAddrSym [] )
+            , ( region, wload (v glob) (n globRegionSlot) )
             , ( top, wload (v region) (n offMarkTop) )
             ]
             (iff (gtW (v top) (n metaWords))
@@ -909,11 +987,15 @@ gcSweepDefun =
 
         marked =
             b 9
+
+        glob =
+            b 13
     in
     lam "Rt.gcSweep" [ cursor ]
         (lets
             [ ( cursorW, wOf (v cursor) )
-            , ( region, callW "rt_midgc_region" [] )
+            , ( glob, callW globAddrSym [] )
+            , ( region, wload (v glob) (n globRegionSlot) )
             , ( heapCursor, wload (v region) (n offHeapCursor) )
             ]
             (iff (geW (v cursorW) (v heapCursor))
@@ -975,11 +1057,15 @@ gcMarkPtrDefun =
 
         markEnd =
             b 9
+
+        glob =
+            b 13
     in
     lam "Rt.gcMarkPtr" [ p ]
         (lets
             [ ( ptr, wOf (v p) )
-            , ( region, callW "rt_midgc_region" [] )
+            , ( glob, callW globAddrSym [] )
+            , ( region, wload (v glob) (n globRegionSlot) )
             , ( heapStart, wload (v region) (n offHeapStart) )
             , ( heapEnd, wload (v region) (n offHeapEnd) )
             ]

@@ -298,86 +298,100 @@ lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByMod
                 -- .ssa is byte-identical to the pre-Rt baseline (the corpus
                 -- attribution proof).
                 let
-                    rtProgram =
+                    rtProgramR =
                         if midRt then
-                            MidRt.program consArr rec eqPtrFast
-                                ++ (if midGc then
-                                        RtGc.gcProgram
+                            -- T7: `program` runs the surface pipeline
+                            -- (Mid.RtSource -> Parse -> Check -> LowerToIr)
+                            -- and is RESULT-VALUED: a bad surface text fails
+                            -- the compile HERE, through the existing Err
+                            -- plumbing — never as a silently-reduced runtime.
+                            Result.map
+                                (\spliced ->
+                                    spliced
+                                        ++ (if midGc then
+                                                RtGc.gcProgram
 
-                                    else
-                                        []
-                                   )
+                                            else
+                                                []
+                                           )
+                                )
+                                (MidRt.program consArr rec eqPtrFast)
 
                         else
-                            []
-
-                    -- THE TYPE TABLE (monomorphisation S1 + S2). Built HERE
-                    -- because `program` fixes the table's domain — the defun
-                    -- keys the passes below actually see. S1: the defun-granular
-                    -- half (schemes). S2: the per-BINDER half — every defun of a
-                    -- CHECKED unit gets `Binders <binderId -> Type>` from the
-                    -- FromAst binder join against the checker's node-type
-                    -- record (see Mid.Qbe.Types's header for the totality and
-                    -- deny-by-default doctrine); defuns of unchecked units keep
-                    -- `BindersAbsent`. STILL READ BY NOTHING: S5's specialiser
-                    -- is the consumer, and the byte-identity oracle below is
-                    -- the proof this step changes no emitted output.
-                    typeTable =
-                        List.foldl QbeTypes.note
-                            (QbeTypes.fromSchemes (Set.fromList (List.map .key (program ++ rtProgram))) groupTypes.schemes
-                                |> QbeTypes.withBinders binderPerDefun
-                            )
-                            groupTypes.failures
+                            Ok []
                 in
-                (if flatten then
-                    QbeFlatten.run program
-
-                 else
-                    Ok program
-                )
+                rtProgramR
                     |> Result.andThen
-                        (\flatProgram ->
+                        (\rtProgram ->
                             let
-                                emitProgram =
-                                    flatProgram ++ rtProgram
-
-                                arities =
-                                    completeArities globals (program ++ rtProgram)
+                                -- THE TYPE TABLE (monomorphisation S1 + S2). Built HERE
+                                -- because `program` fixes the table's domain — the defun
+                                -- keys the passes below actually see. S1: the defun-granular
+                                -- half (schemes). S2: the per-BINDER half — every defun of a
+                                -- CHECKED unit gets `Binders <binderId -> Type>` from the
+                                -- FromAst binder join against the checker's node-type
+                                -- record (see Mid.Qbe.Types's header for the totality and
+                                -- deny-by-default doctrine); defuns of unchecked units keep
+                                -- `BindersAbsent`. STILL READ BY NOTHING: S5's specialiser
+                                -- is the consumer, and the byte-identity oracle below is
+                                -- the proof this step changes no emitted output.
+                                typeTable =
+                                    List.foldl QbeTypes.note
+                                        (QbeTypes.fromSchemes (Set.fromList (List.map .key (program ++ rtProgram))) groupTypes.schemes
+                                            |> QbeTypes.withBinders binderPerDefun
+                                        )
+                                        groupTypes.failures
                             in
-                            (if mono then
-                                -- S5/M2: the specialiser runs LAST (on the
-                                -- flattened program the emitter will see) and
-                                -- hands down a program with the clones
-                                -- appended plus a type table carrying one
-                                -- MONOTYPE entry per clone.
-                                QbeMono.run typeTable refinedPerDefun arities emitProgram entryKey
+                            (if flatten then
+                                QbeFlatten.run program
 
                              else
-                                -- QBE_NOMONO=1: the pre-S5 emission, byte for
-                                -- byte — no clone exists, no table entry is
-                                -- added, and no pass decision is reported.
-                                Ok { program = emitProgram, table = typeTable, note = "" }
+                                Ok program
                             )
                                 |> Result.andThen
-                                    (\specialised ->
-                                        QbeLower.lower
-                                            rep
-                                            primDirect
-                                            midCons
-                                            rtLean
-                                            consArr
-                                            rec
-                                            typeSpec
-                                            midGc
-                                            specialised.table
-                                            (completeArities globals specialised.program)
-                                            specialised.program
-                                            entryKey
-                                            |> Result.map
-                                                (\il ->
-                                                    prependNote specialised.note (QbePrint.print (QbePeephole.optimize il))
+                                    (\flatProgram ->
+                                        let
+                                            emitProgram =
+                                                flatProgram ++ rtProgram
+
+                                            arities =
+                                                completeArities globals (program ++ rtProgram)
+                                        in
+                                        (if mono then
+                                            -- S5/M2: the specialiser runs LAST (on the
+                                            -- flattened program the emitter will see) and
+                                            -- hands down a program with the clones
+                                            -- appended plus a type table carrying one
+                                            -- MONOTYPE entry per clone.
+                                            QbeMono.run typeTable refinedPerDefun arities emitProgram entryKey
+
+                                         else
+                                            -- QBE_NOMONO=1: the pre-S5 emission, byte for
+                                            -- byte — no clone exists, no table entry is
+                                            -- added, and no pass decision is reported.
+                                            Ok { program = emitProgram, table = typeTable, note = "" }
+                                        )
+                                            |> Result.andThen
+                                                (\specialised ->
+                                                    QbeLower.lower
+                                                        rep
+                                                        primDirect
+                                                        midCons
+                                                        rtLean
+                                                        consArr
+                                                        rec
+                                                        typeSpec
+                                                        midGc
+                                                        specialised.table
+                                                        (completeArities globals specialised.program)
+                                                        specialised.program
+                                                        entryKey
+                                                        |> Result.map
+                                                            (\il ->
+                                                                prependNote specialised.note (QbePrint.print (QbePeephole.optimize il))
+                                                            )
                                                 )
-                                    )
+                                )
                         )
             )
 

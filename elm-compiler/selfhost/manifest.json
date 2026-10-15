@@ -72,7 +72,12 @@
         "elm-compiler/src/Mid/Rt.elm",
         "elm-compiler/src/Mid/RtPrims.elm",
         "elm-compiler/src/Mid/RtLayout.elm",
-        "elm-compiler/src/Mid/RtGc.elm"
+        "elm-compiler/src/Mid/RtGc.elm",
+        "elm-compiler/src/Mid/RtLang/Ast.elm",
+        "elm-compiler/src/Mid/RtLang/Parse.elm",
+        "elm-compiler/src/Mid/RtLang/Check.elm",
+        "elm-compiler/src/Mid/RtLang/LowerToIr.elm",
+        "elm-compiler/src/Mid/RtSource.elm"
       ],
       "output": "zig-out/selfhost.ssa",
       "entry": "NativeMain.main"

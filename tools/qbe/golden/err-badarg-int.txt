@@ -1,0 +1,1 @@
+qbe-rt: entry arg 'abc' is not an int (qbe slice)

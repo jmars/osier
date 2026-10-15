@@ -463,6 +463,24 @@ type UnsafeNode
       -- RawAllocRaw so the safepoint discipline stays stated at the node).
       -- Rt.* DEFUN calls are the OTHER constructor: RawCall above.
       RawCallRaw { sym : String, args : List Exp }
+    | -- call through a RUNTIME WORD (a function/code pointer held in a
+      -- register, not a named symbol) with an AGGREGATE result — the
+      -- stage-6 apply/bounce port's voice (call the Desc code pointer).
+      -- THE RESULT IS THE ADDRESS OF THE sret BUFFER, as a word: the node
+      -- is a WORD producer (binds to a raw temp) and the caller reads the
+      -- aggregate's fields with the EXISTING RawWordLoad at +0/+40/+48/...
+      -- — no field-reading lives in this node.  `fn` is a WORD producer
+      -- (the code pointer), `args` are WORD producers (raw-word lowering
+      -- each), and `shape` is "ret" (the 80-B `:ret` call-result shape —
+      -- val@0, kind@40, f@48, e@56, args@64, arity@72 — for unknown-code
+      -- tail calls) or "val" (the 40-B tagged `:val` Value, for the
+      -- saturated arm).  Lowered exactly like RawCallRaw but with the
+      -- callee as a word ARGUMENT (`call %f(...)`) and an `Agg` result;
+      -- legality probed against the vendored qbe (agg.ssa assembles exit 0,
+      -- the sret temp addressable).  NOT allocation-free BY ITSELF — the
+      -- callee is unknown generated code and may allocate, so the
+      -- classification is conservatively a safepoint (Mid.Rt).
+      RawCallAgg { fn : Exp, args : List Exp, shape : String }
     | -- (E) the ADDRESS of a static data def, built in Lower — an `Unsafe`
       -- WORD producer yielding the address of a content-keyed freshData
       -- array of `sym:<field>` DRefs (the names array of a positional

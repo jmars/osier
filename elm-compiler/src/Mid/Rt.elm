@@ -1,4 +1,20 @@
-module Mid.Rt exposing (Impl, allocating, closureSeeds, conSeeds, direct, gcSeeds, program, primImpl, rtDeps, seeds)
+module Mid.Rt
+    exposing
+        ( Impl
+        , allocating
+        , closureSeeds
+        , conSeeds
+        , direct
+        , externArities
+        , gcSeeds
+        , program
+        , primImpl
+        , activeSurf
+        , rtDeps
+        , seeds
+        , spliceSurface
+        , surf
+        )
 
 -- Mid.Rt — the MID-WRITTEN RUNTIME's program assembly (handoff
 -- osier-consspike, TRACK 2 step 4).
@@ -16,6 +32,10 @@ module Mid.Rt exposing (Impl, allocating, closureSeeds, conSeeds, direct, gcSeed
 --
 -- BACKEND-NEUTRAL BY CONSTRUCTION: this module and Mid.RtPrims import only
 -- Mid.Ir — a Lua backend consumes the SAME defuns through its own lowering.
+-- (Since T7 this module ALSO imports the Mid.RtLang.* surface front end and
+-- Mid.RtSource, which are backend-neutral by the same contract: Ast/Parse/
+-- Check read only Ast + the vendored ParserFast (already in the seed — it is
+-- the front end's own parser) and LowerToIr reads only Mid.Ir.)
 -- The seeding contract travels with them: seed exactly the used prims' keys,
 -- so a program that never conses never carries the cons machinery (the
 -- pruning a committed runtime blob could not offer).
@@ -28,17 +48,206 @@ module Mid.Rt exposing (Impl, allocating, closureSeeds, conSeeds, direct, gcSeed
 import Dict exposing (Dict)
 import Mid.Ir exposing (Defun, Exp(..), LetBinder(..), Lit(..), Match, UnsafeNode(..), ValuePath(..))
 import Mid.RtGc exposing (gcProgram)
+import Mid.RtLang.Ast as RtAst
+import Mid.RtLang.Check as RtCheck
+import Mid.RtLang.LowerToIr
+import Mid.RtLang.Parse
 import Mid.RtPrims exposing (helperDefuns, primDefuns)
+import Mid.RtSource
 import Set exposing (Set)
 
 
-{-| The Rt program: every Mid-implemented runtime defun.  Injected whole by
-QbeModule; Lower keeps only the SEEDED (used) subset.  `consArr` selects the
-cons representation (QBE_NOCONSARR=1 -> False = the pre-(A) two-word cons).
+{-| The Rt program: every Mid-implemented runtime defun — the DSL-built
+lists (`primDefuns`/`helperDefuns`) with any SURFACE defuns spliced into
+their list positions (T7, handoff-osier-tier2-midlang-plan THE INJECTION
+PATH).  Injected whole by QbeModule; Lower keeps only the SEEDED (used)
+subset.  `consArr` selects the cons representation (QBE_NOCONSARR=1 ->
+False = the pre-(A) two-word cons).
+
+RESULT-VALUED (T7): `program` runs the surface pipeline
+(`Mid.RtSource.source` -> Parse -> Check -> LowerToIr) and can FAIL.  A
+silently-empty or silently-reduced runtime is the worst failure mode, so
+the Err is real: Mid.QbeModule routes it through the compile's existing
+error plumbing and EVERY compile fails loudly on a bad surface text.
 -}
-program : Bool -> Bool -> Bool -> List Defun
+program : Bool -> Bool -> Bool -> Result String (List Defun)
 program consArr rec eqPtrFast =
-    primDefuns consArr rec eqPtrFast ++ helperDefuns rec
+    surf (activeFlags consArr rec eqPtrFast)
+        |> Result.andThen
+            (\surface ->
+                spliceSurface surface (primDefuns consArr rec eqPtrFast ++ helperDefuns rec)
+            )
+
+
+{-| The three `program` switches as the surface language's ACTIVE flag set
+(the `@flag`/`@!flag` guards hold against exactly this list; a False flag
+is simply absent).  The measured variation is 4 defuns — cons/atp/eq/
+deepEq — plus `helperDefuns`' rec emission.
+-}
+activeFlags : Bool -> Bool -> Bool -> List RtAst.Flag
+activeFlags consArr rec eqPtrFast =
+    (if consArr then
+        [ RtAst.ConsArr ]
+
+     else
+        []
+    )
+        ++ (if rec then
+                [ RtAst.Rec ]
+
+            else
+                []
+           )
+        ++ (if eqPtrFast then
+                [ RtAst.EqPtrFast ]
+
+            else
+                []
+           )
+
+
+{-| The surface text, PARSED ONCE PER PROCESS.  A top-level VALUE is the
+Elm runtime's once-per-process memoization — MEASURED in the generated JS
+(test-compiler.js: a top-level constant compiles to a plain `var`,
+evaluated once at module load; a function like `program` compiles to `F3`
+and is not memoized per flags).  Cost note (plan R4): the pipeline
+therefore parses once per process even under QBE_NOMIDRT=1, while
+check+lower re-run per `program` call (twice per compile: QbeModule's
+injection and `allocating`'s fixed point below).
+-}
+parsedSource : Result String RtAst.Program
+parsedSource =
+    Mid.RtLang.Parse.parseProgram (String.join "\n" Mid.RtSource.source)
+
+
+{-| The surface AST's declared arities: (key, param count) per defun,
+guard variants included (they share one key and never differ in arity —
+TestMain's T7 flag-stable row pins that).  A MIGRATED key's entry lives
+HERE once its DSL builder is deleted (T8's six first), so the extern
+table stays total over the Rt call graph and the T7 safety net keeps its
+arity witness.  NO VALUE CYCLE: `parsedSource` is parse-only — it does
+not touch `externArities` the way `surf` does.
+-}
+surfaceSigs : List ( String, Int )
+surfaceSigs =
+    case parsedSource of
+        Ok ast ->
+            List.map (\d -> ( d.key, List.length d.params )) ast
+
+        Err _ ->
+            []
+
+
+{-| J2's extern/arity table, beside `rtDeps`: every Rt key a surface defun
+may `call` while that key is still DSL-built.  Derived from the DSL program
+plus the surface AST's declared arities (`surfaceSigs` above) rather than
+hand-written beside `rtDeps` — a second hand table would be exactly the
+arity-skew hazard (plan R5) — and the derivation is pinned flag-stable by
+TestMain's T7 rows.  The DSL entries come LAST in the `fromList` fold, so
+for a key defined on BOTH sides the DSL arity wins: a surface defun whose
+Lam arity drifts from the DSL arity it replaced is a TestMain FAIL.
+`resolveCall` prefers a surface signature, so a migrated key's entry here
+is the shadowed witness the safety-net row reads.
+-}
+externArities : Dict String Int
+externArities =
+    Dict.fromList
+        (surfaceSigs
+            ++ List.map (\d -> ( d.key, lamArity d ))
+                (primDefuns True True True ++ helperDefuns True ++ gcProgram)
+        )
+
+
+lamArity : Defun -> Int
+lamArity d =
+    case d.value of
+        Lam l ->
+            List.length l.params
+
+        _ ->
+            0
+
+
+{-| The ACTIVE surface defuns for one flag combo, keyed for the splice.
+Parse is the per-process `parsedSource`; check and lower run here (they
+are flag-dependent: J8's exactly-one-active judgment reads the flag set).
+The check has ALREADY run when `activeSurf` filters the positionally
+paired `ast`/`lowered` lists by the active flags (see `activeSurf` for
+why the pairing is positional, not key-keyed).
+-}
+surf : List RtAst.Flag -> Result String (Dict String Defun)
+surf flags =
+    case parsedSource of
+        Err msg ->
+            Err msg
+
+        Ok ast ->
+            case RtCheck.checkProgram externArities flags ast of
+                Err msg ->
+                    Err msg
+
+                Ok () ->
+                    case Mid.RtLang.LowerToIr.lowerProgram ast of
+                        Err msg ->
+                            Err msg
+
+                        Ok lowered ->
+                            Ok
+                                (activeSurf flags (List.map2 Tuple.pair ast lowered))
+
+
+{-| The ACTIVE surface defuns for one flag combo, keyed for the splice.
+`ast` and `lowered` are paired POSITIONALLY, not keyed: guard variants
+SHARE one key, so a key-keyed dict of the lowered list would be last-wins
+and could fetch an INACTIVE variant's tree under a flag combo whose active
+variant is not last in source order.  The pairing relies on
+`lowerProgram` preserving the input order and count 1:1 (its `lowerAll`
+walks the program defun by defun and reverses its accumulator).  Only
+ACTIVE variants enter the dict — the checker has already guaranteed at
+most one active defun per key, so a duplicate key cannot fire silently.
+-}
+activeSurf : List RtAst.Flag -> List ( RtAst.Defun, Defun ) -> Dict String Defun
+activeSurf flags pairs =
+    List.filter (\( a, _ ) -> RtCheck.guardsHold flags a.flags) pairs
+        |> List.map (\( a, d ) -> ( a.key, d ))
+        |> Dict.fromList
+
+
+{-| THE SPLICE: every DSL entry whose key is in `surf` is REPLACED by the
+surface defun at its old position — list order is .ssa bytes, so order is
+preserved and untouched entries pass through unchanged.  A surface key with
+NO DSL position is a LOUD Err, never a silent drop: a defun that vanishes
+while `rtDeps` still routes to it is the exact failure class this wiring
+exists to make impossible.  (Rt.gc* keys live in `gcProgram`, appended by
+QbeModule outside `program` — splicing them is T18's wiring step, and until
+then a surface Rt.gc* key fails right here.)
+-}
+spliceSurface : Dict String Defun -> List Defun -> Result String (List Defun)
+spliceSurface surface dsl =
+    let
+        dslKeys =
+            Set.fromList (List.map .key dsl)
+    in
+    case List.filter (\k -> not (Set.member k dslKeys)) (Dict.keys surface) of
+        [] ->
+            Ok
+                (List.map
+                    (\d ->
+                        case Dict.get d.key surface of
+                            Just replacement ->
+                                replacement
+
+                            Nothing ->
+                                d
+                    )
+                    dsl
+                )
+
+        orphan :: _ ->
+            Err
+                (orphan
+                    ++ ": the surface defines this key, but it has no position in the Rt program's DSL list to splice into — a defun only the surface knows would be silently dropped here; add it to the DSL list domain or fix the key"
+                )
 
 
 {-| One Mid prim implementation: the Rt defun key AND its arity — the arity
@@ -487,7 +696,16 @@ allocating =
         -- computed over the default program (consArr = True, rec = True,
         -- eqPtrFast = True).
         rtProgram =
-            program True True True ++ gcProgram
+            case program True True True of
+                Ok spliced ->
+                    spliced ++ gcProgram
+
+                Err _ ->
+                    -- UNREACHABLE on a live compile (T7): `program`'s Err
+                    -- aborts the compile in Mid.QbeModule's injection before
+                    -- Lower/classification could read this set — the fixed
+                    -- point below only needs the defun LIST.
+                    []
 
         -- (zigretire stage 3 GROUP 3B-2a) THE MANUAL OVERRIDE IS GONE (3B-2c
         -- deleted the rt_exec_run C seat): Rt.exec-plan no longer needs a
@@ -669,6 +887,17 @@ unsafeSafepoint selfKey selfArity node =
 
         RawCallRaw _ ->
             False
+
+        RawCallAgg _ ->
+            -- CONSERVATIVELY ALLOCATING, deny-by-default: the callee is
+            -- UNKNOWN GENERATED CODE (a runtime word — the stage-6
+            -- apply/bounce port's Desc code pointer), so the node allocates
+            -- nothing itself but its CALLEE can allocate, and an apply
+            -- defun containing one must never classify frame-free (the
+            -- stage-1 lesson: a False here silently misclassifies the
+            -- apply defuns and hands them unrooted scratch across the
+            -- callee's collection).
+            True
 
         RawTagOf _ ->
             False

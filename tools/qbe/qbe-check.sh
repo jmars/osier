@@ -325,6 +325,59 @@ run_argv() {
   echo "PASS $name: golden (${nat_out:0:80})"
 }
 
+# run_err — a DRIVER ERROR-PATH row: builds exactly like run(), then runs the
+# binary with an EXPLICIT command line (`cli...`, possibly EMPTY) and requires
+# BOTH the merged stdout+stderr to match the golden AND the exit code to equal
+# the pinned expected code.  run() compares output only and never reads the
+# status, so every driver error path was invisible to it (a swap that turned
+# an error exit into a success stayed green); these rows pin the exit codes
+# and stderr bytes the stage-6 ABI swap must keep.
+#   * `entry` is the BUILD entry (qbe-mk needs a real one, like run()); the
+#     command line is `cli...` — NOT the build entry — because the pinned
+#     shapes are exactly the ones where the CLI entry is absent (usage),
+#     bogus (not in qbe_meta), or malformed (bad arg).
+#   * the exit code is read DIRECTLY off the command substitution
+#     (`out="$(...)"; rc=$?`), never through a pipe: a pipe would report the
+#     last stage's status, not the binary's.
+#   * NO gc-churn rerun: these rows exit from the driver's own argument
+#     handling before generated code runs, so there is no allocation pressure
+#     to vary — a churn rerun would only double-count the row.
+#   * the expected code is pinned in the ROW, and freeze mode never writes it:
+#     a frozen golden cannot heal a wrong expected exit code.
+run_err() {
+  local name="$1" entry="$2" fixture="$3" want_rc="$4"; shift 4
+  local cli=("$@")
+  local bin
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$TMP/$name")" || {
+    echo "FAIL $name: qbe-mk"; FAIL=1; return
+  }
+  local nat_out rc exp
+  nat_out="$(timeout 60 "$bin" "${cli[@]}" 2>&1)"
+  rc=$?
+  if [ "$FREEZE" = 1 ]; then
+    printf '%s\n' "$nat_out" > "$GOLDEN/$name.txt"
+    exp="$nat_out"
+    echo "FROZE $name: golden <- the one backend's current output (${nat_out:0:80})"
+  else
+    exp="$(golden_read "$name")"
+    if [ "$exp" = "__NO_GOLDEN__" ]; then
+      echo "FAIL $name: no golden at $GOLDEN/$name.txt (a golden is frozen deliberately, in a commit that says why)"
+      FAIL=1; return
+    fi
+  fi
+  if [ "$nat_out" != "$exp" ]; then
+    echo "FAIL $name: golden='$exp' native='$nat_out'"
+    FAIL=1
+    return
+  fi
+  if [ "$rc" -ne "$want_rc" ]; then
+    echo "FAIL $name: exit=$rc want=$want_rc (output matched — the exit code is the pinned half)"
+    FAIL=1
+    return
+  fi
+  echo "PASS $name: golden + exit $rc (${nat_out:0:80})"
+}
+
 # ---- the slice fixtures (in-scope constructs only) ----
 run fib        Fib.fib          tests/elm-fixtures/fib.elm 10
 run fib20      Fib.fib          tests/elm-fixtures/fib.elm 20
@@ -476,6 +529,16 @@ run aggchurn    AggChurn.main   tools/qbe/fixtures/aggchurn.elm
 # does not exercise).
 run arity9      Arity9.add9     tools/qbe/fixtures/arity9.elm 1 2 3 4 5 6 7 8 9
 run arity9apply Arity9.main9    tools/qbe/fixtures/arity9.elm
+# partyapply: the PARTIAL -> OVER-APPLICATION chain (the stage-6 U0 ABI
+# fixture).  add3 (arity 3) applied with 2 args yields a partial closure
+# (applyGo's `rem > nargs` arm, the saturation buffer holding staged args);
+# that closure is then applied with 2 MORE args than it still needs, so the
+# OVER arm fires — saturate, call the body (which returns a FURTHER function),
+# apply that result to the leftover arg.  Every rt_apply arm runs in one
+# entry, and the answer is arg-order-sensitive: ((add3 1 2) 3) 4 = 1234.  The
+# only other over-application row (arity9apply) is a single exactly-saturated
+# call, not a chain.
+run partyapply PartyApply.chain tools/qbe/fixtures/partyapply.elm
 
 # ---- stage 5: record field patterns (VField) ----
 # vfield-let: a destructuring let field pattern ({x,y} = p).  vfield-nested: a
@@ -496,6 +559,23 @@ run vfield-main   VField.main       tools/qbe/fixtures/vfield.elm
 # runners (string list, not int args).
 run_argv argvrepro-empty ArgvRepro.main tools/qbe/fixtures/argvrepro.elm
 run_argv argvrepro-count ArgvRepro.count tools/qbe/fixtures/argvrepro.elm a b c d
+
+# ---- stage-6 U0: THE DRIVER CONTRACT — the error paths nothing pinned ----
+# The four error paths rt.zig's main can take in its own argument handling
+# (before generated code runs), each pinned on BOTH halves: the merged
+# stdout+stderr bytes (golden, frozen from the CURRENT Zig driver) and the
+# exit code (a row literal).  A stage-6 Mid driver that misprints the usage
+# line, exits 0 on an unknown entry, accepts 17 entry args, or misroutes a
+# malformed arg goes red here even while every normal run row stays green.
+# All five rows build the SAME trivial fixture: the pinned behaviour lives in
+# the driver, not the program.
+run_err err-usage        Const42.main tools/qbe/fixtures/const42.elm 2
+run_err err-notmeta      Const42.main tools/qbe/fixtures/const42.elm 2 NoSuch.entry
+run_err err-toomany      Const42.main tools/qbe/fixtures/const42.elm 2 Const42.main 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17
+# the bad-arg heuristic has TWO arms (rt.zig isFloatArg): a '.'/'e'-spelled
+# arg takes the float path, everything else the int path — pin both refusals.
+run_err err-badarg-int   Const42.main tools/qbe/fixtures/const42.elm 2 Const42.main abc
+run_err err-badarg-float Const42.main tools/qbe/fixtures/const42.elm 2 Const42.main 2.5.3
 
 # ---- stage 4: the effect loop (StreamRef) + host I/O (golden-pinned) ----
 # io-read: read a file (QBE_IO_IN) and write a stdout sentinel through the
