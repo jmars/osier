@@ -2580,11 +2580,32 @@ checks =
                 False
         )
     , check
-        "T17/T18 pipeline (the wave-9 + collector key-set row, post-T18's one-hundred-twenty-three): surf is Ok with EXACTLY the one-hundred-twenty-three migrated keys under the default flags — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
+        "T17/T18/T20/T21/T22 pipeline (the wave-9 + collector + never-scheduled key-set row, post-T22's one-hundred-fifty-nine): surf is Ok with EXACTLY the one-hundred-fifty-nine migrated keys under the default flags — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
         (case Rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
             Ok s ->
                 List.sort (Dict.keys s)
-                    == [ "Rt.<-address", "Rt.=", "Rt.@p", "Rt.absvector", "Rt.address->", "Rt.allocRaw", "Rt.allocVector", "Rt.appendL", "Rt.applyOneRedir", "Rt.applyRedirects", "Rt.asF", "Rt.assoc", "Rt.assocGo", "Rt.bodyWriteGo", "Rt.bytesEqGo", "Rt.bytesOf", "Rt.bytesToStr", "Rt.cStrCopyGo", "Rt.cStrEqLit", "Rt.cStrFill", "Rt.cStrLenGo", "Rt.cd", "Rt.childBuiltin", "Rt.childPwd", "Rt.close", "Rt.closeCmdTmpfds", "Rt.closeOthersGo", "Rt.closePipeTmpfds", "Rt.closePipesGo", "Rt.cn2", "Rt.collect", "Rt.cons", "Rt.countL", "Rt.deepEq", "Rt.dgs", "Rt.echoGo", "Rt.emptylist", "Rt.envHome", "Rt.epArgvGo", "Rt.epChain", "Rt.epCount", "Rt.epCountStdin", "Rt.epElem", "Rt.epFreeArgv", "Rt.epFreeChains", "Rt.epFreeCmd", "Rt.epFreeCmds", "Rt.epFreeRedirs", "Rt.epNum", "Rt.epPipeGo", "Rt.epPipeline", "Rt.epProg", "Rt.epProgGo", "Rt.epRedir", "Rt.epRedirsGo", "Rt.epStr", "Rt.epSymIs", "Rt.epSymOf", "Rt.exec-plan", "Rt.exec-run", "Rt.execGo", "Rt.fillGo", "Rt.floatCopy", "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.gcDrain", "Rt.gcInit", "Rt.gcMarkPtr", "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcScanValueArray", "Rt.gcSweep", "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot", "Rt.globIsDotDot", "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess", "Rt.intern", "Rt.isChildBuiltin", "Rt.memGo", "Rt.mkTmpAt", "Rt.nameBytes", "Rt.numText", "Rt.open", "Rt.openBodyTmpfile", "Rt.read-byte", "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind", "Rt.recAppendNamesGo", "Rt.recGet", "Rt.recGetGo", "Rt.recInsert", "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd", "Rt.recUpdCopy", "Rt.recUpdFind", "Rt.revGo", "Rt.runBuiltinInprocess", "Rt.setenv", "Rt.snd", "Rt.str", "Rt.strOf", "Rt.symEq", "Rt.symToStr", "Rt.toI32", "Rt.value", "Rt.vecEq", "Rt.wRaw", "Rt.wStr", "Rt.waitStatusCode", "Rt.wireCmdGo", "Rt.wirePipeGo", "Rt.write-byte" ]
+                    == [ "Rt.*", "Rt.+", "Rt.-", "Rt./", "Rt.<", "Rt.<-address", "Rt.<=", "Rt.=", "Rt.>", "Rt.>=",
+                      "Rt.@p", "Rt.absvector", "Rt.address->", "Rt.allocRaw", "Rt.allocVector", "Rt.appendL", "Rt.applyOneRedir",
+                      "Rt.applyRedirects", "Rt.asF", "Rt.assoc", "Rt.assocGo", "Rt.bitwise-and", "Rt.bitwise-not", "Rt.bitwise-or",
+                      "Rt.bitwise-shift-left", "Rt.bitwise-shift-right", "Rt.bitwise-shift-right-zf", "Rt.bitwise-xor",
+                      "Rt.bodyWriteGo", "Rt.bytesBuild", "Rt.bytesEqGo", "Rt.bytesOf",
+                      "Rt.bytesToStr", "Rt.c-strlen", "Rt.cStrCopyGo", "Rt.cStrEqLit", "Rt.cStrFill", "Rt.cStrLenGo",
+                      "Rt.cd", "Rt.char-code", "Rt.childBuiltin",
+                      "Rt.childPwd", "Rt.close", "Rt.closeCmdTmpfds", "Rt.closeOthersGo", "Rt.closePipeTmpfds", "Rt.closePipesGo", "Rt.closure",
+                      "Rt.closureFill", "Rt.cn", "Rt.cn2", "Rt.collect", "Rt.con", "Rt.conFill", "Rt.cons", "Rt.cons?", "Rt.countL", "Rt.deepEq", "Rt.dgs", "Rt.echoGo", "Rt.empty?",
+                      "Rt.emptylist", "Rt.envHome", "Rt.epArgvGo", "Rt.epChain", "Rt.epCount", "Rt.epCountStdin", "Rt.epElem",
+                      "Rt.epFreeArgv", "Rt.epFreeChains", "Rt.epFreeCmd", "Rt.epFreeCmds", "Rt.epFreeRedirs", "Rt.epNum", "Rt.epPipeGo",
+                      "Rt.epPipeline", "Rt.epProg", "Rt.epProgGo", "Rt.epRedir", "Rt.epRedirsGo", "Rt.epStr", "Rt.epSymIs", "Rt.epSymOf",
+                      "Rt.exec-plan", "Rt.exec-run", "Rt.execGo", "Rt.f/", "Rt.fillGo", "Rt.floatCopy", "Rt.gcAlloc", "Rt.gcAllocGo",
+                      "Rt.gcDrain", "Rt.gcInit", "Rt.gcMarkPtr", "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcScanValueArray", "Rt.gcSweep",
+                      "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot", "Rt.globIsDotDot",
+                      "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess", "Rt.intern",
+                      "Rt.isChildBuiltin", "Rt.memGo", "Rt.mkTmpAt", "Rt.nameBytes", "Rt.numText", "Rt.number?", "Rt.open",
+                      "Rt.openBodyTmpfile", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind",
+                      "Rt.recAppendNamesGo", "Rt.recGet", "Rt.recGetGo", "Rt.recInsert", "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd",
+                      "Rt.recUpdCopy", "Rt.recUpdFind", "Rt.repGo", "Rt.repeat", "Rt.revGo", "Rt.runBuiltinInprocess", "Rt.setenv", "Rt.shen.bytes->string", "Rt.shen.str->bytes", "Rt.snd", "Rt.str", "Rt.strOf",
+                      "Rt.string?", "Rt.subGo", "Rt.substring", "Rt.symEq", "Rt.symLess", "Rt.symToStr", "Rt.toI32", "Rt.value", "Rt.vecEq", "Rt.wRaw", "Rt.wStr",
+                      "Rt.waitStatusCode", "Rt.wireCmdGo", "Rt.wirePipeGo", "Rt.write-byte"]
             Err _ ->
                 False
         )
@@ -2812,6 +2833,42 @@ checks =
             , { key = "Rt.mkTmpAt", arity = 1 }
             , { key = "Rt.exec-plan", arity = 1 }
             , { key = "Rt.exec-run", arity = 3 }
+            , { key = "Rt.+", arity = 2 }
+            , { key = "Rt.-", arity = 2 }
+            , { key = "Rt.*", arity = 2 }
+            , { key = "Rt./", arity = 2 }
+            , { key = "Rt.f/", arity = 2 }
+            , { key = "Rt.<", arity = 2 }
+            , { key = "Rt.<=", arity = 2 }
+            , { key = "Rt.>", arity = 2 }
+            , { key = "Rt.>=", arity = 2 }
+            , { key = "Rt.number?", arity = 1 }
+            , { key = "Rt.string?", arity = 1 }
+            , { key = "Rt.cons?", arity = 1 }
+            , { key = "Rt.empty?", arity = 1 }
+            , { key = "Rt.bitwise-and", arity = 2 }
+            , { key = "Rt.bitwise-not", arity = 1 }
+            , { key = "Rt.bitwise-or", arity = 2 }
+            , { key = "Rt.bitwise-shift-left", arity = 2 }
+            , { key = "Rt.bitwise-shift-right", arity = 2 }
+            , { key = "Rt.bitwise-shift-right-zf", arity = 2 }
+            , { key = "Rt.bitwise-xor", arity = 2 }
+            , { key = "Rt.c-strlen", arity = 1 }
+            , { key = "Rt.char-code", arity = 2 }
+            , { key = "Rt.substring", arity = 3 }
+            , { key = "Rt.cn", arity = 2 }
+            , { key = "Rt.repeat", arity = 2 }
+            , { key = "Rt.shen.str->bytes", arity = 1 }
+            , { key = "Rt.shen.bytes->string", arity = 1 }
+            , { key = "Rt.con", arity = 3 }
+            , { key = "Rt.conFill", arity = 3 }
+            , { key = "Rt.closure", arity = 3 }
+            , { key = "Rt.closureFill", arity = 3 }
+            , { key = "Rt.subGo", arity = 3 }
+            , { key = "Rt.repGo", arity = 2 }
+            , { key = "Rt.bytesBuild", arity = 3 }
+            , { key = "Rt.symLess", arity = 3 }
+            , { key = "Rt.read-file-as-string", arity = 1 }
             ]
             && List.any (\d -> d.key == "Rt.readFileGo") (RtPrims.helperDefuns True)
             && List.any (\d -> d.key == "Rt.childCd") (RtPrims.helperDefuns True)
@@ -2928,8 +2985,10 @@ checks =
     -- all have a diverging then-branch (the L6 else-nesting); open's out
     -- arm and read-byte's file arm end in the T9b `?:` join in return
     -- position.  The two now-unused fd helpers (isStringOf, mkStream) were
-    -- deleted with their only caller; cStrOf and errnoOf stay (glob /
-    -- read-file-as-string / the EINTR arms still use them).
+    -- deleted with their only caller; errnoOf's shape stays (the readFull
+    -- / EINTR arms), and the cStrOf four-binder EXPANSION stays spelled
+    -- out in every NUL-copying defun — the cStrOf ELM HELPER itself was
+    -- deleted in T22 with its last DSL reader (read-file-as-string).
     , t8SplicedRow "Rt.read-byte"
     , t8SplicedRow "Rt.open"
     , t8SplicedRow "Rt.intern"
@@ -3059,6 +3118,139 @@ checks =
     , t18SplicedRow "Rt.gcSweep"
     , t18SplicedRow "Rt.gcMarkPtr"
     , t18SplicedRow "Rt.gcMarkValue"
+
+    -- ===== T20 — the never-scheduled family, part 1 (handoff-osier-tier2-t20) =====
+    -- Thirteen RtPrims builders NO wave T8-T18 ever scheduled (T19's
+    -- holdout inventory): Rt.+ - * / f/ (float-promote or bare i64 wrap),
+    -- the four comparisons (cmpDefun's numeric-guard + promote, spelled
+    -- as a nested term-if), and the four tag predicates (predDefun's
+    -- foldr OR-chain, spelled per defun).  Rt.+, Rt.*, Rt./, Rt.f/ and
+    -- the four `?` keys needed THREE more key characters (`* / ?`) in
+    -- Parse's key charset — the T8b/T12 precedent; the T20 grammar rows
+    -- below pin the new keys and the untouched `?:` join.
+
+    -- ---- parse: the new key characters (each measured ambiguity pinned) ----
+    , check "parse: defun Rt.*(a, b) lexes the * key verbatim and calls it -- a key-position * never touches the body's mul operator"
+        (Parse.parseProgram
+            "defun Rt.*(a: val, b: val) -> val {\n  return mknum(payload(a, 0) * payload(b, 0));\n}"
+            == Ok
+                [ { key = "Rt.*"
+                  , flags = []
+                  , params =
+                        [ { name = "a", ty = Ast.TVal }
+                        , { name = "b", ty = Ast.TVal }
+                        ]
+                  , ret = Ast.TVal
+                  , body =
+                        { stmts = []
+                        , term =
+                            Ast.TRet
+                                (Ast.EBuiltin Ast.MkNum
+                                    [ Ast.EWordBin Ast.WMul
+                                        (Ast.EBuiltin Ast.Payload [ Ast.EVar "a", Ast.EInt 0 ])
+                                        (Ast.EBuiltin Ast.Payload [ Ast.EVar "b", Ast.EInt 0 ])
+                                    ]
+                                )
+                        }
+                  }
+                ]
+        )
+    , check "parse: defun Rt.number?(a) lexes the ? key verbatim -- a key-position ? never touches the expression layer's ?: join"
+        (Parse.parseProgram
+            "defun Rt.number?(a: val) -> val {\n  return mkbool(tagis(a, 0)) || false;\n}"
+            == Ok
+                [ { key = "Rt.number?"
+                  , flags = []
+                  , params = [ { name = "a", ty = Ast.TVal } ]
+                  , ret = Ast.TVal
+                  , body =
+                        { stmts = []
+                        , term =
+                            Ast.TRet
+                                (Ast.EShortOr
+                                    (Ast.EBuiltin Ast.MkBool [ Ast.EBuiltin Ast.TagIs [ Ast.EVar "a", Ast.EInt 0 ] ])
+                                    (Ast.EBuiltin Ast.MkBool [ Ast.EInt 0 ])
+                                )
+                        }
+                  }
+                ]
+        )
+    , check "parse: call Rt.f/(a, b) -- the / key reads in call position; the body's f/ and / stay the float/word div operators"
+        (Parse.parseExp "call Rt.f/(a, b)"
+            == Ok (Ast.ECall "Rt.f/" [ Ast.EVar "a", Ast.EVar "b" ])
+            && Parse.parseExp "x f/ y"
+            == Ok (Ast.EFltBin Ast.FDiv (Ast.EVar "x") (Ast.EVar "y"))
+            && Parse.parseExp "x / y"
+            == Ok (Ast.EWordBin Ast.WDiv (Ast.EVar "x") (Ast.EVar "y"))
+        )
+    , check "parse: the ?: join is UNTOUCHED by the ? key char (T9b's accept row, re-run -- a body ? is still the value join)"
+        (Parse.parseExp "c ? a : b" == Ok (Ast.EIf (Ast.EVar "c") (Ast.EVar "a") (Ast.EVar "b")))
+
+    , t8SplicedRow "Rt.+"
+    , t8SplicedRow "Rt.-"
+    , t8SplicedRow "Rt.*"
+    , t8SplicedRow "Rt./"
+    , t8SplicedRow "Rt.f/"
+    , t8SplicedRow "Rt.<"
+    , t8SplicedRow "Rt.<="
+    , t8SplicedRow "Rt.>"
+    , t8SplicedRow "Rt.>="
+    , t8SplicedRow "Rt.number?"
+    , t8SplicedRow "Rt.string?"
+    , t8SplicedRow "Rt.cons?"
+    , t8SplicedRow "Rt.empty?"
+
+    -- ===== T21 — the never-scheduled family, part 2 (handoff-osier-tier2-t21) =====
+    -- Fourteen RtPrims builders NO wave T8-T20 ever scheduled: the
+    -- Bitwise family (bit2Defun/bitNotDefun/shl/sar/shr — toI32
+    -- operands, word-width ops, mod-32 shift counts) and seven string
+    -- prims (c-strlen/char-code/substring/cn/repeat/shen.str->bytes/
+    -- shen.bytes->string — substring's clamps are the T9b `?:` join
+    -- class, the halt arms are the rt_halt dead binder).  NO parser
+    -- change: every key character was already in the T8b/T12/T20
+    -- charset (the splice rows themselves prove `Rt.shen.str->bytes`
+    -- lexes — a parse failure would fail every surf row loudly).  The
+    -- walk helpers these call (subGo/repGo/bytesBuild) are still
+    -- DSL-bodied; J2's extern table resolves them with no new row.
+    , t8SplicedRow "Rt.bitwise-and"
+    , t8SplicedRow "Rt.bitwise-not"
+    , t8SplicedRow "Rt.bitwise-or"
+    , t8SplicedRow "Rt.bitwise-shift-left"
+    , t8SplicedRow "Rt.bitwise-shift-right"
+    , t8SplicedRow "Rt.bitwise-shift-right-zf"
+    , t8SplicedRow "Rt.bitwise-xor"
+    , t8SplicedRow "Rt.c-strlen"
+    , t8SplicedRow "Rt.char-code"
+    , t8SplicedRow "Rt.substring"
+    , t8SplicedRow "Rt.cn"
+    , t8SplicedRow "Rt.repeat"
+    , t8SplicedRow "Rt.shen.str->bytes"
+    , t8SplicedRow "Rt.shen.bytes->string"
+
+    -- ===== T22 — the never-scheduled family, part 3 (FINAL) =====
+    -- The LAST nine never-scheduled builders (T19's inventory, now
+    -- empty on that side): the constructor layer con/conFill/closure/
+    -- closureFill (allocvec + the staged-block copy walks + the
+    -- tag-10/tag-6 wraps) and the four walk helpers subGo/repGo/
+    -- bytesBuild/symLess, plus read-file-as-string — whose OOM binders
+    -- looked like the T9 wall class but are DEAD-VALUE binders, spelled
+    -- as the T15 both-diverge mid-block if.  NO parser/checker/lowerer
+    -- change: every shape rode an existing spelling.  Recursion
+    -- MEASURED per defun: ALL of it is the builders' callR (RawCall) —
+    -- a plain `call`, NOT recur, in every one of the nine.  The wave's
+    -- deletions killed seven Elm helpers (cStrOf, lenOf, mkVec, consV,
+    -- byteOf, trueV, falseV — zero-ref verified); Rt.readFileGo,
+    -- Rt.epCmd and Rt.childCd stay DSL-side (the three wall-class
+    -- holdouts, unchanged).
+    , t8SplicedRow "Rt.con"
+    , t8SplicedRow "Rt.conFill"
+    , t8SplicedRow "Rt.closure"
+    , t8SplicedRow "Rt.closureFill"
+    , t8SplicedRow "Rt.subGo"
+    , t8SplicedRow "Rt.repGo"
+    , t8SplicedRow "Rt.bytesBuild"
+    , t8SplicedRow "Rt.symLess"
+    , t8SplicedRow "Rt.read-file-as-string"
 
     -- ---- the T10 parse additions: the guard conjunction ----
     , check

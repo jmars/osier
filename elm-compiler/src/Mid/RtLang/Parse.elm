@@ -99,11 +99,16 @@ deliberate, documented restriction):
     header and a `call` name — by `keyTokenAt`, whose charset adds
     `- + = < >` to the general token's `[A-Za-z0-9_.]`, plus `@` (T12 —
     `Rt.@p` is a real key and the guard parser only ever sees `@` BEFORE
-    the `defun` keyword, so a key-position `@` is unambiguous).  The six
-    added characters are MEASURED over the real `Rt.*` key set
+    the `defun` keyword, so a key-position `@` is unambiguous), plus
+    `* / ?` (T20 — `Rt.*`, `Rt./`, `Rt.f/` and the four `?` tag-predicate
+    keys are real keys; `?` is safe because keys are read only in the two
+    key positions, both followed by `(`, so the expression lexer — and the
+    `?:` join it owns — is untouched).  The nine added characters are
+    MEASURED over the real `Rt.*` key set
     (`Rt.write-byte`, `Rt.exec-run`, `Rt.address->`, `Rt.<-address`,
     `Rt.@p`, `Rt.=`, `Rt.+`, `Rt.-`, `Rt.>=`, `Rt.<=`, `Rt.>`, `Rt.<`,
-    `Rt.shen.str->bytes`); the expression
+    `Rt.shen.str->bytes`, `Rt.*`, `Rt./`, `Rt.f/`, `Rt.number?`,
+    `Rt.string?`, `Rt.cons?`, `Rt.empty?`); the expression
     lexer is UNCHANGED, so a body's `-` is still binary minus and an
     unspaced `x-2` still lexes as subtraction.  The three ambiguities this
     creates are pinned by the rules themselves: a key ending `->` stops at
@@ -1679,7 +1684,7 @@ isTokenChar c =
 {-| The longest KEY token starting at offset `start` of `src`: the general
 token charset plus the characters the measured `Rt.*` key set needs beyond
 it (`- + = < >` — see the module header's key-charset note — and `@`, T12's
-`Rt.@p`).
+`Rt.@p`, and `* / ?`, T20's arithmetic/tag-predicate keys).
 Used ONLY in key positions (`callAt`, `keyNameAt`) — never by the
 expression lexer, whose tokens stay `[A-Za-z0-9_.]` so a body's
 unspaced `x-2` still lexes as `x`, `-`, `2` and every existing parse is
@@ -1708,7 +1713,7 @@ keyTokenHelp start n src =
 
 isKeyChar : Char -> Bool
 isKeyChar c =
-    isTokenChar c || c == '-' || c == '+' || c == '=' || c == '<' || c == '>' || c == '@'
+    isTokenChar c || c == '-' || c == '+' || c == '=' || c == '<' || c == '>' || c == '@' || c == '*' || c == '/' || c == '?'
 
 
 {-| Does the token start with a digit (number) rather than a name?
@@ -1813,7 +1818,7 @@ keySegRun first cs =
 
 isKeyBodyChar : Char -> Bool
 isKeyBodyChar c =
-    Char.isAlphaNum c || c == '_' || c == '-' || c == '+' || c == '=' || c == '<' || c == '>' || c == '@'
+    Char.isAlphaNum c || c == '_' || c == '-' || c == '+' || c == '=' || c == '<' || c == '>' || c == '@' || c == '*' || c == '/' || c == '?'
 
 
 {-| Surface string content is one ASCII printable/space character.

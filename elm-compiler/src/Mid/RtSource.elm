@@ -3668,5 +3668,441 @@ source =
     , "    }"
     , "  }"
     , "}"
+
+    , -- ====================== T20 — the never-scheduled family, part 1:
+      -- arithmetic + comparisons + tag predicates ======================
+      --
+      -- THIRTEEN keys NO wave T8-T18 ever scheduled (T19's holdout
+      -- inventory, "spellable today"): Rt.+ - * / f/, the four
+      -- comparisons, and the four tag predicates.  Each body is the SAME
+      -- tree shape as its deleted RtPrims builder:
+      --   * Rt.+ / Rt.- / Rt.* — `iff (or2 (mkBool (tagIs a 12)) (mkBool
+      --     (tagIs bb 12))) (mkFlt (fbin .. (flOf (callR "Rt.asF" ..))
+      --     ..)) (mkNum (ibin ..))`: EITHER float promotes and computes
+      --     in f64 over `fload(call Rt.asF(..))`, else the BARE i64 op
+      --     (shen semantics, no numeric guard — the metacircular
+      --     interpreter relies on the wrap).  The if is the defun's TERM
+      --     with an else, so L5 spells the DSL's bare If — no dead
+      --     binder, no else-nesting.
+      --   * Rt./ — bare integer divTrunc, no guard at all (a zero
+      --     divisor SIGFPEs both backends — parity by crash).
+      --   * Rt.f/ — ALWAYS f64 division (IEEE: x/0.0 = Infinity).
+      --   * Rt.< <= > >= — cmpDefun: BOTH operands numeric (tag 0 or 12)
+      --     or the answer is `false`; either float promotes to the f64
+      --     compare, else the signed i64 compare.  The NESTED term-if
+      --     spells the DSL's iff-in-iff (each branch returns, so both
+      --     levels lower as bare Ifs).  The outer cond is the same
+      --     `(tag 0 || tag 12) && (tag 0 || tag 12)` shape T10's Rt.=
+      --     arms already pin.
+      --   * Rt.number? / string? / cons? / empty? — predDefun's
+      --     List.foldr OR-chain spelled out per defun; number? (tags
+      --     [0, 12]) keeps the fold's RIGHT-nested shape with explicit
+      --     parens (the left-assoc `||` parse would move the Ifs —
+      --     the T15 globScanGo precedent).
+      -- Rt.+, Rt.*, Rt./, Rt.f/ and the four `?` keys needed THREE more
+      -- key characters (`* / ?`) in Parse's key charset — the T8b (`-
+      -- + = < >`) and T12 (`@`) precedent, read only in the two key
+      -- positions, both followed by `(`; the expression lexer (and the
+      -- `?:` join) is untouched.
+      --
+      -- Recursion MEASURED per defun: NONE — no builder in this wave
+      -- references itself or any non-migrated key; the only Rt calls are
+      -- `call Rt.asF(..)` (migrated T11), an EXISTING surface defun.
+
+      "defun Rt.+(a : val, bb : val) -> val {"
+    , "  if (mkbool(tagis(a, 12)) || mkbool(tagis(bb, 12))) {"
+    , "    return mkflt(fload(call Rt.asF(a)) f+ fload(call Rt.asF(bb)));"
+    , "  } else {"
+    , "    return mknum(payload(a, 0) + payload(bb, 0));"
+    , "  }"
+    , "}"
+    , "defun Rt.-(a : val, bb : val) -> val {"
+    , "  if (mkbool(tagis(a, 12)) || mkbool(tagis(bb, 12))) {"
+    , "    return mkflt(fload(call Rt.asF(a)) f- fload(call Rt.asF(bb)));"
+    , "  } else {"
+    , "    return mknum(payload(a, 0) - payload(bb, 0));"
+    , "  }"
+    , "}"
+    , "defun Rt.*(a : val, bb : val) -> val {"
+    , "  if (mkbool(tagis(a, 12)) || mkbool(tagis(bb, 12))) {"
+    , "    return mkflt(fload(call Rt.asF(a)) f* fload(call Rt.asF(bb)));"
+    , "  } else {"
+    , "    return mknum(payload(a, 0) * payload(bb, 0));"
+    , "  }"
+    , "}"
+    , "defun Rt./(a : val, bb : val) -> val {"
+    , "  return mknum(payload(a, 0) / payload(bb, 0));"
+    , "}"
+    , "defun Rt.f/(a : val, bb : val) -> val {"
+    , "  return mkflt(fload(call Rt.asF(a)) f/ fload(call Rt.asF(bb)));"
+    , "}"
+    , "defun Rt.<(a : val, bb : val) -> val {"
+    , "  if ((mkbool(tagis(a, 0)) || mkbool(tagis(a, 12))) && (mkbool(tagis(bb, 0)) || mkbool(tagis(bb, 12)))) {"
+    , "    if (mkbool(tagis(a, 12)) || mkbool(tagis(bb, 12))) {"
+    , "      return mkbool(fload(call Rt.asF(a)) f< fload(call Rt.asF(bb)));"
+    , "    } else {"
+    , "      return mkbool(payload(a, 0) < payload(bb, 0));"
+    , "    }"
+    , "  } else {"
+    , "    return false;"
+    , "  }"
+    , "}"
+    , "defun Rt.<=(a : val, bb : val) -> val {"
+    , "  if ((mkbool(tagis(a, 0)) || mkbool(tagis(a, 12))) && (mkbool(tagis(bb, 0)) || mkbool(tagis(bb, 12)))) {"
+    , "    if (mkbool(tagis(a, 12)) || mkbool(tagis(bb, 12))) {"
+    , "      return mkbool(fload(call Rt.asF(a)) f<= fload(call Rt.asF(bb)));"
+    , "    } else {"
+    , "      return mkbool(payload(a, 0) <= payload(bb, 0));"
+    , "    }"
+    , "  } else {"
+    , "    return false;"
+    , "  }"
+    , "}"
+    , "defun Rt.>(a : val, bb : val) -> val {"
+    , "  if ((mkbool(tagis(a, 0)) || mkbool(tagis(a, 12))) && (mkbool(tagis(bb, 0)) || mkbool(tagis(bb, 12)))) {"
+    , "    if (mkbool(tagis(a, 12)) || mkbool(tagis(bb, 12))) {"
+    , "      return mkbool(fload(call Rt.asF(a)) f> fload(call Rt.asF(bb)));"
+    , "    } else {"
+    , "      return mkbool(payload(a, 0) > payload(bb, 0));"
+    , "    }"
+    , "  } else {"
+    , "    return false;"
+    , "  }"
+    , "}"
+    , "defun Rt.>=(a : val, bb : val) -> val {"
+    , "  if ((mkbool(tagis(a, 0)) || mkbool(tagis(a, 12))) && (mkbool(tagis(bb, 0)) || mkbool(tagis(bb, 12)))) {"
+    , "    if (mkbool(tagis(a, 12)) || mkbool(tagis(bb, 12))) {"
+    , "      return mkbool(fload(call Rt.asF(a)) f>= fload(call Rt.asF(bb)));"
+    , "    } else {"
+    , "      return mkbool(payload(a, 0) >= payload(bb, 0));"
+    , "    }"
+    , "  } else {"
+    , "    return false;"
+    , "  }"
+    , "}"
+    , "defun Rt.number?(a : val) -> val {"
+    , "  return mkbool(tagis(a, 0)) || (mkbool(tagis(a, 12)) || false);"
+    , "}"
+    , "defun Rt.string?(a : val) -> val {"
+    , "  return mkbool(tagis(a, 1)) || false;"
+    , "}"
+    , "defun Rt.cons?(a : val) -> val {"
+    , "  return mkbool(tagis(a, 4)) || false;"
+    , "}"
+    , "defun Rt.empty?(a : val) -> val {"
+    , "  return mkbool(tagis(a, 5)) || false;"
+    , "}"
+
+    , -- ====================== T21 — the never-scheduled family, part 2:
+      -- bitwise + string prims ======================
+      --
+      -- FOURTEEN keys NO wave T8-T20 ever scheduled (T19's holdout
+      -- inventory, "spellable today"): the seven-key Bitwise family and
+      -- seven string prims.  Each body is the SAME tree shape as its
+      -- deleted RtPrims builder:
+      --   * Rt.bitwise-and/or/xor — bit2Defun's `mknum(payload(call
+      --     Rt.toI32(a), 0) OP payload(call Rt.toI32(bb), 0))`: operands
+      --     through toI32, the op at word width (the DSL's iand/ior/ixor
+      --     RawBin), one mknum wrap.
+      --   * Rt.bitwise-not — bitNotDefun's RawUn RBitNot, spelled
+      --     `bitnot` over the same payload(toI32(a), 0) operand.
+      --   * Rt.bitwise-shift-left/right/right-zf — shl/sar/shr:
+      --     `value << (count & 31)` (RShl/RShAr/RShR; `>>` the
+      --     arithmetic, `>>>` the zero-fill), the count masked mod 32
+      --     by `& 31` — `&` binds TIGHTER than the shifts in the
+      --     C-convention precedence table (Parse rows 5 vs 8), and the
+      --     parens are written anyway.  ZINC RTL operand order kept:
+      --     a1 = count (leftmost param), a2 = value.
+      --   * Rt.c-strlen — `mknum(len32(s))`, the i32 len field.
+      --   * Rt.char-code — the bounds test `0 <= i && i < len` boxed
+      --     per arm (mkbool over the raw compares), `strbyte` the byte
+      --     read, else `mknum(-1)`; the DSL's and2 -> the surface `&&`
+      --     (EShortOr's twin), the defun-tail if spells the bare If.
+      --   * Rt.substring — primSubstring's clamps: the st0/ln0 binders
+      --     hold Ifs in LET-VALUE positions whose branches are
+      --     EXPRESSIONS (mknum / the raw val param) — the T9b `?:`
+      --     join, nested right per row-0's associativity (numText
+      --     precedent); `end` is a plain mknum of the two payloads;
+      --     the tail is bytesToStr over subGo.
+      --   * Rt.cn — `call Rt.cn2(call Rt.strOf(a), call Rt.strOf(bb))`,
+      --     no let, no if.
+      --   * Rt.repeat — the `cnt <= 0 || len < 0` guard as the tail if,
+      --     the empty string literal as the then-value.
+      --   * Rt.shen.str->bytes / Rt.shen.bytes->string — the tag guard
+      --     (string / nil-or-cons) as the tail if; the halt arm is
+      --     `word h = rawcall rt_halt();` + `return mknil;` — the DSL's
+      --     haltV dead binder (L2's fresh-binder Let; binder ids are
+      --     dict keys, not emitted — F1), the T8 rt_halt-0 spelling.
+      --
+      -- Rt.subGo / Rt.repGo / Rt.bytesBuild (the walk helpers
+      -- substring / repeat / str->bytes call) are STILL DSL-BODIED:
+      -- J2's extern table resolves them without a new row —
+      -- Rt.externArities is DERIVED from the DSL program, so a key
+      -- not yet migrated is seeded automatically (Rt.elm's
+      -- externArities note).  Recursion MEASURED per defun: NONE — no
+      -- builder in this wave references itself; the only Rt calls are
+      -- toI32/bytesToStr/cn2/strOf (surface since T11/T12) and the
+      -- three walk helpers above (plain RawCall edges rtDeps already
+      -- carries).
+      --
+      -- NO parser change: every key character is already in the T8b/
+      -- T12/T20 charset (letters, digits, `.`, and `- > ? * / + = < @`);
+      -- `Rt.shen.str->bytes` lexes exactly as `Rt.address->` did in
+      -- T13.  Newly-dead RtPrims helpers deleted with the builders:
+      -- iand/ior/ixor (bit2Defun's op arguments + the shift masks),
+      -- shlW/sarW/shrW (the shift RawBins), and the RawUnOp(..)
+      -- import (bitNotDefun was its only user).
+
+      "defun Rt.bitwise-and(a : val, bb : val) -> val {"
+    , "  return mknum(payload(call Rt.toI32(a), 0) & payload(call Rt.toI32(bb), 0));"
+    , "}"
+    , "defun Rt.bitwise-or(a : val, bb : val) -> val {"
+    , "  return mknum(payload(call Rt.toI32(a), 0) | payload(call Rt.toI32(bb), 0));"
+    , "}"
+    , "defun Rt.bitwise-xor(a : val, bb : val) -> val {"
+    , "  return mknum(payload(call Rt.toI32(a), 0) ^ payload(call Rt.toI32(bb), 0));"
+    , "}"
+    , "defun Rt.bitwise-not(a : val) -> val {"
+    , "  return mknum(bitnot(payload(call Rt.toI32(a), 0)));"
+    , "}"
+    , "defun Rt.bitwise-shift-left(count : val, value : val) -> val {"
+    , "  return mknum(payload(call Rt.toI32(value), 0) << (payload(call Rt.toI32(count), 0) & 31));"
+    , "}"
+    , "defun Rt.bitwise-shift-right(count : val, value : val) -> val {"
+    , "  return mknum(payload(call Rt.toI32(value), 0) >> (payload(call Rt.toI32(count), 0) & 31));"
+    , "}"
+    , "defun Rt.bitwise-shift-right-zf(count : val, value : val) -> val {"
+    , "  return mknum(payload(call Rt.toI32(value), 0) >>> (payload(call Rt.toI32(count), 0) & 31));"
+    , "}"
+    , "defun Rt.c-strlen(s : val) -> val {"
+    , "  return mknum(len32(s));"
+    , "}"
+    , "defun Rt.char-code(s : val, i : val) -> val {"
+    , "  if (mkbool(0 <= payload(i, 0)) && mkbool(payload(i, 0) < len32(s))) {"
+    , "    return mknum(strbyte(s, payload(i, 0)));"
+    , "  } else {"
+    , "    return mknum(-1);"
+    , "  }"
+    , "}"
+    , "defun Rt.substring(s : val, st : val, ln : val) -> val {"
+    , "  val st0 = mkbool(payload(st, 0) < 0) ? mknum(0) : (mkbool(payload(st, 0) > len32(s)) ? mknum(len32(s)) : st);"
+    , "  val ln0 = mkbool(payload(ln, 0) < 0) ? mknum(0) : (mkbool((payload(st0, 0) + payload(ln, 0)) > len32(s)) ? mknum(len32(s) - payload(st0, 0)) : ln);"
+    , "  val end = mknum(payload(st0, 0) + payload(ln0, 0));"
+    , "  return call Rt.bytesToStr(call Rt.subGo(s, st0, end));"
+    , "}"
+    , "defun Rt.cn(a : val, bb : val) -> val {"
+    , "  return call Rt.cn2(call Rt.strOf(a), call Rt.strOf(bb));"
+    , "}"
+    , "defun Rt.repeat(cnt : val, s : val) -> val {"
+    , "  if (mkbool(payload(cnt, 0) <= 0) || mkbool(len32(s) <= 0)) {"
+    , "    return \"\";"
+    , "  } else {"
+    , "    return call Rt.bytesToStr(call Rt.repGo(s, cnt));"
+    , "  }"
+    , "}"
+    , "defun Rt.shen.str->bytes(s : val) -> val {"
+    , "  if (mkbool(tagis(s, 1))) {"
+    , "    return call Rt.bytesBuild(s, mknum(len32(s)), mknil);"
+    , "  } else {"
+    , "    word h = rawcall rt_halt();"
+    , "    return mknil;"
+    , "  }"
+    , "}"
+    , "defun Rt.shen.bytes->string(bs : val) -> val {"
+    , "  if (mkbool(tagis(bs, 5)) || mkbool(tagis(bs, 4))) {"
+    , "    return call Rt.bytesToStr(bs);"
+    , "  } else {"
+    , "    word h = rawcall rt_halt();"
+    , "    return mknil;"
+    , "  }"
+    , "}"
+    , -- ====================== T22 — the never-scheduled family, part 3
+      -- (FINAL): the constructor layer + the residual helpers
+      -- ======================
+      --
+      -- NINE keys — the last of T19's never-scheduled holdouts; the
+      -- tier-2 remainder is now ONLY the three wall-class defuns
+      -- (readFileGo's growB, epCmd's ago/rgo, childCd's dirN#2).  Each
+      -- body is the SAME tree shape as its deleted RtPrims builder:
+      --   * Rt.con — allocvec of cnt+1 slots, the tag at [0] (the
+      --     vecstore effect statement = the DSL's dead b6 binder), the
+      --     staged args copied by the conFill effect call (dead b7),
+      --     wrapped `mkvec(dataW, cntW + 1)` = RawMkValue tagVector.
+      --   * Rt.conFill — the 1-based copy walk: the idx==0 guard as
+      --     the defun-tail if (mknil arm), the vecstore(vecload(..))
+      --     as an effect statement (dead b7), the self-call a plain
+      --     `call` — every recursion in this wave is the DSL's callR
+      --     RawCall, NOT recur (MEASURED per defun).
+      --   * Rt.closure — allocvec of cnt slots (NO tag slot), code_len
+      --     read as `wload(descW, 1)` (the Desc's arity word at offset
+      --     8: arity low half), the captures copied by the closureFill
+      --     effect call, wrapped `mkval(6, descW, arityW, dataW, cntW)`
+      --     = RawMkValue tagLambda words verbatim.
+      --   * Rt.closureFill — conFill's 0-BASED twin: env[i] = cap[i],
+      --     so BOTH the store index and the load index are idx-1.
+      --   * Rt.subGo — substring's copy walk: the i>=e guard as the
+      --     tail if, then `call Rt.cons(mknum(strbyte(..)), call
+      --     Rt.subGo(..))` (consV WAS callR "Rt.cons" exactly).
+      --   * Rt.repGo — the i<=0 guard (the DSL's RCles), then appendL
+      --     over bytesOf and the self-call.
+      --   * Rt.bytesBuild — the back-to-front walk: the i<=0 guard
+      --     (RCles again) returns `acc` (the bare param), the cons
+      --     rides in the self-call's third argument.
+      --   * Rt.symLess — symEq's LESS-THAN twin: two boxed byte reads
+      --     (mknum(strbyte(..))), then the nested term-if chain (the
+      --     T20 comparisons' shape): ca==0 -> cb!=0; cb==0 ->
+      --     mkbool(0); ca<cb -> mkbool(1); ca>cb -> mkbool(0); else
+      --     the self-call at i+1.
+      --   * Rt.read-file-as-string — primReadFileAsString: the cStrOf
+      --     four binders written out (payload32(path, 1) is the DSL's
+      --     lenOf — the i32 len FIELD at word 1, NOT payload(., 0)),
+      --     openat(-100, bufW, 0, 0); the open-fail arm is the
+      --     stderr-note lets + `return "";`; the malloc OOM checks are
+      --     Ifs in LET-VALUE positions whose branches are LETs and
+      --     whose values are DEAD — spelled as the T15 both-diverge
+      --     mid-block if (`word h = rawcall rt_halt(); return mknil;`
+      --     IS the DSL's haltV; `return mknum(0);` its dead mknum(0)
+      --     else; tmp OOM frees the block first, the pairing); then
+      --     the five state-block wstores, the readFileGo call, and
+      --     the ONE exit (memGo, the NUL bytestore, free/free/free/
+      --     close, mkstr).  Its copy-on-grow helper Rt.readFileGo
+      --     STAYS DSL-side (the growB wall, unchanged).
+      -- Deleted with their only readers: cStrOf, lenOf, mkVec, consV,
+      -- byteOf, trueV, falseV (zero-ref verified after the wave).
+      "defun Rt.con(tag : val, argsPtr : val, cnt : val) -> val {"
+    , "  word dataW = allocvec(payload(cnt, 0) + 1);"
+    , "  word cntW = payload(cnt, 0);"
+    , "  vecstore(dataW, 0, tag);"
+    , "  call Rt.conFill(mknum(dataW), argsPtr, mknum(cntW));"
+    , "  return mkvec(dataW, cntW + 1);"
+    , "}"
+    , ""
+    , "defun Rt.conFill(data : val, argsPtr : val, idx : val) -> val {"
+    , "  word dataW = payload(data, 0);"
+    , "  word argsW = payload(argsPtr, 0);"
+    , "  word idxW = payload(idx, 0);"
+    , "  if (mkbool(idxW == 0)) {"
+    , "    return mknil;"
+    , "  } else {"
+    , "    vecstore(dataW, idxW, vecload(argsW, idxW - 1));"
+    , "    return call Rt.conFill(mknum(dataW), mknum(argsW), mknum(idxW - 1));"
+    , "  }"
+    , "}"
+    , ""
+    , "defun Rt.closure(desc : val, capBase : val, cnt : val) -> val {"
+    , "  word dataW = allocvec(payload(cnt, 0));"
+    , "  word cntW = payload(cnt, 0);"
+    , "  word descW = payload(desc, 0);"
+    , "  word arityW = wload(descW, 1);"
+    , "  call Rt.closureFill(mknum(dataW), capBase, mknum(cntW));"
+    , "  return mkval(6, descW, arityW, dataW, cntW);"
+    , "}"
+    , ""
+    , "defun Rt.closureFill(data : val, capBase : val, idx : val) -> val {"
+    , "  word dataW = payload(data, 0);"
+    , "  word capW = payload(capBase, 0);"
+    , "  word idxW = payload(idx, 0);"
+    , "  if (mkbool(idxW == 0)) {"
+    , "    return mknil;"
+    , "  } else {"
+    , "    vecstore(dataW, idxW - 1, vecload(capW, idxW - 1));"
+    , "    return call Rt.closureFill(mknum(dataW), mknum(capW), mknum(idxW - 1));"
+    , "  }"
+    , "}"
+    , ""
+    , "defun Rt.subGo(s : val, i : val, e : val) -> val {"
+    , "  if (mkbool(payload(i, 0) >= payload(e, 0))) {"
+    , "    return mknil;"
+    , "  } else {"
+    , "    return call Rt.cons(mknum(strbyte(s, payload(i, 0))), call Rt.subGo(s, mknum(payload(i, 0) + 1), e));"
+    , "  }"
+    , "}"
+    , ""
+    , "defun Rt.repGo(s : val, i : val) -> val {"
+    , "  if (mkbool(payload(i, 0) <= 0)) {"
+    , "    return mknil;"
+    , "  } else {"
+    , "    return call Rt.appendL(call Rt.bytesOf(s, mknum(0)), call Rt.repGo(s, mknum(payload(i, 0) - 1)));"
+    , "  }"
+    , "}"
+    , ""
+    , "defun Rt.bytesBuild(s : val, i : val, acc : val) -> val {"
+    , "  if (mkbool(payload(i, 0) <= 0)) {"
+    , "    return acc;"
+    , "  } else {"
+    , "    return call Rt.bytesBuild(s, mknum(payload(i, 0) - 1), call Rt.cons(mknum(strbyte(s, payload(i, 0) - 1)), acc));"
+    , "  }"
+    , "}"
+    , ""
+    , "defun Rt.symLess(a : val, bb : val, i : val) -> val {"
+    , "  val ca = mknum(strbyte(a, payload(i, 0)));"
+    , "  val cb = mknum(strbyte(bb, payload(i, 0)));"
+    , "  if (mkbool(payload(ca, 0) == 0)) {"
+    , "    return mkbool(payload(cb, 0) != 0);"
+    , "  } else {"
+    , "    if (mkbool(payload(cb, 0) == 0)) {"
+    , "      return mkbool(0);"
+    , "    } else {"
+    , "      if (mkbool(payload(ca, 0) < payload(cb, 0))) {"
+    , "        return mkbool(1);"
+    , "      } else {"
+    , "        if (mkbool(payload(ca, 0) > payload(cb, 0))) {"
+    , "          return mkbool(0);"
+    , "        } else {"
+    , "          return call Rt.symLess(a, bb, mknum(payload(i, 0) + 1));"
+    , "        }"
+    , "      }"
+    , "    }"
+    , "  }"
+    , "}"
+    , ""
+    , "defun Rt.read-file-as-string(path : val) -> val {"
+    , "  word lenW = payload32(path, 1);"
+    , "  word bufW = allocraw(lenW + 1);"
+    , "  val bufN = mknum(bufW);"
+    , "  call Rt.cStrFill(bufN, path, mknum(0));"
+    , "  word fdW = rawcall openat(-100, bufW, 0, 0);"
+    , "  if (mkbool(fdW < 0)) {"
+    , "    val msg = \"runtime: cannot open file for read-file-as-string\\n\";"
+    , "    word w12 = rawcall write(2, payload(msg, 0), payload32(msg, 1));"
+    , "    return \"\";"
+    , "  } else {"
+    , "    word blkW = rawcall malloc(72);"
+    , "    if (mkbool(blkW == 0)) {"
+    , "      word h = rawcall rt_halt();"
+    , "      return mknil;"
+    , "    } else {"
+    , "      return mknum(0);"
+    , "    }"
+    , "    val blkN = mknum(blkW);"
+    , "    word tmpW = rawcall malloc(65536);"
+    , "    if (mkbool(tmpW == 0)) {"
+    , "      word f15 = rawcall free(blkW);"
+    , "      word h = rawcall rt_halt();"
+    , "      return mknil;"
+    , "    } else {"
+    , "      return mknum(0);"
+    , "    }"
+    , "    wstore(blkW, 0, fdW);"
+    , "    wstore(blkW, 1, tmpW);"
+    , "    wstore(blkW, 2, 0);"
+    , "    wstore(blkW, 3, 0);"
+    , "    wstore(blkW, 4, 0);"
+    , "    call Rt.readFileGo(blkN);"
+    , "    word len22 = wload(blkW, 3);"
+    , "    word accW = wload(blkW, 2);"
+    , "    word dstW = allocraw(len22 + 1);"
+    , "    wstore(blkW, 6, accW);"
+    , "    wstore(blkW, 7, dstW);"
+    , "    wstore(blkW, 8, len22);"
+    , "    call Rt.memGo(mknum(blkW + 48), mknum(0));"
+    , "    bytestore(dstW, len22, 0);"
+    , "    word f30 = rawcall free(accW);"
+    , "    word f31 = rawcall free(tmpW);"
+    , "    word f32 = rawcall free(blkW);"
+    , "    word f33 = rawcall close(fdW);"
+    , "    return mkstr(dstW, len22);"
+    , "  }"
+    , "}"
     ]
 

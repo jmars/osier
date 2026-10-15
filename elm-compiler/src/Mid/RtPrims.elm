@@ -9,30 +9,36 @@ osier-midprims, TRACK 2 step 5: the mechanical remainder after the cons
 spike).
 
 
-## WHAT IS HERE (post-T19)
+## WHAT IS HERE (post-T22)
 
-123 MIGRATION SEATS — the defun-list positions `Mid.Rt.spliceSurface`
-replaces by key (24 in `primDefuns`, 87 in `helperDefuns`, 12 in
-Mid.RtGc's `gcProgram`) — and the 39 DSL-bodied HOLDOUTS at the keys the
-surface does not yet carry, each a Mid.Ir tree transcribed NODE FOR NODE
+150 MIGRATION SEATS — the defun-list positions `Mid.Rt.spliceSurface`
+replaces by key (51 in `primDefuns`, 87 in `helperDefuns`, 12 in
+Mid.RtGc's `gcProgram`) — and the 3 DSL-bodied HOLDOUTS at the keys the
+surface does not carry, each a Mid.Ir tree transcribed NODE FOR NODE
 from the Zig original in vendor/osier-rt/src/rt/prims.zig / values.zig /
 streams.zig / execplan.zig.  The seats are `seat` tripwires: the real
-bodies of the migrated keys live in Mid.RtSource's surface text.  Mid.Rt
-maps the surface prim names onto the prim keys (`primImpl`); Mid.Rt.rtDeps
-closes the RawCall edges for reachability.
+bodies of the migrated keys live in Mid.RtSource's surface text (159
+keys under the default flags).  Mid.Rt maps the surface prim names onto
+the prim keys (`primImpl`); Mid.Rt.rtDeps closes the RawCall edges for
+reachability.
 
 
-## THE HOLDOUT INVENTORY (T19 — what the tier-2 surface cannot express
-## today, and what it was never asked to)
+## THE HOLDOUT INVENTORY (FINAL, post-T22 — the durable record of where
+## tier 2 stands)
 
-WALL-CLASS — UNSPELLABLE in the surface TODAY (the grammar-gap record; any
-future grammar work starts here).  The common shape: an If BOUND IN A
-LET-VALUE whose branch carries a Let-chain and whose VALUE the continuation
-subsequently READS.  All three spellings the grammar offers fail: the `?:`
-value-join takes EXPRESSION branches (no lets); the both-diverge
-statement-if needs the bound value DEAD (these are read); else-nesting
-needs a diverging then (the then IS the value).  T9 found the class
-(readFileGo's growB), T16 and T17 confirmed it twice more:
+T8-T21 migrated 150 keys; T22 moved the LAST nine never-scheduled ones —
+the constructor layer Rt.con / conFill / closure / closureFill, the walk
+helpers Rt.subGo / repGo / bytesBuild / symLess, and
+Rt.read-file-as-string (see Mid.RtSource's T22 block; read-file-as-
+string's OOM binders, once read as the wall class, turned out to be
+DEAD-VALUE binders — the T15 both-diverge statement-if spelled them).
+THREE keys remain DSL-bodied, all WALL-CLASS — an If BOUND IN A
+LET-VALUE whose branch carries a Let-chain and whose VALUE the
+continuation subsequently READS.  All three spellings the grammar offers
+fail: the `?:` value-join takes EXPRESSION branches (no lets); the
+both-diverge statement-if needs the bound value DEAD (these are read);
+else-nesting needs a diverging then (the then IS the value).  T9 found
+the class (readFileGo's growB), T16 and T17 confirmed it twice more:
 
   - Rt.readFileGo (`readFileGoDefun`): `growB` — the grow/no-grow decision;
     its then-branch chains the malloc + state-block stores, and the
@@ -57,28 +63,10 @@ their callers:
     childCd means freezing those offsets as literals (T17 computed them:
     "/" = 139, "\n" = 173, "cd: " = 240; cbuf size 336).
 
-NEVER-SCHEDULED — SPELLABLE TODAY; no wave covered them.  T8-T18 migrated
-123 keys; these 36 were left out of every wave's list, not blocked by any
-wall.  A future wave can transcribe them with the existing grammar:
-
-  - the arithmetic family Rt.+ - * / f/ (float-promote or bare i64 wrap);
-  - the comparisons Rt.< <= > >= (`cmpDefun`: numeric-guard + promote);
-  - the Bitwise family Rt.bitwise-and/or/xor/not/-shift-left/right/
-    right-zf (`bit2Defun`/shl/sar/shr: toI32, ops at i32, mod-32 counts);
-  - the tag predicates Rt.number?/string?/cons?/empty? (`predDefun`'s
-    tag-or-fold, spelled explicitly per defun);
-  - the string prims Rt.c-strlen / char-code / substring / cn / repeat /
-    shen.str->bytes / shen.bytes->string — substring's clamped binders are
-    the T9b `?:` join class (numText precedent), the rest are plain;
-  - the constructor layer Rt.con / conFill / closure / closureFill
-    (RawAllocVector + the staged-block copies; the allocvec/vecstore/
-    vecload builtins all exist);
-  - the walk helpers Rt.subGo / repGo / bytesBuild / symLess (plain value
-    recursion over RawCall self-edges);
-  - Rt.read-file-as-string — its OOM binders (blkOOM/tmpOOM) LOOK like the
-    wall class but are DEAD-VALUE binders (never read), so the T15/T16
-    both-diverge statement-if spelling applies; the rest of the body is
-    plain lets and a tail if.
+That is the WHOLE remainder: 159 keys on the surface under the default
+flags (MEASURED: 165 surface defuns - 6 guarded duplicate variants),
+and the 3 walls above are the only keys whose bodies are still DSL
+trees.  Any future grammar work starts there.
 
 
 ## THE STEP-5 CLASSIFICATION, SUPERSEDED IN PART
@@ -154,7 +142,7 @@ shared `asF`/`toI32` machinery the arithmetic differential does cover.
 
 -}
 
-import Mid.Ir exposing (Binder, Defun, Exp(..), LetBinder(..), Lit(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), UnsafeNode(..))
+import Mid.Ir exposing (Binder, Defun, Exp(..), LetBinder(..), Lit(..), RawBinOp(..), RawCmpOp(..), UnsafeNode(..))
 import Mid.RtLayout as RtLayout
 
 
@@ -248,16 +236,9 @@ wOf x =
     Unsafe (RawPayload { value = x, word = 0 })
 
 
-{-| The i32 LENGTH field (word 1) of a string or vector Value.  (The i32
-word-0 read the deleted boolean-payload builders used — the DSL `w32Of` —
-died with its readers in T19; the surface spells `payload32(x, 0)` where a
-body needs it.)
--}
-lenOf : Exp -> Exp
-lenOf x =
-    Unsafe (RawPayload32 { value = x, word = 1 })
-
-
+-- lenOf DELETED (T22): the i32 len-field read (RawPayload32 word 1) was
+-- cStrOf's and read-file-as-string's only reader — both moved to the
+-- surface, where the read is spelled `payload32(x, 1)`.
 -- ---- values ----
 iadd x y =
     Unsafe (RawBin { op = RAdd, a = x, b = y })
@@ -273,39 +254,9 @@ imul x y =
     Unsafe (RawBin { op = RMul, a = x, b = y })
 
 
-idiv : Exp -> Exp -> Exp
-idiv x y =
-    Unsafe (RawBin { op = RDiv, a = x, b = y })
-
-
-iand : Exp -> Exp -> Exp
-iand x y =
-    Unsafe (RawBin { op = RBitAnd, a = x, b = y })
-
-
-ior : Exp -> Exp -> Exp
-ior x y =
-    Unsafe (RawBin { op = RBitOr, a = x, b = y })
-
-
-ixor : Exp -> Exp -> Exp
-ixor x y =
-    Unsafe (RawBin { op = RBitXor, a = x, b = y })
-
-
-shlW : Exp -> Exp -> Exp
-shlW x count =
-    Unsafe (RawBin { op = RShl, a = x, b = count })
-
-
-sarW : Exp -> Exp -> Exp
-sarW x count =
-    Unsafe (RawBin { op = RShAr, a = x, b = count })
-
-
-shrW : Exp -> Exp -> Exp
-shrW x count =
-    Unsafe (RawBin { op = RShR, a = x, b = count })
+-- iand/ior/ixor/shlW/sarW/shrW DELETED (T21): the Bitwise family moved
+-- to Mid/RtSource (surface word ops & | ^ << >> >>>), and those were
+-- their only readers.
 
 
 cmpW : RawCmpOp -> Exp -> Exp -> Exp
@@ -316,21 +267,6 @@ cmpW op x y =
 tagIs : Exp -> Int -> Exp
 tagIs x tag =
     Unsafe (RawTagIs { value = x, tag = tag })
-
-
-flOf : Exp -> Exp
-flOf x =
-    Unsafe (RawLoadFlt x)
-
-
-fbin : RawFltBinOp -> Exp -> Exp -> Exp
-fbin op x y =
-    Unsafe (RawFltBin { op = op, a = x, b = y })
-
-
-fcmp : RawFltCmpOp -> Exp -> Exp -> Exp
-fcmp op x y =
-    Unsafe (RawFltCmp { op = op, a = x, b = y })
 
 
 -- ---- values ----
@@ -355,24 +291,12 @@ mkStr dataW lenW =
     Unsafe (RawMkValue { tag = RtLayout.tagString, words = [ dataW, lenW ] })
 
 
-mkFlt : Exp -> Exp
-mkFlt fwe =
-    Unsafe (RawMkValue { tag = RtLayout.tagFloat, words = [ fwe ] })
+-- mkVec DELETED (T22): the tag-10 wrap was conDefun's only reader (the
+-- constructor moved to the surface, spelled `mkvec(dataW, cntW + 1)`).
 
 
-mkVec : Exp -> Exp -> Exp
-mkVec dataW lenW =
-    Unsafe (RawMkValue { tag = RtLayout.tagVector, words = [ dataW, lenW ] })
-
-
-trueV : Exp
-trueV =
-    mkBool (n 1)
-
-
-falseV : Exp
-falseV =
-    mkBool (n 0)
+-- trueV / falseV DELETED (T22): symLessDefun's only readers (the walk
+-- moved to the surface, spelled `mkbool(1)` / `mkbool(0)`).
 
 
 callR : String -> List Exp -> Exp
@@ -385,9 +309,8 @@ callW sym args =
     Unsafe (RawCallRaw { sym = sym, args = args })
 
 
-consV : Exp -> Exp -> Exp
-consV car cdr =
-    callR "Rt.cons" [ car, cdr ]
+-- consV DELETED (T22): subGoDefun's and bytesBuildDefun's only readers
+-- (both moved to the surface, spelled `call Rt.cons(..)`).
 
 
 carV : Exp -> Exp
@@ -400,9 +323,9 @@ cdrV l =
     Unsafe (RawVecLoad { vec = wOf l, index = n 1 })
 
 
-byteOf : Exp -> Exp -> Exp
-byteOf s indexW =
-    Unsafe (RawStrByte { str = s, index = indexW })
+-- byteOf DELETED (T22): the string-byte read (RawStrByte) was subGo/
+-- bytesBuild/symLess's only reader (all moved to the surface, spelled
+-- `strbyte(s, i)`).
 
 
 lam : String -> List Binder -> Exp -> Defun
@@ -496,77 +419,23 @@ letL =
 -- there; its list position below (helperDefuns) is a seat.
 
 
-{-| subGo s i end — s's bytes in [i, end) as a list (substring's copy).
--}
-subGoDefun : Defun
-subGoDefun =
-    let
-        s =
-            p1
-
-        i =
-            p2
-
-        e =
-            p3
-    in
-    lam "Rt.subGo" [ s, i, e ]
-        (iff (mkBool (cmpW RCges (wOf (v i)) (wOf (v e))))
-            mkNil
-            (consV (mkNum (byteOf (v s) (wOf (v i))))
-                (callR "Rt.subGo" [ v s, mkNum (iadd (wOf (v i)) (n 1)), v e ])
-            )
-        )
+-- Rt.subGo / Rt.repGo / Rt.bytesBuild MOVED TO THE SURFACE (T22, the
+-- never-scheduled family part 3): substring's / repeat's / str->bytes'
+-- value walks — plain `call` recursion over RawCall self-edges, NOT
+-- recur (the builders' callR, MEASURED) — transcribed in Mid/RtSource's
+-- T22 block; their list positions below (helperDefuns) are seats.  Their
+-- deletion killed the last readers of consV and byteOf (both deleted).
 
 
-{-| repGo s i — i copies of s's bytes appended (repeat's doubling in Zig is
-an optimization; the byte RESULT is s^n either way).
--}
-repGoDefun : Defun
-repGoDefun =
-    let
-        s =
-            p1
-
-        i =
-            p2
-    in
-    lam "Rt.repGo" [ s, i ]
-        (iff (mkBool (cmpW RCles (wOf (v i)) (n 0)))
-            mkNil
-            (callR "Rt.appendL"
-                [ callR "Rt.bytesOf" [ v s, mkNum (n 0) ]
-                , callR "Rt.repGo" [ v s, mkNum (isub (wOf (v i)) (n 1)) ]
-                ]
-            )
-        )
-
-
-{-| bytesBuild s i acc — str->bytes' back-to-front walk: cons byte[i-1]
-onto acc and recurse at i-1; entered at i = len.
--}
-bytesBuildDefun : Defun
-bytesBuildDefun =
-    let
-        s =
-            p1
-
-        i =
-            p2
-
-        acc =
-            p3
-    in
-    lam "Rt.bytesBuild" [ s, i, acc ]
-        (iff (mkBool (cmpW RCles (wOf (v i)) (n 0)))
-            (v acc)
-            (callR "Rt.bytesBuild"
-                [ v s
-                , mkNum (isub (wOf (v i)) (n 1))
-                , consV (mkNum (byteOf (v s) (isub (wOf (v i)) (n 1)))) (v acc)
-                ]
-            )
-        )
+-- Rt.symLess a b i — byte-lexicographic LESS-THAN of two symbol Values'
+-- names (symEq tests equality only; the sorted-insert path needs `<`).
+-- Mirrors symEq's walk: byte at i, null-termination decides prefix order.
+--
+-- MOVED TO THE SURFACE (T22): the two boxed byte reads then the nested
+-- term-if chain (ca==0 -> cb!=0; cb==0 -> false; ca<cb -> true; ca>cb ->
+-- false; else the self-call at i+1) transcribed in Mid/RtSource's T22
+-- block; its list position below (helperDefuns) is a seat.  Its deletion
+-- killed the last readers of trueV/falseV (both deleted).
 
 
 -- Rt.recGet / Rt.recGetGo moved to Mid/RtSource.elm in T13
@@ -581,49 +450,6 @@ bytesBuildDefun =
 -- copy, overwrite, wrap reusing the base's names pointer; every defun
 -- <= 3 params for the lean ABI), their `defun` text now there; their
 -- list positions below (helperDefuns) are seats.
-
-
-{-| `Rt.symLess a b i` — byte-lexicographic LESS-THAN of two symbol Values'
-names (symEq tests equality only; the sorted-insert path needs `<`).  Mirrors
-symEq's walk: byte at i, null-termination decides prefix order.
--}
-symLessDefun : Defun
-symLessDefun =
-    let
-        a =
-            p1
-
-        bb =
-            p2
-
-        i =
-            p3
-
-        ca =
-            b 4
-
-        cb =
-            b 5
-    in
-    lam "Rt.symLess" [ a, bb, i ]
-        (lets
-            [ ( ca, mkNum (byteOf (v a) (wOf (v i))) )
-            , ( cb, mkNum (byteOf (v bb) (wOf (v i))) )
-            ]
-            (iff (mkBool (cmpW RCeq (wOf (v ca)) (n 0)))
-                (mkBool (cmpW RCne (wOf (v cb)) (n 0)))
-                (iff (mkBool (cmpW RCeq (wOf (v cb)) (n 0)))
-                    falseV
-                    (iff (mkBool (cmpW RClts (wOf (v ca)) (wOf (v cb))))
-                        trueV
-                        (iff (mkBool (cmpW RCgts (wOf (v ca)) (wOf (v cb))))
-                            falseV
-                            (callR "Rt.symLess" [ v a, v bb, mkNum (iadd (wOf (v i)) (n 1)) ])
-                        )
-                    )
-                )
-            )
-        )
 
 
 -- Rt.recAppendFind / Rt.recAppendDataGo / Rt.recAppendNamesGo moved to
@@ -653,34 +479,12 @@ symLessDefun =
 -- the packed word right 32 (is_input is the RawPayload32 half).
 
 
-{-| The null-terminated copy of a string: the binders to prepend plus the
-buffer WORD (a raw `Var`, usable directly in a raw argument position).  Alloc
-len+1, re-read the data pointer AFTER the alloc (the Zig GC is moving), fill
-+ NUL.  `base` supplies four fresh binder ids so a defun can inline this
-twice (the open arms) without an id collision.
--}
-cStrOf : Int -> Exp -> ( List ( Binder, Exp ), Exp )
-cStrOf base path =
-    let
-        lenW =
-            { id = base, name = "t" ++ String.fromInt base }
-
-        bufW =
-            { id = base + 1, name = "t" ++ String.fromInt (base + 1) }
-
-        bufN =
-            { id = base + 2, name = "t" ++ String.fromInt (base + 2) }
-
-        fill =
-            { id = base + 3, name = "t" ++ String.fromInt (base + 3) }
-    in
-    ( [ ( lenW, lenOf path )
-      , ( bufW, Unsafe (RawAllocRaw (iadd (v lenW) (n 1))) )
-      , ( bufN, mkNum (v bufW) )
-      , ( fill, callR "Rt.cStrFill" [ v bufN, path, mkNum (n 0) ] )
-      ]
-    , v bufW
-    )
+-- The cStrOf four-binder EXPANSION (len = payload32(path, 1); buf =
+-- allocraw(len + 1); bufN = mknum(buf); call Rt.cStrFill(bufN, path,
+-- mknum(0))) is spelled out in the surface defuns that NUL-copy a path
+-- (T14's open/getcwd/cd/getenv/setenv, T15's glob, T22's read-file-
+-- as-string).  The ELM HELPER is DELETED (T22): read-file-as-string —
+-- its last DSL reader — moved to the surface.
 
 
 -- read-byte (1 arg: stream) and open (2 args: path, dir) moved to
@@ -757,114 +561,22 @@ cStrOf base path =
 -- SINGLE success exit (free(NULL) is a no-op for the empty-file case).
 
 
-{-| `Rt.read-file-as-string path` — primReadFileAsString.  Arity 1, FRAMED
-(allocates: cStrOf, the result RawAllocRaw, and the "" literals).  The loop
-state (fd/tmp/acc/len/cap at words 0..4) and the memcpy block (words 6..8)
-share ONE 72-byte C-heap block; mblk = block+48 is passed to memGo.  All
-state crossing the loop is C-heap or int — the two GC allocations (path copy,
-result) sit OUTSIDE the loop's raw-pointer window, and the result buffer is
-consumed by mkStr before any further allocation (the moving-GC discipline:
-the raw temp is valid only to the next safepoint, and there is none between
-the RawAllocRaw and the mkStr).
--}
-readFileAsStringDefun : Defun
-readFileAsStringDefun =
-    let
-        path =
-            p1
-
-        -- cStrOf 3: binders 3..6
-        ( cstrBinds, cstr ) =
-            cStrOf 3 (v path)
-
-        fdW =
-            b 7
-
-        blkW =
-            b 8
-
-        blkN =
-            b 9
-
-        tmpW =
-            b 10
-
-        msg =
-            b 11
-
-        blkOOM =
-            b 13
-
-        tmpOOM =
-            b 14
-
-        stStores =
-            [ ( b 16, Unsafe (RawWordStore { ptr = v blkW, index = n 0, value = v fdW }) )
-            , ( b 17, Unsafe (RawWordStore { ptr = v blkW, index = n 1, value = v tmpW }) )
-            , ( b 18, Unsafe (RawWordStore { ptr = v blkW, index = n 2, value = n 0 }) )
-            , ( b 19, Unsafe (RawWordStore { ptr = v blkW, index = n 3, value = n 0 }) )
-            , ( b 20, Unsafe (RawWordStore { ptr = v blkW, index = n 4, value = n 0 }) )
-            ]
-
-        lenW =
-            b 22
-
-        accW =
-            b 23
-
-        dstW =
-            b 24
-    in
-    lam "Rt.read-file-as-string" [ path ]
-        (lets
-            (cstrBinds ++ [ ( fdW, callW "openat" [ n (-100), cstr, n 0, n 0 ] ) ])
-            (iff (mkBool (cmpW RClts (v fdW) (n 0)))
-                -- open failure: the stderr note + "" (Zig's catch arm — ANY
-                -- open error, not just ENOENT)
-                (lets
-                    [ ( msg, Lit (LString "runtime: cannot open file for read-file-as-string\n") )
-                    , ( b 12, callW "write" [ n 2, wOf (v msg), lenOf (v msg) ] )
-                    ]
-                    (Lit (LString ""))
-                )
-                -- success: state block, the read loop, then the ONE exit
-                -- (build the result, free everything, close)
-                (lets
-                    ([ ( blkW, callW "malloc" [ n 72 ] )
-                     , -- OOM is LOUD (glob's precedent: halt, never a NULL
-                       -- write) — nothing else is allocated yet at this point.
-                       ( blkOOM, iff (mkBool (cmpW RCeq (v blkW) (n 0))) haltV (mkNum (n 0)) )
-                     , ( blkN, mkNum (v blkW) )
-                     , ( tmpW, callW "malloc" [ n 65536 ] )
-                     , -- tmp OOM: free the block FIRST (the pairing), then halt.
-                       ( tmpOOM, iff (mkBool (cmpW RCeq (v tmpW) (n 0))) (lets [ ( b 15, callW "free" [ v blkW ] ) ] haltV) (mkNum (n 0)) )
-                     ]
-                        ++ stStores
-                        ++ [ ( b 21, callR "Rt.readFileGo" [ v blkN ] ) ]
-                    )
-                    (lets
-                        [ ( lenW, Unsafe (RawWordLoad { ptr = v blkW, index = n 3 }) )
-                        , ( accW, Unsafe (RawWordLoad { ptr = v blkW, index = n 2 }) )
-                        , ( dstW, Unsafe (RawAllocRaw (iadd (v lenW) (n 1))) )
-                        , ( b 25, Unsafe (RawWordStore { ptr = v blkW, index = n 6, value = v accW }) )
-                        , ( b 26, Unsafe (RawWordStore { ptr = v blkW, index = n 7, value = v dstW }) )
-                        , ( b 27, Unsafe (RawWordStore { ptr = v blkW, index = n 8, value = v lenW }) )
-                        , ( b 28, callR "Rt.memGo" [ mkNum (iadd (v blkW) (n 48)), mkNum (n 0) ] )
-                        , -- valString parity: dst[len] = 0 (the length stays
-                          -- the observable bound; nothing reads past it)
-                          ( b 29, Unsafe (RawByteStore { ptr = v dstW, index = v lenW, value = n 0 }) )
-                        , -- frees BEFORE the mkStr consume: they are raw
-                          -- calls, no safepoint, so dstW stays valid.
-                          ( b 30, callW "free" [ v accW ] )
-                        , ( b 31, callW "free" [ v tmpW ] )
-                        , ( b 32, callW "free" [ v blkW ] )
-                        , ( b 33, callW "close" [ v fdW ] )
-                        ]
-                        (mkStr (v dstW) (v lenW))
-                    )
-                )
-            )
-        )
+-- `Rt.read-file-as-string path` — primReadFileAsString.  Arity 1, FRAMED
+-- (allocates: the path NUL copy, the result RawAllocRaw, and the "" literals).
+-- The loop state (fd/tmp/acc/len/cap at words 0..4) and the memcpy block
+-- (words 6..8) share ONE 72-byte C-heap block; mblk = block+48 is passed to
+-- memGo.  All state crossing the loop is C-heap or int — the two GC
+-- allocations (path copy, result) sit OUTSIDE the loop's raw-pointer window,
+-- and the result buffer is consumed by mkStr before any further allocation
+-- (the moving-GC discipline: the raw temp is valid only to the next safepoint,
+-- and there is none between the RawAllocRaw and the mkStr).
+-- 
+-- MOVED TO THE SURFACE (T22): the tree above is transcribed in Mid/RtSource's
+-- T22 block — the cStrOf four binders written out (its Elm helper is deleted
+-- with this, its last reader), the OOM checks as the T15 both-diverge
+-- mid-block if, the tail exactly as read here.  Rt.readFileGo (below) STAYS
+-- DSL-side — the growB wall.  The defun text below is deleted; the list
+-- position in primDefuns is a seat.
 
 
 {-| `Rt.readFileGo blkN` — Zig's `while (true)` read loop, one self-tail
@@ -1532,15 +1244,18 @@ helperDefuns rec =
       -- T13: assocGo + the rec walk family moved to Mid/RtSource
       -- (handoff-osier-tier2-t13); their seats keep the list order.
     , seat "Rt.assocGo" 2
-    , subGoDefun
-    , repGoDefun
-    , bytesBuildDefun
+      -- T22: subGo/repGo/bytesBuild moved to Mid/RtSource (the walk
+      -- helpers, the never-scheduled family part 3); their seats keep
+      -- the list order.
+    , seat "Rt.subGo" 3
+    , seat "Rt.repGo" 2
+    , seat "Rt.bytesBuild" 3
     , seat "Rt.recGet" 2
     , seat "Rt.recGetGo" 3
     , seat "Rt.recUpd" 3
     , seat "Rt.recUpdFind" 3
     , seat "Rt.recUpdCopy" 3
-    , symLessDefun
+    , seat "Rt.symLess" 3
     , seat "Rt.recAppendFind" 3
     , seat "Rt.recAppendDataGo" 3
     , seat "Rt.recAppendNamesGo" 3
@@ -1642,215 +1357,39 @@ helperDefuns rec =
 -- (Qbe/Lower.lowerLetBinders folds a Let's binder list in order).
 -- Their list positions in primDefuns below are seats.
 
-{-| `Rt.con tag argsPtr n` — the Mid ADT constructor (zigretire stage 5):
-allocate a vector of n+1 Values through `RawAllocVector` (which QBE_MIDGC=1
-routes to the Mid collector's seat `Rt.allocVector`), store the tag at index
-0, copy the n args from the caller's STAGED block (argsPtr, a contiguous
-[*]Value array in the caller's ROOTED frame), and wrap as a tag-10 vector
-Value.  The args survive the allocation because they live in the caller's
-rooted frame — the Zig `rt_con` contract, unchanged; tag and the two boxed
-words live in Rt.con's OWN rooted frame (Rt.con is `allocating`).  Rt.conFill
-does the copy alloc-free, so it is frame-free.
--}
-conDefun : Defun
-conDefun =
-    let
-        tag =
-            p1
-
-        argsPtr =
-            p2
-
-        cnt =
-            p3
-
-        dataW =
-            b 4
-
-        cntW =
-            b 5
-    in
-    lam "Rt.con" [ tag, argsPtr, cnt ]
-        (lets
-            [ ( dataW, Unsafe (RawAllocVector (iadd (wOf (v cnt)) (n 1))) )
-            , ( cntW, wOf (v cnt) )
-            , ( b 6, Unsafe (RawVecStore { vec = Var dataW.id, index = n 0, value = v tag }) )
-            , ( b 7, callR "Rt.conFill" [ mkNum (Var dataW.id), v argsPtr, mkNum (v cntW) ] )
-            ]
-            (mkVec (Var dataW.id) (iadd (v cntW) (n 1)))
-        )
+-- Rt.con / Rt.conFill / Rt.closure / Rt.closureFill MOVED TO THE SURFACE
+-- (T22, the never-scheduled family part 3 — FINAL): the constructor layer
+-- (RawAllocVector + the staged-block copy walks + the tag-10/tag-6 wraps)
+-- transcribed in Mid/RtSource's T22 block; their seats keep the order in
+-- primDefuns below.
 
 
-{-| `Rt.conFill data argsPtr i` — fill vector element i from staged arg i-1,
-then recurse.  Frame-free: RawVecLoad/RawVecStore allocate nothing (the
-plain store, no barrier — the collector is non-moving).
--}
-conFillDefun : Defun
-conFillDefun =
-    let
-        data =
-            p1
-
-        argsPtr =
-            p2
-
-        idx =
-            p3
-
-        dataW =
-            b 4
-
-        argsW =
-            b 5
-
-        idxW =
-            b 6
-    in
-    lam "Rt.conFill" [ data, argsPtr, idx ]
-        (lets
-            [ ( dataW, wOf (v data) )
-            , ( argsW, wOf (v argsPtr) )
-            , ( idxW, wOf (v idx) )
-            ]
-            (iff (mkBool (cmpW RCeq (v idxW) (n 0)))
-                mkNil
-                (lets
-                    [ ( b 7
-                      , Unsafe
-                            (RawVecStore
-                                { vec = Var dataW.id
-                                , index = Var idxW.id
-                                , value = Unsafe (RawVecLoad { vec = Var argsW.id, index = isub (v idxW) (n 1) })
-                                }
-                            )
-                      )
-                    ]
-                    (callR "Rt.conFill" [ mkNum (Var dataW.id), mkNum (Var argsW.id), mkNum (isub (v idxW) (n 1)) ])
-                )
-            )
-        )
-
-
-{-| `Rt.closure desc capBase K` — the Mid closure (zigretire stage 5 PART 2):
-allocate a K-Value env array through `RawAllocVector` (under QBE_MIDGC=1 the
-Mid collector's seat `Rt.allocVector`), copy the K captures from the caller's
-STAGED contiguous block (capBase), and wrap as a tag-6 lambda Value whose
-`code` is the static Desc pointer and whose `code_len` is the Desc's arity.
-Mirrors values.valLambda (the Zig seat rt_make_closure calls) word for word.
-The captures survive the allocation because they live in the caller's ROOTED
-frame — the Zig contract, unchanged; desc/capBase/K live in Rt.closure's OWN
-rooted frame (Rt.closure is `allocating`).  The copy is Rt.closureFill —
-conFill's 0-BASED twin (the env array has NO tag slot, so env[i] = cap[i],
-whereas Con's vector stores args at [1..n] past the tag at [0]); alloc-free,
-so the copy is not itself a safepoint.
-
-code_len comes from the Desc's arity WORD (offset 8 = `{ w arity, w ncaps }`:
-arity in the low 32 bits, ncaps in the high 32).  Storing the full word as
-lambda payload word 1 puts arity in the low half — read as the i32 `code_len`
-field — and ncaps in the high half, which is the Value's padding that Zig's
-struct store leaves UNWRITTEN and no reader (applyGo, the collectors, the
-nursery predicate) ever reads.
--}
-closureDefun : Defun
-closureDefun =
-    let
-        desc =
-            p1
-
-        capBase =
-            p2
-
-        cnt =
-            p3
-
-        dataW =
-            b 4
-
-        cntW =
-            b 5
-
-        descW =
-            b 6
-
-        arityW =
-            b 7
-    in
-    lam "Rt.closure" [ desc, capBase, cnt ]
-        (lets
-            [ ( dataW, Unsafe (RawAllocVector (wOf (v cnt))) )
-            , ( cntW, wOf (v cnt) )
-            , ( descW, wOf (v desc) )
-            , ( arityW, Unsafe (RawWordLoad { ptr = Var descW.id, index = n 1 }) )
-            , ( b 8, callR "Rt.closureFill" [ mkNum (Var dataW.id), v capBase, mkNum (v cntW) ] )
-            ]
-            (Unsafe
-                (RawMkValue
-                    { tag = RtLayout.tagLambda
-                    , words = [ Var descW.id, Var arityW.id, Var dataW.id, Var cntW.id ]
-                    }
-                )
-            )
-        )
-
-
-{-| `Rt.closureFill data capBase idx` — fill env element idx-1 from staged
-capture idx-1, then recurse.  Frame-free: RawVecLoad/RawVecStore allocate
-nothing (the plain store, no barrier — the collector is non-moving).  This is
-Rt.conFill's 0-BASED twin: the closure env array has NO tag slot, so
-env[i] = cap[i], where Con stores args at [1..n] past the tag at [0].
-
-THE BOUND (named, per the stage-5 review's ask): the recursion depth is the
-closure's CAPTURE COUNT K, a finite number of free binders — not the arity
-ceiling, and doubly moot because the self-tail lowers to an IN-FRAME LOOP
-(the same gate that makes conFill's "recursion" loop-shaped).  The arity
-itself (read into code_len) is bounded by `maxArity` = 16, enforced where
-the closure's defun is rejected (`Lower.elm` lowerClosure: "closure has arity
-> 16 (rt_callN table limit)").
--}
-closureFillDefun : Defun
-closureFillDefun =
-    let
-        data =
-            p1
-
-        capBase =
-            p2
-
-        idx =
-            p3
-
-        dataW =
-            b 4
-
-        capW =
-            b 5
-
-        idxW =
-            b 6
-    in
-    lam "Rt.closureFill" [ data, capBase, idx ]
-        (lets
-            [ ( dataW, wOf (v data) )
-            , ( capW, wOf (v capBase) )
-            , ( idxW, wOf (v idx) )
-            ]
-            (iff (mkBool (cmpW RCeq (v idxW) (n 0)))
-                mkNil
-                (lets
-                    [ ( b 7
-                      , Unsafe
-                            (RawVecStore
-                                { vec = Var dataW.id
-                                , index = isub (v idxW) (n 1)
-                                , value = Unsafe (RawVecLoad { vec = Var capW.id, index = isub (v idxW) (n 1) })
-                                }
-                            )
-                      )
-                    ]
-                    (callR "Rt.closureFill" [ mkNum (Var dataW.id), mkNum (Var capW.id), mkNum (isub (v idxW) (n 1)) ])
-                )
-            )
-        )
+-- Rt.closure desc capBase K — the Mid closure (zigretire stage 5 PART 2):
+-- allocate a K-Value env array through `RawAllocVector` (under QBE_MIDGC=1
+-- the Mid collector's seat `Rt.allocVector`), copy the K captures from the
+-- caller's STAGED contiguous block (capBase), and wrap as a tag-6 lambda
+-- Value whose `code` is the static Desc pointer and whose `code_len` is
+-- the Desc's arity.  Mirrors values.valLambda (the Zig seat
+-- rt_make_closure calls) word for word.  The captures survive the
+-- allocation because they live in the caller's ROOTED frame — the Zig
+-- contract, unchanged; desc/capBase/K live in Rt.closure's OWN rooted
+-- frame (Rt.closure is `allocating`).  The copy is Rt.closureFill —
+-- conFill's 0-BASED twin (the env array has NO tag slot, so env[i] =
+-- cap[i], whereas Con's vector stores args at [1..n] past the tag at
+-- [0]); alloc-free, so the copy is not itself a safepoint.
+--
+-- code_len comes from the Desc's arity WORD (offset 8 = `{ w arity,
+-- w ncaps }`: arity in the low 32 bits, ncaps in the high 32).  Storing
+-- the full word as lambda payload word 1 puts arity in the low half —
+-- read as the i32 `code_len` field — and ncaps in the high half, which
+-- is the Value's padding that Zig's struct store leaves UNWRITTEN and no
+-- reader (applyGo, the collectors, the nursery predicate) ever reads.
+--
+-- MOVED TO THE SURFACE (T22): the tree above (the allocvec, the arity
+-- wload, the closureFill copy call, the mkval(6, ..) wrap) is
+-- transcribed in Mid/RtSource's T22 block; the DSL defuns are deleted
+-- and the list positions in primDefuns below are seats.  The code_len
+-- note stays — it is the reason the surface spells `wload(descW, 1)`.
 
 
 -- Rt.emptylist MOVED TO THE SURFACE (T8 wave 1): the surface text in
@@ -1865,368 +1404,35 @@ closureFillDefun =
 -- position below is a seat.
 
 
-{-| `Rt.+ a b` — primAdd: EITHER float promotes and computes in f64;
-otherwise the BARE i64 wrap (no numeric guard — shen semantics, AGENTS.md;
-the metacircular interpreter relies on it).  `-`/`*` identical modulo the
-op.
--}
-addDefun : Defun
-addDefun =
-    let
-        a =
-            p1
-
-        bb =
-            p2
-    in
-    lam "Rt.+" [ a, bb ]
-        (iff (or2 (mkBool (tagIs (v a) 12)) (mkBool (tagIs (v bb) 12)))
-            (mkFlt (fbin RFAdd (flOf (callR "Rt.asF" [ v a ])) (flOf (callR "Rt.asF" [ v bb ]))))
-            (mkNum (iadd (wOf (v a)) (wOf (v bb))))
-        )
+-- Rt.+ / Rt.- / Rt.* MOVED TO THE SURFACE (T20 wave: the never-scheduled
+-- arithmetic family): the float-promote guard then either the f64 op over
+-- `fload(call Rt.asF(..))` or the BARE i64 op; TestMain's T20 splice rows
+-- pin the shapes.  Rt.< <= > >= moved in the SAME wave — the nested
+-- term-if spells the DSL's iff-in-iff (both operands numeric or `false`;
+-- either float promotes to the f64 compare, else the signed i64 compare).
 
 
-subDefun : Defun
-subDefun =
-    let
-        a =
-            p1
-
-        bb =
-            p2
-    in
-    lam "Rt.-" [ a, bb ]
-        (iff (or2 (mkBool (tagIs (v a) 12)) (mkBool (tagIs (v bb) 12)))
-            (mkFlt (fbin RFSub (flOf (callR "Rt.asF" [ v a ])) (flOf (callR "Rt.asF" [ v bb ]))))
-            (mkNum (isub (wOf (v a)) (wOf (v bb))))
-        )
+-- The Bitwise family (bit2Defun/bitNotDefun/shlDefun/sarDefun/shrDefun —
+-- the seven Rt.bitwise-* keys) MOVED TO THE SURFACE (T21, the
+-- never-scheduled family part 2): JS int32 semantics — operands through
+-- toI32, ops at word width, shift counts masked mod 32 — transcribed in
+-- Mid/RtSource's T21 block; their seats keep the order in primDefuns
+-- below.
 
 
-mulDefun : Defun
-mulDefun =
-    let
-        a =
-            p1
-
-        bb =
-            p2
-    in
-    lam "Rt.*" [ a, bb ]
-        (iff (or2 (mkBool (tagIs (v a) 12)) (mkBool (tagIs (v bb) 12)))
-            (mkFlt (fbin RFMul (flOf (callR "Rt.asF" [ v a ])) (flOf (callR "Rt.asF" [ v bb ]))))
-            (mkNum (imul (wOf (v a)) (wOf (v bb))))
-        )
+-- Rt.number? / string? / cons? / empty? MOVED TO THE SURFACE (T20):
+-- predDefun's List.foldr OR-chain spelled out per defun — number? keeps
+-- the fold's RIGHT-nested shape (`tag 0 || (tag 12 || false)`), the
+-- single-tag preds are `tag N || false`.
 
 
-{-| `Rt./ a b` — primDiv: bare integer @divTrunc (Elm `//`).  A zero
-divisor SIGFPEs both arms (Zig panics, QBE idivs) — parity by crash.
--}
-divDefun : Defun
-divDefun =
-    let
-        a =
-            p1
-
-        bb =
-            p2
-    in
-    lam "Rt./" [ a, bb ]
-        (mkNum (idiv (wOf (v a)) (wOf (v bb))))
-
-
-{-| `Rt.f/ a b` — primFdiv: ALWAYS f64 division (Elm `/`), promoting.
-x/0.0 = Infinity (IEEE), matching Elm.
--}
-fdivDefun : Defun
-fdivDefun =
-    let
-        a =
-            p1
-
-        bb =
-            p2
-    in
-    lam "Rt.f/" [ a, bb ]
-        (mkFlt (fbin RFDiv (flOf (callR "Rt.asF" [ v a ])) (flOf (callR "Rt.asF" [ v bb ]))))
-
-
-{-| The comparison family — primLt/Le/Gt/Ge: BOTH operands numeric or the
-answer is false; either float promotes to the f64 compare, else the signed
-i64 compare.
--}
-cmpDefun : String -> RawCmpOp -> RawFltCmpOp -> Defun
-cmpDefun key icmp fcmpOp =
-    let
-        a =
-            p1
-
-        bb =
-            p2
-    in
-    lam key [ a, bb ]
-        (iff (and2
-                (or2 (mkBool (tagIs (v a) 0)) (mkBool (tagIs (v a) 12)))
-                (or2 (mkBool (tagIs (v bb) 0)) (mkBool (tagIs (v bb) 12)))
-             )
-            (iff (or2 (mkBool (tagIs (v a) 12)) (mkBool (tagIs (v bb) 12)))
-                (mkBool (fcmp fcmpOp (flOf (callR "Rt.asF" [ v a ])) (flOf (callR "Rt.asF" [ v bb ]))))
-                (mkBool (cmpW icmp (wOf (v a)) (wOf (v bb))))
-            )
-            falseV
-        )
-
-
-{-| The Bitwise family — JS int32 semantics (prims.zig bitOperand/
-shiftAmount): operands through toI32, ops at i32, results re-entering i64
-sign-extended (zero for shift-right-zf), shift counts masked mod 32.
--}
-bit2Defun : String -> (Exp -> Exp -> Exp) -> Defun
-bit2Defun key op =
-    let
-        a =
-            p1
-
-        bb =
-            p2
-    in
-    lam key [ a, bb ]
-        (mkNum (op (wOf (callR "Rt.toI32" [ v a ])) (wOf (callR "Rt.toI32" [ v bb ]))))
-
-
-bitNotDefun : Defun
-bitNotDefun =
-    let
-        a =
-            p1
-    in
-    lam "Rt.bitwise-not" [ a ]
-        (mkNum (Unsafe (RawUn { op = RBitNot, v = wOf (callR "Rt.toI32" [ v a ]) })))
-
-
-shlDefun : Defun
-shlDefun =
-    -- ZINC RTL: a1 = count (leftmost), a2 = value.
-    let
-        count =
-            p1
-
-        value =
-            p2
-    in
-    lam "Rt.bitwise-shift-left" [ count, value ]
-        (mkNum
-            (shlW (wOf (callR "Rt.toI32" [ v value ]))
-                (iand (wOf (callR "Rt.toI32" [ v count ])) (n 31))
-            )
-        )
-
-
-sarDefun : Defun
-sarDefun =
-    let
-        count =
-            p1
-
-        value =
-            p2
-    in
-    lam "Rt.bitwise-shift-right" [ count, value ]
-        (mkNum
-            (sarW (wOf (callR "Rt.toI32" [ v value ]))
-                (iand (wOf (callR "Rt.toI32" [ v count ])) (n 31))
-            )
-        )
-
-
-shrDefun : Defun
-shrDefun =
-    let
-        count =
-            p1
-
-        value =
-            p2
-    in
-    lam "Rt.bitwise-shift-right-zf" [ count, value ]
-        (mkNum
-            (shrW (wOf (callR "Rt.toI32" [ v value ]))
-                (iand (wOf (callR "Rt.toI32" [ v count ])) (n 31))
-            )
-        )
-
-
-{-| The tag predicates — number? covers Int AND Float (primNumberP).
--}
-predDefun : String -> List Int -> Defun
-predDefun key tags =
-    let
-        a =
-            p1
-    in
-    lam key [ a ]
-        (List.foldr (\t acc -> or2 (mkBool (tagIs (v a) t)) acc) falseV tags)
-
-
-{-| `Rt.c-strlen s` — the i32 len field (lenOf — the word-1 i32 length).
--}
-cstrlenDefun : Defun
-cstrlenDefun =
-    let
-        s =
-            p1
-    in
-    lam "Rt.c-strlen" [ s ] (mkNum (lenOf (v s)))
-
-
-{-| `Rt.char-code s i` — byte at index, -1 out of bounds (primCharCode).
--}
-charCodeAtDefun : Defun
-charCodeAtDefun =
-    let
-        s =
-            p1
-
-        i =
-            p2
-    in
-    lam "Rt.char-code" [ s, i ]
-        (iff (and2
-                (mkBool (cmpW RCles (n 0) (wOf (v i))))
-                (mkBool (cmpW RClts (wOf (v i)) (lenOf (v s))))
-             )
-            (mkNum (byteOf (v s) (wOf (v i))))
-            (mkNum (n -1))
-        )
-
-
-{-| `Rt.substring s start len` — primSubstring's clamps, then the slice:
-start = clamp [0, slen]; len = clamp [0, slen - start].
--}
-substringDefun : Defun
-substringDefun =
-    let
-        s =
-            p1
-
-        st =
-            p2
-
-        ln =
-            p3
-
-        st0 =
-            b 4
-
-        ln0 =
-            b 5
-
-        end =
-            b 6
-
-        stW =
-            wOf (v st)
-
-        lnW =
-            wOf (v ln)
-
-        lenW =
-            lenOf (v s)
-
-        stClamped =
-            iff (mkBool (cmpW RClts stW (n 0)))
-                (mkNum (n 0))
-                (iff (mkBool (cmpW RCgts stW lenW))
-                    (mkNum lenW)
-                    (v st)
-                )
-
-        lnClamped =
-            iff (mkBool (cmpW RClts lnW (n 0)))
-                (mkNum (n 0))
-                (iff (mkBool (cmpW RCgts (iadd (wOf (v st0)) lnW) lenW))
-                    (mkNum (isub lenW (wOf (v st0))))
-                    (v ln)
-                )
-    in
-    lam "Rt.substring" [ s, st, ln ]
-        (lets
-            [ ( st0, stClamped )
-            , ( ln0, lnClamped )
-            , ( end, mkNum (iadd (wOf (v st0)) (wOf (v ln0))) )
-            ]
-            (callR "Rt.bytesToStr" [ callR "Rt.subGo" [ v s, v st0, v end ] ])
-        )
-
-
-{-| `Rt.cn a b` — primCn: coerce each operand to its text (strOf), then
-concatenate (cn2).
--}
-cnDefun : Defun
-cnDefun =
-    let
-        a =
-            p1
-
-        bb =
-            p2
-    in
-    lam "Rt.cn" [ a, bb ]
-        (callR "Rt.cn2" [ callR "Rt.strOf" [ v a ], callR "Rt.strOf" [ v bb ] ])
-
-
-{-| `Rt.repeat n s` — primRepeat: n <= 0 or empty s -> ""; else s, n times
-(byte-exact with the doubling schedule's result).
--}
-repeatDefun : Defun
-repeatDefun =
-    let
-        cnt =
-            p1
-
-        s =
-            p2
-    in
-    lam "Rt.repeat" [ cnt, s ]
-        (iff (or2
-                (mkBool (cmpW RCles (wOf (v cnt)) (n 0)))
-                (mkBool (cmpW RCles (lenOf (v s)) (n 0)))
-             )
-            (Lit (LString ""))
-            (callR "Rt.bytesToStr" [ callR "Rt.repGo" [ v s, v cnt ] ])
-        )
-
-
-{-| `Rt.shen.str->bytes s` — primStrToBytes: byte[0] lands at the head
-(back-to-front build, entered at i = len).  A non-string throws in Zig —
-the halt arm here (module header GAPS).
--}
-strToBytesDefun : Defun
-strToBytesDefun =
-    let
-        s =
-            p1
-    in
-    lam "Rt.shen.str->bytes" [ s ]
-        (iff (mkBool (tagIs (v s) 1))
-            (callR "Rt.bytesBuild" [ v s, mkNum (lenOf (v s)), mkNil ])
-            haltV
-        )
-
-
-{-| `Rt.shen.bytes->string bs` — primBytesToStr's shape (count, ONE alloc,
-fill, wrap).  A non-list throws in Zig — the halt arm here.
--}
-bytesToStringDefun : Defun
-bytesToStringDefun =
-    let
-        bs =
-            p1
-    in
-    lam "Rt.shen.bytes->string" [ bs ]
-        (iff (or2 (mkBool (tagIs (v bs) 5)) (mkBool (tagIs (v bs) 4)))
-            (callR "Rt.bytesToStr" [ v bs ])
-            haltV
-        )
+-- The string prims (cstrlenDefun/charCodeAtDefun/substringDefun/cnDefun/
+-- repeatDefun/strToBytesDefun/bytesToStringDefun — Rt.c-strlen, char-code,
+-- substring, cn, repeat, shen.str->bytes, shen.bytes->string) MOVED TO
+-- THE SURFACE (T21, the never-scheduled family part 2): the bounds test
+-- as a boxed `&&`, substring's clamps as the T9b `?:` value joins, the
+-- halt arms as the rt_halt dead binder — transcribed in Mid/RtSource's
+-- T21 block; their seats keep the order in primDefuns below.
 
 
 -- Rt.absvector / Rt.address-> / Rt.<-address / Rt.assoc / Rt.snd moved to
@@ -2249,39 +1455,49 @@ primDefuns consArr rec eqPtrFast =
       -- these seats keep their list positions (primDefuns' head).
     seat "Rt.cons" 2
     , seat "Rt.@p" 2
-    , conDefun
-    , conFillDefun
-    , closureDefun
-    , closureFillDefun
+      -- T22: con/conFill/closure/closureFill moved to Mid/RtSource (the
+      -- constructor layer, the never-scheduled family part 3); these
+      -- seats keep their list positions.
+    , seat "Rt.con" 3
+    , seat "Rt.conFill" 3
+    , seat "Rt.closure" 3
+    , seat "Rt.closureFill" 3
     , seat "Rt.emptylist" 1
     , seat "Rt.=" 2
-    , addDefun
-    , subDefun
-    , mulDefun
-    , divDefun
-    , fdivDefun
-    , cmpDefun "Rt.<" RClts RFLt
-    , cmpDefun "Rt.<=" RCles RFLe
-    , cmpDefun "Rt.>" RCgts RFGt
-    , cmpDefun "Rt.>=" RCges RFGe
-    , bit2Defun "Rt.bitwise-and" iand
-    , bit2Defun "Rt.bitwise-or" ior
-    , bit2Defun "Rt.bitwise-xor" ixor
-    , bitNotDefun
-    , shlDefun
-    , sarDefun
-    , shrDefun
-    , predDefun "Rt.number?" [ 0, 12 ]
-    , predDefun "Rt.string?" [ 1 ]
-    , predDefun "Rt.cons?" [ 4 ]
-    , predDefun "Rt.empty?" [ 5 ]
-    , cstrlenDefun
-    , charCodeAtDefun
-    , substringDefun
-    , cnDefun
-    , repeatDefun
-    , strToBytesDefun
-    , bytesToStringDefun
+      -- T20: the arithmetic + comparison + tag-predicate families moved to
+      -- Mid/RtSource (handoff-osier-tier2-t20); their seats keep the order.
+    , seat "Rt.+" 2
+    , seat "Rt.-" 2
+    , seat "Rt.*" 2
+    , seat "Rt./" 2
+    , seat "Rt.f/" 2
+    , seat "Rt.<" 2
+    , seat "Rt.<=" 2
+    , seat "Rt.>" 2
+    , seat "Rt.>=" 2
+    , seat "Rt.bitwise-and" 2
+    , seat "Rt.bitwise-not" 1
+    , seat "Rt.bitwise-or" 2
+    , seat "Rt.bitwise-shift-left" 2
+    , seat "Rt.bitwise-shift-right" 2
+    , seat "Rt.bitwise-shift-right-zf" 2
+    , seat "Rt.bitwise-xor" 2
+      -- T20: the tag predicates moved to Mid/RtSource; their seats keep
+      -- the order.  The Bitwise family joined them in T21 (the
+      -- never-scheduled family part 2) — seats too.
+    , seat "Rt.number?" 1
+    , seat "Rt.string?" 1
+    , seat "Rt.cons?" 1
+    , seat "Rt.empty?" 1
+    , seat "Rt.c-strlen" 1
+    , seat "Rt.char-code" 2
+    , seat "Rt.substring" 3
+    , seat "Rt.cn" 2
+    , seat "Rt.repeat" 2
+    , seat "Rt.shen.str->bytes" 1
+    , seat "Rt.shen.bytes->string" 1
+      -- T21: the seven string prims above moved to Mid/RtSource too
+      -- (the never-scheduled family part 2) — seats keep the order.
       -- T13: absvector/address->/<-address/assoc/snd moved to Mid/RtSource
       -- (handoff-osier-tier2-t13); their seats keep the list order.
     , seat "Rt.absvector" 1
@@ -2311,5 +1527,7 @@ primDefuns consArr rec eqPtrFast =
     -- wave); their seats keep the list order.
     , seat "Rt.exec-plan" 1
     , seat "Rt.exec-run" 3
-    , readFileAsStringDefun
+      -- T22: read-file-as-string moved to Mid/RtSource (the never-scheduled
+      -- family part 3); its seat keeps the list position.
+    , seat "Rt.read-file-as-string" 1
     ]
