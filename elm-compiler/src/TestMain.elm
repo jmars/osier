@@ -1069,17 +1069,25 @@ checks =
     -- def with midGc off (the DEFAULT route — the corpus byte-identity
     -- proof), and both with it on (the midgc route; U5a's driver joins the
     -- same gate).
-    , check "stage6 globals block: midGc OFF emits neither rt_glob nor rt_glob_addr even with gcProgram in the compile (the gate)"
-        (case QbeLower.lower False False False True True True True False QbeTypes.empty (rtArities (rtProgram True True True ++ RtGc.gcProgram)) (rtProgram True True True ++ RtGc.gcProgram) "Rt.allocVector" of
-            Ok mod ->
-                not (List.any (\d -> d.name == RtGc.globDataSym) mod.datas)
-                    && not (List.any (\f -> f.name == RtGc.globAddrSym) mod.funcs)
-
-            Err _ ->
+    , check "stage6 globals block: midGc OFF emits neither rt_glob nor rt_glob_addr even with gcProgram in the compile (the gate; T19: an empty spliced half used to make the absence assertions vacuous — a pipeline Err now FAILs the row)"
+        (case ( rtProgram True True True, rtProgramGc True True True ) of
+            ( [], _ ) ->
                 False
+
+            ( _, [] ) ->
+                False
+
+            ( primProg, gcProg ) ->
+                case QbeLower.lower False False False True True True True False QbeTypes.empty (rtArities (primProg ++ gcProg)) (primProg ++ gcProg) "Rt.allocVector" of
+                    Ok mod ->
+                        not (List.any (\d -> d.name == RtGc.globDataSym) mod.datas)
+                            && not (List.any (\f -> f.name == RtGc.globAddrSym) mod.funcs)
+
+                    Err _ ->
+                        False
         )
     , check "stage6 globals block: midGc ON emits both, in the pinned shapes, and no gc defun names the deleted seats"
-        (case QbeLower.lower False False False True True True True True QbeTypes.empty (rtArities (rtProgram True True True ++ RtGc.gcProgram)) (rtProgram True True True ++ RtGc.gcProgram) "Rt.allocVector" of
+        (case QbeLower.lower False False False True True True True True QbeTypes.empty (rtArities (rtProgram True True True ++ rtProgramGc True True True)) (rtProgram True True True ++ rtProgramGc True True True) "Rt.allocVector" of
             Ok mod ->
                 List.any
                     (\d ->
@@ -1290,10 +1298,10 @@ checks =
             && not (Set.member "Rt.gcScanValueArray" Rt.allocating)
             && not (Set.member "Rt.gcInit" Rt.allocating)
         )
-    , check "rt gc call graph: every RawCall target in the collector is a program key AND declared in rtDeps"
+    , check "rt gc call graph: every RawCall target in the collector is a program key AND declared in rtDeps (T18: read over the SPLICED gc half — the DSL list is tripwire seats, whose .surface-seat call would fail this row loudly if the splice ever dropped a body)"
         (let
             gcSyms key =
-                case List.filter (\d -> d.key == key) RtGc.gcProgram of
+                case List.filter (\d -> d.key == key) (rtProgramGc True True True) of
                     d :: _ ->
                         rawCallSyms d.value
 
@@ -1301,13 +1309,20 @@ checks =
                         []
 
             gcKeys =
-                List.map .key RtGc.gcProgram
+                List.map .key (rtProgramGc True True True)
 
             ok key =
                 List.all (\sym -> List.member sym gcKeys && List.member sym (Maybe.withDefault [] (Dict.get key Rt.rtDeps)))
                     (gcSyms key)
          in
-         List.all ok gcKeys
+         case gcKeys of
+             -- T19: the driver maps a pipeline Err to [], and `List.all ok []`
+             -- is trivially true — an Err must FAIL the row, not pass it.
+             [] ->
+                 False
+
+             _ ->
+                 List.all ok gcKeys
         )
     , check "rt gc seeds: the collector seeds are exactly the two seats plus their transitive closure"
         (Rt.gcSeeds
@@ -2516,13 +2531,13 @@ checks =
     -- `program`'s or `activeFlags`' DEFINITIONS; the corpus byte-identity
     -- and the t8SplicedRow structural rows are the independent oracles.
     , check
-        "T8 wiring (T7's identity row, post-migration): for all 8 flag combos, Rt.program IS the DSL list with the ACTIVE surface defuns spliced into their positions (order preserved)"
+        "T8/T18 wiring (T7's identity row, post-T18): for all 8 flag combos, the union splice (prim ++ helper ++ gcProgram) IS the pair (primHalf, gcHalf) concatenated — the gc defuns replace at their gcProgram positions, the split is order-preserving, and nothing duplicates"
         (List.all
             (\combo ->
-                case ( Rt.surf combo.flags, Rt.program combo.c combo.r combo.e ) of
-                    ( Ok s, Ok p ) ->
-                        Rt.spliceSurface s (RtPrims.primDefuns combo.c combo.r combo.e ++ RtPrims.helperDefuns combo.r)
-                            == Ok p
+                case ( Rt.surf combo.flags, Rt.programPair combo.c combo.r combo.e ) of
+                    ( Ok s, Ok ( p, g ) ) ->
+                        Rt.spliceSurface s (RtPrims.primDefuns combo.c combo.r combo.e ++ RtPrims.helperDefuns combo.r ++ RtGc.gcProgram)
+                            == Ok (p ++ g)
 
                     _ ->
                         False
@@ -2538,11 +2553,38 @@ checks =
             ]
         )
     , check
-        "T17 pipeline (the wave-9 key-set row, post-T16's ninety-one): surf is Ok with EXACTLY the one-hundred-eleven migrated keys under the default flags — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key (a silently-lost or silently-added surface defun shows here)"
+        "T19 seat-arity row: every tripwire SEAT in the three DSL lists (prim/helper/gc) declares the param count of the surface defun that replaces it — the splice substitutes the whole defun, so the mirror is not a lowering input, but it is now a READ assertion (a seat arity drifting from its surface defun FAILs here instead of being silently inert)"
+        (case Rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
+            Ok s ->
+                let
+                    seats =
+                        List.filter isSeatDefun
+                            (RtPrims.primDefuns True True True
+                                ++ RtPrims.helperDefuns True
+                                ++ RtGc.gcProgram
+                            )
+                in
+                not (List.isEmpty seats)
+                    && List.all
+                        (\d ->
+                            case Dict.get d.key s of
+                                Just sd ->
+                                    lamArity d == lamArity sd
+
+                                Nothing ->
+                                    False
+                        )
+                        seats
+
+            Err _ ->
+                False
+        )
+    , check
+        "T17/T18 pipeline (the wave-9 + collector key-set row, post-T18's one-hundred-twenty-three): surf is Ok with EXACTLY the one-hundred-twenty-three migrated keys under the default flags — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
         (case Rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
             Ok s ->
                 List.sort (Dict.keys s)
-                    == [ "Rt.<-address", "Rt.=", "Rt.@p", "Rt.absvector", "Rt.address->", "Rt.appendL", "Rt.applyOneRedir", "Rt.applyRedirects", "Rt.asF", "Rt.assoc", "Rt.assocGo", "Rt.bodyWriteGo", "Rt.bytesEqGo", "Rt.bytesOf", "Rt.bytesToStr", "Rt.cStrCopyGo", "Rt.cStrEqLit", "Rt.cStrFill", "Rt.cStrLenGo", "Rt.cd", "Rt.childBuiltin", "Rt.childPwd", "Rt.close", "Rt.closeCmdTmpfds", "Rt.closeOthersGo", "Rt.closePipeTmpfds", "Rt.closePipesGo", "Rt.cn2", "Rt.cons", "Rt.countL", "Rt.deepEq", "Rt.dgs", "Rt.echoGo", "Rt.emptylist", "Rt.envHome", "Rt.epArgvGo", "Rt.epChain", "Rt.epCount", "Rt.epCountStdin", "Rt.epElem", "Rt.epFreeArgv", "Rt.epFreeChains", "Rt.epFreeCmd", "Rt.epFreeCmds", "Rt.epFreeRedirs", "Rt.epNum", "Rt.epPipeGo", "Rt.epPipeline", "Rt.epProg", "Rt.epProgGo", "Rt.epRedir", "Rt.epRedirsGo", "Rt.epStr", "Rt.epSymIs", "Rt.epSymOf", "Rt.exec-plan", "Rt.exec-run", "Rt.execGo", "Rt.fillGo", "Rt.floatCopy", "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot", "Rt.globIsDotDot", "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess", "Rt.intern", "Rt.isChildBuiltin", "Rt.memGo", "Rt.mkTmpAt", "Rt.nameBytes", "Rt.numText", "Rt.open", "Rt.openBodyTmpfile", "Rt.read-byte", "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind", "Rt.recAppendNamesGo", "Rt.recGet", "Rt.recGetGo", "Rt.recInsert", "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd", "Rt.recUpdCopy", "Rt.recUpdFind", "Rt.revGo", "Rt.runBuiltinInprocess", "Rt.setenv", "Rt.snd", "Rt.str", "Rt.strOf", "Rt.symEq", "Rt.symToStr", "Rt.toI32", "Rt.value", "Rt.vecEq", "Rt.wRaw", "Rt.wStr", "Rt.waitStatusCode", "Rt.wireCmdGo", "Rt.wirePipeGo", "Rt.write-byte" ]
+                    == [ "Rt.<-address", "Rt.=", "Rt.@p", "Rt.absvector", "Rt.address->", "Rt.allocRaw", "Rt.allocVector", "Rt.appendL", "Rt.applyOneRedir", "Rt.applyRedirects", "Rt.asF", "Rt.assoc", "Rt.assocGo", "Rt.bodyWriteGo", "Rt.bytesEqGo", "Rt.bytesOf", "Rt.bytesToStr", "Rt.cStrCopyGo", "Rt.cStrEqLit", "Rt.cStrFill", "Rt.cStrLenGo", "Rt.cd", "Rt.childBuiltin", "Rt.childPwd", "Rt.close", "Rt.closeCmdTmpfds", "Rt.closeOthersGo", "Rt.closePipeTmpfds", "Rt.closePipesGo", "Rt.cn2", "Rt.collect", "Rt.cons", "Rt.countL", "Rt.deepEq", "Rt.dgs", "Rt.echoGo", "Rt.emptylist", "Rt.envHome", "Rt.epArgvGo", "Rt.epChain", "Rt.epCount", "Rt.epCountStdin", "Rt.epElem", "Rt.epFreeArgv", "Rt.epFreeChains", "Rt.epFreeCmd", "Rt.epFreeCmds", "Rt.epFreeRedirs", "Rt.epNum", "Rt.epPipeGo", "Rt.epPipeline", "Rt.epProg", "Rt.epProgGo", "Rt.epRedir", "Rt.epRedirsGo", "Rt.epStr", "Rt.epSymIs", "Rt.epSymOf", "Rt.exec-plan", "Rt.exec-run", "Rt.execGo", "Rt.fillGo", "Rt.floatCopy", "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.gcDrain", "Rt.gcInit", "Rt.gcMarkPtr", "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcScanValueArray", "Rt.gcSweep", "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot", "Rt.globIsDotDot", "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess", "Rt.intern", "Rt.isChildBuiltin", "Rt.memGo", "Rt.mkTmpAt", "Rt.nameBytes", "Rt.numText", "Rt.open", "Rt.openBodyTmpfile", "Rt.read-byte", "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind", "Rt.recAppendNamesGo", "Rt.recGet", "Rt.recGetGo", "Rt.recInsert", "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd", "Rt.recUpdCopy", "Rt.recUpdFind", "Rt.revGo", "Rt.runBuiltinInprocess", "Rt.setenv", "Rt.snd", "Rt.str", "Rt.strOf", "Rt.symEq", "Rt.symToStr", "Rt.toI32", "Rt.value", "Rt.vecEq", "Rt.wRaw", "Rt.wStr", "Rt.waitStatusCode", "Rt.wireCmdGo", "Rt.wirePipeGo", "Rt.write-byte" ]
             Err _ ->
                 False
         )
@@ -2995,6 +3037,28 @@ checks =
     , t8SplicedRow "Rt.mkTmpAt"
     , t8SplicedRow "Rt.exec-plan"
     , t8SplicedRow "Rt.exec-run"
+
+    -- ===== T18 — the COLLECTOR wave (Mid.RtGc's 12 defuns) =====
+    -- The whole mark-sweep moved to Mid.RtSource (the second DSL copy
+    -- DELETED — RtGc keeps only the globals-block constants and the seat
+    -- list).  These read the GC half of the splice (`rtProgramGc`) — the
+    -- gc keys are not in `Rt.program` — and assert the built program
+    -- carries the SURFACE lowering at each gcProgram position, the same
+    -- tooth the t8SplicedRow rows have.  The gc call-graph row above is
+    -- the structural twin (every RawCall target a rtDeps-declared program
+    -- key — a tripwire seat would fail it loudly).
+    , t18SplicedRow "Rt.gcInit"
+    , t18SplicedRow "Rt.allocVector"
+    , t18SplicedRow "Rt.allocRaw"
+    , t18SplicedRow "Rt.gcAlloc"
+    , t18SplicedRow "Rt.gcAllocGo"
+    , t18SplicedRow "Rt.collect"
+    , t18SplicedRow "Rt.gcMarkRoots"
+    , t18SplicedRow "Rt.gcScanValueArray"
+    , t18SplicedRow "Rt.gcDrain"
+    , t18SplicedRow "Rt.gcSweep"
+    , t18SplicedRow "Rt.gcMarkPtr"
+    , t18SplicedRow "Rt.gcMarkValue"
 
     -- ---- the T10 parse additions: the guard conjunction ----
     , check
@@ -3594,6 +3658,30 @@ t8SplicedRow key =
     check
         ("T8 splice: " ++ key ++ " in the built program IS the surface defun (not an Elm builder)")
         (case ( Rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ], rtProgram True True True ) of
+            ( Ok s, prog ) ->
+                case ( Dict.get key s, defunByKey key prog ) of
+                    ( Just sd, Just pd ) ->
+                        pd == sd
+
+                    _ ->
+                        False
+
+            _ ->
+                False
+        )
+
+
+{-| T18's twin of `t8SplicedRow`, over the GC half: `Rt.program` is the
+prim/helper half and carries no gc keys, so the row reads `rtProgramGc` —
+the gcProgram list with its surface replacements in place.  Structural
+`==` (binder ids/names differ between the DSL builder and the surface
+pipeline, so a surviving DSL/seat body cannot satisfy it).
+-}
+t18SplicedRow : String -> String
+t18SplicedRow key =
+    check
+        ("T18 splice: " ++ key ++ " in the spliced gc program IS the surface defun (not an Elm builder/seat)")
+        (case ( Rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ], rtProgramGc True True True ) of
             ( Ok s, prog ) ->
                 case ( Dict.get key s, defunByKey key prog ) of
                     ( Just sd, Just pd ) ->
@@ -4808,6 +4896,26 @@ rtProgram consArr rec eqPtrFast =
             []
 
 
+{-| T18: the GC half of the splice (`Rt.programGc`) — the collector defuns
+with their surface-migrated bodies at the `gcProgram` list positions.  The
+rows that read `RtGc.gcProgram` DIRECTLY (the :1073/:1082 QbeLower probes,
+the gc call-graph row, the per-key splice rows) were re-pointed here by
+T18: after the migration the DSL list holds tripwire SEATS (the
+`key ++ ".surface-seat"` bodies), so a seat-reading row would either fail
+loudly (the call-graph row) or lower the wrong body (the probes).  The gc
+keys are NOT in `rtProgram` — `Rt.program` is the prim/helper half — so
+this driver is the only seat-honest view of the collector.
+-}
+rtProgramGc : Bool -> Bool -> Bool -> List Defun
+rtProgramGc consArr rec eqPtrFast =
+    case Rt.programGc consArr rec eqPtrFast of
+        Ok p ->
+            p
+
+        Err _ ->
+            []
+
+
 lamArity : Defun -> Int
 lamArity d =
     case d.value of
@@ -4816,6 +4924,26 @@ lamArity d =
 
         _ ->
             0
+
+
+{-| T19: is this defun a migration SEAT (the Mid.RtPrims.seat tripwire
+shape) rather than a real body?  The seat's one RawCall names exactly
+`key ++ ".surface-seat"` with no args — a real body cannot match unless it
+issues that same dead call, which no holdout does.
+-}
+isSeatDefun : Defun -> Bool
+isSeatDefun d =
+    case d.value of
+        Lam l ->
+            case l.body of
+                Unsafe (RawCall { sym, args }) ->
+                    args == [] && sym == d.key ++ ".surface-seat"
+
+                _ ->
+                    False
+
+        _ ->
+            False
 
 
 {-| The arity table a standalone `QbeLower.lower` call needs for the Rt

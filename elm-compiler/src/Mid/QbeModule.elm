@@ -85,7 +85,6 @@ import Mid.Qbe.Peephole as QbePeephole
 import Mid.Qbe.Print as QbePrint
 import Mid.Qbe.Types as QbeTypes
 import Mid.Rt as MidRt
-import Mid.RtGc as RtGc
 import Set exposing (Set)
 import Type.Check as Check
 import Type.Env as Env exposing (Env, Scheme)
@@ -300,22 +299,31 @@ lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByMod
                 let
                     rtProgramR =
                         if midRt then
-                            -- T7: `program` runs the surface pipeline
-                            -- (Mid.RtSource -> Parse -> Check -> LowerToIr)
-                            -- and is RESULT-VALUED: a bad surface text fails
-                            -- the compile HERE, through the existing Err
-                            -- plumbing — never as a silently-reduced runtime.
+                            -- T7: the surface pipeline (Mid.RtSource ->
+                            -- Parse -> Check -> LowerToIr) is RESULT-VALUED:
+                            -- a bad surface text fails the compile HERE,
+                            -- through the existing Err plumbing — never as a
+                            -- silently-reduced runtime.  T18: `programPair`
+                            -- splices over the WHOLE DSL program (prim ++
+                            -- helper ++ gc) and splits the halves, so the gc
+                            -- half appended under midGc is the SPLICED half
+                            -- (surface-migrated collector defuns at their
+                            -- gcProgram positions), not the raw DSL list —
+                            -- appending `RtGc.gcProgram` here again would
+                            -- duplicate every collector defun (the DSL entry
+                            -- is a tripwire seat once migrated) and emit the
+                            -- tripwire's `Rt.*.surface-seat` RawCall.
                             Result.map
-                                (\spliced ->
-                                    spliced
+                                (\( primHalf, gcHalf ) ->
+                                    primHalf
                                         ++ (if midGc then
-                                                RtGc.gcProgram
+                                                gcHalf
 
                                             else
                                                 []
                                            )
                                 )
-                                (MidRt.program consArr rec eqPtrFast)
+                                (MidRt.programPair consArr rec eqPtrFast)
 
                         else
                             Ok []

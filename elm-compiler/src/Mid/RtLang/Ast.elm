@@ -714,6 +714,11 @@ rawcallArity =
         , ( "__errno_location", 0 )
         , ( "rt_halt", 0 )
         , ( "rt_midgc_die", 1 )
+        , -- T18: the collector reads the U1c globals block through this
+          -- accessor (Mid.RtGc's globAddrSym; Lower's finishModule emits the
+          -- 0-arg func).  The DSL's `callW globAddrSym []` sites moved to the
+          -- surface, and J3 must know the symbol the surface spells.
+        ( "rt_glob_addr", 0 )
         , ( "rt_die", 1 )
         , ( "rt_gc_heap_bytes", 0 )
         , ( "rt_gc_roots_len", 0 )

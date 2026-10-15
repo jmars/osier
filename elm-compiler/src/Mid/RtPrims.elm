@@ -9,34 +9,99 @@ osier-midprims, TRACK 2 step 5: the mechanical remainder after the cons
 spike).
 
 
-## WHAT IS HERE
+## WHAT IS HERE (post-T19)
 
-36 prim defuns (cons from the spike + 35 new) and 20 helper defuns, each a
-Mid.Ir tree transcribed NODE FOR NODE from the Zig original in
-vendor/osier-rt/src/rt/prims.zig / values.zig — ports, not re-designs, so
-the fuzz differential (tools/qbe/consdiff) only has to prove the LOWERING
-faithful.  Mid.Rt.impls maps the surface prim names onto the prim defuns;
-Mid.Rt.rtDeps closes the RawCall edges for reachability.
+123 MIGRATION SEATS — the defun-list positions `Mid.Rt.spliceSurface`
+replaces by key (24 in `primDefuns`, 87 in `helperDefuns`, 12 in
+Mid.RtGc's `gcProgram`) — and the 39 DSL-bodied HOLDOUTS at the keys the
+surface does not yet carry, each a Mid.Ir tree transcribed NODE FOR NODE
+from the Zig original in vendor/osier-rt/src/rt/prims.zig / values.zig /
+streams.zig / execplan.zig.  The seats are `seat` tripwires: the real
+bodies of the migrated keys live in Mid.RtSource's surface text.  Mid.Rt
+maps the surface prim names onto the prim keys (`primImpl`); Mid.Rt.rtDeps
+closes the RawCall edges for reachability.
 
 
-## THE CLASSIFICATION THIS ENCODES (the step's enumeration)
+## THE HOLDOUT INVENTORY (T19 — what the tier-2 surface cannot express
+## today, and what it was never asked to)
 
-PORTED here: the prims reachable from the Elm front end whose bodies are
-pure value functions — the desugar set (cons, @p, emptylist, assoc, snd),
-the operators (=, +, -, *, /, f/, <, <=, >, >=), the alias set (cn,
-c-strlen, repeat, substring, char-code, shen.str->bytes,
-shen.bytes->string, number?, string?, cons?, empty?, absvector, <-address,
-address->) and the Bitwise family.  HOST-ONLY (still Zig at the flip): the
-fd layer (write-byte, read-byte, read-file-as-string, open, close), the
+WALL-CLASS — UNSPELLABLE in the surface TODAY (the grammar-gap record; any
+future grammar work starts here).  The common shape: an If BOUND IN A
+LET-VALUE whose branch carries a Let-chain and whose VALUE the continuation
+subsequently READS.  All three spellings the grammar offers fail: the `?:`
+value-join takes EXPRESSION branches (no lets); the both-diverge
+statement-if needs the bound value DEAD (these are read); else-nesting
+needs a diverging then (the then IS the value).  T9 found the class
+(readFileGo's growB), T16 and T17 confirmed it twice more:
+
+  - Rt.readFileGo (`readFileGoDefun`): `growB` — the grow/no-grow decision;
+    its then-branch chains the malloc + state-block stores, and the
+    continuation tests `growB == 1` for the OOM stop.
+  - Rt.epCmd (`epCmdDefun`): `ago` and `rgo` — each dispatches a Go helper
+    in a let-value If whose branches carry malloc/store/clear chains, and
+    the continuation tests `ago < 0` / `rgo < 0` to unwind.
+  - Rt.childCd (`childCdDefun`): `dirN` binder #2 — the argv[1]-or-HOME
+    resolution; its else chains `ln = cStrLenGo dirN`, and binder #3 plus
+    `ln` read `dirN` after.
+
+Their ELM-SIDE CO-HELPERS are spellable in isolation and migrate only with
+their callers:
+
+  - `tagCountState` (an Elm Exp-of-Exp function; single caller epCmd): its
+    tree is the `?:` join class, but migrating epCmd means WRITING IT OUT
+    at the `subState` binder — the surface has no intra-defun abstraction
+    (T16's epUnwrap precedent, written out as three defuns).
+  - `runLits` / `runLitsPacked` / `runOff` / `rLoad` / `rCbuf` (childCd's):
+    `runOff` computes byte offsets into the packed cbuf literal list at
+    ELM-compile time; the surface has no constant evaluator, so migrating
+    childCd means freezing those offsets as literals (T17 computed them:
+    "/" = 139, "\n" = 173, "cd: " = 240; cbuf size 336).
+
+NEVER-SCHEDULED — SPELLABLE TODAY; no wave covered them.  T8-T18 migrated
+123 keys; these 36 were left out of every wave's list, not blocked by any
+wall.  A future wave can transcribe them with the existing grammar:
+
+  - the arithmetic family Rt.+ - * / f/ (float-promote or bare i64 wrap);
+  - the comparisons Rt.< <= > >= (`cmpDefun`: numeric-guard + promote);
+  - the Bitwise family Rt.bitwise-and/or/xor/not/-shift-left/right/
+    right-zf (`bit2Defun`/shl/sar/shr: toI32, ops at i32, mod-32 counts);
+  - the tag predicates Rt.number?/string?/cons?/empty? (`predDefun`'s
+    tag-or-fold, spelled explicitly per defun);
+  - the string prims Rt.c-strlen / char-code / substring / cn / repeat /
+    shen.str->bytes / shen.bytes->string — substring's clamped binders are
+    the T9b `?:` join class (numText precedent), the rest are plain;
+  - the constructor layer Rt.con / conFill / closure / closureFill
+    (RawAllocVector + the staged-block copies; the allocvec/vecstore/
+    vecload builtins all exist);
+  - the walk helpers Rt.subGo / repGo / bytesBuild / symLess (plain value
+    recursion over RawCall self-edges);
+  - Rt.read-file-as-string — its OOM binders (blkOOM/tmpOOM) LOOK like the
+    wall class but are DEAD-VALUE binders (never read), so the T15/T16
+    both-diverge statement-if spelling applies; the rest of the body is
+    plain lets and a tail if.
+
+
+## THE STEP-5 CLASSIFICATION, SUPERSEDED IN PART
+
+The step-5 enumeration below divided the prims into PORTED (DSL bodies
+here), HOST-ONLY (still Zig) and UNREACHABLE/UNPORTED.  The PORTED/HOST-ONLY
+split is historical since the tier-2 waves: what it called PORTED has
+largely MIGRATED to the surface (T8-T18), and what it called HOST-ONLY
+(fd/process/VM-state/str) migrated too.  The enumeration's UNREACHABLE set
+(hd, tl, fst, reverse, append, absvector? — in no wrapper/alias table, so
+no compiled fixture can name them) remains accurately described.
+
+
+The classification this step encoded (historical): the desugar set (cons,
+@p, emptylist, assoc, snd), the operators (=, +, -, *, /, f/, <, <=, >,
+>=), the alias set (cn, c-strlen, repeat, substring, char-code,
+shen.str->bytes, shen.bytes->string, number?, string?, cons?, empty?,
+absvector, <-address, address->) and the Bitwise family were ported here;
+the fd layer (write-byte, read-byte, read-file-as-string, open, close), the
 process layer (exec-plan, cd, getcwd, getpid, getenv, setenv, glob), VM
 state (intern — the symbol table; value — the registry; simple-error —
 error unwinding) and `str` (floatText's shortest-round-trip float render +
-strValue's composite printer: an algorithmic library, not a value
-constructor).  UNREACHABLE, therefore UNPORTED (no compiled fixture can
-name them, so no differential can drive them): hd, tl, fst, reverse,
-append, absvector? — none is in any wrapper/alias table; the Prelude
-implements reverse/append in Elm and case-destructuring reads pairs without
-the prims.
+strValue's composite printer) were HOST-ONLY.
 
 
 ## THE NODE-SET FINDINGS THIS STEP LANDED
@@ -130,16 +195,6 @@ p3 =
     { id = 3, name = "a3" }
 
 
-p4 : Binder
-p4 =
-    { id = 4, name = "a4" }
-
-
-p5 : Binder
-p5 =
-    { id = 5, name = "a5" }
-
-
 {-| Sequential `let`s, threaded left to right like the Zig body's lines.
 -}
 lets : List ( Binder, Exp ) -> Exp -> Exp
@@ -193,39 +248,14 @@ wOf x =
     Unsafe (RawPayload { value = x, word = 0 })
 
 
-w32Of : Exp -> Exp
-w32Of x =
-    Unsafe (RawPayload32 { value = x, word = 0 })
-
-
-{-| The i32 LENGTH field (word 1) of a string or vector Value.  Booleans
-keep `w32Of` (their payload is word 0).
+{-| The i32 LENGTH field (word 1) of a string or vector Value.  (The i32
+word-0 read the deleted boolean-payload builders used — the DSL `w32Of` —
+died with its readers in T19; the surface spells `payload32(x, 0)` where a
+body needs it.)
 -}
 lenOf : Exp -> Exp
 lenOf x =
     Unsafe (RawPayload32 { value = x, word = 1 })
-
-
-{-| The record-helpers' length: a NIL base (the `{}` literal, which E keeps on
-the emptylist route) has UNZEROED payload words 1/2 in a frame-free defun's
-scratch slot, so a plain `lenOf` reads garbage and a huge `rt_vec_alloc`
-follows.  Only the record walk/rebuild defuns use this — they are emitted
-ONLY under rec=True, so the QBE_NOREC=1 hatch (which never emits them) keeps
-mkNil's 0-word shape byte-identical to pre-E.
--}
-recLenOf : Exp -> Exp
-recLenOf x =
-    -- WORD-level nil-aware length: len * (1 - isNil).  A nil base (the `{}`
-    -- literal) has UNZEROED payload words 1/2 in a frame-free defun's scratch
-    -- slot, so a plain lenOf reads garbage; this forces 0 for tag 5.  Stays a
-    -- WORD producer (usable in RawAllocVector/cmpW), unlike an If branch.
-    Unsafe
-        (RawBin
-            { op = RMul
-            , a = Unsafe (RawPayload32 { value = x, word = 1 })
-            , b = Unsafe (RawBin { op = RSub, a = n 1, b = Unsafe (RawTagIs { value = x, tag = RtLayout.tagNil }) })
-            }
-        )
 
 
 -- ---- values ----
@@ -291,11 +321,6 @@ tagIs x tag =
 flOf : Exp -> Exp
 flOf x =
     Unsafe (RawLoadFlt x)
-
-
-itof : Exp -> Exp
-itof we =
-    Unsafe (RawIToF we)
 
 
 fbin : RawFltBinOp -> Exp -> Exp -> Exp
@@ -395,9 +420,11 @@ The body is a TRIPWIRE, never emitted while the splice is wired: its one
 RawCall names `key ++ ".surface-seat"`, a key in no rtDeps row and no
 program, so if the splice ever failed to replace a seat, Mid.Qbe.Lower's
 rawCall arm fails LOUDLY instead of emitting a wrong runtime.  The param
-count is the migrated defun's arity — the arity witness the TestMain
-safety-net row reads; a seat/defun arity drift is a loud FAIL, never a
-silent re-route.
+count MIRRORS the migrated defun's arity, and the reader that makes the
+mirror load-bearing is TestMain's T19 seat-arity row (every seat's param
+count == the surface defun's arity at its key — a drift is a loud FAIL,
+never a silent no-op).  Note the T7 safety-net row is a DIFFERENT check:
+it compares the SURFACE defun's arity to externArities and reads no seat.
 -}
 seat : String -> Int -> Defun
 seat key arity =
@@ -624,14 +651,6 @@ symLessDefun =
 -- = file (?*anyopaque, an fd-int-in-pointer; null = fd 0), payload word 1 =
 -- is_input (LOW half) | is_string (HIGH half).  is_string is read by shifting
 -- the packed word right 32 (is_input is the RawPayload32 half).
-
-
-{-| errno as a word: __errno_location() then the low byte.  Linux errnos are
-all < 256 and this target is little-endian, so the low byte IS the value.
--}
-errnoOf : Exp
-errnoOf =
-    Unsafe (RawByteLoad { ptr = callW "__errno_location" [], index = n 0 })
 
 
 {-| The null-terminated copy of a string: the binders to prepend plus the
@@ -1391,34 +1410,16 @@ runOff name =
             0
 
 
-runCbufSize : Int
-runCbufSize =
-    List.foldl (\s acc -> acc + String.length s + 1) 104 runLits
+-- runCbufSize was DELETED in T19: its one reader, the DSL Rt.exec-plan
+-- builder (malloc'd the cbuf at this size), moved to the surface in T17,
+-- which spells the size as the literal 336.
 
 
--- run-state block word slots (malloc'd in Rt.exec-plan)
+-- run-state block word slots (malloc'd in Rt.exec-plan).  T19: only rCbuf
+-- survives — Rt.childCd's cbuf read is its last reader; the other 21 slot
+-- names died with the DSL run builders in T17 (the surface spells the
+-- offsets as literals).
 rCbuf = 0
-rOutfd = 1
-rErrfd = 2
-rInChild = 3
-rProg = 4
-rPipe = 5
-rLast = 6
-rI = 7
-rN = 8
-rNpipes = 9
-rPfds = 10
-rPids = 11
-rForked = 12
-rForkFail = 13
-rExit = 14
-rScrA = 15
-rScrB = 16
-rStatus = 17
-rScrC = 18
-rJ = 19
-rEchoI = 20
-rStWords = 21
 
 
 rLoad : Binder -> Int -> Exp
@@ -1426,9 +1427,9 @@ rLoad stN idx =
     Unsafe (RawWordLoad { ptr = wOf (v stN), index = n idx })
 
 
-rStore : Binder -> Int -> Exp -> Exp
-rStore stN idx val =
-    Unsafe (RawWordStore { ptr = wOf (v stN), index = n idx, value = val })
+-- rStore was DELETED in T19: rStoreW (its dedicated wide variant) died with
+-- Rt.exec-plan in T17 as "its only reader", and T17's childCd holdout in
+-- fact reads state only through rLoad — rStore had no reader left.
 
 
 -- cStrEqLit/wStr/wRaw/waitStatusCode MOVED TO THE SURFACE (T8 wave 1):
@@ -1601,8 +1602,8 @@ helperDefuns rec =
     -- whose else chains ln = cStrLenGo dirN and whose value the continuation
     -- reads — the epCmd wall class, see the T16 note and the RtSource T17
     -- header) and keeps its builder at its list position; runLits/runOff/
-    -- rLoad/rStore stay for it (rStoreW died with Rt.exec-plan, its only
-    -- reader).
+    -- rLoad/rCbuf stay for it (rStore died in T19 — no reader left; the
+    -- surface spells the other state-block offsets as literals).
     , seat "Rt.envHome" 1
     , seat "Rt.isChildBuiltin" 2
     , seat "Rt.echoGo" 3
@@ -2066,7 +2067,7 @@ predDefun key tags =
         (List.foldr (\t acc -> or2 (mkBool (tagIs (v a) t)) acc) falseV tags)
 
 
-{-| `Rt.c-strlen s` — the i32 len field (lenOf — the word-1 i32 length; booleans keep w32Of).
+{-| `Rt.c-strlen s` — the i32 len field (lenOf — the word-1 i32 length).
 -}
 cstrlenDefun : Defun
 cstrlenDefun =

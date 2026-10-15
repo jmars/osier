@@ -8,6 +8,8 @@ module Mid.Rt
         , externArities
         , gcSeeds
         , program
+        , programGc
+        , programPair
         , primImpl
         , activeSurf
         , rtDeps
@@ -69,14 +71,64 @@ RESULT-VALUED (T7): `program` runs the surface pipeline
 silently-empty or silently-reduced runtime is the worst failure mode, so
 the Err is real: Mid.QbeModule routes it through the compile's existing
 error plumbing and EVERY compile fails loudly on a bad surface text.
+
+T18: the splice domain is the WHOLE DSL program — `primDefuns` ++
+`helperDefuns` ++ `gcProgram` — so the surface can replace collector
+defuns too.  `program` is the PRIM/HELPER half of that splice (the same
+list it always returned); `programPair` splits the spliced result into
+the two halves QbeModule consumes (the gc half is emitted only under
+QBE_MIDGC=1) and `programGc` is the gc half alone.
 -}
 program : Bool -> Bool -> Bool -> Result String (List Defun)
 program consArr rec eqPtrFast =
+    Result.map Tuple.first (programPair consArr rec eqPtrFast)
+
+
+{-| The whole splice (T18): ONE `surf` evaluation (the compile path runs
+this twice per compile — QbeModule's injection and `allocating` — exactly
+as before T18), spliced over the UNION of the three DSL lists so
+`spliceSurface`'s orphan check stays total over every surface key, then
+split back into the two halves the injection consumes.  The split is
+`List.partition` by the gc key set — MEASURED STABLE (elm/core 1.0.5:
+foldr + cons, original order preserved on both sides), which is what
+keeps the gc half in `gcProgram`'s exact list order (order is .ssa
+bytes).  No gc key exists outside `gcProgram` and no prim/helper key
+inside it, so the two halves are exactly the old two lists, each with
+its surface replacements in place.
+-}
+programPair : Bool -> Bool -> Bool -> Result String ( List Defun, List Defun )
+programPair consArr rec eqPtrFast =
+    let
+        gcKeys =
+            Set.fromList (List.map .key gcProgram)
+    in
     surf (activeFlags consArr rec eqPtrFast)
         |> Result.andThen
             (\surface ->
-                spliceSurface surface (primDefuns consArr rec eqPtrFast ++ helperDefuns rec)
+                spliceSurface surface
+                    (primDefuns consArr rec eqPtrFast
+                        ++ helperDefuns rec
+                        ++ gcProgram
+                    )
             )
+        |> Result.map
+            (\spliced ->
+                let
+                    ( gcHalf, primHalf ) =
+                        List.partition (\d -> Set.member d.key gcKeys) spliced
+                in
+                ( primHalf, gcHalf )
+            )
+
+
+{-| The GC half of the splice (T18): `gcProgram` with any surface-migrated
+collector defuns replaced at their list positions.  Emitted by QbeModule
+only under QBE_MIDGC=1; TestMain's gc rows read it (the DSL seats left
+behind by the migration are tripwires, never the live bodies).
+-}
+programGc : Bool -> Bool -> Bool -> Result String (List Defun)
+programGc consArr rec eqPtrFast =
+    Result.map Tuple.second (programPair consArr rec eqPtrFast)
 
 
 {-| The three `program` switches as the surface language's ACTIVE flag set
@@ -218,9 +270,9 @@ surface defun at its old position — list order is .ssa bytes, so order is
 preserved and untouched entries pass through unchanged.  A surface key with
 NO DSL position is a LOUD Err, never a silent drop: a defun that vanishes
 while `rtDeps` still routes to it is the exact failure class this wiring
-exists to make impossible.  (Rt.gc* keys live in `gcProgram`, appended by
-QbeModule outside `program` — splicing them is T18's wiring step, and until
-then a surface Rt.gc* key fails right here.)
+exists to make impossible.  (Since T18 the caller passes the UNION
+`primDefuns ++ helperDefuns ++ gcProgram`, so surface Rt.gc* keys splice
+into their `gcProgram` positions too; `programPair` splits the halves.)
 -}
 spliceSurface : Dict String Defun -> List Defun -> Result String (List Defun)
 spliceSurface surface dsl =
@@ -694,14 +746,16 @@ allocating =
         -- (cons is allocating either way), and neither does the equality
         -- fast path (it adds a pointer compare, no safepoint), so the set is
         -- computed over the default program (consArr = True, rec = True,
-        -- eqPtrFast = True).
+        -- eqPtrFast = True).  T18: the gc half is the SPLICED half — after
+        -- the migration the surface bodies are the live trees; reading the
+        -- DSL `gcProgram` here would classify the seats' tripwire bodies.
         rtProgram =
-            case program True True True of
-                Ok spliced ->
-                    spliced ++ gcProgram
+            case programPair True True True of
+                Ok ( primHalf, gcHalf ) ->
+                    primHalf ++ gcHalf
 
                 Err _ ->
-                    -- UNREACHABLE on a live compile (T7): `program`'s Err
+                    -- UNREACHABLE on a live compile (T7): `programPair`'s Err
                     -- aborts the compile in Mid.QbeModule's injection before
                     -- Lower/classification could read this set — the fixed
                     -- point below only needs the defun LIST.
