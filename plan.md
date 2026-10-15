@@ -346,6 +346,63 @@ params share the decl range). Occurrence is not even well-defined across the bin
 
 ---
 
+### 2.5 The Osier ↔ mid-c interface (the `export` block) — DESIGN SETTLED, NOT BUILT
+
+**Why.** `mid-c` (the tier-2 surface, §3 Phase 4b) is the low-level dialect for the runtime,
+primitives and other low-level machinery. It becomes Osier's **foreign-module mechanism** — the slot
+Elm reserves for JS — so a `.mid` module's defuns are callable from Osier and compiled into the
+program by the compiler itself rather than spliced from an Elm blob.
+
+**Where it rides.** Today's injection is a blob (`Mid/RtSource.elm`), and that blob exists *only*
+because the builder lane is elm/node, which cannot read files — `run.js` reads everything and passes
+text in via flags. **`.mid`-as-a-file and the native driver are the same piece of work**: the
+compiler's `main` takes argv, reads its inputs (Osier sources **and** `.mid`) and compiles them
+together. That driver is Phase 6's enabler; the blob goes when it lands.
+
+**The `export` block.** A `.mid` module declares its Osier-visible surface in an `export` block,
+written in **Osier type syntax**:
+
+```
+export Rt.read-file-as-string : Val Int -> Val Int
+export Rt.malloc               : Word -> Word
+export Rt.exec-run             : Word -> Word -> Val   !io
+```
+
+One line per exported defun; the key is the defun name verbatim; `!io` (or whatever effect marker
+Osier adopts) marks an impure export. Unexported defuns are module-private.
+
+**The type mapping — three classes, REPRESENTATION-PINNED:**
+
+| mid-c | Osier | why |
+|---|---|---|
+| `val` | the **boxed** value type (`Val a`) | the tagged constant. S4/S4f unboxing must NOT cross this boundary (boxed scalars are rejected at it) — a `val` parameter arrives boxed whatever Osier does to an `Int` internally. |
+| `float` | `Float`, boxed / ABI-pinned | §2.1 and §3 already refuse to trust a Float **parameter** for unboxing; a cross-module call can trust it less. |
+| `word` | an **opaque `Word`** (locally abstract) | a raw machine word — pointer-or-int, convention-only. It must NOT unify with Osier `Int`, or every C pointer becomes arithmetic-addable. Osier's locally abstract types (λρG) are the tool. |
+
+**Checking (bidirectional; the seat already exists).** `Mid.RtLang.Check`'s **J1** already proves each
+mid-c parameter is used only in positions of its declared class; the Osier side is checked against the
+declared Osier types. The `export` block is the join. The compiler's **`externArities`** table — today
+arity-only, "extern seats are all-`:val`" (`Check.elm:187`) — is the seat that becomes the **typed
+extern table**. A mismatch is loud at one end or the other.
+
+**The three contracts a type check cannot carry** (build the seat, state the gap):
+1. **ROOTING.** A `val` argument is a GC reference: it must survive the callee's allocations and must
+   not be stashed where the collector cannot see it. The mid-c frame machinery roots; the contract
+   must be STATED at the interface.
+2. **IMMUTABILITY.** Osier values are immutable; mid-c has `wstore`. Mutation must be reachable **only
+   through `word`/raw, never through `val`** — otherwise handing an Osier value to mid-c breaks the
+   language's core assumption.
+3. **EFFECTS.** Impure exports carry the effect marker; Osier's purity discipline must not be silently
+   violated.
+
+Plus **ARITY**: declared and flat (Osier is curried, mid-c is flat) — the one thing `externArities`
+already does today.
+
+**Status:** design settled here; NOT built. It rides Phase 6 (the driver) and is a prerequisite for
+`import`ing mid-c from Osier.
+
+---
+
 ## 3. The plan
 
 ### Phase 0 — done (context for the rest)
@@ -948,6 +1005,14 @@ over `io`/`os` implementing the same Task stepping through the same `host_apply`
 constraint. The Mid runtime is precisely what makes this one implementation rather than two.
 
 ### Phase 6 — node-lane retirement  ⏭
+
+Move the build loop onto the native/seed lane: `qbe-bootstrap.sh` already rebuilds the compiler from
+the committed seed with `qbe` + `cc` alone (`compiler.js` is elm-built and today the oracles drive it
+via `node run.js`). The enabler is the **native driver** — a `main` that takes argv, reads its inputs
+and compiles them — which is also what makes **`.mid` files** possible (§2.5): the Elm blob
+(`Mid/RtSource.elm`) exists only because the elm/node lane cannot read files. Landing the driver
+retires node from the *runtime*; elm/node then survive only as the seed's bootstrap. Phase 7 (GADTs)
+is blocked behind this, because `elm 0.19.2` must type-check the sources today.
 
 ### Phase 7 — GADT-indexed AST (`Exp mode`)  ⏭
 
