@@ -3838,6 +3838,238 @@ checks =
             Err _ ->
                 False
         )
+
+    -- ===== T23 — the surface grammar extended: the BLOCK-BRANCH if =====
+    -- The FOURTH and last measured grammar wall: the three remaining DSL
+    -- holdouts (Rt.readFileGo's growB, Rt.epCmd's ago/rgo, Rt.childCd's
+    -- dirN #2) all bind an If in a LET-VALUE whose BRANCHES carry
+    -- let-chains and whose VALUE the continuation reads.  `?:` cannot
+    -- spell those (expression branches, no statements) and the
+    -- statement/term `if` cannot (no value in an initializer slot), so
+    -- `if (cond) { block } else { block }` is now an EXPRESSION (an atom):
+    -- each branch is the EXISTING block grammar, its terminator is the
+    -- branch's value, else is REQUIRED, and the lowering is the TERM if's
+    -- own (`mkIf` over two lowered blocks — no new machinery).  The
+    -- statement dispatch keeps its own `if` arm, so SIf/TIf parse exactly
+    -- as before (row below), and the `?:` join is a different token.
+    -- Rows: parse shapes/positions/rejects, the class judgments, the
+    -- lowering (canon vs hand-built), and THE ACCEPTANCE ROW: growB's
+    -- region spelled on the surface lowers canon-EQUAL to HEAD's DSL tree.
+
+    -- ---- parse: shape and positions ----
+    , check "parse: the block-branch if — `if (c) { return a; } else { return b; }` is EIfBlock (T23; else REQUIRED)"
+        (Parse.parseExp "if (c) { return a; } else { return b; }"
+            == Ok
+                (Ast.EIfBlock (Ast.EVar "c")
+                    { stmts = [], term = Ast.TRet (Ast.EVar "a") }
+                    { stmts = [], term = Ast.TRet (Ast.EVar "b") }
+                )
+        )
+    , check "parse: the block-branch if in a CALL ARGUMENT (a value slot like any atom; the comma still separates args)"
+        (Parse.parseExp "call Rt.f(if (c) { return 1; } else { return 2; }, w)"
+            == Ok
+                (Ast.ECall "Rt.f"
+                    [ Ast.EIfBlock (Ast.EVar "c")
+                        { stmts = [], term = Ast.TRet (Ast.EInt 1) }
+                        { stmts = [], term = Ast.TRet (Ast.EInt 2) }
+                    , Ast.EVar "w"
+                    ]
+                )
+        )
+    , check "parse: the block-branch if NESTED — a branch block binds an inner block-if (a block's value needs a binder: a bare expression is not a term)"
+        (Parse.parseExp "if (c) { val t = if (d) { return 1; } else { return 2; }; return t; } else { return 0; }"
+            == Ok
+                (Ast.EIfBlock (Ast.EVar "c")
+                    { stmts =
+                        [ Ast.SBind Ast.TVal "t"
+                            (Ast.EIfBlock (Ast.EVar "d")
+                                { stmts = [], term = Ast.TRet (Ast.EInt 1) }
+                                { stmts = [], term = Ast.TRet (Ast.EInt 2) }
+                            )
+                        ]
+                    , term = Ast.TRet (Ast.EVar "t")
+                    }
+                    { stmts = [], term = Ast.TRet (Ast.EInt 0) }
+                )
+        )
+    , check "parse REJECTS a block-branch if with a missing `else` (an expression needs a value from both arms — no silent fall-through)"
+        (case Parse.parseExp "if (c) { return a; }" of
+            Err msg ->
+                String.contains "expected `else`" msg
+
+            Ok _ ->
+                False
+        )
+    , check "parse: the STATEMENT if is untouched — the same tokens at statement position are SIf with an else block, never EIfBlock"
+        (case Parse.parseBlock "{ if (c) { return mknum(1); } else { return mknum(2); } return mknil; }" of
+            Ok b ->
+                b.stmts
+                    == [ Ast.SIf (Ast.EVar "c")
+                            { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNum [ Ast.EInt 1 ]) }
+                            (Just { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNum [ Ast.EInt 2 ]) })
+                       ]
+                    && (case b.term of
+                            Ast.TRet (Ast.EBuiltin Ast.MkNil []) ->
+                                True
+
+                            _ ->
+                                False
+                       )
+
+            Err _ ->
+                False
+        )
+    , check "parse: the ?: join is UNTOUCHED by the block-branch if — a ?: arm can BE one (the arm parses the atom, the outer `:` still binds)"
+        (Parse.parseExp "c ? if (a) { return 1; } else { return 2; } : d"
+            == Ok
+                (Ast.EIf (Ast.EVar "c")
+                    (Ast.EIfBlock (Ast.EVar "a")
+                        { stmts = [], term = Ast.TRet (Ast.EInt 1) }
+                        { stmts = [], term = Ast.TRet (Ast.EInt 2) }
+                    )
+                    (Ast.EVar "d")
+                )
+        )
+
+    -- ---- check: the class judgments (checkCond reused; branch classes AGREE) ----
+    , checkOk "check: block-if accept — :val branches AGREE, :val cond (the growB shape's judgment)"
+        "defun Rt.iba(a: val) -> val {\n  val x = if (mkbool(tagis(a, 1) == 1)) { return mknum(1); } else { return mknil; };\n  return x;\n}"
+    , checkOk "check: block-if accept — :word branches agree in a -> word defun (the form composes in a word slot too)"
+        "defun Rt.ibw(a: val) -> word {\n  word w = if (mkbool(tagis(a, 1) == 1)) { return 1; } else { return 2; };\n  return w;\n}"
+    , checkErr "check: block-if REJECT — the agreed branch class flows to the bind slot: a :val join bound :word is a LOUD J1 reject"
+        "declares word but its initializer is val"
+        "defun Rt.ibbad(a: val) -> val {\n  word w = if (mkbool(tagis(a, 1) == 1)) { return mknum(1); } else { return mknum(2); };\n  return mknum(w);\n}"
+    , checkErr "check: block-if REJECT — a true val-vs-word BRANCH mismatch (MEASURED: every term's class is the defun's -> ty — J6 pins each return — so the route is J6's, and the branch-agreement arm is correct-by-construction through the existing term grammar)"
+        "J6"
+        "defun Rt.ibarm(a: val) -> word {\n  word w = if (mkbool(tagis(a, 1) == 1)) { return 1; } else { return mknil; };\n  return w;\n}"
+    , checkErr "check: block-if REJECT — a non-:val cond (a raw word compare must be boxed: the SAME checkCond as every if)"
+        "condition must be val"
+        "defun Rt.ibcond(a: val) -> val {\n  val x = if (payload(a, 0) == 1) { return mknum(1); } else { return mknum(2); };\n  return x;\n}"
+
+    -- ---- lower: the TERM if's machinery in a value slot ----
+    , check "lower: block-if — `val x = if (c) {..} else {..};` lowers to Let { x = If { branch values in order } } (the TIf machinery, value position)"
+        (case lowlBody "defun Rt.ibl(n : val) -> val {\n  val x = if (mkbool(tagis(n, 1) == 1)) { return mknum(1); } else { return mknum(2); };\n  return x;\n}" of
+            Ok body ->
+                canon body
+                    == canon
+                        (llets
+                            [ ( ltb 2
+                              , liff (lmkBool (lcmpW RCeq (ltagIs (ltv 1) 1) (ltn 1)))
+                                    (lmkNum (ltn 1))
+                                    (lmkNum (ltn 2))
+                              )
+                            ]
+                            (ltv 2)
+                        )
+
+            Err _ ->
+                False
+        )
+    , check "lower: block-if — a branch's STATEMENTS fold into the branch's 1-binder Let chain, its terminator is the branch's value (If { then = lets .., else = .. } in a let-value: THE wall shape)"
+        (case lowlBody "defun Rt.iblets(a : val) -> val {\n  val x = if (mkbool(tagis(a, 1) == 1)) {\n    word u = payload(a, 0) + 1;\n    word v = u + 1;\n    return mknum(v);\n  } else {\n    return mknil;\n  };\n  return x;\n}" of
+            Ok body ->
+                canon body
+                    == canon
+                        (llets
+                            [ ( ltb 4
+                              , liff (lmkBool (lcmpW RCeq (ltagIs (ltv 1) 1) (ltn 1)))
+                                    (llets
+                                        [ ( ltb 2, liadd (lwOf (ltv 1)) (ltn 1) )
+                                        , ( ltb 3, liadd (ltv 2) (ltn 1) )
+                                        ]
+                                        (lmkNum (ltv 3))
+                                    )
+                                    lmkNilV
+                              )
+                            ]
+                            (ltv 4)
+                        )
+
+            Err _ ->
+                False
+        )
+    , check "lower: block-if — the Rt.childCd dirN-#2 shape: SHADOWED rebinding reads the PREVIOUS binder in its own initializer, and a one-sided diverging if inside a branch ELSE-NESTS (the second wall's form)"
+        (case lowlBody "defun Rt.ibdirn(argcN : val, stN : val) -> val {\n  val dirN = if (mkbool(payload(argcN, 0) > 1)) { return mknum(1); } else { return mknum(0); };\n  val dirN = if (mkbool(payload(dirN, 0) == 0)) {\n    return call Rt.envHome(stN);\n  } else {\n    val ln = call Rt.cStrLenGo(dirN, mknum(0));\n    if (mkbool(payload(ln, 0) == 0)) { return call Rt.envHome(stN); }\n    return dirN;\n  };\n  return dirN;\n}\n\ndefun Rt.envHome(st : val) -> val {\n  return st;\n}\n\ndefun Rt.cStrLenGo(s : val, i : val) -> val {\n  return i;\n}" of
+            Ok body ->
+                canon body
+                    == canon
+                        (llets
+                            [ ( ltb 3, liff (lmkBool (lcmpW RCgts (lwOf (ltv 1)) (ltn 1))) (lmkNum (ltn 1)) (lmkNum (ltn 0)) )
+                            , ( ltb 5
+                              , liff (lmkBool (lcmpW RCeq (lwOf (ltv 3)) (ltn 0)))
+                                    (lcallR "Rt.envHome" [ ltv 2 ])
+                                    (llets
+                                        [ ( ltb 4, lcallR "Rt.cStrLenGo" [ ltv 3, lmkNum (ltn 0) ] ) ]
+                                        (liff (lmkBool (lcmpW RCeq (lwOf (ltv 4)) (ltn 0)))
+                                            (lcallR "Rt.envHome" [ ltv 2 ])
+                                            (ltv 3)
+                                        )
+                                    )
+                              )
+                            ]
+                            (ltv 5)
+                        )
+
+            Err _ ->
+                False
+        )
+
+    -- ---- THE ACCEPTANCE ROW: HEAD's growB tree, spelled on the surface ----
+    -- Rt.readFileGo's grow region verbatim (RtPrims-HEAD, the `growB =`
+    -- binder): the If bound in a LET-VALUE, its branches carrying let-
+    -- chains (newcapW/mW and the 8-statement store/memGo/free chain), the
+    -- bound value READ by the continuation (`payload(growB, 0) == 1` is
+    -- the OOM stop).  memGo/envHome/cStrLenGo stand in as one-line surface
+    -- defuns (J2 needs the keys defined; their BODIES are irrelevant — the
+    -- row pins the growB region's SHAPE).
+    , check "lower: THE T23 ACCEPTANCE ROW — Rt.readFileGo's growB region, spelled with the block-branch if, lowers canon-EQUAL to HEAD's DSL tree (the wall is closed)"
+        (case lowlBody "defun Rt.growBwall(blkN : val, nV : val) -> val {\n  word lenW = wload(payload(blkN, 0), 3);\n  word capW = wload(payload(blkN, 0), 4);\n  word neededW = lenW + payload(nV, 0);\n  val growB = if (mkbool(neededW > capW)) {\n    word newcapW = neededW + (capW * 2 - neededW) * (capW * 2 > neededW);\n    word mW = rawcall malloc(newcapW);\n    if (mkbool(mW == 0)) { return mknum(1); }\n    word oldW = wload(payload(blkN, 0), 2);\n    wstore(payload(blkN, 0), 6, oldW);\n    wstore(payload(blkN, 0), 7, mW);\n    wstore(payload(blkN, 0), 8, lenW);\n    call Rt.memGo(mknum(payload(blkN, 0) + 48), mknum(0));\n    rawcall free(oldW);\n    wstore(payload(blkN, 0), 2, mW);\n    wstore(payload(blkN, 0), 4, newcapW);\n    return mknum(0);\n  } else {\n    return mknum(0);\n  };\n  if (mkbool(payload(growB, 0) == 1)) { return mknil; }\n  return mknum(payload(growB, 0));\n}\n\ndefun Rt.memGo(blk : val, i : val) -> val {\n  return i;\n}" of
+            Ok body ->
+                canon body
+                    == canon
+                        (llets
+                            [ ( ltb 3, Unsafe (RawWordLoad { ptr = lwOf (ltv 1), index = ltn 3 }) )
+                            , ( ltb 4, Unsafe (RawWordLoad { ptr = lwOf (ltv 1), index = ltn 4 }) )
+                            , ( ltb 5, liadd (ltv 3) (lwOf (ltv 2)) )
+                            , ( ltb 16
+                              , liff (lmkBool (lcmpW RCgts (ltv 5) (ltv 4)))
+                                    (llets
+                                        [ ( ltb 6
+                                          , liadd (ltv 5)
+                                                (limul (lisub (limul (ltv 4) (ltn 2)) (ltv 5))
+                                                    (lcmpW RCgts (limul (ltv 4) (ltn 2)) (ltv 5))
+                                                )
+                                          )
+                                        , ( ltb 7, lcallW "malloc" [ ltv 6 ] )
+                                        ]
+                                        (liff (lmkBool (lcmpW RCeq (ltv 7) (ltn 0)))
+                                            (lmkNum (ltn 1))
+                                            (llets
+                                                [ ( ltb 8, Unsafe (RawWordLoad { ptr = lwOf (ltv 1), index = ltn 2 }) )
+                                                , ( ltb 9, Unsafe (RawWordStore { ptr = lwOf (ltv 1), index = ltn 6, value = ltv 8 }) )
+                                                , ( ltb 10, Unsafe (RawWordStore { ptr = lwOf (ltv 1), index = ltn 7, value = ltv 7 }) )
+                                                , ( ltb 11, Unsafe (RawWordStore { ptr = lwOf (ltv 1), index = ltn 8, value = ltv 3 }) )
+                                                , ( ltb 12, lcallR "Rt.memGo" [ lmkNum (liadd (lwOf (ltv 1)) (ltn 48)), lmkNum (ltn 0) ] )
+                                                , ( ltb 13, lcallW "free" [ ltv 8 ] )
+                                                , ( ltb 14, Unsafe (RawWordStore { ptr = lwOf (ltv 1), index = ltn 2, value = ltv 7 }) )
+                                                , ( ltb 15, Unsafe (RawWordStore { ptr = lwOf (ltv 1), index = ltn 4, value = ltv 6 }) )
+                                                ]
+                                                (lmkNum (ltn 0))
+                                            )
+                                        )
+                                    )
+                                    (lmkNum (ltn 0))
+                              )
+                            ]
+                            (liff (lmkBool (lcmpW RCeq (lwOf (ltv 16)) (ltn 1)))
+                                lmkNilV
+                                (lmkNum (lwOf (ltv 16)))
+                            )
+                        )
+
+            Err _ ->
+                False
+        )
     ]
 
 

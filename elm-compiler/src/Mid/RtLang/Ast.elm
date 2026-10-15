@@ -224,6 +224,20 @@ transcribes):
     binder is the measured wall this spell closes).  The branches must
     AGREE on a class (the result is that class) and the cond is `:val` —
     the same judgment the statement/term `if` applies, not a new one.
+  * `EIfBlock` — `if (cond) { block } else { block }` (T23): the
+    BLOCK-BRANCH if EXPRESSION, the form the three remaining DSL walls
+    actually have: an `If` bound in a let-value whose BRANCHES carry
+    let-chains (`Rt.readFileGo`'s growB, `Rt.epCmd`'s ago/rgo,
+    `Rt.childCd`'s dirN #2) and whose VALUE the continuation reads —
+    `?:` cannot spell those (its branches are bare expressions, no
+    statements) and the statement/term `if` cannot (no value in an
+    initializer slot).  Each branch is the EXISTING block grammar
+    (`stmt* term`; the block's term is the branch's value) and the whole
+    form is an expression, so it composes in any value slot — the
+    lowering is the TERM `if`'s own (`mkIf` over the two lowered blocks),
+    no new machinery.  The else block is REQUIRED (an expression needs a
+    value from both arms); the cond is `:val` and the two branch classes
+    must AGREE — the agreed class is the form's.
 
 -}
 type Exp
@@ -238,6 +252,7 @@ type Exp
     | EShortAnd Exp Exp
     | EShortOr Exp Exp
     | EIf Exp Exp Exp
+    | EIfBlock Exp Block Block
     | ECall Key (List Exp)
     | ERawCall Sym (List Exp)
     | EAggCall AggShape Exp (List Exp)

@@ -51,6 +51,9 @@ surface's only grouping rule besides parentheses):
     9  + - f+ f-     EWordBin / EFltBin
     10 * / f* f/     EWordBin / EFltBin    (tightest)
     atom literals, names, call/rawcall/aggcall, builtins,
+       if (c) {..} else {..}   EIfBlock   (T23 — an ATOM: the block-branch
+       if expression, else REQUIRED; the statement/term `if` is a
+       DIFFERENT path — `itemStepAt`'s own arm — and is unchanged)
        (expression), withroots [..] ..
 
 A compare yields a WORD 0/1, never a bool — the DSL's
@@ -182,8 +185,13 @@ parser's commit semantics:
   * RESERVED at statement/defun positions: `word float val if return
     recur else defun` (dispatch reads them first — a statement cannot
     START with one of them as an expression).  Inside expressions T2's
-    rules are unchanged; binder SPELLING is unchecked here (any plain
-    name) — names are the checker's judgments (J5).
+    rules are unchanged EXCEPT T23's `if`, which is now the block-branch
+    if EXPRESSION's keyword (an `if` token in expression position parses
+    `if (c) {..} else {..}` — it is no longer a legal plain variable
+    there; a surface BINDER may still be NAMED `if` at declaration but
+    cannot be read as an expression).  Binder SPELLING is otherwise
+    unchecked here (any plain name) — names are the checker's judgments
+    (J5).
   * `recur` is a TERM only, per the plan (L4): a mid-block `recur`
     becomes a second terminator and the exactly-one-terminator reject
     fires; the loop-state-completeness judgment on it is T5's (J4).
@@ -678,6 +686,13 @@ nameAtom tok =
 
         "withroots" ->
             spelled tok withrootsExp
+
+        "if" ->
+            -- T23: the BLOCK-BRANCH if EXPRESSION (`if (c) {..} else {..}`
+            -- in any value slot).  Statement-position `if` never reaches
+            -- this arm — `itemStepAt` dispatches it to SIf/TIf first; the
+            -- `?:` join is a different token (`?`) and keeps its own level.
+            spelled tok ifBlockExp
 
         _ ->
             case Dict.get tok builtinTable of
@@ -1578,6 +1593,28 @@ parenCond =
             else
                 ParserFast.problem "`if` needs its condition in parentheses — `if (cond) {..}`"
         )
+
+
+{-| T23 — the BLOCK-BRANCH if EXPRESSION: `if (cond) { block } else {
+block }` in any EXPRESSION position (an initializer slot, a call
+argument, a nested arm).  Same tokens as the statement/term `if` but
+reached only through the expression atom path (`nameAtom`) — the
+statement dispatch (`itemStepAt`) keeps its own `if` arm, so SIf/TIf
+parse exactly as before.  The cond parser (`parenCond`) and the branch
+parser (`block`) are the statement if's OWN, reused verbatim; the else
+block is REQUIRED — an expression needs a value from both arms (the
+missing-else is the loud `expected `else`` symbol failure, pinned by a
+TestMain reject row).  The lowering and the class judgment live in
+LowerToIr (the TERM if's `mkIf` over two lowered blocks) and Check
+(`checkCond` + branch-class agreement).
+-}
+ifBlockExp : ParserFast.Parser Exp
+ifBlockExp =
+    ParserFast.map3
+        EIfBlock
+        (commit parenCond)
+        (spelled ")" block)
+        (spelled "else" block)
 
 
 {-| Force a committed failure for `parser`: `map2` promotes its SECOND

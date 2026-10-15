@@ -789,6 +789,44 @@ lowerExp st e =
                                     in
                                     Ok ( stF, ie )
 
+        Ast.EIfBlock c thn els ->
+            -- T23: the BLOCK-BRANCH if EXPRESSION — the TERM `if`'s own
+            -- lowering (`mkIf` over the two blocks lowered by the EXISTING
+            -- `lowerBlock`), in an expression slot.  Position-free by
+            -- construction: Mid's `If` carries only its invented
+            -- falseLabel/endLabel and the backend invents its own labels
+            -- and never reads the tree's (plan fact F1) — there is no
+            -- isTail flag in this pipeline to vary — so the SAME node
+            -- serves the tail position (the defun's value) and the VALUE
+            -- position (an `SBind` initializer: L1 wraps it into
+            -- `Let { x = If { .. } }`, the join the backend handles
+            -- natively).  Each branch lowers as a BLOCK (its statements
+            -- fold into the 1-binder Let chain of L1/L2, its terminator is
+            -- the branch's value — a `return`/`recur` branch value is
+            -- exactly the TIf branch's), else-nesting and both-diverge
+            -- mid-block ifs inside a branch work unchanged, and the else
+            -- branch is parsed-required so no dead-value fill is needed.
+            case lowerExp st c of
+                Err msg ->
+                    Err msg
+
+                Ok ( st1, c1 ) ->
+                    case lowerBlock st1 thn of
+                        Err msg ->
+                            Err msg
+
+                        Ok ( st2, t1 ) ->
+                            case lowerBlock st2 els of
+                                Err msg ->
+                                    Err msg
+
+                                Ok ( st3, e1 ) ->
+                                    let
+                                        ( ie, stF ) =
+                                            mkIf st3 c1 t1 e1
+                                    in
+                                    Ok ( stF, ie )
+
         Ast.ECall key args ->
             lowerCall st args (\es s -> ( Unsafe (RawCall { sym = key, args = es }), s ))
 

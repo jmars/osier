@@ -728,9 +728,9 @@ checkCond ctx c =
 
 {-| The expression walk: every case returns the expression's FIXED class.
 Nothing is inferred — an `EVar` IS its declared class, a literal its
-family's, a form its table row's.  The one form whose class is COMPUTED
-is `EIf`: its branches must agree (checked right here) and the agreed
-class is the form's.
+family's, a form its table row's.  The forms whose class is COMPUTED are
+`EIf` and `EIfBlock` (T23): their branches must agree (checked right
+here) and the agreed class is the form's.
 -}
 checkExp : Ctx -> Exp -> Result String Type
 checkExp ctx e =
@@ -793,6 +793,49 @@ checkExp ctx e =
                                         Err
                                             (ctx.key
                                                 ++ ": J1: '?:' branches disagree — then is "
+                                                ++ typeStr thnCls
+                                                ++ ", else is "
+                                                ++ typeStr elsCls
+                                                ++ " (the value join needs ONE class)"
+                                            )
+
+        EIfBlock c thn els ->
+            -- T23: the block-branch if EXPRESSION.  Same cond judgment as
+            -- every if (`checkCond`); each BRANCH's class is its block's
+            -- VALUE class (`checkBlock` — the block's terminator's class),
+            -- the two must AGREE, and the agreed class is the form's, so
+            -- it composes in a word or val slot.  Each block is checked
+            -- against the ENCLOSING ctx — a branch's binders end at its
+            -- own `}` and cannot leak into the other branch or the
+            -- continuation.  (MEASURED note: every TERM's class is the
+            -- defun's `-> ty` — J6 pins each `return`, TRecur returns
+            -- ctx.ret, TIf recurses on blocks — so through the existing
+            -- term grammar the two branch classes always agree once both
+            -- blocks check; the agreement arm states the judgment the
+            -- form's contract needs and stays correct if the term grammar
+            -- ever gains a value-introducing term.)
+            case checkCond ctx c of
+                Err msg ->
+                    Err msg
+
+                Ok _ ->
+                    case checkBlock ctx thn of
+                        Err msg ->
+                            Err msg
+
+                        Ok thnCls ->
+                            case checkBlock ctx els of
+                                Err msg ->
+                                    Err msg
+
+                                Ok elsCls ->
+                                    if thnCls == elsCls then
+                                        Ok thnCls
+
+                                    else
+                                        Err
+                                            (ctx.key
+                                                ++ ": J1: block-if branches disagree — then is "
                                                 ++ typeStr thnCls
                                                 ++ ", else is "
                                                 ++ typeStr elsCls
