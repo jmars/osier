@@ -2581,6 +2581,27 @@ checks rt =
             && parseExportTy "(forall s. Ref s -> Int) -> Int"
             == Just (Ast.OArrow (Ast.OForall "s" (Ast.OArrow (Ast.OCon "Ref" [ Ast.OVar "s" ]) (Ast.OCon "Int" []))) (Ast.OCon "Int" []))
         )
+    , check "M2 export arity: `splitArrow` UNWRAPS a leading quantifier — the arrow chain under it IS the param list (`forall s. Ref s -> Int` is arity 1, not 0)"
+        (Ast.splitArrow (Ast.OForall "s" (Ast.OArrow (Ast.OCon "Ref" [ Ast.OVar "s" ]) (Ast.OCon "Int" [])))
+            == ( [ Ast.OCon "Ref" [ Ast.OVar "s" ] ], Ast.OCon "Int" [] )
+            && Ast.splitArrow (Ast.OExists "s" (Ast.OArrow Ast.OVal Ast.OVal)) == ( [ Ast.OVal ], Ast.OVal )
+        )
+    , check "M2 export arity: a quantified export LOADS against its defun — `forall s. Ref s -> Int` over a 1-param defun is ACCEPTED (this row is the one the parse-only row above left open: the export PARSED but failed load with `declares arity 0`, blaming the defun)"
+        (case Rt.load "module Rt\nexport Rt.f : forall s. Ref s -> Int\ndefun Rt.f(a: val) -> val { return mknil; }" of
+            Ok m ->
+                case Dict.get "Rt.f" m.externTypes of
+                    Just sig ->
+                        externArity sig
+                            == 1
+                            && Ast.splitArrow sig.ty
+                            == ( [ Ast.OCon "Ref" [ Ast.OVar "s" ] ], Ast.OCon "Int" [] )
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
     , check "M2 export markers: `!io` and `!taint` parse and are CARRIED on the signature (enforcement is M4)"
         (case Parse.parseModule "export Rt.f : val -> val !io !taint\ndefun Rt.f(a: val) -> val { return mknil; }" of
             Ok m ->
@@ -2601,6 +2622,22 @@ checks rt =
 
             Ok _ ->
                 False
+        )
+    , check "M2 export marker: a DROPPED `!` is LOUD — `Val Int io` is a parse ERROR, never a silent type application to a variable named `io` (io/taint are reserved, so only a MARKER can spell them)"
+        ((case Parse.parseModule "export Rt.f : Val Int io\ndefun Rt.f(a: val) -> val { return mknil; }" of
+            Err msg ->
+                String.contains "unexpected input" msg
+
+            Ok _ ->
+                False
+         )
+            && (case Parse.parseModule "export Rt.f : Val Int !io\ndefun Rt.f(a: val) -> val { return mknil; }" of
+                    Ok m ->
+                        List.map (\e -> ( e.sig.effects, e.sig.taint )) m.header.exports == [ ( [ Ast.Io ], False ) ]
+
+                    Err _ ->
+                        False
+               )
         )
     , check "M2 key agreement: exports naming existing defuns with agreeing arities ACCEPT"
         (Check.checkExports

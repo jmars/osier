@@ -214,10 +214,14 @@ type alias Module =
 
 {-| Flatten a type expression's TOP-LEVEL arrow chain into `(params,
 result)` — the `key -> (param types, result)` view the typed extern table
-gives J2.  A non-arrow type (a bare atom, or a quantified type) flattens
-to zero params and itself as the result — quantified types therefore read
-as arity 0 here, which is FINE in M2 (nothing consumes one yet; the
-scoping question a `forall s.` over params+result raises is M4/Phase-7's).
+gives J2.  A LEADING quantifier scopes the whole rest of the type, so the
+arrow chain UNDER it is exactly the param list: `forall s. Ref s -> Int`
+flattens to `([Ref s], Int)` — one parameter, quantified over `s`.
+Unwrapping it here (rather than at each consumer) is what keeps the
+forward-enforced arity check in `Check.checkExports` honest: without these
+two cases a quantified export read as arity 0 and the FIRST such export
+failed load with a message blaming the defun.  A non-arrow, non-quantified
+type (a bare atom) is the only thing that flattens to zero params.
 -}
 splitArrow : OTy -> ( List OTy, OTy )
 splitArrow ty =
@@ -228,6 +232,12 @@ splitArrow ty =
                     splitArrow b
             in
             ( a :: ps, r )
+
+        OForall _ b ->
+            splitArrow b
+
+        OExists _ b ->
+            splitArrow b
 
         _ ->
             ( [], ty )

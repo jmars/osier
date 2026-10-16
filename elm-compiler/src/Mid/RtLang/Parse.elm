@@ -1482,10 +1482,15 @@ otypeNameAt at src =
 
 
 {-| The surface keywords that are NEVER type names (variable or
-constructor): the top-level `defun`/`export`/`module` delimiters and the
-type-level `forall`/`exists`/`val`/`float`/`word` atoms.  Excluding them
-here is what lets a constructor-application loop (`Ref s`) STOP cleanly at
-the next defun instead of greedily reading `defun` as a type variable.
+constructor): the top-level `defun`/`export`/`module` delimiters, the
+type-level `forall`/`exists`/`val`/`float`/`word` atoms, and the two
+MARKER names `io`/`taint`.  Excluding the delimiters here is what lets a
+constructor-application loop (`Ref s`) STOP cleanly at the next defun
+instead of greedily reading `defun` as a type variable.  `io`/`taint`
+are excluded because they are reserved in marker position: without them a
+DROPPED `!` is silent — `Val Int io` would parse as a type APPLICATION to
+a type variable `io`, with no effect marker and no error, turning a typo
+into a wrong answer the moment M4 enforces `!io`.
 -}
 isTypeKeyword : String -> Bool
 isTypeKeyword tok =
@@ -1497,6 +1502,8 @@ isTypeKeyword tok =
         || tok == "val"
         || tok == "float"
         || tok == "word"
+        || tok == "io"
+        || tok == "taint"
 
 
 {-| `Name` / `Name atom atom ...` — a type constructor, bare (`OCon name
