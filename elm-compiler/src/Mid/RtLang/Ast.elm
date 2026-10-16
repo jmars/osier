@@ -364,6 +364,7 @@ type Builtin
     | Uext
     | BitNot
     | RecLen
+    | RawStr
 
 
 
@@ -522,6 +523,14 @@ builtinClass b =
         RecLen ->
             Sig [ TVal ] TWord
 
+        RawStr ->
+            -- the static C-string address form: `rawstr("...")` — the argument
+            -- is a STRING LITERAL (EStr, class TVal) and the result is the raw
+            -- word pointer to a content-keyed NUL-terminated data def.  The
+            -- lowerer pattern-matches the EStr (a computed val is unrepresentable
+            -- — the payload/tagis/mkval literal-slot discipline).
+            Sig [ TVal ] TWord
+
 
 {-| The surface spelling of each builtin (the parser's keywords and the
 checker's error messages read these — one spelling, one place).
@@ -613,6 +622,9 @@ builtinName b =
         RecLen ->
             "reclen"
 
+        RawStr ->
+            "rawstr"
+
 
 {-| The operator FAMILIES' signatures.  The class is the family's, not the
 constructor's (every RawBin lowers word,word -> word regardless of op), so
@@ -688,7 +700,7 @@ C seats / libc, called from Rt bodies today:
 
 rt_* seats (tools/qbe/rt.zig exports) called from Rt bodies today:
 
-  * rt_halt 0, rt_midgc_die 1, rt_die 1 (seat exists, 0 calls yet)
+  * rt_halt 0 (the prim halt arm; retargets to the Mid Rt.halt under QBE_MIDDRIVER=1)
   * rt_gc_heap_bytes 0, rt_gc_roots_len 0
   * rt_gc_root_kind 1, rt_gc_root_slot 1, rt_gc_root_np 1
   * rt_ss_in 2, rt_ss_readbyte 1, rt_ss_close 1
@@ -720,6 +732,7 @@ rawcallArity =
         , ( "kill", 2 )
         , ( "execvp", 2 )
         , ( "_exit", 1 )
+        , ( "exit", 1 )
         , ( "getpid", 0 )
         , ( "chdir", 1 )
         , ( "getcwd", 2 )
@@ -736,7 +749,6 @@ rawcallArity =
         , ( "unlink", 1 )
         , ( "__errno_location", 0 )
         , ( "rt_halt", 0 )
-        , ( "rt_midgc_die", 1 )
         , -- T18: the collector reads the U1c globals block through this
           -- accessor (Mid.RtGc's globAddrSym; Lower's finishModule emits the
           -- 0-arg func).  The DSL's `callW globAddrSym []` sites moved to the

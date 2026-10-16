@@ -487,6 +487,15 @@ type UnsafeNode
       -- record).  Transient: constructed by Lower's record lowering, never
       -- by Mid.Rt (Mid.Rt is the only producer of the other raw nodes).
       RawDataAddr (List String)
+    | -- (stage 6 U2) the ADDRESS of a static NUL-terminated C-string data
+      -- def — a WORD producer yielding the raw `l` pointer to a content-keyed
+      -- `[DStr s, DByte 0]` def (the `sym:` key domain, shared with
+      -- LSymbol/RawDataAddr's `sym:` dedup).  Built by Mid.RtLang's `rawstr`
+      -- builtin and used by the rawAbi defuns (Rt.die/Rt.halt) to write
+      -- STATIC messages to stderr WITHOUT allocating — a die path that
+      -- interned via rt_string would recurse into the collector it is
+      -- reporting on (the OOM/mmap-fail arms).  NOT a safepoint.
+      RawCStr String
 
 
 -- The semantic word-op enums (backend-neutral: QBE's widths and mnemonics

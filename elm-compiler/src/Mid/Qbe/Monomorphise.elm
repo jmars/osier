@@ -1358,6 +1358,9 @@ unsafeChildren node =
         RawDataAddr _ ->
             []
 
+        RawCStr _ ->
+            []
+
 
 unsafeRebuild : UnsafeNode -> List Exp -> UnsafeNode
 unsafeRebuild node parts =
@@ -1441,6 +1444,9 @@ unsafeRebuild node parts =
             WithRoots { r | body = e }
 
         ( RawDataAddr _, _ ) ->
+            node
+
+        ( RawCStr _, _ ) ->
             node
 
         _ ->

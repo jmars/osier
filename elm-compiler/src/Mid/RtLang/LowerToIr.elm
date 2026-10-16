@@ -1166,6 +1166,19 @@ buildBuiltin b es =
                 _ ->
                     Err arityBug
 
+        RawStr ->
+            -- the static C-string address (stage 6 U2): the content is the
+            -- STRING LITERAL (an EStr — the only AST the parser admits for
+            -- this builtin's one slot), lowered to `Lit (LString s)` then to
+            -- the RawCStr WORD node.  A non-literal reaches this Err loudly
+            -- (never a silent guess).
+            case es of
+                [ Lit (LString s) ] ->
+                    Ok (Unsafe (RawCStr s))
+
+                _ ->
+                    Err "rawstr needs a string literal (the content is static data — RawCStr)"
+
 
 arityBug : String
 arityBug =

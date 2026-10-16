@@ -93,7 +93,7 @@ import Type.Infer as Infer
 import Type.Representation exposing (Type)
 
 
-compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( Bool, ( Bool, Bool, Bool ) ) -> Bool -> Result String String
+compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( Bool, ( Bool, Bool, ( Bool, Bool ) ) ) -> Bool -> Result String String
 compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt midCons rtLean mono consArrRec eqPtrFast =
     case
         MidModule.parseAll corpusSources
@@ -141,7 +141,7 @@ compileGroup :
     -> Bool
     -> Bool
     -> Bool
-    -> ( Bool, ( Bool, Bool, Bool ) )
+    -> ( Bool, ( Bool, Bool, ( Bool, Bool ) ) )
     -> Bool
     -> Result String String
 compileGroup env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono consArrRec eqPtrFast =
@@ -266,12 +266,12 @@ lowerAll :
     -> List MidModule.Unit
     -> List MidModule.Unit
     -> String
-    -> ( Bool, ( Bool, Bool, Bool ) )
+    -> ( Bool, ( Bool, Bool, ( Bool, Bool ) ) )
     -> Bool
     -> Result String String
 lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey consArrRec eqPtrFast =
     let
-        ( consArr, ( rec, typeSpec, midGc ) ) =
+        ( consArr, ( rec, typeSpec, ( midGc, midDriver ) ) ) =
             consArrRec
     in
     reserveRtName (corpusUnits ++ groupUnits)
@@ -390,6 +390,7 @@ lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByMod
                                                         rec
                                                         typeSpec
                                                         midGc
+                                                        midDriver
                                                         specialised.table
                                                         (completeArities globals specialised.program)
                                                         specialised.program

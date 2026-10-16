@@ -28,7 +28,9 @@ kind*2 + mark, count); two object kinds (value_array, raw); precise roots
 read through the rt_gc_roots_len/rt_gc_root_kind/rt_gc_root_slot/
 rt_gc_root_np seats; the trigger inside Rt.gcAlloc (threshold collect,
 first-fit free list, bump, exhaustion collect-and-retry); failure is LOUD
-through rt_midgc_die.  FRAME-FREE BY CONSTRUCTION: no collector defun
+through Rt.die (stage 6 U2: the raw-word die defun — the six messages fold
+into its `rawstr` arguments, replacing the deleted rt_midgc_die seat).
+FRAME-FREE BY CONSTRUCTION: no collector defun
 contains an allocating node (no RawAllocVector/RawAllocRaw, no LString, no
 WithRoots), so Mid.Rt.allocating leaves every one of them out of the framed
 set — pinned by a TestMain row, kept green by the migration.

@@ -5,6 +5,7 @@ module Mid.Rt
         , closureSeeds
         , conSeeds
         , direct
+        , driverSeeds
         , externArities
         , gcSeeds
         , program
@@ -12,6 +13,7 @@ module Mid.Rt
         , programPair
         , primImpl
         , activeSurf
+        , rawAbi
         , rtDeps
         , seeds
         , spliceSurface
@@ -547,16 +549,16 @@ rtDeps =
         , -- ===== the mark-sweep collector (zigretire stage 4, Mid.RtGc)
           ( "Rt.allocVector", [ "Rt.gcInit", "Rt.gcAlloc" ] )
         , ( "Rt.allocRaw", [ "Rt.gcInit", "Rt.gcAlloc" ] )
-        , ( "Rt.gcAlloc", [ "Rt.gcAllocGo", "Rt.collect" ] )
+        , ( "Rt.gcAlloc", [ "Rt.gcAllocGo", "Rt.collect", "Rt.die" ] )
         , ( "Rt.gcAllocGo", [ "Rt.gcAllocGo" ] )
-        , ( "Rt.gcInit", [] )
-        , ( "Rt.collect", [ "Rt.gcMarkRoots", "Rt.gcDrain", "Rt.gcSweep" ] )
-        , ( "Rt.gcMarkRoots", [ "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkPtr", "Rt.gcMarkValue" ] )
+        , ( "Rt.gcInit", [ "Rt.die" ] )
+        , ( "Rt.collect", [ "Rt.gcMarkRoots", "Rt.gcDrain", "Rt.gcSweep", "Rt.die" ] )
+        , ( "Rt.gcMarkRoots", [ "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkPtr", "Rt.gcMarkValue", "Rt.die" ] )
         , ( "Rt.gcScanValueArray", [ "Rt.gcScanValueArray", "Rt.gcMarkValue" ] )
         , ( "Rt.gcDrain", [ "Rt.gcDrain", "Rt.gcScanValueArray" ] )
         , ( "Rt.gcSweep", [ "Rt.gcSweep" ] )
-        , ( "Rt.gcMarkPtr", [] )
-        , ( "Rt.gcMarkValue", [ "Rt.gcMarkPtr" ] )
+        , ( "Rt.gcMarkPtr", [ "Rt.die" ] )
+        , ( "Rt.gcMarkValue", [ "Rt.gcMarkPtr", "Rt.die" ] )
         , -- ===== the Mid ADT constructor (zigretire stage 5)
           ( "Rt.con", [ "Rt.conFill" ] )
         , ( "Rt.conFill", [ "Rt.conFill" ] )
@@ -731,6 +733,17 @@ rtDeps =
           )
         , ( "Rt.readFileGo", [ "Rt.readFull", "Rt.memGo" ] )
         , ( "Rt.memGo", [] )
+        , -- ===== the stage-6 U2 raw-word-ABI die/halt family.  Rt.die is a
+          -- rawAbi defun (a WORD param, word result) reached from BOTH the
+          -- Mid collector's failure arms (seeded transitively under
+          -- QBE_MIDGC=1 via the gc* edges above) and Lower's non-exhaustive
+          -- die emission (seeded under QBE_MIDDRIVER=1 via `driverSeeds`
+          -- below).  Rt.halt is its 0-arg sibling, reached from Lower's
+          -- rt_halt routing under QBE_MIDDRIVER=1.  Both write a static
+          -- message via `rawstr` (no allocation) and exit(1); cStrLenGo is
+          -- the only RawCall edge.
+          ( "Rt.die", [ "Rt.cStrLenGo" ] )
+        , ( "Rt.halt", [ "Rt.cStrLenGo" ] )
         ]
 
 
@@ -788,6 +801,37 @@ used-prim census does not seed it).
 closureSeeds : List String
 closureSeeds =
     keepRtDependencies [ "Rt.closure" ]
+
+
+{-| THE RAW-WORD DEFUN CONVENTION (stage 6 U2, plan obs-4): the Rt keys that
+lower with a WORD calling convention instead of the lean `:val` ABI — their
+defuns emit `(params Base L, ret Base L/W)` and every caller (Lower-generated
+sites AND surface `call` sites) emits a matching WORD call.  The set is the
+ONE place Lower and the program builder agree on which keys are word-ABI;
+`driverSeeds` (below) is the seed list, `seeds`/`gcSeeds`/`conSeeds`/
+`closureSeeds` are the `:val` ones.  U2 carries the two smallest consumers
+(Rt.die: one WORD param, Rt.halt: zero) to prove the convention; U3-U5 add
+the frame/apply/driver family.
+-}
+rawAbi : Set String
+rawAbi =
+    Set.fromList
+        [ "Rt.die"
+        , "Rt.halt"
+        ]
+
+
+{-| The MIDDRIVER seed (stage 6 U2): the rawAbi defuns reached from
+LOWER-GENERATED call sites (not from an Rt body, so the used-prim census
+cannot seed them — the `conSeeds`/`closureSeeds` precedent).  Seeded by
+Lower when QBE_MIDDRIVER=1; transitively closed over `rtDeps` so Rt.die
+pulls Rt.cStrLenGo.  The MIDGC collector reaches Rt.die through its own
+`gcSeeds` closure (the gc* defuns' rtDeps edges), so the two hatches agree
+on the same defun.
+-}
+driverSeeds : List String
+driverSeeds =
+    keepRtDependencies [ "Rt.die", "Rt.halt" ]
 
 
 {-| The Rt defuns whose execution can reach a GC SAFEPOINT — the fact the
@@ -1108,6 +1152,11 @@ unsafeSafepoint selfKey selfArity node =
             safepoint selfKey selfArity w.ptr || safepoint selfKey selfArity w.index || safepoint selfKey selfArity w.value
 
         RawDataAddr _ ->
+            False
+
+        RawCStr _ ->
+            -- (stage 6 U2) a static data-def address — no allocation, no
+            -- safepoint (the def is content-keyed static data, never moved).
             False
 
 letValue : LetBinder -> Exp

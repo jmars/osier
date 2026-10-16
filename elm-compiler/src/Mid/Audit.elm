@@ -263,3 +263,6 @@ describe node =
 
         RawDataAddr _ ->
             "rawDataAddr (static data address)"
+
+        RawCStr _ ->
+            "rawCStr (static C-string address)"

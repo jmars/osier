@@ -555,24 +555,6 @@ var gc_heap_bytes: usize = 0;
 // updated to REMOVED in the same change; this file must not carry the old
 // seat names (the row asserts `rg` finds none).
 
-/// The Mid collector's LOUD failure seat (zigretire stage 4).  The code is
-/// the Mid.RtGc die-code table index; each message names the failure mode so
-/// a probe can tell "unknown tag" from "mark stack overflow" from "OOM".
-/// Never returns (the Mid code binds the result to a dead temp).
-export fn rt_midgc_die(code: i64) callconv(.c) i64 {
-    const msgs = [_][]const u8{
-        "midgc: unknown value tag in mark walk",
-        "midgc: unknown root kind",
-        "midgc: mark stack overflow",
-        "midgc: out of memory",
-        "midgc: mmap failed",
-        "midgc: collect before init",
-    };
-    if (code >= 0 and code < msgs.len) dieLoud(msgs[@intCast(code)]);
-    dieLoud("midgc: unknown failure");
-    return 0;
-}
-
 /// Shadow-stack bridge: the Mid mark walk reads the SAME precise roots the
 /// Zig collector's scanRoots walks, entry by entry.  RootKind is u32:
 /// ROOT_PTR=0 (slot is *usize), ROOT_VALUE=1 (slot is *Value),

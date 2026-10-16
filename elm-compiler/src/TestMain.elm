@@ -876,7 +876,7 @@ checks =
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
     , check "rt program: 150 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram True True True) == 150
+        (List.length (rtProgram True True True) == 152
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram True True True)
             && List.any
                 (\d ->
@@ -1013,7 +1013,7 @@ checks =
          List.all ok allKeys
         )
     , check "rt cons lowers to a QBE function named q_Rt_x2econs"
-        (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty (rtProgram True True True) "Rt.cons" of
+        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram True True True) "Rt.cons" of
             Ok mod ->
                 List.any (\f -> f.name == "q_Rt_x2econs") mod.funcs
 
@@ -1021,7 +1021,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a raw-word binder read in a value position (must-fail)"
-        (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
+        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
             Err msg ->
                 String.contains "raw word binder" msg
 
@@ -1029,7 +1029,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a word node in a value position (must-fail)"
-        (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
+        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
             Err msg ->
                 String.contains "value position" msg
 
@@ -1037,7 +1037,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a value binder in a raw-argument position (must-fail)"
-        (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
+        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
             Err msg ->
                 String.contains "not a raw word" msg
 
@@ -1052,12 +1052,107 @@ checks =
     , check "rt RawCallAgg classification: a defun containing one is a DIRECT safepoint (allocating — the callee is unknown generated code)"
         (Rt.direct rawCallAggProbe)
     , check "rt RawCallAgg lowers to a word-target aggregate call returning the sret address"
-        (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty [ rawCallAggProbe ] "Rt.rawCallAggProbe" of
+        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggProbe ] "Rt.rawCallAggProbe" of
             Ok mod ->
                 List.any rawCallAggCallShape mod.funcs
 
             Err _ ->
                 False
+        )
+
+    -- STAGE 6 U2: the raw-word defun convention (Mid.Rt.rawAbi).  Rt.die /
+    -- Rt.halt lower with (params Base L, ret Base L) instead of the lean
+    -- 4-arg :val ABI, and their Lower/surface callers emit matching WORD
+    -- calls.  A :val-shaped arg or an under-applied call here is a SILENT
+    -- MISCOMPILE (the callee reads a garbage register), so the emitted
+    -- shapes are pinned, not just "it links".
+    , check "rawAbi set + classification: Rt.die/Rt.halt are the word-ABI keys and are frame-free (a die path must not reach a safepoint)"
+        (Rt.rawAbi
+            == Set.fromList [ "Rt.die", "Rt.halt" ]
+            && not (Set.member "Rt.die" Rt.allocating)
+            && not (Set.member "Rt.halt" Rt.allocating)
+        )
+    , check "rawAbi emission shape: Rt.die (1 word param) emits (params [a0:l], ret l, frame-free alloc scratch)"
+        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities (rtProgram True True True)) (rtProgram True True True) "Rt.die" of
+            Ok mod ->
+                case funcByName "q_Rt_x2edie" mod of
+                    Just f ->
+                        List.map Tuple.second f.params == [ Il.Base Il.L ]
+                            && f.ret == Il.Base Il.L
+                            && not (callsSym "rt_frame_enter" f)
+                            && frameBaseIsAlloc f
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "rawAbi emission shape: Rt.halt (0-ary) emits an EMPTY param list — the lean 4-arg shape would be a silent miscompile"
+        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities (rtProgram True True True)) (rtProgram True True True) "Rt.halt" of
+            Ok mod ->
+                case funcByName "q_Rt_x2ehalt" mod of
+                    Just f ->
+                        f.params == []
+                            && f.ret == Il.Base Il.L
+                            && frameBaseIsAlloc f
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "rawAbi VALUE-position reject (fail-before): a rawAbi Rt call in a :val tail is a loud Err, never a silent word->val reinterpretation"
+        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawAbiValueMisuse ] "Rt.bad4" of
+            Err msg ->
+                String.contains "rawAbi Rt call in a VALUE position" msg
+
+            Ok _ ->
+                False
+        )
+    , check "rawAbi caller shape: the midgc die arm emits a WORD call q_Rt_x2edie(l msg) — one Base L arg, never the lean 4-arg :val shape"
+        (case QbeLower.lower False False False True True True True True False QbeTypes.empty (rtArities (rtProgram True True True ++ rtProgramGc True True True)) (rtProgram True True True ++ rtProgramGc True True True) "Rt.allocVector" of
+            Ok mod ->
+                case funcByName "q_Rt_x2egcInit" mod of
+                    Just f ->
+                        rawAbiWordCall "q_Rt_x2edie" f
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "rawAbi caller shape: the halt arm retargets rt_halt -> q_Rt_x2ehalt under QBE_MIDDRIVER and keeps rt_halt by default (the symbol swap)"
+        (let
+            prog =
+                rtProgram True True True
+         in
+         (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
+            Ok mod ->
+                case funcByName "q_Rt_x2eemptylist" mod of
+                    Just f ->
+                        callsSym "q_Rt_x2ehalt" f && not (callsSym "rt_halt" f)
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+         )
+            && (case QbeLower.lower False False False True True True True False False QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
+                    Ok mod ->
+                        case funcByName "q_Rt_x2eemptylist" mod of
+                            Just f ->
+                                callsSym "rt_halt" f && not (callsSym "q_Rt_x2ehalt" f)
+
+                            Nothing ->
+                                False
+
+                    Err _ ->
+                        False
+               )
         )
 
     -- STAGE 6 U1c: the Mid-owned globals block + its 0-arg accessor, both
@@ -1078,7 +1173,7 @@ checks =
                 False
 
             ( primProg, gcProg ) ->
-                case QbeLower.lower False False False True True True True False QbeTypes.empty (rtArities (primProg ++ gcProg)) (primProg ++ gcProg) "Rt.allocVector" of
+                case QbeLower.lower False False False True True True True False False QbeTypes.empty (rtArities (primProg ++ gcProg)) (primProg ++ gcProg) "Rt.allocVector" of
                     Ok mod ->
                         not (List.any (\d -> d.name == RtGc.globDataSym) mod.datas)
                             && not (List.any (\f -> f.name == RtGc.globAddrSym) mod.funcs)
@@ -1087,7 +1182,7 @@ checks =
                         False
         )
     , check "stage6 globals block: midGc ON emits both, in the pinned shapes, and no gc defun names the deleted seats"
-        (case QbeLower.lower False False False True True True True True QbeTypes.empty (rtArities (rtProgram True True True ++ rtProgramGc True True True)) (rtProgram True True True ++ rtProgramGc True True True) "Rt.allocVector" of
+        (case QbeLower.lower False False False True True True True True False QbeTypes.empty (rtArities (rtProgram True True True ++ rtProgramGc True True True)) (rtProgram True True True ++ rtProgramGc True True True) "Rt.allocVector" of
             Ok mod ->
                 List.any
                     (\d ->
@@ -1298,7 +1393,7 @@ checks =
             && not (Set.member "Rt.gcScanValueArray" Rt.allocating)
             && not (Set.member "Rt.gcInit" Rt.allocating)
         )
-    , check "rt gc call graph: every RawCall target in the collector is a program key AND declared in rtDeps (T18: read over the SPLICED gc half — the DSL list is tripwire seats, whose .surface-seat call would fail this row loudly if the splice ever dropped a body)"
+    , check "rt gc call graph: every RawCall target in the collector is a program key (prim half included — Rt.die is appended to the prim half) AND declared in rtDeps (T18: read over the SPLICED gc half — the DSL list is tripwire seats, whose .surface-seat call would fail this row loudly if the splice ever dropped a body)"
         (let
             gcSyms key =
                 case List.filter (\d -> d.key == key) (rtProgramGc True True True) of
@@ -1311,8 +1406,11 @@ checks =
             gcKeys =
                 List.map .key (rtProgramGc True True True)
 
+            programKeys =
+                List.map .key (rtProgram True True True ++ rtProgramGc True True True)
+
             ok key =
-                List.all (\sym -> List.member sym gcKeys && List.member sym (Maybe.withDefault [] (Dict.get key Rt.rtDeps)))
+                List.all (\sym -> List.member sym programKeys && List.member sym (Maybe.withDefault [] (Dict.get key Rt.rtDeps)))
                     (gcSyms key)
          in
          case gcKeys of
@@ -1324,9 +1422,9 @@ checks =
              _ ->
                  List.all ok gcKeys
         )
-    , check "rt gc seeds: the collector seeds are exactly the two seats plus their transitive closure"
+    , check "rt gc seeds: the collector seeds are exactly the two seats plus their transitive closure (stage 6 U2 adds Rt.die + Rt.cStrLenGo through the die arm's RawCall edge)"
         (Rt.gcSeeds
-            == [ "Rt.allocVector", "Rt.gcInit", "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.collect", "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkValue", "Rt.gcMarkPtr", "Rt.gcDrain", "Rt.gcSweep", "Rt.allocRaw" ]
+            == [ "Rt.allocVector", "Rt.gcInit", "Rt.die", "Rt.cStrLenGo", "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.collect", "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkValue", "Rt.gcMarkPtr", "Rt.gcDrain", "Rt.gcSweep", "Rt.allocRaw" ]
         )
     , check "rt con seeds: the Mid ADT constructor and its fill helper"
         (Rt.conSeeds == [ "Rt.con", "Rt.conFill" ]
@@ -1335,7 +1433,7 @@ checks =
         (Rt.closureSeeds == [ "Rt.closure", "Rt.closureFill" ]
         )
     , check "rt lean ABI: a frame-free callee has pointer params, :val return and NO frame enter/leave"
-        (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty (rtProgram True True True) "Rt.+" of
+        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram True True True) "Rt.+" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2e_x2b") mod.funcs of
                     f :: _ ->
@@ -1352,7 +1450,7 @@ checks =
                 False
         )
     , check "rt lean ABI: a framing callee (cons) keeps rt_frame_enter/leave and the lean signature"
-        (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty (rtProgram True True True) "Rt.cons" of
+        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram True True True) "Rt.cons" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2econs") mod.funcs of
                     f :: _ ->
@@ -1368,7 +1466,7 @@ checks =
                 False
         )
     , check "rt lean ABI: rt_bounce appears NOWHERE in a lean emit, and the fat hatch restores it"
-        (case QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty (rtProgram True True True) "Rt.+" of
+        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram True True True) "Rt.+" of
             Ok mod ->
                 not (List.any (callsSym "rt_bounce") mod.funcs)
 
@@ -1397,7 +1495,7 @@ checks =
     , check "rt self-tail loops: cStrLenGo/cStrCopyGo/cStrFill/memGo + the glob + ep* + RUN loops emit jmp @body and NO native call to their own symbol (the O(1)-stack property)"
         (List.all
             (\( key, qname ) ->
-                case QbeLower.lower False False False True True True True False QbeTypes.empty (rtArities (rtProgram True True True)) (rtProgram True True True) key of
+                case QbeLower.lower False False False True True True True False False QbeTypes.empty (rtArities (rtProgram True True True)) (rtProgram True True True) key of
                     Ok mod ->
                         case funcByName qname mod of
                             Just f ->
@@ -1482,8 +1580,8 @@ checks =
         )
 
     , check "rt = symbol fast path: emitted as a pointer short-circuit that KEEPS the symEq fallback, and the hatch removes it"
-        (case ( QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty (rtProgram True True True) "Rt.="
-              , QbeLower.lower False False False True True True True False QbeTypes.empty Dict.empty (rtProgram True True False) "Rt.="
+        (case ( QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram True True True) "Rt.="
+              , QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram True True False) "Rt.="
               ) of
             ( Ok onMod, Ok offMod ) ->
                 case ( funcByName "q_Rt_x2e_x3d" onMod, funcByName "q_Rt_x2e_x3d" offMod ) of
@@ -2531,13 +2629,23 @@ checks =
     -- `program`'s or `activeFlags`' DEFINITIONS; the corpus byte-identity
     -- and the t8SplicedRow structural rows are the independent oracles.
     , check
-        "T8/T18 wiring (T7's identity row, post-T18): for all 8 flag combos, the union splice (prim ++ helper ++ gcProgram) IS the pair (primHalf, gcHalf) concatenated — the gc defuns replace at their gcProgram positions, the split is order-preserving, and nothing duplicates"
+        "T8/T18 wiring (T7's identity row, post-T18): for all 8 flag combos, the union splice (prim ++ helper ++ gcProgram) and the pair (primHalf, gcHalf) agree — the gc defuns replace at their gcProgram positions, the split is order-preserving within each half, and nothing duplicates (stage 6 U2: the appended Rt.die/Rt.halt move from the splice's tail into the END of the prim half — the partition contract)"
         (List.all
             (\combo ->
                 case ( Rt.surf combo.flags, Rt.programPair combo.c combo.r combo.e ) of
                     ( Ok s, Ok ( p, g ) ) ->
-                        Rt.spliceSurface s (RtPrims.primDefuns combo.c combo.r combo.e ++ RtPrims.helperDefuns combo.r ++ RtGc.gcProgram)
-                            == Ok (p ++ g)
+                        case Rt.spliceSurface s (RtPrims.primDefuns combo.c combo.r combo.e ++ RtPrims.helperDefuns combo.r ++ RtGc.gcProgram) of
+                            Ok spliced ->
+                                let
+                                    gcKeySet =
+                                        Set.fromList (List.map .key RtGc.gcProgram)
+                                in
+                                List.sort (List.map .key (p ++ g)) == List.sort (List.map .key spliced)
+                                    && List.length (p ++ g) == List.length spliced
+                                    && List.map .key g == List.map .key (List.filter (\d -> Set.member d.key gcKeySet) spliced)
+
+                            Err _ ->
+                                False
 
                     _ ->
                         False
@@ -2592,14 +2700,14 @@ checks =
                       "Rt.bytesToStr", "Rt.c-strlen", "Rt.cStrCopyGo", "Rt.cStrEqLit", "Rt.cStrFill", "Rt.cStrLenGo",
                       "Rt.cd", "Rt.char-code", "Rt.childBuiltin", "Rt.childCd",
                       "Rt.childPwd", "Rt.close", "Rt.closeCmdTmpfds", "Rt.closeOthersGo", "Rt.closePipeTmpfds", "Rt.closePipesGo", "Rt.closure",
-                      "Rt.closureFill", "Rt.cn", "Rt.cn2", "Rt.collect", "Rt.con", "Rt.conFill", "Rt.cons", "Rt.cons?", "Rt.countL", "Rt.deepEq", "Rt.dgs", "Rt.echoGo", "Rt.empty?",
+                      "Rt.closureFill", "Rt.cn", "Rt.cn2", "Rt.collect", "Rt.con", "Rt.conFill", "Rt.cons", "Rt.cons?", "Rt.countL", "Rt.deepEq", "Rt.dgs", "Rt.die", "Rt.echoGo", "Rt.empty?",
                       "Rt.emptylist", "Rt.envHome", "Rt.epArgvGo", "Rt.epChain", "Rt.epCmd", "Rt.epCount", "Rt.epCountStdin", "Rt.epElem",
                       "Rt.epFreeArgv", "Rt.epFreeChains", "Rt.epFreeCmd", "Rt.epFreeCmds", "Rt.epFreeRedirs", "Rt.epNum", "Rt.epPipeGo",
                       "Rt.epPipeline", "Rt.epProg", "Rt.epProgGo", "Rt.epRedir", "Rt.epRedirsGo", "Rt.epStr", "Rt.epSymIs", "Rt.epSymOf",
                       "Rt.exec-plan", "Rt.exec-run", "Rt.execGo", "Rt.f/", "Rt.fillGo", "Rt.floatCopy", "Rt.gcAlloc", "Rt.gcAllocGo",
                       "Rt.gcDrain", "Rt.gcInit", "Rt.gcMarkPtr", "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcScanValueArray", "Rt.gcSweep",
                       "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot", "Rt.globIsDotDot",
-                      "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess", "Rt.intern",
+                      "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess", "Rt.halt", "Rt.intern",
                       "Rt.isChildBuiltin", "Rt.memGo", "Rt.mkTmpAt", "Rt.nameBytes", "Rt.numText", "Rt.number?", "Rt.open",
                       "Rt.openBodyTmpfile", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo", "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind",
                       "Rt.recAppendNamesGo", "Rt.recGet", "Rt.recGetGo", "Rt.recInsert", "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd",
@@ -2662,7 +2770,7 @@ checks =
     -- is now the append below; the loud Err moved to the key-agreement walk
     -- (row C), which is the collision/rename class the orphan check guarded.
     , check
-        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface NOTHING is appended — for all 8 flag combos the spliced program's key ORDER and COUNT are exactly the DSL union list's (so the emitted .ssa order cannot move)"
+        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the two stage-6 U2 keys (Rt.die, Rt.halt) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ [Rt.die, Rt.halt] and COUNT is union+2 (so the emitted .ssa order is pinned)"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -2684,7 +2792,7 @@ checks =
                             in
                             case Rt.spliceSurface s union of
                                 Ok spliced ->
-                                    List.map .key spliced == List.map .key union
+                                    List.map .key spliced == List.map .key union ++ [ "Rt.die", "Rt.halt" ]
 
                                 Err _ ->
                                     False
@@ -4987,6 +5095,9 @@ cnode st node =
         RawDataAddr _ ->
             ( node, st )
 
+        RawCStr _ ->
+            ( node, st )
+
 
 {-| The two-exp and three-exp raw-node records: the accessors name the
 fields (each ctor's record has a different field set), the rebuild
@@ -5390,6 +5501,46 @@ rawCallAggProbe =
     }
 
 
+{-| The rawAbi VALUE-position probe (stage 6 U2): a hand-built defun whose
+TAIL is a rawAbi Rt call (Rt.die) — a word producer landed in a `:val`
+position.  Lower must reject it loudly (the `lowerRawVal` rawAbi arm), never
+reinterpret the word as a Value — the silent-miscompile class this unit's
+pins exist to close.
+-}
+rawAbiValueMisuse : Defun
+rawAbiValueMisuse =
+    { key = "Rt.bad4"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body = Unsafe (RawCall { sym = "Rt.die", args = [ Lit (LNumber 0) ] })
+            }
+    }
+
+
+{-| The rawAbi WORD-call shape: a call to `sym` whose result is `Base L` and
+whose argument list is EXACTLY one `Base L` word — the shape a rawAbi Rt
+call (Rt.die) must emit, and the shape the lean 4-arg `:val` ABI must NOT
+(a mismatch is a silent register-class miscompile, not a link error).
+-}
+rawAbiWordCall : String -> Il.Func -> Bool
+rawAbiWordCall sym f =
+    List.any
+        (\b ->
+            List.any
+                (\i ->
+                    case i of
+                        Il.Call _ (Il.Base Il.L) (Il.Sym s) [ Il.ArgVal (Il.Base Il.L) _ ] ->
+                            s == sym
+
+                        _ ->
+                            False
+                )
+                b.body
+        )
+        f.blocks
+
+
 {-| The RawCallAgg IL shape: a call with a result temp, an `:ret` aggregate
 result, the callee as a WORD argument (`ArgVal (Base L) (Il.Tmp _)` — a
 register target, not a symbol), and the word args in order.
@@ -5765,6 +5916,9 @@ rawCallSyms exp =
                     rawCallSyms call.fn ++ List.concatMap rawCallSyms call.args
 
                 RawDataAddr _ ->
+                    []
+
+                RawCStr _ ->
                     []
 
 

@@ -203,6 +203,7 @@ type alias S =
     , consArr : Bool -- (A)'s switch (QBE_NOCONSARR=1 -> False = the 2-word cons)
     , typeSpec : Bool -- Unit B's switch (QBE_NOTYPESPEC=1 -> False = no binder-map type specialization)
     , midGc : Bool -- zigretire stage 4's switch (QBE_MIDGC=1 -> the Mid mark-sweep collector)
+    , midDriver : Bool -- stage 6's switch (QBE_MIDDRIVER=1 -> the raw-word ABI driver/ABI defuns are seeded and Lower's die/halt sites retarget to them)
     , funcs : List PendingFunc -- extra (closure) funcs, REVERSED
     , datas : List DataDef -- REVERSED
     , dataKeys : Dict String String -- content key -> data name (dedup)
@@ -227,6 +228,7 @@ type alias PendingFunc =
     , nparams : Int
     , ncaps : Int
     , pro : Pro
+    , rawAbi : Bool -- RtRawWord (stage 6 U2): the prologue skips the param blits — the params live in `l` registers, not frame slots
     , entryKey : Maybe String -- Just key for top-level defuns (meta table)
     }
 
@@ -242,6 +244,23 @@ because the classification proved no safepoint is reachable in this body.
 type Pro
     = PFrame
     | PAlloc
+
+
+{-| The Rt defun calling convention (stage 6 U2 extends the two lean arms
+with the raw-word one).  `RtGeneric` is the generic closure ABI (`:val`
+params, `:ret` result, rt_frame_enter — the whole Rt program under
+QBE_NORTLEAN=1); `RtLeanRooted`/`RtLeanFree` are the lean ABI (osier-midabi,
+3 pointer params + count, direct `:val` return) with a pooled ROOTED frame
+or a frame-FREE `alloc8` scratch block; `RtRawWord` is the raw-word ABI
+(plan obs-4): one `l` param per defun param, an `l` result, frame-FREE —
+the shape the stage-6 driver/ABI defuns (Rt.die/Rt.halt, the frame pair,
+the apply family, Rt.main) lower with.
+-}
+type RtAbi
+    = RtGeneric
+    | RtLeanRooted
+    | RtLeanFree
+    | RtRawWord
 
 
 emit : Il.Inst -> S -> S
@@ -378,8 +397,8 @@ unique xs =
         |> Tuple.second
 
 
-lower : Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
-lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable program entryKey =
+lower : Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
+lower rep primDirect midCons rtLean consArr rec typeSpec midGc midDriver table arityTable program entryKey =
     let
         defuns =
             Dict.fromList (List.map (\d -> ( d.key, d )) program)
@@ -417,6 +436,12 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                         List.filter (\k -> not (List.member k surfaceKeys)) (MidRt.seeds usedPrims)
                             ++ (if midGc then
                                     List.filter (\k -> not (List.member k surfaceKeys)) (unique (MidRt.gcSeeds ++ MidRt.conSeeds ++ MidRt.closureSeeds))
+
+                                else
+                                    []
+                               )
+                            ++ (if midDriver then
+                                    List.filter (\k -> not (List.member k surfaceKeys)) (unique MidRt.driverSeeds)
 
                                 else
                                     []
@@ -545,6 +570,7 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable 
                     , consArr = consArr
                     , typeSpec = typeSpec
                     , midGc = midGc
+                    , midDriver = midDriver
                     , funcs = []
                     , datas = []
                     , dataKeys = Dict.empty
@@ -970,24 +996,29 @@ lowerDefun defun sOuter =
                 qname =
                     "q_" ++ mangle defun.key
 
-                -- THE Rt LEAN ABI (osier-midabi): every Rt.* defun lowers
-                -- with pass A's calling convention instead of the generic
-                -- closure ABI — 3 pointer params + a count word, a DIRECT
-                -- :val return (no :ret, so no rt_bounce at any call site),
-                -- and a frame ONLY when the body can reach a GC safepoint
+                -- THE Rt ABI (osier-midabi + stage 6 U2 raw-word): every
+                -- Rt.* defun lowers with one of four conventions — the
+                -- raw-word ABI for MidRt.rawAbi keys (Rt.die/Rt.halt here,
+                -- the driver/ABI family in U3-U5); otherwise the lean ABI
+                -- (3 pointer params + count, direct :val return) with a
+                -- frame ONLY when the body can reach a GC safepoint
                 -- (Mid.Rt.allocating, the classification that owns the
-                -- fact).  `rt` here: Nothing = the generic ABI (surface
-                -- defuns, and the whole Rt program when QBE_NORTLEAN=1
-                -- restores the fat shape for a bisect); Just True = lean
-                -- with the pooled ROOTED frame; Just False = lean and
-                -- FRAME-FREE (a plain alloc8 scratch block — sound because
-                -- the classification proves no allocation is reachable).
+                -- fact); otherwise the generic closure ABI (surface defuns,
+                -- and the whole Rt program when QBE_NORTLEAN=1 restores the
+                -- fat shape for a bisect).
                 rt =
-                    if sOuter.rtLean && isRtKey defun.key then
-                        Just (Set.member defun.key MidRt.allocating)
+                    if Set.member defun.key MidRt.rawAbi then
+                        RtRawWord
+
+                    else if sOuter.rtLean && isRtKey defun.key then
+                        if Set.member defun.key MidRt.allocating then
+                            RtLeanRooted
+
+                        else
+                            RtLeanFree
 
                     else
-                        Nothing
+                        RtGeneric
             in
             if List.length lambda.params > maxArity then
                 Err ("qbe: defun " ++ defun.key ++ " has arity > " ++ String.fromInt maxArity ++ " (rt_callN table limit)")
@@ -1026,7 +1057,7 @@ lowerDefun defun sOuter =
 -- second lowering.
 
 
-lowerFunBody : Bool -> String -> String -> Lambda -> List Int -> Maybe Bool -> S -> Result String ( PendingFunc, S )
+lowerFunBody : Bool -> String -> String -> Lambda -> List Int -> RtAbi -> S -> Result String ( PendingFunc, S )
 lowerFunBody entry key qname lambda captures rt sOuter =
     let
         nparams =
@@ -1062,6 +1093,14 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             else
                 Ok ()
 
+        rawAbi =
+            case rt of
+                RtRawWord ->
+                    True
+
+                _ ->
+                    False
+
         -- S4: the ONLY binder types the S1 table can give is the defun's own
         -- MONOTYPE, peeled in parameter order (Mid's `params` is in the
         -- callee's order, param 1 outermost, and `Rep.TFun` is
@@ -1085,12 +1124,27 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , slot = 2 + nparams + ncaps
             , binderSlots =
                 Dict.fromList
-                    (List.indexedMap (\i p -> ( p.id, i + 2 )) lambda.params
+                    ((if rawAbi then
+                        -- rawAbi params are WORD registers, not frame slots —
+                        -- the slot counter still reserves 2..N+1 so the body's
+                        -- own temps get the SAME slot numbers as every other
+                        -- Rt defun (the slots are simply never written/read).
+                        []
+
+                      else
+                        List.indexedMap (\i p -> ( p.id, i + 2 )) lambda.params
+                     )
                         ++ List.indexedMap (\j cid -> ( cid, nparams + 2 + j )) captures
                     )
             , rawInt = Dict.empty
             , rawFloat = Dict.empty
-            , rawWord = Dict.empty
+            , rawWord =
+                if rawAbi then
+                    -- each rawAbi param arrives in its own `l` register (a0..)
+                    Dict.fromList (List.indexedMap (\i p -> ( p.id, Il.Tmp ("a" ++ String.fromInt i) )) lambda.params)
+
+                else
+                    Dict.empty
             , intBinders = intParams
             , table = sOuter.table
             , rep = sOuter.rep
@@ -1101,6 +1155,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , consArr = sOuter.consArr
             , typeSpec = sOuter.typeSpec
             , midGc = sOuter.midGc
+            , midDriver = sOuter.midDriver
             , funcs = []
             , datas = sOuter.datas
             , dataKeys = sOuter.dataKeys
@@ -1136,21 +1191,27 @@ lowerFunBody entry key qname lambda captures rt sOuter =
         sStart =
             closeBlock (Jmp "body") s0
 
-        -- the LEAN ARM (osier-midabi): the signature, the return type and
-        -- the prologue kind all switch on `rt` — Nothing is the GENERIC
-        -- (closure-ABI) shape, byte-identical to the pre-midabi emission
-        -- (the QBE_NORTLEAN=1 bisect hatch pins that identity).
+        -- the signature, the return type and the prologue kind all switch on
+        -- `rt` — RtGeneric is the GENERIC (closure-ABI) shape, byte-identical
+        -- to the pre-midabi emission (the QBE_NORTLEAN=1 bisect hatch pins
+        -- that identity).
         retTy =
             case rt of
-                Just _ ->
+                RtLeanRooted ->
                     Agg "val"
 
-                Nothing ->
+                RtLeanFree ->
+                    Agg "val"
+
+                RtRawWord ->
+                    Base L
+
+                RtGeneric ->
                     Agg "ret"
 
         paramsList =
             case rt of
-                Just _ ->
+                RtLeanRooted ->
                     -- A's uniform direct shape: 3 pointer args (the caller
                     -- pads unused ones with the LAST REAL arg's pointer,
                     -- exactly rtPrimSlotsZig's convention — the padding is
@@ -1158,12 +1219,21 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                     -- ignores (the arity is static in the tree).
                     [ ( "a0", Base L ), ( "a1", Base L ), ( "a2", Base L ), ( "an", Base W ) ]
 
-                Nothing ->
+                RtLeanFree ->
+                    [ ( "a0", Base L ), ( "a1", Base L ), ( "a2", Base L ), ( "an", Base W ) ]
+
+                RtRawWord ->
+                    List.map (\i -> ( "a" ++ String.fromInt i, Base L )) (List.range 0 (nparams - 1))
+
+                RtGeneric ->
                     List.map (\i -> ( "a" ++ String.fromInt i, Agg "val" )) (List.range 0 (nparams - 1))
 
         proKind =
             case rt of
-                Just False ->
+                RtLeanFree ->
+                    PAlloc
+
+                RtRawWord ->
                     PAlloc
 
                 _ ->
@@ -1171,16 +1241,39 @@ lowerFunBody entry key qname lambda captures rt sOuter =
 
         rtChecks =
             case rt of
-                Just _ ->
+                RtRawWord ->
+                    -- no lean-arity bound: a rawAbi defun may take 0..maxArity
+                    -- word params (Rt.halt is 0-ary); the capture bound still
+                    -- holds (an Rt defun is never a closure).
+                    rtCapsErr
+
+                RtLeanRooted ->
                     rtArityErr |> Result.andThen (\_ -> rtCapsErr)
 
-                Nothing ->
+                RtLeanFree ->
+                    rtArityErr |> Result.andThen (\_ -> rtCapsErr)
+
+                RtGeneric ->
                     Ok ()
     in
     rtChecks
-        |> Result.andThen (\_ -> startBlock "body" sStart |> lowerTail lambda.body)
+        |> Result.andThen
+            (\_ ->
+                case rt of
+                    -- rawAbi bodies RETURN A WORD: lower the tail through the
+                    -- raw-word path and hand the word to the @ret block.
+                    RtRawWord ->
+                        startBlock "body" sStart
+                            |> lowerTailWord lambda.body
+                            |> Result.map (\( s1, retWord ) -> ( s1, retWord ))
+
+                    _ ->
+                        startBlock "body" sStart
+                            |> lowerTail lambda.body
+                            |> Result.map (\s1 -> ( s1, Il.Tmp (slotTmp 0) ))
+            )
         |> Result.map
-            (\s1 ->
+            (\( s1, rawWordResult ) ->
                 let
                     -- every tail path ended in a closed block (jmp @ret/@body)
                     sRet =
@@ -1188,8 +1281,12 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                             -- FRAME-FREE lean: no pooled frame was entered,
                             -- so there is nothing to pop — the scratch block
                             -- dies with this C frame at `ret`.
-                            Just False ->
+                            RtLeanFree ->
                                 startBlock "ret" s1 |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
+
+                            -- rawAbi returns the body's WORD.
+                            RtRawWord ->
+                                startBlock "ret" s1 |> closeBlock (Ret (Just rawWordResult))
 
                             _ ->
                                 startBlock "ret" s1
@@ -1215,6 +1312,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                         , nparams = nparams
                         , ncaps = ncaps
                         , pro = proKind
+                        , rawAbi = rawAbi
                         , entryKey =
                             if entry then
                                 Just key
@@ -1276,6 +1374,35 @@ lowerTail exp s =
         _ ->
             lowerVal exp 0 s
                 |> Result.map (jumpTo "ret")
+
+
+{-| The rawAbi tail (stage 6 U2): the defun's tail VALUE is a WORD, not the
+slot-0 `:val` `lowerTail` produces.  Statements (a `Let` chain) fold in the
+same way; the leaf lowers through `rawWordArg` and the body block closes with
+`jmp @ret`, handing the word to the caller's @ret block.  A tail `If`/`App`/
+closure is not spelled by any U2 defun (Rt.die/Rt.halt end in `exit(1)` then
+`return 0`) and is a loud Err here — extend the same way `lowerTail` handles
+its arms when a rawAbi defun needs one.
+-}
+lowerTailWord : Exp -> S -> Result String ( S, Il.Arg )
+lowerTailWord exp s =
+    case exp of
+        NoTail inner ->
+            lowerTailWord inner s
+
+        Let block ->
+            lowerLetBinders block.binders s
+                |> Result.andThen (lowerTailWord block.body)
+
+        If _ ->
+            Err "qbe: raw-abi defun tail is an If (a word-valued branch join is not lowered — U2's die/halt tails are plain words)"
+
+        App _ ->
+            Err "qbe: raw-abi defun tail is an App (a word-valued tail call is not lowered — U2's die/halt tails are plain words)"
+
+        _ ->
+            rawWordArg exp s
+                |> Result.map (\( a, s1 ) -> ( jumpTo "ret" s1, a ))
 
 
 lowerVal : Exp -> Int -> S -> Result String S
@@ -1566,7 +1693,13 @@ lowerRawVal node dest s =
             -- ROOTED (rt_frame_enter); if the callee is frame-free, no GC
             -- can run anywhere under this call.  QBE_NORTLEAN=1 restores
             -- the fat :val-args/:ret/rt_bounce shape.
-            if String.startsWith "Rt." call.sym then
+            if Set.member call.sym MidRt.rawAbi then
+                -- stage 6 U2: a rawAbi defun (Rt.die/Rt.halt) is WORD-in/
+                -- WORD-out — it never appears in a VALUE position (its let
+                -- binder is a raw temp, via isRawWordExp/rawWordArg).
+                Err "qbe: rawAbi Rt call in a VALUE position — word-producing defuns (Rt.die/Rt.halt) bind to let binders and are legal only in raw-argument/tail positions"
+
+            else if String.startsWith "Rt." call.sym then
                 if Dict.member call.sym s.defuns then
                     lowerArgsToSlots call.args s
                         |> Result.andThen
@@ -1682,6 +1815,9 @@ lowerRawVal node dest s =
             Err wordProducerMessage
 
         RawDataAddr _ ->
+            Err wordProducerMessage
+
+        RawCStr _ ->
             Err wordProducerMessage
 
 
@@ -2208,9 +2344,55 @@ rawWordArg exp s =
                         let
                             ( t, s2 ) =
                                 freshTmp s1
+
+                            -- stage 6 U2: under QBE_MIDDRIVER=1 the surface's
+                            -- `rawcall rt_halt()` (the prim halt arm) routes to
+                            -- the Mid rawAbi defun Rt.halt instead of the Zig
+                            -- seat — the SAME 0-arg word-call shape, a symbol
+                            -- swap (the defun is named q_Rt_x2ehalt; the Zig
+                            -- seat keeps its name for the default route).
+                            callee =
+                                if s.midDriver && seat.sym == "rt_halt" then
+                                    "q_" ++ mangle "Rt.halt"
+
+                                else
+                                    seat.sym
                         in
-                        ( Il.Tmp t, emit (Call (Just t) (Base L) (Il.Sym seat.sym) args) s2 )
+                        ( Il.Tmp t, emit (Call (Just t) (Base L) (Il.Sym callee) args) s2 )
                     )
+
+        Unsafe (RawCall call) ->
+            -- stage 6 U2: a rawAbi Rt->Rt call (Rt.die/Rt.halt) — WORD args,
+            -- WORD result, named q_Rt_* callee.  The lean-:val RawCall lives
+            -- in lowerRawVal; this arm is the raw-word twin, reached through
+            -- isRawWordExp/rawWordOf when the let binder is a raw temp.
+            if Set.member call.sym MidRt.rawAbi then
+                if Dict.member call.sym s.defuns then
+                    List.foldl
+                        (\e acc ->
+                            Result.andThen
+                                (\( args, st ) ->
+                                    rawWordArg e st
+                                        |> Result.map (\( a, st2 ) -> ( args ++ [ ArgVal (Base L) a ], st2 ))
+                                )
+                                acc
+                        )
+                        (Ok ( [], s ))
+                        call.args
+                        |> Result.map
+                            (\( args, s1 ) ->
+                                let
+                                    ( t, s2 ) =
+                                        freshTmp s1
+                                in
+                                ( Il.Tmp t, emit (Call (Just t) (Base L) (Il.Sym ("q_" ++ mangle call.sym)) args) s2 )
+                            )
+
+                else
+                    Err ("qbe: rawCall to rawAbi defun " ++ call.sym ++ " — not in this compile (Mid.Rt.driverSeeds/gcSeeds must seed it)")
+
+            else
+                Err ("qbe: rawCall to " ++ call.sym ++ " in a word position — a non-rawAbi Rt call is a :val producer, never a word")
 
         Unsafe (RawCallAgg call) ->
             -- Call through a RUNTIME WORD with an AGGREGATE result (stage 6
@@ -2310,6 +2492,21 @@ rawWordArg exp s =
                         s1
             in
             Ok ( Il.Sym arrName, s2 )
+
+        Unsafe (RawCStr content) ->
+            -- (stage 6 U2) the ADDRESS of a static NUL-terminated string:
+            -- freshData the `sym:`-keyed def (the SAME dedup LSymbol and
+            -- RawDataAddr's ensure use — a rawstr literal and a symbol/record
+            -- field of the same content share ONE data def) and return its
+            -- symbol as the word (Il.Sym IS an Arg).
+            let
+                ( symName, s1 ) =
+                    freshData ("sym:" ++ content)
+                        (\n -> { name = n, align = Just 8, items = [ DStr content, DByte 0 ], export_ = False })
+                        s
+            in
+            Ok ( Il.Sym symName, s1 )
+
         Unsafe (RawFltBin bin) ->
             -- f64 word binop -> `d` temp.  Operands are FLOAT-word
             -- expressions (rawFltArg); landing one in an integer-word
@@ -2629,6 +2826,9 @@ rawNodeName node =
 
         RawDataAddr _ ->
             "rawDataAddr"
+
+        RawCStr _ ->
+            "rawCStr"
 
 
 -- &vec[index] — a fresh `l` temp holding vec + vs*index (the index may be a
@@ -3831,6 +4031,14 @@ isRawWordExp exp =
                 RawDataAddr _ ->
                     True
 
+                RawCStr _ ->
+                    True
+
+                RawCall call ->
+                    -- stage 6 U2: a rawAbi Rt->Rt call (Rt.die/Rt.halt) is a
+                    -- WORD producer; a :val RawCall stays on the slot path.
+                    Set.member call.sym MidRt.rawAbi
+
                 _ ->
                     False
 
@@ -4573,8 +4781,20 @@ lowerNonExhaustive msg s =
             freshData ("msg:" ++ msg)
                 (\n -> { name = n, align = Just 8, items = [ DStr msg, DByte 0 ], export_ = False })
                 s
+
+        -- stage 6 U2: under QBE_MIDDRIVER=1 the die arm retargets from the
+        -- Zig `rt_die` seat to the Mid rawAbi defun Rt.die (q_Rt_x2edie) —
+        -- the same single WORD argument (the static message address), a
+        -- symbol swap; the result type follows the callee (Base L for the
+        -- Mid word-ABI defun, Base W for the Zig seat's i64).
+        ( rtDieSym, rtDieRet ) =
+            if s.midDriver then
+                ( "q_" ++ mangle "Rt.die", Base L )
+
+            else
+                ( "rt_die", Base W )
     in
-    emit (Call Nothing (Base W) (Il.Sym "rt_die") [ ArgVal (Base L) (Il.Sym msgName) ]) s1
+    emit (Call Nothing rtDieRet (Il.Sym rtDieSym) [ ArgVal (Base L) (Il.Sym msgName) ]) s1
         |> closeBlock Hlt
 
 
@@ -6209,7 +6429,7 @@ lowerClosure lambda dest s =
                     Err ("qbe: closure has arity > " ++ String.fromInt maxArity ++ " (rt_callN table limit)")
 
                 else
-                    lowerFunBody False s1.defunKey qname lambda captures Nothing s2
+                    lowerFunBody False s1.defunKey qname lambda captures RtGeneric s2
                         |> Result.andThen
                             (\( pending, sInner ) ->
                                 -- blit each capture's CURRENT slot into its
@@ -6597,9 +6817,16 @@ withPrologue pending =
                 (List.range 0 (pending.nslots - 1))
 
         paramBlits =
-            List.map
-                (\i -> Blit (Il.Tmp ("a" ++ String.fromInt i)) (Il.Tmp (slotTmp (i + 2))) vs)
-                (List.range 0 (pending.nparams - 1))
+            -- rawAbi params are `l` REGISTERS (never blitted into slots —
+            -- the body reads them through `s.rawWord`); every other ABI
+            -- blits the incoming `%a<i>` pointers into their frame slots.
+            if pending.rawAbi then
+                []
+
+            else
+                List.map
+                    (\i -> Blit (Il.Tmp ("a" ++ String.fromInt i)) (Il.Tmp (slotTmp (i + 2))) vs)
+                    (List.range 0 (pending.nparams - 1))
 
         capBlitsPro =
             List.concatMap

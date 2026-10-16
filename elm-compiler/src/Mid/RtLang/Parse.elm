@@ -947,6 +947,9 @@ builtinCall b =
         TagIs ->
             tagIsCall
 
+        RawStr ->
+            rawStrCall
+
         _ ->
             ParserFast.map (EBuiltin b) argsInParens
 
@@ -984,6 +987,18 @@ tagIsCall =
             (spelled "," intLitArg)
             (spelled ")" (succeed ()))
         )
+
+
+{-| `rawstr("...")` — a static C-string address (stage 6 U2).  The ONE
+argument is a STRING LITERAL token (reusing `stringLit`, which owns the
+opening quote) — a computed string is unrepresentable (the content is a
+static data def), so the parser rejects anything else loud, the same
+literal-slot discipline as `payloadCall`/`tagIsCall`.  Owns its `(`.
+-}
+rawStrCall : ParserFast.Parser Exp
+rawStrCall =
+    spelled "("
+        (ParserFast.map2 (\s _ -> EBuiltin RawStr [ s ]) stringLit (spelled ")" (succeed ())))
 
 
 {-| The integer-literal token reader for index/tag slots: decimal or hex
@@ -1057,6 +1072,7 @@ allBuiltins =
     , Uext
     , BitNot
     , RecLen
+    , RawStr
     ]
 
 
