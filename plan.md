@@ -396,16 +396,19 @@ extern table**. A mismatch is loud at one end or the other.
    violated.
 4. **EFFECT CONTAINMENT — OWNER-STATED (2026-10-16).** *"functions in Osier should not be able to
    return a value which is from a call into Mid (to contain side effects)."* An Osier function MAY
-   call into mid-c, but a value obtained from such a call must **not escape the function's return**.
-   Formally: the result of a Mid import is a **tainted/opaque** type in Osier that (a) does not unify
-   with any ordinary Osier type, and (b) is not permitted in a `return` position of an Osier function
-   (nor in a value that is returned through a barriered path — the check is on dataflow, not syntax).
-   A function whose declared result would carry the taint is rejected loudly. This is what keeps a
-   foreign side effect from leaking into Osier's reasoning: a caller can invoke the effect and observe
-   it through the effect marker, but cannot smuggle its result back as an ordinary value. NOTE: how
-   the taint is PROPAGATED (does it follow the value through arithmetic/records/lists?) is the design
-   question this rule opens — M4 must answer it, and a conservative "any value derived from a Mid
-   result is tainted" is the safe floor.
+   call into mid-c, and it MAY **use** the result freely **inside** itself — the restriction is on the
+   **RETURN**, not on the use. Formally: the result of a Mid import is a **tainted/opaque** type that
+   does not unify with any ordinary Osier type, and the taint must not reach the ENCLOSING FUNCTION'S
+   `return` (directly, or through a returned closure's captures). A function whose declared result
+   would carry the taint is rejected loudly.
+   **EXPLICITLY SAFE (OWNER-STATED, mutually recursive case):** a Mid result bound in a `let`, then
+   **captured by a lambda defined below which calls itself (recursion)** — that is safe, because the
+   value stays local; the lambda is invoked, not returned. The check is therefore on **dataflow into
+   the function's return**, never a syntactic ban on the call or on let-binding/closure-capture.
+   NOTE: the open design question is precisely what counts as "reaching the return" (does the taint
+   follow a value through arithmetic/records/lists/a returned closure's captures?) — M4 must answer
+   it, and the conservative floor is "any value derived from a Mid result is tainted **for the purpose
+   of the return check only**, with local use unrestricted".
 
 Plus **ARITY**: declared and flat (Osier is curried, mid-c is flat) — the one thing `externArities`
 already does today.
