@@ -59,6 +59,7 @@ type Msg
 
 type alias Job =
     { sources : List String
+    , mids : List String
     , output : String
     }
 
@@ -155,10 +156,22 @@ manifestGo lines accSrcs accJobs =
                         Err ("manifest output marker with no sources: " ++ line)
 
                     _ ->
-                        manifestGo rest [] ({ sources = reverse accSrcs, output = markerPath line } :: accJobs)
+                        manifestGo rest [] (splitJob (reverse accSrcs) (markerPath line) :: accJobs)
 
             else
                 manifestGo rest (line :: accSrcs) accJobs
+
+
+-- M3: extension classification at the READER — a source path ending `.mid`
+-- is a mid-c module (per-group input, compiled by Mid.RtLang), everything
+-- else an Elm source.  Mirrors run.js's `isMidPath` exactly: the two drivers
+-- must split the same group the same way, or their emits diverge.
+splitJob : List String -> String -> Job
+splitJob paths output =
+    { sources = filter (\p -> not (String.endsWith ".mid" p)) paths
+    , mids = filter (String.endsWith ".mid") paths
+    , output = output
+    }
 
 
 isMarker : String -> Bool
@@ -215,7 +228,12 @@ runSsaJobs entryKey jobs =
 
 allSources : List Job -> List String
 allSources jobs =
-    concatMap2 .sources jobs
+    concatMap2 allPaths jobs
+
+
+allPaths : Job -> List String
+allPaths job =
+    append2 job.sources job.mids
 
 
 readAll paths =
@@ -248,7 +266,14 @@ corpusRoot =
 
 regroup : List Job -> List String -> List (List String)
 regroup jobs texts =
-    splitAt (List.map (\j -> count (j.sources)) jobs) texts
+    splitAt (List.map (\j -> count (allPaths j)) jobs) texts
+
+
+-- A job's text group is its sources (Elm) followed by its mids (mid-c), the
+-- `allPaths` order — split it back apart by the job's own source count.
+splitJobTexts : Job -> List String -> ( List String, List String )
+splitJobTexts job texts =
+    ( take (count job.sources) texts, drop (count job.sources) texts )
 
 
 ssaJobs : String -> List Job -> List String -> Runtime.Task x String
@@ -290,7 +315,13 @@ ssaJobs entryKey jobs texts =
                                             -- stage-6 hatch vector: ( False, True ) = run.js's
                                             -- post-A5 defaults (MIDGC off, MIDDRIVER on), the
                                             -- TestMain "U2 fix 4" pin's hand-copied twin.
-                                            (\job srcs -> renderSsa (QbeModule.compileEntry rt corpus srcs entryKey True True True True True True True ( ( True, ( True, True, ( False, True ) ) ), True )))
+                                            (\job jobTexts ->
+                                                let
+                                                    ( srcs, mids ) =
+                                                        splitJobTexts job jobTexts
+                                                in
+                                                renderSsa (QbeModule.compileEntry rt corpus srcs mids entryKey True True True True True True True ( ( True, ( True, True, ( False, True ) ) ), True ))
+                                            )
                                             jobs
                                             (regroup jobs texts)
                                         )

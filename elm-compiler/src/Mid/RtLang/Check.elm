@@ -292,10 +292,14 @@ checkExports exports arities =
 
 
 {-| The one program-shape check this unit owns: a defun's key must be a
-full `Rt.*` key — the surface defines the Rt program, and J2's call
-contract can never reach a key the `Rt.*` rule excludes (a stray
-`defun getpid()` would be uncallable and unlowerable).  Guard
-exclusivity is J8, right below.
+namespace-QUALIFIED key (a dotted `Mod.name`).  The `Rt.*`-only rule M2
+landed generalized to this: since M3 the surface also defines USER `.mid`
+modules, whose defun keys are qualified by THEIR module name (`Foo.bar`),
+so the checker can no longer assume the `Rt.` prefix (a stray bare
+`defun getpid()` would be uncallable and unlowerable).  The namespace
+OWNERSHIP — a user key must not be `Rt.*`, a key must not collide with
+another module's — is the CALLER's collision rule (QbeModule, M3), not a
+shape judgment here.  Guard exclusivity is J8, right below.
 -}
 keyCheck : Program -> Result String ()
 keyCheck program =
@@ -304,15 +308,25 @@ keyCheck program =
             Ok ()
 
         d :: rest ->
-            if String.startsWith "Rt." d.key then
+            if isQualifiedKey d.key then
                 keyCheck rest
 
             else
                 Err
                     ("RtLang: defun key '"
                         ++ d.key
-                        ++ "' must start with 'Rt.' — the surface defines the Rt program's defuns under their full rtDeps keys"
+                        ++ "' must be namespace-qualified (a dotted 'Mod.name') — the runtime's keys are Rt.*, a user module's are its own name"
                     )
+
+
+{-| A key is namespace-qualified when it carries at least one `.` (a
+`Mod.name` key).  The runtime's are `Rt.*`; a user module's are qualified
+by ITS module name (M3).  `String.toList` + `List.any` rather than
+`String.contains` (absent from the selfhost Prelude).
+-}
+isQualifiedKey : String -> Bool
+isQualifiedKey key =
+    List.any (\c -> c == '.') (String.toList key)
 
 
 {-| J8 — the `@flag` guard exclusivity walk: every key must have EXACTLY
@@ -968,13 +982,15 @@ shortSigOf =
     Sig [ TVal, TVal ] TVal
 
 
-{-| J2 — `call Key`: full `Rt.*` key, resolved against surfaces UNION
-externs, arity and per-argument classes against the callee's declared
-signature (extern seats: all-`:val`, matching today's Rt surface).
+{-| J2 — `call Key`: a namespace-qualified key (the `Rt.*`-only rule,
+generalized for user `.mid` modules in M3), resolved against surfaces
+UNION externs, arity and per-argument classes against the callee's
+declared signature (extern seats: all-`:val`, matching today's Rt
+surface).
 -}
 checkCall : Ctx -> Key -> List Exp -> Result String Type
 checkCall ctx key args =
-    if String.startsWith "Rt." key then
+    if isQualifiedKey key then
         case resolveCall ctx.env key of
             Just ( paramTys, retTy ) ->
                 case checkArgs ctx "J2" ("call '" ++ key ++ "'") paramTys args of
@@ -997,7 +1013,7 @@ checkCall ctx key args =
             (ctx.key
                 ++ ": J2: call target '"
                 ++ key
-                ++ "' must be a full 'Rt.*' key"
+                ++ "' must be a namespace-qualified 'Mod.name' key"
             )
 
 

@@ -2,7 +2,10 @@ module Mid.Rt
     exposing
         ( Impl
         , Runtime
+        , UserModule
+        , checkLowerUserModule
         , load
+        , parseUserModule
         , closureSeeds
         , conSeeds
         , driverSeeds
@@ -284,6 +287,114 @@ load source =
                         , allocating = allocating
                         , direct = direct
                         }
+
+
+-- ============================ USER .mid modules (M3) ============================
+
+
+{-| One user `.mid` module, checked and lowered (M3).  `name` is the module
+header's name — the namespace every key is qualified by; `exports` the
+export block (the declared types M4 checks against); `defuns` the
+LOWERED Mid.Ir defuns, keyed `<name>.<fn>`, ready to be appended to the
+program by the caller (QbeModule) through the SAME splice path the
+runtime uses (T25's ADD arm — a user key has no DSL position).
+-}
+type alias UserModule =
+    { name : String
+    , exports : List RtAst.Export
+    , defuns : List Defun
+    }
+
+
+{-| Parse a USER `.mid` module and enforce the NAMESPACE RULE (the module
+NAME from the header qualifies every key): a user module must carry a
+`module Name` header, and every defun/export key must be spelled
+`Name.<fn>`.  The `Rt.*`-only shape check lives in `Check.keyCheck`
+(generalized M3); THIS is the ownership half — the prefix must be the
+module's OWN name, so two modules can never silently share a key through
+a typo'd prefix.  Returns the parsed name/exports/ast for the caller to
+build the cross-module extern table before the check+lower pass.
+-}
+parseUserModule : String -> Result String ( String, List RtAst.Export, RtAst.Program )
+parseUserModule source =
+    case Mid.RtLang.Parse.parseModule source of
+        Err msg ->
+            Err msg
+
+        Ok module_ ->
+            case module_.header.name of
+                Nothing ->
+                    Err "user .mid: no `module Name` header — a user module needs a namespace to qualify its keys"
+
+                Just name ->
+                    case firstKeyNotPrefixed name (List.map .key module_.defuns) of
+                        Just bad ->
+                            Err (namespaceError name bad)
+
+                        Nothing ->
+                            case firstKeyNotPrefixed name (List.map .key module_.header.exports) of
+                                Just bad ->
+                                    Err (namespaceError name bad)
+
+                                Nothing ->
+                                    Ok ( name, module_.header.exports, module_.defuns )
+
+
+{-| Check + lower a PARSED user module against the given extern table — the
+SAME pipeline as `runtime.mid` (`Check.checkExports` -> `Check.checkProgram`
+-> `LowerToIr.lowerProgram`), with the runtime's own `surf` path.  `externs`
+is the typed extern table the module's `call` sites resolve against: the
+caller (QbeModule) supplies the runtime's `externTypes` UNION every group
+user module's exports, so a user module may `call Rt.*` or another user
+module's exported defun.  Flags are `[]`: user modules carry no `@flag`
+guards (those are the runtime's internal switches).
+-}
+checkLowerUserModule : Dict String RtAst.ExportSig -> ( String, List RtAst.Export, RtAst.Program ) -> Result String UserModule
+checkLowerUserModule externs ( name, exports, ast ) =
+    let
+        arities =
+            Dict.fromList (List.map (\d -> ( d.key, List.length d.params )) ast)
+    in
+    RtCheck.checkExports exports arities
+        |> Result.andThen (\_ -> RtCheck.checkProgram externs [] ast)
+        |> Result.andThen (\_ -> Mid.RtLang.LowerToIr.lowerProgram ast)
+        |> Result.map
+            (\defuns ->
+                { name = name
+                , exports = exports
+                , defuns = defuns
+                }
+            )
+
+
+{-| The first key in the list that is NOT qualified by `name` (i.e. does
+not start with `name ++ "."`).  `Nothing` = every key is `name.<fn>`.
+`String.startsWith (name ++ ".")` rather than `String.startsWith name`:
+`Foo` must not silently own `Foobar.baz`.
+-}
+firstKeyNotPrefixed : String -> List String -> Maybe String
+firstKeyNotPrefixed name keys =
+    case keys of
+        [] ->
+            Nothing
+
+        k :: rest ->
+            if String.startsWith (name ++ ".") k then
+                firstKeyNotPrefixed name rest
+
+            else
+                Just k
+
+
+namespaceError : String -> String -> String
+namespaceError name bad =
+    "user .mid: module '"
+        ++ name
+        ++ "' — key '"
+        ++ bad
+        ++ "' is not qualified by the module name (every defun/export key must be '"
+        ++ name
+        ++ ".<fn>')"
 
 
 {-| The three `program` switches as the surface language's ACTIVE flag set

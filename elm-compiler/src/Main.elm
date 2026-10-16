@@ -40,6 +40,7 @@ port emit : String -> Cmd msg
 type alias Flags =
     { corpusSourcesJson : String
     , groupsJson : String
+    , midsJson : String
     , entriesJson : String
     , runtimeMidJson : String
     , qbeFlatten : Bool
@@ -88,20 +89,22 @@ compileAll flags =
 
         Ok rt ->
             case
-                ( JD.decodeString (JD.list JD.string) flags.corpusSourcesJson
-                , JD.decodeString (JD.list (JD.list JD.string)) flags.groupsJson
+                ( ( JD.decodeString (JD.list JD.string) flags.corpusSourcesJson
+                  , JD.decodeString (JD.list (JD.list JD.string)) flags.groupsJson
+                  , JD.decodeString (JD.list (JD.list JD.string)) flags.midsJson
+                  )
                 , JD.decodeString (JD.list JD.string) flags.entriesJson
                 )
             of
-                ( Ok corpusSources, Ok groups, Ok entries ) ->
-                    if List.length groups /= List.length entries then
-                        encodeStrings [ "err internal: groups/entries length mismatch" ]
+                ( ( Ok corpusSources, Ok groups, Ok mids ), Ok entries ) ->
+                    if List.length groups /= List.length entries || List.length groups /= List.length mids then
+                        encodeStrings [ "err internal: groups/entries/mids length mismatch" ]
 
                     else
                         encodeStrings
-                            (List.map2
-                                (\groupSources entry ->
-                                    case QbeModule.compileEntry rt corpusSources groupSources entry flags.qbeFlatten flags.qbeRep flags.qbePrimDirect flags.qbeMidRt flags.qbeMidCons flags.qbeRtLean flags.qbeMono ( ( flags.qbeConsArr, ( flags.qbeRec, flags.qbeTypeSpec, ( flags.qbeMidGc, flags.qbeMidDriver ) ) ), flags.qbeEqPtrFast ) of
+                            (List.map3
+                                (\groupSources groupMids entry ->
+                                    case QbeModule.compileEntry rt corpusSources groupSources groupMids entry flags.qbeFlatten flags.qbeRep flags.qbePrimDirect flags.qbeMidRt flags.qbeMidCons flags.qbeRtLean flags.qbeMono ( ( flags.qbeConsArr, ( flags.qbeRec, flags.qbeTypeSpec, ( flags.qbeMidGc, flags.qbeMidDriver ) ) ), flags.qbeEqPtrFast ) of
                                         Ok ssa ->
                                             ssa
 
@@ -109,6 +112,7 @@ compileAll flags =
                                             "err " ++ msg
                                 )
                                 groups
+                                mids
                                 entries
                             )
 

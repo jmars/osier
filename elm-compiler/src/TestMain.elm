@@ -25,6 +25,7 @@ import Mid.Ir exposing (Alt, AltKind(..), Binder, Defun, Exp(..), LetBinder(..),
 import Mid.Module as MidModule
 import Mid.Qbe.Il as Il
 import Mid.Qbe.Lower as QbeLower
+import Mid.QbeModule as QbeModule
 import Mid.Qbe.Print as Print
 import Mid.Qbe.Types as QbeTypes
 import Mid.Rt as Rt
@@ -2666,6 +2667,79 @@ checks rt =
             == [ "Rt.read-file-as-string", "Rt.exec-run", "Rt.main" ]
         )
 
+    -- ==================== M3: user .mid modules ====================
+    -- The namespace rule (the module NAME qualifies every key), the SAME
+    -- Parse->Check->LowerToIr pipeline as runtime.mid, and the collision
+    -- rules defined against the export block's namespace.
+    , check "M3 namespace: a well-formed user module parses, and its keys are module-name-qualified defuns"
+        (case Rt.parseUserModule ("module UserMid\nexport UserMid.answer : val -> val -> val\ndefun UserMid.answer(a: val, b: val) -> val {\n  return mknum(payload(a, 0) + payload(b, 0));\n}") of
+            Ok ( name, exports, ast ) ->
+                name
+                    == "UserMid"
+                    && List.map .key exports
+                    == [ "UserMid.answer" ]
+                    && List.map .key ast
+                    == [ "UserMid.answer" ]
+
+            Err _ ->
+                False
+        )
+    , check "M3 namespace: a user module with NO `module Name` header is a LOUD reject (a key needs a namespace)"
+        (case Rt.parseUserModule "defun X.f() -> val { return mknil; }" of
+            Err msg ->
+                String.contains "no `module Name` header" msg
+
+            Ok _ ->
+                False
+        )
+    , check "M3 namespace: a key not qualified by the module name is a LOUD reject (a module owns only its own keys)"
+        (case Rt.parseUserModule "module A\ndefun B.f() -> val { return mknil; }" of
+            Err msg ->
+                String.contains "not qualified by the module name" msg
+
+            Ok _ ->
+                False
+        )
+    , check "M3 pipeline: a user module checks+lowers through the SAME RtLang pipeline and lands as a Mid.Ir defun under its qualified key"
+        (case Rt.parseUserModule ("module UserMid\nexport UserMid.answer : val -> val -> val\ndefun UserMid.answer(a: val, b: val) -> val {\n  return mknum(payload(a, 0) + payload(b, 0));\n}") of
+            Err msg ->
+                False
+
+            Ok parsed ->
+                case Rt.checkLowerUserModule rt.externTypes parsed of
+                    Ok m ->
+                        List.map .key m.defuns == [ "UserMid.answer" ]
+
+                    Err _ ->
+                        False
+        )
+    , check "M3 collision (a): a user key in the Rt.* namespace is a LOUD reject (the reserved compiler-internal namespace)"
+        (case QbeModule.userCollisions Dict.empty [ mkUser "X" [ "Rt.foo" ] ] of
+            Err msg ->
+                String.contains "reserved Rt.* namespace" msg
+
+            Ok () ->
+                False
+        )
+    , check "M3 collision (b): two user modules claiming the same key is a LOUD reject"
+        (case QbeModule.userCollisions Dict.empty [ mkUser "A" [ "A.f" ], mkUser "A" [ "A.f" ] ] of
+            Err msg ->
+                String.contains "defined by two modules" msg
+
+            Ok () ->
+                False
+        )
+    , check "M3 collision (bonus): a user key colliding with an Elm global is a LOUD reject"
+        (case QbeModule.userCollisions (Dict.fromList [ ( "A.f", 1 ) ]) [ mkUser "A" [ "A.f" ] ] of
+            Err msg ->
+                String.contains "collides with an Elm global" msg
+
+            Ok () ->
+                False
+        )
+    , check "M3 collision accept: disjoint user modules (and no Elm overlap) pass"
+        (QbeModule.userCollisions Dict.empty [ mkUser "A" [ "A.f" ], mkUser "B" [ "B.g" ] ] == Ok ())
+
     -- ==================== TIER-2 T4: the typechecker J1-J6 ====================
     -- (Mid.RtLang.Check — checkProgram over the parsed Ast).  Each judgment
     -- gets an ACCEPT row plus REJECT rows whose message names it (the
@@ -2780,9 +2854,10 @@ checks rt =
         "J6"
         "defun Rt.badret2() -> word {\n  return mknil;\n}"
 
-    -- ---- program shape: the Rt.* key rule (J2's namespace contract) ----
-    , checkErr "check: REJECT — a defun keyed outside Rt.* (uncallable, unlowerable)"
-        "must start with 'Rt.'"
+    -- ---- program shape: the namespace-qualified key rule (M3: the Rt.*
+    -- rule generalized — a bare key has no namespace to route a call to) ----
+    , checkErr "check: REJECT — a defun keyed without a namespace (uncallable, unlowerable)"
+        "must be namespace-qualified"
         "defun getpid() -> val {\n  return mknil;\n}"
 
     -- ==================== TIER-2 T5: the typechecker J7-J10 ====================
@@ -6468,6 +6543,19 @@ type; an unexported key's from the `valArity n` fallback — both via
 externArity : Ast.ExportSig -> Int
 externArity sig =
     List.length (Tuple.first (Ast.splitArrow sig.ty))
+
+
+{-| M3: a hand-built user `.mid` module for the COLLISION rows — only the
+defun KEYS matter to `QbeModule.userCollisions`, so the value is a dummy
+literal.  The exports are empty (the collision rules read defun keys, not
+the export block).
+-}
+mkUser : String -> List String -> Rt.UserModule
+mkUser name keys =
+    { name = name
+    , exports = []
+    , defuns = List.map (\k -> { key = k, value = Lit (LNumber 0) }) keys
+    }
 
 
 {-| M2: parse a single export line's declared TYPE by wrapping it in a

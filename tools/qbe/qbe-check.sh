@@ -166,6 +166,50 @@ run() {
   fi
 }
 
+# run_mid — like run(), but the group is TWO sources: the Osier .elm fixture
+# PLUS one user .mid module (M3: a per-group mid-c input beside the Osier
+# source).  The .mid is classified by extension in run.js, compiled by
+# Mid.RtLang, and merged; the entry is the Osier module's own.  The golden +
+# churn contract is `run`'s.
+run_mid() {
+  local name="$1" entry="$2" fixture="$3" mid="$4"; shift 4
+  local args=("$@")
+  local bin
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$mid" "$entry" "$TMP/$name")" || {
+    echo "FAIL $name: qbe-mk"; FAIL=1; return
+  }
+  local nat_out
+  nat_out="$(timeout 60 "$bin" "$entry" "${args[@]}" 2>&1)"
+  local exp
+  if [ "$FREEZE" = 1 ]; then
+    printf '%s\n' "$nat_out" > "$GOLDEN/$name.txt"
+    exp="$nat_out"
+    echo "FROZE $name: golden <- the one backend's current output (${nat_out:0:80})"
+  else
+    exp="$(golden_read "$name")"
+    if [ "$exp" = "__NO_GOLDEN__" ]; then
+      echo "FAIL $name: no golden at $GOLDEN/$name.txt"
+      FAIL=1; return
+    fi
+  fi
+  if [ "$nat_out" != "$exp" ]; then
+    echo "FAIL $name: golden='$exp' native='$nat_out'"
+    FAIL=1
+    return
+  fi
+  echo "PASS $name: golden (${nat_out:0:80})"
+  if [[ "$name" != *-nochurn ]]; then
+  local churn_out
+  churn_out="$(QBE_HEAP_MB=$CHURN_MB "$bin" "$entry" "${args[@]}" 2>&1)" || true
+  if [ "$churn_out" != "$exp" ]; then
+    echo "FAIL $name: CHURN mismatch (QBE_HEAP_MB=$CHURN_MB): '$churn_out'"
+    FAIL=1
+  else
+    echo "PASS $name: gc-churn (QBE_HEAP_MB=$CHURN_MB) identical"
+  fi
+  fi
+}
+
 # like run(), but QBE_MIDGC=1: the fixture compiles through the MID mark-sweep
 # collector (the raw allocating nodes route to Rt.allocVector/Rt.allocRaw) and
 # runs at the minimum heap, where the collector actually collects.  The golden
@@ -526,6 +570,9 @@ run closure    Closure.main     tests/elm-fixtures/closure.elm
 run const42    Const42.main     tools/qbe/fixtures/const42.elm
 run idn        Idn.idn          tools/qbe/fixtures/idn.elm 7
 run ifx        Ifx.main         tools/qbe/fixtures/ifx.elm
+# M3: the FIRST user .mid — the Osier fixture (user-mid.elm) calls the mid-c
+# defun UserMid.answer (user-mid.mid) by qualified name; the driver prints 13.
+run_mid user-mid UserMidRun.main tools/qbe/fixtures/user-mid.elm tools/qbe/fixtures/user-mid.mid
 # churn: 150k conses = ~13.2MB live, just under the CHURN_MB minimum heap, so
 # the gc-churn stress rerun collects/promotes constantly and still fits the
 # reservation; 500k at the default heap is the identity run.

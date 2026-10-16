@@ -54,6 +54,15 @@ const CORPUS = [
 // ONCE per process (the parse hoist that keeps the corpus wall ~16 s-class).
 const RUNTIME_MID = fs.readFileSync(path.join(__dirname, 'runtime.mid'), 'utf8');
 
+// M3: extension classification — a source whose path ends `.mid` is a mid-c
+// module (compiled by Mid.RtLang and merged as a per-group input), NOT an
+// Osier/Elm source.  Classified HERE at the reader (it sees paths; the Elm
+// core sees only text).  `runtime.mid` is NOT among these — it stays the
+// shipped default, read once at module load above and passed as runtimeMidJson.
+function isMidPath(p) {
+  return p.endsWith('.mid');
+}
+
 // QBE_NOFLATTEN=1 DISABLES the defun-local aggregate flattening pass.  It
 // exists so the pass can be A/B'd on the SAME source: the structural gate in
 // tools/qbe/qbe-check.sh compiles both ways and requires the aggregate prims
@@ -232,6 +241,7 @@ function compileGroups(groups) {
     flags: {
       corpusSourcesJson: JSON.stringify(CORPUS),
       groupsJson: JSON.stringify(groups.map((g) => g.sources)),
+      midsJson: JSON.stringify(groups.map((g) => g.mids)),
       entriesJson: JSON.stringify(groups.map((g) => g.entry)),
       runtimeMidJson: RUNTIME_MID,
       qbeFlatten: QBE_FLATTEN,
@@ -294,7 +304,8 @@ function main() {
     if (argv.length !== 2) usage();
     const manifest = JSON.parse(fs.readFileSync(argv[1], 'utf8'));
     const groups = manifest.groups.map((g) => ({
-      sources: g.sources.map((p) => fs.readFileSync(p, 'utf8')),
+      sources: g.sources.filter((p) => !isMidPath(p)).map((p) => fs.readFileSync(p, 'utf8')),
+      mids: g.sources.filter((p) => isMidPath(p)).map((p) => fs.readFileSync(p, 'utf8')),
       output: g.output,
       entry: g.entry || '',
     }));
@@ -312,7 +323,15 @@ function main() {
   if (!QBE_ENTRY) usage();
   const output = argv[argv.length - 1];
   const inputs = argv.slice(0, -1);
-  compileGroups([{ sources: inputs.map((p) => fs.readFileSync(p, 'utf8')), output, entry: QBE_ENTRY }]);
+  const read = (p) => fs.readFileSync(p, 'utf8');
+  compileGroups([
+    {
+      sources: inputs.filter((p) => !isMidPath(p)).map(read),
+      mids: inputs.filter((p) => isMidPath(p)).map(read),
+      output,
+      entry: QBE_ENTRY,
+    },
+  ]);
 }
 
 main();

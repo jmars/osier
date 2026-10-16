@@ -1,0 +1,10 @@
+// M3: the FIRST user .mid — a per-group mid-c module beside the Osier sources.
+// `module UserMid` is the namespace: every defun/export key is `UserMid.*`.
+// The exported `answer` adds the two boxed Int args' payload word 0 (an Elm
+// Int is storew tagNumber; storel n — payload(v, 0) is n) and re-boxes with
+// mknum.  Called from user-mid.elm by qualified name.
+module UserMid
+export UserMid.answer : val -> val -> val
+defun UserMid.answer(a: val, b: val) -> val {
+  return mknum(payload(a, 0) + payload(b, 0));
+}

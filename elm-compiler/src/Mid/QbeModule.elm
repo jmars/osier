@@ -1,4 +1,4 @@
-module Mid.QbeModule exposing (compileEntry)
+module Mid.QbeModule exposing (compileEntry, userCollisions)
 
 -- Mid.QbeModule — the NATIVE-backend driver: sources -> Mid.Ir -> QBE IL
 -- text (.ssa) for ONE entry key (native-backend stage 1; handoff-qbe-lower).
@@ -85,16 +85,17 @@ import Mid.Qbe.Peephole as QbePeephole
 import Mid.Qbe.Print as QbePrint
 import Mid.Qbe.Types as QbeTypes
 import Mid.Rt as MidRt
+import Mid.RtLang.Ast as RtAst
 import Set exposing (Set)
 import Type.Check as Check
 import Type.Env as Env exposing (Env, Scheme)
 import Type.Error as Error
 import Type.Infer as Infer
-import Type.Representation exposing (Type)
+import Type.Representation as Rep exposing (Flex(..), Kind(..), Type(..), VarId)
 
 
-compileEntry : MidRt.Runtime -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, Bool, ( Bool, Bool ) ) ), Bool ) -> Result String String
-compileEntry rt corpusSources groupSources entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
+compileEntry : MidRt.Runtime -> List String -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, Bool, ( Bool, Bool ) ) ), Bool ) -> Result String String
+compileEntry rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
     case
         MidModule.parseAll corpusSources
             |> Result.andThen
@@ -113,7 +114,7 @@ compileEntry rt corpusSources groupSources entryKey flatten rep primDirect midRt
                                                                 Err msg
 
                                                             Ok corpusGlobals ->
-                                                                compileGroup rt env nodeTypes refinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast )
+                                                                compileGroup rt env nodeTypes refinedVars corpusUnits corpusGlobals ( groupSources, groupMids ) entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast )
                                                     )
                                         )
                             )
@@ -133,7 +134,7 @@ compileGroup :
     -> Dict String (List Int)
     -> List MidModule.Unit
     -> Dict String Int
-    -> List String
+    -> ( List String, List String )
     -> String
     -> Bool
     -> Bool
@@ -144,48 +145,366 @@ compileGroup :
     -> Bool
     -> ( ( Bool, ( Bool, Bool, ( Bool, Bool ) ) ), Bool )
     -> Result String String
-compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
-    MidModule.parseAll groupSources
-        |> Result.andThen
-            (\groupFiles ->
-                MidModule.collectAll groupFiles
-                    |> Result.andThen
-                        (\groupUnits0 ->
-                            Check.checkUserGroup env (List.map .file groupUnits0)
-                                |> Result.andThen
-                                    (\checkedGroupFiles ->
-                                        MidModule.collectAll checkedGroupFiles
-                                            |> Result.andThen
-                                                (\groupUnits ->
-                                                    case MidModule.mergedGlobals (corpusUnits ++ groupUnits) of
-                                                        Err msg ->
-                                                            Err msg
+compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals ( groupSources, groupMids ) entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
+    -- M3: load the group's user .mid modules FIRST — their exported keys'
+    -- schemes join the env BEFORE the Elm sources are checked (an Elm source
+    -- may reference a mid key by qualified name).  A .mid that fails to
+    -- parse/check/lower, or that trips a collision rule, fails the GROUP.
+    case loadUserMids rt groupMids of
+        Err msg ->
+            Err msg
 
-                                                        Ok globals ->
-                                                            let
-                                                                groupTypes =
-                                                                    groupSchemes env groupUnits0
+        Ok userModules ->
+            let
+                envWithMids =
+                    injectUserSchemes env userModules
+            in
+            MidModule.parseAll groupSources
+                |> Result.andThen
+                    (\groupFiles ->
+                        MidModule.collectAll groupFiles
+                            |> Result.andThen
+                                (\groupUnits0 ->
+                                    Check.checkUserGroup envWithMids (List.map .file groupUnits0)
+                                        |> Result.andThen
+                                            (\checkedGroupFiles ->
+                                                MidModule.collectAll checkedGroupFiles
+                                                    |> Result.andThen
+                                                        (\groupUnits ->
+                                                            case MidModule.mergedGlobals (corpusUnits ++ groupUnits) of
+                                                                Err msg ->
+                                                                    Err msg
 
-                                                                -- S2/M0b: the checker's per-node/per-binder
-                                                                -- record for BOTH halves, keyed by module
-                                                                -- name (a Range is unique only within one
-                                                                -- file). Corpus: from checkBuiltins; group:
-                                                                -- from the same re-inference that recovered
-                                                                -- the schemes.
-                                                                nodeTypesByModule =
-                                                                    Dict.union groupTypes.nodeTypes corpusNodeTypes
+                                                                Ok globals0 ->
+                                                                    case userCollisions globals0 userModules of
+                                                                        Err msg ->
+                                                                            Err msg
 
-                                                                -- S5/M2 clause (c): the per-UNIT refined
-                                                                -- variable sets, merged the same way (a
-                                                                -- module name is unique per half).
-                                                                refinedVarsByModule =
-                                                                    Dict.union groupTypes.refinedVars corpusRefinedVars
-                                                            in
-                                                            lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey ( consArrRec, eqPtrFast )
-                                                )
-                                    )
+                                                                        Ok () ->
+                                                                            let
+                                                                                globals =
+                                                                                    Dict.union (userArities userModules) globals0
+
+                                                                                groupTypes =
+                                                                                    groupSchemes envWithMids groupUnits0
+
+                                                                                nodeTypesByModule =
+                                                                                    Dict.union groupTypes.nodeTypes corpusNodeTypes
+
+                                                                                refinedVarsByModule =
+                                                                                    Dict.union groupTypes.refinedVars corpusRefinedVars
+                                                                            in
+                                                                            lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule (corpusUnits ++ groupUnits) (userSurface userModules) entryKey ( consArrRec, eqPtrFast )
+                                                        )
+                                            )
+                                )
+                    )
+
+
+-- ============================ M3: user .mid modules ============================
+
+
+{-| Load the group's user `.mid` modules in TWO phases: parse ALL first (the
+namespace rule + name/exports), so the cross-module extern table — the
+runtime's `externTypes` UNION every user module's export — exists before any
+check+lower runs.  A user module may therefore `call Rt.*` (the runtime's
+exported surface) or another user module's exported defun.
+-}
+loadUserMids : MidRt.Runtime -> List String -> Result String (List MidRt.UserModule)
+loadUserMids rt sources =
+    case sequence (List.map MidRt.parseUserModule sources) of
+        Err msg ->
+            Err msg
+
+        Ok parsed ->
+            let
+                userExterns =
+                    Dict.fromList
+                        (List.concatMap
+                            (\( _, exports, _ ) -> List.map (\e -> ( e.key, e.sig )) exports)
+                            parsed
                         )
-            )
+
+                externs =
+                    Dict.union userExterns rt.externTypes
+            in
+            sequence (List.map (MidRt.checkLowerUserModule externs) parsed)
+
+
+{-| The M3 COLLISION RULES, defined against the EXPORT BLOCK's namespace (the
+module NAME from the header qualifies every key — see `Mid.Rt.parseUserModule`).
+A loud reject for each, because a silent merge here is a silent miscompile:
+
+  * (a) a user key in the `Rt.*` namespace — the RESERVED compiler-internal
+    runtime namespace.  This covers BOTH a user defun keyed `Rt.foo` and a
+    user module NAMED `Rt` (its keys are all `Rt.*`).
+  * (c) a user key colliding with a DSL/list position — SUBSUMED by (a): every
+    DSL seat (`primDefuns`/`helperDefuns`/`gcProgram`) and every runtime
+    surface key is spelled `Rt.*`, so rejecting a user `Rt.*` key prevents the
+    splice's REPLACE arm from ever swapping a runtime/DSL defun for a user one.
+  * (b) a user key defined by TWO user modules (or an Elm source — the bonus
+    arm: `globals` is the merged Elm global table, so a `.mid` and an `.elm`
+    module that both claim one key is caught here too).
+
+`Ok ()` = no collision; the caller then splices the user surface over `[]`
+(an ADD, never a REPLACE).
+-}
+userCollisions : Dict String Int -> List MidRt.UserModule -> Result String ()
+userCollisions globals modules =
+    let
+        keys =
+            List.concatMap (\m -> List.map .key m.defuns) modules
+
+        globalsSet =
+            Set.fromList (Dict.keys globals)
+    in
+    case firstMatch (\k -> String.startsWith "Rt." k) keys of
+        Just k ->
+            Err
+                ("user .mid: key '"
+                    ++ k
+                    ++ "' is in the reserved Rt.* namespace (the compiler-internal runtime AND the DSL seats live there) — rename the module or the defun"
+                )
+
+        Nothing ->
+            case firstDuplicate keys of
+                Just k ->
+                    Err
+                        ("user .mid: key '"
+                            ++ k
+                            ++ "' is defined by two modules — a .mid key is namespaced by its module name, so two modules may not claim the same key"
+                        )
+
+                Nothing ->
+                    case firstMatch (\k -> Set.member k globalsSet) keys of
+                        Just k ->
+                            Err
+                                ("user .mid: key '"
+                                    ++ k
+                                    ++ "' collides with an Elm global (a .elm module already defines it) — rename the .mid module or the Elm defun"
+                                )
+
+                        Nothing ->
+                            Ok ()
+
+
+{-| Inject the user modules' exported keys as Osier-side SCHEMES into the
+checker env, so an Elm source can reference a mid key by qualified name
+(`UserMid.answer`) and typecheck.  The scheme is the M3 PLACEHOLDER for M4's
+real declared-type mapping (`exportScheme`): it honours the ARITY and the
+`float`/known-scalar atoms, and reads `val`/unknown atoms as fresh polymorphic
+variables (the conservative `Val a`).
+-}
+injectUserSchemes : Env -> List MidRt.UserModule -> Env
+injectUserSchemes env modules =
+    List.foldl
+        (\m acc ->
+            List.foldl (\e a -> Env.insert e.key (exportScheme e.sig) a) acc m.exports
+        )
+        env
+        modules
+
+
+{-| The M3 placeholder Osier-side scheme for an export (M4 owns the real
+Osier ↔ mid-c type mapping and the taint/effect checks).  `val`, `word`,
+a type variable, a quantifier, and any unknown `OCon` all read as a FRESH
+polymorphic variable — the "any boxed value" reading of §2.5's `Val a`;
+`float` and the known scalar constructors map to their Elm types.  The body is
+the declared arrow shape (`params -> result`), so an Osier reference checks at
+the right arity; the quantifiers are the fresh variables, in order.
+-}
+exportScheme : RtAst.ExportSig -> Scheme
+exportScheme sig =
+    let
+        ( params, result ) =
+            RtAst.splitArrow sig.ty
+
+        ( paramTys, n ) =
+            mapTypes params 0
+
+        ( resultTy, _ ) =
+            otyToElm result n
+
+        body =
+            List.foldr Rep.TFun resultTy paramTys
+    in
+    { quantifiers = collectTypeVars body, body = body, bound = [] }
+
+
+mapTypes : List RtAst.OTy -> Int -> ( List Type, Int )
+mapTypes tys n =
+    case tys of
+        [] ->
+            ( [], n )
+
+        t :: rest ->
+            let
+                ( tt, n1 ) =
+                    otyToElm t n
+
+                ( restTys, n2 ) =
+                    mapTypes rest n1
+            in
+            ( tt :: restTys, n2 )
+
+
+otyToElm : RtAst.OTy -> Int -> ( Type, Int )
+otyToElm ty n =
+    case ty of
+        RtAst.OVal ->
+            ( freshVal n, n + 1 )
+
+        RtAst.OFloat ->
+            ( Rep.tFloat, n )
+
+        RtAst.OWord ->
+            ( freshVal n, n + 1 )
+
+        RtAst.OVar _ ->
+            ( freshVal n, n + 1 )
+
+        RtAst.OCon name args ->
+            case scalarCon name args of
+                Just t ->
+                    ( t, n )
+
+                Nothing ->
+                    ( freshVal n, n + 1 )
+
+        RtAst.OArrow a b ->
+            let
+                ( ta, n1 ) =
+                    otyToElm a n
+
+                ( tb, n2 ) =
+                    otyToElm b n1
+            in
+            ( Rep.TFun ta tb, n2 )
+
+        RtAst.OForall _ t ->
+            otyToElm t n
+
+        RtAst.OExists _ t ->
+            otyToElm t n
+
+
+freshVal : Int -> Type
+freshVal n =
+    Rep.TVar (Rep.var n Rep.KType Rep.FNone)
+
+
+scalarCon : String -> List RtAst.OTy -> Maybe Type
+scalarCon name args =
+    case ( name, args ) of
+        ( "Int", [] ) ->
+            Just Rep.tInt
+
+        ( "Float", [] ) ->
+            Just Rep.tFloat
+
+        ( "String", [] ) ->
+            Just Rep.tString
+
+        ( "Bool", [] ) ->
+            Just Rep.tBool
+
+        ( "Char", [] ) ->
+            Just Rep.tChar
+
+        _ ->
+            Nothing
+
+
+{-| The free type variables of a type, in first-appearance order.  The M3
+placeholder scheme builds each `val`/unknown atom as a UNIQUE fresh variable,
+so no dedup is needed — but `TFun`/`TCon` recursion keeps the order the
+quantifiers must be listed in.
+-}
+collectTypeVars : Type -> List VarId
+collectTypeVars t =
+    case t of
+        Rep.TVar v ->
+            [ v ]
+
+        Rep.TFun a b ->
+            collectTypeVars a ++ collectTypeVars b
+
+        Rep.TCon _ args ->
+            List.concatMap collectTypeVars args
+
+        Rep.TTuple ts ->
+            List.concatMap collectTypeVars ts
+
+        Rep.TRecord row ->
+            List.concatMap (\( _, ft ) -> collectTypeVars ft) row.fields
+
+
+{-| The group's user defun keys -> arity, for the merged globals table
+(`FromAst.resolveGlobal` reads it; `Lower.completeArities` re-derives the
+same arity from the defun's Lam).
+-}
+userArities : List MidRt.UserModule -> Dict String Int
+userArities modules =
+    Dict.fromList
+        (List.concatMap
+            (\m -> List.map (\d -> ( d.key, lamArity d )) m.defuns)
+            modules
+        )
+
+
+{-| The merged user surface dict (key -> lowered Defun), the input to the
+SAME splice the runtime surface goes through (`spliceSurface`, T25's ADD arm).
+-}
+userSurface : List MidRt.UserModule -> Dict String Defun
+userSurface modules =
+    Dict.fromList
+        (List.concatMap
+            (\m -> List.map (\d -> ( d.key, d )) m.defuns)
+            modules
+        )
+
+
+lamArity : Defun -> Int
+lamArity d =
+    case d.value of
+        Mid.Ir.Lam l ->
+            List.length l.params
+
+        _ ->
+            0
+
+
+firstMatch : (String -> Bool) -> List String -> Maybe String
+firstMatch pred keys =
+    case keys of
+        [] ->
+            Nothing
+
+        k :: rest ->
+            if pred k then
+                Just k
+
+            else
+                firstMatch pred rest
+
+
+firstDuplicate : List String -> Maybe String
+firstDuplicate keys =
+    firstDupHelp Set.empty keys
+
+
+firstDupHelp : Set String -> List String -> Maybe String
+firstDupHelp seen keys =
+    case keys of
+        [] ->
+            Nothing
+
+        k :: rest ->
+            if Set.member k seen then
+                Just k
+
+            else
+                firstDupHelp (Set.insert k seen) rest
 
 
 {-| The group's schemes plus what the RECOVERY pass could not infer, plus the
@@ -265,17 +584,17 @@ lowerAll :
     -> GroupSchemes
     -> Dict String (List Int)
     -> List MidModule.Unit
-    -> List MidModule.Unit
+    -> Dict String Defun
     -> String
     -> ( ( Bool, ( Bool, Bool, ( Bool, Bool ) ) ), Bool )
     -> Result String String
-lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey ( consArrRec, eqPtrFast ) =
+lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule units userSurf entryKey ( consArrRec, eqPtrFast ) =
     let
         ( consArr, ( rec, typeSpec, ( midGc, midDriver ) ) ) =
             consArrRec
     in
-    reserveRtName (corpusUnits ++ groupUnits)
-        |> Result.andThen (\_ -> compileAllJoin globals (corpusUnits ++ groupUnits) nodeTypesByModule refinedVarsByModule)
+    reserveRtName units
+        |> Result.andThen (\_ -> compileAllJoin globals units nodeTypesByModule refinedVarsByModule)
         -- The unsafe-node audit (osier-rawnodes): EVERY compile fails loudly
         -- if an `Unsafe` node appears outside the Rt.* namespace — i.e. if the
         -- front end ever emits one.  Passes nothing through unchanged-but-
@@ -329,10 +648,20 @@ lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesBy
 
                         else
                             Ok []
+
+                    -- M3: the group's USER .mid defuns join through the SAME
+                    -- splice as the runtime's own surface (T25's ADD arm — a
+                    -- user key has no DSL position, so `spliceSurface` appends
+                    -- every defun, ascending by key).  Reusing the splice keeps
+                    -- ONE merge path; the collision check in compileGroup has
+                    -- already rejected any user key that would REPLACE a DSL/
+                    -- runtime seat, so the ADDs here are collision-free.
+                    userProgramR =
+                        MidRt.spliceSurface userSurf []
                 in
-                rtProgramR
+                Result.map2 (\rtProgram userProgram -> ( rtProgram, userProgram )) rtProgramR userProgramR
                     |> Result.andThen
-                        (\rtProgram ->
+                        (\( rtProgram, userProgram ) ->
                             let
                                 -- THE TYPE TABLE (monomorphisation S1 + S2). Built HERE
                                 -- because `program` fixes the table's domain — the defun
@@ -347,7 +676,7 @@ lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesBy
                                 -- the proof this step changes no emitted output.
                                 typeTable =
                                     List.foldl QbeTypes.note
-                                        (QbeTypes.fromSchemes (Set.fromList (List.map .key (program ++ rtProgram))) groupTypes.schemes
+                                        (QbeTypes.fromSchemes (Set.fromList (List.map .key (program ++ rtProgram ++ userProgram))) groupTypes.schemes
                                             |> QbeTypes.withBinders binderPerDefun
                                         )
                                         groupTypes.failures
@@ -362,10 +691,10 @@ lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesBy
                                     (\flatProgram ->
                                         let
                                             emitProgram =
-                                                flatProgram ++ rtProgram
+                                                flatProgram ++ rtProgram ++ userProgram
 
                                             arities =
-                                                completeArities globals (program ++ rtProgram)
+                                                completeArities globals (program ++ rtProgram ++ userProgram)
                                         in
                                         (if mono then
                                             -- S5/M2: the specialiser runs LAST (on the
