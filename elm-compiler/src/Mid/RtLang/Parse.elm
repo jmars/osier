@@ -69,6 +69,26 @@ deliberate, documented restriction):
   * Whitespace is space, newline and carriage return ONLY — the vendored
     `skipWhileWhitespace` handles exactly those three; a tab is a loud
     reject.  The surface text (like the rest of this repo) uses spaces.
+  * `//` to end of line is a COMMENT (M0), dropped at parse: nothing in
+    `Mid.RtLang.Ast`, the checker or the lowerer sees it, and a comment
+    never becomes a statement.  A comment IS whitespace — the local
+    `skipWsCommentsFollowedBy` / `followedBySkipWsComments` replace the
+    vendored whitespace combinators and skip it at EVERY whitespace-legal
+    position (before/after a defun, between statements, after a statement,
+    at end of file), so a comment also serves as a REQUIRED separator
+    between two tokens (`defun //c\nRt.f(..)`).
+    THE ONE RESTRICTION: a comment may not ABUT a bare token — a `//`
+    whose immediately preceding character is a token character
+    (`[A-Za-z0-9_.]`, `isTokenChar`) is NOT a comment.  So `a //c`, `;//c`
+    and `)//c` are comments, while `a//b` is `a`, then the `/` operator,
+    then `/b` in operand position — a LOUD parse error, never a silent
+    truncation of `a` to `a`.  This is what keeps the token readers (whose
+    KEY charset includes `/`) authoritative: a `//` inside a would-be key
+    is read as part of the token and rejected by key validation, never
+    truncated.  A `//` inside a string literal is string content —
+    `stringChunkAt` never consults the skipper.  The newline that ends a
+    comment stays (it is whitespace the vendored skipper already handles),
+    so line/column numbers keep their meaning.
   * Float operators are `f+ f- f* f/`, float compares `f< f<= f> f>= f== f!=`.
     They are recognized ONLY in operator position, and the f itself must
     be AT the operator position — the token reader has already eaten a
@@ -268,7 +288,7 @@ expression, trailing whitespace; `ParserFast.run` enforces EOF.
 -}
 parseTarget : ParserFast.Parser Exp
 parseTarget =
-    ParserFast.followedBySkipWhileWhitespace expression
+    followedBySkipWsComments expression
 
 
 {-| The expression grammar's root (the `?:` value join — row 0, loosest:
@@ -279,7 +299,7 @@ trailing skip compose.
 -}
 expression : ParserFast.Parser Exp
 expression =
-    ParserFast.skipWhileWhitespaceFollowedBy ifExpLevel
+    skipWsCommentsFollowedBy ifExpLevel
 
 
 
@@ -382,7 +402,7 @@ opAt table operand peek3 =
 opStepArm : (Exp -> Exp -> Exp) -> String -> ParserFast.Parser Exp -> ParserFast.Parser (Exp -> Exp)
 opStepArm mk sym operand =
     ParserFast.symbolFollowedBy sym
-        (ParserFast.skipWhileWhitespaceFollowedBy
+        (skipWsCommentsFollowedBy
             (ParserFast.map (\rhs lhs -> mk lhs rhs) operand)
         )
 
@@ -718,7 +738,7 @@ quote BEFORE each chunk, so the chunk reader never sees one.
 -}
 stringLit : ParserFast.Parser Exp
 stringLit =
-    ParserFast.followedBySkipWhileWhitespace
+    followedBySkipWsComments
         (ParserFast.symbolFollowedBy "\""
             (ParserFast.map EStr
                 (ParserFast.loopUntil endQuote stringChunk "" (\chunk acc -> acc ++ chunk) identity)
@@ -1130,7 +1150,7 @@ so the loop's end is a NON-committed handback, never a failed match.
 -}
 programTarget : ParserFast.Parser Program
 programTarget =
-    ParserFast.followedBySkipWhileWhitespace programDefuns
+    followedBySkipWsComments programDefuns
 
 
 programDefuns : ParserFast.Parser Program
@@ -1140,7 +1160,7 @@ programDefuns =
 
 defunTarget : ParserFast.Parser Defun
 defunTarget =
-    ParserFast.followedBySkipWhileWhitespace defun
+    followedBySkipWsComments defun
 
 
 {-| One defun, including its leading whitespace.  Dispatch first (peek
@@ -1155,28 +1175,43 @@ defun =
 
 defunAt : Int -> String -> ParserFast.Parser Defun
 defunAt offset src =
-    -- peek WITHOUT dropping the tail (the O(n) invariant): `skipSpaces`
+    -- peek WITHOUT dropping the tail (the O(n) invariant): `skipWsCommentsAt`
     -- threads an offset, and the `@` / token checks read at that offset
     let
         at =
-            skipSpaces offset src
+            skipWsCommentsAt offset src
     in
     if String.slice at (at + 1) src == "@" then
-        ParserFast.skipWhileWhitespaceFollowedBy defunCore
+        skipWsCommentsFollowedBy defunCore
 
     else
         case tokenAtOff at src of
             Just ( "defun", _ ) ->
-                ParserFast.skipWhileWhitespaceFollowedBy defunCore
+                skipWsCommentsFollowedBy defunCore
 
             _ ->
                 ParserFast.problem "expected a defun (or the end of the program)"
 
 
 {-| How far the whitespace (space, newline, CR — the vendored skipper's
-exact set) extends from `n`: a pure scan used only for PEEKING; the real
-whitespace consumption stays inside the library.
+exact set) AND the `//` comments extend from `n`: a pure scan used only
+for PEEKING; the real consumption stays inside the library
+(`skipWsCommentsFollowedBy`).  A comment ends at (and keeps) its newline.
 -}
+skipWsCommentsAt : Int -> String -> Int
+skipWsCommentsAt n src =
+    let
+        afterWs =
+            skipSpaces n src
+    in
+    case commentAt afterWs src of
+        Just comment ->
+            skipWsCommentsAt (afterWs + String.length comment) src
+
+        Nothing ->
+            afterWs
+
+
 skipSpaces : Int -> String -> Int
 skipSpaces n src =
     case String.slice n (n + 1) src of
@@ -1191,6 +1226,49 @@ skipSpaces n src =
 
         _ ->
             n
+
+
+{-| The comment starting at `offset`, if there is one: `Just "// ..."` up
+to (not including) the newline that ends it, or `Nothing`.  The ABUT
+rule (module header): a `//` whose immediately preceding character is a
+token character is NOT a comment — that is what keeps `a//b` (and a `//`
+inside a would-be key, whose charset includes `/`) from silently
+truncating the token, and what makes the token readers authoritative.
+The single source of truth for both the pure peek (`skipWsCommentsAt`)
+and the parser (`commentOr`), so the two can never disagree.
+-}
+commentAt : Int -> String -> Maybe String
+commentAt offset src =
+    if String.slice offset (offset + 2) src == "//" && not (tokenCharBefore offset src) then
+        Just (String.slice offset (commentEnd offset src) src)
+
+    else
+        Nothing
+
+
+tokenCharBefore : Int -> String -> Bool
+tokenCharBefore offset src =
+    offset > 0 && String.any isTokenChar (String.slice (offset - 1) offset src)
+
+
+{-| The offset of the newline (or CR, or the end of input) that ends the
+comment starting at `n` — the comment's newline is NOT part of it (it is
+whitespace the vendored skipper owns, so row/column stay correct).
+-}
+commentEnd : Int -> String -> Int
+commentEnd n src =
+    case String.slice n (n + 1) src of
+        "\n" ->
+            n
+
+        "\u{000D}" ->
+            n
+
+        "" ->
+            n
+
+        _ ->
+            commentEnd (n + 1) src
 
 
 {-| The dispatch-committed defun body: the optional `@flag` guard, then
@@ -1236,7 +1314,7 @@ moreFlagGuardsAt offset src =
             skipSpaces offset src
     in
     if String.slice at (at + 1) src == "@" then
-        ParserFast.skipWhileWhitespaceFollowedBy
+        skipWsCommentsFollowedBy
             (ParserFast.map2 (::) flagGuard moreFlagGuards)
 
     else
@@ -1391,7 +1469,7 @@ surfaceTypeAt offset src =
 
 blockTarget : ParserFast.Parser Block
 blockTarget =
-    ParserFast.followedBySkipWhileWhitespace (ParserFast.skipWhileWhitespaceFollowedBy block)
+    followedBySkipWsComments (skipWsCommentsFollowedBy block)
 
 
 {-| `{ stmt* term }`.  The fold sees every item; the closing `}` is
@@ -1664,14 +1742,50 @@ commit parser =
 
 
 {-| Match the literal `tok` (exactly, at the current position — callers
-have just peeked it), then the whitespace after it, then `parser`.  The
-whitespace skip is `skipWhileWhitespaceFollowedBy` (a committing
+have just peeked it), then the whitespace AND `//` comments after it,
+then `parser`.  The skip is `skipWsCommentsFollowedBy` (a committing
 leading-skip), which is safe here: the `symbol` has already matched, so
 the parse is committed either way.
 -}
 spelled : String -> ParserFast.Parser res -> ParserFast.Parser res
 spelled tok parser =
-    ParserFast.symbolFollowedBy tok (ParserFast.skipWhileWhitespaceFollowedBy parser)
+    ParserFast.symbolFollowedBy tok (skipWsCommentsFollowedBy parser)
+
+
+{-| The vendored `skipWhileWhitespaceFollowedBy`, extended with `//` line
+comments (M0, module header): skip whitespace and comments, then `parser`.
+Whitespace is skipped by the vendored skip (so row/column advance
+correctly across newlines) and each comment by an exact `symbol` match on
+the comment TEXT — which never contains a newline — so both the state
+advance and the error positions stay the library's.  The recursion is
+guarded by a consumed comment, so it terminates.
+-}
+skipWsCommentsFollowedBy : ParserFast.Parser a -> ParserFast.Parser a
+skipWsCommentsFollowedBy parser =
+    ParserFast.skipWhileWhitespaceFollowedBy (commentOr parser)
+
+
+commentOr : ParserFast.Parser a -> ParserFast.Parser a
+commentOr parser =
+    ParserFast.offsetSourceAndThen
+        (\offset src ->
+            case commentAt offset src of
+                Just comment ->
+                    ParserFast.symbolFollowedBy comment (skipWsCommentsFollowedBy parser)
+
+                Nothing ->
+                    parser
+        )
+
+
+{-| The vendored `followedBySkipWhileWhitespace`, extended with `//`
+comments: parse `parser`, then skip the whitespace AND comments after it.
+Never fails (`skipWsCommentsFollowedBy (succeed ())` can only succeed),
+so it adds no commit state a caller did not already have.
+-}
+followedBySkipWsComments : ParserFast.Parser a -> ParserFast.Parser a
+followedBySkipWsComments parser =
+    ParserFast.map2 (\res _ -> res) parser (skipWsCommentsFollowedBy (succeed ()))
 
 
 {-| The vendored library exposes no `succeed`; a zero-length `symbol`

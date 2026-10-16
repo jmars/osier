@@ -2429,6 +2429,105 @@ checks =
                 False
         )
 
+    -- ==================== TIER-2 M0: `//` line comments ====================
+    -- (handoff-osier-midfile-m0-result).  A `//` to end of line is a
+    -- COMMENT, dropped at parse: nothing in Ast/Check/LowerToIr sees it
+    -- (no new Ast ctor) and it never becomes a statement.  A comment IS
+    -- whitespace — skipped wherever whitespace is legal — with ONE
+    -- restriction PINNED here: a `//` whose immediately preceding
+    -- character is a token character (`[A-Za-z0-9_.]`) is NOT a comment,
+    -- so `a//b` is LOUD and a `//` inside a key or a string literal is
+    -- never truncated.  One row per position, plus the abut-rule reject
+    -- pair and a positive control for the separator rule.
+
+    , check "parse comment: a leading comment line above the first defun (the top of a defun)"
+        (case Parse.parseProgram "// Rt.getpid — the pid boxed as a val\ndefun Rt.getpid() -> val { return mknum(1); }" of
+            Ok defuns ->
+                List.map .key defuns == [ "Rt.getpid" ]
+
+            Err _ ->
+                False
+        )
+    , check "parse comment: after a statement and at the top of the block — and it creates NO statement"
+        (Parse.parseBlock "{ // how the tag is read\n  word w = payload(v); // index 0\n  return mknum(w); }"
+            == Ok
+                { stmts = [ Ast.SBind Ast.TWord "w" (Ast.EBuiltin Ast.Payload [ Ast.EVar "v", Ast.EInt 0 ]) ]
+                , term = Ast.TRet (Ast.EBuiltin Ast.MkNum [ Ast.EVar "w" ])
+                }
+        )
+    , check "parse comment: a comment line BETWEEN two statements (nothing is dropped or reordered)"
+        (Parse.parseBlock "{ word a = mknum(1);\n  // the second one\n  word b = mknum(2);\n  return b; }"
+            == Ok
+                { stmts =
+                    [ Ast.SBind Ast.TWord "a" (Ast.EBuiltin Ast.MkNum [ Ast.EInt 1 ])
+                    , Ast.SBind Ast.TWord "b" (Ast.EBuiltin Ast.MkNum [ Ast.EInt 2 ])
+                    ]
+                , term = Ast.TRet (Ast.EVar "b")
+                }
+        )
+    , check "parse comment: between an expression's operands — after the operand, after the operator, and before it"
+        (Parse.parseExp "a + b // trailing\n" == Ok (Ast.EWordBin Ast.WAdd (Ast.EVar "a") (Ast.EVar "b"))
+            && Parse.parseExp "a // after the operand\n + b" == Ok (Ast.EWordBin Ast.WAdd (Ast.EVar "a") (Ast.EVar "b"))
+            && Parse.parseExp "a +// after the operator\n b" == Ok (Ast.EWordBin Ast.WAdd (Ast.EVar "a") (Ast.EVar "b"))
+        )
+    , check "parse comment: in the whitespace-legal header slots (inside the parameter list, after `->`)"
+        (case Parse.parseProgram "defun Rt.f(a: val, // the accumulator\n  b: val) -> // its class\nval { return mknil; }" of
+            Ok defuns ->
+                List.map .key defuns == [ "Rt.f" ]
+
+            Err _ ->
+                False
+        )
+    , check "parse comment: at end of file, after the closing brace"
+        (case Parse.parseProgram "defun Rt.f() -> val { return mknil; }\n// EOF\n" of
+            Ok defuns ->
+                List.map .key defuns == [ "Rt.f" ]
+
+            Err _ ->
+                False
+        )
+    , check "parse comment: between a branch's closing brace and its `else`"
+        (Parse.parseBlock "{ if (a == 1) { return mknil; } // the other arm\n else { return mkbool(1); } }"
+            == Ok
+                { stmts = []
+                , term =
+                    Ast.TIf (Ast.EWordCmp Ast.WCeq (Ast.EVar "a") (Ast.EInt 1))
+                        { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNil []) }
+                        (Just { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkBool [ Ast.EInt 1 ]) })
+                }
+        )
+    , check "parse comment: a comment COUNTS as the whitespace separator a token boundary needs"
+        (case Parse.parseProgram "defun //c\nRt.f() -> val { return mknil; }" of
+            Ok defuns ->
+                List.map .key defuns == [ "Rt.f" ]
+
+            Err _ ->
+                False
+        )
+    , check "parse comment CONTROL: with no separator at all the tokens merge (`defunRt`) and the parse is LOUD"
+        (case Parse.parseProgram "defunRt.f() -> val { return mknil; }" of
+            Err _ ->
+                True
+
+            Ok _ ->
+                False
+        )
+    , check "parse comment: `a//b` is NOT a comment — `/` is the division operator and the reject is loud (never a silent `a`)"
+        (case Parse.parseExp "a//b" of
+            Err msg ->
+                String.contains "expected an expression" msg
+
+            Ok _ ->
+                False
+        )
+    , check "parse comment: `a //b` (separated by whitespace) IS a comment — the other half of the abut rule"
+        (Parse.parseExp "a //b\n" == Ok (Ast.EVar "a"))
+    , checkErr "check comment: a `//` inside a call key is part of the token (never truncated to `Rt.a`) and J2 rejects it"
+        "J2"
+        "defun Rt.f(a: val) -> val {\n  return call Rt.a//b(a);\n}"
+    , check "parse comment: `//` inside a string literal is CONTENT (the string reader never consults the skipper)"
+        (Parse.parseExp "\"http://x // not a comment\"" == Ok (Ast.EStr "http://x // not a comment"))
+
     -- ==================== TIER-2 T4: the typechecker J1-J6 ====================
     -- (Mid.RtLang.Check — checkProgram over the parsed Ast).  Each judgment
     -- gets an ACCEPT row plus REJECT rows whose message names it (the
