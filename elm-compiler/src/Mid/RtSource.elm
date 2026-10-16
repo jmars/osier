@@ -4786,6 +4786,20 @@ source =
     , "  word a13 = abuf + 520;"
     , "  word a14 = abuf + 560;"
     , "  word a15 = abuf + 600;"
+    , -- ====================== stage 6 A4b — the result slots ======================
+      -- fslot holds the final Value's ADDRESS (the bounce result's 40-B sret
+      -- buffer address, or the runProgram model after the program arm); the
+      -- model itself lives in modelslot (40 B, rt_run_program's out slot).
+      -- aggcall is WORD-position here (its result is the sret buffer ADDRESS
+      -- — Check.elm J1 types both aggcall shapes :word, matching Lower's
+      -- isRawWordExp), so the driver passes the ADDRESS straight to the
+      -- rt_is_program/rt_run_program/rt_print_value seats: no Mid :val binder
+      -- is ever materialised, and the 40-B Value is never copied (its tag
+      -- word is not surface-readable — payload starts at offset 8).  malloc
+      -- (not allocraw): the slots are rooted by hand (rt_root_push_value
+      -- below) and must survive across the seats' collections.
+      "  word fslot = rawcall malloc(8);"
+    , "  word modelslot = rawcall malloc(40);"
     , -- ====================== stage 6 A4a — the 17-arm entry dispatch ======================
       -- BYTE-PARITY with rt.zig main's `callArity(m.arity, m.code, null,
       -- &argv_buf)` = bounce(callArityRet(arity, f, e, buf)): each arm calls
@@ -4797,130 +4811,182 @@ source =
       -- shape: rawAbi bodies cannot carry a tail If, and `return 0` is the
       -- branch VALUE — the join stores it in the dead slot and the chain
       -- continues, so EXACTLY the matching arm runs its calls once).  The
-      -- bounce result is DEAD here — A4b is program/print.
+      -- matching arm stashes its bounce result's sret ADDRESS in fslot —
+      -- A4b's program/print tail reads it back out.
       "  word d0 = if (mkbool(arity == 0)) {"
     , "    word r0 = aggcall ret rawsym(\"rt_call0\")(code, 0);"
-    , "    val res0 = aggcall val rawsym(\"rt_bounce\")(r0);"
+    , "    word res0 = aggcall val rawsym(\"rt_bounce\")(r0);"
+    , "    wstore(fslot, 0, res0);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
     , "  word d1 = if (mkbool(arity == 1)) {"
     , "    word r1 = aggcall ret rawsym(\"rt_call1\")(code, 0, abuf);"
-    , "    val res1 = aggcall val rawsym(\"rt_bounce\")(r1);"
+    , "    word res1 = aggcall val rawsym(\"rt_bounce\")(r1);"
+    , "    wstore(fslot, 0, res1);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
     , "  word d2 = if (mkbool(arity == 2)) {"
     , "    word r2 = aggcall ret rawsym(\"rt_call2\")(code, 0, abuf, a1);"
-    , "    val res2 = aggcall val rawsym(\"rt_bounce\")(r2);"
+    , "    word res2 = aggcall val rawsym(\"rt_bounce\")(r2);"
+    , "    wstore(fslot, 0, res2);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
     , "  word d3 = if (mkbool(arity == 3)) {"
     , "    word r3 = aggcall ret rawsym(\"rt_call3\")(code, 0, abuf, a1, a2);"
-    , "    val res3 = aggcall val rawsym(\"rt_bounce\")(r3);"
+    , "    word res3 = aggcall val rawsym(\"rt_bounce\")(r3);"
+    , "    wstore(fslot, 0, res3);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
     , "  word d4 = if (mkbool(arity == 4)) {"
     , "    word r4 = aggcall ret rawsym(\"rt_call4\")(code, 0, abuf, a1, a2, a3);"
-    , "    val res4 = aggcall val rawsym(\"rt_bounce\")(r4);"
+    , "    word res4 = aggcall val rawsym(\"rt_bounce\")(r4);"
+    , "    wstore(fslot, 0, res4);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
     , "  word d5 = if (mkbool(arity == 5)) {"
     , "    word r5 = aggcall ret rawsym(\"rt_call5\")(code, 0, abuf, a1, a2, a3, a4);"
-    , "    val res5 = aggcall val rawsym(\"rt_bounce\")(r5);"
+    , "    word res5 = aggcall val rawsym(\"rt_bounce\")(r5);"
+    , "    wstore(fslot, 0, res5);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
     , "  word d6 = if (mkbool(arity == 6)) {"
     , "    word r6 = aggcall ret rawsym(\"rt_call6\")(code, 0, abuf, a1, a2, a3, a4, a5);"
-    , "    val res6 = aggcall val rawsym(\"rt_bounce\")(r6);"
+    , "    word res6 = aggcall val rawsym(\"rt_bounce\")(r6);"
+    , "    wstore(fslot, 0, res6);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
     , "  word d7 = if (mkbool(arity == 7)) {"
     , "    word r7 = aggcall ret rawsym(\"rt_call7\")(code, 0, abuf, a1, a2, a3, a4, a5, a6);"
-    , "    val res7 = aggcall val rawsym(\"rt_bounce\")(r7);"
+    , "    word res7 = aggcall val rawsym(\"rt_bounce\")(r7);"
+    , "    wstore(fslot, 0, res7);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
     , "  word d8 = if (mkbool(arity == 8)) {"
     , "    word r8 = aggcall ret rawsym(\"rt_call8\")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7);"
-    , "    val res8 = aggcall val rawsym(\"rt_bounce\")(r8);"
+    , "    word res8 = aggcall val rawsym(\"rt_bounce\")(r8);"
+    , "    wstore(fslot, 0, res8);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
     , "  word d9 = if (mkbool(arity == 9)) {"
     , "    word r9 = aggcall ret rawsym(\"rt_call9\")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8);"
-    , "    val res9 = aggcall val rawsym(\"rt_bounce\")(r9);"
+    , "    word res9 = aggcall val rawsym(\"rt_bounce\")(r9);"
+    , "    wstore(fslot, 0, res9);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
     , "  word d10 = if (mkbool(arity == 10)) {"
     , "    word r10 = aggcall ret rawsym(\"rt_call10\")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9);"
-    , "    val res10 = aggcall val rawsym(\"rt_bounce\")(r10);"
+    , "    word res10 = aggcall val rawsym(\"rt_bounce\")(r10);"
+    , "    wstore(fslot, 0, res10);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
     , "  word d11 = if (mkbool(arity == 11)) {"
     , "    word r11 = aggcall ret rawsym(\"rt_call11\")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);"
-    , "    val res11 = aggcall val rawsym(\"rt_bounce\")(r11);"
+    , "    word res11 = aggcall val rawsym(\"rt_bounce\")(r11);"
+    , "    wstore(fslot, 0, res11);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
     , "  word d12 = if (mkbool(arity == 12)) {"
     , "    word r12 = aggcall ret rawsym(\"rt_call12\")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);"
-    , "    val res12 = aggcall val rawsym(\"rt_bounce\")(r12);"
+    , "    word res12 = aggcall val rawsym(\"rt_bounce\")(r12);"
+    , "    wstore(fslot, 0, res12);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
     , "  word d13 = if (mkbool(arity == 13)) {"
     , "    word r13 = aggcall ret rawsym(\"rt_call13\")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12);"
-    , "    val res13 = aggcall val rawsym(\"rt_bounce\")(r13);"
+    , "    word res13 = aggcall val rawsym(\"rt_bounce\")(r13);"
+    , "    wstore(fslot, 0, res13);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
     , "  word d14 = if (mkbool(arity == 14)) {"
     , "    word r14 = aggcall ret rawsym(\"rt_call14\")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13);"
-    , "    val res14 = aggcall val rawsym(\"rt_bounce\")(r14);"
+    , "    word res14 = aggcall val rawsym(\"rt_bounce\")(r14);"
+    , "    wstore(fslot, 0, res14);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
     , "  word d15 = if (mkbool(arity == 15)) {"
     , "    word r15 = aggcall ret rawsym(\"rt_call15\")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);"
-    , "    val res15 = aggcall val rawsym(\"rt_bounce\")(r15);"
+    , "    word res15 = aggcall val rawsym(\"rt_bounce\")(r15);"
+    , "    wstore(fslot, 0, res15);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
     , "  word d16 = if (mkbool(arity == 16)) {"
     , "    word r16 = aggcall ret rawsym(\"rt_call16\")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15);"
-    , "    val res16 = aggcall val rawsym(\"rt_bounce\")(r16);"
+    , "    word res16 = aggcall val rawsym(\"rt_bounce\")(r16);"
+    , "    wstore(fslot, 0, res16);"
     , "    return 0;"
     , "  } else {"
     , "    return 0;"
     , "  };"
-    , -- MARKER: A4b continues here — isProgram (rt_is_program), runProgram
-      -- (rt_run_program), print (rt_print_value + newline), exit 0 — verbatim
-      -- rt.zig main:1767-1790.  The bounce result is the dead `resN` slot of
-      -- the matching arm; A4b restructures the dispatch to expose it.
-      "  return 0;"
+    , -- ====================== stage 6 A4b — isProgram / runProgram / print ======================
+      -- VERBATIM rt.zig main:1767-1790: root the entry's result Value, ask
+      -- rt_is_program; if it is a program, drive the effect loop
+      -- (rt_run_program -> the model into modelslot) and root the model; then
+      -- rt_print_value (Value + newline) and exit 0.  Byte-parity is the
+      -- WHOLE point: rt_print_value does the allocating-writer print + the
+      -- trailing newline EXACTLY as rt.zig's main does, so the MIDDRIVER
+      -- arm's stdout is byte-identical to the default route's.  fslot names
+      -- the final Value's ADDRESS (bounce result, or the model after the
+      -- program arm).
+      --
+      -- ROOTING (matches rt.zig's main exactly): the bounce result is rooted
+      -- ONCE (rt_root_push_value of its sret address), before
+      -- rt_is_program/rt_run_program; the model is rooted only on the program
+      -- arm (rt.zig roots `final` only after runProgram).  Neither root is
+      -- popped — the driver exits after Rt.main returns (rt.zig's main pops
+      -- via defer; the Mid driver has no defer: one inert shadow-stack entry
+      -- each, the same contract as the argv-buffer root).
+      --
+      -- Each `return N` inside a branch is block-VALUE sugar (the A3a D-A
+      -- shape), NOT an early return; the exit-on-failure arms use
+      -- rawcall exit(1) — observationally identical to rt.zig's `return 1`
+      -- (the Mid driver has no stats defers).
+      "  word fptr = wload(fslot, 0);"
+    , "  rawcall rt_root_push_value(fptr);"
+    , "  word isprog = rawcall rt_is_program(fptr);"
+    , "  word ran = if (mkbool(isprog != 0)) {"
+    , "    word rrc = rawcall rt_run_program(fptr, modelslot);"
+    , "    word rr = if (mkbool(rrc != 0)) { rawcall exit(1); return 0; } else { return 0; };"
+    , "    rawcall rt_root_push_value(modelslot);"
+    , "    wstore(fslot, 0, modelslot);"
+    , "    return 0;"
+    , "  } else {"
+    , "    return 0;"
+    , "  };"
+    , "  word fptr2 = wload(fslot, 0);"
+    , "  word ppc = rawcall rt_print_value(fptr2);"
+    , "  word pf = if (mkbool(ppc != 0)) { rawcall exit(1); return 0; } else { return 0; };"
+    , "  return 0;"
     , "}"
     ]

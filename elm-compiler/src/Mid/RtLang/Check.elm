@@ -1004,10 +1004,17 @@ checkRawCall ctx sym args =
 
 
 {-| The aggcall family (J1's call row): the fn expression and every argument
-are `:word`; the RESULT class is the shape — `ret` yields the 80-B sret
-buffer ADDRESS as `:word` (read the fields with wload), `val` yields the
-40-B tagged `:val` (blitted into the binder slot by Lower's value-position
-RawCallAgg arm, the A1 item-5 shape — the driver's rt_bounce sret-as-a-Value).
+are `:word`, and the RESULT is the sret buffer ADDRESS as `:word` for BOTH
+shapes — `ret` (80 B, read the fields with wload) and `val` (40 B, the
+tagged Value the callee wrote).  The shape selects only the AGGREGATE SIZE
+the callee's sret occupies, never the result class: Lower's isRawWordExp
+classifies EVERY RawCallAgg as a word producer (the sret address), so the
+checker must agree — the A4a AggVal->TVal reading made `val x = aggcall val`
+check :val while Lower bound a raw word, an unreadable binder (stage 6 A4b
+hit it: payload = "raw word in VALUE position", wload = "needs word, got
+val").  The driver reaches the Value by PASSING the sret ADDRESS to the
+rt_is_program/rt_run_program/rt_print_value seats — no Mid :val binder is
+ever materialised, which is exactly the driver's shape.
 -}
 checkAggCall : Ctx -> AggShape -> Exp -> List Exp -> Result String Type
 checkAggCall ctx shape fnExp args =
@@ -1024,14 +1031,7 @@ checkAggCall ctx shape fnExp args =
                     args
             of
                 Ok () ->
-                    Ok
-                        (case shape of
-                            AggVal ->
-                                TVal
-
-                            AggRet ->
-                                TWord
-                        )
+                    Ok TWord
 
                 Err msg ->
                     Err msg

@@ -769,8 +769,10 @@ rtDeps =
           -- reached cStrLenGo before A3b; A3b adds the meta-walk edge, A4a
           -- the arg loop.  Everything else it reaches is a rawcall
           -- (write/exit/getenv/getrlimit/setrlimit/malloc/rt_boot/
-          -- rt_parse_arg/rt_argv_install/rt_root_push_value_array) or a
-          -- rawstr/rawsym static def — neither is an rtDeps edge.
+          -- rt_parse_arg/rt_argv_install/rt_root_push_value_array +
+          -- A4b's rt_root_push_value/rt_is_program/rt_run_program/
+          -- rt_print_value) or a rawstr/rawsym static def — neither is an
+          -- rtDeps edge.
           ( "Rt.main", [ "Rt.cStrLenGo", "Rt.metaGo", "Rt.parseArgsGo" ] )
         ]
 

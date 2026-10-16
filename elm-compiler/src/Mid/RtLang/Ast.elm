@@ -795,6 +795,13 @@ rawcallArity =
         , ( "rt_parse_arg", 2 )
         , ( "rt_argv_install", 3 )
         , ( "rt_root_push_value_array", 2 )
+        , -- ===== the stage-6 A4b program/print seats (the A2 word-in/out
+          -- seats the driver's tail reaches: isProgram/runProgram/print +
+          -- the single-value root for the result/model slots)
+        ( "rt_root_push_value", 1 )
+        , ( "rt_is_program", 1 )
+        , ( "rt_run_program", 2 )
+        , ( "rt_print_value", 1 )
         , ( "getdents64", 3 )
         , ( "fstatat", 4 )
         , ( "clock_gettime", 2 )

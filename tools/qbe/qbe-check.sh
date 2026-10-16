@@ -437,6 +437,86 @@ run_err_md() {
   echo "PASS $name: golden + exit $rc (${nat_out:0:80})"
 }
 
+# run_md — a MIDDRIVER RUN row (stage 6 A4b): the fixture COMPILES AND RUNS
+# under the MID-WRITTEN Rt.main driver, byte-identical to the DEFAULT arm.
+# Builds BOTH binaries — the default arm via qbe-mk, and the MIDDRIVER arm via
+# the run_err_md pipeline (strip Zig main, QBE_MIDDRIVER=1) — runs each with
+# the SAME command line (and SAME env for the io rows), and requires STDOUT,
+# STDERR and EXIT CODE to be byte-identical across the two arms.  The default
+# arm's stdout is the one the corresponding run()/run_argv()/run_io() row pins
+# in `golden`, and this row re-checks that pin so the A/B is self-contained:
+# a green row proves the Mid driver produces the SAME observable result as the
+# Zig main — the whole point of stage 6 A4b.
+#
+# `want_rc` is NOT a parameter: the exit codes are compared BETWEEN the arms
+# (both are 0 for a run row), and the pinned golden is the output-only pin the
+# default row froze.  `entry` is BOTH the build entry and argv[1], as run().
+# `env...` are passed to BOTH runs (the io rows need QBE_IO_IN/QBE_IO_OUT).
+run_md() {
+  local name="$1" golden="$2" entry="$3" fixture="$4"; shift 4
+  local cli=("$@")
+  local src rt_path rt_nomain ssa bin_def bin_md
+  local def_out rc_def rc_md
+  src="$ROOT/$fixture"
+  [ -f "$src" ] || { echo "FAIL $name: no source: $src"; FAIL=1; return; }
+  # DEFAULT arm (the same binary run() builds; its golden is pinned by the
+  # run()/run_argv()/run_io() row named `golden`).
+  bin_def="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$TMP/$name-def")" || {
+    echo "FAIL $name: qbe-mk (default)"; FAIL=1; return
+  }
+  # MIDDRIVER arm (run_err_md's pipeline: strip Zig main from a COPY,
+  # QBE_MIDDRIVER=1 emit).
+  rt_path="$("$ROOT/tools/qbe/rt-o.sh")" || { echo "FAIL $name: rt-o"; FAIL=1; return; }
+  rt_nomain="$TMP/$name-rt.o"
+  cp "$rt_path" "$rt_nomain" && objcopy --strip-symbol=main "$rt_nomain" || {
+    echo "FAIL $name: objcopy --strip-symbol=main"; FAIL=1; return
+  }
+  ssa="$TMP/$name.ssa"
+  (cd "$ROOT/elm-compiler" &&
+    QBE=1 QBE_ENTRY="$entry" QBE_MIDDRIVER=1 node run.js "$src" "$ssa") >&2 || {
+    echo "FAIL $name: qbe-mk (QBE_MIDDRIVER=1)"; FAIL=1; return
+  }
+  case "$(head -c 4 "$ssa")" in
+    "err "*) echo "FAIL $name: compile failed: $(cat "$ssa")"; FAIL=1; return;;
+  esac
+  "$ROOT/vendor/qbe/qbe" "$ssa" > "$TMP/$name.s"
+  bin_md="$TMP/$name-md"
+  cc "$TMP/$name.s" "$rt_nomain" -o "$bin_md" -lc || {
+    echo "FAIL $name: link"; FAIL=1; return
+  }
+  if [ "$FREEZE" = 1 ]; then
+    echo "FAIL $name: a MIDDRIVER run row is an A/B arm comparison — freeze the default row ($golden), not this one"
+    FAIL=1; return
+  fi
+  # run BOTH arms with the SAME command line and the SAME inherited env (the
+  # io rows set QBE_IO_IN/QBE_IO_OUT on the run_md invocation), capturing the
+  # three channels SEPARATELY (stdout/stderr/exit — the brief's triple).
+  timeout 60 "$bin_def" "$entry" "${cli[@]}" > "$TMP/$name-def.out" 2> "$TMP/$name-def.err"
+  rc_def=$?
+  timeout 60 "$bin_md" "$entry" "${cli[@]}" > "$TMP/$name-md.out" 2> "$TMP/$name-md.err"
+  rc_md=$?
+  # the default arm's stdout must still match its pinned golden (the golden IS
+  # the default arm, frozen by the run()/run_argv()/run_io() row).
+  def_out="$(cat "$TMP/$name-def.out")"
+  if [ "$def_out" != "$(golden_read "$golden")" ]; then
+    echo "FAIL $name: default arm no longer matches golden '$golden' (the pin moved — refreeze the run() row)"
+    FAIL=1; return
+  fi
+  if ! cmp -s "$TMP/$name-md.out" "$TMP/$name-def.out"; then
+    echo "FAIL $name: STDOUT differs — midriver='$(cat "$TMP/$name-md.out")' default='$(cat "$TMP/$name-def.out")'"
+    FAIL=1; return
+  fi
+  if ! cmp -s "$TMP/$name-md.err" "$TMP/$name-def.err"; then
+    echo "FAIL $name: STDERR differs — midriver='$(cat "$TMP/$name-md.err")' default='$(cat "$TMP/$name-def.err")'"
+    FAIL=1; return
+  fi
+  if [ "$rc_md" -ne "$rc_def" ]; then
+    echo "FAIL $name: exit differs — midriver=$rc_md default=$rc_def"
+    FAIL=1; return
+  fi
+  echo "PASS $name: stdout+stderr+exit identical to default arm (${def_out:0:60})"
+}
+
 # ---- the slice fixtures (in-scope constructs only) ----
 run fib        Fib.fib          tests/elm-fixtures/fib.elm 10
 run fib20      Fib.fib          tests/elm-fixtures/fib.elm 20
@@ -706,6 +786,30 @@ run_io() {
 run_io io-read   IoRead.main  tools/qbe/fixtures/io-read.elm
 run_io io-write  IoWrite.main tools/qbe/fixtures/io-write.elm
 run_io io-fail   IoFail.main  tools/qbe/fixtures/io-fail.elm
+
+# ---- stage-6 A4b: THE FULL MIDDRIVER RUN BATTERY, QBE_MIDDRIVER=1 ----
+# The point of the unit: the MID-WRITTEN Rt.main driver COMPILES AND RUNS a
+# representative slice of the corpus, byte-identical (stdout + stderr + exit)
+# to the DEFAULT arm each row's golden already pins.  Every arm class the
+# 17-way dispatch covers: no-arg (rt_call0), 1-int-arg (rt_call1), 9-int-arg
+# (rt_call9), float-arg, a closure, a partial/over-application chain, a list,
+# a record, argv-mode, and the PROGRAM path (rt_is_program -> rt_run_program
+# -> rt_print_value — the io rows) which is the new code A4b adds.
+run_md md-const42   const42         Const42.main     tools/qbe/fixtures/const42.elm
+run_md md-idn       idn             Idn.idn          tools/qbe/fixtures/idn.elm 7
+run_md md-arity9    arity9          Arity9.add9      tools/qbe/fixtures/arity9.elm 1 2 3 4 5 6 7 8 9
+run_md md-float-arg float-arg       Flt.idF          tools/qbe/fixtures/float.elm 2.5
+run_md md-closure   closure         Closure.main     tests/elm-fixtures/closure.elm
+run_md md-partyapply partyapply     PartyApply.chain tools/qbe/fixtures/partyapply.elm
+run_md md-list      list            ListAgg.main     tools/qbe/fixtures/list.elm
+run_md md-record    record          Record.main      tools/qbe/fixtures/record.elm
+AOTRUN_ARGV=1 run_md md-argvrepro-count argvrepro-count ArgvRepro.count tools/qbe/fixtures/argvrepro.elm a b c d
+# the PROGRAM path (the effect-loop seam): rt_is_program sees the entry's
+# `Platform.program` value, rt_run_program drives the shared CEK manager, and
+# rt_print_value prints the model — the same stdout the default arm's Zig main
+# produces.  The env is passed to BOTH arms via the run_md invocation.
+QBE_IO_IN="$IO_IN" QBE_IO_OUT="$IO_OUT" run_md md-io-read  io-read  IoRead.main  tools/qbe/fixtures/io-read.elm
+QBE_IO_IN="$IO_IN" QBE_IO_OUT="$IO_OUT" run_md md-io-write io-write IoWrite.main tools/qbe/fixtures/io-write.elm
 # the write path's on-disk bytes: both runs wrote IO_OUT, and both must equal
 # the exact expected content (a round-trip read could hide a wrong write).
 EXPECTED_IO="hello native

@@ -1253,8 +1253,8 @@ checks =
             Err _ ->
                 False
         )
-    , check "A1b aggcall surface → RawCallAgg with a RawSym callee: `aggcall val rawsym(\"rt_bounce\")(0)` lowers fn to the function-symbol producer (content, not a rawstr data def) — A4a makes the val shape a :val (it binds a val slot now, the A1 item-5 value-position arm)"
-        (case lowlBody "defun Rt.agg(a : val) -> val {\n  val r = aggcall val rawsym(\"rt_bounce\")(0);\n  return mknil;\n}" of
+    , check "A1b aggcall surface → RawCallAgg with a RawSym callee: `aggcall val rawsym(\"rt_bounce\")(0)` lowers fn to the function-symbol producer (content, not a rawstr data def) — the binder is a WORD (the sret buffer address; A4b corrected J1: BOTH aggcall shapes are :word)"
+        (case lowlBody "defun Rt.agg(a : val) -> val {\n  word r = aggcall val rawsym(\"rt_bounce\")(0);\n  return mknil;\n}" of
             Ok body ->
                 canon body
                     == canon (llets [ ( ltb 2, Unsafe (RawCallAgg { fn = Unsafe (RawSym "rt_bounce"), args = [ ltn 0 ], shape = "val" }) ) ] lmkNilV)
@@ -1262,8 +1262,8 @@ checks =
             Err _ ->
                 False
         )
-    , check "A4a J1 aggcall shape classes: `aggcall val` checks :val (binds a val slot, the A1 item-5 value-position arm) and `aggcall ret` checks :word (the 80-B sret ADDRESS); the wrong binder is a LOUD J1 reject — the checker gap the A1 value-position lowering left (Lower had the arm, the surface could not spell it)"
-        (case ( lowlBody "defun Rt.av(a : val) -> val {\n  val r = aggcall val rawsym(\"rt_bounce\")(0);\n  return r;\n}", lowlBody "defun Rt.ar(a : val) -> val {\n  word r = aggcall ret rawsym(\"rt_bounce\")(0);\n  return mknil;\n}", lowlBody "defun Rt.aw(a : val) -> val {\n  word r = aggcall val rawsym(\"rt_bounce\")(0);\n  return mknil;\n}" ) of
+    , check "A4b J1 aggcall shape classes (CORRECTED): `aggcall val` and `aggcall ret` BOTH check :word — the result is the sret buffer ADDRESS (40-B :val / 80-B :ret), matching Lower's isRawWordExp (every RawCallAgg is a word producer); a val binder is a LOUD J1 reject.  The A4a AggVal->TVal reading was the bug A4b fixed: it made `val r = aggcall val` check :val while Lower bound a raw word, an unreadable binder"
+        (case ( lowlBody "defun Rt.av(a : val) -> val {\n  word r = aggcall val rawsym(\"rt_bounce\")(0);\n  return mknil;\n}", lowlBody "defun Rt.ar(a : val) -> val {\n  word r = aggcall ret rawsym(\"rt_bounce\")(0);\n  return mknil;\n}", lowlBody "defun Rt.aw(a : val) -> val {\n  val r = aggcall val rawsym(\"rt_bounce\")(0);\n  return r;\n}" ) of
             ( Ok _, Ok _, Err msg ) ->
                 String.contains "declares val but its initializer is word" msg || String.contains "declares word" msg
 
@@ -1297,12 +1297,12 @@ checks =
             Err _ ->
                 False
         )
-    , check "A3a MIDDRIVER emission — the error paths CALL write and exit IN $main: the $main function itself emits call $write and call $exit (usage/toomany write fd-2 then exit 2) — scoped to $main's own blocks so Rt.die/Rt.halt in the same module cannot satisfy it (the A3a-review SHOULD-FIX 1: the old whole-module String.contains was vacuously satisfiable by die/halt)"
+    , check "A3a MIDDRIVER emission — the error paths CALL write and exit IN $main: $main's OWN blocks emit >=2 call $write and >=2 call $exit (usage and toomany each write fd-2 then exit 2; notmeta adds more writes) — COUNTED, not just scoped, so neither Rt.die/Rt.halt (other functions) NOR the notmeta path alone can satisfy it (the A3a-review SHOULD-FIX 1, the count form)"
         (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
             Ok mod ->
                 (case funcByName "main" mod of
                     Just f ->
-                        callsSym "write" f && callsSym "exit" f
+                        symCount "write" f >= 2 && symCount "exit" f >= 2
 
                     Nothing ->
                         False
@@ -1393,6 +1393,22 @@ checks =
                             && callsSym "rt_call9" f
                             && callsSym "rt_call16" f
                             && callsSym "rt_bounce" f
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "A4b MIDDRIVER emission — the program/print tail: $main calls the A4b seats BY NAME (rt_is_program/rt_run_program/rt_print_value via rawcall, rt_root_push_value for the result/model roots) — the seats the A2 result handed word-in/word-out"
+        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+            Ok mod ->
+                case funcByName "main" mod of
+                    Just f ->
+                        callsSym "rt_is_program" f
+                            && callsSym "rt_run_program" f
+                            && callsSym "rt_print_value" f
+                            && callsSym "rt_root_push_value" f
 
                     Nothing ->
                         False
@@ -6115,6 +6131,35 @@ callsSym sym f =
                 b.body
         )
         f.blocks
+
+
+{-| How many times a function's own blocks CALL a symbol by name.  The A3a
+SHOULD-FIX-1 counter: scoping alone (callsSym) still leaves the "error paths
+CALL write and exit" check satisfiable by the notmeta path alone, so the row
+counts — the two A3a error paths (usage + toomany) each write-then-exit, and
+Rt.die/Rt.halt (in OTHER functions) supply nothing, so >=2 of each is the
+non-vacuous pin.
+-}
+symCount : String -> Il.Func -> Int
+symCount sym f =
+    List.sum
+        (List.map
+            (\b ->
+                List.length
+                    (List.filter
+                        (\i ->
+                            case i of
+                                Il.Call _ _ (Il.Sym s) _ ->
+                                    s == sym
+
+                                _ ->
+                                    False
+                            )
+                        b.body
+                    )
+            )
+            f.blocks
+        )
 
 
 funcByName : String -> Il.Module -> Maybe Il.Func
