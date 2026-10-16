@@ -394,6 +394,18 @@ extern table**. A mismatch is loud at one end or the other.
    language's core assumption.
 3. **EFFECTS.** Impure exports carry the effect marker; Osier's purity discipline must not be silently
    violated.
+4. **EFFECT CONTAINMENT — OWNER-STATED (2026-10-16).** *"functions in Osier should not be able to
+   return a value which is from a call into Mid (to contain side effects)."* An Osier function MAY
+   call into mid-c, but a value obtained from such a call must **not escape the function's return**.
+   Formally: the result of a Mid import is a **tainted/opaque** type in Osier that (a) does not unify
+   with any ordinary Osier type, and (b) is not permitted in a `return` position of an Osier function
+   (nor in a value that is returned through a barriered path — the check is on dataflow, not syntax).
+   A function whose declared result would carry the taint is rejected loudly. This is what keeps a
+   foreign side effect from leaking into Osier's reasoning: a caller can invoke the effect and observe
+   it through the effect marker, but cannot smuggle its result back as an ordinary value. NOTE: how
+   the taint is PROPAGATED (does it follow the value through arithmetic/records/lists?) is the design
+   question this rule opens — M4 must answer it, and a conservative "any value derived from a Mid
+   result is tainted" is the safe floor.
 
 Plus **ARITY**: declared and flat (Osier is curried, mid-c is flat) — the one thing `externArities`
 already does today.
