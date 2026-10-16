@@ -368,6 +368,10 @@ export Rt.malloc               : Word -> Word
 export Rt.exec-run             : Word -> Word -> Val   !io
 ```
 
+NOTE: the `Rt.malloc` line above is ILLUSTRATIVE OF THE SYNTAX only — as written it cannot LOAD:
+an export must name an existing DEFUN, and `Rt.malloc` is a libc rawcall seat. `runtime.mid` carries
+the real export block and says the same thing.
+
 One line per exported defun; the key is the defun name verbatim; `!io` (or whatever effect marker
 Osier adopts) marks an impure export. Unexported defuns are module-private.
 
