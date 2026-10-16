@@ -156,7 +156,8 @@ the same class as T8b's: `@` joined keyTokenAt's charset (the guard
 parser only ever sees `@` BEFORE the `defun` keyword, so a key-position
 `@` is unambiguous) because the key `Rt.@p` could not otherwise lex.
 ALL recursion in the six plain bodies is `call Rt.<key>` (RawCall),
-none recur.  `Rt.readFileGo` stays DSL-side — not in this wave's list.
+none recur.  `Rt.readFileGo` was not in this wave's list (T9 kept it
+dsl-side; T24 migrated it, the T24 block at the end of this list).
 
 T14 (handoff-osier-tier2-t14) is wave-6 — the FD/PROCESS family and the
 string/value prims, NINE keys: `Rt.read-byte` + `Rt.open` (the fd layer;
@@ -210,13 +211,11 @@ the record decoders `Rt.epProg` / `Rt.epProgGo` / `Rt.epChain` /
 `Rt.epPipeline` / `Rt.epPipeGo` / `Rt.epArgvGo` / `Rt.epRedirsGo` /
 `Rt.epRedir`, the stdin guard `Rt.epCountStdin`, and the free walk
 `Rt.epFreeChains` / `Rt.epFreeCmds` / `Rt.epFreeCmd` / `Rt.epFreeArgv` /
-`Rt.epFreeRedirs`.  `Rt.epCmd` is deliberately NOT here: its ago/rgo
-binders are Ifs in LET-VALUE positions whose else carries a Let-chain
-(malloc + OOM check + store + the argv/redir fill call) and whose VALUES
-the continuation reads (`iff (ago < 0) ..`) — unspellable (?: needs
-expression branches, both-diverge needs both branches returning,
-else-nesting needs a diverging then); its builder stays DSL-side and
-tagCountState stays with it.  The RtLayout blob offsets are transcribed
+`Rt.epFreeRedirs`.  `Rt.epCmd` was NOT in T16 (its ago/rgo binders are
+Ifs in LET-VALUE positions whose else carries a Let-chain (malloc + OOM
+check + store + the argv/redir fill call) and whose VALUES the
+continuation reads (`iff (ago < 0) ..`) — unspellable until T23's
+block-branch if; T24 migrated it, the T24 block below).  The RtLayout blob offsets are transcribed
 as LITERALS (prog 2 words, chain 2, cmd 5, redir 6 — kind0/fd1/path2/
 dupfd3/body4/tmpfd5 —, op codes 0/1/2, kind codes 0..5, the cbuf literal
 bytes 16/24/32..96); MEASURED before writing: the emitted .ssa of ALL
@@ -1524,13 +1523,13 @@ source =
       -- constants transcribed as LITERALS — prog[0/1], chain{op,pipe}, pipe[0/1],
       -- cmd{argv,argc,redirs,nredirs,sub}, redir{kind,fd,path,dupfd,body,tmpfd=6
       -- words}, the epOp*/epKind* codes, the cbuf literal offsets 4..12/16/24/32..96).
-      -- Rt.epCmd is deliberately NOT here: its ago/rgo binders (RtPrims epCmdDefun)
+      -- Rt.epCmd was NOT in T16: its ago/rgo binders (RtPrims epCmdDefun)
       -- are Ifs in LET-VALUE positions whose else carries a Let-chain (malloc +
       -- OOM check + store + epArgvGo/epRedirsGo) and whose VALUE the continuation
-      -- reads (iff (ago < 0) ..) — unspellable: ?: needs expression branches,
+      -- reads (iff (ago < 0) ..) — unspellable then: ?: needs expression branches,
       -- both-diverge needs both branches returning, else-nesting needs a diverging
-      -- then.  Its builder stays DSL-side (the readFileGo precedent); tagCountState
-      -- stays with it.  The three epUnwrap template instances are written out
+      -- then.  T23's block-branch if closed the class and T24 migrated it (the
+      -- T24 block below); tagCountState was written out at its subState binder.  The three epUnwrap template instances are written out
       -- EXPLICITLY (the Elm template died): Rt.epNum (+16, tag 0), Rt.epStr (+8,
       -- tag 1), Rt.epSymOf (+24, tag 2).  Recursion MEASURED per defun: SELF-TAIL
       -- recur in epSymIs/epCount/epElem/epProgGo/epPipeGo/epArgvGo/epRedirsGo/
@@ -2081,13 +2080,13 @@ source =
       -- builders (envHome, isChildBuiltin, echoGo, childPwd, childBuiltin,
       -- applyOneRedir, applyRedirects, bodyWriteGo, openBodyTmpfile, wireCmdGo,
       -- wirePipeGo, closeCmdTmpfds, closePipeTmpfds, closePipesGo, closeOthersGo,
-      -- runBuiltinInprocess, execGo).  Rt.childCd is deliberately NOT here — the
-      -- SAME wall that held Rt.epCmd in T16: its second `dirN` binder is an If in
-      -- a LET VALUE position whose ELSE carries a Let-chain (ln = cStrLenGo dirN)
-      -- and whose VALUE the third dirN binder and `ln` read — unspellable (?:
+      -- runBuiltinInprocess, execGo).  Rt.childCd was NOT here — the SAME wall
+      -- that held Rt.epCmd in T16: its second `dirN` binder is an If in a LET
+      -- VALUE position whose ELSE carries a Let-chain (ln = cStrLenGo dirN) and
+      -- whose VALUE the third dirN binder and `ln` read — unspellable then (?
       -- needs expression branches, both-diverge needs both branches returning,
-      -- else-nesting needs a diverging then); its builder stays DSL-side and the
-      -- runLits/runOff/rLoad/rStore helpers stay with it.
+      -- else-nesting needs a diverging then).  T24 migrated it (the T24 block at
+      -- the end of this list), and runLits/runOff/rLoad/rStore died with it.
       --
       -- Recursion MEASURED per defun: execGo self-references at TWENTY-THREE
       -- sites, ALL the recur shape (App { GRef own-key, force = False } — the
@@ -2197,7 +2196,7 @@ source =
     , -- -- -- Rt.childBuiltin argcN argvN stN: echo/true/false/:/cd/pwd in-process.
       -- -- -1 when argv[0] is not a builtin (the caller falls through to execvp).
       -- -- The -n rearm (scrB 0 / scrA 2 / echoI 2) is the both-diverge spelling of
-      -- -- the DSL's dead b23 If.  Rt.childCd stays DSL-side (the T17 header).
+      -- -- the DSL's dead b23 If.  Rt.childCd was DSL-side in T17; T24 migrated it.
       "defun Rt.childBuiltin(argcN : val, argvN : val, stN : val) -> val {"
     , "  if (mkbool(payload(argcN, 0) == 0)) {"
     , "    return mknum(-1);"
@@ -3364,14 +3363,13 @@ source =
     , "  val tagCode = call Rt.cons(call Rt.intern(\"number\"), call Rt.cons(mknum(payload(codeN, 0)), mknil));"
     , "  return call Rt.cons(call Rt.intern(\"cons\"), call Rt.cons(tagCode, call Rt.cons(outLst, mknil)));"
     , "}"
-    -- -- Rt.readFileGo is still deliberately NOT here: it was not in this
-    -- wave's list (its growB binder WOULD now spell with the ?: join, but
-    -- that is T13+'s call).  Its builder stays DSL-side.  T16 adds
-    -- Rt.epCmd to that list, and T17 adds Rt.childCd: each has an If in a
-    -- LET-VALUE position whose branches carry LETS and whose value the
-    -- continuation reads (epCmd's ago/rgo; childCd's second dirN, whose
-    -- ELSE chains ln = cStrLenGo dirN and whose value the third dirN and
-    -- ln read) — the grammar cannot spell them (see the T16/T17 headers).
+    -- -- Rt.readFileGo was NOT in T22's list (nor T16's/T17's Rt.epCmd
+    -- and Rt.childCd): each has an If in a LET-VALUE position whose
+    -- branches carry LETS and whose value the continuation reads (growB;
+    -- epCmd's ago/rgo; childCd's second dirN, whose ELSE chains
+    -- ln = cStrLenGo dirN and whose value the third dirN and ln read) —
+    -- the grammar could not spell them until T23's block-branch if.  ALL
+    -- THREE migrated in T24: see the T24 block at the end of this list.
 
     -- ===== T18 (handoff-osier-tier2-t18): the WHOLE MARK-SWEEP COLLECTOR
     -- (Mid.RtGc's 12 defuns — the SECOND DSL copy, the dedup payoff the
@@ -3921,8 +3919,9 @@ source =
       -- ======================
       --
       -- NINE keys — the last of T19's never-scheduled holdouts; the
-      -- tier-2 remainder is now ONLY the three wall-class defuns
-      -- (readFileGo's growB, epCmd's ago/rgo, childCd's dirN#2).  Each
+      -- tier-2 remainder after T22 was then ONLY the three wall-class
+      -- defuns (readFileGo's growB, epCmd's ago/rgo, childCd's dirN#2),
+      -- all migrated in T24 (the block at the end of this list).  Each
       -- body is the SAME tree shape as its deleted RtPrims builder:
       --   * Rt.con — allocvec of cnt+1 slots, the tag at [0] (the
       --     vecstore effect statement = the DSL's dead b6 binder), the
@@ -4104,5 +4103,366 @@ source =
     , "    return mkstr(dstW, len22);"
     , "  }"
     , "}"
+-- ====================== T24 (handoff-osier-tier2-t24) — the LAST THREE WALL-CLASS HOLDOUTS ======================
+--
+-- Rt.readFileGo / Rt.epCmd / Rt.childCd — the three keys whose If-bound-in-a-
+-- LET-VALUE bodies the grammar could not spell until T23 landed the BLOCK-
+-- BRANCH if EXPRESSION (`val x = if (c) { .. } else { .. };`, EIfBlock,
+-- lowering through the term-if's own machinery).  The T23 acceptance rows
+-- (TestMain's growB and dirN#2 canon-equal rows) are the templates; each body
+-- below is a 1:1 tree transcription of its deleted RtPrims builder and the
+-- corpus hash is the judge.
+--
+-- SHAPE NOTES (load-bearing — the choice of spelling IS the tree):
+--   * a wall If whose VALUE the continuation reads (growB, ago, rgo, dirN#2)
+--     spells as the EIfBlock bind — `Let { x = If { .. } }`, the DSL shape;
+--   * a chain-tail If whose BOTH arms return (epCmd's acnt/rcnt bounds, the
+--     subState dispatch) spells as the TERM if — a both-diverging TERM-if
+--     lowers to a BARE If (the DSL's value-position shape); the STATEMENT-if
+--     would DEAD-BIND it (an extra Let) — the wrong tree;
+--   * a one-sided diverging if mid-block else-nests (the continuation is the
+--     false path) — the read-error/EOF/OOM-stop/argv-empty tails;
+--   * the dead-value halt/freeArgv Ifs are the T15 both-diverge statement-if
+--     (`word h = rawcall rt_halt();` then / `return mknum(0);` else; a bare
+--     call branch value is `return call Rt.f(..);` — TRet of the call, NO
+--     Let, the dead binder takes the If — the T16 epFreeCmd rule);
+--   * tagCountState was written OUT at the subState binder (the T16 epUnwrap
+--     precedent): the same tree was already corpus-green as epCount's T9b ?:
+--     join (the `val stV = ..` line in epCount above) and is copied verbatim
+--     with vv -> subv;
+--   * runOff's cbuf literal offsets are frozen as literals — re-derived from
+--     HEAD's runLits (fold from 104: "echo" 104, "/" 139, "\n" 173, "cd: "
+--     240, "pwd: cannot get cwd\n" 245; cbuf size 336) and MATCHED to T17's
+--     numbers and to the already-migrated surface sites (childBuiltin's
+--     cbufW + 104..125 literals, echoGo/childBuiltin's cbufW + 173,
+--     exec-plan's malloc(336)).
+--
+-- Recursion MEASURED per defun: readFileGo SELF-TAIL recur (the DSL body's
+-- one `App { GRef own-key }`); epCmd and childCd have NO self-call.
+--
+-- -- Rt.readFileGo blkN: Zig's `while (true)` read loop, one self-tail
+-- -- in-frame loop over the 72-byte C block (blkN boxes the block pointer:
+-- -- word 0 = fd, 1 = tmp, 2 = acc, 3 = len, 4 = cap; 6/7/8 the memGo dst
+-- -- block).  growB is the T23 acceptance row's spelling, verbatim.
+    , ""
+    , "defun Rt.readFileGo(blkN : val) -> val {"
+    , "  word fdW = wload(payload(blkN, 0), 0);"
+    , "  word tmpW = wload(payload(blkN, 0), 1);"
+    , "  val nV = call Rt.readFull(mknum(fdW), mknum(tmpW), mknum(65536));"
+    , "  if (mkbool(payload(nV, 0) < 0)) {"
+    , "    return mknil;"
+    , "  }"
+    , "  if (mkbool(payload(nV, 0) == 0)) {"
+    , "    return mknil;"
+    , "  }"
+    , "  word lenW = wload(payload(blkN, 0), 3);"
+    , "  word capW = wload(payload(blkN, 0), 4);"
+    , "  word neededW = lenW + payload(nV, 0);"
+    , "  val growB = if (mkbool(neededW > capW)) {"
+    , "    word newcapW = neededW + (capW * 2 - neededW) * (capW * 2 > neededW);"
+    , "    word mW = rawcall malloc(newcapW);"
+    , "    if (mkbool(mW == 0)) { return mknum(1); }"
+    , "    word oldW = wload(payload(blkN, 0), 2);"
+    , "    wstore(payload(blkN, 0), 6, oldW);"
+    , "    wstore(payload(blkN, 0), 7, mW);"
+    , "    wstore(payload(blkN, 0), 8, lenW);"
+    , "    call Rt.memGo(mknum(payload(blkN, 0) + 48), mknum(0));"
+    , "    rawcall free(oldW);"
+    , "    wstore(payload(blkN, 0), 2, mW);"
+    , "    wstore(payload(blkN, 0), 4, newcapW);"
+    , "    return mknum(0);"
+    , "  } else {"
+    , "    return mknum(0);"
+    , "  };"
+    , "  if (mkbool(payload(growB, 0) == 1)) {"
+    , "    return mknil;"
+    , "  }"
+    , "  word accW = wload(payload(blkN, 0), 2);"
+    , "  wstore(payload(blkN, 0), 6, tmpW);"
+    , "  wstore(payload(blkN, 0), 7, accW + lenW);"
+    , "  wstore(payload(blkN, 0), 8, payload(nV, 0));"
+    , "  call Rt.memGo(mknum(payload(blkN, 0) + 48), mknum(0));"
+    , "  wstore(payload(blkN, 0), 3, neededW);"
+    , "  recur(blkN);"
+    , "}"
+    , ""
+    , -- -- Rt.epCmd e stN cAddrN — decodeCmd: [Argv Redirs Sub], len 3.  The
+      -- -- ago/rgo wall Ifs spell as EIfBlock binds (their values the
+      -- -- continuation reads); the bounds/subState Ifs are TERM-ifs (both arms
+      -- -- return -> the BARE If); the halt/freeArgv dead-value Ifs are the T15
+      -- -- both-diverge spelling (freeArgv's call as `return call ..`, T16's
+      -- -- epFreeCmd rule); tagCountState is written out at subState (epCount's
+      -- -- ?: join, copied).  RtLayout offsets as literals: cmd argv0/argc1/
+      -- -- redirs2/nredirs3/sub4, prog chains 1, redir 6 words.  UNWIND (the
+      -- -- Elm helper) is written out at each of its FIVE sites, STDINGUARD at
+      -- -- both of its sites — the surface has no intra-defun abstraction.
+      "defun Rt.epCmd(e : val, stN : val, cAddrN : val) -> val {"
+    , "  wstore(payload(stN, 0), 2, 8);"
+    , "  val cnt = call Rt.epCount(e, stN, mknum(0));"
+    , "  word cbufW = wload(payload(stN, 0), 0);"
+    , "  if (mkbool(payload(cnt, 0) != 3)) { return mknum(-1); }"
+    , "  val argvv = call Rt.epElem(e, mknum(0), mknum(0));"
+    , "  val redirsv = call Rt.epElem(e, mknum(0), mknum(1));"
+    , "  val subv = call Rt.epElem(e, mknum(0), mknum(2));"
+    , "  wstore(payload(cAddrN, 0), 0, 0);"
+    , "  wstore(payload(cAddrN, 0), 1, 0);"
+    , "  wstore(payload(cAddrN, 0), 2, 0);"
+    , "  wstore(payload(cAddrN, 0), 3, 0);"
+    , "  wstore(payload(cAddrN, 0), 4, 0);"
+    , "  wstore(payload(stN, 0), 2, 256);"
+    , "  val acnt = call Rt.epCount(argvv, stN, mknum(0));"
+    , "  if (mkbool(payload(acnt, 0) < 0) || mkbool(payload(acnt, 0) > 256)) { return mknum(-1); }"
+    , "  val ago = if (mkbool(payload(acnt, 0) == 0)) {"
+    , "    return mknum(0);"
+    , "  } else {"
+    , "    word argvW = rawcall malloc(payload(acnt, 0) * 8 + 8);"
+    , "    if (mkbool(argvW == 0)) {"
+    , "      word h = rawcall rt_halt();"
+    , "      return mknil;"
+    , "    } else {"
+    , "      return mknum(0);"
+    , "    }"
+    , "    wstore(payload(cAddrN, 0), 0, argvW);"
+    , "    val agoGo = call Rt.epArgvGo(argvv, stN, cAddrN);"
+    , "    if (mkbool(payload(agoGo, 0) < 0)) {"
+    , "      wstore(payload(cAddrN, 0), 0, 0);"
+    , "      return mknum(-1);"
+    , "    }"
+    , "    wstore(argvW, payload(acnt, 0), 0);"
+    , "    return mknum(0);"
+    , "  };"
+    , "  if (mkbool(payload(ago, 0) < 0)) { return mknum(-1); }"
+    , "  wstore(payload(stN, 0), 2, 64);"
+    , "  val rcnt = call Rt.epCount(redirsv, stN, mknum(0));"
+    , "  if (mkbool(payload(rcnt, 0) < 0) || mkbool(payload(rcnt, 0) > 64)) {"
+    , "    if (mkbool(wload(payload(cAddrN, 0), 0) != 0)) {"
+    , "      return call Rt.epFreeArgv(mknum(wload(payload(cAddrN, 0), 0)), mknum(0), mknum(wload(payload(cAddrN, 0), 1)));"
+    , "    } else {"
+    , "      return mknil;"
+    , "    }"
+    , "    wstore(payload(cAddrN, 0), 0, 0);"
+    , "    return mknum(-1);"
+    , "  } else {"
+    , "    val rgo = if (mkbool(payload(rcnt, 0) == 0)) {"
+    , "      return mknum(0);"
+    , "    } else {"
+    , "      word redirsW = rawcall malloc(payload(rcnt, 0) * 48);"
+    , "      if (mkbool(redirsW == 0)) {"
+    , "        word h = rawcall rt_halt();"
+    , "        return mknil;"
+    , "      } else {"
+    , "        return mknum(0);"
+    , "      }"
+    , "      wstore(payload(cAddrN, 0), 2, redirsW);"
+    , "      val rgoGo = call Rt.epRedirsGo(redirsv, stN, cAddrN);"
+    , "      if (mkbool(payload(rgoGo, 0) < 0)) {"
+    , "        wstore(payload(cAddrN, 0), 2, 0);"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 0) != 0)) {"
+    , "          return call Rt.epFreeArgv(mknum(wload(payload(cAddrN, 0), 0)), mknum(0), mknum(wload(payload(cAddrN, 0), 1)));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        wstore(payload(cAddrN, 0), 0, 0);"
+    , "        return mknum(-1);"
+    , "      }"
+    , "      return mknum(0);"
+    , "    };"
+    , "    if (mkbool(payload(rgo, 0) < 0)) { return mknum(-1); }"
+    , "    val subState = mkbool(tagis(subv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(payload(subv, 0), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(payload(subv, 0), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(payload(subv, 0), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(payload(subv, 0), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));"
+    , "    if (mkbool(payload(subState, 0) == 2)) {"
+    , "      if (mkbool(wload(payload(cAddrN, 0), 4) != 0)) {"
+    , "        return call Rt.epFreeChains(mknum(wload(payload(cAddrN, 0), 4)), mknum(wload(wload(payload(cAddrN, 0), 4), 1)), mknum(0));"
+    , "      } else {"
+    , "        return mknil;"
+    , "      }"
+    , "      if (mkbool(wload(payload(cAddrN, 0), 2) != 0)) {"
+    , "        return call Rt.epFreeRedirs(mknum(wload(payload(cAddrN, 0), 2)), mknum(0), mknum(wload(payload(cAddrN, 0), 3)));"
+    , "      } else {"
+    , "        return mknil;"
+    , "      }"
+    , "      wstore(payload(cAddrN, 0), 2, 0);"
+    , "      if (mkbool(wload(payload(cAddrN, 0), 0) != 0)) {"
+    , "        return call Rt.epFreeArgv(mknum(wload(payload(cAddrN, 0), 0)), mknum(0), mknum(wload(payload(cAddrN, 0), 1)));"
+    , "      } else {"
+    , "        return mknil;"
+    , "      }"
+    , "      wstore(payload(cAddrN, 0), 0, 0);"
+    , "      return mknum(-1);"
+    , "    }"
+    , "    if (mkbool(payload(subState, 0) == 0)) {"
+    , "      if (mkbool(wload(payload(cAddrN, 0), 0) == 0)) {"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 4) != 0)) {"
+    , "          return call Rt.epFreeChains(mknum(wload(payload(cAddrN, 0), 4)), mknum(wload(wload(payload(cAddrN, 0), 4), 1)), mknum(0));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 2) != 0)) {"
+    , "          return call Rt.epFreeRedirs(mknum(wload(payload(cAddrN, 0), 2)), mknum(0), mknum(wload(payload(cAddrN, 0), 3)));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        wstore(payload(cAddrN, 0), 2, 0);"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 0) != 0)) {"
+    , "          return call Rt.epFreeArgv(mknum(wload(payload(cAddrN, 0), 0)), mknum(0), mknum(wload(payload(cAddrN, 0), 1)));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        wstore(payload(cAddrN, 0), 0, 0);"
+    , "        return mknum(-1);"
+    , "      }"
+    , "      val nstdin = call Rt.epCountStdin(mknum(wload(payload(cAddrN, 0), 2)), mknum(wload(payload(cAddrN, 0), 3)), mknum(0));"
+    , "      if (mkbool(payload(nstdin, 0) > 1)) {"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 4) != 0)) {"
+    , "          return call Rt.epFreeChains(mknum(wload(payload(cAddrN, 0), 4)), mknum(wload(wload(payload(cAddrN, 0), 4), 1)), mknum(0));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 2) != 0)) {"
+    , "          return call Rt.epFreeRedirs(mknum(wload(payload(cAddrN, 0), 2)), mknum(0), mknum(wload(payload(cAddrN, 0), 3)));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        wstore(payload(cAddrN, 0), 2, 0);"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 0) != 0)) {"
+    , "          return call Rt.epFreeArgv(mknum(wload(payload(cAddrN, 0), 0)), mknum(0), mknum(wload(payload(cAddrN, 0), 1)));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        wstore(payload(cAddrN, 0), 0, 0);"
+    , "        return mknum(-1);"
+    , "      }"
+    , "      return mknum(0);"
+    , "    } else {"
+    , "      if (mkbool(wload(payload(cAddrN, 0), 0) != 0)) {"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 4) != 0)) {"
+    , "          return call Rt.epFreeChains(mknum(wload(payload(cAddrN, 0), 4)), mknum(wload(wload(payload(cAddrN, 0), 4), 1)), mknum(0));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 2) != 0)) {"
+    , "          return call Rt.epFreeRedirs(mknum(wload(payload(cAddrN, 0), 2)), mknum(0), mknum(wload(payload(cAddrN, 0), 3)));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        wstore(payload(cAddrN, 0), 2, 0);"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 0) != 0)) {"
+    , "          return call Rt.epFreeArgv(mknum(wload(payload(cAddrN, 0), 0)), mknum(0), mknum(wload(payload(cAddrN, 0), 1)));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        wstore(payload(cAddrN, 0), 0, 0);"
+    , "        return mknum(-1);"
+    , "      }"
+    , "      word depthW = wload(payload(stN, 0), 1);"
+    , "      if (mkbool(depthW >= 32)) {"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 4) != 0)) {"
+    , "          return call Rt.epFreeChains(mknum(wload(payload(cAddrN, 0), 4)), mknum(wload(wload(payload(cAddrN, 0), 4), 1)), mknum(0));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 2) != 0)) {"
+    , "          return call Rt.epFreeRedirs(mknum(wload(payload(cAddrN, 0), 2)), mknum(0), mknum(wload(payload(cAddrN, 0), 3)));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        wstore(payload(cAddrN, 0), 2, 0);"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 0) != 0)) {"
+    , "          return call Rt.epFreeArgv(mknum(wload(payload(cAddrN, 0), 0)), mknum(0), mknum(wload(payload(cAddrN, 0), 1)));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        wstore(payload(cAddrN, 0), 0, 0);"
+    , "        return mknum(-1);"
+    , "      }"
+    , "      wstore(payload(stN, 0), 1, depthW + 1);"
+    , "      val subN = call Rt.epProg(subv, stN);"
+    , "      wstore(payload(stN, 0), 1, depthW);"
+    , "      if (mkbool(payload(subN, 0) < 0)) {"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 4) != 0)) {"
+    , "          return call Rt.epFreeChains(mknum(wload(payload(cAddrN, 0), 4)), mknum(wload(wload(payload(cAddrN, 0), 4), 1)), mknum(0));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 2) != 0)) {"
+    , "          return call Rt.epFreeRedirs(mknum(wload(payload(cAddrN, 0), 2)), mknum(0), mknum(wload(payload(cAddrN, 0), 3)));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        wstore(payload(cAddrN, 0), 2, 0);"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 0) != 0)) {"
+    , "          return call Rt.epFreeArgv(mknum(wload(payload(cAddrN, 0), 0)), mknum(0), mknum(wload(payload(cAddrN, 0), 1)));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        wstore(payload(cAddrN, 0), 0, 0);"
+    , "        return mknum(-1);"
+    , "      }"
+    , "      wstore(payload(cAddrN, 0), 4, payload(subN, 0));"
+    , "      val nstdin = call Rt.epCountStdin(mknum(wload(payload(cAddrN, 0), 2)), mknum(wload(payload(cAddrN, 0), 3)), mknum(0));"
+    , "      if (mkbool(payload(nstdin, 0) > 1)) {"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 4) != 0)) {"
+    , "          return call Rt.epFreeChains(mknum(wload(payload(cAddrN, 0), 4)), mknum(wload(wload(payload(cAddrN, 0), 4), 1)), mknum(0));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 2) != 0)) {"
+    , "          return call Rt.epFreeRedirs(mknum(wload(payload(cAddrN, 0), 2)), mknum(0), mknum(wload(payload(cAddrN, 0), 3)));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        wstore(payload(cAddrN, 0), 2, 0);"
+    , "        if (mkbool(wload(payload(cAddrN, 0), 0) != 0)) {"
+    , "          return call Rt.epFreeArgv(mknum(wload(payload(cAddrN, 0), 0)), mknum(0), mknum(wload(payload(cAddrN, 0), 1)));"
+    , "        } else {"
+    , "          return mknil;"
+    , "        }"
+    , "        wstore(payload(cAddrN, 0), 0, 0);"
+    , "        return mknum(-1);"
+    , "      }"
+    , "      return mknum(0);"
+    , "    }"
+    , "  }"
+    , "}"
+    , ""
+    , -- -- Rt.childCd argvN argcN stN — the cd builtin arm (Zig's two-pass dir
+      -- -- resolution: argv[1] or HOME, then the cbuf "/" literal, PATH_MAX
+      -- -- guard, chdir).  dirN#2 is the T23 acceptance row's spelling verbatim
+      -- -- (shadowed rebinding reads the previous binder in its own
+      -- -- initializer; the one-sided diverging if inside the branch
+      -- -- else-nests); dirN#1/#3 are pure-expression branches -> the T9b ?:
+      -- -- join; the frozen cbuf offsets are 139 ("/"), 240 ("cd: "), 173
+      -- -- ("\n").
+      "defun Rt.childCd(argvN : val, argcN : val, stN : val) -> val {"
+    , "  word cbufW = wload(payload(stN, 0), 0);"
+    , "  val dirN = mkbool(payload(argcN, 0) > 1) ? mknum(wload(payload(argvN, 0), 1)) : mknum(0);"
+    , "  val dirN = if (mkbool(payload(dirN, 0) == 0)) {"
+    , "    return call Rt.envHome(stN);"
+    , "  } else {"
+    , "    val ln = call Rt.cStrLenGo(dirN, mknum(0));"
+    , "    if (mkbool(payload(ln, 0) == 0)) { return call Rt.envHome(stN); }"
+    , "    return dirN;"
+    , "  };"
+    , "  val dirN = mkbool(payload(dirN, 0) == 0) ? mknum(cbufW + 139) : dirN;"
+    , "  val ln = call Rt.cStrLenGo(dirN, mknum(0));"
+    , "  if (mkbool(payload(ln, 0) >= 4096)) {"
+    , "    return mknum(1);"
+    , "  }"
+    , "  word bufW = rawcall malloc(4096);"
+    , "  if (mkbool(bufW == 0)) {"
+    , "    word h = rawcall rt_halt();"
+    , "    return mknil;"
+    , "  } else {"
+    , "    return mknum(0);"
+    , "  }"
+    , "  call Rt.cStrCopyGo(dirN, mknum(bufW), mknum(0));"
+    , "  word rc = rawcall chdir(bufW);"
+    , "  rawcall free(bufW);"
+    , "  if (mkbool(rc == 0)) {"
+    , "    return mknum(0);"
+    , "  }"
+    , "  call Rt.wStr(mknum(2), mknum(cbufW + 240));"
+    , "  call Rt.wStr(mknum(2), dirN);"
+    , "  call Rt.wRaw(mknum(2), mknum(cbufW + 173), mknum(1));"
+    , "  return mknum(1);"
+    , "}"
     ]
-

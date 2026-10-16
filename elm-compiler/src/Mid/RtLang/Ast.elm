@@ -237,7 +237,15 @@ transcribes):
     lowering is the TERM `if`'s own (`mkIf` over the two lowered blocks),
     no new machinery.  The else block is REQUIRED (an expression needs a
     value from both arms); the cond is `:val` and the two branch classes
-    must AGREE — the agreed class is the form's.
+    must AGREE — the agreed class is the form's.  TWO MEASURED notes from
+    the T23 review (T24): through the current TERM grammar the agreed class
+    always COLLAPSES to the enclosing defun's `-> ty` (every term's class is
+    `ctx.ret` — J6 pins each return, `TRecur` returns `ctx.ret`, the term
+    `if` recurses), so a block-if composes only in a defun of that class
+    and a WORD-valued join inside a `-> val` defun still needs `?:`; and a
+    branch terminated by `recur` is checker-legal but UNPINNED by any row
+    (it lowers to an `If` carrying a self-`App` value — shape-identical to
+    the term `if`'s, classifier-safe per the plan's F3/L4).
 
 -}
 type Exp

@@ -9,64 +9,84 @@ osier-midprims, TRACK 2 step 5: the mechanical remainder after the cons
 spike).
 
 
-## WHAT IS HERE (post-T22)
+## WHAT IS HERE (post-T24 — the DSL is GONE)
 
-150 MIGRATION SEATS — the defun-list positions `Mid.Rt.spliceSurface`
-replaces by key (51 in `primDefuns`, 87 in `helperDefuns`, 12 in
-Mid.RtGc's `gcProgram`) — and the 3 DSL-bodied HOLDOUTS at the keys the
-surface does not carry, each a Mid.Ir tree transcribed NODE FOR NODE
-from the Zig original in vendor/osier-rt/src/rt/prims.zig / values.zig /
-streams.zig / execplan.zig.  The seats are `seat` tripwires: the real
-bodies of the migrated keys live in Mid.RtSource's surface text (159
-keys under the default flags).  Mid.Rt maps the surface prim names onto
-the prim keys (`primImpl`); Mid.Rt.rtDeps closes the RawCall edges for
-reachability.
+162 MIGRATION SEATS and nothing else — the defun-list positions
+`Mid.Rt.spliceSurface` replaces by key (MEASURED: 56 in `primDefuns`, 94
+in `helperDefuns`, 12 in Mid.RtGc's `gcProgram` — 150 prim/helper seats =
+the built program's 150 defuns, plus the 12 gc ones; the pre-T24 header's
+"51 prim / 87 helper" split was a miscount, the lists never had 138).
+The 6 MORE surface defun LINES than
+seats are the `@flag`-guarded second variants — Rt.= x4 lines (3 extra),
+Rt.cons / Rt.@p / Rt.deepEq x2 each (1 extra) — so 168 lines = 162 unique
+keys.  Every seat is a `seat` tripwire: the real bodies of ALL the keys
+live in Mid.RtSource's surface text (162 keys under the default flags).  Mid.Rt maps the surface prim
+names onto the prim keys (`primImpl`); Mid.Rt.rtDeps closes the RawCall
+edges for reachability.  Mid.RtGc's own copy of the builder DSL is dead
+in the same way (all 12 of its positions are seats) — it dies in that
+module's own cleanup, not here.
+
+THIS MODULE NOW CONTAINS: `seat` / `seatParams` and the two list
+functions.  The BUILDER DSL (n/v/b/p1..p3/lets/iff/and2/or2/wOf/iadd/
+isub/imul/cmpW/tagIs/mkNum/mkBool/mkNil/mkStr/callR/callW/carV/cdrV/lam/
+haltV/letL) is DELETED (T24) — with the last three bodies migrated every
+one of its helpers had zero readers left (verified by reference search;
+the compiler build is the second check).  Nothing outside this module ever
+referenced them: the only exports are `primDefuns`, `helperDefuns` and
+`seat`.
 
 
-## THE HOLDOUT INVENTORY (FINAL, post-T22 — the durable record of where
-## tier 2 stands)
+## THE HOLDOUT INVENTORY (FINAL, post-T24 — ZERO DSL-bodied defuns)
 
 T8-T21 migrated 150 keys; T22 moved the LAST nine never-scheduled ones —
 the constructor layer Rt.con / conFill / closure / closureFill, the walk
 helpers Rt.subGo / repGo / bytesBuild / symLess, and
-Rt.read-file-as-string (see Mid.RtSource's T22 block; read-file-as-
-string's OOM binders, once read as the wall class, turned out to be
-DEAD-VALUE binders — the T15 both-diverge statement-if spelled them).
-THREE keys remain DSL-bodied, all WALL-CLASS — an If BOUND IN A
-LET-VALUE whose branch carries a Let-chain and whose VALUE the
-continuation subsequently READS.  All three spellings the grammar offers
-fail: the `?:` value-join takes EXPRESSION branches (no lets); the
-both-diverge statement-if needs the bound value DEAD (these are read);
-else-nesting needs a diverging then (the then IS the value).  T9 found
-the class (readFileGo's growB), T16 and T17 confirmed it twice more:
+Rt.read-file-as-string.  T23 landed the grammar feature the last three
+needed — the BLOCK-BRANCH `if` EXPRESSION `if (c) { block } else
+{ block }` in expression position (EIfBlock, lowering through the
+term-if's own machinery) — and T24 migrated them with it:
 
-  - Rt.readFileGo (`readFileGoDefun`): `growB` — the grow/no-grow decision;
-    its then-branch chains the malloc + state-block stores, and the
-    continuation tests `growB == 1` for the OOM stop.
-  - Rt.epCmd (`epCmdDefun`): `ago` and `rgo` — each dispatches a Go helper
-    in a let-value If whose branches carry malloc/store/clear chains, and
-    the continuation tests `ago < 0` / `rgo < 0` to unwind.
-  - Rt.childCd (`childCdDefun`): `dirN` binder #2 — the argv[1]-or-HOME
-    resolution; its else chains `ln = cStrLenGo dirN`, and binder #3 plus
-    `ln` read `dirN` after.
+  - `Rt.readFileGo` (growB — the wall T9 found): the T23 acceptance row's
+    spelling, verbatim.  Canon-EQUAL to its deleted builder (MEASURED with
+    the T6 canon normalizer before the builder was deleted).
+  - `Rt.epCmd` (ago/rgo): EIfBlock binds for the two read-value walls; the
+    chain-tail Ifs are TERM-ifs (a both-diverging TERM-if lowers to a BARE
+    If — the DSL's value-position shape — where the STATEMENT-if
+    dead-binds); tagCountState is written OUT at the subState binder (the
+    T16 epUnwrap precedent — the same tree was already corpus-green as
+    epCount's T9b ?: join, copied verbatim).  Canon-EQUAL to its builder
+    (MEASURED).
+  - `Rt.childCd` (dirN binder #2): the T23 acceptance row's spelling;
+    dirN #1/#3 are pure-expression branches (the T9b ?: join).  Its canon
+    differs from the builder's in ONE respect that is byte-inert and
+    MEASURED as such: the DSL reuses ONE Binder id for all three dirN
+    binds, so the in-initializer read canon-maps to the CURRENT bind's
+    number, while the surface resolves it to the previous binder's id —
+    the same binding, and binder ids are Dict keys, never emitted (plan
+    fact F1).  The corpus (byte-identity, 159/159) is the proof; the T23
+    dirN#2 row pins the surface spelling.
 
-Their ELM-SIDE CO-HELPERS are spellable in isolation and migrate only with
-their callers:
+THE WALL CLASS, resolved: an If BOUND IN A LET-VALUE whose branch carries
+a Let-chain and whose VALUE the continuation reads spells as the
+block-branch if bound at a binder (`val x = if (c) { .. } else { .. };` →
+`Let { x = If { .. } }`, the DSL shape).  The `?:` join still takes
+EXPRESSION branches, and a both-diverge statement-if still dead-binds —
+the T23 form is what closed the class.
 
-  - `tagCountState` (an Elm Exp-of-Exp function; single caller epCmd): its
-    tree is the `?:` join class, but migrating epCmd means WRITING IT OUT
-    at the `subState` binder — the surface has no intra-defun abstraction
-    (T16's epUnwrap precedent, written out as three defuns).
-  - `runLits` / `runLitsPacked` / `runOff` / `rLoad` / `rCbuf` (childCd's):
-    `runOff` computes byte offsets into the packed cbuf literal list at
-    ELM-compile time; the surface has no constant evaluator, so migrating
-    childCd means freezing those offsets as literals (T17 computed them:
-    "/" = 139, "\n" = 173, "cd: " = 240; cbuf size 336).
+Their ELM-SIDE CO-HELPERS died with them (T24): `tagCountState` (its
+single caller epCmd — the surface has no intra-defun abstraction, so its
+tree was written out), and `runLits` / `runLitsPacked` / `runOff` /
+`rLoad` / `rCbuf` (childCd's — `runOff`'s byte offsets into the packed
+cbuf literal list are FROZEN as literals in the surface text, re-derived
+from HEAD and matched to T17's numbers: "/" = 139, "\n" = 173, "cd: " =
+240; cbuf size 336; cross-checked against the already-migrated sites —
+childBuiltin's cbufW + 104..125, the cbufW + 173 "\n", exec-plan's
+malloc(336)).
 
-That is the WHOLE remainder: 159 keys on the surface under the default
-flags (MEASURED: 165 surface defuns - 6 guarded duplicate variants),
-and the 3 walls above are the only keys whose bodies are still DSL
-trees.  Any future grammar work starts there.
+That is the WHOLE remainder: 162 keys on the surface under the default
+flags (MEASURED: 168 surface defun lines - 6 guarded duplicate variants),
+and NO key whose body is a DSL tree.  Any future runtime body is surface text
+in Mid.RtSource.
 
 
 ## THE STEP-5 CLASSIFICATION, SUPERSEDED IN PART
@@ -142,203 +162,13 @@ shared `asF`/`toI32` machinery the arithmetic differential does cover.
 
 -}
 
-import Mid.Ir exposing (Binder, Defun, Exp(..), LetBinder(..), Lit(..), RawBinOp(..), RawCmpOp(..), UnsafeNode(..))
-import Mid.RtLayout as RtLayout
-
-
--- ============================ BUILDER DSL ============================
--- The trees below are read as PORTS: each `let` binder is one line of the
--- Zig body, in the Zig body's order.  Tag constants mirror Lower's
--- (gc/types.zig ValTag): number 0, string 1, symbol 2, boolean 3, cons 4,
--- nil 5, prim 8, vector 10, float 12.
-
-
-n : Int -> Exp
-n i =
-    Lit (LNumber i)
-
-
-v : Binder -> Exp
-v binder =
-    Var binder.id
-
-
-b : Int -> Binder
-b i =
-    { id = i, name = "t" ++ String.fromInt i }
-
-
-p1 : Binder
-p1 =
-    { id = 1, name = "a1" }
-
-
-p2 : Binder
-p2 =
-    { id = 2, name = "a2" }
-
-
-p3 : Binder
-p3 =
-    { id = 3, name = "a3" }
-
-
-{-| Sequential `let`s, threaded left to right like the Zig body's lines.
--}
-lets : List ( Binder, Exp ) -> Exp -> Exp
-lets binds body =
-    case binds of
-        [] ->
-            body
-
-        ( binder, value ) :: rest ->
-            Let
-                { binders = [ LetBind { binder = binder, value = value } ]
-                , body = lets rest body
-                }
-
-
-iff : Exp -> Exp -> Exp -> Exp
-iff cond thenBranch elseBranch =
-    If
-        { cond = cond
-        , thenBranch = thenBranch
-        , elseBranch = elseBranch
-        , falseLabel = "F"
-        , endLabel = "E"
-        }
-
-
-and2 : Exp -> Exp -> Exp
-and2 left right =
-    ShortAnd
-        { left = left
-        , right = right
-        , falseLabel = "F"
-        , endLabel = "E"
-        }
-
-
-or2 : Exp -> Exp -> Exp
-or2 left right =
-    ShortOr
-        { left = left
-        , right = right
-        , falseLabel = "F"
-        , endLabel = "E"
-        }
-
-
--- ---- words ----
-
-wOf : Exp -> Exp
-wOf x =
-    Unsafe (RawPayload { value = x, word = 0 })
-
-
--- lenOf DELETED (T22): the i32 len-field read (RawPayload32 word 1) was
--- cStrOf's and read-file-as-string's only reader — both moved to the
--- surface, where the read is spelled `payload32(x, 1)`.
--- ---- values ----
-iadd x y =
-    Unsafe (RawBin { op = RAdd, a = x, b = y })
-
-
-isub : Exp -> Exp -> Exp
-isub x y =
-    Unsafe (RawBin { op = RSub, a = x, b = y })
-
-
-imul : Exp -> Exp -> Exp
-imul x y =
-    Unsafe (RawBin { op = RMul, a = x, b = y })
-
-
--- iand/ior/ixor/shlW/sarW/shrW DELETED (T21): the Bitwise family moved
--- to Mid/RtSource (surface word ops & | ^ << >> >>>), and those were
--- their only readers.
-
-
-cmpW : RawCmpOp -> Exp -> Exp -> Exp
-cmpW op x y =
-    Unsafe (RawCmp { op = op, a = x, b = y })
-
-
-tagIs : Exp -> Int -> Exp
-tagIs x tag =
-    Unsafe (RawTagIs { value = x, tag = tag })
-
-
--- ---- values ----
-
-mkNum : Exp -> Exp
-mkNum we =
-    Unsafe (RawMkValue { tag = RtLayout.tagNumber, words = [ we ] })
-
-
-mkBool : Exp -> Exp
-mkBool we =
-    Unsafe (RawMkValue { tag = RtLayout.tagBoolean, words = [ we ] })
-
-
-mkNil : Exp
-mkNil =
-    Unsafe (RawMkValue { tag = RtLayout.tagNil, words = [] })
-
-
-mkStr : Exp -> Exp -> Exp
-mkStr dataW lenW =
-    Unsafe (RawMkValue { tag = RtLayout.tagString, words = [ dataW, lenW ] })
-
-
--- mkVec DELETED (T22): the tag-10 wrap was conDefun's only reader (the
--- constructor moved to the surface, spelled `mkvec(dataW, cntW + 1)`).
-
-
--- trueV / falseV DELETED (T22): symLessDefun's only readers (the walk
--- moved to the surface, spelled `mkbool(1)` / `mkbool(0)`).
-
-
-callR : String -> List Exp -> Exp
-callR key args =
-    Unsafe (RawCall { sym = key, args = args })
-
-
-callW : String -> List Exp -> Exp
-callW sym args =
-    Unsafe (RawCallRaw { sym = sym, args = args })
-
-
--- consV DELETED (T22): subGoDefun's and bytesBuildDefun's only readers
--- (both moved to the surface, spelled `call Rt.cons(..)`).
-
-
-carV : Exp -> Exp
-carV l =
-    Unsafe (RawVecLoad { vec = wOf l, index = n 0 })
-
-
-cdrV : Exp -> Exp
-cdrV l =
-    Unsafe (RawVecLoad { vec = wOf l, index = n 1 })
-
-
--- byteOf DELETED (T22): the string-byte read (RawStrByte) was subGo/
--- bytesBuild/symLess's only reader (all moved to the surface, spelled
--- `strbyte(s, i)`).
-
-
-lam : String -> List Binder -> Exp -> Defun
-lam key params body =
-    { key = key
-    , value = Lam { params = params, body = body }
-    }
+import Mid.Ir exposing (Binder, Defun, Exp(..), UnsafeNode(..))
 
 
 {-| A migration SEAT (T8, handoff-osier-tier2-t8): the defun-list POSITION
 a surface-migrated key still occupies.  `Mid.Rt.spliceSurface` replaces
 entries BY KEY at their list position — list ORDER is .ssa bytes — so a
-migrated defun leaves its builder to the surface but KEEPS this position.
+migrated defun hands its body to the surface text but KEEPS this position.
 The body is a TRIPWIRE, never emitted while the splice is wired: its one
 RawCall names `key ++ ".surface-seat"`, a key in no rtDeps row and no
 program, so if the splice ever failed to replace a seat, Mid.Qbe.Lower's
@@ -366,19 +196,6 @@ seatParams count =
 
     else
         { id = count, name = "p" ++ String.fromInt count } :: seatParams (count - 1)
-
-
-haltV : Exp
-haltV =
-    -- the halt arm: process death through the rt_halt seat (see the module
-    -- header's GAPS — Zig's arm is a catchable throw / error.Halt; Mid has
-    -- no error mechanism this step, and on QBE error.Halt dies loudly too).
-    letL [ ( b 30, callW "rt_halt" [] ) ] mkNil
-
-
-letL : List ( Binder, Exp ) -> Exp -> Exp
-letL =
-    lets
 
 
 -- ============================ HELPERS ============================
@@ -574,122 +391,9 @@ letL =
 -- MOVED TO THE SURFACE (T22): the tree above is transcribed in Mid/RtSource's
 -- T22 block — the cStrOf four binders written out (its Elm helper is deleted
 -- with this, its last reader), the OOM checks as the T15 both-diverge
--- mid-block if, the tail exactly as read here.  Rt.readFileGo (below) STAYS
--- DSL-side — the growB wall.  The defun text below is deleted; the list
--- position in primDefuns is a seat.
-
-
-{-| `Rt.readFileGo blkN` — Zig's `while (true)` read loop, one self-tail
-in-frame loop over the 72-byte C block (blkN boxes the block pointer):
-word 0 = fd, 1 = tmp, 2 = acc, 3 = len, 4 = cap.  Each iteration:
-readFull(fd, tmp, 65536) -> nV; nV < 0 -> STOP (read error: Zig's
-`catch break`, partial buffer kept); nV == 0 -> STOP (EOF); else append
-tmp[0..n) to acc (grow first when len+n > cap: newcap = max(2*cap, needed),
-malloc, memGo the old content, free the OLD buffer — on malloc OOM STOP with
-the old buffer INTACT, Zig's `appendSlice catch break`), then the loop.
-FRAME-FREE and non-allocating: no safepoint anywhere (readFull/memGo/
-malloc/free are raw; the state is C-heap), which is what makes the acc/tmp
-raw pointers sound across iterations — the TestMain partition row pins it.
--}
-readFileGoDefun : Defun
-readFileGoDefun =
-    let
-        blkN =
-            p1
-
-        fdW =
-            b 3
-
-        tmpW =
-            b 4
-
-        nV =
-            b 5
-
-        lenW =
-            b 6
-
-        capW =
-            b 7
-
-        neededW =
-            b 8
-
-        growB =
-            b 9
-    in
-    lam "Rt.readFileGo" [ blkN ]
-        (lets
-            [ ( fdW, Unsafe (RawWordLoad { ptr = wOf (v blkN), index = n 0 }) )
-            , ( tmpW, Unsafe (RawWordLoad { ptr = wOf (v blkN), index = n 1 }) )
-            , ( nV, callR "Rt.readFull" [ mkNum (v fdW), mkNum (v tmpW), mkNum (n 65536) ] )
-            ]
-            (iff (mkBool (cmpW RClts (wOf (v nV)) (n 0)))
-                -- read error: break (partial content is the answer)
-                mkNil
-                (iff (mkBool (cmpW RCeq (wOf (v nV)) (n 0)))
-                    -- EOF: break
-                    mkNil
-                    (lets
-                        [ ( lenW, Unsafe (RawWordLoad { ptr = wOf (v blkN), index = n 3 }) )
-                        , ( capW, Unsafe (RawWordLoad { ptr = wOf (v blkN), index = n 4 }) )
-                        , ( neededW, iadd (v lenW) (wOf (v nV)) )
-                        , ( growB, iff (mkBool (cmpW RCgts (v neededW) (v capW)))
-                            -- grow arm: newcap = max(2*cap, needed)
-                            (lets
-                                -- newcap = max(2*cap, needed), as ARITHMETIC
-                                -- (an iff's branches are VALUE positions and
-                                -- a raw word binder cannot appear there):
-                                -- needed + (2*cap - needed) * [2*cap > needed]
-                                [ ( b 10, iadd (v neededW) (imul (isub (imul (v capW) (n 2)) (v neededW)) (cmpW RCgts (imul (v capW) (n 2)) (v neededW))) )
-                                , ( b 11, callW "malloc" [ v (b 10) ] )
-                                ]
-                                (iff (mkBool (cmpW RCeq (v (b 11)) (n 0)))
-                                    -- OOM: flag 1 = stop WITHOUT freeing the
-                                    -- old buffer (it IS the partial answer;
-                                    -- the exit path frees it)
-                                    (mkNum (n 1))
-                                    (lets
-                                        [ ( b 12, Unsafe (RawWordLoad { ptr = wOf (v blkN), index = n 2 }) )
-                                        , ( b 13, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 6, value = v (b 12) }) )
-                                        , ( b 14, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 7, value = v (b 11) }) )
-                                        , ( b 15, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 8, value = v lenW }) )
-                                        , ( b 16, callR "Rt.memGo" [ mkNum (iadd (wOf (v blkN)) (n 48)), mkNum (n 0) ] )
-                                        , ( b 17, callW "free" [ v (b 12) ] )
-                                        , ( b 18, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 2, value = v (b 11) }) )
-                                        , ( b 19, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 4, value = v (b 10) }) )
-                                        ]
-                                        (mkNum (n 0))
-                                    )
-                                )
-                            )
-                            -- needed <= cap: nothing to do
-                            (mkNum (n 0))
-                        )
-                        ]
-                        (iff (mkBool (cmpW RCeq (wOf (v growB)) (n 1)))
-                            -- the OOM stop
-                            mkNil
-                            (lets
-                                [ ( b 20, Unsafe (RawWordLoad { ptr = wOf (v blkN), index = n 2 }) )
-                                , ( b 21, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 6, value = v tmpW }) )
-                                , -- the append lands at acc + len (the
-                                  -- memGo block's dst BASE — offset 0 here
-                                  -- would overwrite the first chunk, the
-                                  -- exact bug the tail-BAD differential
-                                  -- caught).
-                                  ( b 22, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 7, value = iadd (v (b 20)) (v lenW) }) )
-                                , ( b 23, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 8, value = wOf (v nV) }) )
-                                , ( b 24, callR "Rt.memGo" [ mkNum (iadd (wOf (v blkN)) (n 48)), mkNum (n 0) ] )
-                                , ( b 25, Unsafe (RawWordStore { ptr = wOf (v blkN), index = n 3, value = v neededW }) )
-                                ]
-                                (App { fn = GRef { key = "Rt.readFileGo", force = False }, args = [ v blkN ] })
-                            )
-                        )
-                    )
-                )
-            )
-        )
+-- mid-block if, the tail exactly as read here.  Rt.readFileGo moved in
+-- T24 — the growB wall fell with the T23 block-branch if (its builder is
+-- deleted and its list position in helperDefuns is a seat).
 
 
 -- Rt.floatCopy moved to Mid/RtSource.elm in T12 (handoff-osier-tier2-t12)
@@ -760,310 +464,9 @@ documented class as every other halt arm.
 -- defuns (epNum +16/tag 0, epStr +8/tag 1, epSymOf +24/tag 2), the
 -- Mid.RtLayout blob offsets transcribed as literals — every self-reference
 -- is recur (App on the own key), MEASURED per defun.  Their list positions
--- below are seats.  Rt.epCmd STAYS HERE: its ago/rgo binders are Ifs in
--- LET-VALUE positions whose branches carry Lets and whose values the
--- continuation reads (iff (ago < 0) ..) — the surface grammar cannot spell
--- them (?: needs expression branches, both-diverge needs both branches
--- returning, else-nesting needs a diverging then); tagCountState stays
--- for it.
-
-
-{-| The tdlIsEmpty state as a WORD: 0 empty, 1 node, 2 malformed.  Shared by
-epCmd (the T16 wave's one ep* holdout — epCount and the fill loops migrated
-to the surface and spell their own checks).
--}
-tagCountState : Exp -> Exp -> Exp
-tagCountState vv cbufW =
-    iff (mkBool (cmpW RCeq (tagIs vv RtLayout.tagCons) (n 0)))
-        (mkNum (n 2))
-        (iff (mkBool (cmpW RCeq (tagIs (carV vv) RtLayout.tagSymbol) (n 0)))
-            (mkNum (n 2))
-            (iff (callR "Rt.epSymIs" [ carV vv, mkNum cbufW, mkNum (n 0) ])
-                (iff (mkBool (cmpW RCne (tagIs (cdrV vv) RtLayout.tagNil) (n 0)))
-                    (mkNum (n 0))
-                    (iff (mkBool (cmpW RCne (tagIs (cdrV vv) RtLayout.tagCons) (n 0)))
-                        (mkNum (n 1))
-                        (mkNum (n 2))
-                    )
-                )
-                (mkNum (n 2))
-            )
-        )
-
-
-{-| epCmd e stN cAddrN — decodeCmd: [Argv Redirs Sub], len 3.  Argv strings
-are dupeZ'd onto the C heap into a char*[argc] (argc doubles as the running
-fill count); redirs into word records; sub recurses into epProg with depth+1
-(st[1] is bumped and restored in place — the block is decode-private).
-Every failure arm frees exactly what this level built, in reverse order
-(Zig's cmdFree discipline).
--}
-epCmdDefun : Defun
-epCmdDefun =
-    let
-        e =
-            p1
-
-        stN =
-            p2
-
-        cAddrN =
-            p3
-
-        lim8 =
-            b 4
-
-        cnt =
-            b 5
-
-        argvv =
-            b 6
-
-        redirsv =
-            b 7
-
-        subv =
-            b 8
-
-        cbufW =
-            b 9
-
-        limArgv =
-            b 10
-
-        acnt =
-            b 11
-
-        argvW =
-            b 12
-
-        ago =
-            b 13
-
-        limRedir =
-            b 14
-
-        rcnt =
-            b 15
-
-        redirsW =
-            b 16
-
-        rgo =
-            b 17
-
-        subState =
-            b 18
-
-        depthW =
-            b 19
-
-        subN =
-            b 21
-
-        nstdin =
-            b 23
-
-        agoGo =
-            b 20
-
-        rgoGo =
-            b 49
-
-        -- free this level's argv (strings + array), then clear the slots.
-        freeArgv =
-            callR "Rt.epFreeArgv"
-                [ mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx }))
-                , mkNum (n 0)
-                , mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgcIdx }))
-                ]
-
-        freeRedirs =
-            callR "Rt.epFreeRedirs"
-                [ mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx }))
-                , mkNum (n 0)
-                , mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdNredirsIdx }))
-                ]
-
-        clearArgv =
-            Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = n 0 })
-
-        clearRedirs =
-            Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx, value = n 0 })
-
-        freeSub =
-            -- epFreeChains frees BOTH the sub's chains array AND the sub prog
-            -- record (its `free progN` leg) — no separate free of the record.
-            callR "Rt.epFreeChains"
-                [ mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx }))
-                , mkNum (Unsafe (RawWordLoad { ptr = Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx }), index = n RtLayout.epProgChainsIdx }))
-                , mkNum (n 0)
-                ]
-
-        unwindAll =
-            -- reverse build order: sub, redirs, argv
-            lets
-                [ ( b 26, iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx })) (n 0))) (freeSub) mkNil)
-                , ( b 27, iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx })) (n 0))) (freeRedirs) mkNil)
-                , ( b 28, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx, value = n 0 }) )
-                , ( b 29, iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0))) (freeArgv) mkNil)
-                , ( b 30, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = n 0 }) )
-                ]
-                (mkNum (n (-1)))
-
-        stdinGuard =
-            -- the stdin-exclusivity check (Zig decodeCmd's tail, C:1358-1366):
-            -- applies to BOTH plain commands and subshells, after the sub
-            -- dispatch (the first cut nested it in the subshell arm only,
-            -- so a plain `cat <a <b` was accepted — wrong, not loud).
-            lets
-                [ ( nstdin
-                  , callR "Rt.epCountStdin"
-                        [ mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx }))
-                        , mkNum (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdNredirsIdx }))
-                        , mkNum (n 0)
-                        ]
-                  )
-                ]
-                (iff (mkBool (cmpW RCgts (wOf (v nstdin)) (n 1)))
-                    (unwindAll)
-                    (mkNum (n 0))
-                )
-    in
-    lam "Rt.epCmd" [ e, stN, cAddrN ]
-        (lets
-            [ ( lim8, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 2, value = n 8 }) )
-            , ( cnt, callR "Rt.epCount" [ v e, v stN, mkNum (n 0) ] )
-            , ( cbufW, Unsafe (RawWordLoad { ptr = wOf (v stN), index = n 0 }) )
-            ]
-            (iff (mkBool (cmpW RCne (wOf (v cnt)) (n 3)))
-                (mkNum (n (-1)))
-                (lets
-                    [ ( argvv, callR "Rt.epElem" [ v e, mkNum (n 0), mkNum (n 0) ] )
-                    , ( redirsv, callR "Rt.epElem" [ v e, mkNum (n 0), mkNum (n 1) ] )
-                    , ( subv, callR "Rt.epElem" [ v e, mkNum (n 0), mkNum (n 2) ] )
-                    , ( b 31, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = n 0 }) )
-                    , ( b 32, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgcIdx, value = n 0 }) )
-                    , ( b 33, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx, value = n 0 }) )
-                    , ( b 34, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdNredirsIdx, value = n 0 }) )
-                    , ( b 35, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx, value = n 0 }) )
-                    , ( limArgv, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 2, value = n 256 }) )
-                    , ( acnt, callR "Rt.epCount" [ v argvv, v stN, mkNum (n 0) ] )
-                    ]
-                    (iff (or2 (mkBool (cmpW RClts (wOf (v acnt)) (n 0))) (mkBool (cmpW RCgts (wOf (v acnt)) (n 256))))
-                        (mkNum (n (-1)))
-                        (lets
-                            [ ( ago
-                              , iff (mkBool (cmpW RCeq (wOf (v acnt)) (n 0)))
-                                    (mkNum (n 0))
-                                    (lets
-                                        [ ( argvW, callW "malloc" [ iadd (imul (wOf (v acnt)) (n 8)) (n 8) ] )
-                                        , ( b 36, iff (mkBool (cmpW RCeq (v argvW) (n 0))) haltV (mkNum (n 0)) )
-                                        , ( b 37, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = v argvW }) )
-                                        , ( agoGo, callR "Rt.epArgvGo" [ v argvv, v stN, v cAddrN ] )
-                                        ]
-                                        (iff (mkBool (cmpW RClts (wOf (v agoGo)) (n 0)))
-                                            -- epArgvGo already freed the strings and
-                                            -- the array; clear the slot and stop.
-                                            (lets [ ( b 38, clearArgv ) ] (mkNum (n (-1))))
-                                            -- (3B-2b) the argv array carries the NULL
-                                            -- terminator Zig's [:null] slice gave the
-                                            -- rebuilt RCmd: execvp reads argv[argc].
-                                            (lets [ ( b 39, Unsafe (RawWordStore { ptr = v argvW, index = wOf (v acnt), value = n 0 }) ) ]
-                                                (mkNum (n 0))
-                                            )
-                                        )
-                                    )
-                              )
-                            ]
-                            (iff (mkBool (cmpW RClts (wOf (v ago)) (n 0)))
-                                (mkNum (n (-1)))
-                                (lets
-                                    [ ( limRedir, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 2, value = n 64 }) )
-                                    , ( rcnt, callR "Rt.epCount" [ v redirsv, v stN, mkNum (n 0) ] )
-                                    ]
-                                    (iff (or2 (mkBool (cmpW RClts (wOf (v rcnt)) (n 0))) (mkBool (cmpW RCgts (wOf (v rcnt)) (n 64))))
-                                        (lets
-                                            [ ( b 39, iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0))) (freeArgv) mkNil)
-                                            , ( b 40, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = n 0 }) )
-                                            ]
-                                            (mkNum (n (-1)))
-                                        )
-                                        (lets
-                                            [ ( rgo
-                                              , iff (mkBool (cmpW RCeq (wOf (v rcnt)) (n 0)))
-                                                    (mkNum (n 0))
-                                                    (lets
-                                                        [ ( redirsW, callW "malloc" [ imul (wOf (v rcnt)) (n (8 * RtLayout.epRedirWords)) ] )
-                                                        , ( b 41, iff (mkBool (cmpW RCeq (v redirsW) (n 0))) haltV (mkNum (n 0)) )
-                                                        , ( b 42, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx, value = v redirsW }) )
-                                                        , ( rgoGo, callR "Rt.epRedirsGo" [ v redirsv, v stN, v cAddrN ] )
-                                                        ]
-                                                        (iff (mkBool (cmpW RClts (wOf (v rgoGo)) (n 0)))
-                                                            -- epRedirsGo freed the
-                                                            -- redir prefix + array;
-                                                            -- then argv too.
-                                                            (lets
-                                                                [ ( b 43, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdRedirsIdx, value = n 0 }) )
-                                                                , ( b 44, iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0))) (freeArgv) mkNil)
-                                                                , ( b 45, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx, value = n 0 }) )
-                                                                ]
-                                                                (mkNum (n (-1)))
-                                                            )
-                                                            (mkNum (n 0))
-                                                        )
-                                                    )
-                                              )
-                                            ]
-                                            (iff (mkBool (cmpW RClts (wOf (v rgo)) (n 0)))
-                                                (mkNum (n (-1)))
-                                                (lets
-                                                    [ ( subState, tagCountState (v subv) (v cbufW) ) ]
-                                                    (iff (mkBool (cmpW RCeq (wOf (v subState)) (n 2)))
-                                                        (unwindAll)
-                                                        (iff (mkBool (cmpW RCeq (wOf (v subState)) (n 0)))
-                                                            -- plain command: empty argv is illegal (C:1343)
-                                                            (iff (mkBool (cmpW RCeq (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0)))
-                                                                (unwindAll)
-                                                                stdinGuard
-                                                            )
-                                                            -- subshell: no argv allowed, depth < 32
-                                                            (iff (mkBool (cmpW RCne (Unsafe (RawWordLoad { ptr = wOf (v cAddrN), index = n RtLayout.epCmdArgvIdx })) (n 0)))
-                                                                (unwindAll)
-                                                                (lets
-                                                                    [ ( depthW, Unsafe (RawWordLoad { ptr = wOf (v stN), index = n 1 }) )
-                                                                    ]
-                                                                    (iff (mkBool (cmpW RCges (v depthW) (n 32)))
-                                                                        (unwindAll)
-                                                                        (lets
-                                                                            [ ( b 46, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 1, value = iadd (v depthW) (n 1) }) )
-                                                                            , ( subN, callR "Rt.epProg" [ v subv, v stN ] )
-                                                                            , ( b 47, Unsafe (RawWordStore { ptr = wOf (v stN), index = n 1, value = v depthW }) )
-                                                                            ]
-                                                                            (iff (mkBool (cmpW RClts (wOf (v subN)) (n 0)))
-                                                                                (unwindAll)
-                                                                                (lets
-                                                                                    [ ( b 48, Unsafe (RawWordStore { ptr = wOf (v cAddrN), index = n RtLayout.epCmdSubIdx, value = wOf (v subN) }) ) ]
-                                                                                    stdinGuard
-                                                                                )
-                                                                            )
-                                                                        )
-                                                                    )
-                                                                )
-                                                            )
-                                                        )
-                                                    )
-                                                )
-                                            )
-                                        )
-                                    )
-                                )
-                            )
-                        )
-                    )
-                )
-            )
-        )
+-- below are seats.  Rt.epCmd moved in T24 (the ago/rgo binders fell with
+-- the T23 block-branch if — its builder and tagCountState are deleted, its
+-- list position below a seat).
 
 
 -- ============================ exec-plan RUN (zigretire stage 3 GROUP 3B-2b) ============================
@@ -1091,132 +494,10 @@ epCmdDefun =
 -- exit path including the fork-fail and pipe-fail unwinds; a leak is
 -- invisible to every oracle.
 
--- run-path literals, packed NUL-terminated after the decode's 13 word-aligned
--- tag names (byte 104).  ASCII only, so String.length == byte length.
-runLits : List String
-runLits =
-    [ "echo", "true", "false", ":", "cd", "pwd", "-n", "HOME", " ", "/"
-    , "Input redirect file not found: ", "\n", "Output redirect failed: "
-    , "shensh: ", ": not found\n", ": cannot execute\n", "cd: "
-    , "pwd: cannot get cwd\n"
-    , "/tmp/shensh-out.XXXXXX", "/tmp/shensh-err.XXXXXX", "/tmp/shensh-hdoc.XXXXXX"
-    ]
-
-
-runLitsPacked : List ( String, Int, Int )
-runLitsPacked =
-    let
-        step s ( off, acc ) =
-            ( off + String.length s + 1, ( s, off, String.length s ) :: acc )
-    in
-    List.foldl step ( 104, [] ) runLits |> Tuple.second |> List.reverse
-
-
-runOff : String -> Int
-runOff name =
-    case List.filter (\( nm, _, _ ) -> nm == name) runLitsPacked of
-        ( _, off, _ ) :: _ ->
-            off
-
-        [] ->
-            0
-
-
--- runCbufSize was DELETED in T19: its one reader, the DSL Rt.exec-plan
--- builder (malloc'd the cbuf at this size), moved to the surface in T17,
--- which spells the size as the literal 336.
-
-
--- run-state block word slots (malloc'd in Rt.exec-plan).  T19: only rCbuf
--- survives — Rt.childCd's cbuf read is its last reader; the other 21 slot
--- names died with the DSL run builders in T17 (the surface spells the
--- offsets as literals).
-rCbuf = 0
-
-
-rLoad : Binder -> Int -> Exp
-rLoad stN idx =
-    Unsafe (RawWordLoad { ptr = wOf (v stN), index = n idx })
-
-
--- rStore was DELETED in T19: rStoreW (its dedicated wide variant) died with
--- Rt.exec-plan in T17 as "its only reader", and T17's childCd holdout in
--- fact reads state only through rLoad — rStore had no reader left.
-
-
 -- cStrEqLit/wStr/wRaw/waitStatusCode MOVED TO THE SURFACE (T8 wave 1):
 -- their surface text is in Mid.RtSource and lowers to the same trees
 -- (cStrEqLit's self-tail recur included).  Rt.close, the next defun in
 -- the old run here, stayed DSL-side — see its note above.
-
-
-{-| childCd argvN argcN stN — the cd builtin arm (Zig's two-pass dir
-resolution: argv[1] or HOME, then "/"; PATH_MAX guard; chdir).
--}
-childCdDefun : Defun
-childCdDefun =
-    let
-        argvN = p1
-
-        argcN = p2
-
-        stN = p3
-
-        cbufW = b 4
-
-        dirN = b 5
-
-        ln = b 6
-
-        bufW = b 7
-
-        rc = b 8
-    in
-    lam "Rt.childCd" [ argvN, argcN, stN ]
-        (lets
-            [ ( cbufW, rLoad stN rCbuf )
-            , ( dirN, iff (mkBool (cmpW RCgts (wOf (v argcN)) (n 1)))
-                        (mkNum (Unsafe (RawWordLoad { ptr = wOf (v argvN), index = n 1 })))
-                        (mkNum (n 0))
-              )
-            , ( dirN, iff (mkBool (cmpW RCeq (wOf (v dirN)) (n 0)))
-                        (callR "Rt.envHome" [ v stN ])
-                        (lets
-                            [ ( ln, callR "Rt.cStrLenGo" [ v dirN, mkNum (n 0) ] ) ]
-                            (iff (mkBool (cmpW RCeq (wOf (v ln)) (n 0)))
-                                (callR "Rt.envHome" [ v stN ])
-                                (v dirN)
-                            )
-                        )
-              )
-            , ( dirN, iff (mkBool (cmpW RCeq (wOf (v dirN)) (n 0)))
-                        (mkNum (iadd (v cbufW) (n (runOff "/"))))
-                        (v dirN)
-              )
-            , ( ln, callR "Rt.cStrLenGo" [ v dirN, mkNum (n 0) ] )
-            ]
-            (iff (mkBool (cmpW RCges (wOf (v ln)) (n 4096)))
-                (mkNum (n 1))
-                (lets
-                    [ ( bufW, callW "malloc" [ n 4096 ] )
-                    , ( b 9, iff (mkBool (cmpW RCeq (v bufW) (n 0))) haltV (mkNum (n 0)) )
-                    , ( b 10, callR "Rt.cStrCopyGo" [ v dirN, mkNum (v bufW), mkNum (n 0) ] )
-                    , ( rc, callW "chdir" [ v bufW ] )
-                    , ( b 11, callW "free" [ v bufW ] )
-                    ]
-                    (iff (mkBool (cmpW RCeq (v rc) (n 0)))
-                        (mkNum (n 0))
-                        (lets
-                            [ ( b 12, callR "Rt.wStr" [ mkNum (n 2), mkNum (iadd (v cbufW) (n (runOff "cd: "))) ] )
-                            , ( b 13, callR "Rt.wStr" [ mkNum (n 2), v dirN ] )
-                            , ( b 14, callR "Rt.wRaw" [ mkNum (n 2), mkNum (iadd (v cbufW) (n (runOff "\n"))) , mkNum (n 1) ] )
-                            ]
-                            (mkNum (n 1))
-                        )
-                    )
-                )
-            )
-        )
 
 
 helperDefuns : Bool -> List Defun
@@ -1264,7 +545,7 @@ helperDefuns rec =
     , seat "Rt.recToChain" 1
     , seat "Rt.recToChainGo" 3
     , seat "Rt.readFull" 3
-    , readFileGoDefun
+    , seat "Rt.readFileGo" 1
     , seat "Rt.memGo" 2
     , seat "Rt.cStrFill" 3
       -- T12: floatCopy moved to Mid/RtSource; its seat keeps the position.
@@ -1297,7 +578,7 @@ helperDefuns rec =
     , seat "Rt.epChain" 3
     , seat "Rt.epPipeline" 2
     , seat "Rt.epPipeGo" 3
-    , epCmdDefun
+    , seat "Rt.epCmd" 3
     , seat "Rt.epArgvGo" 3
     , seat "Rt.epRedirsGo" 3
     , seat "Rt.epRedir" 3
@@ -1312,17 +593,16 @@ helperDefuns rec =
     , seat "Rt.wRaw" 3
     , seat "Rt.waitStatusCode" 1
     -- T17 (handoff-osier-tier2-t17) moved the exec-plan RUN machinery to
-    -- Mid/RtSource.elm — the nineteen keys below are seats.  Rt.childCd is
-    -- NOT migrated (its second dirN binder is an If in a let-value position
-    -- whose else chains ln = cStrLenGo dirN and whose value the continuation
-    -- reads — the epCmd wall class, see the T16 note and the RtSource T17
-    -- header) and keeps its builder at its list position; runLits/runOff/
-    -- rLoad/rCbuf stay for it (rStore died in T19 — no reader left; the
-    -- surface spells the other state-block offsets as literals).
+    -- Mid/RtSource.elm — the twenty keys below are seats.  Rt.childCd moved
+    -- in T24 (its second dirN binder fell with the T23 block-branch if; its
+    -- builder is deleted, its position a seat, and runLits/runLitsPacked/
+    -- runOff/rLoad/rCbuf were its only readers — deleted with it, the cbuf
+    -- literal offsets frozen as literals in the surface text: "/" 139,
+    -- "\n" 173, "cd: " 240, cbuf 336).
     , seat "Rt.envHome" 1
     , seat "Rt.isChildBuiltin" 2
     , seat "Rt.echoGo" 3
-    , childCdDefun
+    , seat "Rt.childCd" 3
     , seat "Rt.childPwd" 1
     , seat "Rt.childBuiltin" 3
     , seat "Rt.applyOneRedir" 2

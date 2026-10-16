@@ -2580,7 +2580,7 @@ checks =
                 False
         )
     , check
-        "T17/T18/T20/T21/T22 pipeline (the wave-9 + collector + never-scheduled key-set row, post-T22's one-hundred-fifty-nine): surf is Ok with EXACTLY the one-hundred-fifty-nine migrated keys under the default flags — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
+        "T17/T18/T20/T21/T22/T24 pipeline (the wave-9 + collector + never-scheduled + T24 key-set row, post-T24's one-hundred-sixty-two): surf is Ok with EXACTLY the one-hundred-sixty-two migrated keys under the default flags — T24 added the LAST THREE wall-class holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd), so the DSL-bodied set is now EMPTY — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
         (case Rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
             Ok s ->
                 List.sort (Dict.keys s)
@@ -2590,10 +2590,10 @@ checks =
                       "Rt.bitwise-shift-left", "Rt.bitwise-shift-right", "Rt.bitwise-shift-right-zf", "Rt.bitwise-xor",
                       "Rt.bodyWriteGo", "Rt.bytesBuild", "Rt.bytesEqGo", "Rt.bytesOf",
                       "Rt.bytesToStr", "Rt.c-strlen", "Rt.cStrCopyGo", "Rt.cStrEqLit", "Rt.cStrFill", "Rt.cStrLenGo",
-                      "Rt.cd", "Rt.char-code", "Rt.childBuiltin",
+                      "Rt.cd", "Rt.char-code", "Rt.childBuiltin", "Rt.childCd",
                       "Rt.childPwd", "Rt.close", "Rt.closeCmdTmpfds", "Rt.closeOthersGo", "Rt.closePipeTmpfds", "Rt.closePipesGo", "Rt.closure",
                       "Rt.closureFill", "Rt.cn", "Rt.cn2", "Rt.collect", "Rt.con", "Rt.conFill", "Rt.cons", "Rt.cons?", "Rt.countL", "Rt.deepEq", "Rt.dgs", "Rt.echoGo", "Rt.empty?",
-                      "Rt.emptylist", "Rt.envHome", "Rt.epArgvGo", "Rt.epChain", "Rt.epCount", "Rt.epCountStdin", "Rt.epElem",
+                      "Rt.emptylist", "Rt.envHome", "Rt.epArgvGo", "Rt.epChain", "Rt.epCmd", "Rt.epCount", "Rt.epCountStdin", "Rt.epElem",
                       "Rt.epFreeArgv", "Rt.epFreeChains", "Rt.epFreeCmd", "Rt.epFreeCmds", "Rt.epFreeRedirs", "Rt.epNum", "Rt.epPipeGo",
                       "Rt.epPipeline", "Rt.epProg", "Rt.epProgGo", "Rt.epRedir", "Rt.epRedirsGo", "Rt.epStr", "Rt.epSymIs", "Rt.epSymOf",
                       "Rt.exec-plan", "Rt.exec-run", "Rt.execGo", "Rt.f/", "Rt.fillGo", "Rt.floatCopy", "Rt.gcAlloc", "Rt.gcAllocGo",
@@ -2601,7 +2601,7 @@ checks =
                       "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot", "Rt.globIsDotDot",
                       "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess", "Rt.intern",
                       "Rt.isChildBuiltin", "Rt.memGo", "Rt.mkTmpAt", "Rt.nameBytes", "Rt.numText", "Rt.number?", "Rt.open",
-                      "Rt.openBodyTmpfile", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind",
+                      "Rt.openBodyTmpfile", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo", "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind",
                       "Rt.recAppendNamesGo", "Rt.recGet", "Rt.recGetGo", "Rt.recInsert", "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd",
                       "Rt.recUpdCopy", "Rt.recUpdFind", "Rt.repGo", "Rt.repeat", "Rt.revGo", "Rt.runBuiltinInprocess", "Rt.setenv", "Rt.shen.bytes->string", "Rt.shen.str->bytes", "Rt.snd", "Rt.str", "Rt.strOf",
                       "Rt.string?", "Rt.subGo", "Rt.substring", "Rt.symEq", "Rt.symLess", "Rt.symToStr", "Rt.toI32", "Rt.value", "Rt.vecEq", "Rt.wRaw", "Rt.wStr",
@@ -2702,9 +2702,9 @@ checks =
     -- the DSL self-references via plain RawCall, a native call per rare
     -- retry, and the corpus pins that shape) and the two defuns T8 had to
     -- defer (close: `-2` is now a single negative literal; write-byte: the
-    -- key now lexes).  Rt.readFileGo stays DSL-side — its growB binder is
-    -- an If in a Let VALUE position and the grammar has no if-expression
-    -- (RtSource's T9 note).
+    -- key now lexes).  Rt.readFileGo stayed DSL-side until T24 (its growB
+    -- binder is an If in a Let VALUE position; the grammar gained the
+    -- if-EXPRESSION in T23 and T24 migrated it — see the T24 rows).
     , t8SplicedRow "Rt.cStrLenGo"
     , t8SplicedRow "Rt.cStrCopyGo"
     , t8SplicedRow "Rt.cStrFill"
@@ -2713,7 +2713,7 @@ checks =
     , t8SplicedRow "Rt.close"
     , t8SplicedRow "Rt.write-byte"
     , check
-        "T12 no double definition (T11's row + the new builder seats): each migrated key's ONLY DSL-side entry is its seat (a re-added builder would displace it — this row is the alarm); the deferred Rt.readFileGo builder is still present, and so are the two walled holdouts Rt.childCd (T17) and Rt.epCmd (T16)"
+        "T12/T24 no double definition (T11's row + the new builder seats): each migrated key's ONLY DSL-side entry is its seat (a re-added builder would displace it — this row is the alarm); T24 added the LAST THREE holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd — their builders are deleted, so ZERO DSL-bodied defuns remain; a regression would fail this row)"
         (List.all
             (\s ->
                 -- Occurrence COUNT, not first-match: a re-added builder AFTER
@@ -2869,10 +2869,14 @@ checks =
             , { key = "Rt.bytesBuild", arity = 3 }
             , { key = "Rt.symLess", arity = 3 }
             , { key = "Rt.read-file-as-string", arity = 1 }
+              -- T24: the LAST THREE wall-class holdouts migrated — their
+              -- builders are DELETED, so the filter-per-key check above is
+              -- now the only entry the row needs for them (a re-added
+              -- builder would fail it loudly).
+            , { key = "Rt.readFileGo", arity = 1 }
+            , { key = "Rt.epCmd", arity = 3 }
+            , { key = "Rt.childCd", arity = 3 }
             ]
-            && List.any (\d -> d.key == "Rt.readFileGo") (RtPrims.helperDefuns True)
-            && List.any (\d -> d.key == "Rt.childCd") (RtPrims.helperDefuns True)
-            && List.any (\d -> d.key == "Rt.epCmd") (RtPrims.helperDefuns True)
         )
 
     -- ===== T10 — wave-3 migration: the equality family, the first @flag-guarded defuns =====
@@ -3035,11 +3039,10 @@ checks =
     -- epFreeRedirs; no self-call in the unwraps/epProg/epChain/epPipeline/
     -- epRedir/epFreeCmd.  The RtLayout offsets are literals in the surface
     -- text (MEASURED: all eight exec fixtures' .ssa reach every key, so
-    -- the corpus pins each offset).  Rt.epCmd is deliberately NOT here:
-    -- its ago/rgo binders are Ifs in LET-VALUE positions whose branches
-    -- carry Lets and whose values the continuation reads — unspellable
-    -- (the readFileGo wall class); its builder stays, and tagCountState
-    -- stays with it.
+    -- the corpus pins each offset).  Rt.epCmd was NOT in T16 (its ago/rgo
+    -- binders are Ifs in LET-VALUE positions whose branches carry Lets and
+    -- whose values the continuation reads — unspellable until T23); T24
+    -- migrated it with the block-branch if — see the T24 rows below.
     , t8SplicedRow "Rt.epNum"
     , t8SplicedRow "Rt.epStr"
     , t8SplicedRow "Rt.epSymOf"
@@ -3068,14 +3071,14 @@ checks =
     -- applyOneRedir/applyRedirects/bodyWriteGo/openBodyTmpfile/wireCmdGo/
     -- wirePipeGo/closeCmdTmpfds/closePipeTmpfds/closePipesGo/closeOthersGo/
     -- runBuiltinInprocess/execGo — the 565-line 7-mode execGo state machine
-    -- itself, TWENTY-THREE recur sites MEASURED).  Rt.childCd is deliberately
-    -- NOT here: its second dirN binder is an If in a LET-VALUE position whose
+    -- itself, TWENTY-THREE recur sites MEASURED).  Rt.childCd was NOT in
+    -- T17 (its second dirN binder is an If in a LET-VALUE position whose
     -- ELSE carries a Let-chain (ln = cStrLenGo dirN) and whose value the
-    -- continuation reads — the epCmd wall class (the readFileGo/epCmd
-    -- precedent); its builder stays and runLits/runOff/rLoad/rStore stay
-    -- with it.  The RtLayout offsets, the runLits cbuf offsets and the
-    -- decode tag words are literals in the surface text (COMPUTED by
-    -- replicating runLitsPacked/the lit folder, not transcribed by hand).
+    -- continuation reads); T24 migrated it with the block-branch if, and
+    -- its runLits/runOff/rLoad helpers died with it.  The RtLayout offsets,
+    -- the runLits cbuf offsets and the decode tag words are literals in the
+    -- surface text (COMPUTED by replicating runLitsPacked/the lit folder,
+    -- not transcribed by hand).
     , t8SplicedRow "Rt.envHome"
     , t8SplicedRow "Rt.isChildBuiltin"
     , t8SplicedRow "Rt.echoGo"
@@ -3240,8 +3243,8 @@ checks =
     -- a plain `call`, NOT recur, in every one of the nine.  The wave's
     -- deletions killed seven Elm helpers (cStrOf, lenOf, mkVec, consV,
     -- byteOf, trueV, falseV — zero-ref verified); Rt.readFileGo,
-    -- Rt.epCmd and Rt.childCd stay DSL-side (the three wall-class
-    -- holdouts, unchanged).
+    -- Rt.epCmd and Rt.childCd stayed DSL-side here — the three wall-class
+    -- holdouts, migrated in T24 (see the T24 block below).
     , t8SplicedRow "Rt.con"
     , t8SplicedRow "Rt.conFill"
     , t8SplicedRow "Rt.closure"
@@ -4070,6 +4073,18 @@ checks =
             Err _ ->
                 False
         )
+
+    -- ===== T24 — the LAST THREE wall-class holdouts (handoff-osier-tier2-t24) =====
+    -- Rt.readFileGo / Rt.epCmd / Rt.childCd migrated on the T23 block-branch
+    -- if.  The three rows below are the SPLICE rows (each key's program
+    -- defun IS the surface lowering — structural ==, so a surviving
+    -- builder/seat cannot satisfy it); the corpus is the byte-level proof
+    -- and the T23 acceptance rows pin the two canonical spellings (growB,
+    -- dirN#2).  The T9/T16/T17 row-comment corrections above record the
+    -- earlier deferrals.
+    , t8SplicedRow "Rt.readFileGo"
+    , t8SplicedRow "Rt.epCmd"
+    , t8SplicedRow "Rt.childCd"
     ]
 
 
@@ -5611,3 +5626,5 @@ rawCallSyms exp =
 
                 RawDataAddr _ ->
                     []
+
+
