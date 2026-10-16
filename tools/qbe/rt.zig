@@ -1440,6 +1440,212 @@ const RESERVE_BYTES: usize = 64 * 1024 * 1024;
 
 var vmem: state.Vm = undefined;
 
+// =====================================================================
+//  THE DRIVER SEATS (stage 6 A2) — the pieces of `main` that stay Zig
+// =====================================================================
+// The Mid driver (stage 6 A3a/A4a) cannot express these yet — the GC's
+// bring-up, the entry-argument parse, the *argv* install, the Program
+// predicate, the effect loop's entry and the printer — so they are exported
+// here, C ABI, for `main` (below) and for the Mid driver alike.  Every body
+// is a VERBATIM lift of the region it came from in `main` (same statements,
+// same order, same helper calls, same error text and exit code), and main now
+// CALLS them, so the default route is byte-identical by construction.
+//
+// THE SHAPE: a seat hands its result back through a caller-provided slot and
+// RETURNS the code `main` returns (0 = proceed, 2 = the driver's argument
+// error, 1 = a runtime error).  No seat exits the process itself: main's exit
+// path also runs the GC/RT stats defers, and an exit() inside a seat would
+// drop them — a byte-parity difference with the pre-A2 driver.
+//
+// These are ADDITIONS (stage 6 A2): nothing already here changed its calling
+// convention, and the seats die with `main` when the Mid side owns the driver
+// (stage 7 / B4).
+
+/// The Gc, promoted from main's stack frame to a global: `rt_boot` creates it
+/// and main (or a seat) reaches it through `g`.  Same lifetime as before —
+/// main's `defer g.deinit()` still runs at exit.
+var gg: Gc = undefined;
+
+/// rt_boot: everything the driver must do before ANY generated code can run —
+/// the debug knobs (read ONCE, here), the heap knob, the Gc, the rt_string
+/// intern table's root, the Vm, the three standard streams, and the effect
+/// loop's host applier.  VERBATIM main:1476-1487 + 1590-1596 + 1599-1630 +
+/// 1677-1688 + 1761.  Returns 0, or 1 after the SAME stderr line and exit
+/// status as the pre-A2 main (the gc-init failure).
+export fn rt_boot() callconv(.c) i64 {
+    // Read the debug knobs ONCE, here, before any generated code can run.
+    // rt_frame_leave used to call getenv on every return (8.4% of the native
+    // compiler's runtime — see no_frame_reuse); nothing below this line may
+    // start calling generated code before the flag is set.
+    no_frame_reuse = std.c.getenv("QBE_NO_REUSE") != null;
+    // The two A/B hatches for this pass's runtime mechanisms.  An env knob (not
+    // a run.js flag like QBE_NOPRIMDIRECT): both mechanisms live in rt.zig, so
+    // ONE binary carries both arms and the A/B is a same-binary comparison
+    // rather than a rebuild.  Same reading discipline as no_frame_reuse —
+    // before anything can call them.
+    no_string_intern = std.c.getenv("QBE_NOSTRINGINTERN") != null;
+    no_tail_stage = std.c.getenv("QBE_NOTTAILSTAGE") != null;
+    // QBE_MIDGC is a COMPILE-time hatch (it selects the emitted .ssa); the
+    // runtime sees it as the resolved weak address of the exported Mid
+    // allocating seat — present iff the .ssa was built with the hatch on.
+    midgc_active = if (midgc_alloc_vector) |seat| @intFromPtr(seat) != 0 else false;
+
+    // heap knob for the GC-churn verification (small heap => many moves)
+    const heap_bytes: usize = blk: {
+        const env = std.c.getenv("QBE_HEAP_MB") orelse break :blk HEAP_BYTES;
+        const s = std.mem.span(env);
+        const mb = std.fmt.parseUnsigned(usize, s, 10) catch break :blk HEAP_BYTES;
+        if (mb == 0) break :blk HEAP_BYTES;
+        break :blk mb * 1024 * 1024;
+    };
+    gc_heap_bytes = heap_bytes;
+
+    rtInit();
+    gg = Gc.init(.{
+        .heap_bytes = heap_bytes,
+        // GC-FIX C: C's OWN reservation policy (16x the heap), not the 2x the
+        // drivers used to pass.  grow_heap asks for a heap of 2 x heappages and
+        // needs `new_size + PAGEBYTES - 1 <= reservation`, so a 2x reservation
+        // made every grow fail BY CONSTRUCTION ("need N MB but reservation is N
+        // MB" — the arithmetic behind the abort at 128 MB, 512 MB and 32768 MB
+        // alike).  k x heap gives a heap CEILING of (k/2) x heap, and 16x is
+        // MEASURED as the smallest multiplier that keeps a real fixture out of a
+        // collect-per-allocation thrash at the minimum heap: at QBE_HEAP_MB=16,
+        // tools/qbe/fixtures/vfield.elm's live set reaches 16.1 MB, which needs
+        // a threshold just above 16 MB, i.e. a heap over 64.4 MB — unreachable
+        // under an 8x reservation (64 MB ceiling), comfortable under a 16x one
+        // (128 MB).  Gc.init shrinks the request toward 2x + 1027*PAGEBYTES only
+        // if the address space cannot map it.  See heap.Options' "THE GROW
+        // ARITHMETIC".
+        .reserve_bytes = @max(heap_bytes * 16, RESERVE_BYTES),
+        .verbose = std.c.getenv("QBE_GC_VERBOSE") != null,
+        .verify_collects = std.c.getenv("QBE_GC_VERIFY") != null,
+    }) catch {
+        werr("qbe-rt: gc init failed\n");
+        return 1;
+    };
+    g = &gg;
+    // The rt_string intern table's root array.  HERE, not in rtInit: rtInit
+    // also runs from rt_frame_enter, i.e. AFTER a frame's watermark is taken,
+    // and a root pushed there would be popped by the next rt_frame_leave
+    // (see rt_frame_leave).  This is the last point that is provably before
+    // any generated code — the entry call is far below.
+    internInit();
+    vmem.init(&gg);
+    vm = &vmem;
+
+    // Wire the standard I/O streams (M6) — the SAME three value variables
+    // the former VM harness set at the same point.  initGlobals only registers the PRIM
+    // globals; the *stinput*/*stoutput*/*sterror* slots are the HOST's to
+    // install, and a native program that reads stdin (Cmd.readLine ->
+    // read-byte on *stinput*) died with "prim read-byte failed: Halt" before
+    // this — the gate's ioecho row is the fixture that catches its absence.
+    vmem.valueSet("*stinput*", streams.valStreamInFd(0));
+    vmem.valueSet("*stoutput*", streams.valStreamOutFd(1));
+    vmem.valueSet("*sterror*", streams.valStreamOutFd(2));
+
+    // Host the effect loop EXACTLY like the retired harnesses did:
+    // install the native host->Elm dispatcher (the seam's default is a loud
+    // stub — only a native applier can execute Desc*-coded closures), run the
+    // entry, and if it returns a Program vector drive the shared CEK effect manager
+    // to the final model.  The Vm already wired *stinput*/*stoutput*/*sterror*
+    // in initGlobals, so StreamRef reads the same value-table slots the VM did.
+    // Installed HERE, in the bring-up, because nothing before the entry call
+    // may depend on it and the Mid driver must not have to reach the seam.
+    effectloop.host_apply = &hostApply;
+    return 0;
+}
+
+/// rt_parse_arg: ONE entry argument -> the Value main builds for it (VERBATIM
+/// main:1715-1738's loop body: the isFloatArg heuristic, parseFloat/parseInt,
+/// valFloat/valNumber, and both error strings).  Stores the value in `dst` and
+/// returns 0, or writes the SAME stderr line and returns 2 for the caller to
+/// exit with (the exit code is main's/the driver's to produce).
+export fn rt_parse_arg(dst: *Value, arg: [*:0]const u8) callconv(.c) i64 {
+    const a = std.mem.span(arg);
+    if (isFloatArg(a)) {
+        const f = std.fmt.parseFloat(f64, a) catch {
+            var buf: [256]u8 = undefined;
+            const out = std.fmt.bufPrint(&buf, "qbe-rt: entry arg '{s}' is not a float\n", .{a}) catch "qbe-rt: bad entry arg\n";
+            werr(out);
+            return 2;
+        };
+        dst.* = values.valFloat(f);
+    } else {
+        const n = std.fmt.parseInt(i64, a, 10) catch {
+            var buf: [256]u8 = undefined;
+            const out = std.fmt.bufPrint(&buf, "qbe-rt: entry arg '{s}' is not an int (qbe slice)\n", .{a}) catch "qbe-rt: bad entry arg\n";
+            werr(out);
+            return 2;
+        };
+        dst.* = values.valNumber(n);
+    }
+    return 0;
+}
+
+/// rt_argv_install: the *argv* pseudo-global for the AOTRUN_ARGV contract
+/// (VERBATIM main:1745-1753).  `argv_mode` is the AOTRUN_ARGV test main
+/// already makes for the max_arity guard, passed in so the seat has no env
+/// logic of its own.
+export fn rt_argv_install(argv_mode: i32, nargs: usize, c_argv: [*]?[*:0]u8) callconv(.c) void {
+    if (argv_mode != 0) {
+        // The list is Zig-heap (valCons/valString below) and valueSet stores
+        // it in the Vm's values table — registered with the collector at
+        // Vm.init (state.zig's g.registerValuesTable), which is what pins it
+        // for the rest of the run.  The SCOPED root here is the lift's own
+        // addition: main built the list inside the valueSet call, and the GC
+        // contract (rt.zig's header) requires anything held across an
+        // allocating call to sit on a shadow-stack root.  It must stay SCOPED:
+        // a forever-root pushed here would be the entry main's own deferred
+        // `g.rootPop()` (the argv_buf array root, pushed just above) pops
+        // instead — the wrong-entry pop rt_frame_leave's comment warns about.
+        var list = buildArgvList(nargs, c_argv);
+        var rt = g.rootValue(&list);
+        defer rt.end();
+        vmem.valueSet("*argv*", list);
+    } else {
+        vmem.valueSet("*argv*", values.valNil());
+    }
+}
+
+/// rt_is_program: the `Runtime.program` predicate the driver asks (VERBATIM
+/// main:1768's effectloop.isProgram).  1 = a Program vector, 0 = not.
+export fn rt_is_program(v: *const Value) callconv(.c) i64 {
+    return @intFromBool(effectloop.isProgram(v.*));
+}
+
+/// rt_run_program: the host-run path for a `program` entry — drive the shared
+/// CEK effect manager to the final model (VERBATIM main:1766-1777).  Stores the
+/// model in `dst` and returns 0, or writes the SAME stderr line and returns 1.
+export fn rt_run_program(v: *const Value, dst: *Value) callconv(.c) i64 {
+    dst.* = effectloop.runProgram(&vmem, v.*) catch {
+        var ebuf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&ebuf, "qbe-rt: error: {s}\n", .{values.errSlice(vmem.err_slot)}) catch "qbe-rt: effect loop failed\n";
+        werr(msg);
+        return 1;
+    };
+    return 0;
+}
+
+/// rt_print_value: print a Value, then the newline — the driver's output
+/// contract (VERBATIM main:1779-1789).  Returns 0, or 1 after the SAME stderr
+/// line as the pre-A2 main (the print failure).
+///
+/// Print through an ALLOCATING writer, not a fixed one: a result whose
+/// printed form exceeds any fixed buffer must print in full (the VM runner
+/// the VM did the same), so native and VM output agreed at every size.
+export fn rt_print_value(final: *const Value) callconv(.c) i64 {
+    var aw = std.Io.Writer.Allocating.init(std.heap.page_allocator);
+    defer aw.deinit();
+    values.printValue(&aw.writer, final.*) catch {
+        werr("qbe-rt: print failed\n");
+        return 1;
+    };
+    wout(aw.written());
+    wout("\n");
+    return 0;
+}
+
 /// AOTRUN_ARGV: build the *argv* pseudo-global value — a plain cons LIST of
 /// strings (run.js argv[2:] shape), built back-to-front (cdr-first) so each
 /// valCons roots the previous tail.  The empty case returns the nil singleton
@@ -1469,22 +1675,11 @@ fn isFloatArg(arg: []const u8) bool {
 }
 
 export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
-    // Read the debug knobs ONCE, here, before any generated code can run.
-    // rt_frame_leave used to call getenv on every return (8.4% of the native
-    // compiler's runtime — see no_frame_reuse); nothing below this line may
-    // start calling generated code before the flag is set.
-    no_frame_reuse = std.c.getenv("QBE_NO_REUSE") != null;
-    // The two A/B hatches for this pass's runtime mechanisms.  An env knob (not
-    // a run.js flag like QBE_NOPRIMDIRECT): both mechanisms live in rt.zig, so
-    // ONE binary carries both arms and the A/B is a same-binary comparison
-    // rather than a rebuild.  Same reading discipline as no_frame_reuse —
-    // before anything can call them.
-    no_string_intern = std.c.getenv("QBE_NOSTRINGINTERN") != null;
-    no_tail_stage = std.c.getenv("QBE_NOTTAILSTAGE") != null;
-    // QBE_MIDGC is a COMPILE-time hatch (it selects the emitted .ssa); the
-    // runtime sees it as the resolved weak address of the exported Mid
-    // allocating seat — present iff the .ssa was built with the hatch on.
-    midgc_active = if (midgc_alloc_vector) |seat| @intFromPtr(seat) != 0 else false;
+    // The debug knobs, the heap knob, the Gc, the intern table, the Vm, the
+    // standard streams and the effect loop's host applier are installed by the
+    // rt_boot SEAT (stage 6 A2), called below exactly where those statements
+    // used to stand — its position is what preserves the "read once, before any
+    // generated code can run" discipline the knob reads rely on.
 
     // The generated code puts Elm recursion on the C stack (Lower.elm:76-84
     // documents the limitation), so the default 8MB RLIMIT_STACK can kill deep
@@ -1586,48 +1781,12 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
         return 2;
     }
 
-    // heap knob for the GC-churn verification (small heap => many moves)
-    const heap_bytes: usize = blk: {
-        const env = std.c.getenv("QBE_HEAP_MB") orelse break :blk HEAP_BYTES;
-        const s = std.mem.span(env);
-        const mb = std.fmt.parseUnsigned(usize, s, 10) catch break :blk HEAP_BYTES;
-        if (mb == 0) break :blk HEAP_BYTES;
-        break :blk mb * 1024 * 1024;
-    };
-    gc_heap_bytes = heap_bytes;
-
-    rtInit();
-    var gg = Gc.init(.{
-        .heap_bytes = heap_bytes,
-        // GC-FIX C: C's OWN reservation policy (16x the heap), not the 2x the
-        // drivers used to pass.  grow_heap asks for a heap of 2 x heappages and
-        // needs `new_size + PAGEBYTES - 1 <= reservation`, so a 2x reservation
-        // made every grow fail BY CONSTRUCTION ("need N MB but reservation is N
-        // MB" — the arithmetic behind the abort at 128 MB, 512 MB and 32768 MB
-        // alike).  k x heap gives a heap CEILING of (k/2) x heap, and 16x is
-        // MEASURED as the smallest multiplier that keeps a real fixture out of a
-        // collect-per-allocation thrash at the minimum heap: at QBE_HEAP_MB=16,
-        // tools/qbe/fixtures/vfield.elm's live set reaches 16.1 MB, which needs
-        // a threshold just above 16 MB, i.e. a heap over 64.4 MB — unreachable
-        // under an 8x reservation (64 MB ceiling), comfortable under a 16x one
-        // (128 MB).  Gc.init shrinks the request toward 2x + 1027*PAGEBYTES only
-        // if the address space cannot map it.  See heap.Options' "THE GROW
-        // ARITHMETIC".
-        .reserve_bytes = @max(heap_bytes * 16, RESERVE_BYTES),
-        .verbose = std.c.getenv("QBE_GC_VERBOSE") != null,
-        .verify_collects = std.c.getenv("QBE_GC_VERIFY") != null,
-    }) catch {
-        werr("qbe-rt: gc init failed\n");
-        return 1;
-    };
-    g = &gg;
+    // The bring-up.  It returns 1 only for the gc-init failure, and it is
+    // called HERE (after the usage/arity checks, before any generated code)
+    // exactly as the statements it replaced were: the usage error must not
+    // boot a collector (byte-parity with the pre-A2 driver).
+    if (rt_boot() != 0) return 1;
     defer g.deinit();
-    // The rt_string intern table's root array.  HERE, not in rtInit: rtInit
-    // also runs from rt_frame_enter, i.e. AFTER a frame's watermark is taken,
-    // and a root pushed there would be popped by the next rt_frame_leave
-    // (see rt_frame_leave).  This is the last point that is provably before
-    // any generated code — the entry call is far below.
-    internInit();
     // QBE_GC_STATS=1: one exit-time line of collector counters and old-gen
     // occupancy, on STDERR (so no stdout oracle can ever see it) and gated (so
     // the default run is byte-for-byte and cycle-for-cycle what it was).
@@ -1674,19 +1833,6 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
             },
         );
     };
-    vmem.init(&gg);
-    vm = &vmem;
-
-    // Wire the standard I/O streams (M6) — the SAME three value variables
-    // the former VM harness set at the same point.  initGlobals only registers the PRIM
-    // globals; the *stinput*/*stoutput*/*sterror* slots are the HOST's to
-    // install, and a native program that reads stdin (Cmd.readLine ->
-    // read-byte on *stinput*) died with "prim read-byte failed: Halt" before
-    // this — the gate's ioecho row is the fixture that catches its absence.
-    vmem.valueSet("*stinput*", streams.valStreamInFd(0));
-    vmem.valueSet("*stoutput*", streams.valStreamOutFd(1));
-    vmem.valueSet("*sterror*", streams.valStreamOutFd(2));
-
     // find the entry in the meta table.  $qbe_meta is a POINTER to a single
     // contiguous array of Meta rows (Mid.Qbe.Lower metaTable emits the rows
     // inline in one $meta_rows symbol and $qbe_meta as `l $meta_rows`), so
@@ -1711,30 +1857,16 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     // heuristic is the former harnesses' verbatim (their isFloatArg) so the
     // native driver and the VM reference accept the SAME command line —
     // `Flt.idF 2.5` must reach the entry as a Value tagged float, exactly as
-    // the VM reference's `F[...]` atom built it.
+    // the VM reference's `F[...]` atom built it.  The whole parse (heuristic,
+    // parseFloat/parseInt, valFloat/valNumber, both error strings) is the
+    // rt_parse_arg SEAT now; it returns 2 to say "already reported", and this
+    // driver owns the exit so its stats defers still run.
     var argv_buf: [max_arity]Value = undefined;
     var entry_nargs: i32 = 0;
     var j: usize = 0;
     if (!argv_mode) {
         while (j < nargs) : (j += 1) {
-            const a = std.mem.span(c_argv[2 + j] orelse "");
-            if (isFloatArg(a)) {
-                const f = std.fmt.parseFloat(f64, a) catch {
-                    var buf: [256]u8 = undefined;
-                    const out = std.fmt.bufPrint(&buf, "qbe-rt: entry arg '{s}' is not a float\n", .{a}) catch "qbe-rt: bad entry arg\n";
-                    werr(out);
-                    return 2;
-                };
-                argv_buf[j] = values.valFloat(f);
-            } else {
-                const n = std.fmt.parseInt(i64, a, 10) catch {
-                    var buf: [256]u8 = undefined;
-                    const out = std.fmt.bufPrint(&buf, "qbe-rt: entry arg '{s}' is not an int (qbe slice)\n", .{a}) catch "qbe-rt: bad entry arg\n";
-                    werr(out);
-                    return 2;
-                };
-                argv_buf[j] = values.valNumber(n);
-            }
+            if (rt_parse_arg(&argv_buf[j], c_argv[2 + j] orelse "") != 0) return 2;
         }
         entry_nargs = @intCast(nargs);
     }
@@ -1745,47 +1877,28 @@ export fn main(c_argc: c_int, c_argv: [*]?[*:0]u8) callconv(.c) c_int {
     // *argv* pseudo-global: in argv mode the APP's strings (built back-to-
     // front, each valCons rooting the previous tail — the same shape
     // the retired AOT driver built); otherwise the empty list (the default
-    // run.zig installs when argv_mode is off).
-    if (argv_mode) {
-        vmem.valueSet("*argv*", buildArgvList(nargs, c_argv));
-    } else {
-        vmem.valueSet("*argv*", values.valNil());
-    }
+    // run.zig installs when argv_mode is off).  The rt_argv_install SEAT owns
+    // the whole region — the build AND the two valueSet arms.
+    rt_argv_install(@intFromBool(argv_mode), nargs, c_argv);
 
-    // Host the effect loop EXACTLY like the retired harnesses did:
-    // install the native host->Elm dispatcher (the seam's default is a loud
-    // stub — only a native applier can execute Desc*-coded closures), run the
-    // entry, and if it returns a Program vector drive the shared CEK effect manager
-    // to the final model.  The Vm already wired *stinput*/*stoutput*/*sterror*
-    // in initGlobals, so StreamRef reads the same value-table slots the VM did.
-    effectloop.host_apply = &hostApply;
-
+    // Host the effect loop EXACTLY like the retired harnesses did: the seam's
+    // host->Elm dispatcher is installed by rt_boot (it must be in place before
+    // anything can drive a Program).  Run the entry here, and if it returns a
+    // Program vector drive the shared CEK effect manager to the final model.
     var result = callArity(m.arity, m.code, null, &argv_buf);
     g.rootPushValue(&result);
     defer g.rootPop();
 
     var final = result;
-    if (effectloop.isProgram(result)) {
-        final = effectloop.runProgram(&vmem, result) catch {
-            var ebuf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&ebuf, "qbe-rt: error: {s}\n", .{values.errSlice(vmem.err_slot)}) catch "qbe-rt: effect loop failed\n";
-            werr(msg);
-            return 1;
-        };
+    if (rt_is_program(&result) != 0) {
+        if (rt_run_program(&result, &final) != 0) return 1;
         g.rootPushValue(&final);
         defer g.rootPop();
     }
 
-    // Print through an ALLOCATING writer, not a fixed one: a result whose
-    // printed form exceeds any fixed buffer must print in full (the VM runner
-    // the VM did the same), so native and VM output agreed at every size.
-    var aw = std.Io.Writer.Allocating.init(std.heap.page_allocator);
-    defer aw.deinit();
-    values.printValue(&aw.writer, final) catch {
-        werr("qbe-rt: print failed\n");
-        return 1;
-    };
-    wout(aw.written());
-    wout("\n");
+    // Print through the rt_print_value SEAT: a Value + the newline, through an
+    // ALLOCATING writer (a printed form that exceeds a fixed buffer must print
+    // in full, so native and VM output agreed at every size).
+    if (rt_print_value(&final) != 0) return 1;
     return 0;
 }
