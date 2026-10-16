@@ -410,6 +410,20 @@ extern table**. A mismatch is loud at one end or the other.
    it, and the conservative floor is "any value derived from a Mid result is tainted **for the purpose
    of the return check only**, with local use unrestricted".
 
+**NAMED DIRECTION — SCOPED EFFECTS VIA QUANTIFIED EXPORTS (owner question 2026-10-16, NOT BUILT).** *"if we
+allow existential types on mid exports... doesn't that mean we have the method to implement scoped
+mutation effects just from this?"* — yes. Existentials (or the dual rank-2 `runST` shape) package a
+region: `∃s. { alloc : Int -> Ref s, read : Ref s -> a, write : Ref s -> a -> Val }`. The witness `s`
+is a phantom no Osier program can name, so a `Ref s` **cannot escape the scope**: containment BY TYPE
+rather than by a taint heuristic, and contract 4's propagation question dissolves (the region is
+unforgeable — nothing to propagate). Passing Osier types in and out works **because the ABI is
+uniform**: `a` erases to the boxed `val` at the boundary, so the type is a checked Osier-side fiction,
+sound iff contract 1 (a Mid container of Osier values is GC-visible — a `value_array` is) and contract
+2 (Mid never mutates an Osier value). STATUS: Phase-7-adjacent (needs existentials/rank-2 + a sealing
+rule); the owner's own direction already includes rank-2 + locally abstract types, so the machinery is
+on the roadmap. **CONSEQUENCE FOR M2:** the export-block grammar must be able to CARRY quantifiers
+later — do not pin it to monomorphic types.
+
 Plus **ARITY**: declared and flat (Osier is curried, mid-c is flat) — the one thing `externArities`
 already does today.
 
