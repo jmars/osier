@@ -647,6 +647,13 @@ run_err_md md-err-toomany err-toomany Const42.main tools/qbe/fixtures/const42.el
 # entry name is not in qbe_meta, so the THREE-write emission (prefix + entry +
 # suffix) must byte-match the default route's bufPrint golden err-notmeta.txt.
 run_err_md md-err-notmeta err-notmeta Const42.main tools/qbe/fixtures/const42.elm 2 NoSuch.entry
+# stage-6 A4a: the ARG PARSE path under the MID driver — rt_parse_arg's TWO
+# refusal arms (the isFloatArg heuristic: a '.'/'e'-spelled arg takes the float
+# path, everything else the int path) write the SAME stderr line and exit 2 as
+# the default route, byte-for-byte (the arg loop is Rt.parseArgsGo; these rows
+# exercise it end-to-end under QBE_MIDDRIVER=1).
+run_err_md md-err-badarg-int   err-badarg-int   Const42.main tools/qbe/fixtures/const42.elm 2 Const42.main abc
+run_err_md md-err-badarg-float err-badarg-float Const42.main tools/qbe/fixtures/const42.elm 2 Const42.main 2.5.3
 
 # ---- stage 4: the effect loop (StreamRef) + host I/O (golden-pinned) ----
 # io-read: read a file (QBE_IO_IN) and write a stdout sentinel through the

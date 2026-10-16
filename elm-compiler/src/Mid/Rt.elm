@@ -755,15 +755,23 @@ rtDeps =
           ( "Rt.cStrEq", [ "Rt.cStrEqGo" ] )
         , ( "Rt.cStrEqGo", [] )
         , ( "Rt.metaGo", [ "Rt.cStrEq" ] )
+        , -- ===== the stage-6 A4a arg loop.  Rt.parseArgsGo is a frame-free
+          -- val defun (self-tail via recur) whose only seat calls are the
+          -- rawcall rt_parse_arg (RawCallRaw — NOT an rtDeps edge); it names
+          -- no Rt RawCall target, so its edge list is empty (the cStrLenGo/
+          -- cStrEqGo [] precedent).
+          ( "Rt.parseArgsGo", [] )
         , -- ===== the stage-6 A3a driver entry.  Rt.main is a rawAbi defun
           -- (WORD argc/argv in, WORD exit-code out) reached from
           -- driverSeeds; its RawCall edges are Rt.cStrLenGo (the three
-          -- not-in-meta writes' lengths) and Rt.metaGo (the meta walk).  The
-          -- usage/toomany error paths reached cStrLenGo before A3b; A3b adds
-          -- the meta-walk edge.  Everything else it reaches is a rawcall
-          -- (write/exit/getenv/getrlimit/setrlimit/malloc) or a rawstr static
-          -- data def — neither is an rtDeps edge.
-          ( "Rt.main", [ "Rt.cStrLenGo", "Rt.metaGo" ] )
+          -- not-in-meta writes' lengths), Rt.metaGo (the meta walk) and
+          -- Rt.parseArgsGo (the A4a arg loop).  The usage/toomany error paths
+          -- reached cStrLenGo before A3b; A3b adds the meta-walk edge, A4a
+          -- the arg loop.  Everything else it reaches is a rawcall
+          -- (write/exit/getenv/getrlimit/setrlimit/malloc/rt_boot/
+          -- rt_parse_arg/rt_argv_install/rt_root_push_value_array) or a
+          -- rawstr/rawsym static def — neither is an rtDeps edge.
+          ( "Rt.main", [ "Rt.cStrLenGo", "Rt.metaGo", "Rt.parseArgsGo" ] )
         ]
 
 

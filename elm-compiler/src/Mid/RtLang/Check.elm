@@ -150,7 +150,8 @@ BACKEND-NEUTRAL (the `Mid.Rt` contract): imports are `Dict` and
 import Dict exposing (Dict)
 import Mid.RtLang.Ast
     exposing
-        ( Block
+        ( AggShape(..)
+        , Block
         , Defun
         , Exp(..)
         , Flag(..)
@@ -848,8 +849,8 @@ checkExp ctx e =
         ERawCall sym args ->
             checkRawCall ctx sym args
 
-        EAggCall _ fnExp args ->
-            checkAggCall ctx fnExp args
+        EAggCall shape fnExp args ->
+            checkAggCall ctx shape fnExp args
 
         EBuiltin b args ->
             checkSig ctx ("builtin '" ++ builtinName b ++ "'") (builtinClass b) args
@@ -1002,12 +1003,14 @@ checkRawCall ctx sym args =
                     )
 
 
-{-| The aggcall family (J1's call row): the fn expression, every argument
-and the result (the sret buffer ADDRESS) are `:word`.  0 uses today; the
-shape is pinned for stage-6.
+{-| The aggcall family (J1's call row): the fn expression and every argument
+are `:word`; the RESULT class is the shape — `ret` yields the 80-B sret
+buffer ADDRESS as `:word` (read the fields with wload), `val` yields the
+40-B tagged `:val` (blitted into the binder slot by Lower's value-position
+RawCallAgg arm, the A1 item-5 shape — the driver's rt_bounce sret-as-a-Value).
 -}
-checkAggCall : Ctx -> Exp -> List Exp -> Result String Type
-checkAggCall ctx fnExp args =
+checkAggCall : Ctx -> AggShape -> Exp -> List Exp -> Result String Type
+checkAggCall ctx shape fnExp args =
     case checkExp ctx fnExp of
         Err msg ->
             Err msg
@@ -1021,7 +1024,14 @@ checkAggCall ctx fnExp args =
                     args
             of
                 Ok () ->
-                    Ok TWord
+                    Ok
+                        (case shape of
+                            AggVal ->
+                                TVal
+
+                            AggRet ->
+                                TWord
+                        )
 
                 Err msg ->
                     Err msg

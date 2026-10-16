@@ -877,7 +877,7 @@ checks =
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
     , check "rt program: 150 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram True True True) == 156
+        (List.length (rtProgram True True True) == 157
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram True True True)
             && List.any
                 (\d ->
@@ -1067,7 +1067,7 @@ checks =
     -- calls.  A :val-shaped arg or an under-applied call here is a SILENT
     -- MISCOMPILE (the callee reads a garbage register), so the emitted
     -- shapes are pinned, not just "it links".
-    , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main are the word-ABI keys and the die/halt/cStrEq set are frame-free (a die path must not reach a safepoint; the meta-walk compare is non-allocating so it stays frame-free too; Rt.main's allocating classification arrives with its A4a body)"
+    , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set)"
         (Rt.rawAbi
             == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main" ]
             && not (Set.member "Rt.die" Rt.allocating)
@@ -1075,6 +1075,7 @@ checks =
             && not (Set.member "Rt.cStrEq" Rt.allocating)
             && not (Set.member "Rt.cStrEqGo" Rt.allocating)
             && not (Set.member "Rt.metaGo" Rt.allocating)
+            && not (Set.member "Rt.parseArgsGo" Rt.allocating)
         )
     , check "rawAbi emission shape: Rt.die (1 word param) emits (params [a0:l], ret l, frame-free alloc scratch)"
         (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.die" of
@@ -1194,7 +1195,7 @@ checks =
             Err _ ->
                 False
         )
-    , check "A1 driverSeeds: Rt.main is seeded alongside the Rt.die/Rt.halt closure (keepRtDependencies keeps the leaf) — the driver entry is reachable under QBE_MIDDRIVER=1; A3b extends the closure with the meta-walk family (Rt.metaGo -> Rt.cStrEq -> Rt.cStrEqGo)"
+    , check "A1 driverSeeds: Rt.main is seeded alongside the Rt.die/Rt.halt closure (keepRtDependencies keeps the leaf) — the driver entry is reachable under QBE_MIDDRIVER=1; A3b extends the closure with the meta-walk family (Rt.metaGo -> Rt.cStrEq -> Rt.cStrEqGo), A4a with the arg loop (Rt.parseArgsGo)"
         (List.member "Rt.main" Rt.driverSeeds
             && List.member "Rt.die" Rt.driverSeeds
             && List.member "Rt.halt" Rt.driverSeeds
@@ -1202,6 +1203,7 @@ checks =
             && List.member "Rt.metaGo" Rt.driverSeeds
             && List.member "Rt.cStrEq" Rt.driverSeeds
             && List.member "Rt.cStrEqGo" Rt.driverSeeds
+            && List.member "Rt.parseArgsGo" Rt.driverSeeds
         )
     , check "A1b RawCallAgg FUNCTION-symbol accept: a RawSym callee (not just a temp) lowers to Call (Just _) (Agg \"val\") (Il.Sym \"rt_bounce\") [word] — the code label, never a dN data ref"
         (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggSymProbe ] "Rt.rawCallAggSymProbe" of
@@ -1251,13 +1253,21 @@ checks =
             Err _ ->
                 False
         )
-    , check "A1b aggcall surface → RawCallAgg with a RawSym callee: `aggcall val rawsym(\"rt_bounce\")(0)` lowers fn to the function-symbol producer (content, not a rawstr data def)"
-        (case lowlBody "defun Rt.agg(a : val) -> val {\n  word r = aggcall val rawsym(\"rt_bounce\")(0);\n  return mknil;\n}" of
+    , check "A1b aggcall surface → RawCallAgg with a RawSym callee: `aggcall val rawsym(\"rt_bounce\")(0)` lowers fn to the function-symbol producer (content, not a rawstr data def) — A4a makes the val shape a :val (it binds a val slot now, the A1 item-5 value-position arm)"
+        (case lowlBody "defun Rt.agg(a : val) -> val {\n  val r = aggcall val rawsym(\"rt_bounce\")(0);\n  return mknil;\n}" of
             Ok body ->
                 canon body
                     == canon (llets [ ( ltb 2, Unsafe (RawCallAgg { fn = Unsafe (RawSym "rt_bounce"), args = [ ltn 0 ], shape = "val" }) ) ] lmkNilV)
 
             Err _ ->
+                False
+        )
+    , check "A4a J1 aggcall shape classes: `aggcall val` checks :val (binds a val slot, the A1 item-5 value-position arm) and `aggcall ret` checks :word (the 80-B sret ADDRESS); the wrong binder is a LOUD J1 reject — the checker gap the A1 value-position lowering left (Lower had the arm, the surface could not spell it)"
+        (case ( lowlBody "defun Rt.av(a : val) -> val {\n  val r = aggcall val rawsym(\"rt_bounce\")(0);\n  return r;\n}", lowlBody "defun Rt.ar(a : val) -> val {\n  word r = aggcall ret rawsym(\"rt_bounce\")(0);\n  return mknil;\n}", lowlBody "defun Rt.aw(a : val) -> val {\n  word r = aggcall val rawsym(\"rt_bounce\")(0);\n  return mknil;\n}" ) of
+            ( Ok _, Ok _, Err msg ) ->
+                String.contains "declares val but its initializer is word" msg || String.contains "declares word" msg
+
+            _ ->
                 False
         )
     , check "A3a surface Rt.main: the driver body is in the surface-spliced program (a Let chain reaching the usage rawstr — the A1 stub was a bare Lit 0 placeholder; a parse/check failure would shrink rtProgram to [] and this goes red)"
@@ -1287,14 +1297,16 @@ checks =
             Err _ ->
                 False
         )
-    , check "A3a MIDDRIVER emission — the error paths CALL write and exit: the rendered .ssa contains a call to $write and $exit (usage/toomany write fd-2 then exit 2)"
+    , check "A3a MIDDRIVER emission — the error paths CALL write and exit IN $main: the $main function itself emits call $write and call $exit (usage/toomany write fd-2 then exit 2) — scoped to $main's own blocks so Rt.die/Rt.halt in the same module cannot satisfy it (the A3a-review SHOULD-FIX 1: the old whole-module String.contains was vacuously satisfiable by die/halt)"
         (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
             Ok mod ->
-                let
-                    ssa =
-                        Print.print mod
-                in
-                String.contains "call $write" ssa && String.contains "call $exit" ssa
+                (case funcByName "main" mod of
+                    Just f ->
+                        callsSym "write" f && callsSym "exit" f
+
+                    Nothing ->
+                        False
+                )
 
             Err _ ->
                 False
@@ -1340,6 +1352,50 @@ checks =
                         Print.print mod
                 in
                 String.contains "$qbe_meta" ssa && String.contains "$qbe_meta_len" ssa
+
+            Err _ ->
+                False
+        )
+    , check "A4a surface defun: Rt.parseArgsGo (val, frame-free arg loop) is in the surface-spliced driver program — a parse/check failure would shrink rtProgram to [] and this goes red"
+        (case defunByKey "Rt.parseArgsGo" driverProg of
+            Just { value } ->
+                case value of
+                    Lam l ->
+                        List.length l.params == 2
+
+                    _ ->
+                        False
+
+            Nothing ->
+                False
+        )
+    , check "A4a MIDDRIVER emission — the seats + root push: the rendered .ssa references $rt_boot, $rt_parse_arg, $rt_argv_install and $rt_root_push_value_array (the A2 seats the driver calls, each via rawcall)"
+        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+            Ok mod ->
+                let
+                    ssa =
+                        Print.print mod
+                in
+                String.contains "call $rt_boot" ssa
+                    && String.contains "call $rt_parse_arg" ssa
+                    && String.contains "call $rt_argv_install" ssa
+                    && String.contains "call $rt_root_push_value_array" ssa
+
+            Err _ ->
+                False
+        )
+    , check "A4a MIDDRIVER emission — the 17-arm entry dispatch: $main calls the rt_callN dispatchers by NAME (aggcall ret rawsym) and rt_bounce (aggcall val) — the RawCallAgg named-symbol shape, not a call into data"
+        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+            Ok mod ->
+                case funcByName "main" mod of
+                    Just f ->
+                        callsSym "rt_call1" f
+                            && callsSym "rt_call9" f
+                            && callsSym "rt_call16" f
+                            && callsSym "rt_bounce" f
+
+                    Nothing ->
+                        False
 
             Err _ ->
                 False
@@ -2992,7 +3048,7 @@ checks =
                       "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot", "Rt.globIsDotDot",
                       "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess", "Rt.halt", "Rt.intern",
                       "Rt.isChildBuiltin", "Rt.main", "Rt.memGo", "Rt.metaGo", "Rt.mkTmpAt", "Rt.nameBytes", "Rt.numText", "Rt.number?", "Rt.open",
-                      "Rt.openBodyTmpfile", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo", "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind",
+                      "Rt.openBodyTmpfile", "Rt.parseArgsGo", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo", "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind",
                       "Rt.recAppendNamesGo", "Rt.recGet", "Rt.recGetGo", "Rt.recInsert", "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd",
                       "Rt.recUpdCopy", "Rt.recUpdFind", "Rt.repGo", "Rt.repeat", "Rt.revGo", "Rt.runBuiltinInprocess", "Rt.setenv", "Rt.shen.bytes->string", "Rt.shen.str->bytes", "Rt.snd", "Rt.str", "Rt.strOf",
                       "Rt.string?", "Rt.subGo", "Rt.substring", "Rt.symEq", "Rt.symLess", "Rt.symToStr", "Rt.toI32", "Rt.value", "Rt.vecEq", "Rt.wRaw", "Rt.wStr",
@@ -3053,7 +3109,7 @@ checks =
     -- is now the append below; the loud Err moved to the key-agreement walk
     -- (row C), which is the collision/rename class the orphan check guarded.
     , check
-        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the six stage-6 keys (Rt.cStrEq, Rt.cStrEqGo, Rt.die, Rt.halt, Rt.main, Rt.metaGo) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ [Rt.cStrEq, Rt.cStrEqGo, Rt.die, Rt.halt, Rt.main, Rt.metaGo] and COUNT is union+6 (so the emitted .ssa order is pinned)"
+        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the seven stage-6 keys (Rt.cStrEq, Rt.cStrEqGo, Rt.die, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ [Rt.cStrEq, Rt.cStrEqGo, Rt.die, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo] and COUNT is union+7 (so the emitted .ssa order is pinned)"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -3075,7 +3131,7 @@ checks =
                             in
                             case Rt.spliceSurface s union of
                                 Ok spliced ->
-                                    List.map .key spliced == List.map .key union ++ [ "Rt.cStrEq", "Rt.cStrEqGo", "Rt.die", "Rt.halt", "Rt.main", "Rt.metaGo" ]
+                                    List.map .key spliced == List.map .key union ++ [ "Rt.cStrEq", "Rt.cStrEqGo", "Rt.die", "Rt.halt", "Rt.main", "Rt.metaGo", "Rt.parseArgsGo" ]
 
                                 Err _ ->
                                     False

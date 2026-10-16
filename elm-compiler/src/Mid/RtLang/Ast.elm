@@ -721,13 +721,24 @@ rt_* seats (tools/qbe/rt.zig exports) called from Rt bodies today:
 
 (The rt.zig exports NOT here — rt_string, rt_vec_alloc, rt_raw_alloc,
 rt_vec_store(_plain), rt_frame_enter/leave, rt_apply, rt_bounce,
-rt_tail_known, rt_prim, rt_root_* — are reached through dedicated nodes
-and literals, never through `rawcall`.)
+rt_tail_known, rt_prim — are reached through dedicated nodes and
+literals, never through `rawcall`.  The stage-6 A2/A4a DRIVER seats —
+rt_boot, rt_parse_arg, rt_argv_install, rt_root_push_value_array — are
+WORD-in/WORD-out (or void) by A2's shape deviations, so `rawcall` IS
+their route and they sit in the table below.)
 
 Plan-listed, no Rt-body call yet (arities from the C prototypes):
 
   * getdents64 3, fstatat 4, clock_gettime 2, strtod 2, getrlimit 2,
     setrlimit 2
+
+The stage-6 A2 driver seats (arities from tools/qbe/rt.zig's exports):
+
+  * rt_boot 0 (no args; 0 ok / 1 gc-init-failed), rt_parse_arg 2
+    (dst *Value, arg cstr; 0 ok / 2 bad-arg), rt_argv_install 3
+    (argv_mode, nargs, c_argv; void — the result is dead-bound),
+    rt_root_push_value_array 2 (base ptr, live-count ptr; the count is
+    read AT SCAN TIME, so the caller wstores it before the push)
 -}
 rawcallArity : Dict Sym Int
 rawcallArity =
@@ -779,6 +790,11 @@ rawcallArity =
         , ( "rt_sym_intern", 2 )
         , ( "rt_value_slot", 1 )
         , ( "rt_float_text", 1 )
+        , -- ===== the stage-6 A2 driver seats (A4a's rawcall route) =====
+        ( "rt_boot", 0 )
+        , ( "rt_parse_arg", 2 )
+        , ( "rt_argv_install", 3 )
+        , ( "rt_root_push_value_array", 2 )
         , ( "getdents64", 3 )
         , ( "fstatat", 4 )
         , ( "clock_gettime", 2 )
