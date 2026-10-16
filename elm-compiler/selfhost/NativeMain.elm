@@ -273,7 +273,11 @@ ssaJobs entryKey jobs texts =
                             -- hold.  The selfhost lane injects the Rt program
                             -- like every other compile, pruned per group by
                             -- the used-prim census.
-                            (\job srcs -> renderSsa (QbeModule.compileEntry corpus srcs entryKey True True True True True True True ( True, ( True, True, ( False, False ) ) ) True))
+                            -- The trailing ( midGc, midDriver ) pair is the
+                            -- stage-6 hatch vector: ( False, True ) = run.js's
+                            -- post-A5 defaults (MIDGC off, MIDDRIVER on), the
+                            -- TestMain "U2 fix 4" pin's hand-copied twin.
+                            (\job srcs -> renderSsa (QbeModule.compileEntry corpus srcs entryKey True True True True True True True ( True, ( True, True, ( False, True ) ) ) True))
                             jobs
                             (regroup jobs texts)
                         )

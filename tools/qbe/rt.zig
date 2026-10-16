@@ -1473,6 +1473,12 @@ var gg: Gc = undefined;
 /// 1677-1688 + 1761.  Returns 0, or 1 after the SAME stderr line and exit
 /// status as the pre-A2 main (the gc-init failure).
 export fn rt_boot() callconv(.c) i64 {
+    // The SEGV stack-depth net.  It used to be installed by rt.zig's own
+    // `main`; since stage 6 A5 the entry is the Mid-written `Rt.main`, which
+    // raises the rlimit and then calls THIS seat — so the guard must be
+    // installed here.  It is called after that raise, which is what the
+    // floor's arithmetic needs (see stackGuardInit's own note).
+    stackGuardInit();
     // Read the debug knobs ONCE, here, before any generated code can run.
     // rt_frame_leave used to call getenv on every return (8.4% of the native
     // compiler's runtime — see no_frame_reuse); nothing below this line may

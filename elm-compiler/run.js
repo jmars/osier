@@ -139,13 +139,13 @@ const QBE_TYPESPEC = process.env.QBE_NOTYPESPEC !== '1';
 // Default OFF (the Zig collector stays the allocation path) — the hatch must
 // reproduce the pre-change corpus byte-for-byte when unset.
 const QBE_MIDGC = process.env.QBE_MIDGC === '1';
-// QBE_MIDDRIVER=1 ENABLES the stage-6 raw-word ABI driver/ABI defuns
-// (Rt.die/Rt.halt today; the frame pair, apply family and Rt.main land in
-// U3-U5): the Mid-written runtime gains word-ABI defuns and Lower's die/halt
-// emission sites retarget from the Zig seats to them.  Default OFF — the
-// default route stays byte-identical to the pre-change corpus (the seats
-// rt_die/rt_halt keep serving the default route until the U6 flip).
-const QBE_MIDDRIVER = process.env.QBE_MIDDRIVER === '1';
+// QBE_MIDDRIVER ENABLES the stage-6 raw-word ABI driver/ABI defuns
+// (Rt.die/Rt.halt/Rt.main): the Mid-written runtime gains word-ABI defuns
+// and Lower's die/halt emission sites retarget from the Zig seats to them.
+// Default ON (the Mid driver is the route).  QBE_MIDDRIVER=0 is the
+// attribution hatch — it must reproduce the PRE-FLIP corpus byte-for-byte
+// (the Zig seats rt_die/rt_halt keep serving that arm until B4 deletes them).
+const QBE_MIDDRIVER = process.env.QBE_MIDDRIVER !== '0';
 // THE MIDGC GUARD, data-driven (zigretire stage 5 PART 3 — the lesson: a
 // guard that names ONE incompatible flag is not a guard; this arc paid for
 // that twice).  QBE_MIDGC=1 is sound iff every flag the Mid seats DEPEND on

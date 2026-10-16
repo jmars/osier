@@ -62,6 +62,21 @@ BASE="$OUTDIR/$(basename "$LAST_SRC" .elm)"
 # how a suite reports an old binary's behaviour as a measurement).
 RT="$("$ROOT/tools/qbe/rt-o.sh")" || exit 1
 
+# ---- the `main`-symbol strip (stage-6 A3a; the DEFAULT route since A5) ----
+# Under QBE_MIDDRIVER (ON by default since A5) the emitted .ssa exports `main`
+# — the Mid `Rt.main` — while rt.o still exports the Zig `main`, so a plain
+# link dies "multiple definition of `main'".  Strip ONLY `main` from a COPY of
+# rt.o: any OTHER duplicate symbol still fails the link loudly (unlike
+# --allow-multiple-definition).  GATED on the flag, because with MIDDRIVER=0
+# the .ssa exports no `main` and rt.o's is the only one.  Temporary: the Zig
+# main is DELETED at B4, and this goes with it.
+if [ "${QBE_MIDDRIVER:-1}" != "0" ]; then
+  RT_STRIPPED="$BASE.rt.o"
+  cp "$RT" "$RT_STRIPPED" && objcopy --strip-symbol=main "$RT_STRIPPED" || {
+    echo "qbe-mk: objcopy --strip-symbol=main failed" >&2; exit 1; }
+  RT="$RT_STRIPPED"
+fi
+
 # ---- elm -> .ssa ----
 (cd "$ROOT/elm-compiler" &&
   QBE=1 QBE_ENTRY="$ENTRY" node run.js "${SRCS[@]}" "$BASE.ssa") >&2

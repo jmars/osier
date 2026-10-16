@@ -1468,12 +1468,12 @@ checks =
                 False
         )
 
-    -- STAGE 6 U2 fix 4: THE NativeMain VECTOR PIN (plan obs-5's deferred
-    -- obligation, the unpinned-midGc drift class).  run.js's DEFAULT hatch
-    -- vector leaves BOTH hatches OFF — run.js:141 QBE_MIDGC = (env === '1'),
-    -- run.js:148 QBE_MIDDRIVER = (env === '1') — and
-    -- selfhost/NativeMain.elm:276's hard-coded ( False, False ) must carry the
-    -- SAME pair: the selfhost lane and run.js have to emit byte-identical
+    -- STAGE 6 U2 fix 4 (re-pinned at A5): THE NativeMain VECTOR PIN (plan
+    -- obs-5's deferred obligation, the unpinned-midGc drift class).  run.js's
+    -- DEFAULT hatch vector is now (midGc OFF, midDriver ON) — run.js:141
+    -- QBE_MIDGC = (env === '1'), run.js:148 QBE_MIDDRIVER = (env !== '0') —
+    -- and selfhost/NativeMain.elm:276's hard-coded ( False, True ) must carry
+    -- the SAME pair: the selfhost lane and run.js have to emit byte-identical
     -- .ssa (the qbe-bootstrap --verify fixed point), so a flip in one and not
     -- the other is a SILENT divergence.  The MEASURED GAP, stated: Elm cannot
     -- read run.js, so this row pins the pair's VALUE (a pinned literal, the
@@ -1483,8 +1483,11 @@ checks =
     -- run.js-vs-NativeMain text row belongs in qbe-check.sh, outside this
     -- unit's write scope.  What the row DOES catch: an edit of the pinned
     -- pair (the routing half below turns a wrong pair into a FAIL), and a
-    -- silent flip of either hatch at the U6/U7 landings.
-    , check "U2 fix 4 — NativeMain vector pin: the selfhost hatch vector is (midGc=False, midDriver=False) = run.js's defaults, and routing THAT pair selects the default route (rt_halt kept, no q_Rt_x2ehalt, no rt_glob)"
+    -- silent flip of either hatch at the B3/B4 landings.  POST-A5 the default
+    -- route selects the MID DRIVER: q_Rt_x2ehalt IS emitted (the driver's
+    -- Rt.halt), rt_glob is still NOT (midGc stays OFF), and the halt arm
+    -- retargets rt_halt -> q_Rt_x2ehalt.
+    , check "U2 fix 4 — NativeMain vector pin: the selfhost hatch vector is (midGc=False, midDriver=True) = run.js's defaults, and routing THAT pair selects the default route (q_Rt_x2ehalt emitted, rt_halt retargeted, no rt_glob)"
         (let
             ( midGc, midDriver ) =
                 defaultHatchVector
@@ -1492,14 +1495,14 @@ checks =
             prog =
                 rtProgram True True True
          in
-         (defaultHatchVector == ( False, False ))
+         (defaultHatchVector == ( False, True ))
             && (case QbeLower.lower False False False True True True True midGc midDriver QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
                     Ok mod ->
-                        not (List.any (\f -> f.name == "q_Rt_x2ehalt") mod.funcs)
+                        List.any (\f -> f.name == "q_Rt_x2ehalt") mod.funcs
                             && not (List.any (\d -> d.name == RtGc.globDataSym) mod.datas)
                             && (case funcByName "q_Rt_x2eemptylist" mod of
                                     Just f ->
-                                        callsSym "rt_halt" f
+                                        callsSym "q_Rt_x2ehalt" f && not (callsSym "rt_halt" f)
 
                                     Nothing ->
                                         False
@@ -6175,15 +6178,15 @@ green — and the dedicated T7 identity row asserts the `Ok` DIRECTLY, so a
 broken pipeline turns red there first, loudly.
 -}
 -- run.js's DEFAULT hatch vector, (midGc, midDriver) — the pair
--- selfhost/NativeMain.elm:276 hard-codes as ( False, False ) and the pin row
--- above asserts.  MEASURED at U2: run.js:141 QBE_MIDGC = (env === '1') and
--- run.js:148 QBE_MIDDRIVER = (env === '1'), both OFF with the env unset.
--- This is a HAND-COPIED twin (Elm cannot read run.js) — when U6 flips a
--- default, this constant, NativeMain.elm's vector and run.js move together,
+-- selfhost/NativeMain.elm:276 hard-codes as ( False, True ) and the pin row
+-- above asserts.  MEASURED at A5: run.js:141 QBE_MIDGC = (env === '1') (OFF)
+-- and run.js:148 QBE_MIDDRIVER = (env !== '0') (ON, flipped at A5).
+-- This is a HAND-COPIED twin (Elm cannot read run.js) — when a default
+-- moves, this constant, NativeMain.elm's vector and run.js move together,
 -- and the row fails until they do.
 defaultHatchVector : ( Bool, Bool )
 defaultHatchVector =
-    ( False, False )
+    ( False, True )
 
 
 rtProgram : Bool -> Bool -> Bool -> List Defun
