@@ -459,6 +459,17 @@ the collector reclaims them; (b) it is REAL TYPE-SYSTEM SURFACE (regions + quant
 affinity + destructors) and therefore PHASE-7 TERRITORY that the GADT/rank-2/refinement work rides —
 name it so the `.mid` arc (M2-M4) does not silently absorb a type-system project.
 
+**DEMOTION — TWO AXES, DO NOT CONFLATE (2026-10-16).** Uniqueness must be demotable (that is the escape
+valve that keeps capture/recursion legal and lets a value be shared), but "demoted to non-unique"
+conflates two separate attributes (Clean's algebra tracks both): (i) MUTABILITY — unique -> read-only,
+still ONE reference; (ii) MULTIPLICITY — one reference -> any number. Demoting (i) is ALWAYS safe and
+keeps affinity. Demoting (ii) is safe ONLY for GC-heap values, where duplicating a reference is free
+because the collector owns lifetime; applied to a non-GC resource (fd, mmap) it re-enables
+double-release — exactly the hazard uniqueness exists to prevent. SO: a release-required resource
+demotes its MUTABILITY, never its MULTIPLICITY, until the Vm/GC owns its lifetime. In a GC'd immutable
+language almost everything ends up observed (shareability is the default) and uniqueness is the narrow
+hatch for a Mid-owned mutable structure.
+
 Plus **ARITY**: declared and flat (Osier is curried, mid-c is flat) — the one thing `externArities`
 already does today.
 
