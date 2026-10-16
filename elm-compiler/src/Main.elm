@@ -30,6 +30,7 @@ port module Main exposing (main)
 import Json.Decode as JD
 import Json.Encode as JE
 import Mid.QbeModule as QbeModule
+import Mid.Rt as MidRt
 import Platform
 
 
@@ -40,6 +41,7 @@ type alias Flags =
     { corpusSourcesJson : String
     , groupsJson : String
     , entriesJson : String
+    , runtimeMidJson : String
     , qbeFlatten : Bool
     , qbeRep : Bool
     , qbePrimDirect : Bool
@@ -76,33 +78,42 @@ init flags =
 
 compileAll : Flags -> String
 compileAll flags =
-    case
-        ( JD.decodeString (JD.list JD.string) flags.corpusSourcesJson
-        , JD.decodeString (JD.list (JD.list JD.string)) flags.groupsJson
-        , JD.decodeString (JD.list JD.string) flags.entriesJson
-        )
-    of
-        ( Ok corpusSources, Ok groups, Ok entries ) ->
-            if List.length groups /= List.length entries then
-                encodeStrings [ "err internal: groups/entries length mismatch" ]
+    -- M1: the runtime surface text is parsed ONCE per process, here — the
+    -- hoist that keeps the corpus wall ~16 s-class (the O(n^2) re-parse wall
+    -- returns if this becomes per-compileEntry-call).  A runtime.mid that does
+    -- not parse fails EVERY group loudly — never a silently-reduced runtime.
+    case MidRt.load flags.runtimeMidJson of
+        Err msg ->
+            encodeStrings [ "err " ++ msg ]
 
-            else
-                encodeStrings
-                    (List.map2
-                        (\groupSources entry ->
-                            case QbeModule.compileEntry corpusSources groupSources entry flags.qbeFlatten flags.qbeRep flags.qbePrimDirect flags.qbeMidRt flags.qbeMidCons flags.qbeRtLean flags.qbeMono ( flags.qbeConsArr, ( flags.qbeRec, flags.qbeTypeSpec, ( flags.qbeMidGc, flags.qbeMidDriver ) ) ) flags.qbeEqPtrFast of
-                                Ok ssa ->
-                                    ssa
+        Ok rt ->
+            case
+                ( JD.decodeString (JD.list JD.string) flags.corpusSourcesJson
+                , JD.decodeString (JD.list (JD.list JD.string)) flags.groupsJson
+                , JD.decodeString (JD.list JD.string) flags.entriesJson
+                )
+            of
+                ( Ok corpusSources, Ok groups, Ok entries ) ->
+                    if List.length groups /= List.length entries then
+                        encodeStrings [ "err internal: groups/entries length mismatch" ]
 
-                                Err msg ->
-                                    "err " ++ msg
-                        )
-                        groups
-                        entries
-                    )
+                    else
+                        encodeStrings
+                            (List.map2
+                                (\groupSources entry ->
+                                    case QbeModule.compileEntry rt corpusSources groupSources entry flags.qbeFlatten flags.qbeRep flags.qbePrimDirect flags.qbeMidRt flags.qbeMidCons flags.qbeRtLean flags.qbeMono ( ( flags.qbeConsArr, ( flags.qbeRec, flags.qbeTypeSpec, ( flags.qbeMidGc, flags.qbeMidDriver ) ) ), flags.qbeEqPtrFast ) of
+                                        Ok ssa ->
+                                            ssa
 
-        _ ->
-            encodeStrings [ "err internal: bad flags" ]
+                                        Err msg ->
+                                            "err " ++ msg
+                                )
+                                groups
+                                entries
+                            )
+
+                _ ->
+                    encodeStrings [ "err internal: bad flags" ]
 
 
 encodeStrings : List String -> String

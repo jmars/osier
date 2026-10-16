@@ -50,6 +50,7 @@ argv[2:] shape: the binary path is NOT an element).
 -}
 
 import Mid.QbeModule as QbeModule
+import Mid.Rt as Rt
 
 
 type Msg
@@ -255,34 +256,48 @@ ssaJobs entryKey jobs texts =
     readCorpus
         |> Task.andThen
             (\corpus ->
-                writeBundles
-                    (zipJobs jobs
-                        (List.map2
-                            -- run.js's DEFAULT flag vector, ALL ELEVEN ON
-                            -- (flatten, rep, primDirect, midRt inject,
-                            -- midCons route, rtLean lean ABI, mono
-                            -- specialiser, consArr, rec, typeSpec,
-                            -- eqPtrFast).  midCons was False here while the
-                            -- route was step 6's OPT-IN; the flip made the
-                            -- Mid route the default and deleted the flipped
-                            -- prims' Zig handlers, so False now means "emit
-                            -- calls to rt_prim_* symbols that rt.o no longer
-                            -- defines" — a vector that cannot link, and one
-                            -- that can never match run.js's own emit, i.e.
-                            -- the bootstrap --verify fixed point could not
-                            -- hold.  The selfhost lane injects the Rt program
-                            -- like every other compile, pruned per group by
-                            -- the used-prim census.
-                            -- The trailing ( midGc, midDriver ) pair is the
-                            -- stage-6 hatch vector: ( False, True ) = run.js's
-                            -- post-A5 defaults (MIDGC off, MIDDRIVER on), the
-                            -- TestMain "U2 fix 4" pin's hand-copied twin.
-                            (\job srcs -> renderSsa (QbeModule.compileEntry corpus srcs entryKey True True True True True True True ( True, ( True, True, ( False, True ) ) ) True))
-                            jobs
-                            (regroup jobs texts)
-                        )
+                -- M1: read the runtime surface file ONCE (the SAME anchor the
+                -- corpus paths use, `corpusRoot ++ "/runtime.mid"`), load it
+                -- once, and thread the record to every group — the
+                -- once-per-process hoist, so the surface parse never becomes
+                -- per-compileEntry-call.
+                Task.andThen
+                    (\rtText ->
+                        case Rt.load rtText of
+                            Err msg ->
+                                errLine ("runtime.mid: " ++ msg)
+
+                            Ok rt ->
+                                writeBundles
+                                    (zipJobs jobs
+                                        (List.map2
+                                            -- run.js's DEFAULT flag vector, ALL ELEVEN ON
+                                            -- (flatten, rep, primDirect, midRt inject,
+                                            -- midCons route, rtLean lean ABI, mono
+                                            -- specialiser, consArr, rec, typeSpec,
+                                            -- eqPtrFast).  midCons was False here while the
+                                            -- route was step 6's OPT-IN; the flip made the
+                                            -- Mid route the default and deleted the flipped
+                                            -- prims' Zig handlers, so False now means "emit
+                                            -- calls to rt_prim_* symbols that rt.o no longer
+                                            -- defines" — a vector that cannot link, and one
+                                            -- that can never match run.js's own emit, i.e.
+                                            -- the bootstrap --verify fixed point could not
+                                            -- hold.  The selfhost lane injects the Rt program
+                                            -- like every other compile, pruned per group by
+                                            -- the used-prim census.
+                                            -- The trailing ( midGc, midDriver ) pair is the
+                                            -- stage-6 hatch vector: ( False, True ) = run.js's
+                                            -- post-A5 defaults (MIDGC off, MIDDRIVER on), the
+                                            -- TestMain "U2 fix 4" pin's hand-copied twin.
+                                            (\job srcs -> renderSsa (QbeModule.compileEntry rt corpus srcs entryKey True True True True True True True ( ( True, ( True, True, ( False, True ) ) ), True )))
+                                            jobs
+                                            (regroup jobs texts)
+                                        )
+                                    )
+                                    []
                     )
-                    []
+                    (Io.readFile (corpusRoot ++ "/runtime.mid"))
             )
 
 

@@ -93,8 +93,8 @@ import Type.Infer as Infer
 import Type.Representation exposing (Type)
 
 
-compileEntry : List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( Bool, ( Bool, Bool, ( Bool, Bool ) ) ) -> Bool -> Result String String
-compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt midCons rtLean mono consArrRec eqPtrFast =
+compileEntry : MidRt.Runtime -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, Bool, ( Bool, Bool ) ) ), Bool ) -> Result String String
+compileEntry rt corpusSources groupSources entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
     case
         MidModule.parseAll corpusSources
             |> Result.andThen
@@ -113,7 +113,7 @@ compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt mi
                                                                 Err msg
 
                                                             Ok corpusGlobals ->
-                                                                compileGroup env nodeTypes refinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono consArrRec eqPtrFast
+                                                                compileGroup rt env nodeTypes refinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast )
                                                     )
                                         )
                             )
@@ -127,7 +127,8 @@ compileEntry corpusSources groupSources entryKey flatten rep primDirect midRt mi
 
 
 compileGroup :
-    Env
+    MidRt.Runtime
+    -> Env
     -> Dict String (List ( Range, Type ))
     -> Dict String (List Int)
     -> List MidModule.Unit
@@ -141,10 +142,9 @@ compileGroup :
     -> Bool
     -> Bool
     -> Bool
-    -> ( Bool, ( Bool, Bool, ( Bool, Bool ) ) )
-    -> Bool
+    -> ( ( Bool, ( Bool, Bool, ( Bool, Bool ) ) ), Bool )
     -> Result String String
-compileGroup env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono consArrRec eqPtrFast =
+compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals groupSources entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
     MidModule.parseAll groupSources
         |> Result.andThen
             (\groupFiles ->
@@ -181,7 +181,7 @@ compileGroup env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals gro
                                                                 refinedVarsByModule =
                                                                     Dict.union groupTypes.refinedVars corpusRefinedVars
                                                             in
-                                                            lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey consArrRec eqPtrFast
+                                                            lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey ( consArrRec, eqPtrFast )
                                                 )
                                     )
                         )
@@ -252,7 +252,8 @@ inferInOrder env files schemes failures nodeTypes refinedVars =
 
 
 lowerAll :
-    Bool
+    MidRt.Runtime
+    -> Bool
     -> Bool
     -> Bool
     -> Bool
@@ -266,10 +267,9 @@ lowerAll :
     -> List MidModule.Unit
     -> List MidModule.Unit
     -> String
-    -> ( Bool, ( Bool, Bool, ( Bool, Bool ) ) )
-    -> Bool
+    -> ( ( Bool, ( Bool, Bool, ( Bool, Bool ) ) ), Bool )
     -> Result String String
-lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey consArrRec eqPtrFast =
+lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule corpusUnits groupUnits entryKey ( consArrRec, eqPtrFast ) =
     let
         ( consArr, ( rec, typeSpec, ( midGc, midDriver ) ) ) =
             consArrRec
@@ -299,11 +299,13 @@ lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByMod
                 let
                     rtProgramR =
                         if midRt then
-                            -- T7: the surface pipeline (Mid.RtSource ->
+                            -- M1: the surface pipeline (runtime.mid ->
                             -- Parse -> Check -> LowerToIr) is RESULT-VALUED:
-                            -- a bad surface text fails the compile HERE,
-                            -- through the existing Err plumbing — never as a
-                            -- silently-reduced runtime.  T18: `programPair`
+                            -- a bad surface text failed the compile at the
+                            -- once-per-process `Mid.Rt.load` in Main — so the
+                            -- record here is always a parse-success, and a
+                            -- check/lower failure still fails through the
+                            -- existing Err plumbing.  T18: `programPair`
                             -- splices over the WHOLE DSL program (prim ++
                             -- helper ++ gc) and splits the halves, so the gc
                             -- half appended under midGc is the SPLICED half
@@ -323,7 +325,7 @@ lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByMod
                                                 []
                                            )
                                 )
-                                (MidRt.programPair consArr rec eqPtrFast)
+                                (rt.programPair consArr rec eqPtrFast)
 
                         else
                             Ok []
@@ -382,6 +384,7 @@ lowerAll rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByMod
                                             |> Result.andThen
                                                 (\specialised ->
                                                     QbeLower.lower
+                                                        rt
                                                         rep
                                                         primDirect
                                                         midCons

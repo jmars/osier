@@ -48,6 +48,12 @@ const CORPUS = [
     .map((f) => fs.readFileSync(path.join(__dirname, 'core-libs', f), 'utf8')),
 ];
 
+// M1: the runtime surface text — elm-compiler/runtime.mid, the moved home of
+// Mid.RtSource's `source` blob.  Read ONCE at module load (via __dirname, like
+// CORPUS — CWD-independent) and passed to Main as content; Main.elm loads it
+// ONCE per process (the parse hoist that keeps the corpus wall ~16 s-class).
+const RUNTIME_MID = fs.readFileSync(path.join(__dirname, 'runtime.mid'), 'utf8');
+
 // QBE_NOFLATTEN=1 DISABLES the defun-local aggregate flattening pass.  It
 // exists so the pass can be A/B'd on the SAME source: the structural gate in
 // tools/qbe/qbe-check.sh compiles both ways and requires the aggregate prims
@@ -227,6 +233,7 @@ function compileGroups(groups) {
       corpusSourcesJson: JSON.stringify(CORPUS),
       groupsJson: JSON.stringify(groups.map((g) => g.sources)),
       entriesJson: JSON.stringify(groups.map((g) => g.entry)),
+      runtimeMidJson: RUNTIME_MID,
       qbeFlatten: QBE_FLATTEN,
       qbeRep: QBE_REP,
       qbePrimDirect: QBE_PRIMDIRECT,

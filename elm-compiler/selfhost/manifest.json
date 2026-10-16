@@ -76,8 +76,7 @@
         "elm-compiler/src/Mid/RtLang/Ast.elm",
         "elm-compiler/src/Mid/RtLang/Parse.elm",
         "elm-compiler/src/Mid/RtLang/Check.elm",
-        "elm-compiler/src/Mid/RtLang/LowerToIr.elm",
-        "elm-compiler/src/Mid/RtSource.elm"
+        "elm-compiler/src/Mid/RtLang/LowerToIr.elm"
       ],
       "output": "zig-out/selfhost.ssa",
       "entry": "NativeMain.main"

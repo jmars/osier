@@ -7,9 +7,16 @@
 
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const { Elm } = require('./test-compiler.js');
 
-const app = Elm.TestMain.init();
+// M1: the runtime surface text — passed as TestMain's flag so the harness's
+// census rows read the SAME moved text the compiler reads (run.js parity).
+// Read via __dirname, CWD-independent.
+const runtimeMid = fs.readFileSync(path.join(__dirname, 'runtime.mid'), 'utf8');
+
+const app = Elm.TestMain.init({ flags: runtimeMid });
 
 let lines = [];
 app.ports.report.subscribe((msg) => {

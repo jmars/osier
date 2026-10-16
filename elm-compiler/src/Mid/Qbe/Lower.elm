@@ -443,8 +443,8 @@ unique xs =
         |> Tuple.second
 
 
-lower : Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
-lower rep primDirect midCons rtLean consArr rec typeSpec midGc midDriver table arityTable program entryKey =
+lower : MidRt.Runtime -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
+lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midDriver table arityTable program entryKey =
     let
         defuns =
             Dict.fromList (List.map (\d -> ( d.key, d )) program)
@@ -693,7 +693,7 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc midDriver table a
                                                 Err ("qbe: unknown global " ++ key)
 
                                             Just defun ->
-                                                lowerDefun defun s
+                                                lowerDefun runtime defun s
                                     )
                         )
                         (Ok s0)
@@ -1053,8 +1053,8 @@ letValues binders =
 -- ============================ DEFUN LOWERING ============================
 
 
-lowerDefun : Defun -> S -> Result String S
-lowerDefun defun sOuter =
+lowerDefun : MidRt.Runtime -> Defun -> S -> Result String S
+lowerDefun runtime defun sOuter =
     case defun.value of
         Lam lambda ->
             let
@@ -1067,8 +1067,9 @@ lowerDefun defun sOuter =
                 -- the driver/ABI family in U3-U5); otherwise the lean ABI
                 -- (3 pointer params + count, direct :val return) with a
                 -- frame ONLY when the body can reach a GC safepoint
-                -- (Mid.Rt.allocating, the classification that owns the
-                -- fact); otherwise the generic closure ABI (surface defuns,
+                -- (rt.allocating, the classification that owns the fact —
+                -- threaded from the once-per-process Mid.Rt.load record,
+                -- M1); otherwise the generic closure ABI (surface defuns,
                 -- and the whole Rt program when QBE_NORTLEAN=1 restores the
                 -- fat shape for a bisect).
                 rt =
@@ -1076,7 +1077,7 @@ lowerDefun defun sOuter =
                         RtRawWord
 
                     else if sOuter.rtLean && isRtKey defun.key then
-                        if Set.member defun.key MidRt.allocating then
+                        if Set.member defun.key runtime.allocating then
                             RtLeanRooted
 
                         else

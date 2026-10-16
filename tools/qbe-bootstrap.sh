@@ -249,7 +249,16 @@ t2=$(now)
 # ============================ 5. .s -> native compiler ============================
 step "== 4/4 cc compiler.s rt.o -> $BIN"
 t3=$(now)
-cc "$WORK/compiler.s" "$RT" -o "$BIN" -lc || die "cc failed"
+# The committed seed is emitted under the stage-6 A5 default (QBE_MIDDRIVER ON),
+# so it exports the Mid-written `main` — while rt.o still exports the Zig one,
+# and a plain link dies "multiple definition of `main'".  Strip ONLY `main` from
+# a COPY of rt.o (any other duplicate still fails loudly, unlike
+# --allow-multiple-definition).  Unconditional here because this path always
+# links the committed seed; it goes away with the Zig main at B4.
+RT_STRIPPED="$WORK/rt-nomain.o"
+cp "$RT" "$RT_STRIPPED" && objcopy --strip-symbol=main "$RT_STRIPPED" \
+  || die "objcopy --strip-symbol=main failed"
+cc "$WORK/compiler.s" "$RT_STRIPPED" -o "$BIN" -lc || die "cc failed"
 [ -x "$BIN" ] || die "cc produced no executable"
 t4=$(now)
 

@@ -34,7 +34,6 @@ import Mid.RtLang.Check as Check
 import Mid.RtLang.LowerToIr as LowerToIr
 import Mid.RtLayout as RtLayout
 import Mid.RtPrims as RtPrims
-import Mid.RtSource
 import Mid.RtLang.Parse as Parse
 import Type.Builtins as Builtins
 import Type.Env as Env
@@ -53,23 +52,43 @@ type Msg
     = Noop
 
 
-main : Program () () Msg
+main : Program String () Msg
 main =
     Platform.worker
-        { init = \_ -> ( (), runTests )
+        { init = \runtimeMidText -> ( (), runTests runtimeMidText )
         , update = \_ model -> ( model, Cmd.none )
         , subscriptions = \_ -> Sub.none
         }
 
 
-runTests : Cmd Msg
-runTests =
-    report (String.join "\n" checks)
+runTests : String -> Cmd Msg
+runTests runtimeMidText =
+    case Rt.load runtimeMidText of
+        Ok rt ->
+            report (String.join "\n" (checks rt))
+
+        Err msg ->
+            report ("FAIL runtime.mid load: " ++ msg ++ "\nFAIL runtime.mid anti-empty (the census rows could not run)")
 
 
-checks : List String
-checks =
-    [ check "utf8ByteLength 'héllo' == 6" (utf8ByteLength "héllo" == 6)
+checks : Rt.Runtime -> List String
+checks rt =
+    [ -- M1 ANTI-EMPTY: the census rows below read `rt` (the once-per-process
+      -- load of runtime.mid).  If test-run.js (or run.js) ever stops reading
+      -- the file, the flag text is empty, `Rt.load` would parse nothing, and
+      -- every `rtProgram`-derived row could pass VACUOUSLY over an empty
+      -- program.  This row pins the full surface program (175 defuns — the
+      -- MEASURED `defun` count of elm-compiler/runtime.mid), so an empty or
+      -- truncated load turns it RED, loudly, before any vacuous row can.
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (175 defuns)"
+        (case rt.parsedSource of
+            Ok ast ->
+                List.length ast == 175
+
+            Err _ ->
+                False
+        )
+    , check "utf8ByteLength 'héllo' == 6" (utf8ByteLength "héllo" == 6)
     , check "utf8ByteLength '🦀' == 4" (utf8ByteLength "🦀" == 4)
     , check "utf8ByteLength 'abcde' == 5" (utf8ByteLength "abcde" == 5)
     , check "utf8ByteLength '' == 0" (utf8ByteLength "" == 0)
@@ -877,8 +896,8 @@ checks =
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
     , check "rt program: 150 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram True True True) == 157
-            && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram True True True)
+        (List.length (rtProgram rt True True True) == 157
+            && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
                     d.key == "Rt.cons"
@@ -890,7 +909,7 @@ checks =
                                     False
                            )
                 )
-                (rtProgram True True True)
+                (rtProgram rt True True True)
             && List.any
                 (\d ->
                     d.key == "Rt.substring"
@@ -902,7 +921,7 @@ checks =
                                     False
                            )
                 )
-                (rtProgram True True True)
+                (rtProgram rt True True True)
             && List.any
                 (\d ->
                     d.key == "Rt.con"
@@ -914,7 +933,7 @@ checks =
                                     False
                            )
                 )
-                (rtProgram True True True)
+                (rtProgram rt True True True)
             && List.any
                 (\d ->
                     d.key == "Rt.open"
@@ -926,7 +945,7 @@ checks =
                                     False
                            )
                 )
-                (rtProgram True True True)
+                (rtProgram rt True True True)
             && List.any
                 (\d ->
                     d.key == "Rt.setenv"
@@ -938,7 +957,7 @@ checks =
                                     False
                            )
                 )
-                (rtProgram True True True)
+                (rtProgram rt True True True)
             && List.any
                 (\d ->
                     d.key == "Rt.glob"
@@ -950,7 +969,7 @@ checks =
                                     False
                            )
                 )
-                (rtProgram True True True)
+                (rtProgram rt True True True)
             && List.any
                 (\d ->
                     d.key == "Rt.getpid"
@@ -962,7 +981,7 @@ checks =
                                     False
                            )
                 )
-                (rtProgram True True True)
+                (rtProgram rt True True True)
             && List.any
                 (\d ->
                     d.key == "Rt.read-file-as-string"
@@ -974,7 +993,7 @@ checks =
                                     False
                            )
                 )
-                (rtProgram True True True)
+                (rtProgram rt True True True)
             && List.any
                 (\d ->
                     d.key == "Rt.exec-run"
@@ -986,7 +1005,7 @@ checks =
                                     False
                            )
                 )
-                (rtProgram True True True)
+                (rtProgram rt True True True)
         )
     , check "rt seeds closure: cons/=/+ pull the 8-key deepEq closure; + alone pulls just Rt.+"
         (Rt.seeds (Set.fromList [ "cons", "+", "=" ])
@@ -997,7 +1016,7 @@ checks =
         (let
 
             syms key =
-                case List.filter (\d -> d.key == key) (rtProgram True True True) of
+                case List.filter (\d -> d.key == key) (rtProgram rt True True True) of
                     d :: _ ->
                         rawCallSyms d.value
 
@@ -1005,7 +1024,7 @@ checks =
                         []
 
             allKeys =
-                List.map .key (rtProgram True True True)
+                List.map .key (rtProgram rt True True True)
 
             ok key =
                 List.all (\sym -> List.member sym allKeys && List.member sym (Maybe.withDefault [] (Dict.get key Rt.rtDeps)))
@@ -1014,7 +1033,7 @@ checks =
          List.all ok allKeys
         )
     , check "rt cons lowers to a QBE function named q_Rt_x2econs"
-        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram True True True) "Rt.cons" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram rt True True True) "Rt.cons" of
             Ok mod ->
                 List.any (\f -> f.name == "q_Rt_x2econs") mod.funcs
 
@@ -1022,7 +1041,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a raw-word binder read in a value position (must-fail)"
-        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
             Err msg ->
                 String.contains "raw word binder" msg
 
@@ -1030,7 +1049,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a word node in a value position (must-fail)"
-        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
             Err msg ->
                 String.contains "value position" msg
 
@@ -1038,7 +1057,7 @@ checks =
                 False
         )
     , check "rt lowering REJECTS a value binder in a raw-argument position (must-fail)"
-        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
             Err msg ->
                 String.contains "not a raw word" msg
 
@@ -1051,9 +1070,9 @@ checks =
     -- is byte-identical); these rows pin the MECHANISM U4a's apply/bounce
     -- port will call through.
     , check "rt RawCallAgg classification: a defun containing one is a DIRECT safepoint (allocating — the callee is unknown generated code)"
-        (Rt.direct rawCallAggProbe)
+        (rt.direct rawCallAggProbe)
     , check "rt RawCallAgg lowers to a word-target aggregate call returning the sret address"
-        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggProbe ] "Rt.rawCallAggProbe" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggProbe ] "Rt.rawCallAggProbe" of
             Ok mod ->
                 List.any rawCallAggCallShape mod.funcs
 
@@ -1070,15 +1089,15 @@ checks =
     , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set)"
         (Rt.rawAbi
             == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main" ]
-            && not (Set.member "Rt.die" Rt.allocating)
-            && not (Set.member "Rt.halt" Rt.allocating)
-            && not (Set.member "Rt.cStrEq" Rt.allocating)
-            && not (Set.member "Rt.cStrEqGo" Rt.allocating)
-            && not (Set.member "Rt.metaGo" Rt.allocating)
-            && not (Set.member "Rt.parseArgsGo" Rt.allocating)
+            && not (Set.member "Rt.die" rt.allocating)
+            && not (Set.member "Rt.halt" rt.allocating)
+            && not (Set.member "Rt.cStrEq" rt.allocating)
+            && not (Set.member "Rt.cStrEqGo" rt.allocating)
+            && not (Set.member "Rt.metaGo" rt.allocating)
+            && not (Set.member "Rt.parseArgsGo" rt.allocating)
         )
     , check "rawAbi emission shape: Rt.die (1 word param) emits (params [a0:l], ret l, frame-free alloc scratch)"
-        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.die" of
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.die" of
             Ok mod ->
                 case funcByName "q_Rt_x2edie" mod of
                     Just f ->
@@ -1094,7 +1113,7 @@ checks =
                 False
         )
     , check "rawAbi emission shape: Rt.halt (0-ary) emits an EMPTY param list — the lean 4-arg shape would be a silent miscompile"
-        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.halt" of
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.halt" of
             Ok mod ->
                 case funcByName "q_Rt_x2ehalt" mod of
                     Just f ->
@@ -1109,7 +1128,7 @@ checks =
                 False
         )
     , check "rawAbi VALUE-position reject (fail-before): a rawAbi Rt call in a :val tail is a loud Err, never a silent word->val reinterpretation"
-        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawAbiValueMisuse ] "Rt.bad4" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawAbiValueMisuse ] "Rt.bad4" of
             Err msg ->
                 String.contains "rawAbi Rt call in a VALUE position" msg
 
@@ -1117,7 +1136,7 @@ checks =
                 False
         )
     , check "rawAbi caller shape: the midgc die arm emits a WORD call q_Rt_x2edie(l msg) — one Base L arg, never the lean 4-arg :val shape"
-        (case QbeLower.lower False False False True True True True True False QbeTypes.empty (rtArities (rtProgram True True True ++ rtProgramGc True True True)) (rtProgram True True True ++ rtProgramGc True True True) "Rt.allocVector" of
+        (case QbeLower.lower rt False False False True True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.allocVector" of
             Ok mod ->
                 case funcByName "q_Rt_x2egcInit" mod of
                     Just f ->
@@ -1132,9 +1151,9 @@ checks =
     , check "rawAbi caller shape: the halt arm retargets rt_halt -> q_Rt_x2ehalt under QBE_MIDDRIVER and keeps rt_halt by default (the symbol swap)"
         (let
             prog =
-                driverProg
+                (driverProg rt)
          in
-         (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
+         (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
             Ok mod ->
                 case funcByName "q_Rt_x2eemptylist" mod of
                     Just f ->
@@ -1146,7 +1165,7 @@ checks =
             Err _ ->
                 False
          )
-            && (case QbeLower.lower False False False True True True True False False QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
+            && (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
                     Ok mod ->
                         case funcByName "q_Rt_x2eemptylist" mod of
                             Just f ->
@@ -1167,7 +1186,7 @@ checks =
     -- accept + still-rejected shape, the val-position Blit, and the arity
     -- record totality.
     , check "A1 ret-class: Rt.main (2 word params argc/argv) emits params [a0:l,a1:l] and ret w (the exit code) — the per-key rawAbi RET CLASS (Rt.die/Rt.halt stay ret l, pinned above)"
-        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 case funcByName "main" mod of
                     Just f ->
@@ -1181,7 +1200,7 @@ checks =
                 False
         )
     , check "A1 export-name override: Rt.main emits name \"main\" (not q_Rt_x2emain) with export_ = True — crt0 links main (the rt_callN naming precedent)"
-        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "main" mod of
                     Just f ->
@@ -1206,7 +1225,7 @@ checks =
             && List.member "Rt.parseArgsGo" Rt.driverSeeds
         )
     , check "A1b RawCallAgg FUNCTION-symbol accept: a RawSym callee (not just a temp) lowers to Call (Just _) (Agg \"val\") (Il.Sym \"rt_bounce\") [word] — the code label, never a dN data ref"
-        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggSymProbe ] "Rt.rawCallAggSymProbe" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggSymProbe ] "Rt.rawCallAggSymProbe" of
             Ok mod ->
                 List.any rawCallAggSymCallShape mod.funcs
 
@@ -1214,7 +1233,7 @@ checks =
                 False
         )
     , check "A1b RawCallAgg DATA-symbol callee rejected: a rawstr data-def stand-in (RawCStr \"rt_bounce\") is a loud Err, not a silent call into static data (the A1-review blocker's over-acceptance half)"
-        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggDataSymProbe ] "Rt.rawCallAggDataSymProbe" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggDataSymProbe ] "Rt.rawCallAggDataSymProbe" of
             Err msg ->
                 String.contains "DATA" msg
 
@@ -1222,7 +1241,7 @@ checks =
                 False
         )
     , check "A1 RawCallAgg still-rejected shape: a CONSTANT callee is a loud Err (the callee must be a RawSym function symbol or a loaded code pointer, never a constant)"
-        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggConstProbe ] "Rt.rawCallAggConstProbe" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggConstProbe ] "Rt.rawCallAggConstProbe" of
             Err msg ->
                 String.contains "not a constant" msg
 
@@ -1230,7 +1249,7 @@ checks =
                 False
         )
     , check "A1b RawCallAgg VALUE-position Blit: a val-shaped aggregate call of rt_bounce emits Call (Just _) (Agg \"val\") (Il.Sym \"rt_bounce\") + a 40-byte Blit into the dest slot (the rtApply non-tail shape, never a word-address return)"
-        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggValProbe ] "Rt.rawCallAggValProbe" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggValProbe ] "Rt.rawCallAggValProbe" of
             Ok mod ->
                 List.any rawCallAggValBlitShape mod.funcs
 
@@ -1238,7 +1257,7 @@ checks =
                 False
         )
     , check "A1b emitted .ssa names the FUNCTION symbol as the call target: the lowered module RENDERED as .ssa contains `call $rt_bounce` (a code label), not a data-def call"
-        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggSymProbe ] "Rt.rawCallAggSymProbe" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggSymProbe ] "Rt.rawCallAggSymProbe" of
             Ok mod ->
                 String.contains "call $rt_bounce" (Print.print mod)
 
@@ -1271,7 +1290,7 @@ checks =
                 False
         )
     , check "A3a surface Rt.main: the driver body is in the surface-spliced program (a Let chain reaching the usage rawstr — the A1 stub was a bare Lit 0 placeholder; a parse/check failure would shrink rtProgram to [] and this goes red)"
-        (case defunByKey "Rt.main" driverProg of
+        (case defunByKey "Rt.main" (driverProg rt) of
             Just { value } ->
                 case value of
                     Lam l ->
@@ -1289,7 +1308,7 @@ checks =
                 False
         )
     , check "A3a MIDDRIVER emission — message DATA: the module carries the usage and toomany messages as content-keyed data defs (the exact frozen-golden bytes, err-usage.txt / err-toomany.txt)"
-        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (List.any (\d -> List.member (Il.DStr "usage: <prog> <entry-name> [int|float-arg ...]\n") d.items) mod.datas)
                     && (List.any (\d -> List.member (Il.DStr "qbe-rt: >16 entry args not supported\n") d.items) mod.datas)
@@ -1298,7 +1317,7 @@ checks =
                 False
         )
     , check "A3a MIDDRIVER emission — the error paths CALL write and exit IN $main: $main's OWN blocks emit >=2 call $write and >=2 call $exit (usage and toomany each write fd-2 then exit 2; notmeta adds more writes) — COUNTED, not just scoped, so neither Rt.die/Rt.halt (other functions) NOR the notmeta path alone can satisfy it (the A3a-review SHOULD-FIX 1, the count form)"
-        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "main" mod of
                     Just f ->
@@ -1315,10 +1334,10 @@ checks =
         (Dict.keys Rt.rawAbiArity == Set.toList Rt.rawAbi
             && (Maybe.map4
                     (\eqN dieN haltN mainN ->
-                        (eqN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.cStrEq" driverProg)))
-                            && (dieN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.die" driverProg)))
-                            && (haltN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.halt" driverProg)))
-                            && (mainN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.main" driverProg)))
+                        (eqN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.cStrEq" (driverProg rt))))
+                            && (dieN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.die" (driverProg rt))))
+                            && (haltN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.halt" (driverProg rt))))
+                            && (mainN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.main" (driverProg rt))))
                     )
                     (Dict.get "Rt.cStrEq" Rt.rawAbiArity)
                     (Dict.get "Rt.die" Rt.rawAbiArity)
@@ -1328,7 +1347,7 @@ checks =
                )
         )
     , check "A3b surface defuns: Rt.cStrEq (rawAbi word,word->word), Rt.cStrEqGo (val byte loop) and Rt.metaGo (val row walker) are in the surface-spliced driver program — a parse/check failure would shrink rtProgram to [] and this goes red"
-        (case ( defunByKey "Rt.cStrEq" driverProg, defunByKey "Rt.cStrEqGo" driverProg, defunByKey "Rt.metaGo" driverProg ) of
+        (case ( defunByKey "Rt.cStrEq" (driverProg rt), defunByKey "Rt.cStrEqGo" (driverProg rt), defunByKey "Rt.metaGo" (driverProg rt) ) of
             ( Just _, Just _, Just _ ) ->
                 True
 
@@ -1336,7 +1355,7 @@ checks =
                 False
         )
     , check "A3b MIDDRIVER emission — the notmeta DATA: the module carries the not-in-meta prefix and suffix as content-keyed data defs (the exact frozen-golden bytes of err-notmeta.txt split at the entry name)"
-        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (List.any (\d -> List.member (Il.DStr "qbe-rt: entry '") d.items) mod.datas)
                     && (List.any (\d -> List.member (Il.DStr "' not in qbe_meta\n") d.items) mod.datas)
@@ -1345,7 +1364,7 @@ checks =
                 False
         )
     , check "A3b MIDDRIVER emission — the meta walk reads the exported table: the rendered .ssa references $qbe_meta and $qbe_meta_len (the wload base/count of the walk)"
-        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 let
                     ssa =
@@ -1357,7 +1376,7 @@ checks =
                 False
         )
     , check "A4a surface defun: Rt.parseArgsGo (val, frame-free arg loop) is in the surface-spliced driver program — a parse/check failure would shrink rtProgram to [] and this goes red"
-        (case defunByKey "Rt.parseArgsGo" driverProg of
+        (case defunByKey "Rt.parseArgsGo" (driverProg rt) of
             Just { value } ->
                 case value of
                     Lam l ->
@@ -1370,7 +1389,7 @@ checks =
                 False
         )
     , check "A4a MIDDRIVER emission — the seats + root push: the rendered .ssa references $rt_boot, $rt_parse_arg, $rt_argv_install and $rt_root_push_value_array (the A2 seats the driver calls, each via rawcall)"
-        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 let
                     ssa =
@@ -1385,7 +1404,7 @@ checks =
                 False
         )
     , check "A4a MIDDRIVER emission — the 17-arm entry dispatch: $main calls the rt_callN dispatchers by NAME (aggcall ret rawsym) and rt_bounce (aggcall val) — the RawCallAgg named-symbol shape, not a call into data"
-        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 case funcByName "main" mod of
                     Just f ->
@@ -1401,7 +1420,7 @@ checks =
                 False
         )
     , check "A4b MIDDRIVER emission — the program/print tail: $main calls the A4b seats BY NAME (rt_is_program/rt_run_program/rt_print_value via rawcall, rt_root_push_value for the result/model roots) — the seats the A2 result handed word-in/word-out"
-        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 case funcByName "main" mod of
                     Just f ->
@@ -1433,9 +1452,9 @@ checks =
     , check "U2 fix 3 — MIDGC x MIDDRIVER dedupe: the seed halves overlap (Rt.cStrLenGo in the prim AND driver/gc closure, Rt.die in gc AND driver) and the one cross-boundary `unique` leaves EXACTLY ONE q_Rt_x2edie and ONE q_Rt_x2ecStrLenGo in the module"
         (let
             prog =
-                rtProgram True True True ++ rtProgramGc True True True
+                rtProgram rt True True True ++ rtProgramGc rt True True True
          in
-         case QbeLower.lower False False False True True True True True True QbeTypes.empty (rtArities prog) prog "Rt.allocVector" of
+         case QbeLower.lower rt False False False True True True True True True QbeTypes.empty (rtArities prog) prog "Rt.allocVector" of
             Ok mod ->
                 (List.length (List.filter (\f -> f.name == "q_Rt_x2edie") mod.funcs) == 1)
                     && (List.length (List.filter (\f -> f.name == "q_Rt_x2ecStrLenGo") mod.funcs) == 1)
@@ -1457,9 +1476,9 @@ checks =
     , check "U2 fix 2 — midgc die prefix parity: the gc half's message data carries \"qbe-rt: midgc: mmap failed\" (dieLoud's prefix restored) and NOT the un-prefixed form"
         (let
             prog =
-                rtProgram True True True ++ rtProgramGc True True True
+                rtProgram rt True True True ++ rtProgramGc rt True True True
          in
-         case QbeLower.lower False False False True True True True True False QbeTypes.empty (rtArities prog) prog "Rt.allocVector" of
+         case QbeLower.lower rt False False False True True True True True False QbeTypes.empty (rtArities prog) prog "Rt.allocVector" of
             Ok mod ->
                 List.any (\d -> List.member (Il.DStr "qbe-rt: midgc: mmap failed") d.items) mod.datas
                     && not (List.any (\d -> List.member (Il.DStr "midgc: mmap failed") d.items) mod.datas)
@@ -1493,10 +1512,10 @@ checks =
                 defaultHatchVector
 
             prog =
-                rtProgram True True True
+                rtProgram rt True True True
          in
          (defaultHatchVector == ( False, True ))
-            && (case QbeLower.lower False False False True True True True midGc midDriver QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
+            && (case QbeLower.lower rt False False False True True True True midGc midDriver QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
                     Ok mod ->
                         List.any (\f -> f.name == "q_Rt_x2ehalt") mod.funcs
                             && not (List.any (\d -> d.name == RtGc.globDataSym) mod.datas)
@@ -1523,7 +1542,7 @@ checks =
     -- proof), and both with it on (the midgc route; U5a's driver joins the
     -- same gate).
     , check "stage6 globals block: midGc OFF emits neither rt_glob nor rt_glob_addr even with gcProgram in the compile (the gate; T19: an empty spliced half used to make the absence assertions vacuous — a pipeline Err now FAILs the row)"
-        (case ( rtProgram True True True, rtProgramGc True True True ) of
+        (case ( rtProgram rt True True True, rtProgramGc rt True True True ) of
             ( [], _ ) ->
                 False
 
@@ -1531,7 +1550,7 @@ checks =
                 False
 
             ( primProg, gcProg ) ->
-                case QbeLower.lower False False False True True True True False False QbeTypes.empty (rtArities (primProg ++ gcProg)) (primProg ++ gcProg) "Rt.allocVector" of
+                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (primProg ++ gcProg)) (primProg ++ gcProg) "Rt.allocVector" of
                     Ok mod ->
                         not (List.any (\d -> d.name == RtGc.globDataSym) mod.datas)
                             && not (List.any (\f -> f.name == RtGc.globAddrSym) mod.funcs)
@@ -1540,7 +1559,7 @@ checks =
                         False
         )
     , check "stage6 globals block: midGc ON emits both, in the pinned shapes, and no gc defun names the deleted seats"
-        (case QbeLower.lower False False False True True True True True False QbeTypes.empty (rtArities (rtProgram True True True ++ rtProgramGc True True True)) (rtProgram True True True ++ rtProgramGc True True True) "Rt.allocVector" of
+        (case QbeLower.lower rt False False False True True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.allocVector" of
             Ok mod ->
                 List.any
                     (\d ->
@@ -1586,7 +1605,7 @@ checks =
     -- (copy env->fresh buffer) and setenv/open/cd (fill then one libc call)
     -- are sound ONLY while those helpers contain no safepoint.  A future
     -- edit that adds an allocation (or a RawCall to an allocating defun) to
-    -- any of them moves it INTO Rt.allocating and fails THIS row — the
+    -- any of them moves it INTO rt.allocating and fails THIS row — the
     -- alternative failure mode is a GC-timing bug no fixture can catch.
     -- (The three helpers are FRAME-FREE by emission — alloc8 scratch, no
     -- pooled frame; being framed would not itself be a safepoint (a frame
@@ -1594,65 +1613,65 @@ checks =
     -- ONLY on the strength of this classification, so the pinned property
     -- is the absence of a reachable allocation.)
     , check "rt allocation classification: the pure-read defuns are frame-free, the builders are framed"
-        (Set.member "Rt.cons" Rt.allocating
-            && Set.member "Rt.@p" Rt.allocating
-            && Set.member "Rt.con" Rt.allocating
-            && Set.member "Rt.closure" Rt.allocating
-            && Set.member "Rt.cn" Rt.allocating
-            && Set.member "Rt.repeat" Rt.allocating
-            && Set.member "Rt.substring" Rt.allocating
-            && Set.member "Rt.strOf" Rt.allocating
-            && Set.member "Rt.str" Rt.allocating
-            && Set.member "Rt.shen.bytes->string" Rt.allocating
-            && Set.member "Rt.absvector" Rt.allocating
-            && not (Set.member "Rt.=" Rt.allocating)
-            && not (Set.member "Rt.+" Rt.allocating)
-            && not (Set.member "Rt.<" Rt.allocating)
-            && not (Set.member "Rt.deepEq" Rt.allocating)
-            && not (Set.member "Rt.bytesEqGo" Rt.allocating)
-            && not (Set.member "Rt.symEq" Rt.allocating)
-            && not (Set.member "Rt.vecEq" Rt.allocating)
-            && not (Set.member "Rt.asF" Rt.allocating)
-            && not (Set.member "Rt.toI32" Rt.allocating)
-            && not (Set.member "Rt.assoc" Rt.allocating)
-            && not (Set.member "Rt.assocGo" Rt.allocating)
-            && not (Set.member "Rt.address->" Rt.allocating)
-            && not (Set.member "Rt.countL" Rt.allocating)
-            && not (Set.member "Rt.conFill" Rt.allocating)
-            && not (Set.member "Rt.closureFill" Rt.allocating)
-            && not (Set.member "Rt.intern" Rt.allocating)
-            && not (Set.member "Rt.value" Rt.allocating)
-            && not (Set.member "Rt.floatCopy" Rt.allocating)
+        (Set.member "Rt.cons" rt.allocating
+            && Set.member "Rt.@p" rt.allocating
+            && Set.member "Rt.con" rt.allocating
+            && Set.member "Rt.closure" rt.allocating
+            && Set.member "Rt.cn" rt.allocating
+            && Set.member "Rt.repeat" rt.allocating
+            && Set.member "Rt.substring" rt.allocating
+            && Set.member "Rt.strOf" rt.allocating
+            && Set.member "Rt.str" rt.allocating
+            && Set.member "Rt.shen.bytes->string" rt.allocating
+            && Set.member "Rt.absvector" rt.allocating
+            && not (Set.member "Rt.=" rt.allocating)
+            && not (Set.member "Rt.+" rt.allocating)
+            && not (Set.member "Rt.<" rt.allocating)
+            && not (Set.member "Rt.deepEq" rt.allocating)
+            && not (Set.member "Rt.bytesEqGo" rt.allocating)
+            && not (Set.member "Rt.symEq" rt.allocating)
+            && not (Set.member "Rt.vecEq" rt.allocating)
+            && not (Set.member "Rt.asF" rt.allocating)
+            && not (Set.member "Rt.toI32" rt.allocating)
+            && not (Set.member "Rt.assoc" rt.allocating)
+            && not (Set.member "Rt.assocGo" rt.allocating)
+            && not (Set.member "Rt.address->" rt.allocating)
+            && not (Set.member "Rt.countL" rt.allocating)
+            && not (Set.member "Rt.conFill" rt.allocating)
+            && not (Set.member "Rt.closureFill" rt.allocating)
+            && not (Set.member "Rt.intern" rt.allocating)
+            && not (Set.member "Rt.value" rt.allocating)
+            && not (Set.member "Rt.floatCopy" rt.allocating)
             -- stage 3 groups 1 + 3A: the fd/process prim bodies and their
             -- byte-walk helpers (the windows named above).
-            && not (Set.member "Rt.getpid" Rt.allocating)
-            && not (Set.member "Rt.cStrLenGo" Rt.allocating)
-            && not (Set.member "Rt.cStrCopyGo" Rt.allocating)
-            && not (Set.member "Rt.cStrFill" Rt.allocating)
-            && not (Set.member "Rt.readFull" Rt.allocating)
-            && not (Set.member "Rt.close" Rt.allocating)
+            && not (Set.member "Rt.getpid" rt.allocating)
+            && not (Set.member "Rt.cStrLenGo" rt.allocating)
+            && not (Set.member "Rt.cStrCopyGo" rt.allocating)
+            && not (Set.member "Rt.cStrFill" rt.allocating)
+            && not (Set.member "Rt.readFull" rt.allocating)
+            && not (Set.member "Rt.close" rt.allocating)
             -- stage 3 GROUP 3B (glob): globScanGo's soundness RESTS on
             -- staying frame-free — state[1] is a raw pointer into the GC
             -- pattern buffer, which a pooled frame cannot root (the C
             -- block's contents are not Values).  A future edit adding an
             -- allocation to ANY of these breaks the scan window with no
             -- other instrument — it must fail THIS row.
-            && not (Set.member "Rt.globLastSlash" Rt.allocating)
-            && not (Set.member "Rt.globIsDot" Rt.allocating)
-            && not (Set.member "Rt.globIsDotDot" Rt.allocating)
-            && not (Set.member "Rt.globScanGo" Rt.allocating)
-            && not (Set.member "Rt.globStrLess" Rt.allocating)
-            && not (Set.member "Rt.globSortShift" Rt.allocating)
-            && not (Set.member "Rt.globSortGo" Rt.allocating)
-            && Set.member "Rt.getcwd" Rt.allocating
-            && Set.member "Rt.cd" Rt.allocating
-            && Set.member "Rt.getenv" Rt.allocating
-            && Set.member "Rt.setenv" Rt.allocating
-            && Set.member "Rt.open" Rt.allocating
-            && Set.member "Rt.write-byte" Rt.allocating
-            && Set.member "Rt.read-byte" Rt.allocating
-            && Set.member "Rt.glob" Rt.allocating
-            && Set.member "Rt.globBuildGo" Rt.allocating
+            && not (Set.member "Rt.globLastSlash" rt.allocating)
+            && not (Set.member "Rt.globIsDot" rt.allocating)
+            && not (Set.member "Rt.globIsDotDot" rt.allocating)
+            && not (Set.member "Rt.globScanGo" rt.allocating)
+            && not (Set.member "Rt.globStrLess" rt.allocating)
+            && not (Set.member "Rt.globSortShift" rt.allocating)
+            && not (Set.member "Rt.globSortGo" rt.allocating)
+            && Set.member "Rt.getcwd" rt.allocating
+            && Set.member "Rt.cd" rt.allocating
+            && Set.member "Rt.getenv" rt.allocating
+            && Set.member "Rt.setenv" rt.allocating
+            && Set.member "Rt.open" rt.allocating
+            && Set.member "Rt.write-byte" rt.allocating
+            && Set.member "Rt.read-byte" rt.allocating
+            && Set.member "Rt.glob" rt.allocating
+            && Set.member "Rt.globBuildGo" rt.allocating
             -- stage 3 GROUP 3B-2a (exec-plan decode): the decode itself is
             -- safepoint-free BY CONSTRUCTION (tag names are BYTES in a
             -- malloc'd cbuf — an LString literal is a safepoint and cannot
@@ -1666,13 +1685,13 @@ checks =
             -- moves it INTO the set and fails THIS row — the decode's raw
             -- temps (the blob, the cbuf, st) are C-heap and survive only
             -- while no safepoint intervenes.
-            && Set.member "Rt.exec-plan" Rt.allocating
+            && Set.member "Rt.exec-plan" rt.allocating
             -- GROUP 3B-2c (exec-plan SLURP+RESULT): Rt.exec-run allocates
             -- DIRECTLY (the two result RawAllocRaws, the intern literals,
             -- the cons tree) so it is a MEMBER; the slurp loop and the byte
             -- memcpy it reuses (Rt.readFileGo/Rt.memGo) stay frame-free
             -- below.
-            && Set.member "Rt.exec-run" Rt.allocating
+            && Set.member "Rt.exec-run" rt.allocating
             -- GROUP 3B-2b (exec-plan RUN): every run defun is frame-free —
             -- the whole point of the port's child-after-fork discipline is
             -- that the run performs NO GC allocation (fork/exec/wait and the
@@ -1681,50 +1700,50 @@ checks =
             -- future edit adding an allocation to any of these reintroduces
             -- a GC safepoint into the fork'd child (INVARIANT 2) — it must
             -- fail THIS row.
-            && not (Set.member "Rt.execGo" Rt.allocating)
-            && not (Set.member "Rt.mkTmpAt" Rt.allocating)
-            && not (Set.member "Rt.cStrEqLit" Rt.allocating)
-            && not (Set.member "Rt.wStr" Rt.allocating)
-            && not (Set.member "Rt.wRaw" Rt.allocating)
-            && not (Set.member "Rt.waitStatusCode" Rt.allocating)
-            && not (Set.member "Rt.envHome" Rt.allocating)
-            && not (Set.member "Rt.isChildBuiltin" Rt.allocating)
-            && not (Set.member "Rt.echoGo" Rt.allocating)
-            && not (Set.member "Rt.childCd" Rt.allocating)
-            && not (Set.member "Rt.childPwd" Rt.allocating)
-            && not (Set.member "Rt.childBuiltin" Rt.allocating)
-            && not (Set.member "Rt.applyOneRedir" Rt.allocating)
-            && not (Set.member "Rt.applyRedirects" Rt.allocating)
-            && not (Set.member "Rt.bodyWriteGo" Rt.allocating)
-            && not (Set.member "Rt.openBodyTmpfile" Rt.allocating)
-            && not (Set.member "Rt.wireCmdGo" Rt.allocating)
-            && not (Set.member "Rt.wirePipeGo" Rt.allocating)
-            && not (Set.member "Rt.closeCmdTmpfds" Rt.allocating)
-            && not (Set.member "Rt.closePipeTmpfds" Rt.allocating)
-            && not (Set.member "Rt.closePipesGo" Rt.allocating)
-            && not (Set.member "Rt.closeOthersGo" Rt.allocating)
-            && not (Set.member "Rt.runBuiltinInprocess" Rt.allocating)
-            && not (Set.member "Rt.epCount" Rt.allocating)
-            && not (Set.member "Rt.epCount" Rt.allocating)
-            && not (Set.member "Rt.epElem" Rt.allocating)
-            && not (Set.member "Rt.epNum" Rt.allocating)
-            && not (Set.member "Rt.epStr" Rt.allocating)
-            && not (Set.member "Rt.epSymOf" Rt.allocating)
-            && not (Set.member "Rt.epProg" Rt.allocating)
-            && not (Set.member "Rt.epProgGo" Rt.allocating)
-            && not (Set.member "Rt.epChain" Rt.allocating)
-            && not (Set.member "Rt.epPipeline" Rt.allocating)
-            && not (Set.member "Rt.epPipeGo" Rt.allocating)
-            && not (Set.member "Rt.epCmd" Rt.allocating)
-            && not (Set.member "Rt.epArgvGo" Rt.allocating)
-            && not (Set.member "Rt.epRedirsGo" Rt.allocating)
-            && not (Set.member "Rt.epRedir" Rt.allocating)
-            && not (Set.member "Rt.epCountStdin" Rt.allocating)
-            && not (Set.member "Rt.epFreeChains" Rt.allocating)
-            && not (Set.member "Rt.epFreeCmds" Rt.allocating)
-            && not (Set.member "Rt.epFreeCmd" Rt.allocating)
-            && not (Set.member "Rt.epFreeArgv" Rt.allocating)
-            && not (Set.member "Rt.epFreeRedirs" Rt.allocating)
+            && not (Set.member "Rt.execGo" rt.allocating)
+            && not (Set.member "Rt.mkTmpAt" rt.allocating)
+            && not (Set.member "Rt.cStrEqLit" rt.allocating)
+            && not (Set.member "Rt.wStr" rt.allocating)
+            && not (Set.member "Rt.wRaw" rt.allocating)
+            && not (Set.member "Rt.waitStatusCode" rt.allocating)
+            && not (Set.member "Rt.envHome" rt.allocating)
+            && not (Set.member "Rt.isChildBuiltin" rt.allocating)
+            && not (Set.member "Rt.echoGo" rt.allocating)
+            && not (Set.member "Rt.childCd" rt.allocating)
+            && not (Set.member "Rt.childPwd" rt.allocating)
+            && not (Set.member "Rt.childBuiltin" rt.allocating)
+            && not (Set.member "Rt.applyOneRedir" rt.allocating)
+            && not (Set.member "Rt.applyRedirects" rt.allocating)
+            && not (Set.member "Rt.bodyWriteGo" rt.allocating)
+            && not (Set.member "Rt.openBodyTmpfile" rt.allocating)
+            && not (Set.member "Rt.wireCmdGo" rt.allocating)
+            && not (Set.member "Rt.wirePipeGo" rt.allocating)
+            && not (Set.member "Rt.closeCmdTmpfds" rt.allocating)
+            && not (Set.member "Rt.closePipeTmpfds" rt.allocating)
+            && not (Set.member "Rt.closePipesGo" rt.allocating)
+            && not (Set.member "Rt.closeOthersGo" rt.allocating)
+            && not (Set.member "Rt.runBuiltinInprocess" rt.allocating)
+            && not (Set.member "Rt.epCount" rt.allocating)
+            && not (Set.member "Rt.epCount" rt.allocating)
+            && not (Set.member "Rt.epElem" rt.allocating)
+            && not (Set.member "Rt.epNum" rt.allocating)
+            && not (Set.member "Rt.epStr" rt.allocating)
+            && not (Set.member "Rt.epSymOf" rt.allocating)
+            && not (Set.member "Rt.epProg" rt.allocating)
+            && not (Set.member "Rt.epProgGo" rt.allocating)
+            && not (Set.member "Rt.epChain" rt.allocating)
+            && not (Set.member "Rt.epPipeline" rt.allocating)
+            && not (Set.member "Rt.epPipeGo" rt.allocating)
+            && not (Set.member "Rt.epCmd" rt.allocating)
+            && not (Set.member "Rt.epArgvGo" rt.allocating)
+            && not (Set.member "Rt.epRedirsGo" rt.allocating)
+            && not (Set.member "Rt.epRedir" rt.allocating)
+            && not (Set.member "Rt.epCountStdin" rt.allocating)
+            && not (Set.member "Rt.epFreeChains" rt.allocating)
+            && not (Set.member "Rt.epFreeCmds" rt.allocating)
+            && not (Set.member "Rt.epFreeCmd" rt.allocating)
+            && not (Set.member "Rt.epFreeArgv" rt.allocating)
+            && not (Set.member "Rt.epFreeRedirs" rt.allocating)
             -- GROUP 3B-3 (read-file-as-string): the prim allocates directly
             -- (cStrOf, the result RawAllocRaw) so it is a MEMBER; the C-heap
             -- read loop and the byte memcpy MUST stay frame-free — their
@@ -1733,28 +1752,28 @@ checks =
             -- while no safepoint can intervene under them.  A future edit
             -- adding an allocation to either breaks that window with no
             -- other instrument — it must fail THIS row.
-            && Set.member "Rt.read-file-as-string" Rt.allocating
-            && not (Set.member "Rt.readFileGo" Rt.allocating)
-            && not (Set.member "Rt.memGo" Rt.allocating)
+            && Set.member "Rt.read-file-as-string" rt.allocating
+            && not (Set.member "Rt.readFileGo" rt.allocating)
+            && not (Set.member "Rt.memGo" rt.allocating)
         )
     , check "rt gc (midgc) classification: the collector is FRAME-FREE by construction (a frame-free callee must never reach a safepoint)"
-        (not (Set.member "Rt.collect" Rt.allocating)
-            && not (Set.member "Rt.allocVector" Rt.allocating)
-            && not (Set.member "Rt.allocRaw" Rt.allocating)
-            && not (Set.member "Rt.gcMarkPtr" Rt.allocating)
-            && not (Set.member "Rt.gcMarkValue" Rt.allocating)
-            && not (Set.member "Rt.gcMarkRoots" Rt.allocating)
-            && not (Set.member "Rt.gcDrain" Rt.allocating)
-            && not (Set.member "Rt.gcSweep" Rt.allocating)
-            && not (Set.member "Rt.gcAlloc" Rt.allocating)
-            && not (Set.member "Rt.gcAllocGo" Rt.allocating)
-            && not (Set.member "Rt.gcScanValueArray" Rt.allocating)
-            && not (Set.member "Rt.gcInit" Rt.allocating)
+        (not (Set.member "Rt.collect" rt.allocating)
+            && not (Set.member "Rt.allocVector" rt.allocating)
+            && not (Set.member "Rt.allocRaw" rt.allocating)
+            && not (Set.member "Rt.gcMarkPtr" rt.allocating)
+            && not (Set.member "Rt.gcMarkValue" rt.allocating)
+            && not (Set.member "Rt.gcMarkRoots" rt.allocating)
+            && not (Set.member "Rt.gcDrain" rt.allocating)
+            && not (Set.member "Rt.gcSweep" rt.allocating)
+            && not (Set.member "Rt.gcAlloc" rt.allocating)
+            && not (Set.member "Rt.gcAllocGo" rt.allocating)
+            && not (Set.member "Rt.gcScanValueArray" rt.allocating)
+            && not (Set.member "Rt.gcInit" rt.allocating)
         )
     , check "rt gc call graph: every RawCall target in the collector is a program key (prim half included — Rt.die is appended to the prim half) AND declared in rtDeps (T18: read over the SPLICED gc half — the DSL list is tripwire seats, whose .surface-seat call would fail this row loudly if the splice ever dropped a body)"
         (let
             gcSyms key =
-                case List.filter (\d -> d.key == key) (rtProgramGc True True True) of
+                case List.filter (\d -> d.key == key) (rtProgramGc rt True True True) of
                     d :: _ ->
                         rawCallSyms d.value
 
@@ -1762,10 +1781,10 @@ checks =
                         []
 
             gcKeys =
-                List.map .key (rtProgramGc True True True)
+                List.map .key (rtProgramGc rt True True True)
 
             programKeys =
-                List.map .key (rtProgram True True True ++ rtProgramGc True True True)
+                List.map .key (rtProgram rt True True True ++ rtProgramGc rt True True True)
 
             ok key =
                 List.all (\sym -> List.member sym programKeys && List.member sym (Maybe.withDefault [] (Dict.get key Rt.rtDeps)))
@@ -1791,7 +1810,7 @@ checks =
         (Rt.closureSeeds == [ "Rt.closure", "Rt.closureFill" ]
         )
     , check "rt lean ABI: a frame-free callee has pointer params, :val return and NO frame enter/leave"
-        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram True True True) "Rt.+" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram rt True True True) "Rt.+" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2e_x2b") mod.funcs of
                     f :: _ ->
@@ -1808,7 +1827,7 @@ checks =
                 False
         )
     , check "rt lean ABI: a framing callee (cons) keeps rt_frame_enter/leave and the lean signature"
-        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram True True True) "Rt.cons" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram rt True True True) "Rt.cons" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2econs") mod.funcs of
                     f :: _ ->
@@ -1824,7 +1843,7 @@ checks =
                 False
         )
     , check "rt lean ABI: rt_bounce appears NOWHERE in a lean emit, and the fat hatch restores it"
-        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram True True True) "Rt.+" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram rt True True True) "Rt.+" of
             Ok mod ->
                 not (List.any (callsSym "rt_bounce") mod.funcs)
 
@@ -1853,7 +1872,7 @@ checks =
     , check "rt self-tail loops: cStrLenGo/cStrCopyGo/cStrFill/memGo + the glob + ep* + RUN loops emit jmp @body and NO native call to their own symbol (the O(1)-stack property)"
         (List.all
             (\( key, qname ) ->
-                case QbeLower.lower False False False True True True True False False QbeTypes.empty (rtArities (rtProgram True True True)) (rtProgram True True True) key of
+                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) key of
                     Ok mod ->
                         case funcByName qname mod of
                             Just f ->
@@ -1928,18 +1947,18 @@ checks =
     -- present = classified allocating).  Under the pre-fix rule these
     -- lowered frame-free — the exact unsoundness.
     , check "rt classifier: an UNDER-/OVER-applied or FORCED self-GRef App is a DIRECT SAFEPOINT (rt_apply builds a partial closure), not an edge"
-        (Rt.direct probeUnderSelfApp
-            && Rt.direct probeOverSelfApp
-            && Rt.direct probeForcedSelfApp
+        (rt.direct probeUnderSelfApp
+            && rt.direct probeOverSelfApp
+            && rt.direct probeForcedSelfApp
             -- positive control: the SATURATED non-forced self-App that the
-            -- real helpers use stays an EDGE (Rt.direct False) — the rule
+            -- real helpers use stays an EDGE (rt.direct False) — the rule
             -- was narrowed, not disabled.
-            && not (Rt.direct cStrLenGoDefunForControl)
+            && not (rt.direct cStrLenGoDefunForControl)
         )
 
     , check "rt = symbol fast path: emitted as a pointer short-circuit that KEEPS the symEq fallback, and the hatch removes it"
-        (case ( QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram True True True) "Rt.="
-              , QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram True True False) "Rt.="
+        (case ( QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram rt True True True) "Rt.="
+              , QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram rt True True False) "Rt.="
               ) of
             ( Ok onMod, Ok offMod ) ->
                 case ( funcByName "q_Rt_x2e_x3d" onMod, funcByName "q_Rt_x2e_x3d" offMod ) of
@@ -2650,7 +2669,7 @@ checks =
     -- NO else — the only fall-through spelling the grammar has.  J8's rows
     -- go through the Flags drivers: the active flag set is the checker's
     -- parameter.  J9 has NO rows here BY DESIGN: allocating/safepoint is
-    -- DERIVED from the produced tree (Mid.Rt.allocating's fixed point,
+    -- DERIVED from the produced tree (Mid.rt.allocating's fixed point,
     -- plan fact F3); the partition rows above are the enforcement.
 
     -- ---- J7: the mid-block divergence rule (plan L6, the honest floor) ----
@@ -3089,7 +3108,7 @@ checks =
         "T8/T18 wiring (T7's identity row, post-T18): for all 8 flag combos, the union splice (prim ++ helper ++ gcProgram) and the pair (primHalf, gcHalf) agree — the gc defuns replace at their gcProgram positions, the split is order-preserving within each half, and nothing duplicates (stage 6 U2: the appended Rt.die/Rt.halt move from the splice's tail into the END of the prim half — the partition contract)"
         (List.all
             (\combo ->
-                case ( Rt.surf combo.flags, Rt.programPair combo.c combo.r combo.e ) of
+                case ( rt.surf combo.flags, rt.programPair combo.c combo.r combo.e ) of
                     ( Ok s, Ok ( p, g ) ) ->
                         case Rt.spliceSurface s (RtPrims.primDefuns combo.c combo.r combo.e ++ RtPrims.helperDefuns combo.r ++ RtGc.gcProgram) of
                             Ok spliced ->
@@ -3119,7 +3138,7 @@ checks =
         )
     , check
         "T19 seat-arity row: every tripwire SEAT in the three DSL lists (prim/helper/gc) declares the param count of the surface defun that replaces it — the splice substitutes the whole defun, so the mirror is not a lowering input, but it is now a READ assertion (a seat arity drifting from its surface defun FAILs here instead of being silently inert)"
-        (case Rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
+        (case rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
             Ok s ->
                 let
                     seats =
@@ -3146,7 +3165,7 @@ checks =
         )
     , check
         "T17/T18/T20/T21/T22/T24 pipeline (the wave-9 + collector + never-scheduled + T24 key-set row, post-T24's one-hundred-sixty-two): surf is Ok with EXACTLY the one-hundred-sixty-two migrated keys under the default flags — T24 added the LAST THREE wall-class holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd), so the DSL-bodied set is now EMPTY — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
-        (case Rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
+        (case rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
             Ok s ->
                 List.sort (Dict.keys s)
                     == [ "Rt.*", "Rt.+", "Rt.-", "Rt./", "Rt.<", "Rt.<-address", "Rt.<=", "Rt.=", "Rt.>", "Rt.>=",
@@ -3177,18 +3196,18 @@ checks =
     , check
         "T7 extern arities: every key rtDeps mentions (subject or target) has a declared arity (J2's extern table is total over the Rt call graph)"
         (List.all
-            (\k -> Dict.member k Rt.externArities)
+            (\k -> Dict.member k rt.externArities)
             (List.concatMap (\( k, deps ) -> k :: deps) (Dict.toList Rt.rtDeps))
         )
     , check
         "T7 extern arities are flag-stable (T12 hardening — the row used to be VACUOUS on a pipeline Err: rtProgram [] -> rtArities Dict.empty -> List.all vacuously true; it now FAILS on Err or an empty program): every combo's program parses and its arities agree per-key with the table derived at True/True/True (the table also covers the gcProgram seats program alone doesn't carry; a flag variant changing an arity must be a loud decision, not drift)"
         (List.all
             (\( c, r, e ) ->
-                case Rt.program c r e of
+                case rt.program c r e of
                     Ok p ->
                         not (List.isEmpty p)
                             && List.all
-                                (\( k, v ) -> Dict.get k Rt.externArities == Just v)
+                                (\( k, v ) -> Dict.get k rt.externArities == Just v)
                                 (Dict.toList (rtArities p))
 
                     Err _ ->
@@ -3206,10 +3225,10 @@ checks =
         )
     , check
         "T7 migration safety net: every ACTIVE surface defun keeps the extern arity of the key it replaces (vacuous while RtSource.source = []; LIVE from T8's first defun)"
-        (case Rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
+        (case rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
             Ok s ->
                 List.all
-                    (\( k, d ) -> Dict.get k Rt.externArities == Just (lamArity d))
+                    (\( k, d ) -> Dict.get k rt.externArities == Just (lamArity d))
                     (Dict.toList s)
 
             Err _ ->
@@ -3239,7 +3258,7 @@ checks =
             == Ok dsl2
             && List.all
                 (\combo ->
-                    case Rt.surf combo.flags of
+                    case rt.surf combo.flags of
                         Ok s ->
                             let
                                 union =
@@ -3322,7 +3341,7 @@ checks =
                )
         )
     , check
-        "T25 derived tables cover appended defuns (VERIFIED, not assumed): the safepoint walk `Mid.Rt.direct` — the tree walk `allocating`'s fixed point runs over the PRODUCED program (Rt.elm rtProgram = programPair True True True) — classifies an appended defun's tree BOTH ways (an allocating body is a direct safepoint, a plain body is not); the arity table derived from the produced program carries an appended key; and `externArities` (surfaceSigs from the parsed AST ++ the DSL arities) is TOTAL over every combo's produced program, so a new surface key's `call` resolves and the T7 safety-net row holds it to an arity"
+        "T25 derived tables cover appended defuns (VERIFIED, not assumed): the safepoint walk `Mid.rt.direct` — the tree walk `allocating`'s fixed point runs over the PRODUCED program (Rt.elm rtProgram = programPair True True True) — classifies an appended defun's tree BOTH ways (an allocating body is a direct safepoint, a plain body is not); the arity table derived from the produced program carries an appended key; and `externArities` (surfaceSigs from the parsed AST ++ the DSL arities) is TOTAL over every combo's produced program, so a new surface key's `call` resolves and the T7 safety-net row holds it to an arity"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -3338,8 +3357,8 @@ checks =
             dsl =
                 [ d0 "Rt.a" ]
          in
-         Rt.direct zAlloc
-            && not (Rt.direct zPlain)
+         rt.direct zAlloc
+            && not (rt.direct zPlain)
             && (case Rt.spliceSurface (Dict.fromList [ ( "Rt.zz", zAlloc ) ]) dsl of
                     Ok spliced ->
                         Dict.get "Rt.zz" (rtArities spliced) == Just 1
@@ -3349,10 +3368,10 @@ checks =
                )
             && List.all
                 (\combo ->
-                    case ( Rt.program combo.c combo.r combo.e, Rt.programGc combo.c combo.r combo.e ) of
+                    case ( rt.program combo.c combo.r combo.e, rt.programGc combo.c combo.r combo.e ) of
                         ( Ok p, Ok g ) ->
                             not (List.isEmpty p)
-                                && List.all (\d -> Dict.member d.key Rt.externArities) (p ++ g)
+                                && List.all (\d -> Dict.member d.key rt.externArities) (p ++ g)
 
                         _ ->
                             False
@@ -3373,12 +3392,12 @@ checks =
     -- defun that still came from a DSL builder cannot satisfy ==.  A
     -- half-done migration (key dropped from the source, a check reject, a
     -- broken splice) leaves surf without the key and fails the row loudly.
-    , t8SplicedRow "Rt.getpid"
-    , t8SplicedRow "Rt.emptylist"
-    , t8SplicedRow "Rt.cStrEqLit"
-    , t8SplicedRow "Rt.wStr"
-    , t8SplicedRow "Rt.wRaw"
-    , t8SplicedRow "Rt.waitStatusCode"
+    , t8SplicedRow rt "Rt.getpid"
+    , t8SplicedRow rt "Rt.emptylist"
+    , t8SplicedRow rt "Rt.cStrEqLit"
+    , t8SplicedRow rt "Rt.wStr"
+    , t8SplicedRow rt "Rt.wRaw"
+    , t8SplicedRow rt "Rt.waitStatusCode"
 
     -- ===== T9 — wave-2 migration: the self-tail loops + the two T8 walls =====
     -- Seven more builders moved to Mid.RtSource: the byte-walk loops
@@ -3392,13 +3411,13 @@ checks =
     -- key now lexes).  Rt.readFileGo stayed DSL-side until T24 (its growB
     -- binder is an If in a Let VALUE position; the grammar gained the
     -- if-EXPRESSION in T23 and T24 migrated it — see the T24 rows).
-    , t8SplicedRow "Rt.cStrLenGo"
-    , t8SplicedRow "Rt.cStrCopyGo"
-    , t8SplicedRow "Rt.cStrFill"
-    , t8SplicedRow "Rt.readFull"
-    , t8SplicedRow "Rt.memGo"
-    , t8SplicedRow "Rt.close"
-    , t8SplicedRow "Rt.write-byte"
+    , t8SplicedRow rt "Rt.cStrLenGo"
+    , t8SplicedRow rt "Rt.cStrCopyGo"
+    , t8SplicedRow rt "Rt.cStrFill"
+    , t8SplicedRow rt "Rt.readFull"
+    , t8SplicedRow rt "Rt.memGo"
+    , t8SplicedRow rt "Rt.close"
+    , t8SplicedRow rt "Rt.write-byte"
     , check
         "T12/T24 no double definition (T11's row + the new builder seats): each migrated key's ONLY DSL-side entry is its seat (a re-added builder would displace it — this row is the alarm); T24 added the LAST THREE holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd — their builders are deleted, so ZERO DSL-bodied defuns remain; a regression would fail this row)"
         (List.all
@@ -3579,11 +3598,11 @@ checks =
     -- QBE_NOEQPTRFAST=1 must each stay byte-identical — only a guard-
     -- selection faithful to Rt.activeFlags can do that, which is what the
     -- selection rows below pin structurally.
-    , t8SplicedRow "Rt.deepEq"
-    , t8SplicedRow "Rt.="
-    , t8SplicedRow "Rt.vecEq"
-    , t8SplicedRow "Rt.bytesEqGo"
-    , t8SplicedRow "Rt.symEq"
+    , t8SplicedRow rt "Rt.deepEq"
+    , t8SplicedRow rt "Rt.="
+    , t8SplicedRow rt "Rt.vecEq"
+    , t8SplicedRow rt "Rt.bytesEqGo"
+    , t8SplicedRow rt "Rt.symEq"
 
     -- ===== T11 — wave-4 migration: the number/string builder family =====
     -- Nine RtPrims builders moved to Mid.RtSource: asF / toI32 (the two
@@ -3597,15 +3616,15 @@ checks =
     -- wall that deferred readFileGo in T9 — spelled here with the T9b
     -- `?:` join (its FIRST surface use); bytesToStr's fillGo call is an
     -- effect statement (the DSL's dead b 7 binder).
-    , t8SplicedRow "Rt.asF"
-    , t8SplicedRow "Rt.toI32"
-    , t8SplicedRow "Rt.dgs"
-    , t8SplicedRow "Rt.revGo"
-    , t8SplicedRow "Rt.bytesOf"
-    , t8SplicedRow "Rt.numText"
-    , t8SplicedRow "Rt.bytesToStr"
-    , t8SplicedRow "Rt.countL"
-    , t8SplicedRow "Rt.fillGo"
+    , t8SplicedRow rt "Rt.asF"
+    , t8SplicedRow rt "Rt.toI32"
+    , t8SplicedRow rt "Rt.dgs"
+    , t8SplicedRow rt "Rt.revGo"
+    , t8SplicedRow rt "Rt.bytesOf"
+    , t8SplicedRow rt "Rt.numText"
+    , t8SplicedRow rt "Rt.bytesToStr"
+    , t8SplicedRow rt "Rt.countL"
+    , t8SplicedRow rt "Rt.fillGo"
 
     -- ===== T12 — wave-4 part 2: the remaining builders + the @consArr guard family =====
     -- Eight keys moved to Mid.RtSource: cn2 / appendL / symToStr /
@@ -3620,14 +3639,14 @@ checks =
     -- `@` is unambiguous.  The T10 review's forward obligation is
     -- closed here: the flag-stable row above lost its vacuous-Err hole,
     -- and the consArr axis gets the per-combo selection rows below.
-    , t8SplicedRow "Rt.cn2"
-    , t8SplicedRow "Rt.appendL"
-    , t8SplicedRow "Rt.symToStr"
-    , t8SplicedRow "Rt.nameBytes"
-    , t8SplicedRow "Rt.strOf"
-    , t8SplicedRow "Rt.floatCopy"
-    , t8SplicedRow "Rt.cons"
-    , t8SplicedRow "Rt.@p"
+    , t8SplicedRow rt "Rt.cn2"
+    , t8SplicedRow rt "Rt.appendL"
+    , t8SplicedRow rt "Rt.symToStr"
+    , t8SplicedRow rt "Rt.nameBytes"
+    , t8SplicedRow rt "Rt.strOf"
+    , t8SplicedRow rt "Rt.floatCopy"
+    , t8SplicedRow rt "Rt.cons"
+    , t8SplicedRow rt "Rt.@p"
 
     -- ===== T13 — wave-5 migration: the records / vector family =====
     -- Eighteen keys moved to Mid/RtSource: the rec walk block from
@@ -3644,24 +3663,24 @@ checks =
     -- join.  The rec* defuns are called only from rec-route sites, so the
     -- QBE_NOREC=1 arm still never emits them (emission is per REACHABLE
     -- defun) — the corpus arms are the judge.
-    , t8SplicedRow "Rt.assocGo"
-    , t8SplicedRow "Rt.recGet"
-    , t8SplicedRow "Rt.recGetGo"
-    , t8SplicedRow "Rt.recUpd"
-    , t8SplicedRow "Rt.recUpdFind"
-    , t8SplicedRow "Rt.recUpdCopy"
-    , t8SplicedRow "Rt.recAppendFind"
-    , t8SplicedRow "Rt.recAppendDataGo"
-    , t8SplicedRow "Rt.recAppendNamesGo"
-    , t8SplicedRow "Rt.recAppend"
-    , t8SplicedRow "Rt.recInsert"
-    , t8SplicedRow "Rt.recToChain"
-    , t8SplicedRow "Rt.recToChainGo"
-    , t8SplicedRow "Rt.absvector"
-    , t8SplicedRow "Rt.address->"
-    , t8SplicedRow "Rt.<-address"
-    , t8SplicedRow "Rt.assoc"
-    , t8SplicedRow "Rt.snd"
+    , t8SplicedRow rt "Rt.assocGo"
+    , t8SplicedRow rt "Rt.recGet"
+    , t8SplicedRow rt "Rt.recGetGo"
+    , t8SplicedRow rt "Rt.recUpd"
+    , t8SplicedRow rt "Rt.recUpdFind"
+    , t8SplicedRow rt "Rt.recUpdCopy"
+    , t8SplicedRow rt "Rt.recAppendFind"
+    , t8SplicedRow rt "Rt.recAppendDataGo"
+    , t8SplicedRow rt "Rt.recAppendNamesGo"
+    , t8SplicedRow rt "Rt.recAppend"
+    , t8SplicedRow rt "Rt.recInsert"
+    , t8SplicedRow rt "Rt.recToChain"
+    , t8SplicedRow rt "Rt.recToChainGo"
+    , t8SplicedRow rt "Rt.absvector"
+    , t8SplicedRow rt "Rt.address->"
+    , t8SplicedRow rt "Rt.<-address"
+    , t8SplicedRow rt "Rt.assoc"
+    , t8SplicedRow rt "Rt.snd"
 
     -- ===== T14 — wave-6 migration: fd / process + the string/value prims =====
     -- Nine keys moved to Mid/RtSource: read-byte/open (the fd layer; close
@@ -3680,15 +3699,15 @@ checks =
     -- / EINTR arms), and the cStrOf four-binder EXPANSION stays spelled
     -- out in every NUL-copying defun — the cStrOf ELM HELPER itself was
     -- deleted in T22 with its last DSL reader (read-file-as-string).
-    , t8SplicedRow "Rt.read-byte"
-    , t8SplicedRow "Rt.open"
-    , t8SplicedRow "Rt.intern"
-    , t8SplicedRow "Rt.value"
-    , t8SplicedRow "Rt.str"
-    , t8SplicedRow "Rt.getcwd"
-    , t8SplicedRow "Rt.cd"
-    , t8SplicedRow "Rt.getenv"
-    , t8SplicedRow "Rt.setenv"
+    , t8SplicedRow rt "Rt.read-byte"
+    , t8SplicedRow rt "Rt.open"
+    , t8SplicedRow rt "Rt.intern"
+    , t8SplicedRow rt "Rt.value"
+    , t8SplicedRow rt "Rt.str"
+    , t8SplicedRow rt "Rt.getcwd"
+    , t8SplicedRow rt "Rt.cd"
+    , t8SplicedRow rt "Rt.getenv"
+    , t8SplicedRow rt "Rt.setenv"
 
     -- ===== T15 — wave-7 migration: the glob family =====
     -- Nine keys moved to Mid/RtSource: the eight helpers (globLastSlash,
@@ -3703,15 +3722,15 @@ checks =
     -- with BOTH branches diverging, which lowers to the DSL's exact
     -- Let { b = If { .. } } dead-binder shape; globScanGo's guard cond
     -- keeps the builders' RAW || inside the &&.
-    , t8SplicedRow "Rt.globLastSlash"
-    , t8SplicedRow "Rt.globIsDot"
-    , t8SplicedRow "Rt.globIsDotDot"
-    , t8SplicedRow "Rt.globScanGo"
-    , t8SplicedRow "Rt.globStrLess"
-    , t8SplicedRow "Rt.globSortShift"
-    , t8SplicedRow "Rt.globSortGo"
-    , t8SplicedRow "Rt.globBuildGo"
-    , t8SplicedRow "Rt.glob"
+    , t8SplicedRow rt "Rt.globLastSlash"
+    , t8SplicedRow rt "Rt.globIsDot"
+    , t8SplicedRow rt "Rt.globIsDotDot"
+    , t8SplicedRow rt "Rt.globScanGo"
+    , t8SplicedRow rt "Rt.globStrLess"
+    , t8SplicedRow rt "Rt.globSortShift"
+    , t8SplicedRow rt "Rt.globSortGo"
+    , t8SplicedRow rt "Rt.globBuildGo"
+    , t8SplicedRow rt "Rt.glob"
 
     -- ===== T16 — wave-8 migration: the ep* exec-plan decode family =====
     -- Twenty keys moved to Mid/RtSource: the three epUnwrap template
@@ -3730,26 +3749,26 @@ checks =
     -- binders are Ifs in LET-VALUE positions whose branches carry Lets and
     -- whose values the continuation reads — unspellable until T23); T24
     -- migrated it with the block-branch if — see the T24 rows below.
-    , t8SplicedRow "Rt.epNum"
-    , t8SplicedRow "Rt.epStr"
-    , t8SplicedRow "Rt.epSymOf"
-    , t8SplicedRow "Rt.epSymIs"
-    , t8SplicedRow "Rt.epCount"
-    , t8SplicedRow "Rt.epElem"
-    , t8SplicedRow "Rt.epProg"
-    , t8SplicedRow "Rt.epProgGo"
-    , t8SplicedRow "Rt.epChain"
-    , t8SplicedRow "Rt.epPipeline"
-    , t8SplicedRow "Rt.epPipeGo"
-    , t8SplicedRow "Rt.epArgvGo"
-    , t8SplicedRow "Rt.epRedirsGo"
-    , t8SplicedRow "Rt.epRedir"
-    , t8SplicedRow "Rt.epCountStdin"
-    , t8SplicedRow "Rt.epFreeChains"
-    , t8SplicedRow "Rt.epFreeCmds"
-    , t8SplicedRow "Rt.epFreeCmd"
-    , t8SplicedRow "Rt.epFreeArgv"
-    , t8SplicedRow "Rt.epFreeRedirs"
+    , t8SplicedRow rt "Rt.epNum"
+    , t8SplicedRow rt "Rt.epStr"
+    , t8SplicedRow rt "Rt.epSymOf"
+    , t8SplicedRow rt "Rt.epSymIs"
+    , t8SplicedRow rt "Rt.epCount"
+    , t8SplicedRow rt "Rt.epElem"
+    , t8SplicedRow rt "Rt.epProg"
+    , t8SplicedRow rt "Rt.epProgGo"
+    , t8SplicedRow rt "Rt.epChain"
+    , t8SplicedRow rt "Rt.epPipeline"
+    , t8SplicedRow rt "Rt.epPipeGo"
+    , t8SplicedRow rt "Rt.epArgvGo"
+    , t8SplicedRow rt "Rt.epRedirsGo"
+    , t8SplicedRow rt "Rt.epRedir"
+    , t8SplicedRow rt "Rt.epCountStdin"
+    , t8SplicedRow rt "Rt.epFreeChains"
+    , t8SplicedRow rt "Rt.epFreeCmds"
+    , t8SplicedRow rt "Rt.epFreeCmd"
+    , t8SplicedRow rt "Rt.epFreeArgv"
+    , t8SplicedRow rt "Rt.epFreeRedirs"
 
     -- ===== T17 — wave-9 migration: the exec-plan RUN machinery =====
     -- Twenty keys moved to Mid/RtSource: the exec-plan prims (exec-plan,
@@ -3766,48 +3785,48 @@ checks =
     -- the runLits cbuf offsets and the decode tag words are literals in the
     -- surface text (COMPUTED by replicating runLitsPacked/the lit folder,
     -- not transcribed by hand).
-    , t8SplicedRow "Rt.envHome"
-    , t8SplicedRow "Rt.isChildBuiltin"
-    , t8SplicedRow "Rt.echoGo"
-    , t8SplicedRow "Rt.childPwd"
-    , t8SplicedRow "Rt.childBuiltin"
-    , t8SplicedRow "Rt.applyOneRedir"
-    , t8SplicedRow "Rt.applyRedirects"
-    , t8SplicedRow "Rt.bodyWriteGo"
-    , t8SplicedRow "Rt.openBodyTmpfile"
-    , t8SplicedRow "Rt.wireCmdGo"
-    , t8SplicedRow "Rt.wirePipeGo"
-    , t8SplicedRow "Rt.closeCmdTmpfds"
-    , t8SplicedRow "Rt.closePipeTmpfds"
-    , t8SplicedRow "Rt.closePipesGo"
-    , t8SplicedRow "Rt.closeOthersGo"
-    , t8SplicedRow "Rt.runBuiltinInprocess"
-    , t8SplicedRow "Rt.execGo"
-    , t8SplicedRow "Rt.mkTmpAt"
-    , t8SplicedRow "Rt.exec-plan"
-    , t8SplicedRow "Rt.exec-run"
+    , t8SplicedRow rt "Rt.envHome"
+    , t8SplicedRow rt "Rt.isChildBuiltin"
+    , t8SplicedRow rt "Rt.echoGo"
+    , t8SplicedRow rt "Rt.childPwd"
+    , t8SplicedRow rt "Rt.childBuiltin"
+    , t8SplicedRow rt "Rt.applyOneRedir"
+    , t8SplicedRow rt "Rt.applyRedirects"
+    , t8SplicedRow rt "Rt.bodyWriteGo"
+    , t8SplicedRow rt "Rt.openBodyTmpfile"
+    , t8SplicedRow rt "Rt.wireCmdGo"
+    , t8SplicedRow rt "Rt.wirePipeGo"
+    , t8SplicedRow rt "Rt.closeCmdTmpfds"
+    , t8SplicedRow rt "Rt.closePipeTmpfds"
+    , t8SplicedRow rt "Rt.closePipesGo"
+    , t8SplicedRow rt "Rt.closeOthersGo"
+    , t8SplicedRow rt "Rt.runBuiltinInprocess"
+    , t8SplicedRow rt "Rt.execGo"
+    , t8SplicedRow rt "Rt.mkTmpAt"
+    , t8SplicedRow rt "Rt.exec-plan"
+    , t8SplicedRow rt "Rt.exec-run"
 
     -- ===== T18 — the COLLECTOR wave (Mid.RtGc's 12 defuns) =====
     -- The whole mark-sweep moved to Mid.RtSource (the second DSL copy
     -- DELETED — RtGc keeps only the globals-block constants and the seat
     -- list).  These read the GC half of the splice (`rtProgramGc`) — the
-    -- gc keys are not in `Rt.program` — and assert the built program
+    -- gc keys are not in `rt.program` — and assert the built program
     -- carries the SURFACE lowering at each gcProgram position, the same
     -- tooth the t8SplicedRow rows have.  The gc call-graph row above is
     -- the structural twin (every RawCall target a rtDeps-declared program
     -- key — a tripwire seat would fail it loudly).
-    , t18SplicedRow "Rt.gcInit"
-    , t18SplicedRow "Rt.allocVector"
-    , t18SplicedRow "Rt.allocRaw"
-    , t18SplicedRow "Rt.gcAlloc"
-    , t18SplicedRow "Rt.gcAllocGo"
-    , t18SplicedRow "Rt.collect"
-    , t18SplicedRow "Rt.gcMarkRoots"
-    , t18SplicedRow "Rt.gcScanValueArray"
-    , t18SplicedRow "Rt.gcDrain"
-    , t18SplicedRow "Rt.gcSweep"
-    , t18SplicedRow "Rt.gcMarkPtr"
-    , t18SplicedRow "Rt.gcMarkValue"
+    , t18SplicedRow rt "Rt.gcInit"
+    , t18SplicedRow rt "Rt.allocVector"
+    , t18SplicedRow rt "Rt.allocRaw"
+    , t18SplicedRow rt "Rt.gcAlloc"
+    , t18SplicedRow rt "Rt.gcAllocGo"
+    , t18SplicedRow rt "Rt.collect"
+    , t18SplicedRow rt "Rt.gcMarkRoots"
+    , t18SplicedRow rt "Rt.gcScanValueArray"
+    , t18SplicedRow rt "Rt.gcDrain"
+    , t18SplicedRow rt "Rt.gcSweep"
+    , t18SplicedRow rt "Rt.gcMarkPtr"
+    , t18SplicedRow rt "Rt.gcMarkValue"
 
     -- ===== T20 — the never-scheduled family, part 1 (handoff-osier-tier2-t20) =====
     -- Thirteen RtPrims builders NO wave T8-T18 ever scheduled (T19's
@@ -3876,19 +3895,19 @@ checks =
     , check "parse: the ?: join is UNTOUCHED by the ? key char (T9b's accept row, re-run -- a body ? is still the value join)"
         (Parse.parseExp "c ? a : b" == Ok (Ast.EIf (Ast.EVar "c") (Ast.EVar "a") (Ast.EVar "b")))
 
-    , t8SplicedRow "Rt.+"
-    , t8SplicedRow "Rt.-"
-    , t8SplicedRow "Rt.*"
-    , t8SplicedRow "Rt./"
-    , t8SplicedRow "Rt.f/"
-    , t8SplicedRow "Rt.<"
-    , t8SplicedRow "Rt.<="
-    , t8SplicedRow "Rt.>"
-    , t8SplicedRow "Rt.>="
-    , t8SplicedRow "Rt.number?"
-    , t8SplicedRow "Rt.string?"
-    , t8SplicedRow "Rt.cons?"
-    , t8SplicedRow "Rt.empty?"
+    , t8SplicedRow rt "Rt.+"
+    , t8SplicedRow rt "Rt.-"
+    , t8SplicedRow rt "Rt.*"
+    , t8SplicedRow rt "Rt./"
+    , t8SplicedRow rt "Rt.f/"
+    , t8SplicedRow rt "Rt.<"
+    , t8SplicedRow rt "Rt.<="
+    , t8SplicedRow rt "Rt.>"
+    , t8SplicedRow rt "Rt.>="
+    , t8SplicedRow rt "Rt.number?"
+    , t8SplicedRow rt "Rt.string?"
+    , t8SplicedRow rt "Rt.cons?"
+    , t8SplicedRow rt "Rt.empty?"
 
     -- ===== T21 — the never-scheduled family, part 2 (handoff-osier-tier2-t21) =====
     -- Fourteen RtPrims builders NO wave T8-T20 ever scheduled: the
@@ -3902,20 +3921,20 @@ checks =
     -- lexes — a parse failure would fail every surf row loudly).  The
     -- walk helpers these call (subGo/repGo/bytesBuild) are still
     -- DSL-bodied; J2's extern table resolves them with no new row.
-    , t8SplicedRow "Rt.bitwise-and"
-    , t8SplicedRow "Rt.bitwise-not"
-    , t8SplicedRow "Rt.bitwise-or"
-    , t8SplicedRow "Rt.bitwise-shift-left"
-    , t8SplicedRow "Rt.bitwise-shift-right"
-    , t8SplicedRow "Rt.bitwise-shift-right-zf"
-    , t8SplicedRow "Rt.bitwise-xor"
-    , t8SplicedRow "Rt.c-strlen"
-    , t8SplicedRow "Rt.char-code"
-    , t8SplicedRow "Rt.substring"
-    , t8SplicedRow "Rt.cn"
-    , t8SplicedRow "Rt.repeat"
-    , t8SplicedRow "Rt.shen.str->bytes"
-    , t8SplicedRow "Rt.shen.bytes->string"
+    , t8SplicedRow rt "Rt.bitwise-and"
+    , t8SplicedRow rt "Rt.bitwise-not"
+    , t8SplicedRow rt "Rt.bitwise-or"
+    , t8SplicedRow rt "Rt.bitwise-shift-left"
+    , t8SplicedRow rt "Rt.bitwise-shift-right"
+    , t8SplicedRow rt "Rt.bitwise-shift-right-zf"
+    , t8SplicedRow rt "Rt.bitwise-xor"
+    , t8SplicedRow rt "Rt.c-strlen"
+    , t8SplicedRow rt "Rt.char-code"
+    , t8SplicedRow rt "Rt.substring"
+    , t8SplicedRow rt "Rt.cn"
+    , t8SplicedRow rt "Rt.repeat"
+    , t8SplicedRow rt "Rt.shen.str->bytes"
+    , t8SplicedRow rt "Rt.shen.bytes->string"
 
     -- ===== T22 — the never-scheduled family, part 3 (FINAL) =====
     -- The LAST nine never-scheduled builders (T19's inventory, now
@@ -3932,15 +3951,15 @@ checks =
     -- byteOf, trueV, falseV — zero-ref verified); Rt.readFileGo,
     -- Rt.epCmd and Rt.childCd stayed DSL-side here — the three wall-class
     -- holdouts, migrated in T24 (see the T24 block below).
-    , t8SplicedRow "Rt.con"
-    , t8SplicedRow "Rt.conFill"
-    , t8SplicedRow "Rt.closure"
-    , t8SplicedRow "Rt.closureFill"
-    , t8SplicedRow "Rt.subGo"
-    , t8SplicedRow "Rt.repGo"
-    , t8SplicedRow "Rt.bytesBuild"
-    , t8SplicedRow "Rt.symLess"
-    , t8SplicedRow "Rt.read-file-as-string"
+    , t8SplicedRow rt "Rt.con"
+    , t8SplicedRow rt "Rt.conFill"
+    , t8SplicedRow rt "Rt.closure"
+    , t8SplicedRow rt "Rt.closureFill"
+    , t8SplicedRow rt "Rt.subGo"
+    , t8SplicedRow rt "Rt.repGo"
+    , t8SplicedRow rt "Rt.bytesBuild"
+    , t8SplicedRow rt "Rt.symLess"
+    , t8SplicedRow rt "Rt.read-file-as-string"
 
     -- ---- the T10 parse additions: the guard conjunction ----
     , check
@@ -3980,7 +3999,7 @@ checks =
     -- ---- the T8fix positional-selection shape, now on live runtime bytes ----
     , check
         "T10 guard selection (Rt.deepEq): the @rec variant is FIRST, @!rec LAST; under [Rec] the active dict carries the FIRST slot's lowered tree, under [] the LAST — and the two trees differ (a swapped, OR-semantics, or last-wins selection cannot pass)"
-        (case Parse.parseProgram (String.join "\n" Mid.RtSource.source) of
+        (case rt.parsedSource of
             Err _ ->
                 False
 
@@ -4006,7 +4025,7 @@ checks =
         )
     , check
         "T10 guard selection (Rt.=, the conjunction): four variants in source order rec+fast / rec+!fast / !rec+fast / !rec+!fast; EVERY flag combo's dict carries ITS OWN slot's tree (under [Rec] the SECOND — a half-held or OR-skewed conjunction picks the first and fails), the four trees pairwise distinct, and the SPLICED program carries the same under its combos"
-        (case Parse.parseProgram (String.join "\n" Mid.RtSource.source) of
+        (case rt.parsedSource of
             Err _ ->
                 False
 
@@ -4026,7 +4045,7 @@ checks =
                                         Rt.activeSurf flags [ ( a1, v1 ), ( a2, v2 ), ( a3, v3 ), ( a4, v4 ) ]
 
                                     inProgram c r e =
-                                        defunByKey "Rt.=" (rtProgram c r e)
+                                        defunByKey "Rt.=" (rtProgram rt c r e)
                                 in
                                 (a1.flags == [ Ast.Guard Ast.Rec, Ast.Guard Ast.EqPtrFast ])
                                     && (a2.flags == [ Ast.Guard Ast.Rec, Ast.GuardNot Ast.EqPtrFast ])
@@ -4061,7 +4080,7 @@ checks =
     -- QBE_NOCONSARR=1 each byte-identical) is the byte-level twin.
     , check
         "T12 guard selection (Rt.cons): the @consArr variant is FIRST, @!consArr LAST; under [ConsArr..] the active dict carries the FIRST slot's tree, without ConsArr the LAST — and the FULL pipeline under both consArr settings splices its OWN variant (a zero-active or two-active consArr bug cannot pass)"
-        (case Parse.parseProgram (String.join "\n" Mid.RtSource.source) of
+        (case rt.parsedSource of
             Err _ ->
                 False
 
@@ -4081,7 +4100,7 @@ checks =
                                         Rt.activeSurf flags [ ( aArr, vArr ), ( aTwo, vTwo ) ]
 
                                     inProgram c =
-                                        defunByKey "Rt.cons" (rtProgram c True True)
+                                        defunByKey "Rt.cons" (rtProgram rt c True True)
                                 in
                                 (aArr.flags == [ Ast.Guard Ast.ConsArr ])
                                     && (aTwo.flags == [ Ast.GuardNot Ast.ConsArr ])
@@ -4096,7 +4115,7 @@ checks =
         )
     , check
         "T12 guard selection (Rt.@p): the SAME @consArr/@!consArr pair under the second key — the parse itself proves the key lexes (T12's key-charset change), and both consArr settings splice their OWN variant"
-        (case Parse.parseProgram (String.join "\n" Mid.RtSource.source) of
+        (case rt.parsedSource of
             Err _ ->
                 False
 
@@ -4116,7 +4135,7 @@ checks =
                                         Rt.activeSurf flags [ ( aArr, vArr ), ( aTwo, vTwo ) ]
 
                                     inProgram c =
-                                        defunByKey "Rt.@p" (rtProgram c True True)
+                                        defunByKey "Rt.@p" (rtProgram rt c True True)
                                 in
                                 (aArr.flags == [ Ast.Guard Ast.ConsArr ])
                                     && (aTwo.flags == [ Ast.GuardNot Ast.ConsArr ])
@@ -4769,9 +4788,9 @@ checks =
     -- and the T23 acceptance rows pin the two canonical spellings (growB,
     -- dirN#2).  The T9/T16/T17 row-comment corrections above record the
     -- earlier deferrals.
-    , t8SplicedRow "Rt.readFileGo"
-    , t8SplicedRow "Rt.epCmd"
-    , t8SplicedRow "Rt.childCd"
+    , t8SplicedRow rt "Rt.readFileGo"
+    , t8SplicedRow rt "Rt.epCmd"
+    , t8SplicedRow rt "Rt.childCd"
     ]
 
 
@@ -4779,11 +4798,11 @@ checks =
 the surface lowering (structural ==, see the T8 block comment for why a
 DSL-built defun cannot satisfy it).
 -}
-t8SplicedRow : String -> String
-t8SplicedRow key =
+t8SplicedRow : Rt.Runtime -> String -> String
+t8SplicedRow rt key =
     check
         ("T8 splice: " ++ key ++ " in the built program IS the surface defun (not an Elm builder)")
-        (case ( Rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ], rtProgram True True True ) of
+        (case ( rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ], rtProgram rt True True True ) of
             ( Ok s, prog ) ->
                 case ( Dict.get key s, defunByKey key prog ) of
                     ( Just sd, Just pd ) ->
@@ -4797,17 +4816,17 @@ t8SplicedRow key =
         )
 
 
-{-| T18's twin of `t8SplicedRow`, over the GC half: `Rt.program` is the
+{-| T18's twin of `t8SplicedRow`, over the GC half: `rt.program` is the
 prim/helper half and carries no gc keys, so the row reads `rtProgramGc` —
 the gcProgram list with its surface replacements in place.  Structural
 `==` (binder ids/names differ between the DSL builder and the surface
 pipeline, so a surviving DSL/seat body cannot satisfy it).
 -}
-t18SplicedRow : String -> String
-t18SplicedRow key =
+t18SplicedRow : Rt.Runtime -> String -> String
+t18SplicedRow rt key =
     check
         ("T18 splice: " ++ key ++ " in the spliced gc program IS the surface defun (not an Elm builder/seat)")
-        (case ( Rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ], rtProgramGc True True True ) of
+        (case ( rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ], rtProgramGc rt True True True ) of
             ( Ok s, prog ) ->
                 case ( Dict.get key s, defunByKey key prog ) of
                     ( Just sd, Just pd ) ->
@@ -4962,7 +4981,7 @@ directly with a table).  `checkOk` asserts acceptance; `checkErr` asserts
 a rejection whose message names the judgment (the fragment pin — a parse
 failure would Err WITHOUT the fragment and fail the row loudly).  The
 `Flags` variants drive J8's rows: the active flag set is a checker
-PARAMETER (T7 will derive it from `Rt.program`'s three Bools).
+PARAMETER (T7 will derive it from `rt.program`'s three Bools).
 -}
 chkFlags : List Ast.Flag -> String -> Result String ()
 chkFlags flags src =
@@ -5984,9 +6003,9 @@ A3a slice: usage + toomany + rlimit), so it is already part of `rtProgram` —
 the A1 `rtMainStub` stand-in is gone (appending it would now emit a SECOND
 Rt.main and a duplicate `main` symbol).
 -}
-driverProg : List Defun
-driverProg =
-    rtProgram True True True
+driverProg : Rt.Runtime -> List Defun
+driverProg rt =
+    rtProgram rt True True True
 
 
 {-| A RawCallAgg whose callee is a FUNCTION symbol (stage 6 A1b, the
@@ -6214,7 +6233,7 @@ rawCallAggCallShape f =
 
 {-| Every `Rt.*` key a body RawCalls, in order (duplicates kept — the check
 only needs membership).  The seed-closure skew detector: a RawCall to a key
-missing from (Rt.program True True True) or from Rt.rtDeps makes that defun unreachable or
+missing from (rt.program True True True) or from Rt.rtDeps makes that defun unreachable or
 unseedable, and this row fails before any .ssa is emitted.
 -}
 callsSym : String -> Il.Func -> Bool
@@ -6269,7 +6288,7 @@ funcByName name mod =
     List.head (List.filter (\f -> f.name == name) mod.funcs)
 
 
-{-| T7: `Rt.program` is now the SURFACE PIPELINE (Result-valued — a bad
+{-| T7: `rt.program` is now the SURFACE PIPELINE (Result-valued — a bad
 `Mid.RtSource` text must fail the compile, never shrink the runtime); the
 pre-T7 rows read the List it produces.  With `Mid.RtSource.source = []` the
 pipeline is the identity, so this unwrap cannot fail while the T7 rows are
@@ -6288,9 +6307,9 @@ defaultHatchVector =
     ( False, True )
 
 
-rtProgram : Bool -> Bool -> Bool -> List Defun
-rtProgram consArr rec eqPtrFast =
-    case Rt.program consArr rec eqPtrFast of
+rtProgram : Rt.Runtime -> Bool -> Bool -> Bool -> List Defun
+rtProgram rt consArr rec eqPtrFast =
+    case rt.program consArr rec eqPtrFast of
         Ok p ->
             p
 
@@ -6298,19 +6317,19 @@ rtProgram consArr rec eqPtrFast =
             []
 
 
-{-| T18: the GC half of the splice (`Rt.programGc`) — the collector defuns
+{-| T18: the GC half of the splice (`rt.programGc`) — the collector defuns
 with their surface-migrated bodies at the `gcProgram` list positions.  The
 rows that read `RtGc.gcProgram` DIRECTLY (the :1073/:1082 QbeLower probes,
 the gc call-graph row, the per-key splice rows) were re-pointed here by
 T18: after the migration the DSL list holds tripwire SEATS (the
 `key ++ ".surface-seat"` bodies), so a seat-reading row would either fail
 loudly (the call-graph row) or lower the wrong body (the probes).  The gc
-keys are NOT in `rtProgram` — `Rt.program` is the prim/helper half — so
+keys are NOT in `rtProgram` — `rt.program` is the prim/helper half — so
 this driver is the only seat-honest view of the collector.
 -}
-rtProgramGc : Bool -> Bool -> Bool -> List Defun
-rtProgramGc consArr rec eqPtrFast =
-    case Rt.programGc consArr rec eqPtrFast of
+rtProgramGc : Rt.Runtime -> Bool -> Bool -> Bool -> List Defun
+rtProgramGc rt consArr rec eqPtrFast =
+    case rt.programGc consArr rec eqPtrFast of
         Ok p ->
             p
 
@@ -6388,7 +6407,7 @@ rtArities program =
 
 {-| The SATURATED, non-forced self-App shape the real helpers use — the
 positive control for the narrowed edge rule (must stay an EDGE, i.e.
-Rt.direct False).
+rt.direct False).
 -}
 cStrLenGoDefunForControl : Defun
 cStrLenGoDefunForControl =
