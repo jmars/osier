@@ -3,12 +3,18 @@ module Mid.RtLang.Ast exposing
     , Builtin(..)
     , Block
     , Defun
+    , Effect(..)
     , Exp(..)
+    , Export
+    , ExportSig
     , Flag(..)
     , FlagGuard(..)
     , FltBinOp(..)
     , FltCmpOp(..)
+    , Header
     , Key
+    , Module
+    , OTy(..)
     , Param
     , Program
     , Sig(..)
@@ -24,6 +30,8 @@ module Mid.RtLang.Ast exposing
     , fltCmpSig
     , rawcallArity
     , shortSig
+    , splitArrow
+    , valArity
     , wordBinSig
     , wordCmpSig
     )
@@ -103,6 +111,139 @@ type alias Sym =
 
 type alias Program =
     List Defun
+
+
+-- ============================ the module header (M2) ============================
+
+
+{-| THE EXPORT-BLOCK TYPE SYNTAX (M2, plan.md §2.5) — the Osier-side type
+an `export` line declares, and the value the TYPED EXTERN TABLE carries.
+
+DELIBERATELY NOT PINNED TO MONOMORPHIC TYPES (the OWNER-STATED forward-
+compatibility requirement): a later exported type can be a QUANTIFIER
+(`OForall`/`OExists` over a bound variable — the `exists s. { alloc :
+Int -> Ref s, ... }` / rank-2 `forall s. ...` scoped-effect shapes), a
+TYPE APPLICATION over an abstract name (`OCon "Ref" [ OVar "s" ]`), or an
+ARROW whose argument is itself polymorphic (`OArrow (OForall "s" ...) _`).
+None of that changes this grammar; M2 parses and CARRIES these forms
+(erasure/semantics are Phase-7-adjacent work, not here).
+
+The atoms, matching §2.5's three classes and the Osier names they map to:
+
+  * `OVal`/`OFloat`/`OWord` — the THREE MID-C CLASSES as OPAQUE atoms
+    (`val` / `float` / `word`, lowercase — the raw ABI classes; `word` is
+    the locally-abstract opaque Word, never unified with Osier Int).
+  * `OVar` — a lowercase identifier: a BOUND type variable (`s`, `a`).
+    Lowercase is reserved for variables, so `val`/`float`/`word` are the
+    ONLY lowercase atoms; any other lowercase identifier is a variable.
+  * `OCon name args` — an UPPERCASE type constructor, applied or bare:
+    `Val Int`, `Word`, `Ref s`, `Int`.  `OCon "Word" []` is the opaque
+    word; `OCon "Val" [...]` the boxed value type.
+  * `OArrow` — `->`, right-associative.
+  * `OForall`/`OExists` — `forall s. T` / `exists s. T` (CARRIED, not
+    checked or erased in M2).
+
+The grammar is a single recursive type expression, so an export line is
+`export key : OTYPE` and the FLAT `params -> result` split is DERIVED
+(`splitArrow`, below) rather than a second grammar — a rank-2 export that
+needs a polymorphic argument stays one type, no grammar change.
+-}
+type OTy
+    = OVal
+    | OFloat
+    | OWord
+    | OVar String
+    | OCon String (List OTy)
+    | OArrow OTy OTy
+    | OForall String OTy
+    | OExists String OTy
+
+
+{-| An export's effect marker.  `Io` is `!io` — the §2.5 impure-export
+marker (contract 3).  The marker list is the postfix `!ident` sequence on
+an export line; M2 recognises exactly `!io` (here) and the contract-4
+taint (`ExportSig.taint`), anything else is a loud parse reject.
+-}
+type Effect
+    = Io
+
+
+{-| One export line's DECLARED SIGNATURE — the full type expression plus
+the markers the grammar attaches to the RESULT position: the `!io` effect
+marker (contract 3) and the contract-4 TAINT (`taint = True` says "this
+result may not escape an Osier function's return").  Both are CARRIED here
+and in the typed extern table; neither is ENFORCED in M2 (that is M4) —
+the seat exists, the check does not.
+-}
+type alias ExportSig =
+    { ty : OTy
+    , effects : List Effect
+    , taint : Bool
+    }
+
+
+{-| One `export key : ty markers` line.  `key` is the defun name verbatim
+(the full `Rt.*` key for runtime.mid; a user module's own key later).
+-}
+type alias Export =
+    { key : Key
+    , sig : ExportSig
+    }
+
+
+{-| A `.mid` module's OPTIONAL header: the module NAME (`module Rt`) and
+the export block (zero or more export lines).  The whole header is
+optional — a headerless `.mid` is a module with no name and no exports
+(every defun module-private).  `//`-commentable per M0.
+-}
+type alias Header =
+    { name : Maybe String
+    , exports : List Export
+    }
+
+
+{-| A whole `.mid` file: the header plus the defun list (`Program`).
+`Parse.parseModule` returns this; the defun list is the same `Program`
+every lowerer/checker already consumes (the header is NOT lowered).
+-}
+type alias Module =
+    { header : Header
+    , defuns : List Defun
+    }
+
+
+{-| Flatten a type expression's TOP-LEVEL arrow chain into `(params,
+result)` — the `key -> (param types, result)` view the typed extern table
+gives J2.  A non-arrow type (a bare atom, or a quantified type) flattens
+to zero params and itself as the result — quantified types therefore read
+as arity 0 here, which is FINE in M2 (nothing consumes one yet; the
+scoping question a `forall s.` over params+result raises is M4/Phase-7's).
+-}
+splitArrow : OTy -> ( List OTy, OTy )
+splitArrow ty =
+    case ty of
+        OArrow a b ->
+            let
+                ( ps, r ) =
+                    splitArrow b
+            in
+            ( a :: ps, r )
+
+        _ ->
+            ( [], ty )
+
+
+{-| The arity-only fallback type: `val -> val -> ... -> val` (n params) —
+today's all-`:val` extern seat, spelled as a type so the typed table can
+hold exported and unexported keys in one shape.
+-}
+valArity : Int -> OTy
+valArity n =
+    if n <= 0 then
+        OVal
+
+    else
+        OArrow OVal (valArity (n - 1))
 
 
 {-| One surface defun.  `key` is the Rt key the lowered Defun carries;

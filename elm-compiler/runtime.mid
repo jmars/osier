@@ -8,6 +8,20 @@
 // trailing newline is whitespace and is emit-inert — MEASURED, not assumed).
 // The `//` header lines are comments (M0) and do not participate in emit;
 // the corpus check is the proof.
+//
+// THE EXPORT BLOCK (M2, plan.md §2.5) — the keys the driver/seats cross into
+// Osier, one line per exported defun, in Osier type syntax.  Unexported
+// defuns are module-private.  The types here are the CONSERVATIVE DEFAULT:
+// the surface defun headers declare only the mid-c class (`val`/`word`), so
+// the Osier PAYLOAD types (a string path vs an Int, say) are not determinable
+// from this file — that mapping is M4's.  `val` = the boxed value class,
+// `word` = the opaque Word, `!io` = the §2.5 effect marker (carried, not
+// enforced, in M2).  `Rt.malloc` is DELIBERATELY ABSENT: it is a rawcall
+// seat (libc malloc), not a defun, and an export must name an existing defun.
+module Rt
+export Rt.read-file-as-string : val -> val
+export Rt.exec-run : val -> val -> val -> val !io
+export Rt.main : word -> word -> word
 defun Rt.getpid(dummy : val) -> val {
   return mknum(rawcall getpid());
 }

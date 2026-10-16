@@ -2547,6 +2547,125 @@ checks rt =
     , check "parse comment: `//` inside a string literal is CONTENT (the string reader never consults the skipper)"
         (Parse.parseExp "\"http://x // not a comment\"" == Ok (Ast.EStr "http://x // not a comment"))
 
+    -- ==================== M2: the module header + the export block ====================
+    , check "M2 header: module name + export block parse, and a headerless module is an EMPTY header (the header is OPTIONAL)"
+        ((case Parse.parseModule "module Rt\nexport Rt.f : val -> val\ndefun Rt.f(a: val) -> val { return mknil; }" of
+            Ok m ->
+                m.header
+                    == { name = Just "Rt"
+                       , exports =
+                            [ { key = "Rt.f"
+                              , sig = { ty = Ast.OArrow Ast.OVal Ast.OVal, effects = [], taint = False }
+                              }
+                            ]
+                       }
+                    && List.map .key m.defuns == [ "Rt.f" ]
+
+            Err _ ->
+                False
+         )
+            && (case Parse.parseModule "defun Rt.f(a: val) -> val { return mknil; }" of
+                    Ok m ->
+                        m.header == { name = Nothing, exports = [] } && List.map .key m.defuns == [ "Rt.f" ]
+
+                    Err _ ->
+                        False
+               )
+        )
+    , check "M2 export type: quantifiers, a `Ref s` application, and a polymorphic arrow argument all parse (the forward-compat grammar — no grammar change needed later)"
+        (parseExportTy "forall s. Ref s -> Int"
+            == Just (Ast.OForall "s" (Ast.OArrow (Ast.OCon "Ref" [ Ast.OVar "s" ]) (Ast.OCon "Int" [])))
+            && parseExportTy "exists s. Ref s"
+            == Just (Ast.OExists "s" (Ast.OCon "Ref" [ Ast.OVar "s" ]))
+            && parseExportTy "(forall s. Ref s -> Int) -> Int"
+            == Just (Ast.OArrow (Ast.OForall "s" (Ast.OArrow (Ast.OCon "Ref" [ Ast.OVar "s" ]) (Ast.OCon "Int" []))) (Ast.OCon "Int" []))
+        )
+    , check "M2 export markers: `!io` and `!taint` parse and are CARRIED on the signature (enforcement is M4)"
+        (case Parse.parseModule "export Rt.f : val -> val !io !taint\ndefun Rt.f(a: val) -> val { return mknil; }" of
+            Ok m ->
+                case m.header.exports of
+                    e :: _ ->
+                        e.sig == { ty = Ast.OArrow Ast.OVal Ast.OVal, effects = [ Ast.Io ], taint = True }
+
+                    [] ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "M2 export marker: an unknown marker is a LOUD reject (a typo'd marker never passes silently)"
+        (case Parse.parseModule "export Rt.f : val -> val !bogus\ndefun Rt.f(a: val) -> val { return mknil; }" of
+            Err msg ->
+                String.contains "unknown export marker" msg
+
+            Ok _ ->
+                False
+        )
+    , check "M2 key agreement: exports naming existing defuns with agreeing arities ACCEPT"
+        (Check.checkExports
+            [ { key = "Rt.f", sig = { ty = Ast.OArrow Ast.OVal Ast.OVal, effects = [], taint = False } } ]
+            (Dict.fromList [ ( "Rt.f", 1 ) ])
+            == Ok ()
+        )
+    , check "M2 key agreement: an export naming no defun is a LOUD reject"
+        (case Check.checkExports
+            [ { key = "Rt.ghost", sig = { ty = Ast.OVal, effects = [], taint = False } } ]
+            (Dict.fromList [ ( "Rt.f", 1 ) ])
+         of
+            Err msg ->
+                String.contains "names no defun" msg
+
+            Ok () ->
+                False
+        )
+    , check "M2 key agreement: an export whose declared arity disagrees with the defun is a LOUD reject (J2 would check against a lying signature)"
+        (case Check.checkExports
+            [ { key = "Rt.f", sig = { ty = Ast.OArrow Ast.OVal Ast.OVal, effects = [], taint = False } } ]
+            (Dict.fromList [ ( "Rt.f", 2 ) ])
+         of
+            Err msg ->
+                String.contains "declares arity 1" msg
+
+            Ok () ->
+                False
+        )
+    , check "M2 key agreement: a duplicate export for one key is a LOUD reject"
+        (case Check.checkExports
+            [ { key = "Rt.f", sig = { ty = Ast.OVal, effects = [], taint = False } }
+            , { key = "Rt.f", sig = { ty = Ast.OVal, effects = [], taint = False } }
+            ]
+            (Dict.fromList [ ( "Rt.f", 0 ) ])
+         of
+            Err msg ->
+                String.contains "exported more than once" msg
+
+            Ok () ->
+                False
+        )
+    , check "M2 typed extern table: an EXPORTED key carries its declared (param types, result) + markers; an unexported key the all-val fallback"
+        ((case Dict.get "Rt.exec-run" rt.externTypes of
+            Just sig ->
+                Ast.splitArrow sig.ty == ( [ Ast.OVal, Ast.OVal, Ast.OVal ], Ast.OVal )
+                    && sig.effects == [ Ast.Io ]
+                    && not sig.taint
+
+            Nothing ->
+                False
+         )
+            && (case Dict.get "Rt.getpid" rt.externTypes of
+                    Just sig ->
+                        externArity sig == 1 && Ast.splitArrow sig.ty == ( [ Ast.OVal ], Ast.OVal )
+
+                    Nothing ->
+                        False
+               )
+        )
+    , check "M2 header: the runtime.mid module is named Rt and its export block names the crossed keys (read-file-as-string, exec-run, main)"
+        (rt.header.name == Just "Rt"
+            && List.map .key rt.header.exports
+            == [ "Rt.read-file-as-string", "Rt.exec-run", "Rt.main" ]
+        )
+
     -- ==================== TIER-2 T4: the typechecker J1-J6 ====================
     -- (Mid.RtLang.Check — checkProgram over the parsed Ast).  Each judgment
     -- gets an ACCEPT row plus REJECT rows whose message names it (the
@@ -2588,7 +2707,11 @@ checks rt =
     , check "check: J2 accept — an extern seat resolves through the extern table"
         (case Parse.parseProgram "defun Rt.caller() -> val {\n  return call Rt.getpid();\n}" of
             Ok program ->
-                Check.checkProgram (Dict.fromList [ ( "Rt.getpid", 0 ) ]) [] program == Ok ()
+                Check.checkProgram
+                    (Dict.fromList [ ( "Rt.getpid", { ty = Ast.valArity 0, effects = [], taint = False } ) ])
+                    []
+                    program
+                    == Ok ()
 
             Err _ ->
                 False
@@ -3196,7 +3319,7 @@ checks rt =
     , check
         "T7 extern arities: every key rtDeps mentions (subject or target) has a declared arity (J2's extern table is total over the Rt call graph)"
         (List.all
-            (\k -> Dict.member k rt.externArities)
+            (\k -> Dict.member k rt.externTypes)
             (List.concatMap (\( k, deps ) -> k :: deps) (Dict.toList Rt.rtDeps))
         )
     , check
@@ -3207,7 +3330,7 @@ checks rt =
                     Ok p ->
                         not (List.isEmpty p)
                             && List.all
-                                (\( k, v ) -> Dict.get k rt.externArities == Just v)
+                                (\( k, v ) -> (Dict.get k rt.externTypes |> Maybe.map externArity) == Just v)
                                 (Dict.toList (rtArities p))
 
                     Err _ ->
@@ -3228,7 +3351,7 @@ checks rt =
         (case rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
             Ok s ->
                 List.all
-                    (\( k, d ) -> Dict.get k rt.externArities == Just (lamArity d))
+                    (\( k, d ) -> (Dict.get k rt.externTypes |> Maybe.map externArity) == Just (lamArity d))
                     (Dict.toList s)
 
             Err _ ->
@@ -3371,7 +3494,7 @@ checks rt =
                     case ( rt.program combo.c combo.r combo.e, rt.programGc combo.c combo.r combo.e ) of
                         ( Ok p, Ok g ) ->
                             not (List.isEmpty p)
-                                && List.all (\d -> Dict.member d.key rt.externArities) (p ++ g)
+                                && List.all (\d -> Dict.member d.key rt.externTypes) (p ++ g)
 
                         _ ->
                             False
@@ -6335,6 +6458,36 @@ rtProgramGc rt consArr rec eqPtrFast =
 
         Err _ ->
             []
+
+
+{-| The arity of a typed extern entry (M2): the flattened param count of
+its declared type.  An exported key's arity comes from its declared Osier
+type; an unexported key's from the `valArity n` fallback — both via
+`Ast.splitArrow`.
+-}
+externArity : Ast.ExportSig -> Int
+externArity sig =
+    List.length (Tuple.first (Ast.splitArrow sig.ty))
+
+
+{-| M2: parse a single export line's declared TYPE by wrapping it in a
+minimal one-export module.  Used by the forward-compatibility rows, which
+assert the grammar (not the semantics) of quantifiers/application/
+polymorphic arrows.
+-}
+parseExportTy : String -> Maybe Ast.OTy
+parseExportTy tySrc =
+    case Parse.parseModule ("module Rt\nexport Rt.f : " ++ tySrc ++ "\ndefun Rt.f(a: val) -> val { return mknil; }") of
+        Ok m ->
+            case m.header.exports of
+                e :: _ ->
+                    Just e.sig.ty
+
+                [] ->
+                    Nothing
+
+        Err _ ->
+            Nothing
 
 
 lamArity : Defun -> Int

@@ -1,5 +1,6 @@
 module Mid.RtLang.Check exposing
-    ( checkProgram
+    ( checkExports
+    , checkProgram
     , guardsHold
     )
 
@@ -8,8 +9,9 @@ J1-J8 and J10 of the tier-2 plan (`handoff-osier-tier2-midlang-plan`, THE
 TYPECHECKER).  It runs when the compiler builds the Rt program — on EVERY
 compile — and its `Err` is a compile error that fails the compile through
 the existing `Err` plumbing (T7 wires the call: after
-`Parse.parseProgram`, call
-`Check.checkProgram externArities activeFlags program`;
+`Parse.parseModule`, call
+`Check.checkExports exports arities` then
+`Check.checkProgram externTypes activeFlags program`;
 `Err msg` propagates exactly like `QbeLower.lower`'s).
 
 NO INFERENCE, BY DESIGN.  Every binder declares its class (`word x = ..;`
@@ -47,9 +49,11 @@ THE JUDGMENTS ENFORCED HERE (T5 adds J7-J10):
   * **J2** — `call Key`: `Key` must be a full `Rt.*` key and resolve in
     the surface defun set (order-independent — Rt bodies are mutually
     recursive) UNION the extern table; arity must match; arguments are
-    checked against the callee's DECLARED parameter classes (all `:val`
-    for extern seats, matching today's Rt surface) and the result is the
-    callee's declared return class.
+    checked against the callee's DECLARED parameter classes — for a TYPED
+    extern seat (an exported key) the declared Osier types, projected to
+    mid-c classes; for an unexported key the arity-only fallback (all
+    `:val`, today's behaviour) — and the result is the callee's declared
+    return class.
   * **J3** — `rawcall sym`: `sym` must be in `Ast.rawcallArity`, the
     arity must match, every argument and the result are `:word`.  This
     per-symbol table is the enforcement seat for the rawAbi caveat: the
@@ -154,11 +158,14 @@ import Mid.RtLang.Ast
         , Block
         , Defun
         , Exp(..)
+        , Export
+        , ExportSig
         , Flag(..)
         , FlagGuard(..)
         , FltBinOp(..)
         , FltCmpOp(..)
         , Key
+        , OTy(..)
         , Param
         , Program
         , Sig(..)
@@ -173,6 +180,7 @@ import Mid.RtLang.Ast
         , fltBinSig
         , fltCmpSig
         , rawcallArity
+        , splitArrow
         , wordBinSig
         , wordCmpSig
         )
@@ -184,14 +192,16 @@ import Mid.RtLang.Ast
 
 {-| What J2 resolves `call` targets against, supplied by the caller so the
 module stays pure and testable: the surface signatures are derived from
-the program itself; `externs` maps an extern `Rt.*` key to its argument
-count (T7's table, to live beside `rtDeps`).  Extern seats are all-`:val`
-in and `:val` out — every Rt param is `:val` today; a surface defun's own
+the program itself; `externs` maps an extern `Rt.*` key to its DECLARED
+signature (M2's typed extern table, the old arity-only table grown).  An
+EXPORTED key carries its Osier types (`ExportSig`, projected to mid-c
+classes); an unexported key carries the arity-only fallback (`valArity n`
+— all-`:val` in, `:val` out, today's behaviour).  A surface defun's own
 word/float params are honoured from its declared signature.
 -}
 type alias Env =
     { surfaces : Dict Key ( List Type, Type )
-    , externs : Dict Key Int
+    , externs : Dict Key ExportSig
     }
 
 
@@ -211,13 +221,13 @@ type alias Ctx =
 -- ============================ entry point ============================
 
 
-{-| Check a whole parsed program (J1-J8, J10).  `externs` is J2's extern
-arity table; `flags` is J8's ACTIVE flag set (T7 derives it from
+{-| Check a whole parsed program (J1-J8, J10).  `externs` is J2's typed
+extern table (M2); `flags` is J8's ACTIVE flag set (T7 derives it from
 `Rt.program`'s three Bools).  `Ok ()` means every defun passed; `Err msg`
 is a loud compile error naming the defun and the judgment, fail-fast on
 the first rejection.
 -}
-checkProgram : Dict Key Int -> List Flag -> Program -> Result String ()
+checkProgram : Dict Key ExportSig -> List Flag -> Program -> Result String ()
 checkProgram externs flags program =
     case keyCheck program of
         Err msg ->
@@ -230,6 +240,55 @@ checkProgram externs flags program =
 
                 Ok () ->
                     checkAll (envOf externs flags program) program
+
+
+{-| THE KEY AGREEMENT (M2, plan.md §2.5) — the FORWARD half, loud now.
+`exports` is the module's export block; `arities` is the module's key ->
+arity map (surface defuns UNION DSL seats — `load` supplies it).  Three
+rejections, each an `Err` that fails the load:
+
+  * a DUPLICATE export for one key (two declared types for one name);
+  * an export key naming NO defun in the module (a typo'd or renamed key
+    — the declared type would sit in the typed table with nothing behind
+    it);
+  * an export whose DECLARED arity (`splitArrow`'s param count) disagrees
+    with the defun's actual arity — the declared type is wrong, and J2
+    would then check surface calls against a lying signature.
+
+The REVERSE half — "a defun intended to be reachable has an export" — is
+DESIGNED here, not enforced here: an UNEXPORTED defun is MODULE-PRIVATE,
+and the Osier import (M4) resolves ONLY against the export block, so a
+private key named in an Osier `import`/call is rejected THERE.  In M2
+nothing imports, so the reverse check is vacuous by construction.
+-}
+checkExports : List Export -> Dict Key Int -> Result String ()
+checkExports exports arities =
+    case exports of
+        [] ->
+            Ok ()
+
+        e :: rest ->
+            if List.any (\e2 -> e2.key == e.key) rest then
+                Err ("RtLang: export: key '" ++ e.key ++ "' is exported more than once — one declared type per defun")
+
+            else
+                case Dict.get e.key arities of
+                    Nothing ->
+                        Err ("RtLang: export: key '" ++ e.key ++ "' names no defun in the module — every export must name an existing defun")
+
+                    Just arity ->
+                        if List.length (Tuple.first (splitArrow e.sig.ty)) == arity then
+                            checkExports rest arities
+
+                        else
+                            Err
+                                ("RtLang: export: key '"
+                                    ++ e.key
+                                    ++ "' declares arity "
+                                    ++ String.fromInt (List.length (Tuple.first (splitArrow e.sig.ty)))
+                                    ++ " but the defun has arity "
+                                    ++ String.fromInt arity
+                                )
 
 
 {-| The one program-shape check this unit owns: a defun's key must be a
@@ -400,7 +459,7 @@ checkAll env program =
                     checkAll env rest
 
 
-envOf : Dict Key Int -> List Flag -> Program -> Env
+envOf : Dict Key ExportSig -> List Flag -> Program -> Env
 envOf externs flags program =
     { surfaces = surfacesOf flags program
     , externs = externs
@@ -950,11 +1009,69 @@ resolveCall env key =
 
         Nothing ->
             case Dict.get key env.externs of
-                Just n ->
-                    Just ( List.repeat n TVal, TVal )
+                Just sig ->
+                    Just (projectSig sig)
 
                 Nothing ->
                     Nothing
+
+
+{-| The typed extern table's J2 view: flatten the declared type's
+top-level arrows into `(params, result)` and project each Osier type to
+its mid-c class.  An exported key's declared types win; an unexported key
+carries the `valArity n` fallback and projects to exactly today's
+all-`:val` seat.  `project` is TOTAL — an unprojectable type (a type
+variable, a quantifier, an unknown constructor like `Ref`) reads as
+`:val`, the conservative default, so M2 never rejects a call it cannot
+classify; M4 owns the real Osier-side mapping.
+-}
+projectSig : ExportSig -> ( List Type, Type )
+projectSig sig =
+    let
+        ( params, result ) =
+            splitArrow sig.ty
+    in
+    ( List.map project params, project result )
+
+
+{-| Osier type -> mid-c class (the §2.5 three-class mapping): the opaque
+atoms map to themselves; `Word` is the opaque word; `Val`/`Int` and every
+other boxed Osier type map to `:val` (`Float` included — §2.5: a Float
+parameter is BOXED, never trusted for unboxing); `float` is the raw f64
+word.  Anything else (a bound variable, a quantifier, an unknown
+constructor) is the conservative `:val`.  M4 refines this — it is the
+placeholder that keeps M2 total.
+-}
+project : OTy -> Type
+project ty =
+    case ty of
+        OVal ->
+            TVal
+
+        OFloat ->
+            TFloat
+
+        OWord ->
+            TWord
+
+        OCon name _ ->
+            if name == "Word" then
+                TWord
+
+            else
+                TVal
+
+        OVar _ ->
+            TVal
+
+        OArrow _ _ ->
+            TVal
+
+        OForall _ _ ->
+            TVal
+
+        OExists _ _ ->
+            TVal
 
 
 {-| J3 — `rawcall sym`: the symbol must be in `Ast.rawcallArity` (the

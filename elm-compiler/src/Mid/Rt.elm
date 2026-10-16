@@ -61,8 +61,8 @@ import Set exposing (Set)
 {-| The once-per-process LOAD of the runtime surface text — the record every
 compile path threads through `QbeModule.compileEntry` -> `Lower`.  `load` is
 the ONLY entry to the surface-derived tables: the old top-level exports
-(`program`/`programPair`/`programGc`/`surf`/`externArities`/`allocating`/
-`direct`) are now FIELDS of this record, computed over the text handed to
+(`program`/`programPair`/`programGc`/`surf`/`externTypes` (M2, was
+`externArities`)/`allocating`/`direct`) are now FIELDS of this record, computed over the text handed to
 `load`, so a call site that still reaches for one is a compile error, never
 a silent stale read.
 
@@ -80,11 +80,12 @@ fails loudly on a bad surface text, the same behaviour the old top-level
 -}
 type alias Runtime =
     { parsedSource : Result String RtAst.Program
+    , header : RtAst.Header
     , surf : List RtAst.Flag -> Result String (Dict String Defun)
     , program : Bool -> Bool -> Bool -> Result String (List Defun)
     , programGc : Bool -> Bool -> Bool -> Result String (List Defun)
     , programPair : Bool -> Bool -> Bool -> Result String ( List Defun, List Defun )
-    , externArities : Dict String Int
+    , externTypes : Dict String RtAst.ExportSig
     , allocating : Set String
     , direct : Defun -> Bool
     }
@@ -92,36 +93,72 @@ type alias Runtime =
 
 load : String -> Result String Runtime
 load source =
-    case Mid.RtLang.Parse.parseProgram source of
+    case Mid.RtLang.Parse.parseModule source of
         Err msg ->
             Err msg
 
-        Ok ast ->
+        Ok module_ ->
             let
+                -- the defun list (the header rides beside it, never lowered).
+                ast =
+                    module_.defuns
+
+                header =
+                    module_.header
+
                 -- the surface AST's declared arities: (key, param count) per
                 -- defun, guard variants included (they share one key and never
                 -- differ in arity — TestMain's T7 flag-stable row pins that).
                 surfaceSigs =
                     List.map (\d -> ( d.key, List.length d.params )) ast
 
-                -- J2's extern/arity table, beside `rtDeps`: every Rt key a
-                -- surface defun may `call` while that key is still DSL-built.
-                -- Derived from the DSL program plus `surfaceSigs` rather than
-                -- hand-written beside `rtDeps` (the arity-skew hazard); the DSL
-                -- entries come LAST in the `fromList` fold, so for a key defined
-                -- on BOTH sides the DSL arity wins (a drift is a TestMain FAIL).
-                externArities =
+                -- the module's key -> arity map (surface defuns UNION DSL
+                -- seats) — the key agreement's known set AND the typed table's
+                -- arity-only fallback source.  The DSL entries come LAST in the
+                -- `fromList` fold, so for a key defined on BOTH sides the DSL
+                -- arity wins (a drift is a TestMain FAIL).
+                moduleArities =
                     Dict.fromList
                         (surfaceSigs
                             ++ List.map (\d -> ( d.key, lamArity d ))
                                 (primDefuns True True True ++ helperDefuns True ++ gcProgram)
                         )
 
+                -- the export block, keyed — the typed extern table's declared
+                -- half (M2, plan.md §2.5).  Nothing in M2 CONSUMES a declared
+                -- Osier type beyond J2's projection (Check.project) — the table
+                -- is emit-inert otherwise.
+                exportedSigs =
+                    Dict.fromList (List.map (\e -> ( e.key, e.sig )) header.exports)
+
+                -- THE TYPED EXTERN TABLE (M2): every module key maps to an
+                -- `ExportSig`.  An EXPORTED key carries its DECLARED signature
+                -- (params + result in Osier type syntax, plus the `!io`/taint
+                -- markers); an unexported key carries the arity-only fallback
+                -- `val -> .. -> val` (today's all-`:val` extern seat, spelled
+                -- as a type).  J2 uses the declared types where they exist and
+                -- falls back to arity-only where they do not — exactly the
+                -- brief's contract.
+                externTypes =
+                    Dict.map
+                        (\key arity ->
+                            case Dict.get key exportedSigs of
+                                Just sig ->
+                                    sig
+
+                                Nothing ->
+                                    { ty = RtAst.valArity arity
+                                    , effects = []
+                                    , taint = False
+                                    }
+                        )
+                        moduleArities
+
                 -- the ACTIVE surface defuns for one flag combo, keyed for the
                 -- splice.  Parse is the per-process `ast` above; check and
                 -- lower run here (flag-dependent).
                 surf flags =
-                    case RtCheck.checkProgram externArities flags ast of
+                    case RtCheck.checkProgram externTypes flags ast of
                         Err msg ->
                             Err msg
 
@@ -231,16 +268,22 @@ load source =
                     in
                     grow (Set.fromList (List.filter direct rtProgram |> List.map .key))
             in
-            Ok
-                { parsedSource = Ok ast
-                , surf = surf
-                , program = program
-                , programGc = programGc
-                , programPair = programPair
-                , externArities = externArities
-                , allocating = allocating
-                , direct = direct
-                }
+            case RtCheck.checkExports header.exports moduleArities of
+                Err msg ->
+                    Err msg
+
+                Ok () ->
+                    Ok
+                        { parsedSource = Ok ast
+                        , header = header
+                        , surf = surf
+                        , program = program
+                        , programGc = programGc
+                        , programPair = programPair
+                        , externTypes = externTypes
+                        , allocating = allocating
+                        , direct = direct
+                        }
 
 
 {-| The three `program` switches as the surface language's ACTIVE flag set
@@ -271,7 +314,7 @@ activeFlags consArr rec eqPtrFast =
 
 
 {-| The arity of a DSL-built defun (the Lam param count) — `load`'s
-`externArities` derivation reads it for the DSL half.
+`moduleArities` (the typed extern table's fallback) reads it for the DSL half.
 -}
 lamArity : Defun -> Int
 lamArity d =
@@ -348,7 +391,7 @@ guard would reject the driver.  The "never called" weight is borne by the
 existing machinery, VERIFIED not assumed: Lower keeps only the SEEDED subset,
 so an appended defun nothing reaches is PRUNED and never emitted (dead
 source, not silent corruption); a call to a key absent from the program fails
-LOUDLY in Lower's rawCall arm; and `externArities` covers every surface key
+LOUDLY in Lower's rawCall arm; and `externTypes` covers every surface key
 via `surfaceSigs` (the parsed AST, guard variants included), so `call` to an
 appended key typechecks and the T7 safety-net row holds it to an arity.  The
 entry-point defuns get an EXPLICIT seed list when they land (the stage-6

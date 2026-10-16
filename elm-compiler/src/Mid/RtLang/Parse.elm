@@ -3,6 +3,7 @@ module Mid.RtLang.Parse exposing
     , parseBlock
     , parseDefun
     , parseExp
+    , parseModule
     , parseProgram
     )
 
@@ -226,15 +227,15 @@ same way, through top-level function bodies only.
 The selfhost's CORE surface is also narrower than elm/core (MEASURED,
 Lower/Resolve.elm's dotted rows): this module uses only `String.slice /
 toList / any / startsWith / length / fromInt / join`, `Char.isAlpha /
-isDigit / isAlphaNum / toCode`, `List.map / singleton / reverse`,
-`Dict.get / fromList` — no `String.uncons / left / split / contains`,
+isDigit / isAlphaNum / isUpper / isLower / toCode`, `List.map / singleton /
+reverse`, `Dict.get / fromList` — no `String.uncons / left / split / contains`,
 and — per the O(n) invariant in the token-plumbing section — NO
 `dropLeft` anywhere (the pre-fix form, an O(n^2) scanner).
 
 -}
 
 import Dict exposing (Dict)
-import Mid.RtLang.Ast exposing (AggShape(..), Block, Builtin(..), Defun, Exp(..), Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Param, Program, Stmt(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
+import Mid.RtLang.Ast exposing (AggShape(..), Block, Builtin(..), Defun, Effect(..), Exp(..), Export, ExportSig, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Module, OTy(..), Param, Program, Stmt(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
 import Parser exposing (DeadEnd, Problem(..))
 import ParserFast
 
@@ -271,6 +272,16 @@ resultOfRun parser src =
 parseProgram : String -> Result String Program
 parseProgram src =
     resultOfRun programTarget src
+
+
+{-| Parse a WHOLE `.mid` MODULE: the OPTIONAL header (module name + export
+block) followed by `defun*` — `Mid.RtLang.Ast.Module`.  `load` uses this;
+`parseProgram` stays the headerless defun-list form the checker/lowerer
+rows feed.
+-}
+parseModule : String -> Result String Module
+parseModule src =
+    resultOfRun moduleTarget src
 
 
 parseDefun : String -> Result String Defun
@@ -1158,6 +1169,376 @@ programDefuns =
     ParserFast.loopWhileSucceeds defun [] (\d acc -> acc ++ [ d ]) identity
 
 
+
+-- ============================ the module header (M2) ============================
+
+
+{-| The whole-module layer: an OPTIONAL header (the `module` name line and
+the `export` block) then `defun*`.  Each header item is entered by the
+same NON-committed peek dispatch as `defun` (`moduleNameLine` peeks for
+`module`, `exportLine` for `export`), so a headerless module — and a
+header followed by defuns — both back up cleanly and the defun loop owns
+the `defun`/`@` dispatch.
+-}
+moduleTarget : ParserFast.Parser Module
+moduleTarget =
+    followedBySkipWsComments
+        (ParserFast.map2 (\hdr defs -> { header = hdr, defuns = defs })
+            header
+            programDefuns
+        )
+
+
+{-| The header: `module Name` (optional, at most one, first), then
+`export*`.  Both halves hand back their empty form without committing when
+the next line is not theirs, so the whole header is OPTIONAL.
+-}
+header : ParserFast.Parser Header
+header =
+    ParserFast.map2
+        (\mname exports -> { name = mname, exports = exports })
+        moduleNameLine
+        (ParserFast.loopWhileSucceeds exportLine [] (\e acc -> acc ++ [ e ]) identity)
+
+
+{-| `module Name` — the OPTIONAL name line.  `Just name` when the next
+token is exactly `module` (peek, then commit); `Nothing` otherwise (the
+non-committed handback the optional header needs).
+-}
+moduleNameLine : ParserFast.Parser (Maybe String)
+moduleNameLine =
+    ParserFast.offsetSourceAndThen moduleNameLineAt
+
+
+moduleNameLineAt : Int -> String -> ParserFast.Parser (Maybe String)
+moduleNameLineAt offset src =
+    let
+        at =
+            skipWsCommentsAt offset src
+    in
+    case tokenAtOff at src of
+        Just ( "module", _ ) ->
+            skipWsCommentsFollowedBy (spelled "module" (ParserFast.map Just moduleName))
+
+        _ ->
+            succeed Nothing
+
+
+{-| The module name: a plain identifier (`Rt`, later `Foo.Bar` would grow
+the charset — not a type-syntax concern).  Reuses `surfaceName` (no dots,
+starts alpha/underscore).
+-}
+moduleName : ParserFast.Parser String
+moduleName =
+    surfaceName
+
+
+{-| One `export key : ty markers` line, entered by peeking for the
+`export` token exactly (the key is read verbatim by `keyName` — the same
+reader as the defun header, so the two can never disagree on a key's
+spelling).
+-}
+exportLine : ParserFast.Parser Export
+exportLine =
+    ParserFast.offsetSourceAndThen exportLineAt
+
+
+exportLineAt : Int -> String -> ParserFast.Parser Export
+exportLineAt offset src =
+    let
+        at =
+            skipWsCommentsAt offset src
+    in
+    case tokenAtOff at src of
+        Just ( "export", _ ) ->
+            skipWsCommentsFollowedBy
+                (ParserFast.map2
+                    (\key sig -> { key = key, sig = sig })
+                    (spelled "export" keyName)
+                    (spelled ":" exportSig)
+                )
+
+        _ ->
+            ParserFast.problem "expected `export` or `defun` (or the end of the program)"
+
+
+{-| `ty markers` — the declared type expression plus the postfix marker
+list (`!io`, `!taint`).  The type is the FULL forward-compatible grammar
+(`otype`); the markers attach to the RESULT position (the whole line's
+tail) and are carried on the signature, never inside the type.
+-}
+exportSig : ParserFast.Parser ExportSig
+exportSig =
+    ParserFast.map2
+        (\ty marks -> { ty = ty, effects = marks.effects, taint = marks.taint })
+        otype
+        markerList
+
+
+{-| The postfix marker list: zero or more `!ident` (currently exactly
+`!io` and `!taint`; anything else rejects loudly — a typo'd marker must
+never pass silently).  Folded into `{ effects, taint }`.
+-}
+markerList : ParserFast.Parser { effects : List Effect, taint : Bool }
+markerList =
+    ParserFast.loopWhileSucceeds marker { effects = [], taint = False } addMarker identity
+
+
+{-| One marker's contribution, for the fold.
+-}
+addMarker : Marker -> { effects : List Effect, taint : Bool } -> { effects : List Effect, taint : Bool }
+addMarker m acc =
+    case m of
+        MIo ->
+            { acc | effects = acc.effects ++ [ Io ] }
+
+        MTaint ->
+            { acc | taint = True }
+
+
+type Marker
+    = MIo
+    | MTaint
+
+
+marker : ParserFast.Parser Marker
+marker =
+    ParserFast.offsetSourceAndThen markerAt
+
+
+markerAt : Int -> String -> ParserFast.Parser Marker
+markerAt offset src =
+    let
+        at =
+            skipWsCommentsAt offset src
+    in
+    if String.slice at (at + 1) src == "!" then
+        -- `spelled "!"` COMMITS (a `!` in marker position is a marker, so an
+        -- unknown name must be a LOUD reject, never a silent hand-back that
+        -- leaves `!bogus` as trailing junk).
+        spelled "!" markerName
+
+    else
+        ParserFast.problem "expected a marker (`!io`/`!taint`) or the end of the export line"
+
+
+{-| The marker NAME after the committed `!` — exactly `io` or `taint`
+(`Effect.Io` / the contract-4 taint); anything else rejects loudly.
+-}
+markerName : ParserFast.Parser Marker
+markerName =
+    ParserFast.offsetSourceAndThen markerNameAt
+
+
+markerNameAt : Int -> String -> ParserFast.Parser Marker
+markerNameAt offset src =
+    case typeTokenAtOff offset src of
+        Just ( "io", _ ) ->
+            spelled "io" (succeed MIo)
+
+        Just ( "taint", _ ) ->
+            spelled "taint" (succeed MTaint)
+
+        Just ( tok, _ ) ->
+            ParserFast.problem ("unknown export marker `!" ++ tok ++ "` — the markers are exactly `!io` and `!taint`")
+
+        Nothing ->
+            ParserFast.problem "expected a marker name after `!` (`io` or `taint`)"
+
+
+{-| The export-block TYPE grammar (the forward-compatible whole):
+`forall`/`exists` quantifiers over a type variable, then a RIGHT-
+associative arrow chain, then atoms.  See `Ast.OTy`'s header for why this
+is not pinned to monomorphic types — a quantifier, a `Ref s`-style
+application, and a polymorphic arrow argument all parse HERE, unchanged.
+-}
+otype : ParserFast.Parser OTy
+otype =
+    ParserFast.offsetSourceAndThen otypeAt
+
+
+otypeAt : Int -> String -> ParserFast.Parser OTy
+otypeAt offset src =
+    let
+        at =
+            skipWsCommentsAt offset src
+    in
+    case typeTokenAtOff at src of
+        Just ( "forall", _ ) ->
+            spelled "forall" (ParserFast.map2 OForall typeVar (spelled "." otype))
+
+        Just ( "exists", _ ) ->
+            spelled "exists" (ParserFast.map2 OExists typeVar (spelled "." otype))
+
+        _ ->
+            oarrow
+
+
+{-| A quantified variable: a lowercase identifier (`s`, `a`) — the bound
+variable of `forall s.` / `exists s.`.  `val`/`float`/`word` are reserved
+atoms, never variables.
+-}
+typeVar : ParserFast.Parser String
+typeVar =
+    ParserFast.offsetSourceAndThen typeVarAt
+
+
+typeVarAt : Int -> String -> ParserFast.Parser String
+typeVarAt offset src =
+    case typeTokenAtOff offset src of
+        Just ( tok, _ ) ->
+            if isLowerName tok && not (isTypeKeyword tok) then
+                spelled tok (succeed tok)
+
+            else
+                ParserFast.problem ("expected a lowercase type variable, found `" ++ tok ++ "`")
+
+        Nothing ->
+            ParserFast.problem "expected a type variable"
+
+
+{-| `atom ('->' type)?` — the RIGHT-associative arrow (the recursive
+`otype` in the tail makes `A -> B -> C` read `A -> (B -> C)`).
+-}
+oarrow : ParserFast.Parser OTy
+oarrow =
+    ParserFast.map2 (\a tail -> tail a) oatom oarrowTail
+
+
+oarrowTail : ParserFast.Parser (OTy -> OTy)
+oarrowTail =
+    ParserFast.offsetSourceAndThen oarrowTailAt
+
+
+oarrowTailAt : Int -> String -> ParserFast.Parser (OTy -> OTy)
+oarrowTailAt offset src =
+    let
+        at =
+            skipWsCommentsAt offset src
+    in
+    if String.slice at (at + 2) src == "->" then
+        spelled "->" (ParserFast.map (\b a -> OArrow a b) otype)
+
+    else
+        succeed identity
+
+
+{-| A type atom: `val`/`float`/`word` (the opaque class atoms), a
+parenthesized full type (so an arrow argument can itself be polymorphic:
+`(forall s. Ref s -> Int) -> Int`), an UPPERCASE constructor (bare or
+applied — `Word`, `Val Int`, `Ref s`), or a lowercase type VARIABLE (`s`,
+`a`).  A digit-starting token is a loud reject (a type is a name).
+-}
+oatom : ParserFast.Parser OTy
+oatom =
+    ParserFast.offsetSourceAndThen oatomAt
+
+
+oatomAt : Int -> String -> ParserFast.Parser OTy
+oatomAt offset src =
+    let
+        at =
+            skipWsCommentsAt offset src
+    in
+    case String.slice at (at + 1) src of
+        "(" ->
+            spelled "(" (ParserFast.map2 (\ty _ -> ty) otype (spelled ")" (succeed ())))
+
+        "" ->
+            ParserFast.problem "expected a type, found end of input"
+
+        c ->
+            if isTokenStart c then
+                otypeNameAt at src
+
+            else
+                ParserFast.problem ("expected a type, found `" ++ c ++ "`")
+
+
+otypeNameAt : Int -> String -> ParserFast.Parser OTy
+otypeNameAt at src =
+    case typeTokenAtOff at src of
+        Just ( "val", _ ) ->
+            spelled "val" (succeed OVal)
+
+        Just ( "float", _ ) ->
+            spelled "float" (succeed OFloat)
+
+        Just ( "word", _ ) ->
+            spelled "word" (succeed OWord)
+
+        Just ( tok, _ ) ->
+            if isUpperName tok then
+                conApp tok
+
+            else if isLowerName tok && not (isTypeKeyword tok) then
+                spelled tok (succeed (OVar tok))
+
+            else
+                ParserFast.problem ("expected a type (a name), found `" ++ tok ++ "`")
+
+        Nothing ->
+            ParserFast.problem "expected a type"
+
+
+{-| The surface keywords that are NEVER type names (variable or
+constructor): the top-level `defun`/`export`/`module` delimiters and the
+type-level `forall`/`exists`/`val`/`float`/`word` atoms.  Excluding them
+here is what lets a constructor-application loop (`Ref s`) STOP cleanly at
+the next defun instead of greedily reading `defun` as a type variable.
+-}
+isTypeKeyword : String -> Bool
+isTypeKeyword tok =
+    tok == "defun"
+        || tok == "export"
+        || tok == "module"
+        || tok == "forall"
+        || tok == "exists"
+        || tok == "val"
+        || tok == "float"
+        || tok == "word"
+
+
+{-| `Name` / `Name atom atom ...` — a type constructor, bare (`OCon name
+[]`) or applied to a sequence of atoms (`Val Int`, `Ref s`).  Application
+arguments are ATOMS (not arrows), so `Ref s -> Int` groups as
+`(Ref s) -> Int` and a deeper argument parenthesizes: `List (Ref s)`.
+-}
+conApp : String -> ParserFast.Parser OTy
+conApp name =
+    ParserFast.map2
+        (\_ args -> OCon name args)
+        (spelled name (succeed ()))
+        (ParserFast.loopWhileSucceeds oatom [] (\a acc -> acc ++ [ a ]) identity)
+
+
+{-| Starts with an UPPERCASE letter (a type constructor: `Val`, `Word`,
+`Ref`, `Int`).  Lowercase is the variable space (and the three reserved
+atoms `val`/`float`/`word`); digits are rejected at the call site.
+-}
+isUpperName : String -> Bool
+isUpperName tok =
+    case String.toList (String.slice 0 1 tok) of
+        c :: _ ->
+            Char.isUpper c
+
+        [] ->
+            False
+
+
+{-| Starts with a lowercase letter or underscore (a type variable `s`,
+`a`, `_x`).
+-}
+isLowerName : String -> Bool
+isLowerName tok =
+    case String.toList (String.slice 0 1 tok) of
+        c :: _ ->
+            Char.isLower c || c == '_'
+
+        [] ->
+            False
+
+
 defunTarget : ParserFast.Parser Defun
 defunTarget =
     followedBySkipWsComments defun
@@ -1862,6 +2243,37 @@ isTokenStart s =
 isTokenChar : Char -> Bool
 isTokenChar c =
     Char.isAlpha c || Char.isDigit c || c == '_' || c == '.'
+
+
+{-| The longest TYPE token starting at offset `start` of `src`:
+`[A-Za-z0-9_]` — deliberately WITHOUT the dot, so the export-block type
+grammar's `.` (the `forall s.` / `exists s.` separator) is NOT swallowed
+into a name token.  The general `tokenAtOff` keeps the dot (it is how
+`Rt.getpid` reads as one token); the type grammar uses THIS reader so
+`s.` splits into the variable `s` and the separator `.`.
+-}
+typeTokenAtOff : Int -> String -> Maybe ( String, Int )
+typeTokenAtOff start src =
+    typeTokenHelp start start src
+
+
+typeTokenHelp : Int -> Int -> String -> Maybe ( String, Int )
+typeTokenHelp start n src =
+    case String.slice n (n + 1) src of
+        "" ->
+            finishedToken start n src
+
+        c ->
+            if String.any isTypeChar c then
+                typeTokenHelp start (n + 1) src
+
+            else
+                finishedToken start n src
+
+
+isTypeChar : Char -> Bool
+isTypeChar c =
+    Char.isAlphaNum c || c == '_'
 
 
 {-| The longest KEY token starting at offset `start` of `src`: the general
