@@ -436,6 +436,18 @@ DEFERRED until such a resource is actually handed out (the Vm/GC owning it is th
 (b) ROOTING and IMMUTABILITY are not type properties at all — they remain runtime/ABI contracts that
 must be ENFORCED, not merely stated.
 
+**REFINED (owner, 2026-10-16): the third ingredient is UNIQUENESS, not linearity.** Linearity is a
+MULTIPLICITY rule ("exactly once") and would reject the owner's explicitly-safe case (a closure
+capturing the value and recurring consumes it per call). UNIQUENESS is a SHARING rule ("no other
+reference exists"): a closure holding the SOLE reference may be called any number of times, so the
+recursion case stays legal AND in-place mutation is sound (no alias can observe the old value). This is
+the Clean model (Barendsen & Smetsers) and essentially Rust's `&mut` (uniqueness + a lifetime). SO:
+phantom region+quantifier = containment/escape; uniqueness = sound mutation; uniqueness does NOT give
+an OBLIGATION to release (that is affinity) — so a release-required handle wants UNIQUE + AFFINE, while
+a Vm/GC-owned lifetime needs unique alone. Uniqueness is a static sharing analysis with a DEMOTION
+coercion: unique -> observed (read-only, shareable), which is the escape valve that keeps
+captured-and-recursed values legal while forbidding mutation through a shared path.
+
 Plus **ARITY**: declared and flat (Osier is curried, mid-c is flat) — the one thing `externArities`
 already does today.
 
