@@ -89,6 +89,7 @@ type alias Runtime =
     , programGc : Bool -> Bool -> Bool -> Result String (List Defun)
     , programPair : Bool -> Bool -> Bool -> Result String ( List Defun, List Defun )
     , externTypes : Dict String RtAst.ExportSig
+    , exportedTypes : Dict String RtAst.ExportSig
     , allocating : Set String
     , direct : Defun -> Bool
     }
@@ -130,7 +131,11 @@ load source =
                 -- the export block, keyed — the typed extern table's declared
                 -- half (M2, plan.md §2.5).  Nothing in M2 CONSUMES a declared
                 -- Osier type beyond J2's projection (Check.project) — the table
-                -- is emit-inert otherwise.
+                -- is emit-inert otherwise.  `exportedTypes` below is this same
+                -- dict, exposed as a record field: it is the PRIVACY BOUNDARY
+                -- for the USER lane (M3fix) — a user `.mid` may `call` only the
+                -- runtime's EXPORTED keys (unexported defuns are module-private,
+                -- per the runtime.mid header), never the whole `externTypes`.
                 exportedSigs =
                     Dict.fromList (List.map (\e -> ( e.key, e.sig )) header.exports)
 
@@ -284,6 +289,7 @@ load source =
                         , programGc = programGc
                         , programPair = programPair
                         , externTypes = externTypes
+                        , exportedTypes = exportedSigs
                         , allocating = allocating
                         , direct = direct
                         }
@@ -344,10 +350,11 @@ parseUserModule source =
 SAME pipeline as `runtime.mid` (`Check.checkExports` -> `Check.checkProgram`
 -> `LowerToIr.lowerProgram`), with the runtime's own `surf` path.  `externs`
 is the typed extern table the module's `call` sites resolve against: the
-caller (QbeModule) supplies the runtime's `externTypes` UNION every group
-user module's exports, so a user module may `call Rt.*` or another user
-module's exported defun.  Flags are `[]`: user modules carry no `@flag`
-guards (those are the runtime's internal switches).
+caller (QbeModule) supplies the runtime's EXPORTED keys (`exportedTypes` — the
+M3fix privacy boundary) UNION every group user module's exports, so a user
+module may `call Rt.<exported>` or another user module's exported defun at the
+CHECKER (J2).  Flags are `[]`: user modules carry no `@flag` guards (those are
+the runtime's internal switches).
 -}
 checkLowerUserModule : Dict String RtAst.ExportSig -> ( String, List RtAst.Export, RtAst.Program ) -> Result String UserModule
 checkLowerUserModule externs ( name, exports, ast ) =

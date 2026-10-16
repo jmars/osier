@@ -1,4 +1,4 @@
-module Mid.QbeModule exposing (compileEntry, userCollisions)
+module Mid.QbeModule exposing (compileEntry, loadUserMids, userCollisions)
 
 -- Mid.QbeModule — the NATIVE-backend driver: sources -> Mid.Ir -> QBE IL
 -- text (.ssa) for ONE entry key (native-backend stage 1; handoff-qbe-lower).
@@ -206,9 +206,15 @@ compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals 
 
 {-| Load the group's user `.mid` modules in TWO phases: parse ALL first (the
 namespace rule + name/exports), so the cross-module extern table — the
-runtime's `externTypes` UNION every user module's export — exists before any
-check+lower runs.  A user module may therefore `call Rt.*` (the runtime's
-exported surface) or another user module's exported defun.
+runtime's EXPORTED keys (`rt.exportedTypes`, the privacy boundary: unexported
+runtime defuns are module-private) UNION every user module's export — exists
+before any check+lower runs.  A user module may therefore `call Rt.<exported>`
+(the exported runtime surface) or another user module's exported defun AT THE
+CHECKER (J2 resolves both through this table).  NOTE (M3fix finding 4): a user
+-> user `call` resolves at J2 but is then REJECTED by Mid.Qbe.Lower — mid-c
+`call` lowers to RawCall (LowerToIr) and Lower's RawCall arm accepts only
+`Rt.*` keys (Lower.elm:1783), so the emit-level cross-module call is a
+still-open gap, pinned by TestMain's "finding-4 DEFECT (fail-before)" row.
 -}
 loadUserMids : MidRt.Runtime -> List String -> Result String (List MidRt.UserModule)
 loadUserMids rt sources =
@@ -226,7 +232,7 @@ loadUserMids rt sources =
                         )
 
                 externs =
-                    Dict.union userExterns rt.externTypes
+                    Dict.union userExterns rt.exportedTypes
             in
             sequence (List.map (MidRt.checkLowerUserModule externs) parsed)
 
@@ -595,11 +601,17 @@ lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesBy
     in
     reserveRtName units
         |> Result.andThen (\_ -> compileAllJoin globals units nodeTypesByModule refinedVarsByModule)
-        -- The unsafe-node audit (osier-rawnodes): EVERY compile fails loudly
-        -- if an `Unsafe` node appears outside the Rt.* namespace — i.e. if the
-        -- front end ever emits one.  Passes nothing through unchanged-but-
-        -- unaudited; on Ok the program is the SAME value, so byte identity of
-        -- the emitted .ssa is this seat's inertness proof.
+        -- The unsafe-node audit (osier-rawnodes): runs over the ELM PROGRAM
+        -- only — the front end's (FromAst) output, born in `compileAllJoin`.
+        -- It fails loudly if an `Unsafe` node appears outside the Rt.*
+        -- namespace THERE (i.e. if the front end ever emits one), and passes
+        -- the program through unchanged — byte identity of the emitted .ssa is
+        -- this seat's inertness proof.  The `.mid` surface is NOT audited by
+        -- it: the runtime's Rt.* defuns AND the group's user .mid defuns join
+        -- AFTER this pass (rtProgram/userProgram below) and are the SANCTIONED
+        -- unsafe lane — they carry Unsafe nodes (RawMkValue/RawCall/...) by
+        -- design, gated instead by Mid.RtLang.Check's J1 class checks and J3
+        -- rawcall signature table (see Mid.Audit's header for the span).
         |> Result.andThen
             (\( program0, binderPerDefun, refinedPerDefun ) ->
                 Result.map (\p -> ( p, binderPerDefun, refinedPerDefun )) (Audit.run program0)

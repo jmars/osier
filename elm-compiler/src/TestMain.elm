@@ -2777,6 +2777,72 @@ checks rt =
     , check "M3 collision accept: disjoint user modules (and no Elm overlap) pass"
         (QbeModule.userCollisions Dict.empty [ mkUser "A" [ "A.f" ], mkUser "B" [ "B.g" ] ] == Ok ())
 
+    -- ==================== M3fix: the privacy boundary + the audit span ====================
+    -- The user lane's extern table is the runtime's EXPORT BLOCK ONLY (the
+    -- exportedTypes field), so an unexported runtime key is unresolvable from a
+    -- user module — while an exported one still resolves.
+    , check "M3fix privacy REJECT: a user .mid cannot `call Rt.getpid` (an UNEXPORTED runtime key) — the user lane's extern table is the runtime export block only"
+        (case QbeModule.loadUserMids rt [ "module A\nexport A.f : val -> val\ndefun A.f(a: val) -> val {\n  return call Rt.getpid(a);\n}" ] of
+            Err msg ->
+                String.contains "unseeded key" msg && String.contains "Rt.getpid" msg
+
+            Ok _ ->
+                False
+        )
+    , check "M3fix privacy ACCEPT: a user .mid CAN `call Rt.exec-run` (an EXPORTED runtime key) and it resolves at the declared arity"
+        (case QbeModule.loadUserMids rt [ "module A\nexport A.f : val -> val\ndefun A.f(a: val) -> val {\n  return call Rt.exec-run(a, a, a);\n}" ] of
+            Ok _ ->
+                True
+
+            Err _ ->
+                False
+        )
+    , check "M3fix audit span: a user .mid is the SANCTIONED unsafe lane — mknum/rawcall(getpid) lower through the RtLang checker (J1/J3) to a defun the audit never sees"
+        (case Rt.parseUserModule "module A\nexport A.pid : val -> val\ndefun A.pid(dummy: val) -> val {\n  return mknum(rawcall getpid());\n}" of
+            Ok parsed ->
+                case Rt.checkLowerUserModule rt.exportedTypes parsed of
+                    Ok m ->
+                        not (List.isEmpty m.defuns)
+
+                    Err _ ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "M3fix cross-module (CHECK phase): a user defun called ONLY from another .mid resolves through the cross-module extern table (J2) and LowerToIr-lowers to a defun at the right arity"
+        (case QbeModule.loadUserMids rt
+            [ "module A\nexport A.f : val -> val\ndefun A.f(a: val) -> val {\n  return call B.g(a);\n}"
+            , "module B\nexport B.g : val -> val\ndefun B.g(a: val) -> val {\n  return mknum(payload(a, 0) + 5);\n}"
+            ] of
+            Ok [ mA, mB ] ->
+                midKeyArity "A.f" mA == Just 1 && midKeyArity "B.g" mB == Just 1
+
+            Ok _ ->
+                False
+
+            Err _ ->
+                False
+        )
+    , check "M3fix finding-4 DEFECT (fail-before): a user .mid `call` to ANOTHER user module's export passes J2 but QBE Lower REJECTS the resulting RawCall — the RawCall namespace is Rt.* only (Lower.elm:1783); the next unit widens it to the program's defun keys"
+        (case Rt.parseUserModule "module A\nexport A.f : val -> val\ndefun A.f(a: val) -> val {\n  return call B.g(a);\n}" of
+            Ok parsed ->
+                case Rt.checkLowerUserModule (Dict.fromList [ ( "B.g", { ty = Ast.valArity 1, effects = [], taint = False } ) ]) parsed of
+                    Ok mA ->
+                        case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (Dict.fromList [ ( "A.f", 1 ) ]) mA.defuns "A.f" of
+                            Err msg ->
+                                String.contains "rawCall to non-Rt symbol B.g" msg
+
+                            Ok _ ->
+                                False
+
+                    Err _ ->
+                        False
+
+            Err _ ->
+                False
+        )
+
     -- ==================== TIER-2 T4: the typechecker J1-J6 ====================
     -- (Mid.RtLang.Check — checkProgram over the parsed Ast).  Each judgment
     -- gets an ACCEPT row plus REJECT rows whose message names it (the
@@ -6593,6 +6659,20 @@ mkUser name keys =
     , exports = []
     , defuns = List.map (\k -> { key = k, value = Lit (LNumber 0) }) keys
     }
+
+
+{-| M3fix (finding 4): the Lam arity of the named defun inside a loaded user
+module, if present — used by the cross-module row to pin that BOTH halves of
+a `.mid`-internal call land at the right arity.
+-}
+midKeyArity : String -> Rt.UserModule -> Maybe Int
+midKeyArity key m =
+    case List.filterMap (\d -> if d.key == key then Just (lamArity d) else Nothing) m.defuns of
+        a :: _ ->
+            Just a
+
+        [] ->
+            Nothing
 
 
 {-| M2: parse a single export line's declared TYPE by wrapping it in a

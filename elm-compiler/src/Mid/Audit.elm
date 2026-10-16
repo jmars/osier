@@ -2,13 +2,25 @@ module Mid.Audit exposing (run)
 
 -- Mid.Audit — the UNSAFE-NODE AUDIT (handoff osier-midruntime-plan TRACK 2
 -- step 3 / handoff osier-rawnodes): the load-bearing seat of the invariant
--- "the front end never emits an unsafe node".
+-- "the FRONT END never emits an unsafe node".
 --
--- THE RULE: an `Mid.Ir.Unsafe` node is LEGAL only inside a defun whose key is
--- in the reserved `Rt.*` namespace (compiler-internal runtime defuns, built by
--- the Mid.Rt side from step 4 on).  Any `Unsafe` node under any other key —
--- i.e. anywhere the front end's output could carry one — is a LOUD compile
--- error naming the key and the node.
+-- THE RULE, AND ITS SPAN: an `Mid.Ir.Unsafe` node is LEGAL only inside a defun
+-- whose key is in the reserved `Rt.*` namespace — and this pass is applied to
+-- the ELM PROGRAM ONLY, i.e. the front end's (FromAst) output.  Any `Unsafe`
+-- node under any other key there is a LOUD compile error naming the key and
+-- the node.
+--
+-- WHAT THIS PASS DELIBERATELY DOES NOT AUDIT: the `.mid` surface.  Since M3 the
+-- program is assembled as `flatProgram ++ rtProgram ++ userProgram`
+-- (Mid.QbeModule.lowerAll) — the runtime's `Rt.*` defuns AND the group's user
+-- `.mid` defuns join AFTER this pass, and they carry `Unsafe` nodes
+-- (RawMkValue/RawCall/...) BY DESIGN: the whole point of the `.mid` surface is
+-- the raw lane (mknum/payload/rawcall/aggcall).  That lane is SANCTIONED and
+-- gated by Mid.RtLang.Check — J1's builtin/operand class checks and J3's
+-- rawcall signature table (a rawcall symbol must be in the table and its
+-- arg/class shape must match) — not by this pass.  So the honest statement is:
+-- Mid.Audit audits the FRONT END; Mid.RtLang.Check audits the `.mid` surface;
+-- the two share a namespace discipline (the `Rt.*` prefix) but not a pass.
 --
 -- WHY THIS SHAPE AND NOT A TYPE-LEVEL WALL: measured out on elm 0.19.2 (see
 -- Mid.Ir's UNSAFE NODES header for the three probes) — a second home for the
@@ -16,9 +28,9 @@ module Mid.Audit exposing (run)
 -- constructors plus builder functions wall DESTRUCTION only, not
 -- construction.  So the property is enforced at COMPILER RUNTIME, on every
 -- compile: this pass is wired into `Mid.QbeModule.lowerAll` immediately after
--- the program is born (before Flatten and Lower), which means EVERY QBE
--- compile — gate fixtures, corpus, and selfhost alike — fails loudly rather
--- than silently miscompiling a tree that should not exist.
+-- the ELM program is born (before the Rt/user injection, Flatten and Lower),
+-- which means every QBE compile fails loudly rather than silently
+-- miscompiling a front-end tree that should not exist.
 --
 -- The threat model is a FROMAST BUG (surface code cannot even NAME an `Rt.*`
 -- defun — it is not a corpus unit — so name resolution already blocks the
