@@ -12,23 +12,27 @@ tools/qbe-bootstrap.sh            # from a clean checkout
 
 | | |
 |---|---|
-| size | 12,597,185 bytes (12.0 MiB) of PLAIN TEXT |
-| sha256 | `dfa17db58432c1e67ff83df35da5089af0218713f005be4949f999ecf6231670` |
-| provenance | MEASURED: emitted once by the stock (elm+node) compiler at HEAD `53f19b6`, from the 64-source manifest `elm-compiler/selfhost/manifest.json` (sha256 `7fc2bd69f9bcb382ffd0f436c3895d3798da369be2aea2a625da2a204d360564`), entry `NativeMain.main` |
+| size | 19,661,673 bytes (18.8 MiB) of PLAIN TEXT |
+| sha256 | `ed75c5ce39aee52c170be12a5a018fb9faf4383729cae7d499e3b6c4a764b09d` |
+| provenance | MEASURED: emitted once by the stock (elm+node) compiler at HEAD `0e0260d`, from the selfhost manifest `elm-compiler/selfhost/manifest.json` (sha256 `ab313c9055629c5c209620a76777e6b87095bbaaeec4140e4e18c98e3ffcb385`), entry `NativeMain.main` |
 | the exact emit | `tools/qbe-bootstrap.sh --freeze` (it is `node elm-compiler/run.js --batch <manifest with output=this file>`; `tools/qbe/qbe-selfhost.sh` step 1 is the same emit) |
 | compiler.js mode | DEV — `elm make` **without** `--optimize`, the mode `tools/osier-numbers.sh` builds. NOT verified for an `--optimize` build; re-freezing under release mode could land different bytes |
-| what it contains | the compiler's whole middle tier: parser, type checker, Mid, and the QBE backend itself (`Mid/Qbe/{Il,Lower,Peephole,Print}`, `Mid/QbeModule`) — 2,542 functions, 520,180 lines |
+| what it contains | the compiler's whole middle tier: parser, type checker, Mid, and the QBE backend itself (`Mid/Qbe/{Il,Lower,Peephole,Print}`, `Mid/QbeModule`) — 3,702 functions, 784,571 lines |
 
 It is a **fixed point**: the compiler this file builds re-emits this file,
 byte for byte.
 
 ```
-MEASURED (this host, 2026-10-10, HEAD 53f19b6; shared host, so wall clock varies)
-  emit (stock, node)          6.9 s   12,597,185 B  compiler.ssa   <- this file
-  vendor/qbe/qbe compiler.ssa 18.5 s  40,288,789 B  compiler.s
-  cc compiler.s rt.o           3.2 s  14,629,880 B  the native compiler
+MEASURED (shared host, so wall clock varies).  ONLY the first row was re-measured
+at the current HEAD (`0e0260d`, 2026-10-15); the three native rows are the
+2026-10-10 measurement at HEAD `53f19b6` and have NOT been re-run (`--verify` is a
+~742 s native emit, deliberately kept out of the loop), so their sizes are that
+HEAD's, not today's.
+  emit (stock, node)          12.6 s  19,661,673 B  compiler.ssa   <- this file
+  vendor/qbe/qbe compiler.ssa 18.5 s  40,288,789 B  compiler.s            [53f19b6]
+  cc compiler.s rt.o           3.2 s  14,629,880 B  the native compiler   [53f19b6]
   that compiler --ssa (QBE_HEAP_MB=8192)
-                             733.0 s  12,597,185 B  == this file, byte for byte
+                             733.0 s  12,597,185 B  == this file, byte for byte  [53f19b6]
 ```
 
 (The native re-emit's heap is the one knob with a real bill attached: at
