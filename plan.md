@@ -448,6 +448,17 @@ a Vm/GC-owned lifetime needs unique alone. Uniqueness is a static sharing analys
 coercion: unique -> observed (read-only, shareable), which is the escape valve that keeps
 captured-and-recursed values legal while forbidding mutation through a shared path.
 
+**RESOURCE HALF SETTLED (owner, 2026-10-16): UNIQUE + AFFINE + A SCOPE DESTRUCTOR.** Affine (at most
+once) is preferred over LINEAR (exactly once): it forbids duplication but imposes no obligation to
+consume, and a destructor at scope exit supplies deterministic release — this is Rust's model (uniqueness
+for mutation, affinity + `Drop` for release). The region/phantom gives the SCOPE the destructor hangs on.
+Linearity is reserved for the rare case where release must be EXPLICITLY ORDERED (a lock sequence).
+TWO CAVEATS: (a) this is a SCOPE-based model, against a GC's reachability grain — so it applies to the
+NON-GC resources Mid hands out (`word`/opaque: fds, mmaps, buffers); GC-heap values are just dropped and
+the collector reclaims them; (b) it is REAL TYPE-SYSTEM SURFACE (regions + quantifiers + uniqueness +
+affinity + destructors) and therefore PHASE-7 TERRITORY that the GADT/rank-2/refinement work rides —
+name it so the `.mid` arc (M2-M4) does not silently absorb a type-system project.
+
 Plus **ARITY**: declared and flat (Osier is curried, mid-c is flat) — the one thing `externArities`
 already does today.
 
