@@ -263,6 +263,52 @@ type RtAbi
     | RtRawWord
 
 
+{-| The rawAbi RESULT class per key (stage 6 A1): Rt.die/Rt.halt return an
+`l` word (the message pointer / the dead halt binder — both never read), and
+Rt.main returns the exit CODE as a `w` word — what crt0 reads back from
+`int main(argc, argv)`.  The ARITY is backend-neutral and lives in
+Mid.Rt.rawAbiArity; the CLASS is a QBE fact, so it lives here beside the
+convention's lowering.
+-}
+rawAbiRetClass : String -> AbiTy
+rawAbiRetClass key =
+    if key == "Rt.main" then
+        Base W
+
+    else
+        Base L
+
+
+{-| The rawAbi ARITY agreement check (stage 6 A1): Mid.Rt.rawAbiArity is the
+ONE place the raw-word defuns' param counts are declared.  Checked against
+the defun's ACTUAL params at lowerDefun AND against the generated call
+sites' actual word counts — a mismatch (a param added in U3-U5 without
+touching the record, or a hand-wired call site left under-applied) is a
+compile Err, never the silent register-class miscompile the record exists to
+kill (the SEGV class the U2 review's nice-to-have 5 named).
+-}
+rawAbiArityAgree : String -> Int -> Result String ()
+rawAbiArityAgree key actual =
+    case Dict.get key MidRt.rawAbiArity of
+        Just arity ->
+            if arity == actual then
+                Ok ()
+
+            else
+                Err
+                    ("qbe: rawAbi arity mismatch for "
+                        ++ key
+                        ++ " — Mid.Rt.rawAbiArity says "
+                        ++ String.fromInt arity
+                        ++ " but this defun/call site has "
+                        ++ String.fromInt actual
+                        ++ " (a param added without updating the record, or a generated call site under-applying)"
+                    )
+
+        Nothing ->
+            Err ("qbe: rawAbi key " ++ key ++ " has no Mid.Rt.rawAbiArity entry — the record must cover every rawAbi key")
+
+
 emit : Il.Inst -> S -> S
 emit inst s =
     { s | curBody = inst :: s.curBody }
@@ -1223,7 +1269,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                     Agg "val"
 
                 RtRawWord ->
-                    Base L
+                    rawAbiRetClass key
 
                 RtGeneric ->
                     Agg "ret"
@@ -1263,8 +1309,10 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                 RtRawWord ->
                     -- no lean-arity bound: a rawAbi defun may take 0..maxArity
                     -- word params (Rt.halt is 0-ary); the capture bound still
-                    -- holds (an Rt defun is never a closure).
-                    rtCapsErr
+                    -- holds (an Rt defun is never a closure).  The rawAbi
+                    -- ARITY RECORD (stage 6 A1) checks the declared param
+                    -- count against Mid.Rt.rawAbiArity instead of a bound.
+                    rawAbiArityAgree key nparams |> Result.andThen (\_ -> rtCapsErr)
 
                 RtLeanRooted ->
                     rtArityErr |> Result.andThen (\_ -> rtCapsErr)
@@ -1314,14 +1362,27 @@ lowerFunBody entry key qname lambda captures rt sOuter =
 
                     pending =
                         { func =
-                            { name = qname
+                            { name =
+                                -- stage 6 A1: the DRIVER ENTRY is exported as
+                                -- `main`, not q_Rt_x2emain — crt0 links `main`
+                                -- (the rtCallFuncs naming precedent: those
+                                -- dispatchers are `export function` rt_callN).
+                                -- Nothing else may name a defun `main`: the
+                                -- override is keyed to Rt.main ONLY.
+                                if key == "Rt.main" then
+                                    "main"
+
+                                else
+                                    qname
                             , export_ =
                                 -- QBE_MIDGC=1: export the allocating seat so the
                                 -- Zig applyGo can call it for the partial-application
                                 -- env array (the bridge in tools/qbe/rt.zig's weak
                                 -- extern).  Off the hatch the symbol is absent, which
                                 -- is what keeps the default .ssa byte-identical.
-                                sOuter.midGc && key == "Rt.allocVector"
+                                -- Rt.main is ALWAYS exported: it is the program's
+                                -- entry point under QBE_MIDDRIVER=1.
+                                (sOuter.midGc && key == "Rt.allocVector") || key == "Rt.main"
                             , ret = retTy
                             , envParam = ncaps > 0
                             , params = paramsList
@@ -1830,8 +1891,29 @@ lowerRawVal node dest s =
         RawCallRaw _ ->
             Err wordProducerMessage
 
-        RawCallAgg _ ->
-            Err wordProducerMessage
+        RawCallAgg call ->
+            -- stage 6 A1: a rawCallAgg in VALUE position is the driver's
+            -- "sret result as a Value" shape — `Call (Just t) (Agg "val")
+            -- <callee> [word args]` then a Blit of the 40-B :val into the
+            -- dest slot, EXACTLY the rtApply non-tail shape (lowerApp's
+            -- rtApply arm: `%v =:val call rt_apply(...)` + blit into dest).
+            -- This is how the driver turns rt_bounce/rt_parse_arg/
+            -- rt_run_program's sret results into Values.  Only shape "val"
+            -- fits a :val slot — "ret" is 80 B and cannot blit into 40.
+            if call.shape /= "val" then
+                Err "qbe: rawCallAgg in a VALUE position must be shape \"val\" (a 40-B :val fits the slot; \"ret\" is 80 B and cannot)"
+
+            else
+                lowerRawCallAgg call s
+                    |> Result.map
+                        (\( fnA, args, s1 ) ->
+                            let
+                                ( t, s2 ) =
+                                    freshTmp s1
+                            in
+                            emit (Call (Just t) (Agg "val") fnA args) s2
+                                |> emit (Blit (Il.Tmp t) (Il.Tmp (slotTmp dest)) vs)
+                        )
 
         RawDataAddr _ ->
             Err wordProducerMessage
@@ -2358,7 +2440,7 @@ rawWordArg exp s =
                 )
                 (Ok ( [], s ))
                 seat.args
-                |> Result.map
+                |> Result.andThen
                     (\( args, s1 ) ->
                         let
                             ( t, s2 ) =
@@ -2377,7 +2459,15 @@ rawWordArg exp s =
                                 else
                                     seat.sym
                         in
-                        ( Il.Tmp t, emit (Call (Just t) (Base L) (Il.Sym callee) args) s2 )
+                        -- stage 6 A1: the halt arm's 0 words are checked
+                        -- against the rawAbi arity record (a param added to
+                        -- Rt.halt in U3-U5 would under-apply here otherwise).
+                        if s.midDriver && seat.sym == "rt_halt" then
+                            rawAbiArityAgree "Rt.halt" (List.length args)
+                                |> Result.map (\_ -> ( Il.Tmp t, emit (Call (Just t) (Base L) (Il.Sym callee) args) s2 ))
+
+                        else
+                            Ok ( Il.Tmp t, emit (Call (Just t) (Base L) (Il.Sym callee) args) s2 )
                     )
 
         Unsafe (RawCall call) ->
@@ -2425,39 +2515,23 @@ rawWordArg exp s =
             -- sret temp is addressable (movq %rax,%rcx; movq 40(%rcx),%rcx).
             -- NOT a safepoint-free seat — the callee is unknown generated
             -- code (Mid.Rt classifies the node conservatively allocating).
+            -- A1: the callee may ALSO be a NAMED exported symbol (Il.Sym) —
+            -- the generated-code call shape (rt_apply/rt_bounce by name),
+            -- not just a loaded code pointer in a temp.
             if call.shape /= "ret" && call.shape /= "val" then
                 Err ("qbe: rawCallAgg shape \"" ++ call.shape ++ "\" — only \"ret\" and \"val\" are legal")
 
             else
-                rawWordArg call.fn s
-                    |> Result.andThen
-                        (\( fnA, s1 ) ->
-                            case fnA of
-                                Il.Tmp fnT ->
-                                    List.foldl
-                                        (\e acc ->
-                                            Result.andThen
-                                                (\( args, st ) ->
-                                                    rawWordArg e st
-                                                        |> Result.map (\( a, st2 ) -> ( args ++ [ ArgVal (Base L) a ], st2 ))
-                                                )
-                                                acc
-                                        )
-                                        (Ok ( [], s1 ))
-                                        call.args
-                                        |> Result.map
-                                            (\( args, s2 ) ->
-                                                let
-                                                    ( t, s3 ) =
-                                                        freshTmp s2
-                                                in
-                                                ( Il.Tmp t
-                                                , emit (Call (Just t) (Agg call.shape) (Il.Tmp fnT) args) s3
-                                                )
-                                            )
-
-                                _ ->
-                                    Err "qbe: rawCallAgg callee must be a raw-word TEMP (a loaded code pointer), not a constant"
+                lowerRawCallAgg call s
+                    |> Result.map
+                        (\( fnA, args, s1 ) ->
+                            let
+                                ( t, s2 ) =
+                                    freshTmp s1
+                            in
+                            ( Il.Tmp t
+                            , emit (Call (Just t) (Agg call.shape) fnA args) s2
+                            )
                         )
 
         Unsafe (RawDataAddr names) ->
@@ -4073,6 +4147,40 @@ rawWordOf exp s =
     rawWordArg exp s
 
 
+{-| The shared RawCallAgg lowering (stage 6 A1): the callee is a WORD producer
+lowered to an `Il.Arg` — either a raw temp (a loaded code pointer) or a NAMED
+exported symbol (`Il.Sym` — the generated-code call shape: rt_apply/rt_bounce/
+rt_tail_known are called BY NAME with an aggregate result, corpus-proven at
+Lower's directCall/rtApply arms).  A constant (`Il.Con`) is not a call target
+and is rejected loudly.  Args are word producers, each a Base L word.  The two
+arms (word position returns the sret ADDRESS; value position blits the :val
+into a slot) share this so the callee rule is ONE place.
+-}
+lowerRawCallAgg : { fn : Exp, args : List Exp, shape : String } -> S -> Result String ( Il.Arg, List Il.CallArg, S )
+lowerRawCallAgg call s =
+    rawWordArg call.fn s
+        |> Result.andThen
+            (\( fnA, s1 ) ->
+                case fnA of
+                    Il.Con _ ->
+                        Err "qbe: rawCallAgg callee must be a raw-word TEMP (a loaded code pointer) or a NAMED exported symbol, not a constant"
+
+                    _ ->
+                        List.foldl
+                            (\e acc ->
+                                Result.andThen
+                                    (\( args, st ) ->
+                                        rawWordArg e st
+                                            |> Result.map (\( a, st2 ) -> ( args ++ [ ArgVal (Base L) a ], st2 ))
+                                    )
+                                    acc
+                            )
+                            (Ok ( [], s1 ))
+                            call.args
+                            |> Result.map (\( args, s2 ) -> ( fnA, args, s2 ))
+            )
+
+
 
 -- ============================ IF ============================
 -- The VM's jmpf semantics EXACTLY (interp.zig .jmpf): false branch iff the
@@ -4306,10 +4414,8 @@ lowerAlts alts scrutSlot scrutType dest isTail s =
     lowerAltsLoop alts errLbl endLbl scrutSlot scrutType dest isTail sEnd
         |> Result.andThen
             (\sA ->
-                Ok (startBlock errLbl sA
-                        |> lowerNonExhaustive "non-exhaustive case"
-                        |> startBlock endLbl
-                   )
+                lowerNonExhaustive "non-exhaustive case" (startBlock errLbl sA)
+                    |> Result.map (startBlock endLbl)
             )
 
 
@@ -4387,11 +4493,8 @@ lowerLetDestruct destruct s =
                 lowerMatchTests destruct.matches scrutSlot scrutType errLbl s5
                     |> Result.andThen
                         (\s6 ->
-                            Ok (jumpTo okLbl s6
-                                    |> startBlock errLbl
-                                    |> lowerNonExhaustive "non-exhaustive let pattern"
-                                    |> startBlock okLbl
-                               )
+                            lowerNonExhaustive "non-exhaustive let pattern" (jumpTo okLbl s6 |> startBlock errLbl)
+                                |> Result.map (startBlock okLbl)
                         )
                     |> Result.andThen (lowerBinds destruct.binds scrutSlot)
             )
@@ -4793,7 +4896,7 @@ jmpfFalse slot falseLbl trueLbl s =
 
 -- The unreachable (in well-typed Elm) non-exhaustive failure arm: raise via a
 -- runtime exit.  Loud, never a silent miscompile.
-lowerNonExhaustive : String -> S -> S
+lowerNonExhaustive : String -> S -> Result String S
 lowerNonExhaustive msg s =
     let
         ( msgName, s1 ) =
@@ -4807,25 +4910,28 @@ lowerNonExhaustive msg s =
         -- symbol swap; the result type follows the callee (Base L for the
         -- Mid word-ABI defun, Base W for the Zig seat's i64).
         --
-        -- NOT DERIVED — a recorded gap (U2 review, nice-to-have 5): the
-        -- argument list below is HAND-WIRED agreement with Rt.die's declared
-        -- param count (1, in RtSource.elm), not read from it.  Adding a
-        -- param to Rt.die/Rt.halt in U3-U5 would silently UNDER-APPLY here
-        -- and the callee would read a garbage register (the SEGV class the
-        -- rawAbi convention exists to kill); only TestMain's shape pins
-        -- would notice, not the compiler.  The fix, when it is worth
-        -- building: a one-place rawAbi arity record checked against the
-        -- defun's params in lowerDefun AND against every generated
-        -- call site, making a mismatch a compile-time Err.
+        -- stage 6 A1 (was the U2 review's nice-to-have 5, "NOT DERIVED"):
+        -- the single WORD argument below is now checked against
+        -- Mid.Rt.rawAbiArity — a param added to Rt.die in U3-U5 without
+        -- touching this site is a compile Err, not the silent under-apply
+        -- (the callee reading a garbage register) the rawAbi convention
+        -- exists to kill.
         ( rtDieSym, rtDieRet ) =
             if s.midDriver then
                 ( "q_" ++ mangle "Rt.die", Base L )
 
             else
                 ( "rt_die", Base W )
+
+        dieArgs =
+            [ ArgVal (Base L) (Il.Sym msgName) ]
     in
-    emit (Call Nothing rtDieRet (Il.Sym rtDieSym) [ ArgVal (Base L) (Il.Sym msgName) ]) s1
-        |> closeBlock Hlt
+    rawAbiArityAgree "Rt.die" (List.length dieArgs)
+        |> Result.map
+            (\_ ->
+                emit (Call Nothing rtDieRet (Il.Sym rtDieSym) dieArgs) s1
+                    |> closeBlock Hlt
+            )
 
 
 -- ============================ CON (ADT construction) ============================

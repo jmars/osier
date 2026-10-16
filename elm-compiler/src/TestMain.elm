@@ -1066,14 +1066,14 @@ checks =
     -- calls.  A :val-shaped arg or an under-applied call here is a SILENT
     -- MISCOMPILE (the callee reads a garbage register), so the emitted
     -- shapes are pinned, not just "it links".
-    , check "rawAbi set + classification: Rt.die/Rt.halt are the word-ABI keys and are frame-free (a die path must not reach a safepoint)"
+    , check "rawAbi set + classification: Rt.die/Rt.halt/Rt.main are the word-ABI keys and the die/halt pair are frame-free (a die path must not reach a safepoint; Rt.main's allocating classification arrives with its A3a body)"
         (Rt.rawAbi
-            == Set.fromList [ "Rt.die", "Rt.halt" ]
+            == Set.fromList [ "Rt.die", "Rt.halt", "Rt.main" ]
             && not (Set.member "Rt.die" Rt.allocating)
             && not (Set.member "Rt.halt" Rt.allocating)
         )
     , check "rawAbi emission shape: Rt.die (1 word param) emits (params [a0:l], ret l, frame-free alloc scratch)"
-        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities (rtProgram True True True)) (rtProgram True True True) "Rt.die" of
+        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.die" of
             Ok mod ->
                 case funcByName "q_Rt_x2edie" mod of
                     Just f ->
@@ -1089,7 +1089,7 @@ checks =
                 False
         )
     , check "rawAbi emission shape: Rt.halt (0-ary) emits an EMPTY param list — the lean 4-arg shape would be a silent miscompile"
-        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities (rtProgram True True True)) (rtProgram True True True) "Rt.halt" of
+        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.halt" of
             Ok mod ->
                 case funcByName "q_Rt_x2ehalt" mod of
                     Just f ->
@@ -1127,7 +1127,7 @@ checks =
     , check "rawAbi caller shape: the halt arm retargets rt_halt -> q_Rt_x2ehalt under QBE_MIDDRIVER and keeps rt_halt by default (the symbol swap)"
         (let
             prog =
-                rtProgram True True True
+                driverProg
          in
          (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
             Ok mod ->
@@ -1155,6 +1155,84 @@ checks =
                )
         )
 
+    -- STAGE 6 A1: the LOWER INTERFACE THE DRIVER NEEDS (the six items of the
+    -- re-plan's "THE LOWER INTERFACE" obs).  The driver BODY is A3a's job —
+    -- these rows pin only the INTERFACE: the rawAbi ret-class, the export-
+    -- name override, the driverSeeds addition, the RawCallAgg named-symbol
+    -- accept + still-rejected shape, the val-position Blit, and the arity
+    -- record totality.
+    , check "A1 ret-class: Rt.main (2 word params argc/argv) emits params [a0:l,a1:l] and ret w (the exit code) — the per-key rawAbi RET CLASS (Rt.die/Rt.halt stay ret l, pinned above)"
+        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+            Ok mod ->
+                case funcByName "main" mod of
+                    Just f ->
+                        List.map Tuple.second f.params == [ Il.Base Il.L, Il.Base Il.L ]
+                            && f.ret == Il.Base Il.W
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "A1 export-name override: Rt.main emits name \"main\" (not q_Rt_x2emain) with export_ = True — crt0 links main (the rt_callN naming precedent)"
+        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+            Ok mod ->
+                (case funcByName "main" mod of
+                    Just f ->
+                        f.export_
+
+                    Nothing ->
+                        False
+                )
+                    && not (List.any (\g -> g.name == "q_Rt_x2emain") mod.funcs)
+
+            Err _ ->
+                False
+        )
+    , check "A1 driverSeeds: Rt.main is seeded alongside the Rt.die/Rt.halt closure (keepRtDependencies keeps the leaf) — the driver entry is reachable under QBE_MIDDRIVER=1"
+        (List.member "Rt.main" Rt.driverSeeds
+            && List.member "Rt.die" Rt.driverSeeds
+            && List.member "Rt.halt" Rt.driverSeeds
+            && List.member "Rt.cStrLenGo" Rt.driverSeeds
+        )
+    , check "A1 RawCallAgg named-symbol accept: a Symbol callee (not just a temp) lowers to Call (Just _) (Agg \"val\") (Il.Sym _) [word]"
+        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggSymProbe ] "Rt.rawCallAggSymProbe" of
+            Ok mod ->
+                List.any rawCallAggSymCallShape mod.funcs
+
+            Err _ ->
+                False
+        )
+    , check "A1 RawCallAgg still-rejected shape: a CONSTANT callee is a loud Err (the relaxation accepts temps and named symbols, never a constant)"
+        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggConstProbe ] "Rt.rawCallAggConstProbe" of
+            Err msg ->
+                String.contains "not a constant" msg
+
+            Ok _ ->
+                False
+        )
+    , check "A1 RawCallAgg VALUE-position Blit: a val-shaped aggregate call in a :val tail emits Call (Just _) (Agg \"val\") + a Blit into the dest slot (the rtApply non-tail shape, never a word-address return)"
+        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggValProbe ] "Rt.rawCallAggValProbe" of
+            Ok mod ->
+                List.any rawCallAggValBlitShape mod.funcs
+
+            Err _ ->
+                False
+        )
+    , check "A1 rawAbi arity record totality: rawAbiArity's keys are EXACTLY the rawAbi set, and each recorded arity matches the defun's Lam params (Rt.die 1 / Rt.halt 0 / Rt.main 2) — a param added without touching the record is a compile Err"
+        (Dict.keys Rt.rawAbiArity == Set.toList Rt.rawAbi
+            && (case ( Dict.get "Rt.die" Rt.rawAbiArity, Dict.get "Rt.halt" Rt.rawAbiArity, Dict.get "Rt.main" Rt.rawAbiArity ) of
+                    ( Just dieN, Just haltN, Just mainN ) ->
+                        (dieN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.die" driverProg)))
+                            && (haltN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.halt" driverProg)))
+                            && (mainN == lamArity rtMainStub)
+
+                    _ ->
+                        False
+               )
+        )
+
     -- STAGE 6 U2 fix 3: MIDGC x MIDDRIVER MUST DEDUPE ACROSS the seed lists.
     -- Lower concatenates the prim half (MidRt.seeds over the surface's called
     -- prims), the gc half (gcSeeds ++ conSeeds ++ closureSeeds) and the driver
@@ -1171,7 +1249,7 @@ checks =
     , check "U2 fix 3 — MIDGC x MIDDRIVER dedupe: the seed halves overlap (Rt.cStrLenGo in the prim AND driver/gc closure, Rt.die in gc AND driver) and the one cross-boundary `unique` leaves EXACTLY ONE q_Rt_x2edie and ONE q_Rt_x2ecStrLenGo in the module"
         (let
             prog =
-                rtProgram True True True ++ rtProgramGc True True True
+                rtProgram True True True ++ rtProgramGc True True True ++ [ rtMainStub ]
          in
          case QbeLower.lower False False False True True True True True True QbeTypes.empty (rtArities prog) prog "Rt.allocVector" of
             Ok mod ->
@@ -5609,6 +5687,174 @@ rawAbiValueMisuse =
             , body = Unsafe (RawCall { sym = "Rt.die", args = [ Lit (LNumber 0) ] })
             }
     }
+
+
+{-| The Rt.main INTERFACE stub (stage 6 A1): the rawAbi defun with the
+driver's two WORD params (argc, argv) and a word result.  Its BODY is a
+placeholder number — the real body (usage error, rlimit, knobs, meta walk,
+entry call) is A3a's job.  The A1 pins read only its SIGNATURE (params/
+ret-class/export-name/seed), so this is a fixture, not a driver body.
+Appended to the program the MIDDRIVER rows lower, so the `driverSeeds`
+entry for Rt.main resolves (before A3a, QBE_MIDDRIVER=1 fails loudly with
+"unknown global Rt.main" — the intended intermediate state).
+-}
+rtMainStub : Defun
+rtMainStub =
+    { key = "Rt.main"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "argc" }, { id = 1, name = "argv" } ]
+            , body = Lit (LNumber 0)
+            }
+    }
+
+
+{-| The prim half + the Rt.main stub, for rows that lower WITH the driver
+hatch (QBE_MIDDRIVER=1) — the stub resolves the driverSeeds entry.
+-}
+driverProg : List Defun
+driverProg =
+    rtProgram True True True ++ [ rtMainStub ]
+
+
+{-| A RawCallAgg whose callee is a NAMED symbol (stage 6 A1 item 4): `fn` is
+`RawCStr "rt_bounce"` — a legal raw-word producer that lowers to `Il.Sym`
+(the data def's symbol stands in for a named exported FUNCTION symbol; the
+pin checks the IL SHAPE `Call _ (Agg "val") (Il.Sym _) args`, not the
+symbol's content).  Before A1 the word arm rejected everything but a temp.
+-}
+rawCallAggSymProbe : Defun
+rawCallAggSymProbe =
+    { key = "Rt.rawCallAggSymProbe"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body =
+                Let
+                    { binders =
+                        [ LetBind
+                            { binder = { id = 1, name = "r" }
+                            , value =
+                                Unsafe
+                                    (RawCallAgg
+                                        { fn = Unsafe (RawCStr "rt_bounce")
+                                        , args = [ Lit (LNumber 0) ]
+                                        , shape = "val"
+                                        }
+                                    )
+                            }
+                        ]
+                    , body = Lit (LNumber 0)
+                    }
+            }
+    }
+
+
+{-| A RawCallAgg whose callee is a CONSTANT (stage 6 A1 item 4, the still-
+rejected shape): `fn = Lit (LNumber 0)` lowers to `Il.Con 0` — not a call
+target.  The relaxation accepts temps AND named symbols, never a constant.
+-}
+rawCallAggConstProbe : Defun
+rawCallAggConstProbe =
+    { key = "Rt.rawCallAggConstProbe"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body =
+                Let
+                    { binders =
+                        [ LetBind
+                            { binder = { id = 1, name = "r" }
+                            , value =
+                                Unsafe
+                                    (RawCallAgg
+                                        { fn = Lit (LNumber 0)
+                                        , args = [ Lit (LNumber 0) ]
+                                        , shape = "val"
+                                        }
+                                    )
+                            }
+                        ]
+                    , body = Lit (LNumber 0)
+                    }
+            }
+    }
+
+
+{-| A RawCallAgg in VALUE position (stage 6 A1 item 5): the defun's TAIL is
+the aggregate call (not a let-binder, so it takes the value path, not the
+word temp) — the driver's "sret result as a Value" shape.  `fn` is again a
+named symbol (RawCStr), exercising the Sym callee through the value arm too.
+-}
+rawCallAggValProbe : Defun
+rawCallAggValProbe =
+    { key = "Rt.rawCallAggValProbe"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body =
+                Unsafe
+                    (RawCallAgg
+                        { fn = Unsafe (RawCStr "rt_bounce")
+                        , args = [ Lit (LNumber 0) ]
+                        , shape = "val"
+                        }
+                    )
+            }
+    }
+
+
+{-| The RawCallAgg IL shape with a NAMED-SYMBOL callee (stage 6 A1 item 4):
+`Call (Just _) (Agg "val") (Il.Sym _) [ArgVal (Base L) (Il.Con 0)]`.
+-}
+rawCallAggSymCallShape : Il.Func -> Bool
+rawCallAggSymCallShape f =
+    List.any
+        (\b ->
+            List.any
+                (\i ->
+                    case i of
+                        Il.Call (Just _) (Il.Agg "val") (Il.Sym _) [ Il.ArgVal (Il.Base Il.L) (Il.Con 0) ] ->
+                            True
+
+                        _ ->
+                            False
+                )
+                b.body
+        )
+        f.blocks
+
+
+{-| The RawCallAgg VALUE-position Blit shape (stage 6 A1 item 5): a `:val`
+call into a temp, then a 40-byte Blit of that temp into the dest slot —
+the rtApply non-tail shape (call + blit), never a word-address return.
+-}
+rawCallAggValBlitShape : Il.Func -> Bool
+rawCallAggValBlitShape f =
+    List.any
+        (\b ->
+            List.any
+                (\i ->
+                    case i of
+                        Il.Call (Just _) (Il.Agg "val") _ _ ->
+                            True
+
+                        _ ->
+                            False
+                )
+                b.body
+                && List.any
+                    (\i ->
+                        case i of
+                            Il.Blit _ _ _ ->
+                                True
+
+                            _ ->
+                                False
+                    )
+                    b.body
+        )
+        f.blocks
 
 
 {-| The rawAbi WORD-call shape: a call to `sym` whose result is `Base L` and

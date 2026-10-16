@@ -14,6 +14,7 @@ module Mid.Rt
         , primImpl
         , activeSurf
         , rawAbi
+        , rawAbiArity
         , rtDeps
         , seeds
         , spliceSurface
@@ -818,6 +819,26 @@ rawAbi =
     Set.fromList
         [ "Rt.die"
         , "Rt.halt"
+        , "Rt.main"
+        ]
+
+
+{-| THE rawAbi ARITY RECORD (stage 6 A1, U2 review nice-to-have 5): the ONE
+place the raw-word defuns' param counts are declared, beside the `rawAbi`
+set above (which keys are word-ABI) — the two tables are the convention.
+Checked by Mid.Qbe.Lower against the defun's ACTUAL params at lowerDefun
+(a param added in U3-U5 without touching this record is a compile Err, not
+a silent under-apply) and against the hand-wired generated call sites (the
+die arm passes exactly 1 word, the halt arm 0).  The arity is an Int —
+backend-neutral (the RESULT CLASS, `l` vs `w`, is a QBE fact and lives in
+Mid.Qbe.Lower.rawAbiRetClass, not here).  Rt.main's 2 = argc + argv.
+-}
+rawAbiArity : Dict String Int
+rawAbiArity =
+    Dict.fromList
+        [ ( "Rt.die", 1 )
+        , ( "Rt.halt", 0 )
+        , ( "Rt.main", 2 )
         ]
 
 
@@ -831,7 +852,7 @@ on the same defun.
 -}
 driverSeeds : List String
 driverSeeds =
-    keepRtDependencies [ "Rt.die", "Rt.halt" ]
+    keepRtDependencies [ "Rt.die", "Rt.halt", "Rt.main" ]
 
 
 {-| The Rt defuns whose execution can reach a GC SAFEPOINT — the fact the
