@@ -223,17 +223,16 @@ runSsa entryKey text =
 
 runSsaJobs : String -> List Job -> Runtime.Task x String
 runSsaJobs entryKey jobs =
-    Task.andThen (ssaJobs entryKey jobs) (readAll (allSources jobs))
+    Task.andThen (ssaJobs entryKey jobs) (readAll (allElmPaths jobs))
 
 
-allSources : List Job -> List String
-allSources jobs =
-    concatMap2 allPaths jobs
-
-
-allPaths : Job -> List String
-allPaths job =
-    append2 job.sources job.mids
+-- M4: read each job's ELM sources first (their texts are needed for the
+-- import scan AND for the compile); the .mid files are resolved and read
+-- AFTER (see `resolveJobs`), because which .mids exist depends on the
+-- imports the Elm sources declare.
+allElmPaths : List Job -> List String
+allElmPaths jobs =
+    concatMap2 .sources jobs
 
 
 readAll paths =
@@ -264,20 +263,15 @@ corpusRoot =
     "elm-compiler"
 
 
-regroup : List Job -> List String -> List (List String)
-regroup jobs texts =
-    splitAt (List.map (\j -> count (allPaths j)) jobs) texts
-
-
--- A job's text group is its sources (Elm) followed by its mids (mid-c), the
--- `allPaths` order — split it back apart by the job's own source count.
-splitJobTexts : Job -> List String -> ( List String, List String )
-splitJobTexts job texts =
-    ( take (count job.sources) texts, drop (count job.sources) texts )
+-- A job's Elm source texts, in `allElmPaths` order (mids are NOT here — they
+-- are read AFTER the import scan resolves them).
+regroupElm : List Job -> List String -> List (List String)
+regroupElm jobs elmTexts =
+    splitAt (List.map (\j -> count j.sources) jobs) elmTexts
 
 
 ssaJobs : String -> List Job -> List String -> Runtime.Task x String
-ssaJobs entryKey jobs texts =
+ssaJobs entryKey jobs elmTexts =
     readCorpus
         |> Task.andThen
             (\corpus ->
@@ -293,43 +287,265 @@ ssaJobs entryKey jobs texts =
                                 errLine ("runtime.mid: " ++ msg)
 
                             Ok rt ->
-                                writeBundles
-                                    (zipJobs jobs
-                                        (List.map2
-                                            -- run.js's DEFAULT flag vector, ALL ELEVEN ON
-                                            -- (flatten, rep, primDirect, midRt inject,
-                                            -- midCons route, rtLean lean ABI, mono
-                                            -- specialiser, consArr, rec, typeSpec,
-                                            -- eqPtrFast).  midCons was False here while the
-                                            -- route was step 6's OPT-IN; the flip made the
-                                            -- Mid route the default and deleted the flipped
-                                            -- prims' Zig handlers, so False now means "emit
-                                            -- calls to rt_prim_* symbols that rt.o no longer
-                                            -- defines" — a vector that cannot link, and one
-                                            -- that can never match run.js's own emit, i.e.
-                                            -- the bootstrap --verify fixed point could not
-                                            -- hold.  The selfhost lane injects the Rt program
-                                            -- like every other compile, pruned per group by
-                                            -- the used-prim census.
-                                            -- The trailing ( midGc, midDriver ) pair is the
-                                            -- stage-6 hatch vector: ( False, True ) = run.js's
-                                            -- post-A5 defaults (MIDGC off, MIDDRIVER on), the
-                                            -- TestMain "U2 fix 4" pin's hand-copied twin.
-                                            (\job jobTexts ->
-                                                let
-                                                    ( srcs, mids ) =
-                                                        splitJobTexts job jobTexts
-                                                in
-                                                renderSsa (QbeModule.compileEntry rt corpus srcs mids entryKey True True True True True True True ( ( True, ( True, True, ( False, True ) ) ), True ))
-                                            )
-                                            jobs
-                                            (regroup jobs texts)
+                                let
+                                    elmGroups =
+                                        regroupElm jobs elmTexts
+                                in
+                                -- M4: resolve each job's `.mid` IMPORTS (reader-side,
+                                -- relative to the importing file), then read them plus
+                                -- the explicit mids, then compile each job.
+                                resolveJobs jobs elmGroups
+                                    |> Task.andThen
+                                        (\midResults ->
+                                            writeBundles
+                                                (zipJobs jobs
+                                                    (zipWith (renderJob rt corpus entryKey)
+                                                        (zipWith (\job elmGroup -> ( job, elmGroup )) jobs elmGroups)
+                                                        midResults
+                                                    )
+                                                )
+                                                []
                                         )
-                                    )
-                                    []
                     )
                     (Io.readFile (corpusRoot ++ "/runtime.mid"))
             )
+
+
+renderJob : Rt.Runtime -> List String -> String -> ( Job, List String ) -> Result String (List String) -> String
+renderJob rt corpus entryKey ( job, elmGroup ) midResult =
+    case midResult of
+        Err msg ->
+            "err " ++ msg
+
+        Ok midTexts ->
+            -- run.js's DEFAULT flag vector, ALL ELEVEN ON (flatten, rep,
+            -- primDirect, midRt inject, midCons route, rtLean lean ABI, mono
+            -- specialiser, consArr, rec, typeSpec, eqPtrFast), the trailing
+            -- ( midGc, midDriver ) pair = ( False, True ) (run.js's post-A5
+            -- defaults).  See the pre-M4 comment for the flip's midCons note.
+            renderSsa (QbeModule.compileEntry rt corpus elmGroup midTexts entryKey True True True True True True True ( ( True, ( True, True, ( False, True ) ) ), True ))
+
+
+-- ======================= M4: reader-side .mid import resolution =======================
+-- Mirrors run.js's resolveMidImports exactly (see run.js for the resolution
+-- rule and the honest floor).  The two drivers must resolve the same group the
+-- same way, or their emits diverge (the node-vs-native byte-compare is the
+-- proof).  `import X` -> `<dir-of-importing-file>/X.mid`, by EXISTENCE; a
+-- resolved .mid whose `module` header disagrees with the import name is LOUD.
+
+
+resolveJobs : List Job -> List (List String) -> Runtime.Task x (List (Result String (List String)))
+resolveJobs jobs elmGroups =
+    seqMap (zipWith resolveJob jobs elmGroups)
+
+
+resolveJob : Job -> List String -> Runtime.Task x (Result String (List String))
+resolveJob job elmTexts =
+    let
+        -- (import name, resolved path) for each import whose .mid EXISTS — the
+        -- existence is stat-checked below, so a missing file is never read (it
+        -- is an Elm import, untouched).
+        candidates =
+            importedMids (zipWith (\p t -> ( p, t )) job.sources elmTexts)
+    in
+    resolveExisting candidates
+        |> Task.andThen
+            (\existing ->
+                readAll (List.map (\( _, p ) -> p) existing ++ job.mids)
+                    |> Task.map
+                        (\texts ->
+                            let
+                                nImported =
+                                    count existing
+
+                                importedTexts =
+                                    take nImported texts
+
+                                explicitTexts =
+                                    drop nImported texts
+                            in
+                            case firstHeaderMismatch existing importedTexts of
+                                Just ( name, path, header ) ->
+                                    Err ("import " ++ name ++ ": " ++ path ++ " declares module " ++ header ++ " (a .mid's module header must match the import name)")
+
+                                Nothing ->
+                                    Ok (importedTexts ++ explicitTexts)
+                        )
+            )
+
+
+resolveExisting : List ( String, String ) -> Runtime.Task x (List ( String, String ))
+resolveExisting candidates =
+    case candidates of
+        [] ->
+            Task.succeed []
+
+        ( name, path ) :: rest ->
+            Task.andThen
+                (\exists ->
+                    Task.andThen
+                        (\kept ->
+                            Task.succeed
+                                (if exists then
+                                    ( name, path ) :: kept
+
+                                 else
+                                    kept
+                                )
+                        )
+                        (resolveExisting rest)
+                )
+                (Task.map (\s -> s.isFile) (Io.stat path))
+
+
+importedMids : List ( String, String ) -> List ( String, String )
+importedMids pairs =
+    importedMidsHelp [] pairs []
+
+
+importedMidsHelp : List String -> List ( String, String ) -> List ( String, String ) -> List ( String, String )
+importedMidsHelp seen pairs acc =
+    case pairs of
+        [] ->
+            reverse acc
+
+        ( path, text ) :: rest ->
+            let
+                ( acc1, seen1 ) =
+                    importNamesOf (dirOf path) seen acc (importNames text)
+            in
+            importedMidsHelp seen1 rest acc1
+
+
+importNamesOf : String -> List String -> List ( String, String ) -> List String -> ( List ( String, String ), List String )
+importNamesOf dir seen acc names =
+    case names of
+        [] ->
+            ( acc, seen )
+
+        n :: rest ->
+            let
+                p =
+                    resolveMidPath dir n
+            in
+            if memberPath p seen then
+                importNamesOf dir seen acc rest
+
+            else
+                importNamesOf dir (p :: seen) (acc ++ [ ( n, p ) ]) rest
+
+
+memberPath : String -> List String -> Bool
+memberPath p seen =
+    List.any (\q -> q == p) seen
+
+
+importNames : String -> List String
+importNames text =
+    List.filterMap importNameOf (Str.lines text)
+
+
+importNameOf : String -> Maybe String
+importNameOf line =
+    if String.startsWith "import " line then
+        Just (moduleNameToken (String.dropLeft 7 line))
+
+    else
+        Nothing
+
+
+midModuleName : String -> Maybe String
+midModuleName text =
+    firstModuleName (Str.lines text)
+
+
+firstModuleName : List String -> Maybe String
+firstModuleName lines =
+    case lines of
+        [] ->
+            Nothing
+
+        l :: rest ->
+            if String.startsWith "//" l || l == "" then
+                firstModuleName rest
+
+            else if String.startsWith "module " l then
+                Just (moduleNameToken (String.dropLeft 7 l))
+
+            else
+                Nothing
+
+
+firstHeaderMismatch : List ( String, String ) -> List String -> Maybe ( String, String, String )
+firstHeaderMismatch imported texts =
+    case ( imported, texts ) of
+        ( ( name, path ) :: restImported, text :: restTexts ) ->
+            case midModuleName text of
+                Just header ->
+                    if header == name then
+                        firstHeaderMismatch restImported restTexts
+
+                    else
+                        Just ( name, path, header )
+
+                Nothing ->
+                    firstHeaderMismatch restImported restTexts
+
+        _ ->
+            Nothing
+
+
+dirOf : String -> String
+dirOf path =
+    case reverse (Str.split "/" path) of
+        _ :: rest ->
+            String.join "/" (reverse rest)
+
+        [] ->
+            path
+
+
+resolveMidPath : String -> String -> String
+resolveMidPath dir name =
+    if dir == "" then
+        name ++ ".mid"
+
+    else
+        dir ++ "/" ++ name ++ ".mid"
+
+
+moduleNameToken : String -> String
+moduleNameToken s =
+    String.fromList (takeWhileName nameChar (String.toList s))
+
+
+nameChar : Char -> Bool
+nameChar c =
+    not (c == ' ' || c == '\t' || c == '(' || c == '\n' || c == '\r')
+
+
+takeWhileName : (Char -> Bool) -> List Char -> List Char
+takeWhileName pred chars =
+    case chars of
+        c :: rest ->
+            if pred c then
+                c :: takeWhileName pred rest
+
+            else
+                []
+
+        [] ->
+            []
+
+
+zipWith : (a -> b -> c) -> List a -> List b -> List c
+zipWith f xs ys =
+    case ( xs, ys ) of
+        ( x :: xr, y :: yr ) ->
+            f x y :: zipWith f xr yr
+
+        _ ->
+            []
 
 
 renderSsa : Result String String -> String

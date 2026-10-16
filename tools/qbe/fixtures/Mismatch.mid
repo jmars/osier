@@ -1,0 +1,10 @@
+// M4 (goal 1): the LOUD header-mismatch fixture.  importmis.elm declares
+// `import Mismatch`, so the reader resolves it to THIS file (Mismatch.mid).
+// But the file's own `module` header names a DIFFERENT module (Othername) —
+// a .mid's module header must match the import name, so the reader refuses
+// loudly naming both names.
+module Othername
+export Othername.answer : val -> val -> val
+defun Othername.answer(a: val, b: val) -> val {
+  return mknum(payload(a, 0) + payload(b, 0));
+}

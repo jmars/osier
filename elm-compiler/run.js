@@ -63,6 +63,107 @@ function isMidPath(p) {
   return p.endsWith('.mid');
 }
 
+// M4: READER-SIDE `import` RESOLUTION.  An Osier source may declare
+// `import X` (the ordinary Elm import); the reader resolves it to a `.mid`
+// FILE relative to the IMPORTING FILE: `X` -> `<dir-of-file>/X.mid`.  The
+// reader owns paths (the Elm core sees only text), so this lives here in
+// run.js and mirrors exactly in selfhost/NativeMain.elm (the two drivers
+// must resolve the same group the same way, or their emits diverge).
+//
+// RESOLUTION RULE (existence-based — the ONLY rule sound for the selfhost
+// group, whose sources import modules like `Foo.Bar`/`Html.Attributes` that
+// are neither Elm files nor `.mid` files): an `import X` is a MID import iff
+// `<dir>/X.mid` exists.  Otherwise it is an ordinary Elm import, untouched.
+// LOUD cases (each surfaces as `err <msg>` in the group's output):
+//   * the resolved `.mid`'s `module Name` header DISAGREES with the import
+//     name — a loud reject here (the file exists at the resolved path, so the
+//     import unambiguously meant a mid);
+//   * the resolved `.mid` fails to parse/check/lower — loud, in the core.
+// HONEST FLOOR: a missing `.mid` for an `import X` is NOT distinguishable from
+// a dead/unused Elm import (the selfhost case above), so it falls through to
+// the Elm path and a referenced-but-missing key fails loudly at the USE site
+// ("unknown name: X.f").  The reader scans `import` lines at column 0 only
+// (top-level Elm declarations are never indented).
+
+// The module names in an Elm source's `import X` lines, in order.
+function importNames(src) {
+  const names = [];
+  for (const line of src.split('\n')) {
+    const m = /^import\s+([A-Z][A-Za-z0-9_.]*)/.exec(line);
+    if (m) names.push(m[1]);
+  }
+  return names;
+}
+
+// The `module X` header name of a `.mid` file, skipping `//`/blank lines.
+// '' when the first non-comment non-blank line is not a `module` line (a
+// headerless .mid — the core rejects it loudly; the reader only flags a
+// MISMATCH, never a missing header).
+function midModuleName(text) {
+  for (const line of text.split('\n')) {
+    const t = line.trim();
+    if (t === '' || t.startsWith('//')) continue;
+    const m = /^module\s+([A-Z][A-Za-z0-9_.]*)/.exec(t);
+    return m ? m[1] : '';
+  }
+  return '';
+}
+
+function pathDir(p) {
+  const i = p.lastIndexOf('/');
+  return i < 0 ? '' : p.slice(0, i);
+}
+
+// Resolve a group's `.mid` IMPORTS: for each Elm source path+text, scan its
+// `import X` lines and read `<dir>/X.mid` when it exists (deduped by resolved
+// path, first-import order).  Returns the mid texts and a loud error list
+// (the first mismatch error wins).
+function resolveMidImports(elmPathTexts) {
+  const mids = [];
+  const seen = new Set();
+  const errors = [];
+  for (const { path, text } of elmPathTexts) {
+    const dir = pathDir(path);
+    for (const name of importNames(text)) {
+      const midPath = dir === '' ? name + '.mid' : dir + '/' + name + '.mid';
+      if (!fs.existsSync(midPath)) continue; // an Elm import, untouched
+      if (seen.has(midPath)) continue;
+      seen.add(midPath);
+      const midText = fs.readFileSync(midPath, 'utf8');
+      const headerName = midModuleName(midText);
+      if (headerName !== '' && headerName !== name) {
+        errors.push(
+          `import ${name}: ${midPath} declares module ${headerName} ` +
+          `(a .mid's module header must match the import name)`
+        );
+      } else {
+        mids.push(midText);
+      }
+    }
+  }
+  return { mids, errors };
+}
+
+// Read one group's sources (paths) into the {sources, mids} text shape
+// compileGroups consumes, resolving `.mid` imports reader-side.  A resolution
+// error becomes { ok: false, msg } — the caller writes `err <msg>` to the
+// group's output and skips it.
+function prepareGroup({ elmPaths, midPaths, output, entry }) {
+  const elmPathTexts = elmPaths.map((p) => ({ path: p, text: fs.readFileSync(p, 'utf8') }));
+  const { mids, errors } = resolveMidImports(elmPathTexts);
+  if (errors.length > 0) {
+    return { ok: false, msg: errors[0], output, entry };
+  }
+  const explicitMids = midPaths.map((p) => fs.readFileSync(p, 'utf8'));
+  return {
+    ok: true,
+    sources: elmPathTexts.map((t) => t.text),
+    mids: mids.concat(explicitMids),
+    output,
+    entry,
+  };
+}
+
 // QBE_NOFLATTEN=1 DISABLES the defun-local aggregate flattening pass.  It
 // exists so the pass can be A/B'd on the SAME source: the structural gate in
 // tools/qbe/qbe-check.sh compiles both ways and requires the aggregate prims
@@ -303,19 +404,27 @@ function main() {
   if (argv[0] === '--batch') {
     if (argv.length !== 2) usage();
     const manifest = JSON.parse(fs.readFileSync(argv[1], 'utf8'));
-    const groups = manifest.groups.map((g) => ({
-      sources: g.sources.filter((p) => !isMidPath(p)).map((p) => fs.readFileSync(p, 'utf8')),
-      mids: g.sources.filter((p) => isMidPath(p)).map((p) => fs.readFileSync(p, 'utf8')),
+    const rawGroups = manifest.groups.map((g) => ({
+      elmPaths: g.sources.filter((p) => !isMidPath(p)),
+      midPaths: g.sources.filter((p) => isMidPath(p)),
       output: g.output,
       entry: g.entry || '',
     }));
-    for (const g of groups) {
+    for (const g of rawGroups) {
       if (!g.entry) {
         console.error(`run.js: batch group missing "entry" for output ${g.output}`);
         process.exit(2);
       }
     }
-    compileGroups(groups);
+    const prepared = rawGroups.map(prepareGroup);
+    for (const g of prepared) {
+      if (!g.ok) fs.writeFileSync(g.output, 'err ' + g.msg);
+    }
+    const ok = prepared.filter((g) => g.ok);
+    if (ok.length === 0) process.exit(0);
+    compileGroups(
+      ok.map((g) => ({ sources: g.sources, mids: g.mids, output: g.output, entry: g.entry }))
+    );
     return;
   }
 
@@ -323,14 +432,18 @@ function main() {
   if (!QBE_ENTRY) usage();
   const output = argv[argv.length - 1];
   const inputs = argv.slice(0, -1);
-  const read = (p) => fs.readFileSync(p, 'utf8');
+  const prepared = prepareGroup({
+    elmPaths: inputs.filter((p) => !isMidPath(p)),
+    midPaths: inputs.filter((p) => isMidPath(p)),
+    output,
+    entry: QBE_ENTRY,
+  });
+  if (!prepared.ok) {
+    fs.writeFileSync(output, 'err ' + prepared.msg);
+    process.exit(0);
+  }
   compileGroups([
-    {
-      sources: inputs.filter((p) => !isMidPath(p)).map(read),
-      mids: inputs.filter((p) => isMidPath(p)).map(read),
-      output,
-      entry: QBE_ENTRY,
-    },
+    { sources: prepared.sources, mids: prepared.mids, output, entry: QBE_ENTRY },
   ]);
 }
 

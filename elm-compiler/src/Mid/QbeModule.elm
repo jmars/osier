@@ -1,4 +1,4 @@
-module Mid.QbeModule exposing (compileEntry, loadUserMids, userCollisions)
+module Mid.QbeModule exposing (compileEntry, exportScheme, loadUserMids, userCollisions)
 
 -- Mid.QbeModule — the NATIVE-backend driver: sources -> Mid.Ir -> QBE IL
 -- text (.ssa) for ONE entry key (native-backend stage 1; handoff-qbe-lower).
@@ -325,13 +325,36 @@ injectUserSchemes env modules =
         modules
 
 
-{-| The M3 placeholder Osier-side scheme for an export (M4 owns the real
-Osier ↔ mid-c type mapping and the taint/effect checks).  `val`, `word`,
-a type variable, a quantifier, and any unknown `OCon` all read as a FRESH
-polymorphic variable — the "any boxed value" reading of §2.5's `Val a`;
-`float` and the known scalar constructors map to their Elm types.  The body is
-the declared arrow shape (`params -> result`), so an Osier reference checks at
-the right arity; the quantifiers are the fresh variables, in order.
+{-| M4 — the Osier-side scheme for an export (the declared Osier types of the
+M2 export block, mapped to the checker's type language).  This is where an
+Osier call into an imported `.mid` defun is checked against the DECLARED types
+(plan.md §2.5, the representation-pinned class mapping):
+
+  * `val`  -> a FRESH polymorphic variable — the boxed `Val a` (§2.5: any
+    boxed value; boxed scalars are NOT unboxed at the boundary).
+  * `float` -> `Float` (boxed, ABI-pinned).
+  * `word` -> the RIGID opaque type `Word` (a `TCon "Word" []` no Osier value
+    inhabits) — §2.5's "an opaque Word (locally abstract)".  ENFORCED WITHOUT
+    Phase-7 by two existing unifier facts, MEASURED: a concrete non-`Word`
+    argument is a LOUD `CannotUnify` (name mismatch), and an unannotated
+    literal (`5 : number`) is a LOUD `FlexConflict` — `bindVar`'s
+    `propagate FNumber` rejects any non-Int/Float binding (Type.Unify.elm).  A
+    `word`-typed export is therefore uncallable from a concrete Osier program,
+    which is the sound reading of "opaque": no Osier value CAN be a raw word.
+    THE ONE HONEST LEAK: a POLYMORPHIC Osier function passing its `a`-typed
+    argument to a `word` export binds `a := Word` (an FNone var propagates
+    trivially) — the classic phantom-escapes-through-polymorphism case, closed
+    only by the Phase-7 locally-abstract machinery.
+  * a type variable / quantifier / unknown `OCon` (`Ref s`) -> the M2
+    conservative `:val` default (`Val a`) — WHERE THE PAYLOAD MAPPING STOPS:
+    the quantifier/region semantics are Phase-7's, not mapped here.
+
+The body is the declared arrow shape (`params -> result`, the M2-fix
+quantifier unwrap via `splitArrow`), so an Osier reference checks at the right
+ARITY (a saturated call to a `val -> val -> val` export checks as `a -> b ->
+c`; too MANY args is a LOUD unify failure when it forces a non-function
+result).  `quantifiers` are the fresh variables, in order; `word`'s rigid
+`TCon` contributes none.
 -}
 exportScheme : RtAst.ExportSig -> Scheme
 exportScheme sig =
@@ -378,7 +401,7 @@ otyToElm ty n =
             ( Rep.tFloat, n )
 
         RtAst.OWord ->
-            ( freshVal n, n + 1 )
+            ( Rep.TCon "Word" [], n )
 
         RtAst.OVar _ ->
             ( freshVal n, n + 1 )
@@ -430,6 +453,12 @@ scalarCon name args =
 
         ( "Char", [] ) ->
             Just Rep.tChar
+
+        ( "Word", [] ) ->
+            -- M4: `Word` (uppercase, the §2.5 opaque-word spelling) is the SAME
+            -- rigid opaque type as the lowercase `word` atom — a TCon no Osier
+            -- value inhabits (see exportScheme's doc for the enforcement).
+            Just (Rep.TCon "Word" [])
 
         _ ->
             Nothing

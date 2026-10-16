@@ -212,6 +212,44 @@ type alias Module =
     }
 
 
+{- M4 — THE FOUR CONTRACTS OF THE Osier ↔ mid-c INTERFACE, STATED HERE (the
+interface the `export` block declares) rather than only in plan.md §2.5.  Each
+is marked ENFORCED / STATED-NOT-ENFORCED, honestly:
+
+  1. ROOTING — a `val` argument is a GC reference: it must survive the callee's
+     allocations and must not be stashed where the collector cannot see it.
+     RUNTIME/ABI contract, NOT a type property (§2.5 SETTLED): the mid-c frame
+     machinery (PFrame, the lean ABI's pooled ROOTED block) enforces it; no
+     `ExportSig` field carries it because no type check could.  STATED.
+  2. IMMUTABILITY — Osier values are immutable; mid-c has `wstore`.  Mutation
+     must be reachable ONLY through `word`/raw, never `val`.  ENFORCED by the
+     J1 class table: every mutating builtin (`VecStore`/`ByteStore`/
+     `WordStore`) takes `word` (raw address) operands, never a `val`, so a
+     `val` cannot be mutated — the class checker rejects a `val` in a `word`
+     slot.  ENFORCED (by J1), stated here as the interface contract.
+  3. EFFECTS — an impure export carries `!io`; Osier's purity discipline must
+     not be silently violated.  The marker is PARSED and CARRIED on
+     `ExportSig.effects` and in the typed extern table.  NOT ENFORCED on the
+     Osier side: the Osier surface has no effect system, so a pure Osier
+     function may call an `!io` export — the marker documents impurity, it does
+     not gate it (enforcing it is effect-system work, Phase-7-adjacent).
+     STATED, marker carried.
+  4. EFFECT CONTAINMENT — the result of a Mid import must not reach the
+     enclosing Osier function's RETURN (use inside the function is unrestricted;
+     the owner's let-bound + self-recursive-lambda case is safe; the check is on
+     DATAFLOW into the return, never a syntactic ban).  The `taint` marker is
+     PARSED and CARRIED on `ExportSig.taint`.  NOT ENFORCED — M4 chose the
+     "state it loudly" arm, not the conservative taint floor: real containment
+     is the Phase-7 machinery (existential/rank-2 + phantom region types,
+     §2.5 SETTLED), and M4 does not half-build a type system.  STATED, marker
+     carried, enforcement deferred.
+
+`!io`/`!taint` are the grammar's postfix `!ident` markers; an unknown marker is
+a loud parse reject (M2).
+-}
+
+
+
 {-| Flatten a type expression's TOP-LEVEL arrow chain into `(params,
 result)` — the `key -> (param types, result)` view the typed extern table
 gives J2.  A LEADING quantifier scopes the whole rest of the type, so the

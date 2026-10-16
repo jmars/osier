@@ -248,6 +248,34 @@ run_midref() {
   echo "PASS $name: refused (names '$expect')"
 }
 
+# run_importref — the M4 refusal rows: an Osier source IMPORTING a .mid by name
+# (the .mid is NOT passed on the CLI — run.js resolves `import X` to X.mid next
+# to the fixture).  The refusal is either READER-side (the .mid's `module`
+# header disagrees with the import name) or CORE-side (an Osier call checked
+# against the DECLARED type fails, e.g. Float vs String).  Both land in the
+# group's output as "err <msg>", so `$4` asserts a substring of that message.
+run_importref() {
+  local name="$1" entry="$2" fixture="$3" expect="$4"
+  local out="$TMP/$name-refusal"
+  mkdir -p "$out"
+  local rc=0
+  "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$out" >/dev/null 2>&1 || rc=1
+  if [ "$rc" = 0 ]; then
+    echo "FAIL $name: the program compiled — the refusal (naming '$expect') is missing"
+    FAIL=1; return
+  fi
+  local ssa="$out/$(basename "$fixture" .elm).ssa"
+  if ! head -c 4 "$ssa" | grep -q '^err '; then
+    echo "FAIL $name: the compile failed but not with an 'err' refusal"
+    FAIL=1; return
+  fi
+  if ! grep -q "$expect" "$ssa"; then
+    echo "FAIL $name: the refusal does not name '$expect'"
+    FAIL=1; return
+  fi
+  echo "PASS $name: refused (names '$expect')"
+}
+
 # like run(), but QBE_MIDGC=1: the fixture compiles through the MID mark-sweep
 # collector (the raw allocating nodes route to Rt.allocVector/Rt.allocRaw) and
 # runs at the minimum heap, where the collector actually collects.  The golden
@@ -627,6 +655,20 @@ run_mid user-mid UserMidRun.main tools/qbe/fixtures/user-mid.elm tools/qbe/fixtu
 # MESSAGE ('not a defun of this program'), so a J2-level failure cannot satisfy
 # the row.
 run_midref midcallmissing MidCallMissing.main tools/qbe/fixtures/midcallmissing.elm tools/qbe/fixtures/midcallmissing.mid 'not a defun of this program' QBE_NOMIDRT=1
+# M4 (goal 4): the WORKED END-TO-END EXAMPLE — an Osier source IMPORTING a .mid
+# BY NAME.  importmid.elm declares `import Midmath`; run.js resolves that to
+# Midmath.mid next to the fixture (the .mid is NOT passed on the CLI — `run`
+# passes only the .elm), and Midmath.answer does the raw-word arithmetic whose
+# result 14 (= 6 + 7 + 1) is the .mid's own behaviour made visible.
+run importmid ImportMid.main tools/qbe/fixtures/importmid.elm
+# M4 (goal 2): the LOUD class-misuse refusal — ImportBad calls Midmath's
+# `float -> val` export doubleIt with a String, so the Osier-side check against
+# the DECLARED type refuses the compile (cannot unify Float with String).
+run_importref importbad ImportBad.main tools/qbe/fixtures/importbad.elm 'cannot unify Float with String'
+# M4 (goal 1): the LOUD header-mismatch refusal — importmis.elm imports
+# `Mismatch`, but Mismatch.mid declares `module Othername`; the reader refuses
+# because a .mid's module header must match the import name.
+run_importref importmis ImportMis.main tools/qbe/fixtures/importmis.elm 'declares module Othername'
 # churn: 150k conses = ~13.2MB live, just under the CHURN_MB minimum heap, so
 # the gc-churn stress rerun collects/promotes constantly and still fits the
 # reservation; 500k at the default heap is the identity run.

@@ -2871,6 +2871,75 @@ checks rt =
                 False
         )
 
+    -- ==================== M4: Osier-side checking + the import mapping ====================
+    -- `exportScheme` maps an export block's DECLARED Osier type to the checker
+    -- scheme an Osier reference is checked against (§2.5's representation-pinned
+    -- class mapping).  `word` is the rigid opaque `Word` (no Osier value
+    -- inhabits it — see QbeModule.exportScheme's doc for the enforcement and
+    -- the one honest leak); `float` is `Float`; `val`/unknown are fresh boxed
+    -- vars; the declared arrow shape is the arity.
+    , check "M4 exportScheme: val -> val -> val maps to a 2-param curried scheme of three DISTINCT fresh boxed vars"
+        (case (QbeModule.exportScheme { ty = Ast.OArrow Ast.OVal (Ast.OArrow Ast.OVal Ast.OVal), effects = [], taint = False }).body of
+            Rep.TFun (Rep.TVar a) (Rep.TFun (Rep.TVar b) (Rep.TVar c)) ->
+                a.id /= b.id && b.id /= c.id && a.id /= c.id
+
+            _ ->
+                False
+        )
+    , check "M4 exportScheme: word -> val maps `word` to the rigid opaque Word (a TCon no Osier value inhabits), val to a fresh var"
+        (case (QbeModule.exportScheme { ty = Ast.OArrow Ast.OWord Ast.OVal, effects = [], taint = False }).body of
+            Rep.TFun (Rep.TCon "Word" []) (Rep.TVar _) ->
+                True
+
+            _ ->
+                False
+        )
+    , check "M4 exportScheme: float -> val maps `float` to Float (boxed, ABI-pinned)"
+        (case (QbeModule.exportScheme { ty = Ast.OArrow Ast.OFloat Ast.OVal, effects = [], taint = False }).body of
+            Rep.TFun (Rep.TCon "Float" []) (Rep.TVar _) ->
+                True
+
+            _ ->
+                False
+        )
+    , check "M4 exportScheme: Word -> val (the UPPERCASE opaque-word spelling) is the SAME rigid Word as the lowercase `word` atom"
+        (case (QbeModule.exportScheme { ty = Ast.OArrow (Ast.OCon "Word" []) Ast.OVal, effects = [], taint = False }).body of
+            Rep.TFun (Rep.TCon "Word" []) (Rep.TVar _) ->
+                True
+
+            _ ->
+                False
+        )
+    , check "M4 exportScheme: Int -> val maps `Int` to the Elm Int scalar"
+        (case (QbeModule.exportScheme { ty = Ast.OArrow (Ast.OCon "Int" []) Ast.OVal, effects = [], taint = False }).body of
+            Rep.TFun (Rep.TCon "Int" []) (Rep.TVar _) ->
+                True
+
+            _ ->
+                False
+        )
+    , check "M4 exportScheme: forall s. Ref s -> val (the M2-fix quantifier unwrap) still flattens to ONE param, with Ref s the conservative boxed-var default"
+        (case (QbeModule.exportScheme { ty = Ast.OForall "s" (Ast.OArrow (Ast.OCon "Ref" [ Ast.OVar "s" ]) Ast.OVal), effects = [], taint = False }).body of
+            Rep.TFun (Rep.TVar _) (Rep.TVar _) ->
+                True
+
+            _ ->
+                False
+        )
+    , check "M4 exportScheme: the !io/!taint markers are CARRIED on the export sig (contract 3/4 statement, not enforcement)"
+        (case QbeModule.loadUserMids rt [ "module A\nexport A.f : val -> val !io !taint\ndefun A.f(a: val) -> val {\n  return mknil;\n}" ] of
+            Ok [ mA ] ->
+                case mA.exports of
+                    [ e ] ->
+                        e.sig.effects == [ Ast.Io ] && e.sig.taint
+
+                    _ ->
+                        False
+
+            _ ->
+                False
+        )
+
     -- ==================== TIER-2 T4: the typechecker J1-J6 ====================
     -- (Mid.RtLang.Check — checkProgram over the parsed Ast).  Each judgment
     -- gets an ACCEPT row plus REJECT rows whose message names it (the

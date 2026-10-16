@@ -1,0 +1,16 @@
+// M4: the WORKED EXAMPLE'S .mid — imported BY NAME from importmid.elm (the
+// reader resolves `import Midmath` to this file, relative to the importing
+// file; it is NOT passed on the CLI).  `answer` does the boxed arithmetic in
+// the RAW WORD lane (payload to unbox, `+` on words, mknum to rebox) so the
+// .mid's own behaviour is what produces the visible 14 (= 6 + 7 + 1).
+// `doubleIt : float -> val` is the CLASS-CHECK seat: an Osier call with a
+// non-Float argument is a LOUD type error (importbad.elm's refusal row).
+module Midmath
+export Midmath.answer : val -> val -> val
+export Midmath.doubleIt : float -> val
+defun Midmath.answer(a: val, b: val) -> val {
+  return mknum(payload(a, 0) + payload(b, 0) + 1);
+}
+defun Midmath.doubleIt(x: float) -> val {
+  return mkflt(x);
+}
