@@ -3389,6 +3389,15 @@ source =
     -- operators are left-associative and the DSL nesting is not.
     -- rt_glob_addr is spelled `rawcall rt_glob_addr()` — its J3 row was
     -- MISSING from Ast.rawcallArity and was added (one row, T18).
+    -- THE die MESSAGES CARRY THE "qbe-rt: " PREFIX IN THE RAWSTR.  The Zig
+    -- seat this fold replaces (rt_midgc_die, deleted at U2) called
+    -- dieLoud(msgs[code]), and dieLoud's OWN format is "qbe-rt: {s}\n"
+    -- (rt.zig:1221-1226) — so the wire bytes were "qbe-rt: midgc: ...\n".
+    -- Rt.die's own format is msg ++ "\n" with NO prefix (it is ALSO the
+    -- rt_die replacement, and rt.zig's rt_die at :784-787 writes span(msg)
+    -- then "\n"), so the prefix belongs HERE, in the call-site strings —
+    -- baking it into Rt.die would double it on the non-exhaustive-pattern
+    -- path and break THAT seat's parity.
     , "defun Rt.gcInit(dummy : val) -> val {"
     , "  word glob = rawcall rt_glob_addr();"
     , "  word region = wload(glob, 0);"
@@ -3399,7 +3408,7 @@ source =
     , "    word regionSize = heapBytes + heapBytes / 8;"
     , "    word base = rawcall mmap(0, regionSize, 3, 34, -1, 0);"
     , "    if (mkbool(base < 0)) {"
-    , "      call Rt.die(rawstr(\"midgc: mmap failed\"));"
+    , "      call Rt.die(rawstr(\"qbe-rt: midgc: mmap failed\"));"
     , "      return mknil;"
     , "    } else {"
     , "      word heapStart = base + (528 + heapBytes / 8);"
@@ -3463,7 +3472,7 @@ source =
     , "      val retry = call Rt.gcAllocGo(region, mknum(regionW + 8));"
     , "      word retryW = payload(retry, 0);"
     , "      if (mkbool(retryW == 0)) {"
-    , "        call Rt.die(rawstr(\"midgc: out of memory\"));"
+    , "        call Rt.die(rawstr(\"qbe-rt: midgc: out of memory\"));"
     , "        return mknil;"
     , "      } else {"
     , "        wstore(regionW, 11, wload(regionW, 11) + total * 8);"
@@ -3508,7 +3517,7 @@ source =
     , "    call Rt.gcSweep(mknum(wload(region, 2)));"
     , "    return mknil;"
     , "  } else {"
-    , "    call Rt.die(rawstr(\"midgc: collect before init\"));"
+    , "    call Rt.die(rawstr(\"qbe-rt: midgc: collect before init\"));"
     , "    return mknil;"
     , "  }"
     , "}"
@@ -3534,7 +3543,7 @@ source =
     , "            word count = byteload(np, 0) + (byteload(np, 1) * 256 + (byteload(np, 2) * 65536 + byteload(np, 3) * 16777216));"
     , "            return call Rt.gcScanValueArray(mknum(slot), mknum(count));"
     , "          } else {"
-    , "            call Rt.die(rawstr(\"midgc: unknown root kind\"));"
+    , "            call Rt.die(rawstr(\"qbe-rt: midgc: unknown root kind\"));"
     , "            return mknil;"
     , "          }"
     , "        }"
@@ -3615,7 +3624,7 @@ source =
     , "        wstore(region, 5, top + 1);"
     , "        return mknil;"
     , "      } else {"
-    , "        call Rt.die(rawstr(\"midgc: mark stack overflow\"));"
+    , "        call Rt.die(rawstr(\"qbe-rt: midgc: mark stack overflow\"));"
     , "        return mknil;"
     , "      }"
     , "    } else {"
@@ -3649,11 +3658,11 @@ source =
     , "              return call Rt.gcMarkPtr(mknum(wload(vaddrW, 3)));"
     , "            } else {"
     , "              if (mkbool(tag == 13)) {"
-    , "                call Rt.die(rawstr(\"midgc: unknown value tag in mark walk\"));"
+    , "                call Rt.die(rawstr(\"qbe-rt: midgc: unknown value tag in mark walk\"));"
     , "                return mknil;"
     , "              } else {"
     , "                if (mkbool(tag > 14)) {"
-    , "                  call Rt.die(rawstr(\"midgc: unknown value tag in mark walk\"));"
+    , "                  call Rt.die(rawstr(\"qbe-rt: midgc: unknown value tag in mark walk\"));"
     , "                  return mknil;"
     , "                } else {"
     , "                  return mknil;"
@@ -4481,7 +4490,15 @@ source =
     , "  return 0;"
     , "}"
     , "defun Rt.halt() -> word {"
-    , "  word m = rawstr(\"qbe-rt: halt (a Mid prim reached its halt arm)\");"
+      -- The DOUBLED prefix is deliberate, not a typo: the Zig seat this
+      -- defun replaces (tools/qbe/rt.zig rt_halt) called dieLoud(msg) with a
+      -- msg that ALREADY carried "qbe-rt: ", so the frozen default-route
+      -- bytes (tests/elm-fixtures/expected/execmal.txt) are
+      -- "qbe-rt: qbe-rt: halt (...)\n".  U2's hatch contract requires the
+      -- MIDDRIVER arm to match the default route byte for byte, so the
+      -- cosmetic Zig bug is reproduced VERBATIM here; it is not fixed on
+      -- either side at U2 (fixing it moves the golden).
+    , "  word m = rawstr(\"qbe-rt: qbe-rt: halt (a Mid prim reached its halt arm)\");"
     , "  val len = call Rt.cStrLenGo(mknum(m), mknum(0));"
     , "  rawcall write(2, m, payload(len, 0));"
     , "  rawcall write(2, rawstr(\"\\n\"), 1);"

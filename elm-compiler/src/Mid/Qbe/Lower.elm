@@ -432,20 +432,39 @@ lower rep primDirect midCons rtLean consArr rec typeSpec midGc midDriver table a
                         surfaceKeys
 
                 rtKeys =
+                    -- ONE `unique` OVER THE WHOLE CONCATENATION (stage 6 U2
+                    -- fix): each of the three halves is deduped WITHIN itself,
+                    -- but they OVERLAP across the boundary — the prim half
+                    -- (MidRt.seeds over the surface's called prims) already
+                    -- carries Rt.cStrLenGo, which is also in the
+                    -- driverSeeds/gcSeeds closure (Rt.die -> Rt.cStrLenGo),
+                    -- and gcSeeds carries Rt.die, which driverSeeds carries
+                    -- too.  The emission fold below lowers ONE defun per key
+                    -- with no seen-set, so a repeat is two definitions of the
+                    -- same q_Rt_* symbol and qbe rejects the .ssa (MEASURED:
+                    -- QBE_MIDDRIVER=1 alone already duplicated
+                    -- q_Rt_x2ecStrLenGo; + QBE_MIDGC=1 added q_Rt_x2edie).
+                    -- The plan declares MIDGC x MIDDRIVER a VALID combination,
+                    -- so the cross-boundary repeat is the defect, not the
+                    -- combination.  With both hatches off this is a no-op
+                    -- (MidRt.seeds is already unique), so the DEFAULT route's
+                    -- bytes do not move.
                     if List.any (\d -> isRtKey d.key) program then
-                        List.filter (\k -> not (List.member k surfaceKeys)) (MidRt.seeds usedPrims)
-                            ++ (if midGc then
-                                    List.filter (\k -> not (List.member k surfaceKeys)) (unique (MidRt.gcSeeds ++ MidRt.conSeeds ++ MidRt.closureSeeds))
+                        unique
+                            (List.filter (\k -> not (List.member k surfaceKeys)) (MidRt.seeds usedPrims)
+                                ++ (if midGc then
+                                        List.filter (\k -> not (List.member k surfaceKeys)) (unique (MidRt.gcSeeds ++ MidRt.conSeeds ++ MidRt.closureSeeds))
 
-                                else
-                                    []
-                               )
-                            ++ (if midDriver then
-                                    List.filter (\k -> not (List.member k surfaceKeys)) (unique MidRt.driverSeeds)
+                                    else
+                                        []
+                                   )
+                                ++ (if midDriver then
+                                        List.filter (\k -> not (List.member k surfaceKeys)) (unique MidRt.driverSeeds)
 
-                                else
-                                    []
-                               )
+                                    else
+                                        []
+                                   )
+                            )
 
                     else
                         []
@@ -4787,6 +4806,17 @@ lowerNonExhaustive msg s =
         -- the same single WORD argument (the static message address), a
         -- symbol swap; the result type follows the callee (Base L for the
         -- Mid word-ABI defun, Base W for the Zig seat's i64).
+        --
+        -- NOT DERIVED — a recorded gap (U2 review, nice-to-have 5): the
+        -- argument list below is HAND-WIRED agreement with Rt.die's declared
+        -- param count (1, in RtSource.elm), not read from it.  Adding a
+        -- param to Rt.die/Rt.halt in U3-U5 would silently UNDER-APPLY here
+        -- and the callee would read a garbage register (the SEGV class the
+        -- rawAbi convention exists to kill); only TestMain's shape pins
+        -- would notice, not the compiler.  The fix, when it is worth
+        -- building: a one-place rawAbi arity record checked against the
+        -- defun's params in lowerDefun AND against every generated
+        -- call site, making a mismatch a compile-time Err.
         ( rtDieSym, rtDieRet ) =
             if s.midDriver then
                 ( "q_" ++ mangle "Rt.die", Base L )

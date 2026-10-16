@@ -1155,6 +1155,99 @@ checks =
                )
         )
 
+    -- STAGE 6 U2 fix 3: MIDGC x MIDDRIVER MUST DEDUPE ACROSS the seed lists.
+    -- Lower concatenates the prim half (MidRt.seeds over the surface's called
+    -- prims), the gc half (gcSeeds ++ conSeeds ++ closureSeeds) and the driver
+    -- half (driverSeeds) — each unique WITHIN itself, but the halves OVERLAP:
+    -- Rt.cStrLenGo sits in both the prim half and the driver/gc closure, and
+    -- Rt.die sits in BOTH the gc and the driver closure.  The emission fold
+    -- lowers one defun per key with no seen-set, so a repeat is a duplicate
+    -- QBE symbol.  MEASURED fail-before (qbe-mk on fixtures/midgc-live.elm):
+    -- QBE_MIDDRIVER=1 ALONE already dies with "symbol `q_Rt_x2ecStrLenGo' is
+    -- already defined" (exit 1), and adding QBE_MIDGC=1 adds
+    -- "symbol `q_Rt_x2edie' is already defined".  The plan declares the
+    -- combination VALID, so the repeat is the defect; the fix is one `unique`
+    -- over the whole concatenation, pinned here.
+    , check "U2 fix 3 — MIDGC x MIDDRIVER dedupe: the seed halves overlap (Rt.cStrLenGo in the prim AND driver/gc closure, Rt.die in gc AND driver) and the one cross-boundary `unique` leaves EXACTLY ONE q_Rt_x2edie and ONE q_Rt_x2ecStrLenGo in the module"
+        (let
+            prog =
+                rtProgram True True True ++ rtProgramGc True True True
+         in
+         case QbeLower.lower False False False True True True True True True QbeTypes.empty (rtArities prog) prog "Rt.allocVector" of
+            Ok mod ->
+                (List.length (List.filter (\f -> f.name == "q_Rt_x2edie") mod.funcs) == 1)
+                    && (List.length (List.filter (\f -> f.name == "q_Rt_x2ecStrLenGo") mod.funcs) == 1)
+
+            Err _ ->
+                False
+        )
+
+    -- STAGE 6 U2 fix 2: THE midgc die MESSAGES CARRY THE "qbe-rt: " PREFIX.
+    -- The deleted Zig seat (rt_midgc_die) wrote dieLoud(msgs[code]), and
+    -- dieLoud's own format is "qbe-rt: {s}\n" (rt.zig:1221-1226), so the wire
+    -- bytes were "qbe-rt: midgc: ...\n" — the fold emits "{msg}\n", so the
+    -- prefix must live in the RAWSTR contents.  The ABSENCE half is what makes
+    -- this row fail on the pre-fix mechanism (MEASURED before: the six data
+    -- defs were the bare "midgc: ..." strings).  Rt.die's own format stays
+    -- prefix-FREE — it is also the rt_die replacement (rt.zig:784-787 writes
+    -- msg then "\n", no prefix), so baking the prefix into the defun would
+    -- double it on the non-exhaustive-pattern path.
+    , check "U2 fix 2 — midgc die prefix parity: the gc half's message data carries \"qbe-rt: midgc: mmap failed\" (dieLoud's prefix restored) and NOT the un-prefixed form"
+        (let
+            prog =
+                rtProgram True True True ++ rtProgramGc True True True
+         in
+         case QbeLower.lower False False False True True True True True False QbeTypes.empty (rtArities prog) prog "Rt.allocVector" of
+            Ok mod ->
+                List.any (\d -> List.member (Il.DStr "qbe-rt: midgc: mmap failed") d.items) mod.datas
+                    && not (List.any (\d -> List.member (Il.DStr "midgc: mmap failed") d.items) mod.datas)
+
+            Err _ ->
+                False
+        )
+
+    -- STAGE 6 U2 fix 4: THE NativeMain VECTOR PIN (plan obs-5's deferred
+    -- obligation, the unpinned-midGc drift class).  run.js's DEFAULT hatch
+    -- vector leaves BOTH hatches OFF — run.js:141 QBE_MIDGC = (env === '1'),
+    -- run.js:148 QBE_MIDDRIVER = (env === '1') — and
+    -- selfhost/NativeMain.elm:276's hard-coded ( False, False ) must carry the
+    -- SAME pair: the selfhost lane and run.js have to emit byte-identical
+    -- .ssa (the qbe-bootstrap --verify fixed point), so a flip in one and not
+    -- the other is a SILENT divergence.  The MEASURED GAP, stated: Elm cannot
+    -- read run.js, so this row pins the pair's VALUE (a pinned literal, the
+    -- two Elm copies being named twins) and its MEANING (the default route it
+    -- must select) — a run.js edit alone is NOT caught here; the machine
+    -- check across that boundary is the bootstrap fixed point, and the cheap
+    -- run.js-vs-NativeMain text row belongs in qbe-check.sh, outside this
+    -- unit's write scope.  What the row DOES catch: an edit of the pinned
+    -- pair (the routing half below turns a wrong pair into a FAIL), and a
+    -- silent flip of either hatch at the U6/U7 landings.
+    , check "U2 fix 4 — NativeMain vector pin: the selfhost hatch vector is (midGc=False, midDriver=False) = run.js's defaults, and routing THAT pair selects the default route (rt_halt kept, no q_Rt_x2ehalt, no rt_glob)"
+        (let
+            ( midGc, midDriver ) =
+                defaultHatchVector
+
+            prog =
+                rtProgram True True True
+         in
+         (defaultHatchVector == ( False, False ))
+            && (case QbeLower.lower False False False True True True True midGc midDriver QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
+                    Ok mod ->
+                        not (List.any (\f -> f.name == "q_Rt_x2ehalt") mod.funcs)
+                            && not (List.any (\d -> d.name == RtGc.globDataSym) mod.datas)
+                            && (case funcByName "q_Rt_x2eemptylist" mod of
+                                    Just f ->
+                                        callsSym "rt_halt" f
+
+                                    Nothing ->
+                                        False
+                               )
+
+                    Err _ ->
+                        False
+               )
+        )
+
     -- STAGE 6 U1c: the Mid-owned globals block + its 0-arg accessor, both
     -- GATED on the midgc flag (plan correction C3: the block replaces the
     -- deleted `rt_midgc_region`/`rt_midgc_set_region` Zig seats — the
@@ -5598,6 +5691,18 @@ pipeline is the identity, so this unwrap cannot fail while the T7 rows are
 green — and the dedicated T7 identity row asserts the `Ok` DIRECTLY, so a
 broken pipeline turns red there first, loudly.
 -}
+-- run.js's DEFAULT hatch vector, (midGc, midDriver) — the pair
+-- selfhost/NativeMain.elm:276 hard-codes as ( False, False ) and the pin row
+-- above asserts.  MEASURED at U2: run.js:141 QBE_MIDGC = (env === '1') and
+-- run.js:148 QBE_MIDDRIVER = (env === '1'), both OFF with the env unset.
+-- This is a HAND-COPIED twin (Elm cannot read run.js) — when U6 flips a
+-- default, this constant, NativeMain.elm's vector and run.js move together,
+-- and the row fails until they do.
+defaultHatchVector : ( Bool, Bool )
+defaultHatchVector =
+    ( False, False )
+
+
 rtProgram : Bool -> Bool -> Bool -> List Defun
 rtProgram consArr rec eqPtrFast =
     case Rt.program consArr rec eqPtrFast of
