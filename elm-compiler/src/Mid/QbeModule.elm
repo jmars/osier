@@ -208,13 +208,27 @@ compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals 
 namespace rule + name/exports), so the cross-module extern table — the
 runtime's EXPORTED keys (`rt.exportedTypes`, the privacy boundary: unexported
 runtime defuns are module-private) UNION every user module's export — exists
-before any check+lower runs.  A user module may therefore `call Rt.<exported>`
-(the exported runtime surface) or another user module's exported defun AT THE
-CHECKER (J2 resolves both through this table).  NOTE (M3fix finding 4): a user
--> user `call` resolves at J2 but is then REJECTED by Mid.Qbe.Lower — mid-c
-`call` lowers to RawCall (LowerToIr) and Lower's RawCall arm accepts only
-`Rt.*` keys (Lower.elm:1783), so the emit-level cross-module call is a
-still-open gap, pinned by TestMain's "finding-4 DEFECT (fail-before)" row.
+before any check+lower runs.  At the CHECKER (J2) a user module may therefore
+`call` any of those keys.
+
+WHAT THE EMIT LEVEL DOES WITH THEM (M3fix-4, MEASURED):
+
+  * a `call` to another USER module's exported defun is emitted — mid-c `call`
+    lowers to RawCall (LowerToIr) naming that defun's key, and Lower's RawCall
+    arm accepts a key by MEMBERSHIP IN THE SET THIS COMPILE EMITS (it no longer
+    tests a `Rt.`-name SHAPE), in the callee's own ABI (a user defun is
+    RtGeneric, never lean) and with the callee made REACHABLE by RawCall's
+    call-graph edge.  The `user-mid` row runs exactly this, end to end.
+  * a `call Rt.<exported>` is still NOT emitted in general: the user .mid body
+    is raw nodes, so the used-prim census (`calledPrims`, which ignores Unsafe)
+    does not see the call and Mid.Rt.seeds never seeds the target — the RawCall
+    arm REFUSES it loudly ("a defun of this program that this compile does not
+    EMIT") instead of emitting a dangling `q_Rt_*`.  Closing that is a census
+    change (Lower.elm/midPrimRoute), NOT an acceptance one; it is measured and
+    open, deliberately not claimed here.
+
+An unknown key — one that names no defun of the program — stays a loud Err
+(`run_midref`'s `midcallmissing` row pins it).
 -}
 loadUserMids : MidRt.Runtime -> List String -> Result String (List MidRt.UserModule)
 loadUserMids rt sources =

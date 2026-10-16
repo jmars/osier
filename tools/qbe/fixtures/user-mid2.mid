@@ -1,0 +1,13 @@
+// M3fix-4: the SECOND user .mid of the user-mid group — the CALLEE of a
+// mid-c -> mid-c cross-module call.  `UserMid.answer` (user-mid.mid) reaches
+// this module's exported defun by qualified name, so the emit is the very
+// same `q_UserMid2_x2eboxedSum` call an Rt->Rt RawCall makes — except through
+// the GENERIC (:val-args, :ret return, rt_bounce) ABI, because a user defun
+// is RtGeneric, never lean (lowerDefun's ABI rule: lean iff `isRtKey`).
+// The key names a PROGRAM defun, not `Rt.*`: the RawCall arm accepts it by
+// membership in the emitted set, not by a name shape.
+module UserMid2
+export UserMid2.boxedSum : val -> val -> val
+defun UserMid2.boxedSum(a: val, b: val) -> val {
+  return mknum(payload(a, 0) + payload(b, 0));
+}

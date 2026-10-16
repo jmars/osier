@@ -719,11 +719,11 @@ reach defuns key seen =
                 List.foldl
                     (\k acc -> Result.andThen (\s -> reach defuns k s) acc)
                     (Ok (key :: seen))
-                    (grefsOf defun.value)
+                    (grefsOf defuns defun.value)
 
 
-grefsOf : Exp -> List String
-grefsOf exp =
+grefsOf : Dict String Defun -> Exp -> List String
+grefsOf defuns exp =
     case exp of
         Lit _ ->
             []
@@ -738,64 +738,84 @@ grefsOf exp =
             []
 
         Lam lambda ->
-            grefsOf lambda.body
+            grefsOf defuns lambda.body
 
         NoTail inner ->
-            grefsOf inner
+            grefsOf defuns inner
 
         App app ->
-            grefsOf app.fn ++ List.concatMap grefsOf app.args
+            grefsOf defuns app.fn ++ List.concatMap (grefsOf defuns) app.args
 
         PrimApp app ->
-            List.concatMap grefsOf app.args
+            List.concatMap (grefsOf defuns) app.args
 
         Let block ->
-            List.concatMap grefsOf (letValues block.binders)
-                ++ grefsOf block.body
+            List.concatMap (grefsOf defuns) (letValues block.binders)
+                ++ grefsOf defuns block.body
 
         Case branch ->
-            grefsOf branch.scrutinee
-                ++ List.concatMap (\a -> grefsOf a.body) branch.alts
+            grefsOf defuns branch.scrutinee
+                ++ List.concatMap (\a -> grefsOf defuns a.body) branch.alts
 
         Con con ->
-            List.concatMap grefsOf con.args
+            List.concatMap (grefsOf defuns) con.args
 
         Tup es ->
-            List.concatMap grefsOf es
+            List.concatMap (grefsOf defuns) es
 
         RecordLit setters ->
-            List.concatMap (\p -> grefsOf (Tuple.second p)) setters
+            List.concatMap (\p -> grefsOf defuns (Tuple.second p)) setters
 
         RecordGet rec _ ->
-            grefsOf rec
+            grefsOf defuns rec
 
         RecordUpdate update ->
-            grefsOf update.base
-                ++ List.concatMap (\p -> grefsOf (Tuple.second p)) update.updates
+            grefsOf defuns update.base
+                ++ List.concatMap (\p -> grefsOf defuns (Tuple.second p)) update.updates
 
         ListLit es ->
-            List.concatMap grefsOf es
+            List.concatMap (grefsOf defuns) es
 
         If block ->
-            grefsOf block.cond ++ grefsOf block.thenBranch ++ grefsOf block.elseBranch
+            grefsOf defuns block.cond ++ grefsOf defuns block.thenBranch ++ grefsOf defuns block.elseBranch
 
         ShortAnd block ->
-            grefsOf block.left ++ grefsOf block.right
+            grefsOf defuns block.left ++ grefsOf defuns block.right
 
         ShortOr block ->
-            grefsOf block.left ++ grefsOf block.right
+            grefsOf defuns block.left ++ grefsOf defuns block.right
 
         NotEqual block ->
-            grefsOf block.left ++ grefsOf block.right
+            grefsOf defuns block.left ++ grefsOf defuns block.right
 
-        -- Unsafe (osier-rawnodes / osier-consspike): [] stays DELIBERATE.  A
-        -- raw node cannot GRef anything — RawCall crosses the call graph as
-        -- an opaque SYMBOL — so Rt->Rt references are invisible here BY
-        -- DESIGN and Mid.Rt.seeds declares each prim's Rt-key closure
-        -- instead (the used-prim seeding in `lower` is the only way an Rt
-        -- defun becomes reachable; this arm returning [] is why it has to).
-        Unsafe _ ->
-            []
+        -- Unsafe (osier-rawnodes / osier-consspike): a raw node GRefs
+        -- NOTHING — RawCall crosses the call graph as an opaque SYMBOL — so
+        -- Rt->Rt references are invisible here BY DESIGN and Mid.Rt.seeds
+        -- declares each prim's Rt-key closure instead (the used-prim seeding
+        -- in `lower` is the only way an Rt defun becomes reachable; this arm
+        -- not reporting Rt keys is why it has to).
+        --
+        -- M3fix-4: a RawCall to a NON-Rt PROGRAM defun IS a real call edge —
+        -- M3 lets a user .mid `call` another user module's exported defun,
+        -- which lowers to RawCall naming that defun's key and emits the
+        -- `q_<key>` call.  Without the edge here the callee is never
+        -- REACHED, so it is never emitted and the link fails (MEASURED on the
+        -- first cut of this fix, predicate-only: `undefined reference to
+        -- q_CrossB_x2eg`).  Reported ONLY when the key already names a defun
+        -- of this program: a key that names nothing stays invisible here so
+        -- the RawCall arm's own reject — not a reachability "unknown global"
+        -- — is the error that names a call to nothing.
+        Unsafe node ->
+            case node of
+                RawCall call ->
+                    if Dict.member call.sym defuns && not (isRtKey call.sym) then
+                        [ call.sym ]
+
+                    else
+                        []
+
+                _ ->
+                    []
 
 
 -- The reserved runtime namespace (Mid.Audit tests the same prefix; a surface
@@ -1762,79 +1782,105 @@ lowerRawVal node dest s =
 
         RawCall call ->
             -- STEP 5 (osier-midprims): Rt->Rt calls, the recursive helpers'
-            -- voice (deepEqual, numberText, the list walks).  Lowered for
-            -- `Rt.*` keys ONLY: args are VALUES lowered into fresh slots,
-            -- then the call.  THE LEAN ABI (osier-midabi): the same shape
-            -- rtPrimSlots' mid route emits — 3 pointer args padded with the
-            -- last real slot, plus the count word, DIRECT :val return, one
-            -- blit to dest — no rt_bounce anywhere on an Rt->Rt edge.
-            -- SOUNDNESS: the staged slots live in the CALLER's frame, and
-            -- the classification guarantees the pairing — if the CALLEE can
-            -- allocate, this caller is `allocating` too, so these slots are
-            -- ROOTED (rt_frame_enter); if the callee is frame-free, no GC
-            -- can run anywhere under this call.  QBE_NORTLEAN=1 restores
-            -- the fat :val-args/:ret/rt_bounce shape.
+            -- voice (deepEqual, numberText, the list walks) — and since
+            -- M3fix-4 a user .mid's cross-module call, which is this same
+            -- shape.  Lowered for any key this program DEFINES: args are
+            -- VALUES lowered into fresh slots, then the call.  THE LEAN ABI
+            -- (osier-midabi): the same shape rtPrimSlots' mid route emits — 3
+            -- pointer args padded with the last real slot, plus the count
+            -- word, DIRECT :val return, one blit to dest — no rt_bounce
+            -- anywhere on an Rt->Rt edge.  SOUNDNESS: the staged slots live in
+            -- the CALLER's frame, and the classification guarantees the
+            -- pairing — if the CALLEE can allocate, this caller is
+            -- `allocating` too, so these slots are ROOTED (rt_frame_enter); if
+            -- the callee is frame-free, no GC can run anywhere under this
+            -- call.  QBE_NORTLEAN=1 restores the fat :val-args/:ret/rt_bounce
+            -- shape.
+            --
+            -- THE ACCEPTANCE (M3fix-4) is MEMBERSHIP IN THIS PROGRAM's defun
+            -- set (`s.defuns`) — the keys whose `q_` symbol the emission fold
+            -- or the Rt seeding can produce — NOT a name SHAPE: since M3 a
+            -- user .mid `call` may name ANOTHER user module's exported defun,
+            -- and that RawCall lowers to this same `q_<key>` call (grefsOf's
+            -- Unsafe arm supplies the call-graph edge, so the callee IS
+            -- emitted — MEASURED: accepting without that edge links with an
+            -- undefined `q_CrossB_x2eg`).  A key that names no defun of this
+            -- program stays a LOUD Err below: that is what stops a call to
+            -- nothing.  HONEST SPAN, MEASURED: `defuns` is the PROGRAM's, not
+            -- the EMITTED set — for a non-Rt key the two coincide (the
+            -- grefsOf edge just above), for an injected Rt KEY they can part
+            -- company when the used-prim census does not see the call (a
+            -- user .mid's body is raw nodes, so `calledPrims` ignores it) —
+            -- that pre-existing case still reaches the linker as an undefined
+            -- `q_Rt_*` rather than an Err here; closing it is a census/seeding
+            -- change, out of this fix's span.
             if Set.member call.sym MidRt.rawAbi then
                 -- stage 6 U2: a rawAbi defun (Rt.die/Rt.halt) is WORD-in/
                 -- WORD-out — it never appears in a VALUE position (its let
                 -- binder is a raw temp, via isRawWordExp/rawWordArg).
                 Err "qbe: rawAbi Rt call in a VALUE position — word-producing defuns (Rt.die/Rt.halt) bind to let binders and are legal only in raw-argument/tail positions"
 
-            else if String.startsWith "Rt." call.sym then
-                if Dict.member call.sym s.defuns then
-                    lowerArgsToSlots call.args s
-                        |> Result.andThen
-                            (\( slots, s1 ) ->
-                                if s.rtLean then
-                                    if List.length slots >= 1 && List.length slots <= maxDirectArity then
-                                        let
-                                            ( vp, s2 ) =
-                                                freshTmp s1
-
-                                            ptrs =
-                                                List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots
-
-                                            pad =
-                                                ArgVal (Base L) (Il.Tmp (slotTmp (lastSlot slots)))
-
-                                            padded =
-                                                ptrs ++ List.repeat (maxDirectArity - List.length ptrs) pad
-                                        in
-                                        Ok
-                                            (emit
-                                                (Call (Just vp)
-                                                    (Agg "val")
-                                                    (Il.Sym ("q_" ++ mangle call.sym))
-                                                    (padded ++ [ ArgVal (Base W) (Il.Con (List.length slots)) ])
-                                                )
-                                                s2
-                                                |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
-                                            )
-
-                                    else
-                                        Err ("qbe: rawCall to " ++ call.sym ++ " stages arity " ++ String.fromInt (List.length slots) ++ " — the lean ABI passes 1.." ++ String.fromInt maxDirectArity ++ " pointer args")
-
-                                else
+            else if Dict.member call.sym s.defuns then
+                lowerArgsToSlots call.args s
+                    |> Result.andThen
+                        (\( slots, s1 ) ->
+                            -- The callee's ABI is chosen by the SAME rule
+                            -- lowerDefun uses: an Rt.* key is lean when
+                            -- QBE_NORTLEAN is off, EVERY program defun
+                            -- (a user .mid's exported defun included) is
+                            -- RtGeneric.  Calling a RtGeneric defun with the
+                            -- lean shape is a silent ABI clash (MEASURED on
+                            -- the first cut of M3fix-4: the lean 4-arg call
+                            -- reached a 1-:val-param callee and the built
+                            -- binary SEGFAULTED), so the shape is keyed on the
+                            -- callee, not on the program-wide flag alone.
+                            if s.rtLean && isRtKey call.sym then
+                                if List.length slots >= 1 && List.length slots <= maxDirectArity then
                                     let
-                                        ( rp, s2 ) =
+                                        ( vp, s2 ) =
                                             freshTmp s1
 
-                                        ( vp, s3 ) =
-                                            freshTmp s2
+                                        ptrs =
+                                            List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots
+
+                                        pad =
+                                            ArgVal (Base L) (Il.Tmp (slotTmp (lastSlot slots)))
+
+                                        padded =
+                                            ptrs ++ List.repeat (maxDirectArity - List.length ptrs) pad
                                     in
                                     Ok
-                                        (s3
-                                            |> emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle call.sym)) (List.map (\sl -> ArgVal (Agg "val") (Il.Tmp (slotTmp sl))) slots))
-                                            |> emit (Call (Just vp) (Agg "val") (Il.Sym "rt_bounce") [ ArgVal (Base L) (Il.Tmp rp) ])
+                                        (emit
+                                            (Call (Just vp)
+                                                (Agg "val")
+                                                (Il.Sym ("q_" ++ mangle call.sym))
+                                                (padded ++ [ ArgVal (Base W) (Il.Con (List.length slots)) ])
+                                            )
+                                            s2
                                             |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
                                         )
-                            )
 
-                else
-                    Err ("qbe: rawCall to Rt defun " ++ call.sym ++ " — not in this compile (Mid.Rt.seeds must close the defun's Rt-key closure)")
+                                else
+                                    Err ("qbe: rawCall to " ++ call.sym ++ " stages arity " ++ String.fromInt (List.length slots) ++ " — the lean ABI passes 1.." ++ String.fromInt maxDirectArity ++ " pointer args")
+
+                            else
+                                let
+                                    ( rp, s2 ) =
+                                        freshTmp s1
+
+                                    ( vp, s3 ) =
+                                        freshTmp s2
+                                in
+                                Ok
+                                    (s3
+                                        |> emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle call.sym)) (List.map (\sl -> ArgVal (Agg "val") (Il.Tmp (slotTmp sl))) slots))
+                                        |> emit (Call (Just vp) (Agg "val") (Il.Sym "rt_bounce") [ ArgVal (Base L) (Il.Tmp rp) ])
+                                        |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
+                                    )
+                        )
 
             else
-                Err ("qbe: rawCall to non-Rt symbol " ++ call.sym ++ " — Rt.* defun calls only (word-level C seats are rawCallRaw)")
+                Err ("qbe: rawCall to " ++ call.sym ++ " — not a defun of this program (word-level C seats are rawCallRaw)")
 
         RawStrByte _ ->
             Err wordProducerMessage

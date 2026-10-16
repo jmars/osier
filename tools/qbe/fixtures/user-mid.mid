@@ -1,10 +1,14 @@
 // M3: the FIRST user .mid — a per-group mid-c module beside the Osier sources.
 // `module UserMid` is the namespace: every defun/export key is `UserMid.*`.
-// The exported `answer` adds the two boxed Int args' payload word 0 (an Elm
-// Int is storew tagNumber; storel n — payload(v, 0) is n) and re-boxes with
-// mknum.  Called from user-mid.elm by qualified name.
+//
+// M3fix-4: `answer` now CROSSES MODULES — it calls the exported defun of a
+// second user .mid (UserMid2.boxedSum) and returns its result unchanged, so
+// the golden stays the same 13 while the mid-c -> mid-c call is load-bearing
+// (the value can only be 13 if the cross-module call is emitted, uses the
+// callee's :val ABI, and returns the right boxed sum).  The boxed arithmetic
+// itself moved into UserMid2, same group, same raw nodes (mknum/payload/+).
 module UserMid
 export UserMid.answer : val -> val -> val
 defun UserMid.answer(a: val, b: val) -> val {
-  return mknum(payload(a, 0) + payload(b, 0));
+  return call UserMid2.boxedSum(a, b);
 }

@@ -2824,14 +2824,42 @@ checks rt =
             Err _ ->
                 False
         )
-    , check "M3fix finding-4 DEFECT (fail-before): a user .mid `call` to ANOTHER user module's export passes J2 but QBE Lower REJECTS the resulting RawCall — the RawCall namespace is Rt.* only (Lower.elm:1783); the next unit widens it to the program's defun keys"
+    , check "M3fix-4 (a) EMIT: a user .mid `call` to ANOTHER user module's exported defun is accepted and emitted — the callee joins the reachable set (its RawCall edge) and the call uses the CALLEE's ABI (RtGeneric: :ret/rt_bounce), never the lean Rt shape"
+        (case QbeModule.loadUserMids rt
+            [ "module A\nexport A.f : val -> val\ndefun A.f(a: val) -> val {\n  return call B.g(a);\n}"
+            , "module B\nexport B.g : val -> val\ndefun B.g(a: val) -> val {\n  return mknum(payload(a, 0) + 5);\n}"
+            ] of
+            Ok [ mA, mB ] ->
+                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (Dict.fromList [ ( "A.f", 1 ), ( "B.g", 1 ) ]) (mA.defuns ++ mB.defuns) "A.f" of
+                    Ok mod ->
+                        let
+                            ssa =
+                                Print.print mod
+                        in
+                        -- the call is the GENERIC shape ... and NOT the lean one:
+                        -- the lean 4-arg shape against a 1-:val-param callee is
+                        -- the ABI clash MEASURED as a SEGFAULT in the first cut
+                        -- of this fix (the shape is keyed on the CALLEE).
+                        String.contains ":ret call $q_B_x2eg" ssa
+                            && not (String.contains ":val call $q_B_x2eg" ssa)
+
+                    Err _ ->
+                        False
+
+            Ok _ ->
+                False
+
+            Err _ ->
+                False
+        )
+    , check "M3fix-4 (b): a user .mid `call` naming a key that is NO defun of this program is still a LOUD Err ('not a defun of this program') — the acceptance widened to member keys, so this arm is what still stops a call to nothing"
         (case Rt.parseUserModule "module A\nexport A.f : val -> val\ndefun A.f(a: val) -> val {\n  return call B.g(a);\n}" of
             Ok parsed ->
                 case Rt.checkLowerUserModule (Dict.fromList [ ( "B.g", { ty = Ast.valArity 1, effects = [], taint = False } ) ]) parsed of
                     Ok mA ->
                         case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (Dict.fromList [ ( "A.f", 1 ) ]) mA.defuns "A.f" of
                             Err msg ->
-                                String.contains "rawCall to non-Rt symbol B.g" msg
+                                String.contains "rawCall to B.g" msg && String.contains "not a defun of this program" msg
 
                             Ok _ ->
                                 False

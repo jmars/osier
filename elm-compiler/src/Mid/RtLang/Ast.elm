@@ -353,8 +353,10 @@ transcribes):
   * `EShortAnd`/`EShortOr` — `&&` `||` (ShortAnd/ShortOr VERBATIM; val,val ->
     val: deepEq RETURNS `and2(..)` as a value, so these are value
     expressions, not statements).
-  * `ECall` — `call Key(..)`: RawCall, Rt.* keys only, :val args and :val
-    result (Lower's RawCall case rejects non-Rt and unseeded keys loudly).
+  * `ECall` — `call Key(..)`: RawCall, ANY key that is a DEFUN OF THE PROGRAM
+    (an injected `Rt.*` key, or a user `.mid` module's export), :val args and
+    `:val` result (Lower's RawCall case rejects a key that is not a program
+    defun loudly — it is no longer a `Rt.` name-shape test).
   * `ERawCall` — `rawcall sym(..)`: RawCallRaw, every arg and the result are
     WORDS (Lower lowers each arg through rawWordArg, `Base L` both sides);
     the symbol must be in `rawcallArity` (J3).
@@ -803,7 +805,8 @@ constructor set, these pin its class contract:
   * `shortSig`   — `&& ||` : val,val -> val (ShortAnd/ShortOr verbatim)
 
 The call forms are NOT rows here because their contracts live with their
-own judgments: `ECall` (J2, val args/result, Rt.* keys), `ERawCall` (J3 +
+own judgments: `ECall` (J2, val args/result — resolved against the user
+module externs UNION the runtime's EXPORTED keys), `ERawCall` (J3 +
 `rawcallArity`, all-word), `EAggCall` (word fn, word args, word result).
 -}
 wordBinSig : Sig

@@ -1,0 +1,13 @@
+// M3fix-4 (b): a user .mid whose `call` names a key that resolves at J2 (the
+// runtime EXPORT block's typed extern table) but names NO defun of this
+// program.  Run under QBE_NOMIDRT=1 — the whole Mid Rt program withheld — so
+// `Rt.read-file-as-string` (exported, hence J2-resolvable) has no defun
+// behind it.  The compile MUST be REFUSED loudly naming the key: a RawCall
+// to a key with no `q_` symbol to call is exactly the "call to nothing" the
+// RawCall arm exists to stop (before M3fix-4 the refusal was the Rt.*-shape
+// predicate; now it is membership in the set this compile EMITS).
+module MissingTarget
+export MissingTarget.bad : val -> val
+defun MissingTarget.bad(dummy: val) -> val {
+  return call Rt.read-file-as-string(dummy);
+}

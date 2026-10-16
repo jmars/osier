@@ -166,20 +166,23 @@ run() {
   fi
 }
 
-# run_mid — like run(), but the group is TWO sources: the Osier .elm fixture
-# PLUS one user .mid module (M3: a per-group mid-c input beside the Osier
-# source).  The .mid is classified by extension in run.js, compiled by
-# Mid.RtLang, and merged; the entry is the Osier module's own.  The golden +
-# churn contract is `run`'s.
+# run_mid — like run(), but the group is the Osier .elm fixture PLUS one or
+# more user .mid modules (M3: a per-group mid-c input beside the Osier source;
+# M3fix-4: a mid-c -> mid-c call needs the CALLEE module in the group too,
+# hence the LIST).  The .mid(s) are classified by extension in run.js,
+# compiled by Mid.RtLang, and merged; the entry is the Osier module's own.
+# The golden + churn contract is `run`'s.  No entry args: the row's entry
+# takes none (a row that needs them wants its own runner, not a silent
+# trailing-argument reinterpretation).
 run_mid() {
-  local name="$1" entry="$2" fixture="$3" mid="$4"; shift 4
-  local args=("$@")
+  local name="$1" entry="$2" fixture="$3"; shift 3
+  local mids=("$@")
   local bin
-  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$mid" "$entry" "$TMP/$name")" || {
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "${mids[@]}" "$entry" "$TMP/$name")" || {
     echo "FAIL $name: qbe-mk"; FAIL=1; return
   }
   local nat_out
-  nat_out="$(timeout 60 "$bin" "$entry" "${args[@]}" 2>&1)"
+  nat_out="$(timeout 60 "$bin" "$entry" 2>&1)"
   local exp
   if [ "$FREEZE" = 1 ]; then
     printf '%s\n' "$nat_out" > "$GOLDEN/$name.txt"
@@ -200,7 +203,7 @@ run_mid() {
   echo "PASS $name: golden (${nat_out:0:80})"
   if [[ "$name" != *-nochurn ]]; then
   local churn_out
-  churn_out="$(QBE_HEAP_MB=$CHURN_MB "$bin" "$entry" "${args[@]}" 2>&1)" || true
+  churn_out="$(QBE_HEAP_MB=$CHURN_MB "$bin" "$entry" 2>&1)" || true
   if [ "$churn_out" != "$exp" ]; then
     echo "FAIL $name: CHURN mismatch (QBE_HEAP_MB=$CHURN_MB): '$churn_out'"
     FAIL=1
@@ -208,6 +211,41 @@ run_mid() {
     echo "PASS $name: gc-churn (QBE_HEAP_MB=$CHURN_MB) identical"
   fi
   fi
+}
+
+# run_midref — the M3fix-4 (b) row: a user .mid `call` whose target is NOT a
+# defun of this program MUST be REFUSED at COMPILE time, loudly, naming the
+# key.  The refusal is the RawCall arm's (Lower.elm), not J2's: the fixture's
+# key resolves through the runtime EXPORT block, so only the emit-level check
+# can stop it — and a compile that let it through would reach the linker as a
+# dangling `q_<key>` (the symptom M3fix-4's acceptance predicate replaced with
+# a named compile error).  `$5` asserts a substring of the REFUSAL MESSAGE, so
+# a row cannot pass on an unrelated (e.g. J2) failure.  `$6` optionally names
+# a hatch to run under; QBE_NOMIDRT=1 is what removes the defun here.
+run_midref() {
+  local name="$1" entry="$2" fixture="$3" mid="$4" expect="$5" hatch="${6:-}"
+  local out="$TMP/$name-refusal"
+  mkdir -p "$out"
+  local rc=0
+  if [ -n "$hatch" ]; then
+    env "$hatch" "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$mid" "$entry" "$out" >/dev/null 2>&1 || rc=1
+  else
+    "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$mid" "$entry" "$out" >/dev/null 2>&1 || rc=1
+  fi
+  if [ "$rc" = 0 ]; then
+    echo "FAIL $name: the program compiled — the refusal (naming '$expect') is missing"
+    FAIL=1; return
+  fi
+  local ssa="$out/$(basename "$mid").ssa"
+  if ! head -c 4 "$ssa" | grep -q '^err '; then
+    echo "FAIL $name: the compile failed but not with an 'err' refusal"
+    FAIL=1; return
+  fi
+  if ! grep -q "$expect" "$ssa"; then
+    echo "FAIL $name: the refusal does not name '$expect'"
+    FAIL=1; return
+  fi
+  echo "PASS $name: refused (names '$expect')"
 }
 
 # like run(), but QBE_MIDGC=1: the fixture compiles through the MID mark-sweep
@@ -572,7 +610,23 @@ run idn        Idn.idn          tools/qbe/fixtures/idn.elm 7
 run ifx        Ifx.main         tools/qbe/fixtures/ifx.elm
 # M3: the FIRST user .mid — the Osier fixture (user-mid.elm) calls the mid-c
 # defun UserMid.answer (user-mid.mid) by qualified name; the driver prints 13.
-run_mid user-mid UserMidRun.main tools/qbe/fixtures/user-mid.elm tools/qbe/fixtures/user-mid.mid
+# M3fix-4: the group now carries a SECOND user .mid (user-mid2.mid), because
+# `UserMid.answer` calls ITS exported defun `UserMid2.boxedSum` — the
+# mid-c -> mid-c cross-module call.  It resolved at J2 (the cross-module extern
+# table) but was REFUSED at emit time before this unit; now the RawCall arm
+# accepts a key by MEMBERSHIP IN THE SET THIS COMPILE EMITS (no `Rt.`-shape
+# predicate), and the call shape follows the callee's ABI (a user defun is
+# RtGeneric, not lean).  The golden is UNCHANGED at 13: `answer` returns
+# boxedSum's result verbatim, so the printed value is load-bearing on the
+# cross-module call (emit it wrong, or not at all, and the row moves).
+run_mid user-mid UserMidRun.main tools/qbe/fixtures/user-mid.elm tools/qbe/fixtures/user-mid.mid tools/qbe/fixtures/user-mid2.mid
+# M3fix-4 (b): the INVERSE row — a user .mid `call` naming a key that resolves
+# at J2 but is NO defun of this program.  QBE_NOMIDRT=1 withholds the Mid Rt
+# program, so the exported key `Rt.read-file-as-string` has nothing behind it;
+# the compile must refuse loudly, naming the key.  run_midref greps the REFUSAL
+# MESSAGE ('not a defun of this program'), so a J2-level failure cannot satisfy
+# the row.
+run_midref midcallmissing MidCallMissing.main tools/qbe/fixtures/midcallmissing.elm tools/qbe/fixtures/midcallmissing.mid 'not a defun of this program' QBE_NOMIDRT=1
 # churn: 150k conses = ~13.2MB live, just under the CHURN_MB minimum heap, so
 # the gc-churn stress rerun collects/promotes constantly and still fits the
 # reservation; 500k at the default heap is the identity run.
