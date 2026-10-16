@@ -877,7 +877,7 @@ checks =
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
     , check "rt program: 150 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram True True True) == 152
+        (List.length (rtProgram True True True) == 153
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram True True True)
             && List.any
                 (\d ->
@@ -1254,13 +1254,52 @@ checks =
             Err _ ->
                 False
         )
+    , check "A3a surface Rt.main: the driver body is in the surface-spliced program (a Let chain reaching the usage rawstr — the A1 stub was a bare Lit 0 placeholder; a parse/check failure would shrink rtProgram to [] and this goes red)"
+        (case defunByKey "Rt.main" driverProg of
+            Just { value } ->
+                case value of
+                    Lam l ->
+                        case l.body of
+                            Let _ ->
+                                True
+
+                            _ ->
+                                False
+
+                    _ ->
+                        False
+
+            Nothing ->
+                False
+        )
+    , check "A3a MIDDRIVER emission — message DATA: the module carries the usage and toomany messages as content-keyed data defs (the exact frozen-golden bytes, err-usage.txt / err-toomany.txt)"
+        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+            Ok mod ->
+                (List.any (\d -> List.member (Il.DStr "usage: <prog> <entry-name> [int|float-arg ...]\n") d.items) mod.datas)
+                    && (List.any (\d -> List.member (Il.DStr "qbe-rt: >16 entry args not supported\n") d.items) mod.datas)
+
+            Err _ ->
+                False
+        )
+    , check "A3a MIDDRIVER emission — the error paths CALL write and exit: the rendered .ssa contains a call to $write and $exit (usage/toomany write fd-2 then exit 2)"
+        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+            Ok mod ->
+                let
+                    ssa =
+                        Print.print mod
+                in
+                String.contains "call $write" ssa && String.contains "call $exit" ssa
+
+            Err _ ->
+                False
+        )
     , check "A1 rawAbi arity record totality: rawAbiArity's keys are EXACTLY the rawAbi set, and each recorded arity matches the defun's Lam params (Rt.die 1 / Rt.halt 0 / Rt.main 2) — a param added without touching the record is a compile Err"
         (Dict.keys Rt.rawAbiArity == Set.toList Rt.rawAbi
             && (case ( Dict.get "Rt.die" Rt.rawAbiArity, Dict.get "Rt.halt" Rt.rawAbiArity, Dict.get "Rt.main" Rt.rawAbiArity ) of
                     ( Just dieN, Just haltN, Just mainN ) ->
                         (dieN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.die" driverProg)))
                             && (haltN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.halt" driverProg)))
-                            && (mainN == lamArity rtMainStub)
+                            && (mainN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.main" driverProg)))
 
                     _ ->
                         False
@@ -1283,7 +1322,7 @@ checks =
     , check "U2 fix 3 — MIDGC x MIDDRIVER dedupe: the seed halves overlap (Rt.cStrLenGo in the prim AND driver/gc closure, Rt.die in gc AND driver) and the one cross-boundary `unique` leaves EXACTLY ONE q_Rt_x2edie and ONE q_Rt_x2ecStrLenGo in the module"
         (let
             prog =
-                rtProgram True True True ++ rtProgramGc True True True ++ [ rtMainStub ]
+                rtProgram True True True ++ rtProgramGc True True True
          in
          case QbeLower.lower False False False True True True True True True QbeTypes.empty (rtArities prog) prog "Rt.allocVector" of
             Ok mod ->
@@ -2913,7 +2952,7 @@ checks =
                       "Rt.gcDrain", "Rt.gcInit", "Rt.gcMarkPtr", "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcScanValueArray", "Rt.gcSweep",
                       "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot", "Rt.globIsDotDot",
                       "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess", "Rt.halt", "Rt.intern",
-                      "Rt.isChildBuiltin", "Rt.memGo", "Rt.mkTmpAt", "Rt.nameBytes", "Rt.numText", "Rt.number?", "Rt.open",
+                      "Rt.isChildBuiltin", "Rt.main", "Rt.memGo", "Rt.mkTmpAt", "Rt.nameBytes", "Rt.numText", "Rt.number?", "Rt.open",
                       "Rt.openBodyTmpfile", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo", "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind",
                       "Rt.recAppendNamesGo", "Rt.recGet", "Rt.recGetGo", "Rt.recInsert", "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd",
                       "Rt.recUpdCopy", "Rt.recUpdFind", "Rt.repGo", "Rt.repeat", "Rt.revGo", "Rt.runBuiltinInprocess", "Rt.setenv", "Rt.shen.bytes->string", "Rt.shen.str->bytes", "Rt.snd", "Rt.str", "Rt.strOf",
@@ -2975,7 +3014,7 @@ checks =
     -- is now the append below; the loud Err moved to the key-agreement walk
     -- (row C), which is the collision/rename class the orphan check guarded.
     , check
-        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the two stage-6 U2 keys (Rt.die, Rt.halt) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ [Rt.die, Rt.halt] and COUNT is union+2 (so the emitted .ssa order is pinned)"
+        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the three stage-6 keys (Rt.die, Rt.halt, Rt.main) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ [Rt.die, Rt.halt, Rt.main] and COUNT is union+3 (so the emitted .ssa order is pinned)"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -2997,7 +3036,7 @@ checks =
                             in
                             case Rt.spliceSurface s union of
                                 Ok spliced ->
-                                    List.map .key spliced == List.map .key union ++ [ "Rt.die", "Rt.halt" ]
+                                    List.map .key spliced == List.map .key union ++ [ "Rt.die", "Rt.halt", "Rt.main" ]
 
                                 Err _ ->
                                     False
@@ -5726,32 +5765,15 @@ rawAbiValueMisuse =
     }
 
 
-{-| The Rt.main INTERFACE stub (stage 6 A1): the rawAbi defun with the
-driver's two WORD params (argc, argv) and a word result.  Its BODY is a
-placeholder number — the real body (usage error, rlimit, knobs, meta walk,
-entry call) is A3a's job.  The A1 pins read only its SIGNATURE (params/
-ret-class/export-name/seed), so this is a fixture, not a driver body.
-Appended to the program the MIDDRIVER rows lower, so the `driverSeeds`
-entry for Rt.main resolves (before A3a, QBE_MIDDRIVER=1 fails loudly with
-"unknown global Rt.main" — the intended intermediate state).
--}
-rtMainStub : Defun
-rtMainStub =
-    { key = "Rt.main"
-    , value =
-        Lam
-            { params = [ { id = 0, name = "argc" }, { id = 1, name = "argv" } ]
-            , body = Lit (LNumber 0)
-            }
-    }
-
-
-{-| The prim half + the Rt.main stub, for rows that lower WITH the driver
-hatch (QBE_MIDDRIVER=1) — the stub resolves the driverSeeds entry.
+{-| The prim half, for rows that lower WITH the driver hatch
+(QBE_MIDDRIVER=1).  Since stage 6 A3a, Rt.main has a REAL surface body (the
+A3a slice: usage + toomany + rlimit), so it is already part of `rtProgram` —
+the A1 `rtMainStub` stand-in is gone (appending it would now emit a SECOND
+Rt.main and a duplicate `main` symbol).
 -}
 driverProg : List Defun
 driverProg =
-    rtProgram True True True ++ [ rtMainStub ]
+    rtProgram True True True
 
 
 {-| A RawCallAgg whose callee is a FUNCTION symbol (stage 6 A1b, the

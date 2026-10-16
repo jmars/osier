@@ -378,6 +378,65 @@ run_err() {
   echo "PASS $name: golden + exit $rc (${nat_out:0:80})"
 }
 
+# run_err_md — a DRIVER ERROR-PATH row under QBE_MIDDRIVER=1: the MID-WRITTEN
+# Rt.main driver's usage/toomany error paths must be BYTE-IDENTICAL to the
+# default (Zig main) route, so it reads the SAME golden the run_err row froze
+# (the row name is the label; the golden name is the explicit 2nd arg).
+# The build is qbe-mk.sh's own node/qbe/cc pipeline with ONE deviation: rt.o's
+# Zig `main` is stripped (objcopy --strip-symbol=main) from a COPY before the
+# link, because under MIDDRIVER the .ssa ALSO exports `main` (Rt.main) and the
+# plain `cc .s rt.o` dies "multiple definition of `main'".  This is the stage-6
+# A3a temporary resolution — the Zig main is DELETED at B4 (re-plan), so the
+# strip goes away then.  It is SURGICAL (only `main`): any OTHER duplicate
+# symbol still fails the link loudly, unlike --allow-multiple-definition.
+run_err_md() {
+  local name="$1" golden="$2" entry="$3" fixture="$4" want_rc="$5"; shift 5
+  local cli=("$@")
+  local src rt_path rt_nomain ssa bin nat_out rc exp
+  src="$ROOT/$fixture"
+  [ -f "$src" ] || { echo "FAIL $name: no source: $src"; FAIL=1; return; }
+  rt_path="$("$ROOT/tools/qbe/rt-o.sh")" || {
+    echo "FAIL $name: rt-o"; FAIL=1; return
+  }
+  rt_nomain="$TMP/$name-rt.o"
+  cp "$rt_path" "$rt_nomain" && objcopy --strip-symbol=main "$rt_nomain" || {
+    echo "FAIL $name: objcopy --strip-symbol=main"; FAIL=1; return
+  }
+  ssa="$TMP/$name.ssa"
+  (cd "$ROOT/elm-compiler" &&
+    QBE=1 QBE_ENTRY="$entry" QBE_MIDDRIVER=1 node run.js "$src" "$ssa") >&2 || {
+    echo "FAIL $name: qbe-mk (QBE_MIDDRIVER=1)"; FAIL=1; return
+  }
+  case "$(head -c 4 "$ssa")" in
+    "err "*) echo "FAIL $name: compile failed: $(cat "$ssa")"; FAIL=1; return;;
+  esac
+  "$ROOT/vendor/qbe/qbe" "$ssa" > "$TMP/$name.s"
+  bin="$TMP/$name"
+  cc "$TMP/$name.s" "$rt_nomain" -o "$bin" -lc || {
+    echo "FAIL $name: link"; FAIL=1; return
+  }
+  nat_out="$(timeout 60 "$bin" "${cli[@]}" 2>&1)"
+  rc=$?
+  if [ "$FREEZE" = 1 ]; then
+    echo "FAIL $name: a MIDDRIVER row's golden is the DEFAULT route's ($golden.txt) — freeze would write the wrong provenance; refreeze the run_err row, not this one"
+    FAIL=1; return
+  fi
+  exp="$(golden_read "$golden")"
+  if [ "$exp" = "__NO_GOLDEN__" ]; then
+    echo "FAIL $name: no golden at $GOLDEN/$golden.txt"
+    FAIL=1; return
+  fi
+  if [ "$nat_out" != "$exp" ]; then
+    echo "FAIL $name: golden='$exp' midriver='$nat_out'"
+    FAIL=1; return
+  fi
+  if [ "$rc" -ne "$want_rc" ]; then
+    echo "FAIL $name: exit=$rc want=$want_rc (output matched — the exit code is the pinned half)"
+    FAIL=1; return
+  fi
+  echo "PASS $name: golden + exit $rc (${nat_out:0:80})"
+}
+
 # ---- the slice fixtures (in-scope constructs only) ----
 run fib        Fib.fib          tests/elm-fixtures/fib.elm 10
 run fib20      Fib.fib          tests/elm-fixtures/fib.elm 20
@@ -576,6 +635,14 @@ run_err err-toomany      Const42.main tools/qbe/fixtures/const42.elm 2 Const42.m
 # arg takes the float path, everything else the int path — pin both refusals.
 run_err err-badarg-int   Const42.main tools/qbe/fixtures/const42.elm 2 Const42.main abc
 run_err err-badarg-float Const42.main tools/qbe/fixtures/const42.elm 2 Const42.main 2.5.3
+
+# ---- stage-6 A3a: the MID-WRITTEN DRIVER (Rt.main) error paths, QBE_MIDDRIVER=1 ----
+# The SAME two argument-error paths, pinned under the MID driver: byte-identical
+# to the default-route goldens above (the A3a slice is usage + toomany + rlimit;
+# the meta walk/args/entry/boot are A3b/A4a, so a NORMAL entry run would return
+# 0 without printing — these two rows exercise exactly the slice's error paths).
+run_err_md md-err-usage   err-usage   Const42.main tools/qbe/fixtures/const42.elm 2
+run_err_md md-err-toomany err-toomany Const42.main tools/qbe/fixtures/const42.elm 2 Const42.main 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17
 
 # ---- stage 4: the effect loop (StreamRef) + host I/O (golden-pinned) ----
 # io-read: read a file (QBE_IO_IN) and write a stdout sentinel through the

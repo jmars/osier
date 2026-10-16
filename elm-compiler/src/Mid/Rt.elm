@@ -745,6 +745,13 @@ rtDeps =
           -- the only RawCall edge.
           ( "Rt.die", [ "Rt.cStrLenGo" ] )
         , ( "Rt.halt", [ "Rt.cStrLenGo" ] )
+        , -- ===== the stage-6 A3a driver entry.  Rt.main is a rawAbi defun
+          -- (WORD argc/argv in, WORD exit-code out) reached from
+          -- driverSeeds; its ONLY RawCall edge is Rt.cStrLenGo (the two
+          -- error messages' lengths).  Everything else it reaches is a
+          -- rawcall (write/exit/getenv/getrlimit/setrlimit/malloc) or a
+          -- rawstr static data def — neither is an rtDeps edge.
+          ( "Rt.main", [ "Rt.cStrLenGo" ] )
         ]
 
 

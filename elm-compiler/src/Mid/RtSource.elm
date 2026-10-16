@@ -4505,4 +4505,86 @@ source =
     , "  rawcall exit(1);"
     , "  return 0;"
     , "}"
+    , -- ====================== stage 6 A3a — the driver entry Rt.main (first slice) ======================
+      -- Rt.main is a rawAbi defun (Mid.Rt.rawAbi): WORD params (argc, argv),
+      -- WORD result (the exit code crt0 reads back), exported as `main`
+      -- (Lower's export-name override, stage 6 A1).  This slice lands the
+      -- usage error, the too-many-args error and the rlimit net — byte-parity
+      -- with tools/qbe/rt.zig's main (rt.zig:1745-1756 + 1762-1782).  A3b
+      -- continues after the marker with rt_boot + the meta walk.
+      --
+      -- TWO SHAPE DEVIATIONS, each measured on the lowerer and stated:
+      -- (D-A) the conditionals are EIfBlock EXPRESSIONS (`word x = if (c) {..}
+      -- else {..};`, branches `return 0;` — the WORD this -> word defun's J6
+      -- pins every return to), NOT mid-block `if` STATEMENTS: `lowerTailWord`
+      -- (Lower.elm:1467) lowers a rawAbi tail through the raw-word path and
+      -- REJECTS a tail `If`, and a statement-`if` else-nests its continuation
+      -- so the `If` lands in the TAIL — the one place rawAbi cannot lower it.
+      -- An EIfBlock lands its `If` in a BINDER value position (lowered via
+      -- lowerVal/lowerIf, the growB shape at RtSource:4170), never the tail.
+      -- (D-B) the rlimit buffer is `rawcall malloc(16)`, NOT `allocraw(16)`:
+      -- `allocraw` lowers to rt_raw_alloc -> g.allocRaw (the Zig Gc), which is
+      -- only valid AFTER rt_boot has run Gc.init — and rt.zig's rlimit net
+      -- runs BEFORE boot, over a stack-local rlim struct (rt.zig:1749-1751).
+      -- The Mid surface has no stack local, so a libc malloc'd 16-byte block
+      -- (cur@0, max@8 — rlim_t is u64 on x86_64) is the faithful no-collector
+      -- translation, sound before boot.  The re-plan's "allocRaw(16)" was a
+      -- projection; this is the correction.
+      --
+      -- Byte-parity facts (frozen goldens, tools/qbe/golden/err-usage.txt and
+      -- err-toomany.txt): BOTH errors are a SINGLE write of the whole message
+      -- (rt.zig's werr does write(2, msg.ptr, msg.len) — the trailing "\n" is
+      -- part of the literal, NOT a second write), then exit(2).  The usage
+      -- path must NOT boot a collector (byte-parity with the pre-A2 driver);
+      -- neither error path does — both exit before the A3b boot marker.
+      "defun Rt.main(argc : word, argv : word) -> word {"
+    , "  word usage = rawstr(\"usage: <prog> <entry-name> [int|float-arg ...]\\n\");"
+    , "  word toomany = rawstr(\"qbe-rt: >16 entry args not supported\\n\");"
+    , "  word u = if (mkbool(argc < 2)) {"
+    , "    val len = call Rt.cStrLenGo(mknum(usage), mknum(0));"
+    , "    rawcall write(2, usage, payload(len, 0));"
+    , "    rawcall exit(2);"
+    , "    return 0;"
+    , "  } else {"
+    , "    return 0;"
+    , "  };"
+    , "  word nargs = argc - 2;"
+    , "  word argvMode = rawcall getenv(rawstr(\"AOTRUN_ARGV\"));"
+    , "  word t = if (mkbool(argvMode == 0) && mkbool(nargs > 16)) {"
+    , "    val len2 = call Rt.cStrLenGo(mknum(toomany), mknum(0));"
+    , "    rawcall write(2, toomany, payload(len2, 0));"
+    , "    rawcall exit(2);"
+    , "    return 0;"
+    , "  } else {"
+    , "    return 0;"
+    , "  };"
+    , -- the rlimit net (rt.zig:1745-1756, verbatim shape): raise RLIMIT_STACK
+      -- soft limit to 64 MiB unless QBE_NO_RLIMIT is set; best-effort — every
+      -- failure arm is silently swallowed, matching Zig's `else |_| {}`.
+      "  word lim = rawcall malloc(16);"
+    , "  word qnl = rawcall getenv(rawstr(\"QBE_NO_RLIMIT\"));"
+    , "  word rl = if (mkbool(qnl == 0)) {"
+    , "    word rc = rawcall getrlimit(3, lim);"
+    , "    word rl2 = if (mkbool(rc == 0)) {"
+    , "      word cur = wload(lim, 0);"
+    , "      word rl3 = if (mkbool(cur < 67108864)) {"
+    , "        wstore(lim, 0, 67108864);"
+    , "        rawcall setrlimit(3, lim);"
+    , "        return 0;"
+    , "      } else {"
+    , "        return 0;"
+    , "      };"
+    , "      return 0;"
+    , "    } else {"
+    , "      return 0;"
+    , "    };"
+    , "    return 0;"
+    , "  } else {"
+    , "    return 0;"
+    , "  };"
+    , -- MARKER: the next slice (A3b) continues here — rt_boot() (no args, the
+      -- A2 seat; boot ORDER is load-bearing and preserved by this position),
+      -- then Rt.cStrEq + the qbe_meta walk + the not-in-meta error.
+      "  return 0;"
+    , "}"
     ]
