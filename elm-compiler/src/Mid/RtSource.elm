@@ -4505,6 +4505,67 @@ source =
     , "  rawcall exit(1);"
     , "  return 0;"
     , "}"
+    , -- ====================== stage 6 A3b — the meta walk (Rt.cStrEq + Rt.cStrEqGo + Rt.metaGo) ======================
+      -- Rt.cStrEq(a,b) — a DYNAMIC cStr-vs-cStr byte compare, WORD in / WORD
+      -- out (a rawAbi defun, Mid.Rt.rawAbi — the meta walk compares two raw
+      -- pointers, so a word ABI keeps the call site unboxed).  The byte walk
+      -- is delegated to Rt.cStrEqGo, a val-ABI helper: rawAbi defuns CANNOT
+      -- self-tail (lowerTailWord rejects a tail App/If, the A3a D-A wall), and
+      -- the lean ABI bounds val defuns to maxDirectArity=3 params (Lower.elm
+      -- :1140) — so the loop lives in a 3-ary val defun that `recur`s.
+      --
+      -- DEVIATION from the plan's "lengths via cStrLenGo + word-chunk loop":
+      -- that sketch needs a 5-ary accumulator helper, which the 3-param lean
+      -- ABI cannot spell, and a naive word-chunk compare reads past the NUL
+      -- terminator and FALSE-NEGATIVES on equal strings with differing
+      -- trailing bytes.  The NUL-terminated byte compare (the EXACT
+      -- Rt.cStrEqLit shape above) is correct for the empty string (both NUL
+      -- at once) and unequal lengths (one hits NUL first) with no length
+      -- pass — byte-parity-identical on the found/not-found result.
+      "defun Rt.cStrEq(a : word, b : word) -> word {"
+    , "  val eq = call Rt.cStrEqGo(mknum(a), mknum(b), mknum(0));"
+    , "  return payload(eq, 0);"
+    , "}"
+    , ""
+    , -- Rt.cStrEqGo — the NUL-terminated byte walk (Rt.cStrEqLit's shape, two
+      -- dynamic pointers).  Self-tail (recur): frame-free, non-allocating, so
+      -- no safepoint can move a/b.
+      "defun Rt.cStrEqGo(a : val, b : val, i : val) -> val {"
+    , "  word xa = byteload(payload(a, 0), payload(i, 0));"
+    , "  word xb = byteload(payload(b, 0), payload(i, 0));"
+    , "  if (mkbool(xb == 0)) {"
+    , "    return mkbool(xa == 0);"
+    , "  }"
+    , "  if (mkbool(xa == xb)) {"
+    , "    recur(a, b, mknum(payload(i, 0) + 1));"
+    , "  }"
+    , "  return false;"
+    , "}"
+    , ""
+    , -- Rt.metaGo — walk the 24-byte qbe_meta rows (name@0, code@8, arity@16,
+      -- 4 B pad — Mid.Qbe.Lower.metaTable).  The 3-word C-block carries the
+      -- FIXED state ([0]=base, [1]=entry, [2]=n — the Rt.memGo block idiom,
+      -- which is how 3+ words of loop state fit the 3-param lean ABI); `i` is
+      -- the index param.  Each row's name is compared against the entry via
+      -- Rt.cStrEq; a match returns mkbool(1) (early return — the found flag
+      -- needs no accumulator, and the notmeta bytes depend only on found/
+      -- not-found, so the early exit is byte-parity-invisible).  Exhaustion
+      -- returns mkbool(0).  Self-tail (recur); frame-free, non-allocating.
+      "defun Rt.metaGo(blk : val, i : val) -> val {"
+    , "  word nW = wload(payload(blk, 0), 2);"
+    , "  if (mkbool(payload(i, 0) >= nW)) {"
+    , "    return mkbool(0);"
+    , "  }"
+    , "  word baseW = wload(payload(blk, 0), 0);"
+    , "  word entryW = wload(payload(blk, 0), 1);"
+    , "  word row = baseW + (payload(i, 0) * 24);"
+    , "  word nameW = wload(row, 0);"
+    , "  word eq = call Rt.cStrEq(nameW, entryW);"
+    , "  if (mkbool(eq != 0)) {"
+    , "    return mkbool(1);"
+    , "  }"
+    , "  recur(blk, mknum(payload(i, 0) + 1));"
+    , "}"
     , -- ====================== stage 6 A3a — the driver entry Rt.main (first slice) ======================
       -- Rt.main is a rawAbi defun (Mid.Rt.rawAbi): WORD params (argc, argv),
       -- WORD result (the exit code crt0 reads back), exported as `main`
@@ -4582,9 +4643,55 @@ source =
     , "  } else {"
     , "    return 0;"
     , "  };"
-    , -- MARKER: the next slice (A3b) continues here — rt_boot() (no args, the
+    , -- ====================== stage 6 A3b — the meta walk + not-in-meta error ======================
+      -- Byte-parity with rt.zig main's meta scan (rt.zig:1834-1846) and its
+      -- not-in-meta error (rt.zig:1848-1852).  qbe_meta and qbe_meta_len are
+      -- the EXPORTED data symbols Mid.Qbe.Lower.metaTable emits; `rawsym` is
+      -- the surface's only route to `Il.Sym <name>` VERBATIM (the A1b RawSym
+      -- node — documented as a FUNCTION-symbol address, but the mechanism is
+      -- symbol-type-agnostic and yields exactly `$qbe_meta`/`$qbe_meta_len`,
+      -- a data symbol's ADDRESS as a word).  wload of qbe_meta reads its ONE
+      -- word — the `l $meta_rows` pointer — the row base; wload of
+      -- qbe_meta_len reads the count.  entry = argv[1] (argc >= 2 already).
+      --
+      -- rt_boot() is DELIBERATELY NOT called here: the meta walk and the
+      -- not-in-meta error are allocation-free (the byte compare is a
+      -- frame-free val loop, no safepoint), so the collector is not needed
+      -- for byte-parity — rt.zig's notmeta path boots first but prints
+      -- nothing by default.  A4a inserts rt_boot() at this position (its
+      -- position IS load-bearing for the args/entry dispatch that follows).
+      --
+      -- The not-in-meta error is THREE writes (prefix + entry name + suffix)
+      -- — the exact byte stream rt.zig's bufPrint + werr emits in one write
+      -- (golden err-notmeta.txt: "qbe-rt: entry 'NoSuch.entry' not in
+      -- qbe_meta\n", 45 bytes = 15 + 12 + 18).
+      "  word entry = wload(argv, 1);"
+    , "  word base = wload(rawsym(\"qbe_meta\"), 0);"
+    , "  word metaN = wload(rawsym(\"qbe_meta_len\"), 0);"
+    , "  word mblk = rawcall malloc(24);"
+    , "  wstore(mblk, 0, base);"
+    , "  wstore(mblk, 1, entry);"
+    , "  wstore(mblk, 2, metaN);"
+    , "  val found = call Rt.metaGo(mknum(mblk), mknum(0));"
+    , "  word nf = if (mkbool(payload(found, 0) == 0)) {"
+    , "    word pre = rawstr(\"qbe-rt: entry '\");"
+    , "    val plen = call Rt.cStrLenGo(mknum(pre), mknum(0));"
+    , "    rawcall write(2, pre, payload(plen, 0));"
+    , "    val elen = call Rt.cStrLenGo(mknum(entry), mknum(0));"
+    , "    rawcall write(2, entry, payload(elen, 0));"
+    , "    word suf = rawstr(\"' not in qbe_meta\\n\");"
+    , "    val slen = call Rt.cStrLenGo(mknum(suf), mknum(0));"
+    , "    rawcall write(2, suf, payload(slen, 0));"
+    , "    rawcall exit(2);"
+    , "    return 0;"
+    , "  } else {"
+    , "    return 0;"
+    , "  };"
+    , -- MARKER: the next slice (A4a) continues here — rt_boot() (no args, the
       -- A2 seat; boot ORDER is load-bearing and preserved by this position),
-      -- then Rt.cStrEq + the qbe_meta walk + the not-in-meta error.
+      -- then the arg parse (rt_parse_arg), the argv install (rt_argv_install),
+      -- the 17-arm entry dispatch (RawCallAgg 'ret' q_Rt_x2ecallN) and the
+      -- rt_bounce call.  A4b takes program/print.
       "  return 0;"
     , "}"
     ]

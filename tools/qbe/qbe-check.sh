@@ -643,6 +643,10 @@ run_err err-badarg-float Const42.main tools/qbe/fixtures/const42.elm 2 Const42.m
 # 0 without printing — these two rows exercise exactly the slice's error paths).
 run_err_md md-err-usage   err-usage   Const42.main tools/qbe/fixtures/const42.elm 2
 run_err_md md-err-toomany err-toomany Const42.main tools/qbe/fixtures/const42.elm 2 Const42.main 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17
+# stage-6 A3b: the meta walk + not-in-meta error under the MID driver — the
+# entry name is not in qbe_meta, so the THREE-write emission (prefix + entry +
+# suffix) must byte-match the default route's bufPrint golden err-notmeta.txt.
+run_err_md md-err-notmeta err-notmeta Const42.main tools/qbe/fixtures/const42.elm 2 NoSuch.entry
 
 # ---- stage 4: the effect loop (StreamRef) + host I/O (golden-pinned) ----
 # io-read: read a file (QBE_IO_IN) and write a stdout sentinel through the

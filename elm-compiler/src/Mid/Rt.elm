@@ -745,13 +745,25 @@ rtDeps =
           -- the only RawCall edge.
           ( "Rt.die", [ "Rt.cStrLenGo" ] )
         , ( "Rt.halt", [ "Rt.cStrLenGo" ] )
+        , -- ===== the stage-6 A3b meta-walk family.  Rt.cStrEq is a rawAbi
+          -- defun (WORD a/b in, WORD 0/1 out) — the meta walk's dynamic
+          -- cStr-vs-cStr compare — reached from Rt.metaGo (the 24-B-row
+          -- walker); its ONLY RawCall edge is Rt.cStrEqGo (the val-ABI
+          -- NUL-terminated byte loop).  Rt.cStrEqGo and Rt.metaGo self-tail
+          -- via recur (no RawCall edge) so neither names itself here (the
+          -- cStrFill/cStrLenGo rule above).
+          ( "Rt.cStrEq", [ "Rt.cStrEqGo" ] )
+        , ( "Rt.cStrEqGo", [] )
+        , ( "Rt.metaGo", [ "Rt.cStrEq" ] )
         , -- ===== the stage-6 A3a driver entry.  Rt.main is a rawAbi defun
           -- (WORD argc/argv in, WORD exit-code out) reached from
-          -- driverSeeds; its ONLY RawCall edge is Rt.cStrLenGo (the two
-          -- error messages' lengths).  Everything else it reaches is a
-          -- rawcall (write/exit/getenv/getrlimit/setrlimit/malloc) or a
-          -- rawstr static data def — neither is an rtDeps edge.
-          ( "Rt.main", [ "Rt.cStrLenGo" ] )
+          -- driverSeeds; its RawCall edges are Rt.cStrLenGo (the three
+          -- not-in-meta writes' lengths) and Rt.metaGo (the meta walk).  The
+          -- usage/toomany error paths reached cStrLenGo before A3b; A3b adds
+          -- the meta-walk edge.  Everything else it reaches is a rawcall
+          -- (write/exit/getenv/getrlimit/setrlimit/malloc) or a rawstr static
+          -- data def — neither is an rtDeps edge.
+          ( "Rt.main", [ "Rt.cStrLenGo", "Rt.metaGo" ] )
         ]
 
 
@@ -824,7 +836,8 @@ the frame/apply/driver family.
 rawAbi : Set String
 rawAbi =
     Set.fromList
-        [ "Rt.die"
+        [ "Rt.cStrEq"
+        , "Rt.die"
         , "Rt.halt"
         , "Rt.main"
         ]
@@ -843,7 +856,8 @@ Mid.Qbe.Lower.rawAbiRetClass, not here).  Rt.main's 2 = argc + argv.
 rawAbiArity : Dict String Int
 rawAbiArity =
     Dict.fromList
-        [ ( "Rt.die", 1 )
+        [ ( "Rt.cStrEq", 2 )
+        , ( "Rt.die", 1 )
         , ( "Rt.halt", 0 )
         , ( "Rt.main", 2 )
         ]

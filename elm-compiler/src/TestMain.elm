@@ -877,7 +877,7 @@ checks =
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
     , check "rt program: 150 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram True True True) == 153
+        (List.length (rtProgram True True True) == 156
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram True True True)
             && List.any
                 (\d ->
@@ -1067,11 +1067,14 @@ checks =
     -- calls.  A :val-shaped arg or an under-applied call here is a SILENT
     -- MISCOMPILE (the callee reads a garbage register), so the emitted
     -- shapes are pinned, not just "it links".
-    , check "rawAbi set + classification: Rt.die/Rt.halt/Rt.main are the word-ABI keys and the die/halt pair are frame-free (a die path must not reach a safepoint; Rt.main's allocating classification arrives with its A3a body)"
+    , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main are the word-ABI keys and the die/halt/cStrEq set are frame-free (a die path must not reach a safepoint; the meta-walk compare is non-allocating so it stays frame-free too; Rt.main's allocating classification arrives with its A4a body)"
         (Rt.rawAbi
-            == Set.fromList [ "Rt.die", "Rt.halt", "Rt.main" ]
+            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main" ]
             && not (Set.member "Rt.die" Rt.allocating)
             && not (Set.member "Rt.halt" Rt.allocating)
+            && not (Set.member "Rt.cStrEq" Rt.allocating)
+            && not (Set.member "Rt.cStrEqGo" Rt.allocating)
+            && not (Set.member "Rt.metaGo" Rt.allocating)
         )
     , check "rawAbi emission shape: Rt.die (1 word param) emits (params [a0:l], ret l, frame-free alloc scratch)"
         (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.die" of
@@ -1191,11 +1194,14 @@ checks =
             Err _ ->
                 False
         )
-    , check "A1 driverSeeds: Rt.main is seeded alongside the Rt.die/Rt.halt closure (keepRtDependencies keeps the leaf) — the driver entry is reachable under QBE_MIDDRIVER=1"
+    , check "A1 driverSeeds: Rt.main is seeded alongside the Rt.die/Rt.halt closure (keepRtDependencies keeps the leaf) — the driver entry is reachable under QBE_MIDDRIVER=1; A3b extends the closure with the meta-walk family (Rt.metaGo -> Rt.cStrEq -> Rt.cStrEqGo)"
         (List.member "Rt.main" Rt.driverSeeds
             && List.member "Rt.die" Rt.driverSeeds
             && List.member "Rt.halt" Rt.driverSeeds
             && List.member "Rt.cStrLenGo" Rt.driverSeeds
+            && List.member "Rt.metaGo" Rt.driverSeeds
+            && List.member "Rt.cStrEq" Rt.driverSeeds
+            && List.member "Rt.cStrEqGo" Rt.driverSeeds
         )
     , check "A1b RawCallAgg FUNCTION-symbol accept: a RawSym callee (not just a temp) lowers to Call (Just _) (Agg \"val\") (Il.Sym \"rt_bounce\") [word] — the code label, never a dN data ref"
         (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggSymProbe ] "Rt.rawCallAggSymProbe" of
@@ -1293,17 +1299,50 @@ checks =
             Err _ ->
                 False
         )
-    , check "A1 rawAbi arity record totality: rawAbiArity's keys are EXACTLY the rawAbi set, and each recorded arity matches the defun's Lam params (Rt.die 1 / Rt.halt 0 / Rt.main 2) — a param added without touching the record is a compile Err"
+    , check "A1 rawAbi arity record totality: rawAbiArity's keys are EXACTLY the rawAbi set, and each recorded arity matches the defun's Lam params (Rt.cStrEq 2 / Rt.die 1 / Rt.halt 0 / Rt.main 2) — a param added without touching the record is a compile Err"
         (Dict.keys Rt.rawAbiArity == Set.toList Rt.rawAbi
-            && (case ( Dict.get "Rt.die" Rt.rawAbiArity, Dict.get "Rt.halt" Rt.rawAbiArity, Dict.get "Rt.main" Rt.rawAbiArity ) of
-                    ( Just dieN, Just haltN, Just mainN ) ->
-                        (dieN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.die" driverProg)))
+            && (Maybe.map4
+                    (\eqN dieN haltN mainN ->
+                        (eqN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.cStrEq" driverProg)))
+                            && (dieN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.die" driverProg)))
                             && (haltN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.halt" driverProg)))
                             && (mainN == Maybe.withDefault -1 (Maybe.map lamArity (defunByKey "Rt.main" driverProg)))
-
-                    _ ->
-                        False
+                    )
+                    (Dict.get "Rt.cStrEq" Rt.rawAbiArity)
+                    (Dict.get "Rt.die" Rt.rawAbiArity)
+                    (Dict.get "Rt.halt" Rt.rawAbiArity)
+                    (Dict.get "Rt.main" Rt.rawAbiArity)
+                    == Just True
                )
+        )
+    , check "A3b surface defuns: Rt.cStrEq (rawAbi word,word->word), Rt.cStrEqGo (val byte loop) and Rt.metaGo (val row walker) are in the surface-spliced driver program — a parse/check failure would shrink rtProgram to [] and this goes red"
+        (case ( defunByKey "Rt.cStrEq" driverProg, defunByKey "Rt.cStrEqGo" driverProg, defunByKey "Rt.metaGo" driverProg ) of
+            ( Just _, Just _, Just _ ) ->
+                True
+
+            _ ->
+                False
+        )
+    , check "A3b MIDDRIVER emission — the notmeta DATA: the module carries the not-in-meta prefix and suffix as content-keyed data defs (the exact frozen-golden bytes of err-notmeta.txt split at the entry name)"
+        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+            Ok mod ->
+                (List.any (\d -> List.member (Il.DStr "qbe-rt: entry '") d.items) mod.datas)
+                    && (List.any (\d -> List.member (Il.DStr "' not in qbe_meta\n") d.items) mod.datas)
+
+            Err _ ->
+                False
+        )
+    , check "A3b MIDDRIVER emission — the meta walk reads the exported table: the rendered .ssa references $qbe_meta and $qbe_meta_len (the wload base/count of the walk)"
+        (case QbeLower.lower False False False True True True True False True QbeTypes.empty (rtArities driverProg) driverProg "Rt.main" of
+            Ok mod ->
+                let
+                    ssa =
+                        Print.print mod
+                in
+                String.contains "$qbe_meta" ssa && String.contains "$qbe_meta_len" ssa
+
+            Err _ ->
+                False
         )
 
     -- STAGE 6 U2 fix 3: MIDGC x MIDDRIVER MUST DEDUPE ACROSS the seed lists.
@@ -2941,7 +2980,7 @@ checks =
                       "Rt.applyRedirects", "Rt.asF", "Rt.assoc", "Rt.assocGo", "Rt.bitwise-and", "Rt.bitwise-not", "Rt.bitwise-or",
                       "Rt.bitwise-shift-left", "Rt.bitwise-shift-right", "Rt.bitwise-shift-right-zf", "Rt.bitwise-xor",
                       "Rt.bodyWriteGo", "Rt.bytesBuild", "Rt.bytesEqGo", "Rt.bytesOf",
-                      "Rt.bytesToStr", "Rt.c-strlen", "Rt.cStrCopyGo", "Rt.cStrEqLit", "Rt.cStrFill", "Rt.cStrLenGo",
+                      "Rt.bytesToStr", "Rt.c-strlen", "Rt.cStrCopyGo", "Rt.cStrEq", "Rt.cStrEqGo", "Rt.cStrEqLit", "Rt.cStrFill", "Rt.cStrLenGo",
                       "Rt.cd", "Rt.char-code", "Rt.childBuiltin", "Rt.childCd",
                       "Rt.childPwd", "Rt.close", "Rt.closeCmdTmpfds", "Rt.closeOthersGo", "Rt.closePipeTmpfds", "Rt.closePipesGo", "Rt.closure",
                       "Rt.closureFill", "Rt.cn", "Rt.cn2", "Rt.collect", "Rt.con", "Rt.conFill", "Rt.cons", "Rt.cons?", "Rt.countL", "Rt.deepEq", "Rt.dgs", "Rt.die", "Rt.echoGo", "Rt.empty?",
@@ -2952,7 +2991,7 @@ checks =
                       "Rt.gcDrain", "Rt.gcInit", "Rt.gcMarkPtr", "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcScanValueArray", "Rt.gcSweep",
                       "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot", "Rt.globIsDotDot",
                       "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess", "Rt.halt", "Rt.intern",
-                      "Rt.isChildBuiltin", "Rt.main", "Rt.memGo", "Rt.mkTmpAt", "Rt.nameBytes", "Rt.numText", "Rt.number?", "Rt.open",
+                      "Rt.isChildBuiltin", "Rt.main", "Rt.memGo", "Rt.metaGo", "Rt.mkTmpAt", "Rt.nameBytes", "Rt.numText", "Rt.number?", "Rt.open",
                       "Rt.openBodyTmpfile", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo", "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind",
                       "Rt.recAppendNamesGo", "Rt.recGet", "Rt.recGetGo", "Rt.recInsert", "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd",
                       "Rt.recUpdCopy", "Rt.recUpdFind", "Rt.repGo", "Rt.repeat", "Rt.revGo", "Rt.runBuiltinInprocess", "Rt.setenv", "Rt.shen.bytes->string", "Rt.shen.str->bytes", "Rt.snd", "Rt.str", "Rt.strOf",
@@ -3014,7 +3053,7 @@ checks =
     -- is now the append below; the loud Err moved to the key-agreement walk
     -- (row C), which is the collision/rename class the orphan check guarded.
     , check
-        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the three stage-6 keys (Rt.die, Rt.halt, Rt.main) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ [Rt.die, Rt.halt, Rt.main] and COUNT is union+3 (so the emitted .ssa order is pinned)"
+        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the six stage-6 keys (Rt.cStrEq, Rt.cStrEqGo, Rt.die, Rt.halt, Rt.main, Rt.metaGo) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ [Rt.cStrEq, Rt.cStrEqGo, Rt.die, Rt.halt, Rt.main, Rt.metaGo] and COUNT is union+6 (so the emitted .ssa order is pinned)"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -3036,7 +3075,7 @@ checks =
                             in
                             case Rt.spliceSurface s union of
                                 Ok spliced ->
-                                    List.map .key spliced == List.map .key union ++ [ "Rt.die", "Rt.halt", "Rt.main" ]
+                                    List.map .key spliced == List.map .key union ++ [ "Rt.cStrEq", "Rt.cStrEqGo", "Rt.die", "Rt.halt", "Rt.main", "Rt.metaGo" ]
 
                                 Err _ ->
                                     False
