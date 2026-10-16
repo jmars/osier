@@ -424,6 +424,18 @@ rule); the owner's own direction already includes rank-2 + locally abstract type
 on the roadmap. **CONSEQUENCE FOR M2:** the export-block grammar must be able to CARRY quantifiers
 later — do not pin it to monomorphic types.
 
+**SETTLED (owner, 2026-10-16): existential/rank-2 + PHANTOM region types is ENOUGH for containment.**
+A fresh, unforgeable phantom witness (per scope) plus a quantifier the caller cannot name (`forall s` in
+argument position, or `exists s` packaged in the export) is exactly the `runST` mechanism, so no Osier
+program can name the region and a Mid value indexed by it cannot appear outside the scope. The language
+already has the vehicle: **locally abstract types** (`plan.md` §0, λρG) ARE scoped phantoms (the
+OCaml-style encoding), so this is the existing refinement machinery used at the foreign boundary, not a
+new feature. TWO BOUNDARIES ON "ENOUGH": (a) phantoms give SCOPING, not LIFETIME — an exactly-once /
+deterministic-release obligation (fd, mmap, lock) would need affinity/linearity, which is therefore
+DEFERRED until such a resource is actually handed out (the Vm/GC owning it is the alternative);
+(b) ROOTING and IMMUTABILITY are not type properties at all — they remain runtime/ABI contracts that
+must be ENFORCED, not merely stated.
+
 Plus **ARITY**: declared and flat (Osier is curried, mid-c is flat) — the one thing `externArities`
 already does today.
 
