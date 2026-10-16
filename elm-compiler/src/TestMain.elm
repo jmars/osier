@@ -2650,8 +2650,52 @@ checks =
             Err _ ->
                 False
         )
+    -- ===== T25 — the splice accepts NEW keys (handoff-osier-tier2-t25) =====
+    -- T25 extends the splice so a surface defun whose key has NO DSL position
+    -- is APPENDED after the DSL list (sorted by key) instead of being the old
+    -- ORPHAN Err, so new runtime defuns (the stage-6 ABI/driver family) can be
+    -- written in the mid-c surface.  REPLACEMENT is unchanged, and with no new
+    -- keys the spliced program is IDENTICAL to the pre-T25 one (the identity
+    -- rows below, the corpus byte-identity 159/159 the byte-level proof).
+    -- The old row lived here: "T7 splice unit: an entry is replaced IN PLACE
+    -- ... and a surf key with no DSL position is a loud Err" — the orphan half
+    -- is now the append below; the loud Err moved to the key-agreement walk
+    -- (row C), which is the collision/rename class the orphan check guarded.
     , check
-        "T7 splice unit: an entry is replaced IN PLACE (order and neighbours kept), and a surf key with no DSL position is a loud Err, never a silent drop"
+        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface NOTHING is appended — for all 8 flag combos the spliced program's key ORDER and COUNT are exactly the DSL union list's (so the emitted .ssa order cannot move)"
+        (let
+            d0 k =
+                { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
+
+            dsl2 =
+                [ d0 "Rt.a", d0 "Rt.b" ]
+         in
+         Rt.spliceSurface Dict.empty dsl2
+            == Ok dsl2
+            && List.all
+                (\combo ->
+                    case Rt.surf combo.flags of
+                        Ok s ->
+                            let
+                                union =
+                                    RtPrims.primDefuns combo.c combo.r combo.e
+                                        ++ RtPrims.helperDefuns combo.r
+                                        ++ RtGc.gcProgram
+                            in
+                            case Rt.spliceSurface s union of
+                                Ok spliced ->
+                                    List.map .key spliced == List.map .key union
+
+                                Err _ ->
+                                    False
+
+                        Err _ ->
+                            False
+                )
+                t25Combos
+        )
+    , check
+        "T25 splice append: a surface key with NO DSL position is APPENDED after the WHOLE DSL list, the appended group SORTED BY KEY (order is .ssa bytes, so it is pinned deliberately) — and replacement still happens IN PLACE with neighbours kept"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -2659,18 +2703,96 @@ checks =
             surfB =
                 { key = "Rt.b", value = Lam { params = [ { id = 7, name = "q" } ], body = Var 7 } }
 
+            za =
+                { key = "Rt.za", value = Lam { params = [], body = Lit (LNumber 1) } }
+
+            zb =
+                { key = "Rt.zb", value = Lam { params = [], body = Lit (LNumber 2) } }
+
+            zc =
+                { key = "Rt.zc", value = Lam { params = [], body = Lit (LNumber 3) } }
+
             dsl =
                 [ d0 "Rt.a", d0 "Rt.b", d0 "Rt.c" ]
          in
          Rt.spliceSurface (Dict.fromList [ ( "Rt.b", surfB ) ]) dsl
             == Ok [ d0 "Rt.a", surfB, d0 "Rt.c" ]
-            && (case Rt.spliceSurface (Dict.fromList [ ( "Rt.zzz", surfB ) ]) dsl of
+            && -- three new keys, inserted in SCRAMBLED source order: the append
+               -- order is by KEY ascending (za < zb < zc), never insertion order
+               Rt.spliceSurface (Dict.fromList [ ( "Rt.zc", zc ), ( "Rt.za", za ), ( "Rt.zb", zb ) ]) dsl
+            == Ok [ d0 "Rt.a", d0 "Rt.b", d0 "Rt.c", za, zb, zc ]
+        )
+    , check
+        "T25 splice collision: a NEW surface key whose own defun is keyed like an EXISTING program key is a loud Err (never a silent duplicate: two defuns, one emitted name), and a replacement whose own key differs from the DSL key it replaces is a loud Err too (never a silent rename/drop while rtDeps still routes to it) — the splice substitutes the whole defun, so the defun's key and the dict key must agree"
+        (let
+            d0 k =
+                { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
+
+            dsl =
+                [ d0 "Rt.a", d0 "Rt.b", d0 "Rt.c" ]
+
+            -- spliced under the NEW key "Rt.zza" but itself keyed "Rt.b" (an
+            -- existing program key) — the append would duplicate "Rt.b"
+            imposter =
+                { key = "Rt.b", value = Lam { params = [], body = Lit (LNumber 9) } }
+
+            -- spliced under the EXISTING key "Rt.b" but itself keyed "Rt.zz"
+            -- — the replacement would drop "Rt.b" while rtDeps routes to it
+            renamer =
+                { key = "Rt.zz", value = Lam { params = [], body = Lit (LNumber 9) } }
+         in
+         (case Rt.spliceSurface (Dict.fromList [ ( "Rt.zza", imposter ) ]) dsl of
+            Err msg ->
+                String.contains "Rt.b" msg && String.contains "Rt.zza" msg
+
+            Ok _ ->
+                False
+         )
+            && (case Rt.spliceSurface (Dict.fromList [ ( "Rt.b", renamer ) ]) dsl of
                     Err msg ->
-                        String.contains "Rt.zzz" msg
+                        String.contains "Rt.zz" msg && String.contains "Rt.b" msg
 
                     Ok _ ->
                         False
                )
+        )
+    , check
+        "T25 derived tables cover appended defuns (VERIFIED, not assumed): the safepoint walk `Mid.Rt.direct` — the tree walk `allocating`'s fixed point runs over the PRODUCED program (Rt.elm rtProgram = programPair True True True) — classifies an appended defun's tree BOTH ways (an allocating body is a direct safepoint, a plain body is not); the arity table derived from the produced program carries an appended key; and `externArities` (surfaceSigs from the parsed AST ++ the DSL arities) is TOTAL over every combo's produced program, so a new surface key's `call` resolves and the T7 safety-net row holds it to an arity"
+        (let
+            d0 k =
+                { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
+
+            zAlloc =
+                { key = "Rt.zz"
+                , value = Lam { params = [ { id = 1, name = "p1" } ], body = Unsafe (RawAllocRaw (Var 1)) }
+                }
+
+            zPlain =
+                { key = "Rt.zz", value = Lam { params = [], body = Lit (LNumber 0) } }
+
+            dsl =
+                [ d0 "Rt.a" ]
+         in
+         Rt.direct zAlloc
+            && not (Rt.direct zPlain)
+            && (case Rt.spliceSurface (Dict.fromList [ ( "Rt.zz", zAlloc ) ]) dsl of
+                    Ok spliced ->
+                        Dict.get "Rt.zz" (rtArities spliced) == Just 1
+
+                    Err _ ->
+                        False
+               )
+            && List.all
+                (\combo ->
+                    case ( Rt.program combo.c combo.r combo.e, Rt.programGc combo.c combo.r combo.e ) of
+                        ( Ok p, Ok g ) ->
+                            not (List.isEmpty p)
+                                && List.all (\d -> Dict.member d.key Rt.externArities) (p ++ g)
+
+                        _ ->
+                            False
+                )
+                t25Combos
         )
 
     -- ===== T8 — wave-1 migration: the trivial prims (handoff-osier-tier2-t8) =====
@@ -5363,6 +5485,24 @@ lamArity d =
 
         _ ->
             0
+
+
+{-| T25's flag-combo sweep: the 8 (consArr, rec, eqPtrFast) combinations
+with the matching surface ACTIVE flag set — the same table the T7/T8 wiring
+row walks inline, named here so the T25 identity + derived-tables rows read
+it without repeating it twice.
+-}
+t25Combos : List { c : Bool, r : Bool, e : Bool, flags : List Ast.Flag }
+t25Combos =
+    [ { c = True, r = True, e = True, flags = [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] }
+    , { c = True, r = True, e = False, flags = [ Ast.ConsArr, Ast.Rec ] }
+    , { c = True, r = False, e = True, flags = [ Ast.ConsArr, Ast.EqPtrFast ] }
+    , { c = True, r = False, e = False, flags = [ Ast.ConsArr ] }
+    , { c = False, r = True, e = True, flags = [ Ast.Rec, Ast.EqPtrFast ] }
+    , { c = False, r = True, e = False, flags = [ Ast.Rec ] }
+    , { c = False, r = False, e = True, flags = [ Ast.EqPtrFast ] }
+    , { c = False, r = False, e = False, flags = [] }
+    ]
 
 
 {-| T19: is this defun a migration SEAT (the Mid.RtPrims.seat tripwire

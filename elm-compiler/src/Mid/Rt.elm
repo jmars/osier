@@ -95,6 +95,14 @@ keeps the gc half in `gcProgram`'s exact list order (order is .ssa
 bytes).  No gc key exists outside `gcProgram` and no prim/helper key
 inside it, so the two halves are exactly the old two lists, each with
 its surface replacements in place.
+
+T25: an APPENDED (new) surface key is never in `gcKeys` — `gcKeys` is the
+raw `gcProgram` key set (the 12 collector seats, MEASURED) and a key with
+no DSL position is not one of them — so every appended defun lands at the
+END of the prim half and `programGc`'s output is byte-identical to the
+pre-T25 gc half.  The appended group's relative order is fixed by
+`spliceSurface` (ascending by key) and preserved here by the same
+order-preserving partition.
 -}
 programPair : Bool -> Bool -> Bool -> Result String ( List Defun, List Defun )
 programPair consArr rec eqPtrFast =
@@ -265,22 +273,99 @@ activeSurf flags pairs =
         |> Dict.fromList
 
 
-{-| THE SPLICE: every DSL entry whose key is in `surf` is REPLACED by the
-surface defun at its old position — list order is .ssa bytes, so order is
-preserved and untouched entries pass through unchanged.  A surface key with
-NO DSL position is a LOUD Err, never a silent drop: a defun that vanishes
-while `rtDeps` still routes to it is the exact failure class this wiring
-exists to make impossible.  (Since T18 the caller passes the UNION
-`primDefuns ++ helperDefuns ++ gcProgram`, so surface Rt.gc* keys splice
-into their `gcProgram` positions too; `programPair` splits the halves.)
+{-| THE SPLICE (T25: REPLACE an existing position, or ADD a new key).
+Every DSL entry whose key is in `surf` is REPLACED by the surface defun at
+its old position — list order is .ssa bytes, so order is preserved and
+untouched entries pass through unchanged.  A surface defun whose key has NO
+DSL position is a legitimate ADD (T25, handoff-osier-tier2-t25): it is
+APPENDED after the WHOLE DSL list, the appended group ordered by key
+ASCENDING — taken from `Dict.keys`, whose order elm/core documents as
+"sorted from lowest to highest" (its Dict is an ordered tree); deterministic
+because order is bytes (why the Dict's own order and not `List.sort`: the
+selfhost lane's Prelude has NO sort function — see the `appended` binding).
+`programPair`'s partition then lands every appended key at
+the END of the PRIM half: `gcKeys` is the raw `gcProgram` key set (MEASURED:
+exactly the 12 collector seats) and an appended key is by definition not one
+of them, so `programGc`'s output is untouched by appends.  A future GC-ONLY
+appended defun would need the partition predicate extended — NOT built here
+(no such key exists; stage 6's new defuns are the driver/ABI family, emitted
+with the prim half under their own hatch).  (Since T18 the caller passes the
+UNION `primDefuns ++ helperDefuns ++ gcProgram`, so surface Rt.gc* keys
+splice into their `gcProgram` positions too; `programPair` splits the
+halves.)
+
+THE LOUD ERROR MOVED (T25) — what is now loud that used to be loud.  The old
+ORPHAN check made "a surface key with no DSL position" an Err precisely so a
+defun could never vanish while `rtDeps` still routes to it.  That position is
+now the ADD above, so keeping the check would make every ADD impossible; the
+error moved onto the thing that is actually wrong.  The splice substitutes
+the WHOLE defun, so the defun's OWN `.key` — not the dict key — is what lands
+in the program; the dict key is only the routing label.  A surface defun
+whose own key differs from the key it is spliced under would therefore
+COLLIDE with an existing program key (an appended defun keyed like a
+pass-through DSL entry => two defuns, one emitted name) or silently RENAME a
+replaced key (a replacement keyed differently drops its DSL key from the
+program while `rtDeps` still routes to it — the very "vanished defun" class
+the orphan check existed to prevent; Lower's rawCall arm fails loudly on it,
+but later and cryptically).  That mismatch is the new LOUD Err, naming both
+keys, and it is the totality witness: program keys = DSL keys UNION surface
+keys, each exactly once.  The real pipeline cannot trip it — `activeSurf`
+pairs each AST key with the lowered defun keyed by that same key
+(`LowerToIr.lowerDefun`).
+
+NOT CHECKED HERE, and why: REACHABILITY.  The splice cannot know the
+used-prim roots (`seeds`' argument), and the remaining stage-6 arc's new
+defuns (`Rt.die`/`Rt.halt`, `Rt.main`) are reached from LOWER-GENERATED call
+sites rather than from an Rt body, so a static "must appear in `rtDeps`"
+guard would reject the driver.  The "never called" weight is borne by the
+existing machinery, VERIFIED not assumed: Lower keeps only the SEEDED subset,
+so an appended defun nothing reaches is PRUNED and never emitted (dead
+source, not silent corruption); a call to a key absent from the program fails
+LOUDLY in Lower's rawCall arm; and `externArities` covers every surface key
+via `surfaceSigs` (the parsed AST, guard variants included), so `call` to an
+appended key typechecks and the T7 safety-net row holds it to an arity.  The
+entry-point defuns get an EXPLICIT seed list when they land (the stage-6
+plan's `driverSeeds`/`abiSeeds`, the `conSeeds`/`closureSeeds` precedent) —
+an obligation recorded for stage 6, not a check that can exist before it.
 -}
 spliceSurface : Dict String Defun -> List Defun -> Result String (List Defun)
 spliceSurface surface dsl =
     let
         dslKeys =
             Set.fromList (List.map .key dsl)
+
+        -- T25: the key-agreement walk (the new loud error).  `Dict.toList`
+        -- visits ASCENDING by key (elm/core's Dict is an ordered tree), so the
+        -- mismatch NAMED is always the lowest offending key — deterministic.
+        mismatched =
+            List.filter (\( k, d ) -> d.key /= k) (Dict.toList surface)
+
+        -- T25: the ADDs — appended after the DSL list, ordered by key
+        -- ASCENDING.  `Dict.keys` IS that order: elm/core documents it
+        -- ("Get all of the keys in a dictionary, sorted from lowest to
+        -- highest") because its Dict is an ordered tree.  This is not a
+        -- stylistic choice — the selfhost lane's Prelude carries NO sort
+        -- function at all (MEASURED: `qbe-bootstrap.sh --status` died
+        -- `unknown name: List.sortBy`), so the Dict's own documented order is
+        -- the deterministic rule, and TestMain's T25 append row pins it.
+        appended =
+            Dict.keys surface
+                |> List.filter (\k -> not (Set.member k dslKeys))
+                |> List.filterMap (\k -> Dict.get k surface)
     in
-    case List.filter (\k -> not (Set.member k dslKeys)) (Dict.keys surface) of
+    case mismatched of
+        ( k, d ) :: _ ->
+            Err
+                (k
+                    ++ ": the surface defun spliced under this key is itself keyed '"
+                    ++ d.key
+                    ++ "' — the splice substitutes the whole defun, so the two keys must agree: a mismatch would COLLIDE with the existing program key '"
+                    ++ d.key
+                    ++ "' (an appended defun keyed like a DSL entry, two defuns one emitted name) or drop '"
+                    ++ k
+                    ++ "' from the program while rtDeps still routes to it (a replacement)"
+                )
+
         [] ->
             Ok
                 (List.map
@@ -293,12 +378,7 @@ spliceSurface surface dsl =
                                 d
                     )
                     dsl
-                )
-
-        orphan :: _ ->
-            Err
-                (orphan
-                    ++ ": the surface defines this key, but it has no position in the Rt program's DSL list to splice into — a defun only the surface knows would be silently dropped here; add it to the DSL list domain or fix the key"
+                    ++ appended
                 )
 
 
