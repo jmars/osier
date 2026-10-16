@@ -1921,6 +1921,9 @@ lowerRawVal node dest s =
         RawCStr _ ->
             Err wordProducerMessage
 
+        RawSym _ ->
+            Err wordProducerMessage
+
 
 wordProducerMessage : String
 wordProducerMessage =
@@ -2600,6 +2603,15 @@ rawWordArg exp s =
             in
             Ok ( Il.Sym symName, s1 )
 
+        Unsafe (RawSym name) ->
+            -- (stage 6 A1b) the ADDRESS of a FUNCTION symbol: Il.Sym of the
+            -- name VERBATIM (rt_bounce/rt_callN/a q_Rt_* defun) — a CODE
+            -- label, not a data def.  This is the ONLY rawWordArg producer of
+            -- a function Il.Sym; RawCStr/RawDataAddr above go through
+            -- freshData and yield dN DATA defs.  `lowerRawCallAgg` accepts
+            -- ONLY this (and a loaded code pointer) as a call target.
+            Ok ( Il.Sym name, s )
+
         Unsafe (RawFltBin bin) ->
             -- f64 word binop -> `d` temp.  Operands are FLOAT-word
             -- expressions (rawFltArg); landing one in an integer-word
@@ -2922,6 +2934,9 @@ rawNodeName node =
 
         RawCStr _ ->
             "rawCStr"
+
+        RawSym _ ->
+            "rawSym"
 
 
 -- &vec[index] — a fresh `l` temp holding vec + vs*index (the index may be a
@@ -4127,6 +4142,9 @@ isRawWordExp exp =
                 RawCStr _ ->
                     True
 
+                RawSym _ ->
+                    True
+
                 RawCall call ->
                     -- stage 6 U2: a rawAbi Rt->Rt call (Rt.die/Rt.halt) is a
                     -- WORD producer; a :val RawCall stays on the slot path.
@@ -4147,37 +4165,62 @@ rawWordOf exp s =
     rawWordArg exp s
 
 
-{-| The shared RawCallAgg lowering (stage 6 A1): the callee is a WORD producer
-lowered to an `Il.Arg` — either a raw temp (a loaded code pointer) or a NAMED
-exported symbol (`Il.Sym` — the generated-code call shape: rt_apply/rt_bounce/
-rt_tail_known are called BY NAME with an aggregate result, corpus-proven at
-Lower's directCall/rtApply arms).  A constant (`Il.Con`) is not a call target
-and is rejected loudly.  Args are word producers, each a Base L word.  The two
-arms (word position returns the sret ADDRESS; value position blits the :val
-into a slot) share this so the callee rule is ONE place.
+{-| The shared RawCallAgg lowering (stage 6 A1/A1b): the callee is a FUNCTION
+— either the `RawSym` producer (an `Il.Sym` naming a code label VERBATIM:
+rt_bounce/rt_callN/rt_tail_known are called BY NAME with an aggregate result,
+corpus-proven at Lower's directCall/rtApply arms) or a loaded code pointer in
+a raw temp.  A DATA symbol (`RawCStr`/`RawDataAddr`, or any `Il.Sym` not from
+a direct `RawSym`) and a constant (`Il.Con`) are NOT call targets and are
+rejected loudly — qbe would otherwise silently assemble a call into static
+data (the A1-review blocker).  Args are word producers, each a Base L word.
+The two arms (word position returns the sret ADDRESS; value position blits
+the :val into a slot) share this so the callee rule is ONE place.
 -}
 lowerRawCallAgg : { fn : Exp, args : List Exp, shape : String } -> S -> Result String ( Il.Arg, List Il.CallArg, S )
 lowerRawCallAgg call s =
-    rawWordArg call.fn s
+    let
+        callee : Result String ( Il.Arg, S )
+        callee =
+            case call.fn of
+                Unsafe (RawSym name) ->
+                    Ok ( Il.Sym name, s )
+
+                Unsafe (RawCStr _) ->
+                    Err "qbe: rawCallAgg callee must be a FUNCTION symbol (rawsym(\"...\")) or a raw-word TEMP (a loaded code pointer), not a rawstr DATA address"
+
+                Unsafe (RawDataAddr _) ->
+                    Err "qbe: rawCallAgg callee must be a FUNCTION symbol (rawsym(\"...\")) or a raw-word TEMP (a loaded code pointer), not a recnames DATA address"
+
+                _ ->
+                    rawWordArg call.fn s
+                        |> Result.andThen
+                            (\( fnA, s1 ) ->
+                                case fnA of
+                                    Il.Tmp _ ->
+                                        Ok ( fnA, s1 )
+
+                                    Il.Con _ ->
+                                        Err "qbe: rawCallAgg callee must be a FUNCTION symbol (rawsym(\"...\")) or a raw-word TEMP (a loaded code pointer), not a constant"
+
+                                    Il.Sym _ ->
+                                        Err "qbe: rawCallAgg callee must be a FUNCTION symbol (rawsym(\"...\")) or a raw-word TEMP (a loaded code pointer), not a DATA symbol (rawstr/recnames produce data defs, never call targets)"
+                            )
+    in
+    callee
         |> Result.andThen
             (\( fnA, s1 ) ->
-                case fnA of
-                    Il.Con _ ->
-                        Err "qbe: rawCallAgg callee must be a raw-word TEMP (a loaded code pointer) or a NAMED exported symbol, not a constant"
-
-                    _ ->
-                        List.foldl
-                            (\e acc ->
-                                Result.andThen
-                                    (\( args, st ) ->
-                                        rawWordArg e st
-                                            |> Result.map (\( a, st2 ) -> ( args ++ [ ArgVal (Base L) a ], st2 ))
-                                    )
-                                    acc
+                List.foldl
+                    (\e acc ->
+                        Result.andThen
+                            (\( args, st ) ->
+                                rawWordArg e st
+                                    |> Result.map (\( a, st2 ) -> ( args ++ [ ArgVal (Base L) a ], st2 ))
                             )
-                            (Ok ( [], s1 ))
-                            call.args
-                            |> Result.map (\( args, s2 ) -> ( fnA, args, s2 ))
+                            acc
+                    )
+                    (Ok ( [], s1 ))
+                    call.args
+                    |> Result.map (\( args, s2 ) -> ( fnA, args, s2 ))
             )
 
 

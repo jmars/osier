@@ -266,3 +266,6 @@ describe node =
 
         RawCStr _ ->
             "rawCStr (static C-string address)"
+
+        RawSym _ ->
+            "rawSym (function symbol address)"

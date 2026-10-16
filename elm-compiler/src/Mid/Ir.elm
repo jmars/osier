@@ -496,6 +496,16 @@ type UnsafeNode
       -- interned via rt_string would recurse into the collector it is
       -- reporting on (the OOM/mmap-fail arms).  NOT a safepoint.
       RawCStr String
+    | -- (stage 6 A1b) the ADDRESS of a FUNCTION symbol (a code label) — a
+      -- WORD producer yielding `Il.Sym name` where `name` is the function's
+      -- symbol VERBATIM (rt_bounce/rt_callN/a `q_Rt_*` defun), NOT a data
+      -- def.  This is the producer the A1 review named: `RawCallAgg`'s
+      -- callee can now name a FUNCTION by name, where `RawCStr`/`RawDataAddr`
+      -- name DATA defs (a call into static data — MEASURED silently wrong).
+      -- Built by Mid.RtLang's `rawsym` builtin; the ONLY surface route to a
+      -- function symbol (RawCStr/RawDataAddr stay data-address producers and
+      -- are rejected as call targets).  NOT a safepoint.
+      RawSym String
 
 
 -- The semantic word-op enums (backend-neutral: QBE's widths and mnemonics

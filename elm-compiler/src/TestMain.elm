@@ -25,6 +25,7 @@ import Mid.Ir exposing (Alt, AltKind(..), Binder, Defun, Exp(..), LetBinder(..),
 import Mid.Module as MidModule
 import Mid.Qbe.Il as Il
 import Mid.Qbe.Lower as QbeLower
+import Mid.Qbe.Print as Print
 import Mid.Qbe.Types as QbeTypes
 import Mid.Rt as Rt
 import Mid.RtGc as RtGc
@@ -1196,7 +1197,7 @@ checks =
             && List.member "Rt.halt" Rt.driverSeeds
             && List.member "Rt.cStrLenGo" Rt.driverSeeds
         )
-    , check "A1 RawCallAgg named-symbol accept: a Symbol callee (not just a temp) lowers to Call (Just _) (Agg \"val\") (Il.Sym _) [word]"
+    , check "A1b RawCallAgg FUNCTION-symbol accept: a RawSym callee (not just a temp) lowers to Call (Just _) (Agg \"val\") (Il.Sym \"rt_bounce\") [word] — the code label, never a dN data ref"
         (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggSymProbe ] "Rt.rawCallAggSymProbe" of
             Ok mod ->
                 List.any rawCallAggSymCallShape mod.funcs
@@ -1204,7 +1205,15 @@ checks =
             Err _ ->
                 False
         )
-    , check "A1 RawCallAgg still-rejected shape: a CONSTANT callee is a loud Err (the relaxation accepts temps and named symbols, never a constant)"
+    , check "A1b RawCallAgg DATA-symbol callee rejected: a rawstr data-def stand-in (RawCStr \"rt_bounce\") is a loud Err, not a silent call into static data (the A1-review blocker's over-acceptance half)"
+        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggDataSymProbe ] "Rt.rawCallAggDataSymProbe" of
+            Err msg ->
+                String.contains "DATA" msg
+
+            Ok _ ->
+                False
+        )
+    , check "A1 RawCallAgg still-rejected shape: a CONSTANT callee is a loud Err (the callee must be a RawSym function symbol or a loaded code pointer, never a constant)"
         (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggConstProbe ] "Rt.rawCallAggConstProbe" of
             Err msg ->
                 String.contains "not a constant" msg
@@ -1212,10 +1221,35 @@ checks =
             Ok _ ->
                 False
         )
-    , check "A1 RawCallAgg VALUE-position Blit: a val-shaped aggregate call in a :val tail emits Call (Just _) (Agg \"val\") + a Blit into the dest slot (the rtApply non-tail shape, never a word-address return)"
+    , check "A1b RawCallAgg VALUE-position Blit: a val-shaped aggregate call of rt_bounce emits Call (Just _) (Agg \"val\") (Il.Sym \"rt_bounce\") + a 40-byte Blit into the dest slot (the rtApply non-tail shape, never a word-address return)"
         (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggValProbe ] "Rt.rawCallAggValProbe" of
             Ok mod ->
                 List.any rawCallAggValBlitShape mod.funcs
+
+            Err _ ->
+                False
+        )
+    , check "A1b emitted .ssa names the FUNCTION symbol as the call target: the lowered module RENDERED as .ssa contains `call $rt_bounce` (a code label), not a data-def call"
+        (case QbeLower.lower False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggSymProbe ] "Rt.rawCallAggSymProbe" of
+            Ok mod ->
+                String.contains "call $rt_bounce" (Print.print mod)
+
+            Err _ ->
+                False
+        )
+    , check "A1b rawsym surface → RawSym node: `rawsym(\"rt_bounce\")` parses and lowers to the FUNCTION-symbol word producer (RawSym, distinct from rawstr's RawCStr data def)"
+        (case lowlBody "defun Rt.sym(a : val) -> val {\n  word p = rawsym(\"rt_bounce\");\n  return mknil;\n}" of
+            Ok body ->
+                canon body == canon (llets [ ( ltb 2, Unsafe (RawSym "rt_bounce") ) ] lmkNilV)
+
+            Err _ ->
+                False
+        )
+    , check "A1b aggcall surface → RawCallAgg with a RawSym callee: `aggcall val rawsym(\"rt_bounce\")(0)` lowers fn to the function-symbol producer (content, not a rawstr data def)"
+        (case lowlBody "defun Rt.agg(a : val) -> val {\n  word r = aggcall val rawsym(\"rt_bounce\")(0);\n  return mknil;\n}" of
+            Ok body ->
+                canon body
+                    == canon (llets [ ( ltb 2, Unsafe (RawCallAgg { fn = Unsafe (RawSym "rt_bounce"), args = [ ltn 0 ], shape = "val" }) ) ] lmkNilV)
 
             Err _ ->
                 False
@@ -5269,6 +5303,9 @@ cnode st node =
         RawCStr _ ->
             ( node, st )
 
+        RawSym _ ->
+            ( node, st )
+
 
 {-| The two-exp and three-exp raw-node records: the accessors name the
 fields (each ctor's record has a different field set), the rebuild
@@ -5717,15 +5754,48 @@ driverProg =
     rtProgram True True True ++ [ rtMainStub ]
 
 
-{-| A RawCallAgg whose callee is a NAMED symbol (stage 6 A1 item 4): `fn` is
-`RawCStr "rt_bounce"` — a legal raw-word producer that lowers to `Il.Sym`
-(the data def's symbol stands in for a named exported FUNCTION symbol; the
-pin checks the IL SHAPE `Call _ (Agg "val") (Il.Sym _) args`, not the
-symbol's content).  Before A1 the word arm rejected everything but a temp.
+{-| A RawCallAgg whose callee is a FUNCTION symbol (stage 6 A1b, the
+A1-review blocker's fix): `fn` is `RawSym "rt_bounce"` — the function-symbol
+producer, which lowers to `Il.Sym "rt_bounce"` (a CODE label, not a data
+def).  The pin checks the symbol's CONTENT (`Il.Sym "rt_bounce"`, not a dN
+data ref); the RawCStr data-def stand-in is rejected loudly by a separate
+row.  Before A1 the word arm rejected everything but a temp.
 -}
 rawCallAggSymProbe : Defun
 rawCallAggSymProbe =
     { key = "Rt.rawCallAggSymProbe"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body =
+                Let
+                    { binders =
+                        [ LetBind
+                            { binder = { id = 1, name = "r" }
+                            , value =
+                                Unsafe
+                                    (RawCallAgg
+                                        { fn = Unsafe (RawSym "rt_bounce")
+                                        , args = [ Lit (LNumber 0) ]
+                                        , shape = "val"
+                                        }
+                                    )
+                            }
+                        ]
+                    , body = Lit (LNumber 0)
+                    }
+            }
+    }
+
+
+{-| A RawCallAgg whose callee is a DATA symbol (the A1-review blocker's
+stand-in): `fn = RawCStr "rt_bounce"` — a rawstr data-def address.  A1b
+rejects this LOUDLY (a call into static data would be silently wrong); the
+RawSym producer is the only function-symbol callee.
+-}
+rawCallAggDataSymProbe : Defun
+rawCallAggDataSymProbe =
+    { key = "Rt.rawCallAggDataSymProbe"
     , value =
         Lam
             { params = [ { id = 0, name = "x" } ]
@@ -5781,10 +5851,11 @@ rawCallAggConstProbe =
     }
 
 
-{-| A RawCallAgg in VALUE position (stage 6 A1 item 5): the defun's TAIL is
+{-| A RawCallAgg in VALUE position (stage 6 A1b): the defun's TAIL is
 the aggregate call (not a let-binder, so it takes the value path, not the
-word temp) — the driver's "sret result as a Value" shape.  `fn` is again a
-named symbol (RawCStr), exercising the Sym callee through the value arm too.
+word temp) — the driver's "sret result as a Value" shape.  `fn` is a
+FUNCTION symbol (RawSym "rt_bounce"), exercising the Sym callee through the
+value arm too.
 -}
 rawCallAggValProbe : Defun
 rawCallAggValProbe =
@@ -5795,7 +5866,7 @@ rawCallAggValProbe =
             , body =
                 Unsafe
                     (RawCallAgg
-                        { fn = Unsafe (RawCStr "rt_bounce")
+                        { fn = Unsafe (RawSym "rt_bounce")
                         , args = [ Lit (LNumber 0) ]
                         , shape = "val"
                         }
@@ -5804,8 +5875,9 @@ rawCallAggValProbe =
     }
 
 
-{-| The RawCallAgg IL shape with a NAMED-SYMBOL callee (stage 6 A1 item 4):
-`Call (Just _) (Agg "val") (Il.Sym _) [ArgVal (Base L) (Il.Con 0)]`.
+{-| The RawCallAgg IL shape with a FUNCTION-symbol callee (stage 6 A1b):
+`Call (Just _) (Agg "val") (Il.Sym "rt_bounce") [ArgVal (Base L) (Il.Con 0)]`
+— the symbol CONTENT pinned, so a data-def stand-in (Il.Sym "d17") fails.
 -}
 rawCallAggSymCallShape : Il.Func -> Bool
 rawCallAggSymCallShape f =
@@ -5814,7 +5886,7 @@ rawCallAggSymCallShape f =
             List.any
                 (\i ->
                     case i of
-                        Il.Call (Just _) (Il.Agg "val") (Il.Sym _) [ Il.ArgVal (Il.Base Il.L) (Il.Con 0) ] ->
+                        Il.Call (Just _) (Il.Agg "val") (Il.Sym "rt_bounce") [ Il.ArgVal (Il.Base Il.L) (Il.Con 0) ] ->
                             True
 
                         _ ->
@@ -5825,9 +5897,12 @@ rawCallAggSymCallShape f =
         f.blocks
 
 
-{-| The RawCallAgg VALUE-position Blit shape (stage 6 A1 item 5): a `:val`
-call into a temp, then a 40-byte Blit of that temp into the dest slot —
-the rtApply non-tail shape (call + blit), never a word-address return.
+{-| The RawCallAgg VALUE-position Blit shape (stage 6 A1b): a `:val` call of
+the FUNCTION symbol rt_bounce into a temp, then a 40-byte Blit of that temp
+into the dest slot — the exact rtApply non-tail shape (call + blit), never a
+word-address return.  The callee CONTENT (`Il.Sym "rt_bounce"`, not a dN data
+ref) and the Blit SIZE (40 B = valSizeBytes, not the 80-B :ret) are both
+pinned.
 -}
 rawCallAggValBlitShape : Il.Func -> Bool
 rawCallAggValBlitShape f =
@@ -5836,7 +5911,7 @@ rawCallAggValBlitShape f =
             List.any
                 (\i ->
                     case i of
-                        Il.Call (Just _) (Il.Agg "val") _ _ ->
+                        Il.Call (Just _) (Il.Agg "val") (Il.Sym "rt_bounce") _ ->
                             True
 
                         _ ->
@@ -5846,7 +5921,7 @@ rawCallAggValBlitShape f =
                 && List.any
                     (\i ->
                         case i of
-                            Il.Blit _ _ _ ->
+                            Il.Blit (Il.Tmp _) (Il.Tmp _) 40 ->
                                 True
 
                             _ ->
@@ -6270,6 +6345,9 @@ rawCallSyms exp =
                     []
 
                 RawCStr _ ->
+                    []
+
+                RawSym _ ->
                     []
 
 

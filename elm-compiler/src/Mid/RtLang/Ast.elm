@@ -365,6 +365,7 @@ type Builtin
     | BitNot
     | RecLen
     | RawStr
+    | RawSym
 
 
 
@@ -531,6 +532,15 @@ builtinClass b =
             -- — the payload/tagis/mkval literal-slot discipline).
             Sig [ TVal ] TWord
 
+        RawSym ->
+            -- (stage 6 A1b) the FUNCTION-symbol address form: `rawsym("...")` —
+            -- the argument is a STRING LITERAL (EStr, class TVal) naming a
+            -- FUNCTION (a code label: rt_bounce/rt_callN/a q_Rt_* defun) and
+            -- the result is the raw word pointer to that function, distinct
+            -- from `rawstr`'s content-keyed DATA def.  The lowerer
+            -- pattern-matches the EStr exactly as rawstr does.
+            Sig [ TVal ] TWord
+
 
 {-| The surface spelling of each builtin (the parser's keywords and the
 checker's error messages read these — one spelling, one place).
@@ -624,6 +634,9 @@ builtinName b =
 
         RawStr ->
             "rawstr"
+
+        RawSym ->
+            "rawsym"
 
 
 {-| The operator FAMILIES' signatures.  The class is the family's, not the

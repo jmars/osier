@@ -950,6 +950,9 @@ builtinCall b =
         RawStr ->
             rawStrCall
 
+        RawSym ->
+            rawSymCall
+
         _ ->
             ParserFast.map (EBuiltin b) argsInParens
 
@@ -999,6 +1002,18 @@ rawStrCall : ParserFast.Parser Exp
 rawStrCall =
     spelled "("
         (ParserFast.map2 (\s _ -> EBuiltin RawStr [ s ]) stringLit (spelled ")" (succeed ())))
+
+
+{-| `rawsym("...")` — a FUNCTION-symbol address (stage 6 A1b).  The ONE
+argument is a STRING LITERAL token naming a function (a code label:
+rt_bounce/rt_callN/a q_Rt_* defun) — the same literal-slot discipline as
+`rawStrCall` (a computed name is unrepresentable: the symbol is baked into
+the lowered `RawSym` node).  Owns its `(`.
+-}
+rawSymCall : ParserFast.Parser Exp
+rawSymCall =
+    spelled "("
+        (ParserFast.map2 (\s _ -> EBuiltin RawSym [ s ]) stringLit (spelled ")" (succeed ())))
 
 
 {-| The integer-literal token reader for index/tag slots: decimal or hex
@@ -1073,6 +1088,7 @@ allBuiltins =
     , BitNot
     , RecLen
     , RawStr
+    , RawSym
     ]
 
 

@@ -1180,6 +1180,11 @@ unsafeSafepoint selfKey selfArity node =
             -- safepoint (the def is content-keyed static data, never moved).
             False
 
+        RawSym _ ->
+            -- (stage 6 A1b) a static FUNCTION-symbol address — like RawCStr,
+            -- no allocation and no safepoint (a code label is never moved).
+            False
+
 letValue : LetBinder -> Exp
 letValue b =
     case b of

@@ -1361,6 +1361,9 @@ unsafeChildren node =
         RawCStr _ ->
             []
 
+        RawSym _ ->
+            []
+
 
 unsafeRebuild : UnsafeNode -> List Exp -> UnsafeNode
 unsafeRebuild node parts =
@@ -1447,6 +1450,9 @@ unsafeRebuild node parts =
             node
 
         ( RawCStr _, _ ) ->
+            node
+
+        ( RawSym _, _ ) ->
             node
 
         _ ->

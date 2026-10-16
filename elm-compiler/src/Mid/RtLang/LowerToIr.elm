@@ -1179,6 +1179,19 @@ buildBuiltin b es =
                 _ ->
                     Err "rawstr needs a string literal (the content is static data — RawCStr)"
 
+        Ast.RawSym ->
+            -- the FUNCTION-symbol address (stage 6 A1b): the symbol is the
+            -- STRING LITERAL (an EStr, the only AST the parser admits for this
+            -- builtin's one slot), lowered to the RawSym WORD node whose
+            -- content is the function's name VERBATIM.  A non-literal reaches
+            -- this Err loudly (never a silent guess).
+            case es of
+                [ Lit (LString s) ] ->
+                    Ok (Unsafe (Mid.Ir.RawSym s))
+
+                _ ->
+                    Err "rawsym needs a string literal (the symbol is a static code label — RawSym)"
+
 
 arityBug : String
 arityBug =
