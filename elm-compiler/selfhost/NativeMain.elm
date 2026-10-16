@@ -407,7 +407,12 @@ importedMidsHelp : List String -> List ( String, String ) -> List ( String, Stri
 importedMidsHelp seen pairs acc =
     case pairs of
         [] ->
-            reverse acc
+            -- `acc` is built by APPEND in importNamesOf (acc ++ [ (n,p) ]), so
+            -- it is ALREADY in first-import order — the old `reverse acc` here
+            -- flipped it against run.js's order (masked today because
+            -- userSurface key-sorts, but the first-mismatch error selection
+            -- differed between the two lanes: the exact mirror hazard).
+            acc
 
         ( path, text ) :: rest ->
             let

@@ -114,6 +114,18 @@ function pathDir(p) {
   return i < 0 ? '' : p.slice(0, i);
 }
 
+// A REGULAR-FILE probe.  `fs.existsSync` is true for directories, fifos and
+// sockets too; the native lane's existence check is `Io.stat isFile`, so this
+// MIRRORS it: a directory named `X.mid` must fall through as "not a .mid"
+// (an Elm import), never EISDIR-crash or hang the gate.
+function isRegularFile(p) {
+  try {
+    return fs.statSync(p).isFile();
+  } catch (e) {
+    return false;
+  }
+}
+
 // Resolve a group's `.mid` IMPORTS: for each Elm source path+text, scan its
 // `import X` lines and read `<dir>/X.mid` when it exists (deduped by resolved
 // path, first-import order).  Returns the mid texts and a loud error list
@@ -126,7 +138,11 @@ function resolveMidImports(elmPathTexts) {
     const dir = pathDir(path);
     for (const name of importNames(text)) {
       const midPath = dir === '' ? name + '.mid' : dir + '/' + name + '.mid';
-      if (!fs.existsSync(midPath)) continue; // an Elm import, untouched
+      // Regular-file probe, MIRRORING the native lane's `Io.stat isFile`.  A
+      // bare `existsSync` is true for directories/fifos/sockets too, so a
+      // directory named `X.mid` would EISDIR-crash here (uncaught) and a fifo
+      // would hang — neither is an `err` refusal.
+      if (!isRegularFile(midPath)) continue; // an Elm import, untouched
       if (seen.has(midPath)) continue;
       seen.add(midPath);
       const midText = fs.readFileSync(midPath, 'utf8');
