@@ -208,8 +208,9 @@ for chunk in "$TMP"/chunk_*.json; do
   # RUN_STACK_KB: the QBE backend's non-tail-recursive Peephole pass can
   # exceed V8's default stack on per-file groups rooted at a deep defun
   # (Elm.Parser.Declarations.declaration is the recorded case); run.js
-  # re-execs itself with --stack-size when this is set.
-  if ! RUN_STACK_KB=16000 node "$CDIR/run.js" --batch "$chunk" 2>"$TMP/node.err" >/dev/null; then
+  # re-execs itself with --stack-size when this is set.  Overridable, so the
+  # value can be MEASURED.
+  if ! RUN_STACK_KB="${RUN_STACK_KB:-16000}" node "$CDIR/run.js" --batch "$chunk" 2>"$TMP/node.err" >/dev/null; then
     chunk_fail=$((chunk_fail + 1))
     echo "audit: chunk tooling failure: $(tail -c 200 "$TMP/node.err" | tr '\n' ' ')" >&2
   fi
@@ -280,8 +281,26 @@ for g in meta:
 # ================ PHASE 2: whole-group pass ================
 # All sources as ONE group — the true self-compile shape (corpus paid once;
 # cross-module resolution live).  Its FIRST error is the deepest blocker.
+#
+# RUN_STACK_KB MEASURED (M4NICE item 4, 2026-10-17, full selfhost-audit.sh runs
+# at HEAD d86cb9c+ this unit, reading the summary's tooling-fail count — the
+# exit code CANNOT see an overflow, the script always exits 0):
+#
+#     1000 KB -> 26 tooling-fail + whole-group TOOLING-FAIL   (V8's default is
+#     2000 KB -> 10 tooling-fail + whole-group TOOLING-FAIL    ~1 MB, so the
+#     2500 KB -> 10 tooling-fail + whole-group TOOLING-FAIL    default FAILS)
+#     3000 KB ->  0 tooling-fail + whole-group OK             <- sufficient
+#     4000/6000/8000/16000 KB -> 0 tooling-fail + OK
+#
+# So the MINIMUM sufficient value lies in (2500, 3000] KB, and the existing
+# 16000 is ~5x that — it was NOT below the post-M4 requirement, and it is left
+# unchanged.  (The review's suggestion to match qbe-bootstrap.sh's 131072 is
+# therefore not needed: that path runs the SAME manifest as ONE group and hit
+# the limit at the lower values, which is the reading above.)  Re-measure with
+# RUN_STACK_KB=<n> after any large addition to the selfhost group; the value is
+# overridable for exactly that.
 jq --arg out "$TMP/group.ssa" '.groups[0].output = $out' "$MANIFEST" >"$TMP/group.json"
-if ! RUN_STACK_KB=16000 node "$CDIR/run.js" --batch "$TMP/group.json" 2>"$TMP/g.err" >/dev/null; then
+if ! RUN_STACK_KB="${RUN_STACK_KB:-16000}" node "$CDIR/run.js" --batch "$TMP/group.json" 2>"$TMP/g.err" >/dev/null; then
   chunk_fail=$((chunk_fail + 1))
 fi
 payload="$(cat "$TMP/group.ssa" 2>/dev/null || true)"
