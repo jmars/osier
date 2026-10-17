@@ -1127,6 +1127,48 @@ frame_perf_gate() {
 }
 frame_perf_gate
 
+# ---- stage 6 B1 DEBT: the apply-family perf gate ----
+# frame_perf_gate's fib is DIRECT defun calls + frames — it never calls a
+# closure VALUE, so the apply family (Rt.apply -> applyGo -> Rt.copyWords ->
+# Rt.callArity) is OFF its hot path.  applyperf.elm makes every iteration a
+# closure-VALUE call, so the apply arms are the whole cost.  MEASURED (median
+# of 7 alternating pairs, the frame-gate method): hatch-ON ~3.7s / hatch-OFF
+# ~0.33s = ~11x at n=5e6.  The floor is Rt.copyWords' :val loop (a 40-byte
+# blit + number boxing per copied word — the B0perf-1 frameZero shape).  THE
+# BOUND IS 20x (the frame gate's ORIGINAL pre-fix bound), a CATASTROPHIC-
+# regression guard: it catches a silent 175x-class regression like the one
+# that shipped in the frame pass, while leaving the known ~11x floor for the
+# B1perf unit (which will tighten this the way B0perf-2 tightened frame-perf
+# 20x -> 2.5x).  Both arms must print the SAME n (identity: 2*n).
+apply_perf_gate() {
+  local bin_on bin_off on_times=() off_times=() i s e on_med off_med ratio out_on out_off
+  bin_on="$("$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/applyperf.elm ApplyPerf.main "$TMP/applyperf-on")" || {
+    echo "FAIL apply-perf: qbe-mk (hatch ON)"; FAIL=1; return; }
+  bin_off="$(QBE_MIDDRIVER=0 "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/applyperf.elm ApplyPerf.main "$TMP/applyperf-off")" || {
+    echo "FAIL apply-perf: qbe-mk (hatch OFF)"; FAIL=1; return; }
+  out_on="$(timeout 60 "$bin_on" ApplyPerf.main 5000000 2>&1)"
+  out_off="$(timeout 60 "$bin_off" ApplyPerf.main 5000000 2>&1)"
+  if [ "$out_on" != "$out_off" ]; then
+    echo "FAIL apply-perf: hatch-ON n(5e6)='$out_on' != hatch-OFF='$out_off' (the closure call differs across arms)"
+    FAIL=1; return
+  fi
+  for i in 1 2 3 4 5; do
+    s=$(date +%s%N); timeout 60 "$bin_on" ApplyPerf.main 5000000 >/dev/null 2>&1; e=$(date +%s%N)
+    on_times+=("$(( (e - s) / 1000000 ))")
+    s=$(date +%s%N); timeout 60 "$bin_off" ApplyPerf.main 5000000 >/dev/null 2>&1; e=$(date +%s%N)
+    off_times+=("$(( (e - s) / 1000000 ))")
+  done
+  on_med="$(printf '%s\n' "${on_times[@]}" | sort -n | sed -n '3p')"
+  off_med="$(printf '%s\n' "${off_times[@]}" | sort -n | sed -n '3p')"
+  ratio="$(awk -v a="$on_med" -v b="$off_med" 'BEGIN { printf "%.1f", (b > 0 ? a / b : 999) }')"
+  if awk -v a="$on_med" -v b="$off_med" 'BEGIN { exit !(a > 20 * b) }'; then
+    echo "FAIL apply-perf: hatch-ON median ${on_med}ms is ${ratio}x the hatch-OFF median ${off_med}ms — bound is 20x (the :val copyWords blit regression shape)"
+    FAIL=1; return
+  fi
+  echo "PASS apply-perf: hatch-ON median ${on_med}ms / hatch-OFF median ${off_med}ms = ${ratio}x (bound 20x), both n(5e6)=${out_on}"
+}
+apply_perf_gate
+
 # ---- stage 4: arity > 8 (the old rt_callN table stopped at rt_call8) ----
 # arity9: a 9-ary defun called DIRECTLY from the driver (rt_call9).  arity9apply:
 # apply9 add9 -> f 1..9 where f is a Var, so the 9-ary call goes through

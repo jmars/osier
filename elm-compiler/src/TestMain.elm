@@ -1856,6 +1856,27 @@ checks rt =
             Err _ ->
                 False
         )
+    , check "B1 root-order: applyGo's PARTIAL arm roots the env slot BEFORE the alloc and RE-READS it AFTER (push_ptr -> rt_vec_alloc -> loadl, in ONE block) — the cStrFill lesson.  A push-after-alloc or a pre-alloc-copy mutation breaks this shape (the emitted .ssa loses the post-alloc load or the pre-alloc push) and fails HERE, because the runtime churn rows CANNOT see the hazard (the moving collector copies bodies without destroying them, so a stale read is output-silent — the honest blindness measured in the b1debt probe)"
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+            Ok mod ->
+                (case funcByName "q_Rt_x2eapplyGo" mod of
+                    Just f ->
+                        partialRootOrder f
+
+                    Nothing ->
+                        False
+                )
+                    && (case funcByName "q_Rt_x2eapplyTailGo" mod of
+                            Just f ->
+                                partialRootOrder f
+
+                            Nothing ->
+                                False
+                       )
+
+            Err _ ->
+                False
+        )
 
     -- THE LEAN ABI (osier-midabi).  The classification is the soundness
     -- fact (a frame-free callee must never reach a safepoint); pin BOTH
@@ -7119,6 +7140,59 @@ symCount sym f =
 funcByName : String -> Il.Module -> Maybe Il.Func
 funcByName name mod =
     List.head (List.filter (\f -> f.name == name) mod.funcs)
+
+
+{-| B1 root-order: within ONE block, `rt_root_push_ptr` must precede
+`rt_vec_alloc` and a word LOAD must follow the alloc (the `wload(sp, 3)`
+re-read).  Both the push-after-alloc and the pre-alloc-copy mutations break
+this — the first puts the alloc before the push (the `seenPush` guard fires),
+the second removes the re-read (no Load is ever seen after the alloc).
+-}
+partialRootOrder : Il.Func -> Bool
+partialRootOrder f =
+    List.any blockRootOrder f.blocks
+
+
+blockRootOrder : Il.Block -> Bool
+blockRootOrder b =
+    rootOrderStep False False b.body
+
+
+rootOrderStep : Bool -> Bool -> List Il.Inst -> Bool
+rootOrderStep seenPush seenAlloc instrs =
+    case instrs of
+        [] ->
+            False
+
+        i :: rest ->
+            case i of
+                Il.Call _ _ (Il.Sym s) _ ->
+                    if s == "rt_root_push_ptr" then
+                        rootOrderStep True seenAlloc rest
+
+                    else if s == "rt_vec_alloc" then
+                        -- the alloc must come AFTER the env-root push.
+                        if seenPush then
+                            rootOrderStep seenPush True rest
+
+                        else
+                            False
+
+                    else
+                        rootOrderStep seenPush seenAlloc rest
+
+                Il.Load _ _ _ _ ->
+                    -- a word load reached after BOTH the push and the alloc is
+                    -- the re-read (wload(sp, 3)); a load before the alloc is
+                    -- the pre-alloc env read, which must not be the copy source.
+                    if seenPush && seenAlloc then
+                        True
+
+                    else
+                        rootOrderStep seenPush seenAlloc rest
+
+                _ ->
+                    rootOrderStep seenPush seenAlloc rest
 
 
 {-| T7: `rt.program` is now the SURFACE PIPELINE (Result-valued — a bad
