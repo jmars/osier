@@ -991,10 +991,15 @@ rawcallArity =
           -- (rt_root_push_value_array is above): rt_root_watermark (the
           -- enter-time shadow-stack depth) and rt_root_pop_to (the
           -- popTo(wm)-NOT-pop truncation).  rt_root_push_ptr/rt_root_pop are
-          -- NOT here: the frame pair never uses them (popTo, never a bare
-          -- pop — the historical qbe-gcbug; pushArray, never pushPtr).
+          -- NOT used by the frame pair (popTo, never a bare pop — the
+          -- historical qbe-gcbug; pushArray, never pushPtr) — but the
+          -- stage-6 B1 apply partial arm's `env_root` dance needs BOTH:
+          -- pushPtr (root a COPY of the env pointer, re-read after the
+          -- allocArray scavenge) and the bare pop that balances it.
         ( "rt_root_watermark", 0 )
         , ( "rt_root_pop_to", 1 )
+        , ( "rt_root_push_ptr", 1 )
+        , ( "rt_root_pop", 0 )
         , -- ===== the stage-6 A4b program/print seats (the A2 word-in/out
           -- seats the driver's tail reaches: isProgram/runProgram/print +
           -- the single-value root for the result/model slots)

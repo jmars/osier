@@ -964,13 +964,29 @@ rtDeps =
           -- (the no-frame panic — Rt.die is already a driverSeed, so this is
           -- a closure edge, not a new root).  Rt.frameBlock (malloc + the
           -- freelist pop, all rawcall/raw-word) and Rt.frameZero (self-tail
-          -- via recur — no RawCall edge, the cStrFill/[] precedent) name no
-          -- Rt target.  The rt_root_push_value_array/rt_root_watermark/
-          -- rt_root_pop_to calls are rawcall (RawCallRaw — NOT rtDeps edges).
+          -- via recur, SLOT-granularity (5 words/iter) no-alloc zeroing — no
+          -- RawCall edge, the cStrFill/[] precedent) name no Rt target.  The
+          -- rt_root_push_value_array/rt_root_watermark/rt_root_pop_to calls
+          -- are rawcall (RawCallRaw — NOT rtDeps edges).
           ( "Rt.frame-enter", [ "Rt.frameBlock", "Rt.frameZero" ] )
         , ( "Rt.frame-leave", [ "Rt.die" ] )
         , ( "Rt.frameBlock", [] )
         , ( "Rt.frameZero", [] )
+        , -- ===== the stage-6 B1 apply family.  Rt.apply/Rt.apply-tail are
+          -- rawAbi WRAPPERS (root the caller's f/args, then hand off); their
+          -- one RawCall edge each is the val-ABI LOOP.  The loops reach
+          -- Rt.callArity (the 17-arm rt_callN dispatch + rt_bounce) and
+          -- Rt.copyWords (the raw-word Value-array copy) and Rt.die (the
+          -- non-function/closure-env panics — already a driverSeed, so these
+          -- are closure edges, not new roots).  rt_callN/rt_bounce are
+          -- aggcall (RawCallAgg — NOT rtDeps edges); malloc/rt_root_* are
+          -- rawcall (RawCallRaw — NOT rtDeps edges).
+          ( "Rt.apply", [ "Rt.applyGo" ] )
+        , ( "Rt.apply-tail", [ "Rt.applyTailGo" ] )
+        , ( "Rt.applyGo", [ "Rt.callArity", "Rt.copyWords", "Rt.die" ] )
+        , ( "Rt.applyTailGo", [ "Rt.callArity", "Rt.copyWords", "Rt.die" ] )
+        , ( "Rt.callArity", [] )
+        , ( "Rt.copyWords", [] )
         ]
 
 
@@ -1051,12 +1067,23 @@ rawAbi =
           -- Rt.frame-enter/leave are the raw-word pair the prologue/return
           -- retarget reaches; Rt.frameBlock (the freelist pop-or-malloc) is a
           -- word helper so the rawAbi->rawAbi `call` stays on the raw-word
-          -- path.  Rt.frameZero is a :val byte-loop (the zero-before-root
+          -- path.  Rt.frameZero is a :val SLOT loop (the zero-before-root
           -- memset — `recur` needs the val self-tail loop, which the rawAbi
-          -- tail rejects), NOT rawAbi.
+          -- tail rejects; five words per iteration, the counter is a raw
+          -- word in header slot 4 so the recur arg is CONSTANT and the loop
+          -- allocates nothing), NOT rawAbi.
           "Rt.frame-enter"
         , "Rt.frame-leave"
         , "Rt.frameBlock"
+        , -- ===== the stage-6 B1 apply family.  Rt.apply/Rt.apply-tail are
+          -- raw-word defuns whose RESULT is an AGGREGATE (the stage-6 B1
+          -- rawAbi-ret-class extension — Mid.Qbe.Lower.rawAbiRetClass maps
+          -- them to Agg "val"/Agg "ret"): 3 word params (fslot *Value,
+          -- args [*]Value, nargs), reached from Lower's rtApply retarget.
+          -- Their LOOP bodies (Rt.applyGo/Rt.applyTailGo) are :val defuns
+          -- (recur needs the val self-tail), NOT rawAbi.
+          "Rt.apply"
+        , "Rt.apply-tail"
         ]
 
 
@@ -1080,6 +1107,11 @@ rawAbiArity =
         , ( "Rt.frame-enter", 1 )
         , ( "Rt.frame-leave", 0 )
         , ( "Rt.frameBlock", 1 )
+        , -- stage 6 B1: Rt.apply/Rt.apply-tail take the SAME 3 word params
+          -- as the Zig seats (fslot, args, nargs) — the retarget site and
+          -- lowerDefun both check this against the actual param count.
+        ( "Rt.apply", 3 )
+        , ( "Rt.apply-tail", 3 )
         ]
 
 
@@ -1098,7 +1130,18 @@ driverSeeds =
     -- the census cannot seed them — the driverSeeds precedent.  Rt.die is
     -- already a root; frame-leave's Rt.die edge is a closure edge, not a
     -- new root.
-    keepRtDependencies [ "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave" ]
+    keepRtDependencies
+        [ "Rt.die"
+        , "Rt.halt"
+        , "Rt.main"
+        , "Rt.frame-enter"
+        , "Rt.frame-leave"
+        , -- stage 6 B1: Lower's rtApply retarget (QBE_MIDDRIVER=1) names
+          -- q_Rt_x2eapply/q_Rt_x2eapply_x2dtail directly, so the census
+          -- cannot seed them — the frame-pair precedent.
+        "Rt.apply"
+        , "Rt.apply-tail"
+        ]
 
 
 -- THE SAFEPOINT WALKERS ARE TOP-LEVEL, NOT let-BOUND INSIDE `allocating`.

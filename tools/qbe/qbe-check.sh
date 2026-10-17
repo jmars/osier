@@ -423,6 +423,55 @@ run_midgc() {
   fi
 }
 
+# run_mdgc — a MIDGC x MIDDRIVER row (stage 6 B1): the cross-heap probe
+# fixtures compile through BOTH the Mid mark-sweep collector AND the Mid apply
+# family (Rt.apply's partial arm allocates the env array via Rt.allocVector —
+# the cross-heap edge; Rt.apply-tail's saturated arm the .tail env array).
+# The golden is the SAME value run_midgc pins (the correct sum — the
+# observable output is collector-agnostic).  Build: the run_md pipeline (strip
+# Zig main, QBE_MIDDRIVER=1) PLUS QBE_MIDGC=1; runs at CHURN_MB so both
+# collectors actually collect.
+run_mdgc() {
+  local name="$1" golden="$2" entry="$3" fixture="$4"; shift 4
+  local cli=("$@")
+  local src rt_path rt_nomain ssa bin nat_out exp
+  src="$ROOT/$fixture"
+  [ -f "$src" ] || { echo "FAIL $name: no source: $src"; FAIL=1; return; }
+  rt_path="$("$ROOT/tools/qbe/rt-o.sh")" || { echo "FAIL $name: rt-o"; FAIL=1; return; }
+  rt_nomain="$TMP/$name-rt.o"
+  cp "$rt_path" "$rt_nomain" && objcopy --strip-symbol=main "$rt_nomain" || {
+    echo "FAIL $name: objcopy --strip-symbol=main"; FAIL=1; return
+  }
+  ssa="$TMP/$name.ssa"
+  (cd "$ROOT/elm-compiler" &&
+    QBE=1 QBE_ENTRY="$entry" QBE_MIDDRIVER=1 QBE_MIDGC=1 node run.js "$src" "$ssa") >&2 || {
+    echo "FAIL $name: qbe-mk (QBE_MIDGC=1 QBE_MIDDRIVER=1)"; FAIL=1; return
+  }
+  case "$(head -c 4 "$ssa")" in
+    "err "*) echo "FAIL $name: compile failed: $(cat "$ssa")"; FAIL=1; return;;
+  esac
+  "$ROOT/vendor/qbe/qbe" "$ssa" > "$TMP/$name.s"
+  bin="$TMP/$name"
+  cc "$TMP/$name.s" "$rt_nomain" -o "$bin" -lc || {
+    echo "FAIL $name: link"; FAIL=1; return
+  }
+  nat_out="$(QBE_HEAP_MB=$CHURN_MB timeout 60 "$bin" "$entry" "${cli[@]}" 2>&1)" || true
+  if [ "$FREEZE" = 1 ]; then
+    echo "FAIL $name: a MIDGC x MIDDRIVER row's golden is the MIDGC row's ($golden.txt) — freeze the run_midgc row, not this one"
+    FAIL=1; return
+  fi
+  exp="$(golden_read "$golden")"
+  if [ "$exp" = "__NO_GOLDEN__" ]; then
+    echo "FAIL $name: no golden at $GOLDEN/$golden.txt"
+    FAIL=1; return
+  fi
+  if [ "$nat_out" != "$exp" ]; then
+    echo "FAIL $name: midgc-x-midriver golden='$exp' native='$nat_out'"
+    FAIL=1; return
+  fi
+  echo "PASS $name: midgc x midriver (QBE_HEAP_MB=$CHURN_MB) identical (${nat_out:0:60})"
+}
+
 # like run_midgc(), but with QBE_NOSTRINGINTERN=1 in the runtime env: the
 # zigretire stage-5 PART 4 STRING probe's hole is the rt_string FALLBACK, which
 # fires on QBE_NOSTRINGINTERN=1 (and at run time once intern_live >= 2048).  A
@@ -737,6 +786,26 @@ run_md() {
     FAIL=1; return
   fi
   echo "PASS $name: stdout+stderr+exit identical to default arm (${def_out:0:60})"
+
+  # GC churn (the ROOTING ORACLE — a missed/stale root is SILENT corruption,
+  # not a crash): BOTH arms under the minimum viable heap, compared.  The
+  # apply family's env_root/args/f rooting is what this row exercises — a
+  # churn that moves the env array mid-apply would diverge the arms.
+  if [[ "$name" != *-nochurn ]]; then
+    timeout 60 env QBE_HEAP_MB=$CHURN_MB "$bin_def" "$entry" "${cli[@]}" > "$TMP/$name-def-churn.out" 2>&1
+    rc_def_churn=$?
+    timeout 60 env QBE_HEAP_MB=$CHURN_MB "$bin_md" "$entry" "${cli[@]}" > "$TMP/$name-md-churn.out" 2>&1
+    rc_md_churn=$?
+    if ! cmp -s "$TMP/$name-md-churn.out" "$TMP/$name-def-churn.out"; then
+      echo "FAIL $name: CHURN differs — midriver='$(cat "$TMP/$name-md-churn.out")' default='$(cat "$TMP/$name-def-churn.out")'"
+      FAIL=1; return
+    fi
+    if [ "$rc_md_churn" -ne "$rc_def_churn" ]; then
+      echo "FAIL $name: CHURN exit differs — midriver=$rc_md_churn default=$rc_def_churn"
+      FAIL=1; return
+    fi
+    echo "PASS $name: gc-churn (QBE_HEAP_MB=$CHURN_MB) identical across arms"
+  fi
 }
 
 # ---- the slice fixtures (in-scope constructs only) ----
@@ -895,6 +964,16 @@ run_midgc_nsi midgc-string MidgcString.main tools/qbe/fixtures/midgc-string.elm
 # collector and survives.  This is the probe that distinguishes THE TRIGGER
 # from THE HOLE (the hole is the host-IO fixture, refused at compile time).
 run_midgc midgc-tail MidgcTail.main tools/qbe/fixtures/midgc-tail.elm
+
+# stage 6 B1 — the MID APPLY arms under MIDGC x MIDDRIVER: the same three
+# cross-heap probes, now with the apply family ROUTED TO MID (Rt.apply's
+# partial arm allocates the env array via Rt.allocVector, Rt.apply-tail's
+# saturated arm the .tail env array — the exact cross-heap edge the stage-5
+# review named).  The golden is run_midgc's (the sum/string is collector- and
+# routing-agnostic).
+run_mdgc mdgc-partial   midgc-partial   MidgcPartial.main  tools/qbe/fixtures/midgc-partial.elm
+run_mdgc mdgc-closure   midgc-closure   MidgcClosure.main  tools/qbe/fixtures/midgc-closure.elm
+run_mdgc mdgc-tail      midgc-tail      MidgcTail.main     tools/qbe/fixtures/midgc-tail.elm
 # zigretire stage 5 PART 5 nice-to-have 4 — THE MID-RAW STRING MARKING PROBE:
 # a concat/++-built (Rt.cn -> RawAllocRaw -> Mid) string kept across a MID
 # COLLECT (the churn's 150k conses force the collector).  Every prior string
@@ -996,6 +1075,52 @@ run aggchurn    AggChurn.main   tools/qbe/fixtures/aggchurn.elm
 # collect, visible as a wrong answer under CHURN_MB.  The result is
 # deterministic (20000 cycles x 2102 = 42040000).
 run interleave Interleave.main tools/qbe/fixtures/interleave.elm
+
+# ---- stage-6 B0perf: THE MISSING PERF GATE (why the 175x regression slipped) ----
+# fib 28 is ~393k calls, every call entering a pooled frame.  Under the PRE-FIX
+# per-byte frameZero the hatch-ON (Mid frames) arm took ~5s vs the hatch-OFF
+# (Zig frames) arm's ~46ms — ~110x; fib 30 was ~175x.  The fixed slot-loop is
+# ~150ms — ~3.3x.  No prior oracle saw this: the corpus checks BYTES and the
+# churn rows check OUTPUT, so a 175x RUNTIME regression was invisible.
+#
+# THE BOUND IS A RATIO, not an absolute time — the loaded-host rule: a busy
+# host slows BOTH arms of the SAME machine together, and the ratio cancels
+# that; an absolute bound is exactly the flake this repo rejects.  Report the
+# MEDIAN of 5 ALTERNATED pairs (a single scheduling spike on one arm is a
+# non-median outlier).  The bound is 20x: an order-of-magnitude regression
+# over the fixed ~3.3x (~33x) and the original ~110x+ are both far above it,
+# while the fixed ratio sits at ~3.3x with ~6x headroom — tight enough to
+# catch an order of magnitude, loose enough to never flake on a loaded host.
+# BOTH arms must also print the SAME fib(28) (317811): a wrong zero is a
+# wrong answer, caught here too (the churn rows already cover the GC side).
+frame_perf_gate() {
+  local bin_on bin_off on_times=() off_times=() i s e on_med off_med ratio out_on out_off
+  bin_on="$("$ROOT/tools/qbe/qbe-mk.sh" tests/elm-fixtures/fib.elm Fib.fib "$TMP/perf-on")" || {
+    echo "FAIL frame-perf: qbe-mk (hatch ON)"; FAIL=1; return; }
+  bin_off="$(QBE_MIDDRIVER=0 "$ROOT/tools/qbe/qbe-mk.sh" tests/elm-fixtures/fib.elm Fib.fib "$TMP/perf-off")" || {
+    echo "FAIL frame-perf: qbe-mk (hatch OFF)"; FAIL=1; return; }
+  out_on="$(timeout 60 "$bin_on" Fib.fib 28 2>&1)"
+  out_off="$(timeout 60 "$bin_off" Fib.fib 28 2>&1)"
+  if [ "$out_on" != "$out_off" ]; then
+    echo "FAIL frame-perf: hatch-ON fib(28)='$out_on' != hatch-OFF='$out_off' (the zero differs across arms)"
+    FAIL=1; return
+  fi
+  for i in 1 2 3 4 5; do
+    s=$(date +%s%N); timeout 60 "$bin_on" Fib.fib 28 >/dev/null 2>&1; e=$(date +%s%N)
+    on_times+=("$(( (e - s) / 1000000 ))")
+    s=$(date +%s%N); timeout 60 "$bin_off" Fib.fib 28 >/dev/null 2>&1; e=$(date +%s%N)
+    off_times+=("$(( (e - s) / 1000000 ))")
+  done
+  on_med="$(printf '%s\n' "${on_times[@]}" | sort -n | sed -n '3p')"
+  off_med="$(printf '%s\n' "${off_times[@]}" | sort -n | sed -n '3p')"
+  ratio="$(awk -v a="$on_med" -v b="$off_med" 'BEGIN { printf "%.1f", (b > 0 ? a / b : 999) }')"
+  if awk -v a="$on_med" -v b="$off_med" 'BEGIN { exit !(a > 20 * b) }'; then
+    echo "FAIL frame-perf: hatch-ON median ${on_med}ms is ${ratio}x the hatch-OFF median ${off_med}ms — bound is 20x (the 175x frame-zero regression shape)"
+    FAIL=1; return
+  fi
+  echo "PASS frame-perf: hatch-ON median ${on_med}ms / hatch-OFF median ${off_med}ms = ${ratio}x (bound 20x), both fib(28)=${out_on}"
+}
+frame_perf_gate
 
 # ---- stage 4: arity > 8 (the old rt_callN table stopped at rt_call8) ----
 # arity9: a 9-ary defun called DIRECTLY from the driver (rt_call9).  arity9apply:
@@ -1137,6 +1262,18 @@ run_md md-arity9    arity9          Arity9.add9      tools/qbe/fixtures/arity9.e
 run_md md-float-arg float-arg       Flt.idF          tools/qbe/fixtures/float.elm 2.5
 run_md md-closure   closure         Closure.main     tests/elm-fixtures/closure.elm
 run_md md-partyapply partyapply     PartyApply.chain tools/qbe/fixtures/partyapply.elm
+# stage 6 B1 — the apply arms' behavioural surface under MIDDRIVER: a closure
+# SELF-TAIL (clostail — the .tail arm chased by rt_bounce) and a single
+# exactly-saturated 9-ary over-application (arity9apply — the saturated arm's
+# rt_call9).  Each gets the run_md gc-churn sub-row (QBE_HEAP_MB=16 on both
+# arms) — the rooting oracle for the env_root/args/f discipline.
+run_md md-clostail   clostail        ClosTail.main    tools/qbe/fixtures/clostail.elm 5
+run_md md-arity9apply arity9apply    Arity9.main9     tools/qbe/fixtures/arity9.elm
+# stage 6 B1 — the partial arm's CAPTURE COPY under a MOVING collector: a
+# closure WITH A CAPTURE is partially re-applied in a churn loop (env != null),
+# so the env_root re-read-after-alloc is what keeps the capture copy on the
+# post-scavenge array.  Both arms must print the same deterministic sum.
+run_md md-partchurn  partchurn       PartChurn.main   tools/qbe/fixtures/partchurn.elm
 run_md md-list      list            ListAgg.main     tools/qbe/fixtures/list.elm
 run_md md-record    record          Record.main      tools/qbe/fixtures/record.elm
 AOTRUN_ARGV=1 run_md md-argvrepro-count argvrepro-count ArgvRepro.count tools/qbe/fixtures/argvrepro.elm a b c d

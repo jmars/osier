@@ -276,8 +276,34 @@ rawAbiRetClass key =
     if key == "Rt.main" then
         Base W
 
+    else if key == "Rt.apply" then
+        -- stage 6 B1: Rt.apply returns the 40-byte `:val` (applyGo's
+        -- `.done` value) through sret, exactly the rt_apply seat's C ABI.
+        Agg "val"
+
+    else if key == "Rt.apply-tail" then
+        -- stage 6 B1: Rt.apply-tail returns the 80-byte `:ret` (`.done`
+        -- value | `.tail` request) through sret — rt_apply_tail's C ABI.
+        Agg "ret"
+
     else
         Base L
+
+
+{-| stage 6 B1: is a rawAbi defun's RESULT an aggregate (sret) rather than a
+word?  Aggregate-returning rawAbi defuns lower their BODY through the value
+path (`lowerTail` — so they may end in an If/recur, which the word tail
+rejects) and hand slot 0 to the @ret block; word-returning ones keep the
+`lowerTailWord` path.
+-}
+rawAbiRetIsAgg : String -> Bool
+rawAbiRetIsAgg key =
+    case rawAbiRetClass key of
+        Agg _ ->
+            True
+
+        Base _ ->
+            False
 
 
 {-| The rawAbi ARITY agreement check (stage 6 A1): Mid.Rt.rawAbiArity is the
@@ -1363,12 +1389,22 @@ lowerFunBody entry key qname lambda captures rt sOuter =
         |> Result.andThen
             (\_ ->
                 case rt of
-                    -- rawAbi bodies RETURN A WORD: lower the tail through the
-                    -- raw-word path and hand the word to the @ret block.
+                    -- rawAbi bodies RETURN A WORD by default: lower the tail
+                    -- through the raw-word path and hand the word to the @ret
+                    -- block.  stage 6 B1: an AGGREGATE-returning rawAbi defun
+                    -- (Rt.apply/Rt.apply-tail) lowers through the VALUE path
+                    -- instead, so its body may end in an If/recur — the word
+                    -- tail rejects both.
                     RtRawWord ->
-                        startBlock "body" sStart
-                            |> lowerTailWord lambda.body
-                            |> Result.map (\( s1, retWord ) -> ( s1, retWord ))
+                        if rawAbiRetIsAgg key then
+                            startBlock "body" sStart
+                                |> lowerTail lambda.body
+                                |> Result.map (\s1 -> ( s1, Il.Tmp (slotTmp 0) ))
+
+                        else
+                            startBlock "body" sStart
+                                |> lowerTailWord lambda.body
+                                |> Result.map (\( s1, retWord ) -> ( s1, retWord ))
 
                     _ ->
                         startBlock "body" sStart
@@ -1387,9 +1423,28 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                             RtLeanFree ->
                                 startBlock "ret" s1 |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
 
-                            -- rawAbi returns the body's WORD.
+                            -- rawAbi returns the body's WORD; an aggregate
+                            -- return (stage 6 B1) hands slot 0 to sret — and
+                            -- for the 80-byte `:ret`, the body leaves
+                            -- mknum(buf) in slot 0 (buf = the :ret the loop
+                            -- built in a malloc'd buffer), so the @ret block
+                            -- reads the address back out of the number's
+                            -- payload word 0 and blits the 80 bytes into the
+                            -- sret area (slots 0+1).
                             RtRawWord ->
-                                startBlock "ret" s1 |> closeBlock (Ret (Just rawWordResult))
+                                case rawAbiRetClass key of
+                                    Agg "val" ->
+                                        startBlock "ret" s1 |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
+
+                                    Agg "ret" ->
+                                        startBlock "ret" s1
+                                            |> emit (Bin (Just "retAddr") L Add (Il.Tmp (slotTmp 0)) (Il.Con (RtLayout.payloadWordOffset 0)))
+                                            |> emit (Load (Just "retBuf") L LoadL (Il.Tmp "retAddr"))
+                                            |> emit (Blit (Il.Tmp "retBuf") (Il.Tmp (slotTmp 0)) rvs)
+                                            |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
+
+                                    _ ->
+                                        startBlock "ret" s1 |> closeBlock (Ret (Just rawWordResult))
 
                             _ ->
                                 -- stage 6 B0: under QBE_MIDDRIVER=1 the pooled
@@ -4090,48 +4145,74 @@ directCall key args dest isTail s =
 -- over-application).  NON-TAIL: rt_apply bounces internally and returns a
 -- .done value.  TAIL: rt_apply_tail returns the :ret (.tail or .done), blitted
 -- into the return area.
+--
+-- stage 6 B1: under QBE_MIDDRIVER=1 the generic apply routes to the Mid
+-- rawAbi defuns Rt.apply / Rt.apply-tail — the SAME aggregate result shapes
+-- (`:val`/`:ret`), a symbol swap, and the nargs ARG CLASS changes: the Zig
+-- seats take nargs as i32 `w`, the rawAbi defuns' params are `l` registers
+-- (QBE subtyping is `l`->`w` only, so a `w` arg to an `l` param would be a
+-- usecheck failure — MEASURED against the vendored qbe).
 rtApply : String -> List Exp -> Int -> Bool -> S -> Result String S
 rtApply fslotTmp args dest isTail s =
+    let
+        midKey =
+            if isTail then
+                "Rt.apply-tail"
+
+            else
+                "Rt.apply"
+
+        ( callee, nargsTy ) =
+            if s.midDriver then
+                ( "q_" ++ mangle midKey, Base L )
+
+            else
+                ( if isTail then "rt_apply_tail" else "rt_apply", Base W )
+    in
     stageArgs args s
         |> Result.andThen
             (\( _, baseSlot, s1 ) ->
-                if isTail then
-                    let
-                        ( rp, s2 ) =
-                            freshTmp s1
-                    in
-                    Ok
-                        (emit
-                            (Call (Just rp)
-                                (Agg "ret")
-                                (Il.Sym "rt_apply_tail")
-                                [ ArgVal (Base L) (Il.Tmp fslotTmp)
-                                , ArgVal (Base L) (Il.Tmp (slotTmp baseSlot))
-                                , ArgVal (Base W) (Il.Con (List.length args))
-                                ]
-                            )
-                            s2
-                            |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp 0)) rvs)
-                            |> jumpTo "ret"
-                        )
+                rawAbiArityAgree midKey 3
+                    |> Result.andThen
+                        (\_ ->
+                            if isTail then
+                                let
+                                    ( rp, s2 ) =
+                                        freshTmp s1
+                                in
+                                Ok
+                                    (emit
+                                        (Call (Just rp)
+                                            (Agg "ret")
+                                            (Il.Sym callee)
+                                            [ ArgVal (Base L) (Il.Tmp fslotTmp)
+                                            , ArgVal (Base L) (Il.Tmp (slotTmp baseSlot))
+                                            , ArgVal nargsTy (Il.Con (List.length args))
+                                            ]
+                                        )
+                                        s2
+                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp 0)) rvs)
+                                        |> jumpTo "ret"
+                                    )
 
-                else
-                    let
-                        ( rp, s2 ) =
-                            freshTmp s1
-                    in
-                    Ok
-                        (emit
-                            (Call (Just rp)
-                                (Agg "val")
-                                (Il.Sym "rt_apply")
-                                [ ArgVal (Base L) (Il.Tmp fslotTmp)
-                                , ArgVal (Base L) (Il.Tmp (slotTmp baseSlot))
-                                , ArgVal (Base W) (Il.Con (List.length args))
-                                ]
-                            )
-                            s2
-                            |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+                            else
+                                let
+                                    ( rp, s2 ) =
+                                        freshTmp s1
+                                in
+                                Ok
+                                    (emit
+                                        (Call (Just rp)
+                                            (Agg "val")
+                                            (Il.Sym callee)
+                                            [ ArgVal (Base L) (Il.Tmp fslotTmp)
+                                            , ArgVal (Base L) (Il.Tmp (slotTmp baseSlot))
+                                            , ArgVal nargsTy (Il.Con (List.length args))
+                                            ]
+                                        )
+                                        s2
+                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+                                    )
                         )
             )
 

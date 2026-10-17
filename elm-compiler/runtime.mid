@@ -3457,17 +3457,37 @@ defun Rt.childCd(argvN : val, argcN : val, stN : val) -> val {
 // head), word 2 = no_frame_reuse (read ONCE in Rt.main, checked here — the
 // rt.zig:240-249 discipline; a per-call getenv is the measured 8.4% trap).
 // FrameHdr is 40 bytes = 5 words: live@0 (i32), wm@1, next@2,
-// freelist_next@3, slots at +40 (word 5).  A Value is 40 bytes = 5 words, so
-// zeroing is 5 words per slot.  Zero-BEFORE-root: the reused block's stale
-// slots are memset to the number-0 Value (tag 0, payload 0) BEFORE
-// rootPushValueArray — otherwise scanValue chases freed GC pages.
-defun Rt.frameZero(base : val, n : val) -> val {
-  word b = payload(base, 0);
-  if (mkbool(payload(n, 0) == 0)) {
+// freelist_next@3, slots@4 (the pointer field — the slots DATA starts at +40,
+// word 5).  A Value is 40 bytes = 5 words, so zeroing is 5 words per slot.
+// Zero-BEFORE-root: the reused block's stale slots are memset to the
+// number-0 Value (tag 0, payload 0) BEFORE rootPushValueArray — otherwise
+// scanValue chases freed GC pages.
+//
+// THE 175x FIX (stage-6 B0perf): the original loop stored ONE BYTE per
+// iteration and re-boxed the decremented count (`mknum(...)`) on every
+// `recur` — an ALLOCATION per byte, so each frame allocated nslots*40
+// Values.  A rawAbi WORD loop is inexpressible (the rawAbi tail rejects both
+// `If` and `recur` — Lower.lowerTailWord), so the loop STAYS :val (in-frame
+// recur) but now (a) zeroes a full 40-byte SLOT (5 words) per iteration and
+// (b) holds the decrementing SLOT count as a raw word in header slot 4 — the
+// slots-POINTER field, which the Mid frame path never reads
+// (rt_root_push_value_array takes base+live explicitly) — with a CONSTANT
+// recur arg, so the loop allocates NOTHING.  The count is seeded by
+// Rt.frame-enter (wstore(hdr,4,nslots)).
+defun Rt.frameZero(hdr : val) -> val {
+  word h = payload(hdr, 0);
+  word i = wload(h, 4);
+  if (mkbool(i == 0)) {
     return mknil;
   } else {
-    bytestore(b, payload(n, 0) - 1, 0);
-    recur(base, mknum(payload(n, 0) - 1));
+    word w = (i - 1) * 5;
+    wstore(h + 40, w, 0);
+    wstore(h + 40, w + 1, 0);
+    wstore(h + 40, w + 2, 0);
+    wstore(h + 40, w + 3, 0);
+    wstore(h + 40, w + 4, 0);
+    wstore(h, 4, i - 1);
+    recur(hdr);
   }
 }
 
@@ -3488,7 +3508,8 @@ defun Rt.frameBlock(nslots : word) -> word {
 defun Rt.frame-enter(nslots : word) -> word {
   word hdr = call Rt.frameBlock(nslots);
   word base = hdr + 40;
-  call Rt.frameZero(mknum(base), mknum(nslots * 40));
+  wstore(hdr, 4, nslots);
+  call Rt.frameZero(mknum(hdr));
   wstore(hdr, 0, nslots);
   word wm = rawcall rt_root_watermark();
   wstore(hdr, 1, wm);
@@ -3837,4 +3858,304 @@ defun Rt.main(argc : word, argv : word) -> word {
   word ppc = rawcall rt_print_value(fptr2);
   word pf = if (mkbool(ppc != 0)) { rawcall exit(1); return 0; } else { return 0; };
   return 0;
+}
+// ===== the stage-6 B1 apply family (VERBATIM rt.zig rt_apply / rt_apply_tail
+// / applyGo, rt.zig:793-927).  Rt.apply / Rt.apply-tail are rawAbi WRAPPERS
+// (3 word params — fslot *Value, args [*]Value, nargs) that root the caller's
+// args array, then hand off to a :val LOOP (Rt.applyGo / Rt.applyTailGo —
+// `recur` needs the val self-tail loop, which the rawAbi tail rejects).  The
+// loop's current closure lives in its OWN (rooted) frame as a :val PARAM, not
+// in the malloc'd state block — the over arm re-binds it via `recur(.., res)`
+// so no raw store ever writes a Value into a non-GC buffer.  The state block
+// carries the raw words: [args | nargs | live | env_root].  The PARTIAL arm's
+// env_root dance (rootPushPtr + the RE-READ-AFTER-ALLOC, the cStrFill lesson)
+// is what keeps the applied-args/captures copy pointing at the POST-scavenge
+// env array.
+defun Rt.apply(fslot : word, args : word, nargs : word) -> val {
+  word state = rawcall malloc(32);
+  wstore(state, 0, args);
+  wstore(state, 1, nargs);
+  wstore(state, 2, nargs);
+  rawcall rt_root_push_value_array(args, state + 16);
+  val f = vecload(fslot, 0);
+  val r = call Rt.applyGo(mknum(state), f);
+  rawcall rt_root_pop();
+  return r;
+}
+defun Rt.apply-tail(fslot : word, args : word, nargs : word) -> val {
+  word state = rawcall malloc(32);
+  wstore(state, 0, args);
+  wstore(state, 1, nargs);
+  wstore(state, 2, nargs);
+  rawcall rt_root_push_value_array(args, state + 16);
+  val f = vecload(fslot, 0);
+  val r = call Rt.applyTailGo(mknum(state), f);
+  rawcall rt_root_pop();
+  return r;
+}
+defun Rt.applyGo(state : val, f : val) -> val {
+  word sp = payload(state, 0);
+  word code = payload(f, 0);
+  word fn = wload(code, 0);
+  word rem = payload32(f, 1);
+  word env = payload(f, 2);
+  word envlen = payload32(f, 3);
+  word args = wload(sp, 0);
+  word nargs = wload(sp, 1);
+  if (mkbool(tagis(f, 6) == 0)) {
+    call Rt.die(rawstr("qbe-rt: apply of a non-function value"));
+    return mknil;
+  } else {
+    word arity = wload(code, 1) & 4294967295;
+    word napp = arity - rem;
+    word capslen = envlen - napp;
+    if (mkbool(rem == nargs)) {
+      word buf = rawcall malloc(640);
+      val chk = if (mkbool(napp > 0) && mkbool(env == 0)) {
+        call Rt.die(rawstr("qbe-rt: closure env missing for applied args"));
+        return mknil;
+      } else {
+        return mknil;
+      };
+      call Rt.copyWords(mknum(buf), mknum(env), mknum(napp * 5));
+      call Rt.copyWords(mknum(buf + napp * 40), mknum(args), mknum(rem * 5));
+      word caps = payload(mkbool(envlen > napp) ? mknum(env + napp * 40) : mknum(0), 0);
+      word disp = rawcall malloc(32);
+      wstore(disp, 0, fn);
+      wstore(disp, 1, caps);
+      wstore(disp, 2, buf);
+      wstore(disp, 3, arity);
+      return call Rt.callArity(mknum(disp));
+    } else {
+      if (mkbool(rem > nargs)) {
+        word total = napp + nargs + capslen;
+        wstore(sp, 3, env);
+        rawcall rt_root_push_ptr(sp + 24);
+        word envv = allocvec(total);
+        word env2 = wload(sp, 3);
+        call Rt.copyWords(mknum(envv), mknum(env2), mknum(napp * 5));
+        call Rt.copyWords(mknum(envv + napp * 40), mknum(args), mknum(nargs * 5));
+        call Rt.copyWords(mknum(envv + (napp + nargs) * 40), mknum(env2 + napp * 40), mknum(capslen * 5));
+        rawcall rt_root_pop();
+        return mkval(6, code, rem - nargs, envv, total);
+      } else {
+        word buf = rawcall malloc(640);
+        call Rt.copyWords(mknum(buf), mknum(env), mknum(napp * 5));
+        call Rt.copyWords(mknum(buf + napp * 40), mknum(args), mknum(rem * 5));
+        word caps = payload(mkbool(envlen > napp) ? mknum(env + napp * 40) : mknum(0), 0);
+        word disp = rawcall malloc(32);
+        wstore(disp, 0, fn);
+        wstore(disp, 1, caps);
+        wstore(disp, 2, buf);
+        wstore(disp, 3, arity);
+        val res = call Rt.callArity(mknum(disp));
+        wstore(sp, 0, args + rem * 40);
+        wstore(sp, 1, nargs - rem);
+        recur(mknum(sp), res);
+      }
+    }
+  }
+}
+defun Rt.applyTailGo(state : val, f : val) -> val {
+  word sp = payload(state, 0);
+  word code = payload(f, 0);
+  word fn = wload(code, 0);
+  word rem = payload32(f, 1);
+  word env = payload(f, 2);
+  word envlen = payload32(f, 3);
+  word args = wload(sp, 0);
+  word nargs = wload(sp, 1);
+  if (mkbool(tagis(f, 6) == 0)) {
+    call Rt.die(rawstr("qbe-rt: apply of a non-function value"));
+    return mknil;
+  } else {
+    word arity = wload(code, 1) & 4294967295;
+    word napp = arity - rem;
+    word capslen = envlen - napp;
+    if (mkbool(rem == nargs)) {
+      word total = arity + capslen;
+      wstore(sp, 3, env);
+      rawcall rt_root_push_ptr(sp + 24);
+      word buf = allocvec(total);
+      word env2 = wload(sp, 3);
+      val chk = if (mkbool(napp > 0) && mkbool(env2 == 0)) {
+        call Rt.die(rawstr("qbe-rt: closure env missing for applied args"));
+        return mknil;
+      } else {
+        return mknil;
+      };
+      call Rt.copyWords(mknum(buf), mknum(env2), mknum(napp * 5));
+      call Rt.copyWords(mknum(buf + napp * 40), mknum(args), mknum(rem * 5));
+      call Rt.copyWords(mknum(buf + arity * 40), mknum(env2 + napp * 40), mknum(capslen * 5));
+      rawcall rt_root_pop();
+      word e = payload(mkbool(capslen > 0) ? mknum(buf + arity * 40) : mknum(0), 0);
+      word retbuf = rawcall malloc(80);
+      wstore(retbuf, 0, 0);
+      wstore(retbuf, 1, 0);
+      wstore(retbuf, 2, 0);
+      wstore(retbuf, 3, 0);
+      wstore(retbuf, 4, 0);
+      wstore(retbuf, 5, 1);
+      wstore(retbuf, 6, fn);
+      wstore(retbuf, 7, e);
+      wstore(retbuf, 8, buf);
+      wstore(retbuf, 9, arity);
+      return mknum(retbuf);
+    } else {
+      if (mkbool(rem > nargs)) {
+        word total = napp + nargs + capslen;
+        wstore(sp, 3, env);
+        rawcall rt_root_push_ptr(sp + 24);
+        word envv = allocvec(total);
+        word env2 = wload(sp, 3);
+        call Rt.copyWords(mknum(envv), mknum(env2), mknum(napp * 5));
+        call Rt.copyWords(mknum(envv + napp * 40), mknum(args), mknum(nargs * 5));
+        call Rt.copyWords(mknum(envv + (napp + nargs) * 40), mknum(env2 + napp * 40), mknum(capslen * 5));
+        rawcall rt_root_pop();
+        word retbuf = rawcall malloc(80);
+        wstore(retbuf, 0, 6);
+        wstore(retbuf, 1, code);
+        wstore(retbuf, 2, rem - nargs);
+        wstore(retbuf, 3, envv);
+        wstore(retbuf, 4, total);
+        wstore(retbuf, 5, 0);
+        wstore(retbuf, 6, 0);
+        wstore(retbuf, 7, 0);
+        wstore(retbuf, 8, 0);
+        wstore(retbuf, 9, 0);
+        return mknum(retbuf);
+      } else {
+        word buf = rawcall malloc(640);
+        call Rt.copyWords(mknum(buf), mknum(env), mknum(napp * 5));
+        call Rt.copyWords(mknum(buf + napp * 40), mknum(args), mknum(rem * 5));
+        word caps = payload(mkbool(envlen > napp) ? mknum(env + napp * 40) : mknum(0), 0);
+        word disp = rawcall malloc(32);
+        wstore(disp, 0, fn);
+        wstore(disp, 1, caps);
+        wstore(disp, 2, buf);
+        wstore(disp, 3, arity);
+        val res = call Rt.callArity(mknum(disp));
+        wstore(sp, 0, args + rem * 40);
+        wstore(sp, 1, nargs - rem);
+        recur(mknum(sp), res);
+      }
+    }
+  }
+}
+defun Rt.callArity(disp : val) -> val {
+  word dp = payload(disp, 0);
+  word code = wload(dp, 0);
+  word caps = wload(dp, 1);
+  word buf = wload(dp, 2);
+  word arity = wload(dp, 3);
+  if (mkbool(arity == 0)) {
+    word r = aggcall ret rawsym("rt_call0")(code, caps);
+    word v = aggcall val rawsym("rt_bounce")(r);
+    return vecload(v, 0);
+  } else {
+    if (mkbool(arity == 1)) {
+      word r = aggcall ret rawsym("rt_call1")(code, caps, buf);
+      word v = aggcall val rawsym("rt_bounce")(r);
+      return vecload(v, 0);
+    } else {
+      if (mkbool(arity == 2)) {
+        word r = aggcall ret rawsym("rt_call2")(code, caps, buf, buf + 40);
+        word v = aggcall val rawsym("rt_bounce")(r);
+        return vecload(v, 0);
+      } else {
+        if (mkbool(arity == 3)) {
+          word r = aggcall ret rawsym("rt_call3")(code, caps, buf, buf + 40, buf + 80);
+          word v = aggcall val rawsym("rt_bounce")(r);
+          return vecload(v, 0);
+        } else {
+          if (mkbool(arity == 4)) {
+            word r = aggcall ret rawsym("rt_call4")(code, caps, buf, buf + 40, buf + 80, buf + 120);
+            word v = aggcall val rawsym("rt_bounce")(r);
+            return vecload(v, 0);
+          } else {
+            if (mkbool(arity == 5)) {
+              word r = aggcall ret rawsym("rt_call5")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160);
+              word v = aggcall val rawsym("rt_bounce")(r);
+              return vecload(v, 0);
+            } else {
+              if (mkbool(arity == 6)) {
+                word r = aggcall ret rawsym("rt_call6")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200);
+                word v = aggcall val rawsym("rt_bounce")(r);
+                return vecload(v, 0);
+              } else {
+                if (mkbool(arity == 7)) {
+                  word r = aggcall ret rawsym("rt_call7")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240);
+                  word v = aggcall val rawsym("rt_bounce")(r);
+                  return vecload(v, 0);
+                } else {
+                  if (mkbool(arity == 8)) {
+                    word r = aggcall ret rawsym("rt_call8")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280);
+                    word v = aggcall val rawsym("rt_bounce")(r);
+                    return vecload(v, 0);
+                  } else {
+                    if (mkbool(arity == 9)) {
+                      word r = aggcall ret rawsym("rt_call9")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320);
+                      word v = aggcall val rawsym("rt_bounce")(r);
+                      return vecload(v, 0);
+                    } else {
+                      if (mkbool(arity == 10)) {
+                        word r = aggcall ret rawsym("rt_call10")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360);
+                        word v = aggcall val rawsym("rt_bounce")(r);
+                        return vecload(v, 0);
+                      } else {
+                        if (mkbool(arity == 11)) {
+                          word r = aggcall ret rawsym("rt_call11")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400);
+                          word v = aggcall val rawsym("rt_bounce")(r);
+                          return vecload(v, 0);
+                        } else {
+                          if (mkbool(arity == 12)) {
+                            word r = aggcall ret rawsym("rt_call12")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440);
+                            word v = aggcall val rawsym("rt_bounce")(r);
+                            return vecload(v, 0);
+                          } else {
+                            if (mkbool(arity == 13)) {
+                              word r = aggcall ret rawsym("rt_call13")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480);
+                              word v = aggcall val rawsym("rt_bounce")(r);
+                              return vecload(v, 0);
+                            } else {
+                              if (mkbool(arity == 14)) {
+                                word r = aggcall ret rawsym("rt_call14")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520);
+                                word v = aggcall val rawsym("rt_bounce")(r);
+                                return vecload(v, 0);
+                              } else {
+                                if (mkbool(arity == 15)) {
+                                  word r = aggcall ret rawsym("rt_call15")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520, buf + 560);
+                                  word v = aggcall val rawsym("rt_bounce")(r);
+                                  return vecload(v, 0);
+                                } else {
+                                  word r = aggcall ret rawsym("rt_call16")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520, buf + 560, buf + 600);
+                                  word v = aggcall val rawsym("rt_bounce")(r);
+                                  return vecload(v, 0);
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+defun Rt.copyWords(dst : val, src : val, n : val) -> val {
+  word dstW = payload(dst, 0);
+  word srcW = payload(src, 0);
+  word nw = payload(n, 0);
+  if (mkbool(nw == 0)) {
+    return mknil;
+  } else {
+    wstore(dstW, nw - 1, wload(srcW, nw - 1));
+    recur(mknum(dstW), mknum(srcW), mknum(nw - 1));
+  }
 }
