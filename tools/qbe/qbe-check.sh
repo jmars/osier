@@ -1079,18 +1079,23 @@ run interleave Interleave.main tools/qbe/fixtures/interleave.elm
 # ---- stage-6 B0perf: THE MISSING PERF GATE (why the 175x regression slipped) ----
 # fib 28 is ~393k calls, every call entering a pooled frame.  Under the PRE-FIX
 # per-byte frameZero the hatch-ON (Mid frames) arm took ~5s vs the hatch-OFF
-# (Zig frames) arm's ~46ms — ~110x; fib 30 was ~175x.  The fixed slot-loop is
-# ~150ms — ~3.3x.  No prior oracle saw this: the corpus checks BYTES and the
-# churn rows check OUTPUT, so a 175x RUNTIME regression was invisible.
+# (Zig frames) arm's ~46ms — ~110x; fib 30 was ~175x.  B0perf's :val slot-loop
+# landed at ~150ms — ~3.3x; B0perf-2's rawAbi WORD loop (no per-iteration Value
+# blit) lands at ~1.6x.  No prior oracle saw this: the corpus checks BYTES and
+# the churn rows check OUTPUT, so a 175x RUNTIME regression was invisible.
 #
 # THE BOUND IS A RATIO, not an absolute time — the loaded-host rule: a busy
 # host slows BOTH arms of the SAME machine together, and the ratio cancels
 # that; an absolute bound is exactly the flake this repo rejects.  Report the
 # MEDIAN of 5 ALTERNATED pairs (a single scheduling spike on one arm is a
-# non-median outlier).  The bound is 20x: an order-of-magnitude regression
-# over the fixed ~3.3x (~33x) and the original ~110x+ are both far above it,
-# while the fixed ratio sits at ~3.3x with ~6x headroom — tight enough to
-# catch an order of magnitude, loose enough to never flake on a loaded host.
+# non-median outlier).  BOUND BASIS (B0perf-2, MEASURED alternating pairs):
+#   fib 28  before 156/50ms = 3.12x  ->  after 118/77ms = 1.53x
+#   fib 30  before 407/125ms = 3.26x ->  after 207/122ms = 1.70x
+# (the after floor is ~1.5-1.7x, with load-transition spikes to ~2.1x on a
+# busy host; the pre-fix :val loop is ~3.1-3.3x).  The bound is 2.5x: ~0.9x
+# headroom above the measured floor and its load spikes, and ~0.6x BELOW the
+# pre-fix 3.12x — tight enough to catch a regression back to the :val blit
+# loop, loose enough to never flake on a loaded host.
 # BOTH arms must also print the SAME fib(28) (317811): a wrong zero is a
 # wrong answer, caught here too (the churn rows already cover the GC side).
 frame_perf_gate() {
@@ -1114,11 +1119,11 @@ frame_perf_gate() {
   on_med="$(printf '%s\n' "${on_times[@]}" | sort -n | sed -n '3p')"
   off_med="$(printf '%s\n' "${off_times[@]}" | sort -n | sed -n '3p')"
   ratio="$(awk -v a="$on_med" -v b="$off_med" 'BEGIN { printf "%.1f", (b > 0 ? a / b : 999) }')"
-  if awk -v a="$on_med" -v b="$off_med" 'BEGIN { exit !(a > 20 * b) }'; then
-    echo "FAIL frame-perf: hatch-ON median ${on_med}ms is ${ratio}x the hatch-OFF median ${off_med}ms — bound is 20x (the 175x frame-zero regression shape)"
+  if awk -v a="$on_med" -v b="$off_med" 'BEGIN { exit !(a > 2.5 * b) }'; then
+    echo "FAIL frame-perf: hatch-ON median ${on_med}ms is ${ratio}x the hatch-OFF median ${off_med}ms — bound is 2.5x (the :val frame-zero blit regression shape)"
     FAIL=1; return
   fi
-  echo "PASS frame-perf: hatch-ON median ${on_med}ms / hatch-OFF median ${off_med}ms = ${ratio}x (bound 20x), both fib(28)=${out_on}"
+  echo "PASS frame-perf: hatch-ON median ${on_med}ms / hatch-OFF median ${off_med}ms = ${ratio}x (bound 2.5x), both fib(28)=${out_on}"
 }
 frame_perf_gate
 

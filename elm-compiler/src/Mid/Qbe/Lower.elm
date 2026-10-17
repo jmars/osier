@@ -1566,10 +1566,11 @@ lowerTail exp s =
 {-| The rawAbi tail (stage 6 U2): the defun's tail VALUE is a WORD, not the
 slot-0 `:val` `lowerTail` produces.  Statements (a `Let` chain) fold in the
 same way; the leaf lowers through `rawWordArg` and the body block closes with
-`jmp @ret`, handing the word to the caller's @ret block.  A tail `If`/`App`/
-closure is not spelled by any U2 defun (Rt.die/Rt.halt end in `exit(1)` then
-`return 0`) and is a loud Err here — extend the same way `lowerTail` handles
-its arms when a rawAbi defun needs one.
+`jmp @ret`, handing the word to the caller's @ret block.  A tail `If` is the
+word-valued branch join (`lowerIfWord`, stage 6 B0perf-2) and a tail `App` is
+the self-tail loop (`lowerSelfTailWord`) — the two arms a word loop needs,
+mirroring `lowerTail`'s handling of the same shapes.  Every OTHER tail shape
+(an unknown App, a closure, a two-word join) stays a loud Err.
 -}
 lowerTailWord : Exp -> S -> Result String ( S, Il.Arg )
 lowerTailWord exp s =
@@ -1581,15 +1582,177 @@ lowerTailWord exp s =
             lowerLetBinders block.binders s
                 |> Result.andThen (lowerTailWord block.body)
 
-        If _ ->
-            Err "qbe: raw-abi defun tail is an If (a word-valued branch join is not lowered — U2's die/halt tails are plain words)"
+        If block ->
+            lowerIfWord block s
 
         App _ ->
-            Err "qbe: raw-abi defun tail is an App (a word-valued tail call is not lowered — U2's die/halt tails are plain words)"
+            case wordSelfTailArgs exp s of
+                Just args ->
+                    lowerSelfTailWord args s
+
+                Nothing ->
+                    Err "qbe: raw-abi defun tail is an App (a word-valued tail call is not lowered — only a self-tail `recur` on the rawAbi word params is expressible)"
 
         _ ->
             rawWordArg exp s
                 |> Result.map (\( a, s1 ) -> ( jumpTo "ret" s1, a ))
+
+
+{-| The self-tail App check shared by `lowerTailWord`'s App arm — the same
+test `lowerApp` makes (head is the self GRef at its declared arity), so a
+rawAbi word defun's `recur` compiles to the in-frame loop the `:val` side
+already gets.  A non-self App (or a `force` thunk) is `Nothing` -> loud.
+-}
+wordSelfTailArgs : Exp -> S -> Maybe (List Exp)
+wordSelfTailArgs exp s =
+    let
+        ( head, args ) =
+            spine exp
+    in
+    case head of
+        GRef ref ->
+            if not ref.force && ref.key == s.defunKey && Dict.get ref.key s.arities == Just (List.length args) then
+                Just args
+
+            else
+                Nothing
+
+        _ ->
+            Nothing
+
+
+{-| The rawAbi WORD self-tail (`recur` -> `jmp @body`).  The params are `l`
+REGISTERS (a0..), never memory slots, so a loop-carried word can only re-enter
+@body when it is ALREADY in its param register — the loop keeps its mutable
+state in memory (header word 4 for Rt.frameZero) and `recur`s on the CONSTANT
+param.  A computed arg would need a register copy the word ABI cannot express
+(no phi node, and `%a0` is already defined by the signature), so it is a loud
+Err, not a silent wrong loop.
+-}
+lowerSelfTailWord : List Exp -> S -> Result String ( S, Il.Arg )
+lowerSelfTailWord args s =
+    lowerSelfTailWordArgs args 0 s
+        |> Result.map (\s1 -> ( jumpTo "body" s1, Il.Con 0 ))
+
+
+lowerSelfTailWordArgs : List Exp -> Int -> S -> Result String S
+lowerSelfTailWordArgs args i s =
+    case args of
+        [] ->
+            Ok s
+
+        e :: rest ->
+            rawWordArg e s
+                |> Result.andThen
+                    (\( a, s1 ) ->
+                        case a of
+                            Il.Tmp t ->
+                                if t == "a" ++ String.fromInt i then
+                                    lowerSelfTailWordArgs rest (i + 1) s1
+
+                                else
+                                    Err
+                                        ("qbe: raw-abi self-tail arg "
+                                            ++ String.fromInt i
+                                            ++ " is not the param register a"
+                                            ++ String.fromInt i
+                                            ++ " — the word loop can only recur on its constant params (the mutable state lives in memory)"
+                                        )
+
+                            _ ->
+                                Err
+                                    ("qbe: raw-abi self-tail arg "
+                                        ++ String.fromInt i
+                                        ++ " is not a param register — a computed word would need a register copy the word ABI cannot express"
+                                    )
+                    )
+
+
+{-| The rawAbi WORD-valued tail If (stage 6 B0perf-2): the cond is the SAME
+`:val` boolean `lowerIf` branches on (`mkbool` of a word compare — one slot
+write, never an allocation), but each BRANCH is a `lowerTailWord` tail, so a
+branch that `recur`s closes with `jmp @body` and a branch that returns a word
+closes with `jmp @ret`.  Exactly ONE branch may be ret-bound (the other must
+be a self-tail): a two-word join would need a phi node and is a LOUD Err, not
+a silent wrong word at @ret.
+-}
+lowerIfWord : { cond : Exp, thenBranch : Exp, elseBranch : Exp, falseLabel : String, endLabel : String } -> S -> Result String ( S, Il.Arg )
+lowerIfWord block s =
+    let
+        ( cslot, s0 ) =
+            freshSlot s
+    in
+    lowerVal block.cond cslot s0
+        |> Result.andThen
+            (\s1 ->
+                let
+                    ( tagT, s2 ) =
+                        freshTmp s1
+
+                    ( isbT, s3 ) =
+                        freshTmp s2
+
+                    ( pldT, s4 ) =
+                        freshTmp s3
+
+                    ( p8T, s5 ) =
+                        freshTmp s4
+
+                    ( iszT, s6 ) =
+                        freshTmp s5
+
+                    ( jfT, s7 ) =
+                        freshTmp s6
+
+                    ( thenLbl, s8 ) =
+                        freshLbl "then" s7
+
+                    ( elseLbl, s9 ) =
+                        freshLbl "else" s8
+                in
+                emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp cslot))) s9
+                    |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con tagBoolean))
+                    |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp cslot)) (Il.Con 8))
+                    |> emit (Load (Just pldT) W LoadW (Il.Tmp p8T))
+                    |> emit (Cmp (Just iszT) W Ceq (Il.Tmp pldT) (Il.Con 0))
+                    |> emit (Bin (Just jfT) W And (Il.Tmp isbT) (Il.Tmp iszT))
+                    |> closeBlock (Jnz (Il.Tmp jfT) elseLbl thenLbl)
+                    |> startBlock thenLbl
+                    |> lowerTailWord block.thenBranch
+                    |> Result.andThen
+                        (\( s_then, w_then ) ->
+                            lowerTailWord block.elseBranch (startBlock elseLbl s_then)
+                                |> Result.andThen
+                                    (\( s_else, w_else ) ->
+                                        case ( lastBlockJump s_then, lastBlockJump s_else ) of
+                                            ( Jmp "ret", Jmp "body" ) ->
+                                                Ok ( s_else, w_then )
+
+                                            ( Jmp "body", Jmp "ret" ) ->
+                                                Ok ( s_else, w_else )
+
+                                            ( Jmp "body", Jmp "body" ) ->
+                                                Ok ( s_else, Il.Con 0 )
+
+                                            ( Jmp "ret", Jmp "ret" ) ->
+                                                Err "qbe: raw-abi defun tail If joins two word-returning branches (a word-valued join is not lowered — one branch must be a self-tail recur)"
+
+                                            _ ->
+                                                Err "qbe: raw-abi defun tail If branch did not close with jmp @ret or jmp @body"
+                                    )
+                        )
+            )
+
+
+-- The jump of the most-recently-closed block (the branch's final terminator).
+lastBlockJump : S -> Jump
+lastBlockJump s =
+    case s.blocks of
+        b :: _ ->
+            b.jump
+
+        [] ->
+            Fallthrough
 
 
 lowerVal : Exp -> Int -> S -> Result String S

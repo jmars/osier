@@ -1067,14 +1067,14 @@ rawAbi =
           -- Rt.frame-enter/leave are the raw-word pair the prologue/return
           -- retarget reaches; Rt.frameBlock (the freelist pop-or-malloc) is a
           -- word helper so the rawAbi->rawAbi `call` stays on the raw-word
-          -- path.  Rt.frameZero is a :val SLOT loop (the zero-before-root
-          -- memset — `recur` needs the val self-tail loop, which the rawAbi
-          -- tail rejects; five words per iteration, the counter is a raw
-          -- word in header slot 4 so the recur arg is CONSTANT and the loop
-          -- allocates nothing), NOT rawAbi.
+          -- path.  Rt.frameZero is the zero-before-root memset, ALSO rawAbi
+          -- (stage 6 B0perf-2): its loop is a WORD self-tail (`recur` on the
+          -- constant hdr param -> jmp @body, state in header word 4), so
+          -- there is no :val on the path and no per-iteration blit.
           "Rt.frame-enter"
         , "Rt.frame-leave"
         , "Rt.frameBlock"
+        , "Rt.frameZero"
         , -- ===== the stage-6 B1 apply family.  Rt.apply/Rt.apply-tail are
           -- raw-word defuns whose RESULT is an AGGREGATE (the stage-6 B1
           -- rawAbi-ret-class extension — Mid.Qbe.Lower.rawAbiRetClass maps
@@ -1107,6 +1107,7 @@ rawAbiArity =
         , ( "Rt.frame-enter", 1 )
         , ( "Rt.frame-leave", 0 )
         , ( "Rt.frameBlock", 1 )
+        , ( "Rt.frameZero", 1 )
         , -- stage 6 B1: Rt.apply/Rt.apply-tail take the SAME 3 word params
           -- as the Zig seats (fslot, args, nargs) — the retarget site and
           -- lowerDefun both check this against the actual param count.

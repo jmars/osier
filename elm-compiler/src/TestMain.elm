@@ -1123,7 +1123,7 @@ checks rt =
     -- shapes are pinned, not just "it links".
     , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main + the B0 frame pair are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo/frame set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set; the frame pair is FRAME-FREE by construction — its only nodes are rawcall/raw-word loads/stores and rawAbi->rawAbi calls to the two non-allocating helpers)"
         (Rt.rawAbi
-            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail" ]
+            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.frameZero", "Rt.apply", "Rt.apply-tail" ]
             && not (Set.member "Rt.die" rt.allocating)
             && not (Set.member "Rt.halt" rt.allocating)
             && not (Set.member "Rt.cStrEq" rt.allocating)
@@ -1172,6 +1172,38 @@ checks rt =
                         f.params == []
                             && f.ret == Il.Base Il.L
                             && frameBaseIsAlloc f
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "B0perf-2 frameZero is a rawAbi WORD defun: params [a0:l], ret l, frame-free, an in-frame self-tail (jmp @body, no self-call) and NO :val aggregate or 40-byte blit in its body — the recur's Value blits are gone (fails on the pre-fix :val frameZero)"
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.frameZero" of
+            Ok mod ->
+                case funcByName "q_Rt_x2eframeZero" mod of
+                    Just f ->
+                        List.map Tuple.second f.params
+                            == [ Il.Base Il.L ]
+                            && f.ret
+                            == Il.Base Il.L
+                            && frameBaseIsAlloc f
+                            && selfLoopIsLoop ( "q_Rt_x2eframeZero", f )
+                            && not (hasValOrBlit f.blocks)
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "B0perf-2 frame-enter calls frameZero with a WORD call (one Base L arg) — never the lean 4-arg :val shape the pre-fix :val defun needed"
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.frame-enter" of
+            Ok mod ->
+                case funcByName "q_Rt_x2eframe_x2denter" mod of
+                    Just f ->
+                        rawAbiWordCall "q_Rt_x2eframeZero" f
 
                     Nothing ->
                         False
@@ -7305,6 +7337,31 @@ frameBaseIsAlloc f =
                 b.body
         )
         f.blocks
+
+
+{-| Does a body carry a `:val` aggregate call or a 40-byte blit?  The B0perf-2
+frameZero must contain NEITHER — a word defun's loop should be pure
+word loads/stores and an in-frame jmp, never a Value copy.
+-}
+hasValOrBlit : List Il.Block -> Bool
+hasValOrBlit blocks =
+    List.any
+        (\b ->
+            List.any
+                (\i ->
+                    case i of
+                        Il.Blit _ _ _ ->
+                            True
+
+                        Il.Call _ (Il.Agg "val") _ _ ->
+                            True
+
+                        _ ->
+                            False
+                )
+                b.body
+        )
+        blocks
 
 
 rawCallSyms : Exp -> List String

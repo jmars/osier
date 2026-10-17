@@ -3463,30 +3463,33 @@ defun Rt.childCd(argvN : val, argcN : val, stN : val) -> val {
 // number-0 Value (tag 0, payload 0) BEFORE rootPushValueArray — otherwise
 // scanValue chases freed GC pages.
 //
-// THE 175x FIX (stage-6 B0perf): the original loop stored ONE BYTE per
-// iteration and re-boxed the decremented count (`mknum(...)`) on every
-// `recur` — an ALLOCATION per byte, so each frame allocated nslots*40
-// Values.  A rawAbi WORD loop is inexpressible (the rawAbi tail rejects both
-// `If` and `recur` — Lower.lowerTailWord), so the loop STAYS :val (in-frame
-// recur) but now (a) zeroes a full 40-byte SLOT (5 words) per iteration and
-// (b) holds the decrementing SLOT count as a raw word in header slot 4 — the
-// slots-POINTER field, which the Mid frame path never reads
-// (rt_root_push_value_array takes base+live explicitly) — with a CONSTANT
-// recur arg, so the loop allocates NOTHING.  The count is seeded by
+// THE 175x FIX (stage-6 B0perf) and THE ~3.4x->~1x CLOSE (stage-6 B0perf-2):
+// the original loop stored ONE BYTE per iteration and re-boxed the
+// decremented count (`mknum(...)`) on every `recur` — an ALLOCATION per byte,
+// nslots*40 allocations per frame.  B0perf zeroed a full 40-byte SLOT (5
+// words) per iteration and held the decrementing SLOT count as a raw word in
+// header slot 4 (the slots-POINTER field, which the Mid frame path never
+// reads — rt_root_push_value_array takes base+live explicitly) with a
+// CONSTANT recur arg, so the loop allocated NOTHING; but the loop was still a
+// :val defun, and the recur's 3 x 40-byte per-iteration blits of the Value
+// param were the residual ~3.4x floor.  B0perf-2 closes it: frameZero is a
+// rawAbi WORD defun (word in/out), so there is NO :val anywhere on the path
+// and therefore NO per-iteration blit — the counter lives in header word 4, 5
+// wstores per slot, and `recur(hdr)` is a word self-tail (`jmp @body`; hdr is
+// the constant a0 param, so no register copy).  The count is seeded by
 // Rt.frame-enter (wstore(hdr,4,nslots)).
-defun Rt.frameZero(hdr : val) -> val {
-  word h = payload(hdr, 0);
-  word i = wload(h, 4);
+defun Rt.frameZero(hdr : word) -> word {
+  word i = wload(hdr, 4);
   if (mkbool(i == 0)) {
-    return mknil;
+    return 0;
   } else {
     word w = (i - 1) * 5;
-    wstore(h + 40, w, 0);
-    wstore(h + 40, w + 1, 0);
-    wstore(h + 40, w + 2, 0);
-    wstore(h + 40, w + 3, 0);
-    wstore(h + 40, w + 4, 0);
-    wstore(h, 4, i - 1);
+    wstore(hdr + 40, w, 0);
+    wstore(hdr + 40, w + 1, 0);
+    wstore(hdr + 40, w + 2, 0);
+    wstore(hdr + 40, w + 3, 0);
+    wstore(hdr + 40, w + 4, 0);
+    wstore(hdr, 4, i - 1);
     recur(hdr);
   }
 }
@@ -3509,7 +3512,7 @@ defun Rt.frame-enter(nslots : word) -> word {
   word hdr = call Rt.frameBlock(nslots);
   word base = hdr + 40;
   wstore(hdr, 4, nslots);
-  call Rt.frameZero(mknum(hdr));
+  call Rt.frameZero(hdr);
   wstore(hdr, 0, nslots);
   word wm = rawcall rt_root_watermark();
   wstore(hdr, 1, wm);
