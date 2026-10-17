@@ -7830,6 +7830,15 @@ finishModule s keys =
                     else
                         rtCallFuncs
                    )
+                -- stage 6 P1d Step B: the two-range apply bridge exists only
+                -- on the Mid route — the hatch-OFF attribution window must
+                -- stay byte-identical (QBE_MIDDRIVER=0 emits no rt_call2r).
+                ++ (if s.midDriver then
+                        [ rtCallTwoRange ]
+
+                    else
+                        []
+                   )
 
         -- Rt.* defuns (osier-consspike) are INTERNAL: no global Desc (only a
         -- GRef'd defun needs one, and surface code cannot GRef an Rt key), no
@@ -8010,6 +8019,97 @@ rtCallFuncs =
             }
         )
         (List.range 0 maxArity)
+
+
+-- rt_call2r: the Mid-route two-range apply bridge (stage 6 P1d Step B).
+-- rt_apply's saturated/over-applied arms build `buf = [captures(napp) ++
+-- args(nargs)]` and hand it to rt_callN, whose callee blits its params from
+-- ONE contiguous array — so every closure call pays a malloc(640) + two
+-- copyWords loops just to stage the two ranges together.  This bridge takes
+-- the two ranges separately (code, caps, napp, args, nargs): the callee's
+-- free-variable captures are passed as its env (`e = caps + napp*40`), and
+-- its params are the applied captures (caps[0..napp)) then the applied args
+-- (args[0..nargs)) — param i's pointer is (i < napp) ? caps + i*40 :
+-- args + (i-napp)*40, computed with a branchless select (no copy, no
+-- malloc).  EMITTED ONLY on the Mid route (finishModule gates it on
+-- s.midDriver) so the hatch-OFF attribution window stays byte-identical.
+rtCallTwoRange : Func
+rtCallTwoRange =
+    let
+        -- (i < napp) ? caps + i*40 : args + (i-napp)*40, branchless:
+        --   p = (args - napp*40) + (i<napp)*(caps + napp*40 - args) + i*40
+        paramPtr : Int -> List Inst
+        paramPtr i =
+            [ Cmp (Just ("ci" ++ String.fromInt i)) L Cslt (Il.Con i) (Il.Tmp "napp")
+            , Unary (Just ("cl" ++ String.fromInt i)) L Extuw (Il.Tmp ("ci" ++ String.fromInt i))
+            , Bin (Just ("sel" ++ String.fromInt i)) L Mul (Il.Tmp ("cl" ++ String.fromInt i)) (Il.Tmp "diff")
+            , Bin (Just ("pa" ++ String.fromInt i)) L Add (Il.Tmp "base") (Il.Tmp ("sel" ++ String.fromInt i))
+            , Bin (Just ("p" ++ String.fromInt i)) L Add (Il.Tmp ("pa" ++ String.fromInt i)) (Il.Con (i * 40))
+            ]
+
+        arityBlock : Int -> Block
+        arityBlock n =
+            { label = "arity" ++ String.fromInt n
+            , body =
+                List.concatMap paramPtr (List.range 0 (n - 1))
+                    ++ [ Call (Just "r") (Agg "ret") (Il.Tmp "code")
+                            (ArgEnv (Il.Tmp "e")
+                                :: List.map (\i -> ArgVal (Agg "val") (Il.Tmp ("p" ++ String.fromInt i))) (List.range 0 (n - 1))
+                            )
+                       ]
+            , jump = Ret (Just (Il.Tmp "r"))
+            }
+
+        -- @c{k}: arity == k ? arity{k} : next.  k runs 1..maxArity-1; the last
+        -- falls through to @arity{maxArity} (arity is bounded <= maxArity by
+        -- the closure arity check, so the chain is total).
+        dispatchBlock : Int -> Block
+        dispatchBlock k =
+            { label = "c" ++ String.fromInt k
+            , body =
+                [ Cmp (Just ("d" ++ String.fromInt k)) L Ceq (Il.Tmp "arity") (Il.Con k) ]
+            , jump =
+                Jnz (Il.Tmp ("d" ++ String.fromInt k))
+                    ("arity" ++ String.fromInt k)
+                    (if k < maxArity - 1 then
+                        "c" ++ String.fromInt (k + 1)
+
+                     else
+                        "arity" ++ String.fromInt maxArity
+                    )
+            }
+
+        start =
+            { label = "start"
+            , body =
+                [ Bin (Just "napp40") L Mul (Il.Tmp "napp") (Il.Con 40)
+                , Bin (Just "e") L Add (Il.Tmp "caps") (Il.Tmp "napp40")
+                , Bin (Just "diff") L Sub (Il.Tmp "e") (Il.Tmp "args")
+                , Bin (Just "base") L Sub (Il.Tmp "args") (Il.Tmp "napp40")
+                , Bin (Just "arity") L Add (Il.Tmp "napp") (Il.Tmp "nargs")
+                , Cmp (Just "d0") L Ceq (Il.Tmp "arity") (Il.Con 0)
+                ]
+            , jump =
+                Jnz (Il.Tmp "d0") "arity0" (if maxArity > 0 then "c1" else "arity0")
+            }
+    in
+    { name = "rt_call2r"
+    , export_ = True
+    , ret = Agg "ret"
+    , envParam = False
+    , params =
+        [ ( "code", Base L )
+        , ( "caps", Base L )
+        , ( "napp", Base L )
+        , ( "args", Base L )
+        , ( "nargs", Base L )
+        ]
+    , blocks =
+        start
+            :: (List.map dispatchBlock (List.range 1 (maxArity - 1))
+                    ++ List.map arityBlock (List.range 0 maxArity)
+               )
+    }
 
 
 -- The driver's lookup table: one name string, one {name, code, arity} entry

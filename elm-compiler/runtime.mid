@@ -3920,35 +3920,29 @@ defun Rt.applyGo(state : val, f : val) -> val {
   word envlen = payload32(f, 3);
   word args = wload(sp, 0);
   word nargs = wload(sp, 1);
-  if (mkbool(tagis(f, 6) == 0)) {
+  if (tagis(f, 6) == 0) {
     call Rt.die(rawstr("qbe-rt: apply of a non-function value"));
     return mknil;
   } else {
     word arity = wload(code, 1) & 4294967295;
     word napp = arity - rem;
     word capslen = envlen - napp;
-    if (mkbool(rem == nargs)) {
-      word buf = rawcall malloc(640);
-      val chk = if (mkbool(napp > 0) && mkbool(env == 0)) {
-        call Rt.die(rawstr("qbe-rt: closure env missing for applied args"));
-        return mknil;
+    if (rem == nargs) {
+      val chk = if (napp > 0) {
+        if (env == 0) {
+          call Rt.die(rawstr("qbe-rt: closure env missing for applied args"));
+          return mknil;
+        } else {
+          return mknil;
+        }
       } else {
         return mknil;
       };
-      call Rt.copyWords(buf, env, napp * 5);
-      call Rt.copyWords(buf + napp * 40, args, rem * 5);
-      word caps = payload(mkbool(envlen > napp) ? mknum(env + napp * 40) : mknum(0), 0);
-      word disp = rawcall malloc(32);
-      wstore(disp, 0, fn);
-      wstore(disp, 1, caps);
-      wstore(disp, 2, buf);
-      wstore(disp, 3, arity);
-      val r = call Rt.callArity(mknum(disp));
-      rawcall free(buf);
-      rawcall free(disp);
-      return r;
+      word r = aggcall ret rawsym("rt_call2r")(fn, env, napp, args, rem);
+      word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
+      return vecload(v, 0);
     } else {
-      if (mkbool(rem > nargs)) {
+      if (rem > nargs) {
         word total = napp + nargs + capslen;
         wstore(sp, 3, env);
         rawcall rt_root_push_ptr(sp + 24);
@@ -3960,18 +3954,9 @@ defun Rt.applyGo(state : val, f : val) -> val {
         rawcall rt_root_pop();
         return mkval(6, code, rem - nargs, envv, total);
       } else {
-        word buf = rawcall malloc(640);
-        call Rt.copyWords(buf, env, napp * 5);
-        call Rt.copyWords(buf + napp * 40, args, rem * 5);
-        word caps = payload(mkbool(envlen > napp) ? mknum(env + napp * 40) : mknum(0), 0);
-        word disp = rawcall malloc(32);
-        wstore(disp, 0, fn);
-        wstore(disp, 1, caps);
-        wstore(disp, 2, buf);
-        wstore(disp, 3, arity);
-        val res = call Rt.callArity(mknum(disp));
-        rawcall free(buf);
-        rawcall free(disp);
+        word r = aggcall ret rawsym("rt_call2r")(fn, env, napp, args, rem);
+        word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
+        val res = vecload(v, 0);
         wstore(sp, 0, args + rem * 40);
         wstore(sp, 1, nargs - rem);
         recur(mknum(sp), res);
@@ -3988,14 +3973,14 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
   word envlen = payload32(f, 3);
   word args = wload(sp, 0);
   word nargs = wload(sp, 1);
-  if (mkbool(tagis(f, 6) == 0)) {
+  if (tagis(f, 6) == 0) {
     call Rt.die(rawstr("qbe-rt: apply of a non-function value"));
     return mknil;
   } else {
     word arity = wload(code, 1) & 4294967295;
     word napp = arity - rem;
     word capslen = envlen - napp;
-    if (mkbool(rem == nargs)) {
+    if (rem == nargs) {
       // THE .tail NO-COLLECT INVARIANT (rt.zig:956-973, stated HERE at the
       // Mid surface too): the .tail args live in the fresh `buf` allocvec
       // array below, which is UNROOTED by convention.  Sound only because the
@@ -4011,9 +3996,13 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
       rawcall rt_root_push_ptr(sp + 24);
       word buf = allocvec(total);
       word env2 = wload(sp, 3);
-      val chk = if (mkbool(napp > 0) && mkbool(env2 == 0)) {
-        call Rt.die(rawstr("qbe-rt: closure env missing for applied args"));
-        return mknil;
+      val chk = if (napp > 0) {
+        if (env2 == 0) {
+          call Rt.die(rawstr("qbe-rt: closure env missing for applied args"));
+          return mknil;
+        } else {
+          return mknil;
+        }
       } else {
         return mknil;
       };
@@ -4021,7 +4010,7 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
       call Rt.copyWords(buf + napp * 40, args, rem * 5);
       call Rt.copyWords(buf + arity * 40, env2 + napp * 40, capslen * 5);
       rawcall rt_root_pop();
-      word e = payload(mkbool(capslen > 0) ? mknum(buf + arity * 40) : mknum(0), 0);
+      word e = payload((capslen > 0) ? mknum(buf + arity * 40) : mknum(0), 0);
       word retbuf = rawcall malloc(80);
       wstore(retbuf, 0, 0);
       wstore(retbuf, 1, 0);
@@ -4035,7 +4024,7 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
       wstore(retbuf, 9, arity);
       return mknum(retbuf);
     } else {
-      if (mkbool(rem > nargs)) {
+      if (rem > nargs) {
         word total = napp + nargs + capslen;
         wstore(sp, 3, env);
         rawcall rt_root_push_ptr(sp + 24);
@@ -4058,18 +4047,9 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
         wstore(retbuf, 9, 0);
         return mknum(retbuf);
       } else {
-        word buf = rawcall malloc(640);
-        call Rt.copyWords(buf, env, napp * 5);
-        call Rt.copyWords(buf + napp * 40, args, rem * 5);
-        word caps = payload(mkbool(envlen > napp) ? mknum(env + napp * 40) : mknum(0), 0);
-        word disp = rawcall malloc(32);
-        wstore(disp, 0, fn);
-        wstore(disp, 1, caps);
-        wstore(disp, 2, buf);
-        wstore(disp, 3, arity);
-        val res = call Rt.callArity(mknum(disp));
-        rawcall free(buf);
-        rawcall free(disp);
+        word r = aggcall ret rawsym("rt_call2r")(fn, env, napp, args, rem);
+        word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
+        val res = vecload(v, 0);
         wstore(sp, 0, args + rem * 40);
         wstore(sp, 1, nargs - rem);
         recur(mknum(sp), res);

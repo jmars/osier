@@ -130,6 +130,36 @@ buffer entirely** (emit a `rt_callN` variant that blits from the two ranges
 `(caps, napp)` + `(args, nargs)`), which removes the 2 `Rt.copyWords` calls AND
 their 2 per-call `malloc(8)` counter cells — not just the allocation.
 
+**P1d — the apply family's boxed CONDITIONS + the 640-byte `buf` FIXED
+(measured).** Two steps, each proven by ablation:
+
+* **Step A (conditions).** `Rt.applyGo`/`Rt.applyTailGo` test six conditions
+  that each `mkbool`-boxed a 0/1 word into a Value before branching.  The P1c
+  word-conditional `if` (which applies in ANY defun, `:val` included) lets
+  them drop the boxing without making the loops rawAbi: `tagis(f, 6) == 0`,
+  `rem == nargs` and `rem > nargs` are now bare word compares (direct `jnz`);
+  `napp > 0 && env == 0` is NESTED into two word `if`s (the surface's `&&` is
+  val-only); the `payload(mkbool(envlen > napp) ? … : …)`/`capslen > 0` idiom
+  drops its `mkbool` wrapper — the same word-cond `?:` shape `Rt.frameBlock`
+  already used.  Ablation: apply-perf gate **3.26× → 2.91×** (ON arm 1135 →
+  1059 ms, ~-6.7%, measured back-to-back against the HEAD runtime).
+* **Step B (the staging copy, mechanism (ii)).** The saturated/over-applied
+  arms built `buf = [captures(napp) ++ args(rem)]` and handed it to
+  `Rt.callArity`/`rt_callN`, whose callee blits its params from ONE contiguous
+  array — a `malloc(640)` + `malloc(32)` disp + two `Rt.copyWords` loops (and
+  their two `malloc(8)` counter cells) per closure call.  Now a new bridge
+  `rt_call2r(code, caps, napp, args, nargs)` (emitted in `Lower.elm`, gated on
+  `s.midDriver` so the hatch-OFF window stays byte-identical) computes the
+  callee's param pointers with branchless selects — param i is
+  `(i < napp) ? caps + i*40 : args + (i-napp)*40` — and passes the free-variable
+  captures `caps + napp*40` as the callee's env; the arms call it directly with
+  no staging buffer at all.  `Rt.callArity` is now dead (pruned).  Ablation:
+  apply-perf gate **2.91× → 1.6×** (the copy + dispatch + malloc all gone).
+
+**Net: apply-perf 3.6× → 1.6×** (bound 12×), leak-apply still bounded (6160 kB).
+The residual 1.6× is the per-call framing + the root push/pop + frame-enter ×3 —
+the next levers.
+
 ### 2. tail — **2.5×** (2.88× manual)
 
 Measured on `mutual-tail` at 1e6 hops (constant stack, `md-mutual-tail`).
