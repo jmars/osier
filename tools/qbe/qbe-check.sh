@@ -741,6 +741,27 @@ run_importref importbad ImportBad.main tools/qbe/fixtures/importbad.elm 'cannot 
 # `Mismatch`, but Mismatch.mid declares `module Othername`; the reader refuses
 # because a .mid's module header must match the import name.
 run_importref importmis ImportMis.main tools/qbe/fixtures/importmis.elm 'declares module Othername'
+# CONTRACT 3 (`!io`) — CARRIED, NOT ENFORCED (plan.md §2.5).  This row is the
+# HONEST PRESENT TENSE: Iopin.mid exports an IMPURE defun marked `!io` (it
+# raw-`write`s "io:" to stdout before returning its argument) and an Osier
+# module imports the .mid by name and calls it directly — the program compiles
+# and runs, printing "io:7".  There is nothing to enforce it AGAINST: Osier has
+# no effect system (MEASURED: no effect row anywhere in Type/*; Osier code is
+# pure by construction, the only impurity sources are mid exports), so `!io`
+# is documentation today.  The marker is genuinely PARSED (any other marker is
+# a loud refusal: "unknown export marker `!bogus` — the markers are exactly
+# `!io` and `!taint`") and genuinely INERT downstream (MEASURED: the emitted
+# .ssa is BYTE-IDENTICAL with the marker removed; `ExportSig.effects` is read
+# only by TestMain — nothing in the checker or the lowerer consumes it).
+#
+# WHY A GATE ROW: the day Phase 7 starts enforcing `!io`, THIS row goes RED —
+# that flip is the asymmetry oracle showing the change was deliberate and
+# exactly what it changed, instead of an enforcement that slipped in silently.
+# Do not "fix" a red here by dropping the marker or the row: a red means the
+# contract moved, and the plan (and this comment) must move with it.
+# The write is load-bearing on the golden: drop the impure call and the fixture
+# prints "7", not "io:7".
+run iopin IoPin.main tools/qbe/fixtures/iopin.elm
 # M4NICE item 3 (review NICE-TO-HAVE 3): THE END-TO-END PIN OF THE `word`
 # UNCALLABILITY CLAIM.  Wordy.mid exports `poke : word -> val`; `word` maps to
 # the RIGID opaque type (QbeModule.exportScheme), so the concrete literal `5`
@@ -749,6 +770,19 @@ run_importref importmis ImportMis.main tools/qbe/fixtures/importmis.elm 'declare
 # bindVar's propagate FNumber, Type/Unify.elm:491-497,708-719) — until this row
 # only the MAPPING and the facts were pinned, in TestMain, never the composition.
 run_importref wordcall WordImp.main tools/qbe/fixtures/wordimp.elm 'cannot unify number with Word'
+# M4-enforce U1 (contract 4): THE RETURN-TAINT FLOOR.  Each REJECT row is the
+# fail-before oracle — it COMPILED on the pre-U1 compiler (rc=0) and must now be
+# REFUSED naming "taint error".  taintret returns the mid result directly;
+# taintclosure returns a closure CAPTURING it; tainttrans returns a tainted
+# helper's result (the least-fixpoint row).  The three stay-legal rows below
+# (taintsafe/taintlocal/taintderived) are the over-tightening net: the owner's
+# let + self-recursive-lambda case MUST still compile and print 42.
+run_importref taintret Taintret.main tools/qbe/fixtures/taintret.elm 'taint error'
+run_importref taintclosure Taintclosure.main tools/qbe/fixtures/taintclosure.elm 'taint error'
+run_importref tainttrans Tainttrans.main tools/qbe/fixtures/tainttrans.elm 'taint error'
+run taintsafe Taintsafe.main tools/qbe/fixtures/taintsafe.elm
+run taintlocal Taintlocal.main tools/qbe/fixtures/taintlocal.elm
+run taintderived Taintderived.main tools/qbe/fixtures/taintderived.elm
 # M4NICE item 1 (review NICE-TO-HAVE 1): THE TOKEN-RULE MIRROR.  The reader's
 # `import` scan is a column-0 LINE scan, so `importtab.elm`'s comment line
 # `import<TAB>Tabimp` is a candidate — but a TAB is not an import separator in

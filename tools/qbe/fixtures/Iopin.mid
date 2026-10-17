@@ -1,0 +1,26 @@
+// CONTRACT 3 (`!io`) — CARRIED, NOT ENFORCED (plan.md §2.5, contract 3).
+// This export is IMPURE on purpose: `answer` performs a raw `write(1, ..)`
+// syscall to stdout before returning its argument, so the effect is visible in
+// the fixture's output (`io:7`, not `7`) and a compile that DROPPED the call
+// would move the golden.  The `!io` marker on the export line does not change
+// the emitted program at all (MEASURED: the .ssa is BYTE-IDENTICAL with the
+// marker removed; only the parser reads it — Mid/RtLang/Parse.elm:1270-1301 —
+// and nothing downstream consumes `ExportSig.effects`).
+//
+// The marker IS genuinely parsed, not silently ignored: any other marker is a
+// loud refusal ("unknown export marker `!bogus` — the markers are exactly
+// `!io` and `!taint`").
+//
+// WHY IT EXISTS: Osier has no effect system to enforce `!io` against (no
+// effect row anywhere in Type/*; Osier code is pure by construction, the only
+// impurity sources are mid exports — see handoff-osier-enforce-plan, Q2).  So
+// this row pins today's HONEST state: an Osier module may call an `!io` export
+// directly and the program compiles and runs.  When Phase 7 lands enforcement,
+// this row goes RED — that flip is the asymmetry oracle proving the change was
+// deliberate, which is why the row (not just the fixture) says so.
+module Iopin
+export Iopin.answer : val -> val !io
+defun Iopin.answer(x : val) -> val {
+  rawcall write(1, rawstr("io:"), 3);
+  return x;
+}

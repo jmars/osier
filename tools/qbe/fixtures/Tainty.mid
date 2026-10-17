@@ -1,0 +1,9 @@
+// M4-enforce U1 (contract 4): the shared `!taint` mid module.  The `!taint`
+// marker on the export is what the return-taint pass keys on — the defun body
+// is irrelevant to containment (the marker says "this result may not escape an
+// Osier function's return").  `make` is the identity on a boxed val.
+module Tainty
+export Tainty.make : val -> val !taint
+defun Tainty.make(a: val) -> val {
+  return a;
+}

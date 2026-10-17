@@ -36,6 +36,7 @@ import Mid.RtLang.LowerToIr as LowerToIr
 import Mid.RtLayout as RtLayout
 import Mid.RtPrims as RtPrims
 import Mid.RtLang.Parse as Parse
+import Mid.TaintCheck as TaintCheck
 import Type.Builtins as Builtins
 import Type.Env as Env
 import Type.Error as Error
@@ -2972,6 +2973,40 @@ checks rt =
                 False
         )
 
+    -- ============ M4-enforce U1: contract-4 return-taint floor ============
+    -- The pure-core rows over Mid.TaintCheck (synthetic single-file groups,
+    -- tainted key `Tainty.make`).  The REJECT rows are the fail-before oracle
+    -- (each compiles on the pre-U1 compiler); the ACCEPT rows are the
+    -- over-tightening net (the owner's let + self-recursive case MUST stay
+    -- legal — head position contributes RESULT taint, value position CAPTURE
+    -- taint).
+    , check "taint: direct mid result is rejected"
+        (taintRejected "module T exposing (main)\n\nmain =\n    Tainty.make 1\n")
+    , check "taint: a returned closure capturing a tainted binder is rejected"
+        (taintRejected "module T exposing (main)\n\nmain =\n    let\n        t =\n            Tainty.make 1\n    in\n    \\y -> t\n")
+    , check "taint: a tainted helper's result propagates to its caller (least fixpoint)"
+        (taintRejected "module T exposing (main)\n\nhelper x =\n    Tainty.make x\n\nmain =\n    helper 1\n")
+    , check "taint: the owner's let + self-recursive-lambda case is LEGAL (invoked, not returned)"
+        (taintAccepted "module T exposing (main)\n\nmain =\n    let\n        t =\n            Tainty.make 1\n\n        go n =\n            if n == 0 then\n                42\n\n            else\n                let\n                    _ =\n                        t\n                in\n                go (n - 1)\n    in\n    go 5\n")
+    , check "taint: local use is unrestricted (bound, discarded, return 42)"
+        (taintAccepted "module T exposing (main)\n\nmain =\n    let\n        t =\n            Tainty.make 1\n\n        _ =\n            t\n    in\n    42\n")
+    , check "taint: a derived value ([t]) used locally and discarded is legal"
+        (taintAccepted "module T exposing (main)\n\nmain =\n    let\n        t =\n            Tainty.make 1\n\n        _ =\n            [ t ]\n    in\n    42\n")
+    , check "taint: returning a capture-free lambda that CALLS mid is legal (Phase-7 a -> T)"
+        (taintAccepted "module T exposing (main)\n\nmain =\n    \\y -> Tainty.make y\n")
+    , check "taint: an inner let shadowing the outer tainted binder is legal"
+        (taintAccepted "module T exposing (main)\n\nmain =\n    let\n        t =\n            Tainty.make 1\n    in\n    let\n        t =\n            42\n    in\n    t\n")
+    , check "taint: mutually recursive clean functions stay legal (least fixpoint over the group)"
+        (taintAccepted "module T exposing (main)\n\nmain =\n    let\n        f n =\n            if n == 0 then\n                42\n\n            else\n                g (n - 1)\n\n        g n =\n            if n == 0 then\n                42\n\n            else\n                f (n - 1)\n    in\n    f 5\n")
+    , check "taint: the reject error names the tainted export"
+        (case taintCheck "module T exposing (main)\n\nmain =\n    Tainty.make 1\n" of
+            Err msg ->
+                String.contains "Tainty.make" msg
+
+            Ok () ->
+                False
+        )
+
     -- ==================== TIER-2 T4: the typechecker J1-J6 ====================
     -- (Mid.RtLang.Check — checkProgram over the parsed Ast).  Each judgment
     -- gets an ACCEPT row plus REJECT rows whose message names it (the
@@ -5460,6 +5495,42 @@ checkOk name src =
 checkErr : String -> String -> String -> String
 checkErr name frag src =
     checkErrFlags name [] frag src
+
+
+{-| Contract-4 return-taint floor (M4-enforce U1): parse an Elm module, then run
+`Mid.TaintCheck.checkGroup` against the single tainted key `Tainty.make`.  The
+module is a synthetic single-file group; a parse failure is an `Err` so a row
+comparing on `Err _ -> False` cannot pass vacuously on a source that did not
+even parse.
+-}
+taintCheck : String -> Result String ()
+taintCheck src =
+    case Elm.Parser.parseToFile src of
+        Ok file ->
+            TaintCheck.checkGroup (Set.singleton "Tainty.make") [ file ]
+
+        Err _ ->
+            Err "parse"
+
+
+taintRejected : String -> Bool
+taintRejected src =
+    case taintCheck src of
+        Err msg ->
+            String.contains "taint error" msg
+
+        Ok () ->
+            False
+
+
+taintAccepted : String -> Bool
+taintAccepted src =
+    case taintCheck src of
+        Ok () ->
+            True
+
+        Err _ ->
+            False
 
 
 

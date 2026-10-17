@@ -86,6 +86,7 @@ import Mid.Qbe.Print as QbePrint
 import Mid.Qbe.Types as QbeTypes
 import Mid.Rt as MidRt
 import Mid.RtLang.Ast as RtAst
+import Mid.TaintCheck as TaintCheck
 import Set exposing (Set)
 import Type.Check as Check
 import Type.Env as Env exposing (Env, Scheme)
@@ -158,6 +159,26 @@ compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals 
             let
                 envWithMids =
                     injectUserSchemes env userModules
+
+                -- CONTRACT 4 (M4-enforce U1): the !taint export keys a result
+                -- may not escape from — the user .mid exports UNION the
+                -- runtime's exported types, filtered to `taint`.  The pass
+                -- itself runs below, after the checker succeeds, over the
+                -- ORIGINAL PRE-LIFT files (Lift would turn the owner's
+                -- let + self-recursive case into a TAINTED snapshot argument).
+                taintedKeys =
+                    Set.fromList
+                        (List.filterMap
+                            (\e ->
+                                if e.sig.taint then
+                                    Just e.key
+
+                                else
+                                    Nothing
+                            )
+                            (List.concatMap .exports userModules)
+                            ++ Dict.keys (Dict.filter (\_ sig -> sig.taint) rt.exportedTypes)
+                        )
             in
             MidModule.parseAll groupSources
                 |> Result.andThen
@@ -168,33 +189,37 @@ compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals 
                                     Check.checkUserGroup envWithMids (List.map .file groupUnits0)
                                         |> Result.andThen
                                             (\checkedGroupFiles ->
-                                                MidModule.collectAll checkedGroupFiles
+                                                TaintCheck.checkGroup taintedKeys groupFiles
                                                     |> Result.andThen
-                                                        (\groupUnits ->
-                                                            case MidModule.mergedGlobals (corpusUnits ++ groupUnits) of
-                                                                Err msg ->
-                                                                    Err msg
+                                                        (\() ->
+                                                            MidModule.collectAll checkedGroupFiles
+                                                                |> Result.andThen
+                                                                    (\groupUnits ->
+                                                                        case MidModule.mergedGlobals (corpusUnits ++ groupUnits) of
+                                                                            Err msg ->
+                                                                                Err msg
 
-                                                                Ok globals0 ->
-                                                                    case userCollisions globals0 userModules of
-                                                                        Err msg ->
-                                                                            Err msg
+                                                                            Ok globals0 ->
+                                                                                case userCollisions globals0 userModules of
+                                                                                    Err msg ->
+                                                                                        Err msg
 
-                                                                        Ok () ->
-                                                                            let
-                                                                                globals =
-                                                                                    Dict.union (userArities userModules) globals0
+                                                                                    Ok () ->
+                                                                                        let
+                                                                                            globals =
+                                                                                                Dict.union (userArities userModules) globals0
 
-                                                                                groupTypes =
-                                                                                    groupSchemes envWithMids groupUnits0
+                                                                                            groupTypes =
+                                                                                                groupSchemes envWithMids groupUnits0
 
-                                                                                nodeTypesByModule =
-                                                                                    Dict.union groupTypes.nodeTypes corpusNodeTypes
+                                                                                            nodeTypesByModule =
+                                                                                                Dict.union groupTypes.nodeTypes corpusNodeTypes
 
-                                                                                refinedVarsByModule =
-                                                                                    Dict.union groupTypes.refinedVars corpusRefinedVars
-                                                                            in
-                                                                            lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule (corpusUnits ++ groupUnits) (userSurface userModules) entryKey ( consArrRec, eqPtrFast )
+                                                                                            refinedVarsByModule =
+                                                                                                Dict.union groupTypes.refinedVars corpusRefinedVars
+                                                                                        in
+                                                                                        lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule (corpusUnits ++ groupUnits) (userSurface userModules) entryKey ( consArrRec, eqPtrFast )
+                                                                    )
                                                         )
                                             )
                                 )
