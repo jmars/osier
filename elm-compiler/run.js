@@ -85,25 +85,54 @@ function isMidPath(p) {
 // ("unknown name: X.f").  The reader scans `import` lines at column 0 only
 // (top-level Elm declarations are never indented).
 
+// The TOKEN RULE below is MIRRORED EXACTLY in selfhost/NativeMain.elm
+// (`keywordName` / `isSepWs` / `upperName` / `isNameChar`): both readers must
+// see the same `import` lines, or the two lanes resolve different `.mid` sets.
+// The separator class is `[ \r]` and NOT `\s` because that is the CORE's
+// whitespace: ParserFast's whitespace skipper takes exactly space, `\n` and
+// `\r` (ParserFast.elm:2852-2866), so `import\tX` is not the language — the
+// core rejects it "parse failed" in both lanes (MEASURED).  `\s` would also
+// match a tab, a form feed or a `\u00a0` INSIDE a comment or a string literal
+// at column 0, resolving a `.mid` the native lane would not see.  A line scan,
+// so `\n` can never occur inside `line`.
+
 // The module names in an Elm source's `import X` lines, in order.
 function importNames(src) {
   const names = [];
   for (const line of src.split('\n')) {
-    const m = /^import\s+([A-Z][A-Za-z0-9_.]*)/.exec(line);
+    const m = /^import[ \r]+([A-Z][A-Za-z0-9_.]*)/.exec(line);
     if (m) names.push(m[1]);
   }
   return names;
 }
 
-// The `module X` header name of a `.mid` file, skipping `//`/blank lines.
-// '' when the first non-comment non-blank line is not a `module` line (a
-// headerless .mid — the core rejects it loudly; the reader only flags a
-// MISMATCH, never a missing header).
+// ASCII whitespace — the set `midTrim` strips in the native lane.  It is
+// `String.trim` restricted to ASCII on purpose: the exotic members of JS `\s`
+// (`\u00a0`, `\u2028`, ...) are NOT stripped in either lane, so a `.mid`
+// padded with them stays headerless in BOTH (the core rejects such a file
+// loudly anyway — it skips only space/`\n`/`\r`).
+const ASCII_WS = /[\t\n\v\f\r ]/;
+function midTrim(s) {
+  let a = 0;
+  let b = s.length;
+  while (a < b && ASCII_WS.test(s[a])) a++;
+  while (b > a && ASCII_WS.test(s[b - 1])) b--;
+  return s.slice(a, b);
+}
+
+// The `module X` header name of a `.mid` file, skipping `//`/blank lines.  A
+// line is skipped after TRIMMING (so a CRLF's `\r`, a blank first line and an
+// indented comment are all skipped — the same reading the native lane's
+// `firstModuleName` applies, and the one the core's own `.mid` header parser
+// has: it skips whitespace and comments before the `module` line,
+// RtLang/Parse.elm:1217).  '' when the first non-comment non-blank line is not
+// a `module` line (a headerless .mid — the core rejects it loudly; the reader
+// only flags a MISMATCH, never a missing header).
 function midModuleName(text) {
   for (const line of text.split('\n')) {
-    const t = line.trim();
+    const t = midTrim(line);
     if (t === '' || t.startsWith('//')) continue;
-    const m = /^module\s+([A-Z][A-Za-z0-9_.]*)/.exec(t);
+    const m = /^module[ \r]+([A-Z][A-Za-z0-9_.]*)/.exec(t);
     return m ? m[1] : '';
   }
   return '';

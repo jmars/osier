@@ -1,0 +1,25 @@
+// M4NICE item 3: the `word` EXPORT — the opaque-Word seat of §2.5, and the
+// end-to-end pin of the UNCALLABILITY claim the whole `word`-is-opaque design
+// rests on.
+//
+// `poke : word -> val` declares a RAW-WORD parameter.  Mid.QbeModule's
+// `exportScheme` maps the `word` atom to the RIGID opaque type `TCon "Word" []`
+// (NOT a fresh variable, which is what `val` gets), so no Osier value inhabits
+// it: a concrete argument is a LOUD `CannotUnify` by NAME MISMATCH
+// (Type/Unify.elm:354-356), and an unannotated literal (`5 : number`) is a
+// LOUD `FlexConflict` — `bindVar`'s `propagate FNumber` refuses any non-Int/
+// Float binding (Type/Unify.elm:491-497,708-719).  importtab.elm's sibling
+// `wordimp.elm` (this file's other caller) exercises exactly that: it is the
+// qbe-check-level pin of the refusal; before it there was only a TestMain
+// unit row pinning the SCHEME MAPPING and unifier rows pinning the two facts,
+// and nothing pinning the composition.
+//
+// The body is deliberately trivial (the row is the CALL-SITE refusal, not a
+// behaviour) but must be a VALID defun: an invalid body here would fail the
+// .mid for an unrelated reason and the refusal message would stop naming the
+// unifier.
+module Wordy
+export Wordy.poke : word -> val
+defun Wordy.poke(w: word) -> val {
+  return mknum(0);
+}

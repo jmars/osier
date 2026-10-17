@@ -276,6 +276,78 @@ run_importref() {
   echo "PASS $name: refused (names '$expect')"
 }
 
+# run_midws — the M4NICE reader-rule row: a `.mid`'s WHITESPACE spelling must
+# not change the compile.  The reader's `module`-header scan (run.js
+# `midModuleName`, MIRRORED in selfhost/NativeMain.elm `firstModuleName`) skips
+# a line after TRIMMING it, so a CRLF `\r`, a blank FIRST line and an indented
+# comment are all skipped — the same reading the core's own `.mid` header
+# parser has (it skips whitespace and comments before the `module` line,
+# RtLang/Parse.elm:1217).  The native lane used to skip `l == ""` alone, which
+# read a CRLF-plus-blank-line `.mid` as headerless and DIVERGED from run.js
+# (MEASURED on a header-MISMATCHED .mid: run.js refused "declares module
+# Othername" while the native lane compiled and failed later on "unknown name").
+#
+# TWO modes, both over the SAME four variants (crlf / blank first line / both /
+# indented):
+#   * no `$5`   — the `.mid` MATCHES its import name: every variant must emit a
+#     `.ssa` BYTE-IDENTICAL to the LF baseline (`cmp`, not the exit code), which
+#     is only true if the same header was found by the same rule.  The baseline
+#     is checked NOT to be an `err` payload first — two identical refusals would
+#     satisfy `cmp` vacuously.
+#   * with `$5` — the `.mid` MISMATCHES (declares another module): every variant
+#     must be REFUSED naming `$5`.  This is the mode that can actually go RED: a
+#     reader that stops trimming loses the header on the `both` and `indent`
+#     variants, so the compile falls through to the core's "unknown name"
+#     instead of the reader's refusal (MEASURED by reverting run.js's trim).
+run_midws() {
+  local name="$1" entry="$2" fixture="$3" mid="$4" expect="${5:-}"
+  local dir="$TMP/$name" v
+  local bf mf
+  bf="$(basename "$fixture")"
+  mf="$(basename "$mid")"
+  mkdir -p "$dir"
+  cp "$ROOT/$fixture" "$dir/$bf"
+  local orig="$dir/$mf.orig"
+  cp "$ROOT/$mid" "$orig"
+  cp "$orig" "$dir/$mf"
+  (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY="$entry" node run.js "$dir/$bf" "$dir/lf.ssa") >/dev/null 2>&1
+  local ok=1
+  if [ -z "$expect" ]; then
+    if [ ! -s "$dir/lf.ssa" ] || head -c 4 "$dir/lf.ssa" | grep -q '^err '; then
+      echo "FAIL $name: the LF baseline did not compile: $(head -c 120 "$dir/lf.ssa" 2>/dev/null)"
+      FAIL=1; return
+    fi
+  elif ! head -c 4 "$dir/lf.ssa" | grep -q '^err ' || ! grep -q "$expect" "$dir/lf.ssa"; then
+    echo "FAIL $name: the LF baseline was not refused naming '$expect' ($(head -c 120 "$dir/lf.ssa" 2>/dev/null))"
+    FAIL=1; return
+  fi
+  for v in crlf blank both indent; do
+    case "$v" in
+      crlf)   sed 's/$/\r/' "$orig" > "$dir/$mf" ;;
+      blank)  { printf '\n'; cat "$orig"; } > "$dir/$mf" ;;
+      both)   { printf '\r\n'; sed 's/$/\r/' "$orig"; } > "$dir/$mf" ;;
+      indent) sed 's/^/ /' "$orig" > "$dir/$mf" ;;
+    esac
+    (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY="$entry" node run.js "$dir/$bf" "$dir/$v.ssa") >/dev/null 2>&1
+    if [ -n "$expect" ]; then
+      if ! head -c 4 "$dir/$v.ssa" | grep -q '^err ' || ! grep -q "$expect" "$dir/$v.ssa"; then
+        echo "FAIL $name: the $v .mid was NOT refused naming '$expect' ($(head -c 90 "$dir/$v.ssa" 2>/dev/null))"
+        FAIL=1; ok=0
+      fi
+    elif ! cmp -s "$dir/lf.ssa" "$dir/$v.ssa"; then
+      echo "FAIL $name: the $v .mid emitted different bytes than the LF baseline ($(head -c 90 "$dir/$v.ssa" 2>/dev/null))"
+      FAIL=1; ok=0
+    fi
+  done
+  if [ "$ok" = 1 ]; then
+    if [ -n "$expect" ]; then
+      echo "PASS $name: the crlf/blank/both/indent .mid spellings are all refused naming '$expect'"
+    else
+      echo "PASS $name: the crlf/blank/both/indent .mid spellings emit a byte-identical .ssa"
+    fi
+  fi
+}
+
 # like run(), but QBE_MIDGC=1: the fixture compiles through the MID mark-sweep
 # collector (the raw allocating nodes route to Rt.allocVector/Rt.allocRaw) and
 # runs at the minimum heap, where the collector actually collects.  The golden
@@ -669,6 +741,30 @@ run_importref importbad ImportBad.main tools/qbe/fixtures/importbad.elm 'cannot 
 # `Mismatch`, but Mismatch.mid declares `module Othername`; the reader refuses
 # because a .mid's module header must match the import name.
 run_importref importmis ImportMis.main tools/qbe/fixtures/importmis.elm 'declares module Othername'
+# M4NICE item 3 (review NICE-TO-HAVE 3): THE END-TO-END PIN OF THE `word`
+# UNCALLABILITY CLAIM.  Wordy.mid exports `poke : word -> val`; `word` maps to
+# the RIGID opaque type (QbeModule.exportScheme), so the concrete literal `5`
+# cannot inhabit it.  The refusal is composed from TWO unifier facts (a name
+# mismatch CannotUnify: Type/Unify.elm:354-356, and a literal's FlexConflict:
+# bindVar's propagate FNumber, Type/Unify.elm:491-497,708-719) — until this row
+# only the MAPPING and the facts were pinned, in TestMain, never the composition.
+run_importref wordcall WordImp.main tools/qbe/fixtures/wordimp.elm 'cannot unify number with Word'
+# M4NICE item 1 (review NICE-TO-HAVE 1): THE TOKEN-RULE MIRROR.  The reader's
+# `import` scan is a column-0 LINE scan, so `importtab.elm`'s comment line
+# `import<TAB>Tabimp` is a candidate — but a TAB is not an import separator in
+# EITHER lane (the separator class is the CORE's whitespace, space/`\r`:
+# ParserFast.elm:2852).  Tabimp.mid declares `module Othername` on purpose, so a
+# reader that DOES resolve the line refuses the compile ("declares module
+# Othername") — which is what run.js's old `\s+` regex did, to a LEGAL program.
+# The row is green only if the tab line resolves nothing and the program prints 7.
+run importtab ImportTab.main tools/qbe/fixtures/importtab.elm
+# M4NICE item 2 (review NICE-TO-HAVE 2): the reader's WHITESPACE rules — a CRLF
+# `.mid`, a blank first line, both, and an indented one must all emit the same
+# bytes as the LF original, and all four spellings of a MISMATCHED `.mid` must
+# be refused at the READER (never falling through to a core "unknown name").
+# See run_midws for the two modes.
+run_midws midws ImportMid.main tools/qbe/fixtures/importmid.elm tools/qbe/fixtures/Midmath.mid
+run_midws midwsref ImportMis.main tools/qbe/fixtures/importmis.elm tools/qbe/fixtures/Mismatch.mid 'declares module Othername'
 # churn: 150k conses = ~13.2MB live, just under the CHURN_MB minimum heap, so
 # the gc-churn stress rerun collects/promotes constantly and still fits the
 # reservation; 500k at the default heap is the identity run.

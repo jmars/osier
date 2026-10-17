@@ -452,11 +452,119 @@ importNames text =
 
 importNameOf : String -> Maybe String
 importNameOf line =
-    if String.startsWith "import " line then
-        Just (moduleNameToken (String.dropLeft 7 line))
+    keywordName "import" 6 line
+
+
+-- M4NICE: THE TOKEN RULE IS MIRRORED EXACTLY in run.js (`importNames` /
+-- `midModuleName`): the keyword, then ONE OR MORE of the CORE's whitespace,
+-- then an UPPERCASE-first name over the charset [A-Za-z0-9_.].  The separator
+-- is space/`\r` only — that is the core's own whitespace (ParserFast.elm:2852
+-- takes exactly space, `\n`, `\r`), and a `\n` cannot occur inside a
+-- `Str.lines` line.  A TAB is therefore NOT a separator in either lane:
+-- `import\tX` is not the language (the core refuses it "parse failed"), and
+-- the old `startsWith "import "` + not-space/tab charset disagreed with
+-- run.js's regex on exactly that class of line — inside a comment or a string
+-- literal at column 0, where the file IS legal and the two lanes resolved
+-- DIFFERENT `.mid` sets (MEASURED: run.js refused a legal program the native
+-- lane compiled).
+keywordName : String -> Int -> String -> Maybe String
+keywordName kwd kwdLen s =
+    if String.startsWith kwd s then
+        case String.toList (String.dropLeft kwdLen s) of
+            c :: rest ->
+                if isSepWs c then
+                    upperName (dropSepWs rest)
+
+                else
+                    Nothing
+
+            [] ->
+                Nothing
 
     else
         Nothing
+
+
+-- run.js's `[ \r]+` VERBATIM: the separator class is space/CR and NOTHING
+-- else, repeated.  A wider skip here (e.g. dropping a tab after the first
+-- space) would make this lane resolve `import <SPACE><TAB>X` where run.js
+-- resolves nothing — a divergence in the OTHER direction, the mirror hazard
+-- this unit exists to close.
+isSepWs : Char -> Bool
+isSepWs c =
+    c == ' ' || c == '\r'
+
+
+dropSepWs : List Char -> List Char
+dropSepWs chars =
+    case chars of
+        c :: rest ->
+            if isSepWs c then
+                dropSepWs rest
+
+            else
+                chars
+
+        [] ->
+            []
+
+
+upperName : List Char -> Maybe String
+upperName chars =
+    case chars of
+        c :: rest ->
+            if isNameStart c then
+                Just (String.fromList (c :: takeWhileName isNameChar rest))
+
+            else
+                Nothing
+
+        [] ->
+            Nothing
+
+
+-- ASCII `[A-Z]` / `[A-Za-z0-9_.]` via the Prelude's `Char.isUpper` /
+-- `Char.isAlphaNum` (which are `65 <= charToCode c <= 90` etc.), NOT
+-- `c >= 'A'` — MEASURED: char ORDERING mislowers in the QBE core (`'A' >= 'A'`
+-- evaluates FALSE), which is why every other selfhost module reaches for
+-- Char.isUpper/toCode.  `Char.isUpper c` is exactly ASCII A-Z and
+-- `Char.isAlphaNum c || c == '_' || c == '.'` is exactly run.js's
+-- `[A-Za-z0-9_.]`.
+isNameStart : Char -> Bool
+isNameStart c =
+    Char.isUpper c
+
+
+isNameChar : Char -> Bool
+isNameChar c =
+    Char.isAlphaNum c || c == '_' || c == '.'
+
+
+-- ASCII whitespace, the set run.js's `midTrim` strips — MIRRORED, and
+-- deliberately restricted to ASCII: the exotic members of JS `\s` are not
+-- stripped in either lane (such a `.mid` is refused loudly by the core).
+isMidWs : Char -> Bool
+isMidWs c =
+    c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\u{000B}' || c == '\u{000C}'
+
+
+dropMidWs : List Char -> List Char
+dropMidWs chars =
+    case chars of
+        c :: rest ->
+            if isMidWs c then
+                dropMidWs rest
+
+            else
+                chars
+
+        [] ->
+            []
+
+
+midTrim : String -> String
+midTrim s =
+    String.fromList (reverse (dropMidWs (reverse (dropMidWs (String.toList s)))))
 
 
 midModuleName : String -> Maybe String
@@ -464,6 +572,15 @@ midModuleName text =
     firstModuleName (Str.lines text)
 
 
+-- M4NICE: the SKIP predicate is the mirror of run.js's `midModuleName` — a
+-- line is skipped after TRIMMING, so a CRLF's `\r`, a blank FIRST line and an
+-- indented comment are all skipped.  It used to skip only `l == ""`, which
+-- made a `\r\n`-plus-blank-line `.mid` read as headerless while run.js saw
+-- `module Othername` — a reader-side DIVERGENCE (MEASURED: run.js refused
+-- "declares module Othername" while this lane deferred to the core's
+-- "unknown name: Mismatch.answer").  `''`/`Just` here both mean "no header"
+-- exactly as run.js's `''` does; the core's own header parser skips
+-- whitespace and comments the same way (RtLang/Parse.elm:1217).
 firstModuleName : List String -> Maybe String
 firstModuleName lines =
     case lines of
@@ -471,14 +588,15 @@ firstModuleName lines =
             Nothing
 
         l :: rest ->
-            if String.startsWith "//" l || l == "" then
+            let
+                t =
+                    midTrim l
+            in
+            if t == "" || String.startsWith "//" t then
                 firstModuleName rest
 
-            else if String.startsWith "module " l then
-                Just (moduleNameToken (String.dropLeft 7 l))
-
             else
-                Nothing
+                keywordName "module" 6 t
 
 
 firstHeaderMismatch : List ( String, String ) -> List String -> Maybe ( String, String, String )
@@ -517,16 +635,6 @@ resolveMidPath dir name =
 
     else
         dir ++ "/" ++ name ++ ".mid"
-
-
-moduleNameToken : String -> String
-moduleNameToken s =
-    String.fromList (takeWhileName nameChar (String.toList s))
-
-
-nameChar : Char -> Bool
-nameChar c =
-    not (c == ' ' || c == '\t' || c == '(' || c == '\n' || c == '\r')
 
 
 takeWhileName : (Char -> Bool) -> List Char -> List Char

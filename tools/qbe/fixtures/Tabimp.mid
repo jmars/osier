@@ -1,0 +1,14 @@
+// M4NICE item 1: the POISON for importtab.elm's token-rule row — it exists ONLY
+// to be conspicuously wrong if it is ever resolved.
+//
+// importtab.elm has a column-0 comment line `import<TAB>Tabimp`.  A reader that
+// treats a TAB as an import separator resolves THIS file for it, and because the
+// header below deliberately disagrees with the import name ("Tabimp"), the
+// compile is refused LOUDLY ("declares module Othername") — which is exactly the
+// RED the row must produce under the old loose rule and never under the mirrored
+// one.  Nothing in the tree may ever import `Tabimp` for real.
+module Othername
+export Othername.never : val -> val
+defun Othername.never(a: val) -> val {
+  return a;
+}
