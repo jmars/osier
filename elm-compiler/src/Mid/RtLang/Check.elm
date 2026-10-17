@@ -36,18 +36,27 @@ THE JUDGMENTS ENFORCED HERE (T5 adds J7-J10):
     never-bind-across-classes discipline).  Also two class facts the
     grammar pins but the parser cannot see:
       - an `if`/`SIf`/`?:` CONDITION is `:val` OR `:word`.  A bare
-        `x == 1` is a WORD 0/1 and is a legal condition AS-IS (the
+        `x == 1` is a WORD PRODUCER and is a legal condition AS-IS (the
         lowering jumps on the word directly — no box, no slot); the old
         spelling `mkbool(x == 1)` still works and lowers EXACTLY as it
         always did (the compatibility seat).  The OLD rule — condition
         must be `:val` — existed because the DSL's `jmpf` tested a
         boolean VALUE slot, so a raw word there was a runtime lie; the
-        new word form tests the word directly.  The ONE word shape still
-        rejected as a condition is a word-VALUED join (`(a == b) ? 1 : 0`,
-        an `EIf`/`EIfBlock` whose branches agree on `:word`): it has no
-        bare-word test to jump on (its value is a join, which needs a
-        slot) — box it or restructure.  A `:float` word is still a reject
-        (it is not a 0/1 word);
+        new word form tests the word directly.  The domain is a CONDITION
+        that is a word PRODUCER — a compare, `tagis`, a word builtin, a
+        rawcall — i.e. exactly the forms the lowering computes into a raw
+        temp and `jnz`es on.  Three word SHAPES are rejected as
+        conditions, each for a MEASURED reason: (a) a word-VALUED join
+        (`(a == b) ? 1 : 0`, an `EIf`/`EIfBlock` whose branches agree on
+        `:word`) — its value is a join, which needs a slot; (b) a word
+        LITERAL (`if (1)`) — it lowers to `jnz 1` and the vendored qbe
+        refuses a constant jump condition; (c) a bare word VARIABLE
+        (`if (x)` for a `word x = ..` binder) — a binder whose
+        initializer is not a raw-word producer is slot-boxed as a NUMBER
+        and the checker cannot see the lowering's representation, so the
+        branch would silently read as always-true.  Write the compare
+        inline, or box a `:val`.  A `:float` word is still a reject (it
+        is not a branchable word);
       - a LOCAL binder may not declare `:float` — float words are not
         let-bindable (MEASURED, Lower's rawFltArg: "A Var never appears —
         recompute"), so `float x = ..;` is a J1 reject: recompute the
@@ -759,8 +768,11 @@ checkRecur ctx args =
 
 
 {-| The shared if walk (`SIf` statement and `TIf` term).  J1: the
-condition is `:val` OR `:word` (a word 0/1 branches directly — no
-`mkbool` needed; the old boxed spelling stays legal and byte-identical).
+condition is `:val` OR a word PRODUCER (`:word` — a bare word compare/
+tagis/builtin/rawcall branches directly on the word, no `mkbool` needed;
+the old boxed spelling stays legal and byte-identical).  A word LITERAL,
+a bare word VARIABLE and a word-VALUED join are rejects — see
+`checkCond`.
 The divergence rules around it are J7's — checked by the SIf arm of
 `checkStmt` and the `TIf` arm of `checkTerm`, not here.
 -}
@@ -799,14 +811,26 @@ checkCond ctx c =
             Ok TVal
 
         Ok TWord ->
-            -- A WORD condition is legal only as a BARE word test (a word
-            -- producer the lowering jumps on directly).  A word-VALUED
-            -- join — `(a == b) ? 1 : 0`, an `EIf`/`EIfBlock` whose branches
-            -- agree on `:word` — is a join whose value needs a slot, so it
-            -- has no bare test; admitting it as a condition would box the
-            -- 0/1 as a NUMBER and jmpf would silently misread it.  Reject
-            -- it loudly (the same word-join shape the binder form cannot
-            -- hold — Mid has no word-valued If join).
+            -- A WORD condition is legal only as a BARE word PRODUCER (a
+            -- compare/tagis/word-builtin/rawcall — the forms the lowering
+            -- computes into a raw TEMP and jumps on directly).  Four word
+            -- shapes must NOT be admitted, each for a MEASURED reason (the
+            -- P1c review):
+            --   * a word-VALUED join — `(a == b) ? 1 : 0`, an `EIf`/
+            --     `EIfBlock` whose branches agree on `:word` — has no bare
+            --     test: its value needs a slot, and admitting it would box
+            --     the 0/1 as a NUMBER that jmpf silently misreads (always
+            --     truthy: tag 0 /= tagBoolean);
+            --   * a word VARIABLE — same silent misread: a binder whose
+            --     initializer is not a raw-word producer (a literal, or a
+            --     word-valued join) is slot-boxed as a number and the
+            --     checker cannot see the lowering's representation.  (A
+            --     raw-word binder `word i = wload(..); if (i)` WOULD lower
+            --     correctly — rejecting it is a deliberate over-strictness
+            --     until the checker tracks raw binders; write the compare
+            --     inline, which is the form the feature exists for.)
+            --   * a word LITERAL — `if (1)` emits `jnz 1` and the vendored
+            --     qbe rejects a constant jump condition.
             case c of
                 EIf _ _ _ ->
                     Err
@@ -818,6 +842,18 @@ checkCond ctx c =
                     Err
                         (ctx.key
                             ++ ": J1: 'if' condition is a word-valued 'if' join — a bare word test is needed (box it with mkbool or restructure)"
+                        )
+
+                EInt _ ->
+                    Err
+                        (ctx.key
+                            ++ ": J1: 'if' condition is a bare word literal — a constant branch is not a test (write the compare inline)"
+                        )
+
+                EVar _ ->
+                    Err
+                        (ctx.key
+                            ++ ": J1: 'if' condition is a bare word variable — only a word PRODUCER (a compare/tagis/…) jumps directly; a binder's representation is the lowering's, not the checker's (write the compare inline, or mkbool for a :val)"
                         )
 
                 _ ->
