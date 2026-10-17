@@ -236,7 +236,7 @@ runtime defuns are module-private) UNION every user module's export — exists
 before any check+lower runs.  At the CHECKER (J2) a user module may therefore
 `call` any of those keys.
 
-WHAT THE EMIT LEVEL DOES WITH THEM (M3fix-4, MEASURED):
+WHAT THE EMIT LEVEL DOES WITH THEM (M3fix-4 + M3-rtcall, MEASURED):
 
   * a `call` to another USER module's exported defun is emitted — mid-c `call`
     lowers to RawCall (LowerToIr) naming that defun's key, and Lower's RawCall
@@ -244,13 +244,13 @@ WHAT THE EMIT LEVEL DOES WITH THEM (M3fix-4, MEASURED):
     tests a `Rt.`-name SHAPE), in the callee's own ABI (a user defun is
     RtGeneric, never lean) and with the callee made REACHABLE by RawCall's
     call-graph edge.  The `user-mid` row runs exactly this, end to end.
-  * a `call Rt.<exported>` is still NOT emitted in general: the user .mid body
-    is raw nodes, so the used-prim census (`calledPrims`, which ignores Unsafe)
-    does not see the call and Mid.Rt.seeds never seeds the target — the RawCall
-    arm REFUSES it loudly ("a defun of this program that this compile does not
-    EMIT") instead of emitting a dangling `q_Rt_*`.  Closing that is a census
-    change (Lower.elm/midPrimRoute), NOT an acceptance one; it is measured and
-    open, deliberately not claimed here.
+  * a `call Rt.<exported>` is ALSO emitted — the SAME RawCall edge, but naming
+    an Rt key: grefsOf reports a RawCall to any program defun (Rt keys
+    included), so `reach` pulls the exported Rt callee AND its body's Rt->Rt
+    closure into the emitted set (computed from the ACTUAL user-mid call
+    graph, the same edges Mid.Rt.rtDeps declares by hand), and the call uses
+    the callee's OWN ABI (an Rt key + rtLean => lean).  The `user-mid-rtcall`
+    row runs exactly this, end to end.
 
 An unknown key — one that names no defun of the program — stays a loud Err
 (`run_midref`'s `midcallmissing` row pins it).

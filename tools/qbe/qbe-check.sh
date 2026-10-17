@@ -213,6 +213,46 @@ run_mid() {
   fi
 }
 
+# run_midrt — the M3-rtcall row: a user .mid `call Rt.<exported>` (an EXPORTED
+# runtime key) end to end.  The fixture reads "rtcall-input.txt" RELATIVE to
+# the process CWD, so this runner CREATES that file in the run dir and runs
+# the binary with CWD = the run dir.  The golden is the file's CONTENT
+# (load-bearing on the seeded call: unseeded, the compile fails to LINK on
+# q_Rt_x2eread_x2dfile_x2das_x2dstring — the exported-key allowance was a
+# trap).  No churn arm: reading is a single allocation, and the row's point is
+# the LINK, not the GC.
+run_midrt() {
+  local name="$1" entry="$2" fixture="$3"; shift 3
+  local mids=("$@")
+  local dir="$TMP/$name"
+  mkdir -p "$dir"
+  printf 'rtcall-ok' > "$dir/rtcall-input.txt"
+  local bin
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "${mids[@]}" "$entry" "$dir")" || {
+    echo "FAIL $name: qbe-mk"; FAIL=1; return
+  }
+  local nat_out
+  nat_out="$(cd "$dir" && timeout 60 "$bin" "$entry" 2>&1)"
+  local exp
+  if [ "$FREEZE" = 1 ]; then
+    printf '%s\n' "$nat_out" > "$GOLDEN/$name.txt"
+    exp="$nat_out"
+    echo "FROZE $name: golden <- the one backend's current output (${nat_out:0:80})"
+  else
+    exp="$(golden_read "$name")"
+    if [ "$exp" = "__NO_GOLDEN__" ]; then
+      echo "FAIL $name: no golden at $GOLDEN/$name.txt"
+      FAIL=1; return
+    fi
+  fi
+  if [ "$nat_out" != "$exp" ]; then
+    echo "FAIL $name: golden='$exp' native='$nat_out'"
+    FAIL=1
+    return
+  fi
+  echo "PASS $name: golden (${nat_out:0:80})"
+}
+
 # run_midref — the M3fix-4 (b) row: a user .mid `call` whose target is NOT a
 # defun of this program MUST be REFUSED at COMPILE time, loudly, naming the
 # key.  The refusal is the RawCall arm's (Lower.elm), not J2's: the fixture's
@@ -720,6 +760,14 @@ run ifx        Ifx.main         tools/qbe/fixtures/ifx.elm
 # boxedSum's result verbatim, so the printed value is load-bearing on the
 # cross-module call (emit it wrong, or not at all, and the row moves).
 run_mid user-mid UserMidRun.main tools/qbe/fixtures/user-mid.elm tools/qbe/fixtures/user-mid.mid tools/qbe/fixtures/user-mid2.mid
+# M3-rtcall: a user .mid `call Rt.<exported>` (an EXPORTED runtime key), end to
+# end.  user-mid-rtcall.mid's `RtCall.read` calls `Rt.read-file-as-string`
+# (exported, so J2 accepts it); before this unit the callee was never SEEDED
+# into the emitted Rt subset, so the binary failed to LINK on
+# q_Rt_x2eread_x2dfile_x2das_x2dstring.  run_midrt creates rtcall-input.txt in
+# the run dir and expects its content (the printed value is load-bearing on
+# the seeded call).  The golden is `"rtcall-ok"` (the driver quotes strings).
+run_midrt user-mid-rtcall UserMidRtCall.main tools/qbe/fixtures/user-mid-rtcall.elm tools/qbe/fixtures/user-mid-rtcall.mid
 # M3fix-4 (b): the INVERSE row — a user .mid `call` naming a key that resolves
 # at J2 but is NO defun of this program.  QBE_NOMIDRT=1 withholds the Mid Rt
 # program, so the exported key `Rt.read-file-as-string` has nothing behind it;

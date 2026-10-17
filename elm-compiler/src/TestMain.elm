@@ -2903,6 +2903,51 @@ checks rt =
             Err _ ->
                 False
         )
+    -- M3-rtcall: the EXPORTED-key trap M3fix-4 left open (a user .mid may
+    -- `call Rt.<exported>` at J2 but the callee was never SEEDED, so the
+    -- emitted `q_Rt_*` was a link error).  The fix is the CENSUS: grefsOf now
+    -- reports a RawCall to ANY program defun (Rt keys included), so `reach`
+    -- pulls the exported callee AND its body's own Rt->Rt closure into the
+    -- emitted surface — computed from the ACTUAL user-mid call graph, not
+    -- guessed (the same edges Mid.Rt.rtDeps declares by hand, which the
+    -- "rt call graph" row pins as agreeing).
+    , check "M3-rtcall seed: a user .mid `call Rt.read-file-as-string` (an EXPORTED runtime key) seeds that Rt defun AND its body closure into the emitted set, and the call site is the callee's LEAN ABI (Rt key + rtLean, never rt_bounce)"
+        (case QbeModule.loadUserMids rt [ "module A\nexport A.f : val -> val\ndefun A.f(a: val) -> val {\n  return call Rt.read-file-as-string(a);\n}" ] of
+            Ok [ mA ] ->
+                let
+                    prog =
+                        rtProgram rt True True True ++ mA.defuns
+                in
+                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities prog) prog "A.f" of
+                    Ok mod ->
+                        let
+                            ssa =
+                                Print.print mod
+                        in
+                        -- the exported callee IS emitted (this is the
+                        -- fail-before: without the grefsOf edge it is absent
+                        -- and the call would be a dangling q_Rt_*), its
+                        -- transitive closure too (readFileGo, reached through
+                        -- the Rt body's own RawCall edge), and the call is the
+                        -- lean 4-slot shape, not the generic rt_bounce.
+                        List.any (\f -> f.name == "q_Rt_x2eread_x2dfile_x2das_x2dstring") mod.funcs
+                            && List.any (\f -> f.name == "q_Rt_x2ereadFileGo") mod.funcs
+                            && String.contains ":val call $q_Rt_x2eread_x2dfile_x2das_x2dstring" ssa
+
+                    Err _ ->
+                        False
+
+            _ ->
+                False
+        )
+    , check "M3-rtcall uncallable: Rt.main (word -> word -> word, the rawAbi driver entry) is NOT val-callable — a user .mid `call Rt.main` with :val args is a LOUD J2 class reject ('needs word, got val'), never a link error"
+        (case QbeModule.loadUserMids rt [ "module A\nexport A.f : val -> val\ndefun A.f(a: val) -> val {\n  return call Rt.main(a, a);\n}" ] of
+            Err msg ->
+                String.contains "call 'Rt.main'" msg && String.contains "needs word" msg
+
+            Ok _ ->
+                False
+        )
 
     -- ==================== M4: Osier-side checking + the import mapping ====================
     -- `exportScheme` maps an export block's DECLARED Osier type to the checker

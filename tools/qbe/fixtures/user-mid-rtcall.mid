@@ -1,0 +1,15 @@
+// M3-rtcall: the FIRST user .mid to call an EXPORTED runtime key.  The module
+// header names it `RtCall` (every key is `RtCall.*`); its one defun `read`
+// calls `Rt.read-file-as-string` — an EXPORTED runtime defun (runtime.mid's
+// export block), so it resolves at J2 through the user lane's extern table
+// (the privacy boundary: ONLY exported runtime keys resolve).  The call lowers
+// to a RawCall naming `Rt.read-file-as-string`, which the emit level now
+// SEEDS (grefsOf reports the RawCall-to-Rt edge, so `reach` pulls the Rt
+// defun and its body's Rt->Rt closure into the emitted set) and calls in the
+// callee's OWN ABI (an Rt key + rtLean => the lean 4-slot shape, the same
+// shape lowerDefun emits for the callee).
+module RtCall
+export RtCall.read : val -> val
+defun RtCall.read(path: val) -> val {
+  return call Rt.read-file-as-string(path);
+}

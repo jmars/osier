@@ -788,27 +788,41 @@ grefsOf defuns exp =
         NotEqual block ->
             grefsOf defuns block.left ++ grefsOf defuns block.right
 
-        -- Unsafe (osier-rawnodes / osier-consspike): a raw node GRefs
-        -- NOTHING — RawCall crosses the call graph as an opaque SYMBOL — so
-        -- Rt->Rt references are invisible here BY DESIGN and Mid.Rt.seeds
-        -- declares each prim's Rt-key closure instead (the used-prim seeding
-        -- in `lower` is the only way an Rt defun becomes reachable; this arm
-        -- not reporting Rt keys is why it has to).
+        -- Unsafe (osier-rawnodes / osier-consspike): a raw node GRefs NOTHING
+        -- except a RawCall, which is a real call edge — see below.  The
+        -- USED-PRIM seeding (Mid.Rt.seeds -> rtDeps) remains how an Rt defun
+        -- reached through a PRIM becomes reachable: a prim call is a PrimApp,
+        -- not a RawCall, so this walk cannot see the Rt key it names; the
+        -- prim->Rt closure is declared in Mid.Rt.rtDeps instead (the seeding
+        -- in `lower`).
         --
-        -- M3fix-4: a RawCall to a NON-Rt PROGRAM defun IS a real call edge —
-        -- M3 lets a user .mid `call` another user module's exported defun,
-        -- which lowers to RawCall naming that defun's key and emits the
-        -- `q_<key>` call.  Without the edge here the callee is never
-        -- REACHED, so it is never emitted and the link fails (MEASURED on the
-        -- first cut of this fix, predicate-only: `undefined reference to
-        -- q_CrossB_x2eg`).  Reported ONLY when the key already names a defun
-        -- of this program: a key that names nothing stays invisible here so
-        -- the RawCall arm's own reject — not a reachability "unknown global"
-        -- — is the error that names a call to nothing.
+        -- M3fix-4 + M3-rtcall: a RawCall to ANY PROGRAM defun is a real call
+        -- edge — M3 lets a user .mid `call` another user module's exported
+        -- defun (non-Rt) AND an EXPORTED runtime key (Rt.*), both of which
+        -- lower to RawCall naming that defun's key and emit the `q_<key>`
+        -- call.  Without the edge here the callee is never REACHED, so it is
+        -- never emitted and the link fails (MEASURED on the first cut of each
+        -- fix, predicate-only: `undefined reference to q_CrossB_x2eg`, and for
+        -- the Rt direction `undefined reference to q_Rt_read-file-as-string`).
+        -- Reported ONLY when the key already names a defun of this program: a
+        -- key that names nothing stays invisible here so the RawCall arm's own
+        -- reject — not a reachability "unknown global" — is the error that
+        -- names a call to nothing.
+        --
+        -- HONEST SPAN: this also makes `reach` traverse an Rt->Rt RawCall
+        -- edge when the walk is ALREADY inside an Rt defun (the collector's
+        -- mark/sweep loops, the deepEq helpers).  That is exactly the call
+        -- graph Mid.Rt.rtDeps declares by hand, so the two closures agree (a
+        -- TestMain row pins every RawCall target is a program key AND in
+        -- rtDeps); for a DEFAULT route (Elm surface only) the walk never
+        -- ENTERS an Rt defun — surface code reaches Rt keys only through
+        -- prims, never through GRef/RawCall — so the corpus .ssa stays
+        -- byte-identical.  Mid.Rt.seeds/rtDeps remain the used-prim seeding
+        -- path (the prim->Rt closure), orthogonal to this edge.
         Unsafe node ->
             case node of
                 RawCall call ->
-                    if Dict.member call.sym defuns && not (isRtKey call.sym) then
+                    if Dict.member call.sym defuns then
                         [ call.sym ]
 
                     else
@@ -1807,13 +1821,14 @@ lowerRawVal node dest s =
             -- undefined `q_CrossB_x2eg`).  A key that names no defun of this
             -- program stays a LOUD Err below: that is what stops a call to
             -- nothing.  HONEST SPAN, MEASURED: `defuns` is the PROGRAM's, not
-            -- the EMITTED set — for a non-Rt key the two coincide (the
-            -- grefsOf edge just above), for an injected Rt KEY they can part
-            -- company when the used-prim census does not see the call (a
-            -- user .mid's body is raw nodes, so `calledPrims` ignores it) —
-            -- that pre-existing case still reaches the linker as an undefined
-            -- `q_Rt_*` rather than an Err here; closing it is a census/seeding
-            -- change, out of this fix's span.
+            -- the EMITTED set — for a non-Rt key the two coincide (the grefsOf
+            -- edge just above), and since M3-rtcall the SAME edge reports an
+            -- injected Rt KEY too (a RawCall to any program defun is a call
+            -- edge), so `reach` pulls the Rt callee and its closure into the
+            -- emitted set and the two coincide for an Rt key as well.  The
+            -- residual: an Rt key reached ONLY through a PRIM (a PrimApp, not
+            -- a RawCall) stays seeded by Mid.Rt.seeds/rtDeps, which this arm
+            -- never sees — that path is the used-prim census, unchanged.
             if Set.member call.sym MidRt.rawAbi then
                 -- stage 6 U2: a rawAbi defun (Rt.die/Rt.halt) is WORD-in/
                 -- WORD-out — it never appears in a VALUE position (its let
