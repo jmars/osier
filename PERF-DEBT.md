@@ -3,6 +3,11 @@
 Recorded 2026-10-17 at HEAD `42ad241` (stage-6 Path B: B0 frames, B1 apply, B2 tail landed).
 This file exists so the debt is not lost when the baseline it is measured against is deleted.
 
+> **Provenance correction** (re-deriving the corpus counts): `42ad241` and `f9d5dd7`
+> each claim "126/159 artifacts moved" — the MEASURED count is **125 moved / 34
+> unchanged**, every one of the 34 a `compile_error` group (the moved *set* is
+> identical across the two commits; only the digits are wrong).
+
 ## ⚠ READ THIS FIRST — B4 DESTROYS THE MEASUREMENT BASELINE
 
 Every ratio in this file is measured **against the Zig arm of the same program**,
@@ -18,6 +23,14 @@ still the Zig seats in `tools/qbe/rt.zig`.
 * **BEFORE landing B4: build one native binary from the last pre-B4 tree and check
   it into `tools/` (or record its sha256 + how to rebuild it).** It becomes the
   fixed reference the gates compare against.
+* **BEFORE landing B4, also run plan.md §1.3's suite rule ON against OFF**
+  (`QBE_MIDDRIVER=0` vs default, arms alternated). That is the *only* oracle B3
+  ("the full flip") had, and B4 closes the window the same way it closes the ratio
+  gates' reference. MEASURED, not yet run: B3 has **no code left to flip** — every
+  retarget (frames B0, apply B1, tail B2) is already `if s.midDriver` and both
+  drivers already default MIDDRIVER **on** (`elm-compiler/run.js:309`,
+  `selfhost/NativeMain.elm:330` `( False, True )`), so B3's deliverable landed
+  inside B0/B1/B2. What is NOT done is the end-to-end >3% check.
 
 ## How the gates work (and why they are ratios)
 
@@ -69,6 +82,17 @@ Measured on `mutual-tail` at 1e6 hops (constant stack, `md-mutual-tail`).
 (the `Ret` could be staged in the frame or the globals scratch — but mind the
 single-`.tail`-in-flight invariant, which is *stated* at `Rt.tail-known`).
 
+**Leak — FIXED (see the commit that added the `free` in Lower's Agg-ret `@ret`
+block).** The per-call `malloc(80)` `Ret` was also a **leak**: nothing freed it
+(the Lower Agg-ret `@ret` block blit it out and dropped the pointer), while the
+Zig seat is heap-free (`Ret` returned by-value through sret) — ~80 MB leaked per
+1e6-hop chain, unbounded growth over a program run.  Fixed by a `free` in the
+shared Agg-ret `@ret` block **after** the `Blit`: the blit copies the 80 bytes
+out first, and libc `free` is not a GC alloc (no safepoint, no move), so the
+no-collect invariant holds.  One site covers all three `malloc(80)` arms
+(`Rt.apply-tail` ×2, `Rt.tail-known`).  The residual is one libc call per tail;
+eliminating the intermediate buffer entirely remains open for B4.
+
 ### 3. frames — **1.6×** — the floor (lowest priority)
 
 The residual after `frameZero` became a raw-word loop. Causes: the
@@ -104,7 +128,8 @@ the nested-`If` case was silently miscompiled until a `TailShape` was threaded t
 
 1. **Save the pre-B4 Zig-arm binary** (see the top of this file) — everything else
    depends on it.
-2. **apply (9.3×)** — the biggest absolute cost and the hottest path; it compounds into
+2. **Run the §1.3 suite rule ON vs OFF** — the last moment it is measurable.
+3. **apply (9.3×)** — the biggest absolute cost and the hottest path; it compounds into
    every closure and tail call.
-3. **tail (2.5×)** — the jump table and the `malloc(80)`.
-4. **frames (1.6×)** — the boxed-boolean conds; lowest payoff, most invasive.
+4. **tail (2.5×)** — the jump table and the `malloc(80)`.
+5. **frames (1.6×)** — the boxed-boolean conds; lowest payoff, most invasive.

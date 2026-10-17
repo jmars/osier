@@ -1473,10 +1473,22 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                                         -- with NO collection in between.  Do NOT
                                         -- add a GC alloc to this block — it would
                                         -- break the invariant silently.
+                                        --
+                                        -- The `free(retBuf)` below is NOT a GC
+                                        -- alloc (libc free is not a safepoint: it
+                                        -- cannot collect, cannot move anything),
+                                        -- and it runs AFTER the blit has copied
+                                        -- the 80-byte :ret out of the malloc'd
+                                        -- buffer — the buffer is dead from here.
+                                        -- Without it every :ret producer leaks 80 B
+                                        -- per call (Rt.apply-tail x2, Rt.tail-known
+                                        -- — all three `malloc(80)` sites in
+                                        -- runtime.mid), unbounded over a tail loop.
                                         startBlock "ret" s1
                                             |> emit (Bin (Just "retAddr") L Add (Il.Tmp (slotTmp 0)) (Il.Con (RtLayout.payloadWordOffset 0)))
                                             |> emit (Load (Just "retBuf") L LoadL (Il.Tmp "retAddr"))
                                             |> emit (Blit (Il.Tmp "retBuf") (Il.Tmp (slotTmp 0)) rvs)
+                                            |> emit (Call Nothing (Base W) (Il.Sym "free") [ ArgVal (Base L) (Il.Tmp "retBuf") ])
                                             |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
 
                                     _ ->

@@ -4334,6 +4334,16 @@ defun Rt.bounceGo(r : val) -> val {
                                     word rr = aggcall ret rawsym("rt_call15")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480, args + 520, args + 560);
                                     recur(mknum(rr));
                                   } else {
+                                    // UNREACHABLE today: the compiler enforces
+                                    // max arity 16 (the same convention as
+                                    // Rt.callArity's table), so the innermost
+                                    // else is arity >= 16 only when arity == 16
+                                    // and routes correctly.  A HAND-BUILT :tail
+                                    // with arity > 16 would land here and read
+                                    // args+600..+760 PAST a smaller buffer —
+                                    // silent corruption, where Zig callArityRet's
+                                    // else dies loudly (rt.zig:1005).  Kept as a
+                                    // documented parity gap, not a B2 regression.
                                     word rr = aggcall ret rawsym("rt_call16")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480, args + 520, args + 560, args + 600);
                                     recur(mknum(rr));
                                   }

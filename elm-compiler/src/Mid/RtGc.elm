@@ -61,6 +61,7 @@ import Mid.RtPrims exposing (seat)
 --   word 0         the Mid collector's region pointer (THIS unit)
 --   words 8..11    driver knobs, getenv read once (U5a)
 --   word 12        the single .tail-in-flight scratch (U4a)
+--   word 13        no_tail_stage (B2: QBE_NOTTAILSTAGE bypasses to allocvec)
 --   words 16..     the frame freelist heads, indexed by nslots (U3)
 -- The freelist bound is 8192 (MEASURED: the seed's max frame nslots is
 -- 4,354; giants never pool).  The block is .bss: reserving the words costs

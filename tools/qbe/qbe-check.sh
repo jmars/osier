@@ -1225,6 +1225,55 @@ tail_perf_gate() {
 }
 tail_perf_gate
 
+# ---- stage 6 B2fix: the per-call malloc(80) Ret LEAK gate ----
+# Rt.tail-known (and both Rt.apply-tail arms) malloc an 80-byte :ret buffer per
+# tail call and, before B2fix, nothing ever freed it: the Lower Agg-ret @ret
+# block blit the 80 bytes out into the caller's sret and dropped the pointer.
+# Zig's rt_tail_known is heap-free (Ret by-value through sret), so this is a
+# behaviour difference, not a perf nicety — ~80 B leaked per hop, ~936 MB peak
+# RSS over the 1e7-hop mutual-tail chain measured PRE-fix (80 B payload + glibc
+# chunk overhead), ~6 MB bounded POST-fix.  The gate runs the MID tail arm
+# (QBE_MIDDRIVER on by default) at 1e7 hops and fails if peak RSS exceeds
+# 200 MB — a bound the pre-fix binary blows through 4.5x and the fixed one
+# never approaches.  A gate that cannot fail is not a gate: proven asymmetric.
+leak_tail_gate() {
+  local bin pid peak cur i out rc
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/mutualtail.elm Mutual.even "$TMP/leaktail")" || {
+    echo "FAIL leak-tail: qbe-mk"; FAIL=1; return; }
+  "$bin" Mutual.even 10000000 >"$TMP/leaktail.out" 2>&1 &
+  pid=$!
+  peak=0
+  i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    cur="$(awk '/VmHWM/{print $2}' "/proc/$pid/status" 2>/dev/null)"
+    [ -n "$cur" ] && [ "$cur" -gt "$peak" ] && peak="$cur"
+    i=$((i + 1))
+    if [ "$i" -gt 15000 ]; then
+      kill "$pid" 2>/dev/null
+      echo "FAIL leak-tail: mutual-tail(1e7) did not finish (killed after ~5min)"
+      FAIL=1
+      wait "$pid" 2>/dev/null
+      return
+    fi
+    sleep 0.02
+  done
+  wait "$pid"
+  rc=$?
+  out="$(cat "$TMP/leaktail.out")"
+  if [ "$rc" -ne 0 ] || [ "$out" != "1" ]; then
+    echo "FAIL leak-tail: mutual-tail(1e7) exit=$rc out='$out' (golden 1)"
+    FAIL=1
+    return
+  fi
+  if [ "$peak" -gt 204800 ]; then
+    echo "FAIL leak-tail: mutual-tail(1e7) peak RSS ${peak}kB > 200MB — the per-call malloc(80) Ret leaks"
+    FAIL=1
+    return
+  fi
+  echo "PASS leak-tail: mutual-tail(1e7) peak RSS ${peak}kB bounded (< 200MB; the Ret malloc(80) is freed per hop)"
+}
+leak_tail_gate
+
 # ---- stage 4: arity > 8 (the old rt_callN table stopped at rt_call8) ----
 # arity9: a 9-ary defun called DIRECTLY from the driver (rt_call9).  arity9apply:
 # apply9 add9 -> f 1..9 where f is a Var, so the 9-ary call goes through
