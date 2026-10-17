@@ -1066,6 +1066,38 @@ checks rt =
                 False
         )
 
+    -- THE CHAR-ORDERING FIX (osier-qbe-charfix): a `<` on a Char/string operand
+    -- must INLINE the byte-lexicographic compare (a loadub byte walk) and NOT
+    -- call the numeric-only Rt.< — which answers False for any non-number,
+    -- the silent mislower whose fix this row pins structurally (the BEHAVIOURAL
+    -- pin is the gate's charord.elm row).
+    , check "char ordering: a Char/string `<` lowers to the inline byte compare (loadub), NOT a call to Rt.<"
+        (case QbeLower.lower rt True False False True True True True False False QbeTypes.empty Dict.empty (rtProgram rt True True True ++ [ charOrdProbe ]) "Rt.charOrdProbe" of
+            Ok mod ->
+                case funcByName "q_Rt_x2echarOrdProbe" mod of
+                    Just f ->
+                        not (callsSym "q_Rt_x2e_x3c" f) && hasLoadUb f
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "char ordering CONTROL: a `<` on two Int literals keeps the i64 fast path (no loadub byte walk, no Rt.< call)"
+        (case QbeLower.lower rt True False False True True True True False False QbeTypes.empty Dict.empty (rtProgram rt True True True ++ [ intLtProbe ]) "Rt.intLtProbe" of
+            Ok mod ->
+                case funcByName "q_Rt_x2eintLtProbe" mod of
+                    Just f ->
+                        not (callsSym "q_Rt_x2e_x3c" f) && not (hasLoadUb f)
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+
     -- STAGE 6 U1a: the RawCallAgg node (the aggregate call through a
     -- runtime word).  Nothing emits it yet (EMIT-INERT — the corpus .ssa
     -- is byte-identical); these rows pin the MECHANISM U4a's apply/bounce
@@ -6345,6 +6377,39 @@ rtValueInRawPosition =
     }
 
 
+{-| The Char-ordering probe (osier-qbe-charfix): `'A' < 'B'` — two Char
+literals (each a 1-char LString).  The lowering must emit the INLINE
+byte-lexicographic compare (a loadub byte walk), not a call to the numeric-only
+Rt.< — which answers False for any non-number, the silent Char-ordering
+mislower.  (A Char-typed BINDER operand is the same branch via `isStrKnown`'s
+`typeOfBinder` read; the end-to-end `c >= 'A'` shape is pinned behaviourally
+by the gate's charord.elm fixture, where `c : Char` is in the real type table.)
+-}
+charOrdProbe : Defun
+charOrdProbe =
+    { key = "Rt.charOrdProbe"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "c" } ]
+            , body = PrimApp { prim = "<", args = [ Lit (LString "A"), Lit (LString "B") ] }
+            }
+    }
+
+
+{-| The Int-ordering control: the SAME `<` on two Int literals must keep the
+i64 fast path — no loadub byte walk, no Rt.< call.
+-}
+intLtProbe : Defun
+intLtProbe =
+    { key = "Rt.intLtProbe"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body = PrimApp { prim = "<", args = [ Lit (LNumber 65), Lit (LNumber 66) ] }
+            }
+    }
+
+
 {-| The RawCallAgg probe (stage 6 U1a): body = one aggregate call through a
 runtime word, let-bound to a raw temp, with a plain number as the returned
 Value.  `fn` is rt_vec_alloc's address word (a legal raw-word producer
@@ -6620,6 +6685,28 @@ rawCallAggCallShape f =
                     case i of
                         Il.Call (Just _) (Il.Agg "ret") (Il.Tmp _) args ->
                             args == [ Il.ArgVal (Il.Base Il.L) (Il.Con 2) ]
+
+                        _ ->
+                            False
+                )
+                b.body
+        )
+        f.blocks
+
+
+{-| Does a func's body read a string BYTE (a `loadub`)?  The marker of the
+inline byte-lexicographic compare (`lowerStrLess`); the numeric compare paths
+never emit one.
+-}
+hasLoadUb : Il.Func -> Bool
+hasLoadUb f =
+    List.any
+        (\b ->
+            List.any
+                (\i ->
+                    case i of
+                        Il.Load _ _ Il.LoadUb _ ->
+                            True
 
                         _ ->
                             False

@@ -3324,6 +3324,50 @@ isIntKnown s exp =
             False
 
 
+{-| THE PREDICATE for the Char/String-ordering branch of `lowerCompare`: an
+expression is PROVEN a string Value (a Char is a 1-byte String — see the
+branch's doc) iff it is a string literal, or a binder whose checker type is
+`Char`/`String` (read through the SAME per-defun binder map `isIntKnown` reads,
+gated on `s.typeSpec` so the QBE_NOTYPESPEC=1 hatch reproduces the pre-change
+emission).  Deny-by-default, exactly like `isIntKnown`.
+-}
+isStrExp : S -> Exp -> Bool
+isStrExp s exp =
+    isStrKnown s exp
+
+
+isStrKnown : S -> Exp -> Bool
+isStrKnown s exp =
+    case exp of
+        Lit (LString _) ->
+            True
+
+        Var id ->
+            s.typeSpec && isStrType (typeOfBinder s id)
+
+        RecordGet rec field ->
+            -- a Char/String FIELD compared by ordering (the record-read result
+            -- is a boxed string Value, so no `s.rec` positional gate — only the
+            -- checker's field TYPE is needed, read like isIntKnown's arm).
+            s.typeSpec && isStrType (closedRecordFieldType s rec field)
+
+        NoTail inner ->
+            isStrKnown s inner
+
+        _ ->
+            False
+
+
+isStrType : Maybe Rep.Type -> Bool
+isStrType t =
+    case t of
+        Just (Rep.TCon name []) ->
+            name == "Char" || name == "String"
+
+        _ ->
+            False
+
+
 {-| The RAW `l`-typed operand holding `exp`'s Int value.  DOMAIN: exactly
 `isIntKnown`'s — every admitted shape here is an admitted shape there, and the
 final arms are loud errors rather than a fallback, so a future shape added to
@@ -6145,6 +6189,18 @@ lowerCompare op args dest s =
                     reboxBoolean dest (Il.Tmp c) (emit (Cmp (Just c) L op aa bb) s2)
                 )
 
+    else if List.length args == 2 && List.all (isStrExp s) args then
+        -- Char ordering: a Char is a 1-byte String at the VM (there is NO Char
+        -- ValTag — Mid/FromAst lowers a Char literal to an LString), so a Char
+        -- (or String) ordering operand is tagString.  Both operands PROVEN a
+        -- string Value -> ONE byte-lexicographic compare, inline, no tag test
+        -- and no `rt_prim` call.  The Rt.< family answers False for ANY
+        -- non-number, which is the silent Char-ordering mislower this branch
+        -- replaces.  Byte-lexicographic UTF-8 order IS code-point order, so
+        -- this is real-Elm's Char/String ordering in the VM's byte model.
+        lowerArgs2 args s
+            |> Result.andThen (\( a1, a2, s1 ) -> lowerStrCmp op a1 a2 dest s1)
+
     else
         lowerArgs2 args s
         |> Result.andThen
@@ -6259,6 +6315,200 @@ cmpName op =
 
         _ ->
             ">="
+
+
+{-| The `isStrExp` (both-operands-PROVEN-string) branch of `lowerCompare`:
+byte-lexicographic ordering of two String VALUES (a Char is a 1-byte String in
+this VM, so this is also Char ordering — and byte-lexicographic UTF-8 order IS
+code-point order).  `<=`/`>=` are `not (b<a)`/`not (a<b)`, `>` is `b<a`, so ONE
+`lowerStrLess` computation covers all four operators.  Emitted inline (the Rt
+defuns are out of this module's budget, and there is no string-compare prim to
+route through).  The comparison loop keeps its index AND its result in stack
+slots (not SSA temps) because this IL has no phi nodes: a loop-carried value
+must live in memory.
+-}
+lowerStrCmp : CmpOp -> Int -> Int -> Int -> S -> Result String S
+lowerStrCmp op aSlot bSlot dest s =
+    let
+        ( x, y ) =
+            case op of
+                Cslt ->
+                    ( aSlot, bSlot )
+
+                Csle ->
+                    -- a <= b  ==  not (b < a)
+                    ( bSlot, aSlot )
+
+                Csgt ->
+                    -- a > b  ==  b < a
+                    ( bSlot, aSlot )
+
+                _ ->
+                    -- a >= b  ==  not (a < b)
+                    ( aSlot, bSlot )
+
+        neg =
+            op == Csle || op == Csge
+    in
+    lowerStrLess x y s
+        |> Result.map
+            (\( resT, s1 ) ->
+                if neg then
+                    let
+                        ( rT, s2 ) =
+                            freshTmp s1
+                    in
+                    reboxBoolean dest (Il.Tmp rT) (emit (Bin (Just rT) W Xor (Il.Con 1) (Il.Tmp resT)) s2)
+
+                else
+                    reboxBoolean dest (Il.Tmp resT) s1
+            )
+
+
+{-| Byte-lexicographic `x < y` of two String VALUES held in slots `xSlot`/`ySlot`.
+Returns the name of the `w` temp holding 0/1, with the current block left at the
+comparison's join label (started, OPEN) so the caller can negate/rebox into it.
+The read is bounded: the loop body runs only while `i < lenX && i < lenY`, so
+`loadub (data + i)` never reads past either string's bytes.
+-}
+lowerStrLess : Int -> Int -> S -> Result String ( String, S )
+lowerStrLess xSlot ySlot s =
+    let
+        ( dxT, s0 ) =
+            freshTmp s
+
+        ( dyT, s1 ) =
+            freshTmp s0
+
+        ( lxw, s2 ) =
+            freshTmp s1
+
+        ( lyw, s3 ) =
+            freshTmp s2
+
+        ( lxT, s4 ) =
+            freshTmp s3
+
+        ( lyT, s5 ) =
+            freshTmp s4
+
+        ( idxSlot, s6 ) =
+            freshSlot s5
+
+        ( resSlot, s7 ) =
+            freshSlot s6
+
+        ( loopLbl, s8 ) =
+            freshLbl "strloop" s7
+
+        ( bodyLbl, s9 ) =
+            freshLbl "strbody" s8
+
+        ( nextLbl, s10 ) =
+            freshLbl "strnext" s9
+
+        ( diffLbl, s11 ) =
+            freshLbl "strdiff" s10
+
+        ( tieLbl, s12 ) =
+            freshLbl "strtie" s11
+
+        ( joinLbl, s13 ) =
+            freshLbl "strjoin" s12
+
+        ( iT, s14 ) =
+            freshTmp s13
+
+        ( geX, s15 ) =
+            freshTmp s14
+
+        ( geY, s16 ) =
+            freshTmp s15
+
+        ( doneT, s17 ) =
+            freshTmp s16
+
+        ( axT, s18 ) =
+            freshTmp s17
+
+        ( baT, s19 ) =
+            freshTmp s18
+
+        ( bxT, s20 ) =
+            freshTmp s19
+
+        ( bbT, s21 ) =
+            freshTmp s20
+
+        ( neT, s22 ) =
+            freshTmp s21
+
+        ( i1T, s23 ) =
+            freshTmp s22
+
+        ( ltDiff, s24 ) =
+            freshTmp s23
+
+        ( ltTie, s25 ) =
+            freshTmp s24
+
+        ( resT, s26 ) =
+            freshTmp s25
+
+        ( x8, s27 ) =
+            freshTmp s26
+
+        ( y8, s28 ) =
+            freshTmp s27
+
+        ( x16, s29 ) =
+            freshTmp s28
+
+        ( y16, s30 ) =
+            freshTmp s29
+    in
+    Ok
+        ( resT
+        , emit (Bin (Just x8) L Add (Il.Tmp (slotTmp xSlot)) (Il.Con 8)) s30
+            |> emit (Load (Just dxT) L LoadL (Il.Tmp x8))
+            |> emit (Bin (Just y8) L Add (Il.Tmp (slotTmp ySlot)) (Il.Con 8))
+            |> emit (Load (Just dyT) L LoadL (Il.Tmp y8))
+            |> emit (Bin (Just x16) L Add (Il.Tmp (slotTmp xSlot)) (Il.Con 16))
+            |> emit (Load (Just lxw) W LoadW (Il.Tmp x16))
+            |> emit (Unary (Just lxT) L Extsw (Il.Tmp lxw))
+            |> emit (Bin (Just y16) L Add (Il.Tmp (slotTmp ySlot)) (Il.Con 16))
+            |> emit (Load (Just lyw) W LoadW (Il.Tmp y16))
+            |> emit (Unary (Just lyT) L Extsw (Il.Tmp lyw))
+            |> emit (Store StoreL (Il.Con 0) (Il.Tmp (slotTmp idxSlot)))
+            |> closeBlock (Jmp loopLbl)
+            |> startBlock loopLbl
+            |> emit (Load (Just iT) L LoadL (Il.Tmp (slotTmp idxSlot)))
+            |> emit (Cmp (Just geX) L Csle (Il.Tmp lxT) (Il.Tmp iT))
+            |> emit (Cmp (Just geY) L Csle (Il.Tmp lyT) (Il.Tmp iT))
+            |> emit (Bin (Just doneT) W Or (Il.Tmp geX) (Il.Tmp geY))
+            |> closeBlock (Jnz (Il.Tmp doneT) tieLbl bodyLbl)
+            |> startBlock bodyLbl
+            |> emit (Bin (Just axT) L Add (Il.Tmp dxT) (Il.Tmp iT))
+            |> emit (Load (Just baT) W LoadUb (Il.Tmp axT))
+            |> emit (Bin (Just bxT) L Add (Il.Tmp dyT) (Il.Tmp iT))
+            |> emit (Load (Just bbT) W LoadUb (Il.Tmp bxT))
+            |> emit (Cmp (Just neT) W Cne (Il.Tmp baT) (Il.Tmp bbT))
+            |> closeBlock (Jnz (Il.Tmp neT) diffLbl nextLbl)
+            |> startBlock nextLbl
+            |> emit (Bin (Just i1T) L Add (Il.Tmp iT) (Il.Con 1))
+            |> emit (Store StoreL (Il.Tmp i1T) (Il.Tmp (slotTmp idxSlot)))
+            |> jumpTo loopLbl
+            |> startBlock diffLbl
+            |> emit (Cmp (Just ltDiff) W Cslt (Il.Tmp baT) (Il.Tmp bbT))
+            |> emit (Store StoreW (Il.Tmp ltDiff) (Il.Tmp (slotTmp resSlot)))
+            |> jumpTo joinLbl
+            |> startBlock tieLbl
+            |> emit (Cmp (Just ltTie) L Cslt (Il.Tmp lxT) (Il.Tmp lyT))
+            |> emit (Store StoreW (Il.Tmp ltTie) (Il.Tmp (slotTmp resSlot)))
+            |> jumpTo joinLbl
+            |> startBlock joinLbl
+            |> emit (Load (Just resT) W LoadW (Il.Tmp (slotTmp resSlot)))
+        )
 
 
 lowerNumEq : List Exp -> Int -> S -> Result String S

@@ -888,6 +888,12 @@ run list        ListAgg.main    tools/qbe/fixtures/list.elm
 # must NOT be evaluated (the `timeout` guard fails the run if it is) — and
 # NotEqual on 5/6 vs 5/5.
 run bool        Bool.main       tools/qbe/fixtures/bool.elm
+# charord: Char ORDERING (<, <=, >, >=) must not silently lower to False —
+# the four operators plus the == and Int controls are pinned as distinct
+# decimal digits of one golden (see the fixture).  Fail-before: 10100000000
+# (every ordering digit 0); the fix makes each ordering digit match real Elm's
+# code-point order.
+run charord     CharOrd.main    tools/qbe/fixtures/charord.elm
 # tup: a right-nested cons chain to and from a destructuring let, a 2-tuple
 # (snd is a plain value), and a nested tuple pattern.
 run tup         Tup.main        tools/qbe/fixtures/tup.elm
