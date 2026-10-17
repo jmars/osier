@@ -828116,6 +828116,7 @@ function :val $q_Rt_x2eapply(l %a0, l %a1, l %a2) {
 	%t12 =:val call $q_Rt_x2eapplyGo(l %s10, l %s11, l %s11, w 2)
 	blit %t12, %s9, 40
 	%t13 =l call $rt_root_pop()
+	%t14 =l call $free(l %t0)
 	blit %s9, %s0, 40
 	# (fallthrough)
 @ret
@@ -828124,7 +828125,7 @@ function :val $q_Rt_x2eapply(l %a0, l %a1, l %a2) {
 
 function :val $q_Rt_x2eapplyGo(l %a0, l %a1, l %a2, w %an) {
 @start
-	%f =l call $q_Rt_x2eframe_x2denter(l 36)
+	%f =l call $q_Rt_x2eframe_x2denter(l 37)
 	%s0 =l add %f, 0
 	%s2 =l add %f, 80
 	%s3 =l add %f, 120
@@ -828143,12 +828144,13 @@ function :val $q_Rt_x2eapplyGo(l %a0, l %a1, l %a2, w %an) {
 	%s16 =l add %f, 640
 	%s21 =l add %f, 840
 	%s22 =l add %f, 880
-	%s24 =l add %f, 960
+	%s23 =l add %f, 920
 	%s25 =l add %f, 1000
-	%s30 =l add %f, 1200
+	%s26 =l add %f, 1040
 	%s31 =l add %f, 1240
-	%s34 =l add %f, 1360
+	%s32 =l add %f, 1280
 	%s35 =l add %f, 1400
+	%s36 =l add %f, 1440
 	blit %a0, %s2, 40
 	blit %a1, %s3, 40
 	# (fallthrough)
@@ -828307,130 +828309,135 @@ function :val $q_Rt_x2eapplyGo(l %a0, l %a1, l %a2, w %an) {
 	%t99 =l mul 8, 3
 	%t100 =l add %t92, %t99
 	storel %t38, %t100
-	storew 0, %s21
-	%t101 =l add %s21, 8
+	storew 0, %s22
+	%t101 =l add %s22, 8
 	storel %t92, %t101
-	%t102 =:val call $q_Rt_x2ecallArity(l %s21, l %s21, l %s21, w 1)
-	blit %t102, %s0, 40
+	%t102 =:val call $q_Rt_x2ecallArity(l %s22, l %s22, l %s22, w 1)
+	blit %t102, %s21, 40
+	%t103 =l call $free(l %t50)
+	%t104 =l call $free(l %t92)
+	blit %s21, %s0, 40
 	jmp @ret
 @else_3
-	%t103 =w csgtl %t9, %t20
-	%t104 =l extsw %t103
-	storew 3, %s22
-	%t105 =l add %s22, 8
-	storel %t104, %t105
-	%t106 =w loadw %s22
-	%t107 =w ceqw %t106, 3
-	%t109 =l add %s22, 8
-	%t108 =w loadw %t109
-	%t110 =w ceqw %t108, 0
-	%t111 =w and %t107, %t110
-	jnz %t111, @else_14, @then_13
+	%t105 =w csgtl %t9, %t20
+	%t106 =l extsw %t105
+	storew 3, %s23
+	%t107 =l add %s23, 8
+	storel %t106, %t107
+	%t108 =w loadw %s23
+	%t109 =w ceqw %t108, 3
+	%t111 =l add %s23, 8
+	%t110 =w loadw %t111
+	%t112 =w ceqw %t110, 0
+	%t113 =w and %t109, %t112
+	jnz %t113, @else_14, @then_13
 @then_13
-	%t112 =l add %t39, %t20
-	%t113 =l add %t112, %t40
-	%t114 =l mul 8, 3
-	%t115 =l add %t1, %t114
-	storel %t11, %t115
-	%t116 =l add %t1, 24
-	%t117 =l call $rt_root_push_ptr(l %t116)
-	%t118 =l call $rt_vec_alloc(w %t113)
-	%t119 =l mul 8, 3
-	%t120 =l add %t1, %t119
-	%t121 =l loadl %t120
-	%t122 =l mul %t39, 5
-	%t123 =l call $q_Rt_x2ecopyWords(l %t118, l %t121, l %t122)
-	%t124 =l mul %t39, 40
-	%t125 =l add %t118, %t124
-	%t126 =l mul %t20, 5
-	%t127 =l call $q_Rt_x2ecopyWords(l %t125, l %t17, l %t126)
-	%t128 =l add %t39, %t20
-	%t129 =l mul %t128, 40
-	%t130 =l add %t118, %t129
-	%t131 =l mul %t39, 40
-	%t132 =l add %t121, %t131
-	%t133 =l mul %t40, 5
-	%t134 =l call $q_Rt_x2ecopyWords(l %t130, l %t132, l %t133)
-	%t135 =l call $rt_root_pop()
-	%t136 =l sub %t9, %t20
+	%t114 =l add %t39, %t20
+	%t115 =l add %t114, %t40
+	%t116 =l mul 8, 3
+	%t117 =l add %t1, %t116
+	storel %t11, %t117
+	%t118 =l add %t1, 24
+	%t119 =l call $rt_root_push_ptr(l %t118)
+	%t120 =l call $rt_vec_alloc(w %t115)
+	%t121 =l mul 8, 3
+	%t122 =l add %t1, %t121
+	%t123 =l loadl %t122
+	%t124 =l mul %t39, 5
+	%t125 =l call $q_Rt_x2ecopyWords(l %t120, l %t123, l %t124)
+	%t126 =l mul %t39, 40
+	%t127 =l add %t120, %t126
+	%t128 =l mul %t20, 5
+	%t129 =l call $q_Rt_x2ecopyWords(l %t127, l %t17, l %t128)
+	%t130 =l add %t39, %t20
+	%t131 =l mul %t130, 40
+	%t132 =l add %t120, %t131
+	%t133 =l mul %t39, 40
+	%t134 =l add %t123, %t133
+	%t135 =l mul %t40, 5
+	%t136 =l call $q_Rt_x2ecopyWords(l %t132, l %t134, l %t135)
+	%t137 =l call $rt_root_pop()
+	%t138 =l sub %t9, %t20
 	storew 6, %s0
-	%t137 =l add %s0, 8
-	storel %t3, %t137
-	%t138 =l add %s0, 16
-	storel %t136, %t138
-	%t139 =l add %s0, 24
-	storel %t118, %t139
-	%t140 =l add %s0, 32
-	storel %t113, %t140
+	%t139 =l add %s0, 8
+	storel %t3, %t139
+	%t140 =l add %s0, 16
+	storel %t138, %t140
+	%t141 =l add %s0, 24
+	storel %t120, %t141
+	%t142 =l add %s0, 32
+	storel %t115, %t142
 	jmp @ret
 @else_14
-	%t141 =l call $malloc(l 640)
-	%t142 =l mul %t39, 5
-	%t143 =l call $q_Rt_x2ecopyWords(l %t141, l %t11, l %t142)
-	%t144 =l mul %t39, 40
-	%t145 =l add %t141, %t144
-	%t146 =l mul %t9, 5
-	%t147 =l call $q_Rt_x2ecopyWords(l %t145, l %t17, l %t146)
-	%t148 =w csgtl %t14, %t39
-	%t149 =l extsw %t148
-	storew 3, %s25
-	%t150 =l add %s25, 8
-	storel %t149, %t150
-	%t151 =w loadw %s25
-	%t152 =w ceqw %t151, 3
-	%t154 =l add %s25, 8
-	%t153 =w loadw %t154
-	%t155 =w ceqw %t153, 0
-	%t156 =w and %t152, %t155
-	jnz %t156, @else_16, @then_15
+	%t143 =l call $malloc(l 640)
+	%t144 =l mul %t39, 5
+	%t145 =l call $q_Rt_x2ecopyWords(l %t143, l %t11, l %t144)
+	%t146 =l mul %t39, 40
+	%t147 =l add %t143, %t146
+	%t148 =l mul %t9, 5
+	%t149 =l call $q_Rt_x2ecopyWords(l %t147, l %t17, l %t148)
+	%t150 =w csgtl %t14, %t39
+	%t151 =l extsw %t150
+	storew 3, %s26
+	%t152 =l add %s26, 8
+	storel %t151, %t152
+	%t153 =w loadw %s26
+	%t154 =w ceqw %t153, 3
+	%t156 =l add %s26, 8
+	%t155 =w loadw %t156
+	%t157 =w ceqw %t155, 0
+	%t158 =w and %t154, %t157
+	jnz %t158, @else_16, @then_15
 @then_15
-	%t157 =l mul %t39, 40
-	%t158 =l add %t11, %t157
-	storew 0, %s24
-	%t159 =l add %s24, 8
-	storel %t158, %t159
+	%t159 =l mul %t39, 40
+	%t160 =l add %t11, %t159
+	storew 0, %s25
+	%t161 =l add %s25, 8
+	storel %t160, %t161
 	jmp @join_17
 @else_16
-	storew 0, %s24
-	%t160 =l add %s24, 8
-	storel 0, %t160
+	storew 0, %s25
+	%t162 =l add %s25, 8
+	storel 0, %t162
 	# (fallthrough)
 @join_17
-	%t161 =l add %s24, 8
-	%t162 =l loadl %t161
-	%t163 =l call $malloc(l 32)
-	%t164 =l mul 8, 0
-	%t165 =l add %t163, %t164
-	storel %t6, %t165
-	%t166 =l mul 8, 1
-	%t167 =l add %t163, %t166
-	storel %t162, %t167
-	%t168 =l mul 8, 2
-	%t169 =l add %t163, %t168
-	storel %t141, %t169
-	%t170 =l mul 8, 3
-	%t171 =l add %t163, %t170
-	storel %t38, %t171
-	storew 0, %s31
-	%t172 =l add %s31, 8
-	storel %t163, %t172
-	%t173 =:val call $q_Rt_x2ecallArity(l %s31, l %s31, l %s31, w 1)
-	blit %t173, %s30, 40
-	%t174 =l mul %t9, 40
-	%t175 =l add %t17, %t174
-	%t176 =l mul 8, 0
-	%t177 =l add %t1, %t176
-	storel %t175, %t177
-	%t178 =l sub %t20, %t9
-	%t179 =l mul 8, 1
-	%t180 =l add %t1, %t179
-	storel %t178, %t180
-	storew 0, %s34
-	%t181 =l add %s34, 8
-	storel %t1, %t181
-	blit %s30, %s35, 40
-	blit %s34, %s2, 40
-	blit %s35, %s3, 40
+	%t163 =l add %s25, 8
+	%t164 =l loadl %t163
+	%t165 =l call $malloc(l 32)
+	%t166 =l mul 8, 0
+	%t167 =l add %t165, %t166
+	storel %t6, %t167
+	%t168 =l mul 8, 1
+	%t169 =l add %t165, %t168
+	storel %t164, %t169
+	%t170 =l mul 8, 2
+	%t171 =l add %t165, %t170
+	storel %t143, %t171
+	%t172 =l mul 8, 3
+	%t173 =l add %t165, %t172
+	storel %t38, %t173
+	storew 0, %s32
+	%t174 =l add %s32, 8
+	storel %t165, %t174
+	%t175 =:val call $q_Rt_x2ecallArity(l %s32, l %s32, l %s32, w 1)
+	blit %t175, %s31, 40
+	%t176 =l call $free(l %t143)
+	%t177 =l call $free(l %t165)
+	%t178 =l mul %t9, 40
+	%t179 =l add %t17, %t178
+	%t180 =l mul 8, 0
+	%t181 =l add %t1, %t180
+	storel %t179, %t181
+	%t182 =l sub %t20, %t9
+	%t183 =l mul 8, 1
+	%t184 =l add %t1, %t183
+	storel %t182, %t184
+	storew 0, %s35
+	%t185 =l add %s35, 8
+	storel %t1, %t185
+	blit %s31, %s36, 40
+	blit %s35, %s2, 40
+	blit %s36, %s3, 40
 	jmp @body
 @ret
 	call $q_Rt_x2eframe_x2dleave()
@@ -829016,6 +829023,7 @@ function :ret $q_Rt_x2eapply_x2dtail(l %a0, l %a1, l %a2) {
 	%t12 =:val call $q_Rt_x2eapplyTailGo(l %s10, l %s11, l %s11, w 2)
 	blit %t12, %s9, 40
 	%t13 =l call $rt_root_pop()
+	%t14 =l call $free(l %t0)
 	blit %s9, %s0, 40
 	# (fallthrough)
 @ret
@@ -829376,18 +829384,20 @@ function :val $q_Rt_x2eapplyTailGo(l %a0, l %a1, l %a2, w %an) {
 	storel %t207, %t216
 	%t217 =:val call $q_Rt_x2ecallArity(l %s47, l %s47, l %s47, w 1)
 	blit %t217, %s46, 40
-	%t218 =l mul %t9, 40
-	%t219 =l add %t17, %t218
-	%t220 =l mul 8, 0
-	%t221 =l add %t1, %t220
-	storel %t219, %t221
-	%t222 =l sub %t20, %t9
-	%t223 =l mul 8, 1
-	%t224 =l add %t1, %t223
-	storel %t222, %t224
+	%t218 =l call $free(l %t185)
+	%t219 =l call $free(l %t207)
+	%t220 =l mul %t9, 40
+	%t221 =l add %t17, %t220
+	%t222 =l mul 8, 0
+	%t223 =l add %t1, %t222
+	storel %t221, %t223
+	%t224 =l sub %t20, %t9
+	%t225 =l mul 8, 1
+	%t226 =l add %t1, %t225
+	storel %t224, %t226
 	storew 0, %s50
-	%t225 =l add %s50, 8
-	storel %t1, %t225
+	%t227 =l add %s50, 8
+	storel %t1, %t227
 	blit %s46, %s51, 40
 	blit %s50, %s2, 40
 	blit %s51, %s3, 40

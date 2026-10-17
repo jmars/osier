@@ -3892,6 +3892,7 @@ defun Rt.apply(fslot : word, args : word, nargs : word) -> val {
   val f = vecload(fslot, 0);
   val r = call Rt.applyGo(mknum(state), f);
   rawcall rt_root_pop();
+  rawcall free(state);
   return r;
 }
 defun Rt.apply-tail(fslot : word, args : word, nargs : word) -> val {
@@ -3903,6 +3904,7 @@ defun Rt.apply-tail(fslot : word, args : word, nargs : word) -> val {
   val f = vecload(fslot, 0);
   val r = call Rt.applyTailGo(mknum(state), f);
   rawcall rt_root_pop();
+  rawcall free(state);
   return r;
 }
 defun Rt.applyGo(state : val, f : val) -> val {
@@ -3937,7 +3939,10 @@ defun Rt.applyGo(state : val, f : val) -> val {
       wstore(disp, 1, caps);
       wstore(disp, 2, buf);
       wstore(disp, 3, arity);
-      return call Rt.callArity(mknum(disp));
+      val r = call Rt.callArity(mknum(disp));
+      rawcall free(buf);
+      rawcall free(disp);
+      return r;
     } else {
       if (mkbool(rem > nargs)) {
         word total = napp + nargs + capslen;
@@ -3961,6 +3966,8 @@ defun Rt.applyGo(state : val, f : val) -> val {
         wstore(disp, 2, buf);
         wstore(disp, 3, arity);
         val res = call Rt.callArity(mknum(disp));
+        rawcall free(buf);
+        rawcall free(disp);
         wstore(sp, 0, args + rem * 40);
         wstore(sp, 1, nargs - rem);
         recur(mknum(sp), res);
@@ -4057,6 +4064,8 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
         wstore(disp, 2, buf);
         wstore(disp, 3, arity);
         val res = call Rt.callArity(mknum(disp));
+        rawcall free(buf);
+        rawcall free(disp);
         wstore(sp, 0, args + rem * 40);
         wstore(sp, 1, nargs - rem);
         recur(mknum(sp), res);

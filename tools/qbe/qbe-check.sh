@@ -1274,6 +1274,57 @@ leak_tail_gate() {
 }
 leak_tail_gate
 
+# ---- stage 6 P1a: the apply-family per-call malloc LEAK gate ----
+# Rt.apply / Rt.apply-tail malloc a 32-byte state block per call and NEITHER
+# freed it, and both the saturated and over-applied arms of Rt.applyGo /
+# Rt.applyTailGo malloc a 640-byte args `buf` + 32-byte `disp` per dispatch —
+# 704 B leaked per saturated closure call (state + buf + disp), NONE ever
+# freed.  Zig's rt_apply is heap-free on the saturated path (a C-STACK
+# `var buf: [max_arity]Value`, no state block), so this is a behaviour
+# difference, not a perf nicety — MEASURED ~3.5 GB peak RSS over the 5e6-iter
+# applyperf chain PRE-fix (~700 B/call x 5e6), ~6 MB bounded POST-fix.  The
+# gate runs the MID apply arm (QBE_MIDDRIVER on by default) at 5e6 iters and
+# fails if peak RSS exceeds 200 MB — a bound the pre-fix binary blows through
+# ~17x and the fixed one never approaches.  A gate that cannot fail is not a
+# gate: proven asymmetric (pre-fix 3668824 kB FAIL, post-fix 6164 kB PASS).
+leak_apply_gate() {
+  local bin pid peak cur i out rc
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/applyperf.elm ApplyPerf.main "$TMP/leakapply")" || {
+    echo "FAIL leak-apply: qbe-mk"; FAIL=1; return; }
+  "$bin" ApplyPerf.main 5000000 >"$TMP/leakapply.out" 2>&1 &
+  pid=$!
+  peak=0
+  i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    cur="$(awk '/VmHWM/{print $2}' "/proc/$pid/status" 2>/dev/null)"
+    [ -n "$cur" ] && [ "$cur" -gt "$peak" ] && peak="$cur"
+    i=$((i + 1))
+    if [ "$i" -gt 15000 ]; then
+      kill "$pid" 2>/dev/null
+      echo "FAIL leak-apply: applyperf(5e6) did not finish (killed after ~5min)"
+      FAIL=1
+      wait "$pid" 2>/dev/null
+      return
+    fi
+    sleep 0.02
+  done
+  wait "$pid"
+  rc=$?
+  out="$(cat "$TMP/leakapply.out")"
+  if [ "$rc" -ne 0 ] || [ "$out" != "10000000" ]; then
+    echo "FAIL leak-apply: applyperf(5e6) exit=$rc out='$out' (golden 10000000)"
+    FAIL=1
+    return
+  fi
+  if [ "$peak" -gt 204800 ]; then
+    echo "FAIL leak-apply: applyperf(5e6) peak RSS ${peak}kB > 200MB — the per-call malloc(640)+malloc(32)+malloc(32) leaks"
+    FAIL=1
+    return
+  fi
+  echo "PASS leak-apply: applyperf(5e6) peak RSS ${peak}kB bounded (< 200MB; the apply-family malloc(state/buf/disp) is freed per call)"
+}
+leak_apply_gate
+
 # ---- stage 4: arity > 8 (the old rt_callN table stopped at rt_call8) ----
 # arity9: a 9-ary defun called DIRECTLY from the driver (rt_call9).  arity9apply:
 # apply9 add9 -> f 1..9 where f is a Var, so the 9-ary call goes through

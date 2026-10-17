@@ -88,6 +88,19 @@ shared across the apply family, or an in-frame loop like `Rt.bounceGo`). Both ar
 `Lower`/surface design work, not a loop swap — which is why `copyWords` (fixed for
 ~17%) only moved 11.6× → 9.3×.
 
+**Leak — FIXED (stage-6 P1a).** The apply family also leaked **~704 B per saturated
+closure call**: `Rt.apply`/`Rt.apply-tail` malloc a 32-byte `state` block and never
+freed it, and the saturated/over-applied arms of `Rt.applyGo`/`Rt.applyTailGo` malloc
+a 640-byte `buf` + 32-byte `disp` per dispatch and never freed either — ~3.5 GB peak
+RSS over the 5e6-iter applyperf chain PRE-fix, ~6 MB POST-fix (the same live
+default-route bug class as the `.tail` leak, on a hotter path).  Fixed by libc `free`s
+after the last use of each block (the `state` after `rt_root_pop`, the `buf`/`disp`
+after `Rt.callArity` returns / before the over-applied `recur`).  **The `malloc(640)`
+`buf`, the `malloc(32)` `disp`, the boxed-boolean conditions, the four `payload(f, k)`
+re-blits and the `mknum`/`payload` round-trips themselves are STILL PENDING** — they
+are perf (the next unit will likely delete these buffers entirely), not correctness;
+this unit freed them and nothing more.
+
 ### 2. tail — **2.5×** (2.88× manual)
 
 Measured on `mutual-tail` at 1e6 hops (constant stack, `md-mutual-tail`).
