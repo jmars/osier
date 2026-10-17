@@ -26,11 +26,31 @@ still the Zig seats in `tools/qbe/rt.zig`.
 * **BEFORE landing B4, also run plan.md §1.3's suite rule ON against OFF**
   (`QBE_MIDDRIVER=0` vs default, arms alternated). That is the *only* oracle B3
   ("the full flip") had, and B4 closes the window the same way it closes the ratio
-  gates' reference. MEASURED, not yet run: B3 has **no code left to flip** — every
-  retarget (frames B0, apply B1, tail B2) is already `if s.midDriver` and both
-  drivers already default MIDDRIVER **on** (`elm-compiler/run.js:309`,
+  gates' reference. MEASURED: B3 has **no code left to flip** — every retarget
+  (frames B0, apply B1, tail B2) is already `if s.midDriver` and both drivers
+  already default MIDDRIVER **on** (`elm-compiler/run.js:309`,
   `selfhost/NativeMain.elm:330` `( False, True )`), so B3's deliverable landed
-  inside B0/B1/B2. What is NOT done is the end-to-end >3% check.
+  inside B0/B1/B2.
+
+### The pre-B4 reference binaries (BUILT — kept)
+
+Below in this file the three ratio gates' Zig arm is referred to as "the Zig arm of the
+same program". Those three Zig-arm executables were **built at `cf59488` and saved** so the
+gates can be re-based on them after B4 deletes their source:
+
+| fixture | file at build | sha256 | size |
+|---|---|---|---|
+| frame gate | `tests/elm-fixtures/fib.elm Fib.fib` | `ae86c1681a32e1a72694112ff6a912214ad463a585bcf6aa08e43a751c183dc2` | 3,913,152 |
+| apply gate | `tools/qbe/fixtures/applyperf.elm ApplyPerf.main` | `68980e52ec1d9d854f3cf398b509fc50e3be91a9e4cfa74d9be14475b3831f0b` | 3,930,032 |
+| tail gate | `tools/qbe/fixtures/mutualtail.elm Mutual.even` | `d86785d56852e8bd1e30d60e06b5f2577c5794247fdc3f207031eafb5cc12ed3` | 3,929,856 |
+
+The built executables currently live at `/home/jaye/osier-scratch/preb4/{fib,applyperf,mutualtail}/`;
+**B4 should commit them under `tools/qbe/ref/`** (precedent: `tools/qbe/rt.o` is committed) and
+point the three gates at them, or the gates cannot be re-based and must be disabled.
+
+Rebuild command if they are ever lost: `QBE_MIDDRIVER=0 tools/qbe/qbe-mk.sh <src> <entry> <outdir>`
+at any tree up to `cf59488` (the Zig seats are still in `tools/qbe/rt.zig` there, and in git
+history after B4 — B4 is recoverable, it is not irreversible).
 
 ## How the gates work (and why they are ratios)
 
@@ -124,11 +144,56 @@ the nested-`If` case was silently miscompiled until a `TailShape` was threaded t
   nears full and fabricates "failed to emit" errors. Use
   `TMPDIR=/home/jaye/osier-scratch` and re-run.
 
+## THE AGGREGATE — the per-op gates UNDERSTATE it (MEASURED 2026-10-17, `cf59488`)
+
+The three ratio gates each measure **one retargeted family** and report 1.6× / 9.3× /
+1.6×. plan.md §1.3's suite rule — the instrument the plan designates for a *route*
+verdict — says the whole stage-6 migration (Path A + Path B) costs **2.2× on the
+representative suite, and up to 4.2× on a single program**. Read that against the plan's
+R5 guard ("selfhost wall regression ≤3%"): the guard is violated by two orders of
+magnitude, so by §1.3 this route is **REFUTED on clocks** — and the owner's decision to
+land it anyway is a *deliberate accepted debt*, not a measurement error.
+
+Instrument: `tools/osier-bench.sh`, `OSIER_BENCH_RUNS=7 OSIER_BENCH_STAT=median`,
+12 suite programs, arms **alternated**, 2 sessions + 2 same-day A/A arms.
+`QBE_MIDDRIVER=1` (Mid route) vs `QBE_MIDDRIVER=0` (Zig route). Per-program medians:
+
+| program | ON ms | OFF ms | ratio |
+|---|---|---|---|
+| adtmatch | 134 | 74 | 1.82 |
+| deepnontail | 66 | 59 | 1.13 |
+| listbuild | 47 | 33 | 1.42 |
+| localrec | 12 | 12 | 0.96 |
+| mono_float | 316 | 82 | 3.83 |
+| mono_int | 298 | 71 | 4.20 |
+| mono_record | 188 | 58 | 3.24 |
+| nestagg | 220 | 156 | 1.41 |
+| numloop | 14 | 14 | 1.04 |
+| recflow | 67 | 34 | 1.94 |
+| recupd_local | 114 | 64 | 1.78 |
+| recupd_param | 78 | 44 | 1.79 |
+| **TOTAL** | **1554** | **702** | **2.22** |
+
+Same-day A/A spread (max−min)/median: **median 5.0% / max 18.3%** (session 1) and
+**1.3% / 15.9%** (session 2) — i.e. every ratio above 1.4 is outside the spread, and the
+big ones are 10–20× outside it. Cross-checked by hand: `mono_int` built both arms,
+median of 7 raw runs, **313 ms vs 80 ms (3.9×)** — not a bench artifact.
+
+**Why the per-op gates understate it:** each gate's fixture is dominated by the family it
+retargets, but a *program* pays the three families **together** plus the Mid driver on
+every entry. fib (1.6×) is a direct-call recursion that barely touches apply or tail;
+mono_int (4.2×) is closure/record-heavy and pays all three. **A per-family gate cannot see
+the sum — that is what the suite is for, and the plan said so.**
+
+Route penalty vs the plan's pre-arc projection (§3 phase-3 note: "numloop ~0%, mono_int
+~+3%, localrec ≤0%, nestagg +5…10%, listbuild +2…13%, mono_float +10…28%, adtmatch
++26…45%"): the measured `mono_float` **+286%** and `mono_int` **+320%** are an order of
+magnitude past the projection. That projection was a PROJECTION; this table is MEASURED.
+
 ## Recommended order when this is picked up
 
-1. **Save the pre-B4 Zig-arm binary** (see the top of this file) — everything else
-   depends on it.
-2. **Run the §1.3 suite rule ON vs OFF** — the last moment it is measurable.
+1. **Save the pre-B4 Zig-arm binary** — DONE, see "The pre-B4 reference binaries".
+2. **Run the §1.3 suite rule ON vs OFF** — DONE, see "THE AGGREGATE" (2.22×).
 3. **apply (9.3×)** — the biggest absolute cost and the hottest path; it compounds into
    every closure and tail call.
 4. **tail (2.5×)** — the jump table and the `malloc(80)`.
