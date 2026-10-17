@@ -993,6 +993,15 @@ rtDeps =
           -- not allocvec/allocRaw, so both stay frame-free.
           ( "Rt.copyWords", [ "Rt.copyWordsGo" ] )
         , ( "Rt.copyWordsGo", [] )
+        , -- ===== the stage-6 B2 mid-tail family.  Rt.tail-known's only RawCall
+          -- edge is Rt.copyWords (the raw-word Value-array copy; its other
+          -- nodes are rawcall/aggcall/raw-word, NOT rtDeps edges).  Rt.bounce's
+          -- only RawCall edge is its :val loop helper Rt.bounceGo (which itself
+          -- dispatches via aggcall — RawCallAgg, NOT an rtDeps edge — and
+          -- self-tails via recur).
+        ( "Rt.tail-known", [ "Rt.copyWords" ] )
+        , ( "Rt.bounce", [ "Rt.bounceGo" ] )
+        , ( "Rt.bounceGo", [] )
         ]
 
 
@@ -1098,6 +1107,17 @@ rawAbi =
           -- frameZero discipline), removing the per-word blit/boxing.
           "Rt.copyWords"
         , "Rt.copyWordsGo"
+        , -- ===== the stage-6 B2 mid-tail family.  Rt.tail-known is a raw-word
+          -- defun whose RESULT is the 80-byte `:ret` (Agg "ret", the
+          -- rt_tail_known seat's C ABI — 3 word params code/argblock/nargs,
+          -- reached from Lower's directCall TAIL retarget).  Rt.bounce is a
+          -- raw-word defun whose RESULT is the 40-byte `.done` Value (Agg
+          -- "val", the rt_bounce seat's C ABI — 1 word param, the :ret
+          -- pointer, reached from Lower's bounce retarget).  Their :val
+          -- helper/loop (Rt.bounceGo) is NOT rawAbi — recur needs the val
+          -- self-tail.
+          "Rt.tail-known"
+        , "Rt.bounce"
         ]
 
 
@@ -1132,6 +1152,12 @@ rawAbiArity =
           -- against the actual param count at lowerDefun (rawAbiArityAgree).
         ( "Rt.copyWords", 3 )
         , ( "Rt.copyWordsGo", 3 )
+        , -- stage 6 B2: Rt.tail-known takes the SAME 3 word params as the
+          -- Zig seat (code, argblock, nargs); Rt.bounce takes 1 (the :ret
+          -- pointer) — both checked against the actual param count at
+          -- lowerDefun (rawAbiArityAgree).
+        ( "Rt.tail-known", 3 )
+        , ( "Rt.bounce", 1 )
         ]
 
 
@@ -1161,6 +1187,12 @@ driverSeeds =
           -- cannot seed them — the frame-pair precedent.
         "Rt.apply"
         , "Rt.apply-tail"
+        , -- stage 6 B2: Lower's directCall/bounce retarget (QBE_MIDDRIVER=1)
+          -- names q_Rt_x2etail_x2dknown / q_Rt_x2ebounce directly, so the
+          -- census cannot seed them — the tail-known/bounce pair joins the
+          -- driverSeeds roots (Rt.bounceGo is a closure edge off Rt.bounce).
+        "Rt.tail-known"
+        , "Rt.bounce"
         ]
 
 

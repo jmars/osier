@@ -1178,6 +1178,53 @@ apply_perf_gate() {
 }
 apply_perf_gate
 
+# ---- stage 6 B2: the tail/bounce perf gate ----
+# mutual-tail 1e6 is the deep-cross-defun-tail workload: every hop builds a
+# .tail (Mid Rt.tail-known: static buffer + copy + malloc(80) Ret) and chases
+# it (Mid Rt.bounce -> Rt.bounceGo: the 17-arm aggcall dispatch + :val recur).
+# This is the B2 hot path — rt_bounce/rt_tail_known sit on ~20,318 corpus
+# call sites.  MEASURED (median of 7 alternating pairs, 1e6 hops):
+#   hatch-ON  ~161ms / hatch-OFF ~56ms = ~2.9x
+# The 2.9x floor (vs the 1.6x frame floor) is the tail family's residual: the
+# per-call malloc(80) Ret in Rt.tail-known (the rawAbi Agg-"ret" convention B1
+# already chose for Rt.apply-tail's saturated arm), the 17-arm LINEAR if-chain
+# dispatch (the Zig's jump table), and the bounceGo :val loop's per-hop
+# mknum+blit.  None is a GC allocation and the loop is an in-frame jmp (the
+# md-mutual-tail row pins constant stack), so this is a REPORTED floor, not a
+# silent 175x-class regression.  THE BOUND IS 6x = the 2.9x floor + ~3x
+# headroom (the frame gate's discipline, widened for the chain's higher
+# per-hop variance) — tight enough to catch a regression to a per-hop GC
+# allocArray or a full-Ret :val blit loop (10x+), loose enough never to flake.
+# Both arms must print the SAME answer ("1").
+tail_perf_gate() {
+  local bin_on bin_off on_times=() off_times=() i s e on_med off_med ratio out_on out_off
+  bin_on="$("$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/mutualtail.elm Mutual.even "$TMP/tailperf-on")" || {
+    echo "FAIL tail-perf: qbe-mk (hatch ON)"; FAIL=1; return; }
+  bin_off="$(QBE_MIDDRIVER=0 "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/mutualtail.elm Mutual.even "$TMP/tailperf-off")" || {
+    echo "FAIL tail-perf: qbe-mk (hatch OFF)"; FAIL=1; return; }
+  out_on="$(timeout 120 "$bin_on" Mutual.even 1000000 2>&1)"
+  out_off="$(timeout 120 "$bin_off" Mutual.even 1000000 2>&1)"
+  if [ "$out_on" != "$out_off" ]; then
+    echo "FAIL tail-perf: hatch-ON mutual-tail(1e6)='$out_on' != hatch-OFF='$out_off' (the tail chase differs across arms)"
+    FAIL=1; return
+  fi
+  for i in 1 2 3 4 5 6 7; do
+    s=$(date +%s%N); timeout 120 "$bin_on" Mutual.even 1000000 >/dev/null 2>&1; e=$(date +%s%N)
+    on_times+=("$(( (e - s) / 1000000 ))")
+    s=$(date +%s%N); timeout 120 "$bin_off" Mutual.even 1000000 >/dev/null 2>&1; e=$(date +%s%N)
+    off_times+=("$(( (e - s) / 1000000 ))")
+  done
+  on_med="$(printf '%s\n' "${on_times[@]}" | sort -n | sed -n '4p')"
+  off_med="$(printf '%s\n' "${off_times[@]}" | sort -n | sed -n '4p')"
+  ratio="$(awk -v a="$on_med" -v b="$off_med" 'BEGIN { printf "%.1f", (b > 0 ? a / b : 999) }')"
+  if awk -v a="$on_med" -v b="$off_med" 'BEGIN { exit !(a > 6 * b) }'; then
+    echo "FAIL tail-perf: hatch-ON median ${on_med}ms is ${ratio}x the hatch-OFF median ${off_med}ms — bound is 6x (the per-hop GC-alloc / :val-blit regression shape)"
+    FAIL=1; return
+  fi
+  echo "PASS tail-perf: hatch-ON median ${on_med}ms / hatch-OFF median ${off_med}ms = ${ratio}x (bound 6x), both mutual-tail(1e6)=${out_on}"
+}
+tail_perf_gate
+
 # ---- stage 4: arity > 8 (the old rt_callN table stopped at rt_call8) ----
 # arity9: a 9-ary defun called DIRECTLY from the driver (rt_call9).  arity9apply:
 # apply9 add9 -> f 1..9 where f is a Var, so the 9-ary call goes through
@@ -2551,6 +2598,43 @@ if "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/mutualtail.elm Mutual.even "$T
   else
     echo "FAIL mutual-tail gc-churn (QBE_HEAP_MB=$CHURN_MB): golden='1' native='$churn_out'"
     FAIL=1
+  fi
+fi
+
+# ---- stage 6 B2: the SAME 1e6 mutual tail under QBE_MIDDRIVER=1 ----
+# (the Mid tail-known builds every .tail and the MID bounce loop chases it —
+# Rt.main's entry dispatch routes through q_Rt_x2ebounce, so this row is the
+# Mid bounce's CONSTANT-NATIVE-STACK oracle, not the default row's Zig seat.
+# A self-CALL recur in Rt.bounceGo would build one C frame per hop and die on
+# the 8MB stack between 20k-40k hops — the same ceiling the default row pins.)
+if rt_path="$("$ROOT/tools/qbe/rt-o.sh")" 2>/dev/null; then
+  rt_nomain="$TMP/md-mutual-rt.o"
+  md_d=1000000
+  cp "$rt_path" "$rt_nomain" && objcopy --strip-symbol=main "$rt_nomain" 2>/dev/null || {
+    echo "FAIL md-mutual-tail: objcopy --strip-symbol=main"; FAIL=1
+  }
+  ssa="$TMP/md-mutual.ssa"
+  if (cd "$ROOT/elm-compiler" &&
+    QBE=1 QBE_ENTRY=Mutual.even QBE_MIDDRIVER=1 node run.js "$ROOT/tools/qbe/fixtures/mutualtail.elm" "$ssa") >&2; then
+    case "$(head -c 4 "$ssa")" in
+      "err "*) echo "FAIL md-mutual-tail: compile failed: $(cat "$ssa")"; FAIL=1;;
+      *)
+        "$ROOT/vendor/qbe/qbe" "$ssa" > "$TMP/md-mutual.s"
+        if cc "$TMP/md-mutual.s" "$rt_nomain" -o "$TMP/md-mutual" -lc 2>/dev/null; then
+          md_out="$(timeout 120 "$TMP/md-mutual" Mutual.even "$md_d" 2>&1)"
+          if [ "$md_out" = "1" ]; then
+            echo "PASS md-mutual-tail $md_d hops: the MID bounce loop chases the chain at constant stack (golden 1)"
+          else
+            echo "FAIL md-mutual-tail $md_d hops: golden='1' native='$md_out'"
+            FAIL=1
+          fi
+        else
+          echo "FAIL md-mutual-tail: link"; FAIL=1
+        fi
+        ;;
+    esac
+  else
+    echo "FAIL md-mutual-tail: qbe-mk (QBE_MIDDRIVER=1)"; FAIL=1
   fi
 fi
 

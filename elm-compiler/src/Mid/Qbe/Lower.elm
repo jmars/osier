@@ -286,6 +286,16 @@ rawAbiRetClass key =
         -- value | `.tail` request) through sret — rt_apply_tail's C ABI.
         Agg "ret"
 
+    else if key == "Rt.tail-known" then
+        -- stage 6 B2: Rt.tail-known returns the 80-byte `:ret` (the .tail
+        -- request) through sret — rt_tail_known's C ABI.
+        Agg "ret"
+
+    else if key == "Rt.bounce" then
+        -- stage 6 B2: Rt.bounce returns the 40-byte `.done` Value through
+        -- sret — rt_bounce's C ABI.
+        Agg "val"
+
     else
         Base L
 
@@ -334,6 +344,23 @@ rawAbiArityAgree key actual =
 
         Nothing ->
             Err ("qbe: rawAbi key " ++ key ++ " has no Mid.Rt.rawAbiArity entry — the record must cover every rawAbi key")
+
+
+{-| stage 6 B2: the bounce seat's symbol.  Under QBE_MIDDRIVER=1 every `rt_bounce`
+emission site retargets to the Mid rawAbi defun q_Rt_x2ebounce — the SAME
+`Agg "val"` (40-byte `.done` Value) result and a single `Base L` :ret-pointer
+arg, a pure symbol swap.  The default (Zig) seat stays `rt_bounce`.  ONE
+helper for ALL THREE sites (directCall's non-tail arm, the RawCall fat
+QBE_NORTLEAN route, the rtPrimSlots fat QBE_NORTLEAN route) so a missed site
+cannot drift from the other two.
+-}
+bounceSeat : S -> String
+bounceSeat s =
+    if s.midDriver then
+        "q_" ++ mangle "Rt.bounce"
+
+    else
+        "rt_bounce"
 
 
 emit : Il.Inst -> S -> S
@@ -2136,7 +2163,7 @@ lowerRawVal node dest s =
                                 Ok
                                     (s3
                                         |> emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle call.sym)) (List.map (\sl -> ArgVal (Agg "val") (Il.Tmp (slotTmp sl))) slots))
-                                        |> emit (Call (Just vp) (Agg "val") (Il.Sym "rt_bounce") [ ArgVal (Base L) (Il.Tmp rp) ])
+                                        |> emit (Call (Just vp) (Agg "val") (Il.Sym (bounceSeat s)) [ ArgVal (Base L) (Il.Tmp rp) ])
                                         |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
                                     )
                         )
@@ -4277,6 +4304,23 @@ stageSlots slots s =
 -- into the return area (slot 0) for the @ret block to hand upward.
 directCall : String -> List Exp -> Int -> Bool -> S -> Result String S
 directCall key args dest isTail s =
+    let
+        -- stage 6 B2: under QBE_MIDDRIVER=1 the tail-known/bounce seats
+        -- retarget to the Mid rawAbi defuns (the SAME aggregate result shapes
+        -- `:ret`/`:val`, a symbol swap, and the nargs ARG CLASS changes for
+        -- tail-known: the Zig seat takes nargs as i32 `w`, the rawAbi defun's
+        -- params are `l` registers — QBE subtyping is `l`->`w` only, so a `w`
+        -- arg to an `l` param is a usecheck failure, the rtApply precedent).
+        ( tailCallee, nargsTy ) =
+            if s.midDriver then
+                ( "q_" ++ mangle "Rt.tail-known", Base L )
+
+            else
+                ( "rt_tail_known", Base W )
+
+        bounceCallee =
+            bounceSeat s
+    in
     stageArgs args s
         |> Result.andThen
             (\( ptrs, base, s1 ) ->
@@ -4285,20 +4329,24 @@ directCall key args dest isTail s =
                         ( rp, s2 ) =
                             freshTmp s1
                     in
-                    Ok
-                        (emit
-                            (Call (Just rp)
-                                (Agg "ret")
-                                (Il.Sym "rt_tail_known")
-                                [ ArgVal (Base L) (Il.Sym ("q_" ++ mangle key))
-                                , ArgVal (Base L) (Il.Tmp (slotTmp base))
-                                , ArgVal (Base W) (Il.Con (List.length args))
-                                ]
+                    rawAbiArityAgree "Rt.tail-known" 3
+                        |> Result.andThen
+                            (\_ ->
+                                Ok
+                                    (emit
+                                        (Call (Just rp)
+                                            (Agg "ret")
+                                            (Il.Sym tailCallee)
+                                            [ ArgVal (Base L) (Il.Sym ("q_" ++ mangle key))
+                                            , ArgVal (Base L) (Il.Tmp (slotTmp base))
+                                            , ArgVal nargsTy (Il.Con (List.length args))
+                                            ]
+                                        )
+                                        s2
+                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp 0)) rvs)
+                                        |> jumpTo "ret"
+                                    )
                             )
-                            s2
-                            |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp 0)) rvs)
-                            |> jumpTo "ret"
-                        )
 
                 else
                     let
@@ -4308,11 +4356,15 @@ directCall key args dest isTail s =
                         ( vp, s3 ) =
                             freshTmp s2
                     in
-                    Ok
-                        (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\p -> ArgVal (Agg "val") (Il.Tmp p)) ptrs)) s3
-                            |> emit (Call (Just vp) (Agg "val") (Il.Sym "rt_bounce") [ ArgVal (Base L) (Il.Tmp rp) ])
-                            |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
-                        )
+                    rawAbiArityAgree "Rt.bounce" 1
+                        |> Result.andThen
+                            (\_ ->
+                                Ok
+                                    (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\p -> ArgVal (Agg "val") (Il.Tmp p)) ptrs)) s3
+                                        |> emit (Call (Just vp) (Agg "val") (Il.Sym bounceCallee) [ ArgVal (Base L) (Il.Tmp rp) ])
+                                        |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
+                                    )
+                            )
             )
 
 
@@ -7014,7 +7066,7 @@ rtPrimSlots prim slots dest s =
                 in
                 Ok
                     (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Agg "val") (Il.Tmp (slotTmp sl))) slots)) s2
-                        |> emit (Call (Just vp) (Agg "val") (Il.Sym "rt_bounce") [ ArgVal (Base L) (Il.Tmp rp) ])
+                        |> emit (Call (Just vp) (Agg "val") (Il.Sym (bounceSeat s)) [ ArgVal (Base L) (Il.Tmp rp) ])
                         |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
                     )
 

@@ -79,14 +79,14 @@ checks rt =
       -- load of runtime.mid).  If test-run.js (or run.js) ever stops reading
       -- the file, the flag text is empty, `Rt.load` would parse nothing, and
       -- every `rtProgram`-derived row could pass VACUOUSLY over an empty
-      -- program.  This row pins the full surface program (186 defuns — the
-      -- MEASURED `defun` count of elm-compiler/runtime.mid; 179 + the seven
-      -- stage-6 B1 apply defuns), so an empty or truncated load turns it
+      -- program.  This row pins the full surface program (189 defuns — the
+      -- MEASURED `defun` count of elm-compiler/runtime.mid; 179 + the ten stage-6 B1/B2
+      -- apply + tail defuns), so an empty or truncated load turns it
       -- RED, loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (186 defuns)"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (189 defuns)"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 186
+                List.length ast == 189
 
             Err _ ->
                 False
@@ -899,7 +899,7 @@ checks rt =
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
     , check "rt program: 150 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram rt True True True) == 168
+        (List.length (rtProgram rt True True True) == 171
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
@@ -1123,7 +1123,7 @@ checks rt =
     -- shapes are pinned, not just "it links".
     , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main + the B0 frame pair are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo/frame set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set; the frame pair is FRAME-FREE by construction — its only nodes are rawcall/raw-word loads/stores and rawAbi->rawAbi calls to the two non-allocating helpers)"
         (Rt.rawAbi
-            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.frameZero", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo" ]
+            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.frameZero", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.tail-known", "Rt.bounce" ]
             && not (Set.member "Rt.die" rt.allocating)
             && not (Set.member "Rt.halt" rt.allocating)
             && not (Set.member "Rt.cStrEq" rt.allocating)
@@ -1147,6 +1147,15 @@ checks rt =
             -- though rt_callN/rt_bounce allocate nothing themselves.
             && Set.member "Rt.callArity" rt.allocating
             && not (Set.member "Rt.copyWords" rt.allocating)
+            -- stage 6 B2: Rt.tail-known allocates (the allocvec fallback is a
+            -- direct safepoint); Rt.bounce reaches its allocating loop helper
+            -- via rtDeps; Rt.bounceGo is CONSERVATIVELY allocating (aggcall,
+            -- the unknown-generated-code deny-by-default).  All three stay
+            -- rawAbi-frame-free regardless (the rawAbi arm wins the frame
+            -- decision before `allocating` is consulted).
+            && Set.member "Rt.tail-known" rt.allocating
+            && Set.member "Rt.bounce" rt.allocating
+            && Set.member "Rt.bounceGo" rt.allocating
         )
     , check "rawAbi emission shape: Rt.die (1 word param) emits (params [a0:l], ret l, frame-free alloc scratch)"
         (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.die" of
@@ -1238,6 +1247,60 @@ checks rt =
                             Nothing ->
                                 False
                        )
+
+            Err _ ->
+                False
+        )
+    , check "B2 Rt.tail-known is a rawAbi Agg-ret defun: params [a0:l,a1:l,a2:l], ret Agg \"ret\" (the 80-byte .tail), frame-free alloc8 (the rawAbi arm wins the frame decision) — the rt_tail_known seat's C ABI, ready for Lower's directCall TAIL retarget"
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.tail-known" of
+            Ok mod ->
+                case funcByName "q_Rt_x2etail_x2dknown" mod of
+                    Just f ->
+                        List.map Tuple.second f.params
+                            == [ Il.Base Il.L, Il.Base Il.L, Il.Base Il.L ]
+                            && f.ret == Il.Agg "ret"
+                            && frameBaseIsAlloc f
+                            && not (callsSym "rt_frame_enter" f)
+                            && not (callsSym "q_Rt_x2eframe_x2denter" f)
+                            && callsSym "q_Rt_x2ecopyWords" f
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "B2 Rt.bounce is a rawAbi Agg-val defun: params [a0:l], ret Agg \"val\" (the 40-byte .done), frame-free alloc8, single-iteration fast path (vecload) + hand-off to the :val loop q_Rt_x2ebounceGo — the rt_bounce seat's C ABI"
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.bounce" of
+            Ok mod ->
+                case funcByName "q_Rt_x2ebounce" mod of
+                    Just f ->
+                        List.map Tuple.second f.params
+                            == [ Il.Base Il.L ]
+                            && f.ret == Il.Agg "val"
+                            && frameBaseIsAlloc f
+                            && not (callsSym "rt_frame_enter" f)
+                            && not (callsSym "q_Rt_x2eframe_x2denter" f)
+                            && callsSym "q_Rt_x2ebounceGo" f
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "B2 Rt.bounceGo is the FRAMED :val tail-chase loop: reaches the rt_callN bridge by name AND its recur is an in-frame self-tail (jmp @body, no self-call) — CONSTANT native stack, exactly the Zig bounce trampoline (fails on a self-CALL recur, which would build one C frame per hop and blow the 1e6 clostail stack)"
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.bounce" of
+            Ok mod ->
+                case funcByName "q_Rt_x2ebounceGo" mod of
+                    Just f ->
+                        callsSym "q_Rt_x2eframe_x2denter" f
+                            && callsSym "rt_call0" f
+                            && callsSym "rt_call16" f
+                            && selfLoopIsLoop ( "q_Rt_x2ebounceGo", f )
+
+                    Nothing ->
+                        False
 
             Err _ ->
                 False
@@ -1536,7 +1599,7 @@ checks rt =
             Err _ ->
                 False
         )
-    , check "A4a MIDDRIVER emission — the 17-arm entry dispatch: $main calls the rt_callN dispatchers by NAME (aggcall ret rawsym) and rt_bounce (aggcall val) — the RawCallAgg named-symbol shape, not a call into data"
+    , check "A4a MIDDRIVER emission — the 17-arm entry dispatch: $main calls the rt_callN dispatchers by NAME (aggcall ret rawsym) and q_Rt_x2ebounce (aggcall val, the stage-6 B2 Mid bounce — the driver's entry chase routes through the MID trampoline, not the Zig rt_bounce seat) — the RawCallAgg named-symbol shape, not a call into data"
         (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 case funcByName "main" mod of
@@ -1544,7 +1607,8 @@ checks rt =
                         callsSym "rt_call1" f
                             && callsSym "rt_call9" f
                             && callsSym "rt_call16" f
-                            && callsSym "rt_bounce" f
+                            && callsSym "q_Rt_x2ebounce" f
+                            && not (callsSym "rt_bounce" f)
 
                     Nothing ->
                         False
@@ -1852,7 +1916,7 @@ checks rt =
             Err _ ->
                 False
         )
-    , check "B1 loop/helper framing: the loops and the dispatch are FRAMED (they reach a safepoint), copyWords is frame-free, and the dispatch reaches rt_callN/rt_bounce by name"
+    , check "B1 loop/helper framing: the loops and the dispatch are FRAMED (they reach a safepoint), copyWords is frame-free, and the dispatch reaches rt_callN/q_Rt_x2ebounce by name (the stage-6 B2 retarget — the apply dispatch routes through the MID bounce, not the Zig rt_bounce seat)"
         (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "q_Rt_x2eapplyGo" mod of
@@ -1871,7 +1935,7 @@ checks rt =
                        )
                     && (case funcByName "q_Rt_x2ecallArity" mod of
                             Just f ->
-                                callsSym "rt_call16" f && callsSym "rt_bounce" f
+                                callsSym "rt_call16" f && callsSym "q_Rt_x2ebounce" f && not (callsSym "rt_bounce" f)
 
                             Nothing ->
                                 False
@@ -3971,7 +4035,7 @@ checks rt =
                       "Rt.@p", "Rt.absvector", "Rt.address->", "Rt.allocRaw", "Rt.allocVector", "Rt.appendL", "Rt.apply", "Rt.apply-tail", "Rt.applyGo", "Rt.applyOneRedir",
                       "Rt.applyRedirects", "Rt.applyTailGo", "Rt.asF", "Rt.assoc", "Rt.assocGo", "Rt.bitwise-and", "Rt.bitwise-not", "Rt.bitwise-or",
                       "Rt.bitwise-shift-left", "Rt.bitwise-shift-right", "Rt.bitwise-shift-right-zf", "Rt.bitwise-xor",
-                      "Rt.bodyWriteGo", "Rt.bytesBuild", "Rt.bytesEqGo", "Rt.bytesOf",
+                      "Rt.bodyWriteGo", "Rt.bounce", "Rt.bounceGo", "Rt.bytesBuild", "Rt.bytesEqGo", "Rt.bytesOf",
                       "Rt.bytesToStr", "Rt.c-strlen", "Rt.cStrCopyGo", "Rt.cStrEq", "Rt.cStrEqGo", "Rt.cStrEqLit", "Rt.cStrFill", "Rt.cStrLenGo",
                       "Rt.callArity", "Rt.cd", "Rt.char-code", "Rt.childBuiltin", "Rt.childCd",
                       "Rt.childPwd", "Rt.close", "Rt.closeCmdTmpfds", "Rt.closeOthersGo", "Rt.closePipeTmpfds", "Rt.closePipesGo", "Rt.closure",
@@ -3989,7 +4053,7 @@ checks rt =
                       "Rt.openBodyTmpfile", "Rt.parseArgsGo", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo", "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind",
                       "Rt.recAppendNamesGo", "Rt.recGet", "Rt.recGetGo", "Rt.recInsert", "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd",
                       "Rt.recUpdCopy", "Rt.recUpdFind", "Rt.repGo", "Rt.repeat", "Rt.revGo", "Rt.runBuiltinInprocess", "Rt.setenv", "Rt.shen.bytes->string", "Rt.shen.str->bytes", "Rt.snd", "Rt.str", "Rt.strOf",
-                      "Rt.string?", "Rt.subGo", "Rt.substring", "Rt.symEq", "Rt.symLess", "Rt.symToStr", "Rt.toI32", "Rt.value", "Rt.vecEq", "Rt.wRaw", "Rt.wStr",
+                      "Rt.string?", "Rt.subGo", "Rt.substring", "Rt.symEq", "Rt.symLess", "Rt.symToStr", "Rt.tail-known", "Rt.toI32", "Rt.value", "Rt.vecEq", "Rt.wRaw", "Rt.wStr",
                       "Rt.waitStatusCode", "Rt.wireCmdGo", "Rt.wirePipeGo", "Rt.write-byte"]
             Err _ ->
                 False
@@ -4047,7 +4111,7 @@ checks rt =
     -- is now the append below; the loud Err moved to the key-agreement walk
     -- (row C), which is the collision/rename class the orphan check guarded.
     , check
-        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the eighteen stage-6 keys (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.frameZero, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
+        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the twenty-one stage-6 keys (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.frameZero, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -4069,7 +4133,7 @@ checks rt =
                             in
                             case Rt.spliceSurface s union of
                                 Ok spliced ->
-                                    List.map .key spliced == List.map .key union ++ [ "Rt.apply", "Rt.apply-tail", "Rt.applyGo", "Rt.applyTailGo", "Rt.cStrEq", "Rt.cStrEqGo", "Rt.callArity", "Rt.copyWords", "Rt.copyWordsGo", "Rt.die", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.frameZero", "Rt.halt", "Rt.main", "Rt.metaGo", "Rt.parseArgsGo" ]
+                                    List.map .key spliced == List.map .key union ++ [ "Rt.apply", "Rt.apply-tail", "Rt.applyGo", "Rt.applyTailGo", "Rt.bounce", "Rt.bounceGo", "Rt.cStrEq", "Rt.cStrEqGo", "Rt.callArity", "Rt.copyWords", "Rt.copyWordsGo", "Rt.die", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.frameZero", "Rt.halt", "Rt.main", "Rt.metaGo", "Rt.parseArgsGo", "Rt.tail-known" ]
 
                                 Err _ ->
                                     False
