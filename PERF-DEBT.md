@@ -161,6 +161,22 @@ The residual after `frameZero` became a raw-word loop. Causes: the
 `frameBlock`/`enter`/`leave` **boxed-boolean condition machinery** (`mkbool` builds a
 Value per condition) and the word loop's per-slot counter round-trip.
 
+**P1c — the boxed-boolean CONDITIONS FIXED (measured).** A surface `if`/`?:`/
+block-if condition may now be `:word` OR `:val`: a bare word 0/1 (`i == 0`)
+lowers to a direct `jnz` on the word — no `mkbool` box, no frame slot, no
+reload — while the old boxed spelling keeps today's lowering byte-for-byte
+(the compatibility seat).  A word-VALUED join (`(a==b) ? 1 : 0`) as a
+condition is a LOUD J1 reject (it has no bare word test; box it or
+restructure), never a silent box-and-misread.  The frame path
+(`Rt.frameZero`, `Rt.frameBlock`, `Rt.frame-leave` — plus `Rt.copyWordsGo`,
+which the apply family drives) converted to the word form: frameBlock went
+4 boxed conds → 4 `jnz` (107 → 67 instructions, 0 `storew 3`), frameZero 1 →
+1 (50 → 39).  The frame-perf gate fell **1.6× → 1.4×** (fib's ~77 ns/call
+floor is the boxed-cond removal; the residual is the freelist malloc and the
+word-zero loop).  The apply-perf gate moved 3.8× → 3.6× (copyWordsGo's cond).
+The corpus moved 125/159 (the same 34 `compile_error` groups); the hatch-OFF
+window (`QBE_MIDDRIVER=0` vs `f55bf1b^`) holds byte-identical 159/159.
+
 ## THE ANTI-PATTERN THAT CAUSED ALL OF THIS (check this first, always)
 
 **A `:val` LOOP IS A BLIT-AND-BOXING FACTORY.** Every `recur` of a `:val` defun copies
@@ -239,4 +255,6 @@ magnitude past the projection. That projection was a PROJECTION; this table is M
 3. **apply (9.3×)** — the biggest absolute cost and the hottest path; it compounds into
    every closure and tail call.
 4. **tail (2.5×)** — the jump table and the `malloc(80)`.
-5. **frames (1.6×)** — the boxed-boolean conds; lowest payoff, most invasive.
+5. **frames (1.6×)** — the boxed-boolean conds — **DONE (P1c)**: the frame
+   path's boxed-boolean conditions are the word form now, 1.6× → 1.4×; the
+   residual is the freelist malloc and the word-zero loop (a later unit).

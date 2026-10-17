@@ -3424,9 +3424,13 @@ checks rt =
     , checkErr "check: J1 REJECT — a val used where a word operator operand is required"
         "J1"
         "defun Rt.badop(a: val) -> val {\n  word n = a + 1;\n  return mknum(n);\n}"
-    , checkErr "check: J1 REJECT — an unboxed word compare as an if condition"
+    , checkOk "check: J1 accept — a bare word compare IS an if condition now (stage 6 P1c word cond; no mkbool)"
+        "defun Rt.wordcond(n: word) -> val {\n  if (n == 1) { return mknil; } else { return mkbool(1); }\n}"
+    , checkOk "check: J1 accept — the old boxed spelling still checks (the :val compatibility seat)"
+        "defun Rt.valcond(n: word) -> val {\n  if (mkbool(n == 1)) { return mknil; } else { return mkbool(1); }\n}"
+    , checkErr "check: J1 REJECT — a word-VALUED '?:' join as an if condition (its value needs a slot; no bare word test)"
         "J1"
-        "defun Rt.badcond(n: word) -> val {\n  if (n == 1) { return mknil; } else { return mkbool(1); }\n}"
+        "defun Rt.badjoincond(n: word) -> val {\n  if ((n == 1) ? 1 : 0) { return mknil; } else { return mkbool(1); }\n}"
     , checkErr "check: J1 REJECT — a builtin called with the wrong arity (mkstr needs 2)"
         "J1"
         "defun Rt.badmkstr(a: val) -> val {\n  val s = mkstr(a);\n  return s;\n}"
@@ -3686,6 +3690,34 @@ checks rt =
                         (liff (lmkBool (lcmpW RCeq (ltagIs (ltv 1) 1) (ltn 1)))
                             (lmkNum (ltn 1))
                             (lmkNum (ltn 2))
+                        )
+
+            Err _ ->
+                False
+        )
+
+    , check "lower: a WORD cond stays UNBOXED — `if (n == 1)` lowers to If { cond = RawCmp } (no mkbool wrapper), the :val branches unchanged"
+        (case lowlBody "defun Rt.wc(n : word) -> val {\n  if (n == 1) { return mknil; } else { return mkbool(1); }\n}" of
+            Ok body ->
+                canon body
+                    == canon
+                        (liff (lcmpW RCeq (ltv 1) (ltn 1))
+                            lmkNilV
+                            (lmkBool (ltn 1))
+                        )
+
+            Err _ ->
+                False
+        )
+
+    , check "lower: a boxed :val cond still lowers EXACTLY as before — `mkbool(n == 1)` wraps the word in RawMkValue tagBoolean"
+        (case lowlBody "defun Rt.vc(n : word) -> val {\n  if (mkbool(n == 1)) { return mknil; } else { return mkbool(1); }\n}" of
+            Ok body ->
+                canon body
+                    == canon
+                        (liff (lmkBool (lcmpW RCeq (ltv 1) (ltn 1)))
+                            lmkNilV
+                            (lmkBool (ltn 1))
                         )
 
             Err _ ->
@@ -5350,9 +5382,8 @@ checks rt =
     , checkErr "check: ?: REJECT — branches disagree on class (then :word, else :val) — a LOUD reject, never a silent widen"
         "branches disagree"
         "defun Rt.qbad(a: val) -> val {\n  word x = mkbool(tagis(a, 1) == 1) ? 1 : mknil;\n  return mknum(x);\n}"
-    , checkErr "check: ?: REJECT — a non-:val cond (a raw word compare must be boxed: the SAME judgment as the statement if)"
-        "condition must be val"
-        "defun Rt.qcond(a: val) -> val {\n  word x = payload(a, 0) == 1 ? 2 : 3;\n  return mknum(x);\n}"
+    , checkOk "check: ?: accept — a WORD cond with :val branches (the frameBlock shape: (nslots < 8192) ? mknum(..) : mknum(0))"
+        "defun Rt.qcond(a: val) -> val {\n  val x = (payload(a, 0) == 1) ? mknum(1) : mknum(2);\n  return x;\n}"
 
     -- ---- lower: the `Let { x = If { .. } }` join shapes (existing L1 + mkIf; no new machinery) ----
     , check "lower: the ?: VALUE JOIN — `val x = c ? t : e;` lowers to Let { x = If { .. } } (the Rt.readFileGo growB binder's wall)"
@@ -5373,6 +5404,25 @@ checks rt =
             Err _ ->
                 False
         )
+    , check "lower: a WORD-cond ?: keeps the cond UNBOXED — `(payload(a,0) == 1) ? mknum(1) : mknum(2)` lowers to If { cond = RawCmp } (no mkbool)"
+        (case lowlBody "defun Rt.qwc(a: val) -> val {\n  val x = (payload(a, 0) == 1) ? mknum(1) : mknum(2);\n  return x;\n}" of
+            Ok body ->
+                canon body
+                    == canon
+                        (llets
+                            [ ( ltb 2
+                              , liff (lcmpW RCeq (lpay (ltv 1) 0) (ltn 1))
+                                    (lmkNum (ltn 1))
+                                    (lmkNum (ltn 2))
+                              )
+                            ]
+                            (ltv 2)
+                        )
+
+            Err _ ->
+                False
+        )
+
     , check "lower: nested ?: — the else arm re-enters the ?: level, each If carrying its own join labels"
         (case lowlBody "defun Rt.qnest(n : val) -> val {\n  val x = mkbool(tagis(n, 1) == 1) ? mknum(1) : mkbool(tagis(n, 2) == 1) ? mknum(2) : mknum(3);\n  return x;\n}" of
             Ok body ->
@@ -5516,8 +5566,7 @@ checks rt =
     , checkErr "check: block-if REJECT — a true val-vs-word BRANCH mismatch (MEASURED: every term's class is the defun's -> ty — J6 pins each return — so the route is J6's, and the branch-agreement arm is correct-by-construction through the existing term grammar)"
         "J6"
         "defun Rt.ibarm(a: val) -> word {\n  word w = if (mkbool(tagis(a, 1) == 1)) { return 1; } else { return mknil; };\n  return w;\n}"
-    , checkErr "check: block-if REJECT — a non-:val cond (a raw word compare must be boxed: the SAME checkCond as every if)"
-        "condition must be val"
+    , checkOk "check: block-if accept — a WORD cond with :val branches (the frame-leave shape)"
         "defun Rt.ibcond(a: val) -> val {\n  val x = if (payload(a, 0) == 1) { return mknum(1); } else { return mknum(2); };\n  return x;\n}"
 
     -- ---- lower: the TERM if's machinery in a value slot ----

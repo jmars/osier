@@ -411,8 +411,9 @@ type UnsafeNode
     | -- tag == n as a BOOLEAN WORD (0/1, raw): the tag dispatch that must NOT
       -- go through Case MLitEq/MTagEq — those lower through rtPrimSlots "=",
       -- which ROUTES to Rt.eq when the route hatch is on, an infinite regress
-      -- inside Rt.eq's own body.  Boxing it (RawMkValue tag 3) makes it an
-      -- `If`/`ShortAnd` condition.
+      -- inside Rt.eq's own body.  A raw 0/1 word IS an `If` condition (the
+      -- word-cond test jumps on it directly); boxing it (RawMkValue tag 3)
+      -- makes it a `:val` `If`/`ShortAnd` condition instead.
       RawTagIs { value : Exp, tag : Int }
     | -- semantic word ops (word x word -> word, raw).  The integer family
       -- (RAdd..RDiv) is i64 wrapping/truncating; the Bitwise family is i32

@@ -3480,7 +3480,7 @@ defun Rt.childCd(argvN : val, argcN : val, stN : val) -> val {
 // Rt.frame-enter (wstore(hdr,4,nslots)).
 defun Rt.frameZero(hdr : word) -> word {
   word i = wload(hdr, 4);
-  if (mkbool(i == 0)) {
+  if (i == 0) {
     return 0;
   } else {
     word w = (i - 1) * 5;
@@ -3496,15 +3496,15 @@ defun Rt.frameZero(hdr : word) -> word {
 
 defun Rt.frameBlock(nslots : word) -> word {
   word bytes = 40 + 40 * nslots;
-  word g = payload(mkbool(nslots < 8192) ? mknum(rawcall rt_glob_addr()) : mknum(0), 0);
-  word h = payload(mkbool(g != 0) ? mknum(wload(g, 16 + nslots)) : mknum(0), 0);
-  word popped = if (mkbool(h != 0)) {
+  word g = payload((nslots < 8192) ? mknum(rawcall rt_glob_addr()) : mknum(0), 0);
+  word h = payload((g != 0) ? mknum(wload(g, 16 + nslots)) : mknum(0), 0);
+  word popped = if (h != 0) {
     wstore(g, 16 + nslots, wload(h, 3));
     return 0;
   } else {
     return 0;
   };
-  word r = payload(mkbool(h != 0) ? mknum(h) : mknum(rawcall malloc(bytes)), 0);
+  word r = payload((h != 0) ? mknum(h) : mknum(rawcall malloc(bytes)), 0);
   return r;
 }
 
@@ -3526,7 +3526,7 @@ defun Rt.frame-enter(nslots : word) -> word {
 defun Rt.frame-leave() -> word {
   word glob = rawcall rt_glob_addr();
   word hdr = wload(glob, 1);
-  word bad = if (mkbool(hdr == 0)) {
+  word bad = if (hdr == 0) {
     call Rt.die(rawstr("qbe-rt: rt_frame_leave with no frame"));
     return 0;
   } else {
@@ -3535,12 +3535,16 @@ defun Rt.frame-leave() -> word {
   wstore(glob, 1, wload(hdr, 2));
   rawcall rt_root_pop_to(wload(hdr, 1));
   word n = wload(hdr, 0);
-  word pooled = if (mkbool(wload(glob, 2) != 0) || mkbool(n >= 8192)) {
+  word pooled = if (wload(glob, 2) != 0) {
     return 0;
   } else {
-    wstore(hdr, 3, wload(glob, 16 + n));
-    wstore(glob, 16 + n, hdr);
-    return 0;
+    if (n >= 8192) {
+      return 0;
+    } else {
+      wstore(hdr, 3, wload(glob, 16 + n));
+      wstore(glob, 16 + n, hdr);
+      return 0;
+    }
   };
   return 0;
 }
@@ -4202,7 +4206,7 @@ defun Rt.copyWords(dst : word, src : word, n : word) -> word {
 }
 defun Rt.copyWordsGo(dst : word, src : word, cnt : word) -> word {
   word i = wload(cnt, 0);
-  if (mkbool(i == 0)) {
+  if (i == 0) {
     return 0;
   } else {
     wstore(dst, i - 1, wload(src, i - 1));

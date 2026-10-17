@@ -35,10 +35,19 @@ THE JUDGMENTS ENFORCED HERE (T5 adds J7-J10):
     initializer's class must BE the declared class — the DSL's
     never-bind-across-classes discipline).  Also two class facts the
     grammar pins but the parser cannot see:
-      - an `if`/`SIf` CONDITION must be `:val` — a bare `x == 1` is a
-        WORD 0/1 and must be boxed, `mkbool(x == 1)` (RtPrims' `mkBool
-        (cmpW ..)` discipline; the runtime's jmpf tests a boolean VALUE
-        slot, so a raw word there is a runtime lie);
+      - an `if`/`SIf`/`?:` CONDITION is `:val` OR `:word`.  A bare
+        `x == 1` is a WORD 0/1 and is a legal condition AS-IS (the
+        lowering jumps on the word directly — no box, no slot); the old
+        spelling `mkbool(x == 1)` still works and lowers EXACTLY as it
+        always did (the compatibility seat).  The OLD rule — condition
+        must be `:val` — existed because the DSL's `jmpf` tested a
+        boolean VALUE slot, so a raw word there was a runtime lie; the
+        new word form tests the word directly.  The ONE word shape still
+        rejected as a condition is a word-VALUED join (`(a == b) ? 1 : 0`,
+        an `EIf`/`EIfBlock` whose branches agree on `:word`): it has no
+        bare-word test to jump on (its value is a join, which needs a
+        slot) — box it or restructure.  A `:float` word is still a reject
+        (it is not a 0/1 word);
       - a LOCAL binder may not declare `:float` — float words are not
         let-bindable (MEASURED, Lower's rawFltArg: "A Var never appears —
         recompute"), so `float x = ..;` is a J1 reject: recompute the
@@ -750,9 +759,10 @@ checkRecur ctx args =
 
 
 {-| The shared if walk (`SIf` statement and `TIf` term).  J1: the
-condition is `:val` (box word compares with `mkbool`).  The divergence
-rules around it are J7's — checked by the SIf arm of `checkStmt` and the
-`TIf` arm of `checkTerm`, not here.
+condition is `:val` OR `:word` (a word 0/1 branches directly — no
+`mkbool` needed; the old boxed spelling stays legal and byte-identical).
+The divergence rules around it are J7's — checked by the SIf arm of
+`checkStmt` and the `TIf` arm of `checkTerm`, not here.
 -}
 checkIf : Ctx -> Exp -> Block -> Maybe Block -> Result String Type
 checkIf ctx c t me =
@@ -788,10 +798,35 @@ checkCond ctx c =
         Ok TVal ->
             Ok TVal
 
+        Ok TWord ->
+            -- A WORD condition is legal only as a BARE word test (a word
+            -- producer the lowering jumps on directly).  A word-VALUED
+            -- join — `(a == b) ? 1 : 0`, an `EIf`/`EIfBlock` whose branches
+            -- agree on `:word` — is a join whose value needs a slot, so it
+            -- has no bare test; admitting it as a condition would box the
+            -- 0/1 as a NUMBER and jmpf would silently misread it.  Reject
+            -- it loudly (the same word-join shape the binder form cannot
+            -- hold — Mid has no word-valued If join).
+            case c of
+                EIf _ _ _ ->
+                    Err
+                        (ctx.key
+                            ++ ": J1: 'if' condition is a word-valued '?:' join — a bare word test is needed (box it with mkbool or restructure)"
+                        )
+
+                EIfBlock _ _ _ ->
+                    Err
+                        (ctx.key
+                            ++ ": J1: 'if' condition is a word-valued 'if' join — a bare word test is needed (box it with mkbool or restructure)"
+                        )
+
+                _ ->
+                    Ok TWord
+
         Ok cls ->
             Err
                 (ctx.key
-                    ++ ": J1: 'if' condition must be val — a word 0/1 compare must be boxed with mkbool, got "
+                    ++ ": J1: 'if' condition must be val or word — a float word cannot branch, got "
                     ++ typeStr cls
                 )
 
@@ -830,7 +865,7 @@ checkExp ctx e =
             checkSig ctx ("operator '" ++ wordBinName op ++ "'") wordBinSig [ a, b ]
 
         EWordCmp op a b ->
-            checkSig ctx ("operator '" ++ wordCmpName op ++ "' (yields a word 0/1 — box with mkbool to branch)") wordCmpSig [ a, b ]
+            checkSig ctx ("operator '" ++ wordCmpName op ++ "' (yields a word 0/1 — branch on it directly, or box with mkbool for a val)") wordCmpSig [ a, b ]
 
         EFltBin op a b ->
             checkSig ctx ("operator '" ++ fltBinName op ++ "'") fltBinSig [ a, b ]

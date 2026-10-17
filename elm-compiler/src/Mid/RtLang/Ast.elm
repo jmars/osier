@@ -383,8 +383,9 @@ transcribes):
     assigns the binder id (ids are Dict keys, never emitted — plan fact F1).
   * `EWordBin` — `+ - * / & | ^ << >> >>>` (RawBin; word,word -> word).
   * `EWordCmp` — `== != < <= > >=` (RawCmp; word,word -> WORD 0/1: a bare
-    compare is NOT a :val, it must be boxed via `mkbool` to branch — the
-    DSL's `mkBool (cmpW ...)` discipline everywhere).
+    compare IS a legal `:word` condition now (branch on it directly); box
+    via `mkbool` to make a `:val` — the OLD DSL's `mkBool (cmpW ...)`
+    discipline, which the compatibility seat still honours byte-identically).
   * `EFltBin` — `f+ f- f* f/` (RawFltBin; float,float -> float).
   * `EFltCmp` — `f< f<= f> f>= f== f!=` (RawFltCmp; float,float -> word 0/1,
     extsw-widened — Lower's RawFltCmp case).
@@ -501,7 +502,8 @@ type FltBinOp
 
 
 {-| f64 compares, 1:1 with RawFltCmpOp.  Result is a WORD 0/1 (extsw-widened
-like the word compares) — box with `mkbool` to branch.
+like the word compares) — branch on it directly, or box with `mkbool` for a
+`:val`.
 -}
 type FltCmpOp
     = FLt
@@ -836,8 +838,8 @@ these are constants rather than a per-op case — the op unions above pin the
 constructor set, these pin its class contract:
 
   * `wordBinSig` — `+ - * / & | ^ << >> >>>` : word,word -> word
-  * `wordCmpSig` — `== != < <= > >=` : word,word -> word (0/1; box via
-    mkbool to branch)
+  * `wordCmpSig` — `== != < <= > >=` : word,word -> word (0/1; branch on
+    it directly, or box via mkbool for a val)
   * `fltBinSig`  — `f+ f- f* f/` : float,float -> float
   * `fltCmpSig`  — `f< f<= f> f>= f== f!=` : float,float -> word (0/1)
   * `shortSig`   — `&& ||` : val,val -> val (ShortAnd/ShortOr verbatim)

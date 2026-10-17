@@ -1731,77 +1731,116 @@ lowerSelfTailWordArgs args i s =
                     )
 
 
-{-| The rawAbi WORD-valued tail If (stage 6 B0perf-2): the cond is the SAME
-`:val` boolean `lowerIf` branches on (`mkbool` of a word compare — one slot
-write, never an allocation), but each BRANCH is a `lowerTailWord` tail, so a
-branch that `recur`s closes with `jmp @body` and a branch that returns a word
-closes with `jmp @ret`.  Exactly ONE branch may be ret-bound (the other must
-be a self-tail): a two-word join would need a phi node and is a LOUD Err, not
-a silent wrong word at @ret.  The join combines each branch's `TailShape`
-(not a read of the block stack): a branch that is ITSELF an If has already
-reduced its own arms to one shape, so a NESTED ret-bound word survives.
+{-| The rawAbi WORD-valued tail If (stage 6 B0perf-2): each BRANCH is a
+`lowerTailWord` tail, so a branch that `recur`s closes with `jmp @body` and a
+branch that returns a word closes with `jmp @ret`.  The CONDITION is the
+shared `condTest`: a WORD cond (`i == 0`) jumps on the raw 0/1 word directly
+(`jnz` — no box, no slot); a `:val` cond (`mkbool(i == 0)`) keeps the
+byte-identical jmpf machinery.  Exactly ONE branch may be ret-bound (the
+other must be a self-tail): a two-word join would need a phi node and is a
+LOUD Err, not a silent wrong word at @ret.  The join combines each branch's
+`TailShape` (not a read of the block stack): a branch that is ITSELF an If
+has already reduced its own arms to one shape, so a NESTED ret-bound word
+survives.
 -}
 lowerIfWord : { cond : Exp, thenBranch : Exp, elseBranch : Exp, falseLabel : String, endLabel : String } -> S -> Result String ( S, Il.Arg, TailShape )
 lowerIfWord block s =
+    case condTest block.cond s of
+        WordTest ->
+            lowerIfWordWordCond block s
+
+        ValTest ->
+            let
+                ( cslot, s0 ) =
+                    freshSlot s
+            in
+            lowerVal block.cond cslot s0
+                |> Result.andThen
+                    (\s1 ->
+                        let
+                            ( tagT, s2 ) =
+                                freshTmp s1
+
+                            ( isbT, s3 ) =
+                                freshTmp s2
+
+                            ( pldT, s4 ) =
+                                freshTmp s3
+
+                            ( p8T, s5 ) =
+                                freshTmp s4
+
+                            ( iszT, s6 ) =
+                                freshTmp s5
+
+                            ( jfT, s7 ) =
+                                freshTmp s6
+
+                            ( thenLbl, s8 ) =
+                                freshLbl "then" s7
+
+                            ( elseLbl, s9 ) =
+                                freshLbl "else" s8
+                        in
+                        Ok
+                            (emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp cslot))) s9
+                                |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con tagBoolean))
+                                |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp cslot)) (Il.Con 8))
+                                |> emit (Load (Just pldT) W LoadW (Il.Tmp p8T))
+                                |> emit (Cmp (Just iszT) W Ceq (Il.Tmp pldT) (Il.Con 0))
+                                |> emit (Bin (Just jfT) W And (Il.Tmp isbT) (Il.Tmp iszT))
+                                |> closeBlock (Jnz (Il.Tmp jfT) elseLbl thenLbl)
+                            )
+                            |> Result.andThen (lowerTailWordBranches thenLbl elseLbl block)
+                    )
+
+
+{-| The WORD-cond tail If: `jnz` on the raw 0/1 word (then on nonzero, else
+on zero) — no `mkbool`, no slot, no reload.  The branches are the same
+`lowerTailWordBranches` tail join as the `:val` arm.
+-}
+lowerIfWordWordCond : { cond : Exp, thenBranch : Exp, elseBranch : Exp, falseLabel : String, endLabel : String } -> S -> Result String ( S, Il.Arg, TailShape )
+lowerIfWordWordCond block s =
     let
-        ( cslot, s0 ) =
-            freshSlot s
+        ( thenLbl, s1 ) =
+            freshLbl "then" s
+
+        ( elseLbl, s2 ) =
+            freshLbl "else" s1
     in
-    lowerVal block.cond cslot s0
+    rawWordArg block.cond s2
         |> Result.andThen
-            (\s1 ->
-                let
-                    ( tagT, s2 ) =
-                        freshTmp s1
+            (\( w, s3 ) ->
+                Ok (closeBlock (Jnz w thenLbl elseLbl) s3)
+                    |> Result.andThen (lowerTailWordBranches thenLbl elseLbl block)
+            )
 
-                    ( isbT, s3 ) =
-                        freshTmp s2
 
-                    ( pldT, s4 ) =
-                        freshTmp s3
-
-                    ( p8T, s5 ) =
-                        freshTmp s4
-
-                    ( iszT, s6 ) =
-                        freshTmp s5
-
-                    ( jfT, s7 ) =
-                        freshTmp s6
-
-                    ( thenLbl, s8 ) =
-                        freshLbl "then" s7
-
-                    ( elseLbl, s9 ) =
-                        freshLbl "else" s8
-                in
-                emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp cslot))) s9
-                    |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con tagBoolean))
-                    |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp cslot)) (Il.Con 8))
-                    |> emit (Load (Just pldT) W LoadW (Il.Tmp p8T))
-                    |> emit (Cmp (Just iszT) W Ceq (Il.Tmp pldT) (Il.Con 0))
-                    |> emit (Bin (Just jfT) W And (Il.Tmp isbT) (Il.Tmp iszT))
-                    |> closeBlock (Jnz (Il.Tmp jfT) elseLbl thenLbl)
-                    |> startBlock thenLbl
-                    |> lowerTailWord block.thenBranch
+{-| The two tail branches of a word-valued tail If, joined on `TailShape` —
+the shared tail of `lowerIfWord`'s `:val` and word arms (byte-identical to the
+pre-word-cond B0perf-2 body).
+-}
+lowerTailWordBranches : String -> String -> { cond : Exp, thenBranch : Exp, elseBranch : Exp, falseLabel : String, endLabel : String } -> S -> Result String ( S, Il.Arg, TailShape )
+lowerTailWordBranches thenLbl elseLbl block s =
+    startBlock thenLbl s
+        |> lowerTailWord block.thenBranch
+        |> Result.andThen
+            (\( s_then, _, shapeThen ) ->
+                lowerTailWord block.elseBranch (startBlock elseLbl s_then)
                     |> Result.andThen
-                        (\( s_then, _, shapeThen ) ->
-                            lowerTailWord block.elseBranch (startBlock elseLbl s_then)
-                                |> Result.andThen
-                                    (\( s_else, _, shapeElse ) ->
-                                        case ( shapeThen, shapeElse ) of
-                                            ( TailBody, TailBody ) ->
-                                                Ok ( s_else, Il.Con 0, TailBody )
+                        (\( s_else, _, shapeElse ) ->
+                            case ( shapeThen, shapeElse ) of
+                                ( TailBody, TailBody ) ->
+                                    Ok ( s_else, Il.Con 0, TailBody )
 
-                                            ( TailRet w, TailBody ) ->
-                                                Ok ( s_else, w, TailRet w )
+                                ( TailRet w, TailBody ) ->
+                                    Ok ( s_else, w, TailRet w )
 
-                                            ( TailBody, TailRet w ) ->
-                                                Ok ( s_else, w, TailRet w )
+                                ( TailBody, TailRet w ) ->
+                                    Ok ( s_else, w, TailRet w )
 
-                                            ( TailRet _, TailRet _ ) ->
-                                                Err "qbe: raw-abi defun tail If joins two word-returning branches (a word-valued join is not lowered — one branch must be a self-tail recur)"
-                                    )
+                                ( TailRet _, TailRet _ ) ->
+                                    Err "qbe: raw-abi defun tail If joins two word-returning branches (a word-valued join is not lowered — one branch must be a self-tail recur)"
                         )
             )
 
@@ -4729,75 +4768,244 @@ lowerRawCallAgg call s =
 
 -- ============================ IF ============================
 -- The VM's jmpf semantics EXACTLY (interp.zig .jmpf): false branch iff the
--- cond is a boolean with payload 0; anything else falls through.
+-- cond is a boolean with payload 0; anything else falls through.  THE
+-- WORD-COND ARM (stage 6 P1c): a condition whose class is `:word` — a raw
+-- 0/1 word — branches with a direct `jnz` on the word (no `mkbool`, no
+-- frame slot, no reload); a `:val` condition keeps the byte-identical jmpf
+-- machinery below (the compatibility seat: every existing `mkbool(..)`
+-- spelling lowers exactly as it always did).
+
+
+{-| Which lowering an `if` CONDITION takes.  `WordTest` — the cond is a raw
+0/1 word, jumped on directly.  `ValTest` — the cond is a `:val` (a boolean
+Value), tested by the jmpf machinery.  The word domain is EXACTLY the raw
+word producers (`isRawWordExp`, plus `RawFltCmp` which is a word 0/1 but not
+a raw-word BINDER) and a raw-word `Var` / `Lit (LNumber _)`.  Everything else
+— a boolean Value, a `:val` `?:` join, `ShortAnd`/`ShortOr` (the checker
+types them `:val`) — is `ValTest`.  A word-VALUED join (`If` with word
+branches) is NOT admitted as a cond by the checker (J1 rejects it), so this
+classifier never has to face it: treating such an `If` as `ValTest` would
+box its 0/1 as a NUMBER and jmpf would silently misread it — which is
+exactly why the checker refuses that shape loudly.
+-}
+type CondTest
+    = WordTest
+    | ValTest
+
+
+condTest : Exp -> S -> CondTest
+condTest exp s =
+    case exp of
+        NoTail inner ->
+            condTest inner s
+
+        Lit (LNumber _) ->
+            WordTest
+
+        Var id ->
+            if Dict.member id s.rawWord then
+                WordTest
+
+            else
+                ValTest
+
+        Unsafe node ->
+            if isWordCondNode node then
+                WordTest
+
+            else
+                ValTest
+
+        _ ->
+            ValTest
+
+
+{-| The word-producing `Unsafe` nodes that are a legal bare word CONDITION —
+`isRawWordExp`'s domain (the raw-word producers, including a rawAbi
+`RawCall`) plus `RawFltCmp` (a word 0/1 that `rawWordArg` lowers but
+`isRawWordExp` deliberately excludes — it is not a raw-word BINDER node).
+The float-word producers (`RawFltBin`/`RawIToF`/`RawLoadFlt`) are a `d`
+class, not a 0/1 word, and are absent — the checker rejects a `:float` cond.
+-}
+isWordCondNode : UnsafeNode -> Bool
+isWordCondNode node =
+    case node of
+        RawCmp _ ->
+            True
+
+        RawBin _ ->
+            True
+
+        RawUn _ ->
+            True
+
+        RawTagIs _ ->
+            True
+
+        RawPayload _ ->
+            True
+
+        RawPayload32 _ ->
+            True
+
+        RawTagOf _ ->
+            True
+
+        RawWordLoad _ ->
+            True
+
+        RawByteLoad _ ->
+            True
+
+        RawStrByte _ ->
+            True
+
+        RawVecAddr _ ->
+            True
+
+        RawAllocVector _ ->
+            True
+
+        RawAllocRaw _ ->
+            True
+
+        RawCallRaw _ ->
+            True
+
+        RawCallAgg _ ->
+            True
+
+        RawFltCmp _ ->
+            True
+
+        RawDataAddr _ ->
+            True
+
+        RawCStr _ ->
+            True
+
+        RawSym _ ->
+            True
+
+        RawCall call ->
+            Set.member call.sym MidRt.rawAbi
+
+        _ ->
+            False
 
 
 lowerIf : { cond : Exp, thenBranch : Exp, elseBranch : Exp, falseLabel : String, endLabel : String } -> Int -> Bool -> S -> Result String S
 lowerIf block dest isTail s =
+    case condTest block.cond s of
+        WordTest ->
+            lowerIfWordCond block dest isTail s
+
+        ValTest ->
+            let
+                ( cslot, s0 ) =
+                    freshSlot s
+            in
+            lowerVal block.cond cslot s0
+                |> Result.andThen
+                    (\s1 ->
+                        let
+                            ( tagT, s2 ) =
+                                freshTmp s1
+
+                            ( isbT, s3 ) =
+                                freshTmp s2
+
+                            ( pldT, s4 ) =
+                                freshTmp s3
+
+                            ( p8T, s5 ) =
+                                freshTmp s4
+
+                            ( iszT, s6 ) =
+                                freshTmp s5
+
+                            ( jfT, s7 ) =
+                                freshTmp s6
+
+                            ( thenLbl, s8 ) =
+                                freshLbl "then" s7
+
+                            ( elseLbl, s9 ) =
+                                freshLbl "else" s8
+
+                            ( joinLbl, s10 ) =
+                                if isTail then
+                                    ( "ret", s9 )
+
+                                else
+                                    freshLbl "join" s9
+                        in
+                        Ok
+                            (emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp cslot))) s10
+                                |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con tagBoolean))
+                                |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp cslot)) (Il.Con 8))
+                                |> emit (Load (Just pldT) W LoadW (Il.Tmp p8T))
+                                |> emit (Cmp (Just iszT) W Ceq (Il.Tmp pldT) (Il.Con 0))
+                                |> emit (Bin (Just jfT) W And (Il.Tmp isbT) (Il.Tmp iszT))
+                                |> closeBlock (Jnz (Il.Tmp jfT) elseLbl thenLbl)
+                            )
+                            |> Result.andThen (lowerIfBranches thenLbl elseLbl joinLbl block dest isTail)
+                    )
+
+
+{-| The WORD-cond value/tail If: `jnz` on the raw 0/1 word (then on nonzero,
+else on zero) — no `mkbool`, no slot, no reload.  The branches are the same
+`lowerIfBranches` value join as the `:val` arm, so a `?:`/`EIfBlock` whose
+CONDITION is a word but whose branches are VALUES (`(nslots < 8192) ?
+mknum(..) : mknum(0)`) lowers with a word test and value branches — the
+word cond threads through the `Let { x = If .. }` join without boxing.
+-}
+lowerIfWordCond : { cond : Exp, thenBranch : Exp, elseBranch : Exp, falseLabel : String, endLabel : String } -> Int -> Bool -> S -> Result String S
+lowerIfWordCond block dest isTail s =
     let
-        ( cslot, s0 ) =
-            freshSlot s
+        ( thenLbl, s1 ) =
+            freshLbl "then" s
+
+        ( elseLbl, s2 ) =
+            freshLbl "else" s1
+
+        ( joinLbl, s3 ) =
+            if isTail then
+                ( "ret", s2 )
+
+            else
+                freshLbl "join" s2
     in
-    lowerVal block.cond cslot s0
+    rawWordArg block.cond s3
         |> Result.andThen
-            (\s1 ->
-                let
-                    ( tagT, s2 ) =
-                        freshTmp s1
+            (\( w, s4 ) ->
+                Ok (closeBlock (Jnz w thenLbl elseLbl) s4)
+                    |> Result.andThen (lowerIfBranches thenLbl elseLbl joinLbl block dest isTail)
+            )
 
-                    ( isbT, s3 ) =
-                        freshTmp s2
 
-                    ( pldT, s4 ) =
-                        freshTmp s3
+{-| The two branches of a value/tail If — the shared tail of `lowerIf`'s
+`:val` and word arms (byte-identical to the pre-word-cond body).
+-}
+lowerIfBranches : String -> String -> String -> { cond : Exp, thenBranch : Exp, elseBranch : Exp, falseLabel : String, endLabel : String } -> Int -> Bool -> S -> Result String S
+lowerIfBranches thenLbl elseLbl joinLbl block dest isTail s =
+    startBlock thenLbl s
+        |> (\s11 ->
+                if isTail then
+                    lowerTail block.thenBranch s11
 
-                    ( p8T, s5 ) =
-                        freshTmp s4
+                else
+                    lowerVal block.thenBranch dest s11
+                        |> Result.map (jumpTo joinLbl)
+           )
+        |> Result.andThen
+            (\s12 ->
+                if isTail then
+                    lowerTail block.elseBranch (startBlock elseLbl s12)
 
-                    ( iszT, s6 ) =
-                        freshTmp s5
-
-                    ( jfT, s7 ) =
-                        freshTmp s6
-
-                    ( thenLbl, s8 ) =
-                        freshLbl "then" s7
-
-                    ( elseLbl, s9 ) =
-                        freshLbl "else" s8
-
-                    ( joinLbl, s10 ) =
-                        if isTail then
-                            ( "ret", s9 )
-
-                        else
-                            freshLbl "join" s9
-                in
-                emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp cslot))) s10
-                    |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con tagBoolean))
-                    |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp cslot)) (Il.Con 8))
-                    |> emit (Load (Just pldT) W LoadW (Il.Tmp p8T))
-                    |> emit (Cmp (Just iszT) W Ceq (Il.Tmp pldT) (Il.Con 0))
-                    |> emit (Bin (Just jfT) W And (Il.Tmp isbT) (Il.Tmp iszT))
-                    |> closeBlock (Jnz (Il.Tmp jfT) elseLbl thenLbl)
-                    |> startBlock thenLbl
-                    |> (\s11 ->
-                            if isTail then
-                                lowerTail block.thenBranch s11
-
-                            else
-                                lowerVal block.thenBranch dest s11
-                                    |> Result.map (jumpTo joinLbl)
-                       )
-                    |> Result.andThen
-                        (\s12 ->
-                            if isTail then
-                                lowerTail block.elseBranch (startBlock elseLbl s12)
-
-                            else
-                                lowerVal block.elseBranch dest (startBlock elseLbl s12)
-                                    |> Result.map (\st -> startBlock joinLbl (jumpTo joinLbl st))
-                        )
+                else
+                    lowerVal block.elseBranch dest (startBlock elseLbl s12)
+                        |> Result.map (\st -> startBlock joinLbl (jumpTo joinLbl st))
             )
 
 
