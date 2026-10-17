@@ -1404,7 +1404,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                         else
                             startBlock "body" sStart
                                 |> lowerTailWord lambda.body
-                                |> Result.map (\( s1, retWord ) -> ( s1, retWord ))
+                                |> Result.map (\( s1, retWord, _ ) -> ( s1, retWord ))
 
                     _ ->
                         startBlock "body" sStart
@@ -1563,6 +1563,19 @@ lowerTail exp s =
                 |> Result.map (jumpTo "ret")
 
 
+{-| What a rawAbi WORD tail branch DID (stage 6 B0perf-2 nested-If fix):
+`TailRet w` — the branch ended in `jmp @ret` carrying word `w`; `TailBody` —
+the branch self-tailed (`jmp @body`).  The tail-`If` join combines THESE (a
+branch that is itself an If has ALREADY reduced its own branches to one
+shape), instead of peeking at the most-recently-closed block — which, for a
+nested If, is the INNER else and hides the branch's real tail.  A
+(TailRet,TailRet) join stays a loud Err (no phi node).
+-}
+type TailShape
+    = TailRet Il.Arg
+    | TailBody
+
+
 {-| The rawAbi tail (stage 6 U2): the defun's tail VALUE is a WORD, not the
 slot-0 `:val` `lowerTail` produces.  Statements (a `Let` chain) fold in the
 same way; the leaf lowers through `rawWordArg` and the body block closes with
@@ -1570,9 +1583,11 @@ same way; the leaf lowers through `rawWordArg` and the body block closes with
 word-valued branch join (`lowerIfWord`, stage 6 B0perf-2) and a tail `App` is
 the self-tail loop (`lowerSelfTailWord`) — the two arms a word loop needs,
 mirroring `lowerTail`'s handling of the same shapes.  Every OTHER tail shape
-(an unknown App, a closure, a two-word join) stays a loud Err.
+(an unknown App, a closure, a two-word join) stays a loud Err.  The returned
+`TailShape` is the branch's OWN report (not a read of the block stack), so a
+nested word-tail If joins on what each branch actually DID.
 -}
-lowerTailWord : Exp -> S -> Result String ( S, Il.Arg )
+lowerTailWord : Exp -> S -> Result String ( S, Il.Arg, TailShape )
 lowerTailWord exp s =
     case exp of
         NoTail inner ->
@@ -1595,7 +1610,7 @@ lowerTailWord exp s =
 
         _ ->
             rawWordArg exp s
-                |> Result.map (\( a, s1 ) -> ( jumpTo "ret" s1, a ))
+                |> Result.map (\( a, s1 ) -> ( jumpTo "ret" s1, a, TailRet a ))
 
 
 {-| The self-tail App check shared by `lowerTailWord`'s App arm — the same
@@ -1629,10 +1644,10 @@ param.  A computed arg would need a register copy the word ABI cannot express
 (no phi node, and `%a0` is already defined by the signature), so it is a loud
 Err, not a silent wrong loop.
 -}
-lowerSelfTailWord : List Exp -> S -> Result String ( S, Il.Arg )
+lowerSelfTailWord : List Exp -> S -> Result String ( S, Il.Arg, TailShape )
 lowerSelfTailWord args s =
     lowerSelfTailWordArgs args 0 s
-        |> Result.map (\s1 -> ( jumpTo "body" s1, Il.Con 0 ))
+        |> Result.map (\s1 -> ( jumpTo "body" s1, Il.Con 0, TailBody ))
 
 
 lowerSelfTailWordArgs : List Exp -> Int -> S -> Result String S
@@ -1674,9 +1689,11 @@ write, never an allocation), but each BRANCH is a `lowerTailWord` tail, so a
 branch that `recur`s closes with `jmp @body` and a branch that returns a word
 closes with `jmp @ret`.  Exactly ONE branch may be ret-bound (the other must
 be a self-tail): a two-word join would need a phi node and is a LOUD Err, not
-a silent wrong word at @ret.
+a silent wrong word at @ret.  The join combines each branch's `TailShape`
+(not a read of the block stack): a branch that is ITSELF an If has already
+reduced its own arms to one shape, so a NESTED ret-bound word survives.
 -}
-lowerIfWord : { cond : Exp, thenBranch : Exp, elseBranch : Exp, falseLabel : String, endLabel : String } -> S -> Result String ( S, Il.Arg )
+lowerIfWord : { cond : Exp, thenBranch : Exp, elseBranch : Exp, falseLabel : String, endLabel : String } -> S -> Result String ( S, Il.Arg, TailShape )
 lowerIfWord block s =
     let
         ( cslot, s0 ) =
@@ -1720,39 +1737,25 @@ lowerIfWord block s =
                     |> startBlock thenLbl
                     |> lowerTailWord block.thenBranch
                     |> Result.andThen
-                        (\( s_then, w_then ) ->
+                        (\( s_then, _, shapeThen ) ->
                             lowerTailWord block.elseBranch (startBlock elseLbl s_then)
                                 |> Result.andThen
-                                    (\( s_else, w_else ) ->
-                                        case ( lastBlockJump s_then, lastBlockJump s_else ) of
-                                            ( Jmp "ret", Jmp "body" ) ->
-                                                Ok ( s_else, w_then )
+                                    (\( s_else, _, shapeElse ) ->
+                                        case ( shapeThen, shapeElse ) of
+                                            ( TailBody, TailBody ) ->
+                                                Ok ( s_else, Il.Con 0, TailBody )
 
-                                            ( Jmp "body", Jmp "ret" ) ->
-                                                Ok ( s_else, w_else )
+                                            ( TailRet w, TailBody ) ->
+                                                Ok ( s_else, w, TailRet w )
 
-                                            ( Jmp "body", Jmp "body" ) ->
-                                                Ok ( s_else, Il.Con 0 )
+                                            ( TailBody, TailRet w ) ->
+                                                Ok ( s_else, w, TailRet w )
 
-                                            ( Jmp "ret", Jmp "ret" ) ->
+                                            ( TailRet _, TailRet _ ) ->
                                                 Err "qbe: raw-abi defun tail If joins two word-returning branches (a word-valued join is not lowered — one branch must be a self-tail recur)"
-
-                                            _ ->
-                                                Err "qbe: raw-abi defun tail If branch did not close with jmp @ret or jmp @body"
                                     )
                         )
             )
-
-
--- The jump of the most-recently-closed block (the branch's final terminator).
-lastBlockJump : S -> Jump
-lastBlockJump s =
-    case s.blocks of
-        b :: _ ->
-            b.jump
-
-        [] ->
-            Fallthrough
 
 
 lowerVal : Exp -> Int -> S -> Result String S

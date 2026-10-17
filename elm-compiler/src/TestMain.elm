@@ -1211,6 +1211,24 @@ checks rt =
             Err _ ->
                 False
         )
+    , check "B0perf-2 nested word-tail If: the ret-bound arm's word SURVIVES the join end-to-end — the BLOCKER fix (the old lastBlockJump read only the INNER else's jmp @body and silently dropped %a0 to ret 0)"
+        (case lowl nestedWordTailIfSrc of
+            Ok [ fixture ] ->
+                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities [ fixture ]) [ fixture ] "Rt.die" of
+                    Ok mod ->
+                        case funcByName "q_Rt_x2edie" mod of
+                            Just f ->
+                                retBlockReturns (Il.Tmp "a0") f
+
+                            Nothing ->
+                                False
+
+                    Err _ ->
+                        False
+
+            _ ->
+                False
+        )
     , check "rawAbi VALUE-position reject (fail-before): a rawAbi Rt call in a :val tail is a loud Err, never a silent word->val reinterpretation"
         (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawAbiValueMisuse ] "Rt.bad4" of
             Err msg ->
@@ -7362,6 +7380,29 @@ hasValOrBlit blocks =
                 b.body
         )
         blocks
+
+
+{-| The nested word-tail If fixture (stage 6 B0perf-2 BLOCKER fix): a rawAbi
+WORD defun whose tail is an If whose ELSE branch is ITSELF an If — one branch
+closes TWO blocks.  The ret-bound arm returns the param word `msg` (a0); every
+other arm self-tails.  The buggy join read only the INNER else's `jmp @body`
+and silently dropped `msg` (join -> `Il.Con 0`); the fix threads the
+`TailShape`, so the ret-bound arm's word survives end-to-end to `@ret`.
+-}
+nestedWordTailIfSrc : String
+nestedWordTailIfSrc =
+    "defun Rt.die(msg : word) -> word {\n  word i = wload(msg, 4);\n  if (mkbool(i == 0)) {\n    recur(msg);\n  } else {\n    if (mkbool(i == 1)) {\n      return msg;\n    } else {\n      recur(msg);\n    }\n  }\n}\n"
+
+
+{-| Does a func's @ret block return the given word?  A rawAbi word defun's
+final block is labelled `ret` and jumps `Ret (Just <word>)` — the seat the
+nested-If fix must hand the surviving branch word to.
+-}
+retBlockReturns : Il.Arg -> Il.Func -> Bool
+retBlockReturns w f =
+    List.any
+        (\b -> b.label == "ret" && b.jump == Il.Ret (Just w))
+        f.blocks
 
 
 rawCallSyms : Exp -> List String
