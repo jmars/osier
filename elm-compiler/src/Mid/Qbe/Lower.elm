@@ -8033,6 +8033,14 @@ rtCallFuncs =
 -- args + (i-napp)*40, computed with a branchless select (no copy, no
 -- malloc).  EMITTED ONLY on the Mid route (finishModule gates it on
 -- s.midDriver) so the hatch-OFF attribution window stays byte-identical.
+--
+-- ARITY > 16: the dispatch chain ends at @arity{maxArity} (the last c{k} test
+-- falls through), so arity > maxArity would run the arity-16 block and read
+-- params past both ranges — silent corruption.  UNREACHABLE by construction:
+-- Lower rejects an arity over maxArity loudly (the same convention as
+-- Rt.callArity's table and Rt.bounceGo's 17-arm chain, whose own note at
+-- runtime.mid:4332 documents the same gap).  Kept as a stated parity gap, not
+-- a live hazard; if maxArity ever grows, this chain follows it automatically.
 rtCallTwoRange : Func
 rtCallTwoRange =
     let

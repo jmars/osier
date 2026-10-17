@@ -131,7 +131,7 @@ buffer entirely** (emit a `rt_callN` variant that blits from the two ranges
 their 2 per-call `malloc(8)` counter cells — not just the allocation.
 
 **P1d — the apply family's boxed CONDITIONS + the 640-byte `buf` FIXED
-(measured).** Two steps, each proven by ablation:
+(endpoints measured; the per-step split is NOT — see below).** Two steps:
 
 * **Step A (conditions).** `Rt.applyGo`/`Rt.applyTailGo` test six conditions
   that each `mkbool`-boxed a 0/1 word into a Value before branching.  The P1c
@@ -141,8 +141,7 @@ their 2 per-call `malloc(8)` counter cells — not just the allocation.
   `napp > 0 && env == 0` is NESTED into two word `if`s (the surface's `&&` is
   val-only); the `payload(mkbool(envlen > napp) ? … : …)`/`capslen > 0` idiom
   drops its `mkbool` wrapper — the same word-cond `?:` shape `Rt.frameBlock`
-  already used.  Ablation: apply-perf gate **3.26× → 2.91×** (ON arm 1135 →
-  1059 ms, ~-6.7%, measured back-to-back against the HEAD runtime).
+  already used.
 * **Step B (the staging copy, mechanism (ii)).** The saturated/over-applied
   arms built `buf = [captures(napp) ++ args(rem)]` and handed it to
   `Rt.callArity`/`rt_callN`, whose callee blits its params from ONE contiguous
@@ -153,12 +152,26 @@ their 2 per-call `malloc(8)` counter cells — not just the allocation.
   callee's param pointers with branchless selects — param i is
   `(i < napp) ? caps + i*40 : args + (i-napp)*40` — and passes the free-variable
   captures `caps + napp*40` as the callee's env; the arms call it directly with
-  no staging buffer at all.  `Rt.callArity` is now dead (pruned).  Ablation:
-  apply-perf gate **2.91× → 1.6×** (the copy + dispatch + malloc all gone).
+  no staging buffer at all.  `Rt.callArity` is now **dead but NOT pruned** — the
+  defun still exists (`runtime.mid:4060`) and is still EMITTED into every program
+  (`q_Rt_x2ecallArity` at `tools/bootstrap/compiler.ssa:816024`,
+  `partyapply.ssa:2442`, `mutualtail.ssa:3838`), with zero call sites: `Rt.*`
+  defuns are emitted unconditionally (no GRef pruning).  The P1d commit message
+  says "pruned"; that half is wrong (P1d review should-fix 1).
 
 **Net: apply-perf 3.6× → 1.6×** (bound 12×), leak-apply still bounded (6160 kB).
 The residual 1.6× is the per-call framing + the root push/pop + frame-enter ×3 —
 the next levers.
+
+**THE PER-STEP SPLIT IS NOT ESTABLISHED — do not quote one.** The endpoints are
+MEASURED (3.6× before the unit, at `c502dfb`; 1.6× after, at `b4fac81`).  The
+attribution *between* Step A and Step B is not: the host was at loadavg ~20 with a
+24–28% same-day A/A spread, the two steps landed together, and the ablative arms
+were **cancelled rather than measured** (the commit message and
+`handoff-perf-a4-result` both say so).  An earlier revision of this section quoted
+"3.26× → 2.91× → 1.6×"; those intermediate digits are withdrawn — a −6.7% delta
+inside a 24–28% spread is noise, and a record must not carry attribution its own
+handoff disclaims (P1d review should-fix 2).
 
 ### 2. tail — **2.5×** (2.88× manual)
 
