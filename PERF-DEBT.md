@@ -101,6 +101,35 @@ re-blits and the `mknum`/`payload` round-trips themselves are STILL PENDING** �
 are perf (the next unit will likely delete these buffers entirely), not correctness;
 this unit freed them and nothing more.
 
+**P1b Step B — the `payload(f,k)` re-blits FIXED (measured).** The "four re-blits"
+were a LOWERING artifact, not a runtime.mid one: `RawPayload`/`RawPayload32`/
+`RawTagOf`/`RawTagIs` re-`lowerVal`-ed their Value operand into a fresh slot first —
+a full 40-byte Blit — so `Rt.applyGo`'s five `payload(f,k)`/`tagis(f,6)` reads
+re-blitted the same 40-byte `f` five times per closure call.  Fixed in
+`Lower.elm` (gated on `QBE_MIDDRIVER` so the hatch-OFF attribution window stays
+byte-identical): a slot-resident binder (a `:val` param / value `let` / capture /
+scrutinee) now reads its field word straight out of its OWN slot.  Ablation
+(alternated median-of-7, 3 arms HEAD / +B / +B+A):
+mono_int 207.4→201.3 (**-3.0%**), mono_float 184.4→170.0 (**-7.8%**),
+mono_record 123.6→120.7 (**-2.4%**); apply-perf gate 4.1x→3.8x.  Corpus: 125 moved /
+34 unchanged (the compile_error groups), the same shape as every stage-6 re-freeze.
+
+**P1b Step A — the arena (scratch without malloc) TRIED and MEASURED A WASH.**
+A bump allocator in the globals block (word 14 bump pointer, 4096 words of .bss,
+libc-malloc fallback) replacing the per-call `malloc(32)`/`malloc(640)`/`malloc(32)`
+triple, via two rawAbi word helpers `Rt.applyScratch`/`Rt.applyScratchFree`.
+Ablation delta (Step B vs B+A): mono_int **+0.7%**, mono_float **-1.7%** (slower),
+mono_record **+1.6%** — all inside the same-day A/A spread (**UNDECIDED**, reverted).
+WHY: the mid-c surface's ONLY word-level conditional is the `?:` ternary, which
+boxes the condition into a `Value` (`mkbool` + slot store + reload) — the helper's
+two ternaries cost as much as the glibc tcache malloc/free they replace (P1a's leak
+fix already made those frees cheap by tcache reuse).  The arena only wins if the
+bump can be expressed as a RAW-WORD conditional, which the surface does not have.
+**The real remaining lever is mechanism (ii): drop the 640-byte `buf` staging
+buffer entirely** (emit a `rt_callN` variant that blits from the two ranges
+`(caps, napp)` + `(args, nargs)`), which removes the 2 `Rt.copyWords` calls AND
+their 2 per-call `malloc(8)` counter cells — not just the allocation.
+
 ### 2. tail — **2.5×** (2.88× manual)
 
 Measured on `mutual-tail` at 1e6 hops (constant stack, `md-mutual-tail`).

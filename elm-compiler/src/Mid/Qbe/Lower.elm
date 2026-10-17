@@ -2414,6 +2414,62 @@ midGcAllocSeat seatKey lenA s =
     )
 
 
+{-| stage 6 P1b Step B — the slot base of a Value operand, when that operand
+is ALREADY a slot-resident binder (a `:val` param, a value `let`, a capture,
+a case scrutinee).  A field projection (`payload`/`payload32`/`tagis`/
+`tagOf`) on such a binder reads its word straight out of the binder's OWN
+slot; the pre-existing shape re-`lowerVal`-ed the binder into a FRESH slot
+first, which for a `:val` is a full 40-byte Blit — so `Rt.applyGo`'s five
+`payload(f, k)`/`tagis(f, 6)` reads re-blitted the same 40-byte `f` five
+times.  rawInt/rawFloat/rawWord binders are never in `binderSlots` (a binder
+is registered in exactly ONE map — lowerLetBinder), so the membership test
+alone picks out the real Value slots.
+-}
+slotBaseOf : Exp -> S -> Maybe Il.Arg
+slotBaseOf exp s =
+    -- GATED on midDriver (stage 6 P1b Step B): the read-direct-from-slot fast
+    -- path is a lowering change, so it must not touch the OFF route's emit
+    -- (QBE_MIDDRIVER=0) — the OFF window is pinned byte-identical to the
+    -- pre-B4 baseline and the mid-c prim defuns (Rt.cons/deepEq/closure) are
+    -- emitted on BOTH routes.  midDriver=0 falls through to the pre-existing
+    -- lowerVal-then-load shape, keeping the OFF corpus byte-identical.
+    if not s.midDriver then
+        Nothing
+
+    else
+        case exp of
+            Var id ->
+                case Dict.get id s.binderSlots of
+                    Just slot ->
+                        Just (Il.Tmp (slotTmp slot))
+
+                    Nothing ->
+                        Nothing
+
+            _ ->
+                Nothing
+
+
+{-| The base address of a Value operand for a field projection: the binder's
+own slot when `slotBaseOf` matches (no copy), else a fresh slot holding the
+lowered Value (the pre-existing shape).  Exactly the semantics `lowerVal`-then-
+load had; only the redundant Blit is gone.
+-}
+rawValueBase : Exp -> S -> Result String ( Il.Arg, S )
+rawValueBase v s =
+    case slotBaseOf v s of
+        Just base ->
+            Ok ( base, s )
+
+        Nothing ->
+            let
+                ( vslot, s1 ) =
+                    freshSlot s
+            in
+            lowerVal v vslot s1
+                |> Result.map (\s2 -> ( Il.Tmp (slotTmp vslot), s2 ))
+
+
 {-| Evaluate ONE raw-word expression (a raw node argument position): a word
 constant, a raw-word binder's temp, or a word-producing raw node computed
 into a fresh temp.  Anything else — a Value binder, a value expression — is a
@@ -2466,40 +2522,32 @@ rawWordArg exp s =
                     )
 
         Unsafe (RawTagOf v) ->
-            let
-                ( vslot, s1 ) =
-                    freshSlot s
-            in
-            lowerVal v vslot s1
+            rawValueBase v s
                 |> Result.map
-                    (\s2 ->
+                    (\( base, s1 ) ->
                         let
-                            ( t, s3 ) =
-                                freshTmp s2
+                            ( t, s2 ) =
+                                freshTmp s1
                         in
-                        ( Il.Tmp t, emit (Load (Just t) W LoadW (Il.Tmp (slotTmp vslot))) s3 )
+                        ( Il.Tmp t, emit (Load (Just t) W LoadW base) s2 )
                     )
 
         Unsafe (RawPayload p) ->
-            let
-                ( vslot, s1 ) =
-                    freshSlot s
-            in
-            lowerVal p.value vslot s1
+            rawValueBase p.value s
                 |> Result.map
-                (\s2 ->
-                    let
-                        ( aT, s3 ) =
-                            freshTmp s2
+                    (\( base, s1 ) ->
+                        let
+                            ( aT, s2 ) =
+                                freshTmp s1
 
-                        ( t, s4 ) =
-                            freshTmp s3
-                    in
-                    ( Il.Tmp t
-                    , emit (Bin (Just aT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con (RtLayout.payloadWordOffset p.word))) s4
-                        |> emit (Load (Just t) L LoadL (Il.Tmp aT))
+                            ( t, s3 ) =
+                                freshTmp s2
+                        in
+                        ( Il.Tmp t
+                        , emit (Bin (Just aT) L Add base (Il.Con (RtLayout.payloadWordOffset p.word))) s3
+                            |> emit (Load (Just t) L LoadL (Il.Tmp aT))
+                        )
                     )
-                )
 
         -- ===== STEP 5 (osier-midprims): the scalar + string word producers
         Unsafe (RawPayload32 p) ->
@@ -2507,56 +2555,48 @@ rawWordArg exp s =
             -- word's low half + extsw to the l word class.  A 64-bit read
             -- here would compare garbage high halves against Zig-built
             -- Values (the extern-struct store never writes them).
-            let
-                ( vslot, s1 ) =
-                    freshSlot s
-            in
-            lowerVal p.value vslot s1
+            rawValueBase p.value s
                 |> Result.map
-                (\s2 ->
-                    let
-                        ( aT, s3 ) =
-                            freshTmp s2
+                    (\( base, s1 ) ->
+                        let
+                            ( aT, s2 ) =
+                                freshTmp s1
 
-                        ( wT, s4 ) =
-                            freshTmp s3
+                            ( wT, s3 ) =
+                                freshTmp s2
 
-                        ( t, s5 ) =
-                            freshTmp s4
-                    in
-                    ( Il.Tmp t
-                    , emit (Bin (Just aT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con (RtLayout.payloadWordOffset p.word))) s5
-                        |> emit (Load (Just wT) W LoadW (Il.Tmp aT))
-                        |> emit (Unary (Just t) L Extsw (Il.Tmp wT))
+                            ( t, s4 ) =
+                                freshTmp s3
+                        in
+                        ( Il.Tmp t
+                        , emit (Bin (Just aT) L Add base (Il.Con (RtLayout.payloadWordOffset p.word))) s4
+                            |> emit (Load (Just wT) W LoadW (Il.Tmp aT))
+                            |> emit (Unary (Just t) L Extsw (Il.Tmp wT))
+                        )
                     )
-                )
 
         Unsafe (RawTagIs ti) ->
             -- tag == n as 0/1 (w), extended to the l word class — box it with
             -- RawMkValue tag 3 to branch (`If` reads a boolean Value).
-            let
-                ( vslot, s1 ) =
-                    freshSlot s
-            in
-            lowerVal ti.value vslot s1
+            rawValueBase ti.value s
                 |> Result.map
-                (\s2 ->
-                    let
-                        ( tagT, s3 ) =
-                            freshTmp s2
+                    (\( base, s1 ) ->
+                        let
+                            ( tagT, s2 ) =
+                                freshTmp s1
 
-                        ( isT, s4 ) =
-                            freshTmp s3
+                            ( isT, s3 ) =
+                                freshTmp s2
 
-                        ( t, s5 ) =
-                            freshTmp s4
-                    in
-                    ( Il.Tmp t
-                    , emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp vslot))) s5
-                        |> emit (Cmp (Just isT) W Ceq (Il.Tmp tagT) (Il.Con ti.tag))
-                        |> emit (Unary (Just t) L Extsw (Il.Tmp isT))
+                            ( t, s4 ) =
+                                freshTmp s3
+                        in
+                        ( Il.Tmp t
+                        , emit (Load (Just tagT) W LoadW base) s4
+                            |> emit (Cmp (Just isT) W Ceq (Il.Tmp tagT) (Il.Con ti.tag))
+                            |> emit (Unary (Just t) L Extsw (Il.Tmp isT))
+                        )
                     )
-                )
 
         Unsafe (RawBin bin) ->
             -- RAdd..RDiv at `l` (i64 wrap/trunc); the Bitwise family at `w`
