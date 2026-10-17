@@ -987,6 +987,14 @@ rawcallArity =
         , ( "rt_parse_arg", 2 )
         , ( "rt_argv_install", 3 )
         , ( "rt_root_push_value_array", 2 )
+        , -- ===== the stage-6 B0 frame machinery's remaining U1b root seats
+          -- (rt_root_push_value_array is above): rt_root_watermark (the
+          -- enter-time shadow-stack depth) and rt_root_pop_to (the
+          -- popTo(wm)-NOT-pop truncation).  rt_root_push_ptr/rt_root_pop are
+          -- NOT here: the frame pair never uses them (popTo, never a bare
+          -- pop — the historical qbe-gcbug; pushArray, never pushPtr).
+        ( "rt_root_watermark", 0 )
+        , ( "rt_root_pop_to", 1 )
         , -- ===== the stage-6 A4b program/print seats (the A2 word-in/out
           -- seats the driver's tail reaches: isProgram/runProgram/print +
           -- the single-value root for the result/model slots)

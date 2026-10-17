@@ -79,13 +79,13 @@ checks rt =
       -- load of runtime.mid).  If test-run.js (or run.js) ever stops reading
       -- the file, the flag text is empty, `Rt.load` would parse nothing, and
       -- every `rtProgram`-derived row could pass VACUOUSLY over an empty
-      -- program.  This row pins the full surface program (175 defuns — the
+      -- program.  This row pins the full surface program (179 defuns — the
       -- MEASURED `defun` count of elm-compiler/runtime.mid), so an empty or
       -- truncated load turns it RED, loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (175 defuns)"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (179 defuns)"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 175
+                List.length ast == 179
 
             Err _ ->
                 False
@@ -898,7 +898,7 @@ checks rt =
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
     , check "rt program: 150 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram rt True True True) == 157
+        (List.length (rtProgram rt True True True) == 161
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
@@ -1120,15 +1120,19 @@ checks rt =
     -- calls.  A :val-shaped arg or an under-applied call here is a SILENT
     -- MISCOMPILE (the callee reads a garbage register), so the emitted
     -- shapes are pinned, not just "it links".
-    , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set)"
+    , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main + the B0 frame pair are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo/frame set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set; the frame pair is FRAME-FREE by construction — its only nodes are rawcall/raw-word loads/stores and rawAbi->rawAbi calls to the two non-allocating helpers)"
         (Rt.rawAbi
-            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main" ]
+            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock" ]
             && not (Set.member "Rt.die" rt.allocating)
             && not (Set.member "Rt.halt" rt.allocating)
             && not (Set.member "Rt.cStrEq" rt.allocating)
             && not (Set.member "Rt.cStrEqGo" rt.allocating)
             && not (Set.member "Rt.metaGo" rt.allocating)
             && not (Set.member "Rt.parseArgsGo" rt.allocating)
+            && not (Set.member "Rt.frame-enter" rt.allocating)
+            && not (Set.member "Rt.frame-leave" rt.allocating)
+            && not (Set.member "Rt.frameBlock" rt.allocating)
+            && not (Set.member "Rt.frameZero" rt.allocating)
         )
     , check "rawAbi emission shape: Rt.die (1 word param) emits (params [a0:l], ret l, frame-free alloc scratch)"
         (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.die" of
@@ -1538,9 +1542,10 @@ checks rt =
     -- pair (the routing half below turns a wrong pair into a FAIL), and a
     -- silent flip of either hatch at the B3/B4 landings.  POST-A5 the default
     -- route selects the MID DRIVER: q_Rt_x2ehalt IS emitted (the driver's
-    -- Rt.halt), rt_glob is still NOT (midGc stays OFF), and the halt arm
-    -- retargets rt_halt -> q_Rt_x2ehalt.
-    , check "U2 fix 4 — NativeMain vector pin: the selfhost hatch vector is (midGc=False, midDriver=True) = run.js's defaults, and routing THAT pair selects the default route (q_Rt_x2ehalt emitted, rt_halt retargeted, no rt_glob)"
+    -- Rt.halt), and the halt arm retargets rt_halt -> q_Rt_x2ehalt.  POST-B0
+    -- rt_glob IS emitted too (midDriver now gates the globals block — the
+    -- frame pair needs the freelist/frame_top words on this route).
+    , check "U2 fix 4 — NativeMain vector pin: the selfhost hatch vector is (midGc=False, midDriver=True) = run.js's defaults, and routing THAT pair selects the driver route (q_Rt_x2ehalt emitted, rt_halt retargeted, rt_glob emitted for the B0 frame pair)"
         (let
             ( midGc, midDriver ) =
                 defaultHatchVector
@@ -1552,7 +1557,8 @@ checks rt =
             && (case QbeLower.lower rt False False False True True True True midGc midDriver QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
                     Ok mod ->
                         List.any (\f -> f.name == "q_Rt_x2ehalt") mod.funcs
-                            && not (List.any (\d -> d.name == RtGc.globDataSym) mod.datas)
+                            && List.any (\d -> d.name == RtGc.globDataSym) mod.datas
+                            && List.any (\f -> f.name == RtGc.globAddrSym) mod.funcs
                             && (case funcByName "q_Rt_x2eemptylist" mod of
                                     Just f ->
                                         callsSym "q_Rt_x2ehalt" f && not (callsSym "rt_halt" f)
@@ -1621,6 +1627,89 @@ checks rt =
                         mod.funcs
                     && not (List.any (callsSym "rt_midgc_region") mod.funcs)
                     && not (List.any (callsSym "rt_midgc_set_region") mod.funcs)
+                    && List.any (callsSym RtGc.globAddrSym) mod.funcs
+
+            Err _ ->
+                False
+        )
+
+    -- STAGE 6 B0: the frame machinery retarget.  Under QBE_MIDDRIVER=1 the
+    -- pooled-frame prologue calls the Mid rawAbi defun q_Rt_x2eframe_x2denter
+    -- (nslots as an `l` word — the raw-word ABI, NOT the Zig seat's `w` i32)
+    -- and the return calls q_Rt_x2eframe_x2dleave; the DEFAULT route keeps
+    -- the Zig rt_frame_enter/rt_frame_leave seats.  These pins are the
+    -- byte-identity boundary for the hatch.
+    , check "B0 prologue retarget: under QBE_MIDDRIVER a framed defun enters through q_Rt_x2eframe_x2denter with an l-word nslots (Base L, not the Zig seat's Base W)"
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.cons" of
+            Ok mod ->
+                case funcByName "q_Rt_x2econs" mod of
+                    Just f ->
+                        rawAbiWordCall "q_Rt_x2eframe_x2denter" f && not (callsSym "rt_frame_enter" f)
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "B0 return retarget: under QBE_MIDDRIVER a framed defun leaves through q_Rt_x2eframe_x2dleave, not the Zig rt_frame_leave"
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.cons" of
+            Ok mod ->
+                case funcByName "q_Rt_x2econs" mod of
+                    Just f ->
+                        callsSym "q_Rt_x2eframe_x2dleave" f && not (callsSym "rt_frame_leave" f)
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "B0 default-route identity: with the hatch OFF a framed defun keeps the Zig rt_frame_enter/rt_frame_leave seats"
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.cons" of
+            Ok mod ->
+                case funcByName "q_Rt_x2econs" mod of
+                    Just f ->
+                        callsSym "rt_frame_enter" f && callsSym "rt_frame_leave" f && not (callsSym "q_Rt_x2eframe_x2denter" f) && not (callsSym "q_Rt_x2eframe_x2dleave" f)
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "B0 frame defuns are rawAbi frame-free emission: q_Rt_x2eframe_x2denter/Leave emit frame-FREE alloc8 scratch (no rt_frame_enter), l params/ret, and the frame pair + helpers are EMITTED under the hatch (driverSeeds)"
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+            Ok mod ->
+                (case funcByName "q_Rt_x2eframe_x2denter" mod of
+                    Just f ->
+                        List.map Tuple.second f.params == [ Il.Base Il.L ]
+                            && f.ret == Il.Base Il.L
+                            && not (callsSym "rt_frame_enter" f)
+                            && frameBaseIsAlloc f
+
+                    Nothing ->
+                        False
+                )
+                    && (case funcByName "q_Rt_x2eframe_x2dleave" mod of
+                            Just f ->
+                                f.params == []
+                                    && f.ret == Il.Base Il.L
+                                    && not (callsSym "rt_frame_enter" f)
+                                    && frameBaseIsAlloc f
+
+                            Nothing ->
+                                False
+                       )
+
+            Err _ ->
+                False
+        )
+    , check "B0 globals-block ungating: midDriver ON (midGc OFF) emits rt_glob + rt_glob_addr — the frames' freelist/frame_top block"
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+            Ok mod ->
+                List.any (\d -> d.name == RtGc.globDataSym) mod.datas
+                    && List.any (\f -> f.name == RtGc.globAddrSym) mod.funcs
                     && List.any (callsSym RtGc.globAddrSym) mod.funcs
 
             Err _ ->
@@ -2731,10 +2820,10 @@ checks rt =
                         False
                )
         )
-    , check "M2 header: the runtime.mid module is named Rt and its export block names the crossed keys (read-file-as-string, exec-run, main)"
+    , check "M2 header: the runtime.mid module is named Rt and its export block names the crossed keys (read-file-as-string, exec-run, main, frame-enter, frame-leave)"
         (rt.header.name == Just "Rt"
             && List.map .key rt.header.exports
-            == [ "Rt.read-file-as-string", "Rt.exec-run", "Rt.main" ]
+            == [ "Rt.read-file-as-string", "Rt.exec-run", "Rt.main", "Rt.frame-enter", "Rt.frame-leave" ]
         )
 
     -- ==================== M3: user .mid modules ====================
@@ -3690,7 +3779,9 @@ checks rt =
                       "Rt.emptylist", "Rt.envHome", "Rt.epArgvGo", "Rt.epChain", "Rt.epCmd", "Rt.epCount", "Rt.epCountStdin", "Rt.epElem",
                       "Rt.epFreeArgv", "Rt.epFreeChains", "Rt.epFreeCmd", "Rt.epFreeCmds", "Rt.epFreeRedirs", "Rt.epNum", "Rt.epPipeGo",
                       "Rt.epPipeline", "Rt.epProg", "Rt.epProgGo", "Rt.epRedir", "Rt.epRedirsGo", "Rt.epStr", "Rt.epSymIs", "Rt.epSymOf",
-                      "Rt.exec-plan", "Rt.exec-run", "Rt.execGo", "Rt.f/", "Rt.fillGo", "Rt.floatCopy", "Rt.gcAlloc", "Rt.gcAllocGo",
+                      "Rt.exec-plan", "Rt.exec-run", "Rt.execGo", "Rt.f/", "Rt.fillGo", "Rt.floatCopy",
+                      "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.frameZero",
+                      "Rt.gcAlloc", "Rt.gcAllocGo",
                       "Rt.gcDrain", "Rt.gcInit", "Rt.gcMarkPtr", "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcScanValueArray", "Rt.gcSweep",
                       "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot", "Rt.globIsDotDot",
                       "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess", "Rt.halt", "Rt.intern",
@@ -3756,7 +3847,7 @@ checks rt =
     -- is now the append below; the loud Err moved to the key-agreement walk
     -- (row C), which is the collision/rename class the orphan check guarded.
     , check
-        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the seven stage-6 keys (Rt.cStrEq, Rt.cStrEqGo, Rt.die, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ [Rt.cStrEq, Rt.cStrEqGo, Rt.die, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo] and COUNT is union+7 (so the emitted .ssa order is pinned)"
+        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the eleven stage-6 keys (Rt.cStrEq, Rt.cStrEqGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.frameZero, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ [Rt.cStrEq, Rt.cStrEqGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.frameZero, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo] and COUNT is union+11 (so the emitted .ssa order is pinned)"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -3778,7 +3869,7 @@ checks rt =
                             in
                             case Rt.spliceSurface s union of
                                 Ok spliced ->
-                                    List.map .key spliced == List.map .key union ++ [ "Rt.cStrEq", "Rt.cStrEqGo", "Rt.die", "Rt.halt", "Rt.main", "Rt.metaGo", "Rt.parseArgsGo" ]
+                                    List.map .key spliced == List.map .key union ++ [ "Rt.cStrEq", "Rt.cStrEqGo", "Rt.die", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.frameZero", "Rt.halt", "Rt.main", "Rt.metaGo", "Rt.parseArgsGo" ]
 
                                 Err _ ->
                                     False

@@ -22,6 +22,8 @@ module Rt
 export Rt.read-file-as-string : val -> val
 export Rt.exec-run : val -> val -> val -> val !io
 export Rt.main : word -> word -> word
+export Rt.frame-enter : word -> word
+export Rt.frame-leave : word
 defun Rt.getpid(dummy : val) -> val {
   return mknum(rawcall getpid());
 }
@@ -3447,6 +3449,78 @@ defun Rt.childCd(argvN : val, argcN : val, stN : val) -> val {
   call Rt.wRaw(mknum(2), mknum(cbufW + 173), mknum(1));
   return mknum(1);
 }
+// ===== the stage-6 B0 frame machinery (VERBATIM rt.zig rt_frame_enter/
+// rt_frame_leave, rt.zig:225-321).  The pooled freelist-head ARRAY lives in
+// the U1c globals block (RtGc: words 16..16+8192, indexed by nslots; bound
+// 8192, giants never pooled).  Two further globals are needed that the RtGc
+// layout comment does not name: word 1 = frame_top (the active-frame stack
+// head), word 2 = no_frame_reuse (read ONCE in Rt.main, checked here — the
+// rt.zig:240-249 discipline; a per-call getenv is the measured 8.4% trap).
+// FrameHdr is 40 bytes = 5 words: live@0 (i32), wm@1, next@2,
+// freelist_next@3, slots at +40 (word 5).  A Value is 40 bytes = 5 words, so
+// zeroing is 5 words per slot.  Zero-BEFORE-root: the reused block's stale
+// slots are memset to the number-0 Value (tag 0, payload 0) BEFORE
+// rootPushValueArray — otherwise scanValue chases freed GC pages.
+defun Rt.frameZero(base : val, n : val) -> val {
+  word b = payload(base, 0);
+  if (mkbool(payload(n, 0) == 0)) {
+    return mknil;
+  } else {
+    bytestore(b, payload(n, 0) - 1, 0);
+    recur(base, mknum(payload(n, 0) - 1));
+  }
+}
+
+defun Rt.frameBlock(nslots : word) -> word {
+  word bytes = 40 + 40 * nslots;
+  word g = payload(mkbool(nslots < 8192) ? mknum(rawcall rt_glob_addr()) : mknum(0), 0);
+  word h = payload(mkbool(g != 0) ? mknum(wload(g, 16 + nslots)) : mknum(0), 0);
+  word popped = if (mkbool(h != 0)) {
+    wstore(g, 16 + nslots, wload(h, 3));
+    return 0;
+  } else {
+    return 0;
+  };
+  word r = payload(mkbool(h != 0) ? mknum(h) : mknum(rawcall malloc(bytes)), 0);
+  return r;
+}
+
+defun Rt.frame-enter(nslots : word) -> word {
+  word hdr = call Rt.frameBlock(nslots);
+  word base = hdr + 40;
+  call Rt.frameZero(mknum(base), mknum(nslots * 40));
+  wstore(hdr, 0, nslots);
+  word wm = rawcall rt_root_watermark();
+  wstore(hdr, 1, wm);
+  word glob = rawcall rt_glob_addr();
+  wstore(hdr, 2, wload(glob, 1));
+  wstore(glob, 1, hdr);
+  rawcall rt_root_push_value_array(base, hdr);
+  return base;
+}
+
+defun Rt.frame-leave() -> word {
+  word glob = rawcall rt_glob_addr();
+  word hdr = wload(glob, 1);
+  word bad = if (mkbool(hdr == 0)) {
+    call Rt.die(rawstr("qbe-rt: rt_frame_leave with no frame"));
+    return 0;
+  } else {
+    return 0;
+  };
+  wstore(glob, 1, wload(hdr, 2));
+  rawcall rt_root_pop_to(wload(hdr, 1));
+  word n = wload(hdr, 0);
+  word pooled = if (mkbool(wload(glob, 2) != 0) || mkbool(n >= 8192)) {
+    return 0;
+  } else {
+    wstore(hdr, 3, wload(glob, 16 + n));
+    wstore(glob, 16 + n, hdr);
+    return 0;
+  };
+  return 0;
+}
+
 defun Rt.die(msg : word) -> word {
   val len = call Rt.cStrLenGo(mknum(msg), mknum(0));
   rawcall write(2, msg, payload(len, 0));
@@ -3581,6 +3655,8 @@ defun Rt.main(argc : word, argv : word) -> word {
   word arity = wload(mblk, 4);
   word brc = rawcall rt_boot();
   word bt = if (mkbool(brc != 0)) { rawcall exit(1); return 0; } else { return 0; };
+  word nreuse = rawcall getenv(rawstr("QBE_NO_REUSE"));
+  wstore(rawcall rt_glob_addr(), 2, nreuse != 0);
   word abuf = rawcall malloc(648);
   word entry_nargs = payload(mkbool(argvMode != 0) ? mknum(0) : mknum(nargs), 0);
   word pblk = rawcall malloc(24);

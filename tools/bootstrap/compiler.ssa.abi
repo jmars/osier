@@ -3,11 +3,11 @@
 # Written by tools/qbe/abi-fingerprint.sh --write; the components are
 # digests of DECLARATIONS (comments/whitespace stripped), so a comment
 # edit in rt.zig does NOT move the marker.
-seed-bytes=20279871
-seed-sha256=5521dfad3d0b4baec7a11fa70ac1c7ef7fffb5d36eee9a769c8e1d5a4030495e
+seed-bytes=20371222
+seed-sha256=7b94cf2efd2b7c6f57717473892dc38703cf0524b3b8686f5ae4d1a1bc8dacbf
 abi-marker=157ba0f7ceacdd734415b89abcb826e8fa23f7958da0fadbc5321a7f74b4a1c8
 abi-rt-exports=b0cb6e6d7d1c4b501c6fef9d00aa19cfcb5937a635eee0c18098e33a4885e7f5
 abi-rt-callN=3737e4e13ed53de03398f934b2577a42aa4c4e0da92a9813a86016b2e7db830d
 abi-rt-types=d2f38829f090edf6c7049dce01ba617c3f93f8087a513ab0b7b72c12f493869e
 abi-gc-layout=a561dff7c131d6ce286174b48df325fd82551bb12d7541a36f5bfe92f5d77c1b
-emit-inputs=b906f1b20bb5dbe21762fa7b850eedf57e4a582740ebbd893e1075644ac4b9e5
+emit-inputs=80f387bcbf106b142f629b58140c90df8caebf412492307ef3f93fc1853c8f10

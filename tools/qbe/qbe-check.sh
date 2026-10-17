@@ -988,6 +988,15 @@ run utf8-eq     Utf8.eq         tools/qbe/fixtures/utf8.elm
 # are rooted — the partial-aggregate rooting hazard, under CHURN_MB below.
 run aggchurn    AggChurn.main   tools/qbe/fixtures/aggchurn.elm
 
+# ---- stage-6 B0: the two-arity-interleaved frame-reuse probe (R2's oracle) ----
+# interleave: `small` (lean frame) and `big` (fat frame — six live conses)
+# are mutually TAIL-recursive, so the bounce loop enters/leaves their frames
+# in alternating sizes and the freelist pools BOTH.  A wrong freelist index
+# cross-reuses the two sizes -> heap corruption or a stale slot surviving a
+# collect, visible as a wrong answer under CHURN_MB.  The result is
+# deterministic (20000 cycles x 2102 = 42040000).
+run interleave Interleave.main tools/qbe/fixtures/interleave.elm
+
 # ---- stage 4: arity > 8 (the old rt_callN table stopped at rt_call8) ----
 # arity9: a 9-ary defun called DIRECTLY from the driver (rt_call9).  arity9apply:
 # apply9 add9 -> f 1..9 where f is a Var, so the 9-ary call goes through
@@ -1475,10 +1484,14 @@ fi
 # has to PROVE it acted on the code, in the .ssa.
 #
 # frame_slots <ssa>: the entry defun's frame-slot count, read off the .ssa's
-# OWN account (`call $rt_frame_enter(w N)`).  The meta table roots only the
-# requested entry, so the first one in the file is the entry's.
+# OWN account.  Two spellings: the DEFAULT (Mid-driver) route enters through
+# the stage-6 B0 frame pair `call $q_Rt_x2eframe_x2denter(l N)` (an `l`
+# word, the raw-word ABI); the ZIG route (QBE_MIDZIG=1) keeps the old
+# `call $rt_frame_enter(w N)`.  The meta table roots only the requested
+# entry, so the first one in the file is the entry's.
 frame_slots() {
-  sed -n 's/.*call \$rt_frame_enter(w \([0-9]*\)).*/\1/p' "$1" | head -1
+  sed -n -e 's/.*call \$rt_frame_enter(w \([0-9]*\)).*/\1/p' \
+         -e 's/.*call \$q_Rt_x2eframe_x2denter(l \([0-9]*\)).*/\1/p' "$1" | head -1
 }
 # rtprim_sites <ssa>: PRIM CALL sites — the tag-test fallback the Int fast
 # path exists to delete.  BOTH emission forms count (pass A's direct entries
@@ -1492,11 +1505,15 @@ rtprim_sites() {
   # (the seeded Rt program's internal edges are not the entry's prim calls —
   # without the attribution filter every seeded fixture would count every
   # prim it merely carries).  POST-FLIP the Mid form is what a DEFAULT build
-  # emits.
+  # emits.  STAGE-6 B0: the frame pair (q_Rt_x2eframe_x2denter/Leave) is the
+  # pooled-frame prologue/return, NOT a prim route — it is excluded so the
+  # pass-A rt_prim-site counters still measure ONLY prim/tag-test sites (the
+  # pair is a constant 2-per-framed-defun offset, invisible to the ON/OFF
+  # asymmetry the norep rows assert).
   awk '
     /^function / { cur=$3; sub(/^\$/,"",cur) }
     /call \$rt_prim/ { c++ }
-    /call \$q_Rt_/ && cur !~ /^q_Rt_/ { c++ }
+    /call \$q_Rt_/ && cur !~ /^q_Rt_/ && $0 !~ /q_Rt_x2eframe_x2d(enter|leave)/ { c++ }
     END { print c+0 }
   ' "$1"
 }

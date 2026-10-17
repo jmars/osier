@@ -12,13 +12,13 @@ tools/qbe-bootstrap.sh            # from a clean checkout
 
 | | |
 |---|---|
-| size | 19,132,960 bytes (18.2 MiB) of PLAIN TEXT |
-| sha256 | `86ca7ab5376971c0fe5e04c232817c2ed0dde7933f9c3d83b72814e87b2490b6` |
+| size | 20,371,222 bytes (19.4 MiB) of PLAIN TEXT |
+| sha256 | `7b94cf2efd2b7c6f57717473892dc38703cf0524b3b8686f5ae4d1a1bc8dacbf` |
 | runtime.mid | the seed now READS the runtime surface text at run time instead of baking it: `elm-compiler/runtime.mid`, sha256 `9fe19b1fa50d7d911a08da5214482c739b80b06b09f154cf06e6b2c910f9768e` (the moved home of `Mid/RtSource.elm`'s `source` blob, byte-identical after the `//` header comment). A seed-built compiler EMITS depending on this file — the fixed point now spans **seed + runtime.mid + rt.o** |
-| provenance | MEASURED: emitted once by the stock (elm+node) compiler, from the selfhost manifest `elm-compiler/selfhost/manifest.json` (sha256 `8847f96d02e97e4875de2350804fbefdbb6688af7076068c6667566d43ba4be1`), entry `NativeMain.main`. RE-FROZEN at stage-6 A5 (the driver flip: `QBE_MIDDRIVER` default ON), then at M1 (the runtime-surface move: `Mid/RtSource.elm` deleted, the text lives in `elm-compiler/runtime.mid` and is read by both drivers) — see below |
+| provenance | MEASURED: emitted once by the stock (elm+node) compiler, from the selfhost manifest `elm-compiler/selfhost/manifest.json` (sha256 `8847f96d02e97e4875de2350804fbefdbb6688af7076068c6667566d43ba4be1`), entry `NativeMain.main`. RE-FROZEN at stage-6 A5 (the driver flip: `QBE_MIDDRIVER` default ON), then at M1 (the runtime-surface move: `Mid/RtSource.elm` deleted, the text lives in `elm-compiler/runtime.mid` and is read by both drivers), then at stage-6 B0 (the frame machinery retarget: `Rt.frame-enter`/`Rt.frame-leave` as Mid rawAbi defuns, the prologue/return retarget behind `QBE_MIDDRIVER` — 125/159 corpus artifacts and the selfhost emit moved) — see below |
 | the exact emit | `tools/qbe-bootstrap.sh --freeze` (it is `node elm-compiler/run.js --batch <manifest with output=this file>`; `tools/qbe/qbe-selfhost.sh` step 1 is the same emit) |
 | compiler.js mode | DEV — `elm make` **without** `--optimize`, the mode `tools/osier-numbers.sh` builds. NOT verified for an `--optimize` build; re-freezing under release mode could land different bytes |
-| what it contains | the compiler's whole middle tier: parser, type checker, Mid, and the QBE backend itself (`Mid/Qbe/{Il,Lower,Peephole,Print}`, `Mid/QbeModule`) — 3,742 functions, 775,800 lines |
+| what it contains | the compiler's whole middle tier: parser, type checker, Mid, and the QBE backend itself (`Mid/Qbe/{Il,Lower,Peephole,Print}`, `Mid/QbeModule`) — 4,007 functions, 823,229 lines |
 
 It is a **fixed point**: the compiler this file builds (given
 `elm-compiler/runtime.mid`, the `rt.o` it links) re-emits this file, byte for
@@ -30,7 +30,7 @@ at the current HEAD (`9cab6a2`, 2026-10-16 — stage-6 A5, the driver flip); the
 three native rows are the 2026-10-10 measurement at HEAD `53f19b6` and have NOT
 been re-run (`--verify` is a ~742 s native emit, deliberately kept out of the
 loop), so their sizes are that HEAD's, not today's.
-  emit (stock, node)          13.7 s  19,132,960 B  compiler.ssa   <- this file
+  emit (stock, node)          13.3 s  20,371,222 B  compiler.ssa   <- this file
   vendor/qbe/qbe compiler.ssa 18.5 s  40,288,789 B  compiler.s            [53f19b6]
   cc compiler.s rt.o           3.2 s  14,629,880 B  the native compiler   [53f19b6]
   that compiler --ssa (QBE_HEAP_MB=8192)

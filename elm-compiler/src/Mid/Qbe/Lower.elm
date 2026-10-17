@@ -229,6 +229,7 @@ type alias PendingFunc =
     , ncaps : Int
     , pro : Pro
     , rawAbi : Bool -- RtRawWord (stage 6 U2): the prologue skips the param blits — the params live in `l` registers, not frame slots
+    , midDriver : Bool -- stage 6 B0: the prologue/return retarget to the Mid frame pair under QBE_MIDDRIVER=1
     , entryKey : Maybe String -- Just key for top-level defuns (meta table)
     }
 
@@ -1391,8 +1392,23 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                                 startBlock "ret" s1 |> closeBlock (Ret (Just rawWordResult))
 
                             _ ->
+                                -- stage 6 B0: under QBE_MIDDRIVER=1 the pooled
+                                -- frame is left through the Mid rawAbi defun
+                                -- q_Rt_x2eframe_x2dleave (0-arg, l result — the
+                                -- discarded-result call type is cosmetic: Print
+                                -- drops the AbiTy when dst is Nothing); the
+                                -- default route keeps the Zig rt_frame_leave seat.
                                 startBlock "ret" s1
-                                    |> emit (Call Nothing (Base W) (Il.Sym "rt_frame_leave") [])
+                                    |> emit
+                                        (Call Nothing (Base W)
+                                            (if sOuter.midDriver then
+                                                Il.Sym ("q_" ++ mangle "Rt.frame-leave")
+
+                                             else
+                                                Il.Sym "rt_frame_leave"
+                                            )
+                                            []
+                                        )
                                     |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
 
                     pending =
@@ -1428,6 +1444,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                         , ncaps = ncaps
                         , pro = proKind
                         , rawAbi = rawAbi
+                        , midDriver = sOuter.midDriver
                         , entryKey =
                             if entry then
                                 Just key
@@ -7220,7 +7237,7 @@ finishModule s keys =
 
         funcs =
             List.map withPrologue pendings
-                ++ (if s.midGc then
+                ++ (if s.midGc || s.midDriver then
                         globBlockFunc :: rtCallFuncs
 
                     else
@@ -7270,7 +7287,11 @@ finishModule s keys =
         List.reverse s.datas
             ++ globalDescs
             ++ metaDatas
-            ++ (if s.midGc then
+            -- stage 6 B0: the frame machinery's freelist/frame_top globals
+            -- need the block on the MIDDRIVER route too (not just MIDGC),
+            -- so the gate is `midGc || midDriver`; the DEFAULT route (both
+            -- off) still emits neither def — byte-identical.
+            ++ (if s.midGc || s.midDriver then
                     [ globBlockData ]
 
                 else
@@ -7337,7 +7358,16 @@ withPrologue pending =
         enter =
             case pending.pro of
                 PFrame ->
-                    Call (Just "f") (Base L) (Il.Sym "rt_frame_enter") [ ArgVal (Base W) (Il.Con pending.nslots) ]
+                    -- stage 6 B0: under QBE_MIDDRIVER=1 the pooled frame is
+                    -- entered through the Mid rawAbi defun q_Rt_x2eframeEnter
+                    -- (its param is `l`, the raw-word ABI — so the nslots arg
+                    -- is Base L, not the Zig seat's Base W i32); the default
+                    -- route keeps the Zig rt_frame_enter seat.
+                    if pending.midDriver then
+                        Call (Just "f") (Base L) (Il.Sym ("q_" ++ mangle "Rt.frame-enter")) [ ArgVal (Base L) (Il.Con pending.nslots) ]
+
+                    else
+                        Call (Just "f") (Base L) (Il.Sym "rt_frame_enter") [ ArgVal (Base W) (Il.Con pending.nslots) ]
 
                 PAlloc ->
                     Alloc "f" (vs * pending.nslots)

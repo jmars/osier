@@ -959,6 +959,18 @@ rtDeps =
           -- rt_print_value) or a rawstr/rawsym static def — neither is an
           -- rtDeps edge.
           ( "Rt.main", [ "Rt.cStrLenGo", "Rt.metaGo", "Rt.parseArgsGo" ] )
+        , -- ===== the stage-6 B0 frame machinery.  Rt.frame-enter's RawCall
+          -- edges are its two helpers; Rt.frame-leave's only edge is Rt.die
+          -- (the no-frame panic — Rt.die is already a driverSeed, so this is
+          -- a closure edge, not a new root).  Rt.frameBlock (malloc + the
+          -- freelist pop, all rawcall/raw-word) and Rt.frameZero (self-tail
+          -- via recur — no RawCall edge, the cStrFill/[] precedent) name no
+          -- Rt target.  The rt_root_push_value_array/rt_root_watermark/
+          -- rt_root_pop_to calls are rawcall (RawCallRaw — NOT rtDeps edges).
+          ( "Rt.frame-enter", [ "Rt.frameBlock", "Rt.frameZero" ] )
+        , ( "Rt.frame-leave", [ "Rt.die" ] )
+        , ( "Rt.frameBlock", [] )
+        , ( "Rt.frameZero", [] )
         ]
 
 
@@ -1035,6 +1047,16 @@ rawAbi =
         , "Rt.die"
         , "Rt.halt"
         , "Rt.main"
+        , -- ===== the stage-6 B0 frame machinery (raw-word ABI: word in/out).
+          -- Rt.frame-enter/leave are the raw-word pair the prologue/return
+          -- retarget reaches; Rt.frameBlock (the freelist pop-or-malloc) is a
+          -- word helper so the rawAbi->rawAbi `call` stays on the raw-word
+          -- path.  Rt.frameZero is a :val byte-loop (the zero-before-root
+          -- memset — `recur` needs the val self-tail loop, which the rawAbi
+          -- tail rejects), NOT rawAbi.
+          "Rt.frame-enter"
+        , "Rt.frame-leave"
+        , "Rt.frameBlock"
         ]
 
 
@@ -1055,6 +1077,9 @@ rawAbiArity =
         , ( "Rt.die", 1 )
         , ( "Rt.halt", 0 )
         , ( "Rt.main", 2 )
+        , ( "Rt.frame-enter", 1 )
+        , ( "Rt.frame-leave", 0 )
+        , ( "Rt.frameBlock", 1 )
         ]
 
 
@@ -1068,7 +1093,12 @@ on the same defun.
 -}
 driverSeeds : List String
 driverSeeds =
-    keepRtDependencies [ "Rt.die", "Rt.halt", "Rt.main" ]
+    -- The B0 frame pair joins the seed roots: Lower's prologue/return
+    -- retarget (QBE_MIDDRIVER=1) names q_Rt_x2eframeEnter/Leave directly, so
+    -- the census cannot seed them — the driverSeeds precedent.  Rt.die is
+    -- already a root; frame-leave's Rt.die edge is a closure edge, not a
+    -- new root.
+    keepRtDependencies [ "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave" ]
 
 
 -- THE SAFEPOINT WALKERS ARE TOP-LEVEL, NOT let-BOUND INSIDE `allocating`.
