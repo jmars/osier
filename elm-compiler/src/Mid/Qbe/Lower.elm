@@ -1437,6 +1437,15 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                                         startBlock "ret" s1 |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
 
                                     Agg "ret" ->
+                                        -- THE .tail NO-COLLECT INVARIANT (stated
+                                        -- at the Mid surface too, applyTailGo's
+                                        -- saturated arm): this @ret block copies
+                                        -- the .tail args out of the fresh allocvec
+                                        -- array, which is UNROOTED and must be read
+                                        -- EXACTLY ONCE by the callee prologue blit
+                                        -- with NO collection in between.  Do NOT
+                                        -- add a GC alloc to this block — it would
+                                        -- break the invariant silently.
                                         startBlock "ret" s1
                                             |> emit (Bin (Just "retAddr") L Add (Il.Tmp (slotTmp 0)) (Il.Con (RtLayout.payloadWordOffset 0)))
                                             |> emit (Load (Just "retBuf") L LoadL (Il.Tmp "retAddr"))
@@ -4334,6 +4343,25 @@ rtApply fslotTmp args dest isTail s =
 
             else
                 ( if isTail then "rt_apply_tail" else "rt_apply", Base W )
+
+        -- stage 6 B1fix (should-fix 1): the call site's aggregate class and
+        -- sret size are DERIVED from rawAbiRetClass — the ONE source of truth
+        -- that lowerDefun's ret type (line ~1334) and the @ret blit (line
+        -- ~1435) also read.  The old code hard-wired `Agg "ret"`/`Agg "val"`
+        -- and `rvs`/`vs` here in a second table: a 40-vs-80-byte sret drift
+        -- (someone edits rawAbiRetClass, or adds a third aggregate class)
+        -- would silently read/write 40 B of adjacent memory at the blit.
+        -- Deriving both from the one function makes that drift impossible.
+        retCls =
+            rawAbiRetClass midKey
+
+        retSize =
+            case retCls of
+                Agg "ret" ->
+                    rvs
+
+                _ ->
+                    vs
     in
     stageArgs args s
         |> Result.andThen
@@ -4349,7 +4377,7 @@ rtApply fslotTmp args dest isTail s =
                                 Ok
                                     (emit
                                         (Call (Just rp)
-                                            (Agg "ret")
+                                            retCls
                                             (Il.Sym callee)
                                             [ ArgVal (Base L) (Il.Tmp fslotTmp)
                                             , ArgVal (Base L) (Il.Tmp (slotTmp baseSlot))
@@ -4357,7 +4385,7 @@ rtApply fslotTmp args dest isTail s =
                                             ]
                                         )
                                         s2
-                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp 0)) rvs)
+                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp 0)) retSize)
                                         |> jumpTo "ret"
                                     )
 
@@ -4369,7 +4397,7 @@ rtApply fslotTmp args dest isTail s =
                                 Ok
                                     (emit
                                         (Call (Just rp)
-                                            (Agg "val")
+                                            retCls
                                             (Il.Sym callee)
                                             [ ArgVal (Base L) (Il.Tmp fslotTmp)
                                             , ArgVal (Base L) (Il.Tmp (slotTmp baseSlot))
@@ -4377,7 +4405,7 @@ rtApply fslotTmp args dest isTail s =
                                             ]
                                         )
                                         s2
-                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) retSize)
                                     )
                         )
             )

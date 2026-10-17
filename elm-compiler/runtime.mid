@@ -3873,7 +3873,12 @@ defun Rt.main(argc : word, argv : word) -> word {
 // carries the raw words: [args | nargs | live | env_root].  The PARTIAL arm's
 // env_root dance (rootPushPtr + the RE-READ-AFTER-ALLOC, the cStrFill lesson)
 // is what keeps the applied-args/captures copy pointing at the POST-scavenge
-// env array.
+// env array.  The wrapper's `f` copy (vecload(fslot,0)) is NOT rooted: sound
+// only because no collect can run between the vecload and applyGo/applyTailGo's
+// param blit (scavenges are alloc-site-triggered; malloc(32)/
+// rt_root_push_value_array/frame-pool pop are collect-free), after which `f`
+// is a ROOTED frame param whose interior pointers the collector rewrites in
+// place.
 defun Rt.apply(fslot : word, args : word, nargs : word) -> val {
   word state = rawcall malloc(32);
   wstore(state, 0, args);
@@ -3920,8 +3925,8 @@ defun Rt.applyGo(state : val, f : val) -> val {
       } else {
         return mknil;
       };
-      call Rt.copyWords(mknum(buf), mknum(env), mknum(napp * 5));
-      call Rt.copyWords(mknum(buf + napp * 40), mknum(args), mknum(rem * 5));
+      call Rt.copyWords(buf, env, napp * 5);
+      call Rt.copyWords(buf + napp * 40, args, rem * 5);
       word caps = payload(mkbool(envlen > napp) ? mknum(env + napp * 40) : mknum(0), 0);
       word disp = rawcall malloc(32);
       wstore(disp, 0, fn);
@@ -3936,15 +3941,15 @@ defun Rt.applyGo(state : val, f : val) -> val {
         rawcall rt_root_push_ptr(sp + 24);
         word envv = allocvec(total);
         word env2 = wload(sp, 3);
-        call Rt.copyWords(mknum(envv), mknum(env2), mknum(napp * 5));
-        call Rt.copyWords(mknum(envv + napp * 40), mknum(args), mknum(nargs * 5));
-        call Rt.copyWords(mknum(envv + (napp + nargs) * 40), mknum(env2 + napp * 40), mknum(capslen * 5));
+        call Rt.copyWords(envv, env2, napp * 5);
+        call Rt.copyWords(envv + napp * 40, args, nargs * 5);
+        call Rt.copyWords(envv + (napp + nargs) * 40, env2 + napp * 40, capslen * 5);
         rawcall rt_root_pop();
         return mkval(6, code, rem - nargs, envv, total);
       } else {
         word buf = rawcall malloc(640);
-        call Rt.copyWords(mknum(buf), mknum(env), mknum(napp * 5));
-        call Rt.copyWords(mknum(buf + napp * 40), mknum(args), mknum(rem * 5));
+        call Rt.copyWords(buf, env, napp * 5);
+        call Rt.copyWords(buf + napp * 40, args, rem * 5);
         word caps = payload(mkbool(envlen > napp) ? mknum(env + napp * 40) : mknum(0), 0);
         word disp = rawcall malloc(32);
         wstore(disp, 0, fn);
@@ -3976,6 +3981,16 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
     word napp = arity - rem;
     word capslen = envlen - napp;
     if (mkbool(rem == nargs)) {
+      // THE .tail NO-COLLECT INVARIANT (rt.zig:956-973, stated HERE at the
+      // Mid surface too): the .tail args live in the fresh `buf` allocvec
+      // array below, which is UNROOTED by convention.  Sound only because the
+      // callee prologue blit reads `buf` EXACTLY ONCE and NO collection runs
+      // between this allocvec and that blit — the tail from here is
+      // allocvec -> wstores (malloc, libc) -> return mknum(retbuf) -> the
+      // Lower @ret blit -> frame-leave (pool push, no collect) -> rt_bounce ->
+      // rt_callN (the generated bridge, prologue blit FIRST).  A future editor
+      // adding a GC alloc AFTER this allocvec (or in the Lower @ret block)
+      // breaks it SILENTLY — keep this arm alloc-free after the allocvec.
       word total = arity + capslen;
       wstore(sp, 3, env);
       rawcall rt_root_push_ptr(sp + 24);
@@ -3987,9 +4002,9 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
       } else {
         return mknil;
       };
-      call Rt.copyWords(mknum(buf), mknum(env2), mknum(napp * 5));
-      call Rt.copyWords(mknum(buf + napp * 40), mknum(args), mknum(rem * 5));
-      call Rt.copyWords(mknum(buf + arity * 40), mknum(env2 + napp * 40), mknum(capslen * 5));
+      call Rt.copyWords(buf, env2, napp * 5);
+      call Rt.copyWords(buf + napp * 40, args, rem * 5);
+      call Rt.copyWords(buf + arity * 40, env2 + napp * 40, capslen * 5);
       rawcall rt_root_pop();
       word e = payload(mkbool(capslen > 0) ? mknum(buf + arity * 40) : mknum(0), 0);
       word retbuf = rawcall malloc(80);
@@ -4011,9 +4026,9 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
         rawcall rt_root_push_ptr(sp + 24);
         word envv = allocvec(total);
         word env2 = wload(sp, 3);
-        call Rt.copyWords(mknum(envv), mknum(env2), mknum(napp * 5));
-        call Rt.copyWords(mknum(envv + napp * 40), mknum(args), mknum(nargs * 5));
-        call Rt.copyWords(mknum(envv + (napp + nargs) * 40), mknum(env2 + napp * 40), mknum(capslen * 5));
+        call Rt.copyWords(envv, env2, napp * 5);
+        call Rt.copyWords(envv + napp * 40, args, nargs * 5);
+        call Rt.copyWords(envv + (napp + nargs) * 40, env2 + napp * 40, capslen * 5);
         rawcall rt_root_pop();
         word retbuf = rawcall malloc(80);
         wstore(retbuf, 0, 6);
@@ -4029,8 +4044,8 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
         return mknum(retbuf);
       } else {
         word buf = rawcall malloc(640);
-        call Rt.copyWords(mknum(buf), mknum(env), mknum(napp * 5));
-        call Rt.copyWords(mknum(buf + napp * 40), mknum(args), mknum(rem * 5));
+        call Rt.copyWords(buf, env, napp * 5);
+        call Rt.copyWords(buf + napp * 40, args, rem * 5);
         word caps = payload(mkbool(envlen > napp) ? mknum(env + napp * 40) : mknum(0), 0);
         word disp = rawcall malloc(32);
         wstore(disp, 0, fn);
@@ -4151,14 +4166,34 @@ defun Rt.callArity(disp : val) -> val {
     }
   }
 }
-defun Rt.copyWords(dst : val, src : val, n : val) -> val {
-  word dstW = payload(dst, 0);
-  word srcW = payload(src, 0);
-  word nw = payload(n, 0);
-  if (mkbool(nw == 0)) {
-    return mknil;
+// THE copyWords :val->WORD FIX (stage-6 B1fix): copyWords was a :val loop — a
+// 40-byte blit + number boxing PER COPIED WORD (the B0perf-1 frameZero shape).
+// It is now
+// the rawAbi WORD defun pair Rt.copyWords/Rt.copyWordsGo: the WRAPPER is
+// (dst, src, n) -> word and owns ONE malloc(8) counter cell (libc malloc,
+// NOT a GC safepoint — the copy runs between two applyGo/applyTailGo
+// safepoints and the cell is never a Value, so nothing can collect it), the
+// LOOP is (dst, src, cnt) -> word and `recur`s on its THREE CONSTANT params
+// (dst=a0, src=a1, cnt=a2 -> jmp @body) with the decrementing count held in
+// the cell — exactly the frameZero discipline (state in memory, recur on
+// constant params).  No :val anywhere on the path, so no per-word blit.  The
+// copy is still exactly `n` words (indices n-1..0, 8 bytes each — the same
+// reverse order as before; all call sites copy into a fresh non-overlapping
+// buffer, so order is unobservable).
+defun Rt.copyWords(dst : word, src : word, n : word) -> word {
+  word cnt = rawcall malloc(8);
+  wstore(cnt, 0, n);
+  call Rt.copyWordsGo(dst, src, cnt);
+  rawcall free(cnt);
+  return 0;
+}
+defun Rt.copyWordsGo(dst : word, src : word, cnt : word) -> word {
+  word i = wload(cnt, 0);
+  if (mkbool(i == 0)) {
+    return 0;
   } else {
-    wstore(dstW, nw - 1, wload(srcW, nw - 1));
-    recur(mknum(dstW), mknum(srcW), mknum(nw - 1));
+    wstore(dst, i - 1, wload(src, i - 1));
+    wstore(cnt, 0, i - 1);
+    recur(dst, src, cnt);
   }
 }

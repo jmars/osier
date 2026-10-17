@@ -1127,19 +1127,28 @@ frame_perf_gate() {
 }
 frame_perf_gate
 
-# ---- stage 6 B1 DEBT: the apply-family perf gate ----
+# ---- stage 6 B1: the apply-family perf gate ----
 # frame_perf_gate's fib is DIRECT defun calls + frames — it never calls a
 # closure VALUE, so the apply family (Rt.apply -> applyGo -> Rt.copyWords ->
 # Rt.callArity) is OFF its hot path.  applyperf.elm makes every iteration a
 # closure-VALUE call, so the apply arms are the whole cost.  MEASURED (median
-# of 7 alternating pairs, the frame-gate method): hatch-ON ~3.7s / hatch-OFF
-# ~0.33s = ~11x at n=5e6.  The floor is Rt.copyWords' :val loop (a 40-byte
-# blit + number boxing per copied word — the B0perf-1 frameZero shape).  THE
-# BOUND IS 20x (the frame gate's ORIGINAL pre-fix bound), a CATASTROPHIC-
-# regression guard: it catches a silent 175x-class regression like the one
-# that shipped in the frame pass, while leaving the known ~11x floor for the
-# B1perf unit (which will tighten this the way B0perf-2 tightened frame-perf
-# 20x -> 2.5x).  Both arms must print the SAME n (identity: 2*n).
+# of 7 alternating pairs, the frame-gate method) at n=5e6:
+#   B1debt (copyWords :val loop):  hatch-ON ~3.83s / OFF ~0.33s = ~11.6x
+#   B1fix  (copyWords word loop):  hatch-ON ~3.16s / OFF ~0.33s = ~9.5x
+# The B1fix copyWords word loop (no per-word blit/boxing) is a REAL ~17% ON-arm
+# win, but it does NOT close the floor: the remaining ~9.5x is the apply
+# family's per-call FRAMING + :val blit overhead (frame-enter x3 per call, the
+# root push/pop, and applyGo's four 40-byte re-blits of the same `f` param to
+# read its fields) — NOT copyWords (which copies only 5 words for this fixture).
+# THE BOUND IS 12x = the measured post-fix floor 9.5x + 2.5x absolute headroom
+# (the frame gate's ~1x discipline, widened for the apply family's higher load
+# variance — the B1debt run saw a 2.2x load spike on the ON arm).  HONEST
+# ASYMMETRY: because copyWords is ~15% of the floor, the pre-fix shape (11.6x)
+# is NOT cleanly separated from the post-fix floor — a bound that FAILS the
+# pre-fix shape would be ~10.5x, inside the floor's run-to-run noise (a flake).
+# 12x keeps the gate a flake-proof catastrophic guard; closing the REAL floor
+# (the apply-family framing) is a separate B1perf unit, out of this one's scope.
+# Both arms must print the SAME n (identity: 2*n).
 apply_perf_gate() {
   local bin_on bin_off on_times=() off_times=() i s e on_med off_med ratio out_on out_off
   bin_on="$("$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/applyperf.elm ApplyPerf.main "$TMP/applyperf-on")" || {
@@ -1152,20 +1161,20 @@ apply_perf_gate() {
     echo "FAIL apply-perf: hatch-ON n(5e6)='$out_on' != hatch-OFF='$out_off' (the closure call differs across arms)"
     FAIL=1; return
   fi
-  for i in 1 2 3 4 5; do
+  for i in 1 2 3 4 5 6 7; do
     s=$(date +%s%N); timeout 60 "$bin_on" ApplyPerf.main 5000000 >/dev/null 2>&1; e=$(date +%s%N)
     on_times+=("$(( (e - s) / 1000000 ))")
     s=$(date +%s%N); timeout 60 "$bin_off" ApplyPerf.main 5000000 >/dev/null 2>&1; e=$(date +%s%N)
     off_times+=("$(( (e - s) / 1000000 ))")
   done
-  on_med="$(printf '%s\n' "${on_times[@]}" | sort -n | sed -n '3p')"
-  off_med="$(printf '%s\n' "${off_times[@]}" | sort -n | sed -n '3p')"
+  on_med="$(printf '%s\n' "${on_times[@]}" | sort -n | sed -n '4p')"
+  off_med="$(printf '%s\n' "${off_times[@]}" | sort -n | sed -n '4p')"
   ratio="$(awk -v a="$on_med" -v b="$off_med" 'BEGIN { printf "%.1f", (b > 0 ? a / b : 999) }')"
-  if awk -v a="$on_med" -v b="$off_med" 'BEGIN { exit !(a > 20 * b) }'; then
-    echo "FAIL apply-perf: hatch-ON median ${on_med}ms is ${ratio}x the hatch-OFF median ${off_med}ms — bound is 20x (the :val copyWords blit regression shape)"
+  if awk -v a="$on_med" -v b="$off_med" 'BEGIN { exit !(a > 12 * b) }'; then
+    echo "FAIL apply-perf: hatch-ON median ${on_med}ms is ${ratio}x the hatch-OFF median ${off_med}ms — bound is 12x (the :val copyWords blit regression shape)"
     FAIL=1; return
   fi
-  echo "PASS apply-perf: hatch-ON median ${on_med}ms / hatch-OFF median ${off_med}ms = ${ratio}x (bound 20x), both n(5e6)=${out_on}"
+  echo "PASS apply-perf: hatch-ON median ${on_med}ms / hatch-OFF median ${off_med}ms = ${ratio}x (bound 12x), both n(5e6)=${out_on}"
 }
 apply_perf_gate
 

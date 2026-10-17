@@ -986,7 +986,13 @@ rtDeps =
         , ( "Rt.applyGo", [ "Rt.callArity", "Rt.copyWords", "Rt.die" ] )
         , ( "Rt.applyTailGo", [ "Rt.callArity", "Rt.copyWords", "Rt.die" ] )
         , ( "Rt.callArity", [] )
-        , ( "Rt.copyWords", [] )
+        , -- Rt.copyWords is the raw-word WRAPPER (malloc the counter cell,
+          -- hand off, free); Rt.copyWordsGo is the raw-word LOOP (wload/wstore
+          -- + a self-tail recur — no RawCall edge, the cStrFill/[] precedent).
+          -- Neither reaches a GC safepoint: malloc/free are libc (RawCallRaw),
+          -- not allocvec/allocRaw, so both stay frame-free.
+          ( "Rt.copyWords", [ "Rt.copyWordsGo" ] )
+        , ( "Rt.copyWordsGo", [] )
         ]
 
 
@@ -1084,6 +1090,14 @@ rawAbi =
           -- (recur needs the val self-tail), NOT rawAbi.
           "Rt.apply"
         , "Rt.apply-tail"
+        , -- ===== the stage-6 B1fix copyWords WORD pair.  Rt.copyWords (the
+          -- wrapper: dst/src/n word params, allocates the counter cell) and
+          -- Rt.copyWordsGo (the loop: dst/src/cnt word params, self-tail
+          -- `recur` on its three constant params with the count in the cell)
+          -- are BOTH rawAbi word defuns — no :val on the copy path (the same
+          -- frameZero discipline), removing the per-word blit/boxing.
+          "Rt.copyWords"
+        , "Rt.copyWordsGo"
         ]
 
 
@@ -1113,6 +1127,11 @@ rawAbiArity =
           -- lowerDefun both check this against the actual param count.
         ( "Rt.apply", 3 )
         , ( "Rt.apply-tail", 3 )
+        , -- stage 6 B1fix: the copyWords WORD pair — the wrapper takes 3 word
+          -- params (dst, src, n), the loop 3 (dst, src, cnt).  Both checked
+          -- against the actual param count at lowerDefun (rawAbiArityAgree).
+        ( "Rt.copyWords", 3 )
+        , ( "Rt.copyWordsGo", 3 )
         ]
 
 

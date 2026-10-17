@@ -12,10 +12,10 @@ tools/qbe-bootstrap.sh            # from a clean checkout
 
 | | |
 |---|---|
-| size | 20518963 bytes (19.6 MiB) of PLAIN TEXT |
-| sha256 | `9c0c5655d65f615837f422cfb53231a4b6e9da56183289dd914ed24e075d7f68` |
-| runtime.mid | the seed now READS the runtime surface text at run time instead of baking it: `elm-compiler/runtime.mid`, sha256 `02c6c8e94761838d984d115eb6c3ac95724cf63c3424651c7d385c72da1c349a` (the moved home of `Mid/RtSource.elm`'s `source` blob, byte-identical after the `//` header comment). A seed-built compiler EMITS depending on this file — the fixed point now spans **seed + runtime.mid + rt.o** |
-| provenance | MEASURED: emitted once by the stock (elm+node) compiler, from the selfhost manifest `elm-compiler/selfhost/manifest.json` (sha256 `50168c9ca87cd056ad6d8cb1d1fddf03645d72ccac7940f2fcc218afa5362540`), entry `NativeMain.main`. RE-FROZEN at stage-6 A5 (the driver flip: `QBE_MIDDRIVER` default ON), then at M1 (the runtime-surface move: `Mid/RtSource.elm` deleted, the text lives in `elm-compiler/runtime.mid` and is read by both drivers), then at stage-6 B0 (the frame machinery retarget), then at stage-6 B1 (the apply-family retarget: `Rt.frame-enter`/`Rt.frame-leave` as Mid rawAbi defuns, the prologue/return retarget behind `QBE_MIDDRIVER` — 125/159 corpus artifacts and the selfhost emit moved), then at stage-6 B0perf (the frame-zero slot loop: `Rt.frameZero` zeroes a full 40-byte slot per iteration with a header-held raw counter — the 175x fix), then at stage-6 B0perf-2 (the frame-zero WORD loop: `Rt.frameZero` is now a rawAbi `word -> word` defun whose `recur` is an in-frame word self-tail — no `:val` on the path, the 3.4x->~1.6x close; `lowerTailWord` gains the word-If join and word self-tail arms) — see below |
+| size | 20511095 bytes (19.6 MiB) of PLAIN TEXT |
+| sha256 | `edc1ff885e038b8556da6655dcbba9a7f9c5967412aa23af00f949701b2f0bd5` |
+| runtime.mid | the seed now READS the runtime surface text at run time instead of baking it: `elm-compiler/runtime.mid`, sha256 `31fe648b40da32d1251a773c4723d0898f30162c07c05d23d380377eaa285dda` (the moved home of `Mid/RtSource.elm`'s `source` blob, byte-identical after the `//` header comment). A seed-built compiler EMITS depending on this file — the fixed point now spans **seed + runtime.mid + rt.o** |
+| provenance | MEASURED: emitted once by the stock (elm+node) compiler, from the selfhost manifest `elm-compiler/selfhost/manifest.json` (sha256 `50168c9ca87cd056ad6d8cb1d1fddf03645d72ccac7940f2fcc218afa5362540`), entry `NativeMain.main`. RE-FROZEN at stage-6 A5 (the driver flip: `QBE_MIDDRIVER` default ON), then at M1 (the runtime-surface move: `Mid/RtSource.elm` deleted, the text lives in `elm-compiler/runtime.mid` and is read by both drivers), then at stage-6 B0 (the frame machinery retarget), then at stage-6 B1 (the apply-family retarget: `Rt.frame-enter`/`Rt.frame-leave` as Mid rawAbi defuns, the prologue/return retarget behind `QBE_MIDDRIVER` — 125/159 corpus artifacts and the selfhost emit moved), then at stage-6 B0perf (the frame-zero slot loop: `Rt.frameZero` zeroes a full 40-byte slot per iteration with a header-held raw counter — the 175x fix), then at stage-6 B0perf-2 (the frame-zero WORD loop: `Rt.frameZero` is now a rawAbi `word -> word` defun whose `recur` is an in-frame word self-tail — no `:val` on the path, the 3.4x->~1.6x close; `lowerTailWord` gains the word-If join and word self-tail arms), then at stage-6 B1fix (the copyWords WORD loop: `Rt.copyWords`/`Rt.copyWordsGo` are rawAbi word defuns — no `:val` on the copy path — plus the rtApply ret-class DERIVATION from `rawAbiRetClass` and the `.tail` no-collect invariant comments) — see below |
 | the exact emit | `tools/qbe-bootstrap.sh --freeze` (it is `node elm-compiler/run.js --batch <manifest with output=this file>`; `tools/qbe/qbe-selfhost.sh` step 1 is the same emit) |
 | compiler.js mode | DEV — `elm make` **without** `--optimize`, the mode `tools/osier-numbers.sh` builds. NOT verified for an `--optimize` build; re-freezing under release mode could land different bytes |
 | what it contains | the compiler's whole middle tier: parser, type checker, Mid, and the QBE backend itself (`Mid/Qbe/{Il,Lower,Peephole,Print}`, `Mid/QbeModule`) — 4,007 functions, 829,121 lines |
@@ -26,12 +26,12 @@ byte.
 
 ```
 MEASURED (shared host, so wall clock varies).  ONLY the first row was re-measured
-at the B0perf-2 re-freeze (HEAD `7ac50da` + the uncommitted B0perf-2 work — stage-6
-B0perf-2, the frame-zero word loop); the
+at the B1fix re-freeze (HEAD `08d48f8` + the uncommitted B1fix work — stage-6
+B1fix, the copyWords word loop + ret-class derivation); the
 three native rows are the 2026-10-10 measurement at HEAD `53f19b6` and have NOT
 been re-run (`--verify` is a ~742 s native emit, deliberately kept out of the
 loop), so their sizes are that HEAD's, not today's.
-  emit (stock, node)          19.4 s  20,518,963 B  compiler.ssa   <- this file
+  emit (stock, node)          13.9 s  20,511,095 B  compiler.ssa   <- this file
   vendor/qbe/qbe compiler.ssa 18.5 s  40,288,789 B  compiler.s            [53f19b6]
   cc compiler.s rt.o           3.2 s  14,629,880 B  the native compiler   [53f19b6]
   that compiler --ssa (QBE_HEAP_MB=8192)

@@ -79,14 +79,14 @@ checks rt =
       -- load of runtime.mid).  If test-run.js (or run.js) ever stops reading
       -- the file, the flag text is empty, `Rt.load` would parse nothing, and
       -- every `rtProgram`-derived row could pass VACUOUSLY over an empty
-      -- program.  This row pins the full surface program (185 defuns — the
-      -- MEASURED `defun` count of elm-compiler/runtime.mid; 179 + the six
+      -- program.  This row pins the full surface program (186 defuns — the
+      -- MEASURED `defun` count of elm-compiler/runtime.mid; 179 + the seven
       -- stage-6 B1 apply defuns), so an empty or truncated load turns it
       -- RED, loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (185 defuns)"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (186 defuns)"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 185
+                List.length ast == 186
 
             Err _ ->
                 False
@@ -899,7 +899,7 @@ checks rt =
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
     , check "rt program: 150 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram rt True True True) == 167
+        (List.length (rtProgram rt True True True) == 168
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
@@ -1123,7 +1123,7 @@ checks rt =
     -- shapes are pinned, not just "it links".
     , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main + the B0 frame pair are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo/frame set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set; the frame pair is FRAME-FREE by construction — its only nodes are rawcall/raw-word loads/stores and rawAbi->rawAbi calls to the two non-allocating helpers)"
         (Rt.rawAbi
-            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.frameZero", "Rt.apply", "Rt.apply-tail" ]
+            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.frameZero", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo" ]
             && not (Set.member "Rt.die" rt.allocating)
             && not (Set.member "Rt.halt" rt.allocating)
             && not (Set.member "Rt.cStrEq" rt.allocating)
@@ -1207,6 +1207,37 @@ checks rt =
 
                     Nothing ->
                         False
+
+            Err _ ->
+                False
+        )
+    , check "B1fix copyWords is a rawAbi WORD pair: the WRAPPER (3 l params, ret l, frame-free) hands off to the LOOP, and the LOOP (3 l params, ret l, frame-free) is an in-frame self-tail with NO :val aggregate or 40-byte blit in its body — the per-word blit/boxing is gone (fails on the pre-fix :val copyWords, which had ret :val, a 40-byte blit, a self-CALL recur and no copyWordsGo)"
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.copyWords" of
+            Ok mod ->
+                (case funcByName "q_Rt_x2ecopyWords" mod of
+                    Just f ->
+                        List.map Tuple.second f.params
+                            == [ Il.Base Il.L, Il.Base Il.L, Il.Base Il.L ]
+                            && f.ret == Il.Base Il.L
+                            && frameBaseIsAlloc f
+                            && callsSym "q_Rt_x2ecopyWordsGo" f
+                            && not (hasValOrBlit f.blocks)
+
+                    Nothing ->
+                        False
+                )
+                    && (case funcByName "q_Rt_x2ecopyWordsGo" mod of
+                            Just f ->
+                                List.map Tuple.second f.params
+                                    == [ Il.Base Il.L, Il.Base Il.L, Il.Base Il.L ]
+                                    && f.ret == Il.Base Il.L
+                                    && frameBaseIsAlloc f
+                                    && selfLoopIsLoop ( "q_Rt_x2ecopyWordsGo", f )
+                                    && not (hasValOrBlit f.blocks)
+
+                            Nothing ->
+                                False
+                       )
 
             Err _ ->
                 False
@@ -1846,6 +1877,13 @@ checks rt =
                                 False
                        )
                     && (case funcByName "q_Rt_x2ecopyWords" mod of
+                            Just f ->
+                                frameBaseIsAlloc f && not (callsSym "rt_frame_enter" f) && callsSym "q_Rt_x2ecopyWordsGo" f
+
+                            Nothing ->
+                                False
+                       )
+                    && (case funcByName "q_Rt_x2ecopyWordsGo" mod of
                             Just f ->
                                 frameBaseIsAlloc f && not (callsSym "rt_frame_enter" f)
 
@@ -3937,7 +3975,7 @@ checks rt =
                       "Rt.bytesToStr", "Rt.c-strlen", "Rt.cStrCopyGo", "Rt.cStrEq", "Rt.cStrEqGo", "Rt.cStrEqLit", "Rt.cStrFill", "Rt.cStrLenGo",
                       "Rt.callArity", "Rt.cd", "Rt.char-code", "Rt.childBuiltin", "Rt.childCd",
                       "Rt.childPwd", "Rt.close", "Rt.closeCmdTmpfds", "Rt.closeOthersGo", "Rt.closePipeTmpfds", "Rt.closePipesGo", "Rt.closure",
-                      "Rt.closureFill", "Rt.cn", "Rt.cn2", "Rt.collect", "Rt.con", "Rt.conFill", "Rt.cons", "Rt.cons?", "Rt.copyWords", "Rt.countL", "Rt.deepEq", "Rt.dgs", "Rt.die", "Rt.echoGo", "Rt.empty?",
+                      "Rt.closureFill", "Rt.cn", "Rt.cn2", "Rt.collect", "Rt.con", "Rt.conFill", "Rt.cons", "Rt.cons?", "Rt.copyWords", "Rt.copyWordsGo", "Rt.countL", "Rt.deepEq", "Rt.dgs", "Rt.die", "Rt.echoGo", "Rt.empty?",
                       "Rt.emptylist", "Rt.envHome", "Rt.epArgvGo", "Rt.epChain", "Rt.epCmd", "Rt.epCount", "Rt.epCountStdin", "Rt.epElem",
                       "Rt.epFreeArgv", "Rt.epFreeChains", "Rt.epFreeCmd", "Rt.epFreeCmds", "Rt.epFreeRedirs", "Rt.epNum", "Rt.epPipeGo",
                       "Rt.epPipeline", "Rt.epProg", "Rt.epProgGo", "Rt.epRedir", "Rt.epRedirsGo", "Rt.epStr", "Rt.epSymIs", "Rt.epSymOf",
@@ -4009,7 +4047,7 @@ checks rt =
     -- is now the append below; the loud Err moved to the key-agreement walk
     -- (row C), which is the collision/rename class the orphan check guarded.
     , check
-        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the seventeen stage-6 keys (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.frameZero, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
+        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the eighteen stage-6 keys (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.frameZero, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -4031,7 +4069,7 @@ checks rt =
                             in
                             case Rt.spliceSurface s union of
                                 Ok spliced ->
-                                    List.map .key spliced == List.map .key union ++ [ "Rt.apply", "Rt.apply-tail", "Rt.applyGo", "Rt.applyTailGo", "Rt.cStrEq", "Rt.cStrEqGo", "Rt.callArity", "Rt.copyWords", "Rt.die", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.frameZero", "Rt.halt", "Rt.main", "Rt.metaGo", "Rt.parseArgsGo" ]
+                                    List.map .key spliced == List.map .key union ++ [ "Rt.apply", "Rt.apply-tail", "Rt.applyGo", "Rt.applyTailGo", "Rt.cStrEq", "Rt.cStrEqGo", "Rt.callArity", "Rt.copyWords", "Rt.copyWordsGo", "Rt.die", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.frameZero", "Rt.halt", "Rt.main", "Rt.metaGo", "Rt.parseArgsGo" ]
 
                                 Err _ ->
                                     False
