@@ -1180,7 +1180,7 @@ rtDeps =
         , ( "Rt.hostSpawn", [ "Rt.hostSpawnFind" ] )
         , ( "Rt.hostSpawnFromCmd", [ "Rt.hostSpawn" ] )
         , ( "Rt.hostPushFrame", [ "Rt.dieErr" ] )
-        , ( "Rt.hostDispatch", [ "Rt.hostDeactivate", "Rt.hostArity", "Rt.cStrEq", "Rt.hostCompleteOk", "Rt.hostCompleteErr", "Rt.hostPushFrame", "Rt.hostNowMs", "Rt.hostDieUnported", "Rt.hostWriteStr", "Rt.hostReadLine", "Rt.hostWriteFileLeaf", "Rt.getenv", "Rt.setenv", "Rt.cd", "Rt.getcwd", "Rt.getpid", "Rt.glob" ] )
+        , ( "Rt.hostDispatch", [ "Rt.hostDeactivate", "Rt.hostArity", "Rt.cStrEq", "Rt.hostCompleteOk", "Rt.hostCompleteErr", "Rt.hostPushFrame", "Rt.hostNowMs", "Rt.hostDieUnported", "Rt.hostWriteStr", "Rt.hostReadLine", "Rt.hostWriteFileLeaf", "Rt.hostLeafReadFile", "Rt.getenv", "Rt.setenv", "Rt.cd", "Rt.getcwd", "Rt.getpid", "Rt.glob" ] )
         , ( "Rt.hostCompleteOk", [ "Rt.hostDeliver", "Rt.hostCall" ] )
         , ( "Rt.hostCompleteErr", [ "Rt.hostDeactivate", "Rt.hostCall" ] )
         , ( "Rt.hostDeliver", [ "Rt.hostCall", "Rt.hostDeactivate", "Rt.hostSpawnFromCmd" ] )
@@ -1188,8 +1188,8 @@ rtDeps =
         , ( "Rt.hostStep", [ "Rt.hostStepGo" ] )
         , ( "Rt.hostStepAllGo", [ "Rt.hostStep" ] )
         , ( "Rt.hostStepAll", [ "Rt.hostStepAllGo" ] )
-        , ( "Rt.hostRunLoop", [ "Rt.hostStepAll", "Rt.hostFlushExpiredSleeps", "Rt.hostRunnableScan", "Rt.hostPollTimeout", "Rt.dieErr" ] )
-        , ( "Rt.hostRun", [ "Rt.hostInit", "Rt.hostSpawnFromCmd", "Rt.hostRunLoop" ] )
+        , ( "Rt.hostRunLoop", [ "Rt.hostStepAll", "Rt.hostFlushExpiredSleeps", "Rt.hostRunnableScan", "Rt.hostPollTimeout", "Rt.hostRebuildPollfds", "Rt.hostDrainReady", "Rt.dieErr" ] )
+        , ( "Rt.hostRun", [ "Rt.hostInit", "Rt.hostSpawnFromCmd", "Rt.hostRunLoop", "Rt.hostCleanupAll" ] )
         , -- ===== THE STAGE 7B SYNCHRONOUS LEAVES + THE DEADLINE MACHINERY.
           -- Same rule as the 7A block above: one entry per host defun, exactly
           -- its `call Rt.*` targets.  The prim leaves' targets (Rt.getenv/
@@ -1209,6 +1209,25 @@ rtDeps =
         , ( "Rt.hostSleepComplete", [ "Rt.hostCompleteOk" ] )
         , ( "Rt.hostFlushExpiredSleeps", [ "Rt.hostNowMs", "Rt.hostSleepScan", "Rt.hostSleepComplete" ] )
         , ( "Rt.hostRunnableScan", [] )
+        , -- ===== THE STAGE 7C fd TABLE + THE POLL.  Same rule again: one entry
+          -- per host defun, exactly its `call Rt.*` targets.  `hostSetNonblocking`
+          -- has NO Rt target at all — its one call is the DECLARED `fcntl`
+          -- (explicitly not a rawcallArity row, so not a RawCall symbol), which
+          -- is also why its edge list is empty rather than missing.
+          ( "Rt.hostRfGrow", [ "Rt.memGo" ] )
+        , ( "Rt.hostReadFileDrain", [ "Rt.hostRfGrow", "Rt.memGo" ] )
+        , ( "Rt.hostReadFileComplete", [ "Rt.memGo", "Rt.hostCompleteOk" ] )
+        , ( "Rt.hostLeafReadFile", [ "Rt.cStrFill", "Rt.hostReadFileDrain", "Rt.hostReadFileComplete", "Rt.hostCompleteOk" ] )
+        , ( "Rt.hostPollFd", [] )
+        , ( "Rt.hostAddPoll", [ "Rt.hostPollFd", "Rt.dieErr" ] )
+        , ( "Rt.hostRebuildPollGo", [ "Rt.hostAddPoll" ] )
+        , ( "Rt.hostRebuildPollfds", [ "Rt.hostRebuildPollGo" ] )
+        , ( "Rt.hostPollEntry", [ "Rt.hostReadFileDrain", "Rt.hostReadFileComplete" ] )
+        , ( "Rt.hostDrainReadyGo", [ "Rt.hostPollEntry" ] )
+        , ( "Rt.hostDrainReady", [ "Rt.hostDrainReadyGo" ] )
+        , ( "Rt.hostCleanupGo", [] )
+        , ( "Rt.hostCleanupAll", [ "Rt.hostCleanupGo" ] )
+        , ( "Rt.hostSetNonblocking", [] )
         ]
 
 

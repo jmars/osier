@@ -107,6 +107,15 @@ extern read(fd : i32, buf : ptr, count : i64) -> i64;
 extern lseek(fd : i32, offset : i64, whence : i32) -> i64;
 extern memset(dst : ptr, c : i32, n : i64) -> ptr;
 extern poll(fds : ptr, nfds : i64, timeout : i32) -> i32;
+// STAGE 7C: `fcntl` is DECLARED AS VARIADIC (plan §6 gap G-I), which is the
+// shape the FFI arc made possible and pinned (tools/qbe/fixtures/ffic-vararg.mid:
+// `=w call $fcntl(w 1, w 3, ..., l 0)` + `extsw`, i.e. two C `int` params and a
+// WORD-class variadic one).  `Rt.hostSetNonblocking` is its only caller, and
+// that seat is 7D's (the exec pipes): the readFile leaf passes O_NONBLOCK to
+// `openat` itself, exactly as the Zig does, so nothing in 7C calls this.
+// (`fcntl` was never a `rawcallArity` row, so R-08's both-tables refusal is not
+// in play here — unlike `clock_gettime`, see the host's own note.)
+extern fcntl(fd : i32, cmd : i32, ...) -> i32;
 extern _exit(code : i32) -> void;
 // THE REGION LAYOUT (midlang-u5) — the name -> word-slot table.  Before this
 // struct the offsets were `wstore(base, k, ..)` constants in Rt.gcInit and
@@ -475,11 +484,22 @@ struct HostFrame {
   kind : word;
   cont : word;
 }
+// 7C: TaskReadFile's pending effect.  `tmp` is the 65536-byte read chunk
+// (malloc'd for the effect's LIFETIME, not per read — gap G-K forbids a 64 KiB
+// Mid local, and a per-iteration malloc would churn the C heap once per 64 KiB
+// of input).  The accumulator is `bptr/blen/bcap`, the same three words 7B's
+// readLine cell carried; the block is C heap, so the collector cannot move it
+// and no raw/stale read can arise across a collect.
+//
+// THE UNION'S SIZE DOES NOT MOVE (the 7A pins still hold: sizeof(HostEv) 527
+// words, all three members at byte 4136) — `ex` is 10 words and this member is
+// now 5.
 struct HostRF {
   fd : i32;
   bptr : word;
   blen : word;
   bcap : word;
+  tmp : word;
 }
 struct HostEX {
   prog : word;
@@ -526,6 +546,43 @@ struct Host {
   clr : word;
   clrBase : word;
   evals : HostEv[128];
+  // 7C: the fd table's LIVE COUNT and the table itself (a malloc'd
+  // `struct HostPoll`).  Both append AFTER `evals` so every 7A offset — and
+  // the whole eval table's stride — is untouched; `hostInit`'s malloc literal
+  // grows by these two words and TestMain's LAYOUT PIN is the seat that says so.
+  npoll : word;
+  poll : word;
+}
+// ==================== STAGE 7C: THE fd TABLE ==============================
+// THE KERNEL'S OWN `struct pollfd` (sys/poll.h): { int fd; short events; short
+// revents; } — 8 bytes, `events`@4, `revents`@6.  THE WIDTHS ARE LOAD-BEARING
+// (plan §6 gap G-H): a word-granular layout would put `revents` at bytes 8..15
+// and the kernel would write bytes 6..7 of our cell, i.e. read back 0 forever.
+// The layout is MEASURED against the kernel itself in tools/qbe/fixtures/
+// ffim-mem.mid's arm 1 (a `storeh` at byte 4 the kernel READS, and a `revents`
+// the kernel WRITES at byte 6) — that fixture is the authority for these three
+// fields, not this comment.
+struct Pollfd {
+  fd : i32;
+  events : u16;
+  revents : u16;
+}
+// THE fd TABLE — ONE malloc'd block, three parallel 258-entry arrays, and the
+// 258 is `MAX_EVALS * 2 + 2` (effectloop.zig:102: a readFile needs one fd and
+// an exec two, plus two slack).  It is a SEPARATE allocation rather than a
+// `struct Host` field because `&lp->pollfds[0]` is NOT expressible: `&place`
+// takes a struct value or a struct FIELD, never an index (Check's J13 address
+// rule), and `poll` needs a pointer.  Holding the block's address as a `word`
+// makes the call site a plain `rawcall poll(lp->poll, lp->npoll, to)`.
+//
+// THE LIFETIME IS THE RUN (plan G-H): one malloc at hostInit, memset to zero,
+// never resized and never moved — so a pointer the kernel is given stays valid
+// across every collect (it is C-heap, invisible to the GC, which is why the
+// collector can move Values between the rebuild and the drain).
+struct HostPoll {
+  fds : Pollfd[258];
+  evals : word[258];
+  roles : word[258];
 }
 // CLOCK_MONOTONIC's timespec (glibc `struct timespec`, x86_64: 16 bytes).
 struct HostTs {
@@ -5095,6 +5152,10 @@ defun Rt.bounceGo(r : val) -> val {
 //   @1321280  clr       hostClearGo's cursor
 //   @1321288  clrBase   hostClearGo's block base
 //   @1321296  evals     HostEv[128], 4224 bytes each
+//   @1860944  npoll     7C: the fd table's live count (the kernel's nfds)
+//   @1860952  poll      7C: the malloc'd `struct HostPoll` (a raw C pointer —
+//                       a SEPARATE allocation, see the decl's comment for why
+//                       it is not a field)
 //
 // THE SLOT ARRAY (33031 slots = 2 + 128 x 258 + 5):
 //   0        model
@@ -5331,6 +5392,181 @@ defun Rt.hostReadLine(dummy : val) -> val {
   return s;
 }
 
+// --- TaskReadFile + THE ACCUMULATOR (stage 7C) --------------------------
+// The Zig's leafReadFile/readFileDrain/readFileComplete (effectloop.zig:517-555)
+// — the FIRST SUSPENDING leaf that owns an fd, and the reason the poll table
+// exists at all.
+//
+// A REGULAR FILE DRAINS TO EOF SYNCHRONOUSLY (read() on a regular file never
+// returns EAGAIN), so this leaf normally finishes inside its own dispatch with
+// no poll — and THAT is what lets a readFile OVERTAKE a concurrently suspended
+// exec (the concurrency proof, `asyncorder`).  The SUSPENDED arm is a pipe, a
+// fifo or a terminal: the fd joins the table in hostRebuildPollfds, the poll
+// blocks on it, and hostDrainReady re-enters the drain.
+//
+// THE ACCUMULATOR IS A C-HEAP BLOCK, NEVER A VALUE (7B's readLine argument, and
+// for the same reason): the collector cannot see it, so it cannot move it, so
+// the whole loop is free of the raw/stale class.  Its three words live in the
+// eval's own effect (`rf.bptr/blen/bcap`), so the drain needs no cell and no
+// extra parameter — a `call Rt.*` carries at most THREE args.
+//
+// THE GROW, THE FREE ORDER AND THE OOM ARM ARE 7B's DOUBLE-FREE CLASS
+// (handoff-s7-7b-result): `hostRfGrow` FREES the old block, so every caller
+// re-reads `bptr` FROM THE EFFECT and never from a local taken before the
+// grow, and nothing reads a block after freeing it.  `free(0)` is a documented
+// no-op, which is what lets the first-grow path (bptr == 0) share the code.
+defun Rt.hostRfGrow(hN : val, iN : val, needN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  word need = payload(needN, 0);
+  *Host lp = [*Host](h);
+  if (mkbool(need <= lp->evals[i].rf.bcap)) {
+    return mknil;                          // already big enough: no alloc
+  }
+  word ncap = 65536;                       // the first capacity: one read chunk
+  while (ncap < lp->evals[i].rf.bcap) {
+    ncap = ncap * 2;
+  }
+  while (ncap < need) {
+    ncap = ncap * 2;
+  }
+  word nbuf = rawcall malloc(ncap);
+  if (mkbool(nbuf == 0)) {
+    return mknil;                          // OOM: bcap is UNCHANGED, and that
+  }                                        // is the caller's failure signal
+  word old = lp->evals[i].rf.bptr;
+  word len = lp->evals[i].rf.blen;
+  *CopyDesc d = rawcall malloc(24);
+  d->src = old;
+  d->dst = nbuf;
+  d->n = len;                              // len == 0 on the first grow, and
+  call Rt.memGo(mknum([word](d)), mknum(0)); // memGo copies nothing for n == 0
+  rawcall free(d);
+  rawcall free(old);                       // free(0) on the first grow: a no-op
+  lp->evals[i].rf.bptr = nbuf;
+  lp->evals[i].rf.bcap = ncap;
+  return mknil;
+}
+
+// ONE read, then either append-and-loop (self-tail) or FINISH.  Returns
+// 0 = STILL PENDING (the eval suspends), 1 = COMPLETE (EOF, a real error, or
+// an OOM in the accumulator).
+//
+// THE WOULDBLOCK DISTINCTION IS THE POINT (plan §7.3's 7C risk): `read`
+// returning -1 with errno EAGAIN (11) is NOT an error — it is "no bytes yet,
+// poll again" — while any other errno completes with what has been gathered
+// (the Zig's `return true`).  EINTR (4) is retried in place, which is what
+// std.posix.read does internally in the Zig.
+//
+// THE ERRNO READ IS THE PRE-EXISTING ONE-BYTE `byteload(__errno_location(), 0)`
+// (the cffi plan's `errno < 256` shape, 7B's EINTR arm beside it).  It is
+// correct on Linux/x86_64 and is deliberately NOT re-spelled here — a widened
+// read is its own finding, not this unit's.
+//
+// EACH CONDITIONAL'S BRANCH DIVERGES (return/recur), which is what makes the
+// loop expressible at all: a mid-block `if` with two falling-through branches
+// is J7's loud reject.
+defun Rt.hostReadFileDrain(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  word n = rawcall read(lp->evals[i].rf.fd, lp->evals[i].rf.tmp, 65536);
+  if (mkbool(n == 0)) {
+    return mknum(1);                       // EOF: complete with what we have
+  }
+  if (mkbool(n < 0)) {
+    word e = byteload(rawcall __errno_location(), 0);
+    if (mkbool(e == 4)) {
+      recur(hN, iN);                       // EINTR: retry the same read
+    } else {
+      if (mkbool(e == 11)) {
+        return mknum(0);                   // EAGAIN: STILL PENDING, poll again
+      } else {
+        return mknum(1);                   // a real error: complete as-is
+      }
+    }
+  }
+  word need = lp->evals[i].rf.blen + n;
+  call Rt.hostRfGrow(hN, iN, mknum(need));
+  if (mkbool(lp->evals[i].rf.bcap < need)) {
+    return mknum(1);                       // OOM: complete with what we have
+  }
+  *CopyDesc d = rawcall malloc(24);
+  d->src = lp->evals[i].rf.tmp;
+  d->dst = lp->evals[i].rf.bptr + lp->evals[i].rf.blen;
+  d->n = n;
+  call Rt.memGo(mknum([word](d)), mknum(0));
+  rawcall free(d);
+  lp->evals[i].rf.blen = need;
+  recur(hN, iN);
+}
+
+// The Zig's readFileComplete: close the fd, build the String out of the
+// accumulator, free the accumulator AND the read chunk, clear the effect and
+// complete SUCCESS.
+//
+// THE STRING IS BUILT BEFORE THE FREE and out of `bptr` read ONCE — the count
+// is captured before the copy for the same reason (a free is not an alloc, but
+// the discipline that keeps the 7B double-free out is "read the effect's words,
+// use them, free last").
+defun Rt.hostReadFileComplete(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  word len = lp->evals[i].rf.blen;
+  word src = lp->evals[i].rf.bptr;
+  word dst = allocraw(len + 1);
+  *CopyDesc d = rawcall malloc(24);
+  d->src = src;
+  d->dst = dst;
+  d->n = len;                              // an empty file copies nothing
+  call Rt.memGo(mknum([word](d)), mknum(0));
+  rawcall free(d);
+  bytestore(dst, len, 0);
+  val s = mkstr(dst, len);
+  rawcall close(lp->evals[i].rf.fd);       // the leaf opened it; it is valid
+  rawcall free(src);
+  rawcall free(lp->evals[i].rf.tmp);
+  lp->evals[i].rf.fd = -1;
+  lp->evals[i].rf.bptr = 0;
+  lp->evals[i].rf.blen = 0;
+  lp->evals[i].rf.bcap = 0;
+  lp->evals[i].rf.tmp = 0;
+  lp->evals[i].etag = 0;
+  vecstore(h + 8 + ((lp->evals[i].base + 1) * 40), 0, s);
+  return call Rt.hostCompleteOk(hN, iN);
+}
+
+// TaskReadFile — the leaf.  `openat(O_NONBLOCK)` (no CREAT, mode 0 — the Zig's
+// `.NONBLOCK` set), drain, and either complete or SUSPEND with etag = 1.
+//
+// AN OPEN FAILURE COMPLETES SUCCESS WITH THE EMPTY STRING (M6 parity, the
+// Zig's `catch` arm; `nativeio`'s sibling contract is the same for write).
+defun Rt.hostLeafReadFile(hN : val, iN : val, pathN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  word len = len32(pathN);
+  word buf = allocraw(len + 2);
+  call Rt.cStrFill(mknum(buf), pathN, mknum(0));
+  word fd = rawcall openat(-100, buf, 2048, 0);   // O_RDONLY|O_NONBLOCK
+  if (mkbool(fd < 0)) {
+    val empty = "";
+    vecstore(h + 8 + ((lp->evals[i].base + 1) * 40), 0, empty);
+    return call Rt.hostCompleteOk(hN, iN);
+  }
+  lp->evals[i].rf.fd = fd;
+  lp->evals[i].rf.bptr = 0;
+  lp->evals[i].rf.blen = 0;
+  lp->evals[i].rf.bcap = 0;
+  lp->evals[i].rf.tmp = rawcall malloc(65536);
+  lp->evals[i].etag = 1;                   // the ladder's order: 1 readFile
+  if (payload(call Rt.hostReadFileDrain(hN, iN), 0) == 0) {
+    return mknil;                          // EAGAIN: the poll resumes it
+  }
+  return call Rt.hostReadFileComplete(hN, iN);
+}
+
 // --- the DEADLINE machinery (TaskSleep) ---------------------------------
 // A sleeping evaluation stays ACTIVE with `etag = 3` and an ABSOLUTE
 // monotonic deadline in `sl.deadline`; `hostStepGo`/`hostStepAllGo` skip any
@@ -5455,6 +5691,210 @@ defun Rt.hostRunnableScan(hN : val, iN : val) -> val {
   }
 }
 
+// ============== STAGE 7C: THE fd TABLE + THE POLL =========================
+// The Zig's rebuildPollfds/addPoll/drainReady/cleanupAll (effectloop.zig:991,
+// 1010, 1081, 1115), ported for the one effect 7C makes suspendable
+// (readFile); the exec roles are 7D's and are already threaded through the
+// table so that unit only fills its arms in.
+//
+// THE LIFETIME (plan §6 gap G-H): ONE malloc'd `struct HostPoll` at hostInit,
+// its address in `lp->poll`, its 258 `struct pollfd` cells given to the kernel
+// every iteration.  Nothing reallocs it and nothing moves it, so the pointer
+// handed to poll() is the same object for the whole run, and a collect between
+// the rebuild and the drain can move every VALUE in the machine without
+// touching one byte of what the kernel wrote.
+//
+// THREE PARALLEL ARRAYS, NOT AN ARRAY OF STRUCTS WITH A POINTER IN IT: `fds` is
+// the C layout the kernel demands, `evals[k]` is the evaluation that owns fd k
+// and `roles[k]` says what a readiness event on it MEANS.  The role is
+// 1 readFile / 2 exec-stdout / 3 exec-stderr — the Zig's PollRole enum order.
+//
+// THE nfds INVARIANT: `lp->npoll` is written in exactly TWO places — set to 0
+// by hostRebuildPollfds, incremented by hostAddPoll — and the value handed to
+// poll() is read ONCE, in the same statement, from the field the scan just
+// filled.  There is no other reader and no other writer, so "nfds matches the
+// number of registered fds" is a structural property of the two defuns rather
+// than a number two places agree to compute (TestMain pins both).
+defun Rt.hostPollFd(hN : val, iN : val, roleN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  word role = payload(roleN, 0);
+  *Host lp = [*Host](h);
+  if (role == 1) {
+    return mknum(lp->evals[i].rf.fd);      // readFile: one fd
+  }
+  if (role == 2) {
+    return mknum(lp->evals[i].ex.outfd);   // exec stdout (7D)
+  }
+  if (role == 3) {
+    return mknum(lp->evals[i].ex.errfd);   // exec stderr (7D)
+  }
+  return mknum(-1);
+}
+defun Rt.hostAddPoll(hN : val, iN : val, roleN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  word role = payload(roleN, 0);
+  *Host lp = [*Host](h);
+  *HostPoll pp = [*HostPoll](lp->poll);
+  word fd = payload(call Rt.hostPollFd(hN, iN, roleN), 0);
+  if (mkbool(fd < 0)) {
+    return mknil;                          // no fd for this role: the Zig's
+  }                                        // `if (fd >= 0)` guard, ONE place
+  word n = lp->npoll;
+  if (mkbool(n >= 258)) {
+    call Rt.dieErr(rawstr("host: more than 258 pollfds (MAX_EVALS * 2 + 2)"));
+    return mknil;
+  }
+  pp->fds[n].fd = fd;
+  pp->fds[n].events = 1;                   // POLLIN
+  pp->fds[n].revents = 0;                  // the kernel's slot, zeroed for
+  pp->evals[n] = i;                        // every rebuild
+  pp->roles[n] = role;
+  lp->npoll = n + 1;
+  return mknil;
+}
+// ONE eval -> its poll entries, selected by its OWN etag (the Zig's switch on
+// the effect).  A runnable (0) or sleeping (3) eval registers NOTHING: a sleep
+// bounds the TIMEOUT (hostPollTimeout) rather than the fd set.
+defun Rt.hostRebuildPollGo(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  if (i >= lp->nevals) {
+    return mknil;
+  }
+  if (lp->evals[i].active == 0) {
+    recur(hN, mknum(i + 1));
+  }
+  if (lp->evals[i].etag == 1) {
+    call Rt.hostAddPoll(hN, mknum(i), mknum(1));
+    recur(hN, mknum(i + 1));
+  }
+  if (lp->evals[i].etag == 2) {
+    call Rt.hostAddPoll(hN, mknum(i), mknum(2));
+    call Rt.hostAddPoll(hN, mknum(i), mknum(3));
+    recur(hN, mknum(i + 1));
+  }
+  recur(hN, mknum(i + 1));
+}
+// The scan.  `npoll = 0` FIRST, then every eval appends — so the table is
+// exactly the live fds after the pass, never the union with the previous pass
+// (a stale entry would let the kernel report readiness on an fd the machine has
+// already closed and reused).
+//
+// THE CURSOR IS A PARAMETER, not `lp->cur`: hostStepAll owns `cur` for its own
+// pass and this scan must not disturb it.
+defun Rt.hostRebuildPollfds(hN : val) -> val {
+  word h = payload(hN, 0);
+  *Host lp = [*Host](h);
+  lp->npoll = 0;
+  return call Rt.hostRebuildPollGo(hN, mknum(0));
+}
+
+// ONE ready table entry.  Every guard is an early return (J7's divergence rule)
+// and each is load-bearing:
+//   * revents == 0 — the entry is not ready (or only POLLHUP/POLLNVAL-free);
+//   * role != 1 — the exec roles are 7D's, and NOTHING sets etag = 2 yet;
+//   * the eval is no longer active, or is no longer THIS effect — the table is
+//     one poll old, and a completion earlier in this same pass can free a slot
+//     and respawn a different evaluation into it.  The `etag` test is stricter
+//     than the Zig's bare `active` test and costs one load.
+// THE DRAIN IS RE-ENTERED FROM THE TABLE, NOT FROM A SAVED POINTER: the fd and
+// the accumulator are read out of the eval's effect words, so nothing here can
+// hold a pointer across the completion's allocations.
+defun Rt.hostPollEntry(hN : val, kN : val) -> val {
+  word h = payload(hN, 0);
+  word k = payload(kN, 0);
+  *Host lp = [*Host](h);
+  *HostPoll pp = [*HostPoll](lp->poll);
+  if (pp->fds[k].revents == 0) {
+    return mknil;
+  }
+  word ev = pp->evals[k];
+  word role = pp->roles[k];
+  if (role != 1) {
+    return mknil;
+  }
+  if (lp->evals[ev].active == 0) {
+    return mknil;
+  }
+  if (lp->evals[ev].etag != 1) {
+    return mknil;
+  }
+  if (payload(call Rt.hostReadFileDrain(hN, mknum(ev)), 0) == 0) {
+    return mknil;                          // EAGAIN again: still suspended
+  }
+  return call Rt.hostReadFileComplete(hN, mknum(ev));
+}
+defun Rt.hostDrainReadyGo(hN : val, iN : val, nN : val) -> val {
+  word i = payload(iN, 0);
+  if (mkbool(i >= payload(nN, 0))) {
+    return mknil;
+  }
+  call Rt.hostPollEntry(hN, mknum(i));
+  recur(hN, mknum(i + 1), nN);
+}
+// The drain pass.  `n` is the SNAPSHOT of npoll the caller took (the Zig's
+// `const n = self.npoll`): an eval that completes and respawns does not change
+// this pass's bound — the next rebuild re-derives the table.
+defun Rt.hostDrainReady(hN : val) -> val {
+  *Host lp = [*Host](payload(hN, 0));
+  return call Rt.hostDrainReadyGo(hN, mknum(0), mknum(lp->npoll));
+}
+
+// The Zig's cleanupAll (`defer loop.cleanupAll()`, LIFO with the root pop):
+// close every fd a SUSPENDED eval still holds and free its two C-heap blocks.
+// It is LOAD-BEARING exactly when the loop exits with work pending — TaskQuit
+// finishing the run while another evaluation sits suspended on a readFile — and
+// a no-op on the ordinary path, where a completion already closed and freed.
+// NO GC ALLOCATION anywhere in it: it runs beside a root pop, so it must be
+// safe under any root set.  (The exec arm — two fds, two buffers, planFree and
+// a blocking reap — is 7D's.)
+defun Rt.hostCleanupGo(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  if (i >= lp->nevals) {
+    return mknil;
+  }
+  if (lp->evals[i].etag == 1) {
+    rawcall close(lp->evals[i].rf.fd);
+    rawcall free(lp->evals[i].rf.bptr);
+    rawcall free(lp->evals[i].rf.tmp);
+    lp->evals[i].rf.fd = -1;
+    lp->evals[i].rf.bptr = 0;
+    lp->evals[i].rf.blen = 0;
+    lp->evals[i].rf.bcap = 0;
+    lp->evals[i].rf.tmp = 0;
+    lp->evals[i].etag = 0;
+    recur(hN, mknum(i + 1));
+  }
+  recur(hN, mknum(i + 1));
+}
+defun Rt.hostCleanupAll(hN : val) -> val {
+  return call Rt.hostCleanupGo(hN, mknum(0));
+}
+
+// The Zig's setNonblocking (effectloop.zig:1357): GETFL, then SETFL with
+// O_NONBLOCK OR-ed in, through the VARIADIC `fcntl` declaration at the top of
+// this file (the FFI arc's U4 shape, pinned by tools/qbe/fixtures/ffic-vararg).
+//
+// NO 7C CALLER, DELIBERATELY: the readFile leaf asks `openat` for O_NONBLOCK
+// itself, exactly as the Zig does, so this seat's first caller is 7D's exec
+// pipes (`setNonblocking(outpipe[0])`).  It lands here because the declaration
+// it needs is part of this unit's FFI surface, and TestMain pins it by text —
+// an uncalled seat is invisible to a behavioural fixture.
+defun Rt.hostSetNonblocking(fdN : val) -> val {
+  word fd = payload(fdN, 0);
+  word fl = rawcall fcntl(fd, 3, 0);       // F_GETFL
+  if (fl < 0) {
+    return mknil;
+  }
+  rawcall fcntl(fd, 4, fl | 2048);         // F_SETFL, | O_NONBLOCK (0x800)
+  return mknil;
+}
+
 // ========================== THE STATE ------------------------------------
 // `hN` is the blob's ADDRESS boxed into a Value (`mknum(blob)`), and every
 // defun below unboxes it at the top (`payload(hN, 0)`) — the runtime's own
@@ -5465,19 +5905,32 @@ defun Rt.hostRunnableScan(hN : val, iN : val) -> val {
 // Rt.hostInit — allocate and root the state, seed the model and the update
 // closure.  Returns mknum(blob).
 //
-// THE MALLOC SIZE IS ARITHMETIC, NOT `sizeof`: Mid has no sizeof.  The literal
-// is 8 (nslots) + 33031 x 40 (the slot array) + 6 x 8 (nevals..clrBase) +
+// THE MALLOC SIZE IS ARITHMETIC, NOT `sizeof(struct Host)`: the blob's layout
+// is what TestMain RECOMPUTES from struct Host above, so a field added without
+// this line is a red row rather than a heap overflow.  The literal is
+// 8 (nslots) + 33031 x 40 (the slot array) + 6 x 8 (nevals..clrBase) +
 // 128 x 4216 (the eval table, sizeof(struct HostEv) = 527 words = 4216 bytes:
-// 4 + 512 + 1 + the 10-word effect union), and
-// TestMain's 7A rows RECOMPUTE it from struct Host / struct HostEv above — a
-// field added to either without this line is a red row, not a heap overflow.
+// 4 + 512 + 1 + the 10-word effect union) + 16 (7C's npoll and poll), i.e.
+// 1860960 in stage 7C.
+//
+// THE fd TABLE IS A SECOND, SEPARATE ALLOCATION (7C) and it DOES use `sizeof`
+// — a fresh block has no established literal-and-pin discipline to inherit, and
+// `sizeof(HostPoll) * 8` cannot drift from the declaration the way a hand-added
+// byte count can.  258 x 8 bytes x 3 arrays, memset to zero: `hostAddPoll`
+// writes all three of `fd`/`events`/`revents` for an entry it registers, so the
+// zero is the property that a NEVER-REGISTERED cell can never be polled.
 defun Rt.hostInit(progAddrN : val) -> val {
   word progAddr = payload(progAddrN, 0);
-  word bytes = 8 + (33031 * 40) + (6 * 8) + (128 * 4216);
+  word bytes = 8 + (33031 * 40) + (6 * 8) + (128 * 4216) + 16;
   word blob = rawcall malloc(bytes);
   rawcall memset(blob, 0, bytes);
   *Host lp = [*Host](blob);
   lp->nslots = 33031;
+  word pollBytes = sizeof(HostPoll) * 8;
+  word pp = rawcall malloc(pollBytes);
+  rawcall memset(pp, 0, pollBytes);
+  lp->npoll = 0;
+  lp->poll = pp;
   rawcall rt_root_push_value_array(blob + 8, blob);
   val prog = vecload(progAddr, 0);
   vecstore(blob + 8, 0, vecload(payload(prog, 0), 1));
@@ -5843,6 +6296,12 @@ defun Rt.hostDispatch(hN : val, iN : val) -> val {
     vecstore(resAddr, 0, call Rt.hostReadLine(mknil));
     return call Rt.hostCompleteOk(hN, iN);
   }
+  // TaskReadFile SUSPENDS unless the file drains to EOF at once (a regular file
+  // always does; a pipe does not).  The leaf owns etag/complete from here.
+  if (call Rt.cStrEq(nm, rawstr("TaskReadFile")) != 0) {
+    val path = vecload(tv, 1);
+    return call Rt.hostLeafReadFile(hN, iN, path);
+  }
   if (call Rt.cStrEq(nm, rawstr("TaskWriteFile")) != 0) {
     val path = vecload(tv, 1);
     val contents = vecload(tv, 2);
@@ -5900,10 +6359,10 @@ defun Rt.hostDispatch(hN : val, iN : val) -> val {
     lp->quit = 1;
     return call Rt.hostDeactivate(hN, iN);
   }
-  // THE OTHER 4 (ReadFile/Exec/ListDir/Stat): LOUD, naming the ctor.  Never a
-  // silent drop (the program would appear to work while its continuation never
+  // THE OTHER 3 (Exec/ListDir/Stat): LOUD, naming the ctor.  Never a silent
+  // drop (the program would appear to work while its continuation never
   // resumes) and never a silent completion (which would make a program "work"
-  // while doing nothing).  7C/7D/7E own them.
+  // while doing nothing).  7D/7E own them.
   call Rt.hostDieUnported(nm);
   return mknil;
 }
@@ -6055,45 +6514,50 @@ defun Rt.hostStepAll(hN : val) -> val {
 // Rt.hostRunLoop — the Zig's `while (nactive > 0 and !quit) { stepAll; ...
 // reapChildren; completeReady; ... poll; ... flushExpiredSleeps }`.
 //
-// 7B's tail is the part of that loop a SLEEP needs: step, complete whatever
-// deadline has already passed, and if nothing can run without waiting, SLEEP
-// ON poll(0 fds, the nearest deadline).  7C/7D insert the fd table, the drain
-// and the child reap between the step and this tail; the seam is deliberately
-// the same statement order the Zig has.
+// THE STATEMENT ORDER IS THE ZIG'S (runProgram's loop, effectloop.zig:1218-1260),
+// minus the two pieces 7D owns (reapChildren and the npoll == 0 reapBlocking
+// arm — with no children the first is a no-op and the second unreachable):
 //
-// WHY A poll AND NOT A SPIN: a sleeping eval is ACTIVE with etag = 3, so
-// hostStepAllGo skips it forever; without a wait the loop would burn the CPU
-// for the sleep's whole duration (nowunit sleeps 30+20+20 ms and would spin).
-// -1 (nothing pending) with no runnable work is a stuck program: the Zig
-// prints "effectloop: pending effect with no pollable fd" and breaks, which
-// under the effect host means a SILENTLY TRUNCATED model — here it is LOUD.
+//   stepAll -> flushExpiredSleeps -> [done?] -> hasRunnable -> (loop at once)
+//   -> rebuildPollfds -> pollTimeout -> poll(fds, npoll, timeout)
+//   -> drainReady -> flushExpiredSleeps -> loop
+//
+// WHY A poll AND NOT A SPIN: a suspended eval (etag 1 or 3) is ACTIVE, so
+// hostStepAllGo skips it forever; without a wait the loop would burn the CPU for
+// the effect's whole duration (nowunit sleeps 30+20+20 ms; a readFile on a pipe
+// waits for a writer).  `poll(NULL, 0, to)` with NO fds is still exactly the
+// Zig's bounded sleep, which is the arm a sleep-only program takes.
+//
+// -1 (nothing pending) with NO fd and no runnable work is a STUCK program: the
+// Zig prints "effectloop: pending effect with no pollable fd" and breaks, which
+// under the effect host means a silently truncated model — here it is LOUD.
+//
+// EVERY GUARD'S BRANCH DIVERGES (return/recur): J7 refuses a mid-block `if` with
+// two falling-through branches, and that rule is what shapes this defun.
 defun Rt.hostRunLoop(hN : val) -> val {
   word h = payload(hN, 0);
   *Host lp = [*Host](h);
   if (mkbool(lp->nactive == 0) || mkbool(lp->quit != 0)) {
     return mknil;
-  } else {
-    call Rt.hostStepAll(hN);
-    call Rt.hostFlushExpiredSleeps(hN);
-    val stalled = if (mkbool(lp->nactive == 0) || mkbool(lp->quit != 0)) {
-      return mknum(1);
-    } else {
-      if (payload(call Rt.hostRunnableScan(hN, mknum(0)), 0) != 0) {
-        return mknum(0);                   // pure work left: no wait, loop
-      } else {
-        word to = payload(call Rt.hostPollTimeout(hN));
-        val slept = if (mkbool(to < 0)) {
-          call Rt.dieErr(rawstr("host: a pending effect has no pollable fd"));
-          return mknum(0);
-        } else {
-          rawcall poll(0, 0, to);          // NULL fds + a timeout IS a sleep
-          return mknum(0);
-        };
-        return mknum(0);
-      }
-    };
-    recur(hN);
   }
+  call Rt.hostStepAll(hN);
+  call Rt.hostFlushExpiredSleeps(hN);
+  if (mkbool(lp->nactive == 0) || mkbool(lp->quit != 0)) {
+    return mknil;
+  }
+  if (payload(call Rt.hostRunnableScan(hN, mknum(0)), 0) != 0) {
+    recur(hN);                             // pure work left: no wait, loop now
+  }
+  call Rt.hostRebuildPollfds(hN);
+  word to = payload(call Rt.hostPollTimeout(hN));
+  if (mkbool(lp->npoll == 0) && mkbool(to < 0)) {
+    call Rt.dieErr(rawstr("host: a pending effect has no pollable fd"));
+    return mknil;
+  }
+  rawcall poll(lp->poll, lp->npoll, to);   // nfds 0 + a timeout IS a sleep
+  call Rt.hostDrainReady(hN);
+  call Rt.hostFlushExpiredSleeps(hN);
+  recur(hN);
 }
 
 // Rt.hostRun — the C-ABI seat rt_run_program's port (plan §5.3): drive the
@@ -6111,6 +6575,12 @@ defun Rt.hostRun(progAddrN : val, outAddrN : val) -> val {
   call Rt.hostSpawnFromCmd(hN, mknum(h + 8 + (33026 * 40)));
   call Rt.hostRunLoop(hN);
   vecstore(outAddr, 0, vecload(h + 8, 0));
+  // THE ZIG'S `defer` ORDER, LIFO (runProgram declares rootPop then
+  // cleanupAll, so cleanupAll runs FIRST): free every pending effect, drop the
+  // fd table, then pop the root.  `cleanupAll` allocates nothing, which is what
+  // makes it safe this close to the pop.
+  call Rt.hostCleanupAll(hN);
+  rawcall free(lp->poll);
   rawcall rt_root_pop();
   return mknil;
 }

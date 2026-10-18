@@ -178,6 +178,24 @@ run_hostio() {
   add_check natio "$name" "$fn" "$exp" "" "$stdin" "$FIX/$name.elm" "" run_hostio "$FIX/$name.elm"
 }
 
+# run_pipe <name> <fn> <expected>
+#
+# STAGE 7C's arm-B row: a `Platform.program` fixture that reads /dev/stdin,
+# with stdin fed by a SLOW PRODUCER (a shell subshell: "he", a 50 ms pause,
+# "llo") instead of a file.  That is what makes the read SUSPEND — the pipe is
+# empty on the first read, so the leaf gets EAGAIN, polls, and the second chunk
+# wakes it — which is the ONLY path that exercises the fd table (a regular file
+# drains to EOF synchronously and never polls).
+#
+# Both arms agree because the fixture's ANSWER is the same however the bytes
+# arrive: one read of five bytes or two reads of two and three.  Like
+# run_hostio it registers NO compile group (the corpus baseline pins the batch
+# artifact set at 159 groups) — the native row builds its own binary on demand.
+run_pipe() {
+  local name="$1" fn="$2" exp="$3"
+  add_check natpipe "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "" run_pipe "$FIX/$name.elm"
+}
+
 # run_io <name> <fn> <expected> <stdin-file>
 #
 # Like run(), but the native binary's stdin is redirected from
@@ -449,6 +467,14 @@ run nowunit     main   "$(read_expected nowunit)"
 # inheriting QBE_MIDHOST, so this ONE row is arm A and arm B.
 run_hostio progio main "$(read_expected progio)" progio.txt
 out_cmp progio progio.out
+# readpipe (STAGE 7C): THE SUSPENDING readFile — the ONLY row that reaches the
+# host's fd table.  Its stdin is a PIPE fed by a slow producer (see run_pipe),
+# so the first read is EAGAIN: rebuildPollfds registers one fd, poll blocks on
+# it, drainReady completes it, and the answer is the same however the bytes
+# arrive.  The chain's second read (big.txt, 70000 bytes) is the accumulator's
+# GROW under the host.  A `Platform.worker` fixture cannot see any of this: the
+# synchronous driver runs the read-file-as-string prim instead of the effect.
+run_pipe readpipe main   "$(read_expected readpipe)"
 
 # --- S6 (M-FOUNDATION): host dir/stat leaves (getdents64 + fstatat) ---
 # dirunit: Io.listDir over input/dirlist — '.'/'..' skipped, isDir from dirent
@@ -920,7 +946,13 @@ dispatch() {
       fi
       mod=$(module_name "$fixfile")
       qname="$mod.$fn"
-      if [ "$kind" = natio ]; then
+      if [ "$kind" = natpipe ]; then
+        # A SLOW PRODUCER, not a file: the pipe is empty on the first read, so
+        # the readFile leaf suspends on EAGAIN and completes on the poll.  The
+        # producer writes "he" at once and holds its end open >= 50 ms, so the
+        # reader cannot see EOF before data (see `readpipe`'s header).
+        got="$( ( printf 'he'; sleep 0.05; printf 'llo' ) | timeout 60 "$bin" "$qname" 2>&1)"
+      elif [ "$kind" = natio ]; then
         got="$(timeout 60 "$bin" "$qname" < "$FIX/input/$stdin" 2>&1)"
       else
         got="$(timeout 60 "$bin" "$qname" $args 2>&1)"

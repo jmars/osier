@@ -95,6 +95,7 @@ fails loudly rather than letting this listing go stale.
 | \`run\` | \`natrun\` | the fixture builds through the QBE backend (elm \`->\` .ssa \`->\` vendored qbe \`->\` cc + rt.o) and the binary must print \`expected\` — the gate's execution model since the interpreter retired at P8 |
 | \`run2\` | \`natrun2\` | multi-module: \`fixture\` compiled *with* its aux module, then as \`run\` |
 | \`run_io\` | \`natio\` | as \`run\`, with stdin redirected from \`input/<stdin>\` |
+| \`run_pipe\` | \`natpipe\` | stage 7C: as \`run\`, but stdin is a PIPE fed by a slow producer (\`he\`, 50 ms, \`llo\`), so the fixture's \`readFile\` SUSPENDS on EAGAIN and the host's fd table (\`rebuildPollfds\` -> \`poll\` -> \`drainReady\`) is the only way the value completes — the one row that reaches the poll machinery |
 | \`compile_clean\` | \`ok\` | compilation must yield a real output, not an \`err …\` payload (no value check — the fixture's value cannot be driven from argv) |
 | \`compile_error\` | \`err\` | compilation must emit \`err <message>\` containing \`expected\` |
 | \`out_cmp\` | \`cmp\` | the raw file an earlier run wrote must equal its \`expected/*.txt\` bytes |
