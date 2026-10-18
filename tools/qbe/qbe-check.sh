@@ -178,7 +178,9 @@ run_mid() {
   local name="$1" entry="$2" fixture="$3"; shift 3
   local mids=("$@")
   local bin
-  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "${mids[@]}" "$entry" "$TMP/$name")" || {
+  # MIDHOST_ROW=1 is `run_midhost`'s knob: it compiles with QBE_MIDHOST=1, which
+  # is what makes a seat that lives INSIDE the QBE_MIDHOST region exist.
+  bin="$(QBE_MIDHOST="${MIDHOST_ROW:+1}" "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "${mids[@]}" "$entry" "$TMP/$name")" || {
     echo "FAIL $name: qbe-mk"; FAIL=1; return
   }
   local nat_out
@@ -211,6 +213,16 @@ run_mid() {
     echo "PASS $name: gc-churn (QBE_HEAP_MB=$CHURN_MB) identical"
   fi
   fi
+}
+
+# run_midhost — `run_mid` for a row whose SURFACE SEAT only exists in an ARM-B
+# (QBE_MIDHOST=1) build.  The golden + churn contract is `run_mid`'s, unchanged;
+# the only difference is the compile-time flag.  Stage 7A's applier pin needs it
+# because `Rt.apply-at` is exported INSIDE the QBE_MIDHOST region — an export
+# must name an existing defun, and in the default arm that defun is spliced out
+# with the host.
+run_midhost() {
+  MIDHOST_ROW=1 run_mid "$@"
 }
 
 # run_midrt — the M3-rtcall row: a user .mid `call Rt.<exported>` (an EXPORTED
@@ -2787,6 +2799,25 @@ run_midshape ffic-vararg FficMain.main tools/qbe/fixtures/ffic-vararg.elm tools/
 # empty extension op FAILS on a trailing `extsw`/`extuw`, which is the positive
 # form of the bug.
 run_midshape ffim-mem FfimMain.main tools/qbe/fixtures/ffim-mem.elm tools/qbe/fixtures/ffim-mem.mid '=l loaduh %t' ''
+
+# ---- stage 7A: THE APPLIER PIN (QBE_MIDHOST) ----
+# Rt.apply-at is the one Mid applier (closure + a rooted raw arg array ->
+# Rt.callArity).  Its FIRST caller is the new Mid effect host, and the failure
+# this row exists to catch is SILENT: the two neighbours of the right entry are
+# traps (Rt.apply/Rt.applyGo return an UNFORCED `:ret` tail, i.e. a heap
+# address where a value belongs; and a Disp arity of `arity - rem` passes zero
+# arguments), and neither is a crash.  So the oracle is a NUMBER: 417 =
+# upd(msg 7, model 41) from a GLOBAL closure, 503 = a CAPTURING closure applied
+# to 3, and the row's own churn arm (run_mid re-runs at QBE_HEAP_MB=$CHURN_MB)
+# is the rooting half — the .mid churns 20 000 allocations between filling the
+# registered root array and applying out of it, so a stale closure/arg reads
+# garbage there.
+#
+# FAIL-BEFORE, MEASURED (the golden is not vacuous): with `dp->arity =
+# arity - rem` the same row prints `[cons 1407343666249120 . [cons 500 . []]]`,
+# and routing through Rt.apply is refused at compile time by J2.  Both were run
+# as mutations of runtime.mid.
+run_midhost hostapply HostApply.main tools/qbe/fixtures/hostapply.elm tools/qbe/fixtures/Whost.mid
 
 # ---- zigretire stage 5 PART 3: THE MIDGC GUARD'S COMPLETENESS ----
 # The guard that names ONE incompatible flag is not a guard (this arc paid for

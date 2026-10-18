@@ -1,0 +1,84 @@
+// Whost.mid — THE APPLIER PIN (stage 7A): a Mid defun applying a COMPILED
+// Elm closure, with its arguments in a rooted raw array, across a REAL
+// collection.
+//
+// WHY THIS FIXTURE EXISTS (plan §7.3's 7A row, gap G-M).  The Mid host's
+// applier — Rt.apply-at -> Rt.callArity — had NO CALLER anywhere in the tree
+// before the host, so its first real exercise would otherwise be the selfhost,
+// where a silent-wrong answer is not a red row.  This pins it in the cheapest
+// place that can see the failure: a golden that is a NUMBER (not a heap
+// address) and a churn arm that forces a scavenge while the closure and its
+// arguments are live.
+//
+// WHAT EACH ARM WOULD PRINT IF IT WERE WRONG — the golden is the discriminator:
+//   * Rt.apply/Rt.applyGo instead of Rt.callArity (plan §4.1's first trap):
+//     applyGo's saturated arm returns mknum(:ret buffer), an UNFORCED TAIL, so
+//     the arm prints a heap ADDRESS (or SEGVs) instead of 417.
+//   * the Disp's `arity` = `arity - rem` (0 for a global closure) instead of
+//     the closure's STATIC arity (wload(desc,1)) — the second trap: the call
+//     passes ZERO args and the closure reads whatever the callee's prologue
+//     left in the argument slots.  Again not 417.
+//   * a root array that is not registered (or args copied out of it into an
+//     unrooted buffer): after churn() has collected, the closure/message read
+//     back is stale — a moving scavenge rewrites the ROOTED slots IN PLACE, so
+//     the arm answers 0 or garbage at QBE_HEAP_MB=${CHURN_MB}.
+//   * `caps` (the Disp's env word) dropped: runCap's closure captures its
+//     multiplier, so an env of 0 makes it read a garbage capture.
+//
+// THE ARGUMENT AREA IS A SLICE OF THE ROOTED ARRAY (blob + 88 = slots[2]) —
+// no copy, no second referee — which is what Rt.callArity's `buf + 40k` needs
+// and what makes the host's argument discipline expressible at all.
+module Whost
+
+export Whost.run : val -> val -> val -> val
+export Whost.runCap : val -> val -> val
+
+struct St {
+  n : i32;
+  slots : val[8];
+}
+
+// Garbage on the GC heap: allocraw in a loop until the collector has to run.
+// `accN` is threaded only so the loop is a self-tail; nothing reads it.
+defun Whost.churn(nN : val, accN : val) -> val {
+  if (payload(nN, 0) == 0) {
+    return accN;
+  } else {
+    allocraw(24);
+    recur(mknum(payload(nN, 0) - 1), accN);
+  }
+}
+
+// run closure model msg  ==  closure msg model, with BOTH arguments held in
+// the rooted array and the closure surviving the churn.
+defun Whost.run(uN : val, mN : val, xN : val) -> val {
+  word blob = rawcall malloc(400);
+  *St lp = [*St](blob);
+  lp->n = 6;
+  rawcall rt_root_push_value_array(blob + 8, blob);
+  vecstore(blob + 8, 0, mN);
+  vecstore(blob + 8 + 40, 0, uN);
+  vecstore(blob + 8 + 80, 0, xN);
+  val ch = call Whost.churn(mknum(20000), mknil);
+  vecstore(blob + 8 + 120, 0, vecload(blob + 8, 0));
+  val r = call Rt.apply-at(vecload(blob + 8 + 40, 0), mknum(blob + 88), mknum(2));
+  rawcall rt_root_pop();
+  return r;
+}
+
+// runCap closure x  ==  closure x, where the closure carries ONE CAPTURE
+// (ncaps = 1, napp = 0 — created by an Elm-level partial application, so its
+// `rem` still equals its `arity` and the applier's napp guard is satisfied).
+// This is the arm that exercises the Disp's `caps` word.
+defun Whost.runCap(uN : val, xN : val) -> val {
+  word blob = rawcall malloc(400);
+  *St lp = [*St](blob);
+  lp->n = 6;
+  rawcall rt_root_push_value_array(blob + 8, blob);
+  vecstore(blob + 8, 0, uN);
+  vecstore(blob + 8 + 40, 0, xN);
+  val ch = call Whost.churn(mknum(20000), mknil);
+  val r = call Rt.apply-at(vecload(blob + 8, 0), mknum(blob + 48), mknum(1));
+  rawcall rt_root_pop();
+  return r;
+}
