@@ -184,6 +184,7 @@ import Mid.RtLang.Ast
         , FltCmpOp(..)
         , Key
         , OTy(..)
+        , PTy(..)
         , Param
         , Program
         , Sig(..)
@@ -651,6 +652,12 @@ checkStmt ctx stmt =
                                 ++ ": J7: a mid-block 'if' with both branches falling through — Mid has no join and Case is forbidden: bind through ?: or make it the last statement"
                             )
 
+        SFieldStore _ _ _ ->
+            Err (ctx.key ++ ": U1: field store (`p->f = e;`) is parsed but not checked yet — J13 (U2) checks the value against the field class")
+
+        SIndexStore _ _ _ ->
+            Err (ctx.key ++ ": U1: index store (`p[i] = e;`) is parsed but not checked yet — J13 (U2) checks the value against the element class")
+
 
 checkTerm : Ctx -> Term -> Result String Type
 checkTerm ctx term =
@@ -1006,6 +1013,15 @@ checkExp ctx e =
 
                 Ok () ->
                     checkBlock { ctx | scope = bindRoots ids ctx.scope } block
+
+        EField _ _ ->
+            Err (ctx.key ++ ": U1: field access (`p->f`) is parsed but not checked yet — J13 (U2) resolves the field against the struct table")
+
+        EIndex _ _ ->
+            Err (ctx.key ++ ": U1: index access (`p[i]`) is parsed but not checked yet — J13 (U2) rules the index class")
+
+        EDeref _ ->
+            Err (ctx.key ++ ": U1: deref (`*p`) is parsed but not checked yet — J13 (U2) rules the pointee")
 
 
 {-| J10 — every `withroots` id must ALREADY name a `:val` binder in scope
@@ -1401,6 +1417,17 @@ typeStr t =
 
         TVal ->
             "val"
+
+        TPtr pty ->
+            case pty of
+                PStruct name ->
+                    "*" ++ name
+
+                PWord ->
+                    "*word"
+
+                PVal ->
+                    "*val"
 
 
 {-| Operator spellings for the J1 messages (checker-owned message text —

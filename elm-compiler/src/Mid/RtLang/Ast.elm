@@ -2,11 +2,14 @@ module Mid.RtLang.Ast exposing
     ( AggShape(..)
     , Builtin(..)
     , Block
+    , Decl(..)
     , Defun
     , Effect(..)
+    , EnumEntry
     , Exp(..)
     , Export
     , ExportSig
+    , Field
     , Flag(..)
     , FlagGuard(..)
     , FltBinOp(..)
@@ -15,6 +18,7 @@ module Mid.RtLang.Ast exposing
     , Key
     , Module
     , OTy(..)
+    , PTy(..)
     , Param
     , Program
     , Sig(..)
@@ -88,12 +92,47 @@ import Dict exposing (Dict)
 
 
 {-| The class/type lattice: word (raw i64/i32 temps), float (a `d` word,
-expression-only — see the header), val (a tagged 40-byte Value).
+expression-only — see the header), val (a tagged 40-byte Value), and —
+added U1 (midlang-u1) — `TPtr`, the POINTER ANNOTATION (`*S` / `*word` /
+`*val`).  A pointer type is a CHECKER-ONLY refinement over `TWord` (the
+plan's §1.1: a pointer IS a word — same register class `l`, same rawWord
+slots, erased at lowering) that names the LAYOUT the address points at.
+It is deliberately NOT a fourth class: it says "layout", never "lifetime,
+ownership, or rootedness" — the checker cannot and must not distinguish a
+`*S` over malloc'd memory from one over the globals block or a
+`value_array` payload, exactly as today's `wload` can read any word.  The
+`PTy` pointee family is below; the struct/enum declarations it can name
+are the `Decl`s on the module record.
 -}
 type Type
     = TWord
     | TFloat
     | TVal
+    | TPtr PTy
+
+
+{-| The POINTEE of a pointer annotation (`*S` / `*word` / `*val`), the
+plan's three pointee families (§1.1):
+
+  * `PStruct name` — `*S`: a pointer to the struct `S`; field access
+    `p->f` and struct-scaled indexing `p[i]` (U2/U3, the checker/lowerer
+    units this grammar is only the seat for).
+  * `PWord` — `*word`: a pointer to a word array; `p[i]` (= `wload(p,i)`),
+    `p[i] = e` (= `wstore`), `*p` (= `wload(p,0)`).
+  * `PVal` — `*val`: a pointer to a value array; `p[i]` (= `vecload`),
+    `p[i] = v` (= `vecstore`).
+
+No `&` address-of in v1: every base arrives as a word from
+`payload`/`wload`/`malloc`/`rt_glob_addr`, so the view-cast is spelled as
+a typed binder (`*S r = payload(v, 0);`), never an operator.  `word`
+stays the language's `void*` — the address the runtime computes with —
+and `*T` is the typed view taken AT that boundary, the one direction the
+source spells (plan J12's unchecked word→*T cast).
+-}
+type PTy
+    = PStruct String
+    | PWord
+    | PVal
 
 
 {-| A Rt-defun key, full and verbatim (`"Rt.deepEq"` — the rtDeps spelling;
@@ -202,13 +241,84 @@ type alias Header =
     }
 
 
-{-| A whole `.mid` file: the header plus the defun list (`Program`).
+{-| A whole `.mid` file: the header, the file-scoped `struct`/`enum`
+declarations (`decls`), and the defun list (`Program`).
 `Parse.parseModule` returns this; the defun list is the same `Program`
-every lowerer/checker already consumes (the header is NOT lowered).
+every lowerer/checker already consumes (the header and the declarations
+are NOT lowered in U1 — they ride beside the program, consumed by U2's
+checker to build the struct/enum tables and U3's lowerer to lay out
+fields).  v1 has NO cross-module import: these declarations are
+FILE-SCOPED to their own `.mid` module — a `*S` in one module cannot name
+a struct declared in another (pointers cross a module boundary only as
+the opaque `word`/`*word` the plan §2.5 already pins).
 -}
 type alias Module =
     { header : Header
+    , decls : List Decl
     , defuns : List Defun
+    }
+
+
+-- ============================ file-scoped declarations (U1) ============================
+
+
+{-| A top-level `struct` or `enum` declaration — the file-scoped layout
+tables the plan's §1.2/§1.3 define.  U1 PARSES and CARRIES these (they
+are the grammar); U2's checker (J11/J14) turns them into the struct/
+enum tables and field-offset layout in `Env`, and U3's lowerer reads the
+SAME table (the plan's one-table property — no second copy to skew).  A
+declaration is NOT lowered in U1: it produces no node and no byte; it
+only reserves a NAME and its shape for the checker/lowerer to consume.
+
+WHY THIS FORM EXISTS (the measured wall it closes): the runtime's own
+layouts are today comment-kept offsets — `RtGc.elm`'s globals comment and
+the `gcInit` wstore block spell the region's words 0..12 as bare numbers,
+and the two OVERLAPS this code has (the mark stack at region base, the
+header at body−2) are silent conventions.  A struct turns one comment
+into ONE table the checker derives offsets from, so a pad field forgotten
+or a shifted cursor/markTop is a checked layout error, not a magic-number
+drift (plan risk R2).  It is a named offset table over raw memory — never
+a GC object kind: `value_array` stays the only GC object (the owner's
+hard constraint), and a struct value is reached only through a pointer
+the program already holds.
+-}
+type Decl
+    = StructDecl { name : String, fields : List Field }
+    | EnumDecl { name : String, entries : List EnumEntry }
+
+
+{-| One struct field: a name and its type, in DECLARATION ORDER (the
+layout rule is order-preserving, word-granular — every field a whole
+number of 8-byte words; the runtime's own layouts are word-quantized, so
+no finer padding exists).  A `_pad` field is an ordinary word field —
+nothing special to check — it keeps the layout table honest where a real
+layout has a hole (region word 7; globals words 3–7, 14–15).  Field
+types are the `Type` grammar: `word`, `val` (40 bytes = 5 words, stored
+INLINE — allowed, nothing traces it, the rooting discipline is a stated
+contract not a type property), `float` (parsed here; REJECTED by U2's J11
+— Mid.Ir has no raw-memory f64 load node), and the three pointer
+families.  Self-reference by value (`next : S`) is U2's J11 reject
+(infinite size); by pointer (`next : *S`) is the only recursion.
+-}
+type alias Field =
+    { name : String
+    , ty : Type
+    }
+
+
+{-| One `enum E { ... }` entry: `name = value`.  C-style named word
+constants, NOT tagged unions — `enum RootKind { ptr = 0; value = 1; }`
+makes `RootKind.ptr` an `EInt` alias legal anywhere a word literal is,
+most usefully in the compares the existing tag-dispatch discipline
+already uses (`if (mkbool(kind == RootKind.ptr))` — a byte-identical word
+compare vs `Con 0`).  Tagged unions + `match` are deliberately REJECTED:
+the measured discipline forbids `Case`/`tagof` (Ast.elm's header), and a
+tag + max-variant-payload layout would need a new Mid.Ir `Case` node,
+violating the keep-IL-unchanged goal.
+-}
+type alias EnumEntry =
+    { name : String
+    , value : Int
     }
 
 
@@ -349,11 +459,22 @@ declared class).  `SEffect` is `exp;` — its value is discarded; the lowering
 `SIf` is a mid-block `if`: legal ONLY when at least one branch diverges
 (ends in `return`/`recur`) — the L6 else-nesting rule; both-branches-fall-
 through is a checker REJECT (J7), never a silent join.
+  * `SFieldStore` — `p->f = e;` (U1, midlang-u1): the field STORE, a
+    STATEMENT (Mid has no assignment expressions).  Lowers to a
+    dead-binder `Let` of `RawWordStore { ptr = p, index = Lit off, value =
+    e }` — the EXACT `wstore(p, off, e);` tree (plan §3) — for a word/
+    pointer field, `RawVecStore` for a `val` field.  The field offset is
+    U2's derived value, carried here as the field NAME.
+  * `SIndexStore` — `p[i] = e;` (U1): the index STORE.  The matching
+    `RawWordStore`/`RawVecStore` node with the computed index `i` — the
+    `wstore(p, i, e)`/`vecstore(p, i, e)` shape.
 -}
 type Stmt
     = SBind Type String Exp
     | SEffect Exp
     | SIf Exp Block (Maybe Block)
+    | SFieldStore Exp String Exp
+    | SIndexStore Exp Exp Exp
 
 
 {-| `TRet` is `return e;` (L3: the block's value).  `TRecur` is
@@ -438,6 +559,23 @@ transcribes):
     branch terminated by `recur` is checker-legal but UNPINNED by any row
     (it lowers to an `If` carrying a self-`App` value — shape-identical to
     the term `if`'s, classifier-safe per the plan's F3/L4).
+  * `EField` — `p->f` (U1, midlang-u1): the postfix field READ.  At
+    lowering it IS the existing `RawWordLoad { ptr = p, index = Lit off }`
+    node (`wload(p, off)` with the field's constant offset — plan §3) for
+    a word/pointer field, or `RawVecLoad` for a `val` field; U1 only
+    parses it — the checker (U2 J13) resolves `f` to `S`'s field offset
+    and the lowerer (U3) emits the same node.  The constructor carries
+    the pointer EXPRESSION and the field NAME (the offset is U2's derived
+    value, not the parser's).
+  * `EIndex` — `p[i]` (U1): the postfix index READ.  `i` is an ELEMENT
+    index (words for `*word`/`*val` — matching `wload`'s word-offset
+    contract; structs for `*S`), an ordinary expression — unlike
+    `payload`'s literal-slot index, this one is a computed value, exactly
+    the generality `wload(p, i)` already has.
+  * `EDeref` — `*p` (U1): the prefix deref, `*word` only → the existing
+    `RawWordLoad { ptr = p, index = Lit 0 }`.  Postfix (`->`, `[]`) binds
+    tighter than the prefix `*`, the C convention, so `*p->f` is
+    `*(p->f)`.
 
 -}
 type Exp
@@ -458,6 +596,9 @@ type Exp
     | EAggCall AggShape Exp (List Exp)
     | EBuiltin Builtin (List Exp)
     | EWithRoots (List String) Block
+    | EField Exp String
+    | EIndex Exp Exp
+    | EDeref Exp
 
 
 {-| The word binops, 1:1 with Mid.Ir's RawBinOp (the lowerer maps each

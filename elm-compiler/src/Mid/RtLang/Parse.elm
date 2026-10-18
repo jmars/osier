@@ -55,7 +55,8 @@ surface's only grouping rule besides parentheses):
        if (c) {..} else {..}   EIfBlock   (T23 — an ATOM: the block-branch
        if expression, else REQUIRED; the statement/term `if` is a
        DIFFERENT path — `itemStepAt`'s own arm — and is unchanged)
-       (expression), withroots [..] ..
+       (expression), withroots [..] .., *p  (EDeref, prefix — postfix
+       `->`/`[]` bind TIGHTER than it, the C convention)
 
 A compare yields a WORD 0/1, never a bool — the DSL's
 `mkBool (cmpW ...)` boxing discipline is a T4 concern, but the shape the
@@ -235,7 +236,7 @@ and — per the O(n) invariant in the token-plumbing section — NO
 -}
 
 import Dict exposing (Dict)
-import Mid.RtLang.Ast exposing (AggShape(..), Block, Builtin(..), Defun, Effect(..), Exp(..), Export, ExportSig, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Module, OTy(..), Param, Program, Stmt(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
+import Mid.RtLang.Ast exposing (AggShape(..), Block, Builtin(..), Decl(..), Defun, Effect(..), EnumEntry, Exp(..), Export, ExportSig, Field, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Module, OTy(..), PTy(..), Param, Program, Stmt(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
 import Parser exposing (DeadEnd, Problem(..))
 import ParserFast
 
@@ -465,7 +466,57 @@ addLevel =
 
 mulLevel : ParserFast.Parser Exp
 mulLevel =
-    binaryLeft (opStep mulTable atom) atom
+    binaryLeft (opStep mulTable postfixLevel) postfixLevel
+
+
+{-| The POSTFIX level (U1, midlang-u1): `atom` then zero or more postfix
+operators — `->f` (field read, `EField`) and `[i]` (index read,
+`EIndex`).  It sits BELOW every binary operator (it is `mulLevel`'s
+operand), so `p->f + 1` reads `(p->f) + 1`, `p[i] * q` reads `(p[i]) *
+q`, and a `p[i]` inside an argument list or a `p->f` in an initializer
+slot composes without swallowing anything.  The step PEEKS two chars
+(`offset` is already at the next non-whitespace char — each token
+consumes its trailing whitespace), so a non-postfix `-`/`[` never leaves
+a committed state and the enclosing `binaryLeft` ends cleanly.
+
+THE `->` TRAP (the plan's named risk): `->` lexes as `-` then `>` in
+expression position (the expression token reader's charset has no `-`),
+and is recognized HERE, in POSTFIX position only.  Keys keep their own
+`->` (`Rt.address->`) because keys are read ONLY in key positions
+(`keyTokenAtOff` — the defun header and `call`), never through this
+level; the defun header's `-> ty` arrow is consumed by `defunTail` after
+the params, also never here.  A `-` NOT followed by `>` (a subtraction,
+`x - 2` / `x -2`) hands back non-committed and the `addLevel` operator
+consumes it exactly as before.
+-}
+postfixLevel : ParserFast.Parser Exp
+postfixLevel =
+    binaryLeft postfixStep atom
+
+
+postfixStep : ParserFast.Parser (Exp -> Exp)
+postfixStep =
+    ParserFast.offsetSourceAndThen postfixStepAt
+
+
+postfixStepAt : Int -> String -> ParserFast.Parser (Exp -> Exp)
+postfixStepAt offset src =
+    case String.slice offset (offset + 2) src of
+        "->" ->
+            spelled "->" (ParserFast.map (\f lhs -> EField lhs f) surfaceName)
+
+        _ ->
+            case String.slice offset (offset + 1) src of
+                "[" ->
+                    spelled "["
+                        (ParserFast.map2
+                            (\idx _ lhs -> EIndex lhs idx)
+                            expression
+                            (spelled "]" (succeed ()))
+                        )
+
+                _ ->
+                    ParserFast.problem "expected a postfix operator (`->` or `[`)"
 
 
 {-| The operator tables, longest-first within a level.  Every row is 1:1
@@ -570,6 +621,9 @@ atomAt offset src =
         "-" ->
             negAtom offset src
 
+        "*" ->
+            derefExp
+
         "" ->
             ParserFast.problem "expected an expression, found end of input"
 
@@ -579,6 +633,19 @@ atomAt offset src =
 
             else
                 ParserFast.problem ("expected an expression, found `" ++ c ++ "`")
+
+
+{-| `*p` — the prefix DEREF (U1, midlang-u1).  Entered at the `*` peeked
+by `atomAt`, so it appears ONLY in operand position (an infix `*` is the
+`mulLevel` operator, never this arm — `a * *p` is multiply-by-deref, the
+operator then a fresh operand).  It applies to a POSTFIX expression (the
+C convention: postfix binds tighter than the prefix `*`), so `*p->f` is
+`*(p->f)`, `*p[i]` is `*(p[i])`, and `**p` nests.  `*p` reads `*word`
+only (`wload(p,0)` at U3); any other pointee is U2's J13 reject.
+-}
+derefExp : ParserFast.Parser Exp
+derefExp =
+    ParserFast.map EDeref (spelled "*" postfixLevel)
 
 
 parenExp : ParserFast.Parser Exp
@@ -1183,8 +1250,10 @@ the `defun`/`@` dispatch.
 moduleTarget : ParserFast.Parser Module
 moduleTarget =
     followedBySkipWsComments
-        (ParserFast.map2 (\hdr defs -> { header = hdr, defuns = defs })
+        (ParserFast.map3
+            (\hdr declarations defs -> { header = hdr, decls = declarations, defuns = defs })
             header
+            decls
             programDefuns
         )
 
@@ -1199,6 +1268,154 @@ header =
         (\mname exports -> { name = mname, exports = exports })
         moduleNameLine
         (ParserFast.loopWhileSucceeds exportLine [] (\e acc -> acc ++ [ e ]) identity)
+
+
+-- ============================ file-scoped declarations (U1) ============================
+
+
+{-| The file-scoped `struct`/`enum` declaration loop (U1, midlang-u1),
+after the header's export block and before the defuns — the top-of-file
+position the plan's worked examples put `struct Region { ... }` /
+`enum RootKind { ... }`.  Each declaration is entered by the SAME
+non-committed peek dispatch as `defun`/`exportLine`: a non-`struct`/
+`enum` token hands back what has, so a declaration-less module (today's
+`runtime.mid`) parses with `decls == []` and every existing parse is
+untouched.  U1 CARRIES the declarations on the module record — the
+checker (U2) builds the struct/enum tables from them, the lowerer (U3)
+lays fields out from the SAME table; nothing here emits a byte.
+-}
+decls : ParserFast.Parser (List Decl)
+decls =
+    ParserFast.loopWhileSucceeds decl [] (\d acc -> acc ++ [ d ]) identity
+
+
+{-| One declaration, entered by a committed peek for the `struct`/`enum`
+keyword.  Anything else is the non-committed handback the loop stops on.
+-}
+decl : ParserFast.Parser Decl
+decl =
+    ParserFast.offsetSourceAndThen declAt
+
+
+declAt : Int -> String -> ParserFast.Parser Decl
+declAt offset src =
+    let
+        at =
+            skipWsCommentsAt offset src
+    in
+    case tokenAtOff at src of
+        Just ( "struct", _ ) ->
+            skipWsCommentsFollowedBy structDecl
+
+        Just ( "enum", _ ) ->
+            skipWsCommentsFollowedBy enumDecl
+
+        _ ->
+            ParserFast.problem "expected a `struct`/`enum` declaration or a defun (or the end of the program)"
+
+
+{-| `struct S { f : ty; ... }` — each field `name : type` REQUIRES its
+trailing `;` (the plan's §1.2 spelling; the last field too, so a dropped
+separator is loud, never a silent re-grouping).  Fields are DECLARATION
+ORDER (the layout rule is order-preserving).
+-}
+structDecl : ParserFast.Parser Decl
+structDecl =
+    ParserFast.map2
+        (\name fields -> StructDecl { name = name, fields = fields })
+        (spelled "struct" structName)
+        (spelled "{"
+            (ParserFast.map2
+                (\fields _ -> fields)
+                fieldList
+                (spelled "}" (succeed ()))
+            )
+        )
+
+
+{-| `enum E { A = 1; B = 2; }` — the plan's §1.3 spelling: each entry
+`name = value` (the value an INTEGER LITERAL, C-style named word
+constants) REQUIRES its trailing `;`.  NOT tagged unions — the entry is
+a name-to-word mapping, carried whole; the `E.entry` EXPRESSION form is
+U2's J14, not this unit's grammar.
+-}
+enumDecl : ParserFast.Parser Decl
+enumDecl =
+    ParserFast.map2
+        (\name entries -> EnumDecl { name = name, entries = entries })
+        (spelled "enum" structName)
+        (spelled "{"
+            (ParserFast.map2
+                (\entries _ -> entries)
+                entryList
+                (spelled "}" (succeed ()))
+            )
+        )
+
+
+{-| A struct/enum NAME: an Uppercase identifier (`Region`, `Hdr`,
+`RootKind`) — the same `isUpperName` convention the export-block type
+grammar and the `*S` pointee share, so a declaration name and its pointer
+spelling can never disagree on case.  U2's J11 owns the duplicate-name/
+unknown-name judgments.
+-}
+structName : ParserFast.Parser String
+structName =
+    ParserFast.offsetSourceAndThen structNameAt
+
+
+structNameAt : Int -> String -> ParserFast.Parser String
+structNameAt offset src =
+    case tokenAtOff offset src of
+        Just ( tok, _ ) ->
+            if isUpperName tok then
+                spelled tok (succeed tok)
+
+            else
+                ParserFast.problem ("expected an Uppercase struct/enum name, found `" ++ tok ++ "`")
+
+        Nothing ->
+            ParserFast.problem "expected an Uppercase struct/enum name"
+
+
+{-| `(f : ty ;)*` — the field list, entered after `{` (which consumed the
+trailing whitespace).  Each ELEMENT is a `field` FOLLOWED by its required
+`;` (the plan's §1.2 spelling — the last field too), so the loop stops
+cleanly when `field` hands back non-committed at the `}` (a dropped `;`
+inside is a committed `spelled` failure, loud).
+-}
+fieldList : ParserFast.Parser (List Field)
+fieldList =
+    ParserFast.loopWhileSucceeds
+        (ParserFast.map2 (\f _ -> f) field (spelled ";" (succeed ())))
+        []
+        (\f acc -> acc ++ [ f ])
+        identity
+
+
+field : ParserFast.Parser Field
+field =
+    ParserFast.map2
+        (\name ty -> { name = name, ty = ty })
+        surfaceName
+        (spelled ":" surfaceType)
+
+
+entryList : ParserFast.Parser (List EnumEntry)
+entryList =
+    ParserFast.loopWhileSucceeds
+        (ParserFast.map2 (\e _ -> e) entry (spelled ";" (succeed ())))
+        []
+        (\e acc -> acc ++ [ e ])
+        identity
+
+
+entry : ParserFast.Parser EnumEntry
+entry =
+    ParserFast.map2
+        (\name value -> { name = name, value = value })
+        surfaceName
+        (spelled "=" intLitArg)
 
 
 {-| `module Name` — the OPTIONAL name line.  `Just name` when the next
@@ -1828,8 +2045,15 @@ param =
         (spelled ":" surfaceType)
 
 
-{-| `word | float | val` — the whole type grammar; anything else is a
-loud reject (a malformed type must never lex as something else).
+{-| `word | float | val | *S | *word | *val` — the whole type grammar;
+anything else is a loud reject (a malformed type must never lex as
+something else).  `*` starts a POINTER annotation (U1, midlang-u1): the
+pointee is a struct name (`*S`, an Uppercase identifier) or the two raw
+families (`*word`, `*val`).  A bare struct name in type position — the
+plan's struct-BY-VALUE field nesting (`f : B`) — is NOT in the U1 grammar
+(the brief's U1 AST list adds only the pointer `Type` constructor, not a
+struct-value one; none of the named structs uses inline nesting), so it
+rejects here loudly, to be added by U2 if the layout rule needs it.
 -}
 surfaceType : ParserFast.Parser Type
 surfaceType =
@@ -1838,21 +2062,56 @@ surfaceType =
 
 surfaceTypeAt : Int -> String -> ParserFast.Parser Type
 surfaceTypeAt offset src =
+    if String.slice offset (offset + 1) src == "*" then
+        ParserFast.map TPtr (spelled "*" ptrPointee)
+
+    else
+        case tokenAtOff offset src of
+            Just ( "word", _ ) ->
+                spelled "word" (succeed TWord)
+
+            Just ( "float", _ ) ->
+                spelled "float" (succeed TFloat)
+
+            Just ( "val", _ ) ->
+                spelled "val" (succeed TVal)
+
+            Just ( tok, _ ) ->
+                ParserFast.problem ("expected a type (`word`, `float`, `val`, `*S`, `*word` or `*val`), found `" ++ tok ++ "`")
+
+            Nothing ->
+                ParserFast.problem "expected a type (`word`, `float`, `val`, `*S`, `*word` or `*val`)"
+
+
+{-| The pointee after `*` in a pointer annotation: `word` (`PWord`),
+`val` (`PVal`), or an Uppercase struct name (`PStruct`).  Uppercase is
+how the pointer grammar knows a struct from a raw family — the same
+`isUpperName` split the export-block type grammar uses for type
+constructors, so a `*S` pointee is a NAME, never confused with a keyword.
+-}
+ptrPointee : ParserFast.Parser PTy
+ptrPointee =
+    ParserFast.offsetSourceAndThen ptrPointeeAt
+
+
+ptrPointeeAt : Int -> String -> ParserFast.Parser PTy
+ptrPointeeAt offset src =
     case tokenAtOff offset src of
         Just ( "word", _ ) ->
-            spelled "word" (succeed TWord)
-
-        Just ( "float", _ ) ->
-            spelled "float" (succeed TFloat)
+            spelled "word" (succeed PWord)
 
         Just ( "val", _ ) ->
-            spelled "val" (succeed TVal)
+            spelled "val" (succeed PVal)
 
         Just ( tok, _ ) ->
-            ParserFast.problem ("expected a type (`word`, `float` or `val`), found `" ++ tok ++ "`")
+            if isUpperName tok then
+                spelled tok (succeed (PStruct tok))
+
+            else
+                ParserFast.problem ("expected a pointer pointee (`word`, `val` or an Uppercase struct name), found `" ++ tok ++ "`")
 
         Nothing ->
-            ParserFast.problem "expected a type (`word`, `float` or `val`)"
+            ParserFast.problem "expected a pointer pointee (`word`, `val` or an Uppercase struct name)"
 
 
 blockTarget : ParserFast.Parser Block
@@ -1977,15 +2236,20 @@ itemStepAt offset src =
             ParserFast.problem "`else` does not start a statement"
 
         Just ( tok, _ ) ->
-            -- any other token starts an effect statement; the expression
-            -- parser reads the token itself (it may be a keyword-led form
-            -- like `call`/`rawcall`/`withroots` — never pre-consume it)
-            ParserFast.map (\e -> IStmt (SEffect e)) expSemi
+            -- any other token starts an effect statement OR a field/index
+            -- store; the expression parser reads the token itself (it may be
+            -- a keyword-led form like `call`/`rawcall`/`withroots` — never
+            -- pre-consume it), and `stmtExp` peeks the `=` that turns a
+            -- `p->f`/`p[i]` into a store
+            ParserFast.map IStmt stmtExp
 
         Nothing ->
             -- not a token character: `}` / `@` / end of input end the
             -- block; anything else (a `(`-grouped expression, a string
-            -- literal) may still start an effect statement
+            -- literal) may still start an effect statement or store.  `*`
+            -- starts a POINTER-TYPED BIND (`*S r = e;` — the plan's
+            -- view-cast spelling), never a deref statement (a deref-discard
+            -- is meaningless, and v1 has no `*p = e;`).
             case String.slice offset (offset + 1) src of
                 "}" ->
                     ParserFast.problem "end of block"
@@ -1996,8 +2260,11 @@ itemStepAt offset src =
                 "" ->
                     ParserFast.problem "end of block (input ends)"
 
+                "*" ->
+                    ParserFast.map IStmt ptrBindStmt
+
                 _ ->
-                    ParserFast.map (\e -> IStmt (SEffect e)) expSemi
+                    ParserFast.map IStmt stmtExp
 
 
 {-| `recur`'s tail: `( [exp {',' exp}] ) ;` — the ONLY loop form (L4);
@@ -2023,6 +2290,84 @@ expSemi =
         (spelled ";" (succeed ()))
 
 
+{-| `exp ;` OR `exp = e ;` — the STATEMENT-level expression (U1,
+midlang-u1): the effect statement's fallthrough arm, extended with the
+two STORE forms the plan's §1.1 spells (`p->f = e;`, `p[i] = e;`).  The
+LHS is parsed as a whole `expression` — so a chained place like
+`a->b->c` lands as `EField (EField a "b") "c"` and stores to `c` — then
+the tail PEEKS: a `=` commits the store (`= value ;`), anything else is
+the REQUIRED `;` of a plain effect.  The one-way door is `stmtOk`'s
+`validate`: a `=` whose LHS is NOT a field or an index (`x = e;`, `*p =
+e;` — v1 has no `*p = e`) is a LOUD reject, never a silent rewrite to an
+effect statement (which would drop the store).
+-}
+stmtExp : ParserFast.Parser Stmt
+stmtExp =
+    ParserFast.map
+        stmtOf
+        (ParserFast.validate
+            stmtOk
+            "a store needs a field or index on its left — write `p->f = e;` or `p[i] = e;`"
+            (ParserFast.map2 (\e tail -> ( e, tail )) expression stmtTail)
+        )
+
+
+type StmtTail
+    = TailEffect
+    | TailStore Exp
+
+
+stmtTail : ParserFast.Parser StmtTail
+stmtTail =
+    ParserFast.offsetSourceAndThen
+        (\offset src ->
+            if String.slice offset (offset + 1) src == "=" then
+                spelled "=" (ParserFast.map TailStore expSemi)
+
+            else
+                spelled ";" (succeed TailEffect)
+        )
+
+
+stmtOk : ( Exp, StmtTail ) -> Bool
+stmtOk ( e, tail ) =
+    case tail of
+        TailEffect ->
+            True
+
+        TailStore _ ->
+            case e of
+                EField _ _ ->
+                    True
+
+                EIndex _ _ ->
+                    True
+
+                _ ->
+                    False
+
+
+stmtOf : ( Exp, StmtTail ) -> Stmt
+stmtOf ( e, tail ) =
+    case tail of
+        TailEffect ->
+            SEffect e
+
+        TailStore v ->
+            case e of
+                EField p f ->
+                    SFieldStore p f v
+
+                EIndex p i ->
+                    SIndexStore p i v
+
+                _ ->
+                    -- unreachable: `stmtOk` rejects a store whose LHS is
+                    -- neither a field nor an index (same shape as
+                    -- `blockOfFold`'s validate-guarded default)
+                    SEffect e
+
+
 {-| `id = exp ;` — the SBind tail after the type token.  A NEW binder
 only (rebinding-as-shadowing is T6's lowering concern); the declared
 class is J5's.
@@ -2031,6 +2376,27 @@ bindTail : Type -> ParserFast.Parser Stmt
 bindTail ty =
     ParserFast.map2
         (SBind ty)
+        surfaceName
+        (spelled "=" expSemi)
+
+
+{-| `*S r = e;` / `*word p = e;` / `*val v = e;` — the POINTER-TYPED BIND
+(U1, midlang-u1), the plan's view-cast spelling: a `*S` annotation on a
+NEW binder is the ONE source-spelled direction of the J12 coercion (word →
+`*T`), so every real site gets its typed view at the `payload(v,0)`/
+`malloc`/`rt_glob_addr` boundary by naming the binder `*S`.  It parses to
+the SAME `SBind` shape as `word x = e;`, with a `TPtr` declared type —
+U1's checker rejects it today (the J1 class check sees the initializer's
+`word` against the declared `*S`, exactly the loud wall U2's J12 coercion
+replaces).  Entered from `itemStepAt`'s `*` arm: at statement start a `*`
+is ALWAYS this bind, never a deref (`*p` as a discard-statement is
+meaningless; `*p = e;` is not in v1).
+-}
+ptrBindStmt : ParserFast.Parser Stmt
+ptrBindStmt =
+    ParserFast.map3
+        (\pty name e -> SBind (TPtr pty) name e)
+        (spelled "*" ptrPointee)
         surfaceName
         (spelled "=" expSemi)
 

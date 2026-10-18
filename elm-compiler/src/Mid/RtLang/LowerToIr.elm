@@ -420,6 +420,12 @@ lowerStmt st stmt cont =
                                 "a mid-block if with both branches falling through reached the lowerer — Check J7 must reject it first"
                             )
 
+        SFieldStore _ _ _ ->
+            Err (internal st "field store (`p->f = e;`)" "is parsed but not lowered yet — U3 maps it onto RawWordStore/RawVecStore with the field offset")
+
+        SIndexStore _ _ _ ->
+            Err (internal st "index store (`p[i] = e;`)" "is parsed but not lowered yet — U3 maps it onto RawWordStore/RawVecStore with the computed index")
+
 
 {-| L3/L4/L5: the terminator IS the block's value.
 -}
@@ -861,6 +867,15 @@ lowerExp st e =
 
                         Ok ( st2, body ) ->
                             Ok ( st2, Unsafe (WithRoots { binders = binders, body = body }) )
+
+        Ast.EField _ _ ->
+            Err (internal st "field access (`p->f`)" "is parsed but not lowered yet — U3 maps it onto RawWordLoad/RawVecLoad with the field offset")
+
+        Ast.EIndex _ _ ->
+            Err (internal st "index access (`p[i]`)" "is parsed but not lowered yet — U3 maps it onto RawWordLoad/RawVecLoad with the computed index")
+
+        Ast.EDeref _ ->
+            Err (internal st "deref (`*p`)" "is parsed but not lowered yet — U3 maps it onto RawWordLoad with index 0")
 
 
 {-| The four operator families lower constructor-by-constructor onto the

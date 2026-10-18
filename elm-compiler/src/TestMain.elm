@@ -2891,6 +2891,162 @@ checks rt =
     , check "parse comment: `//` inside a string literal is CONTENT (the string reader never consults the skipper)"
         (Parse.parseExp "\"http://x // not a comment\"" == Ok (Ast.EStr "http://x // not a comment"))
 
+    -- ==================== U1: structs, enums, pointers (midlang-u1) ====================
+    -- The grammar only: decls carry on the module record, `*S`/`*word`/
+    -- `*val` annotate types, and the postfix/store forms parse into new
+    -- constructors — all REJECTED downstream today (U2's checker / U3's
+    -- lowerer are the next units).  Every row asserts the exact AST so a
+    -- silent re-association cannot pass; the anti-empty guard pins a
+    -- NON-empty decl list (a vacuous `[]` parse must not pass).
+
+    , check "parse U1: a struct declaration lands on the module's decls (declaration-order fields, exact AST)"
+        (case Parse.parseModule "struct Region { magic : word; count : word; }" of
+            Ok m ->
+                m.header == { name = Nothing, exports = [] }
+                    && m.decls
+                    == [ Ast.StructDecl
+                            { name = "Region"
+                            , fields =
+                                [ { name = "magic", ty = Ast.TWord }
+                                , { name = "count", ty = Ast.TWord }
+                                ]
+                            }
+                       ]
+                    && m.defuns == []
+
+            Err _ ->
+                False
+        )
+    , check "parse U1 ANTI-EMPTY: the decl list is NON-empty and the fields carry their names/types (a vacuous parse must not pass)"
+        (case Parse.parseModule "struct Hdr { flags : word; next : *Hdr; }" of
+            Ok m ->
+                case m.decls of
+                    (Ast.StructDecl s) :: _ ->
+                        s.name == "Hdr"
+                            && List.length s.fields == 2
+                            && s.fields == [ { name = "flags", ty = Ast.TWord }, { name = "next", ty = Ast.TPtr (Ast.PStruct "Hdr") } ]
+
+                    _ ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "parse U1: an enum declaration (C-style named word constants, exact AST)"
+        (case Parse.parseModule "enum RootKind { ptr = 0; value = 1; }" of
+            Ok m ->
+                m.decls
+                    == [ Ast.EnumDecl
+                            { name = "RootKind"
+                            , entries =
+                                [ { name = "ptr", value = 0 }
+                                , { name = "value", value = 1 }
+                                ]
+                            }
+                       ]
+
+            Err _ ->
+                False
+        )
+    , check "parse U1: a pointer annotation in the type position (*Region as a param type)"
+        (case Parse.parseProgram "defun Rt.f(p: *Region) -> word { return wload(p, 0); }" of
+            Ok defuns ->
+                case defuns of
+                    d :: _ ->
+                        d.params == [ { name = "p", ty = Ast.TPtr (Ast.PStruct "Region") } ]
+                            && d.ret == Ast.TWord
+
+                    [] ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "parse U1: postfix field read p->f and the chained a->b->c (EField)"
+        (Parse.parseExp "p->f" == Ok (Ast.EField (Ast.EVar "p") "f")
+            && Parse.parseExp "a->b->c" == Ok (Ast.EField (Ast.EField (Ast.EVar "a") "b") "c")
+        )
+    , check "parse U1: postfix index read p[i] (EIndex) and a field-then-index chain a->tab[i]"
+        (Parse.parseExp "p[i]" == Ok (Ast.EIndex (Ast.EVar "p") (Ast.EVar "i"))
+            && Parse.parseExp "a->tab[i]" == Ok (Ast.EIndex (Ast.EField (Ast.EVar "a") "tab") (Ast.EVar "i"))
+        )
+    , check "parse U1: prefix deref *p (EDeref) and postfix binds tighter than * (*p->f is *(p->f))"
+        (Parse.parseExp "*p" == Ok (Ast.EDeref (Ast.EVar "p"))
+            && Parse.parseExp "*p->f" == Ok (Ast.EDeref (Ast.EField (Ast.EVar "p") "f"))
+        )
+    , check "parse U1: field/index store statements (SFieldStore / SIndexStore, exact AST)"
+        (Parse.parseBlock "{ p->f = e;\n  p[i] = e;\n  return mknil; }"
+            == Ok
+                { stmts =
+                    [ Ast.SFieldStore (Ast.EVar "p") "f" (Ast.EVar "e")
+                    , Ast.SIndexStore (Ast.EVar "p") (Ast.EVar "i") (Ast.EVar "e")
+                    ]
+                , term = Ast.TRet (Ast.EBuiltin Ast.MkNil [])
+                }
+        )
+    , check "parse U1: a pointer-typed binder (*Region r = e;) parses to SBind with a TPtr type"
+        (case Parse.parseBlock "{ *Region r = payload(v, 0);\n  return mknum(r); }" of
+            Ok b ->
+                case b.stmts of
+                    Ast.SBind (Ast.TPtr (Ast.PStruct "Region")) "r" (Ast.EBuiltin Ast.Payload [ Ast.EVar "v", Ast.EInt 0 ]) :: _ ->
+                        True
+
+                    _ ->
+                        False
+
+            Err _ ->
+                False
+        )
+
+    -- must-fail rejects (each pins the message fragment — a loud-but-wrong failure must not pass)
+    , check "parse U1 REJECTS a malformed struct decl (a dropped `;` separator)"
+        (case Parse.parseModule "struct Region { magic : word }" of
+            Err msg ->
+                String.contains "expected `;`" msg
+
+            Ok _ ->
+                False
+        )
+    , check "parse U1 REJECTS a lowercase struct name (structs/enums are Uppercase identifiers)"
+        (case Parse.parseModule "struct region { magic : word; }" of
+            Err msg ->
+                String.contains "Uppercase struct/enum name" msg
+
+            Ok _ ->
+                False
+        )
+    , check "parse U1 REJECTS a misplaced decl (a struct AFTER a defun is trailing input, not a declaration)"
+        (case Parse.parseModule "defun Rt.f() -> val { return mknil; }\nstruct Region { magic : word; }" of
+            Err _ ->
+                True
+
+            Ok _ ->
+                False
+        )
+    , check "parse U1 REJECTS `*p = e;` (v1 has no deref-store — at statement start a `*` is a pointer bind, and `p` is no pointee)"
+        (case Parse.parseBlock "{ *p = e; return mknil; }" of
+            Err msg ->
+                String.contains "pointer pointee" msg
+
+            Ok _ ->
+                False
+        )
+
+    -- the loud REJECTIONS-TODAY: a struct/pointer form REACHING the existing
+    -- checker fails loudly (U2's J11-J14 / J12 coercion are the next units)
+    , checkErr "check U1: field access REACHING the checker is a loud U1 reject (J13 is U2)" "U1"
+        "defun Rt.f(p: *word) -> word {\n  return p->f;\n}"
+    , checkErr "check U1: index access REACHING the checker is a loud U1 reject" "U1"
+        "defun Rt.f(p: *word) -> word {\n  return p[0];\n}"
+    , checkErr "check U1: deref REACHING the checker is a loud U1 reject" "U1"
+        "defun Rt.f(p: *word) -> word {\n  return *p;\n}"
+    , checkErr "check U1: a field store REACHING the checker is a loud U1 reject" "U1"
+        "defun Rt.f(p: *word) -> word {\n  p->f = 1;\n  return 0;\n}"
+    , checkErr "check U1: an index store REACHING the checker is a loud U1 reject" "U1"
+        "defun Rt.f(p: *word) -> word {\n  p[0] = 1;\n  return 0;\n}"
+    , checkErr "check U1: a pointer-typed binder is REJECTED by the EXISTING J1 class check (declares *word but initializer is word — the wall J12 replaces)" "declares *word"
+        "defun Rt.f() -> word {\n  *word p = 0;\n  return p;\n}"
+
     -- ==================== M2: the module header + the export block ====================
     , check "M2 header: module name + export block parse, and a headerless module is an EMPTY header (the header is OPTIONAL)"
         ((case Parse.parseModule "module Rt\nexport Rt.f : val -> val\ndefun Rt.f(a: val) -> val { return mknil; }" of
