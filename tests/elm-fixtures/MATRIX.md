@@ -112,7 +112,7 @@ fails loudly rather than letting this listing go stale.
 | 54 | `taskattempt` | `run` | `main` | `"boom"` | — | — | `taskattempt.elm` |
 | 55 | `execpipe` | `run` | `main` | `"0\|ho\|"` | — | — | `execpipe.elm` |
 | 56 | `execenv` | `run` | `main` | `"hello\|1\|/tmp"` | — | — | `execenv.elm` |
-| 57 | `execglob` | `run` | `main` | `"tests/elm-fixtures/globdir/?\|.\ntests/elm-fixtures/globdir/*\|.,..,x.txt\ntests/elm-fixtures/globdir/.*\|.,..\nexecbig.txt,execchain.txt,execenv.txt,execglob.txt,execmal.txt,execnofile.txt,execpipe.txt,execsubchain.txt"` | — | — | `execglob.elm` |
+| 57 | `execglob` | `run` | `main` | `"tests/elm-fixtures/globdir/?\|.\ntests/elm-fixtures/globdir/*\|.,..,x.txt\ntests/elm-fixtures/globdir/.*\|.,..\nexecbig.txt,execchain.txt,execenv.txt,execfallback.out.txt,execfallback.txt,execglob.txt,exechost.txt,execmal.txt,execnofile.txt,execpipe.txt,execsubchain.txt"` | — | — | `execglob.elm` |
 | 58 | `asyncorder` | `run` | `main` | `"file,ran"` | — | — | `asyncorder.elm` |
 | 59 | `fastexec` | `run` | `main` | `"0\|hi\n\|"` | — | — | `fastexec.elm` |
 | 60 | `exechost` | `runhost` | `main` | `"3\|108894\|oops"` | — | — | `exechost.elm` |
