@@ -4658,7 +4658,7 @@ checks rt runtimeMidText =
             ]
             && String.contains "word ms = (st->mtim.sec * 1000) + (st->mtim.nsec / 1000000);" f
         )
-    , check "7E ROOTING PIN (the record builders): every intermediate is a `val` binder — a rooted frame slot for the whole body (Lower's WithRoots note) — and the LIST accumulator, which outlives one record, lives in the eval's RESULT SLOT: mknil is stored there BEFORE the open (so the failed-open arm still completes a rooted []), each record's cons re-READS it (`vecload(resAddr, 0)`) instead of holding a raw copy, and the reversal happens only AFTER the dirfd and the getdents64 buffer are closed and freed, so no allocation runs while either raw resource is live"
+    , check "7E ROOTING PIN (the record builders): every intermediate is a `val` binder — a rooted frame slot for the whole body (Lower's WithRoots note) — and the LIST accumulator, which outlives one record, lives in the eval's RESULT SLOT: mknil is stored there BEFORE the open (so the failed-open arm still completes a rooted []), each record's cons re-READS it (`vecload(resAddr, 0)`) instead of holding a raw copy, and the reversal runs only AFTER the dirfd and the getdents64 buffer are closed and freed (the walk itself DOES allocate with the fd open — a deliberate divergence from the Zig's drain-then-build split, sound because both raw resources are C heap, which the collector cannot see or move; the same class as 7D's `oaddr`)"
         (let
             leaf =
                 defunText "Rt.hostLeafListDir" runtimeMidText

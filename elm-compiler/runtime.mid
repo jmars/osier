@@ -6819,10 +6819,21 @@ defun Rt.hostLeafExec(hN : val, iN : val, planN : val) -> val {
 // THE FLIP: the walk visits the entries in the KERNEL'S raw fs order (never
 // sorted — sorting is app-side, `dirunit` re-sorts through Set) and PREPENDS
 // each record, so the accumulator ends up REVERSED; `Rt.revGo` flips it after
-// the dirfd is closed.  The two-phase order is the Zig's (it drained names into
-// page_allocator storage first, for exactly this reason): no allocation for a
-// record happens while a raw fd and a raw buffer are both live and referenced
-// from the loop's own cursor.
+// the dirfd is closed.
+//
+// THE ONE DELIBERATE DIVERGENCE FROM THE ZIG'S STRUCTURE:  effectloop.zig
+// drains the names into page_allocator storage FIRST, closes the fd, and only
+// then builds the Elm list — explicitly "so no GC allocation happens while the
+// fd is open".  THIS PORT BUILDS THE RECORDS DURING THE WALK, i.e. it DOES
+// allocate with the dirfd open, and that is safe for a reason the split
+// existed to approximate: the two raw things in play are C HEAP (the fd, an
+// i32 in `struct HostDir`, and the getdents64 buffer), so the collector can
+// neither see nor move them, and no Mid value describes either.  The address
+// held across the record's allocations (`nptr`) is a C pointer for the same
+// reason — the same class 7D's `oaddr`/`eaddr` already are.  What the split
+// bought (an alloc-free window around a raw resource) holds here BY
+// CONSTRUCTION rather than by ordering.  The flip stays after the close
+// because it needs no resource at all.
 defun Rt.hostLeafListDir(hN : val, iN : val, pathN : val) -> val {
   word h = payload(hN, 0);
   word i = payload(iN, 0);
