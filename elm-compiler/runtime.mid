@@ -45,6 +45,33 @@ export Rt.frame-leave : word
 //   slot 11 allocated   bump-path bytes charged against the budget
 //   slot 12 numClass    the number of size classes
 //
+//   ---- THE STATS INSTRUMENT (GC-ARC F1, slots 13..23) ----------------
+//   Nine words + a scratch buffer, so the two claims plan.md §2.2 records as
+//   ASSERTED become CHECKABLE: (a) the collect COUNT (the 64/128 MB residual
+//   is "zero collects", i.e. route cost, not GC — stage-4 review finding 2),
+//   and (b) the mark-vs-sweep SPLIT of a collect's time (the 16 MB delta was
+//   attributed to the O(heap) sweep with no instrument behind it).
+//
+//   slot 13/14  ts0     CLOCK_MONOTONIC {sec,nsec} at collect entry
+//   slot 15/16  ts1     ... after the mark walk (roots + drain), before the sweep
+//   slot 17/18  ts2     ... after the sweep
+//   slot 19  collects   collects since init (the counter)
+//   slot 20  marked     object bodies MARKED by the last collect — one push
+//                       per body (gcMarkPtr's `marked == 0` test), i.e. the
+//                       O(live) half of the work, and reset per collect
+//   slot 21  sweptBytes heap bytes the last sweep walked (O(heap))
+//   slot 22  markUs     microseconds in the last mark walk
+//   slot 23  sweepUs    microseconds in the last sweep
+//   byte 288 (NOT a field) the 32-byte digit scratch Rt.gcNum writes into
+//
+// THE TIMESTAMPS COST THREE vDSO clock reads PER COLLECT (no branch: the knob
+// only gates the PRINT — Rt.gcNumOut, from Rt.collect), because a collect is
+// already an O(heap) walk and the alternative is a knob-read in the hot path.
+// Reading them on every collect is also what keeps the code shape simple
+// enough to stay frame-free.  A negative µs is not representable in the
+// printed form (Rt.gcNum is unsigned); the clocks are monotonic, so it cannot
+// arise.
+//
 // NOT fields, deliberately: the MARK STACK (words 64..markEnd) and every
 // object body.  Those are reached by a COMPUTED word index, so they stay
 // `wload(region, top)` / `wstore(region, top, ptr)` in Rt.gcDrain and
@@ -64,6 +91,17 @@ struct Region {
   heapBytes : word;
   allocated : word;
   numClass : word;
+  ts0s : word;
+  ts0n : word;
+  ts1s : word;
+  ts1n : word;
+  ts2s : word;
+  ts2n : word;
+  collects : word;
+  marked : word;
+  sweptBytes : word;
+  markUs : word;
+  sweepUs : word;
 }
 // THE FRAME HEADER LAYOUT (midlang-u6) — the name -> word-slot table.  Before
 // this struct frameBlock/frame-enter/frame-leave spelled the header as
@@ -2924,17 +2962,48 @@ defun Rt.gcInit(dummy : val) -> val {
       word maxTotal = heapBytes / 8;
       word numClasses = 1 + payload((maxTotal <= 4096) ? mknum((maxTotal + 7) / 8) : mknum(512 + (maxTotal - 4096 + 4095) / 4096), 0);
       word heapStart = classTable + numClasses * 8 + 16;
+      // THE MARK-STACK BOUND, AS A CHECKED INVARIANT (GC-ARC F1).  The plan
+      // recorded it as a 0.05% MARGIN that "holds" — an assertion, not a
+      // property.  It is a THEOREM once stated right: the sweep's smallest
+      // physical block is class 1 = 8 words = 64 bytes (gcAlloc's
+      // `(total+7)/8` with total >= 3), so no heap this geometry can map
+      // holds more than `(regionEnd - heapStart) / 64` object bodies, and the
+      // mark walk pushes at most ONE entry per body (gcMarkPtr's `marked == 0`
+      // test).  Capacity is `markEnd - 64`.  The margin is therefore
+      // `(markEnd - 64) - (regionEnd - heapStart)/64`, which works out to
+      // heapBytes/262144 + ~72 entries — bigger than 0 at every heap size, and
+      // ONLY because the mark stack and the heap are both carved from the one
+      // mmap: if a later change moves the class table, shrinks the stack, or
+      // changes the minimum class, this DIES AT INIT instead of overflowing a
+      // stack nothing can grow.
+      // MEASURED at the probe heaps: 16 MB -> 262144 cap vs 262007 bodies
+      // (margin 137 = 16777216/262144 + 73); 64 MB -> 1048576 vs 1048247
+      // (margin 329 = 67108864/262144 + 73).
+      // probe-midgc-guards.sh is the fail-before (a halved stack trips it).
+      word regionEnd = base + regionSize;
+      word maxBlocks = (regionEnd - heapStart) / 64;
+      if (mkbool(markEnd - 64 < maxBlocks)) {
+        call Rt.die(rawstr("qbe-rt: midgc: mark stack smaller than the heap can hold"));
+        return mknil;
+      } else {
+        return mknil;
+      }
       wstore(glob, 0, base);
       wstore(base, 0, 331941693251);
       wstore(base, 1, classTable);
       wstore(base, 2, heapStart);
       wstore(base, 3, heapStart);
-      wstore(base, 4, base + regionSize);
+      wstore(base, 4, regionEnd);
       wstore(base, 5, 64);
       wstore(base, 6, markEnd);
       wstore(base, 10, heapBytes);
       wstore(base, 11, 0);
       wstore(base, 12, numClasses);
+      // the stats knob, read ONCE: QBE_MIDGC_STATS=1 prints one line per
+      // collect (Rt.collect -> Rt.gcNumOut).  Glob word 8 is the MIDGC-owned
+      // block's first free knob slot (Rt.main uses 2, 12, 13).
+      word statsKnob = rawcall getenv(rawstr("QBE_MIDGC_STATS"));
+      wstore(glob, 8, statsKnob);
       return mknum(base);
     }
   }
@@ -3020,18 +3089,80 @@ defun Rt.gcAllocGo(region : val, cls : val) -> val {
 }
 defun Rt.collect(dummy : val) -> val {
   word glob = rawcall rt_glob_addr();
-  *Region region = wload(glob, 0);
-  if (mkbool(region->magic == 331941693251)) {
-    region->markTop = 64;
-    call Rt.gcMarkRoots(mknum(0));
-    call Rt.gcDrain(mknum(0));
-    call Rt.gcClearClasses(mknum(0));
-    call Rt.gcSweep(mknum(region->heapStart));
+  word regionW = wload(glob, 0);
+  if (mkbool(regionW == 0)) {
+    call Rt.die(rawstr("qbe-rt: midgc: collect before init (no region mapped)"));
     return mknil;
   } else {
-    call Rt.die(rawstr("qbe-rt: midgc: collect before init"));
-    return mknil;
+    *Region region = regionW;
+    if (mkbool(region->magic == 331941693251)) {
+      rawcall clock_gettime(1, [word](region) + 104);
+      region->markTop = 64;
+      region->marked = 0;
+      call Rt.gcMarkRoots(mknum(0));
+      call Rt.gcDrain(mknum(0));
+      rawcall clock_gettime(1, [word](region) + 120);
+      call Rt.gcClearClasses(mknum(0));
+      call Rt.gcSweep(mknum(region->heapStart));
+      rawcall clock_gettime(1, [word](region) + 136);
+      region->collects = region->collects + 1;
+      region->sweptBytes = region->cursor - region->heapStart;
+      region->markUs = (region->ts1s * 1000000 + region->ts1n / 1000) - (region->ts0s * 1000000 + region->ts0n / 1000);
+      region->sweepUs = (region->ts2s * 1000000 + region->ts2n / 1000) - (region->ts1s * 1000000 + region->ts1n / 1000);
+      if (mkbool(wload(glob, 8) != 0)) {
+        word regW = [word](region);
+        word cN = region->collects;
+        word mN = region->marked;
+        word sN = region->sweptBytes;
+        word mU = region->markUs;
+        word sU = region->sweepUs;
+        call Rt.gcNumOut(mknum(rawstr("midgc: c=")), mknum(cN), mknum(regW));
+        call Rt.gcNumOut(mknum(rawstr(" mark=")), mknum(mN), mknum(regW));
+        call Rt.gcNumOut(mknum(rawstr(" swept=")), mknum(sN), mknum(regW));
+        call Rt.gcNumOut(mknum(rawstr(" markUs=")), mknum(mU), mknum(regW));
+        call Rt.gcNumOut(mknum(rawstr(" sweepUs=")), mknum(sU), mknum(regW));
+        rawcall write(2, rawstr("\n"), 1);
+        return mknil;
+      }
+      return mknil;
+    } else {
+      call Rt.die(rawstr("qbe-rt: midgc: collect before init (region not initialised)"));
+      return mknil;
+    }
   }
+}
+// THE STATS PRINTER (GC-ARC F1) — the INSTRUMENT half of the collector, and
+// the reason it is here rather than in the driver: Rt.main is emitted on BOTH
+// routes, so a print there would move the default route's bytes and the corpus
+// baseline with it.  These two defuns are seeded ONLY under QBE_MIDGC=1.
+//
+// FRAME-FREE, hence printable from inside a collect: digits are written into
+// the region's own scratch with `bytestore` and emitted with the `write`
+// RAW-CALL (alloc-free, no safepoint — the same class as Rt.die's message
+// path).  NOTHING here allocates, so `swept`/`markUs` can be reported from
+// inside the walk without re-entering the collector.
+//
+// Rt.gcNum: the decimal digits of n, RIGHT-ALIGNED so the last digit lands at
+// endP-1; returns the address of the first digit.  Unsigned: every caller
+// passes a count or a monotonic duration.
+defun Rt.gcNum(n : val, endP : val) -> val {
+  word v = payload(n, 0);
+  word q = v / 10;
+  word p = payload(endP, 0);
+  bytestore(p - 1, 0, 48 + (v - q * 10));
+  if (mkbool(q == 0)) {
+    return mknum(p - 1);
+  }
+  recur(mknum(q), mknum(p - 1));
+}
+// Rt.gcNumOut: `label` (a NUL-terminated static) then n, both written to stderr.
+defun Rt.gcNumOut(label : val, n : val, region : val) -> val {
+  word end = payload(region, 0) + 288;
+  val start = call Rt.gcNum(n, mknum(end));
+  val llen = call Rt.cStrLenGo(mknum(payload(label, 0)), mknum(0));
+  rawcall write(2, payload(label, 0), payload(llen, 0));
+  rawcall write(2, payload(start, 0), end - payload(start, 0));
+  return mknil;
 }
 defun Rt.gcMarkRoots(i : val) -> val {
   word iW = payload(i, 0);
@@ -3147,6 +3278,7 @@ defun Rt.gcMarkPtr(p : val) -> val {
         wstore(ptr, -2, flags + 1);
         wstore(region, top, ptr);
         region->markTop = top + 1;
+        region->marked = region->marked + 1;
         return mknil;
       } else {
         call Rt.die(rawstr("qbe-rt: midgc: mark stack overflow"));

@@ -56,6 +56,14 @@ contains an allocating node (no RawAllocVector/RawAllocRaw, no LString, no
 WithRoots), so Mid.Rt.allocating leaves every one of them out of the framed
 set — pinned by a TestMain row, kept green by the migration.
 
+THE INSTRUMENT (GC ARC F1): `Rt.gcNum`/`Rt.gcNumOut` are the two non-collector
+defuns in this list — the decimal printer behind `QBE_MIDGC_STATS=1`, which
+prints one line per collect (count, bodies marked, bytes swept, per-phase µs)
+on stderr.  They are HERE rather than in the driver on purpose: `Rt.main` is
+emitted on BOTH routes, so a print there would move the default route's bytes;
+these are seeded only under the hatch, and being alloc-free they can be called
+from inside `Rt.collect` without violating the frame-free property above.
+
 -}
 
 import Mid.Ir exposing (Defun)
@@ -153,4 +161,6 @@ gcProgram =
     , seat "Rt.gcClearClasses" 1
     , seat "Rt.gcMarkPtr" 1
     , seat "Rt.gcMarkValue" 1
+    , seat "Rt.gcNum" 2
+    , seat "Rt.gcNumOut" 3
     ]

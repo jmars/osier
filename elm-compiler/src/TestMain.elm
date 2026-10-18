@@ -84,10 +84,10 @@ checks rt runtimeMidText =
       -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
       -- the frameZero loop), so an empty or truncated load turns it RED,
       -- loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (189 defuns)"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (191 defuns — GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut)"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 189
+                List.length ast == 191
 
             Err _ ->
                 False
@@ -2143,12 +2143,94 @@ checks rt runtimeMidText =
              _ ->
                  List.all ok gcKeys
         )
-    , check "rt gc seeds: the collector seeds are exactly the two seats plus their transitive closure (stage 6 U2 adds Rt.die + Rt.cStrLenGo through the die arm's RawCall edge)"
+    , check "rt gc seeds: the collector seeds are exactly the two seats plus their transitive closure (stage 6 U2 adds Rt.die + Rt.cStrLenGo through the die arm's RawCall edge; GC-ARC F1 adds the stats printer Rt.gcNumOut + its digit loop Rt.gcNum through Rt.collect)"
         (Rt.gcSeeds
-            == [ "Rt.allocVector", "Rt.gcInit", "Rt.die", "Rt.cStrLenGo", "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.collect", "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkValue", "Rt.gcMarkPtr", "Rt.gcDrain", "Rt.gcSweep", "Rt.gcClearClasses", "Rt.allocRaw" ]
+            == [ "Rt.allocVector", "Rt.gcInit", "Rt.die", "Rt.cStrLenGo", "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.collect", "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkValue", "Rt.gcMarkPtr", "Rt.gcDrain", "Rt.gcSweep", "Rt.gcClearClasses", "Rt.gcNumOut", "Rt.gcNum", "Rt.allocRaw" ]
         )
     , check "rt con seeds: the Mid ADT constructor and its fill helper"
         (Rt.conSeeds == [ "Rt.con", "Rt.conFill" ]
+        )
+    -- ==================== GC-ARC F1: the mark-stack bound ====================
+    -- The bound was an ASSERTION in the plan ("holds by 0.05% at 16 MB").  It is
+    -- now a DERIVED guard in Rt.gcInit (it dies at init when the mark stack is
+    -- smaller than the heap can hold) plus the arithmetic below, which states
+    -- the margin at the probe heaps.  The numbers are a MIRROR of gcInit's
+    -- formula — a TestMain row cannot execute Mid — so the row's job is to make
+    -- the margin a stated quantity and to go RED if the SHAPE of the derivation
+    -- is deleted; the LIVE check is the runtime guard, proven by
+    -- probe-midgc-guards.sh (a halved mark stack dies at init with the fix and
+    -- runs silently without it).
+    , check "GC-ARC F1 mark-stack margin: capacity (markEnd - 64 = H/64) EXCEEDS the largest block count the same mmap can hold — 137 entries at 16 MB (262144 vs 262007), 329 at 64 MB, and positive at every probe heap, because the smallest physical block is class 1 = 8 words = 64 bytes.  The mark walk pushes at most one entry per body, so the stack CANNOT overflow: this is a geometry theorem, not a margin that happens to hold"
+        (List.all
+            (\mb ->
+                let
+                    h =
+                        mb * 1024 * 1024
+
+                    markEnd =
+                        64 + (h // 8 // 8)
+
+                    maxTotal =
+                        h // 8
+
+                    numClasses =
+                        1
+                            + (if maxTotal <= 4096 then
+                                (maxTotal + 7) // 8
+
+                               else
+                                512 + (maxTotal - 4096 + 4095) // 4096
+                              )
+
+                    heapStart =
+                        markEnd * 8 + numClasses * 8 + 16
+
+                    regionSize =
+                        h + h // 8
+
+                    maxBlocks =
+                        (regionSize - heapStart) // 64
+                in
+                markEnd - 64 >= maxBlocks && maxBlocks > 0
+            )
+            [ 16, 32, 64, 128 ]
+        )
+    , check "GC-ARC F1 mark-stack margin, the two MEASURED points: 16 MB -> 262144 capacity vs 262007 bodies (margin 137), 64 MB -> 1048576 vs 1048247 (margin 329) — the same digits gcInit's comment quotes"
+        (let
+            margin mb =
+                let
+                    h =
+                        mb * 1024 * 1024
+
+                    markEnd =
+                        64 + (h // 8 // 8)
+
+                    maxTotal =
+                        h // 8
+
+                    numClasses =
+                        1
+                            + (if maxTotal <= 4096 then
+                                (maxTotal + 7) // 8
+
+                               else
+                                512 + (maxTotal - 4096 + 4095) // 4096
+                              )
+
+                    heapStart =
+                        markEnd * 8 + numClasses * 8 + 16
+
+                    regionSize =
+                        h + h // 8
+                in
+                markEnd - 64 - ((regionSize - heapStart) // 64)
+         in
+         ( margin 16, margin 64 ) == ( 137, 329 )
+        )
+    , check "GC-ARC F1 guards are PRESENT in runtime.mid (the tripwire that keeps them from being deleted): gcInit carries the derived capacity check and collect tests the region WORD before it dereferences it"
+        (String.contains "word maxBlocks = (regionEnd - heapStart) / 64;" runtimeMidText
+            && String.contains "mark stack smaller than the heap can hold" runtimeMidText
+            && String.contains "midgc: collect before init (no region mapped)" runtimeMidText
         )
     , check "rt closure seeds: the Mid closure and its 0-based fill helper"
         (Rt.closureSeeds == [ "Rt.closure", "Rt.closureFill" ]
@@ -3169,12 +3251,12 @@ checks rt runtimeMidText =
                 declsOf runtimeMidText
 
             names =
-                [ "magic", "classTab", "heapStart", "cursor", "heapEnd", "markTop", "markEnd", "_pad", "kind", "count", "heapBytes", "allocated", "numClass" ]
+                [ "magic", "classTab", "heapStart", "cursor", "heapEnd", "markTop", "markEnd", "_pad", "kind", "count", "heapBytes", "allocated", "numClass", "ts0s", "ts0n", "ts1s", "ts1n", "ts2s", "ts2n", "collects", "marked", "sweptBytes", "markUs", "sweepUs" ]
          in
-         List.map (\n -> Check.fieldOffset d "Region" n) names == List.map Just (List.range 0 12)
+         List.map (\n -> Check.fieldOffset d "Region" n) names == List.map Just (List.range 0 23)
         )
-    , check "U5 LAYOUT PIN: sizeof(Region) == 13 words in runtime.mid's own declaration (slots 0..12 — the mark stack starts at word 64, so it is NOT a field)"
-        (Check.sizeofStruct (declsOf runtimeMidText) "Region" == Just 13)
+    , check "U5 LAYOUT PIN: sizeof(Region) == 24 words in runtime.mid's own declaration (slots 0..12 + GC-ARC F1's stats instrument at 13..23 — the mark stack starts at word 64, so it is NOT a field, and the digit scratch the printer writes into is at BYTE 288, outside the struct)"
+        (Check.sizeofStruct (declsOf runtimeMidText) "Region" == Just 24)
     , check "U5 ACCEPT: the collector's `*Region` binder is the typed VIEW over the word it already held — `*Region r = payload(v, 0); r->cursor` loads the same node as `word r = payload(v, 0); wload(r, 3)`, and `wload(r, <computed>)` (the mark stack) still type-checks on the POINTER, which is what lets tier (i) convert only the constant-offset sites"
         (case
             ( lowlModuleBody "struct R { a : word; b : word; c : word; d : word; }\ndefun Rt.a(v : val, i : word) -> word {\n  *R r = payload(v, 0);\n  return r->d + wload(r, i);\n}"
@@ -4977,7 +5059,7 @@ checks rt runtimeMidText =
                 False
         )
     , check
-        "T17/T18/T20/T21/T22/T24 pipeline (the wave-9 + collector + never-scheduled + T24 key-set row, post-T24's one-hundred-sixty-two): surf is Ok with EXACTLY the one-hundred-sixty-two migrated keys under the default flags — T24 added the LAST THREE wall-class holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd), so the DSL-bodied set is now EMPTY — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
+        "T17/T18/T20/T21/T22/T24 pipeline (the wave-9 + collector + never-scheduled + T24 key-set row, post-T24's one-hundred-sixty-two, + GC-ARC F1's two stats defuns = one-hundred-sixty-four): surf is Ok with EXACTLY the one-hundred-sixty-four migrated keys under the default flags — T24 added the LAST THREE wall-class holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd), so the DSL-bodied set is now EMPTY — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
         (case rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
             Ok s ->
                 List.sort (Dict.keys s)
@@ -4997,7 +5079,7 @@ checks rt runtimeMidText =
                       "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock",
                       "Rt.gcAlloc", "Rt.gcAllocGo",
                       "Rt.gcClearClasses",
-                      "Rt.gcDrain", "Rt.gcInit", "Rt.gcMarkPtr", "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcScanValueArray", "Rt.gcSweep",
+                      "Rt.gcDrain", "Rt.gcInit", "Rt.gcMarkPtr", "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcNum", "Rt.gcNumOut", "Rt.gcScanValueArray", "Rt.gcSweep",
                       "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot", "Rt.globIsDotDot",
                       "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess", "Rt.halt", "Rt.intern",
                       "Rt.isChildBuiltin", "Rt.main", "Rt.memGo", "Rt.metaGo", "Rt.mkTmpAt", "Rt.nameBytes", "Rt.numText", "Rt.number?", "Rt.open",
