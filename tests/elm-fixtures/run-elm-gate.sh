@@ -52,6 +52,16 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
+# ARM B (stage 7A): QBE_MIDHOST=1 runs this whole gate against the MID effect
+# host instead of the Zig one.  The variable is read TWICE — by the COMPILE
+# (run.js splices the host into the surface text; without it the host arm and
+# its defuns are dropped and the emit is byte-identical to the pre-7A tree) and
+# by the NATIVE BINARIES at run time (Rt.main's getenv hatch, which is why ONE
+# arm-B build still carries both hosts).  Both phases inherit the caller's
+# environment; this keeps the RUN phase explicitly in the loop so arm B cannot
+# become half-set by an invocation that scopes the variable to the build.
+[ -n "${QBE_MIDHOST:-}" ] && export QBE_MIDHOST
+
 CDIR="${1:-$ROOT/elm-compiler}"
 FIX="${2:-$ROOT/tests/elm-fixtures}"
 OUT="$(mktemp -d)"

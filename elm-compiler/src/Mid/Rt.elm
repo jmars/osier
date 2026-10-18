@@ -12,7 +12,6 @@ module Mid.Rt
         , driverSeeds
         , gcSeeds
         , hostSeeds
-        , midHostMarker
         , primImpl
         , activeSurf
         , rawAbi
@@ -368,7 +367,7 @@ load source =
                         , allocating = allocating
                         , direct = direct
                         , abi = abiTable module_.decls ast
-                        , hosted = String.contains midHostMarker source
+                        , hosted = List.any (\d -> d.key == "Rt.hostRun") ast
                         }
 
 
@@ -774,26 +773,26 @@ primImpl prim =
     Dict.get prim impls
 
 
-{-| THE QBE_MIDHOST GATE (stage 7A) — the host's REACHABILITY switch.
-`run.js` COMPILE-TIME-splices the Mid effect host's arm out of `Rt.main` unless
-QBE_MIDHOST=1, and the witness of that decision inside this module is the
-MARKER LINE that the splice removes with the region: no marker, no host arm,
-no host.  The host's OWN defuns are NOT inside the region (a decl may not
-follow a defun, and the arm sits mid-file): they are always parsed, and in the
-default route they are reached by nothing and PRUNED — which is why the corpus
-stays byte-identical with them in the file (MEASURED, 159/159).
-
-WHY THE GATE IS NEEDED AT ALL: the Rt program's reachability is the hand table
-`rtDeps` closed from SEED ROOTS, not a walk of the bodies (`reach` never enters
-an Rt defun that is only seeded — see Lower's `keys`).  `Rt.main` is a seed
-root unconditionally, so an edge `Rt.main -> Rt.hostRun` in `rtDeps` would drag
-the whole host into EVERY artifact, because `$main` is in every artifact.  The
-edge therefore lives in NO table: the host's entry points are GATED ROOTS
-(`hostSeeds`), present only when the marker is.
--}
-midHostMarker : String
-midHostMarker =
-    ">>> QBE_MIDHOST-ONLY"
+-- THE QBE_MIDHOST GATE (stage 7A) — the host's REACHABILITY switch, and the
+-- ONE place the port is allowed to be conditional.
+--
+-- `run.js` COMPILE-TIME-splices the Mid effect host OUT of the surface text
+-- unless QBE_MIDHOST=1: `Rt.main`'s host arm (region 1) AND the host's own
+-- defuns (region 2) are both marked lines that the reader drops.  The witness of
+-- that decision here is therefore STRUCTURAL, not textual — the parsed program
+-- either defines `Rt.hostRun` or it does not (a `String.contains` on the text
+-- would break the selfhost lane, whose Prelude has no such function, and the
+-- defuns being absent is the stronger fact anyway: the default program carries
+-- no host key at all).
+--
+-- WHY THE GATE IS NEEDED AT ALL: the Rt program's reachability is the hand table
+-- `rtDeps` closed from SEED ROOTS, not a walk of the bodies (`reach` never enters
+-- an Rt defun that is only seeded — see Lower's `keys`).  `Rt.main` is a seed
+-- root UNCONDITIONALLY, so an edge `Rt.main -> Rt.hostRun` in `rtDeps` would drag
+-- the whole host into EVERY artifact, because `$main` is in every artifact.  The
+-- edge therefore lives in NO table: the host's entry points are GATED ROOTS
+-- (`hostSeeds`), present only when `hosted`.
+--
 
 
 {-| The host's ENTRY POINTS: the two defuns `Rt.main`'s host arm calls.  Their
@@ -1311,6 +1310,15 @@ rawAbi =
           -- self-tail.
           "Rt.tail-known"
         , "Rt.bounce"
+        , -- ===== THE STAGE 7A HOST's die family (QBE_MIDHOST).  These are not
+          -- driver seats: they are declared so the B6 RULE's derived set (an
+          -- all-word SIGNATURE) and this table agree — they are word-ABI by
+          -- signature, and declaring them keeps the two statements of one fact
+          -- from drifting.  Rt.die's own precedent: a die takes the raw C
+          -- string it prints.
+          "Rt.dieErr"
+        , "Rt.hostDieErr"
+        , "Rt.hostDieUnported"
         ]
 
 
@@ -1350,6 +1358,11 @@ rawAbiArity =
           -- lowerDefun (rawAbiArityAgree).
         ( "Rt.tail-known", 3 )
         , ( "Rt.bounce", 1 )
+        , -- stage 7A's die family (see the rawAbi set above): the message, and
+          -- the two-part variant's prefix + name.
+          ( "Rt.dieErr", 1 )
+        , ( "Rt.hostDieErr", 2 )
+        , ( "Rt.hostDieUnported", 1 )
         ]
 
 

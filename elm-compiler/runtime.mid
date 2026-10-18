@@ -24,6 +24,9 @@ export Rt.exec-run : val -> val -> val -> val !io
 export Rt.main : word -> word -> word
 export Rt.frame-enter : word -> word
 export Rt.frame-leave : word
+// >>> QBE_MIDHOST-ONLY (1/3): the applier's EXPORT line.  An export must name
+// an existing defun, so it travels with the defuns it names (region 2) — a
+// kept export over a dropped defun is a loud 'names no defun in the module'.
 // THE APPLIER SEAT (stage 7A): (closure, arg-area, nargs) -> the applied value.
 // The Mid host calls it directly (same module), and it is EXPORTED so a Mid
 // PROGRAM can reach it too — the applier pin (tools/qbe/fixtures/hostapply.elm)
@@ -32,6 +35,7 @@ export Rt.frame-leave : word
 // only EXPORTED runtime keys (J2), so an internal spelling is unreachable for
 // the pin — this is the one seat the port widens the block for.
 export Rt.apply-at : val -> val -> val -> val
+// <<< QBE_MIDHOST-ONLY (1/3)
 // ======================= THE C FFI BOUNDARY (cffi U5) =======================
 // The runtime's libc surface, DECLARED (plan §8 U5) so a `rawcall` site's
 // register classes come from the C prototype instead of the all-word
@@ -4459,7 +4463,7 @@ defun Rt.main(argc : word, argv : word) -> word {
   };
   word fptr = wload(fslot, 0);
   rawcall rt_root_push_value(fptr);
-  // >>> QBE_MIDHOST-ONLY: the Mid host arm.  run.js KEEPS this region only when
+  // >>> QBE_MIDHOST-ONLY (2/3): the Mid host arm.  run.js KEEPS this region only when
   // QBE_MIDHOST=1 is set at COMPILE time, and DROPS every line of it otherwise
   // (see run.js's `spliceMidHost`).  WHY AT COMPILE TIME AND NOT ONLY AT RUN
   // TIME: `$main` is emitted into EVERY artifact, so a getenv hatch that is
@@ -4491,7 +4495,7 @@ defun Rt.main(argc : word, argv : word) -> word {
   } else {
     return 0;
   };
-  // <<< QBE_MIDHOST-ONLY
+  // <<< QBE_MIDHOST-ONLY (2/3)
   word isprog = rawcall rt_is_program(fptr);
   word ran = if (mkbool(isprog != 0)) {
     word rrc = rawcall rt_run_program(fptr, modelslot);
@@ -5071,6 +5075,14 @@ defun Rt.bounceGo(r : val) -> val {
 // 1 readFile, 2 exec, 3 sleep — the Zig enum order) beside ONE anonymous
 // promoted `union { ... }` block whose members are named once, globally.
 // 7A only ever sets etag = 0; 7B-7E fill the unions in.
+// >>> QBE_MIDHOST-ONLY (3/3): THE HOST ITSELF.  run.js drops this region with
+// the Rt.main arm above, so the DEFAULT route does not even PARSE the host.
+// That is what makes `Rt.load`'s `hosted` flag — the reachability gate — a
+// STRUCTURAL question ("does the surface define Rt.hostRun?") and not a text
+// search: the selfhost lane's Prelude has NO `String.contains` (MEASURED:
+// `qbe-bootstrap.sh --status` -> "err type error ... unknown name:
+// String.contains").  Dropping it also means the default program carries no
+// host key at all, so `rtDeps`' host entries have no phantom target.
 // "qbe-rt: error: " + a + b + "\n", then exit 1.  The Zig host raised a
 // VmError that rt_run_program printed with this prefix; Rt.die has no prefix
 // (it is the runtime's own halt), so the port carries the prefix HERE and the
@@ -5122,12 +5134,13 @@ defun Rt.hostNowMs(dummy : val) -> val {
 //
 // THE MALLOC SIZE IS ARITHMETIC, NOT `sizeof`: Mid has no sizeof.  The literal
 // is 8 (nslots) + 33031 x 40 (the slot array) + 6 x 8 (nevals..clrBase) +
-// 128 x 4224 (the eval table, sizeof(struct HostEv) = 528 words), and
+// 128 x 4216 (the eval table, sizeof(struct HostEv) = 527 words = 4216 bytes:
+// 4 + 512 + 1 + the 10-word effect union), and
 // TestMain's 7A rows RECOMPUTE it from struct Host / struct HostEv above — a
 // field added to either without this line is a red row, not a heap overflow.
 defun Rt.hostInit(progAddrN : val) -> val {
   word progAddr = payload(progAddrN, 0);
-  word bytes = 8 + (33031 * 40) + (6 * 8) + (128 * 4224);
+  word bytes = 8 + (33031 * 40) + (6 * 8) + (128 * 4216);
   word blob = rawcall malloc(bytes);
   rawcall memset(blob, 0, bytes);
   *Host lp = [*Host](blob);
@@ -5683,3 +5696,4 @@ defun Rt.hostRun(progAddrN : val, outAddrN : val) -> val {
   rawcall rt_root_pop();
   return mknil;
 }
+// <<< QBE_MIDHOST-ONLY (3/3)

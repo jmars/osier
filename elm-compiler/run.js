@@ -81,6 +81,12 @@ const MIDHOST_BEGIN = '// >>> QBE_MIDHOST-ONLY';
 const MIDHOST_END = '// <<< QBE_MIDHOST-ONLY';
 const QBE_MIDHOST = process.env.QBE_MIDHOST === '1';
 
+// TWO regions, dropped (or kept) together: (1) Rt.main's host arm and (2) the
+// host's own defuns.  Both must go — an arm calling a pruned defun is an
+// undefined symbol at link, and a defun nothing reaches is dead weight in the
+// parse.  The counters make an unbalanced marker a LOUD compile refusal,
+// because a silently half-dropped pair is the one shape that could leave the
+// default route emitting host code.
 function spliceMidHost(text, keep) {
   const out = [];
   let inside = false;
@@ -88,13 +94,13 @@ function spliceMidHost(text, keep) {
   let ended = 0;
   for (const line of text.split('\n')) {
     const t = line.replace(/^\s+/, '');
-    if (t.startsWith(MIDHOST_BEGIN)) {
+    if (!inside && t.startsWith(MIDHOST_BEGIN)) {
       inside = true;
       began += 1;
       if (keep) out.push(line);
       continue;
     }
-    if (t.startsWith(MIDHOST_END)) {
+    if (inside && t.startsWith(MIDHOST_END)) {
       inside = false;
       ended += 1;
       if (keep) out.push(line);
@@ -106,8 +112,8 @@ function spliceMidHost(text, keep) {
     }
     out.push(line);
   }
-  if (began !== 1 || ended !== 1) {
-    console.error(`run.js: runtime.mid must carry exactly ONE QBE_MIDHOST region (found ${began} begin, ${ended} end marker(s))`);
+  if (inside || began === 0 || began !== ended) {
+    console.error(`run.js: runtime.mid's QBE_MIDHOST regions are unbalanced (${began} begin, ${ended} end, unterminated=${inside}) — refusing to compile a half-spliced runtime`);
     process.exit(2);
   }
   return out.join('\n');
