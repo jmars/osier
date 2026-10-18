@@ -1020,15 +1020,52 @@ export fn rt_print_value(final: *const Value) callconv(.c) i64 {
     };
     wout(aw.written());
     wout("\n");
+    rtCounts();
     return 0;
 }
 
+/// QBE_RT_COUNTS=1: the runtime MECHANISM counters, on STDERR, once per run.
+/// RE-HOMED (GC-ARC F1, declared): the exit-time print used to live in the Zig
+/// `main` that stage 6 B4 DELETED, so from `08e994d` on the counters were
+/// incremented by rt_string and never emitted — and probe-midgc-string.sh's
+/// runtime half (it greps `rt_string=0` as the structural kill for the
+/// `intern_live >= 2048` nursery fallback) was RED at HEAD for that reason, not
+/// because of a collector defect.  This is the only surviving hook on the exit
+/// path a Mid driver calls (Rt.main -> rt_print_value, once), and it is gated
+/// on the knob, so an un-knobbed run is byte-for-byte the same on stdout and
+/// silent on stderr.  The three `tail_*` counters are GONE with their seats —
+/// the line reports what still has a counter, not the retired shape.
+fn rtCounts() void {
+    if (std.c.getenv("QBE_RT_COUNTS") == null) return;
+    var buf: [192]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "[RT COUNTS] rt_string={d} intern_hits={d} intern_misses={d} intern_fallbacks={d} intern_live={d}\n", .{
+        rt_string_calls,
+        intern_hits,
+        intern_misses,
+        intern_fallbacks,
+        intern_live,
+    }) catch return;
+    werr(line);
+}
+
 /// AOTRUN_ARGV: build the *argv* pseudo-global value — a plain cons LIST of
-/// strings (run.js argv[2:] shape), built back-to-front (cdr-first) so each
-/// valCons roots the previous tail.  The empty case returns the nil singleton
-/// (Runtime.argv () -> []).  Mirrors the retired AOT driver's buildArgvList.
+/// strings (run.js argv[2:] shape), built back-to-front (cdr-first).  The
+/// empty case returns the nil singleton (Runtime.argv () -> []).  Mirrors the
+/// retired AOT driver's buildArgvList.
+///
+/// THE ACCUMULATOR IS ROOTED ACROSS THE WHOLE LOOP, and that is a FIX, not
+/// decoration (GC-ARC F1): the retired driver rooted only from inside
+/// valCons, so `acc` was UNROOTED at the moment `valString`'s allocation ran
+/// — a nursery scavenge there (the preemptive trigger fires at ~1 MB, i.e.
+/// ~20k argv entries) reclaims the whole tail built so far and *argv* comes
+/// back as garbage.  MEASURED pre-fix (default route, AOTRUN_ARGV=1, 60k
+/// args): `[GC NURSERY #1 …] non-exhaustive case`; post-fix the same command
+/// prints the argument count.  probe-midgc-argv.sh is the fail-before/
+/// pass-after.
 fn buildArgvList(nargs: usize, c_argv: [*]?[*:0]u8) Value {
     var acc: Value = values.valNil();
+    var rt = g.rootValue(&acc); // the SLOT is rooted: a move rewrites acc in place
+    defer rt.end();
     var i: usize = nargs;
     while (i > 0) {
         i -= 1;
