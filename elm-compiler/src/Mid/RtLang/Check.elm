@@ -7,6 +7,8 @@ module Mid.RtLang.Check exposing
     , fieldWidth
     , guardsHold
     , sizeofStruct
+    , structAlign
+    , structSizeBytes
     )
 
 {-| Mid.RtLang.Check — the surface language's TYPECHECKER, judgments
@@ -339,25 +341,33 @@ type alias Env =
     }
 
 
-{-| One struct field with its computed word offset (declaration order, the
-`Field` plus the offset `layoutOf` derived).  The LOWERER (A2) consumes
-this SAME shape — name -> ordered fields -> (type, offset) — the one-table
-property: no second copy to skew (plan risk R2).
+{-| One struct field with its computed BYTE offset (declaration order, the
+`Field` plus the offset `layoutOf` derived — cffi U6 made the unit bytes, so
+`events` in a `{ i32; u16; u16 }` is at byte 4).  The LOWERER (A2) consumes
+this SAME shape — name -> ordered fields -> (type, width, offset) — the
+one-table property: no second copy to skew (plan risk R2).  `width` rides
+along from the declaration because the ACCESS needs it (which load/store
+mnemonic and sign rule), and taking it from the table the layout came from is
+what makes a field laid out at one width and accessed at another
+unrepresentable rather than merely tested.
 -}
 type alias StructField =
     { name : String
     , ty : Type
+    , width : Maybe FfiTy
     , offset : Int
     }
 
 
-{-| One struct's layout: the ordered fields (offsets derived) and the
-struct's SIZE in words (the max field end — every field is a whole number
-of 8-byte words, `val` = 5 inline).
+{-| One struct's layout: the ordered fields (byte offsets derived), the
+struct's SIZE in BYTES (the last field's end rounded up to `align`), and that
+alignment (the widest field's, 1..8 — so `sizeof` is a multiple of it, exactly
+as C's rule says).
 -}
 type alias StructInfo =
     { fields : List StructField
     , size : Int
+    , align : Int
     }
 
 
@@ -991,30 +1001,52 @@ structsFoldAll all remaining names acc =
                         Err msg ->
                             Err msg
 
-                        Ok ( fields, size ) ->
-                            structsFoldAll all rest names (Dict.insert s.name { fields = fields, size = size } acc)
+                        Ok ( fields, size, align ) ->
+                            structsFoldAll all rest names (Dict.insert s.name { fields = fields, size = size, align = align } acc)
 
 
-{-| One struct's layout: declaration-order offsets, each field's size in
-whole words (`word`/`*T` = 1, `val` = 5 inline, a nested struct = its own
-size).  Rejections: a duplicate field name; a `float` field (no raw f64
-load node); a pointer field naming an unknown struct; a struct field
-naming an unknown struct; and a BY-VALUE CYCLE (`struct S { s : S; }`, or
-`S { b : B }` beside `B { s : S }`) — B2, the layout seat the A1 note
-reserved for exactly this unit.  `decls` is threaded for the nested-struct
-SIZE only: the recursion re-walks the same declarations, it does not
-build a second table.
+{-| One struct's layout — cffi U6: BYTE offsets with PER-FIELD ALIGNMENT, and
+the struct's own size rounded up to its widest field's alignment.  Each
+field's size and alignment come from `fieldSizeOf`: the declared MEMORY width
+when the field carries one (`u8`/`i8` = 1 byte align 1, `u16`/`i16` = 2 align
+2, `u32`/`i32` = 4 align 4, `u64`/`i64` = 8 align 8), else the `Type`'s own
+(the word classes are 8, `val` is 40 bytes inline, a nested struct is its own
+size and alignment, an array is its element's size times the count).
+
+THE RULE, in one place (this function): `offset = alignUp cursor fieldAlign`,
+then `cursor = offset + fieldSize`; the size is `alignUp cursor structAlign`
+and `structAlign` is the max field alignment.  That is C's layout rule for the
+x86_64 SysV classes this language can spell, and the census fixture pins it
+against the real headers (`struct pollfd` = 8 bytes with `events` at 4 and
+`revents` at 6; `struct stat` = 144 with `st_mode` at 24).
+
+WHY BYTES AND NOT WORDS: every libc struct the effect-loop port needs is
+SUB-WORD (`short events` at a 4-byte boundary).  A word-granular table cannot
+place it at all, and — worse — a table that ROUNDED to words would place
+`st_uid` at 32 instead of 28 and read the right struct's wrong bytes.  The
+word-count surfaces the language already exposes (`sizeof`, the word-copy
+walk) are DERIVED from these byte numbers, not the other way round.
+
+Rejections, all J11: a duplicate field name; a width on a field whose `Type`
+is not `TWord`; a `float` field (no raw f64 load node); a pointer field naming
+an unknown struct; a struct field naming an unknown struct; a BY-VALUE CYCLE
+(`struct S { s : S; }`, or `S { b : B }` beside `B { s : S }`); and a struct
+whose BYTE SIZE is not a whole number of 8-byte words (a Mid struct VALUE is
+a word-quantised block — the frame cell, the word-for-word copy and `sizeof`
+all are — so a 2-byte or 12-byte layout would copy past its own end into the
+next field; the remedy is a `_pad` field, and the message says so).
 
 B5 — THE UNION RULE, and it is the ONLY place it is written: the members of
-an `MUnion` block ALL take the block's offset, and the block advances the
-cursor by the MAX of its members' sizes (so the next field starts after the
-max, word-aligned like every field).  A member is then PROMOTED into the
-struct's field list — `m.n`, `m.p`, `m.pair` all resolve here, through
-`fieldOffset`, to one offset.  Nothing else in the pipeline knows what a
-union is: the lowerer reads the same table and a union member lowers to the
-ordinary `RawWordLoad`/address at the shared offset.
+an `MUnion` block ALL take the block's offset (the block is aligned by its
+WIDEST member's alignment), and the block advances the cursor by the MAX of
+its members' sizes (so the next field starts after the max, aligned like every
+field).  A member is then PROMOTED into the struct's field list — `m.n`,
+`m.p`, `m.pair` all resolve here, through `fieldOffset`, to one offset.
+Nothing else in the pipeline knows what a union is: the lowerer reads the same
+table and a union member lowers to the ordinary `RawWordLoad`/address at the
+shared offset.
 -}
-layoutOf : List Decl -> List String -> String -> List StructMember -> Result String ( List StructField, Int )
+layoutOf : List Decl -> List String -> String -> List StructMember -> Result String ( List StructField, Int, Int )
 layoutOf decls names structName members =
     case duplicateMemberName members of
         Just f ->
@@ -1027,49 +1059,152 @@ layoutOf decls names structName members =
                 )
 
         Nothing ->
-            layoutOfSeen decls names [ structName ] structName members
+            case layoutOfSeen decls names [ structName ] structName members of
+                Err msg ->
+                    Err msg
+
+                Ok ( fields, size, align ) ->
+                    if modBy 8 size /= 0 then
+                        Err
+                            ("RtLang: J11: struct '"
+                                ++ structName
+                                ++ "' is "
+                                ++ String.fromInt size
+                                ++ " bytes — not a whole number of 8-byte words. A Mid struct VALUE is a word-quantised block, so the word-for-word copy would write past this layout's end into whatever follows it; add a `_pad` field (or widen the tail) so the size is a multiple of 8"
+                            )
+
+                    else
+                        Ok ( fields, size, align )
 
 
-layoutOfSeen : List Decl -> List String -> List String -> String -> List StructMember -> Result String ( List StructField, Int )
+layoutOfSeen : List Decl -> List String -> List String -> String -> List StructMember -> Result String ( List StructField, Int, Int )
 layoutOfSeen decls names seen structName members =
-    membersWalk decls names seen structName members 0 []
+    membersWalk decls names seen structName members 0 1 []
 
 
-membersWalk : List Decl -> List String -> List String -> String -> List StructMember -> Int -> List StructField -> Result String ( List StructField, Int )
-membersWalk decls names seen structName members offset acc =
+{-| The layout cursor walk: `cursor` is the BYTE offset the next field starts
+at (before alignment), `alignSoFar` the widest field alignment seen.  Each
+field is placed at `alignUp cursor fieldAlign` and the cursor moves to the end
+of the field's bytes.
+-}
+membersWalk : List Decl -> List String -> List String -> String -> List StructMember -> Int -> Int -> List StructField -> Result String ( List StructField, Int, Int )
+membersWalk decls names seen structName members cursor alignSoFar acc =
     case members of
         [] ->
-            Ok ( List.reverse acc, offset )
+            Ok
+                ( List.reverse acc
+                , alignUp cursor alignSoFar
+                , alignSoFar
+                )
 
         m :: rest ->
             case m of
                 MField f ->
-                    case fieldSize decls names seen structName f.ty of
+                    case fieldSizeOf decls names seen structName f of
                         Err msg ->
                             Err msg
 
-                        Ok sz ->
-                            membersWalk decls names seen structName rest (offset + sz) ({ name = f.name, ty = f.ty, offset = offset } :: acc)
+                        Ok ( sz, al ) ->
+                            let
+                                off =
+                                    alignUp cursor al
+                            in
+                            membersWalk decls names seen structName rest (off + sz) (max alignSoFar al) ({ name = f.name, ty = f.ty, width = f.width, offset = off } :: acc)
 
                 MUnion ms ->
-                    case unionAt decls names seen structName ms offset of
+                    case unionAt decls names seen structName ms (alignUp cursor (unionAlign ms)) of
                         Err msg ->
                             Err msg
 
-                        Ok ( placed, sz ) ->
-                            -- the block's members were laid out in declaration
-                            -- order, so prepending them REVERSED keeps `acc`
+                        Ok ( placed, sz, al ) ->
+                            -- the block's members were laid out in
+                            -- declaration order, so prepending them REVERSED keeps `acc`
                             -- (the reversed accumulator) in field order.
-                            membersWalk decls names seen structName rest (offset + sz) (List.reverse placed ++ acc)
+                            membersWalk decls names seen structName rest (alignUp cursor al + sz) (max alignSoFar al) (List.reverse placed ++ acc)
 
 
-{-| B5 — one union block's members at the SHARED offset `off`, and the
-block's size (`max` of the member sizes; members are ≥ 1 word, so the max is
-the block's reach).  An EMPTY block is a reject: it has no member to place
-and no size, and silently contributing 0 would let a later field sit at an
-offset nothing declares.
+{-| The alignment of a union block: the widest member's (the block is placed
+as if its widest member stood there alone).  A field whose size/alignment
+cannot be computed contributes nothing here — the walk reports the error.
 -}
-unionAt : List Decl -> List String -> List String -> String -> List Field -> Int -> Result String ( List StructField, Int )
+unionAlign : List Field -> Int
+unionAlign ms =
+    List.foldl
+        (\f acc ->
+            case widthAlign f of
+                Just al ->
+                    max acc al
+
+                Nothing ->
+                    acc
+        )
+        1
+        ms
+
+
+{-| A declared width's alignment (== its size, the C rule for the scalar
+widths this language admits).  `Nothing` for a field with no declared width
+(its `Type` decides) or for a width that is not a memory width.
+-}
+widthAlign : Field -> Maybe Int
+widthAlign f =
+    case f.width of
+        Just w ->
+            Maybe.map Tuple.first (widthSizeAlign w)
+
+        Nothing ->
+            Nothing
+
+
+{-| A declared MEMORY width's (bytes, alignment).  `i64`/`u64` are 8 — the
+same size and alignment as a word, but spelled by the width so a `mode_t`-like
+field reads as what C calls it.  `ptr`/`f64`/`void` are not memory widths
+(they are `Type` spellings here, and `void` has no size): `Nothing`.
+-}
+widthSizeAlign : FfiTy -> Maybe ( Int, Int )
+widthSizeAlign w =
+    case w of
+        FI8 ->
+            Just ( 1, 1 )
+
+        FU8 ->
+            Just ( 1, 1 )
+
+        FI16 ->
+            Just ( 2, 2 )
+
+        FU16 ->
+            Just ( 2, 2 )
+
+        FI32 ->
+            Just ( 4, 4 )
+
+        FU32 ->
+            Just ( 4, 4 )
+
+        FI64 ->
+            Just ( 8, 8 )
+
+        FU64 ->
+            Just ( 8, 8 )
+
+        FPtr ->
+            Nothing
+
+        FF64 ->
+            Nothing
+
+        FVoid ->
+            Nothing
+
+
+{-| B5 — one union block's members at the SHARED offset `off`, the block's
+size (`max` of the member sizes; members are ≥ 1 byte, so the max is the
+block's reach) and its alignment.  An EMPTY block is a reject: it has no
+member to place and no size, and silently contributing 0 would let a later
+field sit at an offset nothing declares.
+-}
+unionAt : List Decl -> List String -> List String -> String -> List Field -> Int -> Result String ( List StructField, Int, Int )
 unionAt decls names seen structName ms off =
     case ms of
         [] ->
@@ -1080,37 +1215,90 @@ unionAt decls names seen structName ms off =
                 )
 
         _ ->
-            unionWalk decls names seen structName ms off 0 []
+            unionWalk decls names seen structName ms off 0 1 []
 
 
-unionWalk : List Decl -> List String -> List String -> String -> List Field -> Int -> Int -> List StructField -> Result String ( List StructField, Int )
-unionWalk decls names seen structName ms off widest placed =
+unionWalk : List Decl -> List String -> List String -> String -> List Field -> Int -> Int -> Int -> List StructField -> Result String ( List StructField, Int, Int )
+unionWalk decls names seen structName ms off widest alignSoFar placed =
     case ms of
         [] ->
-            Ok ( List.reverse placed, widest )
+            Ok ( List.reverse placed, widest, alignSoFar )
 
         f :: rest ->
-            case fieldSize decls names seen structName f.ty of
+            case fieldSizeOf decls names seen structName f of
                 Err msg ->
                     Err msg
 
-                Ok sz ->
-                    unionWalk decls names seen structName rest off (max widest sz) ({ name = f.name, ty = f.ty, offset = off } :: placed)
+                Ok ( sz, al ) ->
+                    unionWalk decls names seen structName rest off (max widest sz) (max alignSoFar al) ({ name = f.name, ty = f.ty, width = f.width, offset = off } :: placed)
 
 
-{-| A field type's size in words, with the J11 field-type rejections.  A
-pointer field resolves its struct name against the full struct-name set
-(order-independent); a STRUCT-VALUE field (B2, `inner : B`) recurses into
-`structSizeOf` with `seen` carrying the enclosing struct names, so
-self-reference BY VALUE — `struct S { s : S; }`, or a two-struct cycle —
-is the infinite-size reject the A1 note reserved for this unit (it was
-structurally unspellable before B2 added the `TStruct` type).
+{-| `alignUp n a` — `n` rounded up to the next multiple of `a` (a power of two
+by construction: 1, 2, 4, 8).
 -}
-fieldSize : List Decl -> List String -> List String -> String -> Type -> Result String Int
-fieldSize decls names seen structName ty =
+alignUp : Int -> Int -> Int
+alignUp n a =
+    if a <= 1 then
+        n
+
+    else
+        a * ((n + a - 1) // a)
+
+
+{-| A field's size in BYTES and its alignment, with the J11 field-type
+rejections.  A declared MEMORY WIDTH wins (`u16` = 2 bytes align 2) and the
+field's `Type` must then be `TWord` — the widened read lands in a word
+register, so any other class would make the declaration a lie (that arm is
+unreachable from the grammar, which spells a width as `TWord` + width; it is
+here because the table must be TOTAL, and a future spelling that reaches it
+must fail loudly instead of being silently word-sized).
+
+Otherwise the `Type` decides: `word`/pointer/bool = 1 word (8 bytes, align 8);
+`val` = 40 bytes inline, align 8; a nested struct = its own (size, align); an
+array = element bytes × count, its element's alignment; `float` is the
+existing J11 reject (Mid.Ir has no raw-memory f64 load node).
+-}
+fieldSizeOf : List Decl -> List String -> List String -> String -> Field -> Result String ( Int, Int )
+fieldSizeOf decls names seen structName f =
+    case f.width of
+        Just w ->
+            case widthSizeAlign w of
+                Just sa ->
+                    if f.ty == TWord then
+                        Ok sa
+
+                    else
+                        Err
+                            ("RtLang: J11: struct '"
+                                ++ structName
+                                ++ "' declares field '"
+                                ++ f.name
+                                ++ "' with a memory width AND a non-word type ("
+                                ++ typeStr f.ty
+                                ++ ") — a narrow field's class IS a word (a sub-word load widens into the word register); a width narrows a `word` field, it does not retype one"
+                            )
+
+                Nothing ->
+                    Err
+                        ("RtLang: J11: struct '"
+                            ++ structName
+                            ++ "' declares field '"
+                            ++ f.name
+                            ++ "' with a width that is not a MEMORY width — a field width is one of i8 u8 i16 u16 i32 u32 i64 u64 (write `*T` for a pointer field and `float` for f64)"
+                        )
+
+        Nothing ->
+            fieldTySize decls names seen structName f.ty
+
+
+{-| A field TYPE's (bytes, alignment) — the `width = Nothing` half of
+`fieldSizeOf`, with the J11 type rejections.
+-}
+fieldTySize : List Decl -> List String -> List String -> String -> Type -> Result String ( Int, Int )
+fieldTySize decls names seen structName ty =
     case ty of
         TWord ->
-            Ok 1
+            Ok ( 8, 8 )
 
         TBool ->
             -- UNREACHABLE from the grammar (B1: `bool` is a BINDER class
@@ -1118,12 +1306,12 @@ fieldSize decls names seen structName ty =
             -- it; the word ABI/B6 is what a bool field would need).  The arm
             -- exists because the layout table must be TOTAL over `Type`, and
             -- a bool IS a 0/1 word, so if the grammar ever admits it the
-            -- honest size is 1.
-            Ok 1
+            -- honest size is one word.
+            Ok ( 8, 8 )
 
         TPtr (PStruct sname) ->
             if List.member sname names then
-                Ok 1
+                Ok ( 8, 8 )
 
             else
                 Err
@@ -1135,10 +1323,10 @@ fieldSize decls names seen structName ty =
                     )
 
         TPtr _ ->
-            Ok 1
+            Ok ( 8, 8 )
 
         TVal ->
-            Ok 5
+            Ok ( 40, 8 )
 
         TStruct sname ->
             structSizeOf decls names seen sname
@@ -1148,6 +1336,9 @@ fieldSize decls names seen structName ty =
             -- (row-major flat, so a nested array is just its element's size
             -- times its count).  `seen` rides through, so `struct S { t :
             -- S[2]; }` is the same BY-VALUE CYCLE reject a direct field is.
+            -- cffi U6: the alignment is the ELEMENT's (C's array rule), and a
+            -- narrow element type is not spellable (see `Ast.Field`'s note),
+            -- so this is the word-scaled case it always was.
             if n <= 0 then
                 Err
                     ("RtLang: J11: struct '"
@@ -1158,12 +1349,12 @@ fieldSize decls names seen structName ty =
                     )
 
             else
-                case fieldSize decls names seen structName elem of
+                case fieldTySize decls names seen structName elem of
                     Err msg ->
                         Err msg
 
-                    Ok w ->
-                        Ok (w * n)
+                    Ok ( w, al ) ->
+                        Ok ( w * n, al )
 
         TFloat ->
             Err
@@ -1173,14 +1364,14 @@ fieldSize decls names seen structName ty =
                 )
 
 
-{-| A struct's size in words, computed from the declarations with `seen`
-carrying the enclosing names: the BY-VALUE CYCLE reject lives here (one
-table, one rule).  An unknown struct is the same J11 reject the pointer
-arm spells.  B5: the size is read off the SAME `layoutOfSeen` walk the top-
-level table uses — there is no second size rule, so a union block's
-`max` contribution is a fact in exactly one place.
+{-| A struct's (size in BYTES, alignment), computed from the declarations with
+`seen` carrying the enclosing names: the BY-VALUE CYCLE reject lives here (one
+table, one rule).  An unknown struct is the same J11 reject the pointer arm
+spells.  B5: the size is read off the SAME `layoutOfSeen` walk the top-level
+table uses — there is no second size rule, so a union block's `max`
+contribution is a fact in exactly one place.
 -}
-structSizeOf : List Decl -> List String -> List String -> String -> Result String Int
+structSizeOf : List Decl -> List String -> List String -> String -> Result String ( Int, Int )
 structSizeOf decls names seen sname =
     if List.member sname seen then
         Err
@@ -1207,8 +1398,8 @@ structSizeOf decls names seen sname =
                     Err msg ->
                         Err msg
 
-                    Ok ( _, size ) ->
-                        Ok size
+                    Ok ( _, size, align ) ->
+                        Ok ( size, align )
 
 
 {-| A struct declaration's BODY (the same `.members` the layout walk reads).
@@ -1326,42 +1517,60 @@ duplicateConstantName entries =
                 duplicateConstantName rest
 
 
-{-| A struct's size in words, from the table — exposed for TestMain's
-layout pins (sizeof(Region) == 13, sizeof(FrameHdr) == 5).  `Nothing`
-when the struct is undeclared or the table rejects.
+{-| A struct's size in WORDS, from the table — the unit the LANGUAGE's
+`sizeof` and the word-quantised copy machinery speak, DERIVED from the byte
+table (`(bytes + 7) / 8`), never a second rule.  For every struct whose fields
+are word-class (which is every struct in `runtime.mid`, so every existing pin
+and every emitted `.ssa`) the byte size is a multiple of 8 and this is exactly
+the old number.  `structSizeBytes` is the honest byte answer and the one the
+census asserts.
+
+The rounding is not a fudge: `layoutOf` REJECTS a layout whose byte size is
+not word-quantised (J11), so `bytes` is always a multiple of 8 here — the
+round-up is the arithmetic, and a struct that needed it cannot exist.
 -}
 sizeofStruct : List Decl -> String -> Maybe Int
 sizeofStruct decls name =
+    Maybe.map (\bytes -> bytes // 8) (structSizeBytes decls name)
+
+
+{-| (cffi U6) A struct's size in BYTES, from the ONE layout table — the
+number the census fixture and `structZero`/`structAlloc` need.  `Nothing` when
+the struct is undeclared or the table rejects.
+-}
+structSizeBytes : List Decl -> String -> Maybe Int
+structSizeBytes decls name =
+    Maybe.map .size (structInfo decls name)
+
+
+{-| (cffi U6) A struct's ALIGNMENT in bytes (its widest field's) — `1..8`.
+Exposed because the census asserts it (`struct pollfd` aligns 4, not 8: its
+widest field is an `int`) and because a reader of the offset table needs the
+number the size was rounded to.
+-}
+structAlign : List Decl -> String -> Maybe Int
+structAlign decls name =
+    Maybe.map .align (structInfo decls name)
+
+
+structInfo : List Decl -> String -> Maybe StructInfo
+structInfo decls name =
     case structsOf decls of
         Err _ ->
             Nothing
 
         Ok table ->
-            case Dict.get name table of
-                Just info ->
-                    Just info.size
-
-                Nothing ->
-                    Nothing
+            Dict.get name table
 
 
-{-| A struct field's word offset, from the table — exposed for TestMain's
-layout pins (the pad-hole pin: `Region._pad` at word 7).  `Nothing` when
-the struct or field is unknown or the table rejects.
+{-| A struct field's BYTE offset, from the table — cffi U6 made the unit bytes
+(the pad-hole pin is now `Region._pad` at byte 56, still word 7; `struct
+pollfd`'s `events` is at byte 4, which a word-granular table could not say at
+all).  `Nothing` when the struct or field is unknown or the table rejects.
 -}
 fieldOffset : List Decl -> String -> String -> Maybe Int
 fieldOffset decls structName fieldName =
-    case structsOf decls of
-        Err _ ->
-            Nothing
-
-        Ok table ->
-            case Dict.get structName table of
-                Just info ->
-                    fieldOffsetIn info.fields fieldName
-
-                Nothing ->
-                    Nothing
+    Maybe.andThen (\info -> fieldOffsetIn info.fields fieldName) (structInfo decls structName)
 
 
 fieldOffsetIn : List StructField -> String -> Maybe Int
@@ -1385,27 +1594,55 @@ field is unknown or the table rejects.
 -}
 fieldWidth : List Decl -> String -> String -> Maybe Int
 fieldWidth decls structName fieldName =
-    case structsOf decls of
-        Err _ ->
+    case fieldOfInfo decls structName fieldName of
+        Nothing ->
             Nothing
 
-        Ok table ->
-            case Dict.get structName table of
-                Just info ->
-                    case fieldTypeIn info.fields fieldName of
-                        Just ty ->
-                            case fieldSize decls (structNames decls) [ structName ] structName ty of
-                                Ok n ->
-                                    Just n
+        Just f ->
+            case fieldSizeOf decls (structNames decls) [ structName ] structName f of
+                Ok ( bytes, _ ) ->
+                    Just (wordsOf bytes)
 
-                                Err _ ->
-                                    Nothing
-
-                        Nothing ->
-                            Nothing
-
-                Nothing ->
+                Err _ ->
                     Nothing
+
+
+{-| (cffi U6) BYTES -> the whole WORDS they occupy, rounded up.  Every field
+is `align >= size`-placed, so a field never straddles a word boundary and this
+round-up is the count of words it touches; a word-class field's byte size is a
+multiple of 8 and this is its plain count.
+-}
+wordsOf : Int -> Int
+wordsOf bytes =
+    (bytes + 7) // 8
+
+
+{-| The declaration's `Field` for one struct/field pair — the record the
+layout's size/alignment rule reads (name, type, and the declared width), taken
+from the ONE table so a caller cannot see a field the layout did not place.
+-}
+fieldOfInfo : List Decl -> String -> String -> Maybe Field
+fieldOfInfo decls structName fieldName =
+    case structInfo decls structName of
+        Nothing ->
+            Nothing
+
+        Just info ->
+            Maybe.map (\f -> { name = f.name, ty = f.ty, width = f.width }) (structFieldIn info.fields fieldName)
+
+
+structFieldIn : List StructField -> String -> Maybe StructField
+structFieldIn fields name =
+    case fields of
+        [] ->
+            Nothing
+
+        f :: rest ->
+            if f.name == name then
+                Just f
+
+            else
+                structFieldIn rest name
 
 
 {-| The surface signature set, straight from the parsed program — so
@@ -2352,7 +2589,7 @@ checkAddrOf ctx e =
                     Err msg
 
                 Ok ( sname, info ) ->
-                    case fieldTypeIn info.fields f of
+                    case fieldIn info.fields f of
                         Nothing ->
                             Err
                                 (ctx.key
@@ -2363,31 +2600,8 @@ checkAddrOf ctx e =
                                     ++ "' to take the address of"
                                 )
 
-                        Just (TStruct inner) ->
-                            Ok (TPtr (PStruct inner))
-
-                        Just TVal ->
-                            Err
-                                (ctx.key
-                                    ++ ": J13: '&"
-                                    ++ sname
-                                    ++ "."
-                                    ++ f
-                                    ++ "' — a val field has no raw address: exposing a GC-interior pointer as a word is the unrooted-view hazard (use vecaddr/payload, plan Q11)"
-                                )
-
-                        Just ty2 ->
-                            -- B3: an ARRAY field is a location too, and it
-                            -- decays to the pointer spelling of its element
-                            -- (`&s.tab` on `word[3]` is `*word`), exactly as
-                            -- the array value itself does.  Everything else is
-                            -- one word -> `*word` (B2's rule, unchanged).
-                            case decayTo ty2 of
-                                Just pty2 ->
-                                    Ok pty2
-
-                                Nothing ->
-                                    Ok (TPtr PWord)
+                        Just sf ->
+                            checkAddrOfField ctx sname f sf
 
         _ ->
             case checkExp ctx e of
@@ -2419,6 +2633,106 @@ checkAddrOf ctx e =
                                     ++ typeStr cls
                                     ++ " — a scalar local, a parameter and a temporary have no address in this lowering (a struct local (`S s;`), an array local (`word[N] a;`) or a struct field is the memory-backed seat)"
                                 )
+
+
+{-| (cffi U6) The FIELD half of `&place`, split out so the narrow-width
+reject reads as its own judgment.  The reject is real and it is the one the
+byte table creates: a NARROW field is 1/2/4 bytes, and the only pointer
+family this language has is `*word`, whose every read is 8 bytes wide — so
+`&p->events` typed `*word` would be a licence to read and WRITE four bytes
+past the field's end into its neighbour.  There is no `*u16` family and this
+unit does not add one; the field is read and written through `p->f`, which
+carries the width.
+-}
+checkAddrOfField : Ctx -> String -> String -> StructField -> Result String Type
+checkAddrOfField ctx sname f sf =
+    case sf.width of
+        Just width ->
+            Err
+                (ctx.key
+                    ++ ": J13: '&"
+                    ++ sname
+                    ++ "."
+                    ++ f
+                    ++ "' — a narrow field ("
+                    ++ ffiFieldWidthName width
+                    ++ ", "
+                    ++ String.fromInt (Maybe.withDefault 4 (Maybe.map Tuple.first (widthSizeAlign width)))
+                    ++ " bytes) has no address: the only pointer family here is `*word`, whose reads and writes are 8 bytes wide, so the address would licence overwriting the neighbouring fields. Read and write the field itself (`"
+                    ++ sname
+                    ++ "."
+                    ++ f
+                    ++ "` / `p->"
+                    ++ f
+                    ++ "`), which carries the width"
+                )
+
+        Nothing ->
+            case sf.ty of
+                TStruct inner ->
+                    Ok (TPtr (PStruct inner))
+
+                TVal ->
+                    Err
+                        (ctx.key
+                            ++ ": J13: '&"
+                            ++ sname
+                            ++ "."
+                            ++ f
+                            ++ "' — a val field has no raw address: exposing a GC-interior pointer as a word is the unrooted-view hazard (use vecaddr/payload, plan Q11)"
+                        )
+
+                ty2 ->
+                    -- B3: an ARRAY field is a location too, and it
+                    -- decays to the pointer spelling of its element
+                    -- (`&s.tab` on `word[3]` is `*word`), exactly as
+                    -- the array value itself does.  Everything else is
+                    -- one word -> `*word` (B2's rule, unchanged).
+                    case decayTo ty2 of
+                        Just pty2 ->
+                            Ok pty2
+
+                        Nothing ->
+                            Ok (TPtr PWord)
+
+
+{-| (cffi U6) A field width as this module's messages spell it.
+-}
+ffiFieldWidthName : FfiTy -> String
+ffiFieldWidthName w =
+    case w of
+        FI8 ->
+            "i8"
+
+        FU8 ->
+            "u8"
+
+        FI16 ->
+            "i16"
+
+        FU16 ->
+            "u16"
+
+        FI32 ->
+            "i32"
+
+        FU32 ->
+            "u32"
+
+        FI64 ->
+            "i64"
+
+        FU64 ->
+            "u64"
+
+        FPtr ->
+            "ptr"
+
+        FF64 ->
+            "f64"
+
+        FVoid ->
+            "void"
 
 
 {-| J13 — `p->f = e;`: `p` must be a struct pointer, `f` a field of its
@@ -2629,6 +2943,24 @@ structAt ctx sname what =
                     ++ what
                     ++ "' — no such struct is declared"
                 )
+
+
+{-| (cffi U6) The table's field RECORD — offset, type AND declared width.  The
+class rules that only need the type use `fieldTypeIn` below; the ones that must
+know the width (`&place`) use this.
+-}
+fieldIn : List StructField -> String -> Maybe StructField
+fieldIn fields name =
+    case fields of
+        [] ->
+            Nothing
+
+        f :: rest ->
+            if f.name == name then
+                Just f
+
+            else
+                fieldIn rest name
 
 
 fieldTypeIn : List StructField -> String -> Maybe Type
@@ -3716,10 +4048,11 @@ castClass ctx target inner =
                             )
 
 
-{-| J1/Q9 — `sizeof`'s value in WORDS (the layout's own unit: every field
-is a whole number of 8-byte words).  A struct reads the ONE table the
-checker already built (`Env.structs` — the A1 layout, no second copy); a
-type reads its class width.  `float` is a reject for the reason J11 rejects
+{-| J1/Q9 — `sizeof`'s value in WORDS (the unit the language exposes: every
+field is a whole number of 8-byte words, and cffi U6's byte table is divided
+back by 8 here — exactly, because `layoutOf` rejects a size that is not
+word-quantised).  A struct reads the ONE table the checker already built
+(`Env.structs` — the A1 layout, no second copy); a type reads its class width.  `float` is a reject for the reason J11 rejects
 a float FIELD: Mid.Ir has no raw-memory f64 load node, so a float's raw
 width is a number this language cannot honour.
 -}
@@ -3729,7 +4062,7 @@ sizeofWords ctx target =
         SizeStruct name ->
             case Dict.get name ctx.env.structs of
                 Just info ->
-                    Ok info.size
+                    Ok (info.size // 8)
 
                 Nothing ->
                     Err
@@ -3744,7 +4077,7 @@ sizeofWords ctx target =
                 TStruct sname ->
                     case Dict.get sname ctx.env.structs of
                         Just info ->
-                            Ok info.size
+                            Ok (info.size // 8)
 
                         Nothing ->
                             Err

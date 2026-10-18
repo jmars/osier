@@ -21,7 +21,7 @@ import Set
 import Char.Extra exposing (utf8ByteLength)
 import Dict exposing (Dict)
 import Mid.Audit as Audit
-import Mid.Ir exposing (Alt, AltKind(..), Binder, Defun, Exp(..), FfiWidth(..), LetBinder(..), Lit(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), UnsafeNode(..), ValuePath)
+import Mid.Ir exposing (Alt, AltKind(..), Binder, Defun, Exp(..), FfiWidth(..), LetBinder(..), Lit(..), MemWidth(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), UnsafeNode(..), ValuePath)
 import Mid.Module as MidModule
 import Mid.Qbe.Il as Il
 import Mid.Qbe.Lower as QbeLower
@@ -2989,8 +2989,8 @@ checks rt runtimeMidText =
                     == [ Ast.StructDecl
                             { name = "Region"
                             , members =
-                                [ Ast.MField { name = "magic", ty = Ast.TWord }
-                                , Ast.MField { name = "count", ty = Ast.TWord }
+                                [ Ast.MField { name = "magic", ty = Ast.TWord, width = Nothing }
+                                , Ast.MField { name = "count", ty = Ast.TWord, width = Nothing }
                                 ]
                             }
                        ]
@@ -3006,7 +3006,7 @@ checks rt runtimeMidText =
                     (Ast.StructDecl s) :: _ ->
                         s.name == "Hdr"
                             && List.length s.members == 2
-                            && s.members == [ Ast.MField { name = "flags", ty = Ast.TWord }, Ast.MField { name = "next", ty = Ast.TPtr (Ast.PStruct "Hdr") } ]
+                            && s.members == [ Ast.MField { name = "flags", ty = Ast.TWord, width = Nothing }, Ast.MField { name = "next", ty = Ast.TPtr (Ast.PStruct "Hdr"), width = Nothing } ]
 
                     _ ->
                         False
@@ -3591,17 +3591,17 @@ checks rt runtimeMidText =
             "FrameHdr"
             == Just 5
         )
-    , check "A1 layout: Region._pad is at word 7 and Region.numClass at word 12 (the pad hole does not shift later fields)"
+    , check "A1 layout: Region._pad is at BYTE 56 (word 7) and Region.numClass at byte 96 (word 12) — cffi U6 made the table byte-granular; the word slots are unchanged, and the pad hole does not shift later fields"
         (Check.fieldOffset
             (declsOf "struct Region { magic : word; classTab : *word; heapStart : word; cursor : word; heapEnd : word; markTop : word; markEnd : word; _pad : word; kind : word; count : word; heapBytes : word; allocated : word; numClass : word; }")
             "Region"
             "_pad"
-            == Just 7
+            == Just 56
             && Check.fieldOffset
                 (declsOf "struct Region { magic : word; classTab : *word; heapStart : word; cursor : word; heapEnd : word; markTop : word; markEnd : word; _pad : word; kind : word; count : word; heapBytes : word; allocated : word; numClass : word; }")
                 "Region"
                 "numClass"
-            == Just 12
+            == Just 96
         )
     , check "A1 layout: a val field is 5 words inline (one val field sizes the struct at 5)"
         (Check.sizeofStruct (declsOf "struct V { v : val; }") "V" == Just 5)
@@ -3626,7 +3626,7 @@ checks rt runtimeMidText =
             names =
                 [ "magic", "classTab", "heapStart", "cursor", "heapEnd", "markTop", "markEnd", "_pad", "kind", "count", "heapBytes", "allocated", "numClass", "ts0s", "ts0n", "ts1s", "ts1n", "ts2s", "ts2n", "collects", "marked", "sweptBytes", "markUs", "sweepUs" ]
          in
-         List.map (\n -> Check.fieldOffset d "Region" n) names == List.map Just (List.range 0 23)
+         List.map (\n -> Check.fieldOffset d "Region" n) names == List.map Just (byteSlots 24)
         )
     , check "U5 LAYOUT PIN: sizeof(Region) == 24 words in runtime.mid's own declaration (slots 0..12 + GC-ARC F1's stats instrument at 13..23 — the mark stack starts at word 64, so it is NOT a field, and the digit scratch the printer writes into is at BYTE 288, outside the struct)"
         (Check.sizeofStruct (declsOf runtimeMidText) "Region" == Just 24)
@@ -3663,7 +3663,7 @@ checks rt runtimeMidText =
             names =
                 [ "live", "wm", "next", "freeNext", "_pad" ]
          in
-         List.map (\n -> Check.fieldOffset d "FrameHdr" n) names == List.map Just (List.range 0 4)
+         List.map (\n -> Check.fieldOffset d "FrameHdr" n) names == List.map Just (byteSlots 5)
         )
     , check "U6 LAYOUT PIN: sizeof(FrameHdr) == 5 words in runtime.mid's own declaration — the 40 bytes frameBlock computes (40 + 40*nslots) and frame-enter adds to reach the slots (base = hdr + 40).  The SLOTS are not a field (variable count, computed offsets); if one ever became one, this row and every `base` row go RED together"
         (Check.sizeofStruct (declsOf runtimeMidText) "FrameHdr" == Just 5)
@@ -3777,7 +3777,7 @@ checks rt runtimeMidText =
             names =
                 [ "args", "nargs", "live", "env" ]
          in
-         List.map (\n -> Check.fieldOffset d "ApplyState" n) names == List.map Just (List.range 0 3)
+         List.map (\n -> Check.fieldOffset d "ApplyState" n) names == List.map Just (byteSlots 4)
         )
     , check "U7 LAYOUT PIN: sizeof(ApplyState) == 4 words in runtime.mid's own declaration — the 32 bytes both wrappers malloc, with rt_root_push_value_array's `np` pointer at word 2 (`[word](state) + 16`) and the partial arm's rooted env at word 3 (`[word](sp) + 24`)"
         (Check.sizeofStruct (declsOf runtimeMidText) "ApplyState" == Just 4)
@@ -3789,7 +3789,7 @@ checks rt runtimeMidText =
             names =
                 [ "result", "kind", "code", "e", "args", "arity" ]
          in
-         List.map (\n -> Check.fieldOffset d "Ret" n) names == [ Just 0, Just 5, Just 6, Just 7, Just 8, Just 9 ]
+         List.map (\n -> Check.fieldOffset d "Ret" n) names == [ Just 0, Just 40, Just 48, Just 56, Just 64, Just 72 ]
         )
     , check "U7 LAYOUT PIN: sizeof(Ret) == 10 words = the 80 bytes Rt.tail-known/Rt.applyTailGo malloc and Lower's @ret blit moves — a `val` field is 5 words, so the `.done` payload is words 0..4 and the tail-call record 5..9.  A word added or dropped anywhere in the declaration moves this and the 80 in every `malloc(80)` is then a lie"
         (Check.sizeofStruct (declsOf runtimeMidText) "Ret" == Just 10)
@@ -3841,7 +3841,7 @@ checks rt runtimeMidText =
             names =
                 [ "nchains", "chains" ]
          in
-         List.map (\n -> Check.fieldOffset d "Prog" n) names == List.map Just (List.range 0 1)
+         List.map (\n -> Check.fieldOffset d "Prog" n) names == List.map Just (byteSlots 2)
         )
     , check "U8 LAYOUT PIN: sizeof(Prog) == 2 words = the 16 bytes Rt.epProg mallocs — a field added anywhere moves this and every `nchains` count with it"
         (Check.sizeofStruct (declsOf runtimeMidText) "Prog" == Just 2)
@@ -3853,7 +3853,7 @@ checks rt runtimeMidText =
             names =
                 [ "op", "pipe" ]
          in
-         List.map (\n -> Check.fieldOffset d "Chain" n) names == List.map Just (List.range 0 1)
+         List.map (\n -> Check.fieldOffset d "Chain" n) names == List.map Just (byteSlots 2)
             && Check.sizeofStruct d "Chain"
             == Just 2
         )
@@ -3865,7 +3865,7 @@ checks rt runtimeMidText =
             names =
                 [ "ncmds", "cmds" ]
          in
-         List.map (\n -> Check.fieldOffset d "Pipe" n) names == List.map Just (List.range 0 1)
+         List.map (\n -> Check.fieldOffset d "Pipe" n) names == List.map Just (byteSlots 2)
             && Check.sizeofStruct d "Pipe"
             == Just 2
         )
@@ -3877,7 +3877,7 @@ checks rt runtimeMidText =
             names =
                 [ "cbuf", "depth", "lim" ]
          in
-         List.map (\n -> Check.fieldOffset d "Scratch" n) names == List.map Just (List.range 0 2)
+         List.map (\n -> Check.fieldOffset d "Scratch" n) names == List.map Just (byteSlots 3)
             && Check.sizeofStruct d "Scratch"
             == Just 3
         )
@@ -3889,7 +3889,7 @@ checks rt runtimeMidText =
             names =
                 [ "kind", "fd", "path", "dupfd", "body", "tmpfd" ]
          in
-         List.map (\n -> Check.fieldOffset d "Redir" n) names == List.map Just (List.range 0 5)
+         List.map (\n -> Check.fieldOffset d "Redir" n) names == List.map Just (byteSlots 6)
             && Check.sizeofStruct d "Redir"
             == Just 6
         )
@@ -3901,7 +3901,7 @@ checks rt runtimeMidText =
             names =
                 [ "argv", "argc", "redirs", "nredirs", "subprog" ]
          in
-         List.map (\n -> Check.fieldOffset d "CmdState" n) names == List.map Just (List.range 0 4)
+         List.map (\n -> Check.fieldOffset d "CmdState" n) names == List.map Just (byteSlots 5)
             && Check.sizeofStruct d "CmdState"
             == Just 5
         )
@@ -3913,7 +3913,7 @@ checks rt runtimeMidText =
             names =
                 [ "cbuf", "outfd", "errfd", "inChild", "subprog", "pipe", "code", "chain", "ncmds", "npipes", "pfds", "pids", "nforked", "forkFailed", "status", "bodyOff", "bodyFd", "waitStatus", "curCmd", "cursor", "argIdx" ]
          in
-         List.map (\n -> Check.fieldOffset d "Exec" n) names == List.map Just (List.range 0 20)
+         List.map (\n -> Check.fieldOffset d "Exec" n) names == List.map Just (byteSlots 21)
         )
     , check "U8 LAYOUT PIN: sizeof(Exec) == 21 words = the 168 bytes Rt.exec-plan mallocs, and slot 17 is at byte 136 — the address `waitpid(pid, payload(st, 0) + 136, 0)` passes, which is the one slot reached by arithmetic rather than by name"
         (Check.sizeofStruct (declsOf runtimeMidText) "Exec" == Just 21)
@@ -3925,7 +3925,7 @@ checks rt runtimeMidText =
             names =
                 [ "fd", "tmp", "acc", "len", "cap", "_pad" ]
          in
-         List.map (\n -> Check.fieldOffset d "ReadBlk" n) names == List.map Just (List.range 0 5)
+         List.map (\n -> Check.fieldOffset d "ReadBlk" n) names == List.map Just (byteSlots 6)
             && Check.sizeofStruct d "ReadBlk"
             == Just 6
             && (Maybe.map (\w -> w * 8) (Check.sizeofStruct d "ReadBlk") == Just 48)
@@ -3938,7 +3938,7 @@ checks rt runtimeMidText =
             names =
                 [ "src", "dst", "n" ]
          in
-         List.map (\n -> Check.fieldOffset d "CopyDesc" n) names == List.map Just (List.range 0 2)
+         List.map (\n -> Check.fieldOffset d "CopyDesc" n) names == List.map Just (byteSlots 3)
             && Check.sizeofStruct d "CopyDesc"
             == Just 3
         )
@@ -4224,13 +4224,13 @@ checks rt runtimeMidText =
             _ ->
                 False
         )
-    , check "A3 ONE TABLE (offset past a val field): `p->c` emits the checker's offset 6 — a hand-rolled second copy that sizes the val field at 1 word would emit 2"
+    , check "A3 ONE TABLE (offset past a val field): `p->c` sits at BYTE 48 (word 6) — the checker's byte offset, and the emitted word index IS that offset / 8, so a hand-rolled second copy that sized the val field at 1 word would emit 2 here"
         (case ( lowlModuleBody a3OffsetMidC, Check.fieldOffset (declsOf a3OffsetDecls) "M" "c" ) of
             ( Ok c, Just offC ) ->
                 wordLoadIndexOf c
-                    == Just offC
+                    == Just (offC // 8)
                     && offC
-                    == 6
+                    == 48
 
             _ ->
                 False
@@ -7462,12 +7462,14 @@ checks rt runtimeMidText =
             == Just 7
             && Check.sizeofStruct decls "Inner"
             == Just 1
+            && Check.structSizeBytes decls "Outer"
+            == Just 56
             && Check.fieldOffset decls "Outer" "a"
             == Just 0
             && Check.fieldOffset decls "Outer" "in_"
-            == Just 1
+            == Just 8
             && Check.fieldOffset decls "Outer" "v"
-            == Just 2
+            == Just 16
             && Check.fieldWidth decls "Outer" "v"
             == Just 5
             && Check.fieldWidth decls "Outer" "in_"
@@ -7587,7 +7589,7 @@ checks rt runtimeMidText =
             |> Result.map (\m -> ( m.decls, m.defuns ))
          )
             == Ok
-                ( [ Ast.StructDecl { name = "S", members = [ Ast.MField { name = "tab", ty = Ast.TArray Ast.TWord 3 } ] } ]
+                ( [ Ast.StructDecl { name = "S", members = [ Ast.MField { name = "tab", ty = Ast.TArray Ast.TWord 3, width = Nothing } ] } ]
                 , [ { key = "S.f"
                     , params = []
                     , ret = Ast.TWord
@@ -8307,20 +8309,20 @@ checks rt runtimeMidText =
             == [ Ast.StructDecl
                     { name = "Msg"
                     , members =
-                        [ Ast.MField { name = "tag", ty = Ast.TWord }
+                        [ Ast.MField { name = "tag", ty = Ast.TWord, width = Nothing }
                         , Ast.MUnion
-                            [ { name = "n", ty = Ast.TWord }
-                            , { name = "p", ty = Ast.TPtr (Ast.PStruct "Msg") }
-                            , { name = "pair", ty = Ast.TStruct "Pair" }
+                            [ { name = "n", ty = Ast.TWord, width = Nothing }
+                            , { name = "p", ty = Ast.TPtr (Ast.PStruct "Msg"), width = Nothing }
+                            , { name = "pair", ty = Ast.TStruct "Pair", width = Nothing }
                             ]
-                        , Ast.MField { name = "pad", ty = Ast.TWord }
+                        , Ast.MField { name = "pad", ty = Ast.TWord, width = Nothing }
                         ]
                     }
                ]
         )
     , check "parse B5: the block keyword is `union` FOLLOWED BY `{` only — a field NAMED `union` still parses as a field (no keyword was stolen from the field namespace)"
         (declsOf "struct S { union : word; }"
-            == [ Ast.StructDecl { name = "S", members = [ Ast.MField { name = "union", ty = Ast.TWord } ] } ]
+            == [ Ast.StructDecl { name = "S", members = [ Ast.MField { name = "union", ty = Ast.TWord, width = Nothing } ] } ]
         )
     , checkErrModule "parse B5 REJECT: a union block OUTSIDE a struct — there is no union VALUE and no union TYPE, so the grammar has nowhere to put one"
         "unexpected input after the expression"
@@ -8338,13 +8340,13 @@ checks rt runtimeMidText =
             && Check.sizeofStruct decls "Pair"
             == Just 2
             && Check.fieldOffset decls "Msg" "n"
-            == Just 1
+            == Just 8
             && Check.fieldOffset decls "Msg" "p"
-            == Just 1
+            == Just 8
             && Check.fieldOffset decls "Msg" "pair"
-            == Just 1
+            == Just 8
             && Check.fieldOffset decls "Msg" "pad"
-            == Just 3
+            == Just 24
             && Check.fieldWidth decls "Msg" "n"
             == Just 1
             && Check.fieldWidth decls "Msg" "pair"
@@ -8358,11 +8360,11 @@ checks rt runtimeMidText =
          Check.sizeofStruct decls "V"
             == Just 7
             && Check.fieldOffset decls "V" "w"
-            == Just 1
+            == Just 8
             && Check.fieldOffset decls "V" "v"
-            == Just 1
+            == Just 8
             && Check.fieldOffset decls "V" "after"
-            == Just 6
+            == Just 48
             && Check.fieldWidth decls "V" "v"
             == Just 5
         )
@@ -8466,6 +8468,176 @@ checks rt runtimeMidText =
         "defun Rt.b7v(v: val) -> val {\n  val boxed = mknum(payload(v, 0) + 1);\n  word base = allocvec(1);\n  vecstore(base, 0, boxed);\n  val back = vecload(base, 0);\n  val e = call Rt.b7same(back, v);\n  return withroots [back, e] { return e; };\n}\n\ndefun Rt.b7same(a: val, b: val) -> val {\n  return mkbool(payload(a, 0) == payload(b, 0));\n}"
     , checkOkModule "B7 ACCEPT (the legal set, the RAW-MEMORY half): a `val` struct FIELD — store through the value (`b.item = v;`), store again through a POINTER (`p->item = v;`), read back both ways.  Nothing traces the field: that is obligation 1, documented in Ast's header, not a checker judgment"
         "struct Bag { tag : word; item : val; }\ndefun Rt.b7bg(v : val) -> val {\n  Bag b;\n  b.tag = 1;\n  b.item = v;\n  *Bag p = &b;\n  p->item = b.item;\n  return b.item;\n}"
+
+    -- ==================== cffi U6: WIDTH-TYPED MEMORY ====================
+    -- (plan §8 U6, handoff-cffi-u6.)  The layout table is BYTE-granular with
+    -- PER-FIELD ALIGNMENT, and a struct field may declare a MEMORY WIDTH
+    -- (`i8 u8 i16 u16 i32 u32 i64 u64`) whose size, alignment, load mnemonic
+    -- and sign rule all come from the one declaration.
+    --
+    -- THE NUMBERS BELOW ARE FROM THIS HOST'S HEADERS (glibc 2.44, x86_64),
+    -- confirmed with a C `offsetof`/`sizeof` program compiled and run here:
+    --   sys/poll.h:36-41               sizeof 8,   fd@0, events@4, revents@6
+    --   bits/struct_stat.h             sizeof 144, mode@24, uid@28, gid@32,
+    --                                  __pad0@36, rdev@40, size@48, blocks@64
+    --   bits/types/struct_timespec.h   sizeof 16, tv_sec@0, tv_nsec@8
+    -- The RUNTIME oracle for them is the `ffim-mem` fixture (a real `poll()`
+    -- writes the bytes); this is the same census one level down, where a wrong
+    -- alignment rule is a number rather than a mystery.
+    , check "cffi U6 LAYOUT (the width matrix): one struct carrying EVERY admissible width — i8/u8/i16/u16/i32/u32/i64/u64/word/val/*T/word[2] — lays out at the C offsets 0,1,2,4,8,12,16,24,32,40,80,88 and is 104 bytes (13 words), i.e. every width carries its OWN size and alignment and the mixed struct's total is the sum plus the padding C inserts"
+        (let
+            decls =
+                declsOf "struct All { a : i8; b : u8; c : i16; d : u16; e : i32; f : u32; g : i64; h : u64; w : word; v : val; p : *All; l : word[2]; }"
+         in
+         List.map (\n -> Check.fieldOffset decls "All" n) [ "a", "b", "c", "d", "e", "f", "g", "h", "w", "v", "p", "l" ]
+            == List.map Just [ 0, 1, 2, 4, 8, 12, 16, 24, 32, 40, 80, 88 ]
+            && Check.structSizeBytes decls "All"
+            == Just 104
+            && Check.sizeofStruct decls "All"
+            == Just 13
+            && Check.structAlign decls "All"
+            == Just 8
+        )
+    , check "cffi U6 LAYOUT (alignment is per field, and it is the WIDTH's): a `u32` after a `u8` lands at byte 4 (not 1), a `u16` after a `u16` lands at 2 (not 1), and a `u16`/`u32` pair then fills a word exactly — the offsets that discriminate align-1/2/4"
+        (let
+            p1 =
+                declsOf "struct P1 { a : u8; b : u32; c : word; }"
+
+            p3 =
+                declsOf "struct P3 { a : u16; b : u16; c : u32; }"
+         in
+         Check.fieldOffset p1 "P1" "b"
+            == Just 4
+            && Check.fieldOffset p1 "P1" "c"
+            == Just 8
+            && Check.fieldOffset p3 "P3" "b"
+            == Just 2
+            && Check.fieldOffset p3 "P3" "c"
+            == Just 4
+            && Check.structSizeBytes p3 "P3"
+            == Just 8
+        )
+    , check "cffi U6 CENSUS: struct pollfd — the effect-loop port's own struct (fd i32, events u16, revents u16) is 8 bytes with events at byte 4 and revents at 6, exactly the header's offsets; a word-granular table could not express byte 4 at all, and a rounded one would put events at 8"
+        (let
+            decls =
+                declsOf "struct Pollfd { fd : i32; events : u16; revents : u16; }"
+         in
+         Check.fieldOffset decls "Pollfd" "fd"
+            == Just 0
+            && Check.fieldOffset decls "Pollfd" "events"
+            == Just 4
+            && Check.fieldOffset decls "Pollfd" "revents"
+            == Just 6
+            && Check.structSizeBytes decls "Pollfd"
+            == Just 8
+            && Check.structAlign decls "Pollfd"
+            == Just 4
+        )
+    , check "cffi U6 CENSUS: struct stat's x86_64 layout through the typed fields — mode@24 (u32), uid@28, gid@32, __pad0@36, rdev@40 (the 8-byte ALIGNMENT BUMP past pad0), size@48, blksize@56, blocks@64, atim@72, mtim@88, ctim@104, reserved@120, sizeof 144"
+        (let
+            decls =
+                statCensusDecls
+         in
+         List.map (\n -> Check.fieldOffset decls "Stat" n)
+            [ "dev", "ino", "nlink", "mode", "uid", "gid", "pad0", "rdev", "size", "blksize", "blocks", "atim", "mtim", "ctim", "reserved" ]
+            == List.map Just [ 0, 8, 16, 24, 28, 32, 36, 40, 48, 56, 64, 72, 88, 104, 120 ]
+            && Check.structSizeBytes decls "Stat"
+            == Just 144
+            && Check.sizeofStruct decls "Stat"
+            == Just 18
+        )
+    , check "cffi U6 CENSUS: struct timespec nests by VALUE at its own size — sizeof(timespec) is 16 bytes / 2 words, so `atim`/`mtim`/`ctim` in `struct stat` are 16 bytes apart (72/88/104), which the row above reads off the ONE table"
+        (let
+            decls =
+                statCensusDecls
+         in
+         Check.structSizeBytes decls "Timespec"
+            == Just 16
+            && Check.structAlign decls "Timespec"
+            == Just 8
+            && Check.sizeofStruct decls "Timespec"
+            == Just 2
+        )
+    , check "cffi U6 LOWER (u16 READ): `p->events` on the pollfd struct is `RawMemLoad { MemH, unsigned, offset 4 }` — the width AND the sign are node data, and the offset is the table's BYTE offset"
+        (lowlModuleBody "struct Pollfd { fd : i32; events : u16; revents : u16; }\ndefun Rt.f(p : *Pollfd) -> word {\n  return p->events;\n}"
+            == Ok (Unsafe (RawMemLoad { width = MemH, signed = False, ptr = Var 1, off = 4 }))
+        )
+    , check "cffi U6 LOWER (i16 IS sign-extended, u16 is not): the same source with `events : i16` lowers to the SAME width and offset with `signed = True` — the sign rule is the declaration's, carried in the node, never inferred from a type at the emission site"
+        (case
+            ( lowlModuleBody "struct S { fd : i32; events : i16; }\ndefun Rt.f(p : *S) -> word {\n  return p->events;\n}"
+            , lowlModuleBody "struct S { fd : i32; events : u16; }\ndefun Rt.f(p : *S) -> word {\n  return p->events;\n}"
+            )
+         of
+            ( Ok signedTree, Ok unsignedTree ) ->
+                signedTree
+                    == Unsafe (RawMemLoad { width = MemH, signed = True, ptr = Var 1, off = 4 })
+                    && unsignedTree
+                    == Unsafe (RawMemLoad { width = MemH, signed = False, ptr = Var 1, off = 4 })
+
+            _ ->
+                False
+        )
+    , check "cffi U6 LOWER (u8): `s->a` is `RawMemLoad { MemB, unsigned, offset 0 }` — an 8-byte UNSIGNED byte read at the field's byte offset"
+        (lowlModuleBody "struct S { a : u8; b : i8; c : u32; d : i32; tail : word; }\ndefun Rt.f(s : *S) -> word {\n  return s->a;\n}"
+            == Ok (Unsafe (RawMemLoad { width = MemB, signed = False, ptr = Var 1, off = 0 }))
+        )
+    , check "cffi U6 LOWER (i8): `s->b` at byte 1 with `signed = True` — the same width, the other extension rule"
+        (lowlModuleBody "struct S { a : u8; b : i8; c : u32; d : i32; tail : word; }\ndefun Rt.f(s : *S) -> word {\n  return s->b;\n}"
+            == Ok (Unsafe (RawMemLoad { width = MemB, signed = True, ptr = Var 1, off = 1 }))
+        )
+    , check "cffi U6 LOWER (u32): `s->c` at BYTE 4 — the `u8`+`i8` pair before it is two bytes, so the `u32`'s align-4 rounds the cursor up: the offset that a word-granular table could not produce"
+        (lowlModuleBody "struct S { a : u8; b : i8; c : u32; d : i32; tail : word; }\ndefun Rt.f(s : *S) -> word {\n  return s->c;\n}"
+            == Ok (Unsafe (RawMemLoad { width = MemW, signed = False, ptr = Var 1, off = 4 }))
+        )
+    , check "cffi U6 LOWER (i32): `s->d` at byte 8 with `signed = True`"
+        (lowlModuleBody "struct S { a : u8; b : i8; c : u32; d : i32; tail : word; }\ndefun Rt.f(s : *S) -> word {\n  return s->d;\n}"
+            == Ok (Unsafe (RawMemLoad { width = MemW, signed = True, ptr = Var 1, off = 8 }))
+        )
+    , check "cffi U6 LOWER (u64 IS the word path): `s->e` on a `u64` field lowers to the ORDINARY `RawWordLoad { index = 2 }` (byte 16 / 8) — an 8-byte field is a word, so its declared width buys the LAYOUT, not a new op"
+        (lowlModuleBody "struct S { a : u8; b : i8; c : u32; d : i32; e : u64; tail : word; }\ndefun Rt.f(s : *S) -> word {\n  return s->e;\n}"
+            == Ok (Unsafe (RawWordLoad { ptr = Var 1, index = Lit (LNumber 2) }))
+        )
+    , check "cffi U6 LOWER (STORE): `p->revents = e;` is `RawMemStore { MemH, offset 6 }` — the store's width comes from the same declaration (both signs store the same bytes, so the store node carries no sign).  The store sits under the dead-binder Let every effect statement gets, so the row searches the tree"
+        (case lowlModuleBody "struct P { fd : i32; events : u16; revents : u16; }\ndefun Rt.f() -> val {\n  P p;\n  p.revents = 7;\n  return mknil;\n}" of
+            Ok body ->
+                List.any (\node -> canon node == canon (Unsafe (RawMemStore { width = MemH, ptr = Var 1, off = 6, value = Lit (LNumber 7) }))) (b4Exps body)
+
+            Err _ ->
+                False
+        )
+    , check "cffi U6 LOWER (a WORD field is UNCHANGED): `p->w` still lowers to `RawWordLoad { index = 1 }` — the WORD-offset node with its 8*index address arithmetic, byte-for-byte the tree the corpus pins; the byte table feeds it `offset / 8`"
+        (lowlModuleBody "struct S { a : word; w : word; }\ndefun Rt.f(p : *S) -> word {\n  return p->w;\n}"
+            == Ok (Unsafe (RawWordLoad { ptr = Var 1, index = Lit (LNumber 1) }))
+        )
+    , check "cffi U6 EMIT (.ssa): the narrow access really prints as the sub-word op — `p.events = 4` emits `storeh 4, %t..` and the read emits `=l loaduh %t..` (an `l`-typed WIDENING load, with no extension after it)"
+        (case emitUserSsa rt "module U6e\nstruct Pollfd { fd : i32; events : u16; revents : u16; }\ndefun U6e.f() -> val {\n  Pollfd p;\n  p.events = 4;\n  return mknum(p.events);\n}" of
+            Ok ssa ->
+                String.contains "=l loaduh " ssa
+                    && String.contains "storeh 4, %t" ssa
+
+            Err _ ->
+                False
+        )
+    , checkErrModule "cffi U6 REJECT (J11, the word-quantised block): a struct whose BYTE SIZE is not a whole number of 8-byte words is refused by name, with the remedy — a 2-byte layout would make the word-for-word copy write past its own end into the next field"
+        "not a whole number of 8-byte words"
+        "struct P { a : u16; }\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , checkErrModule "cffi U6 REJECT (a narrow ARRAY element): `u8[256]` — the `struct dirent` name tail — is refused at PARSE with the reason (a narrow element type in `TArray` is not part of this unit), never silently word-scaled"
+        "is a MEMORY width, and an ARRAY of one is not expressible yet"
+        "struct D { type : u8; name : u8[256]; }\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , checkErrModule "cffi U6 REJECT (a narrow width at the CALL boundary): `u16` in an `extern` parameter is refused at parse, and the message says it is a FIELD width — the four sub-word `FfiTy` constructors stay unreachable from an `extern` line, so no sub-word argument class exists to get wrong"
+        "is a MEMORY width: it is spellable as a struct FIELD type"
+        "extern f(x : u16) -> i32;\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , checkErrModule "cffi U6 REJECT (J13, the address of a narrow field): `&p->events` is refused — the only pointer family here is `*word`, 8 bytes wide, so the address would licence overwriting the neighbouring fields; the message names the width and the remedy (read the field itself)"
+        "has no address: the only pointer family here is `*word`"
+        "struct Pollfd { fd : i32; events : u16; revents : u16; }\ndefun Rt.g(p : *Pollfd) -> word {\n  *word q = &p->events;\n  return *q;\n}"
+    , check "cffi U6 ACCEPT (the control): `&p->w` on a struct with NO narrow field is still legal (`*word`) — so the J13 reject above is about the declared WIDTH and not about `&` on a field (and note it fires for `i32` too: a 4-byte field has no 8-byte view either)"
+        (case chkModuleFlags [] "struct S { w : word; x : word; }\ndefun Rt.g(p : *S) -> word {\n  *word q = &p->w;\n  return *q;\n}" of
+            Ok () ->
+                True
+
+            Err _ ->
+                False
+        )
     ]
 
 
@@ -8638,6 +8810,13 @@ b4Kids e =
 
                 RawWordStore r ->
                     [ r.ptr, r.index, r.value ]
+
+                -- cffi U6: width-typed memory — the offset is node data.
+                RawMemLoad r ->
+                    [ r.ptr ]
+
+                RawMemStore r ->
+                    [ r.ptr, r.value ]
 
                 WithRoots r ->
                     [ r.body ]
@@ -9204,7 +9383,19 @@ auditNested =
                         }
                 }
       }
+
     ]
+
+
+{-| cffi U6: `struct stat`'s x86_64 layout as the CENSUS rows spell it — the
+header's field order and widths (glibc 2.44, `bits/struct_stat.h`, the
+`__x86_64__` arm without time64 redirects), including glibc's own `__pad0` int
+and its `__glibc_reserved[3]` tail, so `sizeof` is 144 = 18 words.  The SAME
+declaration the `ffim-mem` fixture's `Stat` uses.
+-}
+statCensusDecls : List Ast.Decl
+statCensusDecls =
+    declsOf "struct Timespec { sec : i64; nsec : i64; }\nstruct Stat { dev : u64; ino : u64; nlink : u64; mode : u32; uid : u32; gid : u32; pad0 : i32; rdev : u64; size : i64; blksize : i64; blocks : i64; atim : Timespec; mtim : Timespec; ctim : Timespec; reserved : word[3]; }"
 
 
 auditClean : List Defun
@@ -9606,6 +9797,18 @@ b6CheckErr rt src =
         Ok parsed ->
             Rt.checkLowerUserModule rt.exportedTypes parsed
                 |> Result.map (\_ -> "ok")
+
+
+{-| cffi U6 — the WORD slots 0..n-1 as BYTE offsets: `Check.fieldOffset` is
+byte-granular now, and a word-class field's slot k is byte 8k.  The layout pins
+below keep stating the SLOT LIST they always stated (the pre-U6 emission is the
+independent record of that mapping) and convert here, so the assertion is the
+same relationship measured in the table's new unit rather than an expectation
+rewritten to whatever the table now says.
+-}
+byteSlots : Int -> List Int
+byteSlots n =
+    List.map (\i -> 8 * i) (List.range 0 (n - 1))
 
 
 {-| The ONE definition of the layout (A2 + A3): the constant the LOWERER emits
@@ -10424,6 +10627,16 @@ cnode st node =
 
         RawWordStore r ->
             cnode3 st r .ptr .index .value RawWordStore (\rec a b c -> { rec | ptr = a, index = b, value = c })
+
+        RawMemLoad r ->
+            let
+                ( x1, st1 ) =
+                    cexp st r.ptr
+            in
+            ( RawMemLoad { r | ptr = x1 }, st1 )
+
+        RawMemStore r ->
+            cnode2 st r .ptr .value RawMemStore (\rec a b -> { rec | ptr = a, value = b })
 
         RawCallRaw r ->
             let
@@ -11815,6 +12028,12 @@ rawCallSyms exp =
 
                 RawWordStore ws ->
                     rawCallSyms ws.ptr ++ rawCallSyms ws.index ++ rawCallSyms ws.value
+
+                RawMemLoad ml ->
+                    rawCallSyms ml.ptr
+
+                RawMemStore ms ->
+                    rawCallSyms ms.ptr ++ rawCallSyms ms.value
 
                 RawCallRaw seat ->
                     List.concatMap rawCallSyms seat.args

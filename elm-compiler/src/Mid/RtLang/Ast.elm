@@ -487,6 +487,26 @@ type FfiTy
     | FPtr
     | FF64
     | FVoid
+    | -- (cffi U6) THE SUB-WORD WIDTHS — a FIELD width only.
+      --
+      -- They are in this vocabulary because a struct field's declared width IS
+      -- the same table read the other way round (a field is "an `i16`", the
+      -- call boundary is "an `i16` register argument"), and a separate
+      -- near-identical width type would be the second table this repo keeps
+      -- paying for.  BUT the two roles are not the same: `i8`/`u8`/`i16`/`u16`
+      -- are MEMORY widths with a sign rule and a byte count, and C carries
+      -- them in a 32-bit register when they cross a call boundary.
+      --
+      -- WHAT HAPPENS IF ONE IS WRITTEN AS A PARAMETER OR RESULT TYPE: the
+      -- `extern` parser's own width table (`Parse.elm`'s `ffiTyOf`) does NOT
+      -- admit them, so it is a PARSE reject with the R-01 message naming the
+      -- field-only reason.  That is deliberate — it keeps these constructors
+      -- UNREACHABLE from the call boundary, so no `case` on `FfiTy` in the
+      -- call lowering can silently acquire a sub-word argument class.
+      FI8
+    | FU8
+    | FI16
+    | FU16
 
 
 {-| One declared C parameter: its NAME is documentation only (the call site
@@ -541,24 +561,50 @@ type StructMember
     | MUnion (List Field)
 
 
-{-| One struct field: a name and its type, in DECLARATION ORDER (the
-layout rule is order-preserving, word-granular — every field a whole
-number of 8-byte words; the runtime's own layouts are word-quantized, so
-no finer padding exists).  B5: a `Field` is also one MEMBER OF A UNION
-BLOCK (`MUnion` carries a list of these) — the same record, a different
-layout rule applied to it.  A `_pad` field is an ordinary word field —
-nothing special to check — it keeps the layout table honest where a real
-layout has a hole (region word 7; globals words 3–7, 14–15).  Field
-types are the `Type` grammar: `word`, `val` (40 bytes = 5 words, stored
-INLINE — allowed, nothing traces it, the rooting discipline is a stated
-contract not a type property), `float` (parsed here; REJECTED by the A1
-checker's J11 — Mid.Ir has no raw-memory f64 load node), and the three
-pointer families.  Self-reference by value (`next : S`) is the A1 checker's
-J11 reject (infinite size); by pointer (`next : *S`) is the only recursion.
+{-| One struct field: a name, its type, and — cffi U6 — an OPTIONAL declared
+MEMORY WIDTH (`Nothing` = the type's own width).  Fields are in DECLARATION
+ORDER and the layout rule is order-preserving and BYTE-granular with
+per-field alignment (`Check.layoutOf`), so a `u16` may sit at byte 4 where the
+word before it ended.
+
+`width` is what a libc struct needs and the `Type` grammar cannot say:
+`events : u16` is an integer field FOUR BYTES INTO a `{ i32; u16; u16 }` —
+half a word, and unsigned.  The spelling carries a `Type` AND a width because
+the two answer different questions: `ty` is the CLASS the field reads/writes
+as (always `TWord` for a narrow field — a sub-word load WIDENS into the word
+register, so the surrounding expression sees a word), while `width` is the
+BYTE COUNT and SIGN RULE the access lowers to (`loaduh`/`storeh` for `u16`,
+`loadsh`/`storeh` for `i16`).  The width is thus the SAME information the load
+node carries (Mid.Ir's `RawMemLoad { width, signed }`), taken from the ONE
+place the declaration wrote it — which is the point: a field cannot be laid
+out at one width and accessed at another without the two disagreeing loudly
+(`Check`'s J11 rejects a width on a non-`TWord` field, and the lowerer reads
+the width from the table, never from a guess).
+
+WHAT A WIDTH IS NOT: it is not a `Type`.  A narrow field's VALUE is a word
+(the widened read), there is no `i16` expression class, no narrow arithmetic
+and no narrow array element — so `u16` is spellable in a FIELD position only
+(the `extern` width table does not admit it: see `FfiTy`).  A NARROW ARRAY
+ELEMENT (`d_name : u8[256]`, the `struct dirent` tail) is therefore NOT
+expressible yet: arrays are word-scaled (`TArray Type Int`), and this unit
+does not widen `Type`.  Named at the census fixture, not silently absent.
+
+B5: a `Field` is also one MEMBER OF A UNION BLOCK (`MUnion` carries a list of
+these) — the same record, a different layout rule applied to it.  A `_pad`
+field is an ordinary word field — nothing special to check — it keeps the
+layout table honest where a real layout has a hole (region word 7; globals
+words 3–7, 14–15).  Field types are the `Type` grammar: `word`, `val` (40
+bytes = 5 words, stored INLINE — allowed, nothing traces it, the rooting
+discipline is a stated contract not a type property), `float` (parsed here;
+REJECTED by the A1 checker's J11 — Mid.Ir has no raw-memory f64 load node),
+and the three pointer families.  Self-reference by value (`next : S`) is the
+A1 checker's J11 reject (infinite size); by pointer (`next : *S`) is the only
+recursion.
 -}
 type alias Field =
     { name : String
     , ty : Type
+    , width : Maybe FfiTy
     }
 
 

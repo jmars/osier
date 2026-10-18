@@ -1847,6 +1847,14 @@ message: anything else — `u8`, `i16`, `int`, `long`, `char` (the `*` of
 `char*` is a separate token), `float32` — is R-01/R-02's parse reject
 naming the found token AND the whole admissible set, so the failure says
 what to write instead.
+
+cffi U6 NOTE — this is the CALL-BOUNDARY table and it deliberately still
+refuses `i8`/`u8`/`i16`/`u16`: those are MEMORY widths (a field's byte count
+and sign rule), spelled in a struct-FIELD position only, through
+`fieldWidthOf` below.  Keeping them out of THIS table is what makes
+`FfiTy`'s four sub-word constructors unreachable from an `extern` line, so
+the call lowering has no sub-word argument class to get wrong.  A reader who
+tries `extern f(x : u16) -> i32;` gets R-01's message, which now says so.
 -}
 ffiTyAt : Int -> String -> ParserFast.Parser FfiTy
 ffiTyAt offset src =
@@ -1858,7 +1866,17 @@ ffiTyAt offset src =
 
                 Nothing ->
                     ParserFast.problem
-                        ("expected an FFI width (i32, u32, i64, u64, ptr, f64, void), found `" ++ tok ++ "`")
+                        ("expected an FFI width (i32, u32, i64, u64, ptr, f64, void), found `"
+                            ++ tok
+                            ++ "`"
+                            ++ (case fieldWidthOf tok of
+                                    Just _ ->
+                                        " — `" ++ tok ++ "` is a MEMORY width: it is spellable as a struct FIELD type (cffi U6), not as a call-boundary width"
+
+                                    Nothing ->
+                                        ""
+                               )
+                        )
 
         Nothing ->
             ParserFast.problem "expected an FFI width (i32, u32, i64, u64, ptr, f64, void)"
@@ -2009,9 +2027,94 @@ fieldMember =
 field : ParserFast.Parser Field
 field =
     ParserFast.map2
-        (\name ty -> { name = name, ty = ty })
+        (\name fty -> { name = name, ty = fty.ty, width = fty.width })
         surfaceName
-        (spelled ":" surfaceType)
+        (spelled ":" fieldType)
+
+
+{-| (cffi U6) A FIELD TYPE: the ordinary `Type` (`word`, `val`, a struct, the
+three pointer families, an array) with NO declared width, or one of the
+integer-width spellings (`i8 u8 i16 u16 i32 u32 i64 u64`) which is a `TWord`
+field with a declared MEMORY width.
+
+The width spellings exist in this position and in no other — a local binder,
+a parameter, a `sizeof` operand and an `extern` line all keep `surfaceType`,
+so `u16` never becomes an expression class.  A narrow ARRAY element is the
+one spelling this rejects LOUDLY rather than silently: `u8[256]` would need a
+narrow element type in `TArray`, which this unit does not add (the `struct
+dirent` name tail is the shape that would want it).
+-}
+fieldType : ParserFast.Parser { ty : Type, width : Maybe FfiTy }
+fieldType =
+    ParserFast.offsetSourceAndThen fieldTypeAt
+
+
+fieldTypeAt : Int -> String -> ParserFast.Parser { ty : Type, width : Maybe FfiTy }
+fieldTypeAt offset src =
+    let
+        plain =
+            ParserFast.map (\ty -> { ty = ty, width = Nothing }) surfaceType
+    in
+    case tokenAtOff offset src of
+        Just ( tok, len ) ->
+            case fieldWidthOf tok of
+                Just w ->
+                    let
+                        after =
+                            skipWsCommentsAt (offset + len) src
+                    in
+                    if String.slice after (after + 1) src == "[" then
+                        ParserFast.problem
+                            ("`"
+                                ++ tok
+                                ++ "` is a MEMORY width, and an ARRAY of one is not expressible yet — a narrow array element (`u8[256]`, the `struct dirent` name tail) would need a narrow element type in `TArray`, which cffi U6 does not add: spell a `word` array and read the bytes with `byteload`"
+                            )
+
+                    else
+                        spelled tok (succeed { ty = TWord, width = Just w })
+
+                Nothing ->
+                    plain
+
+        Nothing ->
+            plain
+
+
+{-| (cffi U6) THE FIELD-WIDTH TABLE.  `i32 u32 i64 u64` are here because a
+libc struct declares `mode_t`/`off_t`-sized integer fields and a field's
+declared width is the whole point of the unit; the sub-word four are the ones
+`ffiTyOf` does NOT admit.  `ptr`/`f64`/`void` are absent: a field spelling
+those is `*T`/`float` in the `Type` grammar, and a `void` field has no size.
+-}
+fieldWidthOf : String -> Maybe FfiTy
+fieldWidthOf tok =
+    case tok of
+        "i8" ->
+            Just FI8
+
+        "u8" ->
+            Just FU8
+
+        "i16" ->
+            Just FI16
+
+        "u16" ->
+            Just FU16
+
+        "i32" ->
+            Just FI32
+
+        "u32" ->
+            Just FU32
+
+        "i64" ->
+            Just FI64
+
+        "u64" ->
+            Just FU64
+
+        _ ->
+            Nothing
 
 
 entryList : ParserFast.Parser (List EnumEntry)

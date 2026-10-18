@@ -108,7 +108,7 @@ emit-inert oracle.
 -}
 
 import Dict exposing (Dict)
-import Mid.Ir exposing (Binder, Defun, Exp(..), FfiWidth(..), LetBinder(..), Lit(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), UnsafeNode(..))
+import Mid.Ir exposing (Binder, Defun, Exp(..), FfiWidth(..), LetBinder(..), Lit(..), MemWidth(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), UnsafeNode(..))
 import Mid.RtLang.Ast as Ast
 import Mid.RtLang.Ast
     exposing
@@ -962,7 +962,7 @@ lowerStmt st stmt cont =
                         Err msg ->
                             Err msg
 
-                        Ok ( off, fty ) ->
+                        Ok ( off, fld ) ->
                             case lowerExp st p of
                                 Err msg ->
                                     Err msg
@@ -977,7 +977,7 @@ lowerStmt st stmt cont =
                                                 -- B1: the same bool→val box, at
                                                 -- a `val` FIELD slot.
                                                 e2 =
-                                                    if fty == Ast.TVal && isBoolExp st2 e then
+                                                    if fld.ty == Ast.TVal && isBoolExp st2 e then
                                                         boolToVal e1
 
                                                     else
@@ -1849,21 +1849,26 @@ lowerExp st e =
                             Err (st.key ++ ": " ++ msg)
 
                         Ok widths ->
-                            lowerCall st args
-                                (\es s ->
-                                    ( Unsafe
-                                        (RawCallExtern
-                                            { sym = sym
-                                            , args = es
-                                            , argWidths = widths
-                                            , varargs = sig.varargs
-                                            , fixedArgs = List.length sig.params
-                                            , result = ffiWidthOf sig.result
-                                            }
+                            case ffiWidthOf sym sig.result of
+                                Err msg ->
+                                    Err (st.key ++ ": " ++ msg)
+
+                                Ok resWidth ->
+                                    lowerCall st args
+                                        (\es s ->
+                                            ( Unsafe
+                                                (RawCallExtern
+                                                    { sym = sym
+                                                    , args = es
+                                                    , argWidths = widths
+                                                    , varargs = sig.varargs
+                                                    , fixedArgs = List.length sig.params
+                                                    , result = resWidth
+                                                    }
+                                                )
+                                            , s
+                                            )
                                         )
-                                    , s
-                                    )
-                                )
 
         Ast.EAggCall shape fnExp args ->
             case lowerExp st fnExp of
@@ -1911,13 +1916,13 @@ lowerExp st e =
                         Err msg ->
                             Err msg
 
-                        Ok ( off, fty ) ->
+                        Ok ( off, fld ) ->
                             case lowerExp st p of
                                 Err msg ->
                                     Err msg
 
                                 Ok ( st1, p1 ) ->
-                                    Ok ( st1, fieldLoad fty p1 off )
+                                    Ok ( st1, fieldLoad fld p1 off )
 
                 Ok pty ->
                     Err
@@ -2344,30 +2349,60 @@ lower2 st a b k =
 `u32` stay apart, because the `extsw`/`extuw` after a `w` result differ — the
 collapse is the IR's, the distinction is the DECLARATION's, and this is the
 single place the two vocabularies meet.
+
+(cffi U6) The four SUB-WORD widths have NO call-boundary class and this is
+where that is stated once: they are MEMORY widths (a field's byte count and
+sign rule), the `extern` parser refuses them, so a signature carrying one
+here means a hand-built declaration — a loud internal error naming the symbol,
+never a silent widening into `FW64`.  Returning a `Result` rather than a
+defaulted classifier is deliberate: the caller cannot forget to look.
 -}
-ffiWidthOf : Ast.FfiTy -> FfiWidth
-ffiWidthOf t =
+ffiWidthOf : String -> Ast.FfiTy -> Result String FfiWidth
+ffiWidthOf sym t =
     case t of
         Ast.FI32 ->
-            FW32S
+            Ok FW32S
 
         Ast.FU32 ->
-            FW32U
+            Ok FW32U
 
         Ast.FI64 ->
-            FW64
+            Ok FW64
 
         Ast.FU64 ->
-            FW64
+            Ok FW64
 
         Ast.FPtr ->
-            FW64
+            Ok FW64
 
         Ast.FF64 ->
-            FF64
+            Ok FF64
 
         Ast.FVoid ->
-            FVoid
+            Ok FVoid
+
+        Ast.FI8 ->
+            subWordWidth sym "i8"
+
+        Ast.FU8 ->
+            subWordWidth sym "u8"
+
+        Ast.FI16 ->
+            subWordWidth sym "i16"
+
+        Ast.FU16 ->
+            subWordWidth sym "u16"
+
+
+subWordWidth : String -> String -> Result String FfiWidth
+subWordWidth sym w =
+    Err
+        ("cffi U6: `"
+            ++ w
+            ++ "` reached the CALL BOUNDARY of '"
+            ++ sym
+            ++ "' — a sub-word width is a struct FIELD width (a byte count and a sign rule), not a register class; C carries such a value in a 32-bit register, and this language spells that `i32`/`u32`"
+        )
 
 
 {-| The positional widths of one DECLARED call's arguments.
@@ -2382,10 +2417,16 @@ whole unit exists to make unrepresentable.
 -}
 declaredArgWidths : String -> Ast.FfiSig -> Int -> Result String (List FfiWidth)
 declaredArgWidths sym sig got =
-    let
-        fixed =
-            List.map (\p -> ffiWidthOf p.ty) sig.params
-    in
+    case List.foldr (\p acc -> Result.map2 (::) (ffiWidthOf sym p.ty) acc) (Ok []) sig.params of
+        Err msg ->
+            Err msg
+
+        Ok fixed ->
+            declaredArgWidthsHelp sym sig got fixed
+
+
+declaredArgWidthsHelp : String -> Ast.FfiSig -> Int -> List FfiWidth -> Result String (List FfiWidth)
+declaredArgWidthsHelp sym sig got fixed =
     if sig.varargs then
         if List.length fixed <= got then
             Ok (fixed ++ List.repeat (got - List.length fixed) FW64)
@@ -2949,17 +2990,23 @@ resolvePointee st e =
                 )
 
 
-{-| A struct field's word offset and its declared type, from the SAME table
-the checker built (`Check.fieldOffset` — the one-table property).  `Nothing`
-here is a lowerer/checker drift, loud, never a guessed offset.
+{-| A struct field's BYTE offset and its declaration, from the SAME table the
+checker built (`Check.fieldOffset` — the one-table property).  `Nothing` here
+is a lowerer/checker drift, loud, never a guessed offset.
+
+(cffi U6) The record comes back WHOLE (type AND declared width) because the
+access node needs both: the type picks the word/val/address shape and the
+width picks the load/store mnemonic and sign.  Taking the width from the same
+declaration the layout measured is what makes "laid out as `u16`, accessed as
+a word" unrepresentable — there is no second place to read it from.
 -}
-fieldInfo : St -> String -> String -> Result String ( Int, Type )
+fieldInfo : St -> String -> String -> Result String ( Int, Ast.Field )
 fieldInfo st sname fname =
     case Check.fieldOffset st.decls sname fname of
         Just off ->
-            case fieldTyIn st.decls sname fname of
-                Just fty ->
-                    Ok ( off, fty )
+            case fieldDeclIn st.decls sname fname of
+                Just f ->
+                    Ok ( off, f )
 
                 Nothing ->
                     Err
@@ -2978,9 +3025,21 @@ fieldInfo st sname fname =
 (the same `.ty` the checker's layout and class rules read).  This is NOT
 layout logic: the offset/size arithmetic lives in `Check`, this only
 discriminates word/pointer vs `val` for the node shape.
+
+(cffi U6) The WIDTH rides with the type (`fieldDeclIn`), so this wrapper is
+only for the class discriminators that do not care which load a narrow field
+gets.
 -}
 fieldTyIn : List Decl -> String -> String -> Maybe Type
 fieldTyIn decls structName fieldName =
+    Maybe.map .ty (fieldDeclIn decls structName fieldName)
+
+
+{-| (cffi U6) The field's whole declaration — its `Type` AND its optional
+declared memory width, from the same structural walk the class rules use.
+-}
+fieldDeclIn : List Decl -> String -> String -> Maybe Ast.Field
+fieldDeclIn decls structName fieldName =
     case decls of
         [] ->
             Nothing
@@ -2989,24 +3048,24 @@ fieldTyIn decls structName fieldName =
             case d of
                 StructDecl s ->
                     if s.name == structName then
-                        fieldTyInMembers s.members fieldName
+                        fieldDeclInMembers s.members fieldName
 
                     else
-                        fieldTyIn rest structName fieldName
+                        fieldDeclIn rest structName fieldName
 
                 EnumDecl _ ->
-                    fieldTyIn rest structName fieldName
+                    fieldDeclIn rest structName fieldName
 
                 ExternDecl _ ->
-                    fieldTyIn rest structName fieldName
+                    fieldDeclIn rest structName fieldName
 
 
 {-| The declared type of a struct's field, walking the body — B5: a union
 block's members are PROMOTED, so `m.n` finds `n` inside the block (that is
 the same namespace the checker's table exposes).
 -}
-fieldTyInMembers : List Ast.StructMember -> String -> Maybe Type
-fieldTyInMembers members name =
+fieldDeclInMembers : List Ast.StructMember -> String -> Maybe Ast.Field
+fieldDeclInMembers members name =
     case members of
         [] ->
             Nothing
@@ -3015,35 +3074,37 @@ fieldTyInMembers members name =
             case m of
                 Ast.MField f ->
                     if f.name == name then
-                        Just f.ty
+                        Just f
 
                     else
-                        fieldTyInMembers rest name
+                        fieldDeclInMembers rest name
 
                 Ast.MUnion ms ->
-                    case fieldTyInFields ms name of
-                        Just ty ->
-                            Just ty
+                    case fieldDeclInFields ms name of
+                        Just f ->
+                            Just f
 
                         Nothing ->
-                            fieldTyInMembers rest name
+                            fieldDeclInMembers rest name
 
 
-fieldTyInFields : List Field -> String -> Maybe Type
-fieldTyInFields fields name =
+fieldDeclInFields : List Field -> String -> Maybe Ast.Field
+fieldDeclInFields fields name =
     case fields of
         [] ->
             Nothing
 
         f :: rest ->
             if f.name == name then
-                Just f.ty
+                Just f
 
             else
-                fieldTyInFields rest name
+                fieldDeclInFields rest name
 
 
-{-| `base + 8*off` — the ADDRESS of a struct's field.  Two rules wear it:
+{-| `base + off` — the ADDRESS of a struct's field, `off` in BYTES (cffi U6:
+the layout table is byte-granular, so `events` in `{ i32; u16; u16 }` is
+`base + 4`, not `base + 8*4`).  Two rules wear it:
 a struct-typed field READ (the field IS a location, so no load happens)
 and the `&place` lowering.  `off = 0` is the IDENTITY, so the emitted tree
 for a field at offset 0 is unchanged from before B2 (the A2 pins compare
@@ -3065,46 +3126,114 @@ addrPlus base off =
         base
 
     else
-        Unsafe (RawBin { op = RAdd, a = base, b = Lit (LNumber (8 * off)) })
+        Unsafe (RawBin { op = RAdd, a = base, b = Lit (LNumber off) })
 
 
-{-| The field READ node: `val` -> `RawVecLoad` (the 5-word Blit) at the
-field's BYTE address, a nested STRUCT -> its address (`addrPlus`, no load),
-everything else (word/pointer — the checker rejects float fields, J11) ->
-`RawWordLoad` at the field's word offset.
+{-| The field READ node.  `off` is the field's BYTE offset (`Check.fieldOffset`).
+
+  * a field with a declared SUB-WORD width (cffi U6) -> `RawMemLoad` at that
+    byte offset, with the WIDTH and the SIGN from the declaration
+    (`loadub`/`loadsb`/`loaduh`/`loadsh`/`loaduw`/`loadw`, each widening into
+    the word register);  an `i64`/`u64` field is exactly a word and takes the
+    word path below;
+  * `val` -> `RawVecLoad` (the 5-word Blit) at the field's byte address;
+  * a nested STRUCT or an ARRAY -> its address (`addrPlus`, no load);
+  * everything else (word/pointer — the checker rejects float fields, J11) ->
+    `RawWordLoad { index = off / 8 }`, the WORD-offset form the emitted bytes
+    already have (the layout aligns every word-class field to 8, so the
+    division is exact — a non-multiple would be a layout bug, and the
+    alignment rule in `Check.fieldSizeOf` is what rules it out).
 -}
-fieldLoad : Type -> Exp -> Int -> Exp
-fieldLoad fty p1 off =
-    case fty of
-        TVal ->
-            Unsafe (RawVecLoad { vec = addrPlus p1 off, index = Lit (LNumber 0) })
+fieldLoad : Ast.Field -> Exp -> Int -> Exp
+fieldLoad f p1 off =
+    case subWordWidthOf f.width of
+        Just ( w, signed ) ->
+            Unsafe (RawMemLoad { width = w, signed = signed, ptr = p1, off = off })
 
-        TStruct _ ->
-            addrPlus p1 off
+        Nothing ->
+            case f.ty of
+                TVal ->
+                    Unsafe (RawVecLoad { vec = addrPlus p1 off, index = Lit (LNumber 0) })
 
-        TArray _ _ ->
-            -- B3: an ARRAY field's value is its ADDRESS (the array repr), so
-            -- the read is the field's location — no load, exactly the nested
-            -- struct's rule two lines up.
-            addrPlus p1 off
+                TStruct _ ->
+                    addrPlus p1 off
+
+                TArray _ _ ->
+                    -- B3: an ARRAY field's value is its ADDRESS (the array
+                    -- repr), so the read is the field's location — no load,
+                    -- exactly the nested struct's rule two lines up.
+                    addrPlus p1 off
+
+                _ ->
+                    Unsafe (RawWordLoad { ptr = p1, index = Lit (LNumber (off // 8)) })
+
+
+{-| The single-node field STORE, matching `fieldLoad`'s rows.  A `TStruct`
+field never reaches here: `fieldStoreNodes` branches to the word-for-word
+COPY first (one node cannot express it, and a one-word store of a struct's
+address would be silently wrong).
+
+(cffi U6) A declared MEMORY WIDTH stores `storeb`/`storeh`/`storew` — the
+LOW bits of the word value, at the field's byte offset.  Both signs write the
+same bytes; only the load's extension is signed.
+-}
+fieldStore : Ast.Field -> Exp -> Int -> Exp -> Exp
+fieldStore f p1 off e1 =
+    case subWordWidthOf f.width of
+        Just ( w, _ ) ->
+            Unsafe (RawMemStore { width = w, ptr = p1, off = off, value = e1 })
+
+        Nothing ->
+            case f.ty of
+                TVal ->
+                    Unsafe (RawVecStore { vec = addrPlus p1 off, index = Lit (LNumber 0), value = e1 })
+
+                _ ->
+                    Unsafe (RawWordStore { ptr = p1, index = Lit (LNumber (off // 8)), value = e1 })
+
+
+{-| (cffi U6) A declared field width -> the SUB-WORD access it lowers to, or
+`Nothing` for the two widths that are exactly a word.
+
+`i64`/`u64` are 8 bytes with 8-byte alignment: their access IS the existing
+`RawWordLoad`/`RawWordStore` at `offset / 8`, so they take the word path and
+the declaration buys only the honest layout numbers (a `u64` field beside a
+`u32` lands where C puts it).  Everything narrower is a `RawMemLoad`/
+`RawMemStore` with a width and (for a LOAD) a sign.
+
+The sign is returned WITH the width rather than inferred at the emission site
+(the plan's "the sign rule is an explicit node field"): `i32` and `u32` are the
+same four bytes and the same register class, and only the declaration says
+which extension the read needs.
+
+`FfiTy`'s call-boundary-only spellings (`ptr`/`f64`/`void`) cannot appear on a
+field — the parser's field-width table admits exactly the eight integer
+widths, and `Check`'s J11 refuses a non-memory width if one ever arrives — so
+their arm is the word path, the total function's honest default.
+-}
+subWordWidthOf : Maybe Ast.FfiTy -> Maybe ( MemWidth, Bool )
+subWordWidthOf mw =
+    case mw of
+        Just Ast.FI8 ->
+            Just ( MemB, True )
+
+        Just Ast.FU8 ->
+            Just ( MemB, False )
+
+        Just Ast.FI16 ->
+            Just ( MemH, True )
+
+        Just Ast.FU16 ->
+            Just ( MemH, False )
+
+        Just Ast.FI32 ->
+            Just ( MemW, True )
+
+        Just Ast.FU32 ->
+            Just ( MemW, False )
 
         _ ->
-            Unsafe (RawWordLoad { ptr = p1, index = Lit (LNumber off) })
-
-
-{-| The single-node field STORE, matching `fieldLoad`'s word/val rows.  A
-`TStruct` field never reaches here: `fieldStoreNodes` branches to the
-word-for-word COPY first (one node cannot express it, and a one-word store
-of a struct's address would be silently wrong).
--}
-fieldStore : Type -> Exp -> Int -> Exp -> Exp
-fieldStore fty p1 off e1 =
-    case fty of
-        TVal ->
-            Unsafe (RawVecStore { vec = addrPlus p1 off, index = Lit (LNumber 0), value = e1 })
-
-        _ ->
-            Unsafe (RawWordStore { ptr = p1, index = Lit (LNumber off), value = e1 })
+            Nothing
 
 
 -- ==================== B2: struct VALUES (storage, copy, address) ====================
@@ -3128,6 +3257,9 @@ structAlloc : St -> String -> Result String Exp
 structAlloc st sname =
     case Check.sizeofStruct st.decls sname of
         Just size ->
+            -- cffi U6: the table's number is BYTES and `RawAllocN` takes
+            -- WORDS; the byte size is always word-quantised (Check's J11
+            -- rejects a layout that is not), so this is exact.
             Ok (Unsafe (RawAllocN size))
 
         Nothing ->
@@ -3137,19 +3269,21 @@ structAlloc st sname =
                 )
 
 
-{-| The ZEROED tail of `S s;` — `memset(addr, 0, 8*sizeof S)`: uninitialised
-raw memory is a silent-wrong-value generator, and this language has no
-`unsafe` marker to opt into it.
+{-| The ZEROED tail of `S s;` — `memset(addr, 0, sizeof S)` in BYTES (cffi
+U6: the table's size is bytes, so the `8 *` the word-granular table needed is
+gone; the emitted number for every word-class struct is the same one it always
+was).  Uninitialised raw memory is a silent-wrong-value generator, and this
+language has no `unsafe` marker to opt into it.
 -}
 structZero : St -> String -> Exp -> Result String Exp
 structZero st sname addr =
-    case Check.sizeofStruct st.decls sname of
+    case Check.structSizeBytes st.decls sname of
         Just size ->
             Ok
                 (Unsafe
                     (RawCallRaw
                         { sym = "memset"
-                        , args = [ addr, Lit (LNumber 0), Lit (LNumber (8 * size)) ]
+                        , args = [ addr, Lit (LNumber 0), Lit (LNumber size) ]
                         }
                     )
                 )
@@ -3239,7 +3373,7 @@ fieldsWords st sname bias members =
                                             Err msg
 
                                         Ok tailWords ->
-                                            case fieldWords st bias off f.ty w of
+                                            case fieldWords st bias (off // 8) f.ty w of
                                                 Err msg ->
                                                     Err msg
 
@@ -3291,7 +3425,7 @@ unionWords st sname bias ms =
                             Err msg
 
                         Ok w ->
-                            Ok (intsFrom (bias + off) w)
+                            Ok (intsFrom (bias + off // 8) w)
 
 
 {-| The widest member of a union block — the block's size, the same `max`
@@ -3384,11 +3518,15 @@ fieldStoreNodes st sname f base e =
         Err msg ->
             Err msg
 
-        Ok ( off, TStruct inner ) ->
-            copyStores st inner off 0 base e
+        Ok ( off, fld ) ->
+            case fld.ty of
+                TStruct inner ->
+                    -- the copy walks WORD offsets; the field's byte offset is a
+                    -- multiple of 8 (a struct field aligns 8).
+                    copyStores st inner (off // 8) 0 base e
 
-        Ok ( off, fty ) ->
-            Ok [ fieldStore fty base off e ]
+                _ ->
+                    Ok [ fieldStore fld base off e ]
 
 
 {-| The store nodes one `S s = ...` initialiser needs, WITH the state the
@@ -3434,7 +3572,7 @@ initFieldsNodes st sname addr fields acc =
                 Err msg ->
                     Err msg
 
-                Ok ( _, fty ) ->
+                Ok ( _, fld ) ->
                     case lowerExp st e of
                         Err msg ->
                             Err msg
@@ -3444,7 +3582,7 @@ initFieldsNodes st sname addr fields acc =
                                 -- B1's box, at a `val` FIELD slot: the same
                                 -- rule SFieldStore applies.
                                 e2 =
-                                    if fty == Ast.TVal && isBoolExp st e then
+                                    if fld.ty == Ast.TVal && isBoolExp st e then
                                         boolToVal e1
 
                                     else
@@ -3619,7 +3757,9 @@ elemAddr : Exp -> Ast.Exp -> Exp -> Int -> Exp
 elemAddr base astI i1 stride =
     case astI of
         Ast.EInt k ->
-            addrPlus base (k * stride)
+            -- cffi U6: `stride` is WORDS (the table's byte size / 8) and
+            -- `addrPlus` adds BYTES.
+            addrPlus base (k * stride * 8)
 
         _ ->
             Unsafe

@@ -1,0 +1,253 @@
+// cffi U6 — WIDTH-TYPED MEMORY, the two oracles the unit is named after.
+//
+// THE EXPECTED NUMBERS ARE MEASURED, NOT CHOSEN.  Read off THIS host's
+// headers AND confirmed by `offsetof`/`sizeof` in a C program compiled and
+// run here (glibc 2.44, x86_64):
+//
+//   /usr/include/sys/poll.h:36-41   struct pollfd { int fd; short events; short revents; }
+//     sizeof 8   fd@0   events@4   revents@6      POLLIN 1  POLLOUT 4  POLLHUP 16  POLLNVAL 32
+//   /usr/include/bits/struct_stat.h (__x86_64__, no __USE_TIME64_REDIRECTS)
+//     sizeof 144 dev@0 ino@8 nlink@16 mode@24 uid@28 gid@32 __pad0@36 rdev@40
+//                size@48 blksize@56 blocks@64 atim@72 mtim@88 ctim@104
+//   /usr/include/bits/types/struct_timespec.h  sizeof 16  tv_sec@0  tv_nsec@8
+//
+// THE FIELDS ARE SPELLED WITH THE WIDTHS THE HEADERS DECLARE (`i32`, `u16`,
+// `u32`, `i64`), which is the whole point of the unit: a `short` at a
+// 4-byte boundary is not expressible at all in a word-granular layout, and a
+// layout that silently ROUNDED to words would put `mode`/`uid`/`gid`/`__pad0`
+// at words 3/4/5/6 instead of bytes 24/28/32/36 — reading the right struct's
+// wrong bytes, the silent-wrong-answer class this oracle exists to catch.
+//
+// ARM 1 — THE KERNEL IS THE INDEPENDENT AUTHORITY (`Mem.pollfd`).  A read of
+// a field we wrote only proves the layout is SELF-consistent: a wrong offset
+// used both to store and to load cancels out.  So the block is filled through
+// the typed FIELDS, handed to `poll()` — which reads `fd` at C's offset 0 and
+// writes `revents` at C's offset 6 — and then read back as ONE 8-byte word
+// through a `*word` view of the same address.  The golden number
+// 9007203549808287 is `fd(99999) | events(1)<<32 | revents(32)<<48`, i.e. EVERY
+// byte of the struct pinned against values the kernel produced:
+//
+//   * 99999 proves `fd` went to bytes 0..3 (the kernel read it there: an
+//     invalid descriptor is what makes the answer POLLNVAL);
+//   * 1<<32 proves `events` went to bytes 4..5 AND that a `storeh` wrote two
+//     bytes (a `storew` would have clobbered bytes 6..7 first — caught because
+//     `revents` is written BEFORE the call and lands at 6);
+//   * 32<<48 proves `revents` came back from bytes 6..7 — the KERNEL wrote
+//     those two bytes, so no self-consistent wrong offset can produce this
+//     number.
+//
+// ARM 2 — THE MASK IS LOAD-BEARING (`Mem.mask`).  Arm 1's POLLNVAL is
+// reported regardless of the requested mask, so it cannot prove the kernel
+// read `events`.  Polling the WRITE end of a pipe with `events = POLLOUT(4)`
+// does: MEASURED in C, `revents = 4, poll() = 1`; with the mask 0 the same
+// call gives `0, 0`.  So 4 + 10*1 = 14 is only reachable if the kernel READ
+// our `storeh` at byte 4.
+//
+// ARM 3/4 — THE OFFSET CENSUS (`Mem.ts`, `Mem.w3`, ...).  The same
+// construction over `struct stat`'s C layout: four `u32` fields written at
+// bytes 24/28/32/36 and read back as words 3 and 4 (8589934593 = 2<<32|1 and
+// 17179869187 = 4<<32|3), `rdev` at 40 (word 5 = 5 — the 8-byte alignment
+// bump past `__pad0`), `size` at 48 (word 6) and `blocks` at 64 (word 8).  A
+// word-granular rule cannot place `uid`/`gid`/`__pad0` at all; a rule without
+// per-field alignment puts `rdev` at 36 and every subsequent field four bytes
+// early, which moves words 4..8.
+module FfimMem
+
+export FfimMem.pollfd : val -> val
+export FfimMem.mask : val -> val
+export FfimMem.ts : val -> val
+export FfimMem.statW3 : val -> val
+export FfimMem.statW4 : val -> val
+export FfimMem.statW5 : val -> val
+export FfimMem.statW6 : val -> val
+export FfimMem.statW8 : val -> val
+export FfimMem.sign8 : val -> val
+export FfimMem.sign16 : val -> val
+export FfimMem.sign32 : val -> val
+export FfimMem.usign16 : val -> val
+export FfimMem.usign32 : val -> val
+export FfimMem.padByte : val -> val
+
+struct Pollfd { fd : i32; events : u16; revents : u16; }
+
+struct Timespec { sec : i64; nsec : i64; }
+
+// `struct stat`'s x86_64 field order, verbatim (the `__pad0` int after
+// st_gid is glibc's own; `sizeof` is 144 = 18 words).
+struct Stat {
+  dev : u64;
+  ino : u64;
+  nlink : u64;
+  mode : u32;
+  uid : u32;
+  gid : u32;
+  pad0 : i32;
+  rdev : u64;
+  size : i64;
+  blksize : i64;
+  blocks : i64;
+  atim : Timespec;
+  mtim : Timespec;
+  ctim : Timespec;
+  reserved : word[3];
+}
+
+// THE SIGN MATRIX's struct: one field per (width, sign) pair the unit adds.
+// Layout by the same rule: s8@0 (align 1), p@1, s16@2 (align 2), u16v@4,
+// s32@8 (align 4), u32v@12 — 16 bytes, 2 words.
+struct Snarrow { s8 : i8; p : u8; s16 : i16; u16v : u16; s32 : i32; u32v : u32; }
+
+// The three libc calls this fixture needs, DECLARED (cffi U5 deleted their
+// rawcallArity rows, so a declaration is the sanctioned route; `poll` never
+// had one).  `write`/`malloc` are still rows and are deliberately not here.
+extern poll(fds : ptr, nfds : i64, timeout : i32) -> i32;
+extern pipe(fds : ptr) -> i32;
+
+defun FfimMem.pollfd(seed : val) -> val {
+  Pollfd p;
+  p.fd = 99999;
+  p.events = 1;
+  p.revents = 7;
+  word r = rawcall poll(&p, 1, 0);
+  *word q = &p;
+  word packed = q[0];
+  return mknum(packed + (1000 * r));
+}
+
+defun FfimMem.mask(seed : val) -> val {
+  word[2] fds;
+  word pr = rawcall pipe(fds);
+  Pollfd p;
+  p.fd = fds[1];
+  p.events = 4;
+  p.revents = 0;
+  word r = rawcall poll(&p, 1, 0);
+  return mknum(p.revents + (10 * r));
+}
+
+defun FfimMem.ts(seed : val) -> val {
+  Timespec t;
+  t.sec = 11;
+  t.nsec = 22;
+  *word q = &t;
+  return mknum((q[0] * 100) + q[1]);
+}
+
+// One defun per word, each writing the SAME sentinels through the typed
+// FIELDS and reading one word of the block back.  (A single defun returning
+// all of them is not expressible — a Mid defun returns one word — and the
+// duplication is what keeps each number independent.)
+defun FfimMem.statW3(seed : val) -> val {
+  Stat s;
+  s.mode = 1;
+  s.uid = 2;
+  s.gid = 3;
+  s.pad0 = 4;
+  s.rdev = 5;
+  s.size = 48;
+  s.blocks = 64;
+  *word q = &s;
+  return mknum(q[3]);
+}
+
+defun FfimMem.statW4(seed : val) -> val {
+  Stat s;
+  s.mode = 1;
+  s.uid = 2;
+  s.gid = 3;
+  s.pad0 = 4;
+  s.rdev = 5;
+  s.size = 48;
+  s.blocks = 64;
+  *word q = &s;
+  return mknum(q[4]);
+}
+
+defun FfimMem.statW5(seed : val) -> val {
+  Stat s;
+  s.mode = 1;
+  s.uid = 2;
+  s.gid = 3;
+  s.pad0 = 4;
+  s.rdev = 5;
+  s.size = 48;
+  s.blocks = 64;
+  *word q = &s;
+  return mknum(q[5]);
+}
+
+defun FfimMem.statW6(seed : val) -> val {
+  Stat s;
+  s.mode = 1;
+  s.uid = 2;
+  s.gid = 3;
+  s.pad0 = 4;
+  s.rdev = 5;
+  s.size = 48;
+  s.blocks = 64;
+  *word q = &s;
+  return mknum(q[6]);
+}
+
+defun FfimMem.statW8(seed : val) -> val {
+  Stat s;
+  s.mode = 1;
+  s.uid = 2;
+  s.gid = 3;
+  s.pad0 = 4;
+  s.rdev = 5;
+  s.size = 48;
+  s.blocks = 64;
+  *word q = &s;
+  return mknum(q[8]);
+}
+
+// ---- THE SIGN MATRIX -------------------------------------------------------
+// Each arm writes a MAXIMAL bit pattern through the typed field and reads it
+// back; the golden number is what ONLY the declared sign rule can produce
+// (MEASURED on the vendored qbe: `=l loadsb` of 0xFF is -1, `=l loadub` is
+// 255; `=l loadsh` of 0xFFFE is -2, `=l loaduh` is 65534; `=l loadw` of
+// 0xFFFFFFFD is -3, `=l loaduw` is 4294967293).  No negative LITERAL is
+// needed — the stored bytes are the whole statement.
+//
+// THE WRITE ORDER IS LOAD-BEARING in `padByte`: `p` (a u8 at byte 1) is
+// written BEFORE `s8` (an i8 at byte 0), so an 8-byte store for a 1-byte
+// field would have overwritten `p` with 0xFF = 255.  That is the
+// over-wide-store failure, and this arm is the only thing in this fixture
+// that can see it.
+defun FfimMem.sign8(seed : val) -> val {
+  Snarrow n;
+  n.s8 = 255;
+  return mknum(n.s8);
+}
+
+defun FfimMem.sign16(seed : val) -> val {
+  Snarrow n;
+  n.s16 = 65534;
+  return mknum(n.s16);
+}
+
+defun FfimMem.sign32(seed : val) -> val {
+  Snarrow n;
+  n.s32 = 4294967293;
+  return mknum(n.s32);
+}
+
+defun FfimMem.usign16(seed : val) -> val {
+  Snarrow n;
+  n.u16v = 65535;
+  return mknum(n.u16v);
+}
+
+defun FfimMem.usign32(seed : val) -> val {
+  Snarrow n;
+  n.u32v = 4294967295;
+  return mknum(n.u32v);
+}
+
+defun FfimMem.padByte(seed : val) -> val {
+  Snarrow n;
+  n.p = 200;
+  n.s8 = 255;
+  return mknum(n.p);
+}

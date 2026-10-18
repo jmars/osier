@@ -2744,6 +2744,50 @@ run_midshape ffiv-void FfivMain.main tools/qbe/fixtures/ffiv-void.elm tools/qbe/
 run_midshape ffis-vararg FfisMain.main tools/qbe/fixtures/ffis-vararg.elm tools/qbe/fixtures/ffis-vararg.mid '=w call $snprintf(l %t0, l 32, l $d0, ..., l 1, l 2)' extsw
 run_midshape ffic-vararg FficMain.main tools/qbe/fixtures/ffic-vararg.elm tools/qbe/fixtures/ffic-vararg.mid '=w call $fcntl(w 1, w 3, ..., l 0)' extsw
 
+# ---- cffi U6: WIDTH-TYPED MEMORY (plan §8 U6) — the offsets are MEASURED ----
+# The effect-loop port's real backer: `struct pollfd` is `{ int; short; short; }`
+# and `struct stat` is full of `off_t`/`mode_t`/`short`, so a word-granular
+# layout cannot express them at all and a layout that ROUNDED to words would
+# place `st_uid` at 32 instead of 28 — the right struct's wrong bytes.
+#
+# THE EXPECTED NUMBERS ARE FROM THIS HOST'S HEADERS, not from the tree:
+#   /usr/include/sys/poll.h:36-41                  sizeof 8,  fd@0, events@4, revents@6
+#   /usr/include/bits/struct_stat.h (__x86_64__)   sizeof 144, mode@24, uid@28,
+#        gid@32, __pad0@36, rdev@40, size@48, blocks@64
+#   /usr/include/bits/types/struct_timespec.h      sizeof 16, tv_sec@0, tv_nsec@8
+# and confirmed by a C `offsetof`/`sizeof` program compiled and run here.
+#
+# THE GOLDEN (14 numbers, one per arm):
+#   9007203549809287  struct pollfd read back as ONE 8-byte word after poll():
+#                     fd(99999)@0 | events(1)<<32 | revents(POLLNVAL=32)<<48, plus
+#                     1000*poll(1).  The KERNEL wrote bytes 6..7, so a
+#                     self-consistent-but-wrong offset cannot produce it — the
+#                     one thing a store/load round trip through our own table
+#                     could never prove.
+#   14                poll() on a pipe's WRITE end with events=POLLOUT(4):
+#                     revents(4) + 10*poll(1).  POLLNVAL is reported regardless
+#                     of the mask, so THIS is the arm that proves the kernel READ
+#                     our events store at byte 4 (mask 0 gives 0 + 0).
+#   1122              struct timespec: 11@0, 22@8
+#   8589934593        struct stat word 3 = mode(1)@24 | uid(2)<<32  (so byte 24 and 28)
+#   17179869187       struct stat word 4 = gid(3)@32 | __pad0(4)<<32 (bytes 32 and 36)
+#   5                 struct stat word 5 = rdev@40 — the 8-byte alignment bump
+#                     past __pad0; a no-alignment rule puts rdev at 36
+#   48 / 64           struct stat words 6 and 8 = size@48, blocks@64
+#   -1 -2 -3          i8/i16/i32 fields of 0xFF/0xFFFE/0xFFFFFFFD read with
+#                     loadsb/loadsh/loadw (the unsigned spellings of the same
+#                     bytes give 255/65534/4294967293)
+#   65535 4294967295  u16/u32 fields read with loaduh/loaduw
+#   200               a u8 at byte 1 that survived its i8 neighbour's store —
+#                     a word-wide store for a 1-byte field would leave 255
+#
+# The SHAPE half (why this is a run_midshape row and not just a golden): the
+# sub-word load must be an `l`-typed widening op with NO extension after it —
+# `%t =l loaduh %t2`, not `loadub`+`extuw` and not a `w` temp.  `run_midshape`'s
+# empty extension op FAILS on a trailing `extsw`/`extuw`, which is the positive
+# form of the bug.
+run_midshape ffim-mem FfimMain.main tools/qbe/fixtures/ffim-mem.elm tools/qbe/fixtures/ffim-mem.mid '=l loaduh %t' ''
+
 # ---- zigretire stage 5 PART 3: THE MIDGC GUARD'S COMPLETENESS ----
 # The guard that names ONE incompatible flag is not a guard (this arc paid for
 # that twice: NORTLEAN then NOMIDRT).  run.js's MIDGC_DEPENDS_ON list is the
