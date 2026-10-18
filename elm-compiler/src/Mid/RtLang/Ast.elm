@@ -1548,16 +1548,30 @@ RtPrims/RtGc call site (all args explicit) or off the C prototype for
 seats no Rt body calls yet (marked "plan"): the plan's J3 list, with the
 plan's own `openat4?` resolved to 4 by the five measured openat sites.
 
-C seats / libc, called from Rt bodies today:
+C seats / libc STILL undeclared, called from Rt bodies today (cffi U5
+migrated the rest to `runtime.mid`'s `extern` block, which DELETED their
+rows — R-08 forbids a symbol in both tables):
 
-  * malloc 1, memset 3 (the frame bulk-zero: dst, 0, 40*nslots bytes), free 1,
-    mmap 6 (RtGc — the one 6-arg site)
-  * write 3, read 3, lseek 3, openat 4, close 1
-  * fork 0, waitpid 3, kill 2, execvp 2, _exit 1, getpid 0
-  * chdir 1, getcwd 2, getenv 1, setenv 3
-  * dup 1, dup2 2, pipe 1
-  * opendir 1, readdir 1, closedir 1, fnmatch 3, mkstemp 1, unlink 1
-  * __errno_location 0
+  * getpid 0 — kept because nine TestMain rows pin the table MECHANISM by
+    spelling `rawcall getpid()` (migrating it would rewrite the rows that pin
+    the seat, for a width fix plan §7.1 MEASURED as not needed on this glibc).
+  * malloc 1, free 1, write 3 — kept ONLY because live gate fixtures still
+    rawcall them undeclared (tools/qbe/fixtures/ffiv-void.mid, Wnods.mid,
+    Wesc.mid, Iopin.mid).  A `.mid` extern is FILE-scoped, so declaring them
+    in runtime.mid would not type those sites; it would only delete the row
+    out from under them (a loud J3 "in no signature table").  Migrate the
+    fixtures, then declare — one move.
+  * mmap 6 (RtGc — the one 6-arg site), exit 1 — outside the plan's U5 list.
+  * getdents64 3, fstatat 4, clock_gettime 2, strtod 2, getrlimit 2,
+    setrlimit 2 — see "plan-listed" below.
+
+MIGRATED by cffi U5 (row DELETED, signature declared in runtime.mid):
+openat 4, __errno_location 0, waitpid 3, readdir 1, opendir 1,
+closedir 1, close 1, dup 1, dup2 2, pipe 1, unlink 1, mkstemp 1, fnmatch 3,
+chdir 1, getcwd 2, getenv 1, setenv 3, kill 2, execvp 2, fork 0, read 3,
+lseek 3, memset 3 (the frame bulk-zero, dst/0/40*nslots bytes — its IR-level
+RawCallRaw seat in Mid.Rt is untouched by this table, but the SURFACE site in
+runtime.mid is what the row governed), _exit 1.
 
 rt_* seats (tools/qbe/rt.zig exports) called from Rt bodies today:
 
@@ -1580,6 +1594,13 @@ Plan-listed, no Rt-body call yet (arities from the C prototypes):
   * getdents64 3, fstatat 4, clock_gettime 2, strtod 2, getrlimit 2,
     setrlimit 2
 
+  (CORRECTION, MEASURED at cffi U5: `clock_gettime` x3 in Rt.collect — the
+  GC-ARC F1 stats instrument — and `getrlimit`/`setrlimit` in Rt.main's argv
+  prologue ARE Rt-body call sites today, so "no Rt-body call yet" is stale
+  for those three.  They stay rows and stay UNDECLARED per plan §8 item 5:
+  the effect-loop port declares them.  `poll`/`fstatat`/`getdents64`/
+  `strtod` still have no site anywhere.)
+
 The stage-6 A2 driver seats (arities from tools/qbe/rt.zig's exports):
 
   * rt_boot 0 (no args; 0 ok / 1 gc-init-failed), rt_parse_arg 2
@@ -1591,36 +1612,28 @@ The stage-6 A2 driver seats (arities from tools/qbe/rt.zig's exports):
 rawcallArity : Dict Sym Int
 rawcallArity =
     Dict.fromList
-        [ ( "malloc", 1 )
-        , ( "memset", 3 )
+        [ -- ===== the libc rows cffi U5 CANNOT migrate yet (a live fixture
+          -- still rawcalls each one UNDECLARED, and a `.mid` extern is
+          -- file-scoped): see the docstring.  malloc/free/write.
+        ( "malloc", 1 )
         , ( "free", 1 )
-        , ( "mmap", 6 )
         , ( "write", 3 )
-        , ( "read", 3 )
-        , ( "lseek", 3 )
-        , ( "openat", 4 )
-        , ( "close", 1 )
-        , ( "fork", 0 )
-        , ( "waitpid", 3 )
-        , ( "kill", 2 )
-        , ( "execvp", 2 )
-        , ( "_exit", 1 )
+        , -- outside U5's list; the all-word shape stands
+        ( "mmap", 6 )
         , ( "exit", 1 )
-        , ( "getpid", 0 )
-        , ( "chdir", 1 )
-        , ( "getcwd", 2 )
-        , ( "getenv", 1 )
-        , ( "setenv", 3 )
-        , ( "dup", 1 )
-        , ( "dup2", 2 )
-        , ( "pipe", 1 )
-        , ( "opendir", 1 )
-        , ( "readdir", 1 )
-        , ( "closedir", 1 )
-        , ( "fnmatch", 3 )
-        , ( "mkstemp", 1 )
-        , ( "unlink", 1 )
-        , ( "__errno_location", 0 )
+        , -- U5 LEFT IT: the TestMain suite's canonical undeclared rawcall
+          -- sample (nine rows pin the table mechanism by spelling
+          -- `rawcall getpid()`), and plan §7.1 MEASURED getpid
+          -- pre-extended — no width fix to buy.  See runtime.mid's header.
+        ( "getpid", 0 )
+        , -- ===== plan §8 item 5: declared by the effect-loop port, not U5.
+          -- clock_gettime/getrlimit/setrlimit DO have Rt-body sites today
+          -- (the GC stats instrument and the argv rlimit seat).
+        ( "getdents64", 3 )
+        , ( "clock_gettime", 2 )
+        , ( "strtod", 2 )
+        , ( "getrlimit", 2 )
+        , ( "setrlimit", 2 )
         , ( "rt_halt", 0 )
         , -- T18: the collector reads the U1c globals block through this
           -- accessor (Mid.RtGc's globAddrSym; Lower's finishModule emits the
@@ -1664,12 +1677,10 @@ rawcallArity =
         , ( "rt_is_program", 1 )
         , ( "rt_run_program", 2 )
         , ( "rt_print_value", 1 )
-        , ( "getdents64", 3 )
-        , ( "fstatat", 4 )
-        , ( "clock_gettime", 2 )
-        , ( "strtod", 2 )
-        , ( "getrlimit", 2 )
-        , ( "setrlimit", 2 )
+        , -- the sixth deferred libc row (the others are in the §8-item-5 block
+          -- above); left in place so the tail of the table keeps the shape it
+          -- had before U5
+        ( "fstatat", 4 )
         ]
 
 

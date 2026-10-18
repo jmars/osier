@@ -24,6 +24,77 @@ export Rt.exec-run : val -> val -> val -> val !io
 export Rt.main : word -> word -> word
 export Rt.frame-enter : word -> word
 export Rt.frame-leave : word
+// ======================= THE C FFI BOUNDARY (cffi U5) =======================
+// The runtime's libc surface, DECLARED (plan §8 U5) so a `rawcall` site's
+// register classes come from the C prototype instead of the all-word
+// convention.  Each symbol here had its `Ast.rawcallArity` row DELETED in the
+// same commit: R-08 refuses a symbol in both tables, so the table row and the
+// declaration can never drift apart.
+//
+// WHAT THIS BUYS, MEASURED (plan §7.1): a C `int` result leaves %rax's upper
+// 32 bits UNSPECIFIED.  The declared `i32` result emits `=w call` + `extsw`,
+// so the value the runtime compares is the C `int` and never a 4294967295.
+// Say it plainly: on THIS glibc the error branch of `openat` was already
+// correct (the wrapper returns -1 in the full register), so U5 fixes no
+// visible behaviour here — the LIVE bug measured on this host is `access`/
+// `fstatat` (plan §7.1), neither of which this file calls.  The declarations
+// are what make the NEXT reader's site checked rather than conventional.
+//
+// DELIBERATELY NOT DECLARED, and why each stays a `rawcallArity` row:
+//   * `getpid` — the TEST SUITE's canonical undeclared `rawcall` sample: nine
+//     TestMain rows pin the table MECHANISM by spelling `rawcall getpid()`
+//     (J1 accept "the getpid shape", J3's arity reject, J7, the L2/L6 lower
+//     rows, R-08's seat, the audit-span row, U2's "UNDECLARED is UNCHANGED"
+//     pin).  Migrating it would rewrite the rows that pin the seat, to buy a
+//     width fix plan §7.1 MEASURED as not needed here (this glibc's getpid is
+//     pre-extended) — the trap the plan's §8 U5 risk (a) names.
+//   * `malloc`/`free`/`write` — still rawcalled UNDECLARED by live gate
+//     fixtures (tools/qbe/fixtures/ffiv-void.mid, Wnods.mid, Wesc.mid,
+//     Iopin.mid).  A declaration here is FILE-SCOPED, so it would not type
+//     those sites; the row deletion would only turn them into loud J3
+//     "no signature table" errors.  Declaring the symbol and deleting the row
+//     is one move, and it needs those fixtures migrated first.
+//   * `mmap`/`exit` — outside the plan's migration list; leaving the rows
+//     keeps today's all-word shape.
+//   * `clock_gettime`/`getrlimit`/`setrlimit` — plan §8 item 5 defers them to
+//     the effect-loop port.  NOTE the plan's PREMISE is stale: the GC-ARC F1
+//     stats instrument added three `clock_gettime` sites (Rt.collect) and the
+//     rlimit seat one `getrlimit` + one `setrlimit` (Rt.main's argv prologue),
+//     so these three DO have Rt-body calls today.  They are still not declared
+//     here, per the brief — the emitted shape is unchanged either way.
+//   * `poll`/`fstatat`/`getdents64`/`strtod` — no call site in this file.
+//   * every `rt_*` seat — not C: they are rt.o/Mid symbols with a WORD ABI
+//     (plan §6), and declaring a word seat as a C signature would be a type
+//     lie.
+//
+// THE ONE LINE DECLARING `__errno_location` DOES NOT FIX: `byteload(
+// __errno_location(), 0)` below reads errno — a 32-bit `int` — through ONE
+// BYTE.  Correct only while errno < 256 (plan §9.2 / §10.2); width-typed
+// memory (cffi U6) is the fix, and it is NOT this unit's.
+extern openat(dirfd : i32, path : ptr, flags : i32, mode : i32) -> i32;
+extern __errno_location() -> ptr;
+extern waitpid(pid : i32, status : ptr, options : i32) -> i32;
+extern readdir(dirp : ptr) -> ptr;
+extern opendir(name : ptr) -> ptr;
+extern closedir(dirp : ptr) -> i32;
+extern close(fd : i32) -> i32;
+extern dup(fd : i32) -> i32;
+extern dup2(oldfd : i32, newfd : i32) -> i32;
+extern pipe(fds : ptr) -> i32;
+extern unlink(path : ptr) -> i32;
+extern mkstemp(template : ptr) -> i32;
+extern fnmatch(pattern : ptr, name : ptr, flags : i32) -> i32;
+extern chdir(path : ptr) -> i32;
+extern getcwd(buf : ptr, size : i64) -> ptr;
+extern getenv(name : ptr) -> ptr;
+extern setenv(name : ptr, value : ptr, overwrite : i32) -> i32;
+extern kill(pid : i32, sig : i32) -> i32;
+extern execvp(file : ptr, argv : ptr) -> i32;
+extern fork() -> i32;
+extern read(fd : i32, buf : ptr, count : i64) -> i64;
+extern lseek(fd : i32, offset : i64, whence : i32) -> i64;
+extern memset(dst : ptr, c : i32, n : i64) -> ptr;
+extern _exit(code : i32) -> void;
 // THE REGION LAYOUT (midlang-u5) — the name -> word-slot table.  Before this
 // struct the offsets were `wstore(base, k, ..)` constants in Rt.gcInit and
 // prose in Mid/RtGc.elm; slot 0..12 MEASURED against gcInit's writes and every

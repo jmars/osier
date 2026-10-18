@@ -3667,6 +3667,67 @@ checks rt runtimeMidText =
         )
     , check "U6 LAYOUT PIN: sizeof(FrameHdr) == 5 words in runtime.mid's own declaration — the 40 bytes frameBlock computes (40 + 40*nslots) and frame-enter adds to reach the slots (base = hdr + 40).  The SLOTS are not a field (variable count, computed offsets); if one ever became one, this row and every `base` row go RED together"
         (Check.sizeofStruct (declsOf runtimeMidText) "FrameHdr" == Just 5)
+
+    -- ==================== cffi U5: runtime.mid's C FFI boundary ====================
+    -- The MIGRATION as a checked artifact, not as text.  Three things this row
+    -- can see that no grep can: (a) the result WIDTH of each declaration (a
+    -- dropped `-> i32` on `openat` puts the site back on the all-word read,
+    -- plan §7.1's silent class); (b) the count, so an extern silently
+    -- disappearing from the block is RED rather than "fewer rows than before";
+    -- (c) DISJOINTNESS with `Ast.rawcallArity` — the state R-08 refuses, stated
+    -- here so the failure names the symbol instead of "runtime.mid did not
+    -- load".  Deliberately NOT a pin on the emitted bytes: the corpus gate
+    -- holds those, and a site moving is a different claim (the STRUCTURAL
+    -- oracle in the unit's report is the emitted `=w call` + `extsw` shape).
+    , check "cffi U5: runtime.mid declares its migrated libc surface with the C prototypes' RESULT widths, and no declared symbol is also a rawcallArity row"
+        (let
+            decls =
+                declsOf runtimeMidText
+
+            externs =
+                List.filterMap
+                    (\d ->
+                        case d of
+                            Ast.ExternDecl e ->
+                                Just ( e.name, e.sig.result )
+
+                            _ ->
+                                Nothing
+                    )
+                    decls
+
+            has name want =
+                case List.filter (\( n, _ ) -> n == name) externs of
+                    [ ( _, got ) ] ->
+                        got == want
+
+                    _ ->
+                        False
+         in
+         List.length externs
+            == 24
+            && has "openat" Ast.FI32
+            && has "waitpid" Ast.FI32
+            && has "closedir" Ast.FI32
+            && has "fork" Ast.FI32
+            && has "__errno_location" Ast.FPtr
+            && has "readdir" Ast.FPtr
+            && has "getcwd" Ast.FPtr
+            && has "read" Ast.FI64
+            && has "lseek" Ast.FI64
+            && has "memset" Ast.FPtr
+            && has "_exit" Ast.FVoid
+            && List.all
+                (\d ->
+                    case d of
+                        Ast.ExternDecl e ->
+                            not (Dict.member e.name Ast.rawcallArity)
+
+                        _ ->
+                            True
+                )
+                decls
+        )
     , check "U6 ACCEPT: the header's byte math stays WORD math — `*FrameHdr hdr = payload(v, 0); word base = [word](hdr) + 40;` (the tier-(i) spelling: the pointer binder IS the header view, the `[word]` cast — J12's `*T -> word` view row — is the identity node) lowers canon-EQUAL to the word-spelled `word hdr = ...; word base = hdr + 40;`, so `base`/memset/rt_root_push_value_array keep the pre-U6 emission"
         (case
             ( lowlModuleBody "struct FrameHdr { live : word; wm : word; next : word; freeNext : word; _pad : word; }\ndefun Rt.e(v : val) -> word {\n  *FrameHdr hdr = payload(v, 0);\n  word base = [word](hdr) + 40;\n  return base;\n}"
@@ -11065,11 +11126,19 @@ rawAbiWordCall sym f =
         f.blocks
 
 
-{-| P1e bulk-zero shape: ONE rawcall `memset(dst, 0, 40 * nslots)` — exactly 3
-`Base L` args with the zero byte constant in the middle, a `40 * x` Mul feeding
-the byte length (a Value is 40 bytes), and NO `q_Rt_x2eframeZero` call or
-in-frame loop.  The per-slot frameZero loop this replaced pinned the OPPOSITE
-properties (a self-loop, no blit); the bulk-zero has no loop at all.
+{-| P1e bulk-zero shape: ONE `memset(dst, 0, 40 * nslots)` — 3 args with the
+zero byte constant in the middle, a `40 * x` Mul feeding the byte length (a
+Value is 40 bytes), and NO `q_Rt_x2eframeZero` call or in-frame loop.  The
+per-slot frameZero loop this replaced pinned the OPPOSITE properties (a
+self-loop, no blit); the bulk-zero has no loop at all.
+
+TWO accepted operand shapes, and they are the SAME call: cffi U5 declared
+`memset(dst : ptr, c : i32, n : i64) -> ptr` in runtime.mid, so frame-enter's
+surface site emits the declared boundary (`w` for the C `int` middle argument)
+where it emitted the all-word convention (`Base L` everywhere).  Both arms
+require the CONSTANT 0 in the same position and a `Tmp` byte length, so the
+assertion is not weakened by admitting the declared one — and the pre-U5 arm
+stays so the row can still fail for the reason it was written for.
 -}
 memsetBulkZeroShape : Il.Func -> Bool
 memsetBulkZeroShape f =
@@ -11080,6 +11149,9 @@ memsetBulkZeroShape f =
                 List.any
                     (\i ->
                         case i of
+                            Il.Call _ (Il.Base Il.L) (Il.Sym "memset") [ Il.ArgVal (Il.Base Il.L) _, Il.ArgVal (Il.Base Il.W) (Il.Con 0), Il.ArgVal (Il.Base Il.L) (Il.Tmp _) ] ->
+                                True
+
                             Il.Call _ (Il.Base Il.L) (Il.Sym "memset") [ Il.ArgVal (Il.Base Il.L) _, Il.ArgVal (Il.Base Il.L) (Il.Con 0), Il.ArgVal (Il.Base Il.L) (Il.Tmp _) ] ->
                                 True
 
