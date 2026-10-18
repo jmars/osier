@@ -270,6 +270,21 @@ sigdeath() {
   add_check natsig "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "" sigdeath "$FIX/$name.elm"
 }
 
+# runhost <name> <fn> <expected>
+#
+# STAGE 7D's arm-B rows: `Platform.program` fixtures that drive TaskExec
+# through the EFFECT HOST.  They exist because every pre-existing `exec*` row
+# is a `Platform.worker` fixture — `Runtime.runTask` runs those SYNCHRONOUSLY
+# through the `exec-plan` prim, so they never construct a Program vector and
+# never reach the leaf (MEASURED: green on both arms with the leaf absent).
+# Like sigdeath/run_pipe/natdepth it registers NO compile group (the corpus
+# baseline pins the batch artifact set at 159 groups) — the native row builds
+# its own binary on demand.
+runhost() {
+  local name="$1" fn="$2" exp="$3"
+  add_check nathost "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "" runhost "$FIX/$name.elm"
+}
+
 # natdepth <name> <fn> <control-depth> <past-depth> <deep-depth> <expected-control-value>
 #
 # THE NATIVE OUT-OF-STACK CHECK (handoff osier-natdepth) — the arm that
@@ -385,6 +400,19 @@ run execglob     main   "$(read_expected execglob)"
 # --- M9: TRUE nonblocking async (host event loop drives a Program) ---
 run asyncorder   main   "$(read_expected asyncorder)"
 run fastexec     main   "$(read_expected fastexec)"
+# --- STAGE 7D: TaskExec through the effect HOST (both arms' differential) ---
+# exechost: the ASYNC single-command arm end to end — a child that writes past
+# the 64 KiB drain chunk (the out accumulator GROWS while the child blocks on
+# the full pipe), 5 bytes of captured stderr (the only row with a non-empty
+# err accumulator through the host), and a NON-ZERO exit code decoded from
+# WIFEXITED.  execfallback: the plan-shape predicate's NEGATIVE arm — a
+# two-command pipeline, which must take the synchronous `exec-plan` fallback
+# instead of being forked.  Both are Platform.program, which is the point.
+runhost exechost      main "$(read_expected exechost)"
+runhost execfallback  main "$(read_expected execfallback)"
+# ... and the fallback's DISCRIMINATOR: only the synchronous runner applies the
+# plan's `out` redirect, so the file exists iff the classification was right.
+out_cmp execfallback execfallback.out
 # --- 3B-2a (exec-plan decode in Mid): a MALFORMED plan must fail LOUDLY ---
 # ExecMal's chain op is "bogus" — not seq/and/or — so Rt.epChain's OP GUARD
 # rejects it and the run halts; the expected value IS the halt diagnostic

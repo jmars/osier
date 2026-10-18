@@ -19,8 +19,8 @@ The dump it is rendered from (no elm/node/jq needed in that mode):
 ELM_GATE_MATRIX=/tmp/matrix.tsv tests/elm-fixtures/run-elm-gate.sh
 ```
 
-**167 registered checks.** Run from the repo root, the gate prints
-`PASS=167 FAIL=0` on the frozen artifact. `docs/research/osier-paper.md`
+**170 registered checks.** Run from the repo root, the gate prints
+`PASS=170 FAIL=0` on the frozen artifact. `docs/research/osier-paper.md`
 **Appendix A** is the paper's prose counterpart: the *designed* programs the
 paper cites, with the claim each one pins. Appendix A is a selected subset;
 this file is the complete registry. Where the two disagree, **this file and the
@@ -48,6 +48,7 @@ fails loudly rather than letting this listing go stale.
 | `compile_clean` | `ok` | compilation must yield a real output, not an `err …` payload (no value check — the fixture's value cannot be driven from argv) |
 | `compile_error` | `err` | compilation must emit `err <message>` containing `expected` |
 | `out_cmp` | `cmp` | the raw file an earlier run wrote must equal its `expected/*.txt` bytes |
+| `runhost` | `nathost` | stage 7D: as `run`, but for a `Platform.program` fixture that drives `TaskExec` through the EFFECT HOST (every pre-existing `exec*` row is a `Platform.worker`, which runs the plan SYNCHRONOUSLY through the `exec-plan` prim and never reaches the leaf). `exechost` covers the async arm (out accumulator growth past 64 KiB, non-empty captured stderr, a non-zero exit code from `WIFEXITED`); `execfallback` covers the plan-shape predicate's negative arm (a pipeline must take the synchronous fallback). Both build their own binary |
 | `sigdeath` | `natsig` | a child that dies BY SIGNAL must be reported as `128+signum` (builds its own binary; `expected` = the `<code>|<out>|<err>` tuple): `sh -c 'kill -9 $$'` is reaped WIFSIGNALED, so the code must be 137 — a decoder without `waitStatusCode`'s signal arm answers `EXITSTATUS(9) = 0` |
 | `natdepth` | `natdepth` | deep NON-tail recursion past the C-stack budget must be LOUD (builds its own binary via `tools/qbe/qbe-mk.sh`; `args` = control-depth past-depth deep-depth): the control prints `expected` under the check's own 1 MiB `ulimit -s` (`QBE_NO_RLIMIT=1`); past the boundary the process exits non-zero with the `native stack depth exceeded` diagnostic on stderr and no value on stdout; deep-depth must still complete at the driver's r
 
@@ -114,114 +115,117 @@ fails loudly rather than letting this listing go stale.
 | 57 | `execglob` | `run` | `main` | `"tests/elm-fixtures/globdir/?\|.\ntests/elm-fixtures/globdir/*\|.,..,x.txt\ntests/elm-fixtures/globdir/.*\|.,..\nexecbig.txt,execchain.txt,execenv.txt,execglob.txt,execmal.txt,execnofile.txt,execpipe.txt,execsubchain.txt"` | — | — | `execglob.elm` |
 | 58 | `asyncorder` | `run` | `main` | `"file,ran"` | — | — | `asyncorder.elm` |
 | 59 | `fastexec` | `run` | `main` | `"0\|hi\n\|"` | — | — | `fastexec.elm` |
-| 60 | `execmal` | `run` | `main` | `qbe-rt: qbe-rt: halt (a Mid prim reached its halt arm)` | — | — | `execmal.elm` |
-| 61 | `execchain` | `run` | `main` | `"0\|start\nor-ran\nend\n\|"` | — | — | `execchain.elm` |
-| 62 | `execsubchain` | `run` | `main` | `"0\|a\nb\n\|"` | — | — | `execsubchain.elm` |
-| 63 | `execbig` | `run` | `main` | `"0\|168894\|0"` | — | — | `execbig.elm` |
-| 64 | `execnofile` | `run` | `main` | `"1\|\|Input redirect file not found: no-such-file.txt\n"` | — | — | `execnofile.elm` |
-| 65 | `asyncpure` | `run` | `main` | `"abc"` | — | — | `asyncpure.elm` |
-| 66 | `signaldeath` | `sigdeath` | `main` | `"137\|\|"` | — | — | `signaldeath.elm` |
-| 67 | `signaldeathasync` | `sigdeath` | `main` | `"137\|\|"` | — | — | `signaldeathasync.elm` |
-| 68 | `dup` | `compile_error` | — | `duplicate top-level definition in Dup: f` | — | — | `dup.elm` |
-| 69 | `shadowerr` | `compile_error` | — | `is both a top-level definition and imported via` | — | — | `shadowerr.elm` |
-| 70 | `shadowtyperr` | `compile_error` | — | `is both a top-level definition and imported via` | — | — | `shadowtyperr.elm` |
-| 71 | `ambimperr` | `compile_error` | — | `from two different modules` | — | — | `ambimperr.elm` |
-| 72 | `cmporder` | `run` | `main` | `"LT GT EQ LT EQ LT GT EQ LT EQ LT EQ GT LT EQ LT LT EQ"` | — | — | `cmporder.elm` |
-| 73 | `resultmaybe` | `run` | `main` | `"42 7 12 N 1 0 7 N 123 O42 E 9 5 O42 E E4 77 N O8 E 1 0 O6"` | — | — | `resultmaybe.elm` |
-| 74 | `dictbasic` | `run` | `main` | `-1956` | — | — | `dictbasic.elm` |
-| 75 | `setops` | `run` | `main` | `168` | — | — | `setops.elm` |
-| 76 | `dictstress` | `run` | `main` | `1533354` | — | — | `dictstress.elm` |
-| 77 | `bitwise` | `run` | `main` | `446` | — | — | `bitwise.elm` |
-| 78 | `arraybasic` | `run` | `main` | `20799` | — | — | `arraybasic.elm` |
-| 79 | `arraystress` | `run` | `main` | `7947531` | — | — | `arraystress.elm` |
-| 80 | `strunit` | `run` | `main` | `"111111111111111111111111111111111111111111111111111\|42.5\|2.0\|  一"` | — | — | `strunit.elm` |
-| 81 | `p2pad` | `run` | `main` | `"11111111111111\|========================================\|    ab\|ab    "` | — | — | `p2pad.elm` |
-| 82 | `nowunit` | `run` | `main` | `"now-ok order-ok"` | — | — | `nowunit.elm` |
-| 83 | `progio` | `run_hostio` | `main` | `echo:01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\n"01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\|set\|pid-ok\|/tmp"` | — | `progio.txt` | `progio.elm` |
-| 84 | `progio` | `out_cmp` | — | — | — | — | — |
-| 85 | `readpipe` | `run_pipe` | `main` | `"pipe=[hello] big=70000"` | — | — | `readpipe.elm` |
-| 86 | `dirunit` | `run` | `main` | `"alpha.txt,beta.txt,gamma/"` | — | — | `dirunit.elm` |
-| 87 | `statunit` | `run` | `main` | `"s12-ok nd-ok reg-ok treg-ok mtime-ok s8-ok dir-ok nfile-ok tdir-ok miss-ok"` | — | — | `statunit.elm` |
-| 88 | `statplus` | `run` | `main` | `"statplus-ok"` | — | — | `statplus.elm` |
-| 89 | `rowpoly` | `run` | `main` | `34` | — | — | `rowpoly.elm` |
-| 90 | `extrec` | `run` | `main` | `29` | — | — | `extrec.elm` |
-| 91 | `insrec` | `run` | `main` | `105` | — | — | `insrec.elm` |
-| 92 | `remrec` | `run` | `main` | `8` | — | — | `remrec.elm` |
-| 93 | `rmprobe` | `run` | `main` | `6` | — | — | `rmprobe.elm` |
-| 94 | `scopedup` | `run` | `main` | `17` | — | — | `scopedup.elm` |
-| 95 | `recalias` | `run` | `main` | `33` | — | — | `recalias.elm` |
-| 96 | `appendres` | `run` | `main` | `5` | — | — | `appendres.elm` |
-| 97 | `tyerr_update_missing_field` | `compile_error` | — | `does not have field` | — | — | `tyerr_update_missing_field.elm` |
-| 98 | `tyerr_ambiguous_append` | `compile_error` | — | `ambiguous` | — | — | `tyerr_ambiguous_append.elm` |
-| 99 | `tyerr_numstr` | `compile_error` | — | `unify number with String` | — | — | `tyerr_numstr.elm` |
-| 100 | `tyerr_arity` | `compile_error` | — | `apply non-function` | — | — | `tyerr_arity.elm` |
-| 101 | `tyerr_remove_absent` | `compile_error` | — | `does not have field` | — | — | `tyerr_remove_absent.elm` |
-| 102 | `rowgadt_select` | `compile_clean` | — | — | — | — | `rowgadt_select.elm` |
-| 103 | `rowgadt_setx` | `compile_clean` | — | — | — | — | `rowgadt_setx.elm` |
-| 104 | `rowgadt_absentfield` | `compile_error` | — | `is rigid` | — | — | `rowgadt_absentfield.elm` |
-| 105 | `rowgadt_escape` | `compile_error` | — | `escaping row equation` | — | — | `rowgadt_escape.elm` |
-| 106 | `rowgadt_eval` | `run` | `main` | `[cons 1 . true]` | — | — | `rowgadt_eval.elm` |
-| 107 | `rowgadt_evalbad` | `compile_error` | — | `escaping row equation` | — | — | `rowgadt_evalbad.elm` |
-| 108 | `rowgadt_het` | `run` | `main` | `"hi3"` | — | — | `rowgadt_het.elm` |
-| 109 | `rowgadt_noescape` | `compile_error` | — | `is rigid` | — | — | `rowgadt_noescape.elm` |
-| 110 | `rowgadt_l3i` | `run` | `main` | `"3"` | — | — | `rowgadt_l3i.elm` |
-| 111 | `rowgadt_l3ii` | `compile_error` | — | `cannot unify {k:a\| b} with {\| a}` | — | — | `rowgadt_l3ii.elm` |
-| 112 | `rowgadt_l3iii` | `run` | `main` | `1` | — | — | `rowgadt_l3iii.elm` |
-| 113 | `rowgadt_hget` | `compile_clean` | — | — | — | — | `rowgadt_hget.elm` |
-| 114 | `rowgadt_hget_bare` | `compile_clean` | — | — | — | — | `rowgadt_hget_bare.elm` |
-| 115 | `rowgadt_hget_escape` | `compile_error` | — | `escaping row equation` | — | — | `rowgadt_hget_escape.elm` |
-| 116 | `rowgadt_hget_badhead` | `compile_error` | — | `is rigid` | — | — | `rowgadt_hget_badhead.elm` |
-| 117 | `rowgadt_escape_launder` | `compile_error` | — | `escaping row equation` | — | — | `rowgadt_escape_launder.elm` |
-| 118 | `rowgadt_escape_wildcard` | `compile_error` | — | `escaping row equation` | — | — | `rowgadt_escape_wildcard.elm` |
-| 119 | `rowgadt_ce1_prealias` | `compile_error` | — | `escaping row equation` | — | — | `rowgadt_ce1_prealias.elm` |
-| 120 | `rowgadt_shape_rebuild` | `compile_clean` | — | — | — | — | `rowgadt_shape_rebuild.elm` |
-| 121 | `rowgadt_dup_rebuild` | `compile_clean` | — | — | — | — | `rowgadt_dup_rebuild.elm` |
-| 122 | `rowgadt_dup_fewer` | `compile_error` | — | `cannot unify a with {x:Int\|` | — | — | `rowgadt_dup_fewer.elm` |
-| 123 | `rowgadt_fsm` | `run` | `main` | `"open:42"` | — | — | `rowgadt_fsm.elm` |
-| 124 | `rowgadt_fsm_bad` | `compile_error` | — | `missing field closed` | — | — | `rowgadt_fsm_bad.elm` |
-| 125 | `rowgadt_fsm_narrow` | `compile_error` | — | `cannot be unified with {broken:a\| b}` | — | — | `rowgadt_fsm_narrow.elm` |
-| 126 | `rowgadt_fsm_nested` | `run` | `main` | `"open:42"` | — | — | `rowgadt_fsm_nested.elm` |
-| 127 | `rowgadt_fsm_nested_bad` | `compile_error` | — | `cannot be unified with {broken:a\| b}` | — | — | `rowgadt_fsm_nested_bad.elm` |
-| 128 | `adtgaps` | `compile_error` | — | `non-exhaustive case` | — | — | `adtgaps.elm` |
-| 129 | `refutneg` | `compile_error` | — | `non-exhaustive case` | — | — | `refutneg.elm` |
-| 130 | `refutpos` | `run` | `main` | `5` | — | — | `refutpos.elm` |
-| 131 | `refutbare` | `compile_error` | — | `non-exhaustive case` | — | — | `refutbare.elm` |
-| 132 | `rowgadt_ce2_barevar` | `compile_error` | — | `cannot unify Int with String` | — | — | `rowgadt_ce2_barevar.elm` |
-| 133 | `rowgadt_ce2_plain` | `compile_error` | — | `cannot unify RowgadtCe2Plain.Expr with String` | — | — | `rowgadt_ce2_plain.elm` |
-| 134 | `rowgadt_ce3_fieldalias` | `compile_error` | — | `type variable a is rigid` | — | — | `rowgadt_ce3_fieldalias.elm` |
-| 135 | `rowgadt_ce3a_tuple` | `compile_error` | — | `infinite type` | — | — | `rowgadt_ce3a_tuple.elm` |
-| 136 | `rowgadt_ce3b_prealias` | `compile_error` | — | `infinite type` | — | — | `rowgadt_ce3b_prealias.elm` |
-| 137 | `rowgadt_ce3c_let` | `compile_error` | — | `infinite type` | — | — | `rowgadt_ce3c_let.elm` |
-| 138 | `liftself` | `run` | `main` | `515` | — | — | `liftself.elm` |
-| 139 | `liftmutual` | `run` | `main` | `42` | — | — | `liftmutual.elm` |
-| 140 | `liftfirstclass` | `run` | `main` | `100` | — | — | `liftfirstclass.elm` |
-| 141 | `liftshadow` | `run` | `main` | `13` | — | — | `liftshadow.elm` |
-| 142 | `liftfwd` | `run` | `main` | `6` | — | — | `liftfwd.elm` |
-| 143 | `liftfwdmix` | `run` | `main` | `11` | — | — | `liftfwdmix.elm` |
-| 144 | `liftnested` | `run` | `main` | `1002` | — | — | `liftnested.elm` |
-| 145 | `liftnestedtuple` | `run` | `main` | `1003` | — | — | `liftnestedtuple.elm` |
-| 146 | `liftnestedfinal` | `run` | `main` | `1002` | — | — | `liftnestedfinal.elm` |
-| 147 | `liftnestedrec` | `run` | `main` | `100` | — | — | `liftnestedrec.elm` |
-| 148 | `liftdelegate` | `run` | `main` | `5` | — | — | `liftdelegate.elm` |
-| 149 | `liftdelegmut` | `run` | `main` | `0` | — | — | `liftdelegmut.elm` |
-| 150 | `liftprelude` | `run` | `main` | `7` | — | — | `liftprelude.elm` |
-| 151 | `liftenclosing` | `run` | `main` | `100` | — | — | `liftenclosing.elm` |
-| 152 | `liftseqcap` | `run` | `main` | `2` | — | — | `liftseqcap.elm` |
-| 153 | `liftfwdback` | `run` | `main` | `6` | — | — | `liftfwdback.elm` |
-| 154 | `liftcapconfl` | `run` | `main` | `51` | — | — | `liftcapconfl.elm` |
-| 155 | `liftcapconfl2` | `run` | `main` | `51` | — | — | `liftcapconfl2.elm` |
-| 156 | `liftmodfwd` | `run` | `main` | `999` | — | — | `liftmodfwd.elm` |
-| 157 | `liftpreludefwd` | `run` | `main` | `2` | — | — | `liftpreludefwd.elm` |
-| 158 | `liftprelfwdfn` | `run` | `main` | `1000` | — | — | `liftprelfwdfn.elm` |
-| 159 | `liftstaycall` | `run` | `main` | `702` | — | — | `liftstaycall.elm` |
-| 160 | `liftdisjoint` | `run` | `main` | `35` | — | — | `liftdisjoint.elm` |
-| 161 | `liftvaluecycle` | `compile_error` | — | `unknown name: v` | — | — | `liftvaluecycle.elm` |
-| 162 | `liftrefuse` | `compile_error` | — | `unknown name: a` | — | — | `liftrefuse.elm` |
-| 163 | `liftstayfwd` | `run` | `main` | `999` | — | — | `liftstayfwd.elm` |
-| 164 | `liftcycshadows` | `run` | `main` | `0` | — | — | `liftcycshadows.elm` |
-| 165 | `liftrelaxleak` | `run` | `main` | `999` | — | — | `liftrelaxleak.elm` |
-| 166 | `liftdisjointshadow` | `run` | `main` | `3` | — | — | `liftdisjointshadow.elm` |
-| 167 | `natcalloverflow` | `natdepth` | `main` | `500500` | `1000 20000 100000` | — | `natcalloverflow.elm` |
+| 60 | `exechost` | `runhost` | `main` | `"3\|108894\|oops"` | — | — | `exechost.elm` |
+| 61 | `execfallback` | `runhost` | `main` | `"ok"` | — | — | `execfallback.elm` |
+| 62 | `execfallback` | `out_cmp` | — | — | — | — | — |
+| 63 | `execmal` | `run` | `main` | `qbe-rt: qbe-rt: halt (a Mid prim reached its halt arm)` | — | — | `execmal.elm` |
+| 64 | `execchain` | `run` | `main` | `"0\|start\nor-ran\nend\n\|"` | — | — | `execchain.elm` |
+| 65 | `execsubchain` | `run` | `main` | `"0\|a\nb\n\|"` | — | — | `execsubchain.elm` |
+| 66 | `execbig` | `run` | `main` | `"0\|168894\|0"` | — | — | `execbig.elm` |
+| 67 | `execnofile` | `run` | `main` | `"1\|\|Input redirect file not found: no-such-file.txt\n"` | — | — | `execnofile.elm` |
+| 68 | `asyncpure` | `run` | `main` | `"abc"` | — | — | `asyncpure.elm` |
+| 69 | `signaldeath` | `sigdeath` | `main` | `"137\|\|"` | — | — | `signaldeath.elm` |
+| 70 | `signaldeathasync` | `sigdeath` | `main` | `"137\|\|"` | — | — | `signaldeathasync.elm` |
+| 71 | `dup` | `compile_error` | — | `duplicate top-level definition in Dup: f` | — | — | `dup.elm` |
+| 72 | `shadowerr` | `compile_error` | — | `is both a top-level definition and imported via` | — | — | `shadowerr.elm` |
+| 73 | `shadowtyperr` | `compile_error` | — | `is both a top-level definition and imported via` | — | — | `shadowtyperr.elm` |
+| 74 | `ambimperr` | `compile_error` | — | `from two different modules` | — | — | `ambimperr.elm` |
+| 75 | `cmporder` | `run` | `main` | `"LT GT EQ LT EQ LT GT EQ LT EQ LT EQ GT LT EQ LT LT EQ"` | — | — | `cmporder.elm` |
+| 76 | `resultmaybe` | `run` | `main` | `"42 7 12 N 1 0 7 N 123 O42 E 9 5 O42 E E4 77 N O8 E 1 0 O6"` | — | — | `resultmaybe.elm` |
+| 77 | `dictbasic` | `run` | `main` | `-1956` | — | — | `dictbasic.elm` |
+| 78 | `setops` | `run` | `main` | `168` | — | — | `setops.elm` |
+| 79 | `dictstress` | `run` | `main` | `1533354` | — | — | `dictstress.elm` |
+| 80 | `bitwise` | `run` | `main` | `446` | — | — | `bitwise.elm` |
+| 81 | `arraybasic` | `run` | `main` | `20799` | — | — | `arraybasic.elm` |
+| 82 | `arraystress` | `run` | `main` | `7947531` | — | — | `arraystress.elm` |
+| 83 | `strunit` | `run` | `main` | `"111111111111111111111111111111111111111111111111111\|42.5\|2.0\|  一"` | — | — | `strunit.elm` |
+| 84 | `p2pad` | `run` | `main` | `"11111111111111\|========================================\|    ab\|ab    "` | — | — | `p2pad.elm` |
+| 85 | `nowunit` | `run` | `main` | `"now-ok order-ok"` | — | — | `nowunit.elm` |
+| 86 | `progio` | `run_hostio` | `main` | `echo:01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\n"01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\|set\|pid-ok\|/tmp"` | — | `progio.txt` | `progio.elm` |
+| 87 | `progio` | `out_cmp` | — | — | — | — | — |
+| 88 | `readpipe` | `run_pipe` | `main` | `"pipe=[hello] big=70000"` | — | — | `readpipe.elm` |
+| 89 | `dirunit` | `run` | `main` | `"alpha.txt,beta.txt,gamma/"` | — | — | `dirunit.elm` |
+| 90 | `statunit` | `run` | `main` | `"s12-ok nd-ok reg-ok treg-ok mtime-ok s8-ok dir-ok nfile-ok tdir-ok miss-ok"` | — | — | `statunit.elm` |
+| 91 | `statplus` | `run` | `main` | `"statplus-ok"` | — | — | `statplus.elm` |
+| 92 | `rowpoly` | `run` | `main` | `34` | — | — | `rowpoly.elm` |
+| 93 | `extrec` | `run` | `main` | `29` | — | — | `extrec.elm` |
+| 94 | `insrec` | `run` | `main` | `105` | — | — | `insrec.elm` |
+| 95 | `remrec` | `run` | `main` | `8` | — | — | `remrec.elm` |
+| 96 | `rmprobe` | `run` | `main` | `6` | — | — | `rmprobe.elm` |
+| 97 | `scopedup` | `run` | `main` | `17` | — | — | `scopedup.elm` |
+| 98 | `recalias` | `run` | `main` | `33` | — | — | `recalias.elm` |
+| 99 | `appendres` | `run` | `main` | `5` | — | — | `appendres.elm` |
+| 100 | `tyerr_update_missing_field` | `compile_error` | — | `does not have field` | — | — | `tyerr_update_missing_field.elm` |
+| 101 | `tyerr_ambiguous_append` | `compile_error` | — | `ambiguous` | — | — | `tyerr_ambiguous_append.elm` |
+| 102 | `tyerr_numstr` | `compile_error` | — | `unify number with String` | — | — | `tyerr_numstr.elm` |
+| 103 | `tyerr_arity` | `compile_error` | — | `apply non-function` | — | — | `tyerr_arity.elm` |
+| 104 | `tyerr_remove_absent` | `compile_error` | — | `does not have field` | — | — | `tyerr_remove_absent.elm` |
+| 105 | `rowgadt_select` | `compile_clean` | — | — | — | — | `rowgadt_select.elm` |
+| 106 | `rowgadt_setx` | `compile_clean` | — | — | — | — | `rowgadt_setx.elm` |
+| 107 | `rowgadt_absentfield` | `compile_error` | — | `is rigid` | — | — | `rowgadt_absentfield.elm` |
+| 108 | `rowgadt_escape` | `compile_error` | — | `escaping row equation` | — | — | `rowgadt_escape.elm` |
+| 109 | `rowgadt_eval` | `run` | `main` | `[cons 1 . true]` | — | — | `rowgadt_eval.elm` |
+| 110 | `rowgadt_evalbad` | `compile_error` | — | `escaping row equation` | — | — | `rowgadt_evalbad.elm` |
+| 111 | `rowgadt_het` | `run` | `main` | `"hi3"` | — | — | `rowgadt_het.elm` |
+| 112 | `rowgadt_noescape` | `compile_error` | — | `is rigid` | — | — | `rowgadt_noescape.elm` |
+| 113 | `rowgadt_l3i` | `run` | `main` | `"3"` | — | — | `rowgadt_l3i.elm` |
+| 114 | `rowgadt_l3ii` | `compile_error` | — | `cannot unify {k:a\| b} with {\| a}` | — | — | `rowgadt_l3ii.elm` |
+| 115 | `rowgadt_l3iii` | `run` | `main` | `1` | — | — | `rowgadt_l3iii.elm` |
+| 116 | `rowgadt_hget` | `compile_clean` | — | — | — | — | `rowgadt_hget.elm` |
+| 117 | `rowgadt_hget_bare` | `compile_clean` | — | — | — | — | `rowgadt_hget_bare.elm` |
+| 118 | `rowgadt_hget_escape` | `compile_error` | — | `escaping row equation` | — | — | `rowgadt_hget_escape.elm` |
+| 119 | `rowgadt_hget_badhead` | `compile_error` | — | `is rigid` | — | — | `rowgadt_hget_badhead.elm` |
+| 120 | `rowgadt_escape_launder` | `compile_error` | — | `escaping row equation` | — | — | `rowgadt_escape_launder.elm` |
+| 121 | `rowgadt_escape_wildcard` | `compile_error` | — | `escaping row equation` | — | — | `rowgadt_escape_wildcard.elm` |
+| 122 | `rowgadt_ce1_prealias` | `compile_error` | — | `escaping row equation` | — | — | `rowgadt_ce1_prealias.elm` |
+| 123 | `rowgadt_shape_rebuild` | `compile_clean` | — | — | — | — | `rowgadt_shape_rebuild.elm` |
+| 124 | `rowgadt_dup_rebuild` | `compile_clean` | — | — | — | — | `rowgadt_dup_rebuild.elm` |
+| 125 | `rowgadt_dup_fewer` | `compile_error` | — | `cannot unify a with {x:Int\|` | — | — | `rowgadt_dup_fewer.elm` |
+| 126 | `rowgadt_fsm` | `run` | `main` | `"open:42"` | — | — | `rowgadt_fsm.elm` |
+| 127 | `rowgadt_fsm_bad` | `compile_error` | — | `missing field closed` | — | — | `rowgadt_fsm_bad.elm` |
+| 128 | `rowgadt_fsm_narrow` | `compile_error` | — | `cannot be unified with {broken:a\| b}` | — | — | `rowgadt_fsm_narrow.elm` |
+| 129 | `rowgadt_fsm_nested` | `run` | `main` | `"open:42"` | — | — | `rowgadt_fsm_nested.elm` |
+| 130 | `rowgadt_fsm_nested_bad` | `compile_error` | — | `cannot be unified with {broken:a\| b}` | — | — | `rowgadt_fsm_nested_bad.elm` |
+| 131 | `adtgaps` | `compile_error` | — | `non-exhaustive case` | — | — | `adtgaps.elm` |
+| 132 | `refutneg` | `compile_error` | — | `non-exhaustive case` | — | — | `refutneg.elm` |
+| 133 | `refutpos` | `run` | `main` | `5` | — | — | `refutpos.elm` |
+| 134 | `refutbare` | `compile_error` | — | `non-exhaustive case` | — | — | `refutbare.elm` |
+| 135 | `rowgadt_ce2_barevar` | `compile_error` | — | `cannot unify Int with String` | — | — | `rowgadt_ce2_barevar.elm` |
+| 136 | `rowgadt_ce2_plain` | `compile_error` | — | `cannot unify RowgadtCe2Plain.Expr with String` | — | — | `rowgadt_ce2_plain.elm` |
+| 137 | `rowgadt_ce3_fieldalias` | `compile_error` | — | `type variable a is rigid` | — | — | `rowgadt_ce3_fieldalias.elm` |
+| 138 | `rowgadt_ce3a_tuple` | `compile_error` | — | `infinite type` | — | — | `rowgadt_ce3a_tuple.elm` |
+| 139 | `rowgadt_ce3b_prealias` | `compile_error` | — | `infinite type` | — | — | `rowgadt_ce3b_prealias.elm` |
+| 140 | `rowgadt_ce3c_let` | `compile_error` | — | `infinite type` | — | — | `rowgadt_ce3c_let.elm` |
+| 141 | `liftself` | `run` | `main` | `515` | — | — | `liftself.elm` |
+| 142 | `liftmutual` | `run` | `main` | `42` | — | — | `liftmutual.elm` |
+| 143 | `liftfirstclass` | `run` | `main` | `100` | — | — | `liftfirstclass.elm` |
+| 144 | `liftshadow` | `run` | `main` | `13` | — | — | `liftshadow.elm` |
+| 145 | `liftfwd` | `run` | `main` | `6` | — | — | `liftfwd.elm` |
+| 146 | `liftfwdmix` | `run` | `main` | `11` | — | — | `liftfwdmix.elm` |
+| 147 | `liftnested` | `run` | `main` | `1002` | — | — | `liftnested.elm` |
+| 148 | `liftnestedtuple` | `run` | `main` | `1003` | — | — | `liftnestedtuple.elm` |
+| 149 | `liftnestedfinal` | `run` | `main` | `1002` | — | — | `liftnestedfinal.elm` |
+| 150 | `liftnestedrec` | `run` | `main` | `100` | — | — | `liftnestedrec.elm` |
+| 151 | `liftdelegate` | `run` | `main` | `5` | — | — | `liftdelegate.elm` |
+| 152 | `liftdelegmut` | `run` | `main` | `0` | — | — | `liftdelegmut.elm` |
+| 153 | `liftprelude` | `run` | `main` | `7` | — | — | `liftprelude.elm` |
+| 154 | `liftenclosing` | `run` | `main` | `100` | — | — | `liftenclosing.elm` |
+| 155 | `liftseqcap` | `run` | `main` | `2` | — | — | `liftseqcap.elm` |
+| 156 | `liftfwdback` | `run` | `main` | `6` | — | — | `liftfwdback.elm` |
+| 157 | `liftcapconfl` | `run` | `main` | `51` | — | — | `liftcapconfl.elm` |
+| 158 | `liftcapconfl2` | `run` | `main` | `51` | — | — | `liftcapconfl2.elm` |
+| 159 | `liftmodfwd` | `run` | `main` | `999` | — | — | `liftmodfwd.elm` |
+| 160 | `liftpreludefwd` | `run` | `main` | `2` | — | — | `liftpreludefwd.elm` |
+| 161 | `liftprelfwdfn` | `run` | `main` | `1000` | — | — | `liftprelfwdfn.elm` |
+| 162 | `liftstaycall` | `run` | `main` | `702` | — | — | `liftstaycall.elm` |
+| 163 | `liftdisjoint` | `run` | `main` | `35` | — | — | `liftdisjoint.elm` |
+| 164 | `liftvaluecycle` | `compile_error` | — | `unknown name: v` | — | — | `liftvaluecycle.elm` |
+| 165 | `liftrefuse` | `compile_error` | — | `unknown name: a` | — | — | `liftrefuse.elm` |
+| 166 | `liftstayfwd` | `run` | `main` | `999` | — | — | `liftstayfwd.elm` |
+| 167 | `liftcycshadows` | `run` | `main` | `0` | — | — | `liftcycshadows.elm` |
+| 168 | `liftrelaxleak` | `run` | `main` | `999` | — | — | `liftrelaxleak.elm` |
+| 169 | `liftdisjointshadow` | `run` | `main` | `3` | — | — | `liftdisjointshadow.elm` |
+| 170 | `natcalloverflow` | `natdepth` | `main` | `500500` | `1000 20000 100000` | — | `natcalloverflow.elm` |
 
 ---
-Generated from `tests/elm-fixtures/run-elm-gate.sh`; 167 checks.
+Generated from `tests/elm-fixtures/run-elm-gate.sh`; 170 checks.

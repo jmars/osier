@@ -8,6 +8,9 @@ elm-compiler/test-compiler.js
 
 # elm-fixtures generated output (iofile test writes this each gate run)
 tests/elm-fixtures/out/hello.out
+# stage 7D's execfallback row: the plan's `out` redirect target (its presence IS
+# the assertion — the golden bytes live in expected/execfallback.out.txt)
+tests/elm-fixtures/out/execfallback.out
 
 # zig global cache redirected onto the pool (tools/aot/aot-build.sh)
 .zig-cache-global/
