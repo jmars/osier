@@ -3,6 +3,7 @@ module Mid.RtLang.Check exposing
     , checkModule
     , checkProgram
     , fieldOffset
+    , fieldWidth
     , guardsHold
     , sizeofStruct
     )
@@ -279,6 +280,7 @@ import Mid.RtLang.Ast
         , Sig(..)
         , SizeTarget(..)
         , Stmt(..)
+        , StructInit(..)
         , Sym
         , Term(..)
         , Type(..)
@@ -740,32 +742,47 @@ structNames decls =
 
 structsFold : List Decl -> List String -> StructTable -> Result String StructTable
 structsFold decls names acc =
-    case decls of
+    structsFoldAll decls decls names acc
+
+
+{-| The walk keeps the WHOLE declaration list beside the remaining one: a
+nested-struct field resolves its SIZE by re-reading the declarations, so
+`layoutOf` must see every declaration, not just the ones after the struct
+being laid out (MEASURED — passing the case scrutinee type-checked and
+then rejected every nested struct as "names no declared struct").
+-}
+structsFoldAll : List Decl -> List Decl -> List String -> StructTable -> Result String StructTable
+structsFoldAll all remaining names acc =
+    case remaining of
         [] ->
             Ok acc
 
         d :: rest ->
             case d of
                 EnumDecl _ ->
-                    structsFold rest names acc
+                    structsFoldAll all rest names acc
 
                 StructDecl s ->
-                    case layoutOf names s.name s.fields of
+                    case layoutOf all names s.name s.fields of
                         Err msg ->
                             Err msg
 
                         Ok ( fields, size ) ->
-                            structsFold rest names (Dict.insert s.name { fields = fields, size = size } acc)
+                            structsFoldAll all rest names (Dict.insert s.name { fields = fields, size = size } acc)
 
 
 {-| One struct's layout: declaration-order offsets, each field's size in
-whole words (`word`/`*T` = 1, `val` = 5 inline).  Rejections: a duplicate
-field name; a `float` field (no raw f64 load node); a pointer field naming
-an unknown struct; self-reference BY VALUE is structurally unspellable in
-the U1 grammar (no struct-value `Type` constructor) — the seat for B2.
+whole words (`word`/`*T` = 1, `val` = 5 inline, a nested struct = its own
+size).  Rejections: a duplicate field name; a `float` field (no raw f64
+load node); a pointer field naming an unknown struct; a struct field
+naming an unknown struct; and a BY-VALUE CYCLE (`struct S { s : S; }`, or
+`S { b : B }` beside `B { s : S }`) — B2, the layout seat the A1 note
+reserved for exactly this unit.  `decls` is threaded for the nested-struct
+SIZE only: the recursion re-walks the same declarations, it does not
+build a second table.
 -}
-layoutOf : List String -> String -> List Field -> Result String ( List StructField, Int )
-layoutOf names structName fields =
+layoutOf : List Decl -> List String -> String -> List Field -> Result String ( List StructField, Int )
+layoutOf decls names structName fields =
     case duplicateFieldName fields of
         Just f ->
             Err
@@ -777,34 +794,34 @@ layoutOf names structName fields =
                 )
 
         Nothing ->
-            fieldsWalk names structName fields 0 []
+            fieldsWalk decls names structName fields 0 []
 
 
-fieldsWalk : List String -> String -> List Field -> Int -> List StructField -> Result String ( List StructField, Int )
-fieldsWalk names structName fields offset acc =
+fieldsWalk : List Decl -> List String -> String -> List Field -> Int -> List StructField -> Result String ( List StructField, Int )
+fieldsWalk decls names structName fields offset acc =
     case fields of
         [] ->
             Ok ( List.reverse acc, offset )
 
         f :: rest ->
-            case fieldSize names structName f.ty of
+            case fieldSize decls names [ structName ] structName f.ty of
                 Err msg ->
                     Err msg
 
                 Ok sz ->
-                    fieldsWalk names structName rest (offset + sz) ({ name = f.name, ty = f.ty, offset = offset } :: acc)
+                    fieldsWalk decls names structName rest (offset + sz) ({ name = f.name, ty = f.ty, offset = offset } :: acc)
 
 
 {-| A field type's size in words, with the J11 field-type rejections.  A
 pointer field resolves its struct name against the full struct-name set
-(order-independent).  Self-reference BY VALUE (`f : S` — the struct's own
-name as a bare field type) is infinite and rejected; that requires a
-struct-value `Type` constructor the U1 grammar does not have, so today the
-rejection is structural (the parser's "expected a type"), and THIS seat is
-where B2's nested-struct unit adds the judgment.
+(order-independent); a STRUCT-VALUE field (B2, `inner : B`) recurses into
+`structSizeOf` with `seen` carrying the enclosing struct names, so
+self-reference BY VALUE — `struct S { s : S; }`, or a two-struct cycle —
+is the infinite-size reject the A1 note reserved for this unit (it was
+structurally unspellable before B2 added the `TStruct` type).
 -}
-fieldSize : List String -> String -> Type -> Result String Int
-fieldSize names structName ty =
+fieldSize : List Decl -> List String -> List String -> String -> Type -> Result String Int
+fieldSize decls names seen structName ty =
     case ty of
         TWord ->
             Ok 1
@@ -837,12 +854,83 @@ fieldSize names structName ty =
         TVal ->
             Ok 5
 
+        TStruct sname ->
+            structSizeOf decls names seen sname
+
         TFloat ->
             Err
                 ("RtLang: J11: struct '"
                     ++ structName
                     ++ "' has a float field — Mid.Ir has no raw-memory f64 load node, so a float field cannot lower (named, not silently word-typed)"
                 )
+
+
+{-| A struct's size in words, computed from the declarations with `seen`
+carrying the enclosing names: the BY-VALUE CYCLE reject lives here (one
+table, one rule).  An unknown struct is the same J11 reject the pointer
+arm spells.
+-}
+structSizeOf : List Decl -> List String -> List String -> String -> Result String Int
+structSizeOf decls names seen sname =
+    if List.member sname seen then
+        Err
+            ("RtLang: J11: struct '"
+                ++ sname
+                ++ "' contains itself BY VALUE ("
+                ++ String.join " -> " (List.reverse (sname :: seen))
+                ++ ") — infinite size; a recursive struct must recurse through a pointer (`next : *"
+                ++ sname
+                ++ "`)"
+            )
+
+    else
+        case fieldsOfDecl decls sname of
+            Nothing ->
+                Err
+                    ("RtLang: J11: field type '"
+                        ++ sname
+                        ++ "' names no declared struct — a struct-value field must resolve in the file's struct table"
+                    )
+
+            Just fields ->
+                sizesWalk decls names (sname :: seen) sname fields 0
+
+
+sizesWalk : List Decl -> List String -> List String -> String -> List Field -> Int -> Result String Int
+sizesWalk decls names seen structName fields acc =
+    case fields of
+        [] ->
+            Ok acc
+
+        f :: rest ->
+            case fieldSize decls names seen structName f.ty of
+                Err msg ->
+                    Err msg
+
+                Ok sz ->
+                    sizesWalk decls names seen structName rest (acc + sz)
+
+
+{-| A struct declaration's field list, structurally (the same `.fields` the
+layout walk reads).  `Nothing` when no such struct is declared.
+-}
+fieldsOfDecl : List Decl -> String -> Maybe (List Field)
+fieldsOfDecl decls sname =
+    case decls of
+        [] ->
+            Nothing
+
+        d :: rest ->
+            case d of
+                StructDecl s ->
+                    if s.name == sname then
+                        Just s.fields
+
+                    else
+                        fieldsOfDecl rest sname
+
+                EnumDecl _ ->
+                    fieldsOfDecl rest sname
 
 
 {-| The first field name used twice inside one struct, or `Nothing`.
@@ -966,6 +1054,36 @@ fieldOffsetIn fields name =
                 fieldOffsetIn rest name
 
 
+{-| A struct field's WIDTH in words, from the table — the B2 copy lowering's
+read of the ONE layout rule (`fieldSize`, the function `layoutOf` lays out
+with; this is a wrapper, not a second copy).  `Nothing` when the struct or
+field is unknown or the table rejects.
+-}
+fieldWidth : List Decl -> String -> String -> Maybe Int
+fieldWidth decls structName fieldName =
+    case structsOf decls of
+        Err _ ->
+            Nothing
+
+        Ok table ->
+            case Dict.get structName table of
+                Just info ->
+                    case fieldTypeIn info.fields fieldName of
+                        Just ty ->
+                            case fieldSize decls (structNames decls) [ structName ] structName ty of
+                                Ok n ->
+                                    Just n
+
+                                Err _ ->
+                                    Nothing
+
+                        Nothing ->
+                            Nothing
+
+                Nothing ->
+                    Nothing
+
+
 {-| The surface signature set, straight from the parsed program — so
 `call` resolution is order-independent (a body may call a defun defined
 later; Rt bodies are mutually recursive).  Only ACTIVE defuns
@@ -1014,12 +1132,26 @@ non-pointer classes need nothing.
 -}
 validateSig : Ctx -> List Param -> Type -> Result String ()
 validateSig ctx params ret =
-    case validateType ctx ret of
-        Err msg ->
-            Err msg
+    case ret of
+        TStruct sname ->
+            -- plan Q7: the ret path is ONE word, so a struct VALUE cannot
+            -- come back (a ret buffer is new ABI machinery — named v2).
+            Err
+                (ctx.key
+                    ++ ": J11: '-> "
+                    ++ sname
+                    ++ "' — a struct RETURN is REJECTED in v1 (plan Q7: the ret path is one word; a struct comes back through a caller-supplied '*"
+                    ++ sname
+                    ++ "' out-parameter)"
+                )
 
-        Ok () ->
-            validateParams ctx params
+        _ ->
+            case validateType ctx ret of
+                Err msg ->
+                    Err msg
+
+                Ok () ->
+                    validateParams ctx params
 
 
 validateParams : Ctx -> List Param -> Result String ()
@@ -1029,12 +1161,29 @@ validateParams ctx params =
             Ok ()
 
         p :: rest ->
-            case validateType ctx p.ty of
-                Err msg ->
-                    Err msg
+            case p.ty of
+                TStruct sname ->
+                    -- B6's seat: a struct parameter by value FLATTENS into
+                    -- consecutive word registers, which is the word-ABI
+                    -- generalization this ladder rung does not own.
+                    Err
+                        (ctx.key
+                            ++ ": J11: parameter '"
+                            ++ p.name
+                            ++ "' is a struct VALUE ("
+                            ++ sname
+                            ++ ") — struct parameters by value are B6's job (the word-ABI flattening); pass a '*"
+                            ++ sname
+                            ++ "' today"
+                        )
 
-                Ok () ->
-                    validateParams ctx rest
+                _ ->
+                    case validateType ctx p.ty of
+                        Err msg ->
+                            Err msg
+
+                        Ok () ->
+                            validateParams ctx rest
 
 
 {-| The struct-name check inside a declared type (J11): a `*S` must
@@ -1056,6 +1205,19 @@ validateType ctx ty =
                             ++ ": J11: pointer type '*"
                             ++ sname
                             ++ "' names no declared struct — every *S must resolve in the file's struct table"
+                        )
+
+        TStruct sname ->
+            case Dict.get sname ctx.env.structs of
+                Just _ ->
+                    Ok ()
+
+                Nothing ->
+                    Err
+                        (ctx.key
+                            ++ ": J11: type '"
+                            ++ sname
+                            ++ "' names no declared struct — a struct VALUE must resolve in the file's struct table"
                         )
 
         _ ->
@@ -1193,6 +1355,12 @@ checkStmt ctx stmt =
         SIndexStore p i e ->
             checkIndexStore ctx p i e
 
+        SStructBind rec ->
+            checkStructBind ctx rec.sname rec.name rec.init
+
+        SVarStore name e ->
+            checkVarStore ctx name e
+
 
 {-| J1 (B1) — the `bool` BINDER rule: the class exists for the 0/1 word,
 and a binder must carry a value whose representation is fixed by the CLASS
@@ -1251,6 +1419,278 @@ isBoolTemp e =
 
         _ ->
             False
+
+
+{-| B2 — the struct-VALUE binder `S s;` / `S s = { .. };` / `S s = other;`.
+Three judgments, all fail-fast and all loud:
+
+  1. `S` must be a declared struct (J11) — and the same walk runs
+     `validateType`, so an unknown name is caught at the BINDER, not at its
+     first use.
+  2. `name` must be NEW (J5's strict-order shadowing rule: a binder is a
+     fresh id, so re-declaring one is a mistake, never an overwrite).
+  3. the initialiser must fit the struct: `InitFields` names real fields,
+     once each, and each value COERCES to its field's class; `InitCopy`
+     needs an expression of the SAME struct value class (`TStruct S` — a
+     `*S` is deliberately NOT accepted: the copy reads the VALUE's words,
+     and a pointer would need a `*p` deref spelling this grammar lacks).
+-}
+checkStructBind : Ctx -> String -> String -> StructInit -> Result String Ctx
+checkStructBind ctx sname name init =
+    case Dict.get sname ctx.env.structs of
+        Nothing ->
+            Err
+                (ctx.key
+                    ++ ": J11: '"
+                    ++ sname
+                    ++ " "
+                    ++ name
+                    ++ "' — no such struct is declared in this module"
+                )
+
+        Just info ->
+            if Dict.member name ctx.scope then
+                Err
+                    (ctx.key
+                        ++ ": J5: '"
+                        ++ name
+                        ++ "' is already a binder in scope — a binder is a NEW id (shadowing is a rename, and a struct binder OWNS fresh storage)"
+                    )
+
+            else
+                case checkStructInit ctx sname info name init of
+                    Err msg ->
+                        Err msg
+
+                    Ok () ->
+                        Ok { ctx | scope = Dict.insert name (TStruct sname) ctx.scope }
+
+
+checkStructInit : Ctx -> String -> StructInfo -> String -> StructInit -> Result String ()
+checkStructInit ctx sname info name init =
+    case init of
+        InitZero ->
+            Ok ()
+
+        InitFields fields ->
+            initFieldsWalk ctx sname info name fields []
+
+        InitCopy e ->
+            case checkExp ctx e of
+                Err msg ->
+                    Err msg
+
+                Ok (TStruct other) ->
+                    if other == sname then
+                        Ok ()
+
+                    else
+                        Err
+                            (ctx.key
+                                ++ ": J1: '"
+                                ++ name
+                                ++ "' is a "
+                                ++ sname
+                                ++ " but its initializer is a "
+                                ++ other
+                                ++ " value — a copy needs the SAME struct"
+                            )
+
+                Ok cls ->
+                    Err
+                        (ctx.key
+                            ++ ": J1: '"
+                            ++ name
+                            ++ "' is a "
+                            ++ sname
+                            ++ " but its initializer is "
+                            ++ typeStr cls
+                            ++ " — a struct copy needs a struct VALUE of the same type (a '*"
+                            ++ sname
+                            ++ "' is not one)"
+                        )
+
+
+initFieldsWalk : Ctx -> String -> StructInfo -> String -> List ( String, Exp ) -> List String -> Result String ()
+initFieldsWalk ctx sname info name fields seen =
+    case fields of
+        [] ->
+            Ok ()
+
+        ( f, e ) :: rest ->
+            if List.member f seen then
+                Err
+                    (ctx.key
+                        ++ ": J13: field '"
+                        ++ f
+                        ++ "' is initialised twice in '"
+                        ++ name
+                        ++ "' — one field, one initialiser"
+                    )
+
+            else
+                case fieldTypeIn info.fields f of
+                    Nothing ->
+                        Err
+                            (ctx.key
+                                ++ ": J13: struct '"
+                                ++ sname
+                                ++ "' has no field '"
+                                ++ f
+                                ++ "' to initialise"
+                            )
+
+                    Just fty ->
+                        case checkExp ctx e of
+                            Err msg ->
+                                Err msg
+
+                            Ok vcls ->
+                                if coerce fty vcls then
+                                    initFieldsWalk ctx sname info name rest (f :: seen)
+
+                                else
+                                    Err
+                                        (ctx.key
+                                            ++ ": J1: initialiser for field '"
+                                            ++ sname
+                                            ++ "."
+                                            ++ f
+                                            ++ "' needs "
+                                            ++ typeStr fty
+                                            ++ ", got "
+                                            ++ typeStr vcls
+                                        )
+
+
+{-| B2 — `s = other;` the aggregate COPY statement.  Only a struct-VALUE
+binder may be assigned (Mid binders are single-assignment: a `word`/`val`/
+pointer destination is a loud reject naming the rule), and the source must
+be the SAME struct value class — this is a word-for-word copy into storage
+that already exists.
+-}
+checkVarStore : Ctx -> String -> Exp -> Result String Ctx
+checkVarStore ctx name e =
+    case Dict.get name ctx.scope of
+        Nothing ->
+            Err (ctx.key ++ ": J5: unbound name '" ++ name ++ "' in an assignment")
+
+        Just (TStruct sname) ->
+            case checkExp ctx e of
+                Err msg ->
+                    Err msg
+
+                Ok (TStruct other) ->
+                    if other == sname then
+                        Ok ctx
+
+                    else
+                        Err
+                            (ctx.key
+                                ++ ": J1: '"
+                                ++ name
+                                ++ "' is a "
+                                ++ sname
+                                ++ " but the assigned value is a "
+                                ++ other
+                                ++ " — a struct copy needs the SAME struct"
+                            )
+
+                Ok cls ->
+                    Err
+                        (ctx.key
+                            ++ ": J1: '"
+                            ++ name
+                            ++ "' is a "
+                            ++ sname
+                            ++ " but the assigned value is "
+                            ++ typeStr cls
+                            ++ " — a struct copy needs a struct VALUE of the same type"
+                        )
+
+        Just cls ->
+            Err
+                (ctx.key
+                    ++ ": J1: '"
+                    ++ name
+                    ++ "' is "
+                    ++ typeStr cls
+                    ++ " — only a struct VALUE can be assigned (Mid binders are single-assignment: a scalar rebind is a NEW binder, and a field is written `p->f = e;`)"
+                )
+
+
+{-| B2 — `&place`: the ADDRESS of a memory-backed place, as `*T`.  Legal on
+exactly two shapes, both of which have storage in this lowering:
+
+  * a struct VALUE expression — `&s`, `&s.inner`, `&(p[i] on a *S)`: its
+    value IS its address, so this is the IDENTITY (`*S`);
+  * a struct FIELD whose type is one word or a nested struct — `&s.f`,
+    `&p->f`, `&s.inner`: base address + the field's constant offset
+    (`*word` for a word/pointer field, `*B` for a nested struct field).
+
+Everything else is refused with the reason: a `word`/`int`/`bool`/`float`
+LOCAL or a PARAMETER (a binder is a temp or a Value slot — no address; a
+scalar spill to memory is the named v2), a temporary/call/literal (no
+place at all), and a `val` FIELD (`&s.v` — a GC-interior address exposed
+as a raw word is the unrooted-view hazard; `vecaddr`/`payload` are the
+sanctioned reads, plan Q11).
+-}
+checkAddrOf : Ctx -> Exp -> Result String Type
+checkAddrOf ctx e =
+    case e of
+        EField base f ->
+            case structPointer ctx base of
+                Err msg ->
+                    Err msg
+
+                Ok ( sname, info ) ->
+                    case fieldTypeIn info.fields f of
+                        Nothing ->
+                            Err
+                                (ctx.key
+                                    ++ ": J13: struct '"
+                                    ++ sname
+                                    ++ "' has no field '"
+                                    ++ f
+                                    ++ "' to take the address of"
+                                )
+
+                        Just (TStruct inner) ->
+                            Ok (TPtr (PStruct inner))
+
+                        Just TVal ->
+                            Err
+                                (ctx.key
+                                    ++ ": J13: '&"
+                                    ++ sname
+                                    ++ "."
+                                    ++ f
+                                    ++ "' — a val field has no raw address: exposing a GC-interior pointer as a word is the unrooted-view hazard (use vecaddr/payload, plan Q11)"
+                                )
+
+                        Just _ ->
+                            Ok (TPtr PWord)
+
+        _ ->
+            case checkExp ctx e of
+                Err msg ->
+                    Err msg
+
+                Ok (TStruct sname) ->
+                    Ok (TPtr (PStruct sname))
+
+                Ok (TPtr _) ->
+                    Err
+                        (ctx.key
+                            ++ ": J13: '&' of a pointer — the pointer IS an address; `&p` would mean the address of the PARAMETER/BINDER holding it, and a binder has no storage in this lowering (spilling it is the named v2)"
+                        )
+
+                Ok cls ->
+                    Err
+                        (ctx.key
+                            ++ ": J13: '&' needs a struct value or a struct field with storage, got "
+                            ++ typeStr cls
+                            ++ " — a scalar local, a parameter and a temporary have no address in this lowering (a struct local (`S s;`) or a struct field is the memory-backed seat)")
 
 
 {-| J13 — `p->f = e;`: `p` must be a struct pointer, `f` a field of its
@@ -1360,30 +1800,42 @@ structPointer ctx p =
             Err msg
 
         Ok (TPtr (PStruct sname)) ->
-            case Dict.get sname ctx.env.structs of
-                Just info ->
-                    Ok ( sname, info )
+            structAt ctx sname ("*" ++ sname)
 
-                Nothing ->
-                    Err
-                        (ctx.key
-                            ++ ": J11: field access on '*"
-                            ++ sname
-                            ++ "' — no such struct is declared"
-                        )
+        Ok (TStruct sname) ->
+            -- B2: a struct VALUE is memory too, and its VALUE is its
+            -- address — so `s.f` resolves exactly as `p->f`/`p.f` does.
+            -- This ONE arm is what makes the `.`-auto-deref rule (Terra's:
+            -- `p.f` on a `*S` derefs once) cost no new judgment.
+            structAt ctx sname sname
 
         Ok (TPtr pty) ->
             Err
                 (ctx.key
-                    ++ ": J13: field access needs a struct pointer, got "
+                    ++ ": J13: field access needs a struct pointer or a struct value, got "
                     ++ typeStr (TPtr pty)
                 )
 
         Ok cls ->
             Err
                 (ctx.key
-                    ++ ": J13: field access needs a struct pointer, got "
+                    ++ ": J13: field access needs a struct pointer or a struct value, got "
                     ++ typeStr cls
+                )
+
+
+structAt : Ctx -> String -> String -> Result String ( String, StructInfo )
+structAt ctx sname what =
+    case Dict.get sname ctx.env.structs of
+        Just info ->
+            Ok ( sname, info )
+
+        Nothing ->
+            Err
+                (ctx.key
+                    ++ ": J11: field access on '"
+                    ++ what
+                    ++ "' — no such struct is declared"
                 )
 
 
@@ -1774,6 +2226,9 @@ checkExp ctx e =
                 Nothing ->
                     Err (ctx.key ++ ": J5: unbound name '" ++ name ++ "'")
 
+        EAddrOf inner ->
+            checkAddrOf ctx inner
+
         EWordBin op a b ->
             checkWordBin ctx op a b
 
@@ -2062,6 +2517,19 @@ sizeofWords ctx target =
 
         SizeType ty ->
             case ty of
+                TStruct sname ->
+                    case Dict.get sname ctx.env.structs of
+                        Just info ->
+                            Ok info.size
+
+                        Nothing ->
+                            Err
+                                (ctx.key
+                                    ++ ": J11: sizeof("
+                                    ++ sname
+                                    ++ ") — no such struct is declared in this module"
+                                )
+
                 TWord ->
                     Ok 1
 
@@ -2653,6 +3121,9 @@ checkWordBin ctx op a b =
 typeStr : Type -> String
 typeStr t =
     case t of
+        TStruct sname ->
+            sname
+
         TWord ->
             "word"
 

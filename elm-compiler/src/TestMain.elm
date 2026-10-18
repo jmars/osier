@@ -3088,7 +3088,7 @@ checks rt =
         "struct S { f : word; }\ndefun Rt.g(p: *S) -> word {\n  return p + 1;\n}"
     , checkErrModule "check A1 reject: a float struct field is a J11 reject (no raw f64 load node)" "float field"
         "struct S { f : float; }\ndefun Rt.g() -> word {\n  return 0;\n}"
-    , checkErrModule "check A1 reject: a self-by-value struct is UNSPELLABLE (structural — the bare-name field is a parse reject, no struct-value Type exists)" "expected a type"
+    , checkErrModule "check A1 reject (REWRITTEN by B2): a self-by-value struct is an INFINITE-SIZE reject — it used to be structurally unspellable (a bare-name field was a parse reject, 'expected a type'); B2's TStruct type makes it spellable, so the judgment moves to the layout table where the A1 note reserved it" "contains itself BY VALUE"
         "struct S { next : S; }\ndefun Rt.g() -> word {\n  return 0;\n}"
     , checkErrModule "check A1 reject: an unknown field is a J13 reject" "has no field"
         "struct S { f : word; }\ndefun Rt.g(p: *S) -> word {\n  return p->g;\n}"
@@ -6481,7 +6481,323 @@ checks rt =
             Err _ ->
                 False
         )
+    , check "B2 parse: `S s;` is a STRUCT-VALUE binder with ZEROED storage (SStructBind InitZero — a statement, not an SBind: the ALLOCATION is the point)"
+        (Parse.parseBlock "{ Outer o;\n  return 0; }"
+            == Ok
+                { stmts =
+                    [ Ast.SStructBind { sname = "Outer", name = "o", init = Ast.InitZero } ]
+                , term = Ast.TRet (Ast.EInt 0)
+                }
+        )
+    , check "B2 parse: `Outer o = { a = 1; in_.k = 7; };` — the field-wise initialiser (name = expression, each `;`-terminated)"
+        (Parse.parseBlock "{ Outer o = { a = 1; in_ = t; };\n  return 0; }"
+            == Ok
+                { stmts =
+                    [ Ast.SStructBind
+                        { sname = "Outer"
+                        , name = "o"
+                        , init =
+                            Ast.InitFields
+                                [ ( "a", Ast.EInt 1 )
+                                , ( "in_", Ast.EVar "t" )
+                                ]
+                        }
+                    ]
+                , term = Ast.TRet (Ast.EInt 0)
+                }
+        )
+    , check "B2 parse: `Outer c = o;` is a COPY initialiser and `c = o;` the aggregate ASSIGNMENT (`SVarStore`) — the same `=` tail, a different statement"
+        (Parse.parseBlock "{ Outer c = o;\n  c = o;\n  return 0; }"
+            == Ok
+                { stmts =
+                    [ Ast.SStructBind { sname = "Outer", name = "c", init = Ast.InitCopy (Ast.EVar "o") }
+                    , Ast.SVarStore "c" (Ast.EVar "o")
+                    ]
+                , term = Ast.TRet (Ast.EInt 0)
+                }
+        )
+    , check "B2 parse: `.` IS `->` — `p.f` and `p->f` parse to the SAME AST (`EField`), and both chain (`s.inner.f`, `p->f.g`): Terra's alias, not a second form"
+        (Parse.parseExp "p.f"
+            == Parse.parseExp "p->f"
+            && Parse.parseExp "s.inner.f" == Parse.parseExp "s->inner->f"
+            && Parse.parseExp "p->f.g"
+            == Ok (Ast.EField (Ast.EField (Ast.EVar "p") "f") "g")
+        )
+    , check "B2 parse: `&place` is the PREFIX address-of (`EAddrOf`) and never eats the infix `&` — `x & &y` is bitand-by-address-of"
+        (Parse.parseExp "&s.f"
+            == Ok (Ast.EAddrOf (Ast.EField (Ast.EVar "s") "f"))
+            && Parse.parseExp "x & &y"
+            == Ok (Ast.EWordBin Ast.WBitAnd (Ast.EVar "x") (Ast.EAddrOf (Ast.EVar "y")))
+            && Parse.parseExp "&p->f.g"
+            == Ok (Ast.EAddrOf (Ast.EField (Ast.EField (Ast.EVar "p") "f") "g"))
+        )
+    , check "B2 parse: the `.` ROUTING MOVED NO KEY — a defun header and a `call` keep their dotted keys verbatim while a body's `p.f` splits (the two readers are different on purpose)"
+        (case Parse.parseProgram "defun Rt.a.b(p: *S) -> word {\n  return call Rt.getpid(p.f);\n}" of
+            Ok [ d ] ->
+                d.key == "Rt.a.b" && d.body.term == Ast.TRet (Ast.ECall "Rt.getpid" [ Ast.EField (Ast.EVar "p") "f" ])
+
+            _ ->
+                False
+        )
+    , checkErr "B2 check REJECT: a bare key in EXPRESSION position is still not an expression — `Rt.getpid` is `Rt` `.` `getpid`, so it is an unbound name (the site moved from a parse reject to a CHECK reject, never to a silent accept)" "unbound name 'Rt'"
+        "defun Rt.g(a: val) -> val {\n  return Rt.getpid;\n}"
+    , checkOkModule "B2 check accept: THE MILESTONE SHAPE — a struct local with a NESTED struct and a `val` field, field-wise init through `.`, `&o` bound to a `*Outer`, mutation through `p.a`/`p.in_.k`, a COPY initialiser, a nested store, and the val field read back"
+        b2MilestoneMid
+    , checkErrModule "B2 check REJECT: `&` of a WORD local — a scalar binder is a temp or a 40-byte slot, so there is no address to take (the struct local and the struct field are the memory-backed seats)" "'&' needs a struct value or a struct field with storage"
+        "struct S { a : word; }\ndefun Rt.g() -> word {\n  word w = 1;\n  *word p = &w;\n  return 0;\n}"
+    , checkOkModule "B2 check accept CONTROL for the row above: `&` of a struct FIELD is legal and types as `*word` (the storage exists)"
+        "struct S { a : word; }\ndefun Rt.g() -> word {\n  S s;\n  *word p = &s.a;\n  return *p;\n}"
+    , checkErrModule "B2 check REJECT: `&` of a VAL field — a GC-interior address exposed as a raw word is the unrooted-view hazard (vecaddr/payload are the sanctioned reads, plan Q11)" "unrooted-view hazard"
+        "struct S { a : word; v : val; }\ndefun Rt.g() -> word {\n  S s;\n  *val p = &s.v;\n  return 0;\n}"
+    , checkErrModule "B2 check REJECT: `&p` of a POINTER — the pointer IS an address; the operand would have to be the address of the BINDER holding it, and a binder has no storage" "the pointer IS an address"
+        "struct S { a : word; }\ndefun Rt.g(p: *S) -> word {\n  *word q = &p;\n  return 0;\n}"
+    , checkErrModule "B2 check REJECT: `.` on a NON-STRUCT (`w.f` on a word) — field access needs a struct value or a struct pointer" "field access needs a struct pointer or a struct value"
+        "defun Rt.g(w: word) -> word {\n  return w.f;\n}"
+    , checkErrModule "B2 check REJECT: a STRUCT RETURN (plan Q7 — the ret path is one word; the out-parameter is the way)" "a struct RETURN is REJECTED"
+        "struct S { a : word; }\ndefun Rt.g() -> S {\n  S s;\n  return s;\n}"
+    , checkErrModule "B2 check REJECT: a STRUCT PARAMETER by value — B6's word-ABI flattening; a `*S` parameter is what to write today" "struct parameters by value are B6's job"
+        "struct S { a : word; }\ndefun Rt.g(s: S) -> word {\n  return 0;\n}"
+    , checkOkModule "B2 check accept CONTROL for the two rows above: a `*S` parameter and a `-> val` result are the legal spellings"
+        "struct S { a : word; }\ndefun Rt.g(p: *S) -> val {\n  return mknum(p.a);\n}"
+    , checkErrModule "B2 check REJECT: copying a DIFFERENT struct (`T t = o;`) — a copy needs the SAME struct value" "the SAME struct"
+        "struct S { a : word; }\nstruct T { b : word; }\ndefun Rt.g() -> word {\n  S o;\n  T t = o;\n  return 0;\n}"
+    , checkErrModule "B2 check REJECT: the same field initialised TWICE (`{ a = 1; a = 2; }`)" "initialised twice"
+        "struct S { a : word; }\ndefun Rt.g() -> word {\n  S s = { a = 1; a = 2; };\n  return 0;\n}"
+    , checkErrModule "B2 check REJECT: an UNKNOWN field in an initialiser" "has no field 'nope'"
+        "struct S { a : word; }\ndefun Rt.g() -> word {\n  S s = { nope = 1; };\n  return 0;\n}"
+    , checkErrModule "B2 check REJECT: a struct binder SHADOWING an existing one (J5 — a binder is a NEW id, and a struct binder owns fresh storage)" "already a binder in scope"
+        "struct S { a : word; }\ndefun Rt.g() -> word {\n  S s;\n  S s;\n  return 0;\n}"
+    , checkErrModule "B2 check REJECT: a TWO-STRUCT by-value cycle (S { b : B } beside B { s : S }) — infinite size, the layout table's judgment" "contains itself BY VALUE"
+        "struct B { s : S; }\nstruct S { b : B; }\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , check "B2 LAYOUT (ONE TABLE, nested + val): Outer{a:word; in_:Inner{k:word}; v:val} is 7 words — sizeof reads the nested struct's OWN size and the val's 5-word inline slot, and the offsets/width follow"
+        (let
+            decls =
+                declsOf "struct Inner { k : word; }\nstruct Outer { a : word; in_ : Inner; v : val; }"
+         in
+         Check.sizeofStruct decls "Outer"
+            == Just 7
+            && Check.sizeofStruct decls "Inner"
+            == Just 1
+            && Check.fieldOffset decls "Outer" "a"
+            == Just 0
+            && Check.fieldOffset decls "Outer" "in_"
+            == Just 1
+            && Check.fieldOffset decls "Outer" "v"
+            == Just 2
+            && Check.fieldWidth decls "Outer" "v"
+            == Just 5
+            && Check.fieldWidth decls "Outer" "in_"
+            == Just 1
+        )
+    , check "B2 LOWER: a struct binder ALLOCATES from the ONE layout table — `Outer o;` binds `malloc(8 * sizeof Outer)` = malloc(56) for a 7-word struct, then `memset(addr, 0, 56)`"
+        (case lowlModuleBody b2LocalMid of
+            Ok body ->
+                b2LetValue body
+                    == Just (Unsafe (RawCallRaw { sym = "malloc", args = [ Lit (LNumber 56) ] }))
+                    && (case b2LetBody body of
+                            Just inner ->
+                                b2LetValue inner
+                                    == Just (Unsafe (RawCallRaw { sym = "memset", args = [ Var 2, Lit (LNumber 0), Lit (LNumber 56) ] }))
+
+                            Nothing ->
+                                False
+                       )
+
+            Err _ ->
+                False
+        )
+    , check "B2 LOWER: `&s` on a struct VALUE is the IDENTITY — no node at all (the value IS its address), so the emitted tree at `return &s;` is exactly the binder"
+        (case lowlModuleBody "struct S { a : word; }\ndefun Rt.a() -> *S {\n  S s;\n  return &s;\n}" of
+            Ok body ->
+                b2LetValue body /= Nothing && b2Shell body == Just (Var 1)
+
+            Err _ ->
+                False
+        )
+    , check "B2 LOWER: `&p->b` is the field's ADDRESS — `p + 8*offset`, no load (offset 1 -> `RawBin RAdd (Var 1) (Lit 8)`); the same arithmetic the field read uses"
+        (lowlModuleBody "struct S { a : word; b : word; }\ndefun Rt.a(p: *S) -> *word {\n  return &p->b;\n}"
+            == Ok (Unsafe (RawBin { op = RAdd, a = Var 1, b = Lit (LNumber 8) }))
+        )
+    , check "B2 LOWER: the aggregate COPY is the field-wise word copy — `Outer c = o;` emits SEVEN word stores at dst offsets 0..6 (a `val` field is 5 words, a nested struct its own size: the widths are the ONE table's)"
+        (case lowlModuleBody b2CopyMid of
+            Ok body ->
+                b2StoreOffsets body == [ 0, 1, 2, 3, 4, 5, 6 ]
+
+            Err _ ->
+                False
+        )
+    , check "B2 LOWER: a `val` FIELD at word 2 is addressed in BYTES — `p.v` is `RawVecLoad { vec = p + 16, index = 0 }`, NOT `vecload(p, 2)` (the vec index is a 40-byte VALUE stride; passing a word offset straight through misplaced every val field at a non-zero offset — MEASURED, unpinned by A1/A2 because their structs put the val field first)"
+        (case lowlModuleBody "struct S { a : word; b : word; v : val; }\ndefun Rt.a(p: *S) -> val {\n  return p.v;\n}" of
+            Ok body ->
+                b2VecField body == Just (Unsafe (RawBin { op = RAdd, a = Var 1, b = Lit (LNumber 16) }), 0)
+
+            Err _ ->
+                False
+        )
+    , b2SameSsaRow rt "B2 .ssa: `.` IS `->` THROUGH THE WHOLE PIPELINE — `p.a + p.b` and `p->a + p->b` emit BYTE-IDENTICAL text (a `*S` binder from malloc, so the ABI is the same on both sides)"
+        (b2DotMid "p.a + p.b")
+        (b2DotMid "p->a + p->b")
+    , check "B2 .ssa: the WORKED EXAMPLE's shapes are in the emitted text — malloc(56), memset, the nested field store at offset 8, and the val field addressed at +16 through the barrier seat"
+        (case emitUserSsa rt b2WorkedMid of
+            Ok ssa ->
+                String.length ssa > 400
+                    && String.contains "call $malloc(l 56)" ssa
+                    && String.contains "call $memset(l " ssa
+                    && String.contains "call $rt_vec_store(l " ssa
+                    && String.contains "%t9 =l add %t2, 16" ssa
+
+            Err _ ->
+                False
+        )
     ]
+
+
+{-| The B2 fixtures, as source text (the rows drive the REAL pipeline).
+-}
+b2MilestoneMid : String
+b2MilestoneMid =
+    "module B2m\nstruct Inner { k : word; }\nstruct Outer { a : word; in_ : Inner; v : val; }\ndefun B2m.f(s : val) -> val {\n  Outer o;\n  o.a = payload(s, 0);\n  o.in_.k = 7;\n  o.v = mknum(9);\n  *Outer p = &o;\n  p.a = p.a + 1;\n  Outer c = o;\n  c = o;\n  c.in_.k = c.in_.k + 1;\n  return mknum(c.a + c.in_.k + payload(c.v, 0) + p.a);\n}"
+
+
+b2LocalMid : String
+b2LocalMid =
+    "module B2loc\nstruct Inner { k : word; }\nstruct Outer { a : word; in_ : Inner; v : val; }\ndefun B2loc.f(s : val) -> val {\n  Outer o;\n  o.a = payload(s, 0);\n  return mknum(o.a);\n}"
+
+
+b2CopyMid : String
+b2CopyMid =
+    "module B2copy\nstruct Inner { k : word; }\nstruct Outer { a : word; in_ : Inner; v : val; }\ndefun B2copy.f(s : val) -> val {\n  word w = payload(s, 0);\n  Outer o;\n  Outer c = o;\n  return mknum(w);\n}"
+
+
+b2DotMid : String -> String
+b2DotMid tail =
+    -- A `val` parameter and a `word` LOCAL on purpose: a user defun's `word`
+    -- parameter is still a 40-byte Value slot (the word-ABI generalization is
+    -- B6), so a word param would make the two sides differ by ABI rather than
+    -- by the access spelling.
+    "module B2dot\nstruct S { a : word; b : word; }\ndefun B2dot.f(v : val) -> val {\n  word i = payload(v, 0);\n  *S p = rawcall malloc(16);\n  p.a = i;\n  return mknum("
+        ++ tail
+        ++ ");\n}"
+
+
+b2WorkedMid : String
+b2WorkedMid =
+    "module B2w\nstruct Inner { k : word; }\nstruct Outer { a : word; in_ : Inner; v : val; }\ndefun B2w.f(s : val) -> val {\n  word w = payload(s, 0);\n  Outer o;\n  o.a = w;\n  o.in_.k = 7;\n  o.v = mknum(99);\n  Outer c = o;\n  c.a = c.a + 1000;\n  return mknum(c.a + c.in_.k + payload(c.v, 0));\n}"
+
+
+{-| The FIRST Let binder's value — the struct ALLOCATION in a B2 body.
+-}
+b2LetValue : Exp -> Maybe Exp
+b2LetValue e =
+    case e of
+        Let block ->
+            case block.binders of
+                LetBind b :: _ ->
+                    Just b.value
+
+                _ ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
+{-| The FIRST Let's body.
+-}
+b2LetBody : Exp -> Maybe Exp
+b2LetBody e =
+    case e of
+        Let block ->
+            Just block.body
+
+        _ ->
+            Nothing
+
+
+{-| The body under the struct binder's `Let` (skipping the allocation and the
+`memset`) — what `&s` / `&s.f` rows read.
+-}
+b2Shell : Exp -> Maybe Exp
+b2Shell body =
+    -- `S s;` lowers to `Let s = malloc in Let dead = memset in <shell>`
+    case b2LetBody body of
+        Just inner ->
+            b2LetBody inner
+
+        Nothing ->
+            Nothing
+
+
+{-| Every `RawWordStore`'s CONSTANT dst index, in emission order — the copy
+rows' read (the number of stores IS the struct's width, and the indexes are
+the ONE table's offsets).
+-}
+b2StoreOffsets : Exp -> List Int
+b2StoreOffsets e =
+    case e of
+        Unsafe (RawWordStore ws) ->
+            (case ws.index of
+                Lit (LNumber n) ->
+                    [ n ]
+
+                _ ->
+                    []
+            )
+                ++ b2StoreOffsets ws.value
+
+        Let block ->
+            List.concatMap b2BinderStores block.binders ++ b2StoreOffsets block.body
+
+        Unsafe (RawBin bin) ->
+            b2StoreOffsets bin.a ++ b2StoreOffsets bin.b
+
+        Unsafe (RawVecStore st) ->
+            b2StoreOffsets st.vec ++ b2StoreOffsets st.value
+
+        Unsafe (RawMkValue mk) ->
+            List.concatMap b2StoreOffsets mk.words
+
+        _ ->
+            []
+
+
+b2BinderStores : LetBinder -> List Int
+b2BinderStores b =
+    case b of
+        LetBind lb ->
+            b2StoreOffsets lb.value
+
+        LetDestruct ld ->
+            b2StoreOffsets ld.value
+
+
+{-| The `(vec, index)` of a `RawVecLoad` — the val-field addressing row's read.
+-}
+b2VecField : Exp -> Maybe ( Exp, Int )
+b2VecField e =
+    case e of
+        Unsafe (RawVecLoad vl) ->
+            case vl.index of
+                Lit (LNumber n) ->
+                    Just ( vl.vec, n )
+
+                _ ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
+b2SameSsaRow : Rt.Runtime -> String -> String -> String -> String
+b2SameSsaRow rt name a b =
+    check name
+        (case ( emitUserSsa rt a, emitUserSsa rt b ) of
+            ( Ok sa, Ok sb ) ->
+                String.length sa > 400 && sa == sb
+
+            _ ->
+                False
+        )
 
 
 
@@ -7124,6 +7440,25 @@ censusStmt s =
         Ast.SIndexStore p i v ->
             "SIndexStore" :: (censusExp p ++ censusExp i ++ censusExp v)
 
+        Ast.SStructBind rec ->
+            "SStructBind" :: censusInit rec.init
+
+        Ast.SVarStore _ v ->
+            "SVarStore" :: censusExp v
+
+
+censusInit : Ast.StructInit -> List String
+censusInit init =
+    case init of
+        Ast.InitZero ->
+            []
+
+        Ast.InitFields fields ->
+            List.concatMap (\( _, e ) -> censusExp e) fields
+
+        Ast.InitCopy e ->
+            censusExp e
+
 
 censusTerm : Ast.Term -> List String
 censusTerm t =
@@ -7196,6 +7531,9 @@ censusExp e =
 
         Ast.ESizeof _ ->
             ["ESizeof"]
+
+        Ast.EAddrOf inner ->
+            "EAddrOf" :: censusExp inner
 
         Ast.EBool _ ->
             ["EBool"]

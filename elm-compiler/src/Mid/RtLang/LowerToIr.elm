@@ -124,6 +124,7 @@ import Mid.RtLang.Ast
         , Param
         , Program
         , Stmt(..)
+        , StructInit(..)
         , Term(..)
         , Type(..)
         , WordBinOp(..)
@@ -475,10 +476,12 @@ lowerStmt st stmt cont =
                             )
 
         SFieldStore p f e ->
-            -- A2: `p->f = e;` — a dead-binder Let of the field's store node
+            -- A2: `p->f = e;` — dead-binder Lets of the field's store node(s)
             -- (the EXACT `wstore(p, off, e);` / `vecstore(p, off, e);` tree,
             -- plan §3).  The value lowers FIRST (state threading), then the
             -- dead binder binds the effect and the continuation continues.
+            -- B2: a struct-typed FIELD stores as a word-for-word copy, so
+            -- the node count is the field's width (`fieldStoreNodes`).
             case resolvePointee st p of
                 Err msg ->
                     Err msg
@@ -508,27 +511,13 @@ lowerStmt st stmt cont =
 
                                                     else
                                                         e1
-
-                                                ( dead, st3 ) =
-                                                    fresh "_fieldstore" st2
                                             in
-                                            case cont st3 of
+                                            case fieldStoreNodes st sname f p1 e2 of
                                                 Err msg ->
                                                     Err msg
 
-                                                Ok ( st4, body ) ->
-                                                    Ok
-                                                        ( st4
-                                                        , Let
-                                                            { binders =
-                                                                [ LetBind
-                                                                    { binder = dead
-                                                                    , value = fieldStore fty p1 off e2
-                                                                    }
-                                                                ]
-                                                            , body = body
-                                                            }
-                                                        )
+                                                Ok stores ->
+                                                    withStores "_fieldstore" st2 stores cont
 
                 Ok pty ->
                     Err
@@ -537,6 +526,71 @@ lowerStmt st stmt cont =
                                 ++ ptyStr pty
                                 ++ " — Check J13 must reject it first"
                             )
+                        )
+
+        SStructBind rec ->
+            -- B2: the struct-VALUE binder.  Storage FIRST (`structAlloc`), then
+            -- the initialiser's stores, then the binder and the continuation —
+            -- `Let s = <addr> in Let dead = <store> in ..`, so the address is a
+            -- raw word binder exactly like any other.
+            case structAlloc st rec.sname of
+                Err msg ->
+                    Err msg
+
+                Ok alloc ->
+                    let
+                        ( binder, st1 ) =
+                            fresh rec.name st
+
+                        st2 =
+                            { st1
+                                | scope = Dict.insert rec.name binder.id st1.scope
+                                , types = Dict.insert rec.name (Ast.TStruct rec.sname) st1.types
+                            }
+                    in
+                    -- The stores address the BINDER (`Var id`), never the
+                    -- `malloc` expression: re-lowering the alloc as the store
+                    -- base would fill a SECOND, discarded block (MEASURED —
+                    -- the first cut read back an all-zero copy).
+                    case structInitNodes st2 rec.sname (Var binder.id) rec.init of
+                        Err msg ->
+                            Err msg
+
+                        Ok ( st3, stores ) ->
+                            case withStores "_structinit" st3 stores cont of
+                                Err msg ->
+                                    Err msg
+
+                                Ok ( st4, body ) ->
+                                    Ok
+                                        ( st4
+                                        , Let
+                                            { binders = [ LetBind { binder = binder, value = alloc } ]
+                                            , body = body
+                                            }
+                                        )
+
+        SVarStore name e ->
+            -- B2: `s = other;` — the aggregate COPY into storage that already
+            -- exists.  The destination's address is its binder (a raw word).
+            case ( Dict.get name st.scope, Dict.get name st.types ) of
+                ( Just id, Just (Ast.TStruct sname) ) ->
+                    case lowerExp st e of
+                        Err msg ->
+                            Err msg
+
+                        Ok ( st1, e1 ) ->
+                            case copyStores st sname 0 0 (Var id) e1 of
+                                Err msg ->
+                                    Err msg
+
+                                Ok stores ->
+                                    withStores "_structcopy" st1 stores cont
+
+                _ ->
+                    Err
+                        (internal st ("assignment to '" ++ name ++ "'")
+                            "needs a struct-VALUE binder — Check J1 must reject it first"
                         )
 
         SIndexStore p i e ->
@@ -1168,6 +1222,44 @@ lowerExp st e =
                 Ok ( st1, p1 ) ->
                     Ok ( st1, Unsafe (RawWordLoad { ptr = p1, index = Lit (LNumber 0) }) )
 
+        Ast.EAddrOf inner ->
+            -- B2: `&place`.  A FIELD is its base's address plus the field's
+            -- constant word offset (`addrPlus` — the same arithmetic the
+            -- field read uses, with the load dropped); a struct VALUE is
+            -- already its own address, so `&s` is the IDENTITY and emits
+            -- nothing.  Check has already refused everything without
+            -- storage, so the fallthrough is exact.
+            case inner of
+                Ast.EField base f ->
+                    case resolvePointee st base of
+                        Err msg ->
+                            Err msg
+
+                        Ok (PStruct sname) ->
+                            case fieldInfo st sname f of
+                                Err msg ->
+                                    Err msg
+
+                                Ok ( off, _ ) ->
+                                    case lowerExp st base of
+                                        Err msg ->
+                                            Err msg
+
+                                        Ok ( st1, b1 ) ->
+                                            Ok ( st1, addrPlus b1 off )
+
+                        Ok pty ->
+                            Err
+                                (internal st "address-of (`&p->f`)"
+                                    ("needs a struct pointer, got *"
+                                        ++ ptyStr pty
+                                        ++ " — Check J13 must reject it first"
+                                    )
+                                )
+
+                _ ->
+                    lowerExp st inner
+
 
 
 -- ============================ B1: bool, casts, sizeof ============================
@@ -1368,6 +1460,14 @@ sizeofWords st target =
 
         Ast.SizeType ty ->
             case ty of
+                Ast.TStruct sname ->
+                    case Check.sizeofStruct st.decls sname of
+                        Just n ->
+                            Ok n
+
+                        Nothing ->
+                            Err ("no struct '" ++ sname ++ "' in the layout table — Check J11 must reject it first")
+
                 Ast.TWord ->
                     Ok 1
 
@@ -1897,6 +1997,12 @@ resolvePointee st e =
                 Just (TPtr pty) ->
                     Ok pty
 
+                Just (TStruct sname) ->
+                    -- B2: a struct VALUE's value IS its address, so for
+                    -- every field/index resolution below it behaves exactly
+                    -- like a `*S` pointing at itself.
+                    Ok (PStruct sname)
+
                 Just ty ->
                     Err
                         (internal st ("field/index base '" ++ name ++ "'")
@@ -1915,6 +2021,9 @@ resolvePointee st e =
                     case fieldTyIn st.decls sname f of
                         Just (TPtr pty) ->
                             Ok pty
+
+                        Just (TStruct inner) ->
+                            Ok (PStruct inner)
 
                         Just ty ->
                             Err
@@ -2009,30 +2118,350 @@ fieldTyInFields fields name =
                 fieldTyInFields rest name
 
 
-{-| The field READ node: `val` -> `RawVecLoad`, everything else (word/pointer
-— the checker rejects float fields, J11) -> `RawWordLoad`, both at the field's
-word offset.
+{-| `base + 8*off` — the ADDRESS of a struct's field.  Two rules wear it:
+a struct-typed field READ (the field IS a location, so no load happens)
+and the `&place` lowering.  `off = 0` is the IDENTITY, so the emitted tree
+for a field at offset 0 is unchanged from before B2 (the A2 pins compare
+trees, and they must keep passing).
+
+MEASURED NOTE — THE VAL-FIELD SCALING THIS FIXES.  `RawVecLoad`/
+`RawVecStore` index in VALUE units (the backend's `elemAddr` multiplies by
+40), while the layout table gives offsets in WORD units.  Passing a word
+offset straight to a vec node was therefore a 40x misplacement for any
+`val` field NOT at word 0 (`struct S { a : word; v : val; }` put `v` at
+word 1 = byte 8; the node addressed byte 40).  A1's rows could not see it
+(the pinned structs had a single val field, at offset 0) and A2's tree pins
+still pass because offset 0 is the identity.  Addressing the field in BYTES
+(`addrPlus`) and indexing the vec at 0 is exact for every offset.
+-}
+addrPlus : Exp -> Int -> Exp
+addrPlus base off =
+    if off <= 0 then
+        base
+
+    else
+        Unsafe (RawBin { op = RAdd, a = base, b = Lit (LNumber (8 * off)) })
+
+
+{-| The field READ node: `val` -> `RawVecLoad` (the 5-word Blit) at the
+field's BYTE address, a nested STRUCT -> its address (`addrPlus`, no load),
+everything else (word/pointer — the checker rejects float fields, J11) ->
+`RawWordLoad` at the field's word offset.
 -}
 fieldLoad : Type -> Exp -> Int -> Exp
 fieldLoad fty p1 off =
     case fty of
         TVal ->
-            Unsafe (RawVecLoad { vec = p1, index = Lit (LNumber off) })
+            Unsafe (RawVecLoad { vec = addrPlus p1 off, index = Lit (LNumber 0) })
+
+        TStruct _ ->
+            addrPlus p1 off
 
         _ ->
             Unsafe (RawWordLoad { ptr = p1, index = Lit (LNumber off) })
 
 
-{-| The field STORE node, matching `fieldLoad`'s shape.
+{-| The single-node field STORE, matching `fieldLoad`'s word/val rows.  A
+`TStruct` field never reaches here: `fieldStoreNodes` branches to the
+word-for-word COPY first (one node cannot express it, and a one-word store
+of a struct's address would be silently wrong).
 -}
 fieldStore : Type -> Exp -> Int -> Exp -> Exp
 fieldStore fty p1 off e1 =
     case fty of
         TVal ->
-            Unsafe (RawVecStore { vec = p1, index = Lit (LNumber off), value = e1 })
+            Unsafe (RawVecStore { vec = addrPlus p1 off, index = Lit (LNumber 0), value = e1 })
 
         _ ->
             Unsafe (RawWordStore { ptr = p1, index = Lit (LNumber off), value = e1 })
+
+
+-- ==================== B2: struct VALUES (storage, copy, address) ====================
+
+
+{-| THE ONE PLACE STRUCT STORAGE IS ALLOCATED (B2).  `malloc(8 * sizeof S)`
+— a C-heap block, because `Mid.Ir` has no frame-allocation node and
+`Mid/Qbe/Il.elm`'s `Alloc` is a tier BELOW this module (Ast's `EAddrOf`
+note records the measured refutation of the plan's `Il.Alloc` premise).
+Swapping to stack memory is ONE edit here when B4 lands `RawAllocN`.
+
+`size` comes from `Check.sizeofStruct` — the one layout table.
+-}
+structAlloc : St -> String -> Result String Exp
+structAlloc st sname =
+    case Check.sizeofStruct st.decls sname of
+        Just size ->
+            Ok (Unsafe (RawCallRaw { sym = "malloc", args = [ Lit (LNumber (8 * size)) ] }))
+
+        Nothing ->
+            Err
+                (internal st ("struct value '" ++ sname ++ "'")
+                    "has no layout in the struct table — Check J11 must reject it first"
+                )
+
+
+{-| The ZEROED tail of `S s;` — `memset(addr, 0, 8*sizeof S)`: uninitialised
+raw memory is a silent-wrong-value generator, and this language has no
+`unsafe` marker to opt into it.
+-}
+structZero : St -> String -> Exp -> Result String Exp
+structZero st sname addr =
+    case Check.sizeofStruct st.decls sname of
+        Just size ->
+            Ok
+                (Unsafe
+                    (RawCallRaw
+                        { sym = "memset"
+                        , args = [ addr, Lit (LNumber 0), Lit (LNumber (8 * size)) ]
+                        }
+                    )
+                )
+
+        Nothing ->
+            Err
+                (internal st ("struct value '" ++ sname ++ "'")
+                    "has no layout in the struct table — Check J11 must reject it first"
+                )
+
+
+{-| A struct declaration's field list, structurally — the same `.fields` the
+checker's layout walks (NOT layout logic: offsets and widths are read from
+`Check.fieldOffset`/`Check.fieldWidth`, the one table).
+-}
+fieldsOf : List Decl -> String -> Maybe (List Field)
+fieldsOf decls sname =
+    case decls of
+        [] ->
+            Nothing
+
+        d :: rest ->
+            case d of
+                StructDecl sd ->
+                    if sd.name == sname then
+                        Just sd.fields
+
+                    else
+                        fieldsOf rest sname
+
+                EnumDecl _ ->
+                    fieldsOf rest sname
+
+
+{-| The WORD OFFSETS a struct value occupies, relative to its base, in field
+order — every field expanded to the whole words it covers (`val` = 5,
+nested struct = its own size, word/pointer = 1).  This is what the COPY
+walks: one 8-byte load/store per word is exact for a val slot too (a
+40-byte Value is five words, which is why the copy needs no Blit node and
+no class rule).
+-}
+structWordsAt : St -> String -> Int -> Result String (List Int)
+structWordsAt st sname bias =
+    case fieldsOf st.decls sname of
+        Nothing ->
+            Err
+                (internal st ("struct value '" ++ sname ++ "'")
+                    "is not in the decl table — Check J11 must reject it first"
+                )
+
+        Just fields ->
+            fieldsWords st sname bias fields
+
+
+fieldsWords : St -> String -> Int -> List Field -> Result String (List Int)
+fieldsWords st sname bias fields =
+    case fields of
+        [] ->
+            Ok []
+
+        f :: rest ->
+            case Check.fieldOffset st.decls sname f.name of
+                Nothing ->
+                    Err
+                        (internal st ("field '" ++ sname ++ "." ++ f.name ++ "'")
+                            "has no offset in the struct table — Check J13 must reject it first"
+                        )
+
+                Just off ->
+                    case Check.fieldWidth st.decls sname f.name of
+                        Nothing ->
+                            Err
+                                (internal st ("field '" ++ sname ++ "." ++ f.name ++ "'")
+                                    "has no width in the struct table — Check J13 must reject it first"
+                                )
+
+                        Just w ->
+                            case fieldsWords st sname bias rest of
+                                Err msg ->
+                                    Err msg
+
+                                Ok tailWords ->
+                                    case fieldWords st bias off f.ty w of
+                                        Err msg ->
+                                            Err msg
+
+                                        Ok here ->
+                                            Ok (here ++ tailWords)
+
+
+{-| One field's word offsets: a nested struct recurses (its own base is the
+outer offset — a struct value is contiguous by the layout rule), everything
+else is `w` consecutive words at `off`.
+-}
+fieldWords : St -> Int -> Int -> Type -> Int -> Result String (List Int)
+fieldWords st bias off ty w =
+    case ty of
+        TStruct inner ->
+            structWordsAt st inner (bias + off)
+
+        _ ->
+            Ok (intsFrom (bias + off) w)
+
+
+intsFrom : Int -> Int -> List Int
+intsFrom off n =
+    if n <= 0 then
+        []
+
+    else
+        off :: intsFrom (off + 1) (n - 1)
+
+
+{-| ONE word copy: `dst[dOff] = src[sOff]`.
+-}
+wordCopy : Exp -> Int -> Exp -> Int -> Exp
+wordCopy dst dOff src sOff =
+    Unsafe
+        (RawWordStore
+            { ptr = dst
+            , index = Lit (LNumber dOff)
+            , value = Unsafe (RawWordLoad { ptr = src, index = Lit (LNumber sOff) })
+            }
+        )
+
+
+{-| The word-for-word COPY of `sname`'s words from `src` (at `srcOff`) into
+`dst` (at `dstOff`) — the aggregate-init / assignment / struct-field store
+lowering (plan Q4).  `dstOff` is the field's offset when the destination is
+a FIELD of a bigger struct, 0 for a whole value.
+-}
+copyStores : St -> String -> Int -> Int -> Exp -> Exp -> Result String (List Exp)
+copyStores st sname dstOff srcOff dst src =
+    case structWordsAt st sname 0 of
+        Err msg ->
+            Err msg
+
+        Ok words ->
+            Ok (List.map (\w -> wordCopy dst (dstOff + w) src (srcOff + w)) words)
+
+
+{-| The store-node list for `base.f = e` (and for one `S s = { f = e; }`
+initialiser entry): a `TStruct` field is a COPY (its own word list, at the
+field's offset), every other field is the single `fieldStore` node.  A
+one-node store of a struct's address would be silently wrong — that is the
+seam this function closes.
+-}
+fieldStoreNodes : St -> String -> String -> Exp -> Exp -> Result String (List Exp)
+fieldStoreNodes st sname f base e =
+    case fieldInfo st sname f of
+        Err msg ->
+            Err msg
+
+        Ok ( off, TStruct inner ) ->
+            copyStores st inner off 0 base e
+
+        Ok ( off, fty ) ->
+            Ok [ fieldStore fty base off e ]
+
+
+{-| The store nodes one `S s = ...` initialiser needs, WITH the state the
+initialiser expressions consumed (an `InitCopy`/`InitFields` operand is a
+real expression, lowered in order like any other).
+-}
+structInitNodes : St -> String -> Exp -> StructInit -> Result String ( St, List Exp )
+structInitNodes st sname addr init =
+    case init of
+        InitZero ->
+            case structZero st sname addr of
+                Err msg ->
+                    Err msg
+
+                Ok zero ->
+                    Ok ( st, [ zero ] )
+
+        InitFields fields ->
+            initFieldsNodes st sname addr fields []
+
+        InitCopy e ->
+            case lowerExp st e of
+                Err msg ->
+                    Err msg
+
+                Ok ( st1, e1 ) ->
+                    case copyStores st sname 0 0 addr e1 of
+                        Err msg ->
+                            Err msg
+
+                        Ok stores ->
+                            Ok ( st1, stores )
+
+
+initFieldsNodes : St -> String -> Exp -> List ( String, Ast.Exp ) -> List Exp -> Result String ( St, List Exp )
+initFieldsNodes st sname addr fields acc =
+    case fields of
+        [] ->
+            Ok ( st, acc )
+
+        ( f, e ) :: rest ->
+            case fieldInfo st sname f of
+                Err msg ->
+                    Err msg
+
+                Ok ( _, fty ) ->
+                    case lowerExp st e of
+                        Err msg ->
+                            Err msg
+
+                        Ok ( st1, e1 ) ->
+                            let
+                                -- B1's box, at a `val` FIELD slot: the same
+                                -- rule SFieldStore applies.
+                                e2 =
+                                    if fty == Ast.TVal && isBoolExp st e then
+                                        boolToVal e1
+
+                                    else
+                                        e1
+                            in
+                            case fieldStoreNodes st sname f addr e2 of
+                                Err msg ->
+                                    Err msg
+
+                                Ok nodes ->
+                                    initFieldsNodes st1 sname addr rest (acc ++ nodes)
+
+
+{-| Run a list of store nodes IN ORDER, each bound to its own fresh dead
+binder (L2's `(b 107, rStore ..)` shape — a store's result slot must be a
+valid binder even though nothing reads it), then the continuation.
+-}
+withStores : String -> St -> List Exp -> (St -> Result String (St, Exp)) -> Result String (St, Exp)
+withStores label st stores cont =
+    case stores of
+        [] ->
+            cont st
+
+        e :: rest ->
+            let
+                ( dead, st1 ) =
+                    fresh label st
+            in
+            case withStores label st1 rest cont of
+                Err msg ->
+                    Err msg
+
+                Ok ( st2, body ) ->
+                    Ok ( st2, Let { binders = [ LetBind { binder = dead, value = e } ], body = body } )
+
 
 
 {-| The index READ node, scaled by the pointee family: `*word` -> `wload`'s
@@ -2113,6 +2542,9 @@ ptyStr pty =
 typeStrOf : Type -> String
 typeStrOf ty =
     case ty of
+        TStruct sname ->
+            sname
+
         TWord ->
             "word"
 

@@ -59,7 +59,21 @@ surface's only grouping rule besides parentheses):
        `->`/`[]` bind TIGHTER than it, the C convention),
        [T](e)  (ECast, B1 — an ATOM: the bracket in atom position is
        unambiguously a cast), sizeof(S) (ESizeof, B1), 'c' (a word
-       byte, B1)
+       byte, B1), &place (EAddrOf, B2 — a prefix in OPERAND position
+       only, exactly like *p, so the infix `&` of row 5 is untouched)
+       postfix: ->f and .f (the SAME EField — Terra's alias, B2), [i]
+
+THE STATEMENT LAYER gained two forms in B2 (`itemStepAt`): an
+Uppercase-leading statement is a STRUCT-VALUE binder (`S s;` /
+`S s = { f = e; };` / `S s = other;`), and `x = e;` is the aggregate COPY
+assignment (parsed for any name; Check refuses a non-struct destination,
+since whether a name is a struct VALUE is a type judgment).  A DOTTED
+token in expression position is read as its first segment plus one
+postfix `.`-step per remaining segment (`firstSegment`) — the routing
+change that let `.` into the grammar without touching the KEY charset
+(`keyTokenAtOff` still reads `Rt.getpid` verbatim in the defun header and
+in `call`), and the reason no accepted parse could move: a dotted
+expression token was ALWAYS a loud reject before it.
 
 A compare yields a BOOL (B1, plan Q2) — `TBool`, a checker-only class over
 the 0/1 word; the parser produces exactly `EWordCmp`/`EFltCmp` and the
@@ -242,7 +256,7 @@ and — per the O(n) invariant in the token-plumbing section — NO
 -}
 
 import Dict exposing (Dict)
-import Mid.RtLang.Ast exposing (AggShape(..), Block, Builtin(..), Decl(..), Defun, Effect(..), EnumEntry, Exp(..), Export, ExportSig, Field, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Module, OTy(..), PTy(..), Param, Program, SizeTarget(..), Stmt(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
+import Mid.RtLang.Ast exposing (AggShape(..), Block, Builtin(..), Decl(..), Defun, Effect(..), EnumEntry, Exp(..), Export, ExportSig, Field, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Module, OTy(..), PTy(..), Param, Program, SizeTarget(..), Stmt(..), StructInit(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
 import Parser exposing (DeadEnd, Problem(..))
 import ParserFast
 
@@ -494,6 +508,20 @@ level; the defun header's `-> ty` arrow is consumed by `defunTail` after
 the params, also never here.  A `-` NOT followed by `>` (a subtraction,
 `x - 2` / `x -2`) hands back non-committed and the `addLevel` operator
 consumes it exactly as before.
+
+THE `.` STEP (B2, plan Q3/R2) — Terra's field selection, an ALIAS of the
+landed `->`: `p.f` on a `*S` derefs once (the same `EField` node, so the
+same `wload(p, off)` tree), `s.f` on a struct VALUE is the value case, and
+`p->f` keeps its own arm byte-for-byte.  The routing is the plan's named
+non-additive change and it is confined to NON-KEY positions: keys are read
+by `keyTokenAtOff` (dots kept verbatim — `call Rt.getpid(..)`), and in
+expression position a dotted token is now read as its FIRST SEGMENT by
+`nameAtom` plus one `.`-step per remaining segment (`Chase.firstSegment`
+below).  Nothing that parsed before moves: a dotted name in expression
+position was ALWAYS a loud reject ("a dotted name is only valid as a
+`call` key"), so no accepted parse can contain one — the corpus
+byte-identity gate (`tools/osier-corpus-ssa.sh`) is the proof and the
+exact-AST rows pin the key side.
 -}
 postfixLevel : ParserFast.Parser Exp
 postfixLevel =
@@ -509,10 +537,13 @@ postfixStepAt : Int -> String -> ParserFast.Parser (Exp -> Exp)
 postfixStepAt offset src =
     case String.slice offset (offset + 2) src of
         "->" ->
-            spelled "->" (ParserFast.map (\f lhs -> EField lhs f) surfaceName)
+            spelled "->" (ParserFast.map (\f lhs -> EField lhs f) postfixFieldName)
 
         _ ->
             case String.slice offset (offset + 1) src of
+                "." ->
+                    spelled "." (ParserFast.map (\f lhs -> EField lhs f) postfixFieldName)
+
                 "[" ->
                     spelled "["
                         (ParserFast.map2
@@ -522,7 +553,70 @@ postfixStepAt offset src =
                         )
 
                 _ ->
-                    ParserFast.problem "expected a postfix operator (`->` or `[`)"
+                    ParserFast.problem "expected a postfix operator (`->`, `.` or `[`)"
+
+
+{-| The FIELD NAME after a postfix operator: the first segment of the
+token at the offset, consumed alone so a following `.g` is the NEXT
+postfix step (`p->f.g`, `s.inner.f`).  The last segment's spelling is
+consumed by the step after it — which is why the reader stops at the dot
+instead of demanding a dot-free token: `surfaceName` (which does demand
+one) stays the reader for binder/field DECLARATION positions, where a dot
+is still a syntax error.
+-}
+postfixFieldName : ParserFast.Parser String
+postfixFieldName =
+    ParserFast.offsetSourceAndThen postfixFieldNameAt
+
+
+postfixFieldNameAt : Int -> String -> ParserFast.Parser String
+postfixFieldNameAt offset src =
+    case tokenAtOff offset src of
+        Just ( tok, _ ) ->
+            case firstSegment tok of
+                Just seg ->
+                    spelled seg (succeed seg)
+
+                Nothing ->
+                    ParserFast.problem ("expected a field name, found `" ++ tok ++ "`")
+
+        Nothing ->
+            ParserFast.problem ("expected a field name, found `" ++ String.slice offset (offset + 1) src ++ "`")
+
+
+{-| The part of a token BEFORE its first dot — a peek, no state advance
+(the caller re-consumes it with `spelled`).  `Nothing` when the token
+starts with the dot (no name to select from).  O(n) in 1-char slices, the
+module's stated cost discipline; `String.split` is deliberately NOT used
+(the selfhost front end rejects it — MEASURED, the S2 freeze).
+-}
+firstSegment : String -> Maybe String
+firstSegment tok =
+    let
+        n =
+            dotIndex 0 tok
+    in
+    if n < 0 then
+        Just tok
+
+    else if n == 0 then
+        Nothing
+
+    else
+        Just (String.slice 0 n tok)
+
+
+dotIndex : Int -> String -> Int
+dotIndex i s =
+    case String.slice i (i + 1) s of
+        "" ->
+            -1
+
+        "." ->
+            i
+
+        _ ->
+            dotIndex (i + 1) s
 
 
 {-| The operator tables, longest-first within a level.  Every row is 1:1
@@ -636,6 +730,9 @@ atomAt offset src =
         "*" ->
             derefExp
 
+        "&" ->
+            addrOfExp
+
         "" ->
             ParserFast.problem "expected an expression, found end of input"
 
@@ -658,6 +755,24 @@ only (`wload(p,0)` at U3); any other pointee is U2's J13 reject.
 derefExp : ParserFast.Parser Exp
 derefExp =
     ParserFast.map EDeref (spelled "*" postfixLevel)
+
+
+{-| `&place` — the prefix ADDRESS-OF (B2, plan Q3).  Entered at the `&`
+peeked by `atomAt`, so — exactly like the prefix `*` — it appears ONLY in
+operand position: an infix `&` (`a & b`, bitwise and) is the
+`bitAndLevel` operator and never reaches here, so `a & &b` is and-by-
+address-of and `a & b` is unchanged.  It applies to a POSTFIX expression
+(the C convention, same as `*p`), so `&s.f` is `&(s.f)` and `&p->f` is
+`&(p->f)` — `&s.f.g` is `&((s.f).g)`.
+
+What `&` is LEGAL on is `Check`'s judgment (the storage question, not a
+grammar question): a struct value, or a struct field that is a word, a
+pointer or a nested struct.  A scalar local, a parameter and a temporary
+are loud rejects — see `Ast`'s `EAddrOf` note for the reasons.
+-}
+addrOfExp : ParserFast.Parser Exp
+addrOfExp =
+    ParserFast.map EAddrOf (spelled "&" postfixLevel)
 
 
 parenExp : ParserFast.Parser Exp
@@ -777,9 +892,30 @@ and `callx` are ordinary variables, never prefixes.
 `mkbool(1)`/`mkbool(0)` sugar tree.  The two spell the SAME emitted bytes:
 the bool literal boxes to `RawMkValue tagBoolean [Lit 1|0]` at a `:val`
 position, which is exactly what the sugar's `mkbool` row emitted.
+
+B2: a dotted token reads as its FIRST SEGMENT (the rest is the postfix
+`.`-chain `postfixFieldName` consumes), which is what makes `s.f` /
+`p.f` / `s.inner.f` parse without touching the token charset — the
+charset keeps the dot because `isTokenChar` is also the comment-rule's
+"is the char before `//` part of a token" probe (`tokenCharBefore`) and
+the key charset's base (`isKeyChar`).  A dotted token in expression
+position was ALWAYS a loud reject before this (`hasDot`), so no accepted
+parse moves; the reject survives for the shapes that are still not a
+field chain (a leading dot, an empty segment).
 -}
 nameAtom : String -> ParserFast.Parser Exp
 nameAtom tok =
+    case firstSegment tok of
+        Nothing ->
+            ParserFast.problem
+                ("`" ++ tok ++ "` — a dotted name is not an expression: a key is only valid as a `call` target, and a field selection needs a plain name before the dot")
+
+        Just base ->
+            nameAtomBase base
+
+
+nameAtomBase : String -> ParserFast.Parser Exp
+nameAtomBase tok =
     case tok of
         "true" ->
             spelled tok (succeed (EBool True))
@@ -818,12 +954,7 @@ nameAtom tok =
                     spelled tok (builtinCall b)
 
                 Nothing ->
-                    if hasDot tok then
-                        ParserFast.problem
-                            ("`" ++ tok ++ "` — a dotted name is only valid as a `call` key")
-
-                    else
-                        spelled tok (succeed (EVar tok))
+                    spelled tok (succeed (EVar tok))
 
 
 
@@ -2252,6 +2383,14 @@ wrong.  `bool` is deliberately ABSENT here: it is a binder class only
 (`itemStepAt`), because a `bool` parameter or return would need the
 word-ABI generalization (B6) and a `bool` field is layout work nobody
 funded.
+
+B2 adds the STRUCT VALUE type: a bare Uppercase identifier (`f : B;`,
+`defun F.g(x : S)`) parses to `TStruct name` — the same `isUpperName`
+split the `*S` pointee and the export grammar use, so a struct's value
+spelling and its pointer spelling can never disagree on case.  A `TStruct`
+PARAMETER or RETURN is a CHECK-level reject (B6's word-ABI flattening /
+plan Q7's no-struct-returns), never a parse failure: the message is worth
+more than the earlier error.
 -}
 surfaceType : ParserFast.Parser Type
 surfaceType =
@@ -2278,10 +2417,14 @@ surfaceTypeAt offset src =
                 spelled "val" (succeed TVal)
 
             Just ( tok, _ ) ->
-                ParserFast.problem ("expected a type (`word`, `int`, `float`, `val`, `*S`, `*word` or `*val`), found `" ++ tok ++ "`")
+                if isUpperName tok then
+                    spelled tok (succeed (TStruct tok))
+
+                else
+                    ParserFast.problem ("expected a type (`word`, `int`, `float`, `val`, `*S`, `*word`, `*val` or a struct name), found `" ++ tok ++ "`")
 
             Nothing ->
-                ParserFast.problem "expected a type (`word`, `int`, `float`, `val`, `*S`, `*word` or `*val`)"
+                ParserFast.problem "expected a type (`word`, `int`, `float`, `val`, `*S`, `*word`, `*val` or a struct name)"
 
 
 {-| The pointee after `*` in a pointer annotation: `word` (`PWord`), `int`
@@ -2450,12 +2593,22 @@ itemStepAt offset src =
             ParserFast.problem "`else` does not start a statement"
 
         Just ( tok, _ ) ->
-            -- any other token starts an effect statement OR a field/index
-            -- store; the expression parser reads the token itself (it may be
-            -- a keyword-led form like `call`/`rawcall`/`withroots` — never
-            -- pre-consume it), and `stmtExp` peeks the `=` that turns a
-            -- `p->f`/`p[i]` into a store
-            ParserFast.map IStmt stmtExp
+            -- B2: an Uppercase-leading statement is a STRUCT-VALUE binder
+            -- (`S s;` / `S s = ...;`).  No other statement form can start
+            -- with an Uppercase token — every keyword-led form is handled
+            -- above, and a bare `EVar`-headed effect statement in this
+            -- language is lowercase by convention (and by the corpus: not
+            -- one statement in runtime.mid starts uppercase).
+            if isUpperName tok then
+                ParserFast.map IStmt structBindStmt
+
+            else
+                -- any other token starts an effect statement OR a field/index
+                -- store; the expression parser reads the token itself (it may be
+                -- a keyword-led form like `call`/`rawcall`/`withroots` — never
+                -- pre-consume it), and `stmtExp` peeks the `=` that turns a
+                -- `p->f`/`p[i]`/`s` into a store
+                ParserFast.map IStmt stmtExp
 
         Nothing ->
             -- not a token character: `}` / `@` / end of input end the
@@ -2557,6 +2710,15 @@ stmtOk ( e, tail ) =
                 EIndex _ _ ->
                     True
 
+                EVar _ ->
+                    -- B2: `s = other;` — the aggregate COPY assignment.  The
+                    -- parser cannot know whether `s` names a struct VALUE
+                    -- (that is a type judgment), so the form is admitted here
+                    -- and `Check` rejects every non-struct destination
+                    -- loudly: Mid binders are single-assignment, so a scalar
+                    -- rebind is not a form this language has.
+                    True
+
                 _ ->
                     False
 
@@ -2575,9 +2737,12 @@ stmtOf ( e, tail ) =
                 EIndex p i ->
                     SIndexStore p i v
 
+                EVar name ->
+                    SVarStore name v
+
                 _ ->
                     -- unreachable: `stmtOk` rejects a store whose LHS is
-                    -- neither a field nor an index (same shape as
+                    -- neither a field, an index nor a name (same shape as
                     -- `blockOfFold`'s validate-guarded default)
                     SEffect e
 
@@ -2592,6 +2757,91 @@ bindTail ty =
         (SBind ty)
         surfaceName
         (spelled "=" expSemi)
+
+
+{-| `S s;` / `S s = { f = e; .. };` / `S s = other;` — the STRUCT-VALUE
+BINDER (B2, plan Q4), entered from `itemStepAt`'s Uppercase arm.  One
+statement, three initialisers (`Ast.StructInit`): the storage ALWAYS comes
+into being here (that is why this is not an `SBind`), and the tail says
+what fills it.  The middle form is `{ f = e; .. }` and NOT a
+general-expression struct literal on purpose: a literal-as-expression would
+have to allocate its own storage, so `S s = S { .. };` would allocate
+twice, and `Mid` has no way to free the temporary.
+-}
+structBindStmt : ParserFast.Parser Stmt
+structBindStmt =
+    ParserFast.map3
+        (\sname name init -> SStructBind { sname = sname, name = name, init = init })
+        structName
+        surfaceName
+        structInitTail
+
+
+{-| The `;` / `= ...` tail of a struct binder.  Peeking (rather than
+raced alternation) so each arm commits to its own spelling: `;` is the
+zeroed storage, `= {` the field-wise initialiser, `= <exp>;` the copy.
+-}
+structInitTail : ParserFast.Parser StructInit
+structInitTail =
+    ParserFast.offsetSourceAndThen
+        (\offset src ->
+            case String.slice offset (offset + 1) src of
+                ";" ->
+                    spelled ";" (succeed InitZero)
+
+                "=" ->
+                    spelled "=" structInit
+
+                c ->
+                    ParserFast.problem
+                        ("expected `;` (zeroed storage), `= { field = value; .. }` (field-wise) or `= <struct value>;` (copy), found `" ++ c ++ "`")
+        )
+
+
+structInit : ParserFast.Parser StructInit
+structInit =
+    ParserFast.offsetSourceAndThen
+        (\offset src ->
+            if String.slice offset (offset + 1) src == "{" then
+                -- the brace list is a STATEMENT's operand, so it carries the
+                -- statement's `;` — `S s = { a = 1; };` (the `}` closes the
+                -- list, the `;` closes the statement)
+                ParserFast.map InitFields
+                    (spelled "{"
+                        (ParserFast.map3 (\fs _ _ -> fs)
+                            structFieldInits
+                            (spelled "}" (succeed ()))
+                            (spelled ";" (succeed ()))
+                        )
+                    )
+
+            else
+                ParserFast.map InitCopy expSemi
+        )
+
+
+{-| `f = e; g = e; }` — the field-wise initialiser list, entered AFTER the
+`{` (which `structInit` consumes, exactly as `fieldList` is entered after
+its own `{`).  Each element is a field name, `=`, an expression and its
+REQUIRED `;`, so the loop stops cleanly (non-committed) at the `}` and a
+dropped `;` inside is a committed failure.  A repeated field is Check's
+reject, and every field is optional (the rest are the zeroed storage).
+-}
+structFieldInits : ParserFast.Parser (List ( String, Exp ))
+structFieldInits =
+    ParserFast.loopWhileSucceeds
+        (ParserFast.map2 (\f _ -> f) fieldInit (spelled ";" (succeed ())))
+        []
+        (\f acc -> acc ++ [ f ])
+        identity
+
+
+fieldInit : ParserFast.Parser ( String, Exp )
+fieldInit =
+    ParserFast.map2
+        (\name e -> ( name, e ))
+        surfaceName
+        (spelled "=" expression)
 
 
 {-| `*S r = e;` / `*word p = e;` / `*val v = e;` — the POINTER-TYPED BIND

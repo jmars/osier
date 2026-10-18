@@ -1,0 +1,55 @@
+// B2 (handoff-midlang-b2) — THE WORKED EXAMPLE's .mid: struct VALUES, `&`,
+// and `.` selection with auto-deref, imported by name from midb2.elm (the
+// reader resolves `import Wext` to this file, relative to the importing
+// file; it is NOT passed on the CLI).
+//
+// What the program does, in the order ladder rung 4 names it:
+//   * `Outer o;` — a struct VALUE local, with a NESTED struct field
+//     (`inner : Inner`) and a `val` field (`note`).
+//   * field-wise initialisation through `.` on the VALUE (`o.inner.k = 7;`
+//     — the value case, no deref) beside a `val` store.
+//   * `&o` — the address of the local — handed to a defun which MUTATES
+//     through `p.a` / `p.inner.k` (`.` AUTO-DEREF on a `*S`; `p->a` is the
+//     same node).
+//   * `Outer copy = o;` — aggregate initialisation, which COPIES.
+//   * the copy is mutated (`copy.a = copy.a + 1000;`) and the ORIGINAL is
+//     read back, so an aliasing bug changes the printed number.
+//
+// THE PARAMETER IS A `val`, NOT A `*Outer`, ON PURPOSE — measured, not a
+// preference: a user defun's parameters are 40-byte Value frame slots
+// unless its key is in `Mid.Rt.rawAbi` (`Mid/Qbe/Lower.elm:1152`), so a
+// `*T` PARAMETER (checker-legal since A1) has no raw register to live in
+// and the field access dies at emit time ("binder id N is not a raw
+// word").  That wiring — the ABI class computed from the declared surface
+// — is B6's row, so this example crosses the pointer the A2-smoke way:
+// `mknum(&o)` out, `*Outer p = payload(pv, 0);` in.  The MUTATION through
+// `p.a` is the real thing either way.
+//
+// The printed number packs the four facts an aliasing/mutation bug would
+// move: o.a(15) | copy.a(1015) | copy.inner.k(8) | payload(copy.note)(99).
+// `o.a` is read LAST, after `copy.a` was mutated — so an ALIAS (a copy that
+// shared the storage) would print 101510150899 instead of 1510150899.
+module Wext
+export Wext.run : val -> val
+export Wext.bump : val -> val
+struct Inner { k : word; }
+struct Outer { a : word; inner : Inner; note : val; }
+
+defun Wext.bump(pv : val) -> val {
+  *Outer p = payload(pv, 0);
+  p.a = p.a + 10;
+  p.inner.k = p.inner.k + 1;
+  return mknum(p.a);
+}
+
+defun Wext.run(seed : val) -> val {
+  word s = payload(seed, 0);
+  Outer o;
+  o.a = s;
+  o.inner.k = 7;
+  o.note = mknum(99);
+  call Wext.bump(mknum(&o));
+  Outer copy = o;
+  copy.a = copy.a + 1000;
+  return mknum((o.a * 100000000) + (copy.a * 10000) + (copy.inner.k * 100) + payload(copy.note, 0));
+}

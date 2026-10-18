@@ -24,6 +24,7 @@ module Mid.RtLang.Ast exposing
     , Sig(..)
     , SizeTarget(..)
     , Stmt(..)
+    , StructInit(..)
     , Sym
     , Term(..)
     , Type(..)
@@ -122,6 +123,16 @@ lowering's, a bool binder's is the class's).  Its ONE implicit coercion is
 bool→val, which BOXES to `RawMkValue tagBoolean` — the exact tree the
 `true`/`false` sugar used to emit.  bool→word is the identity but is
 EXPLICIT only (`[word](b)`, plan Q10).
+
+`TStruct name` (B2, plan Q4) is the struct VALUE class: a `struct S` used by
+value (`S s;`, a field `inner : B`, a `p[i]`-style element once B3 lands).
+Its REPRESENTATION is one raw WORD — the ADDRESS of the value's storage —
+which is what makes the plan's rule "a struct-typed field read IS the
+field's ADDRESS (no load: the field is a location)" literally true, and
+what makes `s.f` and `p->f` (/`p.f`) the SAME lowering.  See `StructInit`
+and `TStruct` notes below for where the storage comes from and what a
+copy means.
+
 -}
 type Type
     = TWord
@@ -129,6 +140,7 @@ type Type
     | TFloat
     | TVal
     | TPtr PTy
+    | TStruct String
 
 
 {-| The POINTEE of a pointer annotation (`*S` / `*word` / `*val`), the
@@ -488,6 +500,18 @@ through is a checker REJECT (J7), never a silent join.
   * `SIndexStore` — `p[i] = e;` (U1): the index STORE.  The matching
     `RawWordStore`/`RawVecStore` node with the computed index `i` — the
     `wstore(p, i, e)`/`vecstore(p, i, e)` shape.
+  * `SStructBind` — `S s;` / `S s = { f = e; .. };` / `S s = other;`
+    (B2): the struct-VALUE binder.  These three are the three ways a
+    struct's storage comes into being, and `StructInit` below says what
+    each lowers to.  It is a STATEMENT of its own (not an `SBind` with a
+    `TStruct` type) because the ALLOCATION is the point: a struct binder
+    is a fresh storage location, never a rename.
+  * `SVarStore` — `s = other;` (B2): aggregate ASSIGNMENT — the
+    field-wise COPY into storage that already exists (plan Q4: "assignment
+    `s2 = s1` lowers to field-wise loads/stores").  Legal ONLY where the
+    destination is a struct-VALUE binder (`Check`'s J5-lookup says so; a
+    `word`/`val`/pointer destination is a loud reject — Mid binders are
+    single-assignment and a scalar rebind would be a different language).
 -}
 type Stmt
     = SBind Type String Exp
@@ -495,6 +519,27 @@ type Stmt
     | SIf Exp Block (Maybe Block)
     | SFieldStore Exp String Exp
     | SIndexStore Exp Exp Exp
+    | SStructBind { sname : String, name : String, init : StructInit }
+    | SVarStore String Exp
+
+
+{-| B2 — HOW a struct value is born, the three `S s ...` forms:
+
+  * `InitZero` (`S s;`) — uninitialised-but-ZEROED storage (a `memset`,
+    because uninitialised raw memory in a language with no `unsafe` marker
+    is a silent-wrong-value generator; C's `S s;` leaves garbage, this one
+    does not).
+  * `InitFields [ (f, e) ]` (`S s = { a = 1; b = x };`) — storage then one
+    field store per named field, in the order written.  Every field is
+    optional (the rest stay zero) and a repeated field is a loud reject.
+  * `InitCopy e` (`S s = other;`) — storage then a field-wise COPY of
+    `other`'s words.  Aggregate initialisation COPIES, as in C: `S t = s;`
+    must not alias.
+-}
+type StructInit
+    = InitZero
+    | InitFields (List ( String, Exp ))
+    | InitCopy Exp
 
 
 {-| `TRet` is `return e;` (L3: the block's value).  `TRecur` is
@@ -611,6 +656,22 @@ transcribes):
     WORD constant read from the ONE layout table (`Check.sizeofStruct`)
     for a struct, or the class width for a type.  Lowers to one
     `Lit (LNumber n)`.
+  * `EAddrOf` — `&place` (B2, plan Q3): the address of a MEMORY-BACKED
+    place, as a `*T` ready for the A1 matrix.  Legal on exactly the
+    things that have storage (Check enforces it and the message names the
+    rule): a struct VALUE (`&s` — the value IS its address, so this is
+    the IDENTITY: no node at all), and a struct field selection whose
+    field is one word or a nested struct (`&s.f` / `&p->f` / `&s.inner`
+    — the base address plus the field's constant word offset, NO load).
+    Everything else is a LOUD reject: a `word`/`int`/`bool`/`float`
+    LOCAL, a parameter, a temporary, a literal — a binder is a temp or a
+    40-byte Value slot in this lowering, so there is no address to take
+    (spilling a scalar to memory is the named v2, plan Q3); `&` of a
+    `val` is refused separately (a GC-interior address exposed as a raw
+    word is the unrooted-view hazard — `vecaddr`/`payload` are the
+    sanctioned reads).  Struct PARAMETERS are B6's (`&x` on a flattened
+    struct param forces the stack spill copy), so there is nothing to
+    take the address of there yet.
 
 -}
 type Exp
@@ -637,6 +698,41 @@ type Exp
     | EDeref Exp
     | ECast Type Exp
     | ESizeof SizeTarget
+    | EAddrOf Exp
+
+
+{- WHERE STRUCT-VALUE STORAGE COMES FROM (B2) — the one plan premise this
+unit MEASURED FALSE, recorded where the representation lives.
+
+The plan (Q4) says a struct local "lowers to `allocN sizeof(S)`" over QBE
+stack memory, "`Il.Alloc` exists and is EMITTED today (`Lower.elm:7906`)".
+That seat is real but it is `Mid/Qbe/Il.elm`'s — BELOW `Mid.Qbe.Lower`,
+the only consumer of THIS module's trees.  `Mid.Ir` (the IR `LowerToIr`
+emits) has NO frame-allocation node at all: its only address producers are
+`RawAllocVector`/`RawAllocRaw` (GC-heap), `RawVecAddr` (an interior
+address into an existing GC array), `RawCStr`/`RawSym`/`RawDataAddr`
+(static) and `RawCall*`.  And the plan itself puts the missing node —
+`RawAllocN` — in B4's row, not B2's.
+
+So a struct value's storage is `rawcall malloc(8 * sizeof(S))`: a C-heap
+block, address-stable, invisible to the collector, never moved.  Three
+consequences, all stated rather than hidden:
+
+  1. IT IS HEAP, NOT STACK — the value's lifetime is the program's, not
+     the frame's, and NOTHING frees it.  A struct binder inside a loop
+     allocates per iteration (B4's problem to fund; the fix is
+     `RawAllocN` in one function, `LowerToIr.structAlloc`).
+  2. The GC does NOT see it, so a `val` FIELD is an unrooted handle —
+     exactly plan §Q11's obligation (no-safepoint window + rooted
+     referent), which B7 owns.  This is forced, not a shortcut:
+     `RawAllocRaw` (the GC's own raw block) would be no better — a raw
+     block that no root points at is SWEPT, because `runtime.mid`'s
+     gcMarkRoots only follows rt_gc_roots_* slots and a raw word binder
+     is not one.
+  3. The representation is the ADDRESS, so `s`, `&s`, `p`, `&p` and a
+     nested `s.inner` are all one raw word: `s.f` and `p->f` lower to the
+     SAME node, which is the plan's own test for the design reading well.
+-}
 
 
 {-| `sizeof`'s operand (B1, plan Q9/Q10): a TYPE (`sizeof(word)` = 1,
