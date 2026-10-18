@@ -245,11 +245,14 @@ in the sound domain; FOUR should-fixes, and the first one corrects a claim this 
    edges are unsound in both directions (Zig→Mid and Mid→Zig). So the hatch stays OFF until those shapes
    are routed through Mid seats — and the stage-4 result's "records are the boundary" must not be read as
    "everything else is fine".
-2. **THE DIFFERENTIAL DECOMPOSITION IS HALF-PROVEN.** The 64/128 MB residual being route cost is
-   **PROVEN** (threshold arithmetic: 14.4 MB < heapBytes/4, and `Rt.collect` has exactly two call sites →
-   zero collects). But "the 16 MB delta is the sweep" is **ASSERTED, not measured** — there is no collect
-   counter and the mark walk (4× `RawByteLoad` per tag32 plus an if-chain dispatch) could dominate. **And
-   the nursery escape hatch does NOT address the 64/128 MB case**, which is route cost, not GC.
+2. **THE DIFFERENTIAL DECOMPOSITION IS HALF-PROVEN — CLOSED by GC-ARC F1 (both halves MEASURED).** The
+   64/128 MB residual being route cost is **PROVEN** (threshold arithmetic: 14.4 MB < heapBytes/4, and
+   `Rt.collect` has exactly two call sites → zero collects); GC-ARC F1 **OBSERVED** it — 1 collect at 64 MB,
+   **0 at 128 MB** (`QBE_MIDGC_STATS=1`). "The 16 MB delta is the sweep" was **ASSERTED, not measured**;
+   now measured, and the split is real (sweep 1.9× the mark at 16 MB, 5.4× at 64 MB) **but far too small to
+   be the delta**: the whole collect cost at 16 MB is ~1.6 ms of a ~24 ms run (≈6%), bounding the GC's
+   share of a +120% differential at ~12%. **And the nursery escape hatch addresses NEITHER number** — the
+   residual is route cost at every heap size. See THE INSTRUMENT below.
 3. **THE FREE LIST IS EXACT-MATCH-ONLY** (`RtGc.elm` `gcAllocGoDefun`): no splitting, no bins, so a
    mixed-size program dies `midgc: out of memory` **with free memory available**. Invisible to every
    current fixture, because they are all uniform 12-word cons arrays.
@@ -265,16 +268,18 @@ in the sound domain; FOUR should-fixes, and the first one corrects a claim this 
 4. **THE 3 UNREGISTERED PROBES LEAVE A REAL HOLE: the per-tag payload-pointer OFFSETS are pinned by
    nothing** (the gate census pins the tag integers and `str.len` only). Today's offsets are correct —
    verified word-by-word against `types.zig:70-88` — but nothing stops drift.
-   (nice-to-haves: `Rt.collect`'s collect-before-init guard SIGSEGVs before reaching its loud die; the
-   mark-stack bound; and a stray `elm-compiler/index.html` — removed, it was a build product of the
-   orchestrator's own compile checks.)
+   (nice-to-haves: `Rt.collect`'s collect-before-init guard SIGSEGVs before reaching its loud die — **FIXED
+   by GC-ARC F1, see THE COLLECT-BEFORE-INIT GUARD below**; the mark-stack bound — **CLOSED by GC-ARC F1,
+   see THE MARK-STACK BOUND IS A THEOREM below**; and a stray `elm-compiler/index.html` — removed, it was a
+   build product of the orchestrator's own compile checks.)
 **Tag coverage, re-derived by the reviewer:** proven reachable every collect = tags 0,1,2,4,5 (the
 intern-table root scans strings/symbols each time); asserted-by-layout-parity = 3,6,8,9,10,11,12,14;
 "two object kinds" **holds by construction for the Mid heap**; no produced-but-unmarked or
 marked-but-unproduced tag; 13/`>14` die loudly; tag 7 has no native producer.
 **Not falsified:** the fail-before mutation halves (the reviewer had no elm binary on PATH — `ELM_BIN`
 must be set; the implementer's 112575/OOM figures are therefore inherited, not independently reproduced),
-the mark-vs-sweep split, and cross-target collector behaviour.
+the mark-vs-sweep split (**MEASURED by GC-ARC F1 — `QBE_MIDGC_STATS=1`, see THE INSTRUMENT below**), and
+cross-target collector behaviour.
 
 **THE CRITERION WAS TOO NARROW — CORRECTED (2026-10-12, stage-5 PART 3 review, REPRODUCED).** The
 soundness condition for `QBE_MIDGC=1` was stated as *"every live pointer-bearing object is Mid-allocated"*.
@@ -291,22 +296,88 @@ hole is NOT guardable by a flag at all. Also affected by the same reasoning: the
 "not live" claim held (verified), but the general lesson is that a *classification by shape* cannot
 substitute for the reachability argument.
 
-**THE HATCH GATE — the "still allocates in Zig" list, CORRECTED THREE TIMES (2026-10-12).** This list is the
+**THE HATCH GATE — RE-DERIVED BY EMITTING (GC ARC unit F1, 2026-10-18).** The list below is the
 precondition for ever setting `QBE_MIDGC=1`, under the **corrected criterion above** (no Mid object may
-reference anything the Zig collector can reclaim — reachability, not pointer-bearingness). It has now been
-wrong three times, in the same direction (too short), so treat it as the artifact it is — verified by
-EMITTING, never by intent:
+reference anything the Zig collector can reclaim — reachability, not pointer-bearingness). The plan has
+recorded it as "CORRECTED THREE TIMES, always too short, verified by EMITTING, never by intent", so this
+revision was derived BY EMITTING and not by reading the previous table: `tools/qbe/probe-midgc-census.sh`
+compiles EVERY group the language gate registers (159 artifacts, the same registry
+`tools/osier-corpus-ssa.sh` walks) with `QBE_MIDGC=1` and reads each `.ssa` for the host shim's
+allocating surface. That probe is now the table's runner — a row that becomes false turns it RED.
 
-| still Zig-allocated under `QBE_MIDGC=1` | reclaimable-by-Zig? | evidence |
+**THE CENSUS BY EMISSION (MEASURED this unit, HEAD `c45ff80` + this unit): 159 groups emitted → 104
+ACCEPTED, 21 REFUSED by the census (7 host-seam: `asyncorder asyncpure dirunit fastexec nowunit statplus
+statunit`; 14 `value`-prim: `execbig execchain execenv execglob execmal execnofile execpipe execsubchain
+ioecho iofile readfile taskattempt taskpure taskseq`), 34 PRE-EXISTING `compile_error` rows (type errors,
+neither accepted nor refused).** Across the 104 accepted programs the emitted calls into the shim are
+`rt_vec_store_plain` (104), `rt_gc_root_{len,kind,slot,np}` (104), `rt_root_{push_value,push_ptr,
+push_value_array,pop,pop_to,watermark}` (104), `rt_glob_addr` (104), `rt_boot`/`rt_parse_arg`/
+`rt_is_program`/`rt_run_program`/`rt_print_value` (104), **`rt_argv_install` (104)**, `rt_global_closure`
+(16), `rt_sym_intern` (3), `rt_float_text` (1), `rt_ss_{in,readbyte,close}` (1) — and **ZERO** calls to
+`rt_string`, `rt_con`, `rt_make_closure`, `rt_vec_alloc`, `rt_raw_alloc` or any `rt_prim_*` entry.
+
+| what allocates in the Zig heap under `QBE_MIDGC=1` | a Mid object can hold it? | status / evidence |
 |---|---|---|
-| **RECORDS** — `lowerRecordLitPos` / `lowerRecordUpdatePos` emit `rt_vec_alloc` + the **barrier** `rt_vec_store` with NO `midGc` branch (`Lower.elm:4872`, `:5018`) | no longer | CLOSED by stage 5 PART 3 (`midGcAllocSeat "Rt.allocVector"` + `rt_vec_store_plain`); probe `probe-midgc-record.sh` PASS 60209 / FAIL-BEFORE 115409 |
-| ADT construction (`rt_con`) | no longer | CLOSED by stage 5 PART 1 (`Rt.con`/`Rt.conFill`, `04344fa`) |
-| **CLOSURES** — `rt_make_closure` → `valLambda` → `g.allocArray` (`values.zig:139`) | no longer | CLOSED by stage 5 PART 2 (`Rt.closure`/`Rt.closureFill`); probe `probe-midgc-closure.sh` PASS 22100 / FAIL-BEFORE 49900 |
-| **PARTIAL APPLICATION** — `applyGo`'s `rem > nargs` arm (`rt.zig`) | no longer | CLOSED by stage 5 PART 2 (the weak-extern `q_Rt_x2eallocVector` bridge); probe `probe-midgc-partial.sh` PASS 22100 / FAIL-BEFORE 49900 |
-| **STRING LITERALS** — `rt_string`'s nursery fallback (`rt.zig:405-408`, fired by `QBE_NOSTRINGINTERN=1` OR `intern_live >= 2048`) allocates a fresh Zig-nursery string whose Value can sit in a Mid object | no longer | CLOSED by stage 5 PART 4: under `QBE_MIDGC=1` a literal is emitted as STATIC data (the `str:` symbol itself), so `rt_string` is never called and both the flag AND the runtime fallback are structurally unreachable; probe `probe-midgc-string.sh` PASS 31200200 / FAIL-BEFORE 31200100 + a zero-`rt_string`-emission pin |
-| the transient tail arrays (`rt_apply_tail`'s saturated arm, `rt_tail_known`'s `nargs > 3` fallback) | **reclaimable but NOT live** across any safepoint (the bounce chase copies them before any allocation) | left Zig this unit — allocation-class, GC-triggering, not a soundness hazard (finding 1's honest framing) |
-| **the HOST-ONLY surface** — `rt_argv`/`buildArgvList` (`rt.zig:1265`), `effectloop.zig`'s `valString`/`valCons` (the ASYNC host leaves only; the WORKER read-file-as-string LEFT `nurseryHostPrims` at GROUP 3B-3: `Rt.read-file-as-string` accumulates on the C heap and builds the result via RawAllocRaw+mkStr, never values.valString — and with it the MID route has ZERO rt_prim emission; the WORKER exec-plan LEFT at GROUP 3B-2c: with the rt_exec_run seat deleted, `Rt.exec-run` builds the whole TAGGED result GC-side in Mid (RawAllocRaw+mkStr strings, Rt.cons/Rt.intern tree — the glob precedent shapes), so `nurseryHostPrims` is down to `value` alone).  `str` (String.fromFloat of NaN/±Infinity — the last census-arm entry) was CLOSED by stage 3 GROUP 2: it now has a Mid body (`Rt.str` → `rt_float_text` → a GC string), so it LEFT `nurseryHostPrims` (see the `str` note below).  `glob` LEFT in GROUP 3B-1: `Rt.glob` dupes matches onto the C heap (malloc) and builds the tagged list via `Rt.intern`/`Rt.cons`, never `values.valString`/`valCons` — `nurseryHostPrims` is now 3 (read-file-as-string, exec-plan, value). | **YES — still a LIVE hole for the REMAINING host-only prims, REPRODUCED** (the PART 4 "deferred" verdict was wrong on reachability) | **REFUSED at compile time by stage 5 PART 5**: `QBE_MIDGC=1` refuses (a) the host seam (`Runtime.program`/`Runtime.worker`, the effect-loop path — the reproduced hole) and (b) a census containing any of the 4 remaining nursery-building host prims (`read-file-as-string`/`glob`/`exec-plan`/`value`); `getcwd`/`getenv` LEFT the list in stage 3 GROUP 3A (their Mid bodies `Rt.getcwd`/`Rt.getenv` allocate via `RawAllocRaw`, never `values.valString`), alongside `str` (GROUP 2); `intern` (Mid `Rt.intern` → page_allocator symbol) and the scalar/libc prims are deliberately NOT refused. In-tree: `probe-midgc-io.sh` PASS-AFTER (refusal + default `"100|150"`) / FAIL-BEFORE (`"0|150"` — the cross-heap signature), `midgc-io`/`midgc-tail` qbe-check rows, and `midgc-tail` (a PURE 4-arg mutual tail churn does NOT corrupt — the trigger is not the hole). The host-IO fix (route `valString`/`valCons` Mid-side) remains for stage 6/7; the refusal is the deliverable the owner can act on today.  The boundary is COARSER than the holes (stdin/stdout are fd-int Values — safe, yet refused via the `value` entry); over-refusal is the documented interim call (`value`'s *argv* result is still a Zig-nursery valCons list).|
-| non-pointer-bearing shapes (symbol/prim names, `record.names`, lambda `code` Desc, stream `FILE*`) | no | static or malloc/libc, never GC-reclaimed |
+| **STRING LITERALS** — `rt_string` + its `intern_live >= 2048` nursery fallback | **no** — the call does not exist in the emit | CLOSED structurally (stage 5 PART 4: a literal is STATIC data). MEASURED this unit: 0 `rt_string` calls in 104/104 accepted programs, and `rt_string=0` at RUNTIME (`probe-midgc-string.sh` PASS 31200200, both the .ssa pin and the counter). The runtime half of that probe was RED for an unrelated reason — see THE INSTRUMENT below |
+| **ADT CONSTRUCTION** (`rt_con`), **RECORDS/VECTORS** (`rt_vec_alloc`), **RAW STRINGS** (`rt_raw_alloc`), **CLOSURES** (`rt_make_closure`), **THE `rt_prim_*` DIRECT ENTRIES** | **no** | CLOSED: 0 emitted calls of each across 104/104. (`rt_vec_store_plain` is the plain store, not an allocator.) The stage-5 pass-after/FAIL-BEFORE numbers for these rows stand where they were measured; the emission census is the STRONGER half — a row that reopens goes red on all 104 programs at once |
+| **`rt_global_closure`** (top-level function values) | **no** — it allocates a one-slot cache from `frame_alloc`, an ARENA over `page_allocator` (`hostshim.zig:294`), i.e. not the GC heap at all, and the slot is a FOREVER root | reached by 16/104 accepted programs; NOT a GC allocation by construction (no `g.allocArray` on this path) |
+| **the TRANSIENT TAIL ARRAYS** — the `.tail` staging (`rt_apply_tail`'s saturated arm, `rt_tail_known`'s `nargs > 3` fallback) | **no** — and re-verified, because "reclaimable but not live" is the claim the plan itself says has failed before | the staging now goes through `Rt.allocVector`/`allocvec` on the MID heap (the apply/tail family is Mid since stage 6 B1/B2); what remains Zig-side on that path is `malloc(80)` for the `Ret` — **libc, never GC-reclaimed** (`hostshim.zig`'s `Ret` is 80 bytes; PERF-DEBT §2 records both the leak fix and this residual). Probe: `probe-midgc-tail.sh` (pure-program arm) |
+| **the HOST-ONLY SURFACE, the effect loop** — `src/effectloop.zig`'s `valString`/`valCons` (the ASYNC host leaves) | **no**, and not by a shape argument: **no `Program` VALUE CAN EXIST** | STRUCTURAL, two independent barriers: (a) the census refuses any program whose reached set contains `Runtime.program`/`Runtime.worker` (`Resolve.elm:230` maps `Platform.program`/`Platform.worker` onto them) — the 7 host-seam groups above; (b) `rt_is_program` (`hostshim.zig:990`) demands a 4-element vector tagged `Program`, which ONLY those two defuns build, so `effectloop.runProgram` cannot be entered by an accepted program. **A third, weaker fact**: `Rt.run_program` IS called unconditionally as a seat, and it is alloc-free until `isProgram` says yes |
+| **the HOST-ONLY SURFACE, the argv registry** — `rt_argv_install` → `buildArgvList` → `values.valString`/`valCons` | **no** — plus the list is never reclaimed OR moved | STILL ZIG-ALLOCATED (104/104 accepted programs reach it: `Rt.main` calls it unconditionally), and closed by a REACHABILITY argument, not by shape: (1) the list is stored in the Vm values table, a REGISTERED Zig root (`state.zig`'s `registerValuesTable`), so the Zig collector never reclaims it; (2) its only reader is `Rt.value` ← the `value` prim, which the census REFUSES (the 14 groups above) — so no Mid object can hold it; (3) it is built at `Rt.main:4029`, BEFORE the entry dispatch, and `Rt.gcInit` maps the Mid region lazily on the FIRST Mid allocation, i.e. later — there is no Mid object in existence while it is built. **BUG FIXED IN THIS UNIT**: the builder's accumulator was UNROOTED across `valString`'s allocation, so a scavenge inside the build reclaimed the tail — MEASURED `non-exhaustive case` with a 60k-entry argv on the DEFAULT route (route-independent: the argv registry is Zig-heap on both). Now `g.rootValue(&acc)`; `probe-midgc-argv.sh` is the fail-before/pass-after, and its second arm asserts the census refusal that keeps the row closed |
+| **non-pointer-bearing shapes** (symbol/prim names, `record.names`, lambda `code` Desc, stream `FILE*`) | n/a | unchanged: static data, `page_allocator` (`rt_sym_intern`, `rt_ss_*`) or libc. `rt_float_text` is static BSS |
+
+**WHAT THE CENSUS STILL DOES NOT COVER, stated rather than implied.** (a) It is entry-REACHABLE per group,
+so a shape reachable only from an unregistered program is invisible to it. (b) It refuses by PRIM NAME and
+by HOST-SEAM KEY: the refusal is COARSER than the holes (stdin/stdout are safe fd Values yet refused via
+`value`), and a future prim with a Mid body that allocates in the Zig heap would need the row added by hand
+— over-refusal is the interim call, under-refusal is the bug. (c) `QBE_MIDGC=1` + `QBE_NORTLEAN=1` is still
+unguarded (unchanged from the stage-5 review).
+
+**THE INSTRUMENT (this unit) — the two ASSERTED claims are now MEASURED.** `QBE_MIDGC_STATS=1` prints one
+line per collect on stderr (`Rt.gcNumOut`, seeded ONLY under the hatch, so the default route's bytes do not
+move): `midgc: c=<n> mark=<bodies> swept=<bytes> markUs=<n> sweepUs=<n>`. `mark` is the O(live) half (one
+push per distinct body), `swept` the O(heap) half, the µs fields are CLOCK_MONOTONIC around each phase.
+MEASURED on `tools/qbe/fixtures/midgc-live.elm` — the SAME 150k-cons churn the stage-4 differential used:
+
+| `QBE_HEAP_MB` | collects | bodies marked (total) | swept bytes per collect | mark µs | sweep µs |
+|---|---|---|---|---|---|
+| 16 | **4** | 3190 | 4,285,472 | 539–644 | 1015–1200 |
+| 32 | 2 | 1611 | 8,455,104 | 265 | 1002 |
+| 64 | 1 | 573 | 16,777,344 | 220–229 | 1188–1238 |
+| 128 | **0** | — | — | — | — |
+
+Three consequences. (1) **"Zero collects at 128 MB" is now an OBSERVATION, not threshold arithmetic** — and
+at 64 MB there is exactly one. So the 64/128 MB residual (the stage-4 differential: +31–40%) is NOT the
+collector, which is what finding 2 said and could not show. (2) **The split, measured**: the sweep is
+1.9× the mark at 16 MB, 3.8× at 32 MB, 5.4× at 64 MB — it scales with the HEAP while the marked-body count
+does NOT (3190 total across 4 collects at 16 MB vs 573 in 1 at 64 MB), i.e. O(heap) vs O(live) is confirmed
+as a shape, not just a claim. (3) **THE PLAN'S OWN DECOMPOSITION IS TOO STRONG, and this corrects it.** §2.2
+records "the 16 MB delta is the real GC difference (mark-sweep's O(heap) sweep vs the Zig O(live))". The
+Mid collector's ENTIRE cost at 16 MB is ~1.6 ms (539+1015 µs of collect time) inside a ~24 ms run — **~6%
+of the run**, against a stage-4 differential of +114–124% on the same fixture. The Zig arm's collector is
+cheaper but not free, so 1.6 ms is an UPPER BOUND on the GC's share of that delta: **at most ~12% of a
++120% delta at 16 MB.** The rest is the per-allocation ROUTE cost, at every heap size. CAVEAT, stated: the
+stage-4 differential cannot be re-measured in-tree (B4 deleted the hatch-OFF Zig arm) and the route has
+since improved, so this is not a re-measurement of that delta — it is a bound on what the collector could
+have contributed, and it says the §2.2 escape hatch (a bump/copying nursery in front) would target ~6% of
+the run, not the residual the plan attributes to it. The allocation-seat cost is the target.
+
+**THE MARK-STACK BOUND IS A THEOREM, NOT A MARGIN (this unit).** §2.2 recorded it as "holds by 0.05%
+(262,144 entries vs 262,007 max blocks at 16 MB)". Derived properly: the smallest physical block is class 1
+= 8 words = 64 bytes, so one mmap of `regionSize = H + H/8` can hold at most
+`(regionEnd - heapStart)/64` bodies, and the walk pushes at most ONE entry per body (`gcMarkPtr`'s
+`marked == 0` test); capacity is `markEnd - 64` = `H/64`. The margin is `H/262144 + ~72` entries —
+**137 at 16 MB, 329 at 64 MB, 585 at 128 MB, positive at every heap size** — because the mark stack and the
+heap are carved from the SAME reservation. `Rt.gcInit` now DERIVES both numbers and dies at init
+(`midgc: mark stack smaller than the heap can hold`) if a future change to the constants breaks the
+relation; `probe-midgc-guards.sh` halves the stack to prove the check fires (and that WITHOUT it the same
+program runs to completion, silently mis-geometried). A TestMain row pins the arithmetic and a text
+tripwire pins the guard's presence.
+
+**THE COLLECT-BEFORE-INIT GUARD DIES LOUDLY NOW (this unit).** It used to bind `*Region region =
+wload(glob, 0)` and dereference `region->magic`, so the null case SEGV'd before the advertised die. The
+region WORD is tested first; `probe-midgc-guards.sh --before` reproduces the SEGV (exit 139) with the old
+body and the message (exit 1) with the new one, same stressor.
 
 **THE GUARD WAS INCOMPLETE — a SECOND silent hole, found by the PART 2 review and fixed in `3c2741e`.**
 `run.js` refused only `MIDGC+NORTLEAN`. With **`QBE_MIDGC=1 QBE_NOMIDRT=1`** the compiler returned 0 and
