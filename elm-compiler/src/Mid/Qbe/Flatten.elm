@@ -301,6 +301,17 @@ rw env gen exp =
         NotEqual block ->
             rw2 (\l r -> NotEqual { block | left = l, right = r }) env gen block.left block.right
 
+        Loop block ->
+            -- (B4) the loop's cond and body are ordinary subtrees; Break and
+            -- Continue name no binder, so they rewrite to themselves.
+            rw2 (\c b -> Loop { cond = c, body = b }) env gen block.cond block.body
+
+        Break ->
+            Ok ( Break, gen )
+
+        Continue ->
+            Ok ( Continue, gen )
+
         -- Unsafe (osier-rawnodes): flattening is UNSOUND to apply around raw
         -- nodes — a renamed binder inside a raw arg or a WithRoots body breaks
         -- the rooting discipline the raw code states by hand — so the pass
@@ -1010,6 +1021,15 @@ usesOK env x shape exp =
         NotEqual block ->
             usesOK env x shape block.left && usesOK env x shape block.right
 
+        Loop block ->
+            usesOK env x shape block.cond && usesOK env x shape block.body
+
+        Break ->
+            False
+
+        Continue ->
+            False
+
         -- Unsafe (osier-rawnodes): deny-by-default — a raw use is never a
         -- "resolvable consumer", so the binder keeps its slot.  (rw rejects
         -- Unsafe nodes outright; this arm exists so the predicate cannot
@@ -1102,6 +1122,15 @@ occurs x exp =
 
         NotEqual block ->
             occurs x block.left || occurs x block.right
+
+        Loop block ->
+            occurs x block.cond || occurs x block.body
+
+        Break ->
+            False
+
+        Continue ->
+            False
 
         -- Unsafe (osier-rawnodes): deny-by-default — treat raw code as using
         -- every binder, so no rewrite around it is admitted.  Moot in
@@ -1224,6 +1253,15 @@ maxId exp =
 
         NotEqual block ->
             max (maxId block.left) (maxId block.right)
+
+        Loop block ->
+            max (maxId block.cond) (maxId block.body)
+
+        Break ->
+            0
+
+        Continue ->
+            0
 
         -- Unsafe (osier-rawnodes): irrelevant by ordering — `rw` rejects any
         -- Unsafe node, and maxId only seeds rw's fresh-id supply, so a defun

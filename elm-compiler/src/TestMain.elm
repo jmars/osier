@@ -6616,12 +6616,31 @@ checks rt =
             Err _ ->
                 False
         )
-    , check "B2 LOWER: `&s` on a struct VALUE is the IDENTITY — no node at all (the value IS its address), so the emitted tree at `return &s;` is exactly the binder"
-        (case lowlModuleBody "struct S { a : word; }\ndefun Rt.a() -> *S {\n  S s;\n  return &s;\n}" of
+    , check "B2 LOWER: `&s` on a struct VALUE is the IDENTITY — no node at all (the value IS its address), so binding it to a `*S` binds exactly the struct's binder"
+        (case lowlModuleBody "struct S { a : word; }\ndefun Rt.a() -> *S {\n  S s;\n  *S p = &s;\n  return p;\n}" of
             Ok body ->
-                b2LetValue body /= Nothing && b2Shell body == Just (Var 1)
+                -- `S s;` -> Let s = alloc in Let dead = memset in Let p = <&s> in ..
+                case b2Shell body of
+                    Just (Let block) ->
+                        case block.binders of
+                            LetBind b :: _ ->
+                                b.value == Var 1
+
+                            _ ->
+                                False
+
+                    _ ->
+                        False
 
             Err _ ->
+                False
+        )
+    , check "B4 REJECT: `return &s;` on a struct LOCAL is refused — the address of an `allocN` block dies with the frame, so a returned pointer would dangle (B2's row above pinned the identity; this is the obligation that keeps it sound)"
+        (case lowlModuleBody "struct S { a : word; }\ndefun Rt.a() -> *S {\n  S s;\n  return &s;\n}" of
+            Err msg ->
+                String.contains "returns the ADDRESS of this frame" msg
+
+            Ok _ ->
                 False
         )
     , check "B2 LOWER: `&p->b` is the field's ADDRESS — `p + 8*offset`, no load (offset 1 -> `RawBin RAdd (Var 1) (Lit 8)`); the same arithmetic the field read uses"
@@ -7023,9 +7042,8 @@ checks rt =
             Ok _ ->
                 False
         )
+
     ]
-
-
 {-| The block's VALUE: the innermost `body` of the Let chain a declaration's
 stores wrap it in (the array pins compare the READ node, not the memset/store
 prefix).
@@ -7951,6 +7969,20 @@ censusStmt s =
         Ast.SVarStore _ v ->
             "SVarStore" :: censusExp v
 
+        Ast.SWhile c b ->
+            "SWhile" :: (censusExp c ++ censusBlock b)
+
+        Ast.SDoWhile b c ->
+            "SDoWhile" :: (censusBlock b ++ censusExp c)
+
+        Ast.SFor rec ->
+            "SFor"
+                :: (Maybe.withDefault [] (Maybe.map censusStmt rec.init)
+                        ++ censusExp rec.cond
+                        ++ Maybe.withDefault [] (Maybe.map censusStmt rec.step)
+                        ++ censusBlock rec.body
+                   )
+
 
 censusInit : Ast.StructInit -> List String
 censusInit init =
@@ -7988,6 +8020,12 @@ censusTerm t =
             censusExp c
                 ++ censusBlock t1
                 ++ Maybe.withDefault [] (Maybe.map censusBlock me)
+
+        Ast.TBreak ->
+            []
+
+        Ast.TContinue ->
+            []
 
 
 censusExp : Ast.Exp -> List String
@@ -8403,6 +8441,22 @@ cexp st e =
             in
             ( NotEqual { n | left = l1, right = r1, falseLabel = "", endLabel = "" }, st2 )
 
+        Loop l ->
+            let
+                ( c1, st1 ) =
+                    cexp st l.cond
+
+                ( b1, st2 ) =
+                    cexp st1 l.body
+            in
+            ( Loop { cond = c1, body = b1 }, st2 )
+
+        Break ->
+            ( Break, st )
+
+        Continue ->
+            ( Continue, st )
+
         Unsafe node ->
             let
                 ( n1, st1 ) =
@@ -8561,6 +8615,9 @@ cnode st node =
             ( node, st )
 
         RawSym _ ->
+            ( node, st )
+
+        RawAllocN _ ->
             ( node, st )
 
 
@@ -9824,6 +9881,15 @@ rawCallSyms exp =
         NotEqual block ->
             rawCallSyms block.left ++ rawCallSyms block.right
 
+        Loop block ->
+            rawCallSyms block.cond ++ rawCallSyms block.body
+
+        Break ->
+            []
+
+        Continue ->
+            []
+
         Unsafe node ->
             case node of
                 RawCall call ->
@@ -9911,6 +9977,9 @@ rawCallSyms exp =
                     []
 
                 RawSym _ ->
+                    []
+
+                RawAllocN _ ->
                     []
 
 

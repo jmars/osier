@@ -157,6 +157,7 @@ type alias St =
     , types : Dict String Ast.Type
     , decls : List Decl
     , ret : Ast.Type
+    , cells : Dict String () -- B4: the AUTO-CELL set — every binder assigned anywhere in this defun
     }
 
 
@@ -185,6 +186,438 @@ mkNilExp : Exp
 mkNilExp =
     Unsafe (RawMkValue { tag = RtLayout.tagNil, words = [] })
 
+
+
+-- ==================== B4: AUTO-CELLS (the loop-carried word local) ====================
+
+
+{-| The CELL CLASS — the types that need an `allocN` cell to be assignable.
+`word`/`int` (one class), `bool` (the 0/1 word) and `*T` (a pointer IS a word)
+are raw REGISTERS in this lowering, and a register cannot be live across a
+back edge without a phi.  The three EXCLUSIONS are memory already: `val` is a
+40-byte rooted frame slot, `float` is a `d` register (never let-bound at all,
+J1), and a struct/array value IS the address of its own block.
+-}
+scalarWordTy : Ast.Type -> Bool
+scalarWordTy ty =
+    case ty of
+        Ast.TWord ->
+            True
+
+        Ast.TBool ->
+            True
+
+        Ast.TPtr _ ->
+            True
+
+        _ ->
+            False
+
+
+{-| Is this binder a CELL?  Two facts, both syntactic: it is ASSIGNED
+somewhere in the defun (`st.cells`) and its declared class is a raw word
+(`scalarWordTy`).  The judgment is DEFUN-WIDE on purpose — "assigned anywhere"
+is a superset of "loop-carried", so there is no loop analysis to mis-scope
+(R3), and an assigned binder behaves the same inside and outside a loop.
+-}
+isCell : St -> String -> Bool
+isCell st name =
+    Dict.member name st.cells
+        && (case Dict.get name st.types of
+                Just ty ->
+                    scalarWordTy ty
+
+                Nothing ->
+                    False
+           )
+
+
+{-| Every binder NAME assigned anywhere in the block (the auto-cell candidate
+set — narrowed to the raw-word class at each use by `isCell`).  Statements are
+walked through nested ifs and loops; expressions are walked because a
+block-branch `if` expression (`.. ? {..} : {..}`, `EIfBlock`) carries blocks.
+Names suffice as the key: this language keeps ONE flat scope per defun (a
+duplicate declaration is J5's reject), so a name has one meaning.
+-}
+assignedNames : Block -> Dict String ()
+assignedNames b =
+    Dict.union (blockAssigned b) Dict.empty
+
+
+blockAssigned : Block -> Dict String ()
+blockAssigned b =
+    List.foldl (\stmt acc -> Dict.union (stmtAssigned stmt) acc)
+        (termAssigned b.term)
+        b.stmts
+
+
+termAssigned : Term -> Dict String ()
+termAssigned term =
+    case term of
+        TRet e ->
+            expAssigned e
+
+        TRecur es ->
+            List.foldl (\e acc -> Dict.union (expAssigned e) acc) Dict.empty es
+
+        TIf c t me ->
+            Dict.union (expAssigned c)
+                (Dict.union (blockAssigned t)
+                    (case me of
+                        Just eb ->
+                            blockAssigned eb
+
+                        Nothing ->
+                            Dict.empty
+                    )
+                )
+
+        TBreak ->
+            Dict.empty
+
+        TContinue ->
+            Dict.empty
+
+
+stmtAssigned : Stmt -> Dict String ()
+stmtAssigned stmt =
+    case stmt of
+        SVarStore name e ->
+            Dict.insert name () (expAssigned e)
+
+        SBind _ _ e ->
+            expAssigned e
+
+        SEffect e ->
+            expAssigned e
+
+        SIf c t me ->
+            Dict.union (expAssigned c)
+                (Dict.union (blockAssigned t)
+                    (case me of
+                        Just eb ->
+                            blockAssigned eb
+
+                        Nothing ->
+                            Dict.empty
+                    )
+                )
+
+        SFieldStore p _ e ->
+            Dict.union (expAssigned p) (expAssigned e)
+
+        SIndexStore p i e ->
+            Dict.union (expAssigned p) (Dict.union (expAssigned i) (expAssigned e))
+
+        SStructBind rec ->
+            structInitAssigned rec.init
+
+        SArrayBind rec ->
+            arrayInitAssigned rec.init
+
+        SWhile c b ->
+            Dict.union (expAssigned c) (blockAssigned b)
+
+        SDoWhile b c ->
+            Dict.union (blockAssigned b) (expAssigned c)
+
+        SFor rec ->
+            Dict.union
+                (case rec.init of
+                    Just st ->
+                        stmtAssigned st
+
+                    Nothing ->
+                        Dict.empty
+                )
+                (Dict.union (expAssigned rec.cond)
+                    (Dict.union
+                        (case rec.step of
+                            Just st ->
+                                stmtAssigned st
+
+                            Nothing ->
+                                Dict.empty
+                        )
+                        (blockAssigned rec.body)
+                    )
+                )
+
+
+structInitAssigned : StructInit -> Dict String ()
+structInitAssigned init =
+    case init of
+        InitZero ->
+            Dict.empty
+
+        InitCopy e ->
+            expAssigned e
+
+        InitFields fields ->
+            List.foldl (\( _, e ) acc -> Dict.union (expAssigned e) acc) Dict.empty fields
+
+
+arrayInitAssigned : ArrayInit -> Dict String ()
+arrayInitAssigned init =
+    case init of
+        AInitZero ->
+            Dict.empty
+
+        AInitFull es ->
+            List.foldl (\e acc -> Dict.union (expAssigned e) acc) Dict.empty es
+
+
+expAssigned : Ast.Exp -> Dict String ()
+expAssigned e =
+    case e of
+        Ast.EIfBlock c t el ->
+            Dict.union (expAssigned c) (Dict.union (blockAssigned t) (blockAssigned el))
+
+        Ast.EWithRoots _ b ->
+            blockAssigned b
+
+        Ast.EInt _ ->
+            Dict.empty
+
+        Ast.EFlt _ ->
+            Dict.empty
+
+        Ast.EStr _ ->
+            Dict.empty
+
+        Ast.EBool _ ->
+            Dict.empty
+
+        Ast.EVar _ ->
+            Dict.empty
+
+        Ast.EWordBin _ a b ->
+            Dict.union (expAssigned a) (expAssigned b)
+
+        Ast.EWordCmp _ a b ->
+            Dict.union (expAssigned a) (expAssigned b)
+
+        Ast.EFltBin _ a b ->
+            Dict.union (expAssigned a) (expAssigned b)
+
+        Ast.EFltCmp _ a b ->
+            Dict.union (expAssigned a) (expAssigned b)
+
+        Ast.EShortAnd a b ->
+            Dict.union (expAssigned a) (expAssigned b)
+
+        Ast.EShortOr a b ->
+            Dict.union (expAssigned a) (expAssigned b)
+
+        Ast.EIf a b c ->
+            Dict.union (expAssigned a) (Dict.union (expAssigned b) (expAssigned c))
+
+        Ast.ECall _ es ->
+            List.foldl (\x acc -> Dict.union (expAssigned x) acc) Dict.empty es
+
+        Ast.ERawCall _ es ->
+            List.foldl (\x acc -> Dict.union (expAssigned x) acc) Dict.empty es
+
+        Ast.EAggCall _ fn es ->
+            List.foldl (\x acc -> Dict.union (expAssigned x) acc) (expAssigned fn) es
+
+        Ast.EBuiltin _ es ->
+            List.foldl (\x acc -> Dict.union (expAssigned x) acc) Dict.empty es
+
+        Ast.EField base _ ->
+            expAssigned base
+
+        Ast.EIndex base i ->
+            Dict.union (expAssigned base) (expAssigned i)
+
+        Ast.EDeref x ->
+            expAssigned x
+
+        Ast.ECast _ x ->
+            expAssigned x
+
+        Ast.ESizeof _ ->
+            Dict.empty
+
+        Ast.EAddrOf x ->
+            expAssigned x
+
+
+-- ==================== B4: THE STATEMENT REWRITES ====================
+
+
+{-| `for (init; c; step) B` — `continue` RUNS the step (C semantics), ONCE per
+iteration.  Two different rewrites, and conflating them double-runs the step:
+
+  * at the loop BODY's own reachable ends (`forTail`) — the fall-through and
+    a tail `if`'s falling path — the step is appended, because falling off
+    the body must advance the loop exactly as an explicit `continue` does;
+  * inside the body, at a block whose term IS `TContinue` (a `continue;`
+    site, `forContinueBlock`), the step is appended too.
+
+What is NOT rewritten is a block that merely falls THROUGH inside the body:
+its fall-through continues the enclosing block's flow (whose end gets the
+step once).  Nothing crosses into a NESTED loop — its continues are its own.
+-}
+forBody : Maybe Stmt -> Block -> Block
+forBody step body =
+    case step of
+        Nothing ->
+            body
+
+        Just st ->
+            forTail st body
+
+
+{-| The body's own ends: `TContinue`, and a tail `if` whose falling paths
+leave the block.  A `TIf` with both arms explicit recurses into BOTH (each is
+an end of this block).
+-}
+forTail : Stmt -> Block -> Block
+forTail step b =
+    let
+        stmts1 =
+            List.map (forStmt step) b.stmts
+    in
+    case b.term of
+        TContinue ->
+            { stmts = stmts1 ++ [ step ], term = TContinue }
+
+        TIf c t Nothing ->
+            -- the then-branch diverges (J7), so as a MID-BLOCK if it is legal
+            -- and its false path is the continuation: the step, then the next
+            -- iteration.  The BRANCH ITSELF is rewritten too — a `continue;`
+            -- inside it is a continue site like any other, and leaving it
+            -- alone is a continue that SKIPS the step (MEASURED: exactly this
+            -- arm, found by this row — one step store where there should be
+            -- two, i.e. an infinite loop in the .ssa).
+            { stmts = stmts1 ++ [ SIf c (forContinueBlock step t) Nothing, step ]
+            , term = TContinue
+            }
+
+        TIf c t (Just eb) ->
+            { stmts = stmts1
+            , term = TIf c (forTail step t) (Just (forTail step eb))
+            }
+
+        other ->
+            { stmts = stmts1, term = other }
+
+
+{-| A block reached through a STATEMENT (an `if`'s branch): only its explicit
+`continue;` sites take the step.
+-}
+forContinueBlock : Stmt -> Block -> Block
+forContinueBlock step b =
+    let
+        stmts1 =
+            List.map (forStmt step) b.stmts
+    in
+    case b.term of
+        TContinue ->
+            { stmts = stmts1 ++ [ step ], term = TContinue }
+
+        TIf c t me ->
+            { stmts = stmts1
+            , term = TIf c (forContinueBlock step t) (Maybe.map (forContinueBlock step) me)
+            }
+
+        other ->
+            { stmts = stmts1, term = other }
+
+
+forStmt : Stmt -> Stmt -> Stmt
+forStmt step stmt =
+    case stmt of
+        SIf c t me ->
+            SIf c (forContinueBlock step t) (Maybe.map (forContinueBlock step) me)
+
+        _ ->
+            -- a NESTED loop (or any other statement): its continues belong to
+            -- it, so the rewrite stops here
+            stmt
+
+
+{-| `do { B } while (c);` — a `Loop` whose condition is the constant 1, with
+C's test placed where control LEAVES an iteration: at every `continue` and at
+the body's fall-through.  `continue` in a do-while evaluates `c` FIRST (C's
+rule), which is exactly "test; then the loop's own next iteration or exit".
+No body duplication and no backend flag: the shape needs only `Loop`,
+`Break` and `Continue`.
+
+The test is spelled `if (c) { continue; }` followed by the block's term being
+`break` — i.e. "if the condition holds, iterate; otherwise leave".
+-}
+doWhileBody : Ast.Exp -> Block -> Block
+doWhileBody cond b =
+    doWhileTail cond { b | stmts = List.map (doWhileStmt cond) b.stmts }
+
+
+{-| The BODY's own end: the `TContinue` term, or a tail `if` whose reachable
+paths need the same treatment (`diverges` tells which — a block whose term
+cannot be fallen past needs nothing).
+-}
+doWhileTail : Ast.Exp -> Block -> Block
+doWhileTail cond b =
+    case b.term of
+        TContinue ->
+            { stmts = b.stmts ++ [ doWhileTest cond ], term = TBreak }
+
+        TIf c t Nothing ->
+            -- the then-branch diverges (J7), so as a mid-block if it is legal
+            -- and its false path is the continuation: the test, then break.
+            -- The branch is rewritten too — a `continue;` in it must still
+            -- evaluate the condition (C's do-while rule).
+            { stmts = b.stmts ++ [ SIf c (doWhileContinue cond t) Nothing, doWhileTest cond ]
+            , term = TBreak
+            }
+
+        TIf c t (Just eb) ->
+            { stmts = b.stmts
+            , term = TIf c (doWhileTail cond t) (Just (doWhileTail cond eb))
+            }
+
+        _ ->
+            b
+
+
+{-| A block whose term is `TContinue` anywhere INSIDE the body (a continue in
+a nested `if`): test, then leave-or-iterate.
+-}
+doWhileContinue : Ast.Exp -> Block -> Block
+doWhileContinue cond b =
+    if b.term == TContinue then
+        { stmts = List.map (doWhileStmt cond) b.stmts ++ [ doWhileTest cond ], term = TBreak }
+
+    else
+        { stmts = List.map (doWhileStmt cond) b.stmts
+        , term =
+            case b.term of
+                TIf c t me ->
+                    TIf c (doWhileContinue cond t) (Maybe.map (doWhileContinue cond) me)
+
+                other ->
+                    other
+        }
+
+
+doWhileStmt : Ast.Exp -> Stmt -> Stmt
+doWhileStmt cond stmt =
+    case stmt of
+        SIf c t me ->
+            SIf c (doWhileContinue cond t) (Maybe.map (doWhileContinue cond) me)
+
+        _ ->
+            stmt
+
+
+{-| The condition test as a mid-block statement: `if (c) { continue; }`.  The
+`break` is the ENCLOSING block's term, so a false condition falls past this
+statement into it.
+-}
+doWhileTest : Ast.Exp -> Stmt
+doWhileTest cond =
+    SIf cond { stmts = [], term = TContinue } Nothing
 
 
 -- ============================ entry point ============================
@@ -246,6 +679,7 @@ lowerDefun decls d =
             , types = paramTypes d.params
             , decls = decls
             , ret = d.ret
+            , cells = assignedNames d.body
             }
     in
     case lowerBlock st0 d.body of
@@ -344,7 +778,43 @@ lowerStmt st stmt cont =
                             Err msg
 
                         Ok ( st4, body ) ->
-                            Ok ( st4, Let { binders = [ LetBind { binder = binder, value = v2 } ], body = body } )
+                            if isCell st3 name then
+                                -- B4: the binder is a CELL — the declaration
+                                -- allocates ONE word of stack storage and
+                                -- STORES the initialiser, so every later
+                                -- assignment is a store and every read a load.
+                                -- The alloc sits INSIDE the declaration's own
+                                -- `Let`, i.e. before the first jump into a
+                                -- loop body and never inside a back edge: the
+                                -- init-once rule is structural.
+                                case
+                                    withStores "_cellinit"
+                                        st4
+                                        [ Unsafe
+                                            (RawWordStore
+                                                { ptr = Var binder.id
+                                                , index = Lit (LNumber 0)
+                                                , value = v2
+                                                }
+                                            )
+                                        ]
+                                        (\st5 -> Ok ( st5, body ))
+                                of
+                                    Err msg ->
+                                        Err msg
+
+                                    Ok ( st5, stored ) ->
+                                        Ok
+                                            ( st5
+                                            , Let
+                                                { binders =
+                                                    [ LetBind { binder = binder, value = Unsafe (RawAllocN 1) } ]
+                                                , body = stored
+                                                }
+                                            )
+
+                            else
+                                Ok ( st4, Let { binders = [ LetBind { binder = binder, value = v2 } ], body = body } )
 
         SEffect e ->
             case lowerExp st e of
@@ -614,6 +1084,10 @@ lowerStmt st stmt cont =
         SVarStore name e ->
             -- B2: `s = other;` — the aggregate COPY into storage that already
             -- exists.  The destination's address is its binder (a raw word).
+            -- B4: a WORD-class destination is a CELL STORE (`x = e;` — the
+            -- assignment that makes a loop-carried local work at all); the
+            -- binder holds the cell's ADDRESS, so the store is
+            -- `wstore(cell, 0, v)`.
             case ( Dict.get name st.scope, Dict.get name st.types ) of
                 ( Just id, Just (Ast.TStruct sname) ) ->
                     case lowerExp st e of
@@ -628,10 +1102,35 @@ lowerStmt st stmt cont =
                                 Ok stores ->
                                     withStores "_structcopy" st1 stores cont
 
+                ( Just id, Just ty ) ->
+                    if scalarWordTy ty && isCell st name then
+                        case lowerExp st e of
+                            Err msg ->
+                                Err msg
+
+                            Ok ( st1, e1 ) ->
+                                withStores "_cellstore"
+                                    st1
+                                    [ Unsafe
+                                        (RawWordStore
+                                            { ptr = Var id
+                                            , index = Lit (LNumber 0)
+                                            , value = e1
+                                            }
+                                        )
+                                    ]
+                                    cont
+
+                    else
+                        Err
+                            (internal st ("assignment to '" ++ name ++ "'")
+                                "needs a struct-VALUE binder or an auto-celled WORD binder — Check J1 must reject it first"
+                            )
+
                 _ ->
                     Err
                         (internal st ("assignment to '" ++ name ++ "'")
-                            "needs a struct-VALUE binder — Check J1 must reject it first"
+                            "is unbound at the lowerer — Check J5 must reject it first"
                         )
 
         SIndexStore p i e ->
@@ -645,6 +1144,88 @@ lowerStmt st stmt cont =
 
                 _ ->
                     indexStoreOnPointer st p i e cont
+
+        -- ==================== B4: the loop STATEMENTS ====================
+        -- Each lowers to a dead-binder `Let` of the `Loop` node, then the
+        -- continuation: the loop produces no value (its node's value is nil),
+        -- so it is an EFFECT with a binder, exactly the `SEffect` shape.
+        SWhile c b ->
+            lowerLoopStmt st c b cont
+
+        SDoWhile b c ->
+            -- the C-correct test placement (see `doWhileBody`); the surface
+            -- cond is DUPLICATED into each test site by the rewrite, which is
+            -- exactly C's execution count
+            lowerLoopStmt st (Ast.EInt 1) (doWhileBody c b) cont
+
+        SFor rec ->
+            let
+                loopStmt =
+                    SWhile rec.cond (forBody rec.step rec.body)
+            in
+            case rec.init of
+                Nothing ->
+                    lowerStmt st loopStmt cont
+
+                Just initStmt ->
+                    -- the continuation is a PARTIAL APPLICATION, not a lambda:
+                    -- elm 0.19 compiles `lowerStmt` into a tail-call LOOP that
+                    -- reassigns its own `cont` parameter, and a lambda closing
+                    -- over `cont` here would capture that reassigned variable
+                    -- and recurse into itself forever (MEASURED: a
+                    -- `for (k = 0; ..)` blew the JS stack; the `for (; ..)`
+                    -- form, which takes no continuation, was fine)
+                    lowerStmt st initStmt (forCont loopStmt cont)
+
+
+{-| The `for` head's init continuation — a NAMED function for the reason
+stated at the call site (a lambda here captures `lowerStmt`'s reassigned
+`cont`).
+-}
+forCont : Stmt -> (St -> Result String (St, Exp)) -> St -> Result String (St, Exp)
+forCont loopStmt cont st =
+    lowerStmt st loopStmt cont
+
+
+{-| `while (c) { B }` (and the desugared forms above): lower the condition,
+then the body, then the continuation — and SCOPE the body's binders to the
+body (a binder declared inside a loop is not visible after it; restoring the
+pre-body scope keeps that true of the lowerer's own table even though Check
+already refused such a read).
+-}
+lowerLoopStmt : St -> Ast.Exp -> Block -> (St -> Result String (St, Exp)) -> Result String (St, Exp)
+lowerLoopStmt st c b cont =
+    case lowerExp st c of
+        Err msg ->
+            Err msg
+
+        Ok ( st1, c1 ) ->
+            case lowerBlock st1 b of
+                Err msg ->
+                    Err msg
+
+                Ok ( st2, b1 ) ->
+                    case cont { st2 | scope = st1.scope, types = st1.types } of
+                        Err msg ->
+                            Err msg
+
+                        Ok ( st3, body ) ->
+                            let
+                                ( dead, st4 ) =
+                                    fresh "_loop" st3
+                            in
+                            Ok
+                                ( st4
+                                , Let
+                                    { binders =
+                                        [ LetBind
+                                            { binder = dead
+                                            , value = Loop { cond = c1, body = b1 }
+                                            }
+                                        ]
+                                    , body = body
+                                    }
+                                )
 
 
 {-| B3 — `a[i] = e;` on an ARRAY base: the store node, its dead binder, the
@@ -777,6 +1358,15 @@ lowerTerm st term =
                 Ok ( st1, es ) ->
                     Ok ( st1, App { fn = GRef { key = st.key, force = False }, args = es } )
 
+        -- B4: the loop leaves — a bare `Break`/`Continue` node.  The backend
+        -- resolves which loop from its own enclosing-loop stack, so nesting
+        -- needs no labels in the tree.
+        TBreak ->
+            Ok ( st, Break )
+
+        TContinue ->
+            Ok ( st, Continue )
+
         TIf c t me ->
             case lowerExp st c of
                 Err msg ->
@@ -888,6 +1478,12 @@ lowerBranchTerm st term cont =
 
                 Ok ( st1, es ) ->
                     Ok ( st1, App { fn = GRef { key = st.key, force = False }, args = es } )
+
+        TBreak ->
+            Ok ( st, Break )
+
+        TContinue ->
+            Ok ( st, Continue )
 
         TIf c t me ->
             case lowerExp st c of
@@ -1037,6 +1633,15 @@ diverges b =
         TRecur _ ->
             True
 
+        -- B4: a loop leaf ends the block (control leaves for the loop's exit
+        -- or its next iteration), so `if (c) { break; }` is the legal
+        -- mid-block shape it looks like.
+        TBreak ->
+            True
+
+        TContinue ->
+            True
+
         TIf _ t me ->
             case me of
                 Just e ->
@@ -1094,7 +1699,15 @@ lowerExp st e =
         Ast.EVar name ->
             case Dict.get name st.scope of
                 Just id ->
-                    Ok ( st, Var id )
+                    if Dict.member name st.cells then
+                        -- B4 auto-cell: the binder holds an ADDRESS (a
+                        -- `RawAllocN` block), so a read is a LOAD of word 0.
+                        -- A word producer, so it is legal exactly where the
+                        -- binder's old raw-temp spelling was.
+                        Ok ( st, Unsafe (RawWordLoad { ptr = Var id, index = Lit (LNumber 0) }) )
+
+                    else
+                        Ok ( st, Var id )
 
                 Nothing ->
                     Err

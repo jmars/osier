@@ -1436,6 +1436,17 @@ safepoint selfKey selfArity e =
         NotEqual b ->
             safepoint selfKey selfArity b.left || safepoint selfKey selfArity b.right
 
+        Loop b ->
+            -- (B4) both subtrees are ordinary code; Break/Continue allocate
+            -- and call nothing at all.
+            safepoint selfKey selfArity b.cond || safepoint selfKey selfArity b.body
+
+        Break ->
+            False
+
+        Continue ->
+            False
+
         Unsafe node ->
             unsafeSafepoint selfKey selfArity node
 
@@ -1547,6 +1558,14 @@ unsafeSafepoint selfKey selfArity node =
         RawSym _ ->
             -- (stage 6 A1b) a static FUNCTION-symbol address — like RawCStr,
             -- no allocation and no safepoint (a code label is never moved).
+            False
+
+        RawAllocN _ ->
+            -- (B4) STACK storage: the block is carved from the current frame,
+            -- touches no heap, triggers no collection and holds no Value the
+            -- collector scans.  NOT a safepoint — which is also why a defun
+            -- whose only allocation is a cell can keep the frame-free lean
+            -- ABI (its liveness never has to be spilled to a root array).
             False
 
 letValue : LetBinder -> Exp

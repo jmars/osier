@@ -601,10 +601,34 @@ through is a checker REJECT (J7), never a silent join.
     storage, never a rename), and its two initialisers are `ArrayInit`'s.
   * `SVarStore` — `s = other;` (B2): aggregate ASSIGNMENT — the
     field-wise COPY into storage that already exists (plan Q4: "assignment
-    `s2 = s1` lowers to field-wise loads/stores").  Legal ONLY where the
-    destination is a struct-VALUE binder (`Check`'s J5-lookup says so; a
-    `word`/`val`/pointer destination is a loud reject — Mid binders are
-    single-assignment and a scalar rebind would be a different language).
+    `s2 = s1` lowers to field-wise loads/stores").  Legal where the
+    destination is a struct-VALUE binder (the copy) or a WORD-class binder
+    (B4's scalar assignment — see the AUTO-CELL note below); a `val`
+    destination is a loud reject with the escape named.
+  * `SWhile c B` — `while (c) { B }` (B4).  A statement, not a terminator:
+    control FALLS THROUGH it into the rest of the block, which is what makes
+    `while (..) { .. } return x;` read like C.
+  * `SDoWhile B c` — `do { B } while (c);` (B4).  `continue` inside `B`
+    evaluates `c` first (C's rule), which is why the surface form carries
+    its condition instead of being desugared away in the parser.
+  * `SFor { init, cond, step, body }` — `for (init; cond; step) { body }`
+    (B4).  `init`/`step` are STATEMENTS (`word i = 0;`, `i = i + 1;`) and
+    either may be absent, so C's `for (i = 0;; i = i + 1)` shape is
+    spellable.  A `continue` in `body` RUNS `step` before re-testing —
+    C semantics, produced by rewriting every `TContinue` in the body to
+    `step; continue`.  SCOPE NOTE (stated, not hidden): `init` declares into
+    the ENCLOSING block's scope — this language has one flat scope per defun
+    — so `i` stays visible after the loop, unlike C's `for (int i = ..)`.
+
+AUTO-CELL (B4, plan Q6).  A WORD-class binder (`word`/`int`/`bool`/`*T`)
+that is the TARGET of an assignment anywhere in its defun is lowered to an
+`allocN` CELL (its declaration allocates one word; reads are loads, writes
+are stores) instead of a raw register.  A loop-carried local needs this
+because a register cannot be live across a back edge without a phi — the
+`Rt.copyWordsGo` discipline, automated — and a read-only binder stays a
+register.  The judgment is deliberately DEFUN-WIDE rather than "inside a
+loop body": the assigning set is syntactic, so there is no loop analysis to
+mis-scope, and an assigned binder is a cell wherever it appears.
 -}
 type Stmt
     = SBind Type String Exp
@@ -615,6 +639,9 @@ type Stmt
     | SStructBind { sname : String, name : String, init : StructInit }
     | SArrayBind { aty : Type, name : String, init : ArrayInit }
     | SVarStore String Exp
+    | SWhile Exp Block
+    | SDoWhile Block Exp
+    | SFor { init : Maybe Stmt, cond : Exp, step : Maybe Stmt, body : Block }
 
 
 {-| B2 — HOW a struct value is born, the three `S s ...` forms:
@@ -664,15 +691,22 @@ type ArrayInit
 
 
 {-| `TRet` is `return e;` (L3: the block's value).  `TRecur` is
-`recur(a, ..);` (L4: `App{fn=GRef own-key, force=False}` — the ONLY loop;
-MEASURED, all 31 DSL sites are saturated self-GRef apps, so J4 pins the
+`recur(a, ..);` (L4: `App{fn=GRef own-key, force=False}` — the ONE self-tail
+form; MEASURED, all 31 DSL sites are saturated self-GRef apps, so J4 pins the
 arity == own param count statically, else the classifier would demote the
 loop to a plain call).  `TIf` is the branch-final `if` (L5).
+`TBreak`/`TContinue` (B4) are the loop LEAVES — they end
+the block like `return` does (a block has exactly one terminator), and
+`Check` rejects either one outside a loop.  `diverges` counts all four, so
+the J7 "a mid-block if needs one diverging branch" rule admits
+`if (c) { break; }` as the mid-block statement it is.
 -}
 type Term
     = TRet Exp
     | TRecur (List Exp)
     | TIf Exp Block (Maybe Block)
+    | TBreak
+    | TContinue
 
 
 

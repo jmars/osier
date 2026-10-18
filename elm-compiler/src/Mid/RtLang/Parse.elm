@@ -224,9 +224,9 @@ parser's commit semantics:
     without parentheses is THE example: without it, the if-arm would
     silently hand back and the block would report a misleading
     missing-terminator error.
-  * RESERVED at statement/defun positions: `word float val if return
-    recur else defun` (dispatch reads them first — a statement cannot
-    START with one of them as an expression).  Inside expressions T2's
+  * RESERVED at statement/defun positions: `word float val bool if return
+    recur else defun while do for break continue` (dispatch reads them
+    first — a statement cannot START with one of them as an expression).  Inside expressions T2's
     rules are unchanged EXCEPT T23's `if`, which is now the block-branch
     if EXPRESSION's keyword (an `if` token in expression position parses
     `if (c) {..} else {..}` — it is no longer a legal plain variable
@@ -237,6 +237,28 @@ parser's commit semantics:
   * `recur` is a TERM only, per the plan (L4): a mid-block `recur`
     becomes a second terminator and the exactly-one-terminator reject
     fires; the loop-state-completeness judgment on it is T5's (J4).
+
+B4 — the LOOP FORMS (`while`/`do`-`while`/`for`/`break`/`continue`) — and
+the ONE grammar relaxation they took:
+
+  * `while (c) B`, `do B while (c);` and `for (init; c; step) B` are
+    STATEMENTS (control falls through them into the rest of the block);
+    `break;`/`continue;` are TERMS (they end the block, like `return`).
+  * A LOOP BODY MAY OMIT ITS TERMINATOR: `while (c) { x = x + 1; }` is a
+    loop body whose fall-through means "next iteration".  Everywhere else
+    the exactly-one-terminator rule stands (`blockInner`'s `validate`); the
+    loop-body variant (`loopInner`) accepts a MISSING terminator and
+    synthesizes `TContinue` for it, so the invariant the checker and
+    lowerer read — every `Block` HAS a terminator — is untouched.  Without
+    this the language would demand a trailing `continue;` in every loop,
+    which is not C and reads as a wart.
+  * `goto` is NOT in this grammar and will not be added: break/continue need
+    exactly two targets (loop top, loop exit) and `Mid.Ir`'s `Loop` node
+    gives them structurally; a general `goto` would need label-addressable
+    blocks across an arbitrary defun, a second block namespace in the IL,
+    and the term-discipline (J7) would have to admit it — for zero measured
+    customer (plan Q6).  The argument is recorded HERE so a later port
+    cannot smuggle it in as a "small addition".
 
 MID-LANE HAZARD (MEASURED, Rt.elm:531-545): the selfhost front end
 resolves let binders strictly in order, so every helper here — including
@@ -2564,6 +2586,52 @@ blockInner =
         )
 
 
+{-| B4 — a LOOP BODY: `{ stmt* [term] }`.  Identical to `block` except that a
+MISSING terminator is legal, and means "next iteration" — the fold
+synthesizes `TContinue`, so the `Block` handed to the checker and the lowerer
+still always HAS a terminator (the invariant they read is untouched).  This
+is the ONLY relaxation of the exactly-one-terminator rule, and it is safe
+because a fall-through block is legal exactly where the enclosing construct
+gives it a meaning — a loop body.  (`if`'s branches cannot use it: a
+mid-block if with a falling-through branch is already J7's reject.)
+-}
+loopBlock : ParserFast.Parser Block
+loopBlock =
+    spelled "{"
+        (ParserFast.map2
+            (\folded _ -> loopBlockOfFold folded)
+            loopInner
+            (spelled "}" (succeed ()))
+        )
+
+
+{-| The loop body's fold: the SAME `itemStep`/`itemReduce` machinery, with
+`validate` refusing only a stray item AFTER the terminator.
+-}
+loopInner : ParserFast.Parser ( List Stmt, Maybe Term, Bool )
+loopInner =
+    ParserFast.validate
+        (\( _, _, stray ) -> not stray)
+        "nothing may follow the terminator of a loop body (`}` ends a body that has none)"
+        (ParserFast.loopWhileSucceedsOntoResultFromParser
+            itemStep
+            (succeed ( [], Nothing, False ))
+            itemReduce
+            identity
+        )
+
+
+loopBlockOfFold : ( List Stmt, Maybe Term, Bool ) -> Block
+loopBlockOfFold ( revStmts, mterm, _ ) =
+    case mterm of
+        Just term ->
+            { stmts = List.reverse revStmts, term = term }
+
+        Nothing ->
+            -- the fall-through: this body's next iteration
+            { stmts = List.reverse revStmts, term = TContinue }
+
+
 {-| One folded item: a statement, or the block's terminator (the `End`
 marks that nothing may follow it, not that it consumed the `}`).
 -}
@@ -2630,6 +2698,33 @@ itemStepAt offset src =
 
         Just ( "recur", _ ) ->
             ParserFast.map ITermEnd (spelled "recur" recurTail)
+
+        -- B4: the loop STATEMENTS and the two loop LEAVES.
+        Just ( "while", _ ) ->
+            ParserFast.map IStmt (spelled "while" whileStmt)
+
+        Just ( "do", _ ) ->
+            ParserFast.map IStmt (spelled "do" doWhileStmt)
+
+        Just ( "for", _ ) ->
+            ParserFast.map IStmt (spelled "for" forStmt)
+
+        Just ( "break", _ ) ->
+            ParserFast.map (\_ -> ITermEnd TBreak) (spelled "break" (spelled ";" (succeed ())))
+
+        Just ( "goto", _ ) ->
+            -- plan Q6: `goto` is REJECTED, and it is worth a message of its
+            -- own rather than a stray "expected `;`" — the argument has to be
+            -- visible where someone would try it.  A bare `problem` (the
+            -- `else`/`defun` arms' shape): the fold hands back and the block
+            -- reports against the token.  COMMITTED (`spelled`), because a
+            -- non-committed problem is indistinguishable from the end of the
+            -- statement list and the block's own "exactly one terminator"
+            -- message would win instead of this one.
+            spelled "goto" (ParserFast.problem "`goto` is not in this language and will not be added (plan Q6): break/continue need exactly TWO targets — the loop's top and its exit — and `Mid.Ir`'s Loop node gives them structurally, with no labels in the tree.  A general goto would need label-addressable blocks across an arbitrary defun, a second block namespace in the IL, and the term discipline (J7) would have to admit it.  Spell the control flow with while/for/break/continue, or restructure with `recur`")
+
+        Just ( "continue", _ ) ->
+            ParserFast.map (\_ -> ITermEnd TContinue) (spelled "continue" (spelled ";" (succeed ())))
 
         Just ( "word", _ ) ->
             ParserFast.map IStmt (spelled "word" (bindOrArray TWord))
@@ -3039,6 +3134,165 @@ ptrBindStmt =
         (spelled "*" ptrPointee)
         surfaceName
         (spelled "=" expSemi)
+
+
+{-| B4 — `(cond) block` for the loop forms: the condition's parentheses are
+REQUIRED, exactly as `if`'s are (`parenCond`'s message family), and the body
+is a `loopBlock` — a block that MAY omit its terminator (fall-through means
+"next iteration").
+-}
+loopHead : ParserFast.Parser ( Exp, Block )
+loopHead =
+    ParserFast.map2 (\c b -> ( c, b ))
+        (commit parenCond)
+        (spelled ")" loopBlock)
+
+
+{-| `while (c) { .. }` after its keyword.
+-}
+whileStmt : ParserFast.Parser Stmt
+whileStmt =
+    ParserFast.map (\( c, b ) -> SWhile c b) loopHead
+
+
+{-| `{ .. } while (c);` after its `do` keyword.  The trailing semicolon is
+REQUIRED (the form is a statement, and every statement in this grammar ends
+with one).
+-}
+doWhileStmt : ParserFast.Parser Stmt
+doWhileStmt =
+    ParserFast.map3 (\b c _ -> SDoWhile b c)
+        loopBlock
+        (spelled "while" (commit parenCond))
+        (spelled ")" (spelled ";" (succeed ())))
+
+
+{-| `for (init; cond; step) { .. }` after its keyword.  `init` and `step` are
+optional STATEMENTS; each carries its OWN `;`, which doubles as the
+separator, so `for (word i = 0; i < 3; i = i + 1)` reads as written.  The
+condition is required (C's `for(;;)` is spelled `while (1)` here, where the
+condition is visible rather than elided).
+-}
+forStmt : ParserFast.Parser Stmt
+forStmt =
+    ParserFast.map4
+        (\mi c ms b -> SFor { init = mi, cond = c, step = ms, body = b })
+        (spelled "(" forInit)
+        (commit expression)
+        (spelled ";" forStep)
+        (spelled ")" loopBlock)
+
+
+{-| `init` in a `for` head: absent (`for (; ..)`) or one statement — a typed
+bind, a pointer bind, a struct bind or a store/effect statement.  A
+TERMINATOR (`return`/`recur`/`break`/`continue`/a final `if`) is not an
+initialiser, so those keyword arms are absent by construction.
+-}
+forInit : ParserFast.Parser (Maybe Stmt)
+forInit =
+    ParserFast.offsetSourceAndThen
+        (\offset src ->
+            if String.slice offset (offset + 1) src == ";" then
+                -- an EMPTY init: `for (; c; step)` — the separator is still
+                -- the head's, so consume it here
+                spelled ";" (succeed Nothing)
+
+            else
+                ParserFast.map Just forHeadStmt
+        )
+
+
+{-| `step` in a `for` head: absent, or ONE store/effect expression.  A
+DECLARATION in the step is refused by the grammar — C's step is an
+expression, and a declaration there would shadow a binder once per
+iteration.  The step's own `;` is OPTIONAL (C has no separator after the
+step): `for (k = 0; k < 6; k = k + 1)` and `... k = k + 1;)` both parse.
+-}
+forStep : ParserFast.Parser (Maybe Stmt)
+forStep =
+    ParserFast.offsetSourceAndThen
+        (\offset src ->
+            if String.slice offset (offset + 1) src == ")" then
+                succeed Nothing
+
+            else
+                ParserFast.map Just
+                    (ParserFast.map stmtOf
+                        (ParserFast.validate
+                            stmtOk
+                            "a store needs a field or index on its left — write `p->f = e;` or `p[i] = e;`"
+                            (ParserFast.map2 (\e tail -> ( e, tail )) expression forStepTail)
+                        )
+                    )
+        )
+
+
+{-| The `for` step's tail: `= value` (then an optional `;`) or nothing at
+all (a bare effect or an empty step, with `)` next).
+-}
+forStepTail : ParserFast.Parser StmtTail
+forStepTail =
+    ParserFast.offsetSourceAndThen
+        (\offset src ->
+            if String.slice offset (offset + 1) src == "=" then
+                spelled "="
+                    (ParserFast.map TailStore
+                        (ParserFast.map2 (\e _ -> e) expression forStepEnd)
+                    )
+
+            else
+                succeed TailEffect
+        )
+
+
+forStepEnd : ParserFast.Parser ()
+forStepEnd =
+    ParserFast.offsetSourceAndThen
+        (\offset src ->
+            if String.slice offset (offset + 1) src == ")" then
+                succeed ()
+
+            else
+                spelled ";" (succeed ())
+        )
+
+
+{-| A `for`-head statement: the statement forms that may appear in the head.
+-}
+forHeadStmt : ParserFast.Parser Stmt
+forHeadStmt =
+    ParserFast.offsetSourceAndThen
+        (\offset src ->
+            case tokenAtOff offset src of
+                Just ( "word", _ ) ->
+                    spelled "word" (bindOrArray TWord)
+
+                Just ( "int", _ ) ->
+                    spelled "int" (bindOrArray TWord)
+
+                Just ( "bool", _ ) ->
+                    spelled "bool" (bindOrArray TBool)
+
+                Just ( "float", _ ) ->
+                    spelled "float" (bindOrArray TFloat)
+
+                Just ( "val", _ ) ->
+                    spelled "val" (bindOrArray TVal)
+
+                Just ( tok, _ ) ->
+                    if isUpperName tok then
+                        structBindStmt
+
+                    else
+                        stmtExp
+
+                Nothing ->
+                    if String.slice offset (offset + 1) src == "*" then
+                        ptrBindStmt
+
+                    else
+                        stmtExp
+        )
 
 
 {-| The ambiguous `if`, after its keyword: parse it whole (`ifTail`),

@@ -369,6 +369,8 @@ type alias Ctx =
     , params : List Param
     , ret : Type
     , scope : Dict String Type
+    , loops : Int -- (B4) the ENCLOSING loop depth: a break/continue needs one
+    , abiWord : Bool -- (B4) is this defun's signature the WORD ABI (Ast.allWordSig)?
     }
 
 
@@ -1333,6 +1335,8 @@ ctxOf env d =
     , params = d.params
     , ret = d.ret
     , scope = paramScope d.params
+    , loops = 0
+    , abiWord = Ast.allWordSig (List.map .ty d.params) d.ret
     }
 
 
@@ -1465,6 +1469,118 @@ checkStmt ctx stmt =
 
         SVarStore name e ->
             checkVarStore ctx name e
+
+        -- B4 — the loop STATEMENTS.  Each checks its condition with the ONE
+        -- condition judgment (J1's `checkCond`: a word 0/1 or a boolean
+        -- Value, never a constant), then checks its body in a context one
+        -- loop DEEPER, which is what makes a `break`/`continue` inside legal
+        -- and one outside a reject.  A body's class is not the loop's: a
+        -- loop is a statement, so it produces no value.
+        SWhile c b ->
+            case checkCond ctx c of
+                Err msg ->
+                    Err msg
+
+                Ok _ ->
+                    case checkBlock { ctx | loops = ctx.loops + 1 } b of
+                        Err msg ->
+                            Err msg
+
+                        Ok _ ->
+                            Ok ctx
+
+        SDoWhile b c ->
+            case checkBlock { ctx | loops = ctx.loops + 1 } b of
+                Err msg ->
+                    Err msg
+
+                Ok _ ->
+                    case checkCond ctx c of
+                        Err msg ->
+                            Err msg
+
+                        Ok _ ->
+                            Ok ctx
+
+        SFor rec ->
+            case forInit ctx rec of
+                Err msg ->
+                    Err msg
+
+                Ok ctx1 ->
+                    case checkCond ctx1 rec.cond of
+                        Err msg ->
+                            Err msg
+
+                        Ok _ ->
+                            case checkForStep ctx1 rec.step of
+                                Err msg ->
+                                    Err msg
+
+                                Ok () ->
+                                    case checkBlock { ctx1 | loops = ctx1.loops + 1 } rec.body of
+                                        Err msg ->
+                                            Err msg
+
+                                        Ok _ ->
+                                            Ok ctx
+
+
+{-| The `for` head's init statement (a declaration or a store/effect) — checked
+against the enclosing context so a binder it declares is visible to the
+condition, the body and the continuation (the flat-scope rule stated in
+Ast's `SFor` note).
+-}
+forInit : Ctx -> { init : Maybe Stmt, cond : Exp, step : Maybe Stmt, body : Block } -> Result String Ctx
+forInit ctx rec =
+    case rec.init of
+        Nothing ->
+            Ok ctx
+
+        Just stmt ->
+            checkStmt ctx stmt
+
+
+{-| The `for` STEP: absent, or ONE store/effect statement — checked like any
+other statement.  A DECLARATION is refused by this rule (the parser's
+`forStep` refuses it too, so this is the checker's half of the same
+judgment, and a hand-built tree cannot smuggle one in): a binder declared in
+the step would be shadowed once per iteration, and a struct/array
+declaration there would allocate a block per iteration for no reason.
+-}
+checkForStep : Ctx -> Maybe Stmt -> Result String ()
+checkForStep ctx step =
+    case step of
+        Nothing ->
+            Ok ()
+
+        Just stmt ->
+            if isStepShape stmt then
+                checkStmt ctx stmt |> Result.map (\_ -> ())
+
+            else
+                Err
+                    (ctx.key
+                        ++ ": J1: the `for` STEP must be a store or an effect statement (C's step is an expression): a declaration there would shadow a binder once per iteration"
+                    )
+
+isStepShape : Stmt -> Bool
+isStepShape stmt =
+    case stmt of
+        SEffect _ ->
+            True
+
+        SFieldStore _ _ _ ->
+            True
+
+        SIndexStore _ _ _ ->
+            True
+
+        SVarStore _ _ ->
+            True
+
+        _ ->
+            False
 
 
 {-| J1 (B1) — the `bool` BINDER rule: the class exists for the 0/1 word,
@@ -1852,15 +1968,64 @@ checkVarStore ctx name e =
                     ++ "' is an ARRAY VALUE — an array cannot be assigned whole (that is an element-wise copy, not in v1): store the elements (`a[i] = e;`)"
                 )
 
-        Just cls ->
+        Just TVal ->
+            -- B4: a loop-carried `val` is the ONE shape this tier cannot
+            -- lower, and the reject says exactly why instead of lowering a
+            -- store that does not exist.
             Err
                 (ctx.key
                     ++ ": J1: '"
                     ++ name
-                    ++ "' is "
-                    ++ typeStr cls
-                    ++ " — only a struct VALUE can be assigned (Mid binders are single-assignment: a scalar rebind is a NEW binder, and a field is written `p->f = e;`)"
+                    ++ "' is a val — a `val` local cannot be ASSIGNED.  Mid.Ir has no node that stores a Value into a binder's frame slot (a `recur`'s argument blit is the backend's own staging, derived from the `App` node, not a node a Loop can carry), so a val loop-carried across a back edge would silently keep its OLD value.  Carry the changing state as a `recur` PARAMETER (the gcSweep idiom: `recur(v2);` at the tail of the body) — or keep it in raw memory (`val[N]` with the Q11 rooting rule).  Word-class locals (`word`/`int`/`bool`/`*T`) ARE assignable: they become `allocN` cells"
                 )
+
+        Just TFloat ->
+            Err
+                (ctx.key
+                    ++ ": J1: '"
+                    ++ name
+                    ++ "' is float — a float binder has no storage to assign (J1's float rule: float words are not let-bindable), so it cannot be assigned either"
+                )
+
+        Just cls ->
+            -- B4: the WORD-class scalar assignment.  The binder becomes an
+            -- `allocN` CELL in the lowering (auto-cell), so `x = e;` is a
+            -- store and every read is a load — the state a back edge needs.
+            -- The class agreement is the same `coerce` the binder's own
+            -- initializer uses, so no new matrix exists.
+            case checkExp ctx e of
+                Err msg ->
+                    Err msg
+
+                Ok cls2 ->
+                    if cls == TBool then
+                        -- a bool binder's value must be a bool TEMP (J1's
+                        -- closure: that is what makes it branchable)
+                        if cls2 == TBool && isBoolTemp e then
+                            Ok ctx
+
+                        else
+                            Err
+                                (ctx.key
+                                    ++ ": J1: '"
+                                    ++ name
+                                    ++ "' is a bool, so it can only be assigned a bool TEMP (a comparison, a `[bool](w)` cast, or another bool binder) — got "
+                                    ++ typeStr cls2
+                                )
+
+                    else if coerce cls cls2 then
+                        Ok ctx
+
+                    else
+                        Err
+                            (ctx.key
+                                ++ ": J1: '"
+                                ++ name
+                                ++ "' is "
+                                ++ typeStr cls
+                                ++ " but the assigned value is "
+                                ++ typeStr cls2
+                            )
 
 
 {-| B2 — `&place`: the ADDRESS of a memory-backed place, as `*T`.  Legal on
@@ -2214,26 +2379,47 @@ checkTerm : Ctx -> Term -> Result String Type
 checkTerm ctx term =
     case term of
         TRet e ->
-            case checkExp ctx e of
-                Err msg ->
-                    Err msg
+            -- B4/J13: a pointer INTO THIS FRAME must not be returned.  Every
+            -- struct/array local (and every struct parameter's entry copy) is
+            -- now an `allocN` block the frame owns, so a returned `&place`
+            -- would name dead storage the moment the defun returned — where
+            -- the malloc block it replaced was merely leaked.
+            case frameAddrOf ctx e of
+                Just why ->
+                    Err
+                        (ctx.key
+                            ++ ": J13: 'return "
+                            ++ why
+                            ++ "' returns the ADDRESS of this frame's own storage — a struct/array local lives in an `allocN` block the frame reclaims at exit, so the caller would hold a dangling pointer (and the runtime is free to reuse those bytes).  Return a heap block instead (`rawcall malloc(..)`), write the result through an OUT-PARAMETER, or return the value by copy"
+                        )
 
-                Ok cls ->
-                    if coerce ctx.ret cls then
-                        Ok ctx.ret
+                Nothing ->
+                    case checkExp ctx e of
+                        Err msg ->
+                            Err msg
 
-                    else
-                        Err
-                            (ctx.key
-                                ++ ": J6: return is "
-                                ++ typeStr cls
-                                ++ " but '-> "
-                                ++ typeStr ctx.ret
-                                ++ "' is declared"
-                            )
+                        Ok cls ->
+                            if coerce ctx.ret cls then
+                                Ok ctx.ret
+
+                            else
+                                Err
+                                    (ctx.key
+                                        ++ ": J6: return is "
+                                        ++ typeStr cls
+                                        ++ " but '-> "
+                                        ++ typeStr ctx.ret
+                                        ++ "' is declared"
+                                    )
 
         TRecur args ->
             checkRecur ctx args
+
+        TBreak ->
+            breakLike ctx "break"
+
+        TContinue ->
+            breakLike ctx "continue"
 
         TIf c t me ->
             case me of
@@ -2270,6 +2456,16 @@ diverges b =
         TRecur _ ->
             True
 
+        -- B4: a loop LEAF ends the block — control leaves it for the loop's
+        -- exit (`break`) or its next iteration (`continue`), never by falling
+        -- past the block's end.  Without this arm a mid-block
+        -- `if (c) { break; }` would be J7's "both branches fall through".
+        TBreak ->
+            True
+
+        TContinue ->
+            True
+
         TIf _ t me ->
             case me of
                 Just e ->
@@ -2287,6 +2483,111 @@ divergesMaybe me =
 
         Nothing ->
             False
+
+
+{-| B4 — `break`/`continue` are legal only INSIDE a loop.  The check is the
+loop depth the statement walk threads (`Ctx.loops`), so a leaf in a loop's
+condition, in a defun body with no loop, or in a `for` head is a loud reject
+here rather than a backend error at emit time.
+-}
+breakLike : Ctx -> String -> Result String Type
+breakLike ctx what =
+    if ctx.loops > 0 then
+        Ok ctx.ret
+
+    else
+        Err
+            (ctx.key
+                ++ ": J7: '"
+                ++ what
+                ++ ";' outside any loop — break/continue leave a loop, so there must be one enclosing them (the nearest loop is the one they leave, so nesting needs no labels)"
+            )
+
+
+{-| B4/J13 — does `e` (a `return` operand) hand back the ADDRESS of THIS
+frame's storage?  Every struct/array local and every struct parameter's entry
+copy is an `allocN` block owned by the frame, so the shapes are:
+
+  * `&s` / `&a` — a struct-VALUE or ARRAY binder;
+  * `&s.f` — interior to such a binder (a nested struct or an array field);
+  * `&p` — a STRUCT PARAMETER (its entry copy is the callee's own block).
+
+Everything else is left to the user (the obligation is stated in Mid.Ir's
+`RawAllocN` note): `&x` of a place reached through a POINTER (`&q->f`,
+`&(p[i])`) is an address in some OTHER block — heap or the caller's frame —
+and the checker cannot know its lifetime.  A deeper escape (`return pk(&s)`)
+is likewise out of reach of a syntactic rule.
+
+`Nothing` when the operand is not one of these shapes (or is not an `&` at
+all, which is the overwhelming majority).
+-}
+frameAddrOf : Ctx -> Exp -> Maybe String
+frameAddrOf ctx e =
+    case e of
+        EAddrOf inner ->
+            if isFramePlace ctx inner then
+                Just (addrOfText inner)
+
+            else
+                Nothing
+
+        _ ->
+            Nothing
+
+
+isFramePlace : Ctx -> Exp -> Bool
+isFramePlace ctx inner =
+    case inner of
+        EVar name ->
+            case Dict.get name ctx.scope of
+                Just (TStruct _) ->
+                    True
+
+                Just (TArray _ _) ->
+                    True
+
+                _ ->
+                    False
+
+        EField base _ ->
+            -- `&s.f` — interior storage of a struct VALUE binder (a nested
+            -- struct or an array field).  `&p->f` on a POINTER base is that
+            -- block's interior, not this frame's.
+            case base of
+                EVar name ->
+                    case Dict.get name ctx.scope of
+                        Just (TStruct _) ->
+                            True
+
+                        _ ->
+                            False
+
+                EField _ _ ->
+                    isFramePlace ctx base
+
+                _ ->
+                    False
+
+        _ ->
+            False
+
+
+{-| The operand as the source spelled it, for the reject message.
+-}
+addrOfText : Exp -> String
+addrOfText inner =
+    case inner of
+        EVar name ->
+            "&" ++ name
+
+        EField base f ->
+            addrOfText base ++ "->" ++ f
+
+        EIndex base i ->
+            addrOfText base ++ "[..]"
+
+        _ ->
+            "&<place>"
 
 
 {-| J4 — the loop's saturation contract.  `recur` lowers to

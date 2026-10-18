@@ -201,8 +201,62 @@ type Exp
     | ShortAnd { left : Exp, right : Exp, falseLabel : String, endLabel : String }
     | ShortOr { left : Exp, right : Exp, falseLabel : String, endLabel : String }
     | NotEqual { left : Exp, right : Exp, falseLabel : String, endLabel : String }
+    | Loop { cond : Exp, body : Exp }
+    | -- (B4) a `break;` — jump to the enclosing Loop's EXIT block.  A LEAF:
+      -- it produces no value (like a diverging tail), so the emission parks a
+      -- fresh unreachable block after the jump; nothing may read its result.
+      Break
+    | -- (B4) a `continue;` — jump to the enclosing Loop's TOP block (per the
+      -- emission below, the CONDITION test, so a `for`'s step is emitted in
+      -- the body before the leaf — C's continue-runs-step semantics).
+      Continue
     | Unsafe UnsafeNode
 
+
+-- ============================ LOOPS (B4) ============================
+-- `Loop { cond, body }` is the ONE control-flow family this IR gained (plan
+-- Q6).  The backend emits, inside one defun:
+--
+--     @loopN:            <cond test>  jnz @exitN      -- or the val-cond test
+--     @bodyN:            <body>       jmp @loopN
+--     @exitN:            <the continuation>
+--
+-- THE INIT-ONCE RULE (this is why the node exists at all, and why the loop
+-- is NOT desugared to `if { body; recur }`): the `body` subtree is emitted
+-- ONCE, so a binder declared inside it is initialised once per ENTRY to the
+-- block, and iterations re-enter at @loopN — the CONDITION — never re-running
+-- the declaration.  A self-tail `recur` re-runs its whole @body let-chain
+-- (the @body label is the defun's param staging point), so a recur desugar
+-- would re-run every initialiser on every iteration.  Lowered surface code
+-- keeps its cell initialisers BEFORE the first jump into @loopN for exactly
+-- this reason; a program's `word i = 0;` above a `while` is initialised once,
+-- not once per iteration.
+--
+-- NO PHI, EVER.  Loop-carried state lives in MEMORY, not in a join:
+--   * a loop-carried WORD-class local (`word`/`int`/`bool`/`*T`) is
+--     AUTO-CELLED by the surface lowerer — one `RawAllocN 1` cell at its
+--     declaration, `RawWordStore` for its assignments, `RawWordLoad` for its
+--     reads.  This is the `Rt.copyWordsGo` discipline (state in raw words)
+--     automated: a register cannot be live across a back edge without a
+--     phi, so the state is given an address instead.  A read-only local
+--     stays a register — it needs no join.
+--   * a `val` local is a 40-byte frame slot (rooted), so it is memory
+--     already; it is READABLE across a back edge.  Updating one is not
+--     expressible at this tier: no node stores a Value into a binder's
+--     frame slot (a `recur`'s argument blit is the BACKEND's own staging,
+--     derived from the `App` node — see `lowerSelfTail`), so the surface
+--     REJECTS `v = e;` on a `val` and names the escape (`recur` params, the
+--     `gcSweep` idiom).  Stated, not silent: the plan expected a per-
+--     iteration re-blit here, and there is no node to spell it with.
+--   * a struct/array local is a storage block already (its value IS its
+--     address), so it needs no join either.
+--
+-- `Break`/`Continue` are LEAVES of the enclosing `Loop`: they name no target
+-- (the backend resolves them against its own loop stack, so nested loops nest
+-- correctly and no label strings enter the tree).  A `Continue` jumps to the
+-- loop TOP — the condition test — which is what makes `for (i; c; step)`'s
+-- step part of the BODY (C semantics), and what makes `do { .. } while (c)`
+-- spellable as a `Loop` whose body carries the test before its continues.
 
 -- A closure body: n-ary parameters plus the body.  Parameter 1 is the OUTERMOST
 -- binder (the ZINC arg convention puts it at the deepest env slot, so
@@ -507,6 +561,27 @@ type UnsafeNode
       -- function symbol (RawCStr/RawDataAddr stay data-address producers and
       -- are rejected as call targets).  NOT a safepoint.
       RawSym String
+    | -- (B4) `n` WORDS of STACK storage — QBE `%r =l allocN 8n` (Il.Alloc, the
+      -- frame-alloc node, which already exists: it is what the prologue's
+      -- pooled/lean frame and B6's struct-parameter entry copy emit).  A WORD
+      -- producer (the address) bound to a raw temp like RawAllocRaw, and NOT a
+      -- safepoint: the block belongs to the current frame, is never scanned
+      -- (it holds raw words, never a Value the collector tracks) and is
+      -- reclaimed by the frame's own exit.
+      --
+      -- THE TWO USES, both "state that a register cannot hold":
+      --   * the AUTO-CELLS of loop-carried word locals (`RawAllocN 1`), where
+      --     a back edge forbids a live register without a phi;
+      --   * declared struct/array locals, whose storage is a block.  B2/B3
+      --     allocated those with `malloc` because Mid.Ir had no frame alloc;
+      --     this node is that missing seat, so those locals need NO free at
+      --     all (a scope exit — `return`, `break`, `continue`, or the block's
+      --     end — cannot leak what the frame owns).  The one obligation the
+      --     swap creates is the reverse of a leak: the ADDRESS must not
+      --     outlive the frame, so the surface rejects `return &local` (a
+      --     stack address in a returned pointer is a dangling pointer where a
+      --     malloc block was merely leaked).
+      RawAllocN Int
 
 
 -- The semantic word-op enums (backend-neutral: QBE's widths and mnemonics

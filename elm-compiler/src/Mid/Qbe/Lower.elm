@@ -216,6 +216,18 @@ type alias S =
     , binderKey : String -- the BINDER-MAP key (the enclosing defun's key for closures, whose params' types live in ITS binder map)
     , qname : String
     , abi : Dict String (List Int) -- B6: the WORD-ABI class table (key -> per-param word widths); MEMBERSHIP is the ABI class
+    , loops : List LoopFrame -- (B4) the ENCLOSING loops, innermost first: what a Break/Continue leaf resolves against
+    }
+
+
+{-| (B4) one enclosing loop's two block labels, as the `Loop` emission built
+them.  `top` is the loop's ENTRY block — the condition test — so `continue`
+re-evaluates the condition (and a `for`'s step has already been emitted into
+the body before the leaf), and `exit` is the block after the loop.
+-}
+type alias LoopFrame =
+    { top : String
+    , exit : String
     }
 
 
@@ -693,6 +705,7 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc table ari
                     , binderKey = ""
                     , qname = ""
                     , abi = runtime.abi
+                    , loops = []
                     }
             in
             case ( midGc, Set.toList hostOnlyPrims, hostSeam ) of
@@ -832,6 +845,17 @@ grefsOf defuns exp =
 
         NotEqual block ->
             grefsOf defuns block.left ++ grefsOf defuns block.right
+
+        -- (B4) a loop calls whatever its cond and body call; the leaves call
+        -- nothing.
+        Loop block ->
+            grefsOf defuns block.cond ++ grefsOf defuns block.body
+
+        Break ->
+            []
+
+        Continue ->
+            []
 
         -- Unsafe (osier-rawnodes / osier-consspike): a raw node GRefs NOTHING
         -- except a RawCall, which is a real call edge — see below.  The
@@ -1033,6 +1057,15 @@ calledPrims rec exp =
 
                 NotEqual block ->
                     Set.union (go block.left) (go block.right)
+
+                Loop block ->
+                    Set.union (go block.cond) (go block.body)
+
+                Break ->
+                    Set.empty
+
+                Continue ->
+                    Set.empty
 
                 Unsafe _ ->
                     Set.empty
@@ -1374,6 +1407,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                 key
             , qname = qname
             , abi = sOuter.abi
+            , loops = sOuter.loops
             }
 
         -- the (empty) @start block, closed by its fallthrough to @body
@@ -1979,6 +2013,15 @@ lowerVal exp dest s =
         NotEqual block ->
             lowerNotEqual block dest s
 
+        Loop block ->
+            lowerLoop block dest s
+
+        Break ->
+            lowerLoopLeaf "exit" s
+
+        Continue ->
+            lowerLoopLeaf "top" s
+
         -- Unsafe (osier-rawnodes / osier-consspike): the Rt-program
         -- lowering — legal only under Rt.* keys (Mid.Audit enforces that on
         -- every compile), and only VALUE producers reach here (RawMkValue,
@@ -2364,6 +2407,9 @@ lowerRawVal node dest s =
         RawSym _ ->
             Err wordProducerMessage
 
+        RawAllocN _ ->
+            Err wordProducerMessage
+
 
 wordProducerMessage : String
 wordProducerMessage =
@@ -2571,7 +2617,18 @@ rawWordArg exp s =
                     Ok ( a, s )
 
                 Nothing ->
-                    Err ("qbe: binder id " ++ String.fromInt id ++ " is not a raw word — value binders cannot appear in raw-argument positions")
+                    -- B4: an INT binder (S4's raw `l` operand) IS a word — the
+                    -- same register class, one representation.  Without this
+                    -- arm a `word n = 3;` local could not be read in ANY raw
+                    -- position (a compare, an index, `mknum(n)`), so a
+                    -- READ-ONLY loop bound was unexpressible: exactly the
+                    -- register the auto-cell rule promises to leave alone.
+                    case Dict.get id s.rawInt of
+                        Just a ->
+                            Ok ( a, s )
+
+                        Nothing ->
+                            Err ("qbe: binder id " ++ String.fromInt id ++ " is not a raw word — value binders cannot appear in raw-argument positions")
 
         Unsafe (RawAllocVector len) ->
             rawWordArg len s
@@ -3082,6 +3139,20 @@ rawWordArg exp s =
             -- ONLY this (and a loaded code pointer) as a call target.
             Ok ( Il.Sym name, s )
 
+        Unsafe (RawAllocN words) ->
+            -- (B4) `n` WORDS of STACK storage: QBE `%t =l allocN 8n`
+            -- (Il.Alloc — the same node the prologue uses for the pooled and
+            -- lean frames and B6 uses for a struct parameter's entry copy).
+            -- A constant size, so vendor/qbe's amd64 isel turns it into a
+            -- fixed frame slot: the block costs frame space, never a runtime
+            -- call, and the frame's exit reclaims it — which is exactly what
+            -- makes a cell or a declared local free-less.
+            let
+                ( t, s1 ) =
+                    freshTmp s
+            in
+            Ok ( Il.Tmp t, emit (Alloc t (8 * words)) s1 )
+
         Unsafe (RawFltBin bin) ->
             -- f64 word binop -> `d` temp.  Operands are FLOAT-word
             -- expressions (rawFltArg); landing one in an integer-word
@@ -3407,6 +3478,9 @@ rawNodeName node =
 
         RawSym _ ->
             "rawSym"
+
+        RawAllocN _ ->
+            "rawAllocN"
 
 
 -- &vec[index] — a fresh `l` temp holding vec + vs*index (the index may be a
@@ -4731,6 +4805,9 @@ isRawWordExp abi exp =
                 RawSym _ ->
                     True
 
+                RawAllocN _ ->
+                    True
+
                 RawCall call ->
                     -- stage 6 U2 / B6: a call to a WORD-ABI defun is a WORD
                     -- producer; a :val RawCall stays on the slot path.
@@ -4947,6 +5024,9 @@ isWordCondNode abi node =
         RawSym _ ->
             True
 
+        RawAllocN _ ->
+            True
+
         RawCall call ->
             Dict.member call.sym abi
 
@@ -5068,6 +5148,140 @@ lowerIfBranches thenLbl elseLbl joinLbl block dest isTail s =
                         |> Result.map (\st -> startBlock joinLbl (jumpTo joinLbl st))
             )
 
+
+
+-- ============================ LOOPS (B4) ============================
+-- The ONE new block structure: `Loop { cond, body }` emits, inside the
+-- current defun,
+--
+--     <preceding block>  jmp @loopN
+--     @loopN:            <cond test>  jnz @bodyN, @exitN   (word cond)
+--                        <val test>  jnz @exitN, @bodyN   (val cond)
+--     @bodyN:            <body>       jmp @loopN
+--     @exitN:            <the continuation>
+--
+-- NO PHI: a loop-carried word local is a `RawAllocN` CELL the surface
+-- lowerer emits (store/load), and a val local is a frame slot — the frame is
+-- one pooled ROOT_VALUE_ARRAY, so every slot is a live root for the whole
+-- body, including across the back edge.  Nothing is joined, so nothing needs
+-- a phi, and the ONLY blocks a Break/Continue name are the frame's two
+-- labels (no label strings enter the tree: `loops` is the enclosing stack,
+-- so nested loops nest correctly by construction).
+--
+-- THE CONDITION IS RE-EVALUATED PER ITERATION at @loopN, never hoisted — the
+-- surface `SWhile`'s cond is an ordinary expression lowered into that block.
+
+
+lowerLoop : { cond : Exp, body : Exp } -> Int -> S -> Result String S
+lowerLoop block dest s =
+    let
+        ( topLbl, s1 ) =
+            freshLbl "loop" s
+
+        ( exitLbl, s2 ) =
+            freshLbl "loopexit" s1
+
+        ( bodyLbl, s3 ) =
+            freshLbl "loopbody" s2
+
+        -- enter the loop: close the preceding block into the entry block, then
+        -- start the CONDITION there (the back edge re-enters this same label)
+        sEnter =
+            startBlock topLbl (jumpTo topLbl s3)
+
+        frame =
+            { top = topLbl, exit = exitLbl }
+
+        -- the body, then the back edge, then the exit block; `dest` receives a
+        -- valid nil Value (the loop's own value — a dead binder in every
+        -- surface use, but a frame slot is a scanned 40-byte Value and must
+        -- never hold garbage)
+        lowerBody st0 =
+            let
+                ( bodySlot, st1 ) =
+                    freshSlot st0
+
+                stBody =
+                    startBlock bodyLbl { st1 | loops = frame :: st1.loops }
+            in
+            lowerVal block.body bodySlot stBody
+                |> Result.map
+                    (\st2 ->
+                        storeNil dest
+                            (startBlock exitLbl (jumpTo topLbl { st2 | loops = st0.loops }))
+                    )
+    in
+    case condTest block.cond sEnter of
+        WordTest ->
+            rawWordArg block.cond sEnter
+                |> Result.andThen (\( w, st ) -> Ok (closeBlock (Jnz w bodyLbl exitLbl) st))
+                |> Result.andThen (\st -> lowerBody st)
+
+        ValTest ->
+            let
+                ( cslot, s4 ) =
+                    freshSlot sEnter
+
+                ( tagT, s5 ) =
+                    freshTmp s4
+
+                ( isbT, s6 ) =
+                    freshTmp s5
+
+                ( pldT, s7 ) =
+                    freshTmp s6
+
+                ( p8T, s8 ) =
+                    freshTmp s7
+
+                ( iszT, s9 ) =
+                    freshTmp s8
+
+                ( jfT, s10 ) =
+                    freshTmp s9
+            in
+            lowerVal block.cond cslot (startBlock topLbl (jumpTo topLbl s10))
+                |> Result.map
+                    (\st ->
+                        emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp cslot))) st
+                            |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con tagBoolean))
+                            |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp cslot)) (Il.Con 8))
+                            |> emit (Load (Just pldT) W LoadW (Il.Tmp p8T))
+                            |> emit (Cmp (Just iszT) W Ceq (Il.Tmp pldT) (Il.Con 0))
+                            |> emit (Bin (Just jfT) W And (Il.Tmp isbT) (Il.Tmp iszT))
+                            -- the VM's jmpf test: `jfT` is 1 for a FALSY value,
+                            -- so a nonzero test EXITS the loop
+                            |> closeBlock (Jnz (Il.Tmp jfT) exitLbl bodyLbl)
+                    )
+                |> Result.andThen (\st -> lowerBody st)
+
+
+{-| A `break`/`continue` LEAF: close the current block with the jump and then
+PARK a fresh, unreachable block.  The park is what makes a leaf usable in a
+VALUE position at all — every value-position caller (`lowerIfBranches`, the
+`Let` binder arm, `lowerTail`) closes ITS block with a jump after lowering a
+subexpression, and without a fresh label that second close would emit a
+duplicate block label (invalid QBE).  Nothing ever enters the parked block.
+-}
+lowerLoopLeaf : String -> S -> Result String S
+lowerLoopLeaf which s =
+    case s.loops of
+        [] ->
+            Err "qbe: a break/continue leaf outside any loop — the surface checker must reject this first"
+
+        frame :: _ ->
+            let
+                target =
+                    if which == "top" then
+                        frame.top
+
+                    else
+                        frame.exit
+
+                ( parked, s1 ) =
+                    freshLbl "loopdead" s
+            in
+            Ok (startBlock parked (closeBlock (Jmp target) s1))
 
 
 -- ============================ SHORT-CIRCUIT BOOLEANS ============================
@@ -7776,6 +7990,15 @@ fvExp exp =
 
         NotEqual block ->
             setsUnion (List.map fvExp [ block.left, block.right ])
+
+        Loop block ->
+            setsUnion (List.map fvExp [ block.cond, block.body ])
+
+        Break ->
+            Ok Set.empty
+
+        Continue ->
+            Ok Set.empty
 
         Case branch ->
             let

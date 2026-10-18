@@ -163,6 +163,17 @@ auditExp exp =
         NotEqual block ->
             auditExps [ block.left, block.right ]
 
+        Loop block ->
+            -- (B4) the loop family is surface-lowered code, never an Unsafe
+            -- node: it is audited like any other tree structure.
+            auditExps [ block.cond, block.body ]
+
+        Break ->
+            Ok ()
+
+        Continue ->
+            Ok ()
+
         Unsafe node ->
             Err (describe node)
 
@@ -278,6 +289,9 @@ describe node =
 
         RawCStr _ ->
             "rawCStr (static C-string address)"
+
+        RawAllocN _ ->
+            "raw stack alloc"
 
         RawSym _ ->
             "rawSym (function symbol address)"

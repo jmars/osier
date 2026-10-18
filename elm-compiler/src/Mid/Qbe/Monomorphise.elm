@@ -1036,6 +1036,16 @@ rw pass ctx acc exp =
         NotEqual block ->
             rw2 pass ctx acc block.left block.right (\l r -> NotEqual { block | left = l, right = r })
 
+        Loop block ->
+            -- (B4) Break/Continue are leaves — no binder, nothing to rewrite.
+            rw2 pass ctx acc block.cond block.body (\c b -> Loop { cond = c, body = b })
+
+        Break ->
+            ( Break, acc )
+
+        Continue ->
+            ( Continue, acc )
+
         Unsafe node ->
             -- (`<<` is not in the subset this tree compiles ITSELF with:
             -- `tools/qbe-bootstrap.sh --freeze` rejected the composition form,
@@ -1258,6 +1268,15 @@ childrenOf exp =
         NotEqual block ->
             [ block.left, block.right ]
 
+        Loop block ->
+            [ block.cond, block.body ]
+
+        Break ->
+            []
+
+        Continue ->
+            []
+
         Unsafe node ->
             unsafeChildren node
 
@@ -1362,6 +1381,9 @@ unsafeChildren node =
             []
 
         RawSym _ ->
+            []
+
+        RawAllocN _ ->
             []
 
 
