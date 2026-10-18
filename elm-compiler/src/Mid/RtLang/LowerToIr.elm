@@ -1,5 +1,6 @@
 module Mid.RtLang.LowerToIr exposing
-    ( lowerProgram
+    ( lowerModule
+    , lowerProgram
     )
 
 {-| Mid.RtLang.LowerToIr — the surface language's LOWERER (tier-2 plan,
@@ -95,8 +96,10 @@ MEASURED in the selfhost's merged table are used (`List.reverse`,
 `List.length`, `String.fromInt`, `String.startsWith`, `++`).
 
 BACKEND-NEUTRAL (the `Mid.Rt` contract): imports are `Dict`, `Mid.Ir`,
-`Mid.RtLang.Ast` and `Mid.RtLayout` (the tag constants — the same single
-source of truth RtPrims/RtGc read).  No QBE type appears here.
+`Mid.RtLang.Ast`, `Mid.RtLang.Check` (only the layout TABLE readers —
+`fieldOffset`/`sizeofStruct`, the one-table property) and `Mid.RtLayout` (the
+tag constants — the same single source of truth RtPrims/RtGc read).  No QBE
+type appears here.
 
 NOT WIRED YET: nothing outside `TestMain` imports this module — T7 splices
 `lowerProgram`'s output into `Mid.Rt.program`.  The corpus hash is the
@@ -112,16 +115,22 @@ import Mid.RtLang.Ast
         ( AggShape(..)
         , Builtin(..)
         , Block
+        , Decl(..)
+        , Field
         , FltBinOp(..)
         , FltCmpOp(..)
+        , Module
+        , PTy(..)
         , Param
         , Program
         , Stmt(..)
         , Term(..)
+        , Type(..)
         , WordBinOp(..)
         , WordCmpOp(..)
         , builtinName
         )
+import Mid.RtLang.Check as Check
 import Mid.RtLayout as RtLayout
 
 
@@ -140,6 +149,8 @@ type alias St =
     , nextId : Int
     , nextLbl : Int
     , scope : Dict String Int
+    , types : Dict String Ast.Type
+    , decls : List Decl
     }
 
 
@@ -175,34 +186,48 @@ mkNilExp =
 
 {-| Lower a checked program to Mid defuns, preserving input order and keys
 (guarded variants of one key lower as separate defuns — selecting the ONE
-active variant per flag set is the wiring's job, T7).
+active variant per flag set is the wiring's job, T7).  The headerless
+delegate: no file-scoped decls, so the field/index/deref arms have no
+struct table to read (they can only fire on a structless program — the
+runtime lane, which uses none of the A2 spellings yet).
 -}
 lowerProgram : Program -> Result String (List Defun)
 lowerProgram program =
-    lowerAll [] program
+    lowerAll [] [] program
 
 
-lowerAll : List Defun -> Program -> Result String (List Defun)
-lowerAll acc program =
+{-| Lower a whole MODULE — the decl-carrying entry the user lane and the
+tree-equality pin use.  `decls` ride in the lowering state so the
+field/index arms read the SAME struct table the A1 checker laid out from
+(`Check.fieldOffset`/`Check.sizeofStruct` — the one-table property: no
+second copy to skew).
+-}
+lowerModule : Module -> Result String (List Defun)
+lowerModule module_ =
+    lowerAll module_.decls [] module_.defuns
+
+
+lowerAll : List Decl -> List Defun -> Program -> Result String (List Defun)
+lowerAll decls acc program =
     case program of
         [] ->
             Ok (List.reverse acc)
 
         d :: rest ->
-            case lowerDefun d of
+            case lowerDefun decls d of
                 Err msg ->
                     Err msg
 
                 Ok idef ->
-                    lowerAll (idef :: acc) rest
+                    lowerAll decls (idef :: acc) rest
 
 
 {-| L3's defun shape, identical to the DSL's `lam` (RtPrims.elm:388-393):
 params are binders with ids 1..n in order (the DSL's `p1..p5` convention),
 the body is the block's lowered value.
 -}
-lowerDefun : Ast.Defun -> Result String Defun
-lowerDefun d =
+lowerDefun : List Decl -> Ast.Defun -> Result String Defun
+lowerDefun decls d =
     let
         params =
             paramBinders 1 d.params
@@ -212,6 +237,8 @@ lowerDefun d =
             , nextId = List.length d.params + 1
             , nextLbl = 1
             , scope = paramScope params
+            , types = paramTypes d.params
+            , decls = decls
             }
     in
     case lowerBlock st0 d.body of
@@ -239,6 +266,16 @@ paramBinders i params =
 paramScope : List Binder -> Dict String Int
 paramScope params =
     List.foldl (\p acc -> Dict.insert p.name p.id acc) Dict.empty params
+
+
+{-| The parameter binder's DECLARED class, name -> type — the lowerer's own
+scope for resolving a pointer base's pointee family (`*word`/`*val`/`*S`),
+mirroring the checker's `paramScope` (Check.elm).  The lowerer reads only
+this (and the `SBind` insert below); it does not re-derive classes.
+-}
+paramTypes : List Param -> Dict String Ast.Type
+paramTypes params =
+    List.foldl (\p acc -> Dict.insert p.name p.ty acc) Dict.empty params
 
 
 
@@ -270,7 +307,7 @@ binder and wrap the continuation in a 1-binder `Let`; L6 else-nests.
 lowerStmt : St -> Stmt -> (St -> Result String (St, Exp)) -> Result String (St, Exp)
 lowerStmt st stmt cont =
     case stmt of
-        SBind _ name e ->
+        SBind ty name e ->
             case lowerExp st e of
                 Err msg ->
                     Err msg
@@ -281,7 +318,10 @@ lowerStmt st stmt cont =
                             fresh name st1
 
                         st3 =
-                            { st2 | scope = Dict.insert name binder.id st2.scope }
+                            { st2
+                                | scope = Dict.insert name binder.id st2.scope
+                                , types = Dict.insert name ty st2.types
+                            }
                     in
                     case cont st3 of
                         Err msg ->
@@ -420,11 +460,112 @@ lowerStmt st stmt cont =
                                 "a mid-block if with both branches falling through reached the lowerer — Check J7 must reject it first"
                             )
 
-        SFieldStore _ _ _ ->
-            Err (internal st "field store (`p->f = e;`)" "is parsed but not lowered yet — U3 maps it onto RawWordStore/RawVecStore with the field offset")
+        SFieldStore p f e ->
+            -- A2: `p->f = e;` — a dead-binder Let of the field's store node
+            -- (the EXACT `wstore(p, off, e);` / `vecstore(p, off, e);` tree,
+            -- plan §3).  The value lowers FIRST (state threading), then the
+            -- dead binder binds the effect and the continuation continues.
+            case resolvePointee st p of
+                Err msg ->
+                    Err msg
 
-        SIndexStore _ _ _ ->
-            Err (internal st "index store (`p[i] = e;`)" "is parsed but not lowered yet — U3 maps it onto RawWordStore/RawVecStore with the computed index")
+                Ok (PStruct sname) ->
+                    case fieldInfo st sname f of
+                        Err msg ->
+                            Err msg
+
+                        Ok ( off, fty ) ->
+                            case lowerExp st p of
+                                Err msg ->
+                                    Err msg
+
+                                Ok ( st1, p1 ) ->
+                                    case lowerExp st1 e of
+                                        Err msg ->
+                                            Err msg
+
+                                        Ok ( st2, e1 ) ->
+                                            let
+                                                ( dead, st3 ) =
+                                                    fresh "_fieldstore" st2
+                                            in
+                                            case cont st3 of
+                                                Err msg ->
+                                                    Err msg
+
+                                                Ok ( st4, body ) ->
+                                                    Ok
+                                                        ( st4
+                                                        , Let
+                                                            { binders =
+                                                                [ LetBind
+                                                                    { binder = dead
+                                                                    , value = fieldStore fty p1 off e1
+                                                                    }
+                                                                ]
+                                                            , body = body
+                                                            }
+                                                        )
+
+                Ok pty ->
+                    Err
+                        (internal st "field store (`p->f = e;`)"
+                            ("needs a struct pointer, got *"
+                                ++ ptyStr pty
+                                ++ " — Check J13 must reject it first"
+                            )
+                        )
+
+        SIndexStore p i e ->
+            -- A2: `p[i] = e;` — the same dead-binder Let, index scaled by the
+            -- pointee family (word stride: the index IS the word offset;
+            -- `*S`: the index is a struct element, scaled by sizeof S).
+            case resolvePointee st p of
+                Err msg ->
+                    Err msg
+
+                Ok pty ->
+                    case lowerExp st p of
+                        Err msg ->
+                            Err msg
+
+                        Ok ( st1, p1 ) ->
+                            case lowerExp st1 i of
+                                Err msg ->
+                                    Err msg
+
+                                Ok ( st2, i1 ) ->
+                                    case lowerExp st2 e of
+                                        Err msg ->
+                                            Err msg
+
+                                        Ok ( st3, e1 ) ->
+                                            case indexStore st pty p1 i i1 e1 of
+                                                Err msg ->
+                                                    Err msg
+
+                                                Ok storeNode ->
+                                                    let
+                                                        ( dead, st4 ) =
+                                                            fresh "_indexstore" st3
+                                                    in
+                                                    case cont st4 of
+                                                        Err msg ->
+                                                            Err msg
+
+                                                        Ok ( st5, body ) ->
+                                                            Ok
+                                                                ( st5
+                                                                , Let
+                                                                    { binders =
+                                                                        [ LetBind
+                                                                            { binder = dead
+                                                                            , value = storeNode
+                                                                            }
+                                                                        ]
+                                                                    , body = body
+                                                                    }
+                                                                )
 
 
 {-| L3/L4/L5: the terminator IS the block's value.
@@ -868,14 +1009,77 @@ lowerExp st e =
                         Ok ( st2, body ) ->
                             Ok ( st2, Unsafe (WithRoots { binders = binders, body = body }) )
 
-        Ast.EField _ _ ->
-            Err (internal st "field access (`p->f`)" "is parsed but not lowered yet — U3 maps it onto RawWordLoad/RawVecLoad with the field offset")
+        Ast.EField p f ->
+            -- A2: `p->f` IS the `wload(p, off)` spelling (plan §3 — the
+            -- one-node property the whole arc is cheap on).  A word/pointer
+            -- field -> `RawWordLoad { ptr = p, index = Lit off }`; a `val`
+            -- field -> `RawVecLoad { vec = p, index = Lit off }` (the 5-word
+            -- `vecload` contract — the field offset is a word offset, so the
+            -- backend's `elemAddr` lands on `p + 40*off`, exactly the inline
+            -- val slot).
+            case resolvePointee st p of
+                Err msg ->
+                    Err msg
 
-        Ast.EIndex _ _ ->
-            Err (internal st "index access (`p[i]`)" "is parsed but not lowered yet — U3 maps it onto RawWordLoad/RawVecLoad with the computed index")
+                Ok (PStruct sname) ->
+                    case fieldInfo st sname f of
+                        Err msg ->
+                            Err msg
 
-        Ast.EDeref _ ->
-            Err (internal st "deref (`*p`)" "is parsed but not lowered yet — U3 maps it onto RawWordLoad with index 0")
+                        Ok ( off, fty ) ->
+                            case lowerExp st p of
+                                Err msg ->
+                                    Err msg
+
+                                Ok ( st1, p1 ) ->
+                                    Ok ( st1, fieldLoad fty p1 off )
+
+                Ok pty ->
+                    Err
+                        (internal st "field access (`p->f`)"
+                            ("needs a struct pointer, got *"
+                                ++ ptyStr pty
+                                ++ " — Check J13 must reject it first"
+                            )
+                        )
+
+        Ast.EIndex p i ->
+            -- A2: `p[i]` — the index scaled by the pointee family.  `*word`:
+            -- the index IS the word offset (`wload`'s contract).  `*val`:
+            -- `vecload`.  `*S`: the index is a STRUCT ELEMENT, so the word
+            -- offset is `i * sizeof S` (folded to `Lit (k*sizeofS)` for a
+            -- literal index).
+            case resolvePointee st p of
+                Err msg ->
+                    Err msg
+
+                Ok pty ->
+                    case lowerExp st p of
+                        Err msg ->
+                            Err msg
+
+                        Ok ( st1, p1 ) ->
+                            case lowerExp st1 i of
+                                Err msg ->
+                                    Err msg
+
+                                Ok ( st2, i1 ) ->
+                                    case indexLoad st pty p1 i i1 of
+                                        Err msg ->
+                                            Err msg
+
+                                        Ok loadNode ->
+                                            Ok ( st2, loadNode )
+
+        Ast.EDeref p ->
+            -- A2: `*p` is `*word` only (J13) -> `RawWordLoad { ptr = p,
+            -- index = Lit 0 }` — `wload(p, 0)`.
+            case lowerExp st p of
+                Err msg ->
+                    Err msg
+
+                Ok ( st1, p1 ) ->
+                    Ok ( st1, Unsafe (RawWordLoad { ptr = p1, index = Lit (LNumber 0) }) )
 
 
 {-| The four operator families lower constructor-by-constructor onto the
@@ -1362,6 +1566,255 @@ fltCmpOp op =
 
         FNe ->
             RFNe
+
+
+
+-- ============================ A2: field/index/deref lowering ============================
+
+
+{-| Resolve a pointer-typed expression's POINTEE family — the lowerer's own
+read of the ONE table the A1 checker laid out.  Handles the forms that can
+PRODUCE a pointer: a binder whose declared type is `*T` (the type scope the
+lowerer threads beside the binder ids), a pointer FIELD via its struct table,
+and a pointer-valued `?:` join whose branches agree (J1).  Anything else is a
+LOUD internal error: the checker admitted a pointer here (J13 resolved `p`),
+so an unresolvable base is a lowering gap named, never a silent guess.
+-}
+resolvePointee : St -> Ast.Exp -> Result String PTy
+resolvePointee st e =
+    case e of
+        Ast.EVar name ->
+            case Dict.get name st.types of
+                Just (TPtr pty) ->
+                    Ok pty
+
+                Just ty ->
+                    Err
+                        (internal st ("field/index base '" ++ name ++ "'")
+                            ("is " ++ typeStrOf ty ++ ", not a pointer — Check J13 must reject it first")
+                        )
+
+                Nothing ->
+                    Err (internal st ("field/index base '" ++ name ++ "'") "is unbound at the lowerer — Check J5 must reject it first")
+
+        Ast.EField base f ->
+            case resolvePointee st base of
+                Err msg ->
+                    Err msg
+
+                Ok (PStruct sname) ->
+                    case fieldTyIn st.decls sname f of
+                        Just (TPtr pty) ->
+                            Ok pty
+
+                        Just ty ->
+                            Err
+                                (internal st ("field '" ++ sname ++ "." ++ f ++ "'")
+                                    ("is " ++ typeStrOf ty ++ ", not a pointer — Check J13 must reject it first")
+                                )
+
+                        Nothing ->
+                            Err
+                                (internal st ("field '" ++ sname ++ "." ++ f ++ "'")
+                                    "is not in the struct table — Check J13 must reject it first"
+                                )
+
+                Ok pty ->
+                    Err
+                        (internal st "field access"
+                            ("needs a struct pointer, got *" ++ ptyStr pty ++ " — Check J13 must reject it first")
+                        )
+
+        Ast.EIf _ a _ ->
+            -- the branches agree (J1), so the then-branch's pointee is the
+            -- join's.
+            resolvePointee st a
+
+        _ ->
+            Err
+                (internal st "a field/index base"
+                    "is a pointer-typed expression form the lowerer cannot resolve (a pointer-returning call / block-if join) — a lowering gap, not a checker reject"
+                )
+
+
+{-| A struct field's word offset and its declared type, from the SAME table
+the checker built (`Check.fieldOffset` — the one-table property).  `Nothing`
+here is a lowerer/checker drift, loud, never a guessed offset.
+-}
+fieldInfo : St -> String -> String -> Result String ( Int, Type )
+fieldInfo st sname fname =
+    case Check.fieldOffset st.decls sname fname of
+        Just off ->
+            case fieldTyIn st.decls sname fname of
+                Just fty ->
+                    Ok ( off, fty )
+
+                Nothing ->
+                    Err
+                        (internal st ("field '" ++ sname ++ "." ++ fname ++ "'")
+                            "is not in the struct table — Check J13 must reject it first"
+                        )
+
+        Nothing ->
+            Err
+                (internal st ("field '" ++ sname ++ "." ++ fname ++ "'")
+                    "is not in the struct table — Check J13 must reject it first"
+                )
+
+
+{-| A struct field's DECLARED type, structurally — a pure read of the decl
+(the same `.ty` the checker's layout and class rules read).  This is NOT
+layout logic: the offset/size arithmetic lives in `Check`, this only
+discriminates word/pointer vs `val` for the node shape.
+-}
+fieldTyIn : List Decl -> String -> String -> Maybe Type
+fieldTyIn decls structName fieldName =
+    case decls of
+        [] ->
+            Nothing
+
+        d :: rest ->
+            case d of
+                StructDecl s ->
+                    if s.name == structName then
+                        fieldTyInFields s.fields fieldName
+
+                    else
+                        fieldTyIn rest structName fieldName
+
+                EnumDecl _ ->
+                    fieldTyIn rest structName fieldName
+
+
+fieldTyInFields : List Field -> String -> Maybe Type
+fieldTyInFields fields name =
+    case fields of
+        [] ->
+            Nothing
+
+        f :: rest ->
+            if f.name == name then
+                Just f.ty
+
+            else
+                fieldTyInFields rest name
+
+
+{-| The field READ node: `val` -> `RawVecLoad`, everything else (word/pointer
+— the checker rejects float fields, J11) -> `RawWordLoad`, both at the field's
+word offset.
+-}
+fieldLoad : Type -> Exp -> Int -> Exp
+fieldLoad fty p1 off =
+    case fty of
+        TVal ->
+            Unsafe (RawVecLoad { vec = p1, index = Lit (LNumber off) })
+
+        _ ->
+            Unsafe (RawWordLoad { ptr = p1, index = Lit (LNumber off) })
+
+
+{-| The field STORE node, matching `fieldLoad`'s shape.
+-}
+fieldStore : Type -> Exp -> Int -> Exp -> Exp
+fieldStore fty p1 off e1 =
+    case fty of
+        TVal ->
+            Unsafe (RawVecStore { vec = p1, index = Lit (LNumber off), value = e1 })
+
+        _ ->
+            Unsafe (RawWordStore { ptr = p1, index = Lit (LNumber off), value = e1 })
+
+
+{-| The index READ node, scaled by the pointee family: `*word` -> `wload`'s
+word-offset index; `*val` -> `vecload`; `*S` -> the index scaled by
+`sizeof S` (a word multiply, folded to a literal for a literal index).
+-}
+indexLoad : St -> PTy -> Exp -> Ast.Exp -> Exp -> Result String Exp
+indexLoad st pty p1 astI i1 =
+    case pty of
+        PWord ->
+            Ok (Unsafe (RawWordLoad { ptr = p1, index = i1 }))
+
+        PVal ->
+            Ok (Unsafe (RawVecLoad { vec = p1, index = i1 }))
+
+        PStruct sname ->
+            case Check.sizeofStruct st.decls sname of
+                Just size ->
+                    Ok (Unsafe (RawWordLoad { ptr = p1, index = scaledIndex astI i1 size }))
+
+                Nothing ->
+                    Err
+                        (internal st ("index access on '*" ++ sname ++ "'")
+                            "has no struct in the table — Check J11 must reject it first"
+                        )
+
+
+{-| The index STORE node, matching `indexLoad`'s shape.
+-}
+indexStore : St -> PTy -> Exp -> Ast.Exp -> Exp -> Exp -> Result String Exp
+indexStore st pty p1 astI i1 e1 =
+    case pty of
+        PWord ->
+            Ok (Unsafe (RawWordStore { ptr = p1, index = i1, value = e1 }))
+
+        PVal ->
+            Ok (Unsafe (RawVecStore { vec = p1, index = i1, value = e1 }))
+
+        PStruct sname ->
+            case Check.sizeofStruct st.decls sname of
+                Just size ->
+                    Ok (Unsafe (RawWordStore { ptr = p1, index = scaledIndex astI i1 size, value = e1 }))
+
+                Nothing ->
+                    Err
+                        (internal st ("index store on '*" ++ sname ++ "'")
+                            "has no struct in the table — Check J11 must reject it first"
+                        )
+
+
+{-| The `*S` index scale: the index is a STRUCT ELEMENT, so the word offset
+is `i * sizeof S`.  A literal index folds to `Lit (k*sizeofS)` (the plan §3
+fold); a computed index lowers to `RawBin { op = RMul, a = i, b = Lit size }`.
+-}
+scaledIndex : Ast.Exp -> Exp -> Int -> Exp
+scaledIndex astI i1 size =
+    case astI of
+        Ast.EInt k ->
+            Lit (LNumber (k * size))
+
+        _ ->
+            Unsafe (RawBin { op = RMul, a = i1, b = Lit (LNumber size) })
+
+
+ptyStr : PTy -> String
+ptyStr pty =
+    case pty of
+        PStruct sname ->
+            sname
+
+        PWord ->
+            "word"
+
+        PVal ->
+            "val"
+
+
+typeStrOf : Type -> String
+typeStrOf ty =
+    case ty of
+        TWord ->
+            "word"
+
+        TFloat ->
+            "float"
+
+        TVal ->
+            "val"
+
+        TPtr pty ->
+            "*" ++ ptyStr pty
 
 
 

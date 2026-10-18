@@ -1,6 +1,7 @@
 module Mid.Rt
     exposing
         ( Impl
+        , ParsedUserModule
         , Runtime
         , UserModule
         , checkLowerUserModule
@@ -312,16 +313,31 @@ type alias UserModule =
     }
 
 
+{-| A PARSED (not yet checked/lowered) user `.mid`: the namespace-qualified
+name, the export block, the file-scoped `struct`/`enum` decls, and the defun
+AST.  A RECORD rather than a tuple (A2: Elm caps tuples at 3) so the DECLS
+ride through — before A2 the parse result was a `(name, exports, ast)`
+3-tuple that silently DROPPED `module_.decls`, so a user `.mid` carrying a
+`struct` declaration parsed it into nothing before the checker.
+-}
+type alias ParsedUserModule =
+    { name : String
+    , exports : List RtAst.Export
+    , decls : List RtAst.Decl
+    , ast : RtAst.Program
+    }
+
+
 {-| Parse a USER `.mid` module and enforce the NAMESPACE RULE (the module
 NAME from the header qualifies every key): a user module must carry a
 `module Name` header, and every defun/export key must be spelled
 `Name.<fn>`.  The `Rt.*`-only shape check lives in `Check.keyCheck`
 (generalized M3); THIS is the ownership half — the prefix must be the
 module's OWN name, so two modules can never silently share a key through
-a typo'd prefix.  Returns the parsed name/exports/ast for the caller to
+a typo'd prefix.  Returns the parsed name/exports/DECLS/ast for the caller to
 build the cross-module extern table before the check+lower pass.
 -}
-parseUserModule : String -> Result String ( String, List RtAst.Export, RtAst.Program )
+parseUserModule : String -> Result String ParsedUserModule
 parseUserModule source =
     case Mid.RtLang.Parse.parseModule source of
         Err msg ->
@@ -343,12 +359,25 @@ parseUserModule source =
                                     Err (namespaceError name bad)
 
                                 Nothing ->
-                                    Ok ( name, module_.header.exports, module_.defuns )
+                                    -- A2: the file-scoped `struct`/`enum`
+                                    -- decls ride out WITH the name/exports/ast
+                                    -- — the user lane used to drop them here, so
+                                    -- a user `.mid` that declared a struct
+                                    -- parsed it into nothing before the checker.
+                                    Ok
+                                        { name = name
+                                        , exports = module_.header.exports
+                                        , decls = module_.decls
+                                        , ast = module_.defuns
+                                        }
 
 
 {-| Check + lower a PARSED user module against the given extern table — the
-SAME pipeline as `runtime.mid` (`Check.checkExports` -> `Check.checkProgram`
--> `LowerToIr.lowerProgram`), with the runtime's own `surf` path.  `externs`
+SAME decl-carrying pipeline as `runtime.mid` (`Check.checkExports` ->
+`Check.checkModule` -> `LowerToIr.lowerModule`; A2 fixed this — the user lane
+used to call the DECL-LESS `checkProgram`/`lowerProgram`, so a user `.mid`
+carrying `struct`/`enum` declarations had them dropped), with the runtime's
+own `surf` path.  `externs`
 is the typed extern table the module's `call` sites resolve against: the
 caller (QbeModule) supplies the runtime's EXPORTED keys (`exportedTypes` — the
 M3fix privacy boundary) UNION every group user module's exports, so a user
@@ -356,19 +385,28 @@ module may `call Rt.<exported>` or another user module's exported defun at the
 CHECKER (J2).  Flags are `[]`: user modules carry no `@flag` guards (those are
 the runtime's internal switches).
 -}
-checkLowerUserModule : Dict String RtAst.ExportSig -> ( String, List RtAst.Export, RtAst.Program ) -> Result String UserModule
-checkLowerUserModule externs ( name, exports, ast ) =
+checkLowerUserModule : Dict String RtAst.ExportSig -> ParsedUserModule -> Result String UserModule
+checkLowerUserModule externs parsed =
     let
         arities =
-            Dict.fromList (List.map (\d -> ( d.key, List.length d.params )) ast)
+            Dict.fromList (List.map (\d -> ( d.key, List.length d.params )) parsed.ast)
+
+        -- A2: a decl-carrying MODULE record — the SAME `Check.checkModule`
+        -- the runtime lane uses, so a user `.mid`'s struct/enum decls reach
+        -- the checker (J11/J14) and the lowerer (the field/index table).
+        module_ =
+            { header = { name = Just parsed.name, exports = parsed.exports }
+            , decls = parsed.decls
+            , defuns = parsed.ast
+            }
     in
-    RtCheck.checkExports exports arities
-        |> Result.andThen (\_ -> RtCheck.checkProgram externs [] ast)
-        |> Result.andThen (\_ -> Mid.RtLang.LowerToIr.lowerProgram ast)
+    RtCheck.checkExports parsed.exports arities
+        |> Result.andThen (\_ -> RtCheck.checkModule externs [] module_)
+        |> Result.andThen (\_ -> Mid.RtLang.LowerToIr.lowerModule module_)
         |> Result.map
             (\defuns ->
-                { name = name
-                , exports = exports
+                { name = parsed.name
+                , exports = parsed.exports
                 , defuns = defuns
                 }
             )

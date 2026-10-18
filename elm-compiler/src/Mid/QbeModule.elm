@@ -266,7 +266,7 @@ loadUserMids rt sources =
                 userExterns =
                     Dict.fromList
                         (List.concatMap
-                            (\( _, exports, _ ) -> List.map (\e -> ( e.key, e.sig )) exports)
+                            (\m -> List.map (\e -> ( e.key, e.sig )) m.exports)
                             parsed
                         )
 

@@ -3151,6 +3151,162 @@ checks rt =
     , check "A1 layout: a val field is 5 words inline (one val field sizes the struct at 5)"
         (Check.sizeofStruct (declsOf "struct V { v : val; }") "V" == Just 5)
 
+    -- ==================== A2: the lowering (field/index/deref arms) ====================
+    -- THE TREE-EQUALITY PIN is this unit's strongest oracle (plan §3, risk R1).
+    -- A field access IS its `wload` spelling: the defun written with `p->f` and
+    -- the SAME defun written with `wload(p, k)` lower to the SAME Mid.Ir tree,
+    -- node for node (canon-normalized — binder ids renumbered in first-appearance
+    -- order, names/labels zeroed, the F1 facts).  This is the pin that would have
+    -- caught the word-cond mis-lowering class (handoff-perf-a3-review): a
+    -- checker-accepted form silently lowering to a DIFFERENT tree shows HERE as an
+    -- inequality, not as wrong emitted bytes found later.  Proven ASYMMETRIC: a
+    -- one-word offset mutation in the lowering makes the first row FAIL (a
+    -- scratch-mutated LowerToIr, rebuilt, observed; see handoff-midlang-a2-result).
+    , check "A2 PIN field access IS its wload spelling: `p->g` (field at word offset 1) lowers canon-EQUAL to `wload(p, 1)` — NODE FOR NODE"
+        (case
+            ( lowlModuleBody "struct S { f : word; g : word; }\ndefun Rt.a(p: *S) -> word {\n  return p->g;\n}"
+            , lowlBody "defun Rt.a(p: *word) -> word {\n  return wload(p, 1);\n}"
+            )
+         of
+            ( Ok fieldBody, Ok wloadBody ) ->
+                canon fieldBody == canon wloadBody
+
+            _ ->
+                False
+        )
+    , check "A2 PIN offset zero: `p->f` (first field) ≡ `wload(p, 0)` — the same node, offset zero included"
+        (case
+            ( lowlModuleBody "struct S { f : word; }\ndefun Rt.a(p: *S) -> word {\n  return p->f;\n}"
+            , lowlBody "defun Rt.a(p: *word) -> word {\n  return wload(p, 0);\n}"
+            )
+         of
+            ( Ok f, Ok w ) ->
+                canon f == canon w
+
+            _ ->
+                False
+        )
+    , check "A2 PIN val field: `p->vf` ≡ `vecload(p, 0)` — a val field is the 5-word Blit shape, NOT a word load (the per-field-type pin: a val field misread as a word is caught here)"
+        (case
+            ( lowlModuleBody "struct S { vf : val; }\ndefun Rt.a(p: *S) -> val {\n  return p->vf;\n}"
+            , lowlBody "defun Rt.a(p: *val) -> val {\n  return vecload(p, 0);\n}"
+            )
+         of
+            ( Ok f, Ok v ) ->
+                canon f == canon v
+
+            _ ->
+                False
+        )
+    , check "A2 PIN field store: `p->g = 7;` ≡ `wstore(p, 1, 7);` — a dead-binder Let of the SAME RawWordStore (the wstore spelling)"
+        (case
+            ( lowlModuleBody "struct S { f : word; g : word; }\ndefun Rt.a(p: *S) -> word {\n  p->g = 7;\n  return 0;\n}"
+            , lowlBody "defun Rt.a(p: *word) -> word {\n  wstore(p, 1, 7);\n  return 0;\n}"
+            )
+         of
+            ( Ok f, Ok w ) ->
+                canon f == canon w
+
+            _ ->
+                False
+        )
+    , check "A2 PIN val field store: `p->vf = v;` ≡ `vecstore(p, 0, v);`"
+        (case
+            ( lowlModuleBody "struct S { vf : val; }\ndefun Rt.a(p: *S, v: val) -> val {\n  p->vf = v;\n  return v;\n}"
+            , lowlBody "defun Rt.a(p: *val, v: val) -> val {\n  vecstore(p, 0, v);\n  return v;\n}"
+            )
+         of
+            ( Ok f, Ok w ) ->
+                canon f == canon w
+
+            _ ->
+                False
+        )
+    , check "A2 PIN index in `*word`: `p[i]` ≡ `wload(p, i)` — the index IS the word offset"
+        (case
+            ( lowlModuleBody "defun Rt.a(p: *word, i: word) -> word {\n  return p[i];\n}"
+            , lowlBody "defun Rt.a(p: *word, i: word) -> word {\n  return wload(p, i);\n}"
+            )
+         of
+            ( Ok f, Ok w ) ->
+                canon f == canon w
+
+            _ ->
+                False
+        )
+    , check "A2 PIN index in `*val`: `p[i]` ≡ `vecload(p, i)` — the value-element stride"
+        (case
+            ( lowlModuleBody "defun Rt.a(p: *val, i: word) -> val {\n  return p[i];\n}"
+            , lowlBody "defun Rt.a(p: *val, i: word) -> val {\n  return vecload(p, i);\n}"
+            )
+         of
+            ( Ok f, Ok v ) ->
+                canon f == canon v
+
+            _ ->
+                False
+        )
+    , check "A2 PIN index in `*S` (literal): `p[1]` ≡ `wload(p, 2)` — the index scaled by sizeof S=2, folded to the literal"
+        (case
+            ( lowlModuleBody "struct S { f : word; g : word; }\ndefun Rt.a(p: *S) -> word {\n  return p[1];\n}"
+            , lowlBody "defun Rt.a(p: *word) -> word {\n  return wload(p, 2);\n}"
+            )
+         of
+            ( Ok f, Ok w ) ->
+                canon f == canon w
+
+            _ ->
+                False
+        )
+    , check "A2 PIN index in `*S` (computed): `p[i]` lowers to `RawWordLoad{p, i * 2}` (the RMul scale, not a mis-scaled literal)"
+        (case lowlModuleBody "struct S { f : word; g : word; }\ndefun Rt.a(p: *S, i: word) -> word {\n  return p[i];\n}" of
+            Ok body ->
+                canon body == canon (Unsafe (RawWordLoad { ptr = ltv 1, index = limul (ltv 2) (ltn 2) }))
+
+            Err _ ->
+                False
+        )
+    , check "A2 PIN index store in `*S`: `p[1] = 9;` ≡ `wstore(p, 2, 9);` — the store scaled the same way"
+        (case
+            ( lowlModuleBody "struct S { f : word; g : word; }\ndefun Rt.a(p: *S) -> word {\n  p[1] = 9;\n  return 0;\n}"
+            , lowlBody "defun Rt.a(p: *word) -> word {\n  wstore(p, 2, 9);\n  return 0;\n}"
+            )
+         of
+            ( Ok f, Ok w ) ->
+                canon f == canon w
+
+            _ ->
+                False
+        )
+    , check "A2 PIN deref: `*p` ≡ `wload(p, 0)`"
+        (case
+            ( lowlModuleBody "defun Rt.a(p: *word) -> word {\n  return *p;\n}"
+            , lowlBody "defun Rt.a(p: *word) -> word {\n  return wload(p, 0);\n}"
+            )
+         of
+            ( Ok f, Ok w ) ->
+                canon f == canon w
+
+            _ ->
+                False
+        )
+    , check "A2 PIN chained pointer field: `p->next->x` composes through the struct table (each hop its own offset — the second hop reads Offset 1 of A through the `*A` field at Offset 0)"
+        (case lowlModuleBody "struct A { next : *A; x : word; }\ndefun Rt.a(p: *A) -> word {\n  return p->next->x;\n}" of
+            Ok body ->
+                canon body
+                    == canon
+                        (Unsafe
+                            (RawWordLoad
+                                { ptr = Unsafe (RawWordLoad { ptr = ltv 1, index = ltn 0 })
+                                , index = ltn 1
+                                }
+                            )
+                        )
+
+            Err _ ->
+                False
+        )
+
     -- ==================== M2: the module header + the export block ====================
     , check "M2 header: module name + export block parse, and a headerless module is an EMPTY header (the header is OPTIONAL)"
         ((case Parse.parseModule "module Rt\nexport Rt.f : val -> val\ndefun Rt.f(a: val) -> val { return mknil; }" of
@@ -3313,13 +3469,15 @@ checks rt =
     -- rules defined against the export block's namespace.
     , check "M3 namespace: a well-formed user module parses, and its keys are module-name-qualified defuns"
         (case Rt.parseUserModule ("module UserMid\nexport UserMid.answer : val -> val -> val\ndefun UserMid.answer(a: val, b: val) -> val {\n  return mknum(payload(a, 0) + payload(b, 0));\n}") of
-            Ok ( name, exports, ast ) ->
-                name
+            Ok m ->
+                m.name
                     == "UserMid"
-                    && List.map .key exports
+                    && List.map .key m.exports
                     == [ "UserMid.answer" ]
-                    && List.map .key ast
+                    && List.map .key m.ast
                     == [ "UserMid.answer" ]
+                    && m.decls
+                    == []
 
             Err _ ->
                 False
@@ -3353,6 +3511,68 @@ checks rt =
                     Err _ ->
                         False
         )
+
+    -- A2: THE USER-MODULE DECL GAP (A1's trade-off 3).  `parseUserModule` used
+    -- to return a 3-tuple that silently DROPPED `module_.decls`, so a user .mid
+    -- carrying a `struct` parsed it into nothing before the checker (the runtime
+    -- lane was threaded, the user lane was not).  The record now carries decls,
+    -- and `checkLowerUserModule` threads them into the SAME `Check.checkModule`
+    -- (decl-carrying) + `LowerToIr.lowerModule` the runtime lane uses.  ASYMMETRY:
+    -- before the fix, row 1's `*S` param had no struct table ("names no declared
+    -- struct", Err) and row 3's bad decl was never checked (silently Ok).
+    , check "A2 user decls: a user .mid that declares a STRUCT checks + lowers (the decls the parse used to drop now reach the checker), and its defun reads a field"
+        (case Rt.parseUserModule "module U\nexport U.read : val -> val\nstruct S { f : word; }\ndefun U.read(a: val) -> val {\n  *S p = payload(a, 0);\n  return mknum(p->f);\n}" of
+            Ok parsed ->
+                not (List.isEmpty parsed.decls)
+                    && (case Rt.checkLowerUserModule rt.exportedTypes parsed of
+                            Ok m ->
+                                List.map .key m.defuns == [ "U.read" ]
+
+                            Err _ ->
+                                False
+                       )
+
+            Err _ ->
+                False
+        )
+    , check "A2 user decls: a user module's struct is usable in its OWN defuns — a field READ, a field STORE and a scaled `p[i]`, all through the user lane"
+        (case Rt.parseUserModule "module U\nexport U.rw : val -> val\nstruct S { f : word; g : word; }\ndefun U.rw(a: val) -> val {\n  *S p = payload(a, 0);\n  p->f = p->g + p[1];\n  return mknum(p->f);\n}" of
+            Ok parsed ->
+                case Rt.checkLowerUserModule rt.exportedTypes parsed of
+                    Ok m ->
+                        List.map .key m.defuns == [ "U.rw" ]
+
+                    Err _ ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "A2 user decls: a BAD decl in a user .mid still fails LOUDLY — a float struct field is J11's reject, through the same checkLowerUserModule the user lane uses (before A2 it was dropped and never checked)"
+        (case Rt.parseUserModule "module U\nexport U.f : val -> val\nstruct S { f : float; }\ndefun U.f(a: val) -> val {\n  return mknil;\n}" of
+            Ok parsed ->
+                case Rt.checkLowerUserModule rt.exportedTypes parsed of
+                    Err msg ->
+                        String.contains "float field" msg
+
+                    Ok _ ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "A2 user decls (loadUserMids): the group path threads a struct-declaring .mid through to a lowered defun too (not only checkLowerUserModule)"
+        (case QbeModule.loadUserMids rt [ "module U\nexport U.read : val -> val\nstruct S { f : word; }\ndefun U.read(a: val) -> val {\n  *S p = payload(a, 0);\n  return mknum(p->f);\n}" ] of
+            Ok [ m ] ->
+                List.map .key m.defuns == [ "U.read" ]
+
+            Ok _ ->
+                False
+
+            Err _ ->
+                False
+        )
+
     , check "M3 collision (a): a user key in the Rt.* namespace is a LOUD reject (the reserved compiler-internal namespace)"
         (case QbeModule.userCollisions Dict.empty [ mkUser "X" [ "Rt.foo" ] ] of
             Err msg ->
@@ -6308,6 +6528,38 @@ lowlBody src =
 
         Err e ->
             Err e
+
+
+{-| The A2 driver: parse + Check.checkModule + LowerToIr.lowerModule — a
+DEFUN body out of a decl-carrying MODULE (the tree-equality pin's pipeline:
+the field/index arms need the decls the headerless `lowl` has none of).
+-}
+lowlModuleBody : String -> Result String Exp
+lowlModuleBody src =
+    case Parse.parseModule src of
+        Err e ->
+            Err ("parse: " ++ e)
+
+        Ok module_ ->
+            case Check.checkModule Dict.empty [] module_ of
+                Err e ->
+                    Err e
+
+                Ok () ->
+                    case LowerToIr.lowerModule module_ of
+                        Err e ->
+                            Err e
+
+                        Ok (d :: _) ->
+                            case d.value of
+                                Lam l ->
+                                    Ok l.body
+
+                                _ ->
+                                    Err "lower: defun value is not a Lam"
+
+                        Ok [] ->
+                            Err "lower: no defuns"
 
 
 defunByKey : String -> List Defun -> Maybe Defun
