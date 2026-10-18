@@ -218,7 +218,7 @@ compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals 
                                                                                             refinedVarsByModule =
                                                                                                 Dict.union groupTypes.refinedVars corpusRefinedVars
                                                                                         in
-                                                                                        lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule (corpusUnits ++ groupUnits) (userSurface userModules) (userAbi userModules) entryKey ( consArrRec, eqPtrFast )
+                                                                                        lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule (corpusUnits ++ groupUnits) ( userSurface userModules, userAbi userModules ) entryKey ( consArrRec, eqPtrFast )
                                                                     )
                                                         )
                                             )
@@ -667,12 +667,11 @@ lowerAll :
     -> GroupSchemes
     -> Dict String (List Int)
     -> List MidModule.Unit
-    -> Dict String Defun
-    -> Dict String (List Int)
+    -> ( Dict String Defun, Dict String (List Int) )
     -> String
     -> ( ( Bool, ( Bool, Bool, Bool ) ), Bool )
     -> Result String String
-lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule units userSurf userAbiTable entryKey ( consArrRec, eqPtrFast ) =
+lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule units ( userSurf, userAbiTable ) entryKey ( consArrRec, eqPtrFast ) =
     let
         ( consArr, ( rec, typeSpec, midGc ) ) =
             consArrRec

@@ -8187,18 +8187,6 @@ withPrologue pending =
                 )
                 (List.range 0 (pending.nslots - 1))
 
-        paramBlits =
-            -- rawAbi params are `l` REGISTERS (never blitted into slots —
-            -- the body reads them through `s.rawWord`); every other ABI
-            -- blits the incoming `%a<i>` pointers into their frame slots.
-            if pending.rawAbi then
-                structParamCopies
-
-            else
-                List.map
-                    (\i -> Blit (Il.Tmp ("a" ++ String.fromInt i)) (Il.Tmp (slotTmp (i + 2))) vs)
-                    (List.range 0 (pending.nparams - 1))
-
         -- B6 — THE STRUCT-PARAMETER ENTRY COPY.  A struct VALUE parameter
         -- crosses as `width` consecutive `l` words (the caller passes the
         -- struct's address and its layout is the defun's own signature, so
@@ -8251,6 +8239,18 @@ withPrologue pending =
                         []
                 )
                 (paramBases pending.paramWidths)
+
+        paramBlits =
+            -- rawAbi params are `l` REGISTERS (never blitted into slots —
+            -- the body reads them through `s.rawWord`); every other ABI
+            -- blits the incoming `%a<i>` pointers into their frame slots.
+            if pending.rawAbi then
+                structParamCopies
+
+            else
+                List.map
+                    (\i -> Blit (Il.Tmp ("a" ++ String.fromInt i)) (Il.Tmp (slotTmp (i + 2))) vs)
+                    (List.range 0 (pending.nparams - 1))
 
         capBlitsPro =
             List.concatMap
