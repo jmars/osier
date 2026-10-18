@@ -3304,6 +3304,104 @@ checks rt runtimeMidText =
                 False
         )
 
+    -- ==================== U8: runtime.mid's PROCESS/EXEC scratch blocks (midlang-u8) ====================
+    -- The same pins as U5/U6/U7, for the effect parser's plan-tree nodes and
+    -- the exec runner's state: read runtime.mid's OWN `struct` declarations —
+    -- the ones the `p->f` accesses resolve against — so a reordered, renamed or
+    -- re-padded field fails HERE instead of as a wrong argv pointer or a
+    -- garbage chain.
+    --
+    -- THIS FAMILY IS REACHED THROUGH `val`-BOXED BLOCK ADDRESSES (`mknum(pipeW)`
+    -- and friends), so most of its sites have no binder to retype and the view
+    -- is spelled `[*Pipe](payload(p, 0))->ncmds`.  That spelling needed the
+    -- `[*T]`-base arm in LowerToIr's `resolvePointee` (the cast IS its operand);
+    -- the ACCEPT row below is what pins it, and the corpus is the proof that the
+    -- arm moved no emitted byte of any existing program.
+    , check "U8 LAYOUT PIN: runtime.mid's own `struct Prog` puts every field at the word slot the plan builder used before the re-spelling (nchains 0, chains 1)"
+        (let
+            d =
+                declsOf runtimeMidText
+
+            names =
+                [ "nchains", "chains" ]
+         in
+         List.map (\n -> Check.fieldOffset d "Prog" n) names == List.map Just (List.range 0 1)
+        )
+    , check "U8 LAYOUT PIN: sizeof(Prog) == 2 words = the 16 bytes Rt.epProg mallocs — a field added anywhere moves this and every `nchains` count with it"
+        (Check.sizeofStruct (declsOf runtimeMidText) "Prog" == Just 2)
+    , check "U8 LAYOUT PIN: runtime.mid's own `struct Chain` puts every field at the word slot the chain builder used before the re-spelling (op 0, pipe 1) — and sizeof == 2 words is the 16-byte STRIDE Prog.chains is indexed by"
+        (let
+            d =
+                declsOf runtimeMidText
+
+            names =
+                [ "op", "pipe" ]
+         in
+         List.map (\n -> Check.fieldOffset d "Chain" n) names == List.map Just (List.range 0 1)
+            && Check.sizeofStruct d "Chain"
+            == Just 2
+        )
+    , check "U8 LAYOUT PIN: runtime.mid's own `struct Pipe` puts every field at the word slot the pipeline builder used before the re-spelling (ncmds 0, cmds 1), and sizeof == 2 words is the 16 bytes Rt.epPipeline mallocs"
+        (let
+            d =
+                declsOf runtimeMidText
+
+            names =
+                [ "ncmds", "cmds" ]
+         in
+         List.map (\n -> Check.fieldOffset d "Pipe" n) names == List.map Just (List.range 0 1)
+            && Check.sizeofStruct d "Pipe"
+            == Just 2
+        )
+    , check "U8 LAYOUT PIN: runtime.mid's own `struct Scratch` puts every field at the word slot the plan parser used before the re-spelling (cbuf 0, depth 1, lim 2), and sizeof == 3 words is the 24 bytes Rt.exec-plan mallocs — `lim` is a STAGING field (rewritten before each Rt.epCount), which is why it is a word and not a constant"
+        (let
+            d =
+                declsOf runtimeMidText
+
+            names =
+                [ "cbuf", "depth", "lim" ]
+         in
+         List.map (\n -> Check.fieldOffset d "Scratch" n) names == List.map Just (List.range 0 2)
+            && Check.sizeofStruct d "Scratch"
+            == Just 3
+        )
+    , check "U8 LAYOUT PIN: runtime.mid's own `struct Redir` puts every field at the word slot the redirect builder/reader used before the re-spelling (kind 0, fd 1, path 2, dupfd 3, body 4, tmpfd 5), and sizeof == 6 words is the 48-byte STRIDE the redirect ARRAY is indexed by — the stride is `i * 48` at six malloc/free/lookup sites, so a dropped field here is a walking offset, not a wrong field"
+        (let
+            d =
+                declsOf runtimeMidText
+
+            names =
+                [ "kind", "fd", "path", "dupfd", "body", "tmpfd" ]
+         in
+         List.map (\n -> Check.fieldOffset d "Redir" n) names == List.map Just (List.range 0 5)
+            && Check.sizeofStruct d "Redir"
+            == Just 6
+        )
+    , check "U8 ACCEPT: the `[*S](payload(p, 0))->f` VIEW CAST is node-identical — a `val`-boxed block address read through the cast lowers canon-EQUAL to the `wload(payload(p, 0), k)` spelling (this is the shape LowerToIr's `resolvePointee` gained the cast arm for; without it the checker admitted the form and the lowerer refused it)"
+        (case
+            ( lowlModuleBody "struct Pipe { ncmds : word; cmds : word; }\ndefun Rt.a(p : val) -> word {\n  return [*Pipe](payload(p, 0))->cmds;\n}"
+            , lowlBody "defun Rt.a(p : val) -> word {\n  return wload(payload(p, 0), 1);\n}"
+            )
+         of
+            ( Ok typed, Ok plain ) ->
+                canon typed == canon plain
+
+            _ ->
+                False
+        )
+    , check "U8 ACCEPT: the retyped-binder shape is node-identical too — `*Redir r = arrN + j * 48; r->tmpfd` lowers canon-EQUAL to `word r = arrN + j * 48; wload(r, 5)` (`word -> *T` is J12's source-spelled view: no node), so every `wload(redirN, k)` -> `redirN->f` site keeps its emission"
+        (case
+            ( lowlModuleBody "struct Redir { kind : word; fd : word; path : word; dupfd : word; body : word; tmpfd : word; }\ndefun Rt.a(arrN : word, j : word) -> word {\n  *Redir r = arrN + (j * 48);\n  return r->tmpfd;\n}"
+            , lowlBody "defun Rt.a(arrN : word, j : word) -> word {\n  word r = arrN + (j * 48);\n  return wload(r, 5);\n}"
+            )
+         of
+            ( Ok typed, Ok plain ) ->
+                canon typed == canon plain
+
+            _ ->
+                False
+        )
+
     -- ==================== A2: the lowering (field/index/deref arms) ====================
     -- THE TREE-EQUALITY PIN is this unit's strongest oracle (plan §3, risk R1).
     -- A field access IS its `wload` spelling: the defun written with `p->f` and

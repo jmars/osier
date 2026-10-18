@@ -2737,8 +2737,9 @@ fltCmpOp op =
 {-| Resolve a pointer-typed expression's POINTEE family — the lowerer's own
 read of the ONE table the A1 checker laid out.  Handles the forms that can
 PRODUCE a pointer: a binder whose declared type is `*T` (the type scope the
-lowerer threads beside the binder ids), a pointer FIELD via its struct table,
-and a pointer-valued `?:` join whose branches agree (J1).  Anything else is a
+lowerer threads beside the binder ids), a pointer FIELD via its struct table, a
+pointer-valued `?:` join whose branches agree (J1), and the `[*T](w)` view cast
+(midlang-u8 — it IS its operand, so its pointee is its target).  Anything else is a
 LOUD internal error: the checker admitted a pointer here (J13 resolved `p`),
 so an unresolvable base is a lowering gap named, never a silent guess.
 -}
@@ -2819,10 +2820,22 @@ resolvePointee st e =
             -- join's.
             resolvePointee st a
 
+        Ast.ECast (Ast.TPtr pty) _ ->
+            -- midlang-u8: the `[*T](w)` VIEW CAST is the IDENTITY at lowering
+            -- (`lowerCast`'s pointer arm emits no node — it is J12's
+            -- `word -> *T` row), so the base's pointee IS the cast target.
+            -- This is the spelling a `val`-BOXED block needs — the effect
+            -- parser carries block ADDRESSES in `val`s, so without a binder to
+            -- hold one, `[*CmdState](payload(p, 0))->argv` was the only
+            -- tier-(i) way to name the field, and J13 had already admitted it
+            -- (the cast's operand class is `word`) while the lowerer refused
+            -- it as a gap.
+            Ok pty
+
         _ ->
             Err
                 (internal st "a field/index base"
-                    "is a pointer-typed expression form the lowerer cannot resolve (a pointer-returning call / block-if join) — a lowering gap, not a checker reject"
+                    "is a pointer-typed expression form the lowerer cannot resolve (a pointer-returning call / a pointer-valued block-if join) — a lowering gap, not a checker reject"
                 )
 
 
