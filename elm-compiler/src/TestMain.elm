@@ -79,14 +79,15 @@ checks rt =
       -- load of runtime.mid).  If test-run.js (or run.js) ever stops reading
       -- the file, the flag text is empty, `Rt.load` would parse nothing, and
       -- every `rtProgram`-derived row could pass VACUOUSLY over an empty
-      -- program.  This row pins the full surface program (188 defuns — the
+      -- program.  This row pins the full surface program (189 defuns — the
       -- MEASURED `defun` count of elm-compiler/runtime.mid; 178 + the ten stage-6 B1/B2
-      -- apply + tail defuns, after P1e deleted the frameZero loop), so an empty
-      -- or truncated load turns it RED, loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (188 defuns)"
+      -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
+      -- the frameZero loop), so an empty or truncated load turns it RED,
+      -- loudly, before any vacuous row can.
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (189 defuns)"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 188
+                List.length ast == 189
 
             Err _ ->
                 False
@@ -2107,6 +2108,7 @@ checks rt =
             && not (Set.member "Rt.gcMarkRoots" rt.allocating)
             && not (Set.member "Rt.gcDrain" rt.allocating)
             && not (Set.member "Rt.gcSweep" rt.allocating)
+            && not (Set.member "Rt.gcClearClasses" rt.allocating)
             && not (Set.member "Rt.gcAlloc" rt.allocating)
             && not (Set.member "Rt.gcAllocGo" rt.allocating)
             && not (Set.member "Rt.gcScanValueArray" rt.allocating)
@@ -2143,7 +2145,7 @@ checks rt =
         )
     , check "rt gc seeds: the collector seeds are exactly the two seats plus their transitive closure (stage 6 U2 adds Rt.die + Rt.cStrLenGo through the die arm's RawCall edge)"
         (Rt.gcSeeds
-            == [ "Rt.allocVector", "Rt.gcInit", "Rt.die", "Rt.cStrLenGo", "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.collect", "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkValue", "Rt.gcMarkPtr", "Rt.gcDrain", "Rt.gcSweep", "Rt.allocRaw" ]
+            == [ "Rt.allocVector", "Rt.gcInit", "Rt.die", "Rt.cStrLenGo", "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.collect", "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkValue", "Rt.gcMarkPtr", "Rt.gcDrain", "Rt.gcSweep", "Rt.gcClearClasses", "Rt.allocRaw" ]
         )
     , check "rt con seeds: the Mid ADT constructor and its fill helper"
         (Rt.conSeeds == [ "Rt.con", "Rt.conFill" ]
@@ -4039,6 +4041,7 @@ checks rt =
                       "Rt.exec-plan", "Rt.exec-run", "Rt.execGo", "Rt.f/", "Rt.fillGo", "Rt.floatCopy",
                       "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock",
                       "Rt.gcAlloc", "Rt.gcAllocGo",
+                      "Rt.gcClearClasses",
                       "Rt.gcDrain", "Rt.gcInit", "Rt.gcMarkPtr", "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcScanValueArray", "Rt.gcSweep",
                       "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot", "Rt.globIsDotDot",
                       "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess", "Rt.halt", "Rt.intern",
@@ -4683,6 +4686,7 @@ checks rt =
     , t18SplicedRow rt "Rt.gcScanValueArray"
     , t18SplicedRow rt "Rt.gcDrain"
     , t18SplicedRow rt "Rt.gcSweep"
+    , t18SplicedRow rt "Rt.gcClearClasses"
     , t18SplicedRow rt "Rt.gcMarkPtr"
     , t18SplicedRow rt "Rt.gcMarkValue"
 

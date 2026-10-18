@@ -23,13 +23,34 @@ half under QBE_MIDGC=1, never this module's seats — a seat body is the
 
 THE COLLECTOR'S SHAPE, as it now lives in RtSource (for the reader of this
 header — the surface text is the truth, read it): one mmap'd region lazily
-created by `Rt.gcInit`; a two-word header before every body (flags =
-kind*2 + mark, count); two object kinds (value_array, raw); precise roots
-read through the rt_gc_roots_len/rt_gc_root_kind/rt_gc_root_slot/
-rt_gc_root_np seats; the trigger inside Rt.gcAlloc (threshold collect,
-first-fit free list, bump, exhaustion collect-and-retry); failure is LOUD
-through Rt.die (stage 6 U2: the raw-word die defun — the six messages fold
-into its `rawstr` arguments, replacing the deleted rt_midgc_die seat).
+created by `Rt.gcInit`; a two-word header before every body (word -2 =
+flags = mark + 2*kind + 4*class, word -1 = exact count); two object kinds
+(value_array, raw); precise roots read through the rt_gc_roots_len /
+rt_gc_root_kind / rt_gc_root_slot / rt_gc_root_np seats; the trigger inside
+Rt.gcAlloc (threshold collect, per-class free list pop, bump, exhaustion
+collect-and-retry); failure is LOUD through Rt.die (stage 6 U2: the raw-word
+die defun — the six messages fold into its `rawstr` arguments, replacing the
+deleted rt_midgc_die seat).
+
+SIZE CLASSES (perf-gc1, plan.md stage-4 review finding 3).  The stage-4
+collector kept ONE free list and accepted a block only on EXACT size match
+(`2 + (fcount + 4*fcount*fkind) == total`), so a program that allocated two
+different shapes died `midgc: out of memory` with free memory available.
+This unit replaces it with a two-level size ladder — 8-word granularity for
+blocks up to 4096 words, then 4096-word granularity above — and ONE free
+list per class.  `classOf(total) = (total <= 4096) ? ((total+7)/8)
+: (512 + (total-4096+4095)/4096)`; the physical block size is
+`roundUp(cls) = (cls <= 512) ? (cls*8) : (4096 + (cls-512)*4096)`.  The
+class is PACKED into the flags word (`flags = mark + 2*kind + 4*class`), so
+the header stays two words: the marker reads `kind = (flags>>1)&1` and the
+EXACT `count` (never scans padding), the sweeper reads `class = flags>>2`
+for the physical advance and the return class.  The per-class heads live in
+the region as a zeroed table after the mark stack (region word 1 = the table
+pointer, word 12 = numClasses, both set by Rt.gcInit; Rt.collect zeroes the
+table before each sweep via Rt.gcClearClasses).  THE INVARIANT this encodes:
+a block's stored class must ALWAYS agree with its physical size — the bump
+path rounds too, so the sweeper's `roundUp(class)` advance can never skip
+into the next block.
 FRAME-FREE BY CONSTRUCTION: no collector defun
 contains an allocating node (no RawAllocVector/RawAllocRaw, no LString, no
 WithRoots), so Mid.Rt.allocating leaves every one of them out of the framed
@@ -129,6 +150,7 @@ gcProgram =
     , seat "Rt.gcScanValueArray" 2
     , seat "Rt.gcDrain" 1
     , seat "Rt.gcSweep" 1
+    , seat "Rt.gcClearClasses" 1
     , seat "Rt.gcMarkPtr" 1
     , seat "Rt.gcMarkValue" 1
     ]

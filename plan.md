@@ -253,6 +253,15 @@ in the sound domain; FOUR should-fixes, and the first one corrects a claim this 
 3. **THE FREE LIST IS EXACT-MATCH-ONLY** (`RtGc.elm` `gcAllocGoDefun`): no splitting, no bins, so a
    mixed-size program dies `midgc: out of memory` **with free memory available**. Invisible to every
    current fixture, because they are all uniform 12-word cons arrays.
+   **CLOSED by perf-gc1 (the GC arc, unit 1).** The one exact-match list is now a per-class free list
+   over a two-level size ladder (8-word granularity up to 4096 words, then 4096-word granularity), the
+   class PACKED into the header flags word (`mark + 2*kind + 4*class`; the marker still reads the EXACT
+   `count` so it never scans rounding padding).  The per-class heads are a zeroed table after the mark
+   stack (region word 1 = table pointer, word 12 = numClasses); the bump path rounds too, so a block's
+   stored class always agrees with its physical size.  Probe `tools/qbe/probe-midgc-mixed.sh`:
+   PASS-AFTER 220555350 / FAIL-BEFORE `midgc: out of memory` (67-word churn records vs 72-word live
+   records — different exact sizes, same class 9).  Full battery + re-freeze deferred to the
+   consolidation pass.
 4. **THE 3 UNREGISTERED PROBES LEAVE A REAL HOLE: the per-tag payload-pointer OFFSETS are pinned by
    nothing** (the gate census pins the tag integers and `str.len` only). Today's offsets are correct —
    verified word-by-word against `types.zig:70-88` — but nothing stops drift.

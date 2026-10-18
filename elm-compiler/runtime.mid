@@ -2601,11 +2601,14 @@ defun Rt.gcInit(dummy : val) -> val {
       call Rt.die(rawstr("qbe-rt: midgc: mmap failed"));
       return mknil;
     } else {
-      word heapStart = base + (528 + heapBytes / 8);
       word markEnd = 64 + ((heapBytes / 8) / 8);
+      word classTable = base + markEnd * 8;
+      word maxTotal = heapBytes / 8;
+      word numClasses = 1 + payload((maxTotal <= 4096) ? mknum((maxTotal + 7) / 8) : mknum(512 + (maxTotal - 4096 + 4095) / 4096), 0);
+      word heapStart = classTable + numClasses * 8 + 16;
       wstore(glob, 0, base);
       wstore(base, 0, 331941693251);
-      wstore(base, 1, 0);
+      wstore(base, 1, classTable);
       wstore(base, 2, heapStart);
       wstore(base, 3, heapStart);
       wstore(base, 4, base + regionSize);
@@ -2613,6 +2616,7 @@ defun Rt.gcInit(dummy : val) -> val {
       wstore(base, 6, markEnd);
       wstore(base, 10, heapBytes);
       wstore(base, 11, 0);
+      wstore(base, 12, numClasses);
       return mknum(base);
     }
   }
@@ -2633,9 +2637,10 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
   word countW = payload(count, 0);
   word regionW = payload(region, 0);
   word total = 2 + (countW + 4 * countW * kindW);
+  word cls = payload((total <= 4096) ? mknum((total + 7) / 8) : mknum(512 + (total - 4096 + 4095) / 4096), 0);
+  word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
   word heapBytes = wload(regionW, 10);
   word allocated = wload(regionW, 11);
-  wstore(regionW, 7, total);
   wstore(regionW, 8, kindW);
   wstore(regionW, 9, countW);
   if (mkbool(allocated > heapBytes / 4)) {
@@ -2645,55 +2650,49 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
   } else {
     return mknil;
   }
-  val first = call Rt.gcAllocGo(region, mknum(regionW + 8));
+  val first = call Rt.gcAllocGo(region, mknum(cls));
   word firstW = payload(first, 0);
   if (mkbool(firstW == 0)) {
     word cursor = wload(regionW, 3);
     word heapEnd = wload(regionW, 4);
-    if (mkbool(cursor + total * 8 < heapEnd)) {
-      wstore(cursor, -2, kindW * 2);
+    if (mkbool(cursor + phys * 8 < heapEnd)) {
+      wstore(cursor, -2, kindW * 2 + cls * 4);
       wstore(cursor, -1, countW);
-      wstore(regionW, 3, cursor + total * 8);
-      wstore(regionW, 11, wload(regionW, 11) + total * 8);
+      wstore(regionW, 3, cursor + phys * 8);
+      wstore(regionW, 11, wload(regionW, 11) + phys * 8);
       return mknum(cursor);
     } else {
       call Rt.collect(mknum(0));
       wstore(regionW, 11, 0);
-      val retry = call Rt.gcAllocGo(region, mknum(regionW + 8));
+      val retry = call Rt.gcAllocGo(region, mknum(cls));
       word retryW = payload(retry, 0);
       if (mkbool(retryW == 0)) {
         call Rt.die(rawstr("qbe-rt: midgc: out of memory"));
         return mknil;
       } else {
-        wstore(regionW, 11, wload(regionW, 11) + total * 8);
+        wstore(regionW, 11, wload(regionW, 11) + phys * 8);
         return mknum(retryW);
       }
     }
   } else {
-    wstore(regionW, 11, wload(regionW, 11) + total * 8);
+    wstore(regionW, 11, wload(regionW, 11) + phys * 8);
     return mknum(firstW);
   }
 }
-defun Rt.gcAllocGo(region : val, linkAddr : val) -> val {
-  word p = wload(payload(linkAddr, 0), 0);
-  word total = wload(payload(region, 0), 7);
-  word kind = wload(payload(region, 0), 8);
-  word count = wload(payload(region, 0), 9);
-  if (mkbool(p == 0)) {
+defun Rt.gcAllocGo(region : val, cls : val) -> val {
+  word regionW = payload(region, 0);
+  word table = wload(regionW, 1);
+  word clsW = payload(cls, 0);
+  word head = wload(table, clsW);
+  if (mkbool(head == 0)) {
     return mknum(0);
   } else {
-    word flags = wload(p, -2);
-    word fkind = flags / 2;
-    word fcount = wload(p, -1);
-    word ftotal = 2 + (fcount + 4 * fcount * fkind);
-    if (mkbool(ftotal == total)) {
-      wstore(payload(linkAddr, 0), 0, wload(p, 0));
-      wstore(p, -2, kind * 2);
-      wstore(p, -1, count);
-      return mknum(p);
-    } else {
-      return call Rt.gcAllocGo(region, mknum(p));
-    }
+    word kind = wload(regionW, 8);
+    word count = wload(regionW, 9);
+    wstore(table, clsW, wload(head, 0));
+    wstore(head, -2, kind * 2 + clsW * 4);
+    wstore(head, -1, count);
+    return mknum(head);
   }
 }
 defun Rt.collect(dummy : val) -> val {
@@ -2703,7 +2702,7 @@ defun Rt.collect(dummy : val) -> val {
     wstore(region, 5, 64);
     call Rt.gcMarkRoots(mknum(0));
     call Rt.gcDrain(mknum(0));
-    wstore(region, 1, 0);
+    call Rt.gcClearClasses(mknum(0));
     call Rt.gcSweep(mknum(wload(region, 2)));
     return mknil;
   } else {
@@ -2760,7 +2759,7 @@ defun Rt.gcDrain(dummy : val) -> val {
     word newTop = top - 1;
     word p = wload(region, newTop);
     word flags = wload(p, -2);
-    word kind = flags / 2;
+    word kind = (flags >> 1) & 1;
     word count = wload(p, -1);
     wstore(region, 5, newTop);
     if (mkbool(kind == 1)) {
@@ -2777,23 +2776,36 @@ defun Rt.gcSweep(cursor : val) -> val {
   word cursorW = payload(cursor, 0);
   word glob = rawcall rt_glob_addr();
   word region = wload(glob, 0);
+  word table = wload(region, 1);
   word heapCursor = wload(region, 3);
   if (mkbool(cursorW >= heapCursor)) {
     return mknil;
   } else {
     word flags = wload(cursorW, -2);
-    word kind = flags / 2;
-    word count = wload(cursorW, -1);
-    word total = 2 + (count + 4 * count * kind);
-    word marked = flags - flags / 2 * 2;
+    word marked = flags & 1;
+    word cls = flags >> 2;
+    word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
     if (mkbool(marked == 1)) {
       wstore(cursorW, -2, flags - 1);
-      return call Rt.gcSweep(mknum(cursorW + total * 8));
+      return call Rt.gcSweep(mknum(cursorW + phys * 8));
     } else {
-      wstore(cursorW, 0, wload(region, 1));
-      wstore(region, 1, cursorW);
-      return call Rt.gcSweep(mknum(cursorW + total * 8));
+      wstore(cursorW, 0, wload(table, cls));
+      wstore(table, cls, cursorW);
+      return call Rt.gcSweep(mknum(cursorW + phys * 8));
     }
+  }
+}
+defun Rt.gcClearClasses(i : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word region = wload(glob, 0);
+  word table = wload(region, 1);
+  word n = wload(region, 12);
+  word iW = payload(i, 0);
+  if (mkbool(iW >= n)) {
+    return mknil;
+  } else {
+    wstore(table, iW, 0);
+    return call Rt.gcClearClasses(mknum(iW + 1));
   }
 }
 defun Rt.gcMarkPtr(p : val) -> val {
@@ -2804,7 +2816,7 @@ defun Rt.gcMarkPtr(p : val) -> val {
   word heapEnd = wload(region, 4);
   if (mkbool(ptr != 0) && (mkbool(ptr >= heapStart) && mkbool(ptr < heapEnd))) {
     word flags = wload(ptr, -2);
-    word marked = flags - flags / 2 * 2;
+    word marked = flags & 1;
     word top = wload(region, 5);
     word markEnd = wload(region, 6);
     if (mkbool(marked == 0)) {
