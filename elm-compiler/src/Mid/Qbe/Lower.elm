@@ -888,17 +888,142 @@ grefsOf defuns exp =
         -- prims, never through GRef/RawCall — so the corpus .ssa stays
         -- byte-identical.  Mid.Rt.seeds/rtDeps remain the used-prim seeding
         -- path (the prim->Rt closure), orthogonal to this edge.
+        --
+        -- M-GREF-OPERAND (handoff-midlang-grefs): the edge above is NOT the
+        -- whole story, because a RawCall can be an OPERAND of another raw
+        -- node — `payload(call A.f(k), 0)` lowers to
+        -- `RawWordLoad { ptr = RawCall .., index = Lit 0 }` — and the first
+        -- cut of this arm returned the RawCall's own edge WITHOUT visiting
+        -- the node's other operands, so the callee was never reached, never
+        -- emitted, and the link failed (`undefined reference to
+        -- q_Wgref_x2ehelper`; MEASURED, minimal two-defun repro).  The arm
+        -- therefore walks every operand of the node (rawOperands) as well,
+        -- which is what makes the census total: a call is a call edge
+        -- wherever it sits.  A RawCall's own ARGS are walked too, so a call
+        -- nested in a call's argument list is reached.
         Unsafe node ->
-            case node of
-                RawCall call ->
-                    if Dict.member call.sym defuns then
-                        [ call.sym ]
+            rawCallEdges defuns node
 
-                    else
-                        []
 
-                _ ->
-                    []
+{-| The call edges of ONE raw node: the node's OWN edge (a `RawCall` names its
+callee) plus the edges of every expression OPERAND it holds, in the same
+account of "the children of a raw node" as `Mid.Qbe.Monomorphise.unsafeChildren`
+(the traversal's one source).  Two places hold that list because Lower cannot
+import Monomorphise's (its `exposing` list is `Output, run`) — Elm's
+exhaustiveness check is what keeps them from drifting: a new `UnsafeNode`
+constructor fails the build HERE until it is given its operands.
+
+Reported only for a key that already names a defun of this program, so a call
+to nothing stays the RawCall arm's own reject, exactly as before.
+-}
+rawCallEdges : Dict String Defun -> UnsafeNode -> List String
+rawCallEdges defuns node =
+    (case node of
+        RawCall call ->
+            if Dict.member call.sym defuns then
+                [ call.sym ]
+
+            else
+                []
+
+        _ ->
+            []
+    )
+        ++ List.concatMap (grefsOf defuns) (rawOperands node)
+
+
+rawOperands : UnsafeNode -> List Exp
+rawOperands node =
+    case node of
+        RawCall call ->
+            call.args
+
+        RawTagOf e ->
+            [ e ]
+
+        RawPayload r ->
+            [ r.value ]
+
+        RawMkValue r ->
+            r.words
+
+        RawAllocVector e ->
+            [ e ]
+
+        RawVecLoad r ->
+            [ r.vec, r.index ]
+
+        RawVecAddr r ->
+            [ r.vec, r.index ]
+
+        RawVecStore r ->
+            [ r.vec, r.index, r.value ]
+
+        RawStrByte r ->
+            [ r.str, r.index ]
+
+        WithRoots r ->
+            [ r.body ]
+
+        RawPayload32 r ->
+            [ r.value ]
+
+        RawTagIs r ->
+            [ r.value ]
+
+        RawBin r ->
+            [ r.a, r.b ]
+
+        RawUn r ->
+            [ r.v ]
+
+        RawCmp r ->
+            [ r.a, r.b ]
+
+        RawFltBin r ->
+            [ r.a, r.b ]
+
+        RawFltCmp r ->
+            [ r.a, r.b ]
+
+        RawIToF e ->
+            [ e ]
+
+        RawLoadFlt e ->
+            [ e ]
+
+        RawAllocRaw e ->
+            [ e ]
+
+        RawByteLoad r ->
+            [ r.ptr, r.index ]
+
+        RawByteStore r ->
+            [ r.ptr, r.index, r.value ]
+
+        RawWordLoad r ->
+            [ r.ptr, r.index ]
+
+        RawWordStore r ->
+            [ r.ptr, r.index, r.value ]
+
+        RawCallRaw call ->
+            call.args
+
+        RawCallAgg call ->
+            call.fn :: call.args
+
+        RawDataAddr _ ->
+            []
+
+        RawCStr _ ->
+            []
+
+        RawSym _ ->
+            []
+
+        RawAllocN _ ->
+            []
 
 
 -- The reserved runtime namespace (Mid.Audit tests the same prefix; a surface

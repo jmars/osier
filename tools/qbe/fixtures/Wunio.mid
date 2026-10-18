@@ -106,20 +106,20 @@ defun Wunio.run(seed : val) -> val {
   word lo0 = c.pair.lo;
   c.n = 88;
 
-  // THE CALL IS BOUND FIRST, then read: a `val`-ABI `call` sitting directly
-  // inside a raw builtin's operand (`payload(call ... , 0)`) is INVISIBLE to
-  // the QBE reachability walk (`Qbe/Lower.elm`'s grefsOf descends into a raw
-  // node only through a RawCall, not through its other operands), so the
-  // callee is never emitted and the link fails with an undefined
-  // `q_Wunio_x2edescribe`.  MEASURED with a two-defun repro; the defect is
-  // recorded, not worked around silently — binding to a `val` first is the
-  // reachable spelling (and the one every earlier fixture happens to use).
-  val da = call Wunio.describe(mknum(&a));
-  val db = call Wunio.describe(mknum(&b));
-  val dc = call Wunio.describe(mknum(&c));
-  word ra = payload(da, 0);
-  word rb = payload(db, 0);
-  word rc = payload(dc, 0);
+  // THE CALL IS INLINE: a `val`-ABI `call` sitting directly inside a raw
+  // builtin's operand (`payload(call ... , 0)`).  This spelling used to FAIL
+  // TO LINK — `Qbe/Lower.elm`'s grefsOf descended into a raw node only
+  // through a RawCall NODE, so a call in another operand was invisible to the
+  // reachability walk, the callee was never emitted, and the link died with
+  // `undefined reference to q_Wunio_x2edescribe` (MEASURED with a two-defun
+  // repro; handoff-midlang-b5 recorded it).  handoff-midlang-grefs made the
+  // census total (the raw arm walks every operand), and this file is where
+  // that shows end-to-end: the golden is unchanged (47079720), because the
+  // fix adds REACHABILITY only — the emitted code for this program is the
+  // same code, plus the `describe` body that was missing.
+  word ra = payload(call Wunio.describe(mknum(&a)), 0);
+  word rb = payload(call Wunio.describe(mknum(&b)), 0);
+  word rc = payload(call Wunio.describe(mknum(&c)), 0);
 
   word pads = lo0 + a.pad + b.pad + c.pad;
   return mknum((ra * 1000000) + (rb * 10000) + (rc * 100) + pads);

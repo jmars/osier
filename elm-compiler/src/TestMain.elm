@@ -3855,6 +3855,52 @@ checks rt =
             Ok _ ->
                 False
         )
+    -- handoff-midlang-grefs: the census gap B5 MEASURED.  `payload(call
+    -- A.helper(k), 0)` lowers to `RawWordLoad { ptr = RawCall .., index = 0 }`,
+    -- and `grefsOf`'s Unsafe arm used to take the edge from a RawCall NODE only
+    -- — a call sitting in a raw node's other operand was invisible, the callee
+    -- was never reached, never emitted, and the program failed to LINK with an
+    -- undefined `q_A_x2ehelper` (MEASURED before the fix, on this exact
+    -- program).  The failure was loud but the wrong one, and `payload(f(x), 0)`
+    -- is idiomatic, so the row pins the CALLEE IN THE EMITTED SET.
+    , check "grefs (raw operand): a val-ABI `call` sitting INSIDE a raw node's operand — `payload(call A.helper(a), 0)` — IS a reachability edge, so the callee is EMITTED (fail-before: the link's undefined q_A_x2ehelper)"
+        (case QbeModule.loadUserMids rt [ "module A\nexport A.f : val -> val\ndefun A.helper(k: val) -> val {\n  return mknum(payload(k, 0) + 1);\n}\ndefun A.f(a: val) -> val {\n  return mknum(payload(call A.helper(a), 0));\n}" ] of
+            Ok [ mA ] ->
+                let
+                    prog =
+                        rtProgram rt True True True ++ mA.defuns
+                in
+                case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities prog) prog "A.f" of
+                    Ok mod ->
+                        List.any (\f -> f.name == "q_A_x2ehelper") mod.funcs
+
+                    Err _ ->
+                        False
+
+            _ ->
+                False
+        )
+    -- The same edge one level in: a val-ABI call as an ARGUMENT of another
+    -- val-ABI call is a `RawCall` inside a RawCall's arg list, which the raw
+    -- arm now walks (it used to return the callee's own edge and stop).
+    , check "grefs (call in a call's argument): `call A.id(call A.helper(a))` emits BOTH callees — the raw arm walks a RawCall's own args too"
+        (case QbeModule.loadUserMids rt [ "module A\nexport A.f : val -> val\ndefun A.helper(k: val) -> val {\n  return mknum(payload(k, 0) + 1);\n}\ndefun A.id(x: val) -> val {\n  return x;\n}\ndefun A.f(a: val) -> val {\n  return call A.id(call A.helper(a));\n}" ] of
+            Ok [ mA ] ->
+                let
+                    prog =
+                        rtProgram rt True True True ++ mA.defuns
+                in
+                case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities prog) prog "A.f" of
+                    Ok mod ->
+                        List.any (\f -> f.name == "q_A_x2ehelper") mod.funcs
+                            && List.any (\f -> f.name == "q_A_x2eid") mod.funcs
+
+                    Err _ ->
+                        False
+
+            _ ->
+                False
+        )
 
     -- ==================== M4: Osier-side checking + the import mapping ====================
     -- `exportScheme` maps an export block's DECLARED Osier type to the checker
