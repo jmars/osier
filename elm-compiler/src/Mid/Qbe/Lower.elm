@@ -570,8 +570,11 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc table ari
                                 -- THE QBE_MIDHOST GATE (stage 7A): the Mid effect
                                 -- host joins ONLY when the surface text carries the
                                 -- host arm — i.e. when run.js kept the marked region
-                                -- (Rt.midHostMarker witnesses it).  Default route:
-                                -- no seed, no host, corpus bytes unchanged.
+                                -- (Rt.midHostMarker witnesses it).  Since stage 7 O2
+                                -- that is the DEFAULT route (the host IS seeded, and
+                                -- the corpus re-freeze was declared with the flip);
+                                -- the unseeded route is the QBE_MIDHOST=0 escape
+                                -- hatch, still byte-identical to the pre-7A tree.
                                 ++ (if runtime.hosted then
                                         List.filter (\k -> not (List.member k surfaceKeys)) (unique MidRt.hostSeeds)
 
@@ -586,102 +589,6 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc table ari
                 keys =
                     surfaceKeys ++ rtKeys
 
-                -- THE CENSUS REFUSAL (zigretire stage 5 PART 5): under
-                -- QBE_MIDGC=1, a used prim whose Zig host handler builds a
-                -- Zig-NURSERY string/conses routes through rt_prim (no Mid
-                -- implementation), and the result lands in a Mid object whose
-                -- pointer the Zig scavenge then reclaims while still live —
-                -- the reproduced cross-heap hole (churn a host-IO program's
-                -- 4-arg MUTUAL tail recursion at QBE_MIDGC=1: content equality
-                -- prints 0 while String.length prints 150).  DERIVED from the
-                -- census, not from a "is this program host-IO" flag: the
-                -- refusal is `usedPrims ∩ nurseryHostPrims`, i.e. it fires on
-                -- whatever the census actually names.
-                --
-                -- nurseryHostPrims is the enumeration (verified by reading
-                -- each Zig handler) of the prims whose RESULT payload was built
-                -- in the GC nursery via values.valString / valCons:
-                --   value (the *argv* registry
-                --   list, rt.zig buildArgvList — still Zig-nursery even
-                --   though the ROUTE is now Mid: Rt.value blits the
-                --   registered Value verbatim, and *argv* is still a valCons
-                --   list in the Zig nursery).  `exec-plan` was REFUSED here
-                --   until zigretire stage 3 GROUP 3B-2c: with the rt_exec_run
-                --   seat deleted, Rt.exec-run builds the whole TAGGED result
-                --   GC-side in Mid (RawAllocRaw+mkStr strings, Rt.cons/
-                --   Rt.intern tree — the glob/getcwd precedent shapes), so
-                --   the worker route no longer builds a nursery value.  `str` was REFUSED here until
-                --   zigretire stage 3 GROUP 2: it now has a Mid body (Rt.str)
-                --   that renders the float through rt_float_text into a GC
-                --   string, so the NaN/±Infinity pass-through arms of
-                --   Prelude.stringFromFloat no longer return a Zig-nursery
-                --   string — the last CENSUS-ARM entry of the host-IO hole
-                --   is CLOSED, and `str` left this list (the midgc-str
-                --   probe now asserts the FIXED behaviour: it compiles under
-                --   QBE_MIDGC=1 and prints "100").  `getcwd`/`getenv` left
-                --   it in stage 3 GROUP 3A: their Mid bodies (Rt.getcwd/
-                --   Rt.getenv) allocate via RawAllocRaw (or return a static
-                --   empty string), never values.valString, so the worker
-                --   route no longer builds a nursery string.  `glob` left it
-                --   in stage 3 GROUP 3B for the same reason: Rt.glob dupes
-                --   matches onto the C HEAP (malloc) and builds the result
-                --   list via RawAllocRaw+mkStr / Rt.cons, never
-                --   values.valString/valCons.  `read-file-as-string` left it
-                --   in stage 3 GROUP 3B-3 (the LAST prim on the list with a
-                --   route): Rt.read-file-as-string accumulates on the C heap
-                --   (malloc/memGo/free) and builds the final string via
-                --   RawAllocRaw+mkStr, never values.valString — the worker
-                --   route is Zig-nursery-free, and with it the MID route has
-                --   NO rt_prim fallback left at all (zero rt_prim emission).
-                --   The OTHER no-Mid-implementation prims are SAFE and
-                --   deliberately NOT refused: intern (Rt.intern ->
-                --   valSymbol, a page_allocator symbol, never GC-reclaimed),
-                --   getpid/cd/setenv/close/write-byte/read-byte (scalar
-                --   results), open (a libc stream), simple-error (aborts),
-                --   and hd/tl/fst/reverse/append/absvector? (no surface
-                --   spelling, so they can never appear in the census).
-                -- THE BOUNDARY IS COARSER THAN THE HOLES: stdin/stdout are
-                --   fd-int Values (streams.valStreamInFd/OutFd — SAFE, yet
-                --   refused via the `value` entry).  Over-refusal is the right
-                --   interim call — the unsound shape is unknowable until run
-                --   time — and it is documented so no reader mistakes the
-                --   boundary for exact.  WHAT IT DOES NOT COVER: it refuses the
-                --   nursery-building host prims the census NAMES; it does NOT
-                --   prove the REMAINING (Mid-implemented) prims are Mid-sound —
-                --   that is the corrected-criterion audit (plan.md §2.2).
-                --   COMPLETENESS of the enumeration remains a REVIEW obligation,
-                --   not a mechanical pin.
-                nurseryHostPrims =
-                    Set.fromList
-                        [ "value"
-                        ]
-
-                hostOnlyPrims =
-                    Set.intersect usedPrims nurseryHostPrims
-
-                -- THE EFFECT-LOOP REFUSAL (the OTHER arm — this one is what
-                -- the reproduced hole actually exercises).  A Platform.program
-                -- (-> Runtime.program) does NOT reach runTask, so its census
-                -- contains NO host prim (verified by emission: the repro .ssa
-                -- references zero rt_prim/read-file-as-string/getenv/getcwd).
-                -- Instead the ZIG effect loop (src/effectloop.zig) dispatches
-                -- the host leaves ITSELF (leafReadFile/leafPrim -> prims.
-                -- execPrimitive) and builds the results with values.valString
-                -- / valCons in the ZIG nursery, then passes them to compiled
-                -- code through host_apply -> rt_apply — into Mid objects.  The
-                -- census cannot see that, so the refusal keys on the reached
-                -- surface instead: Runtime.program / Runtime.worker are the
-                -- ONLY two host-seam entry points (Lower/Resolve.elm
-                -- platformTable), DERIVED from surfaceKeys, not a hand list.
-                hostSeam =
-                    List.any (\k -> k == "Runtime.program" || k == "Runtime.worker") surfaceKeys
-
-                -- WHAT THE REFUSAL DOES NOT COVER (both arms): it refuses the
-                -- host seam and the host prims the census names; it does NOT
-                -- prove the REMAINING (Mid-implemented) prims are Mid-sound —
-                -- that is the corrected-criterion audit (plan.md §2.2), whose
-                -- pure-program half is pinned by probe-midgc-tail.sh (the
-                -- transient tail array is a scavenge trigger but not a hole).
                 s0 =
                     { blocks = []
                     , curLabel = "start"
@@ -718,56 +625,61 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc table ari
                     , abi = runtime.abi
                     , loops = []
                     }
+
+                -- THE MIDGC REFUSAL ARMS ARE GONE (stage 7 O2).  Two arms
+                -- stood here, and they existed for ONE reason: while the ZIG
+                -- effect host (src/effectloop.zig) was the host, every host leaf
+                -- built its result in the ZIG nursery (values.valString /
+                -- valCons) and handed it to compiled code through host_apply, so
+                -- a Mid object could reference memory the Zig scavenge reclaims
+                -- — the reproduced cross-heap hole (churn a host-IO program's
+                -- 4-arg MUTUAL tail recursion at QBE_MIDGC=1: content equality
+                -- printed 0 while String.length printed 150).  Arm 1 was a CENSUS
+                -- (`usedPrims ∩ nurseryHostPrims`: refuse when a used prim's Zig
+                -- handler built a nursery value); arm 2 was the SEAM (refuse any
+                -- program reaching Runtime.program / Runtime.worker, because a
+                -- Platform.program never reaches runTask and so has an EMPTY
+                -- census while the Zig loop still drove it).
+                --
+                -- O2 makes the MID host the DEFAULT and it allocates through the
+                -- Mid seats (Rt.cons -> allocvec -> Rt.allocVector under midGc),
+                -- so the hole closes BY CONSTRUCTION on the default route: there
+                -- is no Zig nursery on the path any more.  The refusals therefore
+                -- die in the SAME COMMIT as the flip — a refusal is a statement
+                -- about what is legal, and one left standing would have the tree
+                -- lying about a hole that no longer exists.
+                --
+                -- WHAT REPLACED THEM: the pairing that IS still unsound — a Mid
+                -- heap driven by the ZIG host (the `QBE_MIDHOST=0` opt-out) — is
+                -- refused LOUDLY in run.js's MIDGC_DEPENDS_ON, where the hole's
+                -- condition is exactly expressible (WHICH HOST) instead of being
+                -- approximated by a prim census that had to enumerate handlers.
+                -- The census could only ever be as complete as its list (it was
+                -- wrong twice, on `intern` and on `str`); the host choice cannot
+                -- be wrong about which host runs.
+                --
+                -- NOT COVERED BY EITHER (before or after): this says nothing
+                -- about whether every Mid-IMPLEMENTED prim is Mid-sound — that is
+                -- the corrected-criterion audit (plan.md §2.2), whose pure-program
+                -- half is pinned by probe-midgc-tail.sh (the transient tail array
+                -- is a scavenge trigger but not a hole).
             in
-            case ( midGc, Set.toList hostOnlyPrims, hostSeam ) of
-                ( True, p :: rest, _ ) ->
-                    let
-                        others =
-                            if List.isEmpty rest then
-                                ""
+            List.foldl
+                (\key acc ->
+                    acc
+                        |> Result.andThen
+                            (\s ->
+                                case Dict.get key defuns of
+                                    Nothing ->
+                                        Err ("qbe: unknown global " ++ key)
 
-                            else
-                                " (and " ++ String.fromInt (List.length rest) ++ " more: " ++ String.join ", " rest ++ ")"
-                    in
-                    Err
-                        -- `String.join ""` NOT `String.concat`: the tree's OWN alias
-                        -- table (Lower/Resolve.elm) maps `String.concat` to
-                        -- `Prelude.concat` (the LIST flatten, `List (List a) -> List a`),
-                        -- not to a string concat — so the tree's typechecker rejects
-                        -- `String.concat ["a","b"]` with "cannot unify List a with
-                        -- String", where elm 0.19.2 accepts it.  This is a WORKAROUND
-                        -- at the use site, not a fix of the alias table; the two are
-                        -- semantically identical (String.concat == String.join "").
-                        (String.join ""
-                            [ "QBE_MIDGC=1 refuses this program: the prim census uses `"
-                            , p
-                            , "`"
-                            , others
-                            , " — its Zig host handler (no Mid implementation) builds Zig-nursery strings/conses (values.valString/valCons) that the Zig scavenge reclaims while a Mid object still references them (the reproduced cross-heap hole). This refusal keys on the HANDLER, not on purity: the program may be pure, but its handler's result is unsound to keep in a Mid object."
-                            ]
-                        )
-
-                ( True, [], True ) ->
-                    Err
-                        "QBE_MIDGC=1 refuses this program: it is driven by the Zig host effect loop (Platform.program -> Runtime.program), whose leaves build Zig-nursery strings/conses (effectloop valString/valCons) passed into compiled code via host_apply — reclaimed by the Zig scavenge while a Mid object still references them (the reproduced cross-heap hole). QBE_MIDGC=1 is for pure programs only."
-
-                _ ->
-                    List.foldl
-                        (\key acc ->
-                            acc
-                                |> Result.andThen
-                                    (\s ->
-                                        case Dict.get key defuns of
-                                            Nothing ->
-                                                Err ("qbe: unknown global " ++ key)
-
-                                            Just defun ->
-                                                lowerDefun runtime defun s
-                                    )
-                        )
-                        (Ok s0)
-                        keys
-                        |> Result.map (\sFinal -> finishModule sFinal keys)
+                                    Just defun ->
+                                        lowerDefun runtime defun s
+                            )
+                )
+                (Ok s0)
+                keys
+                |> Result.map (\sFinal -> finishModule sFinal keys)
 
 
 

@@ -16,13 +16,19 @@
 # fix therefore lives in the DEFAULT route's code path too, which is why this
 # probe drives it there.
 #
-# THE SECOND ARM IS THE CENSUS ROW'S OWN EVIDENCE, and it is not a run: under
-# QBE_MIDGC=1 the argv repr is COMPILE-REFUSED.  `Runtime.argv ()` lowers to the
-# `value` prim, `value` is on the census's nurseryHostPrims list, and the
-# refusal is what makes the argv list UNREACHABLE from a Mid object — the
-# corrected criterion (plan.md §2.2) is "no Mid object may reference anything
-# the Zig collector can reclaim", and a program that cannot be built cannot hold
-# one.  So the arm asserts the refusal, in the refusal's own words.
+# THE SECOND ARM USED TO BE THE CENSUS ROW'S OWN EVIDENCE, and it was not a
+# run: under QBE_MIDGC=1 the argv repr was COMPILE-REFUSED (`Runtime.argv ()`
+# lowers to the `value` prim, `value` was on nurseryHostPrims, and the refusal
+# is what made the argv list UNREACHABLE from a Mid object).  STAGE 7 O2 DELETED
+# that arm with the rest of the census (the Mid host is the default now), so the
+# arm is a MEASUREMENT instead of a refusal: the same program must COMPILE under
+# QBE_MIDGC=1 and still answer NARGS — MEASURED on the O2 tree at QBE_HEAP_MB=16
+# with 60000 args.  That is a weaker statement than the old one and it is
+# recorded as such: nothing on the default route scavenges the Zig nursery after
+# boot (the argv list is still a Zig-heap valCons, and `value` is the one prim
+# that hands it out), so "it answers correctly" is evidence, not a proof of
+# soundness.  The census's replacement — refuse a MID GC heap driven by the ZIG
+# host — is in run.js's MIDGC_DEPENDS_ON and is scripted by probe-midgc-io.sh.
 #
 # THE ASYMMETRY.  tools/qbe/fixtures/argvrepro.elm's `count` returns the LENGTH
 # of Runtime.argv (), so a corrupt tail changes the answer, not just the data.
@@ -86,7 +92,7 @@ open(p, "w").write(s.replace(old, ""))
 PY
 }
 
-run_arm() { # $1 = midgc (0 only: the 1 arm is a compile refusal, see below)
+run_arm() { # $1 = midgc (0: the default route; the 1 arm is midgc_arm below)
   local midgc="$1" out r
   out="$(mktemp -d "$WORK/b$midgc.XXXXXX")"
   build "$out" "$midgc" || { echo "RESULT=build-failed" >&2; return 1; }
@@ -94,13 +100,14 @@ run_arm() { # $1 = midgc (0 only: the 1 arm is a compile refusal, see below)
   echo "RESULT=$r"
 }
 
-# the MIDGC arm: the emit must be REFUSED, by name, and produce no binary.
-refusal_arm() {
-  local out
-  out="$(mktemp -d "$WORK/refuse.XXXXXX")"
-  ( cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY="$ENTRY" QBE_MIDGC=1 \
-      node run.js "$ROOT/$FIXTURE" "$out/argvrepro.ssa" ) >/dev/null 2>&1
-  head -c 400 "$out/argvrepro.ssa" 2>/dev/null
+# the MIDGC arm: the emit must COMPILE (O2 deleted the refusal) and the binary
+# must still answer the argv count — the `value` prim on a Mid heap, measured.
+midgc_arm() {
+  local out r
+  out="$(mktemp -d "$WORK/midgc.XXXXXX")"
+  build "$out" 1 || { echo "BUILD_FAILED"; return 0; }
+  r="$(count_with "$out/argvrepro" QBE_MIDGC=1)"
+  echo "RESULT=$r"
 }
 
 rc=0
@@ -109,12 +116,15 @@ case "${1:-}" in
     r="$(run_arm 0)"
     echo "QBE_MIDGC=0: $r (want RESULT=$NARGS)"
     [ "$r" = "RESULT=$NARGS" ] || { echo "FAIL-AFTER: the default route lost argv entries" >&2; rc=1; }
-    ref="$(refusal_arm)"
-    case "$ref" in
-      *"refuses this program"*"\`value\`"*) echo "QBE_MIDGC=1: REFUSED by the census (the \`value\` prim) — no Mid object can hold the argv list" ;;
-      *) echo "FAIL-AFTER: the MIDGC emit of an argv-reading program was NOT refused: '$ref'" >&2; rc=1 ;;
-    esac
-    [ "$rc" -eq 0 ] && echo "PASS-AFTER: *argv* survives a scavenge inside the build ($NARGS entries), and under the hatch it is unreadable by construction"
+    mg="$(midgc_arm)"
+    if [ "$mg" = "BUILD_FAILED" ]; then
+      echo "FAIL-AFTER: QBE_MIDGC=1 still REFUSES the argv-reading program — the census arm is back (O2 deleted it)" >&2; rc=1
+    elif [ "$mg" = "RESULT=$NARGS" ]; then
+      echo "QBE_MIDGC=1: COMPILES under the default Mid host and answers $NARGS — the census arm's \`value\` entry is gone, and the argv list survives the Mid churn (MEASURED; see the header for what this does and does not prove)"
+    else
+      echo "FAIL-AFTER: QBE_MIDGC=1 answered '$mg', want RESULT=$NARGS (the argv list did not survive the Mid churn)" >&2; rc=1
+    fi
+    [ "$rc" -eq 0 ] && echo "PASS-AFTER: *argv* survives a scavenge inside the build ($NARGS entries), and the MIDGC arm now runs instead of being refused"
     ;;
   --before)
     mutate_before || exit 1

@@ -54,32 +54,48 @@ const CORPUS = [
 // ONCE per process (the parse hoist that keeps the corpus wall ~16 s-class).
 const RUNTIME_MID_RAW = fs.readFileSync(path.join(__dirname, 'runtime.mid'), 'utf8');
 
-// QBE_MIDHOST (stage 7A) — the MID EFFECT HOST, chosen at COMPILE time, and
-// why it has to be compile time.
+// QBE_MIDHOST (stage 7A; DEFAULT ON since stage 7's O2) — the MID EFFECT HOST,
+// chosen at COMPILE time, and why it has to be compile time.
 //
 // `runtime.mid` carries the host (Rt.hostRun and the machine under it) plus a
-// getenv hatch in Rt.main that selects it at RUN time.  Both halves cannot be
-// unconditional: Rt.main is emitted into EVERY artifact ($main is in all 159
-// corpus groups), so an always-present hatch would pull the host's ~1,500
-// lines of IL and its strings into every artifact — a corpus-wide re-freeze
-// for a path the default does not take.  So the hatch lives inside a marked
-// region of runtime.mid and THIS reader drops it unless QBE_MIDHOST=1:
+// getenv hatch in Rt.main that selects it at RUN time.  The compile-time half
+// cannot be unconditional in the other direction: Rt.main is emitted into
+// EVERY artifact ($main is in all corpus groups), so removing the region is
+// what keeps a host-less emit reachable at all.  The hatch lives inside a
+// marked region of runtime.mid and THIS reader keeps it by DEFAULT (O2's flip)
+// and drops it only when QBE_MIDHOST=0:
 //
-//   * QBE_MIDHOST unset/0 — the region is removed, nothing reaches the host
-//     defuns, they are PRUNED (an unreached Mid defun is never emitted), and
-//     the emitted bytes are the ones the corpus baseline pins.  MEASURED: the
-//     corpus is byte-identical with the whole host PRESENT in runtime.mid.
-//   * QBE_MIDHOST=1 — the region is kept, and the surviving hatch still reads
-//     getenv("QBE_MIDHOST") at RUN time, so ONE binary carries both hosts:
-//     `QBE_MIDHOST=0 ./the-binary <entry>` runs the Zig host inside the very
-//     build that can run the Mid one (the differential, in one artifact).
+//   * QBE_MIDHOST unset/1 — the region is KEPT: the Mid host is the DEFAULT
+//     (stage 7 O2), so `$main` carries the hatch and the host defuns in every
+//     artifact.  THE CORPUS RE-FREEZE THIS CAUSES IS DECLARED, not a drift —
+//     the default route now really does contain the host.
+//   * QBE_MIDHOST=0 — the region is removed, nothing reaches the host defuns,
+//     they are PRUNED (an unreached Mid defun is never emitted), and the
+//     emitted bytes are the pre-7A ones.  THIS IS THE ESCAPE HATCH and it
+//     stays until O4 deletes the Zig host: the Zig host is still the oracle
+//     the Mid one is measured against, so a build without the Mid host must
+//     remain reachable.  MEASURED before the flip: the corpus was
+//     byte-identical with the whole host PRESENT in runtime.mid, i.e. this
+//     switch is what moves bytes.
+//
+// The RUN-time half is runtime.mid's own hatch, and it reads the same variable
+// the other way round: unset -> the Mid host, `=0` -> the Zig host.  So ONE
+// default build carries both and `QBE_MIDHOST=0 ./the-binary <entry>` is the
+// differential inside a single artifact.
+//
+// MIDGC x MIDHOST: `QBE_MIDGC=1` with `QBE_MIDHOST=0` is REFUSED (see
+// MIDGC_DEPENDS_ON) — that pairing is exactly the cross-heap hole stage 5
+// reproduced (the Zig host builds Zig-nursery strings/conses into Mid objects),
+// and it used to be caught by Lower.elm's two compile-time refusal arms, which
+// O2 deletes because the DEFAULT pair (MIDGC=1 + the Mid host) is sound by
+// construction.  The refusal's replacement is this guard, not silence.
 //
 // The markers are the contract with the file (TestMain pins their shape: one
 // BEGIN, one END, BEGIN first).  They are `//` comments, which are emit-inert
 // on their own — the SPLICE is what moves bytes, not the markers.
 const MIDHOST_BEGIN = '// >>> QBE_MIDHOST-ONLY';
 const MIDHOST_END = '// <<< QBE_MIDHOST-ONLY';
-const QBE_MIDHOST = process.env.QBE_MIDHOST === '1';
+const QBE_MIDHOST = process.env.QBE_MIDHOST !== '0';
 
 // TWO regions, dropped (or kept) together: (1) Rt.main's host arm and (2) the
 // host's own defuns.  Both must go — an arm calling a pruned defun is an
@@ -397,6 +413,19 @@ if (process.env.QBE_MIDDRIVER === '0') {
 //      q_Rt_x2eallocVector export, the weak extern resolves to 0, and
 //      applyGo's partial arm silently reverts to the Zig allocator — a
 //      cross-heap edge that SEGVs with no diagnostic.  (stage-5 PART 2 review)
+//   3. the MID EFFECT HOST — QBE_MIDHOST=0 drops the Mid host at compile time,
+//      which puts the ZIG host (effectloop.zig) back in charge.  Its leaves
+//      build Zig-nursery strings/conses (values.valString/valCons) and hand
+//      them to compiled code through host_apply, where a Mid object keeps them
+//      — the cross-heap hole stage 5 reproduced (content equality prints 0
+//      while String.length prints 150).  (stage 7 O2: this entry replaces the
+//      Lower.elm refusal arms, which refused MIDGC=1 for host programs
+//      wholesale; with the Mid host the DEFAULT, the pairing is sound and only
+//      the OPT-OUT is unsound, so the guard moves from "cannot be built" to
+//      "cannot be built THIS way".)
+//
+// NOTE the entry is the only one whose incompatible value is '0', not '1' (the
+// dependent flag is ON by default now), hence the per-entry `val`.
 //
 // The tools/qbe/qbe-check.sh "midgc-guard" row greps THIS list and re-runs
 // run.js with each `off` flag, asserting exit 2.  WHAT THAT ROW ACTUALLY PINS
@@ -417,10 +446,11 @@ if (process.env.QBE_MIDDRIVER === '0') {
 const MIDGC_DEPENDS_ON = [
   { off: 'QBE_NORTLEAN', dep: 'the lean ABI', why: 'the Mid routes hard-code the lean call shape (3 pointer args + a count word, direct :val return), which mixes with the FAT QBE_NORTLEAN callees into a link-and-read-the-wrong-registers' },
   { off: 'QBE_NOMIDRT', dep: 'the Mid runtime', why: 'withholding the Rt program removes the q_Rt_* seats the collector and routes call, so the partial-application path silently reverts to the Zig allocator (a cross-heap edge that SEGVs)' },
+  { off: 'QBE_MIDHOST', val: '0', dep: 'the Mid effect host', why: 'opting the Zig host back in hands Mid objects values built in the Zig nursery (effectloop values.valString/valCons through host_apply), which the Zig scavenge reclaims while they are still live' },
 ];
 for (const d of MIDGC_DEPENDS_ON) {
-  if (QBE_MIDGC && process.env[d.off] === '1') {
-    console.error(`run.js: QBE_MIDGC=1 requires ${d.dep} (${d.off}=1 is incompatible — ${d.why})`);
+  if (QBE_MIDGC && process.env[d.off] === (d.val || '1')) {
+    console.error(`run.js: QBE_MIDGC=1 requires ${d.dep} (${d.off}=${d.val || '1'} is incompatible — ${d.why})`);
     process.exit(2);
   }
 }

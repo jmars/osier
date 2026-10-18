@@ -179,7 +179,13 @@ run_mid() {
   local mids=("$@")
   local bin
   # MIDHOST_ROW=1 is `run_midhost`'s knob: it compiles with QBE_MIDHOST=1, which
-  # is what makes a seat that lives INSIDE the QBE_MIDHOST region exist.
+  # is what makes a seat that lives INSIDE the QBE_MIDHOST region exist.  SINCE
+  # STAGE 7 O2 THE KNOB IS REDUNDANT, NOT WRONG: the region is kept BY DEFAULT,
+  # so every row here (including the ones that set nothing, i.e. `QBE_MIDHOST=""`
+  # which is "unset" to run.js) now carries the Mid host, and `=1` merely says so
+  # explicitly.  It is left in place because the row that flips a knob back is
+  # the cheap fail-before for the flip itself: `MIDHOST_ROW=` -> QBE_MIDHOST=0
+  # would drop the two host rows' seats.
   bin="$(QBE_MIDHOST="${MIDHOST_ROW:+1}" "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "${mids[@]}" "$entry" "$TMP/$name")" || {
     echo "FAIL $name: qbe-mk"; FAIL=1; return
   }
@@ -563,35 +569,6 @@ run_midgc_nsi() {
   fi
 }
 
-# run_midgc_refusal — the QBE_MIDGC=1 REFUSAL row (zigretire stage 5 PART 5):
-# the fixture MUST be refused at COMPILE time under QBE_MIDGC=1 (qbe-mk exits
-# non-zero, the .ssa begins "err " and names `$expect` — the effect-loop seam
-# "Runtime.program" for host-IO programs, or the refused prim (backtick-quoted,
-# e.g. `str`) for the CENSUS arm).  This is the IN-TREE documented-fail row:
-# the gate asserts the refusal rather than letting the program silently run to
-# corruption under the hatch.
-run_midgc_refusal() {
-  local name="$1" entry="$2" fixture="$3" expect="$4"
-  local out
-  out="$TMP/$name-refusal"
-  mkdir -p "$out"
-  if QBE_MIDGC=1 "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$out" >/dev/null 2>&1; then
-    echo "FAIL $name: QBE_MIDGC=1 compiled the program — the refusal (naming $expect) is missing"
-    FAIL=1; return
-  fi
-  local ssa
-  ssa="$out/$(basename "$fixture" .elm).ssa"
-  if ! head -c 4 "$ssa" | grep -q '^err '; then
-    echo "FAIL $name: QBE_MIDGC=1 failed but not with an 'err' refusal"
-    FAIL=1; return
-  fi
-  if ! grep -q "$expect" "$ssa"; then
-    echo "FAIL $name: the refusal does not name $expect"
-    FAIL=1; return
-  fi
-  echo "PASS $name: QBE_MIDGC=1 refuses the program (names $expect)"
-}
-
 # run_midgc_io — the DEFAULT-path control for the host-IO fixture: with the Zig
 # collector (no MIDGC) the kept string is rooted -> evacuated, not reclaimed,
 # so the fixture prints the golden.  Proves the refusal did not change the
@@ -890,14 +867,19 @@ run_mdgc mdgc-tail      midgc-tail      MidgcTail.main     tools/qbe/fixtures/mi
 # tag-1 (data-pointer) marking falsifiable (verified: disabling that one mark
 # prints "0|150" — the sweep reclaims the kept data bytes).
 run_midgc midgc-rawstr MidgcRawstr.main tools/qbe/fixtures/midgc-rawstr.elm
-# zigretire stage 5 PART 5 — THE HOST-IO CENSUS REFUSAL: a host-IO program
-# (Io.readFile -> keeper -> 4-arg mutual tail churn) must be REFUSED under
-# QBE_MIDGC=1 (its effect-loop seam builds Zig-nursery strings/conses the
-# scavenge reclaims — the reproduced cross-heap hole), while its DEFAULT path
-# prints the golden.  The fail-before/pass-after asymmetry is scripted in
-# tools/qbe/probe-midgc-io.sh; this row re-asserts the refusal and the
-# default-path golden in the gate.
-run_midgc_refusal midgc-io MidgcIo.main tools/qbe/fixtures/midgc-io.elm 'Runtime.program'
+# zigretire stage 5 PART 5's HOST-IO REFUSAL ROW IS GONE (stage 7 O2): it
+# asserted that QBE_MIDGC=1 REFUSES a host-IO program at compile time, and O2
+# deleted that refusal arm with the census — the Mid host is the DEFAULT now, so
+# the combination it refused is the SOUND one (one heap on the path).
+# WHAT REPLACED IT: the default-path golden below (unchanged), plus the row that
+# is no longer a refusal — QBE_MIDGC=1 on this fixture now COMPILES and must
+# print the same golden, which is the whole point of the flip.  That assertion
+# needs the builder that qbe-check has no shape for here (it wants MIDGC_IO_IN
+# AND QBE_MIDGC=1 at build time), so it lives in tools/qbe/probe-midgc-io.sh as
+# both arms of an asymmetric pair: PASS-AFTER = "MIDGC=1 compiles and prints
+# 100|150" here, FAIL-BEFORE = "disable run.js's QBE_MIDHOST guard, force the
+# Zig host, and the same build prints 0|150".  MEASURED, and it is the only
+# scripted statement of which host the default selects.
 run_midgc_io midgc-io MidgcIo.main tools/qbe/fixtures/midgc-io.elm
 # zigretire stage 3 GROUP 2 — THE `str` CENSUS-ARM CLOSED: a PURE program whose
 # census used to trip the `str` entry (String.fromFloat of NaN kept through a
@@ -2829,17 +2811,25 @@ run_midhost hostapply HostApply.main tools/qbe/fixtures/hostapply.elm tools/qbe/
 # instrument that sees it is the probe for that shape, so this row also pins
 # that the list is non-empty (a refactor that deletes the enumeration fails
 # here, not silently).
-midgc_guard_offs="$(grep -o "off: 'QBE_[A-Z]*'" "$ROOT/elm-compiler/run.js" | sed "s/off: '//; s/'//")"
+# STAGE 7 O2 EXTENDED the derivation: an entry may carry `val:` — the value of
+# the dependent flag that is INCOMPATIBLE.  The first two entries name flags that
+# default OFF, so `=1` disables them; O2's QBE_MIDHOST entry names a flag that
+# defaults ON, so its incompatible value is `=0`.  A reader that assumed `=1`
+# would test QBE_MIDHOST=1 (the Mid host, i.e. the COMPATIBLE value) and go red
+# on a healthy tree, so the `val` travels with the `off` (default 1).
+midgc_guard_offs="$(grep -o "off: 'QBE_[A-Z]*'\(, val: '[^']*'\)\?" "$ROOT/elm-compiler/run.js" \
+  | sed "s/off: '//; s/', val: '/=/; s/'//g; s/,$//" \
+  | sed "s/^\(QBE_[A-Z]*\)$/\1=1/")"
 if [ -z "$midgc_guard_offs" ]; then
   echo "FAIL midgc-guard: MIDGC_DEPENDS_ON in run.js lists no flags — the enumeration was deleted"
   FAIL=1
 else
   mg_ok=1
   for off in $midgc_guard_offs; do
-    (cd "$ROOT/elm-compiler" && env QBE_MIDGC=1 "$off=1" node run.js >/dev/null 2>&1)
+    (cd "$ROOT/elm-compiler" && env QBE_MIDGC=1 "$off" node run.js >/dev/null 2>&1)
     mg_rc=$?
     if [ "$mg_rc" -ne 2 ]; then
-      echo "FAIL midgc-guard: QBE_MIDGC=1 $off=1 exited $mg_rc, want 2 (the incompatible combination is no longer refused loudly)"
+      echo "FAIL midgc-guard: QBE_MIDGC=1 $off exited $mg_rc, want 2 (the incompatible combination is no longer refused loudly)"
       FAIL=1; mg_ok=0
     fi
   done

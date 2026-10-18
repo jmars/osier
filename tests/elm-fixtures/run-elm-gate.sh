@@ -52,14 +52,17 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
-# ARM B (stage 7A): QBE_MIDHOST=1 runs this whole gate against the MID effect
-# host instead of the Zig one.  The variable is read TWICE — by the COMPILE
-# (run.js splices the host into the surface text; without it the host arm and
-# its defuns are dropped and the emit is byte-identical to the pre-7A tree) and
+# THE TWO HOST ARMS (stage 7A's arm B, INVERTED by stage 7 O2): the MID effect
+# host is the DEFAULT, so an ordinary `run-elm-gate.sh` is the Mid-host arm; the
+# ZIG host — still in the tree, still the oracle, until O4 deletes it — is
+# selected by `QBE_MIDHOST=0 run-elm-gate.sh`.  The variable is read TWICE — by
+# the COMPILE (run.js keeps the host region by default and drops it on `=0`) and
 # by the NATIVE BINARIES at run time (Rt.main's getenv hatch, which is why ONE
-# arm-B build still carries both hosts).  Both phases inherit the caller's
-# environment; this keeps the RUN phase explicitly in the loop so arm B cannot
-# become half-set by an invocation that scopes the variable to the build.
+# default build still carries both hosts, and why `QBE_MIDHOST=0` on a
+# default-built binary is the differential inside a single artifact).  Both
+# phases inherit the caller's environment; this keeps the RUN phase explicitly in
+# the loop so the arm cannot become half-set by an invocation that scopes the
+# variable to the build.
 [ -n "${QBE_MIDHOST:-}" ] && export QBE_MIDHOST
 
 CDIR="${1:-$ROOT/elm-compiler}"
@@ -166,8 +169,8 @@ run2() {
 #
 # STAGE 7B's arm-B row: a `Platform.program` fixture driven through the MID
 # EFFECT HOST.  Like run_io it redirects stdin, and like run_io it inherits
-# QBE_MIDHOST, so the SAME row is arm A (unset -> the Zig host) or arm B
-# (=1 -> the Mid host) with no second registration.
+# QBE_MIDHOST, so the SAME row is the Mid-host arm (unset/`=1`, the DEFAULT since
+# stage 7 O2) or the Zig-host arm (`=0`) with no second registration.
 #
 # It registers NO compile group, DELIBERATELY: the corpus baseline pins the
 # batch artifact set (159 groups), so a new .ssa group would move the corpus

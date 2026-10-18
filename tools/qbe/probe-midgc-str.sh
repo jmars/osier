@@ -15,25 +15,27 @@
 #   * PASS-AFTER (this tree): QBE_MIDGC=1 COMPILES the program (no refusal) and
 #     prints "100" — the kept "NaN" is Mid-allocated (Rt.str -> rt_float_text
 #     -> a GC string), so the Zig scavenge cannot reclaim it.
-#   * FAIL-BEFORE: re-adding ONE line in elm-compiler/src/Mid/Qbe/Lower.elm
-#     (the `str` entry of nurseryHostPrims) makes QBE_MIDGC=1 REFUSE the
-#     program at compile time, naming `str` — the exact shape this probe must
-#     detect if the census-arm refusal is re-introduced.
+#   * FAIL-BEFORE (NO LONGER RUNNABLE, stage 7 O2): re-adding ONE line in
+#     elm-compiler/src/Mid/Qbe/Lower.elm (the `str` entry of nurseryHostPrims)
+#     made QBE_MIDGC=1 REFUSE the program at compile time, naming `str`.  O2
+#     DELETED that list and both refusal arms (the Mid host is the default, so
+#     the hole closes by construction), so the reversion target no longer
+#     exists and the --before arm is GONE rather than silently broken.  The
+#     asymmetry it documented is history; what still pins the claim is this
+#     script's PASS-AFTER arm plus qbe-check's `run_midgc midgc-str` row, which
+#     goes red if QBE_MIDGC=1 starts refusing again or if Rt.str stops
+#     rendering into a GC string ("0" instead of "100").
 #
 # Usage:
 #   tools/qbe/probe-midgc-str.sh          # PASS-AFTER (current tree)
-#   tools/qbe/probe-midgc-str.sh --before # FAIL-BEFORE: re-add, rebuild, run,
-#                                         # RESTORE
 #
-# The --before arm restores Lower.elm under a trap, so even a failed run never
-# leaves the tree edited.  It rebuilds compiler.js itself (ELM_BIN defaults to
-# the npm-global elm, the same path osier-numbers.sh documents).
+# It rebuilds compiler.js itself (ELM_BIN defaults to the npm-global elm, the
+# same path osier-numbers.sh documents).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-LOWER="elm-compiler/src/Mid/Qbe/Lower.elm"
 FIXTURE="tools/qbe/fixtures/midgc-str.elm"
 ENTRY="MidgcStr.main"
 GOLDEN='"100"'
@@ -122,39 +124,8 @@ case "${1:-}" in
       exit 1
     fi
     ;;
-  --before)
-    need node; need cc
-    # Re-add the ONE line (the `str` entry), then always restore it.
-    python3 - "$LOWER" <<'PY'
-import sys
-p = sys.argv[1]
-s = open(p).read()
-without = '                        , "value"\n                        ]'
-with_str = '                        , "value"\n                        , "str"\n                        ]'
-assert s.count(without) == 1, f"expected exactly one reversion site, found {s.count(without)}"
-open(p, "w").write(s.replace(without, with_str))
-PY
-    restore() {
-      python3 - "$LOWER" <<'PY'
-import sys
-p = sys.argv[1]
-s = open(p).read()
-with_str = '                        , "value"\n                        , "str"\n                        ]'
-without = '                        , "value"\n                        ]'
-assert s.count(with_str) == 1, f"expected exactly one reverted site, found {s.count(with_str)}"
-open(p, "w").write(s.replace(with_str, without))
-PY
-      (cd "$ROOT/elm-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) || true
-    }
-    trap restore EXIT
-    rebuild
-    out="$(midgc_build 1)"
-    rm -rf "$(dirname "$out")"
-    echo "FAIL-BEFORE REPRODUCED: with the \`str\` entry re-added, QBE_MIDGC=1 refuses the pure str program naming \`str\` (the census-arm refusal is back — the probe detects the hole's return)"
-    exit 0
-    ;;
   *)
-    echo "usage: tools/qbe/probe-midgc-str.sh [--before]" >&2
+    echo "usage: tools/qbe/probe-midgc-str.sh" >&2
     exit 2
     ;;
 esac

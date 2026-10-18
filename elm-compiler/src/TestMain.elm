@@ -4184,15 +4184,16 @@ checks rt runtimeMidText =
             && String.contains "if (mkbool(remain <= 0)) {" d
             && String.contains "return mknum(2147483647);" d
         )
-    , check "7B HATCH PIN (the two 7A defects this unit MEASURED): the Mid arm PRINTS AND EXITS itself — an expression arm's `return` does not return and a rawAbi defun cannot carry a mid-block guard-if, so without this epilogue the Zig host ran the program a SECOND time — and the hatch tests the byte '1', not pointer-presence, so QBE_MIDHOST=0 really selects the Zig host"
+    , check "7B HATCH PIN (the two 7A defects this unit MEASURED; POLARITY FLIPPED at stage 7 O2): the Mid arm PRINTS AND EXITS itself — an expression arm's `return` does not return and a rawAbi defun cannot carry a mid-block guard-if, so without this epilogue the Zig host ran the program a SECOND time — and the hatch tests a BYTE, not pointer-presence, so one spelling means one thing at run time.  O2 flipped WHICH byte: the test is now for '0' (the Zig host is the opt-out), so an unset QBE_MIDHOST runs the Mid host"
         (let
             region =
                 String.join "\n"
-                    (List.filter (\l -> String.contains "mhEnv" l || String.contains "mhOn" l || String.contains "mppc" l || String.contains "rawcall exit(0);" l || String.contains "rt_print_value(modelslot)" l)
+                    (List.filter (\l -> String.contains "mhEnv" l || String.contains "mhOff" l || String.contains "mppc" l || String.contains "rawcall exit(0);" l || String.contains "rt_print_value(modelslot)" l)
                         (String.lines runtimeMidText)
                     )
          in
-         String.contains "mkbool(byteload(mhEnv, 0) == 49)" region
+         String.contains "mkbool(byteload(mhEnv, 0) == 48)" region
+            && String.contains "word hop = if (payload(mhOff, 0) == 0) {" region
             && String.contains "rawcall rt_print_value(modelslot)" region
             && String.contains "rawcall exit(0);" region
             && String.contains "word isprog = rawcall rt_is_program(fptr);" runtimeMidText

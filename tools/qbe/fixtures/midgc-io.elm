@@ -18,17 +18,22 @@ module MidgcIo exposing (main)
 -- g.allocArray in the Zig nursery per iteration (rt.zig:817), which is what
 -- forces the scavenge.  `churnA`/`churnB` are 4-arg mutual tail recursion.
 --
--- THE CROSS-HEAP SIGNATURE this fixture prints: `String.length` (the Value's
--- intact length field) is 150 while CONTENT EQUALITY fails (the data bytes are
--- reclaimed).  Default path (no MIDGC): the kept string is reachable from the
--- Zig shadow stack and is evacuated, not reclaimed -> "100|150".  Under
--- QBE_MIDGC=1 WITHOUT the refusal (probe-midgc-io.sh --before): "0|150".
+-- THE CROSS-HEAP SIGNATURE this fixture was built to print: `String.length`
+-- (the Value's intact length field) is 150 while CONTENT EQUALITY fails (the
+-- data bytes are reclaimed).  Default path (no MIDGC): the kept string is
+-- reachable from the Zig shadow stack and is evacuated, not reclaimed ->
+-- "100|150".
 --
--- WITH the refusal (this tree), QBE_MIDGC=1 refuses this program at COMPILE
--- time — the program is effect-loop-driven (Platform.program -> Runtime.program),
--- and the census/effect-loop refusal (Lower.elm) names it.  The default path
--- is untouched and prints the golden.  The asymmetry is scripted in
--- tools/qbe/probe-midgc-io.sh.
+-- STAGE 7 O2 CHANGED WHAT THIS FIXTURE PINS, and the two older claims above are
+-- now HISTORY, not this tree's behaviour: (1) QBE_MIDGC=1 no longer REFUSES the
+-- program — O2 deleted the census/effect-loop refusals along with the flip, so
+-- this is the row that now says MIDGC is LEGAL for a host program; (2) the
+-- "0|150" signature no longer reproduces in ANY arm, including the Zig host on a
+-- Mid heap (MEASURED 2026-10-18 at QBE_HEAP_MB=16), because the tail array this
+-- fixture uses as its trigger is allocated on the Mid heap under MIDGC (the
+-- stage-5 tail work; INTERPRETATION: that is why the scavenge that reclaimed the
+-- data no longer happens).  Both arms print "100|150" now; the scripted
+-- statement is tools/qbe/probe-midgc-io.sh.
 
 
 type Msg

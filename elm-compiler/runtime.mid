@@ -4641,19 +4641,21 @@ defun Rt.main(argc : word, argv : word) -> word {
   };
   word fptr = wload(fslot, 0);
   rawcall rt_root_push_value(fptr);
-  // >>> QBE_MIDHOST-ONLY (2/3): the Mid host arm.  run.js KEEPS this region only when
-  // QBE_MIDHOST=1 is set at COMPILE time, and DROPS every line of it otherwise
-  // (see run.js's `spliceMidHost`).  WHY AT COMPILE TIME AND NOT ONLY AT RUN
-  // TIME: `$main` is emitted into EVERY artifact, so a getenv hatch that is
-  // always present would put the whole host's IL (and every string in it) into
-  // all 159 corpus artifacts — a corpus-wide re-freeze for a default that does
-  // not use it.  With the region dropped, nothing reaches the host defuns and
-  // they are PRUNED, so the default arm stays byte-identical (MEASURED: the
-  // corpus is byte-identical with the whole host present in this file).
+  // >>> QBE_MIDHOST-ONLY (2/3): the Mid host arm.  run.js KEEPS this region by
+  // DEFAULT (stage 7 O2's flip) and DROPS every line of it only when
+  // QBE_MIDHOST=0 is set at COMPILE time (see run.js's `spliceMidHost`).  WHY AT
+  // COMPILE TIME AND NOT ONLY AT RUN TIME: `$main` is emitted into EVERY
+  // artifact, so the compile-time splice is what keeps a host-less emit
+  // reachable at all — with the region dropped, nothing reaches the host defuns
+  // and they are PRUNED (MEASURED before the flip: the corpus was
+  // byte-identical with the whole host present in this file, i.e. the splice,
+  // not the presence, moves bytes).  After O2 the kept region is the DEFAULT
+  // and the dropped one is the ESCAPE HATCH — the O2 commit's declared
+  // corpus re-freeze is the cost of `$main` carrying the hatch.
   //
   // The arm is still TWO-LEVEL: the compile-time splice decides whether the
   // hatch EXISTS, and `getenv("QBE_MIDHOST")` decides at RUN time which host
-  // drives — so ONE arm-B binary carries both hosts and
+  // drives — so ONE default binary carries both hosts and
   // `QBE_MIDHOST=0 ./prog <entry>` exercises the Zig path inside it (the
   // differential survives inside a single build).  Both arms are spelled as
   // `word X = if (c) { ... return 0; } else { return 0; };` — the file's own
@@ -4666,7 +4668,7 @@ defun Rt.main(argc : word, argv : word) -> word {
   // tail If joins two word-returning branches ... one branch must be a
   // self-tail recur" — re-measured on this tree), and an expression arm's
   // `return` does NOT return, so 7A's hatch FELL THROUGH into
-  // `rt_is_program`/`rt_run_program` below: under QBE_MIDHOST=1 the Mid host
+  // `rt_is_program`/`rt_run_program` below: with the hatch ON the Mid host
   // ran the program, wrote its model into `modelslot`, and then the ZIG host
   // ran THE SAME PROGRAM A SECOND TIME and overwrote the model.  No 7A
   // fixture could see it (all of them are pure, or nowunit dies inside the
@@ -4681,10 +4683,23 @@ defun Rt.main(argc : word, argv : word) -> word {
   // `getenv(...) != 0` is TRUE for "0" as well, so 7A's `QBE_MIDHOST=0
   // ./prog` ran the MID host — the doc above claimed the opposite.  The byte
   // test makes the variable a one-character switch, which is what turns one
-  // arm-B build into TWO arms (Mid host on "1", Zig host otherwise).
+  // arm-B build into TWO arms.
+  //
+  // WHICH WAY THE SWITCH READS (stage 7 O2 — THE FLIP): the Mid host is now
+  // the DEFAULT, so the test is for the byte '0' and the ZIG host is the
+  // opt-out: unset/empty/`=1` -> the Mid host, `=0` -> the Zig host.  O2 chose
+  // "0 selects the Zig host" rather than "1 selects the Mid host" because the
+  // variable is read TWICE — here at RUN time and in run.js at COMPILE time —
+  // and ONE spelling has to mean the same thing in both: `QBE_MIDHOST=0` is
+  // "no Mid host" in both, which is what makes the escape hatch a single
+  // decision instead of a pair a caller can half-set.  The Zig host is still
+  // in the tree (it dies at O4), so the differential
+  // `QBE_MIDHOST=0 ./prog <entry>` inside a default build stays runnable — and
+  // under QBE_MIDGC=1 it is REFUSED at compile time (run.js MIDGC_DEPENDS_ON),
+  // because the Zig host allocating into a Mid heap is the cross-heap hole.
   word mhEnv = rawcall getenv(rawstr("QBE_MIDHOST"));
-  val mhOn = mkbool(mhEnv != 0) && mkbool(byteload(mhEnv, 0) == 49);
-  word hop = if (payload(mhOn, 0) != 0) {
+  val mhOff = mkbool(mhEnv != 0) && mkbool(byteload(mhEnv, 0) == 48);
+  word hop = if (payload(mhOff, 0) == 0) {
     word chk = if (payload(call Rt.hostIsProgram(vecload(fptr, 0)), 0) != 0) {
       call Rt.hostRun(mknum(fptr), mknum(modelslot));
       rawcall rt_root_push_value(modelslot);
@@ -4705,6 +4720,10 @@ defun Rt.main(argc : word, argv : word) -> word {
     return 0;
   };
   // <<< QBE_MIDHOST-ONLY (2/3)
+  // THE ZIG ARM IS THE `else` OF THE HATCH, i.e. it is what runs on
+  // QBE_MIDHOST=0.  After O2 that is an OPT-OUT, not the default: the branch
+  // below is the ESCAPE HATCH (and the differential's control arm) until O4
+  // deletes it.
   word isprog = rawcall rt_is_program(fptr);
   word ran = if (mkbool(isprog != 0)) {
     word rrc = rawcall rt_run_program(fptr, modelslot);
@@ -5211,11 +5230,11 @@ defun Rt.bounceGo(r : val) -> val {
 
 // ==================== STAGE 7A: THE MID EFFECT HOST =======================
 // The CEK effect-manager state machine of src/effectloop.zig, PORTED (plan
-// stage7-plan.md §3, §7.3's 7A row).  Behind QBE_MIDHOST: the ZIG host stays
-// the default and stays the live oracle, and `Rt.main` picks between them at
-// RUNTIME (a getenv hatch spliced in by run.js at COMPILE time — see the
-// markers around that arm, and the comment there for why the splice is
-// compile-time).
+// stage7-plan.md §3, §7.3's 7A row).  DEFAULT since stage 7's O2 (the ZIG host
+// is the `QBE_MIDHOST=0` opt-out, still present and still the live oracle until
+// O4 deletes it), and `Rt.main` picks between them at RUNTIME (a getenv hatch
+// spliced in by run.js at COMPILE time — see the markers around that arm, and
+// the comment there for why the splice is compile-time).
 //
 // THE STATE (plan §3.1): ONE `val[]` slot array, permanently ROOTED by
 // `rt_root_push_value_array`, and everything else plain WORDS in one malloc'd
@@ -5288,14 +5307,16 @@ defun Rt.bounceGo(r : val) -> val {
 // 1 readFile, 2 exec, 3 sleep — the Zig enum order) beside ONE anonymous
 // promoted `union { ... }` block whose members are named once, globally.
 // 7A only ever sets etag = 0; 7B-7E fill the unions in.
-// >>> QBE_MIDHOST-ONLY (3/3): THE HOST ITSELF.  run.js drops this region with
-// the Rt.main arm above, so the DEFAULT route does not even PARSE the host.
-// That is what makes `Rt.load`'s `hosted` flag — the reachability gate — a
-// STRUCTURAL question ("does the surface define Rt.hostRun?") and not a text
-// search: the selfhost lane's Prelude has NO `String.contains` (MEASURED:
-// `qbe-bootstrap.sh --status` -> "err type error ... unknown name:
-// String.contains").  Dropping it also means the default program carries no
-// host key at all, so `rtDeps`' host entries have no phantom target.
+// >>> QBE_MIDHOST-ONLY (3/3): THE HOST ITSELF.  run.js splices this region with
+// the Rt.main arm above — KEPT by DEFAULT since O2, dropped only on
+// QBE_MIDHOST=0 (the escape hatch that still runs the Zig host).  With the
+// region dropped the emit does not even PARSE the host, which is what makes
+// `Rt.load`'s `hosted` flag — the reachability gate — a STRUCTURAL question
+// ("does the surface define Rt.hostRun?") and not a text search: the selfhost
+// lane's Prelude has NO `String.contains` (MEASURED: `qbe-bootstrap.sh --status`
+// -> "err type error ... unknown name: String.contains").  A host-less build
+// also carries no host key at all, so `rtDeps`' host entries have no phantom
+// target.
 // "qbe-rt: error: " + a + b + "\n", then exit 1.  The Zig host raised a
 // VmError that rt_run_program printed with this prefix; Rt.die has no prefix
 // (it is the runtime's own halt), so the port carries the prefix HERE and the

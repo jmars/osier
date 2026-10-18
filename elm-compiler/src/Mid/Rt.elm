@@ -776,22 +776,23 @@ primImpl prim =
 -- THE QBE_MIDHOST GATE (stage 7A) — the host's REACHABILITY switch, and the
 -- ONE place the port is allowed to be conditional.
 --
--- `run.js` COMPILE-TIME-splices the Mid effect host OUT of the surface text
--- unless QBE_MIDHOST=1: `Rt.main`'s host arm (region 1) AND the host's own
--- defuns (region 2) are both marked lines that the reader drops.  The witness of
--- that decision here is therefore STRUCTURAL, not textual — the parsed program
--- either defines `Rt.hostRun` or it does not (a `String.contains` on the text
--- would break the selfhost lane, whose Prelude has no such function, and the
--- defuns being absent is the stronger fact anyway: the default program carries
--- no host key at all).
+-- `run.js` COMPILE-TIME-splices the Mid effect host: `Rt.main`'s host arm
+-- (region 1) AND the host's own defuns (region 2) are marked lines the reader
+-- keeps BY DEFAULT and drops when QBE_MIDHOST=0 (stage 7 O2's flip; the Zig host
+-- is the escape hatch until O4 deletes it).  The witness of that decision here is
+-- therefore STRUCTURAL, not textual — the parsed program either defines
+-- `Rt.hostRun` or it does not (a `String.contains` on the text would break the
+-- selfhost lane, whose Prelude has no such function, and the defuns being absent
+-- is the stronger fact anyway: a host-less program carries no host key at all).
 --
 -- WHY THE GATE IS NEEDED AT ALL: the Rt program's reachability is the hand table
 -- `rtDeps` closed from SEED ROOTS, not a walk of the bodies (`reach` never enters
 -- an Rt defun that is only seeded — see Lower's `keys`).  `Rt.main` is a seed
 -- root UNCONDITIONALLY, so an edge `Rt.main -> Rt.hostRun` in `rtDeps` would drag
--- the whole host into EVERY artifact, because `$main` is in every artifact.  The
--- edge therefore lives in NO table: the host's entry points are GATED ROOTS
--- (`hostSeeds`), present only when `hosted`.
+-- the whole host into EVERY artifact even when the region was dropped, because
+-- `$main` is in every artifact.  The edge therefore lives in NO table: the host's
+-- entry points are GATED ROOTS (`hostSeeds`), present only when `hosted` — which
+-- is why a host-less emit is still possible with the host present in the file.
 --
 
 
