@@ -7043,7 +7043,586 @@ checks rt =
                 False
         )
 
+    -- ================== B4: LOOPS (plan Q6) ==================
+    -- The ONE new IR family (`Loop` + the `Break`/`Continue` leaves +
+    -- `RawAllocN`), the four surface forms, and the AUTO-CELL rule.  The
+    -- rows are ordered as the unit was built: PARSE (exact AST), CHECK (the
+    -- judgments), IR (the exact tree), .ssa (the block structure — and the
+    -- absence of a phi), and the memory path.
+    , check "B4 PARSE (exact AST): `while (c) {..}` is an `SWhile` STATEMENT whose body's fall-through is synthesized as `TContinue` — the relaxation is in the PARSER, so every Block the checker and lowerer read still has a terminator"
+        (Parse.parseProgram "defun Rt.w(i: word) -> word {\n  while (i < 3) {\n    i = i + 1;\n  }\n  return i;\n}"
+            == Ok
+                [ { key = "Rt.w"
+                  , flags = []
+                  , params = [ { name = "i", ty = Ast.TWord } ]
+                  , ret = Ast.TWord
+                  , body =
+                        { stmts =
+                            [ Ast.SWhile
+                                (Ast.EWordCmp Ast.WClts (Ast.EVar "i") (Ast.EInt 3))
+                                { stmts =
+                                    [ Ast.SVarStore "i"
+                                        (Ast.EWordBin Ast.WAdd (Ast.EVar "i") (Ast.EInt 1))
+                                    ]
+                                , term = Ast.TContinue
+                                }
+                            ]
+                        , term = Ast.TRet (Ast.EVar "i")
+                        }
+                  }
+                ]
+        )
+    , check "B4 PARSE (exact AST): `do {..} while (c);` keeps its CONDITION on the statement (`SDoWhile`) — C's continue-evaluates-the-condition rule needs it, so it is not desugared away in the parser"
+        (Parse.parseProgram "defun Rt.d(i: word) -> word {\n  do {\n    i = i + 1;\n  } while (i < 3);\n  return i;\n}"
+            == Ok
+                [ { key = "Rt.d"
+                  , flags = []
+                  , params = [ { name = "i", ty = Ast.TWord } ]
+                  , ret = Ast.TWord
+                  , body =
+                        { stmts =
+                            [ Ast.SDoWhile
+                                { stmts =
+                                    [ Ast.SVarStore "i"
+                                        (Ast.EWordBin Ast.WAdd (Ast.EVar "i") (Ast.EInt 1))
+                                    ]
+                                , term = Ast.TContinue
+                                }
+                                (Ast.EWordCmp Ast.WClts (Ast.EVar "i") (Ast.EInt 3))
+                            ]
+                        , term = Ast.TRet (Ast.EVar "i")
+                        }
+                  }
+                ]
+        )
+    , check "B4 PARSE (exact AST): `for (init; c; step) {..}` carries BOTH head statements — `init` (`i = 0;`) and `step` (`i = i + 1`, its `;` optional as in C) — and an EMPTY body is `TContinue`"
+        (Parse.parseProgram "defun Rt.f(i: word) -> word {\n  for (i = 0; i < 3; i = i + 1) {\n  }\n  return i;\n}"
+            == Ok
+                [ { key = "Rt.f"
+                  , flags = []
+                  , params = [ { name = "i", ty = Ast.TWord } ]
+                  , ret = Ast.TWord
+                  , body =
+                        { stmts =
+                            [ Ast.SFor
+                                { init = Just (Ast.SVarStore "i" (Ast.EInt 0))
+                                , cond = Ast.EWordCmp Ast.WClts (Ast.EVar "i") (Ast.EInt 3)
+                                , step =
+                                    Just
+                                        (Ast.SVarStore "i"
+                                            (Ast.EWordBin Ast.WAdd (Ast.EVar "i") (Ast.EInt 1))
+                                        )
+                                , body = { stmts = [], term = Ast.TContinue }
+                                }
+                            ]
+                        , term = Ast.TRet (Ast.EVar "i")
+                        }
+                  }
+                ]
+        )
+    , check "B4 PARSE (exact AST): `break;`/`continue;` are TERMS (they end the block, like `return`), so `if (c) { break; }` parses as the ordinary mid-block if with a diverging branch"
+        (Parse.parseProgram "defun Rt.b(i: word) -> word {\n  while (i < 9) {\n    if (i == 4) { break; }\n    i = i + 1;\n  }\n  return i;\n}"
+            == Ok
+                [ { key = "Rt.b"
+                  , flags = []
+                  , params = [ { name = "i", ty = Ast.TWord } ]
+                  , ret = Ast.TWord
+                  , body =
+                        { stmts =
+                            [ Ast.SWhile
+                                (Ast.EWordCmp Ast.WClts (Ast.EVar "i") (Ast.EInt 9))
+                                { stmts =
+                                    [ Ast.SIf (Ast.EWordCmp Ast.WCeq (Ast.EVar "i") (Ast.EInt 4))
+                                        { stmts = [], term = Ast.TBreak }
+                                        Nothing
+                                    , Ast.SVarStore "i"
+                                        (Ast.EWordBin Ast.WAdd (Ast.EVar "i") (Ast.EInt 1))
+                                    ]
+                                , term = Ast.TContinue
+                                }
+                            ]
+                        , term = Ast.TRet (Ast.EVar "i")
+                        }
+                  }
+                ]
+        )
+    , check "B4 PARSE: the fall-through relaxation is LOOP-BODY-ONLY — the same terminator-less block at a DEFUN's body is still the exactly-one-terminator reject (the invariant did not move)"
+        (case Parse.parseProgram "defun Rt.n() -> val {\n  word x = 1;\n}" of
+            Err msg ->
+                String.contains "exactly one terminator" msg
+
+            Ok _ ->
+                False
+        )
+    , check "B4 PARSE: `goto` is REJECTED with the Q6 argument in the message (it is a COMMITTED failure, so the block's own terminator message cannot hide it)"
+        (case Parse.parseProgram "defun Rt.g() -> val {\n  goto done;\n  return mknil;\n}" of
+            Err msg ->
+                String.contains "`goto` is not in this language" msg
+                    && String.contains "exactly TWO targets" msg
+
+            Ok _ ->
+                False
+        )
+    , check "B4 PARSE: a DECLARATION in a `for` step is a parse reject (C's step is an expression; a declaration there would shadow a binder once per iteration)"
+        (case Parse.parseProgram "defun Rt.f(j: word) -> word {\n  for (j = 0; j < 2; word k = 1) {\n    j = j + 1;\n  }\n  return j;\n}" of
+            Err _ ->
+                True
+
+            Ok _ ->
+                False
+        )
+    , check "B4 CHECK: `break;` outside any loop is a reject naming the rule — the nearest loop is the one it leaves, so nesting needs no labels"
+        (case b6CheckErr rt "module B4b\ndefun B4b.f() -> word {\n  break;\n}" of
+            Err msg ->
+                String.contains "outside any loop" msg
+
+            Ok _ ->
+                False
+        )
+    , check "B4 CHECK: `continue;` outside any loop is the same reject"
+        (case b6CheckErr rt "module B4c\ndefun B4c.f() -> word {\n  continue;\n}" of
+            Err msg ->
+                String.contains "outside any loop" msg
+
+            Ok _ ->
+                False
+        )
+    , check "B4 CHECK: a WORD-class local IS assignable (`x = 1;`) — the auto-cell is what makes a loop-carried word legal at all — and a cross-class assignment is still the class reject"
+        (case b6CheckErr rt "module B4w\ndefun B4w.f() -> word {\n  word x = 0;\n  x = 1;\n  return x;\n}" of
+            Ok _ ->
+                case b6CheckErr rt "module B4w\ndefun B4w.g() -> word {\n  word x = 0;\n  x = mknil;\n  return x;\n}" of
+                    Err msg ->
+                        String.contains "but the assigned value is" msg
+
+                    Ok _ ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "B4 CHECK: a BOOL local takes a bool TEMP only (the J1 binder closure, at the assignment site) — `b = i < 5;` is legal, `b = 1;` is the reject"
+        (case b6CheckErr rt "module B4o\ndefun B4o.f(i: word) -> word {\n  bool b = i < 3;\n  b = i < 5;\n  return payload(mkbool(b), 0);\n}" of
+            Ok _ ->
+                case b6CheckErr rt "module B4o\ndefun B4o.g(i: word) -> word {\n  bool b = i < 3;\n  b = 1;\n  return 0;\n}" of
+                    Err msg ->
+                        String.contains "can only be assigned a bool TEMP" msg
+
+                    Ok _ ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "B4 CHECK: a `val` local cannot be ASSIGNED, and the reject names the escape (`recur` params, the gcSweep idiom) — Mid.Ir has no node that stores a Value into a frame slot, so this is a stated cut, not a silent one"
+        (case b6CheckErr rt "module B4v\ndefun B4v.f() -> val {\n  val v = mknum(1);\n  while (payload(v, 0) < 3) {\n    v = mknum(2);\n  }\n  return v;\n}" of
+            Err msg ->
+                String.contains "cannot be ASSIGNED" msg
+                    && String.contains "recur` PARAMETER" msg
+
+            Ok _ ->
+                False
+        )
+    , check "B4 IR: the AUTO-CELL shape — `word i = 0; while (i < 3) { i = i + 1; }` lowers the declaration to `RawAllocN 1` + a `RawWordStore` of the initialiser, the condition to a `RawWordLoad`, and the assignment to a store (NO phi anywhere: the state lives in memory)"
+        (case lowlBody "defun Rt.c(n: word) -> word {\n  word i = 0;\n  while (i < 3) {\n    i = i + 1;\n  }\n  return i;\n}" of
+            Ok body ->
+                b4CellInit body == Just 1
+                    && b4CellStores body == [ 0, 0 ]
+                    && b4CellLoads body >= 2
+                    && b4HasLoop body
+
+            Err _ ->
+                False
+        )
+    , check "B4 IR: a READ-ONLY local in a loop stays a REGISTER (no cell, no load) — the auto-cell set is `assigned anywhere`, not `in a loop`"
+        (case lowlBody "defun Rt.r(n: word) -> word {\n  word k = 0;\n  word lim = 3;\n  while (k < lim) {\n    k = k + 1;\n  }\n  return k;\n}" of
+            Ok body ->
+                -- ONE cell (k) — `lim` is read-only and is a plain `Var`, so
+                -- if the auto-cell rule widened to "in a loop" this is 2
+                b4CellInits body == 1 && b4CellLoads body >= 1
+
+            Err _ ->
+                False
+        )
+    , check "B4 IR: `for` desugars so that `continue` RUNS the step — the body's `continue` block carries the step statement BEFORE the `Continue` leaf (a continue that jumped to the loop top would hang the fixture, not misprint it)"
+        (case lowlBody "defun Rt.f(i: word) -> word {\n  for (i = 0; i < 3; i = i + 1) {\n    if (i == 1) { continue; }\n  }\n  return i;\n}" of
+            Ok body ->
+                -- the step's `i = i + 1` appears TWICE: at the continue and
+                -- at the body's fall-through end.  Once = a continue that
+                -- skips the step (C-wrong); three = a doubled rewrite
+                b4StepStores body == 2
+
+            Err _ ->
+                False
+        )
+    , check "B4 IR: `do {..} while (c);` is a `Loop` whose condition is the constant 1 with C's TEST placed where an iteration leaves — `if (c) { continue; }` followed by `break` (no body duplication, no new flag)"
+        (case lowlBody "defun Rt.d(i: word) -> word {\n  do {\n    i = i + 1;\n  } while (i < 3);\n  return i;\n}" of
+            Ok body ->
+                b4DoWhileShape body
+
+            Err _ ->
+                False
+        )
+    , check "B4 .ssa STRUCTURE: a `while` emits `<cond test> jnz @loopbody / @loopexit`, the body, `jmp @loop`, and @loopexit — and NO `phi` appears ANYWHERE in the emitted text (the no-phi rule is the whole point of the cell)"
+        (case emitUserSsa rt "module B4s\ndefun B4s.f(n: word) -> word {\n  word i = 0;\n  word s = 0;\n  while (i < n) {\n    i = i + 1;\n    s = s + i;\n  }\n  return s;\n}" of
+            Ok ssa ->
+                String.contains "@loop_0" ssa
+                    && String.contains "jnz %t" ssa
+                    && String.contains "@loopbody_2" ssa
+                    && String.contains "jmp @loop_0" ssa
+                    && String.contains "@loopexit_1" ssa
+                    && not (String.contains "phi" ssa)
+
+            Err _ ->
+                False
+        )
+    , check "B4 .ssa AUTO-CELL: the cell is STACK storage — `alloc8 8` (Il.Alloc), never `malloc(l 8)` — and its init is a store into it, so the state a back edge needs lives in the frame (the exact cell COUNT is pinned by the IR rows above, where no runtime defun's allocs are in the text)"
+        (case emitUserSsa rt "module B4a\ndefun B4a.f(n: word) -> word {\n  word lim = 3;\n  word i = 0;\n  while (i < lim) {\n    i = i + 1;\n  }\n  return i;\n}" of
+            Ok ssa ->
+                String.contains "alloc8 8" ssa
+                    && not (String.contains "malloc(l 8)" ssa)
+                    && String.contains "loadl" ssa
+
+            Err _ ->
+                False
+        )
     ]
+
+
+{-| B4 — every subexpression of a tree, pre-order (the loop rows count nodes
+of a shape; a shape-specific walker per row would restate the IR).
+-}
+b4Exps : Exp -> List Exp
+b4Exps e =
+    e :: List.concatMap b4Exps (b4Kids e)
+
+
+b4Kids : Exp -> List Exp
+b4Kids e =
+    case e of
+        Lit _ ->
+            []
+
+        Var _ ->
+            []
+
+        GRef _ ->
+            []
+
+        StreamRef _ ->
+            []
+
+        Lam l ->
+            [ l.body ]
+
+        NoTail inner ->
+            [ inner ]
+
+        App app ->
+            app.fn :: app.args
+
+        PrimApp app ->
+            app.args
+
+        Let block ->
+            List.concatMap
+                (\b ->
+                    case b of
+                        LetBind lb ->
+                            [ lb.value ]
+
+                        LetDestruct d ->
+                            [ d.value ]
+                )
+                block.binders
+                ++ [ block.body ]
+
+        Case branch ->
+            branch.scrutinee :: List.map .body branch.alts
+
+        Con c ->
+            c.args
+
+        Tup es ->
+            es
+
+        RecordLit setters ->
+            List.map Tuple.second setters
+
+        RecordGet rec _ ->
+            [ rec ]
+
+        RecordUpdate update ->
+            update.base :: List.map Tuple.second update.updates
+
+        ListLit es ->
+            es
+
+        If block ->
+            [ block.cond, block.thenBranch, block.elseBranch ]
+
+        ShortAnd block ->
+            [ block.left, block.right ]
+
+        ShortOr block ->
+            [ block.left, block.right ]
+
+        NotEqual block ->
+            [ block.left, block.right ]
+
+        Loop block ->
+            [ block.cond, block.body ]
+
+        Break ->
+            []
+
+        Continue ->
+            []
+
+        Unsafe node ->
+            case node of
+                RawCall c ->
+                    c.args
+
+                RawCallRaw c ->
+                    c.args
+
+                RawCallAgg c ->
+                    c.fn :: c.args
+
+                RawTagOf x ->
+                    [ x ]
+
+                RawPayload r ->
+                    [ r.value ]
+
+                RawPayload32 r ->
+                    [ r.value ]
+
+                RawTagIs r ->
+                    [ r.value ]
+
+                RawMkValue r ->
+                    r.words
+
+                RawAllocVector x ->
+                    [ x ]
+
+                RawAllocRaw x ->
+                    [ x ]
+
+                RawVecLoad r ->
+                    [ r.vec, r.index ]
+
+                RawVecAddr r ->
+                    [ r.vec, r.index ]
+
+                RawVecStore r ->
+                    [ r.vec, r.index, r.value ]
+
+                RawStrByte r ->
+                    [ r.str, r.index ]
+
+                RawBin r ->
+                    [ r.a, r.b ]
+
+                RawUn r ->
+                    [ r.v ]
+
+                RawCmp r ->
+                    [ r.a, r.b ]
+
+                RawFltBin r ->
+                    [ r.a, r.b ]
+
+                RawFltCmp r ->
+                    [ r.a, r.b ]
+
+                RawIToF x ->
+                    [ x ]
+
+                RawLoadFlt x ->
+                    [ x ]
+
+                RawByteLoad r ->
+                    [ r.ptr, r.index ]
+
+                RawByteStore r ->
+                    [ r.ptr, r.index, r.value ]
+
+                RawWordLoad r ->
+                    [ r.ptr, r.index ]
+
+                RawWordStore r ->
+                    [ r.ptr, r.index, r.value ]
+
+                WithRoots r ->
+                    [ r.body ]
+
+                RawDataAddr _ ->
+                    []
+
+                RawCStr _ ->
+                    []
+
+                RawSym _ ->
+                    []
+
+                RawAllocN _ ->
+                    []
+
+
+{-| The FIRST cell allocation's word count (`Just n` for `RawAllocN n`).
+-}
+b4CellInit : Exp -> Maybe Int
+b4CellInit body =
+    List.head
+        (List.filterMap
+            (\e ->
+                case e of
+                    Unsafe (RawAllocN n) ->
+                        Just n
+
+                    _ ->
+                        Nothing
+            )
+            (b4Exps body)
+        )
+
+
+b4CellInits : Exp -> Int
+b4CellInits body =
+    List.length
+        (List.filter
+            (\e ->
+                case e of
+                    Unsafe (RawAllocN _) ->
+                        True
+
+                    _ ->
+                        False
+            )
+            (b4Exps body)
+        )
+
+
+{-| Every `RawWordStore`'s constant dst index, in tree order.
+-}
+b4CellStores : Exp -> List Int
+b4CellStores body =
+    List.filterMap
+        (\e ->
+            case e of
+                Unsafe (RawWordStore r) ->
+                    case r.index of
+                        Lit (LNumber n) ->
+                            Just n
+
+                        _ ->
+                            Nothing
+
+                _ ->
+                    Nothing
+        )
+        (b4Exps body)
+
+
+b4CellLoads : Exp -> Int
+b4CellLoads body =
+    List.length
+        (List.filter
+            (\e ->
+                case e of
+                    Unsafe (RawWordLoad _) ->
+                        True
+
+                    _ ->
+                        False
+            )
+            (b4Exps body)
+        )
+
+
+b4HasLoop : Exp -> Bool
+b4HasLoop body =
+    List.any
+        (\e ->
+            case e of
+                Loop _ ->
+                    True
+
+                _ ->
+                    False
+        )
+        (b4Exps body)
+
+
+b4HasBreak : Exp -> Bool
+b4HasBreak body =
+    List.any (\e -> e == Break) (b4Exps body)
+
+
+b4HasContinue : Exp -> Bool
+b4HasContinue body =
+    List.any (\e -> e == Continue) (b4Exps body)
+
+
+{-| The stores whose VALUE is an addition — the `for` step's `i = i + 1`.  A
+continue site that ran the step and the body's own end are two such stores;
+any other count is the rewrite having doubled (or dropped) one.
+-}
+b4StepStores : Exp -> Int
+b4StepStores body =
+    List.length
+        (List.filter
+            (\e ->
+                case e of
+                    Unsafe (RawWordStore r) ->
+                        case r.value of
+                            Unsafe (RawBin b) ->
+                                b.op == RAdd
+
+                            _ ->
+                                False
+
+                    _ ->
+                        False
+            )
+            (b4Exps body)
+        )
+
+
+{-| The `do`-`while` desugar's shape: a `Loop` whose condition is the constant
+1, carrying BOTH leaves (a `Continue` for "the test held" and a `Break` for
+"it did not").
+-}
+b4DoWhileShape : Exp -> Bool
+b4DoWhileShape body =
+    List.any
+        (\e ->
+            case e of
+                Loop l ->
+                    l.cond == Lit (LNumber 1) && b4HasContinue l.body && b4HasBreak l.body
+
+                _ ->
+                    False
+        )
+        (b4Exps body)
+
+
+{-| How many times a literal substring appears (the .ssa alloc census).
+-}
+b4Count : String -> String -> Int
+b4Count needle hay =
+    if String.length hay < String.length needle then
+        0
+
+    else if String.startsWith needle hay then
+        1 + b4Count needle (String.dropLeft (String.length needle) hay)
+
+    else
+        b4Count needle (String.dropLeft 1 hay)
+
+
 {-| The block's VALUE: the innermost `body` of the Let chain a declaration's
 stores wrap it in (the array pins compare the READ node, not the memset/store
 prefix).
