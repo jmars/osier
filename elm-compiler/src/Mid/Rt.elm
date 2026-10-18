@@ -1160,12 +1160,20 @@ rtDeps =
           -- an edge from Rt.main: Rt.main is seeded unconditionally ($main is
           -- in every artifact), so an edge here would pull the host into the
           -- default route and move all 159 corpus hashes.  See midHostMarker.
-          -- The dispatch's eight edges are the ctor arms (Succeed/Fail/AndThen/
-          -- OnError/Now/Quit land in complete*/pushFrame; the 14 unported ones
-          -- land in hostDieUnported) plus hostArity/cStrEq for the tag probe.
+          -- The dispatch's edges are the ctor arms (Succeed/Fail/AndThen/
+          -- OnError/Now/Quit land in complete*/pushFrame; 7B-7E's leaves land
+          -- in their own seated defuns) plus hostArity/cStrEq for the tag
+          -- probe and hostDieErr for the note below.
+          --
+          -- STAGE 7E DELETED ( "Rt.hostDieUnported", [ "Rt.hostDieErr" ] ).
+          -- It was the porting gate: 7A-7D had 18 of twenty ctors, and the
+          -- other two had to die loudly.  7E implements ListDir and Stat, so
+          -- no ctor routes there any more and the seat was removed from the
+          -- rawAbi set, the arity record and this table alike.  The dispatch's
+          -- tail is now the ZIG's unhandled-ctor arm, hostDieErr with its own
+          -- `unhandled Task effect: ` prefix.
           ( "Rt.hostDieErr", [ "Rt.cStrLenGo" ] )
         , ( "Rt.dieErr", [ "Rt.hostDieErr" ] )
-        , ( "Rt.hostDieUnported", [ "Rt.hostDieErr" ] )
         , ( "Rt.hostNowMs", [] )
         , ( "Rt.hostInit", [] )
         , ( "Rt.hostIsProgram", [ "Rt.cStrEq" ] )
@@ -1180,7 +1188,7 @@ rtDeps =
         , ( "Rt.hostSpawn", [ "Rt.hostSpawnFind" ] )
         , ( "Rt.hostSpawnFromCmd", [ "Rt.hostSpawn" ] )
         , ( "Rt.hostPushFrame", [ "Rt.dieErr" ] )
-        , ( "Rt.hostDispatch", [ "Rt.hostDeactivate", "Rt.hostArity", "Rt.cStrEq", "Rt.hostCompleteOk", "Rt.hostCompleteErr", "Rt.hostPushFrame", "Rt.hostNowMs", "Rt.hostDieUnported", "Rt.hostWriteStr", "Rt.hostReadLine", "Rt.hostWriteFileLeaf", "Rt.hostLeafReadFile", "Rt.hostLeafExec", "Rt.getenv", "Rt.setenv", "Rt.cd", "Rt.getcwd", "Rt.getpid", "Rt.glob" ] )
+        , ( "Rt.hostDispatch", [ "Rt.hostDeactivate", "Rt.hostArity", "Rt.cStrEq", "Rt.hostCompleteOk", "Rt.hostCompleteErr", "Rt.hostPushFrame", "Rt.hostNowMs", "Rt.hostDieErr", "Rt.hostWriteStr", "Rt.hostReadLine", "Rt.hostWriteFileLeaf", "Rt.hostLeafReadFile", "Rt.hostLeafExec", "Rt.hostLeafListDir", "Rt.hostLeafStat", "Rt.getenv", "Rt.setenv", "Rt.cd", "Rt.getcwd", "Rt.getpid", "Rt.glob" ] )
         , ( "Rt.hostCompleteOk", [ "Rt.hostDeliver", "Rt.hostCall" ] )
         , ( "Rt.hostCompleteErr", [ "Rt.hostDeactivate", "Rt.hostCall" ] )
         , ( "Rt.hostDeliver", [ "Rt.hostCall", "Rt.hostDeactivate", "Rt.hostSpawnFromCmd" ] )
@@ -1257,6 +1265,20 @@ rtDeps =
         , ( "Rt.hostCompleteReadyGo", [ "Rt.hostExecComplete" ] )
         , ( "Rt.hostCompleteReady", [ "Rt.hostCompleteReadyGo" ] )
         , ( "Rt.hostLeafExec", [ "Rt.hostEpCbuf", "Rt.epProg", "Rt.hostDieErr", "Rt.hostSingleCommandArgv", "Rt.epFreeChains", "Rt.exec-plan", "Rt.hostCompleteOk", "Rt.hostExecChild", "Rt.hostSetNonblocking", "Rt.hostRegisterChild" ] )
+        , -- ===== THE STAGE 7E DIR/STAT LEAVES.  Same rule again: one entry per
+          -- host defun, exactly its `call Rt.*` targets.  `Rt.revGo` is the
+          -- list flip the walk needs (the accumulator is built in reverse
+          -- order, since each record is PREPENDED), and `Rt.cons`/`Rt.@p`/
+          -- `Rt.intern` are the record builders' primitive forms — the Zig's
+          -- values.valCons/values.valSymbol/runPrim("@p"), which is why the
+          -- record shape is an ASSOC CHAIN and not a compiled vector.
+          ( "Rt.hostLeafListDir", [ "Rt.cStrFill", "Rt.hostListDirDrain", "Rt.revGo", "Rt.hostCompleteOk" ] )
+        , ( "Rt.hostListDirDrain", [ "Rt.hostListDirChunk" ] )
+        , ( "Rt.hostListDirChunk", [ "Rt.cStrLenGo", "Rt.hostCStrOf", "Rt.hostDirIsDir", "Rt.hostDirRecord" ] )
+        , ( "Rt.hostDirIsDir", [] )
+        , ( "Rt.hostDirRecord", [ "Rt.@p", "Rt.intern", "Rt.cons" ] )
+        , ( "Rt.hostLeafStat", [ "Rt.cStrFill", "Rt.hostStatRecord", "Rt.hostCompleteOk" ] )
+        , ( "Rt.hostStatRecord", [ "Rt.cons", "Rt.@p", "Rt.intern" ] )
         ]
 
 
@@ -1385,7 +1407,6 @@ rawAbi =
           -- string it prints.
           "Rt.dieErr"
         , "Rt.hostDieErr"
-        , "Rt.hostDieUnported"
         ]
 
 
@@ -1429,7 +1450,6 @@ rawAbiArity =
           -- the two-part variant's prefix + name.
           ( "Rt.dieErr", 1 )
         , ( "Rt.hostDieErr", 2 )
-        , ( "Rt.hostDieUnported", 1 )
         ]
 
 

@@ -74,7 +74,10 @@ export Rt.apply-at : val -> val -> val -> val
 //     rlimit seat one `getrlimit` + one `setrlimit` (Rt.main's argv prologue),
 //     so these three DO have Rt-body calls today.  They are still not declared
 //     here, per the brief — the emitted shape is unchanged either way.
-//   * `poll`/`fstatat`/`getdents64`/`strtod` — no call site in this file.
+//   * `fstatat`/`getdents64` — DECLARED at stage 7E, which is the unit that
+//     gave them their first call sites (the listDir walk and the stat leaf);
+//     the two `rawcallArity` rows went with them, since R-08 refuses a symbol
+//     in both tables.  `strtod` is still a row and still has no site.
 //   * every `rt_*` seat — not C: they are rt.o/Mid symbols with a WORD ABI
 //     (plan §6), and declaring a word seat as a C signature would be a type
 //     lie.
@@ -117,6 +120,14 @@ extern poll(fds : ptr, nfds : i64, timeout : i32) -> i32;
 // in play here — unlike `clock_gettime`, see the host's own note.)
 extern fcntl(fd : i32, cmd : i32, ...) -> i32;
 extern _exit(code : i32) -> void;
+// STAGE 7E: the two syscalls the dir/stat leaves need (plan §6 gap G-I's
+// list, minus `strtod`).  Both are declared with the C prototypes' RESULT
+// widths — `getdents64` is glibc's `int` (not the raw syscall's `long`), so
+// the seam's `=w call` + `extsw` is what makes `n < 0` a real read-error test
+// rather than a comparison against 0x00000000ffffffff.  `count` stays `i64`
+// (size_t), and `flag` is AT_SYMLINK_NOFOLLOW's `int`.
+extern getdents64(fd : i32, buf : ptr, count : i64) -> i32;
+extern fstatat(dirfd : i32, path : ptr, buf : ptr, flag : i32) -> i32;
 // THE REGION LAYOUT (midlang-u5) — the name -> word-slot table.  Before this
 // struct the offsets were `wstore(base, k, ..)` constants in Rt.gcInit and
 // prose in Mid/RtGc.elm; slot 0..12 MEASURED against gcInit's writes and every
@@ -626,6 +637,67 @@ struct HostSpawn {
   errr : word;
   errw : word;
   exec : word;
+}
+// ==================== STAGE 7E: THE DIR/STAT STRUCTS =====================
+// The two layouts the last leaves read.  BOTH ARE C LAYOUTS, so both are
+// spelled with the widths the headers declare — the cffi U6 rule, and the same
+// reason `struct Pollfd` above exists (`mode`/`uid`/`gid` at 4-byte offsets
+// cannot be expressed word-granularly at all).
+//
+// THE AUTHORITY IS tools/qbe/fixtures/ffim-mem.mid, NOT this comment: its
+// `struct Stat` is byte-identical to the libc header on this host, and its
+// arms 3/4 WRITE every one of these fields through the typed fields and read
+// the words back (`mode`@24, `uid`@28, `gid`@32, `__pad0`@36, `rdev`@40,
+// `size`@48, `blocks`@64), so the offsets are measured against values the
+// libc call produced rather than re-derived here.  144 bytes = 18 words.
+//
+// WHY THE TIMESPECS ARE `HostTs` AND NOT A NEW STRUCT: glibc's `struct
+// timespec` is exactly `{ i64 tv_sec; i64 tv_nsec; }` (ffim-mem's `Timespec`)
+// and `HostTs` is that declaration already, from `clock_gettime`.  A rename
+// would be a second declaration of one layout.
+struct Stat {
+  dev : u64;
+  ino : u64;
+  nlink : u64;
+  mode : u32;
+  uid : u32;
+  gid : u32;
+  pad0 : i32;
+  rdev : u64;
+  size : i64;
+  blksize : i64;
+  blocks : i64;
+  atim : HostTs;
+  mtim : HostTs;
+  ctim : HostTs;
+  reserved : word[3];
+}
+// LINUX `struct linux_dirent64` — the getdents64 record: ino64 8, off64 8,
+// reclen u16 @16, d_type u8 @18, then a NUL-terminated name at byte 19.
+//
+// THE NAME TAIL IS NOT A FIELD, DELIBERATELY: a narrow array element is not
+// expressible (Parse's fieldType rejects `u8[256]` naming exactly this struct),
+// and it must not be — the record's STRIDE is `d_reclen`, not a fixed size, so
+// the name is read in place at `base + 19` with `byteload`.  `sizeof(Dirent)`
+// is therefore 24 (the four headers padded to alignment) and is NEVER the
+// stride; only the four fields above it are read by name, and their offsets are
+// the kernel's own.
+struct Dirent {
+  ino : u64;
+  off : i64;
+  reclen : u16;
+  dtype : u8;
+}
+// ONE getdents64 WALK'S CURSOR.  C heap rather than defun params: a `call Rt.*`
+// carries at most THREE pointer args and a self-tail hands back only the params
+// (7B's HostScan note), so the four words live in memory.  `fd` keeps the width
+// the kernel's openat gave it; `buf` is the reused 4096-byte chunk, which is
+// C heap for gap G-K's reason (a Mid local that size is a 512-slot frame).
+struct HostDir {
+  fd : i32;
+  buf : word;
+  off : word;
+  nread : word;
 }
 // NO extern FOR clock_gettime, DELIBERATELY: the symbol still has an
 // `Ast.rawcallArity` row (cffi U5 left it, "per the brief"), and R-08 refuses
@@ -5245,13 +5317,14 @@ defun Rt.hostDieErr(a : word, b : word) -> word {
 defun Rt.dieErr(msg : word) -> word {
   return call Rt.hostDieErr(rawstr(""), msg);
 }
-// The 14 Task ctors 7A does NOT implement (7B-7E own them).  LOUD: a silent
-// drop would leave the continuation unresumed and the program apparently
-// working, which is the Zig's `unhandled Task effect` arm's reason for
-// existing.  The ctor's own name is appended so a red row names the leaf.
-defun Rt.hostDieUnported(nm : word) -> word {
-  return call Rt.hostDieErr(rawstr("unported Task effect: "), nm);
-}
+// THE UNPORTED SEAT IS GONE (stage 7E).  `Rt.hostDieUnported` existed for one
+// reason — 7A-7D implemented 18 of Runtime.elm's twenty Task constructors and
+// the rest had to die LOUD rather than be silently dropped — and 7E implements
+// the last two.  The defun is DELETED rather than left uncalled so that the
+// claim is checkable by grep: no "unported" text survives in this file, and a
+// later editor who wants a porting gate back has to write one, not reopen one.
+// The dispatch's tail is now the ZIG's own arm (its `unhandled Task effect`
+// message, printed through hostDieErr directly).
 
 defun Rt.hostNowMs(dummy : val) -> val {
   HostTs t;
@@ -6717,6 +6790,216 @@ defun Rt.hostLeafExec(hN : val, iN : val, planN : val) -> val {
   return mknil;
 }
 
+// ===================== STAGE 7E: LISTDIR + STAT =========================
+// THE LAST TWO LEAVES, and with them the unported set is EMPTY: every one of
+// Runtime.elm's twenty Task constructors has a real arm in hostDispatch below,
+// so nothing reaches the loud unknown-ctor seat any more (see that seat's note,
+// and TestMain's 7E UNPORTED row, which asserts the ABSENCE of a porting gate
+// rather than its text).
+//
+// BOTH LEAVES ARE SYNCHRONOUS: no etag, no poll registration, no state in the
+// effect union — the Zig's leafListDir/leafStat are the same, because a
+// directory walk and an fstatat never block.  What they do NOT share with the
+// Zig is the SHAPE of the record builders: the Zig spelled five explicit
+// rootPush/rootPop pairs per record, while here every intermediate is a `val`
+// binder, which is a rooted frame slot for the whole body (Lower's WithRoots
+// note: rt_frame_enter registers the pooled frame as one ROOT_VALUE_ARRAY, so
+// a `val` binder survives a collect in place — that is what makes the plain
+// `val p1 = call Rt.cons(..)` chain below safe across the next allocation).
+//
+// THE RECORDS ARE ASSOC CHAINS, not compiled vectors — the shape the Zig's
+// runPrim("@p") built, and the shape `statplus` exists to pin arithmetic on.
+
+// TaskListDir — openat(O_DIRECTORY) then the getdents64 walk.
+//
+// A FAILED OPEN COMPLETES SUCCESS WITH [] — the Zig's `catch` arm, and
+// leafReadFile's empty-string parity: Io.listDir has no failure channel on
+// this route, so an unreadable directory is an empty listing, not an error.
+//
+// THE FLIP: the walk visits the entries in the KERNEL'S raw fs order (never
+// sorted — sorting is app-side, `dirunit` re-sorts through Set) and PREPENDS
+// each record, so the accumulator ends up REVERSED; `Rt.revGo` flips it after
+// the dirfd is closed.  The two-phase order is the Zig's (it drained names into
+// page_allocator storage first, for exactly this reason): no allocation for a
+// record happens while a raw fd and a raw buffer are both live and referenced
+// from the loop's own cursor.
+defun Rt.hostLeafListDir(hN : val, iN : val, pathN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  word resAddr = h + 8 + ((lp->evals[i].base + 1) * 40);
+  word len = len32(pathN);
+  word pb = allocraw(len + 2);
+  call Rt.cStrFill(mknum(pb), pathN, mknum(0));
+  vecstore(resAddr, 0, mknil);             // the accumulator: EMPTY and ROOTED
+  word fd = rawcall openat(-100, pb, 589824, 0);   // O_RDONLY|O_DIRECTORY|O_CLOEXEC
+  if (mkbool(fd < 0)) {
+    return call Rt.hostCompleteOk(hN, iN); // the Zig's failed-open arm: []
+  }
+  word cell = rawcall malloc(32);
+  [*HostDir](cell)->fd = fd;
+  [*HostDir](cell)->buf = rawcall malloc(4096);
+  [*HostDir](cell)->off = 0;
+  [*HostDir](cell)->nread = 0;
+  call Rt.hostListDirDrain(hN, iN, mknum(cell));
+  rawcall close(fd);
+  rawcall free([*HostDir](cell)->buf);
+  rawcall free(cell);
+  vecstore(resAddr, 0, call Rt.revGo(vecload(resAddr, 0), mknil));
+  return call Rt.hostCompleteOk(hN, iN);
+}
+
+// ONE getdents64 call per iteration; the entries inside that chunk are
+// hostListDirChunk's.  THE TWO ZIG `break :drain` ARMS (a read error, and EOF)
+// ARE ONE ARM HERE — both STOP THE WALK AND KEEP WHAT IS ALREADY ACCUMULATED —
+// and the "stop" is simply this defun NOT recurring (gap G-B: Mid has no
+// labelled break, so there is no loop label to escape and no flag to thread).
+// The accumulator is not in the loop's hands at all: it lives in the eval's
+// result slot, so returning early cannot lose it.
+defun Rt.hostListDirDrain(hN : val, iN : val, cellN : val) -> val {
+  word c = payload(cellN, 0);
+  *HostDir dd = [*HostDir](c);
+  word n = rawcall getdents64(dd->fd, dd->buf, 4096);
+  if (mkbool(n <= 0)) {
+    return mknil;                          // 0 = EOF, < 0 = a read error
+  }
+  dd->nread = n;
+  dd->off = 0;
+  call Rt.hostListDirChunk(hN, iN, cellN);
+  recur(hN, iN, cellN);
+}
+
+// ONE CHUNK of entries, walked `off` to `nread`.  Returns when the chunk is
+// exhausted, which is the caller's signal to ask the kernel for more.
+//
+// THE STRIDE IS d_reclen, NEVER A FIXED SIZE: a record is 19 bytes of headers
+// plus a NUL-terminated name padded to 8, so the only correct walk is
+// `off += reclen`.  The name is read IN PLACE (the buffer is reused by the next
+// getdents64 call) and copied into a Mid String before the step returns.
+//
+// '.' AND '..' ARE SKIPPED (Go os.ReadDir parity) — the Zig's two byte tests,
+// kept as one boolean because a second `if` would need a second `recur` on the
+// same path.
+defun Rt.hostListDirChunk(hN : val, iN : val, cellN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  word c = payload(cellN, 0);
+  *HostDir dd = [*HostDir](c);
+  *Host lp = [*Host](h);
+  word off = dd->off;
+  if (mkbool(off >= dd->nread)) {
+    return mknil;                          // the chunk is done
+  }
+  word base = dd->buf + off;
+  *Dirent d = [*Dirent](base);
+  word rlen = d->reclen;
+  word dtype = d->dtype;
+  word nptr = base + 19;                   // ino 8 + off 8 + reclen 2 + dtype 1
+  word nlen = payload(call Rt.cStrLenGo(mknum(nptr), mknum(0)), 0);
+  word b0 = byteload(nptr, 0);
+  word b1 = byteload(nptr, 1);
+  val skip = (mkbool(nlen == 1) && mkbool(b0 == 46)) || ((mkbool(nlen == 2) && mkbool(b0 == 46)) && mkbool(b1 == 46));
+  if (payload(skip, 0) != 0) {
+    dd->off = off + rlen;
+    recur(hN, iN, cellN);                  // '.' / '..': skipped, not listed
+  }
+  word resAddr = h + 8 + ((lp->evals[i].base + 1) * 40);
+  val nm = call Rt.hostCStrOf(mknum(nptr), mknum(nlen));
+  val isDirV = call Rt.hostDirIsDir(mknum(dd->fd), mknum(nptr), mknum(dtype));
+  vecstore(resAddr, 0, call Rt.hostDirRecord(nm, isDirV, vecload(resAddr, 0)));
+  dd->off = off + rlen;
+  recur(hN, iN, cellN);
+}
+
+// THE d_type ARM, with the DT_UNKNOWN FALLBACK PER ENTRY (never per directory —
+// one record's type says nothing about the next one's): DT_UNKNOWN (0) fstatats
+// the name RELATIVE TO THE OPEN DIRFD with AT_SYMLINK_NOFOLLOW (256), which is
+// Go DirEntry.IsDir's parity — a symlink TO a directory is NOT a directory here
+// (the symlink-following question is TaskStat's, and it answers the other way).
+//
+// MEASURED GAP: this host's filesystems report real d_types for every entry the
+// gate sees, so the fallback arm has NO fixture — it is pinned by TEXT (7E
+// DT_UNKNOWN row) only.  Same class of stated gap as 7C's OOM arms.
+defun Rt.hostDirIsDir(fdN : val, nameN : val, dtypeN : val) -> val {
+  word dt = payload(dtypeN, 0);
+  if (mkbool(dt != 0)) {
+    return mkbool(dt == 4);                // DT_DIR, and no syscall for it
+  }
+  Stat st;
+  word rc = rawcall fstatat(payload(fdN, 0), payload(nameN, 0), &st, 256);
+  if (mkbool(rc != 0)) {
+    return false;                          // the Zig's `!= 0 -> false`
+  }
+  return mkbool((st.mode & 61440) == 16384);   // S_IFMT == S_IFDIR
+}
+
+// ONE {name, isDir} record, pair-consed onto `tailN`.  Three params is the lean
+// ABI's whole budget, and it is exactly what this needs.
+//
+// THE TAIL IS CONSED ON THE OUTSIDE (the Zig's dirRecord comment records the
+// bug this exists for): the record's spine ends at nil, and threading the list
+// tail into the isDir pair BURIES the rest of the list inside the record — then
+// `assoc`/field j read the tail instead of the boolean.  So: build the record
+// to nil, then cons it onto the tail.
+defun Rt.hostDirRecord(nameN : val, isDirN : val, tailN : val) -> val {
+  val pName = call Rt.@p(call Rt.intern("name"), nameN);
+  val inner = call Rt.cons(call Rt.@p(call Rt.intern("isDir"), isDirN), mknil);
+  val rec = call Rt.cons(pName, inner);
+  return call Rt.cons(rec, tailN);
+}
+
+// TaskStat — fstatat(AT_FDCWD) with symlinks FOLLOWED (flag 0, Go os.Stat's
+// parity), completing `{ size, mode, mtimeMs, isDir, isFile }`.
+//
+// A FAILED STAT COMPLETES THE ZERO RECORD, AND THE ZERO IS STRUCTURAL: the
+// 144-byte block is memset to 0 BEFORE the call, so ENOENT leaves
+// size = mode = mtimeMs = 0 and `mode & S_IFMT` = 0 — neither a dir nor a file.
+// That is the Zig's five `if (ok)` arms with no `ok` flag to get wrong (it is
+// also what `statunit`'s absent-path line pins).
+defun Rt.hostLeafStat(hN : val, iN : val, pathN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  word len = len32(pathN);
+  word pb = allocraw(len + 2);
+  call Rt.cStrFill(mknum(pb), pathN, mknum(0));
+  word stW = rawcall malloc(144);          // 18 words: struct Stat, U6-measured
+  rawcall memset(stW, 0, 144);
+  rawcall fstatat(-100, pb, stW, 0);       // AT_FDCWD, flag 0 = FOLLOW symlinks
+  call Rt.hostStatRecord(hN, iN, mknum(stW));
+  rawcall free(stW);
+  return call Rt.hostCompleteOk(hN, iN);
+}
+
+// The {size, mode, mtimeMs, isDir, isFile} record — FIVE assoc pairs, field j
+// of the source at depth j, so the list is built right-to-left and the LAST
+// pair prepended is `size` (the source's first field).
+//
+// THE OFFSETS ARE THE U6 FIXTURE'S, not re-derived: mode @24 (byte), size @48,
+// mtim @88 (sec) and @96 (nsec) out of `struct Stat` above.  `statunit` is this
+// row's behavioural oracle — a wrong `size` offset breaks its `s12-ok`/`s8-ok`
+// lines and a wrong `mode` offset breaks `treg-ok`/`tdir-ok`, so the field
+// numbers are MEASURED by a green arm-B row, not just by this comment.
+defun Rt.hostStatRecord(hN : val, iN : val, stN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  *Stat st = [*Stat](payload(stN, 0));
+  word mode = st->mode;
+  word sz = st->size;
+  word ms = (st->mtim.sec * 1000) + (st->mtim.nsec / 1000000);
+  val isDir = mkbool((mode & 61440) == 16384);
+  val isFile = mkbool((mode & 61440) == 32768);
+  val fFile = call Rt.cons(call Rt.@p(call Rt.intern("isFile"), isFile), mknil);
+  val fDir = call Rt.cons(call Rt.@p(call Rt.intern("isDir"), isDir), fFile);
+  val fMtime = call Rt.cons(call Rt.@p(call Rt.intern("mtimeMs"), mknum(ms)), fDir);
+  val fMode = call Rt.cons(call Rt.@p(call Rt.intern("mode"), mknum(mode)), fMtime);
+  val fSize = call Rt.cons(call Rt.@p(call Rt.intern("size"), mknum(sz)), fMode);
+  word resAddr = h + 8 + ((lp->evals[i].base + 1) * 40);
+  vecstore(resAddr, 0, fSize);
+  return mknil;
+}
+
 // ========================== THE STATE ------------------------------------
 // `hN` is the blob's ADDRESS boxed into a Value (`mknum(blob)`), and every
 // defun below unboxes it at the top (`payload(hN, 0)`) — the runtime's own
@@ -7185,11 +7468,28 @@ defun Rt.hostDispatch(hN : val, iN : val) -> val {
     lp->quit = 1;
     return call Rt.hostDeactivate(hN, iN);
   }
-  // THE OTHER 2 (ListDir/Stat): LOUD, naming the ctor.  Never a silent
-  // drop (the program would appear to work while its continuation never
-  // resumes) and never a silent completion (which would make a program "work"
-  // while doing nothing).  7E owns them.
-  call Rt.hostDieUnported(nm);
+  // 7E's TWO — the last leaves.  Both are SYNCHRONOUS, so both own the
+  // completion from their leaf (the readFile/exec pattern, minus the etag: a
+  // directory walk and an fstatat never suspend).
+  if (call Rt.cStrEq(nm, rawstr("TaskListDir")) != 0) {
+    val dp = vecload(tv, 1);
+    return call Rt.hostLeafListDir(hN, iN, dp);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskStat")) != 0) {
+    val sp = vecload(tv, 1);
+    return call Rt.hostLeafStat(hN, iN, sp);
+  }
+  // THE UNPORTED SET IS EMPTY (stage 7E — this unit's headline): every one of
+  // Runtime.elm's TWENTY Task constructors has a real arm above, so NO porting
+  // gate is left and the string "unported" appears nowhere in this file.
+  //
+  // WHAT SURVIVES HERE IS THE ZIG'S OWN `else`: effectloop.zig's stepEval ends
+  // in `throwShen(unhandledTaskMsg(...))` for a ctor name outside taskArity's
+  // twenty.  Such a name is reachable — Rt.hostArity answers 0 for it, so the
+  // arity gate above skips and the chain falls through — and it must stay
+  // LOUD: a silent deactivate would leave the continuation unresumed and the
+  // program apparently working, which is the Zig's stated reason for the arm.
+  call Rt.hostDieErr(rawstr("unhandled Task effect: "), nm);
   return mknil;
 }
 

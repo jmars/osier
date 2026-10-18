@@ -1608,8 +1608,8 @@ rows — R-08 forbids a symbol in both tables):
     out from under them (a loud J3 "in no signature table").  Migrate the
     fixtures, then declare — one move.
   * mmap 6 (RtGc — the one 6-arg site), exit 1 — outside the plan's U5 list.
-  * getdents64 3, fstatat 4, clock_gettime 2, strtod 2, getrlimit 2,
-    setrlimit 2 — see "plan-listed" below.
+  * clock_gettime 2, strtod 2, getrlimit 2, setrlimit 2 — see "plan-listed"
+    below.
 
 MIGRATED by cffi U5 (row DELETED, signature declared in runtime.mid):
 openat 4, __errno_location 0, waitpid 3, readdir 1, opendir 1,
@@ -1618,6 +1618,10 @@ chdir 1, getcwd 2, getenv 1, setenv 3, kill 2, execvp 2, fork 0, read 3,
 lseek 3, memset 3 (the frame bulk-zero, dst/0/40*nslots bytes — its IR-level
 RawCallRaw seat in Mid.Rt is untouched by this table, but the SURFACE site in
 runtime.mid is what the row governed), _exit 1.
+STAGE 7E ADDED getdents64 3 and fstatat 4 to this list — the effect-loop
+port's dir/stat leaves are their first call sites, and they are declared in
+runtime.mid with the C prototypes' widths (getdents64's `int`, not the raw
+syscall's `long`).
 
 rt_* seats (tools/qbe/rt.zig exports) called from Rt bodies today:
 
@@ -1637,15 +1641,15 @@ their route and they sit in the table below.)
 
 Plan-listed, no Rt-body call yet (arities from the C prototypes):
 
-  * getdents64 3, fstatat 4, clock_gettime 2, strtod 2, getrlimit 2,
-    setrlimit 2
+  * clock_gettime 2, strtod 2, getrlimit 2, setrlimit 2
 
   (CORRECTION, MEASURED at cffi U5: `clock_gettime` x3 in Rt.collect — the
   GC-ARC F1 stats instrument — and `getrlimit`/`setrlimit` in Rt.main's argv
   prologue ARE Rt-body call sites today, so "no Rt-body call yet" is stale
   for those three.  They stay rows and stay UNDECLARED per plan §8 item 5:
-  the effect-loop port declares them.  `poll`/`fstatat`/`getdents64`/
-  `strtod` still have no site anywhere.)
+  the effect-loop port declares them.  `strtod` still has no site anywhere;
+  `poll`, `getdents64` and `fstatat` have sites and are DECLARED — 7B for
+  `poll`, 7E for the other two — so their rows are gone.)
 
 The stage-6 A2 driver seats (arities from tools/qbe/rt.zig's exports):
 
@@ -1675,8 +1679,12 @@ rawcallArity =
         , -- ===== plan §8 item 5: declared by the effect-loop port, not U5.
           -- clock_gettime/getrlimit/setrlimit DO have Rt-body sites today
           -- (the GC stats instrument and the argv rlimit seat).
-        ( "getdents64", 3 )
-        , ( "clock_gettime", 2 )
+          -- getdents64 and fstatat LEFT this table at stage 7E: that unit
+          -- gave them their first call sites (the listDir walk and the stat
+          -- leaf) and DECLARED them in runtime.mid, and R-08 refuses a symbol
+          -- in both tables — so the row and the declaration move together,
+          -- the rule U5 followed for the other twenty-four.
+        ( "clock_gettime", 2 )
         , ( "strtod", 2 )
         , ( "getrlimit", 2 )
         , ( "setrlimit", 2 )
@@ -1723,10 +1731,6 @@ rawcallArity =
         , ( "rt_is_program", 1 )
         , ( "rt_run_program", 2 )
         , ( "rt_print_value", 1 )
-        , -- the sixth deferred libc row (the others are in the §8-item-5 block
-          -- above); left in place so the tail of the table keeps the shape it
-          -- had before U5
-        ( "fstatat", 4 )
         ]
 
 
