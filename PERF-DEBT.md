@@ -275,6 +275,31 @@ the nested-`If` case was silently miscompiled until a `TailShape` was threaded t
   nears full and fabricates "failed to emit" errors. Use
   `TMPDIR=/home/jaye/osier-scratch` and re-run.
 
+## THE ARC'S OWN SCOREBOARD (MEASURED, suite, arms alternated)
+
+| commit | lever | suite total | apply gate | frame gate |
+|---|---|---|---|---|
+| `249b09a` | baseline (recorded) | **2.22×** | 9.3× | 1.6× |
+| `7748887` | P1a — apply family's ~704 B/closure-call **leak** | 1.74× | 4.1× | 1.6× |
+| `53be0c1` | P1b — 5 per-call re-blits of the same 40-byte `f` | 1.67× | 3.8× | 1.6× |
+| `dcc15aa` | P1c — word-conditional `if`; frame path converted | 1.33× | 3.6× | **1.4×** |
+| `b4fac81` | P1d — apply conditions + the two-range `rt_call2r` bridge | 1.25× (UNDECIDED that session) | **1.6×** | 1.4× |
+| `af64afa` | P1e — the frame zeroing loop replaced by ONE `memset` | — | 1.6× | **0.97×** |
+| `11a5f80` | consolidation (re-freeze + the stale-pin fix) | **1.06×** (load 8) | — | 0.97× |
+
+Final per-programme ratios (load 8, A/A median spread 4-6%): adtmatch 1.19,
+deepnontail 1.32, listbuild 1.10, localrec 1.14, mono_float 1.03, mono_int 1.18,
+mono_record 1.00, nestagg 1.03, numloop 1.07, recflow 0.96, **recupd_local 0.86,
+recupd_param 0.83** — the Mid route is now FASTER than the Zig arm on two
+programmes and inside the spread on most of the rest.  The route penalty that
+plan.md's R5 guard called a 3% ceiling is, at the end, 6% of the suite with two
+programmes ahead.
+
+**Ordering lesson (MEASURED): fix the CORRECTNESS leaks first.** P1a was one
+commit of `free`s and it bought the single largest step (2.22× → 1.74×, and the
+apply gate 9.3× → 4.1×) — the per-call `malloc` arena growth had been inflating
+the Mid arm, not just leaking.  Two units then spent more for less.
+
 ## THE AGGREGATE — the per-op gates UNDERSTATE it (MEASURED 2026-10-17, `cf59488`)
 
 The three ratio gates each measure **one retargeted family** and report 1.6× / 9.3× /
