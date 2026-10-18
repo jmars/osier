@@ -691,62 +691,62 @@ function so the array arm above and this one share the statement shape.
 -}
 indexStoreOnPointer : St -> Ast.Exp -> Ast.Exp -> Ast.Exp -> (St -> Result String (St, Exp)) -> Result String (St, Exp)
 indexStoreOnPointer st p i e cont =
-            case resolvePointee st p of
+    case resolvePointee st p of
+        Err msg ->
+            Err msg
+
+        Ok pty ->
+            case lowerExp st p of
                 Err msg ->
                     Err msg
 
-                Ok pty ->
-                    case lowerExp st p of
+                Ok ( st1, p1 ) ->
+                    case lowerExp st1 i of
                         Err msg ->
                             Err msg
 
-                        Ok ( st1, p1 ) ->
-                            case lowerExp st1 i of
+                        Ok ( st2, i1 ) ->
+                            case lowerExp st2 e of
                                 Err msg ->
                                     Err msg
 
-                                Ok ( st2, i1 ) ->
-                                    case lowerExp st2 e of
+                                Ok ( st3, e1 ) ->
+                                    let
+                                        -- B1: the bool→val box at a
+                                        -- `*val` ELEMENT slot.
+                                        e2 =
+                                            if pty == PVal && isBoolExp st3 e then
+                                                boolToVal e1
+
+                                            else
+                                                e1
+                                    in
+                                    case indexStore st pty p1 i i1 e2 of
                                         Err msg ->
                                             Err msg
 
-                                        Ok ( st3, e1 ) ->
+                                        Ok storeNode ->
                                             let
-                                                -- B1: the bool→val box at a
-                                                -- `*val` ELEMENT slot.
-                                                e2 =
-                                                    if pty == PVal && isBoolExp st3 e then
-                                                        boolToVal e1
-
-                                                    else
-                                                        e1
+                                                ( dead, st4 ) =
+                                                    fresh "_indexstore" st3
                                             in
-                                            case indexStore st pty p1 i i1 e2 of
+                                            case cont st4 of
                                                 Err msg ->
                                                     Err msg
 
-                                                Ok storeNode ->
-                                                    let
-                                                        ( dead, st4 ) =
-                                                            fresh "_indexstore" st3
-                                                    in
-                                                    case cont st4 of
-                                                        Err msg ->
-                                                            Err msg
-
-                                                        Ok ( st5, body ) ->
-                                                            Ok
-                                                                ( st5
-                                                                , Let
-                                                                    { binders =
-                                                                        [ LetBind
-                                                                            { binder = dead
-                                                                            , value = storeNode
-                                                                            }
-                                                                        ]
-                                                                    , body = body
+                                                Ok ( st5, body ) ->
+                                                    Ok
+                                                        ( st5
+                                                        , Let
+                                                            { binders =
+                                                                [ LetBind
+                                                                    { binder = dead
+                                                                    , value = storeNode
                                                                     }
-                                                                )
+                                                                ]
+                                                            , body = body
+                                                            }
+                                                        )
 
 
 {-| L3/L4/L5: the terminator IS the block's value.
@@ -1367,27 +1367,27 @@ destroy.
 -}
 indexLoadOnPointer : St -> Ast.Exp -> Ast.Exp -> Result String (St, Exp)
 indexLoadOnPointer st p i =
-            case resolvePointee st p of
+    case resolvePointee st p of
+        Err msg ->
+            Err msg
+
+        Ok pty ->
+            case lowerExp st p of
                 Err msg ->
                     Err msg
 
-                Ok pty ->
-                    case lowerExp st p of
+                Ok ( st1, p1 ) ->
+                    case lowerExp st1 i of
                         Err msg ->
                             Err msg
 
-                        Ok ( st1, p1 ) ->
-                            case lowerExp st1 i of
+                        Ok ( st2, i1 ) ->
+                            case indexLoad st pty p1 i i1 of
                                 Err msg ->
                                     Err msg
 
-                                Ok ( st2, i1 ) ->
-                                    case indexLoad st pty p1 i i1 of
-                                        Err msg ->
-                                            Err msg
-
-                                        Ok loadNode ->
-                                            Ok ( st2, loadNode )
+                                Ok loadNode ->
+                                    Ok ( st2, loadNode )
 
 
 -- ============================ B1: bool, casts, sizeof ============================
