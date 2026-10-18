@@ -89,6 +89,112 @@ the record family's data-pointer read (RtPrims:1083), `payload32(v, 0)` is
 `w32Of`, and `payload32(v, 1)` is spelled `len32` — the plan grammar's
 `payload(w)` shorthand cannot express the word-2 reads on its own.
 
+B7 — THE `val` BRIDGE, AS RULES (plan §Q11, Terra's Lua-value posture).
+
+A `val` is the opaque 40-byte host handle.  What a user program MAY do with
+one is a short list; what the compiler CANNOT check about it is TWO numbered
+obligations.  Both are stated here, the way Terra states its Lua-value rules,
+rather than left to be inferred from the lowering.
+
+LEGAL on a `val` (each form has a positive row in TestMain's B7 section, and
+the bridge fixture tools/qbe/fixtures/{Wbridge.mid,midb7.elm} RUNS them):
+  * BIND — a parameter (`x : val`) or a local (`val v = ..;`);
+  * PASS to a `call` (a `val` parameter) and RETURN (a `val` result);
+  * STORE into a val slot — a struct field (`s.item = v;` / `p->item = v;`),
+    a `val[N]` array element, or a `*val` view via `vecstore`/`p[i] = v`.
+    The store is the 40-byte blit (`RawVecStore` at a VALUE-unit index —
+    LowerToIr's field store addresses the field in BYTES and indexes 0);
+  * READ BACK from those: `s.item`, `vecload(p, i)`, `p[i]`.  (`*p` is the
+    `*word` deref only — there is no `*val` deref; index 0 is the spelling.)
+  * ROOT existing ids for a block via `withroots [ids] { .. }` (J10);
+  * BOX via the `mk*` primitives and unbox only through the sanctioned READS
+    (`payload`, `payload32`, `len32`, `tagis`, `strbyte`, `fload`, `reclen`)
+    — never a cast.
+
+ILLEGAL, and ENFORCED (one negative row each; the judgment is named):
+  * a `val` in a WORD SLOT — a `word`/`int`/`bool`/`*T` binder, a word
+    builtin's operand, a `rawcall` argument, a `word` field or element
+    (J1/J3/J13: "needs word, got val");
+  * a WORD READING A VAL — the same judgments from the other side:
+    `wload(v, 0)` (the address slot wants a word), `payload` of a word, a
+    `val` bound into a word binder;
+  * `==` / `<` ON VALUES — the six compares are `word,word -> bool`, so a
+    `val` operand is a J1 reject, and the message now names the remedy
+    (`call Rt.=(a, b)` for the boxed bool, `Rt.deepEq` for structural
+    equality; `Check.checkWordCmp`).  There is no value ORDERING at all;
+  * ANY CAST OF A `val` — `[word](v)`, `[int](v)`, `[*T](v)`, `[val](v)`,
+    and `[val](e)` of anything but a `bool`, are all outside `castClass`'s
+    matrix (plan Q10: val casts NONE);
+  * a `val` CONDITION that is not a BOXED BOOL.  The val-cond PATH stays
+    legal and is load-bearing (`mkbool(..)`, `&&`/`||`, a `val` binder or
+    `call` that holds one — runtime.mid's own `if (isDup)`/`if (lessB)`
+    sites); B7 enforces the sliver the checker can PROVE: `mknum`, `mkstr`,
+    `mkvec`, `mkflt`, `mknil` and a string literal can never carry the
+    boolean tag, and the value test is FALSE only for a boolean whose
+    payload is 0 — every other tag is TRUE, so `if (mknum(0))` takes the
+    then-branch (`Check.unboxedValCond`).  `mkval(tag, ..)` and a `val`
+    binder/call stay legal: their tag is not decidable here, and that
+    boundary is stated, not hidden.  So does `mkbool(1)` — a constant boxed
+    bool in a condition is a constant branch (`if (1)`'s own objection), but
+    the checker does not fold builtins, and pretending otherwise would be a
+    second, weaker judgment in the same seat.
+
+THE TWO OBLIGATIONS (documented; the compiler CANNOT check them).  Both come
+from one fact: a `val` is a handful of WORDS, and only the roots the frame
+machinery REGISTERED are scanned.
+
+  1. ROOTING.  A `val` stored in RAW MEMORY — a struct field, an array
+     element, a `*val` view, any seat that is not a `val` binder — is
+     INVISIBLE to the collector: that copy roots nothing.  Its REFERENT must
+     be rooted across every safepoint between the store and the last read of
+     the copy.  The sanctioned long-lived seats are (a) a `val` BINDER:
+     `rt_frame_enter` registers the whole pooled frame as one
+     ROOT_VALUE_ARRAY, which is also why `withroots` is a documented NO-OP on
+     this backend (Mid.Qbe.Lower's WithRoots arm — the roots it names already
+     exist); and (b) a REGISTERED root array,
+     `rawcall rt_root_push_value_array(base, countPtr)`, whose elements
+     `Rt.gcScanValueArray` follows and whose count is read AT SCAN TIME — the
+     collector scans it AND (under a moving collector) updates it in place.
+     An UNREGISTERED raw copy is scanned by neither, and BOTH collectors make
+     the consequence visible in the same place — the block's first word, which
+     for a `value_array` is element 0's tag: the `QBE_MIDGC=1` sweep writes
+     the free-list link there (`Rt.gcSweep`), and the default collector
+     EVACUATES the block and abandons those words.  The probe is
+     tools/qbe/fixtures/{Wval.mid,valchurn.elm} and its `stale` arm reads 0
+     under both.
+
+  2. MOVE STALENESS.  A raw `val` is a byte copy, so it goes stale whenever
+     its referent MOVES — even when the referent was rooted (the root slot
+     gets the new address; the raw copy does not).  RULE: **a raw `val` may
+     be READ only inside the no-safepoint window in which it was WRITTEN**;
+     across a safepoint, re-load it from a rooted slot.  The safepoints a
+     user program can reach are the allocating builtins (`allocvec`,
+     `allocraw`), a string literal (`EStr` — the intern), and any `call`
+     whose callee allocates.
+     MEASURED — AND OBLIGATION 2 *IS* OBSERVABLE, which is the one claim this
+     header got wrong first.  The repo has TWO collectors and they disagree
+     on exactly this point:
+       * the DEFAULT runtime's collector is the MOVING one —
+         `vendor/osier-rt/src/gc/collect.zig` is a semi-space scavenge
+         (`moveInternal` copies a body to to-space and leaves a forwarding
+         pointer), and `scanRoots` writes the new address BACK into the root
+         slot.  Under it a rooted referent survives and the raw copy does
+         not: the probe's `rooted` arm reads 1, i.e. the raw copy's tag was
+         lost while the root slot read fine.
+       * the `QBE_MIDGC=1` collector is the Mid program (`runtime.mid`'s
+         `Rt.collect`): a NON-MOVING mark-sweep (`gcMarkRoots` -> `gcDrain`
+         -> `gcSweep`, and `gcMarkRoots` marks without writing anything
+         back), so there a rooted raw copy can never go stale — the same arm
+         reads 11.
+     The probe (tools/qbe/fixtures/{Wval.mid,valchurn.elm}) pins both:
+     `10001` built against the default runtime (obligation 2 visible in the
+     `rooted` arm: raw copy 0, rooted slot 1) and `10011` built with
+     `QBE_MIDGC=1` and run at `QBE_HEAP_MB=16` (obligation 1 only; the same
+     arm reads 11).  Both builds agree that the UNROOTED arm (`stale`) reads
+     0 once a collection runs, and that nothing breaks at all when the churn
+     is too small to collect — the dose control that shows the mechanism is
+     the collection, not the store.
+
 -}
 
 import Dict exposing (Dict)

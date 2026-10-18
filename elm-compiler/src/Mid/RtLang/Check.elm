@@ -94,6 +94,14 @@ THE JUDGMENTS ENFORCED HERE (T5 adds J7-J10):
         branch would silently read as always-true.  Write the compare
         inline, or box a `:val`.  A `:float` word is still a reject (it
         is not a branchable word);
+      - (B7) a `:val` CONDITION must be a BOXED BOOL — the existing
+        val-cond path (`mkbool(..)`, `&&`/`||`, a `val` binder or call that
+        holds one), which the runtime's own `if (isDup)`/`if (lessB)` sites
+        need.  What B7 ENFORCES is the provable sliver: the fixed-tag `mk*`
+        builders and a string literal can never hold a boolean, and the
+        value test is false only for a boolean with payload 0 and TRUE for
+        every other tag — so `if (mknum(0))` takes the then-branch.  See
+        `unboxedValCond` and Ast's `val`-bridge rules (plan Q11);
       - a LOCAL binder may not declare `:float` — float words are not
         let-bindable (MEASURED, Lower's rawFltArg: "A Var never appears —
         recompute"), so `float x = ..;` is a J1 reject: recompute the
@@ -266,6 +274,7 @@ import Mid.RtLang.Ast as Ast
         ( AggShape(..)
         , ArrayInit(..)
         , Block
+        , Builtin(..)
         , Decl(..)
         , Defun
         , EnumEntry
@@ -2996,7 +3005,27 @@ checkCond ctx c =
             Err msg
 
         Ok TVal ->
-            Ok TVal
+            -- B7 (plan Q11, Ast's `val` bridge rules): a `val` condition is
+            -- legal ONLY as a BOXED BOOL — the existing val-cond path, which
+            -- the runtime depends on (twenty-odd `if (isDup)`/`if (lessB)`
+            -- sites over `val` binders and calls).  What is ENFORCED here is
+            -- the sliver the checker can PROVE: the fixed-tag `mk*`
+            -- builders and a string literal never hold a boolean, and the
+            -- value test (`jmpf`) is FALSE only for a boolean with payload 0
+            -- while every other tag FALLS THROUGH as true — so such a
+            -- condition is always taken (`mknum(0)` included), a silent
+            -- wrong branch rather than a test.
+            case unboxedValCond c of
+                Just what ->
+                    Err
+                        (ctx.key
+                            ++ ": J1: 'if' condition is "
+                            ++ what
+                            ++ " — a `val` condition must be a BOXED BOOL (mkbool(..), `&&`/`||`, or a `val` binder/call that holds one).  The value test is false only for a boolean with payload 0 and TRUE for every other tag, so this branch is always taken: a silent wrong branch, not a test"
+                        )
+
+                Nothing ->
+                    Ok TVal
 
         Ok TBool ->
             -- B1: a BOOL condition is branchable — a bool expression IS a
@@ -3118,6 +3147,40 @@ isConstExp c =
             False
 
 
+{-| B7 — the `val` conditions the checker can PROVE are not boxed bools: the
+fixed-tag `mk*` builders (nil / number / string / vector / float — none of
+them can carry the boolean tag) and a string literal.  `mkval(tag, ..)` is
+deliberately ABSENT and that is a stated boundary, not an oversight: its tag
+is an arbitrary expression, so deciding it would mean reading tag constants
+this module does not own (plan Q11's documented edge).  A `val` binder or a
+`call` is absent for the same reason from the other side — it MAY hold
+`mkbool(..)`, and `runtime.mid`'s own `if (isDup)` sites are exactly that.
+-}
+unboxedValCond : Exp -> Maybe String
+unboxedValCond c =
+    case c of
+        EBuiltin MkNil _ ->
+            Just "mknil"
+
+        EBuiltin MkNum _ ->
+            Just "a mknum(..) value"
+
+        EBuiltin MkStr _ ->
+            Just "a mkstr(..) value"
+
+        EBuiltin MkVec _ ->
+            Just "a mkvec(..) value"
+
+        EBuiltin MkFlt _ ->
+            Just "a mkflt(..) value"
+
+        EStr _ ->
+            Just "a string literal"
+
+        _ ->
+            Nothing
+
+
 
 -- ============================ J1/J2/J3: expressions ============================
 
@@ -3169,7 +3232,7 @@ checkExp ctx e =
             checkWordBin ctx op a b
 
         EWordCmp op a b ->
-            checkSig ctx ("operator '" ++ wordCmpName op ++ "' (yields a bool — branch on it directly, bind it `bool b = ..`, or box with mkbool for a val)") wordCmpSig [ a, b ]
+            checkWordCmp ctx op a b
 
         EFltBin op a b ->
             checkSig ctx ("operator '" ++ fltBinName op ++ "'") fltBinSig [ a, b ]
@@ -4141,6 +4204,55 @@ checkWordBin ctx op a b =
 
                         else
                             Ok TWord
+
+
+{-| B7 — the word-compare row (`== != < <= > >=`: word,word -> bool) with
+the hint a `val` operand needs.  The judgment is `checkSig`'s, unchanged; only
+the MESSAGE grows, and only when an operand was a `val`, because Ast's bridge
+rules say a value has no `==`/`<` and a reject that does not say what to write
+instead sends the reader to the wrong place (the sanctioned value comparisons
+are CALLS — `Rt.=` for the boxed bool, `Rt.deepEq` for structural equality —
+never an operator).
+
+The val test is a RE-CHECK of the two operand classes rather than a look at
+`msg`: the selfhost Prelude has no `String.contains` (see `isQualifiedKey`),
+and it costs nothing here — it runs only on the error path.
+-}
+checkWordCmp : Ctx -> WordCmpOp -> Exp -> Exp -> Result String Type
+checkWordCmp ctx op a b =
+    case
+        checkSig ctx
+            ("operator '"
+                ++ wordCmpName op
+                ++ "' (yields a bool — branch on it directly, bind it `bool b = ..`, or box with mkbool for a val)"
+            )
+            wordCmpSig
+            [ a, b ]
+    of
+        Err msg ->
+            Err
+                (if isValOperand ctx a || isValOperand ctx b then
+                    msg
+                        ++ " — there is no `"
+                        ++ wordCmpName op
+                        ++ "` on values: compare them with `call Rt.=(a, b)` (a boxed bool) or `Rt.deepEq` (structural) — plan Q11"
+
+                 else
+                    msg
+                )
+
+        Ok cls ->
+            Ok cls
+
+
+isValOperand : Ctx -> Exp -> Bool
+isValOperand ctx e =
+    case checkExp ctx e of
+        Ok TVal ->
+            True
+
+        _ ->
+            False
 
 
 

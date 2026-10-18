@@ -1,0 +1,68 @@
+// B7 (handoff-midlang-b7) — THE BRIDGE: a `val` IN and a `val` OUT through
+// the `export` block, walked through the LEGAL set Ast.elm's header states.
+// Imported by name from midb7.elm (the reader resolves `import Wbridge` to
+// this file, relative to the importing file).
+//
+//   tools/qbe/qbe-mk.sh tools/qbe/fixtures/midb7.elm MidB7.main <outdir>
+//   <outdir>/midb7 MidB7.main          -> 125105
+//
+// What the two defuns pin, in the order the rules doc lists them:
+//   * an Osier caller PASSES a value (an Int boxed by the compiler) into a
+//     Mid defun (`seed : val`) and USES the value that comes back — the
+//     `export` block is the only crossing point (plan Q12/M4).
+//   * bind (`val boxed`, `val back`), BOX via `mknum`, store into a `val`
+//     struct FIELD (`b.item = boxed;`) — the 40-byte copy into raw memory —
+//     and READ IT BACK inside the no-safepoint window it was written in
+//     (nothing between the store and `b.item` allocates; see the Wval probe
+//     for what reading it across a safepoint costs).
+//   * store into a `*val`/`val[]` ELEMENT via `vecstore(base, 0, back)` — an
+//     `allocvec` base, which IS a safepoint: `back` is re-read from a rooted
+//     `val` binder afterwards, never from the raw field.
+//   * pass a `val` to a `call` and take the `val` it returns.
+//   * ROOT existing ids for a block via `withroots [acc, k] { .. }` around
+//     the allocating call, and read the values back through the vector.
+//
+// The printed number packs one fact per field:  path = 125 = s(12) * 10 +
+// tag(5), ring = 105 = acc(0) + k(seed 5) + 100.  main = 125 * 1000 + 105.
+module Wbridge
+
+export Wbridge.path : val -> val
+export Wbridge.ring : val -> val
+
+struct Bag { tag : word; item : val; }
+
+defun Wbridge.add(x : val, y : val) -> val {
+  return mknum(payload(x, 0) + payload(y, 0));
+}
+
+// A val in, a val out, and every legal val form on the way.
+defun Wbridge.path(seed : val) -> val {
+  Bag b;
+  b.tag = payload(seed, 0);
+  val boxed = mknum(payload(seed, 0) + 1);
+  b.item = boxed;
+  val back = b.item;
+  word base = allocvec(1);
+  vecstore(base, 0, back);
+  val el = vecload(base, 0);
+  val s = call Wbridge.add(back, el);
+  return mknum(payload(s, 0) * 10 + b.tag);
+}
+
+// The structural ROOTING seat: `withroots` names the ids the block's
+// allocations must see.  MEASURED, stated so the fixture does not overclaim:
+// on the QBE backend this is a documented NO-OP (rt_frame_enter registers the
+// whole pooled frame as one ROOT_VALUE_ARRAY, so every `val` binder is
+// already a root for the whole body — Mid.Qbe.Lower's WithRoots arm).  The
+// row exists to RUN the form end to end, which nothing in the tree did.
+defun Wbridge.ring(n : val) -> val {
+  val acc = mknum(0);
+  val k = mknum(payload(n, 0));
+  return withroots [acc, k] {
+    word base = allocvec(2);
+    vecstore(base, 0, acc);
+    vecstore(base, 1, k);
+    val pair = mkvec(base, 2);
+    return mknum(payload(vecload(payload(pair, 0), 0), 0) + payload(vecload(payload(pair, 0), 1), 0) + 100);
+  };
+}

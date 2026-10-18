@@ -7550,6 +7550,48 @@ checks rt =
         "struct M { tag : word; union { n : word; p : *M; }; }\ndefun Rt.f() -> word {\n  M a = { tag = 1; n = 5; };\n  return a.n;\n}"
     , checkOkModule "B5 DOCUMENTED, NOT ENFORCED: a `val` member in a union block is LEGAL — raw memory holding a handle is the §Q11 obligation on the WRITER (nothing traces it), and the layout arithmetic is all this unit rules on (plan Q4 says exactly that)"
         "struct V { tag : word; union { w : word; v : val; }; }\ndefun Rt.f(x : val) -> val {\n  V s;\n  s.tag = 1;\n  s.v = x;\n  return s.v;\n}"
+
+    -- ==================== B7: the `val` bridge, as rules (midlang-b7) ====================
+    -- THE SET IS THE GATE (plan Q11's illegal list, five items).  Three of
+    -- them already had rows BEFORE this unit, so they are not duplicated —
+    -- the pointers, so a reader can check the set is complete:
+    --   * "a val in a word slot"  -> "J1 REJECT — a binder whose initializer
+    --     class differs" (`word n = mknil;`), the J1 builtin-argument row,
+    --     the J3 rawcall row, and the TWO J13 rows "needs word, got val"
+    --     (a val into a word FIELD; a word into a VAL field/slot);
+    --   * "a word reading a val"  -> "check A1 reject: a val READ AS A WORD
+    --     (a val field into a word binder) is a J1 reject";
+    --   * "any cast of a val"     -> the three B1 rows under "not in the cast
+    --     matrix" ([word](v), [val](v), [val](x)).
+    -- The two with NO row ("a word reading a val" through a raw-word ADDRESS,
+    -- and the compares) are the first rows below; then the ONE judgment this
+    -- unit ADDS (the val condition), then the legal set as POSITIVE rows.
+    , checkErr "B7 ENFORCED: `wload(v, 0)` — a val passed into a raw word ADDRESS slot (the other direction of \"word reading a val\": the copy IS a word, its class is not)"
+        "builtin 'wload' argument"
+        "defun Rt.b7w(v: val) -> val {\n  word n = wload(v, 0);\n  return mknum(n);\n}"
+    , checkErr "B7 ENFORCED: `==` on two vals — the compares are word,word -> bool, and the reject names the REMEDY (`call Rt.=` / `Rt.deepEq`), not just the class"
+        "there is no `==` on values"
+        "defun Rt.b7eq(a: val, b: val) -> val {\n  val c = mkbool(a == b);\n  return c;\n}"
+    , checkErr "B7 ENFORCED: `<` on two vals — there is no value ORDERING at all (the six compares are the word family)"
+        "there is no `<` on values"
+        "defun Rt.b7lt(a: val, b: val) -> val {\n  val c = mkbool(a < b);\n  return c;\n}"
+    , checkErr "B7 ENFORCED (the judgment this unit adds): `if (mknil)` — a val condition must be a BOXED BOOL, and nil is provably not one; the value test is false only for a boolean with payload 0, so this branch is ALWAYS taken"
+        "condition is mknil"
+        "defun Rt.b7c1() -> val {\n  if (mknil) { return mknum(1); } else { return mknum(2); }\n}"
+    , checkErr "B7 ENFORCED: `if (mknum(0))` — the sharpest case: a NUMBER is TRUTHY to the value test whatever its payload, so this silently took the then-branch before the rule"
+        "condition is a mknum(..) value"
+        "defun Rt.b7c2() -> val {\n  if (mknum(0)) { return mknum(1); } else { return mknum(2); }\n}"
+    , checkErr "B7 ENFORCED: `if (\"x\")` — a string literal is a val and never a boolean (and it is a SAFEPOINT, so it cannot even be the window's cond by accident)"
+        "condition is a string literal"
+        "defun Rt.b7c3() -> val {\n  if (\"x\") { return mknum(1); } else { return mknum(2); }\n}"
+    , checkOk "B7 ACCEPT (the rule must NOT swallow the boxed path — runtime.mid's own `if (isDup)`/`if (lessB)` shape): a `val` BINDER and a `val` RETURN of a `call` are both legal conditions"
+        "defun Rt.b7c4(n: word) -> val {\n  val isBig = mkbool(n == 3);\n  if (isBig) { return mknum(1); } else { return mknum(2); }\n}\n\ndefun Rt.b7c5(n: word) -> val {\n  if (call Rt.b7c4(n)) { return mknum(1); } else { return mknum(2); }\n}"
+    , checkOk "B7 DOCUMENTED HOLE, PINNED POSITIVE: `mkval(tag, ..)` as a condition stays legal — its tag is an arbitrary expression, so deciding it would mean reading tag constants the checker does not own (a later 'louder' rule must not tighten this silently)"
+        "defun Rt.b7c6() -> val {\n  if (mkval(1, 7)) { return mknum(1); } else { return mknum(2); }\n}"
+    , checkOk "B7 ACCEPT (the legal set, in one defun): bind a val, BOX via mk*, store into a `val` array element via vecstore, read back, pass to a call, root with `withroots`, and return it"
+        "defun Rt.b7v(v: val) -> val {\n  val boxed = mknum(payload(v, 0) + 1);\n  word base = allocvec(1);\n  vecstore(base, 0, boxed);\n  val back = vecload(base, 0);\n  val e = call Rt.b7same(back, v);\n  return withroots [back, e] { return e; };\n}\n\ndefun Rt.b7same(a: val, b: val) -> val {\n  return mkbool(payload(a, 0) == payload(b, 0));\n}"
+    , checkOkModule "B7 ACCEPT (the legal set, the RAW-MEMORY half): a `val` struct FIELD — store through the value (`b.item = v;`), store again through a POINTER (`p->item = v;`), read back both ways.  Nothing traces the field: that is obligation 1, documented in Ast's header, not a checker judgment"
+        "struct Bag { tag : word; item : val; }\ndefun Rt.b7bg(v : val) -> val {\n  Bag b;\n  b.tag = 1;\n  b.item = v;\n  *Bag p = &b;\n  p->item = b.item;\n  return b.item;\n}"
     ]
 
 

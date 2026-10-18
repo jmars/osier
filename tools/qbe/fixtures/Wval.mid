@@ -1,0 +1,128 @@
+// B7 (handoff-midlang-b7) — THE RAW-MEMORY `val` CHURN PROBE: plan §Q11's
+// obligations (a) ROOTING and (b) MOVE STALENESS made visible by failure.
+// Paired with valchurn.elm.  Sibling of B3's Achurn (which probes the same
+// rule for a `val` ARRAY ELEMENT; this one probes a `val` STRUCT FIELD and
+// separates "in the window" from "across a safepoint").
+//
+//   QBE_MIDGC=1 QBE_HEAP_MB=16 tools/qbe/qbe-mk.sh \
+//       tools/qbe/fixtures/valchurn.elm Valchurn.main <outdir>
+//   QBE_MIDGC=1 QBE_HEAP_MB=16 <outdir>/valchurn Valchurn.main   # -> 10011
+//
+//   tools/qbe/qbe-mk.sh tools/qbe/fixtures/valchurn.elm Valchurn.main <outdir>
+//   <outdir>/valchurn Valchurn.main                              # -> 10001
+//
+// BOTH GOLDENS ARE REAL and the difference is the point: the repo has TWO
+// collectors, and `QBE_MIDGC` is a BUILD-time switch (it decides which one
+// the emitted program carries; setting it at RUN time changes nothing).
+//   * default build (vendor/osier-rt's semi-space scavenge — MOVING:
+//     `moveInternal` forwards a body to to-space and `scanRoots` writes the
+//     new address back into the root slot)                    -> 10001
+//        win 1 | stale 0 | rooted 1   (raw copy 0, rooted slot 1)
+//   * QBE_MIDGC=1 build (runtime.mid's Rt.collect — NON-MOVING mark-sweep)
+//     at QBE_HEAP_MB=16                                        -> 10011
+//        win 1 | stale 0 | rooted 11  (raw copy 1, rooted slot 1)
+//   * QBE_MIDGC=1 build at the DEFAULT heap (64 MB)             -> 10111
+//        win 1 | stale 1 | rooted 11 — the 200k churn never crosses the
+//        Mid collector's threshold, so nothing collects; kept because it is
+//        the dose control that shows the mechanism is the COLLECTION.
+// (With a 100-vector churn, either build reads 1/1/11 per arm — same point.)
+//
+// THE THREE ARMS differ in exactly two things — WHO owns the only rooted copy
+// of the handle, and WHETHER the raw copy is read across a safepoint:
+//   * `win`   — unrooted (the producing frame dies) but read INSIDE the
+//     no-safepoint window it was written in: nothing allocates between
+//     `put`'s store and this read, so the copy is still valid      -> 1.
+//     This is the rule's PERMISSION: reading the raw copy in the window is
+//     legal even with nothing rooting the referent.
+//   * `stale` — unrooted AND read across an allocating call: the churn's
+//     collections reclaim the referent (nothing roots it) and the block's
+//     first word — element 0's TAG — is gone (free-list link under the Mid
+//     sweep, abandoned words under the default scavenge)           -> 0.
+//   * `rooted` — the SAME handle kept in the caller's `val` binder (a rooted
+//     frame slot) and ALSO copied into the raw field; after the same churn
+//     the ROOT SLOT is fine, and the raw copy's fate is the collector's:
+//     1 under the MOVING default (the root slot got the new address, the raw
+//     copy did not — plan §Q11's obligation (b) made visible) and 11 under
+//     the non-moving Mid collector (nothing can move, so the copy stays).
+//
+// So obligation (b) MOVE STALENESS is observable after all — under the
+// default runtime — and obligation (a) ROOTING is observable under both.
+module Wval
+
+export Wval.win : val -> val
+export Wval.stale : val -> val
+export Wval.rooted : val -> val
+
+struct Slot { tag : word; item : val; }
+
+// A 1-element vector whose element is a BOOLEAN value (tag 3) — the tag the
+// sweep overwrites, so the corruption is VISIBLE (a number element reads back
+// unchanged: Achurn's header records that trap).
+defun Wval.mk() -> val {
+  word base = allocvec(1);
+  vecstore(base, 0, mkbool(1));
+  return mkvec(base, 1);
+}
+
+// Allocate and drop `n` one-element vectors: garbage from the moment the next
+// step starts, so collections fire and the free list fills with this class.
+defun Wval.churn(n : val) -> val {
+  if (mkbool(payload(n, 0) == 0)) {
+    return mknil;
+  } else {
+    word base = allocvec(1);
+    vecstore(base, 0, mknum(999));
+    val dead = mkvec(base, 1);
+    return call Wval.churn(mknum(payload(n, 0) - 1));
+  }
+}
+
+// THE VIOLATION'S WRITER: the handle is produced in THIS frame and copied into
+// the caller's raw block; this frame dies on return, so the raw field holds
+// the only copy and nothing roots the referent.
+defun Wval.put(sv : val) -> val {
+  *Slot p = payload(sv, 0);
+  val v = call Wval.mk();
+  p->item = v;
+  return mknil;
+}
+
+// THE COMPLIANT WRITER: the caller owns the handle, so the callee only copies.
+defun Wval.store1(sv : val, v : val) -> val {
+  *Slot p = payload(sv, 0);
+  p->item = v;
+  return mknil;
+}
+
+// 1 — unrooted, read INSIDE the window: legal.
+defun Wval.win(dummy : val) -> val {
+  Slot s;
+  word sv = &s;
+  call Wval.put(mknum(sv));
+  val back = s.item;
+  return mknum(tagis(vecload(payload(back, 0), 0), 3));
+}
+
+// 0 — unrooted, read ACROSS an allocating call: the referent was swept and the
+// raw copy now reads garbage words.
+defun Wval.stale(dummy : val) -> val {
+  Slot s;
+  word sv = &s;
+  call Wval.put(mknum(sv));
+  val junk = call Wval.churn(mknum(200000));
+  val back = s.item;
+  return mknum(tagis(vecload(payload(back, 0), 0), 3));
+}
+
+// 11 — ROOTED referent, same churn: the raw copy still reads, and so does the
+// rooted slot.  (Under a moving collector the raw copy would read 0 here and
+// the slot would read 1 — obligation (b), a stated contract, not a probe.)
+defun Wval.rooted(dummy : val) -> val {
+  Slot s;
+  word sv = &s;
+  val keep = call Wval.mk();
+  call Wval.store1(mknum(sv), keep);
+  val junk = call Wval.churn(mknum(200000));
+  val back = s.item;
+  return mknum(tagis(vecload(payload(back, 0), 0), 3) * 10 + tagis(vecload(payload(keep, 0), 0), 3));
+}
