@@ -65,6 +65,35 @@ struct Region {
   allocated : word;
   numClass : word;
 }
+// THE FRAME HEADER LAYOUT (midlang-u6) — the name -> word-slot table.  Before
+// this struct frameBlock/frame-enter/frame-leave spelled the header as
+// `wload(hdr, k)` / `wstore(hdr, k, v)` constants; slots 0..3 are MEASURED
+// against those four accesses, and sizeof(FrameHdr) = 5 words = the 40 bytes
+// `frameBlock` computes (`40 + 40*nslots`) and `frame-enter` adds to reach the
+// slots (`base = hdr + 40`).  TestMain's U6 rows pin this table to this
+// declaration.
+//
+//   slot 0  live      the slot count written by frame-enter (rt.zig: live@0)
+//   slot 1  wm        the shadow-stack watermark taken at enter; frame-leave
+//                     pops TO it (`rt_root_pop_to(hdr->wm)`, never a bare pop:
+//                     the collector caches root slots above it)
+//   slot 2  next      the parent frame in the frame stack (globals word 1)
+//   slot 3  freeNext  the freelist link, written on leave, read on reuse
+//   slot 4  _pad      the rt.zig `slots` pointer field; NOTHING in the Mid
+//                     frame path reads or writes it (P1e dropped the counter
+//                     seeding along with the zero loop — rt_root_push_value_array
+//                     takes base+live explicitly), so it is a named hole
+//
+// NOT a field, deliberately: the SLOTS themselves.  They begin at hdr + 40
+// (word 5), are variable in count, and are reached only with computed word
+// offsets — `base`/`memset`/`rt_root_push_value_array` keep the WORD spelling.
+struct FrameHdr {
+  live : word;
+  wm : word;
+  next : word;
+  freeNext : word;
+  _pad : word;
+}
 defun Rt.getpid(dummy : val) -> val {
   return mknum(rawcall getpid());
 }
@@ -3514,9 +3543,11 @@ defun Rt.childCd(argvN : val, argcN : val, stN : val) -> val {
 // layout comment does not name: word 1 = frame_top (the active-frame stack
 // head), word 2 = no_frame_reuse (read ONCE in Rt.main, checked here — the
 // rt.zig:240-249 discipline; a per-call getenv is the measured 8.4% trap).
-// FrameHdr is 40 bytes = 5 words: live@0 (i32), wm@1, next@2,
-// freelist_next@3, slots@4 (the pointer field — the slots DATA starts at +40,
-// word 5).  A Value is 40 bytes = 5 words, so zeroing is 5 words per slot.
+// The header is 40 bytes = 5 words and is the file-scoped `struct FrameHdr`
+// above (the ONE name -> slot table: live@0 (i32), wm@1, next@2, freeNext@3,
+// _pad@4 — the rt.zig slots pointer field, which neither shape writes; the
+// slots DATA starts at +40, word 5).  A Value is 40 bytes = 5 words, so
+// zeroing is 5 words per slot.
 // Zero-BEFORE-root: the reused block's stale slots are memset to the
 // number-0 Value (tag 0, payload 0) BEFORE rootPushValueArray — otherwise
 // scanValue chases freed GC pages.
@@ -3546,9 +3577,9 @@ defun Rt.childCd(argvN : val, argcN : val, stN : val) -> val {
 defun Rt.frameBlock(nslots : word) -> word {
   word bytes = 40 + 40 * nslots;
   word g = payload((nslots < 8192) ? mknum(rawcall rt_glob_addr()) : mknum(0), 0);
-  word h = payload((g != 0) ? mknum(wload(g, 16 + nslots)) : mknum(0), 0);
+  *FrameHdr h = payload((g != 0) ? mknum(wload(g, 16 + nslots)) : mknum(0), 0);
   word popped = if (h != 0) {
-    wstore(g, 16 + nslots, wload(h, 3));
+    wstore(g, 16 + nslots, h->freeNext);
     return 0;
   } else {
     return 0;
@@ -3558,14 +3589,14 @@ defun Rt.frameBlock(nslots : word) -> word {
 }
 
 defun Rt.frame-enter(nslots : word) -> word {
-  word hdr = call Rt.frameBlock(nslots);
-  word base = hdr + 40;
+  *FrameHdr hdr = call Rt.frameBlock(nslots);
+  word base = [word](hdr) + 40;
   rawcall memset(base, 0, 40 * nslots);
-  wstore(hdr, 0, nslots);
+  hdr->live = nslots;
   word wm = rawcall rt_root_watermark();
-  wstore(hdr, 1, wm);
+  hdr->wm = wm;
   word glob = rawcall rt_glob_addr();
-  wstore(hdr, 2, wload(glob, 1));
+  hdr->next = wload(glob, 1);
   wstore(glob, 1, hdr);
   rawcall rt_root_push_value_array(base, hdr);
   return base;
@@ -3573,23 +3604,23 @@ defun Rt.frame-enter(nslots : word) -> word {
 
 defun Rt.frame-leave() -> word {
   word glob = rawcall rt_glob_addr();
-  word hdr = wload(glob, 1);
+  *FrameHdr hdr = wload(glob, 1);
   word bad = if (hdr == 0) {
     call Rt.die(rawstr("qbe-rt: rt_frame_leave with no frame"));
     return 0;
   } else {
     return 0;
   };
-  wstore(glob, 1, wload(hdr, 2));
-  rawcall rt_root_pop_to(wload(hdr, 1));
-  word n = wload(hdr, 0);
+  wstore(glob, 1, hdr->next);
+  rawcall rt_root_pop_to(hdr->wm);
+  word n = hdr->live;
   word pooled = if (wload(glob, 2) != 0) {
     return 0;
   } else {
     if (n >= 8192) {
       return 0;
     } else {
-      wstore(hdr, 3, wload(glob, 16 + n));
+      hdr->freeNext = wload(glob, 16 + n);
       wstore(glob, 16 + n, hdr);
       return 0;
     }

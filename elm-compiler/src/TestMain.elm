@@ -3130,9 +3130,9 @@ checks rt runtimeMidText =
             "Region"
             == Just 13
         )
-    , check "A1 layout: sizeof(FrameHdr) == 5 words (frameBlock's 40-byte header: live/wm/next/freelistNext/slots)"
+    , check "A1 layout: sizeof(FrameHdr) == 5 words (frameBlock's 40-byte header: live/wm/next/freeNext/slot-word 4 — the names runtime.mid's own `struct FrameHdr` uses since U6, where word 4 is the `_pad` hole)"
         (Check.sizeofStruct
-            (declsOf "struct FrameHdr { live : word; wm : word; next : word; freelistNext : word; slots : word; }")
+            (declsOf "struct FrameHdr { live : word; wm : word; next : word; freeNext : word; _pad : word; }")
             "FrameHdr"
             == Just 5
         )
@@ -3179,6 +3179,55 @@ checks rt runtimeMidText =
         (case
             ( lowlModuleBody "struct R { a : word; b : word; c : word; d : word; }\ndefun Rt.a(v : val, i : word) -> word {\n  *R r = payload(v, 0);\n  return r->d + wload(r, i);\n}"
             , lowlBody "defun Rt.a(v : val, i : word) -> word {\n  word r = payload(v, 0);\n  return wload(r, 3) + wload(r, i);\n}"
+            )
+         of
+            ( Ok typed, Ok plain ) ->
+                canon typed == canon plain
+
+            _ ->
+                False
+        )
+
+    -- ==================== U6: runtime.mid's FRAME HEADER layout (midlang-u6) ====================
+    -- The same pair of pins as U5, for the frame family: read runtime.mid's OWN
+    -- `struct FrameHdr` — the declaration frameBlock/frame-enter/frame-leave's
+    -- `h->f` / `hdr->f` accesses resolve against — so a reordered, renamed or
+    -- re-padded field fails HERE instead of as a wrong frame header.  The
+    -- expected numbers are the word slots the code spelled as `wload(hdr, k)` /
+    -- `wstore(hdr, k, v)` BEFORE the re-spelling (the pre-U6 emission is the
+    -- independent record of the mapping, and the corpus gate holds the accesses
+    -- to it).  Slot 4 is a HOLE for the frame path: it is the rt.zig `slots`
+    -- pointer field, which neither shape writes (P1e dropped the counter
+    -- seeding with the zero loop), hence `_pad` — the same choice U5 made for
+    -- region word 7.
+    , check "U6 LAYOUT PIN: runtime.mid's own `struct FrameHdr` puts every field at the word slot the frame family used before the re-spelling (live 0, wm 1, next 2, freeNext 3, _pad 4)"
+        (let
+            d =
+                declsOf runtimeMidText
+
+            names =
+                [ "live", "wm", "next", "freeNext", "_pad" ]
+         in
+         List.map (\n -> Check.fieldOffset d "FrameHdr" n) names == List.map Just (List.range 0 4)
+        )
+    , check "U6 LAYOUT PIN: sizeof(FrameHdr) == 5 words in runtime.mid's own declaration — the 40 bytes frameBlock computes (40 + 40*nslots) and frame-enter adds to reach the slots (base = hdr + 40).  The SLOTS are not a field (variable count, computed offsets); if one ever became one, this row and every `base` row go RED together"
+        (Check.sizeofStruct (declsOf runtimeMidText) "FrameHdr" == Just 5)
+    , check "U6 ACCEPT: the header's byte math stays WORD math — `*FrameHdr hdr = payload(v, 0); word base = [word](hdr) + 40;` (the tier-(i) spelling: the pointer binder IS the header view, the `[word]` cast — J12's `*T -> word` view row — is the identity node) lowers canon-EQUAL to the word-spelled `word hdr = ...; word base = hdr + 40;`, so `base`/memset/rt_root_push_value_array keep the pre-U6 emission"
+        (case
+            ( lowlModuleBody "struct FrameHdr { live : word; wm : word; next : word; freeNext : word; _pad : word; }\ndefun Rt.e(v : val) -> word {\n  *FrameHdr hdr = payload(v, 0);\n  word base = [word](hdr) + 40;\n  return base;\n}"
+            , lowlBody "defun Rt.e(v : val) -> word {\n  word hdr = payload(v, 0);\n  word base = hdr + 40;\n  return base;\n}"
+            )
+         of
+            ( Ok typed, Ok plain ) ->
+                canon typed == canon plain
+
+            _ ->
+                False
+        )
+    , check "U6 ACCEPT: the frame-leave shape type-checks on the POINTER — `h == 0` (pointer COMPARISON is address comparison, so no scaling and no J12 firewall), the `h->next` / `h->wm` / `h->live` loads, the FIELD STORE `h->freeNext = wload(g, 16 + n)`, and `h` itself at a builtin WORD slot (`wstore(g, 16 + n, h)`, `*T -> word`) — all the same nodes as the wload/wstore spelling"
+        (case
+            ( lowlModuleBody "struct FrameHdr { live : word; wm : word; next : word; freeNext : word; _pad : word; }\ndefun Rt.l(v : val, g : word) -> word {\n  *FrameHdr h = payload(v, 0);\n  word bad = if (h == 0) { return 0; } else { return 0; };\n  wstore(g, 1, h->next);\n  rawcall rt_root_pop_to(h->wm);\n  word n = h->live;\n  h->freeNext = wload(g, 16 + n);\n  wstore(g, 16 + n, h);\n  return n;\n}"
+            , lowlBody "defun Rt.l(v : val, g : word) -> word {\n  word h = payload(v, 0);\n  word bad = if (h == 0) { return 0; } else { return 0; };\n  wstore(g, 1, wload(h, 2));\n  rawcall rt_root_pop_to(wload(h, 1));\n  word n = wload(h, 0);\n  wstore(h, 3, wload(g, 16 + n));\n  wstore(g, 16 + n, h);\n  return n;\n}"
             )
          of
             ( Ok typed, Ok plain ) ->
