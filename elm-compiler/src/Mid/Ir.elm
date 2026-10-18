@@ -528,9 +528,12 @@ type UnsafeNode
       -- arm) has one seat, not four.
       --
       -- The width is a MEMORY width (1/2/4/8 bytes); 8 is spelled by
-      -- RawWordLoad's word-index form for the existing word fields (whose
-      -- byte offsets are always 8-aligned), so this family is the SUB-WORD
-      -- one in practice.  Measured classes (`doc/il.txt:715-745`,
+      -- RawWordLoad's word-index form for the existing word fields, so this
+      -- family is the SUB-WORD one in practice.  The `off / 8` that form
+      -- costs is exact only because a WORD-ADDRESSED field at a
+      -- non-multiple-of-8 offset is a J11 REJECT
+      -- (`Mid.RtLang.Check.layoutOf`'s `wordIndexed` rule) — a checked
+      -- invariant, not an assumption.  Measured classes (`doc/il.txt:715-745`,
       -- `Mid.Qbe.Il`'s LoadOp docstring): MemB signed = loadsb, unsigned =
       -- loadub; MemH signed = loadsh, unsigned = loaduh; MemW signed =
       -- loadw, unsigned = loaduw — each WIDENING to `l` in one instruction.
@@ -677,8 +680,9 @@ type FfiWidth
 
 {-| (cffi U6) A MEMORY width in BYTES — the three sub-word sizes a struct
 field can declare (`i8`/`u8` = MemB, `i16`/`u16` = MemH, `i32`/`u32` = MemW;
-the 8-byte word keeps RawWordLoad/RawWordStore's word-index form because
-every 8-byte field is 8-aligned by construction).
+the 8-byte word keeps RawWordLoad/RawWordStore's word-index form, and an
+8-byte-addressed field at a non-multiple-of-8 offset is a J11 REJECT —
+`Mid.RtLang.Check.wordIndexed` — so that word index divides exactly).
 
 Kept apart from `FfiWidth` on purpose: `FfiWidth` is a CALL-BOUNDARY
 register class (`w`/`l`/`d` and how the result is extended), a memory width

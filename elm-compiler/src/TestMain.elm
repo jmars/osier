@@ -8638,7 +8638,72 @@ checks rt runtimeMidText =
             Err _ ->
                 False
         )
+
+    -- ============ cffi U6 FIX: the `off / 8` invariant, CHECKED ============
+    -- The post-U6 review's should-fix.  Until now the rule "every
+    -- word-class field is at a multiple of 8" was stated in three comments
+    -- and checked NOWHERE, and two shapes the grammar accepts broke it with a
+    -- SILENT wrong answer (both MEASURED by emission in the review):
+    --   (A) a union block placed by `widthAlign` — the DECLARED widths only —
+    --       while the cursor was advanced by the full `fieldSizeOf`
+    --       alignment, so a block after a sub-word field sat at byte 1;
+    --   (B) an align-4 nested struct at byte 4, whose word-indexed copy ran
+    --       from word 0 to word 0.
+    -- No row could fail on either before these four: every union row above
+    -- and both union fixtures sit at an already-8-aligned cursor, and no row
+    -- nested an align-4 struct.
+    , check "cffi U6 FIX LAYOUT (probe A): a union block is aligned by its MEMBER's alignment, read from the SAME table the walk advances the cursor by — in `struct S { a : u8; union { p : *word; }; tail : word; }` the block starts at BYTE 8 (C's rule: the union's alignment is its widest member's, 8), so `p` is at 8, `tail` at 16 and the struct is 24 bytes.  FAIL-BEFORE (0af695d): `p` sat at byte 1 — an offset the block's own cursor advance already knew was wrong, because `unionAlign` answered 1 for a member aligned by its TYPE"
+        (let
+            decls =
+                declsOf "struct S { a : u8; union { p : *word; }; tail : word; }"
+         in
+         Check.fieldOffset decls "S" "a"
+            == Just 0
+            && Check.fieldOffset decls "S" "p"
+            == Just 8
+            && Check.fieldOffset decls "S" "tail"
+            == Just 16
+            && Check.structSizeBytes decls "S"
+            == Just 24
+            && Check.sizeofStruct decls "S"
+            == Just 3
+        )
+    , check "cffi U6 FIX LOWER (probe A's access): that union member is addressed at WORD 1 (`RawWordLoad { index = 1 }`, i.e. the emitted `mul 8, 1`).  FAIL-BEFORE: the same field lowered to `index = 0` — the store landed on byte 0, overwriting the `a = 7` written just before it"
+        (lowlModuleBody "struct S { a : u8; union { p : *word; }; tail : word; }\ndefun Rt.f(s : *S) -> word {\n  return [word](s->p);\n}"
+            == Ok (Unsafe (RawWordLoad { ptr = Var 1, index = Lit (LNumber 1) }))
+        )
+    , checkErrModule "cffi U6 FIX REJECT (probe B, and the invariant now CHECKED): an align-4 nested struct placed at byte 4 is a J11 reject naming the field and the word the division would truncate to.  `struct Inner { a : u32; b : u32; }` is legal (8 bytes, align 4), so `inner` follows `x : u32` at byte 4 — where the WORD-indexed copy machinery copied from word 0 to word 0, clobbering `o.x` and leaving `o.inner.b` unlanded.  FAIL-BEFORE: this module checked and emitted cleanly.  The EXEMPTION is the declared sub-word widths (a byte-addressed access), which is what keeps the width-matrix row above legal"
+        "places field 'inner' at byte 4"
+        "struct Inner { a : u32; b : u32; }\nstruct Outer { x : u32; inner : Inner; tail : word; }\ndefun Rt.g() -> word {\n  Inner i;\n  Outer o;\n  o.inner = i;\n  return o.x;\n}"
+    , check "cffi U6 FIX CONTROL (the reject is about the OFFSET, not about nesting): the same nested field at an 8-aligned offset is ACCEPTED and its copy lands on WORD 1 of the destination (`o.inner` at byte 8) — so nothing writes word 0, which is `o.x`.  The two stores are both word 1 because `Inner`'s own two `u32` fields word-index into its word 0: a redundant but content-correct store of the same 8 bytes, and the reason the row pins the DESTINATION base rather than a store count"
+        (case lowlModuleBody "struct Inner { a : u32; b : u32; }\nstruct Outer { x : word; inner : Inner; tail : word; }\ndefun Rt.f() -> word {\n  Inner i;\n  Outer o;\n  o.inner = i;\n  return o.x;\n}" of
+            Ok body ->
+                b2StoreOffsets body == [ 1, 1 ]
+
+            Err _ ->
+                False
+        )
+    , checkErrModule "cffi U6 FIX REJECT (the review's extern-namespace nice-to-have): `extern rt_vec_alloc(n : i64) -> ptr;` is refused — the `rt_`/`q_Rt_` prefix belongs to the lowering's OWN seats, and the Mid heap's allocating seat is one of them.  It is neither a builtin nor a `rawcallArity` row, so before this rule the declaration passed J15 and the call was classified a NON-safepoint C call: the enclosing defun could be classified frame-free, i.e. unrooted across an allocation"
+        "names a MID RUNTIME seat"
+        "extern rt_vec_alloc(n : i64) -> ptr;\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , check "cffi U6 FIX (the ONE declaration table's two readers AGREE on the FIRST declaration): a symbol declared twice cannot be typed from one declaration and emitted from another even when a caller lowers without `declCheck`.  NOT a fail-before row, and the record should say so: the review read `ffiTable`'s `Dict.insert e.name e.sig (ffiTable rest)` as last-wins, but the recursion inserts each declaration AFTER its successors, so the head won there too (MEASURED: this row passes unchanged on 0af695d).  The fix is legibility — a `List.foldl` in file order — and this row is the pin that keeps the two readers agreeing if either one is ever rewritten"
+        (let
+            decls =
+                declsOf "extern f(a : i64) -> i64;\nextern f(a : i32, b : i32) -> i32;"
+         in
+         case ( Dict.get "f" (Check.ffiTable decls), Check.externSig decls "f" ) of
+            ( Just fromTable, Just fromDecls ) ->
+                fromTable == fromDecls && List.length fromTable.params == 1
+
+            _ ->
+                False
+        )
     ]
+
+
+{- The two rows above are the post-U6 review's second and third nice-to-haves,
+kept beside the U6 fix because they are the same class (two seats that could
+disagree). -}
 
 
 {-| B4 — every subexpression of a tree, pre-order (the loop rows count nodes

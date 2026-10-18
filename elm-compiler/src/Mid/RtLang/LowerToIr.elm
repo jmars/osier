@@ -3140,9 +3140,9 @@ addrPlus base off =
   * a nested STRUCT or an ARRAY -> its address (`addrPlus`, no load);
   * everything else (word/pointer — the checker rejects float fields, J11) ->
     `RawWordLoad { index = off / 8 }`, the WORD-offset form the emitted bytes
-    already have (the layout aligns every word-class field to 8, so the
-    division is exact — a non-multiple would be a layout bug, and the
-    alignment rule in `Check.fieldSizeOf` is what rules it out).
+    already have.  The division is exact because a WORD-ADDRESSED field at a
+    non-multiple-of-8 offset is a J11 REJECT (`layoutOf`'s `wordIndexed` rule)
+    — that check, not an alignment hope, is what rules the truncation out.
 -}
 fieldLoad : Ast.Field -> Exp -> Int -> Exp
 fieldLoad f p1 off =
@@ -3521,8 +3521,13 @@ fieldStoreNodes st sname f base e =
         Ok ( off, fld ) ->
             case fld.ty of
                 TStruct inner ->
-                    -- the copy walks WORD offsets; the field's byte offset is a
-                    -- multiple of 8 (a struct field aligns 8).
+                    -- the copy walks WORD offsets, so the field's byte offset
+                    -- must divide by 8 — which `Check.layoutOf` CHECKS (a
+                    -- word-addressed field at a non-multiple-of-8 offset is a
+                    -- J11 reject).  Before that check, a nested struct with a
+                    -- 4-byte alignment (e.g. `struct Inner { a : u32; b : u32; }`
+                    -- at byte 4) copied from word 0 to word 0 and clobbered
+                    -- the fields above it.
                     copyStores st inner (off // 8) 0 base e
 
                 _ ->

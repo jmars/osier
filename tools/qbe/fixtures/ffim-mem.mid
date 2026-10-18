@@ -23,9 +23,11 @@
 // used both to store and to load cancels out.  So the block is filled through
 // the typed FIELDS, handed to `poll()` — which reads `fd` at C's offset 0 and
 // writes `revents` at C's offset 6 — and then read back as ONE 8-byte word
-// through a `*word` view of the same address.  The golden number
-// 9007203549808287 is `fd(99999) | events(1)<<32 | revents(32)<<48`, i.e. EVERY
-// byte of the struct pinned against values the kernel produced:
+// through a `*word` view of the same address.  The word read back is
+// 9007203549808287 = `fd(99999) | events(1)<<32 | revents(32)<<48`, and the
+// GOLDEN adds the defun's `1000 * poll()` term (the call returns 1 here):
+// 9007203549808287 + 1000 = 9007203549809287, the committed number.  So EVERY
+// byte of the struct is pinned against values the kernel produced:
 //
 //   * 99999 proves `fd` went to bytes 0..3 (the kernel read it there: an
 //     invalid descriptor is what makes the answer POLLNVAL);

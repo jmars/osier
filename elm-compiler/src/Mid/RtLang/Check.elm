@@ -3,6 +3,7 @@ module Mid.RtLang.Check exposing
     , checkModule
     , checkProgram
     , externSig
+    , ffiTable
     , fieldOffset
     , fieldWidth
     , guardsHold
@@ -715,7 +716,8 @@ declCheck decls =
 {-| J15 — the `extern` declarations' judgment (cffi plan §4's R-03..R-08
 family), run BEFORE the layout tables so a bad C signature is reported
 before anything reads a struct offset.  Each rejection is a distinct
-message, and the three here are exactly the ones this unit owns:
+message, and the ones here are exactly the ones this unit owns (plus the
+runtime-seat prefix rule the post-U6 review added):
 
   * **R-06** a symbol declared twice in one file.  THE DUPLICATE-TABLE SEAT:
     U1 deliberately kept externs OUT of the struct/enum namespace
@@ -731,6 +733,13 @@ message, and the three here are exactly the ones this unit owns:
     describing one symbol is the skew this repo keeps paying for; the
     declaration is authoritative, so the fix is to delete the row (cffi U5
     does that for the runtime's libc surface, one symbol per commit).
+  * **THE RUNTIME-SEAT PREFIX** `rt_`/`q_Rt_`: the lowerer's own symbols
+    (`rt_vec_alloc`, `rt_raw_alloc`, `rt_string`, …) are not builtins and not
+    `rawcallArity` rows, so without this rule a declaration could claim one —
+    and `Rt.unsafeSafepoint` classifies a `RawCallExtern` as NON-safepoint, so
+    an EXTERN declaration of an ALLOCATING seat would be treated as
+    allocation-free by the frame-free walker.  That is the one route by which
+    the `unsafeSafepoint = False` claim can be made unsound.
 
 R-03 (`val` in any extern position) and R-05 (`void` as a parameter) are
 UNREACHABLE here BY GRAMMAR: `FfiTy` has no `val`, `void` is a result-only
@@ -771,9 +780,11 @@ externCheck decls =
 
 
 {-| The FIRST problem with one extern symbol, in the order the plan lists the
-rejections (duplicate, then the two name collisions — a name collision is
+rejections (duplicate, then the three name collisions — a name collision is
 true of the symbol wherever it is declared, so it must not depend on which
-declaration the walk reaches first).
+declaration the walk reaches first).  The third collision is a PREFIX rule
+(`rt_`/`q_Rt_`) rather than a list: a list of the runtime's own seats would
+rot the moment a seat is renamed.
 -}
 firstSymbolProblem : List Decl -> Sym -> Maybe String
 firstSymbolProblem decls sym =
@@ -796,6 +807,13 @@ firstSymbolProblem decls sym =
             ("RtLang: J15: extern symbol '"
                 ++ sym
                 ++ "' is declared here AND is a rawcallArity row — the declaration is authoritative; delete the table row (two tables is the skew this repo keeps paying for)"
+            )
+
+    else if String.startsWith "rt_" sym || String.startsWith "q_Rt_" sym then
+        Just
+            ("RtLang: J15: extern symbol '"
+                ++ sym
+                ++ "' names a MID RUNTIME seat (the 'rt_'/'q_Rt_' prefix belongs to the lowering's own symbols) — a C declaration cannot claim it, and classifying it as a C call would make the safepoint walker treat an ALLOCATING seat as allocation-free"
             )
 
     else
@@ -833,23 +851,39 @@ externParamProblem sym sig =
 
 {-| The extern table as `Env` carries it (and as the LOWERER reads it — the
 one-table property: `LowerToIr` calls `externSig`, so the checker's arity and
-the emitter's widths cannot come from two copies).  Total: `externCheck` has
-already rejected a duplicate symbol, so the last-wins `Dict.insert` is never
-ambiguous on a checked module.
+the emitter's widths cannot come from two copies).
+
+FIRST DECLARATION WINS — the same rule `externSig` (the lowerer's reader) has
+walked with all along, so the two readers of the file's declarations cannot
+disagree even for a caller that lowers without `declCheck` (a test helper, a
+`--no-check` lane).
+
+MEASURED, and worth stating because the post-U6 review read it backwards: the
+previous recursive `Dict.insert e.name e.sig (ffiTable rest)` inserted each
+declaration AFTER its successors' entries, so the HEAD declaration won there
+too — the review's "last-wins" claim was wrong, and NO BEHAVIOUR CHANGED here.
+What changed is that the order is now the one the source is read in
+(`List.foldl` over the file) instead of an emergent property of a right-fold's
+insert nesting.  `externCheck` rejects a duplicate symbol (R-06) anyway; this
+seat keeps the answer independent of that judgment.
 -}
 ffiTable : List Decl -> Dict Sym FfiSig
 ffiTable decls =
-    case decls of
-        [] ->
-            Dict.empty
-
-        d :: rest ->
+    List.foldl
+        (\d acc ->
             case d of
                 ExternDecl e ->
-                    Dict.insert e.name e.sig (ffiTable rest)
+                    if Dict.member e.name acc then
+                        acc
+
+                    else
+                        Dict.insert e.name e.sig acc
 
                 _ ->
-                    ffiTable rest
+                    acc
+        )
+        Dict.empty
+        decls
 
 
 {-| The FILE's declared signature for one symbol, or `Nothing` (an undeclared
@@ -1034,11 +1068,18 @@ an unknown struct; a struct field naming an unknown struct; a BY-VALUE CYCLE
 whose BYTE SIZE is not a whole number of 8-byte words (a Mid struct VALUE is
 a word-quantised block — the frame cell, the word-for-word copy and `sizeof`
 all are — so a 2-byte or 12-byte layout would copy past its own end into the
-next field; the remedy is a `_pad` field, and the message says so).
+next field; the remedy is a `_pad` field, and the message says so); and a
+WORD-ADDRESSED field at a non-multiple-of-8 byte offset (the lowerer addresses
+such a field as `offset / 8`, so the division would truncate — see
+`wordIndexed`; a sub-word-width field is exempt because its access is
+byte-addressed).
 
 B5 — THE UNION RULE, and it is the ONLY place it is written: the members of
 an `MUnion` block ALL take the block's offset (the block is aligned by its
-WIDEST member's alignment), and the block advances the cursor by the MAX of
+WIDEST member's alignment, read through `fieldSizeOf` — the SAME table that
+places each field and advances the cursor, so a block's offset and its
+members' accesses cannot disagree), and the block advances the cursor by the
+MAX of
 its members' sizes (so the next field starts after the max, aligned like every
 field).  A member is then PROMOTED into the struct's field list — `m.n`,
 `m.p`, `m.pair` all resolve here, through `fieldOffset`, to one offset.
@@ -1074,7 +1115,24 @@ layoutOf decls names structName members =
                             )
 
                     else
-                        Ok ( fields, size, align )
+                        case List.filter (\f -> wordIndexed f.width && modBy 8 f.offset /= 0) fields of
+                            bad :: _ ->
+                                Err
+                                    ("RtLang: J11: struct '"
+                                        ++ structName
+                                        ++ "' places field '"
+                                        ++ bad.name
+                                        ++ "' at byte "
+                                        ++ String.fromInt bad.offset
+                                        ++ ", which is not a multiple of 8 — its access is addressed at `offset / 8` (the word-index form the word load/store and the word-for-word struct copy speak), so byte "
+                                        ++ String.fromInt bad.offset
+                                        ++ " would silently truncate to word "
+                                        ++ String.fromInt (bad.offset // 8)
+                                        ++ ". Either give the field an explicit sub-word width (i8/u8/i16/u16/i32/u32 — a byte-addressed access), or pad before it with a `_pad` field so it lands on an 8-byte boundary (note: that padding moves the field off the byte offset a C header would give it, so a struct whose C layout puts a word-class field at a sub-word boundary is not yet expressible byte-exactly)"
+                                    )
+
+                            [] ->
+                                Ok ( fields, size, align )
 
 
 layoutOfSeen : List Decl -> List String -> List String -> String -> List StructMember -> Result String ( List StructField, Int, Int )
@@ -1112,48 +1170,61 @@ membersWalk decls names seen structName members cursor alignSoFar acc =
                             membersWalk decls names seen structName rest (off + sz) (max alignSoFar al) ({ name = f.name, ty = f.ty, width = f.width, offset = off } :: acc)
 
                 MUnion ms ->
-                    case unionAt decls names seen structName ms (alignUp cursor (unionAlign ms)) of
+                    case unionAlignOf decls names seen structName ms of
                         Err msg ->
                             Err msg
 
-                        Ok ( placed, sz, al ) ->
-                            -- the block's members were laid out in
-                            -- declaration order, so prepending them REVERSED keeps `acc`
-                            -- (the reversed accumulator) in field order.
-                            membersWalk decls names seen structName rest (alignUp cursor al + sz) (max alignSoFar al) (List.reverse placed ++ acc)
+                        Ok blockAlign ->
+                            case unionAt decls names seen structName ms (alignUp cursor blockAlign) of
+                                Err msg ->
+                                    Err msg
+
+                                Ok ( placed, sz, al ) ->
+                                    -- the block's members were laid out in
+                                    -- declaration order, so prepending them REVERSED keeps `acc`
+                                    -- (the reversed accumulator) in field order.
+                                    membersWalk decls names seen structName rest (alignUp cursor al + sz) (max alignSoFar al) (List.reverse placed ++ acc)
 
 
-{-| The alignment of a union block: the widest member's (the block is placed
-as if its widest member stood there alone).  A field whose size/alignment
-cannot be computed contributes nothing here — the walk reports the error.
+{-| The alignment of a union block: its widest member's, read through
+`fieldSizeOf` — the SAME table the block's PLACEMENT and the walk's CURSOR
+ADVANCE both read.  (cffi fix: the review's should-fix.)
+
+WHY THIS IS NOT A SEPARATE RULE.  The first version folded `widthAlign`, i.e.
+the DECLARED WIDTHS only, and answered 1 for a member whose alignment comes
+from its TYPE (`word`, `*T`, `bool`, a nested struct, an array) — while the
+walk advanced the cursor by the FULL alignment (`al`, which `unionWalk` reads
+from `fieldSizeOf`).  So a block that followed a sub-word field was placed at
+a byte offset nothing aligned and its word-class members' accesses
+(`offset / 8`) truncated SILENTLY: MEASURED, `struct S { a : u8; union { p :
+*word; }; tail : word; }` placed `p` at byte 1 and stored it at WORD 0,
+overwriting the byte just stored.  One table, one answer: the offset the block
+is placed at and the offset its members are accessed at now come from the same
+call.
+
+A member whose size/alignment cannot be computed is REPORTED (hence `Result`),
+never skipped — skipping is what let the weaker rule look total.  (The walk
+reports the same error a moment later via `unionWalk`; doing it here means the
+block's OFFSET is never derived from a partial table.)
 -}
-unionAlign : List Field -> Int
-unionAlign ms =
-    List.foldl
-        (\f acc ->
-            case widthAlign f of
-                Just al ->
-                    max acc al
+unionAlignOf : List Decl -> List String -> List String -> String -> List Field -> Result String Int
+unionAlignOf decls names seen structName ms =
+    case ms of
+        [] ->
+            Ok 1
 
-                Nothing ->
-                    acc
-        )
-        1
-        ms
+        f :: rest ->
+            case fieldSizeOf decls names seen structName f of
+                Err msg ->
+                    Err msg
 
+                Ok ( _, al ) ->
+                    case unionAlignOf decls names seen structName rest of
+                        Err msg ->
+                            Err msg
 
-{-| A declared width's alignment (== its size, the C rule for the scalar
-widths this language admits).  `Nothing` for a field with no declared width
-(its `Type` decides) or for a width that is not a memory width.
--}
-widthAlign : Field -> Maybe Int
-widthAlign f =
-    case f.width of
-        Just w ->
-            Maybe.map Tuple.first (widthSizeAlign w)
-
-        Nothing ->
-            Nothing
+                        Ok acc ->
+                            Ok (max acc al)
 
 
 {-| A declared MEMORY width's (bytes, alignment).  `i64`/`u64` are 8 — the
@@ -1243,6 +1314,35 @@ alignUp n a =
 
     else
         a * ((n + a - 1) // a)
+
+
+{-| (cffi fix) Is a field's ACCESS addressed in WORDS?  `fieldLoad`/`fieldStore`
+(`offset / 8`) and the word-for-word struct copy do that for every field whose
+width is a WORD (`word`, `*T`, `bool`, `i64`/`u64`, `val`, a nested struct, an
+array); the only fields whose access is BYTE-addressed are the ones declaring a
+sub-word width (1/2/4 bytes), which is exactly what `subWordWidthOf` lowers to
+`RawMemLoad`/`RawMemStore`.  So a field at a non-multiple-of-8 offset MUST be a
+sub-word one, and this predicate is the half of that rule the layout pass can
+decide — `layoutOf` turns it into a J11 REJECT, which is what makes the
+`off / 8` in the lowerer a CHECKED invariant rather than a comment.
+
+It reads the WIDTH, not the whole `Field`, because `StructField` (this
+module's four-field record) is not an `Ast.Field`: Elm records are structural
+but not subtyped.
+-}
+wordIndexed : Maybe FfiTy -> Bool
+wordIndexed mw =
+    case mw of
+        Just w ->
+            case widthSizeAlign w of
+                Just ( sz, _ ) ->
+                    sz == 8
+
+                Nothing ->
+                    True
+
+        Nothing ->
+            True
 
 
 {-| A field's size in BYTES and its alignment, with the J11 field-type
