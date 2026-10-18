@@ -426,22 +426,10 @@ phicopyref(Fn *fn, Blk *b, Phi *p)
 
 	/* if s1 ends with a jnz on either b
 	 * or s2; the inference below is wrong
-	 * without the jump type checks.
-	 *
-	 * OSIER PATCH (see THIRD-PARTY.md): a jnz argument may only
-	 * stand in for the phi when it has the phi's class.  qbe's
-	 * constants are untyped, so `req(p->arg[n], con01[c])` also
-	 * matches an `l`-class phi of the 8-byte values $0/$1 (what
-	 * ssa() builds from `storel 0`/`storel 1` in the two arms,
-	 * read back by an `l` load).  Returning the `w`-class jnz
-	 * argument for such a phi emits ill-typed IL -- a `w` temp
-	 * used where `l` is required -- which rv64/isel.c's fixarg
-	 * asserts on, and which amd64/arm64 silently widen. */
+	 * without the jump type checks */
 	if (d->s1 == s[1] && d->s2 == s[0]
 	&& d->s1->jmp.type == Jjmp
-	&& d->s2->jmp.type == Jjmp
-	&& (rtype(d->jmp.arg) != RTmp
-	    || fn->tmp[d->jmp.arg.val].cls == p->cls))
+	&& d->s2->jmp.type == Jjmp)
 		return d->jmp.arg;
 
 	return R;

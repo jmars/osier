@@ -77,11 +77,8 @@ SOFTWARE.
 
 ## QBE (qbe) — compiler backend, vendored verbatim
 
-**A verbatim vendoring with ONE recorded patch: every file under `vendor/qbe/`
-is byte-identical to upstream at the pinned commit except `copy.c`, which
-carries the local fix described under "Local patch" below. (Before
-2026-10-18 this section read "nothing is patched"; the patch landed the same
-day, and the file says so rather than leaving the claim standing.)**
+**A verbatim vendoring, not a derivation: every file under `vendor/qbe/` is
+byte-identical to upstream and nothing is patched.**
 
 - **Licence:** MIT — upstream's `LICENSE` opens with the copyright line
   `© 2015-2026 Quentin Carbonneaux <quentin@c9x.me>`; the file is reproduced
@@ -102,29 +99,7 @@ day, and the file says so rather than leaving the claim standing.)**
   the ABI notes, `minic/` an example C frontend, `test/` upstream's testsuite.
 - **Verification of the copy (2026-10-07):** every one of the 153 files was
   re-hashed as a git blob (`sha1("blob <len>\0" + contents)`) and compared
-  against `git ls-tree -r e786f06` — 153/153 identical. After the local patch
-  below, 152/153 are still identical and `copy.c` is the one exception.
-- **Local patch (2026-10-18) — `copy.c`, `phicopyref()`.** The "dominating jnz
-  arg" substitution returned the jnz argument (a `w`-class 0/1 condition) for
-  any 2-armed phi whose arms are the constants `$0`/`$1`. qbe's constants are
-  untyped, so `req(p->arg[n], con01[c])` also matches an `l`-class phi — what
-  qbe's own `ssa()` builds from `storel 0` / `storel 1` in the two arms of a
-  diamond, read back by an `l` load (a boxed boolean stored as an 8-byte
-  value). The substitution then left a `w` temp used where `l` is required:
-  **ill-typed IL.** MEASURED consequences on the unpatched pin: `qbe -t rv64`
-  ABORTS (`rv64/isel.c:80: fixarg: Assertion 'k == fn->tmp[r0.val].cls'
-  failed`) on such legal IL — including `x + (if c then 0 else 1)` compiled
-  from plain Elm — while amd64/arm64 accept it and silently rely on the
-  backend zero-extending a 32-bit value into an 8-byte slot. The patch adds
-  the missing class test (a jnz-arg TEMP may only stand in when its class
-  equals the phi's); a constant argument is untyped and still substitutes.
-  This *removes* an unsound optimization, never adds one, and upstream has it
-  in neither `master` (= this pin) nor `dev` (checked 2026-10-18), so there is
-  no commit to move the pin to. Verified after patching: `make -C vendor/qbe
-  check` → "All is fine!", and `tools/qbe/qbe-check.sh`'s
-  `cross-rv64-lphi` row (a hand-written IL fixture with exactly this shape)
-  is RED on the unpatched pin and GREEN with it. **A future pin bump must
-  re-apply this patch or confirm upstream fixed it.**
+  against `git ls-tree -r e786f06` — 153/153 identical.
 - **How it is built:** `tools/qbe-build.sh` → `vendor/qbe/qbe`. It drives
   upstream's own `Makefile` unmodified, with the system `cc` and `make`, and
   needs no network. Its artifacts (`qbe`, `*.o`, `config.h`) are covered by

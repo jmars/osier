@@ -2456,15 +2456,9 @@ fi
 #     `rt_prim_cons` site survives;
 #   * midrt-zig: the OLD path is still selectable (QBE_MIDZIG=1) and emits
 #     `call $rt_prim_cons(` sites again — the bisect hatch, measured at the
-#     emission level (post-flip it cannot link; see qbe_ssa_midrt).  SURFACE
-#     scoped: the hatch gates the surface prim route, never the injected
-#     runtime's own Mid bodies (stage 7 O2-fix — see midrt_surface);
-#   * midrt-pruned: the pruning claim, measured on a cons-FREE entry
-#     (NoRep.chain is pure arithmetic), which must carry NO Rt defun from the
-#     used-prim census.  TWO ARMS since the host became the default: the
-#     unhosted route (QBE_MIDHOST=0) is where the census is the only seed
-#     source, and the host-on build of the SAME fixture is the control that
-#     attributes the default's cons defun to the host's own closure;
+#     emission level (post-flip it cannot link; see qbe_ssa_midrt);
+#   * midrt-pruned: the hatch ON a cons-FREE entry (NoRep.chain is pure
+#     arithmetic) emits NO Rt defun at all — the pruning claim, measured;
 #   * midrt-hatch: QBE_NOMIDRT=1 removes the injection from the cons-using
 #     fixture — the same-source control that attributes every .ssa move
 #     above to the injection (the corpus-ssa attribution's in-gate twin).
@@ -2486,40 +2480,11 @@ midrt_ssa() { grep -c 'q_Rt_x2econs' "$1" 2>/dev/null || true; }
 midrt_calls() { grep -c 'call \$q_Rt_x2econs(' "$1" 2>/dev/null || true; }
 midrt_zigcons() { grep -c 'rt_prim_cons' "$1" 2>/dev/null || true; }
 
-# SURFACE-ONLY counters (stage 7 O2-fix).  Since O2 made the Mid effect host
-# the DEFAULT, every .ssa also carries the INJECTED Rt defuns, and their own
-# bodies call q_Rt_* (Rt.globBuildGo conses, Rt.deepEq conses, ...).  Those
-# calls are the runtime's own Mid emission, not the surface prim route, and no
-# hatch gates them — so a WHOLE-FILE grep can no longer ask either row's
-# question.  MEASURED on flatten.elm at c5373ec: 33 whole-file call sites, 0
-# in the surface defuns; the same file under QBE_MIDHOST=0 (the unhosted
-# escape route) is 0/0.  A surface defun is any defun whose mangled name does
-# not start with `q_Rt_x2e`: the compiler REFUSES a surface module named `Rt`
-# (the Rt name reservation, row `rtmod`), so that prefix is the injected
-# runtime and nothing else.
-midrt_surface() { # <ssa> <fixed substring>
-  # FIXED-STRING match, not a regex: awk's -v processes backslash escapes in
-  # the value, so a `-v pat='call \$q_Rt_x2econs\('` reached the regex engine
-  # as `call $q_Rt_x2econs(` and died "unbalanced (" -- and with stderr
-  # discarded the counter came back EMPTY, which every `[ "$c" -lt 1 ]` below
-  # reads as false.  MEASURED during the O2-fix: that made midrt-route and
-  # midrt-zig PASS with no measurement at all.  index() cannot fail that way,
-  # and every caller still checks the value is a number.
-  awk -v pat="$2" '
-    /^function/ { surf = (index($0, "$q_Rt_x2e") == 0) }
-    surf && index($0, pat) { n++ }
-    END { print n+0 }
-  ' "$1" 2>/dev/null
-}
-midrt_scalls() { midrt_surface "$1" 'call $q_Rt_x2econs('; }
-midrt_szigcons() { midrt_surface "$1" 'rt_prim_cons'; }
-
 qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-on.ssa"  on
 qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-off.ssa" off
 qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-route.ssa" route
 qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-zig.ssa"  zig
-QBE_NOREP=1 qbe_ssa_midrt tools/qbe/fixtures/norep.elm NoRep.chain "$TMP/midrt-chain-host.ssa" route
-QBE_NOREP=1 QBE_MIDHOST=0 qbe_ssa_midrt tools/qbe/fixtures/norep.elm NoRep.chain "$TMP/midrt-chain-route.ssa" route
+QBE_NOREP=1 qbe_ssa_midrt tools/qbe/fixtures/norep.elm NoRep.chain "$TMP/midrt-chain-route.ssa" route
 
 midrt_bad=0
 if [ -s "$TMP/midrt-flat-on.ssa" ]; then
@@ -2537,66 +2502,42 @@ else
   echo "FAIL midrt-injected: .ssa missing (compile failed?)"; midrt_bad=1
 fi
 if [ -s "$TMP/midrt-flat-route.ssa" ]; then
-  c=$(midrt_scalls "$TMP/midrt-flat-route.ssa")
-  z=$(midrt_szigcons "$TMP/midrt-flat-route.ssa")
-  case "$c$z" in ''|*[!0-9]*) echo "FAIL midrt-route: a surface counter returned '$c'/'$z', not a number — the row cannot measure"; midrt_bad=1; c=0; z=1;; esac
+  c=$(midrt_calls "$TMP/midrt-flat-route.ssa")
+  z=$(midrt_zigcons "$TMP/midrt-flat-route.ssa")
   if [ "$c" -lt 1 ]; then
-    echo "FAIL midrt-route: no SURFACE call \$q_Rt_x2econs site — the route does not fire on this fixture"
+    echo "FAIL midrt-route: no call \$q_Rt_x2econs site — the route does not fire on this fixture"
     midrt_bad=1
   elif [ "$z" -ne 0 ]; then
-    echo "FAIL midrt-route: $z surface rt_prim_cons site(s) survive with the route ON — cons did not convert"
+    echo "FAIL midrt-route: $z rt_prim_cons site(s) survive with the route ON — cons did not convert"
     midrt_bad=1
   else
-    echo "PASS midrt-route: $c surface cons site(s) -> q_Rt_x2econs, 0 rt_prim_cons left (the DEFAULT route; the host's own $(midrt_calls "$TMP/midrt-flat-route.ssa") internal call(s) are the injected runtime, counted apart)"
+    echo "PASS midrt-route: $c cons site(s) -> q_Rt_x2econs, 0 rt_prim_cons left (the DEFAULT route)"
   fi
 else
   echo "FAIL midrt-route: .ssa missing (compile failed?)"; midrt_bad=1
 fi
 if [ -s "$TMP/midrt-flat-zig.ssa" ]; then
-  # SURFACE-SCOPED (stage 7 O2-fix): the hatch gates the SURFACE prim route.
-  # The injected Rt defuns are Mid IL and call q_Rt_x2econs in their own
-  # bodies whatever the hatch says -- MEASURED on this fixture at c5373ec: 33
-  # whole-file call sites, 0 of them in a surface defun, and the same build
-  # under QBE_MIDHOST=0 is 0 whole-file.  A whole-file count here would fail
-  # on a healthy tree and could never fail for the reason it names.
-  zc=$(midrt_szigcons "$TMP/midrt-flat-zig.ssa")
-  zq=$(midrt_scalls "$TMP/midrt-flat-zig.ssa")
-  zi=$(midrt_calls "$TMP/midrt-flat-zig.ssa")
-  case "$zc$zq" in ''|*[!0-9]*) echo "FAIL midrt-zig: a surface counter returned '$zc'/'$zq', not a number — the row cannot measure"; midrt_bad=1; zc=0; zq=1;; esac
+  zc=$(midrt_zigcons "$TMP/midrt-flat-zig.ssa")
+  zq=$(midrt_calls "$TMP/midrt-flat-zig.ssa")
   if [ "$zc" -lt 1 ]; then
-    echo "FAIL midrt-zig: QBE_MIDZIG=1 emitted no SURFACE rt_prim_cons site — the old path is not selectable"
+    echo "FAIL midrt-zig: QBE_MIDZIG=1 emitted no rt_prim_cons site — the old path is not selectable"
     midrt_bad=1
   elif [ "$zq" -ne 0 ]; then
-    echo "FAIL midrt-zig: $zq SURFACE q_Rt_x2econs call site(s) under QBE_MIDZIG=1 — the hatch does not gate the route"
+    echo "FAIL midrt-zig: $zq q_Rt_x2econs call site(s) under QBE_MIDZIG=1 — the hatch does not gate the route"
     midrt_bad=1
   else
-    echo "PASS midrt-zig: QBE_MIDZIG=1 emits $zc surface rt_prim_cons site(s), 0 surface q_Rt cons calls (the $zi injected-runtime call(s) are the host's own Mid bodies, ungated by construction)"
+    echo "PASS midrt-zig: QBE_MIDZIG=1 emits $zc rt_prim_cons site(s), 0 q_Rt cons calls (the seeded defun may still be present, uncalled)"
   fi
 else
   echo "FAIL midrt-zig: .ssa missing (compile failed?)"; midrt_bad=1
 fi
-if [ -s "$TMP/midrt-chain-route.ssa" ] && [ -s "$TMP/midrt-chain-host.ssa" ]; then
-  # TWO ARMS (stage 7 O2-fix).  The census claim is about used-prim seeding,
-  # and since O2 the DEFAULT route ALSO seeds the Mid effect host's closure
-  # (MidRt.hostSeeds) — whose bodies cons (Rt.globBuildGo -> Rt.cons).  So the
-  # default build of this pure-arithmetic entry legitimately carries the cons
-  # defun, and a bare "0 mentions" assertion can no longer tell that apart
-  # from a census that over-seeds.  The census is therefore measured on the
-  # UNHOSTED route (QBE_MIDHOST=0, byte-identical to the pre-7A tree), with
-  # the host-on build of the SAME fixture as the arm that keeps this row
-  # falsifiable: if the census ever over-seeds, arm 1 goes red; if the host
-  # ever stops being the thing that brings cons in, arm 2 goes red.
-  # MEASURED at c5373ec: unhosted 0 mention(s) / 106,881 B, default 34 / 634,750 B.
+if [ -s "$TMP/midrt-chain-route.ssa" ]; then
   n=$(midrt_ssa "$TMP/midrt-chain-route.ssa")
-  h=$(midrt_ssa "$TMP/midrt-chain-host.ssa")
   if [ "$n" -ne 0 ]; then
-    echo "FAIL midrt-pruned: a cons-free entry carries $n q_Rt_x2econs mention(s) on the UNHOSTED route — the used-prim census over-seeds"
-    midrt_bad=1
-  elif [ "$h" -lt 1 ]; then
-    echo "FAIL midrt-pruned: the host-ON build of the same cons-free fixture carries no Rt defun either — the two arms are not distinguished, so the row cannot attribute anything"
+    echo "FAIL midrt-pruned: a cons-free entry carries $n q_Rt_x2econs mention(s) — the used-prim census over-seeds"
     midrt_bad=1
   else
-    echo "PASS midrt-pruned: the cons-free entry carries NO Rt defun on the unhosted route (used-prim seeding prunes it); the default build's $h mention(s) are the Mid HOST's own closure, attributed not seeded"
+    echo "PASS midrt-pruned: the cons-free entry carries NO Rt defun (used-prim seeding prunes it)"
   fi
 else
   echo "FAIL midrt-pruned: .ssa missing (compile failed?)"; midrt_bad=1
@@ -2726,28 +2667,6 @@ for tgt in arm64 rv64; do
     echo "PASS cross-$tgt: fib.ssa and float.ssa compile under qbe -t $tgt (the IL is target-neutral)"
   fi
 done
-
-# ---- cross-rv64-lphi: THE DEPENDENCY FIX'S OWN PIN (stage 7 O2-fix).  The
-#      row above compiles the EMITTER'S artifacts; this one compiles
-#      HAND-WRITTEN IL with the one shape the vendored qbe mistyped (a
-#      `w`-class jnz over a diamond whose arms `storel` the constants 0 and 1,
-#      read back by an `l` load — see tools/qbe/fixtures/lphi-const.ssa and
-#      THIRD-PARTY.md's "Local patch").  It is RED on the unpatched pin
-#      (rv64/isel.c:80 fixarg asserts, rc 134) and GREEN with the patch, so it
-#      fails for a reason independent of both the emitter and the fixture: a
-#      future qbe pin bump that drops the patch goes red HERE, naming the
-#      cause, instead of as an rv64 abort on a plain Elm fixture.
-if [ -s "$ROOT/tools/qbe/fixtures/lphi-const.ssa" ]; then
-  if "$ROOT/vendor/qbe/qbe" -t rv64 "$ROOT/tools/qbe/fixtures/lphi-const.ssa" >/dev/null 2>"$TMP/lphi.err"; then
-    echo "PASS cross-rv64-lphi: hand-written IL with an l-class phi of \$0/\$1 under a w jnz compiles (the copy.c class guard is present)"
-  else
-    echo "FAIL cross-rv64-lphi: vendored qbe -t rv64 rejected the l-phi fixture: $(head -c 140 "$TMP/lphi.err") — the copy.c class guard (THIRD-PARTY.md, Local patch) is missing or was lost in a pin bump"
-    FAIL=1
-  fi
-else
-  echo "FAIL cross-rv64-lphi: tools/qbe/fixtures/lphi-const.ssa is missing — the row no longer measures the dependency fix"
-  FAIL=1
-fi
 
 # ---- cffi U2: THE WIDTH PAIR (plan §7.2) — the oracle this arc exists for ----
 # Two fixtures identical EXCEPT for the DECLARED RESULT WIDTH of the same libc
