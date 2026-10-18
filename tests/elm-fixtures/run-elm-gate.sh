@@ -441,12 +441,13 @@ run p2pad       main   "$(read_expected p2pad)"
 # get-time prim) + a two-sleep ORDER chain (sequential sleeps take >= 40ms).
 run nowunit     main   "$(read_expected nowunit)"
 # progio (STAGE 7B): the SYNCHRONOUS leaves of the Mid effect host under a real
-# Platform.program — readLine (stdin "hello"), writeString (fd 1), setenv +
+# Platform.program — readLine (stdin/input/progio.txt, a 260-byte LINE so the
+# accumulator GROWS twice: the growth arm's only cheap probe), writeString (fd 1), setenv +
 # getenv, getpid, writeFile (out/progio.out, compared below) and cd + getcwd,
 # with a 15 ms sleep composed into the chain so the deadline machinery runs
 # between them.  Registered WITHOUT a compile group (see run_hostio) and
 # inheriting QBE_MIDHOST, so this ONE row is arm A and arm B.
-run_hostio progio main "$(read_expected progio)" echo.txt
+run_hostio progio main "$(read_expected progio)" progio.txt
 out_cmp progio progio.out
 
 # --- S6 (M-FOUNDATION): host dir/stat leaves (getdents64 + fstatat) ---

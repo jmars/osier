@@ -22,9 +22,15 @@ module Progio exposing (main)
 -- yet).  Pinning that shape in a golden would pin an accident, so this row
 -- leaves glob out and the gap is named in handoff-s7-7b-result instead.
 --
--- The chain, in order (each step is a DIFFERENT leaf):
---   readLine              -> TaskReadLine           (stdin "hello")
---   writeString           -> TaskWrite              (stdout "echo:hello")
+-- The chain, in order (each step is a DIFFERENT leaf).  The stdin is a
+-- 260-byte line + a second line, so readLine's accumulator GROWS twice (a
+-- line longer than the first 128-byte buffer) and STOPS at the newline.  The
+-- growth path is otherwise only reachable by a hand probe: the first version
+-- of this fixture read "hello", never grew, and a DOUBLE FREE in the grow arm
+-- got past it — MEASURED: "free(): double free detected in tcache 2" on a
+-- 300-byte line.
+--   readLine              -> TaskReadLine           (stdin: a 260-byte line)
+--   writeString           -> TaskWrite              (stdout "echo:" + the line)
 --   setenv / getenv       -> TaskSetenv/TaskGetenv  (env -> "set")
 --   getpid                -> TaskGetpid             (asserted only positive)
 --   writeFile             -> TaskWriteFile          (out/progio.out)

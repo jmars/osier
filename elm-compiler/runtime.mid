@@ -5321,7 +5321,12 @@ defun Rt.hostReadLine(dummy : val) -> val {
   val s = mkstr(dst, len);
   rawcall free(d);
   rawcall free(one);
-  rawcall free(buf);
+  // THE CURRENT BUFFER, re-read from the cell — NOT the one this defun
+  // malloc'd: a grow FREES the old block, so freeing `buf` here double-freed
+  // it (MEASURED, and only on a line longer than the first 128-byte buffer:
+  // `free(): double free detected in tcache 2`).  progio's stdin is longer
+  // than one buffer so the gate walks this path every run.
+  rawcall free(src);
   rawcall free(cell);
   return s;
 }
