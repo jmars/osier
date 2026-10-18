@@ -1127,21 +1127,25 @@ frame_perf_gate() {
 }
 frame_perf_gate
 
-# ---- stage 6 P1c: the WORD-CONDITION structural pin (the feature FIRES) ----
-# fib's frame enter/leave path is the boxed-boolean hot spot: frameBlock
-# carries 4 `mkbool` conditions and frameZero 1, each a `storew 3` (boolean
+# ---- stage 6 P1c/P1e: the FRAME-PATH structural pin (the feature FIRES) ----
+# fib's frame enter/leave path was the boxed-boolean hot spot: frameBlock
+# carried 4 `mkbool` conditions and frameZero 1, each a `storew 3` (boolean
 # tag) + `storel` payload + load-back + compare chain before the `jnz`
-# (~10 instructions apiece).  The P1c word cond replaces each with a direct
-# `jnz` on the raw 0/1 word — no slot, no store, no reload.  This pin reads
-# the EMITTED .ssa of the two defuns (the lowering, not the result): the
-# mkbool shape (`storew 3,`) must be ABSENT (4/1 at 53be0c1), and the
-# instruction count must sit at or under the word-cond bound.  MEASURED:
+# (~10 instructions apiece).  The P1c word cond replaced each with a direct
+# `jnz` on the raw 0/1 word — no slot, no store, no reload — and P1e then
+# DELETED frameZero (the per-slot zeroing loop) for ONE `memset` in
+# frame-enter.  This pin reads the EMITTED .ssa (the lowering, not the
+# result): frameBlock's mkbool shape (`storew 3,`) must be ABSENT and its
+# instruction count at or under the word-cond bound, and frame-enter must
+# carry exactly ONE bulk-zero memset call.  MEASURED:
 #   frameBlock  107 instrs + 4 storew-3 (53be0c1)  ->  67 instrs + 0 (P1c)
-#   frameZero    50 instrs + 1 storew-3 (53be0c1)  ->  39 instrs + 0 (P1c)
-# The bounds (80/46) split the before/after with headroom; a regression back
-# to boxing fails BOTH the grep and the count.
+#   frameZero    50 instrs + 1 storew-3 (53be0c1)  ->  39 instrs + 0 (P1c)  -> DELETED (P1e)
+# The bound (80) splits the before/after with headroom; a regression back to
+# boxing fails BOTH the grep and the count.  The memset count carries the
+# P1e shape: 0 would mean the bulk zero is gone (or was never emitted), 2+
+# that something re-introduced a second zeroing pass.
 frame_wordcond_pin() {
-  local ssa fb fz fb3 fz3 fb_i fz_i ok
+  local ssa fb fe fb3 fb_i fe_memset ok
   ssa="$TMP/frame-wordcond.ssa"
   (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY=Fib.fib QBE_MIDDRIVER=1 node run.js "$ROOT/tests/elm-fixtures/fib.elm" "$ssa") >/dev/null 2>&1
   if [ ! -s "$ssa" ]; then
@@ -1149,22 +1153,24 @@ frame_wordcond_pin() {
     FAIL=1; return
   fi
   fb="$(sed -n '/^function l \$q_Rt_x2eframeBlock(/,/^}/p' "$ssa")"
-  fz="$(sed -n '/^function l \$q_Rt_x2eframeZero(/,/^}/p' "$ssa")"
-  if [ -z "$fb" ] || [ -z "$fz" ]; then
-    echo "FAIL frame-wordcond: frameBlock/frameZero defun not found in fib .ssa (the pin is vacuous)"
+  # P1e deleted Rt.frameZero (the per-slot loop) for a single memset in
+  # Rt.frame-enter, so this pin tracks frameBlock ALONE and asserts the
+  # memset the zeroing became.  It keeps the vacuity guard for both: a defun
+  # that vanished would otherwise make "0 matches" read as a pass.
+  fe="$(sed -n '/^function l \$q_Rt_x2eframe_x2denter(/,/^}/p' "$ssa")"
+  if [ -z "$fb" ] || [ -z "$fe" ]; then
+    echo "FAIL frame-wordcond: frameBlock/frame-enter defun not found in fib .ssa (the pin is vacuous)"
     FAIL=1; return
   fi
   fb3="$(printf '%s\n' "$fb" | grep -c 'storew 3,')"
-  fz3="$(printf '%s\n' "$fz" | grep -c 'storew 3,')"
   fb_i="$(printf '%s\n' "$fb" | awk '{ line=$0; sub(/^[ \t]+/,"",line); if (line !~ /^@/ && line !~ /^#/ && line !~ /^function/ && line !~ /^}/) c++ } END { print c+0 }')"
-  fz_i="$(printf '%s\n' "$fz" | awk '{ line=$0; sub(/^[ \t]+/,"",line); if (line !~ /^@/ && line !~ /^#/ && line !~ /^function/ && line !~ /^}/) c++ } END { print c+0 }')"
+  fe_memset="$(printf '%s\n' "$fe" | grep -c 'call \$memset')"
   ok=1
   if [ "$fb3" -ne 0 ]; then echo "FAIL frame-wordcond: frameBlock still boxes a cond (storew 3 x $fb3)"; ok=0; fi
-  if [ "$fz3" -ne 0 ]; then echo "FAIL frame-wordcond: frameZero still boxes a cond (storew 3 x $fz3)"; ok=0; fi
   if [ "$fb_i" -gt 80 ]; then echo "FAIL frame-wordcond: frameBlock instruction count $fb_i > 80 (boxed-cond shape)"; ok=0; fi
-  if [ "$fz_i" -gt 46 ]; then echo "FAIL frame-wordcond: frameZero instruction count $fz_i > 46 (boxed-cond shape)"; ok=0; fi
+  if [ "$fe_memset" -ne 1 ]; then echo "FAIL frame-wordcond: frame-enter does not bulk-zero with exactly ONE memset call (found $fe_memset)"; ok=0; fi
   if [ "$ok" -eq 1 ]; then
-    echo "PASS frame-wordcond: frameBlock/frameZero emit no mkbool shape (storew 3 x $fb3/$fz3) and $fb_i/$fz_i instructions (bounds 80/46)"
+    echo "PASS frame-wordcond: frameBlock emits no mkbool shape (storew 3 x $fb3, $fb_i instructions, bound 80) and frame-enter bulk-zeroes with one memset call"
   else
     FAIL=1
   fi
