@@ -22,6 +22,7 @@ module Mid.RtLang.Ast exposing
     , Param
     , Program
     , Sig(..)
+    , SizeTarget(..)
     , Stmt(..)
     , Sym
     , Term(..)
@@ -103,9 +104,28 @@ ownership, or rootedness" — the checker cannot and must not distinguish a
 `value_array` payload, exactly as today's `wload` can read any word.  The
 `PTy` pointee family is below; the struct/enum declarations it can name
 are the `Decl`s on the module record.
+
+`int` IS NOT A CLASS (B1, plan Q1): it is a second SPELLING of `TWord` —
+the parser maps the token `int` to `TWord`, so `int` and `word` are
+interchangeable in every position and no int↔word cast exists to get
+wrong.  There are no narrow widths (`int8/16/32`, `uint`): no raw node
+exists for them (Q1's honest cut, not a silent `word` stand-in).
+
+`TBool` (B1, plan Q2) is a NEW checker-only class over the 0/1 word: the
+result of a comparison (`EWordCmp`/`EFltCmp`), a `[bool](w)` cast, or a
+`bool` literal, held by a `bool` binder.  It is deliberately
+REPRESENTATION-UNAMBIGUOUS — every bool expression lowers to a raw 0/1
+word temp (a `RawCmp`, or a constant `Lit`) — which is what makes a bool
+BINDER branchable where a `word` binder is not (Check.checkCond; the
+`handoff-perf-a3-review` P1c seam: a word binder's representation is the
+lowering's, a bool binder's is the class's).  Its ONE implicit coercion is
+bool→val, which BOXES to `RawMkValue tagBoolean` — the exact tree the
+`true`/`false` sugar used to emit.  bool→word is the identity but is
+EXPLICIT only (`[word](b)`, plan Q10).
 -}
 type Type
     = TWord
+    | TBool
     | TFloat
     | TVal
     | TPtr PTy
@@ -576,12 +596,28 @@ transcribes):
     `RawWordLoad { ptr = p, index = Lit 0 }`.  Postfix (`->`, `[]`) binds
     tighter than the prefix `*`, the C convention, so `*p->f` is
     `*(p->f)`.
+  * `EBool` — `true` / `false` (B1, plan Q8): a BOOL literal.  It is a
+    0/1 word (`Lit (LNumber 1|0)`) and at a `:val` position it BOXES to
+    `RawMkValue tagBoolean [Lit 1|0]` — byte-identical to the
+    `mkbool(1)`/`mkbool(0)` sugar it replaces, which is why `return true;`
+    in a `-> val` defun emits the same bytes as before.
+  * `ECast` — `[T](e)` (B1, plan Q10): Terra's mechanical cast.  The
+    CHECKER owns the matrix (`Check.castClass` — word/int/pointer/bool
+    identities, `[bool](w)` = a nonzero compare, `[float]`/`[word]` =
+    itof/ftoi32, `[val](b)` = the box, and a LOUD reject for everything
+    else, `val` casts above all); the lowering is one node per row and
+    NOTHING (no node at all) for the identity rows.
+  * `ESizeof` — `sizeof(S)` / `sizeof(T)` (B1, plan Q9): a compile-time
+    WORD constant read from the ONE layout table (`Check.sizeofStruct`)
+    for a struct, or the class width for a type.  Lowers to one
+    `Lit (LNumber n)`.
 
 -}
 type Exp
     = EInt Int
     | EFlt Float
     | EStr String
+    | EBool Bool
     | EVar String
     | EWordBin WordBinOp Exp Exp
     | EWordCmp WordCmpOp Exp Exp
@@ -599,6 +635,21 @@ type Exp
     | EField Exp String
     | EIndex Exp Exp
     | EDeref Exp
+    | ECast Type Exp
+    | ESizeof SizeTarget
+
+
+{-| `sizeof`'s operand (B1, plan Q9/Q10): a TYPE (`sizeof(word)` = 1,
+`sizeof(val)` = 5, `sizeof(*S)` = 1) or a STRUCT NAME resolved in the
+file's ONE layout table (`Check.sizeofStruct` — never a second copy).  A
+bare struct name is NOT a `Type` in this grammar (struct/array VALUES are
+B2/B3; `TStruct` does not exist), so the two spellings are two
+constructors rather than a widened type grammar.  Both are compile-time
+WORD constants: `ESizeof` lowers to a single `Lit (LNumber n)`.
+-}
+type SizeTarget
+    = SizeType Type
+    | SizeStruct String
 
 
 {-| The word binops, 1:1 with Mid.Ir's RawBinOp (the lowerer maps each
@@ -979,10 +1030,14 @@ these are constants rather than a per-op case — the op unions above pin the
 constructor set, these pin its class contract:
 
   * `wordBinSig` — `+ - * / & | ^ << >> >>>` : word,word -> word
-  * `wordCmpSig` — `== != < <= > >=` : word,word -> word (0/1; branch on
-    it directly, or box via mkbool for a val)
+  * `wordCmpSig` — `== != < <= > >=` : word,word -> BOOL (B1/plan Q2: the
+    result class is `bool`, not `word`; the lowered `RawCmp` is UNCHANGED,
+    so the corpus is byte-identical — the change is checker-only.  Branch
+    on a compare inline, bind it `bool b = ..`, or `mkbool(..)` it for a
+    `:val`.)
   * `fltBinSig`  — `f+ f- f* f/` : float,float -> float
-  * `fltCmpSig`  — `f< f<= f> f>= f== f!=` : float,float -> word (0/1)
+  * `fltCmpSig`  — `f< f<= f> f>= f== f!=` : float,float -> BOOL (same
+    class change as wordCmpSig; the `RawFltCmp` node is unchanged)
   * `shortSig`   — `&& ||` : val,val -> val (ShortAnd/ShortOr verbatim)
 
 The call forms are NOT rows here because their contracts live with their
@@ -997,7 +1052,7 @@ wordBinSig =
 
 wordCmpSig : Sig
 wordCmpSig =
-    Sig [ TWord, TWord ] TWord
+    Sig [ TWord, TWord ] TBool
 
 
 fltBinSig : Sig
@@ -1007,7 +1062,7 @@ fltBinSig =
 
 fltCmpSig : Sig
 fltCmpSig =
-    Sig [ TFloat, TFloat ] TWord
+    Sig [ TFloat, TFloat ] TBool
 
 
 shortSig : Sig

@@ -26,10 +26,38 @@ for: a `val` silently accepted into a `word` slot is precisely the bug
 Lower catches late-and-cryptic (its "raw word binder" / "not a raw word"
 errors, Lower.elm:1293/:1846) — here it is a loud reject with the defun
 named.  An expression's class is always FIXED by its shape: literals
-(int `:word`, float `:float`, string `:val`, `true`/`false` = `mkbool`
-sugar `:val`, `mknil` `:val`), operators (the four families + `&& ||` via
-`Ast`'s signature constants), builtins (`Ast.builtinClass`), the three
-call forms, or a scope lookup.
+(int `:word`, float `:float`, string `:val`, `true`/`false` `:bool` (B1 —
+`EBool`; the old `mkbool` sugar's tree is what the box still emits),
+`mknil` `:val`, `'c'` `:word`), operators (the four families + `&& ||` via
+`Ast`'s signature constants), builtins (`Ast.builtinClass`), `sizeof`
+`:word`, a cast the TARGET's class, the three call forms, or a scope
+lookup.
+
+THE BOOL CLASS (B1, plan Q2 — the P1c seam's structural close).  `bool`
+is over the 0/1 word and every bool expression lowers to a raw 0/1 TEMP
+or a constant: comparisons, `[bool](w)`, a `bool` binder, `true`/`false`.
+That closure is what makes a bool BINDER branchable where a `word` binder
+is not: `word i = ..; if (i)` is rejected because the binder's
+REPRESENTATION is the lowering's (a raw temp if its initializer was a
+producer, a number-boxed SLOT otherwise — and the slot case is the
+always-then misread the P1c review measured), while a bool binder's
+representation is the CLASS's (a raw 0/1 temp, by the initializer rule
+below), so `jnz` on it is exactly right.  Three consequences, each a loud
+reject here rather than a QBE-layer surprise:
+  * a `bool` BINDER's initializer must be a bool TEMP — a WORD compare
+    (`EWordCmp`), a `[bool](w)` cast, or another bool binder.  Three
+    shapes are rejected, each for the representation it would get: a
+    LITERAL (`bool b = true;` — Lower's raw-Int binder reboxes as a
+    NUMBER and a value test then reads tag 0: the always-then misread),
+    a FLOAT compare (`RawFltCmp` is a word 0/1 that Lower's raw-word
+    BINDER set deliberately excludes, so the binder would take the value
+    path and fail there), and a bool JOIN (`If` is not a temp at all).
+    A float compare is still branchable INLINE (`if (f < g)`) — it is
+    only the binder that has no representation;
+  * a constant bool CONDITION is rejected like `if (1)` (a constant
+    branch is not a test);
+  * `bool` is a BINDER class only — `surfaceType` does not spell it, so a
+    bool parameter/return/field cannot even parse (the word ABI is B6).
 
 THE JUDGMENTS ENFORCED HERE (T5 adds J7-J10):
 
@@ -249,6 +277,7 @@ import Mid.RtLang.Ast
         , Param
         , Program
         , Sig(..)
+        , SizeTarget(..)
         , Stmt(..)
         , Sym
         , Term(..)
@@ -780,6 +809,15 @@ fieldSize names structName ty =
         TWord ->
             Ok 1
 
+        TBool ->
+            -- UNREACHABLE from the grammar (B1: `bool` is a BINDER class
+            -- only — `surfaceType` does not spell it, so no field can carry
+            -- it; the word ABI/B6 is what a bool field would need).  The arm
+            -- exists because the layout table must be TOTAL over `Type`, and
+            -- a bool IS a 0/1 word, so if the grammar ever admits it the
+            -- honest size is 1.
+            Ok 1
+
         TPtr (PStruct sname) ->
             if List.member sname names then
                 Ok 1
@@ -1098,6 +1136,9 @@ checkStmt ctx stmt =
                         ++ "' declares float — float words are not let-bindable (MEASURED: Lower's rawFltArg never yields a Var): recompute the float expression at each use, or bind it boxed via mkflt"
                     )
 
+            else if ty == TBool then
+                bindBool ctx name e
+
             else
                 case validateType ctx ty of
                     Err msg ->
@@ -1153,10 +1194,70 @@ checkStmt ctx stmt =
             checkIndexStore ctx p i e
 
 
+{-| J1 (B1) — the `bool` BINDER rule: the class exists for the 0/1 word,
+and a binder must carry a value whose representation is fixed by the CLASS
+(a raw 0/1 TEMP) — that is the property that lets a bool binder be a
+condition.  So the initializer must be a bool TEMP (`isBoolTemp`); a
+literal, a float compare or a bool join are the three shapes whose values
+are NOT temps, and each is a loud reject here rather than a misread (or a
+QBE-layer failure) later.  See the module header for each reason.
+-}
+bindBool : Ctx -> String -> Exp -> Result String Ctx
+bindBool ctx name e =
+    case checkExp ctx e of
+        Err msg ->
+            Err msg
+
+        Ok cls ->
+            if cls /= TBool then
+                Err
+                    (ctx.key
+                        ++ ": J1: binder '"
+                        ++ name
+                        ++ "' declares bool but its initializer is "
+                        ++ typeStr cls
+                    )
+
+            else if isBoolTemp e then
+                Ok { ctx | scope = Dict.insert name TBool ctx.scope }
+
+            else
+                Err
+                    (ctx.key
+                        ++ ": J1: binder '"
+                        ++ name
+                        ++ "' declares bool but its initializer is not a bool TEMP — a bool binder is branchable precisely because every bool value is a raw 0/1 temp (a comparison, a [bool](w) cast, or another bool binder): a literal (a raw-Int binder reads back as a NUMBER), a float compare (not a raw-word binder node) and a ?: join (a slot) have no such representation.  Branch the comparison inline, or bind a `val`"
+                    )
+
+
+{-| The bool TEMP forms — exactly the shapes that lower to a raw 0/1 temp
+AND are raw-word/word-cond nodes in the backend: a word compare
+(`RawCmp`), a `[bool](w)` cast (`RawCmp`), and a bool binder variable (a
+temp by induction, since it was admitted by this same rule).  Deliberately
+ABSENT: `EBool` (a `Lit`), `EFltCmp` (`RawFltCmp` is a word 0/1 but not a
+raw-word BINDER node) and the joins (`If` — a slot).
+-}
+isBoolTemp : Exp -> Bool
+isBoolTemp e =
+    case e of
+        EWordCmp _ _ _ ->
+            True
+
+        ECast ty _ ->
+            ty == TBool
+
+        EVar _ ->
+            True
+
+        _ ->
+            False
+
+
 {-| J13 — `p->f = e;`: `p` must be a struct pointer, `f` a field of its
 struct, and `e`'s class must COERCE to the field's (the J12 matrix — a
 `val` into a `word` field is the pinned reject; a pointer into a word
-field is a word, so it stores).
+field is a word, so it stores).  A bool into a `val` field is the ONE
+implicit coercion (`coerce`'s bool→val row, boxed at lowering).
 -}
 checkFieldStore : Ctx -> Exp -> String -> Exp -> Result String Ctx
 checkFieldStore ctx p f e =
@@ -1440,7 +1541,8 @@ checkRecur : Ctx -> List Exp -> Result String Type
 checkRecur ctx args =
     if List.length args == List.length ctx.params then
         case
-            checkArgs ctx
+            checkArgs argOk
+                ctx
                 "J4"
                 ("recur in '" ++ ctx.key ++ "'")
                 (List.map .ty ctx.params)
@@ -1508,6 +1610,25 @@ checkCond ctx c =
         Ok TVal ->
             Ok TVal
 
+        Ok TBool ->
+            -- B1: a BOOL condition is branchable — a bool expression IS a
+            -- raw 0/1 TEMP (the header's closure), so `jnz` on it is right
+            -- and NO representation is left to the lowering.  That is
+            -- exactly what a bare `word` VARIABLE cannot promise (below),
+            -- which is the P1c seam this closes.
+            --
+            -- ONE form is refused: a CONSTANT (`if (true)`) — a constant
+            -- branch is not a test, the same rule `if (1)` has had since
+            -- P1c.
+            if isConstExp c then
+                Err
+                    (ctx.key
+                        ++ ": J1: 'if' condition is a CONSTANT bool — a constant branch is not a test (write the compare inline)"
+                    )
+
+            else
+                Ok TBool
+
         Ok TWord ->
             -- A WORD condition is legal only as a BARE word PRODUCER (a
             -- compare/tagis/word-builtin/rawcall — the forms the lowering
@@ -1526,9 +1647,19 @@ checkCond ctx c =
             --     raw-word binder `word i = wload(..); if (i)` WOULD lower
             --     correctly — rejecting it is a deliberate over-strictness
             --     until the checker tracks raw binders; write the compare
-            --     inline, which is the form the feature exists for.)
-            --   * a word LITERAL — `if (1)` emits `jnz 1` and the vendored
-            --     qbe rejects a constant jump condition.
+            --     inline, which is the form the feature exists for.  A
+            --     `bool` binder IS branchable because its representation is
+            --     the CLASS's — see the TBool arm above.)
+            --   * a word LITERAL — `if (1)`.  CORRECTION (B1, MEASURED on
+            --     this tree's `vendor/qbe/qbe`): that binary ACCEPTS `jnz 1`
+            --     and folds it (`movl $1, %eax; ret`), so the reason is NOT
+            --     an assembler refusal — it is that a constant branch is not
+            --     a test, and a constant condition in a source language hides
+            --     the compare the reader meant to write.  The rule is
+            --     unchanged; only the stated reason is now the measured one.
+            -- B1 extends the LITERAL rule (not the vocabulary): `sizeof(S)`
+            -- and a cast of a constant are constants too, and would emit
+            -- exactly the same constant condition.
             case c of
                 EIf _ _ _ ->
                     Err
@@ -1542,20 +1673,21 @@ checkCond ctx c =
                             ++ ": J1: 'if' condition is a word-valued 'if' join — a bare word test is needed (box it with mkbool or restructure)"
                         )
 
-                EInt _ ->
-                    Err
-                        (ctx.key
-                            ++ ": J1: 'if' condition is a bare word literal — a constant branch is not a test (write the compare inline)"
-                        )
-
                 EVar _ ->
                     Err
                         (ctx.key
-                            ++ ": J1: 'if' condition is a bare word variable — only a word PRODUCER (a compare/tagis/…) jumps directly; a binder's representation is the lowering's, not the checker's (write the compare inline, or mkbool for a :val)"
+                            ++ ": J1: 'if' condition is a bare word variable — only a word PRODUCER (a compare/tagis/…) jumps directly; a binder's representation is the lowering's, not the checker's (write the compare inline, or bind it `bool` and branch on that)"
                         )
 
                 _ ->
-                    Ok TWord
+                    if isConstExp c then
+                        Err
+                            (ctx.key
+                                ++ ": J1: 'if' condition is a CONSTANT word — a constant branch is not a test (write the compare inline)"
+                            )
+
+                    else
+                        Ok TWord
 
         Ok cls ->
             Err
@@ -1563,6 +1695,39 @@ checkCond ctx c =
                     ++ ": J1: 'if' condition must be val or word — a float word cannot branch, got "
                     ++ typeStr cls
                 )
+
+
+{-| B1 — does this expression FOLD TO A CONSTANT, i.e. would it lower to a
+bare `Lit`?  Only the forms whose lowering is exactly one `Lit`: an int, a
+float, a string, a bool literal, a `sizeof`, and a cast of one of those
+through a row that emits no node (`[word]`/`[int]`/`[bool]`/`[*T]`).  Used
+ONLY by `checkCond`'s constant-branch rejects, which is why it can be this
+narrow: a form it misses is a form whose cond the lowering computes into a
+temp (the thing such a cond is supposed to be).
+-}
+isConstExp : Exp -> Bool
+isConstExp c =
+    case c of
+        EInt _ ->
+            True
+
+        EFlt _ ->
+            True
+
+        EStr _ ->
+            True
+
+        EBool _ ->
+            True
+
+        ESizeof _ ->
+            True
+
+        ECast target inner ->
+            (target == TWord || target == TBool || isPtr target) && isConstExp inner
+
+        _ ->
+            False
 
 
 
@@ -1587,6 +1752,20 @@ checkExp ctx e =
         EStr _ ->
             Ok TVal
 
+        EBool _ ->
+            Ok TBool
+
+        ESizeof target ->
+            case sizeofWords ctx target of
+                Err msg ->
+                    Err msg
+
+                Ok _ ->
+                    Ok TWord
+
+        ECast ty inner ->
+            castClass ctx ty inner
+
         EVar name ->
             case Dict.get name ctx.scope of
                 Just ty ->
@@ -1599,7 +1778,7 @@ checkExp ctx e =
             checkWordBin ctx op a b
 
         EWordCmp op a b ->
-            checkSig ctx ("operator '" ++ wordCmpName op ++ "' (yields a word 0/1 — branch on it directly, or box with mkbool for a val)") wordCmpSig [ a, b ]
+            checkSig ctx ("operator '" ++ wordCmpName op ++ "' (yields a bool — branch on it directly, bind it `bool b = ..`, or box with mkbool for a val)") wordCmpSig [ a, b ]
 
         EFltBin op a b ->
             checkSig ctx ("operator '" ++ fltBinName op ++ "'") fltBinSig [ a, b ]
@@ -1629,18 +1808,7 @@ checkExp ctx e =
                                     Err msg
 
                                 Ok elsCls ->
-                                    if thnCls == elsCls then
-                                        Ok thnCls
-
-                                    else
-                                        Err
-                                            (ctx.key
-                                                ++ ": J1: '?:' branches disagree — then is "
-                                                ++ typeStr thnCls
-                                                ++ ", else is "
-                                                ++ typeStr elsCls
-                                                ++ " (the value join needs ONE class)"
-                                            )
+                                    joinClass ctx "?:" thnCls elsCls
 
         EIfBlock c thn els ->
             -- T23: the block-branch if EXPRESSION.  Same cond judgment as
@@ -1672,18 +1840,7 @@ checkExp ctx e =
                                     Err msg
 
                                 Ok elsCls ->
-                                    if thnCls == elsCls then
-                                        Ok thnCls
-
-                                    else
-                                        Err
-                                            (ctx.key
-                                                ++ ": J1: block-if branches disagree — then is "
-                                                ++ typeStr thnCls
-                                                ++ ", else is "
-                                                ++ typeStr elsCls
-                                                ++ " (the value join needs ONE class)"
-                                            )
+                                    joinClass ctx "block-if" thnCls elsCls
 
         ECall key args ->
             checkCall ctx key args
@@ -1768,6 +1925,162 @@ checkExp ctx e =
                         )
 
 
+{-| The two branch classes must AGREE, with exactly ONE coercion admitted
+(B1): bool→val.  Everything else is the J1 reject it always was — the
+matrix is NOT `coerce`'s (a pointer branch against a word branch is still
+the loud reject; the join has no view-cast).
+
+A `bool`-agreed join is itself a REJECT: a join needs a SLOT, and a bool
+value's whole contract is that it is a raw 0/1 TEMP (see the header) — a
+bool-valued `If` would put a raw word where the lowering expects a value
+(the `?.`-binder shape the P1c review MEASURED as always-then).  Write the
+two compares where they are branched or let the join be a `:val`
+(`mkbool(..)`), which is the shape the corpus already uses.
+-}
+joinClass : Ctx -> String -> Type -> Type -> Result String Type
+joinClass ctx what thnCls elsCls =
+    if thnCls == elsCls then
+        if thnCls == TBool then
+            Err
+                (ctx.key
+                    ++ ": J1: "
+                    ++ what
+                    ++ " branches agree on bool — a bool value is a raw 0/1 TEMP, and a join needs a slot (it would be read back as a NUMBER): branch each compare where it is written, or make the join a `:val` with mkbool(..)"
+                )
+
+        else
+            Ok thnCls
+
+    else if thnCls == TVal && elsCls == TBool then
+        -- the ONE implicit coercion (plan Q2): bool->val BOXES to
+        -- RawMkValue tagBoolean — the tree the true/false sugar emitted.
+        Ok TVal
+
+    else if thnCls == TBool && elsCls == TVal then
+        Ok TVal
+
+    else
+        Err
+            (ctx.key
+                ++ ": J1: "
+                ++ what
+                ++ " branches disagree — then is "
+                ++ typeStr thnCls
+                ++ ", else is "
+                ++ typeStr elsCls
+                ++ " (the value join needs ONE class)"
+            )
+
+
+{-| J1 (B1, plan Q10) — the CAST matrix: `[T](e)`.  `expected` is the
+target class; each row is a checker judgment AND a lowering:
+`c' stands for the target's class, `src` the operand's.
+
+  * `[word](e)` / `[int](e)` — word|pointer|bool -> word: the IDENTITY
+    (a pointer is a word; a bool is its 0/1 word), no node at all.
+  * `[bool](e)` — word -> bool: a nonzero compare (`RawCmp WCne e 0`).
+  * `[bool](b)` — bool -> bool: identity.
+  * `[*T](e)` — word -> any pointer: the J12 view-cast, made explicit,
+    NOTHING emitted.
+  * `[float](e)` — word -> float: `RawIToF` (the existing itof).
+  * `[word](f)` / `[int](f)` — float -> word: `RawUn RFToI32` (the
+    existing ftoi32, an i32 result — Q10's row, stated as it is).
+  * `[val](b)` — bool -> val: the ONE box, explicit (`RawMkValue
+    tagBoolean`).
+
+Everything else is a LOUD reject, and the two families that matter most
+are named in their message: a `val` cast in EITHER direction (`[val]` of
+anything but a bool, `[word](v)`) because `val` is the opaque handle —
+`payload`/`tagis` are the sanctioned reads (plan Q11) — and a POINTER->
+POINTER cast (`[*T2](p)`), which is J12's matrix spelled as a cast: go
+through a `word` binder, one named line.  A FLOAT<->INT conversion is the
+two explicit rows above, never implicit.
+-}
+castClass : Ctx -> Type -> Exp -> Result String Type
+castClass ctx target inner =
+    case validateType ctx target of
+        Err msg ->
+            Err msg
+
+        Ok () ->
+            case checkExp ctx inner of
+                Err msg ->
+                    Err msg
+
+                Ok src ->
+                    if target == TWord && (src == TWord || isPtr src || src == TBool) then
+                        Ok TWord
+
+                    else if target == TBool && (src == TWord || src == TBool) then
+                        Ok TBool
+
+                    else if isPtr target && src == TWord then
+                        Ok target
+
+                    else if target == TFloat && src == TWord then
+                        Ok TFloat
+
+                    else if target == TWord && src == TFloat then
+                        Ok TWord
+
+                    else if target == TVal && src == TBool then
+                        Ok TVal
+
+                    else
+                        Err
+                            (ctx.key
+                                ++ ": J10: cast to "
+                                ++ typeStr target
+                                ++ " from "
+                                ++ typeStr src
+                                ++ " is not in the cast matrix — legal: [word]/[int] of word|pointer|bool, [bool] of word|bool, [*T] of word, [float]/[word] of the other, [val] of bool; a `val` cast (either direction) and a pointer->pointer cast are REJECTS (go through a `word` binder)"
+                            )
+
+
+{-| J1/Q9 — `sizeof`'s value in WORDS (the layout's own unit: every field
+is a whole number of 8-byte words).  A struct reads the ONE table the
+checker already built (`Env.structs` — the A1 layout, no second copy); a
+type reads its class width.  `float` is a reject for the reason J11 rejects
+a float FIELD: Mid.Ir has no raw-memory f64 load node, so a float's raw
+width is a number this language cannot honour.
+-}
+sizeofWords : Ctx -> SizeTarget -> Result String Int
+sizeofWords ctx target =
+    case target of
+        SizeStruct name ->
+            case Dict.get name ctx.env.structs of
+                Just info ->
+                    Ok info.size
+
+                Nothing ->
+                    Err
+                        (ctx.key
+                            ++ ": J11: sizeof("
+                            ++ name
+                            ++ ") — no such struct is declared in this module"
+                        )
+
+        SizeType ty ->
+            case ty of
+                TWord ->
+                    Ok 1
+
+                TBool ->
+                    Ok 1
+
+                TPtr _ ->
+                    Ok 1
+
+                TVal ->
+                    Ok 5
+
+                TFloat ->
+                    Err
+                        (ctx.key
+                            ++ ": J1: sizeof(float) — Mid.Ir has no raw-memory f64 seat, so a float's word width is not a thing this language can promise (the J11 float-field rule, same reason)"
+                        )
+
+
 {-| J10 — every `withroots` id must ALREADY name a `:val` binder in scope
 at that point (a parameter or an earlier binder): WithRoots roots
 EXISTING values for the block's duration, it does not create them.  A
@@ -1824,7 +2137,7 @@ checkCall ctx key args =
     if isQualifiedKey key then
         case resolveCall ctx.env key of
             Just ( paramTys, retTy ) ->
-                case checkArgs ctx "J2" ("call '" ++ key ++ "'") paramTys args of
+                case checkArgs argOk ctx "J2" ("call '" ++ key ++ "'") paramTys args of
                     Ok () ->
                         Ok retTy
 
@@ -1943,7 +2256,8 @@ checkRawCall ctx sym args =
         Just n ->
             if List.length args == n then
                 case
-                    checkArgs ctx
+                    checkArgs argOk
+                        ctx
                         "J3"
                         ("rawcall '" ++ sym ++ "'")
                         (List.repeat n TWord)
@@ -1988,7 +2302,8 @@ checkAggCall ctx shape fnExp args =
 
         Ok TWord ->
             case
-                checkArgs ctx
+                checkArgs argOk
+                    ctx
                     "J1"
                     ("aggcall in '" ++ ctx.key ++ "'")
                     (List.repeat (List.length args) TWord)
@@ -2017,7 +2332,7 @@ checkSig : Ctx -> String -> Sig -> List Exp -> Result String Type
 checkSig ctx what sig args =
     case sig of
         Sig tys res ->
-            case checkArgs ctx "J1" what tys args of
+            case checkArgs sigArgOk ctx "J1" what tys args of
                 Ok () ->
                     Ok res
 
@@ -2080,10 +2395,13 @@ mkValWords ctx i args =
 
 {-| Zip the expected classes against the argument expressions; the first
 mismatch (or arity difference) is the error.  `jn` names the owning
-judgment (J1 builtins/operators, J2 call, J3 rawcall, J4 recur).
+judgment (J1 builtins/operators, J2 call, J3 rawcall, J4 recur).  The
+compatibility predicate is `argOk` at every boundary: a pointer, and since
+B1 a bool, pass where a `word` is expected (both ARE words — the identity);
+nothing passes into a `:val` slot unwrapped.
 -}
-checkArgs : Ctx -> String -> String -> List Type -> List Exp -> Result String ()
-checkArgs ctx jn what tys args =
+checkArgs : (Type -> Type -> Bool) -> Ctx -> String -> String -> List Type -> List Exp -> Result String ()
+checkArgs ok ctx jn what tys args =
     case ( tys, args ) of
         ( [], [] ) ->
             Ok ()
@@ -2120,8 +2438,8 @@ checkArgs ctx jn what tys args =
                     Err msg
 
                 Ok cls ->
-                    if argOk t cls then
-                        checkArgs ctx jn what ts as_
+                    if ok t cls then
+                        checkArgs ok ctx jn what ts as_
 
                     else
                         Err
@@ -2157,12 +2475,18 @@ predicate a binder, store and return accept.  The legal movements:
   * any pointer <- `word` (`word -> *T`: the view-cast, the direction the
     source spells);
   * `*word` <- `*S` (the universal raw view — the mark-stack/freelist
-    overlap sites).
+    overlap sites);
+  * `val` <- `bool` (B1, plan Q2: the ONE implicit coercion — the bool is
+    BOXED to `RawMkValue tagBoolean` at lowering, the exact tree the
+    `true`/`false` sugar emitted.  This is what keeps `return true;` in a
+    `-> val` defun legal and byte-identical and what lets a `?:` arm be
+    `false` beside a val).
 
 Everything else — `*S1 -> *S2` (cross-struct), `*word -> *S`, `*val -> *S`,
-`*word -> *val`, `val <-> word` — is FALSE: go through a `word` binder,
-one named line.  The only unchecked direction is `word -> *T`, which is
-exactly the source-spelled one.
+`*word -> *val`, `val <-> word`, and `word <- bool` (a bool is the 0/1 word
+but NAMING that is the explicit `[word](b)` cast, plan Q10) — is FALSE: go
+through a `word` binder, one named line.  The only unchecked direction is
+`word -> *T`, which is exactly the source-spelled one.
 -}
 coerce : Type -> Type -> Bool
 coerce expected actual =
@@ -2180,6 +2504,24 @@ coerce expected actual =
             ( TPtr PWord, TPtr (PStruct _) ) ->
                 True
 
+            ( TVal, TBool ) ->
+                True
+
+            ( TWord, TBool ) ->
+                -- B1: a bool IS the 0/1 word, so binding/storing/returning one
+                -- where a WORD is expected is the IDENTITY — the same node, no
+                -- conversion (the `[word](b)` cast, implicit).  MEASURED
+                -- correction to the plan: it expected ZERO such sites ("the
+                -- MEASURED 0-site fact is the safe row" for a reject), and
+                -- runtime.mid has two — `word isStr = payload(stream, 1) > 1;`
+                -- in Rt.close and a twin — which lower to a raw-word binder and
+                -- rebox with `mkbool(isStr)`.  Rejecting the row would have
+                -- moved the corpus, so the row is the legal one.  It is sound
+                -- for the reason the word-binder COND reject gives: nothing
+                -- here branches on the binder (`if (isStr)` is still a J1
+                -- reject — write `bool b = ..` for that).
+                True
+
             _ ->
                 False
 
@@ -2189,10 +2531,34 @@ the expected class must match, OR a pointer is acceptable where a `word`
 is expected (`*T -> word` — a pointer is a word).  The reverse (`word ->
 *T`) is NOT legal at a call/recur boundary — the view-cast is spelled only
 at a typed binder, never implicit at a call.
+
+A BOOL also passes where a `word` is expected (B1): a bool IS the 0/1 word,
+so the conversion is the identity — `isWordish`, the same predicate the
+arithmetic operator uses.  That is what keeps `mkbool(a == b)` (the
+309-site corpus spelling), `payload(accN, 0) + (fdW == 0)` and a `word`
+binder initialized from a compare legal and byte-identical.  It does NOT
+admit a bool where a `:val` is expected — that is the box and needs the
+spelling (`mkbool(..)` / `[val](b)`).
 -}
 argOk : Type -> Type -> Bool
 argOk expected actual =
-    expected == actual || (expected == TWord && isPtr actual)
+    expected == actual
+        || (expected == TWord && isPtr actual)
+        || (expected == TWord && actual == TBool)
+
+
+{-| The BUILTIN/operator argument predicate (`checkSig`): `argOk` plus the
+bool→val coercion.  Both halves are things the LOWERING boxes or passes
+through with no guess, because a builtin's operand classes are STATIC
+(`Ast.builtinClass`; `&&`/`||` are `Ast.shortSig`'s val,val): a bool at a
+`:val` slot is boxed to `RawMkValue tagBoolean`, and a bool at a `word` slot
+is already that word.  A CALL argument is deliberately NOT this predicate —
+the lowering has no callee signatures, so a bool into a `:val` parameter
+keeps the explicit `mkbool(..)`/`[val](b)` spelling (`argOk`).
+-}
+sigArgOk : Type -> Type -> Bool
+sigArgOk expected actual =
+    argOk expected actual || (expected == TVal && actual == TBool)
 
 
 isPtr : Type -> Bool
@@ -2203,6 +2569,20 @@ isPtr t =
 
         _ ->
             False
+
+
+{-| Is this class a WORD for the purpose of a word OPERAND?  `word`/`int`
+(`TWord`), and — since B1 — `bool`, which IS the 0/1 word: `RawBin`/
+`RawCmp`'s operands lower through `rawWordArg`, which computes a bool temp
+with no node, so the arithmetic is exact.  MEASURED: runtime.mid already
+relies on it (`mknum(payload(accN, 0) + (fdW == 0))` in Rt.epCountStdin),
+which is why the plan's "bool is EXPLICIT only" line could not hold without
+moving the corpus.  A POINTER is deliberately NOT wordish here — that is
+J12's arithmetic firewall.
+-}
+isWordish : Type -> Bool
+isWordish t =
+    t == TWord || t == TBool
 
 
 {-| J12's FIREWALL on top of the matrix: a pointer operand in `EWordBin`
@@ -2228,7 +2608,7 @@ checkWordBin ctx op a b =
                         ++ "' — address math must happen on a word binder (bind `word w = p;` first); struct-scaled math happens only through p[i]"
                     )
 
-            else if aCls /= TWord then
+            else if not (isWordish aCls) then
                 Err
                     (ctx.key
                         ++ ": J1: operator '"
@@ -2251,7 +2631,7 @@ checkWordBin ctx op a b =
                                     ++ "' — address math must happen on a word binder (bind `word w = p;` first); struct-scaled math happens only through p[i]"
                                 )
 
-                        else if bCls /= TWord then
+                        else if not (isWordish bCls) then
                             Err
                                 (ctx.key
                                     ++ ": J1: operator '"
@@ -2275,6 +2655,9 @@ typeStr t =
     case t of
         TWord ->
             "word"
+
+        TBool ->
+            "bool"
 
         TFloat ->
             "float"

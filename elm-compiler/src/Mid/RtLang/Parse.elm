@@ -56,16 +56,22 @@ surface's only grouping rule besides parentheses):
        if expression, else REQUIRED; the statement/term `if` is a
        DIFFERENT path — `itemStepAt`'s own arm — and is unchanged)
        (expression), withroots [..] .., *p  (EDeref, prefix — postfix
-       `->`/`[]` bind TIGHTER than it, the C convention)
+       `->`/`[]` bind TIGHTER than it, the C convention),
+       [T](e)  (ECast, B1 — an ATOM: the bracket in atom position is
+       unambiguously a cast), sizeof(S) (ESizeof, B1), 'c' (a word
+       byte, B1)
 
-A compare yields a WORD 0/1, never a bool — the DSL's
-`mkBool (cmpW ...)` boxing discipline is a T4 concern, but the shape the
-parser produces is exactly `EWordCmp`/`EFltCmp` (Ast's J1 table).
+A compare yields a BOOL (B1, plan Q2) — `TBool`, a checker-only class over
+the 0/1 word; the parser produces exactly `EWordCmp`/`EFltCmp` and the
+lowered `RawCmp`/`RawFltCmp` trees are UNCHANGED (the DSL's
+`mkBool (cmpW ...)` boxing discipline is still spelled `mkbool(..)`).
 
 SPELLING DECISIONS pinned here (each is a MEASURED grammar fact or a
 deliberate, documented restriction):
 
-  * `true`/`false` are sugar for `mkbool(1)`/`mkbool(0)`; `mknil` is a
+  * `true`/`false` are BOOL LITERALS (`EBool`, B1) — at a `:val` position
+    they box to the exact tree the old `mkbool(1)`/`mkbool(0)` sugar
+    emitted, so nothing that spelled them moves a byte; `mknil` is a
     bare literal keyword (the plan lists it among the literals) — it takes
     no parentheses.
   * Whitespace is space, newline and carriage return ONLY — the vendored
@@ -236,7 +242,7 @@ and — per the O(n) invariant in the token-plumbing section — NO
 -}
 
 import Dict exposing (Dict)
-import Mid.RtLang.Ast exposing (AggShape(..), Block, Builtin(..), Decl(..), Defun, Effect(..), EnumEntry, Exp(..), Export, ExportSig, Field, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Module, OTy(..), PTy(..), Param, Program, Stmt(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
+import Mid.RtLang.Ast exposing (AggShape(..), Block, Builtin(..), Decl(..), Defun, Effect(..), EnumEntry, Exp(..), Export, ExportSig, Field, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Module, OTy(..), PTy(..), Param, Program, SizeTarget(..), Stmt(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
 import Parser exposing (DeadEnd, Problem(..))
 import ParserFast
 
@@ -618,6 +624,12 @@ atomAt offset src =
         "\"" ->
             stringLit
 
+        "'" ->
+            charLit
+
+        "[" ->
+            castExp
+
         "-" ->
             negAtom offset src
 
@@ -756,22 +768,30 @@ negNumberLitParser =
         (\_ n -> EInt (0 - n))
 
 
-{-| A name-shaped token: `true`/`false`/`mknil` sugar, the three call
-forms, `withroots`, a builtin (read from `Ast.builtinName` — one spelling,
-one place), or a plain variable.  Full-token matching, so `truex` and
-`callx` are ordinary variables, never prefixes.
+{-| A name-shaped token: `true`/`false`/`mknil` literals, the three call
+forms, `withroots`, `sizeof`, a builtin (read from `Ast.builtinName` — one
+spelling, one place), or a plain variable.  Full-token matching, so `truex`
+and `callx` are ordinary variables, never prefixes.
+
+`true`/`false` are BOOL literals (B1, plan Q2/Q8) — `EBool`, not the old
+`mkbool(1)`/`mkbool(0)` sugar tree.  The two spell the SAME emitted bytes:
+the bool literal boxes to `RawMkValue tagBoolean [Lit 1|0]` at a `:val`
+position, which is exactly what the sugar's `mkbool` row emitted.
 -}
 nameAtom : String -> ParserFast.Parser Exp
 nameAtom tok =
     case tok of
         "true" ->
-            spelled tok (succeed (EBuiltin MkBool [ EInt 1 ]))
+            spelled tok (succeed (EBool True))
 
         "false" ->
-            spelled tok (succeed (EBuiltin MkBool [ EInt 0 ]))
+            spelled tok (succeed (EBool False))
 
         "mknil" ->
             spelled tok (succeed (EBuiltin MkNil []))
+
+        "sizeof" ->
+            spelled tok sizeofExp
 
         "call" ->
             spelled tok callExp
@@ -889,6 +909,177 @@ escapeAt offset src =
                 ("unknown string escape `\\"
                     ++ c
                     ++ "` — supported: \\n \\t \\r \\0 \\\" \\\\"
+                )
+
+
+
+-- ============================ casts, sizeof, char literals (B1) ============================
+
+
+{-| `[T](e)` — Terra's mechanical cast (B1, plan Q10).  Entered at the `[`
+peeked by `atomAt`: `[` never started an expression before (postfix `[i]`
+is consumed by `postfixStep`, and `withroots [ids]` owns its own bracket
+list), so the bracket in ATOM position is unambiguously a cast.
+
+The TARGET is the surface type grammar plus `bool` (`castTargetType`) —
+`word`/`int`/`bool`/`float`/`val`/`*S`/`*word`/`*val`.  A struct-by-value
+target is not spellable (no `TStruct`, exactly as in type position) and the
+CHECKER owns the whole matrix (`Check.castClass`), so a target outside it is
+a loud reject there with the row named, never a silent identity.
+-}
+castExp : ParserFast.Parser Exp
+castExp =
+    ParserFast.symbolFollowedBy "["
+        (ParserFast.map2 ECast
+            castTargetType
+            (spelled "]" parenExp)
+        )
+
+
+{-| The cast target: the surface type grammar, plus `bool` (which is NOT a
+type annotation — bool binds only — so it is spelled here rather than in
+`surfaceTypeAt`).
+-}
+castTargetType : ParserFast.Parser Type
+castTargetType =
+    ParserFast.offsetSourceAndThen castTargetAt
+
+
+castTargetAt : Int -> String -> ParserFast.Parser Type
+castTargetAt offset src =
+    case tokenAtOff offset src of
+        Just ( "bool", _ ) ->
+            spelled "bool" (succeed TBool)
+
+        _ ->
+            surfaceTypeAt offset src
+
+
+{-| `sizeof(S)` / `sizeof(T)` (B1, plan Q9): a compile-time WORD constant.
+The operand is a struct NAME (resolved in the file's ONE layout table at
+check time — `Check.sizeofStruct`) or a type (`word`/`int` = 1, `val` = 5,
+`*T` = 1).  Uppercase vs keyword decides which, the same `isUpperName` split
+the pointer grammar uses.
+-}
+sizeofExp : ParserFast.Parser Exp
+sizeofExp =
+    ParserFast.symbolFollowedBy "("
+        (ParserFast.map2 (\t _ -> ESizeof t)
+            sizeTarget
+            (spelled ")" (succeed ()))
+        )
+
+
+sizeTarget : ParserFast.Parser SizeTarget
+sizeTarget =
+    ParserFast.offsetSourceAndThen sizeTargetAt
+
+
+sizeTargetAt : Int -> String -> ParserFast.Parser SizeTarget
+sizeTargetAt offset src =
+    case tokenAtOff offset src of
+        Just ( tok, _ ) ->
+            if isUpperName tok then
+                spelled tok (succeed (SizeStruct tok))
+
+            else
+                ParserFast.map SizeType (surfaceTypeAt offset src)
+
+        Nothing ->
+            -- a `*T` operand: `*` starts no token, so the type grammar reads it
+            ParserFast.map SizeType (surfaceTypeAt offset src)
+
+
+{-| `'c'` — a CHARACTER literal (B1, plan Q8): a word BYTE (0..255), the
+`strbyte`/`byteload` spelling.  ASCII only, exactly like `stringLit`
+(`isSurfaceChar`), and exactly ONE character — `'ab'` is a loud reject, not
+a two-byte surprise.  The escape set is the string set plus the quote itself
+(`'\''`), and an unknown escape is a loud reject here too.
+
+The result is an ordinary `EInt` (the code): there is deliberately no char
+CLASS — Q8 settles it as a word, so `'a' == 97` compares and `[bool]('a')`
+is a cast like any other, with no second representation to lose.
+-}
+charLit : ParserFast.Parser Exp
+charLit =
+    ParserFast.symbolFollowedBy "'"
+        (ParserFast.map2 (\code _ -> EInt code)
+            charCode
+            (spelled "'" (succeed ()))
+        )
+
+
+charCode : ParserFast.Parser Int
+charCode =
+    ParserFast.offsetSourceAndThen charCodeAt
+
+
+charCodeAt : Int -> String -> ParserFast.Parser Int
+charCodeAt offset src =
+    case String.slice offset (offset + 1) src of
+        "" ->
+            ParserFast.problem "unterminated character literal"
+
+        "\\" ->
+            ParserFast.symbolFollowedBy "\\" (ParserFast.offsetSourceAndThen charEscapeAt)
+
+        c ->
+            if isSurfaceChar c then
+                ParserFast.symbolFollowedBy c (succeed (Char.toCode (charOf c)))
+
+            else
+                ParserFast.problem
+                    ("character literals are ASCII (printable, no raw newline) on the surface — found"
+                        ++ surfaceCharReport c
+                    )
+
+
+{-| The one character of a 1-char slice.  `\u{FFFD}` cannot occur: the
+caller has already checked `isSurfaceChar` (ASCII 32..126), so the slice is
+exactly one character.
+-}
+charOf : String -> Char
+charOf s =
+    case String.toList s of
+        c :: _ ->
+            c
+
+        [] ->
+            '\u{0000}'
+
+
+{-| The one character after a backslash in a CHAR literal: the string
+escapes plus `'` (which a string has no need to escape).
+-}
+charEscapeAt : Int -> String -> ParserFast.Parser Int
+charEscapeAt offset src =
+    case String.slice offset (offset + 1) src of
+        "n" ->
+            spelled "n" (succeed 10)
+
+        "t" ->
+            spelled "t" (succeed 9)
+
+        "r" ->
+            spelled "r" (succeed 13)
+
+        "0" ->
+            spelled "0" (succeed 0)
+
+        "\\" ->
+            spelled "\\" (succeed 92)
+
+        "'" ->
+            spelled "'" (succeed 39)
+
+        "" ->
+            ParserFast.problem "unterminated character literal (input ends after a backslash)"
+
+        c ->
+            ParserFast.problem
+                ("unknown character escape `\\"
+                    ++ c
+                    ++ "` — supported: \\n \\t \\r \\0 \\\\ \\'"
                 )
 
 
@@ -2045,7 +2236,7 @@ param =
         (spelled ":" surfaceType)
 
 
-{-| `word | float | val | *S | *word | *val` — the whole type grammar;
+{-| `word | int | float | val | *S | *word | *val` — the whole type grammar;
 anything else is a loud reject (a malformed type must never lex as
 something else).  `*` starts a POINTER annotation (U1, midlang-u1): the
 pointee is a struct name (`*S`, an Uppercase identifier) or the two raw
@@ -2054,6 +2245,13 @@ plan's struct-BY-VALUE field nesting (`f : B`) — is NOT in the U1 grammar
 (the brief's U1 AST list adds only the pointer `Type` constructor, not a
 struct-value one; none of the named structs uses inline nesting), so it
 rejects here loudly, to be added by U2 if the layout rule needs it.
+
+`int` is a second SPELLING of `word` (B1, plan Q1) and parses wherever a
+type does — one class, two spellings, so there is no int↔word cast to get
+wrong.  `bool` is deliberately ABSENT here: it is a binder class only
+(`itemStepAt`), because a `bool` parameter or return would need the
+word-ABI generalization (B6) and a `bool` field is layout work nobody
+funded.
 -}
 surfaceType : ParserFast.Parser Type
 surfaceType =
@@ -2070,6 +2268,9 @@ surfaceTypeAt offset src =
             Just ( "word", _ ) ->
                 spelled "word" (succeed TWord)
 
+            Just ( "int", _ ) ->
+                spelled "int" (succeed TWord)
+
             Just ( "float", _ ) ->
                 spelled "float" (succeed TFloat)
 
@@ -2077,17 +2278,18 @@ surfaceTypeAt offset src =
                 spelled "val" (succeed TVal)
 
             Just ( tok, _ ) ->
-                ParserFast.problem ("expected a type (`word`, `float`, `val`, `*S`, `*word` or `*val`), found `" ++ tok ++ "`")
+                ParserFast.problem ("expected a type (`word`, `int`, `float`, `val`, `*S`, `*word` or `*val`), found `" ++ tok ++ "`")
 
             Nothing ->
-                ParserFast.problem "expected a type (`word`, `float`, `val`, `*S`, `*word` or `*val`)"
+                ParserFast.problem "expected a type (`word`, `int`, `float`, `val`, `*S`, `*word` or `*val`)"
 
 
-{-| The pointee after `*` in a pointer annotation: `word` (`PWord`),
-`val` (`PVal`), or an Uppercase struct name (`PStruct`).  Uppercase is
-how the pointer grammar knows a struct from a raw family — the same
-`isUpperName` split the export-block type grammar uses for type
-constructors, so a `*S` pointee is a NAME, never confused with a keyword.
+{-| The pointee after `*` in a pointer annotation: `word` (`PWord`), `int`
+(the same `PWord` — the alias, B1), `val` (`PVal`), or an Uppercase struct
+name (`PStruct`).  Uppercase is how the pointer grammar knows a struct from
+a raw family — the same `isUpperName` split the export-block type grammar
+uses for type constructors, so a `*S` pointee is a NAME, never confused with
+a keyword.
 -}
 ptrPointee : ParserFast.Parser PTy
 ptrPointee =
@@ -2100,6 +2302,9 @@ ptrPointeeAt offset src =
         Just ( "word", _ ) ->
             spelled "word" (succeed PWord)
 
+        Just ( "int", _ ) ->
+            spelled "int" (succeed PWord)
+
         Just ( "val", _ ) ->
             spelled "val" (succeed PVal)
 
@@ -2108,10 +2313,10 @@ ptrPointeeAt offset src =
                 spelled tok (succeed (PStruct tok))
 
             else
-                ParserFast.problem ("expected a pointer pointee (`word`, `val` or an Uppercase struct name), found `" ++ tok ++ "`")
+                ParserFast.problem ("expected a pointer pointee (`word`, `int`, `val` or an Uppercase struct name), found `" ++ tok ++ "`")
 
         Nothing ->
-            ParserFast.problem "expected a pointer pointee (`word`, `val` or an Uppercase struct name)"
+            ParserFast.problem "expected a pointer pointee (`word`, `int`, `val` or an Uppercase struct name)"
 
 
 blockTarget : ParserFast.Parser Block
@@ -2220,6 +2425,15 @@ itemStepAt offset src =
 
         Just ( "word", _ ) ->
             ParserFast.map IStmt (spelled "word" (bindTail TWord))
+
+        Just ( "int", _ ) ->
+            ParserFast.map IStmt (spelled "int" (bindTail TWord))
+
+        Just ( "bool", _ ) ->
+            -- B1: `bool x = <bool temp>;` — the binder class is spelled ONLY
+            -- here (never in `surfaceType`), so a bool parameter/return/field
+            -- stays a loud parse reject until the word ABI (B6) exists.
+            ParserFast.map IStmt (spelled "bool" (bindTail TBool))
 
         Just ( "float", _ ) ->
             ParserFast.map IStmt (spelled "float" (bindTail TFloat))

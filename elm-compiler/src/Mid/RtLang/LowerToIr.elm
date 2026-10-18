@@ -142,7 +142,10 @@ import Mid.RtLayout as RtLayout
 the WHOLE defun — the backend keys its slot dicts by them, plan fact F1);
 `nextLbl` hands out the If/ShortAnd/ShortOr label strings (IGNORED by the
 backend — readability only); `scope` maps surface names to binder ids; `key`
-is the defun's own key (L4's self-GRef target).
+is the defun's own key (L4's self-GRef target); `types` is the DECLARED class
+of every binder in scope; `decls` is the file's struct/enum table; `ret` is
+the defun's declared result class (B1: the `return` site needs it to know
+whether a bool operand goes through the bool→val BOX).
 -}
 type alias St =
     { key : String
@@ -151,6 +154,7 @@ type alias St =
     , scope : Dict String Int
     , types : Dict String Ast.Type
     , decls : List Decl
+    , ret : Ast.Type
     }
 
 
@@ -239,6 +243,7 @@ lowerDefun decls d =
             , scope = paramScope params
             , types = paramTypes d.params
             , decls = decls
+            , ret = d.ret
             }
     in
     case lowerBlock st0 d.body of
@@ -314,6 +319,15 @@ lowerStmt st stmt cont =
 
                 Ok ( st1, v1 ) ->
                     let
+                        -- B1: a bool initializer at a `:val` slot goes through
+                        -- the box (the checker's ONE implicit coercion).
+                        v2 =
+                            if ty == Ast.TVal && isBoolExp st e then
+                                boolToVal v1
+
+                            else
+                                v1
+
                         ( binder, st2 ) =
                             fresh name st1
 
@@ -328,7 +342,7 @@ lowerStmt st stmt cont =
                             Err msg
 
                         Ok ( st4, body ) ->
-                            Ok ( st4, Let { binders = [ LetBind { binder = binder, value = v1 } ], body = body } )
+                            Ok ( st4, Let { binders = [ LetBind { binder = binder, value = v2 } ], body = body } )
 
         SEffect e ->
             case lowerExp st e of
@@ -486,6 +500,15 @@ lowerStmt st stmt cont =
 
                                         Ok ( st2, e1 ) ->
                                             let
+                                                -- B1: the same bool→val box, at
+                                                -- a `val` FIELD slot.
+                                                e2 =
+                                                    if fty == Ast.TVal && isBoolExp st2 e then
+                                                        boolToVal e1
+
+                                                    else
+                                                        e1
+
                                                 ( dead, st3 ) =
                                                     fresh "_fieldstore" st2
                                             in
@@ -500,7 +523,7 @@ lowerStmt st stmt cont =
                                                             { binders =
                                                                 [ LetBind
                                                                     { binder = dead
-                                                                    , value = fieldStore fty p1 off e1
+                                                                    , value = fieldStore fty p1 off e2
                                                                     }
                                                                 ]
                                                             , body = body
@@ -540,7 +563,17 @@ lowerStmt st stmt cont =
                                             Err msg
 
                                         Ok ( st3, e1 ) ->
-                                            case indexStore st pty p1 i i1 e1 of
+                                            let
+                                                -- B1: the bool→val box at a
+                                                -- `*val` ELEMENT slot.
+                                                e2 =
+                                                    if pty == PVal && isBoolExp st3 e then
+                                                        boolToVal e1
+
+                                                    else
+                                                        e1
+                                            in
+                                            case indexStore st pty p1 i i1 e2 of
                                                 Err msg ->
                                                     Err msg
 
@@ -574,7 +607,19 @@ lowerTerm : St -> Term -> Result String (St, Exp)
 lowerTerm st term =
     case term of
         TRet e ->
-            lowerExp st e
+            case lowerExp st e of
+                Err msg ->
+                    Err msg
+
+                Ok ( st1, v1 ) ->
+                    -- B1: the bool→val box at a `-> val` return — the site
+                    -- that keeps `return true;` byte-identical to the old
+                    -- `mkbool(1)` sugar.
+                    if st.ret == Ast.TVal && isBoolExp st e then
+                        Ok ( st1, boolToVal v1 )
+
+                    else
+                        Ok ( st1, v1 )
 
         TRecur args ->
             case lowerArgs st args of
@@ -879,6 +924,25 @@ lowerExp st e =
         Ast.EStr s ->
             Ok ( st, Lit (LString s) )
 
+        Ast.EBool b ->
+            -- B1: the bool literal is the 0/1 WORD (`Lit 1`/`Lit 0`) — the
+            -- bool class's constant form.  At a `:val` position the bool→val
+            -- box wraps it (`boolToVal`), and `RawMkValue tagBoolean [Lit k]`
+            -- is EXACTLY the tree the `mkbool(k)` sugar this replaced emitted
+            -- — that is the byte-identity the corpus gate checks.
+            Ok ( st, Lit (LNumber (boolWord b)) )
+
+        Ast.ESizeof target ->
+            case sizeofWords st target of
+                Err msg ->
+                    Err (internal st "sizeof" msg)
+
+                Ok n ->
+                    Ok ( st, Lit (LNumber n) )
+
+        Ast.ECast target inner ->
+            lowerCast st target inner
+
         Ast.EVar name ->
             case Dict.get name st.scope of
                 Just id ->
@@ -903,10 +967,13 @@ lowerExp st e =
             lower2 st a b (fltCmpLower (fltCmpOp op))
 
         Ast.EShortAnd a b ->
-            lower2 st a b shortLower
+            -- B1: `&&`/`||` are val,val -> val (Ast.shortSig), so a bool
+            -- operand is BOXED here — the inferred chain is
+            -- `mkbool(x) || false`, whose `false` arm is the old mkbool(0) tree.
+            lower2 st a b (\x y s1 -> shortLower (boxIfValBool st Ast.TVal a x) (boxIfValBool st Ast.TVal b y) s1)
 
         Ast.EShortOr a b ->
-            lower2 st a b shortOrLower
+            lower2 st a b (\x y s1 -> shortOrLower (boxIfValBool st Ast.TVal a x) (boxIfValBool st Ast.TVal b y) s1)
 
         Ast.EIf c thn els ->
             -- the ?: VALUE JOIN (T9b), 1:1: the same `mkIf` the statement
@@ -931,8 +998,28 @@ lowerExp st e =
 
                                 Ok ( st3, e1 ) ->
                                     let
+                                        -- B1: the join's ONE implicit
+                                        -- coercion — a bool arm beside a
+                                        -- `:val` arm is BOXED (the checker's
+                                        -- `joinClass`; a bool-vs-bool join is
+                                        -- its reject, so exactly one side can
+                                        -- need this).
+                                        t2 =
+                                            if isBoolExp st thn && not (isBoolExp st els) then
+                                                boolToVal t1
+
+                                            else
+                                                t1
+
+                                        e2 =
+                                            if isBoolExp st els && not (isBoolExp st thn) then
+                                                boolToVal e1
+
+                                            else
+                                                e1
+
                                         ( ie, stF ) =
-                                            mkIf st3 c1 t1 e1
+                                            mkIf st3 c1 t2 e2
                                     in
                                     Ok ( stF, ie )
 
@@ -1080,6 +1167,221 @@ lowerExp st e =
 
                 Ok ( st1, p1 ) ->
                     Ok ( st1, Unsafe (RawWordLoad { ptr = p1, index = Lit (LNumber 0) }) )
+
+
+
+-- ============================ B1: bool, casts, sizeof ============================
+
+
+{-| `true`/`false` as the 0/1 word.
+-}
+boolWord : Bool -> Int
+boolWord b =
+    if b then
+        1
+
+    else
+        0
+
+
+{-| The bool→val BOX (plan Q2's ONE implicit coercion): the operand is a raw
+0/1 word, the result is a boolean Value — the node `mkbool(..)` builds, which
+is the tree the `true`/`false` sugar used to emit (`RawMkValue tagBoolean
+[Lit 1|0]`).  The checker admits the operand at exactly the `:val` SLOTS this
+module can see syntactically (a `:val` binder, a `:val` field/element store, a
+`-> val` return, and a `?:` arm beside a val), so every site calls this with a
+word it has already lowered.
+-}
+boolToVal : Exp -> Exp
+boolToVal word =
+    Unsafe (RawMkValue { tag = RtLayout.tagBoolean, words = [ word ] })
+
+
+{-| Does this expression have class `bool`?  The LOWERING's mirror of
+`Check`'s TBool class, and it is TOTAL because the checker admits no other
+bool shape (`Check.isBoolTemp` is the binder rule; a bool join, a bool
+param/return and a bool field cannot parse or check).  Used for the two
+decisions the checker cannot make for it: where the bool→val box goes, and
+which cast rows are the identity.
+-}
+isBoolExp : St -> Ast.Exp -> Bool
+isBoolExp st e =
+    case e of
+        Ast.EBool _ ->
+            True
+
+        Ast.EWordCmp _ _ _ ->
+            True
+
+        Ast.EFltCmp _ _ _ ->
+            True
+
+        Ast.ECast target _ ->
+            target == Ast.TBool
+
+        Ast.EVar name ->
+            Dict.get name st.types == Just Ast.TBool
+
+        _ ->
+            False
+
+
+{-| Is this expression a FLOAT word (`d`)?  Only the cast rows need it: the
+`[word]`/`[int]` cast is the identity for a word operand and `ftoi32` for a
+float one.  Float words are never let-bound (`Check` J1), so the binding
+shapes are the four expression forms plus a float PARAMETER (a stage-6 rawAbi
+seat; a user defun's float param is B6's).  A shape this misses is a shape
+whose cast would be an identity on a `d` temp — a loud QBE-layer type error,
+never a silent wrong value.
+-}
+isFloatExp : St -> Ast.Exp -> Bool
+isFloatExp st e =
+    case e of
+        Ast.EFlt _ ->
+            True
+
+        Ast.EFltBin _ _ _ ->
+            True
+
+        Ast.EBuiltin Ast.IToF _ ->
+            True
+
+        Ast.EBuiltin Ast.FLoad _ ->
+            True
+
+        Ast.EVar name ->
+            Dict.get name st.types == Just Ast.TFloat
+
+        _ ->
+            False
+
+
+{-| Box every bool operand whose expected class is `:val` — the general form
+of the ONE implicit coercion, used wherever the expected classes are STATIC in
+the tree: a builtin's operand slots (`Ast.builtinClass`) and the `&&`/`||`
+operands (`Ast.shortSig` is val,val).  The other coercion sites are the ones
+whose `:val` slot is explicit in the node being built (a binder, a field/
+element store, a return, a `?:` arm) and box inline.
+-}
+boxArgs : St -> List Ast.Type -> List Ast.Exp -> List Exp -> List Exp
+boxArgs st tys args es =
+    case ( tys, args, es ) of
+        ( t :: ts, a :: as_, e :: es_ ) ->
+            boxIfValBool st t a e :: boxArgs st ts as_ es_
+
+        _ ->
+            es
+
+
+{-| ONE operand: box it iff the expected class is `:val` and the surface
+expression is a bool.  The single decision `boxArgs` folds over, so the
+`&&`/`||` arms (whose expected class is `Ast.shortSig`'s val,val) and the
+builtin slot walk cannot disagree.
+-}
+boxIfValBool : St -> Ast.Type -> Ast.Exp -> Exp -> Exp
+boxIfValBool st expected a e =
+    if expected == Ast.TVal && isBoolExp st a then
+        boolToVal e
+
+    else
+        e
+
+
+{-| The builtin form of `boxArgs`: a fixed-arity `Sig`'s operand classes;
+`SigMkVal`'s payload words take a bool AS a word (rawWordArg computes the
+0/1 temp), so nothing is boxed there.
+-}
+boxBuiltinArgs : St -> Ast.Builtin -> List Ast.Exp -> List Exp -> List Exp
+boxBuiltinArgs st b args es =
+    case Ast.builtinClass b of
+        Ast.Sig tys _ ->
+            boxArgs st tys args es
+
+        Ast.SigMkVal ->
+            es
+
+
+{-| `[T](e)` — one arm per row of the checker's matrix (`Check.castClass` is
+the judge; this is the emission).  The identity rows emit NO node at all:
+
+  * `[word]`/`[int]` of word|pointer|bool — identity; of a FLOAT — `ftoi32`.
+  * `[bool]` of word — a nonzero compare (`RawCmp WCne e 0`); of bool —
+    identity.
+  * `[*T]` of word — identity (the J12 view-cast, made explicit).
+  * `[float]` of word — `RawIToF` (itof).
+  * `[val]` of bool — the box.
+
+Anything else is the checker's reject, so a fall-through here is an internal
+error and says so.
+-}
+lowerCast : St -> Ast.Type -> Ast.Exp -> Result String (St, Exp)
+lowerCast st target inner =
+    case lowerExp st inner of
+        Err msg ->
+            Err msg
+
+        Ok ( st1, e1 ) ->
+            if target == Ast.TVal then
+                Ok ( st1, boolToVal e1 )
+
+            else if target == Ast.TFloat then
+                if isFloatExp st inner then
+                    Err (internal st "cast to float" "the operand is already a float word — Check J10 must reject it first")
+
+                else
+                    Ok ( st1, Unsafe (RawIToF e1) )
+
+            else if target == Ast.TBool then
+                if isBoolExp st inner then
+                    Ok ( st1, e1 )
+
+                else
+                    Ok ( st1, Unsafe (RawCmp { op = RCne, a = e1, b = Lit (LNumber 0) }) )
+
+            else if target == Ast.TWord then
+                if isFloatExp st inner then
+                    Ok ( st1, Unsafe (RawUn { op = RFToI32, v = e1 }) )
+
+                else
+                    Ok ( st1, e1 )
+
+            else
+                -- a pointer target: the `[*T](w)` identity (J12's view-cast)
+                Ok ( st1, e1 )
+
+
+{-| `sizeof`'s word count, from the ONE layout table (`Check.sizeofStruct`,
+the same numbers the checker validated) or the class width — `word`/`int`/
+pointer = 1, `val` = 5 inline words, `bool` = 1.  `float` is the checker's
+reject (no raw f64 seat), so it is an internal error here.
+-}
+sizeofWords : St -> Ast.SizeTarget -> Result String Int
+sizeofWords st target =
+    case target of
+        Ast.SizeStruct name ->
+            case Check.sizeofStruct st.decls name of
+                Just n ->
+                    Ok n
+
+                Nothing ->
+                    Err ("no struct '" ++ name ++ "' in the layout table — Check J11 must reject it first")
+
+        Ast.SizeType ty ->
+            case ty of
+                Ast.TWord ->
+                    Ok 1
+
+                Ast.TBool ->
+                    Ok 1
+
+                Ast.TPtr _ ->
+                    Ok 1
+
+                Ast.TVal ->
+                    Ok 5
+
+                Ast.TFloat ->
+                    Err "a float has no raw-memory word width (Check J1 must reject it first)"
 
 
 {-| The four operator families lower constructor-by-constructor onto the
@@ -1231,7 +1533,14 @@ lowerBuiltin st b args =
             Err msg
 
         Ok ( st1, es ) ->
-            case buildBuiltin b es of
+            let
+                -- B1: a bool operand at a `:val` slot is BOXED (the implicit
+                -- coercion; `Ast.builtinClass` is the class table, so the
+                -- slot's class is static — no guessing).
+                es2 =
+                    boxBuiltinArgs st b args es
+            in
+            case buildBuiltin b es2 of
                 Err msg ->
                     Err (internal st ("builtin '" ++ builtinName b ++ "'") msg)
 
@@ -1806,6 +2115,9 @@ typeStrOf ty =
     case ty of
         TWord ->
             "word"
+
+        TBool ->
+            "bool"
 
         TFloat ->
             "float"

@@ -2341,10 +2341,10 @@ checks rt =
         (Parse.parseExp "\"hi\"" == Ok (Ast.EStr "hi"))
     , check "parse: string escapes (backslash n, t, quote, backslash, r, 0)"
         (Parse.parseExp "\"a\\n\\t\\\"b\\\\c\\r\\0\"" == Ok (Ast.EStr "a\n\t\"b\\c\r\u{0000}"))
-    , check "parse: true/false/mknil sugar (mkbool(1) / mkbool(0) / the bare nil literal)"
-        (Parse.parseExp "true" == Ok (Ast.EBuiltin Ast.MkBool [ Ast.EInt 1 ])
+    , check "parse: true/false are BOOL literals (B1: EBool, no longer the mkbool(1)/mkbool(0) sugar tree) and mknil is the bare nil literal"
+        (Parse.parseExp "true" == Ok (Ast.EBool True)
             && Parse.parseExp "false"
-                == Ok (Ast.EBuiltin Ast.MkBool [ Ast.EInt 0 ])
+                == Ok (Ast.EBool False)
             && Parse.parseExp "mknil"
                 == Ok (Ast.EBuiltin Ast.MkNil [])
         )
@@ -5337,7 +5337,7 @@ checks rt =
                             Ast.TRet
                                 (Ast.EShortOr
                                     (Ast.EBuiltin Ast.MkBool [ Ast.EBuiltin Ast.TagIs [ Ast.EVar "a", Ast.EInt 0 ] ])
-                                    (Ast.EBuiltin Ast.MkBool [ Ast.EInt 0 ])
+                                    (Ast.EBool False)
                                 )
                         }
                   }
@@ -6267,7 +6267,262 @@ checks rt =
     , t8SplicedRow rt "Rt.readFileGo"
     , t8SplicedRow rt "Rt.epCmd"
     , t8SplicedRow rt "Rt.childCd"
+
+    -- ===== B1 — bool, int, literals, casts, sizeof (handoff-midlang-b1) =====
+    -- The unit is CHECKER-ONLY and must stay EMISSION-NEUTRAL: the class
+    -- change (`wordCmpSig`/`fltCmpSig` -> bool) moved no tree, so the corpus
+    -- stays byte-identical (tools/osier-corpus-ssa.sh, the oracle), and the
+    -- three byte-identity rows below pin the half a corpus gate cannot see
+    -- (they compare two spellings of the SAME program, so a moved tree fails
+    -- them even where no corpus group spells either).
+    , check "B1 parse: `int` IS `word` — a binder, a parameter and the result all parse to TWord (one class, two spellings)"
+        (Parse.parseProgram
+            "defun F.g(a: int) -> int {\n  int n = a;\n  return n;\n}"
+            == Ok
+                [ { key = "F.g"
+                  , flags = []
+                  , params = [ { name = "a", ty = Ast.TWord } ]
+                  , ret = Ast.TWord
+                  , body =
+                        { stmts = [ Ast.SBind Ast.TWord "n" (Ast.EVar "a") ]
+                        , term = Ast.TRet (Ast.EVar "n")
+                        }
+                  }
+                ]
+        )
+    , check "B1 parse: `*int` is `*word` (the same PWord pointee — no second pointer family)"
+        (Parse.parseExp "[*int](1)"
+            == Ok (Ast.ECast (Ast.TPtr Ast.PWord) (Ast.EInt 1))
+        )
+    , check "B1 parse: `bool b = (a == b);` is SBind TBool over an EWordCmp (the binder class, spelled ONLY in binder position)"
+        (Parse.parseProgram
+            "defun F.g(a: word, b: word) -> val {\n  bool c = (a == b);\n  return mknil;\n}"
+            == Ok
+                [ { key = "F.g"
+                  , flags = []
+                  , params = [ { name = "a", ty = Ast.TWord }, { name = "b", ty = Ast.TWord } ]
+                  , ret = Ast.TVal
+                  , body =
+                        { stmts = [ Ast.SBind Ast.TBool "c" (Ast.EWordCmp Ast.WCeq (Ast.EVar "a") (Ast.EVar "b")) ]
+                        , term = Ast.TRet (Ast.EBuiltin Ast.MkNil [])
+                        }
+                  }
+                ]
+        )
+    , check "B1 parse REJECT: `bool` is NOT a type annotation — a bool parameter is a loud parse reject (the word ABI is B6)"
+        (case Parse.parseProgram "defun F.g(b: bool) -> val {\n  return mknil;\n}" of
+            Err _ ->
+                True
+
+            Ok _ ->
+                False
+        )
+    , check "B1 parse: `[T](e)` casts — [bool] of a word, [word] of a bool, [*S] of a word, [val], [int]"
+        (Parse.parseExp "[bool](x)" == Ok (Ast.ECast Ast.TBool (Ast.EVar "x"))
+            && Parse.parseExp "[word](b)"
+                == Ok (Ast.ECast Ast.TWord (Ast.EVar "b"))
+            && Parse.parseExp "[*S](p)"
+                == Ok (Ast.ECast (Ast.TPtr (Ast.PStruct "S")) (Ast.EVar "p"))
+            && Parse.parseExp "[val](b)"
+                == Ok (Ast.ECast Ast.TVal (Ast.EVar "b"))
+            && Parse.parseExp "[int](x)"
+                == Ok (Ast.ECast Ast.TWord (Ast.EVar "x"))
+        )
+    , check "B1 parse: a cast COMPOSES as an atom — [word](a) + 1 is a sum, and p[[word](a)] is an index (the bracket in atom position is a cast, never the postfix [i])"
+        (Parse.parseExp "[word](a) + 1"
+            == Ok (Ast.EWordBin Ast.WAdd (Ast.ECast Ast.TWord (Ast.EVar "a")) (Ast.EInt 1))
+            && Parse.parseExp "p[[word](a)]"
+                == Ok (Ast.EIndex (Ast.EVar "p") (Ast.ECast Ast.TWord (Ast.EVar "a")))
+        )
+    , check "B1 parse: `sizeof(R)` is a STRUCT target and `sizeof(*word)` a TYPE target (the two spellings Q9 names)"
+        (Parse.parseExp "sizeof(R)" == Ok (Ast.ESizeof (Ast.SizeStruct "R"))
+            && Parse.parseExp "sizeof(*word)"
+                == Ok (Ast.ESizeof (Ast.SizeType (Ast.TPtr Ast.PWord)))
+            && Parse.parseExp "sizeof(val)"
+                == Ok (Ast.ESizeof (Ast.SizeType Ast.TVal))
+        )
+    , check "B1 parse: `'c'` is a WORD byte literal with the string escape table plus \' — and `'ab'`/an unknown escape are loud rejects"
+        (Parse.parseExp "'a'" == Ok (Ast.EInt 97)
+            && Parse.parseExp "'\\n'"
+                == Ok (Ast.EInt 10)
+            && Parse.parseExp "'\\''"
+                == Ok (Ast.EInt 39)
+            && Parse.parseExp "' '"
+                == Ok (Ast.EInt 32)
+            && (case Parse.parseExp "'ab'" of
+                    Err _ ->
+                        True
+
+                    Ok _ ->
+                        False
+               )
+            && (case Parse.parseExp "'\\q'" of
+                    Err _ ->
+                        True
+
+                    Ok _ ->
+                        False
+               )
+        )
+
+    -- the class judgments: what bool admits, and the three shapes whose
+    -- representation is NOT a temp (each refused for the lowering reason the
+    -- Check header states).
+    , checkOk "B1 check accept: a BOOL BINDER is branchable — `bool c = (a == b); if (c) {..}` (the seam closer: its representation is the class's)"
+        "defun F.g(a: word, b: word) -> val {\n  bool c = (a == b);\n  if (c) {\n    return mknum(1);\n  } else {\n    return mknum(2);\n  }\n}"
+    , checkOk "B1 check accept: the ONE implicit coercion — `val v = (a == b);` (bool->val BOXES; this was a J1 reject before the class change: the fail-before/pass-after row)"
+        "defun F.g(a: word, b: word) -> val {\n  val v = (a == b);\n  return v;\n}"
+    , checkOk "B1 check accept: `word w = (a == b);` STAYS legal — the plan expected zero such sites and runtime.mid has two (Rt.close's isStr), so bool->word is the identity, not a reject"
+        "defun F.g(a: word, b: word) -> val {\n  word w = (a == b);\n  return mknum(w);\n}"
+    , checkOk "B1 check accept: bool in WORD arithmetic — `payload(a, 0) + (x == 0)` (MEASURED: Rt.epCountStdin's shape) and mkbool(compare) (the 309-site corpus spelling)"
+        "defun F.g(a: val, x: word) -> val {\n  return mknum(payload(a, 0) + (x == 0));\n}\n\ndefun F.h(x: word) -> val {\n  return mkbool(x == 1);\n}"
+    , checkErr "B1 check REJECT: `if (true)` — a constant bool branch is not a test (the plan's negative row)"
+        "CONSTANT bool"
+        "defun F.g() -> val {\n  if (true) {\n    return mknum(1);\n  } else {\n    return mknum(2);\n  }\n}"
+    , checkErrModule "B1 check REJECT: `if (sizeof(R))` — the same rule extended: a sizeof is a constant, so it is not a test either"
+        "CONSTANT word"
+        "struct R { aa : word; }\n\ndefun F.g() -> val {\n  if (sizeof(R)) {\n    return mknum(1);\n  } else {\n    return mknum(2);\n  }\n}"
+    , checkErr "B1 check REJECT: `bool b = true;` — a literary bool has no branchable lowering (Lower's raw-Int binder reboxes as a NUMBER and a value test would read tag 0: the always-then misread)"
+        "not a bool TEMP"
+        "defun F.g() -> val {\n  bool b = true;\n  if (b) {\n    return mknum(1);\n  } else {\n    return mknum(2);\n  }\n}"
+    , checkErr "B1 check REJECT: `bool b = (fload(v) f< fload(v));` — a float compare IS a word 0/1 but is not a raw-word BINDER node, so the binder would fail in the backend instead of here (the compare itself is still a legal INLINE cond)"
+        "not a bool TEMP"
+        "defun F.g(v: val) -> val {\n  bool b = (fload(v) f< fload(v));\n  return mknum(1);\n}"
+    , checkErr "B1 check REJECT: a bool JOIN — `bool b = c ? (a == b) : (d == e);` needs a slot, and a bool value is a raw temp"
+        "branches agree on bool"
+        "defun F.g(a: word, b: word, d: word, e: word, c: val) -> val {\n  bool j = c ? (a == b) : (d == e);\n  return mknum(1);\n}"
+    , checkErr "B1 check REJECT: `[word](v)` — a val cast is NO cast (Q11: the opaque handle; payload/tagis are the sanctioned reads)"
+        "not in the cast matrix"
+        "defun F.g(v: val) -> val {\n  word w = [word](v);\n  return mknum(w);\n}"
+    , checkErr "B1 check REJECT: `[val](x)` — only a BOOL boxes into a val; a word->val cast is not a row"
+        "not in the cast matrix"
+        "defun F.g(x: word) -> val {\n  val v = [val](x);\n  return v;\n}"
+    , checkErr "B1 check REJECT: `[val](v)` — a val identity cast is refused too (Q10: val casts NONE)"
+        "not in the cast matrix"
+        "defun F.g(v: val) -> val {\n  val w = [val](v);\n  return w;\n}"
+    , checkErrModule "B1 check REJECT: `[*S2](p)` — pointer->pointer is J12's reject spelled as a cast (go through a `word` binder)"
+        "not in the cast matrix"
+        "struct S1 { aa : word; }\nstruct S2 { bb : word; }\n\ndefun F.g(p: *S1) -> val {\n  *S2 q = [*S2](p);\n  return mknum(1);\n}"
+    , checkErr "B1 check REJECT: an IMPLICIT float->word (no row folds it) — `word w = fload(v);`"
+        "declares word but its initializer is float"
+        "defun F.g(v: val) -> val {\n  word w = fload(v);\n  return mknum(w);\n}"
+    , checkErr "B1 check REJECT: `sizeof(Nope)` — an unknown struct (the ONE table has no such entry)"
+        "no such struct is declared"
+        "defun F.g() -> val {\n  return mknum(sizeof(Nope));\n}"
+    , checkErr "B1 check REJECT: `sizeof(float)` — no raw f64 seat, the J11 float-field reason"
+        "no raw-memory f64 seat"
+        "defun F.g() -> val {\n  return mknum(sizeof(float));\n}"
+
+    -- THE EMISSION ROWS.  Two of them are byte-identity pins between a NEW
+    -- spelling and the OLD one it replaces (so `true`/`false` and the
+    -- bool->val box are proven to emit the sugar's own tree), one is the SEAM
+    -- (a bool binder branches with a direct jnz on the compare's temp, with
+    -- NO boolean box) with the BOXED spelling as its two-sided control, and
+    -- the rest pin the cast/sizeof rows' nodes.
+    , b1SameSsaRow rt "B1 .ssa IDENTITY: `return true;` emits the SAME text as `return mkbool(1);` — the bool literal's bool->val box IS the sugar's tree (the byte-identity the corpus gate cannot see, because no corpus group spells `true`)"
+        "module B1t\n\ndefun B1t.f() -> val {\n  return true;\n}"
+        "module B1t\n\ndefun B1t.f() -> val {\n  return mkbool(1);\n}"
+    , b1SameSsaRow rt "B1 .ssa IDENTITY: `mkbool(x == y) ? false : mknum(7)` emits the SAME text as the mkbool(0) spelling (the ?: arm's implicit box — the MEASURED Rt.clone/fdIsSeekable shape)"
+        "module B1t\n\ndefun B1t.f(a: val, b: val) -> val {\n  word x = payload(a, 0);\n  word y = payload(b, 0);\n  return mkbool(x == y) ? false : mknum(7);\n}"
+        "module B1t\n\ndefun B1t.f(a: val, b: val) -> val {\n  word x = payload(a, 0);\n  word y = payload(b, 0);\n  return mkbool(x == y) ? mkbool(0) : mknum(7);\n}"
+    , b1SameSsaRow rt "B1 .ssa IDENTITY: `return [val](x == y);` emits the SAME text as `return mkbool(x == y);` — the explicit box (Q10's [val](b) row) is the builtin's own tree"
+        "module B1t\n\ndefun B1t.f(a: val, b: val) -> val {\n  word x = payload(a, 0);\n  word y = payload(b, 0);\n  return [val](x == y);\n}"
+        "module B1t\n\ndefun B1t.f(a: val, b: val) -> val {\n  word x = payload(a, 0);\n  word y = payload(b, 0);\n  return mkbool(x == y);\n}"
+    , check "B1 SEAM: a `bool` binder branches with a DIRECT jnz on the comparison's temp — no boolean box (`storew 3`), and the jump is true-first — where the boxed :val spelling boxes and INVERTS (the control row below)"
+        (case ( emitUserSsa rt b1SeamMid, emitUserSsa rt b1BoxedMid ) of
+            ( Ok seam, Ok boxed ) ->
+                String.length seam > 400
+                    && String.contains "jnz %" seam
+                    && String.contains ", @then_0, @else_1" seam
+                    && not (String.contains "storew 3" seam)
+                    && not (String.contains ", @then_0, @else_1" boxed)
+                    && String.contains "storew 3" boxed
+                    && String.contains ", @else_1, @then_0" boxed
+
+            _ ->
+                False
+        )
+    , checkErr "B1 SEAM CONTRAST: the SAME program with a `word` binder is a J1 REJECT — `word c = (a == b); if (c)` (a word binder's representation is the lowering's, so only the bool class can be branchable)"
+        "bare word variable"
+        "defun F.g(a: val, b: val) -> val {\n  word x = payload(a, 0);\n  word y = payload(b, 0);\n  word c = (x == y);\n  if (c) {\n    return mknum(1);\n  } else {\n    return mknum(2);\n  }\n}"
+    , check "B1 LOWER: `[bool](w)` emits exactly ONE nonzero compare (`cnel %t, 0`) — the row's `[word](b)` identity is pinned by the byte-identity row below"
+        (case emitUserSsa rt b1CastMid of
+            Ok ssa ->
+                String.length ssa > 400
+                    && List.length (String.indexes "cnel " ssa) == 1
+
+            Err _ ->
+                False
+        )
+    , b1SameSsaRow rt "B1 .ssa IDENTITY: `if ([word](c))` emits the SAME text as `if (c)` — the [word] cast of a bool is NO node (Q10's identity row, proven at emit level)"
+        "module B1t\n\ndefun B1t.f(a: val) -> val {\n  word x = payload(a, 0);\n  bool c = (x == 0);\n  if ([word](c)) {\n    return mknum(1);\n  } else {\n    return mknum(2);\n  }\n}"
+        "module B1t\n\ndefun B1t.f(a: val) -> val {\n  word x = payload(a, 0);\n  bool c = (x == 0);\n  if (c) {\n    return mknum(1);\n  } else {\n    return mknum(2);\n  }\n}"
+    , check "B1 LOWER: `sizeof(R)` is the ONE layout table's number (R = word+val+word = 7 words, emitted as a `mul 7, 1000000`) and `sizeof(*word)` is 1"
+        (case ( declsOf "struct R { aa : word; bb : val; cc : word; }", emitUserSsa rt b1SzMid ) of
+            ( decls, Ok ssa ) ->
+                case Check.sizeofStruct decls "R" of
+                    Just n ->
+                        n == 7
+                            && String.length ssa > 400
+                            && String.contains ("mul " ++ String.fromInt n ++ ", 1000000") ssa
+
+                    Nothing ->
+                        False
+
+            _ ->
+                False
+        )
+    , check "B1 LOWER: a NON-literal bool at a `-> val` return goes through the box — `return (x == y);` emits `storew 3` + the payload store (no raw word in a value position)"
+        (case emitUserSsa rt b1RetBoolMid of
+            Ok ssa ->
+                String.length ssa > 400
+                    && String.contains "storew 3" ssa
+
+            Err _ ->
+                False
+        )
     ]
+
+
+
+
+
+b1SameSsaRow : Rt.Runtime -> String -> String -> String -> String
+b1SameSsaRow rt name a b =
+    check name
+        (case ( emitUserSsa rt a, emitUserSsa rt b ) of
+            ( Ok sa, Ok sb ) ->
+                -- anti-vacuity: two ERRORS are not a byte-identity proof
+                String.length sa > 400 && sa == sb
+
+            _ ->
+                False
+        )
+
+
+b1CastMid : String
+b1CastMid =
+    "module B1cast\n\ndefun B1cast.f(a: val) -> val {\n  word x = payload(a, 0);\n  bool c = [bool](x);\n  if ([word](c)) {\n    return mknum(1);\n  } else {\n    return mknum(2);\n  }\n}"
+
+
+b1SzMid : String
+b1SzMid =
+    "module B1sz\n\nstruct R { aa : word; bb : val; cc : word; }\n\ndefun B1sz.f(a: val) -> val {\n  return mknum((sizeof(R) * 1000000) + sizeof(*word));\n}"
+
+
+b1RetBoolMid : String
+b1RetBoolMid =
+    "module B1ret\n\ndefun B1ret.f(a: val, b: val) -> val {\n  word x = payload(a, 0);\n  word y = payload(b, 0);\n  return (x == y);\n}"
+
+
+b1BoxedMid : String
+b1BoxedMid =
+    "module B1box\n\ndefun B1box.f(a: val, b: val) -> val {\n  word x = payload(a, 0);\n  word y = payload(b, 0);\n  if (mkbool(x == y)) {\n    return mknum(1);\n  } else {\n    return mknum(2);\n  }\n}"
+
+
+b1SeamMid : String
+b1SeamMid =
+    "module B1seam\n\ndefun B1seam.f(a: val, b: val) -> val {\n  word x = payload(a, 0);\n  word y = payload(b, 0);\n  bool c = (x == y);\n  if (c) {\n    return mknum(1);\n  } else {\n    return mknum(2);\n  }\n}"
 
 
 {-| T8: the one migrated key's row — the built program's defun at `key` IS
@@ -6935,6 +7190,15 @@ censusExp e =
 
         Ast.EWithRoots _ b ->
             censusBlock b
+
+        Ast.ECast _ inner ->
+            "ECast" :: censusExp inner
+
+        Ast.ESizeof _ ->
+            ["ESizeof"]
+
+        Ast.EBool _ ->
+            ["EBool"]
 
         Ast.EInt _ ->
             []
