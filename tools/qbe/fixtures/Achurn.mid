@@ -1,0 +1,88 @@
+// B3 (handoff-midlang-b3) — THE val-ARRAY CHURN PROBE: plan §Q11's
+// "enforcement by failure", made visible.  Paired with achurn.elm.
+//
+//   QBE_MIDGC=1 QBE_HEAP_MB=16 tools/qbe/qbe-mk.sh \
+//       tools/qbe/fixtures/achurn.elm AchurnMain.main <outdir>
+//   QBE_MIDGC=1 QBE_HEAP_MB=16 <outdir>/achurn AchurnMain.main   # -> 10
+//
+// THE RULE (plan §Q11, restated): a `val` ELEMENT of an array is 40 bytes of
+// RAW MEMORY holding a handle.  The collector never scans it, so it roots
+// nothing — a handle whose only copy is that element is garbage the moment
+// the frame that produced it dies, and the referent is SWEPT while the
+// element still "holds" it.  The compliant spellings are the ones the rest
+// of the language uses: keep the handle in a `val` BINDER (a rooted frame
+// slot) and re-read it THERE, or hold it under `withroots` for the window.
+//
+// THE TWO ARMS DIFFER IN EXACTLY ONE THING — where the handle lives:
+//   * `good`: the handle is a `val` binder (`keep`) in this defun's frame.
+//     Frame slots are registered roots (rt_frame_enter pushes a
+//     value_array root over them), so the referent is MARKED, survives the
+//     churn, and its element still has tag `boolean` (3)  -> 1.
+//   * `bad`: the handle is written into a raw `val[1]` array by `put`, whose
+//     OWN frame dies on return.  Nothing roots the referent, so the sweep
+//     frees its block and OVERWRITES the object's first word with the
+//     free-list link (Rt.gcSweep: `wstore(cursor, 0, wload(table, cls))`) —
+//     which is the element's TAG.  The element is still there, still 40
+//     bytes, and no longer a boolean  -> 0.
+//
+// MEASURED (this tree, QBE_MIDGC=1 QBE_HEAP_MB=16): `10` = good(1) |
+// bad(0).  The churn is 200k one-element vectors, far past the quarter-heap
+// (4 MB) threshold, so collections run on both arms; the compliant arm's
+// value reads back UNCHANGED (a control that the churn itself is not what
+// breaks the tag — only the missing root is).
+//
+// WHY THE FIRST CUT OF THIS PROBE SHOWED NOTHING (kept, because it is the
+// trap): an element holding `mknum(7)` reads back as 7 even after the sweep,
+// because a number's tag is 0 and the free-list link stored into word 0 has
+// the same low word — the corruption is real but INVISIBLE through a
+// number-valued element.  A probe whose fixture cannot show the difference is
+// not a probe; the boolean tag is what makes the sweep's own write visible.
+module Achurn
+export Achurn.good : val -> val
+export Achurn.bad : val -> val
+
+// A 1-element vector whose element is a BOOLEAN value (tag 3) — the tag the
+// churn's sweep destroys.
+defun Achurn.mk() -> val {
+  word base = allocvec(1);
+  vecstore(base, 0, mkbool(1));
+  return mkvec(base, 1);
+}
+
+// Allocate `n` one-element vectors and drop every one of them: garbage from
+// the moment the next step starts, so collections fire and the free list is
+// populated with exactly this size class.
+defun Achurn.churn(n : val) -> val {
+  if (mkbool(payload(n, 0) == 0)) {
+    return mknil;
+  } else {
+    word base = allocvec(1);
+    vecstore(base, 0, mknum(999));
+    val dead = mkvec(base, 1);
+    return call Achurn.churn(mknum(payload(n, 0) - 1));
+  }
+}
+
+// THE VIOLATION, as a separate defun so the handle's producing frame is NOT
+// the caller's: `dest` is a `*val` view of the raw array, and the handle
+// never leaves this frame alive.
+defun Achurn.put(vsV : val) -> val {
+  *val dest = payload(vsV, 0);
+  dest[0] = call Achurn.mk();
+  return mknil;
+}
+
+// COMPLIANT: the handle lives in a rooted frame slot; re-read from there.
+defun Achurn.good(dummy : val) -> val {
+  val keep = call Achurn.mk();
+  call Achurn.churn(mknum(200000));
+  return mknum(tagis(vecload(payload(keep, 0), 0), 3));
+}
+
+// VIOLATION: the handle's only copy is the raw array element.
+defun Achurn.bad(dummy : val) -> val {
+  val[1] vs;
+  call Achurn.put(mknum(vs));
+  call Achurn.churn(mknum(200000));
+  return mknum(tagis(vecload(payload(vs[0], 0), 0), 3));
+}
