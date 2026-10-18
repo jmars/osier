@@ -2723,6 +2723,52 @@ rawFfiArg ew st =
             rawWordArg ew.exp st
 
 
+{-| (cffi U4) Insert the IL's `...` marker after the declaration's FIXED
+arguments — the one thing a variadic call needs that a fixed one does not.
+
+WHY THE MARKER IS MANDATORY EVEN WITH ZERO VARIADIC ARGUMENTS: QBE sets the
+SysV vector-register count (`%al`) from the arguments AFTER the marker
+(MEASURED, plan §5: `movl $1, %eax` with one `d` among them, `movl $0, %eax`
+with none).  A variadic callee's `va_start` prologue reads `%al` whatever the
+number of arguments, so omitting the marker for `printf(fmt)` would hand it
+whatever the previous code left in `%eax` — the silent ABI break this whole
+arc exists to prevent.  Position, not argument count, is what QBE reads.
+
+The split point is `fixedArgs`, NOT "the last word-class argument": a fixed
+`ptr` argument is `FW64` exactly like a variadic word, so the count has to come
+from the declaration (it rides on the node for that reason).
+-}
+withEllipsis : Bool -> Int -> List CallArg -> List CallArg
+withEllipsis varargs fixedArgs args =
+    if varargs then
+        let
+            ( fixedPart, variadicPart ) =
+                splitAtCount fixedArgs args
+        in
+        fixedPart ++ [ ArgEllipsis ] ++ variadicPart
+
+    else
+        args
+
+
+splitAtCount : Int -> List a -> ( List a, List a )
+splitAtCount n xs =
+    if n <= 0 then
+        ( [], xs )
+
+    else
+        case xs of
+            [] ->
+                ( [], [] )
+
+            x :: rest ->
+                let
+                    ( a, b ) =
+                        splitAtCount (n - 1) rest
+                in
+                ( x :: a, b )
+
+
 {-| The register class of one DECLARED argument.  `w` for the 32-bit family
 (a C `int` parameter is read from %edi/%esi/...), `l` for i64/u64/ptr — plan
 §3.2's measured table.  `FF64` and `FVoid` cannot appear in a parameter
@@ -3276,6 +3322,10 @@ rawWordArg exp s =
                             )
                             (Ok ( [], s ))
                             ws
+                            |> Result.map
+                                (\( args, st ) ->
+                                    ( withEllipsis seat.varargs seat.fixedArgs args, st )
+                                )
                             |> Result.andThen
                                 (\( args, s1 ) ->
                                     let

@@ -1,0 +1,37 @@
+// cffi U4 — VARARGS, arm 1: `snprintf(buf, 32, "%d-%d", 1, 2)` (plan §8 U4).
+//
+// The declaration's trailing `...` is what makes the extra arguments legal at
+// all (R-11/R-12 count only the FIXED parameters, `buf`/`n`/`fmt`), and cffi
+// U4 is what puts QBE's `...` marker in the emitted call:
+//
+//   %t1 =w call $snprintf(l %t0, l 32, l $d0, ..., l 1, l 2)
+//                                             ^^^ HERE
+//   %t2 =l extsw %t1
+//
+// WHY THE MARKER'S POSITION IS THE WHOLE UNIT: QBE derives the SysV
+// vector-register count (`%al`) from the arguments AFTER the marker and emits
+// `movl $<count>, %eax` before the call — MEASURED in this fixture's own
+// assembly, `movl $0, %eax` / `callq snprintf`, and in a raw probe with a `d`
+// among them, `movl $1, %eax` (plan §5).  A variadic callee's `va_start`
+// prologue reads `%al` whatever the argument count, so the marker must be
+// emitted even for a call that passes NO extra arguments at all.
+//
+// THE GOLDEN IS LOAD-BEARING ON THE ARGUMENTS, NOT ON THE MARKER, and that is
+// stated rather than glossed: MEASURED by mutating the emitter to never emit
+// the marker, `"1-2"` still prints (glibc's printf tolerates a stale `%al` when
+// every variadic argument is word-class — which is exactly what v1 admits, so
+// `%al` is ALWAYS 0 in the calls this compiler emits today).  The instrument
+// that can FAIL is qbe-check.sh's run_midshape row, which pins the marker's
+// position literally.  What the golden does prove is the other half: the
+// declared boundary (`ptr`, `i64`, `ptr`, then `l` words) plus the `w` return
+// and its extension produce the right string and the right length.
+module Ffis
+export Ffis.fmt : val -> val
+
+extern snprintf(buf : ptr, n : i64, fmt : ptr, ...) -> i32;
+
+defun Ffis.fmt(dummy : val) -> val {
+  word buf = allocraw(32);
+  word n = rawcall snprintf(buf, 32, rawstr("%d-%d"), 1, 2);
+  return mkstr(buf, n);
+}

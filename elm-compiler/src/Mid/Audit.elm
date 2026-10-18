@@ -284,12 +284,14 @@ describe node =
         RawCallExtern call ->
             -- cffi U2: the description NAMES the declared widths, because a
             -- .ssa/audit reader must be able to tell a typed C call from the
-            -- all-word seat without re-reading the declaration.
+            -- all-word seat without re-reading the declaration.  cffi U4:
+            -- the `...` goes where the EMITTER puts it — after the fixed
+            -- arguments — so the description cannot disagree with the call
+            -- it describes.
             "raw call C extern "
                 ++ call.sym
                 ++ " ("
-                ++ String.join "," (List.map ffiWidthName call.argWidths)
-                ++ (if call.varargs then ",..." else "")
+                ++ String.join "," (ffiArgNames call.varargs call.fixedArgs call.argWidths)
                 ++ ") -> "
                 ++ ffiWidthName call.result
 
@@ -307,6 +309,22 @@ describe node =
 
         RawSym _ ->
             "rawSym (function symbol address)"
+
+
+{-| (cffi U4) The declared argument widths with the `...` marker INSIDE the
+list, at the position the emitter puts it (after `fixedArgs` entries).  A
+variadic declaration with no extra arguments still shows its marker — that is
+the case where the marker is most load-bearing (the callee's `va_start` reads
+`%al` regardless).
+-}
+ffiArgNames : Bool -> Int -> List FfiWidth -> List String
+ffiArgNames varargs fixedArgs widths =
+    if varargs then
+        List.take fixedArgs (List.map ffiWidthName widths)
+            ++ ("..." :: List.drop fixedArgs (List.map ffiWidthName widths))
+
+    else
+        List.map ffiWidthName widths
 
 
 {-| (cffi U2) the WIDTH as the audit prints it — the declaration's own

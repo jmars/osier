@@ -1857,6 +1857,7 @@ lowerExp st e =
                                             , args = es
                                             , argWidths = widths
                                             , varargs = sig.varargs
+                                            , fixedArgs = List.length sig.params
                                             , result = ffiWidthOf sig.result
                                             }
                                         )
@@ -2369,30 +2370,46 @@ ffiWidthOf t =
             FVoid
 
 
-{-| The positional widths of one DECLARED call's arguments.  The CHECKER
-(J3, `Check.checkExternCall`) has already pinned the count against the same
-declaration, so a mismatch here is a loud internal error rather than a
-silent all-word fallback — the shape the whole unit exists to make
-unrepresentable.
+{-| The positional widths of one DECLARED call's arguments.
+
+The FIXED positions take the declaration's widths; every argument past them is
+a VARIADIC one and is `FW64` (an `l` word) — plan §5: v1 admits only word-class
+variadic arguments, and `FW64` is the one word class the emitter can spell
+without a per-argument type.  The CHECKER (J3, `Check.checkExternCall`) has
+already pinned the count against the same declaration, so a mismatch here is a
+loud internal error rather than a silent all-word fallback — the shape the
+whole unit exists to make unrepresentable.
 -}
 declaredArgWidths : String -> Ast.FfiSig -> Int -> Result String (List FfiWidth)
 declaredArgWidths sym sig got =
     let
-        widths =
+        fixed =
             List.map (\p -> ffiWidthOf p.ty) sig.params
     in
-    if List.length widths == got then
-        Ok widths
+    if sig.varargs then
+        if List.length fixed <= got then
+            Ok (fixed ++ List.repeat (got - List.length fixed) FW64)
+
+        else
+            internalArgWidths sym (List.length fixed) got
+
+    else if List.length fixed == got then
+        Ok fixed
 
     else
-        Err
-            ("internal: J3 should have rejected rawcall '"
-                ++ sym
-                ++ "' — the declaration has "
-                ++ String.fromInt (List.length widths)
-                ++ " parameter(s) and the call site has "
-                ++ String.fromInt got
-            )
+        internalArgWidths sym (List.length fixed) got
+
+
+internalArgWidths : String -> Int -> Int -> Result String (List FfiWidth)
+internalArgWidths sym declared got =
+    Err
+        ("internal: J3 should have rejected rawcall '"
+            ++ sym
+            ++ "' — the declaration has "
+            ++ String.fromInt declared
+            ++ " parameter(s) and the call site has "
+            ++ String.fromInt got
+        )
 
 
 lowerCall : St -> List Ast.Exp -> (List Exp -> St -> ( Exp, St )) -> Result String (St, Exp)

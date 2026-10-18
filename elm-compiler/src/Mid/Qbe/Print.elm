@@ -343,6 +343,11 @@ printCallArg carg =
         ArgEnv a ->
             "env " ++ printArg a
 
+        -- (cffi U4) the variadic boundary marker: a bare `...` between the
+        -- fixed and the variadic arguments (QBE's own IL spelling).
+        ArgEllipsis ->
+            "..."
+
 
 printAbi : AbiTy -> String
 printAbi t =

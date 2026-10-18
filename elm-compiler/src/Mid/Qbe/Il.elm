@@ -294,6 +294,15 @@ type StoreTy
 type CallArg
     = ArgVal AbiTy Arg
     | ArgEnv Arg
+    | -- (cffi U4) THE VARIADIC BOUNDARY MARKER — a literal `...` in QBE's IL,
+      -- printed between the fixed and the variadic arguments (`doc/il.txt:925,
+      -- 961-962`).  It carries NO operand: everything QBE needs beyond the
+      -- position is the argument count it can already see, and it derives the
+      -- vector-register count (`%al`) itself from the `d`-class arguments after
+      -- the marker (MEASURED: `movl $1, %eax` after `call $printf(l $fmt,
+      -- ..., d %d, w 42)`; `movl $0, %eax` with no float among them — plan §5).
+      -- Nothing in this backend ever needs to compute `%al`.
+      ArgEllipsis
 
 
 -- ============================ HELPERS ============================
@@ -350,6 +359,11 @@ callArgArg carg =
 
         ArgEnv a ->
             Just a
+
+        -- (cffi U4) the `...` marker carries NO operand — it is a position,
+        -- not a value, so it contributes no temporary to the liveness walk.
+        ArgEllipsis ->
+            Nothing
 
 
 {-| Temporaries an instruction DEFINES (used by the peephole's liveness; kept

@@ -2728,6 +2728,22 @@ run_midshape ffidr-f64 FfidrMain.main tools/qbe/fixtures/ffidr-f64.elm tools/qbe
 # covers runtime.mid's own `rawcall free` sites.
 run_midshape ffiv-void FfivMain.main tools/qbe/fixtures/ffiv-void.elm tools/qbe/fixtures/ffiv-void.mid '=l call $srand(w 7)' ''
 
+# ---- cffi U4: VARARGS (plan §5) — the `...` MARKER and its position ----
+# The golden half of these two rows is a smoke value (see the fixtures): with
+# every variadic argument word-class, `%al` is always 0, so a dropped marker is
+# NOT behaviourally visible — MEASURED by mutating the emitter to never emit it
+# (`"1-2"` still printed).  The pin below is therefore the instrument that can
+# fail, and it holds both halves at once: the fixed arguments' classes (`l`/`w`/
+# `l` from the declaration), the marker's POSITION (between the fixed and the
+# variadic ones), the variadic arguments' class (`l` words) and the `w` result
+# plus its extension.
+#
+# `snprintf` is the printf shape; `fcntl` is the shape the effect-loop port
+# needs (`effectloop.zig:117`), with the variadic argument a real argument
+# rather than a format operand.
+run_midshape ffis-vararg FfisMain.main tools/qbe/fixtures/ffis-vararg.elm tools/qbe/fixtures/ffis-vararg.mid '=w call $snprintf(l %t0, l 32, l $d0, ..., l 1, l 2)' extsw
+run_midshape ffic-vararg FficMain.main tools/qbe/fixtures/ffic-vararg.elm tools/qbe/fixtures/ffic-vararg.mid '=w call $fcntl(w 1, w 3, ..., l 0)' extsw
+
 # ---- zigretire stage 5 PART 3: THE MIDGC GUARD'S COMPLETENESS ----
 # The guard that names ONE incompatible flag is not a guard (this arc paid for
 # that twice: NORTLEAN then NOMIDRT).  run.js's MIDGC_DEPENDS_ON list is the

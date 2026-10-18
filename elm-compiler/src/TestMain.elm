@@ -3391,12 +3391,68 @@ checks rt runtimeMidText =
     , checkErrModule "check cffi U2 J15 R-06 (the duplicate U1 deferred): one symbol declared TWICE is refused — the extern symbol namespace had no owner until this unit" "is declared twice" "extern access(path : ptr) -> i32;\nextern access(path : ptr, mode : i32) -> i64;\ndefun Rt.g() -> word {\n  return 0;\n}"
     , checkErrModule "check cffi U2 J15 R-07: a symbol that collides with a BUILTIN spelling is refused — the call site would resolve to the builtin, never to the C symbol" "is a BUILTIN" "extern wload(p : ptr) -> i64;\ndefun Rt.g() -> word {\n  return 0;\n}"
     , checkErrModule "check cffi U2 J15 R-08: a symbol that is ALSO a rawcallArity row is refused — two tables for one symbol is the skew this repo keeps paying for" "is a rawcallArity row" "extern getpid() -> i32;\ndefun Rt.g() -> word {\n  return 0;\n}"
-    , checkErrModule "check cffi U2 J3 R-11/R-12: a declared extern's ARITY is the declaration's (2 declared, 1 passed)" "is declared extern with 2 parameter(s), got 1" "extern access(path : ptr, mode : i32) -> i32;\ndefun Rt.g(p : word) -> word {\n  word r = rawcall access(p);\n  return r;\n}"
+    , checkErrModule "check cffi U2 J3 R-11: a declared extern's ARITY is at least the declaration's FIXED parameters (2 declared, 1 passed)" "is declared extern with 2 fixed parameter(s), got 1" "extern access(path : ptr, mode : i32) -> i32;\ndefun Rt.g(p : word) -> word {\n  word r = rawcall access(p);\n  return r;\n}"
     , checkErrModule "check cffi U2 J3 R-14/R-16: the DECLARED class is what an argument is checked against — a word at an f64 slot is the existing wording" "needs float, got word" "extern fmodx(x : f64) -> i32;\ndefun Rt.g(p : word) -> word {\n  word r = rawcall fmodx(p);\n  return r;\n}"
     , checkErrModule "check cffi U2 J3 result class: an f64 RESULT is `float`, so binding it to a `word` is the existing word-slot reject (not a silent word read)" "declares word but its initializer is float" "extern fv() -> f64;\ndefun Rt.g() -> word {\n  word r = rawcall fv();\n  return r;\n}"
     , checkOkModule "check cffi U2 ACCEPT (the other side of the row above): a DECLARED f64 result enters a float slot — `mkflt(rawcall fv())` proves the call's class is `float` and not a word"
         "extern fv() -> f64;\ndefun Rt.g() -> val {\n  return mkflt(rawcall fv());\n}"
-    , checkErrModule "check cffi U2 varargs: a call to a `...` extern is REFUSED until cffi U4 emits the IL's `...` marker — accepting the extra argument would emit a call whose %al is whatever the previous code left" "cffi U4" "extern printfx(fmt : ptr, ...) -> i32;\ndefun Rt.g(p : word) -> val {\n  val r = rawcall printfx(p, 1);\n  return r;\n}"
+    -- ================ cffi U4: VARARGS (the `...` marker) ================
+    -- U2 REFUSED a call to a `...` extern with a message naming this unit,
+    -- because accepting it would have emitted a call with no IL marker — and
+    -- QBE derives the vector-register count (%al) from the arguments AFTER the
+    -- marker, so the callee's va_start would read whatever the previous code
+    -- left in %eax.  The rows below are that refusal MOVED, not deleted: the
+    -- same source that was `Err "cffi U4"` is now an accepted call whose node
+    -- carries the fixed count, and the three ways a variadic call can still be
+    -- wrong (too few, too many on a fixed extern, a float among the extras)
+    -- each have their own row.
+    , checkOkModule "check cffi U3/U4 ACCEPT: a call to a `...` extern with WORD arguments is accepted (the refusal row that stood here in U2 named this unit)"
+        "extern printfx(fmt : ptr, ...) -> i32;\ndefun Rt.g(p : word) -> val {\n  word r = rawcall printfx(p, 1);\n  return mknum(r);\n}"
+    , check "lower cffi U4: the node carries the split — `varargs` True, `fixedArgs` 1 (the declaration's own fixed count), and the VARIADIC argument arrives as FW64 (plan §5: v1 admits word-class variadic arguments only)"
+        (case lowlModuleBody "extern printfx(fmt : ptr, ...) -> i32;\ndefun Rt.g(p : word) -> word {\n  word r = rawcall printfx(p, 1);\n  return r;\n}" of
+            Ok body ->
+                case ffiCallOfBody body of
+                    Just c ->
+                        c.varargs
+                            == True
+                            && c.fixedArgs
+                            == 1
+                            && c.argWidths
+                            == [ FW64, FW64 ]
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "lower cffi U4: a variadic declaration with NO extra arguments keeps `fixedArgs` == the arity and `varargs` True — the marker is still emitted (the callee's va_start reads %al regardless of the count), so this is the case the emitter must not drop"
+        (case lowlModuleBody "extern printfx(fmt : ptr, ...) -> i32;\ndefun Rt.g(p : word) -> word {\n  word r = rawcall printfx(p);\n  return r;\n}" of
+            Ok body ->
+                case ffiCallOfBody body of
+                    Just c ->
+                        c.varargs == True && c.fixedArgs == 1 && c.argWidths == [ FW64 ]
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "lower cffi U4 THE MARKER: the emitted call carries `...` BETWEEN the fixed and the variadic arguments (QBE's IL spelling) and every variadic argument is an `l` word"
+        (case emitUserSsa rt "module Ffv\nextern printfx(fmt : ptr, ...) -> i32;\ndefun Ffv.g() -> word {\n  word r = rawcall printfx(rawstr(\"x\"), 1, 2);\n  return r;\n}" of
+            Ok ssa ->
+                -- the marker sits AFTER the fixed `fmt` argument and EVERY
+                -- variadic argument is an `l` word
+                String.contains "call $printfx(l $d0, ..., l 1, l 2)" ssa
+
+            Err _ ->
+                False
+        )
+    , checkErrModule "check cffi U4 R-11: a variadic call still needs EVERY fixed parameter (1 fixed, 0 passed) — the `...` does not make the fixed half optional" "is declared extern with 1 fixed parameter(s), got 0" "extern printfx(fmt : ptr, ...) -> i32;\ndefun Rt.g() -> val {\n  word r = rawcall printfx();\n  return mknum(r);\n}"
+    , checkErrModule "check cffi U4 R-12: a declaration with NO `...` takes exactly its parameters — one extra argument is refused, not silently passed" "parameter(s) and no '...', got 3" "extern access2(path : ptr, mode : i32) -> i32;\ndefun Rt.g(p : word) -> val {\n  word r = rawcall access2(p, 0, 0);\n  return mknum(r);\n}"
+    , checkErrModule "check cffi U4 R-13 THE DELIBERATE HOLE: an `f64` among the variadic arguments is REFUSED in v1, and the message says why (%al is the vector-register count QBE derives from exactly those arguments) and what to do instead" "variadic argument must be word-class in this version" "extern printfx(fmt : ptr, ...) -> i32;\ndefun Rt.g(p : word) -> val {\n  word r = rawcall printfx(p, itof(1));\n  return mknum(r);\n}"
+    , checkErrModule "check cffi U4: a `val` among the variadic arguments is refused too — the variadic half is WORD-class, and the message names the class it got rather than the position-only wording" "takes word-class variadic arguments, got val" "extern printfx(fmt : ptr, ...) -> i32;\ndefun Rt.g(p : word, v : val) -> val {\n  word r = rawcall printfx(p, v);\n  return mknum(r);\n}"
     -- These two were the stated U2/U3 seam: U2 refused an f64 OPERAND/RESULT
     -- LOUDLY at the emitter (naming this unit), because a `d` temp in a word
     -- slot is the silent register-class bug.  cffi U3 lifts both — so these
@@ -9580,11 +9636,11 @@ their first `let`, so the Let spine is enough — and reading the NODE (rather
 than the emitted bytes) is what pins "the widths are the DECLARATION's" at the
 place the emitter reads them.
 -}
-ffiCallOfBody : Exp -> Maybe { sym : String, argWidths : List FfiWidth, varargs : Bool, result : FfiWidth }
+ffiCallOfBody : Exp -> Maybe { sym : String, argWidths : List FfiWidth, varargs : Bool, fixedArgs : Int, result : FfiWidth }
 ffiCallOfBody body =
     case b2LetValue body of
         Just (Unsafe (RawCallExtern c)) ->
-            Just { sym = c.sym, argWidths = c.argWidths, varargs = c.varargs, result = c.result }
+            Just { sym = c.sym, argWidths = c.argWidths, varargs = c.varargs, fixedArgs = c.fixedArgs, result = c.result }
 
         _ ->
             Nothing

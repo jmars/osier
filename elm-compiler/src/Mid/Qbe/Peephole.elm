@@ -281,6 +281,11 @@ readsTmps inst =
 
                         ArgEnv a ->
                             Set.union acc (argTmps a)
+
+                        -- (cffi U4) the `...` marker is a POSITION, not a
+                        -- value: no operand, no temporary.
+                        ArgEllipsis ->
+                            acc
                 )
                 (argTmps target)
                 args

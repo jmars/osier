@@ -531,11 +531,16 @@ type UnsafeNode
       -- emitted as a bare `=l call` without deleting the field.  It also
       -- makes the .ssa and Mid.Audit self-describing.
       --
-      -- `argWidths` is positional and parallel to `args`; `varargs` is the
-      -- declaration's trailing `...` (CARRIED, not yet emitted — the IL's
-      -- `...` marker is cffi U4, and the CHECKER refuses a call to a
-      -- variadic extern until it lands rather than emitting a call with an
-      -- undefined %al).
+      -- `argWidths` is positional and parallel to `args`.  `varargs` is the
+      -- declaration's trailing `...` and `fixedArgs` is HOW MANY of the
+      -- arguments are the declaration's fixed parameters — the emitter needs
+      -- the count to place the IL's `...` marker (cffi U4), and it cannot
+      -- recover it from `argWidths` because a fixed `ptr` and a variadic word
+      -- are both `FW64`.  Both fields come from the ONE `FfiSig` row
+      -- (`LowerToIr`), so they cannot disagree with each other; `varargs`
+      -- alone is not enough either, because a variadic callee called with no
+      -- extra arguments (`printf(fmt)`) STILL needs the marker (the callee's
+      -- va_start prologue reads `%al` whatever the count).
       --
       -- A WORD producer on every WORD result width the IL can spell here
       -- (FW32S and FW32U arrive sign-/zero-EXTENDED from the `w` result, FW64
@@ -552,6 +557,7 @@ type UnsafeNode
           , args : List Exp
           , argWidths : List FfiWidth
           , varargs : Bool
+          , fixedArgs : Int
           , result : FfiWidth
           }
     | -- call through a RUNTIME WORD (a function/code pointer held in a

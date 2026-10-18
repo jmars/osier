@@ -4012,12 +4012,16 @@ checkRawCallTable ctx sym args =
 {-| J3/J15 — a `rawcall` to a DECLARED `extern`: the declaration supplies
 everything (plan §3.1/§3.2's tables).
 
-  * ARITY (R-11/R-12): exactly the declared fixed parameters.  A `...`
-    declaration does NOT widen this yet — cffi U4 owns the variadic call
-    site (the IL's `...` marker and the argument count QBE needs for %al),
-    and ACCEPTING the extra arguments here would emit a call whose %al is
-    whatever the previous code left, a silent ABI break.  So the message
-    names the unit that lifts it.
+  * ARITY (R-11/R-12): at least the declared FIXED parameters.  A `...`
+    declaration takes any number of extra arguments; without `...` the count
+    is exactly the fixed one.  The message counts the fixed parameters, so
+    "declared extern with 2 parameter(s)" stays the number a reader can see
+    in the declaration.
+  * VARIADIC ARGUMENTS (R-13, cffi U4): every argument past the fixed ones
+    must be WORD-class — plan §5's v1 restriction, and it is deliberate: a
+    `double` among them would change QBE's vector-register count (`%al`), and
+    that count is the one thing on this path nothing else verifies.  The
+    rejection says so and names the version; it is a HOLE, not an oversight.
   * ARGUMENT CLASS (§3.2): `i32`/`u32`/`i64`/`u64`/`ptr` are word-class —
     any `TWord` expression, which is exactly what `argOk` accepts there;
     `f64` is `TFloat`, the one float class, and a word at an `f64` slot (or
@@ -4039,37 +4043,122 @@ checkExternCall ctx sym sig args =
         got =
             List.length args
     in
-    if got /= fixed then
+    if got < fixed then
         Err
             (ctx.key
                 ++ ": J3: rawcall '"
                 ++ sym
                 ++ "' is declared extern with "
                 ++ String.fromInt fixed
-                ++ " parameter(s), got "
+                ++ " fixed parameter(s), got "
                 ++ String.fromInt got
-                ++ (if sig.varargs then
-                        " (a variadic extern's call sites land in cffi U4 — the IL's `...` marker is not emitted yet, so the extra arguments cannot be passed)"
+            )
 
-                    else
-                        ""
-                   )
+    else if got > fixed && not sig.varargs then
+        -- R-12: too MANY arguments, and the declaration has no `...` to
+        -- absorb them.
+        Err
+            (ctx.key
+                ++ ": J3: rawcall '"
+                ++ sym
+                ++ "' is declared extern with "
+                ++ String.fromInt fixed
+                ++ " parameter(s) and no '...', got "
+                ++ String.fromInt got
             )
 
     else
+        let
+            ( fixedArgs, variadicArgs ) =
+                splitArgs fixed args
+        in
         case
             checkArgs argOk
                 ctx
                 "J3"
                 ("rawcall '" ++ sym ++ "'")
                 (List.map ffiParamClass sig.params)
-                args
+                fixedArgs
         of
             Err msg ->
                 Err msg
 
             Ok () ->
-                Ok (ffiResultClass sig.result)
+                -- R-13: the variadic half is checked SEPARATELY, not by
+                -- folding `TWord` slots into the zip above — folded in, the
+                -- f64 arm would be unreachable (argOk would answer its own
+                -- generic "needs word, got float" first) and R-13's own
+                -- message, with the reason and the version, would be a seat
+                -- nothing calls.
+                case firstVariadicProblem ctx sym variadicArgs of
+                    Just msg ->
+                        Err msg
+
+                    Nothing ->
+                        Ok (ffiResultClass sig.result)
+
+
+{-| (cffi U4 / R-13) The first VARIADIC argument that cannot be passed, as the
+rejection message; `Nothing` means the whole tail is word-class.
+
+The `f64` arm is the plan's DELIBERATE HOLE (§5): QBE would handle a `double`
+among the variadic arguments, but it derives the vector-register count (`%al`)
+from exactly those `d`-class arguments, and that count is the one thing on this
+path nothing on our side verifies.  The message says so and names the version,
+so a future reader sees a decision rather than an accident.
+-}
+firstVariadicProblem : Ctx -> Sym -> List Exp -> Maybe String
+firstVariadicProblem ctx sym args =
+    case args of
+        [] ->
+            Nothing
+
+        a :: rest ->
+            case checkExp ctx a of
+                Err msg ->
+                    Just msg
+
+                Ok TFloat ->
+                    Just
+                        (ctx.key
+                            ++ ": J3: rawcall '"
+                            ++ sym
+                            ++ "' — a variadic argument must be word-class in this version: an `f64` among the '...' arguments changes QBE's vector-register count (%al), and that count is not built for it yet (cffi U4 v1 restriction).  Pass a pointer to the double, or declare a non-variadic extern"
+                        )
+
+                Ok cls ->
+                    if argOk TWord cls then
+                        firstVariadicProblem ctx sym rest
+
+                    else
+                        Just
+                            (ctx.key
+                                ++ ": J3: rawcall '"
+                                ++ sym
+                                ++ "' takes word-class variadic arguments, got "
+                                ++ typeStr cls
+                            )
+
+
+{-| Split the argument list at the declaration's FIXED parameter count, so the
+fixed half is zipped positionally and the variadic tail is walked on its own.
+-}
+splitArgs : Int -> List a -> ( List a, List a )
+splitArgs n xs =
+    if n <= 0 then
+        ( [], xs )
+
+    else
+        case xs of
+            [] ->
+                ( [], [] )
+
+            x :: rest ->
+                let
+                    ( a, b ) =
+                        splitArgs (n - 1) rest
+                in
+                ( x :: a, b )
 
 
 {-| One declared parameter's mid-c class (§3.2).  `FVoid` is unreachable
