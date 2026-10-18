@@ -1369,6 +1369,12 @@ unsafeChildren node =
         RawCallRaw call ->
             call.args
 
+        -- cffi U2: the typed C boundary's operands are its args in order (the
+        -- widths are node data).  Elm's exhaustiveness is what put this arm
+        -- here — the plan's file-touch map did not list this file.
+        RawCallExtern call ->
+            call.args
+
         RawCallAgg call ->
             -- the callee is a child too (it is lowered with the raw-word
             -- path), so the walk covers fn + args.
@@ -1398,6 +1404,9 @@ unsafeRebuild node parts =
 
         ( RawCallRaw call, _ ) ->
             RawCallRaw { call | args = parts }
+
+        ( RawCallExtern call, _ ) ->
+            RawCallExtern { call | args = parts }
 
         ( RawCallAgg call, fn :: rest ) ->
             RawCallAgg { call | fn = fn, args = rest }

@@ -3,6 +3,7 @@ module Mid.Ir exposing
     , Defun
     , Exp(..)
     , UnsafeNode(..)
+    , FfiWidth(..)
     , RawBinOp(..)
     , RawUnOp(..)
     , RawCmpOp(..)
@@ -518,6 +519,41 @@ type UnsafeNode
       -- RawAllocRaw so the safepoint discipline stays stated at the node).
       -- Rt.* DEFUN calls are the OTHER constructor: RawCall above.
       RawCallRaw { sym : String, args : List Exp }
+    | -- (cffi U2) THE TYPED C BOUNDARY — a `rawcall` whose symbol the file
+      -- DECLARES `extern`, carrying the DECLARATION's widths IN the node.
+      --
+      -- WHY THE WIDTHS LIVE HERE AND NOT AT THE EMISSION SITE: the emitted
+      -- shape is not uniform in the argument/result class, and the class is
+      -- the one thing a C `int` return does NOT tell us (the upper 32 bits
+      -- of %rax are UNSPECIFIED).  A lowering that re-derives the symbol's
+      -- type at emit time is the "declaration types the checker but not the
+      -- emitter" failure; a node that CARRIES `result = FW32S` cannot be
+      -- emitted as a bare `=l call` without deleting the field.  It also
+      -- makes the .ssa and Mid.Audit self-describing.
+      --
+      -- `argWidths` is positional and parallel to `args`; `varargs` is the
+      -- declaration's trailing `...` (CARRIED, not yet emitted — the IL's
+      -- `...` marker is cffi U4, and the CHECKER refuses a call to a
+      -- variadic extern until it lands rather than emitting a call with an
+      -- undefined %al).
+      --
+      -- A WORD producer on every result width the IL can spell here (FW32S
+      -- and FW32U arrive sign-/zero-EXTENDED from the `w` result, FW64 and
+      -- FVoid are an `l` temp — void's is the same dead word `RawCallRaw`
+      -- already yields).  FF64 is not lowered yet (cffi U3): the lowering
+      -- refuses it LOUDLY rather than emitting a `d` result into a word
+      -- temp.
+      --
+      -- NOT allocation-free by assumption: like RawCallRaw it is stated
+      -- non-safepoint (a C callee cannot move the MID heap; the same class
+      -- Mid.Rt already assigns RawCallRaw).
+      RawCallExtern
+          { sym : String
+          , args : List Exp
+          , argWidths : List FfiWidth
+          , varargs : Bool
+          , result : FfiWidth
+          }
     | -- call through a RUNTIME WORD (a function/code pointer held in a
       -- register, not a named symbol) with an AGGREGATE result — the
       -- stage-6 apply/bounce port's voice (call the Desc code pointer).
@@ -582,6 +618,23 @@ type UnsafeNode
       --     stack address in a returned pointer is a dangling pointer where a
       --     malloc block was merely leaked).
       RawAllocN Int
+
+
+{-| THE C CALL-BOUNDARY REGISTER CLASS (cffi plan §3), backend-neutral — the
+declared width collapsed to what the emitter must actually DO.  Not the
+declaration's spelling: `i64`/`u64`/`ptr` are ONE class (`FW64`, an `l` temp
+both ways), while `i32` and `u32` must stay DISTINCT because the extension
+after a `w` result differs (`extsw` for the signed one, `extuw` for the
+unsigned).  `FVoid` keeps today's dead `l` temp, exactly as `rawcall free(..)`
+emits it; `FF64` is an `f64` (a `d` temp) and is MEASURED in the plan but
+lowered by cffi U3, not here.
+-}
+type FfiWidth
+    = FW32S
+    | FW32U
+    | FW64
+    | FF64
+    | FVoid
 
 
 -- The semantic word-op enums (backend-neutral: QBE's widths and mnemonics

@@ -94,7 +94,7 @@ module Mid.Qbe.Lower exposing (lower)
 -- (Exp's Con variant is deliberately NOT exposed: Mid.Qbe.Il.Arg also has a
 -- Il.Con (the integer-constant argument), and Elm cannot qualify constructors
 -- in patterns — exposing only one of the two keeps the pattern arms clean.)
-import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), Lambda, LetBinder(..), Lit(..), Match(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), Step(..), UnsafeNode(..), ValuePath(..))
+import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), FfiWidth(..), Lambda, LetBinder(..), Lit(..), Match(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), Step(..), UnsafeNode(..), ValuePath(..))
 import Mid.Rt as MidRt
 import Mid.RtGc as RtGc
 import Mid.RtLayout as RtLayout
@@ -1008,6 +1008,11 @@ rawOperands node =
             [ r.ptr, r.index, r.value ]
 
         RawCallRaw call ->
+            call.args
+
+        -- cffi U2 — the typed C boundary's operands are its args, in order
+        -- (the widths are NODE DATA, not expressions).
+        RawCallExtern call ->
             call.args
 
         RawCallAgg call ->
@@ -2499,6 +2504,13 @@ lowerRawVal node dest s =
         RawCallRaw _ ->
             Err wordProducerMessage
 
+        -- cffi U2: the typed C boundary is a WORD producer on every width it
+        -- lowers (FW32S/FW32U arrive extended from the `w` result; FW64 and
+        -- FVoid are an `l` temp), so a value position is the same loud
+        -- "raw word in VALUE position" error RawCallRaw gets.
+        RawCallExtern _ ->
+            Err wordProducerMessage
+
         RawCallAgg call ->
             -- stage 6 A1: a rawCallAgg in VALUE position is the driver's
             -- "sret result as a Value" shape — `Call (Just t) (Agg "val")
@@ -2637,6 +2649,97 @@ rawWordArgs exps s =
                         rawWordArgs rest s1
                             |> Result.map (\( as_, s2 ) -> ( a :: as_, s2 ))
                     )
+
+
+{-| (cffi U2) ONE argument of a typed C call: the operand expression and the
+REGISTER CLASS the `extern` declaration gives that position.  Zipped from the
+IR node's parallel `argWidths`/`args` lists, so the emitter reads the width
+the DECLARATION wrote (carried in the node) rather than re-deriving it.
+
+A length disagreement is a LOUD internal error: the checker pins the arity
+from the same declaration, so a mismatch here means the two readers of one
+table drifted — the failure this repo keeps paying for — and it must never
+fall back to the old all-word convention.
+-}
+type alias FfiArg =
+    { exp : Exp
+    , width : FfiWidth
+    }
+
+
+zipWidths : String -> List FfiWidth -> List Exp -> Result String (List FfiArg)
+zipWidths sym widths exps =
+    if hasFf64 widths then
+        -- cffi U3 owns the float ARGUMENT (a `d`-class operand, the
+        -- float-word producer route).  Refusing it HERE — rather than letting
+        -- rawWordArg reject the operand as "not a word producer" — keeps the
+        -- message naming the unit that lifts it.
+        Err
+            ("qbe: cffi U3: '"
+                ++ sym
+                ++ "' declares an f64 PARAMETER — a `d`-class call argument is not lowered yet (cffi U2 lowers the integer/pointer family)"
+            )
+
+    else if List.length widths == List.length exps then
+        Ok (List.map2 (\w e -> { exp = e, width = w }) widths exps)
+
+    else
+        Err
+            ("qbe: cffi U2: the declaration's "
+                ++ String.fromInt (List.length widths)
+                ++ " argument width(s) and the call's "
+                ++ String.fromInt (List.length exps)
+                ++ " argument(s) disagree — the checker and the emitter read one table and it drifted"
+            )
+
+
+{-| Is any argument width the `f64` class?  Written as a walk, NOT
+`List.member`: MEASURED (the same trap Check.elm:598 records), the selfhost's
+`List.member` demands `comparable` elements and rejects a user ADT — the
+bootstrap emit failed on `List.member FF64 widths` with "cannot unify
+comparable with Mid.Ir.FfiWidth" before this walk replaced it.  Real Elm
+derives comparable for ADTs; the selfhost's core-libs table does not.
+-}
+hasFf64 : List FfiWidth -> Bool
+hasFf64 widths =
+    case widths of
+        [] ->
+            False
+
+        w :: rest ->
+            case w of
+                FF64 ->
+                    True
+
+                _ ->
+                    hasFf64 rest
+
+
+{-| The register class of one DECLARED argument.  `w` for the 32-bit family
+(a C `int` parameter is read from %edi/%esi/...), `l` for i64/u64/ptr — plan
+§3.2's measured table.  `FF64` and `FVoid` cannot appear in a parameter
+position (the grammar refuses `void` there, and the `d` class is U3's); the
+`w` fallback here is UNREACHABLE for checked input and is not a silent
+default: the checker classified the argument against this same table.
+-}
+ffiArgClass : FfiWidth -> AbiTy
+ffiArgClass w =
+    case w of
+        FW32S ->
+            Base W
+
+        FW32U ->
+            Base W
+
+        FW64 ->
+            Base L
+
+        FF64 ->
+            Base D
+
+        FVoid ->
+            Base L
+
 
 
 {-| The QBE_MIDGC=1 routing for the two raw allocating nodes: box the length
@@ -3125,6 +3228,100 @@ rawWordArg exp s =
                             Ok ( Il.Tmp t, emit (Call (Just t) (Base L) (Il.Sym callee) args) s2 )
                     )
 
+        Unsafe (RawCallExtern seat) ->
+            -- (cffi U2) THE TYPED C BOUNDARY — the width fix.  This is the
+            -- ONE arm that emits a C call's register classes from the
+            -- DECLARATION rather than from `RawCallRaw`'s "everything is a
+            -- word" convention:
+            --
+            --   argument  FW32S / FW32U -> `w`   (a C `int` parameter is
+            --                 what %edi holds; passing `l` happens to work,
+            --                 which is why this half of the bug was
+            --                 invisible — plan §3.2)
+            --             FW64        -> `l`   (i64/u64/ptr)
+            --   result    FW32S       -> `=w call` + `extsw`  (SIGN-extend:
+            --                 the ABI leaves %rax's upper 32 bits
+            --                 UNSPECIFIED, so an `l` read of a C `int`
+            --                 return is the measured SILENT bug)
+            --             FW32U       -> `=w call` + `extuw`
+            --             FW64/FVoid  -> `=l call` (FVoid's temp is the
+            --                 same dead word RawCallRaw yields today)
+            --             FF64        -> refused, loudly (cffi U3)
+            --
+            -- MEASURED against the vendored QBE (plan §3.1): `=w call` +
+            -- `extsw` emits `movslq %eax`; `=w call` + `extuw` emits
+            -- `movl %eax, %r32d`; `=l call` emits a bare `movq %rax`.
+            zipWidths seat.sym seat.argWidths seat.args
+                |> Result.andThen
+                    (\ws ->
+                        List.foldl
+                            (\ew acc ->
+                                Result.andThen
+                                    (\( args, st ) ->
+                                        rawWordArg ew.exp st
+                                            |> Result.map (\( a, st2 ) -> ( args ++ [ ArgVal (ffiArgClass ew.width) a ], st2 ))
+                                    )
+                                    acc
+                            )
+                            (Ok ( [], s ))
+                            ws
+                            |> Result.andThen
+                                (\( args, s1 ) ->
+                                    let
+                                        ( t, s2 ) =
+                                            freshTmp s1
+
+                                        -- the EXTENSION temp needs its own
+                                        -- allocation: the counter must survive
+                                        -- into s3, or the next freshTmp hands
+                                        -- out the same name again (MEASURED:
+                                        -- `%t1 =w csltl %t1, 0`, an
+                                        -- unassemblable clash).
+                                        ( e, s3 ) =
+                                            freshTmp s2
+                                    in
+                                    case seat.result of
+                                        FW32S ->
+                                            Ok
+                                                ( Il.Tmp e
+                                                , emit (Call (Just t) (Base W) (Il.Sym seat.sym) args) s3
+                                                    |> emit (Unary (Just e) L Extsw (Il.Tmp t))
+                                                )
+
+                                        FW32U ->
+                                            Ok
+                                                ( Il.Tmp e
+                                                , emit (Call (Just t) (Base W) (Il.Sym seat.sym) args) s3
+                                                    |> emit (Unary (Just e) L Extuw (Il.Tmp t))
+                                                )
+
+                                        FW64 ->
+                                            Ok
+                                                ( Il.Tmp t
+                                                , emit (Call (Just t) (Base L) (Il.Sym seat.sym) args) s2
+                                                )
+
+                                        FVoid ->
+                                            -- the declared result is DEAD — the
+                                            -- same `l` temp `rawcall free(..)`
+                                            -- emits today, so a `-> void`
+                                            -- declaration moves no existing
+                                            -- shape (R-09 states the read
+                                            -- hazard).
+                                            Ok
+                                                ( Il.Tmp t
+                                                , emit (Call (Just t) (Base L) (Il.Sym seat.sym) args) s2
+                                                )
+
+                                        FF64 ->
+                                            Err
+                                                ("qbe: cffi U3: '"
+                                                    ++ seat.sym
+                                                    ++ "' declares an f64 RESULT — a `d`-class call result is not lowered yet (cffi U2 lowers the integer/pointer family; U3 owns f64 results)"
+                                                )
+                                )
+                    )
+
         Unsafe (RawCall call) ->
             -- stage 6 U2: a rawAbi Rt->Rt call (Rt.die/Rt.halt) — WORD args,
             -- WORD result, named q_Rt_* callee.  The lean-:val RawCall lives
@@ -3422,6 +3619,20 @@ rawFltArg exp s =
                 RawLoadFlt _ ->
                     rawWordArg exp s
 
+                -- cffi U2/U3 — THE SIXTH CLASSIFICATION SITE, and the one that
+                -- is NOT compiler-forced (this case has a wildcard): a typed C
+                -- call in a float-word position is an f64-consuming or
+                -- f64-result slot, which is cffi U3's.  Without this arm the
+                -- wildcard below answers "non-float raw node", which is
+                -- actively misleading — the node IS a float producer, just not
+                -- a lowered one.
+                RawCallExtern call ->
+                    Err
+                        ("qbe: cffi U3: '"
+                            ++ call.sym
+                            ++ "' appears in a float-word position — a C call's f64 argument or result is not lowered yet (cffi U2 lowers the integer/pointer family; U3 owns f64)"
+                        )
+
                 _ ->
                     Err ("qbe: float-word position holds a non-float raw node (" ++ rawNodeName node ++ ")")
 
@@ -3591,6 +3802,9 @@ rawNodeName node =
 
         RawCallRaw seat ->
             "rawCallRaw " ++ seat.sym
+
+        RawCallExtern seat ->
+            "rawCallExtern " ++ seat.sym
 
         RawCallAgg call ->
             "rawCallAgg " ++ call.shape
@@ -4918,6 +5132,12 @@ isRawWordExp abi exp =
                 RawCallRaw _ ->
                     True
 
+                -- cffi U2: the typed C boundary is a WORD producer on every
+                -- width it lowers (the 32-bit family arrives EXTENDED into an
+                -- `l` temp) — the same class RawCallRaw has.
+                RawCallExtern _ ->
+                    True
+
                 RawCallAgg _ ->
                     True
 
@@ -5132,6 +5352,9 @@ isWordCondNode abi node =
             True
 
         RawCallRaw _ ->
+            True
+
+        RawCallExtern _ ->
             True
 
         RawCallAgg _ ->

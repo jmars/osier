@@ -108,7 +108,7 @@ emit-inert oracle.
 -}
 
 import Dict exposing (Dict)
-import Mid.Ir exposing (Binder, Defun, Exp(..), LetBinder(..), Lit(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), UnsafeNode(..))
+import Mid.Ir exposing (Binder, Defun, Exp(..), FfiWidth(..), LetBinder(..), Lit(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), UnsafeNode(..))
 import Mid.RtLang.Ast as Ast
 import Mid.RtLang.Ast
     exposing
@@ -1826,7 +1826,43 @@ lowerExp st e =
             lowerCall st args (\es s -> ( Unsafe (RawCall { sym = key, args = es }), s ))
 
         Ast.ERawCall sym args ->
-            lowerCall st args (\es s -> ( Unsafe (RawCallRaw { sym = sym, args = es }), s ))
+            -- (cffi U2) THE TYPED CALL BOUNDARY's one decision: does the FILE
+            -- declare this symbol `extern`?
+            --
+            --   DECLARED   -> `RawCallExtern` carrying the declaration's
+            --                 widths (the node the QBE arm turns into `=w
+            --                 call` + `extsw` for an `i32` result).  Read
+            --                 through `Check.externSig` — the SAME lookup
+            --                 the checker's J3 uses, so a width cannot mean
+            --                 two things (plan §10.1's one-table property).
+            --   UNDECLARED -> the unchanged `RawCallRaw`: the runtime's
+            --                 internal `rt_*` seats and the not-yet-migrated
+            --                 libc surface keep their all-word shape
+            --                 byte-for-byte (plan §6).
+            case Check.externSig st.decls sym of
+                Nothing ->
+                    lowerCall st args (\es s -> ( Unsafe (RawCallRaw { sym = sym, args = es }), s ))
+
+                Just sig ->
+                    case declaredArgWidths sym sig (List.length args) of
+                        Err msg ->
+                            Err (st.key ++ ": " ++ msg)
+
+                        Ok widths ->
+                            lowerCall st args
+                                (\es s ->
+                                    ( Unsafe
+                                        (RawCallExtern
+                                            { sym = sym
+                                            , args = es
+                                            , argWidths = widths
+                                            , varargs = sig.varargs
+                                            , result = ffiWidthOf sig.result
+                                            }
+                                        )
+                                    , s
+                                    )
+                                )
 
         Ast.EAggCall shape fnExp args ->
             case lowerExp st fnExp of
@@ -2300,6 +2336,63 @@ lower2 st a b k =
                             k a1 b1 st2
                     in
                     Ok ( stF, ie )
+
+
+{-| (cffi U2) the DECLARED width -> the IR's call-boundary class.  `i64`,
+`u64` and `ptr` collapse to `FW64` (one `l` class both ways) while `i32` and
+`u32` stay apart, because the `extsw`/`extuw` after a `w` result differ — the
+collapse is the IR's, the distinction is the DECLARATION's, and this is the
+single place the two vocabularies meet.
+-}
+ffiWidthOf : Ast.FfiTy -> FfiWidth
+ffiWidthOf t =
+    case t of
+        Ast.FI32 ->
+            FW32S
+
+        Ast.FU32 ->
+            FW32U
+
+        Ast.FI64 ->
+            FW64
+
+        Ast.FU64 ->
+            FW64
+
+        Ast.FPtr ->
+            FW64
+
+        Ast.FF64 ->
+            FF64
+
+        Ast.FVoid ->
+            FVoid
+
+
+{-| The positional widths of one DECLARED call's arguments.  The CHECKER
+(J3, `Check.checkExternCall`) has already pinned the count against the same
+declaration, so a mismatch here is a loud internal error rather than a
+silent all-word fallback — the shape the whole unit exists to make
+unrepresentable.
+-}
+declaredArgWidths : String -> Ast.FfiSig -> Int -> Result String (List FfiWidth)
+declaredArgWidths sym sig got =
+    let
+        widths =
+            List.map (\p -> ffiWidthOf p.ty) sig.params
+    in
+    if List.length widths == got then
+        Ok widths
+
+    else
+        Err
+            ("internal: J3 should have rejected rawcall '"
+                ++ sym
+                ++ "' — the declaration has "
+                ++ String.fromInt (List.length widths)
+                ++ " parameter(s) and the call site has "
+                ++ String.fromInt got
+            )
 
 
 lowerCall : St -> List Ast.Exp -> (List Exp -> St -> ( Exp, St )) -> Result String (St, Exp)

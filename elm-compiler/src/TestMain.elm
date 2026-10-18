@@ -21,7 +21,7 @@ import Set
 import Char.Extra exposing (utf8ByteLength)
 import Dict exposing (Dict)
 import Mid.Audit as Audit
-import Mid.Ir exposing (Alt, AltKind(..), Binder, Defun, Exp(..), LetBinder(..), Lit(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), UnsafeNode(..), ValuePath)
+import Mid.Ir exposing (Alt, AltKind(..), Binder, Defun, Exp(..), FfiWidth(..), LetBinder(..), Lit(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), UnsafeNode(..), ValuePath)
 import Mid.Module as MidModule
 import Mid.Qbe.Il as Il
 import Mid.Qbe.Lower as QbeLower
@@ -3305,6 +3305,116 @@ checks rt runtimeMidText =
                     == [ "Rt.g" ]
 
             Err _ ->
+                False
+        )
+
+    -- ============ cffi U2: THE TYPED CALL BOUNDARY (the width fix) ============
+    -- U1's seat was CARRIED-NOT-CONSULTED; these rows are what make the
+    -- declaration mean something.  Three things must hold together, and each
+    -- has its own row family:
+    --   (a) LowerToIr puts the DECLARATION's widths ON THE NODE (so the
+    --       emitter cannot re-derive them and cannot default them),
+    --   (b) an UNDECLARED rawcall still lowers to the unchanged RawCallRaw
+    --       (plan §6: the runtime's internal seats and the not-yet-migrated
+    --       libc surface do not move a byte),
+    --   (c) J15/J3 refuse what the declaration cannot express.
+    -- The end-to-end shape proof (`=w call` + `extsw` vs `=l call`) is NOT
+    -- here: it needs the emitter, and it lives in qbe-check.sh's
+    -- `run_midshape` rows for tools/qbe/fixtures/ffiw-{i32,i64}.mid.
+    , check "lower cffi U2 i32 RESULT — THE WIDTH FIX: a declared `-> i32` lowers to RawCallExtern with result FW32S (the QBE arm emits `=w call` + `extsw`) and the ARGUMENT widths come from the declaration (ptr -> FW64, i32 -> FW32S)"
+        (case lowlModuleBody "extern access(path : ptr, mode : i32) -> i32;\ndefun Rt.g(p : word) -> val {\n  word r = rawcall access(p, 0);\n  return mkbool(r < 0);\n}" of
+            Ok body ->
+                case ffiCallOfBody body of
+                    Just c ->
+                        c.sym
+                            == "access"
+                            && c.result
+                            == FW32S
+                            && c.argWidths
+                            == [ FW64, FW32S ]
+                            && c.varargs
+                            == False
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "lower cffi U2 i64 RESULT — THE CONTROL (the same call, the declared width the only difference): `-> i64` lowers the SAME call with result FW64 and NO extension"
+        (case lowlModuleBody "extern access(path : ptr, mode : i32) -> i64;\ndefun Rt.g(p : word) -> val {\n  word r = rawcall access(p, 0);\n  return mkbool(r < 0);\n}" of
+            Ok body ->
+                case ffiCallOfBody body of
+                    Just c ->
+                        c.result == FW64 && c.argWidths == [ FW64, FW32S ]
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "lower cffi U2 u32 RESULT is its OWN width (FW32U, the `extuw` arm) — not collapsed into i32: the declared width, not the register class, is what the node carries"
+        (case lowlModuleBody "extern getuidcount() -> u32;\ndefun Rt.g() -> word {\n  word r = rawcall getuidcount();\n  return r;\n}" of
+            Ok body ->
+                case ffiCallOfBody body of
+                    Just c ->
+                        c.result == FW32U && c.argWidths == []
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "lower cffi U2 `-> void` lowers to FVoid (the dead `l` temp rawcall free(..) already yields — plan §3.1: a declared void moves no existing shape)"
+        (case lowlModuleBody "extern shimv(x : ptr) -> void;\ndefun Rt.g(p : word) -> word {\n  word r = rawcall shimv(p);\n  return r;\n}" of
+            Ok body ->
+                case ffiCallOfBody body of
+                    Just c ->
+                        c.result == FVoid && c.argWidths == [ FW64 ]
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "lower cffi U2 UNDECLARED rawcall is UNCHANGED: `getpid` (a rawcallArity row, no extern in the file) still lowers to RawCallRaw — the all-word shape the runtime's own seats keep by plan §6"
+        (case lowlModuleBody "defun Rt.g() -> word {\n  return rawcall getpid();\n}" of
+            Ok (Unsafe (RawCallRaw r)) ->
+                r.sym == "getpid"
+
+            _ ->
+                False
+        )
+    , checkErrModule "check cffi U2 J15 R-06 (the duplicate U1 deferred): one symbol declared TWICE is refused — the extern symbol namespace had no owner until this unit" "is declared twice" "extern access(path : ptr) -> i32;\nextern access(path : ptr, mode : i32) -> i64;\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , checkErrModule "check cffi U2 J15 R-07: a symbol that collides with a BUILTIN spelling is refused — the call site would resolve to the builtin, never to the C symbol" "is a BUILTIN" "extern wload(p : ptr) -> i64;\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , checkErrModule "check cffi U2 J15 R-08: a symbol that is ALSO a rawcallArity row is refused — two tables for one symbol is the skew this repo keeps paying for" "is a rawcallArity row" "extern getpid() -> i32;\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , checkErrModule "check cffi U2 J3 R-11/R-12: a declared extern's ARITY is the declaration's (2 declared, 1 passed)" "is declared extern with 2 parameter(s), got 1" "extern access(path : ptr, mode : i32) -> i32;\ndefun Rt.g(p : word) -> word {\n  word r = rawcall access(p);\n  return r;\n}"
+    , checkErrModule "check cffi U2 J3 R-14/R-16: the DECLARED class is what an argument is checked against — a word at an f64 slot is the existing wording" "needs float, got word" "extern fmodx(x : f64) -> i32;\ndefun Rt.g(p : word) -> word {\n  word r = rawcall fmodx(p);\n  return r;\n}"
+    , checkErrModule "check cffi U2 J3 result class: an f64 RESULT is `float`, so binding it to a `word` is the existing word-slot reject (not a silent word read)" "declares word but its initializer is float" "extern fv() -> f64;\ndefun Rt.g() -> word {\n  word r = rawcall fv();\n  return r;\n}"
+    , checkOkModule "check cffi U2 ACCEPT (the other side of the row above): a DECLARED f64 result enters a float slot — `mkflt(rawcall fv())` proves the call's class is `float` and not a word"
+        "extern fv() -> f64;\ndefun Rt.g() -> val {\n  return mkflt(rawcall fv());\n}"
+    , checkErrModule "check cffi U2 varargs: a call to a `...` extern is REFUSED until cffi U4 emits the IL's `...` marker — accepting the extra argument would emit a call whose %al is whatever the previous code left" "cffi U4" "extern printfx(fmt : ptr, ...) -> i32;\ndefun Rt.g(p : word) -> val {\n  val r = rawcall printfx(p, 1);\n  return r;\n}"
+    -- These two need the EMITTER (the refusal is in Mid/Qbe/Lower, not in
+    -- LowerToIr), so they run the full `emitUserSsa` lane rather than the
+    -- Mid-tree helper above.  Both are the stated U2/U3 seam, refused LOUDLY
+    -- rather than emitted as a `d` operand.
+    , check "lower cffi U2/U3 refuses an f64 ARGUMENT loudly, naming the unit that lifts it (the checker accepts the class; the `d` operand route is cffi U3)"
+        (case emitUserSsa rt "module Ffm\nextern fmodx(x : f64) -> i64;\ndefun Ffm.g() -> word {\n  word r = rawcall fmodx(itof(1));\n  return r;\n}" of
+            Err msg ->
+                String.contains "cffi U3" msg
+
+            Ok _ ->
+                False
+        )
+    , check "lower cffi U2/U3 refuses an f64 RESULT loudly — THE SIXTH CLASSIFICATION SITE (the one whose case has a wildcard, so Elm does not force it): a typed C call in a float-word position names cffi U3 instead of answering the misleading 'non-float raw node'"
+        (case emitUserSsa rt "module Ffr\nextern fv() -> f64;\ndefun Ffr.g() -> val {\n  return mkflt(rawcall fv());\n}" of
+            Err msg ->
+                String.contains "cffi U3" msg
+
+            Ok _ ->
                 False
         )
 
@@ -8327,6 +8437,9 @@ b4Kids e =
                 RawCallRaw c ->
                     c.args
 
+                RawCallExtern c ->
+                    c.args
+
                 RawCallAgg c ->
                     c.fn :: c.args
 
@@ -9448,6 +9561,22 @@ externSigOf d =
             Nothing
 
 
+{-| (cffi U2) the `RawCallExtern` the first statement of a lowered module body
+holds, or `Nothing`.  The U2 rows' modules all begin with the typed C call as
+their first `let`, so the Let spine is enough — and reading the NODE (rather
+than the emitted bytes) is what pins "the widths are the DECLARATION's" at the
+place the emitter reads them.
+-}
+ffiCallOfBody : Exp -> Maybe { sym : String, argWidths : List FfiWidth, varargs : Bool, result : FfiWidth }
+ffiCallOfBody body =
+    case b2LetValue body of
+        Just (Unsafe (RawCallExtern c)) ->
+            Just { sym = c.sym, argWidths = c.argWidths, varargs = c.varargs, result = c.result }
+
+        _ ->
+            Nothing
+
+
 {-| The census fixture: every NEW AST constructor, with the access forms nested
 INSIDE an `if`'s blocks (a Stmt list + a Term) so a walker that forgets to
 descend reports a short count and the census row fails.
@@ -10172,6 +10301,13 @@ cnode st node =
                     cexps st r.args
             in
             ( RawCallRaw { r | args = args }, st1 )
+
+        RawCallExtern r ->
+            let
+                ( args, st1 ) =
+                    cexps st r.args
+            in
+            ( RawCallExtern { r | args = args }, st1 )
 
         RawCallAgg r ->
             let
@@ -11540,6 +11676,9 @@ rawCallSyms exp =
                     rawCallSyms ws.ptr ++ rawCallSyms ws.index ++ rawCallSyms ws.value
 
                 RawCallRaw seat ->
+                    List.concatMap rawCallSyms seat.args
+
+                RawCallExtern seat ->
                     List.concatMap rawCallSyms seat.args
 
                 RawCallAgg call ->

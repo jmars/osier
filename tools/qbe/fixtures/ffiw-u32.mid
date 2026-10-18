@@ -1,0 +1,24 @@
+// cffi U2 — THE WIDTH PAIR's THIRD ARM (`-> u32`), added because the pair
+// alone leaves `FW32U`'s emission unpinned: `extuw` and `extsw` are the same
+// instruction SHAPE on the same temp, so nothing in the i32/i64 pair would go
+// red if the u32 arm wrongly sign-extended.
+//
+// The asymmetry that makes this arm discriminating (plan §7.1, MEASURED):
+// `access` fails with `movl $-1, %eax`, so the raw `w` read is 4294967295.
+//   `extuw` (CORRECT, zero-extend) -> 4294967295 -> `r < 0` FALSE
+//   `extsw` (the bug)              -> -1         -> `r < 0` TRUE
+// So the golden is `false` and a wrong-width lowering prints `true`.
+//
+// The i32/i64 pair remains THE oracle (it varies the declared width and
+// nothing else and catches both the "ignores the width" and the "extends
+// unconditionally" lowerings); this third arm closes the remaining 32-bit
+// sub-case of the same table.
+module Ffwi32u
+export Ffwi32u.neg : val -> val
+
+extern access(path : ptr, mode : i32) -> u32;
+
+defun Ffwi32u.neg(dummy : val) -> val {
+  word r = rawcall access(rawstr("/no-such-file-ffiw-xyzzy"), 0);
+  return mkbool(r < 0);
+}

@@ -288,6 +288,56 @@ run_midref() {
   echo "PASS $name: refused (names '$expect')"
 }
 
+# run_midshape — `run_mid` PLUS a STRUCTURAL PIN on the emitted .ssa (cffi U2).
+#
+# WHY A SHAPE CHECK AND NOT ONLY A GOLDEN: the width fix is an EMITTED SHAPE
+# (`=w call` plus an extension of THAT call's result), and a golden alone
+# cannot say where the shape came from.  `$5` is a literal pattern the .ssa
+# must contain (`grep -F`, so `$` is a dollar and not end-of-line); `$6` is the
+# extension op that must appear on the line AFTER the call, applied to the
+# call's own temp (`extsw`/`extuw`), or the empty string for "no extension" —
+# an absence that must be asserted because the POSITIVE form of the bug is a
+# lowering that extends unconditionally.
+#
+# The line-after read is deliberate: `extsw` occurs all over the runtime's own
+# defuns in the same file, so "the .ssa contains an extsw" would pass on any
+# program at all (instrument that cannot fail).  This pins it to the ONE line
+# that consumes the accession's result.
+#
+# The ssa path is qbe-mk's own naming: the LAST source in the group names the
+# output, and a .mid group member keeps its extension (BASE =
+# basename <last> .elm -> "ffiw-i32.mid"), so the .ssa is "<mid>.ssa".
+run_midshape() {
+  local name="$1" entry="$2" fixture="$3" mid="$4" must="$5" extop="$6"
+  run_mid "$name" "$entry" "$fixture" "$mid"
+  local ssa="$TMP/$name/$(basename "$mid").ssa"
+  if [ ! -f "$ssa" ]; then
+    echo "FAIL $name: no emitted .ssa at $ssa"; FAIL=1; return
+  fi
+  if ! grep -qF "$must" "$ssa"; then
+    echo "FAIL $name: the emitted .ssa lacks the required shape '$must' (the emitted call does not match the DECLARED boundary)"; FAIL=1; return
+  fi
+  local ln ctmp next
+  ln="$(awk -v pat="$must" 'index($0, pat) { print NR; exit }' "$ssa")"
+  next="$(sed -n "$((ln + 1))p" "$ssa")"
+  if [ -n "$extop" ]; then
+    ctmp="$(printf '%s\n' "$(sed -n "${ln}p" "$ssa")" | grep -o '%[A-Za-z0-9_]*' | head -1)"
+    case "$next" in
+      *"$extop $ctmp"*)
+        echo "PASS $name: emitted shape '$must' + '$extop $ctmp' (the result IS extended)";;
+      *)
+        echo "FAIL $name: no '$extop $ctmp' after '$must' — next line: $next"; FAIL=1;;
+    esac
+  else
+    case "$next" in
+      *extsw*|*extuw*)
+        echo "FAIL $name: the line after '$must' EXTENDS the result ($next) — the width was not honoured"; FAIL=1;;
+      *)
+        echo "PASS $name: emitted shape '$must' with NO extension (next line: $(printf '%s' "$next" | sed -e 's/^[[:space:]]*//' -e 's/\t/ /g'))";;
+    esac
+  fi
+}
+
 # run_importref — the M4 refusal rows: an Osier source IMPORTING a .mid by name
 # (the .mid is NOT passed on the CLI — run.js resolves `import X` to X.mid next
 # to the fixture).  The refusal is either READER-side (the .mid's `module`
@@ -2623,6 +2673,37 @@ for tgt in arm64 rv64; do
     echo "PASS cross-$tgt: fib.ssa and float.ssa compile under qbe -t $tgt (the IL is target-neutral)"
   fi
 done
+
+# ---- cffi U2: THE WIDTH PAIR (plan §7.2) — the oracle this arc exists for ----
+# Two fixtures identical EXCEPT for the DECLARED RESULT WIDTH of the same libc
+# call, both with goldens written from the expectation (not frozen from the
+# tree) and both also pinned STRUCTURALLY on the emitted .ssa:
+#
+#   `-> i32`  : `=w call $access` + `extsw` of that temp   -> true   (sign)
+#   `-> i64`  : `=l call $access`, NO extension            -> false  (legacy)
+#
+# MEASURED on this host's glibc 2.44 (plan §7.1): `access` sets its failure
+# with `movl $-1, %eax`, so the raw `l` value is 4294967295, not -1.  The pair
+# therefore cannot be passed by a lowering that ignores the declared width
+# (both arms false) NOR by one that extends unconditionally (both arms true) —
+# and both directions were RUN as mutations of Mid/Qbe/Lower.elm.
+#
+# `openat`/`getpid`/`poll`/`waitpid`/`readdir` are NOT usable here: they are
+# PRE-EXTENDED on this glibc, so an oracle built on them would be a FALSE
+# NEGATIVE that passes before the fix as well.
+# BOTH halves of the boundary are pinned: the RESULT class (`=w call`/`=l call`
+# plus the extension) and the ARGUMENT classes in the same line — `ptr` as `l`
+# (FW64) and `i32` as `w` (FW32S).  Passing `l` for the `i32` argument happens
+# to work on x86_64 (plan §3.2), which is why the argument half needs a SHAPE
+# assertion rather than a behavioural one.
+run_midshape ffiw-i32 Ffiw32Main.main tools/qbe/fixtures/ffiw-i32.elm tools/qbe/fixtures/ffiw-i32.mid '=w call $access(l $d0, w 0)' extsw
+run_midshape ffiw-i64 Ffiw64Main.main tools/qbe/fixtures/ffiw-i64.elm tools/qbe/fixtures/ffiw-i64.mid '=l call $access(l $d0, w 0)' ''
+# The THIRD arm pins FW32U's emission, which the pair leaves open: `extuw` and
+# `extsw` have the same shape on the same temp, so a u32 arm that wrongly
+# SIGN-extended would pass both rows above.  It cannot pass this one — `access`
+# fails with 4294967295 in the raw `w`, so `extuw` -> false and `extsw` -> true
+# (the golden is false).
+run_midshape ffiw-u32 Ffiw32uMain.main tools/qbe/fixtures/ffiw-u32.elm tools/qbe/fixtures/ffiw-u32.mid '=w call $access(l $d0, w 0)' extuw
 
 # ---- zigretire stage 5 PART 3: THE MIDGC GUARD'S COMPLETENESS ----
 # The guard that names ONE incompatible flag is not a guard (this arc paid for

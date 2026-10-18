@@ -1,0 +1,24 @@
+// cffi U2 — THE WIDTH PAIR, ARM 2 (`-> i64`).  Sibling: ffiw-i32.mid.
+//
+// IDENTICAL to ffiw-i32.mid except for the declared result width: `i64`
+// instead of `i32`.  This arm is the NEGATIVE CONTROL and the legacy
+// reading in one: with no extension, the `l` read of `access`'s `movl $-1`
+// return is 4294967295 — a positive number — so `r < 0` is FALSE.
+//
+//   THIS ARM (`-> i64`, no extension) -> `=l call $access`          -> false
+//   THE SIBLING (`-> i32`, sign)      -> `=w call $access` + `extsw` -> true
+//
+// The pair varies THE CAUSE (the declared width) and nothing else.  A
+// lowering that ignores the width prints false for both; one that extends
+// unconditionally prints true for both — which is why BOTH arms are goldens
+// and this one is not "the wrong answer to be fixed later": for an `i64`
+// return, false IS the correct reading of this glibc's `access`.
+module Ffwi64
+export Ffwi64.neg : val -> val
+
+extern access(path : ptr, mode : i32) -> i64;
+
+defun Ffwi64.neg(dummy : val) -> val {
+  word r = rawcall access(rawstr("/no-such-file-ffiw-xyzzy"), 0);
+  return mkbool(r < 0);
+}

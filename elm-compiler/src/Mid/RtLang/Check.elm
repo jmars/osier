@@ -2,6 +2,7 @@ module Mid.RtLang.Check exposing
     ( checkExports
     , checkModule
     , checkProgram
+    , externSig
     , fieldOffset
     , fieldWidth
     , guardsHold
@@ -281,6 +282,9 @@ import Mid.RtLang.Ast as Ast
         , Exp(..)
         , Export
         , ExportSig
+        , FfiParam
+        , FfiSig
+        , FfiTy(..)
         , Field
         , Flag(..)
         , FlagGuard(..)
@@ -302,6 +306,7 @@ import Mid.RtLang.Ast as Ast
         , Type(..)
         , WordBinOp(..)
         , WordCmpOp(..)
+        , allBuiltins
         , builtinClass
         , builtinName
         , fltBinSig
@@ -330,6 +335,7 @@ type alias Env =
     , externs : Dict Key ExportSig
     , structs : StructTable
     , enums : EnumTable
+    , ffi : Dict Sym FfiSig
     }
 
 
@@ -434,7 +440,7 @@ checkModule externs flags module_ =
                             Err msg
 
                         Ok tables ->
-                            checkAll (envOf externs flags module_.defuns tables) module_.defuns
+                            checkAll (envOf externs flags module_.defuns module_.decls tables) module_.defuns
 
 
 {-| THE KEY AGREEMENT (M2, plan.md §2.5) — the FORWARD half, loud now.
@@ -668,12 +674,13 @@ checkAll env program =
                     checkAll env rest
 
 
-envOf : Dict Key ExportSig -> List Flag -> Program -> ( StructTable, EnumTable ) -> Env
-envOf externs flags program tables =
+envOf : Dict Key ExportSig -> List Flag -> Program -> List Decl -> ( StructTable, EnumTable ) -> Env
+envOf externs flags program decls tables =
     { surfaces = surfacesOf flags program
     , externs = externs
     , structs = Tuple.first tables
     , enums = Tuple.second tables
+    , ffi = ffiTable decls
     }
 
 
@@ -687,6 +694,179 @@ and the ones the lowerer (A2) consumes — one table, one layout truth.
 -}
 declCheck : List Decl -> Result String ( StructTable, EnumTable )
 declCheck decls =
+    case externCheck decls of
+        Err msg ->
+            Err msg
+
+        Ok () ->
+            declTables decls
+
+
+{-| J15 — the `extern` declarations' judgment (cffi plan §4's R-03..R-08
+family), run BEFORE the layout tables so a bad C signature is reported
+before anything reads a struct offset.  Each rejection is a distinct
+message, and the three here are exactly the ones this unit owns:
+
+  * **R-06** a symbol declared twice in one file.  THE DUPLICATE-TABLE SEAT:
+    U1 deliberately kept externs OUT of the struct/enum namespace
+    (`declName` returns `Nothing` for them) and left the symbol namespace
+    with no owner, so two declarations of one symbol were accepted and
+    SILENTLY DUPLICATED — harmless while nothing read them, and an
+    ambiguous table the moment this unit made the symbol load-bearing.
+  * **R-07** a symbol that is also a BUILTIN spelling: the call site
+    `wload(..)` can never reach a C symbol of that name — the parser
+    resolves the builtin first — so the declaration would be a silent no-op
+    for every site it claims to type.
+  * **R-08** a symbol that is ALSO an `Ast.rawcallArity` row.  Two tables
+    describing one symbol is the skew this repo keeps paying for; the
+    declaration is authoritative, so the fix is to delete the row (cffi U5
+    does that for the runtime's libc surface, one symbol per commit).
+
+R-03 (`val` in any extern position) and R-05 (`void` as a parameter) are
+UNREACHABLE here BY GRAMMAR: `FfiTy` has no `val`, `void` is a result-only
+atom the parameter parser refuses, and `ffiParamTy`'s message is the
+documented one.  They stay listed in the plan as the J15 wording should a
+future route (an imported/AST-built signature) reach this judgment.
+-}
+externCheck : List Decl -> Result String ()
+externCheck decls =
+    case decls of
+        [] ->
+            Ok ()
+
+        d :: rest ->
+            case d of
+                ExternDecl e ->
+                    let
+                        sig =
+                            e.sig
+
+                        symbolProblem =
+                            firstSymbolProblem decls e.name
+                    in
+                    case symbolProblem of
+                        Just msg ->
+                            Err msg
+
+                        Nothing ->
+                            case externParamProblem e.name sig of
+                                Just msg ->
+                                    Err msg
+
+                                Nothing ->
+                                    externCheck rest
+
+                _ ->
+                    externCheck rest
+
+
+{-| The FIRST problem with one extern symbol, in the order the plan lists the
+rejections (duplicate, then the two name collisions — a name collision is
+true of the symbol wherever it is declared, so it must not depend on which
+declaration the walk reaches first).
+-}
+firstSymbolProblem : List Decl -> Sym -> Maybe String
+firstSymbolProblem decls sym =
+    if List.length (List.filter (\d -> externNameOf d == Just sym) decls) > 1 then
+        Just
+            ("RtLang: J15: extern symbol '"
+                ++ sym
+                ++ "' is declared twice in this file — one symbol, one signature (delete the second declaration)"
+            )
+
+    else if List.member sym (List.map builtinName allBuiltins) then
+        Just
+            ("RtLang: J15: extern symbol '"
+                ++ sym
+                ++ "' is a BUILTIN — the call site resolves to the builtin, never to your symbol (rename the declaration or the C symbol)"
+            )
+
+    else if Dict.member sym rawcallArity then
+        Just
+            ("RtLang: J15: extern symbol '"
+                ++ sym
+                ++ "' is declared here AND is a rawcallArity row — the declaration is authoritative; delete the table row (two tables is the skew this repo keeps paying for)"
+            )
+
+    else
+        Nothing
+
+
+externNameOf : Decl -> Maybe Sym
+externNameOf d =
+    case d of
+        ExternDecl e ->
+            Just e.name
+
+        _ ->
+            Nothing
+
+
+{-| R-05 re-stated where the SIGNATURE is judged rather than only where it is
+parsed: a `void` parameter is not a register class.  Total and cheap — the
+grammar already refuses it, so this is the J15 half of the plan's §4 row (and
+the reason it can never fire is stated in `externCheck`'s doc).
+-}
+externParamProblem : Sym -> FfiSig -> Maybe String
+externParamProblem sym sig =
+    case List.filter (\p -> p.ty == FVoid) sig.params of
+        [] ->
+            Nothing
+
+        _ ->
+            Just
+                ("RtLang: J15: '"
+                    ++ sym
+                    ++ "': 'void' is a RESULT-only width — a parameter must name an actual register class"
+                )
+
+
+{-| The extern table as `Env` carries it (and as the LOWERER reads it — the
+one-table property: `LowerToIr` calls `externSig`, so the checker's arity and
+the emitter's widths cannot come from two copies).  Total: `externCheck` has
+already rejected a duplicate symbol, so the last-wins `Dict.insert` is never
+ambiguous on a checked module.
+-}
+ffiTable : List Decl -> Dict Sym FfiSig
+ffiTable decls =
+    case decls of
+        [] ->
+            Dict.empty
+
+        d :: rest ->
+            case d of
+                ExternDecl e ->
+                    Dict.insert e.name e.sig (ffiTable rest)
+
+                _ ->
+                    ffiTable rest
+
+
+{-| The FILE's declared signature for one symbol, or `Nothing` (an undeclared
+`rawcall` keeps the all-word `RawCallRaw` shape, unchanged).  The two readers
+(`checkRawCall` and `LowerToIr`'s `ERawCall` arm) both call THIS.
+-}
+externSig : List Decl -> Sym -> Maybe FfiSig
+externSig decls sym =
+    case decls of
+        [] ->
+            Nothing
+
+        d :: rest ->
+            case d of
+                ExternDecl e ->
+                    if e.name == sym then
+                        Just e.sig
+
+                    else
+                        externSig rest sym
+
+                _ ->
+                    externSig rest sym
+
+
+declTables : List Decl -> Result String ( StructTable, EnumTable )
+declTables decls =
     case duplicateDeclName decls of
         Just name ->
             Err
@@ -3758,16 +3938,40 @@ project ty =
             TVal
 
 
-{-| J3 — `rawcall sym`: the symbol must be in `Ast.rawcallArity` (the
-per-symbol SIGNATURE TABLE — the enforcement seat for stage-6's rawAbi
-defuns: when those land they JOIN the table, and any cap on
-directly-passed args is enforced per-symbol THERE), arity must match,
-and every argument is a `:word` (Lower lowers each through rawWordArg);
-the result is `:word` (result-void seats still yield the dead word the
-caller must ignore, exactly as the DSL does today).
+{-| J3 — `rawcall sym`.  TWO tables, and the DECLARATION WINS:
+
+  1. a symbol the FILE DECLARES `extern` is checked against that
+     declaration (`checkExternCall`) — its arity, its per-argument class
+     and its result class are the declaration's, and the lowerer reads the
+     same table (`Check.externSig`), so the checker and the emitter cannot
+     disagree about a width (cffi U2's one-table property);
+  2. otherwise the symbol must be in `Ast.rawcallArity` (the per-symbol
+     SIGNATURE TABLE — the enforcement seat for stage-6's rawAbi defuns:
+     when those land they JOIN the table, and any cap on directly-passed
+     args is enforced per-symbol THERE), arity must match, and every
+     argument is a `:word` (Lower lowers each through rawWordArg); the
+     result is `:word` (result-void seats still yield the dead word the
+     caller must ignore, exactly as the DSL does today).
+
+R-08 (J15) forbids a symbol being in BOTH tables, so the order here is a
+defence, not a precedence rule; R-15's existing message is arm 2's.
 -}
 checkRawCall : Ctx -> Sym -> List Exp -> Result String Type
 checkRawCall ctx sym args =
+    case Dict.get sym ctx.env.ffi of
+        Just sig ->
+            checkExternCall ctx sym sig args
+
+        Nothing ->
+            checkRawCallTable ctx sym args
+
+
+{-| The UNDECLARED arm — byte-for-byte the judgment it always was, moved out
+so the declared arm reads as the new rule and the old one stays visibly
+unchanged.
+-}
+checkRawCallTable : Ctx -> Sym -> List Exp -> Result String Type
+checkRawCallTable ctx sym args =
     case Dict.get sym rawcallArity of
         Nothing ->
             Err
@@ -3803,6 +4007,95 @@ checkRawCall ctx sym args =
                         ++ " word argument(s), got "
                         ++ String.fromInt (List.length args)
                     )
+
+
+{-| J3/J15 — a `rawcall` to a DECLARED `extern`: the declaration supplies
+everything (plan §3.1/§3.2's tables).
+
+  * ARITY (R-11/R-12): exactly the declared fixed parameters.  A `...`
+    declaration does NOT widen this yet — cffi U4 owns the variadic call
+    site (the IL's `...` marker and the argument count QBE needs for %al),
+    and ACCEPTING the extra arguments here would emit a call whose %al is
+    whatever the previous code left, a silent ABI break.  So the message
+    names the unit that lifts it.
+  * ARGUMENT CLASS (§3.2): `i32`/`u32`/`i64`/`u64`/`ptr` are word-class —
+    any `TWord` expression, which is exactly what `argOk` accepts there;
+    `f64` is `TFloat`, the one float class, and a word at an `f64` slot (or
+    the reverse) is the EXISTING `needs word/float, got ...` wording (R-14:
+    no new text).  `void` cannot appear (the grammar refuses it); the arm
+    exists so a hand-built signature cannot slip through.
+  * RESULT CLASS: `word` for every width this unit lowers — INCLUDING
+    `void`, whose dead word is the shape `rawcall free(..)` already binds
+    (plan §3.1; R-09 names the read hazard).  `f64` results are `TFloat`
+    here and refused LOUDLY by the lowerer (cffi U3).
+-}
+checkExternCall : Ctx -> Sym -> FfiSig -> List Exp -> Result String Type
+checkExternCall ctx sym sig args =
+    let
+        fixed =
+            List.length sig.params
+
+        got =
+            List.length args
+    in
+    if got /= fixed then
+        Err
+            (ctx.key
+                ++ ": J3: rawcall '"
+                ++ sym
+                ++ "' is declared extern with "
+                ++ String.fromInt fixed
+                ++ " parameter(s), got "
+                ++ String.fromInt got
+                ++ (if sig.varargs then
+                        " (a variadic extern's call sites land in cffi U4 — the IL's `...` marker is not emitted yet, so the extra arguments cannot be passed)"
+
+                    else
+                        ""
+                   )
+            )
+
+    else
+        case
+            checkArgs argOk
+                ctx
+                "J3"
+                ("rawcall '" ++ sym ++ "'")
+                (List.map ffiParamClass sig.params)
+                args
+        of
+            Err msg ->
+                Err msg
+
+            Ok () ->
+                Ok (ffiResultClass sig.result)
+
+
+{-| One declared parameter's mid-c class (§3.2).  `FVoid` is unreachable
+(the grammar and J15 both refuse it) and reads as `TWord` so the function
+stays total without pretending a void parameter exists.
+-}
+ffiParamClass : FfiParam -> Type
+ffiParamClass p =
+    case p.ty of
+        FF64 ->
+            TFloat
+
+        _ ->
+            TWord
+
+
+{-| The declared result's class (§3.1): `word` for the integer/pointer family
+AND for `void` (the dead word), `float` for `f64`.
+-}
+ffiResultClass : FfiTy -> Type
+ffiResultClass t =
+    case t of
+        FF64 ->
+            TFloat
+
+        _ ->
+            TWord
 
 
 {-| The aggcall family (J1's call row): the fn expression and every argument

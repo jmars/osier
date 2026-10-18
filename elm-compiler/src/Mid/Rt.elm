@@ -1469,6 +1469,15 @@ unsafeSafepoint selfKey selfArity node =
         RawCallRaw _ ->
             False
 
+        RawCallExtern _ ->
+            -- (cffi U2) a DECLARED C call: the callee is libc, and no C
+            -- callee can move the MID heap — the same class RawCallRaw has.
+            -- Marking it allocating would force every libc call into a
+            -- mallocing frame (a performance cliff with no rooting reason),
+            -- and the reason for changing this must be a MID-heap reason
+            -- (a Mid-allocating seat), never a C-heap one (plan §10.2).
+            False
+
         RawCallAgg _ ->
             -- CONSERVATIVELY ALLOCATING, deny-by-default: the callee is
             -- UNKNOWN GENERATED CODE (a runtime word — the stage-6

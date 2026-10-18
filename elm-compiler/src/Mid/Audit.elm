@@ -50,7 +50,7 @@ module Mid.Audit exposing (run)
 -- program unchanged on Ok, so a green audit is byte-identity-preserving —
 -- this step's whole oracle.
 
-import Mid.Ir exposing (Defun, Exp(..), LetBinder(..), Program, UnsafeNode(..))
+import Mid.Ir exposing (Defun, Exp(..), FfiWidth(..), LetBinder(..), Program, UnsafeNode(..))
 
 
 run : Program -> Result String Program
@@ -281,6 +281,18 @@ describe node =
         RawCallRaw call ->
             "raw call word seat " ++ call.sym
 
+        RawCallExtern call ->
+            -- cffi U2: the description NAMES the declared widths, because a
+            -- .ssa/audit reader must be able to tell a typed C call from the
+            -- all-word seat without re-reading the declaration.
+            "raw call C extern "
+                ++ call.sym
+                ++ " ("
+                ++ String.join "," (List.map ffiWidthName call.argWidths)
+                ++ (if call.varargs then ",..." else "")
+                ++ ") -> "
+                ++ ffiWidthName call.result
+
         RawCallAgg call ->
             "raw call aggregate " ++ call.shape
 
@@ -295,3 +307,27 @@ describe node =
 
         RawSym _ ->
             "rawSym (function symbol address)"
+
+
+{-| (cffi U2) the WIDTH as the audit prints it — the declaration's own
+spelling where it matters (`i32` vs `u32` is the whole width fix), the
+lumped class name where it cannot be recovered (`i64`/`u64`/`ptr` are one
+`l` class in the IR, and the node is not the place to remember which).
+-}
+ffiWidthName : FfiWidth -> String
+ffiWidthName w =
+    case w of
+        FW32S ->
+            "i32"
+
+        FW32U ->
+            "u32"
+
+        FW64 ->
+            "i64"
+
+        FF64 ->
+            "f64"
+
+        FVoid ->
+            "void"

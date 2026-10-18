@@ -1,0 +1,35 @@
+// cffi U2 — THE WIDTH PAIR, ARM 1 (`-> i32`).  Sibling: ffiw-i64.mid.
+//
+// The two fixtures differ in EXACTLY ONE character of meaning: the DECLARED
+// RESULT WIDTH of the same libc call on the same argument.  Nothing else —
+// same module shape, same `access` call, same nonexistent path, same
+// `mkbool(r < 0)`.
+//
+// WHAT IS BEING MEASURED (cffi plan §7.1/§7.2, MEASURED on this host's
+// glibc 2.44): `access`'s own body returns its failure with
+// `movl $-1, %eax`, so the upper 32 bits of %rax are left ZERO —
+// the raw `l` value is 4294967295, not -1.  A `rawcall` (all-word, the
+// pre-U2 shape) reads exactly that, so `r < 0` is FALSE and the runtime
+// SILENTLY SKIPS its error branch.
+//
+//   THIS ARM (`-> i32`, sign)      -> `=w call $access` + `extsw` -> true
+//   THE SIBLING (`-> i64`, no ext) -> `=l call $access`          -> false
+//
+// Why the pair and not either arm alone: a lowering that IGNORES the
+// declared width prints false for both; one that extends UNCONDITIONALLY
+// prints true for both.  Neither can pass the pair by accident, and both
+// arms are goldens.  The i64 arm is also the honest legacy control — it is
+// exactly what `rawcall` did before this unit.
+//
+// WHY `access` AND NOT `openat`/`getpid`/`poll`/`waitpid`/`readdir`: those
+// five are PRE-EXTENDED on this glibc (measured), so an oracle built on any
+// of them would be a FALSE NEGATIVE — it would pass before the fix too.
+module Ffwi32
+export Ffwi32.neg : val -> val
+
+extern access(path : ptr, mode : i32) -> i32;
+
+defun Ffwi32.neg(dummy : val) -> val {
+  word r = rawcall access(rawstr("/no-such-file-ffiw-xyzzy"), 0);
+  return mkbool(r < 0);
+}

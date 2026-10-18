@@ -35,6 +35,7 @@ module Mid.RtLang.Ast exposing
     , Type(..)
     , WordBinOp(..)
     , WordCmpOp(..)
+    , allBuiltins
     , allWordSig
     , builtinClass
     , builtinName
@@ -1670,3 +1671,46 @@ rawcallArity =
         , ( "getrlimit", 2 )
         , ( "setrlimit", 2 )
         ]
+
+
+{-| EVERY builtin constructor, in one place — the surface's spelling set as
+`builtinName` spells it.  Moved here from `Parse.elm` by cffi U2: the extern
+declarations' J15 rule (R-07) must refuse a C symbol that collides with a
+builtin SPELLING, and Check cannot import Parse (Parse imports Check's Ast).
+Parse now reads this list, so the one-table property holds for the spellings
+too — a builtin added here joins both the parser's keyword table and the
+extern judgment without a second edit.
+-}
+allBuiltins : List Builtin
+allBuiltins =
+    [ MkNum
+    , MkBool
+    , MkNil
+    , MkStr
+    , MkFlt
+    , MkVec
+    , MkVal
+    , Payload
+    , Payload32
+    , Len32
+    , TagIs
+    , VecLoad
+    , VecAddr
+    , VecStore
+    , StrByte
+    , ByteLoad
+    , ByteStore
+    , WordLoad
+    , WordStore
+    , AllocVec
+    , AllocRaw
+    , IToF
+    , FLoad
+    , FToI32
+    , Sext
+    , Uext
+    , BitNot
+    , RecLen
+    , RawStr
+    , RawSym
+    ]

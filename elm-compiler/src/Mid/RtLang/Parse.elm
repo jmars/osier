@@ -1493,45 +1493,16 @@ intLitParser =
     ParserFast.integerDecimalOrHexadecimalMapWithRange (\_ n -> n) (\_ n -> n)
 
 
-{-| Every builtin spelling, read from `Ast.builtinName` — the Ast table
-stays the one source of truth for the surface's spellings.  (`mknil` is
-dispatched as a bare literal in `nameAtom` before this table is
-consulted; its row here keeps the table a faithful reverse of
-`builtinName`.)
+{-| Every builtin spelling — the LIST now lives in `Ast` (cffi U2 moved it
+there so the checker's extern judgment, R-07, can refuse a C symbol that
+collides with a builtin spelling without importing this module).  One table:
+this is the parser's view of it.  (`mknil` is dispatched as a bare literal in
+`nameAtom` before this table is consulted; its row keeps the table a faithful
+reverse of `builtinName`.)
 -}
 allBuiltins : List Builtin
 allBuiltins =
-    [ MkNum
-    , MkBool
-    , MkNil
-    , MkStr
-    , MkFlt
-    , MkVec
-    , MkVal
-    , Payload
-    , Payload32
-    , Len32
-    , TagIs
-    , VecLoad
-    , VecAddr
-    , VecStore
-    , StrByte
-    , ByteLoad
-    , ByteStore
-    , WordLoad
-    , WordStore
-    , AllocVec
-    , AllocRaw
-    , IToF
-    , FLoad
-    , FToI32
-    , Sext
-    , Uext
-    , BitNot
-    , RecLen
-    , RawStr
-    , RawSym
-    ]
+    Mid.RtLang.Ast.allBuiltins
 
 
 builtinTable : Dict String Builtin
