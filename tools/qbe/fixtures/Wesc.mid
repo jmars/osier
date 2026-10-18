@@ -1,0 +1,112 @@
+// B4b (handoff-midlang-b4b) — DECLARED LOCALS ON FRAME MEMORY, through the
+// real pipeline.  A SIBLING of Warr.mid (B3), Wext.mid (B2) and Wloop.mid
+// (B4): none of their goldens can be moved by this unit.
+//
+//   tools/qbe/qbe-mk.sh tools/qbe/fixtures/wesc.elm MidB4b.main <outdir>
+//   <outdir>/wesc MidB4b.main
+//
+// Expected stdout with top = 5:  14100095
+//   = acc.x(14) | acc.y(100) | a[5](9) | top(5)
+//
+// WHAT THE NUMBER PINS (a bug in any one moves it):
+//   * `word[6] a = { 3, 1, 4, 1, 5, 9 };` is an `alloc8 48` FRAME block now,
+//     not a `malloc` — and it is indexed by a LOOP-CARRIED word (`i`), so the
+//     block has to be address-stable across the back edge and readable from
+//     memory (MEASURED in the .ssa).
+//   * `P acc;` is a struct local — also frame memory — and it is ACCUMULATED
+//     ACROSS ITERATIONS (`acc.x = acc.x + a[i]`), so a per-iteration
+//     re-allocation with a lost value, or a bad field offset, moves the
+//     number (14 = 3+1+4+1+5, and acc.y counts the single 4).
+//   * `a[5]` is never touched by the loop: it proves the loop stopped at
+//     `top` (5) and left the tail of the block intact.
+//
+// THE ESCAPE RULE'S DOCUMENTED HALF (probe, run by wescprobe.elm):
+// a callee that RETAINS an address it is handed dangles once the owner's
+// frame dies — and no checker can see retention, so this is an obligation
+// made visible rather than a rule.  `alive` reads the address inside the
+// owner's own frame (7, correct); `probe` reads it after `steal` returned,
+// from a SIBLING frame that has reused those bytes (`word[64] z;` zeroes 512
+// of them).  MEASURED: 70 = alive 7, dead-read 0 (the reusing frame's memset)
+// — i.e. NOT the 7 that was written.  71 would mean the dead block survived
+// intact in that build and the probe had gone inconclusive; the golden is
+// pinned so that cannot pass silently.
+module Wesc
+
+export Wesc.run : val -> val
+export Wesc.probe : val -> val
+export Wesc.keep : val -> val -> val
+export Wesc.read : val -> val
+export Wesc.alive : val -> val
+export Wesc.steal : val -> val
+export Wesc.reuse : val -> val
+
+struct P { x : word; y : word; }
+
+defun Wesc.run(n : val) -> val {
+  word top = payload(n, 0);
+
+  word[6] a = { 3, 1, 4, 1, 5, 9 };
+
+  P acc;
+  acc.x = 0;
+  acc.y = 0;
+
+  word i = 0;
+  while (i < top) {
+    acc.x = acc.x + a[i];
+    word four = [word](a[i] == 4);
+    acc.y = acc.y + (four * 100);
+    i = i + 1;
+  }
+
+  return mknum((acc.x * 1000000) + (acc.y * 1000) + (a[5] * 10) + top);
+}
+
+// ---- the retention probe (wescprobe.elm) ----
+
+// store the address it is handed into the caller's slot
+defun Wesc.keep(slot : val, addr : val) -> val {
+  *word s = payload(slot, 0);
+  s[0] = payload(addr, 0);
+  return mknum(0);
+}
+
+// read the word at the address the slot holds
+defun Wesc.read(slot : val) -> val {
+  *word s = payload(slot, 0);
+  *word t = payload(mknum(s[0]), 0);
+  return mknum(t[0]);
+}
+
+// hand out a frame block's address, then return (the block dies here)
+defun Wesc.steal(slot : val) -> val {
+  word[2] a = { 7, 8 };
+  call Wesc.keep(slot, mknum(a));
+  return mknum(a[0]);
+}
+
+// the same hand-out, but the read happens while the owner is STILL LIVE
+defun Wesc.alive(slot : val) -> val {
+  word[2] a = { 7, 8 };
+  call Wesc.keep(slot, mknum(a));
+  return call Wesc.read(slot);
+}
+
+// a SIBLING frame (the same call depth): a 64-word block that ZEROES the
+// dead owner's bytes, then reads through the retained address
+defun Wesc.reuse(slot : val) -> val {
+  word[64] z;
+  z[0] = 9;
+  *word t = payload(slot, 0);
+  *word u = payload(mknum(t[0]), 0);
+  return mknum(u[0]);
+}
+
+defun Wesc.probe(seed : val) -> val {
+  val slot = mknum(rawcall malloc(8));
+  val good = call Wesc.alive(slot);
+  call Wesc.steal(slot);
+  val dead = call Wesc.reuse(slot);
+  word same = [word](payload(good, 0) == payload(dead, 0));
+  return mknum((payload(good, 0) * 10) + same);
+}

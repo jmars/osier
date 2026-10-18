@@ -2956,11 +2956,17 @@ fieldStore fty p1 off e1 =
 -- ==================== B2: struct VALUES (storage, copy, address) ====================
 
 
-{-| THE ONE PLACE STRUCT STORAGE IS ALLOCATED (B2).  `malloc(8 * sizeof S)`
-— a C-heap block, because `Mid.Ir` has no frame-allocation node and
-`Mid/Qbe/Il.elm`'s `Alloc` is a tier BELOW this module (Ast's `EAddrOf`
-note records the measured refutation of the plan's `Il.Alloc` premise).
-Swapping to stack memory is ONE edit here when B4 lands `RawAllocN`.
+{-| THE ONE PLACE STRUCT STORAGE IS ALLOCATED (B2, re-seated on the FRAME by
+B4b).  `allocN sizeof S` — `size` WORDS of QBE stack memory (`RawAllocN` ->
+`Il.Alloc`, the seat B4 landed and the loop cells use), NOT a `malloc` call:
+the frame owns the block, so a scope exit cannot leak it and no `free` is
+ever needed.  B2/B3 used `malloc` only because `Mid.Ir` had no frame-alloc
+node at the time.
+
+THE OBLIGATION THE SWAP CREATES is the reverse of the leak it removes: the
+ADDRESS of the block dies with the frame, so the surface must not let it
+outlive the frame (`Check`'s escape rule — `return &s`, a store through a
+pointer, and the documented retention obligation).
 
 `size` comes from `Check.sizeofStruct` — the one layout table.
 -}
@@ -2968,7 +2974,7 @@ structAlloc : St -> String -> Result String Exp
 structAlloc st sname =
     case Check.sizeofStruct st.decls sname of
         Just size ->
-            Ok (Unsafe (RawCallRaw { sym = "malloc", args = [ Lit (LNumber (8 * size)) ] }))
+            Ok (Unsafe (RawAllocN size))
 
         Nothing ->
             Err
@@ -3220,18 +3226,18 @@ initFieldsNodes st sname addr fields acc =
 -- ==================== B3: ARRAY values (storage, stride, init) ====================
 
 
-{-| THE ONE PLACE ARRAY STORAGE IS ALLOCATED (B3) — `malloc(8 * words)`,
-`words` from the SAME width walk `sizeof` uses (`sizeofWords`), which is the
-same table `Check` laid out.
+{-| THE ONE PLACE ARRAY STORAGE IS ALLOCATED (B3, re-seated on the FRAME by
+B4b) — `allocN words`, `words` from the SAME width walk `sizeof` uses
+(`sizeofWords`), which is the same table `Check` laid out.  `RawAllocN` ->
+`Il.Alloc` is the frame-alloc seat B2/B3 lacked (the plan put the missing
+node in B4's row; `Il.Alloc` itself is a tier BELOW this module and was
+never reachable from here).
 
-MEASURED PREMISE CORRECTION (the plan, Q5/the brief: "fixed-size locals on
-stack memory (`allocN`, the seat `Il.Alloc` already provides)").  B2 already
-refuted it for structs and it is exactly as false for arrays: `Il.Alloc` is a
-tier BELOW this module (`Mid/Qbe/Il.elm`), and `Mid.Ir` — the IR this module
-emits — has NO frame-allocation node at all.  The plan itself puts the missing
-node (`RawAllocN`) in B4's row, not B3's.  So an array local is a C-heap block
-here: address-stable, invisible to the collector, never freed, and the one
-edit `arrayAlloc`/`structAlloc` share when B4 lands `RawAllocN`.
+WHAT THE SWAP CHANGES, stated because it is observable: the block belongs to
+the FRAME, so (1) it can never leak, (2) its ADDRESS is the same on every
+execution of the declaration (a `word[4] a;` inside a loop body reuses one
+frame slot for every iteration — C's usual behaviour, not a guarantee), and
+(3) the address must not outlive the frame (`Check`'s escape rule).
 -}
 arrayAlloc : St -> Ast.Type -> Result String Exp
 arrayAlloc st aty =
@@ -3247,7 +3253,7 @@ arrayAlloc st aty =
                     )
 
             else
-                Ok (Unsafe (RawCallRaw { sym = "malloc", args = [ Lit (LNumber (8 * words)) ] }))
+                Ok (Unsafe (RawAllocN words))
 
 
 {-| The ZEROED tail of `T[N] a;` — `memset(addr, 0, 8*words)`, the same rule

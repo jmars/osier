@@ -371,6 +371,13 @@ type alias Ctx =
     , scope : Dict String Type
     , loops : Int -- (B4) the ENCLOSING loop depth: a break/continue needs one
     , abiWord : Bool -- (B4) is this defun's signature the WORD ABI (Ast.allWordSig)?
+    , frameAddr : Dict String String
+      -- (B4b) J13's provenance set: binder name -> the frame PLACE whose
+      -- address it holds (`*S p = &s` -> p |-> "&s").  Populated at a bind
+      -- whose initialiser is a frame address, and any assignment to the name
+      -- REMOVES it (a `word`/`*T` binder may be reassigned by the auto-cell,
+      -- so an alias cannot be assumed to survive a store).  Read only by the
+      -- escape rule — it never affects typing.
     }
 
 
@@ -1337,6 +1344,7 @@ ctxOf env d =
     , scope = paramScope d.params
     , loops = 0
     , abiWord = Ast.allWordSig (List.map .ty d.params) d.ret
+    , frameAddr = Dict.empty
     }
 
 
@@ -1419,7 +1427,7 @@ checkStmt ctx stmt =
 
                             Ok cls ->
                                 if coerce ty cls then
-                                    Ok { ctx | scope = Dict.insert name ty ctx.scope }
+                                    Ok (bindProvenance ctx name e ty)
 
                                 else
                                     Err
@@ -2014,7 +2022,11 @@ checkVarStore ctx name e =
                                 )
 
                     else if coerce cls cls2 then
-                        Ok ctx
+                        -- B4b: an assignment re-decides what the name holds.
+                        -- `frameAddr` loses the stale provenance first and
+                        -- regains it only if the new value IS a frame address
+                        -- (`w = &a;` -> w |-> "&a", `w = 0;` -> w dropped).
+                        Ok (rebindProvenance ctx name e)
 
                     else
                         Err
@@ -2147,26 +2159,37 @@ checkFieldStore ctx p f e =
                         )
 
                 Just fty ->
-                    case checkExp ctx e of
-                        Err msg ->
-                            Err msg
+                    -- B4b/J13: the ESCAPE rule, before the class matrix — a
+                    -- store THROUGH A POINTER lands in memory this frame does
+                    -- not own (a heap block, a caller's frame), so storing a
+                    -- frame address there is the dangling-pointer shape.  A
+                    -- struct VALUE base is this frame's own block and is
+                    -- allowed (`structPointer`'s TStruct arm).
+                    case ( frameValueAddr ctx e, structBaseIsPointer ctx p ) of
+                        ( Just why, True ) ->
+                            Err (frameEscapeMsg ctx ("'" ++ fieldSiteText p f ++ " = " ++ why ++ "'") why)
 
-                        Ok vcls ->
-                            if coerce fty vcls then
-                                Ok ctx
+                        _ ->
+                            case checkExp ctx e of
+                                Err msg ->
+                                    Err msg
 
-                            else
-                                Err
-                                    (ctx.key
-                                        ++ ": J13: store to field '"
-                                        ++ sname
-                                        ++ "."
-                                        ++ f
-                                        ++ "' needs "
-                                        ++ typeStr fty
-                                        ++ ", got "
-                                        ++ typeStr vcls
-                                    )
+                                Ok vcls ->
+                                    if coerce fty vcls then
+                                        Ok ctx
+
+                                    else
+                                        Err
+                                            (ctx.key
+                                                ++ ": J13: store to field '"
+                                                ++ sname
+                                                ++ "."
+                                                ++ f
+                                                ++ "' needs "
+                                                ++ typeStr fty
+                                                ++ ", got "
+                                                ++ typeStr vcls
+                                            )
 
 
 {-| J13 — `p[i] = e;`: the element class comes from the pointer's pointee
@@ -2234,24 +2257,34 @@ checkIndexStore ctx p i e =
                             Err msg
 
                         Ok elemTy ->
-                            case checkExp ctx e of
-                                Err msg ->
-                                    Err msg
+                            -- B4b/J13: the ESCAPE rule on the POINTER arm
+                            -- (`p[i] = &s`): `p` may point at a heap block or
+                            -- a caller's frame, so a frame address stored
+                            -- through it can outlive this frame.  The ARRAY
+                            -- arm above is a same-frame block and is allowed.
+                            case frameValueAddr ctx e of
+                                Just why ->
+                                    Err (frameEscapeMsg ctx ("'" ++ indexSiteText p i ++ " = " ++ why ++ "'") why)
 
-                                Ok vcls ->
-                                    if coerce elemTy vcls then
-                                        Ok ctx
+                                Nothing ->
+                                    case checkExp ctx e of
+                                        Err msg ->
+                                            Err msg
 
-                                    else
-                                        Err
-                                            (ctx.key
-                                                ++ ": J13: store to '"
-                                                ++ typeStr (TPtr pty)
-                                                ++ "' element needs "
-                                                ++ typeStr elemTy
-                                                ++ ", got "
-                                                ++ typeStr vcls
-                                            )
+                                        Ok vcls ->
+                                            if coerce elemTy vcls then
+                                                Ok ctx
+
+                                            else
+                                                Err
+                                                    (ctx.key
+                                                        ++ ": J13: store to '"
+                                                        ++ typeStr (TPtr pty)
+                                                        ++ "' element needs "
+                                                        ++ typeStr elemTy
+                                                        ++ ", got "
+                                                        ++ typeStr vcls
+                                                    )
 
         Ok cls ->
             Err
@@ -2504,25 +2537,171 @@ breakLike ctx what =
             )
 
 
-{-| B4/J13 — does `e` (a `return` operand) hand back the ADDRESS of THIS
+{-| B4b — the WRITE side of J13's provenance set, at a DECLARATION: insert
+the name, and record the frame place whose address it holds when its
+initialiser is one (`*S p = &s`, `*T q = p`, `word w = &a`, `Outer c = o`).
+A name being re-declared is dropped first, so a shadowed name cannot inherit
+the outer binder's provenance.
+-}
+bindProvenance : Ctx -> String -> Exp -> Type -> Ctx
+bindProvenance ctx name e ty =
+    let
+        base =
+            { ctx
+                | scope = Dict.insert name ty ctx.scope
+                , frameAddr = Dict.remove name ctx.frameAddr
+            }
+    in
+    case frameValueAddr ctx e of
+        Just why ->
+            { base | frameAddr = Dict.insert name why base.frameAddr }
+
+        Nothing ->
+            base
+
+
+{-| B4b — the WRITE side at an ASSIGNMENT: the old provenance is gone (the
+binder now holds whatever was stored), and the new value's provenance, if any,
+takes its place.
+-}
+rebindProvenance : Ctx -> String -> Exp -> Ctx
+rebindProvenance ctx name e =
+    let
+        base =
+            { ctx | frameAddr = Dict.remove name ctx.frameAddr }
+    in
+    case frameValueAddr ctx e of
+        Just why ->
+            { base | frameAddr = Dict.insert name why base.frameAddr }
+
+        Nothing ->
+            base
+
+
+{-| B4b — is the store's base reached through a POINTER?  `structPointer`
+resolves a field store's base either as a `*S` (some block this frame does not
+own) or as a struct VALUE (this frame's block, so an address stored into it
+dies with the frame).  The distinction is exactly `TPtr` vs `TStruct`; the
+expression was already checked by `structPointer`, so this re-read cannot
+change the outcome.
+-}
+structBaseIsPointer : Ctx -> Exp -> Bool
+structBaseIsPointer ctx p =
+    case checkExp ctx p of
+        Ok (TPtr _) ->
+            True
+
+        _ ->
+            False
+
+
+{-| B4b/J13 — the shared reject for an address that outlives its frame.  ONE
+message, so the three sites (`return`, a field store through a pointer, an
+index store through a pointer) cannot drift apart.
+-}
+frameEscapeMsg : Ctx -> String -> String -> String
+frameEscapeMsg ctx site why =
+    ctx.key
+        ++ ": J13: "
+        ++ site
+        ++ " — "
+        ++ why
+        ++ " is the ADDRESS of this frame's own storage, and it is being put somewhere that outlives the frame: a struct/array local lives in an `allocN` block the frame reclaims at exit (B4b moved those off `malloc`), so a pointer kept past its defun dangles into whatever the next call puts there.  Take the address of a HEAP block instead (`*T p = rawcall malloc(..)`), store into a SAME-FRAME aggregate (`s.f = &t`, `a[0] = &t`), or pass it as a CALL ARGUMENT while the owner is still live"
+
+
+{-| B4b/J13 — THE ESCAPE RULE: does `e` hand back the ADDRESS of THIS
 frame's storage?  Every struct/array local and every struct parameter's entry
-copy is an `allocN` block owned by the frame, so the shapes are:
+copy is an `allocN` block the frame owns (B4b moved them off `malloc`), so an
+address that outlives the frame is a DANGLING POINTER — where the `malloc`
+block it replaced was merely leaked.  That inversion is why the storage swap
+and this rule are one unit.
 
-  * `&s` / `&a` — a struct-VALUE or ARRAY binder;
-  * `&s.f` — interior to such a binder (a nested struct or an array field);
-  * `&p` — a STRUCT PARAMETER (its entry copy is the callee's own block).
+The shapes, as built:
 
-Everything else is left to the user (the obligation is stated in Mid.Ir's
-`RawAllocN` note): `&x` of a place reached through a POINTER (`&q->f`,
-`&(p[i])`) is an address in some OTHER block — heap or the caller's frame —
-and the checker cannot know its lifetime.  A deeper escape (`return pk(&s)`)
-is likewise out of reach of a syntactic rule.
+  * `&s` / `&a` / `&s.f` / `&a[i]` — the address of a frame place (or one of
+    its interior words);
+  * a BINDER whose value is a frame address — `*S p = &s`, `word w = &a`,
+    and transitively `*S q = p`.  The provenance set is `Ctx.frameAddr`, and
+    a name is REMOVED from it by any assignment to that name (a `word`/`*T`
+    binder may be reassigned — the auto-cell — so an alias cannot be assumed
+    to survive a store);
+  * a bare struct/array BINDER used as a VALUE — its value IS its address
+    (decay), so `return a;` in a `-> *word` defun hands back the block.
 
-`Nothing` when the operand is not one of these shapes (or is not an `&` at
-all, which is the overwhelming majority).
+WHERE IT IS ENFORCED: `return` (any frame address), a FIELD store through a
+POINTER (`p->f = ...`), and an INDEX store through a POINTER (`p[i] = ...`) —
+the three places an address can outlive the frame without a callee's help.
+
+WHERE IT IS NOT, stated rather than implied (the checker cannot see these):
+
+  * a CALLEE that retains the address it is handed (`f(&s)`, `f(a)`,
+    `f(p)` where `p` aliases a frame block) — the call itself is legal and
+    must stay so (it is the ordinary out-parameter idiom); RETENTION is a
+    documented obligation, and the fixture `Wesc.mid`/`wescprobe.elm` makes
+    its consequence visible (a read through a retained frame address after the
+    owner returned answers 0 — the reusing frame's own memset — not the 7 that
+    was written; MEASURED);
+  * laundering through a builtin: `mknum(&s)` is a plain `val` to this walk,
+    so `return mknum(&a)` and `rawcall free(mknum(&a))` are not caught;
+  * a store into a SAME-FRAME aggregate (`s.f = &t`, `a[0] = &t` on a local
+    `word[N]`): the block and the address die together, so it is sound and
+    allowed — the rule rejects only a target reached through a POINTER, which
+    may be heap or a caller's frame.
+
+`Nothing` when the operand is none of these shapes (the overwhelming
+majority).
 -}
 frameAddrOf : Ctx -> Exp -> Maybe String
 frameAddrOf ctx e =
+    case frameAddrScalar ctx e of
+        Just why ->
+            Just why
+
+        Nothing ->
+            -- an aggregate VALUE is its own address, EXCEPT when the declared
+            -- return is that same aggregate: a struct/array return has its
+            -- own reject with a better message (J6's class mismatch, or the
+            -- array-return cut), and this rule must not shadow it.
+            case e of
+                EVar name ->
+                    if aggregateBinder ctx name && not (aggregateTy ctx.ret) then
+                        Just ("&" ++ name)
+
+                    else
+                        Nothing
+
+                _ ->
+                    Nothing
+
+
+{-| The store-position form: no return-class exception, because a store has
+no declared class to excuse it (`p[0] = a;` writes the block's address into
+whatever `p` points at, which may be a heap block or another frame).
+-}
+frameValueAddr : Ctx -> Exp -> Maybe String
+frameValueAddr ctx e =
+    case frameAddrScalar ctx e of
+        Just why ->
+            Just why
+
+        Nothing ->
+            case e of
+                EVar name ->
+                    if aggregateBinder ctx name then
+                        Just ("&" ++ name)
+
+                    else
+                        Nothing
+
+                _ ->
+                    Nothing
+
+
+{-| `&framePlace` (or interior), or a binder the provenance set says holds a
+frame address.  This is the half both positions share.
+-}
+frameAddrScalar : Ctx -> Exp -> Maybe String
+frameAddrScalar ctx e =
     case e of
         EAddrOf inner ->
             if isFramePlace ctx inner then
@@ -2531,23 +2710,48 @@ frameAddrOf ctx e =
             else
                 Nothing
 
+        EVar name ->
+            -- name the binder the address ARRIVED through, so a `return p`
+            -- reject says which alias it followed
+            case Dict.get name ctx.frameAddr of
+                Just why ->
+                    Just (why ++ " (via " ++ name ++ ")")
+
+                Nothing ->
+                    Nothing
+
         _ ->
             Nothing
+
+
+aggregateBinder : Ctx -> String -> Bool
+aggregateBinder ctx name =
+    case Dict.get name ctx.scope of
+        Just ty ->
+            aggregateTy ty
+
+        Nothing ->
+            False
+
+
+aggregateTy : Type -> Bool
+aggregateTy ty =
+    case ty of
+        TStruct _ ->
+            True
+
+        TArray _ _ ->
+            True
+
+        _ ->
+            False
 
 
 isFramePlace : Ctx -> Exp -> Bool
 isFramePlace ctx inner =
     case inner of
         EVar name ->
-            case Dict.get name ctx.scope of
-                Just (TStruct _) ->
-                    True
-
-                Just (TArray _ _) ->
-                    True
-
-                _ ->
-                    False
+            aggregateBinder ctx name
 
         EField base _ ->
             -- `&s.f` — interior storage of a struct VALUE binder (a nested
@@ -2568,8 +2772,59 @@ isFramePlace ctx inner =
                 _ ->
                     False
 
+        EIndex base _ ->
+            -- B4b: `&a[i]` on a frame ARRAY is interior to this frame's block
+            -- (the array's own value is its base, so the index only moves
+            -- WITHIN it).  A pointer base moves outside — `&p[i]` is the
+            -- pointee's interior, the same rule `&p->f` gets.
+            case base of
+                EVar name ->
+                    case Dict.get name ctx.scope of
+                        Just (TArray _ _) ->
+                            True
+
+                        _ ->
+                            False
+
+                _ ->
+                    isFramePlace ctx base
+
         _ ->
             False
+
+
+{-| B4b — the store SITE as the source spelled it, for the escape reject.
+-}
+fieldSiteText : Exp -> String -> String
+fieldSiteText p f =
+    exprText p ++ "->" ++ f
+
+
+indexSiteText : Exp -> Exp -> String
+indexSiteText p i =
+    exprText p ++ "[" ++ exprText i ++ "]"
+
+
+exprText : Exp -> String
+exprText e =
+    case e of
+        EVar name ->
+            name
+
+        EField base f ->
+            exprText base ++ "." ++ f
+
+        EIndex base i ->
+            exprText base ++ "[" ++ exprText i ++ "]"
+
+        EInt n ->
+            String.fromInt n
+
+        EAddrOf inner ->
+            addrOfText inner
+
+        _ ->
+            "<expr>"
 
 
 {-| The operand as the source spelled it, for the reject message.

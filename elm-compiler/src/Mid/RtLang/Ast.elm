@@ -873,10 +873,15 @@ So a struct value's storage is `rawcall malloc(8 * sizeof(S))`: a C-heap
 block, address-stable, invisible to the collector, never moved.  Three
 consequences, all stated rather than hidden:
 
-  1. IT IS HEAP, NOT STACK — the value's lifetime is the program's, not
-     the frame's, and NOTHING frees it.  A struct binder inside a loop
-     allocates per iteration (B4's problem to fund; the fix is
-     `RawAllocN` in one function, `LowerToIr.structAlloc`).
+  1. IT WAS HEAP, NOT STACK — the value's lifetime was the program's, not
+     the frame's, and NOTHING freed it (a struct binder inside a loop
+     allocated per iteration).  CORRECTED BY B4b: `RawAllocN` landed in
+     B4 and `LowerToIr.structAlloc` is now `RawAllocN sizeof(S)`, i.e.
+     QBE stack memory the frame reclaims — no free exists or is needed.
+     The reverse obligation arrived with it: the ADDRESS must not outlive
+     the frame, which `Check`'s escape rule enforces (see its
+     `frameAddrOf` note for what is enforced and what stays a documented
+     obligation).
   2. The GC does NOT see it, so a `val` FIELD is an unrooted handle —
      exactly plan §Q11's obligation (no-safepoint window + rooted
      referent), which B7 owns.  This is forced, not a shortcut:

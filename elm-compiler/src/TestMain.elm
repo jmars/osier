@@ -6599,11 +6599,11 @@ checks rt =
             && Check.fieldWidth decls "Outer" "in_"
             == Just 1
         )
-    , check "B2 LOWER: a struct binder ALLOCATES from the ONE layout table — `Outer o;` binds `malloc(8 * sizeof Outer)` = malloc(56) for a 7-word struct, then `memset(addr, 0, 56)`"
+    , check "B2 LOWER (re-seated by B4b): a struct binder ALLOCATES off the ONE layout table — `Outer o;` binds `RawAllocN 7` (SEVEN words of QBE stack memory = `alloc8 56`, no `malloc` call at all) for a 7-word struct, then `memset(addr, 0, 56)`, which is a memset over the frame block"
         (case lowlModuleBody b2LocalMid of
             Ok body ->
                 b2LetValue body
-                    == Just (Unsafe (RawCallRaw { sym = "malloc", args = [ Lit (LNumber 56) ] }))
+                    == Just (Unsafe (RawAllocN 7))
                     && (case b2LetBody body of
                             Just inner ->
                                 b2LetValue inner
@@ -6617,7 +6617,7 @@ checks rt =
                 False
         )
     , check "B2 LOWER: `&s` on a struct VALUE is the IDENTITY — no node at all (the value IS its address), so binding it to a `*S` binds exactly the struct's binder"
-        (case lowlModuleBody "struct S { a : word; }\ndefun Rt.a() -> *S {\n  S s;\n  *S p = &s;\n  return p;\n}" of
+        (case lowlModuleBody "struct S { a : word; }\ndefun Rt.a() -> word {\n  S s;\n  *S p = &s;\n  p.a = 3;\n  return p.a;\n}" of
             Ok body ->
                 -- `S s;` -> Let s = alloc in Let dead = memset in Let p = <&s> in ..
                 case b2Shell body of
@@ -6666,11 +6666,12 @@ checks rt =
     , b2SameSsaRow rt "B2 .ssa: `.` IS `->` THROUGH THE WHOLE PIPELINE — `p.a + p.b` and `p->a + p->b` emit BYTE-IDENTICAL text (a `*S` binder from malloc, so the ABI is the same on both sides)"
         (b2DotMid "p.a + p.b")
         (b2DotMid "p->a + p->b")
-    , check "B2 .ssa: the WORKED EXAMPLE's shapes are in the emitted text — malloc(56), memset, the nested field store at offset 8, and the val field addressed at +16 through the barrier seat"
+    , check "B2 .ssa (re-seated by B4b): the WORKED EXAMPLE's shapes are in the emitted text — `alloc8 56` (FRAME memory, never `malloc`), memset, the nested field store at offset 8, and the val field addressed at +16 through the barrier seat"
         (case emitUserSsa rt b2WorkedMid of
             Ok ssa ->
                 String.length ssa > 400
-                    && String.contains "call $malloc(l 56)" ssa
+                    && String.contains "%t2 =l alloc8 56" ssa
+                    && not (String.contains "call $malloc" ssa)
                     && String.contains "call $memset(l " ssa
                     && String.contains "call $rt_vec_store(l " ssa
                     && String.contains "%t9 =l add %t2, 16" ssa
@@ -6733,7 +6734,8 @@ checks rt =
         (case emitUserSsa rt "module B3g\ndefun B3g.g() -> word {\n  word[5] a = { 1, 2, 3, 4, 5 };\n  *word p = a;\n  return p[2];\n}" of
             Ok ssa ->
                 String.contains "function l $q_B3g_x2eg() {" ssa
-                    && String.contains "call $malloc(l 40)" ssa
+                    && String.contains "alloc8 40" ssa
+                    && not (String.contains "call $malloc" ssa)
                     && String.contains "mul 8, 2" ssa
 
             Err _ ->
@@ -6876,15 +6878,16 @@ checks rt =
             Err _ ->
                 False
         )
-    , check "B3 .ssa: the worked source emits its THREE blocks at the sizes the table computes (the same three shapes as tools/qbe/fixtures/Warr.mid — ONE defun here because `emitUserSsa` lowers the first defun only, MEASURED) — 40 (word[5]), 96 + memset 96 (word[3][4] = 12 words), 32 + memset 32 (Outer[2] = 2 x 4 words)"
+    , check "B3 .ssa (re-seated by B4b): the worked source emits its THREE blocks at the sizes the table computes (the same three shapes as tools/qbe/fixtures/Warr.mid — ONE defun here because `emitUserSsa` lowers the first defun only, MEASURED) — alloc8 40 (word[5]), alloc8 96 + memset 96 (word[3][4] = 12 words), alloc8 32 + memset 32 (Outer[2] = 2 x 4 words) — and NOT ONE `malloc`, because a declared aggregate local is frame memory now"
         (case emitUserSsa rt b3WorkedMid of
             Ok ssa ->
                 String.length ssa > 400
-                    && String.contains "call $malloc(l 40)" ssa
-                    && String.contains "call $malloc(l 96)" ssa
+                    && String.contains "alloc8 40" ssa
+                    && String.contains "alloc8 96" ssa
                     && String.contains "l 0, l 96)" ssa
-                    && String.contains "call $malloc(l 32)" ssa
+                    && String.contains "alloc8 32" ssa
                     && String.contains "l 0, l 32)" ssa
+                    && not (String.contains "call $malloc" ssa)
 
             Err _ ->
                 False
@@ -7018,7 +7021,8 @@ checks rt =
         (case b6SsaAt rt "B6s.g" "module B6s\nstruct S { a : word; b : word; }\ndefun B6s.f(s : S) -> word {\n  return s.a;\n}\ndefun B6s.g() -> word {\n  S o;\n  o.a = 1;\n  o.b = 2;\n  return call B6s.f(o);\n}" of
             Ok ssa ->
                 String.contains "call $q_B6s_x2ef(l %t" ssa
-                    && String.contains "call $malloc(l 16)" ssa
+                    && String.contains "alloc8 16" ssa
+                    && not (String.contains "call $malloc" ssa)
 
             Err _ ->
                 False
@@ -7285,6 +7289,138 @@ checks rt =
             Err _ ->
                 False
         )
+    , check "B4b IR: a declared ARRAY local is a FRAME block — `word[5] a;` binds `RawAllocN 5` (five WORDS of QBE stack memory, the node B4 landed for the auto-cells) and a nested `word[3][4] m;` binds `RawAllocN 12`; NO `malloc` node is left in the tree"
+        (case lowlModuleBody "defun Rt.g() -> word {\n  word[5] a;\n  word[3][4] m;\n  a[0] = 1;\n  m[0][0] = 2;\n  return a[0] + m[0][0];\n}" of
+            Ok body ->
+                b2LetValue body
+                    == Just (Unsafe (RawAllocN 5))
+                    && b4AllocNs body == [ 5, 12 ]
+                    && not (List.any (\e -> e == Unsafe (RawCallRaw { sym = "malloc", args = [ Lit (LNumber 40) ] })) (b4Exps body))
+
+            Err _ ->
+                False
+        )
+    , check "B4b .ssa: a struct local AND an array local live in the FRAME — `alloc8 16` / `alloc8 48` in the emitted text, not one `$malloc` call and not one `$free` (a scope exit cannot leak what the frame owns, so no destructor exists to go wrong)"
+        (case emitUserSsa rt "module B4bq\nstruct P { x : word; y : word; }\ndefun B4bq.f(n: word) -> word {\n  P acc;\n  word[6] a = { 3, 1, 4, 1, 5, 9 };\n  acc.x = a[0] + n;\n  return acc.x;\n}" of
+            Ok ssa ->
+                String.contains "alloc8 16" ssa
+                    && String.contains "alloc8 48" ssa
+                    && not (String.contains "call $malloc" ssa)
+                    && not (String.contains "call $free" ssa)
+
+            Err _ ->
+                False
+        )
+    , check "B4b .ssa: the memset of a zeroed local addresses the FRAME block — `S s;` emits `alloc8` then `call $memset(l <that temp>, l 0, l <8*words>)`, so uninitialised-memory discipline survives the move off the heap"
+        (case emitUserSsa rt "module B4bm\nstruct P { x : word; y : word; }\ndefun B4bm.f() -> word {\n  P acc;\n  return acc.x;\n}" of
+            Ok ssa ->
+                String.contains "alloc8 16" ssa
+                    && String.contains "call $memset(l %t" ssa
+                    && String.contains "l 0, l 16)" ssa
+
+            Err _ ->
+                False
+        )
+    , check "B4b REGRESSION (B4's auto-cell may not lose): a word local ASSIGNED in a loop is still a CELL (`RawAllocN 1` + a store of its initialiser + loads in the body) while an ARRAY local declared INSIDE the same loop body is its own frame block — two `RawAllocN`s, no phi, no malloc"
+        (case lowlBody "defun Rt.c(n: word) -> word {\n  word i = 0;\n  while (i < n) {\n    word[2] t;\n    t[0] = i;\n    i = i + t[0];\n  }\n  return i;\n}" of
+            Ok body ->
+                b4AllocNs body == [ 1, 2 ]
+                    && b4CellInits body == 2
+                    && b4CellInit body == Just 1
+                    && b4CellLoads body >= 2
+                    && b4HasLoop body
+
+            Err _ ->
+                False
+        )
+
+    -- ---- B4b: THE WIDENED ESCAPE RULE (one negative row per shape) ----
+    , check "B4b ESCAPE REJECT: `p->ptr = &a;` — a FIELD store through a POINTER target may outlive this frame, so a frame address stored there dangles; the message names the site and the place"
+        (case b6CheckErr rt "module B4be\nstruct S { a : word; ptr : *word; }\ndefun B4be.f(p : *S) -> word {\n  word[3] a = { 1, 2, 3 };\n  p->ptr = &a;\n  return p->a;\n}" of
+            Err msg ->
+                String.contains "ADDRESS of this frame's own storage" msg
+                    && String.contains "p->ptr = &a" msg
+
+            Ok _ ->
+                False
+        )
+    , check "B4b ESCAPE REJECT: `p[0] = &a;` — an INDEX store through a POINTER (`*word p` may point at a heap block or a caller's frame)"
+        (case b6CheckErr rt "module B4bx\ndefun B4bx.f(p : *word) -> word {\n  word[3] a = { 1, 2, 3 };\n  p[0] = &a;\n  return p[0];\n}" of
+            Err msg ->
+                String.contains "ADDRESS of this frame's own storage" msg
+                    && String.contains "p[0] = &a" msg
+
+            Ok _ ->
+                False
+        )
+    , check "B4b ESCAPE REJECT: `p[0] = a;` — the DECAY spelling of the same store (an array VALUE is its address), so the reject cannot be dodged by dropping the `&`"
+        (case b6CheckErr rt "module B4bd\ndefun B4bd.f(p : *word) -> word {\n  word[3] a;\n  p[0] = a;\n  return p[0];\n}" of
+            Err msg ->
+                String.contains "ADDRESS of this frame's own storage" msg
+
+            Ok _ ->
+                False
+        )
+    , check "B4b ESCAPE REJECT: `*S p = &s; return p;` — the alias the provenance set follows (`Ctx.frameAddr`), and the message names the binder it went through (`(via p)`) instead of pretending the source said `&s`"
+        (case b6CheckErr rt "module B4bp\nstruct S { a : word; }\ndefun B4bp.f() -> *S {\n  S s;\n  *S p = &s;\n  return p;\n}" of
+            Err msg ->
+                String.contains "returns the ADDRESS of this frame" msg
+                    && String.contains "(via p)" msg
+
+            Ok _ ->
+                False
+        )
+    , check "B4b ESCAPE REJECT: `return a;` on an ARRAY local in a `-> *word` defun — MEASURED as a live hole before this unit (it emitted a return of the block's address); an array value IS its address, so this is the same dangling return"
+        (case b6CheckErr rt "module B4ba\ndefun B4ba.f() -> *word {\n  word[3] a;\n  return a;\n}" of
+            Err msg ->
+                String.contains "returns the ADDRESS of this frame" msg
+
+            Ok _ ->
+                False
+        )
+    , check "B4b ESCAPE REJECT: `word w = &a; return w;` — a scalar binder carries the address just as a `*T` does, so the provenance set tracks it too (and is CLEARED by any assignment to the name, below)"
+        (case b6CheckErr rt "module B4bw\ndefun B4bw.f() -> word {\n  word[3] a;\n  word w = &a;\n  return w;\n}" of
+            Err msg ->
+                String.contains "returns the ADDRESS of this frame" msg
+                    && String.contains "(via w)" msg
+
+            Ok _ ->
+                False
+        )
+    , check "B4b ESCAPE REJECT: `return &s.f;` — interior of a frame block is still this frame's storage (the B4 rule, kept)"
+        (case b6CheckErr rt "module B4bi\nstruct I { k : word; }\nstruct S { inner : I; }\ndefun B4bi.f() -> *I {\n  S s;\n  return &s.inner;\n}" of
+            Err msg ->
+                String.contains "returns the ADDRESS of this frame" msg
+
+            Ok _ ->
+                False
+        )
+
+    -- ---- B4b ACCEPT: the rule must not reject what is SOUND ----
+    , check "B4b ACCEPT (no false positive): a store into a SAME-FRAME aggregate is legal — `s.ptr = &t;` and `a[0] = &t;` on locals: the address and the block die together, so there is nothing to dangle"
+        (case b6CheckErr rt "module B4bs\nstruct S { a : word; ptr : *word; }\ndefun B4bs.f() -> word {\n  S t;\n  S s;\n  t.a = 5;\n  s.ptr = &t;\n  word[3] a;\n  a[0] = &t;\n  return t.a + a[0];\n}" of
+            Err _ ->
+                False
+
+            Ok _ ->
+                True
+        )
+    , check "B4b ACCEPT: PASSING `&local` to a callee is legal — the ordinary out-parameter idiom.  RETENTION by the callee is the DOCUMENTED obligation (no checker can see it): the fixture Wesc.mid/wescprobe.elm is the probe that makes its consequence visible (a read through a retained frame address answers 0, not the 7 written)"
+        (case b6CheckErr rt "module B4bc\nstruct S { a : word; }\ndefun B4bc.take(p : *S) -> word {\n  return p->a;\n}\ndefun B4bc.f() -> word {\n  S s;\n  s.a = 4;\n  return call B4bc.take(&s);\n}" of
+            Err _ ->
+                False
+
+            Ok _ ->
+                True
+        )
+    , check "B4b ACCEPT: an assignment CLEARS the provenance — `*S p = &s; p = rawcall malloc(16); return p;` is legal, because `p` no longer holds a frame address (a flow-blind rule would reject a correct program here)"
+        (case b6CheckErr rt "module B4br\nstruct S { a : word; }\ndefun B4br.f() -> *S {\n  S s;\n  *S p = &s;\n  p = rawcall malloc(16);\n  return p;\n}" of
+            Err _ ->
+                False
+
+            Ok _ ->
+                True
+        )
     ]
 
 
@@ -7487,6 +7623,23 @@ b4CellInit body =
             )
             (b4Exps body)
         )
+
+
+{-| Every `RawAllocN`'s word count, in tree order (B4b reads the frame
+blocks this way: a cell is 1 word, an array/struct block is its width).
+-}
+b4AllocNs : Exp -> List Int
+b4AllocNs body =
+    List.filterMap
+        (\e ->
+            case e of
+                Unsafe (RawAllocN n) ->
+                    Just n
+
+                _ ->
+                    Nothing
+        )
+        (b4Exps body)
 
 
 b4CellInits : Exp -> Int
