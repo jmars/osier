@@ -3114,6 +3114,200 @@ checks rt runtimeMidText =
                 False
         )
 
+    -- ==================== cffi U1: `extern` declarations (grammar + CARRYING, no semantics) ====================
+    -- An `extern` is the THIRD file-scoped declaration: it lands on
+    -- `Module.decls` beside `struct`/`enum` and NOTHING consults it yet (the
+    -- typed call boundary is cffi U2), so these rows are about the GRAMMAR and
+    -- the CARRIED record only.  Every accept row asserts the exact `FfiSig`
+    -- (a silently re-ordered parameter list must fail), every reject row pins
+    -- a message fragment AND its position, so a row cannot pass on a parse
+    -- that failed for a different reason.  The INERT rows at the end are the
+    -- unit's real claim: a declaration moves no byte and rejects nothing.
+
+    , check "parse cffi U1: an extern declaration lands on the module's decls (exact AST: declaration-order params, varargs False, i32 result) and the defuns are untouched"
+        (case Parse.parseModule "extern access(path : ptr, mode : i32) -> i32;\ndefun Rt.f() -> word { return 0; }" of
+            Ok m ->
+                m.decls
+                    == [ Ast.ExternDecl
+                            { name = "access"
+                            , sig =
+                                { params =
+                                    [ { name = "path", ty = Ast.FPtr }
+                                    , { name = "mode", ty = Ast.FI32 }
+                                    ]
+                                , varargs = False
+                                , result = Ast.FI32
+                                }
+                            }
+                       ]
+                    && List.map .key m.defuns
+                    == [ "Rt.f" ]
+
+            Err _ ->
+                False
+        )
+    , check "parse cffi U1: ALL SEVEN widths parse in the RESULT position — the table is exactly i32 u32 i64 u64 ptr f64 void (and every one of these declarations also pins ZERO params)"
+        (List.all
+            (\( width, want ) ->
+                case Parse.parseModule ("extern g() -> " ++ width ++ ";") of
+                    Ok m ->
+                        List.filterMap externSigOf m.decls
+                            == [ { params = [], varargs = False, result = want } ]
+
+                    Err _ ->
+                        False
+            )
+            [ ( "i32", Ast.FI32 )
+            , ( "u32", Ast.FU32 )
+            , ( "i64", Ast.FI64 )
+            , ( "u64", Ast.FU64 )
+            , ( "ptr", Ast.FPtr )
+            , ( "f64", Ast.FF64 )
+            , ( "void", Ast.FVoid )
+            ]
+        )
+    , check "parse cffi U1: the six non-void widths parse in the PARAMETER position (a parameter is a register class — `void` is not one, see the R-05 reject)"
+        (case Parse.parseModule "extern seven(a : i32, b : u32, c : i64, d : u64, e : ptr, f : f64) -> i32;" of
+            Ok m ->
+                List.filterMap externSigOf m.decls
+                    == [ { params =
+                            [ { name = "a", ty = Ast.FI32 }
+                            , { name = "b", ty = Ast.FU32 }
+                            , { name = "c", ty = Ast.FI64 }
+                            , { name = "d", ty = Ast.FU64 }
+                            , { name = "e", ty = Ast.FPtr }
+                            , { name = "f", ty = Ast.FF64 }
+                            ]
+                         , varargs = False
+                         , result = Ast.FI32
+                         }
+                       ]
+
+            Err _ ->
+                False
+        )
+    , check "parse cffi U1: the trailing `...` is CARRIED (varargs True) and the fixed params stay before it"
+        (case Parse.parseModule "extern printf(fmt : ptr, ...) -> i32;" of
+            Ok m ->
+                List.filterMap externSigOf m.decls
+                    == [ { params = [ { name = "fmt", ty = Ast.FPtr } ]
+                         , varargs = True
+                         , result = Ast.FI32
+                         }
+                       ]
+
+            Err _ ->
+                False
+        )
+    , check "parse cffi U1: a zero-parameter `void` declaration (the `_exit` shape) — `()` with no params and a RESULT-position void"
+        (case Parse.parseModule "extern _exit(code : i32) -> void;\nextern getpid() -> i32;" of
+            Ok m ->
+                List.filterMap externSigOf m.decls
+                    == [ { params = [ { name = "code", ty = Ast.FI32 } ], varargs = False, result = Ast.FVoid }
+                       , { params = [], varargs = False, result = Ast.FI32 }
+                       ]
+
+            Err _ ->
+                False
+        )
+    , check "parse cffi U1: an extern rides BETWEEN the struct/enum decls and the defuns without disturbing either (3 decls in order, the header and the defun set intact)"
+        (case Parse.parseModule "module M\nstruct S { f : word; }\nextern access(path : ptr, mode : i32) -> i32;\nenum K { a = 0; }\ndefun M.g(p : *S) -> word { return p->f; }" of
+            Ok m ->
+                m.header.name
+                    == Just "M"
+                    && List.length m.decls
+                    == 3
+                    && List.filterMap externSigOf m.decls
+                    /= []
+                    && List.map .key m.defuns
+                    == [ "M.g" ]
+
+            Err _ ->
+                False
+        )
+
+    -- the named rejections, each pinning its OWN fragment (a loud-but-wrong failure must not pass)
+    , check "parse cffi U1 REJECTS R-01: a width outside the table (`u8` — a MEMORY width, not a call class) — the message names the found token AND the whole admissible set"
+        (case Parse.parseModule "extern f(a : u8) -> i32;" of
+            Err msg ->
+                String.contains "expected an FFI width (i32, u32, i64, u64, ptr, f64, void), found `u8`" msg
+
+            Ok _ ->
+                False
+        )
+    , check "parse cffi U1 REJECTS R-02: `f32` is not a width (Mid has ONE float class, `d`/f64; QBE's `s` class is unbuilt) — the same table, the same message"
+        (case Parse.parseModule "extern f(a : f32) -> i32;" of
+            Err msg ->
+                String.contains "expected an FFI width" msg
+                    && String.contains "found `f32`" msg
+
+            Ok _ ->
+                False
+        )
+    , check "parse cffi U1 REJECTS a `val` in a parameter slot — at parse it is simply not a width (the 40-byte aggregate has no C ABI, and the J15 wording that says so is cffi U2's)"
+        (case Parse.parseModule "extern f(a : val) -> i32;" of
+            Err msg ->
+                String.contains "found `val`" msg
+
+            Ok _ ->
+                False
+        )
+    , check "parse cffi U1 REJECTS R-05: `void` as a PARAMETER — 'void' is a RESULT-only width (and the row above proves `-> void` is accepted, so this is not a blanket void reject)"
+        (case Parse.parseModule "extern f(a : void) -> i32;" of
+            Err msg ->
+                String.contains "'void' is a RESULT-only width" msg
+
+            Ok _ ->
+                False
+        )
+    , check "parse cffi U1 REJECTS R-10: `...` that is not last — a COMMITTED reject naming the rule, never a silent end of the parameter list"
+        (case Parse.parseModule "extern f(a : i32, ..., b : i64) -> i32;" of
+            Err msg ->
+                String.contains "'...' must be the last parameter" msg
+
+            Ok _ ->
+                False
+        )
+    , check "parse cffi U1 REJECTS R-10 (the second arm): a SECOND `...` is not last either"
+        (case Parse.parseModule "extern f(a : i32, ..., ...) -> i32;" of
+            Err msg ->
+                String.contains "'...' must be the last parameter" msg
+
+            Ok _ ->
+                False
+        )
+    , check "parse cffi U1 REJECTS a non-plain extern symbol: a DOTTED name is a Mid defun key (`Rt.open`), never a C symbol"
+        (case Parse.parseModule "extern Rt.open(path : ptr) -> i32;" of
+            Err msg ->
+                String.contains "expected a plain `extern` symbol" msg
+
+            Ok _ ->
+                False
+        )
+    , check "parse cffi U1 REJECTS a dropped `;` after a declaration (the same loud-separator discipline the struct fields keep)"
+        (case Parse.parseModule "extern access(path : ptr) -> i32" of
+            Err msg ->
+                String.contains "expected `;`" msg
+
+            Ok _ ->
+                False
+        )
+
+    -- THE UNIT'S REAL CLAIM: parsed, CARRIED, NOT CONSULTED.  A declaration
+    -- must check and lower to exactly what the same module without it produces
+    -- — no J15, no node, no byte (U2 is what makes it mean something).
+    , checkOkModule "check cffi U1 INERT: a module carrying an extern declaration CHECKS (the five decl folds have their arm, and the declaration contributes no table row — no J15 in this unit)"
+        "extern access(path : ptr, mode : i32) -> i32;\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , check "lower cffi U1 INERT: the same module LOWERS to the one defun it declares (the extern rides beside the defuns and emits nothing)"
+        (case loweredRuntime "extern access(path : ptr, mode : i32) -> i32;\ndefun Rt.g() -> word {\n  return 0;\n}" of
+            Ok ( _, defuns ) ->
+                List.map .key defuns
+                    == [ "Rt.g" ]
+
+            Err _ ->
+                False
+        )
+
     -- ==================== A1: the checker (J11-J14, the U1 reject arms become real checks) ====================
     -- Each positive row parses a MODULE (decls + defuns) and runs Check.checkModule;
     -- each negative row pins the judgment's message fragment, so a parse failure
@@ -3743,14 +3937,14 @@ checks rt runtimeMidText =
 
     -- (2) THE ANTI-EMPTY CENSUS.  This repo has shipped a battery that ran zero
     -- parts and "passed", so the new AST constructors are counted, not assumed:
-    -- each of EField/EIndex/EDeref/SFieldStore/SIndexStore/StructDecl/EnumDecl
-    -- must appear >= 1 time in a PARSED fixture, and the CONTROL row proves the
+    -- each of EField/EIndex/EDeref/SFieldStore/SIndexStore/StructDecl/EnumDecl/
+    -- ExternDecl must appear >= 1 time in a PARSED fixture, and the CONTROL row proves the
     -- walker cannot report a trivially-positive count (it reports 0 for every one
     -- of them on a fixture that carries none, while still counting a form that
     -- fixture does carry).  The fixture nests the forms inside an `if` whose
     -- blocks are a Stmt list + a Term, so a walker that forgets to descend fails
     -- the census row.
-    , check "A3 ANTI-EMPTY census: every new AST constructor (EField, EIndex, EDeref, SFieldStore, SIndexStore, StructDecl, EnumDecl) is counted >= 1 in a parsed fixture — nested in an if's blocks, so the walk must descend"
+    , check "A3 ANTI-EMPTY census: every new AST constructor (EField, EIndex, EDeref, SFieldStore, SIndexStore, StructDecl, EnumDecl, ExternDecl) is counted >= 1 in a parsed fixture — nested in an if's blocks, so the walk must descend"
         (let
             counts =
                 censusOfSource a3CensusMid
@@ -9239,13 +9433,28 @@ a3ScaleMid =
     a3OffsetDecls ++ "\ndefun Rt.a(p: *M, i: word) -> word {\n  return p[i];\n}"
 
 
+{-| cffi U1's rows read the CARRIED signature back off the module's own decl
+list (nothing else consumes it in this unit, so the parse IS the observable).
+A struct/enum declaration yields nothing here, so a row asserting the exact
+list cannot pass on a module whose extern failed to land.
+-}
+externSigOf : Ast.Decl -> Maybe Ast.FfiSig
+externSigOf d =
+    case d of
+        Ast.ExternDecl e ->
+            Just e.sig
+
+        _ ->
+            Nothing
+
+
 {-| The census fixture: every NEW AST constructor, with the access forms nested
 INSIDE an `if`'s blocks (a Stmt list + a Term) so a walker that forgets to
 descend reports a short count and the census row fails.
 -}
 a3CensusMid : String
 a3CensusMid =
-    "module C\nstruct S { f : word; g : word; }\nenum K { a = 0; b = 1; }\ndefun C.a(p: *S, q: *word, i: word) -> word {\n  *word d = q;\n  p->f = *d;\n  p[1] = p->g + p->f;\n  if (mkbool(i == 1)) {\n    return p[i];\n  } else {\n    return *d;\n  }\n}"
+    "module C\nstruct S { f : word; g : word; }\nenum K { a = 0; b = 1; }\nextern access(path : ptr, mode : i32) -> i32;\ndefun C.a(p: *S, q: *word, i: word) -> word {\n  *word d = q;\n  p->f = *d;\n  p[1] = p->g + p->f;\n  if (mkbool(i == 1)) {\n    return p[i];\n  } else {\n    return *d;\n  }\n}"
 
 
 a3CensusTags : List String
@@ -9257,6 +9466,7 @@ a3CensusTags =
     , "SIndexStore"
     , "StructDecl"
     , "EnumDecl"
+    , "ExternDecl"
     ]
 
 
@@ -9295,6 +9505,9 @@ censusDecl d =
 
         Ast.EnumDecl _ ->
             [ "EnumDecl" ]
+
+        Ast.ExternDecl _ ->
+            [ "ExternDecl" ]
 
 
 censusBlock : Ast.Block -> List String

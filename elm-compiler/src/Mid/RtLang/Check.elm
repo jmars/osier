@@ -714,7 +714,12 @@ declCheck decls =
 
 
 {-| The first declaration name used twice (struct/enum names in one
-namespace), or `Nothing`.
+namespace), or `Nothing`.  An `extern` is deliberately NOT in this
+namespace: its symbol is a C name in the declarations' own table, and the
+duplicate-SYMBOL judgment belongs to the extern table (cffi U2's R-06).
+Folding it in here would (a) reject two externs as a struct-name clash and
+(b) let a struct and a C symbol collide under a message about `*S`
+pointers.
 -}
 duplicateDeclName : List Decl -> Maybe String
 duplicateDeclName decls =
@@ -723,21 +728,29 @@ duplicateDeclName decls =
             Nothing
 
         d :: rest ->
-            if List.member (declName d) (List.map declName rest) then
-                Just (declName d)
+            case declName d of
+                Nothing ->
+                    duplicateDeclName rest
 
-            else
-                duplicateDeclName rest
+                Just name ->
+                    if List.member name (List.filterMap declName rest) then
+                        Just name
+
+                    else
+                        duplicateDeclName rest
 
 
-declName : Decl -> String
+declName : Decl -> Maybe String
 declName d =
     case d of
         StructDecl s ->
-            s.name
+            Just s.name
 
         EnumDecl e ->
-            e.name
+            Just e.name
+
+        ExternDecl _ ->
+            Nothing
 
 
 {-| The struct table: walk the `struct` declarations (ignoring enums),
@@ -759,6 +772,9 @@ structNames decls =
                     s.name :: acc
 
                 EnumDecl _ ->
+                    acc
+
+                ExternDecl _ ->
                     acc
         )
         []
@@ -785,6 +801,9 @@ structsFoldAll all remaining names acc =
         d :: rest ->
             case d of
                 EnumDecl _ ->
+                    structsFoldAll all rest names acc
+
+                ExternDecl _ ->
                     structsFoldAll all rest names acc
 
                 StructDecl s ->
@@ -1033,6 +1052,9 @@ membersOfDecl decls sname =
                 EnumDecl _ ->
                     membersOfDecl rest sname
 
+                ExternDecl _ ->
+                    membersOfDecl rest sname
+
 
 {-| The first field name used twice in one struct, or `Nothing`.  B5: a union
 block's member names are PROMOTED into the struct's field namespace, so the
@@ -1086,6 +1108,9 @@ enumsFold decls acc =
         d :: rest ->
             case d of
                 StructDecl _ ->
+                    enumsFold rest acc
+
+                ExternDecl _ ->
                     enumsFold rest acc
 
                 EnumDecl e ->

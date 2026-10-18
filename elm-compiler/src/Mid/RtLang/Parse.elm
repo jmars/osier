@@ -278,7 +278,7 @@ and — per the O(n) invariant in the token-plumbing section — NO
 -}
 
 import Dict exposing (Dict)
-import Mid.RtLang.Ast exposing (AggShape(..), ArrayInit(..), Block, Builtin(..), Decl(..), Defun, Effect(..), EnumEntry, Exp(..), Export, ExportSig, Field, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Module, OTy(..), PTy(..), Param, Program, SizeTarget(..), Stmt(..), StructInit(..), StructMember(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
+import Mid.RtLang.Ast exposing (AggShape(..), ArrayInit(..), Block, Builtin(..), Decl(..), Defun, Effect(..), EnumEntry, Exp(..), Export, ExportSig, FfiParam, FfiSig, FfiTy(..), Field, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Module, OTy(..), PTy(..), Param, Program, SizeTarget(..), Stmt(..), StructInit(..), StructMember(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
 import Parser exposing (DeadEnd, Problem(..))
 import ParserFast
 
@@ -1617,24 +1617,28 @@ header =
 -- ============================ file-scoped declarations (U1) ============================
 
 
-{-| The file-scoped `struct`/`enum` declaration loop (U1, midlang-u1),
-after the header's export block and before the defuns — the top-of-file
-position the plan's worked examples put `struct Region { ... }` /
-`enum RootKind { ... }`.  Each declaration is entered by the SAME
-non-committed peek dispatch as `defun`/`exportLine`: a non-`struct`/
-`enum` token hands back what has, so a declaration-less module (today's
-`runtime.mid`) parses with `decls == []` and every existing parse is
-untouched.  U1 CARRIES the declarations on the module record — the
-checker (U2) builds the struct/enum tables from them, the lowerer (U3)
-lays fields out from the SAME table; nothing here emits a byte.
+{-| The file-scoped `struct`/`enum`/`extern` declaration loop (U1,
+midlang-u1; `extern` added by cffi U1), after the header's export block
+and before the defuns — the top-of-file position the plan's worked
+examples put `struct Region { ... }` / `enum RootKind { ... }` /
+`extern openat(dirfd : i32, path : ptr, flags : i32, mode : i32) -> i32;`.
+Each declaration is entered by the SAME non-committed peek dispatch as
+`defun`/`exportLine`: a non-`struct`/`enum`/`extern` token hands back what
+has, so a declaration-less module (today's `runtime.mid`) parses with
+`decls == []` and every existing parse is untouched.  The declarations are
+CARRIED on the module record — the checker builds the struct/enum tables
+from them and the lowerer lays fields out from the SAME table; an
+`extern` is carried and NOT YET consulted (the typed call boundary is
+cffi U2), so nothing here emits a byte.
 -}
 decls : ParserFast.Parser (List Decl)
 decls =
     ParserFast.loopWhileSucceeds decl [] (\d acc -> acc ++ [ d ]) identity
 
 
-{-| One declaration, entered by a committed peek for the `struct`/`enum`
-keyword.  Anything else is the non-committed handback the loop stops on.
+{-| One declaration, entered by a committed peek for one of the three
+declaration keywords (`struct`/`enum`/`extern`).  Anything else is the
+non-committed handback the loop stops on.
 -}
 decl : ParserFast.Parser Decl
 decl =
@@ -1654,8 +1658,11 @@ declAt offset src =
         Just ( "enum", _ ) ->
             skipWsCommentsFollowedBy enumDecl
 
+        Just ( "extern", _ ) ->
+            skipWsCommentsFollowedBy externDecl
+
         _ ->
-            ParserFast.problem "expected a `struct`/`enum` declaration or a defun (or the end of the program)"
+            ParserFast.problem "expected a `struct`/`enum`/`extern` declaration or a defun (or the end of the program)"
 
 
 {-| `struct S { f : ty; ... }` — each field `name : type` REQUIRES its
@@ -1697,6 +1704,221 @@ enumDecl =
                 (spelled "}" (succeed ()))
             )
         )
+
+
+{-| The C FFI boundary (cffi plan §2 — mid-c's THIRD file-scoped
+declaration):
+
+    extern <plainname> ( [ <name> : <width> { , <name> : <width> } ] [ , ... ] ) -> <width> ;
+
+CARRIED, NOT CONSULTED.  This parser builds the `FfiSig`; nothing in the
+checker or the lowerer reads it in this unit, so a declaration emits no
+byte and every `.mid` that does not declare a symbol parses and lowers
+exactly as before (the corpus is the oracle).  The typed call boundary
+that turns a declaration into an emitted width is the plan's U2.
+
+`;`-terminated like a struct field ("the last one too, so a dropped
+separator is loud").  The symbol is the SAME `isPlainName` a `rawcall`
+names (no dots) and a Mid defun key must be DOTTED (`isQualifiedKey`, J2),
+so the two namespaces are disjoint by grammar — the checker assertion that
+the tables agree is U2's R-08, not this unit's.
+
+NOTE ON THE `->`: it is special ONLY in this position (between the closed
+parameter list and the result width).  In expression grammar `->` is a
+postfix field access, and that is untouched: a declaration is never parsed
+through the expression parser.
+-}
+externDecl : ParserFast.Parser Decl
+externDecl =
+    ParserFast.map3
+        (\name sig_ _ -> ExternDecl { name = name, sig = sig_ })
+        (spelled "extern" externSym)
+        ffiSig
+        (spelled ";" (succeed ()))
+
+
+{-| The declaration's C symbol: a plain name, the same shape `rawcall`
+takes (`openat`, `fstatat`, `__errno_location`).  A DOTTED token is
+rejected by name: a dotted key is a Mid defun (`Rt.open`), and letting one
+through here would make a C symbol out of a Mid namespace.
+-}
+externSym : ParserFast.Parser String
+externSym =
+    ParserFast.offsetSourceAndThen externSymAt
+
+
+externSymAt : Int -> String -> ParserFast.Parser String
+externSymAt offset src =
+    case tokenAtOff offset src of
+        Just ( tok, _ ) ->
+            if isPlainName tok then
+                spelled tok (succeed tok)
+
+            else
+                ParserFast.problem
+                    ("expected a plain `extern` symbol (letters, digits, `_`; a dotted name is a Mid defun key), found `" ++ tok ++ "`")
+
+        Nothing ->
+            ParserFast.problem "expected an `extern` symbol"
+
+
+{-| `( ... ) -> width` — the parameter list (with its own `)`) then the
+result width.  The whitespace-commit discipline is the one `argsInParens`
+records: the EMPTY list is chosen by peeking for `)` first, never by racing
+an optional parameter parser against the close.
+-}
+ffiSig : ParserFast.Parser FfiSig
+ffiSig =
+    ParserFast.map2
+        (\( params, varargs ) result ->
+            { params = params, varargs = varargs, result = result }
+        )
+        ffiParams
+        (spelled "->" ffiTy)
+
+
+{-| `( )` or `( p : width { , p : width } [ , ... ] )` — the WHOLE list,
+closing `)` included (so the `...`-last rule can look at what follows it).
+The ONE vararg form v1 allows is the trailing `...`: a variadic CALL is
+unchecked by construction (C's own contract), the marker is carried for
+U4, and nothing here gives it a meaning.
+-}
+ffiParams : ParserFast.Parser ( List FfiParam, Bool )
+ffiParams =
+    spelled "("
+        (ParserFast.oneOf2
+            (spelled ")" (succeed ( [], False )))
+            (ParserFast.map2
+                (\p rest -> ( p :: Tuple.first rest, Tuple.second rest ))
+                ffiParam
+                ffiParamTail
+            )
+        )
+
+
+{-| After one parameter: the closing `)`, or `,` and then either another
+`name : width` or the trailing `...` (chosen by a PEEK at the token, so a
+name is never raced against the ellipsis).
+-}
+ffiParamTail : ParserFast.Parser ( List FfiParam, Bool )
+ffiParamTail =
+    ParserFast.oneOf2
+        (spelled ")" (succeed ( [], False )))
+        (spelled "," ffiItem)
+
+
+ffiItem : ParserFast.Parser ( List FfiParam, Bool )
+ffiItem =
+    ParserFast.offsetSourceAndThen ffiItemAt
+
+
+ffiItemAt : Int -> String -> ParserFast.Parser ( List FfiParam, Bool )
+ffiItemAt offset src =
+    case tokenAtOff offset src of
+        Just ( "...", _ ) ->
+            spelled "..." ffiAfterEllipsis
+
+        _ ->
+            ParserFast.map2
+                (\p rest -> ( p :: Tuple.first rest, Tuple.second rest ))
+                ffiParam
+                ffiParamTail
+
+
+{-| After a trailing `...`: the parameter list may only CLOSE here.  R-10
+(otherwise "expected `)`", which would name the wrong thing): the
+`spelled ","` above already committed the parse, so this `problem` is a
+loud parse error rather than the non-committed handback that would end the
+list silently.
+-}
+ffiAfterEllipsis : ParserFast.Parser ( List FfiParam, Bool )
+ffiAfterEllipsis =
+    ParserFast.oneOf2
+        (spelled ")" (succeed ( [], True )))
+        (ParserFast.problem "'...' must be the last parameter")
+
+
+ffiParam : ParserFast.Parser FfiParam
+ffiParam =
+    ParserFast.map2
+        (\name ty -> { name = name, ty = ty })
+        surfaceName
+        (spelled ":" ffiParamTy)
+
+
+{-| A PARAMETER width: the width table minus `void`, which is a RESULT-only
+width (R-05) — a C parameter that takes no register is not a parameter.
+The plan files this under the extern judgment (J15, U2); the position is
+known here, so the grammar refuses it here and U2 inherits the message.
+-}
+ffiParamTy : ParserFast.Parser FfiTy
+ffiParamTy =
+    ParserFast.offsetSourceAndThen ffiParamTyAt
+
+
+ffiParamTyAt : Int -> String -> ParserFast.Parser FfiTy
+ffiParamTyAt offset src =
+    case tokenAtOff offset src of
+        Just ( "void", _ ) ->
+            ParserFast.problem "'void' is a RESULT-only width — a parameter must name an actual register class"
+
+        _ ->
+            ffiTyAt offset src
+
+
+ffiTy : ParserFast.Parser FfiTy
+ffiTy =
+    ParserFast.offsetSourceAndThen ffiTyAt
+
+
+{-| The width ATOM TABLE (`i32 u32 i64 u64 ptr f64 void`).  One table, one
+message: anything else — `u8`, `i16`, `int`, `long`, `char` (the `*` of
+`char*` is a separate token), `float32` — is R-01/R-02's parse reject
+naming the found token AND the whole admissible set, so the failure says
+what to write instead.
+-}
+ffiTyAt : Int -> String -> ParserFast.Parser FfiTy
+ffiTyAt offset src =
+    case tokenAtOff offset src of
+        Just ( tok, _ ) ->
+            case ffiTyOf tok of
+                Just ty ->
+                    spelled tok (succeed ty)
+
+                Nothing ->
+                    ParserFast.problem
+                        ("expected an FFI width (i32, u32, i64, u64, ptr, f64, void), found `" ++ tok ++ "`")
+
+        Nothing ->
+            ParserFast.problem "expected an FFI width (i32, u32, i64, u64, ptr, f64, void)"
+
+
+ffiTyOf : String -> Maybe FfiTy
+ffiTyOf tok =
+    case tok of
+        "i32" ->
+            Just FI32
+
+        "u32" ->
+            Just FU32
+
+        "i64" ->
+            Just FI64
+
+        "u64" ->
+            Just FU64
+
+        "ptr" ->
+            Just FPtr
+
+        "f64" ->
+            Just FF64
+
+        "void" ->
+            Just FVoid
+
+        _ ->
+            Nothing
 
 
 {-| A struct/enum NAME: an Uppercase identifier (`Region`, `Hdr`,

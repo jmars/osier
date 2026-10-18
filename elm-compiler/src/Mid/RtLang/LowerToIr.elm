@@ -2887,6 +2887,9 @@ fieldTyIn decls structName fieldName =
                 EnumDecl _ ->
                     fieldTyIn rest structName fieldName
 
+                ExternDecl _ ->
+                    fieldTyIn rest structName fieldName
+
 
 {-| The declared type of a struct's field, walking the body — B5: a union
 block's members are PROMOTED, so `m.n` finds `n` inside the block (that is
@@ -3070,6 +3073,9 @@ fieldsOf decls sname =
                         fieldsOf rest sname
 
                 EnumDecl _ ->
+                    fieldsOf rest sname
+
+                ExternDecl _ ->
                     fieldsOf rest sname
 
 

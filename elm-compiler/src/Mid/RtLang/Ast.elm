@@ -9,6 +9,9 @@ module Mid.RtLang.Ast exposing
     , Exp(..)
     , Export
     , ExportSig
+    , FfiParam
+    , FfiSig
+    , FfiTy(..)
     , Field
     , Flag(..)
     , FlagGuard(..)
@@ -403,13 +406,15 @@ type alias Header =
     }
 
 
-{-| A whole `.mid` file: the header, the file-scoped `struct`/`enum`
-declarations (`decls`), and the defun list (`Program`).
+{-| A whole `.mid` file: the header, the file-scoped `struct`/`enum`/
+`extern` declarations (`decls`), and the defun list (`Program`).
 `Parse.parseModule` returns this; the defun list is the same `Program`
 every lowerer/checker already consumes (the header and the declarations
-are NOT lowered in U1 — they ride beside the program, consumed by the
+are NOT lowered — they ride beside the program, consumed by the
 A1 checker (J11/J14) to build the struct/enum tables and the A2 lowerer to
-lay out fields).  v1 has NO cross-module import: these declarations are
+lay out fields; an `extern` rides the same slot and is CONSULTED BY NO ONE
+yet, cffi U2's typed call boundary being what reads it).  v1 has NO
+cross-module import: these declarations are
 FILE-SCOPED to their own `.mid` module — a `*S` in one module cannot name
 a struct declared in another (pointers cross a module boundary only as
 the opaque `word`/`*word` the plan §2.5 already pins).
@@ -443,10 +448,69 @@ drift (plan risk R2).  It is a named offset table over raw memory — never
 a GC object kind: `value_array` stays the only GC object (the owner's
 hard constraint), and a struct value is reached only through a pointer
 the program already holds.
+
+`ExternDecl` is the THIRD file-scoped declaration (cffi plan §2) and rides
+the same slot for the same reason: `Module.decls` already reaches both
+consumers (the checker's declarative folds and the lowerer's `lowerAll`),
+so a C signature needs no new plumbing.  It is not a layout table: it is
+the width table for a `rawcall` symbol's C boundary (U2 reads it).
+`Module.decls` carries it; NOTHING consults it in this unit.
 -}
 type Decl
     = StructDecl { name : String, members : List StructMember }
     | EnumDecl { name : String, entries : List EnumEntry }
+    | ExternDecl { name : String, sig : FfiSig }
+
+
+{-| THE C FFI WIDTH VOCABULARY (cffi plan §3) — the ONLY widths an `extern`
+declaration may name, as a CALL-BOUNDARY REGISTER CLASS rather than a
+memory layout.  Each row is a class the IL can already spell and the
+vendored QBE already emits: `i32`/`u32` are a `w` call result (plus the
+`extsw`/`extuw` extension the result read needs), `i64`/`u64`/`ptr` are an
+`l` one, `f64` is `d`, and `void` keeps today's dead `l` temp — so a
+declaration can never ask for an instruction the backend lacks.  A width
+OUTSIDE this table (`u8`, `i16`, `char*`, a struct by value, `val`) is a
+parse reject: narrow and sub-word widths are MEMORY widths, and
+width-typed memory is the plan's own later unit (U6) with a layout oracle,
+not this grammar.
+
+DISTINCT FROM `OTy` (the export block's declared-type grammar): `OTy` is
+polymorphic and is deliberately NOT an ABI vocabulary; folding `i32`/`ptr`
+into it would put C register classes into the Osier type language.
+-}
+type FfiTy
+    = FI32
+    | FU32
+    | FI64
+    | FU64
+    | FPtr
+    | FF64
+    | FVoid
+
+
+{-| One declared C parameter: its NAME is documentation only (the call site
+passes positionally), its width is what the boundary checks.  `void` is not
+a legal `FfiTy` here — the parser rejects it in this position (a parameter
+must name an actual register class).
+-}
+type alias FfiParam =
+    { name : String
+    , ty : FfiTy
+    }
+
+
+{-| A declared C signature: the fixed parameters in declaration order, the
+trailing `...` flag (`varargs`), and the result width.  CARRIED ONLY in
+this unit: nothing in the checker or the lowerer CONSULTS it yet, so a
+declaration emits no byte — the typed call boundary that reads it is the
+plan's U2, and until it lands the declaration is a parsed-and-ignored
+record (the "seat that is never called" shape, stated in the unit's report).
+-}
+type alias FfiSig =
+    { params : List FfiParam
+    , varargs : Bool
+    , result : FfiTy
+    }
 
 
 {-| One struct BODY ITEM — B5 (handoff-midlang-b5): a named field, or an
