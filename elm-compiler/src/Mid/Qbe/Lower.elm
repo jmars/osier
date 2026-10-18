@@ -94,7 +94,7 @@ module Mid.Qbe.Lower exposing (lower)
 -- (Exp's Con variant is deliberately NOT exposed: Mid.Qbe.Il.Arg also has a
 -- Il.Con (the integer-constant argument), and Elm cannot qualify constructors
 -- in patterns — exposing only one of the two keeps the pattern arms clean.)
-import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), FfiWidth(..), Lambda, LetBinder(..), Lit(..), Match(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), Step(..), UnsafeNode(..), ValuePath(..))
+import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), FfiWidth(..), Lambda, LetBinder(..), Lit(..), Match(..), MemWidth(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), Step(..), UnsafeNode(..), ValuePath(..))
 import Mid.Rt as MidRt
 import Mid.RtGc as RtGc
 import Mid.RtLayout as RtLayout
@@ -1006,6 +1006,14 @@ rawOperands node =
 
         RawWordStore r ->
             [ r.ptr, r.index, r.value ]
+
+        -- cffi U6: width-typed memory — the offset is node data, so the
+        -- operands are the pointer (and the value for a store).
+        RawMemLoad r ->
+            [ r.ptr ]
+
+        RawMemStore r ->
+            [ r.ptr, r.value ]
 
         RawCallRaw call ->
             call.args
@@ -2345,6 +2353,27 @@ lowerRawVal node dest s =
                                 )
                     )
 
+        RawMemStore ms ->
+            -- (cffi U6) `width` bytes of the value's LOW bits at ptr + off —
+            -- `storeb`/`storeh`/`storew`, addressed at a BYTE offset.  The
+            -- value is a word expression and the sub-word stores take a `w`
+            -- operand; QBE's Subtyping rule lets the `l` temp sit in that
+            -- slot (MEASURED: the low 16 bits land), so no narrowing `copy`
+            -- is emitted.  NO barrier: a narrow field is host data.
+            rawWordArg ms.ptr s
+                |> Result.andThen
+                    (\( pT, s1 ) ->
+                        rawWordArg ms.value s1
+                            |> Result.map
+                                (\( vT, s2 ) ->
+                                    let
+                                        ( aT, s3 ) =
+                                            memAddr pT ms.off s2
+                                    in
+                                    emit (Store (memStoreTy ms.width) vT (Il.Tmp aT)) s3
+                                )
+                    )
+
         RawCall call ->
             -- STEP 5 (osier-midprims): Rt->Rt calls, the recursive helpers'
             -- voice (deepEqual, numberText, the list walks) — and since
@@ -2499,6 +2528,12 @@ lowerRawVal node dest s =
             Err wordProducerMessage
 
         RawWordLoad _ ->
+            Err wordProducerMessage
+
+        -- cffi U6: a width-typed load is a WORD producer (an `l` temp — every
+        -- sub-word load WIDENS into the word class), so a value position is
+        -- the same loud error RawWordLoad gets.
+        RawMemLoad _ ->
             Err wordProducerMessage
 
         RawCallRaw _ ->
@@ -3239,6 +3274,32 @@ rawWordArg exp s =
                                 )
                     )
 
+        Unsafe (RawMemLoad ml) ->
+            -- (cffi U6) load{ub,sb,uh,sh,uw,w} at ptr + off, WIDENING to `l`
+            -- in ONE instruction: the `l` result type IS the extension, which
+            -- is why nothing follows it (MEASURED on the vendored qbe: `=l
+            -- loadsh` of 0xFFFE gives -2, `=l loaduh` gives 65534, `=l
+            -- loadsb` of 0xC8 gives -56, `=l loaduw` gives 4294967295).
+            --
+            -- Why not the `w` + `extuw` shape RawByteLoad uses: that shape is
+            -- a two-instruction spelling of the same thing, and it is
+            -- retained AS the existing shape it is (its sites are the string
+            -- and byte-buffer reads, whose emitted bytes the corpus pins).
+            rawWordArg ml.ptr s
+                |> Result.map
+                    (\( pT, s1 ) ->
+                        let
+                            ( aT, s2 ) =
+                                memAddr pT ml.off s1
+
+                            ( t, s3 ) =
+                                freshTmp s2
+                        in
+                        ( Il.Tmp t
+                        , emit (Load (Just t) L (memLoadOp ml.width ml.signed) (Il.Tmp aT)) s3
+                        )
+                    )
+
         Unsafe (RawCallRaw seat) ->
             -- alloc-FREE C seat, word args -> word result (Base L both
             -- sides).  rt_halt's `l` result is never defined (the seat exits)
@@ -3885,6 +3946,14 @@ rawNodeName node =
         RawWordStore _ ->
             "rawWordStore"
 
+        -- cffi U6 — the width and the sign in the NAME, so an error message
+        -- about a misplaced narrow access says which access it was.
+        RawMemLoad m ->
+            "rawMemLoad " ++ memWidthName m.width ++ (if m.signed then "/signed" else "/unsigned")
+
+        RawMemStore m ->
+            "rawMemStore " ++ memWidthName m.width
+
         RawCallRaw seat ->
             "rawCallRaw " ++ seat.sym
 
@@ -3941,6 +4010,88 @@ wordAddr ptrT idxT s =
         |> emit (Bin (Just offT) L Mul (Il.Con 8) idxT)
         |> emit (Bin (Just t) L Add ptrT (Il.Tmp offT))
     )
+
+
+-- (cffi U6) &ptr[off BYTES] — the width-typed family's address: the offset
+-- is a COMPILE-TIME constant, so it is one `add` (and NO `add` at all at
+-- offset 0: the base temp IS the address).  Deliberately not `wordAddr` with a
+-- divided index — a byte offset is not a word offset, and the whole point of
+-- the byte layout table is that a field may sit at byte 4 or 6.
+memAddr : Il.Arg -> Int -> S -> ( String, S )
+memAddr ptrT off s =
+    if off == 0 then
+        case ptrT of
+            Il.Tmp t ->
+                ( t, s )
+
+            _ ->
+                let
+                    ( t, s1 ) =
+                        freshTmp s
+                in
+                ( t, emit (Bin (Just t) L Add ptrT (Il.Con 0)) s1 )
+
+    else
+        let
+            ( t, s1 ) =
+                freshTmp s
+        in
+        ( t, emit (Bin (Just t) L Add ptrT (Il.Con off)) s1 )
+
+
+-- (cffi U6) the load MNEMONIC for a memory width and a sign rule — the table
+-- `doc/il.txt:715-745` states and the vendored qbe was MEASURED against.  The
+-- sign is an ARGUMENT, not an inference: `loaduw` and `loadw` are one word
+-- apart in meaning and identical in register class.
+memLoadOp : MemWidth -> Bool -> LoadOp
+memLoadOp width signed =
+    case ( width, signed ) of
+        ( MemB, True ) ->
+            LoadSb
+
+        ( MemB, False ) ->
+            LoadUb
+
+        ( MemH, True ) ->
+            LoadSh
+
+        ( MemH, False ) ->
+            LoadUh
+
+        ( MemW, True ) ->
+            LoadW
+
+        ( MemW, False ) ->
+            LoadUw
+
+
+-- (cffi U6) the store MNEMONIC for a memory width — `storeb`/`storeh`/`storew`
+-- (both signs write the same bytes; only a LOAD's extension is signed).
+memStoreTy : MemWidth -> StoreTy
+memStoreTy width =
+    case width of
+        MemB ->
+            StoreB
+
+        MemH ->
+            StoreH
+
+        MemW ->
+            StoreW
+
+
+-- (cffi U6) a memory width as this module's messages spell it.
+memWidthName : MemWidth -> String
+memWidthName width =
+    case width of
+        MemB ->
+            "1B"
+
+        MemH ->
+            "2B"
+
+        MemW ->
+            "4B"
 
 
 -- ============================ LITERALS ============================
@@ -5211,6 +5362,12 @@ isRawWordExp abi exp =
                 RawWordLoad _ ->
                     True
 
+                -- cffi U6: width-typed memory loads WIDEN into the word class
+                -- (the `l` result type is what makes the extension the op's
+                -- own), so the class is RawWordLoad's.
+                RawMemLoad _ ->
+                    True
+
                 RawStrByte _ ->
                     True
 
@@ -5426,6 +5583,11 @@ isWordCondNode abi node =
             True
 
         RawWordLoad _ ->
+            True
+
+        -- cffi U6: a width-typed load is a 0/1-capable word (`if (p->u16)`),
+        -- the same class RawWordLoad has.
+        RawMemLoad _ ->
             True
 
         RawByteLoad _ ->

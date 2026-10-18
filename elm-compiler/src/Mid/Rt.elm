@@ -1563,6 +1563,15 @@ unsafeSafepoint selfKey selfArity node =
         RawWordStore w ->
             safepoint selfKey selfArity w.ptr || safepoint selfKey selfArity w.index || safepoint selfKey selfArity w.value
 
+        RawMemLoad m ->
+            -- cffi U6: a width-typed load allocates nothing.
+            safepoint selfKey selfArity m.ptr
+
+        RawMemStore m ->
+            -- cffi U6: a width-typed store allocates nothing; the VALUE still
+            -- rides through (a sibling operand may itself allocate).
+            safepoint selfKey selfArity m.ptr || safepoint selfKey selfArity m.value
+
         RawDataAddr _ ->
             False
 

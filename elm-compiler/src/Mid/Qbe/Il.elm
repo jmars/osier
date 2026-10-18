@@ -278,10 +278,22 @@ type CmpOp
 
 
 type LoadOp
-    = LoadW -- loadw (32-bit, sign/zero-extension irrelevant for tags)
+    = LoadW -- loadw (32-bit SIGN-extending; MEASURED: `%r =l loadw %p` gives -1 for 0xFFFFFFFF)
     | LoadL -- loadl (64-bit payloads)
     | LoadD -- loadd (float payloads, from static data)
     | LoadUb -- loadub (8-bit, ZERO-extended; the string-byte read)
+    | -- (cffi U6) THE SUB-WORD LOAD FAMILY.  `doc/il.txt:715-745` gives
+      -- `loaduw`/`loaduh`/`loadub` as the ZERO-extending variants and
+      -- `loadsw`/`loadsh`/`loadsb` as the SIGN-extending ones, each `I(mm)`:
+      -- the result may be `w` OR `l`, and the extension is the OP's own —
+      -- MEASURED on the vendored qbe (`%r =l loadsh %p` of 0xFFFE gives -2;
+      -- `%r =l loaduh %p` gives 65534; `%r =l loadsb %p` of 0xC8 gives -56)
+      -- so a widening load needs NO separate `exts*` after it.  `loadw` is
+      -- QBE's sugar for `loadsw` and stays the signed 32-bit form.
+      LoadUw -- loaduw (32-bit, ZERO-extended)
+    | LoadUh -- loaduh (16-bit, ZERO-extended)
+    | LoadSh -- loadsh (16-bit, SIGN-extended)
+    | LoadSb -- loadsb (8-bit, SIGN-extended)
 
 
 type StoreTy
@@ -289,6 +301,11 @@ type StoreTy
     | StoreL
     | StoreD -- stored (64-bit float payloads; the load/store mirror of LoadD)
     | StoreB -- storeb (the string-byte write)
+    | -- (cffi U6) storeh — 2 bytes.  `doc/il.txt:715-730`: byte and halfword
+      -- stores take a WORD (`(w,m)`), and QBE's Subtyping rule ("any value of
+      -- type `l` can be used in a `w` context") means an `l` temp is legal in
+      -- that slot — MEASURED: `storeh %l, %addr` stores the low 16 bits.
+      StoreH
 
 
 type CallArg

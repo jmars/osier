@@ -4,6 +4,7 @@ module Mid.Ir exposing
     , Exp(..)
     , UnsafeNode(..)
     , FfiWidth(..)
+    , MemWidth(..)
     , RawBinOp(..)
     , RawUnOp(..)
     , RawCmpOp(..)
@@ -513,6 +514,37 @@ type UnsafeNode
     | -- store one 8-byte word at ptr + 8*index (effect, like RawByteStore;
       -- NO barrier — the word is host bookkeeping, not a GC Value reference)
       RawWordStore { ptr : Exp, index : Exp, value : Exp }
+    | -- (cffi U6) WIDTH-TYPED MEMORY — a load of `width` BYTES at a BYTE
+      -- offset (`ptr + off`; `off` is a compile-time constant, so a field's
+      -- static offset needs no address arithmetic of its own).
+      --
+      -- WHY A WIDTH AND A SIGN FLAG RATHER THAN ONE NODE PER WIDTH: the
+      -- sign rule is the one thing a type CANNOT tell you at the emission
+      -- site (an `i16` field's 0xFFFE is -2 signed, 65534 zero-extended, and
+      -- both are one word register), so it is CARRIED, not inferred.  One
+      -- node (instead of the plan's four) also means ONE new constructor for
+      -- Elm's exhaustiveness to force at every classification site — the
+      -- §10.1 failure (a variant missed at a hand-written classification
+      -- arm) has one seat, not four.
+      --
+      -- The width is a MEMORY width (1/2/4/8 bytes); 8 is spelled by
+      -- RawWordLoad's word-index form for the existing word fields (whose
+      -- byte offsets are always 8-aligned), so this family is the SUB-WORD
+      -- one in practice.  Measured classes (`doc/il.txt:715-745`,
+      -- `Mid.Qbe.Il`'s LoadOp docstring): MemB signed = loadsb, unsigned =
+      -- loadub; MemH signed = loadsh, unsigned = loaduh; MemW signed =
+      -- loadw, unsigned = loaduw — each WIDENING to `l` in one instruction.
+      --
+      -- A WORD producer (an `l` temp, exactly like RawWordLoad) and NOT a
+      -- safepoint: a plain load allocates nothing.
+      RawMemLoad { width : MemWidth, signed : Bool, ptr : Exp, off : Int }
+    | -- (cffi U6) the STORE mirror: `width` bytes of `value`'s low bits at
+      -- `ptr + off` (effect, like RawByteStore; NO barrier — a narrow field
+      -- is host data, never a GC Value reference).  `value` is a word
+      -- expression: the sub-word stores take a `w` operand and QBE's
+      -- Subtyping rule lets an `l` temp sit there (MEASURED: the low 16 bits
+      -- are what lands in memory).
+      RawMemStore { width : MemWidth, ptr : Exp, off : Int, value : Exp }
     | -- call a C runtime seat with WORD args and a WORD result (raw register
       -- class on both sides — rt_bytes_copy/rt_halt-class seats; alloc-FREE
       -- by contract, the allocating seats go through RawAllocVector /
@@ -641,6 +673,22 @@ type FfiWidth
     | FW64
     | FF64
     | FVoid
+
+
+{-| (cffi U6) A MEMORY width in BYTES — the three sub-word sizes a struct
+field can declare (`i8`/`u8` = MemB, `i16`/`u16` = MemH, `i32`/`u32` = MemW;
+the 8-byte word keeps RawWordLoad/RawWordStore's word-index form because
+every 8-byte field is 8-aligned by construction).
+
+Kept apart from `FfiWidth` on purpose: `FfiWidth` is a CALL-BOUNDARY
+register class (`w`/`l`/`d` and how the result is extended), a memory width
+is a byte count and a sign rule.  Folding them would put a `w`-temp question
+into a layout table.
+-}
+type MemWidth
+    = MemB
+    | MemH
+    | MemW
 
 
 -- The semantic word-op enums (backend-neutral: QBE's widths and mnemonics

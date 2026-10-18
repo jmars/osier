@@ -1366,6 +1366,15 @@ unsafeChildren node =
         RawWordStore r ->
             [ r.ptr, r.index, r.value ]
 
+        -- cffi U6: width-typed memory.  The OFFSET is a compile-time
+        -- constant (node data like FfiWidth), so the operands are the same
+        -- two/three an index-form node has.
+        RawMemLoad r ->
+            [ r.ptr ]
+
+        RawMemStore r ->
+            [ r.ptr, r.value ]
+
         RawCallRaw call ->
             call.args
 
@@ -1446,6 +1455,12 @@ unsafeRebuild node parts =
 
         ( RawWordStore r, a :: b :: c :: _ ) ->
             RawWordStore { r | ptr = a, index = b, value = c }
+
+        ( RawMemLoad r, a :: _ ) ->
+            RawMemLoad { r | ptr = a }
+
+        ( RawMemStore r, a :: b :: _ ) ->
+            RawMemStore { r | ptr = a, value = b }
 
         ( RawTagOf _, e :: _ ) ->
             RawTagOf e

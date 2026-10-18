@@ -50,7 +50,7 @@ module Mid.Audit exposing (run)
 -- program unchanged on Ok, so a green audit is byte-identity-preserving —
 -- this step's whole oracle.
 
-import Mid.Ir exposing (Defun, Exp(..), FfiWidth(..), LetBinder(..), Program, UnsafeNode(..))
+import Mid.Ir exposing (Defun, Exp(..), FfiWidth(..), LetBinder(..), MemWidth(..), Program, UnsafeNode(..))
 
 
 run : Program -> Result String Program
@@ -278,6 +278,15 @@ describe node =
         RawWordStore _ ->
             "rawWordStore"
 
+        -- cffi U6: the width and the sign ARE the description — an audit/.ssa
+        -- reader must be able to tell `u16` from `i16` without the struct
+        -- declaration (the same reason RawCallExtern names its widths).
+        RawMemLoad m ->
+            "rawMemLoad " ++ memWidthName m.width ++ (if m.signed then " signed" else " unsigned") ++ " +" ++ String.fromInt m.off
+
+        RawMemStore m ->
+            "rawMemStore " ++ memWidthName m.width ++ " +" ++ String.fromInt m.off
+
         RawCallRaw call ->
             "raw call word seat " ++ call.sym
 
@@ -349,3 +358,21 @@ ffiWidthName w =
 
         FVoid ->
             "void"
+
+
+{-| (cffi U6) a memory width as the audit prints it — the byte count's usual
+spelling (`1B`/`2B`/`4B`), not a signedness (that is the load's own flag,
+printed beside it: the two are independent, and printing them separately is
+what makes `i16` and `u16` distinguishable in a .ssa/audit dump).
+-}
+memWidthName : MemWidth -> String
+memWidthName w =
+    case w of
+        MemB ->
+            "1B"
+
+        MemH ->
+            "2B"
+
+        MemW ->
+            "4B"

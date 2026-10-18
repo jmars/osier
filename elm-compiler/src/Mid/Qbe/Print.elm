@@ -496,6 +496,20 @@ loadName op =
         LoadUb ->
             "loadub"
 
+        -- cffi U6: the sub-word family.  Printed straight through — the
+        -- mnemonic IS the extension rule (see the LoadOp docstring).
+        LoadUw ->
+            "loaduw"
+
+        LoadUh ->
+            "loaduh"
+
+        LoadSh ->
+            "loadsh"
+
+        LoadSb ->
+            "loadsb"
+
 
 storeName : StoreTy -> String
 storeName st =
@@ -511,6 +525,9 @@ storeName st =
 
         StoreB ->
             "storeb"
+
+        StoreH ->
+            "storeh"
 
 
 -- List.intersperse, local: the selfhost alias table has no `List.intersperse`
