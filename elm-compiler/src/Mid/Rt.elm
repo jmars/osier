@@ -1180,7 +1180,7 @@ rtDeps =
         , ( "Rt.hostSpawn", [ "Rt.hostSpawnFind" ] )
         , ( "Rt.hostSpawnFromCmd", [ "Rt.hostSpawn" ] )
         , ( "Rt.hostPushFrame", [ "Rt.dieErr" ] )
-        , ( "Rt.hostDispatch", [ "Rt.hostDeactivate", "Rt.hostArity", "Rt.cStrEq", "Rt.hostCompleteOk", "Rt.hostCompleteErr", "Rt.hostPushFrame", "Rt.hostNowMs", "Rt.hostDieUnported" ] )
+        , ( "Rt.hostDispatch", [ "Rt.hostDeactivate", "Rt.hostArity", "Rt.cStrEq", "Rt.hostCompleteOk", "Rt.hostCompleteErr", "Rt.hostPushFrame", "Rt.hostNowMs", "Rt.hostDieUnported", "Rt.hostWriteStr", "Rt.hostReadLine", "Rt.hostWriteFileLeaf", "Rt.getenv", "Rt.setenv", "Rt.cd", "Rt.getcwd", "Rt.getpid", "Rt.glob" ] )
         , ( "Rt.hostCompleteOk", [ "Rt.hostDeliver", "Rt.hostCall" ] )
         , ( "Rt.hostCompleteErr", [ "Rt.hostDeactivate", "Rt.hostCall" ] )
         , ( "Rt.hostDeliver", [ "Rt.hostCall", "Rt.hostDeactivate", "Rt.hostSpawnFromCmd" ] )
@@ -1188,8 +1188,27 @@ rtDeps =
         , ( "Rt.hostStep", [ "Rt.hostStepGo" ] )
         , ( "Rt.hostStepAllGo", [ "Rt.hostStep" ] )
         , ( "Rt.hostStepAll", [ "Rt.hostStepAllGo" ] )
-        , ( "Rt.hostRunLoop", [ "Rt.hostStepAll" ] )
+        , ( "Rt.hostRunLoop", [ "Rt.hostStepAll", "Rt.hostFlushExpiredSleeps", "Rt.hostRunnableScan", "Rt.hostPollTimeout", "Rt.dieErr" ] )
         , ( "Rt.hostRun", [ "Rt.hostInit", "Rt.hostSpawnFromCmd", "Rt.hostRunLoop" ] )
+        , -- ===== THE STAGE 7B SYNCHRONOUS LEAVES + THE DEADLINE MACHINERY.
+          -- Same rule as the 7A block above: one entry per host defun, exactly
+          -- its `call Rt.*` targets.  The prim leaves' targets (Rt.getenv/
+          -- setenv/cd/getcwd/getpid/glob) are the GROUP 3A/3B defuns, whose
+          -- own edges are declared further up — that is why the closure pulls
+          -- the whole prim (Rt.glob's cons/intern included) into an arm-B
+          -- binary and into nothing on the default route.
+          ( "Rt.hostWriteAll", [] )
+        , ( "Rt.hostWriteStr", [ "Rt.cStrFill", "Rt.hostWriteAll" ] )
+        , ( "Rt.hostWriteFileLeaf", [ "Rt.cStrFill", "Rt.hostWriteStr" ] )
+        , ( "Rt.hostLineGrow", [ "Rt.memGo" ] )
+        , ( "Rt.hostReadLineLoop", [ "Rt.hostLineGrow" ] )
+        , ( "Rt.hostReadLine", [ "Rt.hostReadLineLoop", "Rt.memGo" ] )
+        , ( "Rt.hostSleepScan", [] )
+        , ( "Rt.hostNearestSleep", [ "Rt.hostSleepScan" ] )
+        , ( "Rt.hostPollTimeout", [ "Rt.hostNearestSleep", "Rt.hostNowMs" ] )
+        , ( "Rt.hostSleepComplete", [ "Rt.hostCompleteOk" ] )
+        , ( "Rt.hostFlushExpiredSleeps", [ "Rt.hostNowMs", "Rt.hostSleepScan", "Rt.hostSleepComplete" ] )
+        , ( "Rt.hostRunnableScan", [] )
         ]
 
 

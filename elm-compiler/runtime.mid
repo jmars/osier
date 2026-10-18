@@ -106,6 +106,7 @@ extern fork() -> i32;
 extern read(fd : i32, buf : ptr, count : i64) -> i64;
 extern lseek(fd : i32, offset : i64, whence : i32) -> i64;
 extern memset(dst : ptr, c : i32, n : i64) -> ptr;
+extern poll(fds : ptr, nfds : i64, timeout : i32) -> i32;
 extern _exit(code : i32) -> void;
 // THE REGION LAYOUT (midlang-u5) — the name -> word-slot table.  Before this
 // struct the offsets were `wstore(base, k, ..)` constants in Rt.gcInit and
@@ -495,6 +496,16 @@ struct HostEX {
 }
 struct HostSL {
   deadline : word;
+}
+// 7B: the sleep scan's loop state.  Its cursor lives in MEMORY (a self-tail
+// `recur` hands back only the defun's params, and a `call Rt.*` may carry at
+// most THREE args — MEASURED: `err qbe: rawCall to Rt.hostSleepScan stages
+// arity 5 — the lean ABI passes 1..3 pointer args`).
+struct HostScan {
+  i : word;
+  best : word;
+  bestD : word;
+  now : word;
 }
 struct HostEv {
   active : word;
@@ -4482,11 +4493,42 @@ defun Rt.main(argc : word, argv : word) -> word {
   // conditional-block idiom: in an if-EXPRESSION arm `return e` yields the
   // arm's VALUE, so the two arms JOIN and the statements run conditionally
   // (Rt.frame-leave's shape, and the reason a "return" here is not a return).
-  word hop = if (mkbool(rawcall getenv(rawstr("QBE_MIDHOST")) != 0)) {
+  //
+  // WHICH IS WHY THE MID ARM PRINTS AND EXITS ITSELF (stage 7B, MEASURED): a
+  // rawAbi defun cannot carry a mid-block guard-`if` at all ("raw-abi defun
+  // tail If joins two word-returning branches ... one branch must be a
+  // self-tail recur" — re-measured on this tree), and an expression arm's
+  // `return` does NOT return, so 7A's hatch FELL THROUGH into
+  // `rt_is_program`/`rt_run_program` below: under QBE_MIDHOST=1 the Mid host
+  // ran the program, wrote its model into `modelslot`, and then the ZIG host
+  // ran THE SAME PROGRAM A SECOND TIME and overwrote the model.  No 7A
+  // fixture could see it (all of them are pure, or nowunit dies inside the
+  // Mid host), so its arm-B rows were reading the ZIG host's answer;
+  // `progio` (7B) sees it at once — two lines read from stdin, and the model
+  // from the second run.  The Mid arm therefore owns its epilogue — root the
+  // model, print it, exit 1 if the print failed else 0, which is exactly what
+  // the Zig route reaches by CONTINUING past its own arm into `fptr2` and
+  // `rt_print_value` — and leaves that shared tail to an arm that did not run.
+  //
+  // AND THE HATCH READS THE VALUE, NOT THE PRESENCE (stage 7B, MEASURED):
+  // `getenv(...) != 0` is TRUE for "0" as well, so 7A's `QBE_MIDHOST=0
+  // ./prog` ran the MID host — the doc above claimed the opposite.  The byte
+  // test makes the variable a one-character switch, which is what turns one
+  // arm-B build into TWO arms (Mid host on "1", Zig host otherwise).
+  word mhEnv = rawcall getenv(rawstr("QBE_MIDHOST"));
+  val mhOn = mkbool(mhEnv != 0) && mkbool(byteload(mhEnv, 0) == 49);
+  word hop = if (payload(mhOn, 0) != 0) {
     word chk = if (payload(call Rt.hostIsProgram(vecload(fptr, 0)), 0) != 0) {
       call Rt.hostRun(mknum(fptr), mknum(modelslot));
       rawcall rt_root_push_value(modelslot);
-      wstore(fslot, 0, modelslot);
+      word mppc = rawcall rt_print_value(modelslot);
+      word mpf = if (mkbool(mppc != 0)) {
+        rawcall exit(1);
+        return 0;
+      } else {
+        return 0;
+      };
+      rawcall exit(0);
       return 0;
     } else {
       return 0;
@@ -5122,6 +5164,292 @@ defun Rt.hostNowMs(dummy : val) -> val {
   return mknum((s * 1000) + (ns / 1000000));
 }
 
+// ============== STAGE 7B: THE SYNCHRONOUS LEAVES + THE DEADLINES ==========
+// The leaves that neither suspend on an fd nor fork: TaskWrite, TaskWriteFile,
+// TaskReadLine (all SYNCHRONOUS in the Zig host too) and TaskSleep (the one
+// SUSPENDING leaf of 7B — it holds no fd, only an absolute monotonic
+// deadline), plus the six prim leaves that CALL an existing Mid defun.
+//
+// THE PRIM LEAVES NEED NO MACHINERY AT ALL: effectloop.zig's `leafPrim` wraps
+// the arg into a fresh `ValueArray` and calls `prims.execPrimitive` by NAME
+// (`runPrim` -> vaInit/vaPush, with the arg array and the stack rooted across
+// both).  Here the prim IS a Mid defun (`Rt.getenv`/`Rt.setenv`/`Rt.cd`/
+// `Rt.getcwd`/`Rt.getpid`/`Rt.glob`, runtime.mid's GROUP 3A/3B port), so the
+// leaf is one `call` and the `runPrim`/`varray` dance does not translate — it
+// DISAPPEARS (the port's one net deletion, plan §7.3's 7B row).
+//
+// NO RAW COPY OF A VALUE CROSSES AN ALLOCATING CALL (the `val` bridge's
+// obligation 2): every leaf reads its arguments out of the rooted slot array
+// (via the task vector's data pointer) BEFORE the allocating leaf call, and
+// writes its result straight into the eval's result slot, whose ADDRESS is a
+// slice of the C-heap-resident rooted array and therefore never moves.
+//
+// STRINGS ARE NUL-COPIED BEFORE A RAW CALL (plan §6 G-G), and for a stronger
+// reason than "not NUL-terminated": a string's data pointer is EVACUATED by
+// the collector (gc/scan.zig's scanValue: `.string => evacuate(str.data)`), so
+// `payload(str, 0)` is a MOVING pointer and the runtime's idiom — allocraw(len
+// + 1) + `Rt.cStrFill(bufN, str, 0)` + the rawcall — is the only shape that
+// re-reads the string from a rooted binder while the copy proceeds.
+defun Rt.hostWriteAll(fdN : val, ptrN : val, lenN : val) -> val {
+  word fd = payload(fdN, 0);
+  word ptr = payload(ptrN, 0);
+  word len = payload(lenN, 0);
+  if (mkbool(len <= 0)) {
+    return mknum(0);
+  } else {
+    word n = rawcall write(fd, ptr, len);
+    if (mkbool(n < 0)) {
+      if (mkbool(byteload(rawcall __errno_location(), 0) == 4)) {
+        recur(fdN, ptrN, lenN);            // EINTR: retry the same bytes
+      } else {
+        return mknum(0);                   // real error: stop (writeFdAll's
+      }                                    // best-effort contract)
+    } else {
+      if (mkbool(n == 0)) {
+        return mknum(0);
+      } else {
+        recur(fdN, mknum(ptr + n), mknum(len - n));
+      }
+    }
+  }
+}
+
+// The `s -> fd` sink both TaskWrite and TaskWriteFile use.
+defun Rt.hostWriteStr(fdN : val, str : val) -> val {
+  word len = len32(str);
+  word buf = allocraw(len + 1);
+  call Rt.cStrFill(mknum(buf), str, mknum(0));
+  return call Rt.hostWriteAll(fdN, mknum(buf), mknum(len));
+}
+
+// TaskWriteFile path contents — openat(WRONLY|CREAT|TRUNC, 0666) + write +
+// close (the flags are Rt.open's "out" arm's own literals).  AN OPEN FAILURE
+// COMPLETES SUCCESS WITH UNIT, exactly as the Zig does (`nativeio`'s sentinel
+// is the fixture that depends on the swallow).
+defun Rt.hostWriteFileLeaf(path : val, contents : val) -> val {
+  word len = len32(path);
+  word buf = allocraw(len + 2);
+  call Rt.cStrFill(mknum(buf), path, mknum(0));
+  word fd = rawcall openat(-100, buf, 577, 438);
+  if (mkbool(fd < 0)) {
+    return mknil;
+  } else {
+    call Rt.hostWriteStr(mknum(fd), contents);
+    rawcall close(fd);
+    return mknil;
+  }
+}
+
+// --- TaskReadLine -------------------------------------------------------
+// Sync ON PURPOSE (stdin is ONE shared fd; interleaving reads of fd 0 is
+// meaningless — the Zig says so in the same words).  Byte at a time from fd 0,
+// stop at 0x0A or EOF, grow the accumulator by doubling.
+//
+// THE ACCUMULATOR IS A C-HEAP BLOCK, NEVER A VALUE: the collector cannot see
+// it, so it cannot move it, so the whole loop is free of the raw/stale class.
+// Layout (32 bytes): 0 len, 8 cap, 16 buf, 24 the 1-byte read scratch.
+// Growth copies through `Rt.memGo` (`struct CopyDesc` — the SAME descriptor
+// read-file-as-string's grow uses) and FREES the old block, so a long-lived
+// line reader does not leak.  The OOM arm returns 0 and the caller completes
+// with the bytes it already has — the Zig's `catch break`.
+defun Rt.hostLineGrow(cellN : val) -> val {
+  word cell = payload(cellN, 0);
+  word len = wload(cell, 0);
+  word cap = wload(cell, 1);
+  word old = wload(cell, 2);
+  word ncap = cap * 2;
+  word nbuf = rawcall malloc(ncap);
+  if (mkbool(nbuf == 0)) {
+    return mknum(0);
+  } else {
+    *CopyDesc d = rawcall malloc(24);
+    d->src = old;
+    d->dst = nbuf;
+    d->n = len;
+    call Rt.memGo(mknum([word](d)), mknum(0));
+    wstore(cell, 1, ncap);
+    wstore(cell, 2, nbuf);
+    rawcall free(old);
+    rawcall free(d);
+    return mknum(1);
+  }
+}
+defun Rt.hostReadLineLoop(cellN : val) -> val {
+  word cell = payload(cellN, 0);
+  word n = rawcall read(0, wload(cell, 3), 1);
+  if (mkbool(n <= 0)) {
+    return mknil;                          // EOF (0) or a read error
+  } else {
+    word b = byteload(wload(cell, 3), 0);
+    if (mkbool(b == 10)) {
+      return mknil;                        // 0x0A ends the line
+    } else {
+      word len = wload(cell, 0);
+      val grew = if (mkbool(len >= wload(cell, 1))) {
+        return call Rt.hostLineGrow(cellN);
+      } else {
+        return mknum(1);
+      };
+      if (mkbool(payload(grew, 0) == 0)) {
+        return mknil;                      // OOM: deliver what we have
+      } else {
+        bytestore(wload(cell, 2), len, b);
+        wstore(cell, 0, len + 1);
+        recur(cellN);
+      }
+    }
+  }
+}
+defun Rt.hostReadLine(dummy : val) -> val {
+  word cell = rawcall malloc(32);
+  word buf = rawcall malloc(128);
+  word one = rawcall malloc(1);
+  wstore(cell, 0, 0);
+  wstore(cell, 1, 128);
+  wstore(cell, 2, buf);
+  wstore(cell, 3, one);
+  call Rt.hostReadLineLoop(mknum(cell));
+  word len = wload(cell, 0);
+  word src = wload(cell, 2);
+  word dst = allocraw(len + 1);
+  *CopyDesc d = rawcall malloc(24);
+  d->src = src;
+  d->dst = dst;
+  d->n = len;
+  call Rt.memGo(mknum([word](d)), mknum(0));
+  bytestore(dst, len, 0);
+  val s = mkstr(dst, len);
+  rawcall free(d);
+  rawcall free(one);
+  rawcall free(buf);
+  rawcall free(cell);
+  return s;
+}
+
+// --- the DEADLINE machinery (TaskSleep) ---------------------------------
+// A sleeping evaluation stays ACTIVE with `etag = 3` and an ABSOLUTE
+// monotonic deadline in `sl.deadline`; `hostStepGo`/`hostStepAllGo` skip any
+// eval whose etag is non-zero, so the driver is what wakes it:
+//
+//   hostStepAll -> hostFlushExpiredSleeps (complete every expired sleep, in
+//   deadline order) -> hostRunnableScan (any pure work left? loop) ->
+//   hostPollTimeout -> poll(0 fds, timeout) -> loop.
+//
+// A SLEEP IS THE ONLY PENDING EFFECT 7B CAN PRODUCE, so with no fd table yet
+// (7C owns it) the poll is a bounded SLEEP: poll(NULL, 0, ms) is the portable
+// way to spell one, and it is exactly what the Zig's npoll == 0 branch falls
+// through to.  `etag` values are the Zig enum's order (plan §5.1): 0 none,
+// 1 readFile, 2 exec, 3 sleep — so 7C/7D extend the same ladder.
+//
+// Rt.hostSleepScan — the earliest (or earliest EXPIRED) sleep, as an INDEX
+// (-1 = none).  `bestN` is the winner's index and `bestDN` its deadline, both
+// carried as params (the scan is a value self-tail, hostSpawnFind's shape)
+// rather than in a memory cursor, so nothing here touches `lp->cur`/`lp->clr`.
+// `nowN < 0` means "no expiry filter".
+defun Rt.hostSleepScan(hN : val, cellN : val) -> val {
+  word h = payload(hN, 0);
+  word c = payload(cellN, 0);
+  *HostScan s = [*HostScan](c);
+  *Host lp = [*Host](h);
+  if (mkbool(s->i >= lp->nevals)) {
+    return mknum(s->best);
+  } else {
+    word idx = s->i;
+    word d = lp->evals[idx].sl.deadline;
+    val earlier = mkbool(s->bestD < 0) || mkbool(d < s->bestD);
+    val expired = mkbool(s->now < 0) || mkbool(d <= s->now);
+    val take = if (mkbool(lp->evals[idx].etag == 3) && earlier && expired) {
+      s->best = idx;
+      s->bestD = d;
+      return mknum(1);
+    } else {
+      return mknum(0);
+    };
+    s->i = idx + 1;
+    recur(hN, cellN);
+  }
+}
+defun Rt.hostNearestSleep(hN : val) -> val {
+  word c = rawcall malloc(32);
+  *HostScan s = [*HostScan](c);
+  s->i = 0;
+  s->best = -1;
+  s->bestD = -1;
+  s->now = -1;
+  val idx = call Rt.hostSleepScan(hN, mknum(c));
+  word i = payload(idx, 0);
+  val d = mkbool(i < 0) ? mknum(-1) : mknum([*Host](payload(hN, 0))->evals[i].sl.deadline);
+  rawcall free(c);
+  return d;
+}
+// The poll timeout: the nearest deadline in ms (so a sleeping eval wakes the
+// poll instead of blocking past it), 0 once it is due, and -1 = block
+// indefinitely when nothing is pending.  The i32 clamp is the Zig's @min.
+defun Rt.hostPollTimeout(hN : val) -> val {
+  word d = payload(call Rt.hostNearestSleep(hN), 0);
+  if (mkbool(d < 0)) {
+    return mknum(-1);
+  } else {
+    word now = payload(call Rt.hostNowMs(mknil), 0);
+    word remain = d - now;
+    if (mkbool(remain <= 0)) {
+      return mknum(0);
+    } else {
+      if (mkbool(remain > 2147483647)) {
+        return mknum(2147483647);
+      } else {
+        return mknum(remain);
+      }
+    }
+  }
+}
+defun Rt.hostSleepComplete(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  lp->evals[i].etag = 0;
+  vecstore(h + 8 + ((lp->evals[i].base + 1) * 40), 0, mknil);
+  return call Rt.hostCompleteOk(hN, iN);
+}
+// Complete every expired sleep, EARLIEST FIRST; each completion may deliver
+// and spawn, so the scan restarts after each one.  `now` is re-read per
+// iteration (the Zig reads it once) — a completion that itself takes time can
+// only make more sleeps due, never fewer, and a freshly spawned sleep's
+// deadline is now+ms (strictly future for ms > 0), so this cannot livelock.
+defun Rt.hostFlushExpiredSleeps(hN : val) -> val {
+  word c = rawcall malloc(32);
+  *HostScan s = [*HostScan](c);
+  s->i = 0;
+  s->best = -1;
+  s->bestD = -1;
+  s->now = payload(call Rt.hostNowMs(mknil), 0);
+  val idx = call Rt.hostSleepScan(hN, mknum(c));
+  word i = payload(idx, 0);
+  rawcall free(c);
+  if (mkbool(i < 0)) {
+    return mknil;
+  } else {
+    call Rt.hostSleepComplete(hN, mknum(i));
+    recur(hN);
+  }
+}
+// Any evaluation that can make progress WITHOUT waiting (the Zig's
+// hasRunnable: active and no pending effect)?
+defun Rt.hostRunnableScan(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  if (mkbool(i >= lp->nevals)) {
+    return mknum(0);
+  } else {
+    if (mkbool(lp->evals[i].active != 0) && mkbool(lp->evals[i].etag == 0)) {
+      return mknum(1);
+    } else {
+      recur(hN, mknum(i + 1));
+    }
+  }
+}
+
 // ========================== THE STATE ------------------------------------
 // `hN` is the blob's ADDRESS boxed into a Value (`mknum(blob)`), and every
 // defun below unboxes it at the top (`payload(hN, 0)`) — the runtime's own
@@ -5500,17 +5828,77 @@ defun Rt.hostDispatch(hN : val, iN : val) -> val {
     vecstore(taskAddr, 0, inner);
     return mknil;
   }
+  if (call Rt.cStrEq(nm, rawstr("TaskWrite")) != 0) {
+    val s = vecload(tv, 1);
+    call Rt.hostWriteStr(mknum(1), s);
+    vecstore(resAddr, 0, mknil);
+    return call Rt.hostCompleteOk(hN, iN);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskReadLine")) != 0) {
+    vecstore(resAddr, 0, call Rt.hostReadLine(mknil));
+    return call Rt.hostCompleteOk(hN, iN);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskWriteFile")) != 0) {
+    val path = vecload(tv, 1);
+    val contents = vecload(tv, 2);
+    call Rt.hostWriteFileLeaf(path, contents);
+    vecstore(resAddr, 0, mknil);
+    return call Rt.hostCompleteOk(hN, iN);
+  }
+  // THE PRIM LEAVES: one `call` each — the Zig's leafPrim/runPrim/varray
+  // wrapper has no Mid counterpart (the prim IS a defun).  The argument is
+  // read out of the rooted slot BEFORE the call allocates.
+  if (call Rt.cStrEq(nm, rawstr("TaskGetenv")) != 0) {
+    val a = vecload(tv, 1);
+    vecstore(resAddr, 0, call Rt.getenv(a));
+    return call Rt.hostCompleteOk(hN, iN);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskSetenv")) != 0) {
+    val n2 = vecload(tv, 1);
+    val v2 = vecload(tv, 2);
+    vecstore(resAddr, 0, call Rt.setenv(n2, v2));
+    return call Rt.hostCompleteOk(hN, iN);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskCd")) != 0) {
+    val p3 = vecload(tv, 1);
+    vecstore(resAddr, 0, call Rt.cd(p3));
+    return call Rt.hostCompleteOk(hN, iN);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskGetcwd")) != 0) {
+    vecstore(resAddr, 0, call Rt.getcwd(mknil));
+    return call Rt.hostCompleteOk(hN, iN);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskGetpid")) != 0) {
+    vecstore(resAddr, 0, call Rt.getpid(mknil));
+    return call Rt.hostCompleteOk(hN, iN);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskGlob")) != 0) {
+    val g1 = vecload(tv, 1);
+    vecstore(resAddr, 0, call Rt.glob(g1));
+    return call Rt.hostCompleteOk(hN, iN);
+  }
   if (call Rt.cStrEq(nm, rawstr("TaskNow")) != 0) {
     vecstore(resAddr, 0, call Rt.hostNowMs(mknil));
     return call Rt.hostCompleteOk(hN, iN);
+  }
+  // TaskSleep SUSPENDS: record the absolute deadline, leave the eval ACTIVE
+  // with etag = 3 and complete NOTHING — hostStepAllGo skips it from here on
+  // and the driver's flush wakes it (hostFlushExpiredSleeps -> sleepComplete).
+  if (call Rt.cStrEq(nm, rawstr("TaskSleep")) != 0) {
+    word ms = payload(vecload(tv, 1), 0);
+    word now = payload(call Rt.hostNowMs(mknil), 0);
+    lp->evals[i].etag = 3;
+    lp->evals[i].sl.deadline = now + ms;
+    return mknil;
   }
   if (call Rt.cStrEq(nm, rawstr("TaskQuit")) != 0) {
     lp->quit = 1;
     return call Rt.hostDeactivate(hN, iN);
   }
-  // THE OTHER 14: LOUD, naming the ctor.  Never a silent drop (the program
-  // would appear to work while its continuation never resumes) and never a
-  // silent completion (which would make a program "work" while doing nothing).
+  // THE OTHER 4 (ReadFile/Exec/ListDir/Stat): LOUD, naming the ctor.  Never a
+  // silent drop (the program would appear to work while its continuation never
+  // resumes) and never a silent completion (which would make a program "work"
+  // while doing nothing).  7C/7D/7E own them.
   call Rt.hostDieUnported(nm);
   return mknil;
 }
@@ -5659,22 +6047,47 @@ defun Rt.hostStepAll(hN : val) -> val {
 }
 
 // ========================== THE DRIVER ===================================
-// Rt.hostRunLoop — the Zig's `while (nactive > 0 and !quit) { stepAll; ... }`.
-// 7A contains only non-suspending leaves, so every evaluation runs to a
-// deliver or a drop inside stepAll; 7C/7D insert reapChildren/completeReady/
-// the poll between the step and the re-test, HERE.
+// Rt.hostRunLoop — the Zig's `while (nactive > 0 and !quit) { stepAll; ...
+// reapChildren; completeReady; ... poll; ... flushExpiredSleeps }`.
+//
+// 7B's tail is the part of that loop a SLEEP needs: step, complete whatever
+// deadline has already passed, and if nothing can run without waiting, SLEEP
+// ON poll(0 fds, the nearest deadline).  7C/7D insert the fd table, the drain
+// and the child reap between the step and this tail; the seam is deliberately
+// the same statement order the Zig has.
+//
+// WHY A poll AND NOT A SPIN: a sleeping eval is ACTIVE with etag = 3, so
+// hostStepAllGo skips it forever; without a wait the loop would burn the CPU
+// for the sleep's whole duration (nowunit sleeps 30+20+20 ms and would spin).
+// -1 (nothing pending) with no runnable work is a stuck program: the Zig
+// prints "effectloop: pending effect with no pollable fd" and breaks, which
+// under the effect host means a SILENTLY TRUNCATED model — here it is LOUD.
 defun Rt.hostRunLoop(hN : val) -> val {
   word h = payload(hN, 0);
   *Host lp = [*Host](h);
-  if (lp->nactive == 0) {
+  if (mkbool(lp->nactive == 0) || mkbool(lp->quit != 0)) {
     return mknil;
   } else {
-    if (lp->quit != 0) {
-      return mknil;
+    call Rt.hostStepAll(hN);
+    call Rt.hostFlushExpiredSleeps(hN);
+    val stalled = if (mkbool(lp->nactive == 0) || mkbool(lp->quit != 0)) {
+      return mknum(1);
     } else {
-      call Rt.hostStepAll(hN);
-      recur(hN);
-    }
+      if (payload(call Rt.hostRunnableScan(hN, mknum(0)), 0) != 0) {
+        return mknum(0);                   // pure work left: no wait, loop
+      } else {
+        word to = payload(call Rt.hostPollTimeout(hN));
+        val slept = if (mkbool(to < 0)) {
+          call Rt.dieErr(rawstr("host: a pending effect has no pollable fd"));
+          return mknum(0);
+        } else {
+          rawcall poll(0, 0, to);          // NULL fds + a timeout IS a sleep
+          return mknum(0);
+        };
+        return mknum(0);
+      }
+    };
+    recur(hN);
   }
 }
 
