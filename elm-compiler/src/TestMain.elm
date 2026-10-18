@@ -84,10 +84,10 @@ checks rt runtimeMidText =
       -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
       -- the frameZero loop), so an empty or truncated load turns it RED,
       -- loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (244 defuns — GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns and stage 7C its 14 fd-table/poll defuns)"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (267 defuns — GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns and stage 7D its 23 exec defuns)"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 244
+                List.length ast == 267
 
             Err _ ->
                 False
@@ -899,8 +899,8 @@ checks rt runtimeMidText =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 223 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram rt True True True) == 223
+    , check "rt program: 246 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
+        (List.length (rtProgram rt True True True) == 246
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
@@ -4003,21 +4003,21 @@ checks rt runtimeMidText =
     -- `struct Host`/`struct HostEv` without the malloc line a RED ROW instead
     -- of a heap overflow.  MEASURED values (the emitted .ssa agrees: the host's
     -- field accesses carry 1321296 for `evals` and 4216 for its stride).
-    , check "7A LAYOUT PIN: runtime.mid's own `struct Host` puts nslots at 0, the rooted slot array at byte 8 and the eval table at 1321296 — the three offsets Rt.hostInit/Rt.hostRun/TestMain all name — and stage 7C APPENDED npoll/poll after the eval table (1860944/1860952), so no earlier offset moved"
+    , check "7A LAYOUT PIN: runtime.mid's own `struct Host` puts nslots at 0, the rooted slot array at byte 8 and the eval table at 1321296 — the three offsets Rt.hostInit/Rt.hostRun/TestMain all name — and stage 7C APPENDED npoll/poll after the eval table (1861968/1861976 once 7D widened the eval stride to 4224), so no earlier offset moved"
         (let
             d =
                 declsOf runtimeMidText
          in
          [ Check.fieldOffset d "Host" "nslots", Check.fieldOffset d "Host" "slots", Check.fieldOffset d "Host" "evals", Check.fieldOffset d "Host" "npoll", Check.fieldOffset d "Host" "poll" ]
-            == [ Just 0, Just 8, Just 1321296, Just 1860944, Just 1860952 ]
+            == [ Just 0, Just 8, Just 1321296, Just 1861968, Just 1861976 ]
         )
-    , check "7A LAYOUT PIN (stage 7C extended the blob by two words): sizeof(struct Host) == 232620 words == 1860960 bytes == Rt.hostInit's `8 + (33031 * 40) + (6 * 8) + (128 * 4216) + 16` (nslots + the slot array + nevals..clrBase + the eval table + 7C's npoll/poll).  A field added to struct Host without the malloc line is a RED ROW, not a heap overflow"
-        (Check.sizeofStruct (declsOf runtimeMidText) "Host" == Just 232620
-            && String.contains "word bytes = 8 + (33031 * 40) + (6 * 8) + (128 * 4216) + 16;" runtimeMidText
+    , check "7A LAYOUT PIN (stage 7C extended the blob by two words, stage 7D widened the eval stride by one): sizeof(struct Host) == 232748 words == 1861984 bytes == Rt.hostInit's `8 + (33031 * 40) + (6 * 8) + (128 * 4224) + 16` (nslots + the slot array + nevals..clrBase + the eval table + 7C's npoll/poll).  A field added to struct Host without the malloc line is a RED ROW, not a heap overflow"
+        (Check.sizeofStruct (declsOf runtimeMidText) "Host" == Just 232748
+            && String.contains "word bytes = 8 + (33031 * 40) + (6 * 8) + (128 * 4224) + 16;" runtimeMidText
         )
-    , check "7A LAYOUT PIN: sizeof(struct HostEv) == 527 words == 4216 bytes (4 header words + 256 two-word frames + etag + the 10-word effect union) and sizeof(struct HostFrame) == 2 — the eval table's stride and the frame stack's stride"
-        (Check.sizeofStruct (declsOf runtimeMidText) "HostEv" == Just 527 && Check.sizeofStruct (declsOf runtimeMidText) "HostFrame" == Just 2)
-    , check "7A LAYOUT PIN: the effect union's three members all start at byte 4136 (one anonymous promoted `union { rf ex sl }` block, its widest member `ex` 10 words) — the plan §5.1 shape"
+    , check "7A LAYOUT PIN: sizeof(struct HostEv) == 528 words == 4224 bytes (4 header words + 256 two-word frames + etag + the 11-word effect union, 7D's `ex` growing it by HostEX.code) and sizeof(struct HostFrame) == 2 — the eval table's stride and the frame stack's stride"
+        (Check.sizeofStruct (declsOf runtimeMidText) "HostEv" == Just 528 && Check.sizeofStruct (declsOf runtimeMidText) "HostFrame" == Just 2)
+    , check "7A LAYOUT PIN: the effect union's three members all start at byte 4136 (one anonymous promoted `union { rf ex sl }` block, its widest member `ex` 11 words after 7D added HostEX.code) — the plan §5.1 shape"
         (let
             d =
                 declsOf runtimeMidText
@@ -4050,7 +4050,7 @@ checks rt runtimeMidText =
         (hostArityPairs (defunText "Rt.hostArity" runtimeMidText)
             == [ ( "TaskSucceed", 2 ), ( "TaskFail", 2 ), ( "TaskAndThen", 3 ), ( "TaskOnError", 3 ), ( "TaskWrite", 2 ), ( "TaskReadLine", 1 ), ( "TaskReadFile", 2 ), ( "TaskWriteFile", 3 ), ( "TaskExec", 2 ), ( "TaskGetenv", 2 ), ( "TaskSetenv", 3 ), ( "TaskCd", 2 ), ( "TaskGetcwd", 1 ), ( "TaskGetpid", 1 ), ( "TaskGlob", 2 ), ( "TaskNow", 1 ), ( "TaskSleep", 2 ), ( "TaskQuit", 1 ), ( "TaskListDir", 2 ), ( "TaskStat", 2 ) ]
         )
-    , check "7A DISPATCH PIN (stage 7B extended it to SIXTEEN, stage 7C to SEVENTEEN): the dispatch implements exactly the pure six (Succeed/Fail/AndThen/OnError/Now/Quit) + 7B's synchronous ten (Write/ReadLine/WriteFile + the six prim leaves + Sleep) + 7C's ReadFile (the first SUSPENDING fd leaf) and its fallthrough is Rt.hostDieUnported — the other THREE (Exec/ListDir/Stat) must be LOUD, never a silent drop (a dropped eval stalls) and never a silent completion (it would look like it worked)"
+    , check "7A DISPATCH PIN (stage 7B extended it to SIXTEEN, stage 7C to SEVENTEEN, stage 7D to EIGHTEEN): the dispatch implements exactly the pure six (Succeed/Fail/AndThen/OnError/Now/Quit) + 7B's synchronous ten (Write/ReadLine/WriteFile + the six prim leaves + Sleep) + 7C's ReadFile (the first SUSPENDING fd leaf) + 7D's Exec (the forking one) and its fallthrough is Rt.hostDieUnported — the other TWO (ListDir/Stat) must be LOUD, never a silent drop (a dropped eval stalls) and never a silent completion (it would look like it worked)"
         (let
             handled =
                 ctorNames (defunText "Rt.hostDispatch" runtimeMidText)
@@ -4059,6 +4059,7 @@ checks rt runtimeMidText =
             == List.sort
                 [ "TaskAndThen"
                 , "TaskCd"
+                , "TaskExec"
                 , "TaskFail"
                 , "TaskGetcwd"
                 , "TaskGetenv"
@@ -4239,7 +4240,7 @@ checks rt runtimeMidText =
             && String.contains "rawcall poll(lp->poll, lp->npoll, to);" runtimeMidText
             && String.contains "if (mkbool(lp->npoll == 0) && mkbool(to < 0)) {" runtimeMidText
         )
-    , check "7C POLL ENTRY PIN: one table cell is drained only when the kernel SET revents, the role is readFile, the eval is still ACTIVE and still carries THIS effect (etag 1) — the table is one poll old, so a completion earlier in the same pass can free a slot and respawn a different evaluation into it, and stepping that one would be a silent wrong answer"
+    , check "7C POLL ENTRY PIN: one table cell is drained only when the kernel SET revents, the eval is still ACTIVE and still carries the effect THIS ROLE belongs to (7C: etag 1 readFile — 7D extended the same guard per role: 2 = exec stdout, 3 = exec stderr) — the table is one poll old, so a completion earlier in the same pass can free a slot and respawn a different evaluation into it, and stepping that one would be a silent wrong answer"
         (let
             d =
                 defunText "Rt.hostPollEntry" runtimeMidText
@@ -4248,10 +4249,15 @@ checks rt runtimeMidText =
             [ "if (pp->fds[k].revents == 0) {"
             , "word ev = pp->evals[k];"
             , "word role = pp->roles[k];"
-            , "if (role != 1) {"
             , "if (lp->evals[ev].active == 0) {"
+            , "if (role == 1) {"
             , "if (lp->evals[ev].etag != 1) {"
             , "return call Rt.hostReadFileComplete(hN, mknum(ev));"
+            , "if (role == 2) {"
+            , "if (lp->evals[ev].etag != 2) {"
+            , "return call Rt.hostExecDrainOut(hN, mknum(ev));"
+            , "if (role == 3) {"
+            , "return call Rt.hostExecDrainErr(hN, mknum(ev));"
             ]
             && String.contains "lp->npoll = 0;" (defunText "Rt.hostRebuildPollfds" runtimeMidText)
             && String.contains "if (lp->evals[i].active == 0) {" (defunText "Rt.hostRebuildPollGo" runtimeMidText)
@@ -4339,6 +4345,224 @@ checks rt runtimeMidText =
             , "rawcall fcntl(fd, 4, fl | 2048);         // F_SETFL, | O_NONBLOCK (0x800)"
             , "if (fl < 0) {"
             ]
+        )
+
+    -- ==================== STAGE 7D: the async exec ====================
+    -- Text + layout rows for the same reason 7A/7B/7C's are: the child side is
+    -- a STATEMENT ORDER (a wrong order truncates output without failing), the
+    -- reaps are a division of labour, and the symbol buffer is a table of
+    -- offsets.  The BEHAVIOUR is the fixtures': exechost (async grow + err +
+    -- non-zero code), execfallback (the predicate's negative arm), fastexec
+    -- (the same-iteration reap), asyncorder (out-of-order delivery) and
+    -- signaldeathasync (the signal arm through this reap).
+    , check "7D CHILD PIN (the `_exit` rule): Rt.hostExecChild's statements are ORDERED — close the read ends, dup2 the write ends onto 1/2, close the (now duplicated) write ends, run the builtin IN THIS PROCESS, and ONLY THEN `_exit` with its code.  An `_exit` before the builtin returns truncates its output to nothing while still answering a plausible exit code, which no fixture can see (a truncated capture still parses); the execvp arm then reads the errno BYTE and answers 127/126 with childW2's cbuf strings, exactly as Rt.exec-run's child arm does"
+        (let
+            d =
+                defunText "Rt.hostExecChild" runtimeMidText
+         in
+         inOrder d
+            [ "rawcall close(s->outr);"
+            , "rawcall close(s->errr);"
+            , "rawcall dup2(s->outw, 1);"
+            , "rawcall dup2(s->errw, 2);"
+            , "call Rt.hostCloseFd(mknum(s->outw), mknum(3), mknum(-1));"
+            , "call Rt.hostCloseFd(mknum(s->errw), mknum(3), mknum(s->outw));"
+            , "val bcode = call Rt.childBuiltin("
+            , "if (payload(bcode, 0) >= 0) {"
+            , "rawcall _exit(payload(bcode, 0));"
+            , "rawcall execvp(a0, s->argv);"
+            , "byteload(rawcall __errno_location(), 0) == 2"
+            , "rawcall _exit(127);"
+            , "rawcall _exit(126);"
+            ]
+            && not (String.contains "_exit(0)" d)
+        )
+    , check "7D PREDICATE PIN (agrees with the Zig's singleCommandArgv): ONE seq chain, ONE command, no subshell, no redirects, non-empty argv — six guards, in the Zig's order, and the leaf runs Rt.exec-plan only when the predicate answers 0.  `execfallback` is this row's behavioural arm: a two-command pipeline must take the fallback on BOTH hosts, and if the predicate disagreed it would fork a bogus argv and diverge on the VALUE"
+        (let
+            d =
+                defunText "Rt.hostSingleCommandArgv" runtimeMidText
+            leaf =
+                defunText "Rt.hostLeafExec" runtimeMidText
+         in
+         inOrder d
+            [ "if (mkbool(p->nchains != 1)) {"
+            , "if (mkbool(ch->op != 0)) {"
+            , "if (mkbool(pp->ncmds != 1)) {"
+            , "if (mkbool(c->subprog != 0)) {"
+            , "if (mkbool(c->nredirs != 0)) {"
+            , "if (mkbool(c->argc == 0)) {"
+            , "if (mkbool(c->argv == 0)) {"
+            ]
+            && String.contains "return mknum(cmds);" d
+            && String.contains "call Rt.hostSingleCommandArgv(mknum(progW))" leaf
+            && String.contains "call Rt.exec-plan(vecload(tv, 1))" leaf
+        )
+    , check "7D REAP PIN (who may reap what): the WNOHANG scan (option 1) reaps only a COMPLETED child and — like the blocking one — CLEARS ex.pid, so one pid is waited for exactly once (a second waitpid is ECHILD at best and, after the kernel recycles the number, somebody else's child at worst).  rc == 0 is the 'still running' answer and must NOT clear the pid (the measured bug this row exists for).  The BLOCKING reap (option 0) retries EINTR on the SAME child and is called ONLY from the driver's npoll == 0 arm — with a registered fd it would deadlock against a child blocked writing into the pipe we are not draining"
+        (let
+            w =
+                defunText "Rt.hostReapGo" runtimeMidText
+            b =
+                defunText "Rt.hostReapBlockGo" runtimeMidText
+            loop =
+                defunText "Rt.hostRunLoop" runtimeMidText
+         in
+         String.contains "rawcall waitpid(pid, stw, 1);" w
+            && String.contains "if (mkbool(rc < 0)) {" w
+            && String.contains "// ECHILD: nothing left to wait for" w
+            && String.contains "// rc == 0: WNOHANG, still running" w
+            && String.contains "rawcall waitpid(pid, stw, 0);" b
+            && inOrder b [ "rawcall waitpid(pid, stw, 0);", "== 4)) {", "recur(hN, iN, stN);", "return mknum(1);" ]
+            && String.contains "lp->evals[i].ex.pid = 0;" w
+            && String.contains "lp->evals[i].ex.pid = 0;" b
+            && inOrder loop [ "if (mkbool(lp->npoll == 0) && mkbool(to < 0)) {", "call Rt.hostReapBlocking" ]
+            && List.length (String.indexes "Rt.hostReapBlocking" runtimeMidText) == 2
+        )
+    , check "7D COMPLETION PIN (the Zig's completeReady): an exec completes on ONE predicate over the three booleans — (oflags & 7) == 7 — and the three are written by exactly four places (bit 1 in hostExOutEof, bit 2 in hostExErrEof, bit 4 in BOTH reap paths), so 'child reaped AND both pipes EOF'd' cannot be satisfied by a subset.  The pass takes the caller's SNAPSHOT of nevals, because a completion delivers a message that can spawn into the table"
+        (let
+            d =
+                defunText "Rt.hostCompleteReadyGo" runtimeMidText
+            ex =
+                defunText "Rt.hostExecComplete" runtimeMidText
+         in
+         String.contains "if ((lp->evals[i].ex.oflags & 7) != 7) {" d
+            && String.contains "call Rt.hostExecComplete(hN, mknum(i));" d
+            && String.contains "mknum(lp->nevals)" (defunText "Rt.hostCompleteReady" runtimeMidText)
+            && String.contains "| 1;" (defunText "Rt.hostExOutEof" runtimeMidText)
+            && String.contains "| 2;" (defunText "Rt.hostExErrEof" runtimeMidText)
+            && String.contains "| 4;" (defunText "Rt.hostReapGo" runtimeMidText)
+            && String.contains "| 4;" (defunText "Rt.hostReapBlockGo" runtimeMidText)
+            && String.contains "ex.code = code;" (defunText "Rt.hostReapGo" runtimeMidText)
+            && String.contains "Rt.waitStatusCode" (defunText "Rt.hostReapGo" runtimeMidText)
+            && inOrder ex
+                [ "vecstore(resAddr, 0, call Rt.hostCStrOf("
+                , "val errS = call Rt.hostCStrOf("
+                , "val inner = call Rt.cons(vecload(resAddr, 0), errS);"
+                , "vecstore(resAddr, 0, inner);"
+                , "vecstore(resAddr, 0, call Rt.cons(mknum(code), vecload(resAddr, 0)));"
+                , "call Rt.hostEpFreePlan(hN, iN);"
+                , "return call Rt.hostCompleteOk(hN, iN);"
+                ]
+        )
+    , check "7D ROOTING PIN (the accumulators): every read of bptr/blen/eptr/elen happens THROUGH THE EFFECT, after the allocating call — the drain re-reads `bptr + blen` for its copy destination only after hostExOutGrow (which FREES the old block), and the completion builds BOTH Strings into the eval's result slot (a slice of the registered slot array) and re-reads them at each cons, so a collect between the two allocations cannot strand a raw copy"
+        (let
+            og =
+                defunText "Rt.hostExOutGrow" runtimeMidText
+            dg =
+                defunText "Rt.hostExecDrainOutGo" runtimeMidText
+            dge =
+                defunText "Rt.hostExecDrainErrGo" runtimeMidText
+         in
+         inOrder og
+            [ "word old = lp->evals[i].ex.bptr;"
+            , "d->src = old;"
+            , "call Rt.memGo("
+            , "rawcall free(old);"
+            , "lp->evals[i].ex.bptr = nbuf;"
+            ]
+            && String.contains "d->dst = lp->evals[i].ex.bptr + lp->evals[i].ex.blen;" dg
+            && String.contains "d->dst = lp->evals[i].ex.eptr + lp->evals[i].ex.elen;" dge
+            && String.contains "if (mkbool(lp->evals[i].ex.bcap < need)) {" dg
+        )
+    , check "7D CBUF PIN (the symbol/diagnostic buffer the decoder and the CHILD share): Rt.hostEpCbuf writes 34 strings at the offsets Rt.exec-plan's own inline fill uses, so the host's decode reads the SAME table the prim route reads and the child's builtin names and childW2 messages are the same bytes.  A missing offset is a decode against garbage (the plan silently classifies wrong) and a wrong childW2 offset writes a fragment of a neighbour"
+        (let
+            d =
+                defunText "Rt.hostEpCbuf" runtimeMidText
+            fills =
+                List.filterMap cStrFillAt (String.lines d)
+            offsets =
+                List.map Tuple.first fills
+         in
+         List.length fills
+            == 34
+            && offsets
+            == [ 0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 109, 114, 120, 122, 125, 129, 132, 137, 139, 141, 173, 175, 200, 209, 222, 240, 245, 266, 289, 312 ]
+            && List.head (List.map Tuple.second fills) == Just "cons"
+            && List.member ( 200, "shensh: " ) fills
+            && List.member ( 209, ": not found\\n" ) fills
+            && List.member ( 222, ": cannot execute\\n" ) fills
+            && List.member ( 104, "echo" ) fills
+            && List.member ( 96, "hstr" ) fills
+            && String.contains "rawcall memset(c, 0, 336);" d
+            && String.contains "rawcall malloc(336);" d
+        )
+    , check "7D LAYOUT PIN: struct HostEX puts prog 0, pid 8, outfd 16, errfd 20, code 24, bptr 32 ... oflags 80 and is 11 words — the union's widest member, one word wider than plan §5.1's sketch because that sketch has no place for the exit code and the Zig's ExecEff carries `exit_code` as a field"
+        (let
+            d =
+                declsOf runtimeMidText
+         in
+         [ Check.fieldOffset d "HostEX" "prog"
+         , Check.fieldOffset d "HostEX" "pid"
+         , Check.fieldOffset d "HostEX" "outfd"
+         , Check.fieldOffset d "HostEX" "errfd"
+         , Check.fieldOffset d "HostEX" "code"
+         , Check.fieldOffset d "HostEX" "oflags"
+         ]
+            == [ Just 0, Just 8, Just 16, Just 20, Just 24, Just 80 ]
+            && Check.sizeofStruct d "HostEX" == Just 11
+        )
+    , check "7D SPAWN PIN (the child's whole input in one pointer): struct HostSpawn is 7 words (argc, argv, the four pipe ends, the `*Exec` scratch) and struct HostPipe is one 8-byte cell of two i32s — the fd halves read by NAME, since a `wload` of a pipe(2) cell would take both ints at once.  The leaf fills the two pipe cells separately (`pipe(pb)`, `pipe(pb + 8)`), writes the NEGATIVE SENTINEL into outfd/errfd BEFORE anything can fail, and only then classifies"
+        (let
+            d =
+                declsOf runtimeMidText
+            leaf =
+                defunText "Rt.hostLeafExec" runtimeMidText
+         in
+         Check.sizeofStruct d "HostSpawn"
+            == Just 7
+            && Check.sizeofStruct d "HostPipe"
+            == Just 1
+            && Check.fieldOffset d "HostPipe" "rd"
+            == Just 0
+            && Check.fieldOffset d "HostPipe" "wr"
+            == Just 4
+            && inOrder leaf
+                [ "lp->evals[i].ex.outfd = -1;"
+                , "word cbuf = payload(call Rt.hostEpCbuf(mknil), 0);"
+                , "word progW = payload(call Rt.epProg(planN, mknum(stw)), 0);"
+                , "call Rt.hostSingleCommandArgv(mknum(progW))"
+                , "word rcOut = rawcall pipe(pb);"
+                , "word rcErr = rawcall pipe(pb + 8);"
+                , "word pid = rawcall fork();"
+                , "call Rt.hostExecChild(mknum(sp));"
+                , "call Rt.hostSetNonblocking(mknum(po->rd));"
+                , "call Rt.hostSetNonblocking(mknum(pe->rd));"
+                , "call Rt.hostRegisterChild(hN, mknum(i), mknum(pid));"
+                , "lp->evals[i].etag = 2;"
+                ]
+            && String.contains "exec-plan: malformed plan" leaf
+            && String.contains "exec-plan: fork/pipe failed" leaf
+        )
+    , check "7D CLEANUP ORDER PIN (the raw-model hazard): Rt.hostRun runs hostCleanupAll BEFORE it copies the model out, because the exec arm's plan free is a value-ABI call and therefore a GC ALLOCATION — and `outAddr` is Rt.main's RAW `modelslot`, which no collector scans.  With the copy first, a collect inside cleanup moves the model in the blob's slot 0 and leaves a stale pointer in the cell rt_print_value reads (the row goes red on the swap, which is why it is pinned rather than commented)"
+        (inOrder (defunText "Rt.hostRun" runtimeMidText)
+            [ "call Rt.hostRunLoop(hN);"
+            , "call Rt.hostCleanupAll(hN);"
+            , "vecstore(outAddr, 0, vecload(h + 8, 0));"
+            , "rawcall free(lp->poll);"
+            , "rawcall rt_root_pop();"
+            ]
+            && String.contains "call Rt.hostEpFreePlan" (defunText "Rt.hostCleanupGo" runtimeMidText)
+        )
+    , check "7D DRIVER PIN (the Zig's reap/complete seams): the driver reaps TWICE per iteration and completes THREE times — after stepAll (so a child that exited during the step is noticed without a poll), again after the poll BEFORE the drain (so a reaped child and freshly ready fds complete in the same pass), and once inside the npoll == 0 arm right after the blocking reap — and that arm blocks for the reap before declaring a stuck program"
+        (let
+            d =
+                defunText "Rt.hostRunLoop" runtimeMidText
+            occurrences =
+                List.length (String.indexes "call Rt.hostReapChildren(hN);" d)
+         in
+         occurrences
+            == 2
+            && List.length (String.indexes "call Rt.hostCompleteReady(hN);" d)
+            == 3
+            && inOrder d
+                [ "call Rt.hostStepAll(hN);"
+                , "call Rt.hostReapChildren(hN);"
+                , "call Rt.hostCompleteReady(hN);"
+                , "call Rt.hostRebuildPollfds(hN);"
+                , "rawcall poll(lp->poll, lp->npoll, to);"
+                , "call Rt.hostReapChildren(hN);"
+                , "call Rt.hostDrainReady(hN);"
+                , "call Rt.hostCompleteReady(hN);"
+                ]
         )
 
     -- ==================== A2: the lowering (field/index/deref arms) ====================
@@ -5881,13 +6105,13 @@ checks rt runtimeMidText =
                        , "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcNum", "Rt.gcNumOut", "Rt.gcScanValueArray", "Rt.gcSweep"
                        , "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot"
                        , "Rt.globIsDotDot", "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess"
-                       , "Rt.halt", "Rt.hostAddPoll", "Rt.hostArity", "Rt.hostCall", "Rt.hostCleanupAll", "Rt.hostCleanupGo"
-                       , "Rt.hostClearFrom", "Rt.hostClearGo", "Rt.hostCompleteErr", "Rt.hostCompleteOk", "Rt.hostDeactivate", "Rt.hostDeliver"
-                       , "Rt.hostDieErr", "Rt.hostDieUnported", "Rt.hostDispatch", "Rt.hostDrainReady", "Rt.hostDrainReadyGo", "Rt.hostFlushExpiredSleeps"
-                       , "Rt.hostInit", "Rt.hostIsProgram", "Rt.hostLeafReadFile", "Rt.hostLineGrow", "Rt.hostNearestSleep", "Rt.hostNowMs"
+                       , "Rt.halt", "Rt.hostAddPoll", "Rt.hostArity", "Rt.hostCStrOf", "Rt.hostCall", "Rt.hostCleanupAll", "Rt.hostCleanupGo"
+                       , "Rt.hostClearFrom", "Rt.hostClearGo", "Rt.hostCloseFd", "Rt.hostCompleteErr", "Rt.hostCompleteOk", "Rt.hostCompleteReady", "Rt.hostCompleteReadyGo", "Rt.hostDeactivate", "Rt.hostDeliver"
+                       , "Rt.hostDieErr", "Rt.hostDieUnported", "Rt.hostDispatch", "Rt.hostDrainReady", "Rt.hostDrainReadyGo", "Rt.hostEpCbuf", "Rt.hostEpFreePlan", "Rt.hostExErrEof", "Rt.hostExErrGrow", "Rt.hostExOutEof", "Rt.hostExOutGrow", "Rt.hostExecChild", "Rt.hostExecComplete", "Rt.hostExecDrainErr", "Rt.hostExecDrainErrGo", "Rt.hostExecDrainOut", "Rt.hostExecDrainOutGo", "Rt.hostFlushExpiredSleeps"
+                       , "Rt.hostInit", "Rt.hostIsProgram", "Rt.hostLeafExec", "Rt.hostLeafReadFile", "Rt.hostLineGrow", "Rt.hostNearestSleep", "Rt.hostNowMs"
                        , "Rt.hostPollEntry", "Rt.hostPollFd", "Rt.hostPollTimeout", "Rt.hostPushFrame", "Rt.hostReadFileComplete", "Rt.hostReadFileDrain"
-                       , "Rt.hostReadLine", "Rt.hostReadLineLoop", "Rt.hostRebuildPollGo", "Rt.hostRebuildPollfds", "Rt.hostRfGrow", "Rt.hostRun"
-                       , "Rt.hostRunLoop", "Rt.hostRunnableScan", "Rt.hostSetNonblocking", "Rt.hostSleepComplete", "Rt.hostSleepScan", "Rt.hostSpawn"
+                       , "Rt.hostReadLine", "Rt.hostReadLineLoop", "Rt.hostReapBlockGo", "Rt.hostReapBlocking", "Rt.hostReapChildren", "Rt.hostReapGo", "Rt.hostRebuildPollGo", "Rt.hostRebuildPollfds", "Rt.hostRegisterChild", "Rt.hostRfGrow", "Rt.hostRun"
+                       , "Rt.hostRunLoop", "Rt.hostRunnableScan", "Rt.hostSetNonblocking", "Rt.hostSingleCommandArgv", "Rt.hostSleepComplete", "Rt.hostSleepScan", "Rt.hostSpawn"
                        , "Rt.hostSpawnAt", "Rt.hostSpawnFind", "Rt.hostSpawnFromCmd", "Rt.hostStep", "Rt.hostStepAll", "Rt.hostStepAllGo"
                        , "Rt.hostStepGo", "Rt.hostWriteAll", "Rt.hostWriteFileLeaf", "Rt.hostWriteStr", "Rt.intern", "Rt.isChildBuiltin"
                        , "Rt.main", "Rt.memGo", "Rt.metaGo", "Rt.mkTmpAt", "Rt.nameBytes", "Rt.numText"
@@ -5980,24 +6204,24 @@ checks rt runtimeMidText =
                             case Rt.spliceSurface s union of
                                 Ok spliced ->
                                     List.map .key spliced == List.map .key union ++
-                                               [ "Rt.apply", "Rt.apply-at", "Rt.apply-tail", "Rt.applyGo",
-                                                 "Rt.applyTailGo", "Rt.bounce", "Rt.bounceGo", "Rt.cStrEq",
-                                                 "Rt.cStrEqGo", "Rt.callArity", "Rt.copyWords", "Rt.copyWordsGo",
-                                                 "Rt.die", "Rt.dieErr", "Rt.frame-enter", "Rt.frame-leave",
-                                                 "Rt.frameBlock", "Rt.halt", "Rt.hostAddPoll", "Rt.hostArity", "Rt.hostCall",
-                                                 "Rt.hostCleanupAll", "Rt.hostCleanupGo", "Rt.hostClearFrom", "Rt.hostClearGo",
-                                                 "Rt.hostCompleteErr", "Rt.hostCompleteOk", "Rt.hostDeactivate", "Rt.hostDeliver",
-                                                 "Rt.hostDieErr", "Rt.hostDieUnported", "Rt.hostDispatch", "Rt.hostDrainReady",
-                                                 "Rt.hostDrainReadyGo", "Rt.hostFlushExpiredSleeps", "Rt.hostInit", "Rt.hostIsProgram",
-                                                 "Rt.hostLeafReadFile", "Rt.hostLineGrow", "Rt.hostNearestSleep", "Rt.hostNowMs",
-                                                 "Rt.hostPollEntry", "Rt.hostPollFd", "Rt.hostPollTimeout", "Rt.hostPushFrame",
-                                                 "Rt.hostReadFileComplete", "Rt.hostReadFileDrain", "Rt.hostReadLine", "Rt.hostReadLineLoop",
-                                                 "Rt.hostRebuildPollGo", "Rt.hostRebuildPollfds", "Rt.hostRfGrow", "Rt.hostRun",
-                                                 "Rt.hostRunLoop", "Rt.hostRunnableScan", "Rt.hostSetNonblocking", "Rt.hostSleepComplete",
-                                                 "Rt.hostSleepScan", "Rt.hostSpawn", "Rt.hostSpawnAt", "Rt.hostSpawnFind",
-                                                 "Rt.hostSpawnFromCmd", "Rt.hostStep", "Rt.hostStepAll", "Rt.hostStepAllGo",
-                                                 "Rt.hostStepGo", "Rt.hostWriteAll", "Rt.hostWriteFileLeaf", "Rt.hostWriteStr",
-                                                 "Rt.main", "Rt.metaGo", "Rt.parseArgsGo", "Rt.tail-known"
+                                               [ "Rt.apply", "Rt.apply-at", "Rt.apply-tail", "Rt.applyGo"
+                                                 , "Rt.applyTailGo", "Rt.bounce", "Rt.bounceGo", "Rt.cStrEq"
+                                                 , "Rt.cStrEqGo", "Rt.callArity", "Rt.copyWords", "Rt.copyWordsGo"
+                                                 , "Rt.die", "Rt.dieErr", "Rt.frame-enter", "Rt.frame-leave"
+                                                 , "Rt.frameBlock", "Rt.halt", "Rt.hostAddPoll", "Rt.hostArity", "Rt.hostCStrOf", "Rt.hostCall"
+                                                 , "Rt.hostCleanupAll", "Rt.hostCleanupGo", "Rt.hostClearFrom", "Rt.hostClearGo", "Rt.hostCloseFd"
+                                                 , "Rt.hostCompleteErr", "Rt.hostCompleteOk", "Rt.hostCompleteReady", "Rt.hostCompleteReadyGo", "Rt.hostDeactivate", "Rt.hostDeliver"
+                                                 , "Rt.hostDieErr", "Rt.hostDieUnported", "Rt.hostDispatch", "Rt.hostDrainReady"
+                                                 , "Rt.hostDrainReadyGo", "Rt.hostEpCbuf", "Rt.hostEpFreePlan", "Rt.hostExErrEof", "Rt.hostExErrGrow", "Rt.hostExOutEof", "Rt.hostExOutGrow", "Rt.hostExecChild", "Rt.hostExecComplete", "Rt.hostExecDrainErr", "Rt.hostExecDrainErrGo", "Rt.hostExecDrainOut", "Rt.hostExecDrainOutGo", "Rt.hostFlushExpiredSleeps", "Rt.hostInit", "Rt.hostIsProgram", "Rt.hostLeafExec"
+                                                 , "Rt.hostLeafReadFile", "Rt.hostLineGrow", "Rt.hostNearestSleep", "Rt.hostNowMs"
+                                                 , "Rt.hostPollEntry", "Rt.hostPollFd", "Rt.hostPollTimeout", "Rt.hostPushFrame"
+                                                 , "Rt.hostReadFileComplete", "Rt.hostReadFileDrain", "Rt.hostReadLine", "Rt.hostReadLineLoop", "Rt.hostReapBlockGo", "Rt.hostReapBlocking", "Rt.hostReapChildren", "Rt.hostReapGo"
+                                                 , "Rt.hostRebuildPollGo", "Rt.hostRebuildPollfds", "Rt.hostRegisterChild", "Rt.hostRfGrow", "Rt.hostRun"
+                                                 , "Rt.hostRunLoop", "Rt.hostRunnableScan", "Rt.hostSetNonblocking", "Rt.hostSingleCommandArgv", "Rt.hostSleepComplete"
+                                                 , "Rt.hostSleepScan", "Rt.hostSpawn", "Rt.hostSpawnAt", "Rt.hostSpawnFind"
+                                                 , "Rt.hostSpawnFromCmd", "Rt.hostStep", "Rt.hostStepAll", "Rt.hostStepAllGo"
+                                                 , "Rt.hostStepGo", "Rt.hostWriteAll", "Rt.hostWriteFileLeaf", "Rt.hostWriteStr"
+                                                 , "Rt.main", "Rt.metaGo", "Rt.parseArgsGo", "Rt.tail-known"
                                                ]
 
                                 Err _ ->
@@ -9986,6 +10210,72 @@ checkErrModule name frag src =
         )
 
 
+{-| True iff every needle occurs in `hay`, in the given order.  Each search
+continues AFTER the previous match, so a needle that must appear twice has to
+appear twice — which is what makes this stronger than a bag of
+`String.contains` calls (7D's child side and driver are both STATEMENT
+ORDERS, and a reordering is exactly the bug that must be RED).
+-}
+inOrder : String -> List String -> Bool
+inOrder hay needles =
+    let
+        advance : String -> Maybe String -> Maybe String
+        advance needle acc =
+            case acc of
+                Nothing ->
+                    Nothing
+
+                Just rest ->
+                    case String.split needle rest of
+                        _ :: after ->
+                            case after of
+                                [] ->
+                                    Nothing
+
+                                _ ->
+                                    -- `after` holds the pieces that FOLLOWED
+                                    -- each occurrence; re-inserting the needle
+                                    -- yields exactly the text past the first.
+                                    Just (String.join needle after)
+
+                        [] ->
+                            Nothing
+    in
+    List.foldl advance (Just hay) needles /= Nothing
+
+
+{-| Read one `call Rt.cStrFill(mknum(c + N), "S", mknum(0));` line of
+Rt.hostEpCbuf as `( N, S )`.  `Nothing` for any other line — a malformed fill
+is thereby DROPPED, which the offset-list equality in the 7D CBUF row turns
+into a red row rather than a vacuous pass.
+-}
+cStrFillAt : String -> Maybe ( Int, String )
+cStrFillAt line =
+    case String.split "call Rt.cStrFill(mknum(c + " line of
+        _ :: rest ->
+            case rest of
+                r :: _ ->
+                    case
+                        String.toInt (String.trim (Maybe.withDefault "" (List.head (String.split "), \"" r))))
+                    of
+                        Nothing ->
+                            Nothing
+
+                        Just off ->
+                            case String.split "\"" r of
+                                _ :: s :: _ ->
+                                    Just ( off, s )
+
+                                _ ->
+                                    Nothing
+
+                [] ->
+                    Nothing
+
+        [] ->
+            Nothing
+
+
 {-| STAGE 7A — the host's text helpers.  `runtimeMidText` is the surface TEXT
 (as a source string), so three of the host's facts are read out of it rather
 than out of a tree: the defun bodies are prose-shaped (a 20-arm if chain), and
@@ -10076,16 +10366,15 @@ spliceRegionOut src =
     String.join "\n" (List.reverse (Tuple.second (List.foldl step ( False, [] ) (String.lines src))))
 
 
-{-| The host's 52 REACHABLE defun keys — the enumeration `Rt.hostSeeds` must
+{-| The host's 76 REACHABLE defun keys — the enumeration `Rt.hostSeeds` must
 close over.  (27 from stage 7A + stage 7B's 12 leaf/deadline defuns + stage 7C's
-13 fd-table/poll defuns.)
+14 fd-table/poll defuns + stage 7D's 23 exec defuns.)
 
-DELIBERATELY NOT LISTED: `Rt.hostSetNonblocking`.  Nothing calls it in stage 7C
-(the readFile leaf asks `openat` for O_NONBLOCK itself), so it is NOT in the
-closure from the two entry points — and the row below is an EQUALITY, so an
-uncalled seat would make it RED.  Its first caller is 7D's exec pipe setup; the
-row that pins it today is stage 7C's text pin, which is also the only thing that
-can see a seat no fixture reaches.
+`Rt.hostSetNonblocking` JOINS the list in stage 7D: 7C declared it uncalled (the
+readFile leaf asks `openat` for O_NONBLOCK itself) and left it out for exactly
+that reason — the row below is an EQUALITY, so an uncalled seat is RED.  7D's
+exec pipe setup is its first caller, which is what moves it from a text-only
+seat into the closure.
 -}
 hostDefunKeys : List String
 hostDefunKeys =
@@ -10141,6 +10430,30 @@ hostDefunKeys =
     , "Rt.hostDrainReady"
     , "Rt.hostCleanupGo"
     , "Rt.hostCleanupAll"
+    , "Rt.hostSetNonblocking"
+    , "Rt.hostEpCbuf"
+    , "Rt.hostSingleCommandArgv"
+    , "Rt.hostCloseFd"
+    , "Rt.hostExecChild"
+    , "Rt.hostCStrOf"
+    , "Rt.hostExOutGrow"
+    , "Rt.hostExErrGrow"
+    , "Rt.hostExOutEof"
+    , "Rt.hostExErrEof"
+    , "Rt.hostExecDrainOutGo"
+    , "Rt.hostExecDrainErrGo"
+    , "Rt.hostExecDrainOut"
+    , "Rt.hostExecDrainErr"
+    , "Rt.hostRegisterChild"
+    , "Rt.hostReapGo"
+    , "Rt.hostReapChildren"
+    , "Rt.hostReapBlockGo"
+    , "Rt.hostReapBlocking"
+    , "Rt.hostEpFreePlan"
+    , "Rt.hostExecComplete"
+    , "Rt.hostCompleteReadyGo"
+    , "Rt.hostCompleteReady"
+    , "Rt.hostLeafExec"
     ]
 
 

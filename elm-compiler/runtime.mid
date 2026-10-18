@@ -501,11 +501,25 @@ struct HostRF {
   bcap : word;
   tmp : word;
 }
+// 7D: TaskExec's pending effect.  TWO accumulators (captured stdout and
+// stderr, each a C block with the same ptr/len/cap triple 7C's readFile
+// carries), the child's pid, the two read ends, and the decoded plan tree
+// (`prog`, kept alive until the child is reaped AND both pipes EOF'd, which is
+// what makes `argv` inside it valid for execvp's whole lifetime).
+//
+// `oflags` is the three booleans the Zig keeps separately, one bit each —
+// out_eof 1, err_eof 2, child_exited 4, so completion is ONE compare
+// `(oflags & 7) == 7` (plan §5.1).  `code` is the DECODED wait status
+// (Rt.waitStatusCode's answer, 0..255); plan §5.1's struct omitted it and the
+// Zig's ExecEff carries `exit_code` as its own field, so the port keeps it as
+// a field rather than packing it into oflags' spare bits — the union grows by
+// one word and TestMain's layout rows are the seat that says so.
 struct HostEX {
   prog : word;
   pid : word;
   outfd : i32;
   errfd : i32;
+  code : word;
   bptr : word;
   blen : word;
   bcap : word;
@@ -588,6 +602,30 @@ struct HostPoll {
 struct HostTs {
   sec : i64;
   nsec : i64;
+}
+// 7D: ONE `pipe(2)` pair.  `rawcall pipe(ptr)` writes two C `int`s, and a
+// `struct` of two `i32`s is the only way this language can READ them back by
+// name — a `wload` would take eight bytes at once and the halves would have to
+// be split by arithmetic (Rt.execGo does that where it has no struct; here the
+// fields carry the width, which is the same reason struct Pollfd exists).
+struct HostPipe {
+  rd : i32;
+  wr : i32;
+}
+// 7D: what the forked child needs, in ONE pointer.  The child may not touch
+// the host state (it is a copy, and the parent keeps running in the original),
+// and a `call Rt.*` carries at most three pointer args (plan §6 G-A), so the
+// five facts travel as one 7-word C block: the argv the decoded plan owns
+// (NUL-terminated, C heap — plan §6 G-G), the four pipe ends, and the `*Exec`
+// scratch whose cbuf carries the builtin names and the childW2 diagnostics.
+struct HostSpawn {
+  argc : word;
+  argv : word;
+  outr : word;
+  outw : word;
+  errr : word;
+  errw : word;
+  exec : word;
 }
 // NO extern FOR clock_gettime, DELIBERATELY: the symbol still has an
 // `Ast.rawcallArity` row (cffi U5 left it, "per the brief"), and R-08 refuses
@@ -5802,12 +5840,15 @@ defun Rt.hostRebuildPollfds(hN : val) -> val {
 
 // ONE ready table entry.  Every guard is an early return (J7's divergence rule)
 // and each is load-bearing:
-//   * revents == 0 — the entry is not ready (or only POLLHUP/POLLNVAL-free);
-//   * role != 1 — the exec roles are 7D's, and NOTHING sets etag = 2 yet;
-//   * the eval is no longer active, or is no longer THIS effect — the table is
-//     one poll old, and a completion earlier in this same pass can free a slot
-//     and respawn a different evaluation into it.  The `etag` test is stricter
-//     than the Zig's bare `active` test and costs one load.
+//   * revents == 0 — the entry is not ready;
+//   * the eval is no longer active, or no longer carries the effect this ROLE
+//     belongs to (etag 1 readFile / 2 exec) — the table is one poll old, and a
+//     completion earlier in this same pass can free a slot and respawn a
+//     DIFFERENT evaluation into it.  The `etag` test is stricter than the Zig's
+//     bare `active` test and costs one load (7C; 7D extended it per role);
+//   * role 2/3 (7D) drain the exec's captured stdout/stderr into its
+//     accumulators — they do NOT complete it, because completion needs the
+//     child reaped as well (hostCompleteReady's `(oflags & 7) == 7`).
 // THE DRAIN IS RE-ENTERED FROM THE TABLE, NOT FROM A SAVED POINTER: the fd and
 // the accumulator are read out of the eval's effect words, so nothing here can
 // hold a pointer across the completion's allocations.
@@ -5821,19 +5862,31 @@ defun Rt.hostPollEntry(hN : val, kN : val) -> val {
   }
   word ev = pp->evals[k];
   word role = pp->roles[k];
-  if (role != 1) {
-    return mknil;
-  }
   if (lp->evals[ev].active == 0) {
     return mknil;
   }
-  if (lp->evals[ev].etag != 1) {
-    return mknil;
+  if (role == 1) {
+    if (lp->evals[ev].etag != 1) {
+      return mknil;
+    }
+    if (payload(call Rt.hostReadFileDrain(hN, mknum(ev)), 0) == 0) {
+      return mknil;                        // EAGAIN again: still suspended
+    }
+    return call Rt.hostReadFileComplete(hN, mknum(ev));
   }
-  if (payload(call Rt.hostReadFileDrain(hN, mknum(ev)), 0) == 0) {
-    return mknil;                          // EAGAIN again: still suspended
+  if (role == 2) {
+    if (lp->evals[ev].etag != 2) {
+      return mknil;
+    }
+    return call Rt.hostExecDrainOut(hN, mknum(ev));
   }
-  return call Rt.hostReadFileComplete(hN, mknum(ev));
+  if (role == 3) {
+    if (lp->evals[ev].etag != 2) {
+      return mknil;
+    }
+    return call Rt.hostExecDrainErr(hN, mknum(ev));
+  }
+  return mknil;
 }
 defun Rt.hostDrainReadyGo(hN : val, iN : val, nN : val) -> val {
   word i = payload(iN, 0);
@@ -5854,11 +5907,16 @@ defun Rt.hostDrainReady(hN : val) -> val {
 // The Zig's cleanupAll (`defer loop.cleanupAll()`, LIFO with the root pop):
 // close every fd a SUSPENDED eval still holds and free its two C-heap blocks.
 // It is LOAD-BEARING exactly when the loop exits with work pending — TaskQuit
-// finishing the run while another evaluation sits suspended on a readFile — and
-// a no-op on the ordinary path, where a completion already closed and freed.
-// NO GC ALLOCATION anywhere in it: it runs beside a root pop, so it must be
-// safe under any root set.  (The exec arm — two fds, two buffers, planFree and
-// a blocking reap — is 7D's.)
+// finishing the run while another evaluation sits suspended on a readFile or
+// an exec — and a no-op on the ordinary path, where a completion already
+// closed and freed.
+//
+// IT MAY ALLOCATE (7D): the exec arm frees the decoded plan tree, and the only
+// path to Rt.epFreeChains is the value ABI (`mknum(progW)` boxes the pointer).
+// That is safe ONLY because Rt.hostRun copies the final model out AFTER this
+// runs — while it ran BEFORE, the model sat in Rt.main's RAW `modelslot`
+// (malloc(40), unscanned), and a collect here would have moved the model in the
+// blob's slot 0 without updating that copy.  TestMain pins the order.
 defun Rt.hostCleanupGo(hN : val, iN : val) -> val {
   word h = payload(hN, 0);
   word i = payload(iN, 0);
@@ -5875,6 +5933,26 @@ defun Rt.hostCleanupGo(hN : val, iN : val) -> val {
     lp->evals[i].rf.blen = 0;
     lp->evals[i].rf.bcap = 0;
     lp->evals[i].rf.tmp = 0;
+    lp->evals[i].etag = 0;
+    recur(hN, mknum(i + 1));
+  }
+  if (lp->evals[i].etag == 2) {
+    call Rt.hostCloseFd(mknum(lp->evals[i].ex.outfd), mknum(0), mknum(-1));
+    call Rt.hostCloseFd(mknum(lp->evals[i].ex.errfd), mknum(0), mknum(-1));
+    rawcall free(lp->evals[i].ex.bptr);
+    rawcall free(lp->evals[i].ex.eptr);
+    call Rt.hostEpFreePlan(hN, mknum(i));
+    lp->evals[i].ex.pid = 0;
+    lp->evals[i].ex.outfd = -1;
+    lp->evals[i].ex.errfd = -1;
+    lp->evals[i].ex.bptr = 0;
+    lp->evals[i].ex.blen = 0;
+    lp->evals[i].ex.bcap = 0;
+    lp->evals[i].ex.eptr = 0;
+    lp->evals[i].ex.elen = 0;
+    lp->evals[i].ex.ecap = 0;
+    lp->evals[i].ex.oflags = 0;
+    lp->evals[i].ex.code = 0;
     lp->evals[i].etag = 0;
     recur(hN, mknum(i + 1));
   }
@@ -5903,6 +5981,742 @@ defun Rt.hostSetNonblocking(fdN : val) -> val {
   return mknil;
 }
 
+// ============== STAGE 7D: TaskExec — THE ASYNC EXEC =======================
+// The Zig's leafExec / execDrainOut / execDrainErr / execComplete /
+// registerChild / reapChildren / reapBlocking (effectloop.zig:559-679,
+// 1018-1079) and the free-function child side (execChild, singleCommandArgv,
+// effectloop.zig:1266-1306), ported onto the Mid decoder that already exists
+// for the PRIM route (Rt.exec-plan + the Rt.ep* family, groups 3B-2a/2b/2c).
+//
+// WHY THE HOST DECODES THE PLAN ITSELF: the Zig host classifies the plan
+// (singleCommandArgv) BEFORE running it — a single plain command becomes
+// fork + piped capture + poll + waitpid, and anything else falls back to the
+// SYNCHRONOUS prim runner.  Mid's synchronous runner is Rt.exec-plan, which
+// decodes AND runs in one body and so cannot be asked for the tree; the leaf
+// therefore decodes with the same Rt.epProg the prim route uses and, when the
+// classification fails, calls Rt.exec-plan (which decodes a SECOND time — one
+// extra decode on the complex path, never on the async one).
+//
+// THE CHILD SIDE IS COPIED FROM Rt.exec-run's CHILD ARM (runtime.mid:2645-
+// 2680), not invented: Rt.childBuiltin for the six in-process builtins, then
+// execvp, then the errno BYTE read, then 127/126 with the messages sitting at
+// cbuf+200/209/222.  THE `_exit` RULE — the child's last act is either
+// `_exit(bcode)` AFTER the builtin RETURNS, or `_exit` in the execvp-failure
+// arm.  NO `_exit` may sit between the dup2s and the builtin: the builtin
+// writes straight to fd 1/2 (write(2), no stdio), so exiting before it runs
+// produces EMPTY output with a plausible exit code — the "silently truncated
+// output" failure this unit's invariant list names, and one no gate row can
+// see (a truncated capture still parses).
+//
+// THE ROOTING DISCIPLINE FOR THE ACCUMULATORS (7B's readLine double-free
+// family): both accumulators are C-heap blocks whose three words live in the
+// eval's own effect (`ex.bptr/blen/bcap`, `ex.eptr/elen/ecap`).  Every reader
+// re-reads them FROM THE EFFECT after any call that allocates, and every
+// grow frees the old block only after the copy is published.  The two Strings
+// hostExecComplete builds are rooted by way of the eval's RESULT SLOT (a
+// slice of the registered slot array): build, store, re-read, use — so a
+// collect between the two allocations cannot leave a raw copy behind.
+
+// The 336-byte symbol/diagnostic buffer the DECODER reads and the CHILD's
+// messages come out of, byte-identical to the one Rt.exec-plan fills inline
+// (offsets 0..334, every byte written; TestMain's 7D CBUF row pins the two
+// against each other).  THE SAME BUFFER SERVES THREE READERS, which is why it
+// is a defun of its own:
+//   0..103   the decoder's own names — cons/string/number/symbol (0/8/16/24)
+//            the chain ops seq/and/or (32/40/48), the redirect kinds
+//            in/out/append/dup/hdoc/hstr (56..96).  Rt.epProg and every
+//            Rt.ep* helper compare the plan's symbols against THESE bytes.
+//   104..139 the child-side builtin names (echo/true/false/:/cd/pwd), "-n",
+//            HOME and "/" — Rt.childBuiltin / Rt.echoGo / Rt.childPwd /
+//            Rt.envHome / Rt.isChildBuiltin read them by offset.
+//   141..335 childW2's diagnostics and the mkstemp templates (exec-run's
+//            synchronous tail); 200/209/222 are the two this unit uses.
+defun Rt.hostEpCbuf(dummy : val) -> val {
+  word c = rawcall malloc(336);
+  if (mkbool(c == 0)) {
+    word h = rawcall rt_halt();
+    return mknil;
+  }
+  rawcall memset(c, 0, 336);
+  call Rt.cStrFill(mknum(c + 0), "cons", mknum(0));
+  call Rt.cStrFill(mknum(c + 8), "string", mknum(0));
+  call Rt.cStrFill(mknum(c + 16), "number", mknum(0));
+  call Rt.cStrFill(mknum(c + 24), "symbol", mknum(0));
+  call Rt.cStrFill(mknum(c + 32), "seq", mknum(0));
+  call Rt.cStrFill(mknum(c + 40), "and", mknum(0));
+  call Rt.cStrFill(mknum(c + 48), "or", mknum(0));
+  call Rt.cStrFill(mknum(c + 56), "in", mknum(0));
+  call Rt.cStrFill(mknum(c + 64), "out", mknum(0));
+  call Rt.cStrFill(mknum(c + 72), "append", mknum(0));
+  call Rt.cStrFill(mknum(c + 80), "dup", mknum(0));
+  call Rt.cStrFill(mknum(c + 88), "hdoc", mknum(0));
+  call Rt.cStrFill(mknum(c + 96), "hstr", mknum(0));
+  call Rt.cStrFill(mknum(c + 104), "echo", mknum(0));
+  call Rt.cStrFill(mknum(c + 109), "true", mknum(0));
+  call Rt.cStrFill(mknum(c + 114), "false", mknum(0));
+  call Rt.cStrFill(mknum(c + 120), ":", mknum(0));
+  call Rt.cStrFill(mknum(c + 122), "cd", mknum(0));
+  call Rt.cStrFill(mknum(c + 125), "pwd", mknum(0));
+  call Rt.cStrFill(mknum(c + 129), "-n", mknum(0));
+  call Rt.cStrFill(mknum(c + 132), "HOME", mknum(0));
+  call Rt.cStrFill(mknum(c + 137), " ", mknum(0));
+  call Rt.cStrFill(mknum(c + 139), "/", mknum(0));
+  call Rt.cStrFill(mknum(c + 141), "Input redirect file not found: ", mknum(0));
+  call Rt.cStrFill(mknum(c + 173), "\n", mknum(0));
+  call Rt.cStrFill(mknum(c + 175), "Output redirect failed: ", mknum(0));
+  call Rt.cStrFill(mknum(c + 200), "shensh: ", mknum(0));
+  call Rt.cStrFill(mknum(c + 209), ": not found\n", mknum(0));
+  call Rt.cStrFill(mknum(c + 222), ": cannot execute\n", mknum(0));
+  call Rt.cStrFill(mknum(c + 240), "cd: ", mknum(0));
+  call Rt.cStrFill(mknum(c + 245), "pwd: cannot get cwd\n", mknum(0));
+  call Rt.cStrFill(mknum(c + 266), "/tmp/shensh-out.XXXXXX", mknum(0));
+  call Rt.cStrFill(mknum(c + 289), "/tmp/shensh-err.XXXXXX", mknum(0));
+  call Rt.cStrFill(mknum(c + 312), "/tmp/shensh-hdoc.XXXXXX", mknum(0));
+  return mknum(c);
+}
+
+// The Zig's singleCommandArgv as a PREDICATE OVER THE DECODED TREE: one seq
+// chain, one command, no subshell, no redirects, at least one argv entry.
+// Returns the command's address (`*CmdState`) or 0.  THE PREDICATE MUST AGREE
+// WITH THE ZIG'S EXACTLY (plan §7.3 7D's invariant): a plan the Zig runs
+// SYNCHRONOUSLY but this runs ASYNC (or the reverse) diverges on `fastexec`
+// and `asyncorder` without ever failing to compile.
+//   `op` is 0 `;` / 1 `&&` / 2 `||` (Rt.epChain's codes), so "seq only" is
+//   `op == 0`; `subprog != 0` is the Zig's `c.sub != null`; the argv test is
+//   BOTH `argc != 0` and `argv != 0` (Rt.epCmd leaves argv at 0 when the
+//   command has no words, and execvp would take a null char**).
+defun Rt.hostSingleCommandArgv(progN : val) -> val {
+  word progW = payload(progN, 0);
+  *Prog p = [*Prog](progW);
+  if (mkbool(p->nchains != 1)) {
+    return mknum(0);
+  }
+  word chains = p->chains;
+  *Chain ch = [*Chain](chains);
+  if (mkbool(ch->op != 0)) {
+    return mknum(0);
+  }
+  *Pipe pp = [*Pipe](ch->pipe);
+  if (mkbool(pp->ncmds != 1)) {
+    return mknum(0);
+  }
+  word cmds = pp->cmds;
+  *CmdState c = [*CmdState](cmds);
+  if (mkbool(c->subprog != 0)) {
+    return mknum(0);
+  }
+  if (mkbool(c->nredirs != 0)) {
+    return mknum(0);
+  }
+  if (mkbool(c->argc == 0)) {
+    return mknum(0);
+  }
+  if (mkbool(c->argv == 0)) {
+    return mknum(0);
+  }
+  return mknum(cmds);
+}
+
+// `close(fd)` when `fd >= low` and `fd` is not the fd named by `keep` — the
+// Zig's guarded closes after the child's dup2s (`if (p[1] > 2) close(p[1])`)
+// and cleanupAll's (`if (fd >= 0) close(fd)`) in one seat.  A helper because
+// every BLOCK in this language must END with a terminator: `if (c) { close();
+// }` with a statement after it is not parseable, and the two-arm
+// `if (c) { stmt; return mknil; } else { return mknil; }` idiom (exec-run's)
+// reads as a conditional RETURN in every other language.
+defun Rt.hostCloseFd(fdN : val, lowN : val, keepN : val) -> val {
+  word fd = payload(fdN, 0);
+  word low = payload(lowN, 0);
+  word keep = payload(keepN, 0);
+  if (mkbool(fd >= low) && mkbool(fd != keep)) {
+    rawcall close(fd);
+    return mknil;
+  }
+  return mknil;
+}
+
+// THE IN-CHILD SEQUENCE — everything the forked child does, and NOTHING the
+// parent may run.  `spN` is a `*HostSpawn`: the four pipe ends, the argv the
+// decoded plan owns (a malloc'd char* array, NUL-terminated — plan §6 G-G's
+// "C-heap copy the decoded blob already is") and the `*Exec` scratch
+// Rt.childBuiltin reads its names out of.  There is no GC value in it and no
+// arity dance: one pointer in, `_exit` or `execvp` out.
+defun Rt.hostExecChild(spawnN : val) -> val {
+  word sp = payload(spawnN, 0);
+  *HostSpawn s = [*HostSpawn](sp);
+  rawcall close(s->outr);
+  rawcall close(s->errr);
+  rawcall dup2(s->outw, 1);
+  rawcall dup2(s->errw, 2);
+  call Rt.hostCloseFd(mknum(s->outw), mknum(3), mknum(-1));
+  call Rt.hostCloseFd(mknum(s->errw), mknum(3), mknum(s->outw));
+  val bcode = call Rt.childBuiltin(mknum(s->argc), mknum(s->argv), mknum(s->exec));
+  if (payload(bcode, 0) >= 0) {
+    rawcall _exit(payload(bcode, 0));
+    return mknil;
+  }
+  word a0 = wload(s->argv, 0);
+  word cbuf = [*Exec](s->exec)->cbuf;
+  rawcall execvp(a0, s->argv);
+  if (mkbool(byteload(rawcall __errno_location(), 0) == 2)) {
+    call Rt.wStr(mknum(2), mknum(cbuf + 200));
+    call Rt.wStr(mknum(2), mknum(a0));
+    call Rt.wStr(mknum(2), mknum(cbuf + 209));
+    rawcall _exit(127);
+    return mknil;
+  }
+  call Rt.wStr(mknum(2), mknum(cbuf + 200));
+  call Rt.wStr(mknum(2), mknum(a0));
+  call Rt.wStr(mknum(2), mknum(cbuf + 222));
+  rawcall _exit(126);
+  return mknil;
+}
+
+// A C block -> a Mid String.  7C's hostReadFileComplete shape, factored out
+// because 7D builds TWO of them per completion (the Zig's valString over
+// each accumulator).
+defun Rt.hostCStrOf(ptrN : val, lenN : val) -> val {
+  word src = payload(ptrN, 0);
+  word len = payload(lenN, 0);
+  word dst = allocraw(len + 1);
+  *CopyDesc d = rawcall malloc(24);
+  d->src = src;
+  d->dst = dst;
+  d->n = len;
+  call Rt.memGo(mknum([word](d)), mknum(0));
+  rawcall free(d);
+  bytestore(dst, len, 0);
+  return mkstr(dst, len);
+}
+
+// --- the two accumulators (7C's hostRfGrow, twice) ----------------------
+// DOUBLE-AND-COPY, read the effect, copy, THEN free and republish — the exact
+// order 7B's readLine got wrong.  `free(0)` is a documented no-op, so the
+// first grow (bptr == 0) shares the code.  An OOM leaves bcap UNCHANGED,
+// which is the caller's failure signal (it completes with what it has, the
+// Zig's `catch break`).
+defun Rt.hostExOutGrow(hN : val, iN : val, needN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  word need = payload(needN, 0);
+  *Host lp = [*Host](h);
+  if (mkbool(need <= lp->evals[i].ex.bcap)) {
+    return mknil;
+  }
+  word ncap = 65536;
+  while (ncap < lp->evals[i].ex.bcap) {
+    ncap = ncap * 2;
+  }
+  while (ncap < need) {
+    ncap = ncap * 2;
+  }
+  word nbuf = rawcall malloc(ncap);
+  if (mkbool(nbuf == 0)) {
+    return mknil;
+  }
+  word old = lp->evals[i].ex.bptr;
+  word len = lp->evals[i].ex.blen;
+  *CopyDesc d = rawcall malloc(24);
+  d->src = old;
+  d->dst = nbuf;
+  d->n = len;
+  call Rt.memGo(mknum([word](d)), mknum(0));
+  rawcall free(d);
+  rawcall free(old);
+  lp->evals[i].ex.bptr = nbuf;
+  lp->evals[i].ex.bcap = ncap;
+  return mknil;
+}
+defun Rt.hostExErrGrow(hN : val, iN : val, needN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  word need = payload(needN, 0);
+  *Host lp = [*Host](h);
+  if (mkbool(need <= lp->evals[i].ex.ecap)) {
+    return mknil;
+  }
+  word ncap = 65536;
+  while (ncap < lp->evals[i].ex.ecap) {
+    ncap = ncap * 2;
+  }
+  while (ncap < need) {
+    ncap = ncap * 2;
+  }
+  word nbuf = rawcall malloc(ncap);
+  if (mkbool(nbuf == 0)) {
+    return mknil;
+  }
+  word old = lp->evals[i].ex.eptr;
+  word len = lp->evals[i].ex.elen;
+  *CopyDesc d = rawcall malloc(24);
+  d->src = old;
+  d->dst = nbuf;
+  d->n = len;
+  call Rt.memGo(mknum([word](d)), mknum(0));
+  rawcall free(d);
+  rawcall free(old);
+  lp->evals[i].ex.eptr = nbuf;
+  lp->evals[i].ex.ecap = ncap;
+  return mknil;
+}
+
+// The two EOF arms — close ONCE (the fd becomes -1, so a second entry through
+// the poll table is a no-op), set this stream's bit in oflags, and report
+// COMPLETE.  One defun per stream because the fd and the bit are fields of
+// different names, and a shared one would have to index the union by hand.
+defun Rt.hostExOutEof(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  call Rt.hostCloseFd(mknum(lp->evals[i].ex.outfd), mknum(0), mknum(-1));
+  lp->evals[i].ex.outfd = -1;
+  lp->evals[i].ex.oflags = lp->evals[i].ex.oflags | 1;
+  return mknum(1);
+}
+defun Rt.hostExErrEof(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  call Rt.hostCloseFd(mknum(lp->evals[i].ex.errfd), mknum(0), mknum(-1));
+  lp->evals[i].ex.errfd = -1;
+  lp->evals[i].ex.oflags = lp->evals[i].ex.oflags | 2;
+  return mknum(1);
+}
+
+// --- the drains (the Zig's execDrainOut/execDrainErr) -------------------
+// ONE fd, drained until it would block.  The 65536-byte chunk is malloc'd per
+// ENTRY and freed on every exit (plan §6 G-K: a 64 KiB Mid local is a
+// 1.6k-slot frame, and 7C's readFile keeps its chunk for the effect's whole
+// lifetime only because a readFile is exactly one slurp).
+//
+// THE WOULDBLOCK DISCIPLINE IS 7C's, MEASURED THERE BY MUTATION: -1 with
+// EAGAIN (11) is "no bytes yet, poll again" and leaves the fd OPEN with the
+// eof bit CLEAR, any other errno closes and completes (the Zig's `break`),
+// and EINTR (4) retries the SAME read.  The errno read is the pre-existing
+// one-byte byteload — deliberately not widened here.
+defun Rt.hostExecDrainOutGo(hN : val, iN : val, tmpN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  word tmp = payload(tmpN, 0);
+  *Host lp = [*Host](h);
+  word n = rawcall read(lp->evals[i].ex.outfd, tmp, 65536);
+  if (mkbool(n == 0)) {
+    return call Rt.hostExOutEof(hN, iN);
+  }
+  if (mkbool(n < 0)) {
+    word e = byteload(rawcall __errno_location(), 0);
+    if (mkbool(e == 4)) {
+      recur(hN, iN, tmpN);
+    }
+    if (mkbool(e == 11)) {
+      return mknum(0);
+    }
+    return call Rt.hostExOutEof(hN, iN);
+  }
+  word need = lp->evals[i].ex.blen + n;
+  call Rt.hostExOutGrow(hN, iN, mknum(need));
+  if (mkbool(lp->evals[i].ex.bcap < need)) {
+    return call Rt.hostExOutEof(hN, iN);
+  }
+  *CopyDesc d = rawcall malloc(24);
+  d->src = tmp;
+  d->dst = lp->evals[i].ex.bptr + lp->evals[i].ex.blen;
+  d->n = n;
+  call Rt.memGo(mknum([word](d)), mknum(0));
+  rawcall free(d);
+  lp->evals[i].ex.blen = need;
+  recur(hN, iN, tmpN);
+}
+defun Rt.hostExecDrainErrGo(hN : val, iN : val, tmpN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  word tmp = payload(tmpN, 0);
+  *Host lp = [*Host](h);
+  word n = rawcall read(lp->evals[i].ex.errfd, tmp, 65536);
+  if (mkbool(n == 0)) {
+    return call Rt.hostExErrEof(hN, iN);
+  }
+  if (mkbool(n < 0)) {
+    word e = byteload(rawcall __errno_location(), 0);
+    if (mkbool(e == 4)) {
+      recur(hN, iN, tmpN);
+    }
+    if (mkbool(e == 11)) {
+      return mknum(0);
+    }
+    return call Rt.hostExErrEof(hN, iN);
+  }
+  word need = lp->evals[i].ex.elen + n;
+  call Rt.hostExErrGrow(hN, iN, mknum(need));
+  if (mkbool(lp->evals[i].ex.ecap < need)) {
+    return call Rt.hostExErrEof(hN, iN);
+  }
+  *CopyDesc d = rawcall malloc(24);
+  d->src = tmp;
+  d->dst = lp->evals[i].ex.eptr + lp->evals[i].ex.elen;
+  d->n = n;
+  call Rt.memGo(mknum([word](d)), mknum(0));
+  rawcall free(d);
+  lp->evals[i].ex.elen = need;
+  recur(hN, iN, tmpN);
+}
+defun Rt.hostExecDrainOut(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  if (mkbool(lp->evals[i].ex.outfd < 0)) {
+    return mknum(1);
+  }
+  word tmp = rawcall malloc(65536);
+  if (mkbool(tmp == 0)) {
+    return call Rt.hostExOutEof(hN, iN);
+  }
+  val rc = call Rt.hostExecDrainOutGo(hN, iN, mknum(tmp));
+  rawcall free(tmp);
+  return rc;
+}
+defun Rt.hostExecDrainErr(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  if (mkbool(lp->evals[i].ex.errfd < 0)) {
+    return mknum(1);
+  }
+  word tmp = rawcall malloc(65536);
+  if (mkbool(tmp == 0)) {
+    return call Rt.hostExErrEof(hN, iN);
+  }
+  val rc = call Rt.hostExecDrainErrGo(hN, iN, mknum(tmp));
+  rawcall free(tmp);
+  return rc;
+}
+
+// --- the children table: DERIVED, not a side table ---------------------
+// The Zig keeps `children: [MAX_EVALS]Child{pid, eval}` beside the eval array
+// and scans it in reapChildren/reapBlocking.  Here the same information IS
+// the eval's effect (`ex.pid`, with 0 meaning "no child or already reaped"),
+// so a second table would be a second copy of one fact — the class of bug
+// where two places must agree.  registerChild therefore has nothing to
+// append to: it writes the pid into the effect, and it exists as a NAMED SEAT
+// so the reap's "who owns this pid" question has one documented answer.
+defun Rt.hostRegisterChild(hN : val, iN : val, pidN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  word pid = payload(pidN, 0);
+  *Host lp = [*Host](h);
+  lp->evals[i].ex.pid = pid;
+  return mknil;
+}
+
+// WNOHANG reap: does NOT block, marks the child's exit on the eval, and
+// CLEARS the pid so the same pid is never waited on twice (a second waitpid
+// would either be ECHILD or — after the kernel recycles the number — reap
+// somebody else's child).  `stw` is an 8-byte C cell: the kernel writes FOUR
+// bytes of wait status, so the cell is zeroed first and read back as a word
+// (Rt.exec-run's `waitStatus = 0` before `waitpid`, same discipline, without
+// the struct-slot address this language cannot spell).
+defun Rt.hostReapGo(hN : val, iN : val, stN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  word stw = payload(stN, 0);
+  *Host lp = [*Host](h);
+  if (mkbool(i >= lp->nevals)) {
+    rawcall free(stw);
+    return mknil;
+  }
+  if (lp->evals[i].active == 0) {
+    recur(hN, mknum(i + 1), stN);
+  }
+  if (lp->evals[i].etag != 2) {
+    recur(hN, mknum(i + 1), stN);
+  }
+  if (mkbool(lp->evals[i].ex.pid <= 0)) {
+    recur(hN, mknum(i + 1), stN);
+  }
+  wstore(stw, 0, 0);
+  word pid = lp->evals[i].ex.pid;
+  word rc = rawcall waitpid(pid, stw, 1);
+  if (mkbool(rc == pid)) {
+    word code = payload(call Rt.waitStatusCode(mknum(wload(stw, 0))), 0);
+    lp->evals[i].ex.code = code;
+    lp->evals[i].ex.oflags = lp->evals[i].ex.oflags | 4;
+    lp->evals[i].ex.pid = 0;
+    recur(hN, mknum(i + 1), stN);
+  }
+  if (mkbool(rc < 0)) {
+    lp->evals[i].ex.pid = 0;               // ECHILD: nothing left to wait for
+    recur(hN, mknum(i + 1), stN);
+  }
+  recur(hN, mknum(i + 1), stN);            // rc == 0: WNOHANG, still running
+}
+defun Rt.hostReapChildren(hN : val) -> val {
+  word stw = rawcall malloc(8);
+  if (mkbool(stw == 0)) {
+    return mknil;
+  }
+  return call Rt.hostReapGo(hN, mknum(0), mknum(stw));
+}
+
+// BLOCKING reap, and it may only ever be called when the poll table is EMPTY
+// (npoll == 0): a child blocked writing into a pipe we are not draining would
+// deadlock this waitpid for as long as the child lives.  That is exactly the
+// state the driver reaches here — every pipe has already EOF'd, which means
+// the child has closed its ends, so the zombie is either there already or a
+// few microseconds away (the Zig's comment on the WNOHANG race, effectloop:1050).
+// EINTR retries the SAME child; ECHILD clears the pid and moves on.
+defun Rt.hostReapBlockGo(hN : val, iN : val, stN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  word stw = payload(stN, 0);
+  *Host lp = [*Host](h);
+  if (mkbool(i >= lp->nevals)) {
+    rawcall free(stw);
+    return mknum(0);
+  }
+  if (lp->evals[i].active == 0) {
+    recur(hN, mknum(i + 1), stN);
+  }
+  if (lp->evals[i].etag != 2) {
+    recur(hN, mknum(i + 1), stN);
+  }
+  if (mkbool(lp->evals[i].ex.pid <= 0)) {
+    recur(hN, mknum(i + 1), stN);
+  }
+  wstore(stw, 0, 0);
+  word pid = lp->evals[i].ex.pid;
+  word rc = rawcall waitpid(pid, stw, 0);
+  if (mkbool(rc < 0) && mkbool(byteload(rawcall __errno_location(), 0) == 4)) {
+    recur(hN, iN, stN);
+  }
+  if (mkbool(rc == pid)) {
+    word code = payload(call Rt.waitStatusCode(mknum(wload(stw, 0))), 0);
+    lp->evals[i].ex.code = code;
+    lp->evals[i].ex.oflags = lp->evals[i].ex.oflags | 4;
+    lp->evals[i].ex.pid = 0;
+    rawcall free(stw);
+    return mknum(1);
+  }
+  lp->evals[i].ex.pid = 0;
+  recur(hN, mknum(i + 1), stN);
+}
+defun Rt.hostReapBlocking(hN : val) -> val {
+  word stw = rawcall malloc(8);
+  if (mkbool(stw == 0)) {
+    return mknum(0);
+  }
+  return call Rt.hostReapBlockGo(hN, mknum(0), mknum(stw));
+}
+
+// Free the decoded tree and CLEAR the field, so the second caller (a
+// completion and then cleanupAll on the same eval) cannot free it twice.
+// The zero test is a guard rather than a `free(0)`-style no-op because the
+// tree is walked through Rt.epFreeChains, which dereferences it.
+defun Rt.hostEpFreePlan(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  word progW = lp->evals[i].ex.prog;
+  lp->evals[i].ex.prog = 0;
+  if (mkbool(progW == 0)) {
+    return mknil;
+  }
+  word chains = [*Prog](progW)->chains;
+  return call Rt.epFreeChains(mknum(progW), mknum(chains), mknum(0));
+}
+
+// --- completion (the Zig's execComplete + completeReady) ----------------
+// cons(code, cons(out, err)) — what Runtime.elm's decodeExec returns.  THE
+// TWO STRINGS ARE ROOTED THROUGH THE EVAL'S RESULT SLOT: it is a slice of the
+// registered slot array, so a collect between the second String's allocation
+// and the first cons updates it in place, and re-reading (never reusing a
+// local taken before an allocation) is 7B's rule applied to values instead of
+// C blocks.
+defun Rt.hostExecComplete(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  word resAddr = h + 8 + ((lp->evals[i].base + 1) * 40);
+  word code = lp->evals[i].ex.code;
+  word olen = lp->evals[i].ex.blen;
+  word elen = lp->evals[i].ex.elen;
+  word oaddr = lp->evals[i].ex.bptr;
+  word eaddr = lp->evals[i].ex.eptr;
+  vecstore(resAddr, 0, call Rt.hostCStrOf(mknum(oaddr), mknum(olen)));
+  val errS = call Rt.hostCStrOf(mknum(eaddr), mknum(elen));
+  val inner = call Rt.cons(vecload(resAddr, 0), errS);
+  vecstore(resAddr, 0, inner);
+  vecstore(resAddr, 0, call Rt.cons(mknum(code), vecload(resAddr, 0)));
+  rawcall free(oaddr);
+  rawcall free(eaddr);
+  call Rt.hostEpFreePlan(hN, iN);
+  lp->evals[i].ex.pid = 0;
+  lp->evals[i].ex.outfd = -1;
+  lp->evals[i].ex.errfd = -1;
+  lp->evals[i].ex.bptr = 0;
+  lp->evals[i].ex.blen = 0;
+  lp->evals[i].ex.bcap = 0;
+  lp->evals[i].ex.eptr = 0;
+  lp->evals[i].ex.elen = 0;
+  lp->evals[i].ex.ecap = 0;
+  lp->evals[i].ex.oflags = 0;
+  lp->evals[i].ex.code = 0;
+  lp->evals[i].etag = 0;
+  return call Rt.hostCompleteOk(hN, iN);
+}
+// The Zig's completeReady: an exec evaluation completes when its child has
+// been REAPED and both pipes have EOF'd — one predicate, `(oflags & 7) == 7`,
+// over the three booleans the Zig keeps separately.  `n` is the caller's
+// SNAPSHOT of nevals: a completion delivers a message, which can spawn into
+// the table, and this pass must not chase what it just created.
+defun Rt.hostCompleteReadyGo(hN : val, iN : val, nN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  if (mkbool(i >= payload(nN, 0))) {
+    return mknil;
+  }
+  if (lp->evals[i].active == 0) {
+    recur(hN, mknum(i + 1), nN);
+  }
+  if (lp->evals[i].etag != 2) {
+    recur(hN, mknum(i + 1), nN);
+  }
+  if ((lp->evals[i].ex.oflags & 7) != 7) {
+    recur(hN, mknum(i + 1), nN);
+  }
+  call Rt.hostExecComplete(hN, mknum(i));
+  recur(hN, mknum(i + 1), nN);
+}
+defun Rt.hostCompleteReady(hN : val) -> val {
+  *Host lp = [*Host](payload(hN, 0));
+  return call Rt.hostCompleteReadyGo(hN, mknum(0), mknum(lp->nevals));
+}
+
+// --- THE LEAF ----------------------------------------------------------
+// TaskExec: decode, classify, and either fork+execvp (async) or run the
+// complex plan through the synchronous prim runner.
+//
+// THE NEGATIVE SENTINEL IS WRITTEN FIRST (7C handed this note over): hostInit
+// memsets the state, so a never-set `ex.outfd`/`ex.errfd` reads 0 — a VALID
+// fd — and hostAddPoll's `fd < 0` guard would register stdin twice.  The
+// effect's whole word set is initialised before anything can fail, so every
+// later arm (drain, complete, cleanup) sees a decodable state.
+//
+// THE PLAN VALUE IS RE-READ FROM THE ROOTED SLOT AFTER THE DECODE: Rt.epProg
+// allocates (mknum boxes the tree pointer), so both the task vector and the
+// plan Value can MOVE; the C pointers (cbuf, the decoded tree) cannot, which
+// is why the tree is carried as a raw word and the plan as a slot re-read.
+defun Rt.hostLeafExec(hN : val, iN : val, planN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  lp->evals[i].ex.prog = 0;
+  lp->evals[i].ex.pid = 0;
+  lp->evals[i].ex.outfd = -1;
+  lp->evals[i].ex.errfd = -1;
+  lp->evals[i].ex.bptr = 0;
+  lp->evals[i].ex.blen = 0;
+  lp->evals[i].ex.bcap = 0;
+  lp->evals[i].ex.eptr = 0;
+  lp->evals[i].ex.elen = 0;
+  lp->evals[i].ex.ecap = 0;
+  lp->evals[i].ex.oflags = 0;
+  lp->evals[i].ex.code = 0;
+  word cbuf = payload(call Rt.hostEpCbuf(mknil), 0);
+  word xst = rawcall malloc(sizeof(Exec) * 8);
+  rawcall memset(xst, 0, sizeof(Exec) * 8);
+  [*Exec](xst)->cbuf = cbuf;
+  word stw = rawcall malloc(24);
+  [*Scratch](stw)->cbuf = cbuf;
+  [*Scratch](stw)->depth = 0;
+  [*Scratch](stw)->lim = 0;
+  word progW = payload(call Rt.epProg(planN, mknum(stw)), 0);
+  rawcall free(stw);
+  if (mkbool(progW < 0)) {
+    rawcall free(xst);
+    rawcall free(cbuf);
+    call Rt.hostDieErr(rawstr("exec-plan: malformed plan"), rawstr(""));
+    return mknil;
+  }
+  word cmdAddr = payload(call Rt.hostSingleCommandArgv(mknum(progW)), 0);
+  if (mkbool(cmdAddr == 0)) {
+    rawcall free(xst);
+    rawcall free(cbuf);
+    word chains = [*Prog](progW)->chains;
+    call Rt.epFreeChains(mknum(progW), mknum(chains), mknum(0));
+    word tv = payload(vecload(h + 8 + (lp->evals[i].base * 40), 0), 0);
+    vecstore(h + 8 + ((lp->evals[i].base + 1) * 40), 0, call Rt.exec-plan(vecload(tv, 1)));
+    return call Rt.hostCompleteOk(hN, iN);
+  }
+  word argc = [*CmdState](cmdAddr)->argc;
+  word argv = [*CmdState](cmdAddr)->argv;
+  word pb = rawcall malloc(16);
+  *HostPipe po = [*HostPipe](pb);
+  *HostPipe pe = [*HostPipe](pb + 8);
+  word rcOut = rawcall pipe(pb);
+  if (mkbool(rcOut < 0)) {
+    rawcall free(pb);
+    rawcall free(xst);
+    rawcall free(cbuf);
+    word ch1 = [*Prog](progW)->chains;
+    call Rt.epFreeChains(mknum(progW), mknum(ch1), mknum(0));
+    call Rt.hostDieErr(rawstr("exec-plan: fork/pipe failed"), rawstr(""));
+    return mknil;
+  }
+  word rcErr = rawcall pipe(pb + 8);
+  if (mkbool(rcErr < 0)) {
+    rawcall close(po->rd);
+    rawcall close(po->wr);
+    rawcall free(pb);
+    rawcall free(xst);
+    rawcall free(cbuf);
+    word ch2 = [*Prog](progW)->chains;
+    call Rt.epFreeChains(mknum(progW), mknum(ch2), mknum(0));
+    call Rt.hostDieErr(rawstr("exec-plan: fork/pipe failed"), rawstr(""));
+    return mknil;
+  }
+  word pid = rawcall fork();
+  if (mkbool(pid < 0)) {
+    rawcall close(po->rd);
+    rawcall close(po->wr);
+    rawcall close(pe->rd);
+    rawcall close(pe->wr);
+    rawcall free(pb);
+    rawcall free(xst);
+    rawcall free(cbuf);
+    word ch3 = [*Prog](progW)->chains;
+    call Rt.epFreeChains(mknum(progW), mknum(ch3), mknum(0));
+    call Rt.hostDieErr(rawstr("exec-plan: fork/pipe failed"), rawstr(""));
+    return mknil;
+  }
+  if (mkbool(pid == 0)) {
+    word sp = rawcall malloc(sizeof(HostSpawn) * 8);
+    [*HostSpawn](sp)->argc = argc;
+    [*HostSpawn](sp)->argv = argv;
+    [*HostSpawn](sp)->outr = po->rd;
+    [*HostSpawn](sp)->outw = po->wr;
+    [*HostSpawn](sp)->errr = pe->rd;
+    [*HostSpawn](sp)->errw = pe->wr;
+    [*HostSpawn](sp)->exec = xst;
+    call Rt.hostExecChild(mknum(sp));
+    rawcall _exit(127);                    // belt: hostExecChild never returns
+    return mknil;
+  }
+  rawcall close(po->wr);
+  rawcall close(pe->wr);
+  call Rt.hostSetNonblocking(mknum(po->rd));
+  call Rt.hostSetNonblocking(mknum(pe->rd));
+  lp->evals[i].ex.outfd = po->rd;
+  lp->evals[i].ex.errfd = pe->rd;
+  lp->evals[i].ex.prog = progW;
+  call Rt.hostRegisterChild(hN, mknum(i), mknum(pid));
+  lp->evals[i].etag = 2;
+  rawcall free(pb);
+  rawcall free(xst);
+  rawcall free(cbuf);
+  return mknil;
+}
+
 // ========================== THE STATE ------------------------------------
 // `hN` is the blob's ADDRESS boxed into a Value (`mknum(blob)`), and every
 // defun below unboxes it at the top (`payload(hN, 0)`) — the runtime's own
@@ -5917,9 +6731,9 @@ defun Rt.hostSetNonblocking(fdN : val) -> val {
 // is what TestMain RECOMPUTES from struct Host above, so a field added without
 // this line is a red row rather than a heap overflow.  The literal is
 // 8 (nslots) + 33031 x 40 (the slot array) + 6 x 8 (nevals..clrBase) +
-// 128 x 4216 (the eval table, sizeof(struct HostEv) = 527 words = 4216 bytes:
-// 4 + 512 + 1 + the 10-word effect union) + 16 (7C's npoll and poll), i.e.
-// 1860960 in stage 7C.
+// 128 x 4224 (the eval table, sizeof(struct HostEv) = 528 words = 4224 bytes:
+// 4 + 512 + 1 + the 11-word effect union, 7D's HostEX growing it by `code`) +
+// 16 (7C's npoll and poll), i.e. 1861984 in stage 7D.
 //
 // THE fd TABLE IS A SECOND, SEPARATE ALLOCATION (7C) and it DOES use `sizeof`
 // — a fresh block has no established literal-and-pin discipline to inherit, and
@@ -5929,7 +6743,7 @@ defun Rt.hostSetNonblocking(fdN : val) -> val {
 // zero is the property that a NEVER-REGISTERED cell can never be polled.
 defun Rt.hostInit(progAddrN : val) -> val {
   word progAddr = payload(progAddrN, 0);
-  word bytes = 8 + (33031 * 40) + (6 * 8) + (128 * 4216) + 16;
+  word bytes = 8 + (33031 * 40) + (6 * 8) + (128 * 4224) + 16;
   word blob = rawcall malloc(bytes);
   rawcall memset(blob, 0, bytes);
   *Host lp = [*Host](blob);
@@ -6363,14 +7177,18 @@ defun Rt.hostDispatch(hN : val, iN : val) -> val {
     lp->evals[i].sl.deadline = now + ms;
     return mknil;
   }
+  if (call Rt.cStrEq(nm, rawstr("TaskExec")) != 0) {
+    val plan = vecload(tv, 1);
+    return call Rt.hostLeafExec(hN, iN, plan);
+  }
   if (call Rt.cStrEq(nm, rawstr("TaskQuit")) != 0) {
     lp->quit = 1;
     return call Rt.hostDeactivate(hN, iN);
   }
-  // THE OTHER 3 (Exec/ListDir/Stat): LOUD, naming the ctor.  Never a silent
+  // THE OTHER 2 (ListDir/Stat): LOUD, naming the ctor.  Never a silent
   // drop (the program would appear to work while its continuation never
   // resumes) and never a silent completion (which would make a program "work"
-  // while doing nothing).  7D/7E own them.
+  // while doing nothing).  7E owns them.
   call Rt.hostDieUnported(nm);
   return mknil;
 }
@@ -6522,23 +7340,32 @@ defun Rt.hostStepAll(hN : val) -> val {
 // Rt.hostRunLoop — the Zig's `while (nactive > 0 and !quit) { stepAll; ...
 // reapChildren; completeReady; ... poll; ... flushExpiredSleeps }`.
 //
-// THE STATEMENT ORDER IS THE ZIG'S (runProgram's loop, effectloop.zig:1218-1260),
-// minus the two pieces 7D owns (reapChildren and the npoll == 0 reapBlocking
-// arm — with no children the first is a no-op and the second unreachable):
+// THE STATEMENT ORDER IS THE ZIG'S (runProgram's loop, effectloop.zig:1218-1260)
+// with 7D's two pieces in place:
 //
-//   stepAll -> flushExpiredSleeps -> [done?] -> hasRunnable -> (loop at once)
-//   -> rebuildPollfds -> pollTimeout -> poll(fds, npoll, timeout)
-//   -> drainReady -> flushExpiredSleeps -> loop
+//   stepAll -> flushExpiredSleeps -> [done?] -> reapChildren -> completeReady
+//   -> [done?] -> hasRunnable -> (loop at once)
+//   -> rebuildPollfds -> pollTimeout
+//   -> [npoll == 0 && no deadline: reapBlocking -> completeReady -> loop]
+//   -> poll(fds, npoll, timeout) -> reapChildren -> drainReady -> completeReady
+//   -> flushExpiredSleeps -> loop
 //
-// WHY A poll AND NOT A SPIN: a suspended eval (etag 1 or 3) is ACTIVE, so
+// (7C's loop differed by exactly those two names and the npoll == 0 arm: with no
+// children the first is a no-op and the second unreachable.)
+//
+// WHY A poll AND NOT A SPIN: a suspended eval (etag 1, 2 or 3) is ACTIVE, so
 // hostStepAllGo skips it forever; without a wait the loop would burn the CPU for
-// the effect's whole duration (nowunit sleeps 30+20+20 ms; a readFile on a pipe
-// waits for a writer).  `poll(NULL, 0, to)` with NO fds is still exactly the
-// Zig's bounded sleep, which is the arm a sleep-only program takes.
+// the effect's whole duration (nowunit sleeps 30+20+20 ms; a readFile or an
+// exec waits for a writer).  `poll(NULL, 0, to)` with NO fds is still exactly
+// the Zig's bounded sleep, which is the arm a sleep-only program takes.
 //
-// -1 (nothing pending) with NO fd and no runnable work is a STUCK program: the
-// Zig prints "effectloop: pending effect with no pollable fd" and breaks, which
-// under the effect host means a silently truncated model — here it is LOUD.
+// THE npoll == 0 ARM IS THE REAP RACE (effectloop.zig:1050): an exec's pipes
+// EOF a moment BEFORE the exiting child becomes waitpid-able, so the WNOHANG
+// reap just above can miss it and leave the exec active with both fds already
+// drained — no fd to poll, no sleep deadline, and (before this unit) a LOUD
+// die.  With no fd left the child cannot be blocked writing to us, so the
+// BLOCKING waitpid returns promptly; then completeReady finishes it.  A second
+// pass finds no child at all and the same state IS a stuck program: loud die.
 //
 // EVERY GUARD'S BRANCH DIVERGES (return/recur): J7 refuses a mid-block `if` with
 // two falling-through branches, and that rule is what shapes this defun.
@@ -6553,17 +7380,28 @@ defun Rt.hostRunLoop(hN : val) -> val {
   if (mkbool(lp->nactive == 0) || mkbool(lp->quit != 0)) {
     return mknil;
   }
+  call Rt.hostReapChildren(hN);
+  call Rt.hostCompleteReady(hN);
+  if (mkbool(lp->nactive == 0) || mkbool(lp->quit != 0)) {
+    return mknil;
+  }
   if (payload(call Rt.hostRunnableScan(hN, mknum(0)), 0) != 0) {
     recur(hN);                             // pure work left: no wait, loop now
   }
   call Rt.hostRebuildPollfds(hN);
   word to = payload(call Rt.hostPollTimeout(hN));
   if (mkbool(lp->npoll == 0) && mkbool(to < 0)) {
+    if (payload(call Rt.hostReapBlocking(hN), 0) != 0) {
+      call Rt.hostCompleteReady(hN);
+      recur(hN);
+    }
     call Rt.dieErr(rawstr("host: a pending effect has no pollable fd"));
     return mknil;
   }
   rawcall poll(lp->poll, lp->npoll, to);   // nfds 0 + a timeout IS a sleep
+  call Rt.hostReapChildren(hN);
   call Rt.hostDrainReady(hN);
+  call Rt.hostCompleteReady(hN);
   call Rt.hostFlushExpiredSleeps(hN);
   recur(hN);
 }
@@ -6572,6 +7410,19 @@ defun Rt.hostRunLoop(hN : val) -> val {
 // Program and leave the final MODEL in the caller's 40-byte cell.  The
 // signature is deliberately the Zig seat's (value in, destination cell in,
 // nothing out) so 7F's deletion of that seat is a drop-in.
+//
+// THE CLEANUP RUNS BEFORE THE MODEL IS COPIED OUT (7D): cleanupAll frees the
+// pending effects, and the exec arm's plan free is a value-ABI call, i.e. a GC
+// ALLOCATION.  `outAddr` is Rt.main's RAW `modelslot` (malloc(40), not in any
+// scanned array), so a collect AFTER the copy would move the model in the
+// blob's slot 0 and leave a stale pointer in the cell that rt_print_value
+// reads.  Before the copy, the model is still reachable through the registered
+// slot array and a collect updates it in place — so the order is
+// cleanup -> copy -> free the fd table -> pop the root.
+//
+// THE fd TABLE IS FREED AFTER the effects (no effect can reference it) and the
+// root pop is LAST, which is the Zig's `defer` LIFO order (rootPop declared
+// first, so cleanupAll runs first).
 defun Rt.hostRun(progAddrN : val, outAddrN : val) -> val {
   word progAddr = payload(progAddrN, 0);
   word outAddr = payload(outAddrN, 0);
@@ -6582,12 +7433,8 @@ defun Rt.hostRun(progAddrN : val, outAddrN : val) -> val {
   vecstore(h + 8 + (33026 * 40), 0, vecload(payload(prog, 0), 2));
   call Rt.hostSpawnFromCmd(hN, mknum(h + 8 + (33026 * 40)));
   call Rt.hostRunLoop(hN);
-  vecstore(outAddr, 0, vecload(h + 8, 0));
-  // THE ZIG'S `defer` ORDER, LIFO (runProgram declares rootPop then
-  // cleanupAll, so cleanupAll runs FIRST): free every pending effect, drop the
-  // fd table, then pop the root.  `cleanupAll` allocates nothing, which is what
-  // makes it safe this close to the pop.
   call Rt.hostCleanupAll(hN);
+  vecstore(outAddr, 0, vecload(h + 8, 0));
   rawcall free(lp->poll);
   rawcall rt_root_pop();
   return mknil;

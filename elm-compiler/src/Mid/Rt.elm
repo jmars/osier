@@ -1180,7 +1180,7 @@ rtDeps =
         , ( "Rt.hostSpawn", [ "Rt.hostSpawnFind" ] )
         , ( "Rt.hostSpawnFromCmd", [ "Rt.hostSpawn" ] )
         , ( "Rt.hostPushFrame", [ "Rt.dieErr" ] )
-        , ( "Rt.hostDispatch", [ "Rt.hostDeactivate", "Rt.hostArity", "Rt.cStrEq", "Rt.hostCompleteOk", "Rt.hostCompleteErr", "Rt.hostPushFrame", "Rt.hostNowMs", "Rt.hostDieUnported", "Rt.hostWriteStr", "Rt.hostReadLine", "Rt.hostWriteFileLeaf", "Rt.hostLeafReadFile", "Rt.getenv", "Rt.setenv", "Rt.cd", "Rt.getcwd", "Rt.getpid", "Rt.glob" ] )
+        , ( "Rt.hostDispatch", [ "Rt.hostDeactivate", "Rt.hostArity", "Rt.cStrEq", "Rt.hostCompleteOk", "Rt.hostCompleteErr", "Rt.hostPushFrame", "Rt.hostNowMs", "Rt.hostDieUnported", "Rt.hostWriteStr", "Rt.hostReadLine", "Rt.hostWriteFileLeaf", "Rt.hostLeafReadFile", "Rt.hostLeafExec", "Rt.getenv", "Rt.setenv", "Rt.cd", "Rt.getcwd", "Rt.getpid", "Rt.glob" ] )
         , ( "Rt.hostCompleteOk", [ "Rt.hostDeliver", "Rt.hostCall" ] )
         , ( "Rt.hostCompleteErr", [ "Rt.hostDeactivate", "Rt.hostCall" ] )
         , ( "Rt.hostDeliver", [ "Rt.hostCall", "Rt.hostDeactivate", "Rt.hostSpawnFromCmd" ] )
@@ -1188,7 +1188,7 @@ rtDeps =
         , ( "Rt.hostStep", [ "Rt.hostStepGo" ] )
         , ( "Rt.hostStepAllGo", [ "Rt.hostStep" ] )
         , ( "Rt.hostStepAll", [ "Rt.hostStepAllGo" ] )
-        , ( "Rt.hostRunLoop", [ "Rt.hostStepAll", "Rt.hostFlushExpiredSleeps", "Rt.hostRunnableScan", "Rt.hostPollTimeout", "Rt.hostRebuildPollfds", "Rt.hostDrainReady", "Rt.dieErr" ] )
+        , ( "Rt.hostRunLoop", [ "Rt.hostStepAll", "Rt.hostFlushExpiredSleeps", "Rt.hostRunnableScan", "Rt.hostPollTimeout", "Rt.hostRebuildPollfds", "Rt.hostDrainReady", "Rt.hostReapChildren", "Rt.hostCompleteReady", "Rt.hostReapBlocking", "Rt.dieErr" ] )
         , ( "Rt.hostRun", [ "Rt.hostInit", "Rt.hostSpawnFromCmd", "Rt.hostRunLoop", "Rt.hostCleanupAll" ] )
         , -- ===== THE STAGE 7B SYNCHRONOUS LEAVES + THE DEADLINE MACHINERY.
           -- Same rule as the 7A block above: one entry per host defun, exactly
@@ -1222,12 +1222,41 @@ rtDeps =
         , ( "Rt.hostAddPoll", [ "Rt.hostPollFd", "Rt.dieErr" ] )
         , ( "Rt.hostRebuildPollGo", [ "Rt.hostAddPoll" ] )
         , ( "Rt.hostRebuildPollfds", [ "Rt.hostRebuildPollGo" ] )
-        , ( "Rt.hostPollEntry", [ "Rt.hostReadFileDrain", "Rt.hostReadFileComplete" ] )
+        , ( "Rt.hostPollEntry", [ "Rt.hostReadFileDrain", "Rt.hostReadFileComplete", "Rt.hostExecDrainOut", "Rt.hostExecDrainErr" ] )
         , ( "Rt.hostDrainReadyGo", [ "Rt.hostPollEntry" ] )
         , ( "Rt.hostDrainReady", [ "Rt.hostDrainReadyGo" ] )
-        , ( "Rt.hostCleanupGo", [] )
+        , ( "Rt.hostCleanupGo", [ "Rt.hostEpFreePlan", "Rt.hostCloseFd" ] )
         , ( "Rt.hostCleanupAll", [ "Rt.hostCleanupGo" ] )
         , ( "Rt.hostSetNonblocking", [] )
+        , -- ===== THE STAGE 7D EXEC.  Same rule again: one entry per host defun,
+          -- exactly its `call Rt.*` targets.  The DECODER (`Rt.epProg` and the
+          -- Rt.ep* family) and the SYNCHRONOUS runner (`Rt.exec-plan`) are
+          -- pre-existing keys with their own edges further up, which is why
+          -- the async leaf pulls the whole plan machinery into an arm-B binary
+          -- and into nothing on the default route.
+          ( "Rt.hostEpCbuf", [ "Rt.cStrFill" ] )
+        , ( "Rt.hostSingleCommandArgv", [] )
+        , ( "Rt.hostCloseFd", [] )
+        , ( "Rt.hostEpFreePlan", [ "Rt.epFreeChains" ] )
+        , ( "Rt.hostExecChild", [ "Rt.hostCloseFd", "Rt.childBuiltin", "Rt.wStr" ] )
+        , ( "Rt.hostCStrOf", [ "Rt.memGo" ] )
+        , ( "Rt.hostExOutGrow", [ "Rt.memGo" ] )
+        , ( "Rt.hostExErrGrow", [ "Rt.memGo" ] )
+        , ( "Rt.hostExOutEof", [ "Rt.hostCloseFd" ] )
+        , ( "Rt.hostExErrEof", [ "Rt.hostCloseFd" ] )
+        , ( "Rt.hostExecDrainOutGo", [ "Rt.hostExOutEof", "Rt.hostExOutGrow", "Rt.memGo" ] )
+        , ( "Rt.hostExecDrainErrGo", [ "Rt.hostExErrEof", "Rt.hostExErrGrow", "Rt.memGo" ] )
+        , ( "Rt.hostExecDrainOut", [ "Rt.hostExecDrainOutGo", "Rt.hostExOutEof" ] )
+        , ( "Rt.hostExecDrainErr", [ "Rt.hostExecDrainErrGo", "Rt.hostExErrEof" ] )
+        , ( "Rt.hostRegisterChild", [] )
+        , ( "Rt.hostReapGo", [ "Rt.waitStatusCode" ] )
+        , ( "Rt.hostReapChildren", [ "Rt.hostReapGo" ] )
+        , ( "Rt.hostReapBlockGo", [ "Rt.waitStatusCode" ] )
+        , ( "Rt.hostReapBlocking", [ "Rt.hostReapBlockGo" ] )
+        , ( "Rt.hostExecComplete", [ "Rt.hostCStrOf", "Rt.cons", "Rt.hostEpFreePlan", "Rt.hostCompleteOk" ] )
+        , ( "Rt.hostCompleteReadyGo", [ "Rt.hostExecComplete" ] )
+        , ( "Rt.hostCompleteReady", [ "Rt.hostCompleteReadyGo" ] )
+        , ( "Rt.hostLeafExec", [ "Rt.hostEpCbuf", "Rt.epProg", "Rt.hostDieErr", "Rt.hostSingleCommandArgv", "Rt.epFreeChains", "Rt.exec-plan", "Rt.hostCompleteOk", "Rt.hostExecChild", "Rt.hostSetNonblocking", "Rt.hostRegisterChild" ] )
         ]
 
 
