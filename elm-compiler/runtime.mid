@@ -3598,7 +3598,7 @@ defun Rt.epCmd(e : val, stN : val, cAddrN : val) -> val {
     val subState = mkbool(tagis(subv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(payload(subv, 0), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(payload(subv, 0), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(payload(subv, 0), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(payload(subv, 0), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
     if (mkbool(payload(subState, 0) == 2)) {
       if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
-        return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum(wload([*CmdState](payload(cAddrN, 0))->subprog, 1)), mknum(0));
+        return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum([*Prog]([*CmdState](payload(cAddrN, 0))->subprog)->chains), mknum(0));
       } else {
         return mknil;
       }
@@ -3619,7 +3619,7 @@ defun Rt.epCmd(e : val, stN : val, cAddrN : val) -> val {
     if (mkbool(payload(subState, 0) == 0)) {
       if (mkbool([*CmdState](payload(cAddrN, 0))->argv == 0)) {
         if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
-          return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum(wload([*CmdState](payload(cAddrN, 0))->subprog, 1)), mknum(0));
+          return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum([*Prog]([*CmdState](payload(cAddrN, 0))->subprog)->chains), mknum(0));
         } else {
           return mknil;
         }
@@ -3640,7 +3640,7 @@ defun Rt.epCmd(e : val, stN : val, cAddrN : val) -> val {
       val nstdin = call Rt.epCountStdin(mknum([*CmdState](payload(cAddrN, 0))->redirs), mknum([*CmdState](payload(cAddrN, 0))->nredirs), mknum(0));
       if (mkbool(payload(nstdin, 0) > 1)) {
         if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
-          return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum(wload([*CmdState](payload(cAddrN, 0))->subprog, 1)), mknum(0));
+          return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum([*Prog]([*CmdState](payload(cAddrN, 0))->subprog)->chains), mknum(0));
         } else {
           return mknil;
         }
@@ -3662,7 +3662,7 @@ defun Rt.epCmd(e : val, stN : val, cAddrN : val) -> val {
     } else {
       if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
         if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
-          return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum(wload([*CmdState](payload(cAddrN, 0))->subprog, 1)), mknum(0));
+          return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum([*Prog]([*CmdState](payload(cAddrN, 0))->subprog)->chains), mknum(0));
         } else {
           return mknil;
         }
@@ -3683,7 +3683,7 @@ defun Rt.epCmd(e : val, stN : val, cAddrN : val) -> val {
       word depthW = [*Scratch](payload(stN, 0))->depth;
       if (mkbool(depthW >= 32)) {
         if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
-          return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum(wload([*CmdState](payload(cAddrN, 0))->subprog, 1)), mknum(0));
+          return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum([*Prog]([*CmdState](payload(cAddrN, 0))->subprog)->chains), mknum(0));
         } else {
           return mknil;
         }
@@ -3706,7 +3706,7 @@ defun Rt.epCmd(e : val, stN : val, cAddrN : val) -> val {
       [*Scratch](payload(stN, 0))->depth = depthW;
       if (mkbool(payload(subN, 0) < 0)) {
         if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
-          return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum(wload([*CmdState](payload(cAddrN, 0))->subprog, 1)), mknum(0));
+          return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum([*Prog]([*CmdState](payload(cAddrN, 0))->subprog)->chains), mknum(0));
         } else {
           return mknil;
         }
@@ -3728,7 +3728,7 @@ defun Rt.epCmd(e : val, stN : val, cAddrN : val) -> val {
       val nstdin = call Rt.epCountStdin(mknum([*CmdState](payload(cAddrN, 0))->redirs), mknum([*CmdState](payload(cAddrN, 0))->nredirs), mknum(0));
       if (mkbool(payload(nstdin, 0) > 1)) {
         if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
-          return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum(wload([*CmdState](payload(cAddrN, 0))->subprog, 1)), mknum(0));
+          return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum([*Prog]([*CmdState](payload(cAddrN, 0))->subprog)->chains), mknum(0));
         } else {
           return mknil;
         }
