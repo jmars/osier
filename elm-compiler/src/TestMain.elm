@@ -3377,6 +3377,67 @@ checks rt runtimeMidText =
             && Check.sizeofStruct d "Redir"
             == Just 6
         )
+    , check "U8 LAYOUT PIN: runtime.mid's own `struct CmdState` puts every field at the word slot the decoded-command builder used before the re-spelling (argv 0, argc 1, redirs 2, nredirs 3, subprog 4), and sizeof == 5 words is the 40-byte STRIDE `Rt.epPipeline` mallocs and `[word](cmdsArr) + i * 40` walks — one word too few is a command read out of its neighbour's argv"
+        (let
+            d =
+                declsOf runtimeMidText
+
+            names =
+                [ "argv", "argc", "redirs", "nredirs", "subprog" ]
+         in
+         List.map (\n -> Check.fieldOffset d "CmdState" n) names == List.map Just (List.range 0 4)
+            && Check.sizeofStruct d "CmdState"
+            == Just 5
+        )
+    , check "U8 LAYOUT PIN: runtime.mid's own `struct Exec` puts every field at the word slot the runner used before the re-spelling (cbuf 0, outfd 1, errfd 2, inChild 3, subprog 4, pipe 5, code 6, chain 7, ncmds 8, npipes 9, pfds 10, pids 11, nforked 12, forkFailed 13, status 14, bodyOff 15, bodyFd 16, waitStatus 17, curCmd 18, cursor 19, argIdx 20)"
+        (let
+            d =
+                declsOf runtimeMidText
+
+            names =
+                [ "cbuf", "outfd", "errfd", "inChild", "subprog", "pipe", "code", "chain", "ncmds", "npipes", "pfds", "pids", "nforked", "forkFailed", "status", "bodyOff", "bodyFd", "waitStatus", "curCmd", "cursor", "argIdx" ]
+         in
+         List.map (\n -> Check.fieldOffset d "Exec" n) names == List.map Just (List.range 0 20)
+        )
+    , check "U8 LAYOUT PIN: sizeof(Exec) == 21 words = the 168 bytes Rt.exec-plan mallocs, and slot 17 is at byte 136 — the address `waitpid(pid, payload(st, 0) + 136, 0)` passes, which is the one slot reached by arithmetic rather than by name"
+        (Check.sizeofStruct (declsOf runtimeMidText) "Exec" == Just 21)
+    , check "U8 LAYOUT PIN: runtime.mid's own `struct ReadBlk` puts every field at the word slot both slurps used before the re-spelling (fd 0, tmp 1, acc 2, len 3, cap 4, _pad 5), and sizeof == 6 words — the allocation is 72 bytes, so the struct is a PREFIX: words 6..8 are the `*CopyDesc` at `[word](blkW) + 48` (48 == 6 words), which is why 48 is pinned here and not merely written in a comment"
+        (let
+            d =
+                declsOf runtimeMidText
+
+            names =
+                [ "fd", "tmp", "acc", "len", "cap", "_pad" ]
+         in
+         List.map (\n -> Check.fieldOffset d "ReadBlk" n) names == List.map Just (List.range 0 5)
+            && Check.sizeofStruct d "ReadBlk"
+            == Just 6
+            && (Maybe.map (\w -> w * 8) (Check.sizeofStruct d "ReadBlk") == Just 48)
+        )
+    , check "U8 LAYOUT PIN: runtime.mid's own `struct CopyDesc` is Rt.memGo's (src 0, dst 1, n 2) — the 3 words the two slurps write at `[word](blkW) + 48`, so it must stay 3 words: a field added here walks into nothing"
+        (let
+            d =
+                declsOf runtimeMidText
+
+            names =
+                [ "src", "dst", "n" ]
+         in
+         List.map (\n -> Check.fieldOffset d "CopyDesc" n) names == List.map Just (List.range 0 2)
+            && Check.sizeofStruct d "CopyDesc"
+            == Just 3
+        )
+    , check "U8 ACCEPT: the NESTED view cast (`[*Pipe]([*Exec](payload(v, 0))->pipe)->cmds`, Rt.execGo's mode-3 re-read) is node-identical too — the arm resolves the OUTER cast and the inner field read is the ordinary nodes, so it lowers canon-EQUAL to `wload(wload(payload(v, 0), 5), 1)`"
+        (case
+            ( lowlModuleBody "struct Exec { cbuf : word; outfd : word; errfd : word; inChild : word; subprog : word; pipe : word; }\nstruct Pipe { ncmds : word; cmds : word; }\ndefun Rt.a(v : val) -> word {\n  return [*Pipe]([*Exec](payload(v, 0))->pipe)->cmds;\n}"
+            , lowlBody "defun Rt.a(v : val) -> word {\n  return wload(wload(payload(v, 0), 5), 1);\n}"
+            )
+         of
+            ( Ok typed, Ok plain ) ->
+                canon typed == canon plain
+
+            _ ->
+                False
+        )
     , check "U8 ACCEPT: the `[*S](payload(p, 0))->f` VIEW CAST is node-identical — a `val`-boxed block address read through the cast lowers canon-EQUAL to the `wload(payload(p, 0), k)` spelling (this is the shape LowerToIr's `resolvePointee` gained the cast arm for; without it the checker admitted the form and the lowerer refused it)"
         (case
             ( lowlModuleBody "struct Pipe { ncmds : word; cmds : word; }\ndefun Rt.a(p : val) -> word {\n  return [*Pipe](payload(p, 0))->cmds;\n}"
