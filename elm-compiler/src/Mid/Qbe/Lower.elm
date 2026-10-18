@@ -1322,7 +1322,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                             (\base p ->
                                 ( p.id
                                 , if base.width > 1 then
-                                    Il.Tmp ("s" ++ String.fromInt base.reg)
+                                    Il.Tmp ("bx" ++ String.fromInt base.reg)
 
                                   else
                                     Il.Tmp ("a" ++ String.fromInt base.reg)
@@ -1603,24 +1603,15 @@ lowerFunBody entry key qname lambda captures rt sOuter =
 
 
 
-{-| B6 — the register each parameter's first word arrives in, plus that
-parameter's width: the per-parameter slice of the word-ABI signature layout
-(`width` consecutive `l` registers, in declaration order).  Total: a missing
-width reads as 1 (the value-ABI shape never consults it).
+{-| B6 — each parameter's incoming register and its width in words.  The
+REGISTER is the parameter's ORDINAL (`a0`, `a1`, ...): the word ABI passes ONE
+`l` register per parameter however wide it is — a struct VALUE crosses as the
+ADDRESS of the caller's storage, and the callee copies `width` words out of it
+at entry.  A parameter of width 1 is its own word, so the copy is skipped.
 -}
 paramBases : List Int -> List { reg : Int, width : Int }
 paramBases widths =
-    paramBasesHelp 0 widths
-
-
-paramBasesHelp : Int -> List Int -> List { reg : Int, width : Int }
-paramBasesHelp reg widths =
-    case widths of
-        [] ->
-            []
-
-        w :: rest ->
-            { reg = reg, width = w } :: paramBasesHelp (reg + w) rest
+    List.indexedMap (\i w -> { reg = i, width = w }) widths
 
 
 -- ============================ TAIL / VALUE LOWERING ============================
@@ -8008,21 +7999,26 @@ withPrologue pending =
             List.concatMap
                 (\b ->
                     if b.width > 1 then
-                        (Alloc ("s" ++ String.fromInt b.reg) (8 * b.width)
+                        (Alloc ("bx" ++ String.fromInt b.reg) (8 * b.width)
                             :: List.concatMap
                                 (\k ->
-                                    [ Bin (Just ("w" ++ String.fromInt b.reg ++ "_" ++ String.fromInt k))
-                                        L
-                                        Add
-                                        (Il.Tmp ("s" ++ String.fromInt b.reg))
-                                        (Il.Con (8 * k))
-                                    , Load (Just ("v" ++ String.fromInt b.reg ++ "_" ++ String.fromInt k))
-                                        L
-                                        LoadL
-                                        (Il.Tmp ("w" ++ String.fromInt b.reg ++ "_" ++ String.fromInt k))
-                                    , Store StoreL
-                                        (Il.Tmp ("v" ++ String.fromInt b.reg ++ "_" ++ String.fromInt k))
-                                        (Il.Tmp ("w" ++ String.fromInt b.reg ++ "_" ++ String.fromInt k))
+                                    let
+                                        sfx =
+                                            String.fromInt b.reg ++ "_" ++ String.fromInt k
+                                    in
+                                    -- SOURCE: the incoming address register (`%a<reg>`)
+                                    -- plus the field's byte offset; DESTINATION: the
+                                    -- fresh block.  Two addresses, two temps — the
+                                    -- first cut of this emitted a load and a store at
+                                    -- the SAME address (the block), i.e. a no-op
+                                    -- copy that read uninitialised stack, and it took
+                                    -- a RUN of the example to see it (the .ssa looked
+                                    -- plausible; the .s showed `movq 0(%rsp), %rax` /
+                                    -- `movq %rax, 0(%rsp)`).
+                                    [ Bin (Just ("ca" ++ sfx)) L Add (Il.Tmp ("a" ++ String.fromInt b.reg)) (Il.Con (8 * k))
+                                    , Load (Just ("cv" ++ sfx)) L LoadL (Il.Tmp ("ca" ++ sfx))
+                                    , Bin (Just ("ba" ++ sfx)) L Add (Il.Tmp ("bx" ++ String.fromInt b.reg)) (Il.Con (8 * k))
+                                    , Store StoreL (Il.Tmp ("cv" ++ sfx)) (Il.Tmp ("ba" ++ sfx))
                                     ]
                                 )
                                 (List.range 0 (b.width - 1))

@@ -1,0 +1,66 @@
+// B6 (handoff-midlang-b6) — THE WORKED EXAMPLE's .mid: THE WORD ABI DERIVED
+// FROM THE SIGNATURE, and a STRUCT PARAMETER BY VALUE, imported by name from
+// midb6.elm (the reader resolves `import Wsum` to this file, relative to the
+// importing file; it is NOT passed on the CLI).
+//
+// What the program does, in the order plan Q7 names it:
+//   * `defun Wsum.add(a : word, b : int, c : bool, g : Big) -> word` — every
+//     parameter and the result are WORD-CLASS, so this defun takes the WORD
+//     ABI by DERIVATION, not by being listed anywhere: it emits
+//     `function l $q_Wsum_x2eadd(l %a0, l %a1, l %a2, l %a3)` with no frame,
+//     no :val blit, and a word tail.  `word`/`int`/`bool`/`*T` and a struct
+//     VALUE are the word classes; ONE `val` anywhere in the signature would
+//     have kept the value ABI.
+//   * `word z = a;` — THE RAW-Var CLOSE (the gap B3 pinned): a word-ABI
+//     parameter IS a raw register, so rebinding it to another `word` binder is
+//     a plain alias of that register (no slot, no box).  Before B6 a
+//     parameter had no register at all and this line died at emit with
+//     "binder id N is not a raw word".
+//   * `g.p.x` / `payload(g.tag, 0)` — a STRUCT PARAMETER BY VALUE, read
+//     through the ordinary struct-value rules.  The CALLER passes the struct's
+//     address as one `l` register; the CALLEE copies the declared width into
+//     its own `alloc8` block at entry (`Big` is 7 words: a `val` field is 5,
+//     the nested `Pt` is 2), and the parameter binder names that block.  So
+//     `g.p.x = g.p.x + 1;` writes the callee's OWN copy.
+//   * `[word](c) * 1000` — the bool PARAMETER read as the 0/1 word it is (a
+//     bool argument arrives in an `l` register like every word-class one; the
+//     explicit cast is the J12 spelling, and the 1000 makes a lost or
+//     mis-registered bool impossible to miss in the printed number).  A
+//     two-armed `if` is NOT used here on purpose: a word-ABI defun's tail has
+//     no join (`raw-abi defun tail If joins two word-returning branches` is a
+//     loud reject), which is its own pre-existing rule and not this unit's.
+//
+// The printed number packs the four facts a bug in any of the above moves:
+//   add's result with the callee's copy mutated(1125) | a SECOND call's result
+//   (1125 again — the entry copy is FRESH, so no state survives a call) | the
+//   caller's g.p.x (10 — the callee's write did NOT escape)
+//   ->  1126125010.
+//   * 1125 = 5 (a) + 2 (b) + 11 (g.p.x after the callee's own +1) + 100
+//     (g.p.y) + 7 (payload(g.tag, 0)) + 1000 ([word](c)).  A lost/renumbered
+//     field, a broken copy width or an unread bool each move it;
+//   * the SECOND 1125 is the by-value proof: if the parameter were the
+//     caller's storage the second call would read 11 and print 1126;
+//   * the trailing 10 is the caller's struct read back AFTER the call — an
+//     aliasing (by-reference) parameter would leave 11.
+module Wsum
+export Wsum.run : val -> val
+struct Pt { x : word; y : word; }
+struct Big { tag : val; p : Pt; }
+
+defun Wsum.add(a : word, b : int, c : bool, g : Big) -> word {
+  word z = a;
+  g.p.x = g.p.x + 1;
+  return z + b + g.p.x + g.p.y + payload(g.tag, 0) + ([word](c) * 1000);
+}
+
+defun Wsum.run(s : val) -> val {
+  word k = payload(s, 0);
+  Big q;
+  q.tag = mknum(7);
+  q.p.x = 10;
+  q.p.y = 100;
+  bool t = [bool](k);
+  word r1 = call Wsum.add(k, 2, t, q);
+  word r2 = call Wsum.add(k, 2, t, q);
+  return mknum((r2 * 1000000) + (r1 * 1000) + q.p.x);
+}

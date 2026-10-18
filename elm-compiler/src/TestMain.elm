@@ -6975,11 +6975,12 @@ checks rt =
         (case emitUserSsa rt "module B6s\nstruct S { a : word; b : word; }\ndefun B6s.f(s : S) -> word {\n  return s.a + s.b;\n}" of
             Ok ssa ->
                 String.contains "function l $q_B6s_x2ef(l %a0) {" ssa
-                    && String.contains "%s0 =l alloc8 16" ssa
-                    && String.contains "%v0_0 =l loadl %w0_0" ssa
-                    && String.contains "storel %v0_0, %w0_0" ssa
-                    && String.contains "%v0_1 =l loadl %w0_1" ssa
-                    && String.contains "add %s0, %t" ssa
+                    && String.contains "%bx0 =l alloc8 16" ssa
+                    && String.contains "%ca0_0 =l add %a0, 0" ssa
+                    && String.contains "%cv0_0 =l loadl %ca0_0" ssa
+                    && String.contains "storel %cv0_0, %ba0_0" ssa
+                    && String.contains "%ca0_1 =l add %a0, 8" ssa
+                    && String.contains "add %bx0, %t" ssa
 
             Err _ ->
                 False
@@ -6987,9 +6988,9 @@ checks rt =
     , check "B6 STRUCT PARAM: a field STORE through the parameter is legal and lands in the callee's OWN copy (by-value semantics: the caller's struct is untouched) — `s.a = 7;` is a storel to the block, and `&s` is the block's address (no second copy, no node)"
         (case emitUserSsa rt "module B6s\nstruct S { a : word; b : word; }\ndefun B6s.f(s : S) -> word {\n  s.a = 7;\n  *S p = &s;\n  return p.b;\n}" of
             Ok ssa ->
-                String.contains "%s0 =l alloc8 16" ssa
+                String.contains "%bx0 =l alloc8 16" ssa
                     && String.contains "storel 7," ssa
-                    && String.contains "add %s0, 8" ssa
+                    && String.contains "add %bx0, 8" ssa
 
             Err _ ->
                 False
