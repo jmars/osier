@@ -3307,6 +3307,123 @@ checks rt =
                 False
         )
 
+    -- ==================== A3: stage A's EXIT GATE ====================
+    -- (1) THE .ssa-LEVEL EQUALITY PIN — the strongest form of A2's tree pin
+    -- (plan §3 risk R1).  A2 proved the two spellings lower to the SAME Mid.Ir
+    -- tree; this proves that equality SURVIVES codegen: the defun written with
+    -- `p->g` and the SAME defun written with `wload(p, 1)` go through the REAL
+    -- pipeline (parse -> check -> LowerToIr -> Mid.Qbe.Lower -> Print) and emit
+    -- the SAME .ssa TEXT.  A tree equality the EMITTER does not honour (a typed
+    -- raw node, a spelling-dependent temp, a second lowering path reached only
+    -- by one spelling) shows HERE even though the trees matched.  The fixture is
+    -- the real shape a user `.mid` writes (the A2 smoke program): a word LOCAL
+    -- from `rawcall malloc`, not a param — a param's ABI would differ from the
+    -- wload module's unless both are spelled identically, which would make the
+    -- row compare ABI, not the field access.  ASYMMETRY: a one-word offset
+    -- mutation in LowerToIr's fieldLoad makes the read row FAIL (scratch-mutated,
+    -- rebuilt, observed; see handoff-midlang-a3-result).
+    , check "A3 .ssa PIN field read IS its wload spelling: `p->g` and `wload(p, 1)` emit the SAME .ssa TEXT through the REAL pipeline (parse -> check -> LowerToIr -> Qbe.Lower -> Print)"
+        (case ( emitUserSsa rt a3FieldReadMid, emitUserSsa rt a3WloadReadMid ) of
+            ( Ok fieldSsa, Ok wloadSsa ) ->
+                fieldSsa
+                    == wloadSsa
+                    && String.contains "loadl" fieldSsa
+                    && String.length fieldSsa
+                    > 200
+
+            _ ->
+                False
+        )
+    , check "A3 .ssa PIN field store IS its wstore spelling: `p->g = 7;` and `wstore(p, 1, 7);` emit the SAME .ssa TEXT"
+        (case ( emitUserSsa rt a3FieldStoreMid, emitUserSsa rt a3WstoreStoreMid ) of
+            ( Ok fieldSsa, Ok wloadSsa ) ->
+                fieldSsa
+                    == wloadSsa
+                    && String.contains "storel" fieldSsa
+                    && String.length fieldSsa
+                    > 200
+
+            _ ->
+                False
+        )
+
+    -- (2) THE ANTI-EMPTY CENSUS.  This repo has shipped a battery that ran zero
+    -- parts and "passed", so the new AST constructors are counted, not assumed:
+    -- each of EField/EIndex/EDeref/SFieldStore/SIndexStore/StructDecl/EnumDecl
+    -- must appear >= 1 time in a PARSED fixture, and the CONTROL row proves the
+    -- walker cannot report a trivially-positive count (it reports 0 for every one
+    -- of them on a fixture that carries none, while still counting a form that
+    -- fixture does carry).  The fixture nests the forms inside an `if` whose
+    -- blocks are a Stmt list + a Term, so a walker that forgets to descend fails
+    -- the census row.
+    , check "A3 ANTI-EMPTY census: every new AST constructor (EField, EIndex, EDeref, SFieldStore, SIndexStore, StructDecl, EnumDecl) is counted >= 1 in a parsed fixture — nested in an if's blocks, so the walk must descend"
+        (let
+            counts =
+                censusOfSource a3CensusMid
+         in
+         List.all (\tag -> tagCount tag counts > 0) a3CensusTags
+            && tagCount "EField" counts
+            >= 2
+            && tagCount "EDeref" counts
+            >= 2
+        )
+    , check "A3 census CONTROL (the count cannot be trivially nonzero): the same walk over a fixture carrying NONE of the new forms reports 0 for every one of them, and still counts a form that fixture does carry"
+        (let
+            counts =
+                censusOfSource "defun C.b(a: word, b: word) -> word {\n  word z = a + b;\n  return z;\n}"
+         in
+         List.all (\tag -> tagCount tag counts == 0) a3CensusTags
+            && tagCount "SBind" counts
+            > 0
+            && tagCount "EWordBin" counts
+            > 0
+        )
+
+    -- (3) THE ONE-TABLE ROW (the negative pin for the layout's ONE definition).
+    -- A2 made LowerToIr IMPORT Check.fieldOffset/sizeofStruct instead of keeping
+    -- its own layout; this row fails if a SECOND copy ever appears, by asserting
+    -- the constant the lowerer emits IS the value the checker's table computes
+    -- (the val field's 5-word inline size is the part a hand-rolled second copy
+    -- gets wrong first: a 1-word val field would put `c` at 2, not 6).
+    , check "A3 ONE TABLE (offset): the constant LowerToIr emits for `p->a` IS Check.fieldOffset's value — a second layout copy in the lowerer shows here as a different constant"
+        (case ( lowlModuleBody a3OffsetMidA, Check.fieldOffset (declsOf a3OffsetDecls) "M" "a" ) of
+            ( Ok a, Just offA ) ->
+                wordLoadIndexOf a
+                    == Just offA
+                    && offA
+                    == 0
+
+            _ ->
+                False
+        )
+    , check "A3 ONE TABLE (offset past a val field): `p->c` emits the checker's offset 6 — a hand-rolled second copy that sizes the val field at 1 word would emit 2"
+        (case ( lowlModuleBody a3OffsetMidC, Check.fieldOffset (declsOf a3OffsetDecls) "M" "c" ) of
+            ( Ok c, Just offC ) ->
+                wordLoadIndexOf c
+                    == Just offC
+                    && offC
+                    == 6
+
+            _ ->
+                False
+        )
+    , check "A3 ONE TABLE (scale): `p[i]` in `*M` multiplies the index by Check.sizeofStruct M — the element scale and the offset table are the SAME value"
+        (case ( lowlModuleBody a3ScaleMid, Check.sizeofStruct (declsOf a3OffsetDecls) "M" ) of
+            ( Ok body, Just size ) ->
+                canon body
+                    == canon
+                        (Unsafe
+                            (RawWordLoad
+                                { ptr = ltv 1
+                                , index = limul (ltv 2) (ltn size)
+                                }
+                            )
+                        )
+
+            _ ->
+                False
+        )
+
     -- ==================== M2: the module header + the export block ====================
     , check "M2 header: module name + export block parse, and a headerless module is an EMPTY header (the header is OPTIONAL)"
         ((case Parse.parseModule "module Rt\nexport Rt.f : val -> val\ndefun Rt.f(a: val) -> val { return mknil; }" of
@@ -6560,6 +6677,276 @@ lowlModuleBody src =
 
                         Ok [] ->
                             Err "lower: no defuns"
+
+
+{-| The A3 driver: a user `.mid` through the REAL pipeline to .ssa TEXT —
+parse -> `Rt.checkLowerUserModule` (check + LowerToIr) -> `Mid.Qbe.Lower.lower`
+-> `Print.print`.  The .ssa-level equality pin compares two of these strings
+verbatim; a source that does not parse/check/lower is an `Err`, never an empty
+string that would compare equal to another empty string.
+-}
+emitUserSsa : Rt.Runtime -> String -> Result String String
+emitUserSsa rt src =
+    case Rt.parseUserModule src of
+        Err e ->
+            Err e
+
+        Ok parsed ->
+            case Rt.checkLowerUserModule rt.exportedTypes parsed of
+                Err e ->
+                    Err e
+
+                Ok m ->
+                    case m.defuns of
+                        d :: _ ->
+                            QbeLower.lower rt
+                                True
+                                False
+                                False
+                                True
+                                True
+                                True
+                                True
+                                False
+                                QbeTypes.empty
+                                (rtArities m.defuns)
+                                m.defuns
+                                d.key
+                                |> Result.map Print.print
+
+                        [] ->
+                            Err "lower: no defuns"
+
+
+{-| The ONE definition of the layout (A2 + A3): the constant the LOWERER emits
+for a field is the value the CHECKER's table computes — `Check.fieldOffset`.
+Reading the index straight out of the lowered RawWordLoad is what makes the
+"second copy of the layout" class visible as a different constant.
+-}
+wordLoadIndexOf : Exp -> Maybe Int
+wordLoadIndexOf body =
+    case body of
+        Unsafe (RawWordLoad wl) ->
+            case wl.index of
+                Lit (LNumber n) ->
+                    Just n
+
+                _ ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
+{-| A3 fixtures: the SAME defun twice — once with the postfix field spelling,
+once with the raw `wload`/`wstore` spelling it must be.  A word LOCAL from
+`rawcall malloc` (the A2 smoke program's real shape) rather than a param, so
+the two modules' ABI is identical and only the ACCESS spelling differs.
+-}
+a3FieldReadMid : String
+a3FieldReadMid =
+    "module A3\nstruct S { f : word; g : word; }\ndefun A3.a(dummy: val) -> val {\n  *S p = rawcall malloc(16);\n  return mknum(p->g);\n}"
+
+
+a3WloadReadMid : String
+a3WloadReadMid =
+    "module A3\nstruct S { f : word; g : word; }\ndefun A3.a(dummy: val) -> val {\n  *S p = rawcall malloc(16);\n  return mknum(wload(p, 1));\n}"
+
+
+a3FieldStoreMid : String
+a3FieldStoreMid =
+    "module A3\nstruct S { f : word; g : word; }\ndefun A3.a(dummy: val) -> val {\n  *S p = rawcall malloc(16);\n  p->g = 7;\n  return mknil;\n}"
+
+
+a3WstoreStoreMid : String
+a3WstoreStoreMid =
+    "module A3\nstruct S { f : word; g : word; }\ndefun A3.a(dummy: val) -> val {\n  *S p = rawcall malloc(16);\n  wstore(p, 1, 7);\n  return mknil;\n}"
+
+
+{-| The one-table rows' struct: a WORD field, a VAL field (5 words INLINE) and
+a word past it, so a hand-rolled second layout gets `c` wrong (2, not 6).
+-}
+a3OffsetDecls : String
+a3OffsetDecls =
+    "struct M { a : word; v : val; c : word; }"
+
+
+a3OffsetMidA : String
+a3OffsetMidA =
+    a3OffsetDecls ++ "\ndefun Rt.a(p: *M) -> word {\n  return p->a;\n}"
+
+
+a3OffsetMidC : String
+a3OffsetMidC =
+    a3OffsetDecls ++ "\ndefun Rt.a(p: *M) -> word {\n  return p->c;\n}"
+
+
+a3ScaleMid : String
+a3ScaleMid =
+    a3OffsetDecls ++ "\ndefun Rt.a(p: *M, i: word) -> word {\n  return p[i];\n}"
+
+
+{-| The census fixture: every NEW AST constructor, with the access forms nested
+INSIDE an `if`'s blocks (a Stmt list + a Term) so a walker that forgets to
+descend reports a short count and the census row fails.
+-}
+a3CensusMid : String
+a3CensusMid =
+    "module C\nstruct S { f : word; g : word; }\nenum K { a = 0; b = 1; }\ndefun C.a(p: *S, q: *word, i: word) -> word {\n  *word d = q;\n  p->f = *d;\n  p[1] = p->g + p->f;\n  if (mkbool(i == 1)) {\n    return p[i];\n  } else {\n    return *d;\n  }\n}"
+
+
+a3CensusTags : List String
+a3CensusTags =
+    [ "EField"
+    , "EIndex"
+    , "EDeref"
+    , "SFieldStore"
+    , "SIndexStore"
+    , "StructDecl"
+    , "EnumDecl"
+    ]
+
+
+{-| Count the census tags in a parsed source.  A PARSE FAILURE yields the empty
+dict, so a census row over a source that did not even parse fails (it can never
+pass on zero hits).
+-}
+censusOfSource : String -> Dict String Int
+censusOfSource src =
+    case Parse.parseModule src of
+        Ok m ->
+            List.foldl
+                (\tag acc -> Dict.update tag (\c -> Just (Maybe.withDefault 0 c + 1)) acc)
+                Dict.empty
+                (censusTags m)
+
+        Err _ ->
+            Dict.empty
+
+
+tagCount : String -> Dict String Int -> Int
+tagCount tag counts =
+    Maybe.withDefault 0 (Dict.get tag counts)
+
+
+censusTags : Ast.Module -> List String
+censusTags m =
+    List.concatMap censusDecl m.decls ++ List.concatMap (\d -> censusBlock d.body) m.defuns
+
+
+censusDecl : Ast.Decl -> List String
+censusDecl d =
+    case d of
+        Ast.StructDecl _ ->
+            [ "StructDecl" ]
+
+        Ast.EnumDecl _ ->
+            [ "EnumDecl" ]
+
+
+censusBlock : Ast.Block -> List String
+censusBlock b =
+    List.concatMap censusStmt b.stmts ++ censusTerm b.term
+
+
+censusStmt : Ast.Stmt -> List String
+censusStmt s =
+    case s of
+        Ast.SBind _ _ e ->
+            "SBind" :: censusExp e
+
+        Ast.SEffect e ->
+            censusExp e
+
+        Ast.SIf c t me ->
+            censusExp c
+                ++ censusBlock t
+                ++ Maybe.withDefault [] (Maybe.map censusBlock me)
+
+        Ast.SFieldStore p f v ->
+            "SFieldStore" :: (censusExp p ++ censusExp v)
+
+        Ast.SIndexStore p i v ->
+            "SIndexStore" :: (censusExp p ++ censusExp i ++ censusExp v)
+
+
+censusTerm : Ast.Term -> List String
+censusTerm t =
+    case t of
+        Ast.TRet e ->
+            censusExp e
+
+        Ast.TRecur es ->
+            List.concatMap censusExp es
+
+        Ast.TIf c t1 me ->
+            censusExp c
+                ++ censusBlock t1
+                ++ Maybe.withDefault [] (Maybe.map censusBlock me)
+
+
+censusExp : Ast.Exp -> List String
+censusExp e =
+    case e of
+        Ast.EField p _ ->
+            "EField" :: censusExp p
+
+        Ast.EIndex p i ->
+            "EIndex" :: (censusExp p ++ censusExp i)
+
+        Ast.EDeref p ->
+            "EDeref" :: censusExp p
+
+        Ast.EWordBin _ a b ->
+            "EWordBin" :: (censusExp a ++ censusExp b)
+
+        Ast.EWordCmp _ a b ->
+            censusExp a ++ censusExp b
+
+        Ast.EFltBin _ a b ->
+            censusExp a ++ censusExp b
+
+        Ast.EFltCmp _ a b ->
+            censusExp a ++ censusExp b
+
+        Ast.EShortAnd a b ->
+            censusExp a ++ censusExp b
+
+        Ast.EShortOr a b ->
+            censusExp a ++ censusExp b
+
+        Ast.EIf c a b ->
+            censusExp c ++ censusExp a ++ censusExp b
+
+        Ast.EIfBlock c t f ->
+            censusExp c ++ censusBlock t ++ censusBlock f
+
+        Ast.ECall _ es ->
+            List.concatMap censusExp es
+
+        Ast.ERawCall _ es ->
+            List.concatMap censusExp es
+
+        Ast.EAggCall _ f es ->
+            censusExp f ++ List.concatMap censusExp es
+
+        Ast.EBuiltin _ es ->
+            List.concatMap censusExp es
+
+        Ast.EWithRoots _ b ->
+            censusBlock b
+
+        Ast.EInt _ ->
+            []
+
+        Ast.EFlt _ ->
+            []
+
+        Ast.EStr _ ->
+            []
+
+        Ast.EVar _ ->
+            []
 
 
 defunByKey : String -> List Defun -> Maybe Defun
