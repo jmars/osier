@@ -1687,8 +1687,8 @@ wordSelfTailArgs exp s =
 {-| The rawAbi WORD self-tail (`recur` -> `jmp @body`).  The params are `l`
 REGISTERS (a0..), never memory slots, so a loop-carried word can only re-enter
 @body when it is ALREADY in its param register — the loop keeps its mutable
-state in memory (header word 4 for Rt.frameZero) and `recur`s on the CONSTANT
-param.  A computed arg would need a register copy the word ABI cannot express
+state in memory (the counter cell for Rt.copyWordsGo) and `recur`s on the
+CONSTANT param.  A computed arg would need a register copy the word ABI cannot express
 (no phi node, and `%a0` is already defined by the signature), so it is a loud
 Err, not a silent wrong loop.
 -}

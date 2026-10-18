@@ -79,14 +79,14 @@ checks rt =
       -- load of runtime.mid).  If test-run.js (or run.js) ever stops reading
       -- the file, the flag text is empty, `Rt.load` would parse nothing, and
       -- every `rtProgram`-derived row could pass VACUOUSLY over an empty
-      -- program.  This row pins the full surface program (189 defuns — the
-      -- MEASURED `defun` count of elm-compiler/runtime.mid; 179 + the ten stage-6 B1/B2
-      -- apply + tail defuns), so an empty or truncated load turns it
-      -- RED, loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (189 defuns)"
+      -- program.  This row pins the full surface program (188 defuns — the
+      -- MEASURED `defun` count of elm-compiler/runtime.mid; 178 + the ten stage-6 B1/B2
+      -- apply + tail defuns, after P1e deleted the frameZero loop), so an empty
+      -- or truncated load turns it RED, loudly, before any vacuous row can.
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (188 defuns)"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 189
+                List.length ast == 188
 
             Err _ ->
                 False
@@ -899,7 +899,7 @@ checks rt =
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
     , check "rt program: 150 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram rt True True True) == 171
+        (List.length (rtProgram rt True True True) == 170
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
@@ -1121,9 +1121,9 @@ checks rt =
     -- calls.  A :val-shaped arg or an under-applied call here is a SILENT
     -- MISCOMPILE (the callee reads a garbage register), so the emitted
     -- shapes are pinned, not just "it links".
-    , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main + the B0 frame pair are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo/frame set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set; the frame pair is FRAME-FREE by construction — its only nodes are rawcall/raw-word loads/stores and rawAbi->rawAbi calls to the two non-allocating helpers)"
+    , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main + the B0 frame pair are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo/frame set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set; the frame pair is FRAME-FREE by construction — its only nodes are rawcall/raw-word loads/stores and rawAbi->rawAbi calls to its one non-allocating helper)"
         (Rt.rawAbi
-            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.frameZero", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.tail-known", "Rt.bounce" ]
+            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.tail-known", "Rt.bounce" ]
             && not (Set.member "Rt.die" rt.allocating)
             && not (Set.member "Rt.halt" rt.allocating)
             && not (Set.member "Rt.cStrEq" rt.allocating)
@@ -1133,7 +1133,6 @@ checks rt =
             && not (Set.member "Rt.frame-enter" rt.allocating)
             && not (Set.member "Rt.frame-leave" rt.allocating)
             && not (Set.member "Rt.frameBlock" rt.allocating)
-            && not (Set.member "Rt.frameZero" rt.allocating)
             -- stage 6 B1: Rt.apply/Rt.apply-tail are the word-ABI wrappers
             -- (NOT frame-free — they call the allocating loops, so the
             -- classifier marks them allocating); the loops and helpers are
@@ -1188,18 +1187,12 @@ checks rt =
             Err _ ->
                 False
         )
-    , check "B0perf-2 frameZero is a rawAbi WORD defun: params [a0:l], ret l, frame-free, an in-frame self-tail (jmp @body, no self-call) and NO :val aggregate or 40-byte blit in its body — the recur's Value blits are gone (fails on the pre-fix :val frameZero)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.frameZero" of
+    , check "P1e frame-enter bulk-zero is a SINGLE rawcall memset(dst, 0, 40*nslots) — 3 word args, the middle the zero byte, a 40*x Mul for the length, and NO q_Rt_x2eframeZero call or in-frame loop (the per-slot frameZero loop is gone; fails on the pre-P1e loop)"
+        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.frame-enter" of
             Ok mod ->
-                case funcByName "q_Rt_x2eframeZero" mod of
+                case funcByName "q_Rt_x2eframe_x2denter" mod of
                     Just f ->
-                        List.map Tuple.second f.params
-                            == [ Il.Base Il.L ]
-                            && f.ret
-                            == Il.Base Il.L
-                            && frameBaseIsAlloc f
-                            && selfLoopIsLoop ( "q_Rt_x2eframeZero", f )
-                            && not (hasValOrBlit f.blocks)
+                        memsetBulkZeroShape f
 
                     Nothing ->
                         False
@@ -1207,12 +1200,12 @@ checks rt =
             Err _ ->
                 False
         )
-    , check "B0perf-2 frame-enter calls frameZero with a WORD call (one Base L arg) — never the lean 4-arg :val shape the pre-fix :val defun needed"
+    , check "P1e zero-BEFORE-root: frame-enter's memset is emitted BEFORE the rt_root_push_value_array call (a reused block's stale slots must be zeroed before the GC scans them — the rt.zig:279 correctness memset)"
         (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.frame-enter" of
             Ok mod ->
                 case funcByName "q_Rt_x2eframe_x2denter" mod of
                     Just f ->
-                        rawAbiWordCall "q_Rt_x2eframeZero" f
+                        memsetBeforeRootPush f
 
                     Nothing ->
                         False
@@ -4082,7 +4075,7 @@ checks rt =
                       "Rt.epFreeArgv", "Rt.epFreeChains", "Rt.epFreeCmd", "Rt.epFreeCmds", "Rt.epFreeRedirs", "Rt.epNum", "Rt.epPipeGo",
                       "Rt.epPipeline", "Rt.epProg", "Rt.epProgGo", "Rt.epRedir", "Rt.epRedirsGo", "Rt.epStr", "Rt.epSymIs", "Rt.epSymOf",
                       "Rt.exec-plan", "Rt.exec-run", "Rt.execGo", "Rt.f/", "Rt.fillGo", "Rt.floatCopy",
-                      "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.frameZero",
+                      "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock",
                       "Rt.gcAlloc", "Rt.gcAllocGo",
                       "Rt.gcDrain", "Rt.gcInit", "Rt.gcMarkPtr", "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcScanValueArray", "Rt.gcSweep",
                       "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot", "Rt.globIsDotDot",
@@ -4149,7 +4142,7 @@ checks rt =
     -- is now the append below; the loud Err moved to the key-agreement walk
     -- (row C), which is the collision/rename class the orphan check guarded.
     , check
-        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the twenty-one stage-6 keys (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.frameZero, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
+        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the twenty stage-6 keys (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -4171,7 +4164,7 @@ checks rt =
                             in
                             case Rt.spliceSurface s union of
                                 Ok spliced ->
-                                    List.map .key spliced == List.map .key union ++ [ "Rt.apply", "Rt.apply-tail", "Rt.applyGo", "Rt.applyTailGo", "Rt.bounce", "Rt.bounceGo", "Rt.cStrEq", "Rt.cStrEqGo", "Rt.callArity", "Rt.copyWords", "Rt.copyWordsGo", "Rt.die", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.frameZero", "Rt.halt", "Rt.main", "Rt.metaGo", "Rt.parseArgsGo", "Rt.tail-known" ]
+                                    List.map .key spliced == List.map .key union ++ [ "Rt.apply", "Rt.apply-tail", "Rt.applyGo", "Rt.applyTailGo", "Rt.bounce", "Rt.bounceGo", "Rt.cStrEq", "Rt.cStrEqGo", "Rt.callArity", "Rt.copyWords", "Rt.copyWordsGo", "Rt.die", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.halt", "Rt.main", "Rt.metaGo", "Rt.parseArgsGo", "Rt.tail-known" ]
 
                                 Err _ ->
                                     False
@@ -7198,6 +7191,87 @@ rawAbiWordCall sym f =
         f.blocks
 
 
+{-| P1e bulk-zero shape: ONE rawcall `memset(dst, 0, 40 * nslots)` — exactly 3
+`Base L` args with the zero byte constant in the middle, a `40 * x` Mul feeding
+the byte length (a Value is 40 bytes), and NO `q_Rt_x2eframeZero` call or
+in-frame loop.  The per-slot frameZero loop this replaced pinned the OPPOSITE
+properties (a self-loop, no blit); the bulk-zero has no loop at all.
+-}
+memsetBulkZeroShape : Il.Func -> Bool
+memsetBulkZeroShape f =
+    symCount "memset" f
+        == 1
+        && List.any
+            (\b ->
+                List.any
+                    (\i ->
+                        case i of
+                            Il.Call _ (Il.Base Il.L) (Il.Sym "memset") [ Il.ArgVal (Il.Base Il.L) _, Il.ArgVal (Il.Base Il.L) (Il.Con 0), Il.ArgVal (Il.Base Il.L) (Il.Tmp _) ] ->
+                                True
+
+                            _ ->
+                                False
+                    )
+                    b.body
+            )
+            f.blocks
+        && List.any
+            (\b ->
+                List.any
+                    (\i ->
+                        case i of
+                            Il.Bin _ Il.L Il.Mul (Il.Con 40) _ ->
+                                True
+
+                            _ ->
+                                False
+                    )
+                    b.body
+            )
+            f.blocks
+        && not (callsSym "q_Rt_x2eframeZero" f)
+
+
+{-| P1e zero-BEFORE-root: in frame-enter's straight-line body the bulk-zero
+`memset` is emitted before `rt_root_push_value_array`.  The correctness order
+from rt.zig:279 — a reused block's stale slots must be zeroed before the GC
+can scan them, or scanValue chases freed pages.
+-}
+memsetBeforeRootPush : Il.Func -> Bool
+memsetBeforeRootPush f =
+    let
+        insts =
+            List.concatMap (\b -> b.body) f.blocks
+
+        isSym sym i =
+            case i of
+                Il.Call _ _ (Il.Sym s) _ ->
+                    s == sym
+
+                _ ->
+                    False
+
+        first pred =
+            List.head
+                (List.filterMap
+                    (\( ix, i ) ->
+                        if pred i then
+                            Just ix
+
+                        else
+                            Nothing
+                    )
+                    (List.indexedMap Tuple.pair insts)
+                )
+    in
+    case ( first (isSym "memset"), first (isSym "rt_root_push_value_array") ) of
+        ( Just m, Just p ) ->
+            m < p
+
+        _ ->
+            False
+
+
 {-| The RawCallAgg IL shape: a call with a result temp, an `:ret` aggregate
 result, the callee as a WORD argument (`ArgVal (Base L) (Il.Tmp _)` — a
 register target, not a symbol), and the word args in order.
@@ -7588,9 +7662,9 @@ frameBaseIsAlloc f =
         f.blocks
 
 
-{-| Does a body carry a `:val` aggregate call or a 40-byte blit?  The B0perf-2
-frameZero must contain NEITHER — a word defun's loop should be pure
-word loads/stores and an in-frame jmp, never a Value copy.
+{-| Does a body carry a `:val` aggregate call or a 40-byte blit?  A rawAbi word
+loop (the copyWords pair) must contain NEITHER — a word defun's loop should be
+pure word loads/stores and an in-frame jmp, never a Value copy.
 -}
 hasValOrBlit : List Il.Block -> Bool
 hasValOrBlit blocks =

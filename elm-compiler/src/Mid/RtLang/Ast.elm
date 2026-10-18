@@ -897,7 +897,8 @@ plan's own `openat4?` resolved to 4 by the five measured openat sites.
 
 C seats / libc, called from Rt bodies today:
 
-  * malloc 1, free 1, mmap 6 (RtGc — the one 6-arg site)
+  * malloc 1, memset 3 (the frame bulk-zero: dst, 0, 40*nslots bytes), free 1,
+    mmap 6 (RtGc — the one 6-arg site)
   * write 3, read 3, lseek 3, openat 4, close 1
   * fork 0, waitpid 3, kill 2, execvp 2, _exit 1, getpid 0
   * chdir 1, getcwd 2, getenv 1, setenv 3
@@ -938,6 +939,7 @@ rawcallArity : Dict Sym Int
 rawcallArity =
     Dict.fromList
         [ ( "malloc", 1 )
+        , ( "memset", 3 )
         , ( "free", 1 )
         , ( "mmap", 6 )
         , ( "write", 3 )

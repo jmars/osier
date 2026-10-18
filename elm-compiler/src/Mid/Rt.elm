@@ -960,18 +960,16 @@ rtDeps =
           -- rtDeps edge.
           ( "Rt.main", [ "Rt.cStrLenGo", "Rt.metaGo", "Rt.parseArgsGo" ] )
         , -- ===== the stage-6 B0 frame machinery.  Rt.frame-enter's RawCall
-          -- edges are its two helpers; Rt.frame-leave's only edge is Rt.die
+          -- edges are its one helper; Rt.frame-leave's only edge is Rt.die
           -- (the no-frame panic — Rt.die is already a driverSeed, so this is
           -- a closure edge, not a new root).  Rt.frameBlock (malloc + the
-          -- freelist pop, all rawcall/raw-word) and Rt.frameZero (self-tail
-          -- via recur, SLOT-granularity (5 words/iter) no-alloc zeroing — no
-          -- RawCall edge, the cStrFill/[] precedent) name no Rt target.  The
+          -- freelist pop, all rawcall/raw-word) names no Rt target.  The
           -- rt_root_push_value_array/rt_root_watermark/rt_root_pop_to calls
-          -- are rawcall (RawCallRaw — NOT rtDeps edges).
-          ( "Rt.frame-enter", [ "Rt.frameBlock", "Rt.frameZero" ] )
+          -- are rawcall (RawCallRaw — NOT rtDeps edges), and P1e's bulk-zero
+          -- `memset` is likewise a rawcall (RawCallRaw — NOT an rtDeps edge).
+          ( "Rt.frame-enter", [ "Rt.frameBlock" ] )
         , ( "Rt.frame-leave", [ "Rt.die" ] )
         , ( "Rt.frameBlock", [] )
-        , ( "Rt.frameZero", [] )
         , -- ===== the stage-6 B1 apply family.  Rt.apply/Rt.apply-tail are
           -- rawAbi WRAPPERS (root the caller's f/args, then hand off); their
           -- one RawCall edge each is the val-ABI LOOP.  The loops reach
@@ -1082,14 +1080,11 @@ rawAbi =
           -- Rt.frame-enter/leave are the raw-word pair the prologue/return
           -- retarget reaches; Rt.frameBlock (the freelist pop-or-malloc) is a
           -- word helper so the rawAbi->rawAbi `call` stays on the raw-word
-          -- path.  Rt.frameZero is the zero-before-root memset, ALSO rawAbi
-          -- (stage 6 B0perf-2): its loop is a WORD self-tail (`recur` on the
-          -- constant hdr param -> jmp @body, state in header word 4), so
-          -- there is no :val on the path and no per-iteration blit.
+          -- path.  P1e's bulk-zero is a rawcall memset (RawCallRaw — no
+          -- rawAbi defun), so frameZero no longer exists.
           "Rt.frame-enter"
         , "Rt.frame-leave"
         , "Rt.frameBlock"
-        , "Rt.frameZero"
         , -- ===== the stage-6 B1 apply family.  Rt.apply/Rt.apply-tail are
           -- raw-word defuns whose RESULT is an AGGREGATE (the stage-6 B1
           -- rawAbi-ret-class extension — Mid.Qbe.Lower.rawAbiRetClass maps
@@ -1141,7 +1136,6 @@ rawAbiArity =
         , ( "Rt.frame-enter", 1 )
         , ( "Rt.frame-leave", 0 )
         , ( "Rt.frameBlock", 1 )
-        , ( "Rt.frameZero", 1 )
         , -- stage 6 B1: Rt.apply/Rt.apply-tail take the SAME 3 word params
           -- as the Zig seats (fslot, args, nargs) — the retarget site and
           -- lowerDefun both check this against the actual param count.

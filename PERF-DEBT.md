@@ -198,7 +198,7 @@ no-collect invariant holds.  One site covers all three `malloc(80)` arms
 (`Rt.apply-tail` ×2, `Rt.tail-known`).  The residual is one libc call per tail;
 eliminating the intermediate buffer entirely remains open for B4.
 
-### 3. frames — **1.6×** — the floor (lowest priority)
+### 3. frames — **1.6× → 1.4× (P1c) → 0.97× (P1e)** — the floor (lowest priority)
 
 The residual after `frameZero` became a raw-word loop. Causes: the
 `frameBlock`/`enter`/`leave` **boxed-boolean condition machinery** (`mkbool` builds a
@@ -219,6 +219,36 @@ floor is the boxed-cond removal; the residual is the freelist malloc and the
 word-zero loop).  The apply-perf gate moved 3.8× → 3.6× (copyWordsGo's cond).
 The corpus moved 125/159 (the same 34 `compile_error` groups); the hatch-OFF
 window (`QBE_MIDDRIVER=0` vs `f55bf1b^`) holds byte-identical 159/159.
+
+**P1e — the frame-zero LOOP replaced by ONE bulk `memset` (measured).** The
+per-slot loop (`Rt.frameZero`, 5 `wstore`s + counter `wload`/`wstore` + compare +
+`jmps` per 40-byte slot) is now a single `rawcall memset(base, 0, 40*nslots)` in
+`Rt.frame-enter` — the exact `@memset(hdr.slots[0..nslots], zeroValue())` Zig emits
+(`rt.zig:281`).  Byte-equivalent: a Value is 5 words and the loop wrote five zero
+WORDS per slot (40 zero bytes).  Zero-BEFORE-root is preserved — the memset is
+emitted before `rt_root_push_value_array` (pinned).  `Rt.frameZero` is deleted;
+header word 4 (the slots pointer) was the loop's counter and is now never written,
+because the Mid frame path never reads it (`rt_root_push_value_array` takes
+base+live).  Frame-perf gate: **1.4× → 0.97×** (median of 7 alternated pairs,
+fib(28)=317811 on both arms, load 0.61) — the Mid frame path is now at parity
+with, slightly faster than, the Zig arm.  Suite rule under load 5–13 (the box was
+busy; session-2 A/A spread median 18.3%): total **1.08×** (ON 731 ms / OFF 676 ms),
+down from the 2.22× aggregate and the ~1.25–1.33× pre-P1e floor.
+
+**P1e item 2 (kill the `payload(mknum(..))` value selects in `Rt.frameBlock` /
+`Rt.frame-leave`) — NOT DONE, and the brief's mechanism is WRONG.**  A rawAbi WORD
+defun has NO word-join: `Lower.lowerTailWordBranches` rejects a tail `If` whose two
+branches both return a word (`Lower.elm:1843`, no phi), and a word-valued `?:`/`if`
+in a value slot is a loud `wordProducerMessage`.  The `mknum`-to-slot-then-`payload`
+round-trip IS the word-join-via-memory idiom — the minimal expressible form.  To
+remove it needs either a word-phi in Lower or a branchless select; both are bigger
+than this unit's minimal mandate and risk the frame invariants (zero-before-root,
+the freelist bound).  Deferred.
+
+**re-freeze + full battery deferred to the consolidation pass** (the corpus
+baseline and the bootstrap seed are STALE at the P1e commit — do not trust
+`tools/bootstrap/compiler.ssa` or the corpus freeze against a post-P1e tree until
+the consolidation pass re-runs them).
 
 ## THE ANTI-PATTERN THAT CAUSED ALL OF THIS (check this first, always)
 
@@ -299,5 +329,7 @@ magnitude past the projection. That projection was a PROJECTION; this table is M
    every closure and tail call.
 4. **tail (2.5×)** — the jump table and the `malloc(80)`.
 5. **frames (1.6×)** — the boxed-boolean conds — **DONE (P1c)**: the frame
-   path's boxed-boolean conditions are the word form now, 1.6× → 1.4×; the
-   residual is the freelist malloc and the word-zero loop (a later unit).
+   path's boxed-boolean conditions are the word form now, 1.6× → 1.4×; and the
+   word-zero loop — **DONE (P1e)**: one bulk `memset`, 1.4× → 0.97×.  The only
+   remaining frame-path item is the `payload(mknum(..))` value select (needs a
+   word-join Lower does not have) — deferred, see the P1e note above.

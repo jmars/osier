@@ -3463,37 +3463,28 @@ defun Rt.childCd(argvN : val, argcN : val, stN : val) -> val {
 // number-0 Value (tag 0, payload 0) BEFORE rootPushValueArray — otherwise
 // scanValue chases freed GC pages.
 //
-// THE 175x FIX (stage-6 B0perf) and THE ~3.4x->~1x CLOSE (stage-6 B0perf-2):
-// the original loop stored ONE BYTE per iteration and re-boxed the
-// decremented count (`mknum(...)`) on every `recur` — an ALLOCATION per byte,
-// nslots*40 allocations per frame.  B0perf zeroed a full 40-byte SLOT (5
-// words) per iteration and held the decrementing SLOT count as a raw word in
-// header slot 4 (the slots-POINTER field, which the Mid frame path never
-// reads — rt_root_push_value_array takes base+live explicitly) with a
-// CONSTANT recur arg, so the loop allocated NOTHING; but the loop was still a
-// :val defun, and the recur's 3 x 40-byte per-iteration blits of the Value
-// param were the residual ~3.4x floor.  B0perf-2 closes it: frameZero is a
-// rawAbi WORD defun (word in/out), so there is NO :val anywhere on the path
-// and therefore NO per-iteration blit — the counter lives in header word 4, 5
-// wstores per slot, and `recur(hdr)` is a word self-tail (`jmp @body`; hdr is
-// the constant a0 param, so no register copy).  The count is seeded by
-// Rt.frame-enter (wstore(hdr,4,nslots)).
-defun Rt.frameZero(hdr : word) -> word {
-  word i = wload(hdr, 4);
-  if (i == 0) {
-    return 0;
-  } else {
-    word w = (i - 1) * 5;
-    wstore(hdr + 40, w, 0);
-    wstore(hdr + 40, w + 1, 0);
-    wstore(hdr + 40, w + 2, 0);
-    wstore(hdr + 40, w + 3, 0);
-    wstore(hdr + 40, w + 4, 0);
-    wstore(hdr, 4, i - 1);
-    recur(hdr);
-  }
-}
-
+// THE 175x FIX (stage-6 B0perf), THE ~3.4x->~1x CLOSE (stage-6 B0perf-2) and
+// THE BULK-ZERO CLOSE (stage-6 P1e): the original loop stored ONE BYTE per
+// iteration and re-boxed the decremented count (`mknum(...)`) on every `recur`
+// — an ALLOCATION per byte, nslots*40 allocations per frame.  B0perf zeroed a
+// full 40-byte SLOT (5 words) per iteration; B0perf-2 made that loop a rawAbi
+// WORD defun (frameZero) so it allocated NOTHING — but it was still a LOOP,
+// ~8-10 instructions per 40-byte slot.  P1e deletes the loop entirely: ONE
+// `rawcall memset(base, 0, 40 * nslots)` zeroes the whole block — the exact
+// `@memset(hdr.slots[0..nslots], zeroValue())` Zig emits (rt.zig:281).  Byte
+// equivalence: a Value is 5 words, and the loop wrote five zero WORDS per slot
+// (40 zero bytes) — memset writes the same 40*nslots zero bytes in one call.
+// Header word 4 (the slots-POINTER field) is written by NEITHER shape: the Mid
+// frame path never reads it (rt_root_push_value_array takes base+live
+// explicitly), so the old counter seeding (wstore(hdr,4,nslots)) drops with
+// the loop.
+//
+// NOTE (P1e item 2 deferred): frameBlock's three `payload(mknum(..))` selects
+// and frame-leave's two dead word-if binders are LEFT AS-IS.  A rawAbi WORD
+// defun has NO word-join — `lowerTailWordBranches` rejects a tail If whose two
+// branches both return a word (no phi), and a word-valued `?:`/`if` in a value
+// slot is a loud `wordProducerMessage` — so the `mknum`-to-slot-then-`payload`
+// round-trip IS the word-join-via-memory idiom, the minimal expressible form.
 defun Rt.frameBlock(nslots : word) -> word {
   word bytes = 40 + 40 * nslots;
   word g = payload((nslots < 8192) ? mknum(rawcall rt_glob_addr()) : mknum(0), 0);
@@ -3511,8 +3502,7 @@ defun Rt.frameBlock(nslots : word) -> word {
 defun Rt.frame-enter(nslots : word) -> word {
   word hdr = call Rt.frameBlock(nslots);
   word base = hdr + 40;
-  wstore(hdr, 4, nslots);
-  call Rt.frameZero(hdr);
+  rawcall memset(base, 0, 40 * nslots);
   wstore(hdr, 0, nslots);
   word wm = rawcall rt_root_watermark();
   wstore(hdr, 1, wm);
