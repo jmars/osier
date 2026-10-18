@@ -792,6 +792,16 @@ run_midgc midgc-record MidgcRecord.main tools/qbe/fixtures/midgc-record.elm
 # because the hole is the FALLBACK path.  The fail-before/pass-after asymmetry
 # + the zero-rt_string-emission pin are scripted in tools/qbe/probe-midgc-string.sh.
 run_midgc_nsi midgc-string MidgcString.main tools/qbe/fixtures/midgc-string.elm
+# PERF-DEBT gc1 (2026-10-18) — THE SIZE-CLASS ALLOCATOR and its OOB guard: the
+# free list was EXACT-MATCH-ONLY (plan.md stage-4 finding 3), so a program
+# allocating two shapes died "midgc: out of memory" with memory free.  The
+# class ladder + this row's neighbours landed in `4c71924`, and `Rt.gcAllocGo`'s
+# class-index bound in `29729d7` (a request bigger than the heap used to index
+# PAST the class table — signal 11, not a loud die).  Both fail-before /
+# pass-after asymmetries are scripted: `tools/qbe/probe-midgc-mixed.sh` (the
+# exact-match OOM) and `tools/qbe/probe-midgc-oom.sh` (the OOB index; its
+# control arm re-runs the same fixture at QBE_HEAP_MB=32, where the request
+# fits, so the crash is attributable to the index and not to the request).
 # zigretire stage 5 PART 5 — THE OTHER HALF of the census refusal: a PURE
 # program churning a >3-arg MUTUAL tail recursion must NOT corrupt.  The
 # transient tail array (rt_tail_known's nargs>3 fallback, rt.zig:817) is a
