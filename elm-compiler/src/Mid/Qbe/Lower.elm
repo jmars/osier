@@ -2507,9 +2507,15 @@ lowerRawVal node dest s =
         -- cffi U2: the typed C boundary is a WORD producer on every width it
         -- lowers (FW32S/FW32U arrive extended from the `w` result; FW64 and
         -- FVoid are an `l` temp), so a value position is the same loud
-        -- "raw word in VALUE position" error RawCallRaw gets.
-        RawCallExtern _ ->
-            Err wordProducerMessage
+        -- "raw word in VALUE position" error RawCallRaw gets.  An `f64` result
+        -- is a FLOAT word and gets the float family's message (cffi U3).
+        RawCallExtern call ->
+            case call.result of
+                FF64 ->
+                    Err "qbe: raw FLOAT-word node in a value position — float words are legal only nested in float-argument positions and RawMkValue word lists"
+
+                _ ->
+                    Err wordProducerMessage
 
         RawCallAgg call ->
             -- stage 6 A1: a rawCallAgg in VALUE position is the driver's
@@ -2669,18 +2675,7 @@ type alias FfiArg =
 
 zipWidths : String -> List FfiWidth -> List Exp -> Result String (List FfiArg)
 zipWidths sym widths exps =
-    if hasFf64 widths then
-        -- cffi U3 owns the float ARGUMENT (a `d`-class operand, the
-        -- float-word producer route).  Refusing it HERE — rather than letting
-        -- rawWordArg reject the operand as "not a word producer" — keeps the
-        -- message naming the unit that lifts it.
-        Err
-            ("qbe: cffi U3: '"
-                ++ sym
-                ++ "' declares an f64 PARAMETER — a `d`-class call argument is not lowered yet (cffi U2 lowers the integer/pointer family)"
-            )
-
-    else if List.length widths == List.length exps then
+    if List.length widths == List.length exps then
         Ok (List.map2 (\w e -> { exp = e, width = w }) widths exps)
 
     else
@@ -2693,26 +2688,39 @@ zipWidths sym widths exps =
             )
 
 
-{-| Is any argument width the `f64` class?  Written as a walk, NOT
-`List.member`: MEASURED (the same trap Check.elm:598 records), the selfhost's
-`List.member` demands `comparable` elements and rejects a user ADT — the
-bootstrap emit failed on `List.member FF64 widths` with "cannot unify
-comparable with Mid.Ir.FfiWidth" before this walk replaced it.  Real Elm
-derives comparable for ADTs; the selfhost's core-libs table does not.
+{-| (cffi U3) ONE declared argument's OPERAND: the `d` class goes through
+`rawFltArg` (the float-producer route `RawLoadFlt`/`RawIToF` already use) and
+every word class through `rawWordArg`.
+
+The class this dispatches on is `ffiArgClass ew.width` — the SAME function the
+call's `ArgVal` reads two lines below, so an operand cannot be LOWERED as one
+class and TYPED as another.  Where the U2 unit refused an `f64` parameter
+loudly, this is the arm that lifts it: `strfromd(str, n, fmt, 1.5)` is the
+fixture (`tools/qbe/fixtures/ffid-f64.mid`), and plan §3.2 MEASURED the
+`call $fmod(d %x, d %y)` shape this produces.
+
+NOT `List.member`/`==` on `FfiWidth`: MEASURED, the selfhost's `List.member`
+demands `comparable` elements and rejects a user ADT (the trap Check.elm:598
+records — it broke a bootstrap emit in U2 with "cannot unify comparable with
+Mid.Ir.FfiWidth").  A `case` walk is what both compilers accept.
 -}
-hasFf64 : List FfiWidth -> Bool
-hasFf64 widths =
-    case widths of
-        [] ->
-            False
+rawFfiArg : FfiArg -> S -> Result String ( Il.Arg, S )
+rawFfiArg ew st =
+    case ew.width of
+        FF64 ->
+            rawFltArg ew.exp st
 
-        w :: rest ->
-            case w of
-                FF64 ->
-                    True
+        FW32S ->
+            rawWordArg ew.exp st
 
-                _ ->
-                    hasFf64 rest
+        FW32U ->
+            rawWordArg ew.exp st
+
+        FW64 ->
+            rawWordArg ew.exp st
+
+        FVoid ->
+            rawWordArg ew.exp st
 
 
 {-| The register class of one DECLARED argument.  `w` for the 32-bit family
@@ -3246,11 +3254,14 @@ rawWordArg exp s =
             --             FW32U       -> `=w call` + `extuw`
             --             FW64/FVoid  -> `=l call` (FVoid's temp is the
             --                 same dead word RawCallRaw yields today)
-            --             FF64        -> refused, loudly (cffi U3)
+            --             FF64        -> `=d call` (an `xmm` result, the
+            --                 float-word producer class — cffi U3)
             --
             -- MEASURED against the vendored QBE (plan §3.1): `=w call` +
             -- `extsw` emits `movslq %eax`; `=w call` + `extuw` emits
-            -- `movl %eax, %r32d`; `=l call` emits a bare `movq %rax`.
+            -- `movl %eax, %r32d`; `=l call` emits a bare `movq %rax`; a
+            -- `=d call` leaves the value in `%xmm0` (the strfromd/fmod
+            -- probes).
             zipWidths seat.sym seat.argWidths seat.args
                 |> Result.andThen
                     (\ws ->
@@ -3258,7 +3269,7 @@ rawWordArg exp s =
                             (\ew acc ->
                                 Result.andThen
                                     (\( args, st ) ->
-                                        rawWordArg ew.exp st
+                                        rawFfiArg ew st
                                             |> Result.map (\( a, st2 ) -> ( args ++ [ ArgVal (ffiArgClass ew.width) a ], st2 ))
                                     )
                                     acc
@@ -3314,10 +3325,17 @@ rawWordArg exp s =
                                                 )
 
                                         FF64 ->
-                                            Err
-                                                ("qbe: cffi U3: '"
-                                                    ++ seat.sym
-                                                    ++ "' declares an f64 RESULT — a `d`-class call result is not lowered yet (cffi U2 lowers the integer/pointer family; U3 owns f64 results)"
+                                            -- (cffi U3) the `d` class: the
+                                            -- value arrives in %xmm0, so the
+                                            -- call's own result type is `d`
+                                            -- and the temp is a FLOAT word —
+                                            -- isFloatWordExp says so, and the
+                                            -- checker only ever lets it into a
+                                            -- float slot (R-16).  No extension:
+                                            -- there is nothing to extend.
+                                            Ok
+                                                ( Il.Tmp t
+                                                , emit (Call (Just t) (Base D) (Il.Sym seat.sym) args) s2
                                                 )
                                 )
                     )
@@ -3621,17 +3639,22 @@ rawFltArg exp s =
 
                 -- cffi U2/U3 — THE SIXTH CLASSIFICATION SITE, and the one that
                 -- is NOT compiler-forced (this case has a wildcard): a typed C
-                -- call in a float-word position is an f64-consuming or
-                -- f64-result slot, which is cffi U3's.  Without this arm the
-                -- wildcard below answers "non-float raw node", which is
-                -- actively misleading — the node IS a float producer, just not
-                -- a lowered one.
+                -- call in a float-word position is a float producer when the
+                -- declaration says its result is `f64` (cffi U3 — the strfromd
+                -- result feeding `mkflt`, a float compare or another `d`
+                -- argument).  Any other result class is a WORD, which in a
+                -- float slot is the same loud class error a word gets.
                 RawCallExtern call ->
-                    Err
-                        ("qbe: cffi U3: '"
-                            ++ call.sym
-                            ++ "' appears in a float-word position — a C call's f64 argument or result is not lowered yet (cffi U2 lowers the integer/pointer family; U3 owns f64)"
-                        )
+                    case call.result of
+                        FF64 ->
+                            rawWordArg exp s
+
+                        _ ->
+                            Err
+                                ("qbe: float-word position holds a C call '"
+                                    ++ call.sym
+                                    ++ "' whose declared result is a WORD class — only a declared `f64` (`d`) result is a float word"
+                                )
 
                 _ ->
                     Err ("qbe: float-word position holds a non-float raw node (" ++ rawNodeName node ++ ")")
@@ -3717,6 +3740,18 @@ isFloatWordExp exp =
 
                 RawLoadFlt _ ->
                     True
+
+                -- (cffi U3) a declared `f64` result IS a float word: the call
+                -- emits `=d call` and its temp lives in an `xmm` register, so
+                -- the mk* / payload-word paths that store float words with
+                -- `stored` (8 bytes) must classify it here.
+                RawCallExtern call ->
+                    case call.result of
+                        FF64 ->
+                            True
+
+                        _ ->
+                            False
 
                 _ ->
                     False
@@ -5132,11 +5167,18 @@ isRawWordExp abi exp =
                 RawCallRaw _ ->
                     True
 
-                -- cffi U2: the typed C boundary is a WORD producer on every
-                -- width it lowers (the 32-bit family arrives EXTENDED into an
-                -- `l` temp) — the same class RawCallRaw has.
-                RawCallExtern _ ->
-                    True
+                -- cffi U2/U3: the typed C boundary is a WORD producer on every
+                -- word width it lowers (the 32-bit family arrives EXTENDED into
+                -- an `l` temp) — the same class RawCallRaw has.  An `f64`
+                -- result is NOT: its temp is a `d` register, and binding it to
+                -- a raw word binder would be a movq of an xmm (cffi U3).
+                RawCallExtern call ->
+                    case call.result of
+                        FF64 ->
+                            False
+
+                        _ ->
+                            True
 
                 RawCallAgg _ ->
                     True
@@ -5354,8 +5396,15 @@ isWordCondNode abi node =
         RawCallRaw _ ->
             True
 
-        RawCallExtern _ ->
-            True
+        -- (cffi U3) a `d` result is not a 0/1 word — the same reason the
+        -- float-word producers are absent from this list.
+        RawCallExtern call ->
+            case call.result of
+                FF64 ->
+                    False
+
+                _ ->
+                    True
 
         RawCallAgg _ ->
             True

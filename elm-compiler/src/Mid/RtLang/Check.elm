@@ -4024,10 +4024,11 @@ everything (plan §3.1/§3.2's tables).
     the reverse) is the EXISTING `needs word/float, got ...` wording (R-14:
     no new text).  `void` cannot appear (the grammar refuses it); the arm
     exists so a hand-built signature cannot slip through.
-  * RESULT CLASS: `word` for every width this unit lowers — INCLUDING
+  * RESULT CLASS: `word` for every WORD width this path types — INCLUDING
     `void`, whose dead word is the shape `rawcall free(..)` already binds
-    (plan §3.1; R-09 names the read hazard).  `f64` results are `TFloat`
-    here and refused LOUDLY by the lowerer (cffi U3).
+    (plan §3.1; R-09 names the read hazard).  `f64` is `TFloat` and is
+    lowered as a `d` temp (cffi U3), so R-16 is the existing word-binder
+    wording — the checker never lets a `d` result into a word slot.
 -}
 checkExternCall : Ctx -> Sym -> FfiSig -> List Exp -> Result String Type
 checkExternCall ctx sym sig args =

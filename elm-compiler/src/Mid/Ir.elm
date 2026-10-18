@@ -537,12 +537,12 @@ type UnsafeNode
       -- variadic extern until it lands rather than emitting a call with an
       -- undefined %al).
       --
-      -- A WORD producer on every result width the IL can spell here (FW32S
-      -- and FW32U arrive sign-/zero-EXTENDED from the `w` result, FW64 and
-      -- FVoid are an `l` temp — void's is the same dead word `RawCallRaw`
-      -- already yields).  FF64 is not lowered yet (cffi U3): the lowering
-      -- refuses it LOUDLY rather than emitting a `d` result into a word
-      -- temp.
+      -- A WORD producer on every WORD result width the IL can spell here
+      -- (FW32S and FW32U arrive sign-/zero-EXTENDED from the `w` result, FW64
+      -- and FVoid are an `l` temp — void's is the same dead word `RawCallRaw`
+      -- already yields).  FF64 is a FLOAT-word producer (cffi U3): its temp is
+      -- a `d` register, so `isFloatWordExp` answers True for it and the
+      -- checker only lets it into a `float` slot (R-16).
       --
       -- NOT allocation-free by assumption: like RawCallRaw it is stated
       -- non-safepoint (a C callee cannot move the MID heap; the same class

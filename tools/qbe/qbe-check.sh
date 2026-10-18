@@ -2705,6 +2705,29 @@ run_midshape ffiw-i64 Ffiw64Main.main tools/qbe/fixtures/ffiw-i64.elm tools/qbe/
 # (the golden is false).
 run_midshape ffiw-u32 Ffiw32uMain.main tools/qbe/fixtures/ffiw-u32.elm tools/qbe/fixtures/ffiw-u32.mid '=w call $access(l $d0, w 0)' extuw
 
+# ---- cffi U3: the `f64` RESULT and the `void` RESULT (plan §3.1, §8 U3) ----
+# The `d` class, both directions in ONE call: `strfromd(str, n, fmt, x)` takes a
+# `double` and returns an `int`.  The pin below therefore holds the whole
+# boundary in one line — the `d` ARGUMENT (`d %t3`, lowered through rawFltArg),
+# the `w` RESULT and the `extsw` after it — and the golden `"1.50"` is
+# load-bearing twice: `1.50` is the argument, and the string's LENGTH is the 4
+# that came back through the `w` return.
+run_midshape ffid-f64 FfidMain.main tools/qbe/fixtures/ffid-f64.elm tools/qbe/fixtures/ffid-f64.mid '=w call $strfromd(l %t0, l 16, l $d0, d %t3)' extsw
+# The RESULT half on its own: `atof(ptr) -> f64` takes no `d` argument, so the
+# only thing this row can be reading is the `=d call`.  MEASURED failure shape
+# (a mutation emitting `=l call` here): QBE refuses the program outright —
+# "invalid type for first operand in stored" — so this arm is loud, never a
+# wrong number.
+run_midshape ffidr-f64 FfidrMain.main tools/qbe/fixtures/ffidr-f64.elm tools/qbe/fixtures/ffidr-f64.mid '=d call $atof(l $d0)' ''
+# FVoid: a declared `-> void` must emit the shape today's UNDECLARED `rawcall`
+# emits — `=l call`, a dead temp, NO extension.  The empty extension op is the
+# arm that FAILS on an extension, which is the positive form of the bug.
+# The legacy `free` line right after it in the same defun is the control.
+# The golden is inert by nature (a void result has nothing to get wrong); the
+# "moves nothing" claim is carried by osier-corpus-ssa.sh's byte-identity, which
+# covers runtime.mid's own `rawcall free` sites.
+run_midshape ffiv-void FfivMain.main tools/qbe/fixtures/ffiv-void.elm tools/qbe/fixtures/ffiv-void.mid '=l call $srand(w 7)' ''
+
 # ---- zigretire stage 5 PART 3: THE MIDGC GUARD'S COMPLETENESS ----
 # The guard that names ONE incompatible flag is not a guard (this arc paid for
 # that twice: NORTLEAN then NOMIDRT).  run.js's MIDGC_DEPENDS_ON list is the

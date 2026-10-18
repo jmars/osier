@@ -1,0 +1,34 @@
+// cffi U3 — the `f64` RESULT (and the `d`-class ARGUMENT it takes to reach one).
+//
+// WHAT IS BEING MEASURED, and why `strfromd`: `strfromd(str, n, fmt, x)` is a
+// libc call that takes a `double` and returns an `int`, so ONE call crosses the
+// boundary in BOTH directions the width table distinguishes — and it makes the
+// crossing VISIBLE in the output instead of only in the emitted .ssa:
+//
+//   * the `d` ARGUMENT (`1.5` = 3.0 / 2.0, two `sltof`s and a `d div`) is
+//     lowered through `rawFltArg` (the float-producer route) — plan §3.2;
+//   * the call itself is `%t =d call` — no extension, an `xmm` result;
+//   * the `w` RESULT is `%t =w call` + `extsw` (the U2 width fix), and the
+//     fixture USES it: it is the string's LENGTH.  A result that lost its
+//     extension would be 4294967295 and `mkstr(buf, n)` would print junk (or
+//     fault) instead of the 4 bytes strfromd wrote.
+//
+// So the golden `"1.50"` is load-bearing twice over: the 4 is the `i32`
+// return, and the 1.50 is the `f64` argument that produced it.  The structural
+// pin (qbe-check.sh's run_midshape row) asserts the emitted call line itself.
+//
+// The buffer is `allocraw` (the runtime's raw-byte seat, what runtime.mid's own
+// read paths use) and is deliberately NOT `free`d: it belongs to the runtime's
+// raw allocator, not to malloc — MEASURED, `free(allocraw(8))` aborts with
+// "free(): invalid pointer".  The void fixture (ffiv-void.mid) is where a
+// malloc'd block is freed.
+module Ffid
+export Ffid.fmt : val -> val
+
+extern strfromd(buf : ptr, n : i64, fmt : ptr, x : f64) -> i32;
+
+defun Ffid.fmt(dummy : val) -> val {
+  word buf = allocraw(16);
+  word n = rawcall strfromd(buf, 16, rawstr("%.2f"), [float](3) f/ [float](2));
+  return mkstr(buf, n);
+}

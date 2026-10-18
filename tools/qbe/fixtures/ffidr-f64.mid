@@ -1,0 +1,26 @@
+// cffi U3 — the `f64` RESULT on its own (`%t =d call`), with the `d` temp
+// carried into `mkflt` and PRINTED.
+//
+// Sibling: ffid-f64.mid, which crosses the boundary in BOTH directions with one
+// strfromd call (a `d` argument and a `w` return).  This one isolates the
+// RESULT half: `atof(s)` takes only a `ptr` and returns a `double`, so the one
+// thing under test is that a declared `f64` result is emitted as `=d call` (an
+// `xmm` result, no extension) and that the temp is classified as a FLOAT word,
+// not a word — which is what lets `mkflt` store it with `stored`.
+//
+// FAILURE SHAPES, both LOUD (measured as mutations of Mid/Qbe/Lower.elm):
+//   * `=l call` for the `f64` result -> `stored %t0` with an `l` temp and QBE
+//     refuses the program ("invalid type for first operand %t0 in stored");
+//   * `isFloatWordExp` answering False -> the same class of usecheck failure,
+//     because the float word would be stored through `storel`.
+// So this fixture cannot report a wrong NUMBER: a mis-lowered `d` never runs.
+// Its golden `2.5` is the runtime's own float printer, i.e. proof the value
+// travelled as a float END TO END.
+module Ffidr
+export Ffidr.run : val -> val
+
+extern atof(s : ptr) -> f64;
+
+defun Ffidr.run(dummy : val) -> val {
+  return mkflt(rawcall atof(rawstr("2.50")));
+}

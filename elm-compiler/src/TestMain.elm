@@ -3397,26 +3397,39 @@ checks rt runtimeMidText =
     , checkOkModule "check cffi U2 ACCEPT (the other side of the row above): a DECLARED f64 result enters a float slot — `mkflt(rawcall fv())` proves the call's class is `float` and not a word"
         "extern fv() -> f64;\ndefun Rt.g() -> val {\n  return mkflt(rawcall fv());\n}"
     , checkErrModule "check cffi U2 varargs: a call to a `...` extern is REFUSED until cffi U4 emits the IL's `...` marker — accepting the extra argument would emit a call whose %al is whatever the previous code left" "cffi U4" "extern printfx(fmt : ptr, ...) -> i32;\ndefun Rt.g(p : word) -> val {\n  val r = rawcall printfx(p, 1);\n  return r;\n}"
-    -- These two need the EMITTER (the refusal is in Mid/Qbe/Lower, not in
-    -- LowerToIr), so they run the full `emitUserSsa` lane rather than the
-    -- Mid-tree helper above.  Both are the stated U2/U3 seam, refused LOUDLY
-    -- rather than emitted as a `d` operand.
-    , check "lower cffi U2/U3 refuses an f64 ARGUMENT loudly, naming the unit that lifts it (the checker accepts the class; the `d` operand route is cffi U3)"
+    -- These two were the stated U2/U3 seam: U2 refused an f64 OPERAND/RESULT
+    -- LOUDLY at the emitter (naming this unit), because a `d` temp in a word
+    -- slot is the silent register-class bug.  cffi U3 lifts both — so these
+    -- rows now assert the EMITTED shape instead of the refusal, and they are
+    -- the asymmetry proof for that seam: the same two sources went from Err to
+    -- this .ssa text.
+    , check "lower cffi U3 an f64 ARGUMENT emits a `d` operand: the argument is lowered through rawFltArg, so the call carries `d %t` (the float-producer route, plan §3.2) and the checker's TFloat class and the emitter's class are the same function"
         (case emitUserSsa rt "module Ffm\nextern fmodx(x : f64) -> i64;\ndefun Ffm.g() -> word {\n  word r = rawcall fmodx(itof(1));\n  return r;\n}" of
-            Err msg ->
-                String.contains "cffi U3" msg
+            Ok ssa ->
+                String.contains "(d %t" ssa && String.contains "=l call $fmodx(d %t" ssa
 
-            Ok _ ->
+            Err _ ->
                 False
         )
-    , check "lower cffi U2/U3 refuses an f64 RESULT loudly — THE SIXTH CLASSIFICATION SITE (the one whose case has a wildcard, so Elm does not force it): a typed C call in a float-word position names cffi U3 instead of answering the misleading 'non-float raw node'"
+    , check "lower cffi U3 an f64 RESULT emits `=d call` (no extension: there is nothing to extend) — THE SIXTH CLASSIFICATION SITE now answers 'float producer' instead of the U2 refusal"
         (case emitUserSsa rt "module Ffr\nextern fv() -> f64;\ndefun Ffr.g() -> val {\n  return mkflt(rawcall fv());\n}" of
-            Err msg ->
-                String.contains "cffi U3" msg
+            Ok ssa ->
+                String.contains "=d call $fv()" ssa
 
-            Ok _ ->
+            Err _ ->
                 False
         )
+    , check "lower cffi U3 an f64 result is a FLOAT WORD in a float COMPARE — the classification U3 added (isFloatWordExp/isWordCondNode): `rawcall fv() f> 0.0` lowers to a `d` compare against the call's own `d` temp"
+        (case emitUserSsa rt "module Ffrq\nextern fv() -> f64;\ndefun Ffrq.g() -> val {\n  return mkbool(rawcall fv() f> itof(0));\n}" of
+            Ok ssa ->
+                String.contains "=d call $fv()" ssa && String.contains "cgtd " ssa
+
+            Err _ ->
+                False
+        )
+    , checkErrModule "check cffi U3 R-14 (the other direction): a FLOAT expression at a WORD-class parameter slot is the existing wording — the declared class is what both sides are read against" "needs word, got float" "extern fvy(x : i32) -> i32;\ndefun Rt.g() -> word {\n  word r = rawcall fvy(itof(1));\n  return r;\n}"
+    , checkOkModule "check cffi U3 R-09 (ACCEPTED, and the hazard is stated not enforced): a `-> void` extern's result types as the dead WORD, so `word r = rawcall srand(1)` binds it — reading it is undefined data, exactly as `rawcall free(..)` is today"
+        "extern srand(seed : u32) -> void;\ndefun Rt.g() -> word {\n  word r = rawcall srand(1);\n  return r;\n}"
 
     -- ==================== A1: the checker (J11-J14, the U1 reject arms become real checks) ====================
     -- Each positive row parses a MODULE (decls + defuns) and runs Check.checkModule;

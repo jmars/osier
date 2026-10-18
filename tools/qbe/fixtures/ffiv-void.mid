@@ -1,0 +1,43 @@
+// cffi U3 — the `void` RESULT (`FVoid`).
+//
+// The claim FVoid has to hold is a NEGATIVE one: a declared `-> void` must move
+// NOTHING.  Today's undeclared `rawcall free(p)` already emits `%t =l call`
+// with a dead word (plan §3.1), and a `-> void` declaration has to emit that
+// same shape — `=l call`, no extension, no `w` result class.
+//
+// So this fixture puts the two shapes ADJACENT in one emitted defun:
+//
+//   word p = rawcall malloc(8);   ->  %t0 =l call $malloc(l 8)     (legacy: rawcallArity row)
+//   rawcall srand(7);             ->  %t1 =l call $srand(w 7)      (DECLARED `-> void`)
+//   rawcall free(p);              ->  %t2 =l call $free(l %t0)     (legacy: same symbol class)
+//
+// and qbe-check.sh's run_midshape row pins the DECLARED line with the EMPTY
+// extension op — the arm that FAILS if the line after the call extends the
+// result, which is what a `-> void` emitted through the `w`-plus-extension
+// path would do.  The legacy `free` line beside it is the control that says the
+// shape is the same one the corpus already contains.
+//
+// WHY `srand` AND NOT `free`: `free` (like `close` and `_exit`) is a
+// `rawcallArity` row, and R-08 refuses to declare a symbol that already has a
+// table row — the declaration would be a SECOND source of truth for its arity.
+// Deleting the row is cffi U5's migration (it would break every unmigrated
+// `rawcall free` site, runtime.mid's included).  `srand` is a real libc `void`
+// function with no row, which is exactly what a first declaration needs.
+//
+// WHAT THIS FIXTURE CANNOT SHOW, stated rather than implied: a `void` call has
+// no result to get wrong, so the GOLDEN is inert with respect to FVoid — it
+// only proves the program runs end to end with the call in the middle.  The
+// instrument that can FAIL is the shape pin, plus `tools/osier-corpus-ssa.sh`'s
+// byte-identity over the corpus (which contains runtime.mid's own `rawcall
+// free` sites) for the "moves nothing" half.
+module Ffiv
+export Ffiv.run : val -> val
+
+extern srand(seed : u32) -> void;
+
+defun Ffiv.run(dummy : val) -> val {
+  word p = rawcall malloc(8);
+  rawcall srand(7);
+  rawcall free(p);
+  return mkbool(1 == 1);
+}
