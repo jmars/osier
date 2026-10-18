@@ -249,16 +249,9 @@ t2=$(now)
 # ============================ 5. .s -> native compiler ============================
 step "== 4/4 cc compiler.s rt.o -> $BIN"
 t3=$(now)
-# The committed seed is emitted under the stage-6 A5 default (QBE_MIDDRIVER ON),
-# so it exports the Mid-written `main` — while rt.o still exports the Zig one,
-# and a plain link dies "multiple definition of `main'".  Strip ONLY `main` from
-# a COPY of rt.o (any other duplicate still fails loudly, unlike
-# --allow-multiple-definition).  Unconditional here because this path always
-# links the committed seed; it goes away with the Zig main at B4.
-RT_STRIPPED="$WORK/rt-nomain.o"
-cp "$RT" "$RT_STRIPPED" && objcopy --strip-symbol=main "$RT_STRIPPED" \
-  || die "objcopy --strip-symbol=main failed"
-cc "$WORK/compiler.s" "$RT_STRIPPED" -o "$BIN" -lc || die "cc failed"
+# B4 deleted the Zig `main` from rt.o, so the committed seed's Mid-written
+# `main` is the only `main` and a plain link works with no objcopy strip.
+cc "$WORK/compiler.s" "$RT" -o "$BIN" -lc || die "cc failed"
 [ -x "$BIN" ] || die "cc produced no executable"
 t4=$(now)
 
@@ -269,12 +262,12 @@ t4=$(now)
 # runtime `arity exceeds the qbe rt_callN table` death (loud), not a wrong
 # answer.  cc's link already refuses a MISSING symbol; this asserts the two
 # halves in ONE artifact, which is what a reader wants to see.
-expect_n="$(grep -cE '^extern fn rt_call[0-9]+' "$ROOT/tools/qbe/rt.zig" || true)"
+expect_n="$(grep -cE '^extern fn rt_call[0-9]+' "$ROOT/tools/qbe/hostshim.zig" || true)"
 if command -v nm >/dev/null 2>&1; then
   have_n="$(nm "$BIN" 2>/dev/null | grep -cE ' T rt_call[0-9]+$' || true)"
-  say "qbe-bootstrap: rt_callN table — rt.zig externs $expect_n, the linked compiler defines $have_n"
+  say "qbe-bootstrap: rt_callN table — hostshim.zig externs $expect_n, the linked compiler defines $have_n"
   [ "$expect_n" = "$have_n" ] \
-    || die "the linked compiler defines $have_n of the $expect_n rt_callN symbols rt.zig externs"
+    || die "the linked compiler defines $have_n of the $expect_n rt_callN symbols hostshim.zig externs"
 else
   say "qbe-bootstrap: nm not found — the rt_callN table cross-check was NOT run" >&2
 fi

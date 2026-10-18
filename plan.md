@@ -850,7 +850,25 @@ pointer-identity fast path with a gate guard proven fail-before/pass-after). **4
 is NEXT**; 5–6 were gated on stage 3's exit condition, which is now the open item rather than the
 `adtmatch` residual.
 
-**BRIDGES — every temporary Zig dependency, named, with the stage that removes it (2026-10-12).**
+**STATUS (2026-10-18): B4 "the shrink" LANDED (the B0-B2 + A5 + P1a..P1e arc is DONE).**
+`tools/qbe/rt.zig` is now `tools/qbe/hostshim.zig` — the ABI surface the generated code used to call
+(frames/apply/apply-tail/tail-known/bounce/die/halt/`main`/`rt_prim`) moved into Mid-emitted defuns, and
+the Zig object shrank to the collector/host seam (31 exports + the 23 `rt_prim_*` direct wrappers).  The
+`QBE_MIDDRIVER` hatch is CLOSED: the Mid driver is the only route, and `QBE_MIDDRIVER=0` dies loudly in
+`run.js`.  The three ratio gates re-based on the committed pre-B4 reference binaries (`tools/qbe/ref/`,
+frozen at `cf59488`); the corpus is BYTE-IDENTICAL 159/159 with no re-freeze.  The SEGV stack-depth net
+(`stackGuard`) and the generic `rt_prim`/`Direct()` dispatch are DELETED (owner decisions) — `natdepth`
+now pins a bare SIGSEGV, and `QBE_NOPRIMDIRECT=1` is EMIT-ONLY.
+
+**THE B4 RESIDUAL — Zig that stays, named so the shim can never read as an endpoint (all die at stage 7):**
+| file | lines | what it is | owner |
+|---|---|---|---|
+| `vendor/osier-rt/src/gc/*` (heap/collect/types/roots/scan + layout_gen) | 3,280 | the Zig collector (the ORACLE for the Mid collector's differential; the default route) | stage 7 zighost |
+| `src/effectloop.zig` | 1,375 | the host effect loop (the `host_apply` seam + execplan) | stage 7 zighost |
+| `tools/qbe/hostshim.zig` | ~1,200 | the host shim: the Zig collector surface (`rt_string`/`rt_con`/`rt_vec_*`/`rt_raw_alloc`/…), the root seats (`rt_root_*`/`rt_gc_root_*`), the driver seats (`rt_boot`/`rt_parse_arg`/`rt_argv_install`/`rt_is_program`/`rt_run_program`/`rt_print_value`), the fd/state seats (`rt_ss_*`/`rt_sym_intern`/`rt_value_slot`/`rt_float_text`), the `rt_prim_*` direct wrappers, and `hostApply`+`callArityRet`+`bounce` (the effect loop's applier) | stage 7 zighost |
+
+**BRIDGES — every temporary Zig dependency, named, with the stage that removes it (2026-10-12; B4 rows
+re-marked 2026-10-18).**
 The end state is **ZERO Zig**; the owner's direction is explicit and the whole phase exists to get
 there. So any Zig dependency a stage introduces is a BRIDGE, and each one is listed here with its
 removal stage — a bridge that is not on this list is not allowed to exist. (This is the repo's
@@ -859,17 +877,17 @@ retirement itself.)
 
 | bridge | introduced by | removed by | why it is needed |
 |---|---|---|---|
-| the Zig collector (`gc/*.zig`) | pre-existing | stage 4 complete + its coverage ported, deleted at the swap | it is the ORACLE for the Mid collector's differential |
-| 4 root seats `rt_gc_roots_len` / `rt_gc_root_kind` / `rt_gc_root_slot` / `rt_gc_root_np` (`tools/qbe/rt.zig:548-560`) | stage 4 | **stage 6** — they die with `rt.zig`, by construction | the root set IS the frame machinery (`rt_frame_enter`'s pooled ROOTED block), which is ABI; stage 4 cannot own roots without owning frames, which is stage 6's job |
-| `rt_gc_heap_bytes` | stage 4 | stage 6 | harness fairness only: the Mid collector mmaps a region of `main`'s `QBE_HEAP_MB` so the churn differential's heap sweeps steer BOTH arms alike |
-| `rt_vec_store_plain` | stage 4 | stage 6 | the non-barriered store the mark-sweep needs (Phase 4: "barriered stores become plain stores") |
-| `rt_midgc_die` | stage 4 | stage 6 | a loud-failure seat carrying a message table — the C-level abort mechanism folds into `rt_halt`'s class; **the MESSAGE TABLE (six strings) folds into whatever Mid-level halt stage 6 provides** (it is Mid's data held in Zig today) |
+| the Zig collector (`gc/*.zig`) | pre-existing | **stage 7** — still the DEFAULT-route collector behind `QBE_MIDGC`; it is the ORACLE for the Mid collector's differential | it is the ORACLE for the Mid collector's differential |
+| 4 root seats `rt_gc_roots_len` / `rt_gc_root_kind` / `rt_gc_root_slot` / `rt_gc_root_np` (`tools/qbe/hostshim.zig`, the root seats) | stage 4 | **DONE at B4 — moved to `hostshim.zig`; die at stage 7** | the root set IS the frame machinery (`rt_frame_enter`'s pooled ROOTED block), which is ABI; stage 4 cannot own roots without owning frames, which is stage 6's job |
+| `rt_gc_heap_bytes` | stage 4 | **DONE at B4 — moved to `hostshim.zig`; dies at stage 7** | harness fairness only: the Mid collector mmaps a region of `main`'s `QBE_HEAP_MB` so the churn differential's heap sweeps steer BOTH arms alike |
+| `rt_vec_store_plain` | stage 4 | **DONE at B4 — moved to `hostshim.zig`; dies at stage 7** | the non-barriered store the mark-sweep needs (Phase 4: "barriered stores become plain stores") |
+| `rt_midgc_die` | stage 4 | **DONE (deleted at U2)** | a loud-failure seat carrying a message table — the C-level abort mechanism folds into `rt_halt`'s class; **the MESSAGE TABLE (six strings) folds into whatever Mid-level halt stage 6 provides** (it is Mid's data held in Zig today) |
 | **`rt_midgc_region` / `rt_midgc_set_region`** | stage 4 | **REMOVED (stage 6 U1c)** | they held the Mid collector's region pointer in a **Zig global** (`var midgc_region: i64`); the gap they recorded ("Mid has no mutable-global-state facility") is **REFUTED** (plan correction C3, MEASURED: `vendor/qbe/emit.c:92` puts an all-zero data def in `.bss`, writable). The pointer now lives at word 0 of the Mid-owned globals block `export data $rt_glob = { z N }` (`.bss`), addressed through the Lower-built 0-arg accessor `rt_glob_addr` (`ret $rt_glob` — a global symbol is a legal `l` ret operand), read/written with the existing `RawCallRaw` + `RawWordLoad`/`RawWordStore` at `RtGc.elm`'s six former `callW` sites. Both seats deleted from `rt.zig` (`rg 'rt_midgc_region' tools/qbe/rt.zig` is empty, as this row demanded); the block + accessor are emitted gated on QBE_MIDGC so the default route stays byte-identical. |
-| **`q_Rt_x2eallocVector` (exported Mid seat) + rt.zig's weak-extern `midgc_alloc_vector` / `midgcVecAlloc`** | stage 5 PART 2 | **stage 6** | the Zig→Mid direction of the apply path: `applyGo`'s partial arm allocates the partial's env array from the MID collector by calling the exported `Rt.allocVector` seat (a WEAK extern, resolved to a zero address when the hatch is off — that is the ON/OFF discriminator). It dies with rt.zig at the swap (the partial arm becomes Mid anyway) |
-| the frame/apply/bounce ABI, `main`, the prim fallback | pre-existing | stage 6 | it is the ABI the generated code links against |
+| **`q_Rt_x2eallocVector` (exported Mid seat) + rt.zig's weak-extern `midgc_alloc_vector` / `midgcVecAlloc`** | stage 5 PART 2 | **DONE at B4 — the weak extern + `midgcVecAlloc` deleted with the Zig `applyGo`** | the Zig→Mid direction of the apply path: `applyGo`'s partial arm allocates the partial's env array from the MID collector by calling the exported `Rt.allocVector` seat (a WEAK extern, resolved to a zero address when the hatch is off — that is the ON/OFF discriminator). It dies with rt.zig at the swap (the partial arm becomes Mid anyway) |
+| the frame/apply/bounce ABI, `main`, the prim fallback | pre-existing | **DONE at B4 — Mid-emitted; the generic `rt_prim` is DELETED (`QBE_NOPRIMDIRECT=1` emit-only)** | it is the ABI the generated code links against |
 | `src/effectloop.zig` + the host/streams surface | pre-existing | **stage 7 — MANDATORY** (ported to Mid, OR replaced by Phase 5's Lua host shim); NO "Zig survives here" option (owner decision 2026-10-12) | host I/O |
-| **`rt_ss_in` / `rt_ss_readbyte` / `rt_ss_close`** (`tools/qbe/rt.zig`, alloc-free word→word) | stage 3 GROUP 1 (the fd prims) | **stage 6** — they die with `rt.zig`; the Mid fd bodies re-point to the Mid-owned string-stream registry (the stage-7 "8 raw-blob slots in the Mid driver state") | the compiled Mid `open`/`read-byte`/`close` bodies reach the Vm-owned string-stream registry while `rt.zig` still owns it |
-| **`rt_sym_intern` / `rt_value_slot` / `rt_float_text`** (`tools/qbe/rt.zig`, alloc-free word→word; page_allocator / static BSS only — no GC) | stage 3 GROUP 2 (the value/intern/str prims) | **stage 6** — they die with `rt.zig`; the Mid bodies re-point to the Mid-owned state (values table / symbol interner / a Mid float renderer) at the swap | the compiled Mid `value`/`intern`/`str` bodies reach the Vm-owned values table, the symbol interner and `values.floatText` while `rt.zig` still owns them |
+| **`rt_ss_in` / `rt_ss_readbyte` / `rt_ss_close`** (`tools/qbe/hostshim.zig`, alloc-free word→word) | stage 3 GROUP 1 (the fd prims) | **DONE at B4 — moved to `hostshim.zig`; die at stage 7** (the Mid fd bodies re-point to the Mid-owned string-stream registry) | the compiled Mid `open`/`read-byte`/`close` bodies reach the Vm-owned string-stream registry while `rt.zig` still owns it |
+| **`rt_sym_intern` / `rt_value_slot` / `rt_float_text`** (`tools/qbe/hostshim.zig`, alloc-free word→word; page_allocator / static BSS only — no GC) | stage 3 GROUP 2 (the value/intern/str prims) | **DONE at B4 — moved to `hostshim.zig`; die at stage 7** (the Mid bodies re-point to the Mid-owned state) | the compiled Mid `value`/`intern`/`str` bodies reach the Vm-owned values table, the symbol interner and `values.floatText` while `rt.zig` still owns them |
 | `rt_root_push_value_array` | stage 6 U1b | stage 7 | the Mid frames register roots into the Zig shadow stack (C1) |
 | `rt_root_push_value` | stage 6 U1b | stage 7 | the Mid frames register roots into the Zig shadow stack (C1) |
 | `rt_root_push_ptr` | stage 6 U1b | stage 7 | the Mid frames register roots into the Zig shadow stack (C1) |
@@ -877,8 +895,7 @@ retirement itself.)
 | `rt_root_watermark` | stage 6 U1b | stage 7 | the Mid frames register roots into the Zig shadow stack (C1) |
 | `rt_root_pop_to` | stage 6 U1b | stage 7 | the Mid frames register roots into the Zig shadow stack (C1) |
 
-**A check so stage 6 cannot forget:** at the swap, `rg 'rt_gc_root' tools/qbe/rt.zig` must be EMPTY
-and no `Mid/*` defun may call the seats — assert it as a row rather than trusting the list above.
+**A check so stage 7 cannot forget:** `rg 'rt_gc_root|rt_root_|rt_boot|rt_ss_|rt_sym_intern|rt_value_slot|rt_float_text' tools/qbe/hostshim.zig` must be EMPTY after the zighost deletion act, and no `Mid/*` defun may call the seats — assert it as a row rather than trusting the list above.
 **And a rule for stages 4–5:** if you must add a new Zig seat or symbol, ADD IT TO THIS TABLE with its
 removal stage in the same change. The failure mode this prevents is a bridge nobody remembers — the
 reason "roots stay in Zig" reads as a permanent design in a stage-4 report.

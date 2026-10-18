@@ -19,7 +19,7 @@
 # rebuild fails, REFUSE LOUDLY: a stale rt.o is worse than none (it is exactly
 # how a suite reports an old binary's behaviour as a measurement).
 #
-# Which inputs: tools/qbe/rt.zig (the exported ABI surface), the vendored
+# Which inputs: tools/qbe/hostshim.zig (the exported ABI surface), the vendored
 # osier-rt package it imports, and src/effectloop.zig (the package it links).
 #
 # Env:
@@ -36,7 +36,7 @@ fail() { say "$*"; exit "$DIE_EXIT"; }
 
 command -v zig >/dev/null 2>&1 || fail "zig not found (it builds $RT)"
 
-rt_newer="$(find "$ROOT/tools/qbe/rt.zig" "$ROOT/vendor/osier-rt/src" "$ROOT/src/effectloop.zig" \
+rt_newer="$(find "$ROOT/tools/qbe/hostshim.zig" "$ROOT/vendor/osier-rt/src" "$ROOT/src/effectloop.zig" \
               -newer "$RT" -print -quit 2>/dev/null)" || rt_newer="PROBE_FAILED"
 if [ "$rt_newer" = "PROBE_FAILED" ]; then
   say "rt.o freshness probe FAILED -- rebuilding rather than trusting it"
@@ -44,7 +44,7 @@ fi
 if [ ! -f "$RT" ] || [ -n "$rt_newer" ]; then
   say "building $RT"
   zig build-obj -O ReleaseFast -lc -femit-bin="$RT" \
-    --dep gc --dep rt --dep effectloop -Mroot="$ROOT/tools/qbe/rt.zig" \
+    --dep gc --dep rt --dep effectloop -Mroot="$ROOT/tools/qbe/hostshim.zig" \
     -Mgc="$ROOT/vendor/osier-rt/src/gc.zig" \
     --dep gc -Mrt="$ROOT/vendor/osier-rt/src/rt.zig" \
     --dep gc --dep rt -Meffectloop="$ROOT/src/effectloop.zig" \

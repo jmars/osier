@@ -423,41 +423,37 @@ run_midgc() {
   fi
 }
 
-# run_mdgc — a MIDGC x MIDDRIVER row (stage 6 B1): the cross-heap probe
-# fixtures compile through BOTH the Mid mark-sweep collector AND the Mid apply
+# run_mdgc — a MIDGC row (stage 6 B1): the cross-heap probe
+# fixtures compile through the Mid mark-sweep collector AND the Mid apply
 # family (Rt.apply's partial arm allocates the env array via Rt.allocVector —
 # the cross-heap edge; Rt.apply-tail's saturated arm the .tail env array).
 # The golden is the SAME value run_midgc pins (the correct sum — the
-# observable output is collector-agnostic).  Build: the run_md pipeline (strip
-# Zig main, QBE_MIDDRIVER=1) PLUS QBE_MIDGC=1; runs at CHURN_MB so both
-# collectors actually collect.
+# observable output is collector-agnostic).  B4 removed the QBE_MIDDRIVER flag
+# (the Mid driver is the only route), so this is QBE_MIDGC=1 alone; runs at
+# CHURN_MB so the collector actually collects.
 run_mdgc() {
   local name="$1" golden="$2" entry="$3" fixture="$4"; shift 4
   local cli=("$@")
-  local src rt_path rt_nomain ssa bin nat_out exp
+  local src rt_path ssa bin nat_out exp
   src="$ROOT/$fixture"
   [ -f "$src" ] || { echo "FAIL $name: no source: $src"; FAIL=1; return; }
   rt_path="$("$ROOT/tools/qbe/rt-o.sh")" || { echo "FAIL $name: rt-o"; FAIL=1; return; }
-  rt_nomain="$TMP/$name-rt.o"
-  cp "$rt_path" "$rt_nomain" && objcopy --strip-symbol=main "$rt_nomain" || {
-    echo "FAIL $name: objcopy --strip-symbol=main"; FAIL=1; return
-  }
   ssa="$TMP/$name.ssa"
   (cd "$ROOT/elm-compiler" &&
-    QBE=1 QBE_ENTRY="$entry" QBE_MIDDRIVER=1 QBE_MIDGC=1 node run.js "$src" "$ssa") >&2 || {
-    echo "FAIL $name: qbe-mk (QBE_MIDGC=1 QBE_MIDDRIVER=1)"; FAIL=1; return
+    QBE=1 QBE_ENTRY="$entry" QBE_MIDGC=1 node run.js "$src" "$ssa") >&2 || {
+    echo "FAIL $name: qbe-mk (QBE_MIDGC=1)"; FAIL=1; return
   }
   case "$(head -c 4 "$ssa")" in
     "err "*) echo "FAIL $name: compile failed: $(cat "$ssa")"; FAIL=1; return;;
   esac
   "$ROOT/vendor/qbe/qbe" "$ssa" > "$TMP/$name.s"
   bin="$TMP/$name"
-  cc "$TMP/$name.s" "$rt_nomain" -o "$bin" -lc || {
+  cc "$TMP/$name.s" "$rt_path" -o "$bin" -lc || {
     echo "FAIL $name: link"; FAIL=1; return
   }
   nat_out="$(QBE_HEAP_MB=$CHURN_MB timeout 60 "$bin" "$entry" "${cli[@]}" 2>&1)" || true
   if [ "$FREEZE" = 1 ]; then
-    echo "FAIL $name: a MIDGC x MIDDRIVER row's golden is the MIDGC row's ($golden.txt) — freeze the run_midgc row, not this one"
+    echo "FAIL $name: a MIDGC row's golden is the run_midgc row's ($golden.txt) — freeze the run_midgc row, not this one"
     FAIL=1; return
   fi
   exp="$(golden_read "$golden")"
@@ -466,10 +462,10 @@ run_mdgc() {
     FAIL=1; return
   fi
   if [ "$nat_out" != "$exp" ]; then
-    echo "FAIL $name: midgc-x-midriver golden='$exp' native='$nat_out'"
+    echo "FAIL $name: midgc golden='$exp' native='$nat_out'"
     FAIL=1; return
   fi
-  echo "PASS $name: midgc x midriver (QBE_HEAP_MB=$CHURN_MB) identical (${nat_out:0:60})"
+  echo "PASS $name: midgc (QBE_HEAP_MB=$CHURN_MB) identical (${nat_out:0:60})"
 }
 
 # like run_midgc(), but with QBE_NOSTRINGINTERN=1 in the runtime env: the
@@ -647,165 +643,6 @@ run_err() {
     return
   fi
   echo "PASS $name: golden + exit $rc (${nat_out:0:80})"
-}
-
-# run_err_md — a DRIVER ERROR-PATH row under QBE_MIDDRIVER=1: the MID-WRITTEN
-# Rt.main driver's usage/toomany error paths must be BYTE-IDENTICAL to the
-# default (Zig main) route, so it reads the SAME golden the run_err row froze
-# (the row name is the label; the golden name is the explicit 2nd arg).
-# The build is qbe-mk.sh's own node/qbe/cc pipeline with ONE deviation: rt.o's
-# Zig `main` is stripped (objcopy --strip-symbol=main) from a COPY before the
-# link, because under MIDDRIVER the .ssa ALSO exports `main` (Rt.main) and the
-# plain `cc .s rt.o` dies "multiple definition of `main'".  This is the stage-6
-# A3a temporary resolution — the Zig main is DELETED at B4 (re-plan), so the
-# strip goes away then.  It is SURGICAL (only `main`): any OTHER duplicate
-# symbol still fails the link loudly, unlike --allow-multiple-definition.
-run_err_md() {
-  local name="$1" golden="$2" entry="$3" fixture="$4" want_rc="$5"; shift 5
-  local cli=("$@")
-  local src rt_path rt_nomain ssa bin nat_out rc exp
-  src="$ROOT/$fixture"
-  [ -f "$src" ] || { echo "FAIL $name: no source: $src"; FAIL=1; return; }
-  rt_path="$("$ROOT/tools/qbe/rt-o.sh")" || {
-    echo "FAIL $name: rt-o"; FAIL=1; return
-  }
-  rt_nomain="$TMP/$name-rt.o"
-  cp "$rt_path" "$rt_nomain" && objcopy --strip-symbol=main "$rt_nomain" || {
-    echo "FAIL $name: objcopy --strip-symbol=main"; FAIL=1; return
-  }
-  ssa="$TMP/$name.ssa"
-  (cd "$ROOT/elm-compiler" &&
-    QBE=1 QBE_ENTRY="$entry" QBE_MIDDRIVER=1 node run.js "$src" "$ssa") >&2 || {
-    echo "FAIL $name: qbe-mk (QBE_MIDDRIVER=1)"; FAIL=1; return
-  }
-  case "$(head -c 4 "$ssa")" in
-    "err "*) echo "FAIL $name: compile failed: $(cat "$ssa")"; FAIL=1; return;;
-  esac
-  "$ROOT/vendor/qbe/qbe" "$ssa" > "$TMP/$name.s"
-  bin="$TMP/$name"
-  cc "$TMP/$name.s" "$rt_nomain" -o "$bin" -lc || {
-    echo "FAIL $name: link"; FAIL=1; return
-  }
-  nat_out="$(timeout 60 "$bin" "${cli[@]}" 2>&1)"
-  rc=$?
-  if [ "$FREEZE" = 1 ]; then
-    echo "FAIL $name: a MIDDRIVER row's golden is the DEFAULT route's ($golden.txt) — freeze would write the wrong provenance; refreeze the run_err row, not this one"
-    FAIL=1; return
-  fi
-  exp="$(golden_read "$golden")"
-  if [ "$exp" = "__NO_GOLDEN__" ]; then
-    echo "FAIL $name: no golden at $GOLDEN/$golden.txt"
-    FAIL=1; return
-  fi
-  if [ "$nat_out" != "$exp" ]; then
-    echo "FAIL $name: golden='$exp' midriver='$nat_out'"
-    FAIL=1; return
-  fi
-  if [ "$rc" -ne "$want_rc" ]; then
-    echo "FAIL $name: exit=$rc want=$want_rc (output matched — the exit code is the pinned half)"
-    FAIL=1; return
-  fi
-  echo "PASS $name: golden + exit $rc (${nat_out:0:80})"
-}
-
-# run_md — a MIDDRIVER RUN row (stage 6 A4b): the fixture COMPILES AND RUNS
-# under the MID-WRITTEN Rt.main driver, byte-identical to the DEFAULT arm.
-# Builds BOTH binaries — the default arm via qbe-mk, and the MIDDRIVER arm via
-# the run_err_md pipeline (strip Zig main, QBE_MIDDRIVER=1) — runs each with
-# the SAME command line (and SAME env for the io rows), and requires STDOUT,
-# STDERR and EXIT CODE to be byte-identical across the two arms.  The default
-# arm's stdout is the one the corresponding run()/run_argv()/run_io() row pins
-# in `golden`, and this row re-checks that pin so the A/B is self-contained:
-# a green row proves the Mid driver produces the SAME observable result as the
-# Zig main — the whole point of stage 6 A4b.
-#
-# `want_rc` is NOT a parameter: the exit codes are compared BETWEEN the arms
-# (both are 0 for a run row), and the pinned golden is the output-only pin the
-# default row froze.  `entry` is BOTH the build entry and argv[1], as run().
-# `env...` are passed to BOTH runs (the io rows need QBE_IO_IN/QBE_IO_OUT).
-run_md() {
-  local name="$1" golden="$2" entry="$3" fixture="$4"; shift 4
-  local cli=("$@")
-  local src rt_path rt_nomain ssa bin_def bin_md
-  local def_out rc_def rc_md
-  src="$ROOT/$fixture"
-  [ -f "$src" ] || { echo "FAIL $name: no source: $src"; FAIL=1; return; }
-  # DEFAULT arm (the same binary run() builds; its golden is pinned by the
-  # run()/run_argv()/run_io() row named `golden`).
-  bin_def="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$TMP/$name-def")" || {
-    echo "FAIL $name: qbe-mk (default)"; FAIL=1; return
-  }
-  # MIDDRIVER arm (run_err_md's pipeline: strip Zig main from a COPY,
-  # QBE_MIDDRIVER=1 emit).
-  rt_path="$("$ROOT/tools/qbe/rt-o.sh")" || { echo "FAIL $name: rt-o"; FAIL=1; return; }
-  rt_nomain="$TMP/$name-rt.o"
-  cp "$rt_path" "$rt_nomain" && objcopy --strip-symbol=main "$rt_nomain" || {
-    echo "FAIL $name: objcopy --strip-symbol=main"; FAIL=1; return
-  }
-  ssa="$TMP/$name.ssa"
-  (cd "$ROOT/elm-compiler" &&
-    QBE=1 QBE_ENTRY="$entry" QBE_MIDDRIVER=1 node run.js "$src" "$ssa") >&2 || {
-    echo "FAIL $name: qbe-mk (QBE_MIDDRIVER=1)"; FAIL=1; return
-  }
-  case "$(head -c 4 "$ssa")" in
-    "err "*) echo "FAIL $name: compile failed: $(cat "$ssa")"; FAIL=1; return;;
-  esac
-  "$ROOT/vendor/qbe/qbe" "$ssa" > "$TMP/$name.s"
-  bin_md="$TMP/$name-md"
-  cc "$TMP/$name.s" "$rt_nomain" -o "$bin_md" -lc || {
-    echo "FAIL $name: link"; FAIL=1; return
-  }
-  if [ "$FREEZE" = 1 ]; then
-    echo "FAIL $name: a MIDDRIVER run row is an A/B arm comparison — freeze the default row ($golden), not this one"
-    FAIL=1; return
-  fi
-  # run BOTH arms with the SAME command line and the SAME inherited env (the
-  # io rows set QBE_IO_IN/QBE_IO_OUT on the run_md invocation), capturing the
-  # three channels SEPARATELY (stdout/stderr/exit — the brief's triple).
-  timeout 60 "$bin_def" "$entry" "${cli[@]}" > "$TMP/$name-def.out" 2> "$TMP/$name-def.err"
-  rc_def=$?
-  timeout 60 "$bin_md" "$entry" "${cli[@]}" > "$TMP/$name-md.out" 2> "$TMP/$name-md.err"
-  rc_md=$?
-  # the default arm's stdout must still match its pinned golden (the golden IS
-  # the default arm, frozen by the run()/run_argv()/run_io() row).
-  def_out="$(cat "$TMP/$name-def.out")"
-  if [ "$def_out" != "$(golden_read "$golden")" ]; then
-    echo "FAIL $name: default arm no longer matches golden '$golden' (the pin moved — refreeze the run() row)"
-    FAIL=1; return
-  fi
-  if ! cmp -s "$TMP/$name-md.out" "$TMP/$name-def.out"; then
-    echo "FAIL $name: STDOUT differs — midriver='$(cat "$TMP/$name-md.out")' default='$(cat "$TMP/$name-def.out")'"
-    FAIL=1; return
-  fi
-  if ! cmp -s "$TMP/$name-md.err" "$TMP/$name-def.err"; then
-    echo "FAIL $name: STDERR differs — midriver='$(cat "$TMP/$name-md.err")' default='$(cat "$TMP/$name-def.err")'"
-    FAIL=1; return
-  fi
-  if [ "$rc_md" -ne "$rc_def" ]; then
-    echo "FAIL $name: exit differs — midriver=$rc_md default=$rc_def"
-    FAIL=1; return
-  fi
-  echo "PASS $name: stdout+stderr+exit identical to default arm (${def_out:0:60})"
-
-  # GC churn (the ROOTING ORACLE — a missed/stale root is SILENT corruption,
-  # not a crash): BOTH arms under the minimum viable heap, compared.  The
-  # apply family's env_root/args/f rooting is what this row exercises — a
-  # churn that moves the env array mid-apply would diverge the arms.
-  if [[ "$name" != *-nochurn ]]; then
-    timeout 60 env QBE_HEAP_MB=$CHURN_MB "$bin_def" "$entry" "${cli[@]}" > "$TMP/$name-def-churn.out" 2>&1
-    rc_def_churn=$?
-    timeout 60 env QBE_HEAP_MB=$CHURN_MB "$bin_md" "$entry" "${cli[@]}" > "$TMP/$name-md-churn.out" 2>&1
-    rc_md_churn=$?
-    if ! cmp -s "$TMP/$name-md-churn.out" "$TMP/$name-def-churn.out"; then
-      echo "FAIL $name: CHURN differs — midriver='$(cat "$TMP/$name-md-churn.out")' default='$(cat "$TMP/$name-def-churn.out")'"
-      FAIL=1; return
-    fi
-    if [ "$rc_md_churn" -ne "$rc_def_churn" ]; then
-      echo "FAIL $name: CHURN exit differs — midriver=$rc_md_churn default=$rc_def_churn"
-      FAIL=1; return
-    fi
-    echo "PASS $name: gc-churn (QBE_HEAP_MB=$CHURN_MB) identical across arms"
-  fi
 }
 
 # ---- the slice fixtures (in-scope constructs only) ----
@@ -1098,32 +935,41 @@ run interleave Interleave.main tools/qbe/fixtures/interleave.elm
 # loop, loose enough to never flake on a loaded host.
 # BOTH arms must also print the SAME fib(28) (317811): a wrong zero is a
 # wrong answer, caught here too (the churn rows already cover the GC side).
+#
+# B4 RE-BASE: the hatch-OFF (Zig) arm is DELETED, so the "OFF" side is now the
+# committed pre-B4 reference binary (tools/qbe/ref/fib/fib, frozen at cf59488)
+# instead of a live QBE_MIDDRIVER=0 build.  The ratio is Mid-vs-FROZEN-Zig, so
+# it may read slightly differently than the live measurement (frame 0.97x,
+# apply 1.6x, tail 1.5x measured against the LIVE Zig arm just before B4); the
+# bounds are KEPT, not retuned to taste.  ASYMMETRY is preserved: a degraded
+# Mid arm (QBE_NORTLEAN=1, the fat ABI) still exceeds the bound (shown once,
+# for this gate, in the B4 handoff evidence — not as a permanent row).
 frame_perf_gate() {
-  local bin_on bin_off on_times=() off_times=() i s e on_med off_med ratio out_on out_off
+  local bin_on on_times=() ref_times=() i s e on_med ref_med ratio out_on out_ref ref_bin
   bin_on="$("$ROOT/tools/qbe/qbe-mk.sh" tests/elm-fixtures/fib.elm Fib.fib "$TMP/perf-on")" || {
-    echo "FAIL frame-perf: qbe-mk (hatch ON)"; FAIL=1; return; }
-  bin_off="$(QBE_MIDDRIVER=0 "$ROOT/tools/qbe/qbe-mk.sh" tests/elm-fixtures/fib.elm Fib.fib "$TMP/perf-off")" || {
-    echo "FAIL frame-perf: qbe-mk (hatch OFF)"; FAIL=1; return; }
+    echo "FAIL frame-perf: qbe-mk (Mid arm)"; FAIL=1; return; }
+  ref_bin="$ROOT/tools/qbe/ref/fib/fib"
+  [ -x "$ref_bin" ] || { echo "FAIL frame-perf: reference binary missing ($ref_bin)"; FAIL=1; return; }
   out_on="$(timeout 60 "$bin_on" Fib.fib 28 2>&1)"
-  out_off="$(timeout 60 "$bin_off" Fib.fib 28 2>&1)"
-  if [ "$out_on" != "$out_off" ]; then
-    echo "FAIL frame-perf: hatch-ON fib(28)='$out_on' != hatch-OFF='$out_off' (the zero differs across arms)"
+  out_ref="$(timeout 60 "$ref_bin" Fib.fib 28 2>&1)"
+  if [ "$out_on" != "$out_ref" ]; then
+    echo "FAIL frame-perf: Mid fib(28)='$out_on' != reference='$out_ref' (the zero differs across arms)"
     FAIL=1; return
   fi
-  for i in 1 2 3 4 5; do
+  for i in 1 2 3 4 5 6 7; do
     s=$(date +%s%N); timeout 60 "$bin_on" Fib.fib 28 >/dev/null 2>&1; e=$(date +%s%N)
     on_times+=("$(( (e - s) / 1000000 ))")
-    s=$(date +%s%N); timeout 60 "$bin_off" Fib.fib 28 >/dev/null 2>&1; e=$(date +%s%N)
-    off_times+=("$(( (e - s) / 1000000 ))")
+    s=$(date +%s%N); timeout 60 "$ref_bin" Fib.fib 28 >/dev/null 2>&1; e=$(date +%s%N)
+    ref_times+=("$(( (e - s) / 1000000 ))")
   done
-  on_med="$(printf '%s\n' "${on_times[@]}" | sort -n | sed -n '3p')"
-  off_med="$(printf '%s\n' "${off_times[@]}" | sort -n | sed -n '3p')"
-  ratio="$(awk -v a="$on_med" -v b="$off_med" 'BEGIN { printf "%.1f", (b > 0 ? a / b : 999) }')"
-  if awk -v a="$on_med" -v b="$off_med" 'BEGIN { exit !(a > 2.5 * b) }'; then
-    echo "FAIL frame-perf: hatch-ON median ${on_med}ms is ${ratio}x the hatch-OFF median ${off_med}ms — bound is 2.5x (the :val frame-zero blit regression shape)"
+  on_med="$(printf '%s\n' "${on_times[@]}" | sort -n | sed -n '4p')"
+  ref_med="$(printf '%s\n' "${ref_times[@]}" | sort -n | sed -n '4p')"
+  ratio="$(awk -v a="$on_med" -v b="$ref_med" 'BEGIN { printf "%.2f", (b > 0 ? a / b : 999) }')"
+  if awk -v a="$on_med" -v b="$ref_med" 'BEGIN { exit !(a > 2.5 * b) }'; then
+    echo "FAIL frame-perf: Mid median ${on_med}ms is ${ratio}x the reference median ${ref_med}ms — bound is 2.5x (the :val frame-zero blit regression shape)"
     FAIL=1; return
   fi
-  echo "PASS frame-perf: hatch-ON median ${on_med}ms / hatch-OFF median ${off_med}ms = ${ratio}x (bound 2.5x), both fib(28)=${out_on}"
+  echo "PASS frame-perf: Mid median ${on_med}ms / reference median ${ref_med}ms = ${ratio}x (bound 2.5x, reference frozen at cf59488), both fib(28)=${out_on}"
 }
 frame_perf_gate
 
@@ -1147,7 +993,7 @@ frame_perf_gate
 frame_wordcond_pin() {
   local ssa fb fe fb3 fb_i fe_memset ok
   ssa="$TMP/frame-wordcond.ssa"
-  (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY=Fib.fib QBE_MIDDRIVER=1 node run.js "$ROOT/tests/elm-fixtures/fib.elm" "$ssa") >/dev/null 2>&1
+  (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY=Fib.fib node run.js "$ROOT/tests/elm-fixtures/fib.elm" "$ssa") >/dev/null 2>&1
   if [ ! -s "$ssa" ]; then
     echo "FAIL frame-wordcond: fib .ssa missing (compile failed)"
     FAIL=1; return
@@ -1199,32 +1045,37 @@ frame_wordcond_pin
 # 12x keeps the gate a flake-proof catastrophic guard; closing the REAL floor
 # (the apply-family framing) is a separate B1perf unit, out of this one's scope.
 # Both arms must print the SAME n (identity: 2*n).
+#
+# B4 RE-BASE: the hatch-OFF (Zig) arm is DELETED; the "OFF" side is now the
+# committed pre-B4 reference binary (tools/qbe/ref/applyperf/applyperf, frozen
+# at cf59488).  The ratio is Mid-vs-FROZEN-Zig; the bound (12x) is KEPT, not
+# retuned.  Measured just before B4 against the LIVE Zig arm: apply 1.6x.
 apply_perf_gate() {
-  local bin_on bin_off on_times=() off_times=() i s e on_med off_med ratio out_on out_off
+  local bin_on on_times=() ref_times=() i s e on_med ref_med ratio out_on out_ref ref_bin
   bin_on="$("$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/applyperf.elm ApplyPerf.main "$TMP/applyperf-on")" || {
-    echo "FAIL apply-perf: qbe-mk (hatch ON)"; FAIL=1; return; }
-  bin_off="$(QBE_MIDDRIVER=0 "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/applyperf.elm ApplyPerf.main "$TMP/applyperf-off")" || {
-    echo "FAIL apply-perf: qbe-mk (hatch OFF)"; FAIL=1; return; }
+    echo "FAIL apply-perf: qbe-mk (Mid arm)"; FAIL=1; return; }
+  ref_bin="$ROOT/tools/qbe/ref/applyperf/applyperf"
+  [ -x "$ref_bin" ] || { echo "FAIL apply-perf: reference binary missing ($ref_bin)"; FAIL=1; return; }
   out_on="$(timeout 60 "$bin_on" ApplyPerf.main 5000000 2>&1)"
-  out_off="$(timeout 60 "$bin_off" ApplyPerf.main 5000000 2>&1)"
-  if [ "$out_on" != "$out_off" ]; then
-    echo "FAIL apply-perf: hatch-ON n(5e6)='$out_on' != hatch-OFF='$out_off' (the closure call differs across arms)"
+  out_ref="$(timeout 60 "$ref_bin" ApplyPerf.main 5000000 2>&1)"
+  if [ "$out_on" != "$out_ref" ]; then
+    echo "FAIL apply-perf: Mid n(5e6)='$out_on' != reference='$out_ref' (the closure call differs across arms)"
     FAIL=1; return
   fi
   for i in 1 2 3 4 5 6 7; do
     s=$(date +%s%N); timeout 60 "$bin_on" ApplyPerf.main 5000000 >/dev/null 2>&1; e=$(date +%s%N)
     on_times+=("$(( (e - s) / 1000000 ))")
-    s=$(date +%s%N); timeout 60 "$bin_off" ApplyPerf.main 5000000 >/dev/null 2>&1; e=$(date +%s%N)
-    off_times+=("$(( (e - s) / 1000000 ))")
+    s=$(date +%s%N); timeout 60 "$ref_bin" ApplyPerf.main 5000000 >/dev/null 2>&1; e=$(date +%s%N)
+    ref_times+=("$(( (e - s) / 1000000 ))")
   done
   on_med="$(printf '%s\n' "${on_times[@]}" | sort -n | sed -n '4p')"
-  off_med="$(printf '%s\n' "${off_times[@]}" | sort -n | sed -n '4p')"
-  ratio="$(awk -v a="$on_med" -v b="$off_med" 'BEGIN { printf "%.1f", (b > 0 ? a / b : 999) }')"
-  if awk -v a="$on_med" -v b="$off_med" 'BEGIN { exit !(a > 12 * b) }'; then
-    echo "FAIL apply-perf: hatch-ON median ${on_med}ms is ${ratio}x the hatch-OFF median ${off_med}ms — bound is 12x (the :val copyWords blit regression shape)"
+  ref_med="$(printf '%s\n' "${ref_times[@]}" | sort -n | sed -n '4p')"
+  ratio="$(awk -v a="$on_med" -v b="$ref_med" 'BEGIN { printf "%.2f", (b > 0 ? a / b : 999) }')"
+  if awk -v a="$on_med" -v b="$ref_med" 'BEGIN { exit !(a > 12 * b) }'; then
+    echo "FAIL apply-perf: Mid median ${on_med}ms is ${ratio}x the reference median ${ref_med}ms — bound is 12x (the :val copyWords blit regression shape)"
     FAIL=1; return
   fi
-  echo "PASS apply-perf: hatch-ON median ${on_med}ms / hatch-OFF median ${off_med}ms = ${ratio}x (bound 12x), both n(5e6)=${out_on}"
+  echo "PASS apply-perf: Mid median ${on_med}ms / reference median ${ref_med}ms = ${ratio}x (bound 12x, reference frozen at cf59488), both n(5e6)=${out_on}"
 }
 apply_perf_gate
 
@@ -1246,32 +1097,37 @@ apply_perf_gate
 # per-hop variance) — tight enough to catch a regression to a per-hop GC
 # allocArray or a full-Ret :val blit loop (10x+), loose enough never to flake.
 # Both arms must print the SAME answer ("1").
+#
+# B4 RE-BASE: the hatch-OFF (Zig) arm is DELETED; the "OFF" side is now the
+# committed pre-B4 reference binary (tools/qbe/ref/mutualtail/mutualtail,
+# frozen at cf59488).  The ratio is Mid-vs-FROZEN-Zig; the bound (6x) is KEPT,
+# not retuned.  Measured just before B4 against the LIVE Zig arm: tail 1.5x.
 tail_perf_gate() {
-  local bin_on bin_off on_times=() off_times=() i s e on_med off_med ratio out_on out_off
+  local bin_on on_times=() ref_times=() i s e on_med ref_med ratio out_on out_ref ref_bin
   bin_on="$("$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/mutualtail.elm Mutual.even "$TMP/tailperf-on")" || {
-    echo "FAIL tail-perf: qbe-mk (hatch ON)"; FAIL=1; return; }
-  bin_off="$(QBE_MIDDRIVER=0 "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/mutualtail.elm Mutual.even "$TMP/tailperf-off")" || {
-    echo "FAIL tail-perf: qbe-mk (hatch OFF)"; FAIL=1; return; }
+    echo "FAIL tail-perf: qbe-mk (Mid arm)"; FAIL=1; return; }
+  ref_bin="$ROOT/tools/qbe/ref/mutualtail/mutualtail"
+  [ -x "$ref_bin" ] || { echo "FAIL tail-perf: reference binary missing ($ref_bin)"; FAIL=1; return; }
   out_on="$(timeout 120 "$bin_on" Mutual.even 1000000 2>&1)"
-  out_off="$(timeout 120 "$bin_off" Mutual.even 1000000 2>&1)"
-  if [ "$out_on" != "$out_off" ]; then
-    echo "FAIL tail-perf: hatch-ON mutual-tail(1e6)='$out_on' != hatch-OFF='$out_off' (the tail chase differs across arms)"
+  out_ref="$(timeout 120 "$ref_bin" Mutual.even 1000000 2>&1)"
+  if [ "$out_on" != "$out_ref" ]; then
+    echo "FAIL tail-perf: Mid mutual-tail(1e6)='$out_on' != reference='$out_ref' (the tail chase differs across arms)"
     FAIL=1; return
   fi
   for i in 1 2 3 4 5 6 7; do
     s=$(date +%s%N); timeout 120 "$bin_on" Mutual.even 1000000 >/dev/null 2>&1; e=$(date +%s%N)
     on_times+=("$(( (e - s) / 1000000 ))")
-    s=$(date +%s%N); timeout 120 "$bin_off" Mutual.even 1000000 >/dev/null 2>&1; e=$(date +%s%N)
-    off_times+=("$(( (e - s) / 1000000 ))")
+    s=$(date +%s%N); timeout 120 "$ref_bin" Mutual.even 1000000 >/dev/null 2>&1; e=$(date +%s%N)
+    ref_times+=("$(( (e - s) / 1000000 ))")
   done
   on_med="$(printf '%s\n' "${on_times[@]}" | sort -n | sed -n '4p')"
-  off_med="$(printf '%s\n' "${off_times[@]}" | sort -n | sed -n '4p')"
-  ratio="$(awk -v a="$on_med" -v b="$off_med" 'BEGIN { printf "%.1f", (b > 0 ? a / b : 999) }')"
-  if awk -v a="$on_med" -v b="$off_med" 'BEGIN { exit !(a > 6 * b) }'; then
-    echo "FAIL tail-perf: hatch-ON median ${on_med}ms is ${ratio}x the hatch-OFF median ${off_med}ms — bound is 6x (the per-hop GC-alloc / :val-blit regression shape)"
+  ref_med="$(printf '%s\n' "${ref_times[@]}" | sort -n | sed -n '4p')"
+  ratio="$(awk -v a="$on_med" -v b="$ref_med" 'BEGIN { printf "%.2f", (b > 0 ? a / b : 999) }')"
+  if awk -v a="$on_med" -v b="$ref_med" 'BEGIN { exit !(a > 6 * b) }'; then
+    echo "FAIL tail-perf: Mid median ${on_med}ms is ${ratio}x the reference median ${ref_med}ms — bound is 6x (the per-hop GC-alloc / :val-blit regression shape)"
     FAIL=1; return
   fi
-  echo "PASS tail-perf: hatch-ON median ${on_med}ms / hatch-OFF median ${off_med}ms = ${ratio}x (bound 6x), both mutual-tail(1e6)=${out_on}"
+  echo "PASS tail-perf: Mid median ${on_med}ms / reference median ${ref_med}ms = ${ratio}x (bound 6x, reference frozen at cf59488), both mutual-tail(1e6)=${out_on}"
 }
 tail_perf_gate
 
@@ -1283,7 +1139,7 @@ tail_perf_gate
 # behaviour difference, not a perf nicety — ~80 B leaked per hop, ~936 MB peak
 # RSS over the 1e7-hop mutual-tail chain measured PRE-fix (80 B payload + glibc
 # chunk overhead), ~6 MB bounded POST-fix.  The gate runs the MID tail arm
-# (QBE_MIDDRIVER on by default) at 1e7 hops and fails if peak RSS exceeds
+# (the Mid tail arm, now the only route) at 1e7 hops and fails if peak RSS exceeds
 # 200 MB — a bound the pre-fix binary blows through 4.5x and the fixed one
 # never approaches.  A gate that cannot fail is not a gate: proven asymmetric.
 leak_tail_gate() {
@@ -1333,7 +1189,7 @@ leak_tail_gate
 # `var buf: [max_arity]Value`, no state block), so this is a behaviour
 # difference, not a perf nicety — MEASURED ~3.5 GB peak RSS over the 5e6-iter
 # applyperf chain PRE-fix (~700 B/call x 5e6), ~6 MB bounded POST-fix.  The
-# gate runs the MID apply arm (QBE_MIDDRIVER on by default) at 5e6 iters and
+# gate runs the MID apply arm (the Mid apply arm, now the only route) at 5e6 iters and
 # fails if peak RSS exceeds 200 MB — a bound the pre-fix binary blows through
 # ~17x and the fixed one never approaches.  A gate that cannot fail is not a
 # gate: proven asymmetric (pre-fix 3668824 kB FAIL, post-fix 6164 kB PASS).
@@ -1430,25 +1286,6 @@ run_err err-toomany      Const42.main tools/qbe/fixtures/const42.elm 2 Const42.m
 run_err err-badarg-int   Const42.main tools/qbe/fixtures/const42.elm 2 Const42.main abc
 run_err err-badarg-float Const42.main tools/qbe/fixtures/const42.elm 2 Const42.main 2.5.3
 
-# ---- stage-6 A3a: the MID-WRITTEN DRIVER (Rt.main) error paths, QBE_MIDDRIVER=1 ----
-# The SAME two argument-error paths, pinned under the MID driver: byte-identical
-# to the default-route goldens above (the A3a slice is usage + toomany + rlimit;
-# the meta walk/args/entry/boot are A3b/A4a, so a NORMAL entry run would return
-# 0 without printing — these two rows exercise exactly the slice's error paths).
-run_err_md md-err-usage   err-usage   Const42.main tools/qbe/fixtures/const42.elm 2
-run_err_md md-err-toomany err-toomany Const42.main tools/qbe/fixtures/const42.elm 2 Const42.main 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17
-# stage-6 A3b: the meta walk + not-in-meta error under the MID driver — the
-# entry name is not in qbe_meta, so the THREE-write emission (prefix + entry +
-# suffix) must byte-match the default route's bufPrint golden err-notmeta.txt.
-run_err_md md-err-notmeta err-notmeta Const42.main tools/qbe/fixtures/const42.elm 2 NoSuch.entry
-# stage-6 A4a: the ARG PARSE path under the MID driver — rt_parse_arg's TWO
-# refusal arms (the isFloatArg heuristic: a '.'/'e'-spelled arg takes the float
-# path, everything else the int path) write the SAME stderr line and exit 2 as
-# the default route, byte-for-byte (the arg loop is Rt.parseArgsGo; these rows
-# exercise it end-to-end under QBE_MIDDRIVER=1).
-run_err_md md-err-badarg-int   err-badarg-int   Const42.main tools/qbe/fixtures/const42.elm 2 Const42.main abc
-run_err_md md-err-badarg-float err-badarg-float Const42.main tools/qbe/fixtures/const42.elm 2 Const42.main 2.5.3
-
 # ---- stage 4: the effect loop (StreamRef) + host I/O (golden-pinned) ----
 # io-read: read a file (QBE_IO_IN) and write a stdout sentinel through the
 # StreamRef (*stoutput*) path.  io-write: write QBE_IO_OUT, read it back, AND
@@ -1501,43 +1338,8 @@ run_io io-read   IoRead.main  tools/qbe/fixtures/io-read.elm
 run_io io-write  IoWrite.main tools/qbe/fixtures/io-write.elm
 run_io io-fail   IoFail.main  tools/qbe/fixtures/io-fail.elm
 
-# ---- stage-6 A4b: THE FULL MIDDRIVER RUN BATTERY, QBE_MIDDRIVER=1 ----
-# The point of the unit: the MID-WRITTEN Rt.main driver COMPILES AND RUNS a
-# representative slice of the corpus, byte-identical (stdout + stderr + exit)
-# to the DEFAULT arm each row's golden already pins.  Every arm class the
-# 17-way dispatch covers: no-arg (rt_call0), 1-int-arg (rt_call1), 9-int-arg
-# (rt_call9), float-arg, a closure, a partial/over-application chain, a list,
-# a record, argv-mode, and the PROGRAM path (rt_is_program -> rt_run_program
-# -> rt_print_value — the io rows) which is the new code A4b adds.
-run_md md-const42   const42         Const42.main     tools/qbe/fixtures/const42.elm
-run_md md-idn       idn             Idn.idn          tools/qbe/fixtures/idn.elm 7
-run_md md-arity9    arity9          Arity9.add9      tools/qbe/fixtures/arity9.elm 1 2 3 4 5 6 7 8 9
-run_md md-float-arg float-arg       Flt.idF          tools/qbe/fixtures/float.elm 2.5
-run_md md-closure   closure         Closure.main     tests/elm-fixtures/closure.elm
-run_md md-partyapply partyapply     PartyApply.chain tools/qbe/fixtures/partyapply.elm
-# stage 6 B1 — the apply arms' behavioural surface under MIDDRIVER: a closure
-# SELF-TAIL (clostail — the .tail arm chased by rt_bounce) and a single
-# exactly-saturated 9-ary over-application (arity9apply — the saturated arm's
-# rt_call9).  Each gets the run_md gc-churn sub-row (QBE_HEAP_MB=16 on both
-# arms) — the rooting oracle for the env_root/args/f discipline.
-run_md md-clostail   clostail        ClosTail.main    tools/qbe/fixtures/clostail.elm 5
-run_md md-arity9apply arity9apply    Arity9.main9     tools/qbe/fixtures/arity9.elm
-# stage 6 B1 — the partial arm's CAPTURE COPY under a MOVING collector: a
-# closure WITH A CAPTURE is partially re-applied in a churn loop (env != null),
-# so the env_root re-read-after-alloc is what keeps the capture copy on the
-# post-scavenge array.  Both arms must print the same deterministic sum.
-run_md md-partchurn  partchurn       PartChurn.main   tools/qbe/fixtures/partchurn.elm
-run_md md-list      list            ListAgg.main     tools/qbe/fixtures/list.elm
-run_md md-record    record          Record.main      tools/qbe/fixtures/record.elm
-AOTRUN_ARGV=1 run_md md-argvrepro-count argvrepro-count ArgvRepro.count tools/qbe/fixtures/argvrepro.elm a b c d
-# the PROGRAM path (the effect-loop seam): rt_is_program sees the entry's
-# `Platform.program` value, rt_run_program drives the shared CEK manager, and
-# rt_print_value prints the model — the same stdout the default arm's Zig main
-# produces.  The env is passed to BOTH arms via the run_md invocation.
-QBE_IO_IN="$IO_IN" QBE_IO_OUT="$IO_OUT" run_md md-io-read  io-read  IoRead.main  tools/qbe/fixtures/io-read.elm
-QBE_IO_IN="$IO_IN" QBE_IO_OUT="$IO_OUT" run_md md-io-write io-write IoWrite.main tools/qbe/fixtures/io-write.elm
-# the write path's on-disk bytes: both runs wrote IO_OUT, and both must equal
-# the exact expected content (a round-trip read could hide a wrong write).
+# the write path's on-disk bytes: the run must write IO_OUT with the exact
+# expected content (a round-trip read could hide a wrong write).
 EXPECTED_IO="hello native
 line2"
 rm -f "$IO_OUT"
@@ -2363,6 +2165,11 @@ QBE_NOREP=1 run norep-main-off NoRep.main tools/qbe/fixtures/norep.elm
 # prim, so pass A has nothing to convert in a default build.  The Zig route
 # is EMIT-ONLY post-flip (its .ssa cannot LINK — the handlers are deleted),
 # which is exactly what these rows do with it: they EMIT and count.
+# POST-B4 (the shrink): the GENERIC arm `rt_prim` is DELETED from rt.o, so
+# `QBE_NOPRIMDIRECT=1` is EMIT-ONLY and its `.ssa` cannot LINK (the generic
+# `call $rt_prim(` sites below reference a symbol that no longer exists).  The
+# `rt_prim_*` direct wrappers STAY — they are the live route.  These rows only
+# EMIT and count, which is exactly the emit-only discipline QBE_MIDZIG=1 uses.
 qbe_ssa_prim() { # <fixture> <entry> <out.ssa> <on|off>
   if [ "$4" = "off" ]; then
     (cd "$ROOT/elm-compiler" && QBE=1 QBE_MIDZIG=1 QBE_NOPRIMDIRECT=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
@@ -2564,18 +2371,20 @@ QBE_MIDCONS=1 run midcons-censusseats CensusSeats.a tools/qbe/fixtures/censussea
 # two rows (the default printed `false`, the QBE_MIDCONS=1 build died
 # loudly); THE FLIP made the Mid route the DEFAULT and deleted the Zig `=`
 # handler, so the `false` golden is FROZEN EVIDENCE of the deleted reference
-# behaviour (tools/qbe/golden/cycleeq.txt) and the DEFAULT build now dies
-# loudly.  The row asserts that death in BOTH directions: a Mid deepEq that
-# silently answered wrong, or one that grew a cycle counter, both fail here
-# and must re-point deliberately.
+# behaviour (tools/qbe/golden/cycleeq.txt) and the DEFAULT build now dies.
+# B4 deleted the SEGV stack-depth net (owner decision), so the death is a BARE
+# SIGSEGV (rc 139), not the "native stack depth exceeded" message the net used
+# to print.  The row still asserts that death in BOTH directions: a Mid deepEq
+# that silently answered wrong, or one that grew a cycle counter, both fail
+# here and must re-point deliberately.
 cyc_bin="$(RUN_STACK_KB=131072 "$ROOT/tools/qbe/qbe-mk.sh" "$ROOT/tools/qbe/fixtures/cycleeq.elm" CycleEq.main "$TMP/cycleeq-mid" 2>/dev/null)"
 if [ -n "$cyc_bin" ] && [ -x "$cyc_bin" ]; then
   cyc_out="$(RUN_STACK_KB=131072 timeout 60 "$cyc_bin" CycleEq.main 2>&1)"
   cyc_rc=$?
-  if [ "$cyc_rc" -ne 0 ] && printf '%s' "$cyc_out" | grep -q "native stack depth exceeded"; then
-    echo "PASS cycleeq-dies-loudly: the default (Mid) \`=\` has no cycle guard (exit $cyc_rc, loud stack message) — the KNOWN post-flip divergence, pinned"
+  if [ "$cyc_rc" -eq 139 ]; then
+    echo "PASS cycleeq-dies-loudly: the default (Mid) \`=\` has no cycle guard (bare SIGSEGV, exit $cyc_rc — the SEGV net that used to name it is DELETED at B4) — the KNOWN post-flip divergence, pinned"
   else
-    echo "FAIL cycleeq-dies-loudly: expected a LOUD native-stack death on the default route, got rc=$cyc_rc out='${cyc_out:0:120}' — if the cycle guard was ported, re-point this row"
+    echo "FAIL cycleeq-dies-loudly: expected a bare-SIGSEGV death (rc 139) on the default route, got rc=$cyc_rc out='${cyc_out:0:120}' — if the cycle guard was ported, re-point this row"
     FAIL=1
   fi
 else
@@ -2751,26 +2560,21 @@ if "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/mutualtail.elm Mutual.even "$T
   fi
 fi
 
-# ---- stage 6 B2: the SAME 1e6 mutual tail under QBE_MIDDRIVER=1 ----
-# (the Mid tail-known builds every .tail and the MID bounce loop chases it —
-# Rt.main's entry dispatch routes through q_Rt_x2ebounce, so this row is the
-# Mid bounce's CONSTANT-NATIVE-STACK oracle, not the default row's Zig seat.
-# A self-CALL recur in Rt.bounceGo would build one C frame per hop and die on
-# the 8MB stack between 20k-40k hops — the same ceiling the default row pins.)
+# ---- stage 6 B2: the SAME 1e6 mutual tail (the Mid bounce's constant-stack
+#      oracle).  The Mid tail-known builds every .tail and the MID bounce loop
+#      chases it; a self-CALL recur in Rt.bounceGo would build one C frame per
+#      hop and die on the 8MB stack between 20k-40k hops.  B4 made the Mid
+#      route the default, so this links the plain rt.o (no main strip).
 if rt_path="$("$ROOT/tools/qbe/rt-o.sh")" 2>/dev/null; then
-  rt_nomain="$TMP/md-mutual-rt.o"
   md_d=1000000
-  cp "$rt_path" "$rt_nomain" && objcopy --strip-symbol=main "$rt_nomain" 2>/dev/null || {
-    echo "FAIL md-mutual-tail: objcopy --strip-symbol=main"; FAIL=1
-  }
   ssa="$TMP/md-mutual.ssa"
   if (cd "$ROOT/elm-compiler" &&
-    QBE=1 QBE_ENTRY=Mutual.even QBE_MIDDRIVER=1 node run.js "$ROOT/tools/qbe/fixtures/mutualtail.elm" "$ssa") >&2; then
+    QBE=1 QBE_ENTRY=Mutual.even node run.js "$ROOT/tools/qbe/fixtures/mutualtail.elm" "$ssa") >&2; then
     case "$(head -c 4 "$ssa")" in
       "err "*) echo "FAIL md-mutual-tail: compile failed: $(cat "$ssa")"; FAIL=1;;
       *)
         "$ROOT/vendor/qbe/qbe" "$ssa" > "$TMP/md-mutual.s"
-        if cc "$TMP/md-mutual.s" "$rt_nomain" -o "$TMP/md-mutual" -lc 2>/dev/null; then
+        if cc "$TMP/md-mutual.s" "$rt_path" -o "$TMP/md-mutual" -lc 2>/dev/null; then
           md_out="$(timeout 120 "$TMP/md-mutual" Mutual.even "$md_d" 2>&1)"
           if [ "$md_out" = "1" ]; then
             echo "PASS md-mutual-tail $md_d hops: the MID bounce loop chases the chain at constant stack (golden 1)"
@@ -2784,7 +2588,7 @@ if rt_path="$("$ROOT/tools/qbe/rt-o.sh")" 2>/dev/null; then
         ;;
     esac
   else
-    echo "FAIL md-mutual-tail: qbe-mk (QBE_MIDDRIVER=1)"; FAIL=1
+    echo "FAIL md-mutual-tail: qbe-mk"; FAIL=1
   fi
 fi
 

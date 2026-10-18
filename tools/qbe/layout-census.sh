@@ -19,14 +19,14 @@
 #   GEN    the same numbers are written as Zig consts into
 #          `vendor/osier-rt/src/gc/layout_gen.zig`; `--check` regenerates and
 #          diffs, so a Mid edit that was not carried into the Zig copy fails
-#          LOUDLY.  `types.zig` and `tools/qbe/rt.zig` each carry a `comptime`
+#          LOUDLY.  `types.zig` and `tools/qbe/hostshim.zig` each carry a `comptime`
 #          row asserting their own declarations equal those consts, so the
 #          collector's own suite (`zig build gate`, step 6 of
 #          tools/osier-numbers.sh) fails to COMPILE on a mismatch.
 #   ZIG    `tools/qbe/layout-probe.zig` PRINTS what the Zig compiler computes
 #          for `types.Value`/`types.ValTag` (`@sizeOf`/`@alignOf`/`@offsetOf`/
 #          `@intFromEnum` — the ABI as laid out, not as re-parsed), and
-#          `max_arity` is read from rt.zig's own declaration.  Both are diffed
+#          `max_arity` is read from hostshim.zig's own declaration.  Both are diffed
 #          against MID.  The Desc/Meta/Ret offsets live in rt.zig, which the
 #          probe cannot import (rt.zig exports `main`); they are covered by
 #          the comptime row in rt.zig, and this script SAYS SO rather than
@@ -52,7 +52,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MID="$ROOT/elm-compiler/src/Mid/RtLayout.elm"
 GEN="$ROOT/vendor/osier-rt/src/gc/layout_gen.zig"
 PROBE="$ROOT/tools/qbe/layout-probe.zig"
-RTZ="$ROOT/tools/qbe/rt.zig"
+RTZ="$ROOT/tools/qbe/hostshim.zig"
 
 die()  { printf 'layout-census: FAIL: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || { printf 'layout-census: %s not found\n' "$1" >&2; exit 2; }; }
@@ -73,12 +73,12 @@ MID_ONLY_NAMES="epChainOpIdx epChainPipeIdx epChainWords epCmdArgcIdx epCmdArgvI
 # `Dirent` declaration — the one Zig statement of the libc struct's layout);
 # (the ep* exec-plan blob rows lived here from 3B-2a until 3B-2b moved the
 # RUN into Mid and the seat stopped reading the blob).
-COMPTIME_FILES="tools/qbe/rt.zig vendor/osier-rt/src/rt/execplan.zig"
+COMPTIME_FILES="tools/qbe/hostshim.zig vendor/osier-rt/src/rt/execplan.zig"
 COMPTIME_NAMES="descArityOffset descCacheOffset descCodeOffset descNcapsOffset descTotalBytes \
 direntNameOffset \
 metaArityOffset metaCodeOffset metaNameOffset metaSizeBytes \
 retArgsOffset retArityOffset retEOffset retFOffset retKindOffset retSizeBytes retValOffset"
-# REGEX: read from rt.zig's own declaration text (a non-pub const no probe can see).
+# REGEX: read from hostshim.zig's own declaration text (a non-pub const no probe can see).
 REGEX_NAMES="maxArity"
 # everything else is PROBED.
 
@@ -116,7 +116,7 @@ zig_values() {
          v = $0; sub(/^const max_arity: i32 = /, "", v); sub(/;$/, "", v);
          print "maxArity=" v; found = 1
        }
-       END { if (!found) exit 1 }' "$RTZ" || die "rt.zig: no anchored 'const max_arity: i32 = N;' declaration to read"
+       END { if (!found) exit 1 }' "$RTZ" || die "hostshim.zig: no anchored 'const max_arity: i32 = N;' declaration to read"
 }
 
 # ---- the generation ---------------------------------------------------------
@@ -129,7 +129,7 @@ gen_file() {
 //! `Mid/RtLayout.elm` carries the cross-ABI numbers, `Mid.Qbe.Il` and
 //! `Mid.Qbe.Lower` DERIVE the emitted IL from them, `Mid.RtPrims` reads the
 //! tag integers from them, and this file is that same definition as Zig
-//! constants.  `types.zig` and `tools/qbe/rt.zig` each carry a `comptime` row
+//! constants.  `types.zig` and `tools/qbe/hostshim.zig` each carry a `comptime` row
 //! asserting their own declarations equal these values, so a mismatch is a
 //! COMPILE ERROR in the collector's own suite (`zig build gate`) rather than a
 //! silently wrong offset at run time.
@@ -214,7 +214,7 @@ check_zig() {
   done
   if [ -n "$missing" ]; then
     printf 'layout-census: FAIL: no comptime row asserts:%s\n' "$missing" >&2
-    printf '  (a row in %s must name Mid.RtLayout.<constant> for each — see tools/qbe/rt.zig)\n' "$COMPTIME_FILES" >&2
+    printf '  (a row in %s must name Mid.RtLayout.<constant> for each — see tools/qbe/hostshim.zig)\n' "$COMPTIME_FILES" >&2
     exit 1
   fi
   echo "layout-census: comptime OK — ${COMPTIME_NAMES// /, } are named by a comptime row in: $COMPTIME_FILES; those rows are compiled by rt-o.sh, NOT by zig build gate"

@@ -8,35 +8,32 @@ This file exists so the debt is not lost when the baseline it is measured agains
 > unchanged**, every one of the 34 a `compile_error` group (the moved *set* is
 > identical across the two commits; only the digits are wrong).
 
-## ⚠ READ THIS FIRST — B4 DESTROYS THE MEASUREMENT BASELINE
+## B4 LANDED (2026-10-18) — this file's warning is now history
 
-Every ratio in this file is measured **against the Zig arm of the same program**,
-i.e. the *hatch-OFF* build (`QBE_MIDDRIVER=0`), where the frames / apply / tail are
+Every ratio in this file was measured **against the Zig arm of the same program**,
+i.e. the *hatch-OFF* build (`QBE_MIDDRIVER=0`), where the frames / apply / tail were
 still the Zig seats in `tools/qbe/rt.zig`.
 
-**B4 (the shrink) deletes those Zig seats.** After B4 there is no hatch-OFF arm, so:
+**B4 (the shrink) deleted those Zig seats.** There is no hatch-OFF arm any more:
 
-* `frame_perf_gate`, `apply_perf_gate` and `tail_perf_gate` (all ratio gates) lose
-  their reference and must be either **re-based on a saved binary** or **disabled**
-  — and disabling them silently re-opens the hole that let a **175×** regression
-  through every correctness oracle (see below).
-* **BEFORE landing B4: build one native binary from the last pre-B4 tree and check
-  it into `tools/` (or record its sha256 + how to rebuild it).** It becomes the
-  fixed reference the gates compare against.
-* **BEFORE landing B4, also run plan.md §1.3's suite rule ON against OFF**
-  (`QBE_MIDDRIVER=0` vs default, arms alternated). That is the *only* oracle B3
-  ("the full flip") had, and B4 closes the window the same way it closes the ratio
-  gates' reference. MEASURED: B3 has **no code left to flip** — every retarget
-  (frames B0, apply B1, tail B2) is already `if s.midDriver` and both drivers
-  already default MIDDRIVER **on** (`elm-compiler/run.js:309`,
-  `selfhost/NativeMain.elm:330` `( False, True )`), so B3's deliverable landed
-  inside B0/B1/B2.
+* `frame_perf_gate`, `apply_perf_gate` and `tail_perf_gate` are **re-based on the
+  committed pre-B4 reference binaries** (`tools/qbe/ref/{fib,applyperf,mutualtail}/`,
+  frozen at `cf59488`, sha256s below).  Each gate builds only the Mid arm and
+  compares against the frozen reference, alternated, median-of-7, and the bounds
+  (2.5× / 12× / 6×) are **kept, not retuned** — the ratio is now Mid-vs-FROZEN-Zig,
+  so it reads slightly differently than the live measurement (frame 0.97×, apply
+  1.6×, tail 1.5× before B4; the frozen-reference ratios land wherever they land).
+* The §1.3 suite rule ON vs OFF was run **before** B4 (the "THE AGGREGATE" section
+  below, 2.22×); it is the *only* ON/OFF measurement that exists, and B4 closed the
+  window.  The ON/OFF RATIO IS NO LONGER MEASURABLE IN-TREE — that is what B5's
+  differential and the committed reference binaries are for.
 
-### The pre-B4 reference binaries (BUILT — kept)
+### The pre-B4 reference binaries (BUILT — now COMMITTED at `tools/qbe/ref/`)
 
 Below in this file the three ratio gates' Zig arm is referred to as "the Zig arm of the
-same program". Those three Zig-arm executables were **built at `cf59488` and saved** so the
-gates can be re-based on them after B4 deletes their source:
+same program". Those three Zig-arm executables were **built at `cf59488` and are now
+committed under `tools/qbe/ref/`** (precedent: `tools/qbe/rt.o` is committed), with a
+README naming each fixture source, entry, build command and sha256:
 
 | fixture | file at build | sha256 | size |
 |---|---|---|---|
@@ -55,12 +52,16 @@ history after B4 — B4 is recoverable, it is not irreversible).
 ## How the gates work (and why they are ratios)
 
 `frame_perf_gate`, `apply_perf_gate`, `tail_perf_gate` live in `tools/qbe/qbe-check.sh`.
-Each builds **the same fixture on both arms**, runs **N alternated pairs**, takes the
-**median**, and compares a **RATIO** against a bound. Never an absolute time: this box
-is shared and its wall clock varies by >10× with load (`plan.md` §1.3 / the loaded-host
-trap — a loaded host once fabricated a fake regression).
+POST-B4 each builds **only the Mid arm**, runs it **alternated against the committed
+pre-B4 reference binary** (`tools/qbe/ref/`), takes the **median-of-7**, and compares a
+**RATIO** against a bound. Never an absolute time: this box is shared and its wall clock
+varies by >10× with load (`plan.md` §1.3 / the loaded-host trap — a loaded host once
+fabricated a fake regression).
 
-Current bounds: frame **2.5×**, apply **12×**, tail **6×**.
+Current bounds: frame **2.5×**, apply **12×**, tail **6×** — KEPT at B4, not retuned
+(the reference is frozen at `cf59488`, so the Mid-vs-frozen ratio reads slightly
+differently than the pre-B4 Mid-vs-live-Zig numbers: frame 0.97×→0.92×, apply
+1.6×→1.48×, tail 1.5×→1.29× on the B4 run).
 
 **A gate that cannot fail is not a gate.** Each was proven asymmetric — the bound fails
 the pre-fix binary and passes the fixed one. Keep that property when re-basing.

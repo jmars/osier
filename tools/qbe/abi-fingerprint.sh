@@ -14,12 +14,12 @@
 #
 # WHAT THE MARKER COVERS (each an interface, not an implementation, so a
 # comment or a private-function change inside rt.zig does NOT move it):
-#   rt:exports  every `export fn` signature in tools/qbe/rt.zig — the symbols
+#   rt:exports  every `export fn` signature in tools/qbe/hostshim.zig — the symbols
 #               the .ssa calls (sorted).
 #   rt:callN    every `extern fn rt_callN` signature — the arity dispatch
 #               table the .ssa must DEFINE (sorted).
 #   rt:types    the `max_arity` / `Desc` / `Meta` / `Ret` declarations in
-#               tools/qbe/rt.zig (braces-literal typed / returned across the
+#               tools/qbe/hostshim.zig (braces-literal typed / returned across the
 #               ABI or written by generated `data` blocks).
 #   gc:layout   the LAYOUT CENSUS (handoff-osier-zigretire-plan STAGE 2): the
 #               digest of the ONE definition, `Mid/RtLayout.elm`, as parsed by
@@ -45,7 +45,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-RT="$ROOT/tools/qbe/rt.zig"
+RT="$ROOT/tools/qbe/hostshim.zig"
 TYPES="$ROOT/vendor/osier-rt/src/gc/types.zig"
 MANIFEST="$ROOT/elm-compiler/selfhost/manifest.json"
 
@@ -131,7 +131,7 @@ case "${1:-}" in
       printf '# Regenerate the two together:  tools/qbe-bootstrap.sh --freeze\n'
       printf '# Written by tools/qbe/abi-fingerprint.sh --write; the components are\n'
       printf '# digests of DECLARATIONS (comments/whitespace stripped), so a comment\n'
-      printf '# edit in rt.zig does NOT move the marker.\n'
+      printf '# edit in hostshim.zig does NOT move the marker.\n'
       printf 'seed-bytes=%s\n'    "$(stat -c %s "$SEED")"
       printf 'seed-sha256=%s\n'   "$(sha256sum "$SEED" | cut -c1-64)"
       printf 'abi-marker=%s\n'    "$MARKER"

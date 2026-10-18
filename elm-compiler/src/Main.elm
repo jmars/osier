@@ -55,7 +55,6 @@ type alias Flags =
     , qbeEqPtrFast : Bool
     , qbeTypeSpec : Bool
     , qbeMidGc : Bool
-    , qbeMidDriver : Bool
     }
 
 
@@ -104,7 +103,7 @@ compileAll flags =
                         encodeStrings
                             (List.map3
                                 (\groupSources groupMids entry ->
-                                    case QbeModule.compileEntry rt corpusSources groupSources groupMids entry flags.qbeFlatten flags.qbeRep flags.qbePrimDirect flags.qbeMidRt flags.qbeMidCons flags.qbeRtLean flags.qbeMono ( ( flags.qbeConsArr, ( flags.qbeRec, flags.qbeTypeSpec, ( flags.qbeMidGc, flags.qbeMidDriver ) ) ), flags.qbeEqPtrFast ) of
+                                    case QbeModule.compileEntry rt corpusSources groupSources groupMids entry flags.qbeFlatten flags.qbeRep flags.qbePrimDirect flags.qbeMidRt flags.qbeMidCons flags.qbeRtLean flags.qbeMono ( ( flags.qbeConsArr, ( flags.qbeRec, flags.qbeTypeSpec, flags.qbeMidGc ) ), flags.qbeEqPtrFast ) of
                                         Ok ssa ->
                                             ssa
 

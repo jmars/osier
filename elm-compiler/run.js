@@ -300,13 +300,17 @@ const QBE_TYPESPEC = process.env.QBE_NOTYPESPEC !== '1';
 // Default OFF (the Zig collector stays the allocation path) — the hatch must
 // reproduce the pre-change corpus byte-for-byte when unset.
 const QBE_MIDGC = process.env.QBE_MIDGC === '1';
-// QBE_MIDDRIVER ENABLES the stage-6 raw-word ABI driver/ABI defuns
-// (Rt.die/Rt.halt/Rt.main): the Mid-written runtime gains word-ABI defuns
-// and Lower's die/halt emission sites retarget from the Zig seats to them.
-// Default ON (the Mid driver is the route).  QBE_MIDDRIVER=0 is the
-// attribution hatch — it must reproduce the PRE-FLIP corpus byte-for-byte
-// (the Zig seats rt_die/rt_halt keep serving that arm until B4 deletes them).
-const QBE_MIDDRIVER = process.env.QBE_MIDDRIVER !== '0';
+// QBE_MIDDRIVER is GONE (stage 6 B4, "the shrink"): the Zig arm that flag
+// selected (rt_die/rt_halt/rt_frame_*/rt_apply/rt_bounce/rt_tail_known/
+// rt_prim/`main` in tools/qbe/rt.zig) is DELETED, so the flag no longer
+// selects anything.  A stale script that still sets QBE_MIDDRIVER=0 must die
+// LOUDLY rather than silently getting the Mid route — the attribution window
+// closed at B4.  QBE_MIDDRIVER=1 (or its absence) is the only route and is
+// accepted silently.
+if (process.env.QBE_MIDDRIVER === '0') {
+  console.error('run.js: QBE_MIDDRIVER=0 is no longer supported — the Zig arm is gone; the attribution window closed at B4. The Mid driver is the only route.');
+  process.exit(2);
+}
 // THE MIDGC GUARD, data-driven (zigretire stage 5 PART 3 — the lesson: a
 // guard that names ONE incompatible flag is not a guard; this arc paid for
 // that twice).  QBE_MIDGC=1 is sound iff every flag the Mid seats DEPEND on
@@ -402,7 +406,6 @@ function compileGroups(groups) {
       qbeEqPtrFast: QBE_EQPTRFAST,
       qbeTypeSpec: QBE_TYPESPEC,
       qbeMidGc: QBE_MIDGC,
-      qbeMidDriver: QBE_MIDDRIVER,
     },
   });
 

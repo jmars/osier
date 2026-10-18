@@ -197,15 +197,15 @@ fi
 # different inputs — treat "cannot tell" as stale and rebuild), and a failed
 # rebuild must refuse LOUDLY rather than answer from a stale object.  A stale
 # rt.o is exactly this repo's documented stale-artifact class.
-rt_newer="$(find "$ROOT/tools/qbe/rt.zig" "$ROOT/vendor/osier-rt/src" "$ROOT/src/effectloop.zig" \
+rt_newer="$(find "$ROOT/tools/qbe/hostshim.zig" "$ROOT/vendor/osier-rt/src" "$ROOT/src/effectloop.zig" \
               -newer "$RT" -print -quit 2>/dev/null)" || rt_newer="PROBE_FAILED"
 if [ "$rt_newer" = "PROBE_FAILED" ]; then
   say "qbe-selfhost: rt.o freshness probe FAILED — rebuilding rather than trusting it" >&2
 fi
 if [ ! -f "$RT" ] || [ -n "$rt_newer" ]; then
-  say "qbe-selfhost: building $RT (tools/qbe/rt.zig is newer than it)"
+  say "qbe-selfhost: building $RT (tools/qbe/hostshim.zig is newer than it)"
   zig build-obj -O ReleaseFast -lc -femit-bin="$RT" \
-    --dep gc --dep rt --dep effectloop -Mroot="$ROOT/tools/qbe/rt.zig" \
+    --dep gc --dep rt --dep effectloop -Mroot="$ROOT/tools/qbe/hostshim.zig" \
     -Mgc="$ROOT/vendor/osier-rt/src/gc.zig" \
     --dep gc -Mrt="$ROOT/vendor/osier-rt/src/rt.zig" \
     --dep gc --dep rt -Meffectloop="$ROOT/src/effectloop.zig" \

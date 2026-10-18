@@ -203,7 +203,6 @@ type alias S =
     , consArr : Bool -- (A)'s switch (QBE_NOCONSARR=1 -> False = the 2-word cons)
     , typeSpec : Bool -- Unit B's switch (QBE_NOTYPESPEC=1 -> False = no binder-map type specialization)
     , midGc : Bool -- zigretire stage 4's switch (QBE_MIDGC=1 -> the Mid mark-sweep collector)
-    , midDriver : Bool -- stage 6's switch (QBE_MIDDRIVER=1 -> the raw-word ABI driver/ABI defuns are seeded and Lower's die/halt sites retarget to them)
     , funcs : List PendingFunc -- extra (closure) funcs, REVERSED
     , datas : List DataDef -- REVERSED
     , dataKeys : Dict String String -- content key -> data name (dedup)
@@ -229,7 +228,6 @@ type alias PendingFunc =
     , ncaps : Int
     , pro : Pro
     , rawAbi : Bool -- RtRawWord (stage 6 U2): the prologue skips the param blits — the params live in `l` registers, not frame slots
-    , midDriver : Bool -- stage 6 B0: the prologue/return retarget to the Mid frame pair under QBE_MIDDRIVER=1
     , entryKey : Maybe String -- Just key for top-level defuns (meta table)
     }
 
@@ -355,12 +353,8 @@ QBE_NORTLEAN route, the rtPrimSlots fat QBE_NORTLEAN route) so a missed site
 cannot drift from the other two.
 -}
 bounceSeat : S -> String
-bounceSeat s =
-    if s.midDriver then
-        "q_" ++ mangle "Rt.bounce"
-
-    else
-        "rt_bounce"
+bounceSeat _ =
+    "q_" ++ mangle "Rt.bounce"
 
 
 emit : Il.Inst -> S -> S
@@ -497,8 +491,8 @@ unique xs =
         |> Tuple.second
 
 
-lower : MidRt.Runtime -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
-lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midDriver table arityTable program entryKey =
+lower : MidRt.Runtime -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
+lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable program entryKey =
     let
         defuns =
             Dict.fromList (List.map (\d -> ( d.key, d )) program)
@@ -558,12 +552,7 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midDriver
                                     else
                                         []
                                    )
-                                ++ (if midDriver then
-                                        List.filter (\k -> not (List.member k surfaceKeys)) (unique MidRt.driverSeeds)
-
-                                    else
-                                        []
-                                   )
+                                ++ List.filter (\k -> not (List.member k surfaceKeys)) (unique MidRt.driverSeeds)
                             )
 
                     else
@@ -689,7 +678,6 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midDriver
                     , consArr = consArr
                     , typeSpec = typeSpec
                     , midGc = midGc
-                    , midDriver = midDriver
                     , funcs = []
                     , datas = []
                     , dataKeys = Dict.empty
@@ -1309,7 +1297,6 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , consArr = sOuter.consArr
             , typeSpec = sOuter.typeSpec
             , midGc = sOuter.midGc
-            , midDriver = sOuter.midDriver
             , funcs = []
             , datas = sOuter.datas
             , dataKeys = sOuter.dataKeys
@@ -1495,21 +1482,15 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                                         startBlock "ret" s1 |> closeBlock (Ret (Just rawWordResult))
 
                             _ ->
-                                -- stage 6 B0: under QBE_MIDDRIVER=1 the pooled
-                                -- frame is left through the Mid rawAbi defun
-                                -- q_Rt_x2eframe_x2dleave (0-arg, l result — the
-                                -- discarded-result call type is cosmetic: Print
-                                -- drops the AbiTy when dst is Nothing); the
-                                -- default route keeps the Zig rt_frame_leave seat.
+                                -- stage 6 B0: the pooled frame is left through
+                                -- the Mid rawAbi defun q_Rt_x2eframe_x2dleave
+                                -- (0-arg, l result — the discarded-result call
+                                -- type is cosmetic: Print drops the AbiTy when
+                                -- dst is Nothing).  B4 deleted the Zig seat.
                                 startBlock "ret" s1
                                     |> emit
                                         (Call Nothing (Base W)
-                                            (if sOuter.midDriver then
-                                                Il.Sym ("q_" ++ mangle "Rt.frame-leave")
-
-                                             else
-                                                Il.Sym "rt_frame_leave"
-                                            )
+                                            (Il.Sym ("q_" ++ mangle "Rt.frame-leave"))
                                             []
                                         )
                                     |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
@@ -1547,7 +1528,6 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                         , ncaps = ncaps
                         , pro = proKind
                         , rawAbi = rawAbi
-                        , midDriver = sOuter.midDriver
                         , entryKey =
                             if entry then
                                 Just key
@@ -2466,27 +2446,19 @@ alone picks out the real Value slots.
 -}
 slotBaseOf : Exp -> S -> Maybe Il.Arg
 slotBaseOf exp s =
-    -- GATED on midDriver (stage 6 P1b Step B): the read-direct-from-slot fast
-    -- path is a lowering change, so it must not touch the OFF route's emit
-    -- (QBE_MIDDRIVER=0) — the OFF window is pinned byte-identical to the
-    -- pre-B4 baseline and the mid-c prim defuns (Rt.cons/deepEq/closure) are
-    -- emitted on BOTH routes.  midDriver=0 falls through to the pre-existing
-    -- lowerVal-then-load shape, keeping the OFF corpus byte-identical.
-    if not s.midDriver then
-        Nothing
+    -- stage 6 P1b Step B: the read-direct-from-slot fast path.  B4 removed the
+    -- midDriver gate (there is no OFF route any more), so this is unconditional.
+    case exp of
+        Var id ->
+            case Dict.get id s.binderSlots of
+                Just slot ->
+                    Just (Il.Tmp (slotTmp slot))
 
-    else
-        case exp of
-            Var id ->
-                case Dict.get id s.binderSlots of
-                    Just slot ->
-                        Just (Il.Tmp (slotTmp slot))
+                Nothing ->
+                    Nothing
 
-                    Nothing ->
-                        Nothing
-
-            _ ->
-                Nothing
+        _ ->
+            Nothing
 
 
 {-| The base address of a Value operand for a field projection: the binder's
@@ -2876,14 +2848,12 @@ rawWordArg exp s =
                             ( t, s2 ) =
                                 freshTmp s1
 
-                            -- stage 6 U2: under QBE_MIDDRIVER=1 the surface's
-                            -- `rawcall rt_halt()` (the prim halt arm) routes to
-                            -- the Mid rawAbi defun Rt.halt instead of the Zig
-                            -- seat — the SAME 0-arg word-call shape, a symbol
-                            -- swap (the defun is named q_Rt_x2ehalt; the Zig
-                            -- seat keeps its name for the default route).
+                            -- stage 6 U2: the surface's `rawcall rt_halt()`
+                            -- (the prim halt arm) routes to the Mid rawAbi
+                            -- defun Rt.halt (q_Rt_x2ehalt).  B4 deleted the
+                            -- Zig rt_halt seat, so this is unconditional.
                             callee =
-                                if s.midDriver && seat.sym == "rt_halt" then
+                                if seat.sym == "rt_halt" then
                                     "q_" ++ mangle "Rt.halt"
 
                                 else
@@ -2892,7 +2862,7 @@ rawWordArg exp s =
                         -- stage 6 A1: the halt arm's 0 words are checked
                         -- against the rawAbi arity record (a param added to
                         -- Rt.halt in U3-U5 would under-apply here otherwise).
-                        if s.midDriver && seat.sym == "rt_halt" then
+                        if seat.sym == "rt_halt" then
                             rawAbiArityAgree "Rt.halt" (List.length args)
                                 |> Result.map (\_ -> ( Il.Tmp t, emit (Call (Just t) (Base L) (Il.Sym callee) args) s2 ))
 
@@ -4396,18 +4366,14 @@ stageSlots slots s =
 directCall : String -> List Exp -> Int -> Bool -> S -> Result String S
 directCall key args dest isTail s =
     let
-        -- stage 6 B2: under QBE_MIDDRIVER=1 the tail-known/bounce seats
-        -- retarget to the Mid rawAbi defuns (the SAME aggregate result shapes
-        -- `:ret`/`:val`, a symbol swap, and the nargs ARG CLASS changes for
-        -- tail-known: the Zig seat takes nargs as i32 `w`, the rawAbi defun's
-        -- params are `l` registers — QBE subtyping is `l`->`w` only, so a `w`
-        -- arg to an `l` param is a usecheck failure, the rtApply precedent).
+        -- stage 6 B2: the tail-known seat retargets to the Mid rawAbi defun
+        -- (the SAME `:ret` aggregate result shape, a symbol swap, and the
+        -- nargs ARG CLASS is Base L — the rawAbi defun's params are `l`
+        -- registers, and QBE subtyping is `l`->`w` only, so a `w` arg to an
+        -- `l` param is a usecheck failure, the rtApply precedent).  B4 deleted
+        -- the Zig rt_tail_known seat, so this is unconditional.
         ( tailCallee, nargsTy ) =
-            if s.midDriver then
-                ( "q_" ++ mangle "Rt.tail-known", Base L )
-
-            else
-                ( "rt_tail_known", Base W )
+            ( "q_" ++ mangle "Rt.tail-known", Base L )
 
         bounceCallee =
             bounceSeat s
@@ -4481,11 +4447,7 @@ rtApply fslotTmp args dest isTail s =
                 "Rt.apply"
 
         ( callee, nargsTy ) =
-            if s.midDriver then
-                ( "q_" ++ mangle midKey, Base L )
-
-            else
-                ( if isTail then "rt_apply_tail" else "rt_apply", Base W )
+            ( "q_" ++ mangle midKey, Base L )
 
         -- stage 6 B1fix (should-fix 1): the call site's aggregate class and
         -- sret size are DERIVED from rawAbiRetClass — the ONE source of truth
@@ -5657,11 +5619,11 @@ lowerNonExhaustive msg s =
                 (\n -> { name = n, align = Just 8, items = [ DStr msg, DByte 0 ], export_ = False })
                 s
 
-        -- stage 6 U2: under QBE_MIDDRIVER=1 the die arm retargets from the
-        -- Zig `rt_die` seat to the Mid rawAbi defun Rt.die (q_Rt_x2edie) —
-        -- the same single WORD argument (the static message address), a
-        -- symbol swap; the result type follows the callee (Base L for the
-        -- Mid word-ABI defun, Base W for the Zig seat's i64).
+        -- stage 6 U2: the die arm retargets from the Zig `rt_die` seat to the
+        -- Mid rawAbi defun Rt.die (q_Rt_x2edie) — the same single WORD argument
+        -- (the static message address), a symbol swap; the result type follows
+        -- the callee (Base L for the Mid word-ABI defun).  B4 deleted the Zig
+        -- rt_die seat, so this is unconditional.
         --
         -- stage 6 A1 (was the U2 review's nice-to-have 5, "NOT DERIVED"):
         -- the single WORD argument below is now checked against
@@ -5670,11 +5632,7 @@ lowerNonExhaustive msg s =
         -- (the callee reading a garbage register) the rawAbi convention
         -- exists to kill.
         ( rtDieSym, rtDieRet ) =
-            if s.midDriver then
-                ( "q_" ++ mangle "Rt.die", Base L )
-
-            else
-                ( "rt_die", Base W )
+            ( "q_" ++ mangle "Rt.die", Base L )
 
         dieArgs =
             [ ArgVal (Base L) (Il.Sym msgName) ]
@@ -7824,21 +7782,11 @@ finishModule s keys =
 
         funcs =
             List.map withPrologue pendings
-                ++ (if s.midGc || s.midDriver then
-                        globBlockFunc :: rtCallFuncs
-
-                    else
-                        rtCallFuncs
-                   )
-                -- stage 6 P1d Step B: the two-range apply bridge exists only
-                -- on the Mid route — the hatch-OFF attribution window must
-                -- stay byte-identical (QBE_MIDDRIVER=0 emits no rt_call2r).
-                ++ (if s.midDriver then
-                        [ rtCallTwoRange ]
-
-                    else
-                        []
-                   )
+                ++ (globBlockFunc :: rtCallFuncs)
+                -- stage 6 P1d Step B: the two-range apply bridge.  B4 closed
+                -- the hatch (the Mid route is the only route), so it is
+                -- unconditional.
+                ++ [ rtCallTwoRange ]
 
         -- Rt.* defuns (osier-consspike) are INTERNAL: no global Desc (only a
         -- GRef'd defun needs one, and surface code cannot GRef an Rt key), no
@@ -7883,16 +7831,10 @@ finishModule s keys =
         List.reverse s.datas
             ++ globalDescs
             ++ metaDatas
-            -- stage 6 B0: the frame machinery's freelist/frame_top globals
-            -- need the block on the MIDDRIVER route too (not just MIDGC),
-            -- so the gate is `midGc || midDriver`; the DEFAULT route (both
-            -- off) still emits neither def — byte-identical.
-            ++ (if s.midGc || s.midDriver then
-                    [ globBlockData ]
-
-                else
-                    []
-               )
+            -- stage 6 B0: the frame machinery's freelist/frame_top globals.
+            -- B4 closed the hatch, so the block is unconditional (the Mid
+            -- frame pair always reads rt_glob).
+            ++ [ globBlockData ]
     , funcs = funcs ++ metaFuncs
     }
 
@@ -7954,16 +7896,12 @@ withPrologue pending =
         enter =
             case pending.pro of
                 PFrame ->
-                    -- stage 6 B0: under QBE_MIDDRIVER=1 the pooled frame is
-                    -- entered through the Mid rawAbi defun q_Rt_x2eframeEnter
-                    -- (its param is `l`, the raw-word ABI — so the nslots arg
-                    -- is Base L, not the Zig seat's Base W i32); the default
-                    -- route keeps the Zig rt_frame_enter seat.
-                    if pending.midDriver then
-                        Call (Just "f") (Base L) (Il.Sym ("q_" ++ mangle "Rt.frame-enter")) [ ArgVal (Base L) (Il.Con pending.nslots) ]
-
-                    else
-                        Call (Just "f") (Base L) (Il.Sym "rt_frame_enter") [ ArgVal (Base W) (Il.Con pending.nslots) ]
+                    -- stage 6 B0: the pooled frame is entered through the Mid
+                    -- rawAbi defun q_Rt_x2eframeEnter (its param is `l`, the
+                    -- raw-word ABI — so the nslots arg is Base L, not the Zig
+                    -- seat's Base W i32).  B4 deleted the Zig rt_frame_enter
+                    -- seat, so this is unconditional.
+                    Call (Just "f") (Base L) (Il.Sym ("q_" ++ mangle "Rt.frame-enter")) [ ArgVal (Base L) (Il.Con pending.nslots) ]
 
                 PAlloc ->
                     Alloc "f" (vs * pending.nslots)
@@ -8021,18 +7959,18 @@ rtCallFuncs =
         (List.range 0 maxArity)
 
 
--- rt_call2r: the Mid-route two-range apply bridge (stage 6 P1d Step B).
--- rt_apply's saturated/over-applied arms build `buf = [captures(napp) ++
--- args(nargs)]` and hand it to rt_callN, whose callee blits its params from
--- ONE contiguous array — so every closure call pays a malloc(640) + two
--- copyWords loops just to stage the two ranges together.  This bridge takes
--- the two ranges separately (code, caps, napp, args, nargs): the callee's
--- free-variable captures are passed as its env (`e = caps + napp*40`), and
--- its params are the applied captures (caps[0..napp)) then the applied args
--- (args[0..nargs)) — param i's pointer is (i < napp) ? caps + i*40 :
--- args + (i-napp)*40, computed with a branchless select (no copy, no
--- malloc).  EMITTED ONLY on the Mid route (finishModule gates it on
--- s.midDriver) so the hatch-OFF attribution window stays byte-identical.
+-- rt_call2r: the two-range apply bridge (stage 6 P1d Step B).  Rt.apply's
+-- saturated/over-applied arms build `buf = [captures(napp) ++ args(nargs)]`
+-- and hand it to rt_callN, whose callee blits its params from ONE contiguous
+-- array — so every closure call pays a malloc(640) + two copyWords loops just
+-- to stage the two ranges together.  This bridge takes the two ranges
+-- separately (code, caps, napp, args, nargs): the callee's free-variable
+-- captures are passed as its env (`e = caps + napp*40`), and its params are
+-- the applied captures (caps[0..napp)) then the applied args (args[0..nargs))
+-- — param i's pointer is (i < napp) ? caps + i*40 : args + (i-napp)*40,
+-- computed with a branchless select (no copy, no malloc).  B4 closed the
+-- hatch, so finishModule emits it unconditionally (the Mid route is the only
+-- route).
 --
 -- ARITY > 16: the dispatch chain ends at @arity{maxArity} (the last c{k} test
 -- falls through), so arity > maxArity would run the arity-16 block and read

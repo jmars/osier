@@ -95,7 +95,7 @@ import Type.Infer as Infer
 import Type.Representation as Rep exposing (Flex(..), Kind(..), Type(..), VarId)
 
 
-compileEntry : MidRt.Runtime -> List String -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, Bool, ( Bool, Bool ) ) ), Bool ) -> Result String String
+compileEntry : MidRt.Runtime -> List String -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, Bool, Bool ) ), Bool ) -> Result String String
 compileEntry rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
     case
         MidModule.parseAll corpusSources
@@ -144,7 +144,7 @@ compileGroup :
     -> Bool
     -> Bool
     -> Bool
-    -> ( ( Bool, ( Bool, Bool, ( Bool, Bool ) ) ), Bool )
+    -> ( ( Bool, ( Bool, Bool, Bool ) ), Bool )
     -> Result String String
 compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals ( groupSources, groupMids ) entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
     -- M3: load the group's user .mid modules FIRST — their exported keys'
@@ -660,11 +660,11 @@ lowerAll :
     -> List MidModule.Unit
     -> Dict String Defun
     -> String
-    -> ( ( Bool, ( Bool, Bool, ( Bool, Bool ) ) ), Bool )
+    -> ( ( Bool, ( Bool, Bool, Bool ) ), Bool )
     -> Result String String
 lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule units userSurf entryKey ( consArrRec, eqPtrFast ) =
     let
-        ( consArr, ( rec, typeSpec, ( midGc, midDriver ) ) ) =
+        ( consArr, ( rec, typeSpec, midGc ) ) =
             consArrRec
     in
     reserveRtName units
@@ -802,7 +802,6 @@ lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesBy
                                                         rec
                                                         typeSpec
                                                         midGc
-                                                        midDriver
                                                         specialised.table
                                                         (completeArities globals specialised.program)
                                                         specialised.program

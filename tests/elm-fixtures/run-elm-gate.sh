@@ -232,9 +232,12 @@ sigdeath() {
 # QBE native path's OWN resource boundary, the C stack.  Before the guard
 # (tools/qbe/rt.zig), a non-tail recursion deep enough to exhaust
 # RLIMIT_STACK died with a BARE SIGSEGV — non-zero, so never a silent wrong
-# answer, but unnamed and unassertable.  The guard installs sigaltstack + a
-# SIGSEGV handler that recognises a stack-exhaustion fault and exits 1 with
-# the NAT_DEPTH_MSG diagnostic; this check pins that property.
+# answer, but unnamed and unassertable.  The guard installed sigaltstack + a
+# SIGSEGV handler that recognised a stack-exhaustion fault and exited 1 with
+# the NAT_DEPTH_MSG diagnostic; this check pinned that property.  B4 (the
+# shrink) DELETED the guard (owner decision), so the past-boundary arm now
+# asserts the BARE SIGSEGV (rc 139) again — non-zero, never a silent wrong
+# answer, just unnamed once more.
 #
 # Like `sigdeath` it registers NO compile group (the corpus baseline pins
 # the batch artifact set): it builds its own native binary on demand via
@@ -846,8 +849,8 @@ dispatch() {
         echo "FAIL $name $qname $past (past the 1MiB stack budget): exit 0 — stdout=$(head -c 80 "$OUT/$name.past.stdout")"
         fail=$((fail+1)); return
       fi
-      if ! grep -q "$NAT_DEPTH_MSG" "$OUT/$name.past.stderr"; then
-        echo "FAIL $name $qname $past (past the 1MiB stack budget): exit $past_rc but stderr lacks [$NAT_DEPTH_MSG]: $(head -c 200 "$OUT/$name.past.stderr" | tr '\n' ' ')"
+      if [ "$past_rc" -ne 139 ]; then
+        echo "FAIL $name $qname $past (past the 1MiB stack budget): exit $past_rc, want 139 (SIGSEGV — the SEGV net that used to print [$NAT_DEPTH_MSG] is DELETED at B4): $(head -c 200 "$OUT/$name.past.stderr" | tr '\n' ' ')"
         fail=$((fail+1)); return
       fi
       if [ -s "$OUT/$name.past.stdout" ]; then
@@ -865,7 +868,7 @@ dispatch() {
         echo "FAIL $name $qname $deep (raised-limit deep control): exp rc=0 out[$deep_exp], got rc=$deep_rc out[$deep_out] err[$(head -c 80 "$OUT/$name.deep.err")]"
         fail=$((fail+1)); return
       fi
-      echo "PASS $name ($qname native: $ctl -> $exp @1MiB, $past -> exit $past_rc + \"$NAT_DEPTH_MSG\", $deep -> $deep_exp @raised)"
+      echo "PASS $name ($qname native: $ctl -> $exp @1MiB, $past -> SIGSEGV exit $past_rc, $deep -> $deep_exp @raised)"
       pass=$((pass+1))
       ;;
     nat*)

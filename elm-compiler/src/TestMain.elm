@@ -1036,7 +1036,7 @@ checks rt =
          List.all ok allKeys
         )
     , check "rt cons lowers to a QBE function named q_Rt_x2econs"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram rt True True True) "Rt.cons" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.cons" of
             Ok mod ->
                 List.any (\f -> f.name == "q_Rt_x2econs") mod.funcs
 
@@ -1044,7 +1044,7 @@ checks rt =
                 False
         )
     , check "rt lowering REJECTS a raw-word binder read in a value position (must-fail)"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
             Err msg ->
                 String.contains "raw word binder" msg
 
@@ -1052,7 +1052,7 @@ checks rt =
                 False
         )
     , check "rt lowering REJECTS a word node in a value position (must-fail)"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
             Err msg ->
                 String.contains "value position" msg
 
@@ -1060,7 +1060,7 @@ checks rt =
                 False
         )
     , check "rt lowering REJECTS a value binder in a raw-argument position (must-fail)"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
             Err msg ->
                 String.contains "not a raw word" msg
 
@@ -1074,7 +1074,7 @@ checks rt =
     -- the silent mislower whose fix this row pins structurally (the BEHAVIOURAL
     -- pin is the gate's charord.elm row).
     , check "char ordering: a Char/string `<` lowers to the inline byte compare (loadub), NOT a call to Rt.<"
-        (case QbeLower.lower rt True False False True True True True False False QbeTypes.empty Dict.empty (rtProgram rt True True True ++ [ charOrdProbe ]) "Rt.charOrdProbe" of
+        (case QbeLower.lower rt True False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ charOrdProbe ])) (rtProgram rt True True True ++ [ charOrdProbe ]) "Rt.charOrdProbe" of
             Ok mod ->
                 case funcByName "q_Rt_x2echarOrdProbe" mod of
                     Just f ->
@@ -1087,7 +1087,7 @@ checks rt =
                 False
         )
     , check "char ordering CONTROL: a `<` on two Int literals keeps the i64 fast path (no loadub byte walk, no Rt.< call)"
-        (case QbeLower.lower rt True False False True True True True False False QbeTypes.empty Dict.empty (rtProgram rt True True True ++ [ intLtProbe ]) "Rt.intLtProbe" of
+        (case QbeLower.lower rt True False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ intLtProbe ])) (rtProgram rt True True True ++ [ intLtProbe ]) "Rt.intLtProbe" of
             Ok mod ->
                 case funcByName "q_Rt_x2eintLtProbe" mod of
                     Just f ->
@@ -1107,7 +1107,7 @@ checks rt =
     , check "rt RawCallAgg classification: a defun containing one is a DIRECT safepoint (allocating — the callee is unknown generated code)"
         (rt.direct rawCallAggProbe)
     , check "rt RawCallAgg lowers to a word-target aggregate call returning the sret address"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggProbe ] "Rt.rawCallAggProbe" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ rawCallAggProbe ])) (rtProgram rt True True True ++ [ rawCallAggProbe ]) "Rt.rawCallAggProbe" of
             Ok mod ->
                 List.any rawCallAggCallShape mod.funcs
 
@@ -1157,7 +1157,7 @@ checks rt =
             && Set.member "Rt.bounceGo" rt.allocating
         )
     , check "rawAbi emission shape: Rt.die (1 word param) emits (params [a0:l], ret l, frame-free alloc scratch)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.die" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.die" of
             Ok mod ->
                 case funcByName "q_Rt_x2edie" mod of
                     Just f ->
@@ -1173,7 +1173,7 @@ checks rt =
                 False
         )
     , check "rawAbi emission shape: Rt.halt (0-ary) emits an EMPTY param list — the lean 4-arg shape would be a silent miscompile"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.halt" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.halt" of
             Ok mod ->
                 case funcByName "q_Rt_x2ehalt" mod of
                     Just f ->
@@ -1188,7 +1188,7 @@ checks rt =
                 False
         )
     , check "P1e frame-enter bulk-zero is a SINGLE rawcall memset(dst, 0, 40*nslots) — 3 word args, the middle the zero byte, a 40*x Mul for the length, and NO q_Rt_x2eframeZero call or in-frame loop (the per-slot frameZero loop is gone; fails on the pre-P1e loop)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.frame-enter" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.frame-enter" of
             Ok mod ->
                 case funcByName "q_Rt_x2eframe_x2denter" mod of
                     Just f ->
@@ -1201,7 +1201,7 @@ checks rt =
                 False
         )
     , check "P1e zero-BEFORE-root: frame-enter's memset is emitted BEFORE the rt_root_push_value_array call (a reused block's stale slots must be zeroed before the GC scans them — the rt.zig:279 correctness memset)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.frame-enter" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.frame-enter" of
             Ok mod ->
                 case funcByName "q_Rt_x2eframe_x2denter" mod of
                     Just f ->
@@ -1214,7 +1214,7 @@ checks rt =
                 False
         )
     , check "B1fix copyWords is a rawAbi WORD pair: the WRAPPER (3 l params, ret l, frame-free) hands off to the LOOP, and the LOOP (3 l params, ret l, frame-free) is an in-frame self-tail with NO :val aggregate or 40-byte blit in its body — the per-word blit/boxing is gone (fails on the pre-fix :val copyWords, which had ret :val, a 40-byte blit, a self-CALL recur and no copyWordsGo)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.copyWords" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.copyWords" of
             Ok mod ->
                 (case funcByName "q_Rt_x2ecopyWords" mod of
                     Just f ->
@@ -1245,7 +1245,7 @@ checks rt =
                 False
         )
     , check "B2 Rt.tail-known is a rawAbi Agg-ret defun: params [a0:l,a1:l,a2:l], ret Agg \"ret\" (the 80-byte .tail), frame-free alloc8 (the rawAbi arm wins the frame decision) — the rt_tail_known seat's C ABI, ready for Lower's directCall TAIL retarget"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.tail-known" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.tail-known" of
             Ok mod ->
                 case funcByName "q_Rt_x2etail_x2dknown" mod of
                     Just f ->
@@ -1264,7 +1264,7 @@ checks rt =
                 False
         )
     , check "B2 Rt.bounce is a rawAbi Agg-val defun: params [a0:l], ret Agg \"val\" (the 40-byte .done), frame-free alloc8, single-iteration fast path (vecload) + hand-off to the :val loop q_Rt_x2ebounceGo — the rt_bounce seat's C ABI"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.bounce" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.bounce" of
             Ok mod ->
                 case funcByName "q_Rt_x2ebounce" mod of
                     Just f ->
@@ -1283,7 +1283,7 @@ checks rt =
                 False
         )
     , check "B2 Rt.bounceGo is the FRAMED :val tail-chase loop: reaches the rt_callN bridge by name AND its recur is an in-frame self-tail (jmp @body, no self-call) — CONSTANT native stack, exactly the Zig bounce trampoline (fails on a self-CALL recur, which would build one C frame per hop and blow the 1e6 clostail stack)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.bounce" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.bounce" of
             Ok mod ->
                 case funcByName "q_Rt_x2ebounceGo" mod of
                     Just f ->
@@ -1301,7 +1301,7 @@ checks rt =
     , check "B0perf-2 nested word-tail If: the ret-bound arm's word SURVIVES the join end-to-end — the BLOCKER fix (the old lastBlockJump read only the INNER else's jmp @body and silently dropped %a0 to ret 0)"
         (case lowl nestedWordTailIfSrc of
             Ok [ fixture ] ->
-                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities [ fixture ]) [ fixture ] "Rt.die" of
+                case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ fixture ])) (rtProgram rt True True True ++ [ fixture ]) "Rt.die" of
                     Ok mod ->
                         case funcByName "q_Rt_x2edie" mod of
                             Just f ->
@@ -1317,7 +1317,7 @@ checks rt =
                 False
         )
     , check "rawAbi VALUE-position reject (fail-before): a rawAbi Rt call in a :val tail is a loud Err, never a silent word->val reinterpretation"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawAbiValueMisuse ] "Rt.bad4" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty Dict.empty [ rawAbiValueMisuse ] "Rt.bad4" of
             Err msg ->
                 String.contains "rawAbi Rt call in a VALUE position" msg
 
@@ -1325,7 +1325,7 @@ checks rt =
                 False
         )
     , check "rawAbi caller shape: the midgc die arm emits a WORD call q_Rt_x2edie(l msg) — one Base L arg, never the lean 4-arg :val shape"
-        (case QbeLower.lower rt False False False True True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.allocVector" of
+        (case QbeLower.lower rt False False False True True True True True QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.allocVector" of
             Ok mod ->
                 case funcByName "q_Rt_x2egcInit" mod of
                     Just f ->
@@ -1337,12 +1337,12 @@ checks rt =
             Err _ ->
                 False
         )
-    , check "rawAbi caller shape: the halt arm retargets rt_halt -> q_Rt_x2ehalt under QBE_MIDDRIVER and keeps rt_halt by default (the symbol swap)"
+    , check "rawAbi caller shape: the halt arm retargets rt_halt -> q_Rt_x2ehalt (B4 deleted the Zig rt_halt seat, so the symbol swap is unconditional)"
         (let
             prog =
                 (driverProg rt)
          in
-         (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
+         case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
             Ok mod ->
                 case funcByName "q_Rt_x2eemptylist" mod of
                     Just f ->
@@ -1353,19 +1353,6 @@ checks rt =
 
             Err _ ->
                 False
-         )
-            && (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
-                    Ok mod ->
-                        case funcByName "q_Rt_x2eemptylist" mod of
-                            Just f ->
-                                callsSym "rt_halt" f && not (callsSym "q_Rt_x2ehalt" f)
-
-                            Nothing ->
-                                False
-
-                    Err _ ->
-                        False
-               )
         )
 
     -- STAGE 6 A1: the LOWER INTERFACE THE DRIVER NEEDS (the six items of the
@@ -1375,7 +1362,7 @@ checks rt =
     -- accept + still-rejected shape, the val-position Blit, and the arity
     -- record totality.
     , check "A1 ret-class: Rt.main (2 word params argc/argv) emits params [a0:l,a1:l] and ret w (the exit code) — the per-key rawAbi RET CLASS (Rt.die/Rt.halt stay ret l, pinned above)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 case funcByName "main" mod of
                     Just f ->
@@ -1389,7 +1376,7 @@ checks rt =
                 False
         )
     , check "A1 export-name override: Rt.main emits name \"main\" (not q_Rt_x2emain) with export_ = True — crt0 links main (the rt_callN naming precedent)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "main" mod of
                     Just f ->
@@ -1414,7 +1401,7 @@ checks rt =
             && List.member "Rt.parseArgsGo" Rt.driverSeeds
         )
     , check "A1b RawCallAgg FUNCTION-symbol accept: a RawSym callee (not just a temp) lowers to Call (Just _) (Agg \"val\") (Il.Sym \"rt_bounce\") [word] — the code label, never a dN data ref"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggSymProbe ] "Rt.rawCallAggSymProbe" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ rawCallAggSymProbe ])) (rtProgram rt True True True ++ [ rawCallAggSymProbe ]) "Rt.rawCallAggSymProbe" of
             Ok mod ->
                 List.any rawCallAggSymCallShape mod.funcs
 
@@ -1422,7 +1409,7 @@ checks rt =
                 False
         )
     , check "A1b RawCallAgg DATA-symbol callee rejected: a rawstr data-def stand-in (RawCStr \"rt_bounce\") is a loud Err, not a silent call into static data (the A1-review blocker's over-acceptance half)"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggDataSymProbe ] "Rt.rawCallAggDataSymProbe" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty Dict.empty [ rawCallAggDataSymProbe ] "Rt.rawCallAggDataSymProbe" of
             Err msg ->
                 String.contains "DATA" msg
 
@@ -1430,7 +1417,7 @@ checks rt =
                 False
         )
     , check "A1 RawCallAgg still-rejected shape: a CONSTANT callee is a loud Err (the callee must be a RawSym function symbol or a loaded code pointer, never a constant)"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggConstProbe ] "Rt.rawCallAggConstProbe" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty Dict.empty [ rawCallAggConstProbe ] "Rt.rawCallAggConstProbe" of
             Err msg ->
                 String.contains "not a constant" msg
 
@@ -1438,7 +1425,7 @@ checks rt =
                 False
         )
     , check "A1b RawCallAgg VALUE-position Blit: a val-shaped aggregate call of rt_bounce emits Call (Just _) (Agg \"val\") (Il.Sym \"rt_bounce\") + a 40-byte Blit into the dest slot (the rtApply non-tail shape, never a word-address return)"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggValProbe ] "Rt.rawCallAggValProbe" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ rawCallAggValProbe ])) (rtProgram rt True True True ++ [ rawCallAggValProbe ]) "Rt.rawCallAggValProbe" of
             Ok mod ->
                 List.any rawCallAggValBlitShape mod.funcs
 
@@ -1446,7 +1433,7 @@ checks rt =
                 False
         )
     , check "A1b emitted .ssa names the FUNCTION symbol as the call target: the lowered module RENDERED as .ssa contains `call $rt_bounce` (a code label), not a data-def call"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggSymProbe ] "Rt.rawCallAggSymProbe" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ rawCallAggSymProbe ])) (rtProgram rt True True True ++ [ rawCallAggSymProbe ]) "Rt.rawCallAggSymProbe" of
             Ok mod ->
                 String.contains "call $rt_bounce" (Print.print mod)
 
@@ -1497,7 +1484,7 @@ checks rt =
                 False
         )
     , check "A3a MIDDRIVER emission — message DATA: the module carries the usage and toomany messages as content-keyed data defs (the exact frozen-golden bytes, err-usage.txt / err-toomany.txt)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (List.any (\d -> List.member (Il.DStr "usage: <prog> <entry-name> [int|float-arg ...]\n") d.items) mod.datas)
                     && (List.any (\d -> List.member (Il.DStr "qbe-rt: >16 entry args not supported\n") d.items) mod.datas)
@@ -1506,7 +1493,7 @@ checks rt =
                 False
         )
     , check "A3a MIDDRIVER emission — the error paths CALL write and exit IN $main: $main's OWN blocks emit >=2 call $write and >=2 call $exit (usage and toomany each write fd-2 then exit 2; notmeta adds more writes) — COUNTED, not just scoped, so neither Rt.die/Rt.halt (other functions) NOR the notmeta path alone can satisfy it (the A3a-review SHOULD-FIX 1, the count form)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "main" mod of
                     Just f ->
@@ -1544,7 +1531,7 @@ checks rt =
                 False
         )
     , check "A3b MIDDRIVER emission — the notmeta DATA: the module carries the not-in-meta prefix and suffix as content-keyed data defs (the exact frozen-golden bytes of err-notmeta.txt split at the entry name)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (List.any (\d -> List.member (Il.DStr "qbe-rt: entry '") d.items) mod.datas)
                     && (List.any (\d -> List.member (Il.DStr "' not in qbe_meta\n") d.items) mod.datas)
@@ -1553,7 +1540,7 @@ checks rt =
                 False
         )
     , check "A3b MIDDRIVER emission — the meta walk reads the exported table: the rendered .ssa references $qbe_meta and $qbe_meta_len (the wload base/count of the walk)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 let
                     ssa =
@@ -1578,7 +1565,7 @@ checks rt =
                 False
         )
     , check "A4a MIDDRIVER emission — the seats + root push: the rendered .ssa references $rt_boot, $rt_parse_arg, $rt_argv_install and $rt_root_push_value_array (the A2 seats the driver calls, each via rawcall)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 let
                     ssa =
@@ -1593,7 +1580,7 @@ checks rt =
                 False
         )
     , check "A4a MIDDRIVER emission — the 17-arm entry dispatch: $main calls the rt_callN dispatchers by NAME (aggcall ret rawsym) and q_Rt_x2ebounce (aggcall val, the stage-6 B2 Mid bounce — the driver's entry chase routes through the MID trampoline, not the Zig rt_bounce seat) — the RawCallAgg named-symbol shape, not a call into data"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 case funcByName "main" mod of
                     Just f ->
@@ -1610,7 +1597,7 @@ checks rt =
                 False
         )
     , check "A4b MIDDRIVER emission — the program/print tail: $main calls the A4b seats BY NAME (rt_is_program/rt_run_program/rt_print_value via rawcall, rt_root_push_value for the result/model roots) — the seats the A2 result handed word-in/word-out"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 case funcByName "main" mod of
                     Just f ->
@@ -1644,7 +1631,7 @@ checks rt =
             prog =
                 rtProgram rt True True True ++ rtProgramGc rt True True True
          in
-         case QbeLower.lower rt False False False True True True True True True QbeTypes.empty (rtArities prog) prog "Rt.allocVector" of
+         case QbeLower.lower rt False False False True True True True True QbeTypes.empty (rtArities prog) prog "Rt.allocVector" of
             Ok mod ->
                 (List.length (List.filter (\f -> f.name == "q_Rt_x2edie") mod.funcs) == 1)
                     && (List.length (List.filter (\f -> f.name == "q_Rt_x2ecStrLenGo") mod.funcs) == 1)
@@ -1668,7 +1655,7 @@ checks rt =
             prog =
                 rtProgram rt True True True ++ rtProgramGc rt True True True
          in
-         case QbeLower.lower rt False False False True True True True True False QbeTypes.empty (rtArities prog) prog "Rt.allocVector" of
+         case QbeLower.lower rt False False False True True True True True QbeTypes.empty (rtArities prog) prog "Rt.allocVector" of
             Ok mod ->
                 List.any (\d -> List.member (Il.DStr "qbe-rt: midgc: mmap failed") d.items) mod.datas
                     && not (List.any (\d -> List.member (Il.DStr "midgc: mmap failed") d.items) mod.datas)
@@ -1677,36 +1664,28 @@ checks rt =
                 False
         )
 
-    -- STAGE 6 U2 fix 4 (re-pinned at A5): THE NativeMain VECTOR PIN (plan
-    -- obs-5's deferred obligation, the unpinned-midGc drift class).  run.js's
-    -- DEFAULT hatch vector is now (midGc OFF, midDriver ON) — run.js:141
-    -- QBE_MIDGC = (env === '1'), run.js:148 QBE_MIDDRIVER = (env !== '0') —
-    -- and selfhost/NativeMain.elm:276's hard-coded ( False, True ) must carry
-    -- the SAME pair: the selfhost lane and run.js have to emit byte-identical
-    -- .ssa (the qbe-bootstrap --verify fixed point), so a flip in one and not
-    -- the other is a SILENT divergence.  The MEASURED GAP, stated: Elm cannot
-    -- read run.js, so this row pins the pair's VALUE (a pinned literal, the
-    -- two Elm copies being named twins) and its MEANING (the default route it
-    -- must select) — a run.js edit alone is NOT caught here; the machine
-    -- check across that boundary is the bootstrap fixed point, and the cheap
-    -- run.js-vs-NativeMain text row belongs in qbe-check.sh, outside this
-    -- unit's write scope.  What the row DOES catch: an edit of the pinned
-    -- pair (the routing half below turns a wrong pair into a FAIL), and a
-    -- silent flip of either hatch at the B3/B4 landings.  POST-A5 the default
-    -- route selects the MID DRIVER: q_Rt_x2ehalt IS emitted (the driver's
-    -- Rt.halt), and the halt arm retargets rt_halt -> q_Rt_x2ehalt.  POST-B0
-    -- rt_glob IS emitted too (midDriver now gates the globals block — the
-    -- frame pair needs the freelist/frame_top words on this route).
-    , check "U2 fix 4 — NativeMain vector pin: the selfhost hatch vector is (midGc=False, midDriver=True) = run.js's defaults, and routing THAT pair selects the driver route (q_Rt_x2ehalt emitted, rt_halt retargeted, rt_glob emitted for the B0 frame pair)"
+    -- STAGE 6 U2 fix 4 (re-pinned at B4): THE NativeMain VECTOR PIN (plan
+    -- obs-5's deferred obligation, the unpinned-midGc drift class).  B4 removed
+    -- the midDriver flag — the Mid driver is the only route — so the only
+    -- remaining selfhost-vs-run.js hatch pair is QBE_MIDGC (default OFF).
+    -- run.js's QBE_MIDGC = (env === '1') and selfhost/NativeMain.elm's
+    -- hard-coded midGc = False must agree: the selfhost lane and run.js have
+    -- to emit byte-identical .ssa (the qbe-bootstrap --verify fixed point).
+    -- The MEASURED GAP, stated: Elm cannot read run.js, so this row pins the
+    -- VALUE (a pinned literal) and its MEANING (the default route it selects):
+    -- q_Rt_x2ehalt IS emitted (the driver's Rt.halt), rt_glob IS emitted (the
+    -- B0 frame pair's freelist/frame_top block), and the halt arm retargets
+    -- rt_halt -> q_Rt_x2ehalt.
+    , check "U2 fix 4 — NativeMain vector pin: the selfhost midGc default is False = run.js's QBE_MIDGC default, and routing midGc=False selects the driver route (q_Rt_x2ehalt emitted, rt_halt retargeted, rt_glob emitted for the B0 frame pair)"
         (let
-            ( midGc, midDriver ) =
-                defaultHatchVector
+            midGc =
+                defaultMidGc
 
             prog =
                 rtProgram rt True True True
          in
-         (defaultHatchVector == ( False, True ))
-            && (case QbeLower.lower rt False False False True True True True midGc midDriver QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
+         (defaultMidGc == False)
+            && (case QbeLower.lower rt False False False True True True True midGc QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
                     Ok mod ->
                         List.any (\f -> f.name == "q_Rt_x2ehalt") mod.funcs
                             && List.any (\d -> d.name == RtGc.globDataSym) mod.datas
@@ -1724,16 +1703,12 @@ checks rt =
                )
         )
 
-    -- STAGE 6 U1c: the Mid-owned globals block + its 0-arg accessor, both
-    -- GATED on the midgc flag (plan correction C3: the block replaces the
-    -- deleted `rt_midgc_region`/`rt_midgc_set_region` Zig seats — the
-    -- collector's region pointer is word 0, read/written through the
-    -- EXISTING RawCallRaw + RawWordLoad/Store).  The gate is the FLAG, not
-    -- the program contents: even a gcProgram-carrying compile emits neither
-    -- def with midGc off (the DEFAULT route — the corpus byte-identity
-    -- proof), and both with it on (the midgc route; U5a's driver joins the
-    -- same gate).
-    , check "stage6 globals block: midGc OFF emits neither rt_glob nor rt_glob_addr even with gcProgram in the compile (the gate; T19: an empty spliced half used to make the absence assertions vacuous — a pipeline Err now FAILs the row)"
+    -- STAGE 6 U1c + B4: the Mid-owned globals block + its 0-arg accessor.
+    -- Originally GATED on the midgc flag (plan correction C3); B4 made the
+    -- block UNCONDITIONAL because the Mid frame pair (the default route)
+    -- always reads rt_glob's freelist/frame_top words.  So with midGc OFF
+    -- the block is now EMITTED (the old "emits neither" pin is inverted).
+    , check "stage6 globals block: midGc OFF still emits rt_glob + rt_glob_addr (B4 made the block unconditional — the frame pair always reads it)"
         (case ( rtProgram rt True True True, rtProgramGc rt True True True ) of
             ( [], _ ) ->
                 False
@@ -1742,16 +1717,16 @@ checks rt =
                 False
 
             ( primProg, gcProg ) ->
-                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (primProg ++ gcProg)) (primProg ++ gcProg) "Rt.allocVector" of
+                case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (primProg ++ gcProg)) (primProg ++ gcProg) "Rt.allocVector" of
                     Ok mod ->
-                        not (List.any (\d -> d.name == RtGc.globDataSym) mod.datas)
-                            && not (List.any (\f -> f.name == RtGc.globAddrSym) mod.funcs)
+                        List.any (\d -> d.name == RtGc.globDataSym) mod.datas
+                            && List.any (\f -> f.name == RtGc.globAddrSym) mod.funcs
 
                     Err _ ->
                         False
         )
     , check "stage6 globals block: midGc ON emits both, in the pinned shapes, and no gc defun names the deleted seats"
-        (case QbeLower.lower rt False False False True True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.allocVector" of
+        (case QbeLower.lower rt False False False True True True True True QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.allocVector" of
             Ok mod ->
                 List.any
                     (\d ->
@@ -1792,7 +1767,7 @@ checks rt =
     -- the Zig rt_frame_enter/rt_frame_leave seats.  These pins are the
     -- byte-identity boundary for the hatch.
     , check "B0 prologue retarget: under QBE_MIDDRIVER a framed defun enters through q_Rt_x2eframe_x2denter with an l-word nslots (Base L, not the Zig seat's Base W)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.cons" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.cons" of
             Ok mod ->
                 case funcByName "q_Rt_x2econs" mod of
                     Just f ->
@@ -1805,7 +1780,7 @@ checks rt =
                 False
         )
     , check "B0 return retarget: under QBE_MIDDRIVER a framed defun leaves through q_Rt_x2eframe_x2dleave, not the Zig rt_frame_leave"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.cons" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.cons" of
             Ok mod ->
                 case funcByName "q_Rt_x2econs" mod of
                     Just f ->
@@ -1817,21 +1792,8 @@ checks rt =
             Err _ ->
                 False
         )
-    , check "B0 default-route identity: with the hatch OFF a framed defun keeps the Zig rt_frame_enter/rt_frame_leave seats"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.cons" of
-            Ok mod ->
-                case funcByName "q_Rt_x2econs" mod of
-                    Just f ->
-                        callsSym "rt_frame_enter" f && callsSym "rt_frame_leave" f && not (callsSym "q_Rt_x2eframe_x2denter" f) && not (callsSym "q_Rt_x2eframe_x2dleave" f)
-
-                    Nothing ->
-                        False
-
-            Err _ ->
-                False
-        )
-    , check "B0 frame defuns are rawAbi frame-free emission: q_Rt_x2eframe_x2denter/Leave emit frame-FREE alloc8 scratch (no rt_frame_enter), l params/ret, and the frame pair + helpers are EMITTED under the hatch (driverSeeds)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+    , check "B0 frame defuns are rawAbi frame-free emission: q_Rt_x2eframe_x2denter/Leave emit frame-FREE alloc8 scratch (no rt_frame_enter), l params/ret, and the frame pair + helpers are EMITTED (driverSeeds)"
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "q_Rt_x2eframe_x2denter" mod of
                     Just f ->
@@ -1857,8 +1819,8 @@ checks rt =
             Err _ ->
                 False
         )
-    , check "B0 globals-block ungating: midDriver ON (midGc OFF) emits rt_glob + rt_glob_addr — the frames' freelist/frame_top block"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+    , check "B0 globals-block ungating: the default route (midGc OFF) emits rt_glob + rt_glob_addr — the frames' freelist/frame_top block (B4 made it unconditional)"
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 List.any (\d -> d.name == RtGc.globDataSym) mod.datas
                     && List.any (\f -> f.name == RtGc.globAddrSym) mod.funcs
@@ -1881,7 +1843,7 @@ checks rt =
     -- word loads/stores only).  The dispatch reaches rt_callN/rt_bounce by
     -- NAME — the same corpus-proven shape the driver's saturated arm uses.
     , check "B1 Rt.apply emission: Agg-val ret, 3 l params, frame-free alloc8, hands off to the val loop q_Rt_x2eapplyGo"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "q_Rt_x2eapply" mod of
                     Just f ->
@@ -1910,7 +1872,7 @@ checks rt =
                 False
         )
     , check "B1 loop/helper framing: the loops and the dispatch are FRAMED (they reach a safepoint), copyWords is frame-free, and the dispatch reaches rt_callN/q_Rt_x2ebounce by name (the stage-6 B2 retarget — the apply dispatch routes through the MID bounce, not the Zig rt_bounce seat)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "q_Rt_x2eapplyGo" mod of
                     Just f ->
@@ -1952,7 +1914,7 @@ checks rt =
                 False
         )
     , check "B1 root-order: applyGo's PARTIAL arm roots the env slot BEFORE the alloc and RE-READS it AFTER (push_ptr -> rt_vec_alloc -> loadl, in ONE block) — the cStrFill lesson.  A push-after-alloc or a pre-alloc-copy mutation breaks this shape (the emitted .ssa loses the post-alloc load or the pre-alloc push) and fails HERE, because the runtime churn rows CANNOT see the hazard (the moving collector copies bodies without destroying them, so a stale read is output-silent — the honest blindness measured in the b1debt probe)"
-        (case QbeLower.lower rt False False False True True True True False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "q_Rt_x2eapplyGo" mod of
                     Just f ->
@@ -2190,7 +2152,7 @@ checks rt =
         (Rt.closureSeeds == [ "Rt.closure", "Rt.closureFill" ]
         )
     , check "rt lean ABI: a frame-free callee has pointer params, :val return and NO frame enter/leave"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram rt True True True) "Rt.+" of
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.+" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2e_x2b") mod.funcs of
                     f :: _ ->
@@ -2206,15 +2168,15 @@ checks rt =
             Err _ ->
                 False
         )
-    , check "rt lean ABI: a framing callee (cons) keeps rt_frame_enter/leave and the lean signature"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram rt True True True) "Rt.cons" of
+    , check "rt lean ABI: a framing callee (cons) enters/leaves through the Mid frame pair and keeps the lean signature"
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.cons" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2econs") mod.funcs of
                     f :: _ ->
                         List.map Tuple.second f.params == [ Il.Base Il.L, Il.Base Il.L, Il.Base Il.L, Il.Base Il.W ]
                             && f.ret == Il.Agg "val"
-                            && callsSym "rt_frame_enter" f
-                            && callsSym "rt_frame_leave" f
+                            && callsSym "q_Rt_x2eframe_x2denter" f
+                            && callsSym "q_Rt_x2eframe_x2dleave" f
 
                     [] ->
                         False
@@ -2222,8 +2184,8 @@ checks rt =
             Err _ ->
                 False
         )
-    , check "rt lean ABI: rt_bounce appears NOWHERE in a lean emit, and the fat hatch restores it"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram rt True True True) "Rt.+" of
+    , check "rt lean ABI: the Zig rt_bounce seat appears NOWHERE in any emit (B4 deleted it — the Mid q_Rt_x2ebounce is the only bounce)"
+        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.+" of
             Ok mod ->
                 not (List.any (callsSym "rt_bounce") mod.funcs)
 
@@ -2252,7 +2214,7 @@ checks rt =
     , check "rt self-tail loops: cStrLenGo/cStrCopyGo/cStrFill/memGo + the glob + ep* + RUN loops emit jmp @body and NO native call to their own symbol (the O(1)-stack property)"
         (List.all
             (\( key, qname ) ->
-                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) key of
+                case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) key of
                     Ok mod ->
                         case funcByName qname mod of
                             Just f ->
@@ -2337,8 +2299,8 @@ checks rt =
         )
 
     , check "rt = symbol fast path: emitted as a pointer short-circuit that KEEPS the symEq fallback, and the hatch removes it"
-        (case ( QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram rt True True True) "Rt.="
-              , QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty (rtProgram rt True True False) "Rt.="
+        (case ( QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.="
+              , QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True False)) (rtProgram rt True True False) "Rt.="
               ) of
             ( Ok onMod, Ok offMod ) ->
                 case ( funcByName "q_Rt_x2e_x3d" onMod, funcByName "q_Rt_x2e_x3d" offMod ) of
@@ -3209,7 +3171,7 @@ checks rt =
             , "module B\nexport B.g : val -> val\ndefun B.g(a: val) -> val {\n  return mknum(payload(a, 0) + 5);\n}"
             ] of
             Ok [ mA, mB ] ->
-                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (Dict.fromList [ ( "A.f", 1 ), ( "B.g", 1 ) ]) (mA.defuns ++ mB.defuns) "A.f" of
+                case QbeLower.lower rt False False False True True True True False QbeTypes.empty (Dict.fromList [ ( "A.f", 1 ), ( "B.g", 1 ) ]) (mA.defuns ++ mB.defuns) "A.f" of
                     Ok mod ->
                         let
                             ssa =
@@ -3236,7 +3198,7 @@ checks rt =
             Ok parsed ->
                 case Rt.checkLowerUserModule (Dict.fromList [ ( "B.g", { ty = Ast.valArity 1, effects = [], taint = False } ) ]) parsed of
                     Ok mA ->
-                        case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (Dict.fromList [ ( "A.f", 1 ) ]) mA.defuns "A.f" of
+                        case QbeLower.lower rt False False False True True True True False QbeTypes.empty (Dict.fromList [ ( "A.f", 1 ) ]) mA.defuns "A.f" of
                             Err msg ->
                                 String.contains "rawCall to B.g" msg && String.contains "not a defun of this program" msg
 
@@ -3264,7 +3226,7 @@ checks rt =
                     prog =
                         rtProgram rt True True True ++ mA.defuns
                 in
-                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities prog) prog "A.f" of
+                case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities prog) prog "A.f" of
                     Ok mod ->
                         let
                             ssa =
@@ -7433,16 +7395,15 @@ pipeline is the identity, so this unwrap cannot fail while the T7 rows are
 green — and the dedicated T7 identity row asserts the `Ok` DIRECTLY, so a
 broken pipeline turns red there first, loudly.
 -}
--- run.js's DEFAULT hatch vector, (midGc, midDriver) — the pair
--- selfhost/NativeMain.elm:276 hard-codes as ( False, True ) and the pin row
--- above asserts.  MEASURED at A5: run.js:141 QBE_MIDGC = (env === '1') (OFF)
--- and run.js:148 QBE_MIDDRIVER = (env !== '0') (ON, flipped at A5).
--- This is a HAND-COPIED twin (Elm cannot read run.js) — when a default
--- moves, this constant, NativeMain.elm's vector and run.js move together,
--- and the row fails until they do.
-defaultHatchVector : ( Bool, Bool )
-defaultHatchVector =
-    ( False, True )
+-- run.js's DEFAULT midGc flag, the one remaining selfhost-vs-run.js hatch
+-- pair after B4 removed midDriver: run.js's QBE_MIDGC = (env === '1') (OFF),
+-- and selfhost/NativeMain.elm's hard-coded midGc = False must match.  This is
+-- a HAND-COPIED twin (Elm cannot read run.js) — when the default moves, this
+-- constant, NativeMain.elm's vector and run.js move together, and the row
+-- above fails until they do.
+defaultMidGc : Bool
+defaultMidGc =
+    False
 
 
 rtProgram : Rt.Runtime -> Bool -> Bool -> Bool -> List Defun
