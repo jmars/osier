@@ -5741,6 +5741,14 @@ defun Rt.hostAddPoll(hN : val, iN : val, roleN : val) -> val {
   if (mkbool(fd < 0)) {
     return mknil;                          // no fd for this role: the Zig's
   }                                        // `if (fd >= 0)` guard, ONE place
+                                           // NOTE FOR 7D: that guard rests on the
+                                           // NEGATIVE sentinel.  hostInit memsets
+                                           // the whole table, so a never-set
+                                           // `ex.outfd`/`ex.errfd` reads 0 — a
+                                           // VALID fd.  The exec leaf must write
+                                           // -1 into both when it spawns (the Zig's
+                                           // ExecEff defaults), or this guard
+                                           // registers stdin twice.
   word n = lp->npoll;
   if (mkbool(n >= 258)) {
     call Rt.dieErr(rawstr("host: more than 258 pollfds (MAX_EVALS * 2 + 2)"));
