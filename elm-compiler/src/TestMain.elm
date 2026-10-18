@@ -84,10 +84,10 @@ checks rt runtimeMidText =
       -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
       -- the frameZero loop), so an empty or truncated load turns it RED,
       -- loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (218 defuns — GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, and stage 7A added the 27-defun Mid effect host)"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (230 defuns — GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host and stage 7B its 12 leaf/deadline defuns)"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 218
+                List.length ast == 230
 
             Err _ ->
                 False
@@ -899,8 +899,8 @@ checks rt runtimeMidText =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 197 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram rt True True True) == 197
+    , check "rt program: 209 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
+        (List.length (rtProgram rt True True True) == 209
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
@@ -3693,7 +3693,7 @@ checks rt runtimeMidText =
     -- load".  Deliberately NOT a pin on the emitted bytes: the corpus gate
     -- holds those, and a site moving is a different claim (the STRUCTURAL
     -- oracle in the unit's report is the emitted `=w call` + `extsw` shape).
-    , check "cffi U5: runtime.mid declares its migrated libc surface with the C prototypes' RESULT widths, and no declared symbol is also a rawcallArity row"
+    , check "cffi U5 (+ stage 7B's poll): runtime.mid declares its migrated libc surface with the C prototypes' RESULT widths, and no declared symbol is also a rawcallArity row"
         (let
             decls =
                 declsOf runtimeMidText
@@ -3719,7 +3719,7 @@ checks rt runtimeMidText =
                         False
          in
          List.length externs
-            == 24
+            == 25
             && has "openat" Ast.FI32
             && has "waitpid" Ast.FI32
             && has "closedir" Ast.FI32
@@ -3730,6 +3730,7 @@ checks rt runtimeMidText =
             && has "read" Ast.FI64
             && has "lseek" Ast.FI64
             && has "memset" Ast.FPtr
+            && has "poll" Ast.FI32
             && has "_exit" Ast.FVoid
             && List.all
                 (\d ->
@@ -4046,13 +4047,30 @@ checks rt runtimeMidText =
         (hostArityPairs (defunText "Rt.hostArity" runtimeMidText)
             == [ ( "TaskSucceed", 2 ), ( "TaskFail", 2 ), ( "TaskAndThen", 3 ), ( "TaskOnError", 3 ), ( "TaskWrite", 2 ), ( "TaskReadLine", 1 ), ( "TaskReadFile", 2 ), ( "TaskWriteFile", 3 ), ( "TaskExec", 2 ), ( "TaskGetenv", 2 ), ( "TaskSetenv", 3 ), ( "TaskCd", 2 ), ( "TaskGetcwd", 1 ), ( "TaskGetpid", 1 ), ( "TaskGlob", 2 ), ( "TaskNow", 1 ), ( "TaskSleep", 2 ), ( "TaskQuit", 1 ), ( "TaskListDir", 2 ), ( "TaskStat", 2 ) ]
         )
-    , check "7A DISPATCH PIN: the dispatch implements exactly the SIX pure ctors (Succeed/Fail/AndThen/OnError/Now/Quit) and its fallthrough is Rt.hostDieUnported — the other 14 must be LOUD, never a silent drop (a dropped eval stalls) and never a silent completion (it would look like it worked)"
+    , check "7A DISPATCH PIN (stage 7B extended it to SIXTEEN): the dispatch implements exactly the pure six (Succeed/Fail/AndThen/OnError/Now/Quit) + 7B's synchronous ten (Write/ReadLine/WriteFile + the six prim leaves + Sleep) and its fallthrough is Rt.hostDieUnported — the other FOUR (ReadFile/Exec/ListDir/Stat) must be LOUD, never a silent drop (a dropped eval stalls) and never a silent completion (it would look like it worked)"
         (let
             handled =
                 ctorNames (defunText "Rt.hostDispatch" runtimeMidText)
          in
          List.sort handled
-            == List.sort [ "TaskAndThen", "TaskFail", "TaskNow", "TaskOnError", "TaskQuit", "TaskSucceed" ]
+            == List.sort
+                [ "TaskAndThen"
+                , "TaskCd"
+                , "TaskFail"
+                , "TaskGetcwd"
+                , "TaskGetenv"
+                , "TaskGetpid"
+                , "TaskGlob"
+                , "TaskNow"
+                , "TaskOnError"
+                , "TaskQuit"
+                , "TaskReadLine"
+                , "TaskSetenv"
+                , "TaskSleep"
+                , "TaskSucceed"
+                , "TaskWrite"
+                , "TaskWriteFile"
+                ]
             && String.contains "call Rt.hostDieUnported(nm);" (defunText "Rt.hostDispatch" runtimeMidText)
         )
     , check "7A SPLICE PIN: runtime.mid carries exactly THREE balanced QBE_MIDHOST regions (the applier's export line, Rt.main's host arm, the host's own defuns), each BEGIN followed by its END — run.js refuses the compile otherwise, so a half-spliced runtime cannot ship"
@@ -4091,6 +4109,87 @@ checks rt runtimeMidText =
         )
     , check "7A ERROR-MODEL PIN (gap G-J): the host's die path writes the 'qbe-rt: error: ' prefix the Zig host's rt_run_program printed — Rt.die has no prefix, so the port carries it (no fixture pins the shape today; the host's loud leaves are the second half of the oracle)"
         (String.contains "qbe-rt: error: " runtimeMidText && String.contains "defun Rt.hostDieErr(a : word, b : word) -> word {" runtimeMidText)
+    -- ==================== STAGE 7B: the synchronous leaves ====================
+    -- Text rows for the same reason 7A's are: the dispatch is a 20-arm if
+    -- chain and the deadline machinery is statement order, neither of which a
+    -- tree pin reads as cheaply as the defun's own text.  The BEHAVIOUR is the
+    -- fixtures' (arm A == arm B on nowunit + progio); these pin the SHAPE the
+    -- fixtures cannot see — which defun each leaf calls, and that a sleeping
+    -- eval completes NOTHING.
+    , check "7B LEAF PIN: each of the nine non-sleeping ctors 7B added calls the defun its Zig leaf reached — Write->hostWriteStr(1,..), ReadLine->hostReadLine, WriteFile->hostWriteFileLeaf, and the six prim leaves ONE `call` each to the existing Rt defun (the runPrim/varray dance has no Mid counterpart, so it must NOT reappear)"
+        (let
+            d =
+                defunText "Rt.hostDispatch" runtimeMidText
+         in
+         List.all (\t -> String.contains t d)
+            [ "call Rt.hostWriteStr(mknum(1), s);"
+            , "call Rt.hostReadLine(mknil)"
+            , "call Rt.hostWriteFileLeaf(path, contents);"
+            , "call Rt.getenv(a)"
+            , "call Rt.setenv(n2, v2)"
+            , "call Rt.cd(p3)"
+            , "call Rt.getcwd(mknil)"
+            , "call Rt.getpid(mknil)"
+            , "call Rt.glob(g1)"
+            ]
+            && not (List.any (\t -> String.contains t d) [ "vaInit", "vaPush", "execPrimitive" ])
+        )
+    , check "7B SLEEP PIN: TaskSleep SUSPENDS — it records an ABSOLUTE deadline (now + ms, both monotonic ms), sets etag = 3 and completes NOTHING (no hostCompleteOk in the arm); the etag ladder is the Zig enum's order 1 readFile / 2 exec / 3 sleep"
+        (case String.split "rawstr(\"TaskSleep\")" (defunText "Rt.hostDispatch" runtimeMidText) of
+            _ :: rest :: _ ->
+                case String.split "return mknil;" rest of
+                    body :: _ ->
+                        String.contains "lp->evals[i].etag = 3;" body
+                            && String.contains "lp->evals[i].sl.deadline = now + ms;" body
+                            && not (String.contains "hostComplete" body)
+                            && not (String.contains "vecstore" body)
+
+                    [] ->
+                        False
+
+            _ ->
+                False
+        )
+    , check "7B DEADLINE PIN: the driver's tail is step -> flush expired sleeps -> (runnable? loop) -> poll(0 fds, the nearest deadline) — the poll is what makes a SLEEPING eval wait instead of spinning, and -1 with no runnable work is a LOUD die, not the Zig's silent break"
+        (let
+            d =
+                defunText "Rt.hostRunLoop" runtimeMidText
+         in
+         List.all (\t -> String.contains t d)
+            [ "call Rt.hostStepAll(hN);"
+            , "call Rt.hostFlushExpiredSleeps(hN);"
+            , "call Rt.hostRunnableScan(hN, mknum(0))"
+            , "call Rt.hostPollTimeout(hN)"
+            , "rawcall poll(0, 0, to);"
+            , "a pending effect has no pollable fd"
+            ]
+        )
+    , check "7B DEADLINE PIN (the timeout's three arms): no pending sleep -> -1 (block), a due one -> 0, otherwise the remainder in ms CLAMPED to maxInt(i32) — the Zig's @min, without which a long sleep would wrap negative and block forever"
+        (let
+            d =
+                defunText "Rt.hostPollTimeout" runtimeMidText
+         in
+         String.contains "return mknum(-1);" d
+            && String.contains "if (mkbool(remain <= 0)) {" d
+            && String.contains "return mknum(2147483647);" d
+        )
+    , check "7B HATCH PIN (the two 7A defects this unit MEASURED): the Mid arm PRINTS AND EXITS itself — an expression arm's `return` does not return and a rawAbi defun cannot carry a mid-block guard-if, so without this epilogue the Zig host ran the program a SECOND time — and the hatch tests the byte '1', not pointer-presence, so QBE_MIDHOST=0 really selects the Zig host"
+        (let
+            region =
+                String.join "\n"
+                    (List.filter (\l -> String.contains "mhEnv" l || String.contains "mhOn" l || String.contains "mppc" l || String.contains "rawcall exit(0);" l || String.contains "rt_print_value(modelslot)" l)
+                        (String.lines runtimeMidText)
+                    )
+         in
+         String.contains "mkbool(byteload(mhEnv, 0) == 49)" region
+            && String.contains "rawcall rt_print_value(modelslot)" region
+            && String.contains "rawcall exit(0);" region
+            && String.contains "word isprog = rawcall rt_is_program(fptr);" runtimeMidText
+        )
+    , check "7B DECLARATION PIN: `poll` is DECLARED (C prototype, i32 result, i64 nfds) rather than added to rawcallArity — the plan's gap G-I route for the effect-loop port, and the reason Ast.rawcallArity must not grow a row for it (R-08 forbids both tables)"
+        (String.contains "extern poll(fds : ptr, nfds : i64, timeout : i32) -> i32;" runtimeMidText
+            && not (Dict.member "poll" Ast.rawcallArity)
+        )
 
     -- ==================== A2: the lowering (field/index/deref arms) ====================
     -- THE TREE-EQUALITY PIN is this unit's strongest oracle (plan §3, risk R1).
@@ -5611,45 +5710,45 @@ checks rt runtimeMidText =
             Ok s ->
                 List.sort (Dict.keys s)
                     == [ "Rt.*"
-                       , "Rt.+", "Rt.-", "Rt./", "Rt.<", "Rt.<-address", "Rt.<=", "Rt.=", "Rt.>", "Rt.>=", "Rt.@p"
-                       , "Rt.absvector", "Rt.address->", "Rt.allocRaw", "Rt.allocVector", "Rt.appendL", "Rt.apply"
-                       , "Rt.apply-at", "Rt.apply-tail", "Rt.applyGo", "Rt.applyOneRedir", "Rt.applyRedirects"
-                       , "Rt.applyTailGo", "Rt.asF", "Rt.assoc", "Rt.assocGo", "Rt.bitwise-and", "Rt.bitwise-not"
-                       , "Rt.bitwise-or", "Rt.bitwise-shift-left", "Rt.bitwise-shift-right"
-                       , "Rt.bitwise-shift-right-zf", "Rt.bitwise-xor", "Rt.bodyWriteGo", "Rt.bounce", "Rt.bounceGo"
-                       , "Rt.bytesBuild", "Rt.bytesEqGo", "Rt.bytesOf", "Rt.bytesToStr", "Rt.c-strlen"
-                       , "Rt.cStrCopyGo", "Rt.cStrEq", "Rt.cStrEqGo", "Rt.cStrEqLit", "Rt.cStrFill", "Rt.cStrLenGo"
-                       , "Rt.callArity", "Rt.cd", "Rt.char-code", "Rt.childBuiltin", "Rt.childCd", "Rt.childPwd"
-                       , "Rt.close", "Rt.closeCmdTmpfds", "Rt.closeOthersGo", "Rt.closePipeTmpfds", "Rt.closePipesGo"
-                       , "Rt.closure", "Rt.closureFill", "Rt.cn", "Rt.cn2", "Rt.collect", "Rt.con", "Rt.conFill"
-                       , "Rt.cons", "Rt.cons?", "Rt.copyWords", "Rt.copyWordsGo", "Rt.countL", "Rt.deepEq", "Rt.dgs"
-                       , "Rt.die", "Rt.dieErr", "Rt.echoGo", "Rt.empty?", "Rt.emptylist", "Rt.envHome", "Rt.epArgvGo"
+                       , "Rt.+", "Rt.-", "Rt./", "Rt.<", "Rt.<-address", "Rt.<="
+                       , "Rt.=", "Rt.>", "Rt.>=", "Rt.@p", "Rt.absvector", "Rt.address->"
+                       , "Rt.allocRaw", "Rt.allocVector", "Rt.appendL", "Rt.apply", "Rt.apply-at", "Rt.apply-tail"
+                       , "Rt.applyGo", "Rt.applyOneRedir", "Rt.applyRedirects", "Rt.applyTailGo", "Rt.asF", "Rt.assoc"
+                       , "Rt.assocGo", "Rt.bitwise-and", "Rt.bitwise-not", "Rt.bitwise-or", "Rt.bitwise-shift-left", "Rt.bitwise-shift-right"
+                       , "Rt.bitwise-shift-right-zf", "Rt.bitwise-xor", "Rt.bodyWriteGo", "Rt.bounce", "Rt.bounceGo", "Rt.bytesBuild"
+                       , "Rt.bytesEqGo", "Rt.bytesOf", "Rt.bytesToStr", "Rt.c-strlen", "Rt.cStrCopyGo", "Rt.cStrEq"
+                       , "Rt.cStrEqGo", "Rt.cStrEqLit", "Rt.cStrFill", "Rt.cStrLenGo", "Rt.callArity", "Rt.cd"
+                       , "Rt.char-code", "Rt.childBuiltin", "Rt.childCd", "Rt.childPwd", "Rt.close", "Rt.closeCmdTmpfds"
+                       , "Rt.closeOthersGo", "Rt.closePipeTmpfds", "Rt.closePipesGo", "Rt.closure", "Rt.closureFill", "Rt.cn"
+                       , "Rt.cn2", "Rt.collect", "Rt.con", "Rt.conFill", "Rt.cons", "Rt.cons?"
+                       , "Rt.copyWords", "Rt.copyWordsGo", "Rt.countL", "Rt.deepEq", "Rt.dgs", "Rt.die"
+                       , "Rt.dieErr", "Rt.echoGo", "Rt.empty?", "Rt.emptylist", "Rt.envHome", "Rt.epArgvGo"
                        , "Rt.epChain", "Rt.epCmd", "Rt.epCount", "Rt.epCountStdin", "Rt.epElem", "Rt.epFreeArgv"
-                       , "Rt.epFreeChains", "Rt.epFreeCmd", "Rt.epFreeCmds", "Rt.epFreeRedirs", "Rt.epNum"
-                       , "Rt.epPipeGo", "Rt.epPipeline", "Rt.epProg", "Rt.epProgGo", "Rt.epRedir", "Rt.epRedirsGo"
-                       , "Rt.epStr", "Rt.epSymIs", "Rt.epSymOf", "Rt.exec-plan", "Rt.exec-run", "Rt.execGo", "Rt.f/"
-                       , "Rt.fillGo", "Rt.floatCopy", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock"
-                       , "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.gcClearClasses", "Rt.gcDrain", "Rt.gcInit", "Rt.gcMarkPtr"
-                       , "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcNum", "Rt.gcNumOut", "Rt.gcScanValueArray"
-                       , "Rt.gcSweep", "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo"
-                       , "Rt.globIsDot", "Rt.globIsDotDot", "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo"
-                       , "Rt.globSortShift", "Rt.globStrLess", "Rt.halt", "Rt.hostArity", "Rt.hostCall"
-                       , "Rt.hostClearFrom", "Rt.hostClearGo", "Rt.hostCompleteErr", "Rt.hostCompleteOk"
-                       , "Rt.hostDeactivate", "Rt.hostDeliver", "Rt.hostDieErr", "Rt.hostDieUnported"
-                       , "Rt.hostDispatch", "Rt.hostInit", "Rt.hostIsProgram", "Rt.hostNowMs", "Rt.hostPushFrame"
-                       , "Rt.hostRun", "Rt.hostRunLoop", "Rt.hostSpawn", "Rt.hostSpawnAt", "Rt.hostSpawnFind"
-                       , "Rt.hostSpawnFromCmd", "Rt.hostStep", "Rt.hostStepAll", "Rt.hostStepAllGo", "Rt.hostStepGo"
-                       , "Rt.intern", "Rt.isChildBuiltin", "Rt.main", "Rt.memGo", "Rt.metaGo", "Rt.mkTmpAt"
-                       , "Rt.nameBytes", "Rt.numText", "Rt.number?", "Rt.open", "Rt.openBodyTmpfile", "Rt.parseArgsGo"
-                       , "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo", "Rt.readFull", "Rt.recAppend"
-                       , "Rt.recAppendDataGo", "Rt.recAppendFind", "Rt.recAppendNamesGo", "Rt.recGet", "Rt.recGetGo"
-                       , "Rt.recInsert", "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd", "Rt.recUpdCopy"
-                       , "Rt.recUpdFind", "Rt.repGo", "Rt.repeat", "Rt.revGo", "Rt.runBuiltinInprocess", "Rt.setenv"
-                       , "Rt.shen.bytes->string", "Rt.shen.str->bytes", "Rt.snd", "Rt.str", "Rt.strOf", "Rt.string?"
-                       , "Rt.subGo", "Rt.substring", "Rt.symEq", "Rt.symLess", "Rt.symToStr", "Rt.tail-known"
-                       , "Rt.toI32", "Rt.value", "Rt.vecEq", "Rt.wRaw", "Rt.wStr", "Rt.waitStatusCode", "Rt.wireCmdGo"
-                       , "Rt.wirePipeGo", "Rt.write-byte"
-                       ]
+                       , "Rt.epFreeChains", "Rt.epFreeCmd", "Rt.epFreeCmds", "Rt.epFreeRedirs", "Rt.epNum", "Rt.epPipeGo"
+                       , "Rt.epPipeline", "Rt.epProg", "Rt.epProgGo", "Rt.epRedir", "Rt.epRedirsGo", "Rt.epStr"
+                       , "Rt.epSymIs", "Rt.epSymOf", "Rt.exec-plan", "Rt.exec-run", "Rt.execGo", "Rt.f/"
+                       , "Rt.fillGo", "Rt.floatCopy", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.gcAlloc"
+                       , "Rt.gcAllocGo", "Rt.gcClearClasses", "Rt.gcDrain", "Rt.gcInit", "Rt.gcMarkPtr", "Rt.gcMarkRoots"
+                       , "Rt.gcMarkValue", "Rt.gcNum", "Rt.gcNumOut", "Rt.gcScanValueArray", "Rt.gcSweep", "Rt.getcwd"
+                       , "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot", "Rt.globIsDotDot"
+                       , "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess", "Rt.halt"
+                       , "Rt.hostArity", "Rt.hostCall", "Rt.hostClearFrom", "Rt.hostClearGo", "Rt.hostCompleteErr", "Rt.hostCompleteOk"
+                       , "Rt.hostDeactivate", "Rt.hostDeliver", "Rt.hostDieErr", "Rt.hostDieUnported", "Rt.hostDispatch", "Rt.hostFlushExpiredSleeps"
+                       , "Rt.hostInit", "Rt.hostIsProgram", "Rt.hostLineGrow", "Rt.hostNearestSleep", "Rt.hostNowMs", "Rt.hostPollTimeout"
+                       , "Rt.hostPushFrame", "Rt.hostReadLine", "Rt.hostReadLineLoop", "Rt.hostRun", "Rt.hostRunLoop", "Rt.hostRunnableScan"
+                       , "Rt.hostSleepComplete", "Rt.hostSleepScan", "Rt.hostSpawn", "Rt.hostSpawnAt", "Rt.hostSpawnFind", "Rt.hostSpawnFromCmd"
+                       , "Rt.hostStep", "Rt.hostStepAll", "Rt.hostStepAllGo", "Rt.hostStepGo", "Rt.hostWriteAll", "Rt.hostWriteFileLeaf"
+                       , "Rt.hostWriteStr", "Rt.intern", "Rt.isChildBuiltin", "Rt.main", "Rt.memGo", "Rt.metaGo"
+                       , "Rt.mkTmpAt", "Rt.nameBytes", "Rt.numText", "Rt.number?", "Rt.open", "Rt.openBodyTmpfile"
+                       , "Rt.parseArgsGo", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo", "Rt.readFull", "Rt.recAppend"
+                       , "Rt.recAppendDataGo", "Rt.recAppendFind", "Rt.recAppendNamesGo", "Rt.recGet", "Rt.recGetGo", "Rt.recInsert"
+                       , "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd", "Rt.recUpdCopy", "Rt.recUpdFind", "Rt.repGo"
+                       , "Rt.repeat", "Rt.revGo", "Rt.runBuiltinInprocess", "Rt.setenv", "Rt.shen.bytes->string", "Rt.shen.str->bytes"
+                       , "Rt.snd", "Rt.str", "Rt.strOf", "Rt.string?", "Rt.subGo", "Rt.substring"
+                       , "Rt.symEq", "Rt.symLess", "Rt.symToStr", "Rt.tail-known", "Rt.toI32", "Rt.value"
+                       , "Rt.vecEq", "Rt.wRaw", "Rt.wStr", "Rt.waitStatusCode", "Rt.wireCmdGo", "Rt.wirePipeGo"
+                       , "Rt.write-byte"
+                     ]
 
             Err _ ->
                 False
@@ -5707,7 +5806,7 @@ checks rt runtimeMidText =
     -- is now the append below; the loud Err moved to the key-agreement walk
     -- (row C), which is the collision/rename class the orphan check guarded.
     , check
-        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the forty-seven appended keys (the twenty stage-6 ABI keys + stage 7A's twenty-seven host defuns) (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
+        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the fifty-nine appended keys (the twenty stage-6 ABI keys + the thirty-nine host defuns of stages 7A/7B) (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -5729,7 +5828,23 @@ checks rt runtimeMidText =
                             in
                             case Rt.spliceSurface s union of
                                 Ok spliced ->
-                                    List.map .key spliced == List.map .key union ++ [ "Rt.apply", "Rt.apply-at", "Rt.apply-tail", "Rt.applyGo", "Rt.applyTailGo", "Rt.bounce", "Rt.bounceGo", "Rt.cStrEq", "Rt.cStrEqGo", "Rt.callArity", "Rt.copyWords", "Rt.copyWordsGo", "Rt.die", "Rt.dieErr", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.halt", "Rt.hostArity", "Rt.hostCall", "Rt.hostClearFrom", "Rt.hostClearGo", "Rt.hostCompleteErr", "Rt.hostCompleteOk", "Rt.hostDeactivate", "Rt.hostDeliver", "Rt.hostDieErr", "Rt.hostDieUnported", "Rt.hostDispatch", "Rt.hostInit", "Rt.hostIsProgram", "Rt.hostNowMs", "Rt.hostPushFrame", "Rt.hostRun", "Rt.hostRunLoop", "Rt.hostSpawn", "Rt.hostSpawnAt", "Rt.hostSpawnFind", "Rt.hostSpawnFromCmd", "Rt.hostStep", "Rt.hostStepAll", "Rt.hostStepAllGo", "Rt.hostStepGo", "Rt.main", "Rt.metaGo", "Rt.parseArgsGo", "Rt.tail-known" ]
+                                    List.map .key spliced == List.map .key union ++
+                                               [ "Rt.apply", "Rt.apply-at", "Rt.apply-tail", "Rt.applyGo",
+                                                 "Rt.applyTailGo", "Rt.bounce", "Rt.bounceGo", "Rt.cStrEq",
+                                                 "Rt.cStrEqGo", "Rt.callArity", "Rt.copyWords", "Rt.copyWordsGo",
+                                                 "Rt.die", "Rt.dieErr", "Rt.frame-enter", "Rt.frame-leave",
+                                                 "Rt.frameBlock", "Rt.halt", "Rt.hostArity", "Rt.hostCall",
+                                                 "Rt.hostClearFrom", "Rt.hostClearGo", "Rt.hostCompleteErr", "Rt.hostCompleteOk",
+                                                 "Rt.hostDeactivate", "Rt.hostDeliver", "Rt.hostDieErr", "Rt.hostDieUnported",
+                                                 "Rt.hostDispatch", "Rt.hostFlushExpiredSleeps", "Rt.hostInit", "Rt.hostIsProgram",
+                                                 "Rt.hostLineGrow", "Rt.hostNearestSleep", "Rt.hostNowMs", "Rt.hostPollTimeout",
+                                                 "Rt.hostPushFrame", "Rt.hostReadLine", "Rt.hostReadLineLoop", "Rt.hostRun",
+                                                 "Rt.hostRunLoop", "Rt.hostRunnableScan", "Rt.hostSleepComplete", "Rt.hostSleepScan",
+                                                 "Rt.hostSpawn", "Rt.hostSpawnAt", "Rt.hostSpawnFind", "Rt.hostSpawnFromCmd",
+                                                 "Rt.hostStep", "Rt.hostStepAll", "Rt.hostStepAllGo", "Rt.hostStepGo",
+                                                 "Rt.hostWriteAll", "Rt.hostWriteFileLeaf", "Rt.hostWriteStr", "Rt.main",
+                                                 "Rt.metaGo", "Rt.parseArgsGo", "Rt.tail-known"
+                                               ]
 
                                 Err _ ->
                                     False
@@ -9807,7 +9922,8 @@ spliceRegionOut src =
     String.join "\n" (List.reverse (Tuple.second (List.foldl step ( False, [] ) (String.lines src))))
 
 
-{-| The host's 27 defun keys — the enumeration `Rt.hostSeeds` must close over.
+{-| The host's 39 defun keys — the enumeration `Rt.hostSeeds` must close over.
+(27 from stage 7A + stage 7B's 12 leaf/deadline defuns.)
 -}
 hostDefunKeys : List String
 hostDefunKeys =
@@ -9838,6 +9954,18 @@ hostDefunKeys =
     , "Rt.hostStepAll"
     , "Rt.hostRunLoop"
     , "Rt.hostRun"
+    , "Rt.hostWriteAll"
+    , "Rt.hostWriteStr"
+    , "Rt.hostWriteFileLeaf"
+    , "Rt.hostLineGrow"
+    , "Rt.hostReadLineLoop"
+    , "Rt.hostReadLine"
+    , "Rt.hostSleepScan"
+    , "Rt.hostNearestSleep"
+    , "Rt.hostPollTimeout"
+    , "Rt.hostSleepComplete"
+    , "Rt.hostFlushExpiredSleeps"
+    , "Rt.hostRunnableScan"
     ]
 
 

@@ -162,6 +162,22 @@ run2() {
   add_check natrun2 "$name" "$fn" "$exp" "" "" "$FIX/$name.elm" "" run2 "$FIX/$aux.elm $FIX/$name.elm"
 }
 
+# run_hostio <name> <fn> <expected> <stdin-file>
+#
+# STAGE 7B's arm-B row: a `Platform.program` fixture driven through the MID
+# EFFECT HOST.  Like run_io it redirects stdin, and like run_io it inherits
+# QBE_MIDHOST, so the SAME row is arm A (unset -> the Zig host) or arm B
+# (=1 -> the Mid host) with no second registration.
+#
+# It registers NO compile group, DELIBERATELY: the corpus baseline pins the
+# batch artifact set (159 groups), so a new .ssa group would move the corpus
+# for a fixture whose point is a RUNTIME differential.  Same shape as
+# `sigdeath`/`natdepth`: the native row builds its own binary on demand.
+run_hostio() {
+  local name="$1" fn="$2" exp="$3" stdin="$4"
+  add_check natio "$name" "$fn" "$exp" "" "$stdin" "$FIX/$name.elm" "" run_hostio "$FIX/$name.elm"
+}
+
 # run_io <name> <fn> <expected> <stdin-file>
 #
 # Like run(), but the native binary's stdin is redirected from
@@ -198,10 +214,11 @@ compile_error() {
   add_check err "$name" "" "$exp" "" "" "$FIX/$name.elm" "$OUT/$name.ssa" compile_error
 }
 
-# out_cmp <name>: compare the raw file the fixture's native run wrote (iofile's hello.out)
-# against its expected bytes.
+# out_cmp <name> <file>: compare the raw file the fixture's native run wrote
+# (under "$FIX/out/") against "expected/<file>.txt".  <file> rides in the
+# COUT column, which no other kind uses.
 out_cmp() {
-  add_check cmp "$1" "" "" "" "" "" "" out_cmp
+  add_check cmp "$1" "" "" "" "" "" "$2" out_cmp
 }
 
 # sigdeath <name> <fn> <expected>
@@ -331,7 +348,7 @@ run mxstring  main   "$(read_expected mxstring)"
 # iofile: RdFile round-trip — the final String model is printed (printValue
 # wraps it in quotes) AND the raw file is written to out/hello.out.
 run_io iofile  main   "$(read_expected iofile)" hello.txt
-out_cmp iofile
+out_cmp iofile hello.out
 # ioecho: readLine echo-until-quit — echoed lines + the final Int count.
 run_io ioecho  main   "$(read_expected ioecho)" echo.txt
 # readfile (GROUP 3B-3): read-file-as-string's four arms in one chain —
@@ -423,6 +440,14 @@ run p2pad       main   "$(read_expected p2pad)"
 # nowunit: sleep 30 then now-diff >= 25 (CLOCK_MONOTONIC, not the wall-clock
 # get-time prim) + a two-sleep ORDER chain (sequential sleeps take >= 40ms).
 run nowunit     main   "$(read_expected nowunit)"
+# progio (STAGE 7B): the SYNCHRONOUS leaves of the Mid effect host under a real
+# Platform.program — readLine (stdin "hello"), writeString (fd 1), setenv +
+# getenv, getpid, writeFile (out/progio.out, compared below) and cd + getcwd,
+# with a 15 ms sleep composed into the chain so the deadline machinery runs
+# between them.  Registered WITHOUT a compile group (see run_hostio) and
+# inheriting QBE_MIDHOST, so this ONE row is arm A and arm B.
+run_hostio progio main "$(read_expected progio)" echo.txt
+out_cmp progio progio.out
 
 # --- S6 (M-FOUNDATION): host dir/stat leaves (getdents64 + fstatat) ---
 # dirunit: Io.listDir over input/dirlist — '.'/'..' skipped, isDir from dirent
@@ -797,10 +822,10 @@ dispatch() {
   args="${CARG[$i]}"; stdin="${CSTDIN[$i]}"; fixfile="${CFIX[$i]}"; outfile="${COUT[$i]}"
   case "$kind" in
     cmp)
-      if cmp -s "$FIX/out/hello.out" "$FIX/expected/hello.out.txt"; then
-        echo "PASS iofile out-file cmp"; pass=$((pass+1))
+      if cmp -s "$FIX/out/$outfile" "$FIX/expected/$outfile.txt"; then
+        echo "PASS $name out-file cmp"; pass=$((pass+1))
       else
-        echo "FAIL iofile out-file cmp: out/hello.out != expected/hello.out.txt"; fail=$((fail+1))
+        echo "FAIL $name out-file cmp: out/$outfile != expected/$outfile.txt"; fail=$((fail+1))
       fi
       ;;
     ok)

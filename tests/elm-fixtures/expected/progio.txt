@@ -1,0 +1,2 @@
+echo:hello
+"hello|set|pid-ok|/tmp"
