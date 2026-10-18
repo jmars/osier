@@ -231,14 +231,19 @@ load source =
 
                 -- the ACTIVE surface defuns for one flag combo, keyed for the
                 -- splice.  Parse is the per-process `ast` above; check and
-                -- lower run here (flag-dependent).
+                -- lower run here (flag-dependent).  DECL-CARRYING (midlang-u5):
+                -- `lowerModule` threads the file's `struct`/`enum` decls into the
+                -- lowering state, which the field/index arms read — without them
+                -- runtime.mid's `region->f` accesses cannot lower at all.  For a
+                -- decl-less module the two entries are the same function
+                -- (`lowerAll decls [] defuns`, decls = []).
                 surf flags =
                     case RtCheck.checkModule externTypes flags module_ of
                         Err msg ->
                             Err msg
 
                         Ok () ->
-                            case Mid.RtLang.LowerToIr.lowerProgram ast of
+                            case Mid.RtLang.LowerToIr.lowerModule module_ of
                                 Err msg ->
                                     Err msg
 

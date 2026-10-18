@@ -67,14 +67,14 @@ runTests : String -> Cmd Msg
 runTests runtimeMidText =
     case Rt.load runtimeMidText of
         Ok rt ->
-            report (String.join "\n" (checks rt))
+            report (String.join "\n" (checks rt runtimeMidText))
 
         Err msg ->
             report ("FAIL runtime.mid load: " ++ msg ++ "\nFAIL runtime.mid anti-empty (the census rows could not run)")
 
 
-checks : Rt.Runtime -> List String
-checks rt =
+checks : Rt.Runtime -> String -> List String
+checks rt runtimeMidText =
     [ -- M1 ANTI-EMPTY: the census rows below read `rt` (the once-per-process
       -- load of runtime.mid).  If test-run.js (or run.js) ever stops reading
       -- the file, the flag text is empty, `Rt.load` would parse nothing, and
@@ -3151,6 +3151,43 @@ checks rt =
     , check "A1 layout: a val field is 5 words inline (one val field sizes the struct at 5)"
         (Check.sizeofStruct (declsOf "struct V { v : val; }") "V" == Just 5)
 
+    -- ==================== U5: runtime.mid's REGION layout (midlang-u5) ====================
+    -- The pins above check the LAYOUT TABLE on a copy of the declaration.  These
+    -- read runtime.mid's OWN `struct Region` — the declaration the collector's
+    -- `region->f` accesses resolve against — so a reordered/renamed/padded field
+    -- in the runtime fails HERE and not as wrong output.  The expected numbers
+    -- are the word slots the code spelled as `wstore(base, k, ..)` /
+    -- `wload(regionW, k)` BEFORE the re-spelling: the migration is only sound if
+    -- every name still lands on the slot that code used (the pre-U5 emission is
+    -- the independent record of the mapping, and the corpus gate holds the
+    -- accesses to it).  MEASURED: slot 7 is a HOLE — nothing in the runtime or in
+    -- tools/qbe/hostshim.zig reads or writes region word 7, which is why it is a
+    -- named `_pad` and not part of the 8/9 staging pair.
+    , check "U5 LAYOUT PIN: runtime.mid's own `struct Region` puts every field at the word slot the collector used before the re-spelling (magic 0, classTab 1, heapStart 2, cursor 3, heapEnd 4, markTop 5, markEnd 6, _pad 7, kind 8, count 9, heapBytes 10, allocated 11, numClass 12)"
+        (let
+            d =
+                declsOf runtimeMidText
+
+            names =
+                [ "magic", "classTab", "heapStart", "cursor", "heapEnd", "markTop", "markEnd", "_pad", "kind", "count", "heapBytes", "allocated", "numClass" ]
+         in
+         List.map (\n -> Check.fieldOffset d "Region" n) names == List.map Just (List.range 0 12)
+        )
+    , check "U5 LAYOUT PIN: sizeof(Region) == 13 words in runtime.mid's own declaration (slots 0..12 — the mark stack starts at word 64, so it is NOT a field)"
+        (Check.sizeofStruct (declsOf runtimeMidText) "Region" == Just 13)
+    , check "U5 ACCEPT: the collector's `*Region` binder is the typed VIEW over the word it already held — `*Region r = payload(v, 0); r->cursor` loads the same node as `word r = payload(v, 0); wload(r, 3)`, and `wload(r, <computed>)` (the mark stack) still type-checks on the POINTER, which is what lets tier (i) convert only the constant-offset sites"
+        (case
+            ( lowlModuleBody "struct R { a : word; b : word; c : word; d : word; }\ndefun Rt.a(v : val, i : word) -> word {\n  *R r = payload(v, 0);\n  return r->d + wload(r, i);\n}"
+            , lowlBody "defun Rt.a(v : val, i : word) -> word {\n  word r = payload(v, 0);\n  return wload(r, 3) + wload(r, i);\n}"
+            )
+         of
+            ( Ok typed, Ok plain ) ->
+                canon typed == canon plain
+
+            _ ->
+                False
+        )
+
     -- ==================== A2: the lowering (field/index/deref arms) ====================
     -- THE TREE-EQUALITY PIN is this unit's strongest oracle (plan §3, risk R1).
     -- A field access IS its `wload` spelling: the defun written with `p->f` and
@@ -5509,7 +5546,7 @@ checks rt =
                 False
 
             Ok ast ->
-                case LowerToIr.lowerProgram ast of
+                case Result.map Tuple.second (loweredRuntime runtimeMidText) of
                     Err _ ->
                         False
 
@@ -5535,7 +5572,7 @@ checks rt =
                 False
 
             Ok ast ->
-                case LowerToIr.lowerProgram ast of
+                case Result.map Tuple.second (loweredRuntime runtimeMidText) of
                     Err _ ->
                         False
 
@@ -5590,7 +5627,7 @@ checks rt =
                 False
 
             Ok ast ->
-                case LowerToIr.lowerProgram ast of
+                case Result.map Tuple.second (loweredRuntime runtimeMidText) of
                     Err _ ->
                         False
 
@@ -5625,7 +5662,7 @@ checks rt =
                 False
 
             Ok ast ->
-                case LowerToIr.lowerProgram ast of
+                case Result.map Tuple.second (loweredRuntime runtimeMidText) of
                     Err _ ->
                         False
 
@@ -8514,6 +8551,25 @@ declsOf src =
 
         Err _ ->
             []
+
+
+{-| U5 — the runtime's own defuns lowered through the DECL-CARRYING entry the
+runtime lane uses (`LowerToIr.lowerModule`, the same call `Mid.Rt.load`'s
+`surf` makes).  The guard-selection rows compare live runtime trees against
+`rt.surf`, so they must lower through the SAME entry: a runtime body that
+needs its file-scoped decls (midlang-u5's `region->f` accesses need
+`struct Region`) lowers to `Err` through the decl-less `lowerProgram`, which
+made those rows FAIL for a reason that had nothing to do with guard selection.
+-}
+loweredRuntime : String -> Result String ( Ast.Program, List Defun )
+loweredRuntime src =
+    case Parse.parseModule src of
+        Err e ->
+            Err e
+
+        Ok module_ ->
+            Result.map (\defuns -> ( module_.defuns, defuns ))
+                (LowerToIr.lowerModule module_)
 
 
 {-| Contract-4 return-taint floor (M4-enforce U1): parse an Elm module, then run
