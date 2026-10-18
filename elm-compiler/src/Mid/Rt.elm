@@ -166,7 +166,7 @@ load source =
                 -- splice.  Parse is the per-process `ast` above; check and
                 -- lower run here (flag-dependent).
                 surf flags =
-                    case RtCheck.checkProgram externTypes flags ast of
+                    case RtCheck.checkModule externTypes flags module_ of
                         Err msg ->
                             Err msg
 

@@ -3032,20 +3032,124 @@ checks rt =
                 False
         )
 
-    -- the loud REJECTIONS-TODAY: a struct/pointer form REACHING the existing
-    -- checker fails loudly (U2's J11-J14 / J12 coercion are the next units)
-    , checkErr "check U1: field access REACHING the checker is a loud U1 reject (J13 is U2)" "U1"
-        "defun Rt.f(p: *word) -> word {\n  return p->f;\n}"
-    , checkErr "check U1: index access REACHING the checker is a loud U1 reject" "U1"
-        "defun Rt.f(p: *word) -> word {\n  return p[0];\n}"
-    , checkErr "check U1: deref REACHING the checker is a loud U1 reject" "U1"
-        "defun Rt.f(p: *word) -> word {\n  return *p;\n}"
-    , checkErr "check U1: a field store REACHING the checker is a loud U1 reject" "U1"
-        "defun Rt.f(p: *word) -> word {\n  p->f = 1;\n  return 0;\n}"
-    , checkErr "check U1: an index store REACHING the checker is a loud U1 reject" "U1"
-        "defun Rt.f(p: *word) -> word {\n  p[0] = 1;\n  return 0;\n}"
-    , checkErr "check U1: a pointer-typed binder is REJECTED by the EXISTING J1 class check (declares *word but initializer is word — the wall J12 replaces)" "declares *word"
-        "defun Rt.f() -> word {\n  *word p = 0;\n  return p;\n}"
+    -- ==================== A1: the checker (J11-J14, the U1 reject arms become real checks) ====================
+    -- Each positive row parses a MODULE (decls + defuns) and runs Check.checkModule;
+    -- each negative row pins the judgment's message fragment, so a parse failure
+    -- (which has no fragment) cannot pass the row vacuously.
+
+    -- J13 field/index/deref: the accepted forms
+    , checkOkModule "check A1: field access yields the FIELD's class (a word field reads as word)"
+        "struct S { f : word; }\ndefun Rt.g(p: *S) -> word {\n  return p->f;\n}"
+    , checkOkModule "check A1: a val field reads as val (the field class, not a word)"
+        "struct S { vf : val; }\ndefun Rt.g(p: *S) -> val {\n  return p->vf;\n}"
+    , checkOkModule "check A1: index access on *word reads a word (the wload stride)"
+        "defun Rt.g(p: *word) -> word {\n  return p[0];\n}"
+    , checkOkModule "check A1: index access on *val reads a val (the vecload stride)"
+        "defun Rt.g(p: *val) -> val {\n  return p[0];\n}"
+    , checkOkModule "check A1: index access on *S reads the word at the struct-scaled element base"
+        "struct S { f : word; }\ndefun Rt.g(p: *S) -> word {\n  return p[1];\n}"
+    , checkOkModule "check A1: deref *p is *word only, yielding word"
+        "defun Rt.g(p: *word) -> word {\n  return *p;\n}"
+    , checkOkModule "check A1: index store on *word (wstore shape)"
+        "defun Rt.g(p: *word) -> word {\n  p[0] = 1;\n  return 0;\n}"
+    , checkOkModule "check A1: index store on *val (vecstore shape)"
+        "defun Rt.g(p: *val, v: val) -> val {\n  p[0] = v;\n  return v;\n}"
+    , checkOkModule "check A1: field store of a word into a word field"
+        "struct S { f : word; }\ndefun Rt.g(p: *S) -> word {\n  p->f = 1;\n  return 0;\n}"
+    , checkOkModule "check A1: field store of a val into a val field"
+        "struct S { vf : val; }\ndefun Rt.g(p: *S, v: val) -> val {\n  p->vf = v;\n  return v;\n}"
+    , checkOkModule "check A1: a chained field-then-index a->tab[i] composes"
+        "struct S { tab : *word; }\ndefun Rt.g(p: *S) -> word {\n  return p->tab[0];\n}"
+
+    -- J12: the one-way coercion matrix — the accepted directions
+    , checkOkModule "check A1 coercion: word -> *T at a typed binder (the view-cast)"
+        "struct S { f : word; }\ndefun Rt.g(v: val) -> word {\n  *S p = payload(v, 0);\n  return p->f;\n}"
+    , checkOkModule "check A1 coercion: *T -> word at a typed binder (a pointer is a word)"
+        "struct S { f : word; }\ndefun Rt.g(v: val) -> word {\n  *S p = payload(v, 0);\n  word w = p;\n  return w;\n}"
+    , checkOkModule "check A1 coercion: *S -> *word (the universal raw view)"
+        "struct S { f : word; }\ndefun Rt.g(v: val) -> word {\n  *S p = payload(v, 0);\n  *word w = p;\n  return w[0];\n}"
+    , checkOkModule "check A1 coercion: pointer comparison p == 0 / p != 0 is address comparison"
+        "struct S { f : word; }\ndefun Rt.g(p: *S) -> val {\n  return mkbool(p == 0);\n}"
+
+    -- J11/J14: accepted declarations
+    , checkOkModule "check A1: self-reference BY POINTER (*S) is legal (the only recursion)"
+        "struct Hdr { flags : word; next : *Hdr; }\ndefun Rt.g(h: *Hdr) -> word {\n  return h->flags;\n}"
+    , checkOkModule "check A1: a forward struct pointer reference resolves order-independently"
+        "struct A { b : *B; }\nstruct B { x : word; }\ndefun Rt.g(a: *A) -> word {\n  return a->b->x;\n}"
+    , checkOkModule "check A1: an enum declaration builds its table (no use site yet)"
+        "enum RootKind { ptr = 0; value = 1; }\ndefun Rt.g() -> word {\n  return 0;\n}"
+
+    -- the named rejections, each pinning the judgment fragment
+    , checkErrModule "check A1 reject: a val into a WORD FIELD is a J13 reject" "needs word, got val"
+        "struct S { f : word; }\ndefun Rt.g(v: val) -> word {\n  *S p = 0;\n  p->f = v;\n  return 0;\n}"
+    , checkErrModule "check A1 reject: a val READ AS A WORD (a val field into a word binder) is a J1 reject" "initializer is val"
+        "struct S { vf : val; }\ndefun Rt.g(p: *S) -> word {\n  word x = p->vf;\n  return x;\n}"
+    , checkErrModule "check A1 reject: *S pointer arithmetic (p + 1 — the off-by-one firewall) is a J12 reject" "J12: pointer arithmetic"
+        "struct S { f : word; }\ndefun Rt.g(p: *S) -> word {\n  return p + 1;\n}"
+    , checkErrModule "check A1 reject: a float struct field is a J11 reject (no raw f64 load node)" "float field"
+        "struct S { f : float; }\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , checkErrModule "check A1 reject: a self-by-value struct is UNSPELLABLE (structural — the bare-name field is a parse reject, no struct-value Type exists)" "expected a type"
+        "struct S { next : S; }\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , checkErrModule "check A1 reject: an unknown field is a J13 reject" "has no field"
+        "struct S { f : word; }\ndefun Rt.g(p: *S) -> word {\n  return p->g;\n}"
+    , checkErrModule "check A1 reject: an unknown struct (a *Region binder with no decl) is a J11 reject" "names no declared struct"
+        "defun Rt.g(v: val) -> word {\n  *Region p = payload(v, 0);\n  return 0;\n}"
+    , checkErrModule "check A1 reject: cross-struct cast *A -> *B is a J12 reject (go through a word binder)" "declares *B"
+        "struct A { x : word; }\nstruct B { y : word; }\ndefun Rt.g(a: *A) -> word {\n  *B b = a;\n  return b->y;\n}"
+    , checkErrModule "check A1 reject: *word -> *S is a J12 reject (go through a word binder)" "declares *S"
+        "struct S { f : word; }\ndefun Rt.g(w: *word) -> word {\n  *S s = w;\n  return 0;\n}"
+    , checkErrModule "check A1 reject: *val -> *S is a J12 reject (go through a word binder)" "declares *S"
+        "struct S { f : word; }\ndefun Rt.g(v: *val) -> word {\n  *S s = v;\n  return 0;\n}"
+    , checkErrModule "check A1 reject: a word into a VAL slot (index store on *val) is a J13 reject" "needs val, got word"
+        "defun Rt.g(p: *val) -> val {\n  p[0] = 1;\n  return mknil;\n}"
+    , checkErrModule "check A1 reject: a word into a VAL FIELD is a J13 reject" "needs val, got word"
+        "struct S { vf : val; }\ndefun Rt.g(p: *S) -> word {\n  p->vf = 1;\n  return 0;\n}"
+    , checkErrModule "check A1 reject: deref on a *S is a J13 reject (*p is *word only)" "deref '*p' is '*word' only"
+        "struct S { f : word; }\ndefun Rt.g(p: *S) -> word {\n  return *p;\n}"
+    , checkErrModule "check A1 reject: bare if(p) on a pointer is a J1 reject (write the compare inline)" "must be val or word"
+        "struct S { f : word; }\ndefun Rt.g(p: *S) -> word {\n  if (p) { return 1; } else { return 0; }\n}"
+    , checkErrModule "check A1 reject: field access on a *word is a J13 reject (needs a struct pointer)" "field access needs a struct pointer"
+        "defun Rt.g(p: *word) -> word {\n  return p->f;\n}"
+    , checkErrModule "check A1 reject: a val index (p[v]) is a J13 reject (the index is a word offset)" "index must be a word"
+        "defun Rt.g(p: *word, v: val) -> word {\n  return p[v];\n}"
+    , checkErrModule "check A1 reject: a duplicate struct name is a J11 reject (one file-scoped namespace)" "declared more than once"
+        "struct S { f : word; }\nstruct S { g : word; }\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , checkErrModule "check A1 reject: a struct/enum name collision is a J11/J14 reject" "declared more than once"
+        "struct S { f : word; }\nenum S { A = 0; }\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , checkErrModule "check A1 reject: a duplicate field name is a J11 reject" "more than once"
+        "struct S { f : word; f : word; }\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , checkErrModule "check A1 reject: a duplicate enum constant is a J14 reject" "more than once"
+        "enum E { A = 0; A = 1; }\ndefun Rt.g() -> word {\n  return 0;\n}"
+
+    -- LAYOUT pins: sizes and offsets computed from the table, against runtime.mid's actuals
+    -- (gcInit writes the region's words 0..12 with a hole at word 7; frame-enter writes
+    -- hdr words 0..3 of the 40-byte = 5-word header, base = hdr + 40).
+    , check "A1 layout: sizeof(Region) == 13 words (the gcInit wstore offsets 0..12 + the word-7 pad hole)"
+        (Check.sizeofStruct
+            (declsOf "struct Region { magic : word; classTab : *word; heapStart : word; cursor : word; heapEnd : word; markTop : word; markEnd : word; _pad : word; kind : word; count : word; heapBytes : word; allocated : word; numClass : word; }")
+            "Region"
+            == Just 13
+        )
+    , check "A1 layout: sizeof(FrameHdr) == 5 words (frameBlock's 40-byte header: live/wm/next/freelistNext/slots)"
+        (Check.sizeofStruct
+            (declsOf "struct FrameHdr { live : word; wm : word; next : word; freelistNext : word; slots : word; }")
+            "FrameHdr"
+            == Just 5
+        )
+    , check "A1 layout: Region._pad is at word 7 and Region.numClass at word 12 (the pad hole does not shift later fields)"
+        (Check.fieldOffset
+            (declsOf "struct Region { magic : word; classTab : *word; heapStart : word; cursor : word; heapEnd : word; markTop : word; markEnd : word; _pad : word; kind : word; count : word; heapBytes : word; allocated : word; numClass : word; }")
+            "Region"
+            "_pad"
+            == Just 7
+            && Check.fieldOffset
+                (declsOf "struct Region { magic : word; classTab : *word; heapStart : word; cursor : word; heapEnd : word; markTop : word; markEnd : word; _pad : word; kind : word; count : word; heapBytes : word; allocated : word; numClass : word; }")
+                "Region"
+                "numClass"
+            == Just 12
+        )
+    , check "A1 layout: a val field is 5 words inline (one val field sizes the struct at 5)"
+        (Check.sizeofStruct (declsOf "struct V { v : val; }") "V" == Just 5)
 
     -- ==================== M2: the module header + the export block ====================
     , check "M2 header: module name + export block parse, and a headerless module is an EMPTY header (the header is OPTIONAL)"
@@ -6065,6 +6169,61 @@ checkOk name src =
 checkErr : String -> String -> String -> String
 checkErr name frag src =
     checkErrFlags name [] frag src
+
+
+{-| The A1 rows' drivers: parse a whole MODULE (decls + defuns) and run the
+decl-carrying checker (`Check.checkModule`).  `checkOkModule` asserts
+acceptance; `checkErrModule` asserts a rejection whose message names the
+judgment — a parse failure would Err WITHOUT the fragment, so a source
+that did not even parse cannot pass the row vacuously.
+-}
+chkModuleFlags : List Ast.Flag -> String -> Result String ()
+chkModuleFlags flags src =
+    case Parse.parseModule src of
+        Ok module_ ->
+            Check.checkModule Dict.empty flags module_
+
+        Err e ->
+            Err ("parse: " ++ e)
+
+
+checkOkModule : String -> String -> String
+checkOkModule name src =
+    check name
+        (case chkModuleFlags [] src of
+            Ok () ->
+                True
+
+            Err _ ->
+                False
+        )
+
+
+checkErrModule : String -> String -> String -> String
+checkErrModule name frag src =
+    check name
+        (case chkModuleFlags [] src of
+            Err msg ->
+                String.contains frag msg
+
+            Ok () ->
+                False
+        )
+
+
+{-| The A1 layout rows' decl source: parse a declaration-only module and
+hand back its `decls` (the layout pin consumes the table via
+`Check.sizeofStruct`/`Check.fieldOffset`).  A parse failure yields `[]`, so
+a layout row comparing on `Just n` cannot pass vacuously.
+-}
+declsOf : String -> List Ast.Decl
+declsOf src =
+    case Parse.parseModule src of
+        Ok m ->
+            m.decls
+
+        Err _ ->
+            []
 
 
 {-| Contract-4 return-taint floor (M4-enforce U1): parse an Elm module, then run

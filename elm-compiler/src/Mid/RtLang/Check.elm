@@ -1,17 +1,21 @@
 module Mid.RtLang.Check exposing
     ( checkExports
+    , checkModule
     , checkProgram
+    , fieldOffset
     , guardsHold
+    , sizeofStruct
     )
 
 {-| Mid.RtLang.Check — the surface language's TYPECHECKER, judgments
-J1-J8 and J10 of the tier-2 plan (`handoff-osier-tier2-midlang-plan`, THE
+J1-J14 of the tier-2 plan (`handoff-osier-tier2-midlang-plan`, THE
 TYPECHECKER).  It runs when the compiler builds the Rt program — on EVERY
 compile — and its `Err` is a compile error that fails the compile through
 the existing `Err` plumbing (T7 wires the call: after
 `Parse.parseModule`, call
 `Check.checkExports exports arities` then
-`Check.checkProgram externTypes activeFlags program`;
+`Check.checkModule externTypes activeFlags module` —
+`Check.checkProgram` is the decl-less delegate for the defun-only rows);
 `Err msg` propagates exactly like `QbeLower.lower`'s).
 
 NO INFERENCE, BY DESIGN.  Every binder declares its class (`word x = ..;`
@@ -143,6 +147,59 @@ THE JUDGMENTS ENFORCED HERE (T5 adds J7-J10):
     EXISTING values for the block's duration; it does not create them.
     Inside the block the ids are re-bound `:val` — T4's half (what the
     roots ARE); the outer-scope check is this unit's.
+  * **J11** — the STRUCT TABLE (round-1 §2, midlang-a1).  The file-scoped
+    `struct`/`enum` declarations build two tables carried in `Env`: the
+    struct table (`name -> ordered fields with computed word offsets` plus
+    the struct's SIZE in words) and the enum table (`name -> constant name
+    -> value`).  Rejections: a duplicate declaration name (struct AND enum
+    names share ONE file-scoped namespace — `*S` and `Enum.c` must never
+    be ambiguous); a duplicate field name inside one struct; a `float`
+    field (Mid.Ir has no raw-memory f64 load node — a float field cannot
+    lower, named, never silently word-typed); a pointer-to-unknown-struct
+    field type (`f : *Nope` — the name must resolve in the table, looked
+    up ORDER-INDEPENDENTLY so `struct A { b : *B; } struct B { .. }`
+    forward pointers work); self-reference BY VALUE (`next : S`) would be
+    infinite size and is REJECTED — but the U1 grammar has no struct-value
+    `Type` constructor, so the rejection is STRUCTURAL today (a bare
+    Uppercase field name is a parse reject, "expected a type"); the
+    judgment's seat lands with B2's nested-struct unit.  Self-reference BY
+    POINTER (`next : *S`) is the only recursion and is legal (one word).
+    Layout is declaration-order, word-granular: `word`/`*T` = 1 word,
+    `val` = 5 words inline.  The SAME table is the one the lowerer (A2)
+    consumes — no second copy to skew.
+  * **J12** — POINTER COERCIONS, the one-way matrix (round-1 §2, the
+    design's load-bearing part).  `word -> *T` (any T) is legal at a typed
+    binder — the view-cast, the direction the source spells.  `*T -> word`
+    is legal wherever a word is expected (a pointer IS a word: binders,
+    returns, rawcall/word builtin slots, comparisons).  `*S -> *word` is
+    legal (the universal raw view — the mark-stack/freelist overlap
+    sites).  EVERYTHING ELSE — `*S1 -> *S2` (cross-struct), `*word -> *S`,
+    `*val -> *S` — is a REJECT: go through a `word` binder, one named
+    line.  The only unchecked direction is `word -> *T`, which is exactly
+    the source-spelled one.  The FIREWALL sits on top: a pointer operand
+    in ARITHMETIC (`p + 1`, `p - 1`, `p & 3` — any `EWordBin`) is a J12
+    REJECT even though `*T -> word` otherwise holds, because byte/word
+    address math must happen on a `word` binder (bind `word w = p;`
+    first) — no context-dependent scaling exists anywhere; struct-scaled
+    math happens only through `p[i]`.  Pointer COMPARISON (`p == 0`,
+    `p != 0`, `p < q`) is legal — it is address comparison, no scaling.
+  * **J13** — FIELD/INDEX/DEREF rules (round-1 §2).  `p->f` / `p->f = e`:
+    `p : *S`, `f` a field of `S`; the expression's class is the FIELD's
+    declared class; a store class-checks `e` against the field class (a
+    `val` into a `word` field is a J13 reject — never less checked than
+    today's `wstore`).  `p[i]` / `p[i] = e`: `p : *word` (word element,
+    `wload` stride), `p : *val` (val element, `vecload` stride), or
+    `p : *S` (struct-scaled — the element read is the WORD at the element
+    base, `RawWordLoad { index = i * sizeofS }` per round-1 §3; v1 has no
+    struct values to yield); the index is a word offset.  `*p`: `*word`
+    only, `:word`.  Chains `a->b->c` / `a->tab[i]` compose through the
+    field/index classes.
+  * **J14** — the ENUM table (round-1 §2).  Duplicate enum name (with any
+    declaration) and duplicate constant name INSIDE one enum are rejects.
+    An enum constant is an `EInt` alias (C-style named word constant) for
+    every subsequent judgment — the `Enum.c` EXPRESSION form is not in the
+    U1 grammar, so at A1 the table is built and validated and the alias
+    rule is the seat the constant-expression grammar lands into.
 
 POSITIONS — THE HONEST GAP, stated loudly.  The plan asks every rejection
 to carry `defun:line:col`.  MEASURED: the T1 AST carries NO source
@@ -174,15 +231,19 @@ import Mid.RtLang.Ast
     exposing
         ( AggShape(..)
         , Block
+        , Decl(..)
         , Defun
+        , EnumEntry
         , Exp(..)
         , Export
         , ExportSig
+        , Field
         , Flag(..)
         , FlagGuard(..)
         , FltBinOp(..)
         , FltCmpOp(..)
         , Key
+        , Module
         , OTy(..)
         , PTy(..)
         , Param
@@ -200,7 +261,6 @@ import Mid.RtLang.Ast
         , fltCmpSig
         , rawcallArity
         , splitArrow
-        , wordBinSig
         , wordCmpSig
         )
 
@@ -221,7 +281,46 @@ word/float params are honoured from its declared signature.
 type alias Env =
     { surfaces : Dict Key ( List Type, Type )
     , externs : Dict Key ExportSig
+    , structs : StructTable
+    , enums : EnumTable
     }
+
+
+{-| One struct field with its computed word offset (declaration order, the
+`Field` plus the offset `layoutOf` derived).  The LOWERER (A2) consumes
+this SAME shape — name -> ordered fields -> (type, offset) — the one-table
+property: no second copy to skew (plan risk R2).
+-}
+type alias StructField =
+    { name : String
+    , ty : Type
+    , offset : Int
+    }
+
+
+{-| One struct's layout: the ordered fields (offsets derived) and the
+struct's SIZE in words (the max field end — every field is a whole number
+of 8-byte words, `val` = 5 inline).
+-}
+type alias StructInfo =
+    { fields : List StructField
+    , size : Int
+    }
+
+
+{-| The struct table: name -> layout.  Built from the file-scoped `struct`
+declarations; field/pointer resolution reads THIS table.
+-}
+type alias StructTable =
+    Dict String StructInfo
+
+
+{-| The enum table: name -> (constant name -> value).  C-style named word
+constants; the `Enum.c` expression form is not yet in the grammar (A1
+builds and validates the table).
+-}
+type alias EnumTable =
+    Dict String (Dict String Int)
 
 
 {-| One defun's walking context: the program-wide env, the enclosing defun
@@ -248,17 +347,38 @@ the first rejection.
 -}
 checkProgram : Dict Key ExportSig -> List Flag -> Program -> Result String ()
 checkProgram externs flags program =
-    case keyCheck program of
+    checkModule externs flags
+        { header = { name = Nothing, exports = [] }
+        , decls = []
+        , defuns = program
+        }
+
+
+{-| Check a whole parsed MODULE (J1-J8, J10-J14) — the decl-carrying entry
+point `Rt.load` calls (the runtime.mid lane).  The file-scoped `decls`
+build the struct/enum tables (J11/J14) BEFORE the defuns walk, and the
+tables ride in `Env` for the field/index/deref/store and coercion
+judgments.  `checkProgram` is the headerless, decl-less delegate the
+existing defun-only rows (and the user-module lane) call.
+-}
+checkModule : Dict Key ExportSig -> List Flag -> Module -> Result String ()
+checkModule externs flags module_ =
+    case keyCheck module_.defuns of
         Err msg ->
             Err msg
 
         Ok () ->
-            case guardCheck flags program of
+            case guardCheck flags module_.defuns of
                 Err msg ->
                     Err msg
 
                 Ok () ->
-                    checkAll (envOf externs flags program) program
+                    case declCheck module_.decls of
+                        Err msg ->
+                            Err msg
+
+                        Ok tables ->
+                            checkAll (envOf externs flags module_.defuns tables) module_.defuns
 
 
 {-| THE KEY AGREEMENT (M2, plan.md §2.5) — the FORWARD half, loud now.
@@ -492,11 +612,320 @@ checkAll env program =
                     checkAll env rest
 
 
-envOf : Dict Key ExportSig -> List Flag -> Program -> Env
-envOf externs flags program =
+envOf : Dict Key ExportSig -> List Flag -> Program -> ( StructTable, EnumTable ) -> Env
+envOf externs flags program tables =
     { surfaces = surfacesOf flags program
     , externs = externs
+    , structs = Tuple.first tables
+    , enums = Tuple.second tables
     }
+
+
+-- ============================ J11/J14: the declaration tables ============================
+
+
+{-| Build and validate the struct and enum tables from the file-scoped
+declarations (J11/J14).  Fail-fast: the first bad declaration names the
+judgment.  The two tables are the ones `Env` carries into every defun walk
+and the ones the lowerer (A2) consumes — one table, one layout truth.
+-}
+declCheck : List Decl -> Result String ( StructTable, EnumTable )
+declCheck decls =
+    case duplicateDeclName decls of
+        Just name ->
+            Err
+                ("RtLang: J11/J14: declaration name '"
+                    ++ name
+                    ++ "' is declared more than once — struct and enum names share ONE file-scoped namespace (a '*"
+                    ++ name
+                    ++ "' pointer and an '"
+                    ++ name
+                    ++ ".c' constant must never be ambiguous)"
+                )
+
+        Nothing ->
+            case structsOf decls of
+                Err msg ->
+                    Err msg
+
+                Ok structs ->
+                    case enumsOf decls of
+                        Err msg ->
+                            Err msg
+
+                        Ok enums ->
+                            Ok ( structs, enums )
+
+
+{-| The first declaration name used twice (struct/enum names in one
+namespace), or `Nothing`.
+-}
+duplicateDeclName : List Decl -> Maybe String
+duplicateDeclName decls =
+    case decls of
+        [] ->
+            Nothing
+
+        d :: rest ->
+            if List.member (declName d) (List.map declName rest) then
+                Just (declName d)
+
+            else
+                duplicateDeclName rest
+
+
+declName : Decl -> String
+declName d =
+    case d of
+        StructDecl s ->
+            s.name
+
+        EnumDecl e ->
+            e.name
+
+
+{-| The struct table: walk the `struct` declarations (ignoring enums),
+resolving pointer targets against the FULL struct-name set (order-
+independent forward references) and deriving each field's word offset and
+the struct's size.
+-}
+structsOf : List Decl -> Result String StructTable
+structsOf decls =
+    structsFold decls (structNames decls) Dict.empty
+
+
+structNames : List Decl -> List String
+structNames decls =
+    List.foldl
+        (\d acc ->
+            case d of
+                StructDecl s ->
+                    s.name :: acc
+
+                EnumDecl _ ->
+                    acc
+        )
+        []
+        decls
+
+
+structsFold : List Decl -> List String -> StructTable -> Result String StructTable
+structsFold decls names acc =
+    case decls of
+        [] ->
+            Ok acc
+
+        d :: rest ->
+            case d of
+                EnumDecl _ ->
+                    structsFold rest names acc
+
+                StructDecl s ->
+                    case layoutOf names s.name s.fields of
+                        Err msg ->
+                            Err msg
+
+                        Ok ( fields, size ) ->
+                            structsFold rest names (Dict.insert s.name { fields = fields, size = size } acc)
+
+
+{-| One struct's layout: declaration-order offsets, each field's size in
+whole words (`word`/`*T` = 1, `val` = 5 inline).  Rejections: a duplicate
+field name; a `float` field (no raw f64 load node); a pointer field naming
+an unknown struct; self-reference BY VALUE is structurally unspellable in
+the U1 grammar (no struct-value `Type` constructor) — the seat for B2.
+-}
+layoutOf : List String -> String -> List Field -> Result String ( List StructField, Int )
+layoutOf names structName fields =
+    case duplicateFieldName fields of
+        Just f ->
+            Err
+                ("RtLang: J11: struct '"
+                    ++ structName
+                    ++ "' declares field '"
+                    ++ f
+                    ++ "' more than once — one name, one offset"
+                )
+
+        Nothing ->
+            fieldsWalk names structName fields 0 []
+
+
+fieldsWalk : List String -> String -> List Field -> Int -> List StructField -> Result String ( List StructField, Int )
+fieldsWalk names structName fields offset acc =
+    case fields of
+        [] ->
+            Ok ( List.reverse acc, offset )
+
+        f :: rest ->
+            case fieldSize names structName f.ty of
+                Err msg ->
+                    Err msg
+
+                Ok sz ->
+                    fieldsWalk names structName rest (offset + sz) ({ name = f.name, ty = f.ty, offset = offset } :: acc)
+
+
+{-| A field type's size in words, with the J11 field-type rejections.  A
+pointer field resolves its struct name against the full struct-name set
+(order-independent).  Self-reference BY VALUE (`f : S` — the struct's own
+name as a bare field type) is infinite and rejected; that requires a
+struct-value `Type` constructor the U1 grammar does not have, so today the
+rejection is structural (the parser's "expected a type"), and THIS seat is
+where B2's nested-struct unit adds the judgment.
+-}
+fieldSize : List String -> String -> Type -> Result String Int
+fieldSize names structName ty =
+    case ty of
+        TWord ->
+            Ok 1
+
+        TPtr (PStruct sname) ->
+            if List.member sname names then
+                Ok 1
+
+            else
+                Err
+                    ("RtLang: J11: struct '"
+                        ++ structName
+                        ++ "' field type '*"
+                        ++ sname
+                        ++ "' names no declared struct — a pointer field must resolve in the file's struct table"
+                    )
+
+        TPtr _ ->
+            Ok 1
+
+        TVal ->
+            Ok 5
+
+        TFloat ->
+            Err
+                ("RtLang: J11: struct '"
+                    ++ structName
+                    ++ "' has a float field — Mid.Ir has no raw-memory f64 load node, so a float field cannot lower (named, not silently word-typed)"
+                )
+
+
+{-| The first field name used twice inside one struct, or `Nothing`.
+-}
+duplicateFieldName : List Field -> Maybe String
+duplicateFieldName fields =
+    case fields of
+        [] ->
+            Nothing
+
+        f :: rest ->
+            if List.member f.name (List.map .name rest) then
+                Just f.name
+
+            else
+                duplicateFieldName rest
+
+
+{-| The enum table: name -> (constant name -> value), rejecting a
+duplicate constant name INSIDE one enum (constants are scoped per enum;
+two enums may each name a constant `ptr`).
+-}
+enumsOf : List Decl -> Result String EnumTable
+enumsOf decls =
+    enumsFold decls Dict.empty
+
+
+enumsFold : List Decl -> EnumTable -> Result String EnumTable
+enumsFold decls acc =
+    case decls of
+        [] ->
+            Ok acc
+
+        d :: rest ->
+            case d of
+                StructDecl _ ->
+                    enumsFold rest acc
+
+                EnumDecl e ->
+                    case duplicateConstantName e.entries of
+                        Just c ->
+                            Err
+                                ("RtLang: J14: enum '"
+                                    ++ e.name
+                                    ++ "' declares constant '"
+                                    ++ c
+                                    ++ "' more than once — one name, one value"
+                                )
+
+                        Nothing ->
+                            enumsFold rest
+                                (Dict.insert e.name
+                                    (Dict.fromList (List.map (\en -> ( en.name, en.value )) e.entries))
+                                    acc
+                                )
+
+
+duplicateConstantName : List EnumEntry -> Maybe String
+duplicateConstantName entries =
+    case entries of
+        [] ->
+            Nothing
+
+        e :: rest ->
+            if List.member e.name (List.map .name rest) then
+                Just e.name
+
+            else
+                duplicateConstantName rest
+
+
+{-| A struct's size in words, from the table — exposed for TestMain's
+layout pins (sizeof(Region) == 13, sizeof(FrameHdr) == 5).  `Nothing`
+when the struct is undeclared or the table rejects.
+-}
+sizeofStruct : List Decl -> String -> Maybe Int
+sizeofStruct decls name =
+    case structsOf decls of
+        Err _ ->
+            Nothing
+
+        Ok table ->
+            case Dict.get name table of
+                Just info ->
+                    Just info.size
+
+                Nothing ->
+                    Nothing
+
+
+{-| A struct field's word offset, from the table — exposed for TestMain's
+layout pins (the pad-hole pin: `Region._pad` at word 7).  `Nothing` when
+the struct or field is unknown or the table rejects.
+-}
+fieldOffset : List Decl -> String -> String -> Maybe Int
+fieldOffset decls structName fieldName =
+    case structsOf decls of
+        Err _ ->
+            Nothing
+
+        Ok table ->
+            case Dict.get structName table of
+                Just info ->
+                    fieldOffsetIn info.fields fieldName
+
+                Nothing ->
+                    Nothing
+
+
+fieldOffsetIn : List StructField -> String -> Maybe Int
+fieldOffsetIn fields name =
+    case fields of
+        [] ->
+            Nothing
+
+        f :: rest ->
+            if f.name == name then
+                Just f.offset
+
+            else
+                fieldOffsetIn rest name
 
 
 {-| The surface signature set, straight from the parsed program — so
@@ -527,12 +956,72 @@ checkDefun env d =
             Err (d.key ++ ": J5: duplicate parameter '" ++ name ++ "'")
 
         Nothing ->
-            case checkBlock (ctxOf env d) d.body of
+            case validateSig (ctxOf env d) d.params d.ret of
                 Err msg ->
                     Err msg
 
-                Ok _ ->
+                Ok () ->
+                    case checkBlock (ctxOf env d) d.body of
+                        Err msg ->
+                            Err msg
+
+                        Ok _ ->
+                            Ok ()
+
+
+{-| J11 — every declared parameter/return type must name declared structs
+(a `*S` whose `S` is absent is an unknown-struct reject at the defun's
+SIGNATURE, before any use).  Raw pointees (`*word`/`*val`) and the
+non-pointer classes need nothing.
+-}
+validateSig : Ctx -> List Param -> Type -> Result String ()
+validateSig ctx params ret =
+    case validateType ctx ret of
+        Err msg ->
+            Err msg
+
+        Ok () ->
+            validateParams ctx params
+
+
+validateParams : Ctx -> List Param -> Result String ()
+validateParams ctx params =
+    case params of
+        [] ->
+            Ok ()
+
+        p :: rest ->
+            case validateType ctx p.ty of
+                Err msg ->
+                    Err msg
+
+                Ok () ->
+                    validateParams ctx rest
+
+
+{-| The struct-name check inside a declared type (J11): a `*S` must
+resolve in the struct table.  Binders, params and returns all run this, so
+an unknown struct is caught at its declaration site, not only its first
+use.
+-}
+validateType : Ctx -> Type -> Result String ()
+validateType ctx ty =
+    case ty of
+        TPtr (PStruct sname) ->
+            case Dict.get sname ctx.env.structs of
+                Just _ ->
                     Ok ()
+
+                Nothing ->
+                    Err
+                        (ctx.key
+                            ++ ": J11: pointer type '*"
+                            ++ sname
+                            ++ "' names no declared struct — every *S must resolve in the file's struct table"
+                        )
+
+        _ ->
+            Ok ()
 
 
 ctxOf : Env -> Defun -> Ctx
@@ -610,24 +1099,29 @@ checkStmt ctx stmt =
                     )
 
             else
-                case checkExp ctx e of
+                case validateType ctx ty of
                     Err msg ->
                         Err msg
 
-                    Ok cls ->
-                        if cls == ty then
-                            Ok { ctx | scope = Dict.insert name ty ctx.scope }
+                    Ok () ->
+                        case checkExp ctx e of
+                            Err msg ->
+                                Err msg
 
-                        else
-                            Err
-                                (ctx.key
-                                    ++ ": J1: binder '"
-                                    ++ name
-                                    ++ "' declares "
-                                    ++ typeStr ty
-                                    ++ " but its initializer is "
-                                    ++ typeStr cls
-                                )
+                            Ok cls ->
+                                if coerce ty cls then
+                                    Ok { ctx | scope = Dict.insert name ty ctx.scope }
+
+                                else
+                                    Err
+                                        (ctx.key
+                                            ++ ": J1: binder '"
+                                            ++ name
+                                            ++ "' declares "
+                                            ++ typeStr ty
+                                            ++ " but its initializer is "
+                                            ++ typeStr cls
+                                        )
 
         SEffect e ->
             case checkExp ctx e of
@@ -652,11 +1146,208 @@ checkStmt ctx stmt =
                                 ++ ": J7: a mid-block 'if' with both branches falling through — Mid has no join and Case is forbidden: bind through ?: or make it the last statement"
                             )
 
-        SFieldStore _ _ _ ->
-            Err (ctx.key ++ ": U1: field store (`p->f = e;`) is parsed but not checked yet — J13 (U2) checks the value against the field class")
+        SFieldStore p f e ->
+            checkFieldStore ctx p f e
 
-        SIndexStore _ _ _ ->
-            Err (ctx.key ++ ": U1: index store (`p[i] = e;`) is parsed but not checked yet — J13 (U2) checks the value against the element class")
+        SIndexStore p i e ->
+            checkIndexStore ctx p i e
+
+
+{-| J13 — `p->f = e;`: `p` must be a struct pointer, `f` a field of its
+struct, and `e`'s class must COERCE to the field's (the J12 matrix — a
+`val` into a `word` field is the pinned reject; a pointer into a word
+field is a word, so it stores).
+-}
+checkFieldStore : Ctx -> Exp -> String -> Exp -> Result String Ctx
+checkFieldStore ctx p f e =
+    case structPointer ctx p of
+        Err msg ->
+            Err msg
+
+        Ok ( sname, info ) ->
+            case fieldTypeIn info.fields f of
+                Nothing ->
+                    Err
+                        (ctx.key
+                            ++ ": J13: struct '"
+                            ++ sname
+                            ++ "' has no field '"
+                            ++ f
+                            ++ "' to store"
+                        )
+
+                Just fty ->
+                    case checkExp ctx e of
+                        Err msg ->
+                            Err msg
+
+                        Ok vcls ->
+                            if coerce fty vcls then
+                                Ok ctx
+
+                            else
+                                Err
+                                    (ctx.key
+                                        ++ ": J13: store to field '"
+                                        ++ sname
+                                        ++ "."
+                                        ++ f
+                                        ++ "' needs "
+                                        ++ typeStr fty
+                                        ++ ", got "
+                                        ++ typeStr vcls
+                                    )
+
+
+{-| J13 — `p[i] = e;`: the element class comes from the pointer's pointee
+family (word/val/struct-scaled word), the index is a word offset, and `e`
+coerces to the element class (a `val` into a `*word` slot is the pinned
+reject).
+-}
+checkIndexStore : Ctx -> Exp -> Exp -> Exp -> Result String Ctx
+checkIndexStore ctx p i e =
+    case checkExp ctx p of
+        Err msg ->
+            Err msg
+
+        Ok (TPtr pty) ->
+            case wordIndex ctx i of
+                Err msg ->
+                    Err msg
+
+                Ok () ->
+                    case indexClass ctx pty of
+                        Err msg ->
+                            Err msg
+
+                        Ok elemTy ->
+                            case checkExp ctx e of
+                                Err msg ->
+                                    Err msg
+
+                                Ok vcls ->
+                                    if coerce elemTy vcls then
+                                        Ok ctx
+
+                                    else
+                                        Err
+                                            (ctx.key
+                                                ++ ": J13: store to '"
+                                                ++ typeStr (TPtr pty)
+                                                ++ "' element needs "
+                                                ++ typeStr elemTy
+                                                ++ ", got "
+                                                ++ typeStr vcls
+                                            )
+
+        Ok cls ->
+            Err
+                (ctx.key
+                    ++ ": J13: index store needs a pointer target, got "
+                    ++ typeStr cls
+                )
+
+
+{-| J13 — `p->f` / `p->f = e`: resolve the pointer expression to a struct
+pointer and return `(struct name, its layout)`.  Anything else is a loud
+reject (field access on a `*word`/`*val`/non-pointer).
+-}
+structPointer : Ctx -> Exp -> Result String ( String, StructInfo )
+structPointer ctx p =
+    case checkExp ctx p of
+        Err msg ->
+            Err msg
+
+        Ok (TPtr (PStruct sname)) ->
+            case Dict.get sname ctx.env.structs of
+                Just info ->
+                    Ok ( sname, info )
+
+                Nothing ->
+                    Err
+                        (ctx.key
+                            ++ ": J11: field access on '*"
+                            ++ sname
+                            ++ "' — no such struct is declared"
+                        )
+
+        Ok (TPtr pty) ->
+            Err
+                (ctx.key
+                    ++ ": J13: field access needs a struct pointer, got "
+                    ++ typeStr (TPtr pty)
+                )
+
+        Ok cls ->
+            Err
+                (ctx.key
+                    ++ ": J13: field access needs a struct pointer, got "
+                    ++ typeStr cls
+                )
+
+
+fieldTypeIn : List StructField -> String -> Maybe Type
+fieldTypeIn fields name =
+    case fields of
+        [] ->
+            Nothing
+
+        f :: rest ->
+            if f.name == name then
+                Just f.ty
+
+            else
+                fieldTypeIn rest name
+
+
+{-| J13 — the element class of a pointer's pointee, for `p[i]` /
+`p[i] = e`: `*word` -> word (`wload` stride), `*val` -> val (`vecload`
+stride), `*S` -> word (struct-scaled — the WORD at the element base,
+`RawWordLoad { index = i * sizeofS }` per round-1 §3; v1 has no struct
+values to yield).
+-}
+indexClass : Ctx -> PTy -> Result String Type
+indexClass ctx pty =
+    case pty of
+        PWord ->
+            Ok TWord
+
+        PVal ->
+            Ok TVal
+
+        PStruct sname ->
+            case Dict.get sname ctx.env.structs of
+                Just _ ->
+                    Ok TWord
+
+                Nothing ->
+                    Err
+                        (ctx.key
+                            ++ ": J11: index access on '*"
+                            ++ sname
+                            ++ "' — no such struct is declared"
+                        )
+
+
+{-| J13 — the index of `p[i]` is a word offset (the `wload`/`vecload`
+contract; the struct-scaled `*S` index is still a WORD element index, the
+`sizeofS` multiply happens at lowering).
+-}
+wordIndex : Ctx -> Exp -> Result String ()
+wordIndex ctx i =
+    case checkExp ctx i of
+        Err msg ->
+            Err msg
+
+        Ok TWord ->
+            Ok ()
+
+        Ok cls ->
+            Err
+                (ctx.key
+                    ++ ": J13: index must be a word offset, got "
+                    ++ typeStr cls
+                )
 
 
 checkTerm : Ctx -> Term -> Result String Type
@@ -668,8 +1359,8 @@ checkTerm ctx term =
                     Err msg
 
                 Ok cls ->
-                    if cls == ctx.ret then
-                        Ok cls
+                    if coerce ctx.ret cls then
+                        Ok ctx.ret
 
                     else
                         Err
@@ -905,7 +1596,7 @@ checkExp ctx e =
                     Err (ctx.key ++ ": J5: unbound name '" ++ name ++ "'")
 
         EWordBin op a b ->
-            checkSig ctx ("operator '" ++ wordBinName op ++ "'") wordBinSig [ a, b ]
+            checkWordBin ctx op a b
 
         EWordCmp op a b ->
             checkSig ctx ("operator '" ++ wordCmpName op ++ "' (yields a word 0/1 — branch on it directly, or box with mkbool for a val)") wordCmpSig [ a, b ]
@@ -1014,14 +1705,67 @@ checkExp ctx e =
                 Ok () ->
                     checkBlock { ctx | scope = bindRoots ids ctx.scope } block
 
-        EField _ _ ->
-            Err (ctx.key ++ ": U1: field access (`p->f`) is parsed but not checked yet — J13 (U2) resolves the field against the struct table")
+        EField p f ->
+            case structPointer ctx p of
+                Err msg ->
+                    Err msg
 
-        EIndex _ _ ->
-            Err (ctx.key ++ ": U1: index access (`p[i]`) is parsed but not checked yet — J13 (U2) rules the index class")
+                Ok ( sname, info ) ->
+                    case fieldTypeIn info.fields f of
+                        Just fty ->
+                            Ok fty
 
-        EDeref _ ->
-            Err (ctx.key ++ ": U1: deref (`*p`) is parsed but not checked yet — J13 (U2) rules the pointee")
+                        Nothing ->
+                            Err
+                                (ctx.key
+                                    ++ ": J13: struct '"
+                                    ++ sname
+                                    ++ "' has no field '"
+                                    ++ f
+                                    ++ "'"
+                                )
+
+        EIndex p i ->
+            case checkExp ctx p of
+                Err msg ->
+                    Err msg
+
+                Ok (TPtr pty) ->
+                    case wordIndex ctx i of
+                        Err msg ->
+                            Err msg
+
+                        Ok () ->
+                            indexClass ctx pty
+
+                Ok cls ->
+                    Err
+                        (ctx.key
+                            ++ ": J13: index access needs a pointer, got "
+                            ++ typeStr cls
+                        )
+
+        EDeref p ->
+            case checkExp ctx p of
+                Err msg ->
+                    Err msg
+
+                Ok (TPtr PWord) ->
+                    Ok TWord
+
+                Ok (TPtr pty) ->
+                    Err
+                        (ctx.key
+                            ++ ": J13: deref '*p' is '*word' only, got "
+                            ++ typeStr (TPtr pty)
+                        )
+
+                Ok cls ->
+                    Err
+                        (ctx.key
+                            ++ ": J13: deref needs a '*word' pointer, got "
+                            ++ typeStr cls
+                        )
 
 
 {-| J10 — every `withroots` id must ALREADY name a `:val` binder in scope
@@ -1376,7 +2120,7 @@ checkArgs ctx jn what tys args =
                     Err msg
 
                 Ok cls ->
-                    if cls == t then
+                    if argOk t cls then
                         checkArgs ctx jn what ts as_
 
                     else
@@ -1398,6 +2142,126 @@ checkArgs ctx jn what tys args =
 bindRoots : List String -> Dict String Type -> Dict String Type
 bindRoots ids scope =
     List.foldl (\id acc -> Dict.insert id TVal acc) scope ids
+
+
+
+-- ============================ J12: the coercion matrix ============================
+
+
+{-| The ONE-WAY coercion matrix (J12) — the `coerce expected actual`
+predicate a binder, store and return accept.  The legal movements:
+
+  * `expected == actual` (identity, every class);
+  * `word` <- any pointer (`*T -> word`: a pointer IS a word — rawcall/
+    arithmetic/wstore/returns take it);
+  * any pointer <- `word` (`word -> *T`: the view-cast, the direction the
+    source spells);
+  * `*word` <- `*S` (the universal raw view — the mark-stack/freelist
+    overlap sites).
+
+Everything else — `*S1 -> *S2` (cross-struct), `*word -> *S`, `*val -> *S`,
+`*word -> *val`, `val <-> word` — is FALSE: go through a `word` binder,
+one named line.  The only unchecked direction is `word -> *T`, which is
+exactly the source-spelled one.
+-}
+coerce : Type -> Type -> Bool
+coerce expected actual =
+    if expected == actual then
+        True
+
+    else
+        case ( expected, actual ) of
+            ( TWord, TPtr _ ) ->
+                True
+
+            ( TPtr _, TWord ) ->
+                True
+
+            ( TPtr PWord, TPtr (PStruct _) ) ->
+                True
+
+            _ ->
+                False
+
+
+{-| The ARGUMENT-compatibility predicate behind `checkArgs` (J1/J2/J3/J4):
+the expected class must match, OR a pointer is acceptable where a `word`
+is expected (`*T -> word` — a pointer is a word).  The reverse (`word ->
+*T`) is NOT legal at a call/recur boundary — the view-cast is spelled only
+at a typed binder, never implicit at a call.
+-}
+argOk : Type -> Type -> Bool
+argOk expected actual =
+    expected == actual || (expected == TWord && isPtr actual)
+
+
+isPtr : Type -> Bool
+isPtr t =
+    case t of
+        TPtr _ ->
+            True
+
+        _ ->
+            False
+
+
+{-| J12's FIREWALL on top of the matrix: a pointer operand in `EWordBin`
+arithmetic/bitwise (`p + 1`, `p - 1`, `p & 3`) is a REJECT even though
+`*T -> word` otherwise holds.  Byte/word address math must happen on a
+`word` binder (bind `word w = p;` first) — no context-dependent scaling
+exists anywhere; struct-scaled math happens only through `p[i]`.  Both
+operands must be `:word` (the firewall catches the pointer; a float/val
+operand stays the J1 class reject).
+-}
+checkWordBin : Ctx -> WordBinOp -> Exp -> Exp -> Result String Type
+checkWordBin ctx op a b =
+    case checkExp ctx a of
+        Err msg ->
+            Err msg
+
+        Ok aCls ->
+            if isPtr aCls then
+                Err
+                    (ctx.key
+                        ++ ": J12: pointer arithmetic on '"
+                        ++ wordBinName op
+                        ++ "' — address math must happen on a word binder (bind `word w = p;` first); struct-scaled math happens only through p[i]"
+                    )
+
+            else if aCls /= TWord then
+                Err
+                    (ctx.key
+                        ++ ": J1: operator '"
+                        ++ wordBinName op
+                        ++ "' needs word operands, got "
+                        ++ typeStr aCls
+                    )
+
+            else
+                case checkExp ctx b of
+                    Err msg ->
+                        Err msg
+
+                    Ok bCls ->
+                        if isPtr bCls then
+                            Err
+                                (ctx.key
+                                    ++ ": J12: pointer arithmetic on '"
+                                    ++ wordBinName op
+                                    ++ "' — address math must happen on a word binder (bind `word w = p;` first); struct-scaled math happens only through p[i]"
+                                )
+
+                        else if bCls /= TWord then
+                            Err
+                                (ctx.key
+                                    ++ ": J1: operator '"
+                                    ++ wordBinName op
+                                    ++ "' needs word operands, got "
+                                    ++ typeStr bCls
+                                )
+
+                        else
+                            Ok TWord
 
 
 

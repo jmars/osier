@@ -115,8 +115,8 @@ type Type
 plan's three pointee families (§1.1):
 
   * `PStruct name` — `*S`: a pointer to the struct `S`; field access
-    `p->f` and struct-scaled indexing `p[i]` (U2/U3, the checker/lowerer
-    units this grammar is only the seat for).
+    `p->f` and struct-scaled indexing `p[i]` (A1/A2, the checker/lowerer
+    units this grammar is the seat for).
   * `PWord` — `*word`: a pointer to a word array; `p[i]` (= `wload(p,i)`),
     `p[i] = e` (= `wstore`), `*p` (= `wload(p,0)`).
   * `PVal` — `*val`: a pointer to a value array; `p[i]` (= `vecload`),
@@ -245,9 +245,9 @@ type alias Header =
 declarations (`decls`), and the defun list (`Program`).
 `Parse.parseModule` returns this; the defun list is the same `Program`
 every lowerer/checker already consumes (the header and the declarations
-are NOT lowered in U1 — they ride beside the program, consumed by U2's
-checker to build the struct/enum tables and U3's lowerer to lay out
-fields).  v1 has NO cross-module import: these declarations are
+are NOT lowered in U1 — they ride beside the program, consumed by the
+A1 checker (J11/J14) to build the struct/enum tables and the A2 lowerer to
+lay out fields).  v1 has NO cross-module import: these declarations are
 FILE-SCOPED to their own `.mid` module — a `*S` in one module cannot name
 a struct declared in another (pointers cross a module boundary only as
 the opaque `word`/`*word` the plan §2.5 already pins).
@@ -264,8 +264,8 @@ type alias Module =
 
 {-| A top-level `struct` or `enum` declaration — the file-scoped layout
 tables the plan's §1.2/§1.3 define.  U1 PARSES and CARRIES these (they
-are the grammar); U2's checker (J11/J14) turns them into the struct/
-enum tables and field-offset layout in `Env`, and U3's lowerer reads the
+are the grammar); the A1 checker (J11/J14) turns them into the struct/
+enum tables and field-offset layout in `Env`, and the A2 lowerer reads the
 SAME table (the plan's one-table property — no second copy to skew).  A
 declaration is NOT lowered in U1: it produces no node and no byte; it
 only reserves a NAME and its shape for the checker/lowerer to consume.
@@ -295,10 +295,10 @@ nothing special to check — it keeps the layout table honest where a real
 layout has a hole (region word 7; globals words 3–7, 14–15).  Field
 types are the `Type` grammar: `word`, `val` (40 bytes = 5 words, stored
 INLINE — allowed, nothing traces it, the rooting discipline is a stated
-contract not a type property), `float` (parsed here; REJECTED by U2's J11
-— Mid.Ir has no raw-memory f64 load node), and the three pointer
-families.  Self-reference by value (`next : S`) is U2's J11 reject
-(infinite size); by pointer (`next : *S`) is the only recursion.
+contract not a type property), `float` (parsed here; REJECTED by the A1
+checker's J11 — Mid.Ir has no raw-memory f64 load node), and the three
+pointer families.  Self-reference by value (`next : S`) is the A1 checker's
+J11 reject (infinite size); by pointer (`next : *S`) is the only recursion.
 -}
 type alias Field =
     { name : String
@@ -464,7 +464,7 @@ through is a checker REJECT (J7), never a silent join.
     dead-binder `Let` of `RawWordStore { ptr = p, index = Lit off, value =
     e }` — the EXACT `wstore(p, off, e);` tree (plan §3) — for a word/
     pointer field, `RawVecStore` for a `val` field.  The field offset is
-    U2's derived value, carried here as the field NAME.
+    the A1 checker's derived value, carried here as the field NAME.
   * `SIndexStore` — `p[i] = e;` (U1): the index STORE.  The matching
     `RawWordStore`/`RawVecStore` node with the computed index `i` — the
     `wstore(p, i, e)`/`vecstore(p, i, e)` shape.
@@ -563,10 +563,10 @@ transcribes):
     lowering it IS the existing `RawWordLoad { ptr = p, index = Lit off }`
     node (`wload(p, off)` with the field's constant offset — plan §3) for
     a word/pointer field, or `RawVecLoad` for a `val` field; U1 only
-    parses it — the checker (U2 J13) resolves `f` to `S`'s field offset
-    and the lowerer (U3) emits the same node.  The constructor carries
-    the pointer EXPRESSION and the field NAME (the offset is U2's derived
-    value, not the parser's).
+    parses it — the A1 checker (J13) resolves `f` to `S`'s field offset
+    and the A2 lowerer emits the same node.  The constructor carries
+    the pointer EXPRESSION and the field NAME (the offset is the A1
+    checker's derived value, not the parser's).
   * `EIndex` — `p[i]` (U1): the postfix index READ.  `i` is an ELEMENT
     index (words for `*word`/`*val` — matching `wload`'s word-offset
     contract; structs for `*S`), an ordinary expression — unlike
