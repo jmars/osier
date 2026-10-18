@@ -1174,12 +1174,19 @@ closureSeeds =
 {-| THE RAW-WORD DEFUN CONVENTION (stage 6 U2, plan obs-4): the Rt keys that
 lower with a WORD calling convention instead of the lean `:val` ABI — their
 defuns emit `(params Base L, ret Base L/W)` and every caller (Lower-generated
-sites AND surface `call` sites) emits a matching WORD call.  The set is the
-ONE place Lower and the program builder agree on which keys are word-ABI;
+sites AND surface `call` sites) emits a matching WORD call.
 `driverSeeds` (below) is the seed list, `seeds`/`gcSeeds`/`conSeeds`/
-`closureSeeds` are the `:val` ones.  U2 carries the two smallest consumers
-(Rt.die: one WORD param, Rt.halt: zero) to prove the convention; U3-U5 add
-the frame/apply/driver family.
+`closureSeeds` are the `:val` ones.
+  * B6 CHANGED THIS SET'S ROLE: it is no longer the ONLY place the ABI class
+    is declared.  The class is now DERIVED from the signature (`abiTable`
+    below, plan Q7) for every surface and user defun; THIS set is the
+    OVERRIDE that keeps the FOUR aggregate-returning keys (Rt.apply,
+    Rt.apply-tail, Rt.tail-known, Rt.bounce — all-word parameters, `val`/
+    `:ret` results) on the word side, where the signature rule alone would
+    move them and the corpus with them.  The other nine keys are word-ABI
+    because their signatures say so; declaring them here as well is what makes
+    the two statements agree, and TestMain pins that they do (the `derived ==
+    rawAbi` row).
 -}
 rawAbi : Set String
 rawAbi =

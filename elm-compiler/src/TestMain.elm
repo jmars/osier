@@ -7004,6 +7004,17 @@ checks rt =
             Err _ ->
                 False
         )
+    , check "B6 `*S` PARAMETERS work in a word-ABI defun too (B2's stated limit, closed): the pointer arrives in `l %a0` and `p.a = p.a + 10` is a load+store through it — MEASURED end-to-end (Ptr.bump over `&o` mutates the CALLER's storage and prints 1117), which is the shape B2's example had to route through `val`/`payload`"
+        (case emitUserSsa rt "module B6p\nstruct I { k : word; }\nstruct O { a : word; i : I; }\ndefun B6p.b(p : *O) -> word {\n  p.a = p.a + 10;\n  return p.a;\n}" of
+            Ok ssa ->
+                String.contains "function l $q_B6p_x2eb(l %a0) {" ssa
+                    && String.contains "%t1 =l add %a0, %t0" ssa
+                    && String.contains "storel %t3, %t5" ssa
+                    && not (String.contains "blit" ssa)
+
+            Err _ ->
+                False
+        )
     , check "B6 STRUCT RETURN stays REJECTED (loudly, with the reason): the word ABI's ret path is ONE register, so a struct cannot come back — the message names the out-parameter, and B6 did not quietly open it"
         (case b6CheckErr rt "module B6s\nstruct S { a : word; }\ndefun B6s.f(s : S) -> S {\n  return s;\n}" of
             Err msg ->

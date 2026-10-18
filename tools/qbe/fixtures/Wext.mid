@@ -16,14 +16,15 @@
 //     read back, so an aliasing bug changes the printed number.
 //
 // THE PARAMETER IS A `val`, NOT A `*Outer`, ON PURPOSE — measured, not a
-// preference: a user defun's parameters are 40-byte Value frame slots
-// unless its key is in `Mid.Rt.rawAbi` (`Mid/Qbe/Lower.elm:1152`), so a
-// `*T` PARAMETER (checker-legal since A1) has no raw register to live in
-// and the field access dies at emit time ("binder id N is not a raw
-// word").  That wiring — the ABI class computed from the declared surface
-// — is B6's row, so this example crosses the pointer the A2-smoke way:
-// `mknum(&o)` out, `*Outer p = payload(pv, 0);` in.  The MUTATION through
-// `p.a` is the real thing either way.
+// preference.  AT THE TIME OF B2 a user defun's parameters were 40-byte Value
+// frame slots unless its key was in `Mid.Rt.rawAbi`, so a `*T` PARAMETER
+// (checker-legal since A1) had no raw register and its field access died at
+// emit time.  B6 has since landed that wiring (the ABI class is DERIVED from
+// the signature — `Mid.Rt.abiTable`; see Wsum.mid/midb6.elm for a defun that
+// takes a struct BY VALUE), and THIS pair keeps the val crossing so its
+// golden stays its own unit's acceptance number.  In a word-ABI defun the
+// same mutation is `defun X.bump(p : *Outer) -> word` with `p.a` read
+// directly — the `.`-auto-deref rules are unchanged.
 //
 // The printed number packs the four facts an aliasing/mutation bug would
 // move: o.a(15) | copy.a(1015) | copy.inner.k(8) | payload(copy.note)(99).

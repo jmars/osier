@@ -57,8 +57,12 @@ reject here rather than a QBE-layer surprise:
     only the binder that has no representation;
   * a constant bool CONDITION is rejected like `if (1)` (a constant
     branch is not a test);
-  * `bool` is a BINDER class only — `surfaceType` does not spell it, so a
-    bool parameter/return/field cannot even parse (the word ABI is B6).
+  * `bool` as a PARAMETER or RESULT was B6's seat and B6 took it: the type
+    grammar now spells `bool`, and THIS module is what refuses it in a
+    value-ABI signature (`validateParams`/`validateSig`) — a bool is a 0/1
+    word REGISTER, and a value-ABI parameter is a 40-byte Value slot.  A bool
+    FIELD is still unspellable (a field is raw memory; the word ABI does not
+    reach into the layout table).
 
 THE JUDGMENTS ENFORCED HERE (T5 adds J7-J10):
 
