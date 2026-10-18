@@ -10,10 +10,14 @@ module ExecHost exposing (main)
 --
 -- ONE plain command, so the host takes its async arm, and every piece of that
 -- arm is exercised at once:
---   * `seq 20000` writes 108894 bytes — more than the 65536-byte drain chunk,
---     so the OUT accumulator GROWS (double-and-copy) while the child is
---     blocked writing into a full pipe: the loop can only finish by polling
---     and draining, which is the async machinery itself;
+--   * `seq 20000 | tr -d '\n'` writes 88894 bytes with no separators — more
+--     than the 65536-byte drain chunk, so the OUT accumulator GROWS
+--     (double-and-copy) while the child is blocked writing into a full pipe:
+--     the loop can only finish by polling and draining, which is the async
+--     machinery itself.  The digits-only payload is deliberate: the model can
+--     then print the FIRST 11 bytes (`String.sliceLen`), so a grow that lost
+--     or mis-ordered the first chunk is a VALUE change and not merely a
+--     length one (a lost chunk leaves `blen` right — it counts what was read);
 --   * `printf oops 1>&2` puts 5 bytes on the ERR accumulator — the only row
 --     where the captured stderr is non-empty through the host (fastexec and
 --     signaldeathasync both leave it ""), so the second accumulator and its
@@ -22,7 +26,8 @@ module ExecHost exposing (main)
 --     decode WIFEXITED/EXITSTATUS (signaldeathasync covers the WIFSIGNALED
 --     arm), and the model prints the code, both LENGTHS and the err BYTES.
 --
--- Golden = "3|108894|oops" (code | length of out | captured stderr).
+-- Golden = "3|88894|12345678910|oops" (code | length of out | out's first 11
+-- bytes | captured stderr).
 
 type Msg
     = Got ( Int, String, String )
@@ -35,7 +40,7 @@ main =
 argv =
     Plan.cons (Plan.str "sh")
         (Plan.cons (Plan.str "-c")
-            (Plan.cons (Plan.str "seq 20000; printf oops 1>&2; exit 3") Plan.nil)
+            (Plan.cons (Plan.str "seq 20000 | tr -d '\\n'; printf oops 1>&2; exit 3") Plan.nil)
         )
 
 
@@ -62,4 +67,11 @@ init () =
 update msg model =
     case msg of
         Got ( code, out, err ) ->
-            ( String.join "|" [ String.fromInt code, String.fromInt (String.length out), err ], Cmd.none )
+            ( String.join "|"
+                [ String.fromInt code
+                , String.fromInt (String.length out)
+                , String.sliceLen 0 11 out
+                , err
+                ]
+            , Cmd.none
+            )

@@ -115,7 +115,7 @@ fails loudly rather than letting this listing go stale.
 | 57 | `execglob` | `run` | `main` | `"tests/elm-fixtures/globdir/?\|.\ntests/elm-fixtures/globdir/*\|.,..,x.txt\ntests/elm-fixtures/globdir/.*\|.,..\nexecbig.txt,execchain.txt,execenv.txt,execfallback.out.txt,execfallback.txt,execglob.txt,exechost.txt,execmal.txt,execnofile.txt,execpipe.txt,execsubchain.txt"` | — | — | `execglob.elm` |
 | 58 | `asyncorder` | `run` | `main` | `"file,ran"` | — | — | `asyncorder.elm` |
 | 59 | `fastexec` | `run` | `main` | `"0\|hi\n\|"` | — | — | `fastexec.elm` |
-| 60 | `exechost` | `runhost` | `main` | `"3\|108894\|oops"` | — | — | `exechost.elm` |
+| 60 | `exechost` | `runhost` | `main` | `"3\|88894\|12345678910\|oops"` | — | — | `exechost.elm` |
 | 61 | `execfallback` | `runhost` | `main` | `"ok"` | — | — | `execfallback.elm` |
 | 62 | `execfallback` | `out_cmp` | — | — | — | — | — |
 | 63 | `execmal` | `run` | `main` | `qbe-rt: qbe-rt: halt (a Mid prim reached its halt arm)` | — | — | `execmal.elm` |
