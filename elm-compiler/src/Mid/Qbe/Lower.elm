@@ -215,6 +215,7 @@ type alias S =
     , defunKey : String -- the SELF-TAIL key ("" for closures — lowerApp's self-call check)
     , binderKey : String -- the BINDER-MAP key (the enclosing defun's key for closures, whose params' types live in ITS binder map)
     , qname : String
+    , abi : Dict String (List Int) -- B6: the WORD-ABI class table (key -> per-param word widths); MEMBERSHIP is the ABI class
     }
 
 
@@ -228,6 +229,7 @@ type alias PendingFunc =
     , ncaps : Int
     , pro : Pro
     , rawAbi : Bool -- RtRawWord (stage 6 U2): the prologue skips the param blits — the params live in `l` registers, not frame slots
+    , paramWidths : List Int -- B6: this defun's per-parameter word widths (a struct VALUE parameter is its layout size; the entry copy spills that many words)
     , entryKey : Maybe String -- Just key for top-level defuns (meta table)
     }
 
@@ -690,6 +692,7 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc table ari
                     , defunKey = ""
                     , binderKey = ""
                     , qname = ""
+                    , abi = runtime.abi
                     }
             in
             case ( midGc, Set.toList hostOnlyPrims, hostSeam ) of
@@ -1149,7 +1152,15 @@ lowerDefun runtime defun sOuter =
                 -- and the whole Rt program when QBE_NORTLEAN=1 restores the
                 -- fat shape for a bisect).
                 rt =
-                    if Set.member defun.key MidRt.rawAbi then
+                    -- B6: the WORD ABI is now derived from the SIGNATURE
+                    -- (`Mid.Rt.abiTable` — a key is in the table iff its
+                    -- declared params and result are all word-class, OR it is
+                    -- a declared Mid.Rt.rawAbi key, which the table merges as
+                    -- an OVERRIDE).  Membership REPLACES the old
+                    -- `Set.member defun.key MidRt.rawAbi` test, so the nine
+                    -- all-word runtime keys classify byte-identically and the
+                    -- four aggregate-return ones stay word-ABI by the merge.
+                    if Dict.member defun.key runtime.abi then
                         RtRawWord
 
                     else if sOuter.rtLean && isRtKey defun.key then
@@ -1207,6 +1218,24 @@ lowerFunBody entry key qname lambda captures rt sOuter =
 
         ncaps =
             List.length captures
+
+        -- B6: this defun's per-parameter word widths.  Only the word ABI
+        -- consumes them (a value-ABI parameter is always one 40-byte slot);
+        -- a key absent from the table takes the all-1s default so the shape
+        -- below is total.
+        widths =
+            case Dict.get key sOuter.abi of
+                Just ws ->
+                    ws
+
+                Nothing ->
+                    List.repeat nparams 1
+
+        -- The register a parameter's first word arrives in: the running sum of
+        -- the widths before it (a struct VALUE parameter occupies `width`
+        -- consecutive `l` registers).
+        bases =
+            paramBases widths
 
         -- The lean ABI's hard bound: 3 pointer params is the whole register
         -- argument budget A's direct entries standardized on (rt.zig
@@ -1282,8 +1311,26 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , rawFloat = Dict.empty
             , rawWord =
                 if rawAbi then
-                    -- each rawAbi param arrives in its own `l` register (a0..)
-                    Dict.fromList (List.indexedMap (\i p -> ( p.id, Il.Tmp ("a" ++ String.fromInt i) )) lambda.params)
+                    -- each rawAbi param arrives in its own `l` register (a0..);
+                    -- B6: a parameter wider than one word (a struct VALUE) is
+                    -- COPIED from its incoming register into a fresh stack
+                    -- block in the prologue, and the binder names THAT block —
+                    -- so a struct parameter is an ordinary struct value (its
+                    -- address) for the whole body.
+                    Dict.fromList
+                        (List.map2
+                            (\base p ->
+                                ( p.id
+                                , if base.width > 1 then
+                                    Il.Tmp ("s" ++ String.fromInt base.reg)
+
+                                  else
+                                    Il.Tmp ("a" ++ String.fromInt base.reg)
+                                )
+                            )
+                            bases
+                            lambda.params
+                        )
 
                 else
                     Dict.empty
@@ -1326,6 +1373,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                 -- no self key), so its lookups deny.
                 key
             , qname = qname
+            , abi = sOuter.abi
             }
 
         -- the (empty) @start block, closed by its fallthrough to @body
@@ -1364,6 +1412,10 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                     [ ( "a0", Base L ), ( "a1", Base L ), ( "a2", Base L ), ( "an", Base W ) ]
 
                 RtRawWord ->
+                    -- B6: ONE `l` register per parameter, struct VALUE
+                    -- parameters included — a struct crosses as the address of
+                    -- the caller's storage and the callee copies it into its
+                    -- own block at entry (see `structParamCopies`).
                     List.map (\i -> ( "a" ++ String.fromInt i, Base L )) (List.range 0 (nparams - 1))
 
                 RtGeneric ->
@@ -1383,12 +1435,21 @@ lowerFunBody entry key qname lambda captures rt sOuter =
         rtChecks =
             case rt of
                 RtRawWord ->
-                    -- no lean-arity bound: a rawAbi defun may take 0..maxArity
+                    -- no lean-arity bound: a word-ABI defun may take 0..maxArity
                     -- word params (Rt.halt is 0-ary); the capture bound still
                     -- holds (an Rt defun is never a closure).  The rawAbi
                     -- ARITY RECORD (stage 6 A1) checks the declared param
-                    -- count against Mid.Rt.rawAbiArity instead of a bound.
-                    rawAbiArityAgree key nparams |> Result.andThen (\_ -> rtCapsErr)
+                    -- count against Mid.Rt.rawAbiArity instead of a bound —
+                    -- for the DECLARED rawAbi keys only, which is what the
+                    -- record covers (B6: a user defun's all-word signature
+                    -- makes it word-ABI without the record ever naming it).
+                    (if Set.member key MidRt.rawAbi then
+                        rawAbiArityAgree key nparams
+
+                     else
+                        Ok ()
+                    )
+                        |> Result.andThen (\_ -> rtCapsErr)
 
                 RtLeanRooted ->
                     rtArityErr |> Result.andThen (\_ -> rtCapsErr)
@@ -1528,6 +1589,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                         , ncaps = ncaps
                         , pro = proKind
                         , rawAbi = rawAbi
+                        , paramWidths = widths
                         , entryKey =
                             if entry then
                                 Just key
@@ -1539,6 +1601,26 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                 ( pending, sRet )
             )
 
+
+
+{-| B6 — the register each parameter's first word arrives in, plus that
+parameter's width: the per-parameter slice of the word-ABI signature layout
+(`width` consecutive `l` registers, in declaration order).  Total: a missing
+width reads as 1 (the value-ABI shape never consults it).
+-}
+paramBases : List Int -> List { reg : Int, width : Int }
+paramBases widths =
+    paramBasesHelp 0 widths
+
+
+paramBasesHelp : Int -> List Int -> List { reg : Int, width : Int }
+paramBasesHelp reg widths =
+    case widths of
+        [] ->
+            []
+
+        w :: rest ->
+            { reg = reg, width = w } :: paramBasesHelp (reg + w) rest
 
 
 -- ============================ TAIL / VALUE LOWERING ============================
@@ -2134,11 +2216,11 @@ lowerRawVal node dest s =
             -- residual: an Rt key reached ONLY through a PRIM (a PrimApp, not
             -- a RawCall) stays seeded by Mid.Rt.seeds/rtDeps, which this arm
             -- never sees — that path is the used-prim census, unchanged.
-            if Set.member call.sym MidRt.rawAbi then
-                -- stage 6 U2: a rawAbi defun (Rt.die/Rt.halt) is WORD-in/
-                -- WORD-out — it never appears in a VALUE position (its let
-                -- binder is a raw temp, via isRawWordExp/rawWordArg).
-                Err "qbe: rawAbi Rt call in a VALUE position — word-producing defuns (Rt.die/Rt.halt) bind to let binders and are legal only in raw-argument/tail positions"
+            if Dict.member call.sym s.abi then
+                -- stage 6 U2 / B6: a WORD-ABI defun is WORD-in/WORD-out — it
+                -- never appears in a VALUE position (its let binder is a raw
+                -- temp, via isRawWordExp/rawWordArg).
+                Err ("qbe: word-ABI call in a VALUE position (" ++ call.sym ++ ") — a word-producing defun binds to a let binder and is legal only in raw-argument/tail positions")
 
             else if Dict.member call.sym s.defuns then
                 lowerArgsToSlots call.args s
@@ -2875,7 +2957,7 @@ rawWordArg exp s =
             -- WORD result, named q_Rt_* callee.  The lean-:val RawCall lives
             -- in lowerRawVal; this arm is the raw-word twin, reached through
             -- isRawWordExp/rawWordOf when the let binder is a raw temp.
-            if Set.member call.sym MidRt.rawAbi then
+            if Dict.member call.sym s.abi then
                 if Dict.member call.sym s.defuns then
                     List.foldl
                         (\e acc ->
@@ -4558,13 +4640,23 @@ lowerLetBinder binder s =
                             { s1 | rawFloat = Dict.insert bind.binder.id raw s1.rawFloat }
                         )
 
-            else if isRawWordExp bind.value then
+            else if isRawWordExp s.abi bind.value || isRawVarAlias s bind.value then
                 -- Rt raw nodes (osier-consspike): a WORD-producing node binds
                 -- to a raw temp, not a frame slot — a slot IS a 40-byte Value
                 -- the collector scans, and a bare address in one is a garbage
                 -- tag away from a crash.  The S4 rawInt shape, one register
                 -- class over; reads go through rawWordArg, and lowerVal's Var
                 -- arm rejects the value-position read.
+                --
+                -- B6 adds the SECOND half of that gate: `Var` of a binder that
+                -- is ALREADY raw (`word z = a;` where `a` is a word-ABI
+                -- parameter or a raw temp) is itself a word producer.  Before
+                -- B6 no reachable program could have such a binder (a `word`
+                -- parameter did not exist: every parameter was a 40-byte Value
+                -- slot), which is exactly the gap B3 pinned — the same
+                -- "`word z = w;` fails identically on two plain word binders"
+                -- row.  rawWordArg's `Var` arm already resolves it; only the
+                -- GATE was missing.
                 rawWordOf bind.value s
                     |> Result.map
                         (\( raw, s1 ) ->
@@ -4588,8 +4680,8 @@ lowerLetBinder binder s =
 -- — it is an effect whose (ignored) result is the stored value's shape, and
 -- it takes the ordinary slot path so its dummy binder's slot stays a valid
 -- zeroed Value.
-isRawWordExp : Exp -> Bool
-isRawWordExp exp =
+isRawWordExp : Dict String (List Int) -> Exp -> Bool
+isRawWordExp abi exp =
     case exp of
         Unsafe node ->
             case node of
@@ -4649,12 +4741,27 @@ isRawWordExp exp =
                     True
 
                 RawCall call ->
-                    -- stage 6 U2: a rawAbi Rt->Rt call (Rt.die/Rt.halt) is a
-                    -- WORD producer; a :val RawCall stays on the slot path.
-                    Set.member call.sym MidRt.rawAbi
+                    -- stage 6 U2 / B6: a call to a WORD-ABI defun is a WORD
+                    -- producer; a :val RawCall stays on the slot path.
+                    Dict.member call.sym abi
 
                 _ ->
                     False
+
+        _ ->
+            False
+
+
+{-| B6 — is this expression a REBIND of an already-raw binder?  The one shape
+`isRawWordExp` cannot see (it is a pure node test): `Var id` where `id` is in
+`s.rawWord`.  `rawWordArg`'s `Var` arm resolves such a read, so the binding is
+a straight alias of the same `l` operand — no temp, no slot, no copy.
+-}
+isRawVarAlias : S -> Exp -> Bool
+isRawVarAlias s exp =
+    case exp of
+        Var id ->
+            Dict.member id s.rawWord
 
         _ ->
             False
@@ -4772,7 +4879,7 @@ condTest exp s =
                 ValTest
 
         Unsafe node ->
-            if isWordCondNode node then
+            if isWordCondNode s.abi node then
                 WordTest
 
             else
@@ -4789,8 +4896,8 @@ condTest exp s =
 The float-word producers (`RawFltBin`/`RawIToF`/`RawLoadFlt`) are a `d`
 class, not a 0/1 word, and are absent — the checker rejects a `:float` cond.
 -}
-isWordCondNode : UnsafeNode -> Bool
-isWordCondNode node =
+isWordCondNode : Dict String (List Int) -> UnsafeNode -> Bool
+isWordCondNode abi node =
     case node of
         RawCmp _ ->
             True
@@ -4850,7 +4957,7 @@ isWordCondNode node =
             True
 
         RawCall call ->
-            Set.member call.sym MidRt.rawAbi
+            Dict.member call.sym abi
 
         _ ->
             False
@@ -7871,12 +7978,60 @@ withPrologue pending =
             -- the body reads them through `s.rawWord`); every other ABI
             -- blits the incoming `%a<i>` pointers into their frame slots.
             if pending.rawAbi then
-                []
+                structParamCopies
 
             else
                 List.map
                     (\i -> Blit (Il.Tmp ("a" ++ String.fromInt i)) (Il.Tmp (slotTmp (i + 2))) vs)
                     (List.range 0 (pending.nparams - 1))
+
+        -- B6 — THE STRUCT-PARAMETER ENTRY COPY.  A struct VALUE parameter
+        -- crosses as `width` consecutive `l` words (the caller passes the
+        -- struct's address and its layout is the defun's own signature, so
+        -- the callee is the only side that needs the width).  One `allocN`
+        -- stack block per such parameter, then one store per word: after the
+        -- prologue the parameter IS its storage — an ordinary struct value —
+        -- so `x.f`, `x.f = e`, `&x` and a struct-typed copy all work through
+        -- the rules that already exist, and the callee's writes reach only its
+        -- OWN copy (C's by-value semantics).
+        --
+        -- MEASURED LIMIT (stated, not hidden): this is a copy at the callee's
+        -- entry, not the plan's lazy register form (`x.f` reading the field's
+        -- own register, `&x` triggering the spill).  The register form needs
+        -- the field's register to be addressable and a way to name "field k of
+        -- a register tuple", which no Ir node can spell — and it would make a
+        -- field STORE through the parameter ill-defined (registers are not
+        -- storage).  The entry copy is the same information, no new node, and
+        -- it keeps the whole struct-value rule set (read, store, `&x`, copy)
+        -- working unchanged inside the callee.
+        structParamCopies =
+            List.concatMap
+                (\b ->
+                    if b.width > 1 then
+                        (Alloc ("s" ++ String.fromInt b.reg) (8 * b.width)
+                            :: List.concatMap
+                                (\k ->
+                                    [ Bin (Just ("w" ++ String.fromInt b.reg ++ "_" ++ String.fromInt k))
+                                        L
+                                        Add
+                                        (Il.Tmp ("s" ++ String.fromInt b.reg))
+                                        (Il.Con (8 * k))
+                                    , Load (Just ("v" ++ String.fromInt b.reg ++ "_" ++ String.fromInt k))
+                                        L
+                                        LoadL
+                                        (Il.Tmp ("w" ++ String.fromInt b.reg ++ "_" ++ String.fromInt k))
+                                    , Store StoreL
+                                        (Il.Tmp ("v" ++ String.fromInt b.reg ++ "_" ++ String.fromInt k))
+                                        (Il.Tmp ("w" ++ String.fromInt b.reg ++ "_" ++ String.fromInt k))
+                                    ]
+                                )
+                                (List.range 0 (b.width - 1))
+                        )
+
+                    else
+                        []
+                )
+                (paramBases pending.paramWidths)
 
         capBlitsPro =
             List.concatMap

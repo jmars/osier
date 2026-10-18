@@ -31,6 +31,7 @@ module Mid.RtLang.Ast exposing
     , Type(..)
     , WordBinOp(..)
     , WordCmpOp(..)
+    , allWordSig
     , builtinClass
     , builtinName
     , fltBinSig
@@ -40,6 +41,7 @@ module Mid.RtLang.Ast exposing
     , splitArrow
     , valArity
     , wordBinSig
+    , wordClassTy
     , wordCmpSig
     )
 
@@ -455,6 +457,72 @@ valArity n =
 
     else
         OArrow OVal (valArity (n - 1))
+
+
+{-| THE WORD-CLASS PREDICATE (B6, plan Q7): does a declared type live in a
+WORD REGISTER — `word`/`int` (one class, B1), `bool` (the 0/1 word, B1), a
+pointer (`*T` — a pointer IS a word, J12), or a struct VALUE (its fields are
+flat words, which is what makes a struct parameter passable at all)?
+
+The two EXCLUSIONS are deliberate and each has its own reason:
+  * `val` — the 40-byte handle; a `:val` in the signature is what forces the
+    value ABI (`:ret`/lean, frame slots, the blit).
+  * `float` — a `d` register class in QBE, not a word.  A float parameter in
+    a word-ABI defun would need `d` registers and a second register class in
+    the signature; no defun in the tree has one, so the rule keeps floats on
+    the value side (today's behaviour, MOVED BY NOTHING).
+  * an ARRAY (`T[N]`) is word-class by REPRESENTATION (its value IS its base
+    address) but a by-value array parameter is still refused by Check (B3's
+    J11 reject, unchanged by B6): the flattening question there is the
+    element count, not the class.  It is listed as word-class so the CLASS
+    rule and the PARAMETER rule stay two separate judgments.
+-}
+wordClassTy : Type -> Bool
+wordClassTy ty =
+    case ty of
+        TWord ->
+            True
+
+        TBool ->
+            True
+
+        TPtr _ ->
+            True
+
+        TStruct _ ->
+            True
+
+        TArray _ _ ->
+            True
+
+        TFloat ->
+            False
+
+        TVal ->
+            False
+
+
+{-| THE ABI CLASS OF A SIGNATURE (B6, plan Q7) — THE ONE RULE, here in the
+backend-neutral vocabulary so the checker (which decides whether a struct
+parameter may exist) and the emitter (which decides the register shape) read
+the SAME judgment:
+
+> a defun whose parameters AND result are all word-class takes the WORD ABI
+> (register parameters, word tail); any `val` (or `float`) in the signature
+> keeps the VALUE ABI (frame slots, `:ret`/lean).
+
+MEASURED agreement with the hand-maintained `Mid.Rt.rawAbi` key list: the
+nine all-word surface defuns in runtime.mid (frameBlock, frame-enter,
+frame-leave, die, halt, cStrEq, main, copyWords, copyWordsGo) are EXACTLY
+the all-word signatures AND are all in `rawAbi`; the four remaining `rawAbi`
+keys (apply, apply-tail, tail-known, bounce) return an AGGREGATE `val`, so
+they classify value-ABI by this rule and are kept word-ABI by the explicit
+set's OVERRIDE (Mid.Rt.abiTable merges the two).  That merge is load-bearing,
+not a safety net: without it those four keys would move the corpus.
+-}
+allWordSig : List Type -> Type -> Bool
+allWordSig paramTys retTy =
+    List.all wordClassTy paramTys && wordClassTy retTy
 
 
 {-| One surface defun.  `key` is the Rt key the lowered Defun carries;

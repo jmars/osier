@@ -218,7 +218,7 @@ compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals 
                                                                                             refinedVarsByModule =
                                                                                                 Dict.union groupTypes.refinedVars corpusRefinedVars
                                                                                         in
-                                                                                        lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule (corpusUnits ++ groupUnits) (userSurface userModules) entryKey ( consArrRec, eqPtrFast )
+                                                                                        lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule (corpusUnits ++ groupUnits) (userSurface userModules) (userAbi userModules) entryKey ( consArrRec, eqPtrFast )
                                                                     )
                                                         )
                                             )
@@ -644,6 +644,15 @@ inferInOrder env files schemes failures nodeTypes refinedVars =
                     inferInOrder env rest schemes (failures ++ [ Error.render err ]) nodeTypes refinedVars
 
 
+{-| B6: the group's user modules' word-ABI tables, merged.  A key defined by
+two user modules is already a loud reject (`userCollisions`), so the union is
+collision-free.
+-}
+userAbi : List MidRt.UserModule -> Dict String (List Int)
+userAbi modules =
+    List.foldl Dict.union Dict.empty (List.map .abi modules)
+
+
 lowerAll :
     MidRt.Runtime
     -> Bool
@@ -659,10 +668,11 @@ lowerAll :
     -> Dict String (List Int)
     -> List MidModule.Unit
     -> Dict String Defun
+    -> Dict String (List Int)
     -> String
     -> ( ( Bool, ( Bool, Bool, Bool ) ), Bool )
     -> Result String String
-lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule units userSurf entryKey ( consArrRec, eqPtrFast ) =
+lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule units userSurf userAbiTable entryKey ( consArrRec, eqPtrFast ) =
     let
         ( consArr, ( rec, typeSpec, midGc ) ) =
             consArrRec
@@ -792,8 +802,17 @@ lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesBy
                                         )
                                             |> Result.andThen
                                                 (\specialised ->
+                                                    -- B6: the ABI class table is the RUNTIME's
+                                                    -- (signature-derived, merged with
+                                                    -- Mid.Rt.rawAbi) UNION every group user
+                                                    -- module's — so a user defun whose declared
+                                                    -- signature is all word-class lowers with
+                                                    -- the word ABI.  A user key can never
+                                                    -- collide with a runtime one (the
+                                                    -- `Rt.*` namespace is reserved), so the
+                                                    -- union's order cannot matter.
                                                     QbeLower.lower
-                                                        rt
+                                                        { rt | abi = Dict.union rt.abi userAbiTable }
                                                         rep
                                                         primDirect
                                                         midCons

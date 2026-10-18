@@ -93,7 +93,73 @@ type alias Runtime =
     , exportedTypes : Dict String RtAst.ExportSig
     , allocating : Set String
     , direct : Defun -> Bool
+    , abi : Dict String (List Int)
     }
+
+
+{-| B6 — THE ABI CLASS TABLE (plan Q7): the keys that lower with the WORD ABI,
+each mapped to its PER-PARAMETER word widths (1 for a `word`/`int`/`bool`/`*T`
+parameter, the struct's word size for a struct VALUE parameter — the width is
+what the callee's entry copy spills).  A key ABSENT from this dict takes the
+value ABI (`:val`/lean), which is every key that was value-ABI before B6, so
+absence is the safe default.
+
+THE RULE IS THE SIGNATURE (`RtAst.allWordSig`), not a hand list — with ONE
+merge: `rawAbi` keys are INSERTED even when their signature classifies
+value-ABI.  That is not a safety net, it is load-bearing and MEASURED: four of
+the thirteen raw-word keys (`Rt.apply`, `Rt.apply-tail`, `Rt.tail-known`,
+`Rt.bounce`) RETURN an aggregate `:val`/`:ret` through sret, so the signature
+rule alone would move them to the value ABI and move the corpus with them.
+The other nine are exactly the all-word signatures runtime.mid has.
+
+The widths come from the CHECKER's ONE layout table (`Check.sizeofStruct`) —
+no second size rule exists.
+-}
+abiTable : List RtAst.Decl -> RtAst.Program -> Dict String (List Int)
+abiTable decls defuns =
+    let
+        bySignature =
+            List.foldl
+                (\d acc ->
+                    if RtAst.allWordSig (List.map .ty d.params) d.ret then
+                        Dict.insert d.key (List.map (paramWords decls) d.params) acc
+
+                    else
+                        acc
+                )
+                Dict.empty
+                defuns
+    in
+    Set.foldl
+        (\key acc ->
+            if Dict.member key acc then
+                acc
+
+            else
+                -- the OVERRIDE: a declared raw-word key keeps the word ABI
+                -- whatever its declared RESULT class says.  The arity record
+                -- is the width source here (every rawAbi key has one; a
+                -- missing entry would be a compile Err at lowerDefun, never a
+                -- silent 0-width).
+                Dict.insert key
+                    (List.repeat (Maybe.withDefault 0 (Dict.get key rawAbiArity)) 1)
+                    acc
+        )
+        bySignature
+        rawAbi
+
+
+{-| One parameter's width in WORDS: a struct VALUE is its layout size (the
+same `sizeof(S)` the checker computes), everything else is one word.
+-}
+paramWords : List RtAst.Decl -> RtAst.Param -> Int
+paramWords decls p =
+    case p.ty of
+        RtAst.TStruct sname ->
+            Maybe.withDefault 1 (RtCheck.sizeofStruct decls sname)
+
+        _ ->
+            1
 
 
 load : String -> Result String Runtime
@@ -293,6 +359,7 @@ load source =
                         , exportedTypes = exportedSigs
                         , allocating = allocating
                         , direct = direct
+                        , abi = abiTable module_.decls ast
                         }
 
 
@@ -304,12 +371,17 @@ header's name — the namespace every key is qualified by; `exports` the
 export block (the declared types M4 checks against); `defuns` the
 LOWERED Mid.Ir defuns, keyed `<name>.<fn>`, ready to be appended to the
 program by the caller (QbeModule) through the SAME splice path the
-runtime uses (T25's ADD arm — a user key has no DSL position).
+runtime uses (T25's ADD arm — a user key has no DSL position).  `abi` is the
+module's B6 word-ABI table (`abiTable` over the module's own decls + defuns):
+the caller unions it into the runtime's, so a user defun with an all-word
+signature lowers with the word ABI — which is what makes a `.mid` able to
+write the collector's word helpers.
 -}
 type alias UserModule =
     { name : String
     , exports : List RtAst.Export
     , defuns : List Defun
+    , abi : Dict String (List Int)
     }
 
 
@@ -408,6 +480,7 @@ checkLowerUserModule externs parsed =
                 { name = parsed.name
                 , exports = parsed.exports
                 , defuns = defuns
+                , abi = abiTable parsed.decls parsed.ast
                 }
             )
 

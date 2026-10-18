@@ -257,6 +257,7 @@ BACKEND-NEUTRAL (the `Mid.Rt` contract): imports are `Dict` and
 
 import Dict exposing (Dict)
 import Mid.RtLang.Ast
+import Mid.RtLang.Ast as Ast
     exposing
         ( AggShape(..)
         , ArrayInit(..)
@@ -1155,10 +1156,21 @@ non-pointer classes need nothing.
 -}
 validateSig : Ctx -> List Param -> Type -> Result String ()
 validateSig ctx params ret =
+    let
+        -- B6: the defun's ABI class, by the ONE rule (Ast.allWordSig), which
+        -- is what decides whether a struct/bool parameter has a register to
+        -- live in at all.
+        wordAbi =
+            Ast.allWordSig (List.map .ty params) ret
+    in
     case ret of
         TStruct sname ->
             -- plan Q7: the ret path is ONE word, so a struct VALUE cannot
             -- come back (a ret buffer is new ABI machinery — named v2).
+            -- B6 changed nothing here and the reason is unchanged: the WORD
+            -- ABI's tail is one register, and a struct return needs either a
+            -- hidden ret buffer (new ABI) or N registers (a multi-value
+            -- return Mid does not have).
             Err
                 (ctx.key
                     ++ ": J11: '-> "
@@ -1183,11 +1195,18 @@ validateSig ctx params ret =
                     Err msg
 
                 Ok () ->
-                    validateParams ctx params
+                    if ret == TBool && not wordAbi then
+                        Err
+                            (ctx.key
+                                ++ ": J11: '-> bool' — a bool RESULT is a 0/1 word REGISTER, so it needs the WORD ABI; this defun's signature has a `val` (or `float`) in it, which forces the value ABI (one `:val` tail)"
+                            )
+
+                    else
+                        validateParams ctx wordAbi params
 
 
-validateParams : Ctx -> List Param -> Result String ()
-validateParams ctx params =
+validateParams : Ctx -> Bool -> List Param -> Result String ()
+validateParams ctx wordAbi params =
     case params of
         [] ->
             Ok ()
@@ -1195,19 +1214,27 @@ validateParams ctx params =
         p :: rest ->
             case p.ty of
                 TStruct sname ->
-                    -- B6's seat: a struct parameter by value FLATTENS into
-                    -- consecutive word registers, which is the word-ABI
-                    -- generalization this ladder rung does not own.
-                    Err
-                        (ctx.key
-                            ++ ": J11: parameter '"
-                            ++ p.name
-                            ++ "' is a struct VALUE ("
-                            ++ sname
-                            ++ ") — struct parameters by value are B6's job (the word-ABI flattening); pass a '*"
-                            ++ sname
-                            ++ "' today"
-                        )
+                    if wordAbi then
+                        -- B6: a struct parameter BY VALUE.  The defun's whole
+                        -- signature is word-class, so it takes the word ABI and
+                        -- the caller passes the struct's ADDRESS as one `l`
+                        -- register; the callee copies it into its own storage
+                        -- at entry (by-value semantics: the callee's writes
+                        -- never escape).  Every field read/`&x`/field store then
+                        -- goes through the ordinary struct-value rules.
+                        Ok ()
+
+                    else
+                        Err
+                            (ctx.key
+                                ++ ": J11: parameter '"
+                                ++ p.name
+                                ++ "' is a struct VALUE ("
+                                ++ sname
+                                ++ ") and this defun's signature is NOT all word-class, so it takes the value ABI — a struct parameter is legal only in a WORD-ABI defun (plan Q7; every parameter `word`/`int`/`bool`/`*T`/struct and the result `word`/`bool`/`*T`).  Make the signature all-word, or pass a '*"
+                                ++ sname
+                                ++ "'"
+                            )
 
                 TArray _ _ ->
                     Err
@@ -1216,16 +1243,25 @@ validateParams ctx params =
                             ++ p.name
                             ++ "' is an ARRAY VALUE ("
                             ++ typeStr p.ty
-                            ++ ") — an array parameter by value is B6's job (the word-ABI flattening/spill); pass a `*word`/`*S` view of its base today"
+                            ++ ") — an array parameter by value is still refused (B3's J11 rule; B6 does not open it: the flattening question there is the ELEMENT COUNT, not the register class).  Pass a `*word`/`*S` view of its base today"
                         )
 
                 _ ->
-                    case validateType ctx p.ty of
-                        Err msg ->
-                            Err msg
+                    if p.ty == TBool && not wordAbi then
+                        Err
+                            (ctx.key
+                                ++ ": J11: parameter '"
+                                ++ p.name
+                                ++ "' is a bool, which is a 0/1 word REGISTER — it needs the WORD ABI, and this defun's signature has a `val` (or `float`) in it, which forces the value ABI (a 40-byte Value slot is not a bool)"
+                            )
 
-                        Ok () ->
-                            validateParams ctx rest
+                    else
+                        case validateType ctx p.ty of
+                            Err msg ->
+                                Err msg
+
+                            Ok () ->
+                                validateParams ctx wordAbi rest
 
 
 {-| The struct-name check inside a declared type (J11): a `*S` must

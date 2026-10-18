@@ -2473,15 +2473,23 @@ baseTypeAt offset src =
             Just ( "val", _ ) ->
                 spelled "val" (succeed TVal)
 
+            Just ( "bool", _ ) ->
+                -- B6: `bool` becomes a spellable SIGNATURE type (a parameter
+                -- or the result), which it could not be before — B1 made it a
+                -- BINDER class only.  It is a `TBool` parameter, i.e. the 0/1
+                -- word in a register; Check refuses it in a value-ABI
+                -- signature (where a bool would land in a 40-byte slot).
+                spelled "bool" (succeed TBool)
+
             Just ( tok, _ ) ->
                 if isUpperName tok then
                     spelled tok (succeed (TStruct tok))
 
                 else
-                    ParserFast.problem ("expected a type (`word`, `int`, `float`, `val`, `*S`, `*word`, `*val` or a struct name), found `" ++ tok ++ "`")
+                    ParserFast.problem ("expected a type (`word`, `int`, `bool`, `float`, `val`, `*S`, `*word`, `*val` or a struct name), found `" ++ tok ++ "`")
 
             Nothing ->
-                ParserFast.problem "expected a type (`word`, `int`, `float`, `val`, `*S`, `*word`, `*val` or a struct name)"
+                ParserFast.problem "expected a type (`word`, `int`, `bool`, `float`, `val`, `*S`, `*word`, `*val` or a struct name)"
 
 
 {-| The pointee after `*` in a pointer annotation: `word` (`PWord`), `int`

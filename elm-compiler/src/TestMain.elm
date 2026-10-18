@@ -1317,10 +1317,10 @@ checks rt =
             _ ->
                 False
         )
-    , check "rawAbi VALUE-position reject (fail-before): a rawAbi Rt call in a :val tail is a loud Err, never a silent word->val reinterpretation"
+    , check "rawAbi VALUE-position reject (fail-before): a WORD-ABI call in a :val tail is a loud Err, never a silent word->val reinterpretation (the message names the callee since B6 — a user word-ABI key can land here too, so 'rawAbi Rt call' was too narrow)"
         (case QbeLower.lower rt False False False True True True True False QbeTypes.empty Dict.empty [ rawAbiValueMisuse ] "Rt.bad4" of
             Err msg ->
-                String.contains "rawAbi Rt call in a VALUE position" msg
+                String.contains "word-ABI call in a VALUE position" msg
 
             Ok _ ->
                 False
@@ -6309,14 +6309,22 @@ checks rt =
                   }
                 ]
         )
-    , check "B1 parse REJECT: `bool` is NOT a type annotation — a bool parameter is a loud parse reject (the word ABI is B6)"
-        (case Parse.parseProgram "defun F.g(b: bool) -> val {\n  return mknil;\n}" of
-            Err _ ->
-                True
-
-            Ok _ ->
-                False
+    , check "B6 parse (REWRITTEN from B1's reject): `bool` IS a signature type now — the parameter parses as TBool and the CHECKER is what refuses it in a value-ABI signature (the two-row pair below)"
+        (Parse.parseProgram "defun F.g(b: bool) -> val {\n  return mknil;\n}"
+            == Ok
+                [ { key = "F.g"
+                  , flags = []
+                  , params = [ { name = "b", ty = Ast.TBool } ]
+                  , ret = Ast.TVal
+                  , body =
+                        { stmts = []
+                        , term = Ast.TRet (Ast.EBuiltin Ast.MkNil [])
+                        }
+                  }
+                ]
         )
+    , checkErrModule "B6 check REJECT: a `bool` parameter in a VALUE-ABI signature — a bool is a 0/1 WORD register, and the `v : val` parameter forces the value ABI (a 40-byte Value slot is not a bool)" "is a bool, which is a 0/1 word REGISTER" "defun F.g(b: bool, v: val) -> word {\n  return 1;\n}"
+    , checkOkModule "B6 check ACCEPT (the control): the same bool parameter and a bool RESULT are legal in an ALL-WORD signature — the word ABI is the only place a bool parameter can exist" "defun F.g(b: bool, w: word) -> bool {\n  return b;\n}"
     , check "B1 parse: `[T](e)` casts — [bool] of a word, [word] of a bool, [*S] of a word, [val], [int]"
         (Parse.parseExp "[bool](x)" == Ok (Ast.ECast Ast.TBool (Ast.EVar "x"))
             && Parse.parseExp "[word](b)"
@@ -6555,8 +6563,10 @@ checks rt =
         "defun Rt.g(w: word) -> word {\n  return w.f;\n}"
     , checkErrModule "B2 check REJECT: a STRUCT RETURN (plan Q7 — the ret path is one word; the out-parameter is the way)" "a struct RETURN is REJECTED"
         "struct S { a : word; }\ndefun Rt.g() -> S {\n  S s;\n  return s;\n}"
-    , checkErrModule "B2 check REJECT: a STRUCT PARAMETER by value — B6's word-ABI flattening; a `*S` parameter is what to write today" "struct parameters by value are B6's job"
-        "struct S { a : word; }\ndefun Rt.g(s: S) -> word {\n  return 0;\n}"
+    , checkOkModule "B6 check ACCEPT (REWRITTEN from B2's reject): a STRUCT PARAMETER by value in an ALL-WORD signature — the defun takes the word ABI, so the parameter has a register to live in (the caller passes its address; the callee copies it at entry)"
+        "struct S { a : word; }\ndefun Rt.g(s: S) -> word {\n  return s.a;\n}"
+    , checkErrModule "B6 check REJECT: the same STRUCT PARAMETER in a VALUE-ABI signature — a struct parameter is legal ONLY where the whole signature is word-class (plan Q7), and the `v : val` parameter forces the value ABI" "a struct parameter is legal only in a WORD-ABI defun"
+        "struct S { a : word; }\ndefun Rt.g(s: S, v: val) -> word {\n  return s.a;\n}"
     , checkOkModule "B2 check accept CONTROL for the two rows above: a `*S` parameter and a `-> val` result are the legal spellings"
         "struct S { a : word; }\ndefun Rt.g(p: *S) -> val {\n  return mknum(p.a);\n}"
     , checkErrModule "B2 check REJECT: copying a DIFFERENT struct (`T t = o;`) — a copy needs the SAME struct value" "the SAME struct"
@@ -6700,12 +6710,14 @@ checks rt =
         "defun Rt.g(s: val) -> word {\n  word[5] a = { 1, 2, 3, 4, 5 };\n  a[2] = a[2] + payload(s, 0);\n  return a[2] + a[0];\n}"
     , checkOk "B3 check ACCEPT: the DECAY row is in the checker's matrix — `*word p = a;` types (an array decays to its element's pointer), and so does `word w = a;` (an address is a word)"
         "defun Rt.g() -> word {\n  word[5] a = { 1, 2, 3, 4, 5 };\n  *word p = a;\n  word w = a;\n  return p[2] + w;\n}"
-    , check "B3 MEASURED GAP (pinned, not hidden): the decay row's BINDER CAST emits nothing valid TODAY — `*word p = a;` dies in the QBE lane with the PRE-EXISTING raw-Var gap (`word z = w;` on two plain word binders fails identically; a Let's value must be a raw PRODUCER node, and `Var` of a raw binder is not one).  Index the array directly, or cross an address through `payload`/`mknum`"
+    , check "B3 MEASURED GAP — CLOSED BY B6 (the row that pinned it is now the row that proves it): `*word p = a;` (the decay binder cast) emitted nothing valid before B6 — it died in the QBE lane with the PRE-EXISTING raw-Var gap, because a Let's value had to be a raw PRODUCER node and `Var` of a raw binder was not one.  B6 made this defun's signature all-word (0 params, `-> word`), so the ABI is the word ABI and `Var a` is a raw alias that now EMITS.  `IsNotVacuouslyOk` below: the load is present and the array's base is the block the free list handed back"
         (case emitUserSsa rt "module B3g\ndefun B3g.g() -> word {\n  word[5] a = { 1, 2, 3, 4, 5 };\n  *word p = a;\n  return p[2];\n}" of
-            Err e ->
-                String.contains "raw word binder read in a VALUE position" e
+            Ok ssa ->
+                String.contains "function l $q_B3g_x2eg() {" ssa
+                    && String.contains "call $malloc(l 40)" ssa
+                    && String.contains "mul 8, 2" ssa
 
-            Ok _ ->
+            Err _ ->
                 False
         )
     , checkOk "B3 check ACCEPT: `&a` on an ARRAY VALUE is the identity (the value IS its address) — typed `*word` by the decay"
@@ -6856,6 +6868,147 @@ checks rt =
                     && String.contains "l 0, l 32)" ssa
 
             Err _ ->
+                False
+        )
+
+    -- ================== B6: THE WORD ABI IS DERIVED FROM THE SIGNATURE ==================
+    -- Plan Q7.  The ABI class is no longer a hand-maintained KEY SET for user
+    -- code: `Mid.Rt.abiTable` derives it from the declared signature (every
+    -- parameter and the result word-class -> the word ABI) and MERGES the
+    -- declared `Mid.Rt.rawAbi` keys in as an override.  The rows below pin the
+    -- rule class by class, the merge, and the two things it unblocks: struct
+    -- parameters by value and the raw-`Var` binder the B3 row below pins.
+    , check "B6 ABI class (word/word): `word` params + a `word` result emit the WORD ABI — `function l` with one `l` register per parameter, and the body's tail is the raw word itself (no frame slot, no :val blit)"
+        (b6Sig rt "module B6a\ndefun B6a.f(a : word) -> word {\n  return a;\n}"
+            == Ok "function l $q_B6a_x2ef(l %a0) {"
+        )
+    , check "B6 ABI class (int/word): `int` IS `word` (B1's alias), so an `int` parameter classifies identically — one class, not two"
+        (b6Sig rt "module B6a\ndefun B6a.f(a : int) -> word {\n  return a;\n}"
+            == Ok "function l $q_B6a_x2ef(l %a0) {"
+        )
+    , check "B6 ABI class (bool/bool): a `bool` parameter and a `bool` result are word-class — a bool IS the 0/1 word, so the defun takes the WORD ABI"
+        (b6Sig rt "module B6a\ndefun B6a.f(a : bool) -> bool {\n  return a;\n}"
+            == Ok "function l $q_B6a_x2ef(l %a0) {"
+        )
+    , check "B6 ABI class (*T/word): a POINTER parameter is word-class (J12: a pointer IS a word) — the word ABI with an `l` register"
+        (b6Sig rt "module B6a\ndefun B6a.f(p : *word) -> word {\n  return p[0];\n}"
+            == Ok "function l $q_B6a_x2ef(l %a0) {"
+        )
+    , check "B6 ABI class (val -> the VALUE ABI): ONE `:val` in the signature (here the parameter) keeps the 40-byte-slot ABI — `function :ret`, an `:val` param, the frame and the blit"
+        (b6Sig rt "module B6a\ndefun B6a.f(v : val) -> val {\n  return v;\n}"
+            == Ok "function :ret $q_B6a_x2ef(:val %a0) {"
+        )
+    , check "B6 ABI class (a val RESULT -> the VALUE ABI): the rule is PARAMS **AND** RESULT — a word parameter with a `val` result is still the value ABI (the ret path is the `:val` tail)"
+        (b6Sig rt "module B6a\ndefun B6a.f(w : word) -> val {\n  return mknum(1);\n}"
+            == Ok "function :ret $q_B6a_x2ef(:val %a0) {"
+        )
+    , check "B6 ABI class (float -> the VALUE ABI): a `float` is a `d` register class, NOT a word, so it never gets the word ABI (no defun in the tree has a float parameter, so nothing moves)"
+        (b6Sig rt "module B6a\ndefun B6a.f(f : float) -> word {\n  return 1;\n}"
+            == Ok "function :ret $q_B6a_x2ef(:val %a0) {"
+        )
+    , check "B6 ABI class (a struct param -> the WORD ABI): a struct VALUE is word-class (its fields are flat words), so `defun f(s : S) -> word` takes the word ABI — MEASURED: ONE `l` register (the address of the caller's storage), which the callee copies at entry"
+        (b6Sig rt "module B6a\nstruct S { a : word; }\ndefun B6a.f(s : S) -> word {\n  return s.a;\n}"
+            == Ok "function l $q_B6a_x2ef(l %a0) {"
+        )
+    , check "B6 THE MERGE (the rule alone is NOT enough): the four aggregate-returning rawAbi keys (Rt.apply/apply-tail/tail-known/bounce) have ALL-WORD parameters and a `val` result, so `Ast.allWordSig` classifies them value-ABI — the hand set's OVERRIDE is what keeps them word-ABI, which is why the merge is load-bearing and not a safety net"
+        (List.all
+            (\key ->
+                (Dict.member key rt.abi)
+                    && (case List.filter (\d -> d.key == key) (Result.withDefault [] rt.parsedSource) of
+                            d :: _ ->
+                                Ast.allWordSig (List.map .ty d.params) d.ret == False
+
+                            [] ->
+                                False
+                       )
+            )
+            [ "Rt.apply", "Rt.apply-tail", "Rt.tail-known", "Rt.bounce" ]
+        )
+    , check "B6 THE TABLE (totality + agreement, over the REAL runtime text): every declared rawAbi key is in the table, every table key the rule contributed (i.e. NOT a rawAbi key) has an all-word signature, and the nine all-word surface defuns are exactly the rawAbi keys the rule derives"
+        (let
+            surface =
+                Result.withDefault [] rt.parsedSource
+
+            derived =
+                List.filter (\d -> Ast.allWordSig (List.map .ty d.params) d.ret) surface
+                    |> List.map .key
+                    |> Set.fromList
+
+            rawSet =
+                Set.fromList (Set.toList Rt.rawAbi)
+         in
+         List.all (\k -> Set.member k rawSet) (Set.toList derived)
+            && List.all (\d -> Dict.member d.key rt.abi) (List.filter (\d -> Set.member d.key rawSet) surface)
+            && Set.size derived == 9
+        )
+
+    -- ---- B6: THE RAW-`Var` GAP (B3's pinned row, now CLOSED for a word binder) ----
+    , check "B6 RAW-VAR (the brief's own MEASURED case, fail-before): `defun Vf.t(a : word) -> word { word z = a; return z; }` — `word z = a;` where `a` is a word PARAMETER now emits (`ret %a0`), where before B6 the parameter had no register at all (B3 pinned the same seam as `binder id 1 is not a raw word`)"
+        (case emitUserSsa rt "module Vf\ndefun Vf.t(a : word) -> word {\n  word z = a;\n  return z;\n}" of
+            Ok ssa ->
+                String.contains "function l $q_Vf_x2et(l %a0) {" ssa
+                    && String.contains "ret %a0" ssa
+                    && not (String.contains "frame" ssa)
+
+            Err _ ->
+                False
+        )
+    , check "B6 RAW-VAR stays CLOSED for a val binder: `val z = a;` on a word parameter is still a loud reject at CHECK (a word does not pass into a `:val` slot unwrapped) — B6 widened the raw-Var GATE, not the class matrix"
+        (case b6CheckErr rt "module Vf\ndefun Vf.t(a : word) -> word {\n  val z = a;\n  return 1;\n}" of
+            Err msg ->
+                String.contains "declares val but its initializer is word" msg
+
+            Ok _ ->
+                False
+        )
+    , check "B6 PINNED PRE-EXISTING GAP (not widened by this unit): a WORD parameter in a VALUE-ABI signature is still a 40-byte Value slot, so `mknum(w)` dies at emit with 'binder id 1 is not a raw word' — MEASURED IDENTICALLY before B6 (a word param in a -> val defun was always a slot); the fix is to make the signature all-word"
+        (case emitUserSsa rt "module Vf\ndefun Vf.t(w : word) -> val {\n  return mknum(w);\n}" of
+            Err e ->
+                String.contains "is not a raw word" e
+
+            Ok _ ->
+                False
+        )
+
+    -- ---- B6: STRUCT PARAMETERS BY VALUE ----
+    , check "B6 STRUCT PARAM: the entry copy IS the by-value hand-off — ONE `alloc8 16` block for a 2-word struct parameter, then one load+store per word from the incoming address register; the parameter binder names THAT block, so `s.a` reads block+0 and `s.b` reads block+8 through the ordinary field rules"
+        (case emitUserSsa rt "module B6s\nstruct S { a : word; b : word; }\ndefun B6s.f(s : S) -> word {\n  return s.a + s.b;\n}" of
+            Ok ssa ->
+                String.contains "function l $q_B6s_x2ef(l %a0) {" ssa
+                    && String.contains "%s0 =l alloc8 16" ssa
+                    && String.contains "%v0_0 =l loadl %w0_0" ssa
+                    && String.contains "storel %v0_0, %w0_0" ssa
+                    && String.contains "%v0_1 =l loadl %w0_1" ssa
+                    && String.contains "add %s0, %t" ssa
+
+            Err _ ->
+                False
+        )
+    , check "B6 STRUCT PARAM: a field STORE through the parameter is legal and lands in the callee's OWN copy (by-value semantics: the caller's struct is untouched) — `s.a = 7;` is a storel to the block, and `&s` is the block's address (no second copy, no node)"
+        (case emitUserSsa rt "module B6s\nstruct S { a : word; b : word; }\ndefun B6s.f(s : S) -> word {\n  s.a = 7;\n  *S p = &s;\n  return p.b;\n}" of
+            Ok ssa ->
+                String.contains "%s0 =l alloc8 16" ssa
+                    && String.contains "storel 7," ssa
+                    && String.contains "add %s0, 8" ssa
+
+            Err _ ->
+                False
+        )
+    , check "B6 STRUCT PARAM is CALLABLE from another Mid defun: the caller passes the struct VALUE (its address — `Var o` is already a raw word), so a struct argument needs no call-site signature table and no flattening on the caller's side — the whole by-value hand-off is `call $q_..(l %t)`, the alloc is the callee's"
+        (case b6SsaAt rt "B6s.g" "module B6s\nstruct S { a : word; b : word; }\ndefun B6s.f(s : S) -> word {\n  return s.a;\n}\ndefun B6s.g() -> word {\n  S o;\n  o.a = 1;\n  o.b = 2;\n  return call B6s.f(o);\n}" of
+            Ok ssa ->
+                String.contains "call $q_B6s_x2ef(l %t" ssa
+                    && String.contains "call $malloc(l 16)" ssa
+
+            Err _ ->
+                False
+        )
+    , check "B6 STRUCT RETURN stays REJECTED (loudly, with the reason): the word ABI's ret path is ONE register, so a struct cannot come back — the message names the out-parameter, and B6 did not quietly open it"
+        (case b6CheckErr rt "module B6s\nstruct S { a : word; }\ndefun B6s.f(s : S) -> S {\n  return s;\n}" of
+            Err msg ->
+                String.contains "a struct RETURN is REJECTED" msg
+
+            Ok _ ->
                 False
         )
     ]
@@ -7520,7 +7673,12 @@ emitUserSsa rt src =
                 Ok m ->
                     case m.defuns of
                         d :: _ ->
-                            QbeLower.lower rt
+                            -- B6: the module's own word-ABI table joins the
+                            -- runtime's — the SAME union QbeModule.lowerAll
+                            -- performs, so a row emitting a user defun with an
+                            -- all-word signature sees the word ABI it would ship
+                            -- with.
+                            QbeLower.lower { rt | abi = Dict.union rt.abi m.abi }
                                 True
                                 False
                                 False
@@ -7537,6 +7695,88 @@ emitUserSsa rt src =
 
                         [] ->
                             Err "lower: no defuns"
+
+
+{-| B6: the SIGNATURE line of a one-defun user `.mid` through the real
+pipeline — the ABI class made literal (`function l` = the word ABI,
+`function :ret` = the value ABI).  `Err` on any pipeline failure, so a row
+comparing on a signature can never pass vacuously.
+-}
+b6Sig : Rt.Runtime -> String -> Result String String
+b6Sig rt src =
+    case b6SsaAt rt "" src of
+        Err e ->
+            Err e
+
+        Ok ssa ->
+            case List.filter (String.startsWith "function ") (String.lines ssa) of
+                line :: _ ->
+                    Ok line
+
+                [] ->
+                    Err "b6Sig: no function line in the emitted .ssa"
+
+
+{-| B6: the emitted `.ssa` for a whole user module with an explicit ENTRY key —
+`emitUserSsa` lowers the module's FIRST defun only, which cannot show a CALL
+SITE (the caller is the second defun).  An empty `entryKey` means the first
+defun's key.
+-}
+b6SsaAt : Rt.Runtime -> String -> String -> Result String String
+b6SsaAt rt entryKey src =
+    case Rt.parseUserModule src of
+        Err e ->
+            Err e
+
+        Ok parsed ->
+            case Rt.checkLowerUserModule rt.exportedTypes parsed of
+                Err e ->
+                    Err e
+
+                Ok m ->
+                    case m.defuns of
+                        [] ->
+                            Err "b6SsaAt: no defuns"
+
+                        d :: _ ->
+                            let
+                                entry =
+                                    if entryKey == "" then
+                                        d.key
+
+                                    else
+                                        entryKey
+                            in
+                            QbeLower.lower { rt | abi = Dict.union rt.abi m.abi }
+                                True
+                                False
+                                False
+                                True
+                                True
+                                True
+                                True
+                                False
+                                QbeTypes.empty
+                                (rtArities m.defuns)
+                                m.defuns
+                                entry
+                                |> Result.map Print.print
+
+
+{-| B6: check + lower a user `.mid` for the REJECT/ACCEPT rows.  `Ok "ok"` on
+acceptance, `Err msg` with the pipeline's own message otherwise (a PARSE
+failure surfaces as `Err ("parse: " ++ e)`, so an expected-fragment row cannot
+pass on a parse accident).
+-}
+b6CheckErr : Rt.Runtime -> String -> Result String String
+b6CheckErr rt src =
+    case Rt.parseUserModule src of
+        Err e ->
+            Err ("parse: " ++ e)
+
+        Ok parsed ->
+            Rt.checkLowerUserModule rt.exportedTypes parsed
+                |> Result.map (\_ -> "ok")
 
 
 {-| The ONE definition of the layout (A2 + A3): the constant the LOWERER emits
@@ -9279,6 +9519,7 @@ mkUser name keys =
     { name = name
     , exports = []
     , defuns = List.map (\k -> { key = k, value = Lit (LNumber 0) }) keys
+    , abi = Dict.empty
     }
 
 
