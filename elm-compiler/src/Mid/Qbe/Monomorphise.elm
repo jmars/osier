@@ -1502,9 +1502,10 @@ foldKids f kids acc =
 -- ============================ REACHABILITY ============================
 
 
-{-| The `GRef` closure of the program from the entry key — `Lower.reach`'s
-walk, so the pass considers exactly the defuns the emitter will emit. Clones
-are appended to the OUTPUT, never discovered here.
+{-| The closure of the program from the entry key over the edges `Lower.reach`
+follows — `grefsOf` below, a `GRef` edge plus a `RawCall` edge — so `keys` is
+exactly the defun set the emitter will emit. Clones are appended to the
+OUTPUT, never discovered here.
 -}
 reach : Dict String Defun -> String -> List String -> Result String (List String)
 reach defuns key seen =
@@ -1520,16 +1521,49 @@ reach defuns key seen =
                 List.foldl
                     (\k acc -> Result.andThen (\s -> reach defuns k s) acc)
                     (Ok (key :: seen))
-                    (grefsOf defun.value)
+                    (grefsOf defuns defun.value)
 
 
-grefsOf : Exp -> List String
-grefsOf exp =
+{-| The walk's edges, one per expression in the fold: a `GRef` names its target,
+and a `RawCall` names its CALLEE when that key is a defun of this program (the
+same member guard `Lower.rawCallEdges` uses — a raw call to nothing is the raw
+arm's own reject, not a reach error). Everything else contributes nothing here
+but is still DESCENDED by `foldExp` through `childrenOf`, which for a raw node
+is `unsafeChildren`; so a call sitting in a raw operand
+(`payload(call f(x), 0)`) is an edge like any other.
+
+This is `Lower.grefsOf`'s edge set in a second copy: `Lower` and this module
+cannot share one (each is total over `UnsafeNode` by Elm's exhaustiveness
+check, which is what keeps the two from drifting), and the emitter's set is the
+one that decides what this pass must visit — a defun missing here is emitted
+anyway, but never rewritten, so its call sites are never specialised.
+
+THE `RawCall` ARM IS INERT TODAY, and that is measured, not assumed: a
+`RawCall`'s target is checked against the MID surface's own defuns
+(`J2: call target '<key>' resolves to no surface defun and no extern seat`), so
+every defun this arm can add to `keys` is a mid defun — and the type table
+holds no scheme for those, so `site` denies every call inside one and the
+visit is an identity rewrite. A mid-only program whose callee is reachable
+ONLY through a `RawCall` emits byte-identical `.ssa` before and after this
+arm, with no `# mono:` note (zero candidates), and the corpus is
+byte-identical 159/159. The arm is here so `keys` stays the EMITTER's set: the
+day the mid half grows a scheme, the pass is already rooted where the emitter
+is. (MEASURED, handoff-mono-reach.)
+-}
+grefsOf : Dict String Defun -> Exp -> List String
+grefsOf defuns exp =
     foldExp
         (\e acc ->
             case e of
                 GRef ref ->
                     ref.key :: acc
+
+                Unsafe (RawCall call) ->
+                    if Dict.member call.sym defuns then
+                        call.sym :: acc
+
+                    else
+                        acc
 
                 _ ->
                     acc
