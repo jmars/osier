@@ -52,7 +52,68 @@ const CORPUS = [
 // Mid.RtSource's `source` blob.  Read ONCE at module load (via __dirname, like
 // CORPUS — CWD-independent) and passed to Main as content; Main.elm loads it
 // ONCE per process (the parse hoist that keeps the corpus wall ~16 s-class).
-const RUNTIME_MID = fs.readFileSync(path.join(__dirname, 'runtime.mid'), 'utf8');
+const RUNTIME_MID_RAW = fs.readFileSync(path.join(__dirname, 'runtime.mid'), 'utf8');
+
+// QBE_MIDHOST (stage 7A) — the MID EFFECT HOST, chosen at COMPILE time, and
+// why it has to be compile time.
+//
+// `runtime.mid` carries the host (Rt.hostRun and the machine under it) plus a
+// getenv hatch in Rt.main that selects it at RUN time.  Both halves cannot be
+// unconditional: Rt.main is emitted into EVERY artifact ($main is in all 159
+// corpus groups), so an always-present hatch would pull the host's ~1,500
+// lines of IL and its strings into every artifact — a corpus-wide re-freeze
+// for a path the default does not take.  So the hatch lives inside a marked
+// region of runtime.mid and THIS reader drops it unless QBE_MIDHOST=1:
+//
+//   * QBE_MIDHOST unset/0 — the region is removed, nothing reaches the host
+//     defuns, they are PRUNED (an unreached Mid defun is never emitted), and
+//     the emitted bytes are the ones the corpus baseline pins.  MEASURED: the
+//     corpus is byte-identical with the whole host PRESENT in runtime.mid.
+//   * QBE_MIDHOST=1 — the region is kept, and the surviving hatch still reads
+//     getenv("QBE_MIDHOST") at RUN time, so ONE binary carries both hosts:
+//     `QBE_MIDHOST=0 ./the-binary <entry>` runs the Zig host inside the very
+//     build that can run the Mid one (the differential, in one artifact).
+//
+// The markers are the contract with the file (TestMain pins their shape: one
+// BEGIN, one END, BEGIN first).  They are `//` comments, which are emit-inert
+// on their own — the SPLICE is what moves bytes, not the markers.
+const MIDHOST_BEGIN = '// >>> QBE_MIDHOST-ONLY';
+const MIDHOST_END = '// <<< QBE_MIDHOST-ONLY';
+const QBE_MIDHOST = process.env.QBE_MIDHOST === '1';
+
+function spliceMidHost(text, keep) {
+  const out = [];
+  let inside = false;
+  let began = 0;
+  let ended = 0;
+  for (const line of text.split('\n')) {
+    const t = line.replace(/^\s+/, '');
+    if (t.startsWith(MIDHOST_BEGIN)) {
+      inside = true;
+      began += 1;
+      if (keep) out.push(line);
+      continue;
+    }
+    if (t.startsWith(MIDHOST_END)) {
+      inside = false;
+      ended += 1;
+      if (keep) out.push(line);
+      continue;
+    }
+    if (inside) {
+      if (keep) out.push(line);
+      continue;
+    }
+    out.push(line);
+  }
+  if (began !== 1 || ended !== 1) {
+    console.error(`run.js: runtime.mid must carry exactly ONE QBE_MIDHOST region (found ${began} begin, ${ended} end marker(s))`);
+    process.exit(2);
+  }
+  return out.join('\n');
+}
+
+const RUNTIME_MID = spliceMidHost(RUNTIME_MID_RAW, QBE_MIDHOST);
 
 // M3: extension classification — a source whose path ends `.mid` is a mid-c
 // module (compiled by Mid.RtLang and merged as a per-group input), NOT an

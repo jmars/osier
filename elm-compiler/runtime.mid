@@ -24,6 +24,14 @@ export Rt.exec-run : val -> val -> val -> val !io
 export Rt.main : word -> word -> word
 export Rt.frame-enter : word -> word
 export Rt.frame-leave : word
+// THE APPLIER SEAT (stage 7A): (closure, arg-area, nargs) -> the applied value.
+// The Mid host calls it directly (same module), and it is EXPORTED so a Mid
+// PROGRAM can reach it too — the applier pin (tools/qbe/fixtures/hostapply.elm)
+// is why: Rt.callArity's first real exercise must not be the selfhost, where a
+// silent-wrong is a wrong answer rather than a red row. A user `.mid` may call
+// only EXPORTED runtime keys (J2), so an internal spelling is unreachable for
+// the pin — this is the one seat the port widens the block for.
+export Rt.apply-at : val -> val -> val -> val
 // ======================= THE C FFI BOUNDARY (cffi U5) =======================
 // The runtime's libc surface, DECLARED (plan §8 U5) so a `rawcall` site's
 // register classes come from the C prototype instead of the all-word
@@ -451,6 +459,72 @@ struct CopyDesc {
   dst : word;
   n : word;
 }
+// ==================== STAGE 7A: THE MID EFFECT HOST — DECLS ==============
+// The host's state declarations.  They live HERE, with every other struct in
+// this file, because a DECL MAY NOT FOLLOW A DEFUN: MEASURED on this tree,
+// `defun ... struct ...` is `err N:1: unexpected input after the expression`
+// (both in this module and in a user `.mid`), so the state block has to sit
+// above the first defun.  The machine itself — its design note, the layout
+// this block declares, and every host defun — is at the END of this file.
+struct HostFrame {
+  kind : word;
+  cont : word;
+}
+struct HostRF {
+  fd : i32;
+  bptr : word;
+  blen : word;
+  bcap : word;
+}
+struct HostEX {
+  prog : word;
+  pid : word;
+  outfd : i32;
+  errfd : i32;
+  bptr : word;
+  blen : word;
+  bcap : word;
+  eptr : word;
+  elen : word;
+  ecap : word;
+  oflags : word;
+}
+struct HostSL {
+  deadline : word;
+}
+struct HostEv {
+  active : word;
+  gen : word;
+  base : word;
+  nframes : word;
+  frames : HostFrame[256];
+  etag : word;
+  union { rf : HostRF; ex : HostEX; sl : HostSL; };
+}
+struct Host {
+  nslots : i32;
+  slots : val[33031];
+  nevals : word;
+  nactive : word;
+  quit : word;
+  cur : word;
+  clr : word;
+  clrBase : word;
+  evals : HostEv[128];
+}
+// CLOCK_MONOTONIC's timespec (glibc `struct timespec`, x86_64: 16 bytes).
+struct HostTs {
+  sec : i64;
+  nsec : i64;
+}
+// NO extern FOR clock_gettime, DELIBERATELY: the symbol still has an
+// `Ast.rawcallArity` row (cffi U5 left it, "per the brief"), and R-08 refuses
+// a symbol in both tables.  Declaring it here would mean deleting that row and
+// re-emitting Rt.collect's three F1-stats call sites — a corpus-wide shape
+// change this unit does not own.  The undeclared row's all-word convention is
+// correct for this call (its `int` result is ignored; the OUT parameter is a
+// timespec pointer).  Adding the declaration + deleting the row belongs to
+// whoever re-freezes the corpus.
 defun Rt.getpid(dummy : val) -> val {
   return mknum(rawcall getpid());
 }
@@ -4385,6 +4459,39 @@ defun Rt.main(argc : word, argv : word) -> word {
   };
   word fptr = wload(fslot, 0);
   rawcall rt_root_push_value(fptr);
+  // >>> QBE_MIDHOST-ONLY: the Mid host arm.  run.js KEEPS this region only when
+  // QBE_MIDHOST=1 is set at COMPILE time, and DROPS every line of it otherwise
+  // (see run.js's `spliceMidHost`).  WHY AT COMPILE TIME AND NOT ONLY AT RUN
+  // TIME: `$main` is emitted into EVERY artifact, so a getenv hatch that is
+  // always present would put the whole host's IL (and every string in it) into
+  // all 159 corpus artifacts — a corpus-wide re-freeze for a default that does
+  // not use it.  With the region dropped, nothing reaches the host defuns and
+  // they are PRUNED, so the default arm stays byte-identical (MEASURED: the
+  // corpus is byte-identical with the whole host present in this file).
+  //
+  // The arm is still TWO-LEVEL: the compile-time splice decides whether the
+  // hatch EXISTS, and `getenv("QBE_MIDHOST")` decides at RUN time which host
+  // drives — so ONE arm-B binary carries both hosts and
+  // `QBE_MIDHOST=0 ./prog <entry>` exercises the Zig path inside it (the
+  // differential survives inside a single build).  Both arms are spelled as
+  // `word X = if (c) { ... return 0; } else { return 0; };` — the file's own
+  // conditional-block idiom: in an if-EXPRESSION arm `return e` yields the
+  // arm's VALUE, so the two arms JOIN and the statements run conditionally
+  // (Rt.frame-leave's shape, and the reason a "return" here is not a return).
+  word hop = if (mkbool(rawcall getenv(rawstr("QBE_MIDHOST")) != 0)) {
+    word chk = if (payload(call Rt.hostIsProgram(vecload(fptr, 0)), 0) != 0) {
+      call Rt.hostRun(mknum(fptr), mknum(modelslot));
+      rawcall rt_root_push_value(modelslot);
+      wstore(fslot, 0, modelslot);
+      return 0;
+    } else {
+      return 0;
+    };
+    return 0;
+  } else {
+    return 0;
+  };
+  // <<< QBE_MIDHOST-ONLY
   word isprog = rawcall rt_is_program(fptr);
   word ran = if (mkbool(isprog != 0)) {
     word rrc = rawcall rt_run_program(fptr, modelslot);
@@ -4887,4 +4994,692 @@ defun Rt.bounceGo(r : val) -> val {
       }
     }
   }
+}
+
+// ==================== STAGE 7A: THE MID EFFECT HOST =======================
+// The CEK effect-manager state machine of src/effectloop.zig, PORTED (plan
+// stage7-plan.md §3, §7.3's 7A row).  Behind QBE_MIDHOST: the ZIG host stays
+// the default and stays the live oracle, and `Rt.main` picks between them at
+// RUNTIME (a getenv hatch spliced in by run.js at COMPILE time — see the
+// markers around that arm, and the comment there for why the splice is
+// compile-time).
+//
+// THE STATE (plan §3.1): ONE `val[]` slot array, permanently ROOTED by
+// `rt_root_push_value_array`, and everything else plain WORDS in one malloc'd
+// C-heap blob.  The array is the Zig loop's `.slots` discipline verbatim: a
+// Value that must outlive ONE host defun's frame lives in a slot and is
+// re-read at the point of use (the `val` bridge's obligation 2,
+// Mid/RtLang/Ast.elm's B7 header).  A Value held inside a host defun's own
+// frame needs no such care: this machine's defuns are the runtime's ordinary
+// VALUE ABI (lean, framed), and a framed defun's binder slots are REGISTERED
+// ROOTS (Rt.frame-enter pushes `value_array(base, hdr)` and hdr->live is the
+// slot count), so the collector scans and UPDATES them in place.
+//
+// WHY VALUE-ABI AND NOT THE rawAbi + indices SPLIT (a measured deviation from
+// plan §3.3, which proposed an all-rawAbi machine): a raw-word defun's tail
+// CANNOT JOIN two word-returning branches ("qbe: raw-abi defun tail If joins
+// two word-returning branches ... one branch must be a self-tail recur"), so
+// in a rawAbi defun a mid-block guard `if (c) { return 0; }` is refused, and
+// the 20-way ctor dispatch can only be written as a 20-deep if/ELSE nest whose
+// one branch recurs.  MEASURED on this tree (a 3-guard rawAbi loop and the
+// plan's §3.3 snippet both fail to compile).  In a VALUE defun the dispatch is
+// the natural chain Rt.deepEq already spells.  The word defuns here are the
+// ones whose body IS straight-line or a single-guard loop.
+//
+// THE BLOB IS malloc'd, NEVER A STACK LOCAL AND NEVER ON THE MID HEAP: as a
+// stack local it made a native caller's frame ~1.9 MB and SEGV'd the 8 MB
+// stack (effectloop.zig:1170-1178's own measurement), and the collector needs
+// the slot array's ADDRESS to stay put across collects (the root
+// registration).  Raw C-heap pointers are invisible to the GC, which is what
+// makes `mknum(blob)` / `payload(hN, 0)` a sound way to carry one in a Value.
+//
+// LAYOUT (byte offsets MEASURED against TestMain's 7A rows, which recompute
+// them from THESE declarations — Mid has no `sizeof`, so hostInit's malloc
+// size is an ARITHMETIC LITERAL and the pin is what keeps it honest):
+//
+//   @0        nslots    the count the root scan reads AT SCAN TIME
+//   @8        slots     the rooted val array; slot k is at byte 8 + 40k
+//   @1321248  nevals    high-water mark of the eval table (first-inactive reuse)
+//   @1321256  nactive   live evaluations
+//   @1321264  quit      the TaskQuit latch
+//   @1321272  cur       hostStepAll's cursor (a loop cursor LIVES IN MEMORY:
+//                       a self-tail `recur` may only pass its params back
+//                       unchanged — "raw-abi self-tail arg 1 is not the param
+//                       register" is the same rule's other face)
+//   @1321280  clr       hostClearGo's cursor
+//   @1321288  clrBase   hostClearGo's block base
+//   @1321296  evals     HostEv[128], 4224 bytes each
+//
+// THE SLOT ARRAY (33031 slots = 2 + 128 x 258 + 5):
+//   0        model
+//   1        update (the Program's updateFn)
+//   2..      per-evaluation blocks, 258 slots each: task, result, 256 frame
+//            slots (a frame slot holds the continuation/handler CLOSURE; the
+//            frame stack is push/pop only, so nframes indexes it directly —
+//            the Zig's `cont_slot` is the same index saved one level down)
+//   33026    SCR_CUR   the Cmd cons-walk cursor
+//   33027    SCR_A0    the applier's argument area (contiguous: callArity
+//   33028    SCR_A1    needs buf + 40k, so a slice of the rooted array IS the
+//                       argument buffer — no copy, no second referee)
+//   33029    SCR_RES   the applier's result cell
+//   33030    SCR_TMP   the spawn/pushFrame staging cell
+// The last eval block ends at slot 33025, so the five scratch cells are
+// outside every block.  SCR_* are consts-by-comment (Mid has no top-level
+// constants); TestMain pins the arithmetic against the declarations above.
+//
+// EFFECTS (plan §5.1): no sum types in Mid, so `etag` is a word (0 none,
+// 1 readFile, 2 exec, 3 sleep — the Zig enum order) beside ONE anonymous
+// promoted `union { ... }` block whose members are named once, globally.
+// 7A only ever sets etag = 0; 7B-7E fill the unions in.
+// "qbe-rt: error: " + a + b + "\n", then exit 1.  The Zig host raised a
+// VmError that rt_run_program printed with this prefix; Rt.die has no prefix
+// (it is the runtime's own halt), so the port carries the prefix HERE and the
+// selfhost/gate rows that assert a stderr shape keep seeing it (plan §5.5,
+// gap G-J).  Two parameters because both the plain error and the unported-leaf
+// error share one printer.
+defun Rt.hostDieErr(a : word, b : word) -> word {
+  word pre = rawstr("qbe-rt: error: ");
+  val plen = call Rt.cStrLenGo(mknum(pre), mknum(0));
+  rawcall write(2, pre, payload(plen, 0));
+  val alen = call Rt.cStrLenGo(mknum(a), mknum(0));
+  rawcall write(2, a, payload(alen, 0));
+  val blen = call Rt.cStrLenGo(mknum(b), mknum(0));
+  rawcall write(2, b, payload(blen, 0));
+  rawcall write(2, rawstr("\n"), 1);
+  rawcall exit(1);
+  return 0;
+}
+defun Rt.dieErr(msg : word) -> word {
+  return call Rt.hostDieErr(rawstr(""), msg);
+}
+// The 14 Task ctors 7A does NOT implement (7B-7E own them).  LOUD: a silent
+// drop would leave the continuation unresumed and the program apparently
+// working, which is the Zig's `unhandled Task effect` arm's reason for
+// existing.  The ctor's own name is appended so a red row names the leaf.
+defun Rt.hostDieUnported(nm : word) -> word {
+  return call Rt.hostDieErr(rawstr("unported Task effect: "), nm);
+}
+
+defun Rt.hostNowMs(dummy : val) -> val {
+  HostTs t;
+  t.sec = 0;
+  t.nsec = 0;
+  rawcall clock_gettime(1, &t);           // 1 = CLOCK_MONOTONIC, an OUT param
+  word s = t.sec;
+  word ns = t.nsec;
+  return mknum((s * 1000) + (ns / 1000000));
+}
+
+// ========================== THE STATE ------------------------------------
+// `hN` is the blob's ADDRESS boxed into a Value (`mknum(blob)`), and every
+// defun below unboxes it at the top (`payload(hN, 0)`) — the runtime's own
+// idiom (Rt.gcAlloc, Rt.tail-known).  Indices are boxed the same way.  It is a
+// number Value, so it cannot be mistaken for a GC pointer and the collector
+// never touches it.
+//
+// Rt.hostInit — allocate and root the state, seed the model and the update
+// closure.  Returns mknum(blob).
+//
+// THE MALLOC SIZE IS ARITHMETIC, NOT `sizeof`: Mid has no sizeof.  The literal
+// is 8 (nslots) + 33031 x 40 (the slot array) + 6 x 8 (nevals..clrBase) +
+// 128 x 4224 (the eval table, sizeof(struct HostEv) = 528 words), and
+// TestMain's 7A rows RECOMPUTE it from struct Host / struct HostEv above — a
+// field added to either without this line is a red row, not a heap overflow.
+defun Rt.hostInit(progAddrN : val) -> val {
+  word progAddr = payload(progAddrN, 0);
+  word bytes = 8 + (33031 * 40) + (6 * 8) + (128 * 4224);
+  word blob = rawcall malloc(bytes);
+  rawcall memset(blob, 0, bytes);
+  *Host lp = [*Host](blob);
+  lp->nslots = 33031;
+  rawcall rt_root_push_value_array(blob + 8, blob);
+  val prog = vecload(progAddr, 0);
+  vecstore(blob + 8, 0, vecload(payload(prog, 0), 1));
+  vecstore(blob + 8 + 40, 0, vecload(payload(prog, 0), 3));
+  return mknum(blob);
+}
+
+// Rt.hostIsProgram — the C-ABI seat rt_is_program's port (plan §5.3): a
+// vector[Program, m0, c0, update] whose head is the bare symbol 'Program'.
+defun Rt.hostIsProgram(vN : val) -> val {
+  if (tagis(vN, 10) == 0) {
+    return mkbool(0);
+  }
+  if (payload32(vN, 1) != 4) {
+    return mkbool(0);
+  }
+  word d = payload(vN, 0);
+  if (d == 0) {
+    return mkbool(0);
+  }
+  val head = vecload(d, 0);
+  if (tagis(head, 2) == 0) {
+    return mkbool(0);
+  }
+  return mkbool(call Rt.cStrEq(payload(head, 0), rawstr("Program")) != 0);
+}
+
+// Rt.hostArity — the EXPECTED VECTOR LENGTH of a Task ctor (len == ctor arity
+// + 1), or 0 for "not a Task ctor".  The Zig's taskArity, and the guard that
+// turns a malformed Task into a dropped evaluation instead of an
+// out-of-bounds read of its payload.
+//
+// DISPATCH IS ON CONTENT, NEVER ON A SYMBOL POINTER (plan §5.2, MEASURED):
+// LSymbol lowers a symbol literal to STATIC DATA, bypassing the interner, so
+// the interner's canonical-pointer property does not hold between a compiled
+// tag and an interned name — pointer equality would compare the tag against 20
+// interned names and never match.
+//
+// THE TAG'S NAME IS payload(tag, 0): a symbol Value is {tag=2, name pointer at
+// payload word 0} — MEASURED off the emitted IL for a ctor (`storew 2, %s3;
+// storel $d3, +8`, gc/types.zig's `sym: { name }`).  NOT word 1: nothing
+// writes word 1 of a symbol.
+defun Rt.hostArity(tagN : val) -> val {
+  word nm = payload(tagN, 0);
+  if (call Rt.cStrEq(nm, rawstr("TaskSucceed")) != 0) {
+    return mknum(2);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskFail")) != 0) {
+    return mknum(2);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskAndThen")) != 0) {
+    return mknum(3);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskOnError")) != 0) {
+    return mknum(3);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskWrite")) != 0) {
+    return mknum(2);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskReadLine")) != 0) {
+    return mknum(1);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskReadFile")) != 0) {
+    return mknum(2);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskWriteFile")) != 0) {
+    return mknum(3);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskExec")) != 0) {
+    return mknum(2);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskGetenv")) != 0) {
+    return mknum(2);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskSetenv")) != 0) {
+    return mknum(3);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskCd")) != 0) {
+    return mknum(2);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskGetcwd")) != 0) {
+    return mknum(1);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskGetpid")) != 0) {
+    return mknum(1);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskGlob")) != 0) {
+    return mknum(2);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskNow")) != 0) {
+    return mknum(1);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskSleep")) != 0) {
+    return mknum(2);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskQuit")) != 0) {
+    return mknum(1);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskListDir")) != 0) {
+    return mknum(2);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskStat")) != 0) {
+    return mknum(2);
+  }
+  return mknum(0);
+}
+
+// ========================== THE APPLIER ==================================
+// Rt.apply-at — THE applier seat, and the ONE place the two APPLIER TRAPS
+// (plan §4.1) are handled:
+//
+//   1. THE ENTRY IS Rt.callArity, NOT Rt.apply/Rt.applyGo.  applyGo's
+//      saturated arm builds a `:ret` TAIL and returns mknum(retbuf) — an
+//      UNFORCED tail, i.e. a heap address where a value is expected.  Our
+//      probe printed exactly that address and then SEGV'd.  Rt.callArity
+//      bounces it (rt_callN -> q_Rt_x2ebounce -> vecload(v,0)) and returns a
+//      REAL value.  TestMain pins this line: `Rt.apply`/`Rt.applyGo` must not
+//      appear in the host's applier.
+//   2. THE Disp's `arity` IS THE CLOSURE'S STATIC ARITY (wload(desc,1)), NOT
+//      `arity - rem`.  With `arity - rem` (0 for a global closure) the call
+//      passes zero args and returns garbage.  This is the silent-wrong.
+//   3. THE PARTIAL ARM IS NOT PORTED AND MUST NOT BE SILENT: `rem` (the
+//      closure's remaining register args) equals `arity` exactly when nothing
+//      has been captured-and-applied (napp = 0).  A closure that arrives
+//      partially applied needs applyGo's capture/args interleave, which 7A
+//      does not have, so it DIES naming the reason.  (The Zig hostApply
+//      skipped this check and would have been silently wrong.)
+//
+// `bufN` is the caller's argument area as a BOXED raw address: `nargs`
+// CONTIGUOUS 40-byte cells that the caller keeps reachable from a registered
+// root (Rt.callArity needs buf + 40k, which is why a slice of the rooted slot
+// array IS the argument buffer — no copy, no second referee).
+defun Rt.apply-at(cN : val, bufN : val, nargsN : val) -> val {
+  word buf = payload(bufN, 0);
+  word nargs = payload(nargsN, 0);
+  if (tagis(cN, 6) == 0) {
+    call Rt.dieErr(rawstr("host: apply of a non-function value"));
+    return mknil;
+  }
+  word code = payload(cN, 0);
+  word fn = wload(code, 0);
+  word arity = wload(code, 1) & 4294967295;
+  word rem = payload32(cN, 1);
+  if (rem != arity) {
+    call Rt.dieErr(rawstr("host: a partially applied closure reached the applier (napp != 0): applyGo's capture/args interleave is not ported"));
+    return mknil;
+  }
+  if (nargs != arity) {
+    call Rt.dieErr(rawstr("host: the applier was handed a different number of arguments than the closure's arity"));
+    return mknil;
+  }
+  *Disp dp = rawcall malloc(32);
+  dp->fn = fn;
+  dp->caps = payload(cN, 2);
+  dp->buf = buf;
+  dp->arity = arity;
+  val r = call Rt.callArity(mknum(dp));
+  rawcall free(dp);
+  return r;
+}
+
+// Rt.hostCall — the host-side wrapper: apply `contAddr`'s closure to the
+// argument area (SCR_A0 ..) and leave the value in SCR_RES.  Two stages
+// because the RESULT must land in a ROOTED cell before anything else can
+// allocate; `r` is a frame binder (a root) and the store right after the call
+// is the only thing that reads it.
+defun Rt.hostCall(hN : val, contAddrN : val, nargsN : val) -> val {
+  word h = payload(hN, 0);
+  val r = call Rt.apply-at(vecload(payload(contAddrN, 0), 0), mknum(h + 8 + (33027 * 40)), nargsN);
+  vecstore(h + 8 + (33029 * 40), 0, r);
+  return mknil;
+}
+
+// ========================== THE EVAL TABLE ===============================
+// Rt.hostClearGo — nil SCR_* .. `clrBase + 257`.  A loop cursor LIVES IN
+// MEMORY (`lp->clr`): a self-tail `recur` may only hand its params back
+// unchanged, so an incrementing counter cannot be a parameter here.
+defun Rt.hostClearGo(hN : val) -> val {
+  word h = payload(hN, 0);
+  *Host lp = [*Host](h);
+  if (lp->clr >= 258) {
+    return mknil;
+  } else {
+    vecstore(h + 8 + ((lp->clrBase + lp->clr) * 40), 0, mknil);
+    lp->clr = lp->clr + 1;
+    recur(hN);
+  }
+}
+defun Rt.hostClearFrom(hN : val, baseN : val) -> val {
+  word h = payload(hN, 0);
+  *Host lp = [*Host](h);
+  lp->clrBase = payload(baseN, 0);
+  lp->clr = 0;
+  return call Rt.hostClearGo(hN);
+}
+
+// Rt.hostDeactivate — the Zig's deactivate: drop the evaluation, release every
+// slot of its block (the array is permanently rooted, so a stale Value there
+// would keep dead closures alive for the whole run) and forget the effect.
+defun Rt.hostDeactivate(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  lp->evals[i].active = 0;
+  lp->nactive = lp->nactive - 1;
+  lp->evals[i].nframes = 0;
+  lp->evals[i].etag = 0;
+  return call Rt.hostClearFrom(hN, mknum(2 + (i * 258)));
+}
+
+// Rt.hostSpawnAt — put `taskAddr`'s task into eval i's block.  `gen` is the
+// LOGICAL-eval token (the Zig's generation counter): it is bumped on every
+// spawn into this slot, and hostStepGo keeps stepping only while it is
+// unchanged — a deliver() can free this slot and spawn a NEW evaluation into
+// it, which the loop must not step under the stale one's state.
+defun Rt.hostSpawnAt(hN : val, taskAddrN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word taskAddr = payload(taskAddrN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  word base = 2 + (i * 258);
+  lp->evals[i].active = 1;
+  lp->evals[i].base = base;
+  lp->evals[i].gen = lp->evals[i].gen + 1;
+  lp->evals[i].nframes = 0;
+  lp->evals[i].etag = 0;
+  lp->nactive = lp->nactive + 1;
+  call Rt.hostClearFrom(hN, mknum(base));
+  vecstore(h + 8 + (base * 40), 0, vecload(taskAddr, 0));
+  return mknil;
+}
+
+// Rt.hostSpawnFind — first INACTIVE slot (the Zig's first-inactive reuse), or
+// append.  `i` advances as a VALUE param: this is a short scan and a self-tail
+// `recur` on a changed Value is the runtime's own loop shape (Rt.bounceGo).
+defun Rt.hostSpawnFind(hN : val, taskAddrN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  if (i >= lp->nevals) {
+    if (lp->nevals >= 128) {
+      call Rt.dieErr(rawstr("host: more than 128 concurrent evaluations"));
+      return mknil;
+    } else {
+      lp->nevals = lp->nevals + 1;
+      return call Rt.hostSpawnAt(hN, taskAddrN, iN);
+    }
+  } else {
+    if (lp->evals[i].active != 0) {
+      recur(hN, taskAddrN, mknum(i + 1));
+    } else {
+      return call Rt.hostSpawnAt(hN, taskAddrN, iN);
+    }
+  }
+}
+defun Rt.hostSpawn(hN : val, taskAddrN : val) -> val {
+  return call Rt.hostSpawnFind(hN, taskAddrN, mknum(0));
+}
+
+// Rt.hostSpawnFromCmd — one evaluation per Task in a Cmd (a cons list of
+// Tasks, nil-terminated).  ALLOCATION-FREE apart from the boxed index, so the
+// list's interior pointers stay valid throughout; the cursor is a ROOTED slot
+// (SCR_CUR), and the task is staged into SCR_TMP before the spawn so the
+// cons cell is never the thing the block clear walks over.
+defun Rt.hostSpawnFromCmd(hN : val, curAddrN : val) -> val {
+  word h = payload(hN, 0);
+  word curAddr = payload(curAddrN, 0);
+  val cur = vecload(curAddr, 0);
+  if (tagis(cur, 4) == 0) {
+    return mknil;
+  } else {
+    vecstore(h + 8 + (33030 * 40), 0, vecload(payload(cur, 0), 0));
+    vecstore(curAddr, 0, vecload(payload(cur, 0), 1));
+    call Rt.hostSpawn(hN, mknum(h + 8 + (33030 * 40)));
+    recur(hN, curAddrN);
+  }
+}
+
+// ========================== THE CEK CORE =================================
+// Rt.hostPushFrame — push a continuation frame.  The Zig took the closure as
+// an argument; here the DISPATCH stages it into SCR_TMP first (three params is
+// the whole register budget, and `kind` is one of them).
+defun Rt.hostPushFrame(hN : val, iN : val, kindN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  word kind = payload(kindN, 0);
+  *Host lp = [*Host](h);
+  word n = lp->evals[i].nframes;
+  if (n >= 256) {
+    call Rt.dieErr(rawstr("host: continuation stack overflow (256 frames)"));
+    return mknil;
+  } else {
+    word slot = lp->evals[i].base + 2 + n;
+    lp->evals[i].frames[n].kind = kind;
+    lp->evals[i].frames[n].cont = slot;
+    lp->evals[i].nframes = n + 1;
+    vecstore(h + 8 + (slot * 40), 0, vecload(h + 8 + (33030 * 40), 0));
+    return mknil;
+  }
+}
+
+// Rt.hostDispatch — ONE step of one evaluation: the Zig's stepEval's 89-line
+// dispatch chain, ctor for ctor.  `task` is the eval's task slot (read FRESH
+// every step, and the slot is a ROOT, so `task` survives anything the arms do).
+defun Rt.hostDispatch(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  word base = lp->evals[i].base;
+  word taskAddr = h + 8 + (base * 40);
+  word resAddr = taskAddr + 40;
+  val task = vecload(taskAddr, 0);
+  if (tagis(task, 10) == 0) {
+    return call Rt.hostDeactivate(hN, iN);
+  }
+  word len = payload32(task, 1);
+  if (len < 1) {
+    return call Rt.hostDeactivate(hN, iN);
+  }
+  val tag = vecload(payload(task, 0), 0);
+  if (tagis(tag, 2) == 0) {
+    return call Rt.hostDeactivate(hN, iN);
+  }
+  word nm = payload(tag, 0);
+  word want = payload(call Rt.hostArity(tag), 0);
+  if (mkbool(want != 0) && mkbool(len != want)) {
+    return call Rt.hostDeactivate(hN, iN);
+  }
+  // A FRESH data pointer: the arity probe above allocates (mknum), so a raw
+  // copy of the vector's data base taken before it is stale after it.
+  word tv = payload(task, 0);
+  if (call Rt.cStrEq(nm, rawstr("TaskSucceed")) != 0) {
+    vecstore(resAddr, 0, vecload(tv, 1));
+    return call Rt.hostCompleteOk(hN, iN);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskFail")) != 0) {
+    vecstore(resAddr, 0, vecload(tv, 1));
+    return call Rt.hostCompleteErr(hN, iN);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskAndThen")) != 0) {
+    val cont = vecload(tv, 1);
+    val inner = vecload(tv, 2);
+    vecstore(h + 8 + (33030 * 40), 0, cont);
+    call Rt.hostPushFrame(hN, iN, mknum(0));
+    vecstore(taskAddr, 0, inner);
+    return mknil;
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskOnError")) != 0) {
+    val cont = vecload(tv, 1);
+    val inner = vecload(tv, 2);
+    vecstore(h + 8 + (33030 * 40), 0, cont);
+    call Rt.hostPushFrame(hN, iN, mknum(1));
+    vecstore(taskAddr, 0, inner);
+    return mknil;
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskNow")) != 0) {
+    vecstore(resAddr, 0, call Rt.hostNowMs(mknil));
+    return call Rt.hostCompleteOk(hN, iN);
+  }
+  if (call Rt.cStrEq(nm, rawstr("TaskQuit")) != 0) {
+    lp->quit = 1;
+    return call Rt.hostDeactivate(hN, iN);
+  }
+  // THE OTHER 14: LOUD, naming the ctor.  Never a silent drop (the program
+  // would appear to work while its continuation never resumes) and never a
+  // silent completion (which would make a program "work" while doing nothing).
+  call Rt.hostDieUnported(nm);
+  return mknil;
+}
+
+// Rt.hostCompleteOk — success: no frame -> deliver; OnError -> pass the
+// success through (and release the frame's closure); AndThen -> apply the
+// continuation to the result and step again.
+//
+// THE ZIG CLEARS THE FRAME SLOT BEFORE APPLYING.  THIS PORT CLEARS IT AFTER:
+// the slot is the closure's ROOT for the duration of the call, and clearing
+// after costs one store and removes the only window in which the applier's
+// target is unreachable.
+defun Rt.hostCompleteOk(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  if (lp->evals[i].nframes == 0) {
+    return call Rt.hostDeliver(hN, iN);
+  } else {
+    word n = lp->evals[i].nframes - 1;
+    word kind = lp->evals[i].frames[n].kind;
+    word cs = lp->evals[i].frames[n].cont;
+    lp->evals[i].nframes = n;
+    if (kind == 1) {
+      vecstore(h + 8 + (cs * 40), 0, mknil);
+      recur(hN, iN);
+    } else {
+      word contAddr = h + 8 + (cs * 40);
+      vecstore(h + 8 + (33027 * 40), 0, vecload(h + 8 + ((lp->evals[i].base + 1) * 40), 0));
+      call Rt.hostCall(hN, mknum(contAddr), mknum(1));
+      vecstore(contAddr, 0, mknil);
+      vecstore(h + 8 + (lp->evals[i].base * 40), 0, vecload(h + 8 + (33029 * 40), 0));
+      return mknil;
+    }
+  }
+}
+
+// Rt.hostCompleteErr — the mirror: no frame -> drop the message (the Zig's
+// "drop the msg"); AndThen -> the error propagates through; OnError -> apply
+// the handler to the error.
+defun Rt.hostCompleteErr(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  if (lp->evals[i].nframes == 0) {
+    return call Rt.hostDeactivate(hN, iN);
+  } else {
+    word n = lp->evals[i].nframes - 1;
+    word kind = lp->evals[i].frames[n].kind;
+    word cs = lp->evals[i].frames[n].cont;
+    lp->evals[i].nframes = n;
+    if (kind == 0) {
+      vecstore(h + 8 + (cs * 40), 0, mknil);
+      recur(hN, iN);
+    } else {
+      word contAddr = h + 8 + (cs * 40);
+      vecstore(h + 8 + (33027 * 40), 0, vecload(h + 8 + ((lp->evals[i].base + 1) * 40), 0));
+      call Rt.hostCall(hN, mknum(contAddr), mknum(1));
+      vecstore(contAddr, 0, mknil);
+      vecstore(h + 8 + (lp->evals[i].base * 40), 0, vecload(h + 8 + (33029 * 40), 0));
+      return mknil;
+    }
+  }
+}
+
+// Rt.hostDeliver — feed a completed message to update, then respawn from the
+// Cmd it returned.  `update msg model` is the ONE two-argument apply (the
+// argument area is SCR_A0, SCR_A1 — contiguous, in the rooted array).
+defun Rt.hostDeliver(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  vecstore(h + 8 + (33027 * 40), 0, vecload(h + 8 + ((lp->evals[i].base + 1) * 40), 0));
+  vecstore(h + 8 + (33028 * 40), 0, vecload(h + 8, 0));
+  call Rt.hostCall(hN, mknum(h + 8 + 40), mknum(2));
+  val pair = vecload(h + 8 + (33029 * 40), 0);
+  if (tagis(pair, 4) == 0) {
+    return call Rt.hostDeactivate(hN, iN);
+  } else {
+    vecstore(h + 8, 0, vecload(payload(pair, 0), 0));
+    vecstore(h + 8 + (33026 * 40), 0, vecload(payload(pair, 0), 1));
+    call Rt.hostDeactivate(hN, iN);
+    return call Rt.hostSpawnFromCmd(hN, mknum(h + 8 + (33026 * 40)));
+  }
+}
+
+// Rt.hostStepGo — ONE evaluation's runnable loop.  The generation check is the
+// Zig's `eval.gen == start_gen`: deliver() can free this slot and spawn a NEW
+// evaluation into it, and the loop must stop rather than step the new one with
+// the old one's state.  `etag != 0` means the evaluation is SUSPENDED on an
+// effect (no effect exists in 7A; 7C/7D make this branch load-bearing).
+defun Rt.hostStepGo(hN : val, iN : val, genN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  word gen = payload(genN, 0);
+  *Host lp = [*Host](h);
+  if (lp->evals[i].active == 0) {
+    return mknil;
+  }
+  if (lp->evals[i].gen != gen) {
+    return mknil;
+  }
+  if (lp->evals[i].etag != 0) {
+    return mknil;
+  }
+  call Rt.hostDispatch(hN, iN);
+  recur(hN, iN, genN);
+}
+defun Rt.hostStep(hN : val, iN : val) -> val {
+  word h = payload(hN, 0);
+  word i = payload(iN, 0);
+  *Host lp = [*Host](h);
+  return call Rt.hostStepGo(hN, iN, mknum(lp->evals[i].gen));
+}
+
+// Rt.hostStepAll — step every runnable evaluation once, in slot order.  The
+// cursor is `lp->cur` (memory, not a param) and the bound is re-read each
+// iteration, exactly as the Zig's `while (i < self.nevals)`: a spawn during
+// the scan APPENDS, and a spawn into an already-passed slot is DELIBERATELY
+// left for the next pass (the fixpoint drain in hostRun is what delivers it).
+defun Rt.hostStepAllGo(hN : val) -> val {
+  word h = payload(hN, 0);
+  *Host lp = [*Host](h);
+  if (lp->cur >= lp->nevals) {
+    return mknil;
+  } else {
+    word i = lp->cur;
+    lp->cur = i + 1;
+    if (lp->evals[i].active == 0) {
+      recur(hN);
+    } else {
+      if (lp->evals[i].etag != 0) {
+        recur(hN);
+      } else {
+        call Rt.hostStep(hN, mknum(i));
+        recur(hN);
+      }
+    }
+  }
+}
+defun Rt.hostStepAll(hN : val) -> val {
+  word h = payload(hN, 0);
+  *Host lp = [*Host](h);
+  lp->cur = 0;
+  return call Rt.hostStepAllGo(hN);
+}
+
+// ========================== THE DRIVER ===================================
+// Rt.hostRunLoop — the Zig's `while (nactive > 0 and !quit) { stepAll; ... }`.
+// 7A contains only non-suspending leaves, so every evaluation runs to a
+// deliver or a drop inside stepAll; 7C/7D insert reapChildren/completeReady/
+// the poll between the step and the re-test, HERE.
+defun Rt.hostRunLoop(hN : val) -> val {
+  word h = payload(hN, 0);
+  *Host lp = [*Host](h);
+  if (lp->nactive == 0) {
+    return mknil;
+  } else {
+    if (lp->quit != 0) {
+      return mknil;
+    } else {
+      call Rt.hostStepAll(hN);
+      recur(hN);
+    }
+  }
+}
+
+// Rt.hostRun — the C-ABI seat rt_run_program's port (plan §5.3): drive the
+// Program and leave the final MODEL in the caller's 40-byte cell.  The
+// signature is deliberately the Zig seat's (value in, destination cell in,
+// nothing out) so 7F's deletion of that seat is a drop-in.
+defun Rt.hostRun(progAddrN : val, outAddrN : val) -> val {
+  word progAddr = payload(progAddrN, 0);
+  word outAddr = payload(outAddrN, 0);
+  val hN = call Rt.hostInit(progAddrN);
+  word h = payload(hN, 0);
+  *Host lp = [*Host](h);
+  val prog = vecload(progAddr, 0);
+  vecstore(h + 8 + (33026 * 40), 0, vecload(payload(prog, 0), 2));
+  call Rt.hostSpawnFromCmd(hN, mknum(h + 8 + (33026 * 40)));
+  call Rt.hostRunLoop(hN);
+  vecstore(outAddr, 0, vecload(h + 8, 0));
+  rawcall rt_root_pop();
+  return mknil;
 }

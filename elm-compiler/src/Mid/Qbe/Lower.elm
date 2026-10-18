@@ -567,6 +567,17 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc table ari
                                         []
                                    )
                                 ++ List.filter (\k -> not (List.member k surfaceKeys)) (unique MidRt.driverSeeds)
+                                -- THE QBE_MIDHOST GATE (stage 7A): the Mid effect
+                                -- host joins ONLY when the surface text carries the
+                                -- host arm — i.e. when run.js kept the marked region
+                                -- (Rt.midHostMarker witnesses it).  Default route:
+                                -- no seed, no host, corpus bytes unchanged.
+                                ++ (if runtime.hosted then
+                                        List.filter (\k -> not (List.member k surfaceKeys)) (unique MidRt.hostSeeds)
+
+                                    else
+                                        []
+                                   )
                             )
 
                     else

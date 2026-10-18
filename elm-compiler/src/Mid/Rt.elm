@@ -11,6 +11,8 @@ module Mid.Rt
         , conSeeds
         , driverSeeds
         , gcSeeds
+        , hostSeeds
+        , midHostMarker
         , primImpl
         , activeSurf
         , rawAbi
@@ -94,6 +96,7 @@ type alias Runtime =
     , allocating : Set String
     , direct : Defun -> Bool
     , abi : Dict String (List Int)
+    , hosted : Bool
     }
 
 
@@ -365,6 +368,7 @@ load source =
                         , allocating = allocating
                         , direct = direct
                         , abi = abiTable module_.decls ast
+                        , hosted = String.contains midHostMarker source
                         }
 
 
@@ -770,6 +774,37 @@ primImpl prim =
     Dict.get prim impls
 
 
+{-| THE QBE_MIDHOST GATE (stage 7A) — the host's REACHABILITY switch.
+`run.js` COMPILE-TIME-splices the Mid effect host's arm out of `Rt.main` unless
+QBE_MIDHOST=1, and the witness of that decision inside this module is the
+MARKER LINE that the splice removes with the region: no marker, no host arm,
+no host.  The host's OWN defuns are NOT inside the region (a decl may not
+follow a defun, and the arm sits mid-file): they are always parsed, and in the
+default route they are reached by nothing and PRUNED — which is why the corpus
+stays byte-identical with them in the file (MEASURED, 159/159).
+
+WHY THE GATE IS NEEDED AT ALL: the Rt program's reachability is the hand table
+`rtDeps` closed from SEED ROOTS, not a walk of the bodies (`reach` never enters
+an Rt defun that is only seeded — see Lower's `keys`).  `Rt.main` is a seed
+root unconditionally, so an edge `Rt.main -> Rt.hostRun` in `rtDeps` would drag
+the whole host into EVERY artifact, because `$main` is in every artifact.  The
+edge therefore lives in NO table: the host's entry points are GATED ROOTS
+(`hostSeeds`), present only when the marker is.
+-}
+midHostMarker : String
+midHostMarker =
+    ">>> QBE_MIDHOST-ONLY"
+
+
+{-| The host's ENTRY POINTS: the two defuns `Rt.main`'s host arm calls.  Their
+bodies' edges are declared in `rtDeps` like every other Rt->Rt edge, so this
+list closes over the whole machine (24 defuns).  GATED — see `midHostMarker`.
+-}
+hostSeeds : List String
+hostSeeds =
+    keepRtDependencies [ "Rt.hostRun", "Rt.hostIsProgram" ]
+
+
 {-| The Rt defun keys a USED-PRIM census seeds: for every used prim with a
 Mid implementation, its key plus every Rt key it transitively references
 (the RawCall edges — GRef reachability cannot see them, so they are
@@ -1119,6 +1154,43 @@ rtDeps =
         ( "Rt.tail-known", [ "Rt.copyWords" ] )
         , ( "Rt.bounce", [ "Rt.bounceGo" ] )
         , ( "Rt.bounceGo", [] )
+        , -- ===== THE STAGE 7A MID HOST (QBE_MIDHOST).  One entry per host
+          -- defun, exactly its RawCall targets — the machine's call graph,
+          -- declared by hand like every other Rt->Rt edge (`reach` never walks
+          -- an Rt body that is only seeded).  The ROOTS are `hostSeeds`, NOT
+          -- an edge from Rt.main: Rt.main is seeded unconditionally ($main is
+          -- in every artifact), so an edge here would pull the host into the
+          -- default route and move all 159 corpus hashes.  See midHostMarker.
+          -- The dispatch's eight edges are the ctor arms (Succeed/Fail/AndThen/
+          -- OnError/Now/Quit land in complete*/pushFrame; the 14 unported ones
+          -- land in hostDieUnported) plus hostArity/cStrEq for the tag probe.
+          ( "Rt.hostDieErr", [ "Rt.cStrLenGo" ] )
+        , ( "Rt.dieErr", [ "Rt.hostDieErr" ] )
+        , ( "Rt.hostDieUnported", [ "Rt.hostDieErr" ] )
+        , ( "Rt.hostNowMs", [] )
+        , ( "Rt.hostInit", [] )
+        , ( "Rt.hostIsProgram", [ "Rt.cStrEq" ] )
+        , ( "Rt.hostArity", [ "Rt.cStrEq" ] )
+        , ( "Rt.apply-at", [ "Rt.dieErr", "Rt.callArity" ] )
+        , ( "Rt.hostCall", [ "Rt.apply-at" ] )
+        , ( "Rt.hostClearGo", [] )
+        , ( "Rt.hostClearFrom", [ "Rt.hostClearGo" ] )
+        , ( "Rt.hostDeactivate", [ "Rt.hostClearFrom" ] )
+        , ( "Rt.hostSpawnAt", [ "Rt.hostClearFrom" ] )
+        , ( "Rt.hostSpawnFind", [ "Rt.dieErr", "Rt.hostSpawnAt" ] )
+        , ( "Rt.hostSpawn", [ "Rt.hostSpawnFind" ] )
+        , ( "Rt.hostSpawnFromCmd", [ "Rt.hostSpawn" ] )
+        , ( "Rt.hostPushFrame", [ "Rt.dieErr" ] )
+        , ( "Rt.hostDispatch", [ "Rt.hostDeactivate", "Rt.hostArity", "Rt.cStrEq", "Rt.hostCompleteOk", "Rt.hostCompleteErr", "Rt.hostPushFrame", "Rt.hostNowMs", "Rt.hostDieUnported" ] )
+        , ( "Rt.hostCompleteOk", [ "Rt.hostDeliver", "Rt.hostCall" ] )
+        , ( "Rt.hostCompleteErr", [ "Rt.hostDeactivate", "Rt.hostCall" ] )
+        , ( "Rt.hostDeliver", [ "Rt.hostCall", "Rt.hostDeactivate", "Rt.hostSpawnFromCmd" ] )
+        , ( "Rt.hostStepGo", [ "Rt.hostDispatch" ] )
+        , ( "Rt.hostStep", [ "Rt.hostStepGo" ] )
+        , ( "Rt.hostStepAllGo", [ "Rt.hostStep" ] )
+        , ( "Rt.hostStepAll", [ "Rt.hostStepAllGo" ] )
+        , ( "Rt.hostRunLoop", [ "Rt.hostStepAll" ] )
+        , ( "Rt.hostRun", [ "Rt.hostInit", "Rt.hostSpawnFromCmd", "Rt.hostRunLoop" ] )
         ]
 
 
