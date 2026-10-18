@@ -2906,9 +2906,9 @@ checks rt =
                     && m.decls
                     == [ Ast.StructDecl
                             { name = "Region"
-                            , fields =
-                                [ { name = "magic", ty = Ast.TWord }
-                                , { name = "count", ty = Ast.TWord }
+                            , members =
+                                [ Ast.MField { name = "magic", ty = Ast.TWord }
+                                , Ast.MField { name = "count", ty = Ast.TWord }
                                 ]
                             }
                        ]
@@ -2923,8 +2923,8 @@ checks rt =
                 case m.decls of
                     (Ast.StructDecl s) :: _ ->
                         s.name == "Hdr"
-                            && List.length s.fields == 2
-                            && s.fields == [ { name = "flags", ty = Ast.TWord }, { name = "next", ty = Ast.TPtr (Ast.PStruct "Hdr") } ]
+                            && List.length s.members == 2
+                            && s.members == [ Ast.MField { name = "flags", ty = Ast.TWord }, Ast.MField { name = "next", ty = Ast.TPtr (Ast.PStruct "Hdr") } ]
 
                     _ ->
                         False
@@ -6713,7 +6713,7 @@ checks rt =
             |> Result.map (\m -> ( m.decls, m.defuns ))
          )
             == Ok
-                ( [ Ast.StructDecl { name = "S", fields = [ { name = "tab", ty = Ast.TArray Ast.TWord 3 } ] } ]
+                ( [ Ast.StructDecl { name = "S", members = [ Ast.MField { name = "tab", ty = Ast.TArray Ast.TWord 3 } ] } ]
                 , [ { key = "S.f"
                     , params = []
                     , ret = Ast.TWord
@@ -7421,6 +7421,135 @@ checks rt =
             Ok _ ->
                 True
         )
+
+    -- ==================== B5: anonymous unions (midlang-b5) ====================
+    -- The union rule is the ONE layout table's (plan Q4): a block's members
+    -- share the block's offset, the block contributes `max(member sizes)`,
+    -- and a member is PROMOTED into the struct's field namespace.  Every row
+    -- below reads that table through the public surface (`fieldOffset`/
+    -- `fieldWidth`/`sizeofStruct`) or the lowered tree — no second rule.
+    , check "parse B5: an anonymous union block inside a struct is its OWN body item — the block carries its members in declaration order and the fields around it keep theirs (exact AST, so a silent re-grouping cannot pass)"
+        (declsOf "struct Msg { tag : word; union { n : word; p : *Msg; pair : Pair; }; pad : word; }"
+            == [ Ast.StructDecl
+                    { name = "Msg"
+                    , members =
+                        [ Ast.MField { name = "tag", ty = Ast.TWord }
+                        , Ast.MUnion
+                            [ { name = "n", ty = Ast.TWord }
+                            , { name = "p", ty = Ast.TPtr (Ast.PStruct "Msg") }
+                            , { name = "pair", ty = Ast.TStruct "Pair" }
+                            ]
+                        , Ast.MField { name = "pad", ty = Ast.TWord }
+                        ]
+                    }
+               ]
+        )
+    , check "parse B5: the block keyword is `union` FOLLOWED BY `{` only — a field NAMED `union` still parses as a field (no keyword was stolen from the field namespace)"
+        (declsOf "struct S { union : word; }"
+            == [ Ast.StructDecl { name = "S", members = [ Ast.MField { name = "union", ty = Ast.TWord } ] } ]
+        )
+    , checkErrModule "parse B5 REJECT: a union block OUTSIDE a struct — there is no union VALUE and no union TYPE, so the grammar has nowhere to put one"
+        "unexpected input after the expression"
+        "union { a : word; }\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , checkErrModule "parse B5 REJECT: a block INSIDE a block — a nested block would be a second overlap at the same offset with no name to tell the two apart (v1 has no such spelling)"
+        "expected `:`"
+        "struct S { union { union { a : word; }; }; }\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , check "B5 LAYOUT (THE RULE): tag/union{n,p,pair}/pad — `n`, `p` and `pair` ALL sit at word 1, the block advances by max(1,1,2) = 2, so `pad` is at word 3 and sizeof(Msg) is 4 (a SUM would put `pad` at word 5 and sizeof at 6)"
+        (let
+            decls =
+                declsOf "struct Pair { lo : word; hi : word; }\nstruct Msg { tag : word; union { n : word; p : *Msg; pair : Pair; }; pad : word; }"
+         in
+         Check.sizeofStruct decls "Msg"
+            == Just 4
+            && Check.sizeofStruct decls "Pair"
+            == Just 2
+            && Check.fieldOffset decls "Msg" "n"
+            == Just 1
+            && Check.fieldOffset decls "Msg" "p"
+            == Just 1
+            && Check.fieldOffset decls "Msg" "pair"
+            == Just 1
+            && Check.fieldOffset decls "Msg" "pad"
+            == Just 3
+            && Check.fieldWidth decls "Msg" "n"
+            == Just 1
+            && Check.fieldWidth decls "Msg" "pair"
+            == Just 2
+        )
+    , check "B5 LAYOUT: a `val` member sizes the block at 5 words beside a `word` member's 1 — pure layout arithmetic, no new rule (the next field is at 6, sizeof is 7)"
+        (let
+            decls =
+                declsOf "struct V { tag : word; union { w : word; v : val; }; after : word; }"
+         in
+         Check.sizeofStruct decls "V"
+            == Just 7
+            && Check.fieldOffset decls "V" "w"
+            == Just 1
+            && Check.fieldOffset decls "V" "v"
+            == Just 1
+            && Check.fieldOffset decls "V" "after"
+            == Just 6
+            && Check.fieldWidth decls "V" "v"
+            == Just 5
+        )
+    , checkErrModule "B5 REJECT: an EMPTY union block — a block with no members has no size and no shared offset, so silently contributing 0 would put the next field at an offset nothing declares"
+        "has an EMPTY union block"
+        "struct S { tag : word; union { }; }\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , checkErrModule "B5 REJECT: a duplicate member NAME inside one block — one name, one offset"
+        "declares field 'n' more than once"
+        "struct S { tag : word; union { n : word; n : word; }; }\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , checkErrModule "B5 REJECT: a union member colliding with a SIBLING FIELD — promotion means the block's members live in the STRUCT's namespace, so `n` beside `n` is the same duplicate"
+        "declares field 'n' more than once"
+        "struct S { n : word; union { n : word; }; }\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , check "B5 LOWER: `m.n` and `m.p` lower to the SAME tree — two members of one block are byte-for-byte the same load (`RawWordLoad (Var 1) 1`), which is what sharing an offset MEANS in this pipeline"
+        (case
+            ( lowlModuleBody "struct M { tag : word; union { n : word; p : *M; }; }\ndefun Rt.f(m : *M) -> word {\n  return m.n;\n}"
+            , lowlModuleBody "struct M { tag : word; union { n : word; p : *M; }; }\ndefun Rt.f(m : *M) -> word {\n  return [word](m.p);\n}"
+            )
+         of
+            ( Ok a, Ok b ) ->
+                a == b && a == Unsafe (RawWordLoad { ptr = Var 1, index = Lit (LNumber 1) })
+
+            _ ->
+                False
+        )
+    , check "B5 LOWER: a STRUCT member of the block is addressed off the block's offset — `m.pair.hi` is `loadl (m + 8) + 1`, i.e. block offset 1 plus the inner field's 1"
+        (lowlModuleBody "struct Pair { lo : word; hi : word; }\nstruct M { tag : word; union { n : word; pair : Pair; }; }\ndefun Rt.f(m : *M) -> word {\n  return m.pair.hi;\n}"
+            == Ok
+                (Unsafe
+                    (RawWordLoad
+                        { ptr = Unsafe (RawBin { op = RAdd, a = Var 1, b = Lit (LNumber 8) })
+                        , index = Lit (LNumber 1)
+                        }
+                    )
+                )
+        )
+    , check "B5 LOWER: the aggregate COPY of a union-bearing struct is ONE overlapped run — words 0,1,2 for tag/block(max 2)/pad, NOT one store per member (a per-member walk would emit 0,1,1,1,2: the same bytes written over themselves)"
+        (case lowlModuleBody "struct Pair { lo : word; hi : word; }\nstruct M { tag : word; union { n : word; p : *M; pair : Pair; }; }\ndefun Rt.f() -> word {\n  M b;\n  M a = b;\n  return a.tag;\n}" of
+            Ok body ->
+                b2StoreOffsets body == [ 0, 1, 2 ]
+
+            Err _ ->
+                False
+        )
+    , check "B5 .ssa: the union-bearing struct's emitted shapes — `alloc8 32` and a 32-byte memset for a 4-word struct (a SUM layout would emit 48), the word member stored at the block's offset, and `pad` addressed at word 3 (max 2 + 1)"
+        (case emitUserSsa rt "module B5u\nstruct Pair { lo : word; hi : word; }\nstruct M { tag : word; union { n : word; p : *M; pair : Pair; }; pad : word; }\ndefun B5u.f() -> word {\n  M v;\n  v.tag = 1;\n  v.n = 11;\n  v.pad = 5;\n  return v.pair.hi;\n}" of
+            Ok ssa ->
+                String.length ssa > 200
+                    && String.contains "alloc8 32" ssa
+                    && String.contains "l 32)" ssa
+                    && String.contains "storel 11" ssa
+                    && String.contains "mul 8, 3" ssa
+
+            Err _ ->
+                False
+        )
+    , checkOkModule "B5 ACCEPT: THE TAGGED-UNION SHAPE (plan Q4/Q2) — a `word` tag field beside the block, and dispatch as an if-CHAIN reading a different member per arm.  There is no `match`/`switch` in this language and this unit does not add one"
+        "struct Pair { lo : word; hi : word; }\nstruct Msg { tag : word; union { n : word; p : *Msg; pair : Pair; }; pad : word; }\ndefun Rt.pick(vm : val) -> val {\n  *Msg m = payload(vm, 0);\n  if (m.tag == 1) {\n    return mknum(m.n);\n  } else {\n    if (m.tag == 2) {\n      return mknum(m.p->n);\n    } else {\n      return mknum(m.pair.lo + m.pair.hi);\n    }\n  }\n}"
+    , checkOkModule "B5 ACCEPT: a union member is initialised through the PROMOTED name (`M a = { tag = 1; n = 5; };`) — the block's members are the struct's own field namespace, so no `a.u.n` spelling exists or is needed"
+        "struct M { tag : word; union { n : word; p : *M; }; }\ndefun Rt.f() -> word {\n  M a = { tag = 1; n = 5; };\n  return a.n;\n}"
+    , checkOkModule "B5 DOCUMENTED, NOT ENFORCED: a `val` member in a union block is LEGAL — raw memory holding a handle is the §Q11 obligation on the WRITER (nothing traces it), and the layout arithmetic is all this unit rules on (plan Q4 says exactly that)"
+        "struct V { tag : word; union { w : word; v : val; }; }\ndefun Rt.f(x : val) -> val {\n  V s;\n  s.tag = 1;\n  s.v = x;\n  return s.v;\n}"
     ]
 
 

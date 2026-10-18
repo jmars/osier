@@ -26,6 +26,7 @@ module Mid.RtLang.Ast exposing
     , Stmt(..)
     , ArrayInit(..)
     , StructInit(..)
+    , StructMember(..)
     , Sym
     , Term(..)
     , Type(..)
@@ -338,14 +339,43 @@ hard constraint), and a struct value is reached only through a pointer
 the program already holds.
 -}
 type Decl
-    = StructDecl { name : String, fields : List Field }
+    = StructDecl { name : String, members : List StructMember }
     | EnumDecl { name : String, entries : List EnumEntry }
+
+
+{-| One struct BODY ITEM — B5 (handoff-midlang-b5): a named field, or an
+ANONYMOUS UNION BLOCK (`union { n : word; p : *Msg; pair : Pair; }`).
+
+THE UNION RULE (plan Q4, Terra's shape — this whole type exists for it):
+the members of a union block SHARE the block's offset (the block's start),
+and the block contributes `max(member sizes)` words to the struct, so the
+NEXT field starts after that max, word-aligned like every other field.  A
+member of a union block is a PROMOTED name: `m.n`, `m.p`, `m.pair` all
+resolve through the file's ONE layout table (`Check.fieldOffset`) to the
+same offset — there is no `m.u.n` spelling, because the block has no name.
+
+WHAT THIS IS NOT.  This is a C union — a layout overlap, nothing more.  It
+carries NO tag, and the language has no `match`/`switch` (Q2: dispatch is
+`if` chains, the measured no-`Case` discipline): a tagged union is an
+ordinary `word` tag field beside the block plus the if-chain that reads it.
+Reading the member the tag does NOT select is the USER'S OBLIGATION — it
+reinterprets the same words, exactly as in C, and no checker can see it.
+A `val` member is allowed by the layout arithmetic (`val` = 5 words, beside
+a `word` = 1 the block is 5) and is the §Q11 hazard in the open: raw memory
+holding a handle is NOT traced, so the rooting obligation is on the writer,
+not on the garbage collector.
+-}
+type StructMember
+    = MField Field
+    | MUnion (List Field)
 
 
 {-| One struct field: a name and its type, in DECLARATION ORDER (the
 layout rule is order-preserving, word-granular — every field a whole
 number of 8-byte words; the runtime's own layouts are word-quantized, so
-no finer padding exists).  A `_pad` field is an ordinary word field —
+no finer padding exists).  B5: a `Field` is also one MEMBER OF A UNION
+BLOCK (`MUnion` carries a list of these) — the same record, a different
+layout rule applied to it.  A `_pad` field is an ordinary word field —
 nothing special to check — it keeps the layout table honest where a real
 layout has a hole (region word 7; globals words 3–7, 14–15).  Field
 types are the `Type` grammar: `word`, `val` (40 bytes = 5 words, stored

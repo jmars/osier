@@ -278,7 +278,7 @@ and — per the O(n) invariant in the token-plumbing section — NO
 -}
 
 import Dict exposing (Dict)
-import Mid.RtLang.Ast exposing (AggShape(..), ArrayInit(..), Block, Builtin(..), Decl(..), Defun, Effect(..), EnumEntry, Exp(..), Export, ExportSig, Field, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Module, OTy(..), PTy(..), Param, Program, SizeTarget(..), Stmt(..), StructInit(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
+import Mid.RtLang.Ast exposing (AggShape(..), ArrayInit(..), Block, Builtin(..), Decl(..), Defun, Effect(..), EnumEntry, Exp(..), Export, ExportSig, Field, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Module, OTy(..), PTy(..), Param, Program, SizeTarget(..), Stmt(..), StructInit(..), StructMember(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
 import Parser exposing (DeadEnd, Problem(..))
 import ParserFast
 
@@ -1661,12 +1661,14 @@ declAt offset src =
 {-| `struct S { f : ty; ... }` — each field `name : type` REQUIRES its
 trailing `;` (the plan's §1.2 spelling; the last field too, so a dropped
 separator is loud, never a silent re-grouping).  Fields are DECLARATION
-ORDER (the layout rule is order-preserving).
+ORDER (the layout rule is order-preserving).  B5: a body item may also be
+an ANONYMOUS UNION BLOCK, `union { n : word; p : *Msg; }`, same `;`-per-
+member discipline inside it (Ast's `StructMember` note carries the rule).
 -}
 structDecl : ParserFast.Parser Decl
 structDecl =
     ParserFast.map2
-        (\name fields -> StructDecl { name = name, fields = fields })
+        (\name members -> StructDecl { name = name, members = members })
         (spelled "struct" structName)
         (spelled "{"
             (ParserFast.map2
@@ -1722,19 +1724,93 @@ structNameAt offset src =
             ParserFast.problem "expected an Uppercase struct/enum name"
 
 
-{-| `(f : ty ;)*` — the field list, entered after `{` (which consumed the
-trailing whitespace).  Each ELEMENT is a `field` FOLLOWED by its required
-`;` (the plan's §1.2 spelling — the last field too), so the loop stops
-cleanly when `field` hands back non-committed at the `}` (a dropped `;`
+{-| `(member ;)*` — the struct body, entered after `{` (which consumed the
+trailing whitespace).  Each ELEMENT is a `member` FOLLOWED by its required
+`;` (the plan's §1.2 spelling — the last one too), so the loop stops
+cleanly when `member` hands back non-committed at the `}` (a dropped `;`
 inside is a committed `spelled` failure, loud).
 -}
-fieldList : ParserFast.Parser (List Field)
+fieldList : ParserFast.Parser (List StructMember)
 fieldList =
+    ParserFast.loopWhileSucceeds
+        (ParserFast.map2 (\f _ -> f) member (spelled ";" (succeed ())))
+        []
+        (\f acc -> acc ++ [ f ])
+        identity
+
+
+{-| `(f : ty ;)*` — a union block's body: PLAIN fields only (there is no
+nested block — a block inside a block would be a second overlap at the same
+offset with no name to tell the two apart, and v1 has no such spelling).
+-}
+plainFieldList : ParserFast.Parser (List Field)
+plainFieldList =
     ParserFast.loopWhileSucceeds
         (ParserFast.map2 (\f _ -> f) field (spelled ";" (succeed ())))
         []
         (\f acc -> acc ++ [ f ])
         identity
+
+
+{-| One struct-body item: `name : ty` (a field) or `union { ... }` (B5's
+anonymous union block).  Dispatched by a PEEK at the two tokens — the block
+keyword `union` must be followed by `{` — so a field that happens to be
+NAMED `union` (`union : word;`) still parses as a field: after `union` comes
+`:` there, not `{`.  The handback is non-committed, so the body loop's stop
+at `}` is unchanged.
+-}
+member : ParserFast.Parser StructMember
+member =
+    ParserFast.offsetSourceAndThen memberAt
+
+
+memberAt : Int -> String -> ParserFast.Parser StructMember
+memberAt offset src =
+    let
+        at =
+            skipWsCommentsAt offset src
+    in
+    case tokenAtOff at src of
+        Just ( "union", len ) ->
+            let
+                after =
+                    skipWsCommentsAt (at + len) src
+            in
+            if String.slice after (after + 1) src == "{" then
+                skipWsCommentsFollowedBy unionBlock
+
+            else
+                fieldMember
+
+        _ ->
+            fieldMember
+
+
+{-| `union { f : ty; ... }` — B5's ANONYMOUS union block inside a struct.
+The members are carried in declaration order; the SHARED-offset/max-size
+rule is the checker's layout judgment (`Check.layoutOf`), not the grammar's,
+and the block has no name (its members are promoted into the struct's own
+field namespace).  The block ITSELF is `;`-terminated like every other body
+item (`tag : word; union { n : word; };`) — C's own struct-body rule, and
+the same "last one too" discipline the fields keep.
+-}
+unionBlock : ParserFast.Parser StructMember
+unionBlock =
+    ParserFast.map MUnion
+        (spelled "union"
+            (spelled "{"
+                (ParserFast.map2
+                    (\fields _ -> fields)
+                    plainFieldList
+                    (spelled "}" (succeed ()))
+                )
+            )
+        )
+
+
+fieldMember : ParserFast.Parser StructMember
+fieldMember =
+    ParserFast.map MField field
 
 
 field : ParserFast.Parser Field

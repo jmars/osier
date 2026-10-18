@@ -1,0 +1,126 @@
+// B5 (handoff-midlang-b5) — ANONYMOUS UNION BLOCKS inside a struct, the
+// Terra shape, through the real pipeline.  A SIBLING of Wext.mid (B2),
+// Warr.mid (B3), Wloop.mid (B4), Wesc.mid (B4b) and Wsum.mid (B6): none of
+// their goldens can be moved by this unit.
+//
+//   tools/qbe/qbe-mk.sh tools/qbe/fixtures/midb5a.elm MidB5a.main <outdir>
+//   <outdir>/midb5a MidB5a.main
+//
+// Expected stdout with seed = 5:  47079720
+//   = ra(47) | rb(7) | rc(97) | pads(20)
+//
+// THE LAYOUT THIS FILE PINS (one table, `Check.fieldOffset`/`sizeofStruct`):
+//
+//     struct Msg {
+//       tag : word;                                  // word 0
+//       union { n : word; p : *Msg; pair : Pair; };  // words 1..2  <- the block
+//       pad : word;                                  // word 3      <- after the MAX (2), not the sum (4)
+//     }
+//
+//   * `n` (1), `p` (1) and `pair` (2) ALL sit at word 1 — reading the member
+//     the tag does not select reinterprets the same words, which is C's own
+//     obligation and the reason this file reads it back on purpose.
+//   * the block is `max(1, 1, 2) = 2` words, so `pad` is at word 3 and
+//     sizeof(Msg) is 4.  A SUM (4) would put `pad` at word 5.
+//
+// WHAT THE NUMBER PINS (a bug in any one moves it):
+//   * 47 = `describe` returns the member the TAG selects — tag kNum -> `m.n`
+//     (42 + k = 47), tag kLink -> `m.p->n` (the pointee's word 1 = 7), tag
+//     kPair -> `m.pair.lo + m.pair.hi`.  Three
+//     DIFFERENT numbers from three different tags is the if-chain dispatch
+//     (there is no `match`/`switch` in this language, and this unit adds none).
+//   * 7 also proves the union holds a POINTER: `b.p = &target` is one word at
+//     the block's offset, and `m.p->n` walks it to another `Msg`.
+//   * 97 = 88 + 9: `c.pair.lo`/`c.pair.hi` were written first, THEN `c.n = 88`
+//     OVERWROTE `pair.lo`'s word through the union — so 97 is only reachable
+//     if `n` and `pair.lo` really are the same offset.  A lookup table that
+//     gave the members DISTINCT offsets would read 8 + 9 = 17 here.
+//   * 20 = c.pair.lo's first value (8, read before the overwrite) + a.pad (3) +
+//     b.pad (4) + c.pad (5): the `pad` offsets are the block's MAX+1 in every
+//     message, so a shift of the block's size moves this digit.
+//
+// THE TAG IS AN ORDINARY `word` FIELD, not an enum constant: the tag values
+// below are plain word locals.  (`Kind.num_` as an EXPRESSION is not wired in
+// this pipeline yet — the enum table exists but nothing reads it in expression
+// position — and this unit does not add an expression form; Q2's rule is that
+// dispatch is `if` chains over a word, so a word constant is the whole
+// spelling.  There is NO `match`/`switch` here and none can be written.)
+module Wunio
+
+export Wunio.run : val -> val
+
+struct Pair { lo : word; hi : word; }
+
+struct Msg {
+  tag : word;
+  union { n : word; p : *Msg; pair : Pair; };
+  pad : word;
+}
+
+// THE DISPATCH: an if-chain on the tag, each arm reading the union member
+// that arm's tag declares.  Each arm returns a DIFFERENT number, so a wrong
+// member read, a wrong offset or a dropped tag compare all move the golden.
+defun Wunio.describe(vm : val) -> val {
+  word kNum = 1;
+  word kLink = 2;
+  *Msg m = payload(vm, 0);
+  if (m.tag == kNum) {
+    return mknum(m.n);
+  } else {
+    if (m.tag == kLink) {
+      return mknum(m.p->n);
+    } else {
+      return mknum(m.pair.lo + m.pair.hi);
+    }
+  }
+}
+
+defun Wunio.run(seed : val) -> val {
+  word kNum = 1;
+  word kLink = 2;
+  word kPair = 3;
+  word k = payload(seed, 0);
+
+  Msg a;
+  a.tag = kNum;
+  a.n = 42 + k;
+  a.pad = 3;
+
+  Msg target;
+  target.tag = kNum;
+  target.n = 7;
+
+  Msg b;
+  b.tag = kLink;
+  b.p = &target;
+  b.pad = 4;
+
+  Msg c;
+  c.tag = kPair;
+  c.pair.lo = 3 + k;
+  c.pair.hi = 9;
+  c.pad = 5;
+
+  // THE OVERLAP, read back: `lo` first (8), then the same word written
+  // through `n` (88) and read again through `lo`.
+  word lo0 = c.pair.lo;
+  c.n = 88;
+
+  // THE CALL IS BOUND FIRST, then read: a `val`-ABI `call` sitting directly
+  // inside a raw builtin's operand (`payload(call ... , 0)`) is INVISIBLE to
+  // the QBE reachability walk (`Qbe/Lower.elm`'s grefsOf descends into a raw
+  // node only through a RawCall, not through its other operands), so the
+  // callee is never emitted and the link fails with an undefined
+  // `q_Wunio_x2edescribe`.  MEASURED with a two-defun repro; the defect is
+  // recorded, not worked around silently — binding to a `val` first is the
+  // reachable spelling (and the one every earlier fixture happens to use).
+  val da = call Wunio.describe(mknum(&a));
+  val db = call Wunio.describe(mknum(&b));
+  val dc = call Wunio.describe(mknum(&c));
+  word ra = payload(da, 0);
+  word rb = payload(db, 0);
+  word rc = payload(dc, 0);
+
+  word pads = lo0 + a.pad + b.pad + c.pad;
+  return mknum((ra * 1000000) + (rb * 10000) + (rc * 100) + pads);
+}

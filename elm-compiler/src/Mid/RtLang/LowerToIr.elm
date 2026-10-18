@@ -2866,13 +2866,41 @@ fieldTyIn decls structName fieldName =
             case d of
                 StructDecl s ->
                     if s.name == structName then
-                        fieldTyInFields s.fields fieldName
+                        fieldTyInMembers s.members fieldName
 
                     else
                         fieldTyIn rest structName fieldName
 
                 EnumDecl _ ->
                     fieldTyIn rest structName fieldName
+
+
+{-| The declared type of a struct's field, walking the body — B5: a union
+block's members are PROMOTED, so `m.n` finds `n` inside the block (that is
+the same namespace the checker's table exposes).
+-}
+fieldTyInMembers : List Ast.StructMember -> String -> Maybe Type
+fieldTyInMembers members name =
+    case members of
+        [] ->
+            Nothing
+
+        m :: rest ->
+            case m of
+                Ast.MField f ->
+                    if f.name == name then
+                        Just f.ty
+
+                    else
+                        fieldTyInMembers rest name
+
+                Ast.MUnion ms ->
+                    case fieldTyInFields ms name of
+                        Just ty ->
+                            Just ty
+
+                        Nothing ->
+                            fieldTyInMembers rest name
 
 
 fieldTyInFields : List Field -> String -> Maybe Type
@@ -3007,11 +3035,13 @@ structZero st sname addr =
                 )
 
 
-{-| A struct declaration's field list, structurally — the same `.fields` the
+{-| A struct declaration's BODY, structurally — the same `.members` the
 checker's layout walks (NOT layout logic: offsets and widths are read from
-`Check.fieldOffset`/`Check.fieldWidth`, the one table).
+`Check.fieldOffset`/`Check.fieldWidth`, the one table).  B5: a `MUnion`
+block rides through unchanged, so the word walk can distinguish a block (one
+`max`-sized overlap) from a plain field.
 -}
-fieldsOf : List Decl -> String -> Maybe (List Field)
+fieldsOf : List Decl -> String -> Maybe (List Ast.StructMember)
 fieldsOf decls sname =
     case decls of
         [] ->
@@ -3021,7 +3051,7 @@ fieldsOf decls sname =
             case d of
                 StructDecl sd ->
                     if sd.name == sname then
-                        Just sd.fields
+                        Just sd.members
 
                     else
                         fieldsOf rest sname
@@ -3050,40 +3080,116 @@ structWordsAt st sname bias =
             fieldsWords st sname bias fields
 
 
-fieldsWords : St -> String -> Int -> List Field -> Result String (List Int)
-fieldsWords st sname bias fields =
-    case fields of
+fieldsWords : St -> String -> Int -> List Ast.StructMember -> Result String (List Int)
+fieldsWords st sname bias members =
+    case members of
         [] ->
             Ok []
 
-        f :: rest ->
-            case Check.fieldOffset st.decls sname f.name of
-                Nothing ->
-                    Err
-                        (internal st ("field '" ++ sname ++ "." ++ f.name ++ "'")
-                            "has no offset in the struct table — Check J13 must reject it first"
-                        )
-
-                Just off ->
-                    case Check.fieldWidth st.decls sname f.name of
+        m :: rest ->
+            case m of
+                Ast.MField f ->
+                    case Check.fieldOffset st.decls sname f.name of
                         Nothing ->
                             Err
                                 (internal st ("field '" ++ sname ++ "." ++ f.name ++ "'")
-                                    "has no width in the struct table — Check J13 must reject it first"
+                                    "has no offset in the struct table — Check J13 must reject it first"
                                 )
 
-                        Just w ->
-                            case fieldsWords st sname bias rest of
-                                Err msg ->
-                                    Err msg
+                        Just off ->
+                            case Check.fieldWidth st.decls sname f.name of
+                                Nothing ->
+                                    Err
+                                        (internal st ("field '" ++ sname ++ "." ++ f.name ++ "'")
+                                            "has no width in the struct table — Check J13 must reject it first"
+                                        )
 
-                                Ok tailWords ->
-                                    case fieldWords st bias off f.ty w of
+                                Just w ->
+                                    case fieldsWords st sname bias rest of
                                         Err msg ->
                                             Err msg
 
-                                        Ok here ->
-                                            Ok (here ++ tailWords)
+                                        Ok tailWords ->
+                                            case fieldWords st bias off f.ty w of
+                                                Err msg ->
+                                                    Err msg
+
+                                                Ok here ->
+                                                    Ok (here ++ tailWords)
+
+                Ast.MUnion ms ->
+                    -- B5: the block's members are the SAME bytes, so the copy
+                    -- must NOT walk them one by one (a `word` member beside a
+                    -- `val` one would cover 1 word and then 5 at one offset) —
+                    -- it copies the block's ONE overlapped range, `max` wide.
+                    case fieldsWords st sname bias rest of
+                        Err msg ->
+                            Err msg
+
+                        Ok tailWords ->
+                            case unionWords st sname bias ms of
+                                Err msg ->
+                                    Err msg
+
+                                Ok here ->
+                                    Ok (here ++ tailWords)
+
+
+{-| B5 — a union block's words: ONE range at the block's SHARED offset,
+`max(member widths)` words wide (the offset is the same for every member, so
+the first member's is the block's: MEASURED off the one table, never summed).
+-}
+unionWords : St -> String -> Int -> List Field -> Result String (List Int)
+unionWords st sname bias ms =
+    case ms of
+        [] ->
+            Err
+                (internal st ("union block in '" ++ sname ++ "'")
+                    "has no members — Check J11 rejects an empty block first"
+                )
+
+        f :: _ ->
+            case Check.fieldOffset st.decls sname f.name of
+                Nothing ->
+                    Err
+                        (internal st ("union member '" ++ sname ++ "." ++ f.name ++ "'")
+                            "has no offset in the struct table — Check J11 must reject it first"
+                        )
+
+                Just off ->
+                    case unionWidest st sname ms of
+                        Err msg ->
+                            Err msg
+
+                        Ok w ->
+                            Ok (intsFrom (bias + off) w)
+
+
+{-| The widest member of a union block — the block's size, the same `max`
+`Check.layoutOf` advanced the cursor by (read through
+`Check.fieldWidth`, i.e. the ONE `fieldSize` rule).
+-}
+unionWidest : St -> String -> List Field -> Result String Int
+unionWidest st sname ms =
+    case ms of
+        [] ->
+            Ok 0
+
+        f :: rest ->
+            case Check.fieldWidth st.decls sname f.name of
+                Nothing ->
+                    Err
+                        (internal st ("union member '" ++ sname ++ "." ++ f.name ++ "'")
+                            "has no width in the struct table — Check J11 must reject it first"
+                        )
+
+                Just w ->
+                    case unionWidest st sname rest of
+                        Err msg ->
+                            Err msg
+
+                        Ok tail ->
+                            Ok (max w tail)
 
 
 {-| One field's word offsets: a nested struct recurses (its own base is the

@@ -287,6 +287,7 @@ import Mid.RtLang.Ast as Ast
         , SizeTarget(..)
         , Stmt(..)
         , StructInit(..)
+        , StructMember(..)
         , Sym
         , Term(..)
         , Type(..)
@@ -778,7 +779,7 @@ structsFoldAll all remaining names acc =
                     structsFoldAll all rest names acc
 
                 StructDecl s ->
-                    case layoutOf all names s.name s.fields of
+                    case layoutOf all names s.name s.members of
                         Err msg ->
                             Err msg
 
@@ -795,36 +796,98 @@ naming an unknown struct; and a BY-VALUE CYCLE (`struct S { s : S; }`, or
 reserved for exactly this unit.  `decls` is threaded for the nested-struct
 SIZE only: the recursion re-walks the same declarations, it does not
 build a second table.
+
+B5 — THE UNION RULE, and it is the ONLY place it is written: the members of
+an `MUnion` block ALL take the block's offset, and the block advances the
+cursor by the MAX of its members' sizes (so the next field starts after the
+max, word-aligned like every field).  A member is then PROMOTED into the
+struct's field list — `m.n`, `m.p`, `m.pair` all resolve here, through
+`fieldOffset`, to one offset.  Nothing else in the pipeline knows what a
+union is: the lowerer reads the same table and a union member lowers to the
+ordinary `RawWordLoad`/address at the shared offset.
 -}
-layoutOf : List Decl -> List String -> String -> List Field -> Result String ( List StructField, Int )
-layoutOf decls names structName fields =
-    case duplicateFieldName fields of
+layoutOf : List Decl -> List String -> String -> List StructMember -> Result String ( List StructField, Int )
+layoutOf decls names structName members =
+    case duplicateMemberName members of
         Just f ->
             Err
                 ("RtLang: J11: struct '"
                     ++ structName
                     ++ "' declares field '"
                     ++ f
-                    ++ "' more than once — one name, one offset"
+                    ++ "' more than once — one name, one offset (a union block's members are promoted into the struct's own field namespace)"
                 )
 
         Nothing ->
-            fieldsWalk decls names structName fields 0 []
+            layoutOfSeen decls names [ structName ] structName members
 
 
-fieldsWalk : List Decl -> List String -> String -> List Field -> Int -> List StructField -> Result String ( List StructField, Int )
-fieldsWalk decls names structName fields offset acc =
-    case fields of
+layoutOfSeen : List Decl -> List String -> List String -> String -> List StructMember -> Result String ( List StructField, Int )
+layoutOfSeen decls names seen structName members =
+    membersWalk decls names seen structName members 0 []
+
+
+membersWalk : List Decl -> List String -> List String -> String -> List StructMember -> Int -> List StructField -> Result String ( List StructField, Int )
+membersWalk decls names seen structName members offset acc =
+    case members of
         [] ->
             Ok ( List.reverse acc, offset )
 
+        m :: rest ->
+            case m of
+                MField f ->
+                    case fieldSize decls names seen structName f.ty of
+                        Err msg ->
+                            Err msg
+
+                        Ok sz ->
+                            membersWalk decls names seen structName rest (offset + sz) ({ name = f.name, ty = f.ty, offset = offset } :: acc)
+
+                MUnion ms ->
+                    case unionAt decls names seen structName ms offset of
+                        Err msg ->
+                            Err msg
+
+                        Ok ( placed, sz ) ->
+                            -- the block's members were laid out in declaration
+                            -- order, so prepending them REVERSED keeps `acc`
+                            -- (the reversed accumulator) in field order.
+                            membersWalk decls names seen structName rest (offset + sz) (List.reverse placed ++ acc)
+
+
+{-| B5 — one union block's members at the SHARED offset `off`, and the
+block's size (`max` of the member sizes; members are ≥ 1 word, so the max is
+the block's reach).  An EMPTY block is a reject: it has no member to place
+and no size, and silently contributing 0 would let a later field sit at an
+offset nothing declares.
+-}
+unionAt : List Decl -> List String -> List String -> String -> List Field -> Int -> Result String ( List StructField, Int )
+unionAt decls names seen structName ms off =
+    case ms of
+        [] ->
+            Err
+                ("RtLang: J11: struct '"
+                    ++ structName
+                    ++ "' has an EMPTY union block (`union { }`) — a block with no members has no size and no offset to share"
+                )
+
+        _ ->
+            unionWalk decls names seen structName ms off 0 []
+
+
+unionWalk : List Decl -> List String -> List String -> String -> List Field -> Int -> Int -> List StructField -> Result String ( List StructField, Int )
+unionWalk decls names seen structName ms off widest placed =
+    case ms of
+        [] ->
+            Ok ( List.reverse placed, widest )
+
         f :: rest ->
-            case fieldSize decls names [ structName ] structName f.ty of
+            case fieldSize decls names seen structName f.ty of
                 Err msg ->
                     Err msg
 
                 Ok sz ->
-                    fieldsWalk decls names structName rest (offset + sz) ({ name = f.name, ty = f.ty, offset = offset } :: acc)
+                    unionWalk decls names seen structName rest off (max widest sz) ({ name = f.name, ty = f.ty, offset = off } :: placed)
 
 
 {-| A field type's size in words, with the J11 field-type rejections.  A
@@ -905,7 +968,9 @@ fieldSize decls names seen structName ty =
 {-| A struct's size in words, computed from the declarations with `seen`
 carrying the enclosing names: the BY-VALUE CYCLE reject lives here (one
 table, one rule).  An unknown struct is the same J11 reject the pointer
-arm spells.
+arm spells.  B5: the size is read off the SAME `layoutOfSeen` walk the top-
+level table uses — there is no second size rule, so a union block's
+`max` contribution is a fact in exactly one place.
 -}
 structSizeOf : List Decl -> List String -> List String -> String -> Result String Int
 structSizeOf decls names seen sname =
@@ -921,7 +986,7 @@ structSizeOf decls names seen sname =
             )
 
     else
-        case fieldsOfDecl decls sname of
+        case membersOfDecl decls sname of
             Nothing ->
                 Err
                     ("RtLang: J11: field type '"
@@ -929,30 +994,20 @@ structSizeOf decls names seen sname =
                         ++ "' names no declared struct — a struct-value field must resolve in the file's struct table"
                     )
 
-            Just fields ->
-                sizesWalk decls names (sname :: seen) sname fields 0
+            Just members ->
+                case layoutOfSeen decls names (sname :: seen) sname members of
+                    Err msg ->
+                        Err msg
+
+                    Ok ( _, size ) ->
+                        Ok size
 
 
-sizesWalk : List Decl -> List String -> List String -> String -> List Field -> Int -> Result String Int
-sizesWalk decls names seen structName fields acc =
-    case fields of
-        [] ->
-            Ok acc
-
-        f :: rest ->
-            case fieldSize decls names seen structName f.ty of
-                Err msg ->
-                    Err msg
-
-                Ok sz ->
-                    sizesWalk decls names seen structName rest (acc + sz)
-
-
-{-| A struct declaration's field list, structurally (the same `.fields` the
-layout walk reads).  `Nothing` when no such struct is declared.
+{-| A struct declaration's BODY (the same `.members` the layout walk reads).
+`Nothing` when no such struct is declared.
 -}
-fieldsOfDecl : List Decl -> String -> Maybe (List Field)
-fieldsOfDecl decls sname =
+membersOfDecl : List Decl -> String -> Maybe (List StructMember)
+membersOfDecl decls sname =
     case decls of
         [] ->
             Nothing
@@ -961,29 +1016,47 @@ fieldsOfDecl decls sname =
             case d of
                 StructDecl s ->
                     if s.name == sname then
-                        Just s.fields
+                        Just s.members
 
                     else
-                        fieldsOfDecl rest sname
+                        membersOfDecl rest sname
 
                 EnumDecl _ ->
-                    fieldsOfDecl rest sname
+                    membersOfDecl rest sname
 
 
-{-| The first field name used twice inside one struct, or `Nothing`.
+{-| The first field name used twice in one struct, or `Nothing`.  B5: a union
+block's member names are PROMOTED into the struct's field namespace, so the
+names checked here are the FLATTENED ones — a duplicate inside one block, and
+a union member colliding with a sibling field, are the same reject.
 -}
-duplicateFieldName : List Field -> Maybe String
-duplicateFieldName fields =
-    case fields of
+duplicateMemberName : List StructMember -> Maybe String
+duplicateMemberName members =
+    firstRepeat (List.concatMap memberFieldNames members)
+
+
+memberFieldNames : StructMember -> List String
+memberFieldNames m =
+    case m of
+        MField f ->
+            [ f.name ]
+
+        MUnion ms ->
+            List.map .name ms
+
+
+firstRepeat : List String -> Maybe String
+firstRepeat names =
+    case names of
         [] ->
             Nothing
 
-        f :: rest ->
-            if List.member f.name (List.map .name rest) then
-                Just f.name
+        n :: rest ->
+            if List.member n rest then
+                Just n
 
             else
-                duplicateFieldName rest
+                firstRepeat rest
 
 
 {-| The enum table: name -> (constant name -> value), rejecting a

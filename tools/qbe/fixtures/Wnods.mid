@@ -1,0 +1,100 @@
+// B5 (handoff-midlang-b5) — THE RECURSIVE STRUCTURE: a struct whose union
+// block holds a `*Node` next-pointer beside a word leaf, hand-built with
+// `rawcall malloc`, linked, walked and freed.  The acceptance ladder's rung 5
+// (plan §4) needs this AND the tagged union; Wunio.mid is the tag-dispatch
+// half and this is the recursion half.
+//
+//   tools/qbe/qbe-mk.sh tools/qbe/fixtures/midb5b.elm MidB5b.main <outdir>
+//   <outdir>/midb5b MidB5b.main
+//
+// Expected stdout with seed = 3:  60307073
+//   = sum(60) | count(3) | leaf(7) | overlap(7) | seeded(3)
+//
+// THE LAYOUT THIS FILE PINS:
+//
+//     struct Tail { v : word; next : *Node; }      // 2 words
+//     struct Node {
+//       tag : word;                                 // word 0
+//       union { leaf : word; link : Tail; };        // words 1..2 <- the block
+//     }                                             // sizeof 3
+//
+//   * the block is `max(1, 2) = 2` words, so `Node` is 3 words = 24 bytes and
+//     the malloc below is 24 — a SUM layout (3) would need 32, and a DISTINCT
+//     layout (leaf 1, link 2..3) would put `link.next` past the allocation.
+//   * `link.v` sits at the block's offset (word 1) and `link.next` one word
+//     later: the two-deep chain of offsets off ONE table.
+//
+// WHAT THE NUMBER PINS (a bug in any one moves it):
+//   * sum 60 = 10 + 20 + 30 and count 3: the chain really LINKS (a lost
+//     `next` store, a per-iteration re-allocation or a bad offset stops the
+//     walk early and both digits move), and the walk terminates on a 0
+//     `next` rather than reading past the last node.
+//   * leaf 7 / overlap 7: the standalone leaf node writes `link.v = 5` first,
+//     then `leaf = 7` — the SAME word, so reading the other member back gives
+//     7.  With the members at DISTINCT offsets this reads 5, which is why the
+//     two digits are separate: the pair `77` IS the union rule, in a run.
+//   * seeded 3 = the loop bound, which rides a loop-carried word (B4's
+//     auto-cell) and sizes the chain.
+//
+// The chain is FREED before the number is returned (a walk with a `next` read
+// hoisted before the `free`, which is the only correct order), so this
+// program allocates 4 blocks and frees 4.
+module Wnods
+
+export Wnods.run : val -> val
+
+struct Tail { v : word; next : *Node; }
+
+struct Node {
+  tag : word;
+  union { leaf : word; link : Tail; };
+}
+
+defun Wnods.run(seed : val) -> val {
+  word n = payload(seed, 0);
+
+  word kLeaf = 1;
+  word kLink = 2;
+
+  // ---- build: push n link nodes onto a 0-terminated chain ----
+  *Node head = 0;
+  word i = 0;
+  while (i < n) {
+    *Node c = rawcall malloc(24);
+    c.tag = kLink;
+    c.link.v = (i + 1) * 10;
+    c.link.next = head;
+    head = c;
+    i = i + 1;
+  }
+
+  // ---- walk: sum the payloads, count the nodes ----
+  word sum = 0;
+  word count = 0;
+  *Node p = head;
+  while (p != 0) {
+    sum = sum + p->link.v;
+    p = p->link.next;
+    count = count + 1;
+  }
+
+  // ---- free: read `next` BEFORE the block goes away ----
+  *Node q = head;
+  while (q != 0) {
+    *Node nx = q->link.next;
+    rawcall free(q);
+    q = nx;
+  }
+
+  // ---- the OTHER member of the block, at the same offset ----
+  *Node one = rawcall malloc(24);
+  one.tag = kLeaf;
+  one.link.v = 5;
+  one.link.next = 0;
+  one.leaf = 7;
+  word lv = one.leaf;
+  word ov = one.link.v;
+  rawcall free(one);
+
+  return mknum((sum * 1000000) + (count * 100000) + (lv * 1000) + (ov * 10) + n);
+}
