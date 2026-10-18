@@ -6543,7 +6543,7 @@ checks rt =
         "defun Rt.g(a: val) -> val {\n  return Rt.getpid;\n}"
     , checkOkModule "B2 check accept: THE MILESTONE SHAPE — a struct local with a NESTED struct and a `val` field, field-wise init through `.`, `&o` bound to a `*Outer`, mutation through `p.a`/`p.in_.k`, a COPY initialiser, a nested store, and the val field read back"
         b2MilestoneMid
-    , checkErrModule "B2 check REJECT: `&` of a WORD local — a scalar binder is a temp or a 40-byte slot, so there is no address to take (the struct local and the struct field are the memory-backed seats)" "'&' needs a struct value or a struct field with storage"
+    , checkErrModule "B2 check REJECT: `&` of a WORD local — a scalar binder is a temp or a 40-byte slot, so there is no address to take (the struct local and the struct field are the memory-backed seats)" "'&' needs a struct value"
         "struct S { a : word; }\ndefun Rt.g() -> word {\n  word w = 1;\n  *word p = &w;\n  return 0;\n}"
     , checkOkModule "B2 check accept CONTROL for the row above: `&` of a struct FIELD is legal and types as `*word` (the storage exists)"
         "struct S { a : word; }\ndefun Rt.g() -> word {\n  S s;\n  *word p = &s.a;\n  return *p;\n}"
@@ -6649,7 +6649,257 @@ checks rt =
             Err _ ->
                 False
         )
+
+    -- ================== B3: ARRAYS (plan Q5) ==================
+    , check "B3 parse: `word[5] a;` is an ARRAY BINDER — the type is `TArray TWord 5` and the initialiser is AInitZero"
+        (Parse.parseBlock "{ word[5] a;\n  return 0; }"
+            == Ok
+                { stmts = [ Ast.SArrayBind { aty = Ast.TArray Ast.TWord 5, name = "a", init = Ast.AInitZero } ]
+                , term = Ast.TRet (Ast.EInt 0)
+                }
+        )
+    , check "B3 parse: `word[3][4] m = { .. };` NESTS with the LEFTMOST group OUTER — `TArray (TArray TWord 4) 3` (three rows of four), the row-major flat order"
+        (Parse.parseBlock "{ word[3][4] m = { 1, 2, 3 };\n  return 0; }"
+            == Ok
+                { stmts =
+                    [ Ast.SArrayBind
+                        { aty = Ast.TArray (Ast.TArray Ast.TWord 4) 3
+                        , name = "m"
+                        , init = Ast.AInitFull [ Ast.EInt 1, Ast.EInt 2, Ast.EInt 3 ]
+                        }
+                    ]
+                , term = Ast.TRet (Ast.EInt 0)
+                }
+        )
+    , check "B3 parse: an UPPERCASE base is an array of STRUCTS — `S[2] xs;` is the same statement shape with a `TStruct` element"
+        (Parse.parseBlock "{ S[2] xs;\n  return 0; }"
+            == Ok
+                { stmts = [ Ast.SArrayBind { aty = Ast.TArray (Ast.TStruct "S") 2, name = "xs", init = Ast.AInitZero } ]
+                , term = Ast.TRet (Ast.EInt 0)
+                }
+        )
+    , check "B3 parse: the array type composes EVERYWHERE a type goes — a struct FIELD (`tab : word[3]`) and a `sizeof` operand (`sizeof(word[5])`)"
+        ((Parse.parseModule "struct S { tab : word[3]; }\ndefun S.f() -> word {\n  return sizeof(word[5]);\n}"
+            |> Result.map (\m -> ( m.decls, m.defuns ))
+         )
+            == Ok
+                ( [ Ast.StructDecl { name = "S", fields = [ { name = "tab", ty = Ast.TArray Ast.TWord 3 } ] } ]
+                , [ { key = "S.f"
+                    , params = []
+                    , ret = Ast.TWord
+                    , body = { stmts = [], term = Ast.TRet (Ast.ESizeof (Ast.SizeType (Ast.TArray Ast.TWord 5))) }
+                    , flags = []
+                    }
+                  ]
+                )
+        )
+    , checkErr "B3 parse REJECT: an array-to-array COPY initialiser (`word[5] b = a;`) — the tail is the brace list or nothing"
+        "FULL brace list"
+        "defun Rt.g(a: *word) -> word {\n  word[5] b = a;\n  return 0;\n}"
+    , checkOk "B3 check ACCEPT: a FULL initialiser, element scaling and mutation through the base (`a[i] = a[i] + ..`) — the array's value is its address, so no cast is needed to index it"
+        "defun Rt.g(s: val) -> word {\n  word[5] a = { 1, 2, 3, 4, 5 };\n  a[2] = a[2] + payload(s, 0);\n  return a[2] + a[0];\n}"
+    , checkOk "B3 check ACCEPT: the DECAY row is in the checker's matrix — `*word p = a;` types (an array decays to its element's pointer), and so does `word w = a;` (an address is a word)"
+        "defun Rt.g() -> word {\n  word[5] a = { 1, 2, 3, 4, 5 };\n  *word p = a;\n  word w = a;\n  return p[2] + w;\n}"
+    , check "B3 MEASURED GAP (pinned, not hidden): the decay row's BINDER CAST emits nothing valid TODAY — `*word p = a;` dies in the QBE lane with the PRE-EXISTING raw-Var gap (`word z = w;` on two plain word binders fails identically; a Let's value must be a raw PRODUCER node, and `Var` of a raw binder is not one).  Index the array directly, or cross an address through `payload`/`mknum`"
+        (case emitUserSsa rt "module B3g\ndefun B3g.g() -> word {\n  word[5] a = { 1, 2, 3, 4, 5 };\n  *word p = a;\n  return p[2];\n}" of
+            Err e ->
+                String.contains "raw word binder read in a VALUE position" e
+
+            Ok _ ->
+                False
+        )
+    , checkOk "B3 check ACCEPT: `&a` on an ARRAY VALUE is the identity (the value IS its address) — typed `*word` by the decay"
+        "defun Rt.g() -> word {\n  word[5] a;\n  *word p = &a;\n  p[0] = 1;\n  return p[0];\n}"
+    , checkOk "B3 check ACCEPT: an array ARGUMENT passes where its element's pointer is expected (`f(a)` into a `*word` parameter) — the decay row at the call boundary (the callee's own `p[i]` is B6's `*T`-parameter work: MEASURED, a `*word` PARAMETER is a Value slot and dies in the raw lane)"
+        "defun Rt.n(p: *word, i: word) -> word {\n  return p[i];\n}\ndefun Rt.g() -> word {\n  word[3] a = { 7, 8, 9 };\n  return call Rt.n(a, 2);\n}"
+    , checkOk "B3 check ACCEPT: MULTIDIMENSIONAL `word[3][4] m;` — a nested element store and a nested read (`m[1][2]`), the inner `[4]` stratifying the layout"
+        "defun Rt.g() -> word {\n  word[3][4] m;\n  m[1][2] = 7;\n  m[2][0] = m[1][2] + 1;\n  return m[2][0];\n}"
+    , checkOkModule "B3 check ACCEPT: an ARRAY OF STRUCTS — the element is a struct VALUE, so a whole-element store COPIES and `xs[0].k` reads through it"
+        "struct I { k : word; }\ndefun Rt.g() -> word {\n  I one;\n  I[2] xs;\n  one.k = 4;\n  xs[0] = one;\n  xs[1].k = 5;\n  return xs[0].k + xs[1].k;\n}"
+    , checkOk "B3 check ACCEPT: an ARRAY OF VAL — 40-byte handles in raw memory: a handle stored and read back by INDEX (`vs[1]`)"
+        "defun Rt.g(v: val) -> val {\n  val[3] vs;\n  vs[0] = v;\n  vs[1] = mknum(payload(vs[0], 0) + 1);\n  return vs[1];\n}"
+    , checkOk "B3 check ACCEPT: a HEAP array — `rawcall malloc(8 * sizeof(word[5]))` plus the typed `*word` view, `sizeof(T[N])` making it spellable"
+        "defun Rt.g() -> word {\n  *word h = rawcall malloc(8 * sizeof(word[5]));\n  h[3] = 4;\n  return h[3];\n}"
+    , checkOkModule "B3 check ACCEPT: an ARRAY FIELD of a struct — `s.tab[1]`, and `&s.tab` decays to `*word`"
+        "struct S { tab : word[3]; }\ndefun Rt.g() -> word {\n  S s;\n  s.tab[1] = 9;\n  *word p = &s.tab;\n  return p[1] + s.tab[1];\n}"
+    , checkErr "B3 check REJECT: a PARTIAL initialiser — and C's `{0}` IS one: zero-filling the elements not spelled manufactures garbage-tag `val` handles"
+        "a PARTIAL initialiser is refused"
+        "defun Rt.g() -> word {\n  word[5] a = { 1, 2 };\n  return a[0];\n}"
+    , checkErr "B3 check REJECT: the SAME rule on a `val` array — the message names the garbage-tag trap and both zero-init spellings"
+        "garbage-tag trap"
+        "defun Rt.g() -> val {\n  val[4] vs = { mknil };\n  return vs[0];\n}"
+    , checkOk "B3 check ACCEPT (control for the two rows above): the FULL list of the same length is legal, and the bare declaration is the zeroed spelling"
+        "defun Rt.g() -> word {\n  word[2] a = { 1, 2 };\n  word[4] b;\n  return a[1] + b[3];\n}"
+    , checkErr "B3 check REJECT: `a[i]` on a NON-ARRAY, non-pointer (`w[0]` on a word) — index access needs a pointer or an array"
+        "index access needs a pointer"
+        "defun Rt.g(w: word) -> word {\n  return w[0];\n}"
+    , checkErr "B3 check REJECT: an index class that is not word/int — a `val` index (`a[v]`) is the one integer class's reject"
+        "index must be a word offset"
+        "defun Rt.g(v: val) -> word {\n  word[3] a = { 1, 2, 3 };\n  return a[v];\n}"
+    , checkErr "B3 check REJECT: an array of an UNKNOWN struct — every dimension resolves in the file's struct table"
+        "names no declared struct"
+        "defun Rt.g() -> word {\n  Nope[2] xs;\n  return 0;\n}"
+    , checkErr "B3 check REJECT: a ZERO-LENGTH array — no storage, so no address and no elements"
+        "at least 1"
+        "defun Rt.g() -> word {\n  word[0] a;\n  return 0;\n}"
+    , checkErr "B3 check REJECT: an ARRAY PARAMETER by value — B6's word-ABI flattening; a `*word` view is what to write today"
+        "ARRAY VALUE"
+        "defun Rt.g(a: word[3]) -> word {\n  return 0;\n}"
+    , checkErr "B3 check REJECT: an ARRAY RETURN (the ret path is one word; a caller-supplied `*word` out-parameter is the way)"
+        "ARRAY RETURN is REJECTED"
+        "defun Rt.g() -> word[3] {\n  word[3] a;\n  return a;\n}"
+    , checkErr "B3 check REJECT: a WHOLE-array assignment (`a = b;`) — that is an element-wise copy, not a v1 form"
+        "cannot be assigned whole"
+        "defun Rt.g() -> word {\n  word[2] a;\n  word[2] b;\n  a = b;\n  return 0;\n}"
+    , checkErr "B3 check REJECT: a NESTED-array element store (`m[0] = n;`) — the leaves are what store"
+        "cannot be stored whole"
+        "defun Rt.g(n: *word) -> word {\n  word[2][3] m;\n  m[0] = *n;\n  return 0;\n}"
+    , checkErr "B3 check REJECT: a FLOAT array — no raw-memory f64 seat (the J11 float-field rule, same reason)"
+        "no raw-memory seat"
+        "defun Rt.g() -> word {\n  float[2] a;\n  return 0;\n}"
+    , check "B3 PIN full initialiser: `word[5] a = { .. };` emits malloc(40) then FIVE stores at word offsets 0..4 (one per element, in written order)"
+        (case lowlModuleBody "defun Rt.g() -> word {\n  word[5] a = { 11, 12, 13, 14, 15 };\n  return a[0];\n}" of
+            Ok body ->
+                b2StoreOffsets body == [ 0, 1, 2, 3, 4 ]
+
+            Err _ ->
+                False
+        )
+    , check "B3 PIN zero init: the BARE declaration memsets the block — `malloc(8*N)` then `memset(base, 0, 8*N)`, no element stores"
+        (case lowlModuleBody "defun Rt.g() -> word {\n  word[4] a;\n  return a[1];\n}" of
+            Ok body ->
+                b2StoreOffsets body == []
+
+            Err _ ->
+                False
+        )
+    , check "B3 PIN stride: `word[3][4] m; m[1][2]` reads at `base + 32` (row 1 = 4 words) and word offset 2 — the emitted constant IS the table's arithmetic (4 = the inner array's width)"
+        (case lowlModuleBody "defun Rt.g() -> word {\n  word[3][4] m;\n  return m[1][2];\n}" of
+            Ok body ->
+                canon (b3BlockValue body)
+                    == canon
+                        (Unsafe
+                            (RawWordLoad
+                                { ptr = Unsafe (RawBin { op = RAdd, a = ltv 1, b = ltn 32 })
+                                , index = ltn 2
+                                }
+                            )
+                        )
+
+            Err _ ->
+                False
+        )
+    , check "B3 PIN stride (structured element): `I[3] xs;` scales the index by `Check.sizeofStruct I` — the ONE layout table, not a second copy"
+        (case lowlModuleBody "struct I { a : word; b : word; }\ndefun Rt.g(i: word) -> word {\n  I[3] xs;\n  return xs[i].a;\n}" of
+            Ok body ->
+                -- the `xs[i]` ADDRESS is `base + i*8*sizeof(I)` and the field
+                -- read is the word at that address (`index = Lit 0`), with
+                -- `sizeof I` = 2 read from the ONE layout table
+                canon (b3BlockValue body)
+                    == canon
+                        (Unsafe
+                            (RawWordLoad
+                                { ptr = Unsafe (RawBin { op = RAdd, a = ltv 2, b = Unsafe (RawBin { op = RMul, a = ltv 1, b = ltn 16 }) })
+                                , index = ltn 0
+                                }
+                            )
+                        )
+
+            Err _ ->
+                False
+        )
+    , check "B3 PIN val element: a `val` array element is a RAW VEC node in VALUE units (`vecload(base, 1)` = byte 40), never a word-scaled offset"
+        (case lowlModuleBody "defun Rt.g() -> val {\n  val[3] vs;\n  return vs[1];\n}" of
+            Ok body ->
+                canon (b3BlockValue body) == canon (Unsafe (RawVecLoad { vec = ltv 1, index = ltn 1 }))
+
+            Err _ ->
+                False
+        )
+    , check "B3 PIN sizeof: `sizeof(word[3][4])` is the LITERAL 12 — element width times both counts, from the same width walk the allocation uses"
+        (case lowlModuleBody "defun Rt.g() -> word {\n  return sizeof(word[3][4]);\n}" of
+            Ok body ->
+                canon body == canon (ltn 12)
+
+            Err _ ->
+                False
+        )
+    , check "B3 PIN val element STORE: `vs[1] = e;` is `RawVecStore { vec = base, index = Lit 1 }` — a VALUE-unit index (byte 40), never a word offset"
+        (case lowlModuleBody "defun Rt.g() -> val {\n  val[3] vs;\n  vs[1] = mknil;\n  return vs[1];\n}" of
+            Ok body ->
+                List.any
+                    (\node ->
+                        canon node
+                            == canon
+                                (Unsafe
+                                    (RawVecStore
+                                        { vec = ltv 1
+                                        , index = ltn 1
+                                        , value = Unsafe (RawMkValue { tag = RtLayout.tagNil, words = [] })
+                                        }
+                                    )
+                                )
+                    )
+                    (b3StoreNodes body)
+
+            Err _ ->
+                False
+        )
+    , check "B3 .ssa: the worked source emits its THREE blocks at the sizes the table computes (the same three shapes as tools/qbe/fixtures/Warr.mid — ONE defun here because `emitUserSsa` lowers the first defun only, MEASURED) — 40 (word[5]), 96 + memset 96 (word[3][4] = 12 words), 32 + memset 32 (Outer[2] = 2 x 4 words)"
+        (case emitUserSsa rt b3WorkedMid of
+            Ok ssa ->
+                String.length ssa > 400
+                    && String.contains "call $malloc(l 40)" ssa
+                    && String.contains "call $malloc(l 96)" ssa
+                    && String.contains "l 0, l 96)" ssa
+                    && String.contains "call $malloc(l 32)" ssa
+                    && String.contains "l 0, l 32)" ssa
+
+            Err _ ->
+                False
+        )
     ]
+
+
+{-| The block's VALUE: the innermost `body` of the Let chain a declaration's
+stores wrap it in (the array pins compare the READ node, not the memset/store
+prefix).
+-}
+b3StoreNodes : Exp -> List Exp
+b3StoreNodes e =
+    case e of
+        Let l ->
+            List.concatMap
+                (\b ->
+                    case b of
+                        LetBind lb ->
+                            [ lb.value ]
+
+                        _ ->
+                            []
+                )
+                l.binders
+                ++ b3StoreNodes l.body
+
+        _ ->
+            []
+
+
+b3BlockValue : Exp -> Exp
+b3BlockValue e =
+    case e of
+        Let l ->
+            b3BlockValue l.body
+
+        _ ->
+            e
+
+
+{-| The B3 fixtures, as source text (the rows drive the REAL pipeline).
+-}
+b3WorkedMid : String
+b3WorkedMid =
+    "module B3w\nstruct Inner { k : word; }\nstruct Outer { tag : word; inner : Inner; }\ndefun B3w.run(seed : val) -> val {\n  word s = payload(seed, 0);\n  word[5] a = { 1, 2, 3, 4, 5 };\n  a[2] = a[2] + s;\n  word[3][4] m;\n  m[0][3] = 7;\n  m[1][2] = a[2];\n  Outer[2] xs;\n  xs[0].tag = 11;\n  xs[1].inner.k = 33;\n  return mknum((a[2] * 100000000) + (m[1][2] * 10000) + (xs[0].tag * 100) + xs[1].inner.k);\n}"
 
 
 {-| The B2 fixtures, as source text (the rows drive the REAL pipeline).
@@ -7443,6 +7693,9 @@ censusStmt s =
         Ast.SStructBind rec ->
             "SStructBind" :: censusInit rec.init
 
+        Ast.SArrayBind rec ->
+            "SArrayBind" :: censusArrayInit rec.init
+
         Ast.SVarStore _ v ->
             "SVarStore" :: censusExp v
 
@@ -7458,6 +7711,16 @@ censusInit init =
 
         Ast.InitCopy e ->
             censusExp e
+
+
+censusArrayInit : Ast.ArrayInit -> List String
+censusArrayInit init =
+    case init of
+        Ast.AInitZero ->
+            []
+
+        Ast.AInitFull es ->
+            List.concatMap censusExp es
 
 
 censusTerm : Ast.Term -> List String

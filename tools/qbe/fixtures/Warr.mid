@@ -1,0 +1,65 @@
+// B3 (handoff-midlang-b3) — THE WORKED EXAMPLE's .mid: FIXED-SIZE ARRAYS,
+// imported by name from midb3.elm (the reader resolves `import Warr` to this
+// file, relative to the importing file; it is NOT passed on the CLI).
+//
+// What the program does, in the order plan Q5 names it:
+//   * `word[5] a = { 1, 2, 3, 4, 5 };` — a fixed-size array local with the
+//     FULL initialiser (one store per element; a PARTIAL list is a loud
+//     reject, because zero-filling the elements you did not spell is exactly
+//     how a `val` element gets a garbage tag).
+//   * `a[2] = a[2] + s;` — indexing and mutating in place.  The index is the
+//     one integer class (`word`/`int`, i.e. `wload`'s contract) and the
+//     element scale is the element's word width.
+//   * `call Warr.bump(mknum(a));` — the ARRAY'S VALUE IS ITS ADDRESS, so the
+//     base crosses to a defun as a word (decay-to-pointer is free); `bump`
+//     re-takes the typed view with `*word p = payload(pv, 0);` and mutates
+//     the CALLER's element through `p[1]`.  MEASURED note: the parameter is a
+//     `val`, not a `*word` — a user defun's parameters are 40-byte Value
+//     frame slots unless its key is in `Mid.Rt.rawAbi`, so a `*word`
+//     PARAMETER cannot be indexed at emit time (B6's word-ABI wiring owns
+//     that; B2 crossed the same way for `*S`).
+//   * `word[3][4] m;` — MULTIDIMENSIONAL: the type is `TArray (TArray TWord
+//     4) 3`, row-major flat, and `m[i][j]` is pure stride arithmetic (the
+//     inner `[4]` multiplies the row stride).  The bare declaration is the
+//     ZEROED spelling (`malloc` + `memset`), never garbage.
+//   * `Outer[2] xs;` — an ARRAY OF STRUCTS: `xs[i]` is the ADDRESS of
+//     element i (scaled by `sizeof Outer`), so `xs[1].inner.k` chains through
+//     the same field layout a struct local uses.
+//
+// The printed number packs the five facts a bug in any of the above would
+// move:  a[2](8) | bump's p[1](102) | m[2][1](109) | xs[0].tag(11) |
+// xs[1].inner.k(33)  ->  903091133.
+//   * a[2] is 8 because the element store landed (3 + seed 5), so a broken
+//     index scale or a lost store moves it;
+//   * 102 is the CALLER's a[1] read back AFTER the call — an array passed by
+//     value (a copy) would leave 2 there;
+//   * 109 = m[0][3](7) + m[1][2](102), i.e. two DIFFERENT rows of the flat
+//     block — a wrong row stride reads a different element;
+//   * 11/33 are two fields of two different struct elements.
+module Warr
+export Warr.run : val -> val
+export Warr.bump : val -> val
+struct Inner { k : word; }
+struct Outer { tag : word; inner : Inner; }
+
+defun Warr.bump(pv : val) -> val {
+  *word p = payload(pv, 0);
+  p[1] = p[1] + 100;
+  return mknum(p[1]);
+}
+
+defun Warr.run(seed : val) -> val {
+  word s = payload(seed, 0);
+  word[5] a = { 1, 2, 3, 4, 5 };
+  a[2] = a[2] + s;
+  val t = call Warr.bump(mknum(a));
+  word[3][4] m;
+  m[0][3] = 7;
+  m[1][2] = payload(t, 0);
+  m[2][1] = m[0][3] + m[1][2];
+  Outer[2] xs;
+  xs[0].tag = 11;
+  xs[1].tag = 22;
+  xs[1].inner.k = 33;
+  return mknum((a[2] * 100000000) + (payload(t, 0) * 1000000) + (m[2][1] * 10000) + (xs[0].tag * 100) + xs[1].inner.k);
+}

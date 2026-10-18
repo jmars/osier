@@ -256,7 +256,7 @@ and — per the O(n) invariant in the token-plumbing section — NO
 -}
 
 import Dict exposing (Dict)
-import Mid.RtLang.Ast exposing (AggShape(..), Block, Builtin(..), Decl(..), Defun, Effect(..), EnumEntry, Exp(..), Export, ExportSig, Field, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Module, OTy(..), PTy(..), Param, Program, SizeTarget(..), Stmt(..), StructInit(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
+import Mid.RtLang.Ast exposing (AggShape(..), ArrayInit(..), Block, Builtin(..), Decl(..), Defun, Effect(..), EnumEntry, Exp(..), Export, ExportSig, Field, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Module, OTy(..), PTy(..), Param, Program, SizeTarget(..), Stmt(..), StructInit(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
 import Parser exposing (DeadEnd, Problem(..))
 import ParserFast
 
@@ -2397,8 +2397,65 @@ surfaceType =
     ParserFast.offsetSourceAndThen surfaceTypeAt
 
 
+{-| The type grammar WITH B3's array suffix: `T` followed by zero or more
+`[N]` groups is `T[N]` (one group) or `T[N][M]` (two, i.e. `TArray (TArray
+T M) N` — the LEFTMOST group is the OUTER dimension, as in C, and the
+layout is row-major flat).  This is a TYPE rule, not a declarator rule: the
+suffix belongs to the type (`word[3][4] a;` binds `a : word[3][4]`), so it
+composes with every type position — a field (`tab : word[3];`), a `sizeof`
+operand (`sizeof(word[5])` = 5) and the array binder's own spelling.  C's
+`word a[3][4]` declarator form is deliberately NOT the grammar.
+-}
 surfaceTypeAt : Int -> String -> ParserFast.Parser Type
 surfaceTypeAt offset src =
+    ParserFast.map2 applyDims (baseTypeAt offset src) dimsSuffix
+
+
+{-| Wrap a base type in its dimension groups.  `List.foldr` is what makes
+the LEFTMOST group the OUTER type: `[3][4]` on `word` is
+`TArray (TArray TWord 4) 3` = three rows of four words (12 contiguous
+words, row-major).
+-}
+applyDims : Type -> List Int -> Type
+applyDims ty dims =
+    List.foldr (\d acc -> TArray acc d) ty dims
+
+
+{-| `[N]` / `[N][M]` — the dimension groups after a base type.  A
+non-committed `succeed []` when the next character is not `[`, so the
+suffix is invisible in every existing position; once a `[` is seen the
+group is COMMITTED (`spelled "["`), so `word[x]` is a loud parse error
+rather than an `word` followed by a stray bracket.
+-}
+dimsSuffix : ParserFast.Parser (List Int)
+dimsSuffix =
+    ParserFast.offsetSourceAndThen
+        (\offset src ->
+            if String.slice offset (offset + 1) src == "[" then
+                ParserFast.loopWhileSucceeds dimGroup [] (\d acc -> acc ++ [ d ]) identity
+
+            else
+                succeed []
+        )
+
+
+{-| One `[N]` group.  `spelled "["` fails WITHOUT consuming when the next
+character is not a bracket, which is what ends `dimsSuffix`'s loop — the
+same non-committed-handback shape every list parser in this file uses.
+-}
+dimGroup : ParserFast.Parser Int
+dimGroup =
+    spelled "["
+        (ParserFast.map2 (\n _ -> n)
+            intLitParser
+            (spelled "]" (succeed ()))
+        )
+
+
+{-| The base type: everything `surfaceType` was before B3.
+-}
+baseTypeAt : Int -> String -> ParserFast.Parser Type
+baseTypeAt offset src =
     if String.slice offset (offset + 1) src == "*" then
         ParserFast.map TPtr (spelled "*" ptrPointee)
 
@@ -2567,22 +2624,22 @@ itemStepAt offset src =
             ParserFast.map ITermEnd (spelled "recur" recurTail)
 
         Just ( "word", _ ) ->
-            ParserFast.map IStmt (spelled "word" (bindTail TWord))
+            ParserFast.map IStmt (spelled "word" (bindOrArray TWord))
 
         Just ( "int", _ ) ->
-            ParserFast.map IStmt (spelled "int" (bindTail TWord))
+            ParserFast.map IStmt (spelled "int" (bindOrArray TWord))
 
         Just ( "bool", _ ) ->
             -- B1: `bool x = <bool temp>;` — the binder class is spelled ONLY
             -- here (never in `surfaceType`), so a bool parameter/return/field
             -- stays a loud parse reject until the word ABI (B6) exists.
-            ParserFast.map IStmt (spelled "bool" (bindTail TBool))
+            ParserFast.map IStmt (spelled "bool" (bindOrArray TBool))
 
         Just ( "float", _ ) ->
-            ParserFast.map IStmt (spelled "float" (bindTail TFloat))
+            ParserFast.map IStmt (spelled "float" (bindOrArray TFloat))
 
         Just ( "val", _ ) ->
-            ParserFast.map IStmt (spelled "val" (bindTail TVal))
+            ParserFast.map IStmt (spelled "val" (bindOrArray TVal))
 
         Just ( "defun", _ ) ->
             -- the next defun begins: this block's statement list is over
@@ -2759,6 +2816,95 @@ bindTail ty =
         (spelled "=" expSemi)
 
 
+{-| After a `word`/`int`/`bool`/`float`/`val` token: `[N]` turns the
+statement into an ARRAY BINDER (`word[5] a;`), anything else into the
+ordinary `ty id = e;` binder.  The peek is one character wide and both arms
+are committed, so no accepted parse moves (the corpus has no bracket after a
+type token — the 159/159 byte-identity gate is the proof).
+-}
+bindOrArray : Type -> ParserFast.Parser Stmt
+bindOrArray ty =
+    ParserFast.offsetSourceAndThen
+        (\offset src ->
+            if String.slice offset (offset + 1) src == "[" then
+                ParserFast.map3
+                    (\dims name init ->
+                        SArrayBind { aty = applyDims ty dims, name = name, init = init }
+                    )
+                    dimsSuffix
+                    surfaceName
+                    arrayInitTail
+
+            else
+                bindTail ty
+        )
+
+
+{-| The `;` / `= { .. };` tail of an ARRAY binder (B3).  Two arms only —
+ZEROED or the FULL list.  An array-to-array COPY (`word[N] b = a;`) is a
+parse reject naming why (it needs N unrolled element stores, a form nobody
+asked for), and it is refused HERE rather than at check time so the message
+can say what to write instead.
+-}
+arrayInitTail : ParserFast.Parser ArrayInit
+arrayInitTail =
+    ParserFast.offsetSourceAndThen
+        (\offset src ->
+            case String.slice offset (offset + 1) src of
+                ";" ->
+                    spelled ";" (succeed AInitZero)
+
+                "=" ->
+                    spelled "=" arrayInit
+
+                c ->
+                    ParserFast.problem
+                        ("expected `;` (zeroed storage) or `= { e1, e2, .. };` (the FULL element list), found `" ++ c ++ "`")
+        )
+
+
+{-| `{ e1, e2, .. };` — the FULL initialiser, comma-separated inside the
+braces and closed by the statement's `;`.  A SHORT list is admitted here and
+refused by `Check` (the count is a type fact), where the message can explain
+the garbage-tag reason; C's `{0}` shorthand is exactly a short list, so it is
+refused there too.
+-}
+arrayInit : ParserFast.Parser ArrayInit
+arrayInit =
+    ParserFast.offsetSourceAndThen
+        (\offset src ->
+            if String.slice offset (offset + 1) src == "{" then
+                ParserFast.map2
+                    (\els _ -> AInitFull els)
+                    (spelled "{" arrayElemList)
+                    (spelled ";" (succeed ()))
+
+            else
+                ParserFast.problem
+                    "an array initialiser is the FULL brace list `{ e1, e2, .. };` — a partial list (including C's `{0}`) is refused because zero-filling the elements you did not spell manufactures garbage-tag `val` handles (zero the whole array with the bare declaration, or `rawcall memset(base, 0, 40*N)`), and an array-to-array copy is not in v1"
+        )
+
+
+{-| `e1, e2, .. }` — the element list, entered after the `{` and closed by
+`}` (the same `argsInParens` shape, so a dropped comma inside is a COMMITTED
+failure and the empty list is a real (check-refused) list).
+-}
+arrayElemList : ParserFast.Parser (List Exp)
+arrayElemList =
+    ParserFast.oneOf2
+        (spelled "}" (succeed []))
+        (ParserFast.map2
+            (\els _ -> els)
+            (ParserFast.loopWhileSucceedsOntoResultFromParser
+                (spelled "," expression)
+                (ParserFast.map List.singleton expression)
+                (\e acc -> acc ++ [ e ])
+                identity
+            )
+            (spelled "}" (succeed ()))
+        )
+
+
 {-| `S s;` / `S s = { f = e; .. };` / `S s = other;` — the STRUCT-VALUE
 BINDER (B2, plan Q4), entered from `itemStepAt`'s Uppercase arm.  One
 statement, three initialisers (`Ast.StructInit`): the storage ALWAYS comes
@@ -2770,11 +2916,33 @@ twice, and `Mid` has no way to free the temporary.
 -}
 structBindStmt : ParserFast.Parser Stmt
 structBindStmt =
-    ParserFast.map3
-        (\sname name init -> SStructBind { sname = sname, name = name, init = init })
+    ParserFast.map2
+        (\sname mk -> mk sname)
         structName
-        surfaceName
-        structInitTail
+        (ParserFast.offsetSourceAndThen afterStructNameAt)
+
+
+{-| After the Uppercase token: `[N]` means an ARRAY of that struct
+(`S[4] tab;` / `S[4] tab = { .. };`), anything else the struct-VALUE binder
+B2 landed.  One peek, two committed arms — the token was already consumed by
+`structName`, so neither arm can be reached by accident.
+-}
+afterStructNameAt : Int -> String -> ParserFast.Parser (String -> Stmt)
+afterStructNameAt offset src =
+    if String.slice offset (offset + 1) src == "[" then
+        ParserFast.map3
+            (\dims name init sname ->
+                SArrayBind { aty = applyDims (TStruct sname) dims, name = name, init = init }
+            )
+            dimsSuffix
+            surfaceName
+            arrayInitTail
+
+    else
+        ParserFast.map2
+            (\name init sname -> SStructBind { sname = sname, name = name, init = init })
+            surfaceName
+            structInitTail
 
 
 {-| The `;` / `= ...` tail of a struct binder.  Peeking (rather than

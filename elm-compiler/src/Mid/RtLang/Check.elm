@@ -259,6 +259,7 @@ import Dict exposing (Dict)
 import Mid.RtLang.Ast
     exposing
         ( AggShape(..)
+        , ArrayInit(..)
         , Block
         , Decl(..)
         , Defun
@@ -857,6 +858,28 @@ fieldSize decls names seen structName ty =
         TStruct sname ->
             structSizeOf decls names seen sname
 
+        TArray elem n ->
+            -- B3: an array field is `n` contiguous copies of its element
+            -- (row-major flat, so a nested array is just its element's size
+            -- times its count).  `seen` rides through, so `struct S { t :
+            -- S[2]; }` is the same BY-VALUE CYCLE reject a direct field is.
+            if n <= 0 then
+                Err
+                    ("RtLang: J11: struct '"
+                        ++ structName
+                        ++ "' has an array field of length "
+                        ++ String.fromInt n
+                        ++ " — a fixed array's length is at least 1 (there is no storage to take the address of)"
+                    )
+
+            else
+                case fieldSize decls names seen structName elem of
+                    Err msg ->
+                        Err msg
+
+                    Ok w ->
+                        Ok (w * n)
+
         TFloat ->
             Err
                 ("RtLang: J11: struct '"
@@ -1145,6 +1168,15 @@ validateSig ctx params ret =
                     ++ "' out-parameter)"
                 )
 
+        TArray _ _ ->
+            Err
+                (ctx.key
+                    ++ ": J11: '-> "
+                    ++ typeStr ret
+                    ++ "' — an ARRAY RETURN is REJECTED in v1 (the ret path is one word; an array comes back through a caller-supplied '"
+                    ++ "*word` out-parameter or a heap array whose base is passed)"
+                )
+
         _ ->
             case validateType ctx ret of
                 Err msg ->
@@ -1175,6 +1207,16 @@ validateParams ctx params =
                             ++ ") — struct parameters by value are B6's job (the word-ABI flattening); pass a '*"
                             ++ sname
                             ++ "' today"
+                        )
+
+                TArray _ _ ->
+                    Err
+                        (ctx.key
+                            ++ ": J11: parameter '"
+                            ++ p.name
+                            ++ "' is an ARRAY VALUE ("
+                            ++ typeStr p.ty
+                            ++ ") — an array parameter by value is B6's job (the word-ABI flattening/spill); pass a `*word`/`*S` view of its base today"
                         )
 
                 _ ->
@@ -1219,6 +1261,26 @@ validateType ctx ty =
                             ++ sname
                             ++ "' names no declared struct — a struct VALUE must resolve in the file's struct table"
                         )
+
+        TArray elem n ->
+            if n <= 0 then
+                Err
+                    (ctx.key
+                        ++ ": J11: '"
+                        ++ typeStr (TArray elem n)
+                        ++ "' — a fixed array's length is at least 1 (a zero-length array has no storage, so no address and no elements)"
+                    )
+
+            else if elem == TFloat then
+                Err
+                    (ctx.key
+                        ++ ": J1: '"
+                        ++ typeStr (TArray elem n)
+                        ++ "' — a float array has no raw-memory seat (Mid.Ir has no f64 load/store node; the J11 float-field rule, same reason)"
+                    )
+
+            else
+                validateType ctx elem
 
         _ ->
             Ok ()
@@ -1357,6 +1419,9 @@ checkStmt ctx stmt =
 
         SStructBind rec ->
             checkStructBind ctx rec.sname rec.name rec.init
+
+        SArrayBind rec ->
+            checkArrayBind ctx rec.aty rec.name rec.init
 
         SVarStore name e ->
             checkVarStore ctx name e
@@ -1563,6 +1628,137 @@ initFieldsWalk ctx sname info name fields seen =
                                         )
 
 
+{-| B3 (plan Q5) — the ARRAY BINDER `word[N] a;` / `word[N] a = { e1, ..,
+eN };`.  Four judgments, all loud:
+
+  1. the type must be an ARRAY (`TArray`) — the arm is only reachable that
+     way, so a non-array here is a lowerer/parser drift, reported as such;
+  2. the type must VALIDATE (an unknown struct element, a zero length, a
+     float element — `validateType`'s arms);
+  3. `name` must be NEW (J5's strict-order rule: an array binder OWNS fresh
+     storage, so re-declaring one is a mistake, never an overwrite);
+  4. a FULL initialiser must have EXACTLY `n` elements, and each must COERCE
+     to the element class.  A SHORT (or long) list is the plan's PARTIAL
+     reject, with the reason in the message: zero-filling the elements the
+     program did not spell would put tag-0 handles in the `val` elements it
+     skipped — a garbage-tag trap manufactured by the compiler, which is
+     exactly what the bare declaration (a `memset`) does NOT do (it zeroes
+     all of them, visibly).
+
+A nested-array element cannot be initialised from a value (`{{1,2},{3,4}}` is
+not in this grammar): the reject names the leaves' spelling.
+-}
+checkArrayBind : Ctx -> Type -> String -> ArrayInit -> Result String Ctx
+checkArrayBind ctx aty name init =
+    case aty of
+        TArray elem n ->
+            case validateType ctx aty of
+                Err msg ->
+                    Err msg
+
+                Ok () ->
+                    if Dict.member name ctx.scope then
+                        Err
+                            (ctx.key
+                                ++ ": J5: '"
+                                ++ name
+                                ++ "' is already a binder in scope — a binder is a NEW id (shadowing is a rename, and an array binder OWNS fresh storage)"
+                            )
+
+                    else
+                        case init of
+                            AInitZero ->
+                                Ok { ctx | scope = Dict.insert name aty ctx.scope }
+
+                            AInitFull es ->
+                                if List.length es /= n then
+                                    Err
+                                        (ctx.key
+                                            ++ ": J11: '"
+                                            ++ name
+                                            ++ "' is a "
+                                            ++ typeStr aty
+                                            ++ " but the initialiser has "
+                                            ++ String.fromInt (List.length es)
+                                            ++ " element(s) — a PARTIAL initialiser is refused (C's `{0}` included): zero-filling the elements you did not spell puts tag-0 handles in the `val` elements it skipped, a garbage-tag trap manufactured by the compiler.  Zero the WHOLE array with the bare declaration (`"
+                                            ++ typeStr aty
+                                            ++ " "
+                                            ++ name
+                                            ++ ";` — a memset) or `rawcall memset(base, 0, 40*N)`, or spell every element"
+                                        )
+
+                                else
+                                    case arrayElemWalk ctx elem name es 0 of
+                                        Err msg ->
+                                            Err msg
+
+                                        Ok () ->
+                                            Ok { ctx | scope = Dict.insert name aty ctx.scope }
+
+        _ ->
+            Err
+                (ctx.key
+                    ++ ": an ARRAY binder needs an array type, got "
+                    ++ typeStr aty
+                    ++ " — the parser only produces this statement from `T[N] id`, so this is a lowering/checker drift"
+                )
+
+
+arrayElemWalk : Ctx -> Type -> String -> List Exp -> Int -> Result String ()
+arrayElemWalk ctx elem name es i =
+    case es of
+        [] ->
+            Ok ()
+
+        e :: rest ->
+            if elem == TFloat then
+                Err (ctx.key ++ ": J1: a float array element has no raw-memory seat")
+
+            else if isArrayTy elem then
+                Err
+                    (ctx.key
+                        ++ ": J11: element "
+                        ++ String.fromInt i
+                        ++ " of '"
+                        ++ name
+                        ++ "' — an ARRAY element cannot be initialised from a value ("
+                        ++ typeStr elem
+                        ++ " is itself an array): declare the array bare (zeroed) and store the leaves (`a[i][j] = e;`)"
+                    )
+
+            else
+                case checkExp ctx e of
+                    Err msg ->
+                        Err msg
+
+                    Ok cls ->
+                        if coerce elem cls then
+                            arrayElemWalk ctx elem name rest (i + 1)
+
+                        else
+                            Err
+                                (ctx.key
+                                    ++ ": J1: element "
+                                    ++ String.fromInt i
+                                    ++ " of '"
+                                    ++ name
+                                    ++ "' needs "
+                                    ++ typeStr elem
+                                    ++ ", got "
+                                    ++ typeStr cls
+                                )
+
+
+isArrayTy : Type -> Bool
+isArrayTy t =
+    case t of
+        TArray _ _ ->
+            True
+
+        _ ->
+            False
+
+
 {-| B2 — `s = other;` the aggregate COPY statement.  Only a struct-VALUE
 binder may be assigned (Mid binders are single-assignment: a `word`/`val`/
 pointer destination is a loud reject naming the rule), and the source must
@@ -1607,6 +1803,14 @@ checkVarStore ctx name e =
                             ++ typeStr cls
                             ++ " — a struct copy needs a struct VALUE of the same type"
                         )
+
+        Just (TArray _ _) ->
+            Err
+                (ctx.key
+                    ++ ": J1: '"
+                    ++ name
+                    ++ "' is an ARRAY VALUE — an array cannot be assigned whole (that is an element-wise copy, not in v1): store the elements (`a[i] = e;`)"
+                )
 
         Just cls ->
             Err
@@ -1668,8 +1872,18 @@ checkAddrOf ctx e =
                                     ++ "' — a val field has no raw address: exposing a GC-interior pointer as a word is the unrooted-view hazard (use vecaddr/payload, plan Q11)"
                                 )
 
-                        Just _ ->
-                            Ok (TPtr PWord)
+                        Just ty2 ->
+                            -- B3: an ARRAY field is a location too, and it
+                            -- decays to the pointer spelling of its element
+                            -- (`&s.tab` on `word[3]` is `*word`), exactly as
+                            -- the array value itself does.  Everything else is
+                            -- one word -> `*word` (B2's rule, unchanged).
+                            case decayTo ty2 of
+                                Just pty2 ->
+                                    Ok pty2
+
+                                Nothing ->
+                                    Ok (TPtr PWord)
 
         _ ->
             case checkExp ctx e of
@@ -1686,11 +1900,21 @@ checkAddrOf ctx e =
                         )
 
                 Ok cls ->
-                    Err
-                        (ctx.key
-                            ++ ": J13: '&' needs a struct value or a struct field with storage, got "
-                            ++ typeStr cls
-                            ++ " — a scalar local, a parameter and a temporary have no address in this lowering (a struct local (`S s;`) or a struct field is the memory-backed seat)")
+                    case decayTo cls of
+                        Just pty2 ->
+                            -- B3: `&a` on an ARRAY value is the IDENTITY — the
+                            -- value already IS the address of its storage, so
+                            -- the address-of node emits nothing (the same
+                            -- treatment `&s` gets, for the same reason).
+                            Ok pty2
+
+                        Nothing ->
+                            Err
+                                (ctx.key
+                                    ++ ": J13: '&' needs a struct value, an array value or a struct field with storage, got "
+                                    ++ typeStr cls
+                                    ++ " — a scalar local, a parameter and a temporary have no address in this lowering (a struct local (`S s;`), an array local (`word[N] a;`) or a struct field is the memory-backed seat)"
+                                )
 
 
 {-| J13 — `p->f = e;`: `p` must be a struct pointer, `f` a field of its
@@ -1750,6 +1974,49 @@ checkIndexStore ctx p i e =
     case checkExp ctx p of
         Err msg ->
             Err msg
+
+        Ok (TArray elem _) ->
+            -- B3: the same element judgment as `p[i] = e` on a pointer, over
+            -- the ARRAY's element type.  A nested-array element is the one
+            -- shape the store cannot express (`a[i] = b;` would need the N
+            -- unrolled element copies an array copy would need) — refused with
+            -- the leaves' spelling.
+            case validateType ctx elem of
+                Err msg ->
+                    Err msg
+
+                Ok () ->
+                    case wordIndex ctx i of
+                        Err msg ->
+                            Err msg
+
+                        Ok () ->
+                            case elem of
+                                TArray _ _ ->
+                                    Err
+                                        (ctx.key
+                                            ++ ": J13: an ARRAY element cannot be stored whole ("
+                                            ++ typeStr elem
+                                            ++ " is itself an array, so the store would be an element-wise copy): store the leaves (`a[i][j] = e;`)"
+                                        )
+
+                                _ ->
+                                    case checkExp ctx e of
+                                        Err msg ->
+                                            Err msg
+
+                                        Ok vcls ->
+                                            if coerce elem vcls then
+                                                Ok ctx
+
+                                            else
+                                                Err
+                                                    (ctx.key
+                                                        ++ ": J13: store to an array element needs "
+                                                        ++ typeStr elem
+                                                        ++ ", got "
+                                                        ++ typeStr vcls
+                                                    )
 
         Ok (TPtr pty) ->
             case wordIndex ctx i of
@@ -2342,6 +2609,26 @@ checkExp ctx e =
                 Err msg ->
                     Err msg
 
+                Ok (TArray elem _) ->
+                    -- B3: `a[i]` on an ARRAY VALUE.  The array's value IS its
+                    -- address (decay is free), the index is the same one
+                    -- integer class `wload` takes, and the READ's class is the
+                    -- ELEMENT type — which is what makes `a[i].f` (a struct
+                    -- element) and `m[i][j]` (a nested array element) compose
+                    -- through the ordinary field/index rules, no second
+                    -- judgment.
+                    case validateType ctx elem of
+                        Err msg ->
+                            Err msg
+
+                        Ok () ->
+                            case wordIndex ctx i of
+                                Err msg ->
+                                    Err msg
+
+                                Ok () ->
+                                    Ok elem
+
                 Ok (TPtr pty) ->
                     case wordIndex ctx i of
                         Err msg ->
@@ -2538,6 +2825,18 @@ sizeofWords ctx target =
 
                 TPtr _ ->
                     Ok 1
+
+                TArray elem n ->
+                    -- B3: `sizeof(word[5])` = 5, `sizeof(word[3][4])` = 12 —
+                    -- the element's width times the count, recursively.  This
+                    -- is the heap-array spelling (`rawcall malloc(8 *
+                    -- sizeof(word[N]))`), which is why it is here.
+                    case sizeofWords ctx (SizeType elem) of
+                        Err msg ->
+                            Err msg
+
+                        Ok w ->
+                            Ok (w * n)
 
                 TVal ->
                     Ok 5
@@ -2934,6 +3233,56 @@ bindRoots ids scope =
 -- ============================ J12: the coercion matrix ============================
 
 
+{-| B3 — the ARRAY VALUE's decay: the pointer type an array decays to, or
+`Nothing` for everything that is not an array.  Decay is FREE because an
+array's representation IS the address of its storage (Ast's `TArray` note), so
+this is a CLASS statement, not a conversion: no node is emitted anywhere the
+decay is admitted.
+
+`word`/`int`/pointer elements decay to `*word` (`*int` is the same family —
+B1's alias), `val` elements to `*val`, struct elements to `*S`.  A NESTED
+array decays to its ELEMENT's pointer (`word[3][4]` -> `*word`), which is what
+makes a multidimensional array passable as the flat row-major block it is.
+-}
+decayTo : Type -> Maybe Type
+decayTo t =
+    case t of
+        TArray TWord _ ->
+            Just (TPtr PWord)
+
+        TArray (TPtr _) _ ->
+            Just (TPtr PWord)
+
+        TArray TBool _ ->
+            Just (TPtr PWord)
+
+        TArray TVal _ ->
+            Just (TPtr PVal)
+
+        TArray (TStruct sname) _ ->
+            Just (TPtr (PStruct sname))
+
+        TArray inner _ ->
+            decayTo inner
+
+        _ ->
+            Nothing
+
+
+{-| Does `actual` DECAY to `expected`?  The one way an array reaches a
+pointer slot without a cast (`*word p = a;`, `f(a)` into a `*T` parameter) —
+the "decay-to-pointer is free" row of plan Q5.
+-}
+decays : Type -> Type -> Bool
+decays expected actual =
+    case decayTo actual of
+        Just p ->
+            p == expected
+
+        Nothing ->
+            False
+
+
 {-| The ONE-WAY coercion matrix (J12) — the `coerce expected actual`
 predicate a binder, store and return accept.  The legal movements:
 
@@ -2972,6 +3321,12 @@ coerce expected actual =
             ( TPtr PWord, TPtr (PStruct _) ) ->
                 True
 
+            ( TWord, TArray _ _ ) ->
+                -- B3: an array's value IS the address of its storage, so a
+                -- WORD slot takes it exactly as it takes a pointer (the
+                -- `*T -> word` row above, one step further out).
+                True
+
             ( TVal, TBool ) ->
                 True
 
@@ -2991,7 +3346,7 @@ coerce expected actual =
                 True
 
             _ ->
-                False
+                decays expected actual
 
 
 {-| The ARGUMENT-compatibility predicate behind `checkArgs` (J1/J2/J3/J4):
@@ -3007,12 +3362,19 @@ arithmetic operator uses.  That is what keeps `mkbool(a == b)` (the
 binder initialized from a compare legal and byte-identical.  It does NOT
 admit a bool where a `:val` is expected — that is the box and needs the
 spelling (`mkbool(..)` / `[val](b)`).
+
+B3 adds the DECAY row: an ARRAY argument passes where its element's pointer
+type is expected (`f(a)` into a `*word` parameter).  It is free — the array's
+value already is that address — so nothing is boxed or converted.
 -}
 argOk : Type -> Type -> Bool
 argOk expected actual =
     expected == actual
         || (expected == TWord && isPtr actual)
         || (expected == TWord && actual == TBool)
+        || (expected == TWord && isArrayTy actual)
+        || decays expected actual
+
 
 
 {-| The BUILTIN/operator argument predicate (`checkSig`): `argOk` plus the
@@ -3146,6 +3508,9 @@ typeStr t =
 
                 PVal ->
                     "*val"
+
+        TArray elem n ->
+            typeStr elem ++ "[" ++ String.fromInt n ++ "]"
 
 
 {-| Operator spellings for the J1 messages (checker-owned message text —

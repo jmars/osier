@@ -24,6 +24,7 @@ module Mid.RtLang.Ast exposing
     , Sig(..)
     , SizeTarget(..)
     , Stmt(..)
+    , ArrayInit(..)
     , StructInit(..)
     , Sym
     , Term(..)
@@ -133,6 +134,25 @@ what makes `s.f` and `p->f` (/`p.f`) the SAME lowering.  See `StructInit`
 and `TStruct` notes below for where the storage comes from and what a
 copy means.
 
+`TArray elem n` (B3, plan Q5) is the FIXED-SIZE ARRAY type — spelled
+`elem[n]` in the source, a TYPE like any other (`surfaceType`), so it
+composes: a binder (`word[5] a;`), a struct field (`tab : word[3];`), a
+`sizeof` operand (`sizeof(word[5])` = 5), and NESTED for the
+multidimensional case.  THE DECLARATOR IS THE TYPE, not C's suffix form:
+`word[3][4] a;` declares `a : word[3][4]`, i.e. `TArray (TArray TWord 4) 3`
+— three elements of `word[4]` each, ROW-MAJOR and flat (12 contiguous
+words).  C's `word a[3][4]` spelling is deliberately NOT the grammar; one
+spelling, and it is the one the type table reads.
+
+Its REPRESENTATION is one raw WORD — the ADDRESS of the storage — exactly
+like `TStruct`, which is what makes decay-to-pointer free (`*word p = a;`
+is a binder cast, `coerce`'s decay row) and what makes the element
+arithmetic the only scaling that exists in the language.  The index
+contract and the initialiser rules are on `ArrayInit` and `SArrayBind`
+below; the val-element obligation is plan §Q11's (raw memory holding
+40-byte handles — an unrooted handle across an allocating call is the
+hazard the B3 churn fixture makes visible).
+
 -}
 type Type
     = TWord
@@ -141,6 +161,7 @@ type Type
     | TVal
     | TPtr PTy
     | TStruct String
+    | TArray Type Int
 
 
 {-| The POINTEE of a pointer annotation (`*S` / `*word` / `*val`), the
@@ -506,6 +527,10 @@ through is a checker REJECT (J7), never a silent join.
     each lowers to.  It is a STATEMENT of its own (not an `SBind` with a
     `TStruct` type) because the ALLOCATION is the point: a struct binder
     is a fresh storage location, never a rename.
+  * `SArrayBind` — `word[N] a;` / `word[N] a = { e, .. };` (B3): the
+    FIXED-SIZE ARRAY binder.  Like `SStructBind` it is a statement of its
+    own because the ALLOCATION is the point (an array binder is fresh
+    storage, never a rename), and its two initialisers are `ArrayInit`'s.
   * `SVarStore` — `s = other;` (B2): aggregate ASSIGNMENT — the
     field-wise COPY into storage that already exists (plan Q4: "assignment
     `s2 = s1` lowers to field-wise loads/stores").  Legal ONLY where the
@@ -520,6 +545,7 @@ type Stmt
     | SFieldStore Exp String Exp
     | SIndexStore Exp Exp Exp
     | SStructBind { sname : String, name : String, init : StructInit }
+    | SArrayBind { aty : Type, name : String, init : ArrayInit }
     | SVarStore String Exp
 
 
@@ -540,6 +566,33 @@ type StructInit
     = InitZero
     | InitFields (List ( String, Exp ))
     | InitCopy Exp
+
+
+{-| B3 (plan Q5) — the TWO ways an array binder's storage is filled:
+
+  * `AInitZero` (`word[N] a;`) — allocated and ZEROED (`memset`, the same
+    rule and the same node `S s;` uses: uninitialised raw memory in a
+    language with no `unsafe` marker is a silent-wrong-value generator).
+  * `AInitFull [e1, .., eN]` (`word[N] a = { e1, .., eN };`) — allocated
+    then ONE STORE PER ELEMENT, in the order written.
+
+**A PARTIAL list is a CHECK REJECT, and `{0}` is a partial list.**  The
+plan's reason is exact and it is the message: zero-filling the elements
+you did not spell would put a `val` element at tag 0 (nil) — a handle that
+LOOKS valid and is not the one the program meant, i.e. a garbage-tag trap
+manufactured by the compiler.  Zero-init of the whole array is spelled by
+the declaration itself (`word[N] a;`, which memsets) or explicitly
+(`rawcall memset(base, 0, 40*N)`), never by a short literal.
+
+An array-to-array COPY (`word[N] b = a;`) is NOT in this grammar (the tail
+is a parse problem): it would need N unrolled element stores (a struct
+copy's word loop keyed by element class) and no user needed it — declare
+`word[N] b;` (zeroed) and store the elements.
+
+-}
+type ArrayInit
+    = AInitZero
+    | AInitFull (List Exp)
 
 
 {-| `TRet` is `return e;` (L3: the block's value).  `TRecur` is

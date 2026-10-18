@@ -113,6 +113,7 @@ import Mid.RtLang.Ast as Ast
 import Mid.RtLang.Ast
     exposing
         ( AggShape(..)
+        , ArrayInit(..)
         , Builtin(..)
         , Block
         , Decl(..)
@@ -570,6 +571,46 @@ lowerStmt st stmt cont =
                                             }
                                         )
 
+        SArrayBind rec ->
+            -- B3: the array-VALUE binder.  Storage FIRST (`arrayAlloc`), then
+            -- the initialiser's stores, then the binder and the continuation —
+            -- `Let a = <addr> in Let dead = <store> in ..`, exactly SStructBind's
+            -- shape (the address is a raw word binder; the STORES address the
+            -- BINDER, never the `malloc` expression, or they would fill a
+            -- second discarded block — the B2 bug its row now pins).
+            case arrayAlloc st rec.aty of
+                Err msg ->
+                    Err msg
+
+                Ok alloc ->
+                    let
+                        ( binder, st1 ) =
+                            fresh rec.name st
+
+                        st2 =
+                            { st1
+                                | scope = Dict.insert rec.name binder.id st1.scope
+                                , types = Dict.insert rec.name rec.aty st1.types
+                            }
+                    in
+                    case arrayInitNodes st2 rec.aty (Var binder.id) rec.init of
+                        Err msg ->
+                            Err msg
+
+                        Ok ( st3, stores ) ->
+                            case withStores "_arrayinit" st3 stores cont of
+                                Err msg ->
+                                    Err msg
+
+                                Ok ( st4, body ) ->
+                                    Ok
+                                        ( st4
+                                        , Let
+                                            { binders = [ LetBind { binder = binder, value = alloc } ]
+                                            , body = body
+                                            }
+                                        )
+
         SVarStore name e ->
             -- B2: `s = other;` — the aggregate COPY into storage that already
             -- exists.  The destination's address is its binder (a raw word).
@@ -597,6 +638,59 @@ lowerStmt st stmt cont =
             -- A2: `p[i] = e;` — the same dead-binder Let, index scaled by the
             -- pointee family (word stride: the index IS the word offset;
             -- `*S`: the index is a struct element, scaled by sizeof S).
+            -- B3 adds the ARRAY base (`a[i] = e;`), scaled by element size.
+            case maybeValueTy st p of
+                Just (TArray elem _) ->
+                    arrayIndexStoreStmt st p i e elem cont
+
+                _ ->
+                    indexStoreOnPointer st p i e cont
+
+
+{-| B3 — `a[i] = e;` on an ARRAY base: the store node, its dead binder, the
+continuation (the body of the pointer arm below, over the array's element
+class).
+-}
+arrayIndexStoreStmt : St -> Ast.Exp -> Ast.Exp -> Ast.Exp -> Ast.Type -> (St -> Result String (St, Exp)) -> Result String (St, Exp)
+arrayIndexStoreStmt st p i e elem cont =
+    case lowerExp st p of
+        Err msg ->
+            Err msg
+
+        Ok ( st1, p1 ) ->
+            case lowerExp st1 i of
+                Err msg ->
+                    Err msg
+
+                Ok ( st2, i1 ) ->
+                    case lowerExp st2 e of
+                        Err msg ->
+                            Err msg
+
+                        Ok ( st3, e1 ) ->
+                            let
+                                -- B1's box, at a `val` ELEMENT slot (the same
+                                -- rule the `*val` element store applies).
+                                e2 =
+                                    if elem == Ast.TVal && isBoolExp st3 e then
+                                        boolToVal e1
+
+                                    else
+                                        e1
+                            in
+                            case arrayElemStore st3 elem p1 i i1 e2 of
+                                Err msg ->
+                                    Err msg
+
+                                Ok stores ->
+                                    withStores "_indexstore" st3 stores cont
+
+
+{-| The pointer-base `p[i] = e;` arm (A2), unchanged — kept as its own
+function so the array arm above and this one share the statement shape.
+-}
+indexStoreOnPointer : St -> Ast.Exp -> Ast.Exp -> Ast.Exp -> (St -> Result String (St, Exp)) -> Result String (St, Exp)
+indexStoreOnPointer st p i e cont =
             case resolvePointee st p of
                 Err msg ->
                     Err msg
@@ -1190,11 +1284,13 @@ lowerExp st e =
             -- `vecload`.  `*S`: the index is a STRUCT ELEMENT, so the word
             -- offset is `i * sizeof S` (folded to `Lit (k*sizeofS)` for a
             -- literal index).
-            case resolvePointee st p of
-                Err msg ->
-                    Err msg
-
-                Ok pty ->
+            --
+            -- B3: when the base's declared VALUE type is an ARRAY, the same
+            -- node shapes are chosen by the ELEMENT type instead (stride =
+            -- the element's word width) — `arrayElemLoad`.  The dispatch is on
+            -- `maybeValueTy`, so every pre-B3 base falls through unchanged.
+            case maybeValueTy st p of
+                Just (TArray elem _) ->
                     case lowerExp st p of
                         Err msg ->
                             Err msg
@@ -1205,12 +1301,16 @@ lowerExp st e =
                                     Err msg
 
                                 Ok ( st2, i1 ) ->
-                                    case indexLoad st pty p1 i i1 of
+                                    case arrayElemLoad st elem p1 i i1 of
                                         Err msg ->
                                             Err msg
 
                                         Ok loadNode ->
                                             Ok ( st2, loadNode )
+
+                _ ->
+                    indexLoadOnPointer st p i
+
 
         Ast.EDeref p ->
             -- A2: `*p` is `*word` only (J13) -> `RawWordLoad { ptr = p,
@@ -1260,6 +1360,34 @@ lowerExp st e =
                 _ ->
                     lowerExp st inner
 
+
+
+{-| The pointer-base `p[i]` read (A2), unchanged — the arm body B3 could not
+destroy.
+-}
+indexLoadOnPointer : St -> Ast.Exp -> Ast.Exp -> Result String (St, Exp)
+indexLoadOnPointer st p i =
+            case resolvePointee st p of
+                Err msg ->
+                    Err msg
+
+                Ok pty ->
+                    case lowerExp st p of
+                        Err msg ->
+                            Err msg
+
+                        Ok ( st1, p1 ) ->
+                            case lowerExp st1 i of
+                                Err msg ->
+                                    Err msg
+
+                                Ok ( st2, i1 ) ->
+                                    case indexLoad st pty p1 i i1 of
+                                        Err msg ->
+                                            Err msg
+
+                                        Ok loadNode ->
+                                            Ok ( st2, loadNode )
 
 
 -- ============================ B1: bool, casts, sizeof ============================
@@ -1476,6 +1604,18 @@ sizeofWords st target =
 
                 Ast.TPtr _ ->
                     Ok 1
+
+                Ast.TArray elem n ->
+                    -- B3: the element's width times the count (row-major flat,
+                    -- so a nested array is its element's width again).  This is
+                    -- what sizes an array binder's malloc and the element
+                    -- strides below.
+                    case sizeofWords st (Ast.SizeType elem) of
+                        Err msg ->
+                            Err msg
+
+                        Ok w ->
+                            Ok (w * n)
 
                 Ast.TVal ->
                     Ok 5
@@ -2043,6 +2183,24 @@ resolvePointee st e =
                             ("needs a struct pointer, got *" ++ ptyStr pty ++ " — Check J13 must reject it first")
                         )
 
+        Ast.EIndex base _ ->
+            -- B3: `xs[i]` on an array of structs is a struct VALUE (the
+            -- element's address), so it is a legal field base — `xs[i].k` and
+            -- `xs[i].k = e` resolve here exactly as `s.k` does.  An array of
+            -- POINTERS (`*S[2]`) yields the pointee family the same way.
+            case maybeValueTy st base of
+                Just (TArray (TStruct sname) _) ->
+                    Ok (PStruct sname)
+
+                Just (TArray (TPtr pty) _) ->
+                    Ok pty
+
+                _ ->
+                    Err
+                        (internal st "a field base"
+                            "is an index whose element is not a struct (or a pointer) — Check J13 must reject it first"
+                        )
+
         Ast.EIf _ a _ ->
             -- the branches agree (J1), so the then-branch's pointee is the
             -- join's.
@@ -2155,6 +2313,12 @@ fieldLoad fty p1 off =
             Unsafe (RawVecLoad { vec = addrPlus p1 off, index = Lit (LNumber 0) })
 
         TStruct _ ->
+            addrPlus p1 off
+
+        TArray _ _ ->
+            -- B3: an ARRAY field's value is its ADDRESS (the array repr), so
+            -- the read is the field's location — no load, exactly the nested
+            -- struct's rule two lines up.
             addrPlus p1 off
 
         _ ->
@@ -2440,6 +2604,260 @@ initFieldsNodes st sname addr fields acc =
                                     initFieldsNodes st1 sname addr rest (acc ++ nodes)
 
 
+-- ==================== B3: ARRAY values (storage, stride, init) ====================
+
+
+{-| THE ONE PLACE ARRAY STORAGE IS ALLOCATED (B3) — `malloc(8 * words)`,
+`words` from the SAME width walk `sizeof` uses (`sizeofWords`), which is the
+same table `Check` laid out.
+
+MEASURED PREMISE CORRECTION (the plan, Q5/the brief: "fixed-size locals on
+stack memory (`allocN`, the seat `Il.Alloc` already provides)").  B2 already
+refuted it for structs and it is exactly as false for arrays: `Il.Alloc` is a
+tier BELOW this module (`Mid/Qbe/Il.elm`), and `Mid.Ir` — the IR this module
+emits — has NO frame-allocation node at all.  The plan itself puts the missing
+node (`RawAllocN`) in B4's row, not B3's.  So an array local is a C-heap block
+here: address-stable, invisible to the collector, never freed, and the one
+edit `arrayAlloc`/`structAlloc` share when B4 lands `RawAllocN`.
+-}
+arrayAlloc : St -> Ast.Type -> Result String Exp
+arrayAlloc st aty =
+    case sizeofWords st (Ast.SizeType aty) of
+        Err msg ->
+            Err msg
+
+        Ok words ->
+            if words <= 0 then
+                Err
+                    (internal st ("array value '" ++ typeStrOf aty ++ "'")
+                        "has no words — Check J11 must reject a zero-length array first"
+                    )
+
+            else
+                Ok (Unsafe (RawCallRaw { sym = "malloc", args = [ Lit (LNumber (8 * words)) ] }))
+
+
+{-| The ZEROED tail of `T[N] a;` — `memset(addr, 0, 8*words)`, the same rule
+and node `S s;` uses (uninitialised raw memory in a language with no `unsafe`
+marker is a silent-wrong-value generator).
+-}
+arrayZero : St -> Ast.Type -> Exp -> Result String Exp
+arrayZero st aty addr =
+    case sizeofWords st (Ast.SizeType aty) of
+        Err msg ->
+            Err msg
+
+        Ok words ->
+            Ok
+                (Unsafe
+                    (RawCallRaw
+                        { sym = "memset"
+                        , args = [ addr, Lit (LNumber 0), Lit (LNumber (8 * words)) ]
+                        }
+                    )
+                )
+
+
+{-| The store nodes one array initialiser needs, WITH the state its element
+expressions consumed (lowered in written order, like every other expression
+list).
+-}
+arrayInitNodes : St -> Ast.Type -> Exp -> ArrayInit -> Result String ( St, List Exp )
+arrayInitNodes st aty addr init =
+    case init of
+        AInitZero ->
+            case arrayZero st aty addr of
+                Err msg ->
+                    Err msg
+
+                Ok zero ->
+                    Ok ( st, [ zero ] )
+
+        AInitFull es ->
+            case aty of
+                TArray elem _ ->
+                    arrayElemStores st elem addr 0 es []
+
+                _ ->
+                    Err
+                        (internal st "an array initialiser"
+                            "on a non-array type — the parser only produces one from `T[N] id`, so this is a drift"
+                        )
+
+
+arrayElemStores : St -> Ast.Type -> Exp -> Int -> List Ast.Exp -> List Exp -> Result String ( St, List Exp )
+arrayElemStores st elem addr i es acc =
+    case es of
+        [] ->
+            Ok ( st, acc )
+
+        e :: rest ->
+            case lowerExp st e of
+                Err msg ->
+                    Err msg
+
+                Ok ( st1, e1 ) ->
+                    let
+                        e2 =
+                            if elem == Ast.TVal && isBoolExp st e then
+                                boolToVal e1
+
+                            else
+                                e1
+                    in
+                    case arrayElemStore st elem addr (Ast.EInt i) (Lit (LNumber i)) e2 of
+                        Err msg ->
+                            Err msg
+
+                        Ok nodes ->
+                            arrayElemStores st1 elem addr (i + 1) rest (acc ++ nodes)
+
+
+{-| ONE array element's store node(s): the element's AST index (`astI`) and
+its lowered form (`i1`) decide where, exactly as the read does:
+
+  * `val` -> `RawVecStore { vec = base, index = i }` — the backend's elemAddr
+    multiplies by 40, and a val array IS a run of 40-byte handles;
+  * struct -> an element COPY (the B2 word-for-word copy) into the element's
+    own address (`elemAddr`) — a one-word store of the address would be
+    silently wrong, the seam `fieldStoreNodes` closes for struct fields;
+  * word/pointer/bool -> one `RawWordStore` at `i * stride` words (stride 1
+    for every scalar class, so a literal index folds to the constant offset).
+
+The stride comes from `sizeofWords` (the ONE width walk).  A nested-array
+element cannot reach here — `Check` refuses to store or initialise one.
+-}
+arrayElemStore : St -> Ast.Type -> Exp -> Ast.Exp -> Exp -> Exp -> Result String (List Exp)
+arrayElemStore st elem base astI i1 e =
+    case elem of
+        Ast.TVal ->
+            Ok [ Unsafe (RawVecStore { vec = base, index = i1, value = e }) ]
+
+        Ast.TStruct sname ->
+            case sizeofWords st (Ast.SizeType elem) of
+                Err msg ->
+                    Err msg
+
+                Ok stride ->
+                    copyStores st sname 0 0 (elemAddr base astI i1 stride) e
+
+        Ast.TArray _ _ ->
+            Err
+                (internal st "an array element store"
+                    "whose element is itself an array — Check J13 must reject it first"
+                )
+
+        _ ->
+            case sizeofWords st (Ast.SizeType elem) of
+                Err msg ->
+                    Err msg
+
+                Ok stride ->
+                    Ok [ Unsafe (RawWordStore { ptr = base, index = scaledIndex astI i1 stride, value = e }) ]
+
+
+{-| `base + 8 * (i * stride)` — the ADDRESS of element `i` of a block whose
+element stride is `stride` WORDS.  A literal index folds into the constant
+(the plan §3 fold `scaledIndex` already does for pointer indices); a computed
+index is `base + (i * 8*stride)`.
+-}
+elemAddr : Exp -> Ast.Exp -> Exp -> Int -> Exp
+elemAddr base astI i1 stride =
+    case astI of
+        Ast.EInt k ->
+            addrPlus base (k * stride)
+
+        _ ->
+            Unsafe
+                (RawBin
+                    { op = RAdd
+                    , a = base
+                    , b = Unsafe (RawBin { op = RMul, a = i1, b = Lit (LNumber (8 * stride)) })
+                    }
+                )
+
+
+{-| The array element READ node, mirroring `arrayElemStore`:
+
+  * `val` -> `RawVecLoad` (the 40-byte handle read, VALUE-unit index);
+  * struct / nested array -> the element's ADDRESS (`elemAddr`, no load: the
+    element is a location, so `a[i].f` and `m[i][j]` compose);
+  * word/pointer/bool -> `RawWordLoad` at `i * stride` (stride 1 for every
+    scalar class, so the index IS the word offset — the `wload` contract).
+-}
+arrayElemLoad : St -> Ast.Type -> Exp -> Ast.Exp -> Exp -> Result String Exp
+arrayElemLoad st elem base astI i1 =
+    case elem of
+        Ast.TVal ->
+            Ok (Unsafe (RawVecLoad { vec = base, index = i1 }))
+
+        Ast.TStruct _ ->
+            case sizeofWords st (Ast.SizeType elem) of
+                Err msg ->
+                    Err msg
+
+                Ok stride ->
+                    Ok (elemAddr base astI i1 stride)
+
+        Ast.TArray _ _ ->
+            case sizeofWords st (Ast.SizeType elem) of
+                Err msg ->
+                    Err msg
+
+                Ok stride ->
+                    Ok (elemAddr base astI i1 stride)
+
+        Ast.TFloat ->
+            Err
+                (internal st "a float array element"
+                    "has no raw-memory seat — Check J1 must reject the array first"
+                )
+
+        _ ->
+            case sizeofWords st (Ast.SizeType elem) of
+                Err msg ->
+                    Err msg
+
+                Ok stride ->
+                    Ok (Unsafe (RawWordLoad { ptr = base, index = scaledIndex astI i1 stride }))
+
+
+{-| A place expression's VALUE type, when the lowerer can name it: a binder
+(`st.types`, which carries the declared classes of params and binders alike),
+a struct FIELD (via the struct table the checker laid out), and an ARRAY
+element (recursively).  `Nothing` when the form is outside this set — the
+caller then takes its pre-B3 path, so no accepted lowering moves.
+
+This is what routes `a[i]` to the ARRAY arithmetic (the base's type is a
+`TArray`) instead of the pointer arithmetic, and it is a pure read of
+declared types — no second class table.
+-}
+maybeValueTy : St -> Ast.Exp -> Maybe Ast.Type
+maybeValueTy st e =
+    case e of
+        Ast.EVar name ->
+            Dict.get name st.types
+
+        Ast.EField base f ->
+            case resolvePointee st base of
+                Ok (PStruct sname) ->
+                    fieldTyIn st.decls sname f
+
+                _ ->
+                    Nothing
+
+        Ast.EIndex base _ ->
+            case maybeValueTy st base of
+                Just (TArray elem _) ->
+                    Just elem
+
+                _ ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
 {-| Run a list of store nodes IN ORDER, each bound to its own fresh dead
 binder (L2's `(b 107, rStore ..)` shape — a store's result slot must be a
 valid binder even though nothing reads it), then the continuation.
@@ -2559,6 +2977,9 @@ typeStrOf ty =
 
         TPtr pty ->
             "*" ++ ptyStr pty
+
+        TArray elem n ->
+            typeStrOf elem ++ "[" ++ String.fromInt n ++ "]"
 
 
 
