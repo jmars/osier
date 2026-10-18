@@ -3237,6 +3237,73 @@ checks rt runtimeMidText =
                 False
         )
 
+    -- ==================== U7: runtime.mid's APPLY STATE + `:ret` layouts (midlang-u7) ====================
+    -- The same pins as U5/U6, for the two blocks the apply/tail family passes
+    -- around: read runtime.mid's OWN `struct ApplyState` / `struct Ret` — the
+    -- declarations the `sp->f` / `state->f` / `retbuf->f` accesses resolve
+    -- against — so a reordered, renamed or re-padded field fails HERE instead of
+    -- as a wrong `:ret` offset.  The expected numbers are the word slots the
+    -- code spelled as `wload(sp, k)` / `wstore(retbuf, k, v)` BEFORE the
+    -- re-spelling (the pre-U7 emission is the independent record of the mapping,
+    -- and the corpus gate holds the accesses to it).
+    --
+    -- WHY THIS BLOCK NEEDS THE PIN MORE THAN THE OTHER TWO: `struct Ret` is an
+    -- ABI in three directions (the builder here, Rt.bounceGo, and Lower's @ret
+    -- blit that moves all 80 bytes), and a swap of two same-typed words there
+    -- emits the SAME instruction SHAPE — the mutual-tail run would then chase a
+    -- code pointer read out of the wrong slot.  The round-trip is pinned here so
+    -- the failure is a red row, not a segfault.
+    , check "U7 LAYOUT PIN: runtime.mid's own `struct ApplyState` puts every field at the word slot the apply family used before the re-spelling (args 0, nargs 1, live 2, env 3)"
+        (let
+            d =
+                declsOf runtimeMidText
+
+            names =
+                [ "args", "nargs", "live", "env" ]
+         in
+         List.map (\n -> Check.fieldOffset d "ApplyState" n) names == List.map Just (List.range 0 3)
+        )
+    , check "U7 LAYOUT PIN: sizeof(ApplyState) == 4 words in runtime.mid's own declaration — the 32 bytes both wrappers malloc, with rt_root_push_value_array's `np` pointer at word 2 (`[word](state) + 16`) and the partial arm's rooted env at word 3 (`[word](sp) + 24`)"
+        (Check.sizeofStruct (declsOf runtimeMidText) "ApplyState" == Just 4)
+    , check "U7 LAYOUT PIN: runtime.mid's own `struct Ret` puts every field at the word slot the builder wrote and the chaser read before the re-spelling (result 0, kind 5, code 6, e 7, args 8, arity 9)"
+        (let
+            d =
+                declsOf runtimeMidText
+
+            names =
+                [ "result", "kind", "code", "e", "args", "arity" ]
+         in
+         List.map (\n -> Check.fieldOffset d "Ret" n) names == [ Just 0, Just 5, Just 6, Just 7, Just 8, Just 9 ]
+        )
+    , check "U7 LAYOUT PIN: sizeof(Ret) == 10 words = the 80 bytes Rt.tail-known/Rt.applyTailGo malloc and Lower's @ret blit moves — a `val` field is 5 words, so the `.done` payload is words 0..4 and the tail-call record 5..9.  A word added or dropped anywhere in the declaration moves this and the 80 in every `malloc(80)` is then a lie"
+        (Check.sizeofStruct (declsOf runtimeMidText) "Ret" == Just 10)
+    , check "U7 LAYOUT PIN: Ret.result is 5 words WIDE, not just at offset 0 (the field-width read, from the same one table): that width is what makes `malloc(80)` = sizeof(Ret) and what makes the `vecload(r, 0)` / `r->result` read the whole `.done` Value"
+        (Check.fieldWidth (declsOf runtimeMidText) "Ret" "result" == Just 5)
+    , check "U7 ACCEPT: the `:ret` builder/chaser shape is node-identical on the typed view — `*Ret r = payload(v, 0); r->kind = 1; r->code = wl; word k = r->kind; word f = r->code; rawcall rt_root_push_ptr([word](r) + 16); return r->result;` lowers canon-EQUAL to the word-spelled `word r = ...; wstore(r, 5, 1); wstore(r, 6, wl); word k = wload(r, 5); word f = wload(r, 6); rawcall rt_root_push_ptr(r + 16); return vecload(r, 0);` — the val field READ at offset 0 is `vecload(r, 0)` (`addrPlus p 0 = p`), the word field stores/loads are the same RawWord nodes, and `[word](r)` is J12's identity `*T -> word` view cast, which is why the word offsets and the temp numbering do not move"
+        (case
+            ( lowlModuleBody "struct Ret { result : val; kind : word; code : word; e : word; args : word; arity : word; }\ndefun Rt.r(v : val, wl : word) -> val {\n  *Ret r = payload(v, 0);\n  r->kind = 1;\n  r->code = wl;\n  word k = r->kind;\n  word f = r->code;\n  rawcall rt_root_push_ptr([word](r) + 16);\n  return r->result;\n}"
+            , lowlBody "defun Rt.r(v : val, wl : word) -> val {\n  word r = payload(v, 0);\n  wstore(r, 5, 1);\n  wstore(r, 6, wl);\n  word k = wload(r, 5);\n  word f = wload(r, 6);\n  rawcall rt_root_push_ptr(r + 16);\n  return vecload(r, 0);\n}"
+            )
+         of
+            ( Ok typed, Ok plain ) ->
+                canon typed == canon plain
+
+            _ ->
+                False
+        )
+    , check "U7 ACCEPT: the apply state's shape type-checks on the POINTER — the field stores (`state->args = ..`, `sp->env = env`, `sp->args = args + rem * 40`), the reload-after-alloc (`word env2 = sp->env`), the pointer at a builtin word slot (`mknum(state)`, `free(state)`) and the `[word](sp) + 24` / `[word](state) + 16` cast the root seats need all ACCOMPANIED the same nodes as their `wstore`/`wload` spelling"
+        (case
+            ( lowlModuleBody "struct ApplyState { args : word; nargs : word; live : word; env : word; }\ndefun Rt.a(v : val, args : word, nargs : word) -> val {\n  *ApplyState state = rawcall malloc(32);\n  state->args = args;\n  state->nargs = nargs;\n  state->live = nargs;\n  rawcall rt_root_push_value_array(args, [word](state) + 16);\n  rawcall free(state);\n  *ApplyState sp = payload(v, 0);\n  sp->env = sp->args;\n  word env2 = sp->env;\n  sp->args = env2 + 40;\n  sp->nargs = sp->nargs - 1;\n  rawcall rt_root_push_ptr([word](sp) + 24);\n  recur(mknum(sp), env2, nargs);\n}"
+            , lowlBody "defun Rt.a(v : val, args : word, nargs : word) -> val {\n  word state = rawcall malloc(32);\n  wstore(state, 0, args);\n  wstore(state, 1, nargs);\n  wstore(state, 2, nargs);\n  rawcall rt_root_push_value_array(args, state + 16);\n  rawcall free(state);\n  word sp = payload(v, 0);\n  wstore(sp, 3, wload(sp, 0));\n  word env2 = wload(sp, 3);\n  wstore(sp, 0, env2 + 40);\n  wstore(sp, 1, wload(sp, 1) - 1);\n  rawcall rt_root_push_ptr(sp + 24);\n  recur(mknum(sp), env2, nargs);\n}"
+            )
+         of
+            ( Ok typed, Ok plain ) ->
+                canon typed == canon plain
+
+            _ ->
+                False
+        )
+
     -- ==================== A2: the lowering (field/index/deref arms) ====================
     -- THE TREE-EQUALITY PIN is this unit's strongest oracle (plan §3, risk R1).
     -- A field access IS its `wload` spelling: the defun written with `p->f` and

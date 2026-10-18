@@ -94,6 +94,80 @@ struct FrameHdr {
   freeNext : word;
   _pad : word;
 }
+// THE APPLY STATE BLOCK LAYOUT (midlang-u7) — the name -> word-slot table for
+// the 32-byte cell Rt.apply/Rt.apply-tail malloc and Rt.applyGo/Rt.applyTailGo
+// read and re-write (the over-applied arm).  Before this struct those four
+// words were `wstore(state, k, v)` / `wload(sp, k)` constants; slots 0..3 are
+// MEASURED against every one of those accesses, and sizeof = 4 words = the 32
+// bytes both wrappers malloc.  TestMain's U7 rows pin this table to this
+// declaration.
+//
+//   slot 0  args    the caller's args array base — the ROOT_VALUE_ARRAY base
+//                   registered by
+//                   `rt_root_push_value_array(args, [word](state) + 16)`
+//   slot 1  nargs   the live args count; the over-applied arm RE-BINDS it (and
+//                   `args`) to the remaining args, then `recur`s
+//   slot 2  live    the element count the root SCAN reads, through the `np`
+//                   pointer at this word (`[word](state) + 16`): nargs at PUSH
+//                   time, deliberately NOT updated by the over-applied arm —
+//                   the registration keeps scanning the ORIGINAL range, whose
+//                   extra elements are live Values, so a superset is sound
+//   slot 3  env     the partial arm's staging copy of the applied closure's
+//                   env, rooted via `rt_root_push_ptr([word](sp) + 24)` and
+//                   RE-READ after the allocvec (the cStrFill lesson: the
+//                   allocvec may have scavenged it)
+struct ApplyState {
+  args : word;
+  nargs : word;
+  live : word;
+  env : word;
+}
+// THE 80-BYTE `:ret` LAYOUT (midlang-u7) — the Agg "ret" cell Rt.tail-known and
+// both Rt.applyTailGo arms malloc, and that Rt.bounce / Rt.bounceGo chase.  The
+// word offsets are an ABI in three directions at once: the builder (this file),
+// the chaser (Rt.bounceGo's rt_callN switch), and Lower's @ret block, which
+// blits all 80 bytes out of slot 0 and frees the block (P1a) — so no offset
+// here may move.  TestMain's U7 rows pin this table; the 1e6-hop mutual-tail
+// run is the behavioural half.
+//
+//   slot 0..4  result  the `.done` Value payload (a `val` field = 5 words);
+//                      read by the chaser as a VALUE (`vecload(r, 0)` — a val
+//                      field read at offset 0 is the same node).  WRITTEN
+//                      WORD-WISE at all three malloc sites (five zeroing
+//                      stores in the two tail arms, the five-word mkval payload
+//                      in the partial arm): that is a run of RawWordStores, NOT
+//                      a val field store, so those five lines keep the `wstore`
+//                      spelling — re-spelling them would emit a different node
+//                      sequence
+//   slot 5  kind   0 = `result` is the finished Value; 1 = words 6..9 are a
+//                  known tail call
+//   slot 6  code   the callee's code pointer (rt_callN's first argument)
+//   slot 7  e      the callee's env / captures pointer
+//   slot 8  args   the staged args array base (the static tsbuf or an allocvec)
+//   slot 9  arity  the callee's arity — the rt_callN switch in Rt.bounceGo
+struct Ret {
+  result : val;
+  kind : word;
+  code : word;
+  e : word;
+  args : word;
+  arity : word;
+}
+// THE APPLY DISPATCH-BLOCK LAYOUT (midlang-u7) — the four words Rt.callArity
+// reads out of its `disp` value's payload.  MEASURED against those reads
+// (fn@0, caps@1, buf@2, arity@3).  This view is a PREFIX of the storage and its
+// sizeof is NOT pinned: the block those reads were written for was a
+// `malloc(32)` in the applyGo/applyTailGo arms, and the P1d "mechanism (ii)"
+// rewrite (PERF-DEBT.md) deleted that writer — Rt.callArity is dead but not
+// pruned, so this is now a read-only view with no in-Mid builder.  It stays a
+// named word table rather than vanishing: the four offsets are what the dead
+// body means, and a future caller must build exactly this shape.
+struct Disp {
+  fn : word;
+  caps : word;
+  buf : word;
+  arity : word;
+}
 defun Rt.getpid(dummy : val) -> val {
   return mknum(rawcall getpid());
 }
@@ -3957,8 +4031,9 @@ defun Rt.main(argc : word, argv : word) -> word {
 // loop's current closure lives in its OWN (rooted) frame as a :val PARAM, not
 // in the malloc'd state block — the over arm re-binds it via `recur(.., res)`
 // so no raw store ever writes a Value into a non-GC buffer.  The state block
-// carries the raw words: [args | nargs | live | env_root].  The PARTIAL arm's
-// env_root dance (rootPushPtr + the RE-READ-AFTER-ALLOC, the cStrFill lesson)
+// carries the raw words — `struct ApplyState` (args/nargs/live/env) is the ONE
+// table for them, above.  The PARTIAL arm's env dance (rootPushPtr + the
+// RE-READ-AFTER-ALLOC, the cStrFill lesson)
 // is what keeps the applied-args/captures copy pointing at the POST-scavenge
 // env array.  The wrapper's `f` copy (vecload(fslot,0)) is NOT rooted: sound
 // only because no collect can run between the vecload and applyGo/applyTailGo's
@@ -3967,11 +4042,11 @@ defun Rt.main(argc : word, argv : word) -> word {
 // is a ROOTED frame param whose interior pointers the collector rewrites in
 // place.
 defun Rt.apply(fslot : word, args : word, nargs : word) -> val {
-  word state = rawcall malloc(32);
-  wstore(state, 0, args);
-  wstore(state, 1, nargs);
-  wstore(state, 2, nargs);
-  rawcall rt_root_push_value_array(args, state + 16);
+  *ApplyState state = rawcall malloc(32);
+  state->args = args;
+  state->nargs = nargs;
+  state->live = nargs;
+  rawcall rt_root_push_value_array(args, [word](state) + 16);
   val f = vecload(fslot, 0);
   val r = call Rt.applyGo(mknum(state), f);
   rawcall rt_root_pop();
@@ -3979,11 +4054,11 @@ defun Rt.apply(fslot : word, args : word, nargs : word) -> val {
   return r;
 }
 defun Rt.apply-tail(fslot : word, args : word, nargs : word) -> val {
-  word state = rawcall malloc(32);
-  wstore(state, 0, args);
-  wstore(state, 1, nargs);
-  wstore(state, 2, nargs);
-  rawcall rt_root_push_value_array(args, state + 16);
+  *ApplyState state = rawcall malloc(32);
+  state->args = args;
+  state->nargs = nargs;
+  state->live = nargs;
+  rawcall rt_root_push_value_array(args, [word](state) + 16);
   val f = vecload(fslot, 0);
   val r = call Rt.applyTailGo(mknum(state), f);
   rawcall rt_root_pop();
@@ -3991,14 +4066,14 @@ defun Rt.apply-tail(fslot : word, args : word, nargs : word) -> val {
   return r;
 }
 defun Rt.applyGo(state : val, f : val) -> val {
-  word sp = payload(state, 0);
+  *ApplyState sp = payload(state, 0);
   word code = payload(f, 0);
   word fn = wload(code, 0);
   word rem = payload32(f, 1);
   word env = payload(f, 2);
   word envlen = payload32(f, 3);
-  word args = wload(sp, 0);
-  word nargs = wload(sp, 1);
+  word args = sp->args;
+  word nargs = sp->nargs;
   if (tagis(f, 6) == 0) {
     call Rt.die(rawstr("qbe-rt: apply of a non-function value"));
     return mknil;
@@ -4023,10 +4098,10 @@ defun Rt.applyGo(state : val, f : val) -> val {
     } else {
       if (rem > nargs) {
         word total = napp + nargs + capslen;
-        wstore(sp, 3, env);
-        rawcall rt_root_push_ptr(sp + 24);
+        sp->env = env;
+        rawcall rt_root_push_ptr([word](sp) + 24);
         word envv = allocvec(total);
-        word env2 = wload(sp, 3);
+        word env2 = sp->env;
         call Rt.copyWords(envv, env2, napp * 5);
         call Rt.copyWords(envv + napp * 40, args, nargs * 5);
         call Rt.copyWords(envv + (napp + nargs) * 40, env2 + napp * 40, capslen * 5);
@@ -4036,22 +4111,22 @@ defun Rt.applyGo(state : val, f : val) -> val {
         word r = aggcall ret rawsym("rt_call2r")(fn, env, napp, args, rem);
         word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
         val res = vecload(v, 0);
-        wstore(sp, 0, args + rem * 40);
-        wstore(sp, 1, nargs - rem);
+        sp->args = args + rem * 40;
+        sp->nargs = nargs - rem;
         recur(mknum(sp), res);
       }
     }
   }
 }
 defun Rt.applyTailGo(state : val, f : val) -> val {
-  word sp = payload(state, 0);
+  *ApplyState sp = payload(state, 0);
   word code = payload(f, 0);
   word fn = wload(code, 0);
   word rem = payload32(f, 1);
   word env = payload(f, 2);
   word envlen = payload32(f, 3);
-  word args = wload(sp, 0);
-  word nargs = wload(sp, 1);
+  word args = sp->args;
+  word nargs = sp->nargs;
   if (tagis(f, 6) == 0) {
     call Rt.die(rawstr("qbe-rt: apply of a non-function value"));
     return mknil;
@@ -4071,10 +4146,10 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
       // adding a GC alloc AFTER this allocvec (or in the Lower @ret block)
       // breaks it SILENTLY — keep this arm alloc-free after the allocvec.
       word total = arity + capslen;
-      wstore(sp, 3, env);
-      rawcall rt_root_push_ptr(sp + 24);
+      sp->env = env;
+      rawcall rt_root_push_ptr([word](sp) + 24);
       word buf = allocvec(total);
-      word env2 = wload(sp, 3);
+      word env2 = sp->env;
       val chk = if (napp > 0) {
         if (env2 == 0) {
           call Rt.die(rawstr("qbe-rt: closure env missing for applied args"));
@@ -4090,58 +4165,58 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
       call Rt.copyWords(buf + arity * 40, env2 + napp * 40, capslen * 5);
       rawcall rt_root_pop();
       word e = payload((capslen > 0) ? mknum(buf + arity * 40) : mknum(0), 0);
-      word retbuf = rawcall malloc(80);
+      *Ret retbuf = rawcall malloc(80);
       wstore(retbuf, 0, 0);
       wstore(retbuf, 1, 0);
       wstore(retbuf, 2, 0);
       wstore(retbuf, 3, 0);
       wstore(retbuf, 4, 0);
-      wstore(retbuf, 5, 1);
-      wstore(retbuf, 6, fn);
-      wstore(retbuf, 7, e);
-      wstore(retbuf, 8, buf);
-      wstore(retbuf, 9, arity);
+      retbuf->kind = 1;
+      retbuf->code = fn;
+      retbuf->e = e;
+      retbuf->args = buf;
+      retbuf->arity = arity;
       return mknum(retbuf);
     } else {
       if (rem > nargs) {
         word total = napp + nargs + capslen;
-        wstore(sp, 3, env);
-        rawcall rt_root_push_ptr(sp + 24);
+        sp->env = env;
+        rawcall rt_root_push_ptr([word](sp) + 24);
         word envv = allocvec(total);
-        word env2 = wload(sp, 3);
+        word env2 = sp->env;
         call Rt.copyWords(envv, env2, napp * 5);
         call Rt.copyWords(envv + napp * 40, args, nargs * 5);
         call Rt.copyWords(envv + (napp + nargs) * 40, env2 + napp * 40, capslen * 5);
         rawcall rt_root_pop();
-        word retbuf = rawcall malloc(80);
+        *Ret retbuf = rawcall malloc(80);
         wstore(retbuf, 0, 6);
         wstore(retbuf, 1, code);
         wstore(retbuf, 2, rem - nargs);
         wstore(retbuf, 3, envv);
         wstore(retbuf, 4, total);
-        wstore(retbuf, 5, 0);
-        wstore(retbuf, 6, 0);
-        wstore(retbuf, 7, 0);
-        wstore(retbuf, 8, 0);
-        wstore(retbuf, 9, 0);
+        retbuf->kind = 0;
+        retbuf->code = 0;
+        retbuf->e = 0;
+        retbuf->args = 0;
+        retbuf->arity = 0;
         return mknum(retbuf);
       } else {
         word r = aggcall ret rawsym("rt_call2r")(fn, env, napp, args, rem);
         word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
         val res = vecload(v, 0);
-        wstore(sp, 0, args + rem * 40);
-        wstore(sp, 1, nargs - rem);
+        sp->args = args + rem * 40;
+        sp->nargs = nargs - rem;
         recur(mknum(sp), res);
       }
     }
   }
 }
 defun Rt.callArity(disp : val) -> val {
-  word dp = payload(disp, 0);
-  word code = wload(dp, 0);
-  word caps = wload(dp, 1);
-  word buf = wload(dp, 2);
-  word arity = wload(dp, 3);
+  *Disp dp = payload(disp, 0);
+  word code = dp->fn;
+  word caps = dp->caps;
+  word buf = dp->buf;
+  word arity = dp->arity;
   if (mkbool(arity == 0)) {
     word r = aggcall ret rawsym("rt_call0")(code, caps);
     word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
@@ -4294,8 +4369,8 @@ defun Rt.copyWordsGo(dst : word, src : word, cnt : word) -> word {
 //
 // Rt.bounce is a rawAbi WORD defun (one word param, the 80-byte :ret pointer)
 // whose RESULT is the 40-byte `.done` Value (Agg "val").  Its body is the
-// single-iteration fast path (kind==0 -> vecload the .done Value at words
-// 0-4) plus a hand-off to the :val self-tail loop Rt.bounceGo for an actual
+// single-iteration fast path (kind==0 -> the `result` Value, `struct Ret` above)
+// plus a hand-off to the :val self-tail loop Rt.bounceGo for an actual
 // tail chain (kind==1).  Rt.bounceGo dispatches one hop (aggcall :ret rt_callN
 // by arity — the callArityRet switch) and `recur`s on mknum(newRetPtr): the
 // SAME :val self-tail Rt.applyGo uses (recur needs the val path; the rawAbi
@@ -4311,37 +4386,37 @@ defun Rt.tail-known(code : word, argblock : word, nargs : word) -> val {
   word noStage = wload(g, 13);
   word buf = payload((mkbool(nargs <= 3) && mkbool(noStage == 0)) ? mknum(tsbuf) : mknum(allocvec(nargs)), 0);
   call Rt.copyWords(buf, argblock, nargs * 5);
-  word retbuf = rawcall malloc(80);
+  *Ret retbuf = rawcall malloc(80);
   wstore(retbuf, 0, 0);
   wstore(retbuf, 1, 0);
   wstore(retbuf, 2, 0);
   wstore(retbuf, 3, 0);
   wstore(retbuf, 4, 0);
-  wstore(retbuf, 5, 1);
-  wstore(retbuf, 6, code);
-  wstore(retbuf, 7, 0);
-  wstore(retbuf, 8, buf);
-  wstore(retbuf, 9, nargs);
+  retbuf->kind = 1;
+  retbuf->code = code;
+  retbuf->e = 0;
+  retbuf->args = buf;
+  retbuf->arity = nargs;
   return mknum(retbuf);
 }
-defun Rt.bounce(r : word) -> val {
-  word kind = wload(r, 5);
+defun Rt.bounce(r : *Ret) -> val {
+  word kind = r->kind;
   if (mkbool(kind == 0)) {
-    return vecload(r, 0);
+    return r->result;
   } else {
     return call Rt.bounceGo(mknum(r));
   }
 }
 defun Rt.bounceGo(r : val) -> val {
-  word rp = payload(r, 0);
-  word kind = wload(rp, 5);
+  *Ret rp = payload(r, 0);
+  word kind = rp->kind;
   if (mkbool(kind == 0)) {
-    return vecload(rp, 0);
+    return rp->result;
   } else {
-    word f = wload(rp, 6);
-    word e = wload(rp, 7);
-    word args = wload(rp, 8);
-    word arity = wload(rp, 9);
+    word f = rp->code;
+    word e = rp->e;
+    word args = rp->args;
+    word arity = rp->arity;
     if (mkbool(arity == 0)) {
       word rr = aggcall ret rawsym("rt_call0")(f, e);
       recur(mknum(rr));
