@@ -2683,16 +2683,21 @@ defun Rt.gcAllocGo(region : val, cls : val) -> val {
   word regionW = payload(region, 0);
   word table = wload(regionW, 1);
   word clsW = payload(cls, 0);
-  word head = wload(table, clsW);
-  if (mkbool(head == 0)) {
+  word n = wload(regionW, 12);
+  if (mkbool(clsW >= n)) {
     return mknum(0);
   } else {
-    word kind = wload(regionW, 8);
-    word count = wload(regionW, 9);
-    wstore(table, clsW, wload(head, 0));
-    wstore(head, -2, kind * 2 + clsW * 4);
-    wstore(head, -1, count);
-    return mknum(head);
+    word head = wload(table, clsW);
+    if (mkbool(head == 0)) {
+      return mknum(0);
+    } else {
+      word kind = wload(regionW, 8);
+      word count = wload(regionW, 9);
+      wstore(table, clsW, wload(head, 0));
+      wstore(head, -2, kind * 2 + clsW * 4);
+      wstore(head, -1, count);
+      return mknum(head);
+    }
   }
 }
 defun Rt.collect(dummy : val) -> val {
