@@ -72,5 +72,21 @@ esac
 
 # ---- .ssa -> .s -> binary ----
 "$ROOT/vendor/qbe/qbe" "$BASE.ssa" > "$BASE.s"
-cc "$BASE.s" "$RT" -o "$BASE" -lc
+
+# DEV-ONLY PROFILER (opt-in; the DEFAULT link is untouched).  QBE_PROF=1
+# adds tools/qbe/prof.c, a ~120-line sampling shim: setitimer(ITIMER_PROF) at
+# QBE_PROF_HZ (default 1000) writes the interrupted RIP into a ring from the
+# SIGPROF handler and dumps `pc count` lines at atexit.  Resolve them with
+# tools/qbe/prof-report.sh.  This box has no perf/gprof/valgrind, so this is
+# the only way to ask where a QBE artifact's CPU time goes.  Nothing in the
+# tree links it by accident: without QBE_PROF=1 this script's cc line is
+# byte-for-byte the one it always was.
+PROF_O=()
+if [ "${QBE_PROF:-0}" = 1 ]; then
+  PROF_O=("$OUTDIR/.prof.o")
+  cc -O2 -c "$ROOT/tools/qbe/prof.c" -o "${PROF_O[0]}" || {
+    echo "qbe-mk: QBE_PROF=1 but profiling shim failed to build" >&2; exit 1; }
+fi
+
+cc "$BASE.s" "$RT" "${PROF_O[@]}" -o "$BASE" -lc
 echo "$BASE"
