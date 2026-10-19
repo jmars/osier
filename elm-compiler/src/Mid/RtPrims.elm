@@ -511,9 +511,11 @@ helperDefuns rec =
     , seat "Rt.dgs" 1
     , seat "Rt.revGo" 2
     , seat "Rt.bytesOf" 2
+    , seat "Rt.bytesOfGo" 3
     , seat "Rt.numText" 1
     , seat "Rt.bytesToStr" 1
     , seat "Rt.countL" 1
+    , seat "Rt.countGo" 2
     , seat "Rt.fillGo" 3
       -- T12: cn2/appendL/symToStr/nameBytes/strOf moved to Mid/RtSource
       -- (the primCn coercion chain); their seats keep the list order.

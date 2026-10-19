@@ -1741,13 +1741,22 @@ lowerTail exp s =
             -- RawCall self-tail (zigretire stage 4): the collector's mark/sweep
             -- loops recurse through RawCall (Rt->Rt), and a 150k-deep list must
             -- not build 150k C frames.  When the call is THIS defun (the same
-            -- key s.defunKey names) and QBE_MIDGC=1, compile it as the in-frame
-            -- loop the `App` self-tail already gets (stage args, blit to the
-            -- param slots 2+i, jump @body).  Gated on midGc so the default emit
-            -- stays byte-identical (the pre-existing Rt helpers never put a
-            -- self-RawCall in tail position, but the gate keeps that a
-            -- non-assumption).
-            if s.midGc && call.sym == s.defunKey then
+            -- key s.defunKey names), compile it as the in-frame loop the `App`
+            -- self-tail already gets (stage args, blit to the param slots 2+i,
+            -- jump @body).
+            --
+            -- NOT gated on midGc.  It was, on the stated non-assumption that
+            -- "the pre-existing Rt helpers never put a self-RawCall in tail
+            -- position" — MEASURED FALSE (2026-10-19): Rt.fillGo (runtime.mid,
+            -- `return call Rt.fillGo(...)`) and ten more Rt helpers do exactly
+            -- that, so under the default emit they were a native `call` with a
+            -- 440-byte `alloc8` frame per iteration.  The seed-built compiler
+            -- then died SIGSEGV with rsp 8 B below the stack bottom inside
+            -- q_Rt.fillGo at the DEFAULT 8 MiB stack (and still at 64 MiB), on
+            -- a workload the JS compiler runs in 1.5 s: the scale wall was
+            -- stack depth.  A tail call is a tail call in either host mode, and
+            -- the loop is what midGc already emitted for these same defuns.
+            if call.sym == s.defunKey then
                 lowerSelfTail call.args s
 
             else

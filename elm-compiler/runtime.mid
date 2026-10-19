@@ -1169,11 +1169,27 @@ defun Rt.revGo(l : val, acc : val) -> val {
   return acc;
 }
 
+// Rt.bytesOf / Rt.countL are the bytes<->string walkers of the text path
+// (Rt.cn/Rt.cn2/Rt.bytesToStr), and as a plain build-up/`1 +` recursion their
+// depth is the LENGTH OF THE TEXT: one native frame per byte.  MEASURED
+// 2026-10-19 from a crash stack: the seed-built compiler printing ONE
+// 26 KB emitted defun had 26 061 q_Rt.countL frames live when it hit the
+// guard page at the default 8 MiB (fillGo's 440-byte frame reached the same
+// wall at 64 MiB), and the printed corpus contains a 672 628-byte defun.
+// Both are accumulators over `recur` — the tree's loop idiom (Rt.gcEnvNum:
+// state travels in the arguments) — so the walk costs O(1) native stack at
+// any text size.  bytesOfGo accumulates REVERSED and hands it to revGo,
+// which is itself a self-tail loop; countGo carries the length.
 defun Rt.bytesOf(s : val, i : val) -> val {
+  return call Rt.bytesOfGo(s, i, mknil);
+}
+
+defun Rt.bytesOfGo(s : val, i : val, acc : val) -> val {
   if (mkbool(payload(i, 0) >= len32(s))) {
-    return mknil;
+    return call Rt.revGo(acc, mknil);
+  } else {
+    recur(s, mknum(payload(i, 0) + 1), call Rt.cons(mknum(strbyte(s, payload(i, 0))), acc));
   }
-  return call Rt.cons(mknum(strbyte(s, payload(i, 0))), call Rt.bytesOf(s, mknum(payload(i, 0) + 1)));
 }
 
 defun Rt.numText(n : val) -> val {
@@ -1194,10 +1210,15 @@ defun Rt.bytesToStr(bs : val) -> val {
 }
 
 defun Rt.countL(l : val) -> val {
+  return call Rt.countGo(l, mknum(0));
+}
+
+defun Rt.countGo(l : val, n : val) -> val {
   if (mkbool(tagis(l, 5))) {
-    return mknum(0);
+    return n;
+  } else {
+    recur(vecload(payload(l, 0), 1), mknum(payload(n, 0) + 1));
   }
-  return mknum(payload(call Rt.countL(vecload(payload(l, 0), 1)), 0) + 1);
 }
 
 defun Rt.fillGo(l : val, bufN : val, i : val) -> val {

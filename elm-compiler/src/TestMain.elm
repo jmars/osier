@@ -84,10 +84,10 @@ checks rt runtimeMidText =
       -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
       -- the frameZero loop), so an empty or truncated load turns it RED,
       -- loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (279 defuns — GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (281 defuns — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 279
+                List.length ast == 281
 
             Err _ ->
                 False
@@ -899,8 +899,8 @@ checks rt runtimeMidText =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 253 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram rt True True True) == 253
+    , check "rt program: 255 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
+        (List.length (rtProgram rt True True True) == 255
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
@@ -6368,7 +6368,7 @@ checks rt runtimeMidText =
                 False
         )
     , check
-        "T17/T18/T20/T21/T22/T24 pipeline (the wave-9 + collector + never-scheduled + T24 key-set row, post-T24's one-hundred-sixty-two, + GC-ARC F1's two stats defuns = one-hundred-sixty-four, + stage 7 O3-fix's Rt.applyPartGo = one-hundred-sixty-five, + GC ARC unit 4's Rt.gcEnvNum = one-hundred-sixty-six, + GC ARC unit 1b's Rt.gcGrow = one-hundred-sixty-seven, + GC ARC unit 2's THREE verifier defuns Rt.gcVD/Rt.gcVerify/Rt.gcVerifyList = one-hundred-seventy): surf is Ok with EXACTLY the one-hundred-seventy migrated keys under the default flags — T24 added the LAST THREE wall-class holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd), so the DSL-bodied set is now EMPTY — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
+        "T17/T18/T20/T21/T22/T24 pipeline (the wave-9 + collector + never-scheduled + T24 key-set row, post-T24's one-hundred-sixty-two, + GC-ARC F1's two stats defuns = one-hundred-sixty-four, + stage 7 O3-fix's Rt.applyPartGo = one-hundred-sixty-five, + GC ARC unit 4's Rt.gcEnvNum = one-hundred-sixty-six, + GC ARC unit 1b's Rt.gcGrow = one-hundred-sixty-seven, + GC ARC unit 2's THREE verifier defuns Rt.gcVD/Rt.gcVerify/Rt.gcVerifyList = one-hundred-seventy, + prof-fixes unit 1's two STACK-DEPTH loop helpers Rt.countGo/Rt.bytesOfGo = one-hundred-seventy-two): surf is Ok with EXACTLY the one-hundred-seventy migrated keys under the default flags — T24 added the LAST THREE wall-class holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd), so the DSL-bodied set is now EMPTY — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
         (case rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
             Ok s ->
                 List.sort (Dict.keys s)
@@ -6378,12 +6378,12 @@ checks rt runtimeMidText =
                        , "Rt.apply-tail", "Rt.applyGo", "Rt.applyOneRedir", "Rt.applyPartGo", "Rt.applyRedirects", "Rt.applyTailGo", "Rt.asF"
                        , "Rt.assoc", "Rt.assocGo", "Rt.bitwise-and", "Rt.bitwise-not", "Rt.bitwise-or", "Rt.bitwise-shift-left"
                        , "Rt.bitwise-shift-right", "Rt.bitwise-shift-right-zf", "Rt.bitwise-xor", "Rt.bodyWriteGo", "Rt.bounce", "Rt.bounceGo"
-                       , "Rt.bytesBuild", "Rt.bytesEqGo", "Rt.bytesOf", "Rt.bytesToStr", "Rt.c-strlen", "Rt.cStrCopyGo"
+                       , "Rt.bytesBuild", "Rt.bytesEqGo", "Rt.bytesOf", "Rt.bytesOfGo", "Rt.bytesToStr", "Rt.c-strlen", "Rt.cStrCopyGo"
                        , "Rt.cStrEq", "Rt.cStrEqGo", "Rt.cStrEqLit", "Rt.cStrFill", "Rt.cStrLenGo", "Rt.callArity"
                        , "Rt.cd", "Rt.char-code", "Rt.childBuiltin", "Rt.childCd", "Rt.childPwd", "Rt.close"
                        , "Rt.closeCmdTmpfds", "Rt.closeOthersGo", "Rt.closePipeTmpfds", "Rt.closePipesGo", "Rt.closure", "Rt.closureFill"
                        , "Rt.cn", "Rt.cn2", "Rt.collect", "Rt.con", "Rt.conFill", "Rt.cons"
-                       , "Rt.cons?", "Rt.copyWords", "Rt.copyWordsGo", "Rt.countL", "Rt.deepEq", "Rt.dgs"
+                       , "Rt.cons?", "Rt.copyWords", "Rt.copyWordsGo", "Rt.countGo", "Rt.countL", "Rt.deepEq", "Rt.dgs"
                        , "Rt.die", "Rt.dieErr", "Rt.echoGo", "Rt.empty?", "Rt.emptylist", "Rt.envHome"
                        , "Rt.epArgvGo", "Rt.epChain", "Rt.epCmd", "Rt.epCount", "Rt.epCountStdin", "Rt.epElem"
                        , "Rt.epFreeArgv", "Rt.epFreeChains", "Rt.epFreeCmd", "Rt.epFreeCmds", "Rt.epFreeRedirs", "Rt.epNum"
@@ -6700,8 +6700,10 @@ checks rt runtimeMidText =
             , { key = "Rt.dgs", arity = 1 }
             , { key = "Rt.revGo", arity = 2 }
             , { key = "Rt.bytesOf", arity = 2 }
+            , { key = "Rt.bytesOfGo", arity = 3 }
             , { key = "Rt.numText", arity = 1 }
             , { key = "Rt.bytesToStr", arity = 1 }
+            , { key = "Rt.countGo", arity = 2 }
             , { key = "Rt.countL", arity = 1 }
             , { key = "Rt.fillGo", arity = 3 }
             , { key = "Rt.cn2", arity = 2 }
