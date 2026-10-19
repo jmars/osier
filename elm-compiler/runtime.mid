@@ -239,7 +239,7 @@ extern fstatat(dirfd : i32, path : ptr, buf : ptr, flag : i32) -> i32;
 //                       (marked + freedN == blocks in the swept range)
 //   slot 27  verify      QBE_MIDGC_VERIFY=1 (read ONCE by gcInit): after every
 //                       sweep, walk the heap and every free list and ASSERT the
-//                       invariants (Rt.gcVerify/Rt.gcVerifyLists).  Knob only.
+//                       invariants (Rt.gcVerify/Rt.gcVerifyList).  Knob only.
 //
 // THE TIMESTAMPS COST THREE vDSO clock reads PER COLLECT (no branch: the knob
 // only gates the PRINT — Rt.gcNumOut, from Rt.collect), because a collect is
@@ -4045,7 +4045,7 @@ defun Rt.gcVerify(p : val, n : val) -> val {
       call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V4: marked + freed != blocks; marked+freed = ")), mknum(tot), mknum(regW));
       return mknil;
     }
-    return call Rt.gcVerifyLists(mknum(0), mknum(0), mknum(nW));
+    return call Rt.gcVerifyList(mknum(wload(region->classTab, 0)), mknum(0), mknum(0));
   }
   word flags = wload(pw, -2);
   word cls = flags >> 2;
@@ -4072,23 +4072,16 @@ defun Rt.gcVerify(p : val, n : val) -> val {
   }
   return call Rt.gcVerify(mknum(pw + phys * 8), mknum(nW + 1));
 }
-// Rt.gcVerifyLists: one class at a time; `acc` is the running list length.
-defun Rt.gcVerifyLists(cls : val, acc : val, n : val) -> val {
-  word clsW = payload(cls, 0);
-  word accW = payload(acc, 0);
-  word glob = rawcall rt_glob_addr();
-  word regW = wload(glob, 0);
-  *Region region = regW;
-  if (mkbool(clsW >= region->numClass)) {
-    // V6: the lists hold every freed block and nothing else.
-    if (mkbool(accW != region->freedN)) {
-      call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V6: the free lists hold a different number of blocks than the sweep freed: ")), mknum(accW), mknum(regW));
-      return mknil;
-    }
-    return mknil;
-  }
-  return call Rt.gcVerifyList(mknum(wload(region->classTab, clsW)), mknum(clsW), mknum(accW));
-}
+// Rt.gcVerifyList: THE FREE-LIST WALK, one defun and one class at a time.
+// `node` 0 means "this list ended, step to the next class"; `acc` is the
+// running total.  SELF-RECURSION ONLY, and that is load-bearing: the lowerer
+// turns `return call Rt.<self>(..)` into a `jmp @body` (MEASURED in the
+// emitted .ssa — that is how Rt.gcSweep walks millions of blocks on one
+// frame), so the class loop and the list walk cost ONE frame.  The first
+// version of this split the two into MUTUALLY recursive defuns
+// (gcVerifyLists/gcVerifyList) and SEGFAULTED on a 4 GB ceiling, where
+// numClass is ~131 000: mutual recursion cannot be a jump, so the chain ran
+// the C stack out.  report: probe-midgc-verify.sh arm 4 at QBE_MIDGC_MAXMB=4096.
 defun Rt.gcVerifyList(node : val, cls : val, acc : val) -> val {
   word nd = payload(node, 0);
   word clsW = payload(cls, 0);
@@ -4097,7 +4090,16 @@ defun Rt.gcVerifyList(node : val, cls : val, acc : val) -> val {
   word regW = wload(glob, 0);
   *Region region = regW;
   if (mkbool(nd == 0)) {
-    return call Rt.gcVerifyLists(mknum(clsW + 1), mknum(accW), mknum(region->freedN));
+    word next = clsW + 1;
+    if (mkbool(next >= region->numClass)) {
+      // V6: the lists hold every freed block and nothing else.
+      if (mkbool(accW != region->freedN)) {
+        call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V6: the free lists hold a different number of blocks than the sweep freed: ")), mknum(accW), mknum(regW));
+        return mknil;
+      }
+      return mknil;
+    }
+    return call Rt.gcVerifyList(mknum(wload(region->classTab, next)), mknum(next), mknum(accW));
   }
   // V6: BOUND the walk — a cycle terminates as a named failure, not a hang.
   if (mkbool(accW >= region->freedN)) {

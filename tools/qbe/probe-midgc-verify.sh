@@ -131,6 +131,24 @@ else
   echo "NOTE (5): no collect happened in the stats arm — the cost arm is vacuous at this heap, not a failure"
 fi
 
+# ---- arm 6: the verifier's own STACK, at a ceiling with ~131 000 classes ---
+# The walkers must be SELF-recursive (the lowerer turns `return call self(..)`
+# into `jmp @body`); the first version split the class loop and the list walk
+# into two MUTUALLY recursive defuns, and at a 4 GB ceiling (numClass ~131 000)
+# that chain ran the C stack out — a SIGSEGV inside the FORENSIC instrument, the
+# one failure mode that must never happen.  This arm is the regression guard:
+# it is a plain run with VERIFY on, and the assertion is that it does not die.
+run 0 QBE_MIDGC_VERIFY=1 QBE_MIDGC_MAXMB=4096
+scale_rc="$STATUS"
+scale_out="$(cat "$WORK/out")"
+if [ "$scale_rc" -eq 0 ] && [ "$scale_out" = "$GOLDEN" ]; then
+  echo "PASS (6): the verifier survives a 4 GB CEILING (~131 000 size classes, so the class loop is 131 000 iterations on ONE frame) and still prints the golden"
+elif [ "$scale_rc" -eq 139 ]; then
+  fail "the verifier SEGFAULTED at QBE_MIDGC_MAXMB=4096 — the walkers have gone mutually recursive again (they must be self-recursive: only that form lowers to a jump)"
+else
+  fail "mode 0 under VERIFY at a 4 GB ceiling printed '$scale_out' (exit $scale_rc), want the golden $GOLDEN"
+fi
+
 if [ "$rc" -eq 0 ]; then
   echo "PASS: every invariant NAMED its failure, and the one that needs the post-collect walk (V2)"
   echo "      is SILENT without QBE_MIDGC_VERIFY=1 — the instruments are live, not decorative."
