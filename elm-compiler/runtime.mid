@@ -217,6 +217,30 @@ extern fstatat(dirfd : i32, path : ptr, buf : ptr, flag : i32) -> i32;
 //                       the reserve past the limit was never handed out, so a
 //                       garbage pointer must not be allowed to mark into it.
 //
+//   ---- THE BLOCK MAP + VERIFY (GC ARC unit 2, slots 25..27) ----------
+//   slot 25  bmPtr      the BLOCK MAP: one BYTE per 64-byte minimum block,
+//                       carved from the same mmap between the class table and
+//                       the heap, sized for the CEILING (capBytes/64).  It is
+//                       the collector's own record of WHERE THE BLOCKS ARE,
+//                       and it is the only structure that makes "is this
+//                       pointer the beginning of an object?" a decidable,
+//                       O(1) question:
+//                         0 = not a block start
+//                         1 = a block start, LIVE (or on the bump path)
+//                         2 = a block start, ON A FREE LIST (freed, not reused)
+//                       A byte rather than a bitmap on purpose: no shift, no
+//                       read-modify-write, one bytestore on the bump path
+//                       (reuse keeps the entry; nothing moves, so a block start
+//                       is a PERMANENT property of the address).  The marker,
+//                       the sweeper and the verifier all read it, which is what
+//                       makes them agree on what a block is.
+//   slot 26  freedN      blocks the LAST sweep linked onto a free list — the
+//                       O(1) half of the verifier's exactly-once accounting
+//                       (marked + freedN == blocks in the swept range)
+//   slot 27  verify      QBE_MIDGC_VERIFY=1 (read ONCE by gcInit): after every
+//                       sweep, walk the heap and every free list and ASSERT the
+//                       invariants (Rt.gcVerify/Rt.gcVerifyLists).  Knob only.
+//
 // THE TIMESTAMPS COST THREE vDSO clock reads PER COLLECT (no branch: the knob
 // only gates the PRINT — Rt.gcNumOut, from Rt.collect), because a collect is
 // already an O(heap) walk and the alternative is a knob-read in the hot path.
@@ -256,6 +280,9 @@ struct Region {
   markUs : word;
   sweepUs : word;
   capEnd : word;
+  bmPtr : word;
+  freedN : word;
+  verify : word;
 }
 // THE FRAME HEADER LAYOUT (midlang-u6) — the name -> word-slot table.  Before
 // this struct frameBlock/frame-enter/frame-leave spelled the header as
@@ -3356,6 +3383,13 @@ defun Rt.gcInit(dummy : val) -> val {
     // stale pointer cannot alias a live object.  Knob only — the environment
     // is not consulted per allocation.
     word noreuseKnob = rawcall getenv(rawstr("QBE_MIDGC_NOREUSE"));
+    // QBE_MIDGC_VERIFY (GC ARC unit 2): read ONCE here, stored in the region's
+    // slot 27.  Nonzero = after EVERY sweep, verify the collector's invariants
+    // (Rt.gcVerify).  The per-pointer invariants (block start / not freed) are
+    // checked in EVERY build — they are two map reads and they turn silent
+    // corruption into a named fatal — this knob adds the O(heap) post-collect
+    // walk that no default run can afford.
+    word verifyKnob = rawcall getenv(rawstr("QBE_MIDGC_VERIFY"));
     word heapBytes = rawcall rt_gc_heap_bytes();
     // THE HEAP CEILING (GC ARC unit 4).  `heapBytes` is the INITIAL heap, not
     // the heap — the same semantics the Zig arm gives the same knob
@@ -3394,14 +3428,25 @@ defun Rt.gcInit(dummy : val) -> val {
     word capWords = capBytes / 8;
     word markEnd = 64 + capWords / 8 + 64;
     word numClasses = 1 + payload((capWords <= 4096) ? mknum((capWords + 7) / 8) : mknum(512 + (capWords - 4096 + 4095) / 4096), 0);
-    word regionSize = markEnd * 8 + numClasses * 8 + 16 + capBytes;
+    // THE BLOCK MAP (GC ARC unit 2, slot 25): one BYTE per 64-byte minimum
+    // block, also sized for the CEILING.  It sits between the class table and
+    // the heap, in the same mmap, and it is what lets the marker, the sweeper
+    // and the verifier agree on WHERE THE BLOCKS ARE — a question the flags
+    // word alone cannot answer for an interior pointer: reading `p-2` at a
+    // non-start address returns another block's body word, and writing the
+    // mark bit there CORRUPTS IT.  Cost: capBytes/512 bytes of VAS at 8-byte
+    // granularity (2 MB at a 128 MB ceiling), of which only the pages covering
+    // the reached frontier are ever touched.
+    word bmBytes = capBytes / 64;
+    word regionSize = markEnd * 8 + numClasses * 8 + 16 + bmBytes + capBytes;
     word base = rawcall mmap(0, regionSize, 3, 34, -1, 0);
     if (mkbool(base < 0)) {
       call Rt.die(rawstr("qbe-rt: midgc: mmap failed"));
       return mknil;
     } else {
       word classTable = base + markEnd * 8;
-      word heapStart = classTable + numClasses * 8 + 16;
+      word bmPtr = classTable + numClasses * 8 + 16;
+      word heapStart = bmPtr + bmBytes;
       // capEnd is the CEILING; heapEnd is the CURRENT limit, which starts at
       // the initial heap and is raised by Rt.gcAlloc's growth step.
       word capEnd = heapStart + capBytes;
@@ -3447,6 +3492,9 @@ defun Rt.gcInit(dummy : val) -> val {
       wstore(base, 11, 0);
       wstore(base, 12, numClasses);
       wstore(base, 24, capEnd);
+      wstore(base, 25, bmPtr);
+      wstore(base, 26, 0);
+      wstore(base, 27, payload((verifyKnob != 0) ? mknum(1) : mknum(0), 0));
       return mknum(base);
     }
   }
@@ -3505,6 +3553,11 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
     if (mkbool(cursor + phys * 8 < heapEnd)) {
       wstore(cursor, -2, kindW * 2 + cls * 4);
       wstore(cursor, -1, countW);
+      // THE BLOCK MAP IS WRITTEN ON THE BUMP PATH ONLY (GC ARC unit 2): a block
+      // start is a PERMANENT property of the address in a non-moving collector,
+      // so a free-list pop (Rt.gcAllocGo) only flips the byte back to LIVE, and
+      // the sweep flips it to FREED.  One division and one byte store.
+      bytestore(regionW->bmPtr + (cursor - regionW->heapStart) / 64, 0, 1);
       regionW->cursor = cursor + phys * 8;
       regionW->allocated = regionW->allocated + phys * 8;
       return mknum(cursor);
@@ -3542,6 +3595,7 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
         if (mkbool(cursor + phys * 8 < regionW->heapEnd)) {
           wstore(cursor, -2, kindW * 2 + cls * 4);
           wstore(cursor, -1, countW);
+          bytestore(regionW->bmPtr + (cursor - regionW->heapStart) / 64, 0, 1);
           regionW->cursor = cursor + phys * 8;
           regionW->allocated = regionW->allocated + phys * 8;
           return mknum(cursor);
@@ -3618,6 +3672,8 @@ defun Rt.gcAllocGo(region : val, cls : val) -> val {
       wstore(table, clsW, wload(head, 0));
       wstore(head, -2, kind * 2 + clsW * 4);
       wstore(head, -1, count);
+      // the block start is permanent; only its STATE flips (GC ARC unit 2)
+      bytestore(regionW->bmPtr + (head - regionW->heapStart) / 64, 0, 1);
       return mknum(head);
     }
   }
@@ -3634,6 +3690,7 @@ defun Rt.collect(dummy : val) -> val {
       rawcall clock_gettime(1, [word](region) + 104);
       region->markTop = 64;
       region->marked = 0;
+      region->freedN = 0;
       // THE BUDGET RESET BELONGS TO THE COLLECT (GC ARC unit 1b): every caller
       // that collects must also start the trigger's window over, and a caller
       // reaching the collect through a CONDITIONAL VALUE (gcAlloc's trigger)
@@ -3644,6 +3701,10 @@ defun Rt.collect(dummy : val) -> val {
       rawcall clock_gettime(1, [word](region) + 120);
       call Rt.gcClearClasses(mknum(0));
       call Rt.gcSweep(mknum(region->heapStart));
+      // THE POST-COLLECT VERIFIER (GC ARC unit 2, QBE_MIDGC_VERIFY=1): the
+      // O(heap) invariant walk.  Conditional VALUE, the same join-free spelling
+      // as the trigger above — the effect is in one arm, `mknil` in the other.
+      word ver = payload((region->verify != 0) ? call Rt.gcVerify(mknum(region->heapStart), mknum(0)) : mknil, 0);
       rawcall clock_gettime(1, [word](region) + 136);
       region->collects = region->collects + 1;
       region->sweptBytes = region->cursor - region->heapStart;
@@ -3800,6 +3861,12 @@ defun Rt.gcSweep(cursor : val) -> val {
     } else {
       wstore(cursorW, 0, wload(table, cls));
       wstore(table, cls, cursorW);
+      // FREE it in the block map and COUNT it (GC ARC unit 2): the marker reads
+      // the state, so a stale pointer to this block is refused by name instead
+      // of being marked (which would push the free-list LINK as if it were a
+      // value and write a flags word into whatever block the garbage tag led to).
+      bytestore(region->bmPtr + (cursorW - region->heapStart) / 64, 0, 2);
+      region->freedN = region->freedN + 1;
       return call Rt.gcSweep(mknum(cursorW + phys * 8));
     }
   }
@@ -3823,7 +3890,43 @@ defun Rt.gcMarkPtr(p : val) -> val {
   *Region region = wload(glob, 0);
   word heapStart = region->heapStart;
   word heapEnd = region->heapEnd;
+  word regW = [word](region);
   if (mkbool(ptr != 0) && (mkbool(ptr >= heapStart) && mkbool(ptr < heapEnd))) {
+    // ---- THE BLOCK-START INVARIANT (GC ARC unit 2, EVERY build) ----------
+    // A heap pointer handed to the marker is either the beginning of a block
+    // or a bug.  `wload(p, -2)` is only a HEADER at a block start: at an
+    // interior address it is another object's body word, and writing the mark
+    // bit there corrupts that object — the M2 mechanism gc-plan §4.3 names
+    // ("the block can end up simultaneously on a free list and marked").  The
+    // map (slot 25) decides it in O(1), and the answer is DIE, not "skip":
+    // skipping would leak a live object and re-hide a use-after-free.  The
+    // named offsets are the whole diagnosis: the collect number says WHEN, the
+    // heap offset says WHERE, and the state says WHAT (0 = interior, 2 = fired).
+    word off = ptr - heapStart;
+    word idx = off / 64;
+    word state = byteload(region->bmPtr + idx, 0);
+    word stateW = payload((state == 0) ? mknum(0) : mknum(state), 0);
+    // The map is COARSE (one byte per 64-byte minimum block), so a start is
+    // `state != 0` AND an offset that is a whole number of map slots: every
+    // block size is a multiple of 64 bytes (class 1 = 8 words, and the >512
+    // ladder is 4096-word granular), so a real start always satisfies BOTH.
+    // Without the second test an INTERIOR pointer that stays inside the first
+    // 64-byte slot of a block would read its block's own entry and pass.
+    if (mkbool(stateW == 0) || mkbool(idx * 64 != off)) {
+      call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY: mark of a NON-BLOCK-START pointer at heap offset ")), mknum(ptr - heapStart), mknum(regW));
+      return mknil;
+    }
+    // A pointer to a FREED block is a STALE pointer: the program holds a
+    // handle the collector already reclaimed.  Marking it would resurrect a
+    // block whose word 0 is the free-list LINK — the marker would then read a
+    // junk tag out of that link and mark a pointer that is nowhere near an
+    // object.  This is the invariant that makes a use-after-free LOUD at the
+    // moment of the collect instead of plausible-silent (and, in the compiler's
+    // own selfhost run, 40 minutes later at a random instruction).
+    if (mkbool(stateW == 2)) {
+      call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY: mark of a pointer to a FREED block at heap offset ")), mknum(ptr - heapStart), mknum(regW));
+      return mknil;
+    }
     word flags = wload(ptr, -2);
     word marked = flags & 1;
     word top = region->markTop;
@@ -3887,6 +3990,134 @@ defun Rt.gcMarkValue(vaddr : val) -> val {
     }
   }
 }
+// ==================== THE VERIFIER (GC ARC unit 2) ====================
+// QBE_MIDGC_VERIFY=1 turns these on: after EVERY sweep, walk the swept range
+// and every free list and assert the invariants the collector's correctness
+// rests on.  This is the STRUCTURAL instrument; the two per-pointer invariants
+// in Rt.gcMarkPtr fire in every build (they are two map reads), while this walk
+// is O(heap) and therefore a knob.
+//
+// The invariants, and the failure each one NAMES:
+//   V1  every block in [heapStart, cursor) has a block-map ENTRY (1 or 2) —
+//       the sweeper's advance and the allocator's record of block starts agree.
+//       A block with no entry means the sweep is standing at an address the
+//       allocator never handed out: the class in the flags word has been
+//       corrupted (a body write into a header), or the advance has drifted.
+//   V2  the walk LANDS EXACTLY ON THE CURSOR — the block partition tiles the
+//       swept range with no gap and no overlap.
+//   V3  no block in the swept range is still MARKED — the sweep cleared every
+//       bit it set, so the next collect starts from a clean state.
+//   V4  marked + freedN == the number of blocks — EVERY block is either live or
+//       exactly once on a free list.  A block counted twice (a double push, a
+//       duplicate list insert) or a block counted zero times fails here.
+//   V5  every free-list link is a block start, is in the state FREE, and sits
+//       on the list for ITS OWN class — a list cannot be walked into a live
+//       body, and a block cannot migrate between classes.
+//   V6  the lists hold exactly freedN blocks, each walked with that total as a
+//       BOUND — a cycle in a free list terminates as a named failure, not a
+//       hang.
+// Costs one extra pass over the frontier and over the freed blocks per collect.
+defun Rt.gcVD(what : val, where : val, region : val) -> val {
+  call Rt.gcNumOut(what, where, region);
+  call Rt.gcNumOut(mknum(rawstr(" (collect ")), mknum(wload(payload(region, 0), 19)), region);
+  rawcall write(2, rawstr(")\n"), 2);
+  call Rt.die(rawstr("qbe-rt: midgc: VERIFY FAILED"));
+  return mknil;
+}
+defun Rt.gcVerify(p : val, n : val) -> val {
+  word pw = payload(p, 0);
+  word nW = payload(n, 0);
+  word glob = rawcall rt_glob_addr();
+  word regW = wload(glob, 0);
+  *Region region = regW;
+  word heapStart = region->heapStart;
+  word bm = region->bmPtr;
+  word cursor = region->cursor;
+  if (mkbool(pw >= cursor)) {
+    // V2: the walk must land exactly on the cursor, never past it.
+    if (mkbool(pw != cursor)) {
+      call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V2: the block walk ended at heap offset ")), mknum(pw - heapStart), mknum(regW));
+      return mknil;
+    }
+    // V4: exactly-once accounting.
+    word tot = region->marked + region->freedN;
+    if (mkbool(tot != nW)) {
+      call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V4: marked + freed != blocks; marked+freed = ")), mknum(tot), mknum(regW));
+      return mknil;
+    }
+    return call Rt.gcVerifyLists(mknum(0), mknum(0), mknum(nW));
+  }
+  word flags = wload(pw, -2);
+  word cls = flags >> 2;
+  word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
+  word state = byteload(bm + (pw - heapStart) / 64, 0);
+  // V1: the allocator's record of block starts must contain this address.
+  if (mkbool(state == 0)) {
+    call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V1: the sweep stands on a NON-BLOCK-START at heap offset ")), mknum(pw - heapStart), mknum(regW));
+    return mknil;
+  }
+  // V3: the sweep clears every mark bit it set.
+  if (mkbool((flags & 1) != 0)) {
+    call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V3: a MARK BIT SURVIVED the sweep at heap offset ")), mknum(pw - heapStart), mknum(regW));
+    return mknil;
+  }
+  // the class must be usable: a corrupted class makes `phys` advance wrong
+  if (mkbool(cls == 0)) {
+    call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V1: block CLASS 0 (flags word corrupted) at heap offset ")), mknum(pw - heapStart), mknum(regW));
+    return mknil;
+  }
+  if (mkbool(cls >= region->numClass)) {
+    call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V1: block CLASS OUT OF RANGE at heap offset ")), mknum(pw - heapStart), mknum(regW));
+    return mknil;
+  }
+  return call Rt.gcVerify(mknum(pw + phys * 8), mknum(nW + 1));
+}
+// Rt.gcVerifyLists: one class at a time; `acc` is the running list length.
+defun Rt.gcVerifyLists(cls : val, acc : val, n : val) -> val {
+  word clsW = payload(cls, 0);
+  word accW = payload(acc, 0);
+  word glob = rawcall rt_glob_addr();
+  word regW = wload(glob, 0);
+  *Region region = regW;
+  if (mkbool(clsW >= region->numClass)) {
+    // V6: the lists hold every freed block and nothing else.
+    if (mkbool(accW != region->freedN)) {
+      call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V6: the free lists hold a different number of blocks than the sweep freed: ")), mknum(accW), mknum(regW));
+      return mknil;
+    }
+    return mknil;
+  }
+  return call Rt.gcVerifyList(mknum(wload(region->classTab, clsW)), mknum(clsW), mknum(accW));
+}
+defun Rt.gcVerifyList(node : val, cls : val, acc : val) -> val {
+  word nd = payload(node, 0);
+  word clsW = payload(cls, 0);
+  word accW = payload(acc, 0);
+  word glob = rawcall rt_glob_addr();
+  word regW = wload(glob, 0);
+  *Region region = regW;
+  if (mkbool(nd == 0)) {
+    return call Rt.gcVerifyLists(mknum(clsW + 1), mknum(accW), mknum(region->freedN));
+  }
+  // V6: BOUND the walk — a cycle terminates as a named failure, not a hang.
+  if (mkbool(accW >= region->freedN)) {
+    call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V6: a free list is LONGER than the freed count (cycle, or a block on two lists) at class ")), mknum(clsW), mknum(regW));
+    return mknil;
+  }
+  // V5: every link is a block start, in the FREE state, on its OWN class.
+  word state = byteload(region->bmPtr + (nd - region->heapStart) / 64, 0);
+  if (mkbool(state != 2)) {
+    call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V5: a free-list link is NOT a freed block start (state) at heap offset ")), mknum(nd - region->heapStart), mknum(regW));
+    return mknil;
+  }
+  word flags = wload(nd, -2);
+  if (mkbool((flags >> 2) != clsW)) {
+    call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V5: a free-list link is on the WRONG CLASS list at heap offset ")), mknum(nd - region->heapStart), mknum(regW));
+    return mknil;
+  }
+  return call Rt.gcVerifyList(mknum(wload(nd, 0)), mknum(clsW), mknum(accW + 1));
+}
+
 defun Rt.+(a : val, bb : val) -> val {
   if (mkbool(tagis(a, 12)) || mkbool(tagis(bb, 12))) {
     return mkflt(fload(call Rt.asF(a)) f+ fload(call Rt.asF(bb)));

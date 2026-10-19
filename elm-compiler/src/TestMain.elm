@@ -84,10 +84,10 @@ checks rt runtimeMidText =
       -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
       -- the frameZero loop), so an empty or truncated load turns it RED,
       -- loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (276 defuns — GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (280 defuns — GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 276
+                List.length ast == 280
 
             Err _ ->
                 False
@@ -2137,6 +2137,10 @@ checks rt runtimeMidText =
             && not (Set.member "Rt.gcScanValueArray" rt.allocating)
             && not (Set.member "Rt.gcInit" rt.allocating)
             && not (Set.member "Rt.gcEnvNum" rt.allocating)
+            && not (Set.member "Rt.gcVD" rt.allocating)
+            && not (Set.member "Rt.gcVerify" rt.allocating)
+            && not (Set.member "Rt.gcVerifyLists" rt.allocating)
+            && not (Set.member "Rt.gcVerifyList" rt.allocating)
         )
     , check "rt gc call graph: every RawCall target in the collector is a program key (prim half included — Rt.die is appended to the prim half) AND declared in rtDeps (T18: read over the SPLICED gc half — the DSL list is tripwire seats, whose .surface-seat call would fail this row loudly if the splice ever dropped a body)"
         (let
@@ -2167,9 +2171,9 @@ checks rt runtimeMidText =
              _ ->
                  List.all ok gcKeys
         )
-    , check "rt gc seeds: the collector seeds are exactly the two seats plus their transitive closure (stage 6 U2 adds Rt.die + Rt.cStrLenGo through the die arm's RawCall edge; GC-ARC F1 adds the stats printer Rt.gcNumOut + its digit loop Rt.gcNum through Rt.collect)"
+    , check "rt gc seeds: the collector seeds are exactly the two seats plus their transitive closure (stage 6 U2 adds Rt.die + Rt.cStrLenGo through the die arm's RawCall edge; GC-ARC F1 adds the stats printer Rt.gcNumOut + its digit loop Rt.gcNum through Rt.collect; GC ARC unit 2 adds the verifier chain Rt.gcVerify -> Rt.gcVerifyLists -> Rt.gcVerifyList and its die printer Rt.gcVD through Rt.collect and Rt.gcMarkPtr)"
         (Rt.gcSeeds
-            == [ "Rt.allocVector", "Rt.gcInit", "Rt.die", "Rt.cStrLenGo", "Rt.gcEnvNum", "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.collect", "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkValue", "Rt.gcMarkPtr", "Rt.gcDrain", "Rt.gcSweep", "Rt.gcClearClasses", "Rt.gcNumOut", "Rt.gcNum", "Rt.gcGrow", "Rt.allocRaw" ]
+            == [ "Rt.allocVector", "Rt.gcInit", "Rt.die", "Rt.cStrLenGo", "Rt.gcEnvNum", "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.collect", "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkValue", "Rt.gcMarkPtr", "Rt.gcVD", "Rt.gcNumOut", "Rt.gcNum", "Rt.gcDrain", "Rt.gcSweep", "Rt.gcClearClasses", "Rt.gcVerify", "Rt.gcVerifyLists", "Rt.gcVerifyList", "Rt.gcGrow", "Rt.allocRaw" ]
         )
     , check "rt con seeds: the Mid ADT constructor and its fill helper"
         (Rt.conSeeds == [ "Rt.con", "Rt.conFill" ]
@@ -2202,8 +2206,9 @@ checks rt runtimeMidText =
     , check "GC ARC unit 4 GEOMETRY: the layout is sized for the CEILING — markEnd, numClasses and regionSize are all derived from capBytes (never from the initial heap), so a grown heap cannot outrun the mark stack or the free-list table.  A heap-sized derivation would put the margin at ZERO and this row is what makes that substitution RED"
         (String.contains "word capWords = capBytes / 8;" runtimeMidText
             && String.contains "word markEnd = 64 + capWords / 8 + 64;" runtimeMidText
-            && String.contains "word regionSize = markEnd * 8 + numClasses * 8 + 16 + capBytes;" runtimeMidText
+            && String.contains "word regionSize = markEnd * 8 + numClasses * 8 + 16 + bmBytes + capBytes;" runtimeMidText
             && String.contains "wstore(base, 24, capEnd);" runtimeMidText
+            && String.contains "word bmBytes = capBytes / 64;" runtimeMidText
         )
     , check "GC ARC unit 4 GROWTH is PRESENT in runtime.mid (the tripwire that keeps it from being deleted): gcAlloc raises heapEnd by a doubling clamped to capEnd, reports it under QBE_MIDGC_STATS, and DIES LOUDLY at the ceiling instead of failing at the initial size"
         (String.contains "word limUp = payload((dbl < needLim) ? mknum(needLim) : mknum(dbl), 0);" runtimeMidText
@@ -3610,12 +3615,12 @@ checks rt runtimeMidText =
                 declsOf runtimeMidText
 
             names =
-                [ "magic", "classTab", "heapStart", "cursor", "heapEnd", "markTop", "markEnd", "noreuse", "kind", "count", "heapBytes", "allocated", "numClass", "ts0s", "ts0n", "ts1s", "ts1n", "ts2s", "ts2n", "collects", "marked", "sweptBytes", "markUs", "sweepUs", "capEnd" ]
+                [ "magic", "classTab", "heapStart", "cursor", "heapEnd", "markTop", "markEnd", "noreuse", "kind", "count", "heapBytes", "allocated", "numClass", "ts0s", "ts0n", "ts1s", "ts1n", "ts2s", "ts2n", "collects", "marked", "sweptBytes", "markUs", "sweepUs", "capEnd", "bmPtr", "freedN", "verify" ]
          in
-         List.map (\n -> Check.fieldOffset d "Region" n) names == List.map Just (byteSlots 25)
+         List.map (\n -> Check.fieldOffset d "Region" n) names == List.map Just (byteSlots 28)
         )
-    , check "U5 LAYOUT PIN: sizeof(Region) == 25 words in runtime.mid's own declaration (slots 0..12 + GC-ARC F1's stats instrument at 13..23 + GC ARC unit 4's growth ceiling at 24 — the mark stack starts at word 64, so it is NOT a field, and the digit scratch the printer writes into is at BYTE 288, outside the struct)"
-        (Check.sizeofStruct (declsOf runtimeMidText) "Region" == Just 25)
+    , check "U5 LAYOUT PIN: sizeof(Region) == 28 words in runtime.mid's own declaration (slots 0..12 + GC-ARC F1's stats instrument at 13..23 + GC ARC unit 4's growth ceiling at 24 + GC ARC unit 2's block map at 25..27 — the mark stack starts at word 64, so it is NOT a field, and the digit scratch the printer writes into is at BYTE 288, outside the struct)"
+        (Check.sizeofStruct (declsOf runtimeMidText) "Region" == Just 28)
     -- ==================== THE RETURN-FLIP (was: the RETURN LANDMINE) ====================
     -- `return` inside a STATEMENT-position `if` now EXITS.  Until the
     -- return-flip unit it did not: the lowerer's `thenDiv && elseDiv` arm
@@ -6364,7 +6369,7 @@ checks rt runtimeMidText =
                 False
         )
     , check
-        "T17/T18/T20/T21/T22/T24 pipeline (the wave-9 + collector + never-scheduled + T24 key-set row, post-T24's one-hundred-sixty-two, + GC-ARC F1's two stats defuns = one-hundred-sixty-four, + stage 7 O3-fix's Rt.applyPartGo = one-hundred-sixty-five, + GC ARC unit 4's Rt.gcEnvNum = one-hundred-sixty-six, + GC ARC unit 1b's Rt.gcGrow = one-hundred-sixty-seven): surf is Ok with EXACTLY the one-hundred-sixty-seven migrated keys under the default flags — T24 added the LAST THREE wall-class holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd), so the DSL-bodied set is now EMPTY — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
+        "T17/T18/T20/T21/T22/T24 pipeline (the wave-9 + collector + never-scheduled + T24 key-set row, post-T24's one-hundred-sixty-two, + GC-ARC F1's two stats defuns = one-hundred-sixty-four, + stage 7 O3-fix's Rt.applyPartGo = one-hundred-sixty-five, + GC ARC unit 4's Rt.gcEnvNum = one-hundred-sixty-six, + GC ARC unit 1b's Rt.gcGrow = one-hundred-sixty-seven, + GC ARC unit 2's four verifier defuns Rt.gcVD/Rt.gcVerify/Rt.gcVerifyList/Rt.gcVerifyLists = one-hundred-seventy-one): surf is Ok with EXACTLY the one-hundred-seventy-one migrated keys under the default flags — T24 added the LAST THREE wall-class holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd), so the DSL-bodied set is now EMPTY — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
         (case rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
             Ok s ->
                 List.sort (Dict.keys s)
@@ -6388,6 +6393,7 @@ checks rt runtimeMidText =
                        , "Rt.f/", "Rt.fillGo", "Rt.floatCopy", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock"
                        , "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.gcClearClasses", "Rt.gcDrain", "Rt.gcEnvNum", "Rt.gcGrow", "Rt.gcInit", "Rt.gcMarkPtr"
                        , "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcNum", "Rt.gcNumOut", "Rt.gcScanValueArray", "Rt.gcSweep"
+                       , "Rt.gcVD", "Rt.gcVerify", "Rt.gcVerifyList", "Rt.gcVerifyLists"
                        , "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot"
                        , "Rt.globIsDotDot", "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess"
                        , "Rt.halt", "Rt.hostAddPoll", "Rt.hostArity", "Rt.hostCStrOf", "Rt.hostCall", "Rt.hostCleanupAll"

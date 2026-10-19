@@ -165,4 +165,8 @@ gcProgram =
     , seat "Rt.gcMarkValue" 1
     , seat "Rt.gcNum" 2
     , seat "Rt.gcNumOut" 3
+    , seat "Rt.gcVD" 3
+    , seat "Rt.gcVerify" 2
+    , seat "Rt.gcVerifyLists" 3
+    , seat "Rt.gcVerifyList" 3
     ]

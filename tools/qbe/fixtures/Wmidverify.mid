@@ -1,0 +1,112 @@
+// GC ARC unit 2 — THE VERIFIER'S NEGATIVE CONTROLS: four arms, each of which
+// must be NAMED by an invariant instead of corrupting silently.
+//
+// The instruments live in elm-compiler/runtime.mid:
+//   * the BLOCK MAP (region slot 25): one byte per 64-byte minimum block,
+//     0 = not a block start, 1 = live, 2 = on a free list;
+//   * Rt.gcMarkPtr's two PER-POINTER invariants, on in EVERY build — a pointer
+//     that is not a block start, and a pointer to a FREED block, both die by
+//     name with the heap offset and the collect number;
+//   * QBE_MIDGC_VERIFY=1's post-collect WALK (Rt.gcVerify/Rt.gcVerifyLists):
+//     V1 block-map agreement, V2 the walk lands exactly on the cursor, V3 no
+//     mark bit survives, V4 marked+freed == blocks, V5/V6 the free lists.
+//
+// A probe whose arms all PASS proves nothing: each arm below DELIBERATELY
+// breaks one thing, and the assertion is that the break is NAMED.  The
+// asymmetry is the argument — that is why `header` has a fail-before arm (the
+// same binary, VERIFY off) that is silent.
+//
+// THE VALUE LAYOUT THIS FIXTURE RELIES ON (read off Rt.gcMarkValue/Rt.cons,
+// not assumed): a `val` is a 5-word CELL; its tag is the low byte of cell word
+// 0 and, for every pointer-carrying tag (1 string, 4 cons, 6 lambda, 9 error,
+// 10 vector, 14 record), the pointer the MARKER follows is cell word 1.
+// `payload(v, 0)` returns the CONTENT of that word (for a vector, the body
+// block), so the word to corrupt is body word 1 when body cell 0 is itself a
+// pointer-carrying value — which is what `mkholder` below builds.
+//
+//   mode 0  OK        the correct program: a rooted graph + churn, walked.
+//                     Green with AND without VERIFY (the no-false-positive
+//                     control), and its stdout is the golden.
+//   mode 1  INTERIOR  a LIVE value's pointer payload is overwritten with an
+//                     INTERIOR address (block start + 8).  The old marker
+//                     wrote its mark bit at `p-2` — i.e. into that block's own
+//                     body — and pushed it; the map names it instead.
+//   mode 2  FREED     a 14-word body is allocated into a RAW WORD (not a
+//                     root), a collect reclaims it, and the stale handle is
+//                     then planted in a LIVE value.  Run with
+//                     QBE_MIDGC_NOREUSE=1 so the block cannot be handed out
+//                     again: the marker names the stale pointer.  (With reuse
+//                     ON the same program is SILENT — the pointer now aliases a
+//                     LIVE block, and a type confusion between two live objects
+//                     is not something a collector can see.  Stated, not
+//                     papered over: that residue is a compiler-side B7
+//                     obligation, not a collector bug.)
+//   mode 3  HEADER    a LIVE block's stored size CLASS is corrupted to 1023
+//                     (16.7 MB of physical block).  The sweep's advance then
+//                     jumps past the frontier: WITHOUT VERIFY that is silent
+//                     (everything after the block is neither marked nor freed,
+//                     a leak), WITH VERIFY it is V2 by name.
+module Wmidverify
+
+export Wmidverify.interior : val -> val -> val
+export Wmidverify.freed : val -> val -> val
+export Wmidverify.header : val -> val -> val
+
+// churn: `n` 14-word bodies (the same class as the walk fixture's nodes)
+// allocated and dropped, so a reclaimed block is exactly what the next
+// allocation wants.
+defun Wmidverify.churnGo(i : val, n : val) -> val {
+  if (mkbool(payload(i, 0) >= payload(n, 0))) {
+    return mknil;
+  } else {
+    word base = allocvec(14);
+    vecstore(base, 0, mknum(payload(i, 0)));
+    val dead = mkvec(base, 14);
+    recur(mknum(payload(i, 0) + 1), n);
+  }
+}
+
+// A ROOTED holder whose body cell 0 is a POINTER-CARRYING value (tag 10): the
+// marker follows cell 0's word 1, so overwriting body word 1 replaces the
+// pointer the collector will mark.  Cell 1 stays a number, so nothing else
+// moves.
+defun Wmidverify.mkholder(i : val) -> val {
+  word inner = allocvec(2);
+  vecstore(inner, 0, mknum(payload(i, 0)));
+  vecstore(inner, 1, mknil);
+  word base = allocvec(2);
+  vecstore(base, 0, mkvec(inner, 2));
+  vecstore(base, 1, mknum(payload(i, 0)));
+  return mkvec(base, 2);
+}
+
+// ---- mode 1: an INTERIOR pointer in a live value ------------------------
+defun Wmidverify.interior(n : val, ch : val) -> val {
+  val holder = call Wmidverify.mkholder(mknum(4242));
+  word body = payload(holder, 0);
+  wstore(body, 1, body + 8);
+  val dead = call Wmidverify.churnGo(mknum(0), ch);
+  return mknum(11);
+}
+
+// ---- mode 2: a STALE pointer (to a FREED block) planted in a live value --
+defun Wmidverify.freed(n : val, ch : val) -> val {
+  val holder = call Wmidverify.mkholder(mknum(4242));
+  word victim = allocvec(14);
+  vecstore(victim, 0, mknum(77));
+  vecstore(victim, 1, mknil);
+  val dead = call Wmidverify.churnGo(mknum(0), ch);
+  wstore(payload(holder, 0), 1, victim);
+  val dead2 = call Wmidverify.churnGo(mknum(0), ch);
+  return mknum(22);
+}
+
+// ---- mode 3: a corrupted CLASS in a live block's header -----------------
+defun Wmidverify.header(n : val, ch : val) -> val {
+  val holder = call Wmidverify.mkholder(mknum(4242));
+  word body = payload(holder, 0);
+  word flags = wload(body, -2);
+  wstore(body, -2, (flags & 3) + 4092);
+  val dead = call Wmidverify.churnGo(mknum(0), ch);
+  return mknum(33);
+}

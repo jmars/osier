@@ -139,17 +139,52 @@ fi
 # so a stale pointer can never alias a LIVE object.  The growth ceiling is left
 # at its default here because nothing is reusable: the heap must be allowed to
 # grow, or the arm would die `out of memory` and measure the budget instead.
+# stdout goes to a FILE, not through a command substitution: the SUBSTITUTION
+# runs this function in a subshell, so a `STATUS=$?` set inside it is lost and
+# an arm that DIES BY NAME would be read as an arm that printed nothing.  (The
+# `run` helper above has the same shape and gets away with it only because its
+# callers test non-zero exits that never happen.)
 run_noreuse() {
   local mode="$1"
   QBE_MIDGC=1 QBE_MIDGC_NOREUSE=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_STATS=1 \
-    timeout 120 "$BIN" MidgcWalk.main "$mode" "$N" "$CHURN" 2>"$WORK/last.err"
+    timeout 120 "$BIN" MidgcWalk.main "$mode" "$N" "$CHURN" >"$WORK/out.nr" 2>"$WORK/last.err"
   STATUS=$?
+  cat "$WORK/out.nr"
 }
-out0="$(run_noreuse 0)"
-out1="$(run_noreuse 1)"
-out2="$(run_noreuse 2)"
-if [ "$STATUS" -ne 0 ]; then
-  fail "QBE_MIDGC_NOREUSE=1 refused to run (last exit $STATUS) — the knob is not wired"
+# GC ARC unit 2 CHANGED WHAT THIS ARM MEASURES, and the change is the finding.
+# Under unit 1b the two violating arms printed the GOLDEN here, because a freed
+# block's bytes are not overwritten when nothing is reused — a use-after-free
+# that happened to be invisible.  The collector now carries a block map with a
+# FREE state and REFUSES to mark a pointer to a freed block, so the SAME
+# mis-rooted program is now a NAMED FATAL instead of a lucky golden:
+#
+#   midbuild — dies `VERIFY: mark of a pointer to a FREED block at heap offset
+#              N (collect K)`; the stale handle its constructor returned is
+#              planted in the live graph and MARKED at the next collect.
+#   stale    — still prints the golden: its graph is never MARKED at all (the
+#              only handle is a raw struct field), so the marker never sees the
+#              freed pointers.  Reading through them is undetected corruption —
+#              stated, not papered over.
+#
+# So the discriminator is now BOTH things at once: reuse OFF makes the
+# use-after-free LOUD (a named die) where reuse ON let it be plausible.
+# called DIRECTLY (no command substitution) so STATUS survives; stdout lands in
+# $WORK/out.nr and is read back with $(cat ..)
+run_noreuse 0 >/dev/null; out0="$(cat "$WORK/out.nr")"
+run_noreuse 1 >/dev/null; out1="$(cat "$WORK/out.nr")"; st1="$STATUS"
+err1="$(grep -m1 'FREED block' "$WORK/last.err")"
+run_noreuse 2 >/dev/null; out2="$(cat "$WORK/out.nr")"
+if [ "$st1" -ne 0 ] && [ -n "$err1" ]; then
+  echo "PASS (5): with REUSE OFF the M1 arm DIES BY NAME instead of printing a lucky golden:"
+  echo "          $err1"
+  if [ "$out0" = "$GOLDEN" ]; then
+    echo "          (the correct arm still prints $GOLDEN with reuse off, so the knob does not break correct programs)"
+  else
+    fail "with REUSE OFF the CORRECT arm printed '$out0', want $GOLDEN — the knob breaks correct programs, so it cannot discriminate"
+  fi
+  if [ "$out2" = "$GOLDEN" ]; then
+    echo "          (the unrooted-GRAPH arm still prints the golden: its graph is never MARKED, so no pointer to a freed block is ever handed to the marker — undetected corruption, stated)"
+  fi
 elif [ "$out0" = "$GOLDEN" ] && [ "$out1" = "$GOLDEN" ] && [ "$out2" = "$GOLDEN" ]; then
   echo "PASS (5): with REUSE OFF all three arms print the golden ($GOLDEN) — the corruption needs BLOCK REUSE, which is M1's signature, and the same binary's reds above are not a broken fixture"
   echo "          (stated: the two violating arms are still use-after-free; their bytes simply were not overwritten)"
