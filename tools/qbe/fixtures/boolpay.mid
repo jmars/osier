@@ -1,0 +1,91 @@
+// boolpay.mid — THE BOOLEAN PAYLOAD'S WIDTH PIN (the route's silent-wrong).
+//
+// WHAT IS BEING PINNED.  A bool Value's payload is a WORD: the Zig `Value`
+// union declares `boolean: i32` (vendor/osier-rt/src/gc/types.zig), the Mid
+// writers `lowerLit` (LBoolean) and `reboxBoolean` store it with a 32-bit
+// `storew`, and the compiler's OWN `:val`-cond test for a boxed bool reads it
+// with a 32-bit `loadw` (Mid/Qbe/Lower, the isBoolean/isZero pair).  So the
+// HIGH HALF of that payload word is not part of the value — it is whatever the
+// cell held before, and for a Value the ZIG runtime builds it is UNDEFINED
+// (the union literal writes only the active member).
+//
+// `payload(b, 0)` is `loadl` of that word; `payload32(b, 0)` is `loadsw` +
+// `extsw` of its low half — the same read the checker emits.  Six sites in
+// runtime.mid read a BOOLEAN with the 64-bit spelling, INCLUDING Rt.main's
+// host-route decision, and each of them is a read of a half-initialised word.
+//
+// THE FIXTURE MAKES THE GARBAGE DETERMINISTIC instead of hoping for a stale
+// high half: `garb` builds a boolean-tagged Value with `mkval(5, mknum(2^32))`
+// — the payload WORD is 0x1_0000_0000, so its low half says FALSE and its high
+// half says 1.  Both readings are then observable, and they DISAGREE:
+//
+//   read32 (the contract)   -> 0             (false — what the low word says)
+//   read64 (the defect)     -> 4294967296    (truthy — the stale high half)
+//   routeFixed (payload32)  -> 0             (the route's post-fix answer)
+//   routeOld   (payload)    -> 1             (the route's pre-fix answer)
+//
+// and the everyday path is pinned beside it: `mkbool(1)`/`mkbool(0)` read 1/0
+// through the same `payload32`, so the fix is a WIDTH change and not a change
+// of what a boolean means.
+//
+// A golden, not a structural row, because the disagreement itself is the
+// oracle: a `payload32` that widened back to `loadl` prints 4294967296 in slot
+// 1 of the list, and a `payload` that narrowed prints 0 — both directions are
+// visible in one line of output.
+module Bpay
+
+export Bpay.garb : val -> val
+export Bpay.mktrue : val -> val
+export Bpay.mkfalse : val -> val
+export Bpay.read64 : val -> val
+export Bpay.read32 : val -> val
+export Bpay.routeOld : val -> val
+export Bpay.routeFixed : val -> val
+
+// A boolean Value whose payload WORD is 2^32: low half 0 (FALSE), high half 1.
+// (The word is taken out of a NUMBER Value because `mkval`'s payload words are
+// `word`-class by the checker's J1 rule — a `val` cannot nest in them.)
+defun Bpay.garb(d : val) -> val {
+  word w = payload(mknum(4294967296), 0);
+  return mkval(5, w);
+}
+
+defun Bpay.mktrue(d : val) -> val {
+  return mkbool(1);
+}
+
+defun Bpay.mkfalse(d : val) -> val {
+  return mkbool(0);
+}
+
+// THE 64-BIT READ (the pre-fix spelling): the whole payload word.
+defun Bpay.read64(b : val) -> val {
+  return mknum(payload(b, 0));
+}
+
+// THE WORD READ (the contract, and the post-fix spelling everywhere).
+defun Bpay.read32(b : val) -> val {
+  return mknum(payload32(b, 0));
+}
+
+// The route decision's SHAPE, both spellings.  `Rt.main` tests
+// `payload*(mhOff, 0) != 0` (and `hostIsProgram`'s answer) to choose the host;
+// these are the same test at the same width, so a wrong answer here is a wrong
+// host there.
+defun Bpay.routeOld(b : val) -> val {
+  if (payload(b, 0) != 0) {
+    return mknum(1);
+  } else {
+    return mknum(0);
+  }
+  return mknum(0);
+}
+
+defun Bpay.routeFixed(b : val) -> val {
+  if (payload32(b, 0) != 0) {
+    return mknum(1);
+  } else {
+    return mknum(0);
+  }
+  return mknum(0);
+}

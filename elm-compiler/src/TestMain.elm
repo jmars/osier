@@ -4253,7 +4253,7 @@ checks rt runtimeMidText =
             && List.map (\l -> String.contains ">>>" l) markers == [ True, False ]
             && String.contains "call Rt.die(rawstr(\"qbe-rt: QBE_MIDHOST=0 is refused" (defunText "Rt.main" runtimeMidText)
             && firstIdx "val mhOff = mkbool(mhEnv != 0)" < firstIdx "// >>> QBE_MIDGC-ONLY"
-            && firstIdx "// >>> QBE_MIDGC-ONLY" < firstIdx "word hop = if (payload(mhOff, 0) == 0) {"
+            && firstIdx "// >>> QBE_MIDGC-ONLY" < firstIdx "word hop = if (payload32(mhOff, 0) == 0) {"
         )
     , check "7A GATE PIN: Rt.load reports `hosted` for the text run.js keeps and NOT for the text it hands the default route — the witness is STRUCTURAL (does the program define Rt.hostRun?), so the gate follows the splice exactly and the selfhost lane needs no String.contains"
         (case ( Rt.load runtimeMidText, Rt.load (spliceRegionOut runtimeMidText) ) of
@@ -4350,7 +4350,7 @@ checks rt runtimeMidText =
                     )
          in
          String.contains "mkbool(byteload(mhEnv, 0) == 48)" region
-            && String.contains "word hop = if (payload(mhOff, 0) == 0) {" region
+            && String.contains "word hop = if (payload32(mhOff, 0) == 0) {" region
             && String.contains "rawcall rt_print_value(modelslot)" region
             && String.contains "rawcall exit(0);" region
             && String.contains "word isprog = rawcall rt_is_program(fptr);" runtimeMidText
@@ -9618,6 +9618,66 @@ checks rt runtimeMidText =
 
             _ ->
                 False
+        )
+
+    -- ============== THE BOOLEAN PAYLOAD IS A WORD, NOT A PAYLOAD WORD ======
+    -- A bool Value's payload is the `i32` member of the Zig `Value` union
+    -- (gc/types.zig: `boolean: i32`), and BOTH non-literal writers store it
+    -- with a 32-bit store (Mid/Qbe/Lower's `lowerLit` LBoolean arm and
+    -- `reboxBoolean`; `storeValueWords` — what `mkbool(..)` uses — writes 8).
+    -- So the HIGH HALF of a bool's payload word belongs to whatever the cell
+    -- held before, and it is UNDEFINED for a Value the Zig runtime built (its
+    -- union literal writes only the active member).  A reader that takes the
+    -- full 64 bits (`payload`) therefore reads a half-uninitialised word; the
+    -- READ the compiler's own `:val`-cond test emits is a 32-bit `loadw` of
+    -- that word (Lower, the boxed-bool test).  These two rows pin the READ on
+    -- both sides of that contract:
+    --   (a) the lowering — `payload32` is the 32-bit read, `payload` is not;
+    --   (b) the runtime's own readers — every site in runtime.mid that reads a
+    --       BOOLEAN spells `payload32`, and the four 64-bit spellings that were
+    --       there are GONE (the negative half is what a revert turns red).
+    -- The EMITTED shape (`loadw`+`extsw` vs `loadl`) and the behaviour on a
+    -- boolean with GARBAGE in its high half are pinned where they can be
+    -- measured: qbe-check.sh's `boolpay` row (the fixture
+    -- tools/qbe/fixtures/boolpay.mid + its golden) and its `BOOLPAY-SHAPE`
+    -- emitted-.ssa row.
+    , check "BOOL PAYLOAD WIDTH (a): `payload32(a, 0)` lowers to RawPayload32 — the payload WORD read (QBE `loadw` + `extsw`) — while `payload(a, 0)` lowers to RawPayload (QBE `loadl` of the same word).  The two nodes differ in WIDTH alone, which is why a runtime site spelling `payload` on a boolean reads the stale high half"
+        (case lowlBody "defun Rt.t(a : val) -> val {\n  word lo = payload32(a, 0);\n  word wide = payload(a, 0);\n  return mknum(lo + wide);\n}" of
+            Ok body ->
+                canon body
+                    == canon
+                        (llets
+                            [ ( ltb 2, Unsafe (RawPayload32 { value = ltv 1, word = 0 }) )
+                            , ( ltb 3, Unsafe (RawPayload { value = ltv 1, word = 0 }) )
+                            ]
+                            (lmkNum (liadd (ltv 2) (ltv 3)))
+                        )
+
+            Err _ ->
+                False
+        )
+    , check "BOOL PAYLOAD WIDTH (b): the SIX runtime.mid sites that read a BOOLEAN Value spell payload32 — Rt.cStrEq's word result (`eq`, which is returned as a WORD to the ~60 `call Rt.cStrEq(..) != 0` tests, so a 64-bit read turned every string compare into a coin flip), Rt.main's metaGo `found`, Rt.main's `mhOff` TWICE (the MIDGC refusal and the host hatch) and its `hostIsProgram` read, and Rt.hostListDirChunk's `skip` ('..' filter).  The negatives are the fail-before half: each 64-bit spelling of those five names is absent"
+        (let
+            mid =
+                runtimeMidText
+
+            routeText =
+                defunText "Rt.main" mid
+
+            absent name =
+                not (String.contains ("payload(" ++ name ++ ", 0)") mid)
+         in
+         String.contains "return payload32(eq, 0);" (defunText "Rt.cStrEq" mid)
+            && String.contains "payload32(found, 0)" routeText
+            && List.length (String.indexes "payload32(mhOff, 0)" routeText)
+            == 2
+            && String.contains "payload32(call Rt.hostIsProgram(vecload(fptr, 0)), 0)" routeText
+            && String.contains "payload32(skip, 0)" (defunText "Rt.hostListDirChunk" mid)
+            && absent "eq"
+            && absent "found"
+            && absent "mhOff"
+            && absent "skip"
+            && not (String.contains "payload(call Rt.hostIsProgram" mid)
         )
     ]
 

@@ -2912,6 +2912,51 @@ run_midshape ffim-mem FfimMain.main tools/qbe/fixtures/ffim-mem.elm tools/qbe/fi
 # as mutations of runtime.mid.
 run_midhost hostapply HostApply.main tools/qbe/fixtures/hostapply.elm tools/qbe/fixtures/Whost.mid
 
+# ---- THE BOOLEAN PAYLOAD'S WIDTH (the route's silent-wrong) ----
+# A bool Value's payload is a WORD — `boolean: i32` in the Zig `Value` union
+# (vendor/osier-rt/src/gc/types.zig), stored 32-bit by Mid/Qbe/Lower's
+# `lowerLit` LBoolean arm and `reboxBoolean`, and READ 32-bit by the compiler's
+# own `:val`-cond test (`loadw` of the payload word).  So the HIGH HALF of that
+# word is not part of the value, and six sites in runtime.mid read a BOOLEAN
+# with the 64-bit spelling — including `Rt.main`'s host-route decision
+# (`payload(mhOff, 0)` twice and `payload(call Rt.hostIsProgram(..), 0)`), the
+# entry gate's `payload(found, 0)`, the dir walk's `payload(skip, 0)` and
+# `Rt.cStrEq`'s `return payload(eq, 0)` (a WORD returned to ~60 `!= 0` string
+# tests, so a stale half makes EVERY compare succeed).
+#
+# THE GOLDEN IS THE DISAGREEMENT, made deterministic instead of waiting for a
+# stale high half: boolpay.mid's `garb` builds a boolean-tagged Value whose
+# payload WORD is 2^32 (low half 0 = FALSE, high half 1), so the two readings
+# of one Value must differ.  Slots 0/1 and 2/3 are the pair — a `payload32`
+# that widened back to `loadl` moves slot 1 to 4294967296, and a `payload` that
+# narrowed moves slots 0/3 — and slots 4/5 pin that the everyday `mkbool` path
+# still reads 1/0 through the same op.
+run_mid boolpay BoolPayMain.main tools/qbe/fixtures/boolpay.elm tools/qbe/fixtures/boolpay.mid
+
+# THE EMITTED WIDTHS, on the fixture's own two defuns (a golden alone cannot
+# say WHERE the width came from, and a bare "the .ssa contains a loadw" would
+# pass on any program at all — the runtime's own hundreds of `loadw`s are in
+# the same file).  `=w loadw` + `=l extsw` is `payload32`; `=l loadl` alone is
+# `payload`; each is asserted POSITIVELY in its own defun and NEGATIVELY in the
+# other, so neither spelling can drift into the other's slot.
+bpssa="$TMP/boolpay/boolpay.mid.ssa"
+bpfn() { awk -v fn="q_Bpay_x2e$1(" 'index($0, "function ") == 1 && index($0, fn) { f = 1 } f { print } f && /^}/ { exit }' "$bpssa"; }
+if [ ! -f "$bpssa" ]; then
+  echo "FAIL BOOLPAY-SHAPE: no emitted .ssa at $bpssa — the width rows cannot measure anything"
+  FAIL=1
+else
+  bp32="$(bpfn read32)"
+  bp64="$(bpfn read64)"
+  if printf '%s\n' "$bp32" | grep -A1 '=w loadw' | grep -q '=l extsw' \
+    && printf '%s\n' "$bp64" | grep -q '=l loadl' \
+    && ! printf '%s\n' "$bp32" | grep -q 'loadl'; then
+    echo "PASS BOOLPAY-SHAPE: payload32 emits '=w loadw' + '=l extsw' (the payload WORD) and payload emits '=l loadl' (the whole 8 bytes) — the two reads differ in width alone"
+  else
+    echo "FAIL BOOLPAY-SHAPE: read32=[$(printf '%s' "$bp32" | grep -E 'load|l extsw' | tr '\n' ' ')] read64=[$(printf '%s' "$bp64" | grep -E 'load' | tr '\n' ' ')] — want loadw+extsw in read32 (and NO loadl) and loadl in read64"
+    FAIL=1
+  fi
+fi
+
 # ---- zigretire stage 5 PART 3: THE MIDGC GUARD'S COMPLETENESS ----
 # The guard that names ONE incompatible flag is not a guard (this arc paid for
 # that twice: NORTLEAN then NOMIDRT).  run.js's MIDGC_DEPENDS_ON list is the

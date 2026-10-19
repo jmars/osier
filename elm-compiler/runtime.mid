@@ -4888,9 +4888,20 @@ defun Rt.halt() -> word {
   rawcall exit(1);
   return 0;
 }
+// THE BOOLEAN PAYLOAD IS A WORD (32 BITS), NOT A PAYLOAD WORD'S 64 BITS.  A
+// bool's payload is declared `i32` in the Zig `Value` union (gc/types.zig:
+// `boolean: i32`) and the Mid writers store it with a 32-bit store
+// (Mid/Qbe/Lower's `lowerLit` LBoolean arm and `reboxBoolean`), so the HIGH
+// HALF of that payload word is whatever the cell held before — undefined for a
+// Zig-allocated Value, and the memset/kernel zeros are the only reason the
+// current emit reads it as 0.  `payload32` is `loadsw`+`extsw` on that word,
+// i.e. exactly the read the checker's own `:val`-cond test emits
+// (Lower's unboxedValBool test: `loadw` of the payload word).  MEASURED in the
+// .ssa: `false` lowers to `storew 0` and every one of these reads was `loadl`
+// of the same word.
 defun Rt.cStrEq(a : word, b : word) -> word {
   val eq = call Rt.cStrEqGo(mknum(a), mknum(b), mknum(0));
-  return payload(eq, 0);
+  return payload32(eq, 0);
 }
 
 defun Rt.cStrEqGo(a : val, b : val, i : val) -> val {
@@ -4989,7 +5000,7 @@ defun Rt.main(argc : word, argv : word) -> word {
   wstore(mblk, 1, entry);
   wstore(mblk, 2, metaN);
   val found = call Rt.metaGo(mknum(mblk), mknum(0));
-  word nf = if (mkbool(payload(found, 0) == 0)) {
+  word nf = if (mkbool(payload32(found, 0) == 0)) {
     word pre = rawstr("qbe-rt: entry '");
     val plen = call Rt.cStrLenGo(mknum(pre), mknum(0));
     rawcall write(2, pre, payload(plen, 0));
@@ -5250,15 +5261,15 @@ defun Rt.main(argc : word, argv : word) -> word {
   // SOUND — a `QBE_MIDGC=0` build, where one heap (the Zig collector) serves
   // both hosts; run.js splices this region OUT of exactly those builds, which is
   // why the message can say "built with QBE_MIDGC" and mean it.
-  word mhz = if (payload(mhOff, 0) != 0) {
+  word mhz = if (payload32(mhOff, 0) != 0) {
     call Rt.die(rawstr("qbe-rt: QBE_MIDHOST=0 is refused: this program was built with QBE_MIDGC (the Mid collector owns every allocation), so the Zig effect host would build Zig-nursery values into a Mid heap. Rebuild with QBE_MIDGC=0 to run the Zig host, or drop QBE_MIDHOST."));
     return 0;
   } else {
     return 0;
   };
   // <<< QBE_MIDGC-ONLY
-  word hop = if (payload(mhOff, 0) == 0) {
-    word chk = if (payload(call Rt.hostIsProgram(vecload(fptr, 0)), 0) != 0) {
+  word hop = if (payload32(mhOff, 0) == 0) {
+    word chk = if (payload32(call Rt.hostIsProgram(vecload(fptr, 0)), 0) != 0) {
       call Rt.hostRun(mknum(fptr), mknum(modelslot));
       rawcall rt_root_push_value(modelslot);
       word mppc = rawcall rt_print_value(modelslot);
@@ -7524,7 +7535,7 @@ defun Rt.hostListDirChunk(hN : val, iN : val, cellN : val) -> val {
   word b0 = byteload(nptr, 0);
   word b1 = byteload(nptr, 1);
   val skip = (mkbool(nlen == 1) && mkbool(b0 == 46)) || ((mkbool(nlen == 2) && mkbool(b0 == 46)) && mkbool(b1 == 46));
-  if (payload(skip, 0) != 0) {
+  if (payload32(skip, 0) != 0) {
     dd->off = off + rlen;
     recur(hN, iN, cellN);                  // '.' / '..': skipped, not listed
   }
