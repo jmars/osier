@@ -118,6 +118,40 @@ extern poll(fds : ptr, nfds : i64, timeout : i32) -> i32;
 // `openat` itself, exactly as the Zig does, so nothing in 7C calls this.
 // (`fcntl` was never a `rawcallArity` row, so R-08's both-tables refusal is not
 // in play here — unlike `clock_gettime`, see the host's own note.)
+// ==================== THE `return`-INSIDE-`if` SPELLING ====================
+// (return-flip stage 1)  69 statements in this file used to depend on a MID-BLOCK
+// `if` whose BOTH branches `return` DEAD-BINDING and the block CARRYING ON: the
+// chosen arm's `return` was a VALUE the lowerer bound to a fresh binder nothing
+// read (LowerToIr's `thenDiv && elseDiv` arm), and the statements after the if
+// ran whatever the condition.  That is a TRAP, not a rule — the code below was
+// written as if `return` exited — and it is why the language cannot spell C's
+// "if/else statement": J7 rejects a mid-block `if` whose branches both FALL
+// THROUGH, so a both-returning if is the ONLY way to write "run one arm, then
+// carry on", and it works only by accident.
+//
+// Each site is now spelled as a DECLARATION:
+//
+//     val _uN = if (c) { <work A> return x; } else { <work B> return y; };
+//     <carry on>
+//
+// Inside an if-EXPRESSION a branch's `return` is the BRANCH's value by L3 (a
+// block's terminator IS its value), and the declaration discards it — which is
+// exactly what the dead bind did, so the meaning is unchanged under EITHER
+// reading of a statement `return` (MEASURED: all 159 corpus .ssa artifacts are
+// byte-identical before and after the migration).  `_uN` names are throwaway;
+// they exist because this language has one flat scope per defun (J5 rejects a
+// duplicate declaration) and a bare `x = if ..` is not a declaration.
+//
+// THE OTHER TWO SPELLINGS THIS FILE ALREADY USES, and when each is right:
+//   * ONE-SIDED GUARD (`if (c) { ..; return x; } <carry on>`): LEGAL beside a
+//     continuation and a REAL early exit — the continuation splices into the
+//     FALSE path, so it does not run when the guard is taken.  Use it when the
+//     guarded work must SKIP the rest of the block (333 sites below).
+//   * DISPATCH CHAIN + TAIL CALLS (Rt.gcMarkRoots): each arm does its work and
+//     tail-calls the next dispatcher, so a k-way dispatch needs no join.  Use it
+//     when the arms end in a call anyway.
+// TestMain pins all three shapes (the SPELLING rows), and pins the count (69)
+// so a site reverted to the bare form turns the row RED.
 extern fcntl(fd : i32, cmd : i32, ...) -> i32;
 extern _exit(code : i32) -> void;
 // STAGE 7E: the two syscalls the dir/stat leaves need (plan §6 gap G-I's
@@ -1566,12 +1600,12 @@ defun Rt.globScanGo(stateN : val) -> val {
   }
   val lenN = call Rt.cStrLenGo(mknum(nameW), mknum(0));
   word pW = rawcall malloc(payload(lenN, 0) + 1);
-  if (mkbool(pW == 0)) {
+  val _u1 = if (mkbool(pW == 0)) {
     word h = rawcall rt_halt();
     return mknil;
   } else {
     return mknum(0);
-  }
+  };
   call Rt.cStrCopyGo(mknum(nameW), mknum(pW), mknum(0));
   wstore(tblW, nW, pW);
   wstore(payload(stateN, 0), 4, nW + 1);
@@ -1635,12 +1669,12 @@ defun Rt.glob(pattern : val) -> val {
   call Rt.cStrFill(patN, pattern, mknum(0));
   val siN = call Rt.globLastSlash(mknum(patW), mknum(len32(pattern) - 1));
   word cbufW = rawcall malloc(8240);
-  if (mkbool(cbufW == 0)) {
+  val _u2 = if (mkbool(cbufW == 0)) {
     word h = rawcall rt_halt();
     return mknil;
   } else {
     return mknum(0);
-  }
+  };
   bytestore(cbufW, 0, 46);
   bytestore(cbufW, 1, 0);
   bytestore(cbufW, 2, 46);
@@ -1651,12 +1685,12 @@ defun Rt.glob(pattern : val) -> val {
   val hasS = mkbool(payload(siN, 0) >= 0);
   val dirN = hasS ? mknum(patW) : mknum(cbufW);
   val baseN = hasS ? mknum(patW + (payload(siN, 0) + 1)) : mknum(patW);
-  if (hasS) {
+  val _u3 = if (hasS) {
     bytestore(patW, payload(siN, 0), 0);
     return mknum(0);
   } else {
     return mknum(0);
-  }
+  };
   word dW = rawcall opendir(payload(dirN, 0));
   if (mkbool(dW == 0)) {
     word fN = rawcall free(cbufW);
@@ -1792,24 +1826,24 @@ defun Rt.epProg(vv : val, stN : val) -> val {
     return mknum(-1);
   }
   *Prog progW = rawcall malloc(16);
-  if (mkbool(progW == 0)) {
+  val _u4 = if (mkbool(progW == 0)) {
     word h = rawcall rt_halt();
     return mknil;
   } else {
     return mknum(0);
-  }
+  };
   progW->nchains = 0;
   progW->chains = 0;
   if (mkbool(payload(cnt, 0) == 0)) {
     return mknum(progW);
   }
   word chainsW = rawcall malloc(payload(cnt, 0) * 16);
-  if (mkbool(chainsW == 0)) {
+  val _u5 = if (mkbool(chainsW == 0)) {
     word h = rawcall rt_halt();
     return mknil;
   } else {
     return mknum(0);
-  }
+  };
   progW->chains = chainsW;
   val go = call Rt.epProgGo(vv, stN, mknum(progW));
   if (mkbool(payload(go, 0) < 0)) {
@@ -1876,21 +1910,21 @@ defun Rt.epPipeline(vv : val, stN : val) -> val {
     return mknum(-1);
   }
   *Pipe pipeW = rawcall malloc(16);
-  if (mkbool(pipeW == 0)) {
+  val _u6 = if (mkbool(pipeW == 0)) {
     word h = rawcall rt_halt();
     return mknil;
   } else {
     return mknum(0);
-  }
+  };
   pipeW->ncmds = 0;
   pipeW->cmds = 0;
   word cmdsW = rawcall malloc(payload(cnt, 0) * 40);
-  if (mkbool(cmdsW == 0)) {
+  val _u7 = if (mkbool(cmdsW == 0)) {
     word h = rawcall rt_halt();
     return mknil;
   } else {
     return mknum(0);
-  }
+  };
   pipeW->cmds = cmdsW;
   val go = call Rt.epPipeGo(vv, stN, mknum(pipeW));
   if (mkbool(payload(go, 0) < 0)) {
@@ -1941,12 +1975,12 @@ defun Rt.epArgvGo(vv : val, stN : val, cAddrN : val) -> val {
     return mknum(-1);
   }
   word bufW = rawcall malloc(len32(sN) + 1);
-  if (mkbool(bufW == 0)) {
+  val _u8 = if (mkbool(bufW == 0)) {
     word h = rawcall rt_halt();
     return mknil;
   } else {
     return mknum(0);
-  }
+  };
   call Rt.cStrFill(mknum(bufW), sN, mknum(0));
   wstore(argvW, jW, bufW);
   [*CmdState](payload(cAddrN, 0))->argc = jW + 1;
@@ -2040,20 +2074,20 @@ defun Rt.epRedir(e : val, stN : val, rAddrN : val) -> val {
         return mknum(-1);
       }
       word bufW = rawcall malloc(len32(sN) + payload(isHstr ? mknum(1) : mknum(0), 0));
-      if (mkbool(bufW == 0)) {
+      val _u9 = if (mkbool(bufW == 0)) {
         word h = rawcall rt_halt();
         return mknil;
       } else {
         return mknum(0);
-      }
+      };
       call Rt.cStrFill(mknum(bufW), sN, mknum(0));
-      if (isHstr) {
+      val _u10 = if (isHstr) {
         bytestore(bufW, len32(sN), 10);
         bytestore(bufW, len32(sN) + 1, 0);
         return mknil;
       } else {
         return mknil;
-      }
+      };
       if (isHdoc || isHstr) {
         [*Redir](payload(rAddrN, 0))->kind = payload(kindV, 0);
         [*Redir](payload(rAddrN, 0))->fd = payload(fdN, 0);
@@ -2112,23 +2146,23 @@ defun Rt.epFreeCmds(pipeN : val, cmdsN : val, iN : val) -> val {
 
 defun Rt.epFreeCmd(cmdAddrN : val) -> val {
   word argvW = [*CmdState](payload(cmdAddrN, 0))->argv;
-  if (mkbool(argvW != 0)) {
+  val _u11 = if (mkbool(argvW != 0)) {
     return call Rt.epFreeArgv(mknum(argvW), mknum(0), mknum([*CmdState](payload(cmdAddrN, 0))->argc));
   } else {
     return mknil;
-  }
+  };
   word redirsW = [*CmdState](payload(cmdAddrN, 0))->redirs;
-  if (mkbool(redirsW != 0)) {
+  val _u12 = if (mkbool(redirsW != 0)) {
     return call Rt.epFreeRedirs(mknum(redirsW), mknum(0), mknum([*CmdState](payload(cmdAddrN, 0))->nredirs));
   } else {
     return mknil;
-  }
+  };
   *Prog subW = [*CmdState](payload(cmdAddrN, 0))->subprog;
-  if (mkbool(subW != 0)) {
+  val _u13 = if (mkbool(subW != 0)) {
     return call Rt.epFreeChains(mknum(subW), mknum(subW->chains), mknum(0));
   } else {
     return mknil;
-  }
+  };
   return mknil;
 }
 
@@ -2189,12 +2223,12 @@ defun Rt.echoGo(argvN : val, argcN : val, stN : val) -> val {
 defun Rt.childPwd(stN : val) -> val {
   word cbufW = [*Exec](payload(stN, 0))->cbuf;
   word pbuf = rawcall malloc(4096);
-  if (mkbool(pbuf == 0)) {
+  val _u14 = if (mkbool(pbuf == 0)) {
     word h = rawcall rt_halt();
     return mknil;
   } else {
     return mknum(0);
-  }
+  };
   word got = rawcall getcwd(pbuf, 4096);
   if (mkbool(got != 0)) {
     val plen = call Rt.cStrLenGo(mknum(pbuf), mknum(0));
@@ -2227,14 +2261,14 @@ defun Rt.childBuiltin(argcN : val, argvN : val, stN : val) -> val {
       [*Exec](payload(stN, 0))->argIdx = 1;
       word arg1 = wload(payload(argvN, 0), 1);
       val isMinusN = mkbool(payload(argcN, 0) > 1) ? call Rt.cStrEqLit(mknum(arg1), mknum(cbufW + 129), mknum(0)) : false;
-      if (isMinusN) {
+      val _u15 = if (isMinusN) {
         [*Exec](payload(stN, 0))->bodyFd = 0;
         [*Exec](payload(stN, 0))->bodyOff = 2;
         [*Exec](payload(stN, 0))->argIdx = 2;
         return mknil;
       } else {
         return mknil;
-      }
+      };
       return call Rt.echoGo(argvN, argcN, stN);
     } else {
       if (isTrue) {
@@ -2385,12 +2419,12 @@ defun Rt.bodyWriteGo(bodyN : val, bodyLenN : val, stN : val) -> val {
 defun Rt.openBodyTmpfile(bodyN : val, stN : val) -> val {
   word cbufW = [*Exec](payload(stN, 0))->cbuf;
   word tpl = rawcall malloc(24);
-  if (mkbool(tpl == 0)) {
+  val _u16 = if (mkbool(tpl == 0)) {
     word h = rawcall rt_halt();
     return mknil;
   } else {
     return mknum(0);
-  }
+  };
   call Rt.cStrCopyGo(mknum(cbufW + 312), mknum(tpl), mknum(0));
   word fd = rawcall mkstemp(tpl);
   rawcall unlink(tpl);
@@ -2453,13 +2487,13 @@ defun Rt.closeCmdTmpfds(cmdN : val, iN : val) -> val {
     word arrN = [*CmdState](payload(cmdN, 0))->redirs;
     *Redir redirN = arrN + (payload(iN, 0) * 48);
     word tmpN = redirN->tmpfd;
-    if (mkbool(tmpN >= 0)) {
+    val _u17 = if (mkbool(tmpN >= 0)) {
       rawcall close(tmpN);
       redirN->tmpfd = -1;
       return mknil;
     } else {
       return mknil;
-    }
+    };
     recur(cmdN, mknum(payload(iN, 0) + 1));
   }
 }
@@ -2502,24 +2536,24 @@ defun Rt.runBuiltinInprocess(cmdN : val, stN : val) -> val {
   word sav1 = rawcall dup(1);
   word sav2 = rawcall dup(2);
   if (mkbool(sav0 < 0) || (mkbool(sav1 < 0) || mkbool(sav2 < 0))) {
-    if (mkbool(sav0 >= 0)) {
+    val _u18 = if (mkbool(sav0 >= 0)) {
       rawcall close(sav0);
       return mknil;
     } else {
       return mknil;
-    }
-    if (mkbool(sav1 >= 0)) {
+    };
+    val _u19 = if (mkbool(sav1 >= 0)) {
       rawcall close(sav1);
       return mknil;
     } else {
       return mknil;
-    }
-    if (mkbool(sav2 >= 0)) {
+    };
+    val _u20 = if (mkbool(sav2 >= 0)) {
       rawcall close(sav2);
       return mknil;
     } else {
       return mknil;
-    }
+    };
     return mknum(-1);
   } else {
     word outfdW = [*Exec](payload(stN, 0))->outfd;
@@ -2600,18 +2634,18 @@ defun Rt.execGo(stN : val, modeN : val) -> val {
                 rawcall _exit(1);
                 return mknil;
               } else {
-                if (mkbool(outfdW > 2)) {
+                val _u21 = if (mkbool(outfdW > 2)) {
                   rawcall close(outfdW);
                   return mknil;
                 } else {
                   return mknil;
-                }
-                if (mkbool(errfdW > 2) && mkbool(errfdW != outfdW)) {
+                };
+                val _u22 = if (mkbool(errfdW > 2) && mkbool(errfdW != outfdW)) {
                   rawcall close(errfdW);
                   return mknil;
                 } else {
                   return mknil;
-                }
+                };
                 [*Exec](payload(stN, 0))->outfd = 1;
                 [*Exec](payload(stN, 0))->errfd = 2;
                 [*Exec](payload(stN, 0))->inChild = 1;
@@ -2652,12 +2686,12 @@ defun Rt.execGo(stN : val, modeN : val) -> val {
           } else {
             word npipes = ncmds - 1;
             word pfds = rawcall malloc(npipes * 8);
-            if (mkbool(pfds == 0)) {
+            val _u23 = if (mkbool(pfds == 0)) {
               word h = rawcall rt_halt();
               return mknil;
             } else {
               return mknum(0);
-            }
+            };
             [*Exec](payload(stN, 0))->npipes = npipes;
             [*Exec](payload(stN, 0))->pfds = pfds;
             [*Exec](payload(stN, 0))->cursor = 0;
@@ -2671,12 +2705,12 @@ defun Rt.execGo(stN : val, modeN : val) -> val {
         word pfds = [*Exec](payload(stN, 0))->pfds;
         if (mkbool([*Exec](payload(stN, 0))->cursor >= npipes)) {
           word pids = rawcall malloc([*Exec](payload(stN, 0))->ncmds * 8);
-          if (mkbool(pids == 0)) {
+          val _u24 = if (mkbool(pids == 0)) {
             word h = rawcall rt_halt();
             return mknil;
           } else {
             return mknum(0);
-          }
+          };
           [*Exec](payload(stN, 0))->pids = pids;
           [*Exec](payload(stN, 0))->nforked = 0;
           [*Exec](payload(stN, 0))->forkFailed = 0;
@@ -2726,18 +2760,18 @@ defun Rt.execGo(stN : val, modeN : val) -> val {
                 word npipes = [*Exec](payload(stN, 0))->npipes;
                 rawcall dup2(outfdW, 1);
                 rawcall dup2(errfdW, 2);
-                if (mkbool(iW > 0)) {
+                val _u25 = if (mkbool(iW > 0)) {
                   rawcall dup2(wload(pfds, iW - 1) & 4294967295, 0);
                   return mknil;
                 } else {
                   return mknil;
-                }
-                if (mkbool(iW < (nW - 1))) {
+                };
+                val _u26 = if (mkbool(iW < (nW - 1))) {
                   rawcall dup2(wload(pfds, iW) / 4294967296, 1);
                   return mknil;
                 } else {
                   return mknil;
-                }
+                };
                 call Rt.closePipesGo(mknum(pfds), mknum(0), mknum(npipes));
                 [*Exec](payload(stN, 0))->curCmd = iW;
                 call Rt.closeOthersGo(mknum(cmdsArr), stN, mknum(0));
@@ -2748,18 +2782,18 @@ defun Rt.execGo(stN : val, modeN : val) -> val {
                 } else {
                   word subW = cmdN->subprog;
                   if (mkbool(subW != 0)) {
-                    if (mkbool(outfdW > 2)) {
+                    val _u27 = if (mkbool(outfdW > 2)) {
                       rawcall close(outfdW);
                       return mknil;
                     } else {
                       return mknil;
-                    }
-                    if (mkbool(errfdW > 2) && mkbool(errfdW != outfdW)) {
+                    };
+                    val _u28 = if (mkbool(errfdW > 2) && mkbool(errfdW != outfdW)) {
                       rawcall close(errfdW);
                       return mknil;
                     } else {
                       return mknil;
-                    }
+                    };
                     [*Exec](payload(stN, 0))->outfd = 1;
                     [*Exec](payload(stN, 0))->errfd = 2;
                     [*Exec](payload(stN, 0))->inChild = 1;
@@ -2768,18 +2802,18 @@ defun Rt.execGo(stN : val, modeN : val) -> val {
                     [*Exec](payload(stN, 0))->chain = 0;
                     recur(stN, mknum(0));
                   } else {
-                    if (mkbool(outfdW > 2)) {
+                    val _u29 = if (mkbool(outfdW > 2)) {
                       rawcall close(outfdW);
                       return mknil;
                     } else {
                       return mknil;
-                    }
-                    if (mkbool(errfdW > 2) && mkbool(errfdW != outfdW)) {
+                    };
+                    val _u30 = if (mkbool(errfdW > 2) && mkbool(errfdW != outfdW)) {
                       rawcall close(errfdW);
                       return mknil;
                     } else {
                       return mknil;
-                    }
+                    };
                     word argcW = cmdN->argc;
                     word argvW = cmdN->argv;
                     val bcode = call Rt.childBuiltin(mknum(argcW), mknum(argvW), stN);
@@ -2827,12 +2861,12 @@ defun Rt.execGo(stN : val, modeN : val) -> val {
               [*Exec](payload(stN, 0))->waitStatus = 0;
               rawcall waitpid(pidW, payload(stN, 0) + 136, 0);
               val code = call Rt.waitStatusCode(mknum([*Exec](payload(stN, 0))->waitStatus));
-              if (mkbool(iW == (nW - 1))) {
+              val _u31 = if (mkbool(iW == (nW - 1))) {
                 [*Exec](payload(stN, 0))->status = payload(code, 0);
                 return mknil;
               } else {
                 return mknil;
-              }
+              };
               [*Exec](payload(stN, 0))->cursor = iW + 1;
               recur(stN, mknum(4));
             }
@@ -2874,12 +2908,12 @@ defun Rt.execGo(stN : val, modeN : val) -> val {
 
 defun Rt.mkTmpAt(litPtrN : val) -> val {
   word tpl = rawcall malloc(24);
-  if (mkbool(tpl == 0)) {
+  val _u32 = if (mkbool(tpl == 0)) {
     word h = rawcall rt_halt();
     return mknil;
   } else {
     return mknum(0);
-  }
+  };
   call Rt.cStrCopyGo(litPtrN, mknum(tpl), mknum(0));
   word fd = rawcall mkstemp(tpl);
   rawcall unlink(tpl);
@@ -2889,26 +2923,26 @@ defun Rt.mkTmpAt(litPtrN : val) -> val {
 
 defun Rt.exec-plan(plan : val) -> val {
   word cbufW = rawcall malloc(336);
-  if (mkbool(cbufW == 0)) {
+  val _u33 = if (mkbool(cbufW == 0)) {
     word h = rawcall rt_halt();
     return mknil;
   } else {
     return mknum(0);
-  }
+  };
   *Scratch stW = rawcall malloc(24);
-  if (mkbool(stW == 0)) {
+  val _u34 = if (mkbool(stW == 0)) {
     word h = rawcall rt_halt();
     return mknil;
   } else {
     return mknum(0);
-  }
+  };
   *Exec rstW = rawcall malloc(168);
-  if (mkbool(rstW == 0)) {
+  val _u35 = if (mkbool(rstW == 0)) {
     word h = rawcall rt_halt();
     return mknil;
   } else {
     return mknum(0);
-  }
+  };
   wstore(cbufW, 0, 1936617315);
   wstore(cbufW, 1, 113723913172083);
   wstore(cbufW, 2, 125779768604014);
@@ -3168,18 +3202,18 @@ defun Rt.exec-plan(plan : val) -> val {
     return mknil;
   } else {
     if (mkbool(payload(outfdW, 0) < 0) || mkbool(payload(errfdW, 0) < 0)) {
-      if (mkbool(payload(outfdW, 0) >= 0)) {
+      val _u36 = if (mkbool(payload(outfdW, 0) >= 0)) {
         rawcall close(payload(outfdW, 0));
         return mknil;
       } else {
         return mknil;
-      }
-      if (mkbool(payload(errfdW, 0) >= 0)) {
+      };
+      val _u37 = if (mkbool(payload(errfdW, 0) >= 0)) {
         rawcall close(payload(errfdW, 0));
         return mknil;
       } else {
         return mknil;
-      }
+      };
       word chainsW = [*Prog](payload(progN, 0))->chains;
       call Rt.epFreeChains(progN, mknum(chainsW), mknum(0));
       rawcall free(rstW);
@@ -3216,47 +3250,47 @@ defun Rt.exec-plan(plan : val) -> val {
 
 defun Rt.exec-run(outfdN : val, errfdN : val, codeN : val) -> val {
   *ReadBlk blkW = rawcall malloc(72);
-  if (mkbool(blkW == 0)) {
+  val _u38 = if (mkbool(blkW == 0)) {
     word h = rawcall rt_halt();
     return mknil;
   } else {
     return mknum(0);
-  }
+  };
   val blkN = mknum(blkW);
   word tmpW = rawcall malloc(65536);
-  if (mkbool(tmpW == 0)) {
+  val _u39 = if (mkbool(tmpW == 0)) {
     rawcall free(blkW);
     word h = rawcall rt_halt();
     return mknil;
   } else {
     return mknum(0);
-  }
+  };
   blkW->acc = 0;
   blkW->len = 0;
   blkW->cap = 0;
   word oLS = rawcall lseek(payload(outfdN, 0), 0, 0);
-  if (mkbool(oLS >= 0)) {
+  val _u40 = if (mkbool(oLS >= 0)) {
     blkW->fd = payload(outfdN, 0);
     blkW->tmp = tmpW;
     call Rt.readFileGo(blkN);
     return mknil;
   } else {
     return mknil;
-  }
+  };
   word oBuf = blkW->acc;
   word oLen = blkW->len;
   blkW->acc = 0;
   blkW->len = 0;
   blkW->cap = 0;
   word eLS = rawcall lseek(payload(errfdN, 0), 0, 0);
-  if (mkbool(eLS >= 0)) {
+  val _u41 = if (mkbool(eLS >= 0)) {
     blkW->fd = payload(errfdN, 0);
     blkW->tmp = tmpW;
     call Rt.readFileGo(blkN);
     return mknil;
   } else {
     return mknil;
-  }
+  };
   word eBuf = blkW->acc;
   word eLen = blkW->len;
   rawcall close(payload(outfdN, 0));
@@ -4098,21 +4132,21 @@ defun Rt.read-file-as-string(path : val) -> val {
     return "";
   } else {
     *ReadBlk blkW = rawcall malloc(72);
-    if (mkbool(blkW == 0)) {
+    val _u42 = if (mkbool(blkW == 0)) {
       word h = rawcall rt_halt();
       return mknil;
     } else {
       return mknum(0);
-    }
+    };
     val blkN = mknum(blkW);
     word tmpW = rawcall malloc(65536);
-    if (mkbool(tmpW == 0)) {
+    val _u43 = if (mkbool(tmpW == 0)) {
       word f15 = rawcall free(blkW);
       word h = rawcall rt_halt();
       return mknil;
     } else {
       return mknum(0);
-    }
+    };
     blkW->fd = fdW;
     blkW->tmp = tmpW;
     blkW->acc = 0;
@@ -4196,12 +4230,12 @@ defun Rt.epCmd(e : val, stN : val, cAddrN : val) -> val {
     return mknum(0);
   } else {
     word argvW = rawcall malloc(payload(acnt, 0) * 8 + 8);
-    if (mkbool(argvW == 0)) {
+    val _u44 = if (mkbool(argvW == 0)) {
       word h = rawcall rt_halt();
       return mknil;
     } else {
       return mknum(0);
-    }
+    };
     [*CmdState](payload(cAddrN, 0))->argv = argvW;
     val agoGo = call Rt.epArgvGo(argvv, stN, cAddrN);
     if (mkbool(payload(agoGo, 0) < 0)) {
@@ -4215,11 +4249,11 @@ defun Rt.epCmd(e : val, stN : val, cAddrN : val) -> val {
   [*Scratch](payload(stN, 0))->lim = 64;
   val rcnt = call Rt.epCount(redirsv, stN, mknum(0));
   if (mkbool(payload(rcnt, 0) < 0) || mkbool(payload(rcnt, 0) > 64)) {
-    if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
+    val _u45 = if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
       return call Rt.epFreeArgv(mknum([*CmdState](payload(cAddrN, 0))->argv), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->argc));
     } else {
       return mknil;
-    }
+    };
     [*CmdState](payload(cAddrN, 0))->argv = 0;
     return mknum(-1);
   } else {
@@ -4227,21 +4261,21 @@ defun Rt.epCmd(e : val, stN : val, cAddrN : val) -> val {
       return mknum(0);
     } else {
       word redirsW = rawcall malloc(payload(rcnt, 0) * 48);
-      if (mkbool(redirsW == 0)) {
+      val _u46 = if (mkbool(redirsW == 0)) {
         word h = rawcall rt_halt();
         return mknil;
       } else {
         return mknum(0);
-      }
+      };
       [*CmdState](payload(cAddrN, 0))->redirs = redirsW;
       val rgoGo = call Rt.epRedirsGo(redirsv, stN, cAddrN);
       if (mkbool(payload(rgoGo, 0) < 0)) {
         [*CmdState](payload(cAddrN, 0))->redirs = 0;
-        if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
+        val _u47 = if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
           return call Rt.epFreeArgv(mknum([*CmdState](payload(cAddrN, 0))->argv), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->argc));
         } else {
           return mknil;
-        }
+        };
         [*CmdState](payload(cAddrN, 0))->argv = 0;
         return mknum(-1);
       }
@@ -4250,107 +4284,107 @@ defun Rt.epCmd(e : val, stN : val, cAddrN : val) -> val {
     if (mkbool(payload(rgo, 0) < 0)) { return mknum(-1); }
     val subState = mkbool(tagis(subv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(payload(subv, 0), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(payload(subv, 0), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(payload(subv, 0), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(payload(subv, 0), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
     if (mkbool(payload(subState, 0) == 2)) {
-      if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
+      val _u48 = if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
         return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum([*Prog]([*CmdState](payload(cAddrN, 0))->subprog)->chains), mknum(0));
       } else {
         return mknil;
-      }
-      if (mkbool([*CmdState](payload(cAddrN, 0))->redirs != 0)) {
+      };
+      val _u49 = if (mkbool([*CmdState](payload(cAddrN, 0))->redirs != 0)) {
         return call Rt.epFreeRedirs(mknum([*CmdState](payload(cAddrN, 0))->redirs), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->nredirs));
       } else {
         return mknil;
-      }
+      };
       [*CmdState](payload(cAddrN, 0))->redirs = 0;
-      if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
+      val _u50 = if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
         return call Rt.epFreeArgv(mknum([*CmdState](payload(cAddrN, 0))->argv), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->argc));
       } else {
         return mknil;
-      }
+      };
       [*CmdState](payload(cAddrN, 0))->argv = 0;
       return mknum(-1);
     }
     if (mkbool(payload(subState, 0) == 0)) {
       if (mkbool([*CmdState](payload(cAddrN, 0))->argv == 0)) {
-        if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
+        val _u51 = if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
           return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum([*Prog]([*CmdState](payload(cAddrN, 0))->subprog)->chains), mknum(0));
         } else {
           return mknil;
-        }
-        if (mkbool([*CmdState](payload(cAddrN, 0))->redirs != 0)) {
+        };
+        val _u52 = if (mkbool([*CmdState](payload(cAddrN, 0))->redirs != 0)) {
           return call Rt.epFreeRedirs(mknum([*CmdState](payload(cAddrN, 0))->redirs), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->nredirs));
         } else {
           return mknil;
-        }
+        };
         [*CmdState](payload(cAddrN, 0))->redirs = 0;
-        if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
+        val _u53 = if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
           return call Rt.epFreeArgv(mknum([*CmdState](payload(cAddrN, 0))->argv), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->argc));
         } else {
           return mknil;
-        }
+        };
         [*CmdState](payload(cAddrN, 0))->argv = 0;
         return mknum(-1);
       }
       val nstdin = call Rt.epCountStdin(mknum([*CmdState](payload(cAddrN, 0))->redirs), mknum([*CmdState](payload(cAddrN, 0))->nredirs), mknum(0));
       if (mkbool(payload(nstdin, 0) > 1)) {
-        if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
+        val _u54 = if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
           return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum([*Prog]([*CmdState](payload(cAddrN, 0))->subprog)->chains), mknum(0));
         } else {
           return mknil;
-        }
-        if (mkbool([*CmdState](payload(cAddrN, 0))->redirs != 0)) {
+        };
+        val _u55 = if (mkbool([*CmdState](payload(cAddrN, 0))->redirs != 0)) {
           return call Rt.epFreeRedirs(mknum([*CmdState](payload(cAddrN, 0))->redirs), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->nredirs));
         } else {
           return mknil;
-        }
+        };
         [*CmdState](payload(cAddrN, 0))->redirs = 0;
-        if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
+        val _u56 = if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
           return call Rt.epFreeArgv(mknum([*CmdState](payload(cAddrN, 0))->argv), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->argc));
         } else {
           return mknil;
-        }
+        };
         [*CmdState](payload(cAddrN, 0))->argv = 0;
         return mknum(-1);
       }
       return mknum(0);
     } else {
       if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
-        if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
+        val _u57 = if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
           return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum([*Prog]([*CmdState](payload(cAddrN, 0))->subprog)->chains), mknum(0));
         } else {
           return mknil;
-        }
-        if (mkbool([*CmdState](payload(cAddrN, 0))->redirs != 0)) {
+        };
+        val _u58 = if (mkbool([*CmdState](payload(cAddrN, 0))->redirs != 0)) {
           return call Rt.epFreeRedirs(mknum([*CmdState](payload(cAddrN, 0))->redirs), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->nredirs));
         } else {
           return mknil;
-        }
+        };
         [*CmdState](payload(cAddrN, 0))->redirs = 0;
-        if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
+        val _u59 = if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
           return call Rt.epFreeArgv(mknum([*CmdState](payload(cAddrN, 0))->argv), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->argc));
         } else {
           return mknil;
-        }
+        };
         [*CmdState](payload(cAddrN, 0))->argv = 0;
         return mknum(-1);
       }
       word depthW = [*Scratch](payload(stN, 0))->depth;
       if (mkbool(depthW >= 32)) {
-        if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
+        val _u60 = if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
           return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum([*Prog]([*CmdState](payload(cAddrN, 0))->subprog)->chains), mknum(0));
         } else {
           return mknil;
-        }
-        if (mkbool([*CmdState](payload(cAddrN, 0))->redirs != 0)) {
+        };
+        val _u61 = if (mkbool([*CmdState](payload(cAddrN, 0))->redirs != 0)) {
           return call Rt.epFreeRedirs(mknum([*CmdState](payload(cAddrN, 0))->redirs), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->nredirs));
         } else {
           return mknil;
-        }
+        };
         [*CmdState](payload(cAddrN, 0))->redirs = 0;
-        if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
+        val _u62 = if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
           return call Rt.epFreeArgv(mknum([*CmdState](payload(cAddrN, 0))->argv), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->argc));
         } else {
           return mknil;
-        }
+        };
         [*CmdState](payload(cAddrN, 0))->argv = 0;
         return mknum(-1);
       }
@@ -4358,44 +4392,44 @@ defun Rt.epCmd(e : val, stN : val, cAddrN : val) -> val {
       val subN = call Rt.epProg(subv, stN);
       [*Scratch](payload(stN, 0))->depth = depthW;
       if (mkbool(payload(subN, 0) < 0)) {
-        if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
+        val _u63 = if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
           return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum([*Prog]([*CmdState](payload(cAddrN, 0))->subprog)->chains), mknum(0));
         } else {
           return mknil;
-        }
-        if (mkbool([*CmdState](payload(cAddrN, 0))->redirs != 0)) {
+        };
+        val _u64 = if (mkbool([*CmdState](payload(cAddrN, 0))->redirs != 0)) {
           return call Rt.epFreeRedirs(mknum([*CmdState](payload(cAddrN, 0))->redirs), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->nredirs));
         } else {
           return mknil;
-        }
+        };
         [*CmdState](payload(cAddrN, 0))->redirs = 0;
-        if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
+        val _u65 = if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
           return call Rt.epFreeArgv(mknum([*CmdState](payload(cAddrN, 0))->argv), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->argc));
         } else {
           return mknil;
-        }
+        };
         [*CmdState](payload(cAddrN, 0))->argv = 0;
         return mknum(-1);
       }
       [*CmdState](payload(cAddrN, 0))->subprog = payload(subN, 0);
       val nstdin = call Rt.epCountStdin(mknum([*CmdState](payload(cAddrN, 0))->redirs), mknum([*CmdState](payload(cAddrN, 0))->nredirs), mknum(0));
       if (mkbool(payload(nstdin, 0) > 1)) {
-        if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
+        val _u66 = if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
           return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum([*Prog]([*CmdState](payload(cAddrN, 0))->subprog)->chains), mknum(0));
         } else {
           return mknil;
-        }
-        if (mkbool([*CmdState](payload(cAddrN, 0))->redirs != 0)) {
+        };
+        val _u67 = if (mkbool([*CmdState](payload(cAddrN, 0))->redirs != 0)) {
           return call Rt.epFreeRedirs(mknum([*CmdState](payload(cAddrN, 0))->redirs), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->nredirs));
         } else {
           return mknil;
-        }
+        };
         [*CmdState](payload(cAddrN, 0))->redirs = 0;
-        if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
+        val _u68 = if (mkbool([*CmdState](payload(cAddrN, 0))->argv != 0)) {
           return call Rt.epFreeArgv(mknum([*CmdState](payload(cAddrN, 0))->argv), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->argc));
         } else {
           return mknil;
-        }
+        };
         [*CmdState](payload(cAddrN, 0))->argv = 0;
         return mknum(-1);
       }
@@ -4420,12 +4454,12 @@ defun Rt.childCd(argvN : val, argcN : val, stN : val) -> val {
     return mknum(1);
   }
   word bufW = rawcall malloc(4096);
-  if (mkbool(bufW == 0)) {
+  val _u69 = if (mkbool(bufW == 0)) {
     word h = rawcall rt_halt();
     return mknil;
   } else {
     return mknum(0);
-  }
+  };
   call Rt.cStrCopyGo(dirN, mknum(bufW), mknum(0));
   word rc = rawcall chdir(bufW);
   rawcall free(bufW);

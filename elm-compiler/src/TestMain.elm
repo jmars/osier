@@ -3675,6 +3675,87 @@ checks rt runtimeMidText =
             _ ->
                 False
         )
+    -- ==================== THE `return`-inside-`if` FLIP: THE THREE SPELLINGS ====================
+    -- Stage 1 of the return-flip unit migrated EVERY statement-position `if` in
+    -- runtime.mid whose BOTH branches `return` (69 sites, 19 defuns) out of the
+    -- dead-bind shape, because that shape is what a `return`-that-exits flips.
+    -- Three spellings carry the migration, and each has a row HERE so a later
+    -- change to the lowering cannot rot one silently.  They are not decoration:
+    -- all three are live in runtime.mid (spelling 1 in 333 sites, spelling 2 in
+    -- the 69 migrated ones, spelling 3 in Rt.gcMarkRoots' four-way dispatch).
+    , check "SPELLING 1 (one-sided guard): the guard's work lives in the then arm and the CONTINUATION lands in the FALSE path, so the guard is a real early exit and nothing dead-binds — `if (c) { word h = rawcall rt_halt(); return 1; } return 7;` lowers to `If c (let h = rt_halt() in 1) (7)`"
+        (case
+            lowlModuleBody "defun Rt.t(d : val) -> val {\n  if (mkbool(1)) {\n    word h = rawcall rt_halt();\n    return mknum(1);\n  }\n  return mknum(7);\n}"
+         of
+            Ok e ->
+                case e of
+                    If { thenBranch, elseBranch } ->
+                        (case thenBranch of
+                            Let { body } ->
+                                numLit 1 body
+
+                            _ ->
+                                False
+                        )
+                            && numLit 7 elseBranch
+
+                    _ ->
+                        False
+
+            _ ->
+                False
+        )
+    , check "SPELLING 2 (conditional VALUE — the migration's form): `val u = if (c) { A; return x; } else { B; return y; }` puts the same If in a DECLARATION, where `return` is the BRANCH's value by L3 — so the statement means what the dead-bind meant (run one arm for its effects, then carry on) under EITHER reading of a statement `return`.  The tree is the LANDMINE PIN's tree: `Let u = If c x y in 7`"
+        (case
+            lowlModuleBody "defun Rt.t(d : val) -> val {\n  val u = if (mkbool(1)) {\n    return mknum(1);\n  } else {\n    return mknum(2);\n  };\n  return mknum(7);\n}"
+         of
+            Ok e ->
+                case e of
+                    Let { binders, body } ->
+                        case binders of
+                            [ LetBind b ] ->
+                                (b.binder.name == "u")
+                                    && (case b.value of
+                                            If _ ->
+                                                numLit 7 body
+
+                                            _ ->
+                                                False
+                                       )
+
+                            _ ->
+                                False
+
+                    _ ->
+                        False
+
+            _ ->
+                False
+        )
+    , check "SPELLING 3 (dispatch chain + TAIL CALLS): each arm does its work and tail-calls the next dispatcher, so the chain needs no dead bind and no join — the Rt.gcMarkRoots shape, here as `if (a) { work; return call Rt.t(n); } if (b) { work; return call Rt.t(n); } return mknil;` folding into nested Ifs whose then arms END in a self-call"
+        (case
+            lowlModuleBody "defun Rt.t(d : val) -> val {\n  if (mkbool(tagis(d, 1) == 1)) {\n    word z = payload(d, 0);\n    return call Rt.t(mknum(z));\n  }\n  if (mkbool(tagis(d, 2) == 1)) {\n    word z = payload(d, 0);\n    return call Rt.t(mknum(z));\n  }\n  return mknil;\n}"
+         of
+            Ok e ->
+                case e of
+                    If { thenBranch, elseBranch } ->
+                        tailSelfCall "Rt.t" thenBranch
+                            && (case elseBranch of
+                                    If inner ->
+                                        tailSelfCall "Rt.t" inner.thenBranch
+
+                                    _ ->
+                                        False
+                               )
+
+                    _ ->
+                        False
+
+            _ ->
+                False
+        )
+    , check "SPELLING 2 INVENTORY (the migration is present and complete): runtime.mid carries 69 `val _uN = if` declarations — the re-derived count of statement-position ifs whose BOTH branches `return` (24 in the 4 sites whose continuation halts / 45 in the 15 whose continuation does work, counted by the LOWERER's own both-diverge arm and by an independent parser scan, which agree at 69/69 per defun).  A site reverted to the bare form drops this count"
+        (List.length (List.filter isMigratedSite (String.split "\n" runtimeMidText)) == 69)
     , check "U5 ACCEPT: the collector's `*Region` binder is the typed VIEW over the word it already held — `*Region r = payload(v, 0); r->cursor` loads the same node as `word r = payload(v, 0); wload(r, 3)`, and `wload(r, <computed>)` (the mark stack) still type-checks on the POINTER, which is what lets tier (i) convert only the constant-offset sites"
         (case
             ( lowlModuleBody "struct R { a : word; b : word; c : word; d : word; }\ndefun Rt.a(v : val, i : word) -> word {\n  *R r = payload(v, 0);\n  return r->d + wload(r, i);\n}"
@@ -10977,6 +11058,43 @@ byteSlots n =
 -- the NUMBER tag whose single word is the literal `n`.  Used by the two
 -- landmine rows to name which arm's value they are looking at, without pinning
 -- the rest of the tree.
+{-| The stage-1 migration's own line shape: a `val _uN = if (..)` DECLARATION
+(the sites are indented arbitrarily deep; the header comment that SPELLS the
+form is a `//` line and must not count).
+-}
+isMigratedSite : String -> Bool
+isMigratedSite line =
+    let
+        t =
+            String.trim line
+    in
+    String.startsWith "val _u" t && not (String.startsWith "//" t)
+
+
+{-| SPELLING 3's shape reader: a branch that ends in a tail call to `key`
+(an `App` on the defun's own GRef), possibly after a statement chain.
+-}
+tailSelfCall : String -> Exp -> Bool
+tailSelfCall key e =
+    case e of
+        App { fn } ->
+            case fn of
+                GRef g ->
+                    g.key == key && not g.force
+
+                _ ->
+                    False
+
+        Unsafe (RawCall rc) ->
+            rc.sym == key
+
+        Let { body } ->
+            tailSelfCall key body
+
+        _ ->
+            False
+
+
 numLit : Int -> Exp -> Bool
 numLit n e =
     case e of
