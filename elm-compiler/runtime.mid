@@ -141,8 +141,14 @@ extern fstatat(dirfd : i32, path : ptr, buf : ptr, flag : i32) -> i32;
 //   slot 4  heapEnd     the end of the heap half (the mark walk's upper bound)
 //   slot 5  markTop     mark-stack top; gcInit/collect set it to 64
 //   slot 6  markEnd     mark-stack end (gcInit: 64 + (heapBytes/8)/8)
-//   slot 7  _pad        NOTHING reads or writes it — a named hole, so a field
-//                       added here cannot silently shift slots 8..12
+//   slot 7  noreuse    QBE_MIDGC_NOREUSE: nonzero = NEVER pop a free-list
+//                       block (the sweep still links them, so the heap keeps
+//                       growing).  The M1 DISCRIMINATOR of GC ARC unit 1b:
+//                       with reuse OFF, a stale pointer can never alias a
+//                       LIVE object — its block's word 0 is the free-list
+//                       link (an in-heap pointer, not a value tag), so a
+//                       corrupt read is loud instead of plausible.  Set once
+//                       by gcInit from the environment; 0 in every normal run
 //   slot 8  kind        STAGING: the object kind, written by Rt.gcAlloc and
 //   slot 9  count       STAGING: the exact count, read back by Rt.gcAllocGo
 //   slot 10 heapBytes   the heap budget (rt_gc_heap_bytes)
@@ -198,7 +204,7 @@ struct Region {
   heapEnd : word;
   markTop : word;
   markEnd : word;
-  _pad : word;
+  noreuse : word;
   kind : word;
   count : word;
   heapBytes : word;
@@ -3310,6 +3316,12 @@ defun Rt.gcInit(dummy : val) -> val {
     // uses 2, 12, 13).
     word statsKnob = rawcall getenv(rawstr("QBE_MIDGC_STATS"));
     wstore(glob, 8, statsKnob);
+    // QBE_MIDGC_NOREUSE (GC ARC unit 1b): read ONCE here, stored in the
+    // region's slot 7 (the struct's `noreuse` field).  Rt.gcAllocGo then never
+    // pops a free-list block, so a swept block is never handed out again and a
+    // stale pointer cannot alias a live object.  Knob only — the environment
+    // is not consulted per allocation.
+    word noreuseKnob = rawcall getenv(rawstr("QBE_MIDGC_NOREUSE"));
     word heapBytes = rawcall rt_gc_heap_bytes();
     // THE HEAP CEILING (GC ARC unit 4).  `heapBytes` is the INITIAL heap, not
     // the heap — the same semantics the Zig arm gives the same knob
@@ -3392,6 +3404,7 @@ defun Rt.gcInit(dummy : val) -> val {
       wstore(base, 4, heapEnd);
       wstore(base, 5, 64);
       wstore(base, 6, markEnd);
+      wstore(base, 7, noreuseKnob);
       wstore(base, 10, heapBytes);
       wstore(base, 11, 0);
       wstore(base, 12, numClasses);
@@ -3525,6 +3538,18 @@ defun Rt.gcAllocGo(region : val, cls : val) -> val {
   if (mkbool(clsW >= n)) {
     return mknum(0);
   } else {
+    // QBE_MIDGC_NOREUSE (GC ARC unit 1b): the sweep still LINKS every freed
+    // block, but nothing ever pops one, so the heap only grows.  A stale
+    // pointer then lands on a block whose word 0 is that link — an in-heap
+    // address, not a value tag — which is the M1 discriminator: corruption
+    // that reuse would hide behind a plausible live object becomes loud.
+    // ONE-SIDED on purpose: this is the `thenDiv && not elseDiv` shape, which
+    // the lowerer splices the continuation into the false path — i.e. it means
+    // what it looks like under BOTH readings of a statement-position `return`
+    // (plan §6.4's landmine needs both branches diverging to bite).
+    if (mkbool(regionW->noreuse != 0)) {
+      return mknum(0);
+    }
     word head = wload(table, clsW);
     if (mkbool(head == 0)) {
       return mknum(0);

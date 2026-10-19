@@ -3599,16 +3599,18 @@ checks rt runtimeMidText =
     -- `wload(regionW, k)` BEFORE the re-spelling: the migration is only sound if
     -- every name still lands on the slot that code used (the pre-U5 emission is
     -- the independent record of the mapping, and the corpus gate holds the
-    -- accesses to it).  MEASURED: slot 7 is a HOLE — nothing in the runtime or in
-    -- tools/qbe/hostshim.zig reads or writes region word 7, which is why it is a
-    -- named `_pad` and not part of the 8/9 staging pair.
-    , check "U5 LAYOUT PIN: runtime.mid's own `struct Region` puts every field at the word slot the collector used before the re-spelling (magic 0, classTab 1, heapStart 2, cursor 3, heapEnd 4, markTop 5, markEnd 6, _pad 7, kind 8, count 9, heapBytes 10, allocated 11, numClass 12)"
+    -- accesses to it).  MEASURED: slot 7 was a HOLE — nothing in the runtime or
+    -- in tools/qbe/hostshim.zig read or wrote region word 7 — which is why it
+    -- was a named `_pad`; GC ARC unit 1b gave that hole its first tenant
+    -- (`noreuse`, the QBE_MIDGC_NOREUSE flag, set once by Rt.gcInit), so the
+    -- hole did its job: slots 8..12 did not shift.
+    , check "U5 LAYOUT PIN: runtime.mid's own `struct Region` puts every field at the word slot the collector used before the re-spelling (magic 0, classTab 1, heapStart 2, cursor 3, heapEnd 4, markTop 5, markEnd 6, noreuse 7, kind 8, count 9, heapBytes 10, allocated 11, numClass 12)"
         (let
             d =
                 declsOf runtimeMidText
 
             names =
-                [ "magic", "classTab", "heapStart", "cursor", "heapEnd", "markTop", "markEnd", "_pad", "kind", "count", "heapBytes", "allocated", "numClass", "ts0s", "ts0n", "ts1s", "ts1n", "ts2s", "ts2n", "collects", "marked", "sweptBytes", "markUs", "sweepUs", "capEnd" ]
+                [ "magic", "classTab", "heapStart", "cursor", "heapEnd", "markTop", "markEnd", "noreuse", "kind", "count", "heapBytes", "allocated", "numClass", "ts0s", "ts0n", "ts1s", "ts1n", "ts2s", "ts2n", "collects", "marked", "sweptBytes", "markUs", "sweepUs", "capEnd" ]
          in
          List.map (\n -> Check.fieldOffset d "Region" n) names == List.map Just (byteSlots 25)
         )

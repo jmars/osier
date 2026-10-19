@@ -1,0 +1,233 @@
+// GC ARC unit 1b (a) — THE CHEAP SHAPE REPRODUCER for the safepoint SIGSEGV.
+//
+// WHAT THE CRASH NEEDS (plan gc-plan.md §4.5, MEASURED there): ~40 GB of
+// selfhost emit, i.e. a record/cons WALK whose field reads are themselves
+// safepoints, over a heap that has already recycled millions of blocks.  At
+// 23 MB/s that is a 37-42 minute run, so it is not a usable instrument.  The
+// SHAPE is what this fixture builds, in seconds:
+//
+//   build  — `n` 14-word NODE vectors (the compiler's 13-field record shape,
+//            size class 9 = 576 B) chained by a child handle, each holding a
+//            3-element ARG vector (the `app.args` cons shape);
+//   churn  — allocate and DROP `2n` more nodes, i.e. exactly the same size
+//            class, so the sweep's freed blocks are handed straight back out
+//            (the "recycled heap behind it" of the crash);
+//   walk   — read every field of every node, walk its arg vector, and
+//            ALLOCATE a 2-word result cell per node (so the walk itself is
+//            safepoint-bearing, which is the whole point).
+//
+// THREE ARMS, and the difference between them is the instrument:
+//
+//   * `nat`   — the graph is held in a ROOTED `val` (a frame slot) across the
+//               churn.  A correct collector must print the golden.  This is
+//               the "shippable program" arm: if the compiler's own walk were
+//               correctly rooted, this is its shape.
+//   * `stale` — the SAME graph, but its only handle lives in a raw struct
+//               field (`Hold.node`, a *word*-addressed frame block) and the
+//               producing frame has returned, so NOTHING ROOTS IT: the churn's
+//               collects reclaim it and the walk then reads recycled blocks.
+//               This is B7 obligation (a) — the M1 shape — deliberately
+//               violated, and it is what makes this fixture an INSTRUMENT
+//               rather than a test: it proves a stale record pointer is
+//               observable at fixture scale in SECONDS.
+//   * QBE_MIDGC_NOREUSE=1 (an environment knob, no rebuild) re-runs either arm
+//               with the free list never popped: a stale pointer can then
+//               never alias a LIVE object — it lands on a freed block whose
+//               word 0 is the class list's link.  Plan §4.3 names that as the
+//               M1 discriminator, and tools/qbe/probe-midgc-walk.sh runs it.
+//
+// WHAT IT DOES **NOT** CLAIM: a `stale` mismatch is the collector behaving
+// correctly (an unrooted referent is garbage).  It says the corruption the
+// compiler suffers at 40 GB is DETECTABLE in 2 seconds when the shape is
+// built on purpose — so the next attempt at the crash has a cheap oracle.
+module Wmidwalk
+
+export Wmidwalk.nat : val -> val -> val
+export Wmidwalk.stale : val -> val -> val
+export Wmidwalk.midbuild : val -> val -> val
+
+// The raw holder the `stale` arm writes through: a FRAME struct, so the field
+// address is a plain word and the collector does not know it is a root.
+struct Hold { node : val; }
+
+// THE ARG VECTOR (3 words) — the `app.args` shape: a node's children as a
+// small vector of values.
+defun Wmidwalk.mkargs(i : val) -> val {
+  word base = allocvec(3);
+  vecstore(base, 0, mknum(payload(i, 0)));
+  vecstore(base, 1, mknum(payload(i, 0) + 1));
+  vecstore(base, 2, mknum(payload(i, 0) + 2));
+  return mkvec(base, 3);
+}
+
+// A NODE: 14 words — 11 numeric fields (the record body a `snd (assoc ..)` /
+// `vecload` walk reads), the arg vector at 11, the CHILD handle at 12, and a
+// has-child flag at 13 (a flag, not a tag test: the walk must not need to
+// interpret a value the collector may have recycled).
+//
+// THE ARG VECTOR IS BUILT FIRST, and that ordering is LOAD-BEARING: `word
+// base` is a RAW binder, i.e. NOT a root, so an allocating call between
+// `allocvec` and the last `vecstore` can collect the half-built body and hand
+// its block to someone else.  `mknodeBad` below is deliberately the other
+// order — it is the M1 shape (B7 obligation (a)) and the fixture's third arm.
+defun Wmidwalk.mknode(i : val, child : val, hasChild : val) -> val {
+  val args = call Wmidwalk.mkargs(i);
+  word base = allocvec(14);
+  vecstore(base, 0, mknum(payload(i, 0)));
+  vecstore(base, 1, mknum(payload(i, 0) + 1));
+  vecstore(base, 2, mknum(payload(i, 0) + 2));
+  vecstore(base, 3, mknum(payload(i, 0) + 3));
+  vecstore(base, 4, mknum(payload(i, 0) + 4));
+  vecstore(base, 5, mknum(payload(i, 0) + 5));
+  vecstore(base, 6, mknum(payload(i, 0) + 6));
+  vecstore(base, 7, mknum(payload(i, 0) + 7));
+  vecstore(base, 8, mknum(payload(i, 0) + 8));
+  vecstore(base, 9, mknum(payload(i, 0) + 9));
+  vecstore(base, 10, mknum(payload(i, 0) + 10));
+  vecstore(base, 11, args);
+  vecstore(base, 12, child);
+  vecstore(base, 13, hasChild);
+  return mkvec(base, 14);
+}
+
+// THE VIOLATION (M1 / B7 obligation (a)): the SAME node, built with the body
+// FIRST and the arg vector — a safepoint — allocated while the body's only
+// handle is the raw `word base`, which nothing roots.  A collection inside
+// `mkargs` therefore reclaims the half-built body; the stores below then write
+// into a block the allocator has already handed out again, and the handle this
+// returns is not an object this program owns.
+defun Wmidwalk.mknodeBad(i : val, child : val, hasChild : val) -> val {
+  word base = allocvec(14);
+  vecstore(base, 0, mknum(payload(i, 0)));
+  vecstore(base, 1, mknum(payload(i, 0) + 1));
+  vecstore(base, 2, mknum(payload(i, 0) + 2));
+  vecstore(base, 3, mknum(payload(i, 0) + 3));
+  vecstore(base, 4, mknum(payload(i, 0) + 4));
+  vecstore(base, 5, mknum(payload(i, 0) + 5));
+  vecstore(base, 6, mknum(payload(i, 0) + 6));
+  vecstore(base, 7, mknum(payload(i, 0) + 7));
+  vecstore(base, 8, mknum(payload(i, 0) + 8));
+  vecstore(base, 9, mknum(payload(i, 0) + 9));
+  vecstore(base, 10, mknum(payload(i, 0) + 10));
+  vecstore(base, 11, call Wmidwalk.mkargs(i));
+  vecstore(base, 12, child);
+  vecstore(base, 13, hasChild);
+  return mkvec(base, 14);
+}
+
+// BUILD a chain of `n` nodes, tail-recursively (`acc` is a rooted `val`
+// parameter — the build's own state travels in the arguments, the tree's
+// dominant idiom, so no `val` local is ever reassigned).
+defun Wmidwalk.buildGo(i : val, n : val, acc : val, hasChild : val) -> val {
+  if (mkbool(payload(i, 0) >= payload(n, 0))) {
+    return acc;
+  } else {
+    val nd = call Wmidwalk.mknode(i, acc, hasChild);
+    recur(mknum(payload(i, 0) + 1), n, nd, mknum(1));
+  }
+}
+
+// THE SAME CHAIN, built through the violating `mknodeBad`: the ONLY
+// difference from `buildGo` is the intra-node ordering, so any divergence
+// between the two arms is that ordering and nothing else.
+defun Wmidwalk.buildGoBad(i : val, n : val, acc : val, hasChild : val) -> val {
+  if (mkbool(payload(i, 0) >= payload(n, 0))) {
+    return acc;
+  } else {
+    val nd = call Wmidwalk.mknodeBad(i, acc, hasChild);
+    recur(mknum(payload(i, 0) + 1), n, nd, mknum(1));
+  }
+}
+
+// CHURN: `n` nodes allocated and dropped.  Same size class as the graph's
+// nodes, so a collected graph block is exactly what the next allocation gets.
+defun Wmidwalk.churnGo(i : val, n : val) -> val {
+  if (mkbool(payload(i, 0) >= payload(n, 0))) {
+    return mknil;
+  } else {
+    val dead = call Wmidwalk.mknode(i, mknil, mknum(0));
+    recur(mknum(payload(i, 0) + 1), n);
+  }
+}
+
+// THE ARG WALK — the `snd (assoc ..)` half: a value that allocates nothing and
+// reads a child vector.
+defun Wmidwalk.argsWalk(a : val, acc : val) -> val {
+  word base = payload(a, 0);
+  word s = payload(acc, 0) + payload(vecload(base, 0), 0) + payload(vecload(base, 1), 0) + payload(vecload(base, 2), 0);
+  return mknum(s);
+}
+
+// THE WALK.  Reads all 11 body fields, walks the arg vector, ALLOCATES a
+// 2-word result cell (the safepoint the shape needs), then tail-recurses into
+// the child.  Everything the next step needs is read BEFORE the allocation, so
+// a rooted graph is walked correctly — and an unrooted one is not.
+defun Wmidwalk.walk(node : val, acc : val, budget : val) -> val {
+  // THE STEP BUDGET is an INSTRUMENT, not semantics: an honest chain of `n`
+  // nodes terminates on its own (the root has hasChild 0), so a budget of 4n
+  // never binds.  A CORRUPTED chain can cycle — the collector's recycled
+  // blocks hold plausible child handles — and a hang is a useless probe
+  // result, so every arm terminates and reports a WRONG NUMBER instead.
+  if (mkbool(payload(budget, 0) <= 0)) {
+    return mknum(payload(acc, 0));
+  }
+  word base = payload(node, 0);
+  val hasChild = vecload(base, 13);
+  val child = vecload(base, 12);
+  val args = vecload(base, 11);
+  word t = payload(vecload(base, 0), 0);
+  word f1 = payload(vecload(base, 1), 0);
+  word f2 = payload(vecload(base, 2), 0);
+  word f3 = payload(vecload(base, 3), 0);
+  word f4 = payload(vecload(base, 4), 0);
+  word f5 = payload(vecload(base, 5), 0);
+  word f6 = payload(vecload(base, 6), 0);
+  word f7 = payload(vecload(base, 7), 0);
+  word f8 = payload(vecload(base, 8), 0);
+  word f9 = payload(vecload(base, 9), 0);
+  word f10 = payload(vecload(base, 10), 0);
+  val asum = call Wmidwalk.argsWalk(args, mknum(0));
+  word total = payload(acc, 0) + t + f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9 + f10 + payload(asum, 0);
+  word cell = allocvec(2);
+  vecstore(cell, 0, mknum(total & 65535));
+  vecstore(cell, 1, mknil);
+  if (mkbool(payload(hasChild, 0) == 1)) {
+    recur(child, mknum(total), mknum(payload(budget, 0) - 1));
+  } else {
+    return mknum(total);
+  }
+}
+
+// ARM 1 — the graph ROOTED (a `val` local in this frame) across the churn.
+defun Wmidwalk.nat(n : val, ch : val) -> val {
+  val keep = call Wmidwalk.buildGo(mknum(0), n, mknil, mknum(0));
+  val junk = call Wmidwalk.churnGo(mknum(0), ch);
+  return call Wmidwalk.walk(keep, mknum(0), mknum(payload(n, 0) * 4));
+}
+
+// ARM 2 — the graph built through the VIOLATING node builder, then held in a
+// rooted `val` exactly like arm 1: the hold is correct, the CONSTRUCTION is
+// not, which is the compiler-walk shape this fixture exists for.
+defun Wmidwalk.midbuild(n : val, ch : val) -> val {
+  val keep = call Wmidwalk.buildGoBad(mknum(0), n, mknil, mknum(0));
+  val junk = call Wmidwalk.churnGo(mknum(0), ch);
+  return call Wmidwalk.walk(keep, mknum(0), mknum(payload(n, 0) * 4));
+}
+
+// ARM 3 — the graph built in a frame that DIES: the only handle is the raw
+// struct field, so nothing roots the graph and the churn reclaims it.
+defun Wmidwalk.produce(sv : val, n : val) -> val {
+  *Hold p = payload(sv, 0);
+  val g = call Wmidwalk.buildGo(mknum(0), n, mknil, mknum(0));
+  p->node = g;
+  return mknil;
+}
+
+defun Wmidwalk.stale(n : val, ch : val) -> val {
+  Hold h;
+  word hv = &h;
+  call Wmidwalk.produce(mknum(hv), n);
+  val junk = call Wmidwalk.churnGo(mknum(0), ch);
+  val root = h.node;
+  return call Wmidwalk.walk(root, mknum(0), mknum(payload(n, 0) * 4));
+}
