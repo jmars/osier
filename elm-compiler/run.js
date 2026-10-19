@@ -104,8 +104,10 @@ const QBE_MIDHOST = process.env.QBE_MIDHOST !== '0';
 // seats Rt.allocVector/Rt.allocRaw (which own a separate mmap'd heap and
 // trigger Rt.collect), instead of the Zig rt_vec_alloc/rt_raw_alloc seats.
 //
-// THE COLLECTOR IS THE DEFAULT (stage 7 O3): the Mid mark-sweep collector is
-// what every allocation in a fresh build goes through, and the Zig collector
+// NOT THE DEFAULT (reverted 2026-10-19, one day after O3): the Mid mark-sweep
+// collector CANNOT yet carry the default — MEASURED `churn`/`vfield-rooted`
+// die `midgc: out of memory` at QBE_MB=16, and the seed-built compiler
+// SIGSEGVs in a safepoint walk.  It stays opt-in until the nursery work lands., and the Zig collector
 // (`gc/*` + the rt_vec_alloc/rt_raw_alloc seats) becomes DEAD CODE — O4
 // deletes its allocation seats.  `QBE_MIDGC=0` is the ESCAPE HATCH and stays
 // until O4: it is the Zig-collector arm the Mid one is differentially measured
@@ -123,7 +125,7 @@ const QBE_MIDHOST = process.env.QBE_MIDHOST !== '0';
 // the env of a later run).  Both halves say the same thing with the same
 // spelling — the SPLICE below is what puts the run-time half in the binary,
 // which is why this constant lives HERE and not with the other flag knobs.
-const QBE_MIDGC = process.env.QBE_MIDGC !== '0';
+const QBE_MIDGC = process.env.QBE_MIDGC === '1';
 // THE SECOND SPLICE (stage 7 O3): the RUN-time half of the MIDGC x MIDHOST
 // refusal.  One region, INSIDE Rt.main's host arm (it has to be: the run-time
 // hatch it guards is in that arm), kept iff QBE_MIDGC — so a MIDGC build's

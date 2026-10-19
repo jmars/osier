@@ -321,12 +321,12 @@ renderJob rt corpus entryKey ( job, elmGroup ) midResult =
             -- run.js's DEFAULT flag vector, ALL ELEVEN ON (flatten, rep,
             -- primDirect, midRt inject, midCons route, rtLean lean ABI, mono
             -- specialiser, consArr, rec, typeSpec, eqPtrFast), the trailing
-            -- midGc = True (run.js's QBE_MIDGC default since stage 7 O3 —
+            -- midGc = False (reverted 2026-10-19: the Mid collector is opt-in again —
             -- the collector is now the DEFAULT, and this literal is the
             -- hand-copied twin TestMain's U2-fix-4 row pins).  B4 removed the
             -- midDriver flag — the Mid driver is the only route.  See the
             -- pre-M4 comment for the flip's midCons note.
-            renderSsa (QbeModule.compileEntry rt corpus elmGroup midTexts entryKey True True True True True True True ( ( True, ( True, True, True ) ), True ))
+            renderSsa (QbeModule.compileEntry rt corpus elmGroup midTexts entryKey True True True True True True True ( ( True, ( True, True, False ) ), True ))
 
 
 -- ======================= M4: reader-side .mid import resolution =======================
