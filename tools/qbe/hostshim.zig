@@ -690,22 +690,53 @@ fn callArityRet(arity: i32, f: *const anyopaque, e: ?[*]Value, buf: [*]Value) Re
 /// The effect loop's `host_apply` hook.  Every lambda the QBE path produces
 /// is Desc*-coded (never a VM *Instr), so an interpreted applier would
 /// execute a Desc as instructions.  The effect loop's call sites are ONE
-/// continuation/handler arg or TWO update args — always a SATURATED call to
-/// a fully-applied closure — so this dispatches straight through the arity
-/// table (callArityRet + bounce) instead of the generic rt_apply/applyGo
-/// path, which B4 DELETED (generated code now routes through the Mid
-/// Rt.apply defun; only the Zig effect loop still needs a native applier).
+/// continuation/handler arg or TWO update args — always a SATURATED call,
+/// i.e. `args.len == lambda.code_len` (the REMAINING arity) — so this
+/// dispatches through the arity table (callArityRet + bounce) instead of the
+/// generic rt_apply/applyGo path, which B4 DELETED (generated code now
+/// routes through the Mid Rt.apply defun; only the Zig effect loop still
+/// needs a native applier).
+///
+/// THE APPLIED PREFIX IS NOT OPTIONAL (MEASURED 2026-10-19).  "Saturated"
+/// does NOT mean "fully applied": a SATURATED call on a HALF-APPLIED closure
+/// (`code_len < desc.arity`, the `napp` cells already sitting in
+/// `lambda.env`) is exactly what a `Task.andThen (f a) task` continuation is
+/// — NativeMain's own manifest read is one.  Passing desc.arity params with
+/// only `args.len` cells filled hands the callee `napp` UNINITIALISED
+/// pointers AND the wrong `env`, which is silent garbage, not a crash: the
+/// seed-built compiler read its manifest into a garbage String and printed
+/// "elmc: manifest has no groups" (tools/qbe/fixtures/rfpart.elm is the
+/// pinned reproducer).  This now does what the Mid applier's
+/// `rt_call2r` bridge does — params = the applied cells then the new args,
+/// env advanced past the applied cells — so both hosts agree.
+///
 /// The `argbuf` is a C-stack copy read EXACTLY ONCE by the callee's prologue
 /// blit (the same single-referee invariant the old rt_apply path relied on),
 /// so no root is needed across the call — fnv/args are Values the effect loop
-/// already holds in its rooted slots.
+/// already holds in its rooted slots, and the applied cells are read out of
+/// the closure's own env before the call (nothing allocates here).
 fn hostApply(vm_: *state.Vm, fnv: Value, args: []const Value) state.VmError!Value {
     _ = vm_;
     if (args.len > max_arity) dieLoud("host apply exceeds the qbe rt_callN table");
     if (fnv.tag != .lambda) dieLoud("host apply of a non-function value");
     const desc: *Desc = @ptrCast(@alignCast(fnv.payload.lambda.code));
+    const rem: i32 = fnv.payload.lambda.code_len; // the REMAINING arity
+    const napp: i32 = desc.arity - rem; // the applied prefix already in env
     var argbuf: [max_arity]Value = undefined;
     var i: usize = 0;
+    if (napp > 0) {
+        const env = fnv.payload.lambda.env orelse
+            dieLoud("host apply: closure env missing for applied args");
+        if (@as(usize, @intCast(rem)) != args.len)
+            dieLoud("host apply: a partially applied closure was called with the wrong arity");
+        if (napp + @as(i32, @intCast(args.len)) > max_arity)
+            dieLoud("host apply exceeds the qbe rt_callN table");
+        const nappU: usize = @intCast(napp);
+        while (i < nappU) : (i += 1) argbuf[i] = env[i]; // the applied cells
+        var j: usize = 0;
+        while (j < args.len) : (j += 1) argbuf[nappU + j] = args[j]; // then the new args
+        return bounce(callArityRet(napp + @as(i32, @intCast(args.len)), desc.code, env + nappU, &argbuf));
+    }
     while (i < args.len) : (i += 1) argbuf[i] = args[i];
     return bounce(callArityRet(desc.arity, desc.code, fnv.payload.lambda.env, &argbuf));
 }
