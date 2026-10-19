@@ -1191,44 +1191,52 @@ defun Rt.numText(n : val) -> val {
     bytestore(z, 1, 0);
     return mkstr(z, 1);
   }
-  word cnt = call Rt.digitCount(nw, 0);
+  val cnt = call Rt.digitCount(mknum(nw), mknum(0));
+  word nd = payload(cnt, 0);
   if (nw < 0) {
-    word ln = cnt + 1;
+    word ln = nd + 1;
     word sb = allocraw(ln + 1);
     bytestore(sb, 0, 45);
-    call Rt.numFill(sb + ln - 1, nw);
+    call Rt.numFill(mknum(sb + ln - 1), mknum(nw));
     bytestore(sb, ln, 0);
     return mkstr(sb, ln);
   }
-  word bp = allocraw(cnt + 1);
-  call Rt.numFill(bp + cnt - 1, nw);
-  bytestore(bp, cnt, 0);
-  return mkstr(bp, cnt);
+  word bp = allocraw(nd + 1);
+  call Rt.numFill(mknum(bp + nd - 1), mknum(nw));
+  bytestore(bp, nd, 0);
+  return mkstr(bp, nd);
 }
 
 // The decimal digit COUNT of n (`m / 10` truncates toward zero, so this
 // terminates on a negative m too and the magnitude is never negated — for
-// INT64_MIN `0 - m` would overflow).
-defun Rt.digitCount(m : word, i : word) -> word {
-  if (m == 0) {
+// INT64_MIN `0 - m` would overflow).  :val params with `recur` and a `mknum`
+// per step, exactly like Rt.countGo: a `mknum` is a FRAME-SLOT box (a 40-byte
+// aggregate store through the destination slot), NOT a GC allocation, so this
+// defun is non-allocating and therefore FRAME-FREE — which is what makes it
+// safe to call with an unrooted raw buffer in hand.  (A WORD-ABI loop cannot
+// do this: `raw-abi self-tail arg 0 is not the param register a0` — the word
+// loop may only recur on its constant params, copyWords' malloc'd counter.)
+defun Rt.digitCount(m : val, i : val) -> val {
+  if (payload(m, 0) == 0) {
     return i;
   }
-  recur(m / 10, i + 1);
+  recur(mknum(payload(m, 0) / 10), mknum(payload(i, 0) + 1));
 }
 
 // The digits of m, written RIGHT-TO-LEFT from `p` — the backward fill
 // Rt.gcNum already does, so no index arithmetic and no second pass.
 // `d + neg * (0 - 2 * d)` is |d| without a branch (`d < 0` is a 0/1 word),
-// which keeps INT64_MIN's digits exact.
-defun Rt.numFill(p : word, m : word) -> word {
-  word q = m / 10;
-  word d = m - q * 10;
+// which keeps INT64_MIN's digits exact.  Non-allocating, frame-free: see
+// digitCount's note.
+defun Rt.numFill(p : val, m : val) -> val {
+  word q = payload(m, 0) / 10;
+  word d = payload(m, 0) - q * 10;
   word neg = d < 0;
-  bytestore(p, 0, 48 + d + neg * (0 - 2 * d));
+  bytestore(payload(p, 0), 0, 48 + d + neg * (0 - 2 * d));
   if (q == 0) {
     return p;
   }
-  recur(p - 1, q);
+  recur(mknum(payload(p, 0) - 1), mknum(q));
 }
 
 defun Rt.bytesToStr(bs : val) -> val {
@@ -1302,29 +1310,30 @@ defun Rt.@p(car : val, cdr : val) -> val {
 // THE CONCATENATION (text-fix): ONE buffer of len(a)+len(b)+1, TWO byte
 // copies, ZERO cons cells — where this used to be bytesOf -> appendL ->
 // bytesToStr, i.e. 2*(la+lb) cons cells plus four walks of the result.
-// `Rt.byteCopyGo` is the loop (3 word params — the LEAN-ABI bound), and it
+// `Rt.byteCopyGo` is the loop (3 :val params, the LEAN-ABI bound), and it
 // advances BOTH pointers, so the second copy starts at buf+la.
 defun Rt.cn2(x : val, y : val) -> val {
   word lx = len32(x);
   word ly = len32(y);
   word buf = allocraw(lx + ly + 1);
-  call Rt.byteCopyGo(buf, payload(x, 0), lx);
-  call Rt.byteCopyGo(buf + lx, payload(y, 0), ly);
+  call Rt.byteCopyGo(mknum(buf), mknum(payload(x, 0)), mknum(lx));
+  call Rt.byteCopyGo(mknum(buf + lx), mknum(payload(y, 0)), mknum(ly));
   bytestore(buf, lx + ly, 0);
   return mkstr(buf, lx + ly);
 }
 
 // n bytes from src to dst, both pointers advancing: the ONLY copy loop the
-// text path needs (cn2, substring, symToStr, repeat).  Word params and word
-// compares throughout, so it allocates NOTHING — a caller can hold a freshly
-// `allocraw`'d buffer across it without a scavenge window (the cStrFill
-// lesson: an unrooted raw block must see no GC allocation before mkstr).
-defun Rt.byteCopyGo(dst : word, src : word, n : word) -> word {
-  if (n == 0) {
+// text path needs (cn2, substring, symToStr).  Non-allocating and therefore
+// FRAME-FREE (a `mknum` is a frame-slot box, not a GC allocation — see
+// digitCount), which is what lets a caller hold a freshly `allocraw`'d buffer
+// across it: no safepoint, so nothing can scavenge the unrooted block (the
+// cStrFill lesson).
+defun Rt.byteCopyGo(dst : val, src : val, n : val) -> val {
+  if (payload(n, 0) == 0) {
     return dst;
   }
-  bytestore(dst, 0, byteload(src, 0));
-  recur(dst + 1, src + 1, n - 1);
+  bytestore(payload(dst, 0), 0, byteload(payload(src, 0), 0));
+  recur(mknum(payload(dst, 0) + 1), mknum(payload(src, 0) + 1), mknum(payload(n, 0) - 1));
 }
 
 // A symbol's name is a NUL-terminated C string (payload word 0); one buffer,
@@ -1334,7 +1343,7 @@ defun Rt.symToStr(s : val) -> val {
   val len = call Rt.cStrLenGo(mknum(payload(s, 0)), mknum(0));
   word n = payload(len, 0);
   word buf = allocraw(n + 1);
-  call Rt.byteCopyGo(buf, payload(s, 0), n);
+  call Rt.byteCopyGo(mknum(buf), mknum(payload(s, 0)), mknum(n));
   bytestore(buf, n, 0);
   return mkstr(buf, n);
 }
@@ -4306,7 +4315,7 @@ defun Rt.substring(s : val, st : val, ln : val) -> val {
   val ln0 = mkbool(payload(ln, 0) < 0) ? mknum(0) : (mkbool((payload(st0, 0) + payload(ln, 0)) > len32(s)) ? mknum(len32(s) - payload(st0, 0)) : ln);
   word n = payload(ln0, 0);
   word buf = allocraw(n + 1);
-  call Rt.byteCopyGo(buf, payload(s, 0) + payload(st0, 0), n);
+  call Rt.byteCopyGo(mknum(buf), mknum(payload(s, 0) + payload(st0, 0)), mknum(n));
   bytestore(buf, n, 0);
   return mkstr(buf, n);
 }

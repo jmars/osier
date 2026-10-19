@@ -1138,7 +1138,7 @@ checks rt runtimeMidText =
     -- shapes are pinned, not just "it links".
     , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main + the B0 frame pair + stage 7A's die family (dieErr/hostDieErr — hostDieUnported left BOTH the family and the runtime at 7E, the unit that gave every Task ctor a real arm) are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo/frame set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set; the frame pair is FRAME-FREE by construction — its only nodes are rawcall/raw-word loads/stores and rawAbi->rawAbi calls to its one non-allocating helper)"
         (Rt.rawAbi
-            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.tail-known", "Rt.bounce", "Rt.dieErr", "Rt.hostDieErr", "Rt.byteCopyGo", "Rt.digitCount", "Rt.numFill" ]
+            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.tail-known", "Rt.bounce", "Rt.dieErr", "Rt.hostDieErr" ]
             && not (Set.member "Rt.die" rt.allocating)
             && not (Set.member "Rt.halt" rt.allocating)
             && not (Set.member "Rt.cStrEq" rt.allocating)
@@ -2003,6 +2003,15 @@ checks rt runtimeMidText =
             && not (Set.member "Rt.assocGo" rt.allocating)
             && not (Set.member "Rt.address->" rt.allocating)
             && not (Set.member "Rt.countL" rt.allocating)
+            -- text-fix: the byte-copy and digit loops MUST be frame-free — an
+            -- ALLOCATING callee allocates a GC frame at CALL time, i.e. a
+            -- safepoint, and cn2/numText/substring/symToStr call them while
+            -- holding a freshly `allocraw`'d — UNROOTED — buffer (the
+            -- cStrFill lesson: a collect there scavenges it).  Their bodies
+            -- are `mknum` (a frame-slot box, not a GC allocation) + `recur`.
+            && not (Set.member "Rt.byteCopyGo" rt.allocating)
+            && not (Set.member "Rt.digitCount" rt.allocating)
+            && not (Set.member "Rt.numFill" rt.allocating)
             && not (Set.member "Rt.conFill" rt.allocating)
             && not (Set.member "Rt.closureFill" rt.allocating)
             && not (Set.member "Rt.intern" rt.allocating)
@@ -8749,7 +8758,7 @@ checks rt runtimeMidText =
          in
          List.all (\k -> Set.member k rawSet) (Set.toList derived)
             && List.all (\d -> Dict.member d.key rt.abi) (List.filter (\d -> Set.member d.key rawSet) surface)
-            && Set.size derived == 14
+            && Set.size derived == 11
         )
 
     -- ---- B6: THE RAW-`Var` GAP (B3's pinned row, now CLOSED for a word binder) ----

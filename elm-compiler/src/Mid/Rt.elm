@@ -1455,14 +1455,6 @@ rawAbi =
           -- string it prints.
           "Rt.dieErr"
         , "Rt.hostDieErr"
-        , -- ===== text-fix's byte-copy and decimal-digit helpers.  All three
-          -- are word-in/word-out by SIGNATURE, so the B6 rule derives them;
-          -- they are declared here for the same reason the die family is
-          -- (one fact, two statements, no drift).  repGo is NOT here: it is
-          -- all-`:val` (the doubling concatenation over Rt.cn2).
-          "Rt.byteCopyGo"
-        , "Rt.digitCount"
-        , "Rt.numFill"
         ]
 
 
@@ -1502,12 +1494,6 @@ rawAbiArity =
           -- lowerDefun (rawAbiArityAgree).
         ( "Rt.tail-known", 3 )
         , ( "Rt.bounce", 1 )
-        , -- text-fix's byte helpers: word-in/word-out by signature (the
-          -- cons-per-character text path's replacements), so the rule derives
-          -- them and rawAbi must insert the same three.
-        ( "Rt.byteCopyGo", 3 )
-        , ( "Rt.digitCount", 2 )
-        , ( "Rt.numFill", 2 )
         , -- stage 7A's die family (see the rawAbi set above): the message, and
           -- the two-part variant's prefix + name.
           ( "Rt.dieErr", 1 )
