@@ -25,12 +25,28 @@
 #      through it without touching the table shows up as a count, not as prose.
 #      Its reachability argument (why no Mid object can hold it) is in
 #      plan.md §2.2's row; its ROOTING is probe-midgc-argv.sh's job.
-#   3. THE REFUSAL SET IS EXACTLY THE 21 GROUPS THE CENSUS REFUSES — 7 host-seam
-#      (Platform.program/Platform.worker -> Runtime.program/Runtime.worker) and
-#      14 `value`-prim.  A refusal that silently WIDENS hides work behind a
-#      compile error; one that silently NARROWS is the cross-heap hole.  The
-#      other 34 non-emitting groups are PRE-EXISTING compile_error rows (type
+#   3. THE REFUSAL SET IS NOW EMPTY — 0 host-seam, 0 `value`-prim — and that is
+#      the point, not a regression.  Until stage 7 O2 this probe pinned 21
+#      refused groups (7 host-seam: Platform.program/Platform.worker ->
+#      Runtime.program/Runtime.worker; 14 `value`-prim), because Lower.elm
+#      refused QBE_MIDGC=1 for any program whose host was the ZIG one.  O2 made
+#      the MID host the default and DELETED both refusal arms: the hole they
+#      refused closes by construction (one heap, the Mid collector, for every
+#      allocation on the route), so the sound domain is now every group that
+#      COMPILES.  The refusals' replacement is not a census but a CHOICE: the
+#      still-unsound pairing is "Mid heap + Zig host", which run.js refuses at
+#      BUILD time (MIDGC_DEPENDS_ON's QBE_MIDHOST entry) and which a MIDGC-built
+#      binary refuses again at RUN time (Rt.main's QBE_MIDGC region, stage 7 O3
+#      — see probe-midgc-midhost0.sh).  So the numbers to keep honest here are:
+#      refusals 0/0 (a refusal REAPPEARING means an arm came back), accepted ==
+#      every non-error group, and claim 1's forbidden count still 0 across that
+#      WIDER domain — which is what makes the widened domain safe to claim.
+#      The 34 non-emitting groups are PRE-EXISTING compile_error rows (type
 #      errors), which are neither accepted nor refused-by-census.
+#
+# (The flag is still passed EXPLICITLY: since stage 7 O3 QBE_MIDGC=1 IS the
+# default, so this reads the same emit either way — but the probe measures the
+# MIDGC route BY NAME, which is what makes it a pin rather than a coincidence.)
 #
 # WHAT IT CANNOT SEE (stated, not hidden): the emit is per group ENTRY-REACHABLE,
 # so a shape reachable only from an unregistered program is invisible here — the
@@ -125,9 +141,13 @@ if [ "$n_argv" -ne "$n_acc" ]; then
   echo "FAIL: rt_argv_install is not reached by every accepted program ($n_argv of $n_acc) — Rt.main calls it unconditionally, so either the route moved or this probe is measuring the wrong symbol; the argv row of plan.md §2.2 is now unbacked" >&2
   rc=1
 fi
-if [ "$n_host" -ne 7 ] || [ "$n_val" -ne 14 ]; then
-  echo "FAIL: the refusal set moved (host-seam $n_host, want 7; value-prim $n_val, want 14)." >&2
-  echo "  A WIDER refusal hides work behind a compile error; a NARROWER one is the cross-heap hole." >&2
+# STAGE 7 O2 DELETED THE TWO REFUSAL ARMS, so the set is pinned at ZERO in BOTH
+# arms (the census no longer refuses anything; the hole moved to a host CHOICE —
+# run.js MIDGC_DEPENDS_ON and, since O3, Rt.main's run-time refusal).  A
+# non-zero count here means an arm came back without the argument that deleted
+# it, which is why the assertion is `-eq 0` and not a comment.
+if [ "$n_host" -ne 0 ] || [ "$n_val" -ne 0 ]; then
+  echo "FAIL: the census refuses programs again (host-seam $n_host, value-prim $n_val; want 0/0 since stage 7 O2 deleted the two arms).  A refusal that comes back hides work behind a compile error; if it is intentional, say WHERE the hole reopened and why the host-choice guard cannot cover it." >&2
   echo "  host-seam: $(cat "$WORK/hostseam.txt")" >&2
   echo "  value-prim: $(cat "$WORK/valueprim.txt")" >&2
   rc=1
@@ -136,6 +156,7 @@ fi
 if [ "$rc" -eq 0 ]; then
   echo "PASS: under QBE_MIDGC=1, no accepted program reaches a Zig-GC allocator; the single"
   echo "      remaining Zig-heap allocation is the argv registry (plan.md §2.2's row), and the"
-  echo "      refusal set is exactly the 21 groups the census names."
+  echo "      refusal set is EMPTY (0/0 — O2's two arms are deleted; the unsound pairing is a"
+  echo "      host CHOICE now, refused at build time by run.js and at run time by Rt.main)."
 fi
 exit "$rc"

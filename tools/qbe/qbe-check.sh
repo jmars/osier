@@ -185,7 +185,11 @@ run_mid() {
   # which is "unset" to run.js) now carries the Mid host, and `=1` merely says so
   # explicitly.  It is left in place because the row that flips a knob back is
   # the cheap fail-before for the flip itself: `MIDHOST_ROW=` -> QBE_MIDHOST=0
-  # would drop the two host rows' seats.
+  # would drop the two host rows' seats.  SINCE STAGE 7 O3 THAT BY-HAND
+  # FAIL-BEFORE ALSO NEEDS `QBE_MIDGC=0`: the default collector is now the Mid
+  # one, and run.js REFUSES the QBE_MIDGC=1 + QBE_MIDHOST=0 BUILD outright
+  # (MIDGC_DEPENDS_ON), so the knob alone would exit 2 instead of compiling the
+  # unhosted arm.
   bin="$(QBE_MIDHOST="${MIDHOST_ROW:+1}" "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "${mids[@]}" "$entry" "$TMP/$name")" || {
     echo "FAIL $name: qbe-mk"; FAIL=1; return
   }
@@ -278,15 +282,21 @@ run_midrt() {
 # can stop it — and a compile that let it through would reach the linker as a
 # dangling `q_<key>` (the symptom M3fix-4's acceptance predicate replaced with
 # a named compile error).  `$5` asserts a substring of the REFUSAL MESSAGE, so
-# a row cannot pass on an unrelated (e.g. J2) failure.  `$6` optionally names
-# a hatch to run under; QBE_NOMIDRT=1 is what removes the defun here.
+# a row cannot pass on an unrelated (e.g. J2) failure.  `$6...` optionally name
+# the hatches to run under, as SEPARATE words (an array — one `env` argument per
+# flag, so a row can need two: since stage 7 O3 the Mid collector is the
+# default, and any hatch MIDGC_DEPENDS_ON names must be paired with QBE_MIDGC=0
+# or run.js refuses the BUILD and the row measures the GUARD's message instead
+# of its own).  QBE_NOMIDRT=1 is what removes the defun here.
 run_midref() {
-  local name="$1" entry="$2" fixture="$3" mid="$4" expect="$5" hatch="${6:-}"
+  local name="$1" entry="$2" fixture="$3" mid="$4" expect="$5"
+  shift 5
+  local hatch=("$@")
   local out="$TMP/$name-refusal"
   mkdir -p "$out"
   local rc=0
-  if [ -n "$hatch" ]; then
-    env "$hatch" "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$mid" "$entry" "$out" >/dev/null 2>&1 || rc=1
+  if [ "${#hatch[@]}" -gt 0 ]; then
+    env "${hatch[@]}" "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$mid" "$entry" "$out" >/dev/null 2>&1 || rc=1
   else
     "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$mid" "$entry" "$out" >/dev/null 2>&1 || rc=1
   fi
@@ -570,13 +580,20 @@ run_midgc_nsi() {
 }
 
 # run_midgc_io — the DEFAULT-path control for the host-IO fixture: with the Zig
-# collector (no MIDGC) the kept string is rooted -> evacuated, not reclaimed,
-# so the fixture prints the golden.  Proves the refusal did not change the
-# default path.
+# collector the kept string is rooted -> evacuated, not reclaimed, so the
+# fixture prints the golden.  Proves the refusal did not change the default
+# path.
+#
+# STAGE 7 O3 MOVED WHAT "THE DEFAULT PATH" IS: no flag now means the MID
+# collector (QBE_MIDGC defaults ON), so an unflagged build here would measure
+# the Mid path — which is probe-midgc-io.sh's row and NOT this one's claim.  The
+# control arm is therefore PINNED EXPLICITLY at QBE_MIDGC=0: this row is the
+# Zig-collector half of the pair, and the pair only means something when each
+# arm says which collector it is.
 run_midgc_io() {
   local name="$1" entry="$2" fixture="$3"
   local bin
-  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$TMP/$name")" || {
+  bin="$(QBE_MIDGC=0 "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$TMP/$name")" || {
     echo "FAIL $name: qbe-mk (default)"; FAIL=1; return
   }
   local nat_out exp
@@ -718,8 +735,11 @@ run_midrt user-mid-rtcall UserMidRtCall.main tools/qbe/fixtures/user-mid-rtcall.
 # program, so the exported key `Rt.read-file-as-string` has nothing behind it;
 # the compile must refuse loudly, naming the key.  run_midref greps the REFUSAL
 # MESSAGE ('not a defun of this program'), so a J2-level failure cannot satisfy
-# the row.
-run_midref midcallmissing MidCallMissing.main tools/qbe/fixtures/midcallmissing.elm tools/qbe/fixtures/midcallmissing.mid 'not a defun of this program' QBE_NOMIDRT=1
+# the row.  QBE_MIDGC=0 rides along (stage 7 O3): QBE_NOMIDRT=1 is a
+# MIDGC_DEPENDS_ON entry, so with the collector on by default this build would
+# be refused by run.js's GUARD instead — a different refusal, with a different
+# message, and the row would then be reading the guard rather than the program.
+run_midref midcallmissing MidCallMissing.main tools/qbe/fixtures/midcallmissing.elm tools/qbe/fixtures/midcallmissing.mid 'not a defun of this program' QBE_NOMIDRT=1 QBE_MIDGC=0
 # M4 (goal 4): the WORKED END-TO-END EXAMPLE — an Osier source IMPORTING a .mid
 # BY NAME.  importmid.elm declares `import Midmath`; run.js resolves that to
 # Midmath.mid next to the fixture (the .mid is NOT passed on the CLI — `run`
@@ -2476,7 +2496,13 @@ fi
 qbe_ssa_midrt() { # <fixture> <entry> <out.ssa> <mode: on|off|route|zig>
   local flags=""
   case "$4" in
-    off)   flags="QBE_NOMIDRT=1" ;;
+    # `off` ALSO PINS THE COLLECTOR OFF (stage 7 O3): QBE_NOMIDRT=1 is one of
+    # MIDGC_DEPENDS_ON's entries (withholding the Rt program makes the partial
+    # path revert to the Zig allocator), so a QBE_MIDGC=1 build of it is a LOUD
+    # compile refusal (exit 2) and the arm's .ssa would simply not exist.  The
+    # hatch this row measures is "the injection is gone", which is reachable
+    # only without the Mid collector — QBE_MIDGC=0 is the honest spelling.
+    off)   flags="QBE_NOMIDRT=1 QBE_MIDGC=0" ;;
     route) flags="" ;;
     zig)   flags="QBE_MIDZIG=1" ;;
   esac
@@ -2519,7 +2545,11 @@ qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-off.s
 qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-route.ssa" route
 qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-zig.ssa"  zig
 QBE_NOREP=1 qbe_ssa_midrt tools/qbe/fixtures/norep.elm NoRep.chain "$TMP/midrt-chain-host.ssa" route
-QBE_NOREP=1 QBE_MIDHOST=0 qbe_ssa_midrt tools/qbe/fixtures/norep.elm NoRep.chain "$TMP/midrt-chain-route.ssa" route
+# THE UNHOSTED ARM IS `QBE_MIDGC=0` TOO (stage 7 O3): QBE_MIDHOST=0 alone is now
+# a REFUSED BUILD (run.js MIDGC_DEPENDS_ON — the Zig host on a Mid heap), and
+# this arm's whole point is the route where the used-prim census is the ONLY
+# seed source, i.e. the no-host, no-Mid-collector tree.
+QBE_MIDGC=0 QBE_NOREP=1 QBE_MIDHOST=0 qbe_ssa_midrt tools/qbe/fixtures/norep.elm NoRep.chain "$TMP/midrt-chain-route.ssa" route
 
 midrt_bad=0
 if [ -s "$TMP/midrt-flat-on.ssa" ]; then

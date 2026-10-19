@@ -55,15 +55,23 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # THE TWO HOST ARMS (stage 7A's arm B, INVERTED by stage 7 O2): the MID effect
 # host is the DEFAULT, so an ordinary `run-elm-gate.sh` is the Mid-host arm; the
 # ZIG host — still in the tree, still the oracle, until O4 deletes it — is
-# selected by `QBE_MIDHOST=0 run-elm-gate.sh`.  The variable is read TWICE — by
-# the COMPILE (run.js keeps the host region by default and drops it on `=0`) and
-# by the NATIVE BINARIES at run time (Rt.main's getenv hatch, which is why ONE
-# default build still carries both hosts, and why `QBE_MIDHOST=0` on a
-# default-built binary is the differential inside a single artifact).  Both
-# phases inherit the caller's environment; this keeps the RUN phase explicitly in
-# the loop so the arm cannot become half-set by an invocation that scopes the
-# variable to the build.
+# selected by `QBE_MIDGC=0 QBE_MIDHOST=0 run-elm-gate.sh`.  The variable is read
+# TWICE — by the COMPILE (run.js keeps the host region by default and drops it on
+# `=0`) and by the NATIVE BINARIES at run time (Rt.main's getenv hatch, which is
+# why ONE default build still carries both hosts).  Both phases inherit the
+# caller's environment; this keeps the RUN phase explicitly in the loop so the
+# arm cannot become half-set by an invocation that scopes the variable to the
+# build.
+#
+# BOTH FLAGS FOR ARM B SINCE STAGE 7 O3: the collector is now the Mid one by
+# default, and `QBE_MIDHOST=0` on a Mid-collector build is REFUSED — twice, by
+# name: at COMPILE time by run.js (MIDGC_DEPENDS_ON, exit 2) and, for a binary
+# that was already built, at RUN time by Rt.main's QBE_MIDGC region (a loud
+# `QBE_MIDHOST=0 is refused` die, exit 1).  So arm B is `QBE_MIDGC=0
+# QBE_MIDHOST=0`, where one heap (the Zig collector) serves both hosts; the
+# single-flag form is a loud refusal, never a silent second arm.
 [ -n "${QBE_MIDHOST:-}" ] && export QBE_MIDHOST
+[ -n "${QBE_MIDGC:-}" ] && export QBE_MIDGC
 
 CDIR="${1:-$ROOT/elm-compiler}"
 FIX="${2:-$ROOT/tests/elm-fixtures}"

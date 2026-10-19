@@ -88,7 +88,10 @@ const RUNTIME_MID_RAW = fs.readFileSync(path.join(__dirname, 'runtime.mid'), 'ut
 // reproduced (the Zig host builds Zig-nursery strings/conses into Mid objects),
 // and it used to be caught by Lower.elm's two compile-time refusal arms, which
 // O2 deletes because the DEFAULT pair (MIDGC=1 + the Mid host) is sound by
-// construction.  The refusal's replacement is this guard, not silence.
+// construction.  The refusal's replacement is this guard, not silence — and
+// since O3 the guard has a second half, because this one sees only the BUILD:
+// MIDGC's region below makes a MIDGC-built binary REFUSE `QBE_MIDHOST=0` at
+// RUN time, which no compile-time guard can see.
 //
 // The markers are the contract with the file (TestMain pins their shape: one
 // BEGIN, one END, BEGIN first).  They are `//` comments, which are emit-inert
@@ -96,27 +99,65 @@ const RUNTIME_MID_RAW = fs.readFileSync(path.join(__dirname, 'runtime.mid'), 'ut
 const MIDHOST_BEGIN = '// >>> QBE_MIDHOST-ONLY';
 const MIDHOST_END = '// <<< QBE_MIDHOST-ONLY';
 const QBE_MIDHOST = process.env.QBE_MIDHOST !== '0';
+// QBE_MIDGC ENABLES the Mid-written mark-sweep collector (zigretire stage 4):
+// the two raw allocating nodes (RawAllocVector/RawAllocRaw) route to the Mid
+// seats Rt.allocVector/Rt.allocRaw (which own a separate mmap'd heap and
+// trigger Rt.collect), instead of the Zig rt_vec_alloc/rt_raw_alloc seats.
+//
+// THE COLLECTOR IS THE DEFAULT (stage 7 O3): the Mid mark-sweep collector is
+// what every allocation in a fresh build goes through, and the Zig collector
+// (`gc/*` + the rt_vec_alloc/rt_raw_alloc seats) becomes DEAD CODE — O4
+// deletes its allocation seats.  `QBE_MIDGC=0` is the ESCAPE HATCH and stays
+// until O4: it is the Zig-collector arm the Mid one is differentially measured
+// against (`QBE_MIDGC=0 ./prog` vs a default build) and the only legal way to
+// pair `QBE_MIDHOST=0` with a sound collector (see MIDGC_DEPENDS_ON below).
+// O3's declared cost is the corpus/seed re-freeze: every artifact that
+// allocates moves, because the allocation seats are what this flag selects.
+//
+// ONE SPELLING, TWO READERS, and the RUN-time reader is the second half of the
+// MIDGC x MIDHOST refusal (stage 7 O3): the compile-time half is
+// MIDGC_DEPENDS_ON below (a `QBE_MIDGC=1 QBE_MIDHOST=0` BUILD is refused,
+// exit 2); the run-time half is runtime.mid's QBE_MIDGC-ONLY region, which
+// makes a MIDGC-built binary REFUSE `QBE_MIDHOST=0` at run time instead of
+// silently running the Zig host on a Mid heap (a compile-time guard cannot see
+// the env of a later run).  Both halves say the same thing with the same
+// spelling — the SPLICE below is what puts the run-time half in the binary,
+// which is why this constant lives HERE and not with the other flag knobs.
+const QBE_MIDGC = process.env.QBE_MIDGC !== '0';
+// THE SECOND SPLICE (stage 7 O3): the RUN-time half of the MIDGC x MIDHOST
+// refusal.  One region, INSIDE Rt.main's host arm (it has to be: the run-time
+// hatch it guards is in that arm), kept iff QBE_MIDGC — so a MIDGC build's
+// Rt.main refuses `QBE_MIDHOST=0` at run time with a named die instead of
+// branching into the Zig host on a Mid heap, and a QBE_MIDGC=0 build keeps the
+// differential intact (both hosts reachable, one heap).  WHY A REGION AND NOT
+// A RUN-TIME TEST OF "IS THE MID COLLECTOR IN?": the flag is a COMPILE-time
+// decision (Lower.elm's allocation seats), so the emitted code is the only
+// place that knows it; there is no run-time witness of it in Rt.main before
+// the first Mid allocation (the region is mapped lazily).
+const MIDGC_BEGIN = '// >>> QBE_MIDGC-ONLY';
+const MIDGC_END = '// <<< QBE_MIDGC-ONLY';
 
-// TWO regions, dropped (or kept) together: (1) Rt.main's host arm and (2) the
-// host's own defuns.  Both must go — an arm calling a pruned defun is an
-// undefined symbol at link, and a defun nothing reaches is dead weight in the
-// parse.  The counters make an unbalanced marker a LOUD compile refusal,
+// TWO kinds of region, dropped (or kept) by kind: (1) Rt.main's host arm and
+// (2) the host's own defuns, both MIDHOST; (3) the run-time override refusal,
+// MIDGC.  The MIDHOST pair must go together — an arm calling a pruned defun is
+// an undefined symbol at link, and a defun nothing reaches is dead weight in
+// the parse.  The counters make an unbalanced marker a LOUD compile refusal,
 // because a silently half-dropped pair is the one shape that could leave the
 // default route emitting host code.
-function spliceMidHost(text, keep) {
+function spliceMidRegion(text, begin, end, label, keep) {
   const out = [];
   let inside = false;
   let began = 0;
   let ended = 0;
   for (const line of text.split('\n')) {
     const t = line.replace(/^\s+/, '');
-    if (!inside && t.startsWith(MIDHOST_BEGIN)) {
+    if (!inside && t.startsWith(begin)) {
       inside = true;
       began += 1;
       if (keep) out.push(line);
       continue;
     }
-    if (inside && t.startsWith(MIDHOST_END)) {
+    if (inside && t.startsWith(end)) {
       inside = false;
       ended += 1;
       if (keep) out.push(line);
@@ -129,13 +170,20 @@ function spliceMidHost(text, keep) {
     out.push(line);
   }
   if (inside || began === 0 || began !== ended) {
-    console.error(`run.js: runtime.mid's QBE_MIDHOST regions are unbalanced (${began} begin, ${ended} end, unterminated=${inside}) — refusing to compile a half-spliced runtime`);
+    console.error(`run.js: runtime.mid's ${label} regions are unbalanced (${began} begin, ${ended} end, unterminated=${inside}) — refusing to compile a half-spliced runtime`);
     process.exit(2);
   }
   return out.join('\n');
 }
 
-const RUNTIME_MID = spliceMidHost(RUNTIME_MID_RAW, QBE_MIDHOST);
+// ORDER IS LOAD-BEARING: the MIDGC region lives INSIDE a MIDHOST region, so it
+// is spliced FIRST — its markers are then gone before the host splice walks the
+// text, and the host splice never sees a foreign marker.  (Dropping the host
+// region drops the MIDGC lines with it, which is right: with no Mid host the
+// Zig host is the only host, so there is nothing to refuse.)
+const RUNTIME_MID = spliceMidRegion(
+  spliceMidRegion(RUNTIME_MID_RAW, MIDGC_BEGIN, MIDGC_END, 'QBE_MIDGC', QBE_MIDGC),
+  MIDHOST_BEGIN, MIDHOST_END, 'QBE_MIDHOST', QBE_MIDHOST);
 
 // M3: extension classification — a source whose path ends `.mid` is a mid-c
 // module (compiled by Mid.RtLang and merged as a per-group input), NOT an
@@ -376,13 +424,8 @@ const QBE_EQPTRFAST = process.env.QBE_NOEQPTRFAST !== '1';
 // corpus attribution hatch for that unit — QBE_NOTYPESPEC=1 must reproduce the
 // pre-change corpus byte-for-byte.  Default OFF (type specialization ON).
 const QBE_TYPESPEC = process.env.QBE_NOTYPESPEC !== '1';
-// QBE_MIDGC=1 ENABLES the Mid-written mark-sweep collector (zigretire stage 4):
-// the two raw allocating nodes (RawAllocVector/RawAllocRaw) route to the Mid
-// seats Rt.allocVector/Rt.allocRaw (which own a separate mmap'd heap and
-// trigger Rt.collect), instead of the Zig rt_vec_alloc/rt_raw_alloc seats.
-// Default OFF (the Zig collector stays the allocation path) — the hatch must
-// reproduce the pre-change corpus byte-for-byte when unset.
-const QBE_MIDGC = process.env.QBE_MIDGC === '1';
+// QBE_MIDGC's VALUE is read UP TOP (beside QBE_MIDHOST), because the runtime
+// splice ABOVE is what consumes it — see the flag's own comment there.
 // QBE_MIDDRIVER is GONE (stage 6 B4, "the shrink"): the Zig arm that flag
 // selected (rt_die/rt_halt/rt_frame_*/rt_apply/rt_bounce/rt_tail_known/
 // rt_prim/`main` in tools/qbe/rt.zig) is DELETED, so the flag no longer

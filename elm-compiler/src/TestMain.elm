@@ -1679,19 +1679,21 @@ checks rt runtimeMidText =
                 False
         )
 
-    -- STAGE 6 U2 fix 4 (re-pinned at B4): THE NativeMain VECTOR PIN (plan
-    -- obs-5's deferred obligation, the unpinned-midGc drift class).  B4 removed
-    -- the midDriver flag — the Mid driver is the only route — so the only
-    -- remaining selfhost-vs-run.js hatch pair is QBE_MIDGC (default OFF).
-    -- run.js's QBE_MIDGC = (env === '1') and selfhost/NativeMain.elm's
-    -- hard-coded midGc = False must agree: the selfhost lane and run.js have
-    -- to emit byte-identical .ssa (the qbe-bootstrap --verify fixed point).
+    -- STAGE 6 U2 fix 4 (re-pinned at B4, re-pinned at STAGE 7 O3): THE
+    -- NativeMain VECTOR PIN (plan obs-5's deferred obligation, the
+    -- unpinned-midGc drift class).  B4 removed the midDriver flag — the Mid
+    -- driver is the only route — so the only remaining selfhost-vs-run.js
+    -- hatch pair is QBE_MIDGC.  run.js's QBE_MIDGC = (env !== '0') — the Mid
+    -- collector is the DEFAULT since O3 — and selfhost/NativeMain.elm's
+    -- hard-coded midGc must agree: the selfhost lane and run.js have to emit
+    -- byte-identical .ssa (the qbe-bootstrap --verify fixed point, i.e. the
+    -- committed seed must be re-emittable BY the compiler that seed builds).
     -- The MEASURED GAP, stated: Elm cannot read run.js, so this row pins the
     -- VALUE (a pinned literal) and its MEANING (the default route it selects):
     -- q_Rt_x2ehalt IS emitted (the driver's Rt.halt), rt_glob IS emitted (the
     -- B0 frame pair's freelist/frame_top block), and the halt arm retargets
     -- rt_halt -> q_Rt_x2ehalt.
-    , check "U2 fix 4 — NativeMain vector pin: the selfhost midGc default is False = run.js's QBE_MIDGC default, and routing midGc=False selects the driver route (q_Rt_x2ehalt emitted, rt_halt retargeted, rt_glob emitted for the B0 frame pair)"
+    , check "U2 fix 4 — NativeMain vector pin (re-pinned at stage 7 O3): the selfhost midGc default is True = run.js's QBE_MIDGC default, and routing midGc=True still selects the driver route (q_Rt_x2ehalt emitted, rt_halt retargeted, rt_glob emitted for the B0 frame pair)"
         (let
             midGc =
                 defaultMidGc
@@ -1699,8 +1701,15 @@ checks rt runtimeMidText =
             prog =
                 rtProgram rt True True True
          in
-         (defaultMidGc == False)
-            && (case QbeLower.lower rt False False False True True True True midGc QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
+         (defaultMidGc == True)
+            && -- THE COLLECTOR HALF IS PART OF THE PROGRAM THE FLAG LOWERS
+               -- (stage 7 O3): with midGc=True the allocation seats are
+               -- Rt.allocVector/Rt.allocRaw, which live in rtProgramGc — a
+               -- program without them fails the lowering LOUDLY ("qbe: unknown
+               -- global Rt.allocVector", MEASURED), which is itself the proof
+               -- that the flag selects the Mid seats.  So the row lowers the
+               -- same union rt.programGc participates in at emit time.
+               (case QbeLower.lower rt False False False True True True True midGc QbeTypes.empty (rtArities (prog ++ rtProgramGc rt True True True)) (prog ++ rtProgramGc rt True True True) "Rt.emptylist" of
                     Ok mod ->
                         List.any (\f -> f.name == "q_Rt_x2ehalt") mod.funcs
                             && List.any (\d -> d.name == RtGc.globDataSym) mod.datas
@@ -4097,6 +4106,28 @@ checks rt runtimeMidText =
             && List.length begins == 3
             && List.length ends == 3
             && List.map (\l -> String.contains ">>>" l) markers == [ True, False, True, False, True, False ]
+        )
+    , check "7O3 RUN-TIME OVERRIDE PIN: runtime.mid carries exactly ONE balanced QBE_MIDGC-ONLY region and it sits BETWEEN the hatch's env read and the branch it guards — a MIDGC build's Rt.main therefore REFUSES `QBE_MIDHOST=0` BY NAME at RUN time (the compile-time guard in run.js can only see the BUILD, never a later run's env; this is the second half of the same refusal), and the region is spliced OUT of every QBE_MIDGC=0 build, where one heap serves both hosts and the differential stays runnable"
+        (let
+            markers =
+                List.filter (\l -> String.contains "QBE_MIDGC-ONLY" l) (String.lines runtimeMidText)
+
+            begins =
+                List.filter (\l -> String.contains ">>>" l) markers
+
+            ends =
+                List.filter (\l -> String.contains "<<<" l) markers
+
+            firstIdx s =
+                List.head (String.indexes s runtimeMidText) |> Maybe.withDefault -1
+         in
+         List.length markers == 2
+            && List.length begins == 1
+            && List.length ends == 1
+            && List.map (\l -> String.contains ">>>" l) markers == [ True, False ]
+            && String.contains "call Rt.die(rawstr(\"qbe-rt: QBE_MIDHOST=0 is refused" (defunText "Rt.main" runtimeMidText)
+            && firstIdx "val mhOff = mkbool(mhEnv != 0)" < firstIdx "// >>> QBE_MIDGC-ONLY"
+            && firstIdx "// >>> QBE_MIDGC-ONLY" < firstIdx "word hop = if (payload(mhOff, 0) == 0) {"
         )
     , check "7A GATE PIN: Rt.load reports `hosted` for the text run.js keeps and NOT for the text it hands the default route — the witness is STRUCTURAL (does the program define Rt.hostRun?), so the gate follows the splice exactly and the selfhost lane needs no String.contains"
         (case ( Rt.load runtimeMidText, Rt.load (spliceRegionOut runtimeMidText) ) of
@@ -12677,14 +12708,18 @@ green — and the dedicated T7 identity row asserts the `Ok` DIRECTLY, so a
 broken pipeline turns red there first, loudly.
 -}
 -- run.js's DEFAULT midGc flag, the one remaining selfhost-vs-run.js hatch
--- pair after B4 removed midDriver: run.js's QBE_MIDGC = (env === '1') (OFF),
--- and selfhost/NativeMain.elm's hard-coded midGc = False must match.  This is
--- a HAND-COPIED twin (Elm cannot read run.js) — when the default moves, this
--- constant, NativeMain.elm's vector and run.js move together, and the row
--- above fails until they do.
+-- pair after B4 removed midDriver: run.js's QBE_MIDGC = (env !== '0') (ON,
+-- since stage 7 O3), and selfhost/NativeMain.elm's hard-coded midGc = True
+-- must match.  This is a HAND-COPIED twin (Elm cannot read run.js) — when the
+-- default moves, this constant, NativeMain.elm's vector and run.js move
+-- together, and the row above fails until they do.  O3 is the second time this
+-- moved (B4 was the first) and the O3 move is why the selfhost lane emits the
+-- Mid allocation seats: leaving it at False would make the node emit and the
+-- seed-built emit disagree on the compiler's OWN sources, i.e. the seed the
+-- consolidator re-freezes could not be re-emitted by the compiler it builds.
 defaultMidGc : Bool
 defaultMidGc =
-    False
+    True
 
 
 rtProgram : Rt.Runtime -> Bool -> Bool -> Bool -> List Defun

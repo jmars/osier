@@ -1112,7 +1112,15 @@ rtDeps =
           -- A4b's rt_root_push_value/rt_is_program/rt_run_program/
           -- rt_print_value) or a rawstr/rawsym static def — neither is an
           -- rtDeps edge.
-          ( "Rt.main", [ "Rt.cStrLenGo", "Rt.metaGo", "Rt.parseArgsGo" ] )
+          -- STAGE 7 O3 adds Rt.die: the default build's Rt.main carries the
+          -- RUN-time half of the MIDGC x MIDHOST refusal (runtime.mid's
+          -- QBE_MIDGC-ONLY region), which is a `call Rt.die(...)` and therefore
+          -- a call-graph edge this list has to declare (the row that walks
+          -- every program key's call targets would otherwise go red).  The
+          -- edge costs the emit NOTHING: Rt.die is already a driverSeed ROOT,
+          -- so the closure it pulls (Rt.cStrLenGo) is in every artifact
+          -- already — an edge, not a new root, exactly like Rt.frame-leave's.
+          ( "Rt.main", [ "Rt.cStrLenGo", "Rt.metaGo", "Rt.parseArgsGo", "Rt.die" ] )
         , -- ===== the stage-6 B0 frame machinery.  Rt.frame-enter's RawCall
           -- edges are its one helper; Rt.frame-leave's only edge is Rt.die
           -- (the no-frame panic — Rt.die is already a driverSeed, so this is
