@@ -58,8 +58,25 @@ DROPPED="$(printf '%s\n' "$HDR" | sed -n 's/.*dropped=\([0-9]*\).*/\1/p')"
 HZ="$(printf '%s\n' "$HDR" | sed -n 's/.*hz=\([0-9]*\).*/\1/p')"
 
 # ---- one symbol table per IMAGE, in absolute runtime addresses -------------
-# An image = one executable mapping path; its bias is start - file offset
-# (works for PIE and non-PIE alike, and for each shared library separately).
+# An image = one executable mapping path.  Its LOAD BIAS is NOT `start - file
+# offset` for every image: that formula assumes the executable segment's
+# p_vaddr equals its p_offset, which holds for a PIE executable and for a
+# shared library (both have their link base folded into the bias) but NOT for
+# a non-PIE ET_EXEC, whose vaddrs are already its runtime addresses and whose
+# first executable segment therefore has p_vaddr - p_offset = the LINK BASE.
+# Using the offset formula there re-adds that base and shifts EVERY symbol of
+# the image by it — MEASURED (2026-10-19) at 0x400000 = 4 MB of text on a QBE
+# artifact, which silently named functions 4 MB BELOW the interrupted PC: the
+# profile's "q_Mid.Rt.rtDeps 28.45%" was really the text/print path, and a
+# defun measured at 98 ms of TSC time inside a 178 s run was reported as 51 s.
+# A wrong symbol name is indistinguishable from a finding, so the type decides:
+# ET_EXEC -> bias 0 (vaddr IS the runtime address), everything else -> the
+# offset formula above.  `readelf` (binutils, beside the `nm` this needs) is a
+# REQUIREMENT now, never a silent fallback.
+if ! command -v readelf >/dev/null 2>&1; then
+  echo "prof-report: readelf not found (it decides PIE vs non-PIE per image; without it every non-PIE symbol shifts by the link base)" >&2
+  exit 2
+fi
 : > "$TMP/syms.abs"
 awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^\//) { print $i; break } }' \
     "$TMP/maps" | sort -u > "$TMP/paths"
@@ -68,12 +85,18 @@ while IFS= read -r path; do
   [ -f "$path" ] || continue
   # The FIRST executable mapping of this path gives the bias and the end of
   # the image's executable range.
-  read -r base end < <(awk -v p="$path" '
+  # ET_EXEC (a plain executable: QBE emits non-PIC code and links it at
+  # 0x400000) keeps its OWN addresses, so its bias is 0.  ET_DYN (a PIE
+  # executable or a shared object) is displaced by the loader: bias =
+  # start - file offset of that image's first executable mapping.
+  etype="$(readelf -h "$path" 2>/dev/null | sed -n 's/^ *Type: *//p' | head -1)"
+  etag="${etype%%[[:space:]]*}"
+  read -r base end < <(awk -v p="$path" -v etag="$etag" '
     $NF == p && $2 ~ /x/ {
       # start-end perms offset ...
       n = split($1, r, "-"); start = strtonum("0x" r[1]); stop = strtonum("0x" r[2])
       off = strtonum("0x" $3)
-      printf "%d %d\n", start - off, stop
+      printf "%d %d\n", (etag == "EXEC" ? 0 : start - off), stop
       exit
     }' "$TMP/maps")
   [ -n "${base:-}" ] || continue
