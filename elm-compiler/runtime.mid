@@ -4807,7 +4807,6 @@ defun Rt.applyGo(state : val, f : val) -> val {
   word fn = wload(code, 0);
   word rem = payload32(f, 1);
   word env = payload(f, 2);
-  word envlen = payload32(f, 3);
   word args = sp->args;
   word nargs = sp->nargs;
   if (tagis(f, 6) == 0) {
@@ -4816,7 +4815,6 @@ defun Rt.applyGo(state : val, f : val) -> val {
   } else {
     word arity = wload(code, 1) & 4294967295;
     word napp = arity - rem;
-    word capslen = envlen - napp;
     if (rem == nargs) {
       val chk = if (napp > 0) {
         if (env == 0) {
@@ -4833,16 +4831,8 @@ defun Rt.applyGo(state : val, f : val) -> val {
       return vecload(v, 0);
     } else {
       if (rem > nargs) {
-        word total = napp + nargs + capslen;
         sp->env = env;
-        rawcall rt_root_push_ptr([word](sp) + 24);
-        word envv = allocvec(total);
-        word env2 = sp->env;
-        call Rt.copyWords(envv, env2, napp * 5);
-        call Rt.copyWords(envv + napp * 40, args, nargs * 5);
-        call Rt.copyWords(envv + (napp + nargs) * 40, env2 + napp * 40, capslen * 5);
-        rawcall rt_root_pop();
-        return mkval(6, code, rem - nargs, envv, total);
+        return call Rt.applyPartGo(state, f);
       } else {
         word r = aggcall ret rawsym("rt_call2r")(fn, env, napp, args, rem);
         word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
@@ -4915,21 +4905,19 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
       return mknum(retbuf);
     } else {
       if (rem > nargs) {
-        word total = napp + nargs + capslen;
         sp->env = env;
-        rawcall rt_root_push_ptr([word](sp) + 24);
-        word envv = allocvec(total);
-        word env2 = sp->env;
-        call Rt.copyWords(envv, env2, napp * 5);
-        call Rt.copyWords(envv + napp * 40, args, nargs * 5);
-        call Rt.copyWords(envv + (napp + nargs) * 40, env2 + napp * 40, capslen * 5);
-        rawcall rt_root_pop();
+        val p = call Rt.applyPartGo(state, f);
         *Ret retbuf = rawcall malloc(80);
+        // the ret cell's `result` is the closure value p WORD-WISE (the
+        // `.done` layout's five words): kind 6, then mkval's four payload
+        // words at +1 - code, the 32-bit remaining arity, env, the 32-bit
+        // cell count.  The offsets are OFFSET BY ONE from mkval's argument
+        // order, so they are spelled out rather than looped.
         wstore(retbuf, 0, 6);
-        wstore(retbuf, 1, code);
-        wstore(retbuf, 2, rem - nargs);
-        wstore(retbuf, 3, envv);
-        wstore(retbuf, 4, total);
+        wstore(retbuf, 1, payload(p, 0));
+        wstore(retbuf, 2, payload32(p, 1));
+        wstore(retbuf, 3, payload(p, 2));
+        wstore(retbuf, 4, payload32(p, 3));
         retbuf->kind = 0;
         retbuf->code = 0;
         retbuf->e = 0;
@@ -4946,6 +4934,53 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
       }
     }
   }
+}
+// Rt.applyPartGo — THE PARTIAL-APPLICATION SEAT, and the ONE source of the
+// capture/args INTERLEAVE (stage 7 O3-fix).  `state`'s args/nargs/env are the
+// closure's current application (ApplyState, above); the new closure's env is
+//
+//     applied(napp) ++ the new args(nargs) ++ the old captures(capslen)
+//
+// whose first napp + nargs cells are the params this closure now has and whose
+// tail is what remains a capture — so applyGo/applyTailGo's `rem > nargs` arm
+// and the HOST applier's partial arm (Rt.apply-at) build ONE shape, not three
+// copies of it.  `mkval(6, code, rem - nargs, envv, total)` is the result: the
+// same desc, the remaining arity reduced by what was just applied.
+//
+// WHY THIS IS A DEFUN AT ALL: it was spelled inline in both apply loops until
+// the host applier needed it (O3-fix's bootstrap blocker), and three copies of
+// a rooting dance is three chances to drift.
+//
+// THE ROOTING (unchanged from the arms it replaces, and load-bearing):
+//   * `args` — the caller's argument area — is NOT re-read after the allocvec,
+//     and must not be: it is a raw base the CALLER rooted (Rt.apply's
+//     rt_root_push_value_array for the generated-code route; a slice of the
+//     host's permanently-rooted slot array for the host route), so a scavenge
+//     moves the Values INSIDE it and rewrites them in place, but the base word
+//     is an address the collector never updates.
+//   * `env` (the applied closure's env array) DOES move, so it is staged in
+//     sp->env, registered with rt_root_push_ptr([word](sp) + 24), and RE-READ
+//     after the allocvec (the cStrFill lesson: the allocvec may have scavenged
+//     it).  `code` needs no such care: a desc is static data.
+defun Rt.applyPartGo(state : val, f : val) -> val {
+  *ApplyState sp = payload(state, 0);
+  word code = payload(f, 0);
+  word rem = payload32(f, 1);
+  word envlen = payload32(f, 3);
+  word arity = wload(code, 1) & 4294967295;
+  word napp = arity - rem;
+  word capslen = envlen - napp;
+  word args = sp->args;
+  word nargs = sp->nargs;
+  word total = napp + nargs + capslen;
+  rawcall rt_root_push_ptr([word](sp) + 24);
+  word envv = allocvec(total);
+  word env2 = sp->env;
+  call Rt.copyWords(envv, env2, napp * 5);
+  call Rt.copyWords(envv + napp * 40, args, nargs * 5);
+  call Rt.copyWords(envv + (napp + nargs) * 40, env2 + napp * 40, capslen * 5);
+  rawcall rt_root_pop();
+  return mkval(6, code, rem - nargs, envv, total);
 }
 defun Rt.callArity(disp : val) -> val {
   *Disp dp = payload(disp, 0);
@@ -7209,12 +7244,42 @@ defun Rt.hostArity(tagN : val) -> val {
 //   2. THE Disp's `arity` IS THE CLOSURE'S STATIC ARITY (wload(desc,1)), NOT
 //      `arity - rem`.  With `arity - rem` (0 for a global closure) the call
 //      passes zero args and returns garbage.  This is the silent-wrong.
-//   3. THE PARTIAL ARM IS NOT PORTED AND MUST NOT BE SILENT: `rem` (the
-//      closure's remaining register args) equals `arity` exactly when nothing
-//      has been captured-and-applied (napp = 0).  A closure that arrives
-//      partially applied needs applyGo's capture/args interleave, which 7A
-//      does not have, so it DIES naming the reason.  (The Zig hostApply
-//      skipped this check and would have been silently wrong.)
+//   3. THE PARTIAL ARM (stage 7 O3-fix).  7A left it unported and LOUD: a
+//      closure arriving with `rem != arity` (napp != 0, i.e. something had
+//      already been applied) died naming the missing capture/args interleave.
+//      That guard is what the seed-built compiler now trips — MEASURED at O3's
+//      re-frozen seed, compiling one source: `arity=2 rem=1 nargs=1`, i.e. a
+//      SATURATED call on a HALF-APPLIED closure (not `nargs < rem`: the
+//      missing case was the interleave in the saturated arm).  All three
+//      nargs/rem shapes are now handled:
+//
+//        nargs < rem   PARTIAL: hand the same (state, closure) pair to
+//                      Rt.applyPartGo — the ONE source of the interleave,
+//                      shared with applyGo/applyTailGo's own partial arms, so
+//                      the host and the generated-code route cannot drift.
+//        nargs > rem   OVER-APPLIED: apply the first `rem` through THIS seat
+//                      (a recursive call, so it lands in one of the other two
+//                      arms) and `recur` on the result with the rest.  `rem`
+//                      is at least 1 or the loop makes no progress, so a grand
+//                      total application of an ALREADY fully applied closure
+//                      (rem == 0) still DIES — loudly, and it cannot arise
+//                      from compiled code (a closure is built with rem ==
+//                      arity and saturation returns a VALUE, so no rem == 0
+//                      closure ever survives as a value).
+//        nargs == rem  SATURATED: `napp == 0` is the 7A path (a Disp, the full
+//                      static arity, Rt.callArity).  `napp > 0` is the arm
+//                      that was missing: the params are the applied cells
+//                      then the new args, which is exactly rt_call2r's
+//                      two-range bridge (the same call applyGo's saturated
+//                      arm makes, and NOT Rt.apply/Rt.applyGo — trap 1).
+//
+// THE TWO DIE MESSAGES 7A KEPT FOR THE UNPORTED CASES ARE GONE BECAUSE THE
+// CASES ARE PORTED, not because they were reworded: `a partially applied
+// closure reached the applier` and `the applier was handed a different number
+// of arguments than the closure's arity` described states that are now normal
+// input.  What remains dies by name: the non-function value, a half-applied
+// closure with no env (the runtime's own message, same condition as applyGo's
+// saturated arm), and the rem == 0 over-application above.
 //
 // `bufN` is the caller's argument area as a BOXED raw address: `nargs`
 // CONTIGUOUS 40-byte cells that the caller keeps reachable from a registered
@@ -7228,25 +7293,48 @@ defun Rt.apply-at(cN : val, bufN : val, nargsN : val) -> val {
     return mknil;
   }
   word code = payload(cN, 0);
-  word fn = wload(code, 0);
   word arity = wload(code, 1) & 4294967295;
   word rem = payload32(cN, 1);
-  if (rem != arity) {
-    call Rt.dieErr(rawstr("host: a partially applied closure reached the applier (napp != 0): applyGo's capture/args interleave is not ported"));
-    return mknil;
+  if (nargs > rem) {
+    if (rem == 0) {
+      call Rt.dieErr(rawstr("host: the applier was handed more arguments than an already fully applied closure"));
+      return mknil;
+    }
+    val f2 = call Rt.apply-at(cN, bufN, mknum(rem));
+    recur(f2, mknum(buf + rem * 40), mknum(nargs - rem));
+  } else {
+    if (nargs < rem) {
+      *ApplyState sp = rawcall malloc(32);
+      sp->args = buf;
+      sp->nargs = nargs;
+      sp->live = nargs;
+      sp->env = payload(cN, 2);
+      val p = call Rt.applyPartGo(mknum(sp), cN);
+      rawcall free(sp);
+      return p;
+    } else {
+      word napp = arity - rem;
+      if (napp > 0) {
+        word env = payload(cN, 2);
+        if (env == 0) {
+          call Rt.die(rawstr("qbe-rt: closure env missing for applied args"));
+          return mknil;
+        }
+        word r = aggcall ret rawsym("rt_call2r")(wload(code, 0), env, napp, buf, rem);
+        word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
+        return vecload(v, 0);
+      } else {
+        *Disp dp = rawcall malloc(32);
+        dp->fn = wload(code, 0);
+        dp->caps = payload(cN, 2);
+        dp->buf = buf;
+        dp->arity = arity;
+        val r = call Rt.callArity(mknum(dp));
+        rawcall free(dp);
+        return r;
+      }
+    }
   }
-  if (nargs != arity) {
-    call Rt.dieErr(rawstr("host: the applier was handed a different number of arguments than the closure's arity"));
-    return mknil;
-  }
-  *Disp dp = rawcall malloc(32);
-  dp->fn = fn;
-  dp->caps = payload(cN, 2);
-  dp->buf = buf;
-  dp->arity = arity;
-  val r = call Rt.callArity(mknum(dp));
-  rawcall free(dp);
-  return r;
 }
 
 // Rt.hostCall — the host-side wrapper: apply `contAddr`'s closure to the

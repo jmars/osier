@@ -84,10 +84,10 @@ checks rt runtimeMidText =
       -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
       -- the frameZero loop), so an empty or truncated load turns it RED,
       -- loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (273 defuns — GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6)"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (274 defuns — GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — and stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave)"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 273
+                List.length ast == 274
 
             Err _ ->
                 False
@@ -899,8 +899,8 @@ checks rt runtimeMidText =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 252 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram rt True True True) == 252
+    , check "rt program: 253 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
+        (List.length (rtProgram rt True True True) == 253
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
@@ -1937,21 +1937,21 @@ checks rt runtimeMidText =
             Err _ ->
                 False
         )
-    , check "B1 root-order: applyGo's PARTIAL arm roots the env slot BEFORE the alloc and RE-READS it AFTER (push_ptr -> rt_vec_alloc -> loadl, in ONE block) — the cStrFill lesson.  A push-after-alloc or a pre-alloc-copy mutation breaks this shape (the emitted .ssa loses the post-alloc load or the pre-alloc push) and fails HERE, because the runtime churn rows CANNOT see the hazard (the moving collector copies bodies without destroying them, so a stale read is output-silent — the honest blindness measured in the b1debt probe)"
+    , check "B1 root-order: THE PARTIAL ARM's env slot is rooted BEFORE the alloc and RE-READ AFTER (push_ptr -> rt_vec_alloc -> loadl, in ONE block) — the cStrFill lesson.  A push-after-alloc or a pre-alloc-copy mutation breaks this shape (the emitted .ssa loses the post-alloc load or the pre-alloc push) and fails HERE, because the runtime churn rows CANNOT see the hazard (the moving collector copies bodies without destroying them, so a stale read is output-silent).  STAGE 7 O3-fix MOVED THE PIN'S TARGET: applyGo and applyTailGo no longer spell this dance (three copies were three chances to drift), so the ONE site is Rt.applyPartGo — and the second half of the row is what keeps it one: both loops' partial arms must CALL it, so a re-inlined copy in either loop is RED here."
         (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
-                (case funcByName "q_Rt_x2eapplyGo" mod of
+                (case funcByName "q_Rt_x2eapplyPartGo" mod of
                     Just f ->
                         partialRootOrder f
 
                     Nothing ->
                         False
                 )
-                    && (case funcByName "q_Rt_x2eapplyTailGo" mod of
-                            Just f ->
-                                partialRootOrder f
+                    && (case ( funcByName "q_Rt_x2eapplyGo" mod, funcByName "q_Rt_x2eapplyTailGo" mod ) of
+                            ( Just a, Just b ) ->
+                                callsSym "q_Rt_x2eapplyPartGo" a && callsSym "q_Rt_x2eapplyPartGo" b
 
-                            Nothing ->
+                            _ ->
                                 False
                        )
 
@@ -4038,14 +4038,17 @@ checks rt runtimeMidText =
         )
     , check "7A SLOT-ARITHMETIC PIN: the last evaluation block (2 + 127 * 258 + 257 = 33025) ends BEFORE the five scratch cells (33026..33030), and nslots = 33031 = 2 + 128 * 258 + 5 — so a spawn/clear can never walk over SCR_CUR/SCR_A0/SCR_A1/SCR_RES/SCR_TMP"
         (2 + 127 * 258 + 257 < 33026 && 33031 == 2 + 128 * 258 + 5 && String.contains "lp->nslots = 33031;" runtimeMidText)
-    , check "7A APPLIER PIN (the plan §4.1 trap): Rt.apply-at calls Rt.callArity and names NEITHER Rt.apply NOR Rt.applyGo — applyGo's saturated arm returns an UNFORCED `:ret` tail (a heap address where a value belongs), and this is the ONE place the port could ship that silently"
+    , check "7A APPLIER PIN (the plan §4.1 trap): Rt.apply-at calls Rt.callArity AND Rt.applyPartGo (stage 7 O3-fix added the partial arm's helper; the saturated napp == 0 case is STILL the Disp/rt_callN route) and names NEITHER Rt.apply NOR Rt.applyGo — applyGo's saturated arm returns an UNFORCED `:ret` tail (a heap address where a value belongs), and this is the ONE place the port could ship that silently"
         (case List.filter (\d -> d.key == "Rt.apply-at") (rtProgram rt True True True) of
             d :: _ ->
                 let
                     syms =
                         rawCallSyms d.value
                 in
-                List.member "Rt.callArity" syms && not (List.member "Rt.apply" syms) && not (List.member "Rt.applyGo" syms)
+                List.member "Rt.callArity" syms
+                    && List.member "Rt.applyPartGo" syms
+                    && not (List.member "Rt.apply" syms)
+                    && not (List.member "Rt.applyGo" syms)
 
             [] ->
                 False
@@ -4055,8 +4058,30 @@ checks rt runtimeMidText =
             && String.contains "dp->arity = arity;" runtimeMidText
             && not (String.contains "dp->arity = arity - rem;" runtimeMidText)
         )
-    , check "7A APPLIER PIN: a PARTIALLY applied closure (napp != 0) DIES naming the reason instead of being silently misapplied — applyGo's capture/args interleave is not ported (7A)"
-        (String.contains "a partially applied closure reached the applier" runtimeMidText)
+    , check "7O3F APPLIER PIN (the bootstrap blocker): Rt.apply-at handles ALL THREE nargs/rem shapes, and the two guards 7A shipped for the UNPORTED ones are GONE from its body — not reworded, ported.  MEASURED at O3's re-frozen seed: the failing call was `arity=2 rem=1 nargs=1`, i.e. a SATURATED call on a HALF-APPLIED closure, which 7A's `rem != arity` guard could not tell apart from an unported case.  This row is a TEXT pin on the defun body (the BEHAVIOUR is the hostapply fixture's, whose new partial/over arms route exactly these shapes through the host applier and are printed as numbers): the partial arm must hand off to Rt.applyPartGo (the ONE interleave, shared with the two apply loops), the over-applied arm must apply the first `rem` and `recur` on the rest, and the saturated napp > 0 arm must be the two-range bridge (rt_call2r with the closure's napp and the caller's buf — rt_call2r, NOT Rt.apply/Rt.applyGo: trap 1)."
+        (let
+            body =
+                defunText "Rt.apply-at" runtimeMidText
+         in
+         not (String.contains "partially applied closure reached the applier" body)
+            && not (String.contains "different number of arguments than the closure's arity" body)
+            && String.contains "val p = call Rt.applyPartGo(mknum(sp), cN);" body
+            && String.contains "val f2 = call Rt.apply-at(cN, bufN, mknum(rem));" body
+            && String.contains "recur(f2, mknum(buf + rem * 40), mknum(nargs - rem));" body
+            && String.contains "aggcall ret rawsym(\"rt_call2r\")(wload(code, 0), env, napp, buf, rem);" body
+            && String.contains "more arguments than an already fully applied closure" body
+        )
+    , check "7O3F APPLIER PIN (no silent case): the saturated arm's missing-env guard keeps the RUNTIME's message (`qbe-rt: closure env missing for applied args`) — one condition, one string, the same one applyGo's saturated arm raises — so a half-applied closure with no env still dies BY NAME on the host route instead of reading a garbage capture"
+        (String.contains "call Rt.die(rawstr(\"qbe-rt: closure env missing for applied args\"));" (defunText "Rt.apply-at" runtimeMidText))
+    , check "7O3F APPLIER PIN: Rt.applyPartGo is the ONLY defun that spells the capture/args interleave — the three copyWords lines appear ONCE in runtime.mid (applyGo's and applyTailGo's partial arms call the helper instead), so the host route and the generated-code route cannot drift; and the helper's own root-order is the pinned dance (the B1 row above)"
+        ((runtimeMidText
+            |> String.split "\n"
+            |> List.filter (\l -> String.contains "call Rt.copyWords(envv + napp * 40, args, nargs * 5);" l)
+            |> List.length
+         )
+            == 1
+            && String.contains "defun Rt.applyPartGo(state : val, f : val) -> val {" runtimeMidText
+        )
     , check "7A CTOR TABLE PIN: Rt.hostArity's 20 (name, expected vector length) pairs are exactly effectloop.zig's taskArity + 1 — the transcription, pinned"
         (hostArityPairs (defunText "Rt.hostArity" runtimeMidText)
             == [ ( "TaskSucceed", 2 ), ( "TaskFail", 2 ), ( "TaskAndThen", 3 ), ( "TaskOnError", 3 ), ( "TaskWrite", 2 ), ( "TaskReadLine", 1 ), ( "TaskReadFile", 2 ), ( "TaskWriteFile", 3 ), ( "TaskExec", 2 ), ( "TaskGetenv", 2 ), ( "TaskSetenv", 3 ), ( "TaskCd", 2 ), ( "TaskGetcwd", 1 ), ( "TaskGetpid", 1 ), ( "TaskGlob", 2 ), ( "TaskNow", 1 ), ( "TaskSleep", 2 ), ( "TaskQuit", 1 ), ( "TaskListDir", 2 ), ( "TaskStat", 2 ) ]
@@ -6247,14 +6272,14 @@ checks rt runtimeMidText =
                 False
         )
     , check
-        "T17/T18/T20/T21/T22/T24 pipeline (the wave-9 + collector + never-scheduled + T24 key-set row, post-T24's one-hundred-sixty-two, + GC-ARC F1's two stats defuns = one-hundred-sixty-four): surf is Ok with EXACTLY the one-hundred-sixty-four migrated keys under the default flags — T24 added the LAST THREE wall-class holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd), so the DSL-bodied set is now EMPTY — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
+        "T17/T18/T20/T21/T22/T24 pipeline (the wave-9 + collector + never-scheduled + T24 key-set row, post-T24's one-hundred-sixty-two, + GC-ARC F1's two stats defuns = one-hundred-sixty-four, + stage 7 O3-fix's Rt.applyPartGo = one-hundred-sixty-five): surf is Ok with EXACTLY the one-hundred-sixty-five migrated keys under the default flags — T24 added the LAST THREE wall-class holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd), so the DSL-bodied set is now EMPTY — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
         (case rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
             Ok s ->
                 List.sort (Dict.keys s)
                     == [ "Rt.*", "Rt.+", "Rt.-", "Rt./", "Rt.<", "Rt.<-address"
                        , "Rt.<=", "Rt.=", "Rt.>", "Rt.>=", "Rt.@p", "Rt.absvector"
                        , "Rt.address->", "Rt.allocRaw", "Rt.allocVector", "Rt.appendL", "Rt.apply", "Rt.apply-at"
-                       , "Rt.apply-tail", "Rt.applyGo", "Rt.applyOneRedir", "Rt.applyRedirects", "Rt.applyTailGo", "Rt.asF"
+                       , "Rt.apply-tail", "Rt.applyGo", "Rt.applyOneRedir", "Rt.applyPartGo", "Rt.applyRedirects", "Rt.applyTailGo", "Rt.asF"
                        , "Rt.assoc", "Rt.assocGo", "Rt.bitwise-and", "Rt.bitwise-not", "Rt.bitwise-or", "Rt.bitwise-shift-left"
                        , "Rt.bitwise-shift-right", "Rt.bitwise-shift-right-zf", "Rt.bitwise-xor", "Rt.bodyWriteGo", "Rt.bounce", "Rt.bounceGo"
                        , "Rt.bytesBuild", "Rt.bytesEqGo", "Rt.bytesOf", "Rt.bytesToStr", "Rt.c-strlen", "Rt.cStrCopyGo"
@@ -6354,7 +6379,7 @@ checks rt runtimeMidText =
     -- is now the append below; the loud Err moved to the key-agreement walk
     -- (row C), which is the collision/rename class the orphan check guarded.
     , check
-        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the seventy-three appended keys (the twenty stage-6 ABI keys + the fifty-three host defuns of stages 7A/7B/7C) (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
+        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the seventy-four appended keys (the twenty stage-6 ABI keys + the fifty-three host defuns of stages 7A/7B/7C + stage 7 O3-fix's Rt.applyPartGo) (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -6378,7 +6403,7 @@ checks rt runtimeMidText =
                                 Ok spliced ->
                                     List.map .key spliced == List.map .key union ++
                                                [ "Rt.apply", "Rt.apply-at", "Rt.apply-tail", "Rt.applyGo"
-                                                 , "Rt.applyTailGo", "Rt.bounce", "Rt.bounceGo", "Rt.cStrEq"
+                                                 , "Rt.applyPartGo", "Rt.applyTailGo", "Rt.bounce", "Rt.bounceGo", "Rt.cStrEq"
                                                  , "Rt.cStrEqGo", "Rt.callArity", "Rt.copyWords", "Rt.copyWordsGo"
                                                  , "Rt.die", "Rt.dieErr", "Rt.frame-enter", "Rt.frame-leave"
                                                  , "Rt.frameBlock", "Rt.halt", "Rt.hostAddPoll", "Rt.hostArity", "Rt.hostCStrOf", "Rt.hostCall"

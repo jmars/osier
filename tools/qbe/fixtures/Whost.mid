@@ -32,6 +32,8 @@ module Whost
 
 export Whost.run : val -> val -> val -> val
 export Whost.runCap : val -> val -> val
+export Whost.runPart : val -> val -> val -> val
+export Whost.runOver : val -> val -> val -> val -> val
 
 struct St {
   n : i32;
@@ -47,6 +49,59 @@ defun Whost.churn(nN : val, accN : val) -> val {
     allocraw(24);
     recur(mknum(payload(nN, 0) - 1), accN);
   }
+}
+
+// runPart closure x y  ==  (closure x) y — STAGE 7 O3-fix's two missing
+// applier arms in ONE arm pair: the FIRST call is PARTIAL (nargs < rem, so the
+// applier must build a half-applied closure through Rt.applyPartGo) and the
+// SECOND is SATURATED on that half-applied closure (nargs == rem with
+// napp > 0, so the params are the applied cell then the new arg — rt_call2r's
+// two-range bridge, NOT the Disp/rt_callN route a napp == 0 closure takes).
+// That second shape is EXACTLY the one the seed-built compiler tripped
+// (MEASURED arity=2 rem=1 nargs=1) — so this arm is the cheap, permanent
+// stand-in for the 12-minute bootstrap run.
+//
+// The half-applied closure is PARKED IN A ROOTED SLOT (slot 3) and a second
+// 20000-allocation churn runs between building it and applying it: the partial
+// arm's env array is an allocvec result, so this is the rooting oracle for the
+// NEW arm (a closure whose env is collected/moved between the two calls prints
+// garbage instead of the golden).
+defun Whost.runPart(uN : val, xN : val, yN : val) -> val {
+  word blob = rawcall malloc(400);
+  *St lp = [*St](blob);
+  lp->n = 6;
+  rawcall rt_root_push_value_array(blob + 8, blob);
+  vecstore(blob + 8, 0, uN);
+  vecstore(blob + 8 + 40, 0, xN);
+  vecstore(blob + 8 + 80, 0, yN);
+  val ch = call Whost.churn(mknum(20000), mknil);
+  val part = call Rt.apply-at(vecload(blob + 8, 0), mknum(blob + 48), mknum(1));
+  vecstore(blob + 8 + 120, 0, part);
+  val ch2 = call Whost.churn(mknum(20000), mknil);
+  val r = call Rt.apply-at(vecload(blob + 8 + 120, 0), mknum(blob + 88), mknum(1));
+  rawcall rt_root_pop();
+  return r;
+}
+
+// runOver closure a b c  ==  closure a b c, where `closure` has arity 2 and
+// RETURNS A FUNCTION: the applier must saturate the first two (rem == 2) and
+// then apply THAT RESULT to the third — the OVER-APPLIED arm (nargs > rem),
+// which 7A refused outright (`the applier was handed a different number of
+// arguments than the closure's arity`).  A wrong arm here dies or prints a
+// non-123 number, never 123.
+defun Whost.runOver(uN : val, aN : val, bN : val, cN : val) -> val {
+  word blob = rawcall malloc(400);
+  *St lp = [*St](blob);
+  lp->n = 8;
+  rawcall rt_root_push_value_array(blob + 8, blob);
+  vecstore(blob + 8, 0, uN);
+  vecstore(blob + 8 + 40, 0, aN);
+  vecstore(blob + 8 + 80, 0, bN);
+  vecstore(blob + 8 + 120, 0, cN);
+  val ch = call Whost.churn(mknum(20000), mknil);
+  val r = call Rt.apply-at(vecload(blob + 8, 0), mknum(blob + 48), mknum(3));
+  rawcall rt_root_pop();
+  return r;
 }
 
 // run closure model msg  ==  closure msg model, with BOTH arguments held in

@@ -1143,8 +1143,13 @@ rtDeps =
           -- rawcall (RawCallRaw — NOT rtDeps edges).
           ( "Rt.apply", [ "Rt.applyGo" ] )
         , ( "Rt.apply-tail", [ "Rt.applyTailGo" ] )
-        , ( "Rt.applyGo", [ "Rt.callArity", "Rt.copyWords", "Rt.die" ] )
-        , ( "Rt.applyTailGo", [ "Rt.callArity", "Rt.copyWords", "Rt.die" ] )
+        , -- STAGE 7 O3-fix: both apply LOOPS' partial arms (`rem > nargs`) now
+          -- hand off to Rt.applyPartGo instead of spelling the capture/args
+          -- interleave inline, so the edge is theirs AND the host applier's:
+          -- ONE defun owns the interleave, so the two routes cannot drift.
+          ( "Rt.applyGo", [ "Rt.callArity", "Rt.copyWords", "Rt.die", "Rt.applyPartGo" ] )
+        , ( "Rt.applyTailGo", [ "Rt.callArity", "Rt.copyWords", "Rt.die", "Rt.applyPartGo" ] )
+        , ( "Rt.applyPartGo", [ "Rt.copyWords" ] )
         , ( "Rt.callArity", [] )
         , -- Rt.copyWords is the raw-word WRAPPER (malloc the counter cell,
           -- hand off, free); Rt.copyWordsGo is the raw-word LOOP (wload/wstore
@@ -1187,7 +1192,19 @@ rtDeps =
         , ( "Rt.hostInit", [] )
         , ( "Rt.hostIsProgram", [ "Rt.cStrEq" ] )
         , ( "Rt.hostArity", [ "Rt.cStrEq" ] )
-        , ( "Rt.apply-at", [ "Rt.dieErr", "Rt.callArity" ] )
+        , -- STAGE 7 O3-fix: the applier's rawcall set grew by the two non-call
+          -- edges its three nargs/rem arms need — Rt.applyPartGo (the partial
+          -- arm; a call edge, because the interleave is a defun) and Rt.die
+          -- (the saturated arm's missing-env guard, the SAME message and the
+          -- same condition as applyGo's).  Rt.callArity is still the
+          -- saturated napp == 0 seat (trap 1) and Rt.apply/Rt.applyGo are
+          -- still absent from it by pin.
+          -- The SELF edge is real and is the over-applied arm: `nargs > rem`
+          -- applies the first `rem` through this same seat (a recursive call,
+          -- which lands in one of the other two arms) and `recur`s on the
+          -- result with the rest.  keepRtDependencies closes over cycles, so a
+          -- key that names itself costs the seed walk nothing.
+          ( "Rt.apply-at", [ "Rt.dieErr", "Rt.callArity", "Rt.applyPartGo", "Rt.die", "Rt.apply-at" ] )
         , ( "Rt.hostCall", [ "Rt.apply-at" ] )
         , ( "Rt.hostClearGo", [] )
         , ( "Rt.hostClearFrom", [ "Rt.hostClearGo" ] )
