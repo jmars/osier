@@ -320,6 +320,12 @@ load source =
                                     -- classification could read this set.
                                     []
 
+                        -- same hoist as keepRtDependencies': the fold step
+                        -- runs 226 defuns x the fixed-point passes, and every
+                        -- one of those references would rebuild the Dict.
+                        deps1 =
+                            rtDeps
+
                         -- fixed point: k allocates iff k has a DIRECT
                         -- safepoint or any rtDeps edge of k lands in the set.
                         grow : Set String -> Set String
@@ -328,7 +334,7 @@ load source =
                                 new =
                                     List.foldl
                                         (\d set ->
-                                            case Dict.get d.key rtDeps of
+                                            case Dict.get d.key deps1 of
                                                 Just deps ->
                                                     if List.any (\dep -> Set.member dep set) deps then
                                                         Set.insert d.key set
@@ -1318,6 +1324,18 @@ rtDeps =
 keepRtDependencies : List String -> List String
 keepRtDependencies roots =
     let
+        -- RTDEPS IS BUILT ONCE PER CALL, NOT ONCE PER QUEUE ELEMENT.  It is a
+        -- 0-arity TOP-LEVEL value, and this emit has no load-time initialiser:
+        -- every REFERENCE to it is a `call` to a defun that rebuilds the whole
+        -- 83-entry Dict (no memo guard).  The walk below references it once
+        -- per queue element, i.e. once per Rt key it closes over — MEASURED
+        -- (2026-10-19, a counter at the seeded defun's entry): 1 289 entries
+        -- per compile of the profiler's small workload, 28.45% of that run's
+        -- CPU.  Bound here, the emitted closure CAPTURES it, so a call of
+        -- keepRtDependencies builds the Dict once however large the closure.
+        deps0 =
+            rtDeps
+
         step : List String -> List String -> List String
         step acc queue =
             case queue of
@@ -1329,7 +1347,7 @@ keepRtDependencies roots =
                         step acc rest
 
                     else
-                        case Dict.get key rtDeps of
+                        case Dict.get key deps0 of
                             Just deps ->
                                 step (key :: acc) (deps ++ rest)
 
