@@ -2,11 +2,16 @@
 # probe-midgc-midhost0.sh — stage 7 O3's HAZARD PIN: the RUN-TIME override
 # `QBE_MIDHOST=0` on a program built with the Mid collector.
 #
-# THE HAZARD IT PINS.  O3 flipped `QBE_MIDGC` to DEFAULT ON, so a fresh build
-# routes every allocation through the Mid collector's heap — and the build
-# still carries BOTH effect hosts, because the host is selected at RUN time by
-# `Rt.main`'s getenv hatch.  So `QBE_MIDHOST=0 ./prog` on a default build would
-# put the ZIG host (effectloop.zig: values.valString/valCons on the Zig
+# THE HAZARD IT PINS.  O3 flipped `QBE_MIDGC` to DEFAULT ON (4c48214 reverted
+# that: the collector is OPT-IN again), and the original form of this probe
+# relied on the default — so its "MIDGC build" arm built a QBE_MIDGC=0 program
+# and could not measure the refusal at all (PRE-EXISTING RED from 4c48214 until
+# GC ARC unit 4 made the build explicit; MEASURED: the same qbe-mk emits 0
+# refusal lines with no env and 1 with QBE_MIDGC=1).  The flag is now spelled
+# OUT below.  A MIDGC build routes every allocation through the Mid heap — and
+# the build still carries BOTH effect hosts, because the host is selected at RUN
+# time by `Rt.main`'s getenv hatch.  So `QBE_MIDHOST=0 ./prog` on such a build
+# would put the ZIG host (effectloop.zig: values.valString/valCons on the Zig
 # nursery) on a MID heap — the stage-5 cross-heap edge, and NO compile-time
 # guard can see a later run's environment.  run.js's MIDGC_DEPENDS_ON catches
 # the same pairing when it is asked for at BUILD time (exit 2); this probe is
@@ -80,11 +85,13 @@ run() {
   printf '%s|%s' "$r" "$o"
 }
 
-# ---- (a)/(b): the DEFAULT build (MIDGC on) ----
+# ---- (a)/(b): the MIDGC build (QBE_MIDGC=1 — spelled out: it is NOT the
+# default since 4c48214, and relying on the default here made this arm measure a
+# QBE_MIDGC=0 program) ----
 mkdir -p "$out/midgc" "$out/zig"
-binA="$(build "$out/midgc" "")"
+binA="$(build "$out/midgc" QBE_MIDGC=1)"
 if [ -z "$binA" ] || [ ! -x "$binA" ]; then
-  echo "FAIL: the DEFAULT (QBE_MIDGC on) build of $FIXTURE failed — this probe cannot measure anything" >&2
+  echo "FAIL: the QBE_MIDGC=1 build of $FIXTURE failed — this probe cannot measure anything" >&2
   exit 1
 fi
 a="$(run "$binA" "")"
@@ -117,7 +124,7 @@ check_golden() { # <label> <rc|output>
   fi
 }
 
-check_golden "a: MIDGC build, no env (the DEFAULT route)" "$a"
+check_golden "a: MIDGC build, no env (the MIDGC route)" "$a"
 
 case "$b" in
   1\|"$REFUSAL"*) echo "PASS (b: MIDGC build, QBE_MIDHOST=0): refused by name, exit 1 — ${b#*|}" ;;

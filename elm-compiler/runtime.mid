@@ -168,6 +168,15 @@ extern fstatat(dirfd : i32, path : ptr, buf : ptr, flag : i32) -> i32;
 //   slot 23  sweepUs    microseconds in the last sweep
 //   byte 288 (NOT a field) the 32-byte digit scratch Rt.gcNum writes into
 //
+//   ---- HEAP GROWTH (GC ARC unit 4, slot 24) --------------------------
+//   slot 24  capEnd     the CEILING's end address: heapStart + the ceiling in
+//                       bytes.  `heapEnd` (slot 4) is the CURRENT limit and is
+//                       never above it; Rt.gcAlloc raises heapEnd by a doubling
+//                       on exhaustion and dies loudly when the two are equal.
+//                       The marker's upper bound stays heapEnd, NOT capEnd —
+//                       the reserve past the limit was never handed out, so a
+//                       garbage pointer must not be allowed to mark into it.
+//
 // THE TIMESTAMPS COST THREE vDSO clock reads PER COLLECT (no branch: the knob
 // only gates the PRINT — Rt.gcNumOut, from Rt.collect), because a collect is
 // already an O(heap) walk and the alternative is a knob-read in the hot path.
@@ -206,6 +215,7 @@ struct Region {
   sweptBytes : word;
   markUs : word;
   sweepUs : word;
+  capEnd : word;
 }
 // THE FRAME HEADER LAYOUT (midlang-u6) — the name -> word-slot table.  Before
 // this struct frameBlock/frame-enter/frame-leave spelled the header as
@@ -3271,44 +3281,103 @@ defun Rt.exec-run(outfdN : val, errfdN : val, codeN : val) -> val {
   val tagCode = call Rt.cons(call Rt.intern("number"), call Rt.cons(mknum(payload(codeN, 0)), mknil));
   return call Rt.cons(call Rt.intern("cons"), call Rt.cons(tagCode, call Rt.cons(outLst, mknil)));
 }
+// Rt.gcEnvNum: the DECIMAL value of a getenv string (0 for unset), stopping at
+// the first non-digit.  A `recur` loop rather than a `while` with a mutable
+// local on purpose: a WORD binder that is the target of an assignment becomes
+// an AUTO-CELL (`allocN`, Mid.RtLang.Ast's AUTO-CELL note) — an ALLOCATING
+// node — and every collector defun must stay FRAME-FREE (TestMain's
+// classification row: a framed callee must never reach a safepoint, and this
+// one runs inside Rt.gcInit).  State travels in the arguments, which is the
+// tree's dominant loop idiom (Rt.gcSweep, Rt.gcMarkRoots, Rt.gcClearClasses).
+defun Rt.gcEnvNum(p : val, acc : val) -> val {
+  word pW = payload(p, 0);
+  word accW = payload(acc, 0);
+  if (mkbool(pW == 0) || (mkbool(byteload(pW, 0) < 48) || mkbool(byteload(pW, 0) > 57))) {
+    return mknum(accW);
+  } else {
+    recur(mknum(pW + 1), mknum(accW * 10 + (byteload(pW, 0) - 48)));
+  }
+}
 defun Rt.gcInit(dummy : val) -> val {
   word glob = rawcall rt_glob_addr();
   word region = wload(glob, 0);
   if (mkbool(region != 0)) {
     return mknum(region);
   } else {
+    // the stats knob, read ONCE: QBE_MIDGC_STATS=1 prints one line per collect
+    // (Rt.collect -> Rt.gcNumOut) AND one line per GROWTH (Rt.gcAlloc).
+    // Glob word 8 is the MIDGC-owned block's first free knob slot (Rt.main
+    // uses 2, 12, 13).
+    word statsKnob = rawcall getenv(rawstr("QBE_MIDGC_STATS"));
+    wstore(glob, 8, statsKnob);
     word heapBytes = rawcall rt_gc_heap_bytes();
-    word regionSize = heapBytes + heapBytes / 8;
+    // THE HEAP CEILING (GC ARC unit 4).  `heapBytes` is the INITIAL heap, not
+    // the heap — the same semantics the Zig arm gives the same knob
+    // (vendor/osier-rt/src/gc/heap.zig:145-176: `heap_bytes` is an initial size
+    // and `grow_heap` doubles into a reservation).  MEASURED, before this unit:
+    // the two 100%-live fixtures (churn 19.2 MB, vfield-rooted 25.2 MB of
+    // bodies) died `qbe-rt: midgc: out of memory` at QBE_HEAP_MB=16 — not
+    // churn pressure, a HARD one-shot mmap at the initial size — while the Zig
+    // arm at the same number survived by growing (live_pages 14337 -> 28673).
+    //
+    // THE RULE (stated, not implied): ceiling = min(8 x initial, initial + 4
+    // GB).  8x is the Zig arm's own effective ceiling (hostshim.zig rt_boot
+    // reserves 16x the heap and grow_heap halves it, GC-FIX C), so one knob
+    // means the same thing on both routes at fixture heaps; the +4 GB arm keeps
+    // the RESERVE — one mmap, VAS only — inside the range this host is measured
+    // to map (overcommit_memory=0, 125 GB RAM: 64 GiB maps, 128 GiB does not,
+    // heap.zig:405-410), because the Mid init has no shrink loop: an
+    // unmappable reserve dies loudly at 'mmap failed' instead.
+    // QBE_MIDGC_MAXMB=<MB> overrides the rule (probes, and callers who want a
+    // hard memory bound); it is CLAMPED UP to heapBytes, because QBE_HEAP_MB is
+    // the guarantee and a ceiling below it would make the initial heap
+    // unmappable.
+    word capKnob = rawcall getenv(rawstr("QBE_MIDGC_MAXMB"));
+    val capArgV = call Rt.gcEnvNum(mknum(capKnob), mknum(0));
+    word capArg = payload(capArgV, 0);
+    word ruleCap = payload((heapBytes * 8 < heapBytes + 4294967296) ? mknum(heapBytes * 8) : mknum(heapBytes + 4294967296), 0);
+    word knobCap = payload((capArg != 0) ? mknum(capArg * 1048576) : mknum(ruleCap), 0);
+    word capBytes = payload((knobCap < heapBytes) ? mknum(heapBytes) : mknum(knobCap), 0);
+    // THE LAYOUT IS SIZED FOR THE CEILING (never the initial heap): the mark
+    // stack must hold one entry per 64-byte block the LARGEST heap this region
+    // can become (the F1 theorem below), and the free-list table must have a
+    // class for the largest block it can hold.  Both cost VAS plus only the
+    // pages actually touched (the mark stack to its depth, the table zeroed per
+    // collect), and the sweep still walks the reached frontier
+    // [heapStart, cursor) — never the reserve.
+    word capWords = capBytes / 8;
+    word markEnd = 64 + capWords / 8 + 64;
+    word numClasses = 1 + payload((capWords <= 4096) ? mknum((capWords + 7) / 8) : mknum(512 + (capWords - 4096 + 4095) / 4096), 0);
+    word regionSize = markEnd * 8 + numClasses * 8 + 16 + capBytes;
     word base = rawcall mmap(0, regionSize, 3, 34, -1, 0);
     if (mkbool(base < 0)) {
       call Rt.die(rawstr("qbe-rt: midgc: mmap failed"));
       return mknil;
     } else {
-      word markEnd = 64 + ((heapBytes / 8) / 8);
       word classTable = base + markEnd * 8;
-      word maxTotal = heapBytes / 8;
-      word numClasses = 1 + payload((maxTotal <= 4096) ? mknum((maxTotal + 7) / 8) : mknum(512 + (maxTotal - 4096 + 4095) / 4096), 0);
       word heapStart = classTable + numClasses * 8 + 16;
+      // capEnd is the CEILING; heapEnd is the CURRENT limit, which starts at
+      // the initial heap and is raised by Rt.gcAlloc's growth step.
+      word capEnd = heapStart + capBytes;
+      word heapEnd = heapStart + heapBytes;
       // THE MARK-STACK BOUND, AS A CHECKED INVARIANT (GC-ARC F1).  The plan
       // recorded it as a 0.05% MARGIN that "holds" — an assertion, not a
       // property.  It is a THEOREM once stated right: the sweep's smallest
       // physical block is class 1 = 8 words = 64 bytes (gcAlloc's
       // `(total+7)/8` with total >= 3), so no heap this geometry can map
-      // holds more than `(regionEnd - heapStart) / 64` object bodies, and the
+      // holds more than `(capEnd - heapStart) / 64` object bodies, and the
       // mark walk pushes at most ONE entry per body (gcMarkPtr's `marked == 0`
-      // test).  Capacity is `markEnd - 64`.  The margin is therefore
-      // `(markEnd - 64) - (regionEnd - heapStart)/64`, which works out to
-      // heapBytes/262144 + ~72 entries — bigger than 0 at every heap size, and
-      // ONLY because the mark stack and the heap are both carved from the one
-      // mmap: if a later change moves the class table, shrinks the stack, or
-      // changes the minimum class, this DIES AT INIT instead of overflowing a
-      // stack nothing can grow.
-      // MEASURED at the probe heaps: 16 MB -> 262144 cap vs 262007 bodies
-      // (margin 137 = 16777216/262144 + 73); 64 MB -> 1048576 vs 1048247
-      // (margin 329 = 67108864/262144 + 73).
+      // test).  Capacity is `markEnd - 64` = capWords/8 + 64 = the largest
+      // block count the CEILING can hold, PLUS 64 spare entries.  The margin is
+      // therefore the constant 64 at EVERY heap size and every ceiling (it was
+      // heapBytes/262144 + ~72 before this unit), and it holds ONLY because the
+      // mark stack, the class table and the heap are carved from the one mmap:
+      // if a later change moves the class table, shrinks the stack, or changes
+      // the minimum class, this DIES AT INIT instead of overflowing a stack
+      // nothing can grow.  MEASURED: 16 MB heap / 128 MB ceiling -> 2 097 216
+      // capacity vs 2 097 152 bodies; 64 MB / 512 MB -> 8 388 672 vs 8 388 608.
       // probe-midgc-guards.sh is the fail-before (a halved stack trips it).
-      word regionEnd = base + regionSize;
-      word maxBlocks = (regionEnd - heapStart) / 64;
+      word maxBlocks = (capEnd - heapStart) / 64;
       if (mkbool(markEnd - 64 < maxBlocks)) {
         call Rt.die(rawstr("qbe-rt: midgc: mark stack smaller than the heap can hold"));
         return mknil;
@@ -3320,17 +3389,13 @@ defun Rt.gcInit(dummy : val) -> val {
       wstore(base, 1, classTable);
       wstore(base, 2, heapStart);
       wstore(base, 3, heapStart);
-      wstore(base, 4, regionEnd);
+      wstore(base, 4, heapEnd);
       wstore(base, 5, 64);
       wstore(base, 6, markEnd);
       wstore(base, 10, heapBytes);
       wstore(base, 11, 0);
       wstore(base, 12, numClasses);
-      // the stats knob, read ONCE: QBE_MIDGC_STATS=1 prints one line per
-      // collect (Rt.collect -> Rt.gcNumOut).  Glob word 8 is the MIDGC-owned
-      // block's first free knob slot (Rt.main uses 2, 12, 13).
-      word statsKnob = rawcall getenv(rawstr("QBE_MIDGC_STATS"));
-      wstore(glob, 8, statsKnob);
+      wstore(base, 24, capEnd);
       return mknum(base);
     }
   }
@@ -3357,7 +3422,13 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
   word allocated = regionW->allocated;
   regionW->kind = kindW;
   regionW->count = countW;
-  if (mkbool(allocated > heapBytes / 4)) {
+  // THE COLLECT TRIGGER FOLLOWS THE HEAP (unit 4): `limit/4`, where limit is
+  // heapEnd - heapStart.  At init that is exactly heapBytes/4 — the number
+  // every fixture's collect count was measured at — and after a growth it keeps
+  // the same 4-collects-per-heap cadence instead of collecting more often
+  // against a bigger region (a fixed heapBytes/4 would multiply the O(heap)
+  // sweep by the growth factor).
+  if (mkbool(allocated > (regionW->heapEnd - regionW->heapStart) / 4)) {
     call Rt.collect(mknum(0));
     regionW->allocated = 0;
     return mknil;
@@ -3381,8 +3452,61 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
       val retry = call Rt.gcAllocGo(region, mknum(cls));
       word retryW = payload(retry, 0);
       if (mkbool(retryW == 0)) {
-        call Rt.die(rawstr("qbe-rt: midgc: out of memory"));
-        return mknil;
+        // GROW (GC ARC unit 4).  Reclamation was tried FIRST and returned
+        // nothing for this class, so the only way to satisfy the request is a
+        // bigger heap.  The step is a DOUBLING of the current limit — the Zig
+        // arm's grow_heap rule (heap.zig:683) — raised to the requested block
+        // when one block needs more than a doubling (the Zig's own
+        // max(2 x heappages, allocated + needed + slack) shape), and CLAMPED to
+        // the ceiling.  Nothing moves: a mark-sweep has no forwarding, so a
+        // bigger limit is just a bigger [heapStart, cursor) frontier, and the
+        // marker's bound (heapEnd) grows with it.
+        word heapStart = regionW->heapStart;
+        word capEnd = regionW->capEnd;
+        word needLim = (cursor + phys * 8) - heapStart;
+        word lim = heapEnd - heapStart;
+        word dbl = lim * 2;
+        word limUp = payload((dbl < needLim) ? mknum(needLim) : mknum(dbl), 0);
+        word capLim = capEnd - heapStart;
+        word limCap = payload((limUp < capLim) ? mknum(limUp) : mknum(capLim), 0);
+        word newEnd = heapStart + limCap;
+        // The store is UNCONDITIONAL on the stats knob (the transcript is the
+        // instrument, the growth is the behaviour); both branches of each `if`
+        // end in the file's dead-bind `return` idiom, never relied on as an
+        // exit (plan §6.4: a `return` in a statement-position branch is a dead
+        // BIND, and the continuation continues).
+        if (mkbool(newEnd > heapEnd)) {
+          regionW->heapEnd = newEnd;
+          if (mkbool(wload(rawcall rt_glob_addr(), 8) != 0)) {
+            call Rt.gcNumOut(mknum(rawstr("midgc: grow ")), mknum((newEnd - heapStart) / 1048576), region);
+            call Rt.gcNumOut(mknum(rawstr(" MB (was ")), mknum((heapEnd - heapStart) / 1048576), region);
+            call Rt.gcNumOut(mknum(rawstr(" MB, ceiling ")), mknum(capLim / 1048576), region);
+            rawcall write(2, rawstr(" MB)\n"), 5);
+            return mknil;
+          } else {
+            return mknil;
+          }
+        } else {
+          return mknil;
+        }
+        if (mkbool(cursor + phys * 8 < regionW->heapEnd)) {
+          wstore(cursor, -2, kindW * 2 + cls * 4);
+          wstore(cursor, -1, countW);
+          regionW->cursor = cursor + phys * 8;
+          regionW->allocated = regionW->allocated + phys * 8;
+          return mknum(cursor);
+        } else {
+          // THE CEILING, LOUDLY.  `heapEnd` is the ceiling here (the growth
+          // above clamps to capEnd, so a request the ceiling cannot hold leaves
+          // the limit AT it), and the numbers make the case actionable instead
+          // of a bare "out of memory": raise QBE_MIDGC_MAXMB (or QBE_HEAP_MB,
+          // which raises the ceiling with it).
+          call Rt.gcNumOut(mknum(rawstr("qbe-rt: midgc: out of memory: heap at its ceiling of ")), mknum(capLim / 1048576), region);
+          call Rt.gcNumOut(mknum(rawstr(" MB (initial ")), mknum(heapBytes / 1048576), region);
+          rawcall write(2, rawstr(" MB)\n"), 5);
+          call Rt.die(rawstr("qbe-rt: midgc: out of memory"));
+          return mknil;
+        }
       } else {
         regionW->allocated = regionW->allocated + phys * 8;
         return mknum(retryW);

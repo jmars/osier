@@ -149,6 +149,7 @@ seat.
 gcProgram : List Defun
 gcProgram =
     [ seat "Rt.gcInit" 1
+    , seat "Rt.gcEnvNum" 2
     , seat "Rt.allocVector" 1
     , seat "Rt.allocRaw" 1
     , seat "Rt.gcAlloc" 3

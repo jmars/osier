@@ -15,10 +15,13 @@
 #   (2) THE MARK-STACK BOUND.  plan.md §2.2 recorded it as a 0.05% MARGIN
 #       ("262,144 entries vs 262,007 max blocks at 16 MB") — an assertion.  It
 #       is a GEOMETRY THEOREM (see Rt.gcInit's comment): capacity = markEnd - 64,
-#       the largest possible block count = (regionEnd - heapStart)/64 because
-#       the smallest physical block is class 1 = 8 words, and the walk pushes at
-#       most one entry per body.  gcInit now DERIVES both numbers and dies at
-#       init if the stack is smaller than the heap can hold.
+#       the largest possible block count = (capEnd - heapStart)/64 because the
+#       smallest physical block is class 1 = 8 words, and the walk pushes at
+#       most one entry per body.  gcInit DERIVES both numbers and dies at init
+#       if the stack is smaller than the heap can hold.  GC ARC unit 4 moved
+#       both sides to the CEILING (the reserve the heap can grow into), so the
+#       margin is a constant 64 entries at every heap: the STRESSOR below is the
+#       same halving, and it now halves a stack sized for 8x the heap.
 #
 # THE ASYMMETRY (both arms mutate runtime.mid, which the compiler reads at RUN
 # time, so the arm costs one qbe-mk and no elm rebuild; every mutation is
@@ -28,10 +31,10 @@
 #       Rt.allocVector — i.e. reach the collector before Rt.gcInit has mapped
 #       anything.  PRE-FIX BODY: SEGV (139).  POST-FIX BODY: the loud message,
 #       exit 1.  Same stressor, two bodies: the body is the only variable.
-#   (2) the STRESSOR is a HALVED mark stack (`(heapBytes / 8) / 16`).  PRE-FIX
-#       BODY (no derived check): the program runs to completion and prints the
-#       golden — a SILENT mis-geometry that would only bite a heap whose live
-#       set is larger.  POST-FIX BODY: dies AT INIT.
+#   (2) the STRESSOR is a HALVED mark stack (`capWords / 16` instead of
+#       `capWords / 8`).  PRE-FIX BODY (no derived check): the program runs to
+#       completion and prints the golden — a SILENT mis-geometry that would only
+#       bite a heap whose live set is larger.  POST-FIX BODY: dies AT INIT.
 #
 # Usage:
 #   tools/qbe/probe-midgc-guards.sh          # PASS-AFTER (this tree)
@@ -88,8 +91,8 @@ if mode == "stress-preinit":
         "allocVector prologue")
 elif mode == "halt-mark-stack":
     # the STRESSOR only: a mark stack the heap can outgrow
-    sub("      word markEnd = 64 + ((heapBytes / 8) / 8);",
-        "      word markEnd = 64 + ((heapBytes / 8) / 16);",
+    sub("    word markEnd = 64 + capWords / 8 + 64;",
+        "    word markEnd = 64 + capWords / 16 + 64;",
         "gcInit markEnd")
 elif mode == "revert-preinit":
     # the PRE-FIX BODY: dereference the region without testing it for null
@@ -107,8 +110,7 @@ elif mode == "revert-preinit":
         "collect null guard")
 elif mode == "revert-bound":
     # the PRE-FIX BODY: no derived capacity check at init
-    sub('''      word regionEnd = base + regionSize;
-      word maxBlocks = (regionEnd - heapStart) / 64;
+    sub('''      word maxBlocks = (capEnd - heapStart) / 64;
       if (mkbool(markEnd - 64 < maxBlocks)) {
         call Rt.die(rawstr("qbe-rt: midgc: mark stack smaller than the heap can hold"));
         return mknil;
@@ -116,7 +118,7 @@ elif mode == "revert-bound":
         return mknil;
       }
 ''',
-        '''      word regionEnd = base + regionSize;
+        '''      word maxBlocks = (capEnd - heapStart) / 64;
 ''',
         "gcInit mark-stack bound check")
 else:
