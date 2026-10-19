@@ -46,16 +46,26 @@ nested expression forms, rule by rule (the plan's numbering kept):
     the tree's strings), so this module allocates readable per-defun
     `else_N`/`join_N` labels from its own counter; byte identity depends
     only on tree SHAPE.
-  * **L6** — a MID-BLOCK `if` (an `SIf` statement) lowers by ELSE-NESTING:
-    the CONTINUATION moves into the NON-DIVERGING branch — `if (c) {
-    return x; } rest..` -> `If { c, then = x, else = lower rest.. }`, and
-    symmetrically when only the else diverges.  BOTH branches diverging ->
-    `If { c, A, B }` bound at a fresh DEAD binder with the continuation as
-    the `Let` body (the execGo `(lets [(b 106, callW _exit ..)] mkNil)`
-    precedent).  Check J7 already rejects both-branches-fall-through, so
-    the remaining shapes are impossible for checked input; if the lowerer
-    still sees one it is a LOUD internal error naming the judgment, never
-    a silent choice.
+  * **L6** — a MID-BLOCK `if` (an `SIf` statement) is a GUARD: at least one
+    branch DIVERGES (Check J7; both-falling is a reject), and the
+    CONTINUATION moves into the NON-DIVERGING branch — `if (c) { return x; }
+    rest..` -> `If { c, then = x, else = lower rest.. }`, and symmetrically
+    when only the else diverges.  So a `return` in a statement `if` EXITS:
+    the arm it is in is that branch's value and the rest of the block is not
+    reachable from it.
+    BOTH branches diverging (a `return`/`recur` in each, or a both-diverging
+    `if` nested in one) -> the `If` IS the block's value and the statements
+    after it are UNREACHABLE, so they are not lowered at all (they ARE
+    dropped from the emit — the C rule).  THIS ARM WAS THE LANDMINE until
+    the return-flip unit: it used to bind the `If` to a fresh DEAD binder
+    and CONTINUE, so a both-returning statement `if` silently fell through
+    and its continuation ran whatever the condition.  69 sites in
+    runtime.mid depended on that; they were migrated to a conditional-VALUE
+    declaration (`val u = if (c) { ..; return x; } else { ..; return y; };`,
+    where `return` is the BRANCH's value by L3) before the arm changed, so
+    this tree's emit is byte-identical under both arms.
+    If the lowerer still sees both branches FALL THROUGH it is a LOUD
+    internal error naming the judgment, never a silent choice.
   * **L7** — the owner's example shape (`if (region != 0) { return
     mknum(region); } base = rawcall mmap(..); ..`) lowers by the L6
     else-nesting rule exactly as written (pinned by a TestMain row).
@@ -907,35 +917,47 @@ lowerStmt st stmt cont =
                                 Err (internal st "SIf" "a diverging else cannot be missing")
 
                     else if thenDiv && elseDiv then
-                        -- Both diverge: the If dead-binds at a fresh binder
-                        -- and the continuation continues (the execGo
-                        -- `(lets [(b 106, callW _exit ..)] mkNil)` shape).
+                        -- BOTH DIVERGE: THE `return` EXITS (the return-flip
+                        -- unit, stage 2).  Both arms END the block — they
+                        -- `return`/`recur`, or are themselves a both-diverging
+                        -- `if` — so the `If` IS this block's value and the
+                        -- statements after it are UNREACHABLE.  The
+                        -- continuation is therefore NOT lowered: under the old
+                        -- (pre-flip) arm this was a DEAD BIND, the `If` was
+                        -- bound to a fresh binder nothing read, and the
+                        -- continuation RAN whatever the condition — a
+                        -- silent-wrong for every program that wrote
+                        -- `if (c) { return a; } else { return b; }` and meant
+                        -- the return.  69 such sites lived in runtime.mid and
+                        -- were migrated to a conditional-VALUE declaration
+                        -- BEFORE this arm changed (see runtime.mid's header);
+                        -- the corpus is byte-identical under both arms, so the
+                        -- flip is inert on this tree and LOUD for a program
+                        -- that still writes the shape.
+                        --
+                        -- Not an error: dropping the unreachable tail is what
+                        -- C (and every block language) does with code after a
+                        -- both-returning if.  A checker-side reject of the
+                        -- shape is a separate, cheekier question — J7 admits
+                        -- it, and it stays admitted because the value spelling
+                        -- above is its own idiom.
                         case me of
                             Just eb ->
-                                let
-                                    ( dead, stA ) =
-                                        fresh "_if" st1
-                                in
-                                case lowerBlock stA t of
+                                case lowerBlock st1 t of
                                     Err msg ->
                                         Err msg
 
-                                    Ok ( stB, t1 ) ->
-                                        case lowerBlock stB eb of
+                                    Ok ( st2, t1 ) ->
+                                        case lowerBlock st2 eb of
                                             Err msg ->
                                                 Err msg
 
-                                            Ok ( stC, e1 ) ->
-                                                case cont stC of
-                                                    Err msg ->
-                                                        Err msg
-
-                                                    Ok ( stD, body ) ->
-                                                        let
-                                                            ( ie, stE ) =
-                                                                mkIf stD c1 t1 e1
-                                                        in
-                                                        Ok ( stE, Let { binders = [ LetBind { binder = dead, value = ie } ], body = body } )
+                                            Ok ( st3, e1 ) ->
+                                                let
+                                                    ( ie, stF ) =
+                                                        mkIf st3 c1 t1 e1
+                                                in
+                                                Ok ( stF, ie )
 
                             Nothing ->
                                 Err (internal st "SIf" "both branches diverge but there is no else block")

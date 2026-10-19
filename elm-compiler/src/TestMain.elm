@@ -3616,48 +3616,33 @@ checks rt runtimeMidText =
         )
     , check "U5 LAYOUT PIN: sizeof(Region) == 25 words in runtime.mid's own declaration (slots 0..12 + GC-ARC F1's stats instrument at 13..23 + GC ARC unit 4's growth ceiling at 24 — the mark stack starts at word 64, so it is NOT a field, and the digit scratch the printer writes into is at BYTE 288, outside the struct)"
         (Check.sizeofStruct (declsOf runtimeMidText) "Region" == Just 25)
-    -- ==================== GC ARC unit 1b: the RETURN LANDMINE ====================
-    -- `return` inside a STATEMENT-position `if` is a DEAD BIND, not an exit: the
-    -- lowerer's `thenDiv && elseDiv` arm (LowerToIr.elm) evaluates the chosen
-    -- arm's value, binds the whole `If` to a fresh binder nothing reads, and
-    -- CONTINUES with the rest of the block.  Pinned here because it is a TRAP,
-    -- not a rule: a program writing `if (c) { return a; } else { return b; }`
-    -- and expecting `return` to exit silently falls through instead.
+    -- ==================== THE RETURN-FLIP (was: the RETURN LANDMINE) ====================
+    -- `return` inside a STATEMENT-position `if` now EXITS.  Until the
+    -- return-flip unit it did not: the lowerer's `thenDiv && elseDiv` arm
+    -- evaluated the chosen arm's value, bound the whole `If` to a fresh binder
+    -- nothing read, and CONTINUED — so `if (c) { return a; } else { return b; }`
+    -- ran the rest of the block whatever `c` was, which is a silent-wrong for
+    -- every program that meant the return.  Stage 1 migrated the 69 runtime.mid
+    -- sites that depended on the fall-through (see the SPELLING rows above);
+    -- stage 2 changed the arm, and the rows below pin the new shape.
     --
-    -- BOTH rows assert TODAY's shapes.  The first is the bug; the second is the
-    -- form every unhooked site in runtime.mid now uses (one-sided, so the
-    -- continuation lands in the FALSE path and the then arm's value IS the
-    -- body's value).  Flipping the first row is the commit that makes `return`
-    -- exit — and MEASURED, that is not a lowering tweak: runtime.mid carries 72
-    -- such sites with a continuation (24 whose then branch halts, 48 that do
-    -- work and must carry on), every one of their emits moves, and J7 admits no
-    -- both-falling mid-block `if`, so the 48 need a join this language does not
-    -- have at that position (Rt.gcAlloc's trigger note spells the workaround).
-    , check "GC1b LANDMINE PIN (the BUG, not a rule): a both-diverging statement `if` DEAD-BINDS and the block continues — `if (c) { return 1; } else { return 2; } return 7;` lowers to `Let _if = <the If> in <7>`, so the function returns 7 whatever `c` is"
+    -- The emitted code is UNCHANGED on this tree (corpus 159/159 byte-identical
+    -- before and after the flip) BECAUSE the migration came first — that is the
+    -- point of doing it in two stages, and the shape that made it necessary is
+    -- exactly the shape the first row below now REJECTS.
+    , check "THE FLIP: a both-diverging statement `if` EXITS — `if (c) { return 1; } else { return 2; } return 7;` lowers to the `If` ITSELF (`If c (1) (2)`), and the `7` is not in the tree at all because the rest of the block is unreachable from both arms (it used to dead-bind the If and return 7 whatever `c` was: the GC1b landmine)"
         (case
             lowlModuleBody "defun Rt.t(d : val) -> val {\n  if (mkbool(1)) {\n    return mknum(1);\n  } else {\n    return mknum(2);\n  }\n  return mknum(7);\n}"
          of
             Ok e ->
-                case e of
-                    Let { binders, body } ->
-                        case binders of
-                            [ LetBind { value } ] ->
-                                (case value of
-                                    If _ ->
-                                        True
+                canon e
+                    == canon
+                        (liff (lmkBool (ltn 1))
+                            (lmkNum (ltn 1))
+                            (lmkNum (ltn 2))
+                        )
 
-                                    _ ->
-                                        False
-                                )
-                                    && numLit 7 body
-
-                            _ ->
-                                False
-
-                    _ ->
-                        False
-
-            _ ->
+            Err _ ->
                 False
         )
     , check "GC1b EARLY-EXIT PIN (the shape that DOES exit): a ONE-SIDED diverging `if` splices the continuation into its FALSE path — `if (c) { return 1; } return 7;` lowers to `If c (1) (7)`, so the then arm's value IS the body's value and nothing dead-binds"
@@ -6086,25 +6071,29 @@ checks rt runtimeMidText =
                 False
         )
 
-    , check "lower: L6 — both branches diverging: the If dead-binds at a fresh unused binder and the continuation continues (the execGo (b 106, callW _exit ..) precedent)"
-        (case lowlBody "defun Rt.bothdiv(n : val) -> val {\n  if (mkbool(tagis(n, 1) == 1)) { return mknum(1); } else { return mknum(2); }\n  return mknil;\n}" of
-            Ok body ->
-                canon body
+    , check "THE FLIP IN A `rawAbi` (WORD) DEFUN: the same exit holds where the defun's ABI is the all-word one and its value is a `word` — `defun Rt.w(n : word) -> word { if (mkbool(n == 0)) { return 1; } else { return 2; } return 7; }` lowers to `If c (1) (2)` with the 7 dropped, so the flip is a property of the STATEMENT FORM and not of the `:val` class (the 69 migrated runtime.mid sites are all `:val`; this row is the other ABI)"
+        (case
+            lowlModuleBody "defun Rt.w(n : word) -> word {\n  if (mkbool(n == 0)) {\n    return 1;\n  } else {\n    return 2;\n  }\n  return 7;\n}"
+         of
+            Ok e ->
+                canon e
                     == canon
-                        (llets
-                            [ ( ltb 2
-                              , liff (lmkBool (lcmpW RCeq (ltagIs (ltv 1) 1) (ltn 1)))
-                                    (lmkNum (ltn 1))
-                                    (lmkNum (ltn 2))
-                              )
-                            ]
-                            lmkNilV
+                        (liff (lmkBool (lcmpW RCeq (ltv 1) (ltn 0)))
+                            (ltn 1)
+                            (ltn 2)
                         )
 
             Err _ ->
                 False
         )
+    , check "THE FLIP IN THE EMITTED .ssa: a user module whose answer depends on the early exit — `if (c) { return mknum(11); } else { return mknum(22); } return mknum(424242);` — emits NO 424242 (the dead tail is not lowered, so the program cannot return it) while the branch test survives, i.e. the answer is 11 or 22 and never the pre-flip 424242"
+        (case emitUserSsa rt "module Flipf\ndefun Flipf.g(c : val) -> val {\n  if (mkbool(tagis(c, 1) == 1)) {\n    return mknum(11);\n  } else {\n    return mknum(22);\n  }\n  return mknum(424242);\n}" of
+            Ok ssa ->
+                not (String.contains "424242" ssa) && String.contains "jnz" ssa
 
+            Err _ ->
+                False
+        )
     -- operators
     , check "lower: precedence round-trips onto the raw nodes (b*c before +, - left-associative)"
         (case lowlBody "defun Rt.prec(a : val, b : val, c : val, d : val) -> val {\n  return mknum(payload(a, 0) + payload(b, 0) * payload(c, 0) - payload(d, 0));\n}" of
