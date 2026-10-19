@@ -1151,17 +1151,6 @@ defun Rt.toI32(x : val) -> val {
   return mknum(0);
 }
 
-defun Rt.dgs(n : val) -> val {
-  if (mkbool(payload(n, 0) == 0)) {
-    return mknil;
-  }
-  val q = mknum(payload(n, 0) / 10);
-  val r = mknum(payload(n, 0) - payload(q, 0) * 10);
-  val rAbs = mkbool(payload(n, 0) < 0) ? mknum(0 - payload(r, 0)) : r;
-  val digit = mknum(48 + payload(rAbs, 0));
-  return call Rt.cons(digit, call Rt.dgs(q));
-}
-
 defun Rt.revGo(l : val, acc : val) -> val {
   if (mkbool(tagis(l, 4))) {
     return call Rt.revGo(vecload(payload(l, 0), 1), call Rt.cons(vecload(payload(l, 0), 0), acc));
@@ -1169,36 +1158,77 @@ defun Rt.revGo(l : val, acc : val) -> val {
   return acc;
 }
 
-// Rt.bytesOf / Rt.countL are the bytes<->string walkers of the text path
-// (Rt.cn/Rt.cn2/Rt.bytesToStr), and as a plain build-up/`1 +` recursion their
-// depth is the LENGTH OF THE TEXT: one native frame per byte.  MEASURED
-// 2026-10-19 from a crash stack: the seed-built compiler printing ONE
-// 26 KB emitted defun had 26 061 q_Rt.countL frames live when it hit the
-// guard page at the default 8 MiB (fillGo's 440-byte frame reached the same
-// wall at 64 MiB), and the printed corpus contains a 672 628-byte defun.
-// Both are accumulators over `recur` — the tree's loop idiom (Rt.gcEnvNum:
-// state travels in the arguments) — so the walk costs O(1) native stack at
-// any text size.  bytesOfGo accumulates REVERSED and hands it to revGo,
-// which is itself a self-tail loop; countGo carries the length.
-defun Rt.bytesOf(s : val, i : val) -> val {
-  return call Rt.bytesOfGo(s, i, mknil);
-}
-
-defun Rt.bytesOfGo(s : val, i : val, acc : val) -> val {
-  if (mkbool(payload(i, 0) >= len32(s))) {
-    return call Rt.revGo(acc, mknil);
-  } else {
-    recur(s, mknum(payload(i, 0) + 1), call Rt.cons(mknum(strbyte(s, payload(i, 0))), acc));
-  }
-}
-
+// THE TEXT PATH IS A BYTE BUFFER, NOT A CONS LIST (text-fix).  A string is
+// the runtime's native string (tag 1: bytes at payload word 0, length at
+// len32) everywhere the printer touches it: an integer's decimal text and a
+// symbol's name are written STRAIGHT into ONE `allocraw` buffer and wrapped
+// with `mkstr`, and Rt.cn2 concatenates two of them by copying two byte
+// ranges into one buffer of len(a)+len(b)+1.  MEASURED (handoff-prof-fixes-
+// result, handoff-osier-prof-result): the old shape built a cons cell PER
+// BYTE (Rt.dgs / Rt.nameBytes / Rt.bytesOf -> Rt.cons) and then walked that
+// list three more times (countL, appendL, fillGo) — 18-24% of the run in
+// libc memset (4.9e9 calls, 1.25 TB, mostly 64-511-byte blocks, i.e. the cons
+// cells) plus ~15% in the walks themselves.  THE RUNTIME SEMANTICS ARE
+// UNCHANGED: a string is still a `val` (tag 1 over a raw block), so the val
+// bridge rules and rooting are exactly as they were — the buffer is a raw
+// GC block, the string a value over it, and no printer ordering moves.
+//
+// Rt.bytesToStr SURVIVES for the one caller whose INPUT REALLY IS a byte list
+// — Rt.shen.bytes->string, i.e. Shen's bytes->string — with its walkers
+// countL/countGo/fillGo.  Their depth was the LENGTH OF THE TEXT as a
+// build-up recursion: MEASURED 2026-10-19 from a crash stack, the seed-built
+// compiler printing ONE 26 KB emitted defun had 26 061 q_Rt.countL frames
+// live when it hit the guard page at the default 8 MiB (fillGo's 440-byte
+// frame reached the same wall at 64 MiB), and the printed corpus contains a
+// 672 628-byte defun.  Both are accumulators over `recur` — the tree's loop
+// idiom (Rt.gcEnvNum: state travels in the arguments) — so the walk costs
+// O(1) native stack at any text size.
 defun Rt.numText(n : val) -> val {
-  if (mkbool(payload(n, 0) == 0)) {
-    return call Rt.bytesToStr(call Rt.cons(mknum(48), mknil));
+  word nw = payload(n, 0);
+  if (nw == 0) {
+    word z = allocraw(2);
+    bytestore(z, 0, 48);
+    bytestore(z, 1, 0);
+    return mkstr(z, 1);
   }
-  val digits = call Rt.revGo(call Rt.dgs(n), mknil);
-  val signed = mkbool(payload(n, 0) < 0) ? call Rt.cons(mknum(45), digits) : digits;
-  return call Rt.bytesToStr(signed);
+  word cnt = call Rt.digitCount(nw, 0);
+  if (nw < 0) {
+    word ln = cnt + 1;
+    word sb = allocraw(ln + 1);
+    bytestore(sb, 0, 45);
+    call Rt.numFill(sb + ln - 1, nw);
+    bytestore(sb, ln, 0);
+    return mkstr(sb, ln);
+  }
+  word bp = allocraw(cnt + 1);
+  call Rt.numFill(bp + cnt - 1, nw);
+  bytestore(bp, cnt, 0);
+  return mkstr(bp, cnt);
+}
+
+// The decimal digit COUNT of n (`m / 10` truncates toward zero, so this
+// terminates on a negative m too and the magnitude is never negated — for
+// INT64_MIN `0 - m` would overflow).
+defun Rt.digitCount(m : word, i : word) -> word {
+  if (m == 0) {
+    return i;
+  }
+  recur(m / 10, i + 1);
+}
+
+// The digits of m, written RIGHT-TO-LEFT from `p` — the backward fill
+// Rt.gcNum already does, so no index arithmetic and no second pass.
+// `d + neg * (0 - 2 * d)` is |d| without a branch (`d < 0` is a 0/1 word),
+// which keeps INT64_MIN's digits exact.
+defun Rt.numFill(p : word, m : word) -> word {
+  word q = m / 10;
+  word d = m - q * 10;
+  word neg = d < 0;
+  bytestore(p, 0, 48 + d + neg * (0 - 2 * d));
+  if (q == 0) {
+    return p;
+  }
+  recur(p - 1, q);
 }
 
 defun Rt.bytesToStr(bs : val) -> val {
@@ -1226,7 +1256,7 @@ defun Rt.fillGo(l : val, bufN : val, i : val) -> val {
     return mknil;
   }
   bytestore(payload(bufN, 0), payload(i, 0), payload(vecload(payload(l, 0), 0), 0));
-  return call Rt.fillGo(vecload(payload(l, 0), 1), bufN, mknum(payload(i, 0) + 1));
+  recur(vecload(payload(l, 0), 1), bufN, mknum(payload(i, 0) + 1));
 }
 
 @consArr
@@ -1269,28 +1299,44 @@ defun Rt.@p(car : val, cdr : val) -> val {
   };
 }
 
+// THE CONCATENATION (text-fix): ONE buffer of len(a)+len(b)+1, TWO byte
+// copies, ZERO cons cells — where this used to be bytesOf -> appendL ->
+// bytesToStr, i.e. 2*(la+lb) cons cells plus four walks of the result.
+// `Rt.byteCopyGo` is the loop (3 word params — the LEAN-ABI bound), and it
+// advances BOTH pointers, so the second copy starts at buf+la.
 defun Rt.cn2(x : val, y : val) -> val {
-  return call Rt.bytesToStr(call Rt.appendL(call Rt.bytesOf(x, mknum(0)), call Rt.bytesOf(y, mknum(0))));
+  word lx = len32(x);
+  word ly = len32(y);
+  word buf = allocraw(lx + ly + 1);
+  call Rt.byteCopyGo(buf, payload(x, 0), lx);
+  call Rt.byteCopyGo(buf + lx, payload(y, 0), ly);
+  bytestore(buf, lx + ly, 0);
+  return mkstr(buf, lx + ly);
 }
 
-defun Rt.appendL(xs : val, ys : val) -> val {
-  return call Rt.revGo(call Rt.revGo(xs, mknil), ys);
-}
-
-defun Rt.symToStr(s : val, i : val) -> val {
-  word byte = byteload(payload(s, 0), payload(i, 0));
-  if (mkbool(byte == 0)) {
-    return call Rt.bytesToStr(mknil);
+// n bytes from src to dst, both pointers advancing: the ONLY copy loop the
+// text path needs (cn2, substring, symToStr, repeat).  Word params and word
+// compares throughout, so it allocates NOTHING — a caller can hold a freshly
+// `allocraw`'d buffer across it without a scavenge window (the cStrFill
+// lesson: an unrooted raw block must see no GC allocation before mkstr).
+defun Rt.byteCopyGo(dst : word, src : word, n : word) -> word {
+  if (n == 0) {
+    return dst;
   }
-  return call Rt.bytesToStr(call Rt.cons(mknum(byte), call Rt.nameBytes(s, mknum(payload(i, 0) + 1))));
+  bytestore(dst, 0, byteload(src, 0));
+  recur(dst + 1, src + 1, n - 1);
 }
 
-defun Rt.nameBytes(s : val, i : val) -> val {
-  word byte = byteload(payload(s, 0), payload(i, 0));
-  if (mkbool(byte == 0)) {
-    return mknil;
-  }
-  return call Rt.cons(mknum(byte), call Rt.nameBytes(s, mknum(payload(i, 0) + 1)));
+// A symbol's name is a NUL-terminated C string (payload word 0); one buffer,
+// one length walk, one copy.  The arity dropped to 1 with the cons list it
+// used to thread its index through.
+defun Rt.symToStr(s : val) -> val {
+  val len = call Rt.cStrLenGo(mknum(payload(s, 0)), mknum(0));
+  word n = payload(len, 0);
+  word buf = allocraw(n + 1);
+  call Rt.byteCopyGo(buf, payload(s, 0), n);
+  bytestore(buf, n, 0);
+  return mkstr(buf, n);
 }
 
 defun Rt.strOf(x : val) -> val {
@@ -1301,7 +1347,7 @@ defun Rt.strOf(x : val) -> val {
     return call Rt.numText(x);
   }
   if (mkbool(tagis(x, 2))) {
-    return call Rt.symToStr(x, mknum(0));
+    return call Rt.symToStr(x);
   }
   if (mkbool(tagis(x, 3))) {
     if (mkbool(payload32(x, 0) != 0)) {
@@ -4258,8 +4304,11 @@ defun Rt.char-code(s : val, i : val) -> val {
 defun Rt.substring(s : val, st : val, ln : val) -> val {
   val st0 = mkbool(payload(st, 0) < 0) ? mknum(0) : (mkbool(payload(st, 0) > len32(s)) ? mknum(len32(s)) : st);
   val ln0 = mkbool(payload(ln, 0) < 0) ? mknum(0) : (mkbool((payload(st0, 0) + payload(ln, 0)) > len32(s)) ? mknum(len32(s) - payload(st0, 0)) : ln);
-  val end = mknum(payload(st0, 0) + payload(ln0, 0));
-  return call Rt.bytesToStr(call Rt.subGo(s, st0, end));
+  word n = payload(ln0, 0);
+  word buf = allocraw(n + 1);
+  call Rt.byteCopyGo(buf, payload(s, 0) + payload(st0, 0), n);
+  bytestore(buf, n, 0);
+  return mkstr(buf, n);
 }
 defun Rt.cn(a : val, bb : val) -> val {
   return call Rt.cn2(call Rt.strOf(a), call Rt.strOf(bb));
@@ -4268,8 +4317,22 @@ defun Rt.repeat(cnt : val, s : val) -> val {
   if (mkbool(payload(cnt, 0) <= 0) || mkbool(len32(s) <= 0)) {
     return "";
   } else {
-    return call Rt.bytesToStr(call Rt.repGo(s, cnt));
+    return call Rt.repGo("", s, cnt);
   }
+}
+// cnt copies of s by DOUBLING (text-fix): `cur` grows s, s+s, s+s+s+s, ... and
+// `acc` collects the binary digits of cnt, so the whole repeat is O(log cnt)
+// Rt.cn2 concatenations — O(total) bytes copied, O(log cnt) allocations —
+// where the old shape built a cons cell per BYTE and reversed the list twice.
+// 3 val params, the LEAN-ABI bound; the recursion is `recur` (depth = the bit
+// count of cnt).
+defun Rt.repGo(acc : val, cur : val, n : val) -> val {
+  if (mkbool(payload(n, 0) == 0)) {
+    return acc;
+  }
+  val bit = mknum(payload(n, 0) - (payload(n, 0) / 2) * 2);
+  val acc2 = mkbool(payload(bit, 0) == 1) ? call Rt.cn2(acc, cur) : acc;
+  recur(acc2, call Rt.cn2(cur, cur), mknum(payload(n, 0) / 2));
 }
 defun Rt.shen.str->bytes(s : val) -> val {
   if (mkbool(tagis(s, 1))) {
@@ -4325,22 +4388,6 @@ defun Rt.closureFill(data : val, capBase : val, idx : val) -> val {
   } else {
     vecstore(dataW, idxW - 1, vecload(capW, idxW - 1));
     return call Rt.closureFill(mknum(dataW), mknum(capW), mknum(idxW - 1));
-  }
-}
-
-defun Rt.subGo(s : val, i : val, e : val) -> val {
-  if (mkbool(payload(i, 0) >= payload(e, 0))) {
-    return mknil;
-  } else {
-    return call Rt.cons(mknum(strbyte(s, payload(i, 0))), call Rt.subGo(s, mknum(payload(i, 0) + 1), e));
-  }
-}
-
-defun Rt.repGo(s : val, i : val) -> val {
-  if (mkbool(payload(i, 0) <= 0)) {
-    return mknil;
-  } else {
-    return call Rt.appendL(call Rt.bytesOf(s, mknum(0)), call Rt.repGo(s, mknum(payload(i, 0) - 1)));
   }
 }
 

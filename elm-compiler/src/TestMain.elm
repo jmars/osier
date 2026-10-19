@@ -84,10 +84,10 @@ checks rt runtimeMidText =
       -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
       -- the frameZero loop), so an empty or truncated load turns it RED,
       -- loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (281 defuns — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (278 defuns — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 281
+                List.length ast == 278
 
             Err _ ->
                 False
@@ -899,8 +899,8 @@ checks rt runtimeMidText =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 255 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram rt True True True) == 255
+    , check "rt program: 252 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
+        (List.length (rtProgram rt True True True) == 252
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
@@ -1138,7 +1138,7 @@ checks rt runtimeMidText =
     -- shapes are pinned, not just "it links".
     , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main + the B0 frame pair + stage 7A's die family (dieErr/hostDieErr — hostDieUnported left BOTH the family and the runtime at 7E, the unit that gave every Task ctor a real arm) are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo/frame set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set; the frame pair is FRAME-FREE by construction — its only nodes are rawcall/raw-word loads/stores and rawAbi->rawAbi calls to its one non-allocating helper)"
         (Rt.rawAbi
-            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.tail-known", "Rt.bounce", "Rt.dieErr", "Rt.hostDieErr" ]
+            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.tail-known", "Rt.bounce", "Rt.dieErr", "Rt.hostDieErr", "Rt.byteCopyGo", "Rt.digitCount", "Rt.numFill" ]
             && not (Set.member "Rt.die" rt.allocating)
             && not (Set.member "Rt.halt" rt.allocating)
             && not (Set.member "Rt.cStrEq" rt.allocating)
@@ -6374,17 +6374,17 @@ checks rt runtimeMidText =
                 List.sort (Dict.keys s)
                     == [ "Rt.*", "Rt.+", "Rt.-", "Rt./", "Rt.<", "Rt.<-address"
                        , "Rt.<=", "Rt.=", "Rt.>", "Rt.>=", "Rt.@p", "Rt.absvector"
-                       , "Rt.address->", "Rt.allocRaw", "Rt.allocVector", "Rt.appendL", "Rt.apply", "Rt.apply-at"
+                       , "Rt.address->", "Rt.allocRaw", "Rt.allocVector", "Rt.apply", "Rt.apply-at"
                        , "Rt.apply-tail", "Rt.applyGo", "Rt.applyOneRedir", "Rt.applyPartGo", "Rt.applyRedirects", "Rt.applyTailGo", "Rt.asF"
                        , "Rt.assoc", "Rt.assocGo", "Rt.bitwise-and", "Rt.bitwise-not", "Rt.bitwise-or", "Rt.bitwise-shift-left"
                        , "Rt.bitwise-shift-right", "Rt.bitwise-shift-right-zf", "Rt.bitwise-xor", "Rt.bodyWriteGo", "Rt.bounce", "Rt.bounceGo"
-                       , "Rt.bytesBuild", "Rt.bytesEqGo", "Rt.bytesOf", "Rt.bytesOfGo", "Rt.bytesToStr", "Rt.c-strlen", "Rt.cStrCopyGo"
+                       , "Rt.byteCopyGo", "Rt.bytesBuild", "Rt.bytesEqGo", "Rt.bytesToStr", "Rt.c-strlen", "Rt.cStrCopyGo"
                        , "Rt.cStrEq", "Rt.cStrEqGo", "Rt.cStrEqLit", "Rt.cStrFill", "Rt.cStrLenGo", "Rt.callArity"
                        , "Rt.cd", "Rt.char-code", "Rt.childBuiltin", "Rt.childCd", "Rt.childPwd", "Rt.close"
                        , "Rt.closeCmdTmpfds", "Rt.closeOthersGo", "Rt.closePipeTmpfds", "Rt.closePipesGo", "Rt.closure", "Rt.closureFill"
                        , "Rt.cn", "Rt.cn2", "Rt.collect", "Rt.con", "Rt.conFill", "Rt.cons"
-                       , "Rt.cons?", "Rt.copyWords", "Rt.copyWordsGo", "Rt.countGo", "Rt.countL", "Rt.deepEq", "Rt.dgs"
-                       , "Rt.die", "Rt.dieErr", "Rt.echoGo", "Rt.empty?", "Rt.emptylist", "Rt.envHome"
+                       , "Rt.cons?", "Rt.copyWords", "Rt.copyWordsGo", "Rt.countGo", "Rt.countL", "Rt.deepEq"
+                       , "Rt.die", "Rt.dieErr", "Rt.digitCount", "Rt.echoGo", "Rt.empty?", "Rt.emptylist", "Rt.envHome"
                        , "Rt.epArgvGo", "Rt.epChain", "Rt.epCmd", "Rt.epCount", "Rt.epCountStdin", "Rt.epElem"
                        , "Rt.epFreeArgv", "Rt.epFreeChains", "Rt.epFreeCmd", "Rt.epFreeCmds", "Rt.epFreeRedirs", "Rt.epNum"
                        , "Rt.epPipeGo", "Rt.epPipeline", "Rt.epProg", "Rt.epProgGo", "Rt.epRedir", "Rt.epRedirsGo"
@@ -6409,13 +6409,13 @@ checks rt runtimeMidText =
                        , "Rt.hostSingleCommandArgv", "Rt.hostSleepComplete", "Rt.hostSleepScan", "Rt.hostSpawn", "Rt.hostSpawnAt", "Rt.hostSpawnFind"
                        , "Rt.hostSpawnFromCmd", "Rt.hostStatRecord", "Rt.hostStep", "Rt.hostStepAll", "Rt.hostStepAllGo", "Rt.hostStepGo"
                        , "Rt.hostWriteAll", "Rt.hostWriteFileLeaf", "Rt.hostWriteStr", "Rt.intern", "Rt.isChildBuiltin", "Rt.main"
-                       , "Rt.memGo", "Rt.metaGo", "Rt.mkTmpAt", "Rt.nameBytes", "Rt.numText", "Rt.number?"
+                       , "Rt.memGo", "Rt.metaGo", "Rt.mkTmpAt", "Rt.numFill", "Rt.numText", "Rt.number?"
                        , "Rt.open", "Rt.openBodyTmpfile", "Rt.parseArgsGo", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo"
                        , "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind", "Rt.recAppendNamesGo", "Rt.recGet"
                        , "Rt.recGetGo", "Rt.recInsert", "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd", "Rt.recUpdCopy"
                        , "Rt.recUpdFind", "Rt.repGo", "Rt.repeat", "Rt.revGo", "Rt.runBuiltinInprocess", "Rt.setenv"
                        , "Rt.shen.bytes->string", "Rt.shen.str->bytes", "Rt.snd", "Rt.str", "Rt.strOf", "Rt.string?"
-                       , "Rt.subGo", "Rt.substring", "Rt.symEq", "Rt.symLess", "Rt.symToStr", "Rt.tail-known"
+                       , "Rt.substring", "Rt.symEq", "Rt.symLess", "Rt.symToStr", "Rt.tail-known"
                        , "Rt.toI32", "Rt.value", "Rt.vecEq", "Rt.wRaw", "Rt.wStr", "Rt.waitStatusCode"
                        , "Rt.wireCmdGo", "Rt.wirePipeGo", "Rt.write-byte"
                      ]
@@ -6697,19 +6697,17 @@ checks rt runtimeMidText =
             , { key = "Rt.=", arity = 2 }
             , { key = "Rt.asF", arity = 1 }
             , { key = "Rt.toI32", arity = 1 }
-            , { key = "Rt.dgs", arity = 1 }
             , { key = "Rt.revGo", arity = 2 }
-            , { key = "Rt.bytesOf", arity = 2 }
-            , { key = "Rt.bytesOfGo", arity = 3 }
             , { key = "Rt.numText", arity = 1 }
+            , { key = "Rt.digitCount", arity = 2 }
+            , { key = "Rt.numFill", arity = 2 }
             , { key = "Rt.bytesToStr", arity = 1 }
             , { key = "Rt.countGo", arity = 2 }
             , { key = "Rt.countL", arity = 1 }
             , { key = "Rt.fillGo", arity = 3 }
             , { key = "Rt.cn2", arity = 2 }
-            , { key = "Rt.appendL", arity = 2 }
-            , { key = "Rt.symToStr", arity = 2 }
-            , { key = "Rt.nameBytes", arity = 2 }
+            , { key = "Rt.byteCopyGo", arity = 3 }
+            , { key = "Rt.symToStr", arity = 1 }
             , { key = "Rt.strOf", arity = 1 }
             , { key = "Rt.floatCopy", arity = 3 }
             , { key = "Rt.cons", arity = 2 }
@@ -6821,8 +6819,7 @@ checks rt runtimeMidText =
             , { key = "Rt.conFill", arity = 3 }
             , { key = "Rt.closure", arity = 3 }
             , { key = "Rt.closureFill", arity = 3 }
-            , { key = "Rt.subGo", arity = 3 }
-            , { key = "Rt.repGo", arity = 2 }
+            , { key = "Rt.repGo", arity = 3 }
             , { key = "Rt.bytesBuild", arity = 3 }
             , { key = "Rt.symLess", arity = 3 }
             , { key = "Rt.read-file-as-string", arity = 1 }
@@ -6859,20 +6856,18 @@ checks rt runtimeMidText =
     -- Nine RtPrims builders moved to Mid.RtSource: asF / toI32 (the two
     -- class-conversion prims), dgs / revGo / numText (the decimal-text
     -- chain), bytesOf / countL / bytesToStr / fillGo (the bytes->string
-    -- machinery).  ALL self-recursion here is `call Rt.<own-key>`
-    -- (RawCall) — the T11 brief's "revGo/countL/fillGo are recur" guess
-    -- was refuted by reading the builders: they self-reference via callR
-    -- (the T9 readFull lesson), and the corpus pins that shape.  numText's
-    -- `signed` and dgs's `rAbs` hold an If in a Let VALUE position — the
-    -- wall that deferred readFileGo in T9 — spelled here with the T9b
-    -- `?:` join (its FIRST surface use); bytesToStr's fillGo call is an
-    -- effect statement (the DSL's dead b 7 binder).
+    -- machinery).  dgs and bytesOf are DELETED by text-fix (the
+    -- cons-per-character representation they built); numText now writes its
+    -- digits into one raw buffer via digitCount/numFill, and countL/fillGo
+    -- survive for shen.bytes->string's byte-LIST input, over `recur` (the
+    -- T11 brief's "revGo/countL/fillGo are recur" guess was refuted then by
+    -- reading the builders; text-fix made fillGo a recur for real).
     , t8SplicedRow rt "Rt.asF"
     , t8SplicedRow rt "Rt.toI32"
-    , t8SplicedRow rt "Rt.dgs"
     , t8SplicedRow rt "Rt.revGo"
-    , t8SplicedRow rt "Rt.bytesOf"
     , t8SplicedRow rt "Rt.numText"
+    , t8SplicedRow rt "Rt.digitCount"
+    , t8SplicedRow rt "Rt.numFill"
     , t8SplicedRow rt "Rt.bytesToStr"
     , t8SplicedRow rt "Rt.countL"
     , t8SplicedRow rt "Rt.fillGo"
@@ -6891,9 +6886,8 @@ checks rt runtimeMidText =
     -- closed here: the flag-stable row above lost its vacuous-Err hole,
     -- and the consArr axis gets the per-combo selection rows below.
     , t8SplicedRow rt "Rt.cn2"
-    , t8SplicedRow rt "Rt.appendL"
+    , t8SplicedRow rt "Rt.byteCopyGo"
     , t8SplicedRow rt "Rt.symToStr"
-    , t8SplicedRow rt "Rt.nameBytes"
     , t8SplicedRow rt "Rt.strOf"
     , t8SplicedRow rt "Rt.floatCopy"
     , t8SplicedRow rt "Rt.cons"
@@ -7207,7 +7201,6 @@ checks rt runtimeMidText =
     , t8SplicedRow rt "Rt.conFill"
     , t8SplicedRow rt "Rt.closure"
     , t8SplicedRow rt "Rt.closureFill"
-    , t8SplicedRow rt "Rt.subGo"
     , t8SplicedRow rt "Rt.repGo"
     , t8SplicedRow rt "Rt.bytesBuild"
     , t8SplicedRow rt "Rt.symLess"
@@ -8756,7 +8749,7 @@ checks rt runtimeMidText =
          in
          List.all (\k -> Set.member k rawSet) (Set.toList derived)
             && List.all (\d -> Dict.member d.key rt.abi) (List.filter (\d -> Set.member d.key rawSet) surface)
-            && Set.size derived == 11
+            && Set.size derived == 14
         )
 
     -- ---- B6: THE RAW-`Var` GAP (B3's pinned row, now CLOSED for a word binder) ----

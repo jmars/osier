@@ -854,27 +854,24 @@ rtDeps =
         , ( "Rt.vecEq", [ "Rt.vecEq", "Rt.deepEq" ] )
         , ( "Rt.bytesEqGo", [ "Rt.bytesEqGo" ] )
         , ( "Rt.symEq", [ "Rt.symEq" ] )
-        , ( "Rt.dgs", [ "Rt.dgs", "Rt.cons" ] )
         , ( "Rt.revGo", [ "Rt.revGo", "Rt.cons" ] )
-        , ( "Rt.bytesOf", [ "Rt.bytesOfGo" ] )
-        , ( "Rt.bytesOfGo", [ "Rt.bytesOfGo", "Rt.revGo", "Rt.cons" ] )
-        , ( "Rt.appendL", [ "Rt.revGo" ] )
-        , ( "Rt.numText", [ "Rt.dgs", "Rt.revGo", "Rt.bytesToStr", "Rt.cons" ] )
+        , ( "Rt.numText", [ "Rt.digitCount", "Rt.numFill" ] )
+        , ( "Rt.digitCount", [ "Rt.digitCount" ] )
+        , ( "Rt.numFill", [ "Rt.numFill" ] )
         , ( "Rt.bytesToStr", [ "Rt.countL", "Rt.fillGo" ] )
         , ( "Rt.countL", [ "Rt.countGo" ] )
         , ( "Rt.countGo", [ "Rt.countGo" ] )
         , ( "Rt.fillGo", [ "Rt.fillGo" ] )
         , ( "Rt.cn", [ "Rt.cn2", "Rt.strOf" ] )
-        , ( "Rt.cn2", [ "Rt.bytesToStr", "Rt.appendL", "Rt.bytesOf" ] )
+        , ( "Rt.cn2", [ "Rt.byteCopyGo" ] )
+        , ( "Rt.byteCopyGo", [ "Rt.byteCopyGo" ] )
         , ( "Rt.strOf", [ "Rt.numText", "Rt.symToStr" ] )
-        , ( "Rt.symToStr", [ "Rt.bytesToStr", "Rt.nameBytes", "Rt.cons" ] )
-        , ( "Rt.nameBytes", [ "Rt.nameBytes", "Rt.cons" ] )
+        , ( "Rt.symToStr", [ "Rt.cStrLenGo", "Rt.byteCopyGo" ] )
         , ( "Rt.assoc", [ "Rt.assocGo" ] )
         , ( "Rt.assocGo", [ "Rt.assocGo", "Rt.deepEq" ] )
-        , ( "Rt.substring", [ "Rt.bytesToStr", "Rt.subGo" ] )
-        , ( "Rt.subGo", [ "Rt.subGo", "Rt.cons" ] )
-        , ( "Rt.repeat", [ "Rt.bytesToStr", "Rt.repGo" ] )
-        , ( "Rt.repGo", [ "Rt.repGo", "Rt.appendL", "Rt.bytesOf" ] )
+        , ( "Rt.substring", [ "Rt.byteCopyGo" ] )
+        , ( "Rt.repeat", [ "Rt.repGo" ] )
+        , ( "Rt.repGo", [ "Rt.repGo", "Rt.cn2" ] )
         , ( "Rt.shen.str->bytes", [ "Rt.bytesBuild" ] )
         , ( "Rt.bytesBuild", [ "Rt.bytesBuild", "Rt.cons" ] )
         , ( "Rt.shen.bytes->string", [ "Rt.bytesToStr" ] )
@@ -1458,6 +1455,14 @@ rawAbi =
           -- string it prints.
           "Rt.dieErr"
         , "Rt.hostDieErr"
+        , -- ===== text-fix's byte-copy and decimal-digit helpers.  All three
+          -- are word-in/word-out by SIGNATURE, so the B6 rule derives them;
+          -- they are declared here for the same reason the die family is
+          -- (one fact, two statements, no drift).  repGo is NOT here: it is
+          -- all-`:val` (the doubling concatenation over Rt.cn2).
+          "Rt.byteCopyGo"
+        , "Rt.digitCount"
+        , "Rt.numFill"
         ]
 
 
@@ -1497,6 +1502,12 @@ rawAbiArity =
           -- lowerDefun (rawAbiArityAgree).
         ( "Rt.tail-known", 3 )
         , ( "Rt.bounce", 1 )
+        , -- text-fix's byte helpers: word-in/word-out by signature (the
+          -- cons-per-character text path's replacements), so the rule derives
+          -- them and rawAbi must insert the same three.
+        ( "Rt.byteCopyGo", 3 )
+        , ( "Rt.digitCount", 2 )
+        , ( "Rt.numFill", 2 )
         , -- stage 7A's die family (see the rawAbi set above): the message, and
           -- the two-part variant's prefix + name.
           ( "Rt.dieErr", 1 )

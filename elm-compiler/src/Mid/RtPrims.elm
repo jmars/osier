@@ -221,6 +221,10 @@ seatParams count =
 -- (RawCall), exactly the builders' callR (NOT recur).  numText's signed
 -- and dgs's rAbs — Ifs in LET VALUE positions — spelled with the T9b
 -- `?:` join.  Their list positions below are seats.
+-- text-fix (2026-10-19) DELETED dgs and bytesOf and rebuilt numText: the
+-- text path is a byte buffer, so a decimal number's digits go into ONE
+-- allocraw via digitCount/numFill and no cons cell per character exists.
+-- countL/fillGo/bytesToStr survive only for shen.bytes->string's byte LIST.
 --
 -- T12 (handoff-osier-tier2-t12) moved the REST of the number/string
 -- builders to Mid/RtSource.elm: cn2, appendL, symToStr, nameBytes,
@@ -242,6 +246,8 @@ seatParams count =
 -- recur (the builders' callR, MEASURED) — transcribed in Mid/RtSource's
 -- T22 block; their list positions below (helperDefuns) are seats.  Their
 -- deletion killed the last readers of consV and byteOf (both deleted).
+-- text-fix DELETED subGo and repGo too: substring and repeat now copy bytes
+-- into one allocraw buffer (byteCopyGo), and repeat concatenates by doubling.
 
 
 -- Rt.symLess a b i — byte-lexicographic LESS-THAN of two symbol Values'
@@ -508,21 +514,23 @@ helperDefuns rec =
     , seat "Rt.vecEq" 3
     , seat "Rt.asF" 1
     , seat "Rt.toI32" 1
-    , seat "Rt.dgs" 1
     , seat "Rt.revGo" 2
-    , seat "Rt.bytesOf" 2
-    , seat "Rt.bytesOfGo" 3
+      -- text-fix: dgs/bytesOf/bytesOfGo/appendL/nameBytes are DELETED with
+      -- the cons-per-character representation they built; numText/symToStr/
+      -- cn2 concatenate and print into ONE raw buffer over byteCopyGo
+      -- instead, and digitCount/numFill write the decimal digits into it.
     , seat "Rt.numText" 1
+    , seat "Rt.digitCount" 2
+    , seat "Rt.numFill" 2
     , seat "Rt.bytesToStr" 1
     , seat "Rt.countL" 1
     , seat "Rt.countGo" 2
     , seat "Rt.fillGo" 3
-      -- T12: cn2/appendL/symToStr/nameBytes/strOf moved to Mid/RtSource
+      -- T12: cn2/symToStr/strOf moved to Mid/RtSource
       -- (the primCn coercion chain); their seats keep the list order.
     , seat "Rt.cn2" 2
-    , seat "Rt.appendL" 2
-    , seat "Rt.symToStr" 2
-    , seat "Rt.nameBytes" 2
+    , seat "Rt.byteCopyGo" 3
+    , seat "Rt.symToStr" 1
     , seat "Rt.strOf" 1
       -- T13: assocGo + the rec walk family moved to Mid/RtSource
       -- (handoff-osier-tier2-t13); their seats keep the list order.
@@ -530,8 +538,11 @@ helperDefuns rec =
       -- T22: subGo/repGo/bytesBuild moved to Mid/RtSource (the walk
       -- helpers, the never-scheduled family part 3); their seats keep
       -- the list order.
-    , seat "Rt.subGo" 3
-    , seat "Rt.repGo" 2
+      -- text-fix: subGo is DELETED and repGo REBUILT — substring copies
+      -- into one raw buffer (byteCopyGo) and repeat concatenates by DOUBLING
+      -- (repGo(acc, cur, n) -> acc+cur, cur+cur, n/2), so neither builds a
+      -- cons list per byte any more.
+    , seat "Rt.repGo" 3
     , seat "Rt.bytesBuild" 3
     , seat "Rt.recGet" 2
     , seat "Rt.recGetGo" 3
