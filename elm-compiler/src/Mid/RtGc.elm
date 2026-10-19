@@ -154,6 +154,7 @@ gcProgram =
     , seat "Rt.allocRaw" 1
     , seat "Rt.gcAlloc" 3
     , seat "Rt.gcAllocGo" 2
+    , seat "Rt.gcGrow" 2
     , seat "Rt.collect" 1
     , seat "Rt.gcMarkRoots" 1
     , seat "Rt.gcScanValueArray" 2

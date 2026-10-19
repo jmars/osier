@@ -84,10 +84,10 @@ checks rt runtimeMidText =
       -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
       -- the frameZero loop), so an empty or truncated load turns it RED,
       -- loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (275 defuns — GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB)"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (276 defuns — GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 275
+                List.length ast == 276
 
             Err _ ->
                 False
@@ -2169,7 +2169,7 @@ checks rt runtimeMidText =
         )
     , check "rt gc seeds: the collector seeds are exactly the two seats plus their transitive closure (stage 6 U2 adds Rt.die + Rt.cStrLenGo through the die arm's RawCall edge; GC-ARC F1 adds the stats printer Rt.gcNumOut + its digit loop Rt.gcNum through Rt.collect)"
         (Rt.gcSeeds
-            == [ "Rt.allocVector", "Rt.gcInit", "Rt.die", "Rt.cStrLenGo", "Rt.gcEnvNum", "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.collect", "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkValue", "Rt.gcMarkPtr", "Rt.gcDrain", "Rt.gcSweep", "Rt.gcClearClasses", "Rt.gcNumOut", "Rt.gcNum", "Rt.allocRaw" ]
+            == [ "Rt.allocVector", "Rt.gcInit", "Rt.die", "Rt.cStrLenGo", "Rt.gcEnvNum", "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.collect", "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkValue", "Rt.gcMarkPtr", "Rt.gcDrain", "Rt.gcSweep", "Rt.gcClearClasses", "Rt.gcNumOut", "Rt.gcNum", "Rt.gcGrow", "Rt.allocRaw" ]
         )
     , check "rt con seeds: the Mid ADT constructor and its fill helper"
         (Rt.conSeeds == [ "Rt.con", "Rt.conFill" ]
@@ -3616,6 +3616,65 @@ checks rt runtimeMidText =
         )
     , check "U5 LAYOUT PIN: sizeof(Region) == 25 words in runtime.mid's own declaration (slots 0..12 + GC-ARC F1's stats instrument at 13..23 + GC ARC unit 4's growth ceiling at 24 — the mark stack starts at word 64, so it is NOT a field, and the digit scratch the printer writes into is at BYTE 288, outside the struct)"
         (Check.sizeofStruct (declsOf runtimeMidText) "Region" == Just 25)
+    -- ==================== GC ARC unit 1b: the RETURN LANDMINE ====================
+    -- `return` inside a STATEMENT-position `if` is a DEAD BIND, not an exit: the
+    -- lowerer's `thenDiv && elseDiv` arm (LowerToIr.elm) evaluates the chosen
+    -- arm's value, binds the whole `If` to a fresh binder nothing reads, and
+    -- CONTINUES with the rest of the block.  Pinned here because it is a TRAP,
+    -- not a rule: a program writing `if (c) { return a; } else { return b; }`
+    -- and expecting `return` to exit silently falls through instead.
+    --
+    -- BOTH rows assert TODAY's shapes.  The first is the bug; the second is the
+    -- form every unhooked site in runtime.mid now uses (one-sided, so the
+    -- continuation lands in the FALSE path and the then arm's value IS the
+    -- body's value).  Flipping the first row is the commit that makes `return`
+    -- exit — and MEASURED, that is not a lowering tweak: runtime.mid carries 72
+    -- such sites with a continuation (24 whose then branch halts, 48 that do
+    -- work and must carry on), every one of their emits moves, and J7 admits no
+    -- both-falling mid-block `if`, so the 48 need a join this language does not
+    -- have at that position (Rt.gcAlloc's trigger note spells the workaround).
+    , check "GC1b LANDMINE PIN (the BUG, not a rule): a both-diverging statement `if` DEAD-BINDS and the block continues — `if (c) { return 1; } else { return 2; } return 7;` lowers to `Let _if = <the If> in <7>`, so the function returns 7 whatever `c` is"
+        (case
+            lowlModuleBody "defun Rt.t(d : val) -> val {\n  if (mkbool(1)) {\n    return mknum(1);\n  } else {\n    return mknum(2);\n  }\n  return mknum(7);\n}"
+         of
+            Ok e ->
+                case e of
+                    Let { binders, body } ->
+                        case binders of
+                            [ LetBind { value } ] ->
+                                (case value of
+                                    If _ ->
+                                        True
+
+                                    _ ->
+                                        False
+                                )
+                                    && numLit 7 body
+
+                            _ ->
+                                False
+
+                    _ ->
+                        False
+
+            _ ->
+                False
+        )
+    , check "GC1b EARLY-EXIT PIN (the shape that DOES exit): a ONE-SIDED diverging `if` splices the continuation into its FALSE path — `if (c) { return 1; } return 7;` lowers to `If c (1) (7)`, so the then arm's value IS the body's value and nothing dead-binds"
+        (case
+            lowlModuleBody "defun Rt.t(d : val) -> val {\n  if (mkbool(1)) {\n    return mknum(1);\n  }\n  return mknum(7);\n}"
+         of
+            Ok e ->
+                case e of
+                    If { thenBranch, elseBranch } ->
+                        numLit 1 thenBranch && numLit 7 elseBranch
+
+                    _ ->
+                        False
+
+            _ ->
+                False
+        )
     , check "U5 ACCEPT: the collector's `*Region` binder is the typed VIEW over the word it already held — `*Region r = payload(v, 0); r->cursor` loads the same node as `word r = payload(v, 0); wload(r, 3)`, and `wload(r, <computed>)` (the mark stack) still type-checks on the POINTER, which is what lets tier (i) convert only the constant-offset sites"
         (case
             ( lowlModuleBody "struct R { a : word; b : word; c : word; d : word; }\ndefun Rt.a(v : val, i : word) -> word {\n  *R r = payload(v, 0);\n  return r->d + wload(r, i);\n}"
@@ -6235,7 +6294,7 @@ checks rt runtimeMidText =
                 False
         )
     , check
-        "T17/T18/T20/T21/T22/T24 pipeline (the wave-9 + collector + never-scheduled + T24 key-set row, post-T24's one-hundred-sixty-two, + GC-ARC F1's two stats defuns = one-hundred-sixty-four, + stage 7 O3-fix's Rt.applyPartGo = one-hundred-sixty-five, + GC ARC unit 4's Rt.gcEnvNum = one-hundred-sixty-six): surf is Ok with EXACTLY the one-hundred-sixty-six migrated keys under the default flags — T24 added the LAST THREE wall-class holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd), so the DSL-bodied set is now EMPTY — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
+        "T17/T18/T20/T21/T22/T24 pipeline (the wave-9 + collector + never-scheduled + T24 key-set row, post-T24's one-hundred-sixty-two, + GC-ARC F1's two stats defuns = one-hundred-sixty-four, + stage 7 O3-fix's Rt.applyPartGo = one-hundred-sixty-five, + GC ARC unit 4's Rt.gcEnvNum = one-hundred-sixty-six, + GC ARC unit 1b's Rt.gcGrow = one-hundred-sixty-seven): surf is Ok with EXACTLY the one-hundred-sixty-seven migrated keys under the default flags — T24 added the LAST THREE wall-class holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd), so the DSL-bodied set is now EMPTY — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
         (case rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
             Ok s ->
                 List.sort (Dict.keys s)
@@ -6257,7 +6316,7 @@ checks rt runtimeMidText =
                        , "Rt.epPipeGo", "Rt.epPipeline", "Rt.epProg", "Rt.epProgGo", "Rt.epRedir", "Rt.epRedirsGo"
                        , "Rt.epStr", "Rt.epSymIs", "Rt.epSymOf", "Rt.exec-plan", "Rt.exec-run", "Rt.execGo"
                        , "Rt.f/", "Rt.fillGo", "Rt.floatCopy", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock"
-                       , "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.gcClearClasses", "Rt.gcDrain", "Rt.gcEnvNum", "Rt.gcInit", "Rt.gcMarkPtr"
+                       , "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.gcClearClasses", "Rt.gcDrain", "Rt.gcEnvNum", "Rt.gcGrow", "Rt.gcInit", "Rt.gcMarkPtr"
                        , "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcNum", "Rt.gcNumOut", "Rt.gcScanValueArray", "Rt.gcSweep"
                        , "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot"
                        , "Rt.globIsDotDot", "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess"
@@ -10914,11 +10973,25 @@ byteSlots n =
     List.map (\i -> 8 * i) (List.range 0 (n - 1))
 
 
-{-| The ONE definition of the layout (A2 + A3): the constant the LOWERER emits
-for a field is the value the CHECKER's table computes — `Check.fieldOffset`.
-Reading the index straight out of the lowered RawWordLoad is what makes the
-"second copy of the layout" class visible as a different constant.
--}
+-- GC ARC unit 1b — `mknum(n)` as the lowered tree spells it: a `RawMkValue` of
+-- the NUMBER tag whose single word is the literal `n`.  Used by the two
+-- landmine rows to name which arm's value they are looking at, without pinning
+-- the rest of the tree.
+numLit : Int -> Exp -> Bool
+numLit n e =
+    case e of
+        Unsafe (RawMkValue mk) ->
+            case mk.words of
+                [ Lit (LNumber m) ] ->
+                    mk.tag == RtLayout.tagNumber && m == n
+
+                _ ->
+                    False
+
+        _ ->
+            False
+
+
 wordLoadIndexOf : Exp -> Maybe Int
 wordLoadIndexOf body =
     case body of

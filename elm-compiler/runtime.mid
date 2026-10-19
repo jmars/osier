@@ -3390,10 +3390,14 @@ defun Rt.gcInit(dummy : val) -> val {
       // capacity vs 2 097 152 bodies; 64 MB / 512 MB -> 8 388 672 vs 8 388 608.
       // probe-midgc-guards.sh is the fail-before (a halved stack trips it).
       word maxBlocks = (capEnd - heapStart) / 64;
+      // ONE-SIDED (GC ARC unit 1b): the `else { return mknil; }` filler is gone.
+      // The `thenDiv && not elseDiv` shape splices the continuation into the
+      // FALSE path, so this means what it reads as under BOTH readings of a
+      // statement-position `return` — die here, carry on there.  The old
+      // both-diverging form worked ONLY because the lowerer dead-binds it and
+      // continues (the landmine documented in Rt.gcAlloc's trigger below).
       if (mkbool(markEnd - 64 < maxBlocks)) {
         call Rt.die(rawstr("qbe-rt: midgc: mark stack smaller than the heap can hold"));
-        return mknil;
-      } else {
         return mknil;
       }
       wstore(glob, 0, base);
@@ -3441,13 +3445,24 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
   // the same 4-collects-per-heap cadence instead of collecting more often
   // against a bigger region (a fixed heapBytes/4 would multiply the O(heap)
   // sweep by the growth factor).
-  if (mkbool(allocated > (regionW->heapEnd - regionW->heapStart) / 4)) {
-    call Rt.collect(mknum(0));
-    regionW->allocated = 0;
-    return mknil;
-  } else {
-    return mknil;
-  }
+  // THE TRIGGER, AS A CONDITIONAL VALUE (GC ARC unit 1b).  This site read
+  //   if (over) { collect; allocated = 0; return mknil; } else { return mknil; }
+  // and it worked ONLY because a both-diverging statement `if` is a DEAD BIND
+  // in this language: the lowerer evaluates the chosen arm's value and
+  // CONTINUES (`LowerToIr.elm`'s `thenDiv && elseDiv` arm).  Under the obvious
+  // reading — a `return` exits — that code collects and then RETURNS mknil
+  // WITHOUT ALLOCATING: every allocation that crosses the trigger yields nil,
+  // a silent-wrong answer rather than a crash.
+  //
+  // Neither spelling J7 admits can express "conditionally do something, then
+  // carry on": a both-falling mid-block `if` is REJECTED (Mid has no join) and
+  // a one-sided `if` splices the continuation into its FALSE path, so its then
+  // arm would return.  The language's join-free conditional effect is the
+  // conditional VALUE — the ternary the runtime already uses freely
+  // (Rt.recAppendDataGo's `? vecstore(..) : ..`) — with the effect in one arm
+  // and `mknil` in the other, read back through `payload` for its class.
+  // Rt.collect resets `allocated` itself, so the bound word is discarded.
+  word trig = payload((allocated > (regionW->heapEnd - regionW->heapStart) / 4) ? call Rt.collect(mknum(0)) : mknil, 0);
   val first = call Rt.gcAllocGo(region, mknum(cls));
   word firstW = payload(first, 0);
   if (mkbool(firstW == 0)) {
@@ -3461,7 +3476,6 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
       return mknum(cursor);
     } else {
       call Rt.collect(mknum(0));
-      regionW->allocated = 0;
       val retry = call Rt.gcAllocGo(region, mknum(cls));
       word retryW = payload(retry, 0);
       if (mkbool(retryW == 0)) {
@@ -3483,25 +3497,14 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
         word capLim = capEnd - heapStart;
         word limCap = payload((limUp < capLim) ? mknum(limUp) : mknum(capLim), 0);
         word newEnd = heapStart + limCap;
-        // The store is UNCONDITIONAL on the stats knob (the transcript is the
-        // instrument, the growth is the behaviour); both branches of each `if`
-        // end in the file's dead-bind `return` idiom, never relied on as an
-        // exit (plan §6.4: a `return` in a statement-position branch is a dead
-        // BIND, and the continuation continues).
-        if (mkbool(newEnd > heapEnd)) {
-          regionW->heapEnd = newEnd;
-          if (mkbool(wload(rawcall rt_glob_addr(), 8) != 0)) {
-            call Rt.gcNumOut(mknum(rawstr("midgc: grow ")), mknum((newEnd - heapStart) / 1048576), region);
-            call Rt.gcNumOut(mknum(rawstr(" MB (was ")), mknum((heapEnd - heapStart) / 1048576), region);
-            call Rt.gcNumOut(mknum(rawstr(" MB, ceiling ")), mknum(capLim / 1048576), region);
-            rawcall write(2, rawstr(" MB)\n"), 5);
-            return mknil;
-          } else {
-            return mknil;
-          }
-        } else {
-          return mknil;
-        }
+        // THE GROWTH ITSELF IS A CONDITIONAL VALUE (GC ARC unit 1b): the
+        // store and the stats transcript are a multi-statement effect that
+        // must be followed by the bump below, and this language has no
+        // both-falling mid-block `if` (J7) and no statement-position exit — so
+        // the effect lives in Rt.gcGrow and is invoked from a ternary arm.
+        // The old form relied on the dead-bind landmine exactly like the
+        // trigger above did.
+        word grew = payload((newEnd > heapEnd) ? call Rt.gcGrow(region, mknum(newEnd)) : mknil, 0);
         if (mkbool(cursor + phys * 8 < regionW->heapEnd)) {
           wstore(cursor, -2, kindW * 2 + cls * 4);
           wstore(cursor, -1, countW);
@@ -3529,6 +3532,28 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
     regionW->allocated = regionW->allocated + phys * 8;
     return mknum(firstW);
   }
+}
+// Rt.gcGrow: RAISE the limit and, under QBE_MIDGC_STATS, print the growth
+// line.  Extracted from Rt.gcAlloc by GC ARC unit 1b — a conditional effect
+// that must be followed by more work is inexpressible at a mid-block `if`
+// here (see gcAlloc's trigger note), so it is a DEFUN invoked from a ternary
+// arm.  FRAME-FREE by construction (raw words and the region view only), the
+// same class as every other collector leaf.
+defun Rt.gcGrow(region : val, newEnd : val) -> val {
+  *Region regionW = payload(region, 0);
+  word newEndW = payload(newEnd, 0);
+  word oldEndW = regionW->heapEnd;
+  word heapStart = regionW->heapStart;
+  word capLimW = (regionW->capEnd - heapStart) / 1048576;
+  regionW->heapEnd = newEndW;
+  if (mkbool(wload(rawcall rt_glob_addr(), 8) == 0)) {
+    return mknil;
+  }
+  call Rt.gcNumOut(mknum(rawstr("midgc: grow ")), mknum((newEndW - heapStart) / 1048576), region);
+  call Rt.gcNumOut(mknum(rawstr(" MB (was ")), mknum((oldEndW - heapStart) / 1048576), region);
+  call Rt.gcNumOut(mknum(rawstr(" MB, ceiling ")), mknum(capLimW), region);
+  rawcall write(2, rawstr(" MB)\n"), 5);
+  return mknil;
 }
 defun Rt.gcAllocGo(region : val, cls : val) -> val {
   *Region regionW = payload(region, 0);
@@ -3575,6 +3600,11 @@ defun Rt.collect(dummy : val) -> val {
       rawcall clock_gettime(1, [word](region) + 104);
       region->markTop = 64;
       region->marked = 0;
+      // THE BUDGET RESET BELONGS TO THE COLLECT (GC ARC unit 1b): every caller
+      // that collects must also start the trigger's window over, and a caller
+      // reaching the collect through a CONDITIONAL VALUE (gcAlloc's trigger)
+      // has no statement position to reset it in.
+      region->allocated = 0;
       call Rt.gcMarkRoots(mknum(0));
       call Rt.gcDrain(mknum(0));
       rawcall clock_gettime(1, [word](region) + 120);
@@ -3645,31 +3675,38 @@ defun Rt.gcMarkRoots(i : val) -> val {
   word nRoots = rawcall rt_gc_roots_len();
   if (mkbool(iW >= nRoots)) {
     return mknil;
-  } else {
-    word kind = rawcall rt_gc_root_kind(iW);
-    word slot = rawcall rt_gc_root_slot(iW);
-    word np = rawcall rt_gc_root_np(iW);
-    if (mkbool(kind == 0)) {
-      return call Rt.gcMarkPtr(mknum(wload(slot, 0)));
-    } else {
-      if (mkbool(kind == 1)) {
-        return call Rt.gcMarkValue(mknum(slot));
-      } else {
-        if (mkbool(kind == 3)) {
-          return call Rt.gcMarkValue(mknum(slot));
-        } else {
-          if (mkbool(kind == 2)) {
-            word count = byteload(np, 0) + (byteload(np, 1) * 256 + (byteload(np, 2) * 65536 + byteload(np, 3) * 16777216));
-            return call Rt.gcScanValueArray(mknum(slot), mknum(count));
-          } else {
-            call Rt.die(rawstr("qbe-rt: midgc: unknown root kind"));
-            return mknil;
-          }
-        }
-      }
-    }
+  }
+  word kind = rawcall rt_gc_root_kind(iW);
+  word slot = rawcall rt_gc_root_slot(iW);
+  word np = rawcall rt_gc_root_np(iW);
+  // A CHAIN OF ONE-SIDED DISPATCHES (GC ARC unit 1b).  This used to be a
+  // nested `if/else` whose every arm `return`ed the mark call, with the
+  // recursion to the NEXT root after the whole nest — i.e. it worked only
+  // because the nest was a DEAD BIND: the chosen arm's call was evaluated for
+  // its effect and its value discarded, and the walk continued.  Under the
+  // obvious reading of `return` the walk would stop after the FIRST root
+  // (MEASURED under the flip: `midgc: c=1 mark=0`).  Each arm now marks its
+  // root and TAIL-CALLS the next one, so nothing depends on a dead bind, and
+  // the die below is reached only when no kind matched.
+  if (mkbool(kind == 0)) {
+    call Rt.gcMarkPtr(mknum(wload(slot, 0)));
     return call Rt.gcMarkRoots(mknum(iW + 1));
   }
+  if (mkbool(kind == 1)) {
+    call Rt.gcMarkValue(mknum(slot));
+    return call Rt.gcMarkRoots(mknum(iW + 1));
+  }
+  if (mkbool(kind == 3)) {
+    call Rt.gcMarkValue(mknum(slot));
+    return call Rt.gcMarkRoots(mknum(iW + 1));
+  }
+  if (mkbool(kind == 2)) {
+    word count = byteload(np, 0) + (byteload(np, 1) * 256 + (byteload(np, 2) * 65536 + byteload(np, 3) * 16777216));
+    call Rt.gcScanValueArray(mknum(slot), mknum(count));
+    return call Rt.gcMarkRoots(mknum(iW + 1));
+  }
+  call Rt.die(rawstr("qbe-rt: midgc: unknown root kind"));
+  return mknil;
 }
 defun Rt.gcScanValueArray(base : val, cnt : val) -> val {
   word baseW = payload(base, 0);
@@ -3685,22 +3722,30 @@ defun Rt.gcDrain(dummy : val) -> val {
   word glob = rawcall rt_glob_addr();
   *Region region = wload(glob, 0);
   word top = region->markTop;
-  if (mkbool(top > 64)) {
-    word newTop = top - 1;
-    word p = wload(region, newTop);
-    word flags = wload(p, -2);
-    word kind = (flags >> 1) & 1;
-    word count = wload(p, -1);
-    region->markTop = newTop;
-    if (mkbool(kind == 1)) {
-      return call Rt.gcScanValueArray(mknum(p), mknum(count));
-    } else {
-      return mknil;
-    }
-    return call Rt.gcDrain(mknum(0));
-  } else {
+  // THE GUARD IS ONE-SIDED AND INVERTED (GC ARC unit 1b): the empty-stack case
+  // EXITS and the work below stays at the defun's TOP LEVEL.  Two reasons, and
+  // both are measured: (a) the old `if (top > 64) { ..work..; return ..; } else
+  // { return mknil; }` form is the landmine shape — it worked only because a
+  // both-diverging statement `if` is a dead bind; (b) a `while` nested inside a
+  // then-branch emits its head LABEL TWICE in this tree, so qbe refuses the
+  // whole function (`multiple definitions of block @loop_N`) — a pre-existing
+  // emitter bug, reported by GC ARC unit 1b and NOT fixed here.
+  if (mkbool(top <= 64)) {
     return mknil;
   }
+  word newTop = top - 1;
+  word p = wload(region, newTop);
+  word flags = wload(p, -2);
+  word kind = (flags >> 1) & 1;
+  word count = wload(p, -1);
+  region->markTop = newTop;
+  // The conditional effect from gcAlloc's trigger, same spelling (GC ARC unit
+  // 1b): the SCAN COUNT is the conditional value (0 for a raw body, whose
+  // words are not values), and `gcScanValueArray` is a no-op at count 0 — so
+  // the call needs no branch and the drain below runs on both paths.
+  word scanCount = payload((kind == 1) ? mknum(count) : mknum(0), 0);
+  call Rt.gcScanValueArray(mknum(p), mknum(scanCount));
+  return call Rt.gcDrain(mknum(0));
 }
 defun Rt.gcSweep(cursor : val) -> val {
   word cursorW = payload(cursor, 0);
