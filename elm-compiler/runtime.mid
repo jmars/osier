@@ -4197,6 +4197,13 @@ defun Rt.gcVerifyList(node : val, cls : val, acc : val) -> val {
     call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V6: a free list is LONGER than the freed count (cycle, or a block on two lists) at class ")), mknum(clsW), mknum(regW));
     return mknil;
   }
+  // V5-range: a link outside [heapStart, cursor) is a corrupted link — name
+  // it before the byteload/wload below can read out of bounds (a bare
+  // SIGSEGV or a lucky false pass instead of the named V5 failure).
+  if (mkbool(nd < region->heapStart) || mkbool(nd >= region->cursor)) {
+    call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V5: a free-list link is OUT OF RANGE (not a heap block) at heap offset ")), mknum(nd - region->heapStart), mknum(regW));
+    return mknil;
+  }
   // V5: every link is a block start, in the FREE state, on its OWN class.
   word state = byteload(region->bmPtr + (nd - region->heapStart) / 64, 0);
   if (mkbool(state != 2)) {
