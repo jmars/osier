@@ -206,7 +206,11 @@ extern fstatat(dirfd : i32, path : ptr, buf : ptr, flag : i32) -> i32;
 //   slot 21  sweptBytes heap bytes the last sweep walked (O(heap))
 //   slot 22  markUs     microseconds in the last mark walk
 //   slot 23  sweepUs    microseconds in the last sweep
-//   byte 288 (NOT a field) the 32-byte digit scratch Rt.gcNum writes into
+//   byte 320 (NOT a field) the 32-byte digit scratch Rt.gcNum writes into
+//                       (MOVED from byte 288 by the GC NURSERY unit: the young
+//                       slots grew the struct to 38 words = byte 304, which
+//                       swallowed the old scratch at 288 — the printer was
+//                       writing digits into scavBytes/scavBodies)
 //
 //   ---- HEAP GROWTH (GC ARC unit 4, slot 24) --------------------------
 //   slot 24  capEnd     the CEILING's end address: heapStart + the ceiling in
@@ -240,6 +244,45 @@ extern fstatat(dirfd : i32, path : ptr, buf : ptr, flag : i32) -> i32;
 //   slot 27  verify      QBE_MIDGC_VERIFY=1 (read ONCE by gcInit): after every
 //                       sweep, walk the heap and every free list and ASSERT the
 //                       invariants (Rt.gcVerify/Rt.gcVerifyList).  Knob only.
+//
+//   ---- THE NURSERY (GC NURSERY unit, QBE_MIDGC_YOUNG=1 builds, slots 28..35) --
+//   One young space carved AFTER capEnd in the same mmap; all allocation bumps
+//   in it; on fill a SCAVENGE copies every live young object into OLD space
+//   (= promotion on first survival) and resets the bump pointer.  The two
+//   load-bearing header bits, both ABOVE every legal class (numClass is < 2^20
+//   at any mappable ceiling) and both CLEARED by a fresh header:
+//     bit 61  RS        the block is in the remembered set (set by the
+//                       rt_vec_store_young barrier, cleared by the scavenge's
+//                       remembered walk, by the sweep's free arm, and by every
+//                       header rewrite — a free-list pop or a promotion)
+//     (the surface's literals are exact only to 2^53, so the collector
+//      builds the constants by multiplication at their use sites)
+//     bit 62  FORWARDED a YOUNG block that was evacuated: word -1 then holds
+//                       the new (old-space) address and body word 0 is
+//                       poisoned with tag 15, so a stale unrooted read dies
+//                       in the tag dispatch instead of returning plausible
+//                       bytes (the wall-B loudness the plan asked for)
+//   Class readers MASK: (flags >> 2) & ((1073741824 * 2147483648) - 1) (bits 0..60).
+//
+//   slot 28  young      1 = the nursery is ACTIVE (QBE_MIDGC_YOUNG=1 in the
+//                       environment of a QBE_MIDGC_YOUNG=1 BUILD; the build
+//                       flag gates the code's existence, this knob gates its
+//                       behaviour — the in-binary A/B arm)
+//   slot 29  youngStart the young space's base (= capEnd)
+//   slot 30  youngEnd   youngStart + youngBytes
+//   slot 31  youngCursor the young bump pointer; == youngStart when off
+//   slot 32  rsBase     the REMEMBERED SET: one word per entry (an old block
+//                       address), carved after the mark stack, capacity
+//                       capBytes/64 — the same one-entry-per-64-byte-block
+//                       bound as the mark stack (an old block is remembered
+//                       at most once per young cycle: the RS bit dedups, and
+//                       it is only cleared by death or by a scavenge scan)
+//   slot 33  rsTop      entries in the set
+//   slot 34  rsEnd      rsBase + capacity (overflow is a NAMED die)
+//   slot 35  scavenges  scavenges since init (the stats counter)
+//   slot 36  scavBytes  body bytes copied out of the young space by the LAST
+//                       scavenge (the per-event stats pair with slot 37)
+//   slot 37  scavBodies blocks copied (promoted) by the last scavenge
 //
 // THE TIMESTAMPS COST THREE vDSO clock reads PER COLLECT (no branch: the knob
 // only gates the PRINT — Rt.gcNumOut, from Rt.collect), because a collect is
@@ -283,6 +326,16 @@ struct Region {
   bmPtr : word;
   freedN : word;
   verify : word;
+  young : word;
+  youngStart : word;
+  youngEnd : word;
+  youngCursor : word;
+  rsBase : word;
+  rsTop : word;
+  rsEnd : word;
+  scavenges : word;
+  scavBytes : word;
+  scavBodies : word;
 }
 // THE FRAME HEADER LAYOUT (midlang-u6) — the name -> word-slot table.  Before
 // this struct frameBlock/frame-enter/frame-leave spelled the header as
@@ -3529,13 +3582,50 @@ defun Rt.gcInit(dummy : val) -> val {
     // granularity (2 MB at a 128 MB ceiling), of which only the pages covering
     // the reached frontier are ever touched.
     word bmBytes = capBytes / 64;
-    word regionSize = markEnd * 8 + numClasses * 8 + 16 + bmBytes + capBytes;
+    // THE NURSERY PLAN (GC NURSERY unit) — SHARED text, present in every
+    // MIDGC build, inert unless the young build's spliced-in code reads the
+    // slots: youngBytes is 0 unless the ENVIRONMENT asks for the nursery
+    // (QBE_MIDGC_YOUNG=1), so a plain MIDGC build reserves NOTHING young and
+    // its behaviour is the pre-nursery tree's.  The DEFAULT young size is
+    // clamp(heapBytes/8, 4 MB, 512 MB) — DEVIATION from gc-plan §5.2's
+    // max(4 MB, heapBytes/4), on purpose: a young space is TOUCHED once per
+    // cycle (the bump pointer runs through all of it), so a 4 GB young at a
+    // 16 GB heap would put 4 GB of RSS under the collector for no copy-volume
+    // benefit (survivors are 2.5% of it either way); 512 MB keeps the same
+    // per-scavenge copy work with 8x less touched memory.  QBE_MIDGC_YOUNG_MB
+    // overrides for experiments.  `=0` (or unset) means OFF — the A/B arm.
+    word youngKnob = rawcall getenv(rawstr("QBE_MIDGC_YOUNG"));
+    word youngOn = payload((mkbool(youngKnob != 0) && mkbool(byteload(youngKnob, 0) == 49)) ? mknum(1) : mknum(0), 0);
+    word ymbKnob = rawcall getenv(rawstr("QBE_MIDGC_YOUNG_MB"));
+    val ymbArgV = call Rt.gcEnvNum(mknum(ymbKnob), mknum(0));
+    word ymbArg = payload(ymbArgV, 0);
+    word yDiv = heapBytes / 8;
+    word yDef = payload((yDiv < 536870912) ? mknum(yDiv) : mknum(536870912), 0);
+    word yFloor = payload((yDef < 4194304) ? mknum(4194304) : mknum(yDef), 0);
+    word yArg = payload((ymbArg != 0) ? mknum(ymbArg * 1048576) : mknum(yFloor), 0);
+    word youngBytes = payload((youngOn != 0) ? mknum(yArg) : mknum(0), 0);
+    // CLAMPED TO capBytes: the scavenge's SCAN QUEUE is the mark stack (one
+    // entry per promoted block), so a young cycle can hold at most as many
+    // blocks as the OLD ceiling — the same bound the mark-stack guard below
+    // asserts.  A young bigger than the ceiling would overflow the queue into
+    // the class table, so the clamp is a correctness bound, not a preference.
+    word youngFit = payload((youngBytes > capBytes) ? mknum(capBytes) : mknum(youngBytes), 0);
+    // THE REMEMBERED SET (slot 32): capacity capBytes/64 words — one entry per
+    // 64-byte minimum block, the mark stack's own bound (an old block is
+    // remembered at most once per young cycle; the RS bit dedups and is only
+    // cleared by death or by a scavenge scan).  RESERVED IN EVERY MIDGC BUILD
+    // (VAS only, touched only by young builds) so the LAYOUT — and therefore
+    // heapStart, the block map's base and every map index — is the same
+    // function of capBytes whether or not the young code is linked.
+    word rsWords = capBytes / 64;
+    word regionSize = markEnd * 8 + rsWords * 8 + numClasses * 8 + 16 + bmBytes + capBytes + youngFit;
     word base = rawcall mmap(0, regionSize, 3, 34, -1, 0);
     if (mkbool(base < 0)) {
       call Rt.die(rawstr("qbe-rt: midgc: mmap failed"));
       return mknil;
     } else {
-      word classTable = base + markEnd * 8;
+      word rsBase = base + markEnd * 8;
+      word classTable = rsBase + rsWords * 8;
       word bmPtr = classTable + numClasses * 8 + 16;
       word heapStart = bmPtr + bmBytes;
       // capEnd is the CEILING; heapEnd is the CURRENT limit, which starts at
@@ -3586,6 +3676,23 @@ defun Rt.gcInit(dummy : val) -> val {
       wstore(base, 25, bmPtr);
       wstore(base, 26, 0);
       wstore(base, 27, payload((verifyKnob != 0) ? mknum(1) : mknum(0), 0));
+      // THE NURSERY SLOTS (GC NURSERY unit, shared text): written in every
+      // MIDGC build; when the environment did not ask for the nursery,
+      // youngBytes is 0, so [youngStart, youngEnd) is EMPTY and every
+      // young-range test in shared code (gcMarkPtr's missing-root die) is
+      // inert.  The young space sits AFTER the old-space ceiling — outside
+      // [heapStart, heapEnd), outside the block map, and never walked by the
+      // sweep or the verifier.
+      wstore(base, 28, youngOn);
+      wstore(base, 29, capEnd);
+      wstore(base, 30, capEnd + youngFit);
+      wstore(base, 31, capEnd);
+      wstore(base, 32, rsBase);
+      wstore(base, 33, 0);
+      wstore(base, 34, rsBase + rsWords * 8);
+      wstore(base, 35, 0);
+      wstore(base, 36, 0);
+      wstore(base, 37, 0);
       return mknum(base);
     }
   }
@@ -3636,6 +3743,35 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
   // and `mknil` in the other, read back through `payload` for its class.
   // Rt.collect resets `allocated` itself, so the bound word is discarded.
   word trig = payload((allocated > (regionW->heapEnd - regionW->heapStart) / 4) ? call Rt.collect(mknum(0)) : mknil, 0);
+  // >>> QBE_MIDGC_YOUNG-ONLY
+  // THE NURSERY PATH (GC NURSERY unit): when the young space is active, every
+  // request that FITS in it bumps there (never the old free lists — the
+  // nursery is a pure bump allocator, its blocks are never in the block map,
+  // and nothing dead is ever walked).  On fill: ONE scavenge empties it
+  // (every live young object is promoted to old space and every root slot
+  // updated), and the retry then always fits — the request was <= youngBytes
+  // by the dispatch test, and the young space is empty again.  Requests
+  // BIGGER than the young space (and every request in a young-OFF run) fall
+  // through to the old path below, untouched.
+  if (mkbool(regionW->young != 0) && mkbool(phys * 8 <= regionW->youngEnd - regionW->youngStart)) {
+    word yc0 = regionW->youngCursor;
+    if (mkbool(yc0 + phys * 8 > regionW->youngEnd)) {
+      call Rt.gcScavenge(mknum(0));
+      word yc1 = regionW->youngCursor;
+      wstore(yc1, -2, kindW * 2 + cls * 4);
+      wstore(yc1, -1, countW);
+      regionW->youngCursor = yc1 + phys * 8;
+      regionW->allocated = regionW->allocated + phys * 8;
+      return mknum(yc1);
+    } else {
+      wstore(yc0, -2, kindW * 2 + cls * 4);
+      wstore(yc0, -1, countW);
+      regionW->youngCursor = yc0 + phys * 8;
+      regionW->allocated = regionW->allocated + phys * 8;
+      return mknum(yc0);
+    }
+  }
+  // <<< QBE_MIDGC_YOUNG-ONLY
   val first = call Rt.gcAllocGo(region, mknum(cls));
   word firstW = payload(first, 0);
   if (mkbool(firstW == 0)) {
@@ -3787,6 +3923,14 @@ defun Rt.collect(dummy : val) -> val {
       // reaching the collect through a CONDITIONAL VALUE (gcAlloc's trigger)
       // has no statement position to reset it in.
       region->allocated = 0;
+      // >>> QBE_MIDGC_YOUNG-ONLY
+      // THE NURSERY FIRST (GC NURSERY unit): every live young object is
+      // promoted BEFORE the mark walk, so the walk sees only old-space
+      // pointers (no old->young edge can survive a scavenge: the remembered
+      // set walk relocated them all) and the sweep below walks the OLD
+      // frontier alone.  Conditional value, the join-free spelling.
+      word scav = payload((region->young != 0) ? call Rt.gcScavenge(mknum(0)) : mknil, 0);
+      // <<< QBE_MIDGC_YOUNG-ONLY
       call Rt.gcMarkRoots(mknum(0));
       call Rt.gcDrain(mknum(0));
       rawcall clock_gettime(1, [word](region) + 120);
@@ -3849,13 +3993,315 @@ defun Rt.gcNum(n : val, endP : val) -> val {
 }
 // Rt.gcNumOut: `label` (a NUL-terminated static) then n, both written to stderr.
 defun Rt.gcNumOut(label : val, n : val, region : val) -> val {
-  word end = payload(region, 0) + 288;
+  word end = payload(region, 0) + 320;
   val start = call Rt.gcNum(n, mknum(end));
   val llen = call Rt.cStrLenGo(mknum(payload(label, 0)), mknum(0));
   rawcall write(2, payload(label, 0), payload(llen, 0));
   rawcall write(2, payload(start, 0), end - payload(start, 0));
   return mknil;
 }
+// >>> QBE_MIDGC_YOUNG-ONLY
+// ==================== THE NURSERY (GC NURSERY unit) ====================
+// QBE_MIDGC_YOUNG=1 BUILD-ONLY (run.js splices this whole region out unless
+// the build flag is set; the knobs and slots in gcInit are shared text and
+// inert without these defuns).  Every defun here is FRAME-FREE and every loop
+// is SELF-recursion only (a `jmp @body`, the gcVerifyList lesson): gcScavPtr
+// calls nothing recursive, and gcScavDrain/gcScavRoots/gcScavValueArray/
+// gcScavRemembered/gcScavCopyWords tail-call themselves.
+//
+// THE HEADER BITS (see the Region table above): RS = bit 61, FORWARDED = bit
+// 62, class readers mask with bits 0..60.  The surface's integer literals are
+// exact only to 2^53, so the constants are PRODUCTS: RS = 2^30 * 2^31, FWD =
+// 2^31 * 2^31, MASK = RS - 1.  Both bits sit above every legal class and are
+// cleared by every fresh header write.
+//
+// Rt.gcPromoteAlloc: allocate an OLD-space block for a promoted young object.
+// Mirrors gcAlloc's old path WITHOUT its collect trigger (a scavenge must not
+// re-enter the collector): free-list pop first (the fresh header clears RS and
+// FORWARDED by construction), then the bump, then growth, then a loud die.
+// Promoted bytes are charged to `allocated` — the full-collect trigger's
+// window — because allocation volume is allocation volume wherever it lands.
+defun Rt.gcPromoteAlloc(cls : val, kind : val, count : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  *Region rw = wload(glob, 0);
+  word clsW = payload(cls, 0);
+  word kindW = payload(kind, 0);
+  word countW = payload(count, 0);
+  word phys = payload((clsW <= 512) ? mknum(clsW * 8) : mknum(4096 + (clsW - 512) * 4096), 0);
+  word table = rw->classTab;
+  word head = wload(table, clsW);
+  if (mkbool(head != 0)) {
+    wstore(table, clsW, wload(head, 0));
+    wstore(head, -2, kindW * 2 + clsW * 4);
+    wstore(head, -1, countW);
+    bytestore(rw->bmPtr + (head - rw->heapStart) / 64, 0, 1);
+    rw->allocated = rw->allocated + phys * 8;
+    return mknum(head);
+  }
+  word cursor = rw->cursor;
+  word heapStart = rw->heapStart;
+  word needLim = (cursor + phys * 8) - heapStart;
+  word lim = rw->heapEnd - heapStart;
+  word dbl = lim * 2;
+  word limUp = payload((dbl < needLim) ? mknum(needLim) : mknum(dbl), 0);
+  word capLim = rw->capEnd - heapStart;
+  word limCap = payload((limUp < capLim) ? mknum(limUp) : mknum(capLim), 0);
+  word grew = payload(((heapStart + limCap) > rw->heapEnd) ? call Rt.gcGrow(mknum([word](rw)), mknum(heapStart + limCap)) : mknil, 0);
+  if (mkbool(cursor + phys * 8 < rw->heapEnd)) {
+    wstore(cursor, -2, kindW * 2 + clsW * 4);
+    wstore(cursor, -1, countW);
+    bytestore(rw->bmPtr + (cursor - rw->heapStart) / 64, 0, 1);
+    rw->cursor = cursor + phys * 8;
+    rw->allocated = rw->allocated + phys * 8;
+    return mknum(cursor);
+  }
+  call Rt.gcNumOut(mknum(rawstr("qbe-rt: midgc: young promote out of memory: heap at its ceiling of ")), mknum(capLim / 1048576), mknum([word](rw)));
+  call Rt.die(rawstr("qbe-rt: midgc: young promote out of memory"));
+  return mknil;
+}
+// Rt.gcScavCopyWords: copy n WORDS from src to dst (whole blocks, headers
+// included — the promote path's fresh header is overwritten with identical
+// bits).  Self-recursion only.
+defun Rt.gcScavCopyWords(src : val, dst : val, n : val) -> val {
+  word nW = payload(n, 0);
+  if (mkbool(nW == 0)) {
+    return mknil;
+  }
+  wstore(payload(dst, 0), nW - 1, wload(payload(src, 0), nW - 1));
+  return call Rt.gcScavCopyWords(mknum(payload(src, 0)), mknum(payload(dst, 0)), mknum(nW - 1));
+}
+// Rt.gcScavPtr: THE COPIER.  A pointer that is not in the live young range
+// [youngStart, youngCursor) is returned unchanged (old space, the C heap,
+// static data, null — the walk's non-young arms).  A forwarded young block
+// returns its new address out of word -1.  Otherwise the block is copied into
+// old space (promotion on FIRST survival — there is no second age, so no age
+// byte and no survivor counter anywhere), the young original gets the
+// FORWARDED bit + the forwarding address, its body word 0 is POISONED with
+// tag 15 (a stale unrooted read dies in the tag dispatch), and the COPY is
+// pushed onto the scan queue (the mark stack, reused — empty at scavenge
+// time, and youngFit <= capBytes is the same bound the mark-stack guard
+// asserts, so the queue cannot overflow).
+defun Rt.gcScavPtr(p : val) -> val {
+  word ptr = payload(p, 0);
+  word glob = rawcall rt_glob_addr();
+  *Region region = wload(glob, 0);
+  if (mkbool(ptr < region->youngStart) || mkbool(ptr >= region->youngCursor)) {
+    return mknum(ptr);
+  }
+  word flags = wload(ptr, -2);
+  if (mkbool((flags & (2147483648 * 2147483648)) != 0)) {
+    return mknum(wload(ptr, -1));
+  }
+  word kind = (flags >> 1) & 1;
+  word count = wload(ptr, -1);
+  word cls = (flags >> 2) & ((1073741824 * 2147483648) - 1);
+  word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
+  val nb = call Rt.gcPromoteAlloc(mknum(cls), mknum(kind), mknum(count));
+  word nw = payload(nb, 0);
+  val cp = call Rt.gcScavCopyWords(mknum(ptr - 16), mknum(nw - 16), mknum(phys));
+  wstore(ptr, -2, flags + (2147483648 * 2147483648));
+  wstore(ptr, -1, nw);
+  wstore(ptr, 0, 15);
+  region->scavBytes = region->scavBytes + phys * 8;
+  region->scavBodies = region->scavBodies + 1;
+  word top = region->markTop;
+  if (mkbool(top >= region->markEnd)) {
+    call Rt.die(rawstr("qbe-rt: midgc: scavenge scan queue overflow"));
+    return mknil;
+  }
+  wstore(region, top, nw);
+  region->markTop = top + 1;
+  return mknum(nw);
+}
+// Rt.gcScavValue: relocate ONE val cell IN PLACE — the cell itself never
+// moves (it lives in a root slot, a rooted C-heap array, or a heap block's
+// body); what moves is the heap block its pointer payloads name.  The tag
+// table mirrors Rt.gcMarkValue exactly (1 string, 4 cons, 9 error, 10 vector:
+// one pointer at word 1; 6 lambda, 14 record: words 1 and 3).  Tag 15 is the
+// POISON a forwarded young body carries: reaching it here means the walk
+// followed a stale reference, which is loud by design.
+defun Rt.gcScavValue(vaddr : val) -> val {
+  word c = payload(vaddr, 0);
+  word tag = byteload(c, 0) + (byteload(c, 1) * 256 + (byteload(c, 2) * 65536 + byteload(c, 3) * 16777216));
+  if (mkbool(tag == 1)) {
+    wstore(c, 1, payload(call Rt.gcScavPtr(mknum(wload(c, 1))), 0));
+    return mknil;
+  }
+  if (mkbool(tag == 4)) {
+    wstore(c, 1, payload(call Rt.gcScavPtr(mknum(wload(c, 1))), 0));
+    return mknil;
+  }
+  if (mkbool(tag == 9)) {
+    wstore(c, 1, payload(call Rt.gcScavPtr(mknum(wload(c, 1))), 0));
+    return mknil;
+  }
+  if (mkbool(tag == 10)) {
+    wstore(c, 1, payload(call Rt.gcScavPtr(mknum(wload(c, 1))), 0));
+    return mknil;
+  }
+  if (mkbool(tag == 6)) {
+    wstore(c, 1, payload(call Rt.gcScavPtr(mknum(wload(c, 1))), 0));
+    wstore(c, 3, payload(call Rt.gcScavPtr(mknum(wload(c, 3))), 0));
+    return mknil;
+  }
+  if (mkbool(tag == 14)) {
+    wstore(c, 1, payload(call Rt.gcScavPtr(mknum(wload(c, 1))), 0));
+    wstore(c, 3, payload(call Rt.gcScavPtr(mknum(wload(c, 3))), 0));
+    return mknil;
+  }
+  if (mkbool(tag == 15)) {
+    call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: scavenge read a POISONED (forwarded young) body at ")), mknum(c), mknum(wload(rawcall rt_glob_addr(), 0)));
+    return mknil;
+  }
+  if (mkbool(tag == 13) || mkbool(tag > 14)) {
+    call Rt.die(rawstr("qbe-rt: midgc: unknown value tag in scavenge walk"));
+    return mknil;
+  }
+  return mknil;
+}
+// Rt.gcScavValueArray: relocate each val cell of an array — self-recursion
+// only, one jmp per element (the gcScanValueArray shape).
+defun Rt.gcScavValueArray(base : val, cnt : val) -> val {
+  word baseW = payload(base, 0);
+  word cntW = payload(cnt, 0);
+  if (mkbool(cntW == 0)) {
+    return mknil;
+  }
+  call Rt.gcScavValue(mknum(baseW));
+  return call Rt.gcScavValueArray(mknum(baseW + 40), mknum(cntW - 1));
+}
+// Rt.gcScavRoots: THE ROOT WALK — exactly Rt.gcMarkRoots' root set, but a
+// young pointer is COPIED and the slot that names it is UPDATED IN PLACE
+// (that update is what makes movement visible to the language: the frame's
+// val cells and the host's rooted arrays keep pointing at the live object).
+defun Rt.gcScavRoots(i : val) -> val {
+  word iW = payload(i, 0);
+  word nRoots = rawcall rt_gc_roots_len();
+  if (mkbool(iW >= nRoots)) {
+    return mknil;
+  }
+  word kind = rawcall rt_gc_root_kind(iW);
+  word slot = rawcall rt_gc_root_slot(iW);
+  word np = rawcall rt_gc_root_np(iW);
+  if (mkbool(kind == 0)) {
+    wstore(slot, 0, payload(call Rt.gcScavPtr(mknum(wload(slot, 0))), 0));
+    return call Rt.gcScavRoots(mknum(iW + 1));
+  }
+  if (mkbool(kind == 1)) {
+    call Rt.gcScavValue(mknum(slot));
+    return call Rt.gcScavRoots(mknum(iW + 1));
+  }
+  if (mkbool(kind == 3)) {
+    call Rt.gcScavValue(mknum(slot));
+    return call Rt.gcScavRoots(mknum(iW + 1));
+  }
+  if (mkbool(kind == 2)) {
+    word count = byteload(np, 0) + (byteload(np, 1) * 256 + (byteload(np, 2) * 65536 + byteload(np, 3) * 16777216));
+    call Rt.gcScavValueArray(mknum(slot), mknum(count));
+    return call Rt.gcScavRoots(mknum(iW + 1));
+  }
+  call Rt.die(rawstr("qbe-rt: midgc: unknown root kind in scavenge"));
+  return mknil;
+}
+// Rt.gcScavRemembered: walk the remembered set.  Each entry is an OLD BLOCK
+// address the barrier recorded (an old value-array that received a store of a
+// young-referencing value).  Validation before the scan, because the entry can
+// be STALE: the block may since have died (block-map state 2 — drop the
+// entry), or died and been RE-ISSUED (RS bit cleared by the fresh header —
+// drop; a new barrier hit would have re-recorded it).  A live, bit-set entry
+// must be a KIND-1 block: anything else is corruption, named.  Clearing the
+// bit HERE is what keeps the set empty-able: rsTop resets to 0 in the
+// scavenge epilogue and every remaining bit is clear.
+// Rt.gcScavOne: ONE remembered entry — a helper because the entry's
+// validation is a FALLING chain (drop stale entries) and Mid has no join:
+// here every arm RETURNS, so the shapes are the legal diverging ones.
+defun Rt.gcScavOne(blk : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  *Region region = wload(glob, 0);
+  word b = payload(blk, 0);
+  if (mkbool(b < region->heapStart) || mkbool(b >= region->cursor)) {
+    return mknil;
+  }
+  word state = byteload(region->bmPtr + (b - region->heapStart) / 64, 0);
+  word flags = wload(b, -2);
+  if (mkbool(state == 1) && mkbool((flags & (1073741824 * 2147483648)) != 0)) {
+    if (mkbool(((flags >> 1) & 1) != 1)) {
+      call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: a REMEMBERED block is not a value array at heap offset ")), mknum(b - region->heapStart), mknum([word](region)));
+      return mknil;
+    }
+    wstore(b, -2, flags - (1073741824 * 2147483648));
+    word count = wload(b, -1);
+    call Rt.gcScavValueArray(mknum(b), mknum(count));
+    return mknil;
+  }
+  return mknil;
+}
+defun Rt.gcScavRemembered(i : val) -> val {
+  word iW = payload(i, 0);
+  word glob = rawcall rt_glob_addr();
+  *Region region = wload(glob, 0);
+  if (mkbool(iW >= region->rsTop)) {
+    return mknil;
+  }
+  val one = call Rt.gcScavOne(mknum(wload(region->rsBase, iW)));
+  return call Rt.gcScavRemembered(mknum(iW + 1));
+}
+// Rt.gcScavDrain: the scan queue — pop a promoted copy, relocate the val
+// cells INSIDE the copy (Cheney's breadth-first half: the copy's payload
+// words are the to-scan set).  Self-recursion only.
+defun Rt.gcScavDrain(dummy : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  *Region region = wload(glob, 0);
+  word top = region->markTop;
+  if (mkbool(top <= 64)) {
+    return mknil;
+  }
+  word newTop = top - 1;
+  word p = wload(region, newTop);
+  region->markTop = newTop;
+  word flags = wload(p, -2);
+  word kind = (flags >> 1) & 1;
+  word count = wload(p, -1);
+  word scanCount = payload((kind == 1) ? mknum(count) : mknum(0), 0);
+  call Rt.gcScavValueArray(mknum(p), mknum(scanCount));
+  return call Rt.gcScavDrain(mknum(0));
+}
+// Rt.gcScavenge: THE SCAVENGE.  Roots first (copy + update the root slots),
+// then the remembered set (old blocks that received young-referencing stores
+// since the last scavenge — the write barrier's other half), then the drain
+// (the transitive closure inside the copies).  Epilogue: the young space is
+// EMPTY again (one store — no sweep, no walk of anything dead), the
+// remembered set is empty, and the stats line prints under QBE_MIDGC_STATS
+// with the SAME knob and printer as the collect line.
+defun Rt.gcScavenge(dummy : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  *Region region = wload(glob, 0);
+  rawcall clock_gettime(1, [word](region) + 104);
+  region->markTop = 64;
+  region->scavBytes = 0;
+  region->scavBodies = 0;
+  word rsHad = region->rsTop;
+  call Rt.gcScavRoots(mknum(0));
+  call Rt.gcScavRemembered(mknum(0));
+  call Rt.gcScavDrain(mknum(0));
+  region->youngCursor = region->youngStart;
+  region->rsTop = 0;
+  region->scavenges = region->scavenges + 1;
+  rawcall clock_gettime(1, [word](region) + 120);
+  region->markUs = (region->ts1s * 1000000 + region->ts1n / 1000) - (region->ts0s * 1000000 + region->ts0n / 1000);
+  if (mkbool(wload(glob, 8) != 0)) {
+    word regW = [word](region);
+    call Rt.gcNumOut(mknum(rawstr("midgc: scavenge s=")), mknum(region->scavenges), mknum(regW));
+    call Rt.gcNumOut(mknum(rawstr(" copied=")), mknum(region->scavBytes), mknum(regW));
+    call Rt.gcNumOut(mknum(rawstr(" bodies=")), mknum(region->scavBodies), mknum(regW));
+    call Rt.gcNumOut(mknum(rawstr(" rs=")), mknum(rsHad), mknum(regW));
+    call Rt.gcNumOut(mknum(rawstr(" us=")), mknum(region->markUs), mknum(regW));
+    rawcall write(2, rawstr("\n"), 1);
+    return mknil;
+  }
+  return mknil;
+}
+// <<< QBE_MIDGC_YOUNG-ONLY
 defun Rt.gcMarkRoots(i : val) -> val {
   word iW = payload(i, 0);
   word nRoots = rawcall rt_gc_roots_len();
@@ -3944,12 +4390,22 @@ defun Rt.gcSweep(cursor : val) -> val {
   } else {
     word flags = wload(cursorW, -2);
     word marked = flags & 1;
-    word cls = flags >> 2;
+    // THE CLASS IS MASKED (GC NURSERY unit): a LIVE block may carry the RS
+    // bit (61) — it was remembered between scavenges — and FORWARDED (62)
+    // never appears here (young blocks are outside the swept range), so
+    // without the mask a remembered block's `flags >> 2` is astronomically
+    // past its class and the sweep's advance walks into garbage.
+    word cls = (flags >> 2) & ((1073741824 * 2147483648) - 1);
     word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
     if (mkbool(marked == 1)) {
       wstore(cursorW, -2, flags - 1);
       return call Rt.gcSweep(mknum(cursorW + phys * 8));
     } else {
+      // A FREED block leaves the remembered set (GC NURSERY unit): clear the
+      // RS bit so a stale set entry is dropped by the scavenge's state test
+      // even before the block is re-issued, and the class the free list files
+      // it under is the masked (true) class.
+      wstore(cursorW, -2, flags & ((1073741824 * 2147483648) - 1));
       wstore(cursorW, 0, wload(table, cls));
       wstore(table, cls, cursorW);
       // FREE it in the block map and COUNT it (GC ARC unit 2): the marker reads
@@ -3982,6 +4438,17 @@ defun Rt.gcMarkPtr(p : val) -> val {
   word heapStart = region->heapStart;
   word heapEnd = region->heapEnd;
   word regW = [word](region);
+  // THE NURSERY'S MISSING-ROOT DETECTOR (GC NURSERY unit, shared text — the
+  // range [youngStart, youngCursor) is EMPTY unless the young space is
+  // active, so this costs two compares and never fires otherwise): a pointer
+  // into the YOUNG space reaching the MARK walk is a root the scavenge did
+  // not walk.  That is exactly wall B's shape (a live value the collector
+  // cannot see), and under the nursery it is LOUD AT THE COLLECT instead of
+  // plausible-silent: die, never skip.
+  if (mkbool(ptr >= region->youngStart) && mkbool(ptr < region->youngCursor)) {
+    call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY: mark of a YOUNG pointer (a root the scavenge missed) at heap offset ")), mknum(ptr - heapStart), mknum(regW));
+    return mknil;
+  }
   if (mkbool(ptr != 0) && (mkbool(ptr >= heapStart) && mkbool(ptr < heapEnd))) {
     // ---- THE BLOCK-START INVARIANT (GC ARC unit 2, EVERY build) ----------
     // A heap pointer handed to the marker is either the beginning of a block
@@ -4139,7 +4606,9 @@ defun Rt.gcVerify(p : val, n : val) -> val {
     return call Rt.gcVerifyList(mknum(wload(region->classTab, 0)), mknum(0), mknum(0));
   }
   word flags = wload(pw, -2);
-  word cls = flags >> 2;
+  // masked (GC NURSERY unit): a live remembered block carries the RS bit and
+  // the unmasked shift would fail the class checks below spuriously.
+  word cls = (flags >> 2) & ((1073741824 * 2147483648) - 1);
   word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
   word state = byteload(bm + (pw - heapStart) / 64, 0);
   // V1: the allocator's record of block starts must contain this address.
@@ -4211,7 +4680,7 @@ defun Rt.gcVerifyList(node : val, cls : val, acc : val) -> val {
     return mknil;
   }
   word flags = wload(nd, -2);
-  if (mkbool((flags >> 2) != clsW)) {
+  if (mkbool(((flags >> 2) & ((1073741824 * 2147483648) - 1)) != clsW)) {
     call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V5: a free-list link is on the WRONG CLASS list at heap offset ")), mknum(nd - region->heapStart), mknum(regW));
     return mknil;
   }

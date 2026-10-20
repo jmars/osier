@@ -168,4 +168,22 @@ gcProgram =
     , seat "Rt.gcVD" 3
     , seat "Rt.gcVerify" 2
     , seat "Rt.gcVerifyList" 3
+    , -- ===== THE NURSERY'S SCAVENGE FAMILY (GC NURSERY unit).  Seated like
+      -- every collector defun (the splice puts them in the GC HALF, where
+      -- their calls to Rt.gcVD/gcNumOut/gcGrow live) but seeded ONLY in a
+      -- QBE_MIDGC_YOUNG=1 build (Lower's youngGcSeeds): the surface defuns
+      -- exist only in that build, so anywhere else these seats stay UNSEEDED
+      -- and are pruned before emission — an unseeded seat never reaches the
+      -- linker, which is what lets a build-conditional defun be seated at
+      -- all.  Nothing ALWAYS-EMITTED may call one (TestMain's NURSERY PIN).
+      seat "Rt.gcScavenge" 1
+    , seat "Rt.gcScavRoots" 1
+    , seat "Rt.gcScavValue" 1
+    , seat "Rt.gcScavValueArray" 2
+    , seat "Rt.gcScavPtr" 1
+    , seat "Rt.gcScavCopyWords" 3
+    , seat "Rt.gcScavRemembered" 1
+    , seat "Rt.gcScavOne" 1
+    , seat "Rt.gcScavDrain" 1
+    , seat "Rt.gcPromoteAlloc" 3
     ]

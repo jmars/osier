@@ -1,0 +1,30 @@
+// GC NURSERY unit (stage A) — THE MINIMAL YOUNG PROBE.  `hold` is the one
+// arm that is LANDED: a rooted vector with a known element, churned past
+// young cycles, read back through the slot.  The `where` (movement witness
+// from inside the language) and `fill` (write-barrier) arms are NOT landed —
+// `fill` needs the remembered set (stage B); `where` hit an unresolved
+// RtLang parse rejection on its struct-statement body (see the result node).
+module Wyoung
+
+export Wyoung.hold : val -> val
+
+// cnt one-element young vectors, dropped immediately: fills the young space.
+defun Wyoung.churn(cnt : val) -> val {
+  if (mkbool(payload(cnt, 0) == 0)) {
+    return mknil;
+  }
+  word base = allocvec(1);
+  vecstore(base, 0, mknum(999));
+  val dead = mkvec(base, 1);
+  return call Wyoung.churn(mknum(payload(cnt, 0) - 1));
+}
+
+// hold -> 424242: a ROOTED vector (frame binder) with a known element,
+// churned past young cycles, read back THROUGH THE SLOT.
+defun Wyoung.hold(cnt : val) -> val {
+  word base = allocvec(1);
+  vecstore(base, 0, mknum(424242));
+  val keep = mkvec(base, 1);
+  val junk = call Wyoung.churn(cnt);
+  return vecload(payload(keep, 0), 0);
+}

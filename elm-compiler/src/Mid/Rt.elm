@@ -11,6 +11,7 @@ module Mid.Rt
         , conSeeds
         , driverSeeds
         , gcSeeds
+        , youngGcSeeds
         , hostSeeds
         , primImpl
         , activeSurf
@@ -909,6 +910,23 @@ rtDeps =
         , ( "Rt.gcClearClasses", [ "Rt.gcClearClasses" ] )
         , ( "Rt.gcMarkPtr", [ "Rt.die", "Rt.gcVD" ] )
         , ( "Rt.gcMarkValue", [ "Rt.gcMarkPtr", "Rt.die" ] )
+        , -- ===== the nursery's scavenge family (GC NURSERY unit).  These keys
+          -- exist in the surface ONLY in a QBE_MIDGC_YOUNG=1 build (run.js
+          -- splices the region out otherwise), so they are seeded from
+          -- `youngGcSeeds` ONLY under that flag — an ALWAYS-PRESENT defun's
+          -- row must never name one of them (the closure would drag an absent
+          -- key into a plain MIDGC build's seeds and Lower dies "unknown
+          -- global"; TestMain pins that rule).
+          ( "Rt.gcScavenge", [ "Rt.gcScavRoots", "Rt.gcScavRemembered", "Rt.gcScavDrain", "Rt.gcNumOut" ] )
+        , ( "Rt.gcScavRoots", [ "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavPtr", "Rt.die" ] )
+        , ( "Rt.gcScavValue", [ "Rt.gcScavPtr", "Rt.gcVD", "Rt.die" ] )
+        , ( "Rt.gcScavValueArray", [ "Rt.gcScavValueArray", "Rt.gcScavValue" ] )
+        , ( "Rt.gcScavPtr", [ "Rt.gcPromoteAlloc", "Rt.gcScavCopyWords", "Rt.die" ] )
+        , ( "Rt.gcScavCopyWords", [ "Rt.gcScavCopyWords" ] )
+        , ( "Rt.gcScavRemembered", [ "Rt.gcScavRemembered", "Rt.gcScavOne", "Rt.gcVD", "Rt.die" ] )
+        , ( "Rt.gcScavOne", [ "Rt.gcScavValueArray", "Rt.gcVD" ] )
+        , ( "Rt.gcScavDrain", [ "Rt.gcScavDrain", "Rt.gcScavValueArray" ] )
+        , ( "Rt.gcPromoteAlloc", [ "Rt.gcGrow", "Rt.gcNumOut", "Rt.die" ] )
         , -- ===== the Mid ADT constructor (zigretire stage 5)
           ( "Rt.con", [ "Rt.conFill" ] )
         , ( "Rt.conFill", [ "Rt.conFill" ] )
@@ -1362,6 +1380,17 @@ the mark/sweep machinery (`Rt.collect` and its walkers) follows them.
 gcSeeds : List String
 gcSeeds =
     keepRtDependencies [ "Rt.allocVector", "Rt.allocRaw" ]
+
+
+{-| THE NURSERY'S SEED ROOT (GC NURSERY unit): the scavenge entry point, whose
+rtDeps closure above pulls in the whole young family.  Seeded by Lower ONLY
+when the QBE_MIDGC_YOUNG=1 build flag is on (the surface defuns exist only
+then); the young dispatch sites in Rt.gcAlloc / Rt.collect are inside the
+spliced region, so nothing else needs to name these keys.
+-}
+youngGcSeeds : List String
+youngGcSeeds =
+    keepRtDependencies [ "Rt.gcScavenge" ]
 
 
 {-| The Mid-routed CONSTRUCTOR seeds (zigretire stage 5): the Rt defuns Lower

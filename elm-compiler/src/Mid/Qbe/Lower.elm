@@ -203,6 +203,7 @@ type alias S =
     , consArr : Bool -- (A)'s switch (QBE_NOCONSARR=1 -> False = the 2-word cons)
     , typeSpec : Bool -- Unit B's switch (QBE_NOTYPESPEC=1 -> False = no binder-map type specialization)
     , midGc : Bool -- zigretire stage 4's switch (QBE_MIDGC=1 -> the Mid mark-sweep collector)
+    , midGcYoung : Bool -- GC NURSERY unit's hatch (QBE_MIDGC_YOUNG=1 -> the nursery's barrier seat + seeding)
     , funcs : List PendingFunc -- extra (closure) funcs, REVERSED
     , datas : List DataDef -- REVERSED
     , dataKeys : Dict String String -- content key -> data name (dedup)
@@ -505,8 +506,8 @@ unique xs =
         |> Tuple.second
 
 
-lower : MidRt.Runtime -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
-lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc table arityTable program entryKey =
+lower : MidRt.Runtime -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
+lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midGcYoung table arityTable program entryKey =
     let
         defuns =
             Dict.fromList (List.map (\d -> ( d.key, d )) program)
@@ -566,6 +567,19 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc table ari
                                     else
                                         []
                                    )
+                                -- THE NURSERY SEEDS (GC NURSERY unit): the young
+                                -- defuns exist in the surface only when run.js
+                                -- kept the QBE_MIDGC_YOUNG-ONLY regions, so they
+                                -- are seeded ONLY in a young build — a plain
+                                -- MIDGC build must not name them (an absent key
+                                -- here is "unknown global", loud, which is why
+                                -- no ALWAYS-PRESENT rtDeps row may list one).
+                                ++ (if midGc && midGcYoung then
+                                        List.filter (\k -> not (List.member k surfaceKeys)) (unique MidRt.youngGcSeeds)
+
+                                    else
+                                        []
+                                   )
                                 ++ List.filter (\k -> not (List.member k surfaceKeys)) (unique MidRt.driverSeeds)
                                 -- THE QBE_MIDHOST GATE (stage 7A): the Mid effect
                                 -- host joins ONLY when the surface text carries the
@@ -610,6 +624,7 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc table ari
                     , consArr = consArr
                     , typeSpec = typeSpec
                     , midGc = midGc
+                    , midGcYoung = midGcYoung
                     , funcs = []
                     , datas = []
                     , dataKeys = Dict.empty
@@ -1438,6 +1453,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , consArr = sOuter.consArr
             , typeSpec = sOuter.typeSpec
             , midGc = sOuter.midGc
+            , midGcYoung = sOuter.midGcYoung
             , funcs = []
             , datas = sOuter.datas
             , dataKeys = sOuter.dataKeys

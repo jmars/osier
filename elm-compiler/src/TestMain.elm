@@ -84,10 +84,10 @@ checks rt runtimeMidText =
       -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
       -- the frameZero loop), so an empty or truncated load turns it RED,
       -- loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (278 defuns — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (288 defuns (GC NURSERY added the ten scavenge-family defuns) — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 278
+                List.length ast == 288
 
             Err _ ->
                 False
@@ -1059,7 +1059,7 @@ checks rt runtimeMidText =
          List.all ok allKeys
         )
     , check "rt cons lowers to a QBE function named q_Rt_x2econs"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.cons" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.cons" of
             Ok mod ->
                 List.any (\f -> f.name == "q_Rt_x2econs") mod.funcs
 
@@ -1067,7 +1067,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "rt lowering REJECTS a raw-word binder read in a value position (must-fail)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rtRawBinderMisuse ] "Rt.bad" of
             Err msg ->
                 String.contains "raw word binder" msg
 
@@ -1075,7 +1075,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "rt lowering REJECTS a word node in a value position (must-fail)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rtWordInValuePosition ] "Rt.bad2" of
             Err msg ->
                 String.contains "value position" msg
 
@@ -1083,7 +1083,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "rt lowering REJECTS a value binder in a raw-argument position (must-fail)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rtValueInRawPosition ] "Rt.bad3" of
             Err msg ->
                 String.contains "not a raw word" msg
 
@@ -1097,7 +1097,7 @@ checks rt runtimeMidText =
     -- the silent mislower whose fix this row pins structurally (the BEHAVIOURAL
     -- pin is the gate's charord.elm row).
     , check "char ordering: a Char/string `<` lowers to the inline byte compare (loadub), NOT a call to Rt.<"
-        (case QbeLower.lower rt True False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ charOrdProbe ])) (rtProgram rt True True True ++ [ charOrdProbe ]) "Rt.charOrdProbe" of
+        (case QbeLower.lower rt True False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ charOrdProbe ])) (rtProgram rt True True True ++ [ charOrdProbe ]) "Rt.charOrdProbe" of
             Ok mod ->
                 case funcByName "q_Rt_x2echarOrdProbe" mod of
                     Just f ->
@@ -1110,7 +1110,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "char ordering CONTROL: a `<` on two Int literals keeps the i64 fast path (no loadub byte walk, no Rt.< call)"
-        (case QbeLower.lower rt True False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ intLtProbe ])) (rtProgram rt True True True ++ [ intLtProbe ]) "Rt.intLtProbe" of
+        (case QbeLower.lower rt True False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ intLtProbe ])) (rtProgram rt True True True ++ [ intLtProbe ]) "Rt.intLtProbe" of
             Ok mod ->
                 case funcByName "q_Rt_x2eintLtProbe" mod of
                     Just f ->
@@ -1130,7 +1130,7 @@ checks rt runtimeMidText =
     , check "rt RawCallAgg classification: a defun containing one is a DIRECT safepoint (allocating — the callee is unknown generated code)"
         (rt.direct rawCallAggProbe)
     , check "rt RawCallAgg lowers to a word-target aggregate call returning the sret address"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ rawCallAggProbe ])) (rtProgram rt True True True ++ [ rawCallAggProbe ]) "Rt.rawCallAggProbe" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ rawCallAggProbe ])) (rtProgram rt True True True ++ [ rawCallAggProbe ]) "Rt.rawCallAggProbe" of
             Ok mod ->
                 List.any rawCallAggCallShape mod.funcs
 
@@ -1180,7 +1180,7 @@ checks rt runtimeMidText =
             && Set.member "Rt.bounceGo" rt.allocating
         )
     , check "rawAbi emission shape: Rt.die (1 word param) emits (params [a0:l], ret l, frame-free alloc scratch)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.die" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.die" of
             Ok mod ->
                 case funcByName "q_Rt_x2edie" mod of
                     Just f ->
@@ -1196,7 +1196,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "rawAbi emission shape: Rt.halt (0-ary) emits an EMPTY param list — the lean 4-arg shape would be a silent miscompile"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.halt" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.halt" of
             Ok mod ->
                 case funcByName "q_Rt_x2ehalt" mod of
                     Just f ->
@@ -1211,7 +1211,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "P1e frame-enter bulk-zero is a SINGLE rawcall memset(dst, 0, 40*nslots) — 3 word args, the middle the zero byte, a 40*x Mul for the length, and NO q_Rt_x2eframeZero call or in-frame loop (the per-slot frameZero loop is gone; fails on the pre-P1e loop)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.frame-enter" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.frame-enter" of
             Ok mod ->
                 case funcByName "q_Rt_x2eframe_x2denter" mod of
                     Just f ->
@@ -1224,7 +1224,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "P1e zero-BEFORE-root: frame-enter's memset is emitted BEFORE the rt_root_push_value_array call (a reused block's stale slots must be zeroed before the GC scans them — the rt.zig:279 correctness memset)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.frame-enter" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.frame-enter" of
             Ok mod ->
                 case funcByName "q_Rt_x2eframe_x2denter" mod of
                     Just f ->
@@ -1237,7 +1237,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "B1fix copyWords is a rawAbi WORD pair: the WRAPPER (3 l params, ret l, frame-free) hands off to the LOOP, and the LOOP (3 l params, ret l, frame-free) is an in-frame self-tail with NO :val aggregate or 40-byte blit in its body — the per-word blit/boxing is gone (fails on the pre-fix :val copyWords, which had ret :val, a 40-byte blit, a self-CALL recur and no copyWordsGo)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.copyWords" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.copyWords" of
             Ok mod ->
                 (case funcByName "q_Rt_x2ecopyWords" mod of
                     Just f ->
@@ -1268,7 +1268,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "B2 Rt.tail-known is a rawAbi Agg-ret defun: params [a0:l,a1:l,a2:l], ret Agg \"ret\" (the 80-byte .tail), frame-free alloc8 (the rawAbi arm wins the frame decision) — the rt_tail_known seat's C ABI, ready for Lower's directCall TAIL retarget"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.tail-known" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.tail-known" of
             Ok mod ->
                 case funcByName "q_Rt_x2etail_x2dknown" mod of
                     Just f ->
@@ -1287,7 +1287,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "B2 Rt.bounce is a rawAbi Agg-val defun: params [a0:l], ret Agg \"val\" (the 40-byte .done), frame-free alloc8, single-iteration fast path (vecload) + hand-off to the :val loop q_Rt_x2ebounceGo — the rt_bounce seat's C ABI"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.bounce" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.bounce" of
             Ok mod ->
                 case funcByName "q_Rt_x2ebounce" mod of
                     Just f ->
@@ -1306,7 +1306,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "B2 Rt.bounceGo is the FRAMED :val tail-chase loop: reaches the rt_callN bridge by name AND its recur is an in-frame self-tail (jmp @body, no self-call) — CONSTANT native stack, exactly the Zig bounce trampoline (fails on a self-CALL recur, which would build one C frame per hop and blow the 1e6 clostail stack)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.bounce" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.bounce" of
             Ok mod ->
                 case funcByName "q_Rt_x2ebounceGo" mod of
                     Just f ->
@@ -1324,7 +1324,7 @@ checks rt runtimeMidText =
     , check "B0perf-2 nested word-tail If: the ret-bound arm's word SURVIVES the join end-to-end — the BLOCKER fix (the old lastBlockJump read only the INNER else's jmp @body and silently dropped %a0 to ret 0)"
         (case lowl nestedWordTailIfSrc of
             Ok [ fixture ] ->
-                case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ fixture ])) (rtProgram rt True True True ++ [ fixture ]) "Rt.die" of
+                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ fixture ])) (rtProgram rt True True True ++ [ fixture ]) "Rt.die" of
                     Ok mod ->
                         case funcByName "q_Rt_x2edie" mod of
                             Just f ->
@@ -1340,7 +1340,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "rawAbi VALUE-position reject (fail-before): a WORD-ABI call in a :val tail is a loud Err, never a silent word->val reinterpretation (the message names the callee since B6 — a user word-ABI key can land here too, so 'rawAbi Rt call' was too narrow)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty Dict.empty [ rawAbiValueMisuse ] "Rt.bad4" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawAbiValueMisuse ] "Rt.bad4" of
             Err msg ->
                 String.contains "word-ABI call in a VALUE position" msg
 
@@ -1348,7 +1348,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "rawAbi caller shape: the midgc die arm emits a WORD call q_Rt_x2edie(l msg) — one Base L arg, never the lean 4-arg :val shape"
-        (case QbeLower.lower rt False False False True True True True True QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.allocVector" of
+        (case QbeLower.lower rt False False False True True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.allocVector" of
             Ok mod ->
                 case funcByName "q_Rt_x2egcInit" mod of
                     Just f ->
@@ -1365,7 +1365,7 @@ checks rt runtimeMidText =
             prog =
                 (driverProg rt)
          in
-         case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
+         case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities prog) prog "Rt.emptylist" of
             Ok mod ->
                 case funcByName "q_Rt_x2eemptylist" mod of
                     Just f ->
@@ -1385,7 +1385,7 @@ checks rt runtimeMidText =
     -- accept + still-rejected shape, the val-position Blit, and the arity
     -- record totality.
     , check "A1 ret-class: Rt.main (2 word params argc/argv) emits params [a0:l,a1:l] and ret w (the exit code) — the per-key rawAbi RET CLASS (Rt.die/Rt.halt stay ret l, pinned above)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 case funcByName "main" mod of
                     Just f ->
@@ -1399,7 +1399,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "A1 export-name override: Rt.main emits name \"main\" (not q_Rt_x2emain) with export_ = True — crt0 links main (the rt_callN naming precedent)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "main" mod of
                     Just f ->
@@ -1424,7 +1424,7 @@ checks rt runtimeMidText =
             && List.member "Rt.parseArgsGo" Rt.driverSeeds
         )
     , check "A1b RawCallAgg FUNCTION-symbol accept: a RawSym callee (not just a temp) lowers to Call (Just _) (Agg \"val\") (Il.Sym \"rt_bounce\") [word] — the code label, never a dN data ref"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ rawCallAggSymProbe ])) (rtProgram rt True True True ++ [ rawCallAggSymProbe ]) "Rt.rawCallAggSymProbe" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ rawCallAggSymProbe ])) (rtProgram rt True True True ++ [ rawCallAggSymProbe ]) "Rt.rawCallAggSymProbe" of
             Ok mod ->
                 List.any rawCallAggSymCallShape mod.funcs
 
@@ -1432,7 +1432,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "A1b RawCallAgg DATA-symbol callee rejected: a rawstr data-def stand-in (RawCStr \"rt_bounce\") is a loud Err, not a silent call into static data (the A1-review blocker's over-acceptance half)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty Dict.empty [ rawCallAggDataSymProbe ] "Rt.rawCallAggDataSymProbe" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggDataSymProbe ] "Rt.rawCallAggDataSymProbe" of
             Err msg ->
                 String.contains "DATA" msg
 
@@ -1440,7 +1440,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "A1 RawCallAgg still-rejected shape: a CONSTANT callee is a loud Err (the callee must be a RawSym function symbol or a loaded code pointer, never a constant)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty Dict.empty [ rawCallAggConstProbe ] "Rt.rawCallAggConstProbe" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty Dict.empty [ rawCallAggConstProbe ] "Rt.rawCallAggConstProbe" of
             Err msg ->
                 String.contains "not a constant" msg
 
@@ -1448,7 +1448,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "A1b RawCallAgg VALUE-position Blit: a val-shaped aggregate call of rt_bounce emits Call (Just _) (Agg \"val\") (Il.Sym \"rt_bounce\") + a 40-byte Blit into the dest slot (the rtApply non-tail shape, never a word-address return)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ rawCallAggValProbe ])) (rtProgram rt True True True ++ [ rawCallAggValProbe ]) "Rt.rawCallAggValProbe" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ rawCallAggValProbe ])) (rtProgram rt True True True ++ [ rawCallAggValProbe ]) "Rt.rawCallAggValProbe" of
             Ok mod ->
                 List.any rawCallAggValBlitShape mod.funcs
 
@@ -1456,7 +1456,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "A1b emitted .ssa names the FUNCTION symbol as the call target: the lowered module RENDERED as .ssa contains `call $rt_bounce` (a code label), not a data-def call"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ rawCallAggSymProbe ])) (rtProgram rt True True True ++ [ rawCallAggSymProbe ]) "Rt.rawCallAggSymProbe" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ rawCallAggSymProbe ])) (rtProgram rt True True True ++ [ rawCallAggSymProbe ]) "Rt.rawCallAggSymProbe" of
             Ok mod ->
                 String.contains "call $rt_bounce" (Print.print mod)
 
@@ -1507,7 +1507,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "A3a MIDDRIVER emission — message DATA: the module carries the usage and toomany messages as content-keyed data defs (the exact frozen-golden bytes, err-usage.txt / err-toomany.txt)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (List.any (\d -> List.member (Il.DStr "usage: <prog> <entry-name> [int|float-arg ...]\n") d.items) mod.datas)
                     && (List.any (\d -> List.member (Il.DStr "qbe-rt: >16 entry args not supported\n") d.items) mod.datas)
@@ -1516,7 +1516,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "A3a MIDDRIVER emission — the error paths CALL write and exit IN $main: $main's OWN blocks emit >=2 call $write and >=2 call $exit (usage and toomany each write fd-2 then exit 2; notmeta adds more writes) — COUNTED, not just scoped, so neither Rt.die/Rt.halt (other functions) NOR the notmeta path alone can satisfy it (the A3a-review SHOULD-FIX 1, the count form)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "main" mod of
                     Just f ->
@@ -1554,7 +1554,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "A3b MIDDRIVER emission — the notmeta DATA: the module carries the not-in-meta prefix and suffix as content-keyed data defs (the exact frozen-golden bytes of err-notmeta.txt split at the entry name)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (List.any (\d -> List.member (Il.DStr "qbe-rt: entry '") d.items) mod.datas)
                     && (List.any (\d -> List.member (Il.DStr "' not in qbe_meta\n") d.items) mod.datas)
@@ -1563,7 +1563,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "A3b MIDDRIVER emission — the meta walk reads the exported table: the rendered .ssa references $qbe_meta and $qbe_meta_len (the wload base/count of the walk)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 let
                     ssa =
@@ -1588,7 +1588,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "A4a MIDDRIVER emission — the seats + root push: the rendered .ssa references $rt_boot, $rt_parse_arg, $rt_argv_install and $rt_root_push_value_array (the A2 seats the driver calls, each via rawcall)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 let
                     ssa =
@@ -1603,7 +1603,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "A4a MIDDRIVER emission — the 17-arm entry dispatch: $main calls the rt_callN dispatchers by NAME (aggcall ret rawsym) and q_Rt_x2ebounce (aggcall val, the stage-6 B2 Mid bounce — the driver's entry chase routes through the MID trampoline, not the Zig rt_bounce seat) — the RawCallAgg named-symbol shape, not a call into data"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 case funcByName "main" mod of
                     Just f ->
@@ -1620,7 +1620,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "A4b MIDDRIVER emission — the program/print tail: $main calls the A4b seats BY NAME (rt_is_program/rt_run_program/rt_print_value via rawcall, rt_root_push_value for the result/model roots) — the seats the A2 result handed word-in/word-out"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 case funcByName "main" mod of
                     Just f ->
@@ -1654,7 +1654,7 @@ checks rt runtimeMidText =
             prog =
                 rtProgram rt True True True ++ rtProgramGc rt True True True
          in
-         case QbeLower.lower rt False False False True True True True True QbeTypes.empty (rtArities prog) prog "Rt.allocVector" of
+         case QbeLower.lower rt False False False True True True True True False QbeTypes.empty (rtArities prog) prog "Rt.allocVector" of
             Ok mod ->
                 (List.length (List.filter (\f -> f.name == "q_Rt_x2edie") mod.funcs) == 1)
                     && (List.length (List.filter (\f -> f.name == "q_Rt_x2ecStrLenGo") mod.funcs) == 1)
@@ -1678,7 +1678,7 @@ checks rt runtimeMidText =
             prog =
                 rtProgram rt True True True ++ rtProgramGc rt True True True
          in
-         case QbeLower.lower rt False False False True True True True True QbeTypes.empty (rtArities prog) prog "Rt.allocVector" of
+         case QbeLower.lower rt False False False True True True True True False QbeTypes.empty (rtArities prog) prog "Rt.allocVector" of
             Ok mod ->
                 List.any (\d -> List.member (Il.DStr "qbe-rt: midgc: mmap failed") d.items) mod.datas
                     && not (List.any (\d -> List.member (Il.DStr "midgc: mmap failed") d.items) mod.datas)
@@ -1717,7 +1717,7 @@ checks rt runtimeMidText =
                -- global Rt.allocVector", MEASURED), which is itself the proof
                -- that the flag selects the Mid seats.  So the row lowers the
                -- same union rt.programGc participates in at emit time.
-               (case QbeLower.lower rt False False False True True True True midGc QbeTypes.empty (rtArities (prog ++ rtProgramGc rt True True True)) (prog ++ rtProgramGc rt True True True) "Rt.emptylist" of
+               (case QbeLower.lower rt False False False True True True True midGc False QbeTypes.empty (rtArities (prog ++ rtProgramGc rt True True True)) (prog ++ rtProgramGc rt True True True) "Rt.emptylist" of
                     Ok mod ->
                         List.any (\f -> f.name == "q_Rt_x2ehalt") mod.funcs
                             && List.any (\d -> d.name == RtGc.globDataSym) mod.datas
@@ -1749,7 +1749,7 @@ checks rt runtimeMidText =
                 False
 
             ( primProg, gcProg ) ->
-                case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (primProg ++ gcProg)) (primProg ++ gcProg) "Rt.allocVector" of
+                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (primProg ++ gcProg)) (primProg ++ gcProg) "Rt.allocVector" of
                     Ok mod ->
                         List.any (\d -> d.name == RtGc.globDataSym) mod.datas
                             && List.any (\f -> f.name == RtGc.globAddrSym) mod.funcs
@@ -1758,7 +1758,7 @@ checks rt runtimeMidText =
                         False
         )
     , check "stage6 globals block: midGc ON emits both, in the pinned shapes, and no gc defun names the deleted seats"
-        (case QbeLower.lower rt False False False True True True True True QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.allocVector" of
+        (case QbeLower.lower rt False False False True True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.allocVector" of
             Ok mod ->
                 List.any
                     (\d ->
@@ -1799,7 +1799,7 @@ checks rt runtimeMidText =
     -- the Zig rt_frame_enter/rt_frame_leave seats.  These pins are the
     -- byte-identity boundary for the hatch.
     , check "B0 prologue retarget: under QBE_MIDDRIVER a framed defun enters through q_Rt_x2eframe_x2denter with an l-word nslots (Base L, not the Zig seat's Base W)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.cons" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.cons" of
             Ok mod ->
                 case funcByName "q_Rt_x2econs" mod of
                     Just f ->
@@ -1812,7 +1812,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "B0 return retarget: under QBE_MIDDRIVER a framed defun leaves through q_Rt_x2eframe_x2dleave, not the Zig rt_frame_leave"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.cons" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.cons" of
             Ok mod ->
                 case funcByName "q_Rt_x2econs" mod of
                     Just f ->
@@ -1825,7 +1825,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "B0 frame defuns are rawAbi frame-free emission: q_Rt_x2eframe_x2denter/Leave emit frame-FREE alloc8 scratch (no rt_frame_enter), l params/ret, and the frame pair + helpers are EMITTED (driverSeeds)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "q_Rt_x2eframe_x2denter" mod of
                     Just f ->
@@ -1852,7 +1852,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "B0 globals-block ungating: the default route (midGc OFF) emits rt_glob + rt_glob_addr — the frames' freelist/frame_top block (B4 made it unconditional)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 List.any (\d -> d.name == RtGc.globDataSym) mod.datas
                     && List.any (\f -> f.name == RtGc.globAddrSym) mod.funcs
@@ -1875,7 +1875,7 @@ checks rt runtimeMidText =
     -- word loads/stores only).  The dispatch reaches rt_callN/rt_bounce by
     -- NAME — the same corpus-proven shape the driver's saturated arm uses.
     , check "B1 Rt.apply emission: Agg-val ret, 3 l params, frame-free alloc8, hands off to the val loop q_Rt_x2eapplyGo"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "q_Rt_x2eapply" mod of
                     Just f ->
@@ -1904,7 +1904,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "B1 loop/helper framing: the loops and the dispatch are FRAMED (they reach a safepoint), copyWords is frame-free, and the dispatch reaches rt_callN/q_Rt_x2ebounce by name (the stage-6 B2 retarget — the apply dispatch routes through the MID bounce, not the Zig rt_bounce seat)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "q_Rt_x2eapplyGo" mod of
                     Just f ->
@@ -1946,7 +1946,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "B1 root-order: THE PARTIAL ARM's env slot is rooted BEFORE the alloc and RE-READ AFTER (push_ptr -> rt_vec_alloc -> loadl, in ONE block) — the cStrFill lesson.  A push-after-alloc or a pre-alloc-copy mutation breaks this shape (the emitted .ssa loses the post-alloc load or the pre-alloc push) and fails HERE, because the runtime churn rows CANNOT see the hazard (the moving collector copies bodies without destroying them, so a stale read is output-silent).  STAGE 7 O3-fix MOVED THE PIN'S TARGET: applyGo and applyTailGo no longer spell this dance (three copies were three chances to drift), so the ONE site is Rt.applyPartGo — and the second half of the row is what keeps it one: both loops' partial arms must CALL it, so a re-inlined copy in either loop is RED here."
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "q_Rt_x2eapplyPartGo" mod of
                     Just f ->
@@ -2174,8 +2174,24 @@ checks rt runtimeMidText =
             programKeys =
                 List.map .key (rtProgram rt True True True ++ rtProgramGc rt True True True)
 
+            -- GC NURSERY carve-out, and why it is not a hole: Rt.gcAlloc's
+            -- and Rt.collect's calls into the scavenge family exist ONLY in
+            -- a QBE_MIDGC_YOUNG=1 build (the call sites are inside the
+            -- spliced region), so they can NEVER be a static rtDeps row —
+            -- gcSeeds closes over those rows in EVERY MIDGC build and would
+            -- drag the absent defuns into a plain one ("unknown global").
+            -- The edge's declaration lives in Rt.youngGcSeeds instead (the
+            -- young build's OWN seed closure), so THAT membership is what the
+            -- row accepts here — and youngGcSeeds' closure covers the whole
+            -- family, which the next conjunct pins.
             ok key =
-                List.all (\sym -> List.member sym programKeys && List.member sym (Maybe.withDefault [] (Dict.get key Rt.rtDeps)))
+                List.all
+                    (\sym ->
+                        List.member sym programKeys
+                            && (List.member sym (Maybe.withDefault [] (Dict.get key Rt.rtDeps))
+                                    || List.member sym Rt.youngGcSeeds
+                               )
+                    )
                     (gcSyms key)
          in
          case gcKeys of
@@ -2222,7 +2238,7 @@ checks rt runtimeMidText =
     , check "GC ARC unit 4 GEOMETRY: the layout is sized for the CEILING — markEnd, numClasses and regionSize are all derived from capBytes (never from the initial heap), so a grown heap cannot outrun the mark stack or the free-list table.  A heap-sized derivation would put the margin at ZERO and this row is what makes that substitution RED"
         (String.contains "word capWords = capBytes / 8;" runtimeMidText
             && String.contains "word markEnd = 64 + capWords / 8 + 64;" runtimeMidText
-            && String.contains "word regionSize = markEnd * 8 + numClasses * 8 + 16 + bmBytes + capBytes;" runtimeMidText
+            && String.contains "word regionSize = markEnd * 8 + rsWords * 8 + numClasses * 8 + 16 + bmBytes + capBytes + youngFit;" runtimeMidText
             && String.contains "wstore(base, 24, capEnd);" runtimeMidText
             && String.contains "word bmBytes = capBytes / 64;" runtimeMidText
         )
@@ -2241,7 +2257,7 @@ checks rt runtimeMidText =
         (Rt.closureSeeds == [ "Rt.closure", "Rt.closureFill" ]
         )
     , check "rt lean ABI: a frame-free callee has pointer params, :val return and NO frame enter/leave"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.+" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.+" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2e_x2b") mod.funcs of
                     f :: _ ->
@@ -2258,7 +2274,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "rt lean ABI: a framing callee (cons) enters/leaves through the Mid frame pair and keeps the lean signature"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.cons" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.cons" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2econs") mod.funcs of
                     f :: _ ->
@@ -2274,7 +2290,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "rt lean ABI: the Zig rt_bounce seat appears NOWHERE in any emit (B4 deleted it — the Mid q_Rt_x2ebounce is the only bounce)"
-        (case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.+" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.+" of
             Ok mod ->
                 not (List.any (callsSym "rt_bounce") mod.funcs)
 
@@ -2303,7 +2319,7 @@ checks rt runtimeMidText =
     , check "rt self-tail loops: cStrLenGo/cStrCopyGo/cStrFill/memGo + the glob + ep* + RUN loops emit jmp @body and NO native call to their own symbol (the O(1)-stack property)"
         (List.all
             (\( key, qname ) ->
-                case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) key of
+                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) key of
                     Ok mod ->
                         case funcByName qname mod of
                             Just f ->
@@ -2388,8 +2404,8 @@ checks rt runtimeMidText =
         )
 
     , check "rt = symbol fast path: emitted as a pointer short-circuit that KEEPS the symEq fallback, and the hatch removes it"
-        (case ( QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.="
-              , QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities (rtProgram rt True True False)) (rtProgram rt True True False) "Rt.="
+        (case ( QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.="
+              , QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True False)) (rtProgram rt True True False) "Rt.="
               ) of
             ( Ok onMod, Ok offMod ) ->
                 case ( funcByName "q_Rt_x2e_x3d" onMod, funcByName "q_Rt_x2e_x3d" offMod ) of
@@ -3631,12 +3647,91 @@ checks rt runtimeMidText =
                 declsOf runtimeMidText
 
             names =
-                [ "magic", "classTab", "heapStart", "cursor", "heapEnd", "markTop", "markEnd", "noreuse", "kind", "count", "heapBytes", "allocated", "numClass", "ts0s", "ts0n", "ts1s", "ts1n", "ts2s", "ts2n", "collects", "marked", "sweptBytes", "markUs", "sweepUs", "capEnd", "bmPtr", "freedN", "verify" ]
+                [ "magic", "classTab", "heapStart", "cursor", "heapEnd", "markTop", "markEnd", "noreuse", "kind", "count", "heapBytes", "allocated", "numClass", "ts0s", "ts0n", "ts1s", "ts1n", "ts2s", "ts2n", "collects", "marked", "sweptBytes", "markUs", "sweepUs", "capEnd", "bmPtr", "freedN", "verify", "young", "youngStart", "youngEnd", "youngCursor", "rsBase", "rsTop", "rsEnd", "scavenges", "scavBytes", "scavBodies" ]
          in
-         List.map (\n -> Check.fieldOffset d "Region" n) names == List.map Just (byteSlots 28)
+         List.map (\n -> Check.fieldOffset d "Region" n) names == List.map Just (byteSlots 38)
         )
-    , check "U5 LAYOUT PIN: sizeof(Region) == 28 words in runtime.mid's own declaration (slots 0..12 + GC-ARC F1's stats instrument at 13..23 + GC ARC unit 4's growth ceiling at 24 + GC ARC unit 2's block map at 25..27 — the mark stack starts at word 64, so it is NOT a field, and the digit scratch the printer writes into is at BYTE 288, outside the struct)"
-        (Check.sizeofStruct (declsOf runtimeMidText) "Region" == Just 28)
+    , check "U5 LAYOUT PIN: sizeof(Region) == 38 words in runtime.mid's own declaration (slots 0..12 + GC-ARC F1's stats instrument at 13..23 + GC ARC unit 4's growth ceiling at 24 + GC ARC unit 2's block map at 25..27 + GC NURSERY's young/remembered-set family at 28..37 — the mark stack starts at word 64, so it is NOT a field, and the digit scratch the printer writes into is at BYTE 288, outside the struct)"
+        (Check.sizeofStruct (declsOf runtimeMidText) "Region" == Just 38)
+    -- ==================== GC NURSERY: the hatch's own pins ====================
+    -- The young defuns live ONLY inside the QBE_MIDGC_YOUNG-ONLY splice region
+    -- (run.js drops them unless the build flag is set), so a young key leaking
+    -- into an ALWAYS-PRESENT rtDeps row would drag an absent defun into a
+    -- plain MIDGC build's seed closure and Lower would die "unknown global" —
+    -- the loud end of the rule; the pin makes the rule itself a test.
+    , check "NURSERY PIN: the QBE_MIDGC_YOUNG-ONLY region of runtime.mid holds EXACTLY the ten scavenge-family defuns (balanced markers, every young defun inside, no young defun outside)"
+        (let
+            youngKeys =
+                [ "Rt.gcScavenge", "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavPtr", "Rt.gcScavCopyWords", "Rt.gcScavRemembered", "Rt.gcScavOne", "Rt.gcScavDrain", "Rt.gcPromoteAlloc" ]
+
+            countInside ls =
+                List.foldl
+                    (\line ( inside, defuns ) ->
+                        if String.contains "// >>> QBE_MIDGC_YOUNG-ONLY" line then
+                            ( True, defuns )
+
+                        else if String.contains "// <<< QBE_MIDGC_YOUNG-ONLY" line then
+                            ( False, defuns )
+
+                        else if inside && String.startsWith "defun " line then
+                            ( inside, defuns + 1 )
+
+                        else
+                            ( inside, defuns )
+                    )
+                    ( False, 0 )
+                    lines
+
+            lines =
+                String.split "\n" runtimeMidText
+
+            ( _, insideN ) =
+                countInside lines
+
+            -- the text with the young region's BODY removed: a young defun
+            -- leaking OUTSIDE the region fails the name scan below
+            outside =
+                List.foldl
+                    (\line ( inside, acc ) ->
+                        if String.contains "// >>> QBE_MIDGC_YOUNG-ONLY" line then
+                            ( True, acc )
+
+                        else if String.contains "// <<< QBE_MIDGC_YOUNG-ONLY" line then
+                            ( False, acc )
+
+                        else if inside then
+                            ( inside, acc )
+
+                        else
+                            ( inside, acc ++ [ line ] )
+                    )
+                    ( False, [] )
+                    lines
+                    |> Tuple.second
+         in
+         (insideN == 10)
+            && List.all
+                (\k -> not (String.contains ("defun " ++ k) (String.join "\n" outside)))
+                youngKeys
+            && List.all
+                (\k -> String.contains ("defun " ++ k) runtimeMidText)
+                youngKeys
+        )
+    , check "NURSERY PIN (the seeding discipline): no ALWAYS-PRESENT rtDeps row names a young-only key — a plain MIDGC build closes gcSeeds over those rows, and an absent key is Lower's loud 'unknown global'"
+        (let
+            youngKeys =
+                [ "Rt.gcScavenge", "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavPtr", "Rt.gcScavCopyWords", "Rt.gcScavRemembered", "Rt.gcScavOne", "Rt.gcScavDrain", "Rt.gcPromoteAlloc" ]
+         in
+         Dict.toList Rt.rtDeps
+            |> List.all
+                (\( from, deps ) ->
+                    if List.member from youngKeys then
+                        True
+
+                    else
+                        List.all (\d -> not (List.member d youngKeys)) deps
+                )
+        )
     -- ==================== THE RETURN-FLIP (was: the RETURN LANDMINE) ====================
     -- `return` inside a STATEMENT-position `if` now EXITS.  Until the
     -- return-flip unit it did not: the lowerer's `thenDiv && elseDiv` arm
@@ -5486,7 +5581,7 @@ checks rt runtimeMidText =
             , "module B\nexport B.g : val -> val\ndefun B.g(a: val) -> val {\n  return mknum(payload(a, 0) + 5);\n}"
             ] of
             Ok [ mA, mB ] ->
-                case QbeLower.lower rt False False False True True True True False QbeTypes.empty (Dict.fromList [ ( "A.f", 1 ), ( "B.g", 1 ) ]) (mA.defuns ++ mB.defuns) "A.f" of
+                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (Dict.fromList [ ( "A.f", 1 ), ( "B.g", 1 ) ]) (mA.defuns ++ mB.defuns) "A.f" of
                     Ok mod ->
                         let
                             ssa =
@@ -5513,7 +5608,7 @@ checks rt runtimeMidText =
             Ok parsed ->
                 case Rt.checkLowerUserModule (Dict.fromList [ ( "B.g", { ty = Ast.valArity 1, effects = [], taint = False } ) ]) parsed of
                     Ok mA ->
-                        case QbeLower.lower rt False False False True True True True False QbeTypes.empty (Dict.fromList [ ( "A.f", 1 ) ]) mA.defuns "A.f" of
+                        case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (Dict.fromList [ ( "A.f", 1 ) ]) mA.defuns "A.f" of
                             Err msg ->
                                 String.contains "rawCall to B.g" msg && String.contains "not a defun of this program" msg
 
@@ -5541,7 +5636,7 @@ checks rt runtimeMidText =
                     prog =
                         rtProgram rt True True True ++ mA.defuns
                 in
-                case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities prog) prog "A.f" of
+                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities prog) prog "A.f" of
                     Ok mod ->
                         let
                             ssa =
@@ -5586,7 +5681,7 @@ checks rt runtimeMidText =
                     prog =
                         rtProgram rt True True True ++ mA.defuns
                 in
-                case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities prog) prog "A.f" of
+                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities prog) prog "A.f" of
                     Ok mod ->
                         List.any (\f -> f.name == "q_A_x2ehelper") mod.funcs
 
@@ -5606,7 +5701,7 @@ checks rt runtimeMidText =
                     prog =
                         rtProgram rt True True True ++ mA.defuns
                 in
-                case QbeLower.lower rt False False False True True True True False QbeTypes.empty (rtArities prog) prog "A.f" of
+                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities prog) prog "A.f" of
                     Ok mod ->
                         List.any (\f -> f.name == "q_A_x2ehelper") mod.funcs
                             && List.any (\f -> f.name == "q_A_x2eid") mod.funcs
@@ -6385,7 +6480,7 @@ checks rt runtimeMidText =
                 False
         )
     , check
-        "T17/T18/T20/T21/T22/T24 pipeline (the wave-9 + collector + never-scheduled + T24 key-set row, post-T24's one-hundred-sixty-two, + GC-ARC F1's two stats defuns = one-hundred-sixty-four, + stage 7 O3-fix's Rt.applyPartGo = one-hundred-sixty-five, + GC ARC unit 4's Rt.gcEnvNum = one-hundred-sixty-six, + GC ARC unit 1b's Rt.gcGrow = one-hundred-sixty-seven, + GC ARC unit 2's THREE verifier defuns Rt.gcVD/Rt.gcVerify/Rt.gcVerifyList = one-hundred-seventy, + prof-fixes unit 1's two STACK-DEPTH loop helpers Rt.countGo/Rt.bytesOfGo = one-hundred-seventy-two): surf is Ok with EXACTLY the one-hundred-seventy migrated keys under the default flags — T24 added the LAST THREE wall-class holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd), so the DSL-bodied set is now EMPTY — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) (a silently-lost or silently-added surface defun shows here)"
+        "T17/T18/T20/T21/T22/T24 pipeline (the wave-9 + collector + never-scheduled + T24 key-set row, post-T24's one-hundred-sixty-two, + GC-ARC F1's two stats defuns = one-hundred-sixty-four, + stage 7 O3-fix's Rt.applyPartGo = one-hundred-sixty-five, + GC ARC unit 4's Rt.gcEnvNum = one-hundred-sixty-six, + GC ARC unit 1b's Rt.gcGrow = one-hundred-sixty-seven, + GC ARC unit 2's THREE verifier defuns Rt.gcVD/Rt.gcVerify/Rt.gcVerifyList = one-hundred-seventy, + prof-fixes unit 1's two STACK-DEPTH loop helpers Rt.countGo/Rt.bytesOfGo = one-hundred-seventy-two): surf is Ok with EXACTLY the one-hundred-seventy migrated keys under the default flags — T24 added the LAST THREE wall-class holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd), so the DSL-bodied set is now EMPTY — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) + GC NURSERY's TEN scavenge-family defuns = one-hundred-eighty-two (a silently-lost or silently-added surface defun shows here)"
         (case rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
             Ok s ->
                 List.sort (Dict.keys s)
@@ -6408,8 +6503,10 @@ checks rt runtimeMidText =
                        , "Rt.epStr", "Rt.epSymIs", "Rt.epSymOf", "Rt.exec-plan", "Rt.exec-run", "Rt.execGo"
                        , "Rt.f/", "Rt.fillGo", "Rt.floatCopy", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock"
                        , "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.gcClearClasses", "Rt.gcDrain", "Rt.gcEnvNum", "Rt.gcGrow", "Rt.gcInit", "Rt.gcMarkPtr"
-                       , "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcNum", "Rt.gcNumOut", "Rt.gcScanValueArray", "Rt.gcSweep"
-                       , "Rt.gcVD", "Rt.gcVerify", "Rt.gcVerifyList"
+                       , "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcNum", "Rt.gcNumOut", "Rt.gcPromoteAlloc"
+                       , "Rt.gcScanValueArray", "Rt.gcScavCopyWords", "Rt.gcScavDrain", "Rt.gcScavOne", "Rt.gcScavPtr"
+                       , "Rt.gcScavRemembered", "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavenge"
+                       , "Rt.gcSweep", "Rt.gcVD", "Rt.gcVerify", "Rt.gcVerifyList"
                        , "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot"
                        , "Rt.globIsDotDot", "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess"
                        , "Rt.halt", "Rt.hostAddPoll", "Rt.hostArity", "Rt.hostCStrOf", "Rt.hostCall", "Rt.hostCleanupAll"
@@ -11016,6 +11113,7 @@ emitUserSsa rt src =
                                 True
                                 True
                                 False
+                                False
                                 QbeTypes.empty
                                 (rtArities m.defuns)
                                 m.defuns
@@ -11084,6 +11182,7 @@ b6SsaAt rt entryKey src =
                                 True
                                 True
                                 True
+                                False
                                 False
                                 QbeTypes.empty
                                 (rtArities m.defuns)

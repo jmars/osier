@@ -138,6 +138,26 @@ const QBE_MIDGC = process.env.QBE_MIDGC === '1';
 // the first Mid allocation (the region is mapped lazily).
 const MIDGC_BEGIN = '// >>> QBE_MIDGC-ONLY';
 const MIDGC_END = '// <<< QBE_MIDGC-ONLY';
+// QBE_MIDGC_YOUNG (GC NURSERY unit) — THE NURSERY HATCH, default OFF.  A
+// BUILD-time switch with a RUN-time knob, exactly the MIDHOST/MIDGC shape:
+//   * BUILD: `QBE_MIDGC_YOUNG=1` keeps the `QBE_MIDGC_YOUNG-ONLY` regions of
+//     runtime.mid (the scavenge family + the young dispatch in Rt.gcAlloc and
+//     Rt.collect) and makes Lower's RawVecStore route through the barrier seat
+//     rt_vec_store_young.  Unset (the default), the regions are spliced OUT
+//     and the emission is the pre-nursery tree's — byte-identical, corpus
+//     safe.  Requires QBE_MIDGC=1 (a nursery without the Mid collector is
+//     meaningless; the guard below refuses it, exit 2).
+//   * RUN: the young slots gcInit writes are inert until the ENVIRONMENT asks
+//     — `QBE_MIDGC_YOUNG=1 ./prog` activates the nursery, unset or `=0` runs
+//     the same binary as a plain mark-sweep.  That is the A/B arm the movement
+//     oracle needs: ONE binary, both collectors.
+const QBE_MIDGC_YOUNG = process.env.QBE_MIDGC_YOUNG === '1';
+if (QBE_MIDGC_YOUNG && !QBE_MIDGC) {
+  console.error('run.js: QBE_MIDGC_YOUNG=1 requires QBE_MIDGC=1 (the nursery is the Mid collector\'s young half; without it the barrier calls a seat that does not exist and the young defuns have no allocator)');
+  process.exit(2);
+}
+const MIDGC_YOUNG_BEGIN = '// >>> QBE_MIDGC_YOUNG-ONLY';
+const MIDGC_YOUNG_END = '// <<< QBE_MIDGC_YOUNG-ONLY';
 
 // TWO kinds of region, dropped (or kept) by kind: (1) Rt.main's host arm and
 // (2) the host's own defuns, both MIDHOST; (3) the run-time override refusal,
@@ -182,9 +202,15 @@ function spliceMidRegion(text, begin, end, label, keep) {
 // is spliced FIRST — its markers are then gone before the host splice walks the
 // text, and the host splice never sees a foreign marker.  (Dropping the host
 // region drops the MIDGC lines with it, which is right: with no Mid host the
-// Zig host is the only host, so there is nothing to refuse.)
+// Zig host is the only host, so there is nothing to refuse.)  The YOUNG region
+// is spliced FIRSTEST for the same reason: its markers sit inside gc defun
+// bodies (Rt.gcAlloc, Rt.collect) and around the scavenge family, all text the
+// other two splices never look inside — but splicing it first means no later
+// splice can ever see a young marker either way.
 const RUNTIME_MID = spliceMidRegion(
-  spliceMidRegion(RUNTIME_MID_RAW, MIDGC_BEGIN, MIDGC_END, 'QBE_MIDGC', QBE_MIDGC),
+  spliceMidRegion(
+    spliceMidRegion(RUNTIME_MID_RAW, MIDGC_YOUNG_BEGIN, MIDGC_YOUNG_END, 'QBE_MIDGC_YOUNG', QBE_MIDGC_YOUNG),
+    MIDGC_BEGIN, MIDGC_END, 'QBE_MIDGC', QBE_MIDGC),
   MIDHOST_BEGIN, MIDHOST_END, 'QBE_MIDHOST', QBE_MIDHOST);
 
 // M3: extension classification — a source whose path ends `.mid` is a mid-c
@@ -548,6 +574,7 @@ function compileGroups(groups) {
       qbeEqPtrFast: QBE_EQPTRFAST,
       qbeTypeSpec: QBE_TYPESPEC,
       qbeMidGc: QBE_MIDGC,
+      qbeMidGcYoung: QBE_MIDGC_YOUNG,
     },
   });
 
