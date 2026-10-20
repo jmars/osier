@@ -4875,9 +4875,16 @@ defun Rt.frame-leave() -> word {
   rawcall rt_root_pop_to(hdr->wm);
   word n = hdr->live;
   word pooled = if (wload(glob, 2) != 0) {
+    // QBE_NO_REUSE: frame-leave never pools here, and this arm is the only
+    // writer of the frame pool, so under the knob the pool stays empty and
+    // every frame is malloc'd — free it, closing the per-enter leak.
+    rawcall free(hdr);
     return 0;
   } else {
     if (n >= 8192) {
+      // Giants are never pooled (frameBlock's g is 0), so they are always
+      // malloc'd — free them, closing the documented no-free path.
+      rawcall free(hdr);
       return 0;
     } else {
       hdr->freeNext = wload(glob, 16 + n);
