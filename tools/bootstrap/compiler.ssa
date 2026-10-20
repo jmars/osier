@@ -939571,7 +939571,7 @@ function :val $q_Rt_x2e_x3d(l %a0, l %a1, l %a2, w %an) {
 
 function :val $q_Rt_x2edeepEq(l %a0, l %a1, l %a2, w %an) {
 @start
-	%f =l alloc8 1720
+	%f =l alloc8 1760
 	%s0 =l add %f, 0
 	%s2 =l add %f, 80
 	%s3 =l add %f, 120
@@ -939614,6 +939614,7 @@ function :val $q_Rt_x2edeepEq(l %a0, l %a1, l %a2, w %an) {
 	%s40 =l add %f, 1600
 	%s41 =l add %f, 1640
 	%s42 =l add %f, 1680
+	%s43 =l add %f, 1720
 	blit %a0, %s2, 40
 	blit %a1, %s3, 40
 	# (fallthrough)
@@ -939935,186 +939936,192 @@ function :val $q_Rt_x2edeepEq(l %a0, l %a1, l %a2, w %an) {
 	%t184 =l loadl %t183
 	%t185 =l mul 40, 0
 	%t186 =l add %t184, %t185
-	blit %t186, %s27, 40
+	blit %t186, %s28, 40
 	%t187 =l add %s3, 8
 	%t188 =l loadl %t187
 	%t189 =l mul 40, 0
 	%t190 =l add %t188, %t189
-	blit %t190, %s28, 40
-	%t191 =:val call $q_Rt_x2edeepEq(l %s27, l %s28, l %s28, w 2)
-	blit %t191, %s26, 40
-	%t192 =w loadw %s26
-	%t193 =w ceqw %t192, 3
-	%t195 =l add %s26, 8
-	%t194 =w loadw %t195
-	%t196 =w ceqw %t194, 0
-	%t197 =w and %t193, %t196
-	jnz %t197, @andf_35, @andt_36
-@andt_36
-	%t198 =l add %s2, 8
-	%t199 =l loadl %t198
-	%t200 =l mul 40, 1
-	%t201 =l add %t199, %t200
-	blit %t201, %s29, 40
-	%t202 =l add %s3, 8
-	%t203 =l loadl %t202
-	%t204 =l mul 40, 1
-	%t205 =l add %t203, %t204
-	blit %t205, %s30, 40
-	%t206 =:val call $q_Rt_x2edeepEq(l %s29, l %s30, l %s30, w 2)
-	blit %t206, %s0, 40
-	jmp @ande_37
-@andf_35
+	blit %t190, %s29, 40
+	%t191 =:val call $q_Rt_x2edeepEq(l %s28, l %s29, l %s29, w 2)
+	blit %t191, %s27, 40
+	%t192 =l add %s27, 8
+	%t193 =w loadw %t192
+	%t194 =l extsw %t193
+	%t195 =w ceql %t194, 0
+	%t196 =l extsw %t195
+	storew 3, %s26
+	%t197 =l add %s26, 8
+	storel %t196, %t197
+	%t198 =w loadw %s26
+	%t199 =w ceqw %t198, 3
+	%t201 =l add %s26, 8
+	%t200 =w loadw %t201
+	%t202 =w ceqw %t200, 0
+	%t203 =w and %t199, %t202
+	jnz %t203, @else_36, @then_35
+@then_35
 	storew 3, %s0
-	%t207 =l add %s0, 8
-	storew 0, %t207
-	# (fallthrough)
-@ande_37
+	%t204 =l add %s0, 8
+	storel 0, %t204
 	jmp @ret
+@else_36
+	%t205 =l add %s2, 8
+	%t206 =l loadl %t205
+	%t207 =l mul 40, 1
+	%t208 =l add %t206, %t207
+	blit %t208, %s30, 40
+	%t209 =l add %s3, 8
+	%t210 =l loadl %t209
+	%t211 =l mul 40, 1
+	%t212 =l add %t210, %t211
+	blit %t212, %s31, 40
+	blit %s30, %s2, 40
+	blit %s31, %s3, 40
+	jmp @body
 @else_34
-	%t208 =w loadw %s2
-	%t209 =w ceqw %t208, 14
-	%t210 =l extsw %t209
-	storew 3, %s32
-	%t211 =l add %s32, 8
-	storel %t210, %t211
-	%t212 =w loadw %s32
-	%t213 =w ceqw %t212, 3
-	%t215 =l add %s32, 8
-	%t214 =w loadw %t215
-	%t216 =w ceqw %t214, 0
-	%t217 =w and %t213, %t216
-	jnz %t217, @andf_38, @andt_39
-@andt_39
-	%t218 =w loadw %s3
-	%t219 =w ceqw %t218, 14
-	%t220 =l extsw %t219
-	storew 3, %s31
-	%t221 =l add %s31, 8
-	storel %t220, %t221
-	jmp @ande_40
-@andf_38
-	storew 3, %s31
-	%t222 =l add %s31, 8
-	storew 0, %t222
-	# (fallthrough)
-@ande_40
-	%t223 =w loadw %s31
-	%t224 =w ceqw %t223, 3
-	%t226 =l add %s31, 8
-	%t225 =w loadw %t226
-	%t227 =w ceqw %t225, 0
-	%t228 =w and %t224, %t227
-	jnz %t228, @else_42, @then_41
-@then_41
-	%t229 =l add %s2, 16
-	%t230 =w loadw %t229
-	%t231 =l extsw %t230
-	%t232 =l add %s3, 16
-	%t233 =w loadw %t232
-	%t234 =l extsw %t233
-	%t235 =w ceql %t231, %t234
-	%t236 =l extsw %t235
+	%t213 =w loadw %s2
+	%t214 =w ceqw %t213, 14
+	%t215 =l extsw %t214
 	storew 3, %s33
-	%t237 =l add %s33, 8
-	storel %t236, %t237
-	%t238 =w loadw %s33
-	%t239 =w ceqw %t238, 3
-	%t241 =l add %s33, 8
-	%t240 =w loadw %t241
-	%t242 =w ceqw %t240, 0
-	%t243 =w and %t239, %t242
-	jnz %t243, @andf_43, @andt_44
-@andt_44
-	blit %s2, %s34, 40
-	blit %s3, %s35, 40
-	storew 0, %s36
-	%t244 =l add %s36, 8
-	storel 0, %t244
-	%t245 =:val call $q_Rt_x2evecEq(l %s34, l %s35, l %s36, w 3)
-	blit %t245, %s0, 40
-	jmp @ande_45
-@andf_43
+	%t216 =l add %s33, 8
+	storel %t215, %t216
+	%t217 =w loadw %s33
+	%t218 =w ceqw %t217, 3
+	%t220 =l add %s33, 8
+	%t219 =w loadw %t220
+	%t221 =w ceqw %t219, 0
+	%t222 =w and %t218, %t221
+	jnz %t222, @andf_37, @andt_38
+@andt_38
+	%t223 =w loadw %s3
+	%t224 =w ceqw %t223, 14
+	%t225 =l extsw %t224
+	storew 3, %s32
+	%t226 =l add %s32, 8
+	storel %t225, %t226
+	jmp @ande_39
+@andf_37
+	storew 3, %s32
+	%t227 =l add %s32, 8
+	storew 0, %t227
+	# (fallthrough)
+@ande_39
+	%t228 =w loadw %s32
+	%t229 =w ceqw %t228, 3
+	%t231 =l add %s32, 8
+	%t230 =w loadw %t231
+	%t232 =w ceqw %t230, 0
+	%t233 =w and %t229, %t232
+	jnz %t233, @else_41, @then_40
+@then_40
+	%t234 =l add %s2, 16
+	%t235 =w loadw %t234
+	%t236 =l extsw %t235
+	%t237 =l add %s3, 16
+	%t238 =w loadw %t237
+	%t239 =l extsw %t238
+	%t240 =w ceql %t236, %t239
+	%t241 =l extsw %t240
+	storew 3, %s34
+	%t242 =l add %s34, 8
+	storel %t241, %t242
+	%t243 =w loadw %s34
+	%t244 =w ceqw %t243, 3
+	%t246 =l add %s34, 8
+	%t245 =w loadw %t246
+	%t247 =w ceqw %t245, 0
+	%t248 =w and %t244, %t247
+	jnz %t248, @andf_42, @andt_43
+@andt_43
+	blit %s2, %s35, 40
+	blit %s3, %s36, 40
+	storew 0, %s37
+	%t249 =l add %s37, 8
+	storel 0, %t249
+	%t250 =:val call $q_Rt_x2evecEq(l %s35, l %s36, l %s37, w 3)
+	blit %t250, %s0, 40
+	jmp @ande_44
+@andf_42
 	storew 3, %s0
-	%t246 =l add %s0, 8
-	storew 0, %t246
+	%t251 =l add %s0, 8
+	storew 0, %t251
 	# (fallthrough)
-@ande_45
+@ande_44
 	jmp @ret
-@else_42
-	%t247 =w loadw %s2
-	%t248 =w ceqw %t247, 10
-	%t249 =l extsw %t248
-	storew 3, %s38
-	%t250 =l add %s38, 8
-	storel %t249, %t250
-	%t251 =w loadw %s38
-	%t252 =w ceqw %t251, 3
-	%t254 =l add %s38, 8
-	%t253 =w loadw %t254
-	%t255 =w ceqw %t253, 0
-	%t256 =w and %t252, %t255
-	jnz %t256, @andf_46, @andt_47
-@andt_47
-	%t257 =w loadw %s3
-	%t258 =w ceqw %t257, 10
-	%t259 =l extsw %t258
-	storew 3, %s37
-	%t260 =l add %s37, 8
-	storel %t259, %t260
-	jmp @ande_48
-@andf_46
-	storew 3, %s37
-	%t261 =l add %s37, 8
-	storew 0, %t261
-	# (fallthrough)
-@ande_48
-	%t262 =w loadw %s37
-	%t263 =w ceqw %t262, 3
-	%t265 =l add %s37, 8
-	%t264 =w loadw %t265
-	%t266 =w ceqw %t264, 0
-	%t267 =w and %t263, %t266
-	jnz %t267, @else_50, @then_49
-@then_49
-	%t268 =l add %s2, 16
-	%t269 =w loadw %t268
-	%t270 =l extsw %t269
-	%t271 =l add %s3, 16
-	%t272 =w loadw %t271
-	%t273 =l extsw %t272
-	%t274 =w ceql %t270, %t273
-	%t275 =l extsw %t274
+@else_41
+	%t252 =w loadw %s2
+	%t253 =w ceqw %t252, 10
+	%t254 =l extsw %t253
 	storew 3, %s39
-	%t276 =l add %s39, 8
-	storel %t275, %t276
-	%t277 =w loadw %s39
-	%t278 =w ceqw %t277, 3
-	%t280 =l add %s39, 8
-	%t279 =w loadw %t280
-	%t281 =w ceqw %t279, 0
-	%t282 =w and %t278, %t281
-	jnz %t282, @andf_51, @andt_52
-@andt_52
-	blit %s2, %s40, 40
-	blit %s3, %s41, 40
-	storew 0, %s42
-	%t283 =l add %s42, 8
-	storel 0, %t283
-	%t284 =:val call $q_Rt_x2evecEq(l %s40, l %s41, l %s42, w 3)
-	blit %t284, %s0, 40
-	jmp @ande_53
-@andf_51
-	storew 3, %s0
-	%t285 =l add %s0, 8
-	storew 0, %t285
+	%t255 =l add %s39, 8
+	storel %t254, %t255
+	%t256 =w loadw %s39
+	%t257 =w ceqw %t256, 3
+	%t259 =l add %s39, 8
+	%t258 =w loadw %t259
+	%t260 =w ceqw %t258, 0
+	%t261 =w and %t257, %t260
+	jnz %t261, @andf_45, @andt_46
+@andt_46
+	%t262 =w loadw %s3
+	%t263 =w ceqw %t262, 10
+	%t264 =l extsw %t263
+	storew 3, %s38
+	%t265 =l add %s38, 8
+	storel %t264, %t265
+	jmp @ande_47
+@andf_45
+	storew 3, %s38
+	%t266 =l add %s38, 8
+	storew 0, %t266
 	# (fallthrough)
-@ande_53
-	jmp @ret
-@else_50
+@ande_47
+	%t267 =w loadw %s38
+	%t268 =w ceqw %t267, 3
+	%t270 =l add %s38, 8
+	%t269 =w loadw %t270
+	%t271 =w ceqw %t269, 0
+	%t272 =w and %t268, %t271
+	jnz %t272, @else_49, @then_48
+@then_48
+	%t273 =l add %s2, 16
+	%t274 =w loadw %t273
+	%t275 =l extsw %t274
+	%t276 =l add %s3, 16
+	%t277 =w loadw %t276
+	%t278 =l extsw %t277
+	%t279 =w ceql %t275, %t278
+	%t280 =l extsw %t279
+	storew 3, %s40
+	%t281 =l add %s40, 8
+	storel %t280, %t281
+	%t282 =w loadw %s40
+	%t283 =w ceqw %t282, 3
+	%t285 =l add %s40, 8
+	%t284 =w loadw %t285
+	%t286 =w ceqw %t284, 0
+	%t287 =w and %t283, %t286
+	jnz %t287, @andf_50, @andt_51
+@andt_51
+	blit %s2, %s41, 40
+	blit %s3, %s42, 40
+	storew 0, %s43
+	%t288 =l add %s43, 8
+	storel 0, %t288
+	%t289 =:val call $q_Rt_x2evecEq(l %s41, l %s42, l %s43, w 3)
+	blit %t289, %s0, 40
+	jmp @ande_52
+@andf_50
 	storew 3, %s0
-	%t286 =l add %s0, 8
-	storel 0, %t286
+	%t290 =l add %s0, 8
+	storew 0, %t290
+	# (fallthrough)
+@ande_52
+	jmp @ret
+@else_49
+	storew 3, %s0
+	%t291 =l add %s0, 8
+	storel 0, %t291
 	# (fallthrough)
 @ret
 	ret %s0
@@ -940178,7 +940185,7 @@ function :val $q_Rt_x2ebytesEqGo(l %a0, l %a1, l %a2, w %an) {
 	%t26 =l add %t25, %t23
 	%t27 =w loadub %t26
 	%t28 =l extuw %t27
-	%t29 =w ceql %t21, %t28
+	%t29 =w cnel %t21, %t28
 	%t30 =l extsw %t29
 	storew 3, %s6
 	%t31 =l add %s6, 8
@@ -940189,26 +940196,25 @@ function :val $q_Rt_x2ebytesEqGo(l %a0, l %a1, l %a2, w %an) {
 	%t34 =w loadw %t35
 	%t36 =w ceqw %t34, 0
 	%t37 =w and %t33, %t36
-	jnz %t37, @andf_2, @andt_3
-@andt_3
+	jnz %t37, @else_3, @then_2
+@then_2
+	storew 3, %s0
+	%t38 =l add %s0, 8
+	storel 0, %t38
+	jmp @ret
+@else_3
 	blit %s2, %s9, 40
 	blit %s3, %s10, 40
-	%t38 =l add %s4, 8
-	%t39 =l loadl %t38
-	%t40 =l add %t39, 1
+	%t39 =l add %s4, 8
+	%t40 =l loadl %t39
+	%t41 =l add %t40, 1
 	storew 0, %s11
-	%t41 =l add %s11, 8
-	storel %t40, %t41
-	%t42 =:val call $q_Rt_x2ebytesEqGo(l %s9, l %s10, l %s11, w 3)
-	blit %t42, %s0, 40
-	jmp @ande_4
-@andf_2
-	storew 3, %s0
-	%t43 =l add %s0, 8
-	storew 0, %t43
-	# (fallthrough)
-@ande_4
-	# (fallthrough)
+	%t42 =l add %s11, 8
+	storel %t41, %t42
+	blit %s9, %s2, 40
+	blit %s10, %s3, 40
+	blit %s11, %s4, 40
+	jmp @body
 @ret
 	ret %s0
 }
@@ -940286,7 +940292,7 @@ function :val $q_Rt_x2esymEq(l %a0, l %a1, l %a2, w %an) {
 	%t37 =l add %t36, %t34
 	%t38 =w loadub %t37
 	%t39 =l extuw %t38
-	%t40 =w ceql %t32, %t39
+	%t40 =w cnel %t32, %t39
 	%t41 =l extsw %t40
 	storew 3, %s8
 	%t42 =l add %s8, 8
@@ -940297,33 +940303,32 @@ function :val $q_Rt_x2esymEq(l %a0, l %a1, l %a2, w %an) {
 	%t45 =w loadw %t46
 	%t47 =w ceqw %t45, 0
 	%t48 =w and %t44, %t47
-	jnz %t48, @andf_2, @andt_3
-@andt_3
+	jnz %t48, @else_3, @then_2
+@then_2
+	storew 3, %s0
+	%t49 =l add %s0, 8
+	storel 0, %t49
+	jmp @ret
+@else_3
 	blit %s2, %s11, 40
 	blit %s3, %s12, 40
-	%t49 =l add %s4, 8
-	%t50 =l loadl %t49
-	%t51 =l add %t50, 1
+	%t50 =l add %s4, 8
+	%t51 =l loadl %t50
+	%t52 =l add %t51, 1
 	storew 0, %s13
-	%t52 =l add %s13, 8
-	storel %t51, %t52
-	%t53 =:val call $q_Rt_x2esymEq(l %s11, l %s12, l %s13, w 3)
-	blit %t53, %s0, 40
-	jmp @ande_4
-@andf_2
-	storew 3, %s0
-	%t54 =l add %s0, 8
-	storew 0, %t54
-	# (fallthrough)
-@ande_4
-	# (fallthrough)
+	%t53 =l add %s13, 8
+	storel %t52, %t53
+	blit %s11, %s2, 40
+	blit %s12, %s3, 40
+	blit %s13, %s4, 40
+	jmp @body
 @ret
 	ret %s0
 }
 
 function :val $q_Rt_x2evecEq(l %a0, l %a1, l %a2, w %an) {
 @start
-	%f =l alloc8 480
+	%f =l alloc8 520
 	%s0 =l add %f, 0
 	%s2 =l add %f, 80
 	%s3 =l add %f, 120
@@ -940335,6 +940340,7 @@ function :val $q_Rt_x2evecEq(l %a0, l %a1, l %a2, w %an) {
 	%s9 =l add %f, 360
 	%s10 =l add %f, 400
 	%s11 =l add %f, 440
+	%s12 =l add %f, 480
 	blit %a0, %s2, 40
 	blit %a1, %s3, 40
 	blit %a2, %s4, 40
@@ -940369,42 +940375,49 @@ function :val $q_Rt_x2evecEq(l %a0, l %a1, l %a2, w %an) {
 	%t18 =l loadl %t17
 	%t19 =l mul 40, %t18
 	%t20 =l add %t16, %t19
-	blit %t20, %s7, 40
+	blit %t20, %s8, 40
 	%t21 =l add %s3, 8
 	%t22 =l loadl %t21
 	%t23 =l add %s4, 8
 	%t24 =l loadl %t23
 	%t25 =l mul 40, %t24
 	%t26 =l add %t22, %t25
-	blit %t26, %s8, 40
-	%t27 =:val call $q_Rt_x2edeepEq(l %s7, l %s8, l %s8, w 2)
-	blit %t27, %s6, 40
-	%t28 =w loadw %s6
-	%t29 =w ceqw %t28, 3
-	%t31 =l add %s6, 8
-	%t30 =w loadw %t31
-	%t32 =w ceqw %t30, 0
-	%t33 =w and %t29, %t32
-	jnz %t33, @andf_2, @andt_3
-@andt_3
-	blit %s2, %s9, 40
-	blit %s3, %s10, 40
-	%t34 =l add %s4, 8
-	%t35 =l loadl %t34
-	%t36 =l add %t35, 1
-	storew 0, %s11
-	%t37 =l add %s11, 8
-	storel %t36, %t37
-	%t38 =:val call $q_Rt_x2evecEq(l %s9, l %s10, l %s11, w 3)
-	blit %t38, %s0, 40
-	jmp @ande_4
-@andf_2
+	blit %t26, %s9, 40
+	%t27 =:val call $q_Rt_x2edeepEq(l %s8, l %s9, l %s9, w 2)
+	blit %t27, %s7, 40
+	%t28 =l add %s7, 8
+	%t29 =w loadw %t28
+	%t30 =l extsw %t29
+	%t31 =w ceql %t30, 0
+	%t32 =l extsw %t31
+	storew 3, %s6
+	%t33 =l add %s6, 8
+	storel %t32, %t33
+	%t34 =w loadw %s6
+	%t35 =w ceqw %t34, 3
+	%t37 =l add %s6, 8
+	%t36 =w loadw %t37
+	%t38 =w ceqw %t36, 0
+	%t39 =w and %t35, %t38
+	jnz %t39, @else_3, @then_2
+@then_2
 	storew 3, %s0
-	%t39 =l add %s0, 8
-	storew 0, %t39
-	# (fallthrough)
-@ande_4
-	# (fallthrough)
+	%t40 =l add %s0, 8
+	storel 0, %t40
+	jmp @ret
+@else_3
+	blit %s2, %s10, 40
+	blit %s3, %s11, 40
+	%t41 =l add %s4, 8
+	%t42 =l loadl %t41
+	%t43 =l add %t42, 1
+	storew 0, %s12
+	%t44 =l add %s12, 8
+	storel %t43, %t44
+	blit %s10, %s2, 40
+	blit %s11, %s3, 40
+	blit %s12, %s4, 40
+	jmp @body
 @ret
 	ret %s0
 }
@@ -945265,34 +945278,36 @@ function l $q_Rt_x2eframe_x2dleave() {
 	%t25 =l extsw %t24
 	jnz %t25, @then_3, @else_4
 @then_3
+	%t26 =l call $free(l %t3)
 	storew 0, %s4
-	%t26 =l add %s4, 8
-	storel 0, %t26
+	%t27 =l add %s4, 8
+	storel 0, %t27
 	jmp @join_5
 @else_4
-	%t27 =w csgel %t20, 8192
-	%t28 =l extsw %t27
-	jnz %t28, @then_6, @else_7
+	%t28 =w csgel %t20, 8192
+	%t29 =l extsw %t28
+	jnz %t29, @then_6, @else_7
 @then_6
+	%t30 =l call $free(l %t3)
 	storew 0, %s4
-	%t29 =l add %s4, 8
-	storel 0, %t29
+	%t31 =l add %s4, 8
+	storel 0, %t31
 	jmp @join_8
 @else_7
-	%t30 =l add 16, %t20
-	%t31 =l mul 8, %t30
-	%t32 =l add %t0, %t31
-	%t33 =l loadl %t32
-	%t34 =l mul 8, 3
-	%t35 =l add %t3, %t34
-	storel %t33, %t35
-	%t36 =l add 16, %t20
-	%t37 =l mul 8, %t36
-	%t38 =l add %t0, %t37
-	storel %t3, %t38
+	%t32 =l add 16, %t20
+	%t33 =l mul 8, %t32
+	%t34 =l add %t0, %t33
+	%t35 =l loadl %t34
+	%t36 =l mul 8, 3
+	%t37 =l add %t3, %t36
+	storel %t35, %t37
+	%t38 =l add 16, %t20
+	%t39 =l mul 8, %t38
+	%t40 =l add %t0, %t39
+	storel %t3, %t40
 	storew 0, %s4
-	%t39 =l add %s4, 8
-	storel 0, %t39
+	%t41 =l add %s4, 8
+	storel 0, %t41
 	# (fallthrough)
 @join_8
 	# (fallthrough)
