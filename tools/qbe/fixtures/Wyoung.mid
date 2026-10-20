@@ -1,12 +1,27 @@
-// GC NURSERY unit (stage A) — THE MINIMAL YOUNG PROBE.  `hold` is the one
-// arm that is LANDED: a rooted vector with a known element, churned past
-// young cycles, read back through the slot.  The `where` (movement witness
-// from inside the language) and `fill` (write-barrier) arms are NOT landed —
-// `fill` needs the remembered set (stage B); `where` hit an unresolved
-// RtLang parse rejection on its struct-statement body (see the result node).
+// GC NURSERY unit (stage A) — THE MINIMAL YOUNG PROBES, graded by what the
+// stage-A scavenge passes.  MEASURED at QBE_MIDGC_YOUNG_MB=1, QBE_HEAP_MB=16:
+//   hold / two / stale / rootNoCopy  GREEN (rooted survival across young
+//                                     cycles, both slots updated, one and
+//                                     two rooted objects, the stale raw copy)
+//   rooted (mode 3)                  DIES 'scavenge read a POISONED body',
+//                                     PHASE=drain — the MINIMAL reproducer
+//                                     of the stage-A bug: a block carrying
+//     FORWARDING flags (FWD set, word -1 an old-space address) entered the
+//     scan queue as if it were a copy; writing the raw copy into the stack
+//     Box (store1) is what triggers it (rootNoCopy, identical minus the raw
+//     copy, is green).  Root cause NOT yet found — see handoff-gc-nursery.
+//   The `fill` (write-barrier) arm is NOT landed: stage B (the remembered
+//   set) does not exist yet.
 module Wyoung
 
 export Wyoung.hold : val -> val
+export Wyoung.two : val -> val
+export Wyoung.stale : val -> val
+export Wyoung.rooted : val -> val
+export Wyoung.rootNoCopy : val -> val
+export Wyoung.rootNoRead : val -> val
+
+struct Box { tag : word; item : val; }
 
 // cnt one-element young vectors, dropped immediately: fills the young space.
 defun Wyoung.churn(cnt : val) -> val {
@@ -27,4 +42,72 @@ defun Wyoung.hold(cnt : val) -> val {
   val keep = mkvec(base, 1);
   val junk = call Wyoung.churn(cnt);
   return vecload(payload(keep, 0), 0);
+}
+
+// two -> A*1000000 + B: TWO rooted vectors (the same shape valchurn's rooted
+// arm holds one of), churned, both read through their slots.
+defun Wyoung.two(cnt : val) -> val {
+  word baseA = allocvec(1);
+  vecstore(baseA, 0, mknum(11));
+  val keepA = mkvec(baseA, 1);
+  word baseB = allocvec(1);
+  vecstore(baseB, 0, mknum(22));
+  val keepB = mkvec(baseB, 1);
+  val junk = call Wyoung.churn(cnt);
+  return mknum(payload(vecload(payload(keepA, 0), 0), 0) * 1000000 + payload(vecload(payload(keepB, 0), 0), 0));
+}
+
+// stale: valchurn's STALE arm verbatim — a young vector whose only val copy
+// lives in a STACK Slot (unrooted), read across a churn.
+defun Wyoung.put(sv : val) -> val {
+  *Box p = payload(sv, 0);
+  word base = allocvec(1);
+  vecstore(base, 0, mkbool(1));
+  val v = mkvec(base, 1);
+  p->item = v;
+  return mknil;
+}
+defun Wyoung.stale(cnt : val) -> val {
+  Box b;
+  word sv = &b;
+  val put = call Wyoung.put(mknum(sv));
+  val junk = call Wyoung.churn(cnt);
+  val back = b.item;
+  return mknum(tagis(vecload(payload(back, 0), 0), 3));
+}
+
+defun Wyoung.mk() -> val {
+  word base = allocvec(1);
+  vecstore(base, 0, mkbool(1));
+  return mkvec(base, 1);
+}
+defun Wyoung.store1(sv : val, v : val) -> val {
+  *Box p = payload(sv, 0);
+  p->item = v;
+  return mknil;
+}
+defun Wyoung.rooted(cnt : val) -> val {
+  Box b;
+  word sv = &b;
+  val keep = call Wyoung.mk();
+  val st = call Wyoung.store1(mknum(sv), keep);
+  val junk = call Wyoung.churn(cnt);
+  val back = b.item;
+  return mknum(tagis(vecload(payload(back, 0), 0), 3) * 10 + tagis(vecload(payload(keep, 0), 0), 3));
+}
+
+// rootNoCopy: keep rooted, NO raw copy in the Box.
+defun Wyoung.rootNoCopy(cnt : val) -> val {
+  val keep = call Wyoung.mk();
+  val junk = call Wyoung.churn(cnt);
+  return mknum(tagis(vecload(payload(keep, 0), 0), 3));
+}
+// rootNoRead: the raw copy written, but only KEEP read at the end.
+defun Wyoung.rootNoRead(cnt : val) -> val {
+  Box b;
+  word sv = &b;
+  val keep = call Wyoung.mk();
+  val st = call Wyoung.store1(mknum(sv), keep);
+  val junk = call Wyoung.churn(cnt);
+  return mknum(tagis(vecload(payload(keep, 0), 0), 3));
 }

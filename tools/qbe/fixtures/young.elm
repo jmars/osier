@@ -13,4 +13,15 @@ import Wyoung
 
 
 main mode n =
-    Wyoung.hold n
+    if mode == 0 then
+        Wyoung.hold n
+    else if mode == 1 then
+        Wyoung.two n
+    else if mode == 2 then
+        Wyoung.stale n
+    else if mode == 3 then
+        Wyoung.rooted n
+    else if mode == 4 then
+        Wyoung.rootNoCopy n
+    else
+        Wyoung.rootNoRead n

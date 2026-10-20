@@ -326,7 +326,7 @@ renderJob rt corpus entryKey ( job, elmGroup ) midResult =
             -- hand-copied twin TestMain's U2-fix-4 row pins).  B4 removed the
             -- midDriver flag — the Mid driver is the only route.  See the
             -- pre-M4 comment for the flip's midCons note.
-            renderSsa (QbeModule.compileEntry rt corpus elmGroup midTexts entryKey True True True True True True True ( ( True, ( True, True, False ) ), True ))
+            renderSsa (QbeModule.compileEntry rt corpus elmGroup midTexts entryKey True True True True True True True ( ( True, ( True, ( True, ( False, False ) ) ) ), True ))
 
 
 -- ======================= M4: reader-side .mid import resolution =======================
