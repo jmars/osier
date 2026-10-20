@@ -406,6 +406,78 @@ export fn rt_vec_store_plain(vec: [*]Value, i: i32, val: *const Value) callconv(
     vec[@intCast(i)] = val.*;
 }
 
+/// THE NURSERY'S WRITE BARRIER (GC NURSERY unit, stage B).  The store half of
+/// the remembered set: store the Value, then — iff the VECTOR is an OLD
+/// live value-array of the Mid heap AND the stored Value REFERENCES the young
+/// space — record the vector's block address once (the RS bit, bit 61 of the
+/// block's flags word, dedups; the scavenge's remembered walk clears it).
+/// This is the SAME policy the Zig collector's writeBarrierVectorStore uses
+/// on its own heap, spelled against the MID region's slots, which the caller
+/// (Lower's RawVecStore emission under QBE_MIDGC_YOUNG) passes because this
+/// file cannot reference $rt_glob_addr (the Mid globals block exists only in
+/// a MIDGC build; an unconditional extern would break every other link).
+///
+/// REGION SLOT MAP (the mirror of runtime.mid's struct Region — offsets are
+/// load-bearing and TestMain pins the declaration):
+///   word 2 heapStart, 3 cursor, 25 bmPtr, 28 young, 29 youngStart,
+///   30 youngEnd, 31 youngCursor, 32 rsBase, 33 rsTop, 34 rsEnd.
+/// The young test uses [youngStart, youngCursor) — only ALLOCATED young
+/// blocks are addressable.  A young VECTOR is not recorded (young->young is
+/// the scavenge's own transitive closure); a target outside the Mid heap
+/// (the C-heap rooted arrays — the exec-plan evals at h+8 — the frames) is
+/// not recorded either: those are ROOTS, the root walk already scans them.
+const RS_BIT: u64 = 1 << 61;
+
+export fn rt_vec_store_young(vec: [*]Value, i: i32, val: *const Value, region: usize) callconv(.c) void {
+    vec[@intCast(i)] = val.*;
+
+    const w: [*]u64 = @ptrFromInt(region);
+    if (w[28] == 0) return; // the nursery is off at run time — plain store
+
+    const vaddr = @intFromPtr(vec);
+    const ystart = w[29];
+    const ycursor = w[31];
+    if (vaddr >= ystart and vaddr < w[30]) return; // young vector: no record
+
+    // does the stored Value reference young?  the pointer tags and their
+    // payload words mirror Rt.gcMarkValue exactly (1 string / 4 cons /
+    // 9 error / 10 vector: word 1; 6 lambda / 14 record: words 1 AND 3)
+    const cells: [*]const u64 = @ptrCast(val);
+    const tag = @as(u32, @truncate(cells[0]));
+    const refs_young = switch (tag) {
+        1, 4, 9, 10 => refsYoung(cells[1], ystart, ycursor),
+        6, 14 => refsYoung(cells[1], ystart, ycursor) or refsYoung(cells[3], ystart, ycursor),
+        else => false,
+    };
+    if (!refs_young) return;
+
+    // the vector must be an OLD LIVE VALUE-ARRAY: inside [heapStart, cursor),
+    // block-map state 1 (LIVE), kind bit 1 (value array).  Anything else is
+    // either dead (drop) or not a GC block at all (the rooted C arrays).
+    const heap_start = w[2];
+    if (vaddr < heap_start or vaddr >= w[3]) return;
+    const bm: [*]const u8 = @ptrFromInt(w[25]);
+    if (bm[(vaddr - heap_start) / 64] != 1) return;
+    const hdr: [*]u64 = @ptrFromInt(vaddr - 16);
+    if (((hdr[0] >> 1) & 1) != 1) return;
+
+    if ((hdr[0] & RS_BIT) != 0) return; // already remembered this cycle
+    hdr[0] |= RS_BIT;
+
+    const rs: [*]u64 = @ptrFromInt(w[32]);
+    const top = w[33];
+    if (top >= w[34]) {
+        werr("qbe-rt: midgc: remembered set overflow (capacity capBytes/64; raise the heap or report)\n");
+        std.process.exit(1);
+    }
+    rs[top] = vaddr;
+    w[33] = top + 1;
+}
+
+inline fn refsYoung(p: u64, ystart: u64, ycursor: u64) bool {
+    return p >= ystart and p < ycursor;
+}
+
 /// The configured heap size (main's QBE_HEAP_MB, in bytes).  The Mid
 /// collector mmaps its own region of this size so the churn differential's
 /// QBE_HEAP_MB sweeps steer both arms alike.

@@ -16,6 +16,8 @@ export Wyoung.hold : val -> val
 export Wyoung.two : val -> val
 export Wyoung.stale : val -> val
 export Wyoung.rooted : val -> val
+export Wyoung.fill : val -> val
+export Wyoung.unbarred : val -> val
 export Wyoung.rootNoCopy : val -> val
 export Wyoung.rootNoRead : val -> val
 
@@ -108,4 +110,57 @@ defun Wyoung.rootNoRead(cnt : val) -> val {
   val st = call Wyoung.store1(mknum(sv), keep);
   val junk = call Wyoung.churn(cnt);
   return mknum(tagis(vecload(payload(keep, 0), 0), 3));
+}
+
+// fill -> 0+1+...+(n-1): THE WRITE BARRIER fixture.  An n-element vector
+// built ONE STORE AT A TIME with an allocating call between stores: at any
+// realistic young size the space fills mid-build, the scavenge PROMOTES the
+// half-filled vector, and every store after the promotion writes a YOUNG
+// value into an OLD vector — the old->young edge ONLY the remembered set
+// can cover (the root walk never enters old space).
+defun Wyoung.fillStep(vecv : val, idx : val, cnt : val) -> val {
+  if (mkbool(payload(idx, 0) >= payload(cnt, 0))) {
+    return mknil;
+  }
+  word fresh = allocvec(1);
+  vecstore(fresh, 0, mknum(payload(idx, 0)));
+  val elem = mkvec(fresh, 1);
+  vecstore(payload(vecv, 0), payload(idx, 0), elem);
+  return call Wyoung.fillStep(vecv, mknum(payload(idx, 0) + 1), cnt);
+}
+defun Wyoung.fillSum(vecv : val, idx : val, cnt : val) -> val {
+  if (mkbool(payload(idx, 0) >= payload(cnt, 0))) {
+    return mknum(0);
+  }
+  val elem = vecload(payload(vecv, 0), payload(idx, 0));
+  return mknum(payload(vecload(payload(elem, 0), 0), 0) + payload(call Wyoung.fillSum(vecv, mknum(payload(idx, 0) + 1), cnt), 0));
+}
+defun Wyoung.fill(cnt : val) -> val {
+  word base = allocvec(payload(cnt, 0));
+  val vecv = mkvec(base, payload(cnt, 0));
+  val built = call Wyoung.fillStep(vecv, mknum(0), cnt);
+  return call Wyoung.fillSum(vecv, mknum(0), cnt);
+}
+
+// unbarred -> 1 under the nursery, 0 with it off: THE DOCUMENTED UNCOVERED
+// EDGE.  A young block's address stored into an OLD RAW block's body by
+// WSTORE — a WORD store, not a val store: no barrier sees it (the barrier is
+// the RawVecStore seam alone) and no scanner reads it (a kind-0 block holds
+// no vals BY Mid.Ir's node contract).  Across a scavenge the young referent
+// is promoted and the raw word goes stale; the non-moving collector leaves
+// it valid.  This is B7 obligation-2's class exactly — a raw word holding a
+// heap pointer across a safepoint is LEGAL TO SPELL and ILLEGAL TO RELY ON —
+// and this arm PINS the hole's existence instead of pretending coverage.
+// (The raw block is ROOTED through the string val so it survives BOTH
+// collectors; the WORD `raw` itself is deliberately left to go stale — that
+// staleness IS the observation.)
+defun Wyoung.unbarred(cnt : val) -> val {
+  word base = allocvec(1);
+  vecstore(base, 0, mknum(77));
+  val keep = mkvec(base, 1);
+  word raw = allocraw(64);
+  val rawv = mkstr(raw, 8);
+  wstore(raw, 0, base);
+  val junk = call Wyoung.churn(cnt);
+  return mkbool(payload(keep, 0) != wload(raw, 0));
 }

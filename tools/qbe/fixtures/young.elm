@@ -23,5 +23,10 @@ main mode n =
         Wyoung.rooted n
     else if mode == 4 then
         Wyoung.rootNoCopy n
-    else
+    else if mode == 5 then
         Wyoung.rootNoRead n
+    else if mode == 6 then
+        Wyoung.fill n
+
+    else
+        Wyoung.unbarred n

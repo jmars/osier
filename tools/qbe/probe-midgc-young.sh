@@ -90,6 +90,32 @@ for spec in "0 424242" "1 11000022" "2 0" "3 1" "4 1" "5 1"; do
   fi
 done
 
+# ---- arm 4f: THE WRITE BARRIER — fill an OLD vector one young store at a time
+# FAIL-BEFORE (MEASURED, pre-barrier): the same run printed 673069544 — a
+# silent wrong number: the vector (1.2MB > the 1MB young) is allocated
+# OLD-DIRECT, every store is old->young, and with no remembered set the
+# scavenge reclaims the stored elements out from under the vector.
+# PASS-AFTER: the golden, with the stats line witnessing the set
+# (rs=1, copied=1048576 bodies=16384 — the remembered walk promoted them).
+out="$(run env QBE_MIDGC_YOUNG=1 QBE_MIDGC_YOUNG_MB=1 QBE_MIDGC_STATS=1 QBE_HEAP_MB=$HEAP_MB "$YBIN" Young.main 6 30000 2>"$WORK/fill")"
+if [ "$out" = "449985000" ]; then
+  echo "PASS (4f): fill — an old vector filled one young store at a time — sums the golden (barrier: $(grep -o 'rs=[0-9]*' "$WORK/fill" | tail -1) recorded)"
+else
+  fail "fill printed '$out', want 449985000 (the write barrier's arm)"
+fi
+
+# ---- arm 4u: THE DOCUMENTED UNCOVERED EDGE — a young pointer stored into an
+# old RAW block by wstore goes stale under the nursery (true) and stays valid
+# with it off (false): word stores are host bookkeeping by Mid.Ir's node
+# contract, NO barrier covers them, and this arm PINS the hole's existence.
+a="$(run env QBE_MIDGC_YOUNG=1 QBE_MIDGC_YOUNG_MB=1 QBE_HEAP_MB=$HEAP_MB "$YBIN" Young.main 7 $N 2>/dev/null)"
+b="$(run env QBE_MIDGC_STATS=1 QBE_HEAP_MB=$HEAP_MB "$YBIN" Young.main 7 $N 2>/dev/null)"
+if [ "$a" = "true" ] && [ "$b" = "false" ]; then
+  echo "PASS (4u): the KNOWN-UNCOVERED arm — a wstore'd young pointer goes stale under the nursery (true) and stays valid with it off (false)"
+else
+  fail "uncovered arm printed '$a'/'$b', want true/false"
+fi
+
 # ---- arm 5: the STATS witness — scavenges ran and copied a small fraction --
 s="$(grep -c '^midgc: scavenge s=' "$WORK/vc.on")"
 c="$(grep '^midgc: scavenge s=' "$WORK/vc.on" | tail -1 | sed 's/.* copied=\([0-9]*\) .*/\1/')"

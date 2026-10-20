@@ -3732,6 +3732,32 @@ checks rt runtimeMidText =
             && not (String.contains "& (2147483648 * 2147483648)) != 0" young)
             && not (String.contains "& ((1073741824 * 2147483648)) != 0" young)
         )
+    , check "NURSERY PIN (the write barrier's SEAM): a surface vecstore lowers to rt_vec_store_young ONLY in a young build (with the region argument via rt_glob_addr), to rt_vec_store_plain in a plain MIDGC build, and to the Zig rt_vec_store on the default route — the one seam every surface vecstore lowers through"
+        (let
+            probeDefuns =
+                case loweredRuntime "module Wb\nexport Wb.f : val -> val\ndefun Wb.f(a : val) -> val {\n  word base = allocvec(1);\n  vecstore(base, 0, mknil);\n  return mkvec(base, 1);\n}" of
+                    Ok ( _, defuns ) ->
+                        defuns
+
+                    Err _ ->
+                        []
+
+            render gc young_ =
+                case QbeLower.lower rt False False False True True True True gc young_ QbeTypes.empty (rtArities probeDefuns) probeDefuns "Wb.f" of
+                    Ok mod ->
+                        Print.print mod
+
+                    Err _ ->
+                        ""
+         in
+         String.contains "rt_vec_store_young" (render True True)
+            && String.contains "rt_glob_addr" (render True True)
+            && not (String.contains "rt_vec_store_plain" (render True True))
+            && String.contains "rt_vec_store_plain" (render True False)
+            && not (String.contains "rt_vec_store_young" (render True False))
+            && String.contains "rt_vec_store" (render False False)
+            && not (String.contains "rt_vec_store_young" (render False False))
+        )
     , check "NURSERY PIN (the seeding discipline): no ALWAYS-PRESENT rtDeps row names a young-only key — a plain MIDGC build closes gcSeeds over those rows, and an absent key is Lower's loud 'unknown global'"
         (let
             youngKeys =

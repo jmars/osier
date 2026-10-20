@@ -2218,27 +2218,60 @@ lowerRawVal node dest s =
                                                 -- context is legal QBE (il.txt Subtyping — the 32
                                                 -- low bits are used), and indices are small
                                                 -- non-negative words by contract.
-                                                -- QBE_MIDGC=1: the store goes to the PLAIN seat
-                                                -- (rt_vec_store_plain) — the barrier's `inOldgen`
-                                                -- page test reads the ZIG heap's metadata by
-                                                -- (addr/512 - firstheappage), which is out of
-                                                -- bounds for a Mid-heap address (a mark-sweep has
-                                                -- no remembered set, so the plain store IS the
-                                                -- whole contract).
-                                                emit
-                                                    (Call Nothing (Base W)
-                                                        (if s.midGc then
-                                                            Il.Sym "rt_vec_store_plain"
+                                                -- QBE_MIDGC_YOUNG=1 (GC NURSERY stage B): the
+                                                -- store goes to rt_vec_store_young — the NURSERY
+                                                -- barrier.  Store, then record the vector in the
+                                                -- Mid region's remembered set iff it is an OLD
+                                                -- live value-array and the stored Value references
+                                                -- young (the Zig barrier's own policy, spelled
+                                                -- against the Mid region, which Lower passes
+                                                -- because hostshim cannot extern rt_glob_addr
+                                                -- unconditionally — the globals block exists only
+                                                -- in a MIDGC build).  This is the ONE seam: every
+                                                -- surface `vecstore` lowers through this node.
+                                                --
+                                                -- QBE_MIDGC=1 (young off): the PLAIN seat
+                                                -- (rt_vec_store_plain) — the Zig barrier's
+                                                -- `inOldgen` page test reads the ZIG heap's
+                                                -- metadata by (addr/512 - firstheappage), which is
+                                                -- out of bounds for a Mid-heap address (a
+                                                -- mark-sweep has no remembered set, so the plain
+                                                -- store IS the whole contract).
+                                                if s.midGcYoung then
+                                                    let
+                                                        ( gT, s5 ) =
+                                                            freshTmp s4
 
-                                                         else
-                                                            Il.Sym "rt_vec_store"
+                                                        ( rT, s6 ) =
+                                                            freshTmp s5
+                                                    in
+                                                    emit (Call (Just gT) (Base L) (Il.Sym "rt_glob_addr") []) s6
+                                                        |> emit (Load (Just rT) L LoadL (Il.Tmp gT))
+                                                        |> emit
+                                                            (Call Nothing (Base W)
+                                                                (Il.Sym "rt_vec_store_young")
+                                                                [ ArgVal (Base L) vecT
+                                                                , ArgVal (Base W) idxT
+                                                                , ArgVal (Base L) (Il.Tmp (slotTmp vslot))
+                                                                , ArgVal (Base L) (Il.Tmp rT)
+                                                                ]
+                                                            )
+
+                                                else
+                                                    emit
+                                                        (Call Nothing (Base W)
+                                                            (if s.midGc then
+                                                                Il.Sym "rt_vec_store_plain"
+
+                                                             else
+                                                                Il.Sym "rt_vec_store"
+                                                            )
+                                                            [ ArgVal (Base L) vecT
+                                                            , ArgVal (Base W) idxT
+                                                            , ArgVal (Base L) (Il.Tmp (slotTmp vslot))
+                                                            ]
                                                         )
-                                                        [ ArgVal (Base L) vecT
-                                                        , ArgVal (Base W) idxT
-                                                        , ArgVal (Base L) (Il.Tmp (slotTmp vslot))
-                                                        ]
-                                                    )
-                                                    s4
+                                                        s4
                                             )
                                 )
                     )
