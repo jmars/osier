@@ -927,7 +927,10 @@ defun Rt.deepEq(a : val, bb : val) -> val {
     return mkbool(tagis(bb, 5));
   }
   if (mkbool(tagis(a, 4)) && mkbool(tagis(bb, 4))) {
-    return call Rt.deepEq(vecload(payload(a, 0), 0), vecload(payload(bb, 0), 0)) && call Rt.deepEq(vecload(payload(a, 0), 1), vecload(payload(bb, 0), 1));
+    if (mkbool(payload32(call Rt.deepEq(vecload(payload(a, 0), 0), vecload(payload(bb, 0), 0)), 0) == 0)) {
+      return false;
+    }
+    recur(vecload(payload(a, 0), 1), vecload(payload(bb, 0), 1));
   }
   if (mkbool(tagis(a, 14)) && mkbool(tagis(bb, 14))) {
     return mkbool(len32(a) == len32(bb)) && call Rt.vecEq(a, bb, mknum(0));
@@ -959,7 +962,10 @@ defun Rt.deepEq(a : val, bb : val) -> val {
     return mkbool(tagis(bb, 5));
   }
   if (mkbool(tagis(a, 4)) && mkbool(tagis(bb, 4))) {
-    return call Rt.deepEq(vecload(payload(a, 0), 0), vecload(payload(bb, 0), 0)) && call Rt.deepEq(vecload(payload(a, 0), 1), vecload(payload(bb, 0), 1));
+    if (mkbool(payload32(call Rt.deepEq(vecload(payload(a, 0), 0), vecload(payload(bb, 0), 0)), 0) == 0)) {
+      return false;
+    }
+    recur(vecload(payload(a, 0), 1), vecload(payload(bb, 0), 1));
   }
   if (mkbool(tagis(a, 10)) && mkbool(tagis(bb, 10))) {
     return mkbool(len32(a) == len32(bb)) && call Rt.vecEq(a, bb, mknum(0));
@@ -971,21 +977,30 @@ defun Rt.bytesEqGo(a : val, bb : val, i : val) -> val {
   if (mkbool(payload(i, 0) >= len32(a))) {
     return true;
   }
-  return mkbool(strbyte(a, payload(i, 0)) == strbyte(bb, payload(i, 0))) && call Rt.bytesEqGo(a, bb, mknum(payload(i, 0) + 1));
+  if (mkbool(strbyte(a, payload(i, 0)) != strbyte(bb, payload(i, 0)))) {
+    return false;
+  }
+  recur(a, bb, mknum(payload(i, 0) + 1));
 }
 
 defun Rt.symEq(a : val, bb : val, i : val) -> val {
   if (mkbool(strbyte(a, payload(i, 0)) == 0)) {
     return mkbool(strbyte(bb, payload(i, 0)) == 0);
   }
-  return mkbool(strbyte(a, payload(i, 0)) == strbyte(bb, payload(i, 0))) && call Rt.symEq(a, bb, mknum(payload(i, 0) + 1));
+  if (mkbool(strbyte(a, payload(i, 0)) != strbyte(bb, payload(i, 0)))) {
+    return false;
+  }
+  recur(a, bb, mknum(payload(i, 0) + 1));
 }
 
 defun Rt.vecEq(a : val, bb : val, i : val) -> val {
   if (mkbool(payload(i, 0) >= len32(a))) {
     return true;
   }
-  return call Rt.deepEq(vecload(payload(a, 0), payload(i, 0)), vecload(payload(bb, 0), payload(i, 0))) && call Rt.vecEq(a, bb, mknum(payload(i, 0) + 1));
+  if (mkbool(payload32(call Rt.deepEq(vecload(payload(a, 0), payload(i, 0)), vecload(payload(bb, 0), payload(i, 0))), 0) == 0)) {
+    return false;
+  }
+  recur(a, bb, mknum(payload(i, 0) + 1));
 }
 
 @rec @eqPtrFast

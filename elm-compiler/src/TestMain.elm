@@ -92,6 +92,14 @@ checks rt runtimeMidText =
             Err _ ->
                 False
         )
+    , check "gc-fixes2 F1: the four equality loops are recur-on-mismatch, not per-byte/per-element `&& call Rt.<self>` recursion (the 179.4s 8-MiB SIGSEGV's shape: 14,888 bytesEqGo frames)"
+        (String.contains "recur(a, bb, mknum(payload(i, 0) + 1));" runtimeMidText
+            && String.contains "recur(vecload(payload(a, 0), 1), vecload(payload(bb, 0), 1));" runtimeMidText
+            && not (String.contains "&& call Rt.bytesEqGo(a, bb, mknum(payload(i, 0) + 1))" runtimeMidText)
+            && not (String.contains "&& call Rt.symEq(a, bb, mknum(payload(i, 0) + 1))" runtimeMidText)
+            && not (String.contains "&& call Rt.vecEq(a, bb, mknum(payload(i, 0) + 1))" runtimeMidText)
+            && not (String.contains "&& call Rt.deepEq(vecload(payload(a, 0), 1), vecload(payload(bb, 0), 1))" runtimeMidText)
+        )
     , check "utf8ByteLength 'héllo' == 6" (utf8ByteLength "héllo" == 6)
     , check "utf8ByteLength '🦀' == 4" (utf8ByteLength "🦀" == 4)
     , check "utf8ByteLength 'abcde' == 5" (utf8ByteLength "abcde" == 5)
