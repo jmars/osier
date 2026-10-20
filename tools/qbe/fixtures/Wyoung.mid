@@ -3,13 +3,11 @@
 //   hold / two / stale / rootNoCopy  GREEN (rooted survival across young
 //                                     cycles, both slots updated, one and
 //                                     two rooted objects, the stale raw copy)
-//   rooted (mode 3)                  DIES 'scavenge read a POISONED body',
-//                                     PHASE=drain — the MINIMAL reproducer
-//                                     of the stage-A bug: a block carrying
-//     FORWARDING flags (FWD set, word -1 an old-space address) entered the
-//     scan queue as if it were a copy; writing the raw copy into the stack
-//     Box (store1) is what triggers it (rootNoCopy, identical minus the raw
-//     copy, is green).  Root cause NOT yet found — see handoff-gc-nursery.
+//   rooted (mode 3) -> 1              The stage-A drain bug's reproducer,
+//                                     FIXED: the FORWARDED test's word `&`
+//     lowered w-class (32-bit), so `flags & 2^62` was identically zero, every
+//     forwarded body was re-copied, and the drain read the re-copy's word -1
+//     (an address) as its scan count.  Post-fix all six modes are green.
 //   The `fill` (write-barrier) arm is NOT landed: stage B (the remembered
 //   set) does not exist yet.
 module Wyoung

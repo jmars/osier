@@ -4089,7 +4089,17 @@ defun Rt.gcScavPtr(p : val) -> val {
     return mknum(ptr);
   }
   word flags = wload(ptr, -2);
-  if (mkbool((flags & (2147483648 * 2147483648)) != 0)) {
+  // THE FORWARDED TEST IS A COMPARE, NOT AN `&`: a word `&` in this surface
+  // lowers to a w-CLASS and (32-bit), so `flags & 2^62` is ALWAYS ZERO -- the
+  // stage-A bug: every already-forwarded body was re-copied, the re-copy
+  // inherited the forwarded header (FWD | kind | class, word -1 = the first
+  // copy's address), and the drain then read word -1 -- an ADDRESS -- as the
+  // scan count and walked off the block into a POISONED body.  Bit 62 is set
+  // iff flags >= 2^62; every legal class is < 2^21, so nothing else reaches
+  // that high.  (The class reads below keep their `&`: classes live in bits
+  // 2..21, the w-class truncation keeps bits 0..31, so the masked read is
+  // EXACT for every class this heap can name -- stated, not luck.)
+  if (mkbool(flags > ((2147483648 * 2147483648) - 1))) {
     return mknum(wload(ptr, -1));
   }
   word kind = (flags >> 1) & 1;
@@ -4224,7 +4234,9 @@ defun Rt.gcScavOne(blk : val) -> val {
   }
   word state = byteload(region->bmPtr + (b - region->heapStart) / 64, 0);
   word flags = wload(b, -2);
-  if (mkbool(state == 1) && mkbool((flags & (1073741824 * 2147483648)) != 0)) {
+  // RS test by DIVISION (an `&` here lowers w-class and truncates bit 61
+  // away): flags / 2^61 == 1 iff RS is set and FWD is clear.
+  if (mkbool(state == 1) && mkbool((flags / (1073741824 * 2147483648)) == 1)) {
     if (mkbool(((flags >> 1) & 1) != 1)) {
       call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: a REMEMBERED block is not a value array at heap offset ")), mknum(b - region->heapStart), mknum([word](region)));
       return mknil;
@@ -4404,8 +4416,10 @@ defun Rt.gcSweep(cursor : val) -> val {
       // A FREED block leaves the remembered set (GC NURSERY unit): clear the
       // RS bit so a stale set entry is dropped by the scavenge's state test
       // even before the block is re-issued, and the class the free list files
-      // it under is the masked (true) class.
-      wstore(cursorW, -2, flags & ((1073741824 * 2147483648) - 1));
+      // it under is the masked (true) class.  SUBTRACT, never `&`: the and
+      // lowers w-class, and storel of a w temp's register stores an
+      // unspecified high half.
+      wstore(cursorW, -2, flags - (flags / (1073741824 * 2147483648)) * (1073741824 * 2147483648));
       wstore(cursorW, 0, wload(table, cls));
       wstore(table, cls, cursorW);
       // FREE it in the block map and COUNT it (GC ARC unit 2): the marker reads

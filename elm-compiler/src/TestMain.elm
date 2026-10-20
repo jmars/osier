@@ -3717,6 +3717,21 @@ checks rt runtimeMidText =
                 (\k -> String.contains ("defun " ++ k) runtimeMidText)
                 youngKeys
         )
+    , check "NURSERY PIN (the register-class landmine, the stage-A drain bug): the young region's FORWARDED test is a COMPARE (`flags > ((2147483648 * 2147483648) - 1)`) and the RS test is a DIVISION — never a word `&` with a constant >= 2^32, because a word `&` in this surface lowers to a w-CLASS (32-bit) and whose result TRUNCATES both operands: `flags & 2^62` was identically ZERO, the forwarding test never fired, every forwarded body was re-copied, and the drain read the re-copy's word -1 (an ADDRESS) as its scan count (MEASURED: valchurn's rooted arm died at the poison detector; post-fix it prints 10001).  The masked CLASS reads are exempt: classes live in bits 2..21 and the truncation keeps bits 0..31, so the masked read is exact for every class a heap can name."
+        (let
+            young =
+                -- the text of the QBE_MIDGC_YOUNG-ONLY regions (may be empty
+                -- in a spliced copy; the row reads the RAW file text)
+                runtimeMidText
+         in
+         String.contains "if (mkbool(flags > ((2147483648 * 2147483648) - 1))) {" young
+            && String.contains "mkbool((flags / (1073741824 * 2147483648)) == 1)" young
+            -- the BROKEN spellings, as tests: an `&`-with-big-constant whose
+            -- result is COMPARED (the w-class and is fine only as the masked
+            -- class read, whose result feeds a shift-free arithmetic consumer)
+            && not (String.contains "& (2147483648 * 2147483648)) != 0" young)
+            && not (String.contains "& ((1073741824 * 2147483648)) != 0" young)
+        )
     , check "NURSERY PIN (the seeding discipline): no ALWAYS-PRESENT rtDeps row names a young-only key — a plain MIDGC build closes gcSeeds over those rows, and an absent key is Lower's loud 'unknown global'"
         (let
             youngKeys =
