@@ -1,4 +1,4 @@
-module Mid.QbeModule exposing (compileEntry, exportScheme, loadUserMids, userCollisions)
+module Mid.QbeModule exposing (Emitted, compileEntry, compileEntryIl, exportScheme, loadUserMids, userCollisions)
 
 -- Mid.QbeModule — the NATIVE-backend driver: sources -> Mid.Ir -> QBE IL
 -- text (.ssa) for ONE entry key (native-backend stage 1; handoff-qbe-lower).
@@ -79,6 +79,7 @@ import Mid.Audit as Audit
 import Mid.Ir exposing (Defun)
 import Mid.Module as MidModule
 import Mid.Qbe.Flatten as QbeFlatten
+import Mid.Qbe.Il as QbeIl
 import Mid.Qbe.Lower as QbeLower
 import Mid.Qbe.Monomorphise as QbeMono
 import Mid.Qbe.Peephole as QbePeephole
@@ -95,8 +96,30 @@ import Type.Infer as Infer
 import Type.Representation as Rep exposing (Flex(..), Kind(..), Type(..), VarId)
 
 
+{-| What one compile produces: the specialiser's one-line report (empty when
+the pass decided nothing) and the post-peephole `Mid.Qbe.Il.Module`. The `.ssa`
+path prints it (`compileEntry`); the `--obj` path encodes it (Mid.Qbe.Encode).
+-}
+type alias Emitted =
+    { note : String
+    , il : QbeIl.Module
+    }
+
+
 compileEntry : MidRt.Runtime -> List String -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ), Bool ) -> Result String String
 compileEntry rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
+    Result.map (\e -> prependNote e.note (QbePrint.print e.il))
+        (compileEntryIl rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ))
+
+
+{-| The SAME compile, handing back the post-peephole `Mid.Qbe.Il.Module`
+instead of its printed text — the `--obj` arm's entry (Mid.Qbe.Encode consumes
+the ADT, so there is no second representation of the program). The `.ssa` path
+is `compileEntry`, which prints exactly this module, so the two outputs cannot
+disagree about what was compiled.
+-}
+compileEntryIl : MidRt.Runtime -> List String -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ), Bool ) -> Result String Emitted
+compileEntryIl rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
     case
         MidModule.parseAll corpusSources
             |> Result.andThen
@@ -121,8 +144,8 @@ compileEntry rt corpusSources groupSources groupMids entryKey flatten rep primDi
                             )
                 )
     of
-        Ok ssa ->
-            Ok ssa
+        Ok emitted ->
+            Ok emitted
 
         Err msg ->
             Err msg
@@ -145,7 +168,7 @@ compileGroup :
     -> Bool
     -> Bool
     -> ( ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ), Bool )
-    -> Result String String
+    -> Result String Emitted
 compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals ( groupSources, groupMids ) entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
     -- M3: load the group's user .mid modules FIRST — their exported keys'
     -- schemes join the env BEFORE the Elm sources are checked (an Elm source
@@ -670,7 +693,7 @@ lowerAll :
     -> ( Dict String Defun, Dict String (List Int) )
     -> String
     -> ( ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ), Bool )
-    -> Result String String
+    -> Result String Emitted
 lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule units ( userSurf, userAbiTable ) entryKey ( consArrRec, eqPtrFast ) =
     let
         ( consArr, ( rec, ( typeSpec, ( midGc, midGcYoung ) ) ) ) =
@@ -827,7 +850,9 @@ lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesBy
                                                         entryKey
                                                         |> Result.map
                                                             (\il ->
-                                                                prependNote specialised.note (QbePrint.print (QbePeephole.optimize il))
+                                                                { note = specialised.note
+                                                                , il = QbePeephole.optimize il
+                                                                }
                                                             )
                                                 )
                                 )
