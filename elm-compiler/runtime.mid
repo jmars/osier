@@ -3593,9 +3593,12 @@ defun Rt.gcInit(dummy : val) -> val {
     // 16 GB heap would put 4 GB of RSS under the collector for no copy-volume
     // benefit (survivors are 2.5% of it either way); 512 MB keeps the same
     // per-scavenge copy work with 8x less touched memory.  QBE_MIDGC_YOUNG_MB
-    // overrides for experiments.  `=0` (or unset) means OFF — the A/B arm.
+    // overrides for experiments.  `=0` means OFF (the run-time escape
+    // hatch); unset means ON since the flip.
     word youngKnob = rawcall getenv(rawstr("QBE_MIDGC_YOUNG"));
-    word youngOn = payload((mkbool(youngKnob != 0) && mkbool(byteload(youngKnob, 0) == 49)) ? mknum(1) : mknum(0), 0);
+    // DEFAULT ON SINCE THE FLIP: the nursery runs unless the env is exactly
+    // "0" (the run-time escape hatch).
+    word youngOn = payload((mkbool(youngKnob != 0) && mkbool(byteload(youngKnob, 0) == 48)) ? mknum(0) : mknum(1), 0);
     word ymbKnob = rawcall getenv(rawstr("QBE_MIDGC_YOUNG_MB"));
     val ymbArgV = call Rt.gcEnvNum(mknum(ymbKnob), mknum(0));
     word ymbArg = payload(ymbArgV, 0);

@@ -5,9 +5,9 @@
 #   * FAIL-BEFORE (MEASURED on 4c48214, the commit before this unit): the Mid
 #     heap was a HARD one-shot mmap of `heapBytes + heapBytes/8`, so the two
 #     100%-live fixtures died at the minimum heap —
-#         QBE_MIDGC=1 QBE_HEAP_MB=16 churn Churn.build 150000 0
+#         QBE_MIDGC_YOUNG=0 QBE_MIDGC=1 QBE_HEAP_MB=16 churn Churn.build 150000 0
 #           -> midgc: c=4 ... ; qbe-rt: midgc: out of memory        (exit 1)
-#         QBE_MIDGC=1 QBE_HEAP_MB=16 vfield VField.rootedField
+#         QBE_MIDGC_YOUNG=0 QBE_MIDGC=1 QBE_HEAP_MB=16 vfield VField.rootedField
 #           -> qbe-rt: midgc: out of memory                         (exit 1)
 #     while the SAME knob on the Zig arm survived by doubling its heap
 #     (live_pages 14337 -> 28673, plan §3.2).  The difference was BUDGET
@@ -59,7 +59,7 @@ build() {
 # ---- arm 1: churn (19.2 MB live) at a 16 MB INITIAL heap -------------------
 BIN_CHURN="$(build tools/qbe/fixtures/churn.elm Churn.build "$WORK/churn")" \
   || { echo "probe-midgc-grow: qbe-mk churn failed" >&2; exit 1; }
-out="$(QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_STATS=1 timeout 120 "$BIN_CHURN" Churn.build 150000 0 2>"$WORK/churn.err")"
+out="$(QBE_MIDGC_YOUNG=0 QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_STATS=1 timeout 120 "$BIN_CHURN" Churn.build 150000 0 2>"$WORK/churn.err")"
 status=$?
 grows="$(grep -c '^midgc: grow ' "$WORK/churn.err")"
 if [ "$status" -ne 0 ] || [ "$out" != "0" ]; then
@@ -76,7 +76,7 @@ fi
 # ---- arm 2: vfield-rooted (25.2 MB live) at the same heap ------------------
 BIN_VF="$(build tools/qbe/fixtures/vfield.elm VField.rootedField "$WORK/vf")" \
   || { echo "probe-midgc-grow: qbe-mk vfield failed" >&2; exit 1; }
-out="$(QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_STATS=1 timeout 120 "$BIN_VF" VField.rootedField 2>"$WORK/vf.err")"
+out="$(QBE_MIDGC_YOUNG=0 QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_STATS=1 timeout 120 "$BIN_VF" VField.rootedField 2>"$WORK/vf.err")"
 status=$?
 if [ "$status" -eq 0 ] && [ "$out" = "20000100007" ] && grep -q '^midgc: grow ' "$WORK/vf.err"; then
   echo "PASS (2): vfield-rooted (25.2 MB live, the {x} field IS rooted) at QBE_HEAP_MB=$HEAP_MB prints $out after: $(grep '^midgc: grow ' "$WORK/vf.err")"
@@ -85,7 +85,7 @@ else
 fi
 
 # ---- arm 3: THE CEILING IS LOUD (growth refused == the pre-unit behaviour) --
-out="$(QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_MAXMB="$HEAP_MB" timeout 120 "$BIN_CHURN" Churn.build 150000 0 2>&1)"
+out="$(QBE_MIDGC_YOUNG=0 QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_MAXMB="$HEAP_MB" timeout 120 "$BIN_CHURN" Churn.build 150000 0 2>&1)"
 status=$?
 if [ "$status" -eq 1 ] \
   && grep -qx "qbe-rt: midgc: out of memory: heap at its ceiling of $HEAP_MB MB (initial $HEAP_MB MB)" <<<"$out" \
@@ -99,7 +99,7 @@ fi
 # ---- arm 4: the doubling is STEP BY STEP, and stops at the rule's ceiling ---
 # 900 000 conses = ~115 MB of live bodies: 16 -> 32 -> 64 -> 128 (8x = the rule's
 # ceiling), then the request fits and the program prints its golden.
-out="$(QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_STATS=1 timeout 300 "$BIN_CHURN" Churn.build 900000 0 2>"$WORK/churn-big.err")"
+out="$(QBE_MIDGC_YOUNG=0 QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_STATS=1 timeout 300 "$BIN_CHURN" Churn.build 900000 0 2>"$WORK/churn-big.err")"
 status=$?
 seq="$(grep '^midgc: grow ' "$WORK/churn-big.err" | sed 's/^midgc: grow //; s/ MB (was.*//' | tr '\n' ' ')"
 if [ "$status" -eq 0 ] && [ "$out" = "0" ] && [ "$seq" = "32 64 128 " ]; then
@@ -111,7 +111,7 @@ fi
 # ---- arm 5: a ceiling ABOVE the request still completes; the rule is 8x -----
 # 1 500 000 conses = ~192 MB > the 128 MB rule ceiling: a LOUD die, never a
 # silent truncation, and the message names the ceiling (not the initial heap).
-out="$(QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_STATS=1 timeout 300 "$BIN_CHURN" Churn.build 1500000 0 2>&1)"
+out="$(QBE_MIDGC_YOUNG=0 QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_STATS=1 timeout 300 "$BIN_CHURN" Churn.build 1500000 0 2>&1)"
 status=$?
 if [ "$status" -eq 1 ] \
   && grep -qx "qbe-rt: midgc: out of memory: heap at its ceiling of $CEIL_MB MB (initial $HEAP_MB MB)" <<<"$out"; then
@@ -124,7 +124,7 @@ fi
 # QBE_HEAP_MB is the guarantee.  QBE_MIDGC_MAXMB=8 under QBE_HEAP_MB=16 must not
 # truncate the heap below the 16 MB that was asked for: the run allocates INTO
 # 16 MB (so the ceiling the die names is 16, not 8) and refuses to grow past it.
-out="$(QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_MAXMB=8 timeout 120 "$BIN_CHURN" Churn.build 150000 0 2>&1)"
+out="$(QBE_MIDGC_YOUNG=0 QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_MAXMB=8 timeout 120 "$BIN_CHURN" Churn.build 150000 0 2>&1)"
 status=$?
 if [ "$status" -eq 1 ] \
   && grep -qx "qbe-rt: midgc: out of memory: heap at its ceiling of $HEAP_MB MB (initial $HEAP_MB MB)" <<<"$out"; then
@@ -134,7 +134,7 @@ else
 fi
 
 # ---- arm 7: the transcript is GATED (the default route's bytes/stderr) -----
-out="$(QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" timeout 120 "$BIN_CHURN" Churn.build 150000 0 2>"$WORK/churn-quiet.err")"
+out="$(QBE_MIDGC_YOUNG=0 QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" timeout 120 "$BIN_CHURN" Churn.build 150000 0 2>"$WORK/churn-quiet.err")"
 status=$?
 if [ "$status" -eq 0 ] && [ "$out" = "0" ] && [ ! -s "$WORK/churn-quiet.err" ]; then
   echo "PASS (7): without QBE_MIDGC_STATS the growth is SILENT (empty stderr) — the instrument is a knob, not a side effect"
@@ -148,7 +148,7 @@ fi
 # otherwise a leak could hide behind the growth this unit added.
 BIN_REC="$(build tools/qbe/fixtures/midgc-reclaim.elm MidgcReclaim.main "$WORK/rec")" \
   || { echo "probe-midgc-grow: qbe-mk midgc-reclaim failed" >&2; exit 1; }
-out="$(QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_MAXMB="$HEAP_MB" QBE_MIDGC_STATS=1 timeout 120 "$BIN_REC" MidgcReclaim.main 2>"$WORK/rec.err")"
+out="$(QBE_MIDGC_YOUNG=0 QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_MAXMB="$HEAP_MB" QBE_MIDGC_STATS=1 timeout 120 "$BIN_REC" MidgcReclaim.main 2>"$WORK/rec.err")"
 status=$?
 if [ "$status" -eq 0 ] && [ "$out" = "0" ] && ! grep -q '^midgc: grow ' "$WORK/rec.err"; then
   echo "PASS (8): midgc-reclaim still reclaims ~192 MB through a ${HEAP_MB} MB heap with growth DISABLED (no grow line) — its reuse oracle is not bought by the new growth"

@@ -50,7 +50,7 @@ STATUS=0
 run() {
   local mode="$1"
   shift
-  env "$@" QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_MAXMB="$HEAP_MB" \
+  env "$@" QBE_MIDGC_YOUNG=0 QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_MAXMB="$HEAP_MB" \
     timeout 120 "$BIN" MidgcVerify.main "$mode" "$N" "$CHURN" >"$WORK/out" 2>"$WORK/err"
   STATUS=$?
 }

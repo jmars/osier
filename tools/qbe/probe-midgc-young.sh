@@ -9,8 +9,8 @@
 #   * MOVING collector      -> 10001 (the root slot was updated to the new
 #                              address, the raw copy was not: 1)
 # THE PROOF IS THE PAIR, one binary, env-toggled:
-#   QBE_MIDGC_YOUNG unset   -> 10011  (the pre-nursery Mid golden, unchanged)
-#   QBE_MIDGC_YOUNG=1       -> 10001  (== the DEFAULT Zig-route build's number)
+#   QBE_MIDGC_YOUNG=0       -> 10011  (the mark-sweep golden, the run-time escape)
+#   QBE_MIDGC_YOUNG=1/unset -> 10001  (== the QBE_MIDGC=0 Zig build's number)
 # FAIL-BEFORE (MEASURED, stage A): the young arm died
 #   'scavenge read a POISONED (forwarded young) body' in the DRAIN — the
 #   FORWARDED test's word `&` lowered w-class and never fired, so every
@@ -62,21 +62,21 @@ else
 fi
 
 # ---- arm 2: THE HATCH — the same binary, env unset, is the OLD golden -----
-out="$(run env QBE_MIDGC_STATS=1 QBE_HEAP_MB=$HEAP_MB "$BIN" Valchurn.main 2>"$WORK/vc.off")"
+out="$(run env QBE_MIDGC_YOUNG=0 QBE_MIDGC_STATS=1 QBE_HEAP_MB=$HEAP_MB "$BIN" Valchurn.main 2>"$WORK/vc.off")"
 if [ "$out" = "10011" ]; then
-  echo "PASS (2): the SAME binary with QBE_MIDGC_YOUNG unset prints $out — the non-moving pre-nursery golden"
+  echo "PASS (2): the SAME binary with QBE_MIDGC_YOUNG=0 prints $out — the non-moving mark-sweep golden (the run-time escape hatch)"
 else
   fail "valchurn young-OFF printed '$out', want 10011 (non-moving)"
 fi
 
 # ---- arm 3: the DEFAULT build agrees (the moving reference) ---------------
-DBIN="$("$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/valchurn.elm Valchurn.main "$WORK/def" 2>>"$WORK/mk.log")" \
-  || { echo "probe-midgc-young: qbe-mk (default) failed" >&2; exit 1; }
+DBIN="$(QBE_MIDGC=0 "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/valchurn.elm Valchurn.main "$WORK/def" 2>>"$WORK/mk.log")" \
+  || { echo "probe-midgc-young: qbe-mk (QBE_MIDGC=0) failed" >&2; exit 1; }
 out="$(run env QBE_HEAP_MB=$HEAP_MB "$DBIN" Valchurn.main 2>/dev/null)"
 if [ "$out" = "10001" ]; then
-  echo "PASS (3): the DEFAULT (Zig, moving) build prints $out — the number the young arm must match"
+  echo "PASS (3): the QBE_MIDGC=0 (Zig, moving) build prints $out — the number the young arm must match"
 else
-  fail "the default build printed '$out', want 10001"
+  fail "the QBE_MIDGC=0 build printed '$out', want 10001"
 fi
 
 # ---- arm 4: the graded Wyoung arms ----------------------------------------
@@ -106,10 +106,11 @@ fi
 
 # ---- arm 4u: THE DOCUMENTED UNCOVERED EDGE — a young pointer stored into an
 # old RAW block by wstore goes stale under the nursery (true) and stays valid
-# with it off (false): word stores are host bookkeeping by Mid.Ir's node
-# contract, NO barrier covers them, and this arm PINS the hole's existence.
+# with the run-time hatch off (false): word stores are host bookkeeping by
+# Mid.Ir's node contract, NO barrier covers them, and this arm PINS the hole's
+# existence.
 a="$(run env QBE_MIDGC_YOUNG=1 QBE_MIDGC_YOUNG_MB=1 QBE_HEAP_MB=$HEAP_MB "$YBIN" Young.main 7 $N 2>/dev/null)"
-b="$(run env QBE_MIDGC_STATS=1 QBE_HEAP_MB=$HEAP_MB "$YBIN" Young.main 7 $N 2>/dev/null)"
+b="$(run env QBE_MIDGC_YOUNG=0 QBE_MIDGC_STATS=1 QBE_HEAP_MB=$HEAP_MB "$YBIN" Young.main 7 $N 2>/dev/null)"
 if [ "$a" = "true" ] && [ "$b" = "false" ]; then
   echo "PASS (4u): the KNOWN-UNCOVERED arm — a wstore'd young pointer goes stale under the nursery (true) and stays valid with it off (false)"
 else

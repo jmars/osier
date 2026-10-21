@@ -65,7 +65,11 @@ BIN="$WORK/$BIN_NAME"
 # lines to $WORK/stats-<mb>.txt and the summed phases to $WORK/sum-<mb>.txt.
 run_at() {
   local mb="$1" so
-  so="$(QBE_HEAP_MB="$mb" QBE_MIDGC_STATS=1 "$BIN" "$ENTRY" 2>"$WORK/err-$mb")"
+  # GC NURSERY FLIP: this probe measures the MARK-SWEEP collector's O(heap)
+  # sweep claim; with the nursery the old frontier stays near the live set and
+  # the sweep no longer grows with the heap (the nursery's whole point), so
+  # the run pins the run-time hatch QBE_MIDGC_YOUNG=0.
+  so="$(QBE_MIDGC_YOUNG=0 QBE_HEAP_MB="$mb" QBE_MIDGC_STATS=1 "$BIN" "$ENTRY" 2>"$WORK/err-$mb")"
   grep -o 'midgc: c=.*' "$WORK/err-$mb" > "$WORK/stats-$mb.txt" || true
   awk '{ for (i = 1; i <= NF; i++) { split($i, kv, "="); if (kv[1] == "mark") m += kv[2]; else if (kv[1] == "swept") s += kv[2]; else if (kv[1] == "markUs") mu += kv[2]; else if (kv[1] == "sweepUs") su += kv[2] } }
        END { printf "%d %d %d %d\n", m, s, mu, su }' "$WORK/stats-$mb.txt" > "$WORK/sum-$mb.txt"

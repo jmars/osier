@@ -2820,11 +2820,16 @@ run_midshape ffiw-u32 Ffiw32uMain.main tools/qbe/fixtures/ffiw-u32.elm tools/qbe
 # ---- cffi U3: the `f64` RESULT and the `void` RESULT (plan §3.1, §8 U3) ----
 # The `d` class, both directions in ONE call: `strfromd(str, n, fmt, x)` takes a
 # `double` and returns an `int`.  The pin below therefore holds the whole
-# boundary in one line — the `d` ARGUMENT (`d %t3`, lowered through rawFltArg),
+# boundary in one line — the `d` ARGUMENT (`d %t6`, lowered through rawFltArg),
 # the `w` RESULT and the `extsw` after it — and the golden `"1.50"` is
 # load-bearing twice: `1.50` is the argument, and the string's LENGTH is the 4
 # that came back through the `w` return.
-MIDGC_OFF=1 run_midshape ffid-f64 FfidMain.main tools/qbe/fixtures/ffid-f64.elm tools/qbe/fixtures/ffid-f64.mid '=w call $strfromd(l %t0, l 16, l $d0, d %t3)' extsw
+# RE-BASELINED AT THE GC NURSERY FLIP: the classes and the shape are unchanged
+# from the Zig-route freeze; only the TEMP NAMES moved (%t0/%t3 -> %t7/%t6) —
+# the Mid route's allocation seats number the surrounding temps differently.
+# The MIDGC_OFF=1 pin that carried the first flip attempt is GONE: the default
+# route is the Mid one now, and this row asserts ITS emission.
+run_midshape ffid-f64 FfidMain.main tools/qbe/fixtures/ffid-f64.elm tools/qbe/fixtures/ffid-f64.mid '=w call $strfromd(l %t3, l 16, l $d0, d %t6)' extsw
 # The RESULT half on its own: `atof(ptr) -> f64` takes no `d` argument, so the
 # only thing this row can be reading is the `=d call`.  MEASURED failure shape
 # (a mutation emitting `=l call` here): QBE refuses the program outright —
@@ -2853,7 +2858,7 @@ run_midshape ffiv-void FfivMain.main tools/qbe/fixtures/ffiv-void.elm tools/qbe/
 # `snprintf` is the printf shape; `fcntl` is the shape the effect-loop port
 # needs (`effectloop.zig:117`), with the variadic argument a real argument
 # rather than a format operand.
-MIDGC_OFF=1 run_midshape ffis-vararg FfisMain.main tools/qbe/fixtures/ffis-vararg.elm tools/qbe/fixtures/ffis-vararg.mid '=w call $snprintf(l %t0, l 32, l $d0, ..., l 1, l 2)' extsw
+run_midshape ffis-vararg FfisMain.main tools/qbe/fixtures/ffis-vararg.elm tools/qbe/fixtures/ffis-vararg.mid '=w call $snprintf(l %t3, l 32, l $d0, ..., l 1, l 2)' extsw
 run_midshape ffic-vararg FficMain.main tools/qbe/fixtures/ffic-vararg.elm tools/qbe/fixtures/ffic-vararg.mid '=w call $fcntl(w 1, w 3, ..., l 0)' extsw
 
 # ---- cffi U6: WIDTH-TYPED MEMORY (plan §8 U6) — the offsets are MEASURED ----

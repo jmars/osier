@@ -104,17 +104,15 @@ const QBE_MIDHOST = process.env.QBE_MIDHOST !== '0';
 // seats Rt.allocVector/Rt.allocRaw (which own a separate mmap'd heap and
 // trigger Rt.collect), instead of the Zig rt_vec_alloc/rt_raw_alloc seats.
 //
-// NOT THE DEFAULT (reverted 2026-10-19, one day after O3): the Mid mark-sweep
-// collector CANNOT yet carry the default — MEASURED `churn`/`vfield-rooted`
-// die `midgc: out of memory` at QBE_MB=16, and the seed-built compiler
-// SIGSEGVs in a safepoint walk.  It stays opt-in until the nursery work lands., and the Zig collector
-// (`gc/*` + the rt_vec_alloc/rt_raw_alloc seats) becomes DEAD CODE — O4
-// deletes its allocation seats.  `QBE_MIDGC=0` is the ESCAPE HATCH and stays
-// until O4: it is the Zig-collector arm the Mid one is differentially measured
-// against (`QBE_MIDGC=0 ./prog` vs a default build) and the only legal way to
-// pair `QBE_MIDHOST=0` with a sound collector (see MIDGC_DEPENDS_ON below).
-// O3's declared cost is the corpus/seed re-freeze: every artifact that
-// allocates moves, because the allocation seats are what this flag selects.
+// THE DEFAULT SINCE THE GC NURSERY FLIP: the Mid collector + the nursery
+// carry the default (measured green on the full battery — see the flip
+// commit).  `QBE_MIDGC=0` is the ESCAPE HATCH and stays until O4 deletes the
+// Zig collector (`gc/*` + the rt_vec_alloc/rt_raw_alloc seats): it is the
+// Zig-collector arm the Mid one is differentially measured against, and the
+// only legal way to pair `QBE_MIDHOST=0` with a sound collector (see
+// MIDGC_DEPENDS_ON below).  The flip's declared cost is the corpus/seed
+// re-freeze: every artifact that allocates moves, because the allocation
+// seats are what this flag selects.
 //
 // ONE SPELLING, TWO READERS, and the RUN-time reader is the second half of the
 // MIDGC x MIDHOST refusal (stage 7 O3): the compile-time half is
@@ -125,7 +123,12 @@ const QBE_MIDHOST = process.env.QBE_MIDHOST !== '0';
 // the env of a later run).  Both halves say the same thing with the same
 // spelling — the SPLICE below is what puts the run-time half in the binary,
 // which is why this constant lives HERE and not with the other flag knobs.
-const QBE_MIDGC = process.env.QBE_MIDGC === '1';
+// QBE_MIDGC ENABLES the Mid-written collector.  THE DEFAULT SINCE THE GC
+// NURSERY FLIP: read as (env !== '0'), so the Mid mark-sweep + nursery is
+// what an unflagged build gets, and `QBE_MIDGC=0` is the ESCAPE HATCH back to
+// the Zig collector (the differential oracle, and the only legal pairing
+// with QBE_MIDHOST=0).
+const QBE_MIDGC = process.env.QBE_MIDGC !== '0';
 // THE SECOND SPLICE (stage 7 O3): the RUN-time half of the MIDGC x MIDHOST
 // refusal.  One region, INSIDE Rt.main's host arm (it has to be: the run-time
 // hatch it guards is in that arm), kept iff QBE_MIDGC — so a MIDGC build's
@@ -151,11 +154,11 @@ const MIDGC_END = '// <<< QBE_MIDGC-ONLY';
 //     — `QBE_MIDGC_YOUNG=1 ./prog` activates the nursery, unset or `=0` runs
 //     the same binary as a plain mark-sweep.  That is the A/B arm the movement
 //     oracle needs: ONE binary, both collectors.
-const QBE_MIDGC_YOUNG = process.env.QBE_MIDGC_YOUNG === '1';
-if (QBE_MIDGC_YOUNG && !QBE_MIDGC) {
-  console.error('run.js: QBE_MIDGC_YOUNG=1 requires QBE_MIDGC=1 (the nursery is the Mid collector\'s young half; without it the barrier calls a seat that does not exist and the young defuns have no allocator)');
-  process.exit(2);
-}
+const QBE_MIDGC_YOUNG = QBE_MIDGC && process.env.QBE_MIDGC_YOUNG !== '0';
+// (No guard here: QBE_MIDGC=0 forces the nursery off — QBE_MIDGC_YOUNG is
+// defined as QBE_MIDGC && ..., so a Zig-route build can never carry the
+// young barrier seat.  QBE_MIDGC_YOUNG=0 is the nursery's own escape hatch,
+// a plain mark-sweep inside the same MIDGC build.)
 const MIDGC_YOUNG_BEGIN = '// >>> QBE_MIDGC_YOUNG-ONLY';
 const MIDGC_YOUNG_END = '// <<< QBE_MIDGC_YOUNG-ONLY';
 

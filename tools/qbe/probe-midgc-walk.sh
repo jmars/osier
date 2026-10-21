@@ -85,7 +85,7 @@ STATUS=0
 run() {
   local mode="$1" nodes="$2" churn="$3"
   shift 3
-  env "$@" QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_MAXMB="$HEAP_MB" QBE_MIDGC_STATS=1 \
+  env "$@" QBE_MIDGC_YOUNG=0 QBE_MIDGC=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_MAXMB="$HEAP_MB" QBE_MIDGC_STATS=1 \
     timeout 120 "$BIN" MidgcWalk.main "$mode" "$nodes" "$churn" 2>"$WORK/last.err"
   STATUS=$?
 }
@@ -146,7 +146,7 @@ fi
 # callers test non-zero exits that never happen.)
 run_noreuse() {
   local mode="$1"
-  QBE_MIDGC=1 QBE_MIDGC_NOREUSE=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_STATS=1 \
+  QBE_MIDGC_YOUNG=0 QBE_MIDGC=1 QBE_MIDGC_NOREUSE=1 QBE_HEAP_MB="$HEAP_MB" QBE_MIDGC_STATS=1 \
     timeout 120 "$BIN" MidgcWalk.main "$mode" "$N" "$CHURN" >"$WORK/out.nr" 2>"$WORK/last.err"
   STATUS=$?
   cat "$WORK/out.nr"

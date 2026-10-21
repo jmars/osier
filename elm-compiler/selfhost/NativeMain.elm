@@ -318,15 +318,13 @@ renderJob rt corpus entryKey ( job, elmGroup ) midResult =
             "err " ++ msg
 
         Ok midTexts ->
-            -- run.js's DEFAULT flag vector, ALL ELEVEN ON (flatten, rep,
-            -- primDirect, midRt inject, midCons route, rtLean lean ABI, mono
-            -- specialiser, consArr, rec, typeSpec, eqPtrFast), the trailing
-            -- midGc = False (reverted 2026-10-19: the Mid collector is opt-in again —
-            -- the collector is now the DEFAULT, and this literal is the
-            -- hand-copied twin TestMain's U2-fix-4 row pins).  B4 removed the
-            -- midDriver flag — the Mid driver is the only route.  See the
-            -- pre-M4 comment for the flip's midCons note.
-            renderSsa (QbeModule.compileEntry rt corpus elmGroup midTexts entryKey True True True True True True True ( ( True, ( True, ( True, ( False, False ) ) ) ), True ))
+            -- run.js's DEFAULT flag vector (flatten, rep, primDirect, midRt
+            -- inject, midCons route, rtLean lean ABI, mono specialiser,
+            -- consArr, rec, typeSpec, eqPtrFast) with the trailing
+            -- (midGc, midGcYoung) = (True, True) SINCE THE GC NURSERY FLIP —
+            -- the selfhost lane must agree with run.js's defaults so the seed
+            -- it builds re-emits itself (the U2-fix-4 twin TestMain pins).
+            renderSsa (QbeModule.compileEntry rt corpus elmGroup midTexts entryKey True True True True True True True ( ( True, ( True, ( True, ( True, True ) ) ) ), True ))
 
 
 -- ======================= M4: reader-side .mid import resolution =======================
