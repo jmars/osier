@@ -1,7 +1,7 @@
 module Mid.RtGc exposing
     ( gcProgram
-    , globAddrSym, globDataSym, globFreelistSlot, globKnobSlot, globRegionSlot
-    , globTailScratchSlot, globWords
+    , globAddrSym, globDataSym, globFreelistSlot, globInternSlot, globKnobSlot
+    , globRegionSlot, globTailScratchSlot, globWords
     )
 
 {-| Mid.RtGc — the FRESH non-moving, non-generational MARK-SWEEP collector
@@ -111,10 +111,25 @@ import Mid.RtPrims exposing (seat)
 --                  slot's index stays consumed).  NOT collector state:
 --                  a QBE_MIDGC=0 build maps no region, so the registry
 --                  lives here where both routes reach it.
---   words 16..     the frame freelist heads, indexed by nslots (U3)
+--   words 16..8207 the frame freelist heads, indexed by nslots (U3)
+--   words 8208..8210  THE INTERN TABLE (O5 seat 2, re-homed by seat 4): 8208
+--                  = the lazily-malloc'd (name,len)-pair array's base, 8209 =
+--                  the live pair count, 8210 = the capacity in pairs.  Owner
+--                  is `Mid.Rt.intern` (runtime.mid's Rt.intTab/intGrow); NOT
+--                  collector state, because a QBE_MIDGC=0 build maps no region
+--                  and the escape route must still reach it.
 -- The freelist bound is 8192 (MEASURED: the seed's max frame nslots is
 -- 4,354; giants never pool).  The block is .bss: reserving the words costs
 -- nothing on disk.
+--
+-- THE BLOCK MUST COVER EVERY SLOT ABOVE.  Seat 2 read words 8208..8210 while
+-- globWords was still `globFreelistSlot + 8192` = 8208, so the intern table
+-- sat 24 bytes PAST the emitted `z 65664` — in the linked binary exactly on
+-- hostshim's rt_string_calls/intern_hits/intern_misses (MEASURED from the
+-- .bss symbol layout).  Harmless by luck, a corruption hazard by
+-- construction.  globWords now derives from globInternSlot, and TestMain pins
+-- the emitted block size against the intern slot so a later slot added without
+-- growing the block fails loudly instead of escaping again.
 
 globDataSym : String
 globDataSym =
@@ -146,9 +161,18 @@ globFreelistSlot =
     16
 
 
+-- The intern table's three words (O5 seat 2's slots; see the layout table).
+-- `Rt.intTab` in runtime.mid spells these indices literally, the same way it
+-- spells the string-stream registry's — this constant is the Mid-side mirror
+-- TestMain's pin reads.
+globInternSlot : Int
+globInternSlot =
+    globFreelistSlot + 8192
+
+
 globWords : Int
 globWords =
-    globFreelistSlot + 8192
+    globInternSlot + 3
 
 
 -- ============================ PROGRAM ============================

@@ -606,7 +606,7 @@ export fn rt_root_pop_to(wm: i64) callconv(.c) i64 {
 //  Word indices are Mid.RtGc's LAYOUT table.  The values-table base (word 3)
 //  is the ONE word this file writes: every other slot is Mid's own state.
 // =====================================================================
-extern var rt_glob: [8208]u64; // RtGc.globWords — keep the two in step
+extern var rt_glob: [8211]u64; // RtGc.globWords — keep the two in step (8208 frame-freelist end + 3 intern-table words)
 
 /// The globals-block word holding `vm.values_table`'s base (RtGc's layout
 /// table, word 3).  Written once, by rt_boot, before any generated code runs.

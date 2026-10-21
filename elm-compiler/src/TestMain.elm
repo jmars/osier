@@ -1794,6 +1794,34 @@ checks rt runtimeMidText =
                 False
         )
 
+    -- O5 SEAT 4: the globals block must COVER every slot the Mid runtime
+    -- addresses.  Seat 2 read the intern table's words 8208..8210 while
+    -- globWords was still `globFreelistSlot + 8192` = 8208, so those 24 bytes
+    -- sat PAST the emitted `z 65664` and landed on hostshim's
+    -- rt_string_calls/intern_hits/intern_misses in the linked binary.  This
+    -- pin reads the EMITTED block size (Lower's DZero item, i.e. what the
+    -- linker actually sees) and requires it to reach past the intern slot, so
+    -- a slot added without growing the block fails here instead of silently
+    -- escaping $rt_glob again.  globInternSlot + 3 = the table's last word.
+    , check "O5 seat 4 glob pin: the emitted $rt_glob covers the intern table's last word (globInternSlot + 2), computed from the DZero byte count — a freelist-sized block would fail"
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.allocVector" of
+            Ok mod ->
+                case List.filter (\d -> d.name == RtGc.globDataSym) mod.datas of
+                    [ d ] ->
+                        case d.items of
+                            [ Il.DZero bytes ] ->
+                                bytes >= 8 * (RtGc.globInternSlot + 3) && bytes == 8 * RtGc.globWords
+
+                            _ ->
+                                False
+
+                    _ ->
+                        False
+
+            Err _ ->
+                False
+        )
+
     -- STAGE 6 B0: the frame machinery retarget.  Under QBE_MIDDRIVER=1 the
     -- pooled-frame prologue calls the Mid rawAbi defun q_Rt_x2eframe_x2denter
     -- (nslots as an `l` word — the raw-word ABI, NOT the Zig seat's `w` i32)
