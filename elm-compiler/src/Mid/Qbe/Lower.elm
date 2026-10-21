@@ -566,7 +566,7 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec _ midGcYoung ta
                     if List.any (\d -> isRtKey d.key) program then
                         unique
                             (List.filter (\k -> not (List.member k surfaceKeys)) (MidRt.seeds usedPrims)
-                                ++ List.filter (\k -> not (List.member k surfaceKeys)) (unique (MidRt.gcSeeds ++ MidRt.conSeeds ++ MidRt.closureSeeds))
+                                ++ List.filter (\k -> not (List.member k surfaceKeys)) (unique (MidRt.gcSeeds ++ MidRt.conSeeds ++ MidRt.closureSeeds ++ MidRt.lowerSeatSeeds))
                                 -- THE NURSERY SEEDS (GC NURSERY unit): the young
                                 -- defuns exist in the surface only when run.js
                                 -- kept the QBE_MIDGC_YOUNG-ONLY regions, so they
@@ -2193,11 +2193,9 @@ lowerRawVal node dest s =
                     )
 
         RawVecStore store ->
-            -- Store the VALUE at vec[i] THROUGH the runtime's one barrier
-            -- seat (tools/qbe/rt.zig rt_vec_store -> heap.zig
-            -- writeBarrierVectorStore: store, then remember iff an old-gen
-            -- array holds a nursery reference).  The stored value is lowered
-            -- into a fresh ROOTED slot first — its address is the argument.
+            -- Store the VALUE at vec[i] THROUGH the runtime's ONE barrier
+            -- seat.  The stored value is lowered into a fresh ROOTED slot
+            -- first — its address is the argument.
             -- `dest` is deliberately IGNORED: this node is an effect, and its
             -- let binder's slot stays zero (a valid Value; nothing reads it).
             rawWordArg store.vec s
@@ -2213,55 +2211,59 @@ lowerRawVal node dest s =
                                     lowerVal store.value vslot s3
                                         |> Result.map
                                             (\s4 ->
-                                                -- The `w` index argument: an `l` value in a `w`
-                                                -- context is legal QBE (il.txt Subtyping — the 32
-                                                -- low bits are used), and indices are small
-                                                -- non-negative words by contract.
-                                                -- QBE_MIDGC_YOUNG=1 (GC NURSERY stage B): the
-                                                -- store goes to rt_vec_store_young — the NURSERY
-                                                -- barrier.  Store, then record the vector in the
-                                                -- Mid region's remembered set iff it is an OLD
-                                                -- live value-array and the stored Value references
-                                                -- young (the Zig barrier's own policy, spelled
-                                                -- against the Mid region, which Lower passes
-                                                -- because hostshim cannot extern rt_glob_addr
-                                                -- unconditionally — the globals block exists only
-                                                -- in a MIDGC build).  This is the ONE seam: every
-                                                -- surface `vecstore` lowers through this node.
+                                                -- zighost Z2: THE SEAM IS MID'S.
+                                                -- Both writers are rawAbi word
+                                                -- defuns (runtime.mid
+                                                -- Rt.vecStorePlain /
+                                                -- Rt.vecStoreYoung), so the
+                                                -- call is 3 words and the
+                                                -- callee loads the region
+                                                -- from rt_glob_addr ITSELF —
+                                                -- the emission no longer has
+                                                -- to fetch it (the deleted Zig
+                                                -- seat took it as a 4th arg
+                                                -- because hostshim could not
+                                                -- name the block; it can, and
+                                                -- Mid reads it directly).
                                                 --
-                                                -- young off: the PLAIN seat
-                                                -- (rt_vec_store_plain) — the Zig barrier's
-                                                -- `inOldgen` page test reads the ZIG heap's
-                                                -- metadata by (addr/512 - firstheappage), which is
-                                                -- out of bounds for a Mid-heap address (a
-                                                -- mark-sweep has no remembered set, so the plain
-                                                -- store IS the whole contract).
+                                                -- young build: the NURSERY
+                                                -- barrier — store, then
+                                                -- record the vector in the
+                                                -- remembered set iff it is an
+                                                -- OLD live value-array and
+                                                -- the stored Value references
+                                                -- young.
+                                                --
+                                                -- young off: the PLAIN seat —
+                                                -- a mark-sweep has no
+                                                -- remembered set, so the
+                                                -- store IS the whole contract
+                                                -- (the record arms below name
+                                                -- the same defun: a freshly
+                                                -- allocated array cannot be
+                                                -- old).
+                                                --
+                                                -- The index crosses as `l`
+                                                -- (the callee's param is a
+                                                -- word register, not the C
+                                                -- `int` the Zig seat took).
                                                 if s.midGcYoung then
-                                                    let
-                                                        ( gT, s5 ) =
-                                                            freshTmp s4
-
-                                                        ( rT, s6 ) =
-                                                            freshTmp s5
-                                                    in
-                                                    emit (Call (Just gT) (Base L) (Il.Sym "rt_glob_addr") []) s6
-                                                        |> emit (Load (Just rT) L LoadL (Il.Tmp gT))
-                                                        |> emit
-                                                            (Call Nothing (Base W)
-                                                                (Il.Sym "rt_vec_store_young")
-                                                                [ ArgVal (Base L) vecT
-                                                                , ArgVal (Base W) idxT
-                                                                , ArgVal (Base L) (Il.Tmp (slotTmp vslot))
-                                                                , ArgVal (Base L) (Il.Tmp rT)
-                                                                ]
-                                                            )
+                                                    emit
+                                                        (Call Nothing (Base W)
+                                                            (Il.Sym ("q_" ++ mangle "Rt.vecStoreYoung"))
+                                                            [ ArgVal (Base L) vecT
+                                                            , ArgVal (Base L) idxT
+                                                            , ArgVal (Base L) (Il.Tmp (slotTmp vslot))
+                                                            ]
+                                                        )
+                                                        s4
 
                                                 else
                                                     emit
                                                         (Call Nothing (Base W)
-                                                            (Il.Sym "rt_vec_store_plain")
+                                                            (Il.Sym ("q_" ++ mangle "Rt.vecStorePlain"))
                                                             [ ArgVal (Base L) vecT
-                                                            , ArgVal (Base W) idxT
+                                                            , ArgVal (Base L) idxT
                                                             , ArgVal (Base L) (Il.Tmp (slotTmp vslot))
                                                             ]
                                                         )
@@ -7011,13 +7013,15 @@ lowerRecordLitPos setters dest s =
                                 ( dataArg, s2 ) =
                                     midGcAllocSeat "Rt.allocVector" (Il.Con n) s1
 
-                                -- The store goes to the PLAIN seat
-                                -- (rt_vec_store_plain) — the barrier's inOldgen page
-                                -- test reads ZIG-heap metadata, out of bounds for a
-                                -- Mid-heap address (a mark-sweep needs no remembered
-                                -- set, so the plain store IS the whole contract).
+                                -- The store goes to the PLAIN Mid seat
+                                -- (Rt.vecStorePlain, zighost Z2): the data array
+                                -- was allocated one statement ago, so it cannot
+                                -- be an old block and there is nothing to
+                                -- remember — the plain store IS the whole
+                                -- contract (the barrier would be a wasted
+                                -- region load per field).
                                 storeSym =
-                                    Il.Sym "rt_vec_store_plain"
+                                    Il.Sym ("q_" ++ mangle "Rt.vecStorePlain")
 
                                 s3 =
                                     List.foldl
@@ -7167,7 +7171,7 @@ lowerRecordUpdateClosed baseB baseNames resultNames updPairs dest s =
 
                     -- The plain store seat (see lowerRecordLitPos).
                     storeSym =
-                        Il.Sym "rt_vec_store_plain"
+                        Il.Sym ("q_" ++ mangle "Rt.vecStorePlain")
 
                     storeOne : Int -> String -> S -> Result String S
                     storeOne rank name st =

@@ -84,10 +84,10 @@ checks rt runtimeMidText =
       -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
       -- the frameZero loop), so an empty or truncated load turns it RED,
       -- loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (325 defuns (GC NURSERY added the ten scavenge-family defuns; O5 added the five string-stream registry + the nine intern-table defuns + seat 3's values-table walk) — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (328 defuns — zighost Z2/Z3 added Rt.vecStorePlain/Rt.vecStoreYoung/Rt.globalClosure (GC NURSERY added the ten scavenge-family defuns; O5 added the five string-stream registry + the nine intern-table defuns + seat 3's values-table walk) — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 325
+                List.length ast == 328
 
             Err _ ->
                 False
@@ -907,8 +907,8 @@ checks rt runtimeMidText =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 287 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram rt True True True) == 287
+    , check "rt program: 288 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
+        (List.length (rtProgram rt True True True) == 288
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
@@ -1146,7 +1146,7 @@ checks rt runtimeMidText =
     -- shapes are pinned, not just "it links".
     , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main + the B0 frame pair + stage 7A's die family (dieErr/hostDieErr — hostDieUnported left BOTH the family and the runtime at 7E, the unit that gave every Task ctor a real arm) are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo/frame set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set; the frame pair is FRAME-FREE by construction — its only nodes are rawcall/raw-word loads/stores and rawAbi->rawAbi calls to its one non-allocating helper)"
         (Rt.rawAbi
-            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.tail-known", "Rt.bounce", "Rt.dieErr", "Rt.hostDieErr", "Rt.rootGrow", "Rt.rootPush", "Rt.rootPushPtr", "Rt.rootPushValue", "Rt.rootPushValueArray", "Rt.rootPop", "Rt.rootWatermark", "Rt.rootPopTo" ]
+            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.tail-known", "Rt.bounce", "Rt.dieErr", "Rt.hostDieErr", "Rt.rootGrow", "Rt.rootPush", "Rt.rootPushPtr", "Rt.rootPushValue", "Rt.rootPushValueArray", "Rt.rootPop", "Rt.rootWatermark", "Rt.rootPopTo", "Rt.vecStorePlain", "Rt.vecStoreYoung" ]
             && not (Set.member "Rt.die" rt.allocating)
             && not (Set.member "Rt.halt" rt.allocating)
             && not (Set.member "Rt.cStrEq" rt.allocating)
@@ -3713,10 +3713,10 @@ checks rt runtimeMidText =
     -- into an ALWAYS-PRESENT rtDeps row would drag an absent defun into a
     -- plain MIDGC build's seed closure and Lower would die "unknown global" —
     -- the loud end of the rule; the pin makes the rule itself a test.
-    , check "NURSERY PIN: the QBE_MIDGC_YOUNG-ONLY region of runtime.mid holds EXACTLY the eleven scavenge-family defuns (balanced markers, every young defun inside, no young defun outside)"
+    , check "NURSERY PIN: the QBE_MIDGC_YOUNG-ONLY region of runtime.mid holds EXACTLY the twelve nursery defuns (the eleven scavenge-family ones + zighost Z2's Rt.vecStoreYoung, the write barrier's record half (balanced markers, every young defun inside, no young defun outside)"
         (let
             youngKeys =
-                [ "Rt.gcScavenge", "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavValuesTab", "Rt.gcScavPtr", "Rt.gcScavCopyWords", "Rt.gcScavRemembered", "Rt.gcScavOne", "Rt.gcScavDrain", "Rt.gcPromoteAlloc" ]
+                [ "Rt.gcScavenge", "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavValuesTab", "Rt.gcScavPtr", "Rt.gcScavCopyWords", "Rt.gcScavRemembered", "Rt.gcScavOne", "Rt.gcScavDrain", "Rt.gcPromoteAlloc", "Rt.vecStoreYoung" ]
 
             countInside ls =
                 List.foldl
@@ -3763,7 +3763,7 @@ checks rt runtimeMidText =
                     lines
                     |> Tuple.second
          in
-         (insideN == 11)
+         (insideN == 12)
             && List.all
                 (\k -> not (String.contains ("defun " ++ k) (String.join "\n" outside)))
                 youngKeys
@@ -3786,31 +3786,48 @@ checks rt runtimeMidText =
             && not (String.contains "& (2147483648 * 2147483648)) != 0" young)
             && not (String.contains "& ((1073741824 * 2147483648)) != 0" young)
         )
-    , check "NURSERY PIN (the write barrier's SEAM): a surface vecstore lowers to rt_vec_store_young ONLY in a young build (with the region argument via rt_glob_addr), to rt_vec_store_plain in a plain MIDGC build, and to the Zig rt_vec_store on the default route — the one seam every surface vecstore lowers through"
+    , check "NURSERY PIN (the write barrier's SEAM, re-pinned at zighost Z2): a surface vecstore lowers to the MID seat q_Rt_x2evecStoreYoung in a young build and to q_Rt_x2evecStorePlain otherwise — THREE words each (vec, index, *Value), the callee loading the region from rt_glob_addr ITSELF, so the CALLER fetches nothing (the deleted Zig seat took the region as a 4th argument because hostshim could not name the block; Mid reads it directly) — and the two deleted Zig seats are named by nothing on either route.  The Z0-retired third combo (the old collector's rt_vec_store) is gone with the flag that selected it"
         (let
-            probeDefuns =
-                case loweredRuntime "module Wb\nexport Wb.f : val -> val\ndefun Wb.f(a : val) -> val {\n  word base = allocvec(1);\n  vecstore(base, 0, mknil);\n  return mkvec(base, 1);\n}" of
-                    Ok ( _, defuns ) ->
-                        defuns
+            probeY =
+                z2Probe rt True True
 
-                    Err _ ->
-                        []
+            probeP =
+                z2Probe rt True False
 
-            render gc young_ =
-                case QbeLower.lower rt False False False True True True True gc young_ QbeTypes.empty (rtArities probeDefuns) probeDefuns "Wb.f" of
-                    Ok mod ->
-                        Print.print mod
+            youngCall =
+                z2Line "call $q_Rt_x2evecStoreYoung(" probeY
 
-                    Err _ ->
-                        ""
+            plainCall =
+                z2Line "call $q_Rt_x2evecStorePlain(" probeP
          in
-         String.contains "rt_vec_store_young" (render True True)
-            && String.contains "rt_glob_addr" (render True True)
-            && not (String.contains "rt_vec_store_plain" (render True True))
-            && String.contains "rt_vec_store_plain" (render True False)
-            && not (String.contains "rt_vec_store_young" (render True False))
-            && String.contains "rt_vec_store" (render False False)
-            && not (String.contains "rt_vec_store_young" (render False False))
+         String.contains "call $q_Rt_x2evecStoreYoung(l " youngCall
+            && String.contains "call $q_Rt_x2evecStorePlain(l " plainCall
+            -- three arguments: the first has no leading comma, the other two do
+            && List.length (String.indexes ", l " youngCall) == 2
+            && List.length (String.indexes ", l " plainCall) == 2
+            && not (String.contains "call $q_Rt_x2evecStorePlain(" probeY)
+            && not (String.contains "call $q_Rt_x2evecStoreYoung(" probeP)
+            -- NO REGION FETCH IN THE CALLER.  `export function l $rt_glob_addr()`
+            -- is emitted unconditionally by finishModule (stage 6 B0), so the
+            -- assertion is on the CALL, which only the seam ever made.
+            && not (String.contains "call $rt_glob_addr" probeY)
+            && not (String.contains "call $rt_glob_addr" probeP)
+            && not (String.contains "rt_vec_store" probeY)
+            && not (String.contains "rt_vec_store" probeP)
+        )
+    , check "Z2 SEAM PIN (the barrier's MASK SAFETY, the stage-A drain bug's spelling): Rt.vecStoreYoung tests the RS bit by DIVISION (flags / 2^61) and SETS it by ADDING the same product — never `&`, which lowers to a w-class op and truncates bit 61 away (the measured bug: `flags & 2^62` was identically ZERO, the forwarding test never fired, every forwarded body was re-copied); and the tag read is a zero-EXTEND (uext), not a mask.  The negatives are the fail-before half: either big-constant `&` spelling in this defun is RED"
+        (let
+            body =
+                defunText "Rt.vecStoreYoung" runtimeMidText
+         in
+         String.contains "(flags / (1073741824 * 2147483648)) == 0" body
+            && String.contains "flags + (1073741824 * 2147483648)" body
+            && String.contains "uext(wload(val, 0))" body
+            && not (String.contains "& (1073741824 * 2147483648)" body)
+            && not (String.contains "& (2147483648 * 2147483648)" body)
+            -- the defun is where the policy lives, not a stub
+            && String.contains "region->rsBase" body
+            && String.contains "region->rsTop" body
         )
     , check "NURSERY PIN (promote bumps before it grows): Rt.gcPromoteAlloc's bump arm precedes its growth ladder — the stage-A bug was a promote path that ran the ladder UNCONDITIONALLY (every free-list miss doubled the limit even with the cursor at offset 0, the startup grow-to-the-ceiling; reserve-only, but still wrong)"
         (case List.head (String.indexes "defun Rt.gcPromoteAlloc" runtimeMidText) of
@@ -3844,7 +3861,7 @@ checks rt runtimeMidText =
     , check "NURSERY PIN (the seeding discipline): no ALWAYS-PRESENT rtDeps row names a young-only key — a plain MIDGC build closes gcSeeds over those rows, and an absent key is Lower's loud 'unknown global'"
         (let
             youngKeys =
-                [ "Rt.gcScavenge", "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavValuesTab", "Rt.gcScavPtr", "Rt.gcScavCopyWords", "Rt.gcScavRemembered", "Rt.gcScavOne", "Rt.gcScavDrain", "Rt.gcPromoteAlloc" ]
+                [ "Rt.gcScavenge", "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavValuesTab", "Rt.gcScavPtr", "Rt.gcScavCopyWords", "Rt.gcScavRemembered", "Rt.gcScavOne", "Rt.gcScavDrain", "Rt.gcPromoteAlloc", "Rt.vecStoreYoung" ]
          in
          Dict.toList Rt.rtDeps
             |> List.all
@@ -6600,7 +6617,7 @@ checks rt runtimeMidText =
                        , "Rt.gcScavRemembered", "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavValuesTab", "Rt.gcScavenge"
                        , "Rt.gcSweep", "Rt.gcVD", "Rt.gcVerify", "Rt.gcVerifyList"
                        , "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot"
-                       , "Rt.globIsDotDot", "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess"
+                       , "Rt.globIsDotDot", "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess", "Rt.globalClosure"
                        , "Rt.halt", "Rt.hostAddPoll", "Rt.hostArity", "Rt.hostCStrOf", "Rt.hostCall", "Rt.hostCleanupAll"
                        , "Rt.hostCleanupGo", "Rt.hostClearFrom", "Rt.hostClearGo", "Rt.hostCloseFd", "Rt.hostCompleteErr", "Rt.hostCompleteOk"
                        , "Rt.hostCompleteReady", "Rt.hostCompleteReadyGo", "Rt.hostDeactivate", "Rt.hostDeliver", "Rt.hostDieErr", "Rt.hostDirIsDir"
@@ -6627,7 +6644,7 @@ checks rt runtimeMidText =
                        , "Rt.shen.bytes->string", "Rt.shen.str->bytes", "Rt.snd", "Rt.ssClose", "Rt.ssIn", "Rt.ssInGo"
                        , "Rt.ssReadbyte", "Rt.ssTab", "Rt.str", "Rt.strOf", "Rt.string?"
                        , "Rt.substring", "Rt.symEq", "Rt.symLess", "Rt.symToStr", "Rt.tail-known"
-                       , "Rt.toI32", "Rt.valEntry", "Rt.valFreeGo", "Rt.valScanGo", "Rt.value", "Rt.vecEq", "Rt.wRaw", "Rt.wStr", "Rt.waitStatusCode"
+                       , "Rt.toI32", "Rt.valEntry", "Rt.valFreeGo", "Rt.valScanGo", "Rt.value", "Rt.vecEq", "Rt.vecStorePlain", "Rt.vecStoreYoung", "Rt.wRaw", "Rt.wStr", "Rt.waitStatusCode"
                        , "Rt.wireCmdGo", "Rt.wirePipeGo", "Rt.write-byte"
                      ]
 
@@ -8682,7 +8699,7 @@ checks rt runtimeMidText =
                     && String.contains "%t2 =l alloc8 56" ssa
                     && not (String.contains "call $malloc" ssa)
                     && String.contains "call $memset(l " ssa
-                    && String.contains "call $rt_vec_store_plain(l " ssa
+                    && String.contains "call $q_Rt_x2evecStorePlain(l " ssa
                     && String.contains "%t9 =l add %t2, 16" ssa
 
             Err _ ->
@@ -8955,7 +8972,7 @@ checks rt runtimeMidText =
             )
             [ "Rt.apply", "Rt.apply-tail", "Rt.tail-known", "Rt.bounce" ]
         )
-    , check "B6 THE TABLE (totality + agreement, over the REAL runtime text): every declared rawAbi key is in the table, every table key the rule contributed (i.e. NOT a rawAbi key) has an all-word signature, and the NINETEEN all-word surface defuns are exactly the rawAbi keys the rule derives (nine stage-6 + stage 7A's Rt.dieErr/hostDieErr + ZIGHOST Z1's eight root-registry defuns — it was twelve until 7E deleted Rt.hostDieUnported with the unported set)"
+    , check "B6 THE TABLE (totality + agreement, over the REAL runtime text): every declared rawAbi key is in the table, every table key the rule contributed (i.e. NOT a rawAbi key) has an all-word signature, and the TWENTY-ONE all-word surface defuns are exactly the rawAbi keys the rule derives (nine stage-6 + stage 7A's Rt.dieErr/hostDieErr + ZIGHOST Z1's eight root-registry defuns + ZIGHOST Z2's two vec-store writers — it was twelve until 7E deleted Rt.hostDieUnported with the unported set)"
         (let
             surface =
                 Result.withDefault [] rt.parsedSource
@@ -8970,7 +8987,7 @@ checks rt runtimeMidText =
          in
          List.all (\k -> Set.member k rawSet) (Set.toList derived)
             && List.all (\d -> Dict.member d.key rt.abi) (List.filter (\d -> Set.member d.key rawSet) surface)
-            && Set.size derived == 19
+            && Set.size derived == 21
         )
 
     -- ---- B6: THE RAW-`Var` GAP (B3's pinned row, now CLOSED for a word binder) ----
@@ -10853,6 +10870,42 @@ cStrFillAt line =
 than out of a tree: the defun bodies are prose-shaped (a 20-arm if chain), and
 the region marker is text by construction (run.js splices lines).
 -}
+{- Z2: the first line of `src` naming `needle` — the seam row's read of a CALL
+   SITE (the whole-text `contains` is too coarse there: the module always
+   carries `export function l $rt_glob_addr()`, and the young/plain seats are
+   both seeded).
+-}
+z2Line : String -> String -> String
+z2Line needle src =
+    String.lines src
+        |> List.filter (String.contains needle)
+        |> List.head
+        |> Maybe.withDefault "NONE"
+
+
+{- Z2: the probe module the seam row lowers — one surface vecstore — printed
+   for a (gc, young) flag pair.  `Err` renders its message, so a pipeline
+   failure is a named red, never a vacuous pass.
+-}
+z2Probe : Rt.Runtime -> Bool -> Bool -> String
+z2Probe r gc young_ =
+    let
+        probeDefuns =
+            case loweredRuntime "module Wb\nexport Wb.f : val -> val\ndefun Wb.f(a : val) -> val {\n  word base = allocvec(1);\n  vecstore(base, 0, mknil);\n  return mkvec(base, 1);\n}" of
+                Ok ( _, defuns ) ->
+                    defuns
+
+                Err _ ->
+                    []
+    in
+    case QbeLower.lower r False False False True True True True gc young_ QbeTypes.empty (rtArities probeDefuns) probeDefuns "Wb.f" of
+        Ok mod ->
+            Print.print mod
+
+        Err msg ->
+            "ERR:" ++ msg
+
+
 defunText : String -> String -> String
 defunText key src =
     let

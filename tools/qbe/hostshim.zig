@@ -402,97 +402,23 @@ export fn rt_raw_alloc(n: i32) callconv(.c) [*]u8 {
 // expose it to the Mid walker as alloc-free word->word calls.  The Zig GC
 // remains untouched as the differential oracle.
 
-/// The plain (NO write-barrier) vector store the Mid collector's non-moving
-/// heap needs.  `rt_vec_store` above goes through writeBarrierVectorStore,
-/// whose `inOldgen` page test indexes the ZIG heap's metadata by
-/// (addr/512 - firstheappage) — for a Mid-heap address that index is garbage
-/// and the barrier reads out of bounds.  A mark-sweep has no remembered set,
-/// so the store is the whole of the contract.
-export fn rt_vec_store_plain(vec: [*]Value, i: i32, val: *const Value) callconv(.c) void {
-    vec[@intCast(i)] = val.*;
-}
-
-/// THE NURSERY'S WRITE BARRIER (GC NURSERY unit, stage B).  The store half of
-/// the remembered set: store the Value, then — iff the VECTOR is an OLD
-/// live value-array of the Mid heap AND the stored Value REFERENCES the young
-/// space — record the vector's block address once (the RS bit, bit 61 of the
-/// block's flags word, dedups; the scavenge's remembered walk clears it).
-/// This is the SAME policy the Zig collector's writeBarrierVectorStore uses
-/// on its own heap, spelled against the MID region's slots, which the caller
-/// (Lower's RawVecStore emission under QBE_MIDGC_YOUNG) passes.  (That
-/// comment used to say this file could NOT reference the block — the block is
-/// emitted unconditionally since stage 6 B0; see THE MID GLOBALS BLOCK note
-/// above rt_boot.)
-///
-/// REGION SLOT MAP (the mirror of runtime.mid's struct Region — offsets are
-/// load-bearing and TestMain pins the declaration):
-///   word 2 heapStart, 3 cursor, 25 bmPtr, 28 young, 29 youngStart,
-///   30 youngEnd, 31 youngCursor, 32 rsBase, 33 rsTop, 34 rsEnd.
-/// The young test uses [youngStart, youngCursor) — only ALLOCATED young
-/// blocks are addressable.  A young VECTOR is not recorded (young->young is
-/// the scavenge's own transitive closure); a target outside the Mid heap
-/// (the C-heap rooted arrays — the exec-plan evals at h+8 — the frames) is
-/// not recorded either: those are ROOTS, the root walk already scans them.
-const RS_BIT: u64 = 1 << 61;
-
-export fn rt_vec_store_young(vec: [*]Value, i: i32, val: *const Value, region: usize) callconv(.c) void {
-    vec[@intCast(i)] = val.*;
-
-    // THE MID REGION IS LAZY: rt_glob word 0 is 0 (the .bss zero) until the
-    // first Mid allocation runs gcInit.  A vecstore that precedes ANY Mid
-    // allocation — e.g. hostapply's `run` arm stores into its malloc'd blob
-    // before its churn's first allocraw — hands the barrier a NULL region;
-    // dereferencing w[28] here SIGSEGVs (the hostapply flip blocker).  The
-    // store itself is already done, so a NULL region means "nothing to
-    // remember yet" and is the plain-store case exactly like young-off.
-    if (region == 0) return;
-
-    const w: [*]u64 = @ptrFromInt(region);
-    if (w[28] == 0) return; // the nursery is off at run time — plain store
-
-    const vaddr = @intFromPtr(vec);
-    const ystart = w[29];
-    const ycursor = w[31];
-    if (vaddr >= ystart and vaddr < w[30]) return; // young vector: no record
-
-    // does the stored Value reference young?  the pointer tags and their
-    // payload words mirror Rt.gcMarkValue exactly (1 string / 4 cons /
-    // 9 error / 10 vector: word 1; 6 lambda / 14 record: words 1 AND 3)
-    const cells: [*]const u64 = @ptrCast(val);
-    const tag = @as(u32, @truncate(cells[0]));
-    const refs_young = switch (tag) {
-        1, 4, 9, 10 => refsYoung(cells[1], ystart, ycursor),
-        6, 14 => refsYoung(cells[1], ystart, ycursor) or refsYoung(cells[3], ystart, ycursor),
-        else => false,
-    };
-    if (!refs_young) return;
-
-    // the vector must be an OLD LIVE VALUE-ARRAY: inside [heapStart, cursor),
-    // block-map state 1 (LIVE), kind bit 1 (value array).  Anything else is
-    // either dead (drop) or not a GC block at all (the rooted C arrays).
-    const heap_start = w[2];
-    if (vaddr < heap_start or vaddr >= w[3]) return;
-    const bm: [*]const u8 = @ptrFromInt(w[25]);
-    if (bm[(vaddr - heap_start) / 64] != 1) return;
-    const hdr: [*]u64 = @ptrFromInt(vaddr - 16);
-    if (((hdr[0] >> 1) & 1) != 1) return;
-
-    if ((hdr[0] & RS_BIT) != 0) return; // already remembered this cycle
-    hdr[0] |= RS_BIT;
-
-    const rs: [*]u64 = @ptrFromInt(w[32]);
-    const top = w[33];
-    if (top >= w[34]) {
-        werr("qbe-rt: midgc: remembered set overflow (capacity capBytes/64; raise the heap or report)\n");
-        std.process.exit(1);
-    }
-    rs[top] = vaddr;
-    w[33] = top + 1;
-}
-
-inline fn refsYoung(p: u64, ystart: u64, ycursor: u64) bool {
-    return p >= ystart and p < ycursor;
-}
+// (DELETED AT ZIGHOST Z2) THE TWO VEC-STORE WRITERS ARE MID'S NOW.
+//   rt_vec_store_plain (the no-barrier store) and rt_vec_store_young (the
+//   NURSERY's remembered-set barrier) are gone: Lower's ONE RawVecStore arm
+//   names runtime.mid's Rt.vecStorePlain / Rt.vecStoreYoung, which write the
+//   remembered set (Region slots 32/33/34) and the RS bit (flags bit 61)
+//   directly — the same slots, in the collector's own idiom, with the
+//   w-class `&` landmine spelled around as a DIVISION.
+//   WHY they had to move rather than be re-pointed: the barrier's whole body
+//   reads the MID region (youngStart/youngCursor/youngEnd, the block map, the
+//   block header), which only the Mid side owns; a Zig seat had to be GIVEN
+//   the region as a 4th argument, and the seam was therefore two spellings of
+//   one policy.  rt_vec_store (the OLD collector's writeBarrierVectorStore
+//   seat) stays until Z6 deletes this file: it serves only the retired escape
+//   route, so nothing emits it.
+//   The RS-bit/refsYoung machinery that lived here is gone with them; the
+//   surviving statement of the policy is runtime.mid's Rt.vecStoreYoung, and
+//   TestMain's NURSERY PIN rows are what keep it honest.
 
 /// The configured heap size (main's QBE_HEAP_MB, in bytes).  The Mid
 /// collector mmaps its own region of this size so the churn differential's
@@ -563,8 +489,9 @@ var gc_heap_bytes: usize = 0;
 //  rt.o cannot be linked without a Mid-emitted module: B4 deleted the Zig
 //  `main`, so the seed's Mid `main` is the only one (qbe-bootstrap.sh step
 //  4/4).  So a reference from this file resolves in every link rt.o takes
-//  part in — the stale "this file cannot reference $rt_glob" note above
-//  rt_vec_store_young predates B0 and is corrected here.
+//  part in.  (The note that used to sit above the vec-store seats saying this
+//  file could not reference the block predated B0; those seats are Mid's since
+//  Z2 and the only Zig writer left is rt_boot's values-table base below.)
 //
 //  Word indices are Mid.RtGc's LAYOUT table.  The values-table base (word 3)
 //  is the ONE word this file writes: every other slot is Mid's own state.

@@ -263,4 +263,13 @@ gcProgram =
     , seat "Rt.gcScavOne" 1
     , seat "Rt.gcScavDrain" 1
     , seat "Rt.gcPromoteAlloc" 3
+    , -- ===== THE VEC-STORE SEAM (zighost Z2).  These are COLLECTOR seats, not
+      -- prims: the young writer's whole job is to write collector state (the
+      -- RS bit, the remembered set), and the plain writer is the same seam's
+      -- no-barrier arm.  Lower's RawVecStore arm names them directly, so they
+      -- are seeded from Mid.Rt.lowerSeatSeeds (plain) and youngGcSeeds
+      -- (young — its body lives in runtime.mid's QBE_MIDGC_YOUNG-ONLY region,
+      -- exactly like the scavenge family above).
+      seat "Rt.vecStorePlain" 3
+    , seat "Rt.vecStoreYoung" 3
     ]

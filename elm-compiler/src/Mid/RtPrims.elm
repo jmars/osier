@@ -755,6 +755,13 @@ primDefuns consArr rec eqPtrFast =
     , seat "Rt.conFill" 3
     , seat "Rt.closure" 3
     , seat "Rt.closureFill" 3
+      -- zighost Z3: the per-Desc closure CACHE (the former Zig seat
+      -- rt_global_closure) is the constructor layer's third member — a
+      -- malloc'd, POINTER-FREE one-Value slot hanging off desc+16, named
+      -- directly by Lower's lowerGRefValue and seeded from
+      -- Mid.Rt.lowerSeatSeeds.  A prim-half seat: it names no gc key (malloc
+      -- + word stores only), so the prim-half call-graph row holds.
+    , seat "Rt.globalClosure" 1
     , seat "Rt.emptylist" 1
     , seat "Rt.=" 2
       -- T20: the arithmetic + comparison + tag-predicate families moved to

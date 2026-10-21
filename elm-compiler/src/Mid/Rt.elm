@@ -10,6 +10,7 @@ module Mid.Rt
         , closureSeeds
         , conSeeds
         , driverSeeds
+        , lowerSeatSeeds
         , gcSeeds
         , youngGcSeeds
         , hostSeeds
@@ -935,6 +936,15 @@ rtDeps =
         , -- ===== the Mid closure (zigretire stage 5 PART 2)
           ( "Rt.closure", [ "Rt.closureFill" ] )
         , ( "Rt.closureFill", [ "Rt.closureFill" ] )
+        , -- ===== THE VEC-STORE SEAM + THE CLOSURE CACHE (zighost Z2/Z3).
+          -- Lower names both seats directly (`q_Rt_x2evecStorePlain` from the
+          -- RawVecStore arm and the record arms, `q_Rt_x2eglobalClosure` from
+          -- lowerGRefValue), so they are seeded from `lowerSeatSeeds`; the
+          -- YOUNG writer lives in the QBE_MIDGC_YOUNG-ONLY region and is
+          -- seeded from `youngGcSeeds` — this row is the only place that says
+          -- so, and the die edge is the only dependency it has.
+          ( "Rt.vecStorePlain", [] )
+        , ( "Rt.vecStoreYoung", [ "Rt.die" ] )
         , -- ===== the fd prims (zigretire stage 3 GROUP 1)
           ( "Rt.write-byte", [] )
         , ( "Rt.read-byte", [ "Rt.readFull", "Rt.ssReadbyte" ] )
@@ -1460,7 +1470,7 @@ spliced region, so nothing else needs to name these keys.
 -}
 youngGcSeeds : List String
 youngGcSeeds =
-    keepRtDependencies [ "Rt.gcScavenge" ]
+    keepRtDependencies [ "Rt.gcScavenge", "Rt.vecStoreYoung" ]
 
 
 {-| The Mid-routed CONSTRUCTOR seeds (zigretire stage 5): the Rt defuns Lower
@@ -1483,6 +1493,22 @@ used-prim census does not seed it).
 closureSeeds : List String
 closureSeeds =
     keepRtDependencies [ "Rt.closure" ]
+
+
+{-| THE SEATS LOWER NAMES DIRECTLY (zighost Z2/Z3): the plain vec-store writer
+and the per-Desc closure-cache slot.  Neither is a prim (so the used-prim
+census does not seed them) and neither is a collector defun (so `gcSeeds`
+does not either), yet both are ALWAYS PRESENT and always emitted when Lower's
+RawVecStore arm / `lowerGRefValue` names them.
+
+The YOUNG vec-store seat is the exception: its body lives in runtime.mid's
+QBE_MIDGC_YOUNG-ONLY region, so it is seeded from `youngGcSeeds` instead — an
+always-present row here naming it would drag an absent defun into a plain
+build's seed closure and Lower would die "unknown global".
+-}
+lowerSeatSeeds : List String
+lowerSeatSeeds =
+    keepRtDependencies [ "Rt.vecStorePlain" ]
 
 
 {-| THE RAW-WORD DEFUN CONVENTION (stage 6 U2, plan obs-4): the Rt keys that
@@ -1535,6 +1561,13 @@ rawAbi =
           -- frameZero discipline), removing the per-word blit/boxing.
           "Rt.copyWords"
         , "Rt.copyWordsGo"
+        , -- ===== zighost Z2's VEC-STORE SEAM.  Both writers are all-word
+          -- signatures, so the B6 rule derives them anyway; declaring them
+          -- here is what makes the two statements AGREE (the B6 THE TABLE row
+          -- asserts derived == rawAbi over the shipped text), and the arity
+          -- record is what checks every call site's 3 words.
+          "Rt.vecStorePlain"
+        , "Rt.vecStoreYoung"
         , -- ===== the stage-6 B2 mid-tail family.  Rt.tail-known is a raw-word
           -- defun whose RESULT is the 80-byte `:ret` (Agg "ret", the
           -- rt_tail_known seat's C ABI — 3 word params code/argblock/nargs,
@@ -1617,6 +1650,10 @@ rawAbiArity =
           -- lowerDefun (rawAbiArityAgree).
         ( "Rt.tail-known", 3 )
         , ( "Rt.bounce", 1 )
+        , -- zighost Z2: the two vec-store writers take (vec, index, *Value) —
+          -- three words, checked against both the defun and Lower's seam.
+          ( "Rt.vecStorePlain", 3 )
+        , ( "Rt.vecStoreYoung", 3 )
         , -- stage 7A's die family (see the rawAbi set above): the message, and
           -- the two-part variant's prefix + name.
           ( "Rt.dieErr", 1 )

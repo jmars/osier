@@ -4604,6 +4604,30 @@ defun Rt.gcNumOut(label : val, n : val, region : val) -> val {
   rawcall write(2, payload(start, 0), end - payload(start, 0));
   return mknil;
 }
+// ==================== THE VEC-STORE SEAM (zighost Z2) ====================
+// Lower has ONE RawVecStore arm and it names ONE of these two defuns: the
+// YOUNG barrier when the build carries the nursery, the PLAIN store
+// otherwise.  Before Z2 the writers were two Zig seats
+// (tools/qbe/hostshim.zig rt_vec_store_young / rt_vec_store_plain); they are
+// DELETED, so the seam has one spelling and the Mid heap has one writer.
+// The retired escape route's third spelling (rt_vec_store -> the Zig
+// collector's writeBarrierVectorStore) is dead code on this tree (run.js
+// refuses QBE_MIDGC=0) and goes with the rest of hostshim at Z6.
+//
+// WHY THE STORE IS FIVE WORD STORES, not a struct copy: the DSL's `p[i] = e`
+// on a `*val` IS RawVecStore — i.e. THIS seam — so using it here would be an
+// infinite regress.  A Value is 40 bytes = 5 words (RtLayout.valSizeBytes),
+// the vec index is a VALUE-unit index (Mid.Ir's RawVecStore contract), so the
+// element address is `vec + i * 40` and the store is words 0..4 of it.
+defun Rt.vecStorePlain(vec : word, i : word, val : word) -> word {
+  word e = vec + i * 40;
+  wstore(e, 0, wload(val, 0));
+  wstore(e, 1, wload(val, 1));
+  wstore(e, 2, wload(val, 2));
+  wstore(e, 3, wload(val, 3));
+  wstore(e, 4, wload(val, 4));
+  return 0;
+}
 // >>> QBE_MIDGC_YOUNG-ONLY
 // ==================== THE NURSERY (GC NURSERY unit) ====================
 // QBE_MIDGC_YOUNG=1 BUILD-ONLY (run.js splices this whole region out unless
@@ -4618,6 +4642,108 @@ defun Rt.gcNumOut(label : val, n : val, region : val) -> val {
 // exact only to 2^53, so the constants are PRODUCTS: RS = 2^30 * 2^31, FWD =
 // 2^31 * 2^31, MASK = RS - 1.  Both bits sit above every legal class and are
 // cleared by every fresh header write.
+//
+// Rt.vecStoreYoung: THE WRITE BARRIER'S RECORD HALF (zighost Z2) — the store
+// (Rt.vecStorePlain's five words, inlined: no second spelling of the store
+// lives here) and then, iff the VECTOR is an OLD LIVE VALUE-ARRAY of the Mid
+// heap AND the stored Value REFERENCES the young space, one entry in the
+// remembered set (slot 32/33/34) plus the block's RS bit.  The policy is the
+// deleted Zig seat's, arm for arm (hostshim.zig rt_vec_store_young): a YOUNG
+// vector is NOT recorded (young->young is the scavenge's own transitive
+// closure) and a target outside the Mid heap (the C-heap rooted arrays, the
+// frames) is not either — those are ROOTS, and the root walk already scans
+// them.  NO NEW STATE: every slot this defun touches is collector state the
+// Region already owns, which is what makes the port a word-op translation
+// rather than a second design.
+//
+// THE MASK LANDMINE, SPELLED AROUND (the stage-A drain bug — the NURSERY PIN's
+// register-class row): a word `&` with a constant >= 2^32 lowers to a w-CLASS
+// (32-bit) op whose result TRUNCATES both operands, so `flags & 2^61` is
+// IDENTICALLY ZERO and a "remembered" test written that way never fires.  So
+// the RS test here is a DIVISION (flags / 2^61, exactly Rt.gcScavOne's
+// spelling) and the tag read is a zero-EXTEND (uext), never an `&`.  The
+// bit-WRITE is the matching ADDITION of the same product.
+//
+// SHAPE: a raw-word defun cannot join two word-returning branches (Lower's
+// lowerTailWord), so an early `return` out of a guard is INEXPRESSIBLE here.
+// Every decision is therefore either word arithmetic on the 0/1 that a bare
+// comparison already IS (`a * b` = and, `a + b` = or, both exact on 0/1 —
+// which is also why no `&&`/`||` appears: those are val,val operators and
+// would BOX a Value per test), or a conditional-side-effect bind in the
+// Rt.frame-leave shape (`word x = if (c) { work; return 0; } else { return 0; };`
+// — the arm runs its effects, the bind's value is dead).  The nesting is the
+// GUARD ORDER: the region, then the young-vector fast path, then the old-block
+// test — so a young vector (the common case in a young build) pays no barrier
+// work at all, and the two reads that could fault (the block map, the block
+// header) sit inside the arms that have already proved the address is an
+// in-range OLD block.
+defun Rt.vecStoreYoung(vec : word, i : word, val : word) -> word {
+  word e = vec + i * 40;
+  wstore(e, 0, wload(val, 0));
+  wstore(e, 1, wload(val, 1));
+  wstore(e, 2, wload(val, 2));
+  wstore(e, 3, wload(val, 3));
+  wstore(e, 4, wload(val, 4));
+  word regW = wload(rawcall rt_glob_addr(), 0);
+  // THE REGION IS LAZY: rt_glob word 0 is 0 (the .bss zero) until the first
+  // Mid allocation runs gcInit, and a vecstore can precede it (hostapply's
+  // `run` arm stores into its malloc'd blob before its churn's first
+  // allocraw).  The store above is already done, so a NULL region means
+  // "nothing to remember yet" and is the plain-store case exactly.
+  word mapped = if (regW != 0) {
+    *Region region = regW;
+    word ys = region->youngStart;
+    word yc = region->youngCursor;
+    // THE FAST PATH: the nursery off, or a YOUNG vector.  `young` is the
+    // run-time knob (slot 28) — 0 in a QBE_MIDGC_YOUNG=0 BUILD's every run,
+    // so the whole barrier is inert there even though the code is linked.
+    word plain = if ((region->young == 0) + ((vec >= ys) * (vec < region->youngEnd)) != 0) {
+      return 0;
+    } else {
+      word tag = uext(wload(val, 0));
+      word p1 = wload(val, 1);
+      // a lambda (6) and a record (14) hold a SECOND pointer payload word;
+      // 1/4/9/10 (string, cons, error, vector) hold one.  p2 is multiplied
+      // by the test so the other tags contribute a ZERO (never a stray
+      // payload word that could land in the young range by accident).
+      word isRec = (tag == 6) + (tag == 14);
+      word p2 = (isRec != 0) * wload(val, 3);
+      word ptrTag = (tag == 1) + (tag == 4) + (tag == 9) + (tag == 10) + isRec;
+      word refs = ((p1 >= ys) * (p1 < yc)) + ((p2 >= ys) * (p2 < yc));
+      word inOld = (vec >= region->heapStart) * (vec < region->cursor);
+      word old = if (inOld != 0) {
+        word st = byteload(region->bmPtr + (vec - region->heapStart) / 64, 0);
+        word flags = wload(vec, -2);
+        word kind1 = (flags >> 1) & 1;
+        word rsClear = (flags / (1073741824 * 2147483648)) == 0;
+        word go = ptrTag * refs * (st == 1) * kind1 * rsClear;
+        word rec = if (go != 0) {
+          wstore(vec, -2, flags + (1073741824 * 2147483648));
+          word top = region->rsTop;
+          word full = if (mkbool(top >= region->rsEnd)) {
+            call Rt.die(rawstr("qbe-rt: midgc: remembered set overflow (capacity capBytes/64; raise the heap or report)"));
+            return 0;
+          } else {
+            return 0;
+          };
+          wstore(region->rsBase, top, vec);
+          region->rsTop = top + 1;
+          return 0;
+        } else {
+          return 0;
+        };
+        return 0;
+      } else {
+        return 0;
+      };
+      return 0;
+    };
+    return 0;
+  } else {
+    return 0;
+  };
+  return 0;
+}
 //
 // Rt.gcPromoteAlloc: allocate an OLD-space block for a promoted young object.
 // Mirrors gcAlloc's old path WITHOUT its collect trigger (a scavenge must not
@@ -5585,6 +5711,42 @@ defun Rt.closureFill(data : val, capBase : val, idx : val) -> val {
     vecstore(dataW, idxW - 1, vecload(capW, idxW - 1));
     return call Rt.closureFill(mknum(dataW), mknum(capW), mknum(idxW - 1));
   }
+}
+
+// Rt.globalClosure: THE PER-DESC CLOSURE CACHE (zighost Z3) — the native
+// mirror of the VM's defun table (one closure per defun, built once).  The
+// deleted Zig seat (hostshim.zig rt_global_closure) kept its slot in a
+// page-allocator arena and pushed it on the ZIG shadow stack forever; both are
+// gone with that collector, and NO ROOT IS NEEDED HERE: the slot is a malloc'd
+// 40-byte Value whose payload words are a STATIC descriptor address (code), the
+// descriptor's arity (code_len) and ZERO (env, env_len) — it holds no pointer
+// into either heap, so there is nothing for a collector to update or keep.
+// (Putting the slot in the MID heap instead and relying on `desc.cache` would
+// be a second *argv*-class hole — a reachable object nothing roots; the C-heap
+// slot avoids that BY CONSTRUCTION, not by discipline.)
+//
+// THE CACHE WORD IS desc+16 (RtLayout.descCacheOffset): the emitted descriptor
+// data is `{ l fn, w arity, w ncaps, z 8 }` — 24 bytes, cache at word 2.
+// The fast path is one load + one compare + a 40-byte vecload, which is what
+// makes this affordable at the 832 shipped selfhost call sites: no call, no
+// allocation, no root push on the hit.
+//
+// code_len is the FULL desc word 1 (arity | ncaps<<32) exactly as the sibling
+// seat Rt.closure writes it (mkval's second word); every reader is a
+// payload32, i.e. the low half, and a top-level defun's ncaps is 0.
+defun Rt.globalClosure(desc : word) -> val {
+  word cache = wload(desc, 2);
+  if (cache != 0) {
+    return vecload(cache, 0);
+  }
+  word slot = rawcall malloc(40);
+  wstore(slot, 0, 6);
+  wstore(slot, 1, desc);
+  wstore(slot, 2, wload(desc, 1));
+  wstore(slot, 3, 0);
+  wstore(slot, 4, 0);
+  wstore(desc, 2, slot);
+  return vecload(slot, 0);
 }
 
 defun Rt.bytesBuild(s : val, i : val, acc : val) -> val {
