@@ -3758,7 +3758,29 @@ checks rt runtimeMidText =
             && String.contains "rt_vec_store" (render False False)
             && not (String.contains "rt_vec_store_young" (render False False))
         )
-    , check "NURSERY PIN (the seeding discipline): no ALWAYS-PRESENT rtDeps row names a young-only key — a plain MIDGC build closes gcSeeds over those rows, and an absent key is Lower's loud 'unknown global'"
+    , check "NURSERY PIN (promote bumps before it grows): Rt.gcPromoteAlloc's bump arm precedes its growth ladder — the stage-A bug was a promote path that ran the ladder UNCONDITIONALLY (every free-list miss doubled the limit even with the cursor at offset 0, the startup grow-to-the-ceiling; reserve-only, but still wrong)"
+        (case List.head (String.indexes "defun Rt.gcPromoteAlloc" runtimeMidText) of
+            Nothing ->
+                False
+
+            Just i ->
+                let
+                    seg =
+                        String.slice i (i + 2200) runtimeMidText
+
+                    b =
+                        List.head (String.indexes "BUMP FIRST" seg)
+
+                    l =
+                        List.head (String.indexes "word needLim = (cursor + phys * 8) - heapStart;" seg)
+                in
+                case ( b, l ) of
+                    ( Just bb, Just ll ) ->
+                        bb < ll
+
+                    _ ->
+                        False
+        )    , check "NURSERY PIN (the seeding discipline): no ALWAYS-PRESENT rtDeps row names a young-only key — a plain MIDGC build closes gcSeeds over those rows, and an absent key is Lower's loud 'unknown global'"
         (let
             youngKeys =
                 [ "Rt.gcScavenge", "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavPtr", "Rt.gcScavCopyWords", "Rt.gcScavRemembered", "Rt.gcScavOne", "Rt.gcScavDrain", "Rt.gcPromoteAlloc" ]

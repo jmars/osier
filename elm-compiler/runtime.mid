@@ -4040,6 +4040,21 @@ defun Rt.gcPromoteAlloc(cls : val, kind : val, count : val) -> val {
   }
   word cursor = rw->cursor;
   word heapStart = rw->heapStart;
+  // BUMP FIRST (the stage-A bug was the absence of this arm): a promotion
+  // that MISSES the free list must bump the cursor like gcAlloc's old path
+  // does, and only GROW when the bump cannot fit.  Without this, EVERY
+  // free-list miss ran the growth ladder unconditionally and doubled the
+  // limit even with the cursor at offset 0 — the startup grow-to-the-ceiling
+  // (reserve-only: heapEnd is a LIMIT inside the already-mapped region, so it
+  // raised VAS, not RSS — the frontier stayed at the live set).
+  if (mkbool(cursor + phys * 8 < rw->heapEnd)) {
+    wstore(cursor, -2, kindW * 2 + clsW * 4);
+    wstore(cursor, -1, countW);
+    bytestore(rw->bmPtr + (cursor - rw->heapStart) / 64, 0, 1);
+    rw->cursor = cursor + phys * 8;
+    rw->allocated = rw->allocated + phys * 8;
+    return mknum(cursor);
+  }
   word needLim = (cursor + phys * 8) - heapStart;
   word lim = rw->heapEnd - heapStart;
   word dbl = lim * 2;
