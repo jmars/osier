@@ -10,7 +10,7 @@
 #                              address, the raw copy was not: 1)
 # THE PROOF IS THE PAIR, one binary, env-toggled:
 #   QBE_MIDGC_YOUNG=0       -> 10011  (the mark-sweep golden, the run-time escape)
-#   QBE_MIDGC_YOUNG=1/unset -> 10001  (== the QBE_MIDGC=0 Zig build's number)
+#   QBE_MIDGC_YOUNG=1/unset -> 10001  (== the mark-sweep route's moving number)
 # FAIL-BEFORE (MEASURED, stage A): the young arm died
 #   'scavenge read a POISONED (forwarded young) body' in the DRAIN — the
 #   FORWARDED test's word `&` lowered w-class and never fired, so every
@@ -69,15 +69,14 @@ else
   fail "valchurn young-OFF printed '$out', want 10011 (non-moving)"
 fi
 
-# ---- arm 3: the DEFAULT build agrees (the moving reference) ---------------
-DBIN="$(QBE_MIDGC=0 "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/valchurn.elm Valchurn.main "$WORK/def" 2>>"$WORK/mk.log")" \
-  || { echo "probe-midgc-young: qbe-mk (QBE_MIDGC=0) failed" >&2; exit 1; }
-out="$(run env QBE_HEAP_MB=$HEAP_MB "$DBIN" Valchurn.main 2>/dev/null)"
-if [ "$out" = "10001" ]; then
-  echo "PASS (3): the QBE_MIDGC=0 (Zig, moving) build prints $out — the number the young arm must match"
-else
-  fail "the QBE_MIDGC=0 build printed '$out', want 10001"
-fi
+# ---- arm 3: RETIRED at ZIGHOST Z0 -----------------------------------------
+# It built valchurn with QBE_MIDGC=0 — the ZIG collector's route — and asserted
+# it printed 10001, the moving number the young arm must match.  That route is
+# deleted and run.js now REFUSES QBE_MIDGC=0 (exit 2), so there is no second
+# collector to compare against: arm 1 above is already the moving number, and a
+# re-pointed arm 3 would rebuild BIN and measure the same binary twice.
+# The claim arm 3 carried ("the young arm's number is the moving one") is what
+# arm 1 + arm 2's PAIR asserts — 10001 with the nursery, 10011 without it.
 
 # ---- arm 4: the graded Wyoung arms ----------------------------------------
 for spec in "0 424242" "1 11000022" "2 0" "3 1" "4 1" "5 1"; do

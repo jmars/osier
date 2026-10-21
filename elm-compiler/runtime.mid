@@ -300,10 +300,9 @@ extern strtoll(s : ptr, endptr : ptr, base : i32) -> i64;
 //   ---- THE STRING-STREAM REGISTRY (O5 — NOT a Region field) -----------
 //   The registry lives in the GLOBALS BLOCK at words 14..15 (ssN at 15,
 //   ssTab at 14 — see RtGc.elm's layout table): it is NOT collector state,
-//   and a QBE_MIDGC=0 build maps no region at all, so Region slots would
-//   be unreachable there.  The block is .bss (zeroed) and rt_glob_addr is
-//   emitted UNCONDITIONALLY (finishModule), so both routes read the same
-//   registry.  The former rt_ss_in/readbyte/close C seats died at O5;
+//   so a Region slot would be the wrong home for it.  The block is .bss
+//   (zeroed) and rt_glob_addr is emitted UNCONDITIONALLY (finishModule), so
+//   the registry is reachable before a region is mapped and after.  The former rt_ss_in/readbyte/close C seats died at O5;
 //   Rt.open's ENOENT arm, Rt.read-byte's string arm and Rt.close's string
 //   arm call the Mid defuns below.
 //
@@ -1771,8 +1770,8 @@ defun Rt.open(path : val, dir : val) -> val {
 // ==================== THE INTERN TABLE (O5 seat 2) =====================
 // rt_sym_intern died here: the table is Mid-owned now — a lazily-malloc'd
 // array of (name,len) pairs off the GLOBALS BLOCK words 8208..8210 (after the
-// frame freelist; NOT collector state — the QBE_MIDGC=0 escape route reaches
-// it too).  Linear byte-compare walk, NOT the Zig table's DJB2+resize: every
+// frame freelist; NOT collector state, so it stays reachable before a region
+// is mapped).  Linear byte-compare walk, NOT the Zig table's DJB2+resize: every
 // MEASURED call site is a rawstr LITERAL (16 call sites, 9 distinct names, all
 // < 8 bytes — cons/string/isDir/isFile/mode/mtimeMs/name/number/size), so the
 // walk is O(144) worst case and the pointer identity the old seat preserved
@@ -1945,8 +1944,8 @@ defun Rt.intern(str : val) -> val {
 // so the Zig side cannot hand the lookup over; it hands over the BASE.  rt_boot
 // stores `vm.values_table` into the GLOBALS BLOCK at word 3 (RtGc.elm's layout
 // table; the same rule the string-stream registry and the intern table follow:
-// a QBE_MIDGC=0 build maps no region, rt_glob_addr is emitted unconditionally
-// and the block is .bss, so both routes read the same word).  Word 3 because
+// rt_glob_addr is emitted unconditionally and the block is .bss, so the word
+// is readable before a region is mapped).  Word 3 because
 // word 1 is the frame machinery's CURRENT-FRAME pointer (frame-enter/leave
 // `wstore(glob, 1, hdr)`) — a value parked there dies at the next frame push.
 //

@@ -10,10 +10,11 @@
 # applied cells. The model prints the applied prefix, the text's LENGTH and
 # its first line, so a call that loses either half cannot print the golden.
 #
-#   * PASS-AFTER (this tree): both hosts print "PREFIX:34:first line here" —
-#     the Mid host through `Rt.apply-at`'s `rt_call2r` bridge and the ZIG host
-#     through `hostApply`'s same interleave (params = the applied cells then
-#     the new args, `env` advanced past the applied cells).
+#   * PASS-AFTER (this tree): "PREFIX:34:first line here" — the Mid host
+#     through `Rt.apply-at`'s `rt_call2r` bridge.  The ZIG host's arm is gone
+#     (O4 deleted the host; ZIGHOST Z0 deleted the collector hatch that was the
+#     only way to build against it), so the differential this probe once had is
+#     a single arm now.
 #   * FAIL-BEFORE: restore the pre-fix `hostApply` (the `napp > 0` arm deleted:
 #     `desc.arity` params, only `args.len` cells filled, the closure's env
 #     unchanged). MEASURED 2026-10-19 on this fixture: one run printed NOTHING
@@ -50,7 +51,7 @@ need node; need cc
 OUT="$(mktemp -d "${TMPDIR:-/tmp}/probe-hostpart.XXXXXX")" || exit 2
 trap 'rm -rf "$OUT"' EXIT
 
-QBE_MIDGC=0 "$ROOT/tools/qbe/qbe-mk.sh" "$FIXTURE" "$ENTRY" "$OUT/bin" >/dev/null 2>&1 || {
+"$ROOT/tools/qbe/qbe-mk.sh" "$FIXTURE" "$ENTRY" "$OUT/bin" >/dev/null 2>&1 || {
   echo "BUILD_FAILED: tools/qbe/qbe-mk.sh could not build $FIXTURE" >&2
   exit 2
 }
@@ -70,10 +71,12 @@ fail() { # $1 = label, $2 = what it printed
 A="$(run "the Mid host")"
 [ "$A" = "$GOLDEN" ] || fail "the Mid host (QBE_MIDHOST unset)" "$A"
 
-# ARM B — the ZIG host's native applier (hostApply). This is the arm the fix
-# is about: it is the differential oracle and the route the seed-built
-# compiler took whenever `Rt.hostIsProgram`'s payload read saw stale padding.
-B="$(run "the Zig host" QBE_MIDHOST=0)"
-[ "$B" = "$GOLDEN" ] || fail "the Zig host (QBE_MIDHOST=0)" "$B"
+# ARM B — RETIRED.  It ran the same binary with QBE_MIDHOST=0 to select the ZIG
+# host's native applier (hostApply), the arm the fix was originally about.  Both
+# halves of that are deleted: O4 removed the Zig host and its run-time getenv
+# switch (QBE_MIDHOST is inert — no reader survives in runtime.mid), and ZIGHOST
+# Z0 removed QBE_MIDGC=0, the only way to build against the Zig heap.  A
+# re-pointed arm B would set an inert variable and measure arm A twice, so it is
+# deleted rather than left looking like a differential.
 
-echo "PASS-AFTER: a partially applied continuation is applied with its prefix intact on BOTH hosts ($GOLDEN)"
+echo "PASS-AFTER: a partially applied continuation is applied with its prefix intact ($GOLDEN)"

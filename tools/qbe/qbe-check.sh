@@ -185,21 +185,13 @@ run_mid() {
   # which is "unset" to run.js) now carries the Mid host, and `=1` merely says so
   # explicitly.  It is left in place because the row that flips a knob back is
   # the cheap fail-before for the flip itself: `MIDHOST_ROW=` -> QBE_MIDHOST=0
-  # would drop the two host rows' seats.  SINCE STAGE 7 O3 THAT BY-HAND
-  # FAIL-BEFORE ALSO NEEDS `QBE_MIDGC=0`: the default collector is now the Mid
-  # one, and run.js REFUSES the QBE_MIDGC=1 + QBE_MIDHOST=0 BUILD outright
-  # (MIDGC_DEPENDS_ON), so the knob alone would exit 2 instead of compiling the
-  # unhosted arm.
-  # MIDGC_OFF=1 (the GC NURSERY flip's companion) builds the row on the
-  # QBE_MIDGC=0 Zig route: the run_midshape rows below it assert LITERAL .ssa
-  # shapes whose TEMP NAMES are the Zig route's register allocation — under
-  # the Mid collector the same declared boundary emits the same classes with
-  # different temps, so the frozen assertion is route-bound.  Unset, the
-  # variable is empty (= unset to run.js under both the old opt-in and the
-  # flipped default readings).
   # (O4: QBE_MIDHOST is RETIRED — the Mid host is the only host; the
-  # MIDHOST_ROW knob's env is no longer set.)
-  bin="$(QBE_MIDGC="${MIDGC_OFF:+0}" "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "${mids[@]}" "$entry" "$TMP/$name")" || {
+  # MIDHOST_ROW knob's env is no longer set.  ZIGHOST Z0 RETIRED THE
+  # MIDGC_OFF KNOB too: it built the row on the Zig collector's route so the
+  # run_midshape rows' literal .ssa temp names stayed comparable, and that
+  # route is deleted — the frozen shapes below are the MID route's, which is
+  # now the only emission there is.)
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "${mids[@]}" "$entry" "$TMP/$name")" || {
     echo "FAIL $name: qbe-mk"; FAIL=1; return
   }
   local nat_out
@@ -293,10 +285,10 @@ run_midrt() {
 # a named compile error).  `$5` asserts a substring of the REFUSAL MESSAGE, so
 # a row cannot pass on an unrelated (e.g. J2) failure.  `$6...` optionally name
 # the hatches to run under, as SEPARATE words (an array — one `env` argument per
-# flag, so a row can need two: since stage 7 O3 the Mid collector is the
-# default, and any hatch MIDGC_DEPENDS_ON names must be paired with QBE_MIDGC=0
-# or run.js refuses the BUILD and the row measures the GUARD's message instead
-# of its own).  QBE_NOMIDRT=1 is what removes the defun here.
+# flag).  Since ZIGHOST Z0 no pairing can rescue a MIDGC_DEPENDS_ON hatch: the
+# Mid collector is unconditional, so the guard refuses those builds outright and
+# a row measuring one would read the GUARD's message instead of its own — which
+# is why the rows that needed NOMIDRT are retired below.
 run_midref() {
   local name="$1" entry="$2" fixture="$3" mid="$4" expect="$5"
   shift 5
@@ -588,21 +580,19 @@ run_midgc_nsi() {
   fi
 }
 
-# run_midgc_io — the DEFAULT-path control for the host-IO fixture: with the Zig
-# collector the kept string is rooted -> evacuated, not reclaimed, so the
-# fixture prints the golden.  Proves the refusal did not change the default
-# path.
+# run_midgc_io — the host-IO fixture's golden + churn row: the kept string is
+# rooted across a 4-arg mutual tail recursion, so the fixture prints "100|150".
 #
-# STAGE 7 O3 MOVED WHAT "THE DEFAULT PATH" IS: no flag now means the MID
-# collector (QBE_MIDGC defaults ON), so an unflagged build here would measure
-# the Mid path — which is probe-midgc-io.sh's row and NOT this one's claim.  The
-# control arm is therefore PINNED EXPLICITLY at QBE_MIDGC=0: this row is the
-# Zig-collector half of the pair, and the pair only means something when each
-# arm says which collector it is.
+# IT WAS THE ZIG-COLLECTOR HALF OF A PAIR (stage 7 O3 pinned it at
+# QBE_MIDGC=0 so each arm said which collector it was).  ZIGHOST Z0 DELETED the
+# Zig collector: the flag is refused outright, and both halves of that pair now
+# measure the same one route — this row and probe-midgc-io.sh.  The row is kept
+# for the golden + churn contract (a reclaimed kept string turns it red); it no
+# longer distinguishes a collector.
 run_midgc_io() {
   local name="$1" entry="$2" fixture="$3"
   local bin
-  bin="$(QBE_MIDGC=0 "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$TMP/$name")" || {
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$TMP/$name")" || {
     echo "FAIL $name: qbe-mk (default)"; FAIL=1; return
   }
   local nat_out exp
@@ -739,16 +729,18 @@ run_mid user-mid UserMidRun.main tools/qbe/fixtures/user-mid.elm tools/qbe/fixtu
 # the run dir and expects its content (the printed value is load-bearing on
 # the seeded call).  The golden is `"rtcall-ok"` (the driver quotes strings).
 run_midrt user-mid-rtcall UserMidRtCall.main tools/qbe/fixtures/user-mid-rtcall.elm tools/qbe/fixtures/user-mid-rtcall.mid
-# M3fix-4 (b): the INVERSE row — a user .mid `call` naming a key that resolves
-# at J2 but is NO defun of this program.  QBE_NOMIDRT=1 withholds the Mid Rt
-# program, so the exported key `Rt.read-file-as-string` has nothing behind it;
-# the compile must refuse loudly, naming the key.  run_midref greps the REFUSAL
-# MESSAGE ('not a defun of this program'), so a J2-level failure cannot satisfy
-# the row.  QBE_MIDGC=0 rides along (stage 7 O3): QBE_NOMIDRT=1 is a
-# MIDGC_DEPENDS_ON entry, so with the collector on by default this build would
-# be refused by run.js's GUARD instead — a different refusal, with a different
-# message, and the row would then be reading the guard rather than the program.
-run_midref midcallmissing MidCallMissing.main tools/qbe/fixtures/midcallmissing.elm tools/qbe/fixtures/midcallmissing.mid 'not a defun of this program' QBE_NOMIDRT=1 QBE_MIDGC=0
+# M3fix-4 (b) — THE midcallmissing ROW IS RETIRED AT ZIGHOST Z0, and this is
+# why it cannot be re-pointed: its whole subject was a user .mid `call` naming a
+# key that resolves at J2 but is NO defun of this program, and the ONLY way to
+# reach that state was QBE_NOMIDRT=1 (withhold the Mid Rt program so
+# `Rt.read-file-as-string` has nothing behind it).  NOMIDRT is a
+# MIDGC_DEPENDS_ON entry, so while the Zig collector existed the row could pair
+# it with QBE_MIDGC=0; the collector is unconditional now, the guard refuses
+# every NOMIDRT=1 build outright (exit 2), and a row built on it would measure
+# the GUARD's message instead of the program's.  The fixtures stay
+# (tools/qbe/fixtures/midcallmissing.{elm,mid}) — the loud refusal they exercise
+# is still covered by the rows above, which reach it through a plain dangling
+# key.  Deleted: the run_midref call that named them.
 # M4 (goal 4): the WORKED END-TO-END EXAMPLE — an Osier source IMPORTING a .mid
 # BY NAME.  importmid.elm declares `import Midmath`; run.js resolves that to
 # Midmath.mid next to the fixture (the .mid is NOT passed on the CLI — `run`
@@ -2489,30 +2481,30 @@ fi
 #     emission level (post-flip it cannot link; see qbe_ssa_midrt).  SURFACE
 #     scoped: the hatch gates the surface prim route, never the injected
 #     runtime's own Mid bodies (stage 7 O2-fix — see midrt_surface);
-#   * midrt-pruned: the pruning claim, measured on a cons-FREE entry
-#     (NoRep.chain is pure arithmetic), which must carry NO Rt defun from the
-#     used-prim census.  TWO ARMS since the host became the default: the
-#     unhosted route (QBE_MIDHOST=0) is where the census is the only seed
-#     source, and the host-on build of the SAME fixture is the control that
-#     attributes the default's cons defun to the host's own closure;
-#   * midrt-hatch: QBE_NOMIDRT=1 removes the injection from the cons-using
-#     fixture — the same-source control that attributes every .ssa move
-#     above to the injection (the corpus-ssa attribution's in-gate twin).
+#   * midrt-hostseed (WAS midrt-pruned, halved at ZIGHOST Z0): the host-on
+#     build of a cons-FREE entry (NoRep.chain is pure arithmetic) carries the
+#     cons defun, and the only thing that can bring it is the Mid effect host's
+#     own closure (MidRt.hostSeeds).  The pruning arm this row used to pair
+#     that with — the no-Rt route, where the used-prim census is the only seed
+#     source — is unreachable since Z0 (NOMIDRT is refused unconditionally).
+#   * midrt-hatch: RETIRED at ZIGHOST Z0 — it measured QBE_NOMIDRT=1 removing
+#     the injection from the cons-using fixture, and that build is now a loud
+#     compile refusal (see the `off` mode note below).
 # POST-FLIP (osier-flip): `route` is the DEFAULT (no flag — the Mid route IS
 # the compile default now); `zig` selects the OLD path with QBE_MIDZIG=1 (an
 # EMIT-ONLY arm on this tree: the deleted Zig handlers mean the emitted
 # rt_prim_cons sites cannot link — the row asserts the EMISSION, which is
-# what a bisect needs).  `off` stays QBE_NOMIDRT=1 (also emit-only post-flip).
-qbe_ssa_midrt() { # <fixture> <entry> <out.ssa> <mode: on|off|route|zig>
+# what a bisect needs).
+#
+# THE `off` MODE IS GONE (zighost Z0).  It was QBE_NOMIDRT=1 (paired with
+# QBE_MIDGC=0 while the Zig collector existed) — the only route on which the
+# injection could be seen to be absent.  NOMIDRT is a MIDGC_DEPENDS_ON entry and
+# the collector is now unconditional, so every NOMIDRT=1 build is a LOUD compile
+# refusal (exit 2): there is no spelling of "the injection is gone" left, and
+# the two rows that measured it (midrt-hatch, midrt-pruned) are retired below.
+qbe_ssa_midrt() { # <fixture> <entry> <out.ssa> <mode: on|route|zig>
   local flags=""
   case "$4" in
-    # `off` ALSO PINS THE COLLECTOR OFF (stage 7 O3): QBE_NOMIDRT=1 is one of
-    # MIDGC_DEPENDS_ON's entries (withholding the Rt program makes the partial
-    # path revert to the Zig allocator), so a QBE_MIDGC=1 build of it is a LOUD
-    # compile refusal (exit 2) and the arm's .ssa would simply not exist.  The
-    # hatch this row measures is "the injection is gone", which is reachable
-    # only without the Mid collector — QBE_MIDGC=0 is the honest spelling.
-    off)   flags="QBE_NOMIDRT=1 QBE_MIDGC=0" ;;
     route) flags="" ;;
     zig)   flags="QBE_MIDZIG=1" ;;
   esac
@@ -2551,15 +2543,15 @@ midrt_scalls() { midrt_surface "$1" 'call $q_Rt_x2econs('; }
 midrt_szigcons() { midrt_surface "$1" 'rt_prim_cons'; }
 
 qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-on.ssa"  on
-qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-off.ssa" off
 qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-route.ssa" route
 qbe_ssa_midrt tools/qbe/fixtures/flatten.elm Flatten.main "$TMP/midrt-flat-zig.ssa"  zig
 QBE_NOREP=1 qbe_ssa_midrt tools/qbe/fixtures/norep.elm NoRep.chain "$TMP/midrt-chain-host.ssa" route
-# THE UNHOSTED ARM IS `QBE_MIDGC=0` TOO (stage 7 O3): QBE_MIDHOST=0 alone is now
-# a REFUSED BUILD (run.js MIDGC_DEPENDS_ON — the Zig host on a Mid heap), and
-# this arm's whole point is the route where the used-prim census is the ONLY
-# seed source, i.e. the no-host, no-Mid-collector tree.
-QBE_MIDGC=0 QBE_NOREP=1 QBE_NOMIDRT=1 qbe_ssa_midrt tools/qbe/fixtures/norep.elm NoRep.chain "$TMP/midrt-chain-route.ssa" route
+# THE NO-RT ARM IS RETIRED (zighost Z0): it was
+# `QBE_MIDGC=0 QBE_NOREP=1 QBE_NOMIDRT=1` — the no-host, no-Mid-collector tree
+# in which the used-prim census was the ONLY seed source.  Both halves are gone
+# (the collector hatch deleted, NOMIDRT refused unconditionally), so the census
+# can no longer be isolated at the emission level; the corpus .ssa byte-identity
+# is what catches over-seeding now.
 
 midrt_bad=0
 if [ -s "$TMP/midrt-flat-on.ssa" ]; then
@@ -2615,43 +2607,27 @@ if [ -s "$TMP/midrt-flat-zig.ssa" ]; then
 else
   echo "FAIL midrt-zig: .ssa missing (compile failed?)"; midrt_bad=1
 fi
-if [ -s "$TMP/midrt-chain-route.ssa" ] && [ -s "$TMP/midrt-chain-host.ssa" ]; then
-  # TWO ARMS (stage 7 O2-fix).  The census claim is about used-prim seeding,
-  # and since O2 the DEFAULT route ALSO seeds the Mid effect host's closure
-  # (MidRt.hostSeeds) — whose bodies cons (Rt.globBuildGo -> Rt.cons).  So the
-  # default build of this pure-arithmetic entry legitimately carries the cons
-  # defun, and a bare "0 mentions" assertion can no longer tell that apart
-  # from a census that over-seeds.  The census is therefore measured on the
-  # NO-RT route (QBE_NOMIDRT=1, re-pinned at O4 when the unhosted route was
-  # retired with the Zig host), with
-  # the host-on build of the SAME fixture as the arm that keeps this row
-  # falsifiable: if the census ever over-seeds, arm 1 goes red; if the host
-  # ever stops being the thing that brings cons in, arm 2 goes red.
-  # MEASURED at c5373ec: unhosted 0 mention(s) / 106,881 B, default 34 / 634,750 B.
-  n=$(midrt_ssa "$TMP/midrt-chain-route.ssa")
+# THE PRUNING ROW IS HALVED AT ZIGHOST Z0, and the half that survives is the
+# one that still has a subject.  `midrt-pruned` was TWO ARMS: the NO-RT route
+# (QBE_NOMIDRT=1, where the used-prim census is the ONLY seed source, so a
+# cons-free entry must carry no cons defun) and the host-ON control that
+# attributes the default build's cons defun to MidRt.hostSeeds.  The no-RT arm
+# is UNREACHABLE now — NOMIDRT is refused unconditionally, so it would measure
+# the guard — and with it goes the row's ability to isolate the census.  What
+# survives is the attribution arm, kept and RENAMED so the row's name states
+# what it still measures: the Mid effect host's own closure (Rt.globBuildGo ->
+# Rt.cons) is what brings cons into a cons-free entry.  MEASURED at c5373ec:
+# unhosted 0 mention(s) / 106,881 B, default 34 / 634,750 B.
+if [ -s "$TMP/midrt-chain-host.ssa" ]; then
   h=$(midrt_ssa "$TMP/midrt-chain-host.ssa")
-  if [ "$n" -ne 0 ]; then
-    echo "FAIL midrt-pruned: a cons-free entry carries $n q_Rt_x2econs mention(s) on the NO-RT route — the used-prim census over-seeds"
-    midrt_bad=1
-  elif [ "$h" -lt 1 ]; then
-    echo "FAIL midrt-pruned: the host-ON build of the same cons-free fixture carries no Rt defun either — the two arms are not distinguished, so the row cannot attribute anything"
+  if [ "$h" -lt 1 ]; then
+    echo "FAIL midrt-hostseed: the host-ON build of a cons-free fixture carries no Rt defun — the host's closure is no longer what brings cons in"
     midrt_bad=1
   else
-    echo "PASS midrt-pruned: the cons-free entry carries NO Rt defun on the no-RT route (used-prim seeding prunes it); the default build's $h mention(s) are the Mid HOST's own closure, attributed not seeded"
+    echo "PASS midrt-hostseed: the cons-free entry's $h cons mention(s) are the Mid HOST's own closure, attributed not seeded"
   fi
 else
-  echo "FAIL midrt-pruned: .ssa missing (compile failed?)"; midrt_bad=1
-fi
-if [ -s "$TMP/midrt-flat-off.ssa" ]; then
-  n=$(midrt_ssa "$TMP/midrt-flat-off.ssa")
-  if [ "$n" -ne 0 ]; then
-    echo "FAIL midrt-hatch: QBE_NOMIDRT=1 build still carries the Rt defun — the hatch does not gate the injection"
-    midrt_bad=1
-  else
-    echo "PASS midrt-hatch: QBE_NOMIDRT=1 removes the injection from the cons-using fixture"
-  fi
-else
-  echo "FAIL midrt-hatch: .ssa missing (compile failed?)"; midrt_bad=1
+  echo "FAIL midrt-hostseed: .ssa missing (compile failed?)"; midrt_bad=1
 fi
 
 # THE `Rt` MODULE-NAME RESERVATION (the audit's residual hole, closed by this
@@ -2667,7 +2643,7 @@ else
   midrt_bad=1
 fi
 if [ "$midrt_bad" -eq 0 ]; then
-  echo "PASS midrt-seats: injected + routed + pruned + hatched + reserved (all counters move)"
+  echo "PASS midrt-seats: injected + routed + host-attributed + reserved (all counters move)"
 else
   # The gate is the EXIT CODE, not the transcript: a printed FAIL that does
   # not fail the run is not a check (this exact bug shipped with the first
@@ -2977,9 +2953,9 @@ fi
 # The guard that names ONE incompatible flag is not a guard (this arc paid for
 # that twice: NORTLEAN then NOMIDRT).  run.js's MIDGC_DEPENDS_ON list is the
 # single source of truth; this row re-derives its entries from THAT list (not
-# a hand-written copy) and re-runs run.js with each `off` flag under
-# QBE_MIDGC=1, asserting a LOUD exit 2.  A future flag QBE_MIDGC newly depends
-# on but forgets to add to the list keeps compiling silently — and the only
+# a hand-written copy) and re-runs run.js with each `off` flag, asserting a LOUD
+# exit 2.  A future flag the Mid collector newly depends on but that is missing
+# from the list keeps compiling silently — and the only
 # instrument that sees it is the probe for that shape, so this row also pins
 # that the list is non-empty (a refactor that deletes the enumeration fails
 # here, not silently).
@@ -2998,15 +2974,15 @@ if [ -z "$midgc_guard_offs" ]; then
 else
   mg_ok=1
   for off in $midgc_guard_offs; do
-    (cd "$ROOT/elm-compiler" && env QBE_MIDGC=1 "$off" node run.js >/dev/null 2>&1)
+    (cd "$ROOT/elm-compiler" && env "$off" node run.js >/dev/null 2>&1)
     mg_rc=$?
     if [ "$mg_rc" -ne 2 ]; then
-      echo "FAIL midgc-guard: QBE_MIDGC=1 $off exited $mg_rc, want 2 (the incompatible combination is no longer refused loudly)"
+      echo "FAIL midgc-guard: $off exited $mg_rc, want 2 (the incompatible combination is no longer refused loudly)"
       FAIL=1; mg_ok=0
     fi
   done
   if [ "$mg_ok" = 1 ]; then
-    echo "PASS midgc-guard: QBE_MIDGC=1 refuses each of its $(echo "$midgc_guard_offs" | wc -w) incompatible flag(s) — $midgc_guard_offs (enumerated from run.js, not hand-copied)"
+    echo "PASS midgc-guard: the Mid collector refuses each of its $(echo "$midgc_guard_offs" | wc -w) incompatible flag(s) — $midgc_guard_offs (enumerated from run.js, not hand-copied)"
   fi
 fi
 

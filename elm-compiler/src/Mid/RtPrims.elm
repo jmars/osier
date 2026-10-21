@@ -658,8 +658,8 @@ helperDefuns rec =
 
 
 -- Rt.closure desc capBase K — the Mid closure (zigretire stage 5 PART 2):
--- allocate a K-Value env array through `RawAllocVector` (under QBE_MIDGC=1
--- the Mid collector's seat `Rt.allocVector`), copy the K captures from the
+-- allocate a K-Value env array through `RawAllocVector` (the Mid collector's
+-- seat `Rt.allocVector`), copy the K captures from the
 -- caller's STAGED contiguous block (capBase), and wrap as a tag-6 lambda
 -- Value whose `code` is the static Desc pointer and whose `code_len` is
 -- the Desc's arity.  Mirrors values.valLambda (the Zig seat

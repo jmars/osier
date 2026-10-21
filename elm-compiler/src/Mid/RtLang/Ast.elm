@@ -161,7 +161,7 @@ machinery REGISTERED are scanned.
      collector scans it AND (under a moving collector) updates it in place.
      An UNREGISTERED raw copy is scanned by neither, and BOTH collectors make
      the consequence visible in the same place — the block's first word, which
-     for a `value_array` is element 0's tag: the `QBE_MIDGC=1` sweep writes
+     for a `value_array` is element 0's tag: the Mid sweep writes
      the free-list link there (`Rt.gcSweep`), and the default collector
      EVACUATES the block and abandons those words.  The probe is
      tools/qbe/fixtures/{Wval.mid,valchurn.elm} and its `stale` arm reads 0
@@ -185,7 +185,7 @@ machinery REGISTERED are scanned.
          slot.  Under it a rooted referent survives and the raw copy does
          not: the probe's `rooted` arm reads 1, i.e. the raw copy's tag was
          lost while the root slot read fine.
-       * the `QBE_MIDGC=1` collector is the Mid program (`runtime.mid`'s
+       * the collector is the Mid program (`runtime.mid`'s
          `Rt.collect`): a NON-MOVING mark-sweep (`gcMarkRoots` -> `gcDrain`
          -> `gcSweep`, and `gcMarkRoots` marks without writing anything
          back), so there a rooted raw copy can never go stale — the same arm
@@ -193,7 +193,7 @@ machinery REGISTERED are scanned.
      The probe (tools/qbe/fixtures/{Wval.mid,valchurn.elm}) pins both:
      `10001` built against the default runtime (obligation 2 visible in the
      `rooted` arm: raw copy 0, rooted slot 1) and `10011` built with
-     `QBE_MIDGC=1` and run at `QBE_HEAP_MB=16` (obligation 1 only; the same
+     the Mid collector and run at `QBE_HEAP_MB=16` (obligation 1 only; the same
      arm reads 11).  Both builds agree that the UNROOTED arm (`stale`) reads
      0 once a collection runs, and that nothing breaks at all when the churn
      is too small to collect — the dose control that shows the mechanism is

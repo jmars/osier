@@ -108,16 +108,16 @@ import Mid.RtPrims exposing (seat)
 --   words 14/15    THE STRING-STREAM REGISTRY (O5): word 14 = ssTab (a
 --                  lazily-malloc'd 8-cell x 3-word (data,len,pos) C-heap
 --                  table), word 15 = ssN (the count; MAX 8, a closed
---                  slot's index stays consumed).  NOT collector state:
---                  a QBE_MIDGC=0 build maps no region, so the registry
---                  lives here where both routes reach it.
+--                  slot's index stays consumed).  NOT collector state, so
+--                  it lives here: the block is .bss and always emitted,
+--                  while a region is mapped lazily.
 --   words 16..8207 the frame freelist heads, indexed by nslots (U3)
 --   words 8208..8210  THE INTERN TABLE (O5 seat 2, re-homed by seat 4): 8208
 --                  = the lazily-malloc'd (name,len)-pair array's base, 8209 =
 --                  the live pair count, 8210 = the capacity in pairs.  Owner
 --                  is `Mid.Rt.intern` (runtime.mid's Rt.intTab/intGrow); NOT
---                  collector state, because a QBE_MIDGC=0 build maps no region
---                  and the escape route must still reach it.
+--                  collector state, because it must be reachable before a
+--                  region is mapped (the block is .bss, always emitted).
 -- The freelist bound is 8192 (MEASURED: the seed's max frame nslots is
 -- 4,354; giants never pool).  The block is .bss: reserving the words costs
 -- nothing on disk.
@@ -179,7 +179,8 @@ globWords =
 
 
 {-| The whole collector program: every defun above.  Injected by
-Mid.QbeModule when QBE_MIDGC=1 and seeded by Mid.Rt.gcSeeds.  Since T18
+Mid.QbeModule on every compile (unconditional since Z0) and seeded by
+Mid.Rt.gcSeeds.  Since T18
 these are SEATS (Mid.RtPrims.seat): the bodies live in Mid.RtSource's
 surface text and arrive here through the splice (`Mid.Rt.programGc`); the
 seat at each key is the position-holder and tripwire.  Its param count

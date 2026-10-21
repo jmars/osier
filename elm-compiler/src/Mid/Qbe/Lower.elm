@@ -202,7 +202,6 @@ type alias S =
     , rec : Bool -- E's switch (QBE_NOREC=1 -> False = the assoc-chain route)
     , consArr : Bool -- (A)'s switch (QBE_NOCONSARR=1 -> False = the 2-word cons)
     , typeSpec : Bool -- Unit B's switch (QBE_NOTYPESPEC=1 -> False = no binder-map type specialization)
-    , midGc : Bool -- zigretire stage 4's switch (QBE_MIDGC=1 -> the Mid mark-sweep collector)
     , midGcYoung : Bool -- GC NURSERY unit's hatch (QBE_MIDGC_YOUNG=1 -> the nursery's barrier seat + seeding)
     , funcs : List PendingFunc -- extra (closure) funcs, REVERSED
     , datas : List DataDef -- REVERSED
@@ -506,8 +505,14 @@ unique xs =
         |> Tuple.second
 
 
+{-| The 9th positional slot — spelled `_` here — is the RETIRED collector
+switch (zighost Z0): the Mid collector is the only collector, so no arm here
+reads it.  The slot stays because `Mid.QbeModule.compileEntry` still carries it
+in its call shape — the one place this unit could not reach (another lane owns
+that file).  Nothing selects a collector; the slot is inert, not a default.
+-}
 lower : MidRt.Runtime -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
-lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midGcYoung table arityTable program entryKey =
+lower runtime rep primDirect midCons rtLean consArr rec typeSpec _ midGcYoung table arityTable program entryKey =
     let
         defuns =
             Dict.fromList (List.map (\d -> ( d.key, d )) program)
@@ -552,8 +557,8 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midGcYoun
                     -- with no seen-set, so a repeat is two definitions of the
                     -- same q_Rt_* symbol and qbe rejects the .ssa (MEASURED:
                     -- QBE_MIDDRIVER=1 alone already duplicated
-                    -- q_Rt_x2ecStrLenGo; + QBE_MIDGC=1 added q_Rt_x2edie).
-                    -- The plan declares MIDGC x MIDDRIVER a VALID combination,
+                    -- q_Rt_x2ecStrLenGo; the Mid collector's seeding added
+                    -- q_Rt_x2edie).  The plan declares MIDGC x MIDDRIVER a VALID combination,
                     -- so the cross-boundary repeat is the defect, not the
                     -- combination.  With both hatches off this is a no-op
                     -- (MidRt.seeds is already unique), so the DEFAULT route's
@@ -561,20 +566,15 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midGcYoun
                     if List.any (\d -> isRtKey d.key) program then
                         unique
                             (List.filter (\k -> not (List.member k surfaceKeys)) (MidRt.seeds usedPrims)
-                                ++ (if midGc then
-                                        List.filter (\k -> not (List.member k surfaceKeys)) (unique (MidRt.gcSeeds ++ MidRt.conSeeds ++ MidRt.closureSeeds))
-
-                                    else
-                                        []
-                                   )
+                                ++ List.filter (\k -> not (List.member k surfaceKeys)) (unique (MidRt.gcSeeds ++ MidRt.conSeeds ++ MidRt.closureSeeds))
                                 -- THE NURSERY SEEDS (GC NURSERY unit): the young
                                 -- defuns exist in the surface only when run.js
                                 -- kept the QBE_MIDGC_YOUNG-ONLY regions, so they
-                                -- are seeded ONLY in a young build — a plain
-                                -- MIDGC build must not name them (an absent key
+                                -- are seeded ONLY in a young build — a young-OFF
+                                -- build must not name them (an absent key
                                 -- here is "unknown global", loud, which is why
                                 -- no ALWAYS-PRESENT rtDeps row may list one).
-                                ++ (if midGc && midGcYoung then
+                                ++ (if midGcYoung then
                                         List.filter (\k -> not (List.member k surfaceKeys)) (unique MidRt.youngGcSeeds)
 
                                     else
@@ -623,7 +623,6 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midGcYoun
                     , rec = rec
                     , consArr = consArr
                     , typeSpec = typeSpec
-                    , midGc = midGc
                     , midGcYoung = midGcYoung
                     , funcs = []
                     , datas = []
@@ -648,7 +647,7 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midGcYoun
                 -- valCons) and handed it to compiled code through host_apply, so
                 -- a Mid object could reference memory the Zig scavenge reclaims
                 -- — the reproduced cross-heap hole (churn a host-IO program's
-                -- 4-arg MUTUAL tail recursion at QBE_MIDGC=1: content equality
+                -- 4-arg MUTUAL tail recursion on the Mid heap: content equality
                 -- printed 0 while String.length printed 150).  Arm 1 was a CENSUS
                 -- (`usedPrims ∩ nurseryHostPrims`: refuse when a used prim's Zig
                 -- handler built a nursery value); arm 2 was the SEAM (refuse any
@@ -657,7 +656,7 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midGcYoun
                 -- census while the Zig loop still drove it).
                 --
                 -- O2 makes the MID host the DEFAULT and it allocates through the
-                -- Mid seats (Rt.cons -> allocvec -> Rt.allocVector under midGc),
+                -- Mid seats (Rt.cons -> allocvec -> Rt.allocVector),
                 -- so the hole closes BY CONSTRUCTION on the default route: there
                 -- is no Zig nursery on the path any more.  The refusals therefore
                 -- die in the SAME COMMIT as the flip — a refusal is a statement
@@ -1452,7 +1451,6 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , rec = sOuter.rec
             , consArr = sOuter.consArr
             , typeSpec = sOuter.typeSpec
-            , midGc = sOuter.midGc
             , midGcYoung = sOuter.midGcYoung
             , funcs = []
             , datas = sOuter.datas
@@ -1682,14 +1680,14 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                                 else
                                     qname
                             , export_ =
-                                -- QBE_MIDGC=1: export the allocating seat so the
-                                -- Zig applyGo can call it for the partial-application
-                                -- env array (the bridge in tools/qbe/rt.zig's weak
-                                -- extern).  Off the hatch the symbol is absent, which
-                                -- is what keeps the default .ssa byte-identical.
+                                -- The allocating seat is EXPORTED: the Zig
+                                -- applyGo calls it for the partial-application env
+                                -- array (the bridge in tools/qbe/rt.zig's weak
+                                -- extern).  It was hatch-conditional until Z0; the
+                                -- collector is unconditional, so the export is too.
                                 -- Rt.main is ALWAYS exported: it is the program's
                                 -- entry point under QBE_MIDDRIVER=1.
-                                (sOuter.midGc && key == "Rt.allocVector") || key == "Rt.main"
+                                key == "Rt.allocVector" || key == "Rt.main"
                             , ret = retTy
                             , envParam = ncaps > 0
                             , params = paramsList
@@ -1761,7 +1759,8 @@ lowerTail exp s =
             -- self-tail already gets (stage args, blit to the param slots 2+i,
             -- jump @body).
             --
-            -- NOT gated on midGc.  It was, on the stated non-assumption that
+            -- NOT gated on the collector hatch (retired at Z0: this is the
+            -- only route).  It was, on the stated non-assumption that
             -- "the pre-existing Rt helpers never put a self-RawCall in tail
             -- position" — MEASURED FALSE (2026-10-19): Rt.fillGo (runtime.mid,
             -- `return call Rt.fillGo(...)`) and ten more Rt helpers do exactly
@@ -1771,7 +1770,7 @@ lowerTail exp s =
             -- q_Rt.fillGo at the DEFAULT 8 MiB stack (and still at 64 MiB), on
             -- a workload the JS compiler runs in 1.5 s: the scale wall was
             -- stack depth.  A tail call is a tail call in either host mode, and
-            -- the loop is what midGc already emitted for these same defuns.
+            -- the loop is what the hatch already emitted for these same defuns.
             if call.sym == s.defunKey then
                 lowerSelfTail call.args s
 
@@ -2230,7 +2229,7 @@ lowerRawVal node dest s =
                                                 -- in a MIDGC build).  This is the ONE seam: every
                                                 -- surface `vecstore` lowers through this node.
                                                 --
-                                                -- QBE_MIDGC=1 (young off): the PLAIN seat
+                                                -- young off: the PLAIN seat
                                                 -- (rt_vec_store_plain) — the Zig barrier's
                                                 -- `inOldgen` page test reads the ZIG heap's
                                                 -- metadata by (addr/512 - firstheappage), which is
@@ -2260,12 +2259,7 @@ lowerRawVal node dest s =
                                                 else
                                                     emit
                                                         (Call Nothing (Base W)
-                                                            (if s.midGc then
-                                                                Il.Sym "rt_vec_store_plain"
-
-                                                             else
-                                                                Il.Sym "rt_vec_store"
-                                                            )
+                                                            (Il.Sym "rt_vec_store_plain")
                                                             [ ArgVal (Base L) vecT
                                                             , ArgVal (Base W) idxT
                                                             , ArgVal (Base L) (Il.Tmp (slotTmp vslot))
@@ -2812,7 +2806,7 @@ ffiArgClass w =
 
 
 
-{-| The QBE_MIDGC=1 routing for the two raw allocating nodes: box the length
+{-| The Mid routing for the two raw allocating nodes: box the length
 word into a number Value slot, call the Mid seat's lean-ABI `q_Rt_*` entry
 (one pointer arg, direct `:val` return), and read the body address back out
 of the result's payload word 0 into a raw temp.  The seat is `Rt.allocVector`
@@ -2932,17 +2926,7 @@ rawWordArg exp s =
             rawWordArg len s
                 |> Result.map
                     (\( lenA, s1 ) ->
-                        if s.midGc then
-                            midGcAllocSeat "Rt.allocVector" lenA s1
-
-                        else
-                            let
-                                ( t, s2 ) =
-                                    freshTmp s1
-                            in
-                            ( Il.Tmp t
-                            , emit (Call (Just t) (Base L) (Il.Sym "rt_vec_alloc") [ ArgVal (Base W) lenA ]) s2
-                            )
+                        midGcAllocSeat "Rt.allocVector" lenA s1
                     )
 
         Unsafe (RawVecAddr addr) ->
@@ -3193,17 +3177,7 @@ rawWordArg exp s =
             rawWordArg len s
                 |> Result.map
                     (\( lenA, s1 ) ->
-                        if s.midGc then
-                            midGcAllocSeat "Rt.allocRaw" lenA s1
-
-                        else
-                            let
-                                ( t, s2 ) =
-                                    freshTmp s1
-                            in
-                            ( Il.Tmp t
-                            , emit (Call (Just t) (Base L) (Il.Sym "rt_raw_alloc") [ ArgVal (Base W) lenA ]) s2
-                            )
+                        midGcAllocSeat "Rt.allocRaw" lenA s1
                     )
 
         Unsafe (RawByteLoad bl) ->
@@ -4153,27 +4127,14 @@ lowerLit lit dest s =
                         (\n -> { name = n, align = Just 8, items = [ DStr str, DByte 0 ], export_ = False })
                         s
             in
-            if s.midGc then
-                -- Mid: the string data IS the static data symbol (immutable,
-                -- null-terminated, the `str:` freshData key) — no Zig-nursery
-                -- copy, so no cross-heap edge and nothing the Zig scavenge can
-                -- reclaim.  rt_string's
-                -- interning/fallback (rt.zig:405-408) allocates the data in the
-                -- Zig nursery, which the scavenge re-claims while a Mid object
-                -- references it — the corrected-criterion hole this fixes (both
-                -- the QBE_NOSTRINGINTERN flag AND the intern_live >= 2048
-                -- runtime fallback are unreachable because rt_string is not
-                -- called at all under the hatch).
-                Ok (storeValueCell tagString [ Il.Sym strname, Il.Con (utf8ByteLength str) ] dest s1)
-            else
-                let
-                    ( rp, s2 ) =
-                        freshTmp s1
-                in
-                Ok
-                    (emit (Call (Just rp) (Agg "val") (Il.Sym "rt_string") [ ArgVal (Base L) (Il.Sym strname), ArgVal (Base W) (Il.Con (utf8ByteLength str)) ]) s2
-                        |> emit (Blit (Il.Tmp rp) (Il.Tmp d) vs)
-                    )
+            -- The string data IS the static data symbol (immutable,
+            -- null-terminated, the `str:` freshData key) — no Zig-nursery
+            -- copy, so no cross-heap edge and nothing a Zig scavenge can
+            -- reclaim.  rt_string is not called at all (its Zig-nursery
+            -- allocation was the corrected-criterion hole), so both the
+            -- QBE_NOSTRINGINTERN flag AND the intern_live >= 2048 runtime
+            -- fallback are unreachable.
+            Ok (storeValueCell tagString [ Il.Sym strname, Il.Con (utf8ByteLength str) ] dest s1)
 
 
 -- ==================== S4: UNBOXED Int LOCALS (representation v1) ====================
@@ -6581,62 +6542,40 @@ lowerCon con dest s =
                                 ( rp, s5 ) =
                                     freshTmp s4
                             in
-                            if s.midGc then
-                                -- QBE_MIDGC=1: route Con through the Mid defun
-                                -- Rt.con (tag, argsPtr, n) — the allocation is
-                                -- Rt.allocVector (the Mid collector), so the ADT
-                                -- vector lands in the MID heap (no cross-heap
-                                -- edge).  argsPtr and n are boxed as number
-                                -- Values in fresh slots (the lean ABI passes
-                                -- POINTERS to Value slots, plus a count word).
-                                let
-                                    ( argsPtrSlot, sA ) =
-                                        freshSlot s5
+                            -- The Mid route: Con through the Mid defun
+                            -- Rt.con (tag, argsPtr, n) — the allocation is
+                            -- Rt.allocVector (the Mid collector), so the ADT
+                            -- vector lands in the MID heap (no cross-heap
+                            -- edge).  argsPtr and n are boxed as number
+                            -- Values in fresh slots (the lean ABI passes
+                            -- POINTERS to Value slots, plus a count word).
+                            let
+                                ( argsPtrSlot, sA ) =
+                                    freshSlot s5
 
-                                    ( nSlot, sB ) =
-                                        freshSlot sA
+                                ( nSlot, sB ) =
+                                    freshSlot sA
 
-                                    sC =
-                                        storeValueCell tagNumber [ Il.Tmp (slotTmp cbase) ] argsPtrSlot sB
+                                sC =
+                                    storeValueCell tagNumber [ Il.Tmp (slotTmp cbase) ] argsPtrSlot sB
 
-                                    sD =
-                                        storeValueCell tagNumber [ Il.Con n ] nSlot sC
-                                in
-                                Ok
-                                    (emit
-                                        (Call (Just rp)
-                                            (Agg "val")
-                                            (Il.Sym ("q_" ++ mangle "Rt.con"))
-                                            [ ArgVal (Base L) (Il.Tmp (slotTmp tagSlot))
-                                            , ArgVal (Base L) (Il.Tmp (slotTmp argsPtrSlot))
-                                            , ArgVal (Base L) (Il.Tmp (slotTmp nSlot))
-                                            , ArgVal (Base W) (Il.Con 3)
-                                            ]
-                                        )
-                                        sD
-                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+                                sD =
+                                    storeValueCell tagNumber [ Il.Con n ] nSlot sC
+                            in
+                            Ok
+                                (emit
+                                    (Call (Just rp)
+                                        (Agg "val")
+                                        (Il.Sym ("q_" ++ mangle "Rt.con"))
+                                        [ ArgVal (Base L) (Il.Tmp (slotTmp tagSlot))
+                                        , ArgVal (Base L) (Il.Tmp (slotTmp argsPtrSlot))
+                                        , ArgVal (Base L) (Il.Tmp (slotTmp nSlot))
+                                        , ArgVal (Base W) (Il.Con 3)
+                                        ]
                                     )
-
-                            else
-                                Ok
-                                    (emit
-                                        (Call (Just rp)
-                                            (Agg "val")
-                                            (Il.Sym "rt_con")
-                                            [ ArgVal (Base L) (Il.Tmp (slotTmp tagSlot))
-                                            , ArgVal (Base L)
-                                                (if n == 0 then
-                                                    Il.Con 0
-
-                                                 else
-                                                    Il.Tmp (slotTmp cbase)
-                                                )
-                                            , ArgVal (Base W) (Il.Con n)
-                                            ]
-                                        )
-                                        s5
-                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
-                                    )
+                                    sD
+                                    |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+                                )
                         )
             )
 
@@ -7066,31 +7005,19 @@ lowerRecordLitPos setters dest s =
                                 -- can allocate), THEN the data array, then alloc-free
                                 -- stores + wrap — the data temp stays valid because
                                 -- nothing between the alloc and the wrap moves the
-                                -- heap.  QBE_MIDGC=1 allocates the data array through
-                                -- the Mid seat Rt.allocVector (no cross-heap edge);
-                                -- the default stays rt_vec_alloc.
+                                -- heap.  The data array allocates through the
+                                -- Mid seat Rt.allocVector (no cross-heap edge);
+                                -- rt_vec_alloc is no longer emitted by anything.
                                 ( dataArg, s2 ) =
-                                    if s.midGc then
-                                        midGcAllocSeat "Rt.allocVector" (Il.Con n) s1
+                                    midGcAllocSeat "Rt.allocVector" (Il.Con n) s1
 
-                                    else
-                                        let
-                                            ( t, st ) =
-                                                freshTmp s1
-                                        in
-                                        ( Il.Tmp t, emit (Call (Just t) (Base L) (Il.Sym "rt_vec_alloc") [ ArgVal (Base W) (Il.Con n) ]) st )
-
-                                -- QBE_MIDGC=1: the store goes to the PLAIN seat
+                                -- The store goes to the PLAIN seat
                                 -- (rt_vec_store_plain) — the barrier's inOldgen page
                                 -- test reads ZIG-heap metadata, out of bounds for a
                                 -- Mid-heap address (a mark-sweep needs no remembered
                                 -- set, so the plain store IS the whole contract).
                                 storeSym =
-                                    if s.midGc then
-                                        Il.Sym "rt_vec_store_plain"
-
-                                    else
-                                        Il.Sym "rt_vec_store"
+                                    Il.Sym "rt_vec_store_plain"
 
                                 s3 =
                                     List.foldl
@@ -7234,27 +7161,13 @@ lowerRecordUpdateClosed baseB baseNames resultNames updPairs dest s =
                     -- tag-14 arm: allocate, copy/store, wrap.  The update values
                     -- were pre-lowered into rooted slots, so the data array allocates
                     -- AFTER them (same load-bearing order as lowerRecordLitPos).
-                    -- QBE_MIDGC=1 allocates through the Mid seat Rt.allocVector.
+                    -- The allocation goes through the Mid seat Rt.allocVector.
                     ( ndArg, s10 ) =
-                        if s.midGc then
-                            midGcAllocSeat "Rt.allocVector" (Il.Con n) (startBlock recLbl s8)
+                        midGcAllocSeat "Rt.allocVector" (Il.Con n) (startBlock recLbl s8)
 
-                        else
-                            let
-                                ( ndT, s9 ) =
-                                    freshTmp s8
-                            in
-                            ( Il.Tmp ndT
-                            , emit (Call (Just ndT) (Base L) (Il.Sym "rt_vec_alloc") [ ArgVal (Base W) (Il.Con n) ]) (startBlock recLbl s9)
-                            )
-
-                    -- QBE_MIDGC=1: the plain store seat (see lowerRecordLitPos).
+                    -- The plain store seat (see lowerRecordLitPos).
                     storeSym =
-                        if s.midGc then
-                            Il.Sym "rt_vec_store_plain"
-
-                        else
-                            Il.Sym "rt_vec_store"
+                        Il.Sym "rt_vec_store_plain"
 
                     storeOne : Int -> String -> S -> Result String S
                     storeOne rank name st =
@@ -8398,74 +8311,53 @@ lowerClosure lambda dest s =
                                                     freshTmp s3
                                             in
                                             Ok
-                                                (if s2.midGc then
-                                                    -- QBE_MIDGC=1: route the closure through the Mid
-                                                    -- defun Rt.closure (desc, capBase, K) — the env array
-                                                    -- is Rt.allocVector (the Mid collector), so the
-                                                    -- closure's captures land in the MID heap (no
-                                                    -- cross-heap edge).  desc/capBase/K are boxed as number
-                                                    -- Values in fresh slots (the lean ABI passes POINTERS to
-                                                    -- Value slots + a count word).
-                                                    let
-                                                        ( descSlot, sA ) =
-                                                            freshSlot s4
+                                                -- The Mid route: the closure goes through the Mid
+                                                -- defun Rt.closure (desc, capBase, K) — the env array
+                                                -- is Rt.allocVector (the Mid collector), so the
+                                                -- closure's captures land in the MID heap (no
+                                                -- cross-heap edge).  desc/capBase/K are boxed as number
+                                                -- Values in fresh slots (the lean ABI passes POINTERS to
+                                                -- Value slots + a count word).
+                                                (let
+                                                    ( descSlot, sA ) =
+                                                        freshSlot s4
 
-                                                        ( capBaseSlot, sB ) =
-                                                            freshSlot sA
+                                                    ( capBaseSlot, sB ) =
+                                                        freshSlot sA
 
-                                                        ( kSlot, sC ) =
-                                                            freshSlot sB
+                                                    ( kSlot, sC ) =
+                                                        freshSlot sB
 
-                                                        sD =
-                                                            storeValueCell tagNumber [ Il.Sym descName ] descSlot sC
+                                                    sD =
+                                                        storeValueCell tagNumber [ Il.Sym descName ] descSlot sC
 
-                                                        sE =
-                                                            storeValueCell tagNumber
-                                                                [ if k == 0 then
-                                                                    Il.Con 0
+                                                    sE =
+                                                        storeValueCell tagNumber
+                                                            [ if k == 0 then
+                                                                Il.Con 0
 
-                                                                  else
-                                                                    Il.Tmp (slotTmp cbase)
-                                                                ]
-                                                                capBaseSlot
-                                                                sD
-
-                                                        sF =
-                                                            storeValueCell tagNumber [ Il.Con k ] kSlot sE
-                                                    in
-                                                    emit
-                                                        (Call (Just rp)
-                                                            (Agg "val")
-                                                            (Il.Sym ("q_" ++ mangle "Rt.closure"))
-                                                            [ ArgVal (Base L) (Il.Tmp (slotTmp descSlot))
-                                                            , ArgVal (Base L) (Il.Tmp (slotTmp capBaseSlot))
-                                                            , ArgVal (Base L) (Il.Tmp (slotTmp kSlot))
-                                                            , ArgVal (Base W) (Il.Con 3)
+                                                              else
+                                                                Il.Tmp (slotTmp cbase)
                                                             ]
-                                                        )
-                                                        sF
-                                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
-                                                        |> mergeClosureResult pending sInner
+                                                            capBaseSlot
+                                                            sD
 
-                                                 else
-                                                    emit
-                                                        (Call (Just rp)
-                                                            (Agg "val")
-                                                            (Il.Sym "rt_make_closure")
-                                                            [ ArgVal (Base L) (Il.Sym descName)
-                                                            , ArgVal (Base L)
-                                                                (if k == 0 then
-                                                                    Il.Con 0
-
-                                                                 else
-                                                                    Il.Tmp (slotTmp cbase)
-                                                                )
-                                                            , ArgVal (Base W) (Il.Con k)
-                                                            ]
-                                                        )
-                                                        s4
-                                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
-                                                        |> mergeClosureResult pending sInner
+                                                    sF =
+                                                        storeValueCell tagNumber [ Il.Con k ] kSlot sE
+                                                in
+                                                emit
+                                                    (Call (Just rp)
+                                                        (Agg "val")
+                                                        (Il.Sym ("q_" ++ mangle "Rt.closure"))
+                                                        [ ArgVal (Base L) (Il.Tmp (slotTmp descSlot))
+                                                        , ArgVal (Base L) (Il.Tmp (slotTmp capBaseSlot))
+                                                        , ArgVal (Base L) (Il.Tmp (slotTmp kSlot))
+                                                        , ArgVal (Base W) (Il.Con 3)
+                                                        ]
+                                                    )
+                                                    sF
+                                                    |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+                                                    |> mergeClosureResult pending sInner
                                                 )
                                         )
                             )
@@ -8649,9 +8541,9 @@ setsUnion results =
 -- the address is a link-time constant).  RtGc's slots go through the
 -- EXISTING RawCallRaw (callW emits the symbol verbatim, word->word — the
 -- same ABI the deleted `rt_midgc_region`/`rt_midgc_set_region` Zig seats
--- had) + RawWordLoad/RawWordStore.  GATED on midGc (the sole consumer until
--- the U5a driver joins the same gate): the DEFAULT route emits neither def,
--- so the corpus stays byte-identical.  The layout table (what each slot is
+-- had) + RawWordLoad/RawWordStore.  UNCONDITIONAL since Z0 (it was gated on
+-- the collector hatch, whose route was the only non-Mid one): both defs are
+-- emitted on every compile.  The layout table (what each slot is
 -- FOR) is Mid.RtGc's GLOBALS BLOCK section.
 globBlockData : DataDef
 globBlockData =

@@ -321,8 +321,12 @@ renderJob rt corpus entryKey ( job, elmGroup ) midResult =
             -- run.js's DEFAULT flag vector (flatten, rep, primDirect, midRt
             -- inject, midCons route, rtLean lean ABI, mono specialiser,
             -- consArr, rec, typeSpec, eqPtrFast) with the trailing
-            -- (midGc, midGcYoung) = (True, True) SINCE THE GC NURSERY FLIP —
-            -- the selfhost lane must agree with run.js's defaults so the seed
+            -- (midGc, midGcYoung) = (True, True).  midGcYoung is the nursery
+            -- hatch (live).  midGc is RETIRED at zighost Z0: the Mid collector
+            -- is the only collector, so the slot is INERT (QbeLower.lower binds
+            -- it `_midGc` and no arm reads it) — it is spelled True only because
+            -- Mid.QbeModule.compileEntry's call shape still carries the bit.
+            -- The vector must still agree with run.js's defaults so the seed
             -- it builds re-emits itself (the U2-fix-4 twin TestMain pins).
             renderSsa (QbeModule.compileEntry rt corpus elmGroup midTexts entryKey True True True True True True True ( ( True, ( True, ( True, ( True, True ) ) ) ), True ))
 

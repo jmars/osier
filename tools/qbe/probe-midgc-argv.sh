@@ -10,25 +10,26 @@
 # the whole nursery: the tail built so far is freed, `acc` points at freed
 # memory, and *argv* comes back as garbage.
 #
-# IS IT ROUTE-SPECIFIC?  NO — the hole is in the ZIG heap on both routes (the
-# hatch only changes who owns the Mid heap; the argv registry is Zig-heap
-# either way, and the list is built before the Mid region even exists).  The
-# fix therefore lives in the DEFAULT route's code path too, which is why this
-# probe drives it there.
+# IS IT ROUTE-SPECIFIC?  NO — the hole is in the ZIG heap (the argv registry is
+# Zig-heap; the list is built before the Mid region even exists).  There is one
+# route since ZIGHOST Z0 (the collector hatch is retired: run.js refuses
+# QBE_MIDGC=0), so the two arms this probe used to run — the flag off and on —
+# are the SAME build now and have been collapsed into one.
 #
-# THE SECOND ARM USED TO BE THE CENSUS ROW'S OWN EVIDENCE, and it was not a
-# run: under QBE_MIDGC=1 the argv repr was COMPILE-REFUSED (`Runtime.argv ()`
-# lowers to the `value` prim, `value` was on nurseryHostPrims, and the refusal
-# is what made the argv list UNREACHABLE from a Mid object).  STAGE 7 O2 DELETED
-# that arm with the rest of the census (the Mid host is the default now), so the
-# arm is a MEASUREMENT instead of a refusal: the same program must COMPILE under
-# QBE_MIDGC=1 and still answer NARGS — MEASURED on the O2 tree at QBE_HEAP_MB=16
-# with 60000 args.  That is a weaker statement than the old one and it is
-# recorded as such: nothing on the default route scavenges the Zig nursery after
-# boot (the argv list is still a Zig-heap valCons, and `value` is the one prim
-# that hands it out), so "it answers correctly" is evidence, not a proof of
-# soundness.  The census's replacement — refuse a MID GC heap driven by the ZIG
-# host — is in run.js's MIDGC_DEPENDS_ON and is scripted by probe-midgc-io.sh.
+# THE SECOND ARM IS GONE, and the record of what it was is kept because the
+# MEASUREMENT it carried is still the honest bound on this probe: under the
+# collector hatch the argv repr was COMPILE-REFUSED (`Runtime.argv ()` lowers to
+# the `value` prim, `value` was on nurseryHostPrims, so the argv list was
+# UNREACHABLE from a Mid object).  STAGE 7 O2 deleted that refusal, turning the
+# arm into a measurement — the same program COMPILES and still answers NARGS,
+# MEASURED on the O2 tree at QBE_HEAP_MB=16 with 60000 args — and ZIGHOST Z0
+# removed the flag, so both arms became the SAME build and were collapsed.  The
+# statement this probe makes is therefore the weaker one, and it is recorded as
+# such: nothing on this route scavenges the Zig nursery after boot (the argv
+# list is still a Zig-heap valCons, and `value` is the one prim that hands it
+# out), so "it answers correctly" is evidence, not a proof of soundness.  The
+# census's replacement — refuse a MID GC heap driven by the ZIG host — is in
+# run.js's MIDGC_DEPENDS_ON and is scripted by probe-midgc-io.sh.
 #
 # THE ASYMMETRY.  tools/qbe/fixtures/argvrepro.elm's `count` returns the LENGTH
 # of Runtime.argv (), so a corrupt tail changes the answer, not just the data.
@@ -43,8 +44,8 @@
 #     scavenge; 60000 is used for margin.)
 #
 # Usage:
-#   tools/qbe/probe-midgc-argv.sh            # PASS-AFTER, both routes
-#   tools/qbe/probe-midgc-argv.sh --before    # FAIL-BEFORE, both routes
+#   tools/qbe/probe-midgc-argv.sh            # PASS-AFTER (the only route)
+#   tools/qbe/probe-midgc-argv.sh --before    # FAIL-BEFORE (the only route)
 #
 # The --before arm edits tools/qbe/hostshim.zig (so rt.o is rebuilt — rt-o.sh's
 # freshness probe sees the change) and restores it under a trap.
@@ -70,7 +71,7 @@ need node; need cc; need python3
 python3 -c "print(' '.join('a' * 20 + str(i) for i in range($NARGS)))" > "$WORK/args.txt"
 
 build() { # $1 = out dir
-  QBE_MIDGC="$2" "$ROOT/tools/qbe/qbe-mk.sh" "$FIXTURE" "$ENTRY" "$1" >/dev/null 2>&1
+  "$ROOT/tools/qbe/qbe-mk.sh" "$FIXTURE" "$ENTRY" "$1" >/dev/null 2>&1
 }
 
 # echo the program's stdout (the argv COUNT); the golden is NARGS
@@ -92,44 +93,26 @@ open(p, "w").write(s.replace(old, ""))
 PY
 }
 
-run_arm() { # $1 = midgc (0: the default route; the 1 arm is midgc_arm below)
-  local midgc="$1" out r
-  out="$(mktemp -d "$WORK/b$midgc.XXXXXX")"
-  build "$out" "$midgc" || { echo "RESULT=build-failed" >&2; return 1; }
-  r="$(count_with "$out/argvrepro" QBE_MIDGC="$midgc")"
-  echo "RESULT=$r"
-}
-
-# the MIDGC arm: the emit must COMPILE (O2 deleted the refusal) and the binary
-# must still answer the argv count — the `value` prim on a Mid heap, measured.
-midgc_arm() {
+run_arm() {
   local out r
-  out="$(mktemp -d "$WORK/midgc.XXXXXX")"
-  build "$out" 1 || { echo "BUILD_FAILED"; return 0; }
-  r="$(count_with "$out/argvrepro" QBE_MIDGC=1)"
+  out="$(mktemp -d "$WORK/b.XXXXXX")"
+  build "$out" || { echo "RESULT=build-failed" >&2; return 1; }
+  r="$(count_with "$out/argvrepro")"
   echo "RESULT=$r"
 }
 
 rc=0
 case "${1:-}" in
   "")
-    r="$(run_arm 0)"
-    echo "QBE_MIDGC=0: $r (want RESULT=$NARGS)"
-    [ "$r" = "RESULT=$NARGS" ] || { echo "FAIL-AFTER: the default route lost argv entries" >&2; rc=1; }
-    mg="$(midgc_arm)"
-    if [ "$mg" = "BUILD_FAILED" ]; then
-      echo "FAIL-AFTER: QBE_MIDGC=1 still REFUSES the argv-reading program — the census arm is back (O2 deleted it)" >&2; rc=1
-    elif [ "$mg" = "RESULT=$NARGS" ]; then
-      echo "QBE_MIDGC=1: COMPILES under the default Mid host and answers $NARGS — the census arm's \`value\` entry is gone, and the argv list survives the Mid churn (MEASURED; see the header for what this does and does not prove)"
-    else
-      echo "FAIL-AFTER: QBE_MIDGC=1 answered '$mg', want RESULT=$NARGS (the argv list did not survive the Mid churn)" >&2; rc=1
-    fi
-    [ "$rc" -eq 0 ] && echo "PASS-AFTER: *argv* survives a scavenge inside the build ($NARGS entries), and the MIDGC arm now runs instead of being refused"
+    r="$(run_arm)"
+    echo "the Mid route: $r (want RESULT=$NARGS)"
+    [ "$r" = "RESULT=$NARGS" ] || { echo "FAIL-AFTER: the route lost argv entries" >&2; rc=1; }
+    [ "$rc" -eq 0 ] && echo "PASS-AFTER: *argv* survives a scavenge inside the build ($NARGS entries) on the only collector there is"
     ;;
   --before)
     mutate_before || exit 1
-    r="$(run_arm 0)"
-    echo "QBE_MIDGC=0: $r (want the '$FAIL_BEFORE' signature)"
+    r="$(run_arm)"
+    echo "the Mid route: $r (want the '$FAIL_BEFORE' signature)"
     case "$r" in
       *"$FAIL_BEFORE"*) echo "FAIL-BEFORE REPRODUCED: without the root the reclaimed tail makes *argv* unreadable" ;;
       *) echo "FAIL-BEFORE NOT REPRODUCED: got '$r'" >&2; rc=1 ;;

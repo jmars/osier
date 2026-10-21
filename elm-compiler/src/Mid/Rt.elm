@@ -1111,7 +1111,7 @@ rtDeps =
         -- pattern: the in-frame loop), so they name no self RawCall edge.
         -- cStrFill/cStrLenGo/cStrCopyGo recurse through `App` on their OWN
         -- key (the SF2 fix: App self-tail = the in-frame loop on the
-        -- DEFAULT route; the RawCall self-tail is midGc-gated), so they
+        -- DEFAULT route; the RawCall self-tail is unconditional since Z0), so they
         -- name NO RawCall edge — no entries here.  A future revert to
         -- callR fails TestMain's rt-call-graph check loudly, by design.
         , -- ===== read-file-as-string (zigretire stage 3 GROUP 3B-3).  The

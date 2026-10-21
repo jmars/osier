@@ -58,12 +58,23 @@ const RUNTIME_MID_RAW = fs.readFileSync(path.join(__dirname, 'runtime.mid'), 'ut
 // compile-time splice, the run-time getenv switch, and Rt.main's Zig arm are
 // deleted with src/effectloop.zig.  The host defuns in runtime.mid are now
 // unconditionally present (an unreached Mid defun is pruned anyway).
-const QBE_MIDGC = process.env.QBE_MIDGC !== '0';
-const QBE_MIDGC_YOUNG = QBE_MIDGC && process.env.QBE_MIDGC_YOUNG !== '0';
+// QBE_MIDGC IS RETIRED (zighost Z0): the Mid collector is the ONLY collector.
+// There is no branch, no default and no flag left to select another one —
+// Lower's allocation seats, the vec-store seam, the Con/closure routes and the
+// globals-block injection are unconditional, and the Zig escape route's own
+// seats (rt_string, rt_con, rt_make_closure, rt_vec_alloc, rt_vec_store,
+// rt_raw_alloc) are no longer emitted by anything.  The value is still READ,
+// once, to die LOUDLY: a stale script that sets QBE_MIDGC=0 must not silently
+// measure a different route than it names (the QBE_MIDDRIVER precedent above).
+if (process.env.QBE_MIDGC === '0') {
+  console.error('run.js: QBE_MIDGC=0 is no longer supported — the Zig collector is deleted (zighost Z0); the Mid collector is the only one. Nothing selects a collector any more.');
+  process.exit(2);
+}
+const QBE_MIDGC_YOUNG = process.env.QBE_MIDGC_YOUNG !== '0';
 // (O4) the QBE_MIDGC-ONLY SPLICE IS RETIRED: its one region — Rt.main's
 // run-time refusal of QBE_MIDHOST=0 — went with the QBE_MIDHOST hatch.  The
-// QBE_MIDGC FLAG still selects the collector (Lower's allocation seats and
-// QbeModule's gc-half injection); only the runtime-text splice is gone.
+// collector hatch that shared its name is gone too (Z0, above); only the
+// nursery's QBE_MIDGC_YOUNG splice remains.
 const MIDGC_YOUNG_BEGIN = '// >>> QBE_MIDGC_YOUNG-ONLY';
 const MIDGC_YOUNG_END = '// <<< QBE_MIDGC_YOUNG-ONLY';
 
@@ -357,8 +368,10 @@ if (process.env.QBE_MIDDRIVER === '0') {
 }
 // THE MIDGC GUARD, data-driven (zigretire stage 5 PART 3 — the lesson: a
 // guard that names ONE incompatible flag is not a guard; this arc paid for
-// that twice).  QBE_MIDGC=1 is sound iff every flag the Mid seats DEPEND on
-// is present.  MIDGC_DEPENDS_ON is the COMPLETE enumeration of those flags:
+// that twice).  Since zighost Z0 the Mid collector is the ONLY collector, so
+// every flag its seats DEPEND on must be present ALWAYS — there is no route
+// left on which withholding one is sound.  MIDGC_DEPENDS_ON is the COMPLETE
+// enumeration of those flags:
 // each entry names the env that turns the dependency OFF, what the dependency
 // is, and why the combination is a SILENT wrong answer (never a loud link
 // error, which is why a by-hand `if` per flag keeps leaking holes).
@@ -390,17 +403,17 @@ if (process.env.QBE_MIDDRIVER === '0') {
 // COMPLETENESS of the enumeration is therefore a REVIEW obligation, not a
 // mechanical one — and the string hole that motivated this correction shows
 // the structural limit: QBE_NOSTRINGINTERN is read in rt.zig main, not run.js,
-// so NO list here could enumerate it.  That hole is closed STRUCTURALLY (under
-// QBE_MIDGC=1, string literals are emitted as static data — rt_string is not
-// called at all), pinned by probe-midgc-string.sh's zero-rt_string-emission
+// so NO list here could enumerate it.  That hole is closed STRUCTURALLY
+// (string literals are emitted as static data — rt_string is not called at
+// all), pinned by probe-midgc-string.sh's zero-rt_string-emission
 // assert, not by this guard.
 const MIDGC_DEPENDS_ON = [
   { off: 'QBE_NORTLEAN', dep: 'the lean ABI', why: 'the Mid routes hard-code the lean call shape (3 pointer args + a count word, direct :val return), which mixes with the FAT QBE_NORTLEAN callees into a link-and-read-the-wrong-registers' },
   { off: 'QBE_NOMIDRT', dep: 'the Mid runtime', why: 'withholding the Rt program removes the q_Rt_* seats the collector and routes call, so the partial-application path silently reverts to the Zig allocator (a cross-heap edge that SEGVs)' },
 ];
 for (const d of MIDGC_DEPENDS_ON) {
-  if (QBE_MIDGC && process.env[d.off] === (d.val || '1')) {
-    console.error(`run.js: QBE_MIDGC=1 requires ${d.dep} (${d.off}=${d.val || '1'} is incompatible — ${d.why})`);
+  if (process.env[d.off] === (d.val || '1')) {
+    console.error(`run.js: the Mid collector requires ${d.dep} (${d.off}=${d.val || '1'} is incompatible — ${d.why})`);
     process.exit(2);
   }
 }
@@ -452,7 +465,6 @@ function compileGroups(groups) {
       qbeRec: QBE_REC,
       qbeEqPtrFast: QBE_EQPTRFAST,
       qbeTypeSpec: QBE_TYPESPEC,
-      qbeMidGc: QBE_MIDGC,
       qbeMidGcYoung: QBE_MIDGC_YOUNG,
     },
   });

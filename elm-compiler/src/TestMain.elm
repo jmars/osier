@@ -1059,7 +1059,7 @@ checks rt runtimeMidText =
          List.all ok allKeys
         )
     , check "rt cons lowers to a QBE function named q_Rt_x2econs"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.cons" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.cons" of
             Ok mod ->
                 List.any (\f -> f.name == "q_Rt_x2econs") mod.funcs
 
@@ -1097,7 +1097,7 @@ checks rt runtimeMidText =
     -- the silent mislower whose fix this row pins structurally (the BEHAVIOURAL
     -- pin is the gate's charord.elm row).
     , check "char ordering: a Char/string `<` lowers to the inline byte compare (loadub), NOT a call to Rt.<"
-        (case QbeLower.lower rt True False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ charOrdProbe ])) (rtProgram rt True True True ++ [ charOrdProbe ]) "Rt.charOrdProbe" of
+        (case QbeLower.lower rt True False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ charOrdProbe ])) (rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ charOrdProbe ]) "Rt.charOrdProbe" of
             Ok mod ->
                 case funcByName "q_Rt_x2echarOrdProbe" mod of
                     Just f ->
@@ -1110,7 +1110,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "char ordering CONTROL: a `<` on two Int literals keeps the i64 fast path (no loadub byte walk, no Rt.< call)"
-        (case QbeLower.lower rt True False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ intLtProbe ])) (rtProgram rt True True True ++ [ intLtProbe ]) "Rt.intLtProbe" of
+        (case QbeLower.lower rt True False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ intLtProbe ])) (rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ intLtProbe ]) "Rt.intLtProbe" of
             Ok mod ->
                 case funcByName "q_Rt_x2eintLtProbe" mod of
                     Just f ->
@@ -1130,7 +1130,7 @@ checks rt runtimeMidText =
     , check "rt RawCallAgg classification: a defun containing one is a DIRECT safepoint (allocating — the callee is unknown generated code)"
         (rt.direct rawCallAggProbe)
     , check "rt RawCallAgg lowers to a word-target aggregate call returning the sret address"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ rawCallAggProbe ])) (rtProgram rt True True True ++ [ rawCallAggProbe ]) "Rt.rawCallAggProbe" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ rawCallAggProbe ])) (rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ rawCallAggProbe ]) "Rt.rawCallAggProbe" of
             Ok mod ->
                 List.any rawCallAggCallShape mod.funcs
 
@@ -1324,7 +1324,7 @@ checks rt runtimeMidText =
     , check "B0perf-2 nested word-tail If: the ret-bound arm's word SURVIVES the join end-to-end — the BLOCKER fix (the old lastBlockJump read only the INNER else's jmp @body and silently dropped %a0 to ret 0)"
         (case lowl nestedWordTailIfSrc of
             Ok [ fixture ] ->
-                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ fixture ])) (rtProgram rt True True True ++ [ fixture ]) "Rt.die" of
+                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ fixture ])) (rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ fixture ]) "Rt.die" of
                     Ok mod ->
                         case funcByName "q_Rt_x2edie" mod of
                             Just f ->
@@ -1424,7 +1424,7 @@ checks rt runtimeMidText =
             && List.member "Rt.parseArgsGo" Rt.driverSeeds
         )
     , check "A1b RawCallAgg FUNCTION-symbol accept: a RawSym callee (not just a temp) lowers to Call (Just _) (Agg \"val\") (Il.Sym \"rt_bounce\") [word] — the code label, never a dN data ref"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ rawCallAggSymProbe ])) (rtProgram rt True True True ++ [ rawCallAggSymProbe ]) "Rt.rawCallAggSymProbe" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ rawCallAggSymProbe ])) (rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ rawCallAggSymProbe ]) "Rt.rawCallAggSymProbe" of
             Ok mod ->
                 List.any rawCallAggSymCallShape mod.funcs
 
@@ -1448,7 +1448,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "A1b RawCallAgg VALUE-position Blit: a val-shaped aggregate call of rt_bounce emits Call (Just _) (Agg \"val\") (Il.Sym \"rt_bounce\") + a 40-byte Blit into the dest slot (the rtApply non-tail shape, never a word-address return)"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ rawCallAggValProbe ])) (rtProgram rt True True True ++ [ rawCallAggValProbe ]) "Rt.rawCallAggValProbe" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ rawCallAggValProbe ])) (rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ rawCallAggValProbe ]) "Rt.rawCallAggValProbe" of
             Ok mod ->
                 List.any rawCallAggValBlitShape mod.funcs
 
@@ -1456,7 +1456,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "A1b emitted .ssa names the FUNCTION symbol as the call target: the lowered module RENDERED as .ssa contains `call $rt_bounce` (a code label), not a data-def call"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ [ rawCallAggSymProbe ])) (rtProgram rt True True True ++ [ rawCallAggSymProbe ]) "Rt.rawCallAggSymProbe" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ rawCallAggSymProbe ])) (rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ rawCallAggSymProbe ]) "Rt.rawCallAggSymProbe" of
             Ok mod ->
                 String.contains "call $rt_bounce" (Print.print mod)
 
@@ -1691,21 +1691,21 @@ checks rt runtimeMidText =
                 False
         )
 
-    -- STAGE 6 U2 fix 4 (re-pinned at B4, re-pinned at STAGE 7 O3): THE
-    -- NativeMain VECTOR PIN (plan obs-5's deferred obligation, the
-    -- unpinned-midGc drift class).  B4 removed the midDriver flag — the Mid
-    -- driver is the only route — so the only remaining selfhost-vs-run.js
-    -- hatch pair is QBE_MIDGC.  run.js's QBE_MIDGC = (env !== '0') — the Mid
-    -- collector is the DEFAULT since O3 — and selfhost/NativeMain.elm's
-    -- hard-coded midGc must agree: the selfhost lane and run.js have to emit
-    -- byte-identical .ssa (the qbe-bootstrap --verify fixed point, i.e. the
-    -- committed seed must be re-emittable BY the compiler that seed builds).
-    -- The MEASURED GAP, stated: Elm cannot read run.js, so this row pins the
-    -- VALUE (a pinned literal) and its MEANING (the default route it selects):
+    -- STAGE 6 U2 fix 4 (re-pinned at B4, at STAGE 7 O3, and at ZIGHOST Z0):
+    -- THE NativeMain VECTOR PIN (plan obs-5's deferred obligation, the
+    -- unpinned-drift class).  The hatch pair this row was written for is GONE:
+    -- B4 removed midDriver, and Z0 removed the collector hatch — there is no
+    -- QBE_MIDGC flag left in run.js to disagree with.  What remains is the
+    -- POSITIONAL SLOT: `Mid.QbeModule.compileEntry`'s call shape still carries
+    -- a collector bit, so selfhost/NativeMain.elm passes the literal True in it
+    -- and `defaultMidGc` pins that literal.  The slot is INERT (QbeLower.lower
+    -- binds it `_midGc`, unread), so this row no longer pins a DEFAULT — it
+    -- pins that the slot has not silently started selecting something again,
+    -- together with the route it used to select and which is now unconditional:
     -- q_Rt_x2ehalt IS emitted (the driver's Rt.halt), rt_glob IS emitted (the
     -- B0 frame pair's freelist/frame_top block), and the halt arm retargets
     -- rt_halt -> q_Rt_x2ehalt.
-    , check "U2 fix 4 — NativeMain vector pin (re-pinned at stage 7 O3): the selfhost midGc default is True = run.js's QBE_MIDGC default, and routing midGc=True still selects the driver route (q_Rt_x2ehalt emitted, rt_halt retargeted, rt_glob emitted for the B0 frame pair)"
+    , check "U2 fix 4 — NativeMain vector pin (re-pinned at ZIGHOST Z0): the selfhost call shape's collector slot is the literal True (INERT — the hatch is retired, no arm reads it), and the route it once selected is now unconditional: q_Rt_x2ehalt emitted, rt_halt retargeted, rt_glob emitted for the B0 frame pair"
         (let
             midGc =
                 defaultMidGc
@@ -1714,12 +1714,12 @@ checks rt runtimeMidText =
                 rtProgram rt True True True
          in
          (defaultMidGc == True)
-            && -- THE COLLECTOR HALF IS PART OF THE PROGRAM THE FLAG LOWERS
-               -- (stage 7 O3): with midGc=True the allocation seats are
-               -- Rt.allocVector/Rt.allocRaw, which live in rtProgramGc — a
-               -- program without them fails the lowering LOUDLY ("qbe: unknown
-               -- global Rt.allocVector", MEASURED), which is itself the proof
-               -- that the flag selects the Mid seats.  So the row lowers the
+            && -- THE COLLECTOR HALF IS PART OF THE PROGRAM THE SEEDING
+               -- REACHES: the allocation seats are Rt.allocVector/Rt.allocRaw,
+               -- which live in rtProgramGc — a program without them fails the
+               -- lowering LOUDLY ("qbe: unknown global Rt.allocVector",
+               -- MEASURED).  Since Z0 the gc seeds are seeded unconditionally
+               -- (Lower's gcSeeds line reads no flag), so the row lowers the
                -- same union rt.programGc participates in at emit time.
                (case QbeLower.lower rt False False False True True True True midGc False QbeTypes.empty (rtArities (prog ++ rtProgramGc rt True True True)) (prog ++ rtProgramGc rt True True True) "Rt.emptylist" of
                     Ok mod ->
@@ -1742,27 +1742,13 @@ checks rt runtimeMidText =
     -- STAGE 6 U1c + B4: the Mid-owned globals block + its 0-arg accessor.
     -- Originally GATED on the midgc flag (plan correction C3); B4 made the
     -- block UNCONDITIONAL because the Mid frame pair (the default route)
-    -- always reads rt_glob's freelist/frame_top words.  So with midGc OFF
-    -- the block is now EMITTED (the old "emits neither" pin is inverted).
-    , check "stage6 globals block: midGc OFF still emits rt_glob + rt_glob_addr (B4 made the block unconditional — the frame pair always reads it)"
-        (case ( rtProgram rt True True True, rtProgramGc rt True True True ) of
-            ( [], _ ) ->
-                False
-
-            ( _, [] ) ->
-                False
-
-            ( primProg, gcProg ) ->
-                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (primProg ++ gcProg)) (primProg ++ gcProg) "Rt.allocVector" of
-                    Ok mod ->
-                        List.any (\d -> d.name == RtGc.globDataSym) mod.datas
-                            && List.any (\f -> f.name == RtGc.globAddrSym) mod.funcs
-
-                    Err _ ->
-                        False
-        )
-    , check "stage6 globals block: midGc ON emits both, in the pinned shapes, and no gc defun names the deleted seats"
-        (case QbeLower.lower rt False False False True True True True True False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.allocVector" of
+    -- always reads rt_glob's freelist/frame_top words.  Z0 RETIRED the row
+    -- that pinned "midGc OFF still emits rt_glob + rt_glob_addr": the flag it
+    -- set is gone and the slot it passed is inert, so that row could no longer
+    -- fail for the reason it named.  The row below asserts the same two defs,
+    -- in their pinned shapes, on the one route there is.
+    , check "stage6 globals block: both defs are emitted unconditionally (Z0: no collector flag), in the pinned shapes, and no gc defun names the deleted seats"
+        (case QbeLower.lower rt False False False True True True True defaultMidGc False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.allocVector" of
             Ok mod ->
                 List.any
                     (\d ->
@@ -1883,8 +1869,8 @@ checks rt runtimeMidText =
             Err _ ->
                 False
         )
-    , check "B0 globals-block ungating: the default route (midGc OFF) emits rt_glob + rt_glob_addr — the frames' freelist/frame_top block (B4 made it unconditional)"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+    , check "B0 globals-block ungating: the driver route emits rt_glob + rt_glob_addr — the frames' freelist/frame_top block (B4 made it unconditional; Z0 removed the flag the label used to name)"
+        (case QbeLower.lower rt False False False True True True True defaultMidGc False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 List.any (\d -> d.name == RtGc.globDataSym) mod.datas
                     && List.any (\f -> f.name == RtGc.globAddrSym) mod.funcs
@@ -1977,7 +1963,7 @@ checks rt runtimeMidText =
             Err _ ->
                 False
         )
-    , check "B1 root-order: THE PARTIAL ARM's env slot is rooted BEFORE the alloc and RE-READ AFTER (push_ptr -> rt_vec_alloc -> loadl, in ONE block) — the cStrFill lesson.  A push-after-alloc or a pre-alloc-copy mutation breaks this shape (the emitted .ssa loses the post-alloc load or the pre-alloc push) and fails HERE, because the runtime churn rows CANNOT see the hazard (the moving collector copies bodies without destroying them, so a stale read is output-silent).  STAGE 7 O3-fix MOVED THE PIN'S TARGET: applyGo and applyTailGo no longer spell this dance (three copies were three chances to drift), so the ONE site is Rt.applyPartGo — and the second half of the row is what keeps it one: both loops' partial arms must CALL it, so a re-inlined copy in either loop is RED here."
+    , check "B1 root-order: THE PARTIAL ARM's env slot is rooted BEFORE the alloc and RE-READ AFTER (push_ptr -> q_Rt_x2eallocVector -> loadl, in ONE block) — the cStrFill lesson.  A push-after-alloc or a pre-alloc-copy mutation breaks this shape (the emitted .ssa loses the post-alloc load or the pre-alloc push) and fails HERE, because the runtime churn rows CANNOT see the hazard (the moving collector copies bodies without destroying them, so a stale read is output-silent).  STAGE 7 O3-fix MOVED THE PIN'S TARGET: applyGo and applyTailGo no longer spell this dance (three copies were three chances to drift), so the ONE site is Rt.applyPartGo — and the second half of the row is what keeps it one: both loops' partial arms must CALL it, so a re-inlined copy in either loop is RED here."
         (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "q_Rt_x2eapplyPartGo" mod of
@@ -2289,7 +2275,7 @@ checks rt runtimeMidText =
         (Rt.closureSeeds == [ "Rt.closure", "Rt.closureFill" ]
         )
     , check "rt lean ABI: a frame-free callee has pointer params, :val return and NO frame enter/leave"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.+" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.+" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2e_x2b") mod.funcs of
                     f :: _ ->
@@ -2306,7 +2292,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "rt lean ABI: a framing callee (cons) enters/leaves through the Mid frame pair and keeps the lean signature"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.cons" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.cons" of
             Ok mod ->
                 case List.filter (\f -> f.name == "q_Rt_x2econs") mod.funcs of
                     f :: _ ->
@@ -2322,7 +2308,7 @@ checks rt runtimeMidText =
                 False
         )
     , check "rt lean ABI: the Zig rt_bounce seat appears NOWHERE in any emit (B4 deleted it — the Mid q_Rt_x2ebounce is the only bounce)"
-        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.+" of
+        (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.+" of
             Ok mod ->
                 not (List.any (callsSym "rt_bounce") mod.funcs)
 
@@ -2351,7 +2337,7 @@ checks rt runtimeMidText =
     , check "rt self-tail loops: cStrLenGo/cStrCopyGo/cStrFill/memGo + the glob + ep* + RUN loops emit jmp @body and NO native call to their own symbol (the O(1)-stack property)"
         (List.all
             (\( key, qname ) ->
-                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) key of
+                case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) key of
                     Ok mod ->
                         case funcByName qname mod of
                             Just f ->
@@ -2436,8 +2422,8 @@ checks rt runtimeMidText =
         )
 
     , check "rt = symbol fast path: emitted as a pointer short-circuit that KEEPS the symEq fallback, and the hatch removes it"
-        (case ( QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True)) (rtProgram rt True True True) "Rt.="
-              , QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True False)) (rtProgram rt True True False) "Rt.="
+        (case ( QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True True ++ rtProgramGc rt True True True)) (rtProgram rt True True True ++ rtProgramGc rt True True True) "Rt.="
+              , QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (rtProgram rt True True False ++ rtProgramGc rt True True False)) (rtProgram rt True True False ++ rtProgramGc rt True True False) "Rt.="
               ) of
             ( Ok onMod, Ok offMod ) ->
                 case ( funcByName "q_Rt_x2e_x3d" onMod, funcByName "q_Rt_x2e_x3d" offMod ) of
@@ -5702,7 +5688,7 @@ checks rt runtimeMidText =
             Ok [ mA ] ->
                 let
                     prog =
-                        rtProgram rt True True True ++ mA.defuns
+                        rtProgram rt True True True ++ rtProgramGc rt True True True ++ mA.defuns
                 in
                 case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities prog) prog "A.f" of
                     Ok mod ->
@@ -5747,7 +5733,7 @@ checks rt runtimeMidText =
             Ok [ mA ] ->
                 let
                     prog =
-                        rtProgram rt True True True ++ mA.defuns
+                        rtProgram rt True True True ++ rtProgramGc rt True True True ++ mA.defuns
                 in
                 case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities prog) prog "A.f" of
                     Ok mod ->
@@ -5767,7 +5753,7 @@ checks rt runtimeMidText =
             Ok [ mA ] ->
                 let
                     prog =
-                        rtProgram rt True True True ++ mA.defuns
+                        rtProgram rt True True True ++ rtProgramGc rt True True True ++ mA.defuns
                 in
                 case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities prog) prog "A.f" of
                     Ok mod ->
@@ -8656,7 +8642,7 @@ checks rt runtimeMidText =
                     && String.contains "%t2 =l alloc8 56" ssa
                     && not (String.contains "call $malloc" ssa)
                     && String.contains "call $memset(l " ssa
-                    && String.contains "call $rt_vec_store(l " ssa
+                    && String.contains "call $rt_vec_store_plain(l " ssa
                     && String.contains "%t9 =l add %t2, 16" ssa
 
             Err _ ->
@@ -12668,15 +12654,20 @@ rawAbiValueMisuse =
     }
 
 
-{-| The prim half, for rows that lower WITH the driver hatch
-(QBE_MIDDRIVER=1).  Since stage 6 A3a, Rt.main has a REAL surface body (the
-A3a slice: usage + toomany + rlimit), so it is already part of `rtProgram` —
-the A1 `rtMainStub` stand-in is gone (appending it would now emit a SECOND
-Rt.main and a duplicate `main` symbol).
+{-| The DRIVER ROUTE's program: the prim half PLUS the collector half.
+Since stage 6 A3a, Rt.main has a REAL surface body (the A3a slice: usage +
+toomany + rlimit), so it is already part of `rtProgram` — the A1 `rtMainStub`
+stand-in is gone (appending it would now emit a SECOND Rt.main and a duplicate
+`main` symbol).
+ZIGHOST Z0 made the collector half MANDATORY here: the Mid allocation seats
+(Rt.allocVector/Rt.allocRaw) are what every Con/vector/string/closure site
+lowers to now, so a program that omits `rtProgramGc` fails the lowering LOUDLY
+("qbe: unknown global Rt.allocVector") — which is exactly how the rows below
+went red until this union matched what Mid.QbeModule actually emits.
 -}
 driverProg : Rt.Runtime -> List Defun
 driverProg rt =
-    rtProgram rt True True True
+    rtProgram rt True True True ++ rtProgramGc rt True True True
 
 
 {-| A RawCallAgg whose callee is a FUNCTION symbol (stage 6 A1b, the
@@ -13073,11 +13064,18 @@ funcByName name mod =
     List.head (List.filter (\f -> f.name == name) mod.funcs)
 
 
-{-| B1 root-order: within ONE block, `rt_root_push_ptr` must precede
-`rt_vec_alloc` and a word LOAD must follow the alloc (the `wload(sp, 3)`
+{-| B1 root-order: within ONE block, `rt_root_push_ptr` must precede the
+allocating seat and a word LOAD must follow the alloc (the `wload(sp, 3)`
 re-read).  Both the push-after-alloc and the pre-alloc-copy mutations break
 this — the first puts the alloc before the push (the `seenPush` guard fires),
 the second removes the re-read (no Load is ever seen after the alloc).
+RE-PINNED AT ZIGHOST Z0: the alloc is the Mid seat `q_Rt_x2eallocVector` (an
+`aggcall val`), not the Zig barrier's `rt_vec_alloc` — the escape route that
+spelled the latter is deleted.  THE HALF THAT GOT WEAKER, stated: the seat's
+own emission ENDS in a load (the payload read-back, Lower.midGcAllocSeat), so
+"a Load after push+alloc" no longer distinguishes the `sp->env` re-read from
+that read-back.  The order half (push BEFORE the alloc) is unchanged and is
+the one the cStrFill lesson is about.
 -}
 partialRootOrder : Il.Func -> Bool
 partialRootOrder f =
@@ -13101,7 +13099,7 @@ rootOrderStep seenPush seenAlloc instrs =
                     if s == "rt_root_push_ptr" then
                         rootOrderStep True seenAlloc rest
 
-                    else if s == "rt_vec_alloc" then
+                    else if s == "q_Rt_x2eallocVector" then
                         -- the alloc must come AFTER the env-root push.
                         if seenPush then
                             rootOrderStep seenPush True rest
@@ -13133,16 +13131,14 @@ pipeline is the identity, so this unwrap cannot fail while the T7 rows are
 green — and the dedicated T7 identity row asserts the `Ok` DIRECTLY, so a
 broken pipeline turns red there first, loudly.
 -}
--- run.js's DEFAULT midGc flag, the one remaining selfhost-vs-run.js hatch
--- pair after B4 removed midDriver: run.js's QBE_MIDGC = (env !== '0') (ON,
--- since stage 7 O3), and selfhost/NativeMain.elm's hard-coded midGc = True
--- must match.  This is a HAND-COPIED twin (Elm cannot read run.js) — when the
--- default moves, this constant, NativeMain.elm's vector and run.js move
--- together, and the row above fails until they do.  O3 is the second time this
--- moved (B4 was the first) and the O3 move is why the selfhost lane emits the
--- Mid allocation seats: leaving it at False would make the node emit and the
--- seed-built emit disagree on the compiler's OWN sources, i.e. the seed the
--- consolidator re-freezes could not be re-emitted by the compiler it builds.
+-- THE COLLECTOR SLOT of Mid.QbeModule's call shape, as
+-- selfhost/NativeMain.elm spells it (a HAND-COPIED twin — Elm cannot read the
+-- other driver).  The hatch this constant used to mirror is RETIRED (zighost
+-- Z0): run.js has no QBE_MIDGC any more, and QbeLower.lower binds the slot
+-- `_midGc`, unread.  So the VALUE no longer selects anything; the constant
+-- exists so the two drivers' call shapes stay legible and cannot drift apart
+-- silently, and the row above pins it together with the route that is now
+-- unconditional.
 defaultMidGc : Bool
 defaultMidGc =
     True
