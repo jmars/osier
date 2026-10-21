@@ -160,3 +160,28 @@ totals across sessions.
    Zig reference arm; `recGet` IS now fired); `tools/qbe-bootstrap.sh --freeze` writes the emit payload
    ONTO the committed seed, so a mid-freeze failure truncates it (hit twice, 51/53 B — restored from
    `HEAD`); emit-to-temp + atomic rename is the fix. `--verify` (~742 s) still unrun since the seed moved.
+
+---
+
+## Deferred — added 2026-10-20 (O5 seat re-homing)
+
+Found while re-homing the last Zig seats (`handoff-o5-result`). `rt_float_text` is the one seat that
+cannot move without a language addition, so it is recorded here rather than forced.
+
+1. **A float-bits ↔ word reinterpret primitive in mid-c.** The surface has `fload` (a `val`'s float
+   word) but **no bit-cast**, so mantissa/exponent extraction is not expressible. Needed by (2) and by
+   nothing else today. Shape: a prim pair (`fbits(x) -> word`, `ofbits(w) -> float`), additive and
+   emit-inert for existing code, with the usual pinned `.ssa` shape row and a round-trip property row
+   (`ofbits(fbits(x)) == x` for a set of edge values incl. `-0.0`, denormals, NaN payloads).
+
+2. **Shortest-round-trip float formatting (Ryu), ported to Mid, with the NaN/Infinity and `.0`
+   rules.** `rt_float_text` is currently one call into Zig's `{d}` formatter (Ryu in
+   `vendor/osier-rt`) plus three rules that are OURS, not Ryu's: the `nan`/`inf`/`-inf` spellings, the
+   `.0` suffix on integral values, and the exponent switch at JS's thresholds (`1e-7`, `1e+22`). The
+   port must reproduce all four byte-for-byte. Oracle: the existing goldens are the specification —
+   `tools/qbe/golden/` plus qbe-check's `float-*` rows (`1e-7`, `-1e+22`, `Inf`, `NaN`, `5e-324`,
+   denormals, `-0.0`), each of which already pins the exact printed text. Fail-before is available:
+   the seat's own golden goes red the moment the Mid port diverges.
+
+Ordering: (1) then (2). Landing (2) deletes `rt_float_text` and leaves `hostshim.zig` with only the
+root registry, the emitted call ABI and the bring-up seats.
