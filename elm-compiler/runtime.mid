@@ -1656,7 +1656,7 @@ defun Rt.ssIn(ptrN : val, lenN : val) -> val {
   word tab = payload(call Rt.ssTab(mknum(0)), 0);
   word data = rawcall malloc(len + 1);
   bytestore(data, payload(lenN, 0), 0);
-  val cp = call Rt.ssInGo(ptrN, mknum(data), mknum(0), lenN);
+  val cp = call Rt.ssInGo(ptrN, mknum(data), lenN);
   wstore(tab + n * 24, 0, data);
   wstore(tab + n * 24 + 8, 0, len);
   wstore(tab + n * 24 + 16, 0, 0);
@@ -1665,13 +1665,17 @@ defun Rt.ssIn(ptrN : val, lenN : val) -> val {
 }
 // Rt.ssInGo: the byte-copy self-tail (the tree's loop idiom — a word
 // binder that is the target of an assignment becomes an AUTO-CELL, an
-// allocating node, and these defuns must stay FRAME-FREE).
-defun Rt.ssInGo(ptrN : val, dataN : val, iN : val, lenN : val) -> val {
-  if (mkbool(payload(iN, 0) >= payload(lenN, 0))) {
+// allocating node, and these defuns must stay FRAME-FREE).  THREE params is
+// the lean ABI's entire argument budget (Lower.maxDirectArity), so the walk
+// carries its position IN the two pointers and only the remaining count in
+// the third: the index this defun used to take is the difference the
+// pointers already encode, so it never has to be passed.
+defun Rt.ssInGo(ptrN : val, dataN : val, lenN : val) -> val {
+  if (mkbool(payload(lenN, 0) <= 0)) {
     return mknil;
   }
-  bytestore(payload(dataN, 0), payload(iN, 0), byteload(payload(ptrN, 0), payload(iN, 0)));
-  return call Rt.ssInGo(ptrN, dataN, mknum(payload(iN, 0) + 1), lenN);
+  bytestore(payload(dataN, 0), 0, byteload(payload(ptrN, 0), 0));
+  return call Rt.ssInGo(mknum(payload(ptrN, 0) + 1), mknum(payload(dataN, 0) + 1), mknum(payload(lenN, 0) - 1));
 }
 
 // Rt.ssReadbyte: the string-stream read arm as a word (byte 0..255,
