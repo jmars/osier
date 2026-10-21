@@ -174,7 +174,7 @@ defun Wyoung.unbarred(cnt : val) -> val {
 // region is null = "nothing to remember yet").
 defun Wyoung.prealloc(dummy : val) -> val {
   word blob = rawcall malloc(400);
-  rawcall rt_root_push_value_array(blob + 8, blob);
+  call Rt.rootPushValueArray(blob + 8, blob);
   vecstore(blob + 8, 0, mknum(42));
   word base = allocvec(1);
   vecstore(base, 0, vecload(blob + 8, 0));

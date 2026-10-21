@@ -156,7 +156,7 @@ machinery REGISTERED are scanned.
      ROOT_VALUE_ARRAY, which is also why `withroots` is a documented NO-OP on
      this backend (Mid.Qbe.Lower's WithRoots arm — the roots it names already
      exist); and (b) a REGISTERED root array,
-     `rawcall rt_root_push_value_array(base, countPtr)`, whose elements
+     `call Rt.rootPushValueArray(base, countPtr)`, whose elements
      `Rt.gcScanValueArray` follows and whose count is read AT SCAN TIME — the
      collector scans it AND (under a moving collector) updates it in place.
      An UNREGISTERED raw copy is scanned by neither, and BOTH collectors make
@@ -1134,8 +1134,8 @@ consequences, all stated rather than hidden:
      referent), which B7 owns.  This is forced, not a shortcut:
      `RawAllocRaw` (the GC's own raw block) would be no better — a raw
      block that no root points at is SWEPT, because `runtime.mid`'s
-     gcMarkRoots only follows rt_gc_roots_* slots and a raw word binder
-     is not one.
+     gcMarkRoots only follows the MID ROOT REGISTRY's slots (and the values
+     table's), and a raw word binder is not one.
   3. The representation is the ADDRESS, so `s`, `&s`, `p`, `&p` and a
      nested `s.inner` are all one raw word: `s.f` and `p->f` lower to the
      SAME node, which is the plan's own test for the design reading well.
@@ -1626,8 +1626,11 @@ syscall's `long`).
 rt_* seats (tools/qbe/rt.zig exports) called from Rt bodies today:
 
   * rt_halt 0 (the prim halt arm; retargets to the Mid Rt.halt under QBE_MIDDRIVER=1)
-  * rt_gc_heap_bytes 0, rt_gc_roots_len 0
-  * rt_gc_root_kind 1, rt_gc_root_slot 1, rt_gc_root_np 1
+  * rt_gc_heap_bytes 0
+  * (ZIGHOST Z1) rt_gc_roots_len/root_kind/root_slot/root_np DELETED — the
+    collector's root walk reads the MID ROOT REGISTRY in the globals block
+    (words 4/5/6 = base/count/cap), so no body reads a root seat and the ten
+    rt_root_*/rt_gc_root_* seats are gone from rt.o
   * (O5) rt_ss_in/readbyte/close DELETED — the registry is Mid-owned
   * (O5) rt_sym_intern DELETED — the intern table is Mid-owned
   * (O5 seat 3) rt_value_slot DELETED — the lookup is Mid's (the table stays
@@ -1636,10 +1639,12 @@ rt_* seats (tools/qbe/rt.zig exports) called from Rt bodies today:
 (The rt.zig exports NOT here — rt_string, rt_vec_alloc, rt_raw_alloc,
 rt_vec_store(_plain), rt_frame_enter/leave, rt_apply, rt_bounce,
 rt_tail_known, rt_prim — are reached through dedicated nodes and
-literals, never through `rawcall`.  The stage-6 A2/A4a DRIVER seats —
-rt_boot, rt_root_push_value_array — are WORD-in/WORD-out (or void) by A2's
-shape deviations, so `rawcall` IS their route and they sit in the table
-below.  (O5 seat 4b: rt_parse_arg and rt_argv_install are GONE from the table
+literals, never through `rawcall`.  The stage-6 A2 DRIVER seat rt_boot is
+WORD-in/WORD-out by A2's shape deviation, so `rawcall` IS its route and it
+sits in the table below.  rt_root_push_value_array was the second such seat
+and is GONE at ZIGHOST Z1 with the rest of the family: the registry is Mid's,
+reached by `call`, and its six WRITE seats are exported so a user `.mid` can
+reach them too.  (O5 seat 4b: rt_parse_arg and rt_argv_install are GONE from the table
 AND from the Zig host — the entry-arg parser and the *argv* list are Mid
 defuns reached by `call`, which is what the A4a emission row now pins.)
 
@@ -1658,9 +1663,10 @@ Plan-listed, no Rt-body call yet (arities from the C prototypes):
 
 The stage-6 A2 driver seats (arities from tools/qbe/rt.zig's exports):
 
-  * rt_boot 0 (no args; 0 ok / 1 gc-init-failed),
-    rt_root_push_value_array 2 (base ptr, live-count ptr; the count is
-    read AT SCAN TIME, so the caller wstores it before the push)
+  * rt_boot 0 (no args; 0 ok / 1 gc-init-failed)
+
+  (ZIGHOST Z1: rt_root_push_value_array's row is DELETED with its seat — the
+  root registry is Mid-owned and reached by `call`.)
 
   (O5 seat 4b: rt_parse_arg 2 and rt_argv_install 3 are GONE from this table
   and from the Zig host.  runtime.mid's Rt.parseArg (dst *Value, arg cstr;
@@ -1708,10 +1714,10 @@ rawcallArity =
         ( "rt_glob_addr", 0 )
         , ( "rt_die", 1 )
         , ( "rt_gc_heap_bytes", 0 )
-        , ( "rt_gc_roots_len", 0 )
-        , ( "rt_gc_root_kind", 1 )
-        , ( "rt_gc_root_slot", 1 )
-        , ( "rt_gc_root_np", 1 )
+        -- (ZIGHOST Z1: rt_gc_roots_len / rt_gc_root_kind / rt_gc_root_slot /
+        --   rt_gc_root_np DELETED — the collector walks the Mid root registry
+        --   now, so no body reads a root seat and these rows would name
+        --   symbols rt.o no longer defines)
         -- (O5: rt_ss_in/readbyte/close DELETED — the string-stream registry
         --   is Mid-owned now, Region slots 38..39 + Rt.ssTab/ssIn/ssInGo/
         --   ssReadbyte/ssClose in runtime.mid)
@@ -1724,25 +1730,16 @@ rawcallArity =
         --   entry-arg parser and the *argv* list are runtime.mid's
         --   Rt.parseArg/Rt.argvInstall, reached by a Mid call)
         ( "rt_boot", 0 )
-        , ( "rt_root_push_value_array", 2 )
-        , -- ===== the stage-6 B0 frame machinery's remaining U1b root seats
-          -- (rt_root_push_value_array is above): rt_root_watermark (the
-          -- enter-time shadow-stack depth) and rt_root_pop_to (the
-          -- popTo(wm)-NOT-pop truncation).  rt_root_push_ptr/rt_root_pop are
-          -- NOT used by the frame pair (popTo, never a bare pop — the
-          -- historical qbe-gcbug; pushArray, never pushPtr) — but the
-          -- stage-6 B1 apply partial arm's `env_root` dance needs BOTH:
-          -- pushPtr (root a COPY of the env pointer, re-read after the
-          -- allocArray scavenge) and the bare pop that balances it.
-        ( "rt_root_watermark", 0 )
-        , ( "rt_root_pop_to", 1 )
-        , ( "rt_root_push_ptr", 1 )
-        , ( "rt_root_pop", 0 )
-        , -- ===== the stage-6 A4b program/print seats (the A2 word-in/out
-          -- seats the driver's tail reaches: isProgram/runProgram/print +
-          -- the single-value root for the result/model slots)
-        ( "rt_root_push_value", 1 )
-        , ( "rt_is_program", 1 )
+        , -- (ZIGHOST Z1: rt_root_push_value_array / rt_root_watermark /
+          --   rt_root_pop_to / rt_root_push_ptr / rt_root_pop /
+          --   rt_root_push_value DELETED with their seats.  The registry is
+          --   Mid's now — runtime.mid's Rt.rootPushValueArray/rootWatermark/
+          --   rootPopTo/rootPushPtr/rootPop/rootPushValue, reached by `call`
+          --   (a Mid edge, so `rawcall` has no arity to record) — and the six
+          --   write seats are EXPORTED so a user `.mid` can reach them.)
+          -- ===== the stage-6 A4b program/print seats (the A2 word-in/out
+          -- seats the driver's tail reaches: isProgram/runProgram/print)
+          ( "rt_is_program", 1 )
         , ( "rt_run_program", 2 )
         , ( "rt_print_value", 1 )
         ]

@@ -34,6 +34,22 @@ export Rt.frame-leave : word
 // only EXPORTED runtime keys (J2), so an internal spelling is unreachable for
 // the pin — this is the one seat the port widens the block for.
 export Rt.apply-at : val -> val -> val -> val
+// ===== THE ROOT REGISTRY'S PUBLIC HALF (ZIGHOST Z1) =====
+// The six WRITE seats of the Mid-owned root registry, exported for exactly the
+// reason Rt.apply-at is: a Mid PROGRAM (a user `.mid` module) must be able to
+// root a C-heap value array across a churn, and J2 lets a user module call
+// only EXPORTED runtime keys.  The pin that needs it is
+// tools/qbe/fixtures/Whost.mid / Wyoung.mid, whose arms store into a malloc'd
+// array, churn 20000 allocations, and read the array back.
+// The collector's walkers (Rt.gcMarkRoots/Rt.gcScavRoots) are NOT exported: no
+// program roots by walking, and a program that could would be a second root
+// source by construction.
+export Rt.rootPushValueArray : word -> word -> word
+export Rt.rootPushValue : word -> word
+export Rt.rootPushPtr : word -> word
+export Rt.rootPop : word
+export Rt.rootWatermark : word
+export Rt.rootPopTo : word -> word
 // ======================= THE C FFI BOUNDARY (cffi U5) =======================
 // The runtime's libc surface, DECLARED (plan §8 U5) so a `rawcall` site's
 // register classes come from the C prototype instead of the all-word
@@ -368,19 +384,19 @@ struct Region {
 // declaration.
 //
 //   slot 0  live      the slot count written by frame-enter (rt.zig: live@0)
-//   slot 1  wm        the shadow-stack watermark taken at enter; frame-leave
-//                     pops TO it (`rt_root_pop_to(hdr->wm)`, never a bare pop:
+//   slot 1  wm        the ROOT REGISTRY watermark taken at enter; frame-leave
+//                     pops TO it (`Rt.rootPopTo(hdr->wm)`, never a bare pop:
 //                     the collector caches root slots above it)
 //   slot 2  next      the parent frame in the frame stack (globals word 1)
 //   slot 3  freeNext  the freelist link, written on leave, read on reuse
 //   slot 4  _pad      the rt.zig `slots` pointer field; NOTHING in the Mid
 //                     frame path reads or writes it (P1e dropped the counter
-//                     seeding along with the zero loop — rt_root_push_value_array
+//                     seeding along with the zero loop — Rt.rootPushValueArray
 //                     takes base+live explicitly), so it is a named hole
 //
 // NOT a field, deliberately: the SLOTS themselves.  They begin at hdr + 40
 // (word 5), are variable in count, and are reached only with computed word
-// offsets — `base`/`memset`/`rt_root_push_value_array` keep the WORD spelling.
+// offsets — `base`/`memset`/`Rt.rootPushValueArray` keep the WORD spelling.
 struct FrameHdr {
   live : word;
   wm : word;
@@ -398,7 +414,7 @@ struct FrameHdr {
 //
 //   slot 0  args    the caller's args array base — the ROOT_VALUE_ARRAY base
 //                   registered by
-//                   `rt_root_push_value_array(args, [word](state) + 16)`
+//                   `Rt.rootPushValueArray(args, [word](state) + 16)`
 //   slot 1  nargs   the live args count; the over-applied arm RE-BINDS it (and
 //                   `args`) to the remaining args, then `recur`s
 //   slot 2  live    the element count the root SCAN reads, through the `np`
@@ -407,7 +423,7 @@ struct FrameHdr {
 //                   the registration keeps scanning the ORIGINAL range, whose
 //                   extra elements are live Values, so a superset is sound
 //   slot 3  env     the partial arm's staging copy of the applied closure's
-//                   env, rooted via `rt_root_push_ptr([word](sp) + 24)` and
+//                   env, rooted via `Rt.rootPushPtr([word](sp) + 24)` and
 //                   RE-READ after the allocvec (the cStrFill lesson: the
 //                   allocvec may have scavenged it)
 struct ApplyState {
@@ -2154,10 +2170,10 @@ defun Rt.parseArg(dstN : val, argN : val) -> val {
 // far and *argv* comes back as garbage (MEASURED pre-fix, 60k args:
 // `[GC NURSERY #1 ...] non-exhaustive case`).  HERE THE ROOT IS A C-HEAP
 // 40-BYTE VALUE SLOT (`acc`), filled with nil and registered with
-// rt_root_push_value BEFORE the first allocation; the loop only ever MOVES the
+// Rt.rootPushValue BEFORE the first allocation; the loop only ever MOVES the
 // accumulator BY WRITING THAT SLOT, so the rooted address always holds the
 // current tail (the Zig's `rootValue(&acc)` — a rooted SLOT, not a rooted
-// copy, because a copy would not see the rebind).  rt_root_pop after the list
+// copy, because a copy would not see the rebind).  Rt.rootPop after the list
 // is in the table, which is itself a registered root.
 defun Rt.argvGo(blkN : val, iN : val) -> val {
   word blk = payload(blkN, 0);
@@ -2231,13 +2247,13 @@ defun Rt.argvInstall(modeN : val, nargsN : val, argvN : val) -> val {
   word blk = rawcall malloc(24);
   word acc = rawcall malloc(40);
   vecstore(acc, 0, mknil);
-  rawcall rt_root_push_value(acc);
+  call Rt.rootPushValue(acc);
   wstore(blk, 0, payload(argvN, 0));
   wstore(blk, 1, acc);
   wstore(blk, 2, payload(nargsN, 0));
   call Rt.argvGo(mknum(blk), mknum(payload(nargsN, 0)));
   vecstore(ent, 0, vecload(acc, 0));
-  rawcall rt_root_pop();
+  call Rt.rootPop();
   return mknil;
 }
 
@@ -4519,6 +4535,7 @@ defun Rt.collect(dummy : val) -> val {
       word scav = payload((region->young != 0) ? call Rt.gcScavenge(mknum(0)) : mknil, 0);
       // <<< QBE_MIDGC_YOUNG-ONLY
       call Rt.gcMarkRoots(mknum(0));
+      call Rt.gcMarkValuesTab(mknum(0));
       call Rt.gcDrain(mknum(0));
       rawcall clock_gettime(1, [word](region) + 120);
       call Rt.gcClearClasses(mknum(0));
@@ -4786,15 +4803,20 @@ defun Rt.gcScavValueArray(base : val, cnt : val) -> val {
 // young pointer is COPIED and the slot that names it is UPDATED IN PLACE
 // (that update is what makes movement visible to the language: the frame's
 // val cells and the host's rooted arrays keep pointing at the live object).
+// THE ROOT SET IS THE MID REGISTRY (ZIGHOST Z1): base/count from the globals
+// block words 4/5, entries `{kind, slot, np}` at a 3-word stride.  Same walk,
+// different source of the three words — the Zig shadow stack is GONE.
 defun Rt.gcScavRoots(i : val) -> val {
   word iW = payload(i, 0);
-  word nRoots = rawcall rt_gc_roots_len();
+  word glob = rawcall rt_glob_addr();
+  word base = wload(glob, 4);
+  word nRoots = wload(glob, 5);
   if (mkbool(iW >= nRoots)) {
     return mknil;
   }
-  word kind = rawcall rt_gc_root_kind(iW);
-  word slot = rawcall rt_gc_root_slot(iW);
-  word np = rawcall rt_gc_root_np(iW);
+  word kind = wload(base, iW * 3);
+  word slot = wload(base, iW * 3 + 1);
+  word np = wload(base, iW * 3 + 2);
   if (mkbool(kind == 0)) {
     wstore(slot, 0, payload(call Rt.gcScavPtr(mknum(wload(slot, 0))), 0));
     return call Rt.gcScavRoots(mknum(iW + 1));
@@ -4814,6 +4836,26 @@ defun Rt.gcScavRoots(i : val) -> val {
   }
   call Rt.die(rawstr("qbe-rt: midgc: unknown root kind in scavenge"));
   return mknil;
+}
+// Rt.gcScavValuesTab: the values table's SCAVENGE twin — exactly
+// Rt.gcMarkValuesTab's 48-byte bounded walk, relocating each live entry's
+// Value IN PLACE (the entry lives on the C heap, so the slot never moves;
+// what moves is the Mid-heap block its payloads name).
+defun Rt.gcScavValuesTab(i : val) -> val {
+  word iW = payload(i, 0);
+  if (mkbool(iW >= 256)) {
+    return mknil;
+  }
+  word tab = wload(rawcall rt_glob_addr(), 3);
+  if (mkbool(tab == 0)) {
+    return mknil;
+  }
+  word e = tab + iW * 48;
+  if (mkbool(wload(e, 0) != 0)) {
+    call Rt.gcScavValue(mknum(e + 8));
+    return call Rt.gcScavValuesTab(mknum(iW + 1));
+  }
+  return call Rt.gcScavValuesTab(mknum(iW + 1));
 }
 // Rt.gcScavRemembered: walk the remembered set.  Each entry is an OLD BLOCK
 // address the barrier recorded (an old value-array that received a store of a
@@ -4896,6 +4938,7 @@ defun Rt.gcScavenge(dummy : val) -> val {
   region->scavBodies = 0;
   word rsHad = region->rsTop;
   call Rt.gcScavRoots(mknum(0));
+  call Rt.gcScavValuesTab(mknum(0));
   call Rt.gcScavRemembered(mknum(0));
   call Rt.gcScavDrain(mknum(0));
   region->youngCursor = region->youngStart;
@@ -4918,13 +4961,15 @@ defun Rt.gcScavenge(dummy : val) -> val {
 // <<< QBE_MIDGC_YOUNG-ONLY
 defun Rt.gcMarkRoots(i : val) -> val {
   word iW = payload(i, 0);
-  word nRoots = rawcall rt_gc_roots_len();
+  word glob = rawcall rt_glob_addr();
+  word base = wload(glob, 4);
+  word nRoots = wload(glob, 5);
   if (mkbool(iW >= nRoots)) {
     return mknil;
   }
-  word kind = rawcall rt_gc_root_kind(iW);
-  word slot = rawcall rt_gc_root_slot(iW);
-  word np = rawcall rt_gc_root_np(iW);
+  word kind = wload(base, iW * 3);
+  word slot = wload(base, iW * 3 + 1);
+  word np = wload(base, iW * 3 + 2);
   // A CHAIN OF ONE-SIDED DISPATCHES (GC ARC unit 1b).  This used to be a
   // nested `if/else` whose every arm `return`ed the mark call, with the
   // recursion to the NEXT root after the whole nest — i.e. it worked only
@@ -4953,6 +4998,41 @@ defun Rt.gcMarkRoots(i : val) -> val {
   }
   call Rt.die(rawstr("qbe-rt: midgc: unknown root kind"));
   return mknil;
+}
+// Rt.gcMarkValuesTab: THE VALUES-TABLE ROOT WALK (ZIGHOST Z1's found hole).
+// The values table (globals word 3) holds `*argv*` — a Mid-heap cons chain
+// built by Rt.argvInstall — plus the three host stream Values.  It was
+// registered with the ZIG collector only (`registerValuesTable`, a no-op on
+// this route since Z0), so before this walker NO Mid collect marked it: the
+// argv chain was reclaimed by any full collect that ran between boot and its
+// read, and argvrepro passed by PROMOTION AND TIMING (the scavenges inside the
+// build), not by being rooted.
+//
+// THE STRIDE IS 48 BYTES, NOT 40: an entry is `{char *name; Value value}`
+// (types.zig:303) — the name word then the 40-byte Value at +8 — so
+// `Rt.gcScanValueArray`'s 40-byte walk cannot express it.  An entry is LIVE
+// iff its name word is nonzero (the table is zeroed at Vm.init and the first
+// free entry is the first zero name — Rt.valFreeGo's own test), and the table
+// is a FIXED 256 entries (tables.zig:32), so the walk is bounded, not
+// cursor-driven.
+//
+// It reads the base out of glob word 3, so it works under BOTH the Vm-owned
+// storage (today) and the Mid-owned one (Z5).
+defun Rt.gcMarkValuesTab(i : val) -> val {
+  word iW = payload(i, 0);
+  if (mkbool(iW >= 256)) {
+    return mknil;
+  }
+  word tab = wload(rawcall rt_glob_addr(), 3);
+  if (mkbool(tab == 0)) {
+    return mknil;
+  }
+  word e = tab + iW * 48;
+  if (mkbool(wload(e, 0) != 0)) {
+    call Rt.gcMarkValue(mknum(e + 8));
+    return call Rt.gcMarkValuesTab(mknum(iW + 1));
+  }
+  return call Rt.gcMarkValuesTab(mknum(iW + 1));
 }
 defun Rt.gcScanValueArray(base : val, cnt : val) -> val {
   word baseW = payload(base, 0);
@@ -5888,6 +5968,126 @@ defun Rt.childCd(argvN : val, argcN : val, stN : val) -> val {
   call Rt.wRaw(mknum(2), mknum(cbufW + 173), mknum(1));
   return mknum(1);
 }
+// ===== THE MID-OWNED ROOT REGISTRY (ZIGHOST Z1) =====
+// The precise-root set the collector walks, owned by Mid instead of the Zig
+// Gc struct's shadow stack.  The storage is a malloc'd, grow-by-doubling array
+// of THREE-WORD entries `{kind, slot, np}` — the retired `GcRoot`
+// (vendor/osier-rt/src/gc/roots.zig:35) word for word, so the two walkers'
+// kind dispatch is unchanged and only the SOURCE of (kind, slot, np) moves.
+// base/count/cap live in the globals block words 4/5/6 (RtGc's layout table):
+// HERE and not in the collector's region, because a frame pushes its roots
+// BEFORE the lazy `Rt.gcInit` maps anything — the block is .bss and always
+// emitted, the region is not.
+//
+// THE KINDS (the Zig enum's numeric values, which the walkers dispatch on):
+// 0 = PTR (slot is a one-word pointer variable), 1 = VALUE (slot is a 40-byte
+// Value; interior pointers rewritten in place), 2 = VALUE_ARRAY (slot is the
+// array base, np points at its LIVE count — read AT SCAN TIME, not at push
+// time), 3 = VALUE_VOLATILE (scanned exactly like 1).  Kind 4
+// (CALLFRAME_ARRAY) was VM-only and is unreachable here; the walkers' falling
+// chain names it.
+//
+// ALLOC-FREE BY CONTRACT from the collector's view: a push may GROW the array,
+// and the grow mallocs (libc, which runs no collect) — so a Mid body may call
+// these under RawCallRaw's no-safepoint contract, exactly as the Zig seats'
+// page_allocator grow was (roots.zig:59-83).
+//
+// POP-TO, NEVER A BARE POP: `Rt.rootWatermark` snapshots the depth at frame
+// enter and `Rt.rootPopTo(wm)` truncates back to it at leave.  When anything
+// pushed between enter and leave (a nested frame, an apply arm's env root), a
+// bare pop pops the WRONG entry, the frame's ROOT_VALUE_ARRAY LEAKS, and every
+// later collect scans a freed block's stale slots — the historical qbe-gcbug.
+// Both truncation guards are LOUD: the Zig asserted them in Debug only
+// (roots.zig:149-165), and a lost balance is exactly the class this repo turns
+// from silent corruption into a named fatal.
+defun Rt.rootGrow() -> word {
+  word glob = rawcall rt_glob_addr();
+  word cap = wload(glob, 6);
+  // SHADOW_STACK_INIT_CAP parity (roots.zig:46): 64 entries, then doubling.
+  word nc = payload((cap == 0) ? mknum(64) : mknum(cap * 2), 0);
+  word old = wload(glob, 4);
+  word n = wload(glob, 5);
+  word nb = rawcall malloc(nc * 24);
+  // The old array is COPIED and freed rather than realloc'd: `realloc` is in
+  // no signature table this file may use, and the copy is alloc-free (libc
+  // malloc/free + a word loop — no safepoint), so the contract above holds.
+  word moved = if (old != 0) {
+    call Rt.copyWords(nb, old, n * 3);
+    rawcall free(old);
+    return 0;
+  } else {
+    return 0;
+  };
+  wstore(glob, 4, nb);
+  wstore(glob, 6, nc);
+  return 0;
+}
+// The ONE push body: every push writes its three words at the live index and
+// bumps the count.  Growing FIRST keeps the index in range on the entry that
+// crosses the capacity.
+defun Rt.rootPush(kind : word, slot : word, np : word) -> word {
+  word glob = rawcall rt_glob_addr();
+  word n = wload(glob, 5);
+  word cap = wload(glob, 6);
+  word grown = if (n >= cap) {
+    call Rt.rootGrow();
+    return 0;
+  } else {
+    return 0;
+  };
+  word base = wload(glob, 4);
+  wstore(base, n * 3, kind);
+  wstore(base, n * 3 + 1, slot);
+  wstore(base, n * 3 + 2, np);
+  wstore(glob, 5, n + 1);
+  return 0;
+}
+// `slot` is the ADDRESS of a one-word pointer variable that MUST point at the
+// HEAD of a GC object (gc.h:155-161): the marker reads the header at *(ptr-1),
+// so an interior/tail pointer would read a garbage header.
+defun Rt.rootPushPtr(slot : word) -> word {
+  call Rt.rootPush(0, slot, 0);
+  return 0;
+}
+// A by-value Value root: the walker rewrites the Value's interior pointers in
+// place; the Value itself never moves.
+defun Rt.rootPushValue(slot : word) -> word {
+  call Rt.rootPush(1, slot, 0);
+  return 0;
+}
+// N by-value Values rooted by base + a LIVE count pointer (`np` is the address
+// of the i32 the frame's `hdr->live` / ApplyState's `live` word holds).
+defun Rt.rootPushValueArray(base : word, np : word) -> word {
+  call Rt.rootPush(2, base, np);
+  return 0;
+}
+defun Rt.rootPop() -> word {
+  word glob = rawcall rt_glob_addr();
+  word n = wload(glob, 5);
+  word bad = if (n == 0) {
+    call Rt.die(rawstr("qbe-rt: midgc: root pop on an empty registry"));
+    return 0;
+  } else {
+    return 0;
+  };
+  wstore(glob, 5, n - 1);
+  return 0;
+}
+defun Rt.rootWatermark() -> word {
+  return wload(rawcall rt_glob_addr(), 5);
+}
+defun Rt.rootPopTo(wm : word) -> word {
+  word glob = rawcall rt_glob_addr();
+  word n = wload(glob, 5);
+  word bad = if (wm > n) {
+    call Rt.die(rawstr("qbe-rt: midgc: root pop_to above the registry depth"));
+    return 0;
+  } else {
+    return 0;
+  };
+  wstore(glob, 5, wm);
+  return 0;
+}
 // ===== the stage-6 B0 frame machinery (VERBATIM rt.zig rt_frame_enter/
 // rt_frame_leave, rt.zig:225-321).  The pooled freelist-head ARRAY lives in
 // the U1c globals block (RtGc: words 16..16+8192, indexed by nslots; bound
@@ -5916,7 +6116,7 @@ defun Rt.childCd(argvN : val, argcN : val, stN : val) -> val {
 // equivalence: a Value is 5 words, and the loop wrote five zero WORDS per slot
 // (40 zero bytes) — memset writes the same 40*nslots zero bytes in one call.
 // Header word 4 (the slots-POINTER field) is written by NEITHER shape: the Mid
-// frame path never reads it (rt_root_push_value_array takes base+live
+// frame path never reads it (Rt.rootPushValueArray takes base+live
 // explicitly), so the old counter seeding (wstore(hdr, 4, nslots)) drops with
 // the loop.
 //
@@ -5945,12 +6145,12 @@ defun Rt.frame-enter(nslots : word) -> word {
   word base = [word](hdr) + 40;
   rawcall memset(base, 0, 40 * nslots);
   hdr->live = nslots;
-  word wm = rawcall rt_root_watermark();
+  word wm = call Rt.rootWatermark();
   hdr->wm = wm;
   word glob = rawcall rt_glob_addr();
   hdr->next = wload(glob, 1);
   wstore(glob, 1, hdr);
-  rawcall rt_root_push_value_array(base, hdr);
+  call Rt.rootPushValueArray(base, hdr);
   return base;
 }
 
@@ -5964,7 +6164,7 @@ defun Rt.frame-leave() -> word {
     return 0;
   };
   wstore(glob, 1, hdr->next);
-  rawcall rt_root_pop_to(hdr->wm);
+  call Rt.rootPopTo(hdr->wm);
   word n = hdr->live;
   word pooled = if (wload(glob, 2) != 0) {
     // QBE_NO_REUSE: frame-leave never pools here, and this arm is the only
@@ -6147,7 +6347,7 @@ defun Rt.main(argc : word, argv : word) -> word {
   val prc = call Rt.parseArgsGo(mknum(pblk), mknum(0));
   word pre = if (mkbool(payload(prc, 0) != 0)) { rawcall exit(2); return 0; } else { return 0; };
   wstore(abuf, 80, entry_nargs);
-  rawcall rt_root_push_value_array(abuf, abuf + 640);
+  call Rt.rootPushValueArray(abuf, abuf + 640);
   call Rt.argvInstall(mknum(argvMode), mknum(nargs), mknum(argv));
   word a1 = abuf + 40;
   word a2 = abuf + 80;
@@ -6303,7 +6503,7 @@ defun Rt.main(argc : word, argv : word) -> word {
     return 0;
   };
   word fptr = wload(fslot, 0);
-  rawcall rt_root_push_value(fptr);
+  call Rt.rootPushValue(fptr);
   // THE MID HOST IS THE ONLY HOST (O4): the QBE_MIDHOST hatch — the compile-time
   // splice, the run-time getenv switch, the MIDGC refusal region, and the Zig
   // arm (the Zig effect-loop seats) — is RETIRED, and the
@@ -6312,7 +6512,7 @@ defun Rt.main(argc : word, argv : word) -> word {
   // program TWICE); non-program entries fall through to the shared print.
   word chk = if (payload32(call Rt.hostIsProgram(vecload(fptr, 0)), 0) != 0) {
     call Rt.hostRun(mknum(fptr), mknum(modelslot));
-    rawcall rt_root_push_value(modelslot);
+    call Rt.rootPushValue(modelslot);
     word mppc = rawcall rt_print_value(modelslot);
     word mpf = if (mkbool(mppc != 0)) {
       rawcall exit(1);
@@ -6345,7 +6545,7 @@ defun Rt.main(argc : word, argv : word) -> word {
 // env array.  The wrapper's `f` copy (vecload(fslot,0)) is NOT rooted: sound
 // only because no collect can run between the vecload and applyGo/applyTailGo's
 // param blit (scavenges are alloc-site-triggered; malloc(32)/
-// rt_root_push_value_array/frame-pool pop are collect-free), after which `f`
+// Rt.rootPushValueArray/frame-pool pop are collect-free), after which `f`
 // is a ROOTED frame param whose interior pointers the collector rewrites in
 // place.
 defun Rt.apply(fslot : word, args : word, nargs : word) -> val {
@@ -6353,10 +6553,10 @@ defun Rt.apply(fslot : word, args : word, nargs : word) -> val {
   state->args = args;
   state->nargs = nargs;
   state->live = nargs;
-  rawcall rt_root_push_value_array(args, [word](state) + 16);
+  call Rt.rootPushValueArray(args, [word](state) + 16);
   val f = vecload(fslot, 0);
   val r = call Rt.applyGo(mknum(state), f);
-  rawcall rt_root_pop();
+  call Rt.rootPop();
   rawcall free(state);
   return r;
 }
@@ -6365,10 +6565,10 @@ defun Rt.apply-tail(fslot : word, args : word, nargs : word) -> val {
   state->args = args;
   state->nargs = nargs;
   state->live = nargs;
-  rawcall rt_root_push_value_array(args, [word](state) + 16);
+  call Rt.rootPushValueArray(args, [word](state) + 16);
   val f = vecload(fslot, 0);
   val r = call Rt.applyTailGo(mknum(state), f);
-  rawcall rt_root_pop();
+  call Rt.rootPop();
   rawcall free(state);
   return r;
 }
@@ -6444,7 +6644,7 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
       // breaks it SILENTLY — keep this arm alloc-free after the allocvec.
       word total = arity + capslen;
       sp->env = env;
-      rawcall rt_root_push_ptr([word](sp) + 24);
+      call Rt.rootPushPtr([word](sp) + 24);
       word buf = allocvec(total);
       word env2 = sp->env;
       val chk = if (napp > 0) {
@@ -6460,7 +6660,7 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
       call Rt.copyWords(buf, env2, napp * 5);
       call Rt.copyWords(buf + napp * 40, args, rem * 5);
       call Rt.copyWords(buf + arity * 40, env2 + napp * 40, capslen * 5);
-      rawcall rt_root_pop();
+      call Rt.rootPop();
       word e = payload((capslen > 0) ? mknum(buf + arity * 40) : mknum(0), 0);
       *Ret retbuf = rawcall malloc(80);
       wstore(retbuf, 0, 0);
@@ -6525,12 +6725,12 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
 // THE ROOTING (unchanged from the arms it replaces, and load-bearing):
 //   * `args` — the caller's argument area — is NOT re-read after the allocvec,
 //     and must not be: it is a raw base the CALLER rooted (Rt.apply's
-//     rt_root_push_value_array for the generated-code route; a slice of the
+//     Rt.rootPushValueArray for the generated-code route; a slice of the
 //     host's permanently-rooted slot array for the host route), so a scavenge
 //     moves the Values INSIDE it and rewrites them in place, but the base word
 //     is an address the collector never updates.
 //   * `env` (the applied closure's env array) DOES move, so it is staged in
-//     sp->env, registered with rt_root_push_ptr([word](sp) + 24), and RE-READ
+//     sp->env, registered with Rt.rootPushPtr([word](sp) + 24), and RE-READ
 //     after the allocvec (the cStrFill lesson: the allocvec may have scavenged
 //     it).  `code` needs no such care: a desc is static data.
 defun Rt.applyPartGo(state : val, f : val) -> val {
@@ -6544,13 +6744,13 @@ defun Rt.applyPartGo(state : val, f : val) -> val {
   word args = sp->args;
   word nargs = sp->nargs;
   word total = napp + nargs + capslen;
-  rawcall rt_root_push_ptr([word](sp) + 24);
+  call Rt.rootPushPtr([word](sp) + 24);
   word envv = allocvec(total);
   word env2 = sp->env;
   call Rt.copyWords(envv, env2, napp * 5);
   call Rt.copyWords(envv + napp * 40, args, nargs * 5);
   call Rt.copyWords(envv + (napp + nargs) * 40, env2 + napp * 40, capslen * 5);
-  rawcall rt_root_pop();
+  call Rt.rootPop();
   return mkval(6, code, rem - nargs, envv, total);
 }
 defun Rt.callArity(disp : val) -> val {
@@ -6863,7 +7063,7 @@ defun Rt.bounceGo(r : val) -> val {
 // the comment there for why the splice is compile-time).
 //
 // THE STATE (plan §3.1): ONE `val[]` slot array, permanently ROOTED by
-// `rt_root_push_value_array`, and everything else plain WORDS in one malloc'd
+// `Rt.rootPushValueArray`, and everything else plain WORDS in one malloc'd
 // C-heap blob.  The array is the Zig loop's `.slots` discipline verbatim: a
 // Value that must outlive ONE host defun's frame lives in a slot and is
 // re-read at the point of use (the `val` bridge's obligation 2,
@@ -8693,7 +8893,7 @@ defun Rt.hostInit(progAddrN : val) -> val {
   rawcall memset(pp, 0, pollBytes);
   lp->npoll = 0;
   lp->poll = pp;
-  rawcall rt_root_push_value_array(blob + 8, blob);
+  call Rt.rootPushValueArray(blob + 8, blob);
   val prog = vecload(progAddr, 0);
   vecstore(blob + 8, 0, vecload(payload(prog, 0), 1));
   vecstore(blob + 8 + 40, 0, vecload(payload(prog, 0), 3));
@@ -9446,6 +9646,6 @@ defun Rt.hostRun(progAddrN : val, outAddrN : val) -> val {
   call Rt.hostCleanupAll(hN);
   vecstore(outAddr, 0, vecload(h + 8, 0));
   rawcall free(lp->poll);
-  rawcall rt_root_pop();
+  call Rt.rootPop();
   return mknil;
 }

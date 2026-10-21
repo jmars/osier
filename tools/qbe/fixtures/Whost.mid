@@ -70,7 +70,7 @@ defun Whost.runPart(uN : val, xN : val, yN : val) -> val {
   word blob = rawcall malloc(400);
   *St lp = [*St](blob);
   lp->n = 6;
-  rawcall rt_root_push_value_array(blob + 8, blob);
+  call Rt.rootPushValueArray(blob + 8, blob);
   vecstore(blob + 8, 0, uN);
   vecstore(blob + 8 + 40, 0, xN);
   vecstore(blob + 8 + 80, 0, yN);
@@ -79,7 +79,7 @@ defun Whost.runPart(uN : val, xN : val, yN : val) -> val {
   vecstore(blob + 8 + 120, 0, part);
   val ch2 = call Whost.churn(mknum(20000), mknil);
   val r = call Rt.apply-at(vecload(blob + 8 + 120, 0), mknum(blob + 88), mknum(1));
-  rawcall rt_root_pop();
+  call Rt.rootPop();
   return r;
 }
 
@@ -93,14 +93,14 @@ defun Whost.runOver(uN : val, aN : val, bN : val, cN : val) -> val {
   word blob = rawcall malloc(400);
   *St lp = [*St](blob);
   lp->n = 8;
-  rawcall rt_root_push_value_array(blob + 8, blob);
+  call Rt.rootPushValueArray(blob + 8, blob);
   vecstore(blob + 8, 0, uN);
   vecstore(blob + 8 + 40, 0, aN);
   vecstore(blob + 8 + 80, 0, bN);
   vecstore(blob + 8 + 120, 0, cN);
   val ch = call Whost.churn(mknum(20000), mknil);
   val r = call Rt.apply-at(vecload(blob + 8, 0), mknum(blob + 48), mknum(3));
-  rawcall rt_root_pop();
+  call Rt.rootPop();
   return r;
 }
 
@@ -110,14 +110,14 @@ defun Whost.run(uN : val, mN : val, xN : val) -> val {
   word blob = rawcall malloc(400);
   *St lp = [*St](blob);
   lp->n = 6;
-  rawcall rt_root_push_value_array(blob + 8, blob);
+  call Rt.rootPushValueArray(blob + 8, blob);
   vecstore(blob + 8, 0, mN);
   vecstore(blob + 8 + 40, 0, uN);
   vecstore(blob + 8 + 80, 0, xN);
   val ch = call Whost.churn(mknum(20000), mknil);
   vecstore(blob + 8 + 120, 0, vecload(blob + 8, 0));
   val r = call Rt.apply-at(vecload(blob + 8 + 40, 0), mknum(blob + 88), mknum(2));
-  rawcall rt_root_pop();
+  call Rt.rootPop();
   return r;
 }
 
@@ -129,11 +129,11 @@ defun Whost.runCap(uN : val, xN : val) -> val {
   word blob = rawcall malloc(400);
   *St lp = [*St](blob);
   lp->n = 6;
-  rawcall rt_root_push_value_array(blob + 8, blob);
+  call Rt.rootPushValueArray(blob + 8, blob);
   vecstore(blob + 8, 0, uN);
   vecstore(blob + 8 + 40, 0, xN);
   val ch = call Whost.churn(mknum(20000), mknil);
   val r = call Rt.apply-at(vecload(blob + 8, 0), mknum(blob + 48), mknum(1));
-  rawcall rt_root_pop();
+  call Rt.rootPop();
   return r;
 }

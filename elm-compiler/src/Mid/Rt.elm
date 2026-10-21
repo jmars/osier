@@ -897,13 +897,14 @@ rtDeps =
         , ( "Rt.gcAllocGo", [] )
         , ( "Rt.gcInit", [ "Rt.die", "Rt.gcEnvNum" ] )
         , ( "Rt.gcEnvNum", [ "Rt.gcEnvNum" ] )
-        , ( "Rt.collect", [ "Rt.gcMarkRoots", "Rt.gcDrain", "Rt.gcSweep", "Rt.gcClearClasses", "Rt.gcNumOut", "Rt.die", "Rt.gcVerify" ] )
+        , ( "Rt.collect", [ "Rt.gcMarkRoots", "Rt.gcMarkValuesTab", "Rt.gcDrain", "Rt.gcSweep", "Rt.gcClearClasses", "Rt.gcNumOut", "Rt.die", "Rt.gcVerify" ] )
         , ( "Rt.gcVerify", [ "Rt.gcVerify", "Rt.gcVerifyList", "Rt.gcVD" ] )
         , ( "Rt.gcVerifyList", [ "Rt.gcVerifyList", "Rt.gcVD" ] )
         , ( "Rt.gcVD", [ "Rt.gcNumOut", "Rt.die" ] )
         , ( "Rt.gcNumOut", [ "Rt.gcNum", "Rt.cStrLenGo" ] )
         , ( "Rt.gcNum", [ "Rt.gcNum" ] )
         , ( "Rt.gcMarkRoots", [ "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkPtr", "Rt.gcMarkValue", "Rt.die" ] )
+        , ( "Rt.gcMarkValuesTab", [ "Rt.gcMarkValuesTab", "Rt.gcMarkValue" ] )
         , ( "Rt.gcScanValueArray", [ "Rt.gcScanValueArray", "Rt.gcMarkValue" ] )
         , ( "Rt.gcDrain", [ "Rt.gcDrain", "Rt.gcScanValueArray" ] )
         , ( "Rt.gcSweep", [ "Rt.gcSweep" ] )
@@ -917,9 +918,10 @@ rtDeps =
           -- row must never name one of them (the closure would drag an absent
           -- key into a plain MIDGC build's seeds and Lower dies "unknown
           -- global"; TestMain pins that rule).
-          ( "Rt.gcScavenge", [ "Rt.gcScavRoots", "Rt.gcScavRemembered", "Rt.gcScavDrain", "Rt.gcNumOut" ] )
+          ( "Rt.gcScavenge", [ "Rt.gcScavRoots", "Rt.gcScavValuesTab", "Rt.gcScavRemembered", "Rt.gcScavDrain", "Rt.gcNumOut" ] )
         , ( "Rt.gcScavRoots", [ "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavPtr", "Rt.die" ] )
         , ( "Rt.gcScavValue", [ "Rt.gcScavPtr", "Rt.gcVD", "Rt.die" ] )
+        , ( "Rt.gcScavValuesTab", [ "Rt.gcScavValuesTab", "Rt.gcScavValue" ] )
         , ( "Rt.gcScavValueArray", [ "Rt.gcScavValueArray", "Rt.gcScavValue" ] )
         , ( "Rt.gcScavPtr", [ "Rt.gcPromoteAlloc", "Rt.gcScavCopyWords", "Rt.die" ] )
         , ( "Rt.gcScavCopyWords", [ "Rt.gcScavCopyWords" ] )
@@ -1179,7 +1181,7 @@ rtDeps =
         , ( "Rt.argvPush", [ "Rt.cStrLenGo", "Rt.cStrCopyGo", "Rt.cons" ] )
         , ( "Rt.valFreeGo", [] )
         , ( "Rt.valEntry", [ "Rt.valScanGo", "Rt.valFreeGo" ] )
-        , ( "Rt.argvInstall", [ "Rt.valEntry", "Rt.argvGo" ] )
+        , ( "Rt.argvInstall", [ "Rt.valEntry", "Rt.argvGo", "Rt.rootPushValue", "Rt.rootPop" ] )
         , -- ===== the stage-6 A3a driver entry.  Rt.main is a rawAbi defun
           -- (WORD argc/argv in, WORD exit-code out) reached from
           -- driverSeeds; its RawCall edges are Rt.cStrLenGo (the three
@@ -1200,7 +1202,7 @@ rtDeps =
           -- edge costs the emit NOTHING: Rt.die is already a driverSeed ROOT,
           -- so the closure it pulls (Rt.cStrLenGo) is in every artifact
           -- already — an edge, not a new root, exactly like Rt.frame-leave's.
-          ( "Rt.main", [ "Rt.cStrLenGo", "Rt.metaGo", "Rt.parseArgsGo", "Rt.argvInstall", "Rt.die" ] )
+          ( "Rt.main", [ "Rt.cStrLenGo", "Rt.metaGo", "Rt.parseArgsGo", "Rt.argvInstall", "Rt.die", "Rt.rootPushValueArray", "Rt.rootPushValue" ] )
         , -- ===== the stage-6 B0 frame machinery.  Rt.frame-enter's RawCall
           -- edges are its one helper; Rt.frame-leave's only edge is Rt.die
           -- (the no-frame panic — Rt.die is already a driverSeed, so this is
@@ -1209,9 +1211,25 @@ rtDeps =
           -- rt_root_push_value_array/rt_root_watermark/rt_root_pop_to calls
           -- are rawcall (RawCallRaw — NOT rtDeps edges), and P1e's bulk-zero
           -- `memset` is likewise a rawcall (RawCallRaw — NOT an rtDeps edge).
-          ( "Rt.frame-enter", [ "Rt.frameBlock" ] )
-        , ( "Rt.frame-leave", [ "Rt.die" ] )
+          ( "Rt.frame-enter", [ "Rt.frameBlock", "Rt.rootWatermark", "Rt.rootPushValueArray" ] )
+        , ( "Rt.frame-leave", [ "Rt.die", "Rt.rootPopTo" ] )
         , ( "Rt.frameBlock", [] )
+        , -- ===== THE MID-OWNED ROOT REGISTRY (ZIGHOST Z1).  The six write
+          -- seats the frame machinery, the apply family, argvInstall, Rt.main
+          -- and the host used to reach through `rawcall rt_root_*` are Mid
+          -- defuns now, so each is a REAL call-graph edge.  Rt.rootPush is the
+          -- ONE push body (three kinds share it); Rt.rootGrow mallocs + copies
+          -- through Rt.copyWords (libc malloc/free — no safepoint, so the whole
+          -- registry stays alloc-free from the collector's view and these
+          -- defuns stay out of the framed set).
+          ( "Rt.rootPushValue", [ "Rt.rootPush" ] )
+        , ( "Rt.rootPushPtr", [ "Rt.rootPush" ] )
+        , ( "Rt.rootPushValueArray", [ "Rt.rootPush" ] )
+        , ( "Rt.rootPush", [ "Rt.rootGrow" ] )
+        , ( "Rt.rootGrow", [ "Rt.copyWords" ] )
+        , ( "Rt.rootPop", [ "Rt.die" ] )
+        , ( "Rt.rootWatermark", [] )
+        , ( "Rt.rootPopTo", [ "Rt.die" ] )
         , -- ===== the stage-6 B1 apply family.  Rt.apply/Rt.apply-tail are
           -- rawAbi WRAPPERS (root the caller's f/args, then hand off); their
           -- one RawCall edge each is the val-ABI LOOP.  The loops reach
@@ -1221,15 +1239,15 @@ rtDeps =
           -- are closure edges, not new roots).  rt_callN/rt_bounce are
           -- aggcall (RawCallAgg — NOT rtDeps edges); malloc/rt_root_* are
           -- rawcall (RawCallRaw — NOT rtDeps edges).
-          ( "Rt.apply", [ "Rt.applyGo" ] )
-        , ( "Rt.apply-tail", [ "Rt.applyTailGo" ] )
+          ( "Rt.apply", [ "Rt.applyGo", "Rt.rootPushValueArray", "Rt.rootPop" ] )
+        , ( "Rt.apply-tail", [ "Rt.applyTailGo", "Rt.rootPushValueArray", "Rt.rootPop" ] )
         , -- STAGE 7 O3-fix: both apply LOOPS' partial arms (`rem > nargs`) now
           -- hand off to Rt.applyPartGo instead of spelling the capture/args
           -- interleave inline, so the edge is theirs AND the host applier's:
           -- ONE defun owns the interleave, so the two routes cannot drift.
           ( "Rt.applyGo", [ "Rt.callArity", "Rt.copyWords", "Rt.die", "Rt.applyPartGo" ] )
-        , ( "Rt.applyTailGo", [ "Rt.callArity", "Rt.copyWords", "Rt.die", "Rt.applyPartGo" ] )
-        , ( "Rt.applyPartGo", [ "Rt.copyWords" ] )
+        , ( "Rt.applyTailGo", [ "Rt.callArity", "Rt.copyWords", "Rt.die", "Rt.applyPartGo", "Rt.rootPushPtr", "Rt.rootPop" ] )
+        , ( "Rt.applyPartGo", [ "Rt.copyWords", "Rt.rootPushPtr", "Rt.rootPop" ] )
         , ( "Rt.callArity", [] )
         , -- Rt.copyWords is the raw-word WRAPPER (malloc the counter cell,
           -- hand off, free); Rt.copyWordsGo is the raw-word LOOP (wload/wstore
@@ -1269,7 +1287,7 @@ rtDeps =
           ( "Rt.hostDieErr", [ "Rt.cStrLenGo" ] )
         , ( "Rt.dieErr", [ "Rt.hostDieErr" ] )
         , ( "Rt.hostNowMs", [] )
-        , ( "Rt.hostInit", [] )
+        , ( "Rt.hostInit", [ "Rt.rootPushValueArray" ] )
         , ( "Rt.hostIsProgram", [ "Rt.cStrEq" ] )
         , ( "Rt.hostArity", [ "Rt.cStrEq" ] )
         , -- STAGE 7 O3-fix: the applier's rawcall set grew by the two non-call
@@ -1303,7 +1321,7 @@ rtDeps =
         , ( "Rt.hostStepAllGo", [ "Rt.hostStep" ] )
         , ( "Rt.hostStepAll", [ "Rt.hostStepAllGo" ] )
         , ( "Rt.hostRunLoop", [ "Rt.hostStepAll", "Rt.hostFlushExpiredSleeps", "Rt.hostRunnableScan", "Rt.hostPollTimeout", "Rt.hostRebuildPollfds", "Rt.hostDrainReady", "Rt.hostReapChildren", "Rt.hostCompleteReady", "Rt.hostReapBlocking", "Rt.dieErr" ] )
-        , ( "Rt.hostRun", [ "Rt.hostInit", "Rt.hostSpawnFromCmd", "Rt.hostRunLoop", "Rt.hostCleanupAll" ] )
+        , ( "Rt.hostRun", [ "Rt.hostInit", "Rt.hostSpawnFromCmd", "Rt.hostRunLoop", "Rt.hostCleanupAll", "Rt.rootPop" ] )
         , -- ===== THE STAGE 7B SYNCHRONOUS LEAVES + THE DEADLINE MACHINERY.
           -- Same rule as the 7A block above: one entry per host defun, exactly
           -- its `call Rt.*` targets.  The prim leaves' targets (Rt.getenv/
@@ -1536,6 +1554,21 @@ rawAbi =
           -- string it prints.
           "Rt.dieErr"
         , "Rt.hostDieErr"
+        , -- ===== THE MID-OWNED ROOT REGISTRY (ZIGHOST Z1): eight word-ABI
+          -- defuns, word-ABI by SIGNATURE (all-word params, word result), so
+          -- they land in the derived set and are declared here to keep the two
+          -- statements of one fact in step.  Rt.rootPush is the ONE push body
+          -- (kind, slot, np), the three public pushes are its 1/1/2-param
+          -- spellings, and Rt.rootWatermark/Rt.rootPop/Rt.rootPopTo are the
+          -- depth seats.
+          "Rt.rootGrow"
+        , "Rt.rootPush"
+        , "Rt.rootPushPtr"
+        , "Rt.rootPushValue"
+        , "Rt.rootPushValueArray"
+        , "Rt.rootPop"
+        , "Rt.rootWatermark"
+        , "Rt.rootPopTo"
         ]
 
 
@@ -1564,6 +1597,15 @@ rawAbiArity =
           -- lowerDefun both check this against the actual param count.
         ( "Rt.apply", 3 )
         , ( "Rt.apply-tail", 3 )
+        , -- ZIGHOST Z1: the root registry's eight word-ABI defuns.
+          ( "Rt.rootGrow", 0 )
+        , ( "Rt.rootPush", 3 )
+        , ( "Rt.rootPushPtr", 1 )
+        , ( "Rt.rootPushValue", 1 )
+        , ( "Rt.rootPushValueArray", 2 )
+        , ( "Rt.rootPop", 0 )
+        , ( "Rt.rootWatermark", 0 )
+        , ( "Rt.rootPopTo", 1 )
         , -- stage 6 B1fix: the copyWords WORD pair — the wrapper takes 3 word
           -- params (dst, src, n), the loop 3 (dst, src, cnt).  Both checked
           -- against the actual param count at lowerDefun (rawAbiArityAgree).

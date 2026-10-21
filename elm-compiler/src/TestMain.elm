@@ -84,10 +84,10 @@ checks rt runtimeMidText =
       -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
       -- the frameZero loop), so an empty or truncated load turns it RED,
       -- loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (315 defuns (GC NURSERY added the ten scavenge-family defuns; O5 added the five string-stream registry + the nine intern-table defuns + seat 3's values-table walk) — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (325 defuns (GC NURSERY added the ten scavenge-family defuns; O5 added the five string-stream registry + the nine intern-table defuns + seat 3's values-table walk) — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 315
+                List.length ast == 325
 
             Err _ ->
                 False
@@ -907,8 +907,8 @@ checks rt runtimeMidText =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 279 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram rt True True True) == 279
+    , check "rt program: 287 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
+        (List.length (rtProgram rt True True True) == 287
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
@@ -1146,7 +1146,7 @@ checks rt runtimeMidText =
     -- shapes are pinned, not just "it links".
     , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main + the B0 frame pair + stage 7A's die family (dieErr/hostDieErr — hostDieUnported left BOTH the family and the runtime at 7E, the unit that gave every Task ctor a real arm) are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo/frame set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set; the frame pair is FRAME-FREE by construction — its only nodes are rawcall/raw-word loads/stores and rawAbi->rawAbi calls to its one non-allocating helper)"
         (Rt.rawAbi
-            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.tail-known", "Rt.bounce", "Rt.dieErr", "Rt.hostDieErr" ]
+            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.tail-known", "Rt.bounce", "Rt.dieErr", "Rt.hostDieErr", "Rt.rootGrow", "Rt.rootPush", "Rt.rootPushPtr", "Rt.rootPushValue", "Rt.rootPushValueArray", "Rt.rootPop", "Rt.rootWatermark", "Rt.rootPopTo" ]
             && not (Set.member "Rt.die" rt.allocating)
             && not (Set.member "Rt.halt" rt.allocating)
             && not (Set.member "Rt.cStrEq" rt.allocating)
@@ -1178,6 +1178,20 @@ checks rt runtimeMidText =
             && Set.member "Rt.tail-known" rt.allocating
             && Set.member "Rt.bounce" rt.allocating
             && Set.member "Rt.bounceGo" rt.allocating
+            -- ZIGHOST Z1: the root registry is FRAME-FREE — the only seat its
+            -- bodies reach is libc malloc/free (RawCallRaw) through
+            -- Rt.rootGrow, so a push can run inside a collector-free window
+            -- and the push sites need no frame of their own.
+            && not (Set.member "Rt.rootGrow" rt.allocating)
+            && not (Set.member "Rt.rootPush" rt.allocating)
+            && not (Set.member "Rt.rootPushPtr" rt.allocating)
+            && not (Set.member "Rt.rootPushValue" rt.allocating)
+            && not (Set.member "Rt.rootPushValueArray" rt.allocating)
+            && not (Set.member "Rt.rootPop" rt.allocating)
+            && not (Set.member "Rt.rootWatermark" rt.allocating)
+            && not (Set.member "Rt.rootPopTo" rt.allocating)
+            && not (Set.member "Rt.gcMarkValuesTab" rt.allocating)
+            && not (Set.member "Rt.gcScavValuesTab" rt.allocating)
         )
     , check "rawAbi emission shape: Rt.die (1 word param) emits (params [a0:l], ret l, frame-free alloc scratch)"
         (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.die" of
@@ -1223,7 +1237,7 @@ checks rt runtimeMidText =
             Err _ ->
                 False
         )
-    , check "P1e zero-BEFORE-root: frame-enter's memset is emitted BEFORE the rt_root_push_value_array call (a reused block's stale slots must be zeroed before the GC scans them — the rt.zig:279 correctness memset)"
+    , check "P1e zero-BEFORE-root: frame-enter's memset is emitted BEFORE the Rt.rootPushValueArray call (a reused block's stale slots must be zeroed before the GC scans them — the rt.zig:279 correctness memset)"
         (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.frame-enter" of
             Ok mod ->
                 case funcByName "q_Rt_x2eframe_x2denter" mod of
@@ -1587,7 +1601,7 @@ checks rt runtimeMidText =
             Nothing ->
                 False
         )
-    , check "A4a MIDDRIVER emission — the seats + root push (RE-PINNED AT O5 SEAT 4b): the rendered .ssa references $rt_boot and $rt_root_push_value_array (the two A2 seats the driver still calls via rawcall), and the entry-arg parser + *argv* installer are now MID DEFUNS the driver CALLS — q_Rt_x2eparseArg from the arg loop and q_Rt_x2eargvInstall from Rt.main — with no $rt_parse_arg/$rt_argv_install anywhere (the Zig seats are deleted)"
+    , check "A4a MIDDRIVER emission — the seats + root push (RE-PINNED AT O5 SEAT 4b): the rendered .ssa references $rt_boot and $q_Rt_x2erootPushValueArray (the A2 seat the driver still rawcalls, and ZIGHOST Z1's Mid registry push it now calls), and the entry-arg parser + *argv* installer are now MID DEFUNS the driver CALLS — q_Rt_x2eparseArg from the arg loop and q_Rt_x2eargvInstall from Rt.main — with no $rt_parse_arg/$rt_argv_install anywhere (the Zig seats are deleted)"
         (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 let
@@ -1595,7 +1609,7 @@ checks rt runtimeMidText =
                         Print.print mod
                 in
                 String.contains "call $rt_boot" ssa
-                    && String.contains "call $rt_root_push_value_array" ssa
+                    && String.contains "call $q_Rt_x2erootPushValueArray" ssa
                     && String.contains "call $q_Rt_x2eparseArg" ssa
                     && String.contains "call $q_Rt_x2eargvInstall" ssa
                     && not (String.contains "$rt_parse_arg" ssa)
@@ -1621,7 +1635,7 @@ checks rt runtimeMidText =
             Err _ ->
                 False
         )
-    , check "A4b MIDDRIVER emission — the program/print tail (RE-PINNED AT O4): the Zig seats rt_is_program/rt_run_program are RETIRED with the effect loop — $main now asks Rt.hostIsProgram (the Mid predicate), drives Rt.hostRun (the only host), and prints through rt_print_value with rt_root_push_value for the model root"
+    , check "A4b MIDDRIVER emission — the program/print tail (RE-PINNED AT O4): the Zig seats rt_is_program/rt_run_program are RETIRED with the effect loop — $main now asks Rt.hostIsProgram (the Mid predicate), drives Rt.hostRun (the only host), and prints through rt_print_value with Rt.rootPushValue for the model root"
         (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 case funcByName "main" mod of
@@ -1629,7 +1643,7 @@ checks rt runtimeMidText =
                         callsSym "q_Rt_x2ehostIsProgram" f
                             && callsSym "q_Rt_x2ehostRun" f
                             && callsSym "rt_print_value" f
-                            && callsSym "rt_root_push_value" f
+                            && callsSym "q_Rt_x2erootPushValue" f
                             && not (callsSym "rt_is_program" f)
                             && not (callsSym "rt_run_program" f)
 
@@ -1808,6 +1822,28 @@ checks rt runtimeMidText =
 
             Err _ ->
                 False
+        )
+
+    -- ZIGHOST Z1: THE ROOT REGISTRY'S LAYOUT.  The registry lives in globals
+    -- words 4/5/6 (base/count/cap), the three words RtGc's table names, and
+    -- the emitted $rt_glob covers them; the two collector walkers read THAT
+    -- pair of words (not a seat) and dispatch on the 3-word {kind,slot,np}
+    -- entry stride.  The fail-before this row is for: a walker left reading
+    -- the retired rt_gc_root_* seats (deleted from rt.o) would link-fail on a
+    -- fixture build, but a walker reading the WRONG WORD would silently walk
+    -- garbage — so the word indices are pinned against RtGc's own constants,
+    -- not spelled twice.
+    , check "Z1 root registry pin: globRootSlot == 4 (base), count at +1 and cap at +2, the emitted $rt_glob covers word 6, and BOTH collector walkers read the registry (no rt_gc_root_* seat anywhere)"
+        (RtGc.globRootSlot
+            == 4
+            && RtGc.globWords
+            >= 7
+            && String.contains "word nRoots = wload(glob, 5);" runtimeMidText
+            && String.contains "word kind = wload(base, iW * 3);" runtimeMidText
+            && String.contains "word np = wload(base, iW * 3 + 2);" runtimeMidText
+            && not (String.contains "rt_gc_root_kind" runtimeMidText)
+            && not (String.contains "rt_gc_roots_len" runtimeMidText)
+            && not (String.contains "rt_root_push" runtimeMidText)
         )
 
     -- STAGE 6 B0: the frame machinery retarget.  Under QBE_MIDDRIVER=1 the
@@ -2223,7 +2259,7 @@ checks rt runtimeMidText =
         )
     , check "rt gc seeds: the collector seeds are exactly the two seats plus their transitive closure (stage 6 U2 adds Rt.die + Rt.cStrLenGo through the die arm's RawCall edge; GC-ARC F1 adds the stats printer Rt.gcNumOut + its digit loop Rt.gcNum through Rt.collect; GC ARC unit 2 adds the verifier walk Rt.gcVerify -> Rt.gcVerifyList and its die printer Rt.gcVD through Rt.collect and Rt.gcMarkPtr)"
         (Rt.gcSeeds
-            == [ "Rt.allocVector", "Rt.gcInit", "Rt.die", "Rt.cStrLenGo", "Rt.gcEnvNum", "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.collect", "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkValue", "Rt.gcMarkPtr", "Rt.gcVD", "Rt.gcNumOut", "Rt.gcNum", "Rt.gcDrain", "Rt.gcSweep", "Rt.gcClearClasses", "Rt.gcVerify", "Rt.gcVerifyList", "Rt.gcGrow", "Rt.allocRaw" ]
+            == [ "Rt.allocVector", "Rt.gcInit", "Rt.die", "Rt.cStrLenGo", "Rt.gcEnvNum", "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.collect", "Rt.gcMarkRoots", "Rt.gcScanValueArray", "Rt.gcMarkValue", "Rt.gcMarkPtr", "Rt.gcVD", "Rt.gcNumOut", "Rt.gcNum", "Rt.gcMarkValuesTab", "Rt.gcDrain", "Rt.gcSweep", "Rt.gcClearClasses", "Rt.gcVerify", "Rt.gcVerifyList", "Rt.gcGrow", "Rt.allocRaw" ]
         )
     , check "rt con seeds: the Mid ADT constructor and its fill helper"
         (Rt.conSeeds == [ "Rt.con", "Rt.conFill" ]
@@ -3677,10 +3713,10 @@ checks rt runtimeMidText =
     -- into an ALWAYS-PRESENT rtDeps row would drag an absent defun into a
     -- plain MIDGC build's seed closure and Lower would die "unknown global" —
     -- the loud end of the rule; the pin makes the rule itself a test.
-    , check "NURSERY PIN: the QBE_MIDGC_YOUNG-ONLY region of runtime.mid holds EXACTLY the ten scavenge-family defuns (balanced markers, every young defun inside, no young defun outside)"
+    , check "NURSERY PIN: the QBE_MIDGC_YOUNG-ONLY region of runtime.mid holds EXACTLY the eleven scavenge-family defuns (balanced markers, every young defun inside, no young defun outside)"
         (let
             youngKeys =
-                [ "Rt.gcScavenge", "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavPtr", "Rt.gcScavCopyWords", "Rt.gcScavRemembered", "Rt.gcScavOne", "Rt.gcScavDrain", "Rt.gcPromoteAlloc" ]
+                [ "Rt.gcScavenge", "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavValuesTab", "Rt.gcScavPtr", "Rt.gcScavCopyWords", "Rt.gcScavRemembered", "Rt.gcScavOne", "Rt.gcScavDrain", "Rt.gcPromoteAlloc" ]
 
             countInside ls =
                 List.foldl
@@ -3727,7 +3763,7 @@ checks rt runtimeMidText =
                     lines
                     |> Tuple.second
          in
-         (insideN == 10)
+         (insideN == 11)
             && List.all
                 (\k -> not (String.contains ("defun " ++ k) (String.join "\n" outside)))
                 youngKeys
@@ -3808,7 +3844,7 @@ checks rt runtimeMidText =
     , check "NURSERY PIN (the seeding discipline): no ALWAYS-PRESENT rtDeps row names a young-only key — a plain MIDGC build closes gcSeeds over those rows, and an absent key is Lower's loud 'unknown global'"
         (let
             youngKeys =
-                [ "Rt.gcScavenge", "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavPtr", "Rt.gcScavCopyWords", "Rt.gcScavRemembered", "Rt.gcScavOne", "Rt.gcScavDrain", "Rt.gcPromoteAlloc" ]
+                [ "Rt.gcScavenge", "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavValuesTab", "Rt.gcScavPtr", "Rt.gcScavCopyWords", "Rt.gcScavRemembered", "Rt.gcScavOne", "Rt.gcScavDrain", "Rt.gcPromoteAlloc" ]
          in
          Dict.toList Rt.rtDeps
             |> List.all
@@ -4049,7 +4085,7 @@ checks rt runtimeMidText =
                 )
                 decls
         )
-    , check "U6 ACCEPT: the header's byte math stays WORD math — `*FrameHdr hdr = payload(v, 0); word base = [word](hdr) + 40;` (the tier-(i) spelling: the pointer binder IS the header view, the `[word]` cast — J12's `*T -> word` view row — is the identity node) lowers canon-EQUAL to the word-spelled `word hdr = ...; word base = hdr + 40;`, so `base`/memset/rt_root_push_value_array keep the pre-U6 emission"
+    , check "U6 ACCEPT: the header's byte math stays WORD math — `*FrameHdr hdr = payload(v, 0); word base = [word](hdr) + 40;` (the tier-(i) spelling: the pointer binder IS the header view, the `[word]` cast — J12's `*T -> word` view row — is the identity node) lowers canon-EQUAL to the word-spelled `word hdr = ...; word base = hdr + 40;`, so `base`/memset/Rt.rootPushValueArray keep the pre-U6 emission"
         (case
             ( lowlModuleBody "struct FrameHdr { live : word; wm : word; next : word; freeNext : word; _pad : word; }\ndefun Rt.e(v : val) -> word {\n  *FrameHdr hdr = payload(v, 0);\n  word base = [word](hdr) + 40;\n  return base;\n}"
             , lowlBody "defun Rt.e(v : val) -> word {\n  word hdr = payload(v, 0);\n  word base = hdr + 40;\n  return base;\n}"
@@ -4063,8 +4099,8 @@ checks rt runtimeMidText =
         )
     , check "U6 ACCEPT: the frame-leave shape type-checks on the POINTER — `h == 0` (pointer COMPARISON is address comparison, so no scaling and no J12 firewall), the `h->next` / `h->wm` / `h->live` loads, the FIELD STORE `h->freeNext = wload(g, 16 + n)`, and `h` itself at a builtin WORD slot (`wstore(g, 16 + n, h)`, `*T -> word`) — all the same nodes as the wload/wstore spelling"
         (case
-            ( lowlModuleBody "struct FrameHdr { live : word; wm : word; next : word; freeNext : word; _pad : word; }\ndefun Rt.l(v : val, g : word) -> word {\n  *FrameHdr h = payload(v, 0);\n  word bad = if (h == 0) { return 0; } else { return 0; };\n  wstore(g, 1, h->next);\n  rawcall rt_root_pop_to(h->wm);\n  word n = h->live;\n  h->freeNext = wload(g, 16 + n);\n  wstore(g, 16 + n, h);\n  return n;\n}"
-            , lowlBody "defun Rt.l(v : val, g : word) -> word {\n  word h = payload(v, 0);\n  word bad = if (h == 0) { return 0; } else { return 0; };\n  wstore(g, 1, wload(h, 2));\n  rawcall rt_root_pop_to(wload(h, 1));\n  word n = wload(h, 0);\n  wstore(h, 3, wload(g, 16 + n));\n  wstore(g, 16 + n, h);\n  return n;\n}"
+            ( lowlModuleBody "struct FrameHdr { live : word; wm : word; next : word; freeNext : word; _pad : word; }\ndefun Rt.l(v : val, g : word) -> word {\n  *FrameHdr h = payload(v, 0);\n  word bad = if (h == 0) { return 0; } else { return 0; };\n  wstore(g, 1, h->next);\n  rawcall free(h->wm);\n  word n = h->live;\n  h->freeNext = wload(g, 16 + n);\n  wstore(g, 16 + n, h);\n  return n;\n}"
+            , lowlBody "defun Rt.l(v : val, g : word) -> word {\n  word h = payload(v, 0);\n  word bad = if (h == 0) { return 0; } else { return 0; };\n  wstore(g, 1, wload(h, 2));\n  rawcall free(wload(h, 1));\n  word n = wload(h, 0);\n  wstore(h, 3, wload(g, 16 + n));\n  wstore(g, 16 + n, h);\n  return n;\n}"
             )
          of
             ( Ok typed, Ok plain ) ->
@@ -4100,7 +4136,7 @@ checks rt runtimeMidText =
          in
          List.map (\n -> Check.fieldOffset d "ApplyState" n) names == List.map Just (byteSlots 4)
         )
-    , check "U7 LAYOUT PIN: sizeof(ApplyState) == 4 words in runtime.mid's own declaration — the 32 bytes both wrappers malloc, with rt_root_push_value_array's `np` pointer at word 2 (`[word](state) + 16`) and the partial arm's rooted env at word 3 (`[word](sp) + 24`)"
+    , check "U7 LAYOUT PIN: sizeof(ApplyState) == 4 words in runtime.mid's own declaration — the 32 bytes both wrappers malloc, with Rt.rootPushValueArray's `np` pointer at word 2 (`[word](state) + 16`) and the partial arm's rooted env at word 3 (`[word](sp) + 24`)"
         (Check.sizeofStruct (declsOf runtimeMidText) "ApplyState" == Just 4)
     , check "U7 LAYOUT PIN: runtime.mid's own `struct Ret` puts every field at the word slot the builder wrote and the chaser read before the re-spelling (result 0, kind 5, code 6, e 7, args 8, arity 9)"
         (let
@@ -4116,10 +4152,10 @@ checks rt runtimeMidText =
         (Check.sizeofStruct (declsOf runtimeMidText) "Ret" == Just 10)
     , check "U7 LAYOUT PIN: Ret.result is 5 words WIDE, not just at offset 0 (the field-width read, from the same one table): that width is what makes `malloc(80)` = sizeof(Ret) and what makes the `vecload(r, 0)` / `r->result` read the whole `.done` Value"
         (Check.fieldWidth (declsOf runtimeMidText) "Ret" "result" == Just 5)
-    , check "U7 ACCEPT: the `:ret` builder/chaser shape is node-identical on the typed view — `*Ret r = payload(v, 0); r->kind = 1; r->code = wl; word k = r->kind; word f = r->code; rawcall rt_root_push_ptr([word](r) + 16); return r->result;` lowers canon-EQUAL to the word-spelled `word r = ...; wstore(r, 5, 1); wstore(r, 6, wl); word k = wload(r, 5); word f = wload(r, 6); rawcall rt_root_push_ptr(r + 16); return vecload(r, 0);` — the val field READ at offset 0 is `vecload(r, 0)` (`addrPlus p 0 = p`), the word field stores/loads are the same RawWord nodes, and `[word](r)` is J12's identity `*T -> word` view cast, which is why the word offsets and the temp numbering do not move"
+    , check "U7 ACCEPT: the `:ret` builder/chaser shape is node-identical on the typed view — `*Ret r = payload(v, 0); r->kind = 1; r->code = wl; word k = r->kind; word f = r->code; rawcall free([word](r) + 16); return r->result;` lowers canon-EQUAL to the word-spelled `word r = ...; wstore(r, 5, 1); wstore(r, 6, wl); word k = wload(r, 5); word f = wload(r, 6); rawcall free(r + 16); return vecload(r, 0);` — the val field READ at offset 0 is `vecload(r, 0)` (`addrPlus p 0 = p`), the word field stores/loads are the same RawWord nodes, and `[word](r)` is J12's identity `*T -> word` view cast, which is why the word offsets and the temp numbering do not move"
         (case
-            ( lowlModuleBody "struct Ret { result : val; kind : word; code : word; e : word; args : word; arity : word; }\ndefun Rt.r(v : val, wl : word) -> val {\n  *Ret r = payload(v, 0);\n  r->kind = 1;\n  r->code = wl;\n  word k = r->kind;\n  word f = r->code;\n  rawcall rt_root_push_ptr([word](r) + 16);\n  return r->result;\n}"
-            , lowlBody "defun Rt.r(v : val, wl : word) -> val {\n  word r = payload(v, 0);\n  wstore(r, 5, 1);\n  wstore(r, 6, wl);\n  word k = wload(r, 5);\n  word f = wload(r, 6);\n  rawcall rt_root_push_ptr(r + 16);\n  return vecload(r, 0);\n}"
+            ( lowlModuleBody "struct Ret { result : val; kind : word; code : word; e : word; args : word; arity : word; }\ndefun Rt.r(v : val, wl : word) -> val {\n  *Ret r = payload(v, 0);\n  r->kind = 1;\n  r->code = wl;\n  word k = r->kind;\n  word f = r->code;\n  rawcall free([word](r) + 16);\n  return r->result;\n}"
+            , lowlBody "defun Rt.r(v : val, wl : word) -> val {\n  word r = payload(v, 0);\n  wstore(r, 5, 1);\n  wstore(r, 6, wl);\n  word k = wload(r, 5);\n  word f = wload(r, 6);\n  rawcall free(r + 16);\n  return vecload(r, 0);\n}"
             )
          of
             ( Ok typed, Ok plain ) ->
@@ -4130,8 +4166,8 @@ checks rt runtimeMidText =
         )
     , check "U7 ACCEPT: the apply state's shape type-checks on the POINTER — the field stores (`state->args = ..`, `sp->env = env`, `sp->args = args + rem * 40`), the reload-after-alloc (`word env2 = sp->env`), the pointer at a builtin word slot (`mknum(state)`, `free(state)`) and the `[word](sp) + 24` / `[word](state) + 16` cast the root seats need all ACCOMPANIED the same nodes as their `wstore`/`wload` spelling"
         (case
-            ( lowlModuleBody "struct ApplyState { args : word; nargs : word; live : word; env : word; }\ndefun Rt.a(v : val, args : word, nargs : word) -> val {\n  *ApplyState state = rawcall malloc(32);\n  state->args = args;\n  state->nargs = nargs;\n  state->live = nargs;\n  rawcall rt_root_push_value_array(args, [word](state) + 16);\n  rawcall free(state);\n  *ApplyState sp = payload(v, 0);\n  sp->env = sp->args;\n  word env2 = sp->env;\n  sp->args = env2 + 40;\n  sp->nargs = sp->nargs - 1;\n  rawcall rt_root_push_ptr([word](sp) + 24);\n  recur(mknum(sp), env2, nargs);\n}"
-            , lowlBody "defun Rt.a(v : val, args : word, nargs : word) -> val {\n  word state = rawcall malloc(32);\n  wstore(state, 0, args);\n  wstore(state, 1, nargs);\n  wstore(state, 2, nargs);\n  rawcall rt_root_push_value_array(args, state + 16);\n  rawcall free(state);\n  word sp = payload(v, 0);\n  wstore(sp, 3, wload(sp, 0));\n  word env2 = wload(sp, 3);\n  wstore(sp, 0, env2 + 40);\n  wstore(sp, 1, wload(sp, 1) - 1);\n  rawcall rt_root_push_ptr(sp + 24);\n  recur(mknum(sp), env2, nargs);\n}"
+            ( lowlModuleBody "struct ApplyState { args : word; nargs : word; live : word; env : word; }\ndefun Rt.a(v : val, args : word, nargs : word) -> val {\n  *ApplyState state = rawcall malloc(32);\n  state->args = args;\n  state->nargs = nargs;\n  state->live = nargs;\n  rawcall clock_gettime(args, [word](state) + 16);\n  rawcall free(state);\n  *ApplyState sp = payload(v, 0);\n  sp->env = sp->args;\n  word env2 = sp->env;\n  sp->args = env2 + 40;\n  sp->nargs = sp->nargs - 1;\n  rawcall free([word](sp) + 24);\n  recur(mknum(sp), env2, nargs);\n}"
+            , lowlBody "defun Rt.a(v : val, args : word, nargs : word) -> val {\n  word state = rawcall malloc(32);\n  wstore(state, 0, args);\n  wstore(state, 1, nargs);\n  wstore(state, 2, nargs);\n  rawcall clock_gettime(args, state + 16);\n  rawcall free(state);\n  word sp = payload(v, 0);\n  wstore(sp, 3, wload(sp, 0));\n  word env2 = wload(sp, 3);\n  wstore(sp, 0, env2 + 40);\n  wstore(sp, 1, wload(sp, 1) - 1);\n  rawcall free(sp + 24);\n  recur(mknum(sp), env2, nargs);\n}"
             )
          of
             ( Ok typed, Ok plain ) ->
@@ -4857,7 +4893,7 @@ checks rt runtimeMidText =
             , "call Rt.hostCleanupAll(hN);"
             , "vecstore(outAddr, 0, vecload(h + 8, 0));"
             , "rawcall free(lp->poll);"
-            , "rawcall rt_root_pop();"
+            , "call Rt.rootPop();"
             ]
             && String.contains "call Rt.hostEpFreePlan" (defunText "Rt.hostCleanupGo" runtimeMidText)
         )
@@ -5439,10 +5475,10 @@ checks rt runtimeMidText =
                         False
                )
         )
-    , check "M2 header: the runtime.mid module is named Rt and its export block names the crossed keys (read-file-as-string, exec-run, main, frame-enter, frame-leave + stage 7A's applier seat apply-at, the ONE key the port widens the block for)"
+    , check "M2 header: the runtime.mid module is named Rt and its export block names the crossed keys (read-file-as-string, exec-run, main, frame-enter, frame-leave + stage 7A's applier seat apply-at + ZIGHOST Z1's six root-registry WRITE seats — the keys the port widens the block for, each because a Mid PROGRAM must be able to reach it and J2 lets a user module call only EXPORTED keys)"
         (rt.header.name == Just "Rt"
             && List.map .key rt.header.exports
-            == [ "Rt.read-file-as-string", "Rt.exec-run", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.apply-at" ]
+            == [ "Rt.read-file-as-string", "Rt.exec-run", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.apply-at", "Rt.rootPushValueArray", "Rt.rootPushValue", "Rt.rootPushPtr", "Rt.rootPop", "Rt.rootWatermark", "Rt.rootPopTo" ]
         )
 
     -- ==================== M3: user .mid modules ====================
@@ -6559,9 +6595,9 @@ checks rt runtimeMidText =
                        , "Rt.epStr", "Rt.epSymIs", "Rt.epSymOf", "Rt.exec-plan", "Rt.exec-run", "Rt.execGo"
                        , "Rt.f/", "Rt.fillGo", "Rt.floatCopy", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock"
                        , "Rt.gcAlloc", "Rt.gcAllocGo", "Rt.gcClearClasses", "Rt.gcDrain", "Rt.gcEnvNum", "Rt.gcGrow", "Rt.gcInit", "Rt.gcMarkPtr"
-                       , "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcNum", "Rt.gcNumOut", "Rt.gcPromoteAlloc"
+                       , "Rt.gcMarkRoots", "Rt.gcMarkValue", "Rt.gcMarkValuesTab", "Rt.gcNum", "Rt.gcNumOut", "Rt.gcPromoteAlloc"
                        , "Rt.gcScanValueArray", "Rt.gcScavCopyWords", "Rt.gcScavDrain", "Rt.gcScavOne", "Rt.gcScavPtr"
-                       , "Rt.gcScavRemembered", "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavenge"
+                       , "Rt.gcScavRemembered", "Rt.gcScavRoots", "Rt.gcScavValue", "Rt.gcScavValueArray", "Rt.gcScavValuesTab", "Rt.gcScavenge"
                        , "Rt.gcSweep", "Rt.gcVD", "Rt.gcVerify", "Rt.gcVerifyList"
                        , "Rt.getcwd", "Rt.getenv", "Rt.getpid", "Rt.glob", "Rt.globBuildGo", "Rt.globIsDot"
                        , "Rt.globIsDotDot", "Rt.globLastSlash", "Rt.globScanGo", "Rt.globSortGo", "Rt.globSortShift", "Rt.globStrLess"
@@ -6585,7 +6621,9 @@ checks rt runtimeMidText =
                        , "Rt.open", "Rt.openBodyTmpfile", "Rt.parseArg", "Rt.parseArgsGo", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo"
                        , "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind", "Rt.recAppendNamesGo", "Rt.recGet"
                        , "Rt.recGetGo", "Rt.recInsert", "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd", "Rt.recUpdCopy"
-                       , "Rt.recUpdFind", "Rt.repGo", "Rt.repeat", "Rt.revGo", "Rt.runBuiltinInprocess", "Rt.setenv"
+                       , "Rt.recUpdFind", "Rt.repGo", "Rt.repeat", "Rt.revGo", "Rt.rootGrow", "Rt.rootPop"
+                       , "Rt.rootPopTo", "Rt.rootPush", "Rt.rootPushPtr", "Rt.rootPushValue", "Rt.rootPushValueArray", "Rt.rootWatermark"
+                       , "Rt.runBuiltinInprocess", "Rt.setenv"
                        , "Rt.shen.bytes->string", "Rt.shen.str->bytes", "Rt.snd", "Rt.ssClose", "Rt.ssIn", "Rt.ssInGo"
                        , "Rt.ssReadbyte", "Rt.ssTab", "Rt.str", "Rt.strOf", "Rt.string?"
                        , "Rt.substring", "Rt.symEq", "Rt.symLess", "Rt.symToStr", "Rt.tail-known"
@@ -6649,7 +6687,7 @@ checks rt runtimeMidText =
     -- is now the append below; the loud Err moved to the key-agreement walk
     -- (row C), which is the collision/rename class the orphan check guarded.
     , check
-        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the one-hundred-and-one appended keys (the twenty stage-6 ABI keys + the fifty-three host defuns of stages 7A/7B/7C + stage 7 O3-fix's Rt.applyPartGo + O5's five string-stream registry defuns + O5 seat 2's nine intern-table defuns + O5 seat 3's Rt.valScanGo + O5 seat 4b's twelve entry-arg-parser/*argv* defuns) (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
+        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the one-hundred-and-nine appended keys (ZIGHOST Z1 added its eight root-registry defuns) (the twenty stage-6 ABI keys + the fifty-three host defuns of stages 7A/7B/7C + stage 7 O3-fix's Rt.applyPartGo + O5's five string-stream registry defuns + O5 seat 2's nine intern-table defuns + O5 seat 3's Rt.valScanGo + O5 seat 4b's twelve entry-arg-parser/*argv* defuns) (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -6695,6 +6733,8 @@ checks rt runtimeMidText =
                                                  , "Rt.intBytesEq", "Rt.intFindGo", "Rt.intGrow", "Rt.intInsert", "Rt.intInsertAt"
                                                  , "Rt.intInsertGo", "Rt.intPairsCopy", "Rt.intStrCopy", "Rt.intTab"
                                                  , "Rt.main", "Rt.metaGo", "Rt.parseArg", "Rt.parseArgsGo"
+                                                 , "Rt.rootGrow", "Rt.rootPop", "Rt.rootPopTo", "Rt.rootPush"
+                                                 , "Rt.rootPushPtr", "Rt.rootPushValue", "Rt.rootPushValueArray", "Rt.rootWatermark"
                                                  , "Rt.ssClose", "Rt.ssIn"
                                                  , "Rt.ssInGo", "Rt.ssReadbyte", "Rt.ssTab", "Rt.tail-known"
                                                  , "Rt.valEntry", "Rt.valFreeGo", "Rt.valScanGo"
@@ -8915,7 +8955,7 @@ checks rt runtimeMidText =
             )
             [ "Rt.apply", "Rt.apply-tail", "Rt.tail-known", "Rt.bounce" ]
         )
-    , check "B6 THE TABLE (totality + agreement, over the REAL runtime text): every declared rawAbi key is in the table, every table key the rule contributed (i.e. NOT a rawAbi key) has an all-word signature, and the ELEVEN all-word surface defuns are exactly the rawAbi keys the rule derives (nine stage-6 + stage 7A's Rt.dieErr/hostDieErr — it was twelve until 7E deleted Rt.hostDieUnported with the unported set)"
+    , check "B6 THE TABLE (totality + agreement, over the REAL runtime text): every declared rawAbi key is in the table, every table key the rule contributed (i.e. NOT a rawAbi key) has an all-word signature, and the NINETEEN all-word surface defuns are exactly the rawAbi keys the rule derives (nine stage-6 + stage 7A's Rt.dieErr/hostDieErr + ZIGHOST Z1's eight root-registry defuns — it was twelve until 7E deleted Rt.hostDieUnported with the unported set)"
         (let
             surface =
                 Result.withDefault [] rt.parsedSource
@@ -8930,7 +8970,7 @@ checks rt runtimeMidText =
          in
          List.all (\k -> Set.member k rawSet) (Set.toList derived)
             && List.all (\d -> Dict.member d.key rt.abi) (List.filter (\d -> Set.member d.key rawSet) surface)
-            && Set.size derived == 11
+            && Set.size derived == 19
         )
 
     -- ---- B6: THE RAW-`Var` GAP (B3's pinned row, now CLOSED for a word binder) ----
@@ -12924,7 +12964,7 @@ memsetBulkZeroShape f =
 
 
 {-| P1e zero-BEFORE-root: in frame-enter's straight-line body the bulk-zero
-`memset` is emitted before `rt_root_push_value_array`.  The correctness order
+`memset` is emitted before `q_Rt_x2erootPushValueArray`.  The correctness order
 from rt.zig:279 — a reused block's stale slots must be zeroed before the GC
 can scan them, or scanValue chases freed pages.
 -}
@@ -12955,7 +12995,7 @@ memsetBeforeRootPush f =
                     (List.indexedMap Tuple.pair insts)
                 )
     in
-    case ( first (isSym "memset"), first (isSym "rt_root_push_value_array") ) of
+    case ( first (isSym "memset"), first (isSym "q_Rt_x2erootPushValueArray") ) of
         ( Just m, Just p ) ->
             m < p
 
@@ -13064,7 +13104,7 @@ funcByName name mod =
     List.head (List.filter (\f -> f.name == name) mod.funcs)
 
 
-{-| B1 root-order: within ONE block, `rt_root_push_ptr` must precede the
+{-| B1 root-order: within ONE block, `q_Rt_x2erootPushPtr` must precede the
 allocating seat and a word LOAD must follow the alloc (the `wload(sp, 3)`
 re-read).  Both the push-after-alloc and the pre-alloc-copy mutations break
 this — the first puts the alloc before the push (the `seenPush` guard fires),
@@ -13096,7 +13136,7 @@ rootOrderStep seenPush seenAlloc instrs =
         i :: rest ->
             case i of
                 Il.Call _ _ (Il.Sym s) _ ->
-                    if s == "rt_root_push_ptr" then
+                    if s == "q_Rt_x2erootPushPtr" then
                         rootOrderStep True seenAlloc rest
 
                     else if s == "q_Rt_x2eallocVector" then

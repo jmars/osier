@@ -9,21 +9,29 @@
 //!   rt_string / rt_con / rt_make_closure / rt_global_closure / rt_vec_* /
 //!   rt_raw_alloc / rt_float_text (rt_sym_intern / rt_value_slot / rt_ss_*
 //!   are GONE — Mid owns those tables; see the O5 notes below)
-//!   the shadow-stack root seats (rt_root_*, rt_gc_root_*, rt_gc_heap_bytes)
+//!   rt_gc_heap_bytes (the heap-size number)
 //!   the driver host half: rt_boot / rt_is_program / rt_run_program /
 //!   rt_print_value (called by Mid Rt.main).  rt_parse_arg and
 //!   rt_argv_install are GONE at O5 seat 4b — Mid owns the entry-arg parser
 //!   and the *argv* list (runtime.mid's Rt.parseArg/Rt.argvInstall)
+//!   (ZIGHOST Z1: the ten shadow-stack root seats — rt_root_push_value /
+//!   push_ptr / push_value_array / pop / watermark / pop_to and rt_gc_roots_len
+//!   / root_kind / root_slot / root_np — are DELETED.  The root registry is
+//!   Mid's now: globals-block words 4/5/6 hold a malloc'd {kind,slot,np}
+//!   array, runtime.mid's Rt.rootPush*/Rt.rootPop*/Rt.rootWatermark write it,
+//!   and Rt.gcMarkRoots/Rt.gcScavRoots read it.  The Zig shadow stack below
+//!   still exists for the VM's OWN registrations (Vm.init's err_slot and pool
+//!   roots) but nothing on this route walks it)
 //!   the rt_prim_* direct per-prim entries (the QBE_NOPRIMDIRECT arm is
 //!   DELETED — its generic rt_prim symbol no longer exists, so that hatch is
 //!   EMIT-ONLY and cannot LINK)
 //!
 //! GC CONTRACT (docs/gc-zig.md mutator rules): the collector is precise and
 //! moving; anything held across an allocating call must be reachable from a
-//! shadow-stack root.  The generated code's root set is now the MID frame
-//! machinery (q_Rt_x2eframeEnter/Leave), which registers into the Zig shadow
-//! stack through the rt_root_* seats below (plan correction C1: the Mid
-//! frames register roots into the Zig shadow stack; it dies at stage 7).
+//! root.  The generated code's root set is the MID ROOT REGISTRY since ZIGHOST
+//! Z1 (q_Rt_x2eframeEnter/Leave push/pop the frame's value array into it), and
+//! the Mid collector walks that registry plus the values table — no Zig seat
+//! takes part.
 //!
 //! This file is compiled by tools/qbe/rt-o.sh to tools/qbe/rt.o (the output
 //! path is UNCHANGED so callers and the committed object keep working).
@@ -503,77 +511,24 @@ var gc_heap_bytes: usize = 0;
 // updated to REMOVED in the same change; this file must not carry the old
 // seat names (the row asserts `rg` finds none).
 
-/// Shadow-stack bridge: the Mid mark walk reads the SAME precise roots the
-/// Zig collector's scanRoots walks, entry by entry.  RootKind is u32:
-/// ROOT_PTR=0 (slot is *usize), ROOT_VALUE=1 (slot is *Value),
-/// ROOT_VALUE_ARRAY=2 (slot is [*]Value, count read from *np),
-/// ROOT_VALUE_VOLATILE=3 (slot is *Value), ROOT_CALLFRAME_ARRAY=4 (VM-only,
-/// unreachable on the native path — the Mid walker fails loudly on it).
-export fn rt_gc_roots_len() callconv(.c) i64 {
-    return @intCast(g.shadow_len);
-}
-
-export fn rt_gc_root_kind(i: i64) callconv(.c) i64 {
-    return @intCast(@intFromEnum(g.shadow_stack[@intCast(i)].kind));
-}
-
-export fn rt_gc_root_slot(i: i64) callconv(.c) i64 {
-    return @bitCast(@intFromPtr(g.shadow_stack[@intCast(i)].slot));
-}
-
-export fn rt_gc_root_np(i: i64) callconv(.c) i64 {
-    const np = g.shadow_stack[@intCast(i)].np orelse return 0;
-    return @bitCast(@intFromPtr(np));
-}
-
-/// Stage-6 U1b root seats: the Mid frame machinery's root-registration
-/// surface.  Each is a thin C-ABI word->word bridge over the vendored
-/// shadow-stack API (vendor/osier-rt/src/gc/roots.zig — rootPushPtr :85,
-/// rootPushValue :94, rootPushValueArray :120, rootPop :149, rootPopTo :159,
-/// rootWatermark :167).  Alloc-free BY CONTRACT from the collector's view:
-/// a push may grow the shadow stack, but shadowStackGrow uses the page
-/// allocator and runs NO collect (roots.zig:120-128 — rootPushValueArray's
-/// body; the grow fn is :59-83), so Mid bodies may call
-/// these under RawCallRaw's no-safepoint contract.  Each seat is a BRIDGE
-/// removed at stage 7 (BRIDGES table, plan.md §3 Phase 4b).
-///
-/// rt_root_watermark / rt_root_pop_to carry the shadow-stack DEPTH the frame
-/// machinery snapshots at enter and truncates back to at leave — popTo(wm),
-/// never a bare pop: when anything (e.g. rt_global_closure's forever-root)
-/// pushed between enter and leave, a bare rootPop pops the WRONG entry, the
-/// frame's ROOT_VALUE_ARRAY LEAKS, and every later GC scans the freed
-/// block's stale slots (the historical qbe-gcbug; rt_frame_leave's comment
-/// below is the spec).  The i64 results are never read (the rt_halt
-/// convention: the word-level call shape stays valid IL).
-export fn rt_root_push_value_array(base: i64, np: i64) callconv(.c) i64 {
-    gc.roots.rootPushValueArray(g, @ptrFromInt(@as(usize, @bitCast(base))), @ptrFromInt(@as(usize, @bitCast(np))));
-    return 0;
-}
-
-export fn rt_root_push_value(ptr: i64) callconv(.c) i64 {
-    gc.roots.rootPushValue(g, @ptrFromInt(@as(usize, @bitCast(ptr))));
-    return 0;
-}
-
-export fn rt_root_push_ptr(ptr: i64) callconv(.c) i64 {
-    gc.roots.rootPushPtr(g, @ptrFromInt(@as(usize, @bitCast(ptr))));
-    return 0;
-}
-
-export fn rt_root_pop() callconv(.c) i64 {
-    gc.roots.rootPop(g);
-    return 0;
-}
-
-export fn rt_root_watermark() callconv(.c) i64 {
-    return @intCast(gc.roots.rootWatermark(g));
-}
-
-export fn rt_root_pop_to(wm: i64) callconv(.c) i64 {
-    gc.roots.rootPopTo(g, @intCast(wm));
-    return 0;
-}
-
+// =====================================================================
+//  (DELETED AT ZIGHOST Z1) THE TEN SHADOW-STACK ROOT SEATS.
+//  rt_gc_roots_len / rt_gc_root_kind / rt_gc_root_slot / rt_gc_root_np (the
+//  read half) and rt_root_push_value_array / rt_root_push_value /
+//  rt_root_push_ptr / rt_root_pop / rt_root_watermark / rt_root_pop_to (the
+//  write half) are GONE.  The registry they fronted is MID-owned now:
+//  globals-block words 4/5/6 are a malloc'd {kind, slot, np} array, written by
+//  runtime.mid's Rt.rootPush*/Rt.rootPop*/Rt.rootWatermark/Rt.rootPopTo and
+//  read by Rt.gcMarkRoots/Rt.gcScavRoots.  The vendored shadow stack
+//  (vendor/osier-rt/src/gc/roots.zig) is untouched and still serves the VM's
+//  own registrations; nothing on the QBE route reaches it.
+//
+//  WHY THE REGISTRY MOVED (the design, so a later reader does not re-derive
+//  it): the Zig stack lived INSIDE the Gc struct, which Z5 deletes; a Mid
+//  owner needs storage that exists BEFORE any region is mapped (frames push
+//  roots before the lazy gcInit), which is exactly what the .bss globals block
+//  is.  Kind/entry semantics are the Zig GcRoot's, word for word.
+// =====================================================================
 // =====================================================================
 //  (DELETED AT O5) the string-stream seats rt_ss_in/rt_ss_readbyte/
 //  rt_ss_close — the registry is Mid-owned now (runtime.mid's Region slots

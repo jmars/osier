@@ -1,7 +1,7 @@
 module Mid.RtGc exposing
     ( gcProgram
     , globAddrSym, globDataSym, globFreelistSlot, globInternSlot, globKnobSlot
-    , globRegionSlot, globTailScratchSlot, globWords
+    , globRegionSlot, globRootSlot, globTailScratchSlot, globWords
     )
 
 {-| Mid.RtGc — the FRESH non-moving, non-generational MARK-SWEEP collector
@@ -25,8 +25,11 @@ THE COLLECTOR'S SHAPE, as it now lives in RtSource (for the reader of this
 header — the surface text is the truth, read it): one mmap'd region lazily
 created by `Rt.gcInit`; a two-word header before every body (word -2 =
 flags = mark + 2*kind + 4*class, word -1 = exact count); two object kinds
-(value_array, raw); precise roots read through the rt_gc_roots_len /
-rt_gc_root_kind / rt_gc_root_slot / rt_gc_root_np seats; the trigger inside
+(value_array, raw); precise roots read from the MID-OWNED ROOT REGISTRY in the
+globals block (ZIGHOST Z1: words 4/5/6 = base/count/cap of a malloc'd
+{kind,slot,np} array — the writers are runtime.mid's Rt.rootPush*/Rt.rootPop*
+and the readers Rt.gcMarkRoots/Rt.gcScavRoots; the ten Zig shadow-stack seats
+that used to carry this are DELETED); the trigger inside
 Rt.gcAlloc (threshold collect, per-class free list pop, bump, exhaustion
 collect-and-retry); failure is LOUD through Rt.die (stage 6 U2: the raw-word
 die defun — the six messages fold into its `rawstr` arguments, replacing the
@@ -101,7 +104,18 @@ import Mid.RtPrims exposing (seat)
 --                  The ONE word in this block the ZIG side writes: the table
 --                  is the host's (it is what rt_boot/rt_argv_install install
 --                  the standard streams and *argv* into), so Mid gets the
---                  pointer, not the storage.  4..7 stay free.
+--                  pointer, not the storage.
+--   words 4..6     THE ROOT REGISTRY (ZIGHOST Z1): the shadow stack's
+--                  replacement, and the only root source the Mid collector
+--                  walks.  word 4 = the malloc'd entry array's base, word 5 =
+--                  the live entry count, word 6 = the capacity in entries.
+--                  An entry is THREE words `{kind, slot, np}` (24 B), the
+--                  retired Zig `GcRoot` (vendor/osier-rt/src/gc/roots.zig:35)
+--                  word for word; the writers/readers are runtime.mid's
+--                  Rt.rootPush*/Rt.rootPop*/Rt.rootWatermark/Rt.rootPopTo and
+--                  the two collector walkers.  HERE, not in the region,
+--                  because a frame pushes roots BEFORE the lazy `gcInit` maps
+--                  anything (the block is .bss, always emitted).
 --   words 8..11    driver knobs, getenv read once (U5a)
 --   word 12        the single .tail-in-flight scratch (U4a)
 --   word 13        no_tail_stage (B2: QBE_NOTTAILSTAGE bypasses to allocvec)
@@ -149,6 +163,16 @@ globRegionSlot =
 globKnobSlot : Int
 globKnobSlot =
     8
+
+
+{-| The root registry's three words (ZIGHOST Z1): base, live count, capacity.
+runtime.mid's Rt.rootPush*/Rt.rootPop*/Rt.rootWatermark spell these indices
+literally (the intern/string-stream precedent); this constant is the Mid-side
+mirror TestMain's pin reads.
+-}
+globRootSlot : Int
+globRootSlot =
+    4
 
 
 globTailScratchSlot : Int
@@ -202,6 +226,11 @@ gcProgram =
     , seat "Rt.gcGrow" 2
     , seat "Rt.collect" 1
     , seat "Rt.gcMarkRoots" 1
+    , -- ZIGHOST Z1: the values table's root walk (the found *argv* hole).
+      -- A COLLECTOR defun (it walks roots and marks), hence HERE and not in
+      -- the prim half: a prim-half key may not name a gc key (TestMain's call
+      -- graph row), and this one names Rt.gcMarkValue.
+      seat "Rt.gcMarkValuesTab" 1
     , seat "Rt.gcScanValueArray" 2
     , seat "Rt.gcDrain" 1
     , seat "Rt.gcSweep" 1
@@ -223,6 +252,9 @@ gcProgram =
       -- all.  Nothing ALWAYS-EMITTED may call one (TestMain's NURSERY PIN).
       seat "Rt.gcScavenge" 1
     , seat "Rt.gcScavRoots" 1
+    , -- ZIGHOST Z1: the values table's scavenge twin (young builds only, the
+      -- same build-conditional seating as the rest of this family).
+      seat "Rt.gcScavValuesTab" 1
     , seat "Rt.gcScavValue" 1
     , seat "Rt.gcScavValueArray" 2
     , seat "Rt.gcScavPtr" 1
