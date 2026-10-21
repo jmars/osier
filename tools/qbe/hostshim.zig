@@ -576,31 +576,14 @@ export fn rt_root_pop_to(wm: i64) callconv(.c) i64 {
 //  38..39 + Rt.ssTab/ssIn/ssInGo/ssReadbyte/ssClose), a lazily-malloc'd
 //  8-cell C-heap table; no Zig seat remains.
 // =====================================================================
+//  (PARTIALLY DELETED AT O5 SEAT 2) rt_sym_intern is GONE — the intern
+//  table is Mid-owned now (runtime.mid's Rt.intTab/intFindGo/intBytesEq/
+//  intStrCopy/intPairsCopy over the GLOBALS BLOCK words 8208..8210): a
+//  linear byte-compare find-or-insert (every measured call site is a
+//  rawstr literal; 9 distinct names).  No Zig seat remains.
+//  rt_value_slot and rt_float_text below stay until their own seats.
+// =====================================================================
 //
-
-// =====================================================================
-//  value / intern / str seats (zigretire stage 3 GROUP 2)
-// =====================================================================
-// The compiled Mid `value`/`intern`/`str` bodies reach the Vm-owned values
-// table, the symbol interner and the float-text renderer through these
-// alloc-free word->word seats.  The STATE stays in Zig until the host ports
-// at stage 7 (values table, symbols); the float render is values.floatText
-// (std.fmt's shortest-round-trip `{d}`), only reachable through rt.zig until
-// then.  Page-allocator / static BSS only — NO GC inside — so the RawCallRaw
-// contract (alloc-free, no safepoint) holds and the caller lowers frame-free.
-// These seats die with rt.zig at the swap (BRIDGES-table entry in plan.md §3
-// Phase 4b).
-
-/// intern's seat: intern data[0..min(len,255)] into the symbol table and
-/// return the canonical name pointer.  `len` is the byte count (negative
-/// clamped to 0, matching primIntern's @max(len,0); 255-byte cap).  Mirrors
-
-export fn rt_sym_intern(data: [*]const u8, len: i64) callconv(.c) [*:0]const u8 {
-    const n: usize = @intCast(@min(@max(len, 0), 255));
-    var buf: [256]u8 = undefined;
-    @memcpy(buf[0..n], data[0..n]);
-    return symbols.valSymbol(&vm.symbols, buf[0..n]).payload.sym.name.?;
-}
 
 /// value's seat: the open-addressed values-table lookup (hashName + linear
 /// probe, mirroring tables.valueLookup but returning the STABLE slot pointer

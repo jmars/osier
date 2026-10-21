@@ -947,6 +947,20 @@ rtDeps =
         , ( "Rt.ssInGo", [ "Rt.ssInGo" ] )
         , ( "Rt.ssReadbyte", [] )
         , ( "Rt.ssClose", [] )
+        , -- ===== THE INTERN TABLE (O5 seat 2): rt_sym_intern's replacement —
+          -- a lazily-malloc'd (name,len)-pair array off the GLOBALS BLOCK
+          -- words 8208..8210, a LINEAR byte-compare walk (every measured
+          -- call site is a rawstr literal; 9 distinct names), find-or-insert.
+          ( "Rt.intTab", [] )
+        , ( "Rt.intFindGo", [ "Rt.intFindGo", "Rt.intBytesEq" ] )
+        , ( "Rt.intBytesEq", [ "Rt.intBytesEq" ] )
+        , ( "Rt.intStrCopy", [ "Rt.intStrCopy" ] )
+        , ( "Rt.intPairsCopy", [ "Rt.intPairsCopy" ] )
+        , ( "Rt.intern", [ "Rt.intTab", "Rt.intFindGo", "Rt.intInsert" ] )
+        , ( "Rt.intGrow", [ "Rt.intPairsCopy" ] )
+        , ( "Rt.intInsert", [ "Rt.intInsertGo", "Rt.intInsertAt" ] )
+        , ( "Rt.intInsertGo", [ "Rt.intGrow", "Rt.intInsertAt" ] )
+        , ( "Rt.intInsertAt", [ "Rt.intStrCopy" ] )
         , -- readFull recurses only on the EINTR RETRY (one frame per retry,
           -- bounded by signal frequency, not by data length) — callR is fine.
         ( "Rt.readFull", [ "Rt.readFull" ] )

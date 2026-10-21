@@ -1753,11 +1753,168 @@ defun Rt.open(path : val, dir : val) -> val {
   }
 }
 
+// ==================== THE INTERN TABLE (O5 seat 2) =====================
+// rt_sym_intern died here: the table is Mid-owned now — a lazily-malloc'd
+// array of (name,len) pairs off the GLOBALS BLOCK words 8208..8210 (after the
+// frame freelist; NOT collector state — the QBE_MIDGC=0 escape route reaches
+// it too).  Linear byte-compare walk, NOT the Zig table's DJB2+resize: every
+// MEASURED call site is a rawstr LITERAL (16 call sites, 9 distinct names, all
+// < 8 bytes — cons/string/isDir/isFile/mode/mtimeMs/name/number/size), so the
+// walk is O(144) worst case and the pointer identity the old seat preserved
+// (equal literals -> one canonical static) is preserved by the dedup itself.
+// NO GC allocation, NO safepoint (malloc + bytestore + byteload only) — the
+// defuns stay frame-free.
+
+// Rt.intTab: the table base, lazily malloc'd (4 pairs = 8 words to start).
+defun Rt.intTab(dummy : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word tab = wload(glob, 8208);
+  if (mkbool(tab != 0)) {
+    return mknum(tab);
+  }
+  word fresh = rawcall malloc(64);
+  wstore(glob, 8208, fresh);
+  wstore(glob, 8209, 0);
+  wstore(glob, 8210, 4);
+  return mknum(fresh);
+}
+// Rt.intStrCopy / intPairsCopy: the table's copy self-tails (frame-free).
+defun Rt.intStrCopy(srcN : val, dstN : val, lenN : val) -> val {
+  word src = payload(srcN, 0);
+  word dst = payload(dstN, 0);
+  word len = payload(lenN, 0);
+  if (mkbool(len == 0)) {
+    return mknil;
+  }
+  word i = len - 1;
+  bytestore(dst, i, byteload(src, i));
+  val more = call Rt.intStrCopy(mknum(src), mknum(dst), mknum(i));
+  bytestore(dst, len, 0);
+  return mknil;
+}
+defun Rt.intPairsCopy(freshN : val, nN : val, iN : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word old = wload(glob, 8208);
+  word fresh = payload(freshN, 0);
+  if (mkbool(payload(iN, 0) >= payload(nN, 0))) {
+    return mknil;
+  }
+  wstore(fresh + payload(iN, 0) * 16, 0, wload(old + payload(iN, 0) * 16, 0));
+  wstore(fresh + payload(iN, 0) * 16 + 8, 0, wload(old + payload(iN, 0) * 16 + 8, 0));
+  return call Rt.intPairsCopy(mknum(fresh), mknum(payload(nN, 0)), mknum(payload(iN, 0) + 1));
+}
+
+// Rt.intGrow: double the table (a fresh malloc'd array of cap*32 bytes),
+// copy the n live pairs in, free the old base, and return the new base.
+// A helper because the caller's growth `if` must rebind `tab` — a
+// both-falling mid-block if is unrepresentable and the rebased word must
+// travel as the helper's RETURN.
+defun Rt.intGrow(nN : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word tab = wload(glob, 8208);
+  word cap = wload(glob, 8210);
+  word fresh = rawcall malloc(cap * 32);
+  val cp = call Rt.intPairsCopy(mknum(fresh), mknum(payload(nN, 0)), mknum(0));
+  rawcall free(tab);
+  wstore(glob, 8210, cap * 2);
+  return mknum(fresh);
+}
+
+// Rt.intFindGo: the linear walk's self-tail. At each i: the pair (cand,
+// candLen); a length mismatch is a miss, a match runs the byte compare. The
+// byte compare's RESULT gates the recursion — a hit returns the canonical
+// pointer, a miss continues the walk at i+1.
+// (tabN dropped — the lean ABI passes 1..3 pointer args; the base is read
+// from the glob word 8208, which is what the arg would have carried anyway)
+defun Rt.intFindGo(nameN : val, lenN : val, iN : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word tab = wload(glob, 8208);
+  word name = payload(nameN, 0);
+  word len = payload(lenN, 0);
+  word i = payload(iN, 0);
+  word n = wload(glob, 8209);
+  if (mkbool(i >= n)) {
+    return mknum(0);
+  }
+  word cand = wload(tab + i * 16, 0);
+  word candLen = wload(tab + i * 16 + 8, 0);
+  if (mkbool(candLen != len)) {
+    return call Rt.intFindGo(mknum(name), mknum(len), mknum(i + 1));
+  }
+  word eq = payload(call Rt.intBytesEq(mknum(cand), mknum(name), mknum(len)), 0);
+  if (mkbool(eq == 1)) {
+    return mknum(cand);
+  }
+  return call Rt.intFindGo(mknum(name), mknum(len), mknum(i + 1));
+}
+// Rt.intBytesEq: byte-compare self-tail -> 1/0 (frame-free).
+defun Rt.intBytesEq(aN : val, bN : val, lenN : val) -> val {
+  word a = payload(aN, 0);
+  word b = payload(bN, 0);
+  word len = payload(lenN, 0);
+  if (mkbool(len == 0)) {
+    return mknum(1);
+  }
+  word i = len - 1;
+  if (mkbool(byteload(a, i) != byteload(b, i))) {
+    return mknum(0);
+  }
+  return call Rt.intBytesEq(mknum(a), mknum(b), mknum(i));
+}
+
+// Rt.intInsert: the insert half, its own defun because a both-falling
+// mid-block if is unrepresentable (Mid has no join): grow at the cap (the
+// rebind is the growth helper's RETURN), then NUL-terminated copy into a
+// fresh pair.  The pairs' strings are MALLOC'd (immortal — the old table's
+// page-alloc strdup parity); nothing here allocates on the GC heap.
+defun Rt.intInsert(dataPtrN : val, lenN : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word dataPtr = payload(dataPtrN, 0);
+  word len = payload(lenN, 0);
+  word tab = wload(glob, 8208);
+  word n = wload(glob, 8209);
+  if (mkbool(n >= wload(glob, 8210))) {
+    return call Rt.intInsertGo(mknum(n), mknum(dataPtr), mknum(len));
+  }
+  return call Rt.intInsertAt(mknum(n), mknum(dataPtr), mknum(len));
+}
+// the growth arm: Rt.intGrow returns the NEW base, then the insert runs on it
+defun Rt.intInsertGo(nN : val, dataPtrN : val, lenN : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word fresh = payload(call Rt.intGrow(mknum(payload(nN, 0))), 0);
+  wstore(glob, 8208, fresh);
+  return call Rt.intInsertAt(mknum(payload(nN, 0)), mknum(payload(dataPtrN, 0)), mknum(payload(lenN, 0)));
+}
+// the insert itself: NUL-terminated copy into a fresh (name,len) pair
+defun Rt.intInsertAt(nN : val, dataPtrN : val, lenN : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word tab = wload(glob, 8208);
+  word n = payload(nN, 0);
+  word dataPtr = payload(dataPtrN, 0);
+  word len = payload(lenN, 0);
+  word store = rawcall malloc(len + 1);
+  val sc = call Rt.intStrCopy(mknum(dataPtr), mknum(store), mknum(len));
+  wstore(tab + n * 16, 0, store);
+  wstore(tab + n * 16 + 8, 0, len);
+  wstore(glob, 8209, n + 1);
+  return mkval(2, store);
+}
+
 defun Rt.intern(str : val) -> val {
   word dataPtr = payload(str, 0);
   word len = len32(str);
-  word canon = rawcall rt_sym_intern(dataPtr, len);
-  return mkval(2, canon);
+  val tabN = call Rt.intTab(mknum(0));
+  word tab = payload(tabN, 0);
+  // find-or-insert: the walk first (a hit returns the CANONICAL pointer —
+  // equal literals intern to one static, the pointer identity the old seat
+  // preserved); a miss falls to the INSERT defun above (a both-falling
+  // mid-block if is unrepresentable — Mid has no join).
+  val found = call Rt.intFindGo(mknum(dataPtr), mknum(len), mknum(0));
+  word hit = payload(found, 0);
+  if (mkbool(hit != 0)) {
+    return mkval(2, hit);
+  }
+  return call Rt.intInsert(mknum(dataPtr), mknum(len));
 }
 
 defun Rt.value(sym : val) -> val {
