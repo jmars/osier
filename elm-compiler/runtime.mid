@@ -282,6 +282,16 @@ extern fstatat(dirfd : i32, path : ptr, buf : ptr, flag : i32) -> i32;
 //                       scavenge (the per-event stats pair with slot 37)
 //   slot 37  scavBodies blocks copied (promoted) by the last scavenge
 //
+//   ---- THE STRING-STREAM REGISTRY (O5 — NOT a Region field) -----------
+//   The registry lives in the GLOBALS BLOCK at words 14..15 (ssN at 15,
+//   ssTab at 14 — see RtGc.elm's layout table): it is NOT collector state,
+//   and a QBE_MIDGC=0 build maps no region at all, so Region slots would
+//   be unreachable there.  The block is .bss (zeroed) and rt_glob_addr is
+//   emitted UNCONDITIONALLY (finishModule), so both routes read the same
+//   registry.  The former rt_ss_in/readbyte/close C seats died at O5;
+//   Rt.open's ENOENT arm, Rt.read-byte's string arm and Rt.close's string
+//   arm call the Mid defuns below.
+//
 // THE TIMESTAMPS COST THREE vDSO clock reads PER COLLECT (no branch: the knob
 // only gates the PRINT — Rt.gcNumOut, from Rt.collect), because a collect is
 // already an O(heap) walk and the alternative is a knob-read in the hot path.
@@ -934,7 +944,7 @@ defun Rt.memGo(blkN : val, iN : val) -> val {
 defun Rt.close(stream : val) -> val {
   word isStr = payload(stream, 1) > 1;
   if (mkbool(isStr)) {
-    word r = rawcall rt_ss_close(payload(stream, 0));
+    word r = payload(call Rt.ssClose(mknum(payload(stream, 0))), 0);
     if (mkbool(r == -2)) {
       word h = rawcall rt_halt();
       return mknil;
@@ -1592,11 +1602,112 @@ defun Rt.snd(x : val) -> val {
   return vecload(payload(x, 0), 1);
 }
 
+// ==================== THE STRING-STREAM REGISTRY (O5) ====================
+// The C seats rt_ss_in/rt_ss_readbyte/rt_ss_close died here: the registry is
+// Mid-owned now — a lazily-malloc'd C-heap table of 8 x (data, len, pos)
+// cells hanging off Region slots 38/39, addressed through the same
+// *Region view every collector defun uses.  NO MID-HEAP allocation and NO
+// safepoint (malloc/free/bytestore only), so the three defuns stay
+// FRAME-FREE and a rawcall site is interchangeable with them.
+//
+// ERROR PARITY (byte-same with the deleted seats): the "too many" arm
+// writes the same stderr line and returns -1 (the caller routes -1 to
+// rt_halt); the bad-idx arms write their line and return -2 (the caller
+// routes -2 to rt_halt).  freeStringStream parity: a close frees the data
+// and NULLs the cell's data word, and the COUNT NEVER DECREMENTS — the
+// index stays consumed, so a later ssIn lands on the NEXT cell.
+
+// Rt.ssTab: the table address, malloc'd on first use (8 cells x 24 bytes).
+defun Rt.ssTab(dummy : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word tab = wload(glob, 14);
+  if (mkbool(tab != 0)) {
+    return mknum(tab);
+  }
+  word fresh = rawcall malloc(192);
+  wstore(glob, 14, fresh);
+  return mknum(fresh);
+}
+// Rt.ssIn: register data[0..len) as a string stream; the stream id is the
+// cell index + 1 (0 is reserved so `mkval(11, idx, ...)` is never a null fd).
+defun Rt.ssIn(ptrN : val, lenN : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word ptr = payload(ptrN, 0);
+  word len = payload(lenN, 0);
+  word n = wload(glob, 15);
+  if (mkbool(n >= 8)) {
+    rawcall write(2, rawstr("runtime: too many string streams\n"), 33);
+    return mknum(-1);
+  }
+  word tab = payload(call Rt.ssTab(mknum(0)), 0);
+  word data = rawcall malloc(len + 1);
+  bytestore(data, payload(lenN, 0), 0);
+  val cp = call Rt.ssInGo(ptrN, mknum(data), mknum(0), lenN);
+  wstore(tab + n * 24, 0, data);
+  wstore(tab + n * 24 + 8, 0, len);
+  wstore(tab + n * 24 + 16, 0, 0);
+  wstore(glob, 15, n + 1);
+  return mknum(n + 1);
+}
+// Rt.ssInGo: the byte-copy self-tail (the tree's loop idiom — a word
+// binder that is the target of an assignment becomes an AUTO-CELL, an
+// allocating node, and these defuns must stay FRAME-FREE).
+defun Rt.ssInGo(ptrN : val, dataN : val, iN : val, lenN : val) -> val {
+  if (mkbool(payload(iN, 0) >= payload(lenN, 0))) {
+    return mknil;
+  }
+  bytestore(payload(dataN, 0), payload(iN, 0), byteload(payload(ptrN, 0), payload(iN, 0)));
+  return call Rt.ssInGo(ptrN, dataN, mknum(payload(iN, 0) + 1), lenN);
+}
+
+// Rt.ssReadbyte: the string-stream read arm as a word (byte 0..255,
+// -1 EOF, -2 bad idx).
+defun Rt.ssReadbyte(iN : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word idx = payload(iN, 0) - 1;
+  if (mkbool(idx < 0) || mkbool(idx >= wload(glob, 15))) {
+    rawcall write(2, rawstr("runtime: bad string stream idx\n"), 32);
+    return mknum(-2);
+  }
+  word tab = wload(glob, 14);
+  word data = wload(tab + idx * 24, 0);
+  if (mkbool(data == 0)) {
+    return mknum(-2);
+  }
+  word len = wload(tab + idx * 24 + 8, 0);
+  word pos = wload(tab + idx * 24 + 16, 0);
+  if (mkbool(pos >= len)) {
+    return mknum(-1);
+  }
+  word b = byteload(data, pos);
+  wstore(tab + idx * 24 + 16, 0, pos + 1);
+  return mknum(b);
+}
+// Rt.ssClose: free the cell's data and NULL it (idempotent; the count
+// never decrements — the index stays consumed).
+defun Rt.ssClose(iN : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word idx = payload(iN, 0) - 1;
+  if (mkbool(idx < 0) || mkbool(idx >= wload(glob, 15))) {
+    rawcall write(2, rawstr("runtime: bad string stream idx\n"), 32);
+    return mknum(-2);
+  }
+  word tab = wload(glob, 14);
+  word cell = tab + idx * 24;
+  word data = wload(cell, 0);
+  if (mkbool(data != 0)) {
+    rawcall free(data);
+    wstore(cell, 0, 0);
+    return mknum(0);
+  }
+  return mknum(0);
+}
+
 defun Rt.read-byte(stream : val) -> val {
   word isStr = payload(stream, 1) > 1;
   if (mkbool(isStr)) {
     word i = payload(stream, 0);
-    word r = rawcall rt_ss_readbyte(i);
+    word r = payload(call Rt.ssReadbyte(mknum(i)), 0);
     if (mkbool(r == -2)) {
       word h = rawcall rt_halt();
       return mknil;
@@ -1619,7 +1730,7 @@ defun Rt.open(path : val, dir : val) -> val {
     word fd = rawcall openat(-100, bufW, 0, 0);
     if (mkbool(fd < 0)) {
       if (mkbool(byteload(rawcall __errno_location(), 0) == 2)) {
-        word idx = rawcall rt_ss_in(bufW, len32(path));
+        word idx = payload(call Rt.ssIn(mknum(bufW), mknum(len32(path))), 0);
         if (mkbool(idx < 0)) {
           word h = rawcall rt_halt();
           return mknil;

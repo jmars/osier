@@ -935,9 +935,18 @@ rtDeps =
         , ( "Rt.closureFill", [ "Rt.closureFill" ] )
         , -- ===== the fd prims (zigretire stage 3 GROUP 1)
           ( "Rt.write-byte", [] )
-        , ( "Rt.read-byte", [ "Rt.readFull" ] )
-        , ( "Rt.open", [ "Rt.=", "Rt.cStrFill" ] )
-        , ( "Rt.close", [] )
+        , ( "Rt.read-byte", [ "Rt.readFull", "Rt.ssReadbyte" ] )
+        , ( "Rt.open", [ "Rt.=", "Rt.cStrFill", "Rt.ssIn" ] )
+        , ( "Rt.close", [ "Rt.ssClose" ] )
+        , -- ===== THE STRING-STREAM REGISTRY (O5): the former rt_ss_* C seats
+          -- re-homed into Mid — a lazily-malloc'd 8-cell (data,len,pos) table
+          -- off Region slots 38..39, so Rt.open's ENOENT arm and the
+          -- read/close string arms need no Zig seat at all.
+          ( "Rt.ssTab", [] )
+        , ( "Rt.ssIn", [ "Rt.ssTab", "Rt.ssInGo" ] )
+        , ( "Rt.ssInGo", [ "Rt.ssInGo" ] )
+        , ( "Rt.ssReadbyte", [] )
+        , ( "Rt.ssClose", [] )
         , -- readFull recurses only on the EINTR RETRY (one frame per retry,
           -- bounded by signal frequency, not by data length) — callR is fine.
         ( "Rt.readFull", [ "Rt.readFull" ] )

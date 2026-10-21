@@ -571,69 +571,12 @@ export fn rt_root_pop_to(wm: i64) callconv(.c) i64 {
 }
 
 // =====================================================================
-//  fd-prim string-stream registry bridge (zigretire stage 3 GROUP 1)
+//  (DELETED AT O5) the string-stream seats rt_ss_in/rt_ss_readbyte/
+//  rt_ss_close — the registry is Mid-owned now (runtime.mid's Region slots
+//  38..39 + Rt.ssTab/ssIn/ssInGo/ssReadbyte/ssClose), a lazily-malloc'd
+//  8-cell C-heap table; no Zig seat remains.
 // =====================================================================
-// The compiled Mid `open`/`read-byte`/`close` bodies reach the Vm-owned
-// string-stream registry (vm.streams, state.zig:103) through these three
-// alloc-free word->word seats.  The registry STAYS in Zig until the host
-// ports at stage 7; these seats die with rt.zig at the swap (BRIDGES table
-// entry in plan.md §3 Phase 4b).  Page-allocator only — NO GC inside — so
-// the RawCallRaw contract (alloc-free, no safepoint) holds and the caller
-// can lower frame-free.
-
-/// open's ENOENT arm as a word: valStringStreamIn's page_allocator copy.
-/// Returns (idx+1) — the stream Value's `file` field (>= 1, never null) — or
-/// a negative sentinel the Mid body routes to rt_halt: -1 = registry full,
-/// -2 = allocation failure.  Mirror of streams.zig valStringStreamIn, minus
-/// the GC-allocating valError path (which would break the alloc-free seat
-/// contract — the Mid body's halt arm is the documented error-model gap).
-export fn rt_ss_in(ptr: [*]const u8, len: i64) callconv(.c) i64 {
-    if (vm.streams.n_string_streams >= streams.MAX_STRING_STREAMS) {
-        werr("runtime: too many string streams\n");
-        return -1;
-    }
-    const idx: usize = @intCast(vm.streams.n_string_streams);
-    const data = std.heap.page_allocator.alloc(u8, @as(usize, @intCast(len)) + 1) catch {
-        werr("runtime: string stream alloc failed\n");
-        return -2;
-    };
-    @memcpy(data[0..@intCast(len)], ptr[0..@intCast(len)]);
-    data[@intCast(len)] = 0;
-    vm.streams.slots[idx] = .{ .data = data.ptr, .len = @intCast(len), .pos = 0 };
-    vm.streams.n_string_streams += 1;
-    return @intCast(idx + 1);
-}
-
-/// read-byte's string-stream arm as a word.  `i` is the stream Value's `file`
-/// field (idx+1).  Returns the byte (0..255), -1 for EOF, or -2 for a bad
-/// idx / closed slot (the Zig arm is error.Halt — the Mid body routes -2 to
-/// rt_halt).
-export fn rt_ss_readbyte(i: i64) callconv(.c) i64 {
-    const idx = i - 1;
-    if (idx < 0 or idx >= vm.streams.n_string_streams) {
-        werr("runtime: bad string stream idx\n");
-        return -2;
-    }
-    const ss = &vm.streams.slots[@intCast(idx)];
-    const data = ss.data orelse return -2;
-    if (ss.pos >= ss.len) return -1;
-    const byte = data[@intCast(ss.pos)];
-    ss.pos += 1;
-    return byte;
-}
-
-/// close's string-stream arm as a word: free the slot (idempotent; the slot
-/// index stays consumed, C parity).  Returns 0, or -2 for a bad idx (the Zig
-/// arm is error.Halt — the Mid body routes -2 to rt_halt).
-export fn rt_ss_close(i: i64) callconv(.c) i64 {
-    const idx = i - 1;
-    if (idx < 0 or idx >= vm.streams.n_string_streams) {
-        werr("runtime: bad string stream idx\n");
-        return -2;
-    }
-    vm.streams.freeStringStream(@intCast(idx));
-    return 0;
-}
+//
 
 // =====================================================================
 //  value / intern / str seats (zigretire stage 3 GROUP 2)

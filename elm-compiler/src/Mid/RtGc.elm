@@ -91,6 +91,12 @@ import Mid.RtPrims exposing (seat)
 --   words 8..11    driver knobs, getenv read once (U5a)
 --   word 12        the single .tail-in-flight scratch (U4a)
 --   word 13        no_tail_stage (B2: QBE_NOTTAILSTAGE bypasses to allocvec)
+--   words 14/15    THE STRING-STREAM REGISTRY (O5): word 14 = ssTab (a
+--                  lazily-malloc'd 8-cell x 3-word (data,len,pos) C-heap
+--                  table), word 15 = ssN (the count; MAX 8, a closed
+--                  slot's index stays consumed).  NOT collector state:
+--                  a QBE_MIDGC=0 build maps no region, so the registry
+--                  lives here where both routes reach it.
 --   words 16..     the frame freelist heads, indexed by nslots (U3)
 -- The freelist bound is 8192 (MEASURED: the seed's max frame nslots is
 -- 4,354; giants never pool).  The block is .bss: reserving the words costs

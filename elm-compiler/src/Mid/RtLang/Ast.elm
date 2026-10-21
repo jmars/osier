@@ -1628,7 +1628,7 @@ rt_* seats (tools/qbe/rt.zig exports) called from Rt bodies today:
   * rt_halt 0 (the prim halt arm; retargets to the Mid Rt.halt under QBE_MIDDRIVER=1)
   * rt_gc_heap_bytes 0, rt_gc_roots_len 0
   * rt_gc_root_kind 1, rt_gc_root_slot 1, rt_gc_root_np 1
-  * rt_ss_in 2, rt_ss_readbyte 1, rt_ss_close 1
+  * (O5) rt_ss_in/readbyte/close DELETED — the registry is Mid-owned
   * rt_sym_intern 2, rt_value_slot 1, rt_float_text 1
 
 (The rt.zig exports NOT here — rt_string, rt_vec_alloc, rt_raw_alloc,
@@ -1700,9 +1700,9 @@ rawcallArity =
         , ( "rt_gc_root_kind", 1 )
         , ( "rt_gc_root_slot", 1 )
         , ( "rt_gc_root_np", 1 )
-        , ( "rt_ss_in", 2 )
-        , ( "rt_ss_readbyte", 1 )
-        , ( "rt_ss_close", 1 )
+        -- (O5: rt_ss_in/readbyte/close DELETED — the string-stream registry
+        --   is Mid-owned now, Region slots 38..39 + Rt.ssTab/ssIn/ssInGo/
+        --   ssReadbyte/ssClose in runtime.mid)
         , ( "rt_sym_intern", 2 )
         , ( "rt_value_slot", 1 )
         , ( "rt_float_text", 1 )
