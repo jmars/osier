@@ -18,15 +18,11 @@
 //!   rt/varray.zig   — ValueArray stack ops (va_init/va_push/va_pop/va_peek/
 //!                     va_free) — extracted from interp.zig; a ValueArray
 //!                     utility, not interpretation
-//!   rt/prims.zig    — prim table + dispatch + the pure-subset exec_primitive
 //!   rt/streams.zig  — string/file stream registry + the stream prims
-//!   rt/execplan.zig — the process exec-plan prims (exec-plan/cd/getenv/...)
 
 pub const state = @import("rt/state.zig");
 pub const values = @import("rt/values.zig");
 pub const symbols = @import("rt/symbols.zig");
 pub const tables = @import("rt/tables.zig");
 pub const varray = @import("rt/varray.zig");
-pub const prims = @import("rt/prims.zig");
 pub const streams = @import("rt/streams.zig");
-pub const execplan = @import("rt/execplan.zig");

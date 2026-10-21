@@ -29,7 +29,6 @@ const types = gc.types;
 const symbols = @import("symbols.zig");
 const tables = @import("tables.zig");
 const values = @import("values.zig");
-const prims = @import("prims.zig");
 const streams = @import("streams.zig");
 
 const Gc = gc.Gc;
@@ -219,7 +218,8 @@ pub const Vm = struct {
     /// literal), else valSymbol (macros/*stinput* must stay symbols).
     pub fn defunGet(self: *Vm, name: []const u8) types.Value {
         if (tables.defunLookup(self.defun_table, tables.DEFUN_TABLE_CAP, name)) |v| return v;
-        if (prims.lookupDef(name)) |def| return values.valPrim(def.name);
+        // (O4: the prim-table fallback is deleted with rt/prims.zig — the Mid
+        // route never looks a prim up here.)
         return symbols.valSymbol(&self.symbols, name);
     }
 
@@ -277,7 +277,9 @@ pub const Vm = struct {
     /// VAL_PRIM global so [global X] falls back to it.  M5: the full
     /// prim_table (prims.zig), the single source (prims.def in C).
     pub fn initGlobals(self: *Vm) void {
-        for (prims.primNames()) |def| self.defunSet(def.name, values.valPrim(def.name));
+        // (O4: the prim-name global registration is deleted with rt/prims.zig
+        // — the Mid host registers nothing through the Vm.)
+        _ = self;
     }
 
 };
