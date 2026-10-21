@@ -1608,8 +1608,8 @@ rows — R-08 forbids a symbol in both tables):
     out from under them (a loud J3 "in no signature table").  Migrate the
     fixtures, then declare — one move.
   * mmap 6 (RtGc — the one 6-arg site), exit 1 — outside the plan's U5 list.
-  * clock_gettime 2, strtod 2, getrlimit 2, setrlimit 2 — see "plan-listed"
-    below.
+  * clock_gettime 2, getrlimit 2, setrlimit 2 — see "plan-listed" below.
+    (strtod was here; O5 seat 4b gave it its first site and declared it.)
 
 MIGRATED by cffi U5 (row DELETED, signature declared in runtime.mid):
 openat 4, __errno_location 0, waitpid 3, readdir 1, opendir 1,
@@ -1637,29 +1637,36 @@ rt_* seats (tools/qbe/rt.zig exports) called from Rt bodies today:
 rt_vec_store(_plain), rt_frame_enter/leave, rt_apply, rt_bounce,
 rt_tail_known, rt_prim — are reached through dedicated nodes and
 literals, never through `rawcall`.  The stage-6 A2/A4a DRIVER seats —
-rt_boot, rt_parse_arg, rt_argv_install, rt_root_push_value_array — are
-WORD-in/WORD-out (or void) by A2's shape deviations, so `rawcall` IS
-their route and they sit in the table below.)
+rt_boot, rt_root_push_value_array — are WORD-in/WORD-out (or void) by A2's
+shape deviations, so `rawcall` IS their route and they sit in the table
+below.  (O5 seat 4b: rt_parse_arg and rt_argv_install are GONE from the table
+AND from the Zig host — the entry-arg parser and the *argv* list are Mid
+defuns reached by `call`, which is what the A4a emission row now pins.)
 
 Plan-listed, no Rt-body call yet (arities from the C prototypes):
 
-  * clock_gettime 2, strtod 2, getrlimit 2, setrlimit 2
+  * clock_gettime 2, getrlimit 2, setrlimit 2
 
   (CORRECTION, MEASURED at cffi U5: `clock_gettime` x3 in Rt.collect — the
   GC-ARC F1 stats instrument — and `getrlimit`/`setrlimit` in Rt.main's argv
   prologue ARE Rt-body call sites today, so "no Rt-body call yet" is stale
   for those three.  They stay rows and stay UNDECLARED per plan §8 item 5:
-  the effect-loop port declares them.  `strtod` still has no site anywhere;
-  `poll`, `getdents64` and `fstatat` have sites and are DECLARED — 7B for
-  `poll`, 7E for the other two — so their rows are gone.)
+  the effect-loop port declares them.  `poll`, `getdents64` and `fstatat`
+  have sites and are DECLARED — 7B for `poll`, 7E for the other two — so
+  their rows are gone.  `strtod` LEFT this list at O5 seat 4b: Rt.parseArg is
+  its site, so it is a declared extern with the C prototype's `f64` result.)
 
 The stage-6 A2 driver seats (arities from tools/qbe/rt.zig's exports):
 
-  * rt_boot 0 (no args; 0 ok / 1 gc-init-failed), rt_parse_arg 2
-    (dst *Value, arg cstr; 0 ok / 2 bad-arg), rt_argv_install 3
-    (argv_mode, nargs, c_argv; void — the result is dead-bound),
+  * rt_boot 0 (no args; 0 ok / 1 gc-init-failed),
     rt_root_push_value_array 2 (base ptr, live-count ptr; the count is
     read AT SCAN TIME, so the caller wstores it before the push)
+
+  (O5 seat 4b: rt_parse_arg 2 and rt_argv_install 3 are GONE from this table
+  and from the Zig host.  runtime.mid's Rt.parseArg (dst *Value, arg cstr;
+  mknum(0) ok / mknum(2) bad-arg) and Rt.argvInstall (argv_mode, nargs,
+  c_argv; the *argv* cons list over a ROOTED C-heap accumulator slot) are Mid
+  defuns.)
 -}
 rawcallArity : Dict Sym Int
 rawcallArity =
@@ -1687,8 +1694,11 @@ rawcallArity =
           -- in both tables — so the row and the declaration move together,
           -- the rule U5 followed for the other twenty-four.
         ( "clock_gettime", 2 )
-        , ( "strtod", 2 )
-        , ( "getrlimit", 2 )
+        , -- (O5 seat 4b) strtod LEFT this table: Rt.parseArg is its first
+          -- call site and it is DECLARED in runtime.mid with the C
+          -- prototype's `f64` result (a `=d call`), so R-08's both-tables
+          -- refusal applies — the row and the declaration move together.
+        ( "getrlimit", 2 )
         , ( "setrlimit", 2 )
         , ( "rt_halt", 0 )
         , -- T18: the collector reads the U1c globals block through this
@@ -1710,9 +1720,10 @@ rawcallArity =
         --   host table through the GLOBALS BLOCK word 3)
         , ( "rt_float_text", 1 )
         , -- ===== the stage-6 A2 driver seats (A4a's rawcall route) =====
+        -- (O5 seat 4b: rt_parse_arg and rt_argv_install DELETED — the
+        --   entry-arg parser and the *argv* list are runtime.mid's
+        --   Rt.parseArg/Rt.argvInstall, reached by a Mid call)
         ( "rt_boot", 0 )
-        , ( "rt_parse_arg", 2 )
-        , ( "rt_argv_install", 3 )
         , ( "rt_root_push_value_array", 2 )
         , -- ===== the stage-6 B0 frame machinery's remaining U1b root seats
           -- (rt_root_push_value_array is above): rt_root_watermark (the

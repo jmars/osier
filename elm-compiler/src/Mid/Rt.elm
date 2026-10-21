@@ -1152,12 +1152,34 @@ rtDeps =
           ( "Rt.cStrEq", [ "Rt.cStrEqGo" ] )
         , ( "Rt.cStrEqGo", [] )
         , ( "Rt.metaGo", [ "Rt.cStrEq" ] )
-        , -- ===== the stage-6 A4a arg loop.  Rt.parseArgsGo is a frame-free
-          -- val defun (self-tail via recur) whose only seat calls are the
-          -- rawcall rt_parse_arg (RawCallRaw — NOT an rtDeps edge); it names
-          -- no Rt RawCall target, so its edge list is empty (the cStrLenGo/
-          -- cStrEqGo [] precedent).
-          ( "Rt.parseArgsGo", [] )
+        , -- ===== the stage-6 A4a arg loop, and (O5 seat 4b) the arg
+          -- PARSER it now calls.  Rt.parseArgsGo was a frame-free val defun
+          -- whose only seat call was the rawcall rt_parse_arg (RawCallRaw —
+          -- NOT an rtDeps edge), so its edge list was empty; the seat is
+          -- gone, so the loop now owns a real Mid edge.  The parser family is
+          -- frame-free by construction (malloc + byte/word stores only, no
+          -- allocraw/allocvec/LString), which is what lets Rt.parseArg be
+          -- called with the unrooted raw abuf pointer in hand.
+          ( "Rt.parseArgsGo", [ "Rt.parseArg" ] )
+        , ( "Rt.argHasFloatCh", [] )
+        , ( "Rt.argIsFloat", [ "Rt.cStrEq", "Rt.argHasFloatCh" ] )
+        , ( "Rt.argWs", [] )
+        , ( "Rt.argErrGo", [ "Rt.cStrLenGo" ] )
+        , ( "Rt.argErrFloat", [ "Rt.argErrGo" ] )
+        , ( "Rt.argErrInt", [ "Rt.argErrGo" ] )
+        , ( "Rt.parseArg", [ "Rt.argWs", "Rt.argIsFloat", "Rt.argErrFloat", "Rt.argErrInt" ] )
+        , -- ===== (O5 seat 4b) the *argv* list + its table entry.
+          -- Rt.argvGo ALLOCATES (allocraw for each argument's bytes and
+          -- Rt.cons for each cell), so it is in the framed/allocating set;
+          -- the accumulator it moves lives in a C-heap slot rooted with
+          -- rt_root_push_value, never in a frame slot (a frame slot is not a
+          -- root).  Rt.valEntry/valFreeGo are the table's write side: a
+          -- linear walk like Rt.valScanGo, no allocation, no safepoint.
+          ( "Rt.argvGo", [ "Rt.argvPush" ] )
+        , ( "Rt.argvPush", [ "Rt.cStrLenGo", "Rt.cStrCopyGo", "Rt.cons" ] )
+        , ( "Rt.valFreeGo", [] )
+        , ( "Rt.valEntry", [ "Rt.valScanGo", "Rt.valFreeGo" ] )
+        , ( "Rt.argvInstall", [ "Rt.valEntry", "Rt.argvGo" ] )
         , -- ===== the stage-6 A3a driver entry.  Rt.main is a rawAbi defun
           -- (WORD argc/argv in, WORD exit-code out) reached from
           -- driverSeeds; its RawCall edges are Rt.cStrLenGo (the three
@@ -1166,7 +1188,7 @@ rtDeps =
           -- reached cStrLenGo before A3b; A3b adds the meta-walk edge, A4a
           -- the arg loop.  Everything else it reaches is a rawcall
           -- (write/exit/getenv/getrlimit/setrlimit/malloc/rt_boot/
-          -- rt_parse_arg/rt_argv_install/rt_root_push_value_array +
+          -- rt_root_push_value_array +
           -- A4b's rt_root_push_value/rt_is_program/rt_run_program/
           -- rt_print_value) or a rawstr/rawsym static def — neither is an
           -- rtDeps edge.
@@ -1178,7 +1200,7 @@ rtDeps =
           -- edge costs the emit NOTHING: Rt.die is already a driverSeed ROOT,
           -- so the closure it pulls (Rt.cStrLenGo) is in every artifact
           -- already — an edge, not a new root, exactly like Rt.frame-leave's.
-          ( "Rt.main", [ "Rt.cStrLenGo", "Rt.metaGo", "Rt.parseArgsGo", "Rt.die" ] )
+          ( "Rt.main", [ "Rt.cStrLenGo", "Rt.metaGo", "Rt.parseArgsGo", "Rt.argvInstall", "Rt.die" ] )
         , -- ===== the stage-6 B0 frame machinery.  Rt.frame-enter's RawCall
           -- edges are its one helper; Rt.frame-leave's only edge is Rt.die
           -- (the no-frame panic — Rt.die is already a driverSeed, so this is

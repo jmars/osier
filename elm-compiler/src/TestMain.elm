@@ -84,10 +84,10 @@ checks rt runtimeMidText =
       -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
       -- the frameZero loop), so an empty or truncated load turns it RED,
       -- loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (303 defuns (GC NURSERY added the ten scavenge-family defuns; O5 added the five string-stream registry + the nine intern-table defuns + seat 3's values-table walk) — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (315 defuns (GC NURSERY added the ten scavenge-family defuns; O5 added the five string-stream registry + the nine intern-table defuns + seat 3's values-table walk) — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 303
+                List.length ast == 315
 
             Err _ ->
                 False
@@ -907,8 +907,8 @@ checks rt runtimeMidText =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 267 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram rt True True True) == 267
+    , check "rt program: 279 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
+        (List.length (rtProgram rt True True True) == 279
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
@@ -1587,7 +1587,7 @@ checks rt runtimeMidText =
             Nothing ->
                 False
         )
-    , check "A4a MIDDRIVER emission — the seats + root push: the rendered .ssa references $rt_boot, $rt_parse_arg, $rt_argv_install and $rt_root_push_value_array (the A2 seats the driver calls, each via rawcall)"
+    , check "A4a MIDDRIVER emission — the seats + root push (RE-PINNED AT O5 SEAT 4b): the rendered .ssa references $rt_boot and $rt_root_push_value_array (the two A2 seats the driver still calls via rawcall), and the entry-arg parser + *argv* installer are now MID DEFUNS the driver CALLS — q_Rt_x2eparseArg from the arg loop and q_Rt_x2eargvInstall from Rt.main — with no $rt_parse_arg/$rt_argv_install anywhere (the Zig seats are deleted)"
         (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 let
@@ -1595,9 +1595,11 @@ checks rt runtimeMidText =
                         Print.print mod
                 in
                 String.contains "call $rt_boot" ssa
-                    && String.contains "call $rt_parse_arg" ssa
-                    && String.contains "call $rt_argv_install" ssa
                     && String.contains "call $rt_root_push_value_array" ssa
+                    && String.contains "call $q_Rt_x2eparseArg" ssa
+                    && String.contains "call $q_Rt_x2eargvInstall" ssa
+                    && not (String.contains "$rt_parse_arg" ssa)
+                    && not (String.contains "$rt_argv_install" ssa)
 
             Err _ ->
                 False
@@ -4006,7 +4008,7 @@ checks rt runtimeMidText =
     -- load".  Deliberately NOT a pin on the emitted bytes: the corpus gate
     -- holds those, and a site moving is a different claim (the STRUCTURAL
     -- oracle in the unit's report is the emitted `=w call` + `extsw` shape).
-    , check "cffi U5 (+ stage 7B's poll, stage 7E's getdents64/fstatat): runtime.mid declares its migrated libc surface with the C prototypes' RESULT widths, and no declared symbol is also a rawcallArity row"
+    , check "cffi U5 (+ stage 7B's poll, stage 7E's getdents64/fstatat, O5 seat 4b's strtod/strtoll): runtime.mid declares its migrated libc surface with the C prototypes' RESULT widths, and no declared symbol is also a rawcallArity row"
         (let
             decls =
                 declsOf runtimeMidText
@@ -4032,7 +4034,7 @@ checks rt runtimeMidText =
                         False
          in
          List.length externs
-            == 28
+            == 30
             && has "fcntl" Ast.FI32
             && has "openat" Ast.FI32
             && has "waitpid" Ast.FI32
@@ -4048,6 +4050,8 @@ checks rt runtimeMidText =
             && has "getdents64" Ast.FI32
             && has "fstatat" Ast.FI32
             && has "_exit" Ast.FVoid
+            && has "strtod" Ast.FF64
+            && has "strtoll" Ast.FI64
             && List.all
                 (\d ->
                     case d of
@@ -6551,7 +6555,9 @@ checks rt runtimeMidText =
                     == [ "Rt.*", "Rt.+", "Rt.-", "Rt./", "Rt.<", "Rt.<-address"
                        , "Rt.<=", "Rt.=", "Rt.>", "Rt.>=", "Rt.@p", "Rt.absvector"
                        , "Rt.address->", "Rt.allocRaw", "Rt.allocVector", "Rt.apply", "Rt.apply-at"
-                       , "Rt.apply-tail", "Rt.applyGo", "Rt.applyOneRedir", "Rt.applyPartGo", "Rt.applyRedirects", "Rt.applyTailGo", "Rt.asF"
+                       , "Rt.apply-tail", "Rt.applyGo", "Rt.applyOneRedir", "Rt.applyPartGo", "Rt.applyRedirects", "Rt.applyTailGo"
+                       , "Rt.argErrFloat", "Rt.argErrGo", "Rt.argErrInt", "Rt.argHasFloatCh", "Rt.argIsFloat", "Rt.argWs"
+                       , "Rt.argvGo", "Rt.argvInstall", "Rt.argvPush", "Rt.asF"
                        , "Rt.assoc", "Rt.assocGo", "Rt.bitwise-and", "Rt.bitwise-not", "Rt.bitwise-or", "Rt.bitwise-shift-left"
                        , "Rt.bitwise-shift-right", "Rt.bitwise-shift-right-zf", "Rt.bitwise-xor", "Rt.bodyWriteGo", "Rt.bounce", "Rt.bounceGo"
                        , "Rt.byteCopyGo", "Rt.bytesBuild", "Rt.bytesEqGo", "Rt.bytesToStr", "Rt.c-strlen", "Rt.cStrCopyGo"
@@ -6590,14 +6596,14 @@ checks rt runtimeMidText =
                        , "Rt.intGrow", "Rt.intInsert", "Rt.intInsertAt", "Rt.intInsertGo", "Rt.intPairsCopy", "Rt.intStrCopy"
                        , "Rt.intTab", "Rt.intern", "Rt.isChildBuiltin", "Rt.main"
                        , "Rt.memGo", "Rt.metaGo", "Rt.mkTmpAt", "Rt.numFill", "Rt.numText", "Rt.number?"
-                       , "Rt.open", "Rt.openBodyTmpfile", "Rt.parseArgsGo", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo"
+                       , "Rt.open", "Rt.openBodyTmpfile", "Rt.parseArg", "Rt.parseArgsGo", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo"
                        , "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind", "Rt.recAppendNamesGo", "Rt.recGet"
                        , "Rt.recGetGo", "Rt.recInsert", "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd", "Rt.recUpdCopy"
                        , "Rt.recUpdFind", "Rt.repGo", "Rt.repeat", "Rt.revGo", "Rt.runBuiltinInprocess", "Rt.setenv"
                        , "Rt.shen.bytes->string", "Rt.shen.str->bytes", "Rt.snd", "Rt.ssClose", "Rt.ssIn", "Rt.ssInGo"
                        , "Rt.ssReadbyte", "Rt.ssTab", "Rt.str", "Rt.strOf", "Rt.string?"
                        , "Rt.substring", "Rt.symEq", "Rt.symLess", "Rt.symToStr", "Rt.tail-known"
-                       , "Rt.toI32", "Rt.valScanGo", "Rt.value", "Rt.vecEq", "Rt.wRaw", "Rt.wStr", "Rt.waitStatusCode"
+                       , "Rt.toI32", "Rt.valEntry", "Rt.valFreeGo", "Rt.valScanGo", "Rt.value", "Rt.vecEq", "Rt.wRaw", "Rt.wStr", "Rt.waitStatusCode"
                        , "Rt.wireCmdGo", "Rt.wirePipeGo", "Rt.write-byte"
                      ]
 
@@ -6657,7 +6663,7 @@ checks rt runtimeMidText =
     -- is now the append below; the loud Err moved to the key-agreement walk
     -- (row C), which is the collision/rename class the orphan check guarded.
     , check
-        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the eighty-nine appended keys (the twenty stage-6 ABI keys + the fifty-three host defuns of stages 7A/7B/7C + stage 7 O3-fix's Rt.applyPartGo + O5's five string-stream registry defuns + O5 seat 2's nine intern-table defuns + O5 seat 3's Rt.valScanGo) (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
+        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the one-hundred-and-one appended keys (the twenty stage-6 ABI keys + the fifty-three host defuns of stages 7A/7B/7C + stage 7 O3-fix's Rt.applyPartGo + O5's five string-stream registry defuns + O5 seat 2's nine intern-table defuns + O5 seat 3's Rt.valScanGo + O5 seat 4b's twelve entry-arg-parser/*argv* defuns) (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -6681,7 +6687,10 @@ checks rt runtimeMidText =
                                 Ok spliced ->
                                     List.map .key spliced == List.map .key union ++
                                                [ "Rt.apply", "Rt.apply-at", "Rt.apply-tail", "Rt.applyGo"
-                                                 , "Rt.applyPartGo", "Rt.applyTailGo", "Rt.bounce", "Rt.bounceGo", "Rt.cStrEq"
+                                                 , "Rt.applyPartGo", "Rt.applyTailGo"
+                                                 , "Rt.argErrFloat", "Rt.argErrGo", "Rt.argErrInt", "Rt.argHasFloatCh", "Rt.argIsFloat", "Rt.argWs"
+                                                 , "Rt.argvGo", "Rt.argvInstall", "Rt.argvPush"
+                                                 , "Rt.bounce", "Rt.bounceGo", "Rt.cStrEq"
                                                  , "Rt.cStrEqGo", "Rt.callArity", "Rt.copyWords", "Rt.copyWordsGo"
                                                  , "Rt.die", "Rt.dieErr", "Rt.frame-enter", "Rt.frame-leave"
                                                  , "Rt.frameBlock", "Rt.halt", "Rt.hostAddPoll", "Rt.hostArity", "Rt.hostCStrOf", "Rt.hostCall"
@@ -6699,9 +6708,10 @@ checks rt runtimeMidText =
                                                  , "Rt.hostStepGo", "Rt.hostWriteAll", "Rt.hostWriteFileLeaf", "Rt.hostWriteStr"
                                                  , "Rt.intBytesEq", "Rt.intFindGo", "Rt.intGrow", "Rt.intInsert", "Rt.intInsertAt"
                                                  , "Rt.intInsertGo", "Rt.intPairsCopy", "Rt.intStrCopy", "Rt.intTab"
-                                                 , "Rt.main", "Rt.metaGo", "Rt.parseArgsGo", "Rt.ssClose", "Rt.ssIn"
+                                                 , "Rt.main", "Rt.metaGo", "Rt.parseArg", "Rt.parseArgsGo"
+                                                 , "Rt.ssClose", "Rt.ssIn"
                                                  , "Rt.ssInGo", "Rt.ssReadbyte", "Rt.ssTab", "Rt.tail-known"
-                                                 , "Rt.valScanGo"
+                                                 , "Rt.valEntry", "Rt.valFreeGo", "Rt.valScanGo"
                                                ]
 
                                 Err _ ->

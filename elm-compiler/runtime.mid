@@ -160,6 +160,21 @@ extern _exit(code : i32) -> void;
 // (size_t), and `flag` is AT_SYMLINK_NOFOLLOW's `int`.
 extern getdents64(fd : i32, buf : ptr, count : i64) -> i32;
 extern fstatat(dirfd : i32, path : ptr, buf : ptr, flag : i32) -> i32;
+// O5 seat 4b: the entry-arg parser's two conversions.  `strtod` was plan §8
+// item 5's last undeclared row with no call site; Rt.parseArg is that site
+// now, so the declaration and the `rawcallArity` row move together (R-08).
+// Both are declared with the C prototype's RESULT width — `strtod`'s `f64` is
+// what makes its call a `=d call` (cffi U3) and lets `mkflt(rawcall
+// strtod(..))` be a float-word producer; `strtoll`'s `i64` is an `=l call`.
+// WHY LIBC AND NOT A HAND-WRITTEN DECIMAL PARSER: strtod is CORRECTLY ROUNDED,
+// so it returns the same double std.fmt.parseFloat did for EVERY input
+// (correct rounding is unique) and the float-arg goldens cannot move; strtoll
+// gives the same i64 as std.fmt.parseInt for every in-range input and
+// SATURATES on overflow, which errno=ERANGE turns back into the refusal
+// parseInt produced.  A hand-rolled pair would be a cheaper analogue wearing
+// the same name.
+extern strtod(s : ptr, endptr : ptr) -> f64;
+extern strtoll(s : ptr, endptr : ptr, base : i32) -> i64;
 // THE REGION LAYOUT (midlang-u5) — the name -> word-slot table.  Before this
 // struct the offsets were `wstore(base, k, ..)` constants in Rt.gcInit and
 // prose in Mid/RtGc.elm; slot 0..12 MEASURED against gcInit's writes and every
@@ -1975,6 +1990,252 @@ defun Rt.value(sym : val) -> val {
   }
   val n = call Rt.cStrLenGo(mknum(payload(sym, 0)), mknum(0));
   return call Rt.intern(mkstr(payload(sym, 0), payload(n, 0)));
+}
+
+// ============== THE ENTRY-ARG PARSER (O5 seat 4b) =====================
+// rt_parse_arg died here.  The DRIVER CONTRACT it carried (qbe-check.sh's
+// err-badarg-int / err-badarg-float / float-arg rows) is now Mid's:
+//
+//   * the HEURISTIC is verbatim the retired rt.zig isFloatArg — an arg takes
+//     the float path iff it contains '.'/'e'/'E' or is exactly one of
+//     NaN/Infinity/-Infinity.  Everything else is the int path, so the former
+//     VM reference and the native driver accept the same command line.
+//   * the FLOAT CONVERSION is libc's `strtod`, not a hand-rolled decimal
+//     parser: it is CORRECTLY ROUNDED, i.e. it returns the same double
+//     std.fmt.parseFloat did for every input (correct rounding is unique), so
+//     moving the seat cannot move a float-arg golden.  `strtod` was already a
+//     `rawcallArity` row with no call site (plan §8 item 5); the declaration
+//     below is its first site, and R-08 (no symbol in both tables) is why the
+//     row is deleted in Mid/RtLang/Ast.elm.
+//   * the ENDPOINTER is the strictness check std.fmt.parseFloat had: the call
+//     consumed the whole string iff *endptr == 0, so `2.5.3` is a REFUSAL (the
+//     pinned err-badarg-float golden) rather than a silent 2.5.  It also
+//     rejects an empty conversion (endptr == arg), which is what makes a lone
+//     "-" or "" an error instead of a zero.
+//   * the INT CONVERSION is `strtoll` (base 10) with an ERANGE test: parseInt
+//     errored on overflow, strtoll SATURATES and sets errno, so the refusal is
+//     recovered from errno rather than from a hand-rolled digit walk.  A walk
+//     was the first draft and it is not spellable here: the boundary constant
+//     922337203685477580 is above 2^53, and this frontend refuses an integer
+//     literal it cannot hold exactly (MEASURED: `err malformed number
+//     literal`), so the overflow test would have to be built out of wrapping
+//     arithmetic — a correctness hazard for no gain.
+//   * both refusals print the SAME bytes the seat printed, through the same
+//     write(2, prefix)/write(2, arg)/write(2, suffix) shape Rt.main's
+//     qbe_meta error already uses.
+// NO GC allocation, NO safepoint in any of these defuns (malloc + byte/word
+// stores only), so they stay FRAME-FREE — which is why Rt.parseArg can be
+// called with the unrooted raw abuf pointer in hand.
+defun Rt.argHasFloatCh(aN : val, iN : val) -> val {
+  word c = byteload(payload(aN, 0), payload(iN, 0));
+  if (mkbool(c == 0)) {
+    return mkbool(0);
+  }
+  if (mkbool(c == 46)) {
+    return mkbool(1);
+  }
+  if (mkbool(c == 101)) {
+    return mkbool(1);
+  }
+  if (mkbool(c == 69)) {
+    return mkbool(1);
+  }
+  recur(aN, mknum(payload(iN, 0) + 1));
+}
+
+// The heuristic, VERBATIM the retired rt.zig isFloatArg: '.'/'e'/'E' anywhere,
+// or exactly one of the three canonical non-finite tokens.  `cStrEq` is the
+// existing word-ABI compare; the val wrapper is this file's mknum idiom (a
+// defun whose signature mixes a `word` parameter with a `val` result is not
+// spellable here — MEASURED: the word param is read as a VALUE and the lowerer
+// refuses it).
+defun Rt.argIsFloat(aN : val) -> val {
+  word a = payload(aN, 0);
+  word nan = call Rt.cStrEq(a, rawstr("NaN"));
+  word inf = call Rt.cStrEq(a, rawstr("Infinity"));
+  word ninf = call Rt.cStrEq(a, rawstr("-Infinity"));
+  val has = call Rt.argHasFloatCh(aN, mknum(0));
+  return mkbool(nan != 0) || mkbool(inf != 0) || mkbool(ninf != 0) || mkbool(payload32(has, 0) != 0);
+}
+
+// A LEADING WHITESPACE reject, because BOTH libc scanners skip it and
+// `std.fmt.parseInt`/`parseFloat` do not: without this, " 5" would be accepted
+// as 5 here and refused by the retired seat.
+defun Rt.argWs(aN : val) -> val {
+  word c = byteload(payload(aN, 0), 0);
+  return mkbool(c == 32) || mkbool(c == 9) || mkbool(c == 10) || mkbool(c == 11) || mkbool(c == 12) || mkbool(c == 13);
+}
+
+// The refusal line, in the same three-write shape Rt.main's qbe_meta error
+// uses.  TWO entry points rather than a `kind` selector: a word ternary is a
+// VALUE position, and this DSL refuses a word binder read there (MEASURED:
+// `err qbe: raw word binder read in a VALUE position`), so the suffix is a
+// literal argument of each arm instead.
+defun Rt.argErrGo(aN : val, sufN : val) -> val {
+  word a = payload(aN, 0);
+  word suf = payload(sufN, 0);
+  word pre = rawstr("qbe-rt: entry arg '");
+  val plen = call Rt.cStrLenGo(mknum(pre), mknum(0));
+  rawcall write(2, pre, payload(plen, 0));
+  val alen = call Rt.cStrLenGo(aN, mknum(0));
+  rawcall write(2, a, payload(alen, 0));
+  val slen = call Rt.cStrLenGo(sufN, mknum(0));
+  rawcall write(2, suf, payload(slen, 0));
+  return mknil;
+}
+
+defun Rt.argErrFloat(aN : val) -> val {
+  return call Rt.argErrGo(aN, mknum(rawstr("' is not a float\n")));
+}
+
+defun Rt.argErrInt(aN : val) -> val {
+  return call Rt.argErrGo(aN, mknum(rawstr("' is not an int (qbe slice)\n")));
+}
+
+// Rt.parseArg: ONE entry argument -> the Value the entry is called with,
+// written into the 40-byte slot at `dst` (the caller's abuf entry) with the
+// raw `vecstore` node.  Returns mknum(0) on success, mknum(2) after the
+// refusal line — the exit code stays the driver's (Rt.parseArgsGo's rc),
+// exactly as the seat had it.
+//
+// THE ENDPOINTER IS THE STRICTNESS: the scan consumed the whole argument iff
+// *endptr == 0 and endptr != a.  That is what makes `2.5.3` a REFUSAL (the
+// pinned err-badarg-float golden) instead of a silent 2.5, and `abc`/`-`/``
+// refusals instead of zeros.
+defun Rt.parseArg(dstN : val, argN : val) -> val {
+  word dst = payload(dstN, 0);
+  word a = payload(argN, 0);
+  val ws = call Rt.argWs(argN);
+  if (mkbool(payload32(ws, 0) != 0)) {
+    call Rt.argErrInt(argN);
+    return mknum(2);
+  }
+  word ep = rawcall malloc(8);
+  wstore(ep, 0, 0);
+  val isn = call Rt.argIsFloat(argN);
+  if (mkbool(payload32(isn, 0) != 0)) {
+    val fv = mkflt(rawcall strtod(a, ep));
+    word endW = wload(ep, 0);
+    rawcall free(ep);
+    if (mkbool(endW != a) && mkbool(byteload(endW, 0) == 0)) {
+      vecstore(dst, 0, fv);
+      return mknum(0);
+    }
+    call Rt.argErrFloat(argN);
+    return mknum(2);
+  }
+  rawcall memset(rawcall __errno_location(), 0, 4);
+  word n = rawcall strtoll(a, ep, 10);
+  word endN = wload(ep, 0);
+  word err = byteload(rawcall __errno_location(), 0);
+  rawcall free(ep);
+  if (mkbool(err == 34) || mkbool(endN == a) || mkbool(byteload(endN, 0) != 0)) {
+    call Rt.argErrInt(argN);
+    return mknum(2);
+  }
+  vecstore(dst, 0, mknum(n));
+  return mknum(0);
+}
+
+// ============== THE *argv* PSEUDO-GLOBAL (O5 seat 4b) ==================
+// rt_argv_install died here.  AOTRUN_ARGV's *argv* is a plain cons LIST of
+// strings (run.js's argv[2:] shape), built BACK-TO-FRONT so the list comes out
+// in argv order, and stored into the host's values table — the table Mid
+// already reads (Rt.value), written through the same entry layout
+// (name at +0, the 40-byte Value at +8).
+//
+// THE ACCUMULATOR IS ROOTED ACROSS EVERY ALLOCATION, and that is the gcf1 FIX
+// this seat had to carry, not decoration: the retired driver rooted only from
+// inside valCons, so the accumulator was UNROOTED at the moment the STRING's
+// allocation ran — a nursery scavenge there reclaims the whole tail built so
+// far and *argv* comes back as garbage (MEASURED pre-fix, 60k args:
+// `[GC NURSERY #1 ...] non-exhaustive case`).  HERE THE ROOT IS A C-HEAP
+// 40-BYTE VALUE SLOT (`acc`), filled with nil and registered with
+// rt_root_push_value BEFORE the first allocation; the loop only ever MOVES the
+// accumulator BY WRITING THAT SLOT, so the rooted address always holds the
+// current tail (the Zig's `rootValue(&acc)` — a rooted SLOT, not a rooted
+// copy, because a copy would not see the rebind).  rt_root_pop after the list
+// is in the table, which is itself a registered root.
+defun Rt.argvGo(blkN : val, iN : val) -> val {
+  word blk = payload(blkN, 0);
+  word i = payload(iN, 0);
+  if (mkbool(i == 0)) {
+    return mknil;
+  }
+  word j = i - 1;
+  word raw = wload(wload(blk, 0), 2 + j);
+  if (mkbool(raw == 0)) {
+    word zero = rawcall malloc(1);
+    bytestore(zero, 0, 0);
+    call Rt.argvPush(blkN, mknum(zero));
+    recur(blkN, mknum(j));
+  }
+  call Rt.argvPush(blkN, mknum(raw));
+  recur(blkN, mknum(j));
+}
+
+// ONE argument -> one string cell prepended to the rooted accumulator.  The
+// cons is written back INTO the rooted slot (vecstore(acc, 0, cons(s, load))),
+// so the tail is live across the string's allocation and the cell's own.
+defun Rt.argvPush(blkN : val, cstrN : val) -> val {
+  word blk = payload(blkN, 0);
+  word cstr = payload(cstrN, 0);
+  val len = call Rt.cStrLenGo(mknum(cstr), mknum(0));
+  word n = payload(len, 0);
+  word buf = allocraw(n + 1);
+  call Rt.cStrCopyGo(mknum(cstr), mknum(buf), mknum(0));
+  val s = mkstr(buf, n);
+  word acc = wload(blk, 1);
+  vecstore(acc, 0, call Rt.cons(s, vecload(acc, 0)));
+  return mknil;
+}
+
+// Rt.valEntry: the values-table entry for `name`, INSERTING the name into the
+// first free entry when the table does not have it — that is the half of the
+// deleted seat's `valueSet` the lookup side (Rt.valScanGo) never needed, and
+// the reason *argv* cannot be written through Rt.value.  Returns the entry's
+// Value address (e + 8), never 0: the table has 256 slots and at most four
+// host-installed names.
+defun Rt.valFreeGo(tabN : val, iN : val) -> val {
+  if (mkbool(payload(iN, 0) >= 256)) {
+    return mknum(0);
+  }
+  word e = payload(tabN, 0) + payload(iN, 0) * 48;
+  if (mkbool(wload(e, 0) == 0)) {
+    return mknum(e + 8);
+  }
+  recur(tabN, mknum(payload(iN, 0) + 1));
+}
+
+defun Rt.valEntry(tabN : val, nameN : val) -> val {
+  val hit = call Rt.valScanGo(tabN, nameN, mknum(0));
+  if (mkbool(payload(hit, 0) != 0)) {
+    return hit;
+  }
+  word free = payload(call Rt.valFreeGo(tabN, mknum(0)), 0);
+  wstore(free - 8, 0, payload(nameN, 0));
+  return mknum(free);
+}
+
+defun Rt.argvInstall(modeN : val, nargsN : val, argvN : val) -> val {
+  word mode = payload(modeN, 0);
+  word tab = wload(rawcall rt_glob_addr(), 3);
+  word ent = payload(call Rt.valEntry(mknum(tab), mknum(rawstr("*argv*"))), 0);
+  if (mkbool(mode == 0)) {
+    vecstore(ent, 0, mknil);
+    return mknil;
+  }
+  word blk = rawcall malloc(24);
+  word acc = rawcall malloc(40);
+  vecstore(acc, 0, mknil);
+  rawcall rt_root_push_value(acc);
+  wstore(blk, 0, payload(argvN, 0));
+  wstore(blk, 1, acc);
+  wstore(blk, 2, payload(nargsN, 0));
+  call Rt.argvGo(mknum(blk), mknum(payload(nargsN, 0)));
+  vecstore(ent, 0, vecload(acc, 0));
+  rawcall rt_root_pop();
+  return mknil;
 }
 
 defun Rt.str(x : val) -> val {
@@ -5793,7 +6054,7 @@ defun Rt.parseArgsGo(blk : val, j : val) -> val {
   word argvW = wload(payload(blk, 0), 1);
   word argPtr = bufW + (payload(j, 0) * 40);
   word argStr = wload(argvW, 2 + payload(j, 0));
-  word rc = rawcall rt_parse_arg(argPtr, argStr);
+  word rc = payload(call Rt.parseArg(mknum(argPtr), mknum(argStr)), 0);
   if (mkbool(rc != 0)) {
     return mknum(2);
   }
@@ -5884,7 +6145,7 @@ defun Rt.main(argc : word, argv : word) -> word {
   word pre = if (mkbool(payload(prc, 0) != 0)) { rawcall exit(2); return 0; } else { return 0; };
   wstore(abuf, 80, entry_nargs);
   rawcall rt_root_push_value_array(abuf, abuf + 640);
-  rawcall rt_argv_install(argvMode, nargs, argv);
+  call Rt.argvInstall(mknum(argvMode), mknum(nargs), mknum(argv));
   word a1 = abuf + 40;
   word a2 = abuf + 80;
   word a3 = abuf + 120;

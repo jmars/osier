@@ -18,13 +18,16 @@
 #      A reappearance is the cross-heap edge the corrected criterion forbids:
 #      a Mid object referencing something the Zig collector can reclaim (or
 #      MOVE — the same defect, see plan.md §2.2's stage-5 finding).
-#   2. THE ONE REMAINING ZIG-GC ALLOCATOR IS NAMED, and it is the argv
-#      registry: `rt_argv_install` -> buildArgvList -> values.valString/valCons.
-#      It must appear in EVERY accepted program (Rt.main calls it
-#      unconditionally), so a future change that SILENTLY routes another shape
-#      through it without touching the table shows up as a count, not as prose.
-#      Its reachability argument (why no Mid object can hold it) is in
-#      plan.md §2.2's row; its ROOTING is probe-midgc-argv.sh's job.
+#   2. NO ZIG-GC ALLOCATOR REMAINS AT ALL, and the argv registry is the seat
+#      that closed it (O5 seat 4b): `rt_argv_install` -> buildArgvList ->
+#      values.valString/valCons WAS the last one, and it is now Mid's
+#      (Rt.argvInstall/Rt.argvGo, rooted on a C-heap accumulator slot).  So the
+#      row is measured the other way round: `rt_argv_install`/`rt_parse_arg`
+#      must appear ZERO times (a reappearance is a retired seat coming back),
+#      and the MID installer `q_Rt_x2eargvInstall` must appear in EVERY
+#      accepted program — Rt.main calls it unconditionally, so a future change
+#      that silently drops or reroutes it shows up as a count, not as prose.
+#      Its ROOTING is probe-midgc-argv.sh's job.
 #   3. THE REFUSAL SET IS NOW EMPTY — 0 host-seam, 0 `value`-prim — and that is
 #      the point, not a regression.  Until stage 7 O2 this probe pinned 21
 #      refused groups (7 host-seam: Platform.program/Platform.worker ->
@@ -100,6 +103,7 @@ while IFS= read -r line; do [ -n "$line" ] && printf '%s\0' "$line"; done < "$WO
 FORBIDDEN='rt_string|rt_con|rt_make_closure|rt_vec_alloc|rt_raw_alloc|rt_prim_'
 : > "$WORK/forbidden.txt"; : > "$WORK/hostseam.txt"; : > "$WORK/valueprim.txt"
 : > "$WORK/preexisting.txt"; : > "$WORK/accepted.txt"; : > "$WORK/argv.txt"
+: > "$WORK/retired.txt"
 for f in "$WORK"/ssa/*.ssa; do
   n="$(basename "$f" .ssa)"
   if head -c 3 "$f" | grep -q '^err'; then
@@ -110,7 +114,8 @@ for f in "$WORK"/ssa/*.ssa; do
   fi
   printf '%s ' "$n" >> "$WORK/accepted.txt"
   grep -oE "call \\\$($FORBIDDEN)[A-Za-z0-9_]*" "$f" | sort -u | sed "s|^|$n: |" >> "$WORK/forbidden.txt"
-  grep -q 'call \$rt_argv_install' "$f" && printf '%s ' "$n" >> "$WORK/argv.txt"
+  grep -q 'call \$q_Rt_x2eargvInstall' "$f" && printf '%s ' "$n" >> "$WORK/argv.txt"
+  grep -oE 'call \$(rt_argv_install|rt_parse_arg)' "$f" | sort -u | sed "s|^|$n: |" >> "$WORK/retired.txt"
 done
 
 n_acc=0; for x in $(cat "$WORK/accepted.txt"); do n_acc=$((n_acc+1)); done
@@ -119,12 +124,14 @@ n_host=0; for x in $(cat "$WORK/hostseam.txt"); do n_host=$((n_host+1)); done
 n_val=0;  for x in $(cat "$WORK/valueprim.txt");  do n_val=$((n_val+1)); done
 n_pre=0;  for x in $(cat "$WORK/preexisting.txt"); do n_pre=$((n_pre+1)); done
 n_argv=0; for x in $(cat "$WORK/argv.txt");       do n_argv=$((n_argv+1)); done
+n_ret=0; [ -s "$WORK/retired.txt" ] && n_ret="$(wc -l < "$WORK/retired.txt" | tr -d ' ')"
 
 echo "census (QBE_MIDGC=1, $(ls "$WORK"/ssa/*.ssa | wc -l | tr -d ' ') groups emitted):"
 echo "  accepted (the sound domain)      $n_acc"
 echo "  refused by the census            $((n_host + n_val))  ($n_host host-seam: $(cat "$WORK/hostseam.txt"); $n_val value-prim)"
 echo "  pre-existing compile_error rows  $n_pre"
-echo "  rt_argv_install reached          $n_argv / $n_acc accepted programs"
+echo "  q_Rt_x2eargvInstall reached      $n_argv / $n_acc accepted programs"
+echo "  retired Zig driver seats reached $n_ret  (rt_argv_install/rt_parse_arg — want 0)"
 echo "  FORBIDDEN Zig-GC allocator calls $n_forb"
 
 rc=0
@@ -138,7 +145,12 @@ if [ "$n_acc" -eq 0 ]; then
   rc=1
 fi
 if [ "$n_argv" -ne "$n_acc" ]; then
-  echo "FAIL: rt_argv_install is not reached by every accepted program ($n_argv of $n_acc) — Rt.main calls it unconditionally, so either the route moved or this probe is measuring the wrong symbol; the argv row of plan.md §2.2 is now unbacked" >&2
+  echo "FAIL: the MID *argv* installer (q_Rt_x2eargvInstall) is not reached by every accepted program ($n_argv of $n_acc) — Rt.main calls it unconditionally, so either the route moved or this probe is measuring the wrong symbol; the argv row of plan.md §2.2 is now unbacked" >&2
+  rc=1
+fi
+if [ "$n_ret" -ne 0 ]; then
+  echo "FAIL: a RETIRED Zig driver seat is still called under QBE_MIDGC=1 (rt_argv_install/rt_parse_arg were deleted at O5 seat 4b) — a route came back:" >&2
+  sed 's/^/    /' "$WORK/retired.txt" >&2
   rc=1
 fi
 # STAGE 7 O2 DELETED THE TWO REFUSAL ARMS, so the set is pinned at ZERO in BOTH
@@ -154,9 +166,11 @@ if [ "$n_host" -ne 0 ] || [ "$n_val" -ne 0 ]; then
 fi
 
 if [ "$rc" -eq 0 ]; then
-  echo "PASS: under QBE_MIDGC=1, no accepted program reaches a Zig-GC allocator; the single"
-  echo "      remaining Zig-heap allocation is the argv registry (plan.md §2.2's row), and the"
-  echo "      refusal set is EMPTY (0/0 — O2's two arms are deleted; the unsound pairing is a"
-  echo "      host CHOICE now, refused at build time by run.js and at run time by Rt.main)."
+  echo "PASS: under QBE_MIDGC=1, no accepted program reaches a Zig-GC allocator, and the"
+  echo "      last one on the route — the argv registry — is Mid's now (O5 seat 4b:"
+  echo "      Rt.argvInstall/Rt.argvGo over a rooted C-heap slot), reached by every accepted"
+  echo "      program.  The refusal set is EMPTY (0/0 — O2's two arms are deleted; the"
+  echo "      unsound pairing is a host CHOICE now, refused at build time by run.js and at"
+  echo "      run time by Rt.main)."
 fi
 exit "$rc"

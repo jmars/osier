@@ -10,8 +10,10 @@
 //!   rt_raw_alloc / rt_float_text (rt_sym_intern / rt_value_slot / rt_ss_*
 //!   are GONE — Mid owns those tables; see the O5 notes below)
 //!   the shadow-stack root seats (rt_root_*, rt_gc_root_*, rt_gc_heap_bytes)
-//!   the driver host half: rt_boot / rt_parse_arg / rt_argv_install /
-//!   rt_is_program / rt_run_program / rt_print_value (called by Mid Rt.main)
+//!   the driver host half: rt_boot / rt_is_program / rt_run_program /
+//!   rt_print_value (called by Mid Rt.main).  rt_parse_arg and
+//!   rt_argv_install are GONE at O5 seat 4b — Mid owns the entry-arg parser
+//!   and the *argv* list (runtime.mid's Rt.parseArg/Rt.argvInstall)
 //!   the rt_prim_* direct per-prim entries (the QBE_NOPRIMDIRECT arm is
 //!   DELETED — its generic rt_prim symbol no longer exists, so that hatch is
 //!   EMIT-ONLY and cannot LINK)
@@ -585,9 +587,15 @@ export fn rt_root_pop_to(wm: i64) callconv(.c) i64 {
 //  rawstr literal; 9 distinct names).  No Zig seat remains.
 //  (DELETED AT O5 SEAT 3) rt_value_slot is GONE — the LOOKUP is Mid's now
 //  (runtime.mid's Rt.valScanGo/Rt.value).  The TABLE is still this file's:
-//  it is what rt_boot/rt_argv_install install the three standard streams and
-//  *argv* into, so the host keeps the storage and PUBLISHES its base into
-//  the Mid globals block (rt_glob[3]) for the Mid walk to read.
+//  it is what rt_boot installs the three standard streams into, so the host
+//  keeps the storage and PUBLISHES its base into the Mid globals block
+//  (rt_glob[3]) for the Mid walk to read.
+//  (DELETED AT O5 SEAT 4b) rt_parse_arg and rt_argv_install are GONE — the
+//  entry-arg parser (strtod + a decimal walk, the same refusals byte for
+//  byte) and the *argv* cons list (built over a ROOTED C-heap accumulator
+//  slot) are runtime.mid's Rt.parseArg/Rt.argvInstall/Rt.argvGo/Rt.valEntry.
+//  The host keeps NO part of either: *argv* now enters the values table from
+//  Mid, through the base published above.
 //  rt_float_text below stays until its own seat.
 // =====================================================================
 //
@@ -802,58 +810,6 @@ export fn rt_boot() callconv(.c) i64 {
     return 0;
 }
 
-/// rt_parse_arg: ONE entry argument -> the Value main builds for it (VERBATIM
-/// main:1715-1738's loop body: the isFloatArg heuristic, parseFloat/parseInt,
-/// valFloat/valNumber, and both error strings).  Stores the value in `dst` and
-/// returns 0, or writes the SAME stderr line and returns 2 for the caller to
-/// exit with (the exit code is main's/the driver's to produce).
-export fn rt_parse_arg(dst: *Value, arg: [*:0]const u8) callconv(.c) i64 {
-    const a = std.mem.span(arg);
-    if (isFloatArg(a)) {
-        const f = std.fmt.parseFloat(f64, a) catch {
-            var buf: [256]u8 = undefined;
-            const out = std.fmt.bufPrint(&buf, "qbe-rt: entry arg '{s}' is not a float\n", .{a}) catch "qbe-rt: bad entry arg\n";
-            werr(out);
-            return 2;
-        };
-        dst.* = values.valFloat(f);
-    } else {
-        const n = std.fmt.parseInt(i64, a, 10) catch {
-            var buf: [256]u8 = undefined;
-            const out = std.fmt.bufPrint(&buf, "qbe-rt: entry arg '{s}' is not an int (qbe slice)\n", .{a}) catch "qbe-rt: bad entry arg\n";
-            werr(out);
-            return 2;
-        };
-        dst.* = values.valNumber(n);
-    }
-    return 0;
-}
-
-/// rt_argv_install: the *argv* pseudo-global for the AOTRUN_ARGV contract
-/// (VERBATIM main:1745-1753).  `argv_mode` is the AOTRUN_ARGV test main
-/// already makes for the max_arity guard, passed in so the seat has no env
-/// logic of its own.
-export fn rt_argv_install(argv_mode: i32, nargs: usize, c_argv: [*]?[*:0]u8) callconv(.c) void {
-    if (argv_mode != 0) {
-        // The list is Zig-heap (valCons/valString below) and valueSet stores
-        // it in the Vm's values table — registered with the collector at
-        // Vm.init (state.zig's g.registerValuesTable), which is what pins it
-        // for the rest of the run.  The SCOPED root here is the lift's own
-        // addition: main built the list inside the valueSet call, and the GC
-        // contract (rt.zig's header) requires anything held across an
-        // allocating call to sit on a shadow-stack root.  It must stay SCOPED:
-        // a forever-root pushed here would be the entry main's own deferred
-        // `g.rootPop()` (the argv_buf array root, pushed just above) pops
-        // instead — the wrong-entry pop rt_frame_leave's comment warns about.
-        var list = buildArgvList(nargs, c_argv);
-        var rt = g.rootValue(&list);
-        defer rt.end();
-        vmem.valueSet("*argv*", list);
-    } else {
-        vmem.valueSet("*argv*", values.valNil());
-    }
-}
-
 /// rt_print_value: print a Value, then the newline — the driver's output
 /// contract (VERBATIM main:1779-1789).  Returns 0, or 1 after the SAME stderr
 /// line as the pre-A2 main (the print failure).
@@ -898,42 +854,3 @@ fn rtCounts() void {
     werr(line);
 }
 
-/// AOTRUN_ARGV: build the *argv* pseudo-global value — a plain cons LIST of
-/// strings (run.js argv[2:] shape), built back-to-front (cdr-first).  The
-/// empty case returns the nil singleton (Runtime.argv () -> []).  Mirrors the
-/// retired AOT driver's buildArgvList.
-///
-/// THE ACCUMULATOR IS ROOTED ACROSS THE WHOLE LOOP, and that is a FIX, not
-/// decoration (GC-ARC F1): the retired driver rooted only from inside
-/// valCons, so `acc` was UNROOTED at the moment `valString`'s allocation ran
-/// — a nursery scavenge there (the preemptive trigger fires at ~1 MB, i.e.
-/// ~20k argv entries) reclaims the whole tail built so far and *argv* comes
-/// back as garbage.  MEASURED pre-fix (default route, AOTRUN_ARGV=1, 60k
-/// args): `[GC NURSERY #1 …] non-exhaustive case`; post-fix the same command
-/// prints the argument count.  probe-midgc-argv.sh is the fail-before/
-/// pass-after.
-fn buildArgvList(nargs: usize, c_argv: [*]?[*:0]u8) Value {
-    var acc: Value = values.valNil();
-    var rt = g.rootValue(&acc); // the SLOT is rooted: a move rewrites acc in place
-    defer rt.end();
-    var i: usize = nargs;
-    while (i > 0) {
-        i -= 1;
-        acc = values.valCons(g, values.valString(g, std.mem.span(c_argv[2 + i] orelse "")), acc);
-    }
-    return acc;
-}
-
-/// True when a CLI arg is spelled as a float literal.  VERBATIM the heuristic
-/// the retired VM/AOT harnesses used, so the former VM reference and the
-/// native driver accept the same command line — an arg is a float iff it
-/// contains '.'/'e'/'E' or is one of the canonical non-finite tokens
-/// (parseFloat accepts all four).  Everything else stays on the int path.
-fn isFloatArg(arg: []const u8) bool {
-    if (std.mem.eql(u8, arg, "NaN") or std.mem.eql(u8, arg, "Infinity") or
-        std.mem.eql(u8, arg, "-Infinity")) return true;
-    for (arg) |c| {
-        if (c == '.' or c == 'e' or c == 'E') return true;
-    }
-    return false;
-}
