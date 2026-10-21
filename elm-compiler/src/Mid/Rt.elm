@@ -1508,7 +1508,7 @@ build's seed closure and Lower would die "unknown global".
 -}
 lowerSeatSeeds : List String
 lowerSeatSeeds =
-    keepRtDependencies [ "Rt.vecStorePlain" ]
+    keepRtDependencies [ "Rt.vecStorePlain", "Rt.globalClosure" ]
 
 
 {-| THE RAW-WORD DEFUN CONVENTION (stage 6 U2, plan obs-4): the Rt keys that
@@ -1568,6 +1568,12 @@ rawAbi =
           -- record is what checks every call site's 3 words.
           "Rt.vecStorePlain"
         , "Rt.vecStoreYoung"
+        , -- ===== zighost Z3's CLOSURE CACHE.  Its signature is (word) -> val,
+          -- so the B6 signature rule would put it on the VALUE side; this
+          -- override is load-bearing (that is the override's whole purpose),
+          -- and the ret class is Agg "val" (Lower.rawAbiRetClass) — the
+          -- deleted Zig seat's sret ABI.
+          "Rt.globalClosure"
         , -- ===== the stage-6 B2 mid-tail family.  Rt.tail-known is a raw-word
           -- defun whose RESULT is the 80-byte `:ret` (Agg "ret", the
           -- rt_tail_known seat's C ABI — 3 word params code/argblock/nargs,
@@ -1654,6 +1660,8 @@ rawAbiArity =
           -- three words, checked against both the defun and Lower's seam.
           ( "Rt.vecStorePlain", 3 )
         , ( "Rt.vecStoreYoung", 3 )
+        , -- zighost Z3: the closure-cache seat takes the descriptor's address.
+          ( "Rt.globalClosure", 1 )
         , -- stage 7A's die family (see the rawAbi set above): the message, and
           -- the two-part variant's prefix + name.
           ( "Rt.dieErr", 1 )

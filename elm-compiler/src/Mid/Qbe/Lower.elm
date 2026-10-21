@@ -308,6 +308,15 @@ rawAbiRetClass key =
         -- sret — rt_bounce's C ABI.
         Agg "val"
 
+    else if key == "Rt.globalClosure" then
+        -- ZIGHOST Z3: the closure-cache seat returns the 40-byte lambda
+        -- Value through sret, exactly the deleted Zig seat's C ABI
+        -- (rt_global_closure -> Value).  Its ONE word param is the static
+        -- descriptor's address.  AGG-returning rawAbi defuns lower their BODY
+        -- through the value path (lowerTail), which is what lets this one
+        -- keep a one-sided `return` guard on the cache hit.
+        Agg "val"
+
     else
         Base L
 
@@ -4844,7 +4853,7 @@ lowerGRefValue ref dest s =
                 freshTmp s
         in
         Ok
-            (emit (Call (Just rp) (Agg "val") (Il.Sym "rt_global_closure") [ ArgVal (Base L) (Il.Sym (globalDescName ref.key)) ]) s1
+            (emit (Call (Just rp) (Agg "val") (Il.Sym ("q_" ++ mangle "Rt.globalClosure")) [ ArgVal (Base L) (Il.Sym (globalDescName ref.key)) ]) s1
                 |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
             )
 

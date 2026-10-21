@@ -6,7 +6,7 @@
 //! the collector/host seam that stays Zig until stage 7 (zighost):
 //!
 //!   the Zig GC (vendor/osier-rt gc/values/streams/tables/symbols/prims)
-//!   rt_string / rt_con / rt_make_closure / rt_global_closure / rt_vec_* /
+//!   rt_string / rt_con / rt_make_closure / rt_vec_* /
 //!   rt_raw_alloc / rt_float_text (rt_sym_intern / rt_value_slot / rt_ss_*
 //!   are GONE — Mid owns those tables; see the O5 notes below)
 //!   rt_gc_heap_bytes (the heap-size number)
@@ -76,7 +76,7 @@ pub const Desc = extern struct {
     code: *const anyopaque, // the QBE function
     arity: i32, // STATIC arity (params of the Lam)
     ncaps: i32, // captures the function reads from env
-    cache: ?*Value, // rt_global_closure's one-slot value cache (defuns only)
+    cache: ?*Value, // the one-slot closure cache (defuns only) — Mid writes it now
 };
 
 /// One row of the emitted `$qbe_meta` table.
@@ -175,14 +175,14 @@ var g: *Gc = undefined;
 var vm: *state.Vm = undefined;
 
 // =====================================================================
-//  rt_global_closure's arena (the only surviving frame-pool remnant)
+//  the frame-pool arena — NOW UNUSED (its one client moved to Mid at Z3)
 // =====================================================================
-// B4 deleted the pooled-frame machinery (rt_frame_enter/leave moved to Mid).
-// frame_alloc survives: rt_global_closure allocates its one-slot per-defun
-// closure cache from it (the cached Value holds NO GC pointers — static
-// Desc* code + null env — so it is the forever-root class rt_frame_leave
-// used to unroot; rtInit still wires it, but only once, from rt_boot and
-// rt_string, never from inside a generated frame).
+// B4 deleted the pooled-frame machinery (rt_frame_enter/leave moved to Mid);
+// the arena's last client was rt_global_closure's one-slot per-defun closure
+// cache, which Z3 moved to Mid (Rt.globalClosure, a malloc'd pointer-free
+// slot).  `rtInit` is still on rt_string's and rt_boot's path and still wires
+// it, so this is dead state rather than dead code — kept for Z6, which
+// deletes this whole file, and NAMED here so nobody reads it as live.
 
 var frame_alloc: std.heap.ArenaAllocator = undefined;
 var rt_inited = false;
@@ -226,7 +226,7 @@ var intern_fallbacks: u64 = 0; // hatch off / table full — the old per-call al
 // `strSlice`), never by identity — so returning one object where there used
 // to be many cannot change what a program prints or computes.
 //
-// ROOTING, and why this is NOT rt_global_closure's shape.  A closure cache
+// ROOTING, and why this is NOT the (now Mid-owned) closure cache's shape.  A closure cache
 // slot holds NO GC pointers, so rt_frame_leave's rootPopTo may unroot it (see
 // rt_frame_leave).  An interned string IS a heap pointer and must stay rooted
 // for the life of the program, so the value array is registered as ONE
@@ -292,25 +292,23 @@ export fn rt_string(data: [*]const u8, len: i32) callconv(.c) Value {
     return v;
 }
 
-/// The closure Value of a top-level defun — CACHED per descriptor in a
-/// malloc'd, forever-rooted slot (the native mirror of the VM's defun
-/// table, which also stores one closure per defun).
-export fn rt_global_closure(desc: *Desc) callconv(.c) Value {
-    if (desc.cache) |slot| return slot.*;
-    const slot = frame_alloc.allocator().create(Value) catch @panic("qbe-rt: oom");
-    slot.* = .{
-        .tag = .lambda,
-        .payload = .{ .lambda = .{
-            .code = @ptrCast(desc),
-            .code_len = desc.arity,
-            .env = null,
-            .env_len = 0,
-        } },
-    };
-    g.rootPushValue(slot); // never popped: the closure lives for the program
-    desc.cache = slot;
-    return slot.*;
-}
+// (DELETED AT ZIGHOST Z3) rt_global_closure IS MID'S NOW.
+//   The per-Desc closure CACHE — one lambda Value per top-level defun, built
+//   once and re-read forever — is runtime.mid's Rt.globalClosure, a rawAbi
+//   defun returning the 40-byte Value through sret (Lower's
+//   rawAbiRetClass) and naming its cache word at desc+16 (the Desc.cache
+//   field below, which stays: the emitted descriptor DATA is 24 bytes and the
+//   compile-time ABI check on @sizeOf/@offsetOf(Desc, "cache") is what keeps
+//   this file and Mid.RtLayout.descCacheOffset from drifting).
+//   WHY the slot is MALLOC'd and NOT a Mid-heap object: its contents are a
+//   static descriptor address (code), the arity (code_len) and a NULL env —
+//   no pointer into either heap — so nothing roots it and nothing needs to.
+//   The deleted seat pushed it on the ZIG shadow stack forever; that stack
+//   went with the root registry at Z1, and a Mid-heap slot reachable only
+//   through `desc.cache` would have been a second *argv*-class hole.
+//   The cache is a STATIC descriptor's word, written by generated code, so
+//   the descriptor data must stay WRITABLE (it does — QBE emits `data`, not
+//   `section .rodata`).
 
 /// A closure with captures.  `caps` points into the CALLER's pooled frame
 /// (a stable address whose CONTENTS the GC rewrites in place), and
