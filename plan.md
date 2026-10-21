@@ -1391,3 +1391,50 @@ Merged from: `handoff-osier-midpasses-plan`, `handoff-osier-midruntime-plan`,
 `handoff-osier-consspike-result`, `handoff-osier-midabi{,-result}`, `handoff-osier-seq-step2`,
 `handoff-osier-mono-s5`. Commits cited: `0258326`, `6e6d6b1`, `51a59cb`, `19dd5b3`, `cea1ce6`,
 `8f581b8`, `b6e4990`, `2d127d1`, `159198d`, `00cc7da`.
+
+---
+
+## Carried from the retired `todo.md` (2026-10-20)
+
+`todo.md` was retired here: its phase-3 / S5 run records are *history* (they live in the commits,
+their review nodes and §1.3's verdicts), and this file is the durable plan. **Only what was still
+true and still open at the retirement is carried, re-verified against the tree** — plus the closed
+items named at the end so nothing is silently dropped.
+
+1. **`Mid.Rt.allocating` has a named latent hole.** `safepointMatch` returns `False`
+   (`Mid/Rt.elm:1863`), so a closure inside a `Match` scrutinee is not classified as
+   safepoint-reaching. Harmless today (no such shape in the tree) and the same subject as the
+   still-pending review of that function's closure completeness — fix both together.
+2. **`QBE_MIDZIG=1` is a dead hatch** (3 references in `run.js` remain): its handlers died with the
+   prim flip. Delete it, or re-document it as emit-only, in the next commit that touches the hatches.
+3. **S6 (unboxed aggregates)** was gated on an approval that is still outstanding. Either obtain it or
+   drop the row — a precondition nobody re-checks is how a stale gate survives.
+4. **The `tools/bench/elm-corpus/` instrument and its dialect findings.** 24/2776 packages compile;
+   the top failure classes are the LEXER (`<<` `>>` `^` `|>` `|.` ≈ 357 files) and 629 uncharacterised
+   `parse failed`. The recorded decision (`osier-module-system-decision`) stands: do **not** build Elm
+   module-system compatibility — rank-2 + first-class modules + modular implicits replace it — **do**
+   fix the operator lexer and grow `core-libs`. Independently: four real packages hit
+   `cannot unify <T> with {field:a| b}`, our checker refusing the extensible-record idiom this project
+   exists for. That one is a checker bug, not a compatibility task.
+5. **Accepted residual:** the `recUpd`/`recInsert`/`recAppend` primsdiff batches (no Zig reference arm
+   remains; `recGet` is fired).
+6. **Operational:** nothing pushes without the owner's word.
+7. **The float-formatting debt** (`rt_float_text` is the one O5 seat that cannot move without a
+   language addition). In dependency order:
+   a. **A float-bits ↔ word reinterpret primitive** (`fbits(x) -> word`, `ofbits(w) -> float`): the
+      surface has `fload` but no bit-cast, so mantissa/exponent extraction is inexpressible. Additive
+      and emit-inert; oracle = a pinned `.ssa` shape row plus a round-trip property row over `-0.0`,
+      denormals and NaN payloads.
+   b. **Shortest-round-trip formatting (Ryu), ported to Mid, with our own three rules**: the
+      `nan`/`inf`/`-inf` spellings, the `.0` suffix on integral values, and the exponent switch at JS's
+      thresholds (`1e-7`, `1e+22`). Oracle = the existing goldens, which already pin the exact printed
+      text (`float-*` rows: `1e-7`, `-1e+22`, `Inf`, `NaN`, `5e-324`, denormals, `-0.0`); the
+      fail-before is free, since a diverging port reddens the seat's own golden. Landing it deletes
+      `rt_float_text` and leaves `hostshim.zig` holding only the root registry, the emitted call ABI
+      and the bring-up seats.
+
+**Closed at retirement, not carried** (recorded so a later reader does not re-open them):
+`tools/qbe-bootstrap.sh --freeze`'s truncation footgun is **fixed** (emit to a temp path, rename only
+on success); `--verify` has been re-run many times since the seed last moved; the phase-3 / S5
+measurements are superseded history; the Zig-retirement sequence is superseded by §3 Phase 4b's
+BRIDGES and the O5 seat list.
