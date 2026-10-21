@@ -4376,64 +4376,62 @@ data $d4369 = align 8 { b "qbe-rt: entry '", b 0 }
 data $d4370 = align 8 { b "' not in qbe_meta\012", b 0 }
 data $d4371 = align 8 { b "QBE_NO_REUSE", b 0 }
 data $d4372 = align 8 { b "QBE_NOTTAILSTAGE", b 0 }
-data $d4373 = align 8 { b "QBE_MIDHOST", b 0 }
-data $d4374 = align 8 { b "qbe-rt: QBE_MIDHOST=0 is refused: this program was built with QBE_MIDGC (the Mid collector owns every allocation), so the Zig effect host would build Zig-nursery values into a Mid heap. Rebuild with QBE_MIDGC=0 to run the Zig host, or drop QBE_MIDHOST.", b 0 }
-data $d4375 = align 8 { b "qbe-rt: rt_frame_leave with no frame", b 0 }
-data $d4376 = align 8 { b "qbe-rt: apply of a non-function value", b 0 }
-data $d4377 = align 8 { b "qbe-rt: closure env missing for applied args", b 0 }
-data $d4378 = align 8 { b "host: more than 128 concurrent evaluations", b 0 }
-data $d4379 = align 8 { b "", b 0 }
-data $d4380 = align 8 { b "qbe-rt: error: ", b 0 }
-data $d4381 = align 8 { b "host: a pending effect has no pollable fd", b 0 }
-data $d4382 = align 8 { b "TaskFail", b 0 }
-data $d4383 = align 8 { b "TaskOnError", b 0 }
-data $d4384 = align 8 { b "TaskWrite", b 0 }
-data $d4385 = align 8 { b "TaskReadLine", b 0 }
-data $d4386 = align 8 { b "TaskGetenv", b 0 }
-data $d4387 = align 8 { b "TaskSetenv", b 0 }
-data $d4388 = align 8 { b "TaskCd", b 0 }
-data $d4389 = align 8 { b "TaskGetcwd", b 0 }
-data $d4390 = align 8 { b "TaskGetpid", b 0 }
-data $d4391 = align 8 { b "TaskGlob", b 0 }
-data $d4392 = align 8 { b "TaskNow", b 0 }
-data $d4393 = align 8 { b "TaskSleep", b 0 }
-data $d4394 = align 8 { b "TaskExec", b 0 }
-data $d4395 = align 8 { b "TaskQuit", b 0 }
-data $d4396 = align 8 { b "TaskListDir", b 0 }
-data $d4397 = align 8 { b "unhandled Task effect: ", b 0 }
-data $d4398 = align 8 { b "host: apply of a non-function value", b 0 }
-data $d4399 = align 8 { b "host: the applier was handed more arguments than an already fully applied closure", b 0 }
-data $d4400 = align 8 { b "host: continuation stack overflow (256 frames)", b 0 }
-data $d4401 = align 8 { b "exec-plan: malformed plan", b 0 }
-data $d4402 = align 8 { b "exec-plan: fork/pipe failed", b 0 }
-data $d4403 = align 8 { b "string", b 0 }
-data $d4404 = align 8 { b "symbol", b 0 }
-data $d4405 = align 8 { b "seq", b 0 }
-data $d4406 = align 8 { b "out", b 0 }
-data $d4407 = align 8 { b "dup", b 0 }
-data $d4408 = align 8 { b "hdoc", b 0 }
-data $d4409 = align 8 { b "hstr", b 0 }
-data $d4410 = align 8 { b "echo", b 0 }
-data $d4411 = align 8 { b "pwd", b 0 }
-data $d4412 = align 8 { b "-n", b 0 }
-data $d4413 = align 8 { b "HOME", b 0 }
-data $d4414 = align 8 { b "Input redirect file not found: ", b 0 }
-data $d4415 = align 8 { b "Output redirect failed: ", b 0 }
-data $d4416 = align 8 { b "shensh: ", b 0 }
-data $d4417 = align 8 { b ": not found\012", b 0 }
-data $d4418 = align 8 { b ": cannot execute\012", b 0 }
-data $d4419 = align 8 { b "cd: ", b 0 }
-data $d4420 = align 8 { b "pwd: cannot get cwd\012", b 0 }
-data $d4421 = align 8 { b "/tmp/shensh-out.XXXXXX", b 0 }
-data $d4422 = align 8 { b "/tmp/shensh-err.XXXXXX", b 0 }
-data $d4423 = align 8 { b "/tmp/shensh-hdoc.XXXXXX", b 0 }
-data $d4424 = align 8 { b "name", b 0 }
-data $d4425 = align 8 { b "isDir", b 0 }
-data $d4426 = align 8 { b "isFile", b 0 }
-data $d4427 = align 8 { b "mtimeMs", b 0 }
-data $d4428 = align 8 { b "mode", b 0 }
-data $d4429 = align 8 { b "size", b 0 }
-data $d4430 = align 8 { b "host: more than 258 pollfds (MAX_EVALS * 2 + 2)", b 0 }
+data $d4373 = align 8 { b "qbe-rt: rt_frame_leave with no frame", b 0 }
+data $d4374 = align 8 { b "qbe-rt: apply of a non-function value", b 0 }
+data $d4375 = align 8 { b "qbe-rt: closure env missing for applied args", b 0 }
+data $d4376 = align 8 { b "host: more than 128 concurrent evaluations", b 0 }
+data $d4377 = align 8 { b "", b 0 }
+data $d4378 = align 8 { b "qbe-rt: error: ", b 0 }
+data $d4379 = align 8 { b "host: a pending effect has no pollable fd", b 0 }
+data $d4380 = align 8 { b "TaskFail", b 0 }
+data $d4381 = align 8 { b "TaskOnError", b 0 }
+data $d4382 = align 8 { b "TaskWrite", b 0 }
+data $d4383 = align 8 { b "TaskReadLine", b 0 }
+data $d4384 = align 8 { b "TaskGetenv", b 0 }
+data $d4385 = align 8 { b "TaskSetenv", b 0 }
+data $d4386 = align 8 { b "TaskCd", b 0 }
+data $d4387 = align 8 { b "TaskGetcwd", b 0 }
+data $d4388 = align 8 { b "TaskGetpid", b 0 }
+data $d4389 = align 8 { b "TaskGlob", b 0 }
+data $d4390 = align 8 { b "TaskNow", b 0 }
+data $d4391 = align 8 { b "TaskSleep", b 0 }
+data $d4392 = align 8 { b "TaskExec", b 0 }
+data $d4393 = align 8 { b "TaskQuit", b 0 }
+data $d4394 = align 8 { b "TaskListDir", b 0 }
+data $d4395 = align 8 { b "unhandled Task effect: ", b 0 }
+data $d4396 = align 8 { b "host: apply of a non-function value", b 0 }
+data $d4397 = align 8 { b "host: the applier was handed more arguments than an already fully applied closure", b 0 }
+data $d4398 = align 8 { b "host: continuation stack overflow (256 frames)", b 0 }
+data $d4399 = align 8 { b "exec-plan: malformed plan", b 0 }
+data $d4400 = align 8 { b "exec-plan: fork/pipe failed", b 0 }
+data $d4401 = align 8 { b "string", b 0 }
+data $d4402 = align 8 { b "symbol", b 0 }
+data $d4403 = align 8 { b "seq", b 0 }
+data $d4404 = align 8 { b "out", b 0 }
+data $d4405 = align 8 { b "dup", b 0 }
+data $d4406 = align 8 { b "hdoc", b 0 }
+data $d4407 = align 8 { b "hstr", b 0 }
+data $d4408 = align 8 { b "echo", b 0 }
+data $d4409 = align 8 { b "pwd", b 0 }
+data $d4410 = align 8 { b "-n", b 0 }
+data $d4411 = align 8 { b "HOME", b 0 }
+data $d4412 = align 8 { b "Input redirect file not found: ", b 0 }
+data $d4413 = align 8 { b "Output redirect failed: ", b 0 }
+data $d4414 = align 8 { b "shensh: ", b 0 }
+data $d4415 = align 8 { b ": not found\012", b 0 }
+data $d4416 = align 8 { b ": cannot execute\012", b 0 }
+data $d4417 = align 8 { b "cd: ", b 0 }
+data $d4418 = align 8 { b "pwd: cannot get cwd\012", b 0 }
+data $d4419 = align 8 { b "/tmp/shensh-out.XXXXXX", b 0 }
+data $d4420 = align 8 { b "/tmp/shensh-err.XXXXXX", b 0 }
+data $d4421 = align 8 { b "/tmp/shensh-hdoc.XXXXXX", b 0 }
+data $d4422 = align 8 { b "name", b 0 }
+data $d4423 = align 8 { b "isDir", b 0 }
+data $d4424 = align 8 { b "isFile", b 0 }
+data $d4425 = align 8 { b "mtimeMs", b 0 }
+data $d4426 = align 8 { b "mode", b 0 }
+data $d4427 = align 8 { b "size", b 0 }
+data $d4428 = align 8 { b "host: more than 258 pollfds (MAX_EVALS * 2 + 2)", b 0 }
 data $gd_Runtime_x2ecmdNone = align 8 { l $q_Runtime_x2ecmdNone, w 0, w 0, z 8 }
 data $gd_NativeMain_x2eupdate = align 8 { l $q_NativeMain_x2eupdate, w 2, w 0, z 8 }
 data $gd_NativeMain_x2eappend2 = align 8 { l $q_NativeMain_x2eappend2, w 2, w 0, z 8 }
@@ -993493,7 +993491,7 @@ function l $q_Rt_x2ehalt() {
 
 export function w $main(l %a0, l %a1) {
 @start
-	%f =l alloc8 5000
+	%f =l alloc8 4640
 	%s4 =l add %f, 160
 	%s5 =l add %f, 200
 	%s6 =l add %f, 240
@@ -993578,14 +993576,6 @@ export function w $main(l %a0, l %a1) {
 	%s113 =l add %f, 4520
 	%s114 =l add %f, 4560
 	%s115 =l add %f, 4600
-	%s116 =l add %f, 4640
-	%s117 =l add %f, 4680
-	%s118 =l add %f, 4720
-	%s119 =l add %f, 4760
-	%s120 =l add %f, 4800
-	%s121 =l add %f, 4840
-	%s123 =l add %f, 4920
-	%s124 =l add %f, 4960
 	# (fallthrough)
 @body
 	%t0 =w csltl %a0, 2
@@ -994469,208 +994459,91 @@ export function w $main(l %a0, l %a1) {
 	%t493 =l add %t235, %t492
 	%t494 =l loadl %t493
 	%t495 =l call $rt_root_push_value(l %t494)
-	%t496 =l call $getenv(l $d4373)
-	%t497 =w cnel %t496, 0
-	%t498 =l extsw %t497
-	storew 3, %s107
+	%t496 =l mul 40, 0
+	%t497 =l add %t494, %t496
+	blit %t497, %s108, 40
+	%t498 =:val call $q_Rt_x2ehostIsProgram(l %s108, l %s108, l %s108, w 1)
+	blit %t498, %s107, 40
 	%t499 =l add %s107, 8
-	storel %t498, %t499
-	%t500 =w loadw %s107
-	%t501 =w ceqw %t500, 3
-	%t503 =l add %s107, 8
-	%t502 =w loadw %t503
-	%t504 =w ceqw %t502, 0
-	%t505 =w and %t501, %t504
-	jnz %t505, @andf_81, @andt_82
-@andt_82
-	%t506 =l add %t496, 0
-	%t507 =w loadub %t506
-	%t508 =l extuw %t507
-	%t509 =w ceql %t508, 48
+	%t500 =w loadw %t499
+	%t501 =l extsw %t500
+	%t502 =w cnel %t501, 0
+	%t503 =l extsw %t502
+	jnz %t503, @then_81, @else_82
+@then_81
+	storew 0, %s110
+	%t504 =l add %s110, 8
+	storel %t494, %t504
+	storew 0, %s111
+	%t505 =l add %s111, 8
+	storel %t236, %t505
+	%t506 =:val call $q_Rt_x2ehostRun(l %s110, l %s111, l %s111, w 2)
+	blit %t506, %s109, 40
+	%t507 =l call $rt_root_push_value(l %t236)
+	%t508 =l call $rt_print_value(l %t236)
+	%t509 =w cnel %t508, 0
 	%t510 =l extsw %t509
-	storew 3, %s106
-	%t511 =l add %s106, 8
+	storew 3, %s113
+	%t511 =l add %s113, 8
 	storel %t510, %t511
-	jmp @ande_83
-@andf_81
-	storew 3, %s106
-	%t512 =l add %s106, 8
-	storew 0, %t512
-	# (fallthrough)
-@ande_83
-	%t513 =l add %s106, 8
-	%t514 =w loadw %t513
-	%t515 =l extsw %t514
-	%t516 =w cnel %t515, 0
-	%t517 =l extsw %t516
-	jnz %t517, @then_84, @else_85
+	%t512 =w loadw %s113
+	%t513 =w ceqw %t512, 3
+	%t515 =l add %s113, 8
+	%t514 =w loadw %t515
+	%t516 =w ceqw %t514, 0
+	%t517 =w and %t513, %t516
+	jnz %t517, @else_85, @then_84
 @then_84
-	%t518 =l call $q_Rt_x2edie(l $d4374)
-	storew 0, %s108
-	%t519 =l add %s108, 8
+	%t518 =l call $exit(l 1)
+	storew 0, %s112
+	%t519 =l add %s112, 8
 	storel 0, %t519
 	jmp @join_86
 @else_85
-	storew 0, %s108
-	%t520 =l add %s108, 8
+	storew 0, %s112
+	%t520 =l add %s112, 8
 	storel 0, %t520
 	# (fallthrough)
 @join_86
-	%t521 =l add %s106, 8
-	%t522 =w loadw %t521
-	%t523 =l extsw %t522
-	%t524 =w ceql %t523, 0
-	%t525 =l extsw %t524
-	jnz %t525, @then_87, @else_88
+	%t521 =l call $exit(l 0)
+	storew 0, %s106
+	%t522 =l add %s106, 8
+	storel 0, %t522
+	jmp @join_83
+@else_82
+	storew 0, %s106
+	%t523 =l add %s106, 8
+	storel 0, %t523
+	# (fallthrough)
+@join_83
+	%t524 =l mul 8, 0
+	%t525 =l add %t235, %t524
+	%t526 =l loadl %t525
+	%t527 =l call $rt_print_value(l %t526)
+	%t528 =w cnel %t527, 0
+	%t529 =l extsw %t528
+	storew 3, %s115
+	%t530 =l add %s115, 8
+	storel %t529, %t530
+	%t531 =w loadw %s115
+	%t532 =w ceqw %t531, 3
+	%t534 =l add %s115, 8
+	%t533 =w loadw %t534
+	%t535 =w ceqw %t533, 0
+	%t536 =w and %t532, %t535
+	jnz %t536, @else_88, @then_87
 @then_87
-	%t526 =l mul 40, 0
-	%t527 =l add %t494, %t526
-	blit %t527, %s112, 40
-	%t528 =:val call $q_Rt_x2ehostIsProgram(l %s112, l %s112, l %s112, w 1)
-	blit %t528, %s111, 40
-	%t529 =l add %s111, 8
-	%t530 =w loadw %t529
-	%t531 =l extsw %t530
-	%t532 =w cnel %t531, 0
-	%t533 =l extsw %t532
-	jnz %t533, @then_90, @else_91
-@then_90
+	%t537 =l call $exit(l 1)
 	storew 0, %s114
-	%t534 =l add %s114, 8
-	storel %t494, %t534
-	storew 0, %s115
-	%t535 =l add %s115, 8
-	storel %t236, %t535
-	%t536 =:val call $q_Rt_x2ehostRun(l %s114, l %s115, l %s115, w 2)
-	blit %t536, %s113, 40
-	%t537 =l call $rt_root_push_value(l %t236)
-	%t538 =l call $rt_print_value(l %t236)
-	%t539 =w cnel %t538, 0
-	%t540 =l extsw %t539
-	storew 3, %s117
-	%t541 =l add %s117, 8
-	storel %t540, %t541
-	%t542 =w loadw %s117
-	%t543 =w ceqw %t542, 3
-	%t545 =l add %s117, 8
-	%t544 =w loadw %t545
-	%t546 =w ceqw %t544, 0
-	%t547 =w and %t543, %t546
-	jnz %t547, @else_94, @then_93
-@then_93
-	%t548 =l call $exit(l 1)
-	storew 0, %s116
-	%t549 =l add %s116, 8
-	storel 0, %t549
-	jmp @join_95
-@else_94
-	storew 0, %s116
-	%t550 =l add %s116, 8
-	storel 0, %t550
-	# (fallthrough)
-@join_95
-	%t551 =l call $exit(l 0)
-	storew 0, %s110
-	%t552 =l add %s110, 8
-	storel 0, %t552
-	jmp @join_92
-@else_91
-	storew 0, %s110
-	%t553 =l add %s110, 8
-	storel 0, %t553
-	# (fallthrough)
-@join_92
-	storew 0, %s109
-	%t554 =l add %s109, 8
-	storel 0, %t554
+	%t538 =l add %s114, 8
+	storel 0, %t538
 	jmp @join_89
 @else_88
-	storew 0, %s109
-	%t555 =l add %s109, 8
-	storel 0, %t555
+	storew 0, %s114
+	%t539 =l add %s114, 8
+	storel 0, %t539
 	# (fallthrough)
 @join_89
-	%t556 =l call $rt_is_program(l %t494)
-	%t557 =w cnel %t556, 0
-	%t558 =l extsw %t557
-	storew 3, %s119
-	%t559 =l add %s119, 8
-	storel %t558, %t559
-	%t560 =w loadw %s119
-	%t561 =w ceqw %t560, 3
-	%t563 =l add %s119, 8
-	%t562 =w loadw %t563
-	%t564 =w ceqw %t562, 0
-	%t565 =w and %t561, %t564
-	jnz %t565, @else_97, @then_96
-@then_96
-	%t566 =l call $rt_run_program(l %t494, l %t236)
-	%t567 =w cnel %t566, 0
-	%t568 =l extsw %t567
-	storew 3, %s121
-	%t569 =l add %s121, 8
-	storel %t568, %t569
-	%t570 =w loadw %s121
-	%t571 =w ceqw %t570, 3
-	%t573 =l add %s121, 8
-	%t572 =w loadw %t573
-	%t574 =w ceqw %t572, 0
-	%t575 =w and %t571, %t574
-	jnz %t575, @else_100, @then_99
-@then_99
-	%t576 =l call $exit(l 1)
-	storew 0, %s120
-	%t577 =l add %s120, 8
-	storel 0, %t577
-	jmp @join_101
-@else_100
-	storew 0, %s120
-	%t578 =l add %s120, 8
-	storel 0, %t578
-	# (fallthrough)
-@join_101
-	%t579 =l call $rt_root_push_value(l %t236)
-	%t580 =l mul 8, 0
-	%t581 =l add %t235, %t580
-	storel %t236, %t581
-	storew 0, %s118
-	%t582 =l add %s118, 8
-	storel 0, %t582
-	jmp @join_98
-@else_97
-	storew 0, %s118
-	%t583 =l add %s118, 8
-	storel 0, %t583
-	# (fallthrough)
-@join_98
-	%t584 =l mul 8, 0
-	%t585 =l add %t235, %t584
-	%t586 =l loadl %t585
-	%t587 =l call $rt_print_value(l %t586)
-	%t588 =w cnel %t587, 0
-	%t589 =l extsw %t588
-	storew 3, %s124
-	%t590 =l add %s124, 8
-	storel %t589, %t590
-	%t591 =w loadw %s124
-	%t592 =w ceqw %t591, 3
-	%t594 =l add %s124, 8
-	%t593 =w loadw %t594
-	%t595 =w ceqw %t593, 0
-	%t596 =w and %t592, %t595
-	jnz %t596, @else_103, @then_102
-@then_102
-	%t597 =l call $exit(l 1)
-	storew 0, %s123
-	%t598 =l add %s123, 8
-	storel 0, %t598
-	jmp @join_104
-@else_103
-	storew 0, %s123
-	%t599 =l add %s123, 8
-	storel 0, %t599
-	# (fallthrough)
-@join_104
 	# (fallthrough)
 @ret
 	ret 0
@@ -995123,7 +994996,7 @@ function l $q_Rt_x2eframe_x2dleave() {
 	%t5 =l extsw %t4
 	jnz %t5, @then_0, @else_1
 @then_0
-	%t6 =l call $q_Rt_x2edie(l $d4375)
+	%t6 =l call $q_Rt_x2edie(l $d4373)
 	storew 0, %s2
 	%t7 =l add %s2, 8
 	storel 0, %t7
@@ -995273,7 +995146,7 @@ function :val $q_Rt_x2eapplyGo(l %a0, l %a1, l %a2, w %an) {
 	%t22 =l extsw %t21
 	jnz %t22, @then_0, @else_1
 @then_0
-	%t23 =l call $q_Rt_x2edie(l $d4376)
+	%t23 =l call $q_Rt_x2edie(l $d4374)
 	storew 5, %s0
 	jmp @ret
 @else_1
@@ -995295,7 +995168,7 @@ function :val $q_Rt_x2eapplyGo(l %a0, l %a1, l %a2, w %an) {
 	%t35 =l extsw %t34
 	jnz %t35, @then_7, @else_8
 @then_7
-	%t36 =l call $q_Rt_x2edie(l $d4377)
+	%t36 =l call $q_Rt_x2edie(l $d4375)
 	storew 5, %s4
 	jmp @join_9
 @else_8
@@ -996054,7 +995927,7 @@ function :val $q_Rt_x2eapplyTailGo(l %a0, l %a1, l %a2, w %an) {
 	%t25 =l extsw %t24
 	jnz %t25, @then_0, @else_1
 @then_0
-	%t26 =l call $q_Rt_x2edie(l $d4376)
+	%t26 =l call $q_Rt_x2edie(l $d4374)
 	storew 5, %s0
 	jmp @ret
 @else_1
@@ -996092,7 +995965,7 @@ function :val $q_Rt_x2eapplyTailGo(l %a0, l %a1, l %a2, w %an) {
 	%t51 =l extsw %t50
 	jnz %t51, @then_7, @else_8
 @then_7
-	%t52 =l call $q_Rt_x2edie(l $d4377)
+	%t52 =l call $q_Rt_x2edie(l $d4375)
 	storew 5, %s6
 	jmp @join_9
 @else_8
@@ -997213,7 +997086,7 @@ function :val $q_Rt_x2ehostSpawnFind(l %a0, l %a1, l %a2, w %an) {
 	%t13 =l extsw %t12
 	jnz %t13, @then_2, @else_3
 @then_2
-	%t14 =l call $q_Rt_x2edieErr(l $d4378)
+	%t14 =l call $q_Rt_x2edieErr(l $d4376)
 	storew 5, %s0
 	jmp @ret
 @else_3
@@ -997266,7 +997139,7 @@ function l $q_Rt_x2edieErr(l %a0) {
 @start
 	# (fallthrough)
 @body
-	%t0 =l call $q_Rt_x2ehostDieErr(l $d4379, l %a0)
+	%t0 =l call $q_Rt_x2ehostDieErr(l $d4377, l %a0)
 	# (fallthrough)
 @ret
 	ret %t0
@@ -997288,7 +997161,7 @@ function l $q_Rt_x2ehostDieErr(l %a0, l %a1) {
 @body
 	storew 0, %s5
 	%t0 =l add %s5, 8
-	storel $d4380, %t0
+	storel $d4378, %t0
 	storew 0, %s6
 	%t1 =l add %s6, 8
 	storel 0, %t1
@@ -997296,7 +997169,7 @@ function l $q_Rt_x2ehostDieErr(l %a0, l %a1) {
 	blit %t2, %s4, 40
 	%t3 =l add %s4, 8
 	%t4 =l loadl %t3
-	%t5 =l call $write(l 2, l $d4380, l %t4)
+	%t5 =l call $write(l 2, l $d4378, l %t4)
 	storew 0, %s8
 	%t6 =l add %s8, 8
 	storel %a0, %t6
@@ -997756,7 +997629,7 @@ function :val $q_Rt_x2ehostRunLoop(l %a0, l %a1, l %a2, w %an) {
 	blit %s31, %s2, 40
 	jmp @body
 @else_23
-	%t119 =l call $q_Rt_x2edieErr(l $d4381)
+	%t119 =l call $q_Rt_x2edieErr(l $d4379)
 	storew 5, %s0
 	jmp @ret
 @else_21
@@ -998250,7 +998123,7 @@ function :val $q_Rt_x2ehostDispatch(l %a0, l %a1, l %a2, w %an) {
 	blit %t72, %s0, 40
 	jmp @ret
 @else_12
-	%t73 =l call $q_Rt_x2ecStrEq(l %t39, l $d4382)
+	%t73 =l call $q_Rt_x2ecStrEq(l %t39, l $d4380)
 	%t74 =w cnel %t73, 0
 	%t75 =l extsw %t74
 	jnz %t75, @then_13, @else_14
@@ -998299,7 +998172,7 @@ function :val $q_Rt_x2ehostDispatch(l %a0, l %a1, l %a2, w %an) {
 	storew 5, %s0
 	jmp @ret
 @else_16
-	%t97 =l call $q_Rt_x2ecStrEq(l %t39, l $d4383)
+	%t97 =l call $q_Rt_x2ecStrEq(l %t39, l $d4381)
 	%t98 =w cnel %t97, 0
 	%t99 =l extsw %t98
 	jnz %t99, @then_17, @else_18
@@ -998331,7 +998204,7 @@ function :val $q_Rt_x2ehostDispatch(l %a0, l %a1, l %a2, w %an) {
 	storew 5, %s0
 	jmp @ret
 @else_18
-	%t113 =l call $q_Rt_x2ecStrEq(l %t39, l $d4384)
+	%t113 =l call $q_Rt_x2ecStrEq(l %t39, l $d4382)
 	%t114 =w cnel %t113, 0
 	%t115 =l extsw %t114
 	jnz %t115, @then_19, @else_20
@@ -998355,7 +998228,7 @@ function :val $q_Rt_x2ehostDispatch(l %a0, l %a1, l %a2, w %an) {
 	blit %t122, %s0, 40
 	jmp @ret
 @else_20
-	%t123 =l call $q_Rt_x2ecStrEq(l %t39, l $d4385)
+	%t123 =l call $q_Rt_x2ecStrEq(l %t39, l $d4383)
 	%t124 =w cnel %t123, 0
 	%t125 =l extsw %t124
 	jnz %t125, @then_21, @else_22
@@ -998412,7 +998285,7 @@ function :val $q_Rt_x2ehostDispatch(l %a0, l %a1, l %a2, w %an) {
 	blit %t146, %s0, 40
 	jmp @ret
 @else_26
-	%t147 =l call $q_Rt_x2ecStrEq(l %t39, l $d4386)
+	%t147 =l call $q_Rt_x2ecStrEq(l %t39, l $d4384)
 	%t148 =w cnel %t147, 0
 	%t149 =l extsw %t148
 	jnz %t149, @then_27, @else_28
@@ -998432,7 +998305,7 @@ function :val $q_Rt_x2ehostDispatch(l %a0, l %a1, l %a2, w %an) {
 	blit %t155, %s0, 40
 	jmp @ret
 @else_28
-	%t156 =l call $q_Rt_x2ecStrEq(l %t39, l $d4387)
+	%t156 =l call $q_Rt_x2ecStrEq(l %t39, l $d4385)
 	%t157 =w cnel %t156, 0
 	%t158 =l extsw %t157
 	jnz %t158, @then_29, @else_30
@@ -998456,7 +998329,7 @@ function :val $q_Rt_x2ehostDispatch(l %a0, l %a1, l %a2, w %an) {
 	blit %t166, %s0, 40
 	jmp @ret
 @else_30
-	%t167 =l call $q_Rt_x2ecStrEq(l %t39, l $d4388)
+	%t167 =l call $q_Rt_x2ecStrEq(l %t39, l $d4386)
 	%t168 =w cnel %t167, 0
 	%t169 =l extsw %t168
 	jnz %t169, @then_31, @else_32
@@ -998476,7 +998349,7 @@ function :val $q_Rt_x2ehostDispatch(l %a0, l %a1, l %a2, w %an) {
 	blit %t175, %s0, 40
 	jmp @ret
 @else_32
-	%t176 =l call $q_Rt_x2ecStrEq(l %t39, l $d4389)
+	%t176 =l call $q_Rt_x2ecStrEq(l %t39, l $d4387)
 	%t177 =w cnel %t176, 0
 	%t178 =l extsw %t177
 	jnz %t178, @then_33, @else_34
@@ -998493,7 +998366,7 @@ function :val $q_Rt_x2ehostDispatch(l %a0, l %a1, l %a2, w %an) {
 	blit %t182, %s0, 40
 	jmp @ret
 @else_34
-	%t183 =l call $q_Rt_x2ecStrEq(l %t39, l $d4390)
+	%t183 =l call $q_Rt_x2ecStrEq(l %t39, l $d4388)
 	%t184 =w cnel %t183, 0
 	%t185 =l extsw %t184
 	jnz %t185, @then_35, @else_36
@@ -998510,7 +998383,7 @@ function :val $q_Rt_x2ehostDispatch(l %a0, l %a1, l %a2, w %an) {
 	blit %t189, %s0, 40
 	jmp @ret
 @else_36
-	%t190 =l call $q_Rt_x2ecStrEq(l %t39, l $d4391)
+	%t190 =l call $q_Rt_x2ecStrEq(l %t39, l $d4389)
 	%t191 =w cnel %t190, 0
 	%t192 =l extsw %t191
 	jnz %t192, @then_37, @else_38
@@ -998530,7 +998403,7 @@ function :val $q_Rt_x2ehostDispatch(l %a0, l %a1, l %a2, w %an) {
 	blit %t198, %s0, 40
 	jmp @ret
 @else_38
-	%t199 =l call $q_Rt_x2ecStrEq(l %t39, l $d4392)
+	%t199 =l call $q_Rt_x2ecStrEq(l %t39, l $d4390)
 	%t200 =w cnel %t199, 0
 	%t201 =l extsw %t200
 	jnz %t201, @then_39, @else_40
@@ -998547,7 +998420,7 @@ function :val $q_Rt_x2ehostDispatch(l %a0, l %a1, l %a2, w %an) {
 	blit %t205, %s0, 40
 	jmp @ret
 @else_40
-	%t206 =l call $q_Rt_x2ecStrEq(l %t39, l $d4393)
+	%t206 =l call $q_Rt_x2ecStrEq(l %t39, l $d4391)
 	%t207 =w cnel %t206, 0
 	%t208 =l extsw %t207
 	jnz %t208, @then_41, @else_42
@@ -998579,7 +998452,7 @@ function :val $q_Rt_x2ehostDispatch(l %a0, l %a1, l %a2, w %an) {
 	storew 5, %s0
 	jmp @ret
 @else_42
-	%t228 =l call $q_Rt_x2ecStrEq(l %t39, l $d4394)
+	%t228 =l call $q_Rt_x2ecStrEq(l %t39, l $d4392)
 	%t229 =w cnel %t228, 0
 	%t230 =l extsw %t229
 	jnz %t230, @then_43, @else_44
@@ -998594,7 +998467,7 @@ function :val $q_Rt_x2ehostDispatch(l %a0, l %a1, l %a2, w %an) {
 	blit %t233, %s0, 40
 	jmp @ret
 @else_44
-	%t234 =l call $q_Rt_x2ecStrEq(l %t39, l $d4395)
+	%t234 =l call $q_Rt_x2ecStrEq(l %t39, l $d4393)
 	%t235 =w cnel %t234, 0
 	%t236 =l extsw %t235
 	jnz %t236, @then_45, @else_46
@@ -998608,7 +998481,7 @@ function :val $q_Rt_x2ehostDispatch(l %a0, l %a1, l %a2, w %an) {
 	blit %t239, %s0, 40
 	jmp @ret
 @else_46
-	%t240 =l call $q_Rt_x2ecStrEq(l %t39, l $d4396)
+	%t240 =l call $q_Rt_x2ecStrEq(l %t39, l $d4394)
 	%t241 =w cnel %t240, 0
 	%t242 =l extsw %t241
 	jnz %t242, @then_47, @else_48
@@ -998638,7 +998511,7 @@ function :val $q_Rt_x2ehostDispatch(l %a0, l %a1, l %a2, w %an) {
 	blit %t251, %s0, 40
 	jmp @ret
 @else_50
-	%t252 =l call $q_Rt_x2ehostDieErr(l $d4397, l %t39)
+	%t252 =l call $q_Rt_x2ehostDieErr(l $d4395, l %t39)
 	storew 5, %s0
 	# (fallthrough)
 @ret
@@ -998720,7 +998593,7 @@ function :val $q_Rt_x2ehostArity(l %a0, l %a1, l %a2, w %an) {
 	storel 2, %t5
 	jmp @ret
 @else_1
-	%t6 =l call $q_Rt_x2ecStrEq(l %t1, l $d4382)
+	%t6 =l call $q_Rt_x2ecStrEq(l %t1, l $d4380)
 	%t7 =w cnel %t6, 0
 	%t8 =l extsw %t7
 	jnz %t8, @then_2, @else_3
@@ -998740,7 +998613,7 @@ function :val $q_Rt_x2ehostArity(l %a0, l %a1, l %a2, w %an) {
 	storel 3, %t13
 	jmp @ret
 @else_5
-	%t14 =l call $q_Rt_x2ecStrEq(l %t1, l $d4383)
+	%t14 =l call $q_Rt_x2ecStrEq(l %t1, l $d4381)
 	%t15 =w cnel %t14, 0
 	%t16 =l extsw %t15
 	jnz %t16, @then_6, @else_7
@@ -998750,7 +998623,7 @@ function :val $q_Rt_x2ehostArity(l %a0, l %a1, l %a2, w %an) {
 	storel 3, %t17
 	jmp @ret
 @else_7
-	%t18 =l call $q_Rt_x2ecStrEq(l %t1, l $d4384)
+	%t18 =l call $q_Rt_x2ecStrEq(l %t1, l $d4382)
 	%t19 =w cnel %t18, 0
 	%t20 =l extsw %t19
 	jnz %t20, @then_8, @else_9
@@ -998760,7 +998633,7 @@ function :val $q_Rt_x2ehostArity(l %a0, l %a1, l %a2, w %an) {
 	storel 2, %t21
 	jmp @ret
 @else_9
-	%t22 =l call $q_Rt_x2ecStrEq(l %t1, l $d4385)
+	%t22 =l call $q_Rt_x2ecStrEq(l %t1, l $d4383)
 	%t23 =w cnel %t22, 0
 	%t24 =l extsw %t23
 	jnz %t24, @then_10, @else_11
@@ -998790,7 +998663,7 @@ function :val $q_Rt_x2ehostArity(l %a0, l %a1, l %a2, w %an) {
 	storel 3, %t33
 	jmp @ret
 @else_15
-	%t34 =l call $q_Rt_x2ecStrEq(l %t1, l $d4394)
+	%t34 =l call $q_Rt_x2ecStrEq(l %t1, l $d4392)
 	%t35 =w cnel %t34, 0
 	%t36 =l extsw %t35
 	jnz %t36, @then_16, @else_17
@@ -998800,7 +998673,7 @@ function :val $q_Rt_x2ehostArity(l %a0, l %a1, l %a2, w %an) {
 	storel 2, %t37
 	jmp @ret
 @else_17
-	%t38 =l call $q_Rt_x2ecStrEq(l %t1, l $d4386)
+	%t38 =l call $q_Rt_x2ecStrEq(l %t1, l $d4384)
 	%t39 =w cnel %t38, 0
 	%t40 =l extsw %t39
 	jnz %t40, @then_18, @else_19
@@ -998810,7 +998683,7 @@ function :val $q_Rt_x2ehostArity(l %a0, l %a1, l %a2, w %an) {
 	storel 2, %t41
 	jmp @ret
 @else_19
-	%t42 =l call $q_Rt_x2ecStrEq(l %t1, l $d4387)
+	%t42 =l call $q_Rt_x2ecStrEq(l %t1, l $d4385)
 	%t43 =w cnel %t42, 0
 	%t44 =l extsw %t43
 	jnz %t44, @then_20, @else_21
@@ -998820,7 +998693,7 @@ function :val $q_Rt_x2ehostArity(l %a0, l %a1, l %a2, w %an) {
 	storel 3, %t45
 	jmp @ret
 @else_21
-	%t46 =l call $q_Rt_x2ecStrEq(l %t1, l $d4388)
+	%t46 =l call $q_Rt_x2ecStrEq(l %t1, l $d4386)
 	%t47 =w cnel %t46, 0
 	%t48 =l extsw %t47
 	jnz %t48, @then_22, @else_23
@@ -998830,7 +998703,7 @@ function :val $q_Rt_x2ehostArity(l %a0, l %a1, l %a2, w %an) {
 	storel 2, %t49
 	jmp @ret
 @else_23
-	%t50 =l call $q_Rt_x2ecStrEq(l %t1, l $d4389)
+	%t50 =l call $q_Rt_x2ecStrEq(l %t1, l $d4387)
 	%t51 =w cnel %t50, 0
 	%t52 =l extsw %t51
 	jnz %t52, @then_24, @else_25
@@ -998840,7 +998713,7 @@ function :val $q_Rt_x2ehostArity(l %a0, l %a1, l %a2, w %an) {
 	storel 1, %t53
 	jmp @ret
 @else_25
-	%t54 =l call $q_Rt_x2ecStrEq(l %t1, l $d4390)
+	%t54 =l call $q_Rt_x2ecStrEq(l %t1, l $d4388)
 	%t55 =w cnel %t54, 0
 	%t56 =l extsw %t55
 	jnz %t56, @then_26, @else_27
@@ -998850,7 +998723,7 @@ function :val $q_Rt_x2ehostArity(l %a0, l %a1, l %a2, w %an) {
 	storel 1, %t57
 	jmp @ret
 @else_27
-	%t58 =l call $q_Rt_x2ecStrEq(l %t1, l $d4391)
+	%t58 =l call $q_Rt_x2ecStrEq(l %t1, l $d4389)
 	%t59 =w cnel %t58, 0
 	%t60 =l extsw %t59
 	jnz %t60, @then_28, @else_29
@@ -998860,7 +998733,7 @@ function :val $q_Rt_x2ehostArity(l %a0, l %a1, l %a2, w %an) {
 	storel 2, %t61
 	jmp @ret
 @else_29
-	%t62 =l call $q_Rt_x2ecStrEq(l %t1, l $d4392)
+	%t62 =l call $q_Rt_x2ecStrEq(l %t1, l $d4390)
 	%t63 =w cnel %t62, 0
 	%t64 =l extsw %t63
 	jnz %t64, @then_30, @else_31
@@ -998870,7 +998743,7 @@ function :val $q_Rt_x2ehostArity(l %a0, l %a1, l %a2, w %an) {
 	storel 1, %t65
 	jmp @ret
 @else_31
-	%t66 =l call $q_Rt_x2ecStrEq(l %t1, l $d4393)
+	%t66 =l call $q_Rt_x2ecStrEq(l %t1, l $d4391)
 	%t67 =w cnel %t66, 0
 	%t68 =l extsw %t67
 	jnz %t68, @then_32, @else_33
@@ -998880,7 +998753,7 @@ function :val $q_Rt_x2ehostArity(l %a0, l %a1, l %a2, w %an) {
 	storel 2, %t69
 	jmp @ret
 @else_33
-	%t70 =l call $q_Rt_x2ecStrEq(l %t1, l $d4395)
+	%t70 =l call $q_Rt_x2ecStrEq(l %t1, l $d4393)
 	%t71 =w cnel %t70, 0
 	%t72 =l extsw %t71
 	jnz %t72, @then_34, @else_35
@@ -998890,7 +998763,7 @@ function :val $q_Rt_x2ehostArity(l %a0, l %a1, l %a2, w %an) {
 	storel 1, %t73
 	jmp @ret
 @else_35
-	%t74 =l call $q_Rt_x2ecStrEq(l %t1, l $d4396)
+	%t74 =l call $q_Rt_x2ecStrEq(l %t1, l $d4394)
 	%t75 =w cnel %t74, 0
 	%t76 =l extsw %t75
 	jnz %t76, @then_36, @else_37
@@ -999278,7 +999151,7 @@ function :val $q_Rt_x2eapply_x2dat(l %a0, l %a1, l %a2, w %an) {
 	%t8 =l extsw %t7
 	jnz %t8, @then_0, @else_1
 @then_0
-	%t9 =l call $q_Rt_x2edieErr(l $d4398)
+	%t9 =l call $q_Rt_x2edieErr(l $d4396)
 	storew 5, %s0
 	jmp @ret
 @else_1
@@ -999300,7 +999173,7 @@ function :val $q_Rt_x2eapply_x2dat(l %a0, l %a1, l %a2, w %an) {
 	%t23 =l extsw %t22
 	jnz %t23, @then_4, @else_5
 @then_4
-	%t24 =l call $q_Rt_x2edieErr(l $d4399)
+	%t24 =l call $q_Rt_x2edieErr(l $d4397)
 	storew 5, %s0
 	jmp @ret
 @else_5
@@ -999366,7 +999239,7 @@ function :val $q_Rt_x2eapply_x2dat(l %a0, l %a1, l %a2, w %an) {
 	%t54 =l extsw %t53
 	jnz %t54, @then_10, @else_11
 @then_10
-	%t55 =l call $q_Rt_x2edie(l $d4377)
+	%t55 =l call $q_Rt_x2edie(l $d4375)
 	storew 5, %s0
 	jmp @ret
 @else_11
@@ -999590,7 +999463,7 @@ function :val $q_Rt_x2ehostPushFrame(l %a0, l %a1, l %a2, w %an) {
 	%t13 =l extsw %t12
 	jnz %t13, @then_0, @else_1
 @then_0
-	%t14 =l call $q_Rt_x2edieErr(l $d4400)
+	%t14 =l call $q_Rt_x2edieErr(l $d4398)
 	storew 5, %s0
 	jmp @ret
 @else_1
@@ -1001241,7 +1001114,7 @@ function :val $q_Rt_x2ehostLeafExec(l %a0, l %a1, l %a2, w %an) {
 @then_0
 	%t104 =l call $free(l %t78)
 	%t105 =l call $free(l %t76)
-	%t106 =l call $q_Rt_x2ehostDieErr(l $d4401, l $d4379)
+	%t106 =l call $q_Rt_x2ehostDieErr(l $d4399, l $d4377)
 	storew 5, %s0
 	jmp @ret
 @else_1
@@ -1001359,7 +1001232,7 @@ function :val $q_Rt_x2ehostLeafExec(l %a0, l %a1, l %a2, w %an) {
 	storel 0, %t185
 	%t186 =:val call $q_Rt_x2eepFreeChains(l %s42, l %s43, l %s44, w 3)
 	blit %t186, %s41, 40
-	%t187 =l call $q_Rt_x2ehostDieErr(l $d4402, l $d4379)
+	%t187 =l call $q_Rt_x2ehostDieErr(l $d4400, l $d4377)
 	storew 5, %s0
 	jmp @ret
 @else_5
@@ -1001403,7 +1001276,7 @@ function :val $q_Rt_x2ehostLeafExec(l %a0, l %a1, l %a2, w %an) {
 	storel 0, %t215
 	%t216 =:val call $q_Rt_x2eepFreeChains(l %s47, l %s48, l %s49, w 3)
 	blit %t216, %s46, 40
-	%t217 =l call $q_Rt_x2ehostDieErr(l $d4402, l $d4379)
+	%t217 =l call $q_Rt_x2ehostDieErr(l $d4400, l $d4377)
 	storew 5, %s0
 	jmp @ret
 @else_7
@@ -1001453,7 +1001326,7 @@ function :val $q_Rt_x2ehostLeafExec(l %a0, l %a1, l %a2, w %an) {
 	storel 0, %t251
 	%t252 =:val call $q_Rt_x2eepFreeChains(l %s52, l %s53, l %s54, w 3)
 	blit %t252, %s51, 40
-	%t253 =l call $q_Rt_x2ehostDieErr(l $d4402, l $d4379)
+	%t253 =l call $q_Rt_x2ehostDieErr(l $d4400, l $d4377)
 	storew 5, %s0
 	jmp @ret
 @else_9
@@ -1001758,7 +1001631,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t18, %t19
 	storew 1, %s10
 	%t20 =l add %s10, 8
-	storel $d4403, %t20
+	storel $d4401, %t20
 	%t21 =l add %s10, 16
 	storel 6, %t21
 	storew 0, %s11
@@ -1001786,7 +1001659,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t30, %t31
 	storew 1, %s18
 	%t32 =l add %s18, 8
-	storel $d4404, %t32
+	storel $d4402, %t32
 	%t33 =l add %s18, 16
 	storel 6, %t33
 	storew 0, %s19
@@ -1001800,7 +1001673,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t36, %t37
 	storew 1, %s22
 	%t38 =l add %s22, 8
-	storel $d4405, %t38
+	storel $d4403, %t38
 	%t39 =l add %s22, 16
 	storel 3, %t39
 	storew 0, %s23
@@ -1001856,7 +1001729,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t60, %t61
 	storew 1, %s38
 	%t62 =l add %s38, 8
-	storel $d4406, %t62
+	storel $d4404, %t62
 	%t63 =l add %s38, 16
 	storel 3, %t63
 	storew 0, %s39
@@ -1001884,7 +1001757,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t72, %t73
 	storew 1, %s46
 	%t74 =l add %s46, 8
-	storel $d4407, %t74
+	storel $d4405, %t74
 	%t75 =l add %s46, 16
 	storel 3, %t75
 	storew 0, %s47
@@ -1001898,7 +1001771,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t78, %t79
 	storew 1, %s50
 	%t80 =l add %s50, 8
-	storel $d4408, %t80
+	storel $d4406, %t80
 	%t81 =l add %s50, 16
 	storel 4, %t81
 	storew 0, %s51
@@ -1001912,7 +1001785,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t84, %t85
 	storew 1, %s54
 	%t86 =l add %s54, 8
-	storel $d4409, %t86
+	storel $d4407, %t86
 	%t87 =l add %s54, 16
 	storel 4, %t87
 	storew 0, %s55
@@ -1001926,7 +1001799,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t90, %t91
 	storew 1, %s58
 	%t92 =l add %s58, 8
-	storel $d4410, %t92
+	storel $d4408, %t92
 	%t93 =l add %s58, 16
 	storel 4, %t93
 	storew 0, %s59
@@ -1001996,7 +1001869,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t120, %t121
 	storew 1, %s78
 	%t122 =l add %s78, 8
-	storel $d4411, %t122
+	storel $d4409, %t122
 	%t123 =l add %s78, 16
 	storel 3, %t123
 	storew 0, %s79
@@ -1002010,7 +1001883,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t126, %t127
 	storew 1, %s82
 	%t128 =l add %s82, 8
-	storel $d4412, %t128
+	storel $d4410, %t128
 	%t129 =l add %s82, 16
 	storel 2, %t129
 	storew 0, %s83
@@ -1002024,7 +1001897,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t132, %t133
 	storew 1, %s86
 	%t134 =l add %s86, 8
-	storel $d4413, %t134
+	storel $d4411, %t134
 	%t135 =l add %s86, 16
 	storel 4, %t135
 	storew 0, %s87
@@ -1002066,7 +1001939,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t150, %t151
 	storew 1, %s98
 	%t152 =l add %s98, 8
-	storel $d4414, %t152
+	storel $d4412, %t152
 	%t153 =l add %s98, 16
 	storel 31, %t153
 	storew 0, %s99
@@ -1002094,7 +1001967,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t162, %t163
 	storew 1, %s106
 	%t164 =l add %s106, 8
-	storel $d4415, %t164
+	storel $d4413, %t164
 	%t165 =l add %s106, 16
 	storel 24, %t165
 	storew 0, %s107
@@ -1002108,7 +1001981,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t168, %t169
 	storew 1, %s110
 	%t170 =l add %s110, 8
-	storel $d4416, %t170
+	storel $d4414, %t170
 	%t171 =l add %s110, 16
 	storel 8, %t171
 	storew 0, %s111
@@ -1002122,7 +1001995,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t174, %t175
 	storew 1, %s114
 	%t176 =l add %s114, 8
-	storel $d4417, %t176
+	storel $d4415, %t176
 	%t177 =l add %s114, 16
 	storel 12, %t177
 	storew 0, %s115
@@ -1002136,7 +1002009,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t180, %t181
 	storew 1, %s118
 	%t182 =l add %s118, 8
-	storel $d4418, %t182
+	storel $d4416, %t182
 	%t183 =l add %s118, 16
 	storel 17, %t183
 	storew 0, %s119
@@ -1002150,7 +1002023,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t186, %t187
 	storew 1, %s122
 	%t188 =l add %s122, 8
-	storel $d4419, %t188
+	storel $d4417, %t188
 	%t189 =l add %s122, 16
 	storel 4, %t189
 	storew 0, %s123
@@ -1002164,7 +1002037,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t192, %t193
 	storew 1, %s126
 	%t194 =l add %s126, 8
-	storel $d4420, %t194
+	storel $d4418, %t194
 	%t195 =l add %s126, 16
 	storel 20, %t195
 	storew 0, %s127
@@ -1002178,7 +1002051,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t198, %t199
 	storew 1, %s130
 	%t200 =l add %s130, 8
-	storel $d4421, %t200
+	storel $d4419, %t200
 	%t201 =l add %s130, 16
 	storel 22, %t201
 	storew 0, %s131
@@ -1002192,7 +1002065,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t204, %t205
 	storew 1, %s134
 	%t206 =l add %s134, 8
-	storel $d4422, %t206
+	storel $d4420, %t206
 	%t207 =l add %s134, 16
 	storel 22, %t207
 	storew 0, %s135
@@ -1002206,7 +1002079,7 @@ function :val $q_Rt_x2ehostEpCbuf(l %a0, l %a1, l %a2, w %an) {
 	storel %t210, %t211
 	storew 1, %s138
 	%t212 =l add %s138, 8
-	storel $d4423, %t212
+	storel $d4421, %t212
 	%t213 =l add %s138, 16
 	storel 23, %t213
 	storew 0, %s139
@@ -1015527,7 +1015400,7 @@ function :val $q_Rt_x2eexec_x2drun(l %a0, l %a1, l %a2, w %an) {
 	%t135 =l call $free(l %t0)
 	storew 1, %s48
 	%t136 =l add %s48, 8
-	storel $d4403, %t136
+	storel $d4401, %t136
 	%t137 =l add %s48, 16
 	storel 6, %t137
 	%t138 =:val call $q_Rt_x2eintern(l %s48, l %s48, l %s48, w 1)
@@ -1015540,7 +1015413,7 @@ function :val $q_Rt_x2eexec_x2drun(l %a0, l %a1, l %a2, w %an) {
 	blit %t140, %s46, 40
 	storew 1, %s54
 	%t141 =l add %s54, 8
-	storel $d4403, %t141
+	storel $d4401, %t141
 	%t142 =l add %s54, 16
 	storel 6, %t142
 	%t143 =:val call $q_Rt_x2eintern(l %s54, l %s54, l %s54, w 1)
@@ -1016939,7 +1016812,7 @@ function :val $q_Rt_x2ehostDirRecord(l %a0, l %a1, l %a2, w %an) {
 @body
 	storew 1, %s7
 	%t0 =l add %s7, 8
-	storel $d4424, %t0
+	storel $d4422, %t0
 	%t1 =l add %s7, 16
 	storel 4, %t1
 	%t2 =:val call $q_Rt_x2eintern(l %s7, l %s7, l %s7, w 1)
@@ -1016949,7 +1016822,7 @@ function :val $q_Rt_x2ehostDirRecord(l %a0, l %a1, l %a2, w %an) {
 	blit %t3, %s5, 40
 	storew 1, %s12
 	%t4 =l add %s12, 8
-	storel $d4425, %t4
+	storel $d4423, %t4
 	%t5 =l add %s12, 16
 	storel 5, %t5
 	%t6 =:val call $q_Rt_x2eintern(l %s12, l %s12, l %s12, w 1)
@@ -1017174,7 +1017047,7 @@ function :val $q_Rt_x2ehostStatRecord(l %a0, l %a1, l %a2, w %an) {
 	storel %t30, %t31
 	storew 1, %s10
 	%t32 =l add %s10, 8
-	storel $d4426, %t32
+	storel $d4424, %t32
 	%t33 =l add %s10, 16
 	storel 6, %t33
 	%t34 =:val call $q_Rt_x2eintern(l %s10, l %s10, l %s10, w 1)
@@ -1017187,7 +1017060,7 @@ function :val $q_Rt_x2ehostStatRecord(l %a0, l %a1, l %a2, w %an) {
 	blit %t36, %s7, 40
 	storew 1, %s16
 	%t37 =l add %s16, 8
-	storel $d4425, %t37
+	storel $d4423, %t37
 	%t38 =l add %s16, 16
 	storel 5, %t38
 	%t39 =:val call $q_Rt_x2eintern(l %s16, l %s16, l %s16, w 1)
@@ -1017200,7 +1017073,7 @@ function :val $q_Rt_x2ehostStatRecord(l %a0, l %a1, l %a2, w %an) {
 	blit %t41, %s13, 40
 	storew 1, %s22
 	%t42 =l add %s22, 8
-	storel $d4427, %t42
+	storel $d4425, %t42
 	%t43 =l add %s22, 16
 	storel 7, %t43
 	%t44 =:val call $q_Rt_x2eintern(l %s22, l %s22, l %s22, w 1)
@@ -1017215,7 +1017088,7 @@ function :val $q_Rt_x2ehostStatRecord(l %a0, l %a1, l %a2, w %an) {
 	blit %t47, %s19, 40
 	storew 1, %s28
 	%t48 =l add %s28, 8
-	storel $d4428, %t48
+	storel $d4426, %t48
 	%t49 =l add %s28, 16
 	storel 4, %t49
 	%t50 =:val call $q_Rt_x2eintern(l %s28, l %s28, l %s28, w 1)
@@ -1017230,7 +1017103,7 @@ function :val $q_Rt_x2ehostStatRecord(l %a0, l %a1, l %a2, w %an) {
 	blit %t53, %s25, 40
 	storew 1, %s34
 	%t54 =l add %s34, 8
-	storel $d4429, %t54
+	storel $d4427, %t54
 	%t55 =l add %s34, 16
 	storel 4, %t55
 	%t56 =:val call $q_Rt_x2eintern(l %s34, l %s34, l %s34, w 1)
@@ -1018711,7 +1018584,7 @@ function :val $q_Rt_x2eglobBuildGo(l %a0, l %a1, l %a2, w %an) {
 	blit %t39, %s17, 40
 	storew 1, %s22
 	%t40 =l add %s22, 8
-	storel $d4403, %t40
+	storel $d4401, %t40
 	%t41 =l add %s22, 16
 	storel 6, %t41
 	%t42 =:val call $q_Rt_x2eintern(l %s22, l %s22, l %s22, w 1)
@@ -1019566,7 +1019439,7 @@ function :val $q_Rt_x2ehostAddPoll(l %a0, l %a1, l %a2, w %an) {
 	%t32 =w and %t28, %t31
 	jnz %t32, @else_3, @then_2
 @then_2
-	%t33 =l call $q_Rt_x2edieErr(l $d4430)
+	%t33 =l call $q_Rt_x2edieErr(l $d4428)
 	storew 5, %s0
 	jmp @ret
 @else_3

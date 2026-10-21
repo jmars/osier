@@ -20,7 +20,7 @@
 # how a suite reports an old binary's behaviour as a measurement).
 #
 # Which inputs: tools/qbe/hostshim.zig (the exported ABI surface), the vendored
-# osier-rt package it imports, and src/effectloop.zig (the package it links).
+# osier-rt package it imports.
 #
 # Env:
 #   RT_O_DIE_EXIT  exit status when the rebuild fails (default 1).
@@ -36,18 +36,16 @@ fail() { say "$*"; exit "$DIE_EXIT"; }
 
 command -v zig >/dev/null 2>&1 || fail "zig not found (it builds $RT)"
 
-rt_newer="$(find "$ROOT/tools/qbe/hostshim.zig" "$ROOT/vendor/osier-rt/src" "$ROOT/src/effectloop.zig" \
-              -newer "$RT" -print -quit 2>/dev/null)" || rt_newer="PROBE_FAILED"
+rt_newer="$(find "$ROOT/tools/qbe/hostshim.zig" "$ROOT/vendor/osier-rt/src" -newer "$RT" -print -quit 2>/dev/null)" || rt_newer="PROBE_FAILED"
 if [ "$rt_newer" = "PROBE_FAILED" ]; then
   say "rt.o freshness probe FAILED -- rebuilding rather than trusting it"
 fi
 if [ ! -f "$RT" ] || [ -n "$rt_newer" ]; then
   say "building $RT"
   zig build-obj -O ReleaseFast -lc -femit-bin="$RT" \
-    --dep gc --dep rt --dep effectloop -Mroot="$ROOT/tools/qbe/hostshim.zig" \
+    --dep gc --dep rt -Mroot="$ROOT/tools/qbe/hostshim.zig" \
     -Mgc="$ROOT/vendor/osier-rt/src/gc.zig" \
     --dep gc -Mrt="$ROOT/vendor/osier-rt/src/rt.zig" \
-    --dep gc --dep rt -Meffectloop="$ROOT/src/effectloop.zig" \
     || fail "rt.o rebuild FAILED -- refusing to answer from a stale $RT"
 fi
 

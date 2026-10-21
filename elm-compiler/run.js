@@ -54,121 +54,21 @@ const CORPUS = [
 // ONCE per process (the parse hoist that keeps the corpus wall ~16 s-class).
 const RUNTIME_MID_RAW = fs.readFileSync(path.join(__dirname, 'runtime.mid'), 'utf8');
 
-// QBE_MIDHOST (stage 7A; DEFAULT ON since stage 7's O2) — the MID EFFECT HOST,
-// chosen at COMPILE time, and why it has to be compile time.
-//
-// `runtime.mid` carries the host (Rt.hostRun and the machine under it) plus a
-// getenv hatch in Rt.main that selects it at RUN time.  The compile-time half
-// cannot be unconditional in the other direction: Rt.main is emitted into
-// EVERY artifact ($main is in all corpus groups), so removing the region is
-// what keeps a host-less emit reachable at all.  The hatch lives inside a
-// marked region of runtime.mid and THIS reader keeps it by DEFAULT (O2's flip)
-// and drops it only when QBE_MIDHOST=0:
-//
-//   * QBE_MIDHOST unset/1 — the region is KEPT: the Mid host is the DEFAULT
-//     (stage 7 O2), so `$main` carries the hatch and the host defuns in every
-//     artifact.  THE CORPUS RE-FREEZE THIS CAUSES IS DECLARED, not a drift —
-//     the default route now really does contain the host.
-//   * QBE_MIDHOST=0 — the region is removed, nothing reaches the host defuns,
-//     they are PRUNED (an unreached Mid defun is never emitted), and the
-//     emitted bytes are the pre-7A ones.  THIS IS THE ESCAPE HATCH and it
-//     stays until O4 deletes the Zig host: the Zig host is still the oracle
-//     the Mid one is measured against, so a build without the Mid host must
-//     remain reachable.  MEASURED before the flip: the corpus was
-//     byte-identical with the whole host PRESENT in runtime.mid, i.e. this
-//     switch is what moves bytes.
-//
-// The RUN-time half is runtime.mid's own hatch, and it reads the same variable
-// the other way round: unset -> the Mid host, `=0` -> the Zig host.  So ONE
-// default build carries both and `QBE_MIDHOST=0 ./the-binary <entry>` is the
-// differential inside a single artifact.
-//
-// MIDGC x MIDHOST: `QBE_MIDGC=1` with `QBE_MIDHOST=0` is REFUSED (see
-// MIDGC_DEPENDS_ON) — that pairing is exactly the cross-heap hole stage 5
-// reproduced (the Zig host builds Zig-nursery strings/conses into Mid objects),
-// and it used to be caught by Lower.elm's two compile-time refusal arms, which
-// O2 deletes because the DEFAULT pair (MIDGC=1 + the Mid host) is sound by
-// construction.  The refusal's replacement is this guard, not silence — and
-// since O3 the guard has a second half, because this one sees only the BUILD:
-// MIDGC's region below makes a MIDGC-built binary REFUSE `QBE_MIDHOST=0` at
-// RUN time, which no compile-time guard can see.
-//
-// The markers are the contract with the file (TestMain pins their shape: one
-// BEGIN, one END, BEGIN first).  They are `//` comments, which are emit-inert
-// on their own — the SPLICE is what moves bytes, not the markers.
-const MIDHOST_BEGIN = '// >>> QBE_MIDHOST-ONLY';
-const MIDHOST_END = '// <<< QBE_MIDHOST-ONLY';
-const QBE_MIDHOST = process.env.QBE_MIDHOST !== '0';
-// QBE_MIDGC ENABLES the Mid-written mark-sweep collector (zigretire stage 4):
-// the two raw allocating nodes (RawAllocVector/RawAllocRaw) route to the Mid
-// seats Rt.allocVector/Rt.allocRaw (which own a separate mmap'd heap and
-// trigger Rt.collect), instead of the Zig rt_vec_alloc/rt_raw_alloc seats.
-//
-// THE DEFAULT SINCE THE GC NURSERY FLIP: the Mid collector + the nursery
-// carry the default (measured green on the full battery — see the flip
-// commit).  `QBE_MIDGC=0` is the ESCAPE HATCH and stays until O4 deletes the
-// Zig collector (`gc/*` + the rt_vec_alloc/rt_raw_alloc seats): it is the
-// Zig-collector arm the Mid one is differentially measured against, and the
-// only legal way to pair `QBE_MIDHOST=0` with a sound collector (see
-// MIDGC_DEPENDS_ON below).  The flip's declared cost is the corpus/seed
-// re-freeze: every artifact that allocates moves, because the allocation
-// seats are what this flag selects.
-//
-// ONE SPELLING, TWO READERS, and the RUN-time reader is the second half of the
-// MIDGC x MIDHOST refusal (stage 7 O3): the compile-time half is
-// MIDGC_DEPENDS_ON below (a `QBE_MIDGC=1 QBE_MIDHOST=0` BUILD is refused,
-// exit 2); the run-time half is runtime.mid's QBE_MIDGC-ONLY region, which
-// makes a MIDGC-built binary REFUSE `QBE_MIDHOST=0` at run time instead of
-// silently running the Zig host on a Mid heap (a compile-time guard cannot see
-// the env of a later run).  Both halves say the same thing with the same
-// spelling — the SPLICE below is what puts the run-time half in the binary,
-// which is why this constant lives HERE and not with the other flag knobs.
-// QBE_MIDGC ENABLES the Mid-written collector.  THE DEFAULT SINCE THE GC
-// NURSERY FLIP: read as (env !== '0'), so the Mid mark-sweep + nursery is
-// what an unflagged build gets, and `QBE_MIDGC=0` is the ESCAPE HATCH back to
-// the Zig collector (the differential oracle, and the only legal pairing
-// with QBE_MIDHOST=0).
+// QBE_MIDHOST IS RETIRED (O4): the Mid host is the ONLY host — the
+// compile-time splice, the run-time getenv switch, and Rt.main's Zig arm are
+// deleted with src/effectloop.zig.  The host defuns in runtime.mid are now
+// unconditionally present (an unreached Mid defun is pruned anyway).
 const QBE_MIDGC = process.env.QBE_MIDGC !== '0';
-// THE SECOND SPLICE (stage 7 O3): the RUN-time half of the MIDGC x MIDHOST
-// refusal.  One region, INSIDE Rt.main's host arm (it has to be: the run-time
-// hatch it guards is in that arm), kept iff QBE_MIDGC — so a MIDGC build's
-// Rt.main refuses `QBE_MIDHOST=0` at run time with a named die instead of
-// branching into the Zig host on a Mid heap, and a QBE_MIDGC=0 build keeps the
-// differential intact (both hosts reachable, one heap).  WHY A REGION AND NOT
-// A RUN-TIME TEST OF "IS THE MID COLLECTOR IN?": the flag is a COMPILE-time
-// decision (Lower.elm's allocation seats), so the emitted code is the only
-// place that knows it; there is no run-time witness of it in Rt.main before
-// the first Mid allocation (the region is mapped lazily).
-const MIDGC_BEGIN = '// >>> QBE_MIDGC-ONLY';
-const MIDGC_END = '// <<< QBE_MIDGC-ONLY';
-// QBE_MIDGC_YOUNG (GC NURSERY unit) — THE NURSERY HATCH, default OFF.  A
-// BUILD-time switch with a RUN-time knob, exactly the MIDHOST/MIDGC shape:
-//   * BUILD: `QBE_MIDGC_YOUNG=1` keeps the `QBE_MIDGC_YOUNG-ONLY` regions of
-//     runtime.mid (the scavenge family + the young dispatch in Rt.gcAlloc and
-//     Rt.collect) and makes Lower's RawVecStore route through the barrier seat
-//     rt_vec_store_young.  Unset (the default), the regions are spliced OUT
-//     and the emission is the pre-nursery tree's — byte-identical, corpus
-//     safe.  Requires QBE_MIDGC=1 (a nursery without the Mid collector is
-//     meaningless; the guard below refuses it, exit 2).
-//   * RUN: the young slots gcInit writes are inert until the ENVIRONMENT asks
-//     — `QBE_MIDGC_YOUNG=1 ./prog` activates the nursery, unset or `=0` runs
-//     the same binary as a plain mark-sweep.  That is the A/B arm the movement
-//     oracle needs: ONE binary, both collectors.
 const QBE_MIDGC_YOUNG = QBE_MIDGC && process.env.QBE_MIDGC_YOUNG !== '0';
-// (No guard here: QBE_MIDGC=0 forces the nursery off — QBE_MIDGC_YOUNG is
-// defined as QBE_MIDGC && ..., so a Zig-route build can never carry the
-// young barrier seat.  QBE_MIDGC_YOUNG=0 is the nursery's own escape hatch,
-// a plain mark-sweep inside the same MIDGC build.)
+// (O4) the QBE_MIDGC-ONLY SPLICE IS RETIRED: its one region — Rt.main's
+// run-time refusal of QBE_MIDHOST=0 — went with the QBE_MIDHOST hatch.  The
+// QBE_MIDGC FLAG still selects the collector (Lower's allocation seats and
+// QbeModule's gc-half injection); only the runtime-text splice is gone.
 const MIDGC_YOUNG_BEGIN = '// >>> QBE_MIDGC_YOUNG-ONLY';
 const MIDGC_YOUNG_END = '// <<< QBE_MIDGC_YOUNG-ONLY';
 
-// TWO kinds of region, dropped (or kept) by kind: (1) Rt.main's host arm and
-// (2) the host's own defuns, both MIDHOST; (3) the run-time override refusal,
-// MIDGC.  The MIDHOST pair must go together — an arm calling a pruned defun is
-// an undefined symbol at link, and a defun nothing reaches is dead weight in
-// the parse.  The counters make an unbalanced marker a LOUD compile refusal,
-// because a silently half-dropped pair is the one shape that could leave the
-// default route emitting host code.
+// (O4) ONE region kind remains (QBE_MIDGC_YOUNG-ONLY, the nursery hatch).
+// The counters still make an unbalanced marker a LOUD compile refusal.
 function spliceMidRegion(text, begin, end, label, keep) {
   const out = [];
   let inside = false;
@@ -201,20 +101,8 @@ function spliceMidRegion(text, begin, end, label, keep) {
   return out.join('\n');
 }
 
-// ORDER IS LOAD-BEARING: the MIDGC region lives INSIDE a MIDHOST region, so it
-// is spliced FIRST — its markers are then gone before the host splice walks the
-// text, and the host splice never sees a foreign marker.  (Dropping the host
-// region drops the MIDGC lines with it, which is right: with no Mid host the
-// Zig host is the only host, so there is nothing to refuse.)  The YOUNG region
-// is spliced FIRSTEST for the same reason: its markers sit inside gc defun
-// bodies (Rt.gcAlloc, Rt.collect) and around the scavenge family, all text the
-// other two splices never look inside — but splicing it first means no later
-// splice can ever see a young marker either way.
-const RUNTIME_MID = spliceMidRegion(
-  spliceMidRegion(
-    spliceMidRegion(RUNTIME_MID_RAW, MIDGC_YOUNG_BEGIN, MIDGC_YOUNG_END, 'QBE_MIDGC_YOUNG', QBE_MIDGC_YOUNG),
-    MIDGC_BEGIN, MIDGC_END, 'QBE_MIDGC', QBE_MIDGC),
-  MIDHOST_BEGIN, MIDHOST_END, 'QBE_MIDHOST', QBE_MIDHOST);
+// (The young splice is the only one left; order no longer load-bearing.)
+const RUNTIME_MID = spliceMidRegion(RUNTIME_MID_RAW, MIDGC_YOUNG_BEGIN, MIDGC_YOUNG_END, 'QBE_MIDGC_YOUNG', QBE_MIDGC_YOUNG);
 
 // M3: extension classification — a source whose path ends `.mid` is a mid-c
 // module (compiled by Mid.RtLang and merged as a per-group input), NOT an
@@ -455,7 +343,6 @@ const QBE_EQPTRFAST = process.env.QBE_NOEQPTRFAST !== '1';
 // corpus attribution hatch for that unit — QBE_NOTYPESPEC=1 must reproduce the
 // pre-change corpus byte-for-byte.  Default OFF (type specialization ON).
 const QBE_TYPESPEC = process.env.QBE_NOTYPESPEC !== '1';
-// QBE_MIDGC's VALUE is read UP TOP (beside QBE_MIDHOST), because the runtime
 // splice ABOVE is what consumes it — see the flag's own comment there.
 // QBE_MIDDRIVER is GONE (stage 6 B4, "the shrink"): the Zig arm that flag
 // selected (rt_die/rt_halt/rt_frame_*/rt_apply/rt_bounce/rt_tail_known/
@@ -476,7 +363,7 @@ if (process.env.QBE_MIDDRIVER === '0') {
 // is, and why the combination is a SILENT wrong answer (never a loud link
 // error, which is why a by-hand `if` per flag keeps leaking holes).
 //
-// DEPENDENCIES (complete, 2026-10-12):
+// DEPENDENCIES (complete, 2026-10-12; QBE_MIDHOST entry RETIRED at O4):
 //   1. the LEAN ABI — the Mid routes (lowerCon / lowerClosure /
 //      midGcAllocSeat / lowerRecordLitPos / lowerRecordUpdateClosed)
 //      hard-code the lean call shape (3 pointer args + a count word, direct
@@ -487,16 +374,6 @@ if (process.env.QBE_MIDDRIVER === '0') {
 //      q_Rt_x2eallocVector export, the weak extern resolves to 0, and
 //      applyGo's partial arm silently reverts to the Zig allocator — a
 //      cross-heap edge that SEGVs with no diagnostic.  (stage-5 PART 2 review)
-//   3. the MID EFFECT HOST — QBE_MIDHOST=0 drops the Mid host at compile time,
-//      which puts the ZIG host (effectloop.zig) back in charge.  Its leaves
-//      build Zig-nursery strings/conses (values.valString/valCons) and hand
-//      them to compiled code through host_apply, where a Mid object keeps them
-//      — the cross-heap hole stage 5 reproduced (content equality prints 0
-//      while String.length prints 150).  (stage 7 O2: this entry replaces the
-//      Lower.elm refusal arms, which refused MIDGC=1 for host programs
-//      wholesale; with the Mid host the DEFAULT, the pairing is sound and only
-//      the OPT-OUT is unsound, so the guard moves from "cannot be built" to
-//      "cannot be built THIS way".)
 //
 // NOTE the entry is the only one whose incompatible value is '0', not '1' (the
 // dependent flag is ON by default now), hence the per-entry `val`.
@@ -520,7 +397,6 @@ if (process.env.QBE_MIDDRIVER === '0') {
 const MIDGC_DEPENDS_ON = [
   { off: 'QBE_NORTLEAN', dep: 'the lean ABI', why: 'the Mid routes hard-code the lean call shape (3 pointer args + a count word, direct :val return), which mixes with the FAT QBE_NORTLEAN callees into a link-and-read-the-wrong-registers' },
   { off: 'QBE_NOMIDRT', dep: 'the Mid runtime', why: 'withholding the Rt program removes the q_Rt_* seats the collector and routes call, so the partial-application path silently reverts to the Zig allocator (a cross-heap edge that SEGVs)' },
-  { off: 'QBE_MIDHOST', val: '0', dep: 'the Mid effect host', why: 'opting the Zig host back in hands Mid objects values built in the Zig nursery (effectloop values.valString/valCons through host_apply), which the Zig scavenge reclaims while they are still live' },
 ];
 for (const d of MIDGC_DEPENDS_ON) {
   if (QBE_MIDGC && process.env[d.off] === (d.val || '1')) {

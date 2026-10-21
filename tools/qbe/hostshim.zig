@@ -14,10 +14,6 @@
 //!   the rt_prim_* direct per-prim entries (the QBE_NOPRIMDIRECT arm is
 //!   DELETED — its generic rt_prim symbol no longer exists, so that hatch is
 //!   EMIT-ONLY and cannot LINK)
-//!   hostApply + callArity/callArityRet/bounce + buildArgvList — the effect
-//!   loop's closure applier (src/effectloop.zig wires host_apply to hostApply;
-//!   the effect loop STAYS Zig until stage 7, so these internals are still
-//!   load-bearing, NOT "now-unreachable" as the B4 brief listed them)
 //!
 //! GC CONTRACT (docs/gc-zig.md mutator rules): the collector is precise and
 //! moving; anything held across an allocating call must be reachable from a
@@ -50,9 +46,8 @@ const values = rt_mod.values;
 const state = rt_mod.state;
 const symbols = rt_mod.symbols;
 const tables = rt_mod.tables;
-const prims = rt_mod.prims;
 const streams = rt_mod.streams;
-const effectloop = @import("effectloop");
+// (src/effectloop.zig is DELETED at O4 — the Mid host is the only host.)
 
 const Gc = heap.Gc;
 const Value = types.Value;
@@ -216,7 +211,7 @@ var intern_fallbacks: u64 = 0; // hatch off / table full — the old per-call al
 // per site and hand back the SAME Value for the rest of the run.
 //
 // WHY THIS IS OBSERVABLE-SAFE: string values are compared by CONTENT
-// everywhere in this runtime (prims.primEq and values.deepEqual both memcmp
+
 // `strSlice`), never by identity — so returning one object where there used
 // to be many cannot change what a program prints or computes.
 //
@@ -372,7 +367,7 @@ export fn rt_vec_store(vec: [*]Value, i: i32, val: *const Value) callconv(.c) vo
 
 // =====================================================================
 //  Rt raw-node seats, step 5 (handoff osier-midprims) — the byte-level
-//  and halt seats under the string prims.  Same contract class as the two
+
 //  above: the lowering carries no second copy of it.
 // =====================================================================
 
@@ -656,7 +651,7 @@ export fn rt_ss_close(i: i64) callconv(.c) i64 {
 /// intern's seat: intern data[0..min(len,255)] into the symbol table and
 /// return the canonical name pointer.  `len` is the byte count (negative
 /// clamped to 0, matching primIntern's @max(len,0); 255-byte cap).  Mirrors
-/// prims.primIntern (vendor/osier-rt/src/rt/prims.zig) + symbols.valSymbol.
+
 export fn rt_sym_intern(data: [*]const u8, len: i64) callconv(.c) [*:0]const u8 {
     const n: usize = @intCast(@min(@max(len, 0), 255));
     var buf: [256]u8 = undefined;
@@ -718,110 +713,11 @@ export fn rt_float_text(bits: i64) callconv(.c) [*]const FloatTextOut {
 }
 
 // =====================================================================
-//  The host applier's trampoline (bounce + the rt_callN arity table)
-// =====================================================================
-// B4 deleted the generated-code application seats (rt_apply/rt_apply_tail/
-// rt_tail_known — now Mid Rt.apply/Rt.apply-tail/Rt.tail-known).  The effect
-// loop's host_apply still needs a native applier, so the two halves it calls
-// survive: `bounce` chases a `.tail` chain to a `.done`, and `callArityRet`
-// dispatches a saturated call through the rt_callN table (Mid-emitted
-// symbols, the arity ceiling both sides agree on).
-
-/// Chases a `.tail` chain to its `.done` value at constant native stack — the
-/// trampoline that makes cross-defun tails unbounded (the AOT's `bounce`).
-fn bounce(r: Ret) Value {
-    var rr = r;
-    while (true) {
-        if (rr.kind == 0) return rr.val;
-        rr = callArityRet(rr.arity, rr.f.?, rr.e, rr.args.?);
-    }
-}
-
-fn callArity(arity: i32, f: *const anyopaque, e: ?[*]Value, buf: [*]Value) Value {
-    return bounce(callArityRet(arity, f, e, buf));
-}
-
-fn callArityRet(arity: i32, f: *const anyopaque, e: ?[*]Value, buf: [*]Value) Ret {
-    return switch (arity) {
-        0 => rt_call0(f, e),
-        1 => rt_call1(f, e, @ptrCast(buf)),
-        2 => rt_call2(f, e, &buf[0], &buf[1]),
-        3 => rt_call3(f, e, &buf[0], &buf[1], &buf[2]),
-        4 => rt_call4(f, e, &buf[0], &buf[1], &buf[2], &buf[3]),
-        5 => rt_call5(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4]),
-        6 => rt_call6(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5]),
-        7 => rt_call7(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6]),
-        8 => rt_call8(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7]),
-        9 => rt_call9(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7], &buf[8]),
-        10 => rt_call10(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7], &buf[8], &buf[9]),
-        11 => rt_call11(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7], &buf[8], &buf[9], &buf[10]),
-        12 => rt_call12(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7], &buf[8], &buf[9], &buf[10], &buf[11]),
-        13 => rt_call13(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7], &buf[8], &buf[9], &buf[10], &buf[11], &buf[12]),
-        14 => rt_call14(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7], &buf[8], &buf[9], &buf[10], &buf[11], &buf[12], &buf[13]),
-        15 => rt_call15(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7], &buf[8], &buf[9], &buf[10], &buf[11], &buf[12], &buf[13], &buf[14]),
-        16 => rt_call16(f, e, &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5], &buf[6], &buf[7], &buf[8], &buf[9], &buf[10], &buf[11], &buf[12], &buf[13], &buf[14], &buf[15]),
-        else => dieLoud("arity exceeds the qbe rt_callN table"),
-    };
-}
-
-// =====================================================================
-//  Host -> Elm apply (the effect loop's seam)
-// =====================================================================
-
-/// The effect loop's `host_apply` hook.  Every lambda the QBE path produces
-/// is Desc*-coded (never a VM *Instr), so an interpreted applier would
-/// execute a Desc as instructions.  The effect loop's call sites are ONE
-/// continuation/handler arg or TWO update args — always a SATURATED call,
-/// i.e. `args.len == lambda.code_len` (the REMAINING arity) — so this
-/// dispatches through the arity table (callArityRet + bounce) instead of the
-/// generic rt_apply/applyGo path, which B4 DELETED (generated code now
-/// routes through the Mid Rt.apply defun; only the Zig effect loop still
-/// needs a native applier).
-///
-/// THE APPLIED PREFIX IS NOT OPTIONAL (MEASURED 2026-10-19).  "Saturated"
-/// does NOT mean "fully applied": a SATURATED call on a HALF-APPLIED closure
-/// (`code_len < desc.arity`, the `napp` cells already sitting in
-/// `lambda.env`) is exactly what a `Task.andThen (f a) task` continuation is
-/// — NativeMain's own manifest read is one.  Passing desc.arity params with
-/// only `args.len` cells filled hands the callee `napp` UNINITIALISED
-/// pointers AND the wrong `env`, which is silent garbage, not a crash: the
-/// seed-built compiler read its manifest into a garbage String and printed
-/// "elmc: manifest has no groups" (tools/qbe/fixtures/rfpart.elm is the
-/// pinned reproducer).  This now does what the Mid applier's
-/// `rt_call2r` bridge does — params = the applied cells then the new args,
-/// env advanced past the applied cells — so both hosts agree.
-///
-/// The `argbuf` is a C-stack copy read EXACTLY ONCE by the callee's prologue
-/// blit (the same single-referee invariant the old rt_apply path relied on),
-/// so no root is needed across the call — fnv/args are Values the effect loop
-/// already holds in its rooted slots, and the applied cells are read out of
-/// the closure's own env before the call (nothing allocates here).
-fn hostApply(vm_: *state.Vm, fnv: Value, args: []const Value) state.VmError!Value {
-    _ = vm_;
-    if (args.len > max_arity) dieLoud("host apply exceeds the qbe rt_callN table");
-    if (fnv.tag != .lambda) dieLoud("host apply of a non-function value");
-    const desc: *Desc = @ptrCast(@alignCast(fnv.payload.lambda.code));
-    const rem: i32 = fnv.payload.lambda.code_len; // the REMAINING arity
-    const napp: i32 = desc.arity - rem; // the applied prefix already in env
-    var argbuf: [max_arity]Value = undefined;
-    var i: usize = 0;
-    if (napp > 0) {
-        const env = fnv.payload.lambda.env orelse
-            dieLoud("host apply: closure env missing for applied args");
-        if (@as(usize, @intCast(rem)) != args.len)
-            dieLoud("host apply: a partially applied closure was called with the wrong arity");
-        if (napp + @as(i32, @intCast(args.len)) > max_arity)
-            dieLoud("host apply exceeds the qbe rt_callN table");
-        const nappU: usize = @intCast(napp);
-        while (i < nappU) : (i += 1) argbuf[i] = env[i]; // the applied cells
-        var j: usize = 0;
-        while (j < args.len) : (j += 1) argbuf[nappU + j] = args[j]; // then the new args
-        return bounce(callArityRet(napp + @as(i32, @intCast(args.len)), desc.code, env + nappU, &argbuf));
-    }
-    while (i < args.len) : (i += 1) argbuf[i] = args[i];
-    return bounce(callArityRet(desc.arity, desc.code, fnv.payload.lambda.env, &argbuf));
-}
-
+//  (DELETED AT O4) the effect loop's applier trampoline — bounce /
+//  Mid host applies through its own Rt.apply-at, and nothing else called the
+//  trampoline.  The rt_call0..16 / rt_call2r EXTERNS below stay: the
+//  EMITTED Rt.bounceGo / Rt.apply defuns call them by symbol.
+//
 // ---------------------------------------------------------------------
 //  exec-plan bridge (zigretire stage 3 GROUP 3B-2a..3B-2c): CLOSED.
 // ---------------------------------------------------------------------
@@ -835,99 +731,12 @@ fn hostApply(vm_: *state.Vm, fnv: Value, args: []const Value) state.VmError!Valu
 // =====================================================================
 //  Direct per-prim entries (handoff osier-passa)
 // =====================================================================
+//  (DELETED AT O4) the rt_prim_* direct per-prim entries — they were
+//  generated from rt/prims.zig's table, which is deleted with the Zig host;
+//  the current default emits NO rt_prim calls (measured on the whole-compiler
+//  .ssa), and every live prim has a Mid implementation or the Mid host.
+// =====================================================================
 //
-// B4 deleted the GENERIC `rt_prim` entry (the QBE_NOPRIMDIRECT=1 arm's
-// symbol): it is now EMIT-ONLY and its `.ssa` cannot LINK.  These DIRECT
-// per-prim entries are the live route that remains.
-//
-// The entries below are the same primitives through a DIRECT C symbol,
-// generated AT COMPTIME from prims.prim_table so there is still exactly ONE
-// implementation of every prim's semantics (the handler bodies in
-// rt/prims.zig): a wrapper points its ValueArray at a ROOTED C-stack copy of
-// the pointer args and calls the handler through the table's own fn pointer —
-// what `prims.execPrimitive` would do after its lookup, with the lookup
-// resolved at compile time.  Nothing about prim SEMANTICS is duplicated here.
-//
-// THE ABI IS UNIFORM: three `*const Value` argument pointers plus the arg
-// count.  That is deliberate, and it is what keeps the two sides of this
-// contract from drifting: the wrappers are generated from the table, but the
-// COMPILER only ever emits a call once it knows the name, and the count it
-// passes IS the count `execPrimitive` would have been handed — the arity
-// stays the call site's, exactly as before, so no second arity table exists
-// to disagree with prims.zig.  The unused pointers of an arity-1 call are
-// never read.  The only cross-language contract left is the SYMBOL NAME,
-// which is a pure function of the prim name (symSuffix below, mirrored in
-// Mid.Qbe.Lower.manglePrim): a mismatch is an undefined symbol at link time,
-// i.e. loud, never silent.
-//
-// Arity 0 is NOT routed here (the compiler keeps the generic entry for it):
-// the C ABI has no way to say "no argument pointers", so a 0-ary direct call
-// would pass undefined registers.
-const direct_arity: usize = 3;
-
-/// One BYTE of a prim name -> its symbol-safe spelling: the SAME mangler
-/// Mid.Qbe.Lower already puts every defun key through (`mangle`/`mangleChar`
-/// there — [a-zA-Z0-9] pass through, every other byte becomes `_xHH` at a
-/// fixed two digits, which is what makes it injective).  Every name in
-/// `prims.prim_table` is ASCII, so Elm's codepoint walk and this byte walk
-/// agree; a name that is not would be a link error, not a silent divergence.
-fn symChar(comptime c: u8) []const u8 {
-    if ((c >= '0' and c <= '9') or (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z'))
-        return comptime std.fmt.comptimePrint("{c}", .{c});
-    return comptime std.fmt.comptimePrint("_x{x:0>2}", .{c});
-}
-
-fn symSuffix(comptime name: []const u8) []const u8 {
-    var out: []const u8 = "";
-    inline for (name) |c| out = out ++ symChar(c);
-    return out;
-}
-
-/// The comptime-generated wrapper for one table entry.
-fn Direct(comptime name: []const u8, comptime func: prims.PrimFn) type {
-    return struct {
-        fn call(a0: *const Value, a1: *const Value, a2: *const Value, nargs: i32) callconv(.c) Value {
-            const n: usize = @intCast(nargs);
-            if (n == 0 or n > direct_arity) dieLoud("qbe-rt: direct prim entry called out of range");
-            const src = [direct_arity]*const Value{ a0, a1, a2 };
-            // Stage into ROOTED C-stack storage: the caller's frame slots are
-            // the same Values, but they are at arbitrary (non-contiguous)
-            // addresses and the handler POPS (vaPop nils the vacated slot), so
-            // it cannot be handed the caller's frame.  REVERSED, because the
-            // first pop must be args[0] (PrimApp args are in pop order) — the
-            // same reversal rt_prim's vaPush loop performs.
-            var buf: [direct_arity]Value = undefined;
-            var i: usize = 0;
-            while (i < n) : (i += 1) buf[i] = src[n - 1 - i].*;
-            var live: i32 = nargs;
-            g.rootPushValueArray(&buf, &live);
-            defer g.rootPop();
-            // `buf` is C-stack, so (unlike rt_prim's vaInit array) its base
-            // cannot move and needs no ROOT_PTR slot: `&buf` IS the live base
-            // for the whole call.
-            var stack: types.ValueArray = .{ .data = &buf, .len = nargs, .cap = nargs };
-            var acc: Value = zeroValue();
-            g.rootPushValue(&acc);
-            defer g.rootPop();
-            func(vm, &acc, &stack) catch |e| diePrimDirect(e, name);
-            return acc;
-        }
-    };
-}
-
-comptime {
-    @setEvalBranchQuota(200000);
-    for (prims.prim_table) |def| {
-        @export(&Direct(def.name, def.func).call, .{ .name = "rt_prim_" ++ symSuffix(def.name) });
-    }
-}
-
-fn diePrimDirect(e: anyerror, name: []const u8) noreturn {
-    var buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "qbe-rt: prim {s} failed: {s}\n", .{ name, @errorName(e) }) catch "qbe-rt: prim failed\n";
-    werr(msg);
-    std.process.exit(1);
-}
 fn dieLoud(msg: []const u8) noreturn {
     var buf: [256]u8 = undefined;
     const out = std.fmt.bufPrint(&buf, "qbe-rt: {s}\n", .{msg}) catch "qbe-rt: error\n";
@@ -1041,7 +850,6 @@ export fn rt_boot() callconv(.c) i64 {
     // in initGlobals, so StreamRef reads the same value-table slots the VM did.
     // Installed HERE, in the bring-up, because nothing before the entry call
     // may depend on it and the Mid driver must not have to reach the seam.
-    effectloop.host_apply = &hostApply;
     return 0;
 }
 
@@ -1095,25 +903,6 @@ export fn rt_argv_install(argv_mode: i32, nargs: usize, c_argv: [*]?[*:0]u8) cal
     } else {
         vmem.valueSet("*argv*", values.valNil());
     }
-}
-
-/// rt_is_program: the `Runtime.program` predicate the driver asks (VERBATIM
-/// main:1768's effectloop.isProgram).  1 = a Program vector, 0 = not.
-export fn rt_is_program(v: *const Value) callconv(.c) i64 {
-    return @intFromBool(effectloop.isProgram(v.*));
-}
-
-/// rt_run_program: the host-run path for a `program` entry — drive the shared
-/// CEK effect manager to the final model (VERBATIM main:1766-1777).  Stores the
-/// model in `dst` and returns 0, or writes the SAME stderr line and returns 1.
-export fn rt_run_program(v: *const Value, dst: *Value) callconv(.c) i64 {
-    dst.* = effectloop.runProgram(&vmem, v.*) catch {
-        var ebuf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&ebuf, "qbe-rt: error: {s}\n", .{values.errSlice(vmem.err_slot)}) catch "qbe-rt: effect loop failed\n";
-        werr(msg);
-        return 1;
-    };
-    return 0;
 }
 
 /// rt_print_value: print a Value, then the newline — the driver's output

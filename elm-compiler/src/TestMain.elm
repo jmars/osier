@@ -1619,15 +1619,17 @@ checks rt runtimeMidText =
             Err _ ->
                 False
         )
-    , check "A4b MIDDRIVER emission — the program/print tail: $main calls the A4b seats BY NAME (rt_is_program/rt_run_program/rt_print_value via rawcall, rt_root_push_value for the result/model roots) — the seats the A2 result handed word-in/word-out"
+    , check "A4b MIDDRIVER emission — the program/print tail (RE-PINNED AT O4): the Zig seats rt_is_program/rt_run_program are RETIRED with the effect loop — $main now asks Rt.hostIsProgram (the Mid predicate), drives Rt.hostRun (the only host), and prints through rt_print_value with rt_root_push_value for the model root"
         (case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 case funcByName "main" mod of
                     Just f ->
-                        callsSym "rt_is_program" f
-                            && callsSym "rt_run_program" f
+                        callsSym "q_Rt_x2ehostIsProgram" f
+                            && callsSym "q_Rt_x2ehostRun" f
                             && callsSym "rt_print_value" f
                             && callsSym "rt_root_push_value" f
+                            && not (callsSym "rt_is_program" f)
+                            && not (callsSym "rt_run_program" f)
 
                     Nothing ->
                         False
@@ -4383,50 +4385,16 @@ checks rt runtimeMidText =
                 ]
             && String.contains "call Rt.hostDieErr(rawstr(\"unhandled Task effect: \"), nm);" (defunText "Rt.hostDispatch" runtimeMidText)
         )
-    , check "7A SPLICE PIN: runtime.mid carries exactly THREE balanced QBE_MIDHOST regions (the applier's export line, Rt.main's host arm, the host's own defuns), each BEGIN followed by its END — run.js refuses the compile otherwise, so a half-spliced runtime cannot ship"
-        (let
-            markers =
-                List.filter (\l -> String.contains "QBE_MIDHOST-ONLY" l) (String.lines runtimeMidText)
+    , check "7A SPLICE PIN (RETIRED AT O4): runtime.mid carries ZERO QBE_MIDHOST markers — the splice, the hatch, and Rt.main's Zig arm are deleted with src/effectloop.zig (the Mid host is the only host, its defuns unconditionally present)"
+        (List.isEmpty (List.filter (\l -> String.contains "QBE_MIDHOST-ONLY" l) (String.lines runtimeMidText)))
+    , check "7O3 RUN-TIME OVERRIDE PIN (RETIRED AT O4): zero QBE_MIDGC-ONLY markers remain in runtime.mid — the run-time refusal guarded the QBE_MIDHOST=0 hatch, which is deleted"
+        (List.isEmpty (List.filter (\l -> String.contains "QBE_MIDGC-ONLY" l) (String.lines runtimeMidText)))
+    , check "7A GATE PIN (RE-PINNED AT O4): with the splice retired there is ONE runtime text and it is HOSTED — Rt.load reports `hosted` (the structural witness: the program defines Rt.hostRun), so hostSeeds is live in every compile including the selfhost lane"
+        (case Rt.load runtimeMidText of
+            Ok withHost ->
+                withHost.hosted
 
-            begins =
-                List.filter (\l -> String.contains ">>>" l) markers
-
-            ends =
-                List.filter (\l -> String.contains "<<<" l) markers
-         in
-         List.length markers == 6
-            && List.length begins == 3
-            && List.length ends == 3
-            && List.map (\l -> String.contains ">>>" l) markers == [ True, False, True, False, True, False ]
-        )
-    , check "7O3 RUN-TIME OVERRIDE PIN: runtime.mid carries exactly ONE balanced QBE_MIDGC-ONLY region and it sits BETWEEN the hatch's env read and the branch it guards — a MIDGC build's Rt.main therefore REFUSES `QBE_MIDHOST=0` BY NAME at RUN time (the compile-time guard in run.js can only see the BUILD, never a later run's env; this is the second half of the same refusal), and the region is spliced OUT of every QBE_MIDGC=0 build, where one heap serves both hosts and the differential stays runnable"
-        (let
-            markers =
-                List.filter (\l -> String.contains "QBE_MIDGC-ONLY" l) (String.lines runtimeMidText)
-
-            begins =
-                List.filter (\l -> String.contains ">>>" l) markers
-
-            ends =
-                List.filter (\l -> String.contains "<<<" l) markers
-
-            firstIdx s =
-                List.head (String.indexes s runtimeMidText) |> Maybe.withDefault -1
-         in
-         List.length markers == 2
-            && List.length begins == 1
-            && List.length ends == 1
-            && List.map (\l -> String.contains ">>>" l) markers == [ True, False ]
-            && String.contains "call Rt.die(rawstr(\"qbe-rt: QBE_MIDHOST=0 is refused" (defunText "Rt.main" runtimeMidText)
-            && firstIdx "val mhOff = mkbool(mhEnv != 0)" < firstIdx "// >>> QBE_MIDGC-ONLY"
-            && firstIdx "// >>> QBE_MIDGC-ONLY" < firstIdx "word hop = if (payload32(mhOff, 0) == 0) {"
-        )
-    , check "7A GATE PIN: Rt.load reports `hosted` for the text run.js keeps and NOT for the text it hands the default route — the witness is STRUCTURAL (does the program define Rt.hostRun?), so the gate follows the splice exactly and the selfhost lane needs no String.contains"
-        (case ( Rt.load runtimeMidText, Rt.load (spliceRegionOut runtimeMidText) ) of
-            ( Ok withHost, Ok without ) ->
-                withHost.hosted && not without.hosted
-
-            _ ->
+            Err _ ->
                 False
         )
     , check "7A REACHABILITY PIN: hostSeeds is the closure of the host's two entry points over rtDeps (52 keys = every REACHED host defun), so a host defun added without an rtDeps edge is a RED ROW (a compiled call to a pruned defun is an undefined symbol, i.e. a link failure at qbe-mk, not a red suite)"
@@ -4507,19 +4475,17 @@ checks rt runtimeMidText =
             && String.contains "if (mkbool(remain <= 0)) {" d
             && String.contains "return mknum(2147483647);" d
         )
-    , check "7B HATCH PIN (the two 7A defects this unit MEASURED; POLARITY FLIPPED at stage 7 O2): the Mid arm PRINTS AND EXITS itself — an expression arm's `return` does not return and a rawAbi defun cannot carry a mid-block guard-if, so without this epilogue the Zig host ran the program a SECOND time — and the hatch tests a BYTE, not pointer-presence, so one spelling means one thing at run time.  O2 flipped WHICH byte: the test is now for '0' (the Zig host is the opt-out), so an unset QBE_MIDHOST runs the Mid host"
+    , check "7B HATCH PIN (RE-PINNED AT O4): Rt.main's host arm is UNCONDITIONAL — no mhEnv/mhOff hatch read, no rt_is_program Zig probe — and it still PRINTS AND EXITS itself (the 7B measured rule: an expression arm's `return` does not return, so falling through ran a program twice)"
         (let
-            region =
-                String.join "\n"
-                    (List.filter (\l -> String.contains "mhEnv" l || String.contains "mhOff" l || String.contains "mppc" l || String.contains "rawcall exit(0);" l || String.contains "rt_print_value(modelslot)" l)
-                        (String.lines runtimeMidText)
-                    )
+            arm =
+                defunText "Rt.main" runtimeMidText
          in
-         String.contains "mkbool(byteload(mhEnv, 0) == 48)" region
-            && String.contains "word hop = if (payload32(mhOff, 0) == 0) {" region
-            && String.contains "rawcall rt_print_value(modelslot)" region
-            && String.contains "rawcall exit(0);" region
-            && String.contains "word isprog = rawcall rt_is_program(fptr);" runtimeMidText
+         String.contains "call Rt.hostIsProgram" arm
+            && String.contains "rawcall rt_print_value(modelslot)" arm
+            && String.contains "rawcall exit(0);" arm
+            && not (String.contains "mhEnv" arm)
+            && not (String.contains "rt_is_program" arm)
+            && not (String.contains "rt_run_program" arm)
         )
     , check "7B DECLARATION PIN (stage 7C added fcntl): `poll` and the VARIADIC `fcntl` are DECLARED (C prototypes) rather than added to rawcallArity — the plan's gap G-I route for the effect-loop port, and the reason Ast.rawcallArity must not grow a row for either (R-08 forbids both tables)"
         (String.contains "extern poll(fds : ptr, nfds : i64, timeout : i32) -> i32;" runtimeMidText
@@ -9824,7 +9790,7 @@ checks rt runtimeMidText =
             Err _ ->
                 False
         )
-    , check "BOOL PAYLOAD WIDTH (b): the SIX runtime.mid sites that read a BOOLEAN Value spell payload32 — Rt.cStrEq's word result (`eq`, which is returned as a WORD to the ~60 `call Rt.cStrEq(..) != 0` tests, so a 64-bit read turned every string compare into a coin flip), Rt.main's metaGo `found`, Rt.main's `mhOff` TWICE (the MIDGC refusal and the host hatch) and its `hostIsProgram` read, and Rt.hostListDirChunk's `skip` ('..' filter).  The negatives are the fail-before half: each 64-bit spelling of those five names is absent"
+    , check "BOOL PAYLOAD WIDTH (b): the FOUR runtime.mid sites that read a BOOLEAN Value spell payload32 (RE-PINNED AT O4: the two mhOff reads retired with the QBE_MIDHOST hatch) — Rt.cStrEq's word result, Rt.main's metaGo `found`, Rt.main's `hostIsProgram` read, and Rt.hostListDirChunk's `skip` ('..' filter).  The negatives are the fail-before half: each 64-bit spelling of those five names is absent"
         (let
             mid =
                 runtimeMidText
@@ -9837,8 +9803,6 @@ checks rt runtimeMidText =
          in
          String.contains "return payload32(eq, 0);" (defunText "Rt.cStrEq" mid)
             && String.contains "payload32(found, 0)" routeText
-            && List.length (String.indexes "payload32(mhOff, 0)" routeText)
-            == 2
             && String.contains "payload32(call Rt.hostIsProgram(vecload(fptr, 0)), 0)" routeText
             && String.contains "payload32(skip, 0)" (defunText "Rt.hostListDirChunk" mid)
             && absent "eq"

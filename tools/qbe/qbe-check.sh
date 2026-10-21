@@ -197,7 +197,9 @@ run_mid() {
   # different temps, so the frozen assertion is route-bound.  Unset, the
   # variable is empty (= unset to run.js under both the old opt-in and the
   # flipped default readings).
-  bin="$(QBE_MIDHOST="${MIDHOST_ROW:+1}" QBE_MIDGC="${MIDGC_OFF:+0}" "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "${mids[@]}" "$entry" "$TMP/$name")" || {
+  # (O4: QBE_MIDHOST is RETIRED — the Mid host is the only host; the
+  # MIDHOST_ROW knob's env is no longer set.)
+  bin="$(QBE_MIDGC="${MIDGC_OFF:+0}" "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "${mids[@]}" "$entry" "$TMP/$name")" || {
     echo "FAIL $name: qbe-mk"; FAIL=1; return
   }
   local nat_out
@@ -2343,22 +2345,23 @@ if [ -s "$RTO" ]; then
       bad_missing="$bad_missing $sym"
     fi
   done < "$TMP/pd-referenced.txt"
-  if [ -n "$bad_missing" ]; then
-    echo "FAIL primdirect-symbols: emitted direct symbol(s) outside rt.o AND outside the flip-deleted set:$bad_missing — a mangle/table disagreement on a KEPT row"
+  # (O4: prims.zig and its rt_prim_* direct entries are DELETED with the Zig
+  # host.  The row now pins the DELETION itself: rt.o defines NO direct
+  # entries, and the only .ssa that still NAMES one is the EMIT-ONLY
+  # QBE_MIDZIG route (pd-*.ssa — its .ssa has been unlinkable since B4
+  # deleted the generic arm); a LINKABLE route must reference none.)
+  n_zigref=$(cat "$TMP"/pd-*.ssa 2>/dev/null | grep -ho '\$rt_prim_[A-Za-z0-9_]*' | sort -u | wc -l)
+  n_linkref=$((n_ref - n_zigref))
+  if [ "$n_def" -ne 0 ]; then
+    echo "FAIL primdirect-symbols: rt.o defines $n_def direct entries — the prims table was to be deleted at O4"
     FAIL=1
-  elif [ "$n_ref" -lt 1 ]; then
-    echo "FAIL primdirect-symbols: no direct symbol referenced by the pass-A .ssa — nothing was checked"
-    FAIL=1
-  elif [ "$n_deleted" -lt 1 ]; then
-    echo "FAIL primdirect-symbols: the QBE_MIDZIG arms referenced no deleted wrapper — they no longer emit the old path"
-    FAIL=1
-  elif [ "$n_def" -ne 23 ]; then
-    echo "FAIL primdirect-symbols: rt.o defines $n_def direct entries, expected one per prims.prim_table row (23 post-flip: the host surface + the no-spelling prims; the flip deleted the 35 flipped rows)"
+  elif [ "$n_linkref" -ne 0 ]; then
+    echo "FAIL primdirect-symbols: a LINKABLE .ssa still references $n_linkref direct symbol(s) — a live consumer was missed"
     FAIL=1
   else
-    echo "PASS primdirect-symbols: $((n_ref - n_deleted)) emitted symbol(s) defined in rt.o ($n_def entries = the post-flip table) + $n_deleted flip-deleted symbol(s) the emit-only Zig route still references, all inside the deleted set"
+    echo "PASS primdirect-symbols: rt.o defines 0 direct entries; the $n_zigref symbol(s) still named anywhere are the emit-only QBE_MIDZIG route's (the prims table deleted at O4)"
   fi
-else
+elif [ ! -f "$RTO" ]; then
   echo "FAIL primdirect-symbols: $RTO missing"
   FAIL=1
 fi
@@ -2556,7 +2559,7 @@ QBE_NOREP=1 qbe_ssa_midrt tools/qbe/fixtures/norep.elm NoRep.chain "$TMP/midrt-c
 # a REFUSED BUILD (run.js MIDGC_DEPENDS_ON — the Zig host on a Mid heap), and
 # this arm's whole point is the route where the used-prim census is the ONLY
 # seed source, i.e. the no-host, no-Mid-collector tree.
-QBE_MIDGC=0 QBE_NOREP=1 QBE_MIDHOST=0 qbe_ssa_midrt tools/qbe/fixtures/norep.elm NoRep.chain "$TMP/midrt-chain-route.ssa" route
+QBE_MIDGC=0 QBE_NOREP=1 QBE_NOMIDRT=1 qbe_ssa_midrt tools/qbe/fixtures/norep.elm NoRep.chain "$TMP/midrt-chain-route.ssa" route
 
 midrt_bad=0
 if [ -s "$TMP/midrt-flat-on.ssa" ]; then
@@ -2619,7 +2622,8 @@ if [ -s "$TMP/midrt-chain-route.ssa" ] && [ -s "$TMP/midrt-chain-host.ssa" ]; th
   # default build of this pure-arithmetic entry legitimately carries the cons
   # defun, and a bare "0 mentions" assertion can no longer tell that apart
   # from a census that over-seeds.  The census is therefore measured on the
-  # UNHOSTED route (QBE_MIDHOST=0, byte-identical to the pre-7A tree), with
+  # NO-RT route (QBE_NOMIDRT=1, re-pinned at O4 when the unhosted route was
+  # retired with the Zig host), with
   # the host-on build of the SAME fixture as the arm that keeps this row
   # falsifiable: if the census ever over-seeds, arm 1 goes red; if the host
   # ever stops being the thing that brings cons in, arm 2 goes red.
@@ -2627,13 +2631,13 @@ if [ -s "$TMP/midrt-chain-route.ssa" ] && [ -s "$TMP/midrt-chain-host.ssa" ]; th
   n=$(midrt_ssa "$TMP/midrt-chain-route.ssa")
   h=$(midrt_ssa "$TMP/midrt-chain-host.ssa")
   if [ "$n" -ne 0 ]; then
-    echo "FAIL midrt-pruned: a cons-free entry carries $n q_Rt_x2econs mention(s) on the UNHOSTED route — the used-prim census over-seeds"
+    echo "FAIL midrt-pruned: a cons-free entry carries $n q_Rt_x2econs mention(s) on the NO-RT route — the used-prim census over-seeds"
     midrt_bad=1
   elif [ "$h" -lt 1 ]; then
     echo "FAIL midrt-pruned: the host-ON build of the same cons-free fixture carries no Rt defun either — the two arms are not distinguished, so the row cannot attribute anything"
     midrt_bad=1
   else
-    echo "PASS midrt-pruned: the cons-free entry carries NO Rt defun on the unhosted route (used-prim seeding prunes it); the default build's $h mention(s) are the Mid HOST's own closure, attributed not seeded"
+    echo "PASS midrt-pruned: the cons-free entry carries NO Rt defun on the no-RT route (used-prim seeding prunes it); the default build's $h mention(s) are the Mid HOST's own closure, attributed not seeded"
   fi
 else
   echo "FAIL midrt-pruned: .ssa missing (compile failed?)"; midrt_bad=1
