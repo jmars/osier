@@ -7,7 +7,8 @@
 //!
 //!   the Zig GC (vendor/osier-rt gc/values/streams/tables/symbols/prims)
 //!   rt_string / rt_con / rt_make_closure / rt_global_closure / rt_vec_* /
-//!   rt_raw_alloc / rt_sym_intern / rt_value_slot / rt_float_text / rt_ss_*
+//!   rt_raw_alloc / rt_float_text (rt_sym_intern / rt_value_slot / rt_ss_*
+//!   are GONE — Mid owns those tables; see the O5 notes below)
 //!   the shadow-stack root seats (rt_root_*, rt_gc_root_*, rt_gc_heap_bytes)
 //!   the driver host half: rt_boot / rt_parse_arg / rt_argv_install /
 //!   rt_is_program / rt_run_program / rt_print_value (called by Mid Rt.main)
@@ -408,9 +409,10 @@ export fn rt_vec_store_plain(vec: [*]Value, i: i32, val: *const Value) callconv(
 /// block's flags word, dedups; the scavenge's remembered walk clears it).
 /// This is the SAME policy the Zig collector's writeBarrierVectorStore uses
 /// on its own heap, spelled against the MID region's slots, which the caller
-/// (Lower's RawVecStore emission under QBE_MIDGC_YOUNG) passes because this
-/// file cannot reference $rt_glob_addr (the Mid globals block exists only in
-/// a MIDGC build; an unconditional extern would break every other link).
+/// (Lower's RawVecStore emission under QBE_MIDGC_YOUNG) passes.  (That
+/// comment used to say this file could NOT reference the block — the block is
+/// emitted unconditionally since stage 6 B0; see THE MID GLOBALS BLOCK note
+/// above rt_boot.)
 ///
 /// REGION SLOT MAP (the mirror of runtime.mid's struct Region — offsets are
 /// load-bearing and TestMain pins the declaration):
@@ -581,29 +583,39 @@ export fn rt_root_pop_to(wm: i64) callconv(.c) i64 {
 //  intStrCopy/intPairsCopy over the GLOBALS BLOCK words 8208..8210): a
 //  linear byte-compare find-or-insert (every measured call site is a
 //  rawstr literal; 9 distinct names).  No Zig seat remains.
-//  rt_value_slot and rt_float_text below stay until their own seats.
+//  (DELETED AT O5 SEAT 3) rt_value_slot is GONE — the LOOKUP is Mid's now
+//  (runtime.mid's Rt.valScanGo/Rt.value).  The TABLE is still this file's:
+//  it is what rt_boot/rt_argv_install install the three standard streams and
+//  *argv* into, so the host keeps the storage and PUBLISHES its base into
+//  the Mid globals block (rt_glob[3]) for the Mid walk to read.
+//  rt_float_text below stays until its own seat.
 // =====================================================================
 //
 
-/// value's seat: the open-addressed values-table lookup (hashName + linear
-/// probe, mirroring tables.valueLookup but returning the STABLE slot pointer
-/// rather than a copy).  The fallback — valSymbol, the `(value +)` bare-symbol
-/// arm — writes a symbol into a static slot whose name is page-allocator
-/// (never a GC pointer), so the static is invisible to the GC and safe.
-var value_fallback_slot: Value = undefined;
-export fn rt_value_slot(name: [*:0]const u8) callconv(.c) ?[*]const Value {
-    const n = std.mem.sliceTo(name, 0);
-    var h = tables.hashName(n, tables.VALUES_TABLE_CAP);
-    var i: usize = 0;
-    while (i < tables.VALUES_TABLE_CAP) : (i += 1) {
-        const e = &vm.values_table[h];
-        if (e.name == null) break;
-        if (std.mem.eql(u8, std.mem.sliceTo(e.name.?, 0), n)) return @ptrCast(&e.value);
-        h = (h + 1) % tables.VALUES_TABLE_CAP;
-    }
-    value_fallback_slot = symbols.valSymbol(&vm.symbols, n);
-    return @ptrCast(&value_fallback_slot);
-}
+// =====================================================================
+//  THE MID GLOBALS BLOCK, FROM THE ZIG SIDE
+//
+//  `export data $rt_glob` (.bss) is emitted by Mid.Qbe.Lower's finishModule
+//  UNCONDITIONALLY (stage 6 B0 — the Mid frame pair always reads it), and
+//  rt.o cannot be linked without a Mid-emitted module: B4 deleted the Zig
+//  `main`, so the seed's Mid `main` is the only one (qbe-bootstrap.sh step
+//  4/4).  So a reference from this file resolves in every link rt.o takes
+//  part in — the stale "this file cannot reference $rt_glob" note above
+//  rt_vec_store_young predates B0 and is corrected here.
+//
+//  Word indices are Mid.RtGc's LAYOUT table.  The values-table base (word 3)
+//  is the ONE word this file writes: every other slot is Mid's own state.
+// =====================================================================
+extern var rt_glob: [8208]u64; // RtGc.globWords — keep the two in step
+
+/// The globals-block word holding `vm.values_table`'s base (RtGc's layout
+/// table, word 3).  Written once, by rt_boot, before any generated code runs.
+/// WORD 1 IS TAKEN: it is the frame machinery's current-frame pointer
+/// (runtime.mid's frame-enter/frame-leave `wstore(glob, 1, hdr)`), so a value
+/// parked there survives only until the next frame push — MEASURED, that is
+/// exactly how the first draft of this handoff failed.  3..7 are free (2 is
+/// the no-reuse knob, 8..11 the driver knobs).
+const GLOB_VALUES_TAB: usize = 3;
 
 /// str's float-arm seat: render `bits` (an f64's raw bits) through
 /// values.floatText into a static BSS buffer and return a pointer to a
@@ -767,6 +779,17 @@ export fn rt_boot() callconv(.c) i64 {
     vmem.valueSet("*stinput*", streams.valStreamInFd(0));
     vmem.valueSet("*stoutput*", streams.valStreamOutFd(1));
     vmem.valueSet("*sterror*", streams.valStreamOutFd(2));
+
+    // O5 seat 3: PUBLISH the values table's base into the Mid globals block,
+    // the one place both routes can read it (see THE MID GLOBALS BLOCK note
+    // above, and GLOB_VALUES_TAB for why the word is 3 and not 1).  The table
+    // is this file's — Vm.init page-allocates it and every write to it is here
+    // (the three streams above, *argv* below) — and the LOOKUP is Mid's
+    // (Rt.value/Rt.valScanGo), so the pointer is the whole handoff.  Done HERE
+    // rather than in Vm.init because the vendored runtime is shared with the
+    // Zig interpreter's own test suite, which links no Mid block; the base is
+    // stable for the run, so one store is enough.
+    rt_glob[GLOB_VALUES_TAB] = @intFromPtr(vmem.values_table);
 
     // Host the effect loop EXACTLY like the retired harnesses did:
     // install the native host->Elm dispatcher (the seam's default is a loud

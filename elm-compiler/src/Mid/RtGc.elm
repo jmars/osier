@@ -88,6 +88,20 @@ import Mid.RtPrims exposing (seat)
 -- LAYOUT (word slots; the reserved slots name their landing unit so U3/U4a/
 -- U5a join the same block instead of growing new globals):
 --   word 0         the Mid collector's region pointer (THIS unit)
+--   word 1         the frame machinery's CURRENT-FRAME pointer (frame-enter
+--                  pushes `hdr` here, frame-leave restores `hdr->next`;
+--                  runtime.mid:5680-5695, and FrameHdr's `next` row).  NOT
+--                  free: a value parked here survives only until the next
+--                  frame push — MEASURED, it is how O5 seat 3's first draft
+--                  lost its pointer.
+--   word 2         no_reuse (Rt.main's QBE_NO_REUSE knob)
+--   word 3         THE VALUES TABLE (O5 seat 3): the host's 256-entry
+--                  {name,value} array base, published ONCE by rt_boot
+--                  (`vm.values_table`) so Rt.value/Rt.valScanGo can walk it.
+--                  The ONE word in this block the ZIG side writes: the table
+--                  is the host's (it is what rt_boot/rt_argv_install install
+--                  the standard streams and *argv* into), so Mid gets the
+--                  pointer, not the storage.  4..7 stay free.
 --   words 8..11    driver knobs, getenv read once (U5a)
 --   word 12        the single .tail-in-flight scratch (U4a)
 --   word 13        no_tail_stage (B2: QBE_NOTTAILSTAGE bypasses to allocvec)

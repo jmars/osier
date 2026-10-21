@@ -1779,6 +1779,11 @@ defun Rt.intTab(dummy : val) -> val {
   return mknum(fresh);
 }
 // Rt.intStrCopy / intPairsCopy: the table's copy self-tails (frame-free).
+// THE TERMINATOR IS THE CALLER'S (O5 seat 3, MEASURED): this walk descends
+// len-1..0, so a `bytestore(dst, len, 0)` in THIS body runs on the UNWIND and
+// zeroes every byte the deeper frames copied — the name came back as its first
+// character only (a `(value *argv*)` miss printed `*`).  intInsertAt writes
+// dst[len] once, after the copy returns.
 defun Rt.intStrCopy(srcN : val, dstN : val, lenN : val) -> val {
   word src = payload(srcN, 0);
   word dst = payload(dstN, 0);
@@ -1788,8 +1793,7 @@ defun Rt.intStrCopy(srcN : val, dstN : val, lenN : val) -> val {
   }
   word i = len - 1;
   bytestore(dst, i, byteload(src, i));
-  val more = call Rt.intStrCopy(mknum(src), mknum(dst), mknum(i));
-  bytestore(dst, len, 0);
+  call Rt.intStrCopy(mknum(src), mknum(dst), mknum(i));
   return mknil;
 }
 defun Rt.intPairsCopy(freshN : val, nN : val, iN : val) -> val {
@@ -1894,6 +1898,7 @@ defun Rt.intInsertAt(nN : val, dataPtrN : val, lenN : val) -> val {
   word len = payload(lenN, 0);
   word store = rawcall malloc(len + 1);
   val sc = call Rt.intStrCopy(mknum(dataPtr), mknum(store), mknum(len));
+  bytestore(store, len, 0);
   wstore(tab + n * 16, 0, store);
   wstore(tab + n * 16 + 8, 0, len);
   wstore(glob, 8209, n + 1);
@@ -1917,10 +1922,59 @@ defun Rt.intern(str : val) -> val {
   return call Rt.intInsert(mknum(dataPtr), mknum(len));
 }
 
+// ==================== THE VALUES TABLE (O5 seat 3) =====================
+// rt_value_slot died here.  The table ITSELF is still the HOST's — 256
+// {name, value} entries (48 bytes each: the name pointer at +0, the 40-byte
+// Value at +8) page-allocated at Vm.init, registered with the collector, and
+// WRITTEN by rt_boot/rt_argv_install (the three standard streams + *argv*) —
+// so the Zig side cannot hand the lookup over; it hands over the BASE.  rt_boot
+// stores `vm.values_table` into the GLOBALS BLOCK at word 3 (RtGc.elm's layout
+// table; the same rule the string-stream registry and the intern table follow:
+// a QBE_MIDGC=0 build maps no region, rt_glob_addr is emitted unconditionally
+// and the block is .bss, so both routes read the same word).  Word 3 because
+// word 1 is the frame machinery's CURRENT-FRAME pointer (frame-enter/leave
+// `wstore(glob, 1, hdr)`) — a value parked there dies at the next frame push.
+//
+// A LINEAR 256-SLOT SCAN, not the Zig table's FNV-1a probe chain: the table
+// holds at most the four host-installed names, and a full walk is a SUPERSET of
+// the chain (names are unique, so it finds the same entry) — the hash is an
+// optimisation, not semantics, exactly the call the intern table's walk made.
+// The byte compare reuses the EXISTING Rt.cStrLenGo/Rt.intBytesEq self-tails
+// (equal length, then a downward compare), so no new compare defun is needed.
+// NO GC allocation, NO safepoint: this defun and its walk are frame-free, which
+// is what keeps `Rt.value` out of the `allocating` set.
+defun Rt.valScanGo(tabN : val, nameN : val, iN : val) -> val {
+  if (mkbool(payload(iN, 0) >= 256)) {
+    return mknum(0);
+  }
+  word e = payload(tabN, 0) + payload(iN, 0) * 48;
+  word nm = wload(e, 0);
+  if (mkbool(nm == 0)) {
+    recur(tabN, nameN, mknum(payload(iN, 0) + 1));
+  }
+  word nmLen = payload(call Rt.cStrLenGo(mknum(nm), mknum(0)), 0);
+  if (mkbool(nmLen != payload(call Rt.cStrLenGo(nameN, mknum(0)), 0))) {
+    recur(tabN, nameN, mknum(payload(iN, 0) + 1));
+  }
+  if (mkbool(payload(call Rt.intBytesEq(mknum(nm), nameN, mknum(nmLen)), 0) == 1)) {
+    return mknum(e + 8);
+  }
+  recur(tabN, nameN, mknum(payload(iN, 0) + 1));
+}
+
+// Rt.value: the `value` prim — `(value X)`, and the argvPrim thunk's
+// `(value *argv*)`.  A hit returns the table's Value; a miss returns the
+// interned SYMBOL, which is the deleted seat's valSymbol fallback in Mid's own
+// interner (the length comes from a cStr walk because the seat's input is a
+// NUL-terminated name, not a (data,len) string).
 defun Rt.value(sym : val) -> val {
-  word namePtr = payload(sym, 0);
-  word slotPtr = rawcall rt_value_slot(namePtr);
-  return vecload(slotPtr, 0);
+  word tab = wload(rawcall rt_glob_addr(), 3);
+  word slot = payload(call Rt.valScanGo(mknum(tab), mknum(payload(sym, 0)), mknum(0)), 0);
+  if (mkbool(slot != 0)) {
+    return vecload(slot, 0);
+  }
+  val n = call Rt.cStrLenGo(mknum(payload(sym, 0)), mknum(0));
+  return call Rt.intern(mkstr(payload(sym, 0), payload(n, 0)));
 }
 
 defun Rt.str(x : val) -> val {

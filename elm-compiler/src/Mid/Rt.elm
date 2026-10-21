@@ -961,6 +961,13 @@ rtDeps =
         , ( "Rt.intInsert", [ "Rt.intInsertGo", "Rt.intInsertAt" ] )
         , ( "Rt.intInsertGo", [ "Rt.intGrow", "Rt.intInsertAt" ] )
         , ( "Rt.intInsertAt", [ "Rt.intStrCopy" ] )
+        , -- ===== THE VALUES TABLE (O5 seat 3): rt_value_slot's replacement —
+          -- the HOST's 256-entry {name,value} table read through the GLOBALS
+          -- BLOCK word 3 (rt_boot publishes vm.values_table there), a LINEAR
+          -- 256-slot scan reusing the cStrLenGo/intBytesEq self-tails; a miss
+          -- falls to the interned symbol.
+          ( "Rt.valScanGo", [ "Rt.cStrLenGo", "Rt.intBytesEq" ] )
+        , ( "Rt.value", [ "Rt.valScanGo", "Rt.cStrLenGo", "Rt.intern" ] )
         , -- readFull recurses only on the EINTR RETRY (one frame per retry,
           -- bounded by signal frequency, not by data length) — callR is fine.
         ( "Rt.readFull", [ "Rt.readFull" ] )

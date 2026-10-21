@@ -1630,6 +1630,8 @@ rt_* seats (tools/qbe/rt.zig exports) called from Rt bodies today:
   * rt_gc_root_kind 1, rt_gc_root_slot 1, rt_gc_root_np 1
   * (O5) rt_ss_in/readbyte/close DELETED — the registry is Mid-owned
   * (O5) rt_sym_intern DELETED — the intern table is Mid-owned
+  * (O5 seat 3) rt_value_slot DELETED — the lookup is Mid's (the table stays
+    the HOST's; rt_boot publishes its base into the GLOBALS BLOCK word 3)
 
 (The rt.zig exports NOT here — rt_string, rt_vec_alloc, rt_raw_alloc,
 rt_vec_store(_plain), rt_frame_enter/leave, rt_apply, rt_bounce,
@@ -1704,7 +1706,8 @@ rawcallArity =
         --   is Mid-owned now, Region slots 38..39 + Rt.ssTab/ssIn/ssInGo/
         --   ssReadbyte/ssClose in runtime.mid)
         -- (O5 seat 2: rt_sym_intern DELETED — the intern table is Mid-owned)
-        , ( "rt_value_slot", 1 )
+        -- (O5 seat 3: rt_value_slot DELETED — Rt.value/Rt.valScanGo read the
+        --   host table through the GLOBALS BLOCK word 3)
         , ( "rt_float_text", 1 )
         , -- ===== the stage-6 A2 driver seats (A4a's rawcall route) =====
         ( "rt_boot", 0 )
