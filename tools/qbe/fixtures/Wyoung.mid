@@ -17,6 +17,7 @@ export Wyoung.two : val -> val
 export Wyoung.stale : val -> val
 export Wyoung.rooted : val -> val
 export Wyoung.fill : val -> val
+export Wyoung.prealloc : val -> val
 export Wyoung.unbarred : val -> val
 export Wyoung.rootNoCopy : val -> val
 export Wyoung.rootNoRead : val -> val
@@ -163,4 +164,20 @@ defun Wyoung.unbarred(cnt : val) -> val {
   wstore(raw, 0, base);
   val junk = call Wyoung.churn(cnt);
   return mkbool(payload(keep, 0) != wload(raw, 0));
+}
+
+// prealloc -> 42: THE BARRIER'S LAZY-REGION PIN.  A vecstore into a MALLOC'd
+// blob BEFORE any Mid allocation: the barrier reads rt_glob word 0, which is
+// the .bss ZERO until the first allocation runs gcInit — dereferencing it is
+// a NULL SIGSEGV (the hostapply flip blocker: Whost.run stores into its blob
+// before its churn's first allocraw).  Post-fix the store is plain (the
+// region is null = "nothing to remember yet").
+defun Wyoung.prealloc(dummy : val) -> val {
+  word blob = rawcall malloc(400);
+  rawcall rt_root_push_value_array(blob + 8, blob);
+  vecstore(blob + 8, 0, mknum(42));
+  word base = allocvec(1);
+  vecstore(base, 0, vecload(blob + 8, 0));
+  val keep = mkvec(base, 1);
+  return vecload(payload(keep, 0), 0);
 }

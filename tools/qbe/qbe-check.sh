@@ -190,7 +190,14 @@ run_mid() {
   # one, and run.js REFUSES the QBE_MIDGC=1 + QBE_MIDHOST=0 BUILD outright
   # (MIDGC_DEPENDS_ON), so the knob alone would exit 2 instead of compiling the
   # unhosted arm.
-  bin="$(QBE_MIDHOST="${MIDHOST_ROW:+1}" "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "${mids[@]}" "$entry" "$TMP/$name")" || {
+  # MIDGC_OFF=1 (the GC NURSERY flip's companion) builds the row on the
+  # QBE_MIDGC=0 Zig route: the run_midshape rows below it assert LITERAL .ssa
+  # shapes whose TEMP NAMES are the Zig route's register allocation — under
+  # the Mid collector the same declared boundary emits the same classes with
+  # different temps, so the frozen assertion is route-bound.  Unset, the
+  # variable is empty (= unset to run.js under both the old opt-in and the
+  # flipped default readings).
+  bin="$(QBE_MIDHOST="${MIDHOST_ROW:+1}" QBE_MIDGC="${MIDGC_OFF:+0}" "$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "${mids[@]}" "$entry" "$TMP/$name")" || {
     echo "FAIL $name: qbe-mk"; FAIL=1; return
   }
   local nat_out
@@ -2817,7 +2824,7 @@ run_midshape ffiw-u32 Ffiw32uMain.main tools/qbe/fixtures/ffiw-u32.elm tools/qbe
 # the `w` RESULT and the `extsw` after it — and the golden `"1.50"` is
 # load-bearing twice: `1.50` is the argument, and the string's LENGTH is the 4
 # that came back through the `w` return.
-run_midshape ffid-f64 FfidMain.main tools/qbe/fixtures/ffid-f64.elm tools/qbe/fixtures/ffid-f64.mid '=w call $strfromd(l %t0, l 16, l $d0, d %t3)' extsw
+MIDGC_OFF=1 run_midshape ffid-f64 FfidMain.main tools/qbe/fixtures/ffid-f64.elm tools/qbe/fixtures/ffid-f64.mid '=w call $strfromd(l %t0, l 16, l $d0, d %t3)' extsw
 # The RESULT half on its own: `atof(ptr) -> f64` takes no `d` argument, so the
 # only thing this row can be reading is the `=d call`.  MEASURED failure shape
 # (a mutation emitting `=l call` here): QBE refuses the program outright —
@@ -2846,7 +2853,7 @@ run_midshape ffiv-void FfivMain.main tools/qbe/fixtures/ffiv-void.elm tools/qbe/
 # `snprintf` is the printf shape; `fcntl` is the shape the effect-loop port
 # needs (`effectloop.zig:117`), with the variadic argument a real argument
 # rather than a format operand.
-run_midshape ffis-vararg FfisMain.main tools/qbe/fixtures/ffis-vararg.elm tools/qbe/fixtures/ffis-vararg.mid '=w call $snprintf(l %t0, l 32, l $d0, ..., l 1, l 2)' extsw
+MIDGC_OFF=1 run_midshape ffis-vararg FfisMain.main tools/qbe/fixtures/ffis-vararg.elm tools/qbe/fixtures/ffis-vararg.mid '=w call $snprintf(l %t0, l 32, l $d0, ..., l 1, l 2)' extsw
 run_midshape ffic-vararg FficMain.main tools/qbe/fixtures/ffic-vararg.elm tools/qbe/fixtures/ffic-vararg.mid '=w call $fcntl(w 1, w 3, ..., l 0)' extsw
 
 # ---- cffi U6: WIDTH-TYPED MEMORY (plan §8 U6) — the offsets are MEASURED ----

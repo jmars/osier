@@ -431,6 +431,15 @@ const RS_BIT: u64 = 1 << 61;
 export fn rt_vec_store_young(vec: [*]Value, i: i32, val: *const Value, region: usize) callconv(.c) void {
     vec[@intCast(i)] = val.*;
 
+    // THE MID REGION IS LAZY: rt_glob word 0 is 0 (the .bss zero) until the
+    // first Mid allocation runs gcInit.  A vecstore that precedes ANY Mid
+    // allocation — e.g. hostapply's `run` arm stores into its malloc'd blob
+    // before its churn's first allocraw — hands the barrier a NULL region;
+    // dereferencing w[28] here SIGSEGVs (the hostapply flip blocker).  The
+    // store itself is already done, so a NULL region means "nothing to
+    // remember yet" and is the plain-store case exactly like young-off.
+    if (region == 0) return;
+
     const w: [*]u64 = @ptrFromInt(region);
     if (w[28] == 0) return; // the nursery is off at run time — plain store
 

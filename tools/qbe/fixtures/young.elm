@@ -28,5 +28,8 @@ main mode n =
     else if mode == 6 then
         Wyoung.fill n
 
-    else
+    else if mode == 7 then
         Wyoung.unbarred n
+
+    else
+        Wyoung.prealloc n

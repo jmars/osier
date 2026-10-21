@@ -116,6 +116,16 @@ else
   fail "uncovered arm printed '$a'/'$b', want true/false"
 fi
 
+# ---- arm 4p: THE LAZY-REGION PIN — a vecstore before any Mid allocation
+# (the hostapply flip blocker's cheap stand-in): pre-fix the barrier read
+# rt_glob word 0 = the .bss zero and SIGSEGV'd; post-fix the store is plain.
+out="$(run env QBE_MIDGC_YOUNG=1 QBE_MIDGC_YOUNG_MB=1 QBE_HEAP_MB=$HEAP_MB "$YBIN" Young.main 8 1 2>/dev/null)"
+if [ "$out" = "42" ]; then
+  echo "PASS (4p): prealloc — a vecstore before the lazy region is mapped is a plain store (the barrier's NULL-region guard)"
+else
+  fail "prealloc printed '$out', want 42 (the barrier's lazy-region guard)"
+fi
+
 # ---- arm 5: the STATS witness — scavenges ran and copied a small fraction --
 s="$(grep -c '^midgc: scavenge s=' "$WORK/vc.on")"
 c="$(grep '^midgc: scavenge s=' "$WORK/vc.on" | tail -1 | sed 's/.* copied=\([0-9]*\) .*/\1/')"
