@@ -262,7 +262,10 @@ t4=$(now)
 # is now "the seed declares and the binary defines the same count" — it catches a
 # truncated table (a runtime `arity exceeds the qbe rt_callN table` death) on the
 # side that still exists.
-expect_n="$(grep -cE '^export function :ret \$rt_call[0-9]+' "$SEED" || true)"
+# The trailing `\(` anchors the pattern: without it `rt_call2r` (the two-range
+# bridge, NOT an arity entry) matches as `rt_call2` and the count is off by one
+# — MEASURED on the first run of this check.
+expect_n="$(grep -cE '^export function :ret \$rt_call[0-9]+\(' "$SEED" || true)"
 if command -v nm >/dev/null 2>&1; then
   have_n="$(nm "$BIN" 2>/dev/null | grep -cE ' T rt_call[0-9]+$' || true)"
   say "qbe-bootstrap: rt_callN table — the seed exports $expect_n, the linked compiler defines $have_n"

@@ -213,7 +213,8 @@ for a in "$@"; do
 done
 
 command -v node >/dev/null 2>&1 || { echo "primsdiff: node not found" >&2; exit 2; }
-command -v zig  >/dev/null 2>&1 || { echo "primsdiff: zig not found" >&2; exit 2; }
+# (ZIGHOST Z6) no `zig` prerequisite: the differential's Zig arm and the whole
+# Zig runtime are deleted; the Mid arm builds through qbe-mk (node + qbe + cc).
 command -v cc   >/dev/null 2>&1 || { echo "primsdiff: cc not found" >&2; exit 2; }
 [ -x "$ROOT/vendor/qbe/qbe" ] || { echo "primsdiff: vendored qbe missing" >&2; exit 2; }
 [ -f "$ROOT/elm-compiler/compiler.js" ] || { echo "primsdiff: compiler.js missing (run build.sh)" >&2; exit 2; }
@@ -233,19 +234,13 @@ command -v cc   >/dev/null 2>&1 || { echo "primsdiff: cc not found" >&2; exit 2;
 # reference runs die loudly ("unknown primitive") — it self-retires.
 REFDIR="$ROOT/tools/qbe/primsdiff/golden/batches"
 if [ "$FREEZE_REF" = 1 ]; then
-  echo "primsdiff: building the Zig reference arm (pre-flip freeze mode)"
-  zig build-obj -O ReleaseFast -lc -femit-bin="$WORK/primref.o" \
-    --dep gc --dep rt -Mroot="$ROOT/tools/qbe/primsdiff/primsdiff-zig.zig" \
-    -Mgc="$ROOT/vendor/osier-rt/src/gc.zig" \
-    --dep gc -Mrt="$ROOT/vendor/osier-rt/src/rt.zig" || {
-    echo "primsdiff: zig build-obj FAILED" >&2; exit 2; }
-  cc "$WORK/primref.o" -lc -o "$WORK/primref" || { echo "primsdiff: cc link FAILED" >&2; exit 2; }
-  mkdir -p "$REFDIR"
-  {
-    echo "frozen $(date -u +%Y-%m-%dT%H:%M:%SZ) from git $(git -C "$ROOT" rev-parse HEAD)"
-    echo "n=$N seed=$SEED"
-    echo "ops=$OPS"
-  } > "$REFDIR/MANIFEST.txt"
+  # TOMBSTONE (ZIGHOST Z6): the pre-flip CAPTURE mode built the Zig reference
+  # arm (primsdiff-zig.zig + vendor/osier-rt) and copied its output out as the frozen
+  # reference.  All three inputs are deleted, so the capture is impossible and
+  # the reference it produced is COMMITTED (golden/) and still used below — the
+  # comparison against it is untouched.  A loud refusal, not a silent skip.
+  echo "primsdiff: --freeze-ref is RETIRED at ZIGHOST Z6 (the Zig reference arm it built was deleted; the frozen reference it produced is committed and still compared against)" >&2
+  exit 2
 else
   [ -s "$REFDIR/MANIFEST.txt" ] || {
     echo "primsdiff: no frozen reference at $REFDIR (the flip deleted the Zig arm; re-capturing needs the pre-flip tree + --freeze-batch-ref)" >&2; exit 2; }

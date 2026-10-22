@@ -34,7 +34,7 @@
 # It is SELF-CONTAINED (builds compiler.js/test-compiler.js and the Lean
 # build on first use) and IDEMPOTENT (re-runs reproduce the same numbers; the
 # corpus diff is empty on an unmodified tree).  Verified from a CLEAN CLONE of
-# the artifact tag with no zig-out/, no compiler.js and no lean/.lake: ~45s and
+# the artifact tag with no compiler.js and no lean/.lake: ~45s and
 # exit 0 on the paper's build host.
 #
 # P6 (osier-ssaseed) adds step 2c's bootstrap check, which builds a compiler
@@ -46,7 +46,8 @@
 #   tools/osier-numbers.sh
 #
 # PREREQUISITES — checked up front, each with its own message if missing:
-#   on PATH: node, jq, zig (0.16), rg (ripgrep), python3.
+#   on PATH: node, jq, rg (ripgrep), python3.  (ZIGHOST Z6: zig is NO LONGER
+#   needed — the chain builds no Zig and runs no Zig suite.)
 #   Step 2c additionally wants cc (and make, if the vendored qbe is not built
 #   yet); it is the ONE step whose prerequisites are not preflighted, because
 #   its failure is REPORTED and never gates this chain.
@@ -96,7 +97,8 @@ need node   "node (any recent version) runs the compiler driver run.js / test-ru
 need jq     "jq builds the fixture gate's batch manifest."
 need rg     "ripgrep counts the Lean theorems/axioms — WITHOUT it those counts print 0."
 need python3 "python3 runs the runTask recount (tools/osier-recount-runTask.sh)."
-need zig    "zig runs the collector's OWN suite (step 6: vendor/osier-rt, \`zig build gate\`)."
+# (ZIGHOST Z6: no `need zig` — the last zig step, the collector's own suite,
+# is gone with the Zig runtime; see step 6's tombstone below.)
 
 if [ ! -x "$ELM_BIN" ]; then
     cat >&2 <<EOF
@@ -128,9 +130,9 @@ fi
 
 # --- build prerequisites (skip if already present) ---------------------------
 # P8: the ZINC interpreter and its elmvm harness are deleted, so there is no
-# zig-built gate binary anymore (the gate executes QBE-native binaries built
-# by tools/qbe/qbe-mk.sh on demand; `zig build gate` runs the GC suite, and
-# step 6 below runs it AS AN ORACLE).
+# gate binary to build (the gate executes QBE-native binaries built by
+# tools/qbe/qbe-mk.sh on demand).  ZIGHOST Z6 also deleted the Zig runtime and
+# its `zig build gate` suite — see step 6's tombstone for what carries that net.
 
 # compiler.js / test-compiler.js are the compiler UNDER TEST — always rebuild
 # them (a stale gitignored artifact would otherwise answer with the wrong exit
@@ -276,27 +278,18 @@ if [ "$recount_rc" -ne 0 ]; then
     fail=1
 fi
 
-# --- 6. the collector's OWN suite (`zig build gate`) -------------------------
-# THE MEMORY-SAFETY NET, and it lives OUTSIDE every oracle in steps 1-5: a green
-# gate / qbe-check / test-run / corpus says nothing about whether the collector
-# can SCAN what the compiler EMITS.  MEASURED 2026-10-12 (the phase-3 epoch):
-# three blockers — a use-after-free (a nursery names array never evacuated) and
-# a SILENT WRONG-FIELD read — shipped past a fully green battery because this
-# step was in no oracle; the suite was itself RED at 36/38 for the same reason.
-# `zig build gate` runs the suite in Debug + ReleaseSafe + ReleaseFast.
-# The runner prints a stray `failed command:` line per mode EVEN ON SUCCESS
-# (protocol noise), so the signal is the EXIT CODE, never the output.
-gc_out="$(cd "$ROOT/vendor/osier-rt" && zig build gate 2>&1)"
-gc_rc=$?
-gc_modes="$(printf '%s\n' "$gc_out" | grep -c '^gate$')"
-if [ "$gc_rc" -eq 0 ]; then
-    printf '%s\n' "$gc_out" | grep -E '^\s+M[0-9]+ T[0-9]+:' | sed 's/^/    /' | head -3
-    note "GC suite (zig build gate)" "exit 0 ($gc_modes optimize mode(s))"
-else
-    note "GC suite (zig build gate)" "FAILED (exit $gc_rc) — last line: $(printf '%s\n' "$gc_out" | tail -1)"
-    printf '%s\n' "$gc_out" | tail -20 | sed 's/^/    /'
-    fail=1
-fi
+# --- 6. the collector's OWN suite — DELETED AT ZIGHOST Z6 --------------------
+# This step ran `zig build gate` over vendor/osier-rt (the Zig collector's suite
+# in Debug + ReleaseSafe + ReleaseFast).  ZIGHOST Z6 deleted the vendored
+# package, the Zig runtime and the root build.zig, so there is no suite to run
+# and no zig in the chain at all.  THE MEMORY-SAFETY NET THIS STEP EXISTED FOR
+# is now the MID collector's own instruments, which are oracles in their own
+# right rather than a step here: QBE_MIDGC_VERIFY=1 (the O(heap) post-collect
+# invariant walk, V1-V6) driven by tools/qbe/probe-midgc-verify.sh, the
+# per-pointer invariants that are live in EVERY build, and the nursery/barrier
+# arms of probe-midgc-young.sh — all 19 probe scripts run serially in this arc's
+# gates.  Recorded here rather than silently dropped: a check that disappears
+# without its replacement named is how a hole opens.
 
 echo
 if [ "$fail" -eq 0 ]; then

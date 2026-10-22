@@ -64,34 +64,13 @@ done
 
 GREF="$ROOT/tools/qbe/consdiff/golden"
 if [ "$FREEZE_REF" = 1 ]; then
-  mkdir -p "$GREF"
-  {
-    echo "frozen $(date -u +%Y-%m-%dT%H:%M:%SZ) from git $(git -C "$ROOT" rev-parse HEAD) (prims.zig still carries primCons)"
-    echo "n=$N seed=$SEED batches=$BATCHES"
-  } > "$GREF/MANIFEST.txt"
-fi
-
-command -v node >/dev/null 2>&1 || { echo "consdiff: node not found" >&2; exit 2; }
-command -v zig  >/dev/null 2>&1 || { echo "consdiff: zig not found"  >&2; exit 2; }
-command -v cc   >/dev/null 2>&1 || { echo "consdiff: cc not found"   >&2; exit 2; }
-[ -x "$ROOT/vendor/qbe/qbe" ] || { echo "consdiff: vendored qbe missing" >&2; exit 2; }
-[ -f "$ROOT/elm-compiler/compiler.js" ] || { echo "consdiff: compiler.js missing (run build.sh)" >&2; exit 2; }
-
-# ---- THE REFERENCE, POST-FLIP ----------------------------------------------
-# The flip DELETED the Zig cons handler, so the reference is the FROZEN bytes
-# the Zig arm printed BEFORE the deletion (golden/, captured at git 8f581b8
-# with primCons present; same generator, same n/seed).  --freeze-ref is the
-# PRE-FLIP capture mode: it builds the live Zig arm, compares live and copies
-# the reference out (post-flip its runs die loudly, "unknown primitive" — it
-# self-retires).
-if [ "$FREEZE_REF" = 1 ]; then
-  echo "consdiff: building the Zig reference arm (pre-flip freeze mode)"
-  zig build-obj -O ReleaseFast -lc -femit-bin="$WORK/consref.o" \
-    --dep gc --dep rt -Mroot="$ROOT/tools/qbe/consdiff/consdiff-zig.zig" \
-    -Mgc="$ROOT/vendor/osier-rt/src/gc.zig" \
-    --dep gc -Mrt="$ROOT/vendor/osier-rt/src/rt.zig" || {
-    echo "consdiff: zig build-obj FAILED" >&2; exit 2; }
-  cc "$WORK/consref.o" -lc -o "$WORK/consref" || { echo "consdiff: cc link FAILED" >&2; exit 2; }
+  # TOMBSTONE (ZIGHOST Z6): the pre-flip CAPTURE mode built the Zig reference
+  # arm (consdiff-zig.zig + vendor/osier-rt) and copied its output out as the frozen
+  # reference.  All three inputs are deleted, so the capture is impossible and
+  # the reference it produced is COMMITTED (golden/) and still used below — the
+  # comparison against it is untouched.  A loud refusal, not a silent skip.
+  echo "consdiff: --freeze-ref is RETIRED at ZIGHOST Z6 (the Zig reference arm it built was deleted; the frozen reference it produced is committed and still compared against)" >&2
+  exit 2
 else
   [ -s "$GREF/MANIFEST.txt" ] || {
     echo "consdiff: no frozen reference at $GREF (the flip deleted the Zig arm; re-capturing needs the pre-flip tree + --freeze-ref)" >&2; exit 2; }

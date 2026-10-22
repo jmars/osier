@@ -109,11 +109,13 @@ marker_of() { # $1 rt:exports digest, $2 rt:callN, $3 rt:types, $4 gc:layout
 }
 
 # ---- gather ----------------------------------------------------------------
-# (ZIGHOST Z6) $RT — hostshim.zig — is GONE: the three rt:* components hash an
-# empty set.  $TYPES (gc/types.zig) survives only until Z6b deletes the vendored
-# package, and the gc:layout census below reads Mid/RtLayout.elm (Mid-side), so
-# the marker's LIVE component after Z6 is the layout.
-[ -f "$TYPES" ]   || { echo "abi-fingerprint: missing $TYPES" >&2; exit 2; }
+# (ZIGHOST Z6) $RT (hostshim.zig) and $TYPES (gc/types.zig) are GONE with the
+# Zig runtime: the three rt:* components hash an empty set, and the LIVE
+# component is `gc:layout` — the census of Mid/RtLayout.elm, the single
+# definition of every cross-ABI number that the emitted IL is derived from.
+# NOTHING here reads a Zig file any more, which is why the marker survives as a
+# meaningful check rather than a formality: it pins the layout the .ssa and the
+# seed agree on, and the seed's own bytes.
 command -v jq >/dev/null 2>&1 || { echo "abi-fingerprint: jq not found" >&2; exit 2; }
 
 RT_EXPORTS="$(rt_exports)"
