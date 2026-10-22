@@ -2173,9 +2173,14 @@ fi
 # when its operands are integer tokens (`7 / 2` is 3.5, `1 / 0` is Infinity),
 # so `f/` must never reach an integer arm; the first cut of this pass did
 # exactly that and these entries catch it (3 and SIGFPE respectively).
-# `tiny`/`big`/`bigNeg` pin printFloat's edges, where JS Number::toString
-# switches to exponential ("1e-7" / "-1e+22") and QBE's data lexer runs C's
-# `%lf` over the text; `infLit`/`negInfLit` are the NON-FINITE literals
+# `tiny`/`big`/`bigNeg` pin printFloat's edges at both ends of the DECIMAL
+# expansion — 0.0000001 / 10000000000000000000000.0 / its negative.  (This
+# comment used to say JS Number::toString "switches to exponential" here; the
+# COMMITTED GOLDENS say otherwise and they are the specification — the native
+# printValue renders the full decimal expansion with no exponent form, and the
+# 1e-7 / 1e22 spellings belong to the OTHER formatter, Prelude's Elm-side
+# jsFloatDigits, which String.fromFloat uses.  Corrected at ZIGHOST Z4a, where
+# the Mid port had to reproduce the goldens' shape exactly.) `infLit`/`negInfLit` are the NON-FINITE literals
 # (1.0e400 overflows to "Infinity", which used to get printFloat's ".0"
 # suffix appended and die as `d_Infinity.0`); `denorm` is the other end
 # (5e-324); `nan` is produced (0.0/0.0), which is the only way a NaN can

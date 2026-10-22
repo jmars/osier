@@ -984,8 +984,26 @@ rtDeps =
           -- bounded by signal frequency, not by data length) — callR is fine.
         ( "Rt.readFull", [ "Rt.readFull" ] )
         , -- ===== the VM-state + str prims (zigretire stage 3 GROUP 2)
-          ( "Rt.str", [ "Rt.floatCopy", "Rt.numText" ] )
+          -- ZIGHOST Z4a: the float arm is Rt.floatText's now (the Zig seat is
+          -- deleted).  Rt.floatCopy stays as a surface helper — the float path
+          -- no longer uses it, and it is pruned from every emit by
+          -- reachability; Z6 sweeps it with the rest.
+          ( "Rt.str", [ "Rt.floatText", "Rt.numText" ] )
         , ( "Rt.floatCopy", [ "Rt.floatCopy" ] )
+        , -- ===== THE FLOAT TEXT (ZIGHOST Z4a).  One entry per defun, exactly
+          -- its `call Rt.*` targets: the shortest-round-trip search (render +
+          -- strtod round-trip), the exponent reader, and the expansion writer
+          -- (byte-at-j + the bounded loop).  Rt.fRender and Rt.fDigit reach no
+          -- Rt key at all — their only calls are rawcall (libc) and the
+          -- builtins.
+          ( "Rt.floatText", [ "Rt.fShortest", "Rt.fExpAt", "Rt.fExpGo", "Rt.fEmit", "Rt.copyWords" ] )
+        , ( "Rt.fShortest", [ "Rt.fRender", "Rt.fShortest" ] )
+        , ( "Rt.fRender", [] )
+        , ( "Rt.fExpAt", [ "Rt.fExpAt" ] )
+        , ( "Rt.fExpGo", [ "Rt.fExpGo" ] )
+        , ( "Rt.fEmit", [ "Rt.fEmit", "Rt.fEmitByte" ] )
+        , ( "Rt.fEmitByte", [ "Rt.fDigit" ] )
+        , ( "Rt.fDigit", [] )
         , -- ===== the simple process prims (zigretire stage 3 GROUP 3A)
           ( "Rt.getpid", [] )
         , ( "Rt.getcwd", [ "Rt.cStrLenGo" ] )

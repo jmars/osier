@@ -6,10 +6,10 @@
 //! the collector/host seam that stays Zig until stage 7 (zighost):
 //!
 //!   the Zig GC (vendor/osier-rt gc/values/streams/tables/symbols/prims)
-//!   rt_string / rt_con / rt_make_closure / rt_vec_* /
-//!   rt_raw_alloc / rt_float_text (rt_sym_intern / rt_value_slot / rt_ss_*
-//!   are GONE — Mid owns those tables; see the O5 notes below)
-//!   rt_gc_heap_bytes (the heap-size number)
+//!   rt_string / rt_con / rt_make_closure / rt_vec_* / rt_raw_alloc
+//!   (rt_sym_intern / rt_value_slot / rt_ss_* are GONE — Mid owns those
+//!   tables; see the O5 notes below.  rt_float_text and rt_gc_heap_bytes are
+//!   GONE at ZIGHOST Z4a: the float text and the heap knob are Mid's)
 //!   the driver host half: rt_boot / rt_is_program / rt_run_program /
 //!   rt_print_value (called by Mid Rt.main).  rt_parse_arg and
 //!   rt_argv_install are GONE at O5 seat 4b — Mid owns the entry-arg parser
@@ -418,14 +418,14 @@ export fn rt_raw_alloc(n: i32) callconv(.c) [*]u8 {
 //   surviving statement of the policy is runtime.mid's Rt.vecStoreYoung, and
 //   TestMain's NURSERY PIN rows are what keep it honest.
 
-/// The configured heap size (main's QBE_HEAP_MB, in bytes).  The Mid
-/// collector mmaps its own region of this size so the churn differential's
-/// QBE_HEAP_MB sweeps steer both arms alike.
-export fn rt_gc_heap_bytes() callconv(.c) i64 {
-    return @intCast(gc_heap_bytes);
-}
-
-var gc_heap_bytes: usize = 0;
+// =====================================================================
+//  (DELETED AT ZIGHOST Z4a) rt_gc_heap_bytes — the heap-size number the Mid
+//  collector used to read across the seam.  The knob is Mid's now: Rt.gcInit
+//  reads QBE_HEAP_MB through Rt.gcEnvNum (the same parse this seat's owner
+//  did), so nothing reads the number across the seam any more.  rt_boot still
+//  computes its OWN copy from the same environment for the Zig Gc, which dies
+//  at Z5.
+// =====================================================================
 
 // (stage 6 U1c) The Mid collector's region pointer no longer lives here:
 // the two seats that served it are DELETED.  It moved to the Mid-owned
@@ -475,7 +475,8 @@ var gc_heap_bytes: usize = 0;
 //  slot) are runtime.mid's Rt.parseArg/Rt.argvInstall/Rt.argvGo/Rt.valEntry.
 //  The host keeps NO part of either: *argv* now enters the values table from
 //  Mid, through the base published above.
-//  rt_float_text below stays until its own seat.
+//  (DELETED AT ZIGHOST Z4a) rt_float_text and rt_gc_heap_bytes are GONE too —
+//  see their own tombstones below.
 // =====================================================================
 //
 
@@ -505,38 +506,14 @@ extern var rt_glob: [8211]u64; // RtGc.globWords — keep the two in step (8208 
 /// the no-reuse knob, 8..11 the driver knobs).
 const GLOB_VALUES_TAB: usize = 3;
 
-/// str's float-arm seat: render `bits` (an f64's raw bits) through
-/// values.floatText into a static BSS buffer and return a pointer to a
-/// { len: i64, data: [64]u8 } the Mid body copies into a GC string.  The 64-
-/// byte data is primStr's own buf[64] bound (a `{d}` text longer than it
-/// panics — the Zig reference behaviour, kept).  Static BSS: not moved by the
-/// GC, so the pointer stays valid across the Mid body's RawAllocRaw.
-///
-/// RE-ENTRANCY (why ONE static scratch is sound): the bytes are valid only
-/// from the render until the Mid body's Rt.floatCopy has copied them out.
-/// That window contains exactly ONE safepoint — the RawAllocRaw itself, whose
-/// collectors cannot call Rt.str (the VM is single-threaded and a collection
-/// runs no generated code) — and Rt.floatCopy is frame-free (no safepoint).
-/// So no second `str` call can interleave and overwrite `float_text_out`
-/// before the copy is done.  Any future Rt.str body that adds a second
-/// safepoint between this seat and the copy BREAKS this invariant (a nested
-/// String.fromFloat would clobber the first call's bytes).
-const FloatTextOut = extern struct { len: i64, data: [64]u8 };
-var float_text_out: FloatTextOut = .{ .len = 0, .data = undefined };
-export fn rt_float_text(bits: i64) callconv(.c) [*]const FloatTextOut {
-    const u: u64 = @bitCast(bits);
-    const v: f64 = @bitCast(u);
-    const s = values.floatText(float_text_out.data[0..], v);
-    // values.floatText returns a STATIC literal ("NaN"/"Infinity"/"-Infinity")
-    // for the non-finite arms — NOT a slice into `data` — so copy those in;
-    // finite floats already render into `data` (a self-copy would be @memcpy
-    // UB).  Then set the length last.
-    if (@intFromPtr(s.ptr) != @intFromPtr(&float_text_out.data)) {
-        @memcpy(float_text_out.data[0..s.len], s);
-    }
-    float_text_out.len = @intCast(s.len);
-    return @ptrCast(&float_text_out);
-}
+// =====================================================================
+//  (DELETED AT ZIGHOST Z4a) rt_float_text — the float-to-text seat.  The text
+//  is Mid's now (runtime.mid's Rt.floatText: shortest round-trip digits
+//  through strfromd/strtod, then the nan/inf spellings, the ".0" suffix and
+//  the 64-byte truncation the float goldens pin).  Rt.str's float arm calls it
+//  directly, so the Zig side keeps NO part of the render — and the
+//  `FloatTextOut` static it wrote into is gone with it.
+// =====================================================================
 
 // =====================================================================
 //  (DELETED AT O4) the effect loop's applier trampoline — bounce /
@@ -622,7 +599,6 @@ export fn rt_boot() callconv(.c) i64 {
         if (mb == 0) break :blk HEAP_BYTES;
         break :blk mb * 1024 * 1024;
     };
-    gc_heap_bytes = heap_bytes;
 
     rtInit();
     gg = Gc.init(.{

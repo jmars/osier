@@ -31,8 +31,11 @@ module Flt exposing
 -- literal alone, everything the inline fast path
 -- handles (+ - * and the < <= == branches), the operands where the fast path
 -- must DECLINE to rt_prim (a float on either side, and `/`), negatives,
--- magnitudes at both ends of `printFloat`'s text (1e-7 / 1e22, where JS's
--- Number::toString switches to exponential notation), a float crossing a
+-- magnitudes at both ends of `printFloat`'s text (1e-7 / 1e22, which the
+-- native printer renders as the full DECIMAL expansion — 0.0000001 /
+-- 10000000000000000000000.0 — NOT in exponential notation; the exponential
+-- spellings "1e-7"/"1e+22" come from Prelude's Elm-side jsFloatDigits, which is
+-- what String.fromFloat uses, and that is a different formatter), a float crossing a
 -- record field and a list, floats returned from and passed to functions, the
 -- `Float`/`Int` ends of the String.fromFloat conversion, and a
 -- float-accumulating loop.
@@ -132,9 +135,12 @@ neq =
     1.5 == 2.5
 
 
--- printFloat's edges: below 1e-6 and above 1e21 JS Number::toString switches
--- to exponential ("1e-7" / "1e+22"), so the data-item text stops looking like
--- a plain decimal — and C's %lf (what QBE's data lexer runs) must read it.
+-- printFloat's edges: 1e-7 and 1e22 are where the DECIMAL expansion gets long
+-- enough that the text stops looking like a short plain decimal (0.0000001 /
+-- 10000000000000000000000.0) — and C's %lf (what QBE's data lexer runs) must
+-- read it.  MEASURED at ZIGHOST Z4a: the expansion NEVER switches to an
+-- exponent form (the goldens are 0.0000001 and 10000000000000000000000.0);
+-- "1e-7"/"1e+22" are jsFloatDigits' spellings on the String.fromFloat path.
 tiny : Float
 tiny =
     1.0e-7

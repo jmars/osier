@@ -191,6 +191,13 @@ extern fstatat(dirfd : i32, path : ptr, buf : ptr, flag : i32) -> i32;
 // the same name.
 extern strtod(s : ptr, endptr : ptr) -> f64;
 extern strtoll(s : ptr, endptr : ptr, base : i32) -> i64;
+// ZIGHOST Z4a: the float-text formatter's two halves, both libc and both
+// CORRECTLY ROUNDED (that is the whole reason this port is not a digit
+// algorithm).  `strfromd(s, n, fmt, x)` renders a double through a printf
+// format with the C locale's decimal point; `strtod` reads it back.  The
+// fixture that proved the boundary is tools/qbe/fixtures/ffid-f64.mid (a `d`
+// argument and a `w` result in ONE call).
+extern strfromd(buf : ptr, n : i64, fmt : ptr, x : f64) -> i32;
 // THE REGION LAYOUT (midlang-u5) — the name -> word-slot table.  Before this
 // struct the offsets were `wstore(base, k, ..)` constants in Rt.gcInit and
 // prose in Mid/RtGc.elm; slot 0..12 MEASURED against gcInit's writes and every
@@ -214,7 +221,8 @@ extern strtoll(s : ptr, endptr : ptr, base : i32) -> i64;
 //                       by gcInit from the environment; 0 in every normal run
 //   slot 8  kind        STAGING: the object kind, written by Rt.gcAlloc and
 //   slot 9  count       STAGING: the exact count, read back by Rt.gcAllocGo
-//   slot 10 heapBytes   the heap budget (rt_gc_heap_bytes)
+//   slot 10 heapBytes   the heap budget (QBE_HEAP_MB, read by gcInit itself
+//                       since ZIGHOST Z4a — the old seat is deleted)
 //   slot 11 allocated   bump-path bytes charged against the budget
 //   slot 12 numClass    the number of size classes
 //
@@ -1484,6 +1492,242 @@ defun Rt.floatCopy(outN : val, bufN : val, i : val) -> val {
   return call Rt.floatCopy(outN, bufN, mknum(payload(i, 0) - 1));
 }
 
+// ===== THE FLOAT TEXT (ZIGHOST Z4a) =====
+// Rt.floatText: a float Value's PRINTED form — the retired Zig seat's contract
+// (values.floatText:254-268) rebuilt on libc's correctly-rounded formatter.
+//
+// WHY strfromd + strtod AND NOT A DIGIT ALGORITHM: the text is the SHORTEST
+// ROUND-TRIP representation (what Zig's `{d}` prints), so the digit count is a
+// PROPERTY of the value, not a fixed precision.  Rt.fShortest asks glibc for p
+// significant digits (p = 1..17, `%.{p-1}e`) and keeps the first p whose
+// strtod round-trip returns the SAME BITS — the standard shortest-repr
+// definition, with both directions delegated to a correctly-rounded libc.  17
+// is the guaranteed bound (no f64 needs more), so the loop terminates.
+//
+// THE RULES ON TOP, and where each is pinned by a committed golden:
+//   * NaN / Infinity / -Infinity spelled literally — float-nan (produced by
+//     0.0/0.0), float-infLit, float-negInfLit, float-infArith, float-fdivZero;
+//   * a ".0" suffix on an INTEGRAL expansion — float-lit (1.5? no: it has a
+//     dot) / float-tiny's neighbours: 12.0 (floatfun), 2.0 (floatlit),
+//     10000000000000000000000.0 (float-big);
+//   * THE EXPONENT SWITCH DOES NOT EXIST ON THIS TREE — MEASURED, and it
+//     refutes the zighost plan's "exponent switch at the JS thresholds 1e-7 /
+//     1e+22": Zig's `{d}` prints the full DECIMAL expansion, never an exponent
+//     form.  1e-7 prints 0.0000001 (float-tiny) and 1e22 prints
+//     10000000000000000000000.0 (float-big).  So this port has NO switch, and
+//     the comment in tools/qbe/qbe-check.sh and the fixture that say
+//     "exponential" are corrected in the same commit.
+//
+// THE 64-BYTE TRUNCATION IS PART OF THE CONTRACT, MEASURED, not an accident to
+// be tidied away: the retired seat's buffer is 64 bytes, its `{d}` call FAILS
+// for a longer expansion, and the bytes it leaves behind are the expansion
+// truncated at 64.  float-maxF (17 significant digits + 47 zeros = 64) and
+// float-denorm (0.0000…, 62 zeros) are exactly that, so the port truncates at
+// 64 too.  A longer buffer would print the CORRECT text and turn both goldens
+// red — the goldens are the specification here.
+//
+// THE SCRATCH is ONE malloc'd 136-byte cell, C-heap (invisible to the
+// collector), because the text is assembled byte by byte:
+//   +0   .. +63   the output text (the 64-byte truncation bound)
+//   +64  .. +71   the printf format ("%.16e" — built per call, p varies)
+//   +72  .. +111  strfromd's rendering (a %.16e of any f64 fits in 25 bytes)
+//   +112          neg  (0/1)   the sign, from the rendered text's leading '-'
+//   +120          p            the shortest round-trip digit count
+//   +128          e            the decimal exponent (value = 0.<p digits>e^e)
+// It is freed after the bytes are copied into the GC string.
+
+// Rt.fRender: render x at p significant digits into the scratch, and return
+// the RENDERING's address.  glibc's %.*e always emits exactly p digits (no
+// trailing zeros are possible at the SHORTEST p, or a smaller p would have
+// round-tripped), so the caller never has to count them.
+defun Rt.fRender(scratchN : val, pN : val, xN : val) -> val {
+  word s = payload(scratchN, 0);
+  word p = payload(pN, 0);
+  word fmt = s + 64;
+  bytestore(fmt, 0, 37);
+  bytestore(fmt, 1, 46);
+  bytestore(fmt, 2, 47 + p);
+  bytestore(fmt, 3, 101);
+  bytestore(fmt, 4, 0);
+  word n = rawcall strfromd(s + 72, 40, fmt, fload(xN));
+  return mknum(s + 72);
+}
+
+// Rt.fShortest: the shortest-round-trip search.  Each arm leaves its OWN
+// rendering in the scratch, so the LAST one (the winner) is the one the caller
+// reads — no second render.  A NON-FINITE value returns p = 0 (see the arm's
+// comment): glibc renders it as "nan"/"inf"/"-nan"/"-inf", which no round-trip
+// search can converge on, and the first letter is the test.
+defun Rt.fShortest(scratchN : val, pN : val, xN : val) -> val {
+  word src = payload(call Rt.fRender(scratchN, pN, xN), 0);
+  // NON-FINITE FIRST, by the RENDERING's first letter ('n' or 'i', after an
+  // optional '-').  This replaced a bit test on the value that was WRONG in a
+  // way only a golden could show: `0.0 / 0.0` on this backend produces a NaN
+  // with the SIGN BIT SET, and the exponent field read by signed division
+  // (bits / 2^52) truncates toward zero for a negative word — so the seat
+  // missed its own NaN arm and rendered "-n.0" (MEASURED: midgc-str printed
+  // 0 instead of 100).  The text cannot lie about which of the four
+  // non-finite spellings it is.
+  word c0 = byteload(src, 0);
+  word c = payload((c0 == 45) ? mknum(byteload(src, 1)) : mknum(c0), 0);
+  if (mkbool(c == 110) || mkbool(c == 105)) {
+    return mknum(0);
+  }
+  word back = payload(mkflt(rawcall strtod(src, 0)), 0);
+  if (mkbool(back == payload(xN, 0))) {
+    return pN;
+  }
+  return call Rt.fShortest(scratchN, mknum(payload(pN, 0) + 1), xN);
+}
+
+// Rt.fExpAt: the index just past the rendering's 'e'.  A SCAN, not arithmetic:
+// `%.0e` emits NO decimal point ("1e-07") while `%.2e` does ("4.25e+01"), so
+// the 'e' is not at a fixed offset — MEASURED: computing it as sign+p+1 put
+// the exponent reader on the '+' for every p >= 2 and on a digit for p == 1,
+// which is what turned 42.5 into 0.0000…0.
+defun Rt.fExpAt(srcN : val, iN : val) -> val {
+  word src = payload(srcN, 0);
+  word i = payload(iN, 0);
+  word c = byteload(src, i);
+  if (mkbool(c == 0)) {
+    return mknum(i);
+  }
+  if (mkbool(c == 101)) {
+    return mknum(i + 1);
+  }
+  return call Rt.fExpAt(mknum(src), mknum(i + 1));
+}
+
+// Rt.fExpGo: the decimal exponent, read from the SIGN onward (`+` and `-` both
+// occur; the digits accumulate left to right).
+defun Rt.fExpGo(srcN : val, iN : val, accN : val) -> val {
+  word src = payload(srcN, 0);
+  word i = payload(iN, 0);
+  word c = byteload(src, i);
+  if (mkbool(c == 0)) {
+    return accN;
+  }
+  if (mkbool(c == 45)) {
+    return mknum(0 - payload(call Rt.fExpGo(mknum(src), mknum(i + 1), accN), 0));
+  }
+  if (mkbool(c == 43)) {
+    return call Rt.fExpGo(mknum(src), mknum(i + 1), accN);
+  }
+  return call Rt.fExpGo(mknum(src), mknum(i + 1), mknum(payload(accN, 0) * 10 + (c - 48)));
+}
+
+// Rt.fDigit: digit k of the rendering.  Digit 0 sits at the rendering's start
+// (after the sign), digit k>0 one byte later because of the '.' — so the byte
+// offset is k for 0 and k+1 for the rest.
+defun Rt.fDigit(srcN : val, idxN : val, negN : val) -> val {
+  word idx = payload(idxN, 0);
+  word off = payload((idx == 0) ? mknum(0) : mknum(idx + 1), 0);
+  return mknum(byteload(payload(srcN, 0), payload(negN, 0) + off));
+}
+
+// Rt.fEmitByte: byte j of the DECIMAL EXPANSION — a pure function of j, so the
+// writer below needs no state but the scratch's three meta words.  `lead` is
+// the number of integer digits (exponent + 1):
+//   lead >= p   all-integer: the digits, then zeros out to `lead`
+//   0 < lead < p  digits[0..lead] '.' digits[lead..p]
+//   lead <= 0    "0." then (-lead) zeros then every digit
+defun Rt.fEmitByte(scratchN : val, jN : val) -> val {
+  word s = payload(scratchN, 0);
+  word j = payload(jN, 0);
+  word neg = wload(s, 14);
+  word p = wload(s, 15);
+  word e = wload(s, 16);
+  word lead = e + 1;
+  word src = s + 72;
+  if (mkbool(neg != 0) && mkbool(j == 0)) {
+    return mknum(45);
+  }
+  word k = j - neg;
+  if (mkbool(lead >= p)) {
+    if (mkbool(k < p)) {
+      return call Rt.fDigit(mknum(src), mknum(k), mknum(neg));
+    }
+    return mknum(48);
+  }
+  if (mkbool(lead > 0)) {
+    if (mkbool(k < lead)) {
+      return call Rt.fDigit(mknum(src), mknum(k), mknum(neg));
+    }
+    if (mkbool(k == lead)) {
+      return mknum(46);
+    }
+    return call Rt.fDigit(mknum(src), mknum(k - 1), mknum(neg));
+  }
+  if (mkbool(k == 0)) {
+    return mknum(48);
+  }
+  if (mkbool(k == 1)) {
+    return mknum(46);
+  }
+  if (mkbool(k < 2 + (0 - lead))) {
+    return mknum(48);
+  }
+  return call Rt.fDigit(mknum(src), mknum(k - 2 + lead), mknum(neg));
+}
+
+// Rt.fEmit: write the expansion into the scratch's output area, byte by byte,
+// and return the byte count — TRUNCATED at the 64-byte bound the goldens pin.
+defun Rt.fEmit(scratchN : val, jN : val) -> val {
+  word s = payload(scratchN, 0);
+  word j = payload(jN, 0);
+  word neg = wload(s, 14);
+  word p = wload(s, 15);
+  word e = wload(s, 16);
+  word lead = e + 1;
+  word rest = payload((lead > 0) ? mknum(p + 1) : mknum(2 + (0 - lead) + p), 0);
+  word totalU = payload((lead >= p) ? mknum(lead) : mknum(rest), 0);
+  word total = neg + totalU;
+  word bound = payload((total > 64) ? mknum(64) : mknum(total), 0);
+  if (mkbool(j >= bound)) {
+    return mknum(bound);
+  }
+  bytestore(s, j, payload(call Rt.fEmitByte(scratchN, mknum(j)), 0));
+  return call Rt.fEmit(scratchN, mknum(j + 1));
+}
+
+defun Rt.floatText(xN : val) -> val {
+  word s = rawcall malloc(136);
+  word p = payload(call Rt.fShortest(mknum(s), mknum(1), xN), 0);
+  if (mkbool(p == 0)) {
+    // NON-FINITE (Rt.fShortest's own test, on the rendering): 'n' is NaN, 'i'
+    // is an infinity, and the sign is the rendering's leading '-'.
+    word c0 = byteload(s + 72, 0);
+    word nneg = payload((c0 == 45) ? mknum(1) : mknum(0), 0);
+    word c = payload((c0 == 45) ? mknum(byteload(s + 72, 1)) : mknum(c0), 0);
+    rawcall free(s);
+    if (mkbool(c == 110)) {
+      return "NaN";
+    }
+    return (nneg != 0) ? "-Infinity" : "Infinity";
+  }
+  // The sign comes from the RENDERING, not from the bit test: it is what the
+  // text carries, and -0.0 must print "-0.0" (float-negZeroInv's sibling).
+  word src = s + 72;
+  word sneg = payload((byteload(src, 0) == 45) ? mknum(1) : mknum(0), 0);
+  word e = payload(call Rt.fExpGo(mknum(src), call Rt.fExpAt(mknum(src), mknum(0)), mknum(0)), 0);
+  wstore(s, 14, sneg);
+  wstore(s, 15, p);
+  wstore(s, 16, e);
+  word n = payload(call Rt.fEmit(mknum(s), mknum(0)), 0);
+  // THE ".0" RULE: an all-integer expansion carries no '.', and the suffix is
+  // written only when the seat's own bound allows it (n + 2 <= 64).  Both
+  // bytes are stored unconditionally — past the text they are inside the
+  // scratch and unread — and the LENGTH is the conditional value.
+  bytestore(s, n, 46);
+  bytestore(s, n + 1, 48);
+  word lead = e + 1;
+  word dot = payload((mkbool(lead >= p) && mkbool(n + 2 <= 64)) ? mknum(n + 2) : mknum(n), 0);
+  word out = allocraw(dot);
+  call Rt.copyWords(out, s, (dot + 7) / 8);
+  rawcall free(s);
+  return mkstr(out, dot);
+}
+
 defun Rt.assocGo(k : val, l : val) -> val {
   if (mkbool(tagis(l, 4))) {
     val pair = vecload(payload(l, 0), 0);
@@ -2259,13 +2503,7 @@ defun Rt.argvInstall(modeN : val, nargsN : val, argvN : val) -> val {
 
 defun Rt.str(x : val) -> val {
   if (mkbool(tagis(x, 12))) {
-    word outPtr = rawcall rt_float_text(payload(x, 0));
-    val lenN = mknum(wload(outPtr, 0));
-    val outN = mknum(outPtr);
-    word bufW = allocraw(payload(lenN, 0));
-    val bufN = mknum(bufW);
-    call Rt.floatCopy(outN, bufN, mknum(payload(lenN, 0) - 1));
-    return mkstr(bufW, payload(lenN, 0));
+    return call Rt.floatText(x);
   }
   if (mkbool(tagis(x, 0))) {
     return call Rt.numText(x);
@@ -4134,7 +4372,15 @@ defun Rt.gcInit(dummy : val) -> val {
     // corruption into a named fatal — this knob adds the O(heap) post-collect
     // walk that no default run can afford.
     word verifyKnob = rawcall getenv(rawstr("QBE_MIDGC_VERIFY"));
-    word heapBytes = rawcall rt_gc_heap_bytes();
+    // THE HEAP KNOB IS MID'S NOW (ZIGHOST Z4a): the rt_gc_heap_bytes seat is
+    // deleted and this is the same parse its owner did (rt_boot: absent,
+    // unparseable or 0 -> 64 MiB, else N MiB), through the Mid env reader the
+    // other three knobs already use.  The Zig Gc still computes its OWN copy
+    // from the same environment in rt_boot (it dies at Z5); nothing reads the
+    // number across the seam any more.
+    val heapArgV = call Rt.gcEnvNum(mknum(rawcall getenv(rawstr("QBE_HEAP_MB"))), mknum(0));
+    word heapArg = payload(heapArgV, 0);
+    word heapBytes = payload((heapArg != 0) ? mknum(heapArg * 1048576) : mknum(67108864), 0);
     // THE HEAP CEILING (GC ARC unit 4).  `heapBytes` is the INITIAL heap, not
     // the heap — the same semantics the Zig arm gives the same knob
     // (vendor/osier-rt/src/gc/heap.zig:145-176: `heap_bytes` is an initial size

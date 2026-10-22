@@ -1626,7 +1626,10 @@ syscall's `long`).
 rt_* seats (tools/qbe/rt.zig exports) called from Rt bodies today:
 
   * rt_halt 0 (the prim halt arm; retargets to the Mid Rt.halt under QBE_MIDDRIVER=1)
-  * rt_gc_heap_bytes 0
+  * (ZIGHOST Z4a) rt_gc_heap_bytes and rt_float_text DELETED — the heap knob
+    is read by Rt.gcInit through Rt.gcEnvNum, and the float text is Mid's
+    (Rt.floatText: strfromd/strtod + the three rules), so neither symbol is in
+    rt.o any more
   * (ZIGHOST Z1) rt_gc_roots_len/root_kind/root_slot/root_np DELETED — the
     collector's root walk reads the MID ROOT REGISTRY in the globals block
     (words 4/5/6 = base/count/cap), so no body reads a root seat and the ten
@@ -1713,7 +1716,8 @@ rawcallArity =
           -- surface, and J3 must know the symbol the surface spells.
         ( "rt_glob_addr", 0 )
         , ( "rt_die", 1 )
-        , ( "rt_gc_heap_bytes", 0 )
+        -- (ZIGHOST Z4a: rt_gc_heap_bytes DELETED — Rt.gcInit reads
+        --   QBE_HEAP_MB through Rt.gcEnvNum, so no body reads the seat)
         -- (ZIGHOST Z1: rt_gc_roots_len / rt_gc_root_kind / rt_gc_root_slot /
         --   rt_gc_root_np DELETED — the collector walks the Mid root registry
         --   now, so no body reads a root seat and these rows would name
@@ -1724,7 +1728,8 @@ rawcallArity =
         -- (O5 seat 2: rt_sym_intern DELETED — the intern table is Mid-owned)
         -- (O5 seat 3: rt_value_slot DELETED — Rt.value/Rt.valScanGo read the
         --   host table through the GLOBALS BLOCK word 3)
-        , ( "rt_float_text", 1 )
+        -- (ZIGHOST Z4a: rt_float_text DELETED — Rt.str's float arm calls the
+        --   Mid Rt.floatText, and no body rawcalls the seat)
         , -- ===== the stage-6 A2 driver seats (A4a's rawcall route) =====
         -- (O5 seat 4b: rt_parse_arg and rt_argv_install DELETED — the
         --   entry-arg parser and the *argv* list are runtime.mid's
