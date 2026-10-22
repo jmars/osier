@@ -1,5 +1,6 @@
-.zig-cache/
-zig-out/
+# (ZIGHOST Z6) the Zig build's caches are gone with the Zig runtime; the native
+# build products (tools/qbe-bootstrap.sh, tools/qbe/qbe-selfhost.sh) land in out/.
+out/
 
 # elm-compiler build artifacts (regenerable via elm-compiler/build.sh)
 elm-compiler/elm-stuff/
@@ -24,8 +25,9 @@ docs/research/build/*
 !docs/research/build/*.tex
 !docs/research/build/*.pdf
 
-# qbe native-backend build artefact (tools/qbe/qbe-mk.sh builds it on demand)
-tools/qbe/rt.o
+# (ZIGHOST Z6) tools/qbe/rt.o — the Zig runtime object — is DELETED; the entry
+# that ignored it is deleted with it, so a rebuilt object would show up in
+# `git status` as a returning client.
 
 # fetched third-party Elm sources (tools/bench/fetch-elm-corpus.sh) — the script and
 # MANIFEST.tsv are the committed record; the sources are reproducible, not vendored.

@@ -20,8 +20,9 @@
 #     unchanged). MEASURED 2026-10-19 on this fixture: one run printed NOTHING
 #     (rc=0, the callee took the garbage) and another printed
 #     `"first line here\nsecond line\nthird\n0:"` — prefix gone, length 0, the
-#     "first line" replaced by the whole text. rt.o must be rebuilt between the
-#     two states (rt-o.sh's freshness probe sees hostshim.zig).
+#     "first line" replaced by the whole text.  (That arm mutated the Zig
+#     hostshim.zig and rebuilt rt.o between the two states; ZIGHOST Z6 deleted
+#     both, so the arm is gone and only this PASS-AFTER statement remains.)
 #
 # WHY IT MATTERS BEYOND THE FIXTURE: the seed's own compiler driver has this
 # shape (`Task.andThen (runSsa entry) (Io.readFile path)` in

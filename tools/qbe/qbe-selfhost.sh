@@ -3,7 +3,8 @@
 #
 #   node run.js --batch (QBE_ENTRY=NativeMain.main per group) -> selfhost.ssa
 #   vendor/qbe/qbe selfhost.ssa                            -> selfhost.s
-#   cc selfhost.s tools/qbe/rt.o                           -> a NATIVE compiler
+#   cc selfhost.s                                         -> a NATIVE compiler
+#                                                             (ZIGHOST Z6: no runtime object)
 #   AOTRUN_ARGV=1 <native compiler> NativeMain.main --ssa NativeMain.main <m>
 #                                                         -> selfhost2.ssa
 #   cmp selfhost2.ssa selfhost.ssa                        <- the .ssa FIXED POINT
@@ -83,7 +84,7 @@
 #                        multi-GB: too small a heap is a loud panic, not a
 #                        wrong answer, but it still costs the run.
 #   QBE_SELFHOST_BIN     where the native compiler lands
-#                        (default zig-out/bin/qelmc; zig-out/ is gitignored).
+#                        (default out/bin/qelmc; out/ is gitignored).
 #   QBE_SELFHOST_WORK    scratch dir to use instead of a fresh mktemp -d
 #                        (kept on exit — for inspecting a failure).
 #   QBE_SELFHOST_ENTRY   entry defun (default NativeMain.main).
@@ -112,9 +113,10 @@ ENTRY="${QBE_SELFHOST_ENTRY:-NativeMain.main}"
 HEAP_MB="${QBE_HEAP_MB:-32768}"
 # One emit's wall-clock budget, in seconds (see the Env: note above).
 EMIT_BUDGET="${QBE_SELFHOST_EMIT_BUDGET:-60}"
-BIN="${QBE_SELFHOST_BIN:-$ROOT/zig-out/bin/qelmc}"
+BIN="${QBE_SELFHOST_BIN:-$ROOT/out/bin/qelmc}"
 MANIFEST="$ROOT/elm-compiler/selfhost/manifest.json"
-RT="$ROOT/tools/qbe/rt.o"
+# (ZIGHOST Z6) no RT: there is no runtime object.  The runtime is Mid and is
+# emitted into the .ssa, so every link below is <ssa>.s + libc.
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf 'qbe-selfhost: %s\n' "$*" >&2; exit 2; }
@@ -184,38 +186,17 @@ if [ ! -x "$QBE" ]; then
   "$ROOT/tools/qbe-build.sh" >&2 || die "qbe build failed"
 fi
 
-# ---- the runtime object (cached, freshness-invalidated) ----
-# The SAME graph now lives as a shared script, tools/qbe/rt-o.sh (qbe-mk.sh
-# and tools/qbe-bootstrap.sh call it).  It is deliberately NOT called from
-# here: this script is the load-bearing whole-corpus oracle and its rt-failure
-# exit code is 2 (its "tooling failure" class) where rt-o.sh exits 1.  Keep
-# the two copies in step -- if you change the probe or the build command here,
-# change rt-o.sh with it.
-# Verbatim the guard tools/qbe/qbe-mk.sh uses.  A cached rt.o answers only
-# while NOTHING it was built from is newer than it; the probe must FAIL SAFE
-# (if `find` errors, "no newer input" would silently reuse an rt.o built from
-# different inputs — treat "cannot tell" as stale and rebuild), and a failed
-# rebuild must refuse LOUDLY rather than answer from a stale object.  A stale
-# rt.o is exactly this repo's documented stale-artifact class.
-rt_newer="$(find "$ROOT/tools/qbe/hostshim.zig" "$ROOT/vendor/osier-rt/src" "$ROOT/src/effectloop.zig" \
-              -newer "$RT" -print -quit 2>/dev/null)" || rt_newer="PROBE_FAILED"
-if [ "$rt_newer" = "PROBE_FAILED" ]; then
-  say "qbe-selfhost: rt.o freshness probe FAILED — rebuilding rather than trusting it" >&2
-fi
-if [ ! -f "$RT" ] || [ -n "$rt_newer" ]; then
-  say "qbe-selfhost: building $RT (tools/qbe/hostshim.zig is newer than it)"
-  zig build-obj -O ReleaseFast -lc -femit-bin="$RT" \
-    --dep gc --dep rt --dep effectloop -Mroot="$ROOT/tools/qbe/hostshim.zig" \
-    -Mgc="$ROOT/vendor/osier-rt/src/gc.zig" \
-    --dep gc -Mrt="$ROOT/vendor/osier-rt/src/rt.zig" \
-    --dep gc --dep rt -Meffectloop="$ROOT/src/effectloop.zig" \
-    || die "rt.o rebuild FAILED — refusing to answer from a stale $RT"
-fi
+# ---- NO RUNTIME OBJECT (ZIGHOST Z6) ----
+# This block used to keep its OWN copy of rt-o.sh's freshness probe and
+# `zig build-obj` command (hostshim.zig + vendor/osier-rt).  Both the file and
+# the package are deleted, and so is rt-o.sh; the runtime is Mid and is emitted
+# into the .ssa.  The links below pass no object — a surviving client would be a
+# LINK ERROR, which is the guard this comment replaces.
 
 mkdir -p "$(dirname "$BIN")"
 
 # ============================ 1. emit the .ssa ============================
-# The manifest's OWN output path (zig-out/selfhost.ssa) is never written by
+# The manifest's OWN output path (out/selfhost.ssa) is never written by
 # this script: every output is redirected into scratch, because a batch
 # compile writes to the output the manifest NAMES and the run manifests below
 # are generated from it.  The compile only ever reads the sources.
@@ -271,9 +252,9 @@ t2=$(now)
 [ -s "$WORK/selfhost.s" ] || die "qbe produced no output"
 
 # ============================ 3. .s -> native compiler ============================
-say "== 3. cc selfhost.s rt.o -> $BIN"
+say "== 3. cc selfhost.s -> $BIN"
 t3=$(now)
-cc "$WORK/selfhost.s" "$RT" -o "$BIN" -lc
+cc "$WORK/selfhost.s" -o "$BIN" -lc
 cc_rc=$?
 t4=$(now)
 [ "$cc_rc" = 0 ] || die "cc exited $cc_rc"

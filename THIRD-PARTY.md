@@ -8,6 +8,19 @@ this file is the central record. An entry may also record code that is
 *vendored verbatim* rather than derived; such an entry says so, and carries no
 per-file comments because adding them would itself modify the upstream tree.
 
+## (ZIGHOST Z6) the vendored Zig runtime — DELETED, no longer third-party here
+
+`vendor/osier-rt/` (the Zig GC + values/state/streams/symbols/tables/varray
+package, itself derived from the Shen `zincvm.c` runtime) was deleted in the
+zighost arc's last act, together with `tools/qbe/hostshim.zig`, the `rt.o`
+object, `src/effectloop.zig` and the root `build.zig`/`build.zig.zon`.  Nothing
+in this repository links, builds or derives from it any more: the runtime is
+Mid (`elm-compiler/runtime.mid`), written for this project, and every artifact
+links against libc and nothing else.  The entry is kept as a RECORD so a reader
+comparing this file against the tree does not conclude the vendoring vanished by
+accident; the provenance history lives in `docs/gc-zig.md` and in `plan.md`'s
+BRIDGES table.
+
 ## stil4m/elm-syntax 7.3.9
 
 - **Licence:** MIT — Copyright (c) 2018 Mats Stijlaart

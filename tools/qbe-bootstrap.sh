@@ -59,7 +59,7 @@
 #
 # Usage / env:
 #   --out <path>              where the native compiler lands
-#                             (default $ROOT/zig-out/bin/qbe-bootstrap; zig-out/
+#                             (default $ROOT/out/bin/qbe-bootstrap; out/ is
 #                             is gitignored).  Also QBE_BOOTSTRAP_BIN.
 #   QBE_BOOTSTRAP_WORK        scratch dir instead of a fresh mktemp -d.
 #   QBE_BOOTSTRAP_HEAP_MB     GC heap for --verify's native emit (default
@@ -79,7 +79,7 @@ SEED="$ROOT/tools/bootstrap/compiler.ssa"
 ABI="$ROOT/tools/bootstrap/compiler.ssa.abi"
 MANIFEST="$ROOT/elm-compiler/selfhost/manifest.json"
 ENTRY="NativeMain.main"
-BIN="${QBE_BOOTSTRAP_BIN:-$ROOT/zig-out/bin/qbe-bootstrap}"
+BIN="${QBE_BOOTSTRAP_BIN:-$ROOT/out/bin/qbe-bootstrap}"
 # The native emit's GC heap.  16384 is the value the whole-compiler runs have
 # used since the manifest grew the middle tier; it is NOT free (the live set
 # is multi-GB) and it is a knob because a smaller machine can lower it and pay

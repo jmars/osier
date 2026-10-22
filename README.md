@@ -12,12 +12,14 @@ prerequisite — see **[ARTIFACT.md](ARTIFACT.md)**.
 Contents:
 
 - `elm-compiler/` — the Elm→QBE compiler (corpus `Prelude`/`Runtime`/core-libs,
-  the `run.js` batch driver, and the selfhost group).
-- `vendor/osier-rt/` — the shared GC package (path dep), linked by the QBE
-  runtime (`tools/qbe/rt.zig`) and by `zig build gate`.
-- `src/effectloop.zig` — the language host: the CEK effect-manager over the
-  compiler's Task effects (execplan + stream/file prims + time + Quit). The UI
-  effects (renderer + terminal input) are not handled here; they live in fx-ui.
+  the `run.js` batch driver, and the selfhost group) **and the whole runtime**:
+  `runtime.mid` is the Mid-written runtime (collector, roots, write barrier,
+  printer, float text, boot) that every artifact links, emitted INTO the `.ssa`.
+  There is no Zig in this repo any more — the Zig runtime, its vendored GC
+  package (`vendor/osier-rt/`), `tools/qbe/hostshim.zig`, the `rt.o` object and
+  the language host (`src/effectloop.zig`, retired at O4) were deleted by the
+  zighost arc, whose last act is `Z6`; the tombstone in `docs/gc-zig.md` and the
+  `BRIDGES` table in `plan.md` are the record.
 - `lean/` — the Lean 4 mechanization.
 - `tests/elm-fixtures/` — the language fixtures + `run-elm-gate.sh` gate
   (`MATRIX.md` lists every registered check, generated from the gate).
@@ -28,15 +30,12 @@ Contents:
 
 ## Build
 
-```sh
-zig build gate     # the GC suite (vendor/osier-rt) in Debug + ReleaseSafe + ReleaseFast
-zig build test     # the gc suite, Debug only
-```
-
-There is deliberately no compiler build step here. `elm-compiler/run.js` drives
-the Elm→QBE front end (`elm-compiler/build.sh` builds `compiler.js`), and the
-native backend is built on demand by `tools/qbe/qbe-mk.sh`
-(`zig build-obj` for `tools/qbe/rt.o` + the vendored qbe + `cc`).
+There is deliberately no build step here, and no Zig. `elm-compiler/run.js`
+drives the Elm→QBE front end (`elm-compiler/build.sh` builds `compiler.js`), and
+the native backend is built on demand by `tools/qbe/qbe-mk.sh`: the vendored
+`vendor/qbe/qbe` turns the emitted `.ssa` into assembly and `cc` links it
+against libc — the runtime is Mid and is already inside the `.ssa`, so there is
+no runtime object to build. The evidence chain is `tools/osier-numbers.sh`.
 
 ## Recursion and the native stack
 
@@ -65,7 +64,8 @@ accumulator walks. The finishing reverse is cheap on both build paths:
 as is elm/core's (`foldl cons [] list`).
 
 As a mitigation — explicitly **not** a guarantee — the native runtime raises
-the stack soft limit to 64 MB at startup (`tools/qbe/rt.zig`). That net covers
+the stack soft limit to 64 MB at startup (`Rt.main` in
+`elm-compiler/runtime.mid`). That net covers
 every C-stack exhaustion up to 64 MB, and deep non-tail recursion can still
 exhaust it and crash. The backend mechanism (in-frame loops, the bounce loop,
 frame rooting) is described in [docs/qbe-backend.md](docs/qbe-backend.md).

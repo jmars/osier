@@ -1,4 +1,17 @@
-# Shen GC — Zig port notes (src/gc)
+# Shen GC — Zig port notes (src/gc) — DELETED CODE, KEPT AS RECORD
+
+> **ZIGHOST Z6 (2026-10-22): THE CODE THIS DOCUMENT DESCRIBES IS GONE.**  Every
+> file named below (`src/gc/*.zig`, the vendored `vendor/osier-rt/` package, the
+> `tools/qbe/hostshim.zig` shim and the `rt.o` object it built) was DELETED in
+> the zighost arc's last act, after the Mid runtime took over the collector, the
+> roots, the write barrier, the closure cache, the float text, the printer and
+> the boot.  Nothing in this repository builds or links any of it, and
+> `rg --files -g '*.zig'` over the tree is EMPTY.  The document is kept because
+> it is the only written record of HOW the retired collector worked — which is
+> what a reader needs to judge the Mid collector (`elm-compiler/runtime.mid`,
+> `Mid/RtGc.elm`) that replaced it.  Read it as history, not as a map of the
+> tree.  The live runtime's own notes are `docs/qbe-backend.md` and
+> `Mid/RtGc.elm`'s header.
 
 A faithful Zig 0.16 port of the Shen Lisp generational moving GC in
 `reference/shen-gc/gc.c` (+ `zincvm.c`'s scan helpers and `gc.md`'s write-barrier
