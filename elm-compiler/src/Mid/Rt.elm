@@ -1004,6 +1004,22 @@ rtDeps =
         , ( "Rt.fEmit", [ "Rt.fEmit", "Rt.fEmitByte" ] )
         , ( "Rt.fEmitByte", [ "Rt.fDigit" ] )
         , ( "Rt.fDigit", [] )
+        , -- ===== THE PRINTER (ZIGHOST Z4b).  One entry per defun, exactly its
+          -- `call Rt.*` targets.  Rt.pvV is the tag walk (recursive, so it
+          -- names itself) and reaches the two formatters the walk delegates:
+          -- Rt.numText for the number text and Rt.floatText (Z4a) for the
+          -- float text — the printer reimplements NEITHER.  Rt.pvRec is the
+          -- record element loop; the four appenders reach Rt.copyWords /
+          -- Rt.byteCopyGo / Rt.cStrLenGo and nothing else.  Rt.die is already a
+          -- driverSeed, so the two refused-by-name arms are closure edges.
+          ( "Rt.printValue", [ "Rt.pvV" ] )
+        , ( "Rt.pvV", [ "Rt.pvV", "Rt.pvRec", "Rt.pvS", "Rt.pvZ", "Rt.pvByte", "Rt.numText", "Rt.floatText", "Rt.die" ] )
+        , ( "Rt.pvRec", [ "Rt.pvRec", "Rt.pvV", "Rt.pvByte" ] )
+        , ( "Rt.pvNeed", [ "Rt.pvNeed", "Rt.copyWords" ] )
+        , ( "Rt.pvN", [ "Rt.pvNeed", "Rt.byteCopyGo" ] )
+        , ( "Rt.pvByte", [ "Rt.pvNeed" ] )
+        , ( "Rt.pvZ", [ "Rt.cStrLenGo", "Rt.pvN" ] )
+        , ( "Rt.pvS", [ "Rt.pvN" ] )
         , -- ===== the simple process prims (zigretire stage 3 GROUP 3A)
           ( "Rt.getpid", [] )
         , ( "Rt.getcwd", [ "Rt.cStrLenGo" ] )
@@ -1230,7 +1246,7 @@ rtDeps =
           -- edge costs the emit NOTHING: Rt.die is already a driverSeed ROOT,
           -- so the closure it pulls (Rt.cStrLenGo) is in every artifact
           -- already — an edge, not a new root, exactly like Rt.frame-leave's.
-          ( "Rt.main", [ "Rt.cStrLenGo", "Rt.metaGo", "Rt.parseArgsGo", "Rt.argvInstall", "Rt.die", "Rt.rootPushValueArray", "Rt.rootPushValue" ] )
+          ( "Rt.main", [ "Rt.cStrLenGo", "Rt.metaGo", "Rt.parseArgsGo", "Rt.argvInstall", "Rt.die", "Rt.rootPushValueArray", "Rt.rootPushValue", "Rt.printValue" ] )
         , -- ===== the stage-6 B0 frame machinery.  Rt.frame-enter's RawCall
           -- edges are its one helper; Rt.frame-leave's only edge is Rt.die
           -- (the no-frame panic — Rt.die is already a driverSeed, so this is

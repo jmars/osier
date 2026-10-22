@@ -1543,12 +1543,23 @@ defun Rt.floatCopy(outN : val, bufN : val, i : val) -> val {
 defun Rt.fRender(scratchN : val, pN : val, xN : val) -> val {
   word s = payload(scratchN, 0);
   word p = payload(pN, 0);
+  // THE PRECISION IS ONE OR TWO DIGITS.  `%.{p-1}e` needs p-1 decimals, and
+  // p-1 reaches 16 at the shortest-round-trip bound — so a single-byte format
+  // builder writes "%.@e" for every p >= 11 and glibc ABORTS on the invalid
+  // conversion (MEASURED: float-maxF and every other 17-digit value died with
+  // SIGABRT and no output, and the Z4a float matrix could not see it because
+  // the printer was still the Zig seat then — only the printer flip routes a
+  // printed float through THIS formatter).  The bytes are written
+  // unconditionally at fixed offsets, with the 'e'/NUL position conditional.
+  word d = p - 1;
+  word two = payload((d >= 10) ? mknum(1) : mknum(0), 0);
   word fmt = s + 64;
   bytestore(fmt, 0, 37);
   bytestore(fmt, 1, 46);
-  bytestore(fmt, 2, 47 + p);
-  bytestore(fmt, 3, 101);
-  bytestore(fmt, 4, 0);
+  bytestore(fmt, 2, payload((two != 0) ? mknum(48 + d / 10) : mknum(48 + d), 0));
+  bytestore(fmt, 3, payload((two != 0) ? mknum(48 + d - (d / 10) * 10) : mknum(101), 0));
+  bytestore(fmt, 4, payload((two != 0) ? mknum(101) : mknum(0), 0));
+  bytestore(fmt, 5, 0);
   word n = rawcall strfromd(s + 72, 40, fmt, fload(xN));
   return mknum(s + 72);
 }
@@ -1726,6 +1737,210 @@ defun Rt.floatText(xN : val) -> val {
   call Rt.copyWords(out, s, (dot + 7) / 8);
   rawcall free(s);
   return mkstr(out, dot);
+}
+
+// ===== THE PRINTER (ZIGHOST Z4b) =====
+// Rt.printValue: the driver's output walk — values.printValue:272-319 (C:
+// zincvm.c:383-404), tag for tag, into ONE malloc'd grow-by-doubling buffer
+// that is written to stdout in a single call and then newline-terminated.
+//
+// THE CONTRACT, and why it is byte-exact rather than "close": EVERY golden in
+// this repo is the program's printed output, so this walk IS the corpus oracle.
+// The shapes, each the reference's:
+//   number   the decimal (Rt.numText — the same i64 text primStr printed)
+//   string   "…" with the RAW bytes (no escaping — the reference does not escape)
+//   symbol   the name, unquoted (a NUL-terminated C string: payload word 0)
+//   boolean  true / false
+//   cons     [cons CAR . CDR], recursively
+//   record   [record v0 v1 …] — POSITIONAL, in canonical (sorted) order
+//   nil      []
+//   vector   [vector N]
+//   stream   [stream in|out]
+//   error    [error "message"]
+//   prim     [prim name]
+//   mark     mark
+//   float    Rt.floatText's text (Z4a — the ONE float formatter; this walk
+//            does not reimplement it)
+//   lambda   REFUSED BY NAME.  The reference prints "[lambda {code} {code_len}
+//            env={env} {env_len}]" — two POINTER VALUES in the text, so no
+//            golden could pin it and no port could reproduce it.  A program
+//            whose printed result is a closure gets a named fatal instead of an
+//            address that differs every run.
+// Anything else (tag 13, which the collector's own walks also treat as
+// unknown) is refused by name too.
+//
+// THE BUFFER is a {buf, len, cap} state block (malloc'd, 32 bytes) so the walk
+// needs no mutable globals: Rt.pvByte/pvN/pvS/pvZ append, Rt.pvNeed doubles
+// through Rt.copyWords, and the whole thing is freed after the write.  The walk
+// is FRAMED (a val defun): every numText/floatText call is a GC allocation and
+// the Value being printed must stay rooted across it.
+defun Rt.pvNeed(stN : val, needN : val) -> val {
+  word st = payload(stN, 0);
+  word len = wload(st, 1);
+  word cap = wload(st, 2);
+  if (mkbool(len + payload(needN, 0) <= cap)) {
+    return mknum(0);
+  }
+  word nc = payload((cap == 0) ? mknum(256) : mknum(cap * 2), 0);
+  word nb = rawcall malloc(nc);
+  word old = wload(st, 0);
+  call Rt.copyWords(nb, old, (len + 7) / 8);
+  val freed = if (old != 0) {
+    rawcall free(old);
+    return mknil;
+  } else {
+    return mknil;
+  };
+  wstore(st, 0, nb);
+  wstore(st, 2, nc);
+  return call Rt.pvNeed(stN, needN);
+}
+
+defun Rt.pvN(stN : val, pN : val, nN : val) -> val {
+  word n = payload(nN, 0);
+  word grown = payload(call Rt.pvNeed(stN, mknum(n)), 0);
+  word st = payload(stN, 0);
+  word len = wload(st, 1);
+  call Rt.byteCopyGo(mknum(wload(st, 0) + len), mknum(payload(pN, 0)), mknum(n));
+  wstore(st, 1, len + n);
+  return mknum(0);
+}
+
+defun Rt.pvByte(stN : val, cN : val) -> val {
+  word grown = payload(call Rt.pvNeed(stN, mknum(1)), 0);
+  word st = payload(stN, 0);
+  word len = wload(st, 1);
+  bytestore(wload(st, 0), len, payload(cN, 0));
+  wstore(st, 1, len + 1);
+  return mknum(0);
+}
+
+// a NUL-terminated C string (a symbol's, a prim's, an error's message, or a
+// static piece like "[cons ")
+defun Rt.pvZ(stN : val, pN : val) -> val {
+  val ln = call Rt.cStrLenGo(mknum(payload(pN, 0)), mknum(0));
+  return call Rt.pvN(stN, mknum(payload(pN, 0)), ln);
+}
+
+// a Mid string Value's bytes (data at payload word 0, length at word 1's low half)
+defun Rt.pvS(stN : val, vN : val) -> val {
+  return call Rt.pvN(stN, mknum(payload(vN, 0)), mknum(payload32(vN, 1)));
+}
+
+defun Rt.pvRec(stN : val, vN : val, iN : val) -> val {
+  word i = payload(iN, 0);
+  if (mkbool(i >= reclen(vN))) {
+    return mknum(0);
+  }
+  call Rt.pvByte(stN, mknum(32));
+  call Rt.pvV(stN, vecload(payload(vN, 0), i));
+  return call Rt.pvRec(stN, vN, mknum(i + 1));
+}
+
+defun Rt.pvV(stN : val, vN : val) -> val {
+  if (mkbool(tagis(vN, 0))) {
+    call Rt.pvS(stN, call Rt.numText(vN));
+    return mknum(0);
+  }
+  if (mkbool(tagis(vN, 1))) {
+    call Rt.pvByte(stN, mknum(34));
+    call Rt.pvS(stN, vN);
+    call Rt.pvByte(stN, mknum(34));
+    return mknum(0);
+  }
+  if (mkbool(tagis(vN, 2))) {
+    call Rt.pvZ(stN, mknum(payload(vN, 0)));
+    return mknum(0);
+  }
+  if (mkbool(tagis(vN, 3))) {
+    if (mkbool(payload32(vN, 0) != 0)) {
+      call Rt.pvZ(stN, mknum(rawstr("true")));
+      return mknum(0);
+    }
+    call Rt.pvZ(stN, mknum(rawstr("false")));
+    return mknum(0);
+  }
+  if (mkbool(tagis(vN, 5))) {
+    call Rt.pvZ(stN, mknum(rawstr("[]")));
+    return mknum(0);
+  }
+  if (mkbool(tagis(vN, 4))) {
+    call Rt.pvZ(stN, mknum(rawstr("[cons ")));
+    call Rt.pvV(stN, vecload(payload(vN, 0), 0));
+    call Rt.pvZ(stN, mknum(rawstr(" . ")));
+    call Rt.pvV(stN, vecload(payload(vN, 0), 1));
+    call Rt.pvZ(stN, mknum(rawstr("]")));
+    return mknum(0);
+  }
+  if (mkbool(tagis(vN, 14))) {
+    call Rt.pvZ(stN, mknum(rawstr("[record")));
+    call Rt.pvRec(stN, vN, mknum(0));
+    call Rt.pvZ(stN, mknum(rawstr("]")));
+    return mknum(0);
+  }
+  if (mkbool(tagis(vN, 10))) {
+    call Rt.pvZ(stN, mknum(rawstr("[vector ")));
+    call Rt.pvS(stN, call Rt.numText(mknum(payload32(vN, 1))));
+    call Rt.pvZ(stN, mknum(rawstr("]")));
+    return mknum(0);
+  }
+  if (mkbool(tagis(vN, 11))) {
+    if (mkbool(payload32(vN, 1) != 0)) {
+      call Rt.pvZ(stN, mknum(rawstr("[stream in]")));
+      return mknum(0);
+    }
+    call Rt.pvZ(stN, mknum(rawstr("[stream out]")));
+    return mknum(0);
+  }
+  if (mkbool(tagis(vN, 9))) {
+    call Rt.pvZ(stN, mknum(rawstr("[error \"")));
+    call Rt.pvZ(stN, mknum(payload(vN, 0)));
+    call Rt.pvZ(stN, mknum(rawstr("\"]")));
+    return mknum(0);
+  }
+  if (mkbool(tagis(vN, 8))) {
+    call Rt.pvZ(stN, mknum(rawstr("[prim ")));
+    call Rt.pvZ(stN, mknum(payload(vN, 0)));
+    call Rt.pvZ(stN, mknum(rawstr("]")));
+    return mknum(0);
+  }
+  if (mkbool(tagis(vN, 7))) {
+    call Rt.pvZ(stN, mknum(rawstr("mark")));
+    return mknum(0);
+  }
+  if (mkbool(tagis(vN, 12))) {
+    call Rt.pvS(stN, call Rt.floatText(vN));
+    return mknum(0);
+  }
+  if (mkbool(tagis(vN, 6))) {
+    call Rt.die(rawstr("qbe-rt: printValue: a lambda prints as code/env ADDRESSES, refused by name (no golden can pin an address)"));
+    return mknum(0);
+  }
+  call Rt.die(rawstr("qbe-rt: printValue: unknown value tag"));
+  return mknum(0);
+}
+
+defun Rt.printValue(xN : val) -> val {
+  word st = rawcall malloc(32);
+  wstore(st, 0, 0);
+  wstore(st, 1, 0);
+  wstore(st, 2, 0);
+  call Rt.pvV(mknum(st), xN);
+  rawcall write(1, wload(st, 0), wload(st, 1));
+  rawcall write(1, rawstr("\n"), 1);
+  word buf = wload(st, 0);
+  val freed = if (buf != 0) {
+    rawcall free(buf);
+    return mknil;
+  } else {
+    return mknil;
+  };
+  rawcall free(st);
+  // The reference returns 1 after "qbe-rt: print failed" when its ALLOCATING
+  // writer fails (an OOM).  Here the buffer is libc malloc, whose failure is a
+  // null deref rather than a returnable error, so the failure arm has no
+  // reachable input and the code is 0 — stated, not silently dropped.
+  return mknum(0);
 }
 
 defun Rt.assocGo(k : val, l : val) -> val {
@@ -6921,7 +7136,7 @@ defun Rt.main(argc : word, argv : word) -> word {
   word chk = if (payload32(call Rt.hostIsProgram(vecload(fptr, 0)), 0) != 0) {
     call Rt.hostRun(mknum(fptr), mknum(modelslot));
     call Rt.rootPushValue(modelslot);
-    word mppc = rawcall rt_print_value(modelslot);
+    word mppc = payload(call Rt.printValue(vecload(modelslot, 0)), 0);
     word mpf = if (mkbool(mppc != 0)) {
       rawcall exit(1);
       return 0;
@@ -6934,7 +7149,7 @@ defun Rt.main(argc : word, argv : word) -> word {
     return 0;
   };
   word fptr2 = wload(fslot, 0);
-  word ppc = rawcall rt_print_value(fptr2);
+  word ppc = payload(call Rt.printValue(vecload(fptr2, 0)), 0);
   word pf = if (mkbool(ppc != 0)) { rawcall exit(1); return 0; } else { return 0; };
   return 0;
 }
@@ -10033,7 +10248,7 @@ defun Rt.hostRunLoop(hN : val) -> val {
 // pending effects, and the exec arm's plan free is a value-ABI call, i.e. a GC
 // ALLOCATION.  `outAddr` is Rt.main's RAW `modelslot` (malloc(40), not in any
 // scanned array), so a collect AFTER the copy would move the model in the
-// blob's slot 0 and leave a stale pointer in the cell that rt_print_value
+// blob's slot 0 and leave a stale pointer in the cell that Rt.printValue
 // reads.  Before the copy, the model is still reachable through the registered
 // slot array and a collect updates it in place — so the order is
 // cleanup -> copy -> free the fd table -> pop the root.

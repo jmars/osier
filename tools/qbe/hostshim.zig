@@ -10,8 +10,8 @@
 //!   (rt_sym_intern / rt_value_slot / rt_ss_* are GONE — Mid owns those
 //!   tables; see the O5 notes below.  rt_float_text and rt_gc_heap_bytes are
 //!   GONE at ZIGHOST Z4a: the float text and the heap knob are Mid's)
-//!   the driver host half: rt_boot / rt_is_program / rt_run_program /
-//!   rt_print_value (called by Mid Rt.main).  rt_parse_arg and
+//!   the driver host half: rt_boot / rt_is_program / rt_run_program
+//!   (rt_print_value is GONE at ZIGHOST Z4b — Mid owns the printer).  rt_parse_arg and
 //!   rt_argv_install are GONE at O5 seat 4b — Mid owns the entry-arg parser
 //!   and the *argv* list (runtime.mid's Rt.parseArg/Rt.argvInstall)
 //!   (ZIGHOST Z1: the ten shadow-stack root seats — rt_root_push_value /
@@ -591,6 +591,11 @@ export fn rt_boot() callconv(.c) i64 {
     // Rt.main raises the rlimit itself before calling this seat.)
     no_string_intern = std.c.getenv("QBE_NOSTRINGINTERN") != null;
 
+    // QBE_RT_COUNTS: the exit-time counter line (see rtCounts).  ZIGHOST Z4b
+    // moved its ONLY call site (rt_print_value) to Mid, so the hook is
+    // registered here instead — same knob, same stream, same moment (exit).
+    if (std.c.getenv("QBE_RT_COUNTS") != null) _ = atexit(&rtCountsAtExit);
+
     // heap knob for the GC-churn verification (small heap => many moves)
     const heap_bytes: usize = blk: {
         const env = std.c.getenv("QBE_HEAP_MB") orelse break :blk HEAP_BYTES;
@@ -666,24 +671,25 @@ export fn rt_boot() callconv(.c) i64 {
     return 0;
 }
 
-/// rt_print_value: print a Value, then the newline — the driver's output
-/// contract (VERBATIM main:1779-1789).  Returns 0, or 1 after the SAME stderr
-/// line as the pre-A2 main (the print failure).
-///
-/// Print through an ALLOCATING writer, not a fixed one: a result whose
-/// printed form exceeds any fixed buffer must print in full (the VM runner
-/// the VM did the same), so native and VM output agreed at every size.
-export fn rt_print_value(final: *const Value) callconv(.c) i64 {
-    var aw = std.Io.Writer.Allocating.init(std.heap.page_allocator);
-    defer aw.deinit();
-    values.printValue(&aw.writer, final.*) catch {
-        werr("qbe-rt: print failed\n");
-        return 1;
-    };
-    wout(aw.written());
-    wout("\n");
+// =====================================================================
+//  (DELETED AT ZIGHOST Z4b) rt_print_value — the driver's output walk.  The
+//  printer is Mid's now (runtime.mid's Rt.printValue + the Rt.pv* appenders),
+//  and Rt.main calls it directly, so the Zig side keeps NO part of the walk.
+//
+//  THE COUNTS HOOK MOVED WITH IT: rtCounts used to be called at the end of
+//  this seat, which was its only call site.  It is now registered with
+//  libc's atexit from rt_boot (knob-gated), so `QBE_RT_COUNTS=1` still prints
+//  its one line on stderr at exit — the line tools/qbe/probe-midgc-string.sh
+//  greps for.  Nothing else about the counters changed.
+// =====================================================================
+
+/// libc's atexit: Zig 0.16's std does not declare it, and this file needs no
+/// more than the C prototype.  Registered from rt_boot when QBE_RT_COUNTS is
+/// set, so the counters survive the seat they used to ride on.
+extern "c" fn atexit(func: *const fn () callconv(.c) void) c_int;
+
+fn rtCountsAtExit() callconv(.c) void {
     rtCounts();
-    return 0;
 }
 
 /// QBE_RT_COUNTS=1: the runtime MECHANISM counters, on STDERR, once per run.
@@ -692,10 +698,10 @@ export fn rt_print_value(final: *const Value) callconv(.c) i64 {
 /// incremented by rt_string and never emitted — and probe-midgc-string.sh's
 /// runtime half (it greps `rt_string=0` as the structural kill for the
 /// `intern_live >= 2048` nursery fallback) was RED at HEAD for that reason, not
-/// because of a collector defect.  This is the only surviving hook on the exit
-/// path a Mid driver calls (Rt.main -> rt_print_value, once), and it is gated
-/// on the knob, so an un-knobbed run is byte-for-byte the same on stdout and
-/// silent on stderr.  The three `tail_*` counters are GONE with their seats —
+/// because of a collector defect.  ZIGHOST Z4b moved its only call site (the
+/// rt_print_value seat) to Mid, so it is now registered with atexit from
+/// rt_boot — one line at exit, gated on the knob, so an un-knobbed run is
+/// byte-for-byte the same on stdout and silent on stderr.  The three `tail_*` counters are GONE with their seats —
 /// the line reports what still has a counter, not the retired shape.
 fn rtCounts() void {
     if (std.c.getenv("QBE_RT_COUNTS") == null) return;

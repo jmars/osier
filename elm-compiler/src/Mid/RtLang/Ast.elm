@@ -1746,7 +1746,8 @@ rawcallArity =
           -- seats the driver's tail reaches: isProgram/runProgram/print)
           ( "rt_is_program", 1 )
         , ( "rt_run_program", 2 )
-        , ( "rt_print_value", 1 )
+        -- (ZIGHOST Z4b: rt_print_value DELETED — the driver's output walk is
+        --   runtime.mid's Rt.printValue, reached by `call`)
         ]
 
 

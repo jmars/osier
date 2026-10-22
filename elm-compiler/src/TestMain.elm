@@ -84,10 +84,10 @@ checks rt runtimeMidText =
       -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
       -- the frameZero loop), so an empty or truncated load turns it RED,
       -- loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (336 defuns — zighost Z2/Z3 added Rt.vecStorePlain/Rt.vecStoreYoung/Rt.globalClosure (GC NURSERY added the ten scavenge-family defuns; O5 added the five string-stream registry + the nine intern-table defuns + seat 3's values-table walk) — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (344 defuns — zighost Z2/Z3 added Rt.vecStorePlain/Rt.vecStoreYoung/Rt.globalClosure (GC NURSERY added the ten scavenge-family defuns; O5 added the five string-stream registry + the nine intern-table defuns + seat 3's values-table walk) — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 336
+                List.length ast == 344
 
             Err _ ->
                 False
@@ -907,8 +907,8 @@ checks rt runtimeMidText =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 296 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram rt True True True) == 296
+    , check "rt program: 304 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
+        (List.length (rtProgram rt True True True) == 304
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
@@ -1642,7 +1642,7 @@ checks rt runtimeMidText =
                     Just f ->
                         callsSym "q_Rt_x2ehostIsProgram" f
                             && callsSym "q_Rt_x2ehostRun" f
-                            && callsSym "rt_print_value" f
+                            && callsSym "q_Rt_x2eprintValue" f
                             && callsSym "q_Rt_x2erootPushValue" f
                             && not (callsSym "rt_is_program" f)
                             && not (callsSym "rt_run_program" f)
@@ -1866,6 +1866,27 @@ checks rt runtimeMidText =
             && not (String.contains "rawcall rt_float_text" runtimeMidText)
             && List.all (\k -> List.member k (List.map .key (driverProg rt)))
                 [ "Rt.floatText", "Rt.fShortest", "Rt.fRender", "Rt.fExpAt", "Rt.fExpGo", "Rt.fEmit", "Rt.fEmitByte", "Rt.fDigit" ]
+        )
+
+    -- ZIGHOST Z4b: THE PRINTER IS MID'S.  The seat is deleted, so the
+    -- structural half is: Rt.main calls q_Rt_x2eprintValue, nothing names the
+    -- Zig seat, the eight walk defuns are in the surface, and the ONE
+    -- non-reproducible tag is refused BY NAME rather than printed as an
+    -- address.  The behavioural half is the whole corpus (every golden is the
+    -- printer's output), which is why no row here re-states a shape.
+    , check "Z4b printer pin: Rt.main calls q_Rt_x2eprintValue (the rt_print_value seat is gone), the eight walk defuns are in the surface, and a LAMBDA is refused by name (its printed form would carry code/env addresses)"
+        ((case QbeLower.lower rt False False False True True True True False False QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
+            Ok mod ->
+                List.any (\f -> f.name == "main" && callsSym "q_Rt_x2eprintValue" f) mod.funcs
+                    && not (List.any (callsSym "rt_print_value") mod.funcs)
+
+            Err _ ->
+                False
+         )
+            && not (String.contains "rawcall rt_print_value" runtimeMidText)
+            && String.contains "refused by name" runtimeMidText
+            && List.all (\k -> List.member k (List.map .key (driverProg rt)))
+                [ "Rt.printValue", "Rt.pvV", "Rt.pvRec", "Rt.pvNeed", "Rt.pvN", "Rt.pvByte", "Rt.pvZ", "Rt.pvS" ]
         )
 
     -- STAGE 6 B0: the frame machinery retarget.  Under QBE_MIDDRIVER=1 the
@@ -4582,7 +4603,7 @@ checks rt runtimeMidText =
                 defunText "Rt.main" runtimeMidText
          in
          String.contains "call Rt.hostIsProgram" arm
-            && String.contains "rawcall rt_print_value(modelslot)" arm
+            && String.contains "call Rt.printValue(vecload(modelslot, 0))" arm
             && String.contains "rawcall exit(0);" arm
             && not (String.contains "mhEnv" arm)
             && not (String.contains "rt_is_program" arm)
@@ -6659,7 +6680,8 @@ checks rt runtimeMidText =
                        , "Rt.intGrow", "Rt.intInsert", "Rt.intInsertAt", "Rt.intInsertGo", "Rt.intPairsCopy", "Rt.intStrCopy"
                        , "Rt.intTab", "Rt.intern", "Rt.isChildBuiltin", "Rt.main"
                        , "Rt.memGo", "Rt.metaGo", "Rt.mkTmpAt", "Rt.numFill", "Rt.numText", "Rt.number?"
-                       , "Rt.open", "Rt.openBodyTmpfile", "Rt.parseArg", "Rt.parseArgsGo", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo"
+                       , "Rt.open", "Rt.openBodyTmpfile", "Rt.parseArg", "Rt.parseArgsGo", "Rt.printValue", "Rt.pvByte", "Rt.pvN"
+                       , "Rt.pvNeed", "Rt.pvRec", "Rt.pvS", "Rt.pvV", "Rt.pvZ", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo"
                        , "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind", "Rt.recAppendNamesGo", "Rt.recGet"
                        , "Rt.recGetGo", "Rt.recInsert", "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd", "Rt.recUpdCopy"
                        , "Rt.recUpdFind", "Rt.repGo", "Rt.repeat", "Rt.revGo", "Rt.rootGrow", "Rt.rootPop"
@@ -6728,7 +6750,7 @@ checks rt runtimeMidText =
     -- is now the append below; the loud Err moved to the key-agreement walk
     -- (row C), which is the collision/rename class the orphan check guarded.
     , check
-        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the one-hundred-and-seventeen appended keys (ZIGHOST Z1 added its eight root-registry defuns, Z4a its eight float-text defuns) (the twenty stage-6 ABI keys + the fifty-three host defuns of stages 7A/7B/7C + stage 7 O3-fix's Rt.applyPartGo + O5's five string-stream registry defuns + O5 seat 2's nine intern-table defuns + O5 seat 3's Rt.valScanGo + O5 seat 4b's twelve entry-arg-parser/*argv* defuns) (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
+        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the one-hundred-and-twenty-five appended keys (ZIGHOST Z1 added its eight root-registry defuns, Z4a its eight float-text defuns, Z4b its eight printer defuns) (the twenty stage-6 ABI keys + the fifty-three host defuns of stages 7A/7B/7C + stage 7 O3-fix's Rt.applyPartGo + O5's five string-stream registry defuns + O5 seat 2's nine intern-table defuns + O5 seat 3's Rt.valScanGo + O5 seat 4b's twelve entry-arg-parser/*argv* defuns) (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -6777,6 +6799,8 @@ checks rt runtimeMidText =
                                                  , "Rt.intBytesEq", "Rt.intFindGo", "Rt.intGrow", "Rt.intInsert", "Rt.intInsertAt"
                                                  , "Rt.intInsertGo", "Rt.intPairsCopy", "Rt.intStrCopy", "Rt.intTab"
                                                  , "Rt.main", "Rt.metaGo", "Rt.parseArg", "Rt.parseArgsGo"
+                                                 , "Rt.printValue", "Rt.pvByte", "Rt.pvN", "Rt.pvNeed"
+                                                 , "Rt.pvRec", "Rt.pvS", "Rt.pvV", "Rt.pvZ"
                                                  , "Rt.rootGrow", "Rt.rootPop", "Rt.rootPopTo", "Rt.rootPush"
                                                  , "Rt.rootPushPtr", "Rt.rootPushValue", "Rt.rootPushValueArray", "Rt.rootWatermark"
                                                  , "Rt.ssClose", "Rt.ssIn"
