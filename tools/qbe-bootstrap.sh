@@ -14,13 +14,13 @@
 #
 # THE CHAIN (default mode, and the only mode that is node-free):
 #   1. ABI GUARD   the seed's marker vs the CURRENT tree (abi-fingerprint.sh).
-#                  A .ssa and an rt.o from different runtime revisions link
+#                  A .ssa and a runtime object from different revisions link
 #                  cleanly and then read each other's structs at the wrong
 #                  offsets — a silent wrong answer.  Refuses on a mismatch.
-#   2. rt.o        tools/qbe/rt-o.sh (the ONE copy of the freshness-guarded
-#                  graph: fail-safe probe, loud refusal on a failed rebuild).
+#   2. rt.o        (ZIGHOST Z6: DELETED — no runtime object; the runtime is Mid
+#                  and is emitted into the .ssa, so this step is gone.)
 #   3. qbe         vendor/qbe/qbe (built by tools/qbe-build.sh: cc + make only).
-#   4. cc          seed.ssa -> .s -> the native compiler, linked with rt.o.
+#   4. cc          seed.ssa -> .s -> the native compiler, linked with libc.
 #   5. (--verify)  that compiler's OWN --ssa emit, cmp'd against the seed —
 #                  the fixed point, in the direct form (see BELOW).
 #
@@ -149,7 +149,7 @@ fi
 # ---- REPORT-ONLY STATUS (never a gate, never refuses) ---------------------
 # The seed status answers TWO questions.
 #   (1) ABI: does the seed's view of the runtime interface match this tree's
-#       rt.o — abi-fingerprint.sh --status (cheap, no node).
+#       the runtime interface — abi-fingerprint.sh --status (cheap, no node).
 #   (2) EXACT: would the stock emit of the current manifest reproduce the
 #       committed seed byte-for-byte?  This is the work --freeze does minus
 #       the write (~7-8 s), and it is the ONLY check that can say "the seed
@@ -212,20 +212,18 @@ if [ "$MODE" = verify ]; then
   command -v jq >/dev/null 2>&1 || die "jq not found (--verify builds the run manifest)"
 fi
 
-# ---- 2. the runtime object (ONE shared freshness-guarded graph) -----------
-step "== 1/4 rt.o (tools/qbe/rt-o.sh)"
-RT="$("$ROOT/tools/qbe/rt-o.sh")" || die "rt.o unavailable"
-[ -s "$RT" ] || die "rt-o.sh returned $RT but it is empty"
-
-# ---- 3. the vendored backend ----------------------------------------------
+# ---- 2. the vendored backend ----------------------------------------------
+# (ZIGHOST Z6 deleted step "1/4 rt.o": there is no runtime object any more.  The
+# runtime is Mid and is emitted into the .ssa, so the seed links against libc
+# and nothing else — see the link step below and qbe-mk.sh's tombstone.)
 QBE="$ROOT/vendor/qbe/qbe"
 if [ ! -x "$QBE" ]; then
-  step "== 2/4 $QBE missing — building it (tools/qbe-build.sh: cc + make only)"
+  step "== 1/3 $QBE missing — building it (tools/qbe-build.sh: cc + make only)"
   "$ROOT/tools/qbe-build.sh" >&2 || die "qbe build failed"
 fi
 
 if [ "$MODE" = check ]; then
-  say "qbe-bootstrap: CHECK OK — seed $(stat -c %s "$SEED") B, ABI marker matches, rt.o + qbe present"
+  say "qbe-bootstrap: CHECK OK — seed $(stat -c %s "$SEED") B, ABI marker matches, qbe present"
   exit 0
 fi
 
@@ -240,34 +238,36 @@ if [ "$CLEAN" = 1 ]; then trap 'rm -rf "$WORK"' EXIT; else trap ':' EXIT; fi
 mkdir -p "$(dirname "$BIN")"
 
 # ============================ 4. .ssa -> .s ============================
-step "== 3/4 $QBE $SEED -> compiler.s"
+step "== 2/3 $QBE $SEED -> compiler.s"
 t1=$(now)
 "$QBE" "$SEED" > "$WORK/compiler.s" || die "qbe exited non-zero"
 [ -s "$WORK/compiler.s" ] || die "qbe produced no output"
 t2=$(now)
 
 # ============================ 5. .s -> native compiler ============================
-step "== 4/4 cc compiler.s rt.o -> $BIN"
+step "== 3/3 cc compiler.s -> $BIN"
 t3=$(now)
-# B4 deleted the Zig `main` from rt.o, so the committed seed's Mid-written
-# `main` is the only `main` and a plain link works with no objcopy strip.
-cc "$WORK/compiler.s" "$RT" -o "$BIN" -lc || die "cc failed"
+# ZIGHOST Z6: no runtime object.  The seed defines everything it calls — the
+# Mid runtime is IN the .ssa and the `rt_callN` dispatch table with it — so the
+# link is compiler.s + libc.  B4 had already deleted the Zig `main`, which is
+# why no objcopy strip was needed before; now there is no object to strip.
+cc "$WORK/compiler.s" -o "$BIN" -lc || die "cc failed"
 [ -x "$BIN" ] || die "cc produced no executable"
 t4=$(now)
 
 # ---- the arity table, explicitly -------------------------------------------
-# rt.o dispatches into `$rt_call0..$rt_callN` — functions the SEED defines
-# (Il/Lower.emitRTCall...): the arity ceiling is an ABI term shared by two
-# files that never see each other's source, and a truncated table is a
-# runtime `arity exceeds the qbe rt_callN table` death (loud), not a wrong
-# answer.  cc's link already refuses a MISSING symbol; this asserts the two
-# halves in ONE artifact, which is what a reader wants to see.
-expect_n="$(grep -cE '^extern fn rt_call[0-9]+' "$ROOT/tools/qbe/hostshim.zig" || true)"
+# `$rt_call0..$rt_callN` are DEFINED by the seed (Il/Lower.emitRTCall...).  Until
+# Z6 the other half of that ABI term lived in hostshim.zig as `extern fn rt_callN`
+# declarations; with the Zig side deleted the table has ONE owner, so the check
+# is now "the seed declares and the binary defines the same count" — it catches a
+# truncated table (a runtime `arity exceeds the qbe rt_callN table` death) on the
+# side that still exists.
+expect_n="$(grep -cE '^export function :ret \$rt_call[0-9]+' "$SEED" || true)"
 if command -v nm >/dev/null 2>&1; then
   have_n="$(nm "$BIN" 2>/dev/null | grep -cE ' T rt_call[0-9]+$' || true)"
-  say "qbe-bootstrap: rt_callN table — hostshim.zig externs $expect_n, the linked compiler defines $have_n"
+  say "qbe-bootstrap: rt_callN table — the seed exports $expect_n, the linked compiler defines $have_n"
   [ "$expect_n" = "$have_n" ] \
-    || die "the linked compiler defines $have_n of the $expect_n rt_callN symbols hostshim.zig externs"
+    || die "the linked compiler defines $have_n of the $expect_n rt_callN symbols the seed exports"
 else
   say "qbe-bootstrap: nm not found — the rt_callN table cross-check was NOT run" >&2
 fi

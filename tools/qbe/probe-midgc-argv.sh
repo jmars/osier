@@ -45,23 +45,26 @@
 #
 # Usage:
 #   tools/qbe/probe-midgc-argv.sh            # PASS-AFTER (the only route)
-#   tools/qbe/probe-midgc-argv.sh --before    # FAIL-BEFORE (the only route)
+#   tools/qbe/probe-midgc-argv.sh --before    # RETIRED at Z6 (loud refusal)
 #
-# The --before arm edits tools/qbe/hostshim.zig (so rt.o is rebuilt — rt-o.sh's
-# freshness probe sees the change) and restores it under a trap.
+# The --before arm used to edit tools/qbe/hostshim.zig (rebuilding rt.o through
+# rt-o.sh's freshness probe) and restore it under a trap.  ZIGHOST Z6 deleted
+# that file and the object, so the arm is a refusal now — see its tombstone.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-HOSTSHIM="tools/qbe/hostshim.zig"
+# ZIGHOST Z6 DELETED tools/qbe/hostshim.zig (and rt.o with it), so the
+# --before arm's mutation target — the Zig accumulator-root lines this probe was
+# born to revert — no longer exists.  The ARM IS RETIRED below with its reason;
+# the PASS-AFTER arm is unchanged and still the statement this probe makes.
 FIXTURE="tools/qbe/fixtures/argvrepro.elm"
 ENTRY="ArgvRepro.count"
 NARGS=60000
 FAIL_BEFORE="non-exhaustive case"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/probe-midgc-argv.XXXXXX")" || exit 2
-cp "$HOSTSHIM" "$WORK/hostshim.zig.orig"
-trap 'cp "$WORK/hostshim.zig.orig" "$HOSTSHIM"; rm -rf "$WORK"' EXIT
+trap 'rm -rf "$WORK"' EXIT
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "probe-midgc-argv: $1 not found" >&2; exit 2; }; }
 need node; need cc; need python3
@@ -80,18 +83,9 @@ count_with() { # $1 = binary, rest = env prefix
   env AOTRUN_ARGV=1 QBE_HEAP_MB=16 "$@" "$bin" "$ENTRY" $(cat "$WORK/args.txt") 2>&1
 }
 
-mutate_before() {
-  python3 - "$HOSTSHIM" <<'PY'
-import sys
-p = sys.argv[1]
-s = open(p).read()
-old = """    var rt = g.rootValue(&acc); // the SLOT is rooted: a move rewrites acc in place
-    defer rt.end();
-"""
-assert s.count(old) == 1, "the rooted accumulator lines are not where the probe expects"
-open(p, "w").write(s.replace(old, ""))
-PY
-}
+# (ZIGHOST Z6) mutate_before — the hostshim.zig accumulator-root reversion — was
+# deleted with its target.  See the --before arm's tombstone above.
+
 
 run_arm() {
   local out r
@@ -110,13 +104,15 @@ case "${1:-}" in
     [ "$rc" -eq 0 ] && echo "PASS-AFTER: *argv* survives a scavenge inside the build ($NARGS entries) on the only collector there is"
     ;;
   --before)
-    mutate_before || exit 1
-    r="$(run_arm)"
-    echo "the Mid route: $r (want the '$FAIL_BEFORE' signature)"
-    case "$r" in
-      *"$FAIL_BEFORE"*) echo "FAIL-BEFORE REPRODUCED: without the root the reclaimed tail makes *argv* unreadable" ;;
-      *) echo "FAIL-BEFORE NOT REPRODUCED: got '$r'" >&2; rc=1 ;;
-    esac
+    # TOMBSTONE (ZIGHOST Z6): the fail-before this arm reproduced — delete the
+    # Zig seat's accumulator root and watch *argv* come back as garbage — died
+    # with tools/qbe/hostshim.zig.  The Mid-side equivalent is a DIFFERENT arm
+    # and it already exists: tools/qbe/probe-midgc-argvtab.sh --before removes
+    # the values-table walk from runtime.mid and reproduces rc 139 (the second
+    # read of *argv* sees reclaimed memory).  Kept as a loud refusal rather than
+    # a silent skip, so nobody reads this probe as still carrying that arm.
+    echo "probe-midgc-argv: --before is RETIRED at ZIGHOST Z6 (its mutation target, tools/qbe/hostshim.zig, was deleted); use tools/qbe/probe-midgc-argvtab.sh --before for the Mid-side fail-before" >&2
+    exit 2
     ;;
   *)
     echo "usage: tools/qbe/probe-midgc-argv.sh [--before]" >&2

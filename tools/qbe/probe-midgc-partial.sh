@@ -47,10 +47,9 @@ AFTER_LINE="        var envv: ?[*]Value = g.allocArray(Value, total);"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "probe-midgc-partial: $1 not found" >&2; exit 2; }; }
 
-rebuild_rt() {
-  "$ROOT/tools/qbe/rt-o.sh" >/dev/null \
-    || { echo "probe-midgc-partial: rt-o.sh failed" >&2; exit 1; }
-}
+# (ZIGHOST Z6) rebuild_rt — the rt-o.sh call that refreshed the runtime object
+# between the two arms — is deleted with the object.  There is nothing to
+# rebuild: the runtime is Mid and is read from runtime.mid at emit time.
 
 run_probe() {
   local out
@@ -63,8 +62,7 @@ run_probe() {
 
 case "${1:-}" in
   "")
-    need node; need cc; need zig
-    rebuild_rt
+    need node; need cc
     out="$(run_probe)"
     if [ "$out" = "$GOLDEN" ]; then
       echo "PASS-AFTER: midgc-partial under QBE_MIDGC=1 QBE_HEAP_MB=$CHURN_MB prints $out (== $GOLDEN)"
@@ -75,38 +73,13 @@ case "${1:-}" in
     fi
     ;;
   --before)
-    need node; need cc; need zig
-    python3 - "$RT" <<'PY'
-import sys
-p = sys.argv[1]
-s = open(p).read()
-before = "        var envv: ?[*]Value = if (midgc_active) midgcVecAlloc(total) else g.allocArray(Value, total);"
-after = "        var envv: ?[*]Value = g.allocArray(Value, total);"
-assert s.count(before) == 1, f"expected exactly one reversion site, found {s.count(before)}"
-open(p, "w").write(s.replace(before, after))
-PY
-    restore() {
-      python3 - "$RT" <<'PY'
-import sys
-p = sys.argv[1]
-s = open(p).read()
-after = "        var envv: ?[*]Value = g.allocArray(Value, total);"
-before = "        var envv: ?[*]Value = if (midgc_active) midgcVecAlloc(total) else g.allocArray(Value, total);"
-assert s.count(after) == 1, f"expected exactly one reverted site, found {s.count(after)}"
-open(p, "w").write(s.replace(after, before))
-PY
-      "$ROOT/tools/qbe/rt-o.sh" >/dev/null || true
-    }
-    trap restore EXIT
-    rebuild_rt
-    out="$(run_probe)"
-    if [ "$out" = "$FAIL_BEFORE" ]; then
-      echo "FAIL-BEFORE REPRODUCED: midgc-partial printed '$out' (== $FAIL_BEFORE) with the partial env array on the Zig g.allocArray route (cross-heap edge, freed env arrays)"
-      exit 0
-    else
-      echo "FAIL-BEFORE NOT REPRODUCED: printed '$out', want the exact signature '$FAIL_BEFORE' — the probe does not pin the mechanism" >&2
-      exit 1
-    fi
+    # TOMBSTONE (ZIGHOST Z6): this arm reverted one line of tools/qbe/hostshim.zig
+    # — the Zig seat's `midgcVecAlloc` route for the partial env array — and
+    # rebuilt rt.o to watch the cross-heap edge break.  Both the file and the
+    # object are deleted, so the arm has no target.  Kept as a loud refusal, not
+    # a silent skip: the PASS-AFTER arm is the statement this probe still makes.
+    echo "probe-midgc-partial: --before is RETIRED at ZIGHOST Z6 (its mutation target, tools/qbe/hostshim.zig, was deleted with rt.o)" >&2
+    exit 2
     ;;
   *)
     echo "usage: tools/qbe/probe-midgc-partial.sh [--before]" >&2

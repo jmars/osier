@@ -513,10 +513,10 @@ run_midgc() {
 run_mdgc() {
   local name="$1" golden="$2" entry="$3" fixture="$4"; shift 4
   local cli=("$@")
-  local src rt_path ssa bin nat_out exp
+  local src ssa bin nat_out exp
   src="$ROOT/$fixture"
   [ -f "$src" ] || { echo "FAIL $name: no source: $src"; FAIL=1; return; }
-  rt_path="$("$ROOT/tools/qbe/rt-o.sh")" || { echo "FAIL $name: rt-o"; FAIL=1; return; }
+  # (ZIGHOST Z6: no rt.o — the runtime is Mid and is emitted into the .ssa)
   ssa="$TMP/$name.ssa"
   (cd "$ROOT/elm-compiler" &&
     QBE=1 QBE_ENTRY="$entry" QBE_MIDGC=1 node run.js "$src" "$ssa") >&2 || {
@@ -527,7 +527,7 @@ run_mdgc() {
   esac
   "$ROOT/vendor/qbe/qbe" "$ssa" > "$TMP/$name.s"
   bin="$TMP/$name"
-  cc "$TMP/$name.s" "$rt_path" -o "$bin" -lc || {
+  cc "$TMP/$name.s" -o "$bin" -lc || {
     echo "FAIL $name: link"; FAIL=1; return
   }
   nat_out="$(QBE_HEAP_MB=$CHURN_MB timeout 60 "$bin" "$entry" "${cli[@]}" 2>&1)" || true
@@ -2321,46 +2321,20 @@ fi
 #     fixture happens to be built;
 #   * rt.o must define exactly one wrapper per prim-table entry (23 post-flip).
 FLIP_DELETED="assoc cons = empty? + / f/ * - > < >= <= bitwise-and bitwise-or bitwise-xor bitwise-not bitwise-shift-left bitwise-shift-right bitwise-shift-right-zf number? string? cons? cn repeat c-strlen char-code substring shen.str->bytes shen.bytes->string absvector address-> <-address emptylist snd"
+# ZIGHOST Z6 TOMBSTONE: THERE IS NO rt.o.  This row used to cross-check the
+# emitted `rt_prim_*` direct wrappers against the object that defined them; the
+# object is deleted, and with it the wrappers (O4 deleted the prims table, Z6
+# deleted the file).  What is left to assert is the DELETION plus the thing that
+# would catch a survivor: every LINKABLE artifact in this run was built with NO
+# runtime object at all, so a remaining client of one would have been a LINK
+# ERROR, not a silent pass — and the pd-*.ssa above are the EMIT-ONLY
+# QBE_MIDZIG arms whose wrappers were unlinkable since B4.
 RTO="$ROOT/tools/qbe/rt.o"
-if [ -s "$RTO" ]; then
-  nm --defined-only "$RTO" 2>/dev/null | awk '$3 ~ /^rt_prim_/ { print $3 }' | sort -u > "$TMP/pd-defined.txt"
-  cat "$TMP"/pd-*.ssa 2>/dev/null | grep -ho '\$rt_prim_[A-Za-z0-9_]*' | sed 's/^\$//' | sort -u > "$TMP/pd-referenced.txt"
-  n_def=$(wc -l < "$TMP/pd-defined.txt")
-  n_ref=$(wc -l < "$TMP/pd-referenced.txt")
-  bad_missing=""
-  n_deleted=0
-  while read -r sym; do
-    [ -n "$sym" ] || continue
-    grep -qx "$sym" "$TMP/pd-defined.txt" && continue
-    prim="$(printf '%s' "$sym" | sed 's/^rt_prim_//' | awk '{ out=""; i=1; s=$0
-      while (i <= length(s)) { if (substr(s,i,2)=="_x" && length(s) >= i+3) { h=substr(s,i+2,2); c=0; for(j=1;j<=2;j++){d=tolower(substr(h,j,1)); c=c*16+index("0123456789abcdef",d)-1}; out=out sprintf("%c",c); i+=4 } else { out=out substr(s,i,1); i+=1 } } ; print out }')"
-    # (QUOTED + tr: an unquoted $FLIP_DELETED would GLOB the '*'/'?' words
-    # against the repo's files — the flip's own prim names are glob chars.)
-    if printf '%s' "$FLIP_DELETED" | tr ' ' '\n' | grep -qxF -- "$prim"; then
-      n_deleted=$((n_deleted + 1))
-    else
-      bad_missing="$bad_missing $sym"
-    fi
-  done < "$TMP/pd-referenced.txt"
-  # (O4: prims.zig and its rt_prim_* direct entries are DELETED with the Zig
-  # host.  The row now pins the DELETION itself: rt.o defines NO direct
-  # entries, and the only .ssa that still NAMES one is the EMIT-ONLY
-  # QBE_MIDZIG route (pd-*.ssa — its .ssa has been unlinkable since B4
-  # deleted the generic arm); a LINKABLE route must reference none.)
-  n_zigref=$(cat "$TMP"/pd-*.ssa 2>/dev/null | grep -ho '\$rt_prim_[A-Za-z0-9_]*' | sort -u | wc -l)
-  n_linkref=$((n_ref - n_zigref))
-  if [ "$n_def" -ne 0 ]; then
-    echo "FAIL primdirect-symbols: rt.o defines $n_def direct entries — the prims table was to be deleted at O4"
-    FAIL=1
-  elif [ "$n_linkref" -ne 0 ]; then
-    echo "FAIL primdirect-symbols: a LINKABLE .ssa still references $n_linkref direct symbol(s) — a live consumer was missed"
-    FAIL=1
-  else
-    echo "PASS primdirect-symbols: rt.o defines 0 direct entries; the $n_zigref symbol(s) still named anywhere are the emit-only QBE_MIDZIG route's (the prims table deleted at O4)"
-  fi
-elif [ ! -f "$RTO" ]; then
-  echo "FAIL primdirect-symbols: $RTO missing"
+if [ -e "$RTO" ]; then
+  echo "FAIL primdirect-symbols: $RTO EXISTS — the Zig runtime object was deleted at ZIGHOST Z6; a rebuilt one means a client came back"
   FAIL=1
+else
+  echo "PASS primdirect-symbols (Z6 tombstone): no runtime object in the tree; every linkable row above linked without one (a remaining client would be a link error)"
 fi
 
 # BEHAVIOUR under the hatch: the OFF build must still run and agree — an
@@ -2700,7 +2674,9 @@ fi
 #      chases it; a self-CALL recur in Rt.bounceGo would build one C frame per
 #      hop and die on the 8MB stack between 20k-40k hops.  B4 made the Mid
 #      route the default, so this links the plain rt.o (no main strip).
-if rt_path="$("$ROOT/tools/qbe/rt-o.sh")" 2>/dev/null; then
+if true; then
+  # (ZIGHOST Z6: the `rt-o.sh` gate that used to wrap this row is gone with the
+  # object — the row links compiler.s + libc like every other one.)
   md_d=1000000
   ssa="$TMP/md-mutual.ssa"
   if (cd "$ROOT/elm-compiler" &&
@@ -2709,7 +2685,7 @@ if rt_path="$("$ROOT/tools/qbe/rt-o.sh")" 2>/dev/null; then
       "err "*) echo "FAIL md-mutual-tail: compile failed: $(cat "$ssa")"; FAIL=1;;
       *)
         "$ROOT/vendor/qbe/qbe" "$ssa" > "$TMP/md-mutual.s"
-        if cc "$TMP/md-mutual.s" "$rt_path" -o "$TMP/md-mutual" -lc 2>/dev/null; then
+        if cc "$TMP/md-mutual.s" -o "$TMP/md-mutual" -lc 2>/dev/null; then
           md_out="$(timeout 120 "$TMP/md-mutual" Mutual.even "$md_d" 2>&1)"
           if [ "$md_out" = "1" ]; then
             echo "PASS md-mutual-tail $md_d hops: the MID bounce loop chases the chain at constant stack (golden 1)"

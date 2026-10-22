@@ -69,9 +69,17 @@ blocks() { # $1 file, $2 start-line ERE
 }
 
 # ---- components -------------------------------------------------------------
-rt_exports() { grep -E '^export fn ' "$RT" | norm | sort | sha; }
-rt_calln()   { grep -E '^extern fn rt_call' "$RT" | norm | sort | sha; }
-rt_types()   { { blocks "$RT" '^const max_arity'; blocks "$RT" '^pub const (Desc|Meta|Ret)'; } | norm | sha; }
+# ZIGHOST Z6 DELETED tools/qbe/hostshim.zig, so these three components now hash
+# an EMPTY declaration set — deliberately, not accidentally: the marker keeps
+# SAYING "the Zig runtime interface is empty", which is the post-Z6 truth, and a
+# re-appearing hostshim.zig would move them (the `-f` guard reads the file when
+# it exists).  WHAT THAT COSTS, stated: the marker can no longer SEE a new Zig
+# runtime file under some other name — `git grep -c zig` over the tracked tree
+# (0 outside historical prose) and qbe-check's primdirect-symbols tombstone are
+# the guards for that, not this digest.
+rt_exports() { { [ -f "$RT" ] && grep -E '^export fn ' "$RT" || true; } | norm | sort | sha; }
+rt_calln()   { { [ -f "$RT" ] && grep -E '^extern fn rt_call' "$RT" || true; } | norm | sort | sha; }
+rt_types()   { { [ -f "$RT" ] && { blocks "$RT" '^const max_arity'; blocks "$RT" '^pub const (Desc|Meta|Ret)'; } || true; } | norm | sha; }
 # THE LAYOUT, FROM THE CENSUS — not from the Zig declaration text.  The
 # census parses Mid/RtLayout.elm (the single definition) and is what the
 # generated `gc/layout_gen.zig` is built from; see tools/qbe/layout-census.sh.
@@ -101,7 +109,10 @@ marker_of() { # $1 rt:exports digest, $2 rt:callN, $3 rt:types, $4 gc:layout
 }
 
 # ---- gather ----------------------------------------------------------------
-[ -f "$RT" ]      || { echo "abi-fingerprint: missing $RT" >&2; exit 2; }
+# (ZIGHOST Z6) $RT — hostshim.zig — is GONE: the three rt:* components hash an
+# empty set.  $TYPES (gc/types.zig) survives only until Z6b deletes the vendored
+# package, and the gc:layout census below reads Mid/RtLayout.elm (Mid-side), so
+# the marker's LIVE component after Z6 is the layout.
 [ -f "$TYPES" ]   || { echo "abi-fingerprint: missing $TYPES" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "abi-fingerprint: jq not found" >&2; exit 2; }
 
@@ -131,7 +142,7 @@ case "${1:-}" in
       printf '# Regenerate the two together:  tools/qbe-bootstrap.sh --freeze\n'
       printf '# Written by tools/qbe/abi-fingerprint.sh --write; the components are\n'
       printf '# digests of DECLARATIONS (comments/whitespace stripped), so a comment\n'
-      printf '# edit in hostshim.zig does NOT move the marker.\n'
+      printf '# edit in a declaration does NOT move the marker.\n'
       printf 'seed-bytes=%s\n'    "$(stat -c %s "$SEED")"
       printf 'seed-sha256=%s\n'   "$(sha256sum "$SEED" | cut -c1-64)"
       printf 'abi-marker=%s\n'    "$MARKER"
@@ -155,7 +166,7 @@ case "${1:-}" in
     echo "  seed $ABI records abi-marker=$got" >&2
     echo "  this tree  computes   abi-marker=$MARKER" >&2
     echo "  the runtime interface MOVED since the seed was emitted; a .ssa" >&2
-    echo "  and an rt.o from different revisions link cleanly and then read" >&2
+    echo "  and a runtime object from different revisions link cleanly and then read" >&2
     echo "  each other's structs at the wrong offsets.  Components that differ:" >&2
     for c in rt-exports:RT_EXPORTS rt-callN:RT_CALLN rt-types:RT_TYPES gc-layout:GC_LAYOUT; do
       key="${c%%:*}"; var="${c##*:}"

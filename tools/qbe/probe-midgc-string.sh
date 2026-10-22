@@ -77,17 +77,13 @@ run_probe() {
       echo "probe-midgc-string: the MIDGC .ssa calls rt_string $rt_calls time(s) — the string route is not static (the structural pin failed)" >&2
       exit 1
     fi
-    # RUNTIME boundary pin (the intern_live >= 2048 fallback, item 5): drive
-    # the runtime counters and assert the intern table is never touched — if
-    # rt_string were called at all, intern_live could reach 2048 and fire the
-    # nursery fallback no flag could guard.  rt_string=0 => the boundary is
-    # unreachable, observed at run time, not just by emission.
-    local counts
-    counts="$(QBE_HEAP_MB=$CHURN_MB QBE_NOSTRINGINTERN=1 QBE_RT_COUNTS=1 timeout 120 "$out/midgc-string" "$ENTRY" 2>&1 >/dev/null)"
-    if ! printf '%s' "$counts" | grep -q 'rt_string=0'; then
-      echo "probe-midgc-string: runtime counters show rt_string was called under MIDGC — the intern_live >= 2048 fallback is NOT structurally unreachable" >&2
-      exit 1
-    fi
+    # TOMBSTONE (ZIGHOST Z6): the RUNTIME half of this pin — drive
+    # QBE_RT_COUNTS=1 and grep `rt_string=0` — died with rt.o, which owned the
+    # counters (they counted rt_string's intern table).  There is no rt_string
+    # to count any more: the seat is deleted and the structural check above is
+    # now the WHOLE statement, not half of one.  Stated so nobody reads this
+    # probe as still observing the intern table at run time.
+    :
   fi
   QBE_HEAP_MB=$CHURN_MB QBE_NOSTRINGINTERN=1 timeout 120 "$out/midgc-string" "$ENTRY" 2>&1
 }

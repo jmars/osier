@@ -10,12 +10,11 @@
 #
 # Pipeline:  node run.js (QBE=1 QBE_ENTRY) -> <out>.ssa
 #            vendor/qbe/qbe <out>.ssa      -> <out>.s   (exit checked)
-#            cc <out>.s tools/qbe/rt.o     -> <out>     (linked, -lc)
+#            cc <out>.s                   -> <out>     (linked, -lc; no runtime object since Z6)
 #
-# rt.o is built once (rebuilt when tools/qbe/rt.zig or the vendored runtime
-# is newer) with `zig build-obj` against the osier-rt package's gc/rt modules
-# (the SAME modules the repo's build.zig uses).  It links NO interpreter: the
-# ZINC VM package is not part of the QBE path at all.
+# ZIGHOST Z6 DELETED the runtime object (tools/qbe/rt.o, built by rt-o.sh from
+# tools/qbe/hostshim.zig + the vendored osier-rt package).  The runtime is Mid
+# and is emitted into the .ssa, so this pipeline no longer invokes zig at all.
 #
 # Exit: 0 success.  Prints the built binary's path.
 set -euo pipefail
@@ -52,15 +51,14 @@ done
 mkdir -p "$OUTDIR"
 BASE="$OUTDIR/$(basename "$LAST_SRC" .elm)"
 
-# ---- runtime object (cached, freshness-invalidated) ----
-# The graph lives in ONE place (tools/qbe/rt-o.sh): this file, the committed
-# seed's bootstrap (tools/qbe-bootstrap.sh) and the whole-corpus oracle all
-# link against the same rt.o, and a mis-copied freshness probe here has
-# already cost this repo a fresh-clone blocker once.  rt-o.sh keeps the probe
-# fail-safe (a failed `find` means "cannot tell" -> rebuild) and REFUSES
-# loudly on a failed rebuild -- a stale rt.o is worse than none (it is exactly
-# how a suite reports an old binary's behaviour as a measurement).
-RT="$("$ROOT/tools/qbe/rt-o.sh")" || exit 1
+# ---- NO RUNTIME OBJECT (ZIGHOST Z6) ----
+# There is no rt.o any more: the runtime is Mid (runtime.mid), emitted INTO the
+# .ssa, so the artifact links against libc and nothing else.  The measured
+# proof that this is a deletion and not a wish: scraping the emitted symbol set
+# of all 159 corpus groups yields $rt_call0..16, $rt_call2r, $rt_glob and
+# $rt_glob_addr — all of which the .ssa itself defines — and ZERO references to
+# any symbol the old object exported.  A remaining client would be a LINK
+# ERROR here, loudly, which is the guard this comment replaces.
 
 # ---- elm -> .ssa ----
 (cd "$ROOT/elm-compiler" &&
@@ -88,5 +86,5 @@ if [ "${QBE_PROF:-0}" = 1 ]; then
     echo "qbe-mk: QBE_PROF=1 but profiling shim failed to build" >&2; exit 1; }
 fi
 
-cc "$BASE.s" "$RT" "${PROF_O[@]}" -o "$BASE" -lc
+cc "$BASE.s" "${PROF_O[@]}" -o "$BASE" -lc
 echo "$BASE"

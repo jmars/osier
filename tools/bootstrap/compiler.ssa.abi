@@ -2,12 +2,12 @@
 # Regenerate the two together:  tools/qbe-bootstrap.sh --freeze
 # Written by tools/qbe/abi-fingerprint.sh --write; the components are
 # digests of DECLARATIONS (comments/whitespace stripped), so a comment
-# edit in hostshim.zig does NOT move the marker.
+# edit in a declaration does NOT move the marker.
 seed-bytes=25245452
 seed-sha256=aa399e27ef24eae58c75342367198e4a981bc7012cfa162010c7aa1000397152
-abi-marker=d2ae956785dcea3dff6e1d9ca5fbad8287c22289128c994517cff70e8c6ce1ed
-abi-rt-exports=47f4bacfe68ff9f47a65bb76e5401dbee35b990f339a312e24a0732923ba76be
-abi-rt-callN=3737e4e13ed53de03398f934b2577a42aa4c4e0da92a9813a86016b2e7db830d
-abi-rt-types=d2f38829f090edf6c7049dce01ba617c3f93f8087a513ab0b7b72c12f493869e
+abi-marker=e5d987cd2068c50d698409e6a1922ea23c25c5b7ad8eb03b5fb8c4da933a99b8
+abi-rt-exports=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+abi-rt-callN=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+abi-rt-types=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 abi-gc-layout=a561dff7c131d6ce286174b48df325fd82551bb12d7541a36f5bfe92f5d77c1b
 emit-inputs=a2528dd8078650faa9dc7f8e641929e837ad3e5b15bd6a1072bac45711e58acb
