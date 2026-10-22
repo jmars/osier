@@ -1,7 +1,7 @@
 # λρG: the declarative calculus of branch-local row refinement
 
 A formal, mechanization-ready specification of the calculus implemented by
-`elm-compiler/src/Type/*` in this repository — Leijen scoped-label
+`osier-compiler/src/Type/*` in this repository — Leijen scoped-label
 extensible records × GADT refinement × locally abstract types, connected by a
 branch-local equation store with two-tier discharge.
 
@@ -752,7 +752,7 @@ E  ::=  [ ]  |  E a  |  v E  |  E.ℓ  |  { E | ℓ = v, … }  |  { E | ℓ ←
 A record value is an **association list** of label-value pairs in source
 order — this is not a modeling choice: records lower to cons pairs
 `((ℓ, v) :: … )` built right-to-left so field `j` sits at the head
-[M: `elm-compiler/src/Lower/Expr.elm:1117-1130` and `recordExpr
+[M: `osier-compiler/src/Lower/Expr.elm:1117-1130` and `recordExpr
 `:1130-1141`]. Selection lowers to `assoc` + `snd`, and **`assoc` is
 first-match-wins from the head** [M: `Lower/Expr.elm:1147-1151`
 `recordAccess`; `vendor/osier-rt/src/rt/prims.zig:237-262` `primAssoc` — the
@@ -1300,7 +1300,7 @@ tree through the batch oracle (the output artifact, never the exit code):
 | `rowgadt_noescape` | err (R-EXISTS escape) | `type variable a is rigid … String` |
 | `rowgadt_l3ii` | err (no-binder principality loss) | `infinite type: a = {k:a\| b}` |
 
-[M: all thirteen re-compiled through `node elm-compiler/run.js` against the
+[M: all thirteen re-compiled through `node osier-compiler/run.js` against the
 current tree during the writing of this spec; the gate has since moved to PASS=151
 FAIL=0 per the meta node's re-measurement.] The two H1-relevant shadowing
 fixtures (`shadow`, `shadowerr`, `shadowtyperr`) are *not* under a

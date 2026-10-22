@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # selfhost-audit.sh — M13 ground-truth audit of the selfhost group.
 #
-# Compiles every file of the selfhost group (elm-compiler/selfhost/
+# Compiles every file of the selfhost group (osier-compiler/selfhost/
 # manifest.json: the compiler's own frontend + the parse closure pulled into
 # src/ (formerly selfhost/vendor; stil4m/elm-syntax 7.3.9, Json codecs
 # pruned) + NativeMain) with the CURRENT stock-built compiler (node
-# elm-compiler/run.js --batch, one QBE ENTRY per group), ONE FILE PER GROUP,
+# osier-compiler/run.js --batch, one QBE ENTRY per group), ONE FILE PER GROUP,
 # plus one FINAL WHOLE-GROUP pass, and tabulates
 # per-file, per-class outcomes:
 #
@@ -39,7 +39,7 @@
 
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CDIR="$ROOT/elm-compiler"
+CDIR="$ROOT/osier-compiler"
 MANIFEST="$CDIR/selfhost/manifest.json"
 OUTTXT="$ROOT/tools/selfhost-audit.txt"
 TMP="$(mktemp -d)"
@@ -49,7 +49,7 @@ CHUNK=${AUDIT_CHUNK:-16} # groups per batched node process
 command -v node >/dev/null 2>&1 || { echo "node not found" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "jq not found" >&2; exit 2; }
 [ -f "$CDIR/compiler.js" ] || {
-  echo "elm-compiler/compiler.js missing (run elm-compiler/build.sh on a host with stock elm)" >&2
+  echo "osier-compiler/compiler.js missing (run osier-compiler/build.sh on a host with stock elm)" >&2
   exit 2
 }
 [ -f "$MANIFEST" ] || { echo "manifest missing: $MANIFEST" >&2; exit 2; }
@@ -112,8 +112,8 @@ sources = json.load(open(manifest))["groups"][0]["sources"]
 def module_of(rel):
     # repo-root-relative path -> Elm module name
     p = rel
-    for prefix in ("elm-compiler/selfhost/",
-                   "elm-compiler/src/"):
+    for prefix in ("osier-compiler/selfhost/",
+                   "osier-compiler/src/"):
         if p.startswith(prefix):
             p = p[len(prefix):]
             break
@@ -340,7 +340,7 @@ fi
   echo "#           selfhost/vendor) + NativeMain driver"
   echo "# Corpus:   src/Prelude.elm + src/Runtime.elm + core-libs/* (fixed side,"
   echo "#           NOT audited — always compiled as the corpus)"
-  echo "# Compiler: node elm-compiler/run.js --batch (stock-built compiler.js)"
+  echo "# Compiler: node osier-compiler/run.js --batch (stock-built compiler.js)"
   echo "# Date:     $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "#"
   echo "# Columns: <RESULT>\t<file>\t<row:col>\t<message>"

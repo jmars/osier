@@ -11,7 +11,7 @@
 #           selfhost/vendor) + NativeMain driver
 # Corpus:   src/Prelude.elm + src/Runtime.elm + core-libs/* (fixed side,
 #           NOT audited — always compiled as the corpus)
-# Compiler: node elm-compiler/run.js --batch (stock-built compiler.js)
+# Compiler: node osier-compiler/run.js --batch (stock-built compiler.js)
 # Date:     2026-10-10T19:12:19Z
 #
 # Columns: <RESULT>\t<file>\t<row:col>\t<message>
@@ -19,70 +19,70 @@
 #                 lowering-error | TOOLING-FAIL
 # Per-file rows show the FIRST error only (Main reports one per group).
 #
-OK	elm-compiler/src/Lower/Resolve.elm		
-OK	elm-compiler/src/Lower/Scope.elm		
-OK	elm-compiler/src/Lower/Expr.elm		
-OK	elm-compiler/src/Type/Builtins.elm		
-OK	elm-compiler/src/Type/Env.elm		
-OK	elm-compiler/src/Type/Representation.elm		
-OK	elm-compiler/src/Type/Unify.elm		
-OK	elm-compiler/src/Type/Error.elm		
-OK	elm-compiler/src/Type/Exhaustive.elm		
-OK	elm-compiler/src/Type/Infer.elm		
-OK	elm-compiler/src/Frontend/Lift.elm		
-OK	elm-compiler/src/Type/Check.elm		
-OK	elm-compiler/src/Char/Extra.elm		
-OK	elm-compiler/src/Elm/Syntax/Comments.elm		
-OK	elm-compiler/src/Elm/Syntax/Declaration.elm		
-OK	elm-compiler/src/Elm/Syntax/Documentation.elm		
-OK	elm-compiler/src/Elm/Syntax/Exposing.elm		
-OK	elm-compiler/src/Elm/Syntax/Expression.elm		
-OK	elm-compiler/src/Elm/Syntax/File.elm		
-OK	elm-compiler/src/Elm/Syntax/Import.elm		
-OK	elm-compiler/src/Elm/Syntax/Infix.elm		
-OK	elm-compiler/src/Elm/Syntax/Module.elm		
-OK	elm-compiler/src/Elm/Syntax/ModuleName.elm		
-OK	elm-compiler/src/Elm/Syntax/Node.elm		
-OK	elm-compiler/src/Elm/Syntax/Pattern.elm		
-OK	elm-compiler/src/Elm/Syntax/Range.elm		
-OK	elm-compiler/src/Elm/Syntax/Signature.elm		
-OK	elm-compiler/src/Elm/Syntax/Type.elm		
-OK	elm-compiler/src/Elm/Syntax/TypeAlias.elm		
-OK	elm-compiler/src/Elm/Syntax/TypeAnnotation.elm		
-OK	elm-compiler/src/List/Extra.elm		
-OK	elm-compiler/src/Elm/Parser/Base.elm		
-OK	elm-compiler/src/Elm/Parser/Comments.elm		
-OK	elm-compiler/src/Elm/Parser/Declarations.elm		
-OK	elm-compiler/src/Elm/Parser/Expose.elm		
-OK	elm-compiler/src/Elm/Parser/Expression.elm		
-OK	elm-compiler/src/Elm/Parser/File.elm		
-OK	elm-compiler/src/Elm/Parser/Imports.elm		
-OK	elm-compiler/src/Elm/Parser/Layout.elm		
-OK	elm-compiler/src/Elm/Parser/Modules.elm		
-OK	elm-compiler/src/Elm/Parser/Patterns.elm		
-OK	elm-compiler/src/Elm/Parser/Tokens.elm		
-OK	elm-compiler/src/Elm/Parser/TypeAnnotation.elm		
-OK	elm-compiler/src/ParserFast.elm		
-OK	elm-compiler/src/ParserWithComments.elm		
-OK	elm-compiler/src/Parser.elm		
-OK	elm-compiler/src/Rope.elm		
-OK	elm-compiler/src/Elm/Internal/RawFile.elm		
-OK	elm-compiler/src/Elm/Parser.elm		
-OK	elm-compiler/src/Elm/Processing.elm		
-OK	elm-compiler/src/Elm/Dependency.elm		
-OK	elm-compiler/src/Elm/Interface.elm		
-OK	elm-compiler/src/Elm/RawFile.elm		
-OK	elm-compiler/src/Mid/Ir.elm		
-OK	elm-compiler/src/Mid/FromAst.elm		
-OK	elm-compiler/src/Mid/Module.elm		
-OK	elm-compiler/src/Mid/Qbe/Il.elm		
-OK	elm-compiler/src/Mid/Qbe/Types.elm		
-OK	elm-compiler/src/Mid/Qbe/Flatten.elm		
-OK	elm-compiler/src/Mid/Qbe/Lower.elm		
-OK	elm-compiler/src/Mid/Qbe/Peephole.elm		
-OK	elm-compiler/src/Mid/Qbe/Print.elm		
-OK	elm-compiler/src/Mid/QbeModule.elm		
-OK	elm-compiler/selfhost/NativeMain.elm		
+OK	osier-compiler/src/Lower/Resolve.elm		
+OK	osier-compiler/src/Lower/Scope.elm		
+OK	osier-compiler/src/Lower/Expr.elm		
+OK	osier-compiler/src/Type/Builtins.elm		
+OK	osier-compiler/src/Type/Env.elm		
+OK	osier-compiler/src/Type/Representation.elm		
+OK	osier-compiler/src/Type/Unify.elm		
+OK	osier-compiler/src/Type/Error.elm		
+OK	osier-compiler/src/Type/Exhaustive.elm		
+OK	osier-compiler/src/Type/Infer.elm		
+OK	osier-compiler/src/Frontend/Lift.elm		
+OK	osier-compiler/src/Type/Check.elm		
+OK	osier-compiler/src/Char/Extra.elm		
+OK	osier-compiler/src/Elm/Syntax/Comments.elm		
+OK	osier-compiler/src/Elm/Syntax/Declaration.elm		
+OK	osier-compiler/src/Elm/Syntax/Documentation.elm		
+OK	osier-compiler/src/Elm/Syntax/Exposing.elm		
+OK	osier-compiler/src/Elm/Syntax/Expression.elm		
+OK	osier-compiler/src/Elm/Syntax/File.elm		
+OK	osier-compiler/src/Elm/Syntax/Import.elm		
+OK	osier-compiler/src/Elm/Syntax/Infix.elm		
+OK	osier-compiler/src/Elm/Syntax/Module.elm		
+OK	osier-compiler/src/Elm/Syntax/ModuleName.elm		
+OK	osier-compiler/src/Elm/Syntax/Node.elm		
+OK	osier-compiler/src/Elm/Syntax/Pattern.elm		
+OK	osier-compiler/src/Elm/Syntax/Range.elm		
+OK	osier-compiler/src/Elm/Syntax/Signature.elm		
+OK	osier-compiler/src/Elm/Syntax/Type.elm		
+OK	osier-compiler/src/Elm/Syntax/TypeAlias.elm		
+OK	osier-compiler/src/Elm/Syntax/TypeAnnotation.elm		
+OK	osier-compiler/src/List/Extra.elm		
+OK	osier-compiler/src/Elm/Parser/Base.elm		
+OK	osier-compiler/src/Elm/Parser/Comments.elm		
+OK	osier-compiler/src/Elm/Parser/Declarations.elm		
+OK	osier-compiler/src/Elm/Parser/Expose.elm		
+OK	osier-compiler/src/Elm/Parser/Expression.elm		
+OK	osier-compiler/src/Elm/Parser/File.elm		
+OK	osier-compiler/src/Elm/Parser/Imports.elm		
+OK	osier-compiler/src/Elm/Parser/Layout.elm		
+OK	osier-compiler/src/Elm/Parser/Modules.elm		
+OK	osier-compiler/src/Elm/Parser/Patterns.elm		
+OK	osier-compiler/src/Elm/Parser/Tokens.elm		
+OK	osier-compiler/src/Elm/Parser/TypeAnnotation.elm		
+OK	osier-compiler/src/ParserFast.elm		
+OK	osier-compiler/src/ParserWithComments.elm		
+OK	osier-compiler/src/Parser.elm		
+OK	osier-compiler/src/Rope.elm		
+OK	osier-compiler/src/Elm/Internal/RawFile.elm		
+OK	osier-compiler/src/Elm/Parser.elm		
+OK	osier-compiler/src/Elm/Processing.elm		
+OK	osier-compiler/src/Elm/Dependency.elm		
+OK	osier-compiler/src/Elm/Interface.elm		
+OK	osier-compiler/src/Elm/RawFile.elm		
+OK	osier-compiler/src/Mid/Ir.elm		
+OK	osier-compiler/src/Mid/FromAst.elm		
+OK	osier-compiler/src/Mid/Module.elm		
+OK	osier-compiler/src/Mid/Qbe/Il.elm		
+OK	osier-compiler/src/Mid/Qbe/Types.elm		
+OK	osier-compiler/src/Mid/Qbe/Flatten.elm		
+OK	osier-compiler/src/Mid/Qbe/Lower.elm		
+OK	osier-compiler/src/Mid/Qbe/Peephole.elm		
+OK	osier-compiler/src/Mid/Qbe/Print.elm		
+OK	osier-compiler/src/Mid/QbeModule.elm		
+OK	osier-compiler/selfhost/NativeMain.elm		
 #
 # ===== whole-group pass (all 64 sources as one group) =====
 WHOLE-GROUP	OK		

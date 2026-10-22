@@ -4,7 +4,7 @@
 # out-of-range class index in the Mid collector's free-list table).
 #
 # THE DEFECT.  Rt.gcAlloc computes cls = classOf(total) for ANY requested size,
-# and Rt.gcAllocGo (elm-compiler/runtime.mid) indexed the per-class free-list
+# and Rt.gcAllocGo (osier-compiler/runtime.mid) indexed the per-class free-list
 # table with it and no bounds check.  The table has
 # numClasses = 1 + classOf(heapWords) entries, so a single request LARGER than
 # the heap (the fixture's 2097502-word vector on a 16 MB heap) yields
@@ -43,7 +43,7 @@
 #
 # The --before arm restores runtime.mid under a trap, so even a failed run
 # never leaves the tree edited.  NO REBUILD is needed on either arm: run.js
-# reads elm-compiler/runtime.mid at compile time (elm-compiler/run.js:55) and
+# reads osier-compiler/runtime.mid at compile time (osier-compiler/run.js:55) and
 # compiles it into the .ssa inside qbe-mk, so the file swap alone decides the
 # arm — compiler.js is untouched (runtime.mid is Mid source, not a Zig module;
 # there is no runtime object any more, ZIGHOST Z6).
@@ -52,7 +52,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-RUNTIME="elm-compiler/runtime.mid"
+RUNTIME="osier-compiler/runtime.mid"
 FIXTURE="tools/qbe/fixtures/midgc-oom.elm"
 ENTRY="MidgcOom.main"
 GOLDEN=200

@@ -11,7 +11,7 @@ prerequisite — see **[ARTIFACT.md](ARTIFACT.md)**.
 
 Contents:
 
-- `elm-compiler/` — the Elm→QBE compiler (corpus `Prelude`/`Runtime`/core-libs,
+- `osier-compiler/` — the Elm→QBE compiler (corpus `Prelude`/`Runtime`/core-libs,
   the `run.js` batch driver, and the selfhost group) **and the whole runtime**:
   `runtime.mid` is the Mid-written runtime (collector, roots, write barrier,
   printer, float text, boot) that every artifact links, emitted INTO the `.ssa`.
@@ -30,8 +30,8 @@ Contents:
 
 ## Build
 
-There is deliberately no build step here, and no Zig. `elm-compiler/run.js`
-drives the Elm→QBE front end (`elm-compiler/build.sh` builds `compiler.js`), and
+There is deliberately no build step here, and no Zig. `osier-compiler/run.js`
+drives the Elm→QBE front end (`osier-compiler/build.sh` builds `compiler.js`), and
 the native backend is built on demand by `tools/qbe/qbe-mk.sh`: the vendored
 `vendor/qbe/qbe` turns the emitted `.ssa` into assembly and `cc` links it
 against libc — the runtime is Mid and is already inside the `.ssa`, so there is
@@ -65,7 +65,7 @@ as is elm/core's (`foldl cons [] list`).
 
 As a mitigation — explicitly **not** a guarantee — the native runtime raises
 the stack soft limit to 64 MB at startup (`Rt.main` in
-`elm-compiler/runtime.mid`). That net covers
+`osier-compiler/runtime.mid`). That net covers
 every C-stack exhaustion up to 64 MB, and deep non-tail recursion can still
 exhaust it and crash. The backend mechanism (in-frame loops, the bounce loop,
 frame rooting) is described in [docs/qbe-backend.md](docs/qbe-backend.md).

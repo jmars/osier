@@ -43,7 +43,7 @@ rc=0
 fail() { echo "FAIL: $*" >&2; rc=1; }
 
 ELM_BIN="${ELM_BIN:-$HOME/.npm-global/lib/node_modules/elm/bin/elm}"
-(cd "$ROOT/elm-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) \
+(cd "$ROOT/osier-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) \
   || { echo "probe-midgc-young: elm make compiler.js failed" >&2; exit 1; }
 
 BIN="$(QBE_MIDGC=1 QBE_MIDGC_YOUNG=1 "$ROOT/tools/qbe/qbe-mk.sh" tools/qbe/fixtures/valchurn.elm Valchurn.main "$WORK" 2>"$WORK/mk.log")" \

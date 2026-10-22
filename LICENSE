@@ -11,7 +11,7 @@ Copyright (c) 2026 Jaye Marshall, for both halves.
 
 Third-party code carried in the repository keeps its own licence — see
 `THIRD-PARTY.md` (currently the pulled-in stil4m/elm-syntax 7.3.9 parse
-closure under `elm-compiler/src/Elm/` and siblings).
+closure under `osier-compiler/src/Elm/` and siblings).
 
 ---
 

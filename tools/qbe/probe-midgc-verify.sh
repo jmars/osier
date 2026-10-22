@@ -9,7 +9,7 @@
 # QBE_MIDGC_VERIFY off and dies V2 by name with it on — the asymmetry is the
 # proof that the post-collect walk measures something.
 #
-# Instruments under test (elm-compiler/runtime.mid):
+# Instruments under test (osier-compiler/runtime.mid):
 #   * the BLOCK MAP, region slot 25 — one byte per 64-byte minimum block,
 #     0 = not a block start, 1 = live, 2 = freed (swept, on a free list);
 #   * Rt.gcMarkPtr's PER-POINTER invariants, live in EVERY build:

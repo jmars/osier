@@ -104,7 +104,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # Everything below resolves paths against the CWD: run.js reads manifest source
 # paths against its process CWD, and NativeMain reads the fixed corpus from
-# $ELMC_ROOT/elm-compiler (default "elm-compiler"), i.e. relative to the CWD.
+# $ELMC_ROOT/osier-compiler (default "osier-compiler"), i.e. relative to the CWD.
 # NOT running from the repo root yields a bogus `err parse failed` that looks
 # like a compiler bug.
 cd "$ROOT"
@@ -114,7 +114,7 @@ HEAP_MB="${QBE_HEAP_MB:-32768}"
 # One emit's wall-clock budget, in seconds (see the Env: note above).
 EMIT_BUDGET="${QBE_SELFHOST_EMIT_BUDGET:-60}"
 BIN="${QBE_SELFHOST_BIN:-$ROOT/out/bin/qelmc}"
-MANIFEST="$ROOT/elm-compiler/selfhost/manifest.json"
+MANIFEST="$ROOT/osier-compiler/selfhost/manifest.json"
 # (ZIGHOST Z6) no RT: there is no runtime object.  The runtime is Mid and is
 # emitted into the .ssa, so every link below is <ssa>.s + libc.
 
@@ -167,8 +167,8 @@ fi
 command -v node >/dev/null 2>&1 || die "node not found"
 command -v jq   >/dev/null 2>&1 || die "jq not found"
 command -v cc   >/dev/null 2>&1 || die "cc not found"
-[ -f "$ROOT/elm-compiler/compiler.js" ] \
-  || die "elm-compiler/compiler.js missing (run elm-compiler/build.sh once)"
+[ -f "$ROOT/osier-compiler/compiler.js" ] \
+  || die "osier-compiler/compiler.js missing (run osier-compiler/build.sh once)"
 [ -f "$MANIFEST" ] || die "manifest missing: $MANIFEST"
 
 # One group exactly: this script's whole shape (one .ssa, one output) assumes
@@ -207,7 +207,7 @@ emit_ssa() { # $1 = output path
   jq --arg out "$1" --arg entry "$ENTRY" \
      '.groups[0].output = $out | .groups[0].entry = $entry' "$MANIFEST" > "$WORK/emit.json"
   ( cd "$ROOT" && \
-      node "$ROOT/elm-compiler/run.js" --batch "$WORK/emit.json" ) || return 1
+      node "$ROOT/osier-compiler/run.js" --batch "$WORK/emit.json" ) || return 1
   # run.js exits 0 on a compile error — the payload lands in the OUTPUT FILE.
   if head -c 4 "$1" | grep -q '^err '; then
     say "qbe-selfhost: emit FAILED: $(head -c 300 "$1")" >&2

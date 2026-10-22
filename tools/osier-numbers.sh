@@ -55,7 +55,7 @@
 #
 #   ELM_BIN      elm 0.19.2 binary
 #                (default: ~/.npm-global/lib/node_modules/elm/bin/elm — NOT on
-#                PATH in the paper's build host; elm-compiler/build.sh's PATH
+#                PATH in the paper's build host; osier-compiler/build.sh's PATH
 #                probe finds nothing there)
 #   ELAN_HOME    Lean toolchain home (default: /var/data/workspace/lean/elan;
 #                lake is ELAN_HOME/bin/lake).  A bare `lean <file>` does NOT
@@ -74,7 +74,7 @@ cd "$ROOT"
 
 ELM_BIN="${ELM_BIN:-$HOME/.npm-global/lib/node_modules/elm/bin/elm}"
 ELAN_HOME="${ELAN_HOME:-/var/data/workspace/lean/elan}"
-CDIR="$ROOT/elm-compiler"
+CDIR="$ROOT/osier-compiler"
 
 fail=0
 note() { printf '%-28s %s\n' "$1:" "$2"; }

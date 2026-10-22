@@ -21,7 +21,7 @@ data $d14 = align 8 { b "src/Prelude.elm", b 0 }
 data $d15 = align 8 { b "src/Runtime.elm", b 0 }
 data $d16 = align 8 { l $clo9_NativeMain_x2ecorpusPaths, w 1, w 0, z 8 }
 data $d17 = align 8 { b "core-libs/", b 0 }
-data $d18 = align 8 { b "elm-compiler", b 0 }
+data $d18 = align 8 { b "osier-compiler", b 0 }
 data $d19 = align 8 { b "TaskStat", b 0 }
 data $d20 = align 8 { l $clo15_NativeMain_x2eresolveExisting, w 1, w 3, z 8 }
 data $d21 = align 8 { l $clo16_, w 1, w 3, z 8 }
@@ -10992,7 +10992,7 @@ function :ret $q_NativeMain_x2ecorpusRoot() {
 	%t0 =l add %s0, 8
 	storel $d18, %t0
 	%t1 =l add %s0, 16
-	storel 12, %t1
+	storel 14, %t1
 	# (fallthrough)
 @ret
 	call $q_Rt_x2eframe_x2dleave()

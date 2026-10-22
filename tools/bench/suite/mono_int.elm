@@ -19,7 +19,7 @@ module MonoInt exposing (main, once)
 -- natively.
 --
 -- WHY ONE FUNCTION, SEVERAL TYPES, IN ONE FILE: the compile unit here is the
--- file.  `node elm-compiler/run.js <one.elm> <out.csexp>` does NOT resolve
+-- file.  `node osier-compiler/run.js <one.elm> <out.csexp>` does NOT resolve
 -- cross-module imports -- MEASURED: a two-module App.elm/Lib.elm compiles to
 -- `err type error ... unknown name: Lib.twice` (run.js exits 0 and writes the
 -- error into the bundle, so the bundle text is the oracle).  A shared

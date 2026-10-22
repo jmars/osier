@@ -15,7 +15,7 @@ package, itself derived from the Shen `zincvm.c` runtime) was deleted in the
 zighost arc's last act, together with `tools/qbe/hostshim.zig`, the `rt.o`
 object, `src/effectloop.zig` and the root `build.zig`/`build.zig.zon`.  Nothing
 in this repository links, builds or derives from it any more: the runtime is
-Mid (`elm-compiler/runtime.mid`), written for this project, and every artifact
+Mid (`osier-compiler/runtime.mid`), written for this project, and every artifact
 links against libc and nothing else.  The entry is kept as a RECORD so a reader
 comparing this file against the tree does not conclude the vendoring vanished by
 accident; the provenance history lives in `docs/gc-zig.md` and in `plan.md`'s
@@ -26,15 +26,15 @@ BRIDGES table.
 - **Licence:** MIT — Copyright (c) 2018 Mats Stijlaart
 - **Upstream:** https://package.elm-lang.org/packages/stil4m/elm-syntax/7.3.9
 - **Derived files (40):**
-  - `elm-compiler/src/Elm/Syntax/*.elm` (17 files)
-  - `elm-compiler/src/Elm/Parser/*.elm` (12 files) and `elm-compiler/src/Elm/Parser.elm`
-  - `elm-compiler/src/Elm/{Dependency,Interface,Processing,RawFile}.elm`
-  - `elm-compiler/src/Elm/Internal/RawFile.elm`
-  - `elm-compiler/src/ParserFast.elm`, `elm-compiler/src/ParserWithComments.elm`, `elm-compiler/src/Rope.elm`
-  - `elm-compiler/src/List/Extra.elm`
-  - `elm-compiler/src/Char/Extra.elm` (which additionally carries miniBill/elm-unicode code — see below)
+  - `osier-compiler/src/Elm/Syntax/*.elm` (17 files)
+  - `osier-compiler/src/Elm/Parser/*.elm` (12 files) and `osier-compiler/src/Elm/Parser.elm`
+  - `osier-compiler/src/Elm/{Dependency,Interface,Processing,RawFile}.elm`
+  - `osier-compiler/src/Elm/Internal/RawFile.elm`
+  - `osier-compiler/src/ParserFast.elm`, `osier-compiler/src/ParserWithComments.elm`, `osier-compiler/src/Rope.elm`
+  - `osier-compiler/src/List/Extra.elm`
+  - `osier-compiler/src/Char/Extra.elm` (which additionally carries miniBill/elm-unicode code — see below)
 - **Local divergence from upstream:**
-  1. **JSON codecs pruned** from 24 files by `elm-compiler/selfhost/prune_codecs.py`
+  1. **JSON codecs pruned** from 24 files by `osier-compiler/selfhost/prune_codecs.py`
      (now retired; kept as the record of the derivation): every
      `encode`/`decoder` and codec-only helper is deleted, because the
      parse -> typecheck -> lower path never serializes the AST.
@@ -48,10 +48,10 @@ BRIDGES table.
      - hunk 3 — `Elm/Parser/TypeAnnotation.elm`: `recordTypeAnnotation` accepts an
        optional `| tailvar` producing `GenericRecord`, so both tail-first
        (`{ r | x : Int }`) and tail-last (`{ x : Int | r }`) record syntax parse.
-  3. `elm-compiler/src/Parser.elm` is **not** upstream code — it is original to
+  3. `osier-compiler/src/Parser.elm` is **not** upstream code — it is original to
      this project (a minimal stub of elm/parser's `Problem`/`DeadEnd` surface).
 - **Note:** this package was previously consumed as a dependency and vendored
-  under `elm-compiler/selfhost/vendor/`; the `elm/parser`,
+  under `osier-compiler/selfhost/vendor/`; the `elm/parser`,
   `rtfeldman/elm-hex` and `stil4m/structured-writer` transitive dependencies
   went with it.
 
@@ -85,7 +85,7 @@ SOFTWARE.
 
 - **Copyright:** 2021 Leonardo Taglialegne
 - **Licence:** BSD 3-Clause — the full notice is retained verbatim inside
-  `elm-compiler/src/Char/Extra.elm` (immediately below the module declaration),
+  `osier-compiler/src/Char/Extra.elm` (immediately below the module declaration),
   and that file is included unmodified from the elm-syntax package copy of it.
 
 ## QBE (qbe) — compiler backend, vendored verbatim
@@ -172,6 +172,6 @@ DEALINGS IN THE SOFTWARE.
 
 ## Upstream `Parser.elm` stub
 
-`elm-compiler/src/Parser.elm` is original to this project (no upstream licence
+`osier-compiler/src/Parser.elm` is original to this project (no upstream licence
 claim); listed here only to make explicit that it is *not* part of the
 elm-syntax derivation above.

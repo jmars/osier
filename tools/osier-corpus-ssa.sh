@@ -49,8 +49,8 @@ MODE=check
 
 command -v node >/dev/null 2>&1 || { echo "osier-corpus-ssa: node not found" >&2; exit 2; }
 command -v jq   >/dev/null 2>&1 || { echo "osier-corpus-ssa: jq not found" >&2; exit 2; }
-[ -f "$ROOT/elm-compiler/compiler.js" ] || {
-  echo "osier-corpus-ssa: elm-compiler/compiler.js missing (run build.sh)" >&2; exit 2; }
+[ -f "$ROOT/osier-compiler/compiler.js" ] || {
+  echo "osier-corpus-ssa: osier-compiler/compiler.js missing (run build.sh)" >&2; exit 2; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/osier-corpus-ssa.XXXXXX")" || exit 2
 trap 'rm -rf "$WORK"' EXIT
@@ -75,7 +75,7 @@ cat > "$WORK/one.sh" <<'EOJ'
 # $1 = "<name>|<src...>|<entry>" -> $2/<name>.ssa (+ .ssa.log on failure)
 IFS='|' read -r name srcs entry <<< "$1"
 out="$2/$name.ssa"
-if ! ( cd "$OSIER_ROOT/elm-compiler" &&
+if ! ( cd "$OSIER_ROOT/osier-compiler" &&
        QBE=1 QBE_ENTRY="$entry" node run.js $srcs "$out" ) > "$out.log" 2>&1; then
   : # run.js exits 0 on a compile error and writes the payload — a NONZERO
     # exit is the driver failing; the emptiness check below catches both.

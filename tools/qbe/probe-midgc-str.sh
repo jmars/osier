@@ -16,7 +16,7 @@
 #     prints "100" — the kept "NaN" is Mid-allocated (Rt.str -> rt_float_text
 #     -> a GC string), so the Zig scavenge cannot reclaim it.
 #   * FAIL-BEFORE (NO LONGER RUNNABLE, stage 7 O2): re-adding ONE line in
-#     elm-compiler/src/Mid/Qbe/Lower.elm (the `str` entry of nurseryHostPrims)
+#     osier-compiler/src/Mid/Qbe/Lower.elm (the `str` entry of nurseryHostPrims)
 #     made QBE_MIDGC=1 REFUSE the program at compile time, naming `str`.  O2
 #     DELETED that list and both refusal arms (the Mid host is the default, so
 #     the hole closes by construction), so the reversion target no longer
@@ -52,7 +52,7 @@ WITH_STR=$'                        , "value"\n                        , "str"\n 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "probe-midgc-str: $1 not found" >&2; exit 2; }; }
 
 rebuild() {
-  (cd "$ROOT/elm-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) \
+  (cd "$ROOT/osier-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) \
     || { echo "probe-midgc-str: elm make compiler.js failed" >&2; exit 1; }
 }
 

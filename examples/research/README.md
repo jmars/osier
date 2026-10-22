@@ -11,11 +11,11 @@ behaviour is pinned separately by the `rowgadt_fsm*` gate fixtures, which are a
 condensed copy of the same program — see its section.)
 
 Compile any probe and read the artifact (the oracle is the OUTPUT FILE, never
-the exit code — `node elm-compiler/run.js` always exits 0 and writes `err <msg>`
+the exit code — `node osier-compiler/run.js` always exits 0 and writes `err <msg>`
 for a rejection):
 
 ```sh
-node elm-compiler/run.js examples/research/<probe>.elm /tmp/out.csexp
+node osier-compiler/run.js examples/research/<probe>.elm /tmp/out.csexp
 cat /tmp/out.csexp      # a bundle = compiles clean; "err <msg>" = rejected
 ```
 

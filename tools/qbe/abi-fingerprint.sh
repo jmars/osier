@@ -47,7 +47,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 RT="$ROOT/tools/qbe/hostshim.zig"
 TYPES="$ROOT/vendor/osier-rt/src/gc/types.zig"
-MANIFEST="$ROOT/elm-compiler/selfhost/manifest.json"
+MANIFEST="$ROOT/osier-compiler/selfhost/manifest.json"
 
 sha() { sha256sum | cut -c1-64; }
 
@@ -95,10 +95,10 @@ emit_inputs() {
   {
     jq -r '.groups[0].sources[]' "$MANIFEST"
     printf '%s\n' \
-      elm-compiler/run.js \
-      elm-compiler/src/Prelude.elm \
-      elm-compiler/src/Runtime.elm
-    (cd "$ROOT/elm-compiler/core-libs" && ls *.elm | sed 's|^|elm-compiler/core-libs/|')
+      osier-compiler/run.js \
+      osier-compiler/src/Prelude.elm \
+      osier-compiler/src/Runtime.elm
+    (cd "$ROOT/osier-compiler/core-libs" && ls *.elm | sed 's|^|osier-compiler/core-libs/|')
   } | sort -u | while read -r f; do
         printf '%s  %s\n' "$(sha256sum "$ROOT/$f" | cut -c1-64)" "$f"
       done | sha

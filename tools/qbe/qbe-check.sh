@@ -429,7 +429,7 @@ run_midws() {
   local orig="$dir/$mf.orig"
   cp "$ROOT/$mid" "$orig"
   cp "$orig" "$dir/$mf"
-  (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY="$entry" node run.js "$dir/$bf" "$dir/lf.ssa") >/dev/null 2>&1
+  (cd "$ROOT/osier-compiler" && QBE=1 QBE_ENTRY="$entry" node run.js "$dir/$bf" "$dir/lf.ssa") >/dev/null 2>&1
   local ok=1
   if [ -z "$expect" ]; then
     if [ ! -s "$dir/lf.ssa" ] || head -c 4 "$dir/lf.ssa" | grep -q '^err '; then
@@ -447,7 +447,7 @@ run_midws() {
       both)   { printf '\r\n'; sed 's/$/\r/' "$orig"; } > "$dir/$mf" ;;
       indent) sed 's/^/ /' "$orig" > "$dir/$mf" ;;
     esac
-    (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY="$entry" node run.js "$dir/$bf" "$dir/$v.ssa") >/dev/null 2>&1
+    (cd "$ROOT/osier-compiler" && QBE=1 QBE_ENTRY="$entry" node run.js "$dir/$bf" "$dir/$v.ssa") >/dev/null 2>&1
     if [ -n "$expect" ]; then
       if ! head -c 4 "$dir/$v.ssa" | grep -q '^err ' || ! grep -q "$expect" "$dir/$v.ssa"; then
         echo "FAIL $name: the $v .mid was NOT refused naming '$expect' ($(head -c 90 "$dir/$v.ssa" 2>/dev/null))"
@@ -518,7 +518,7 @@ run_mdgc() {
   [ -f "$src" ] || { echo "FAIL $name: no source: $src"; FAIL=1; return; }
   # (ZIGHOST Z6: no rt.o — the runtime is Mid and is emitted into the .ssa)
   ssa="$TMP/$name.ssa"
-  (cd "$ROOT/elm-compiler" &&
+  (cd "$ROOT/osier-compiler" &&
     QBE=1 QBE_ENTRY="$entry" QBE_MIDGC=1 node run.js "$src" "$ssa") >&2 || {
     echo "FAIL $name: qbe-mk (QBE_MIDGC=1)"; FAIL=1; return
   }
@@ -1068,7 +1068,7 @@ frame_perf_gate
 frame_wordcond_pin() {
   local ssa fb fe fb3 fb_i fe_memset ok
   ssa="$TMP/frame-wordcond.ssa"
-  (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY=Fib.fib node run.js "$ROOT/tests/elm-fixtures/fib.elm" "$ssa") >/dev/null 2>&1
+  (cd "$ROOT/osier-compiler" && QBE=1 QBE_ENTRY=Fib.fib node run.js "$ROOT/tests/elm-fixtures/fib.elm" "$ssa") >/dev/null 2>&1
   if [ ! -s "$ssa" ]; then
     echo "FAIL frame-wordcond: fib .ssa missing (compile failed)"
     FAIL=1; return
@@ -1458,7 +1458,7 @@ printf 'module Oos exposing (main)\n\nmain =\n    let\n        { x } =\n        
 # The compile's own status decides, not the old artifact's absence: with no
 # build this run there is no oos.ssa, and "no err prefix in a missing file"
 # must not read as a pass.
-if (cd "$ROOT/elm-compiler" &&
+if (cd "$ROOT/osier-compiler" &&
       QBE=1 QBE_ENTRY=Oos.main node run.js "$TMP/oos.elm" "$TMP/oos.ssa") >/dev/null 2>&1 \
    && [ -f "$TMP/oos.ssa" ] \
    && ! head -c 4 "$TMP/oos.ssa" | grep -q '^err '; then
@@ -1476,7 +1476,7 @@ fi
 # violating tree is not producible from surface code, by construction).
 # Row 1: the front end must not even NAME the raw surface — any `Unsafe`/`Raw`
 # token in FromAst.elm is a front end that can emit one.
-n="$(rg -c 'Unsafe|Raw' "$ROOT/elm-compiler/src/Mid/FromAst.elm" || true)"
+n="$(rg -c 'Unsafe|Raw' "$ROOT/osier-compiler/src/Mid/FromAst.elm" || true)"
 if [ -z "$n" ]; then
   echo "PASS rawnodes-front-end: FromAst.elm names no Unsafe/Raw constructor (the front end cannot emit one)"
 else
@@ -1485,7 +1485,7 @@ else
 fi
 # Row 2: the wiring pin — the audit must be CALLED on every compile, not
 # merely exist (a seat never called is indistinguishable from an absent one).
-n="$(rg -c 'Audit\.run' "$ROOT/elm-compiler/src/Mid/QbeModule.elm" || true)"
+n="$(rg -c 'Audit\.run' "$ROOT/osier-compiler/src/Mid/QbeModule.elm" || true)"
 if [ "$n" = "1" ]; then
   echo "PASS rawnodes-audit-wired: Mid.QbeModule runs Mid.Audit on every compile"
 else
@@ -1594,9 +1594,9 @@ agg_count() {
 # a tracked artifact).
 qbe_ssa() { # <fixture> <entry> <out.ssa> <on|off>
   if [ "$4" = "off" ]; then
-    (cd "$ROOT/elm-compiler" && QBE=1 QBE_NOFLATTEN=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+    (cd "$ROOT/osier-compiler" && QBE=1 QBE_NOFLATTEN=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
   else
-    (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+    (cd "$ROOT/osier-compiler" && QBE=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
   fi
 }
 
@@ -1805,9 +1805,9 @@ primdirect_arities() {
 }
 qbe_ssa_rep() { # <fixture> <entry> <out.ssa> <on|off>
   if [ "$4" = "off" ]; then
-    (cd "$ROOT/elm-compiler" && QBE=1 QBE_NOREP=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+    (cd "$ROOT/osier-compiler" && QBE=1 QBE_NOREP=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
   else
-    (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+    (cd "$ROOT/osier-compiler" && QBE=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
   fi
 }
 for pair in slotCount:slot chain:chain capture:cap polyLocal:poly boxed:box floatLocal:float floatParam:floatp floatCapture:floatc; do
@@ -1830,7 +1830,7 @@ done
 # call (MEASURED: floatLocal 23 slots Zig-route vs 15 Mid-route), which would
 # silently weaken the fixture-strength bound.
 qbe_ssa_norep_offpd() {
-  (cd "$ROOT/elm-compiler" && QBE=1 QBE_MIDZIG=1 QBE_NOREP=1 QBE_NOPRIMDIRECT=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+  (cd "$ROOT/osier-compiler" && QBE=1 QBE_MIDZIG=1 QBE_NOREP=1 QBE_NOPRIMDIRECT=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
 }
 
 if [ -s "$TMP/norep-slot-on.ssa" ] && [ -s "$TMP/norep-slot-off.ssa" ]; then
@@ -1973,9 +1973,9 @@ fi
 # byte-identical INCLUDING its first line.
 qbe_ssa_mono() { # <fixture> <entry> <out.ssa> <on|off>
   if [ "$4" = "off" ]; then
-    (cd "$ROOT/elm-compiler" && QBE=1 QBE_NOMONO=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+    (cd "$ROOT/osier-compiler" && QBE=1 QBE_NOMONO=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
   else
-    (cd "$ROOT/elm-compiler" && QBE=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+    (cd "$ROOT/osier-compiler" && QBE=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
   fi
 }
 # mono_note <ssa>: the pass's one-line report ("" when it decided nothing).  A
@@ -2252,9 +2252,9 @@ QBE_NOREP=1 run norep-main-off NoRep.main tools/qbe/fixtures/norep.elm
 # EMIT and count, which is exactly the emit-only discipline QBE_MIDZIG=1 uses.
 qbe_ssa_prim() { # <fixture> <entry> <out.ssa> <on|off>
   if [ "$4" = "off" ]; then
-    (cd "$ROOT/elm-compiler" && QBE=1 QBE_MIDZIG=1 QBE_NOPRIMDIRECT=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+    (cd "$ROOT/osier-compiler" && QBE=1 QBE_MIDZIG=1 QBE_NOPRIMDIRECT=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
   else
-    (cd "$ROOT/elm-compiler" && QBE=1 QBE_MIDZIG=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+    (cd "$ROOT/osier-compiler" && QBE=1 QBE_MIDZIG=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
   fi
 }
 # flatten.elm is the fixture with the widest prim mix already on the row list
@@ -2487,7 +2487,7 @@ qbe_ssa_midrt() { # <fixture> <entry> <out.ssa> <mode: on|route|zig>
     route) flags="" ;;
     zig)   flags="QBE_MIDZIG=1" ;;
   esac
-  (cd "$ROOT/elm-compiler" && env QBE=1 $flags QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
+  (cd "$ROOT/osier-compiler" && env QBE=1 $flags QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
 }
 midrt_ssa() { grep -c 'q_Rt_x2econs' "$1" 2>/dev/null || true; }
 midrt_calls() { grep -c 'call \$q_Rt_x2econs(' "$1" 2>/dev/null || true; }
@@ -2613,7 +2613,7 @@ fi
 # step): a surface module named Rt would emit keys under the whitelisted
 # Rt.* prefix and never be audited, so every compile rejects it loudly.
 printf 'module Rt exposing (f)\n\nf x =\n    x + 1\n' > "$TMP/rtmod.elm"
-if (cd "$ROOT/elm-compiler" &&
+if (cd "$ROOT/osier-compiler" &&
       QBE=1 QBE_ENTRY=Rt.f node run.js "$TMP/rtmod.elm" "$TMP/rtmod.ssa") >/dev/null 2>&1 \
    && head -c 200 "$TMP/rtmod.ssa" 2>/dev/null | grep -q 'module name Rt is reserved'; then
   echo "PASS rt-name-reserved: a surface module named Rt is rejected loudly at collect time"
@@ -2679,7 +2679,7 @@ if true; then
   # object — the row links compiler.s + libc like every other one.)
   md_d=1000000
   ssa="$TMP/md-mutual.ssa"
-  if (cd "$ROOT/elm-compiler" &&
+  if (cd "$ROOT/osier-compiler" &&
     QBE=1 QBE_ENTRY=Mutual.even node run.js "$ROOT/tools/qbe/fixtures/mutualtail.elm" "$ssa") >&2; then
     case "$(head -c 4 "$ssa")" in
       "err "*) echo "FAIL md-mutual-tail: compile failed: $(cat "$ssa")"; FAIL=1;;
@@ -2946,7 +2946,7 @@ fi
 # defaults ON, so its incompatible value is `=0`.  A reader that assumed `=1`
 # would test QBE_MIDHOST=1 (the Mid host, i.e. the COMPATIBLE value) and go red
 # on a healthy tree, so the `val` travels with the `off` (default 1).
-midgc_guard_offs="$(grep -o "off: 'QBE_[A-Z]*'\(, val: '[^']*'\)\?" "$ROOT/elm-compiler/run.js" \
+midgc_guard_offs="$(grep -o "off: 'QBE_[A-Z]*'\(, val: '[^']*'\)\?" "$ROOT/osier-compiler/run.js" \
   | sed "s/off: '//; s/', val: '/=/; s/'//g; s/,$//" \
   | sed "s/^\(QBE_[A-Z]*\)$/\1=1/")"
 if [ -z "$midgc_guard_offs" ]; then
@@ -2955,7 +2955,7 @@ if [ -z "$midgc_guard_offs" ]; then
 else
   mg_ok=1
   for off in $midgc_guard_offs; do
-    (cd "$ROOT/elm-compiler" && env "$off" node run.js >/dev/null 2>&1)
+    (cd "$ROOT/osier-compiler" && env "$off" node run.js >/dev/null 2>&1)
     mg_rc=$?
     if [ "$mg_rc" -ne 2 ]; then
       echo "FAIL midgc-guard: $off exited $mg_rc, want 2 (the incompatible combination is no longer refused loudly)"

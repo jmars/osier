@@ -8,11 +8,11 @@
 # and — after Phase 4b — the Mid-written collector.  Every one of those used
 # to carry its own copy of the numbers, and a mismatch LINKS CLEANLY and then
 # reads another struct's bytes at the wrong offset.  Since stage 2 the numbers
-# are defined once, in `elm-compiler/src/Mid/RtLayout.elm`, and this script is
+# are defined once, in `osier-compiler/src/Mid/RtLayout.elm`, and this script is
 # how the OTHER copies are brought to it — loudly.
 #
 # THE THREE LEGS.
-#   MID    `elm-compiler/src/Mid/RtLayout.elm` is parsed as TEXT (the module
+#   MID    `osier-compiler/src/Mid/RtLayout.elm` is parsed as TEXT (the module
 #          states every constant as `name =` / `    <digits>`, and the parse
 #          is checked against an EXPECTED NAME LIST below — a renamed or
 #          dropped constant is a census FAILURE, never a silent skip).
@@ -49,7 +49,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-MID="$ROOT/elm-compiler/src/Mid/RtLayout.elm"
+MID="$ROOT/osier-compiler/src/Mid/RtLayout.elm"
 # (ZIGHOST Z6) GEN / PROBE / RTZ named the three Zig artifacts this census used
 # to cross-check against — layout_gen.zig, layout-probe.zig and hostshim.zig.
 # All three are deleted; only the Mid leg is left.

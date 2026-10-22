@@ -25,7 +25,7 @@
 #     and is deliberately NOT denied (it does not occur standalone in the
 #     source; every occurrence is a hyphenated provenance token).
 #   * Artifact-layout paths that name only the artifact's own directories
-#     (elm-compiler/…, lean/…, tests/elm-fixtures/…, src/effectloop.zig,
+#     (osier-compiler/…, lean/…, tests/elm-fixtures/…, src/effectloop.zig,
 #     docs/research/row-gadt*.md) are KEPT: they describe the supplementary
 #     artifact a reviewer receives at submission time and name no owner,
 #     repository, tag or author — stripping them would cost the paper's

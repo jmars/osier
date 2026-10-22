@@ -1,0 +1,558 @@
+// M0 bootstrap → M3 → batch: node wrapper for the osier-compiler.
+//
+// Single-fixture CLI:
+//   QBE_ENTRY=<Mod>.<fn> node run.js <input1.elm> [input2.elm ...] <output.ssa>
+// ALL inputs are compiled TOGETHER as one multi-module program (cross-module
+// references resolve through the merged global table).  src/Prelude.elm is
+// ALWAYS appended last — it is compiled by the compiler itself (plan §6/§8
+// M3), so user modules get List/String/Basics conveniences without importing
+// anything.  The source list travels to Main.elm as a JSON array string.
+//
+// Batch CLI (S8):
+//   node run.js --batch <manifest.json>
+// manifest = { "groups": [ { "sources": ["/abs/a.elm", ...], "output": "/abs/x.ssa", "entry": "Mod.fn" }, ... ] }
+// The fixed corpus (Prelude + Runtime + the eight core-libs) is read ONCE and
+// every group is compiled in this one process; Main.elm emits a JSON ARRAY of
+// per-group strings (the QBE IL text, or "err <msg>" per group), which are
+// written to each group's output file.  This pays for the corpus
+// parse+typecheck+lower exactly once instead of once per fixture.  Each
+// group's OWN `entry` names the defun the QBE backend roots reachability
+// from (the single-fixture CLI's QBE_ENTRY, per group).
+//
+// P8 (osier-delete-zinc): this driver is QBE-ONLY.  The ZINC-csexp output
+// paths (MIDTIER=0 direct lowering and the MIDTIER=1 middle-tier driver) are
+// deleted with the interpreter; every compile emits QBE IL (.ssa).
+//
+// Main.elm emits synchronously inside init, but Elm's kernel delivers port
+// Cmd messages asynchronously (on the next tick), so we wait for the emit
+// callback and exit once it fires.
+
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+
+// The fixed corpus, in the order Main/run.js historically appended them:
+// Prelude, Runtime, then the eight elm/core ports (Dict/Set/Maybe/Result/
+// Tuple live in core-libs/ — NOT src/ — because elm's ambiguity check
+// spans source-directories: a local src/Dict.elm collides with elm/core's
+// Dict for every compiler module that imports it, breaking
+// `elm make src/Main.elm`).  The UI-flavoured libs (Tea, Key, Draw, ...)
+// were parked in fx-ui in osier split Phase 3 and are no longer part of the
+// corpus.
+const CORPUS = [
+  fs.readFileSync(path.join(__dirname, 'src', 'Prelude.elm'), 'utf8'),
+  fs.readFileSync(path.join(__dirname, 'src', 'Runtime.elm'), 'utf8'),
+  ...[ 'Dict.elm', 'Set.elm', 'Maybe.elm', 'Result.elm',
+       'Tuple.elm', 'JsArray.elm', 'Array.elm', 'Str.elm' ]
+    .map((f) => fs.readFileSync(path.join(__dirname, 'core-libs', f), 'utf8')),
+];
+
+// M1: the runtime surface text — osier-compiler/runtime.mid, the moved home of
+// Mid.RtSource's `source` blob.  Read ONCE at module load (via __dirname, like
+// CORPUS — CWD-independent) and passed to Main as content; Main.elm loads it
+// ONCE per process (the parse hoist that keeps the corpus wall ~16 s-class).
+const RUNTIME_MID_RAW = fs.readFileSync(path.join(__dirname, 'runtime.mid'), 'utf8');
+
+// QBE_MIDHOST IS RETIRED (O4): the Mid host is the ONLY host — the
+// compile-time splice, the run-time getenv switch, and Rt.main's Zig arm are
+// deleted with src/effectloop.zig.  The host defuns in runtime.mid are now
+// unconditionally present (an unreached Mid defun is pruned anyway).
+// QBE_MIDGC IS RETIRED (zighost Z0): the Mid collector is the ONLY collector.
+// There is no branch, no default and no flag left to select another one —
+// Lower's allocation seats, the vec-store seam, the Con/closure routes and the
+// globals-block injection are unconditional, and the Zig escape route's own
+// seats (rt_string, rt_con, rt_make_closure, rt_vec_alloc, rt_vec_store,
+// rt_raw_alloc) are no longer emitted by anything.  The value is still READ,
+// once, to die LOUDLY: a stale script that sets QBE_MIDGC=0 must not silently
+// measure a different route than it names (the QBE_MIDDRIVER precedent above).
+if (process.env.QBE_MIDGC === '0') {
+  console.error('run.js: QBE_MIDGC=0 is no longer supported — the Zig collector is deleted (zighost Z0); the Mid collector is the only one. Nothing selects a collector any more.');
+  process.exit(2);
+}
+const QBE_MIDGC_YOUNG = process.env.QBE_MIDGC_YOUNG !== '0';
+// (O4) the QBE_MIDGC-ONLY SPLICE IS RETIRED: its one region — Rt.main's
+// run-time refusal of QBE_MIDHOST=0 — went with the QBE_MIDHOST hatch.  The
+// collector hatch that shared its name is gone too (Z0, above); only the
+// nursery's QBE_MIDGC_YOUNG splice remains.
+const MIDGC_YOUNG_BEGIN = '// >>> QBE_MIDGC_YOUNG-ONLY';
+const MIDGC_YOUNG_END = '// <<< QBE_MIDGC_YOUNG-ONLY';
+
+// (O4) ONE region kind remains (QBE_MIDGC_YOUNG-ONLY, the nursery hatch).
+// The counters still make an unbalanced marker a LOUD compile refusal.
+function spliceMidRegion(text, begin, end, label, keep) {
+  const out = [];
+  let inside = false;
+  let began = 0;
+  let ended = 0;
+  for (const line of text.split('\n')) {
+    const t = line.replace(/^\s+/, '');
+    if (!inside && t.startsWith(begin)) {
+      inside = true;
+      began += 1;
+      if (keep) out.push(line);
+      continue;
+    }
+    if (inside && t.startsWith(end)) {
+      inside = false;
+      ended += 1;
+      if (keep) out.push(line);
+      continue;
+    }
+    if (inside) {
+      if (keep) out.push(line);
+      continue;
+    }
+    out.push(line);
+  }
+  if (inside || began === 0 || began !== ended) {
+    console.error(`run.js: runtime.mid's ${label} regions are unbalanced (${began} begin, ${ended} end, unterminated=${inside}) — refusing to compile a half-spliced runtime`);
+    process.exit(2);
+  }
+  return out.join('\n');
+}
+
+// (The young splice is the only one left; order no longer load-bearing.)
+const RUNTIME_MID = spliceMidRegion(RUNTIME_MID_RAW, MIDGC_YOUNG_BEGIN, MIDGC_YOUNG_END, 'QBE_MIDGC_YOUNG', QBE_MIDGC_YOUNG);
+
+// M3: extension classification — a source whose path ends `.mid` is a mid-c
+// module (compiled by Mid.RtLang and merged as a per-group input), NOT an
+// Osier/Elm source.  Classified HERE at the reader (it sees paths; the Elm
+// core sees only text).  `runtime.mid` is NOT among these — it stays the
+// shipped default, read once at module load above and passed as runtimeMidJson.
+function isMidPath(p) {
+  return p.endsWith('.mid');
+}
+
+// M4: READER-SIDE `import` RESOLUTION.  An Osier source may declare
+// `import X` (the ordinary Elm import); the reader resolves it to a `.mid`
+// FILE relative to the IMPORTING FILE: `X` -> `<dir-of-file>/X.mid`.  The
+// reader owns paths (the Elm core sees only text), so this lives here in
+// run.js and mirrors exactly in selfhost/NativeMain.elm (the two drivers
+// must resolve the same group the same way, or their emits diverge).
+//
+// RESOLUTION RULE (existence-based — the ONLY rule sound for the selfhost
+// group, whose sources import modules like `Foo.Bar`/`Html.Attributes` that
+// are neither Elm files nor `.mid` files): an `import X` is a MID import iff
+// `<dir>/X.mid` exists.  Otherwise it is an ordinary Elm import, untouched.
+// LOUD cases (each surfaces as `err <msg>` in the group's output):
+//   * the resolved `.mid`'s `module Name` header DISAGREES with the import
+//     name — a loud reject here (the file exists at the resolved path, so the
+//     import unambiguously meant a mid);
+//   * the resolved `.mid` fails to parse/check/lower — loud, in the core.
+// HONEST FLOOR: a missing `.mid` for an `import X` is NOT distinguishable from
+// a dead/unused Elm import (the selfhost case above), so it falls through to
+// the Elm path and a referenced-but-missing key fails loudly at the USE site
+// ("unknown name: X.f").  The reader scans `import` lines at column 0 only
+// (top-level Elm declarations are never indented).
+
+// The TOKEN RULE below is MIRRORED EXACTLY in selfhost/NativeMain.elm
+// (`keywordName` / `isSepWs` / `upperName` / `isNameChar`): both readers must
+// see the same `import` lines, or the two lanes resolve different `.mid` sets.
+// The separator class is `[ \r]` and NOT `\s` because that is the CORE's
+// whitespace: ParserFast's whitespace skipper takes exactly space, `\n` and
+// `\r` (ParserFast.elm:2852-2866), so `import\tX` is not the language — the
+// core rejects it "parse failed" in both lanes (MEASURED).  `\s` would also
+// match a tab, a form feed or a `\u00a0` INSIDE a comment or a string literal
+// at column 0, resolving a `.mid` the native lane would not see.  A line scan,
+// so `\n` can never occur inside `line`.
+
+// The module names in an Elm source's `import X` lines, in order.
+function importNames(src) {
+  const names = [];
+  for (const line of src.split('\n')) {
+    const m = /^import[ \r]+([A-Z][A-Za-z0-9_.]*)/.exec(line);
+    if (m) names.push(m[1]);
+  }
+  return names;
+}
+
+// ASCII whitespace — the set `midTrim` strips in the native lane.  It is
+// `String.trim` restricted to ASCII on purpose: the exotic members of JS `\s`
+// (`\u00a0`, `\u2028`, ...) are NOT stripped in either lane, so a `.mid`
+// padded with them stays headerless in BOTH (the core rejects such a file
+// loudly anyway — it skips only space/`\n`/`\r`).
+const ASCII_WS = /[\t\n\v\f\r ]/;
+function midTrim(s) {
+  let a = 0;
+  let b = s.length;
+  while (a < b && ASCII_WS.test(s[a])) a++;
+  while (b > a && ASCII_WS.test(s[b - 1])) b--;
+  return s.slice(a, b);
+}
+
+// The `module X` header name of a `.mid` file, skipping `//`/blank lines.  A
+// line is skipped after TRIMMING (so a CRLF's `\r`, a blank first line and an
+// indented comment are all skipped — the same reading the native lane's
+// `firstModuleName` applies, and the one the core's own `.mid` header parser
+// has: it skips whitespace and comments before the `module` line,
+// RtLang/Parse.elm:1217).  '' when the first non-comment non-blank line is not
+// a `module` line (a headerless .mid — the core rejects it loudly; the reader
+// only flags a MISMATCH, never a missing header).
+function midModuleName(text) {
+  for (const line of text.split('\n')) {
+    const t = midTrim(line);
+    if (t === '' || t.startsWith('//')) continue;
+    const m = /^module[ \r]+([A-Z][A-Za-z0-9_.]*)/.exec(t);
+    return m ? m[1] : '';
+  }
+  return '';
+}
+
+function pathDir(p) {
+  const i = p.lastIndexOf('/');
+  return i < 0 ? '' : p.slice(0, i);
+}
+
+// A REGULAR-FILE probe.  `fs.existsSync` is true for directories, fifos and
+// sockets too; the native lane's existence check is `Io.stat isFile`, so this
+// MIRRORS it: a directory named `X.mid` must fall through as "not a .mid"
+// (an Elm import), never EISDIR-crash or hang the gate.
+function isRegularFile(p) {
+  try {
+    return fs.statSync(p).isFile();
+  } catch (e) {
+    return false;
+  }
+}
+
+// Resolve a group's `.mid` IMPORTS: for each Elm source path+text, scan its
+// `import X` lines and read `<dir>/X.mid` when it exists (deduped by resolved
+// path, first-import order).  Returns the mid texts and a loud error list
+// (the first mismatch error wins).
+function resolveMidImports(elmPathTexts) {
+  const mids = [];
+  const seen = new Set();
+  const errors = [];
+  for (const { path, text } of elmPathTexts) {
+    const dir = pathDir(path);
+    for (const name of importNames(text)) {
+      const midPath = dir === '' ? name + '.mid' : dir + '/' + name + '.mid';
+      // Regular-file probe, MIRRORING the native lane's `Io.stat isFile`.  A
+      // bare `existsSync` is true for directories/fifos/sockets too, so a
+      // directory named `X.mid` would EISDIR-crash here (uncaught) and a fifo
+      // would hang — neither is an `err` refusal.
+      if (!isRegularFile(midPath)) continue; // an Elm import, untouched
+      if (seen.has(midPath)) continue;
+      seen.add(midPath);
+      const midText = fs.readFileSync(midPath, 'utf8');
+      const headerName = midModuleName(midText);
+      if (headerName !== '' && headerName !== name) {
+        errors.push(
+          `import ${name}: ${midPath} declares module ${headerName} ` +
+          `(a .mid's module header must match the import name)`
+        );
+      } else {
+        mids.push(midText);
+      }
+    }
+  }
+  return { mids, errors };
+}
+
+// Read one group's sources (paths) into the {sources, mids} text shape
+// compileGroups consumes, resolving `.mid` imports reader-side.  A resolution
+// error becomes { ok: false, msg } — the caller writes `err <msg>` to the
+// group's output and skips it.
+function prepareGroup({ elmPaths, midPaths, output, entry }) {
+  const elmPathTexts = elmPaths.map((p) => ({ path: p, text: fs.readFileSync(p, 'utf8') }));
+  const { mids, errors } = resolveMidImports(elmPathTexts);
+  if (errors.length > 0) {
+    return { ok: false, msg: errors[0], output, entry };
+  }
+  const explicitMids = midPaths.map((p) => fs.readFileSync(p, 'utf8'));
+  return {
+    ok: true,
+    sources: elmPathTexts.map((t) => t.text),
+    mids: mids.concat(explicitMids),
+    output,
+    entry,
+  };
+}
+
+// QBE_NOFLATTEN=1 DISABLES the defun-local aggregate flattening pass.  It
+// exists so the pass can be A/B'd on the SAME source: the structural gate in
+// tools/qbe/qbe-check.sh compiles both ways and requires the aggregate prims
+// to be GONE in one build and PRESENT in the other, and the selfhost
+// wall-clock measurement needs the same switch.  Default ON.
+const QBE_FLATTEN = process.env.QBE_NOFLATTEN !== '1';
+// QBE_NOREP=1 DISABLES the S4/M1 representation pass (unboxed Int locals +
+// Native i64 arithmetic on proven-Int operands in a monotype defun).  Same
+// purpose as QBE_NOFLATTEN: it exists so the pass can be A/B'd on the SAME
+// source — the structural gate compiles both ways and the counters must move
+// with the clock.  Default ON.
+const QBE_REP = process.env.QBE_NOREP !== '1';
+// QBE_NOPRIMDIRECT=1 DISABLES pass A (the DIRECT per-prim call entries:
+// `call $rt_prim_<name>(...)` instead of the name-dispatched generic
+// `rt_prim`).  Same purpose as QBE_NOFLATTEN/QBE_NOREP: it exists so the pass
+// can be A/B'd on the SAME source — the structural gate compiles both ways
+// and the direct call sites must be PRESENT in one build and ABSENT in the
+// other, while the programs still print what they printed.  Default ON.
+const QBE_PRIMDIRECT = process.env.QBE_NOPRIMDIRECT !== '1';
+// QBE_NOMIDRT=1 DISABLES the Mid-written runtime injection (osier-consspike):
+// the Rt.* defuns are withheld from the compile entirely, so no used-prim
+// seed fires and the emitted .ssa is byte-identical to the pre-Rt baseline.
+// It exists so the injection can be A/B'd on the SAME source — the corpus
+// attribution proof, and the structural gate's off arm.  Default ON (inject).
+// POST-FLIP (osier-flip) this arm is EMIT-ONLY: the Mid route is now the
+// default, so a withheld Rt program makes midPrimRoute fall back to the Zig
+// route for every prim whose Zig handler the flip DELETED — the emitted .ssa
+// references rt_prim_* symbols rt.o no longer defines and cannot LINK.  That
+// is deliberate and loud (a missing symbol at ld), never a silent wrong
+// answer; the hatch survives for emit-level attribution.
+const QBE_MIDRT = process.env.QBE_NOMIDRT !== '1';
+// THE FLIP (osier-flip, step 6): the Mid route IS the default — every prim
+// with a Mid implementation (Mid.Rt.impls, the 36 differentially-proven
+// defuns) is CALLED as its Rt.* defun, not through rt.o's Zig entry; this is
+// the route the whole-gate rehearsal proved byte-identical (154/0 under the
+// old QBE_MIDCONS=1 hatch).  The old Zig route stays selectable for a bisect
+// with QBE_MIDZIG=1 — an EMIT-level hatch on this tree, because the flip
+// deleted the flipped prims' Zig handlers: a QBE_MIDZIG=1 build's .ssa
+// references rt_prim_* symbols that no longer exist and fails at LINK time,
+// loudly.  The pre-flip opt-in name QBE_MIDCONS is RETIRED (scripts that set
+// it now get the default, which is what they asked for).  Requires the
+// injection (QBE_NOMIDRT=1 removes the defun and the route falls back to
+// Zig rather than calling an absent function).
+const QBE_MIDCONS = process.env.QBE_MIDZIG !== '1';
+// QBE_NORTLEAN=1 DISABLES the Rt lean ABI (osier-midabi): every Rt.* defun
+// goes back to the generic closure-ABI shape — :val BY-VALUE args, an 80-byte
+// :ret return, rt_bounce at every call site, and rt_frame_enter machinery on
+// every callee — which is the pre-midabi (fat) emission.  It exists for the
+// same purpose as QBE_NOFLATTEN/QBE_NOREP: A/B the ABI on the SAME source —
+// it is the corpus attribution hatch for the lean re-freeze (hatch ON
+// reproduces the pre-midabi committed baseline byte-for-byte).  Default OFF
+// (the lean ABI is the point of the flip's recovery).
+const QBE_RTLEAN = process.env.QBE_NORTLEAN !== '1';
+// QBE_NOMONO=1 DISABLES the S5/M2 specialiser (Mid/Qbe/Monomorphise.elm):
+// no polymorphic defun is cloned at its call sites' instantiations, so the
+// emitted .ssa is the pre-S5 emission on the SAME source.  Same purpose as
+// QBE_NOFLATTEN/QBE_NOREP: it exists so the pass can be A/B'd on one source —
+// the corpus attribution hatch (QBE_NOMONO=1 must reproduce the pre-S5
+// committed baseline byte-for-byte), and the structural gate's off arm.
+// Default ON.
+const QBE_MONO = process.env.QBE_NOMONO !== '1';
+// QBE_NOCONSARR=1 RESTORES the pre-(A) two-word cons representation (cons as
+// two interior pointers into a 2-element array, the old fused-pair shape).
+// It is the corpus attribution hatch for (A): QBE_NOCONSARR=1 must reproduce
+// the 00cc7da corpus byte-for-byte.  Default OFF (cons is ONE pointer).
+const QBE_CONSARR = process.env.QBE_NOCONSARR !== '1';
+// QBE_NOREC=1 RESTORES the pre-(E) assoc-chain record representation: every
+// record build/get/update site emits the old cons/@p/emptylist/assoc/snd
+// chain route.  It is the corpus attribution hatch for (E): QBE_NOREC=1 +
+// QBE_NOCONSARR=1 must reproduce the 00cc7da corpus byte-for-byte.  Default
+// OFF (records are positional).
+const QBE_REC = process.env.QBE_NOREC !== '1';
+// QBE_NOEQPTRFAST=1 DISABLES the `Rt.=` name-pointer fast path (stage 3,
+// zigretire): the symbol/symbol and symbol/prim equality arms fall back to the
+// pure byte walk (`Rt.symEq`) with no pointer-identity short-circuit.  It is
+// the corpus attribution hatch for that change — QBE_NOEQPTRFAST=1 must
+// reproduce the pre-change corpus byte-for-byte.  Default OFF (fast path ON).
+const QBE_EQPTRFAST = process.env.QBE_NOEQPTRFAST !== '1';
+// QBE_NOTYPESPEC=1 DISABLES the binder-map type specialization (unit B): the
+// MTagEq payload-pointer inline, the Int binder-map operands, and the record
+// field-type operands all fall back to the pre-change emission.  It is the
+// corpus attribution hatch for that unit — QBE_NOTYPESPEC=1 must reproduce the
+// pre-change corpus byte-for-byte.  Default OFF (type specialization ON).
+const QBE_TYPESPEC = process.env.QBE_NOTYPESPEC !== '1';
+// splice ABOVE is what consumes it — see the flag's own comment there.
+// QBE_MIDDRIVER is GONE (stage 6 B4, "the shrink"): the Zig arm that flag
+// selected (rt_die/rt_halt/rt_frame_*/rt_apply/rt_bounce/rt_tail_known/
+// rt_prim/`main` in tools/qbe/rt.zig) is DELETED, so the flag no longer
+// selects anything.  A stale script that still sets QBE_MIDDRIVER=0 must die
+// LOUDLY rather than silently getting the Mid route — the attribution window
+// closed at B4.  QBE_MIDDRIVER=1 (or its absence) is the only route and is
+// accepted silently.
+if (process.env.QBE_MIDDRIVER === '0') {
+  console.error('run.js: QBE_MIDDRIVER=0 is no longer supported — the Zig arm is gone; the attribution window closed at B4. The Mid driver is the only route.');
+  process.exit(2);
+}
+// THE MIDGC GUARD, data-driven (zigretire stage 5 PART 3 — the lesson: a
+// guard that names ONE incompatible flag is not a guard; this arc paid for
+// that twice).  Since zighost Z0 the Mid collector is the ONLY collector, so
+// every flag its seats DEPEND on must be present ALWAYS — there is no route
+// left on which withholding one is sound.  MIDGC_DEPENDS_ON is the COMPLETE
+// enumeration of those flags:
+// each entry names the env that turns the dependency OFF, what the dependency
+// is, and why the combination is a SILENT wrong answer (never a loud link
+// error, which is why a by-hand `if` per flag keeps leaking holes).
+//
+// DEPENDENCIES (complete, 2026-10-12; QBE_MIDHOST entry RETIRED at O4):
+//   1. the LEAN ABI — the Mid routes (lowerCon / lowerClosure /
+//      midGcAllocSeat / lowerRecordLitPos / lowerRecordUpdateClosed)
+//      hard-code the lean call shape (3 pointer args + a count word, direct
+//      :val return).  With QBE_NORTLEAN=1 the Rt callees lower FAT, so the
+//      mix links and then reads the wrong registers.  (stage-5 review finding 5)
+//   2. the MID RUNTIME — QBE_NOMIDRT=1 withholds the Rt program, so the
+//      q_Rt_* seats the collector and routes call are never emitted: no
+//      q_Rt_x2eallocVector export, the weak extern resolves to 0, and
+//      applyGo's partial arm silently reverts to the Zig allocator — a
+//      cross-heap edge that SEGVs with no diagnostic.  (stage-5 PART 2 review)
+//
+// NOTE the entry is the only one whose incompatible value is '0', not '1' (the
+// dependent flag is ON by default now), hence the per-entry `val`.
+//
+// The tools/qbe/qbe-check.sh "midgc-guard" row greps THIS list and re-runs
+// run.js with each `off` flag, asserting exit 2.  WHAT THAT ROW ACTUALLY PINS
+// (and does not pin — corrected 2026-10-12, stage-5 PART 3 review):
+//   * it pins DELETION: the row asserts the list is non-empty, so a refactor
+//     that deletes the enumeration fails there, not silently;
+//   * it pins LIST<->LOOP CONSISTENCY: list and loop are the same variable, so
+//     the check cannot drift from the guard;
+//   * it CANNOT see an OMITTED flag — a dependency added to the code without a
+//     list entry compiles on, and the row re-tests only what it NAMES.
+// COMPLETENESS of the enumeration is therefore a REVIEW obligation, not a
+// mechanical one — and the string hole that motivated this correction shows
+// the structural limit: QBE_NOSTRINGINTERN is read in rt.zig main, not run.js,
+// so NO list here could enumerate it.  That hole is closed STRUCTURALLY
+// (string literals are emitted as static data — rt_string is not called at
+// all), pinned by probe-midgc-string.sh's zero-rt_string-emission
+// assert, not by this guard.
+const MIDGC_DEPENDS_ON = [
+  { off: 'QBE_NORTLEAN', dep: 'the lean ABI', why: 'the Mid routes hard-code the lean call shape (3 pointer args + a count word, direct :val return), which mixes with the FAT QBE_NORTLEAN callees into a link-and-read-the-wrong-registers' },
+  { off: 'QBE_NOMIDRT', dep: 'the Mid runtime', why: 'withholding the Rt program removes the q_Rt_* seats the collector and routes call, so the partial-application path silently reverts to the Zig allocator (a cross-heap edge that SEGVs)' },
+];
+for (const d of MIDGC_DEPENDS_ON) {
+  if (process.env[d.off] === (d.val || '1')) {
+    console.error(`run.js: the Mid collector requires ${d.dep} (${d.off}=${d.val || '1'} is incompatible — ${d.why})`);
+    process.exit(2);
+  }
+}
+// QBE_ENTRY: the defun key the QBE backend roots reachability from
+// ("<Mod>.<fn>").  REQUIRED in the single-fixture CLI; the batch mode reads
+// one entry PER GROUP from the manifest instead.
+const QBE_ENTRY = process.env.QBE_ENTRY || '';
+
+// V8's stack limit CANNOT be raised once node has started, and the QBE
+// backend's lowering runs non-tail-recursive passes (Peephole.forwardBlock)
+// over per-block instruction lists.  The gate fixtures and the whole-compiler
+// emit (rooted at NativeMain.main) stay comfortably inside the default, but a
+// compile that roots reachability at an arbitrary deep defun (the per-file
+// groups of tools/selfhost-audit.sh — e.g. Elm.Parser.Declarations.declaration,
+// one enormous parser-combinator expression) can exceed it.  RUN_STACK_KB=<kb>
+// re-executes this driver once with --stack-size=<kb> so such callers keep
+// using the ordinary entry points.  Unset => no re-exec, no behaviour change.
+// (This is the same mechanism the retired MIDTIER_STACK knob provided.)
+if (process.env.RUN_STACK_KB && !process.env.RUN_STACK_KB_DONE) {
+  const res = require('child_process').spawnSync(
+    process.execPath,
+    ['--stack-size=' + process.env.RUN_STACK_KB].concat(process.argv.slice(1)),
+    { stdio: 'inherit', env: Object.assign({}, process.env, { RUN_STACK_KB_DONE: '1' }) }
+  );
+  process.exit(res.status === null ? 1 : res.status);
+}
+
+const { Elm } = require('./compiler.js');
+
+// Compile `groups` (array of { sources: [String], output: String, entry:
+// String }) in ONE process.  Each group's QBE IL text (or "err <msg>") lands
+// in its output file.
+function compileGroups(groups) {
+  const app = Elm.Main.init({
+    flags: {
+      corpusSourcesJson: JSON.stringify(CORPUS),
+      groupsJson: JSON.stringify(groups.map((g) => g.sources)),
+      midsJson: JSON.stringify(groups.map((g) => g.mids)),
+      entriesJson: JSON.stringify(groups.map((g) => g.entry)),
+      runtimeMidJson: RUNTIME_MID,
+      qbeFlatten: QBE_FLATTEN,
+      qbeRep: QBE_REP,
+      qbePrimDirect: QBE_PRIMDIRECT,
+      qbeMidRt: QBE_MIDRT,
+      qbeMidCons: QBE_MIDCONS,
+      qbeRtLean: QBE_RTLEAN,
+      qbeMono: QBE_MONO,
+      qbeConsArr: QBE_CONSARR,
+      qbeRec: QBE_REC,
+      qbeEqPtrFast: QBE_EQPTRFAST,
+      qbeTypeSpec: QBE_TYPESPEC,
+      qbeMidGcYoung: QBE_MIDGC_YOUNG,
+    },
+  });
+
+  app.ports.emit.subscribe((msg) => {
+    let bundles;
+    try {
+      bundles = JSON.parse(msg);
+    } catch (e) {
+      console.error('run.js: bad emit payload (not JSON)');
+      process.exit(1);
+    }
+    if (!Array.isArray(bundles) || bundles.length !== groups.length) {
+      console.error(
+        `run.js: expected ${groups.length} outputs, got ` +
+        `${Array.isArray(bundles) ? bundles.length : 'non-array'}`
+      );
+      process.exit(1);
+    }
+    for (let i = 0; i < groups.length; i++) {
+      fs.writeFileSync(groups[i].output, bundles[i]);
+    }
+    process.exit(0);
+  });
+
+  // Safety net: if Main.elm never emits, don't hang forever.  Generous for
+  // the batch mode (all fixtures in one process).
+  setTimeout(() => {
+    console.error('run.js: timed out waiting for emit port');
+    process.exit(1);
+  }, 120000);
+}
+
+function usage() {
+  console.error(
+    'usage: QBE_ENTRY=<Mod>.<fn> node run.js <input1.elm> [input2.elm ...] <output.ssa>\n' +
+    '       node run.js --batch <manifest.json>'
+  );
+  process.exit(2);
+}
+
+function main() {
+  const argv = process.argv.slice(2);
+
+  if (argv[0] === '--batch') {
+    if (argv.length !== 2) usage();
+    const manifest = JSON.parse(fs.readFileSync(argv[1], 'utf8'));
+    const rawGroups = manifest.groups.map((g) => ({
+      elmPaths: g.sources.filter((p) => !isMidPath(p)),
+      midPaths: g.sources.filter((p) => isMidPath(p)),
+      output: g.output,
+      entry: g.entry || '',
+    }));
+    for (const g of rawGroups) {
+      if (!g.entry) {
+        console.error(`run.js: batch group missing "entry" for output ${g.output}`);
+        process.exit(2);
+      }
+    }
+    const prepared = rawGroups.map(prepareGroup);
+    for (const g of prepared) {
+      if (!g.ok) fs.writeFileSync(g.output, 'err ' + g.msg);
+    }
+    const ok = prepared.filter((g) => g.ok);
+    if (ok.length === 0) process.exit(0);
+    compileGroups(
+      ok.map((g) => ({ sources: g.sources, mids: g.mids, output: g.output, entry: g.entry }))
+    );
+    return;
+  }
+
+  if (argv.length < 2) usage();
+  if (!QBE_ENTRY) usage();
+  const output = argv[argv.length - 1];
+  const inputs = argv.slice(0, -1);
+  const prepared = prepareGroup({
+    elmPaths: inputs.filter((p) => !isMidPath(p)),
+    midPaths: inputs.filter((p) => isMidPath(p)),
+    output,
+    entry: QBE_ENTRY,
+  });
+  if (!prepared.ok) {
+    fs.writeFileSync(output, 'err ' + prepared.msg);
+    process.exit(0);
+  }
+  compileGroups([
+    { sources: prepared.sources, mids: prepared.mids, output, entry: QBE_ENTRY },
+  ]);
+}
+
+main();

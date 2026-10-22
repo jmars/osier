@@ -8,7 +8,7 @@
 > the boot.  Nothing in this repository builds or links any of it, and
 > `rg --files -g '*.zig'` over the tree is EMPTY.  The document is kept because
 > it is the only written record of HOW the retired collector worked — which is
-> what a reader needs to judge the Mid collector (`elm-compiler/runtime.mid`,
+> what a reader needs to judge the Mid collector (`osier-compiler/runtime.mid`,
 > `Mid/RtGc.elm`) that replaced it.  Read it as history, not as a map of the
 > tree.  The live runtime's own notes are `docs/qbe-backend.md` and
 > `Mid/RtGc.elm`'s header.

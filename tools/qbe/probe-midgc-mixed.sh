@@ -43,12 +43,12 @@ ELM_BIN="${ELM_BIN:-$HOME/.npm-global/lib/node_modules/elm/bin/elm}"
 # are the pre-fix allocator the --before arm reverts to.
 BASE_SHA=08e994d
 
-FILES="elm-compiler/runtime.mid elm-compiler/src/Mid/RtGc.elm elm-compiler/src/Mid/Rt.elm elm-compiler/src/TestMain.elm"
+FILES="osier-compiler/runtime.mid osier-compiler/src/Mid/RtGc.elm osier-compiler/src/Mid/Rt.elm osier-compiler/src/TestMain.elm"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "probe-midgc-mixed: $1 not found" >&2; exit 2; }; }
 
 rebuild() {
-  (cd "$ROOT/elm-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) \
+  (cd "$ROOT/osier-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) \
     || { echo "probe-midgc-mixed: elm make compiler.js failed" >&2; exit 1; }
 }
 
@@ -91,7 +91,7 @@ case "${1:-}" in
         cp "$tmp/$f" "$f"
       done
       rm -rf "$tmp"
-      (cd "$ROOT/elm-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) || true
+      (cd "$ROOT/osier-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) || true
     }
     trap restore EXIT
     rebuild

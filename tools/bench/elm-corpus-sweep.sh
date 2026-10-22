@@ -32,7 +32,7 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CORPUS="${ELM_CORPUS_DIR:-$ROOT/tools/bench/elm-corpus}"
-CDIR="$ROOT/elm-compiler"
+CDIR="$ROOT/osier-compiler"
 LIMIT=""; JOBS="${ELM_SWEEP_JOBS:-10}"; FPK="${ELM_SWEEP_FILES:-5}"; CLOSURE=""
 OUT="$CORPUS/SWEEP.tsv"
 
@@ -48,7 +48,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-[ -f "$CDIR/compiler.js" ] || { echo "elm-corpus-sweep: run elm-compiler/build.sh first" >&2; exit 2; }
+[ -f "$CDIR/compiler.js" ] || { echo "elm-corpus-sweep: run osier-compiler/build.sh first" >&2; exit 2; }
 command -v node >/dev/null 2>&1 || { echo "elm-corpus-sweep: node is required" >&2; exit 2; }
 
 # The module index (module -> file) over the WHOLE corpus: most packages fail

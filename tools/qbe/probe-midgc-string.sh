@@ -11,7 +11,7 @@
 #     STATIC data (the immutable, null-terminated data symbol itself), so
 #     rt_string is never called, no Zig-nursery allocation is made, and the
 #     content equality holds -> 31200200.
-#   * FAIL-BEFORE: reverting ONE line in elm-compiler/src/Mid/Qbe/Lower.elm
+#   * FAIL-BEFORE: reverting ONE line in osier-compiler/src/Mid/Qbe/Lower.elm
 #     (lowerLit's LString case `if s.midGc then` -> `if False then`) restores
 #     the Zig rt_string route; under QBE_NOSTRINGINTERN=1 its fallback
 #     allocates each literal in the Zig nursery, the churn forces a scavenge
@@ -36,7 +36,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-LOWER="elm-compiler/src/Mid/Qbe/Lower.elm"
+LOWER="osier-compiler/src/Mid/Qbe/Lower.elm"
 FIXTURE="tools/qbe/fixtures/midgc-string.elm"
 ENTRY="MidgcString.main"
 GOLDEN=31200200
@@ -53,7 +53,7 @@ AFTER_BLOCK=$'            if False then\n                -- Mid: the string data
 need() { command -v "$1" >/dev/null 2>&1 || { echo "probe-midgc-string: $1 not found" >&2; exit 2; }; }
 
 rebuild() {
-  (cd "$ROOT/elm-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) \
+  (cd "$ROOT/osier-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) \
     || { echo "probe-midgc-string: elm make compiler.js failed" >&2; exit 1; }
 }
 
@@ -123,7 +123,7 @@ before = "            if s.midGc then\n                -- Mid: the string data I
 assert s.count(after) == 1, f"expected exactly one reverted site, found {s.count(after)}"
 open(p, "w").write(s.replace(after, before))
 PY
-      (cd "$ROOT/elm-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) || true
+      (cd "$ROOT/osier-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) || true
     }
     trap restore EXIT
     rebuild

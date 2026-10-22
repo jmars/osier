@@ -5,7 +5,7 @@
 *Draft, compiled section by section. Target venue: ICFP full paper, 25 pp ACM Small excluding
 bibliography. Companion material: the calculus specification
 (`docs/research/row-gadt-calculus.md`, λρG), the mechanization (`lean/`, one Lake project),
-the reference implementation (`elm-compiler/src/Type/`), the fixture matrix
+the reference implementation (`osier-compiler/src/Type/`), the fixture matrix
 (`tests/elm-fixtures/run-elm-gate.sh`), the reproducibility chain (the artifact's verification script,
 which reprints every number this paper cites), and the survey
 (the companion document that is the bibliography's source).*
@@ -611,7 +611,7 @@ The full decision procedure at a branch result, in order (Figure 4):
 
 **Figure 4.** The branch-result decision procedure. Source:
 `docs/research/row-gadt-calculus.md` §2.7 and the code — `unifyResultM`
-(`elm-compiler/src/Type/Infer.elm:1498`): unify first (`:1509`), then on success the three gates
+(`osier-compiler/src/Type/Infer.elm:1498`): unify first (`:1509`), then on success the three gates
 `dropIntroduced` (`:1511`), `refinedTargetAliasedBy` (`:1515`), `pendingTypeOccurs` (`:1526`);
 on rigid failure `rebuildMatches` (`:1534`) and the Tier-T discharge (`:1542`). Helpers:
 `tailReachesHead` (`:1818`), `dropIntroduced` (`:1842`), `rebuildMatches` (`:1879`),
@@ -937,7 +937,7 @@ should-be-rigid-treated-as-solvable bug class at its root instead of per case.
 
 The discipline is not a paper design with a sketch: it runs inside a real checker. The substrate
 is an Elm-family compiler with Hindley–Milner inference over Leijen scoped-label rows (the
-pre-existing `elm-compiler/src/Type/*` tree: unification with a row-rewrite, let
+pre-existing `osier-compiler/src/Type/*` tree: unification with a row-rewrite, let
 generalization, an eight-library corpus and a self-host track). The change is contained to the
 pattern path and the unifier state; lowering and codegen are untouched (types are
 erased) — nor was the interpreter back end, while it existed. Everything below is *measured*,
@@ -961,7 +961,7 @@ the equation-lifecycle repair, and the lambda-lifting pass all post-date the fre
 fails `type error … unknown name: f` (raised by the checker, before lowering). The compiler's own
 `Type/Exhaustive.elm` (its `resolveScrutinee`) hit this while the compiler's sources were being
 made self-hosting; a frontend lambda-lifting pass now hoists recursive local groups to the top
-level (`elm-compiler/src/Frontend/Lift.elm`), with the VM substrate untouched —
+level (`osier-compiler/src/Frontend/Lift.elm`), with the VM substrate untouched —
 no new instruction and no collector change, which is why a frontend pass was chosen over a
 VM-level `letrec`. It is recorded as a measured datum about what the substrate is and what the
 artifact needed, not as a contribution.
@@ -1268,8 +1268,8 @@ paper's methods section). It is a statement about process, not about the discipl
 **Where the assistance was.** AI coding agents, working from the author's briefs and reviewed
 by the author, produced the project's own code, by area: the compiler implementation — the
 Elm-family compiler and its Hindley–Milner checker over scoped-label rows
-(`elm-compiler/src/`, including the eight core libraries), the frontend lambda-lifting pass
-(`elm-compiler/src/Frontend/Lift.elm`), and the host effect loop (`src/effectloop.zig`); the
+(`osier-compiler/src/`, including the eight core libraries), the frontend lambda-lifting pass
+(`osier-compiler/src/Frontend/Lift.elm`), and the host effect loop (`src/effectloop.zig`); the
 research extension itself — the branch-local refinement machinery in `Type/Unify.elm` and
 `Type/Infer.elm`, with its surface (the `type a.` binders, exhaustiveness and refutation
 checking); the Lean mechanization (`lean/`); the verification harness —

@@ -16,10 +16,10 @@ FIXTURE="$1"; ENTRY="$2"; OUT="$3"
 [ -f "$FIXTURE" ] || { echo "perf-emit: no fixture: $FIXTURE" >&2; exit 2; }
 mkdir -p "$(dirname "$OUT")"
 
-# run.js resolves the corpus against ELMC_ROOT/elm-compiler relative to the CWD.
+# run.js resolves the corpus against ELMC_ROOT/osier-compiler relative to the CWD.
 t0=$(date +%s%N)
 ( cd "$ROOT" && QBE=1 QBE_ENTRY="$ENTRY" \
-    node "$ROOT/elm-compiler/run.js" "$FIXTURE" "$OUT" )
+    node "$ROOT/osier-compiler/run.js" "$FIXTURE" "$OUT" )
 t1=$(date +%s%N)
 
 case "$(head -c 4 "$OUT")" in

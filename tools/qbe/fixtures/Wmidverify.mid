@@ -1,7 +1,7 @@
 // GC ARC unit 2 — THE VERIFIER'S NEGATIVE CONTROLS: four arms, each of which
 // must be NAMED by an invariant instead of corrupting silently.
 //
-// The instruments live in elm-compiler/runtime.mid:
+// The instruments live in osier-compiler/runtime.mid:
 //   * the BLOCK MAP (region slot 25): one byte per 64-byte minimum block,
 //     0 = not a block start, 1 = live, 2 = on a free list;
 //   * Rt.gcMarkPtr's two PER-POINTER invariants, on in EVERY build — a pointer

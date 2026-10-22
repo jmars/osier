@@ -29,7 +29,7 @@
 #     ceiling pinned to the heap (growth OFF) and requires the same golden: the
 #     reclamation is real, not a bigger heap.
 #
-# Every arm is a `qbe-mk` (no elm rebuild: run.js reads elm-compiler/runtime.mid
+# Every arm is a `qbe-mk` (no elm rebuild: run.js reads osier-compiler/runtime.mid
 # at emit time) plus a run; the whole probe is a few seconds.
 #
 # Usage: tools/qbe/probe-midgc-grow.sh

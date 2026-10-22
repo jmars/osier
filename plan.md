@@ -35,7 +35,7 @@ compiler"), then node-lane retirement, the GADT-indexed AST, and the corpus/pape
 |---|---|---|
 | QBE structural + behavioural + GC-churn | `./tools/qbe/qbe-check.sh` | exit 0, **270 PASS / 0 FAIL** |
 | the language gate | `tests/elm-fixtures/run-elm-gate.sh` | exit 0, **PASS=154 FAIL=0** |
-| unit rows | `node test-run.js` (in `elm-compiler/`) | exit 0, **111/111** |
+| unit rows | `node test-run.js` (in `osier-compiler/`) | exit 0, **111/111** |
 | the whole chain | `tools/osier-numbers.sh` | exit 0, `VERDICT: all checks pass` |
 | corpus `.ssa` byte-identity | inside `osier-numbers.sh` (**gating**) | **BYTE-IDENTICAL 149 = 149** |
 | seed | `tools/qbe-bootstrap.sh --freeze`, then a stub-PATH build | exit 0; invocation log **0 bytes** |
@@ -270,7 +270,7 @@ in the sound domain; FOUR should-fixes, and the first one corrects a claim this 
    verified word-by-word against `types.zig:70-88` — but nothing stops drift.
    (nice-to-haves: `Rt.collect`'s collect-before-init guard SIGSEGVs before reaching its loud die — **FIXED
    by GC-ARC F1, see THE COLLECT-BEFORE-INIT GUARD below**; the mark-stack bound — **CLOSED by GC-ARC F1,
-   see THE MARK-STACK BOUND IS A THEOREM below**; and a stray `elm-compiler/index.html` — removed, it was a
+   see THE MARK-STACK BOUND IS A THEOREM below**; and a stray `osier-compiler/index.html` — removed, it was a
    build product of the orchestrator's own compile checks.)
 **Tag coverage, re-derived by the reviewer:** proven reachable every collect = tags 0,1,2,4,5 (the
 intern-table root scans strings/symbols each time); asserted-by-layout-parity = 3,6,8,9,10,11,12,14;
@@ -991,7 +991,7 @@ act that deletes the FILES they lived in and the object they built.  End state, 
 `rg --files -g '*.zig'` over the repo is EMPTY; `tools/qbe/hostshim.zig`, `tools/qbe/rt.o`,
 `tools/qbe/rt-o.sh`, `vendor/osier-rt/**`, the root `build.zig`/`build.zig.zon`,
 `tools/qbe/layout-probe.zig` and the two `*-zig.zig` differential arms are DELETED; the link is
-`cc <artifact>.s -lc` with no runtime object; and the runtime is `elm-compiler/runtime.mid`, emitted
+`cc <artifact>.s -lc` with no runtime object; and the runtime is `osier-compiler/runtime.mid`, emitted
 into every artifact.  The one thing that survives in the record rather than in the tree is the ABI
 marker's `gc:layout` component (the Value/Desc layout, defined in `Mid/RtLayout.elm`) — the marker
 still means something precisely because that definition is still shared by the emitted IL and the
@@ -1301,7 +1301,7 @@ The paper's reproducible chain is `tools/osier-numbers.sh`, which prints every n
   `--freeze` early; treat its error as authoritative.
 - **An import resolving under `elm make` does not mean the module is in the SELFHOST MANIFEST
   (2026-10-12).** The tree's own front end resolves imported names only against the modules listed
-  in `elm-compiler/selfhost/manifest.json`; a seed-bearing module added to the tree but not to the
+  in `osier-compiler/selfhost/manifest.json`; a seed-bearing module added to the tree but not to the
   manifest reads as `unknown name: gcProgram` (the missing module's export) when `--freeze` compiles
   the manifest. `Mid/RtGc.elm` landed in stage 4 (`9e3bb6e`) and was never added, so `--freeze` died
   for every stage-4 and stage-5 unit while the seed status reported FRESH. When a new module joins

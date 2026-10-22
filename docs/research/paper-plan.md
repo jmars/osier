@@ -538,7 +538,7 @@ hidden.
 ## 5. Claim → evidence table (the spine)
 
 Legend: FIX = gate-registered fixture (`tests/elm-fixtures/rowgadt_*.elm`, registrations at
-`run-elm-gate.sh:309-450` ✎); LEAN = theorem in `lean/`; CODE = `elm-compiler/src` seat; DOC =
+`run-elm-gate.sh:309-450` ✎); LEAN = theorem in `lean/`; CODE = `osier-compiler/src` seat; DOC =
 companion doc with verified pointers; SURVEY = osier-related-work.md. "Thin" = evidence exists but
 is volatile (`/tmp`) or reported-not-re-measured — each Thin row names its gap item.
 

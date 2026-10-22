@@ -105,7 +105,7 @@ show the conflict is an *artefact of eager global solving*, not of the features 
 
 ## 2. The substrate already exists
 
-`elm-compiler/src/Type/*` in this repo is an Elm-family checker. **[M]** measured by reading the
+`osier-compiler/src/Type/*` in this repo is an Elm-family checker. **[M]** measured by reading the
 source and running probes:
 
 - **Rows: present.** HM + Leijen scoped-label rows (`Type/Unify.elm` `unifyRow` / `rewrite`).
@@ -175,7 +175,7 @@ holds, and the mechanism it requires is exactly the one the checker lacks.
 The brief asks: if `r : { x : Int | ρ }` and a GADT match refines `ρ` to `{ y : String }`, what
 does `r with { x = 5 }` mean?
 
-**[M]** Probes `/tmp/rowgadt/P*.elm`, oracle = the output file (`node elm-compiler/run.js`
+**[M]** Probes `/tmp/rowgadt/P*.elm`, oracle = the output file (`node osier-compiler/run.js`
 always exits 0; a type error is written into the artifact as `err <msg>`):
 
 | program | result |

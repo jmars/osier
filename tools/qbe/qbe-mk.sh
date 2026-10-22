@@ -23,7 +23,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # Args: <src1.elm> [src2.elm ...] <Entry.key> <outdir>.  The last two are the
 # entry and the output dir; everything before them is the SOURCE GROUP,
 # compiled together as one program (each path made absolute — the node step
-# below runs from elm-compiler).  A single source is the common case.
+# below runs from osier-compiler).  A single source is the common case.
 [ "$#" -ge 3 ] || {
   echo "qbe-mk: usage: qbe-mk.sh <src1.elm> [src2.elm ...] <Entry.key> <outdir>" >&2
   exit 2
@@ -61,7 +61,7 @@ BASE="$OUTDIR/$(basename "$LAST_SRC" .elm)"
 # ERROR here, loudly, which is the guard this comment replaces.
 
 # ---- elm -> .ssa ----
-(cd "$ROOT/elm-compiler" &&
+(cd "$ROOT/osier-compiler" &&
   QBE=1 QBE_ENTRY="$ENTRY" node run.js "${SRCS[@]}" "$BASE.ssa") >&2
 
 case "$(head -c 4 "$BASE.ssa")" in

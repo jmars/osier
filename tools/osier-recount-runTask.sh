@@ -13,7 +13,7 @@
 # old fifth failure, left with the UI.
 #
 # METHOD — temp-copy bisection (the working tree is NEVER edited):
-#   1. copy elm-compiler/ to a scratch dir (mktemp);
+#   1. copy osier-compiler/ to a scratch dir (mktemp);
 #   2. in the COPY: remove `Runtime.runTask` from trustedBodies
 #      (Type/Builtins.elm — compiled into compiler.js) and add the
 #      `type x a.` binder to runTask's signature (Runtime.elm — read from disk
@@ -58,7 +58,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 ELM_BIN="${ELM_BIN:-$HOME/.npm-global/lib/node_modules/elm/bin/elm}"
-CDIR="$ROOT/elm-compiler"
+CDIR="$ROOT/osier-compiler"
 
 # Name every missing tool HERE: without node/python3 the measurement dies inside
 # the python block below with a FileNotFoundError traceback.
@@ -80,7 +80,7 @@ EOF
     exit 2
 fi
 if [ ! -f "$CDIR/src/Runtime.elm" ] || [ ! -f "$CDIR/src/Type/Builtins.elm" ]; then
-    echo "FAIL: elm-compiler sources not found under $CDIR" >&2
+    echo "FAIL: osier-compiler sources not found under $CDIR" >&2
     exit 2
 fi
 
@@ -94,9 +94,9 @@ h_runtime="$(sha256sum "$CDIR/src/Runtime.elm" | cut -d' ' -f1)"
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 
-cp -r "$CDIR" "$SCRATCH/elm-compiler"
-rm -rf "$SCRATCH/elm-compiler/elm-stuff"   # force a clean dependency build (no stale .elmi)
-S="$SCRATCH/elm-compiler"
+cp -r "$CDIR" "$SCRATCH/osier-compiler"
+rm -rf "$SCRATCH/osier-compiler/elm-stuff"   # force a clean dependency build (no stale .elmi)
+S="$SCRATCH/osier-compiler"
 printf 'module Main exposing (main)\nmain : Int\nmain = 1\n' > "$SCRATCH/trivial.elm"
 
 HEAD="$(git rev-parse --short HEAD 2>/dev/null || echo 'no-git')"

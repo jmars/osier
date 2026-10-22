@@ -88,7 +88,7 @@ mkdir -p "$WORK/ssa"
 cat > "$WORK/one.sh" <<'EOJ'
 #!/usr/bin/env bash
 IFS='|' read -r name srcs entry <<< "$1"
-( cd "$OSIER_ROOT/elm-compiler" && QBE=1 QBE_ENTRY="$entry" QBE_MIDGC=1 node run.js $srcs "$2/$name.ssa" ) \
+( cd "$OSIER_ROOT/osier-compiler" && QBE=1 QBE_ENTRY="$entry" QBE_MIDGC=1 node run.js $srcs "$2/$name.ssa" ) \
   > "$2/$name.log" 2>&1
 [ -s "$2/$name.ssa" ] || echo "probe-midgc-census: $name produced no output" >&2
 EOJ

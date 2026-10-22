@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run-elm-gate.sh — the Osier LANGUAGE gate (BATCH mode).
 #
-# For each fixture under tests/elm-fixtures, compiles it with the elm-compiler
+# For each fixture under tests/elm-fixtures, compiles it with the osier-compiler
 # (node run.js), and — for every EXECUTABLE row — builds the fixture through
 # the QBE backend (tools/qbe/qbe-mk.sh: elm -> .ssa -> vendored qbe -> cc +
 # rt.o) and runs the native binary, diffing the printed value against
@@ -32,7 +32,7 @@
 # runs the checks in declaration order.
 #
 # Usage:
-#   tests/elm-fixtures/run-elm-gate.sh [elm-compiler-dir] [fixtures-dir]
+#   tests/elm-fixtures/run-elm-gate.sh [osier-compiler-dir] [fixtures-dir]
 #
 # Every check this script REGISTERS is listed, generated from the registration
 # calls below, in tests/elm-fixtures/MATRIX.md
@@ -40,7 +40,7 @@
 # ELM_GATE_MATRIX=1 tests/elm-fixtures/run-elm-gate.sh).
 #
 # Defaults assume you are running from the repo root:
-#   compiler -> elm-compiler/       (compiler.js built via build.sh)
+#   compiler -> osier-compiler/     (compiler.js built via build.sh)
 #   fixtures -> tests/elm-fixtures
 #
 # NOTE: M6's iofile fixture resolves input/hello.txt and out/hello.out RELATIVE
@@ -63,7 +63,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 [ -n "${QBE_MIDHOST:-}" ] && export QBE_MIDHOST
 [ -n "${QBE_MIDGC:-}" ] && export QBE_MIDGC
 
-CDIR="${1:-$ROOT/elm-compiler}"
+CDIR="${1:-$ROOT/osier-compiler}"
 FIX="${2:-$ROOT/tests/elm-fixtures}"
 OUT="$(mktemp -d)"
 
@@ -838,7 +838,7 @@ fi
 # parallel job found it fresh.  rt.o, rt-o.sh, hostshim.zig and every zig
 # invocation are DELETED; what qbe-mk writes now all lives under the job's OWN
 # outdir ($OUT/nat/<idx>/: <base>.ssa, <base>.s, <base>), run.js writes only
-# the .ssa path it is handed (elm-compiler/run.js:488/529/550), and
+# the .ssa path it is handed (osier-compiler/run.js:488/529/550), and
 # vendor/qbe/qbe is a prebuilt binary nothing writes.  There is no shared
 # output path left, so every row goes straight into the pool.
 {

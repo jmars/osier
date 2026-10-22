@@ -25,7 +25,7 @@ written (they are that run's evidence, not the current state).
 | corpus | 149 gate groups; the compiler's QBE emit is **byte-identical** against the committed manifest `tools/osier-corpus-baseline.ssa.sha256` (check with `tools/osier-corpus-ssa.sh`; `tools/osier-numbers.sh` reports it, and the check is **gating**) |
 | tests | TestMain **111 assertions passed** |
 | Lean | `lean/` is a **Lake project** (build with `lake build` from `lean/`); **90 theorem declarations, 3 axiom parameters, zero `sorry`** (per-file counts in `ARTIFACT.md` §4) |
-| tree | dirty only with `elm-compiler/.elm-cache/0.19.2/packages/registry.dat` — the elm 0.19.2 cache rewrite `ARTIFACT.md` §2 documents |
+| tree | dirty only with `osier-compiler/.elm-cache/0.19.2/packages/registry.dat` — the elm 0.19.2 cache rewrite `ARTIFACT.md` §2 documents |
 
 **Venue call (plane §1): ICFP 2027 research track** — *not* POPL, because T1/T2 are argued, not
 proved, and the Lean development mechanizes the **row algebra, not the typing judgment**.
@@ -205,8 +205,8 @@ weeks for a pencil T2 sketch at OOPSLA-R2 scale).
 - [x] `tools/selfhost-audit.txt` — **RESOLVED**: it is now a tracked, clean file (git status shows no
       diff), so the timestamp churn that motivated the `.gitignore` note is gone; no action.
 - [x] Delete `elmc.err` — **DONE** (no longer present).
-- [x] `elm-compiler/.elm-cache/0.19.1/` — **RESOLVED**: the tree now has only
-      `elm-compiler/.elm-cache/0.19.2/`; the other elm version's cache dir is gone.
+- [x] `osier-compiler/.elm-cache/0.19.1/` — **RESOLVED**: the tree now has only
+      `osier-compiler/.elm-cache/0.19.2/`; the other elm version's cache dir is gone.
 
 ---
 

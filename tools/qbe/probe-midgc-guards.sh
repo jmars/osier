@@ -44,7 +44,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-MID="elm-compiler/runtime.mid"
+MID="osier-compiler/runtime.mid"
 FIXTURE="tools/qbe/fixtures/midgc-live.elm"
 ENTRY="MidgcLive.main"
 GOLDEN=1275

@@ -77,7 +77,7 @@ cd "$ROOT"
 
 SEED="$ROOT/tools/bootstrap/compiler.ssa"
 ABI="$ROOT/tools/bootstrap/compiler.ssa.abi"
-MANIFEST="$ROOT/elm-compiler/selfhost/manifest.json"
+MANIFEST="$ROOT/osier-compiler/selfhost/manifest.json"
 ENTRY="NativeMain.main"
 BIN="${QBE_BOOTSTRAP_BIN:-$ROOT/out/bin/qbe-bootstrap}"
 # The native emit's GC heap.  16384 is the value the whole-compiler runs have
@@ -130,7 +130,7 @@ if [ "$MODE" = freeze ]; then
   # Mid.RtPrims trees are deep nested Ifs — Mid.Audit's walker (and the
   # lowering behind it) recurses past node's default V8 stack.  run.js's own
   # re-exec knob (its header documents exactly this class).
-  RUN_STACK_KB="${RUN_STACK_KB:-131072}" node "$ROOT/elm-compiler/run.js" --batch "$WORK/emit.json" || die "the stock emit failed"
+  RUN_STACK_KB="${RUN_STACK_KB:-131072}" node "$ROOT/osier-compiler/run.js" --batch "$WORK/emit.json" || die "the stock emit failed"
   t1=$(now)
   case "$(head -c 4 "$WORK/emit.ssa")" in
     "err "*) die "the stock emit FAILED: $(head -c 300 "$WORK/emit.ssa")";;
@@ -173,7 +173,7 @@ if [ "$MODE" = status ]; then
   trap 'rm -rf "$WORK"' EXIT
   jq --arg out "$WORK/emit.ssa" --arg entry "$ENTRY" \
      '.groups[0].output = $out | .groups[0].entry = $entry' "$MANIFEST" > "$WORK/emit.json"
-  if ! RUN_STACK_KB="${RUN_STACK_KB:-131072}" node "$ROOT/elm-compiler/run.js" --batch "$WORK/emit.json" 2>"$WORK/node.err"; then
+  if ! RUN_STACK_KB="${RUN_STACK_KB:-131072}" node "$ROOT/osier-compiler/run.js" --batch "$WORK/emit.json" 2>"$WORK/node.err"; then
     printf 'exact STALE — the selfhost emit FAILED (tooling): %s\n' \
       "$(tail -c 200 "$WORK/node.err" | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//')"
     exit 0

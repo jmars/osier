@@ -19,7 +19,7 @@ Pipeline: `Elm -> csexp -> parseBundle (real parser) -> aotdump (emit Zig) ->
 zig build (link gc+vm+aotrt) -> aotbench (native exe)`.
 
 ```
-elm-compiler/run.js          tools/aot/dump.zig         tools/aot/runtime.zig
+osier-compiler/run.js          tools/aot/dump.zig         tools/aot/runtime.zig
   .elm ──► .csexp ──► parseBundle ──► emit gen.zig ──► aotbench-<fixture>
                                   (real parser, zero drift)   (native exe)
 ```

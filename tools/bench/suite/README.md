@@ -82,7 +82,7 @@ Float and at a record type — do not duplicate the source". What was built:
   gain.)*
 
 **A shared `Mono.elm` module is not possible here**, and that is *measured*, not
-assumed: `node elm-compiler/run.js <one.elm> <out.csexp>` does not resolve
+assumed: `node osier-compiler/run.js <one.elm> <out.csexp>` does not resolve
 cross-module imports. A two-module `App.elm` + `Lib.elm` compiles to
 `err type error at 7:5: unknown name: Lib.twice` written **into the bundle**,
 with `run.js` still exiting **0**. The compile unit is the file, so "one
@@ -140,7 +140,7 @@ deleted.)*
 
 Every `Float` value in this front end originates from a float literal
 (`Mid/Qbe/Lower.elm`, `LFloat` → `freshData ("flt:" ++ …)`), and
-`elm-compiler/src/Mid/Qbe/Print.elm:89` emits that static as
+`osier-compiler/src/Mid/Qbe/Print.elm:89` emits that static as
 
 ```
 data $d0 = align 8 { d 0.0 }
@@ -256,7 +256,7 @@ probe at depth 65536 makes the runner exit 1 with
 
 ### 3. `run.js` exits 0 on a type error — MEASURED
 
-`node elm-compiler/run.js <src> <out.csexp>` exits **0** when the source does
+`node osier-compiler/run.js <src> <out.csexp>` exits **0** when the source does
 not compile and writes `err type error at L:C: …` **into the csexp**. The
 **oracle is the file**, not `$?`. The QBE path already checks the `err ` prefix;
 this runner applies the same check to the VM path. (Without it every

@@ -2,10 +2,10 @@
 # build products (tools/qbe-bootstrap.sh, tools/qbe/qbe-selfhost.sh) land in out/.
 out/
 
-# elm-compiler build artifacts (regenerable via elm-compiler/build.sh)
-elm-compiler/elm-stuff/
-elm-compiler/compiler.js
-elm-compiler/test-compiler.js
+# osier-compiler build artifacts (regenerable via osier-compiler/build.sh)
+osier-compiler/elm-stuff/
+osier-compiler/compiler.js
+osier-compiler/test-compiler.js
 
 # elm-fixtures generated output (iofile test writes this each gate run)
 tests/elm-fixtures/out/hello.out

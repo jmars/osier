@@ -26,7 +26,7 @@
 #
 # WHY IT MATTERS BEYOND THE FIXTURE: the seed's own compiler driver has this
 # shape (`Task.andThen (runSsa entry) (Io.readFile path)` in
-# elm-compiler/selfhost/NativeMain.elm). With the pre-fix hostApply the
+# osier-compiler/selfhost/NativeMain.elm). With the pre-fix hostApply the
 # seed-built compiler read its manifest into a garbage String and printed
 # `"elmc: manifest has no groups"`, so `tools/qbe-bootstrap.sh --verify` was
 # RED in 42 s at "the native compiler wrote no .ssa".

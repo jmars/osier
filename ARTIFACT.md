@@ -13,7 +13,7 @@ Osier is a small statically-typed functional language, its compiler and its nati
 the machine-checked metatheory behind the row-refinement discipline the paper
 (`docs/research/osier-paper.md`) describes and measures. Concretely:
 
-- **`elm-compiler/`** — the compiler and its corpus. Frontend (lexer/parser, arrow-spelling GADT
+- **`osier-compiler/`** — the compiler and its corpus. Frontend (lexer/parser, arrow-spelling GADT
   constructors), the type checker (`src/Type/`: unification with a row rewrite, branch-local row
   refinement, GADT-style index refinement, let-generalization, exhaustiveness/refutation,
   the escape/discharge checks), the lowerer, the corpus it is built from (`src/Prelude.elm`,
@@ -71,7 +71,7 @@ git checkout osier-paper-artifact-1 && tools/withe-numbers.sh
 Run it from the repository root (the script `cd`s there itself). At the tag it performs, in order:
 
 1. builds the gate harness `zig-out/bin/elmvm` (skipped if already built);
-2. rebuilds **both** compiler artifacts from source (`elm-compiler/compiler.js` and
+2. rebuilds **both** compiler artifacts from source (`osier-compiler/compiler.js` and
    `test-compiler.js`) — deliberately always, so a stale gitignored artifact cannot answer with
    the wrong bytes;
 3. runs the fixture gate (`tests/elm-fixtures/run-elm-gate.sh`) — PASS/FAIL counts;
@@ -96,7 +96,7 @@ is *folded into every artifact*. So the check proves "the compiler's output did 
 and it holds only while neither the corpus text nor the emitter's semantics change. Editing
 `Prelude.elm` — even to make a helper tail-recursive — changes all 149 artifacts **by
 construction**, as does any semantic change to the QBE emitter
-(`elm-compiler/src/Mid/Qbe/Lower.elm`, `Print.elm`). When that is deliberate, the baseline
+(`osier-compiler/src/Mid/Qbe/Lower.elm`, `Print.elm`). When that is deliberate, the baseline
 must be **re-frozen on purpose** (`tools/osier-corpus-ssa.sh --freeze`) and the reason
 recorded; a bare `DIFFERS` is how a real regression and a legitimate corpus edit arrive
 looking identical. Last re-frozen 2026-10-09, for `Prelude.filterMap` becoming a
@@ -209,12 +209,12 @@ code and the final `VERDICT:` line decide.
   is downloaded, and no network access is needed — verified by running the whole chain inside
   `unshare -rn` (a network namespace with no interfaces) from a checkout stripped of
   `zig-out/`, `compiler.js` and `lean/.lake`: same numbers, exit 0. The elm package cache is
-  committed (`elm-compiler/.elm-cache/`), and `lean/lake-manifest.json` has no external packages.
+  committed (`osier-compiler/.elm-cache/`), and `lean/lake-manifest.json` has no external packages.
 - **Idempotent**: re-runs print the same numbers and the corpus diff stays empty; the recount
   edits only a scratch copy and asserts the working tree is unchanged.
 - **One tracked file is refreshed on the first run of a fresh checkout**:
-  `elm-compiler/.elm-cache/0.19.2/packages/registry.dat`, which elm 0.19.2 rewrites
-  (deterministically, same bytes every time) when it has to rebuild `elm-compiler/elm-stuff/`.
+  `osier-compiler/.elm-cache/0.19.2/packages/registry.dat`, which elm 0.19.2 rewrites
+  (deterministically, same bytes every time) when it has to rebuild `osier-compiler/elm-stuff/`.
   So `git status` shows that one file as modified after the first run. It is a cache refresh, not
   a change to the artifact, and it does not affect any number.
 
@@ -374,10 +374,10 @@ in detail; the paper states the same facts as §6.7 of `docs/research/osier-pape
 
 - **What was AI-assisted.** The project's own code was written by AI coding agents (several
   underlying models, dispatched per work unit), working from the author's briefs and reviewed
-  by the author: the compiler (`elm-compiler/`, including the eight core libraries), the host
+  by the author: the compiler (`osier-compiler/`, including the eight core libraries), the host
   effect loop (`src/effectloop.zig`), the branch-local refinement extension
-  (`elm-compiler/src/Type/`), the frontend lambda-lifting pass
-  (`elm-compiler/src/Frontend/Lift.elm`), the Lean mechanization (`lean/`), the verification
+  (`osier-compiler/src/Type/`), the frontend lambda-lifting pass
+  (`osier-compiler/src/Frontend/Lift.elm`), the Lean mechanization (`lean/`), the verification
   harness (`tools/osier-numbers.sh`, `tests/elm-fixtures/run-elm-gate.sh`,
   `tools/osier-corpus-ssa.sh` and `tools/osier-corpus-baseline.ssa.sha256`,
   `tools/osier-recount-runTask.sh`), the adversarial
@@ -512,7 +512,7 @@ happened and what the tip measures. The frozen-tag figures in §2 remain untouch
 `.zig-cache` ghost directory it left behind); everything that linked it — `tools/elmvm.zig`,
 `tools/vmbench.zig`, `tools/aot/` (all of it), `tools/elmc.sh`, `tools/bootstrap-compile.sh`,
 `tools/selfhost-compile.sh`, `tools/selfhost-gate.sh`; the csexp backend
-(`elm-compiler/src/Zinc/{Emit,Csexp}.elm`, `Mid/ToZinc.elm`, `Lower/{Module,Pattern}.elm`) and
+(`osier-compiler/src/Zinc/{Emit,Csexp}.elm`, `Mid/ToZinc.elm`, `Lower/{Module,Pattern}.elm`) and
 the ZINC-only mid-tier passes (`Mid/{Arity,ConstFold,DeadGlobals,Inline,Shrink,Simplify}.elm`);
 the MIDTIER=0-vs-1 differential and its measurement tooling (`tools/midtier-{diff,runtime}.sh`,
 `tools/midtier-emit-stats.py`); the committed bootstrap seed

@@ -229,7 +229,7 @@ command -v node >/dev/null 2>&1 || { echo "primsdiff: node not found" >&2; exit 
 # Zig runtime are deleted; the Mid arm builds through qbe-mk (node + qbe + cc).
 command -v cc   >/dev/null 2>&1 || { echo "primsdiff: cc not found" >&2; exit 2; }
 [ -x "$ROOT/vendor/qbe/qbe" ] || { echo "primsdiff: vendored qbe missing" >&2; exit 2; }
-[ -f "$ROOT/elm-compiler/compiler.js" ] || { echo "primsdiff: compiler.js missing (run build.sh)" >&2; exit 2; }
+[ -f "$ROOT/osier-compiler/compiler.js" ] || { echo "primsdiff: compiler.js missing (run build.sh)" >&2; exit 2; }
 
 # ---- THE REFERENCE, POST-FLIP ----------------------------------------------
 # The flip DELETED the Zig handlers, so the reference is the FROZEN bytes the

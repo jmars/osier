@@ -10,7 +10,7 @@
 #
 #   * PASS-AFTER (this tree): QBE_MIDGC=1 routes every closure through the Mid
 #     defun `Rt.closure`, so list and env arrays share the MID heap -> 22100.
-#   * FAIL-BEFORE: reverting ONE line in elm-compiler/src/Mid/Qbe/Lower.elm
+#   * FAIL-BEFORE: reverting ONE line in osier-compiler/src/Mid/Qbe/Lower.elm
 #     (lowerClosure's `if s2.midGc then` -> `if False then`) restores the
 #     stage-4 state where closures still went through the Zig `rt_make_closure`.
 #     The list is Mid-allocated, its closures' env arrays Zig-allocated: the
@@ -32,7 +32,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-LOWER="elm-compiler/src/Mid/Qbe/Lower.elm"
+LOWER="osier-compiler/src/Mid/Qbe/Lower.elm"
 FIXTURE="tools/qbe/fixtures/midgc-closure.elm"
 ENTRY="MidgcClosure.main"
 GOLDEN=22100
@@ -47,7 +47,7 @@ AFTER_BLOCK=$'                                            Ok\n                  
 need() { command -v "$1" >/dev/null 2>&1 || { echo "probe-midgc-closure: $1 not found" >&2; exit 2; }; }
 
 rebuild() {
-  (cd "$ROOT/elm-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) \
+  (cd "$ROOT/osier-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) \
     || { echo "probe-midgc-closure: elm make compiler.js failed" >&2; exit 1; }
 }
 
@@ -94,7 +94,7 @@ before = "                                            Ok\n                      
 assert s.count(after) == 1, f"expected exactly one reverted site, found {s.count(after)}"
 open(p, "w").write(s.replace(after, before))
 PY
-      (cd "$ROOT/elm-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) || true
+      (cd "$ROOT/osier-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) || true
     }
     trap restore EXIT
     rebuild

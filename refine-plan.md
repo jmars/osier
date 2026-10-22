@@ -141,7 +141,7 @@ or traps, plus its compliant twin that still compiles — and where a claim is s
 the check present (UNKNOWN) or absent (PROVED). A refinement checker nobody has seen fail is not a
 checker.
 
-Fast oracles per unit: `node elm-compiler/test-run.js`, `tools/osier-corpus-ssa.sh`,
+Fast oracles per unit: `node osier-compiler/test-run.js`, `tools/osier-corpus-ssa.sh`,
 `tools/qbe-bootstrap.sh --status` (`… FAILED: err …` is a hard break — it has caught five of them).
 The 20-minute `qbe-check.sh` battery belongs to a consolidation pass covering several units, never to
 a single unit.

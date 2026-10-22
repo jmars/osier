@@ -9,7 +9,7 @@
 #
 #   * PASS-AFTER (this tree): QBE_MIDGC=1 routes every Con through the Mid
 #     defun `Rt.con`, so list and elements share the MID heap -> 160800.
-#   * FAIL-BEFORE: reverting ONE line in elm-compiler/src/Mid/Qbe/Lower.elm
+#   * FAIL-BEFORE: reverting ONE line in osier-compiler/src/Mid/Qbe/Lower.elm
 #     (lowerCon's `if s.midGc then` -> `if False then`) restores the stage-4
 #     state where Con still went through the Zig `rt_con`.  The list is
 #     Mid-allocated, its elements Zig-allocated: the cross-heap edge the
@@ -29,7 +29,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-LOWER="elm-compiler/src/Mid/Qbe/Lower.elm"
+LOWER="osier-compiler/src/Mid/Qbe/Lower.elm"
 FIXTURE="tools/qbe/fixtures/midgc-adt.elm"
 ENTRY="MidgcAdt.main"
 GOLDEN=160800
@@ -45,7 +45,7 @@ AFTER_BLOCK=$'                            in\n                            if Fal
 need() { command -v "$1" >/dev/null 2>&1 || { echo "probe-midgc-adt: $1 not found" >&2; exit 2; }; }
 
 rebuild() {
-  (cd "$ROOT/elm-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) \
+  (cd "$ROOT/osier-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) \
     || { echo "probe-midgc-adt: elm make compiler.js failed" >&2; exit 1; }
 }
 
@@ -94,7 +94,7 @@ before = "                            in\n                            if s.midGc
 assert s.count(after) == 1, f"expected exactly one reverted site, found {s.count(after)}"
 open(p, "w").write(s.replace(after, before))
 PY
-      (cd "$ROOT/elm-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) || true
+      (cd "$ROOT/osier-compiler" && ELM_HOME="$PWD/.elm-cache" "$ELM_BIN" make src/Main.elm --output=compiler.js >/dev/null) || true
     }
     trap restore EXIT
     rebuild

@@ -6,8 +6,8 @@ Same shape as the gc-fixes2 retention measurement, with the nursery ON:
 
 ```
 jq '.groups[0].output=emit.ssa | .groups[0].entry=NativeMain.main' \
-   elm-compiler/selfhost/manifest.json   # the build manifest
-QBE_MIDGC=1 QBE_MIDGC_YOUNG=1 RUN_STACK_KB=131072 node elm-compiler/run.js --batch ...
+   osier-compiler/selfhost/manifest.json   # the build manifest
+QBE_MIDGC=1 QBE_MIDGC_YOUNG=1 RUN_STACK_KB=131072 node osier-compiler/run.js --batch ...
 vendor/qbe/qbe emit.ssa > emit.s; cc -O1 emit.s "$(tools/qbe/rt-o.sh)" -o qbemit -lc
 # run, from the REPO ROOT (the manifest sources are repo-root-relative):
 ulimit -s 524288

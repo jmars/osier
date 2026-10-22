@@ -46,7 +46,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-RUNTIME="elm-compiler/runtime.mid"
+RUNTIME="osier-compiler/runtime.mid"
 FIXTURE="tools/qbe/fixtures/argvroot.elm"
 ENTRY="ArgvRoot.probe"
 NARGS=200

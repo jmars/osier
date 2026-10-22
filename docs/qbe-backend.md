@@ -207,15 +207,15 @@ always escapes — meaning the `Con`/`rt_con` half is correct but cannot be exer
 
 ## Files
 
-- `elm-compiler/src/Mid/Qbe/Il.elm` — the QBE IL subset as Elm data
-- `elm-compiler/src/Mid/Qbe/Lower.elm` — the lowering (all contracts in the
+- `osier-compiler/src/Mid/Qbe/Il.elm` — the QBE IL subset as Elm data
+- `osier-compiler/src/Mid/Qbe/Lower.elm` — the lowering (all contracts in the
   header: ABI, rooting, closures, tails)
-- `elm-compiler/src/Mid/Qbe/Print.elm` — the only text surface
-- `elm-compiler/src/Mid/Qbe/Peephole.elm` — barrier-delimited blit
+- `osier-compiler/src/Mid/Qbe/Print.elm` — the only text surface
+- `osier-compiler/src/Mid/Qbe/Peephole.elm` — barrier-delimited blit
   forwarding, jump-to-next removal, dead pure defs
-- `elm-compiler/src/Mid/QbeModule.elm` — driver (Mid.Module's orchestration
+- `osier-compiler/src/Mid/QbeModule.elm` — driver (Mid.Module's orchestration
   reused via additive `exposing`; NO mid-tier passes on this path)
-- `elm-compiler/src/Main.elm` + `run.js` — `QBE=1 QBE_ENTRY=<key>` switches
+- `osier-compiler/src/Main.elm` + `run.js` — `QBE=1 QBE_ENTRY=<key>` switches
   the group output to .ssa text (ZINC paths byte-identical, anchor verified)
 - `tools/qbe/rt.zig` — the runtime (rt.o built on demand by qbe-mk.sh)
 - `tools/qbe/qbe-mk.sh`, `tools/qbe/qbe-check.sh` — build + verification
@@ -559,7 +559,7 @@ same whole-compiler emit concurrently on 1 core of 32):
 TWO THINGS TO KNOW BEFORE THIS GOES ON A GATE.  (i) STAGE 1 DOMINATES: the
 stock emit is ~27 min — ~6x the native compile of the same corpus and 85% of
 the script's wall clock.  The day-to-day cost of the proof is the tail
-(qbe + cc + run ≈ 5 min).  `elm-compiler/compiler.js` is a DEV-mode elm build
+(qbe + cc + run ≈ 5 min).  `osier-compiler/compiler.js` is a DEV-mode elm build
 (the driver prints "Compiled in DEV mode"; `elm make` without `--optimize`),
 and an optimized build was NOT measured here, so that headroom is
 unquantified.  (ii) THE HEAP IS NOT SMALL, and the recorded values conflicted
@@ -586,7 +586,7 @@ rather than silently reworded), and `tools/osier-numbers.sh` exits 0 with
 
 ## The emit was quadratic: one argument flip, 293x (MEASURED 2026-10-09/10)
 
-`elm-compiler/src/Mid/Qbe/Peephole.elm:248` — one line, inside `usedInBlock`:
+`osier-compiler/src/Mid/Qbe/Peephole.elm:248` — one line, inside `usedInBlock`:
 
 ```elm
 Set.union condTmps (List.foldl (\i a -> Set.union a (readsTmps i)) acc b.body)
@@ -596,7 +596,7 @@ Set.union condTmps (List.foldl (\i a -> Set.union a (readsTmps i)) acc b.body)
 `acc` is the ACCUMULATED used-temp set threaded across blocks by `dropDeadDefs`
 (`Peephole.elm:161-180`) and grown to a function's TOTAL DISTINCT TEMPS.
 elm/core's `Set.union t1 t2` **iterates `t1`** — MEASURED in the generated
-driver, `elm-compiler/compiler.js:6861`:
+driver, `osier-compiler/compiler.js:6861`:
 
 ```js
 var $elm$core$Dict$union = F2(function (t1, t2) { return A3($elm$core$Dict$foldl, $elm$core$Dict$insert, t2, t1); });
@@ -611,7 +611,7 @@ output-preserving, because union is content-commutative and `used` is only ever
 read through `Set.member` (the set's SHAPE changes, its content cannot).
 
 MEASURED, whole-compiler emit, same manifest, same host, the flip reverted by
-rebuilding `compiler.js` (`elm-compiler/build.sh`; `elm` must be on PATH) and
+rebuilding `compiler.js` (`osier-compiler/build.sh`; `elm` must be on PATH) and
 back:
 
 ```
@@ -674,7 +674,7 @@ banner). MEASURED: `elm make src/Main.elm --output=<scratch> --optimize` exits
 There are uses of the `Debug` module in the following modules:  Mid.Qbe.Flatten
 ```
 
-— root: `elm-compiler/src/Mid/Qbe/Flatten.elm:172` (`{ defun | value = Debug.todo
+— root: `osier-compiler/src/Mid/Qbe/Flatten.elm:172` (`{ defun | value = Debug.todo
 msg }`; the only real `Debug` use in `src/`, `ParserFast.elm:2083` is inside a
 comment). When that ONE unreachable site (`Err` from `rw`; the DEV build
 completed, so the path is never taken on this corpus — MEASURED) is replaced by
@@ -1072,7 +1072,7 @@ measurement, and the re-pointed oracle below.
 
 `tools/qbe/qbe-selfhost.sh`'s csexp oracle used to be
 `tools/bootstrap/selfhost.csexp`, a FROZEN past artifact.  `Mid/Qbe/Lower.elm`
-and `Mid/Qbe/Peephole.elm` are themselves entries in `elm-compiler/selfhost/
+and `Mid/Qbe/Peephole.elm` are themselves entries in `osier-compiler/selfhost/
 manifest.json`, so any real change to the backend changes the compiled
 compiler, hence the csexp — the strongest check in the repo would fail for a
 LEGITIMATE change and the only route back to green would be to re-freeze the
@@ -1184,7 +1184,7 @@ mono_int 55 -> 5, listbuild 55 -> 5.
 
 ### The compiler's own workload (the selfhost guard)
 
-THE WHOLE COMPILER, one group, 64 sources (`elm-compiler/selfhost/manifest.json`
+THE WHOLE COMPILER, one group, 64 sources (`osier-compiler/selfhost/manifest.json`
 with the entry `NativeMain.main` — exactly `qbe-selfhost.sh`'s stage 1, run
 directly so the `run` stage's 32 GB booking is not paid):
 
@@ -1272,7 +1272,7 @@ on stderr (the `QBE_GC_STATS` precedent).
   and their tail sites are cold: `mono_record` executes `rt_tail_known` **3**
   times and `numloop` **1** time in a whole run (QBE_RT_COUNTS).  A flat suite
   is the expected result, not a refutation.
-- **The JS emit cannot see `rt_string` at all.**  `node elm-compiler/run.js`
+- **The JS emit cannot see `rt_string` at all.**  `node osier-compiler/run.js`
   links no `rt.o`; the whole-compiler emit is unchanged by construction
   (1726 call sites over 747 symbols, `.ssa` 11,114,730 B, sha `7a2ce2eb…`,
   emit 6.35/6.16 s — byte-identical to the pre-pass baseline).  Its role here
@@ -1342,9 +1342,9 @@ and `tools/bench/golden/` untouched (`git status` shows only `tools/qbe/rt.zig`)
 
 ### Known follow-up (not done here)
 
-`elm-compiler/src/Mid/Qbe/Lower.elm`'s `directCall` docstring still says a
+`osier-compiler/src/Mid/Qbe/Lower.elm`'s `directCall` docstring still says a
 `.tail`'s args "live in a fresh GC array".  That is now true only for arity > 3.
 It was left alone deliberately: editing it would leave the build artifact
-`elm-compiler/compiler.js` stale (nothing in the gates rebuilds it), and this
+`osier-compiler/compiler.js` stale (nothing in the gates rebuilds it), and this
 pass changes no emission — the next unit that touches the emitter should fix
 the phrase in the same commit that rebuilds `compiler.js`.
