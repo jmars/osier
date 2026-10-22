@@ -1004,6 +1004,12 @@ rtDeps =
         , ( "Rt.fEmit", [ "Rt.fEmit", "Rt.fEmitByte" ] )
         , ( "Rt.fEmitByte", [ "Rt.fDigit" ] )
         , ( "Rt.fDigit", [] )
+        , -- ===== THE BOOT (ZIGHOST Z5).  Rt.boot mallocs the values table and
+          -- installs the three standard streams; Rt.valSlot is the one helper
+          -- (Rt.valFreeGo's first free slot + the name write).  Both reach
+          -- nothing but rawcalls and that helper.
+          ( "Rt.boot", [ "Rt.valSlot" ] )
+        , ( "Rt.valSlot", [ "Rt.valFreeGo" ] )
         , -- ===== THE PRINTER (ZIGHOST Z4b).  One entry per defun, exactly its
           -- `call Rt.*` targets.  Rt.pvV is the tag walk (recursive, so it
           -- names itself) and reaches the two formatters the walk delegates:
@@ -1246,7 +1252,7 @@ rtDeps =
           -- edge costs the emit NOTHING: Rt.die is already a driverSeed ROOT,
           -- so the closure it pulls (Rt.cStrLenGo) is in every artifact
           -- already — an edge, not a new root, exactly like Rt.frame-leave's.
-          ( "Rt.main", [ "Rt.cStrLenGo", "Rt.metaGo", "Rt.parseArgsGo", "Rt.argvInstall", "Rt.die", "Rt.rootPushValueArray", "Rt.rootPushValue", "Rt.printValue" ] )
+          ( "Rt.main", [ "Rt.cStrLenGo", "Rt.metaGo", "Rt.parseArgsGo", "Rt.argvInstall", "Rt.die", "Rt.rootPushValueArray", "Rt.rootPushValue", "Rt.printValue", "Rt.boot" ] )
         , -- ===== the stage-6 B0 frame machinery.  Rt.frame-enter's RawCall
           -- edges are its one helper; Rt.frame-leave's only edge is Rt.die
           -- (the no-frame panic — Rt.die is already a driverSeed, so this is

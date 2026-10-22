@@ -10,8 +10,9 @@
 //!   (rt_sym_intern / rt_value_slot / rt_ss_* are GONE — Mid owns those
 //!   tables; see the O5 notes below.  rt_float_text and rt_gc_heap_bytes are
 //!   GONE at ZIGHOST Z4a: the float text and the heap knob are Mid's)
-//!   the driver host half: rt_boot / rt_is_program / rt_run_program
-//!   (rt_print_value is GONE at ZIGHOST Z4b — Mid owns the printer).  rt_parse_arg and
+//!   (ZIGHOST Z4b DELETED rt_print_value and Z5 DELETED rt_boot: after Z5 the
+//!   Mid driver calls NO seat in this file at all.  What remains is the six
+//!   object-layer seats, each with no caller left — see the Z5 tombstone.)  rt_parse_arg and
 //!   rt_argv_install are GONE at O5 seat 4b — Mid owns the entry-arg parser
 //!   and the *argv* list (runtime.mid's Rt.parseArg/Rt.argvInstall)
 //!   (ZIGHOST Z1: the ten shadow-stack root seats — rt_root_push_value /
@@ -168,7 +169,9 @@ extern fn rt_call15(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, 
 extern fn rt_call16(f: ?*const anyopaque, e: ?[*]Value, a0: *Value, a1: *Value, a2: *Value, a3: *Value, a4: *Value, a5: *Value, a6: *Value, a7: *Value, a8: *Value, a9: *Value, a10: *Value, a11: *Value, a12: *Value, a13: *Value, a14: *Value, a15: *Value) callconv(.c) Ret;
 
 // =====================================================================
-//  Global state (set once in rt_boot)
+//  Global state (was set once in rt_boot; Z5 DELETED rt_boot, so these are
+//  NEVER CONSTRUCTED and are reachable only from the six object-layer seats,
+//  which have no caller left)
 // =====================================================================
 
 var g: *Gc = undefined;
@@ -180,9 +183,9 @@ var vm: *state.Vm = undefined;
 // B4 deleted the pooled-frame machinery (rt_frame_enter/leave moved to Mid);
 // the arena's last client was rt_global_closure's one-slot per-defun closure
 // cache, which Z3 moved to Mid (Rt.globalClosure, a malloc'd pointer-free
-// slot).  `rtInit` is still on rt_string's and rt_boot's path and still wires
-// it, so this is dead state rather than dead code — kept for Z6, which
-// deletes this whole file, and NAMED here so nobody reads it as live.
+// slot).  Z5 deleted rt_boot, so NOTHING wires it any more: dead state, kept
+// only because rt_string (which also has no caller) still names it.  Z6
+// deletes this whole file.
 
 var frame_alloc: std.heap.ArenaAllocator = undefined;
 var rt_inited = false;
@@ -422,9 +425,8 @@ export fn rt_raw_alloc(n: i32) callconv(.c) [*]u8 {
 //  (DELETED AT ZIGHOST Z4a) rt_gc_heap_bytes — the heap-size number the Mid
 //  collector used to read across the seam.  The knob is Mid's now: Rt.gcInit
 //  reads QBE_HEAP_MB through Rt.gcEnvNum (the same parse this seat's owner
-//  did), so nothing reads the number across the seam any more.  rt_boot still
-//  computes its OWN copy from the same environment for the Zig Gc, which dies
-//  at Z5.
+//  did), so nothing reads the number across the seam any more.  Z5 then
+//  deleted rt_boot, so the Zig Gc is never even constructed.
 // =====================================================================
 
 // (stage 6 U1c) The Mid collector's region pointer no longer lives here:
@@ -466,9 +468,9 @@ export fn rt_raw_alloc(n: i32) callconv(.c) [*]u8 {
 //  rawstr literal; 9 distinct names).  No Zig seat remains.
 //  (DELETED AT O5 SEAT 3) rt_value_slot is GONE — the LOOKUP is Mid's now
 //  (runtime.mid's Rt.valScanGo/Rt.value).  The TABLE is still this file's:
-//  it is what rt_boot installs the three standard streams into, so the host
-//  keeps the storage and PUBLISHES its base into the Mid globals block
-//  (rt_glob[3]) for the Mid walk to read.
+//  it is what rt_boot USED to install the three standard streams into; Z5
+//  moved both the storage and the installs to Mid (Rt.boot), and the base is
+//  still globals word 3 — the same word, so the Z1 walkers are untouched.
 //  (DELETED AT O5 SEAT 4b) rt_parse_arg and rt_argv_install are GONE — the
 //  entry-arg parser (strtod + a decimal walk, the same refusals byte for
 //  byte) and the *argv* cons list (built over a ROOTED C-heap accumulator
@@ -495,7 +497,10 @@ export fn rt_raw_alloc(n: i32) callconv(.c) [*]u8 {
 //  Word indices are Mid.RtGc's LAYOUT table.  The values-table base (word 3)
 //  is the ONE word this file writes: every other slot is Mid's own state.
 // =====================================================================
-extern var rt_glob: [8211]u64; // RtGc.globWords — keep the two in step (8208 frame-freelist end + 3 intern-table words)
+// (ZIGHOST Z5) THE ZIG SIDE NO LONGER TOUCHES THE GLOBALS BLOCK.  `$rt_glob`
+// used to be declared here for rt_boot's ONE write — the values-table base into
+// word 3 — and that write is Mid's now (Rt.boot).  Every other slot was always
+// Mid's.  The block itself is unchanged and still emitted unconditionally.
 
 /// The globals-block word holding `vm.values_table`'s base (RtGc's layout
 /// table, word 3).  Written once, by rt_boot, before any generated code runs.
@@ -567,9 +572,6 @@ fn dieLoud(msg: []const u8) noreturn {
 // These seats die with the Zig host at stage 7 (zighost), when the effect
 // loop ports to Mid.
 
-const HEAP_BYTES: usize = 64 * 1024 * 1024;
-const RESERVE_BYTES: usize = 64 * 1024 * 1024;
-
 var vmem: state.Vm = undefined;
 
 /// The Gc, promoted from main's stack frame to a global: `rt_boot` creates it
@@ -584,92 +586,32 @@ var gg: Gc = undefined;
 /// loop's host applier.  VERBATIM main:1476-1487 + 1590-1596 + 1599-1630 +
 /// 1677-1688 + 1761.  Returns 0, or 1 after the SAME stderr line and exit
 /// status as the pre-A2 main (the gc-init failure).
-export fn rt_boot() callconv(.c) i64 {
-    // Read the debug knob ONCE, here, before any generated code can run.
-    // (B4 deleted the SEGV stack-depth net and the no_frame_reuse /
-    // no_tail_stage hatches with the Zig frame/tail seats; the Mid driver
-    // Rt.main raises the rlimit itself before calling this seat.)
-    no_string_intern = std.c.getenv("QBE_NOSTRINGINTERN") != null;
+// =====================================================================
+//  (DELETED AT ZIGHOST Z5) rt_boot — the LAST Zig owner.
+//
+//  What it used to do, and where each piece lives now: the heap knob is read by
+//  Rt.gcInit (Z4a), the root registry is globals words 4/5/6 (Z1), the write
+//  barrier is Rt.vecStorePlain/Young (Z2), the closure cache is
+//  Rt.globalClosure (Z3), the float text is Rt.floatText (Z4a) and the printer
+//  is Rt.printValue (Z4b).  The two things it still owned are Mid's now too:
+//  the VALUES TABLE (Rt.boot mallocs 256 x 48 bytes, zeroes them and publishes
+//  the base into globals word 3 — the same word, so the Z1 walkers and
+//  Rt.value are untouched) and the THREE STANDARD STREAMS (tag-11 Values whose
+//  payload is fd and is_input|is_string<<32, written with raw stores).
+//
+//  SO THE Gc AND THE Vm ARE NEVER CONSTRUCTED.  `gg`/`g`/`vmem`/`vm` below stay
+//  declared because the six remaining object-layer seats (rt_string, rt_con,
+//  rt_make_closure, rt_vec_alloc, rt_raw_alloc, rt_vec_store) still name them —
+//  and those six have NO CALLER LEFT: the emitted-call census is 0 across the
+//  corpus (probe-midgc-census.sh) and probe-midgc-string.sh asserts 0 rt_string
+//  sites.  Z6 deletes them, and this comment is the claim it rests on.
+//
+//  WHAT DIED WITH IT, stated: no_string_intern's one-time read (the knob is
+//  read nowhere else; rt_string is uncalled), internInit (rt_string's intern
+//  root array — same), the QBE_GC_VERBOSE/QBE_GC_VERIFY knobs (Zig-collector
+//  only), and the "gc init failed" exit path (no Zig Gc to fail).
+// =====================================================================
 
-    // QBE_RT_COUNTS: the exit-time counter line (see rtCounts).  ZIGHOST Z4b
-    // moved its ONLY call site (rt_print_value) to Mid, so the hook is
-    // registered here instead — same knob, same stream, same moment (exit).
-    if (std.c.getenv("QBE_RT_COUNTS") != null) _ = atexit(&rtCountsAtExit);
-
-    // heap knob for the GC-churn verification (small heap => many moves)
-    const heap_bytes: usize = blk: {
-        const env = std.c.getenv("QBE_HEAP_MB") orelse break :blk HEAP_BYTES;
-        const s = std.mem.span(env);
-        const mb = std.fmt.parseUnsigned(usize, s, 10) catch break :blk HEAP_BYTES;
-        if (mb == 0) break :blk HEAP_BYTES;
-        break :blk mb * 1024 * 1024;
-    };
-
-    rtInit();
-    gg = Gc.init(.{
-        .heap_bytes = heap_bytes,
-        // GC-FIX C: C's OWN reservation policy (16x the heap), not the 2x the
-        // drivers used to pass.  grow_heap asks for a heap of 2 x heappages and
-        // needs `new_size + PAGEBYTES - 1 <= reservation`, so a 2x reservation
-        // made every grow fail BY CONSTRUCTION ("need N MB but reservation is N
-        // MB" — the arithmetic behind the abort at 128 MB, 512 MB and 32768 MB
-        // alike).  k x heap gives a heap CEILING of (k/2) x heap, and 16x is
-        // MEASURED as the smallest multiplier that keeps a real fixture out of a
-        // collect-per-allocation thrash at the minimum heap: at QBE_HEAP_MB=16,
-        // tools/qbe/fixtures/vfield.elm's live set reaches 16.1 MB, which needs
-        // a threshold just above 16 MB, i.e. a heap over 64.4 MB — unreachable
-        // under an 8x reservation (64 MB ceiling), comfortable under a 16x one
-        // (128 MB).  Gc.init shrinks the request toward 2x + 1027*PAGEBYTES only
-        // if the address space cannot map it.  See heap.Options' "THE GROW
-        // ARITHMETIC".
-        .reserve_bytes = @max(heap_bytes * 16, RESERVE_BYTES),
-        .verbose = std.c.getenv("QBE_GC_VERBOSE") != null,
-        .verify_collects = std.c.getenv("QBE_GC_VERIFY") != null,
-    }) catch {
-        werr("qbe-rt: gc init failed\n");
-        return 1;
-    };
-    g = &gg;
-    // The rt_string intern table's root array.  HERE, not in rtInit: rtInit
-    // also runs from the Mid frame machinery (q_Rt_x2eframeEnter), i.e. AFTER
-    // a frame's watermark is taken, and a root pushed there would be popped by
-    // the next frame-leave.  This is the last point that is provably before
-    // any generated code — the entry call is far below.
-    internInit();
-    vmem.init(&gg);
-    vm = &vmem;
-
-    // Wire the standard I/O streams (M6) — the SAME three value variables
-    // the former VM harness set at the same point.  initGlobals only registers the PRIM
-    // globals; the *stinput*/*stoutput*/*sterror* slots are the HOST's to
-    // install, and a native program that reads stdin (Cmd.readLine ->
-    // read-byte on *stinput*) died with "prim read-byte failed: Halt" before
-    // this — the gate's ioecho row is the fixture that catches its absence.
-    vmem.valueSet("*stinput*", streams.valStreamInFd(0));
-    vmem.valueSet("*stoutput*", streams.valStreamOutFd(1));
-    vmem.valueSet("*sterror*", streams.valStreamOutFd(2));
-
-    // O5 seat 3: PUBLISH the values table's base into the Mid globals block,
-    // the one place both routes can read it (see THE MID GLOBALS BLOCK note
-    // above, and GLOB_VALUES_TAB for why the word is 3 and not 1).  The table
-    // is this file's — Vm.init page-allocates it and every write to it is here
-    // (the three streams above, *argv* below) — and the LOOKUP is Mid's
-    // (Rt.value/Rt.valScanGo), so the pointer is the whole handoff.  Done HERE
-    // rather than in Vm.init because the vendored runtime is shared with the
-    // Zig interpreter's own test suite, which links no Mid block; the base is
-    // stable for the run, so one store is enough.
-    rt_glob[GLOB_VALUES_TAB] = @intFromPtr(vmem.values_table);
-
-    // Host the effect loop EXACTLY like the retired harnesses did:
-    // install the native host->Elm dispatcher (the seam's default is a loud
-    // stub — only a native applier can execute Desc*-coded closures), run the
-    // entry, and if it returns a Program vector drive the shared CEK effect manager
-    // to the final model.  The Vm already wired *stinput*/*stoutput*/*sterror*
-    // in initGlobals, so StreamRef reads the same value-table slots the VM did.
-    // Installed HERE, in the bring-up, because nothing before the entry call
-    // may depend on it and the Mid driver must not have to reach the seam.
-    return 0;
-}
 
 // =====================================================================
 //  (DELETED AT ZIGHOST Z4b) rt_print_value — the driver's output walk.  The
@@ -691,6 +633,20 @@ extern "c" fn atexit(func: *const fn () callconv(.c) void) c_int;
 fn rtCountsAtExit() callconv(.c) void {
     rtCounts();
 }
+
+/// THE COUNTS HOOK'S LAST HOME (ZIGHOST Z5).  Its registration used to ride on
+/// rt_boot, and rt_boot is GONE — after Z5 the Mid driver calls NO Zig seat at
+/// all, so there is no function left to register from and adding one would be
+/// exactly the "grow the Zig surface" move the plan refuses.  An ELF
+/// constructor needs no caller: this pointer sits in .init_array, the loader
+/// calls it before main, and it registers the atexit handler when the knob is
+/// set.  It is NOT part of the ABI — nothing can call it, and Z6 deletes it
+/// with the rest of this file.
+fn rtCountsInit() callconv(.c) void {
+    if (std.c.getenv("QBE_RT_COUNTS") != null) _ = atexit(&rtCountsAtExit);
+}
+
+export const rt_counts_ctor: *const fn () callconv(.c) void linksection(".init_array") = &rtCountsInit;
 
 /// QBE_RT_COUNTS=1: the runtime MECHANISM counters, on STDERR, once per run.
 /// RE-HOMED (GC-ARC F1, declared): the exit-time print used to live in the Zig

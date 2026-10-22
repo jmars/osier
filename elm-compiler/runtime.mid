@@ -2716,6 +2716,63 @@ defun Rt.argvInstall(modeN : val, nargsN : val, argvN : val) -> val {
   return mknil;
 }
 
+// ===== THE BOOT (ZIGHOST Z5) =====
+// Rt.boot: everything the driver must do before any generated code runs, now
+// that the Zig host is gone from the route.  It is SMALL because the five
+// services rt_boot used to provide have all moved to Mid in this arc:
+//   * the heap knob        -> Rt.gcInit reads QBE_HEAP_MB itself (Z4a)
+//   * the root registry    -> glob words 4/5/6 (Z1)
+//   * the write barrier    -> Rt.vecStorePlain/Young (Z2)
+//   * the closure cache    -> Rt.globalClosure (Z3)
+//   * the float text       -> Rt.floatText (Z4a); the printer -> Rt.printValue (Z4b)
+// What is LEFT is the VALUES TABLE and the three standard streams, and neither
+// needs a Zig struct: the table is 256 x 48 bytes of C-heap memory that Mid
+// mallocs, zeroes and publishes into globals word 3 (the word the Z1 walkers
+// and Rt.value already read), and a stream is a tag-11 Value whose payload
+// words are the fd and (is_input + is_string<<32) — the exact shape
+// values.valStreamIn/Out build, written with raw stores.
+//
+// WHY NOT "Mid allocates storage for a Zig Gc/Vm": that shape needs a size
+// export, an init seat and a deinit seat (>= 3 new Zig exports), keeps all
+// 3,280 lines of gc/* alive, and moves no line of work — the O5 finding that
+// refused the same shape for rt_boot.  Here the Gc and Vm are simply NEVER
+// CONSTRUCTED: nothing on this route reads them (the six object-layer seats
+// that do have no caller left — the census pins 0 emitted calls), which is
+// what makes Z6's deletion act a deletion and not a re-homing.
+//
+// THE TABLE'S LIFETIME: malloc'd once, never freed — the same lifetime the Vm
+// gave it (its deinit defer died with the Zig main at B4), and the entries are
+// walked by Rt.gcMarkValuesTab on every collect.
+defun Rt.valSlot(tabN : val, nameN : val) -> val {
+  // The entry a name would occupy: Rt.valFreeGo's first free slot (the table
+  // is zeroed, and only three names are ever installed, so it never fills).
+  // It returns the VALUE's address (e + 8); the name goes one word earlier.
+  word free = payload(call Rt.valFreeGo(tabN, mknum(0)), 0);
+  wstore(free - 8, 0, payload(nameN, 0));
+  return mknum(free - 8);
+}
+
+defun Rt.boot(dummy : val) -> val {
+  word tab = rawcall malloc(12288);
+  rawcall memset(tab, 0, 12288);
+  wstore(rawcall rt_glob_addr(), 3, tab);
+  // An entry is {char *name; Value value} — 48 bytes: the name word, then the
+  // 40-byte Value at +8 (tag at +8, payload word k at +16 + 8k).
+  word e1 = payload(call Rt.valSlot(mknum(tab), mknum(rawstr("*stinput*"))), 0);
+  wstore(e1 + 8, 0, 11);
+  wstore(e1 + 8, 1, 0);
+  wstore(e1 + 8, 2, 1);
+  word e2 = payload(call Rt.valSlot(mknum(tab), mknum(rawstr("*stoutput*"))), 0);
+  wstore(e2 + 8, 0, 11);
+  wstore(e2 + 8, 1, 1);
+  wstore(e2 + 8, 2, 0);
+  word e3 = payload(call Rt.valSlot(mknum(tab), mknum(rawstr("*sterror*"))), 0);
+  wstore(e3 + 8, 0, 11);
+  wstore(e3 + 8, 1, 2);
+  wstore(e3 + 8, 2, 0);
+  return mknum(0);
+}
+
 defun Rt.str(x : val) -> val {
   if (mkbool(tagis(x, 12))) {
     return call Rt.floatText(x);
@@ -6953,8 +7010,11 @@ defun Rt.main(argc : word, argv : word) -> word {
   };
   word code = wload(mblk, 3);
   word arity = wload(mblk, 4);
-  word brc = rawcall rt_boot();
-  word bt = if (mkbool(brc != 0)) { rawcall exit(1); return 0; } else { return 0; };
+  // ZIGHOST Z5: the boot is Mid's.  The old seat returned 1 after
+  // "qbe-rt: gc init failed" when the Zig Gc could not map its reservation;
+  // there is no Zig Gc to fail now, and a Mid malloc has no returnable
+  // failure (a null deref is the failure), so there is no branch to keep.
+  val booted = call Rt.boot(mknil);
   word nreuse = rawcall getenv(rawstr("QBE_NO_REUSE"));
   wstore(rawcall rt_glob_addr(), 2, nreuse != 0);
   word ntailstage = rawcall getenv(rawstr("QBE_NOTTAILSTAGE"));

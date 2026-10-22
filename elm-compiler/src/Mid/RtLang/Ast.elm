@@ -1734,8 +1734,10 @@ rawcallArity =
         -- (O5 seat 4b: rt_parse_arg and rt_argv_install DELETED — the
         --   entry-arg parser and the *argv* list are runtime.mid's
         --   Rt.parseArg/Rt.argvInstall, reached by a Mid call)
-        ( "rt_boot", 0 )
-        , -- (ZIGHOST Z1: rt_root_push_value_array / rt_root_watermark /
+        -- (ZIGHOST Z5: rt_boot DELETED — the boot is runtime.mid's Rt.boot,
+        --   reached by `call`; the values table and the three standard streams
+        --   are Mid's and the Zig Gc/Vm are never constructed)
+          -- (ZIGHOST Z1: rt_root_push_value_array / rt_root_watermark /
           --   rt_root_pop_to / rt_root_push_ptr / rt_root_pop /
           --   rt_root_push_value DELETED with their seats.  The registry is
           --   Mid's now — runtime.mid's Rt.rootPushValueArray/rootWatermark/
