@@ -98,13 +98,19 @@ import Mid.RtPrims exposing (seat)
 --                  frame push — MEASURED, it is how O5 seat 3's first draft
 --                  lost its pointer.
 --   word 2         no_reuse (Rt.main's QBE_NO_REUSE knob)
---   word 3         THE VALUES TABLE (O5 seat 3): the host's 256-entry
---                  {name,value} array base, published ONCE by rt_boot
---                  (`vm.values_table`) so Rt.value/Rt.valScanGo can walk it.
---                  The ONE word in this block the ZIG side writes: the table
---                  is the host's (it is what rt_boot/rt_argv_install install
---                  the standard streams and *argv* into), so Mid gets the
---                  pointer, not the storage.
+--   word 3         THE VALUES TABLE (O5 seat 3): the 256-entry
+--                  {name,value} array base (48 B per entry) so
+--                  Rt.value/Rt.valScanGo can walk it.  MID OWNS IT SINCE
+--                  ZIGHOST Z5 (rt_boot and the Vm were deleted): `Rt.boot`
+--                  mallocs the 12288 bytes, zeroes them and publishes the
+--                  base here (runtime.mid:2755, called from Rt.main:7017),
+--                  then installs the three standard streams through
+--                  `Rt.valSlot`; `Rt.argvInstall` (runtime.mid:2698) writes
+--                  the *argv* entry into the same table.  Nothing else
+--                  publishes it, and the two collector walkers
+--                  (`Rt.gcMarkValuesTab` / `Rt.gcScavValuesTab`) read the
+--                  word straight out of this block — there is no separate
+--                  registration call.
 --   words 4..6     THE ROOT REGISTRY (ZIGHOST Z1): the shadow stack's
 --                  replacement, and the only root source the Mid collector
 --                  walks.  word 4 = the malloc'd entry array's base, word 5 =

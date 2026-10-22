@@ -184,10 +184,13 @@ fi
 #     acceptable: a stale seed still bootstraps, and the compiler it builds
 #     compiles the CURRENT sources.  The correctness oracle is the .ssa FIXED
 #     POINT plus the suites, not this file's age.
-#   * the ABI marker.  A .ssa and an rt.o from different runtime revisions
-#     link cleanly and then read each other's structs at the wrong offsets —
-#     so tools/qbe-bootstrap.sh REFUSES on a mismatch (that is the gate, in
-#     the bootstrap, where it is actionable).  HERE it is only reported.
+#   * the ABI marker.  The seed .ssa declares its OWN view of the runtime's
+#     interface (the arity table, the layout census), so a seed frozen at one
+#     runtime revision and a tree at another disagree about offsets and
+#     silently read the wrong ones — so tools/qbe-bootstrap.sh REFUSES on a
+#     mismatch, recomputing the marker from the CURRENT tree through
+#     tools/qbe/abi-fingerprint.sh (that is the gate, in the bootstrap, where
+#     it is actionable).  HERE it is only reported.
 #
 # The bootstrap is RUN (its build half: qbe + cc, ~20s), because "does the
 # node-free bootstrap still work" is worth a real answer rather than a

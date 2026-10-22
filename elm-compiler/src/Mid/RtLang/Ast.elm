@@ -159,13 +159,14 @@ machinery REGISTERED are scanned.
      `call Rt.rootPushValueArray(base, countPtr)`, whose elements
      `Rt.gcScanValueArray` follows and whose count is read AT SCAN TIME — the
      collector scans it AND (under a moving collector) updates it in place.
-     An UNREGISTERED raw copy is scanned by neither, and BOTH collectors make
-     the consequence visible in the same place — the block's first word, which
-     for a `value_array` is element 0's tag: the Mid sweep writes
-     the free-list link there (`Rt.gcSweep`), and the default collector
-     EVACUATES the block and abandons those words.  The probe is
+     An UNREGISTERED raw copy is scanned by neither, and the collector makes
+     the consequence visible in the same place — the block's first word,
+     which for a `value_array` is element 0's tag: the sweep writes the
+     free-list link there (`Rt.gcSweep`), and the nursery scavenge POISONS it
+     (tag 15 on the forwarded young body, `Rt.gcScavPtr`) before abandoning
+     the young words.  The probe is
      tools/qbe/fixtures/{Wval.mid,valchurn.elm} and its `stale` arm reads 0
-     under both.
+     either way.
 
   2. MOVE STALENESS.  A raw `val` is a byte copy, so it goes stale whenever
      its referent MOVES — even when the referent was rooted (the root slot
@@ -175,29 +176,32 @@ machinery REGISTERED are scanned.
      user program can reach are the allocating builtins (`allocvec`,
      `allocraw`), a string literal (`EStr` — the intern), and any `call`
      whose callee allocates.
-     MEASURED — AND OBLIGATION 2 *IS* OBSERVABLE, which is the one claim this
-     header got wrong first.  The repo has TWO collectors and they disagree
-     on exactly this point:
-       * the DEFAULT runtime's collector is the MOVING one —
-         `vendor/osier-rt/src/gc/collect.zig` is a semi-space scavenge
-         (`moveInternal` copies a body to to-space and leaves a forwarding
-         pointer), and `scanRoots` writes the new address BACK into the root
-         slot.  Under it a rooted referent survives and the raw copy does
-         not: the probe's `rooted` arm reads 1, i.e. the raw copy's tag was
-         lost while the root slot read fine.
-       * the collector is the Mid program (`runtime.mid`'s
-         `Rt.collect`): a NON-MOVING mark-sweep (`gcMarkRoots` -> `gcDrain`
-         -> `gcSweep`, and `gcMarkRoots` marks without writing anything
-         back), so there a rooted raw copy can never go stale — the same arm
-         reads 11.
-     The probe (tools/qbe/fixtures/{Wval.mid,valchurn.elm}) pins both:
-     `10001` built against the default runtime (obligation 2 visible in the
-     `rooted` arm: raw copy 0, rooted slot 1) and `10011` built with
-     the Mid collector and run at `QBE_HEAP_MB=16` (obligation 1 only; the same
-     arm reads 11).  Both builds agree that the UNROOTED arm (`stale`) reads
-     0 once a collection runs, and that nothing breaks at all when the churn
-     is too small to collect — the dose control that shows the mechanism is
-     the collection, not the store.
+     MEASURED — AND OBLIGATION 2 IS OBSERVABLE IN THE DEFAULT BUILD, which is
+     what an earlier version of this header had INVERTED (it named a deleted
+     Zig collector as the moving one).  There is ONE collector — the Mid
+     program, `runtime.mid` — and it has TWO mechanisms that disagree on
+     exactly this point:
+       * THE NURSERY SCAVENGE (`Rt.gcScavenge`) is the MOVING one, and it is
+         the DEFAULT since the flip: `run.js` splices the nursery on unless
+         `QBE_MIDGC_YOUNG` is exactly "0".  `Rt.gcScavPtr` copies a surviving
+         young body into old space, leaves the FORWARDED bit plus the
+         forwarding address in the young header and POISONS its body word 0,
+         and `Rt.gcScavRoots`/`Rt.gcScavValuesTab` write the new address BACK
+         into the root slot.  Under it a rooted referent survives and the raw
+         copy does not: the probe's `rooted` arm reads 1, i.e. the raw copy's
+         tag was lost while the root slot read fine.
+       * THE FULL COLLECT (`Rt.collect` -> `gcMarkRoots` -> `gcDrain` ->
+         `gcSweep`) is a NON-MOVING mark-sweep (`gcMarkRoots` marks without
+         writing anything back), so in a `QBE_MIDGC_YOUNG=0` run a rooted raw
+         copy can never go stale — the same arm reads 11 there.
+     The probe (tools/qbe/fixtures/{Wval.mid,valchurn.elm}) pins both from ONE
+     binary at `QBE_HEAP_MB=16`: `10001` with the nursery ON — the DEFAULT
+     (obligation 2 visible in the `rooted` arm: raw copy 0, rooted slot 1) —
+     and `10011` with `QBE_MIDGC_YOUNG=0` (obligation 1 only; the same arm
+     reads 11).  Both runs agree that the UNROOTED arm (`stale`) reads 0 once
+     a collection runs, and that nothing breaks at all when the churn is too
+     small to collect — the dose control that shows the mechanism is the
+     collection, not the store.
 
 -}
 
@@ -1608,8 +1612,12 @@ rows — R-08 forbids a symbol in both tables):
     out from under them (a loud J3 "in no signature table").  Migrate the
     fixtures, then declare — one move.
   * mmap 6 (RtGc — the one 6-arg site), exit 1 — outside the plan's U5 list.
-  * clock_gettime 2, getrlimit 2, setrlimit 2 — see "plan-listed" below.
-    (strtod was here; O5 seat 4b gave it its first site and declared it.)
+  * clock_gettime 2 — see "plan-listed" below.
+    (strtod was here; O5 seat 4b gave it its first site and declared it.
+     getrlimit 2 and setrlimit 2 were here too and are now DECLARED: the
+     rlimit seat COMPARES getrlimit's C `int` result, which is the measured
+     live width class, so the pair moved to runtime.mid's `extern` block and
+     their rows went with them — R-08 refuses a symbol in both tables.)
 
 MIGRATED by cffi U5 (row DELETED, signature declared in runtime.mid):
 openat 4, __errno_location 0, waitpid 3, readdir 1, opendir 1,
@@ -1617,7 +1625,7 @@ closedir 1, close 1, dup 1, dup2 2, pipe 1, unlink 1, mkstemp 1, fnmatch 3,
 chdir 1, getcwd 2, getenv 1, setenv 3, kill 2, execvp 2, fork 0, read 3,
 lseek 3, memset 3 (the frame bulk-zero, dst/0/40*nslots bytes — its IR-level
 RawCallRaw seat in Mid.Rt is untouched by this table, but the SURFACE site in
-runtime.mid is what the row governed), _exit 1.
+runtime.mid is what the row governed), _exit 1, getrlimit 2, setrlimit 2.
 STAGE 7E ADDED getdents64 3 and fstatat 4 to this list — the effect-loop
 port's dir/stat leaves are their first call sites, and they are declared in
 runtime.mid with the C prototypes' widths (getdents64's `int`, not the raw
@@ -1653,16 +1661,19 @@ defuns reached by `call`, which is what the A4a emission row now pins.)
 
 Plan-listed, no Rt-body call yet (arities from the C prototypes):
 
-  * clock_gettime 2, getrlimit 2, setrlimit 2
+  * clock_gettime 2
 
   (CORRECTION, MEASURED at cffi U5: `clock_gettime` x3 in Rt.collect — the
-  GC-ARC F1 stats instrument — and `getrlimit`/`setrlimit` in Rt.main's argv
-  prologue ARE Rt-body call sites today, so "no Rt-body call yet" is stale
-  for those three.  They stay rows and stay UNDECLARED per plan §8 item 5:
-  the effect-loop port declares them.  `poll`, `getdents64` and `fstatat`
-  have sites and are DECLARED — 7B for `poll`, 7E for the other two — so
-  their rows are gone.  `strtod` LEFT this list at O5 seat 4b: Rt.parseArg is
-  its site, so it is a declared extern with the C prototype's `f64` result.)
+  GC-ARC F1 stats instrument — IS an Rt-body call site today, so "no Rt-body
+  call yet" is stale for it.  It stays a row and stays UNDECLARED: nothing
+  compares its result as a C `int`, so the width class that pulled
+  `getrlimit`/`setrlimit` off this list does not apply.  `poll`, `getdents64`
+  and `fstatat` have sites and are DECLARED — 7B for `poll`, 7E for the other
+  two — so their rows are gone.  `strtod` LEFT this list at O5 seat 4b:
+  Rt.parseArg is its site, so it is a declared extern with the C prototype's
+  `f64` result.  `getrlimit`/`setrlimit` LEFT it too: Rt.main's rlimit seat
+  COMPARES getrlimit's C `int` (`rc == 0`), the measured-live width class, so
+  both are declared externs in runtime.mid and their rows are deleted.)
 
 The stage-6 A2 driver seats (arities from tools/qbe/rt.zig's exports):
 
@@ -1695,8 +1706,9 @@ rawcallArity =
           -- pre-extended — no width fix to buy.  See runtime.mid's header.
         ( "getpid", 0 )
         , -- ===== plan §8 item 5: declared by the effect-loop port, not U5.
-          -- clock_gettime/getrlimit/setrlimit DO have Rt-body sites today
-          -- (the GC stats instrument and the argv rlimit seat).
+          -- clock_gettime DOES have Rt-body sites today (the GC stats
+          -- instrument) and stays undeclared: its result is never compared as
+          -- a C `int`.
           -- getdents64 and fstatat LEFT this table at stage 7E: that unit
           -- gave them their first call sites (the listDir walk and the stat
           -- leaf) and DECLARED them in runtime.mid, and R-08 refuses a symbol
@@ -1707,9 +1719,10 @@ rawcallArity =
           -- call site and it is DECLARED in runtime.mid with the C
           -- prototype's `f64` result (a `=d call`), so R-08's both-tables
           -- refusal applies — the row and the declaration move together.
-        ( "getrlimit", 2 )
-        , ( "setrlimit", 2 )
-        , ( "rt_halt", 0 )
+          -- getrlimit/setrlimit LEFT the same way (the rlimit width fix):
+          -- Rt.main COMPARES getrlimit's C `int` result, so both are
+          -- declared externs with `-> i32` now.
+        ( "rt_halt", 0 )
         , -- T18: the collector reads the U1c globals block through this
           -- accessor (Mid.RtGc's globAddrSym; Lower's finishModule emits the
           -- 0-arg func).  The DSL's `callW globAddrSym []` sites moved to the

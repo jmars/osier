@@ -82,12 +82,17 @@ export Rt.rootPopTo : word -> word
 //     is one move, and it needs those fixtures migrated first.
 //   * `mmap`/`exit` — outside the plan's migration list; leaving the rows
 //     keeps today's all-word shape.
-//   * `clock_gettime`/`getrlimit`/`setrlimit` — plan §8 item 5 defers them to
-//     the effect-loop port.  NOTE the plan's PREMISE is stale: the GC-ARC F1
-//     stats instrument added three `clock_gettime` sites (Rt.collect) and the
-//     rlimit seat one `getrlimit` + one `setrlimit` (Rt.main's argv prologue),
-//     so these three DO have Rt-body calls today.  They are still not declared
-//     here, per the brief — the emitted shape is unchanged either way.
+//   * `clock_gettime` — plan §8 item 5 defers it to the effect-loop port.
+//     NOTE the plan's PREMISE is stale: the GC-ARC F1 stats instrument added
+//     three `clock_gettime` sites (Rt.collect), so it DOES have Rt-body calls
+//     today.  It is still not declared here — nothing compares its result as
+//     a C `int`, so the width class that put `getrlimit`/`setrlimit` below on
+//     the list does not apply to it.
+//   * `getrlimit`/`setrlimit` LEFT this list: Rt.main's rlimit seat COMPARES
+//     `getrlimit`'s result (`rc == 0`), which IS the measured-live class, so
+//     both are DECLARED above with the C `int` — and their `rawcallArity`
+//     rows in Mid.RtLang.Ast went with the declarations (R-08 refuses a
+//     symbol in both tables).
 //   * `fstatat`/`getdents64` — DECLARED at stage 7E, which is the unit that
 //     gave them their first call sites (the listDir walk and the stat leaf);
 //     the two `rawcallArity` rows went with them, since R-08 refuses a symbol
@@ -124,6 +129,14 @@ extern read(fd : i32, buf : ptr, count : i64) -> i64;
 extern lseek(fd : i32, offset : i64, whence : i32) -> i64;
 extern memset(dst : ptr, c : i32, n : i64) -> ptr;
 extern poll(fds : ptr, nfds : i64, timeout : i32) -> i32;
+// THE RLIMIT PAIR (width fix, post-Z6 record unit): `getrlimit` returns a C
+// `int` and `setrlimit` takes/returns one.  Rt.main's argv prologue is
+// their ONLY site, and it COMPARES the result (`rc == 0`) — the exact class
+// the header above calls measured-live, read at 64 bits through an
+// undeclared all-word rawcall row.  `resource` is the C `int`
+// (RLIMIT_STACK = 3), `rlim` the `struct rlimit *`.
+extern getrlimit(resource : i32, rlim : ptr) -> i32;
+extern setrlimit(resource : i32, rlim : ptr) -> i32;
 // STAGE 7C: `fcntl` is DECLARED AS VARIADIC (plan §6 gap G-I), which is the
 // shape the FFI arc made possible and pinned (tools/qbe/fixtures/ffic-vararg.mid:
 // `=w call $fcntl(w 1, w 3, ..., l 0)` + `extsw`, i.e. two C `int` params and a
@@ -2416,15 +2429,18 @@ defun Rt.intern(str : val) -> val {
 }
 
 // ==================== THE VALUES TABLE (O5 seat 3) =====================
-// rt_value_slot died here.  The table ITSELF is still the HOST's — 256
-// {name, value} entries (48 bytes each: the name pointer at +0, the 40-byte
-// Value at +8) page-allocated at Vm.init, registered with the collector, and
-// WRITTEN by rt_boot/rt_argv_install (the three standard streams + *argv*) —
-// so the Zig side cannot hand the lookup over; it hands over the BASE.  rt_boot
-// stores `vm.values_table` into the GLOBALS BLOCK at word 3 (RtGc.elm's layout
-// table; the same rule the string-stream registry and the intern table follow:
-// rt_glob_addr is emitted unconditionally and the block is .bss, so the word
-// is readable before a region is mapped).  Word 3 because
+// rt_value_slot died here, and so did the Zig half of the table (ZIGHOST Z5
+// deleted rt_boot AND the Vm).  The table ITSELF is 256 {name, value} entries
+// (48 bytes each: the name pointer at +0, the 40-byte Value at +8) and it is
+// MID'S: `Rt.boot` (called from Rt.main) mallocs the 12288 bytes, zeroes them,
+// stores the base in the GLOBALS BLOCK at word 3 (RtGc.elm's layout table; the
+// same rule the intern table follows: rt_glob_addr is emitted unconditionally
+// and the block is .bss, so the word is readable before a region is mapped)
+// and installs the three standard streams through `Rt.valSlot`;
+// `Rt.argvInstall` writes the *argv* entry into the same table.  No other
+// seat publishes it, and the two collector walkers (`Rt.gcMarkValuesTab`,
+// `Rt.gcScavValuesTab`) read the word straight out of the block — the table
+// needs no separate registration call.  Word 3 because
 // word 1 is the frame machinery's CURRENT-FRAME pointer (frame-enter/leave
 // `wstore(glob, 1, hdr)`) — a value parked there dies at the next frame push.
 //

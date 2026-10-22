@@ -831,10 +831,16 @@ fi
 # Every registered native row (CNAT non-empty) builds HERE, in parallel, so
 # PHASE 3 only RUNS binaries: the transcript stays in declaration order, and a
 # build failure is a per-row FAIL carrying the build error — never a silently
-# missing row.  The FIRST build runs SERIALLY: if tools/qbe/rt.o is stale,
-# qbe-mk rebuilds it, and two concurrent `zig build-obj` writes to the same
-# rt.o path would race — after the serial warm-up every parallel job finds it
-# fresh (the freshness probe is read-only).
+# missing row.  THE SERIAL WARM-UP IS GONE (ZIGHOST Z6), and why it was there:
+# the first build used to run ALONE because qbe-mk could rebuild the shared
+# runtime object tools/qbe/rt.o (rt-o.sh -> `zig build-obj`), and two
+# concurrent writes to that ONE path raced — after the serial build every
+# parallel job found it fresh.  rt.o, rt-o.sh, hostshim.zig and every zig
+# invocation are DELETED; what qbe-mk writes now all lives under the job's OWN
+# outdir ($OUT/nat/<idx>/: <base>.ssa, <base>.s, <base>), run.js writes only
+# the .ssa path it is handed (elm-compiler/run.js:488/529/550), and
+# vendor/qbe/qbe is a prebuilt binary nothing writes.  There is no shared
+# output path left, so every row goes straight into the pool.
 {
   mkdir -p "$OUT/nat"
   : > "$OUT/nat.plan"
@@ -856,16 +862,7 @@ else
 fi
 EOJ
   chmod +x "$OUT/nat-one.sh"
-  first=1
-  while IFS= read -r job; do
-    [ -n "$job" ] || continue
-    if [ "$first" = 1 ]; then
-      OSIER_ROOT="$ROOT" "$OUT/nat-one.sh" "$job" || :
-      first=0
-    else
-      printf '%s\n' "$job"
-    fi
-  done < "$OUT/nat.plan" > "$OUT/nat.jobs"
+  cp "$OUT/nat.plan" "$OUT/nat.jobs"
   # -r: an empty jobs file (only one native row) is legal, not an error.
   OSIER_ROOT="$ROOT" xargs -r -P "$NATJ" -I{} "$OUT/nat-one.sh" "{}" < "$OUT/nat.jobs" 2>/dev/null || :
 }

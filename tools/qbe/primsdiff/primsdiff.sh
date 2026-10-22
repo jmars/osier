@@ -54,14 +54,26 @@
 #
 # CHURN (should-fix 3): the churn batches (churn-str / churn-cons /
 # churn-vec) allocate tens of KB PER VECTOR, which is the only lever that
-# works — the nursery is a FIXED 8MB (vendor/osier-rt/src/gc/heap.zig:53) and
-# QBE_HEAP_MB scales the TOTAL heap only, so the other batches' QBE_HEAP_MB=16
-# run is a small-heap RERUN and NOT a collection (their PASS line says
-# `heap16-rerun`, and it is not a churn claim).  For the churn batches this
-# script PARSES BOTH ARMS' [GC STATS] line and fails unless the collector
-# actually ran.  MEASURED (n=200): churn-str 334 scavenges, churn-cons 8
-# scavenges, churn-vec 0 scavenges but 11 full collects — a multi-KB array is
-# old-gen-allocated, so the vector family churns the OLD GENERATION.
+# works — QBE_HEAP_MB scales the TOTAL heap and the nursery's default size is
+# clamp(heapBytes/8, 4MB, 512MB) (runtime.mid Rt.gcInit), so the other
+# batches' QBE_HEAP_MB=16 run is a small-heap RERUN and NOT a churn claim
+# (their PASS line says `heap16-rerun`).  For the churn batches this script
+# PARSES THE MID ARM's `midgc:` LINES and fails unless the collector actually
+# ran.  THE INSTRUMENT IS THE MID COLLECTOR'S (ZIGHOST Z6): QBE_MIDGC_STATS=1
+# (read once in Rt.gcInit, runtime.mid) makes it print ONE LINE PER EVENT —
+# `midgc: scavenge s=N ...` per nursery scavenge (Rt.gcScavenge) and
+# `midgc: c=N ...` per full collect (Rt.collect) — so a field here is a count
+# of LINES.  The `[GC STATS] scavenges=.. full_collects=..` one-liner this
+# script used to grep was the DELETED Zig collector's format (its knob,
+# QBE_GC_STATS, is read by nothing on this tree): after the deletion the grep
+# matched nothing, gc_field returned 0 unconditionally, and every churn row
+# failed with the FALSE diagnosis "the churn claim is false".  The Zig-era
+# numbers in older records (n=200: churn-str 334 scavenges, churn-cons 8,
+# churn-vec 0 scavenges / 11 collects) are therefore NOT comparable — the Mid
+# counts, MEASURED at n=200 / QBE_HEAP_MB=16 / Mid arm on this tree:
+# churn-str 25 collection events, churn-cons 19 scavenges, churn-vec 33
+# collection events (a multi-KB array is old-gen-allocated, so the vector
+# family churns the OLD GENERATION).
 #
 # STATED GAPS (the cons-spike discipline — a stated gap is a result):
 #   * x/0 and x/0.0-as-SIGFPE: both arms die; untestable same-process.
@@ -254,14 +266,18 @@ fi
 # A prim called only from inside the Rt program itself (e.g. assocGo, called
 # by Rt.assoc) is NOT evidence that the batch exercises it — those call sites
 # are emitted as soon as the defun is seeded.
-# [GC STATS] parsing for the churn assertion: scavenges+full_collects, and
-# scavenges alone (0 when the line is absent).
+# midgc: parsing for the churn assertion: scavenges+full_collects, and
+# scavenges alone (0 when no midgc: line is present).  The Mid collector
+# prints ONE LINE PER EVENT (Rt.collect -> `midgc: c=N ...`, Rt.gcScavenge ->
+# `midgc: scavenge s=N ...`), so each field is a count of LINES.  The old
+# one-line `[GC STATS] scavenges=.. full_collects=..` summary was the deleted
+# Zig collector's format; grepping for it here returned 0 unconditionally and
+# made every churn row fail with a false "the churn claim is false".
 gc_field() {
-  local line
-  line="$(grep -h '\[GC STATS\]' "$1" 2>/dev/null | head -1)"
-  [ -n "$line" ] || { echo 0; return; }
-  printf '%s\n' "$line" | tr ' ' '\n' | awk -F= -v want="$2" \
-    '$1=="scavenges"{s=$2} $1=="full_collects"{f=$2} END{ if (want=="scav") print s+0; else print s+f+0 }'
+  local s f
+  s=$(grep -c '^midgc: scavenge s=' "$1" 2>/dev/null); s=${s:-0}
+  f=$(grep -c '^midgc: c=' "$1" 2>/dev/null); f=${f:-0}
+  if [ "$2" = scav ]; then echo "$s"; else echo $((s + f)); fi
 }
 gc_total() { gc_field "$1" tot; }
 gc_scav() { gc_field "$1" scav; }
@@ -308,7 +324,7 @@ for op in $OPS; do
   for mode in default heap16-rerun; do
     TOTAL=$((TOTAL + 1))
     if [ "$mode" = heap16-rerun ]; then
-      ENVV=(LC_ALL=C QBE_HEAP_MB=16 QBE_GC_STATS=1)
+      ENVV=(LC_ALL=C QBE_HEAP_MB=16 QBE_MIDGC_STATS=1)
     else
       ENVV=(LC_ALL=C)
     fi
@@ -316,7 +332,7 @@ for op in $OPS; do
     # silently drop NUL bytes — the byte-list batches print raw bytes, and a
     # divergence IN the nulls must not be invisible).  stderr is kept out of
     # the compared stream but its presence fails the exit-code check — EXCEPT
-    # for the churn batches, whose GC STATS line is REQUIRED on stderr.
+    # for the churn batches, whose midgc: lines are REQUIRED on stderr.
     if [ "$FREEZE_REF" = 1 ]; then
       env "${ENVV[@]}" timeout 120 "$WORK/primref" "$B/vectors.spec" > "$B/zig.$mode.out" 2> "$B/zig.$mode.err"
       zrc=$?
@@ -374,11 +390,11 @@ for op in $OPS; do
       fi
       if [ "$okc" -ne 1 ]; then
         echo "FAIL $mode op=$op: CHURN batch shows NO $what — the churn claim is false"
-        echo "  mid: $(grep -h '\[GC STATS\]' "$B/mid.$mode.err" 2>/dev/null)"
+        echo "  mid: $(grep -h '^midgc:' "$B/mid.$mode.err" 2>/dev/null | head -2)"
         FAIL=1
         continue
       fi
-      echo "PASS $mode op=$op: identical with the $REFNAME ($(wc -c < "$B/mid.$mode.out") bytes), CHURNED ($what): mid=$(grep -h '\[GC STATS\]' "$B/mid.$mode.err") | frozen-zig=$(cat "$REFDIR/$op.heap16-rerun.gcstats" 2>/dev/null | head -c 120)"
+      echo "PASS $mode op=$op: identical with the $REFNAME ($(wc -c < "$B/mid.$mode.out") bytes), CHURNED ($what): mid=$(grep -h '^midgc:' "$B/mid.$mode.err" | head -1) | frozen-zig=$(cat "$REFDIR/$op.heap16-rerun.gcstats" 2>/dev/null | head -c 120)"
     else
       echo "PASS $mode op=$op: identical with the $REFNAME ($(wc -c < "$B/mid.$mode.out") bytes)"
     fi

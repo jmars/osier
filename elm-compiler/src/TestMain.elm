@@ -4140,8 +4140,10 @@ checks rt runtimeMidText =
                         False
          in
          List.length externs
-            == 31
+            == 33
             && has "fcntl" Ast.FI32
+            && has "getrlimit" Ast.FI32
+            && has "setrlimit" Ast.FI32
             && has "openat" Ast.FI32
             && has "waitpid" Ast.FI32
             && has "closedir" Ast.FI32

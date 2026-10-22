@@ -56,7 +56,7 @@ run() { timeout 120 "$@"; }
 # ---- arm 1: MOVEMENT — the young arm prints the MOVING golden -------------
 out="$(run env QBE_MIDGC_YOUNG=1 QBE_MIDGC_YOUNG_MB=$YOUNG_MB QBE_MIDGC_STATS=1 QBE_HEAP_MB=$HEAP_MB "$BIN" Valchurn.main 2>"$WORK/vc.on")"
 if [ "$out" = "10001" ]; then
-  echo "PASS (1): valchurn YOUNG prints $out — the MOVING golden (the default Zig route's own number)"
+  echo "PASS (1): valchurn YOUNG prints $out — the MOVING golden (the DEFAULT build: the nursery scavenge promotes and poisons the young original)"
 else
   fail "valchurn YOUNG printed '$out', want 10001 (moving)"
 fi

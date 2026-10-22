@@ -404,22 +404,28 @@ const OPS = {
 
   // ---------------------------------------------------------------------
   //  THE CHURN BATCHES (should-fix 3).  The committed churn mode was INERT:
-  //  MEASURED with QBE_GC_STATS, every one of the 40 batches showed
-  //  scavenges=0 full_collects=0 — the nursery is a FIXED 8MB
-  //  (vendor/osier-rt/src/gc/heap.zig:53; QBE_HEAP_MB scales the TOTAL heap,
-  //  rt.zig:1244, not the nursery) and 200 small vectors allocate < 1MB.  So
-  //  `churn-16` was a plain rerun and the GC/rooting dimension had ZERO
-  //  exercise.  The lever that actually works is ALLOCATION VOLUME: each
-  //  vector below allocates tens of KB and keeps the printed result SMALL
-  //  (a length / one element), so the collector genuinely churns without
-  //  40MB of stdout.  primsdiff.sh ASSERTS the collection happened (its
-  //  churn rows fail when the counters stay at 0) rather than claiming it.
+  //  MEASURED (Zig-era, under the then-live QBE_GC_STATS knob), every one of
+  //  the 40 batches showed scavenges=0 full_collects=0 — the then-live Zig
+  //  nursery was a FIXED 8MB (vendor/osier-rt/src/gc/heap.zig, DELETED at
+  //  Z6b; QBE_HEAP_MB scales the TOTAL heap, not the nursery) and 200 small
+  //  vectors allocate < 1MB.  So `churn-16` was a plain rerun and the
+  //  GC/rooting dimension had ZERO exercise.  The lever that actually works
+  //  is ALLOCATION VOLUME: each vector below allocates tens of KB and keeps
+  //  the printed result SMALL (a length / one element), so the collector
+  //  genuinely churns without 40MB of stdout.  primsdiff.sh ASSERTS the
+  //  collection happened (its churn rows fail when the counters stay at 0)
+  //  rather than claiming it.
   //
-  //  MEASURED at n=200, QBE_HEAP_MB=16, MID arm: churn-str 334 scavenges /
-  //  144 full collects; churn-cons 8 scavenges; churn-vec 0 scavenges / 11
-  //  full collects (a multi-KB array is old-gen-allocated, so the vector
-  //  family CHURNS THE OLD GENERATION, not the nursery — stated per batch,
-  //  not papered over).
+  //  THE COUNTERS ARE THE MID COLLECTOR'S NOW: QBE_MIDGC_STATS=1 prints one
+  //  `midgc:` line per event (Rt.collect / Rt.gcScavenge), and the Mid
+  //  nursery's default size is clamp(heapBytes/8, 4MB, 512MB) (runtime.mid
+  //  Rt.gcInit) — so at QBE_HEAP_MB=16 it is 4MB, not the deleted Zig 8MB.
+  //  MEASURED at n=200, QBE_HEAP_MB=16, Mid arm on this tree: churn-str 25
+  //  collection events; churn-cons 19 scavenges; churn-vec 33 collection
+  //  events (a multi-KB array is old-gen-allocated, so the vector family
+  //  CHURNS THE OLD GENERATION, not the nursery — stated per batch, not
+  //  papered over).  The Zig-era 334/8/11 figures are NOT comparable and are
+  //  not restated here.
   // ---------------------------------------------------------------------
   'churn-str': {
     args: [() => ({ spec: 'n:500', elm: '500' }), longStrSpec],

@@ -45,8 +45,8 @@
 # never leaves the tree edited.  NO REBUILD is needed on either arm: run.js
 # reads elm-compiler/runtime.mid at compile time (elm-compiler/run.js:55) and
 # compiles it into the .ssa inside qbe-mk, so the file swap alone decides the
-# arm — compiler.js and rt.o are untouched (runtime.mid is Mid source, not a
-# Zig module).
+# arm — compiler.js is untouched (runtime.mid is Mid source, not a Zig module;
+# there is no runtime object any more, ZIGHOST Z6).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
