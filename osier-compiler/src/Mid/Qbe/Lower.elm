@@ -1680,6 +1680,17 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                       else
                         List.indexedMap (\i p -> ( p.id, i + 2 )) lambda.params
                      )
+                        -- NOTE, because the two counters disagree on purpose: a
+                        -- capture is numbered ABOVE the params (nparams + 2 + j)
+                        -- even under ptrReadD, whose fresh-slot counter starts at
+                        -- 2 + ncaps with NO param reservation — so a ptrRead defun
+                        -- with captures would hand out temps that collide with
+                        -- these slots.  That is unreachable, and reachable only
+                        -- from one place: lowerDefun (:1528) passes captures = []
+                        -- to EVERY entry defun, so the capture list is always
+                        -- empty where ptrReadD can be true.  If an entry defun
+                        -- ever gets captures, the ptrRead slot base at :1660 must
+                        -- become 2 + nparams + ncaps to match.
                         ++ List.indexedMap (\j cid -> ( cid, nparams + 2 + j )) captures
                     )
             , rawInt = Dict.empty
