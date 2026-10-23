@@ -289,6 +289,13 @@ const QBE_REP = process.env.QBE_NOREP !== '1';
 // and the direct call sites must be PRESENT in one build and ABSENT in the
 // other, while the programs still print what they printed.  Default ON.
 const QBE_PRIMDIRECT = process.env.QBE_NOPRIMDIRECT !== '1';
+// QBE_NOLEAF=1 DISABLES perf P5 (frame-free surface leaf defuns: a defun whose
+// every GC-safepoint call site has an EMPTY live-frame-slot map takes no pooled
+// frame at all — no frame-enter, no frame-leave, no rootPush/rootPopTo).  Same
+// purpose as QBE_NOFLATTEN/QBE_NOREP: it exists so the classification can be
+// A/B'd on the SAME source, and the structural gate compiles both ways.
+// Default ON.
+const QBE_LEAFFREE = process.env.QBE_NOLEAF !== '1';
 // QBE_NOMIDRT=1 DISABLES the Mid-written runtime injection (osier-consspike):
 // the Rt.* defuns are withheld from the compile entirely, so no used-prim
 // seed fires and the emitted .ssa is byte-identical to the pre-Rt baseline.
@@ -466,6 +473,7 @@ function compileGroups(groups) {
       qbeEqPtrFast: QBE_EQPTRFAST,
       qbeTypeSpec: QBE_TYPESPEC,
       qbeMidGcYoung: QBE_MIDGC_YOUNG,
+      qbeLeafFree: QBE_LEAFFREE,
     },
   });
 

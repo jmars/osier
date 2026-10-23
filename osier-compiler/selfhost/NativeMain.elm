@@ -328,7 +328,7 @@ renderJob rt corpus entryKey ( job, elmGroup ) midResult =
             -- Mid.QbeModule.compileEntry's call shape still carries the bit.
             -- The vector must still agree with run.js's defaults so the seed
             -- it builds re-emits itself (the U2-fix-4 twin TestMain pins).
-            renderSsa (QbeModule.compileEntry rt corpus elmGroup midTexts entryKey True True True True True True True ( ( True, ( True, ( True, ( True, True ) ) ) ), True ))
+            renderSsa (QbeModule.compileEntry rt corpus elmGroup midTexts entryKey True True True True True True True ( ( True, ( True, ( True, ( True, ( True, True ) ) ) ) ), True ))
 
 
 -- ======================= M4: reader-side .mid import resolution =======================

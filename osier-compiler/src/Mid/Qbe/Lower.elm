@@ -100,6 +100,7 @@ import Mid.RtGc as RtGc
 import Mid.RtLayout as RtLayout
 import Dict exposing (Dict)
 import Mid.Qbe.Il as Il exposing (Module, Func, Block, Inst(..), Jump(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), UnaryOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..))
+import Mid.Qbe.Liveness as Liveness
 import Set exposing (Set)
 import Mid.Qbe.Types as QbeTypes
 import Type.Representation as Rep
@@ -121,6 +122,20 @@ vs =
 rvs : Int
 rvs =
     RtLayout.retSizeBytes
+
+
+-- P5: the non-GC libc entries this emitter names as CALL TARGETS, i.e. the
+-- ones a call may target without being a GC safepoint.  The list is EXACTLY
+-- what the emitter emits: `free` (the :ret buffer release in a rawAbi @ret
+-- block), a C-heap release that cannot run a collect or move the Mid heap.
+-- NOTHING ELSE may join it without the same argument — every other target is
+-- a `q_*` symbol resolved against Mid.Rt.allocating, an indirect call, or a
+-- cffi extern, and those are all treated as safepoints (deny by default):
+-- a GC seat reached from C would be invisible here.
+libcNoCollect : Set String
+libcNoCollect =
+    Set.fromList [ "free" ]
+
 
 
 -- VM ValTag numbers this lowering switches on (gc/types.zig ValTag order).
@@ -219,6 +234,8 @@ type alias S =
     , loops : List LoopFrame -- (B4) the ENCLOSING loops, innermost first: what a Break/Continue leaf resolves against
     , ptrRead : Set String -- VR1: the defuns that READ their params through the incoming `l` pointer (no entry blit); see ptrReadKeys
     , paramPtr : Dict Int Il.Arg -- VR1: binder id -> the incoming `l` pointer holding that param (ptrRead defuns only)
+    , noCollect : Set String -- P5: the CALL SYMBOLS whose execution cannot reach a GC safepoint (Mid.Rt.allocating's complement + the non-collecting libc entries); a call to anything else is a safepoint
+    , leafFree : Bool -- P5's A/B switch (QBE_NOLEAF=1 -> False = every surface defun keeps its pooled frame, i.e. the pre-P5 shape)
     }
 
 
@@ -256,10 +273,17 @@ lean frame-FREE arm: a plain `alloc8` scratch block (a COMPILE-TIME QBE frame
 slot — vendor/qbe amd64/isel.c turns a constant-size alloc8 into Onop plus a
 slot assignment), unzeroed and unregistered as a root, which is sound exactly
 because the classification proved no safepoint is reachable in this body.
+`PLeaf` is the SAME frame-free shape for a SURFACE defun (perf P5): it adds
+the two things a surface defun needs that a lean one does not — slot 0 (the
+`.done` result) and slot 1 (the `.done`/`.tail` marker of the 80-byte `:ret`)
+are read by the RETURN path WITHOUT a tag test, which the pooled frame
+supplied by being memset at enter, so a PLeaf prologue materializes those two
+words with two 8-byte stores (see leafTailZero in withPrologue).
 -}
 type Pro
     = PFrame
     | PAlloc
+    | PLeaf
 
 
 {-| The Rt defun calling convention (stage 6 U2 extends the two lean arms
@@ -523,8 +547,8 @@ reads it.  The slot stays because `Mid.QbeModule.compileEntry` still carries it
 in its call shape — the one place this unit could not reach (another lane owns
 that file).  Nothing selects a collector; the slot is inert, not a default.
 -}
-lower : MidRt.Runtime -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
-lower runtime rep primDirect midCons rtLean consArr rec typeSpec _ midGcYoung table arityTable program entryKey =
+lower : MidRt.Runtime -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
+lower runtime rep primDirect midCons rtLean consArr rec typeSpec _ midGcYoung leafFree table arityTable program entryKey =
     let
         defuns =
             Dict.fromList (List.map (\d -> ( d.key, d )) program)
@@ -615,6 +639,33 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec _ midGcYoung ta
                 keys =
                     surfaceKeys ++ rtKeys
 
+                -- P5: THE NON-COLLECTING CALL TARGETS.  A call may be skipped
+                -- as a GC safepoint only when its target is PROVABLY unable to
+                -- reach one: an Rt defun OUTSIDE `runtime.allocating` (the
+                -- existing fixed point over the Rt program's own call graph,
+                -- so this is the SAME classification the lean ABI's frame
+                -- decision already trusts), plus the libc entries the emitter
+                -- names that cannot run a collect (`free` is a C-heap release;
+                -- `malloc` is not a GC seat and cannot move the Mid heap).
+                -- Everything else — a surface defun, an indirect call, an
+                -- extern — is a safepoint.  Denying by default is what makes
+                -- the predicate conservative.
+                noCollect =
+                    Set.union
+                        (Set.fromList
+                            (List.filterMap
+                                (\k ->
+                                    if isRtKey k && not (Set.member k runtime.allocating) then
+                                        Just ("q_" ++ mangle k)
+
+                                    else
+                                        Nothing
+                                )
+                                keys
+                            )
+                        )
+                        libcNoCollect
+
                 s0 =
                     { blocks = []
                     , curLabel = "start"
@@ -652,6 +703,8 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec _ midGcYoung ta
                     , loops = []
                     , ptrRead = ptrReadKeys defuns arityTable
                     , paramPtr = Dict.empty
+                    , noCollect = noCollect
+                    , leafFree = leafFree
                     }
 
                 -- THE MIDGC REFUSAL ARMS ARE GONE (stage 7 O2).  Two arms
@@ -1620,6 +1673,24 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                 _ ->
                     False
 
+        -- P5: is this defun even a CANDIDATE for a frame-free body?  Only a
+        -- top-level SURFACE defun (the generic closure ABI) is.  An Rt defun
+        -- already has its own frame decision (the lean ABI's `allocating`
+        -- membership), a closure body is called through rt_callN with a
+        -- GC-array env, and a rawAbi defun is frame-free by ABI — so this
+        -- classification COMPOSES with those three instead of second-guessing
+        -- them (H5/H6).  QBE_NOLEAF=1 restores the pre-P5 shape for the A/B.
+        leafOk =
+            sOuter.leafFree
+                && entry
+                && (case rt of
+                        RtGeneric ->
+                            True
+
+                        _ ->
+                            False
+                   )
+
         -- VR1: this defun reads its value params THROUGH the incoming `l`
         -- pointers instead of blitting them into its own frame at entry.
         -- Only a top-level RtGeneric defun with at least one value param is
@@ -1769,6 +1840,8 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , abi = sOuter.abi
             , loops = sOuter.loops
             , ptrRead = sOuter.ptrRead
+            , noCollect = sOuter.noCollect
+            , leafFree = sOuter.leafFree
             }
 
         -- the (empty) @start block, closed by its fallthrough to @body
@@ -1874,20 +1947,50 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                         if rawAbiRetIsAgg key then
                             startBlock "body" sStart
                                 |> lowerTail lambda.body
-                                |> Result.map (\s1 -> ( s1, Il.Tmp (slotTmp 0) ))
+                                |> Result.map (\s1 -> ( s1, Il.Tmp (slotTmp 0), False ))
 
                         else
                             startBlock "body" sStart
                                 |> lowerTailWord lambda.body
-                                |> Result.map (\( s1, retWord, _ ) -> ( s1, retWord ))
+                                |> Result.map (\( s1, retWord, _ ) -> ( s1, retWord, False ))
 
                     _ ->
                         startBlock "body" sStart
                             |> lowerTail lambda.body
-                            |> Result.map (\s1 -> ( s1, Il.Tmp (slotTmp 0) ))
+                            |> Result.map
+                                (\s1 ->
+                                    let
+                                        -- P5: THE FRAME-FREE DECISION.  It runs
+                                        -- on the COMPLETE body (every path has
+                                        -- closed its block) and BEFORE the @ret
+                                        -- block exists — because the two things
+                                        -- it decides are the frame-leave call
+                                        -- here and the frame-enter in the
+                                        -- prologue (via `pro`).
+                                        --
+                                        -- The predicate is the DEGENERATE case
+                                        -- of Mid.Qbe.Liveness's per-safepoint
+                                        -- slot maps (the analysis P8 consumes):
+                                        -- no allocation-capable call site has a
+                                        -- live frame slot, and no frame address
+                                        -- escaped the defun.  Anything it
+                                        -- cannot prove keeps the frame.
+                                        leaf =
+                                            leafOk
+                                                && Liveness.frameFree
+                                                    (Liveness.analyze
+                                                        { retBytes = rvs
+                                                        , nslots = s1.slot
+                                                        , noCollect = sOuter.noCollect
+                                                        }
+                                                        (List.reverse s1.blocks)
+                                                    )
+                                    in
+                                    ( s1, Il.Tmp (slotTmp 0), leaf )
+                                )
             )
         |> Result.map
-            (\( s1, rawWordResult ) ->
+            (\( s1, rawWordResult, leaf ) ->
                 let
                     -- every tail path ended in a closed block (jmp @ret/@body)
                     sRet =
@@ -1943,18 +2046,28 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                                         startBlock "ret" s1 |> closeBlock (Ret (Just rawWordResult))
 
                             _ ->
-                                -- stage 6 B0: the pooled frame is left through
-                                -- the Mid rawAbi defun q_Rt_x2eframe_x2dleave
-                                -- (0-arg, l result — the discarded-result call
-                                -- type is cosmetic: Print drops the AbiTy when
-                                -- dst is Nothing).  B4 deleted the Zig seat.
-                                startBlock "ret" s1
-                                    |> emit
-                                        (Call Nothing (Base W)
-                                            (Il.Sym ("q_" ++ mangle "Rt.frame-leave"))
-                                            []
-                                        )
-                                    |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
+                                if leaf then
+                                    -- P5 FRAME-FREE: no pooled frame was
+                                    -- entered, so there is nothing to pop and
+                                    -- no registry entry to truncate — the
+                                    -- alloc8 block dies with this C frame at
+                                    -- `ret`, exactly the lean arm's shape.
+                                    startBlock "ret" s1
+                                        |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
+
+                                else
+                                    -- stage 6 B0: the pooled frame is left through
+                                    -- the Mid rawAbi defun q_Rt_x2eframe_x2dleave
+                                    -- (0-arg, l result — the discarded-result call
+                                    -- type is cosmetic: Print drops the AbiTy when
+                                    -- dst is Nothing).  B4 deleted the Zig seat.
+                                    startBlock "ret" s1
+                                        |> emit
+                                            (Call Nothing (Base W)
+                                                (Il.Sym ("q_" ++ mangle "Rt.frame-leave"))
+                                                []
+                                            )
+                                        |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
 
                     pending =
                         { func =
@@ -1987,7 +2100,12 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                         , nslots = s1.slot
                         , nparams = nparams
                         , ncaps = ncaps
-                        , pro = proKind
+                        , pro =
+                            if leaf then
+                                PLeaf
+
+                            else
+                                proKind
                         , rawAbi = rawAbi
                         , ptrRead = ptrReadD
                         , paramWidths = widths
@@ -9080,6 +9198,8 @@ withPrologue pending =
         -- runtime call, no zeroing, no root push; unzeroed slot TAILS are
         -- never interpreted (every read is tag-directed, the block is
         -- never registered as a root, and blit is a raw copy).
+        -- PLeaf: the same block for a SURFACE defun (perf P5), plus the one
+        -- zero the pooled frame used to supply (see leafTailZero below).
         enter =
             case pending.pro of
                 PFrame ->
@@ -9093,10 +9213,52 @@ withPrologue pending =
                 PAlloc ->
                     Alloc "f" (vs * pending.nslots)
 
+                PLeaf ->
+                    Alloc "f" (vs * pending.nslots)
+
+        -- P5 / H3 — THE .done MARKER.  A surface defun returns the 80-byte
+        -- `:ret`, i.e. slots 0 AND 1, and slot 1 carries the .done/.tail
+        -- discriminator that rt_bounce and every caller test.  On a .done path
+        -- nothing writes it: the pooled frame's enter-side memset is what made
+        -- it read 0.  A frame-free defun has no memset, so it MATERIALIZES
+        -- that zero here.
+        --
+        -- MEASURED, and it is why this is a 64-bit store and not a 32-bit one:
+        -- the reader loads EIGHT bytes at retKindOffset — `Rt.bounce`'s
+        -- `r->kind == 0` lowers to `movq 40(%rax), %rcx; cmpq $0, %rcx`
+        -- (vendor/qbe, the emitted .s of tests/elm-fixtures/arraybasic.elm).
+        -- A `storew 0` leaves the four PADDING bytes at 44..47 uninitialised,
+        -- the 64-bit compare sees a non-zero word, the .done path is missed,
+        -- and rt_bounce chases a .tail built out of stack garbage — MEASURED:
+        -- a wild jump into the heap (ASan: `PC is at a non-executable
+        -- region`) with only that one defun changed.  So: one `storel`.
+        -- The remaining words of slot 1 (f/e/args/arity) are read ONLY when
+        -- the marker is non-zero, which this store rules out.
+        --
+        -- SLOT 0 gets the same treatment for the same reason: the `.done`
+        -- result is the one thing the RETURN path reads without a tag test of
+        -- its own, and the pooled frame's memset is what made a never-written
+        -- slot 0 read as the number 0 (tag 0).  Two stores reproduce exactly
+        -- the two non-tag-directed reads the frame used to supply; every OTHER
+        -- slot is read tag-directed, which is the SAME argument the lean
+        -- frame-free arm (PAlloc) has always rested on: the block is never
+        -- registered as a root and a blit is a raw copy, so an unzeroed word
+        -- past a cell's last written one is never interpreted.
+        leafTailZero =
+            case pending.pro of
+                PLeaf ->
+                    [ Store StoreL (Il.Con 0) (Il.Tmp (slotTmp 0))
+                    , Bin (Just "tzk") L Add (Il.Tmp "f") (Il.Con (vs * 1))
+                    , Store StoreL (Il.Con 0) (Il.Tmp "tzk")
+                    ]
+
+                _ ->
+                    []
+
         prologue =
             case f.blocks of
                 b0 :: rest ->
-                    { b0 | body = enter :: slotDefs ++ paramBlits ++ capBlitsPro ++ b0.body } :: rest
+                    { b0 | body = enter :: slotDefs ++ leafTailZero ++ paramBlits ++ capBlitsPro ++ b0.body } :: rest
 
                 [] ->
                     []

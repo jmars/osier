@@ -106,7 +106,7 @@ type alias Emitted =
     }
 
 
-compileEntry : MidRt.Runtime -> List String -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ), Bool ) -> Result String String
+compileEntry : MidRt.Runtime -> List String -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ) ), Bool ) -> Result String String
 compileEntry rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
     Result.map (\e -> prependNote e.note (QbePrint.print e.il))
         (compileEntryIl rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ))
@@ -118,7 +118,7 @@ the ADT, so there is no second representation of the program). The `.ssa` path
 is `compileEntry`, which prints exactly this module, so the two outputs cannot
 disagree about what was compiled.
 -}
-compileEntryIl : MidRt.Runtime -> List String -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ), Bool ) -> Result String Emitted
+compileEntryIl : MidRt.Runtime -> List String -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ) ), Bool ) -> Result String Emitted
 compileEntryIl rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
     case
         MidModule.parseAll corpusSources
@@ -167,7 +167,7 @@ compileGroup :
     -> Bool
     -> Bool
     -> Bool
-    -> ( ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ), Bool )
+    -> ( ( Bool, ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ) ), Bool )
     -> Result String Emitted
 compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals ( groupSources, groupMids ) entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
     -- M3: load the group's user .mid modules FIRST — their exported keys'
@@ -692,11 +692,11 @@ lowerAll :
     -> List MidModule.Unit
     -> ( Dict String Defun, Dict String (List Int) )
     -> String
-    -> ( ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ), Bool )
+    -> ( ( Bool, ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ) ), Bool )
     -> Result String Emitted
 lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule units ( userSurf, userAbiTable ) entryKey ( consArrRec, eqPtrFast ) =
     let
-        ( consArr, ( rec, ( typeSpec, ( midGc, midGcYoung ) ) ) ) =
+        ( consArr, ( rec, ( typeSpec, ( midGc, ( midGcYoung, leafFree ) ) ) ) ) =
             consArrRec
     in
     reserveRtName units
@@ -844,6 +844,7 @@ lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesBy
                                                         typeSpec
                                                         midGc
                                                         midGcYoung
+                                                        leafFree
                                                         specialised.table
                                                         (completeArities globals specialised.program)
                                                         specialised.program
