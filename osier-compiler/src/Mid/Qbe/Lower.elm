@@ -9223,6 +9223,10 @@ withPrologue pending =
         -- it read 0.  A frame-free defun has no memset, so it MATERIALIZES
         -- that zero here.
         --
+        -- The marker's offset is READ from Mid.RtLayout (`retKindOffset`), not
+        -- spelled 40 here — the layout is defined once, and the same constant
+        -- is what the emitted-text row in TestMain pins.
+        --
         -- MEASURED, and it is why this is a 64-bit store and not a 32-bit one:
         -- the reader loads EIGHT bytes at retKindOffset — `Rt.bounce`'s
         -- `r->kind == 0` lowers to `movq 40(%rax), %rcx; cmpq $0, %rcx`
@@ -9248,7 +9252,7 @@ withPrologue pending =
             case pending.pro of
                 PLeaf ->
                     [ Store StoreL (Il.Con 0) (Il.Tmp (slotTmp 0))
-                    , Bin (Just "tzk") L Add (Il.Tmp "f") (Il.Con (vs * 1))
+                    , Bin (Just "tzk") L Add (Il.Tmp "f") (Il.Con RtLayout.retKindOffset)
                     , Store StoreL (Il.Con 0) (Il.Tmp "tzk")
                     ]
 

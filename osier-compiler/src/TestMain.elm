@@ -1250,6 +1250,34 @@ checks rt runtimeMidText =
             Err _ ->
                 False
         )
+    , check "P5 PLeaf emission (THE H3 REGRESSION PIN): a leaf-qualified SURFACE defun emits NO pooled frame — no frame-enter call, no frame-leave call, an alloc8 block — and materialises BOTH non-tag-directed return reads as EIGHT-BYTE zero stores: `storel 0, %s0` (the .done result tag) and `storel 0, %tzk` at f+retKindOffset (the .done marker). EXACT emitted text, and the 4-byte `storew` spelling at that offset is asserted ABSENT: it is what shipped first and it cost a SEGV. runtime.mid's own `struct Ret { kind : word }` makes the marker an 8-byte word while QBE's :ret spells it `w` + 4 padding bytes, so Rt.bounce's `r->kind == 0` compiles to `movq 40(%rax)` + `cmpq $0, %rcx`; a storew leaves those padding bytes as stack garbage and rt_bounce chases a .tail built out of it (MEASURED: wild jump into the heap, one defun changed). This row would have failed at emit time."
+        (case QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ leafProbe ]) [ leafProbe ] "Lf.f" of
+            Ok mod ->
+                case funcByName "q_Lf_x2ef" mod of
+                    Just f ->
+                        let
+                            -- the function ALONE, rendered by the one printer
+                            -- the pipeline uses — so this is the text qbe reads
+                            txt =
+                                Print.print { types = [], datas = [], funcs = [ f ] }
+                        in
+                        String.contains ("\t%f =l alloc8 " ++ String.fromInt (RtLayout.valSizeBytes * 2) ++ "\n") txt
+                            && String.contains
+                                ("\tstorel 0, %s0\n\t%tzk =l add %f, "
+                                    ++ String.fromInt RtLayout.retKindOffset
+                                    ++ "\n\tstorel 0, %tzk\n"
+                                )
+                                txt
+                            && not (String.contains "frame_x2denter" txt)
+                            && not (String.contains "frame_x2dleave" txt)
+                            && not (String.contains "storew 0, %tzk" txt)
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
     , check "B1fix copyWords is a rawAbi WORD pair: the WRAPPER (3 l params, ret l, frame-free) hands off to the LOOP, and the LOOP (3 l params, ret l, frame-free) is an in-frame self-tail with NO :val aggregate or 40-byte blit in its body — the per-word blit/boxing is gone (fails on the pre-fix :val copyWords, which had ret :val, a 40-byte blit, a self-CALL recur and no copyWordsGo)"
         (case QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.copyWords" of
             Ok mod ->
@@ -12738,6 +12766,23 @@ rtValueInRawPosition =
                         , words = [ Var 0 ]
                         }
                     )
+            }
+    }
+
+
+{-| The P5 PLeaf probe: a 0-ary SURFACE defun (a non-Rt key, so the generic
+closure ABI) whose body is one number literal — no call, no frame address, no
+safepoint — which is exactly the class the P5 classification must emit WITHOUT
+a pooled frame.  Kept beside the other probes so the emitted-text row above
+compiles it through the real `lower`.
+-}
+leafProbe : Defun
+leafProbe =
+    { key = "Lf.f"
+    , value =
+        Lam
+            { params = []
+            , body = Lit (LNumber 42)
             }
     }
 

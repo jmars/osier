@@ -79,7 +79,9 @@ type alias Analysis =
 
 
 {-| The degenerate predicate P5 consumes: no site has a non-empty live set AND
-no frame address left the defun.
+no frame address left the defun.  Note that a NON-CONVERGENT analysis cannot
+satisfy this by accident: `analyze` poisons `sites` with a full-live sentinel
+and `escapes` with the failure, so both conjuncts are false on that path.
 -}
 frameFree : Analysis -> Bool
 frameFree a =
@@ -140,7 +142,23 @@ analyze opts blocks =
     in
     case fixpoint fuel ctx bodies succs ends of
         Nothing ->
-            { sites = [], escapes = [ "liveness did not converge" ] }
+            -- A FAILED analysis must never look like a clean one.  The
+            -- failure is reported in `escapes` (which `frameFree` already
+            -- checks), but `.sites` is the EXPORTED half — P8 reads it
+            -- directly for its per-safepoint descriptor maps — and an empty
+            -- list there would say "no live slots anywhere" about a fixpoint
+            -- that never converged.  So the site list is POISONED with one
+            -- full-live sentinel: every predicate in this module, and every
+            -- consumer of the maps, then gets the conservative answer by
+            -- CONSTRUCTION rather than by remembering to check `escapes`.
+            { sites =
+                [ { block = "<no-convergence>"
+                  , pc = -1
+                  , live = Set.fromList (List.range 0 (opts.nslots - 1))
+                  }
+                ]
+            , escapes = [ "liveness did not converge" ]
+            }
 
         Just liveIn ->
             { sites =
