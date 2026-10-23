@@ -631,6 +631,13 @@ helperDefuns rec =
     , seat "Rt.runBuiltinInprocess" 2
     , seat "Rt.execGo" 2
     , seat "Rt.mkTmpAt" 1
+      -- perf U1: the linear join family (surface bodies in runtime.mid).
+      -- Appended at the END so every pre-existing seat keeps its position
+      -- (the splice is positional; emit order is unchanged for programs
+      -- that do not use the prim).
+    , seat "Rt.join" 2
+    , seat "Rt.joinLen" 3
+    , seat "Rt.joinFill" 3
     ]
 
 

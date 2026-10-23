@@ -87,6 +87,9 @@ primWrappers =
     binaryPrims
         ++ [ ( "", "cn" )
            , ( "", "repeat" )
+
+           -- perf U1: the LINEAR join prim (Prelude.join's trusted body).
+           , ( "", "joinPrim" )
            , ( "", "write-byte" )
            , ( "", "open" )
            , ( "", "setenv" )

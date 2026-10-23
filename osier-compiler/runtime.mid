@@ -1450,17 +1450,88 @@ defun Rt.cn2(x : val, y : val) -> val {
 }
 
 // n bytes from src to dst, both pointers advancing: the ONLY copy loop the
-// text path needs (cn2, substring, symToStr).  Non-allocating and therefore
-// FRAME-FREE (a `mknum` is a frame-slot box, not a GC allocation — see
-// digitCount), which is what lets a caller hold a freshly `allocraw`'d buffer
-// across it: no safepoint, so nothing can scavenge the unrooted block (the
-// cStrFill lesson).
+// text path needs (cn2, joinFill, substring, symToStr).  Non-allocating and
+// therefore FRAME-FREE (a `mknum` is a frame-slot box, not a GC allocation —
+// see digitCount), which is what lets a caller hold a freshly `allocraw`'d
+// buffer across it: no safepoint, so nothing can scavenge the unrooted block
+// (the cStrFill lesson).
+//
+// WORD-WIDE (perf U2): 8 bytes per iteration while n >= 8, then the byte tail.
+// The loads/stores stay INSIDE [src, src+n) / [dst, dst+n) by construction
+// (the word step is taken only when 8 bytes remain), so no overrun and no
+// tail-byte special case beyond the original loop; the unaligned case is the
+// x86-64 loadl/storel the emitter already produces.  The RETURN contract is
+// unchanged: the ADVANCED dst (dst+n), which joinFill threads as its offset.
 defun Rt.byteCopyGo(dst : val, src : val, n : val) -> val {
+  if (mkbool(payload(n, 0) >= 8)) {
+    wstore(payload(dst, 0), 0, wload(payload(src, 0), 0));
+    recur(mknum(payload(dst, 0) + 8), mknum(payload(src, 0) + 8), mknum(payload(n, 0) - 8));
+  }
   if (payload(n, 0) == 0) {
     return dst;
   }
   bytestore(payload(dst, 0), 0, byteload(payload(src, 0), 0));
   recur(mknum(payload(dst, 0) + 1), mknum(payload(src, 0) + 1), mknum(payload(n, 0) - 1));
+}
+
+// THE LINEAR JOIN (perf U1): join a LIST OF STRINGS around a separator in
+// O(total) bytes — ONE length walk, ONE allocraw, ONE copy per piece into a
+// running offset.  The Prelude's `join` used to be a right fold of
+// String.append (Rt.cn2), which re-copies BOTH operands at every step: N
+// parts of total length L copy about L*N/2 bytes into N intermediate
+// buffers.  That is the quadratic emit the perf plan measured (byteCopyGo
+// 52.9% of the self-emit's CPU, the per-process fixed cost's dominant term).
+// Precedent: Rt.repeat's doubling rebuild (Rt.repGo), same class of fix.
+//
+// THE ELEMENTS ARE STRINGS.  The wrapper's scheme is String -> List String ->
+// String and the checker enforces it at every call site, so this walk reads
+// len32/payload directly instead of coercing through Rt.strOf: a coercion
+// ALLOCATES for a number, and an allocation between `allocraw` and the copies
+// would be a safepoint holding the buffer unrooted (the cStrFill lesson —
+// the same reason cn2 is safe today).
+//
+// Three val params per defun, the LEAN-ABI bound; the separator rides as a
+// param rather than needing a fourth slot.
+defun Rt.join(sep : val, strs : val) -> val {
+  word n = payload(call Rt.joinLen(sep, strs, mknum(0)), 0);
+  word buf = allocraw(n + 1);
+  bytestore(buf, n, 0);
+  call Rt.joinFill(strs, mknum(buf), sep);
+  return mkstr(buf, n);
+}
+
+// Pass 1: total = sum(len32(s)) + sepLen between neighbours.  The separator
+// goes only BETWEEN, never after the last — the tail test here is the
+// fold's `case rest of [] -> ""` arm, and it is why the accumulator can be a
+// single slot (a count-plus-length pair would need a fourth param).
+defun Rt.joinLen(sep : val, strs : val, acc : val) -> val {
+  if (mkbool(tagis(strs, 5))) {
+    return acc;
+  }
+  val s = vecload(payload(strs, 0), 0);
+  val rest = vecload(payload(strs, 0), 1);
+  if (mkbool(tagis(rest, 5))) {
+    recur(sep, rest, mknum(payload(acc, 0) + len32(s)));
+  }
+  recur(sep, rest, mknum(payload(acc, 0) + len32(s) + len32(sep)));
+}
+
+// Pass 2: copy each piece at the running offset.  byteCopyGo RETURNS the
+// advanced dst pointer, so the offset threads through the return value and
+// this defun needs no fourth slot.  Frame-free (byteCopyGo and the mknum
+// boxes allocate nothing), so the caller's fresh buffer is safe across it.
+defun Rt.joinFill(strs : val, dstN : val, sep : val) -> val {
+  if (mkbool(tagis(strs, 5))) {
+    return dstN;
+  }
+  val s = vecload(payload(strs, 0), 0);
+  val rest = vecload(payload(strs, 0), 1);
+  val p = call Rt.byteCopyGo(mknum(payload(dstN, 0)), mknum(payload(s, 0)), mknum(len32(s)));
+  if (mkbool(tagis(rest, 5))) {
+    return p;
+  }
+  val q = call Rt.byteCopyGo(p, mknum(payload(sep, 0)), mknum(len32(sep)));
+  recur(rest, q, sep);
 }
 
 // A symbol's name is a NUL-terminated C string (payload word 0); one buffer,

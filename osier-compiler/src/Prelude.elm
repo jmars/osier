@@ -509,19 +509,17 @@ concat xss =
             []
 
 
+-- String.join.  The body rides the LINEAR `joinPrim` (Rt.join): one length
+-- walk, ONE buffer, one copy per piece — O(total) bytes.  It used to be a
+-- right fold of String.append, which copies BOTH operands at every step
+-- (N parts of total length L copy ~L*N/2 bytes) and was the quadratic cost
+-- in the compiler's own emit (perf-plan2 §3: byteCopyGo 52.9% at self-emit
+-- scale).  Same class of fix as Str.repeat's doubling rebuild.  The alias
+-- `joinPrim` is typed String -> List String -> String, so the body checks
+-- honestly; the runtime reads len32/payload directly, which is sound because
+-- the elements are checked Strings at every call site.
 join sep strs =
-    case strs of
-        s :: rest ->
-            String.append s (case rest of
-                [] ->
-                    ""
-
-                _ ->
-                    String.append sep (join sep rest)
-            )
-
-        [] ->
-            ""
+    joinPrim sep strs
 
 
 

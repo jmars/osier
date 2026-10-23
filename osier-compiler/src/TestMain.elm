@@ -84,10 +84,10 @@ checks rt runtimeMidText =
       -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
       -- the frameZero loop), so an empty or truncated load turns it RED,
       -- loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (346 defuns — zighost Z2/Z3 added Rt.vecStorePlain/Rt.vecStoreYoung/Rt.globalClosure (GC NURSERY added the ten scavenge-family defuns; O5 added the five string-stream registry + the nine intern-table defuns + seat 3's values-table walk) — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (349 defuns — perf U1 added THREE: Rt.join/Rt.joinLen/Rt.joinFill, the linear String.join; zighost Z2/Z3 added Rt.vecStorePlain/Rt.vecStoreYoung/Rt.globalClosure (GC NURSERY added the ten scavenge-family defuns; O5 added the five string-stream registry + the nine intern-table defuns + seat 3's values-table walk) — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 346
+                List.length ast == 349
 
             Err _ ->
                 False
@@ -539,8 +539,8 @@ checks rt runtimeMidText =
         (not (Builtins.isTrusted "Prelude.map"))
     , check "every prim-wrapper alias row has a builtin scheme"
         (Builtins.uncoveredPrimRows == [])
-    , check "36 prim-wrapper schemes registered"
-        (Dict.size Builtins.primWrapperSchemes == 36)
+    , check "37 prim-wrapper schemes registered"
+        (Dict.size Builtins.primWrapperSchemes == 37)
 
     -- Type.Infer: Algorithm W over expressions/patterns, record operations,
     -- let-generalization, top-level group, and the ++/Record.remove rewrites.
@@ -907,8 +907,8 @@ checks rt runtimeMidText =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 306 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram rt True True True) == 306
+    , check "rt program: 309 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
+        (List.length (rtProgram rt True True True) == 309
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
@@ -6704,7 +6704,8 @@ checks rt runtimeMidText =
                        , "Rt.hostSpawnFromCmd", "Rt.hostStatRecord", "Rt.hostStep", "Rt.hostStepAll", "Rt.hostStepAllGo", "Rt.hostStepGo"
                        , "Rt.hostWriteAll", "Rt.hostWriteFileLeaf", "Rt.hostWriteStr", "Rt.intBytesEq", "Rt.intFindGo"
                        , "Rt.intGrow", "Rt.intInsert", "Rt.intInsertAt", "Rt.intInsertGo", "Rt.intPairsCopy", "Rt.intStrCopy"
-                       , "Rt.intTab", "Rt.intern", "Rt.isChildBuiltin", "Rt.main"
+                       , "Rt.intTab", "Rt.intern", "Rt.isChildBuiltin", "Rt.join", "Rt.joinFill", "Rt.joinLen"
+                       , "Rt.main"
                        , "Rt.memGo", "Rt.metaGo", "Rt.mkTmpAt", "Rt.numFill", "Rt.numText", "Rt.number?"
                        , "Rt.open", "Rt.openBodyTmpfile", "Rt.parseArg", "Rt.parseArgsGo", "Rt.printValue", "Rt.pvByte", "Rt.pvN"
                        , "Rt.pvNeed", "Rt.pvRec", "Rt.pvS", "Rt.pvV", "Rt.pvZ", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo"

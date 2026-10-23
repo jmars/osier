@@ -289,6 +289,10 @@ streamPrimAliases =
     -- Str.repeat: the 2-arg `repeat` prim (bare alias for the trusted
     -- core-libs/Str.elm body; Str.repeat itself is also a primDotAlias).
     , ( "repeatPrim", Expr.wrapperGlobalName "repeat" )
+
+    -- perf U1: the 2-arg LINEAR join prim (bare alias for Prelude.join's
+    -- trusted body — one length walk, ONE buffer, one copy per piece).
+    , ( "joinPrim", Expr.wrapperGlobalName "joinPrim" )
     ]
 
 

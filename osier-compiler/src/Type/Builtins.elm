@@ -191,6 +191,10 @@ primWrapperSchemes =
     Dict.fromList
         [ ( "cn", mono (func [ tString, tString ] tString) )
         , ( "repeat", mono (func [ tInt, tString ] tString) )
+
+        -- perf U1: the linear join — separator then the list of pieces, the
+        -- same argument order as String.join (Prelude.join's trusted body).
+        , ( "joinPrim", mono (func [ tString, tList tString ] tString) )
         , ( "c-strlen", mono (func [ tString ] tInt) )
         , ( "bitwise-and", mono (func [ tInt, tInt ] tInt) )
         , ( "bitwise-or", mono (func [ tInt, tInt ] tInt) )
