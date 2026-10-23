@@ -991306,7 +991306,7 @@ function :val $q_Rt_x2eintStrCopy(l %a0, l %a1, l %a2, w %an) {
 
 export function :val $q_Rt_x2eallocVector(l %a0, l %a1, l %a2, w %an) {
 @start
-	%f =l alloc8 320
+	%f =l alloc8 360
 	%s0 =l add %f, 0
 	%s2 =l add %f, 80
 	%s3 =l add %f, 120
@@ -991314,25 +991314,50 @@ export function :val $q_Rt_x2eallocVector(l %a0, l %a1, l %a2, w %an) {
 	%s5 =l add %f, 200
 	%s6 =l add %f, 240
 	%s7 =l add %f, 280
+	%s8 =l add %f, 320
 	blit %a0, %s2, 40
 	# (fallthrough)
 @body
-	storew 0, %s4
-	%t0 =l add %s4, 8
-	storel 0, %t0
-	%t1 =:val call $q_Rt_x2egcInit(l %s4, l %s4, l %s4, w 1)
-	blit %t1, %s3, 40
-	%t2 =l add %s2, 8
+	%t0 =l call $rt_glob_addr()
+	%t1 =l mul 8, 0
+	%t2 =l add %t0, %t1
 	%t3 =l loadl %t2
-	blit %s3, %s5, 40
-	storew 0, %s6
-	%t4 =l add %s6, 8
-	storel 1, %t4
+	%t4 =w cnel %t3, 0
+	%t5 =l extsw %t4
+	storew 3, %s4
+	%t6 =l add %s4, 8
+	storel %t5, %t6
+	%t7 =w loadw %s4
+	%t8 =w ceqw %t7, 3
+	%t10 =l add %s4, 8
+	%t9 =w loadw %t10
+	%t11 =w ceqw %t9, 0
+	%t12 =w and %t8, %t11
+	jnz %t12, @else_1, @then_0
+@then_0
+	storew 0, %s3
+	%t13 =l add %s3, 8
+	storel %t3, %t13
+	jmp @join_2
+@else_1
+	storew 0, %s5
+	%t14 =l add %s5, 8
+	storel 0, %t14
+	%t15 =:val call $q_Rt_x2egcInit(l %s5, l %s5, l %s5, w 1)
+	blit %t15, %s3, 40
+	# (fallthrough)
+@join_2
+	%t16 =l add %s2, 8
+	%t17 =l loadl %t16
+	blit %s3, %s6, 40
 	storew 0, %s7
-	%t5 =l add %s7, 8
-	storel %t3, %t5
-	%t6 =:val call $q_Rt_x2egcAlloc(l %s5, l %s6, l %s7, w 3)
-	blit %t6, %s0, 40
+	%t18 =l add %s7, 8
+	storel 1, %t18
+	storew 0, %s8
+	%t19 =l add %s8, 8
+	storel %t17, %t19
+	%t20 =:val call $q_Rt_x2egcAlloc(l %s6, l %s7, l %s8, w 3)
+	blit %t20, %s0, 40
 	# (fallthrough)
 @ret
 	ret %s0
@@ -995054,7 +995079,7 @@ function :val $q_Rt_x2egcGrow(l %a0, l %a1, l %a2, w %an) {
 
 function :val $q_Rt_x2eallocRaw(l %a0, l %a1, l %a2, w %an) {
 @start
-	%f =l alloc8 320
+	%f =l alloc8 360
 	%s0 =l add %f, 0
 	%s2 =l add %f, 80
 	%s3 =l add %f, 120
@@ -995062,27 +995087,52 @@ function :val $q_Rt_x2eallocRaw(l %a0, l %a1, l %a2, w %an) {
 	%s5 =l add %f, 200
 	%s6 =l add %f, 240
 	%s7 =l add %f, 280
+	%s8 =l add %f, 320
 	blit %a0, %s2, 40
 	# (fallthrough)
 @body
-	storew 0, %s4
-	%t0 =l add %s4, 8
-	storel 0, %t0
-	%t1 =:val call $q_Rt_x2egcInit(l %s4, l %s4, l %s4, w 1)
-	blit %t1, %s3, 40
-	%t2 =l add %s2, 8
+	%t0 =l call $rt_glob_addr()
+	%t1 =l mul 8, 0
+	%t2 =l add %t0, %t1
 	%t3 =l loadl %t2
-	%t4 =l add %t3, 7
-	%t5 =l div %t4, 8
-	blit %s3, %s5, 40
-	storew 0, %s6
-	%t6 =l add %s6, 8
-	storel 0, %t6
+	%t4 =w cnel %t3, 0
+	%t5 =l extsw %t4
+	storew 3, %s4
+	%t6 =l add %s4, 8
+	storel %t5, %t6
+	%t7 =w loadw %s4
+	%t8 =w ceqw %t7, 3
+	%t10 =l add %s4, 8
+	%t9 =w loadw %t10
+	%t11 =w ceqw %t9, 0
+	%t12 =w and %t8, %t11
+	jnz %t12, @else_1, @then_0
+@then_0
+	storew 0, %s3
+	%t13 =l add %s3, 8
+	storel %t3, %t13
+	jmp @join_2
+@else_1
+	storew 0, %s5
+	%t14 =l add %s5, 8
+	storel 0, %t14
+	%t15 =:val call $q_Rt_x2egcInit(l %s5, l %s5, l %s5, w 1)
+	blit %t15, %s3, 40
+	# (fallthrough)
+@join_2
+	%t16 =l add %s2, 8
+	%t17 =l loadl %t16
+	%t18 =l add %t17, 7
+	%t19 =l div %t18, 8
+	blit %s3, %s6, 40
 	storew 0, %s7
-	%t7 =l add %s7, 8
-	storel %t5, %t7
-	%t8 =:val call $q_Rt_x2egcAlloc(l %s5, l %s6, l %s7, w 3)
-	blit %t8, %s0, 40
+	%t20 =l add %s7, 8
+	storel 0, %t20
+	storew 0, %s8
+	%t21 =l add %s8, 8
+	storel %t19, %t21
+	%t22 =:val call $q_Rt_x2egcAlloc(l %s6, l %s7, l %s8, w 3)
+	blit %t22, %s0, 40
 	# (fallthrough)
 @ret
 	ret %s0

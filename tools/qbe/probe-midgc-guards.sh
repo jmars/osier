@@ -86,8 +86,11 @@ def sub(old, new, why):
 
 if mode == "stress-preinit":
     # the STRESSOR only: reach the collector before gcInit
-    sub("defun Rt.allocVector(count : val) -> val {\n  val region = call Rt.gcInit(mknum(0));",
-        "defun Rt.allocVector(count : val) -> val {\n  call Rt.collect(mknum(0));\n  val region = call Rt.gcInit(mknum(0));",
+    # (perf U3 moved the region fetch into an inline load, so the anchor is the
+    # defun's FIRST statement, not the gcInit call — the stressor still lands
+    # ahead of every read of the region word, which is what it is for.)
+    sub("defun Rt.allocVector(count : val) -> val {\n  word glob = rawcall rt_glob_addr();",
+        "defun Rt.allocVector(count : val) -> val {\n  call Rt.collect(mknum(0));\n  word glob = rawcall rt_glob_addr();",
         "allocVector prologue")
 elif mode == "halt-mark-stack":
     # the STRESSOR only: a mark stack the heap can outgrow

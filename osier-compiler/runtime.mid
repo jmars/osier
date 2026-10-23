@@ -4905,13 +4905,35 @@ defun Rt.gcInit(dummy : val) -> val {
     }
   }
 }
+// THE REGION WITHOUT THE CALL (perf U3).  `Rt.gcInit`'s early exit tests
+// exactly ONE predicate — `wload(rt_glob_addr(), 0) != 0`, the region word —
+// and that word is written exactly once (gcInit's own `wstore(glob, 0, base)`)
+// and cleared by nothing, so fetching it here is the SAME value for one load
+// instead of a call plus a frame and that frame's zeroed block, on every
+// allocation after the first.  The CALL stays on the null path: the region is
+// legitimately absent at boot and in the window before the first allocation
+// (Rt.vecStoreYoung documents the same lazy region — a vecstore can precede
+// it).  Nothing downstream moves: Rt.gcAlloc receives the identical word, so
+// the bump, the class, the collect trigger and the scavenge decision are the
+// same arithmetic on the same input.
+//
+// THE PREDICATE, STATED SO IT CANNOT DRIFT: gcInit's guard is
+//   `if (mkbool(region != 0)) { return mknum(region); } else { ...map... }`
+// — there is no second condition (no flag, no generation, no heap-mode
+// toggle) between "the word is non-null" and "return it".  If that ever gains
+// one, this fast path must carry it too; probe-midgc-guards.sh's stress-preinit
+// arm is the probe that keeps the null path exercised.
 defun Rt.allocVector(count : val) -> val {
-  val region = call Rt.gcInit(mknum(0));
+  word glob = rawcall rt_glob_addr();
+  word regionW = wload(glob, 0);
+  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
   word countW = payload(count, 0);
   return call Rt.gcAlloc(region, mknum(1), mknum(countW));
 }
 defun Rt.allocRaw(nbytes : val) -> val {
-  val region = call Rt.gcInit(mknum(0));
+  word glob = rawcall rt_glob_addr();
+  word regionW = wload(glob, 0);
+  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
   word nbytesW = payload(nbytes, 0);
   word bodyWords = (nbytesW + 7) / 8;
   return call Rt.gcAlloc(region, mknum(0), mknum(bodyWords));
