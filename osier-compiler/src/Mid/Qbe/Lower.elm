@@ -217,6 +217,8 @@ type alias S =
     , qname : String
     , abi : Dict String (List Int) -- B6: the WORD-ABI class table (key -> per-param word widths); MEMBERSHIP is the ABI class
     , loops : List LoopFrame -- (B4) the ENCLOSING loops, innermost first: what a Break/Continue leaf resolves against
+    , ptrRead : Set String -- VR1: the defuns that READ their params through the incoming `l` pointer (no entry blit); see ptrReadKeys
+    , paramPtr : Dict Int Il.Arg -- VR1: binder id -> the incoming `l` pointer holding that param (ptrRead defuns only)
     }
 
 
@@ -241,6 +243,7 @@ type alias PendingFunc =
     , ncaps : Int
     , pro : Pro
     , rawAbi : Bool -- RtRawWord (stage 6 U2): the prologue skips the param blits — the params live in `l` registers, not frame slots
+    , ptrRead : Bool -- VR1: the prologue skips the param blits — the body reads them through the incoming `l` pointer
     , paramWidths : List Int -- B6: this defun's per-parameter word widths (a struct VALUE parameter is its layout size; the entry copy spills that many words)
     , entryKey : Maybe String -- Just key for top-level defuns (meta table)
     }
@@ -647,6 +650,8 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec _ midGcYoung ta
                     , qname = ""
                     , abi = runtime.abi
                     , loops = []
+                    , ptrRead = ptrReadKeys defuns arityTable
+                    , paramPtr = Dict.empty
                     }
 
                 -- THE MIDGC REFUSAL ARMS ARE GONE (stage 7 O2).  Two arms
@@ -983,6 +988,232 @@ rawOperands node =
 
         RawAllocN _ ->
             []
+
+
+-- ============================ VR1 — POINTER PARAMS ============================
+-- A Value parameter crosses as an `l` POINTER to the caller's 40-byte slot
+-- (the ABI's ONE change).  What that pointer points at is what decides whether
+-- the callee may read through it LAZILY — i.e. after its own safepoints —
+-- instead of blitting it into its own rooted frame at entry:
+--
+--   * a DIRECT call site passes `slotTmp` of an arg it just lowered into a
+--     FRESH ROOTED frame slot of the caller, and the caller's frame stays live
+--     for the whole callee — so the collector rewrites the Value IN PLACE and
+--     the pointer stays valid at every safepoint the callee reaches.
+--   * a CLOSURE call (rt_apply -> rt_call2r) and a TAIL call (rt_tail-known ->
+--     rt_bounce -> rt_callN) pass pointers into GC ARRAYS (`buf`, the closure
+--     env, the apply args) — the MOVING collector relocates those, so a lazy
+--     read is a stale pointer.  Both paths are sound today only because the
+--     callee copies out at entry, before its first safepoint.
+--   * a SELF-TAIL (the in-frame loop) REBINDS slots 2+i for the next
+--     iteration, so a param read through `%a<i>` would never see the rebind.
+--   * the driver's ENTRY call is NOT one of those: Rt.main stages the entry
+--     args in `abuf`, a malloc'd block registered with rootPushValueArray, so
+--     it is rooted AND immovable — a lazy read through it is sound.
+--
+-- So a defun may read through its pointers iff EVERY reference to it is a
+-- direct non-tail call (or the entry table) and it has no self-tail.  The set
+-- is computed here, before lowering, by walking every body with the same
+-- tail-position rule lowerTail applies — and it is read in ONE place
+-- (lowerFunBody's prologue); a defun outside the set keeps today's entry blit
+-- and is CORRECT on every path, so a missed fact costs the copies, never
+-- soundness.  The one direction that would be unsound — a defun IN the set
+-- reached by a closure or a tail call — is what the walker's conservative
+-- arms (an unknown arity, a forced GRef, an `Unsafe` operand) exclude.
+type alias ParamFacts =
+    { closure : Set String -- GRef'd in a non-direct-call position (closure Value)
+    , tailed : Set String -- target of a cross-defun TAIL call
+    , selfTail : Set String -- has an in-frame self-tail loop
+    }
+
+
+noParamFacts : ParamFacts
+noParamFacts =
+    { closure = Set.empty, tailed = Set.empty, selfTail = Set.empty }
+
+
+ptrReadKeys : Dict String Defun -> Dict String Int -> Set String
+ptrReadKeys defuns arities =
+    let
+        facts =
+            allParamFacts defuns arities
+    in
+    Set.filter
+        (\k ->
+            not (Set.member k facts.closure)
+                && not (Set.member k facts.tailed)
+                && not (Set.member k facts.selfTail)
+        )
+        (Set.fromList (Dict.keys defuns))
+
+
+allParamFacts : Dict String Defun -> Dict String Int -> ParamFacts
+allParamFacts defuns arities =
+    List.foldl
+        (\d acc ->
+            case d.value of
+                Lam lambda ->
+                    paramFacts arities d.key True lambda.body acc
+
+                _ ->
+                    acc
+        )
+        noParamFacts
+        (Dict.values defuns)
+
+
+-- The tail-position flag mirrors lowerTail: a Let body and both If arms and
+-- every Case alt inherit the enclosing position, a Lam body is ALWAYS a tail
+-- position (it is lowered as its own function, whose @ret it reaches), NoTail
+-- is transparent (lowerTail strips it — so a NoTail'd tail App IS emitted as a
+-- tail call today), and everything else is a value position.
+paramFacts : Dict String Int -> String -> Bool -> Exp -> ParamFacts -> ParamFacts
+paramFacts arities self tailPos exp acc =
+    let
+        value =
+            paramFacts arities self False
+
+        values es st =
+            List.foldl (\e a -> value e a) st es
+    in
+    case exp of
+        Lit _ ->
+            acc
+
+        Var _ ->
+            acc
+
+        StreamRef _ ->
+            acc
+
+        Break ->
+            acc
+
+        Continue ->
+            acc
+
+        GRef ref ->
+            closureRef ref.key acc
+
+        Lam lambda ->
+            -- a closure body: its own function, no self key (lowerFunBody's
+            -- defunKey is "" for a closure — so a saturated tail call to the
+            -- ENCLOSING defun there is a cross-defun tail call, not a loop).
+            paramFacts arities "" True lambda.body acc
+
+        NoTail inner ->
+            paramFacts arities self tailPos inner acc
+
+        App app ->
+            let
+                ( head, args ) =
+                    spine exp
+
+                accArgs =
+                    values args acc
+            in
+            case head of
+                GRef ref ->
+                    callFacts arities self tailPos ref (List.length args) accArgs
+
+                _ ->
+                    value head accArgs
+
+        PrimApp app ->
+            values app.args acc
+
+        Let block ->
+            paramFacts arities self tailPos block.body (values (letValues block.binders) acc)
+
+        Case branch ->
+            List.foldl
+                (\a st -> paramFacts arities self tailPos a.body st)
+                (value branch.scrutinee acc)
+                branch.alts
+
+        Con con ->
+            values con.args acc
+
+        Tup es ->
+            values es acc
+
+        RecordLit setters ->
+            values (List.map Tuple.second setters) acc
+
+        RecordGet rec _ ->
+            value rec acc
+
+        RecordUpdate update ->
+            values (update.base :: List.map Tuple.second update.updates) acc
+
+        ListLit es ->
+            values es acc
+
+        If block ->
+            paramFacts arities self tailPos block.thenBranch
+                (paramFacts arities self tailPos block.elseBranch (value block.cond acc))
+
+        ShortAnd block ->
+            values [ block.left, block.right ] acc
+
+        ShortOr block ->
+            values [ block.left, block.right ] acc
+
+        NotEqual block ->
+            values [ block.left, block.right ] acc
+
+        Loop block ->
+            values [ block.cond, block.body ] acc
+
+        Unsafe node ->
+            let
+                accSelf =
+                    case node of
+                        RawCall call ->
+                            if tailPos && call.sym == self then
+                                { acc | selfTail = Set.insert self acc.selfTail }
+
+                            else
+                                acc
+
+                        _ ->
+                            acc
+            in
+            values (rawOperands node) accSelf
+
+
+-- One saturated-App head.  `force` heads call the defun with ZERO args (a
+-- thunk force), so no pointer crosses — they constrain nothing.
+callFacts : Dict String Int -> String -> Bool -> { key : String, force : Bool } -> Int -> ParamFacts -> ParamFacts
+callFacts arities self tailPos ref nargs acc =
+    if ref.force then
+        acc
+
+    else
+        case Dict.get ref.key arities of
+            Nothing ->
+                -- lowerApp rejects this ("no arity for global"); count it as a
+                -- closure so the analysis can never be the looser side.
+                closureRef ref.key acc
+
+            Just n ->
+                if nargs /= n then
+                    -- under-/over-applied: lowerGRefValue materializes a closure
+                    closureRef ref.key acc
+
+                else if not tailPos then
+                    acc
+
+                else if ref.key == self then
+                    { acc | selfTail = Set.insert self acc.selfTail }
+
+                else
+                    { acc | tailed = Set.insert ref.key acc.tailed }
+
+
+closureRef : String -> ParamFacts -> ParamFacts
+closureRef key acc =
+    { acc | closure = Set.insert key acc.closure }
 
 
 -- The reserved runtime namespace (Mid.Audit tests the same prefix; a surface
@@ -1389,6 +1620,18 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                 _ ->
                     False
 
+        -- VR1: this defun reads its value params THROUGH the incoming `l`
+        -- pointers instead of blitting them into its own frame at entry.
+        -- Only a top-level RtGeneric defun with at least one value param is
+        -- eligible (a closure body is called through rt_callN with GC-array
+        -- pointers, and an Rt key's lean/word ABI has no `:val` params at all).
+        ptrReadD =
+            entry
+                && not rawAbi
+                && not (isRtKey key)
+                && nparams > 0
+                && Set.member key sOuter.ptrRead
+
         -- S4: the ONLY binder types the S1 table can give is the defun's own
         -- MONOTYPE, peeled in parameter order (Mid's `params` is in the
         -- callee's order, param 1 outermost, and `Rep.TFun` is
@@ -1409,7 +1652,16 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , curBody = []
             , tmp = 0
             , lbl = 0
-            , slot = 2 + nparams + ncaps
+            , slot =
+                -- VR1: a ptrRead defun's params occupy NO frame slots — the
+                -- body reads them through `%a<i>`, so 2..N+1 (the params) are
+                -- simply not reserved and the frame is N slots smaller (the
+                -- memset at rt_frame_enter is proportional to it).
+                if ptrReadD then
+                    2 + ncaps
+
+                else
+                    2 + nparams + ncaps
             , binderSlots =
                 Dict.fromList
                     ((if rawAbi then
@@ -1417,6 +1669,12 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                         -- the slot counter still reserves 2..N+1 so the body's
                         -- own temps get the SAME slot numbers as every other
                         -- Rt defun (the slots are simply never written/read).
+                        []
+
+                      else if ptrReadD then
+                        -- VR1: not frame slots either — s.paramPtr names them,
+                        -- so an unhandled read path is a LOUD "unbound binder"
+                        -- instead of a silent read of an unwritten slot.
                         []
 
                       else
@@ -1448,6 +1706,13 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                             bases
                             lambda.params
                         )
+
+                else
+                    Dict.empty
+            , paramPtr =
+                if ptrReadD then
+                    Dict.fromList
+                        (List.indexedMap (\i p -> ( p.id, Il.Tmp ("a" ++ String.fromInt i) )) lambda.params)
 
                 else
                     Dict.empty
@@ -1492,6 +1757,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , qname = qname
             , abi = sOuter.abi
             , loops = sOuter.loops
+            , ptrRead = sOuter.ptrRead
             }
 
         -- the (empty) @start block, closed by its fallthrough to @body
@@ -1537,7 +1803,12 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                     List.map (\i -> ( "a" ++ String.fromInt i, Base L )) (List.range 0 (nparams - 1))
 
                 RtGeneric ->
-                    List.map (\i -> ( "a" ++ String.fromInt i, Agg "val" )) (List.range 0 (nparams - 1))
+                    -- VR1: a value param is an `l` POINTER to the caller's
+                    -- 40-byte slot.  QBE's `:val` (a >16-byte aggregate) is
+                    -- passed by value on the machine stack, so the old shape
+                    -- paid a caller copy + a callee entry copy for every
+                    -- argument; `l` passes the address the caller already has.
+                    List.map (\i -> ( "a" ++ String.fromInt i, Base L )) (List.range 0 (nparams - 1))
 
         proKind =
             case rt of
@@ -1707,6 +1978,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                         , ncaps = ncaps
                         , pro = proKind
                         , rawAbi = rawAbi
+                        , ptrRead = ptrReadD
                         , paramWidths = widths
                         , entryKey =
                             if entry then
@@ -2125,6 +2397,22 @@ lowerVal exp dest s =
             lowerRawVal node dest s
 
 
+{-| VR1 — the base ADDRESS of a binder's 40-byte Value: the incoming `l`
+pointer for a ptrRead parameter (the CALLER's rooted slot, read in place — no
+copy), otherwise the binder's own frame slot.  The two maps are disjoint
+(ptrRead params are registered in `paramPtr` and NOT in `binderSlots`), so this
+is also the total answer for a Value binder.
+-}
+valueBaseOf : Int -> S -> Maybe Il.Arg
+valueBaseOf id s =
+    case Dict.get id s.paramPtr of
+        Just p ->
+            Just p
+
+        Nothing ->
+            Maybe.map (\slot -> Il.Tmp (slotTmp slot)) (Dict.get id s.binderSlots)
+
+
 -- The original `Var` body (everything except the raw-word check above).
 lowerValValue : Int -> Int -> S -> Result String S
 lowerValValue id dest s =
@@ -2146,9 +2434,9 @@ lowerValValue id dest s =
                     Ok (reboxFloat dest raw s)
 
                 Nothing ->
-                    case Dict.get id s.binderSlots of
-                        Just srcSlot ->
-                            Ok (emit (Blit (Il.Tmp (slotTmp srcSlot)) (Il.Tmp (slotTmp dest)) vs) s)
+                    case valueBaseOf id s of
+                        Just src ->
+                            Ok (emit (Blit src (Il.Tmp (slotTmp dest)) vs) s)
 
                         Nothing ->
                             Err ("qbe: unbound binder id " ++ String.fromInt id ++ " (corrupt Mid tree)")
@@ -2454,7 +2742,7 @@ lowerRawVal node dest s =
                                 in
                                 Ok
                                     (s3
-                                        |> emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle call.sym)) (List.map (\sl -> ArgVal (Agg "val") (Il.Tmp (slotTmp sl))) slots))
+                                        |> emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle call.sym)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots))
                                         |> emit (Call (Just vp) (Agg "val") (Il.Sym (bounceSeat s)) [ ArgVal (Base L) (Il.Tmp rp) ])
                                         |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
                                     )
@@ -2872,12 +3160,7 @@ slotBaseOf exp s =
     -- midDriver gate (there is no OFF route any more), so this is unconditional.
     case exp of
         Var id ->
-            case Dict.get id s.binderSlots of
-                Just slot ->
-                    Just (Il.Tmp (slotTmp slot))
-
-                Nothing ->
-                    Nothing
+            valueBaseOf id s
 
         _ ->
             Nothing
@@ -4418,8 +4701,8 @@ rawIntOf exp s =
                     Ok ( raw, s )
 
                 Nothing ->
-                    case Dict.get id s.binderSlots of
-                        Just slot ->
+                    case valueBaseOf id s of
+                        Just base ->
                             let
                                 ( p, s1 ) =
                                     freshTmp s
@@ -4429,7 +4712,7 @@ rawIntOf exp s =
                             in
                             Ok
                                 ( Il.Tmp t
-                                , emit (Bin (Just p) L Add (Il.Tmp (slotTmp slot)) (Il.Con 8)) s2
+                                , emit (Bin (Just p) L Add base (Il.Con 8)) s2
                                     |> emit (Load (Just t) L LoadL (Il.Tmp p))
                                 )
 
@@ -4451,8 +4734,8 @@ rawIntOf exp s =
                     -- compiler-built case stays on the raw arm.
                     case rec of
                         Var id ->
-                            case Dict.get id s.binderSlots of
-                                Just rslot ->
+                            case valueBaseOf id s of
+                                Just rbase ->
                                     let
                                         ( jt, s0 ) =
                                             freshTmp s
@@ -4473,7 +4756,7 @@ rawIntOf exp s =
                                             freshLbl "rfieldjoin" s4
 
                                         sTest =
-                                            emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp rslot))) s5
+                                            emit (Load (Just tagT) W LoadW rbase) s5
                                                 |> emit (Cmp (Just is14T) W Ceq (Il.Tmp tagT) (Il.Con tagRecord))
                                                 |> closeBlock (Jnz (Il.Tmp is14T) rawLbl fallLbl)
 
@@ -4487,7 +4770,7 @@ rawIntOf exp s =
                                             freshTmp s7
 
                                         sRaw =
-                                            emit (Bin (Just d8) L Add (Il.Tmp (slotTmp rslot)) (Il.Con 8)) (startBlock rawLbl s8)
+                                            emit (Bin (Just d8) L Add rbase (Il.Con 8)) (startBlock rawLbl s8)
                                                 |> emit (Load (Just d) L LoadL (Il.Tmp d8))
                                                 |> emit (Bin (Just p) L Add (Il.Tmp d) (Il.Con (vs * rank + 8)))
                                                 |> emit (Load (Just jt) L LoadL (Il.Tmp p))
@@ -4944,21 +5227,31 @@ lowerApp exp dest isTail s =
 
 lowerSelfTail : List Exp -> S -> Result String S
 lowerSelfTail args s =
-    -- Stage EVERY arg into a fresh rooted slot BEFORE blitting any of them
-    -- into the param slots: the VM's appterm evaluates all args before
+    -- VR1 TRIPWIRE: a ptrRead defun owns NO param slots, so this loop's rebind
+    -- (blit into slots 2+i, jump @body) would write slots the body no longer
+    -- reads.  ptrReadKeys excludes a defun with a self-tail by construction —
+    -- so reaching this is a bug in THAT walk, and it must be a compile error,
+    -- never a silent wrong loop.
+    --
+    -- Otherwise: stage EVERY arg into a fresh rooted slot BEFORE blitting any
+    -- of them into the param slots.  The VM's appterm evaluates all args before
     -- rebinding, and an arg that reads a param (directly or nested) must see
     -- the OLD value, not one already overwritten by an earlier arg's blit.
-    lowerArgsToSlots args s
-        |> Result.map
-            (\( slots, s1 ) ->
-                List.foldl
-                    (\( slot, i ) acc ->
-                        emit (Blit (Il.Tmp (slotTmp slot)) (Il.Tmp (slotTmp (i + 2))) vs) acc
-                    )
-                    s1
-                    (List.indexedMap (\i slot -> ( slot, i )) slots)
-                    |> jumpTo "body"
-            )
+    if Set.member s.defunKey s.ptrRead then
+        Err ("qbe: internal — " ++ s.defunKey ++ " is a pointer-param callee and a self-tail loop (ptrReadKeys must exclude it)")
+
+    else
+        lowerArgsToSlots args s
+            |> Result.map
+                (\( slots, s1 ) ->
+                    List.foldl
+                        (\( slot, i ) acc ->
+                            emit (Blit (Il.Tmp (slotTmp slot)) (Il.Tmp (slotTmp (i + 2))) vs) acc
+                        )
+                        s1
+                        (List.indexedMap (\i slot -> ( slot, i )) slots)
+                        |> jumpTo "body"
+                )
 
 
 
@@ -5053,10 +5346,13 @@ directCall key args dest isTail s =
         bounceCallee =
             bounceSeat s
     in
-    stageArgs args s
-        |> Result.andThen
-            (\( ptrs, base, s1 ) ->
-                if isTail then
+    if isTail then
+        -- TAIL: rt_tail-known takes ONE contiguous argblock pointer + nargs, so
+        -- the staged block stays (the callee copies out of it at entry — the
+        -- argblock itself dies with the GC array Rt.tail-known builds).
+        stageArgs args s
+            |> Result.andThen
+                (\( _, base, s1 ) ->
                     let
                         ( rp, s2 ) =
                             freshTmp s1
@@ -5079,8 +5375,15 @@ directCall key args dest isTail s =
                                         |> jumpTo "ret"
                                     )
                             )
+                )
 
-                else
+    else
+        -- NON-TAIL: VR1 — each arg crosses as an `l` POINTER to the rooted
+        -- frame slot it was just lowered into.  The contiguous staging block
+        -- (and the 40-byte copy into it) is gone: the slot IS the argument.
+        lowerArgsToSlots args s
+            |> Result.andThen
+                (\( slots, s1 ) ->
                     let
                         ( rp, s2 ) =
                             freshTmp s1
@@ -5092,12 +5395,12 @@ directCall key args dest isTail s =
                         |> Result.andThen
                             (\_ ->
                                 Ok
-                                    (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\p -> ArgVal (Agg "val") (Il.Tmp p)) ptrs)) s3
+                                    (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots)) s3
                                         |> emit (Call (Just vp) (Agg "val") (Il.Sym bounceCallee) [ ArgVal (Base L) (Il.Tmp rp) ])
                                         |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
                                     )
                             )
-            )
+                )
 
 
 -- Generic application through the runtime (first-class closures, partials,
@@ -8111,7 +8414,7 @@ rtPrimSlots prim slots dest s =
                         freshTmp s1
                 in
                 Ok
-                    (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Agg "val") (Il.Tmp (slotTmp sl))) slots)) s2
+                    (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots)) s2
                         |> emit (Call (Just vp) (Agg "val") (Il.Sym (bounceSeat s)) [ ArgVal (Base L) (Il.Tmp rp) ])
                         |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
                     )
@@ -8398,9 +8701,9 @@ captureBlits captures cbase s =
                                         Ok (reboxFloat (cbase + i) raw s1)
 
                                     Nothing ->
-                                        case Dict.get cid s1.binderSlots of
-                                            Just srcSlot ->
-                                                Ok (emit (Blit (Il.Tmp (slotTmp srcSlot)) (Il.Tmp (slotTmp (cbase + i))) vs) s1)
+                                        case valueBaseOf cid s1 of
+                                            Just src ->
+                                                Ok (emit (Blit src (Il.Tmp (slotTmp (cbase + i))) vs) s1)
 
                                             Nothing ->
                                                 Err ("qbe: capture not in scope (corrupt Mid tree): binder " ++ String.fromInt cid)
@@ -8737,10 +9040,14 @@ withPrologue pending =
 
         paramBlits =
             -- rawAbi params are `l` REGISTERS (never blitted into slots —
-            -- the body reads them through `s.rawWord`); every other ABI
-            -- blits the incoming `%a<i>` pointers into their frame slots.
+            -- the body reads them through `s.rawWord`); VR1's ptrRead defuns
+            -- are `l` POINTERS read in place through `s.paramPtr`; every other
+            -- ABI blits the incoming `%a<i>` pointers into their frame slots.
             if pending.rawAbi then
                 structParamCopies
+
+            else if pending.ptrRead then
+                []
 
             else
                 List.map
@@ -8808,7 +9115,7 @@ rtCallFuncs =
                     ( "fn", Base L ) :: ( "e", Base L ) :: List.map (\a -> ( a, Base L )) argNames
 
                 callArgs =
-                    ArgEnv (Il.Tmp "e") :: List.map (\a -> ArgVal (Agg "val") (Il.Tmp a)) argNames
+                    ArgEnv (Il.Tmp "e") :: List.map (\a -> ArgVal (Base L) (Il.Tmp a)) argNames
             in
             { name = "rt_call" ++ String.fromInt n
             , export_ = True
@@ -8869,7 +9176,7 @@ rtCallTwoRange =
                 List.concatMap paramPtr (List.range 0 (n - 1))
                     ++ [ Call (Just "r") (Agg "ret") (Il.Tmp "code")
                             (ArgEnv (Il.Tmp "e")
-                                :: List.map (\i -> ArgVal (Agg "val") (Il.Tmp ("p" ++ String.fromInt i))) (List.range 0 (n - 1))
+                                :: List.map (\i -> ArgVal (Base L) (Il.Tmp ("p" ++ String.fromInt i))) (List.range 0 (n - 1))
                             )
                        ]
             , jump = Ret (Just (Il.Tmp "r"))

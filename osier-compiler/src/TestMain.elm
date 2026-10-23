@@ -9020,17 +9020,17 @@ checks rt runtimeMidText =
         (b6Sig rt "module B6a\ndefun B6a.f(p : *word) -> word {\n  return p[0];\n}"
             == Ok "function l $q_B6a_x2ef(l %a0) {"
         )
-    , check "B6 ABI class (val -> the VALUE ABI): ONE `:val` in the signature (here the parameter) keeps the 40-byte-slot ABI — `function :ret`, an `:val` param, the frame and the blit"
+    , check "B6 ABI class (val -> the VALUE ABI): ONE `:val` in the signature (here the parameter) keeps the VALUE ABI — `function :ret` (the 80-byte sret), a frame and the blit.  VR1 changed the PARAMETER's register class: it crosses as an `l` POINTER to the caller's 40-byte Value, not as a by-value `:val` aggregate — the return path (the `:ret` sret) is unchanged"
         (b6Sig rt "module B6a\ndefun B6a.f(v : val) -> val {\n  return v;\n}"
-            == Ok "function :ret $q_B6a_x2ef(:val %a0) {"
+            == Ok "function :ret $q_B6a_x2ef(l %a0) {"
         )
-    , check "B6 ABI class (a val RESULT -> the VALUE ABI): the rule is PARAMS **AND** RESULT — a word parameter with a `val` result is still the value ABI (the ret path is the `:val` tail)"
+    , check "B6 ABI class (a val RESULT -> the VALUE ABI): the rule is PARAMS **AND** RESULT — a word parameter with a `val` result is still the value ABI (the ret path is the `:val` tail).  VR1: the parameter itself is still a 40-byte Value, so it crosses as an `l` POINTER (the class VR1 gave every value parameter)"
         (b6Sig rt "module B6a\ndefun B6a.f(w : word) -> val {\n  return mknum(1);\n}"
-            == Ok "function :ret $q_B6a_x2ef(:val %a0) {"
+            == Ok "function :ret $q_B6a_x2ef(l %a0) {"
         )
-    , check "B6 ABI class (float -> the VALUE ABI): a `float` is a `d` register class, NOT a word, so it never gets the word ABI (no defun in the tree has a float parameter, so nothing moves)"
+    , check "B6 ABI class (float -> the VALUE ABI): a `float` is a `d` register class, NOT a word, so it never gets the word ABI (no defun in the tree has a float parameter, so nothing moves).  VR1: the `val`-classed parameter crosses as an `l` POINTER to the boxed 40-byte Value"
         (b6Sig rt "module B6a\ndefun B6a.f(f : float) -> word {\n  return 1;\n}"
-            == Ok "function :ret $q_B6a_x2ef(:val %a0) {"
+            == Ok "function :ret $q_B6a_x2ef(l %a0) {"
         )
     , check "B6 ABI class (a struct param -> the WORD ABI): a struct VALUE is word-class (its fields are flat words), so `defun f(s : S) -> word` takes the word ABI — MEASURED: ONE `l` register (the address of the caller's storage), which the callee copies at entry"
         (b6Sig rt "module B6a\nstruct S { a : word; }\ndefun B6a.f(s : S) -> word {\n  return s.a;\n}"
