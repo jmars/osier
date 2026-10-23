@@ -62,6 +62,7 @@
         "osier-compiler/src/Mid/Qbe/Il.elm",
         "osier-compiler/src/Mid/Qbe/Types.elm",
         "osier-compiler/src/Mid/Qbe/Flatten.elm",
+        "osier-compiler/src/Mid/Qbe/Liveness.elm",
         "osier-compiler/src/Mid/Qbe/Lower.elm",
         "osier-compiler/src/Mid/Qbe/Peephole.elm",
         "osier-compiler/src/Mid/Qbe/Print.elm",
