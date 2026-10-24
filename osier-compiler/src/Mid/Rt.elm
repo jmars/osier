@@ -6,6 +6,7 @@ module Mid.Rt
         , UserModule
         , checkLowerUserModule
         , load
+        , loadArm
         , parseUserModule
         , closureSeeds
         , conSeeds
@@ -20,6 +21,7 @@ module Mid.Rt
         , rawAbiArity
         , rtDeps
         , seeds
+        , spliceArm
         , spliceSurface
         )
 
@@ -166,8 +168,147 @@ paramWords decls p =
             1
 
 
+{-| (perf VR3c) The arm splice itself: keep one region kind, drop the other,
+drop every marker line, and refuse a malformed file loudly.  See `loadArm`.
+-}
+spliceArm : Bool -> String -> Result String String
+spliceArm wordVal source =
+    let
+        beginVal =
+            "// >>> QBE_VAL-ONLY"
+
+        endVal =
+            "// <<< QBE_VAL-ONLY"
+
+        beginWord =
+            "// >>> QBE_WORDVAL-ONLY"
+
+        endWord =
+            "// <<< QBE_WORDVAL-ONLY"
+
+        -- 0 = outside every region, 1 = inside QBE_VAL-ONLY, 2 = inside
+        -- QBE_WORDVAL-ONLY.
+        kept : Int -> Bool
+        kept region =
+            (region == 1 && not wordVal) || (region == 2 && wordVal)
+
+        go : List String -> Int -> Int -> Int -> Int -> Int -> List String -> Result String (List String)
+        go lines region beganVal endedVal beganWord endedWord acc =
+            case lines of
+                [] ->
+                    if region /= 0 then
+                        Err "runtime.mid: an arm-splice region is UNTERMINATED — refusing to compile a half-spliced runtime"
+
+                    else if beganVal /= endedVal || beganWord /= endedWord then
+                        Err "runtime.mid: the arm-splice regions are UNBALANCED (a begin without its end, or the reverse) — refusing to compile a half-spliced runtime"
+
+                    else
+                        Ok (List.reverse acc)
+
+                line :: rest ->
+                    if startsAt beginVal line then
+                        go rest 1 (beganVal + 1) endedVal beganWord endedWord acc
+
+                    else if startsAt beginWord line then
+                        go rest 2 beganVal endedVal (beganWord + 1) endedWord acc
+
+                    else if startsAt endVal line then
+                        go rest 0 beganVal (endedVal + 1) beganWord endedWord acc
+
+                    else if startsAt endWord line then
+                        go rest 0 beganVal endedVal beganWord (endedWord + 1) acc
+
+                    else if region == 0 || kept region then
+                        go rest region beganVal endedVal beganWord endedWord (line :: acc)
+
+                    else
+                        go rest region beganVal endedVal beganWord endedWord acc
+
+        -- a marker is a line whose FIRST NON-SPACE text is the marker (the
+        -- regions sit inside indented blocks, so leading whitespace is
+        -- expected; a marker anywhere else in a line is prose and is left
+        -- alone).
+        startsAt : String -> String -> Bool
+        startsAt marker line =
+            if String.startsWith " " line then
+                startsAt marker (String.dropLeft 1 line)
+
+            else if String.startsWith "\t" line then
+                startsAt marker (String.dropLeft 1 line)
+
+            else
+                String.startsWith marker line
+    in
+    Result.map (String.join "\n") (go (splitLines source) 0 0 0 0 0 [])
+
+
+{-| `String.split` is NOT in this language's String surface (MEASURED: the
+self-host front end rejects it — Mid.RtLang.Parse's `firstSegment` note), and
+this module IS compiled by that front end, so the line split is spelled here
+with the two prims that do exist (`String.slice`, `String.length`).
+-}
+splitLines : String -> List String
+splitLines s =
+    let
+        go : Int -> Int -> List String -> List String
+        go start i acc =
+            if i >= String.length s then
+                List.reverse (String.slice start i s :: acc)
+
+            else if String.slice i (i + 1) s == "\n" then
+                go (i + 1) (i + 1) (String.slice start i s :: acc)
+
+            else
+                go start (i + 1) acc
+    in
+    go 0 0 []
+
+
 load : String -> Result String Runtime
-load source =
+load =
+    loadArm False
+
+
+{-| (perf VR3c) THE ARM SPLICE — `loadArm wordVal text` selects the runtime
+TEXT for the representation arm before it is parsed.
+
+WHY A TEXT SPLICE AND NOT A FLAG THREADED THROUGH EVERY DEFUN.  `runtime.mid`
+is the Mid SURFACE source: its strides are written as arithmetic (`40 * nslots`,
+`2 + (countW + 4 * countW * kindW)`, `iW * 48`), so the two arms cannot share a
+body — the val arm's numbers are 40-byte Values and the word arm's are 8-byte
+words, and a body that tried to serve both would need a layout VALUE in the
+surface language, which it does not have.  So each stride site carries BOTH
+spellings, side by side, in two marker-delimited regions:
+
+    // >>> QBE_VAL-ONLY      ..  // <<< QBE_VAL-ONLY       (kept on the val arm)
+    // >>> QBE_WORDVAL-ONLY  ..  // <<< QBE_WORDVAL-ONLY   (kept on the word arm)
+
+and this function keeps one and DROPS the other — the same splice discipline
+`run.js` already applies to the nursery's `QBE_MIDGC_YOUNG-ONLY` region (that
+one is a BUILD flag and stays in the driver; this one is the per-compile
+`QBE_VALREP` knob, which is why it lives here, where `Mid.QbeModule`'s flags
+already reach the parse).
+
+THE VAL ARM'S TEXT IS UNCHANGED BY CONSTRUCTION.  The marker lines themselves
+are dropped in BOTH arms and a region's body is kept only for its own arm, so
+`loadArm False` yields the byte-for-byte text the tree had before the twins
+existed — which is what keeps the val arm's emitted IL (and therefore the
+corpus baseline) inert.  A region that is unterminated or unbalanced is a LOUD
+refusal: a half-spliced runtime would link cleanly and read the wrong bytes.
+-}
+loadArm : Bool -> String -> Result String Runtime
+loadArm wordVal source =
+    case spliceArm wordVal source of
+        Err msg ->
+            Err msg
+
+        Ok text ->
+            loadText text
+
+
+-- the parse half of `loadArm`, unchanged: the hoisted per-process parse.
+loadText : String -> Result String Runtime
+loadText source =
     case Mid.RtLang.Parse.parseModule source of
         Err msg ->
             Err msg

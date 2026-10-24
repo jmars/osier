@@ -1,5 +1,7 @@
 module Mid.RtLayout exposing
     ( abiAlign
+    , bodyWords
+    , heapKindMask, heapKindScanned, heapKindShift
     , i32Bytes
     , descArityOffset, descCacheOffset, descCodeOffset, descNcapsOffset, descQbeFields
     , descTotalBytes, direntNameOffset
@@ -214,6 +216,86 @@ tagRecord =
 
 
 
+-- ==================== THE GC-HEADER KIND CONTRACT (VR3c, AREA 1) ====================
+-- WHAT THIS SETTLES, AND WHY IT HAD TO BE SETTLED HERE.  Under the word arm
+-- EVERY heap object's tag is `...001` (see `wordLayout` below), so the value's
+-- own word cannot say WHICH object it points at — a cons, a string, a vector,
+-- a float cell, a closure.  The disambiguation is the object's 2-WORD GC
+-- HEADER, which does not move (valrep2 §2(a): the block map, the class ladder,
+-- the remembered set and the forwarding stomp all stay where they are).  The
+-- header's fields, in bits:
+--
+--   bit 0        MARK      set by the marker, cleared by the sweep
+--   bit 1        SCAN KIND 1 = the body is `count` Values, 0 = `count` raw words
+--   bits 2..23   CLASS     the size class (`kind*2 + cls*4`, the ladder's own
+--                          packing — MEASURED: numClass < 2^20 at any mappable
+--                          ceiling, so bits 22..23 are already spare)
+--   bits 24..27  KIND CODE this contract (a 4-bit code; see below)
+--   bit 61       RS        the remembered set
+--   bit 62       FORWARDED the young space's evacuation mark
+--
+-- THE KIND CODE IS THE OBJECT'S VALTAG INTEGER.  Not a second numbering: the
+-- codes below ARE `tagString`/`tagCons`/... — the same integers the val arm
+-- writes into a Value's tag word and switches on everywhere.  A word-arm
+-- `tagis(v, 4)` therefore becomes "read the header, compare the code with 4",
+-- and the two arms name the same constructors with the same numbers.
+--
+-- WHY A NEW FIELD AND NOT A WIDER `kind`.  The scan kind is ONE bit and the
+-- class ladder starts at bit 2; widening the kind would MOVE the class, which
+-- the invariant forbids.  Bits 24..27 are above every legal class and are
+-- written by nothing on the val arm, so the val arm's headers carry code 0 —
+-- "no code", which a word-arm reader refuses BY NAME rather than mistaking it
+-- for a constructor (the mixed-representation trap).
+--
+-- THE SCAN BIT IS DERIVED FROM THE CODE, not carried twice: `heapKindScanned`
+-- below is the one statement of which codes have Value bodies (cons, lambda,
+-- error, vector, record).  The strings/symbols/floats/prims/streams have raw
+-- bodies.
+--
+-- THE BODY-SIZE RULE, in words: `bodyWords` below.  On the val arm a body unit
+-- is `1 + 4*kind` words (a 40-byte Value or one raw word), so a cons is
+-- 2 + 2*5 = 12 words = 96 B; on the word arm `valuePayloadWords` is 0, so a
+-- unit is ONE word and a cons is 2 + 2 = 4 words = 32 B (16 B of 2-word header
+-- plus 16 B of body).  The emitted `runtime.mid` arithmetic is the SAME
+-- expression in both arms, with the layout's own `valuePayloadWords` folded in.
+--
+-- THE PIN.  `runtime.mid` states this contract once, in the word-arm splice
+-- region, as `// KIND-CONTRACT: <name> <code> <scanned|raw>` rows plus the
+-- field's shift and mask; TestMain parses those rows and compares them with
+-- THIS file's numbers and with `heapKindScanned`.  A stale duplicate on either
+-- side FAILS a test instead of silently reading another object's bytes.
+
+
+heapKindShift : Int
+heapKindShift =
+    24
+
+
+heapKindMask : Int
+heapKindMask =
+    15
+
+
+-- Which codes have VALUE bodies (`count` Values, scanned by the collector) and
+-- which have raw ones.  The val arm's header carries the same distinction in
+-- bit 1; under the word arm the allocator derives bit 1 from the code through
+-- this predicate, so the two statements cannot drift.
+heapKindScanned : Int -> Bool
+heapKindScanned code =
+    code == tagCons || code == tagLambda || code == tagError || code == tagVector || code == tagRecord
+
+
+-- The body-size rule, in words: TWO header words plus `count` body units, a
+-- unit being `1 + valuePayloadWords*scanKind` words.  MEASURED against
+-- `runtime.mid`'s gcAlloc: val `2 + (countW + 4 * countW * kindW)` ==
+-- `bodyWords valLayout count 1`, and the word arm's `2 + countW` ==
+-- `bodyWords wordLayout count 1`.  TestMain pins both directions.
+bodyWords : ValLayout -> Int -> Int -> Int
+bodyWords layout count scanKind =
+    2 + count * (1 + layout.valuePayloadWords * scanKind)
+
+
+
 -- ==================== THE VALUE LAYOUT, AS A VALUE (VR3a) ====================
 -- The constants above are the VAL arm's numbers.  `valLayout` is the ONE
 -- INSTANCE the emitters read, and it is built FROM those constants — every
@@ -271,6 +353,8 @@ type alias ValLayout =
     , tagFalse : Int -- FLIPS 12 -> 4 (VR3b2): see `booleanSplit`
     , booleanSplit : Bool -- FLIPS False -> True (VR3b2): two IMMEDIATES vs one tag + a payload bit
     , heapTagIsKind : Bool -- FLIPS False -> True (VR3b2): the tag names the kind vs the 2-word header does
+    , heapKindShift : Int -- FLIPS 0 -> 24 (VR3c AREA 1): the header's KIND CODE field starts here (0 = there is NO kind field: the tag word IS the kind, so a reader branches on `heapTagIsKind` first — the `tagMask` rule)
+    , heapKindMask : Int -- FLIPS 0 -> 15 (VR3c AREA 1): the kind code's width mask, meaningless on the val arm for the same reason
     , tagNumber : Int -- REINTERPRETED by VR3b (low-3-bit encoding), not renumbered
     , tagString : Int
     , tagSymbol : Int
@@ -302,6 +386,8 @@ valLayout =
     , tagFalse = tagBoolean
     , booleanSplit = False
     , heapTagIsKind = False
+    , heapKindShift = 0
+    , heapKindMask = 0
     , tagNumber = tagNumber
     , tagString = tagString
     , tagSymbol = tagSymbol
@@ -338,8 +424,12 @@ valLayout =
 --     ...101  error
 --     ...110, ...111        reserved
 --
--- BODY STRIDES: a cons cell is 24 B (2-word header + 2 words), a vector is
--- 8n+16, a values-table row is 16 B, a frame slot is 8 B.  The 2-word GC
+-- BODY STRIDES: a cons cell is 32 B (the 2-word/16-byte header plus 2 body
+-- words), a vector is 8n+16, a values-table row is 16 B, a frame slot is 8 B.
+-- (VR3c AREA 1 CORRECTED this line: it read "a cons cell is 24 B", which is
+-- 16 B of header plus ONE body word — the arithmetic of a 1-word header.  The
+-- header is two words in both arms, so the word-arm cons is 32 B; `bodyWords`
+-- above is the one statement of the rule and TestMain pins it.)  The 2-word GC
 -- header (mark/kind/class/RS/forwarding) is UNTOUCHED — that is what keeps the
 -- collector's block map and class ladder out of this flip.
 --
@@ -359,11 +449,20 @@ valLayout =
 --   * THE HEAP KIND.  `...001` says "a heap object"; WHICH object (cons,
 --     string, vector, record, float cell, closure, stream, prim) is read from
 --     the object's 2-word GC header, which does not move.  So under the word
---     arm every `tagCons`/`tagString`/... field reads 1 and a heap-object TAG
---     TEST is not a tag test at all: it is a header-KIND read
---     (`heapTagIsKind = True`).  The tag integers below stay the val arm's
---     numbers (VR3b does not renumber them); they are meaningful on the word
---     arm only as `w & 7` equals 1.
+--     arm every `tagCons`/`tagString`/... field READS 1 (the shared heap tag)
+--     and a heap-object TAG TEST is not a tag test at all: it is a header-KIND
+--     read (`heapTagIsKind = True`).
+--
+--     THE KIND CODE ITSELF IS NOT A FIELD OF THIS RECORD, and that is
+--     deliberate (VR3c AREA 1): the code IS the object's ValTag integer, i.e.
+--     the TOP-LEVEL `tagCons`/`tagString`/... constants at the head of this
+--     file — NOT `wordLayout.tagCons`, which is the low-3-bit tag 1 that every
+--     heap object shares.  Overloading the record's tag fields with the codes
+--     would put two meanings on one field, so the codes stay in the one
+--     numbering both arms already use and `heapKindShift`/`heapKindMask` (this
+--     record) locate the header field that carries them.  See THE GC-HEADER
+--     KIND CONTRACT above: the code set, the scan-bit derivation
+--     (`heapKindScanned`) and the body-size rule (`bodyWords`).
 --
 -- `tagMask` is the mask that makes both statements usable: 0 on the val arm
 -- (the tag is a whole word, so masking it would be a bug — a reader must branch
@@ -433,6 +532,8 @@ wordLayout =
     , tagFalse = 4
     , booleanSplit = True
     , heapTagIsKind = True
+    , heapKindShift = heapKindShift
+    , heapKindMask = heapKindMask
     , tagNumber = 0
     , tagString = 1
     , tagSymbol = 1

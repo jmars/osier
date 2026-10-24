@@ -86,7 +86,10 @@ compileAll flags =
     -- hoist that keeps the corpus wall ~16 s-class (the O(n^2) re-parse wall
     -- returns if this becomes per-compileEntry-call).  A runtime.mid that does
     -- not parse fails EVERY group loudly — never a silently-reduced runtime.
-    case MidRt.load flags.runtimeMidJson of
+    -- (perf VR3c) the arm splice: `QBE_VALREP=word` selects the runtime text's
+    -- word-arm regions (`Mid.Rt.loadArm`); on the val arm this is byte-for-byte
+    -- the text this hoist always parsed.
+    case MidRt.loadArm flags.qbeWordVal flags.runtimeMidJson of
         Err msg ->
             encodeStrings [ "err " ++ msg ]
 

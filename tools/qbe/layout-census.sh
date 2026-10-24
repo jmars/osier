@@ -76,7 +76,15 @@ need() { command -v "$1" >/dev/null 2>&1 || { printf 'layout-census: %s not foun
 # (40/48/56/64/72/80 val, 8/16/24/32/40/48 word), so the numbers are still
 # stated once and still loudly checked.  `retValOffset` (0) is still a
 # constant and stays below.
+# (VR3c AREA 1) `heapKindShift`/`heapKindMask` are the WORD ARM's GC-header
+# kind-code field (bits 24..27 of the 2-word header).  They are MID_ONLY for the
+# same reason the ep* blob is: their readers are the Mid-written collector and
+# the emitted IL, and their VALUES are pinned where they are read — TestMain's
+# VR3c AREA 1 row parses runtime.mid's own `// KIND-CONTRACT:` rows and compares
+# them with these constants, so a stale duplicate is a RED row rather than a
+# silently different offset.
 MID_ONLY_NAMES="descArityOffset descCacheOffset descCodeOffset descNcapsOffset descTotalBytes \
+heapKindMask heapKindShift \
 direntNameOffset maxArity \
 metaArityOffset metaCodeOffset metaNameOffset metaSizeBytes \
 retValOffset \

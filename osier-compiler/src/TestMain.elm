@@ -1402,6 +1402,105 @@ checks rt runtimeMidText =
             [ RtLayout.valLayout, RtLayout.wordLayout ]
             == [ [ 40, 48, 56, 64, 72, 80 ], [ 8, 16, 24, 32, 40, 48 ] ]
         )
+    , check "VR3c AREA 1 — THE KIND CONTRACT IS ONE SET OF NUMBERS, PINNED ACROSS RtLayout AND runtime.mid. Under the word arm every heap object's value tag is `...001`, so WHICH object a pointer names is read from the 2-word GC header — and the codes ARE the ValTag integers both arms already use (cons 4, vector 10, ...). This row parses runtime.mid's own `// KIND-CONTRACT:` rows (word-arm splice) and compares every one with RtLayout: the field's shift/mask, each code against the TOP-LEVEL `tag*` constants, and each body class against `heapKindScanned`. A stale duplicate on EITHER side turns this RED instead of linking cleanly and reading another object's bytes. It also pins that the rows are WORD-ARM ONLY (the val text carries none) and that the val arm has NO kind field (0/0, the `tagMask` convention)"
+        (case ( Rt.spliceArm False runtimeMidText, Rt.spliceArm True runtimeMidText ) of
+            ( Ok valText, Ok wordText ) ->
+                let
+                    rows =
+                        kindContractRows wordText
+
+                    field : Int -> String -> Maybe String
+                    field i name =
+                        List.filterMap
+                            (\r ->
+                                if List.head (List.drop 1 r) == Just name then
+                                    List.head (List.drop i r)
+
+                                else
+                                    Nothing
+                            )
+                            rows
+                            |> List.head
+
+                    code : String -> Maybe Int
+                    code name =
+                        Maybe.andThen String.toInt (field 2 name)
+
+                    bodyClass : String -> Maybe String
+                    bodyClass name =
+                        field 3 name
+
+                    pinned : String -> Int -> String -> Bool
+                    pinned name n cls =
+                        code name
+                            == Just n
+                            && bodyClass name
+                            == Just cls
+                            && (cls == "scanned")
+                            == RtLayout.heapKindScanned n
+                in
+                field 2 "shift"
+                    == Just (String.fromInt RtLayout.heapKindShift)
+                    && field 2 "shift"
+                    == Just "24"
+                    && field 2 "mask"
+                    == Just (String.fromInt RtLayout.heapKindMask)
+                    && field 2 "mask"
+                    == Just "15"
+                    && RtLayout.wordLayout.heapKindShift
+                    == RtLayout.heapKindShift
+                    && RtLayout.wordLayout.heapKindMask
+                    == RtLayout.heapKindMask
+                    && RtLayout.valLayout.heapKindShift
+                    == 0
+                    && RtLayout.valLayout.heapKindMask
+                    == 0
+                    && List.length rows
+                    == 12
+                    && pinned "string" RtLayout.tagString "raw"
+                    && pinned "symbol" RtLayout.tagSymbol "raw"
+                    && pinned "cons" RtLayout.tagCons "scanned"
+                    && pinned "lambda" RtLayout.tagLambda "scanned"
+                    && pinned "prim" RtLayout.tagPrim "raw"
+                    && pinned "error" RtLayout.tagError "scanned"
+                    && pinned "vector" RtLayout.tagVector "scanned"
+                    && pinned "stream" RtLayout.tagStream "raw"
+                    && pinned "float" RtLayout.tagFloat "raw"
+                    && pinned "record" RtLayout.tagRecord "scanned"
+                    && List.isEmpty (kindContractRows valText)
+                    && List.isEmpty (List.filter (String.contains "KIND-CONTRACT") (String.split "\n" valText))
+                    && List.isEmpty (List.filter (String.contains "QBE_WORDVAL-ONLY") (String.split "\n" valText))
+                    && List.isEmpty (List.filter (String.contains "QBE_VAL-ONLY") (String.split "\n" valText))
+                    && List.length (kindContractRows wordText)
+                    == 12
+
+            _ ->
+                False
+        )
+    , check "VR3c AREA 1 — THE BODY-SIZE RULE, STATED ONCE: `bodyWords` is 2 header words plus `count` body units of `1 + valuePayloadWords*scanKind` words, so the SAME expression is a 40-byte Value on the val arm (a cons = 2 + 2*5 = 12 words = 96 B) and ONE word on the word arm (a cons = 2 + 2 = 4 words = 32 B: 16 B of 2-word header plus 16 B of body). The `wordLayout` comment that said `a cons cell is 24 B` was the arithmetic of a ONE-word header and is CORRECTED here; a body rule that drifts from the layout's own `valuePayloadWords` is RED"
+        (RtLayout.bodyWords RtLayout.valLayout 2 1
+            == 12
+            && RtLayout.bodyWords RtLayout.valLayout 0 0
+            == 2
+            && RtLayout.bodyWords RtLayout.valLayout 3 0
+            == 5
+            && RtLayout.bodyWords RtLayout.wordLayout 2 1
+            == 4
+            && RtLayout.bodyWords RtLayout.wordLayout 3 0
+            == 5
+            && RtLayout.bodyWords RtLayout.wordLayout 0 0
+            == 2
+            && RtLayout.valLayout.valuePayloadWords
+            == 4
+            && RtLayout.wordLayout.valuePayloadWords
+            == 0
+            && RtLayout.bodyWords RtLayout.wordLayout 2 1
+            * RtLayout.wordBytes
+            == 32
+            && RtLayout.bodyWords RtLayout.valLayout 2 1
+            * RtLayout.wordBytes
+            == 96
+        )
     , check "VR3b2 AREA 1 PORTED — THE FRAME SLOT STRIDE LOWERS UNDER THE WORD ARM. A defun whose whole body is one Value copy (`\\x -> x`) now emits a REAL module on the word instance: `type :val = align 8 { l }`, the frame block is `alloc8 (valSizeBytes * nslots)` = 16 for 2 slots, the slot address table steps by 8 (`%s0 =l add %f, 0`, `%s1 =l add %f, 8`), the param and result copies are 8-byte blits, and slot 0/1's materialisation is `storel 0` at both `%s0` and `%f + retKindOffset` = `%f + 8`. EXACT text, and the VAL-arm spellings (alloc8 80, a 40-byte blit, a `storew` tag) are asserted ABSENT — this is the row that would have gone red had any stride site still read a constant"
         (case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ idProbe ]) [ idProbe ] "Id.f" of
             Ok mod ->
@@ -11087,6 +11186,25 @@ auditClean =
                 }
       }
     ]
+
+
+-- ==================== VR3c AREA 1: the kind contract's parse ====================
+{-| The `// KIND-CONTRACT: <name> <value> [scanned|raw]` rows of a runtime text,
+as word lists (`["KIND-CONTRACT:", "<name>", "<value>", ...]`).  A malformed
+row is returned as-is and the pin row's own comparisons turn RED — nothing is
+silently skipped.
+-}
+kindContractRows : String -> List (List String)
+kindContractRows text =
+    List.filterMap
+        (\line ->
+            if String.contains "// KIND-CONTRACT:" line then
+                Just (List.filter (\w -> w /= "") (String.split " " (String.replace "//" " " line)))
+
+            else
+                Nothing
+        )
+        (String.split "\n" text)
 
 
 check : String -> Bool -> String

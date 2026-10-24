@@ -4938,6 +4938,54 @@ defun Rt.allocRaw(nbytes : val) -> val {
   word bodyWords = (nbytesW + 7) / 8;
   return call Rt.gcAlloc(region, mknum(0), mknum(bodyWords));
 }
+// >>> QBE_WORDVAL-ONLY
+// ==================== THE GC-HEADER KIND CONTRACT (perf VR3c AREA 1) ============
+// THE DEFINITION IS `Mid/RtLayout.elm`'s "THE GC-HEADER KIND CONTRACT"
+// section.  This block is the runtime's own statement of the same numbers, and
+// TestMain parses the rows below and compares them with RtLayout — a stale
+// duplicate on either side FAILS a test instead of linking cleanly and reading
+// another object's bytes at the wrong offset.
+//
+// Under the word arm EVERY heap object's value tag is `...001`, so WHICH object
+// a pointer names is read from its 2-word GC header, whose fields do not move:
+//
+//   bit 0      mark          set by the marker, cleared by the sweep
+//   bit 1      scan kind     1 = the body is `count` Values, 0 = raw words
+//   bits 2..23 class          the size class (the ladder's own packing)
+//   bits 24..27 KIND CODE     this contract
+//   bit 61     RS            the remembered set
+//   bit 62     FORWARDED     the young space's evacuation mark
+//
+// THE KIND CODE IS THE OBJECT'S VALTAG INTEGER — the same numbering the val arm
+// writes into a Value's tag word — so a word-arm `tagis(v, 4)` is "read the
+// header, compare the code with 4".  Code 0 means NO CODE: the val arm writes
+// nothing there, so a word-arm reader that meets 0 is looking at a val-arm
+// header and must refuse it BY NAME rather than mistake it for a constructor.
+//
+// THE SCAN BIT IS DERIVED FROM THE CODE (Rt.kindHdr below): the codes with
+// Value bodies are cons, lambda, error, vector and record; strings, symbols,
+// prims, streams and float cells have raw bodies.
+//
+// KIND-CONTRACT: shift 24
+// KIND-CONTRACT: mask 15
+// KIND-CONTRACT: string 1 raw
+// KIND-CONTRACT: symbol 2 raw
+// KIND-CONTRACT: cons 4 scanned
+// KIND-CONTRACT: lambda 6 scanned
+// KIND-CONTRACT: prim 8 raw
+// KIND-CONTRACT: error 9 scanned
+// KIND-CONTRACT: vector 10 scanned
+// KIND-CONTRACT: stream 11 raw
+// KIND-CONTRACT: float 12 raw
+// KIND-CONTRACT: record 14 scanned
+//
+// THE BODY-SIZE RULE IS `2 + count` WORDS.  A body unit is ONE word, so a cons
+// is 2 + 2 = 4 words = 32 B (16 B of 2-word header plus 16 B of body), a
+// vector 2 + n, a string 2 + (bytes+7)/8, a float cell 2 + 1.  The val arm's
+// unit is `1 + 4*kind` words (a 40-byte Value), i.e. the SAME expression with
+// the layout's `valuePayloadWords` folded in — which is why gcAlloc's two
+// spellings below differ by exactly that term and nothing else.
+// <<< QBE_WORDVAL-ONLY
 defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
   word kindW = payload(kind, 0);
   word countW = payload(count, 0);
