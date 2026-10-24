@@ -19,8 +19,8 @@ The dump it is rendered from (no elm/node/jq needed in that mode):
 ELM_GATE_MATRIX=/tmp/matrix.tsv tests/elm-fixtures/run-elm-gate.sh
 ```
 
-**170 registered checks.** Run from the repo root, the gate prints
-`PASS=170 FAIL=0` on the frozen artifact. `docs/research/osier-paper.md`
+**174 registered checks.** Run from the repo root, the gate prints
+`PASS=174 FAIL=0` on the frozen artifact. `docs/research/osier-paper.md`
 **Appendix A** is the paper's prose counterpart: the *designed* programs the
 paper cites, with the claim each one pins. Appendix A is a selected subset;
 this file is the complete registry. Where the two disagree, **this file and the
@@ -226,6 +226,10 @@ fails loudly rather than letting this listing go stale.
 | 168 | `liftrelaxleak` | `run` | `main` | `999` | — | — | `liftrelaxleak.elm` |
 | 169 | `liftdisjointshadow` | `run` | `main` | `3` | — | — | `liftdisjointshadow.elm` |
 | 170 | `natcalloverflow` | `natdepth` | `main` | `500500` | `1000 20000 100000` | — | `natcalloverflow.elm` |
+| 171 | `intcorner` | `intproc` | `wrapmul` | `0\|0\|` | `1` | — | `intcorner.elm` |
+| 172 | `intcorner` | `intproc` | `truncdiv` | `0\|-3\|` | `7` | — | `intcorner.elm` |
+| 173 | `intcorner` | `intproc` | `divzero` | `136\|\|` | `0` | — | `intcorner.elm` |
+| 174 | `intcorner` | `intproc` | `minbyneg` | `136\|\|` | `1` | — | `intcorner.elm` |
 
 ---
-Generated from `tests/elm-fixtures/run-elm-gate.sh`; 170 checks.
+Generated from `tests/elm-fixtures/run-elm-gate.sh`; 174 checks.

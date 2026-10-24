@@ -322,6 +322,32 @@ natdepth() {
 # other backend's message.
 NAT_DEPTH_MSG="native stack depth exceeded"
 
+# intproc <name> <fn> <expected-status> <expected-stdout> <expected-stderr> [args...]
+#
+# THE EXTREME-Int CORNER ROW (L3-U0, design §7).  It asserts the PROCESS — exit
+# STATUS plus each stream separately — because two of its rows pin a SIGNAL
+# DEATH, and a signal death cannot be expressed as a stdout diff: bash prints
+# the "Floating point exception" notice on ITS OWN stderr with a PID in it, so
+# that notice must never reach the capture (the natdepth check routes shell
+# stderr to a file for the same reason).
+#
+# WHY A ROW THAT PINS A CRASH IS THE RIGHT THING TO WRITE FIRST.  The language's
+# Int is already an i64 at execution — `+ - *` wrap, `//` truncates toward zero
+# — but no row pinned any of it, and `//0` / INT64_MIN // -1 are SIGFPE core
+# dumps today.  Pinning today's measured behaviour HERE makes L3-U2's fix an
+# ASYMMETRY PROOF: the divzero/minbyneg rows are green on exit 136 now, and
+# green on the named halt only after the pre-check lands.  A row written at the
+# same time as the fix could not tell "the fix works" from "the row was written
+# to match the fix".
+#
+# Like sigdeath/natdepth it registers NO compile group (the corpus baseline
+# pins the batch artifact set at 159 groups, and these rows change no
+# compiler behaviour) — the native row builds its own binary on demand.
+intproc() {
+  local name="$1" fn="$2" st="$3" out="$4" err="$5"; shift 5
+  add_check natproc "$name" "$fn" "$st|$out|$err" "$*" "" "$FIX/$name.elm" "" intproc "$FIX/$name.elm"
+}
+
 run fib        fib        "$(read_expected fib)"        10
 run rtl1       main       "$(read_expected rtl1)"
 run rtl2       main       "$(read_expected rtl2)"
@@ -770,6 +796,25 @@ run liftdisjointshadow main "$(read_expected liftdisjointshadow)"
 # raise exists to allow).
 natdepth natcalloverflow main 1000 20000 100000 500500
 
+# ==================== L3-U0: the extreme-Int corners ====================
+# The rows the L3 design (§7 U0) puts in FIRST, because they pin what the
+# language ALREADY does rather than what it is about to do:
+#
+#   wrapmul  — `*` wraps in two's complement: 1024^6 * 16 = 2^64 -> 0.
+#   truncdiv — `//` truncates TOWARD ZERO: (0 - 7) // 2 = -3, not -4.
+#   divzero  — 100 // 0 is SIGFPE (exit 136) TODAY; L3-U2 makes it a named halt.
+#   minbyneg — INT64_MIN // -1 is SIGFPE TODAY, for the same reason (the
+#              quotient 2^63 is not an i64, so the hardware idiv traps).
+#
+# The two crash rows are EXPECTED to flip in U2 (exit 136, empty streams ->
+# exit 1 + the runtime's named message).  That flip is the proof that the
+# pre-check, not the fixture, is what changed.  See the intproc helper for why
+# the status and each stream are compared separately.
+intproc intcorner wrapmul  0   "0"  ""  1
+intproc intcorner truncdiv 0   "-3" ""  7
+intproc intcorner divzero  136 ""   ""  0
+intproc intcorner minbyneg 136 ""   ""  1
+
 # ==================== ELM_GATE_MATRIX: dump the registry ====================
 # ELM_GATE_MATRIX=1 prints every REGISTERED check as TSV (one row per check, in
 # declaration order) and exits WITHOUT compiling or running anything; with any
@@ -958,6 +1003,39 @@ dispatch() {
       fi
       echo "PASS $name ($qname native: $ctl -> $exp @1MiB, $past -> SIGSEGV exit $past_rc, $deep -> $deep_exp @raised)"
       pass=$((pass+1))
+      ;;
+    natproc)
+      # The PROCESS-shaped native row (see the intproc helper): exit status and
+      # the two streams compared SEPARATELY, so a row can pin a signal death.
+      bin="$(cat "$OUT/nat/$i.binpath" 2>/dev/null || true)"
+      if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+        echo "FAIL $name (native build): $(head -c 200 "$OUT/nat/$i.builderr" 2>/dev/null || echo 'no build output')"
+        fail=$((fail+1)); return
+      fi
+      mod=$(module_name "$fixfile")
+      qname="$mod.$fn"
+      want_st="${exp%%|*}"
+      rest="${exp#*|}"
+      want_out="${rest%%|*}"
+      want_err="${rest#*|}"
+      ulimit -c 0 2>/dev/null || true
+      exec 3>&2
+      exec 2>"$OUT/$name.shellstderr"
+      ( timeout 60 "$bin" "$qname" $args >"$OUT/$name.out" 2>"$OUT/$name.err" )
+      got_st=$?
+      exec 2>&3 3>&-
+      got_out="$(cat "$OUT/$name.out")"
+      # timeout(1) reports the CORE-DUMP bit on ITS OWN stderr ("the monitored
+      # command dumped core").  The kernel sets WCOREDUMP for any death by a
+      # coredump signal even under `ulimit -c 0`, so a row that pins a signal
+      # death would otherwise be comparing timeout's notice, not the program's
+      # stream.  Drop exactly that one line — timeout never writes any other.
+      got_err="$(sed -e '/^timeout: the monitored command dumped core$/d' "$OUT/$name.err")"
+      if [ "$got_st" = "$want_st" ] && [ "$got_out" = "$want_out" ] && [ "$got_err" = "$want_err" ]; then
+        echo "PASS $name (native $qname $args) -> rc $got_st out[$got_out] err[$got_err]"; pass=$((pass+1))
+      else
+        echo "FAIL $name (native $qname $args): exp rc $want_st out[$want_out] err[$want_err], got rc $got_st out[$got_out] err[$got_err]"; fail=$((fail+1))
+      fi
       ;;
     nat*)
       # The native row (P7; the ONLY execution model since P8): the binary
