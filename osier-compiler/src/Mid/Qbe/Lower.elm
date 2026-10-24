@@ -516,10 +516,16 @@ wordArmUnsupported what =
 
 {-| The VAL-arm entry point — the layout this whole tree has always emitted,
 and what every existing caller (TestMain's pins included) means by `lower`.
+
+Spelled as a FULL application and not as `lower = lowerWith RtLayout.valLayout`:
+a top-level PARTIAL application of a 16-parameter defun is a shape nothing in
+this tree compiles today (this entry is unreachable from the self-host manifest,
+so the fixed point never lowers it), and VR3b1 already paid once for shipping a
+shape no oracle exercised.
 -}
 lower : MidRt.Runtime -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
-lower =
-    lowerWith RtLayout.valLayout
+lower runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midGcYoung leafFree table arityTable program entryKey =
+    lowerWith RtLayout.valLayout runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midGcYoung leafFree table arityTable program entryKey
 
 
 {-| The SAME lowering, FOR A GIVEN LAYOUT INSTANCE (VR3b1).  The instance is

@@ -318,17 +318,45 @@ renderJob rt corpus entryKey ( job, elmGroup ) midResult =
             "err " ++ msg
 
         Ok midTexts ->
-            -- run.js's DEFAULT flag vector (flatten, rep, primDirect, midRt
-            -- inject, midCons route, rtLean lean ABI, mono specialiser,
-            -- consArr, rec, typeSpec, eqPtrFast) with the trailing
-            -- (midGc, midGcYoung) = (True, True).  midGcYoung is the nursery
-            -- hatch (live).  midGc is RETIRED at zighost Z0: the Mid collector
-            -- is the only collector, so the slot is INERT (QbeLower.lower binds
-            -- it `_midGc` and no arm reads it) — it is spelled True only because
-            -- Mid.QbeModule.compileEntry's call shape still carries the bit.
-            -- The vector must still agree with run.js's defaults so the seed
-            -- it builds re-emits itself (the U2-fix-4 twin TestMain pins).
-            renderSsa (QbeModule.compileEntry rt corpus elmGroup midTexts entryKey True True True True True True True ( ( True, ( True, ( True, ( True, ( True, True ) ) ) ) ), True ))
+            -- run.js's DEFAULT flag vector, field for field — the NATIVE twin
+            -- of `run.js`'s `qbe*` flags and of `Main.toQbeFlags`, HAND-COPIED
+            -- because this file is in the self-host manifest but NOT in Elm's
+            -- build graph: `elm make` never type-checks it, so a shape drift
+            -- here is invisible to every Elm-side gate and shows up ONLY when
+            -- the compiler compiles itself (the VR3b1 lesson: a missing
+            -- positional `Bool` here read the nested tuple as a Bool, and one
+            -- extra parameter upstream tripped `arity > 16`).
+            --
+            -- THAT IS WHY THE VECTOR IS ONE RECORD NOW (`Mid.QbeModule.Flags`):
+            -- a new switch is a FIELD, and a field this file forgets is a
+            -- MISSING FIELD — a type error in whichever compiler builds it,
+            -- never a silently shifted positional slot.
+            --
+            -- midGc is RETIRED at zighost Z0 (the Mid collector is the only
+            -- collector): INERT, spelled True only because the field exists and
+            -- the two drivers must agree on every field.  midGcYoung is the
+            -- live nursery hatch.  These defaults must keep matching run.js's,
+            -- or the seed the bootstrap builds stops re-emitting itself (the
+            -- U2-fix-4 twin TestMain pins the collector slot's value).
+            renderSsa
+                (QbeModule.compileEntry rt corpus elmGroup midTexts entryKey
+                    { flatten = True
+                    , rep = True
+                    , primDirect = True
+                    , midRt = True
+                    , midCons = True
+                    , rtLean = True
+                    , mono = True
+                    , wordVal = False
+                    , consArr = True
+                    , rec = True
+                    , typeSpec = True
+                    , midGc = True
+                    , midGcYoung = True
+                    , leafFree = True
+                    , eqPtrFast = True
+                    }
+                )
 
 
 -- ======================= M4: reader-side .mid import resolution =======================

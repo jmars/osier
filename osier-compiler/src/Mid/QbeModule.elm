@@ -1,4 +1,4 @@
-module Mid.QbeModule exposing (Emitted, compileEntry, compileEntryIl, exportScheme, loadUserMids, userCollisions)
+module Mid.QbeModule exposing (Emitted, Flags, compileEntry, compileEntryIl, exportScheme, loadUserMids, userCollisions)
 
 -- Mid.QbeModule — the NATIVE-backend driver: sources -> Mid.Ir -> QBE IL
 -- text (.ssa) for ONE entry key (native-backend stage 1; handoff-qbe-lower).
@@ -107,10 +107,59 @@ type alias Emitted =
     }
 
 
-compileEntry : MidRt.Runtime -> List String -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ) ), Bool ) -> Result String String
-compileEntry rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono wordVal ( consArrRec, eqPtrFast ) =
+{-| THE FLAG VECTOR — ONE PACKED VALUE, and the packing is load-bearing, not
+taste (VR3b1 fix).
+
+This driver used to take its A/B switches as a POSITIONAL BOOL VECTOR: seven
+leading `Bool`s plus the nested-tuple tail the tree grew for exactly this
+reason (`( ( Bool, ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ) ), Bool )` — the
+tuple existed because Elm's tuples stop at three and the parameter list was
+already at the language's own ceiling).  VR3b1 added one more switch (the
+word-arm knob) and pushed `lowerAll`/`compileGroup` to SEVENTEEN parameters —
+past `RtLayout.maxArity` = 16, the `rt_callN` dispatch-table bound this
+language enforces on every defun.  The stock compiler still built: the failure
+only appears when the compiler compiles ITSELF, as
+
+    err qbe: defun Mid.QbeModule.lowerAll has arity > 16 (rt_callN table limit)
+
+because `selfhost/NativeMain.elm` — the other caller of `compileEntry` — is in
+the self-host manifest but NOT in Elm's build graph, so `elm make` never
+type-checks it and every Elm-side gate is blind to the whole class.  Two rules
+came out of that, and this record is the first of them:
+
+  * the flags travel as ONE value, so the parameter list has room and a new
+    switch costs a FIELD, never a positional slot;
+  * `tools/qbe-bootstrap.sh --status` (or a direct manifest emit) is part of
+    the gate for any change to compiler sources — it is the only oracle that
+    compiles the compiler with itself.
+
+The DEFAULTS live in `run.js` (the node driver) and, hand-copied, in
+`selfhost/NativeMain.elm` (the native one); the two must agree or the seed the
+bootstrap builds stops re-emitting itself.
+-}
+type alias Flags =
+    { flatten : Bool -- QBE_NOFLATTEN=1 -> False
+    , rep : Bool -- QBE_NOREP=1 -> False (S4's Int/float unboxing)
+    , primDirect : Bool -- QBE_NOPRIMDIRECT=1 -> False (the direct per-prim entries)
+    , midRt : Bool -- QBE_NOMIDRT=1 -> False (withhold the Mid runtime injection)
+    , midCons : Bool -- QBE_MIDZIG=1 -> False (the flipped prim route)
+    , rtLean : Bool -- QBE_NORTLEAN=1 -> False (the Rt lean ABI)
+    , mono : Bool -- QBE_NOMONO=1 -> False (the S5/M2 specialiser)
+    , wordVal : Bool -- QBE_VALREP=word -> True (THE WORD ARM, VR3b1: Lower stops loudly, no IL)
+    , consArr : Bool -- QBE_NOCONSARR=1 -> False (the pre-(A) 2-word cons)
+    , rec : Bool -- QBE_NOREC=1 -> False (the pre-(E) assoc-chain records)
+    , typeSpec : Bool -- QBE_NOTYPESPEC=1 -> False (unit B's binder-map specialization)
+    , midGc : Bool -- RETIRED at zighost Z0 (the Mid collector is the only one); INERT, no arm reads it
+    , midGcYoung : Bool -- QBE_MIDGC_YOUNG=0 -> False (the nursery)
+    , leafFree : Bool -- QBE_NOLEAF=1 -> False (P5's frame-free surface leaves)
+    , eqPtrFast : Bool -- QBE_NOEQPTRFAST=1 -> False (the `Rt.=` pointer fast path)
+    }
+
+
+compileEntry : MidRt.Runtime -> List String -> List String -> List String -> String -> Flags -> Result String String
+compileEntry rt corpusSources groupSources groupMids entryKey flags =
     Result.map (\e -> prependNote e.note (QbePrint.print e.il))
-        (compileEntryIl rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono wordVal ( consArrRec, eqPtrFast ))
+        (compileEntryIl rt corpusSources groupSources groupMids entryKey flags)
 
 
 {-| The SAME compile, handing back the post-peephole `Mid.Qbe.Il.Module`
@@ -119,8 +168,8 @@ the ADT, so there is no second representation of the program). The `.ssa` path
 is `compileEntry`, which prints exactly this module, so the two outputs cannot
 disagree about what was compiled.
 -}
-compileEntryIl : MidRt.Runtime -> List String -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ) ), Bool ) -> Result String Emitted
-compileEntryIl rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono wordVal ( consArrRec, eqPtrFast ) =
+compileEntryIl : MidRt.Runtime -> List String -> List String -> List String -> String -> Flags -> Result String Emitted
+compileEntryIl rt corpusSources groupSources groupMids entryKey flags =
     case
         MidModule.parseAll corpusSources
             |> Result.andThen
@@ -139,7 +188,7 @@ compileEntryIl rt corpusSources groupSources groupMids entryKey flatten rep prim
                                                                 Err msg
 
                                                             Ok corpusGlobals ->
-                                                                compileGroup rt env nodeTypes refinedVars corpusUnits corpusGlobals ( groupSources, groupMids ) entryKey flatten rep primDirect midRt midCons rtLean mono wordVal ( consArrRec, eqPtrFast )
+                                                                compileGroup rt env nodeTypes refinedVars corpusUnits corpusGlobals ( groupSources, groupMids ) entryKey flags
                                                     )
                                         )
                             )
@@ -161,17 +210,9 @@ compileGroup :
     -> Dict String Int
     -> ( List String, List String )
     -> String
-    -> Bool
-    -> Bool
-    -> Bool
-    -> Bool
-    -> Bool
-    -> Bool
-    -> Bool
-    -> Bool
-    -> ( ( Bool, ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ) ), Bool )
+    -> Flags
     -> Result String Emitted
-compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals ( groupSources, groupMids ) entryKey flatten rep primDirect midRt midCons rtLean mono wordVal ( consArrRec, eqPtrFast ) =
+compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals ( groupSources, groupMids ) entryKey flags =
     -- M3: load the group's user .mid modules FIRST — their exported keys'
     -- schemes join the env BEFORE the Elm sources are checked (an Elm source
     -- may reference a mid key by qualified name).  A .mid that fails to
@@ -243,7 +284,7 @@ compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals 
                                                                                             refinedVarsByModule =
                                                                                                 Dict.union groupTypes.refinedVars corpusRefinedVars
                                                                                         in
-                                                                                        lowerAll rt rep primDirect midRt midCons rtLean mono wordVal flatten globals nodeTypesByModule groupTypes refinedVarsByModule (corpusUnits ++ groupUnits) ( userSurface userModules, userAbi userModules ) entryKey ( consArrRec, eqPtrFast )
+                                                                                        lowerAll rt flags globals nodeTypesByModule groupTypes refinedVarsByModule (corpusUnits ++ groupUnits) ( userSurface userModules, userAbi userModules ) entryKey
                                                                     )
                                                         )
                                             )
@@ -680,14 +721,7 @@ userAbi modules =
 
 lowerAll :
     MidRt.Runtime
-    -> Bool
-    -> Bool
-    -> Bool
-    -> Bool
-    -> Bool
-    -> Bool
-    -> Bool
-    -> Bool
+    -> Flags
     -> Dict String Int
     -> Dict String (List ( Range, Type ))
     -> GroupSchemes
@@ -695,13 +729,8 @@ lowerAll :
     -> List MidModule.Unit
     -> ( Dict String Defun, Dict String (List Int) )
     -> String
-    -> ( ( Bool, ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ) ), Bool )
     -> Result String Emitted
-lowerAll rt rep primDirect midRt midCons rtLean mono wordVal flatten globals nodeTypesByModule groupTypes refinedVarsByModule units ( userSurf, userAbiTable ) entryKey ( consArrRec, eqPtrFast ) =
-    let
-        ( consArr, ( rec, ( typeSpec, ( midGc, ( midGcYoung, leafFree ) ) ) ) ) =
-            consArrRec
-    in
+lowerAll rt flags globals nodeTypesByModule groupTypes refinedVarsByModule units ( userSurf, userAbiTable ) entryKey =
     reserveRtName units
         |> Result.andThen (\_ -> compileAllJoin globals units nodeTypesByModule refinedVarsByModule)
         -- The unsafe-node audit (osier-rawnodes): runs over the ELM PROGRAM
@@ -732,7 +761,7 @@ lowerAll rt rep primDirect midRt midCons rtLean mono wordVal flatten globals nod
                 -- attribution proof).
                 let
                     rtProgramR =
-                        if midRt then
+                        if flags.midRt then
                             -- M1: the surface pipeline (runtime.mid ->
                             -- Parse -> Check -> LowerToIr) is RESULT-VALUED:
                             -- a bad surface text failed the compile at the
@@ -752,14 +781,14 @@ lowerAll rt rep primDirect midRt midCons rtLean mono wordVal flatten globals nod
                             Result.map
                                 (\( primHalf, gcHalf ) ->
                                     primHalf
-                                        ++ (if midGc then
+                                        ++ (if flags.midGc then
                                                 gcHalf
 
                                             else
                                                 []
                                            )
                                 )
-                                (rt.programPair consArr rec eqPtrFast)
+                                (rt.programPair flags.consArr flags.rec flags.eqPtrFast)
 
                         else
                             Ok []
@@ -796,7 +825,7 @@ lowerAll rt rep primDirect midRt midCons rtLean mono wordVal flatten globals nod
                                         )
                                         groupTypes.failures
                             in
-                            (if flatten then
+                            (if flags.flatten then
                                 QbeFlatten.run program
 
                              else
@@ -811,7 +840,7 @@ lowerAll rt rep primDirect midRt midCons rtLean mono wordVal flatten globals nod
                                             arities =
                                                 completeArities globals (program ++ rtProgram ++ userProgram)
                                         in
-                                        (if mono then
+                                        (if flags.mono then
                                             -- S5/M2: the specialiser runs LAST (on the
                                             -- flattened program the emitter will see) and
                                             -- hands down a program with the clones
@@ -843,23 +872,23 @@ lowerAll rt rep primDirect midRt midCons rtLean mono wordVal flatten globals nod
                                                         -- `wordLayout` down, and Lower
                                                         -- stops at its choke point with a
                                                         -- loud error naming the construct.
-                                                        (if wordVal then
+                                                        (if flags.wordVal then
                                                             RtLayout.wordLayout
 
                                                          else
                                                             RtLayout.valLayout
                                                         )
                                                         { rt | abi = Dict.union rt.abi userAbiTable }
-                                                        rep
-                                                        primDirect
-                                                        midCons
-                                                        rtLean
-                                                        consArr
-                                                        rec
-                                                        typeSpec
-                                                        midGc
-                                                        midGcYoung
-                                                        leafFree
+                                                        flags.rep
+                                                        flags.primDirect
+                                                        flags.midCons
+                                                        flags.rtLean
+                                                        flags.consArr
+                                                        flags.rec
+                                                        flags.typeSpec
+                                                        flags.midGc
+                                                        flags.midGcYoung
+                                                        flags.leafFree
                                                         specialised.table
                                                         (completeArities globals specialised.program)
                                                         specialised.program

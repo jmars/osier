@@ -107,7 +107,7 @@ compileAll flags =
                         encodeStrings
                             (List.map3
                                 (\groupSources groupMids entry ->
-                                    case QbeModule.compileEntry rt corpusSources groupSources groupMids entry flags.qbeFlatten flags.qbeRep flags.qbePrimDirect flags.qbeMidRt flags.qbeMidCons flags.qbeRtLean flags.qbeMono flags.qbeWordVal ( ( flags.qbeConsArr, ( flags.qbeRec, ( flags.qbeTypeSpec, ( True, ( flags.qbeMidGcYoung, flags.qbeLeafFree ) ) ) ) ), flags.qbeEqPtrFast ) of
+                                    case QbeModule.compileEntry rt corpusSources groupSources groupMids entry (toQbeFlags flags) of
                                         Ok ssa ->
                                             ssa
 
@@ -121,6 +121,34 @@ compileAll flags =
 
                 _ ->
                     encodeStrings [ "err internal: bad flags" ]
+
+
+{-| THE PORT FLAGS -> the backend's PACKED FLAG VECTOR.  This is the ONE
+translation site for the node driver (VR3b1: the vector is a record because the
+positional form crossed the language's own 16-parameter ceiling — see
+`Mid.QbeModule.Flags`).  `midGc` is the RETIRED collector switch: the Mid
+collector is the only one, so it is the literal True and no arm reads it (it is
+kept in the shape only because `selfhost/NativeMain.elm`'s twin must agree with
+this one on every field).
+-}
+toQbeFlags : Flags -> QbeModule.Flags
+toQbeFlags flags =
+    { flatten = flags.qbeFlatten
+    , rep = flags.qbeRep
+    , primDirect = flags.qbePrimDirect
+    , midRt = flags.qbeMidRt
+    , midCons = flags.qbeMidCons
+    , rtLean = flags.qbeRtLean
+    , mono = flags.qbeMono
+    , wordVal = flags.qbeWordVal
+    , consArr = flags.qbeConsArr
+    , rec = flags.qbeRec
+    , typeSpec = flags.qbeTypeSpec
+    , midGc = True
+    , midGcYoung = flags.qbeMidGcYoung
+    , leafFree = flags.qbeLeafFree
+    , eqPtrFast = flags.qbeEqPtrFast
+    }
 
 
 encodeStrings : List String -> String
