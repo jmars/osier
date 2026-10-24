@@ -6190,6 +6190,44 @@ defun Rt./(a : val, bb : val) -> val {
     }
   }
 }
+// L1 — THE `^` OPERATOR (`b ^ e`, Int -> Int -> Int).
+//
+// EXPONENTIATION BY SQUARING, as a runtime prim rather than an inline lowering
+// or a desugaring: the surface has no loop form to desugar into, and a
+// self-tail `recur` loop is where loops live here. One square and at most one
+// multiply per exponent bit, so `e` costs O(log e) — 63 steps at worst.
+//
+// SEMANTICS, the same decisions L3 makes for `*` (design §1/§9):
+//   * `e >= 0`  -> the exact product with i64 two's-complement WRAP, which is
+//                  what `*` already does (2^64 answers 0);
+//   * `0 ^ 0`   -> 1 (the loop's accumulator start, the standard convention);
+//   * `e < 0`   -> a NAMED HALT, never a quiet 0: an integer power with a
+//                  negative exponent has no i64 value, and a wrong-quiet answer
+//                  is the class this whole unit exists to remove.
+//
+// The exponent is read as a WORD (`payload`) because it is an Int, and shifted
+// LOGICALLY (`>>>`): the sign was rejected above, so the shift only ever sees
+// non-negative bits.
+defun Rt.powGo(b : val, e : val, acc : val) -> val {
+  word n = payload(e, 0);
+  if (mkbool(n == 0)) {
+    return acc;
+  } else {
+    if (mkbool((n & 1) == 1)) {
+      recur(mknum(payload(b, 0) * payload(b, 0)), mknum(n >>> 1), mknum(payload(acc, 0) * payload(b, 0)));
+    } else {
+      recur(mknum(payload(b, 0) * payload(b, 0)), mknum(n >>> 1), acc);
+    }
+  }
+}
+defun Rt.pow(b : val, e : val) -> val {
+  word n = payload(e, 0);
+  if (mkbool(n < 0)) {
+    call Rt.die(rawstr("qbe-rt: negative exponent: `^` requires an exponent >= 0"));
+    return mknil;
+  }
+  return call Rt.powGo(b, e, mknum(1));
+}
 defun Rt.f/(a : val, bb : val) -> val {
   return mkflt(fload(call Rt.asF(a)) f/ fload(call Rt.asF(bb)));
 }

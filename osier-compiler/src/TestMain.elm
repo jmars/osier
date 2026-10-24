@@ -21,6 +21,8 @@ import Set
 import Char.Extra exposing (utf8ByteLength)
 import Dict exposing (Dict)
 import Mid.Audit as Audit
+import IntegerLiteral exposing (IntegerLiteral(..))
+import ParserFast
 import Mid.Ir exposing (Alt, AltKind(..), Binder, Defun, Exp(..), FfiWidth(..), LetBinder(..), Lit(..), MemWidth(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), UnsafeNode(..), ValuePath)
 import Mid.Module as MidModule
 import Mid.Qbe.Il as Il
@@ -84,10 +86,10 @@ checks rt runtimeMidText =
       -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
       -- the frameZero loop), so an empty or truncated load turns it RED,
       -- loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (349 defuns — perf U1 added THREE: Rt.join/Rt.joinLen/Rt.joinFill, the linear String.join; zighost Z2/Z3 added Rt.vecStorePlain/Rt.vecStoreYoung/Rt.globalClosure (GC NURSERY added the ten scavenge-family defuns; O5 added the five string-stream registry + the nine intern-table defuns + seat 3's values-table walk) — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (351 defuns — L1 added TWO: Rt.pow/Rt.powGo, the `^` prim; perf U1 added THREE — perf U1 added THREE: Rt.join/Rt.joinLen/Rt.joinFill, the linear String.join; zighost Z2/Z3 added Rt.vecStorePlain/Rt.vecStoreYoung/Rt.globalClosure (GC NURSERY added the ten scavenge-family defuns; O5 added the five string-stream registry + the nine intern-table defuns + seat 3's values-table walk) — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 349
+                List.length ast == 351
 
             Err _ ->
                 False
@@ -682,6 +684,85 @@ checks rt runtimeMidText =
             Err _ ->
                 False
         )
+    -- ===== L3-U1: the exact (i64) literal lane =====
+    -- Unit-level counterparts of the gate's intbig/inttoobig rows. The parser
+    -- rows are the FALSIFIER the design names (§7 U1): before this unit
+    -- `9223372036854775807` was a parse error and `9007199254740993` parsed as
+    -- 9007199254740992 — so these fail before and pass after.
+    , check "L3-U1 parser: a 19-digit literal is carried EXACTLY (the digits, not a host number)"
+        (case ParserFast.run (ParserFast.integerDecimalOrHexadecimalMapWithRangeExact (\_ lit -> lit) (\_ lit -> lit)) "9223372036854775807" of
+            Ok lit ->
+                IntegerLiteral.decimalText lit == "9223372036854775807"
+
+            Err _ ->
+                False
+        )
+    , check "L3-U1 parser: 2^53+1 is EXACT (the old accumulator rounded it to 2^53)"
+        (case ParserFast.run (ParserFast.integerDecimalMapWithRangeExact (\_ lit -> lit)) "9007199254740993" of
+            Ok lit ->
+                IntegerLiteral.decimalText lit == "9007199254740993"
+
+            Err _ ->
+                False
+        )
+    , check "L3-U1 parser: the boundary is EXACT both ways — 2^53 parses, 2^53+1 is a DIFFERENT literal"
+        (case ( ParserFast.run (ParserFast.integerDecimalMapWithRangeExact (\_ lit -> lit)) "9007199254740992", ParserFast.run (ParserFast.integerDecimalMapWithRangeExact (\_ lit -> lit)) "9007199254740993" ) of
+            ( Ok a, Ok b ) ->
+                IntegerLiteral.decimalText a == "9007199254740992" && IntegerLiteral.decimalText b /= IntegerLiteral.decimalText a
+
+            _ ->
+                False
+        )
+    , check "L3-U1 parser: 2^63 is accepted as the INT64_MIN MAGNITUDE and nothing else (the negation rule's substrate)"
+        (case ParserFast.run (ParserFast.integerDecimalMapWithRangeExact (\_ lit -> lit)) "9223372036854775808" of
+            Ok lit ->
+                case lit of
+                    Int64MinMagnitude digits ->
+                        digits == "9223372036854775808"
+
+                    _ ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "L3-U1 parser: above 2^63 is a LOUD refusal naming the literal and the i64 range (not a rounded value)"
+        (case MidModule.parseAll [ "module T exposing (m)\n\nm = 9223372036854775809\n" ] of
+            Err msg ->
+                String.contains "9223372036854775809" msg
+                    && String.contains "is out of range: this language's Int is a signed 64-bit integer" msg
+
+            Ok _ ->
+                False
+        )
+    , check "L3-U1: a bare 2^63 literal is REFUSED at FromAst (it is the INT64_MIN magnitude, legal only under a unary minus) while -9223372036854775808 lowers"
+        (case ( MidModule.parseAll [ "module T exposing (m)\n\nm = 9223372036854775808\n" ], MidModule.parseAll [ "module T exposing (m)\n\nm = -9223372036854775808\n" ] ) of
+            ( Ok bare, Ok negated ) ->
+                case ( MidModule.collectAll bare, MidModule.collectAll negated ) of
+                    ( Ok [ bareUnit ], Ok [ negatedUnit ] ) ->
+                        case ( MidModule.compileUnit Dict.empty bareUnit, MidModule.compileUnit Dict.empty negatedUnit ) of
+                            ( Err msg, Ok _ ) ->
+                                String.contains "magnitude of INT64_MIN" msg
+
+                            _ ->
+                                False
+
+                    _ ->
+                        False
+
+            _ ->
+                False
+        )
+    , check "L3-U1: Mid.Module.parseOne SURFACES the parser's reason (it used to collapse every parse error to \"parse failed\")"
+        (case MidModule.parseAll [ "module T exposing (m)\n\nm = 99999999999999999999\n" ] of
+            Err msg ->
+                String.contains "parse error at row 3 column 5" msg
+                    && String.contains "99999999999999999999" msg
+                    && String.contains "out of range" msg
+
+            Ok _ ->
+                False
+        )
     , check "infer insertion is free extension (may duplicate)"
         (case inferSrc "module Main exposing (..)\n\nins r =\n    { r | x <- 1 }\n" of
             Ok unit ->
@@ -689,7 +770,7 @@ checks rt runtimeMidText =
                     && (case bodyOf "ins" unit.file of
                             Just (Expression.RecordUpdateExpression _ setters) ->
                                 case setters of
-                                    Node _ ( _, Node _ (Expression.Integer 1) ) :: [] ->
+                                    Node _ ( _, Node _ (Expression.Integer (SmallInteger 1)) ) :: [] ->
                                         True
 
                                     _ ->
@@ -907,8 +988,8 @@ checks rt runtimeMidText =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 309 defuns, all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram rt True True True) == 309
+    , check "rt program: 311 defuns (L1 added Rt.pow/Rt.powGo), all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
+        (List.length (rtProgram rt True True True) == 311
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
@@ -6943,7 +7024,7 @@ checks rt runtimeMidText =
                        , "Rt.intTab", "Rt.intern", "Rt.isChildBuiltin", "Rt.join", "Rt.joinFill", "Rt.joinLen"
                        , "Rt.main"
                        , "Rt.memGo", "Rt.metaGo", "Rt.mkTmpAt", "Rt.numFill", "Rt.numText", "Rt.number?"
-                       , "Rt.open", "Rt.openBodyTmpfile", "Rt.parseArg", "Rt.parseArgsGo", "Rt.printValue", "Rt.pvByte", "Rt.pvN"
+                       , "Rt.open", "Rt.openBodyTmpfile", "Rt.parseArg", "Rt.parseArgsGo", "Rt.pow", "Rt.powGo", "Rt.printValue", "Rt.pvByte", "Rt.pvN"
                        , "Rt.pvNeed", "Rt.pvRec", "Rt.pvS", "Rt.pvV", "Rt.pvZ", "Rt.read-byte", "Rt.read-file-as-string", "Rt.readFileGo"
                        , "Rt.readFull", "Rt.recAppend", "Rt.recAppendDataGo", "Rt.recAppendFind", "Rt.recAppendNamesGo", "Rt.recGet"
                        , "Rt.recGetGo", "Rt.recInsert", "Rt.recToChain", "Rt.recToChainGo", "Rt.recUpd", "Rt.recUpdCopy"
@@ -7013,7 +7094,7 @@ checks rt runtimeMidText =
     -- is now the append below; the loud Err moved to the key-agreement walk
     -- (row C), which is the collision/rename class the orphan check guarded.
     , check
-        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the one-hundred-and-twenty-seven appended keys (ZIGHOST Z1 added its eight root-registry defuns, Z4a its eight float-text defuns, Z4b its eight printer defuns, Z5 its boot pair) (the twenty stage-6 ABI keys + the fifty-three host defuns of stages 7A/7B/7C + stage 7 O3-fix's Rt.applyPartGo + O5's five string-stream registry defuns + O5 seat 2's nine intern-table defuns + O5 seat 3's Rt.valScanGo + O5 seat 4b's twelve entry-arg-parser/*argv* defuns) (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
+        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the one-hundred-and-twenty-nine appended keys (L1 added Rt.pow/Rt.powGo) (ZIGHOST Z1 added its eight root-registry defuns, Z4a its eight float-text defuns, Z4b its eight printer defuns, Z5 its boot pair) (the twenty stage-6 ABI keys + the fifty-three host defuns of stages 7A/7B/7C + stage 7 O3-fix's Rt.applyPartGo + O5's five string-stream registry defuns + O5 seat 2's nine intern-table defuns + O5 seat 3's Rt.valScanGo + O5 seat 4b's twelve entry-arg-parser/*argv* defuns) (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -7062,6 +7143,7 @@ checks rt runtimeMidText =
                                                  , "Rt.intBytesEq", "Rt.intFindGo", "Rt.intGrow", "Rt.intInsert", "Rt.intInsertAt"
                                                  , "Rt.intInsertGo", "Rt.intPairsCopy", "Rt.intStrCopy", "Rt.intTab"
                                                  , "Rt.main", "Rt.metaGo", "Rt.parseArg", "Rt.parseArgsGo"
+                                                 , "Rt.pow", "Rt.powGo"
                                                  , "Rt.printValue", "Rt.pvByte", "Rt.pvN", "Rt.pvNeed"
                                                  , "Rt.pvRec", "Rt.pvS", "Rt.pvV", "Rt.pvZ"
                                                  , "Rt.rootGrow", "Rt.rootPop", "Rt.rootPopTo", "Rt.rootPush"

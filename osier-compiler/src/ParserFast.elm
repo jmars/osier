@@ -9,6 +9,7 @@ module ParserFast exposing
     , keyword, keywordFollowedBy
     , anyChar, atLeastOneWhile, atLeastOneWhileWithoutLinebreak, whileMapWithRange, ifFollowedByWhileWithoutLinebreak, ifFollowedByWhileMapWithoutLinebreak, ifFollowedByWhileMapWithRangeWithoutLinebreak, ifFollowedByWhileValidateWithoutLinebreak, ifFollowedByWhileValidateMapWithRangeWithoutLinebreak, whileWithoutLinebreakAnd2PartUtf16ToResultAndThen, whileWithoutLinebreakAnd2PartUtf16ValidateMapWithRangeBacktrackableFollowedBySymbol
     , integerDecimalMapWithRange, integerDecimalOrHexadecimalMapWithRange, floatOrIntegerDecimalOrHexadecimalMapWithRange
+    , integerDecimalMapWithRangeExact, integerDecimalOrHexadecimalMapWithRangeExact, floatOrIntegerDecimalOrHexadecimalMapWithRangeExact
     , skipWhileWhitespaceFollowedBy, followedBySkipWhileWhitespace, nestableMultiCommentMapWithRange
     , map, validate, lazy
     , map2, map2WithStartLocation, map2WithRange, map3, map3WithStartLocation, map3WithRange, map4, map4WithRange, map5, map5WithStartLocation, map5WithRange, map6, map6WithStartLocation, map6WithRange, map7WithRange, map8WithStartLocation, map9WithRange
@@ -130,6 +131,7 @@ Once a path is chosen, it does not come back and try the others.
 
 import Char.Extra
 import Elm.Syntax.Range exposing (Location, Range)
+import IntegerLiteral exposing (IntegerLiteral(..))
 import Parser
 
 
@@ -1799,6 +1801,322 @@ floatOrIntegerDecimalOrHexadecimalMapWithRange rangeAndFloatToRes rangeAndIntDec
 
                         Nothing ->
                             Bad False (ExpectingNumber s0.row s0.col)
+        )
+
+
+-- ==================== THE EXACT (i64) LITERAL PARSERS ====================
+--
+-- The three parsers above accumulate the literal in a host `Int` and then ask
+-- whether that accumulation was exact.  The three below never accumulate in a
+-- host Int at all: they SCAN the literal's digits, hand them to
+-- `IntegerLiteral`, and receive a value that is exact on every host by
+-- construction (two 32-bit limbs, every intermediate under 2^36).
+--
+-- WHY BOTH FAMILIES EXIST.  The `Int`-returning ones stay for the Mid lane
+-- (`Mid.RtLang.Parse`), whose AST node is `EInt Int` and which therefore has
+-- its own, narrower accept set — |n| <= 2^53, the range BOTH hosts hold
+-- exactly.  The Osier frontend (the language this compiler compiles) uses the
+-- exact ones, so its literal range is the i64 range the runtime already
+-- implements.  Two lanes, two accept sets, both stated; neither is a silent
+-- rounding of the other.
+--
+-- The accept set of the exact parsers, stated once: decimal digits
+-- [-2^63 + 1 .. 2^63 - 1] plus EXACTLY the magnitude 2^63 (which only a
+-- negating context may use — `Int64MinMagnitude`), hex the same bound; outside
+-- it a LOUD parse error naming the literal and the range.  Leading zeros keep
+-- the old rule (a leading `0` is the whole literal in decimal; hex may carry
+-- them), so the accept set is a SUPERSET of the old one only in magnitude.
+
+
+{-| The digits of a decimal literal at `offset` — the scan the accumulator
+above does inline, with the same leading-`0` rule (a `0` is the whole
+literal, so `0123` is `0` followed by `123`, exactly as before).
+-}
+decimalLiteralScan : Int -> String -> Maybe { digitsStart : Int, end : Int }
+decimalLiteralScan offset src =
+    if String.slice offset (offset + 1) src == "0" then
+        Just { digitsStart = offset, end = offset + 1 }
+
+    else if isDecimalDigitString (String.slice offset (offset + 1) src) then
+        Just { digitsStart = offset, end = decimalRunEnd (offset + 1) src }
+
+    else
+        Nothing
+
+
+decimalOrHexadecimalLiteralScan : Int -> String -> Maybe { base : Base, digitsStart : Int, end : Int }
+decimalOrHexadecimalLiteralScan offset src =
+    if String.slice offset (offset + 1) src == "0" && String.slice (offset + 1) (offset + 2) src == "x" then
+        let
+            end : Int
+            end =
+                hexadecimalRunEnd (offset + 2) src
+        in
+        if end == offset + 2 then
+            -- `0x` with no hex digits: the accumulator above answers -1 here.
+            Nothing
+
+        else
+            Just { base = Hexadecimal, digitsStart = offset + 2, end = end }
+
+    else
+        case decimalLiteralScan offset src of
+            Nothing ->
+                Nothing
+
+            Just scanned ->
+                Just { base = Decimal, digitsStart = scanned.digitsStart, end = scanned.end }
+
+
+decimalRunEnd : Int -> String -> Int
+decimalRunEnd offset src =
+    if isDecimalDigitString (String.slice offset (offset + 1) src) then
+        decimalRunEnd (offset + 1) src
+
+    else
+        offset
+
+
+hexadecimalRunEnd : Int -> String -> Int
+hexadecimalRunEnd offset src =
+    if isHexadecimalDigitString (String.slice offset (offset + 1) src) then
+        hexadecimalRunEnd (offset + 1) src
+
+    else
+        offset
+
+
+isDecimalDigitString : String -> Bool
+isDecimalDigitString str =
+    case String.toList str of
+        [ c ] ->
+            let
+                code : Int
+                code =
+                    Char.toCode c
+            in
+            code >= 48 && code <= 57
+
+        _ ->
+            False
+
+
+isHexadecimalDigitString : String -> Bool
+isHexadecimalDigitString str =
+    case String.toList str of
+        [ c ] ->
+            let
+                code : Int
+                code =
+                    Char.toCode c
+            in
+            (code >= 48 && code <= 57)
+                || (code >= 97 && code <= 102)
+                || (code >= 65 && code <= 70)
+
+        _ ->
+            False
+
+
+{-| The loud refusal. The POSITION is the `DeadEnd`'s own (every consumer
+renders it), so the text carries the literal and the range only — `Mid.Module`
+composes "parse error at row R column C: " in front of it.
+-}
+literalValueProblem : String -> String -> Int -> Int -> Problem
+literalValueProblem base digits row col =
+    ExpectingCustom row col
+        ("integer literal `"
+            ++ base
+            ++ digits
+            ++ "` is out of range: this language's Int is a signed 64-bit integer, [-9223372036854775808, 9223372036854775807]"
+        )
+
+
+literalFromScan : String -> { base : Base, digitsStart : Int, end : Int } -> Maybe IntegerLiteral
+literalFromScan src scanned =
+    let
+        digits : String
+        digits =
+            String.slice scanned.digitsStart scanned.end src
+    in
+    case scanned.base of
+        Decimal ->
+            IntegerLiteral.fromDecimalDigits digits
+
+        Hexadecimal ->
+            IntegerLiteral.fromHexDigits digits
+
+
+scanDigitsProblem : String -> { base : Base, digitsStart : Int, end : Int } -> Int -> Int -> Problem
+scanDigitsProblem src scanned row col =
+    let
+        digits : String
+        digits =
+            String.slice scanned.digitsStart scanned.end src
+    in
+    case scanned.base of
+        Decimal ->
+            literalValueProblem "" digits row col
+
+        Hexadecimal ->
+            literalValueProblem "0x" digits row col
+
+
+{-| `integerDecimalMapWithRange` with the literal carried exactly. -}
+integerDecimalMapWithRangeExact : (Range -> IntegerLiteral -> res) -> Parser res
+integerDecimalMapWithRangeExact rangeAndIntToRes =
+    Parser
+        (\s0 ->
+            case decimalLiteralScan s0.offset s0.src of
+                Nothing ->
+                    Bad False (ExpectingNumber s0.row s0.col)
+
+                Just scanned ->
+                    case IntegerLiteral.fromDecimalDigits (String.slice scanned.digitsStart scanned.end s0.src) of
+                        Nothing ->
+                            Bad True (scanDigitsProblem s0.src { base = Decimal, digitsStart = scanned.digitsStart, end = scanned.end } s0.row s0.col)
+
+                        Just lit ->
+                            let
+                                newColumn : Int
+                                newColumn =
+                                    s0.col + (scanned.end - s0.offset)
+                            in
+                            Good
+                                (rangeAndIntToRes
+                                    { start = { row = s0.row, column = s0.col }
+                                    , end = { row = s0.row, column = newColumn }
+                                    }
+                                    lit
+                                )
+                                { src = s0.src
+                                , offset = scanned.end
+                                , indent = s0.indent
+                                , row = s0.row
+                                , col = newColumn
+                                }
+        )
+
+
+{-| `integerDecimalOrHexadecimalMapWithRange` with the literal carried
+exactly (so a big HEX literal arrives as canonical DECIMAL digits).
+-}
+integerDecimalOrHexadecimalMapWithRangeExact : (Range -> IntegerLiteral -> res) -> (Range -> IntegerLiteral -> res) -> Parser res
+integerDecimalOrHexadecimalMapWithRangeExact rangeAndIntDecimalToRes rangeAndIntHexadecimalToRes =
+    Parser
+        (\s0 ->
+            case decimalOrHexadecimalLiteralScan s0.offset s0.src of
+                Nothing ->
+                    Bad False (ExpectingNumber s0.row s0.col)
+
+                Just scanned ->
+                    case literalFromScan s0.src scanned of
+                        Nothing ->
+                            Bad True (scanDigitsProblem s0.src scanned s0.row s0.col)
+
+                        Just lit ->
+                            let
+                                newColumn : Int
+                                newColumn =
+                                    s0.col + (scanned.end - s0.offset)
+
+                                range : Range
+                                range =
+                                    { start = { row = s0.row, column = s0.col }
+                                    , end = { row = s0.row, column = newColumn }
+                                    }
+                            in
+                            Good
+                                (case scanned.base of
+                                    Decimal ->
+                                        rangeAndIntDecimalToRes range lit
+
+                                    Hexadecimal ->
+                                        rangeAndIntHexadecimalToRes range lit
+                                )
+                                { src = s0.src
+                                , offset = scanned.end
+                                , indent = s0.indent
+                                , row = s0.row
+                                , col = newColumn
+                                }
+        )
+
+
+{-| `floatOrIntegerDecimalOrHexadecimalMapWithRange` with the INTEGER arms
+carried exactly.  The FLOAT arm is untouched (its own range/exactness story is
+out of L3's scope; see the design's audit item).
+-}
+floatOrIntegerDecimalOrHexadecimalMapWithRangeExact : (Range -> Float -> res) -> (Range -> IntegerLiteral -> res) -> (Range -> IntegerLiteral -> res) -> Parser res
+floatOrIntegerDecimalOrHexadecimalMapWithRangeExact rangeAndFloatToRes rangeAndIntDecimalToRes rangeAndIntHexadecimalToRes =
+    Parser
+        (\s0 ->
+            case decimalOrHexadecimalLiteralScan s0.offset s0.src of
+                Nothing ->
+                    Bad False (ExpectingNumber s0.row s0.col)
+
+                Just scanned ->
+                    let
+                        offsetAfterFloat : Int
+                        offsetAfterFloat =
+                            skipFloatAfterIntegerDecimal scanned.end s0.src
+                    in
+                    if offsetAfterFloat == -1 then
+                        case literalFromScan s0.src scanned of
+                            Nothing ->
+                                Bad True (scanDigitsProblem s0.src scanned s0.row s0.col)
+
+                            Just lit ->
+                                let
+                                    newColumn : Int
+                                    newColumn =
+                                        s0.col + (scanned.end - s0.offset)
+
+                                    range : Range
+                                    range =
+                                        { start = { row = s0.row, column = s0.col }
+                                        , end = { row = s0.row, column = newColumn }
+                                        }
+                                in
+                                Good
+                                    (case scanned.base of
+                                        Decimal ->
+                                            rangeAndIntDecimalToRes range lit
+
+                                        Hexadecimal ->
+                                            rangeAndIntHexadecimalToRes range lit
+                                    )
+                                    { src = s0.src
+                                    , offset = scanned.end
+                                    , indent = s0.indent
+                                    , row = s0.row
+                                    , col = newColumn
+                                    }
+
+                    else
+                        case String.toFloat (String.slice s0.offset offsetAfterFloat s0.src) of
+                            Just float ->
+                                let
+                                    newColumn : Int
+                                    newColumn =
+                                        s0.col + (offsetAfterFloat - s0.offset)
+                                in
+                                Good
+                                    (rangeAndFloatToRes
+                                        { start = { row = s0.row, column = s0.col }
+                                        , end = { row = s0.row, column = newColumn }
+                                        }
+                                        float
+                                    )
+                                    { src = s0.src
+                                    , offset = offsetAfterFloat
+                                    , indent = s0.indent
+                                    , row = s0.row
+                                    , col = newColumn
+                                    }
+
+                            Nothing ->
+                                Bad False (ExpectingNumber s0.row s0.col)
         )
 
 

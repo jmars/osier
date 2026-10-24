@@ -30,6 +30,7 @@ For example:
 
 import Elm.Syntax.ModuleName as ModuleName exposing (ModuleName)
 import Elm.Syntax.Node as Node exposing (Node(..))
+import IntegerLiteral exposing (IntegerLiteral)
 
 
 {-| Custom type for all patterns such as:
@@ -56,8 +57,8 @@ type Pattern
     | UnitPattern
     | CharPattern Char
     | StringPattern String
-    | IntPattern Int
-    | HexPattern Int
+    | IntPattern IntegerLiteral
+    | HexPattern IntegerLiteral
     | FloatPattern Float
     | TuplePattern (List (Node Pattern))
     | RecordPattern (List (Node String))

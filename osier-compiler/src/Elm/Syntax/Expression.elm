@@ -33,6 +33,7 @@ import Elm.Syntax.ModuleName as ModuleName exposing (ModuleName)
 import Elm.Syntax.Node as Node exposing (Node(..))
 import Elm.Syntax.Pattern as Pattern exposing (Pattern)
 import Elm.Syntax.Range exposing (Range)
+import IntegerLiteral exposing (IntegerLiteral)
 import Elm.Syntax.Signature as Signature exposing (Signature)
 
 
@@ -118,8 +119,8 @@ type Expression
     | IfBlock (Node Expression) (Node Expression) (Node Expression)
     | PrefixOperator String
     | Operator String
-    | Integer Int
-    | Hex Int
+    | Integer IntegerLiteral
+    | Hex IntegerLiteral
     | Floatable Float
     | Negation (Node Expression)
     | Literal String

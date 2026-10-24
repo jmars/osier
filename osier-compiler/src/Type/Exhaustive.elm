@@ -31,6 +31,7 @@ decide compatibility and bind the row tails.
 
 -}
 
+import IntegerLiteral
 import Dict exposing (Dict)
 import Elm.Syntax.Node as Node exposing (Node)
 import Elm.Syntax.Pattern as Pattern exposing (Pattern(..))
@@ -89,11 +90,11 @@ fromPattern pat =
         StringPattern s ->
             PLit s
 
-        IntPattern n ->
-            PLit (String.fromInt n)
+        IntPattern lit ->
+            PLit (IntegerLiteral.decimalText lit)
 
-        HexPattern n ->
-            PLit (String.fromInt n)
+        HexPattern lit ->
+            PLit (IntegerLiteral.decimalText lit)
 
         FloatPattern f ->
             PLit (String.fromFloat f)

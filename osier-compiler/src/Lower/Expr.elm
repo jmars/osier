@@ -55,6 +55,10 @@ binaryPrims =
     , ( "-", "-" )
     , ( "*", "*" )
     , ( "//", "/" )
+      -- L1: `^` lowers to the runtime prim `Rt.pow` (square-and-multiply, the
+      -- named halt on a negative exponent, wrap on overflow). The parser
+      -- already carries `^` at Elm's precedence 8, right-associative.
+    , ( "^", "pow" )
     , ( "/", "f/" )
     , ( "==", "=" )
     , ( "<", "<" )

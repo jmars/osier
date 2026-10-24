@@ -155,10 +155,18 @@ type alias Binder =
 
 
 -- ============================ LITERALS ============================
+-- `LNumber` holds a literal the HOST holds exactly (|n| <= 2^53) and emits as
+-- it always has. `LNumberBig` holds the VALIDATED canonical decimal digits of
+-- a literal outside that range (optional leading `-`): consumers emit the
+-- digits, never a number, so an i64 literal survives a host whose Int is a
+-- double (design §3.4). The two are distinct CONSTRUCTORS, not a flag, so a
+-- consumer that forgets the big arm is an Elm exhaustiveness ERROR rather than
+-- a silent rounding — the VR3b2 trap class.
 
 
 type Lit
     = LNumber Int
+    | LNumberBig String
     | LFloat Float
     | LString String
     | LSymbol String

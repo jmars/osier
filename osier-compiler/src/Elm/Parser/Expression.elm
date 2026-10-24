@@ -887,7 +887,7 @@ parameterPatternsEqual =
 
 numberExpression : Parser (WithComments (Node Expression))
 numberExpression =
-    ParserFast.floatOrIntegerDecimalOrHexadecimalMapWithRange
+    ParserFast.floatOrIntegerDecimalOrHexadecimalMapWithRangeExact
         (\range n ->
             { comments = Rope.empty
             , syntax = Node range (Floatable n)

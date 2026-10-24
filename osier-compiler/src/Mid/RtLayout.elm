@@ -459,10 +459,6 @@ wordLayout =
 -- exact i64 (no truncation, no overflow), outside it the emitter refuses the
 -- literal by name instead of silently dropping its top three bits.
 --
--- Written as `0 - 2^60` rather than a negative literal because our own
--- compiler (which compiles this file) does not implement `^` at all — MEASURED
--- at VR3b2: `2 ^ tagBits` broke the self-host emit while every Elm-side gate
--- stayed green.
 -- The bound is EXCLUSIVE IN MAGNITUDE and stated once: a word-arm fixnum is an
 -- `n` with `-wordFixnumLimit <= n < wordFixnumLimit`, i.e. 2^60.  It is not
 -- written as the inclusive pair [-2^60, 2^60-1] because THIS COMPILER'S Int IS
@@ -471,11 +467,19 @@ wordLayout =
 -- out-of-range value and the check silently passes it — MEASURED at VR3b2, the
 -- `2^60` literal was emitted as `n * 8` instead of being refused.  A bound whose
 -- two spellings are the same number cannot express a range.
+--
+-- L3-U1 NOTE: the product below was originally the only way to SPELL 2^60 (our
+-- own frontend rejected a 19-digit literal outright: "err parse failed" from
+-- the self-host emit, every Elm-side gate green — MEASURED at VR3b2).  The
+-- exact parser makes the plain literal legal now, but re-spelling it is
+-- deliberately NOT done here: `abi-fingerprint.sh`'s `gc:layout` component
+-- digests this declaration's TEXT, so the re-spelling moves the committed
+-- seed's ABI marker and makes `tools/qbe-bootstrap.sh` REFUSE — measured, for a
+-- change that moves no layout NUMBER (2^60 either way).  The re-spelling
+-- belongs in the commit that re-freezes the seed, not in a parser unit.
 wordFixnumLimit : Int
 wordFixnumLimit =
-    -- 2^60, spelled as a product: our own compiler's Elm parser REJECTS a
-    -- 19-digit integer literal outright ("err parse failed" from the self-host
-    -- emit, with every Elm-side gate green — MEASURED at VR3b2).
+    -- 2^60, spelled as a product (see the note above).
     1024 * 1024 * 1024 * 1024 * 1024 * 1024
 
 

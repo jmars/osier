@@ -30,6 +30,7 @@ import Lower.Expr as Expr
 import Lower.Resolve as Resolve
 import Mid.FromAst as FromAst
 import Mid.Ir exposing (Defun, Exp(..), Program)
+import Parser
 
 
 
@@ -61,8 +62,79 @@ parseOne source =
         Ok file ->
             Ok file
 
-        Err _ ->
-            Err "parse failed"
+        Err deadEnds ->
+            Err (parseErrorText deadEnds)
+
+
+{-| THE PARSE PROBLEM, RENDERED — not collapsed to `"parse failed"`.
+
+Every diagnostic the parser produces is a `Parser.Problem` carrying its own
+text (the literal-range message is one: `ParserFast`'s `ExpectingCustom`), and
+the old two-word collapse threw that text away: a 19-digit literal reported
+`err parse failed` and nothing else (MEASURED at VR3b2). A refusal a reader
+cannot act on is barely a refusal, so the first problem is spelled out with its
+position. The `"parse failed"` fallback survives only for the degenerate
+empty-list case.
+-}
+parseErrorText : List Parser.DeadEnd -> String
+parseErrorText deadEnds =
+    case deadEnds of
+        de :: _ ->
+            "parse error at row "
+                ++ String.fromInt de.row
+                ++ " column "
+                ++ String.fromInt de.col
+                ++ ": "
+                ++ parseProblemText de.problem
+
+        [] ->
+            "parse failed"
+
+
+parseProblemText : Parser.Problem -> String
+parseProblemText problem =
+    case problem of
+        Parser.Expecting str ->
+            "expected " ++ str
+
+        Parser.ExpectingInt ->
+            "expected an integer"
+
+        Parser.ExpectingHex ->
+            "expected hexadecimal digits"
+
+        Parser.ExpectingOctal ->
+            "expected octal digits"
+
+        Parser.ExpectingBinary ->
+            "expected binary digits"
+
+        Parser.ExpectingFloat ->
+            "expected a float"
+
+        Parser.ExpectingNumber ->
+            "expected a number"
+
+        Parser.ExpectingVariable ->
+            "expected a variable"
+
+        Parser.ExpectingSymbol str ->
+            "expected `" ++ str ++ "`"
+
+        Parser.ExpectingKeyword keyword ->
+            "expected keyword `" ++ keyword ++ "`"
+
+        Parser.ExpectingEnd ->
+            "unexpected input after the expression"
+
+        Parser.UnexpectedChar ->
+            "unexpected character"
+
+        Parser.Problem message ->
+            message
+
+        Parser.BadRepeat ->
+            "repetition"
 
 
 collectAll : List File.File -> Result String (List Unit)

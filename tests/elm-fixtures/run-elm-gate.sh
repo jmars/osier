@@ -348,6 +348,18 @@ intproc() {
   add_check natproc "$name" "$fn" "$st|$out|$err" "$*" "" "$FIX/$name.elm" "" intproc "$FIX/$name.elm"
 }
 
+# intreject <name> <expected-substring>
+#
+# THE LOUD-REFUSAL ROW (L3-U1).  Compiles the fixture on demand and requires the
+# compiler's error payload to CONTAIN <expected-substring> — the "does it refuse,
+# and does it say why" half of the literal-range work.  Like intproc it registers
+# NO compile group (the corpus baseline pins the batch artifact set at 159
+# groups); the row owns its own compile.
+intreject() {
+  local name="$1" exp="$2"
+  add_check natreject "$name" "" "$exp" "" "" "$FIX/$name.elm" "" intreject
+}
+
 run fib        fib        "$(read_expected fib)"        10
 run rtl1       main       "$(read_expected rtl1)"
 run rtl2       main       "$(read_expected rtl2)"
@@ -822,6 +834,59 @@ intproc intcorner truncdiv 0   "-3" ""  7
 intproc intcorner divzero  1   ""   'qbe-rt: division by zero: `// 0` has no i64 value'  0
 intproc intcorner minbyneg 1   ""   'qbe-rt: division overflow: `INT64_MIN // -1` is 2^63, which is not an i64'  1
 
+# ==================== L3-U1: the i64 LITERAL RANGE ====================
+# The frontend's accept set is the i64 range now, carried EXACTLY (two-arm
+# `Lit`: a host-exact small arm and a validated-digit-string big arm).  Every
+# literal in intbig.elm is above the OLD bound (2^53), so before this unit not
+# one of these rows could even be written — that is the fail-before half.
+#
+#   maxi64   INT64_MAX, digit for digit (a double rounds it UP to 2^63).
+#   mini64   INT64_MIN, the one value legal only under a unary minus.
+#   above53  2^53+1 — the "small but inexact" half of the defect.
+#   bigmul   2^60-1, the VR3b2 trap value (a double cannot tell it from 2^60).
+#   bigdiff  the same value reached by i64 ADDITION (the general prim path,
+#            since the raw-Int fast path does not admit a big literal).
+#   hexmax   the same bound in HEX, arriving as canonical decimal digits.
+intproc intbig maxi64  0 "9223372036854775807"  ""
+intproc intbig mini64  0 "-9223372036854775808" ""
+intproc intbig above53 0 "9007199254740993"     ""
+intproc intbig bigmul  0 "1152921504606846975"  ""
+intproc intbig bigdiff 0 "1152921504606846976"  ""
+intproc intbig hexmax  0 "9223372036854775807"  ""
+# ... and a big literal in PATTERN position: `MLitEq` carries the digits and
+# the runtime compare is an i64 compare, so the test is exact over the range.
+# The argv argument goes through the runtime's own parser, which is exact too.
+intproc intbig patmatch 0 "1" "" 9223372036854775807
+intproc intbig patmatch 0 "0" "" 5
+# THE LOUD REFUSALS. Three routes, because the range is decided in three
+# places: the parser (> 2^63), and FromAst's negation site for the bare 2^63
+# magnitude (decimal and hex), which the parser must accept so that
+# -9223372036854775808 parses.
+# SINGLE-QUOTED on purpose: the expected text contains BACKTICKS, and a
+# backtick inside double quotes is command substitution (it silently ate the
+# literal from these three expectations the first time they were written).
+intreject inttoobigparse 'parse error at row 16 column 5: integer literal `99999999999999999999` is out of range: this language'"'"'s Int is a signed 64-bit integer'
+intreject inttoobig      'integer literal `9223372036854775808` is out of range: it is the magnitude of INT64_MIN'
+intreject inttoobighex   'integer literal `9223372036854775808` is out of range: it is the magnitude of INT64_MIN'
+
+# ==================== L1: the `^` operator ====================
+# `^` was already in the parser (Elm's precedence 8, right-associative); what did
+# not exist was a checker row, a lowering row and a runtime prim, so every `^`
+# in a program was an unknown-operator error. These rows pin the semantics the
+# design decides (§9): exponentiation by squaring, i64 wrap (consistent with
+# `*`), `0 ^ 0 = 1`, and a NAMED HALT on a negative exponent rather than a quiet 0.
+#
+#   powsmall  2 ^ 10            -> 1024
+#   powzero   0 ^ 0             -> 1        (the accumulator's start)
+#   powwrap   2 ^ 64            -> 0        (i64 wrap, exactly as `*` does)
+#   powbig    3 ^ 39            -> 4052555153018976267 (exact, big)
+#   powneg    2 ^ (0 - 1)       -> rc 1 + the runtime's message
+intproc intpow powsmall 0 "1024"  ""
+intproc intpow powzero  0 "1"     ""
+intproc intpow powwrap  0 "0"     ""
+intproc intpow powbig   0 "4052555153018976267" ""
+intproc intpow powneg   1 ""      'qbe-rt: negative exponent: `^` requires an exponent >= 0'  1
+
 # ==================== ELM_GATE_MATRIX: dump the registry ====================
 # ELM_GATE_MATRIX=1 prints every REGISTERED check as TSV (one row per check, in
 # declaration order) and exits WITHOUT compiling or running anything; with any
@@ -1010,6 +1075,18 @@ dispatch() {
       fi
       echo "PASS $name ($qname native: $ctl -> $exp @1MiB, $past -> SIGSEGV exit $past_rc, $deep -> $deep_exp @raised)"
       pass=$((pass+1))
+      ;;
+    natreject)
+      # The loud-refusal row (see the intreject helper): the compile's error
+      # payload must be an `err ` and must contain the expected text.
+      mod=$(module_name "$fixfile")
+      rel_fix="${fixfile#"$ROOT"/}"
+      ( cd "$CDIR" && QBE_ENTRY="$mod.main" timeout 120 node run.js "$fixfile" "$OUT/$name.reject.ssa" >/dev/null 2>&1 )
+      got="$(cat "$OUT/$name.reject.ssa" 2>/dev/null || true)"
+      case "$got" in
+        err*"$exp"*) echo "PASS $name: $got"; pass=$((pass+1));;
+        *) echo "FAIL $name: expected err containing [$exp], got [$got]"; fail=$((fail+1));;
+      esac
       ;;
     natproc)
       # The PROCESS-shaped native row (see the intproc helper): exit status and

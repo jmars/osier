@@ -108,6 +108,10 @@ operatorSchemes =
         , ( "-", flexBinop FNumber )
         , ( "*", flexBinop FNumber )
         , ( "//", mono (func [ tInt, tInt ] tInt) )
+          -- L1: `^` is Int -> Int -> Int (the runtime prim `Rt.pow`), NOT the
+          -- Elm `number` surface: exponentiation of a Float has no seat that
+          -- reads it, and Int-only is what the design decides.
+        , ( "^", mono (func [ tInt, tInt ] tInt) )
         , ( "/", mono (func [ tFloat, tFloat ] tFloat) )
         , ( "<", cmpOp )
         , ( "<=", cmpOp )

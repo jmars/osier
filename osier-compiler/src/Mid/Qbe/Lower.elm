@@ -94,6 +94,7 @@ module Mid.Qbe.Lower exposing (lower, lowerWith)
 -- (Exp's Con variant is deliberately NOT exposed: Mid.Qbe.Il.Arg also has a
 -- Il.Con (the integer-constant argument), and Elm cannot qualify constructors
 -- in patterns — exposing only one of the two keeps the pattern arms clean.)
+import IntegerLiteral
 import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), FfiWidth(..), Lambda, LetBinder(..), Lit(..), Match(..), MemWidth(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), Step(..), UnsafeNode(..), ValuePath(..))
 import Mid.Rt as MidRt
 import Mid.RtGc as RtGc
@@ -587,6 +588,12 @@ wordArmUnported exp =
             -- AREA 2, THE FIXNUM IMMEDIATE.  `lowerLitWord` owns the i61 range
             -- decision (it refuses an out-of-range literal by NAME, as area 4's
             -- boxing gap) so there is one place that decides, not two.
+            Nothing
+
+        Lit (LNumberBig _) ->
+            -- Same seat as `LNumber`: an immediate number needs no heap object
+            -- here, and `lowerLitWord` owns the (area-4) decision about one it
+            -- cannot inline.  Under the VALUE arm `lowerLitVal` emits it.
             Nothing
 
         Lit (LBoolean _) ->
@@ -3728,6 +3735,16 @@ rawWordArg exp s =
         Lit (LNumber n) ->
             Ok ( Il.Con n, s )
 
+        Lit (LNumberBig digits) ->
+            -- A raw WORD constant is `Il.Con`-shaped, i.e. a host number, so a
+            -- literal above 2^53 has no honest form in this position.  Loud,
+            -- never rounded.
+            Err
+                ("a raw-word literal above 2^53 (`"
+                    ++ digits
+                    ++ "`) has no exact `Il.Con` form — spell it as a value literal instead"
+                )
+
         Var id ->
             case Dict.get id s.rawWord of
                 Just a ->
@@ -4916,6 +4933,24 @@ lowerLitWord lit dest s =
             else
                 Ok (emit (Store StoreL (Il.Con (n * 8)) (Il.Tmp (slotTmp dest))) s)
 
+        LNumberBig digits ->
+            -- L3-U1/U3 BOUNDARY, stated rather than papered over: a literal
+            -- above 2^53 is above the parser's OLD bound, so it never reached
+            -- this arm before, and under the word arm it needs the exact i61
+            -- range decision plus an exact `n * 8` (both AREA 4 work).  Until
+            -- that exists the word arm REFUSES it by name — never a rounded
+            -- `n * 8`, which is the VR3b2 trap this whole unit removes.
+            Err
+                (wordArmUnsupported
+                    (wordArea
+                        "AREA 4 (ARITHMETIC — THE i61 OVERFLOW/BOXING PATH)"
+                        ("the literal "
+                            ++ digits
+                            ++ " — it is above 2^53, so its i61 range check and its `n * 8` fixnum shift have to be done in the exact domain (AREA 4); emitting them from a host number would silently round it"
+                        )
+                    )
+                )
+
         LBoolean b ->
             Ok (emit (Store StoreL (Il.Con (if b then s.layout.tagTrue else s.layout.tagFalse)) (Il.Tmp (slotTmp dest))) s)
 
@@ -4952,6 +4987,81 @@ lowerLitVal lit dest s =
                     afterTag (storeTag s.layout.tagNumber)
             in
             Ok (emit (Store StoreL (Il.Con n) (Il.Tmp d8)) s1)
+
+        LNumberBig digits ->
+            -- THE EXACT EMISSION (L3-U1).  The digits are the value; they reach
+            -- the payload as three base-2^26 limbs (`IntegerLiteral.limbsOf`),
+            -- because each limb is host-exact and the sum is the i64 the
+            -- literal denotes (two's-complement wrap does the rest).
+            --
+            -- WHY NOT `Il.Con <digits>`: `Il.Con` carries a host `Int`, and
+            -- that is exactly the number this arm exists because we do not
+            -- have.  Emitting `storel <digits>` verbatim is the design's
+            -- stated shape (§3.4); it needs a new `Arg` constructor read by all
+            -- 85 `Con` sites, and this limb form is the same exactness with no
+            -- new `Arg` arm — the emitted .ssa says two `mul`s and two `add`s
+            -- where the design's sketch says one `storel`.
+            case IntegerLiteral.limbsOf digits of
+                Nothing ->
+                    Err
+                        ("LNumberBig \""
+                            ++ digits
+                            ++ "\" is not a decimal digit string — the parser validates before this form exists, so this is a compiler bug"
+                        )
+
+                Just limbs ->
+                    let
+                        ( d8, s1 ) =
+                            afterTag (storeTag s.layout.tagNumber)
+
+                        ( t1, s2 ) =
+                            freshTmp s1
+
+                        ( t2, s3 ) =
+                            freshTmp s2
+
+                        ( t3, s4 ) =
+                            freshTmp s3
+
+                        ( t4, s5 ) =
+                            freshTmp s4
+
+                        ( t5, s6 ) =
+                            freshTmp s5
+
+                        -- `l0 + l1 * 2^26 + l2 * 2^52`, then `0 - v` for a
+                        -- negative literal.  2^26 and 2^52 are powers of two,
+                        -- so both constants are exact on every host, and the
+                        -- intermediate products WRAP in two's complement —
+                        -- which is exactly the i64 bit pattern wanted (a
+                        -- 2^63 magnitude lands on INT64_MIN).
+                        s7 =
+                            emit (Bin (Just t1) L Mul (Il.Con limbs.l1) (Il.Con 67108864)) s6
+
+                        s8 =
+                            emit (Bin (Just t2) L Add (Il.Tmp t1) (Il.Con limbs.l0)) s7
+
+                        s9 =
+                            emit (Bin (Just t3) L Mul (Il.Con limbs.l2) (Il.Con 4503599627370496)) s8
+
+                        s10 =
+                            emit (Bin (Just t4) L Add (Il.Tmp t3) (Il.Tmp t2)) s9
+
+                        s11 =
+                            if limbs.negative then
+                                emit (Bin (Just t5) L Sub (Il.Con 0) (Il.Tmp t4)) s10
+
+                            else
+                                s10
+
+                        stored =
+                            if limbs.negative then
+                                Il.Tmp t5
+
+                            else
+                                Il.Tmp t4
+                    in
+                    Ok (emit (Store StoreL stored (Il.Tmp d8)) s11)
 
         LBoolean b ->
             let
@@ -5187,6 +5297,16 @@ isIntKnown s exp =
         Lit (LNumber _) ->
             True
 
+        Lit (LNumberBig _) ->
+            -- NOT admitted, deliberately: every caller of `isIntKnown` feeds
+            -- `rawInt2`, whose operand form is `Il.Con Int` — a HOST number,
+            -- i.e. exactly what a big literal is not. Denying it here routes
+            -- the expression to the general path, which materializes the
+            -- literal exactly (`lowerLitVal`'s limb arm) and then computes.
+            -- Slower for that one expression, exact; admitting it would mean a
+            -- rounded operand in the fast path.
+            False
+
         Var id ->
             Set.member id s.intBinders
                 || (s.typeSpec && typeOfBinder s id == Just (Rep.TCon "Int" []))
@@ -5268,6 +5388,13 @@ rawIntOf exp s =
     case exp of
         Lit (LNumber n) ->
             Ok ( Il.Con n, s )
+
+        Lit (LNumberBig digits) ->
+            Err
+                ("an i64 literal above 2^53 (`"
+                    ++ digits
+                    ++ "`) has no exact `Il.Con` operand — the raw Int fast path cannot carry it"
+                )
 
         NoTail inner ->
             rawIntOf inner s
@@ -6365,6 +6492,9 @@ condTest exp s =
             condTest inner s
 
         Lit (LNumber _) ->
+            WordTest
+
+        Lit (LNumberBig _) ->
             WordTest
 
         Var id ->

@@ -3,6 +3,7 @@
   "groups": [
     {
       "sources": [
+        "osier-compiler/src/IntegerLiteral.elm",
         "osier-compiler/src/Lower/Resolve.elm",
         "osier-compiler/src/Lower/Scope.elm",
         "osier-compiler/src/Lower/Expr.elm",

@@ -76,6 +76,7 @@ import Elm.Syntax.Pattern as Pattern exposing (Pattern(..), QualifiedNameRef)
 import Elm.Syntax.Range as Range exposing (Range)
 import Lower.Expr as LExpr
 import Mid.Ir exposing (Alt, AltKind(..), Binder, Defun, Exp(..), LetBinder(..), Lit(..), Match(..), Step(..), ValuePath(..))
+import IntegerLiteral exposing (IntegerLiteral(..))
 
 
 
@@ -307,11 +308,11 @@ primWrapperName op =
 fromExpression : Context -> Node Expression -> Gen Exp
 fromExpression ctx (Node range expr) =
     case expr of
-        Integer n ->
-            pure (Lit (LNumber n))
+        Integer lit ->
+            literalExp lit
 
-        Hex n ->
-            pure (Lit (LNumber n))
+        Hex lit ->
+            literalExp lit
 
         Literal str ->
             pure (Lit (LString str))
@@ -385,14 +386,56 @@ fromExpression ctx (Node range expr) =
             fail "unsupported expression in the M1b subset (case/records/ADTs are M2)"
 
 
+{-| A literal's Mid form.
+
+`Int64MinMagnitude` is REFUSED here and accepted only by `negatedNumber`
+below: exactly 2^63 is legal in this language ONLY as `-9223372036854775808`,
+and the negation is the one place the sign is known. Refusing it here is what
+makes a bare `9223372036854775808` a compile error instead of a positive i64
+that is silently the INT64_MIN bit pattern.
+-}
+literalExp : IntegerLiteral -> Gen Exp
+literalExp lit =
+    case lit of
+        SmallInteger n ->
+            pure (Lit (LNumber n))
+
+        BigInteger digits ->
+            pure (Lit (LNumberBig digits))
+
+        Int64MinMagnitude digits ->
+            fail
+                ("integer literal `"
+                    ++ digits
+                    ++ "` is out of range: it is the magnitude of INT64_MIN, which this language spells `-9223372036854775808`"
+                )
+
+
+{-| `0 - lit`, in the EXACT form: a big literal negates by prefixing its digits,
+so `-1152921504606846976` never becomes a host number. The 2^63 magnitude
+becomes the canonical INT64_MIN digit string.
+-}
+negatedNumber : IntegerLiteral -> Lit
+negatedNumber lit =
+    case lit of
+        SmallInteger n ->
+            LNumber (-n)
+
+        BigInteger digits ->
+            LNumberBig ("-" ++ digits)
+
+        Int64MinMagnitude _ ->
+            LNumberBig "-9223372036854775808"
+
+
 negation : Context -> Node Expression -> Gen Exp
 negation ctx inner =
     case inner of
-        Node _ (Integer n) ->
-            pure (Lit (LNumber (-n)))
+        Node _ (Integer lit) ->
+            pure (Lit (negatedNumber lit))
 
-        Node _ (Hex n) ->
-            pure (Lit (LNumber (-n)))
+        Node _ (Hex lit) ->
+            pure (Lit (negatedNumber lit))
 
         Node _ (Floatable f) ->
             pure (Lit (LFloat (-f)))
@@ -935,6 +978,24 @@ lowerClause ctx caseRange i ( patNode, bodyNode ) endLabel =
 
 -- What the alt is ABOUT (metadata for later passes; emission is driven by the
 -- match sequence).
+{-| A literal pattern's alt METADATA. The 2^63 magnitude is `AltOther`
+deliberately: it is not an Int value, and `numberMatch` below refuses it
+loudly before anything is emitted (emission is driven by the match sequence,
+not by this metadata — see `altKind`'s header).
+-}
+altLitOf : IntegerLiteral -> AltKind
+altLitOf lit =
+    case lit of
+        SmallInteger n ->
+            AltLit (LNumber n)
+
+        BigInteger digits ->
+            AltLit (LNumberBig digits)
+
+        Int64MinMagnitude _ ->
+            AltOther
+
+
 altKind : Node Pattern.Pattern -> AltKind
 altKind (Node _ pat) =
     case pat of
@@ -954,11 +1015,11 @@ altKind (Node _ pat) =
         StringPattern s ->
             AltLit (LString s)
 
-        IntPattern n ->
-            AltLit (LNumber n)
+        IntPattern lit ->
+            altLitOf lit
 
-        HexPattern n ->
-            AltLit (LNumber n)
+        HexPattern lit ->
+            altLitOf lit
 
         _ ->
             AltOther
@@ -1069,6 +1130,27 @@ emptyMatch =
     { matches = [], binds = [] }
 
 
+{-| The literal test for an Int/hex pattern. A big literal compares through
+`LNumberBig`, whose digits the emitter writes verbatim; the runtime compare is
+an i64 compare, so the test is exact over the whole range.
+-}
+numberMatch : List Step -> IntegerLiteral -> Result String MatchResult
+numberMatch path lit =
+    case lit of
+        SmallInteger n ->
+            Ok { matches = [ MLitEq path (LNumber n) ], binds = [] }
+
+        BigInteger digits ->
+            Ok { matches = [ MLitEq path (LNumberBig digits) ], binds = [] }
+
+        Int64MinMagnitude digits ->
+            Err
+                ("integer literal `"
+                    ++ digits
+                    ++ "` is out of range: it is the magnitude of INT64_MIN, which this language spells `-9223372036854775808`"
+                )
+
+
 goPattern : Node Pattern.Pattern -> List Step -> Result String MatchResult
 goPattern (Node r pat) path =
     case pat of
@@ -1087,11 +1169,11 @@ goPattern (Node r pat) path =
         StringPattern s ->
             Ok { matches = [ MLitEq path (LString s) ], binds = [] }
 
-        IntPattern n ->
-            Ok { matches = [ MLitEq path (LNumber n) ], binds = [] }
+        IntPattern lit ->
+            numberMatch path lit
 
-        HexPattern n ->
-            Ok { matches = [ MLitEq path (LNumber n) ], binds = [] }
+        HexPattern lit ->
+            numberMatch path lit
 
         FloatPattern _ ->
             Err "float patterns not supported"

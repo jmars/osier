@@ -724,6 +724,8 @@ impls =
         , ( "-", { key = "Rt.-", arity = 2 } )
         , ( "*", { key = "Rt.*", arity = 2 } )
         , ( "/", { key = "Rt./", arity = 2 } )
+          -- L1: the `^` operator's runtime prim (square-and-multiply).
+        , ( "pow", { key = "Rt.pow", arity = 2 } )
         , ( "f/", { key = "Rt.f/", arity = 2 } )
         , ( "<", { key = "Rt.<", arity = 2 } )
         , ( "<=", { key = "Rt.<=", arity = 2 } )
@@ -846,6 +848,11 @@ rtDeps =
           -- must see — a key named in a body but absent here makes that
           -- defun unreachable, and Lower's rawCall arm fails LOUDLY on it.
         , ( "Rt./", [ "Rt.die" ] )
+          -- L1: the `^` prim. `Rt.pow` rejects a negative exponent through
+          -- Rt.die and hands the loop to `Rt.powGo`, whose square-and-multiply
+          -- is a self-tail `recur` (its own edge, like every recur loop here).
+        , ( "Rt.pow", [ "Rt.powGo", "Rt.die" ] )
+        , ( "Rt.powGo", [ "Rt.powGo" ] )
         , ( "Rt.f/", [ "Rt.asF" ] )
         , ( "Rt.<", [ "Rt.asF" ] )
         , ( "Rt.<=", [ "Rt.asF" ] )
