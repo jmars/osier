@@ -17,6 +17,7 @@ module Mid.RtLayout exposing
     , retArityOffset, retArgsOffset, retEOffset, retFOffset, retKindOffset, retQbeFields, retSizeBytes, retValOffset
     , tagBoolean, tagCons, tagError, tagFloat, tagLambda, tagMark, tagNil, tagNumber, tagPrim, tagRecord, tagStream, tagString, tagSymbol, tagVector
     , ValLayout, valLayout
+    , wordLayout
     , valQbeFields, valSizeBytes, valuePayloadWords, valueTagBytes, wordBytes
     )
 
@@ -219,10 +220,10 @@ tagRecord =
 -- field IS the constant above it, so this record holds no second copy of any
 -- number and `valLayout.valSizeBytes == 40` is true by construction.
 --
--- WHY A RECORD.  The representation is about to become a compile-time choice
--- (VR3b adds a second instance and selects it with the QBE_VALREP knob).  A
--- reader that names a top-level constant cannot be switched; a reader that
--- takes a `ValLayout` can.  So the EMIT PATH threads the record and never
+-- WHY A RECORD.  The representation is a compile-time choice: `wordLayout`
+-- below is the SECOND instance (VR3b1, the word arm) and `QBE_VALREP` selects
+-- it.  A reader that names a top-level constant cannot be switched; a reader
+-- that takes a `ValLayout` can.  So the EMIT PATH threads the record and never
 -- consults the constants directly: `Mid.Qbe.Lower`'s `S.layout`,
 -- `Mid.Qbe.Il`'s `Module.layout` (what `Print`/`Encode` read),
 -- `Mid.Qbe.Liveness`'s opts record, and the two top-level IL builders
@@ -248,12 +249,13 @@ tagRecord =
 --      stay OUT of this record: a record mixing "flips with the
 --      representation" and "never flips" is exactly the silent-mismatch shape
 --      this module's header was written to prevent.  ONE COUPLING SURVIVES and
---      is named here so it cannot go silent: `retKindOffset` (40) IS
---      `valSizeBytes` today and `retSizeBytes` (80) is `valSizeBytes + 40` —
---      the `:ret` aggregate's first field is a Value.  VR3b must DERIVE those
---      two from `layout.valSizeBytes` (a `:ret` over a word Value is
---      `{ l, w, l, l, l, w }`), never leave them at the constants above.
---      `desc*`/`meta*`/`ep*`/`dirent*` carry no Value at all and stay put.
+--      is named here so it cannot go silent: the `:ret` aggregate's first
+--      field IS a Value, so `retKindOffset` is `valSizeBytes` and
+--      `retSizeBytes` is `valSizeBytes + 40`.  VR3b1 DISCHARGED that finding
+--      by turning all six tail offsets into functions OF THE INSTANCE
+--      (see the Ret section below) — a `:ret` over a word Value is
+--      `{ l, w, l, l, l, w }` = 48 B with kind at 8.  `desc*`/`meta*`/`ep*`/
+--      `dirent*` carry no Value at all and stay put.
 
 
 type alias ValLayout =
@@ -304,6 +306,94 @@ valLayout =
     , tagStream = tagStream
     , tagFloat = tagFloat
     , tagRecord = tagRecord
+    }
+
+
+
+-- ==================== THE WORD ARM (VR3b1): THE SECOND INSTANCE ====================
+-- `wordLayout` is the 8-byte TAGGED-WORD representation of
+-- handoff-valrep2-plan §2(a): ONE WORD per value, and the LOW 3 BITS are the
+-- tag (a cell is 8-aligned, so those bits are free in a pointer):
+--
+--     ...000  fixnum        i61; an i64 result that does not fit is BOXED onto
+--                           the heap (one overflow check per arithmetic op,
+--                           the V8/SMI shape)
+--     ...001  heap pointer  EVERY heap object — cons, string, symbol, vector,
+--                           float cell, lambda/closure, record, stream, prim.
+--                           The object's KIND stays in the 2-word GC HEADER,
+--                           which DOES NOT MOVE; only the body strides shrink.
+--     ...010  nil
+--     ...011  true   } the record carries ONE boolean tag, so only `true` has
+--     ...100  false  } a field today (see WHAT IS NOT EXPRESSIBLE, below)
+--     ...101  error
+--     ...110, ...111        reserved
+--
+-- BODY STRIDES: a cons cell is 24 B (2-word header + 2 words), a vector is
+-- 8n+16, a values-table row is 16 B, a frame slot is 8 B.  The 2-word GC
+-- header (mark/kind/class/RS/forwarding) is UNTOUCHED — that is what keeps the
+-- collector's block map and class ladder out of this flip.
+--
+-- WHAT IS NOT EXPRESSIBLE IN THIS RECORD YET, and VR3b2 must widen it BEFORE
+-- it ports a single tag test: the true/false SPLIT (two immediates against one
+-- `tagBoolean` field) and the heap KIND (`...001` says "heap object"; which
+-- object is read from the header).  NOTHING here is reachable today — the arm
+-- stops at Lower's one choke point (`Mid.Qbe.Lower.wordArmUnsupported`) before
+-- a byte of IL is emitted, so no field of this instance can be read into
+-- half-word code.
+--
+-- THE WORKLIST — every construct the emitter and the Mid runtime still carry
+-- for the 40-byte representation, i.e. everything VR3b2/VR3c must port before
+-- the knob can be turned on.  This list IS the unit's deliverable:
+--
+--   1. THE FRAME SLOT STRIDE.  The prologue/epilogue blits, the `valSizeBytes
+--      * nslots` alloc, the param and capture blits, slot 0/1 materialisation
+--      (PLeaf).  THIS IS THE FIRST CONSTRUCT THE WORD ARM HITS, and it is what
+--      the choke point names.
+--   2. TAG WRITES AND TESTS.  `storeValueCell`'s `storew <tag>`, every `Cmp W
+--      Ceq` tag test, and the .mid surface lane's `RawTagIs`/`RawMkValue`
+--      (Mid.RtLang.LowerToIr names `valLayout` at 9 sites — VR3a's finding;
+--      that lane lowers BEFORE Lower runs, so its tag integers are baked into
+--      the Mid.Ir under any knob).
+--   3. PAYLOAD ACCESS.  Every `payloadWordOffset` read/write: cons car/cdr,
+--      string/vector `len`, record fields, float payload, argv, the exec-plan
+--      blob.  Under the word arm a field is a plain 8-byte load at 8i, and a
+--      fixnum's value is the word arithmetic-shifted.
+--   4. ARITHMETIC.  Inline tag/untag (and + shift, no runtime call), the i61
+--      overflow check and the boxing path, comparisons, div/mod, negate.
+--   5. FLOATS.  The heap-boxed `[hdr | f64]` cell and Lower's `rawFloat` lane.
+--   6. THE `:ret` AGGREGATE.  Its FIRST FIELD IS A VALUE, so its tail offsets
+--      move with `valSizeBytes` (they are DERIVED below); plus the 80-byte sret
+--      path, slot 1's `.tail` metadata and rt_bounce.
+--   7. THE Rt SURFACE (`runtime.mid` — VR3c's, single-writer, NOT this unit):
+--      gcAlloc's `2 + count + 4*count*kind` sizing, apply's `args + rem*40`,
+--      gcScav/copyWordsGo, the values-table builder AND walk, argv install, and
+--      the printer internals (mknum/payload/tagis).
+--   8. THE C FFI GLUE.  The tag/untag at the boundary — a fixnum's payload IS
+--      the C i64 after untag, and Values never cross raw (the extern
+--      declarations already encode C widths, so nothing there moves).
+wordLayout : ValLayout
+wordLayout =
+    { valSizeBytes = 8
+    , valuePayloadWords = 0
+    , payloadBase = 0
+    , wordBytes = wordBytes
+    , valueTagBytes = 0
+    , valQbeFields = [ "l" ]
+    , maxArity = maxArity
+    , tagNumber = 0
+    , tagString = 1
+    , tagSymbol = 1
+    , tagBoolean = 3
+    , tagCons = 1
+    , tagNil = 2
+    , tagLambda = 1
+    , tagMark = 1
+    , tagPrim = 1
+    , tagError = 5
+    , tagVector = 1
+    , tagStream = 1
+    , tagFloat = 1
+    , tagRecord = 1
     }
 
 
@@ -380,7 +470,8 @@ metaArityOffset =
 
 
 -- ============================ Ret (the bounce-loop result) ============================
--- `Mid.Qbe.Il.retType` is `align 8 { :val, w, l, l, l, w }` = 80 bytes:
+-- `Mid.Qbe.Il.retType` is `align 8 { :val, w, l, l, l, w }` = 80 bytes on the
+-- VAL arm:
 --   :val  @0   the finished value when kind == `.done`;
 --   kind  @40  the discriminator (0 = done, 1 = tail);
 --   f     @48  the callee code pointer (`.tail`);
@@ -388,12 +479,28 @@ metaArityOffset =
 --   args  @64  a fresh GC array of `arity` Value structs (or the runtime's
 --              static staging buffer for the known-tail path);
 --   arity @72  the static arity == length of `args`.
--- `tools/qbe/rt.zig`'s `Ret` extern struct is asserted to be these 80 bytes.
+--
+-- VR3b1 — THE COUPLING IS NOW DERIVED, NOT CONSTANT.  VR3a's finding: the
+-- `:ret` aggregate's FIRST FIELD IS A VALUE, so retKindOffset IS
+-- `valSizeBytes` and every offset after it moves with it; the tail
+-- `{ w kind, pad, l f, l e, l args, w arity, pad }` is 40 bytes on top.  These
+-- are therefore FUNCTIONS OF THE INSTANCE, and `40`/`80` appear nowhere as a
+-- ret number any more — that pair left as constants is exactly the stale-40
+-- trap the moment the word arm is ported (`:ret` over a word Value is
+-- `{ l, w, l, l, l, w }` = 48 B, kind at 8).  TestMain pins both values for
+-- BOTH instances, so a derivation that stops agreeing with the emitted IL is
+-- loud.
+--
+-- (The `:ret` TYPE is still a module constant — its FIELD LIST does not flip
+-- with the representation, only the size of its first field does; see
+-- `retQbeFields` below and Mid.RtLayout's TRAP-3 note.  The census's
+-- MID_ONLY_NAMES list dropped these six names when they stopped being
+-- constants, which is why they are pinned in TestMain instead.)
 
 
-retSizeBytes : Int
-retSizeBytes =
-    80
+retSizeBytes : ValLayout -> Int
+retSizeBytes layout =
+    layout.valSizeBytes + 40
 
 
 retValOffset : Int
@@ -401,29 +508,29 @@ retValOffset =
     0
 
 
-retKindOffset : Int
-retKindOffset =
-    40
+retKindOffset : ValLayout -> Int
+retKindOffset layout =
+    layout.valSizeBytes
 
 
-retFOffset : Int
-retFOffset =
-    48
+retFOffset : ValLayout -> Int
+retFOffset layout =
+    layout.valSizeBytes + 8
 
 
-retEOffset : Int
-retEOffset =
-    56
+retEOffset : ValLayout -> Int
+retEOffset layout =
+    layout.valSizeBytes + 16
 
 
-retArgsOffset : Int
-retArgsOffset =
-    64
+retArgsOffset : ValLayout -> Int
+retArgsOffset layout =
+    layout.valSizeBytes + 24
 
 
-retArityOffset : Int
-retArityOffset =
-    72
+retArityOffset : ValLayout -> Int
+retArityOffset layout =
+    layout.valSizeBytes + 32
 
 
 

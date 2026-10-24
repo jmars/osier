@@ -11,8 +11,10 @@ port module Main exposing (main)
 --   {entriesJson}       — a JSON array of strings, one ENTRY DEFUN KEY per
 --     group ("<Mod>.<fn>"): the QBE backend roots reachability at the
 --     group's own entry, so a batch can lower every group in one process.
---   {qbeFlatten}/{qbeRep}/{...}/{qbeMono} — the QBE backend's A/B switches
---     (see run.js).
+--   {qbeFlatten}/{qbeRep}/{...}/{qbeMono}/{qbeWordVal} — the QBE backend's
+--     A/B switches (see run.js).  `qbeWordVal` is `QBE_VALREP=word` (VR3b1):
+--     it selects the WORD value-representation instance, which the emitter
+--     does not lower yet — it stops with a loud error naming the construct.
 --
 -- P8 (osier-delete-zinc): this driver is QBE-ONLY.  The ZINC-csexp output
 -- paths (the direct AST lowerer `Lower.Module` and the middle-tier driver
@@ -56,6 +58,7 @@ type alias Flags =
     , qbeTypeSpec : Bool
     , qbeMidGcYoung : Bool
     , qbeLeafFree : Bool
+    , qbeWordVal : Bool
     }
 
 
@@ -104,7 +107,7 @@ compileAll flags =
                         encodeStrings
                             (List.map3
                                 (\groupSources groupMids entry ->
-                                    case QbeModule.compileEntry rt corpusSources groupSources groupMids entry flags.qbeFlatten flags.qbeRep flags.qbePrimDirect flags.qbeMidRt flags.qbeMidCons flags.qbeRtLean flags.qbeMono ( ( flags.qbeConsArr, ( flags.qbeRec, ( flags.qbeTypeSpec, ( True, ( flags.qbeMidGcYoung, flags.qbeLeafFree ) ) ) ) ), flags.qbeEqPtrFast ) of
+                                    case QbeModule.compileEntry rt corpusSources groupSources groupMids entry flags.qbeFlatten flags.qbeRep flags.qbePrimDirect flags.qbeMidRt flags.qbeMidCons flags.qbeRtLean flags.qbeMono flags.qbeWordVal ( ( flags.qbeConsArr, ( flags.qbeRec, ( flags.qbeTypeSpec, ( True, ( flags.qbeMidGcYoung, flags.qbeLeafFree ) ) ) ) ), flags.qbeEqPtrFast ) of
                                         Ok ssa ->
                                             ssa
 

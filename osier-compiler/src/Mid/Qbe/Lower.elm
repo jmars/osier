@@ -1,4 +1,4 @@
-module Mid.Qbe.Lower exposing (lower)
+module Mid.Qbe.Lower exposing (lower, lowerWith)
 
 -- Mid.Qbe.Lower — Mid.Ir -> Qbe.Il (native-backend stage 1; handoff-qbe-lower).
 --
@@ -116,15 +116,11 @@ import Char.Extra exposing (utf8ByteLength)
 -- a second instance (VR3b's word arm) a change at the SEED rather than at the
 -- ~150 emit sites.
 --
--- WHAT STAYS A MODULE CONSTANT, and why: `rvs` below is sizeof(:ret) = 80
--- (`{ :val, w, l, l, l, w }` = two pooled-frame slots — slot 0 the finished
--- value, slot 1 the .tail discriminator + payload).  The `:ret` aggregate is
--- NOT a Value and does not flip with the representation, so it is not in the
--- record (Mid.RtLayout's TRAP-3 note names the ONE coupling VR3b must derive:
--- retKindOffset == valSizeBytes).
-rvs : Int
-rvs =
-    RtLayout.retSizeBytes
+-- SIZEOF(:ret) IS NOT A CONSTANT ANY MORE (VR3b1): the `:ret` aggregate's
+-- first field IS a Value, so its size is `valSizeBytes + 40` — two pooled
+-- frame slots (slot 0 the finished value, slot 1 the .tail discriminator +
+-- payload) on the val arm, one-and-a-bit on the word arm.  It is read as
+-- `RtLayout.retSizeBytes <instance>` at its three sites, never spelled here.
 
 
 -- P5: the non-GC libc entries this emitter names as CALL TARGETS, i.e. the
@@ -493,14 +489,71 @@ unique xs =
         |> Tuple.second
 
 
-{-| The 9th positional slot — spelled `_` here — is the RETIRED collector
-switch (zighost Z0): the Mid collector is the only collector, so no arm here
-reads it.  The slot stays because `Mid.QbeModule.compileEntry` still carries it
-in its call shape — the one place this unit could not reach (another lane owns
-that file).  Nothing selects a collector; the slot is inert, not a default.
+{-| VR3b1 — THE WORD ARM'S ONE CHOKE POINT, and the whole safety rule of this
+increment in one function.
+
+`QBE_VALREP=word` does NOT make the word representation work.  The arm exists
+so the representation is a knob with a LOUD off-switch rather than a
+half-flipped emitter: a half-word emit LINKS CLEANLY and then reads another
+representation's bytes at the wrong offset — the exact failure Mid.RtLayout's
+header exists to prevent.  So every construct the word arm cannot lower yet
+fails HERE, by name, before a byte of IL is emitted; there is no path that
+emits some word-arm code and some val-arm code.
+
+`what` NAMES THE CONSTRUCT.  The full worklist (every construct still
+un-ported, for VR3b2/VR3c) is written down once, beside `RtLayout.wordLayout`
+— keep them in step: this message names the FIRST entry, that comment lists
+the rest.
+
+When the arm is ported this function and its one call site go away together.
+-}
+wordArmUnsupported : String -> String
+wordArmUnsupported what =
+    "qbe: QBE_VALREP=word is NOT IMPLEMENTED (perf VR3b1): the emitter cannot lower "
+        ++ what
+        ++ " — the word arm stops at its first un-ported construct instead of emitting half-word code (nothing was emitted). The full worklist is beside `wordLayout` in Mid/RtLayout.elm."
+
+
+{-| The VAL-arm entry point — the layout this whole tree has always emitted,
+and what every existing caller (TestMain's pins included) means by `lower`.
 -}
 lower : MidRt.Runtime -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
-lower runtime rep primDirect midCons rtLean consArr rec typeSpec _ midGcYoung leafFree table arityTable program entryKey =
+lower =
+    lowerWith RtLayout.valLayout
+
+
+{-| The SAME lowering, FOR A GIVEN LAYOUT INSTANCE (VR3b1).  The instance is
+selected at the SEED (here) and not at the ~150 emit sites: that is exactly
+what VR3a's `S.layout` threading was for.  The knob plumbing is
+`QBE_NOLEAF`/`QBE_NOMONO`'s, copied — run.js reads the env, Main's flags carry
+it, `Mid.QbeModule` hands it down, and the instance lands in `S.layout` at
+`s0`.
+
+`QBE_VALREP=word` therefore arrives here as `RtLayout.wordLayout` and STOPS at
+`wordArmUnsupported` before the reachability walk: one loud error, no IL at
+all.  When VR3b2 ports the arm, this guard is the line that goes — everything
+below it already threads the instance.
+-}
+lowerWith : RtLayout.ValLayout -> MidRt.Runtime -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
+lowerWith layout runtime rep primDirect midCons rtLean consArr rec typeSpec _ midGcYoung leafFree table arityTable program entryKey =
+    if layout == RtLayout.wordLayout then
+        Err
+            (wordArmUnsupported
+                "THE FRAME SLOT STRIDE — the `:val` prologue/epilogue blits, the `valSizeBytes * nslots` alloc and the slot 0/1 materialisation every defun starts with"
+            )
+
+    else
+        lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec False midGcYoung leafFree table arityTable program entryKey
+
+
+{-| The val arm's body.  Its 9th positional slot — spelled `_` — is the RETIRED
+collector switch (zighost Z0): the Mid collector is the only collector, so no
+arm here reads it.  The slot stays because `Mid.QbeModule.compileEntry` still
+carries it in its call shape.  Nothing selects a collector; the slot is inert,
+not a default.
+-}
+lowerArm : RtLayout.ValLayout -> MidRt.Runtime -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
+lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec _ midGcYoung leafFree table arityTable program entryKey =
     let
         defuns =
             Dict.fromList (List.map (\d -> ( d.key, d )) program)
@@ -619,7 +672,7 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec _ midGcYoung le
                         libcNoCollect
 
                 s0 =
-                    { layout = RtLayout.valLayout
+                    { layout = layout
                     , blocks = []
                     , curLabel = "start"
                     , curBody = []
@@ -1995,7 +2048,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                                         startBlock "ret" s1
                                             |> emit (Bin (Just "retAddr") L Add (Il.Tmp (slotTmp 0)) (Il.Con (RtLayout.payloadWordOffset s1.layout 0)))
                                             |> emit (Load (Just "retBuf") L LoadL (Il.Tmp "retAddr"))
-                                            |> emit (Blit (Il.Tmp "retBuf") (Il.Tmp (slotTmp 0)) rvs)
+                                            |> emit (Blit (Il.Tmp "retBuf") (Il.Tmp (slotTmp 0)) (RtLayout.retSizeBytes s1.layout))
                                             |> emit (Call Nothing (Base W) (Il.Sym "free") [ ArgVal (Base L) (Il.Tmp "retBuf") ])
                                             |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
 
@@ -5457,7 +5510,7 @@ directCall key args dest isTail s =
                                             ]
                                         )
                                         s2
-                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp 0)) rvs)
+                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp 0)) (RtLayout.retSizeBytes s2.layout))
                                         |> jumpTo "ret"
                                     )
                             )
@@ -5517,7 +5570,8 @@ rtApply fslotTmp args dest isTail s =
         -- sret size are DERIVED from rawAbiRetClass — the ONE source of truth
         -- that lowerDefun's ret type (line ~1334) and the @ret blit (line
         -- ~1435) also read.  The old code hard-wired `Agg "ret"`/`Agg "val"`
-        -- and `rvs`/`vs` here in a second table: a 40-vs-80-byte sret drift
+        -- and `retSizeBytes`/`valSizeBytes` here in a second table: a
+        -- 40-vs-80-byte sret drift
         -- (someone edits rawAbiRetClass, or adds a third aggregate class)
         -- would silently read/write 40 B of adjacent memory at the blit.
         -- Deriving both from the one function makes that drift impossible.
@@ -5527,7 +5581,7 @@ rtApply fslotTmp args dest isTail s =
         retSize =
             case retCls of
                 Agg "ret" ->
-                    rvs
+                    RtLayout.retSizeBytes s.layout
 
                 _ ->
                     s.layout.valSizeBytes
@@ -9210,7 +9264,7 @@ withPrologue layout pending =
             case pending.pro of
                 PLeaf ->
                     [ Store StoreL (Il.Con 0) (Il.Tmp (slotTmp 0))
-                    , Bin (Just "tzk") L Add (Il.Tmp "f") (Il.Con RtLayout.retKindOffset)
+                    , Bin (Just "tzk") L Add (Il.Tmp "f") (Il.Con (RtLayout.retKindOffset layout))
                     , Store StoreL (Il.Con 0) (Il.Tmp "tzk")
                     ]
 

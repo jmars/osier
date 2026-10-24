@@ -65,10 +65,21 @@ need() { command -v "$1" >/dev/null 2>&1 || { printf 'layout-census: %s not foun
 # MID-INTERNAL (the Mid decode writes it, the Mid Rt.execGo run reads it; the
 # rt_exec_run seat that once read it is DELETED as of 3B-2c), so there
 # is no Zig counterpart to assert against anymore.
+# (VR3b1) THE `:ret` TAIL OFFSETS LEFT THIS LIST, and it is not a silent drop:
+# `retKindOffset`/`retFOffset`/`retEOffset`/`retArgsOffset`/`retArityOffset`/
+# `retSizeBytes` stopped being constants when VR3a's coupling was discharged —
+# the `:ret` aggregate's first field IS a Value, so they are now FUNCTIONS OF
+# THE LAYOUT INSTANCE (`valSizeBytes` + k).  The census parses this file's
+# `name = <digits>` constants and demands its name set EQUAL the parse, so a
+# derived function has no seat here by construction.  What replaces the leg:
+# TestMain's VR3b1 row pins all six values FOR BOTH INSTANCES
+# (40/48/56/64/72/80 val, 8/16/24/32/40/48 word), so the numbers are still
+# stated once and still loudly checked.  `retValOffset` (0) is still a
+# constant and stays below.
 MID_ONLY_NAMES="descArityOffset descCacheOffset descCodeOffset descNcapsOffset descTotalBytes \
 direntNameOffset maxArity \
 metaArityOffset metaCodeOffset metaNameOffset metaSizeBytes \
-retArgsOffset retArityOffset retEOffset retFOffset retKindOffset retSizeBytes retValOffset \
+retValOffset \
 epChainOpIdx epChainPipeIdx epChainWords epCmdArgcIdx epCmdArgvIdx epCmdNredirsIdx epCmdRedirsIdx epCmdSubIdx epCmdWords epKindAppend epKindDup epKindHdoc epKindHstr epKindIn epKindOut epOpAnd epOpOr epOpSeq epPipeCmdArrIdx epPipeCmdCountIdx epProgChainsIdx epProgCountIdx epRedirBodyIdx epRedirDupfdIdx epRedirFdIdx epRedirKindIdx epRedirPathIdx epRedirTmpfdIdx epRedirWords"
 # COMPTIME: attested by a comptime row against layout_gen.zig, in a file the
 # probe cannot import (an `export fn main`/`pub fn main` collides with an

@@ -338,6 +338,16 @@ const QBE_RTLEAN = process.env.QBE_NORTLEAN !== '1';
 // committed baseline byte-for-byte), and the structural gate's off arm.
 // Default ON.
 const QBE_MONO = process.env.QBE_NOMONO !== '1';
+// QBE_VALREP=word selects the WORD Value representation (perf VR3b): ONE
+// 8-byte tagged word per value instead of the 40-byte {tag, payload} struct
+// (Mid.RtLayout.wordLayout; the tag lives in the low 3 bits, body strides
+// shrink, the 2-word GC header does not move).  IT DOES NOT WORK YET (VR3b1):
+// the emitter stops at its ONE choke point (Mid.Qbe.Lower.wordArmUnsupported)
+// with a loud error NAMING the first construct it cannot lower.  That is
+// deliberate — a half-flipped emit LINKS CLEANLY and then reads another
+// representation's bytes at the wrong offset, so the arm must fail, never
+// half-work.  Default val, i.e. the 40-byte representation, byte-identical.
+const QBE_WORDVAL = process.env.QBE_VALREP === 'word';
 // QBE_NOCONSARR=1 RESTORES the pre-(A) two-word cons representation (cons as
 // two interior pointers into a 2-element array, the old fused-pair shape).
 // It is the corpus attribution hatch for (A): QBE_NOCONSARR=1 must reproduce
@@ -474,6 +484,7 @@ function compileGroups(groups) {
       qbeTypeSpec: QBE_TYPESPEC,
       qbeMidGcYoung: QBE_MIDGC_YOUNG,
       qbeLeafFree: QBE_LEAFFREE,
+      qbeWordVal: QBE_WORDVAL,
     },
   });
 

@@ -1264,7 +1264,7 @@ checks rt runtimeMidText =
                         String.contains ("\t%f =l alloc8 " ++ String.fromInt (RtLayout.valLayout.valSizeBytes * 2) ++ "\n") txt
                             && String.contains
                                 ("\tstorel 0, %s0\n\t%tzk =l add %f, "
-                                    ++ String.fromInt RtLayout.retKindOffset
+                                    ++ String.fromInt (RtLayout.retKindOffset RtLayout.valLayout)
                                     ++ "\n\tstorel 0, %tzk\n"
                                 )
                                 txt
@@ -1276,6 +1276,63 @@ checks rt runtimeMidText =
                         False
 
             Err _ ->
+                False
+        )
+    , check "VR3b1 THE WORD ARM'S INSTANCE: `wordLayout` states handoff-valrep2-plan §2(a) — ONE 8-byte word per value, no tag word before the payload (payloadBase 0), no payload words, `:val` = { l } — against `valLayout`'s 40/8/4/{ w, l, l, l, l }; and the two things that must NOT move with the representation DO NOT: `wordBytes` (the `l` width every offset is counted in) and `maxArity` (the rt_callN dispatch bound, not a cell size)"
+        (RtLayout.wordLayout.valSizeBytes
+            == 8
+            && RtLayout.wordLayout.payloadBase
+            == 0
+            && RtLayout.wordLayout.valueTagBytes
+            == 0
+            && RtLayout.wordLayout.valuePayloadWords
+            == 0
+            && RtLayout.wordLayout.valQbeFields
+            == [ "l" ]
+            && RtLayout.wordLayout.wordBytes
+            == RtLayout.valLayout.wordBytes
+            && RtLayout.wordLayout.maxArity
+            == RtLayout.valLayout.maxArity
+            && RtLayout.valLayout.valSizeBytes
+            == 40
+            && RtLayout.valLayout.valQbeFields
+            == [ "w", "l", "l", "l", "l" ]
+            -- THE TYPE LAYER RESPECTS THE KNOB, end to end: `Il.valType` is
+            -- built from the instance and `Print`/`Encode` read `m.layout`, so
+            -- a module printed FOR the word instance carries the word `:val`
+            -- typedef and the val instance the 40-byte one.  This is the one
+            -- part of the word arm that IS ported.
+            && String.contains "type :val = align 8 { l }\n"
+                (Print.print { layout = RtLayout.wordLayout, types = [], datas = [], funcs = [] })
+            && String.contains "type :val = align 8 { w, l, l, l, l }\n"
+                (Print.print { layout = RtLayout.valLayout, types = [], datas = [], funcs = [] })
+        )
+    , check "VR3b1 THE `:ret` COUPLING IS DERIVED, NOT A CONSTANT (VR3a's finding): the aggregate's first field IS a Value, so retKindOffset/retFOffset/retEOffset/retArgsOffset/retArityOffset/retSizeBytes are FUNCTIONS of the instance — 40/48/56/64/72/80 on the val arm (the offsets the 40-byte representation has always emitted) and 8/16/24/32/40/48 on the word arm. A `40` left as a constant is the stale-40 trap this row exists to make loud"
+        (List.map
+            (\l ->
+                [ RtLayout.retKindOffset l
+                , RtLayout.retFOffset l
+                , RtLayout.retEOffset l
+                , RtLayout.retArgsOffset l
+                , RtLayout.retArityOffset l
+                , RtLayout.retSizeBytes l
+                ]
+            )
+            [ RtLayout.valLayout, RtLayout.wordLayout ]
+            == [ [ 40, 48, 56, 64, 72, 80 ], [ 8, 16, 24, 32, 40, 48 ] ]
+        )
+    , check "VR3b1 QBE_VALREP=word IS LOUD, NEVER HALF-WORKING: the word arm returns an Err NAMING the first construct it cannot lower (the `:val` frame slot stride) and emits NOTHING — a half-flipped emit links cleanly and then reads another representation's bytes at the wrong offset, so the arm must fail before the reachability walk. The SAME program on the VAL arm still compiles, i.e. the guard is the arm's, not the program's"
+        (case
+            ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ leafProbe ]) [ leafProbe ] "Lf.f"
+            , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ leafProbe ]) [ leafProbe ] "Lf.f"
+            )
+         of
+            ( Err msg, Ok _ ) ->
+                String.contains "QBE_VALREP=word is NOT IMPLEMENTED" msg
+                    && String.contains "FRAME SLOT STRIDE" msg
+                    && String.contains "Mid/RtLayout.elm" msg
+
+            _ ->
                 False
         )
     , check "B1fix copyWords is a rawAbi WORD pair: the WRAPPER (3 l params, ret l, frame-free) hands off to the LOOP, and the LOOP (3 l params, ret l, frame-free) is an in-frame self-tail with NO :val aggregate or 40-byte blit in its body — the per-word blit/boxing is gone (fails on the pre-fix :val copyWords, which had ret :val, a 40-byte blit, a self-CALL recur and no copyWordsGo)"

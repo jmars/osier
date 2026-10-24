@@ -86,6 +86,7 @@ import Mid.Qbe.Peephole as QbePeephole
 import Mid.Qbe.Print as QbePrint
 import Mid.Qbe.Types as QbeTypes
 import Mid.Rt as MidRt
+import Mid.RtLayout as RtLayout
 import Mid.RtLang.Ast as RtAst
 import Mid.TaintCheck as TaintCheck
 import Set exposing (Set)
@@ -106,10 +107,10 @@ type alias Emitted =
     }
 
 
-compileEntry : MidRt.Runtime -> List String -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ) ), Bool ) -> Result String String
-compileEntry rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
+compileEntry : MidRt.Runtime -> List String -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ) ), Bool ) -> Result String String
+compileEntry rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono wordVal ( consArrRec, eqPtrFast ) =
     Result.map (\e -> prependNote e.note (QbePrint.print e.il))
-        (compileEntryIl rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ))
+        (compileEntryIl rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono wordVal ( consArrRec, eqPtrFast ))
 
 
 {-| The SAME compile, handing back the post-peephole `Mid.Qbe.Il.Module`
@@ -118,8 +119,8 @@ the ADT, so there is no second representation of the program). The `.ssa` path
 is `compileEntry`, which prints exactly this module, so the two outputs cannot
 disagree about what was compiled.
 -}
-compileEntryIl : MidRt.Runtime -> List String -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ) ), Bool ) -> Result String Emitted
-compileEntryIl rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
+compileEntryIl : MidRt.Runtime -> List String -> List String -> List String -> String -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> ( ( Bool, ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ) ), Bool ) -> Result String Emitted
+compileEntryIl rt corpusSources groupSources groupMids entryKey flatten rep primDirect midRt midCons rtLean mono wordVal ( consArrRec, eqPtrFast ) =
     case
         MidModule.parseAll corpusSources
             |> Result.andThen
@@ -138,7 +139,7 @@ compileEntryIl rt corpusSources groupSources groupMids entryKey flatten rep prim
                                                                 Err msg
 
                                                             Ok corpusGlobals ->
-                                                                compileGroup rt env nodeTypes refinedVars corpusUnits corpusGlobals ( groupSources, groupMids ) entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast )
+                                                                compileGroup rt env nodeTypes refinedVars corpusUnits corpusGlobals ( groupSources, groupMids ) entryKey flatten rep primDirect midRt midCons rtLean mono wordVal ( consArrRec, eqPtrFast )
                                                     )
                                         )
                             )
@@ -167,9 +168,10 @@ compileGroup :
     -> Bool
     -> Bool
     -> Bool
+    -> Bool
     -> ( ( Bool, ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ) ), Bool )
     -> Result String Emitted
-compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals ( groupSources, groupMids ) entryKey flatten rep primDirect midRt midCons rtLean mono ( consArrRec, eqPtrFast ) =
+compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals ( groupSources, groupMids ) entryKey flatten rep primDirect midRt midCons rtLean mono wordVal ( consArrRec, eqPtrFast ) =
     -- M3: load the group's user .mid modules FIRST — their exported keys'
     -- schemes join the env BEFORE the Elm sources are checked (an Elm source
     -- may reference a mid key by qualified name).  A .mid that fails to
@@ -241,7 +243,7 @@ compileGroup rt env corpusNodeTypes corpusRefinedVars corpusUnits corpusGlobals 
                                                                                             refinedVarsByModule =
                                                                                                 Dict.union groupTypes.refinedVars corpusRefinedVars
                                                                                         in
-                                                                                        lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule (corpusUnits ++ groupUnits) ( userSurface userModules, userAbi userModules ) entryKey ( consArrRec, eqPtrFast )
+                                                                                        lowerAll rt rep primDirect midRt midCons rtLean mono wordVal flatten globals nodeTypesByModule groupTypes refinedVarsByModule (corpusUnits ++ groupUnits) ( userSurface userModules, userAbi userModules ) entryKey ( consArrRec, eqPtrFast )
                                                                     )
                                                         )
                                             )
@@ -685,6 +687,7 @@ lowerAll :
     -> Bool
     -> Bool
     -> Bool
+    -> Bool
     -> Dict String Int
     -> Dict String (List ( Range, Type ))
     -> GroupSchemes
@@ -694,7 +697,7 @@ lowerAll :
     -> String
     -> ( ( Bool, ( Bool, ( Bool, ( Bool, ( Bool, Bool ) ) ) ) ), Bool )
     -> Result String Emitted
-lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesByModule groupTypes refinedVarsByModule units ( userSurf, userAbiTable ) entryKey ( consArrRec, eqPtrFast ) =
+lowerAll rt rep primDirect midRt midCons rtLean mono wordVal flatten globals nodeTypesByModule groupTypes refinedVarsByModule units ( userSurf, userAbiTable ) entryKey ( consArrRec, eqPtrFast ) =
     let
         ( consArr, ( rec, ( typeSpec, ( midGc, ( midGcYoung, leafFree ) ) ) ) ) =
             consArrRec
@@ -833,7 +836,19 @@ lowerAll rt rep primDirect midRt midCons rtLean mono flatten globals nodeTypesBy
                                                     -- collide with a runtime one (the
                                                     -- `Rt.*` namespace is reserved), so the
                                                     -- union's order cannot matter.
-                                                    QbeLower.lower
+                                                    QbeLower.lowerWith
+                                                        -- VR3b1: THE ONE PLACE the knob
+                                                        -- selects the layout INSTANCE.
+                                                        -- `QBE_VALREP=word` hands
+                                                        -- `wordLayout` down, and Lower
+                                                        -- stops at its choke point with a
+                                                        -- loud error naming the construct.
+                                                        (if wordVal then
+                                                            RtLayout.wordLayout
+
+                                                         else
+                                                            RtLayout.valLayout
+                                                        )
                                                         { rt | abi = Dict.union rt.abi userAbiTable }
                                                         rep
                                                         primDirect
