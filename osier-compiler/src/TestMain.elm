@@ -1321,7 +1321,41 @@ checks rt runtimeMidText =
             [ RtLayout.valLayout, RtLayout.wordLayout ]
             == [ [ 40, 48, 56, 64, 72, 80 ], [ 8, 16, 24, 32, 40, 48 ] ]
         )
-    , check "VR3b1 QBE_VALREP=word IS LOUD, NEVER HALF-WORKING: the word arm returns an Err NAMING the first construct it cannot lower (the `:val` frame slot stride) and emits NOTHING — a half-flipped emit links cleanly and then reads another representation's bytes at the wrong offset, so the arm must fail before the reachability walk. The SAME program on the VAL arm still compiles, i.e. the guard is the arm's, not the program's"
+    , check "VR3b2 AREA 1 PORTED — THE FRAME SLOT STRIDE LOWERS UNDER THE WORD ARM. A defun whose whole body is one Value copy (`\\x -> x`) now emits a REAL module on the word instance: `type :val = align 8 { l }`, the frame block is `alloc8 (valSizeBytes * nslots)` = 16 for 2 slots, the slot address table steps by 8 (`%s0 =l add %f, 0`, `%s1 =l add %f, 8`), the param and result copies are 8-byte blits, and slot 0/1's materialisation is `storel 0` at both `%s0` and `%f + retKindOffset` = `%f + 8`. EXACT text, and the VAL-arm spellings (alloc8 80, a 40-byte blit, a `storew` tag) are asserted ABSENT — this is the row that would have gone red had any stride site still read a constant"
+        (case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ idProbe ]) [ idProbe ] "Id.f" of
+            Ok mod ->
+                let
+                    txt =
+                        Print.print mod
+                in
+                String.contains "type :val = align 8 { l }\n" txt
+                    && String.contains "type :ret = align 8 { :val, w, l, l, l, w }\n" txt
+                    && String.contains "\t%f =l alloc8 16\n" txt
+                    && String.contains "\t%s0 =l add %f, 0\n\t%s1 =l add %f, 8\n" txt
+                    && String.contains "\tstorel 0, %s0\n\t%tzk =l add %f, 8\n\tstorel 0, %tzk\n" txt
+                    && String.contains "\tblit %a0, %s0, 8\n" txt
+                    && not (String.contains "alloc8 80" txt)
+                    && not (String.contains "blit %a0, %s0, 40" txt)
+                    && not (String.contains "storew" txt)
+
+            Err _ ->
+                False
+        )
+    , check "VR3b2 THE VAL ARM IS INERT ON THE SAME PROBE: `\\x -> x` on the DEFAULT instance is the 40-byte shape it has always been — `alloc8 80`, a 40-byte param blit, the `storel 0` .done materialisation at `%f + 40` — so the port above changed the word arm and nothing else"
+        (case QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ idProbe ]) [ idProbe ] "Id.f" of
+            Ok mod ->
+                let
+                    txt =
+                        Print.print mod
+                in
+                String.contains "\t%f =l alloc8 80\n" txt
+                    && String.contains "\tblit %a0, %s0, 40\n" txt
+                    && String.contains "\t%tzk =l add %f, 40\n" txt
+
+            Err _ ->
+                False
+        )
+    , check "VR3b2 THE WORD ARM IS STILL LOUD, AND NOW IT NAMES THE CONSTRUCT: a number literal is a TAG WRITE (area 2), so the same probe that emits for `\\x -> x` is REFUSED for `\\() -> 42` — with the area and the reason in the message, not the old blanket `FRAME SLOT STRIDE` line. The VAL arm still compiles that program, i.e. the guard is the arm's, not the program's"
         (case
             ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ leafProbe ]) [ leafProbe ] "Lf.f"
             , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ leafProbe ]) [ leafProbe ] "Lf.f"
@@ -1329,8 +1363,46 @@ checks rt runtimeMidText =
          of
             ( Err msg, Ok _ ) ->
                 String.contains "QBE_VALREP=word is NOT IMPLEMENTED" msg
-                    && String.contains "FRAME SLOT STRIDE" msg
-                    && String.contains "Mid/RtLayout.elm" msg
+                    && String.contains "AREA 2 (TAG WRITES)" msg
+                    && String.contains "a literal" msg
+                    && String.contains "handoff-perf-vr3b2-result" msg
+                    && not (String.contains "FRAME SLOT STRIDE" msg)
+
+            _ ->
+                False
+        )
+    , check "VR3b2 AREA 7 GATE — THE Rt SURFACE IS REFUSED WHOLESALE: a program carrying any Rt.* key is refused on the word arm with the runtime named, because `runtime.mid`'s stride-carrying defuns (gcAlloc's `2 + count + 4*count*kind`, apply's `args + rem*40`, the values table, argv, the printer) are VR3c's lane. The SAME program lowers on the val arm, so the gate is the arm's"
+        (case
+            ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.copyWords"
+            , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.copyWords"
+            )
+         of
+            ( Err msg, Ok _ ) ->
+                String.contains "AREA 7 (THE Rt SURFACE)" msg
+                    && String.contains "runtime.mid" msg
+
+            _ ->
+                False
+        )
+    , check "VR3b2 THE `:val` PARAMETER ABI IS NOT SIZE-INVARIANT (MEASURED on the vendored qbe: a 40-byte aggregate param arrives BY VALUE ON THE STACK, an 8-byte one IN A REGISTER, and a `:val` call argument built from an `l` operand is the ADDRESS only in the 40-byte case). So `rt_callN` dereferences each pointer under the word arm and passes the LOADED word (`%va0 =l loadl %a0` … `call %fn(env %e, l %va0)`), while the val arm keeps passing the pointer itself. Same for the two-range bridge's `p<i>`"
+        (case
+            ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ idProbe ]) [ idProbe ] "Id.f"
+            , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ idProbe ]) [ idProbe ] "Id.f"
+            )
+         of
+            ( Ok wordMod, Ok valMod ) ->
+                let
+                    wTxt =
+                        Print.print wordMod
+
+                    vTxt =
+                        Print.print valMod
+                in
+                String.contains "\t%va0 =l loadl %a0\n\t%r =:ret call %fn(env %e, l %va0)\n" wTxt
+                    && String.contains "\t%pv0 =l loadl %p0\n" wTxt
+                    && String.contains "\t%r =:ret call %fn(env %e, l %a0)\n" vTxt
+                    && not (String.contains "%va0" vTxt)
+                    && not (String.contains "%pv0" vTxt)
 
             _ ->
                 False
@@ -12840,6 +12912,23 @@ leafProbe =
         Lam
             { params = []
             , body = Lit (LNumber 42)
+            }
+    }
+
+
+{-| perf VR3b2 — THE AREA-1 PROBE: `\x -> x`, a defun whose ENTIRE body is one
+Value copy.  Under the word arm this is the one shape area 1 admits, so it is
+the program that proves the frame slot stride ports: `alloc8 (valSizeBytes *
+nslots)`, the slot address table at the instance's stride, the param blit and
+the result blit — all of them 8 bytes, none of them a tag word.
+-}
+idProbe : Defun
+idProbe =
+    { key = "Id.f"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body = Var 0
             }
     }
 

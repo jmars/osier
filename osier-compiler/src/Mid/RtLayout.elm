@@ -345,15 +345,25 @@ valLayout =
 -- for the 40-byte representation, i.e. everything VR3b2/VR3c must port before
 -- the knob can be turned on.  This list IS the unit's deliverable:
 --
---   1. THE FRAME SLOT STRIDE.  The prologue/epilogue blits, the `valSizeBytes
---      * nslots` alloc, the param and capture blits, slot 0/1 materialisation
---      (PLeaf).  THIS IS THE FIRST CONSTRUCT THE WORD ARM HITS, and it is what
---      the choke point names.
---   2. TAG WRITES AND TESTS.  `storeValueCell`'s `storew <tag>`, every `Cmp W
---      Ceq` tag test, and the .mid surface lane's `RawTagIs`/`RawMkValue`
---      (Mid.RtLang.LowerToIr names `valLayout` at 9 sites — VR3a's finding;
---      that lane lowers BEFORE Lower runs, so its tag integers are baked into
---      the Mid.Ir under any knob).
+--   1. THE FRAME SLOT STRIDE.  PORTED (perf VR3b2).  The prologue/epilogue
+--      blits, the `valSizeBytes * nslots` alloc, the slot address table, the
+--      param and capture blits and slot 0/1's materialisation (PLeaf) all read
+--      the instance, so a Value copy is an 8-byte blit and the frame is 8 bytes
+--      a slot.  Pinned in TestMain by the `id` probe on BOTH arms.  The `:val`
+--      PARAMETER ABI moved with it: MEASURED on the vendored qbe, a 40-byte
+--      aggregate param arrives BY VALUE ON THE STACK and an 8-byte one IN A
+--      REGISTER, so a `:val` CALL ARGUMENT built from an `l` operand is that
+--      operand's ADDRESS only at 40 bytes — `rt_callN`/`rt_call2r` load each
+--      pointer before passing it under the word arm.
+--   2. TAG WRITES AND TESTS.  NOT PORTED.  `storeValueCell`'s `storew <tag>`,
+--      every `Cmp W Ceq` tag test, and the .mid surface lane's `RawTagIs`/
+--      `RawMkValue` (Mid.RtLang.LowerToIr names `valLayout` at 9 sites —
+--      VR3a's finding; that lane lowers BEFORE Lower runs, so its tag integers
+--      are baked into the Mid.Ir under any knob).  Under the word arm the tag
+--      is the LOW 3 BITS, so a TEST is `and`+compare and a WRITE is an
+--      or/and-mask — and the heap tags (cons/string/vector/record/float/
+--      lambda/prim/stream/mark) all collapse to `...001`, so a heap-object test
+--      additionally needs the 2-word header's KIND.
 --   3. PAYLOAD ACCESS.  Every `payloadWordOffset` read/write: cons car/cdr,
 --      string/vector `len`, record fields, float payload, argv, the exec-plan
 --      blob.  Under the word arm a field is a plain 8-byte load at 8i, and a
@@ -367,7 +377,9 @@ valLayout =
 --   7. THE Rt SURFACE (`runtime.mid` — VR3c's, single-writer, NOT this unit):
 --      gcAlloc's `2 + count + 4*count*kind` sizing, apply's `args + rem*40`,
 --      gcScav/copyWordsGo, the values-table builder AND walk, argv install, and
---      the printer internals (mknum/payload/tagis).
+--      the printer internals (mknum/payload/tagis).  REFUSED WHOLESALE under
+--      the word arm by Lower's area-7 gate — a program whose emitted set
+--      contains any Rt key stops there, which today is every real program.
 --   8. THE C FFI GLUE.  The tag/untag at the boundary — a fixnum's payload IS
 --      the C i64 after untag, and Values never cross raw (the extern
 --      declarations already encode C widths, so nothing there moves).

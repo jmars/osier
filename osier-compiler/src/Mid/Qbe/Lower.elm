@@ -489,29 +489,294 @@ unique xs =
         |> Tuple.second
 
 
-{-| VR3b1 — THE WORD ARM'S ONE CHOKE POINT, and the whole safety rule of this
-increment in one function.
+{-| THE WORD ARM'S LOUD GATE, per construct (VR3b1 introduced it as ONE choke
+point before the reachability walk; VR3b2 turned it into a per-construct gate
+so the arm can port AREA BY AREA without ever emitting a half-word module).
 
 `QBE_VALREP=word` does NOT make the word representation work.  The arm exists
 so the representation is a knob with a LOUD off-switch rather than a
 half-flipped emitter: a half-word emit LINKS CLEANLY and then reads another
 representation's bytes at the wrong offset — the exact failure Mid.RtLayout's
-header exists to prevent.  So every construct the word arm cannot lower yet
-fails HERE, by name, before a byte of IL is emitted; there is no path that
-emits some word-arm code and some val-arm code.
+header exists to prevent.  So every construct the word arm cannot lower YET
+fails here, by name, and because every emit site returns `Result`, one failure
+means NO IL AT ALL (there is no path that emits some word-arm code and some
+val-arm code).
 
-`what` NAMES THE CONSTRUCT.  The full worklist (every construct still
-un-ported, for VR3b2/VR3c) is written down once, beside `RtLayout.wordLayout`
-— keep them in step: this message names the FIRST entry, that comment lists
-the rest.
-
-When the arm is ported this function and its one call site go away together.
+`what` NAMES THE CONSTRUCT AND ITS WORKLIST AREA.  The full worklist is beside
+`RtLayout.wordLayout`; the running ported/un-ported table is in
+`handoff-perf-vr3b2-result`.
 -}
 wordArmUnsupported : String -> String
 wordArmUnsupported what =
-    "qbe: QBE_VALREP=word is NOT IMPLEMENTED (perf VR3b1): the emitter cannot lower "
+    "qbe: QBE_VALREP=word is NOT IMPLEMENTED (perf VR3b2): the emitter cannot lower "
         ++ what
-        ++ " — the word arm stops at its first un-ported construct instead of emitting half-word code (nothing was emitted). The full worklist is beside `wordLayout` in Mid/RtLayout.elm."
+        ++ " — the word arm stops at its first un-ported construct instead of emitting half-word code (nothing was emitted). The worklist is beside `wordLayout` in Mid/RtLayout.elm; the ported/un-ported table is in handoff-perf-vr3b2-result."
+
+
+{-| Is this emit running for the 8-byte tagged-word instance?  ONE predicate,
+read by every per-construct gate, so a gate cannot disagree with the arm it is
+guarding.
+-}
+wordArm : S -> Bool
+wordArm s =
+    s.layout == RtLayout.wordLayout
+
+
+wordArmLayout : RtLayout.ValLayout -> Bool
+wordArmLayout layout =
+    layout == RtLayout.wordLayout
+
+
+{-| Refuse a construct the word arm has not ported yet.  Always succeeds on the
+val arm, so every call site is inert there.
+-}
+wordGate : String -> S -> Result String S
+wordGate what s =
+    if wordArm s then
+        Err (wordArmUnsupported what)
+
+    else
+        Ok s
+
+
+{-| THE PER-DEFUN PRE-WALK CLASSIFIER (perf VR3b2) — which Mid.Ir constructs
+the word arm can emit TODAY.
+
+WHY A WHITELIST AND NOT PER-SITE GATES ALONE.  The value-materialising sites
+are gated individually (and that is where the ports land, area by area), but a
+gate at each of ~60 sites is only as complete as the enumeration behind it, and
+a MISSED site is a mixed-representation emit — the one failure this arc exists
+to prevent.  This classifier is the belt to that braces: under the word arm a
+defun whose body contains ANY construct outside the ported set is refused
+BEFORE its body walk starts, so a missed site cannot be reached.  The two must
+agree, and the direction of the risk is chosen: a construct listed here is
+claimed PORTED and is pinned in TestMain; a construct not listed stays loud
+even if its emit site happens to work.
+
+WHAT IS PORTED (perf VR3b2, area 1 — the frame slot stride):
+  * the prologue/epilogue: the `alloc8 (valSizeBytes * nslots)` block, the slot
+    address table, the param and capture blits, slot 0/1's materialisation;
+  * a VALUE COPY (`Var`, `let x = y`, `NoTail` around either) — one `blit` of
+    `valSizeBytes`.
+NOTHING ELSE.  In particular a LITERAL is a tag WRITE (area 2) and is refused
+here by name, so the arm's admitted language is exactly what has been ported.
+-}
+wordArmUnported : Exp -> Maybe String
+wordArmUnported exp =
+    case exp of
+        Var _ ->
+            Nothing
+
+        NoTail inner ->
+            wordArmUnported inner
+
+        Let block ->
+            let
+                fromBinder b =
+                    case b of
+                        LetBind bind ->
+                            wordArmUnported bind.value
+
+                        LetDestruct _ ->
+                            Just (wordArea "AREA 2/3 (DESTRUCTURING)" "a `let` destructuring pattern — it is a tag test plus payload reads")
+
+                fromBinders bs =
+                    case bs of
+                        [] ->
+                            wordArmUnported block.body
+
+                        b :: rest ->
+                            case fromBinder b of
+                                Just what ->
+                                    Just what
+
+                                Nothing ->
+                                    fromBinders rest
+            in
+            fromBinders block.binders
+
+        Lit _ ->
+            Just (wordArea "AREA 2 (TAG WRITES)" "a literal — under the word arm a literal is a TAGGED IMMEDIATE (or a heap cell), not a tag word plus payload words")
+
+        _ ->
+            Just (wordArea (wordAreaName exp) (wordAreaWhat exp))
+
+
+wordArea : String -> String -> String
+wordArea area what =
+    area ++ " — " ++ what
+
+
+{-| The same classifier over the whole reachable SURFACE, so the refusal names
+the first surface construct the port has not reached rather than whichever
+defun happened to be lowered first.  Rt keys are not walked here — they are
+refused wholesale by the area-7 gate, which states a stronger fact.
+-}
+wordSurfaceUnported : Dict String Defun -> List String -> Maybe String
+wordSurfaceUnported defuns keys =
+    case keys of
+        [] ->
+            Nothing
+
+        k :: rest ->
+            if isRtKey k then
+                -- An Rt key reached as the ENTRY (a TestMain probe into the
+                -- runtime) is not a surface defun: it is refused wholesale by
+                -- the area-7 gate, which states a stronger fact than "this
+                -- node is un-ported".
+                wordSurfaceUnported defuns rest
+
+            else
+                case Dict.get k defuns of
+                    Nothing ->
+                        wordSurfaceUnported defuns rest
+
+                    Just defun ->
+                        case defun.value of
+                            Lam lambda ->
+                                case wordArmUnported lambda.body of
+                                    Just what ->
+                                        Just what
+
+                                    Nothing ->
+                                        wordSurfaceUnported defuns rest
+
+                            _ ->
+                                Just "a defun with a non-Lambda value (corrupt Mid tree)"
+
+
+wordAreaName : Exp -> String
+wordAreaName exp =
+    case exp of
+        App _ ->
+            "AREA 6 (THE CALL ABI)"
+
+        PrimApp _ ->
+            "AREA 4 (ARITHMETIC)"
+
+        Case _ ->
+            "AREA 2 (TAG TESTS)"
+
+        If _ ->
+            "AREA 2 (TAG TESTS)"
+
+        ShortAnd _ ->
+            "AREA 2 (TAG TESTS)"
+
+        ShortOr _ ->
+            "AREA 2 (TAG TESTS)"
+
+        NotEqual _ ->
+            "AREA 2 (TAG TESTS)"
+
+        Con _ ->
+            "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
+
+        Tup _ ->
+            "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
+
+        RecordLit _ ->
+            "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
+
+        RecordGet _ _ ->
+            "AREA 3 (PAYLOAD ACCESS)"
+
+        RecordUpdate _ ->
+            "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
+
+        ListLit _ ->
+            "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
+
+        Lam _ ->
+            "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
+
+        GRef _ ->
+            "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
+
+        StreamRef _ ->
+            "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
+
+        Loop _ ->
+            "AREA 2 (TAG TESTS)"
+
+        Break ->
+            "AREA 2 (TAG TESTS)"
+
+        Continue ->
+            "AREA 2 (TAG TESTS)"
+
+        Unsafe _ ->
+            "AREA 3 (PAYLOAD ACCESS)"
+
+        _ ->
+            "AN UNPORTED CONSTRUCT"
+
+
+wordAreaWhat : Exp -> String
+wordAreaWhat exp =
+    case exp of
+        App _ ->
+            "a call — its argument staging, `:ret` aggregate and .tail metadata are not ported"
+
+        PrimApp _ ->
+            "a primitive application — arithmetic needs inline tag/untag and the i61 overflow/boxing path"
+
+        Case _ ->
+            "a case — every alternative is a tag test, and under the word arm a tag test is `and`+compare (immediates) or a header-kind read (heap objects)"
+
+        If _ ->
+            "an if — the condition is a tag test on the boolean value"
+
+        ShortAnd _ ->
+            "`&&` — a tag test on the boolean value"
+
+        ShortOr _ ->
+            "`||` — a tag test on the boolean value"
+
+        NotEqual _ ->
+            "`/=` — a tag test plus a payload compare"
+
+        Con _ ->
+            "a constructor application — under the word arm a heap object is one tagged pointer, not a tag word plus payload words"
+
+        Tup _ ->
+            "a tuple — a heap object under the word arm"
+
+        RecordLit _ ->
+            "a record literal — a heap object under the word arm"
+
+        RecordGet _ _ ->
+            "a record field read — a payload access"
+
+        RecordUpdate _ ->
+            "a record update — a heap object plus payload accesses"
+
+        ListLit _ ->
+            "a list literal — a cons chain of heap objects"
+
+        Lam _ ->
+            "a closure — a heap object under the word arm"
+
+        GRef _ ->
+            "a global reference — it materialises a closure or descriptor Value"
+
+        StreamRef _ ->
+            "a stream reference — it materialises a symbol Value"
+
+        Loop _ ->
+            "a loop — its condition is a tag test"
+
+        Break ->
+            "`break` inside a loop"
+
+        Continue ->
+            "`continue` inside a loop"
+
+        Unsafe _ ->
+            "a raw node in a value position — the Mid runtime's lane"
+
+        _ ->
+            "a construct the word arm has not ported"
 
 
 {-| The VAL-arm entry point — the layout this whole tree has always emitted,
@@ -535,21 +800,17 @@ what VR3a's `S.layout` threading was for.  The knob plumbing is
 it, `Mid.QbeModule` hands it down, and the instance lands in `S.layout` at
 `s0`.
 
-`QBE_VALREP=word` therefore arrives here as `RtLayout.wordLayout` and STOPS at
-`wordArmUnsupported` before the reachability walk: one loud error, no IL at
-all.  When VR3b2 ports the arm, this guard is the line that goes — everything
-below it already threads the instance.
+VR3b1 refused the word arm HERE, in one place, before the reachability walk.
+VR3b2 turned that into a PER-CONSTRUCT gate so the arm can be ported area by
+area: the arm now walks the same path and refuses the first construct it has
+not ported (`wordArmUnported` per defun, `wordGate` at the emit sites, and the
+Rt-surface gate in `lowerArm`), so the loud error NAMES the construct that
+stopped it instead of always naming area 1.  The invariant is unchanged: one
+refusal means NO IL AT ALL.
 -}
 lowerWith : RtLayout.ValLayout -> MidRt.Runtime -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
 lowerWith layout runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midGcYoung leafFree table arityTable program entryKey =
-    if layout == RtLayout.wordLayout then
-        Err
-            (wordArmUnsupported
-                "THE FRAME SLOT STRIDE — the `:val` prologue/epilogue blits, the `valSizeBytes * nslots` alloc and the slot 0/1 materialisation every defun starts with"
-            )
-
-    else
-        lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midGcYoung leafFree table arityTable program entryKey
+    lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midGcYoung leafFree table arityTable program entryKey
 
 
 {-| The val arm's body.  Its 9th positional slot — spelled `_` — is the RETIRED
@@ -756,23 +1017,69 @@ lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec _ mid
                 -- the corrected-criterion audit (plan.md §2.2), whose pure-program
                 -- half is pinned by probe-midgc-tail.sh (the transient tail array
                 -- is a scavenge trigger but not a hole).
-            in
-            List.foldl
-                (\key acc ->
-                    acc
-                        |> Result.andThen
-                            (\s ->
-                                case Dict.get key defuns of
-                                    Nothing ->
-                                        Err ("qbe: unknown global " ++ key)
-
-                                    Just defun ->
-                                        lowerDefun runtime defun s
+                -- THE Rt SURFACE GATE (perf VR3b2, worklist entry 7).  Every
+                -- Rt.* defun is `runtime.mid` text written against the 40-byte
+                -- layout — gcAlloc's `2 + count + 4*count*kind`, apply's
+                -- `args + rem*40`, gcScav/copyWordsGo, the values table, argv,
+                -- the printer — and VR3b2's write scope EXCLUDES runtime.mid
+                -- (VR3c owns it, single-writer).  Lowering one of them under
+                -- the word arm would emit a runtime whose own arithmetic reads
+                -- 8-byte values at 40-byte strides.  So a word-arm program
+                -- whose emitted set contains ANY Rt key is refused HERE,
+                -- before a defun is lowered.
+                --
+                -- MEASURED consequence, stated so nobody mistakes the arm's
+                -- reach: EVERY program compiled by run.js carries runtime.mid,
+                -- and `MidRt.gcSeeds`/`conSeeds`/`closureSeeds` join the
+                -- emitted set whenever the program carries any Rt defun at
+                -- all — so under the word arm every real program stops HERE
+                -- and only a runtime-free module (a TestMain probe, or a
+                -- surface-only Mid program) can be emitted.  That is the
+                -- honest state of the flip: area 7 is VR3c's, and until it
+                -- lands the word arm cannot produce a runnable program.
+                lowerAllKeys =
+                    if wordArmLayout layout && List.any isRtKey keys then
+                        Err
+                            (wordArmUnsupported
+                                (wordArea
+                                    "AREA 7 (THE Rt SURFACE)"
+                                    "a program that reaches `runtime.mid` — its stride-carrying defuns (gcAlloc, apply, gcScav/copyWordsGo, the values table, argv, the printer) are VR3c's single-writer lane and still assume 40-byte values, so a word-arm program that reaches the runtime would link cleanly and read the wrong bytes at the wrong offset"
+                                )
                             )
-                )
-                (Ok s0)
-                keys
-                |> Result.map (\sFinal -> finishModule sFinal keys)
+
+                    else
+                        List.foldl
+                            (\key acc ->
+                                acc
+                                    |> Result.andThen
+                                        (\s ->
+                                            case Dict.get key defuns of
+                                                Nothing ->
+                                                    Err ("qbe: unknown global " ++ key)
+
+                                                Just defun ->
+                                                    lowerDefun runtime defun s
+                                        )
+                            )
+                            (Ok s0)
+                            keys
+                            |> Result.map (\sFinal -> finishModule sFinal keys)
+            in
+            -- ORDER MATTERS FOR THE ERROR, NOT FOR SAFETY.  The SURFACE
+            -- constructs are checked first so a real program's refusal names
+            -- the construct the port is actually about (area 2's tag write,
+            -- area 4's arithmetic) instead of the blanket runtime gate above;
+            -- both refuse before any defun is lowered, so no IL is emitted.
+            if wordArmLayout layout then
+                case wordSurfaceUnported defuns surfaceKeys of
+                    Just what ->
+                        Err (wordArmUnsupported what)
+
+                    Nothing ->
+                        lowerAllKeys
+
+            else
+                lowerAllKeys
 
 
 
@@ -1588,6 +1895,29 @@ lowerDefun runtime defun sOuter =
             in
             if List.length lambda.params > sOuter.layout.maxArity then
                 Err ("qbe: defun " ++ defun.key ++ " has arity > " ++ String.fromInt sOuter.layout.maxArity ++ " (rt_callN table limit)")
+
+            else if wordArm sOuter then
+                -- perf VR3b2: the per-defun belt to the per-site braces — see
+                -- `wordArmUnported`.  A defun containing a construct the arm
+                -- has not ported is refused BEFORE its body walk, so a site
+                -- missing its own gate cannot be reached.
+                case wordArmUnported lambda.body of
+                    Just what ->
+                        Err (wordArmUnsupported what)
+
+                    Nothing ->
+                        lowerFunBody True defun.key qname lambda [] rt sOuter
+                            |> Result.map
+                                (\( pending, sInner ) ->
+                                    { sOuter
+                                        | funcs = pending :: List.foldl (::) sOuter.funcs sInner.funcs
+                                        , datas = sInner.datas
+                                        , dataKeys = sInner.dataKeys
+                                        , dataN = sInner.dataN
+                                        , cloN = sInner.cloN
+                                    }
+
+                                )
 
             else
                 lowerFunBody True defun.key qname lambda [] rt sOuter
@@ -9309,8 +9639,32 @@ rtCallFuncs layout =
                 params =
                     ( "fn", Base L ) :: ( "e", Base L ) :: List.map (\a -> ( a, Base L )) argNames
 
+                -- PERF VR3b2 — THE `:val` PARAMETER ABI IS NOT SIZE-INVARIANT.
+                -- MEASURED on the vendored qbe: a `:val` parameter arrives BY
+                -- VALUE ON THE STACK when the aggregate is 40 bytes and IN A
+                -- REGISTER when it is 8 (amd64/sysv.c passes <=16 B aligned
+                -- aggregates in registers).  A `:val` CALL ARGUMENT built from
+                -- an `l` operand is the 40-byte case only because qbe puts the
+                -- aggregate in memory and reads the `l` as its address; at 8
+                -- bytes it passes the `l` ITSELF as the word — i.e. the
+                -- POINTER instead of the value it points at.  So under the
+                -- word arm each pointer is dereferenced first and the loaded
+                -- word is what crosses.  The callee side needs no change: its
+                -- prologue `blit %a<i>, %s<slot>, 8` copies the aggregate
+                -- either way.
+                loadArgs =
+                    if wordArmLayout layout then
+                        List.map (\a -> Load (Just ("v" ++ a)) L LoadL (Il.Tmp a)) argNames
+
+                    else
+                        []
+
                 callArgs =
-                    ArgEnv (Il.Tmp "e") :: List.map (\a -> ArgVal (Base L) (Il.Tmp a)) argNames
+                    if wordArmLayout layout then
+                        ArgEnv (Il.Tmp "e") :: List.map (\a -> ArgVal (Base L) (Il.Tmp ("v" ++ a))) argNames
+
+                    else
+                        ArgEnv (Il.Tmp "e") :: List.map (\a -> ArgVal (Base L) (Il.Tmp a)) argNames
             in
             { name = "rt_call" ++ String.fromInt n
             , export_ = True
@@ -9320,8 +9674,8 @@ rtCallFuncs layout =
             , blocks =
                 [ { label = "start"
                   , body =
-                        [ Call (Just "r") (Agg "ret") (Il.Tmp "fn") callArgs
-                        ]
+                        loadArgs
+                            ++ [ Call (Just "r") (Agg "ret") (Il.Tmp "fn") callArgs ]
                   , jump = Ret (Just (Il.Tmp "r"))
                   }
                 ]
@@ -9369,9 +9723,27 @@ rtCallTwoRange layout =
             { label = "arity" ++ String.fromInt n
             , body =
                 List.concatMap paramPtr (List.range 0 (n - 1))
+                    ++ (if wordArmLayout layout then
+                            List.map (\i -> Load (Just ("pv" ++ String.fromInt i)) L LoadL (Il.Tmp ("p" ++ String.fromInt i))) (List.range 0 (n - 1))
+
+                        else
+                            []
+                       )
                     ++ [ Call (Just "r") (Agg "ret") (Il.Tmp "code")
                             (ArgEnv (Il.Tmp "e")
-                                :: List.map (\i -> ArgVal (Base L) (Il.Tmp ("p" ++ String.fromInt i))) (List.range 0 (n - 1))
+                                :: List.map
+                                    (\i ->
+                                        ArgVal (Base L)
+                                            (Il.Tmp
+                                                (if wordArmLayout layout then
+                                                    "pv" ++ String.fromInt i
+
+                                                 else
+                                                    "p" ++ String.fromInt i
+                                                )
+                                            )
+                                    )
+                                    (List.range 0 (n - 1))
                             )
                        ]
             , jump = Ret (Just (Il.Tmp "r"))
