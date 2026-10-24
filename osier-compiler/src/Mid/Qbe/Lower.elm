@@ -535,7 +535,7 @@ all.  When VR3b2 ports the arm, this guard is the line that goes — everything
 below it already threads the instance.
 -}
 lowerWith : RtLayout.ValLayout -> MidRt.Runtime -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> Bool -> QbeTypes.Table -> Dict String Int -> List Defun -> String -> Result String Il.Module
-lowerWith layout runtime rep primDirect midCons rtLean consArr rec typeSpec _ midGcYoung leafFree table arityTable program entryKey =
+lowerWith layout runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midGcYoung leafFree table arityTable program entryKey =
     if layout == RtLayout.wordLayout then
         Err
             (wordArmUnsupported
@@ -543,7 +543,7 @@ lowerWith layout runtime rep primDirect midCons rtLean consArr rec typeSpec _ mi
             )
 
     else
-        lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec False midGcYoung leafFree table arityTable program entryKey
+        lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec midGc midGcYoung leafFree table arityTable program entryKey
 
 
 {-| The val arm's body.  Its 9th positional slot — spelled `_` — is the RETIRED
