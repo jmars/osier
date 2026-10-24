@@ -108,17 +108,20 @@ import Char.Extra exposing (utf8ByteLength)
 
 
 -- THE LAYOUT IS DEFINED ONCE, IN Mid.RtLayout (handoff-osier-zigretire-plan
--- STAGE 2).  These are the names this module's ~3500 lines already used; each
--- one is now READ from that single definition rather than restated here, so
--- the emitted IL and the Zig runtime cannot describe different bytes.
--- sizeof(vm Value) = 40 (gc/types.zig), the `:val` aggregate.
-vs : Int
-vs =
-    RtLayout.valSizeBytes
-
-
--- sizeof(:ret) = 80 (Il.retType): `{ :val, w, l, l, l, w }` = two pooled-frame
--- slots — slot 0 the finished value, slot 1 the .tail discriminator + payload.
+-- STAGE 2), and since VR3a it is read as a RECORD INSTANCE threaded in the
+-- state: `S.layout`, seeded from `RtLayout.valLayout` at the entry point and
+-- carried into every closure body's fresh state.  Nothing here names a layout
+-- CONSTANT any more — `s.layout.valSizeBytes`/`s.layout.tagNil`/... are the
+-- fields of the instance this compile was started with, which is what makes
+-- a second instance (VR3b's word arm) a change at the SEED rather than at the
+-- ~150 emit sites.
+--
+-- WHAT STAYS A MODULE CONSTANT, and why: `rvs` below is sizeof(:ret) = 80
+-- (`{ :val, w, l, l, l, w }` = two pooled-frame slots — slot 0 the finished
+-- value, slot 1 the .tail discriminator + payload).  The `:ret` aggregate is
+-- NOT a Value and does not flip with the representation, so it is not in the
+-- record (Mid.RtLayout's TRAP-3 note names the ONE coupling VR3b must derive:
+-- retKindOffset == valSizeBytes).
 rvs : Int
 rvs =
     RtLayout.retSizeBytes
@@ -138,58 +141,6 @@ libcNoCollect =
 
 
 
--- VM ValTag numbers this lowering switches on (gc/types.zig ValTag order).
-tagNumber : Int
-tagNumber =
-    RtLayout.tagNumber
-
-
-tagBoolean : Int
-tagBoolean =
-    RtLayout.tagBoolean
-
-
-tagFloat : Int
-tagFloat =
-    RtLayout.tagFloat
-
-
-tagSymbol : Int
-tagSymbol =
-    RtLayout.tagSymbol
-
-
-tagString : Int
-tagString =
-    RtLayout.tagString
-
-
-tagCons : Int
-tagCons =
-    RtLayout.tagCons
-
-
-tagNil : Int
-tagNil =
-    RtLayout.tagNil
-
-
-tagVector : Int
-tagVector =
-    RtLayout.tagVector
-
-
-tagRecord : Int
-tagRecord =
-    RtLayout.tagRecord
-
-
-maxArity : Int
-maxArity =
-    RtLayout.maxArity
-
-
-
 -- ============================ STATE ============================
 -- One state record threads everything: block emission, temp/label/slot
 -- supplies, the binder->slot scope, and module-level accumulation (extra
@@ -198,7 +149,8 @@ maxArity =
 
 
 type alias S =
-    { blocks : List Block -- completed blocks, REVERSED
+    { layout : RtLayout.ValLayout -- VR3a: the Value layout instance this compile emits FOR (seeded from RtLayout.valLayout, carried into every closure body's fresh state); NOTHING in this module may name a layout constant directly
+    , blocks : List Block -- completed blocks, REVERSED
     , curLabel : String
     , curBody : List Il.Inst -- REVERSED
     , tmp : Int
@@ -667,7 +619,8 @@ lower runtime rep primDirect midCons rtLean consArr rec typeSpec _ midGcYoung le
                         libcNoCollect
 
                 s0 =
-                    { blocks = []
+                    { layout = RtLayout.valLayout
+                    , blocks = []
                     , curLabel = "start"
                     , curBody = []
                     , tmp = 0
@@ -1574,8 +1527,8 @@ lowerDefun runtime defun sOuter =
                     else
                         RtGeneric
             in
-            if List.length lambda.params > maxArity then
-                Err ("qbe: defun " ++ defun.key ++ " has arity > " ++ String.fromInt maxArity ++ " (rt_callN table limit)")
+            if List.length lambda.params > sOuter.layout.maxArity then
+                Err ("qbe: defun " ++ defun.key ++ " has arity > " ++ String.fromInt sOuter.layout.maxArity ++ " (rt_callN table limit)")
 
             else
                 lowerFunBody True defun.key qname lambda [] rt sOuter
@@ -1799,6 +1752,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                 else
                     Dict.empty
             , intBinders = intParams
+            , layout = sOuter.layout
             , table = sOuter.table
             , rep = sOuter.rep
             , primDirect = sOuter.primDirect
@@ -1984,6 +1938,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                                                     (Liveness.classify
                                                         { nslots = s1.slot
                                                         , noCollect = sOuter.noCollect
+                                                        , layout = s1.layout
                                                         }
                                                         (List.reverse s1.blocks)
                                                     )
@@ -2038,7 +1993,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                                         -- — all three `malloc(80)` sites in
                                         -- runtime.mid), unbounded over a tail loop.
                                         startBlock "ret" s1
-                                            |> emit (Bin (Just "retAddr") L Add (Il.Tmp (slotTmp 0)) (Il.Con (RtLayout.payloadWordOffset 0)))
+                                            |> emit (Bin (Just "retAddr") L Add (Il.Tmp (slotTmp 0)) (Il.Con (RtLayout.payloadWordOffset s1.layout 0)))
                                             |> emit (Load (Just "retBuf") L LoadL (Il.Tmp "retAddr"))
                                             |> emit (Blit (Il.Tmp "retBuf") (Il.Tmp (slotTmp 0)) rvs)
                                             |> emit (Call Nothing (Base W) (Il.Sym "free") [ ArgVal (Base L) (Il.Tmp "retBuf") ])
@@ -2368,7 +2323,7 @@ lowerIfWord block s =
                         in
                         Ok
                             (emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp cslot))) s9
-                                |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con tagBoolean))
+                                |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagBoolean))
                                 |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp cslot)) (Il.Con 8))
                                 |> emit (Load (Just pldT) W LoadW (Il.Tmp p8T))
                                 |> emit (Cmp (Just iszT) W Ceq (Il.Tmp pldT) (Il.Con 0))
@@ -2567,7 +2522,7 @@ lowerValValue id dest s =
                 Nothing ->
                     case valueBaseOf id s of
                         Just src ->
-                            Ok (emit (Blit src (Il.Tmp (slotTmp dest)) vs) s)
+                            Ok (emit (Blit src (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes) s)
 
                         Nothing ->
                             Err ("qbe: unbound binder id " ++ String.fromInt id ++ " (corrupt Mid tree)")
@@ -2616,7 +2571,7 @@ lowerRawVal node dest s =
                                         ( eT, s3 ) =
                                             elemAddr vecT idxT s2
                                     in
-                                    emit (Blit (Il.Tmp eT) (Il.Tmp (slotTmp dest)) vs) s3
+                                    emit (Blit (Il.Tmp eT) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes) s3
                                 )
                     )
 
@@ -2857,7 +2812,7 @@ lowerRawVal node dest s =
                                                 (padded ++ [ ArgVal (Base W) (Il.Con (List.length slots)) ])
                                             )
                                             s2
-                                            |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
+                                            |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
                                         )
 
                                 else
@@ -2875,7 +2830,7 @@ lowerRawVal node dest s =
                                     (s3
                                         |> emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle call.sym)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots))
                                         |> emit (Call (Just vp) (Agg "val") (Il.Sym (bounceSeat s)) [ ArgVal (Base L) (Il.Tmp rp) ])
-                                        |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
+                                        |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
                                     )
                         )
 
@@ -2978,7 +2933,7 @@ lowerRawVal node dest s =
                                     freshTmp s1
                             in
                             emit (Call (Just t) (Agg "val") fnA args) s2
-                                |> emit (Blit (Il.Tmp t) (Il.Tmp (slotTmp dest)) vs)
+                                |> emit (Blit (Il.Tmp t) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
                         )
 
         RawDataAddr _ ->
@@ -3021,7 +2976,7 @@ storeValueCell tag words dest s0 =
 
                         acc2 =
                             acc1
-                                |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp dest)) (Il.Con (RtLayout.payloadWordOffset i)))
+                                |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp dest)) (Il.Con (RtLayout.payloadWordOffset s0.layout i)))
                                 |> emit (Store StoreL w (Il.Tmp pT))
                     in
                     go (i + 1) acc2 rest
@@ -3070,7 +3025,7 @@ storeValueWords tag words dest s0 =
 
                                     st2 =
                                         st1
-                                            |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp dest)) (Il.Con (RtLayout.payloadWordOffset i)))
+                                            |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp dest)) (Il.Con (RtLayout.payloadWordOffset s0.layout i)))
                                             |> emit (Store (if isFlt then StoreD else StoreL) w (Il.Tmp pT))
                                 in
                                 go (i + 1) st2 more
@@ -3250,7 +3205,7 @@ midGcAllocSeat seatKey lenA s =
             freshSlot s
 
         s2 =
-            storeValueCell tagNumber [ lenA ] slot s1
+            storeValueCell s.layout.tagNumber [ lenA ] slot s1
 
         ( vp, s3 ) =
             freshTmp s2
@@ -3269,7 +3224,7 @@ midGcAllocSeat seatKey lenA s =
     in
     ( Il.Tmp t
     , emit (Call (Just vp) (Agg "val") (Il.Sym ("q_" ++ mangle seatKey)) (padded ++ [ ArgVal (Base W) (Il.Con 1) ])) s5
-        |> emit (Bin (Just aT) L Add (Il.Tmp vp) (Il.Con (RtLayout.payloadWordOffset 0)))
+        |> emit (Bin (Just aT) L Add (Il.Tmp vp) (Il.Con (RtLayout.payloadWordOffset s.layout 0)))
         |> emit (Load (Just t) L LoadL (Il.Tmp aT))
     )
 
@@ -3392,7 +3347,7 @@ rawWordArg exp s =
                                 freshTmp s2
                         in
                         ( Il.Tmp t
-                        , emit (Bin (Just aT) L Add base (Il.Con (RtLayout.payloadWordOffset p.word))) s3
+                        , emit (Bin (Just aT) L Add base (Il.Con (RtLayout.payloadWordOffset s.layout p.word))) s3
                             |> emit (Load (Just t) L LoadL (Il.Tmp aT))
                         )
                     )
@@ -3417,7 +3372,7 @@ rawWordArg exp s =
                                 freshTmp s3
                         in
                         ( Il.Tmp t
-                        , emit (Bin (Just aT) L Add base (Il.Con (RtLayout.payloadWordOffset p.word))) s4
+                        , emit (Bin (Just aT) L Add base (Il.Con (RtLayout.payloadWordOffset s.layout p.word))) s4
                             |> emit (Load (Just wT) W LoadW (Il.Tmp aT))
                             |> emit (Unary (Just t) L Extsw (Il.Tmp wT))
                         )
@@ -3933,10 +3888,10 @@ rawWordArg exp s =
                               items =
                                 List.concatMap
                                     (\sn ->
-                                        [ DWord RtLayout.tagSymbol
-                                        , DZero (RtLayout.abiAlign - RtLayout.valueTagBytes)
+                                        [ DWord s.layout.tagSymbol
+                                        , DZero (RtLayout.abiAlign - s.layout.valueTagBytes)
                                         , DRef sn
-                                        , DZero (RtLayout.valSizeBytes - RtLayout.payloadBase - RtLayout.wordBytes)
+                                        , DZero (s.layout.valSizeBytes - s.layout.payloadBase - s.layout.wordBytes)
                                         ]
                                     )
                                     (List.reverse symNamesRev)
@@ -4369,7 +4324,7 @@ elemAddr vecT idxT s =
     in
     ( t
     , s2
-        |> emit (Bin (Just offT) L Mul (Il.Con vs) idxT)
+        |> emit (Bin (Just offT) L Mul (Il.Con s.layout.valSizeBytes) idxT)
         |> emit (Bin (Just t) L Add vecT (Il.Tmp offT))
     )
 
@@ -4503,14 +4458,14 @@ lowerLit lit dest s =
         LNumber n ->
             let
                 ( d8, s1 ) =
-                    afterTag (storeTag tagNumber)
+                    afterTag (storeTag s.layout.tagNumber)
             in
             Ok (emit (Store StoreL (Il.Con n) (Il.Tmp d8)) s1)
 
         LBoolean b ->
             let
                 ( d8, s1 ) =
-                    afterTag (storeTag tagBoolean)
+                    afterTag (storeTag s.layout.tagBoolean)
             in
             Ok (emit (Store StoreW (Il.Con (if b then 1 else 0)) (Il.Tmp d8)) s1)
 
@@ -4536,7 +4491,7 @@ lowerLit lit dest s =
         LSymbol name ->
             let
                 ( d8, s1 ) =
-                    afterTag (storeTag tagSymbol)
+                    afterTag (storeTag s.layout.tagSymbol)
 
                 ( sname, s2 ) =
                     freshData ("sym:" ++ name)
@@ -4559,7 +4514,7 @@ lowerLit lit dest s =
             -- allocation was the corrected-criterion hole), so both the
             -- QBE_NOSTRINGINTERN flag AND the intern_live >= 2048 runtime
             -- fallback are unreachable.
-            Ok (storeValueCell tagString [ Il.Sym strname, Il.Con (utf8ByteLength str) ] dest s1)
+            Ok (storeValueCell s.layout.tagString [ Il.Sym strname, Il.Con (utf8ByteLength str) ] dest s1)
 
 
 -- ==================== S4: UNBOXED Int LOCALS (representation v1) ====================
@@ -4888,7 +4843,7 @@ rawIntOf exp s =
 
                                         sTest =
                                             emit (Load (Just tagT) W LoadW rbase) s5
-                                                |> emit (Cmp (Just is14T) W Ceq (Il.Tmp tagT) (Il.Con tagRecord))
+                                                |> emit (Cmp (Just is14T) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagRecord))
                                                 |> closeBlock (Jnz (Il.Tmp is14T) rawLbl fallLbl)
 
                                         ( d8, s6 ) =
@@ -4903,7 +4858,7 @@ rawIntOf exp s =
                                         sRaw =
                                             emit (Bin (Just d8) L Add rbase (Il.Con 8)) (startBlock rawLbl s8)
                                                 |> emit (Load (Just d) L LoadL (Il.Tmp d8))
-                                                |> emit (Bin (Just p) L Add (Il.Tmp d) (Il.Con (vs * rank + 8)))
+                                                |> emit (Bin (Just p) L Add (Il.Tmp d) (Il.Con (s.layout.valSizeBytes * rank + 8)))
                                                 |> emit (Load (Just jt) L LoadL (Il.Tmp p))
                                                 |> jumpTo joinLbl
 
@@ -4988,7 +4943,7 @@ reboxArg dest raw s =
         ( d8, s1 ) =
             freshTmp s
     in
-    emit (Store StoreW (Il.Con tagNumber) (Il.Tmp (slotTmp dest))) s1
+    emit (Store StoreW (Il.Con s.layout.tagNumber) (Il.Tmp (slotTmp dest))) s1
         |> emit (Bin (Just d8) L Add (Il.Tmp (slotTmp dest)) (Il.Con 8))
         |> emit (Store StoreL raw (Il.Tmp d8))
 
@@ -5003,7 +4958,7 @@ reboxBoolean dest raw s =
         ( d8, s1 ) =
             freshTmp s
     in
-    emit (Store StoreW (Il.Con tagBoolean) (Il.Tmp (slotTmp dest))) s1
+    emit (Store StoreW (Il.Con s.layout.tagBoolean) (Il.Tmp (slotTmp dest))) s1
         |> emit (Bin (Just d8) L Add (Il.Tmp (slotTmp dest)) (Il.Con 8))
         |> emit (Store StoreW raw (Il.Tmp d8))
 
@@ -5217,7 +5172,7 @@ reboxFloat dest raw s =
         ( d8, s1 ) =
             freshTmp s
     in
-    emit (Store StoreW (Il.Con tagFloat) (Il.Tmp (slotTmp dest))) s1
+    emit (Store StoreW (Il.Con s.layout.tagFloat) (Il.Tmp (slotTmp dest))) s1
         |> emit (Bin (Just d8) L Add (Il.Tmp (slotTmp dest)) (Il.Con 8))
         |> emit (Store StoreD raw (Il.Tmp d8))
 
@@ -5268,7 +5223,7 @@ lowerGRefValue ref dest s =
         in
         Ok
             (emit (Call (Just rp) (Agg "val") (Il.Sym ("q_" ++ mangle "Rt.globalClosure")) [ ArgVal (Base L) (Il.Sym (globalDescName ref.key)) ]) s1
-                |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+                |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
             )
 
 
@@ -5377,7 +5332,7 @@ lowerSelfTail args s =
                 (\( slots, s1 ) ->
                     List.foldl
                         (\( slot, i ) acc ->
-                            emit (Blit (Il.Tmp (slotTmp slot)) (Il.Tmp (slotTmp (i + 2))) vs) acc
+                            emit (Blit (Il.Tmp (slotTmp slot)) (Il.Tmp (slotTmp (i + 2))) s.layout.valSizeBytes) acc
                         )
                         s1
                         (List.indexedMap (\i slot -> ( slot, i )) slots)
@@ -5448,8 +5403,8 @@ stageSlots slots s =
                     base ++ "_" ++ String.fromInt i
             in
             acc
-                |> emit (Bin (Just ptmp) L Add (Il.Tmp base) (Il.Con (vs * i)))
-                |> emit (Blit (Il.Tmp (slotTmp slot)) (Il.Tmp ptmp) vs)
+                |> emit (Bin (Just ptmp) L Add (Il.Tmp base) (Il.Con (s.layout.valSizeBytes * i)))
+                |> emit (Blit (Il.Tmp (slotTmp slot)) (Il.Tmp ptmp) s.layout.valSizeBytes)
         )
         s1
         (List.indexedMap (\i slot -> ( slot, i )) slots)
@@ -5528,7 +5483,7 @@ directCall key args dest isTail s =
                                 Ok
                                     (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots)) s3
                                         |> emit (Call (Just vp) (Agg "val") (Il.Sym bounceCallee) [ ArgVal (Base L) (Il.Tmp rp) ])
-                                        |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
+                                        |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
                                     )
                             )
                 )
@@ -5575,7 +5530,7 @@ rtApply fslotTmp args dest isTail s =
                     rvs
 
                 _ ->
-                    vs
+                    s.layout.valSizeBytes
     in
     stageArgs args s
         |> Result.andThen
@@ -6078,7 +6033,7 @@ lowerIf block dest isTail s =
                         in
                         Ok
                             (emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp cslot))) s10
-                                |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con tagBoolean))
+                                |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagBoolean))
                                 |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp cslot)) (Il.Con 8))
                                 |> emit (Load (Just pldT) W LoadW (Il.Tmp p8T))
                                 |> emit (Cmp (Just iszT) W Ceq (Il.Tmp pldT) (Il.Con 0))
@@ -6240,7 +6195,7 @@ lowerLoop block dest s =
                 |> Result.map
                     (\st ->
                         emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp cslot))) st
-                            |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con tagBoolean))
+                            |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagBoolean))
                             |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp cslot)) (Il.Con 8))
                             |> emit (Load (Just pldT) W LoadW (Il.Tmp p8T))
                             |> emit (Cmp (Just iszT) W Ceq (Il.Tmp pldT) (Il.Con 0))
@@ -6537,13 +6492,13 @@ lowerMatch : Match -> Int -> Maybe Rep.Type -> String -> S -> Result String S
 lowerMatch match scrutSlot scrutType failLbl s =
     case match of
         MCons steps ->
-            Ok (lowerTagMatch steps scrutSlot tagCons failLbl s)
+            Ok (lowerTagMatch steps scrutSlot s.layout.tagCons failLbl s)
 
         MEmpty steps ->
-            Ok (lowerTagMatch steps scrutSlot tagNil failLbl s)
+            Ok (lowerTagMatch steps scrutSlot s.layout.tagNil failLbl s)
 
         MVector steps ->
-            Ok (lowerTagMatch steps scrutSlot tagVector failLbl s)
+            Ok (lowerTagMatch steps scrutSlot s.layout.tagVector failLbl s)
 
         MTagEq steps tag ->
             -- UNIT B item 1: inline the payload-pointer compare when the
@@ -6724,7 +6679,7 @@ lowerPath path scrutSlot dest s =
                     { s2 | binderSlots = Dict.insert recB.id p s2.binderSlots }
             in
             if s.rec then
-                lowerVal (recordAccessBody recB Nothing field) dest s3
+                lowerVal (recordAccessBody s3.layout recB Nothing field) dest s3
 
             else
                 let
@@ -6749,7 +6704,7 @@ readSteps : List Step -> Int -> Int -> S -> S
 readSteps steps src dst s =
     case steps of
         [] ->
-            emit (Blit (Il.Tmp (slotTmp src)) (Il.Tmp (slotTmp dst)) vs) s
+            emit (Blit (Il.Tmp (slotTmp src)) (Il.Tmp (slotTmp dst)) s.layout.valSizeBytes) s
 
         step :: rest ->
             let
@@ -6791,8 +6746,8 @@ lowerStep step src dst s =
             in
             emit (Bin (Just p8) L Add (Il.Tmp (slotTmp src)) (Il.Con 8)) s3
                 |> emit (Load (Just dataT) L LoadL (Il.Tmp p8))
-                |> emit (Bin (Just eT) L Add (Il.Tmp dataT) (Il.Con (vs * j)))
-                |> emit (Blit (Il.Tmp eT) (Il.Tmp (slotTmp dst)) vs)
+                |> emit (Bin (Just eT) L Add (Il.Tmp dataT) (Il.Con (s.layout.valSizeBytes * j)))
+                |> emit (Blit (Il.Tmp eT) (Il.Tmp (slotTmp dst)) s.layout.valSizeBytes)
 
 
 -- fst/snd: blit the car body (at `off` in the cons Value) into dst.
@@ -6807,7 +6762,7 @@ chaseField off src dst s =
     in
     emit (Bin (Just p8) L Add (Il.Tmp (slotTmp src)) (Il.Con off)) s2
         |> emit (Load (Just ptrT) L LoadL (Il.Tmp p8))
-        |> emit (Blit (Il.Tmp ptrT) (Il.Tmp (slotTmp dst)) vs)
+        |> emit (Blit (Il.Tmp ptrT) (Il.Tmp (slotTmp dst)) s.layout.valSizeBytes)
 
 
 -- (A) the cdr of a cons: element 1 of the 2-element array `car` heads
@@ -6827,8 +6782,8 @@ chaseCdr src dst s =
     in
     emit (Bin (Just p8) L Add (Il.Tmp (slotTmp src)) (Il.Con 8)) s3
         |> emit (Load (Just carT) L LoadL (Il.Tmp p8))
-        |> emit (Bin (Just cdrT) L Add (Il.Tmp carT) (Il.Con vs))
-        |> emit (Blit (Il.Tmp cdrT) (Il.Tmp (slotTmp dst)) vs)
+        |> emit (Bin (Just cdrT) L Add (Il.Tmp carT) (Il.Con s.layout.valSizeBytes))
+        |> emit (Blit (Il.Tmp cdrT) (Il.Tmp (slotTmp dst)) s.layout.valSizeBytes)
 
 
 -- hd/tl (prims.zig primHd/primTl): nil -> nil, else car/cdr.  The nil arm is
@@ -6853,7 +6808,7 @@ lowerHdTl isHd src dst s =
             freshLbl "hdone" s4
     in
     emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp src))) s5
-        |> emit (Cmp (Just isnil) W Ceq (Il.Tmp tagT) (Il.Con tagNil))
+        |> emit (Cmp (Just isnil) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagNil))
         |> closeBlock (Jnz (Il.Tmp isnil) nilLbl chaseLbl)
         |> startBlock nilLbl
         |> storeNil dst
@@ -6878,7 +6833,7 @@ storeNil dst s =
         ( d8, s1 ) =
             freshTmp s
     in
-    emit (Store StoreW (Il.Con tagNil) (Il.Tmp (slotTmp dst))) s1
+    emit (Store StoreW (Il.Con s.layout.tagNil) (Il.Tmp (slotTmp dst))) s1
         |> emit (Bin (Just d8) L Add (Il.Tmp (slotTmp dst)) (Il.Con 8))
         |> emit (Store StoreL (Il.Con 0) (Il.Tmp d8))
 
@@ -6908,7 +6863,7 @@ jmpfFalse slot falseLbl trueLbl s =
             freshTmp s5
     in
     emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp slot))) s6
-        |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con tagBoolean))
+        |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagBoolean))
         |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp slot)) (Il.Con 8))
         |> emit (Load (Just pldT) W LoadW (Il.Tmp p8T))
         |> emit (Cmp (Just iszT) W Ceq (Il.Tmp pldT) (Il.Con 0))
@@ -7002,10 +6957,10 @@ lowerCon con dest s =
                                     freshSlot sA
 
                                 sC =
-                                    storeValueCell tagNumber [ Il.Tmp (slotTmp cbase) ] argsPtrSlot sB
+                                    storeValueCell s.layout.tagNumber [ Il.Tmp (slotTmp cbase) ] argsPtrSlot sB
 
                                 sD =
-                                    storeValueCell tagNumber [ Il.Con n ] nSlot sC
+                                    storeValueCell s.layout.tagNumber [ Il.Con n ] nSlot sC
                             in
                             Ok
                                 (emit
@@ -7019,7 +6974,7 @@ lowerCon con dest s =
                                         ]
                                     )
                                     sD
-                                    |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+                                    |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
                                 )
                         )
             )
@@ -7353,16 +7308,16 @@ closedRecordFieldType s rec field =
     Maybe.map Tuple.second (closedRecordField s rec field)
 
 
-boxTagIs : Exp -> Int -> Exp
-boxTagIs value tag =
-    Unsafe (RawMkValue { tag = tagBoolean, words = [ Unsafe (RawTagIs { value = value, tag = tag }) ] })
+boxTagIs : RtLayout.ValLayout -> Exp -> Int -> Exp
+boxTagIs layout value tag =
+    Unsafe (RawMkValue { tag = layout.tagBoolean, words = [ Unsafe (RawTagIs { value = value, tag = tag }) ] })
 
 
 -- The shared access body: tag 14 -> positional (Just rank) or recGet walk;
 -- tag 4 -> assoc/snd chain; else (defensive) -> recGet walk.  `recB` is the
 -- binder the record subexpression was bound to (evaluated ONCE).
-recordAccessBody : Binder -> Maybe Int -> String -> Exp
-recordAccessBody recB rank field =
+recordAccessBody : RtLayout.ValLayout -> Binder -> Maybe Int -> String -> Exp
+recordAccessBody layout recB rank field =
     let
         recV =
             Var recB.id
@@ -7377,11 +7332,11 @@ recordAccessBody recB rank field =
             PrimApp { prim = "snd", args = [ PrimApp { prim = "assoc", args = [ Lit (LSymbol field), recV ] } ] }
     in
     If
-        { cond = boxTagIs recV tagRecord
+        { cond = boxTagIs layout recV layout.tagRecord
         , thenBranch = Maybe.withDefault walk (Maybe.map (\_ -> positional) rank)
         , elseBranch =
             If
-                { cond = boxTagIs recV tagCons
+                { cond = boxTagIs layout recV layout.tagCons
                 , thenBranch = chain
                 , elseBranch = walk
                 , falseLabel = "r4"
@@ -7394,9 +7349,9 @@ recordAccessBody recB rank field =
 
 -- Bind the record subexpression ONCE, then the access body (its evaluation can
 -- allocate; the Let slot roots it across the tag test and both arms).
-recordAccessExp : Binder -> Exp -> Maybe Int -> String -> Exp
-recordAccessExp recB rec rank field =
-    Let { binders = [ LetBind { binder = recB, value = rec } ], body = recordAccessBody recB rank field }
+recordAccessExp : RtLayout.ValLayout -> Binder -> Exp -> Maybe Int -> String -> Exp
+recordAccessExp layout recB rec rank field =
+    Let { binders = [ LetBind { binder = recB, value = rec } ], body = recordAccessBody layout recB rank field }
 
 
 lowerRecordLit : List ( String, Exp ) -> Int -> S -> Result String S
@@ -7484,7 +7439,7 @@ lowerRecordLitPos setters dest s =
                             rawWordArg (Unsafe (RawDataAddr names)) s3
                                 |> Result.map
                                     (\( namesArg, s4 ) ->
-                                        storeValueCell tagRecord [ dataArg, Il.Con n, namesArg ] dest s4
+                                        storeValueCell s.layout.tagRecord [ dataArg, Il.Con n, namesArg ] dest s4
                                     )
                         )
 
@@ -7499,7 +7454,7 @@ lowerRecordGet rec field dest s =
             rank =
                 rankOf field (Maybe.withDefault [] (closedRecordNames s rec))
         in
-        lowerVal (recordAccessExp recB rec rank field) dest s0
+        lowerVal (recordAccessExp s0.layout recB rec rank field) dest s0
 
     else
         lowerVal (buildRecordGet rec field) dest s
@@ -7515,8 +7470,8 @@ applyUpdates base updates =
 
 -- The update's walk form: tag 14 -> recUpd fold; tag 4 -> the old chain
 -- prepend (host-built base); else -> recUpd fold (defensive).
-recordUpdateWalkExp : Binder -> Exp -> List ( String, Exp ) -> Exp
-recordUpdateWalkExp baseB base updates =
+recordUpdateWalkExp : RtLayout.ValLayout -> Binder -> Exp -> List ( String, Exp ) -> Exp
+recordUpdateWalkExp layout baseB base updates =
     let
         baseV =
             Var baseB.id
@@ -7531,11 +7486,11 @@ recordUpdateWalkExp baseB base updates =
         { binders = [ LetBind { binder = baseB, value = base } ]
         , body =
             If
-                { cond = boxTagIs baseV tagRecord
+                { cond = boxTagIs layout baseV layout.tagRecord
                 , thenBranch = walk
                 , elseBranch =
                     If
-                        { cond = boxTagIs baseV tagCons
+                        { cond = boxTagIs layout baseV layout.tagCons
                         , thenBranch = chain
                         , elseBranch = walk
                         , falseLabel = "u4"
@@ -7602,7 +7557,7 @@ lowerRecordUpdateClosed baseB baseNames resultNames updPairs dest s =
                     s8 =
                         s7
                             |> emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp baseSlot)))
-                            |> emit (Cmp (Just is14T) W Ceq (Il.Tmp tagT) (Il.Con tagRecord))
+                            |> emit (Cmp (Just is14T) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagRecord))
                             |> closeBlock (Jnz (Il.Tmp is14T) recLbl notRecLbl)
 
                     -- tag-14 arm: allocate, copy/store, wrap.  The update values
@@ -7656,7 +7611,7 @@ lowerRecordUpdateClosed baseB baseNames resultNames updPairs dest s =
                                             (st3
                                                 |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp baseSlot)) (Il.Con 8))
                                                 |> emit (Load (Just dataT) L LoadL (Il.Tmp p8T))
-                                                |> emit (Bin (Just elemT) L Add (Il.Tmp dataT) (Il.Con (vs * brank)))
+                                                |> emit (Bin (Just elemT) L Add (Il.Tmp dataT) (Il.Con (s.layout.valSizeBytes * brank)))
                                                 |> emit
                                                     (Call Nothing (Base W) storeSym
                                                         [ ArgVal (Base L) ndArg
@@ -7674,7 +7629,7 @@ lowerRecordUpdateClosed baseB baseNames resultNames updPairs dest s =
                         rawWordArg (Unsafe (RawDataAddr resultNames)) st
                             |> Result.map
                                 (\( namesArg, st1 ) ->
-                                    storeValueCell tagRecord [ ndArg, Il.Con n, namesArg ] dest st1
+                                    storeValueCell s.layout.tagRecord [ ndArg, Il.Con n, namesArg ] dest st1
                                         |> jumpTo joinLbl
                                 )
                 in
@@ -7703,7 +7658,7 @@ lowerRecordUpdateClosed baseB baseNames resultNames updPairs dest s =
                                     s14
                                         |> startBlock notRecLbl
                                         |> emit (Load (Just tagT2) W LoadW (Il.Tmp (slotTmp baseSlot)))
-                                        |> emit (Cmp (Just is4T) W Ceq (Il.Tmp tagT2) (Il.Con tagCons))
+                                        |> emit (Cmp (Just is4T) W Ceq (Il.Tmp tagT2) (Il.Con s.layout.tagCons))
                                         |> closeBlock (Jnz (Il.Tmp is4T) chainLbl walkLbl)
 
                                 chain =
@@ -7770,7 +7725,7 @@ lowerRecordUpdate update dest s =
                     ( baseB, s0 ) =
                         freshBinder s
                 in
-                lowerVal (recordUpdateWalkExp baseB update.base update.updates) dest s0
+                lowerVal (recordUpdateWalkExp s0.layout baseB update.base update.updates) dest s0
 
     else
         lowerVal (buildRecordUpdate update) dest s
@@ -7971,8 +7926,8 @@ lowerArith prim args dest s =
                 Ok
                     (emit (Load (Just ta) W LoadW (Il.Tmp (slotTmp a1))) s17
                         |> emit (Load (Just tb) W LoadW (Il.Tmp (slotTmp a2)))
-                        |> emit (Cmp (Just fa) W Ceq (Il.Tmp ta) (Il.Con tagFloat))
-                        |> emit (Cmp (Just fb) W Ceq (Il.Tmp tb) (Il.Con tagFloat))
+                        |> emit (Cmp (Just fa) W Ceq (Il.Tmp ta) (Il.Con s.layout.tagFloat))
+                        |> emit (Cmp (Just fb) W Ceq (Il.Tmp tb) (Il.Con s.layout.tagFloat))
                         |> emit (Bin (Just o1) W Or (Il.Tmp fa) (Il.Tmp fb))
                         |> emit (Bin (Just o2) W Xor (Il.Con 1) (Il.Tmp o1))
                         |> emit (Cmp (Just anyf) W Ceq (Il.Tmp o2) (Il.Con 0))
@@ -7983,7 +7938,7 @@ lowerArith prim args dest s =
                         |> emit (Bin (Just pb) L Add (Il.Tmp (slotTmp a2)) (Il.Con 8))
                         |> emit (Load (Just xb) L LoadL (Il.Tmp pb))
                         |> emit (Bin (Just r) L op (Il.Tmp xa) (Il.Tmp xb))
-                        |> emit (Store StoreW (Il.Con tagNumber) (Il.Tmp (slotTmp dest)))
+                        |> emit (Store StoreW (Il.Con s.layout.tagNumber) (Il.Tmp (slotTmp dest)))
                         |> emit (Bin (Just d8) L Add (Il.Tmp (slotTmp dest)) (Il.Con 8))
                         |> emit (Store StoreL (Il.Tmp r) (Il.Tmp d8))
                         |> jumpTo jLbl
@@ -8111,11 +8066,11 @@ lowerCompare op args dest s =
                 Ok
                     (emit (Load (Just ta) W LoadW (Il.Tmp (slotTmp a1))) s22
                         |> emit (Load (Just tb) W LoadW (Il.Tmp (slotTmp a2)))
-                        |> emit (Cmp (Just na) W Ceq (Il.Tmp ta) (Il.Con tagNumber))
-                        |> emit (Cmp (Just fa) W Ceq (Il.Tmp ta) (Il.Con tagFloat))
+                        |> emit (Cmp (Just na) W Ceq (Il.Tmp ta) (Il.Con s.layout.tagNumber))
+                        |> emit (Cmp (Just fa) W Ceq (Il.Tmp ta) (Il.Con s.layout.tagFloat))
                         |> emit (Bin (Just numa) W Or (Il.Tmp na) (Il.Tmp fa))
-                        |> emit (Cmp (Just nb) W Ceq (Il.Tmp tb) (Il.Con tagNumber))
-                        |> emit (Cmp (Just fb) W Ceq (Il.Tmp tb) (Il.Con tagFloat))
+                        |> emit (Cmp (Just nb) W Ceq (Il.Tmp tb) (Il.Con s.layout.tagNumber))
+                        |> emit (Cmp (Just fb) W Ceq (Il.Tmp tb) (Il.Con s.layout.tagFloat))
                         |> emit (Bin (Just numb) W Or (Il.Tmp nb) (Il.Tmp fb))
                         |> emit (Bin (Just num2) W And (Il.Tmp numa) (Il.Tmp numb))
                         |> emit (Bin (Just anyf) W Or (Il.Tmp fa) (Il.Tmp fb))
@@ -8128,7 +8083,7 @@ lowerCompare op args dest s =
                         |> emit (Bin (Just pb) L Add (Il.Tmp (slotTmp a2)) (Il.Con 8))
                         |> emit (Load (Just xb) L LoadL (Il.Tmp pb))
                         |> emit (Cmp (Just c) L op (Il.Tmp xa) (Il.Tmp xb))
-                        |> emit (Store StoreW (Il.Con tagBoolean) (Il.Tmp (slotTmp dest)))
+                        |> emit (Store StoreW (Il.Con s.layout.tagBoolean) (Il.Tmp (slotTmp dest)))
                         |> emit (Bin (Just d8) L Add (Il.Tmp (slotTmp dest)) (Il.Con 8))
                         |> emit (Store StoreW (Il.Tmp c) (Il.Tmp d8))
                         |> jumpTo jLbl
@@ -8430,8 +8385,8 @@ lowerNumEq args dest s =
                 Ok
                     (emit (Load (Just ta) W LoadW (Il.Tmp (slotTmp a1))) s15
                         |> emit (Load (Just tb) W LoadW (Il.Tmp (slotTmp a2)))
-                        |> emit (Cmp (Just na) W Ceq (Il.Tmp ta) (Il.Con tagNumber))
-                        |> emit (Cmp (Just nb) W Ceq (Il.Tmp tb) (Il.Con tagNumber))
+                        |> emit (Cmp (Just na) W Ceq (Il.Tmp ta) (Il.Con s.layout.tagNumber))
+                        |> emit (Cmp (Just nb) W Ceq (Il.Tmp tb) (Il.Con s.layout.tagNumber))
                         |> emit (Bin (Just ok) W And (Il.Tmp na) (Il.Tmp nb))
                         |> closeBlock (Jnz (Il.Tmp ok) iLbl fLbl)
                         |> startBlock iLbl
@@ -8440,7 +8395,7 @@ lowerNumEq args dest s =
                         |> emit (Bin (Just pb) L Add (Il.Tmp (slotTmp a2)) (Il.Con 8))
                         |> emit (Load (Just xb) L LoadL (Il.Tmp pb))
                         |> emit (Cmp (Just c) L Ceq (Il.Tmp xa) (Il.Tmp xb))
-                        |> emit (Store StoreW (Il.Con tagBoolean) (Il.Tmp (slotTmp dest)))
+                        |> emit (Store StoreW (Il.Con s.layout.tagBoolean) (Il.Tmp (slotTmp dest)))
                         |> emit (Bin (Just d8) L Add (Il.Tmp (slotTmp dest)) (Il.Con 8))
                         |> emit (Store StoreW (Il.Tmp c) (Il.Tmp d8))
                         |> jumpTo jLbl
@@ -8530,7 +8485,7 @@ rtPrimSlots prim slots dest s =
                                 (padded ++ [ ArgVal (Base W) (Il.Con (List.length slots)) ])
                             )
                             s1
-                            |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
+                            |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
                         )
 
                 else
@@ -8547,7 +8502,7 @@ rtPrimSlots prim slots dest s =
                 Ok
                     (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots)) s2
                         |> emit (Call (Just vp) (Agg "val") (Il.Sym (bounceSeat s)) [ ArgVal (Base L) (Il.Tmp rp) ])
-                        |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) vs)
+                        |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
                     )
 
         ( True, Err msg ) ->
@@ -8629,7 +8584,7 @@ rtPrimSlotsZig prim slots dest s =
                     (padded ++ [ ArgVal (Base W) (Il.Con (List.length slots)) ])
                 )
                 s1
-                |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+                |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
             )
 
     else
@@ -8656,7 +8611,7 @@ rtPrimSlotsZig prim slots dest s =
                     ]
                 )
                 s2
-                |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+                |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
             )
 
 
@@ -8740,8 +8695,8 @@ lowerClosure lambda dest s =
                             )
                             s1
                 in
-                if List.length lambda.params > maxArity then
-                    Err ("qbe: closure has arity > " ++ String.fromInt maxArity ++ " (rt_callN table limit)")
+                if List.length lambda.params > s.layout.maxArity then
+                    Err ("qbe: closure has arity > " ++ String.fromInt s.layout.maxArity ++ " (rt_callN table limit)")
 
                 else
                     lowerFunBody False s1.defunKey qname lambda captures RtGeneric s2
@@ -8776,10 +8731,10 @@ lowerClosure lambda dest s =
                                                         freshSlot sB
 
                                                     sD =
-                                                        storeValueCell tagNumber [ Il.Sym descName ] descSlot sC
+                                                        storeValueCell s.layout.tagNumber [ Il.Sym descName ] descSlot sC
 
                                                     sE =
-                                                        storeValueCell tagNumber
+                                                        storeValueCell s.layout.tagNumber
                                                             [ if k == 0 then
                                                                 Il.Con 0
 
@@ -8790,7 +8745,7 @@ lowerClosure lambda dest s =
                                                             sD
 
                                                     sF =
-                                                        storeValueCell tagNumber [ Il.Con k ] kSlot sE
+                                                        storeValueCell s.layout.tagNumber [ Il.Con k ] kSlot sE
                                                 in
                                                 emit
                                                     (Call (Just rp)
@@ -8803,7 +8758,7 @@ lowerClosure lambda dest s =
                                                         ]
                                                     )
                                                     sF
-                                                    |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) vs)
+                                                    |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
                                                     |> mergeClosureResult pending sInner
                                                 )
                                         )
@@ -8834,7 +8789,7 @@ captureBlits captures cbase s =
                                     Nothing ->
                                         case valueBaseOf cid s1 of
                                             Just src ->
-                                                Ok (emit (Blit src (Il.Tmp (slotTmp (cbase + i))) vs) s1)
+                                                Ok (emit (Blit src (Il.Tmp (slotTmp (cbase + i))) s.layout.valSizeBytes) s1)
 
                                             Nothing ->
                                                 Err ("qbe: capture not in scope (corrupt Mid tree): binder " ++ String.fromInt cid)
@@ -9031,12 +8986,12 @@ finishModule s keys =
             List.reverse s.funcs
 
         funcs =
-            List.map withPrologue pendings
-                ++ (globBlockFunc :: rtCallFuncs)
+            List.map (withPrologue s.layout) pendings
+                ++ (globBlockFunc :: rtCallFuncs s.layout)
                 -- stage 6 P1d Step B: the two-range apply bridge.  B4 closed
                 -- the hatch (the Mid route is the only route), so it is
                 -- unconditional.
-                ++ [ rtCallTwoRange ]
+                ++ [ rtCallTwoRange s.layout ]
 
         -- Rt.* defuns (osier-consspike) are INTERNAL: no global Desc (only a
         -- GRef'd defun needs one, and surface code cannot GRef an Rt key), no
@@ -9076,7 +9031,8 @@ finishModule s keys =
         ( metaDatas, metaFuncs ) =
             metaTable (List.filter (\p -> surfaceEntry p.entryKey) pendings)
     in
-    { types = []
+    { layout = s.layout
+    , types = []
     , datas =
         List.reverse s.datas
             ++ globalDescs
@@ -9103,8 +9059,8 @@ surfaceEntry mkey =
 
 -- @start gets: %f =l call rt_frame_enter(w F); one %s<i> per slot; param
 -- blits from the %a<i> pointers; capture blits from the %env array.
-withPrologue : PendingFunc -> Func
-withPrologue pending =
+withPrologue : RtLayout.ValLayout -> PendingFunc -> Func
+withPrologue layout pending =
     let
         f =
             pending.func
@@ -9112,7 +9068,7 @@ withPrologue pending =
         slotDefs =
             List.map
                 (\i ->
-                    Bin (Just (slotTmp i)) L Add (Il.Tmp "f") (Il.Con (vs * i))
+                    Bin (Just (slotTmp i)) L Add (Il.Tmp "f") (Il.Con (layout.valSizeBytes * i))
                 )
                 (List.range 0 (pending.nslots - 1))
 
@@ -9182,14 +9138,14 @@ withPrologue pending =
 
             else
                 List.map
-                    (\i -> Blit (Il.Tmp ("a" ++ String.fromInt i)) (Il.Tmp (slotTmp (i + 2))) vs)
+                    (\i -> Blit (Il.Tmp ("a" ++ String.fromInt i)) (Il.Tmp (slotTmp (i + 2))) layout.valSizeBytes)
                     (List.range 0 (pending.nparams - 1))
 
         capBlitsPro =
             List.concatMap
                 (\j ->
-                    [ Bin (Just ("e" ++ String.fromInt j)) L Add (Il.Tmp "env") (Il.Con (vs * j))
-                    , Blit (Il.Tmp ("e" ++ String.fromInt j)) (Il.Tmp (slotTmp (pending.nparams + 2 + j))) vs
+                    [ Bin (Just ("e" ++ String.fromInt j)) L Add (Il.Tmp "env") (Il.Con (layout.valSizeBytes * j))
+                    , Blit (Il.Tmp ("e" ++ String.fromInt j)) (Il.Tmp (slotTmp (pending.nparams + 2 + j))) layout.valSizeBytes
                     ]
                 )
                 (List.range 0 (pending.ncaps - 1))
@@ -9213,10 +9169,10 @@ withPrologue pending =
                     Call (Just "f") (Base L) (Il.Sym ("q_" ++ mangle "Rt.frame-enter")) [ ArgVal (Base L) (Il.Con pending.nslots) ]
 
                 PAlloc ->
-                    Alloc "f" (vs * pending.nslots)
+                    Alloc "f" (layout.valSizeBytes * pending.nslots)
 
                 PLeaf ->
-                    Alloc "f" (vs * pending.nslots)
+                    Alloc "f" (layout.valSizeBytes * pending.nslots)
 
         -- P5 / H3 — THE .done MARKER.  A surface defun returns the 80-byte
         -- `:ret`, i.e. slots 0 AND 1, and slot 1 carries the .done/.tail
@@ -9282,8 +9238,8 @@ withPrologue pending =
 -- params and pass each as a `:val` CALL ARGUMENT — QBE copies the 40 bytes
 -- from the pointer onto the outgoing stack at the call site, which is
 -- exactly what a C/Zig `*Value` argument is.
-rtCallFuncs : List Func
-rtCallFuncs =
+rtCallFuncs : RtLayout.ValLayout -> List Func
+rtCallFuncs layout =
     List.map
         (\n ->
             let
@@ -9311,7 +9267,7 @@ rtCallFuncs =
                 ]
             }
         )
-        (List.range 0 maxArity)
+        (List.range 0 layout.maxArity)
 
 
 -- rt_call2r: the two-range apply bridge (stage 6 P1d Step B).  Rt.apply's
@@ -9334,8 +9290,8 @@ rtCallFuncs =
 -- Rt.callArity's table and Rt.bounceGo's 17-arm chain, whose own note at
 -- runtime.mid:4332 documents the same gap).  Kept as a stated parity gap, not
 -- a live hazard; if maxArity ever grows, this chain follows it automatically.
-rtCallTwoRange : Func
-rtCallTwoRange =
+rtCallTwoRange : RtLayout.ValLayout -> Func
+rtCallTwoRange layout =
     let
         -- (i < napp) ? caps + i*40 : args + (i-napp)*40, branchless:
         --   p = (args - napp*40) + (i<napp)*(caps + napp*40 - args) + i*40
@@ -9345,7 +9301,7 @@ rtCallTwoRange =
             , Unary (Just ("cl" ++ String.fromInt i)) L Extuw (Il.Tmp ("ci" ++ String.fromInt i))
             , Bin (Just ("sel" ++ String.fromInt i)) L Mul (Il.Tmp ("cl" ++ String.fromInt i)) (Il.Tmp "diff")
             , Bin (Just ("pa" ++ String.fromInt i)) L Add (Il.Tmp "base") (Il.Tmp ("sel" ++ String.fromInt i))
-            , Bin (Just ("p" ++ String.fromInt i)) L Add (Il.Tmp ("pa" ++ String.fromInt i)) (Il.Con (i * 40))
+            , Bin (Just ("p" ++ String.fromInt i)) L Add (Il.Tmp ("pa" ++ String.fromInt i)) (Il.Con (i * layout.valSizeBytes))
             ]
 
         arityBlock : Int -> Block
@@ -9372,18 +9328,18 @@ rtCallTwoRange =
             , jump =
                 Jnz (Il.Tmp ("d" ++ String.fromInt k))
                     ("arity" ++ String.fromInt k)
-                    (if k < maxArity - 1 then
+                    (if k < layout.maxArity - 1 then
                         "c" ++ String.fromInt (k + 1)
 
                      else
-                        "arity" ++ String.fromInt maxArity
+                        "arity" ++ String.fromInt layout.maxArity
                     )
             }
 
         start =
             { label = "start"
             , body =
-                [ Bin (Just "napp40") L Mul (Il.Tmp "napp") (Il.Con 40)
+                [ Bin (Just "napp40") L Mul (Il.Tmp "napp") (Il.Con layout.valSizeBytes)
                 , Bin (Just "e") L Add (Il.Tmp "caps") (Il.Tmp "napp40")
                 , Bin (Just "diff") L Sub (Il.Tmp "e") (Il.Tmp "args")
                 , Bin (Just "base") L Sub (Il.Tmp "args") (Il.Tmp "napp40")
@@ -9391,7 +9347,7 @@ rtCallTwoRange =
                 , Cmp (Just "d0") L Ceq (Il.Tmp "arity") (Il.Con 0)
                 ]
             , jump =
-                Jnz (Il.Tmp "d0") "arity0" (if maxArity > 0 then "c1" else "arity0")
+                Jnz (Il.Tmp "d0") "arity0" (if layout.maxArity > 0 then "c1" else "arity0")
             }
     in
     { name = "rt_call2r"
@@ -9407,8 +9363,8 @@ rtCallTwoRange =
         ]
     , blocks =
         start
-            :: (List.map dispatchBlock (List.range 1 (maxArity - 1))
-                    ++ List.map arityBlock (List.range 0 maxArity)
+            :: (List.map dispatchBlock (List.range 1 (layout.maxArity - 1))
+                    ++ List.map arityBlock (List.range 0 layout.maxArity)
                )
     }
 

@@ -192,9 +192,15 @@ freshLabels st =
     )
 
 
+-- VR3a: the RawMkValue tags below are the VALUE LAYOUT's tag numbers, read
+-- from the single instance `RtLayout.valLayout` — this module builds Mid IR
+-- before any emitter state exists, so it names the instance rather than
+-- threading it.  VR3b (the word arm, whose tag ENCODING differs) must thread
+-- the layout through this module's own state; the sites are all marked by the
+-- `RtLayout.valLayout.` prefix, so that sweep is a search, not a re-read.
 mkNilExp : Exp
 mkNilExp =
-    Unsafe (RawMkValue { tag = RtLayout.tagNil, words = [] })
+    Unsafe (RawMkValue { tag = RtLayout.valLayout.tagNil, words = [] })
 
 
 
@@ -2091,7 +2097,7 @@ word it has already lowered.
 -}
 boolToVal : Exp -> Exp
 boolToVal word =
-    Unsafe (RawMkValue { tag = RtLayout.tagBoolean, words = [ word ] })
+    Unsafe (RawMkValue { tag = RtLayout.valLayout.tagBoolean, words = [ word ] })
 
 
 {-| Does this expression have class `bool`?  The LOWERING's mirror of
@@ -2578,27 +2584,27 @@ buildBuiltin : Builtin -> List Exp -> Result String Exp
 buildBuiltin b es =
     case b of
         MkNum ->
-            buildMk RtLayout.tagNumber es
+            buildMk RtLayout.valLayout.tagNumber es
 
         MkBool ->
-            buildMk RtLayout.tagBoolean es
+            buildMk RtLayout.valLayout.tagBoolean es
 
         MkNil ->
             case es of
                 [] ->
-                    Ok (Unsafe (RawMkValue { tag = RtLayout.tagNil, words = [] }))
+                    Ok (Unsafe (RawMkValue { tag = RtLayout.valLayout.tagNil, words = [] }))
 
                 _ ->
                     Err arityBug
 
         MkStr ->
-            buildMk2 RtLayout.tagString es
+            buildMk2 RtLayout.valLayout.tagString es
 
         MkFlt ->
-            buildMk RtLayout.tagFloat es
+            buildMk RtLayout.valLayout.tagFloat es
 
         MkVec ->
-            buildMk2 RtLayout.tagVector es
+            buildMk2 RtLayout.valLayout.tagVector es
 
         MkVal ->
             -- The generic value constructor: `mkval(tag, words..)`.  The tag
@@ -2710,7 +2716,7 @@ buildBuiltin b es =
                                         (RawBin
                                             { op = RSub
                                             , a = Lit (LNumber 1)
-                                            , b = Unsafe (RawTagIs { value = v, tag = RtLayout.tagNil })
+                                            , b = Unsafe (RawTagIs { value = v, tag = RtLayout.valLayout.tagNil })
                                             }
                                         )
                                 }

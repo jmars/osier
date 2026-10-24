@@ -1259,9 +1259,9 @@ checks rt runtimeMidText =
                             -- the function ALONE, rendered by the one printer
                             -- the pipeline uses — so this is the text qbe reads
                             txt =
-                                Print.print { types = [], datas = [], funcs = [ f ] }
+                                Print.print { layout = RtLayout.valLayout, types = [], datas = [], funcs = [ f ] }
                         in
-                        String.contains ("\t%f =l alloc8 " ++ String.fromInt (RtLayout.valSizeBytes * 2) ++ "\n") txt
+                        String.contains ("\t%f =l alloc8 " ++ String.fromInt (RtLayout.valLayout.valSizeBytes * 2) ++ "\n") txt
                             && String.contains
                                 ("\tstorel 0, %s0\n\t%tzk =l add %f, "
                                     ++ String.fromInt RtLayout.retKindOffset
@@ -6549,7 +6549,7 @@ checks rt runtimeMidText =
                                                 (RawBin
                                                     { op = RSub
                                                     , a = ltn 1
-                                                    , b = Unsafe (RawTagIs { value = ltv 1, tag = RtLayout.tagNil })
+                                                    , b = Unsafe (RawTagIs { value = ltv 1, tag = RtLayout.valLayout.tagNil })
                                                     }
                                                 )
                                         }
@@ -9000,7 +9000,7 @@ checks rt runtimeMidText =
                                     (RawVecStore
                                         { vec = ltv 1
                                         , index = ltn 1
-                                        , value = Unsafe (RawMkValue { tag = RtLayout.tagNil, words = [] })
+                                        , value = Unsafe (RawMkValue { tag = RtLayout.valLayout.tagNil, words = [] })
                                         }
                                     )
                                 )
@@ -11533,7 +11533,7 @@ numLit n e =
         Unsafe (RawMkValue mk) ->
             case mk.words of
                 [ Lit (LNumber m) ] ->
-                    mk.tag == RtLayout.tagNumber && m == n
+                    mk.tag == RtLayout.valLayout.tagNumber && m == n
 
                 _ ->
                     False
@@ -12507,32 +12507,32 @@ lcallW sym args =
 
 lmkNum : Exp -> Exp
 lmkNum w =
-    Unsafe (RawMkValue { tag = RtLayout.tagNumber, words = [ w ] })
+    Unsafe (RawMkValue { tag = RtLayout.valLayout.tagNumber, words = [ w ] })
 
 
 lmkBool : Exp -> Exp
 lmkBool w =
-    Unsafe (RawMkValue { tag = RtLayout.tagBoolean, words = [ w ] })
+    Unsafe (RawMkValue { tag = RtLayout.valLayout.tagBoolean, words = [ w ] })
 
 
 lmkNilV : Exp
 lmkNilV =
-    Unsafe (RawMkValue { tag = RtLayout.tagNil, words = [] })
+    Unsafe (RawMkValue { tag = RtLayout.valLayout.tagNil, words = [] })
 
 
 lmkStr : Exp -> Exp -> Exp
 lmkStr d l =
-    Unsafe (RawMkValue { tag = RtLayout.tagString, words = [ d, l ] })
+    Unsafe (RawMkValue { tag = RtLayout.valLayout.tagString, words = [ d, l ] })
 
 
 lmkVec : Exp -> Exp -> Exp
 lmkVec d l =
-    Unsafe (RawMkValue { tag = RtLayout.tagVector, words = [ d, l ] })
+    Unsafe (RawMkValue { tag = RtLayout.valLayout.tagVector, words = [ d, l ] })
 
 
 lmkFlt : Exp -> Exp
 lmkFlt f =
-    Unsafe (RawMkValue { tag = RtLayout.tagFloat, words = [ f ] })
+    Unsafe (RawMkValue { tag = RtLayout.valLayout.tagFloat, words = [ f ] })
 
 
 lwOf : Exp -> Exp

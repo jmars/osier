@@ -16,6 +16,7 @@ module Mid.RtLayout exposing
     , payloadBase, payloadWordOffset
     , retArityOffset, retArgsOffset, retEOffset, retFOffset, retKindOffset, retQbeFields, retSizeBytes, retValOffset
     , tagBoolean, tagCons, tagError, tagFloat, tagLambda, tagMark, tagNil, tagNumber, tagPrim, tagRecord, tagStream, tagString, tagSymbol, tagVector
+    , ValLayout, valLayout
     , valQbeFields, valSizeBytes, valuePayloadWords, valueTagBytes, wordBytes
     )
 
@@ -209,6 +210,101 @@ tagFloat =
 tagRecord : Int
 tagRecord =
     14
+
+
+
+-- ==================== THE VALUE LAYOUT, AS A VALUE (VR3a) ====================
+-- The constants above are the VAL arm's numbers.  `valLayout` is the ONE
+-- INSTANCE the emitters read, and it is built FROM those constants — every
+-- field IS the constant above it, so this record holds no second copy of any
+-- number and `valLayout.valSizeBytes == 40` is true by construction.
+--
+-- WHY A RECORD.  The representation is about to become a compile-time choice
+-- (VR3b adds a second instance and selects it with the QBE_VALREP knob).  A
+-- reader that names a top-level constant cannot be switched; a reader that
+-- takes a `ValLayout` can.  So the EMIT PATH threads the record and never
+-- consults the constants directly: `Mid.Qbe.Lower`'s `S.layout`,
+-- `Mid.Qbe.Il`'s `Module.layout` (what `Print`/`Encode` read),
+-- `Mid.Qbe.Liveness`'s opts record, and the two top-level IL builders
+-- `Lower.rtCallFuncs`/`Lower.rtCallTwoRange` (which take it as a parameter
+-- because they are not inside the state record).
+--
+-- WHAT BELONGS HERE, AND THE THREE BOUNDARIES.
+--
+--   1. THIS IS "THE NUMBERS THIS REPRESENTATION USES", NOT "THE NUMBERS FOR A
+--      VALUE".  The `tag*` fields are the ValTag ENUM INTEGERS of the 40-byte
+--      representation — what the emitted `storew %d` writes and what the Zig
+--      `@intFromEnum` agrees with.  VR3b does NOT renumber them: the word
+--      representation ENCODES the tag in a Value's LOW 3 BITS (`(w & 7)`), so
+--      a tag test becomes an `and`+compare, and `valueTagBytes`/`payloadBase`
+--      go to 0.  Fields marked FLIPS below must be REINTERPRETED, not merely
+--      re-valued, when the second instance is written.
+--   2. NOTHING HERE MAY SIZE A P8 MAP.  The per-site root maps index SLOT
+--      INDICES and the registry entry is frozen at 4 words (p8-design §5), so
+--      the only thing VR3 changes about a map is the frame STRIDE, outside
+--      this record.  No field here is an input to a map's shape — do not add
+--      one.
+--   3. THE ret/desc/meta AGGREGATES ARE NOT VALUES AND DO NOT FLIP, so they
+--      stay OUT of this record: a record mixing "flips with the
+--      representation" and "never flips" is exactly the silent-mismatch shape
+--      this module's header was written to prevent.  ONE COUPLING SURVIVES and
+--      is named here so it cannot go silent: `retKindOffset` (40) IS
+--      `valSizeBytes` today and `retSizeBytes` (80) is `valSizeBytes + 40` —
+--      the `:ret` aggregate's first field is a Value.  VR3b must DERIVE those
+--      two from `layout.valSizeBytes` (a `:ret` over a word Value is
+--      `{ l, w, l, l, l, w }`), never leave them at the constants above.
+--      `desc*`/`meta*`/`ep*`/`dirent*` carry no Value at all and stay put.
+
+
+type alias ValLayout =
+    { valSizeBytes : Int -- FLIPS 40 -> 8 (the cell IS a word)
+    , valuePayloadWords : Int -- FLIPS 4 -> 0
+    , payloadBase : Int -- FLIPS 8 -> 0 (no tag word before the payload)
+    , wordBytes : Int -- UNCHANGED: the `l` width every offset is counted in
+    , valueTagBytes : Int -- FLIPS 4 -> 0 (the tag moves into the low 3 bits)
+    , valQbeFields : List String -- FLIPS { w, l, l, l, l } -> { l }
+    , maxArity : Int -- UNCHANGED: the rt_callN dispatch bound, not a cell size
+    , tagNumber : Int -- REINTERPRETED by VR3b (low-3-bit encoding), not renumbered
+    , tagString : Int
+    , tagSymbol : Int
+    , tagBoolean : Int
+    , tagCons : Int
+    , tagNil : Int
+    , tagLambda : Int
+    , tagMark : Int
+    , tagPrim : Int
+    , tagError : Int
+    , tagVector : Int
+    , tagStream : Int
+    , tagFloat : Int
+    , tagRecord : Int
+    }
+
+
+valLayout : ValLayout
+valLayout =
+    { valSizeBytes = valSizeBytes
+    , valuePayloadWords = valuePayloadWords
+    , payloadBase = payloadBase
+    , wordBytes = wordBytes
+    , valueTagBytes = valueTagBytes
+    , valQbeFields = valQbeFields
+    , maxArity = maxArity
+    , tagNumber = tagNumber
+    , tagString = tagString
+    , tagSymbol = tagSymbol
+    , tagBoolean = tagBoolean
+    , tagCons = tagCons
+    , tagNil = tagNil
+    , tagLambda = tagLambda
+    , tagMark = tagMark
+    , tagPrim = tagPrim
+    , tagError = tagError
+    , tagVector = tagVector
+    , tagStream = tagStream
+    , tagFloat = tagFloat
+    , tagRecord = tagRecord
+    }
 
 
 
@@ -536,10 +632,12 @@ maxArity =
 -- ============================ derived: payload offsets ============================
 
 
--- The byte offset of payload word `i` inside a Value cell.
-payloadWordOffset : Int -> Int
-payloadWordOffset word =
-    payloadBase + wordBytes * word
+-- The byte offset of payload word `i` inside a Value cell — DERIVED FROM THE
+-- INSTANCE IT IS GIVEN (not from the constants above), so a second instance
+-- cannot disagree with its own payload base and word width.
+payloadWordOffset : ValLayout -> Int -> Int
+payloadWordOffset layout word =
+    layout.payloadBase + layout.wordBytes * word
 
 
 

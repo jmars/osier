@@ -78,9 +78,10 @@ import Mid.RtLayout as RtLayout
 import Set exposing (Set)
 
 
-vs : Int
-vs =
-    RtLayout.valSizeBytes
+-- VR3a: the slot stride is NOT a constant here — it is a field of the Value
+-- layout INSTANCE the analysis is run for (`opts.layout`, threaded from
+-- Mid.Qbe.Lower's state).  Every "byte offset -> slot index" conversion below
+-- divides by it, so the word arm needs no edit in this module.
 
 
 {-| Mid.Qbe.Lower's slot-address temp naming: slot i's address is the temp
@@ -125,11 +126,11 @@ to a call or stored to memory would otherwise not be recognised as a frame
 address (the H2 shape).  MEASURED (perf P5b): without the seed, 10 of the 16
 gate groups' emits moved, each one a defun wrongly declared frame-free.
 -}
-classify : { nslots : Int, noCollect : Set String } -> List Block -> Class
+classify : { nslots : Int, noCollect : Set String, layout : RtLayout.ValLayout } -> List Block -> Class
 classify opts blocks =
     let
         ( offs, bad ) =
-            slotOffsets opts.nslots blocks
+            slotOffsets opts.layout opts.nslots blocks
 
         ctx =
             { offs = offs, bad = bad, noCollect = opts.noCollect }
@@ -197,6 +198,7 @@ type alias Ctx =
     , bad : Set String
     , retBytes : Int
     , noCollect : Set String
+    , layout : RtLayout.ValLayout
     }
 
 
@@ -210,17 +212,18 @@ safepoint.
 The fixpoint runs only when there is something to compute: with no
 allocation-capable call site the map set is `Computed []`.
 -}
-analyze : { retBytes : Int, nslots : Int, noCollect : Set String } -> List Block -> Analysis
+analyze : { retBytes : Int, nslots : Int, noCollect : Set String, layout : RtLayout.ValLayout } -> List Block -> Analysis
 analyze opts blocks =
     let
         ( offs, bad ) =
-            slotOffsets opts.nslots blocks
+            slotOffsets opts.layout opts.nslots blocks
 
         ctx =
             { offs = offs
             , bad = bad
             , retBytes = opts.retBytes
             , noCollect = opts.noCollect
+            , layout = opts.layout
             }
 
         escapes =
@@ -447,7 +450,7 @@ jumpUse ctx jump =
         -- the edge that reaches it.  "ret" is the label Mid.Qbe.Lower's @ret
         -- block always takes.
         Jmp "ret" ->
-            Set.fromList (List.range 0 (ctx.retBytes // vs - 1))
+            Set.fromList (List.range 0 (ctx.retBytes // ctx.layout.valSizeBytes - 1))
 
         Jmp _ ->
             Set.empty
@@ -478,13 +481,13 @@ callArgOperand a =
 -- ============================ SLOT ADDRESSES ============================
 
 
-slotOf : { r | offs : Dict String Int } -> Arg -> Set Int
+slotOf : { r | offs : Dict String Int, layout : RtLayout.ValLayout } -> Arg -> Set Int
 slotOf ctx a =
     case a of
         Tmp t ->
             case Dict.get t ctx.offs of
                 Just off ->
-                    Set.singleton (off // vs)
+                    Set.singleton (off // ctx.layout.valSizeBytes)
 
                 Nothing ->
                     Set.empty
@@ -493,7 +496,7 @@ slotOf ctx a =
             Set.empty
 
 
-slotRange : { r | offs : Dict String Int } -> Int -> Arg -> Set Int
+slotRange : { r | offs : Dict String Int, layout : RtLayout.ValLayout } -> Int -> Arg -> Set Int
 slotRange ctx n a =
     if n <= 0 then
         Set.empty
@@ -503,7 +506,7 @@ slotRange ctx n a =
             Tmp t ->
                 case Dict.get t ctx.offs of
                     Just off ->
-                        Set.fromList (List.range (off // vs) ((off + n - 1) // vs))
+                        Set.fromList (List.range (off // ctx.layout.valSizeBytes) ((off + n - 1) // ctx.layout.valSizeBytes))
 
                     Nothing ->
                         Set.empty
@@ -528,13 +531,13 @@ not an optimisation — the prologue is emitted after the body walk, so without 
 a bare `%s<i>` handed to a call or stored to memory resolves to nothing and the
 escape goes unreported.
 -}
-slotOffsets : Int -> List Block -> ( Dict String Int, Set String )
-slotOffsets nslots blocks =
+slotOffsets : RtLayout.ValLayout -> Int -> List Block -> ( Dict String Int, Set String )
+slotOffsets layout nslots blocks =
     let
         ( offsBody, bad ) =
             addressOffsets blocks
     in
-    ( List.foldl (\i d -> Dict.insert (slotTmp i) (vs * i) d)
+    ( List.foldl (\i d -> Dict.insert (slotTmp i) (layout.valSizeBytes * i) d)
         offsBody
         (List.range 0 (nslots - 1))
     , bad

@@ -153,7 +153,7 @@ type alias TyInfo =
 
 typeTable : Module -> Result String (Dict String TyInfo)
 typeTable m =
-    typeTableGo (Il.valType :: Il.retType :: m.types ++ [ Il.descType ]) Dict.empty
+    typeTableGo (Il.valType m.layout :: Il.retType :: m.types ++ [ Il.descType ]) Dict.empty
 
 
 typeTableGo : List Il.TypeDef -> Dict String TyInfo -> Result String (Dict String TyInfo)

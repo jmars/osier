@@ -53,7 +53,8 @@ import Mid.RtLayout as RtLayout
 
 
 type alias Module =
-    { types : List TypeDef
+    { layout : RtLayout.ValLayout -- VR3a: the Value layout this module was emitted FOR (Lower seeds it from its state; Print/Encode read it, so no printer can describe a layout the emitter did not use)
+    , types : List TypeDef
     , datas : List DataDef
     , funcs : List Func
     }
@@ -67,11 +68,15 @@ type alias Module =
 -- (gc/types.zig: Value = extern struct { tag: ValTag, payload: union }),
 -- ABI-verified against the vendored qbe: aggregate params arrive as
 -- POINTERS, aggregate returns go through sret.
-valType : TypeDef
-valType =
+-- VR3a: the ONE typedef that flips with the representation, so it is built
+-- from the layout INSTANCE the module was emitted with.  `:ret`/`:desc` below
+-- are NOT Values and stay constants (see Mid.RtLayout's TRAP-3 note; `:ret`'s
+-- `retKindOffset` is the coupling VR3b must derive).
+valType : RtLayout.ValLayout -> TypeDef
+valType layout =
     { name = "val"
     , align = Just RtLayout.abiAlign
-    , fields = RtLayout.valQbeFields
+    , fields = layout.valQbeFields
     }
 
 

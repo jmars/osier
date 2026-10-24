@@ -28,7 +28,7 @@ import Mid.Qbe.Il exposing (Module, Func, Block, Inst(..), Jump(..), Arg(..), Ty
 print : Module -> String
 print m =
     String.join "\n"
-        (List.map printType (valType :: retType :: m.types ++ [ descType ])
+        (List.map printType (valType m.layout :: retType :: m.types ++ [ descType ])
             ++ [ "" ]
             ++ List.map printData m.datas
             ++ [ "" ]
