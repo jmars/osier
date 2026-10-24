@@ -76,7 +76,21 @@ runTests runtimeMidText =
 
 
 checks : Rt.Runtime -> String -> List String
-checks rt runtimeMidText =
+checks rt rawMidText =
+    let
+        -- (perf VR3c) THE VAL ARM'S TEXT — what every census / struct-layout /
+        -- text row below reads.  It must be the text the VAL arm actually
+        -- compiles, i.e. the file with the word-arm splice regions removed;
+        -- on the val arm that is byte-for-byte the committed file (the markers
+        -- are dropped in BOTH arms), so every existing row is unchanged.
+        -- Reading the RAW file here instead shows BOTH arms' lines at once, and
+        -- a `declsOf` parse of it is a duplicate-binding error — MEASURED: 31
+        -- struct pins went RED the moment the first word-arm twin landed.
+        -- (A splice failure cannot reach here: `runTests` loads through the
+        -- same splice and reports the failure instead of calling `checks`.)
+        runtimeMidText =
+            Result.withDefault rawMidText (Rt.spliceArm False rawMidText)
+    in
     [ -- M1 ANTI-EMPTY: the census rows below read `rt` (the once-per-process
       -- load of runtime.mid).  If test-run.js (or run.js) ever stops reading
       -- the file, the flag text is empty, `Rt.load` would parse nothing, and
@@ -1403,7 +1417,7 @@ checks rt runtimeMidText =
             == [ [ 40, 48, 56, 64, 72, 80 ], [ 8, 16, 24, 32, 40, 48 ] ]
         )
     , check "VR3c AREA 1 — THE KIND CONTRACT IS ONE SET OF NUMBERS, PINNED ACROSS RtLayout AND runtime.mid. Under the word arm every heap object's value tag is `...001`, so WHICH object a pointer names is read from the 2-word GC header — and the codes ARE the ValTag integers both arms already use (cons 4, vector 10, ...). This row parses runtime.mid's own `// KIND-CONTRACT:` rows (word-arm splice) and compares every one with RtLayout: the field's shift/mask, each code against the TOP-LEVEL `tag*` constants, and each body class against `heapKindScanned`. A stale duplicate on EITHER side turns this RED instead of linking cleanly and reading another object's bytes. It also pins that the rows are WORD-ARM ONLY (the val text carries none) and that the val arm has NO kind field (0/0, the `tagMask` convention)"
-        (case ( Rt.spliceArm False runtimeMidText, Rt.spliceArm True runtimeMidText ) of
+        (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
             ( Ok valText, Ok wordText ) ->
                 let
                     rows =
@@ -1500,6 +1514,40 @@ checks rt runtimeMidText =
             && RtLayout.bodyWords RtLayout.valLayout 2 1
             * RtLayout.wordBytes
             == 96
+        )
+    , check "VR3c AREA 2 — THE ALLOCATION STRIDES ARE TWINNED AND AGREE WITH THE CONTRACT: gcAlloc's body size is `2 + count` words on the word arm (no `4*count*kind` term — a body unit is ONE word) and the 40-byte expression on the val arm, each the SAME number `bodyWords` computes; every fresh header is built by ONE word-arm defun (`Rt.kindHdr`) that derives bit 1 from the kind code with exactly `heapKindScanned`'s five-code set and shifts the code by 2^24 = `heapKindShift`; and the constructors that had no seat of their own get one (`Rt.allocCons` code 4 count 2, `Rt.allocKind`, `Rt.allocVector` code 10). The val text is asserted to carry NONE of it, so the val arm's emitted IL cannot move"
+        (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
+            ( Ok valText, Ok wordText ) ->
+                String.contains "word total = 2 + (countW + 4 * countW * kindW);" valText
+                    && not (String.contains "word total = 2 + countW;" valText)
+                    && not (String.contains "defun Rt.kindHdr" valText)
+                    && not (String.contains "defun Rt.allocCons" valText)
+                    && not (String.contains "defun Rt.allocKind" valText)
+                    && not (String.contains "mknum(10), mknum(countW)" valText)
+                    && String.contains "word total = 2 + countW;" wordText
+                    && not (String.contains "4 * countW * kindW" wordText)
+                    && String.contains "defun Rt.kindHdr(kind : val, cls : val) -> val {" wordText
+                    && String.contains "word scan = (k == 4) + (k == 6) + (k == 9) + (k == 10) + (k == 14);" wordText
+                    && String.contains "return mknum(scan * 2 + c * 4 + k * 16777216);" wordText
+                    && String.contains "defun Rt.allocCons() -> val {" wordText
+                    && String.contains "return call Rt.gcAlloc(region, mknum(4), mknum(2));" wordText
+                    && String.contains "defun Rt.allocKind(code : val, count : val) -> val {" wordText
+                    && String.contains "return call Rt.gcAlloc(region, mknum(10), mknum(countW));" wordText
+                    -- the SHIFT in the code is the layout's shift: 2^24 is the
+                    -- one number both sides must spell the same way.
+                    && RtLayout.heapKindShift
+                    == 24
+                    && 1024
+                    * 1024
+                    * 16
+                    == 16777216
+                    -- the SCAN LADDER in the code is `heapKindScanned`'s set,
+                    -- over every ValTag integer this file defines.
+                    && List.filter RtLayout.heapKindScanned [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14 ]
+                    == [ 4, 6, 9, 10, 14 ]
+
+            _ ->
+                False
         )
     , check "VR3b2 AREA 1 PORTED — THE FRAME SLOT STRIDE LOWERS UNDER THE WORD ARM. A defun whose whole body is one Value copy (`\\x -> x`) now emits a REAL module on the word instance: `type :val = align 8 { l }`, the frame block is `alloc8 (valSizeBytes * nslots)` = 16 for 2 slots, the slot address table steps by 8 (`%s0 =l add %f, 0`, `%s1 =l add %f, 8`), the param and result copies are 8-byte blits, and slot 0/1's materialisation is `storel 0` at both `%s0` and `%f + retKindOffset` = `%f + 8`. EXACT text, and the VAL-arm spellings (alloc8 80, a 40-byte blit, a `storew` tag) are asserted ABSENT — this is the row that would have gone red had any stride site still read a constant"
         (case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ idProbe ]) [ idProbe ] "Id.f" of

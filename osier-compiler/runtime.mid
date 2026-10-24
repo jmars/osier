@@ -4928,7 +4928,12 @@ defun Rt.allocVector(count : val) -> val {
   word regionW = wload(glob, 0);
   val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
   word countW = payload(count, 0);
+  // >>> QBE_VAL-ONLY
   return call Rt.gcAlloc(region, mknum(1), mknum(countW));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  return call Rt.gcAlloc(region, mknum(10), mknum(countW));
+  // <<< QBE_WORDVAL-ONLY
 }
 defun Rt.allocRaw(nbytes : val) -> val {
   word glob = rawcall rt_glob_addr();
@@ -4938,6 +4943,34 @@ defun Rt.allocRaw(nbytes : val) -> val {
   word bodyWords = (nbytesW + 7) / 8;
   return call Rt.gcAlloc(region, mknum(0), mknum(bodyWords));
 }
+// >>> QBE_WORDVAL-ONLY
+// ==================== THE WORD ARM'S ALLOCATION SEATS (VR3c AREA 2) ============
+// On the val arm `allocvec(n)` + the Value's tag word said everything: the cell
+// held n 40-byte Values and the tag named the constructor.  On the word arm the
+// tag is `...001` for every heap object, so the constructor has to be named AT
+// ALLOCATION TIME — it becomes the header's KIND CODE (bits 24..27) and decides
+// the scan bit.  `Rt.allocVector` (code 10) and `Rt.allocRaw` (code 0, raw
+// bytes) keep their meanings; the two seats below are what the emitter calls for
+// the constructors that had no seat of their own:
+//
+//   Rt.allocCons()          a 2-value cons cell: code 4, count 2, 32 B
+//   Rt.allocKind(code, n)   the general seat: code `code`, n body words/Values
+//
+// The body is `2 + count` words in every case (gcAlloc's `total`), so a cons is
+// 4 words and a vector 2 + n — the body-size rule RtLayout.bodyWords states.
+defun Rt.allocCons() -> val {
+  word glob = rawcall rt_glob_addr();
+  word regionW = wload(glob, 0);
+  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  return call Rt.gcAlloc(region, mknum(4), mknum(2));
+}
+defun Rt.allocKind(code : val, count : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word regionW = wload(glob, 0);
+  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  return call Rt.gcAlloc(region, code, count);
+}
+// <<< QBE_WORDVAL-ONLY
 // >>> QBE_WORDVAL-ONLY
 // ==================== THE GC-HEADER KIND CONTRACT (perf VR3c AREA 1) ============
 // THE DEFINITION IS `Mid/RtLayout.elm`'s "THE GC-HEADER KIND CONTRACT"
@@ -4986,11 +5019,38 @@ defun Rt.allocRaw(nbytes : val) -> val {
 // the layout's `valuePayloadWords` folded in — which is why gcAlloc's two
 // spellings below differ by exactly that term and nothing else.
 // <<< QBE_WORDVAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// THE HEADER WORD, WORD ARM (perf VR3c AREA 2).  ONE place builds a fresh
+// header, so every writer below (gcAlloc's young and bump paths, gcAllocGo's
+// free-list pop, gcPromoteAlloc's three) stores the SAME word:
+//
+//   bit 1      SCAN KIND  DERIVED from the kind code (the five-code set the
+//                         KIND-CONTRACT block above names) — never carried
+//                         twice, so the two statements cannot drift
+//   bits 2..23 CLASS      the size ladder's packing, unmoved
+//   bits 24..27 KIND CODE the object's ValTag integer
+//
+// `16777216` is 2^24 = Mid/RtLayout.elm's `heapKindShift`; the shift is written
+// as the product of a power of two for the reason this file's other big
+// constants are (the surface's integer literals are exact, but a bare 2^24
+// literal in a SHIFT would hide which layout number it is).
+defun Rt.kindHdr(kind : val, cls : val) -> val {
+  word k = payload(kind, 0);
+  word c = payload(cls, 0);
+  word scan = (k == 4) + (k == 6) + (k == 9) + (k == 10) + (k == 14);
+  return mknum(scan * 2 + c * 4 + k * 16777216);
+}
+// <<< QBE_WORDVAL-ONLY
 defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
   word kindW = payload(kind, 0);
   word countW = payload(count, 0);
   *Region regionW = payload(region, 0);
+  // >>> QBE_VAL-ONLY
   word total = 2 + (countW + 4 * countW * kindW);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word total = 2 + countW;
+  // <<< QBE_WORDVAL-ONLY
   word cls = payload((total <= 4096) ? mknum((total + 7) / 8) : mknum(512 + (total - 4096 + 4095) / 4096), 0);
   word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
   word heapBytes = regionW->heapBytes;
@@ -5036,13 +5096,23 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
     if (mkbool(yc0 + phys * 8 > regionW->youngEnd)) {
       call Rt.gcScavenge(mknum(0));
       word yc1 = regionW->youngCursor;
+      // >>> QBE_VAL-ONLY
       wstore(yc1, -2, kindW * 2 + cls * 4);
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      wstore(yc1, -2, payload(call Rt.kindHdr(mknum(kindW), mknum(cls)), 0));
+      // <<< QBE_WORDVAL-ONLY
       wstore(yc1, -1, countW);
       regionW->youngCursor = yc1 + phys * 8;
       regionW->allocated = regionW->allocated + phys * 8;
       return mknum(yc1);
     } else {
+      // >>> QBE_VAL-ONLY
       wstore(yc0, -2, kindW * 2 + cls * 4);
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      wstore(yc0, -2, payload(call Rt.kindHdr(mknum(kindW), mknum(cls)), 0));
+      // <<< QBE_WORDVAL-ONLY
       wstore(yc0, -1, countW);
       regionW->youngCursor = yc0 + phys * 8;
       regionW->allocated = regionW->allocated + phys * 8;
@@ -5056,7 +5126,12 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
     word cursor = regionW->cursor;
     word heapEnd = regionW->heapEnd;
     if (mkbool(cursor + phys * 8 < heapEnd)) {
+      // >>> QBE_VAL-ONLY
       wstore(cursor, -2, kindW * 2 + cls * 4);
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      wstore(cursor, -2, payload(call Rt.kindHdr(mknum(kindW), mknum(cls)), 0));
+      // <<< QBE_WORDVAL-ONLY
       wstore(cursor, -1, countW);
       // THE BLOCK MAP IS WRITTEN ON THE BUMP PATH ONLY (GC ARC unit 2): a block
       // start is a PERMANENT property of the address in a non-moving collector,
@@ -5098,7 +5173,12 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
         // trigger above did.
         word grew = payload((newEnd > heapEnd) ? call Rt.gcGrow(region, mknum(newEnd)) : mknil, 0);
         if (mkbool(cursor + phys * 8 < regionW->heapEnd)) {
-          wstore(cursor, -2, kindW * 2 + cls * 4);
+          // >>> QBE_VAL-ONLY
+      wstore(cursor, -2, kindW * 2 + cls * 4);
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      wstore(cursor, -2, payload(call Rt.kindHdr(mknum(kindW), mknum(cls)), 0));
+      // <<< QBE_WORDVAL-ONLY
           wstore(cursor, -1, countW);
           bytestore(regionW->bmPtr + (cursor - regionW->heapStart) / 64, 0, 1);
           regionW->cursor = cursor + phys * 8;
@@ -5175,7 +5255,12 @@ defun Rt.gcAllocGo(region : val, cls : val) -> val {
       word kind = regionW->kind;
       word count = regionW->count;
       wstore(table, clsW, wload(head, 0));
+      // >>> QBE_VAL-ONLY
       wstore(head, -2, kind * 2 + clsW * 4);
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      wstore(head, -2, payload(call Rt.kindHdr(mknum(kind), mknum(clsW)), 0));
+      // <<< QBE_WORDVAL-ONLY
       wstore(head, -1, count);
       // the block start is permanent; only its STATE flips (GC ARC unit 2)
       bytestore(regionW->bmPtr + (head - regionW->heapStart) / 64, 0, 1);
@@ -5437,7 +5522,12 @@ defun Rt.gcPromoteAlloc(cls : val, kind : val, count : val) -> val {
   word head = wload(table, clsW);
   if (mkbool(head != 0)) {
     wstore(table, clsW, wload(head, 0));
+    // >>> QBE_VAL-ONLY
     wstore(head, -2, kindW * 2 + clsW * 4);
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    wstore(head, -2, payload(call Rt.kindHdr(mknum(kindW), mknum(clsW)), 0));
+    // <<< QBE_WORDVAL-ONLY
     wstore(head, -1, countW);
     bytestore(rw->bmPtr + (head - rw->heapStart) / 64, 0, 1);
     rw->allocated = rw->allocated + phys * 8;
@@ -5453,7 +5543,12 @@ defun Rt.gcPromoteAlloc(cls : val, kind : val, count : val) -> val {
   // (reserve-only: heapEnd is a LIMIT inside the already-mapped region, so it
   // raised VAS, not RSS — the frontier stayed at the live set).
   if (mkbool(cursor + phys * 8 < rw->heapEnd)) {
+    // >>> QBE_VAL-ONLY
     wstore(cursor, -2, kindW * 2 + clsW * 4);
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    wstore(cursor, -2, payload(call Rt.kindHdr(mknum(kindW), mknum(clsW)), 0));
+    // <<< QBE_WORDVAL-ONLY
     wstore(cursor, -1, countW);
     bytestore(rw->bmPtr + (cursor - rw->heapStart) / 64, 0, 1);
     rw->cursor = cursor + phys * 8;
@@ -5468,7 +5563,12 @@ defun Rt.gcPromoteAlloc(cls : val, kind : val, count : val) -> val {
   word limCap = payload((limUp < capLim) ? mknum(limUp) : mknum(capLim), 0);
   word grew = payload(((heapStart + limCap) > rw->heapEnd) ? call Rt.gcGrow(mknum([word](rw)), mknum(heapStart + limCap)) : mknil, 0);
   if (mkbool(cursor + phys * 8 < rw->heapEnd)) {
+    // >>> QBE_VAL-ONLY
     wstore(cursor, -2, kindW * 2 + clsW * 4);
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    wstore(cursor, -2, payload(call Rt.kindHdr(mknum(kindW), mknum(clsW)), 0));
+    // <<< QBE_WORDVAL-ONLY
     wstore(cursor, -1, countW);
     bytestore(rw->bmPtr + (cursor - rw->heapStart) / 64, 0, 1);
     rw->cursor = cursor + phys * 8;
