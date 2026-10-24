@@ -527,18 +527,6 @@ wordArmLayout layout =
     layout == RtLayout.wordLayout
 
 
-{-| Refuse a construct the word arm has not ported yet.  Always succeeds on the
-val arm, so every call site is inert there.
--}
-wordGate : String -> S -> Result String S
-wordGate what s =
-    if wordArm s then
-        Err (wordArmUnsupported what)
-
-    else
-        Ok s
-
-
 {-| THE PER-DEFUN PRE-WALK CLASSIFIER (perf VR3b2) — which Mid.Ir constructs
 the word arm can emit TODAY.
 
@@ -668,28 +656,6 @@ readTag t base s =
 
     else
         emit (Load (Just t) W LoadW base) s
-
-
-{-| Refuse a TAG TEST for a tag the word arm cannot distinguish: every heap
-object shares `...001`, so which KIND it is lives in the 2-word GC header and
-is area 3/7's read, not a tag test.  A test that compares the tag word against
-one of those integers is meaningful on the val arm only.
--}
-wordHeapTagGate : String -> Int -> S -> Result String S
-wordHeapTagGate what tag s =
-    if wordArm s && tag == s.layout.tagCons then
-        Err
-            (wordArmUnsupported
-                (wordArea
-                    "AREA 3 (HEAP KIND)"
-                    (what
-                        ++ " — under the word arm every heap object's tag is `...001`, so which object it is lives in the 2-word GC header; a tag test cannot distinguish a cons from a string, a vector, a record or a closure"
-                    )
-                )
-            )
-
-    else
-        Ok s
 
 
 wordArea : String -> String -> String
@@ -893,8 +859,8 @@ it, `Mid.QbeModule` hands it down, and the instance lands in `S.layout` at
 VR3b1 refused the word arm HERE, in one place, before the reachability walk.
 VR3b2 turned that into a PER-CONSTRUCT gate so the arm can be ported area by
 area: the arm now walks the same path and refuses the first construct it has
-not ported (`wordArmUnported` per defun, `wordGate` at the emit sites, and the
-Rt-surface gate in `lowerArm`), so the loud error NAMES the construct that
+not ported (`wordArmUnported` per defun — the whitelist — plus the Rt-surface
+gate in `lowerArm`), so the loud error NAMES the construct that
 stopped it instead of always naming area 1.  The invariant is unchanged: one
 refusal means NO IL AT ALL.
 -}

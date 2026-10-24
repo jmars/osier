@@ -385,15 +385,21 @@ valLayout =
 --      REGISTER, so a `:val` CALL ARGUMENT built from an `l` operand is that
 --      operand's ADDRESS only at 40 bytes — `rt_callN`/`rt_call2r` load each
 --      pointer before passing it under the word arm.
---   2. TAG WRITES AND TESTS.  NOT PORTED.  `storeValueCell`'s `storew <tag>`,
---      every `Cmp W Ceq` tag test, and the .mid surface lane's `RawTagIs`/
---      `RawMkValue` (Mid.RtLang.LowerToIr names `valLayout` at 9 sites —
---      VR3a's finding; that lane lowers BEFORE Lower runs, so its tag integers
---      are baked into the Mid.Ir under any knob).  Under the word arm the tag
---      is the LOW 3 BITS, so a TEST is `and`+compare and a WRITE is an
---      or/and-mask — and the heap tags (cons/string/vector/record/float/
---      lambda/prim/stream/mark) all collapse to `...001`, so a heap-object test
---      additionally needs the 2-word header's KIND.
+--   2. TAG WRITES AND TESTS.  THE IMMEDIATE HALF IS PORTED (perf VR3b2).
+--      `readTag` (Mid.Qbe.Lower) is the ONE place a tag is read: val =
+--      `loadw` of the tag word, word = `loadl` + `and tagMask`.  Ported on top
+--      of it: the boolean condition test in `lowerIf` and the shared
+--      `jmpfFalse` helper (`&&`, `||`, `/=`, one match arm); and the WRITES for
+--      the immediates in `lowerLitWord` (a fixnum `n * 8`, refused by name
+--      outside i61 because boxing is area 4; `true`/`false` = tagTrue/tagFalse)
+--      plus `storeNil`.  NOT PORTED: every HEAP-object tag — cons/string/
+--      vector/record/float/lambda/stream/prim all collapse to `...001`, so a
+--      heap-object test is a 2-word-HEADER KIND read (heapTagIsKind), which is
+--      area 3/7's contract; and `storeValueCell`'s heap writes.  The .mid
+--      surface lane's `RawTagIs`/`RawMkValue` are also un-ported
+--      (Mid.RtLang.LowerToIr names `valLayout` at 9 sites — VR3a's finding;
+--      that lane lowers BEFORE Lower runs, so its tag integers are baked into
+--      the Mid.Ir under any knob).
 --   3. PAYLOAD ACCESS.  Every `payloadWordOffset` read/write: cons car/cdr,
 --      string/vector `len`, record fields, float payload, argv, the exec-plan
 --      blob.  Under the word arm a field is a plain 8-byte load at 8i, and a
