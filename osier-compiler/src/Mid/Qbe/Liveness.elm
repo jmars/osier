@@ -1,17 +1,40 @@
-module Mid.Qbe.Liveness exposing (Analysis, Site, allSitesEmpty, analyze, frameFree)
+module Mid.Qbe.Liveness exposing (Analysis, Class, Site, Sites(..), allSitesEmpty, analyze, classify, frameFree)
 
 -- Mid.Qbe.Liveness — THE SLOT-LIVENESS PRE-PASS (perf P5; the analysis P8's
--- per-safepoint descriptor maps are built from, and the only consumer of it
--- today is P5's degenerate predicate).
+-- per-safepoint descriptor maps are built from).
 --
--- WHAT IT ANSWERS: for ONE defun's EMITTED blocks, for every CALL that can
+-- TWO TIERS, because the two consumers want very different things.
+--
+--   TIER 1 — `classify`: a CHEAP LINEAR classification of one defun with NO
+--   CFG dataflow — "does any call in this defun reach a GC safepoint?" and
+--   "did a frame address leave the defun?".  This is all P5's degenerate
+--   predicate needs, and `frameFree` consumes it.
+--
+--   TIER 2 — `analyze`: the per-safepoint slot maps (`sites`).  This is the
+--   EXPENSIVE half — a backward CFG fixpoint — and P8 is its consumer.  It is
+--   LAZY: a defun with no allocation-capable call site has no safepoint to
+--   describe, so its map set is COMPLETE AND EMPTY and the fixpoint is not
+--   run.  (Before this split the fixpoint ran for EVERY candidate defun even
+--   though P5 only ever read "are the sets empty".)
+--
+-- WHY TIER 1 IS SOUND: P5 asks only whether a frame-free defun can hold a live
+-- composite ACROSS a safepoint.  With no allocation-capable call site in the
+-- defun there is no safepoint, so there is nothing to hold it across, and the
+-- linear scan answers the question by itself.  The fixpoint could not have
+-- said more: the `Jmp @ret` fold in `jumpUse` makes the return aggregate's
+-- slots live on every path into @ret, so a defun with a safepoint reported a
+-- non-empty live set anyway.  MEASURED (perf P5b): the linear rule and the
+-- fixpoint rule select the SAME frame-free defuns on the 16-group gate
+-- workload — the emits are BYTE-IDENTICAL.
+--
+-- WHAT TIER 2 ANSWERS: for ONE defun's EMITTED blocks, for every CALL that can
 -- reach a GC safepoint, WHICH FRAME SLOTS hold a live composite across it.
--- "Live across" is the ordinary backward liveness dataflow over the block
--- CFG (a use reachable before a redefinition on SOME path), run to a
--- FIXPOINT — not a forward scan — because the paths that matter are exactly
--- the ones a forward walk misses: a `case`/`if` arm that rejoins, an error
--- arm that jumps straight to @ret, and the self-tail loop's back edge
--- (Lower's `recur` compiles to `jmp @body`).
+-- "Live across" is the ordinary backward liveness dataflow over the block CFG
+-- (a use reachable before a redefinition on SOME path), run to a FIXPOINT —
+-- not a forward scan — because the paths that matter are exactly the ones a
+-- forward walk misses: a `case`/`if` arm that rejoins, an error arm that jumps
+-- straight to @ret, and the self-tail loop's back edge (Lower's `recur`
+-- compiles to `jmp @body`).
 --
 -- THE FRAME-SLOT MODEL, read off the emitter (Mid.Qbe.Lower): a slot address
 -- is a temp holding `f + k` (slotTmp i = "s<i>" = f + 40*i, and every
@@ -33,9 +56,10 @@ module Mid.Qbe.Liveness exposing (Analysis, Site, allSitesEmpty, analyze, frameF
 --
 -- SOUNDNESS DIRECTION: every set here is an OVER-approximation of "holds a
 -- live composite" (a slot holding a raw word is reported live; an
--- unresolvable address is reported as an escape).  The predicate
--- `frameFree` is therefore conservative in the only direction that is safe:
--- it says True only when NOTHING can be live across a safepoint.
+-- unresolvable address is reported as an escape), and `allocSite` is an
+-- over-approximation of "reaches a safepoint" (an indirect call always
+-- counts).  Both predicates here are therefore conservative in the only
+-- direction that is safe.
 
 import Dict exposing (Dict)
 import Mid.Qbe.Il as Il exposing (Arg(..), BinOp(..), Block, CallArg(..), Inst(..), Jump(..), Ty(..))
@@ -60,10 +84,62 @@ slotTmp i =
     "s" ++ String.fromInt i
 
 
+-- ======================= TIER 1: THE LINEAR CLASSIFICATION =======================
+
+
+{-| The cheap per-defun answer: two linear passes over the emitted instructions
+and NO CFG dataflow.  `allocSite` is "some call in this defun can reach a GC
+safepoint"; `escapes` is the frame-address-escape evidence (see `escapesOf`).
+-}
+type alias Class =
+    { allocSite : Bool
+    , escapes : List String
+    }
+
+
+{-| P5's predicate: no safepoint anywhere in the defun AND no frame address left
+it.  A NON-CONVERGENT analysis cannot reach here at all — this tier has no
+fixpoint to fail — and the escape conjunct is the conservative one that
+`analyze` shares.
+-}
+frameFree : Class -> Bool
+frameFree c =
+    List.isEmpty c.escapes && not c.allocSite
+
+
+{-| `nslots` is needed even by the cheap tier, and only for `escapes`: a bare
+slot address (`%s<i>`) is DEFINED by the prologue, which the emitter writes
+after the body walk — so `addressOffsets` cannot see it, and an address passed
+to a call or stored to memory would otherwise not be recognised as a frame
+address (the H2 shape).  MEASURED (perf P5b): without the seed, 10 of the 16
+gate groups' emits moved, each one a defun wrongly declared frame-free.
+-}
+classify : { nslots : Int, noCollect : Set String } -> List Block -> Class
+classify opts blocks =
+    let
+        ( offs, bad ) =
+            slotOffsets opts.nslots blocks
+
+        ctx =
+            { offs = offs, bad = bad, noCollect = opts.noCollect }
+    in
+    { allocSite = anyAllocSite ctx blocks
+    , escapes = escapesOf ctx blocks
+    }
+
+
+anyAllocSite : { r | offs : Dict String Int, bad : Set String, noCollect : Set String } -> List Block -> Bool
+anyAllocSite ctx blocks =
+    List.foldl (\b acc -> acc || List.any (allocCapable ctx) b.body) False blocks
+
+
+-- ======================= TIER 2: THE PER-SITE MAPS =======================
+
+
 {-| One allocation-capable call site: which frame slots hold a live composite
 across it.  `pc` is the instruction index within its block.  P8 will key its
 descriptor's per-site map off this list; P5 reads only whether the sets are
-empty.
+empty — and it no longer asks for the list at all.
 -}
 type alias Site =
     { block : String
@@ -72,25 +148,37 @@ type alias Site =
     }
 
 
+{-| The map set, as a SUM rather than a list, because "not computed" must never
+be readable as "computed and empty": a consumer of the per-safepoint maps (P8)
+gets the conservative answer BY CONSTRUCTION — `NotComputed` carries no list to
+misread, and `Computed` is only produced when every allocation-capable call site
+of the defun has been enumerated.  A defun with no allocation-capable call site
+is `Computed []`: there is no safepoint, so the enumeration is complete and
+empty.
+-}
+type Sites
+    = Computed (List Site)
+    | NotComputed String
+
+
 type alias Analysis =
-    { sites : List Site
+    { sites : Sites
     , escapes : List String
     }
 
 
-{-| The degenerate predicate P5 consumes: no site has a non-empty live set AND
-no frame address left the defun.  Note that a NON-CONVERGENT analysis cannot
-satisfy this by accident: `analyze` poisons `sites` with a full-live sentinel
-and `escapes` with the failure, so both conjuncts are false on that path.
+{-| "No site has a non-empty live set."  A NOT-COMPUTED analysis cannot satisfy
+this by accident — it has no list, and this returns False for it — so neither a
+non-convergent fixpoint nor an unrun one can read as "no live slots".
 -}
-frameFree : Analysis -> Bool
-frameFree a =
-    List.isEmpty a.escapes && allSitesEmpty a
-
-
 allSitesEmpty : Analysis -> Bool
 allSitesEmpty a =
-    List.all (\s -> Set.isEmpty s.live) a.sites
+    case a.sites of
+        Computed sites ->
+            List.all (\s -> Set.isEmpty s.live) sites
+
+        NotComputed _ ->
+            False
 
 
 type alias Ctx =
@@ -101,22 +189,21 @@ type alias Ctx =
     }
 
 
-{-| `noCollect` is the set of CALL SYMBOLS whose execution cannot reach a GC
-safepoint (Mid.Rt.allocating's complement over the Rt program, plus the
-non-collecting libc entries the emitter names).  A call to anything else —
-including a call through a TEMP (an indirect call, whose target is unknown) —
-is treated as a safepoint.
+{-| THE EXPLICIT MAP REQUEST (P8's entry point; P5 never makes it).  `noCollect`
+is the set of CALL SYMBOLS whose execution cannot reach a GC safepoint
+(Mid.Rt.allocating's complement over the Rt program, plus the non-collecting
+libc entries the emitter names).  A call to anything else — including a call
+through a TEMP (an indirect call, whose target is unknown) — is treated as a
+safepoint.
+
+The fixpoint runs only when there is something to compute: with no
+allocation-capable call site the map set is `Computed []`.
 -}
 analyze : { retBytes : Int, nslots : Int, noCollect : Set String } -> List Block -> Analysis
 analyze opts blocks =
     let
-        ( offsBody, bad ) =
-            addressOffsets blocks
-
-        offs =
-            List.foldl (\i d -> Dict.insert (slotTmp i) (vs * i) d)
-                offsBody
-                (List.range 0 (opts.nslots - 1))
+        ( offs, bad ) =
+            slotOffsets opts.nslots blocks
 
         ctx =
             { offs = offs
@@ -125,52 +212,60 @@ analyze opts blocks =
             , noCollect = opts.noCollect
             }
 
-        bodies =
-            List.foldl (\b acc -> Dict.insert b.label b.body acc) Dict.empty blocks
-
-        succs =
-            List.foldl (\b acc -> Dict.insert b.label (successors blocks b) acc) Dict.empty blocks
-
-        ends =
-            List.foldl (\b acc -> Dict.insert b.label (jumpUse ctx b.jump) acc) Dict.empty blocks
-
-        -- Monotone growth makes the fixpoint terminate; the bound guards
-        -- against a defect in THIS module, and running out of it denies
-        -- frame-freedom rather than guessing.
-        fuel =
-            4 * (List.length blocks + 1) + 64
+        escapes =
+            escapesOf ctx blocks
     in
-    case fixpoint fuel ctx bodies succs ends of
-        Nothing ->
-            -- A FAILED analysis must never look like a clean one.  The
-            -- failure is reported in `escapes` (which `frameFree` already
-            -- checks), but `.sites` is the EXPORTED half — P8 reads it
-            -- directly for its per-safepoint descriptor maps — and an empty
-            -- list there would say "no live slots anywhere" about a fixpoint
-            -- that never converged.  So the site list is POISONED with one
-            -- full-live sentinel: every predicate in this module, and every
-            -- consumer of the maps, then gets the conservative answer by
-            -- CONSTRUCTION rather than by remembering to check `escapes`.
-            { sites =
-                [ { block = "<no-convergence>"
-                  , pc = -1
-                  , live = Set.fromList (List.range 0 (opts.nslots - 1))
-                  }
-                ]
-            , escapes = [ "liveness did not converge" ]
-            }
+    if not (anyAllocSite ctx blocks) then
+        -- THE LAZY HALF.  No allocation-capable call site, so no safepoint and
+        -- no live-set to compute: the map set is complete and empty, and the
+        -- backward fixpoint — the expensive part of this module — is not run.
+        { sites = Computed [], escapes = escapes }
 
-        Just liveIn ->
-            { sites =
-                List.concatMap
-                    (\b ->
-                        sitesInBlock ctx b.label
-                            (blockLiveOut ctx succs ends liveIn b.label)
-                            b.body
-                    )
-                    blocks
-            , escapes = escapesOf ctx blocks
-            }
+    else
+        let
+            bodies =
+                List.foldl (\b acc -> Dict.insert b.label b.body acc) Dict.empty blocks
+
+            succs =
+                List.foldl (\b acc -> Dict.insert b.label (successors blocks b) acc) Dict.empty blocks
+
+            ends =
+                List.foldl (\b acc -> Dict.insert b.label (jumpUse ctx b.jump) acc) Dict.empty blocks
+
+            -- Monotone growth makes the fixpoint terminate; the bound guards
+            -- against a defect in THIS module, and running out of it denies
+            -- the maps rather than guessing.
+            fuel =
+                4 * (List.length blocks + 1) + 64
+        in
+        case fixpoint fuel ctx bodies succs ends of
+            Nothing ->
+                -- A FAILED analysis must never look like a clean one.  The
+                -- failure is reported in `escapes` (which every predicate here
+                -- checks), and `.sites` is the EXPORTED half — P8 reads it
+                -- directly for its per-safepoint descriptor maps — so it is
+                -- reported as `NotComputed`, which carries NO list.  An empty
+                -- list there would say "no live slots anywhere" about a
+                -- fixpoint that never converged; the sum type makes that
+                -- unrepresentable instead of relying on a sentinel being
+                -- noticed.
+                { sites = NotComputed "liveness did not converge"
+                , escapes = "liveness did not converge" :: escapes
+                }
+
+            Just liveIn ->
+                { sites =
+                    Computed
+                        (List.concatMap
+                            (\b ->
+                                sitesInBlock ctx b.label
+                                    (blockLiveOut ctx succs ends liveIn b.label)
+                                    b.body
+                            )
+                            blocks
+                        )
+                , escapes = escapes
+                }
 
 
 -- ============================ FIXPOINT ============================
@@ -286,7 +381,7 @@ dropUntil pred xs =
 -- ============================ TRANSFER ============================
 
 
-allocCapable : Ctx -> Inst -> Bool
+allocCapable : { r | noCollect : Set String } -> Inst -> Bool
 allocCapable ctx inst =
     case inst of
         Call _ _ (Sym s) _ ->
@@ -372,7 +467,7 @@ callArgOperand a =
 -- ============================ SLOT ADDRESSES ============================
 
 
-slotOf : Ctx -> Arg -> Set Int
+slotOf : { r | offs : Dict String Int } -> Arg -> Set Int
 slotOf ctx a =
     case a of
         Tmp t ->
@@ -387,7 +482,7 @@ slotOf ctx a =
             Set.empty
 
 
-slotRange : Ctx -> Int -> Arg -> Set Int
+slotRange : { r | offs : Dict String Int } -> Int -> Arg -> Set Int
 slotRange ctx n a =
     if n <= 0 then
         Set.empty
@@ -406,7 +501,7 @@ slotRange ctx n a =
                 Set.empty
 
 
-isFrameAddr : Ctx -> Arg -> Bool
+isFrameAddr : { r | offs : Dict String Int, bad : Set String } -> Arg -> Bool
 isFrameAddr ctx a =
     case a of
         Tmp t ->
@@ -414,6 +509,25 @@ isFrameAddr ctx a =
 
         _ ->
             False
+
+
+{-| The address map both tiers use: the body's own `f + k` derivations, PLUS the
+`nslots` slot temps the PROLOGUE defines (`%s<i> =l add %f, 40*i`).  The seed is
+not an optimisation — the prologue is emitted after the body walk, so without it
+a bare `%s<i>` handed to a call or stored to memory resolves to nothing and the
+escape goes unreported.
+-}
+slotOffsets : Int -> List Block -> ( Dict String Int, Set String )
+slotOffsets nslots blocks =
+    let
+        ( offsBody, bad ) =
+            addressOffsets blocks
+    in
+    ( List.foldl (\i d -> Dict.insert (slotTmp i) (vs * i) d)
+        offsBody
+        (List.range 0 (nslots - 1))
+    , bad
+    )
 
 
 {-| Every temp holding `f + k`, by a single forward pass over the emitted
@@ -490,7 +604,7 @@ offsetOf d a =
 -- ============================ ESCAPES ============================
 
 
-escapesOf : Ctx -> List Block -> List String
+escapesOf : { r | offs : Dict String Int, bad : Set String } -> List Block -> List String
 escapesOf ctx blocks =
     List.concatMap
         (\b ->

@@ -1968,19 +1968,21 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                                         -- here and the frame-enter in the
                                         -- prologue (via `pro`).
                                         --
-                                        -- The predicate is the DEGENERATE case
-                                        -- of Mid.Qbe.Liveness's per-safepoint
-                                        -- slot maps (the analysis P8 consumes):
-                                        -- no allocation-capable call site has a
-                                        -- live frame slot, and no frame address
-                                        -- escaped the defun.  Anything it
-                                        -- cannot prove keeps the frame.
+                                        -- The predicate is Mid.Qbe.Liveness's
+                                        -- LINEAR tier: no allocation-capable
+                                        -- call site anywhere in the defun (so
+                                        -- no safepoint to be live across) and
+                                        -- no frame address escaped it.  It is
+                                        -- deliberately NOT the per-safepoint
+                                        -- slot maps (P8's half): those need a
+                                        -- backward CFG fixpoint, and a defun
+                                        -- with no safepoint has nothing for
+                                        -- that fixpoint to say.
                                         leaf =
                                             leafOk
                                                 && Liveness.frameFree
-                                                    (Liveness.analyze
-                                                        { retBytes = rvs
-                                                        , nslots = s1.slot
+                                                    (Liveness.classify
+                                                        { nslots = s1.slot
                                                         , noCollect = sOuter.noCollect
                                                         }
                                                         (List.reverse s1.blocks)
