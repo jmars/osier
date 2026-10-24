@@ -812,8 +812,15 @@ natdepth natcalloverflow main 1000 20000 100000 500500
 # the status and each stream are compared separately.
 intproc intcorner wrapmul  0   "0"  ""  1
 intproc intcorner truncdiv 0   "-3" ""  7
-intproc intcorner divzero  136 ""   ""  0
-intproc intcorner minbyneg 136 ""   ""  1
+# The two division corners now HALT BY NAME (L3-U2). These rows were pinned to
+# the SIGFPE in U0 and are flipped here — that flip is the asymmetry proof: the
+# same row went from green-on-136 to green-on-1-with-a-message, so it is the
+# pre-check that changed, not the fixture.  Exit 1 is `Rt.die`'s (the runtime's
+# named-error channel), and the message is compared EXACTLY on the program's own
+# stderr (see the natproc dispatch arm for why the shell's and timeout's
+# notices are kept out of it).
+intproc intcorner divzero  1   ""   'qbe-rt: division by zero: `// 0` has no i64 value'  0
+intproc intcorner minbyneg 1   ""   'qbe-rt: division overflow: `INT64_MIN // -1` is 2^63, which is not an i64'  1
 
 # ==================== ELM_GATE_MATRIX: dump the registry ====================
 # ELM_GATE_MATRIX=1 prints every REGISTERED check as TSV (one row per check, in

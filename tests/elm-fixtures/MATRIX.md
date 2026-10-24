@@ -228,8 +228,8 @@ fails loudly rather than letting this listing go stale.
 | 170 | `natcalloverflow` | `natdepth` | `main` | `500500` | `1000 20000 100000` | — | `natcalloverflow.elm` |
 | 171 | `intcorner` | `intproc` | `wrapmul` | `0\|0\|` | `1` | — | `intcorner.elm` |
 | 172 | `intcorner` | `intproc` | `truncdiv` | `0\|-3\|` | `7` | — | `intcorner.elm` |
-| 173 | `intcorner` | `intproc` | `divzero` | `136\|\|` | `0` | — | `intcorner.elm` |
-| 174 | `intcorner` | `intproc` | `minbyneg` | `136\|\|` | `1` | — | `intcorner.elm` |
+| 173 | `intcorner` | `intproc` | `divzero` | `1\|\|qbe-rt: division by zero: `// 0` has no i64 value` | `0` | — | `intcorner.elm` |
+| 174 | `intcorner` | `intproc` | `minbyneg` | `1\|\|qbe-rt: division overflow: `INT64_MIN // -1` is 2^63, which is not an i64` | `1` | — | `intcorner.elm` |
 
 ---
 Generated from `tests/elm-fixtures/run-elm-gate.sh`; 174 checks.

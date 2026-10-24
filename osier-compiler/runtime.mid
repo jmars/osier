@@ -6157,8 +6157,38 @@ defun Rt.*(a : val, bb : val) -> val {
     return mknum(payload(a, 0) * payload(bb, 0));
   }
 }
+// L3-U2 — THE TWO DIVISION CORNERS HALT BY NAME.
+//
+// `//` is an i64 divide, so `Rt./` is QBE's `div`, which is the hardware idiv:
+// its two defined traps are a zero divisor and the one quotient that is not
+// representable (INT64_MIN / -1 = 2^63).  Before this pre-check both were a
+// BARE SIGFPE — exit 136, no diagnostic, nothing to assert on — which is an
+// accident of the lowering, not a language decision.
+//
+// The decision (design §1/§2): both halt through `Rt.die`, the runtime's
+// existing named-error channel (write to fd 2, exit 1).  The check costs one
+// compare per divide; it is NOT gated behind a knob because a silent crash is
+// exactly the class this design removes.
+//
+// THE INT64_MIN COMPARAND is spelled as a product because this file is parsed
+// by our own frontend, whose literal range is being widened in the same unit:
+// `0 - (2^30 * 2^30 * 8)` is INT64_MIN bit-for-bit (2^63 wraps to INT64_MIN,
+// and `0 - INT64_MIN` is INT64_MIN again, so the value is independent of which
+// side of the wrap the product lands on).
 defun Rt./(a : val, bb : val) -> val {
-  return mknum(payload(a, 0) / payload(bb, 0));
+  word n = payload(a, 0);
+  word d = payload(bb, 0);
+  if (mkbool(d == 0)) {
+    call Rt.die(rawstr("qbe-rt: division by zero: `// 0` has no i64 value"));
+    return mknil;
+  } else {
+    if (mkbool(d == (0 - 1)) && mkbool(n == (0 - ((1073741824 * 1073741824) * 8)))) {
+      call Rt.die(rawstr("qbe-rt: division overflow: `INT64_MIN // -1` is 2^63, which is not an i64"));
+      return mknil;
+    } else {
+      return mknum(n / d);
+    }
+  }
 }
 defun Rt.f/(a : val, bb : val) -> val {
   return mkflt(fload(call Rt.asF(a)) f/ fload(call Rt.asF(bb)));

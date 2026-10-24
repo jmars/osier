@@ -841,6 +841,11 @@ rtDeps =
         , ( "Rt.+", [ "Rt.asF" ] )
         , ( "Rt.-", [ "Rt.asF" ] )
         , ( "Rt.*", [ "Rt.asF" ] )
+          -- L3-U2: `//`'s two corners (zero divisor, INT64_MIN // -1) halt
+          -- through Rt.die, so the divide now has an edge the seed closure
+          -- must see — a key named in a body but absent here makes that
+          -- defun unreachable, and Lower's rawCall arm fails LOUDLY on it.
+        , ( "Rt./", [ "Rt.die" ] )
         , ( "Rt.f/", [ "Rt.asF" ] )
         , ( "Rt.<", [ "Rt.asF" ] )
         , ( "Rt.<=", [ "Rt.asF" ] )
