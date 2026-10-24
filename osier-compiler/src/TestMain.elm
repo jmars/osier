@@ -1341,6 +1341,30 @@ checks rt runtimeMidText =
             Err _ ->
                 False
         )
+    , check "VR3b2 AREA 2 (TAG TESTS) — A BOOLEAN TEST IS `and`+COMPARE UNDER THE WORD ARM. `\\b -> if b then b else b` emits a REAL module on the word instance: the tag is read with `loadl` and masked (`%tN =w and %lM, 7`) and compared against the TRUE IMMEDIATE (3) — no `loadw` tag read, no payload-word load, no AND of two flags. The VAL arm keeps the 40-byte pair (`%tN =w loadw %s0`, tag vs 12, payload vs 0, AND). Both texts are asserted, so a tag test that silently kept the val shape is RED"
+        (case
+            ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ ifProbe ]) [ ifProbe ] "Bf.f"
+            , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ ifProbe ]) [ ifProbe ] "Bf.f"
+            )
+         of
+            ( Ok wordMod, Ok valMod ) ->
+                let
+                    wTxt =
+                        Print.print wordMod
+
+                    vTxt =
+                        Print.print valMod
+                in
+                String.contains "=w and %t" wTxt
+                    && String.contains "=w ceqw %t" wTxt
+                    && String.contains ", 3\n" wTxt
+                    && not (String.contains "loadw" wTxt)
+                    && String.contains "=w loadw %s" vTxt
+                    && String.contains "=w and %t" vTxt
+
+            _ ->
+                False
+        )
     , check "VR3b2 THE VAL ARM IS INERT ON THE SAME PROBE: `\\x -> x` on the DEFAULT instance is the 40-byte shape it has always been — `alloc8 80`, a 40-byte param blit, the `storel 0` .done materialisation at `%f + 40` — so the port above changed the word arm and nothing else"
         (case QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ idProbe ]) [ idProbe ] "Id.f" of
             Ok mod ->
@@ -12912,6 +12936,23 @@ leafProbe =
         Lam
             { params = []
             , body = Lit (LNumber 42)
+            }
+    }
+
+
+{-| perf VR3b2 — THE AREA-2 PROBE: `\b -> if b then b else b`, a defun whose
+only construct beyond area 1 is a BOOLEAN TAG TEST.  Under the word arm the
+test is `and 7` + a compare against the `true` IMMEDIATE (`...011`); there is no
+payload word to read, which is the whole difference from the val arm's
+`isBool && payload == 0` pair.
+-}
+ifProbe : Defun
+ifProbe =
+    { key = "Bf.f"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "b" } ]
+            , body = If { cond = Var 0, thenBranch = Var 0, elseBranch = Var 0, falseLabel = "F", endLabel = "E" }
             }
     }
 

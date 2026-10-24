@@ -266,6 +266,11 @@ type alias ValLayout =
     , valueTagBytes : Int -- FLIPS 4 -> 0 (the tag moves into the low 3 bits)
     , valQbeFields : List String -- FLIPS { w, l, l, l, l } -> { l }
     , maxArity : Int -- UNCHANGED: the rt_callN dispatch bound, not a cell size
+    , tagMask : Int -- FLIPS 0 -> 7 (VR3b2): the LOW-BIT MASK that extracts the tag (0 = the tag is a whole word)
+    , tagTrue : Int -- FLIPS 12 -> 3 (VR3b2): see `booleanSplit`
+    , tagFalse : Int -- FLIPS 12 -> 4 (VR3b2): see `booleanSplit`
+    , booleanSplit : Bool -- FLIPS False -> True (VR3b2): two IMMEDIATES vs one tag + a payload bit
+    , heapTagIsKind : Bool -- FLIPS False -> True (VR3b2): the tag names the kind vs the 2-word header does
     , tagNumber : Int -- REINTERPRETED by VR3b (low-3-bit encoding), not renumbered
     , tagString : Int
     , tagSymbol : Int
@@ -292,6 +297,11 @@ valLayout =
     , valueTagBytes = valueTagBytes
     , valQbeFields = valQbeFields
     , maxArity = maxArity
+    , tagMask = 0
+    , tagTrue = tagBoolean
+    , tagFalse = tagBoolean
+    , booleanSplit = False
+    , heapTagIsKind = False
     , tagNumber = tagNumber
     , tagString = tagString
     , tagSymbol = tagSymbol
@@ -333,13 +343,33 @@ valLayout =
 -- header (mark/kind/class/RS/forwarding) is UNTOUCHED — that is what keeps the
 -- collector's block map and class ladder out of this flip.
 --
--- WHAT IS NOT EXPRESSIBLE IN THIS RECORD YET, and VR3b2 must widen it BEFORE
--- it ports a single tag test: the true/false SPLIT (two immediates against one
--- `tagBoolean` field) and the heap KIND (`...001` says "heap object"; which
--- object is read from the header).  NOTHING here is reachable today — the arm
--- stops at Lower's one choke point (`Mid.Qbe.Lower.wordArmUnsupported`) before
--- a byte of IL is emitted, so no field of this instance can be read into
--- half-word code.
+-- THE TWO THINGS THIS RECORD COULD NOT EXPRESS, WIDENED AT VR3b2 (as VR3b1's
+-- note demanded before a single tag test was ported).  Both are stated as
+-- per-instance FACTS, not as flags a reader may ignore:
+--
+--   * THE TRUE/FALSE SPLIT.  The val arm has ONE boolean tag plus a payload
+--     word (`booleanSplit = False`, and `tagTrue`/`tagFalse` both spell
+--     `tagBoolean` because the split does not exist there).  The word arm has
+--     TWO immediates (`booleanSplit = True`, `tagTrue = 3`, `tagFalse = 4`), so
+--     a boolean test is `(w & 7) == 3` and a boolean WRITE is an immediate —
+--     there is no payload word to read.  `tagBoolean` on the word instance is
+--     the TRUE immediate and nothing else; a reader that tests it for false is
+--     reading a field that cannot express false, which is why `booleanSplit`
+--     exists and must be tested first.
+--   * THE HEAP KIND.  `...001` says "a heap object"; WHICH object (cons,
+--     string, vector, record, float cell, closure, stream, prim) is read from
+--     the object's 2-word GC header, which does not move.  So under the word
+--     arm every `tagCons`/`tagString`/... field reads 1 and a heap-object TAG
+--     TEST is not a tag test at all: it is a header-KIND read
+--     (`heapTagIsKind = True`).  The tag integers below stay the val arm's
+--     numbers (VR3b does not renumber them); they are meaningful on the word
+--     arm only as `w & 7` equals 1.
+--
+-- `tagMask` is the mask that makes both statements usable: 0 on the val arm
+-- (the tag is a whole word, so masking it would be a bug — a reader must branch
+-- on the field), 7 on the word arm (`(w & 7)` is the tag).  It is a MASK and
+-- not a bit count because every reader of it wants the mask, and a width that
+-- each caller turns into a mask is a second place to be wrong.
 --
 -- THE WORKLIST — every construct the emitter and the Mid runtime still carry
 -- for the 40-byte representation, i.e. everything VR3b2/VR3c must port before
@@ -392,6 +422,11 @@ wordLayout =
     , valueTagBytes = 0
     , valQbeFields = [ "l" ]
     , maxArity = maxArity
+    , tagMask = 7
+    , tagTrue = 3
+    , tagFalse = 4
+    , booleanSplit = True
+    , heapTagIsKind = True
     , tagNumber = 0
     , tagString = 1
     , tagSymbol = 1

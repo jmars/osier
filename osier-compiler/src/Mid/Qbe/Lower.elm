@@ -598,8 +598,73 @@ wordArmUnported exp =
         Lit _ ->
             Just (wordArea "AREA 2 (TAG WRITES)" "a literal — under the word arm a literal is a TAGGED IMMEDIATE (or a heap cell), not a tag word plus payload words")
 
+        If block ->
+            -- AREA 2, THE BOOLEAN TAG TEST (perf VR3b2).  The condition is a
+            -- Value test whose lowering is `readTag` + a compare; the two
+            -- BRANCHES are ordinary sub-expressions and are classified here,
+            -- so an If only emits when everything inside it does.
+            case wordArmUnported block.cond of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    case wordArmUnported block.thenBranch of
+                        Just what ->
+                            Just what
+
+                        Nothing ->
+                            wordArmUnported block.elseBranch
+
         _ ->
             Just (wordArea (wordAreaName exp) (wordAreaWhat exp))
+
+
+{-| THE TAG OF THE VALUE WHOSE ADDRESS IS `base`, into the `w` temp `t`
+(perf VR3b2, area 2).
+
+val arm: the tag is a whole WORD at offset 0 of the Value.
+word arm: the tag is the value word's LOW BITS (`tagMask`), so the word is
+loaded and masked.  `%t =w and %l, 7` is legal QBE (an `l` value in a `w` context is
+its low 32 bits) and the vendored qbe lowers it to `andl $7, %eax` — MEASURED.
+
+This is the ONE place a tag is read, so "a tag test is `and`+compare" is a fact
+about the emitter rather than a convention each site re-implements.
+-}
+readTag : String -> Il.Arg -> S -> S
+readTag t base s =
+    if wordArm s then
+        let
+            ( v, s1 ) =
+                freshTmp s
+        in
+        s1
+            |> emit (Load (Just v) L LoadL base)
+            |> emit (Bin (Just t) W And (Il.Tmp v) (Il.Con s.layout.tagMask))
+
+    else
+        emit (Load (Just t) W LoadW base) s
+
+
+{-| Refuse a TAG TEST for a tag the word arm cannot distinguish: every heap
+object shares `...001`, so which KIND it is lives in the 2-word GC header and
+is area 3/7's read, not a tag test.  A test that compares the tag word against
+one of those integers is meaningful on the val arm only.
+-}
+wordHeapTagGate : String -> Int -> S -> Result String S
+wordHeapTagGate what tag s =
+    if wordArm s && tag == s.layout.tagCons then
+        Err
+            (wordArmUnsupported
+                (wordArea
+                    "AREA 3 (HEAP KIND)"
+                    (what
+                        ++ " — under the word arm every heap object's tag is `...001`, so which object it is lives in the 2-word GC header; a tag test cannot distinguish a cons from a string, a vector, a record or a closure"
+                    )
+                )
+            )
+
+    else
+        Ok s
 
 
 wordArea : String -> String -> String
@@ -6422,13 +6487,27 @@ lowerIf block dest isTail s =
                                     freshLbl "join" s9
                         in
                         Ok
-                            (emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp cslot))) s10
-                                |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagBoolean))
-                                |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp cslot)) (Il.Con 8))
-                                |> emit (Load (Just pldT) W LoadW (Il.Tmp p8T))
-                                |> emit (Cmp (Just iszT) W Ceq (Il.Tmp pldT) (Il.Con 0))
-                                |> emit (Bin (Just jfT) W And (Il.Tmp isbT) (Il.Tmp iszT))
-                                |> closeBlock (Jnz (Il.Tmp jfT) elseLbl thenLbl)
+                            (if wordArm s then
+                                -- WORD ARM (area 2): a boolean is an IMMEDIATE —
+                                -- `true` is `...011`, `false` is `...100` — so the
+                                -- test is the tag compare alone.  There is no
+                                -- payload word to read (the val arm's second
+                                -- compare and its AND are the whole difference),
+                                -- and a non-boolean condition takes the ELSE
+                                -- branch, exactly as the val arm's
+                                -- `isBool && payload == 0` does.
+                                readTag tagT (Il.Tmp (slotTmp cslot)) s10
+                                    |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagTrue))
+                                    |> closeBlock (Jnz (Il.Tmp isbT) thenLbl elseLbl)
+
+                             else
+                                emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp cslot))) s10
+                                    |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagBoolean))
+                                    |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp cslot)) (Il.Con 8))
+                                    |> emit (Load (Just pldT) W LoadW (Il.Tmp p8T))
+                                    |> emit (Cmp (Just iszT) W Ceq (Il.Tmp pldT) (Il.Con 0))
+                                    |> emit (Bin (Just jfT) W And (Il.Tmp isbT) (Il.Tmp iszT))
+                                    |> closeBlock (Jnz (Il.Tmp jfT) elseLbl thenLbl)
                             )
                             |> Result.andThen (lowerIfBranches thenLbl elseLbl joinLbl block dest isTail)
                     )
