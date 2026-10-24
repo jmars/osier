@@ -1379,18 +1379,48 @@ checks rt runtimeMidText =
             Err _ ->
                 False
         )
-    , check "VR3b2 THE WORD ARM IS STILL LOUD, AND NOW IT NAMES THE CONSTRUCT: a number literal is a TAG WRITE (area 2), so the same probe that emits for `\\x -> x` is REFUSED for `\\() -> 42` — with the area and the reason in the message, not the old blanket `FRAME SLOT STRIDE` line. The VAL arm still compiles that program, i.e. the guard is the arm's, not the program's"
+    , check "VR3b2 AREA 2b — THE IMMEDIATE TAG WRITES LOWER. `\\() -> 42` emits `storel 336, %s0` on the word arm (42 * 8, tag `...000`, ONE store and no tag word) where the val arm emits `storew 0` plus a `storel 42` payload; `\\() -> True` emits `storel 3, %s0` (the `...011` immediate) where the val arm emits `storew 3` plus a payload word. EXACT text on both arms — a tag write that kept the val shape is RED"
         (case
-            ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ leafProbe ]) [ leafProbe ] "Lf.f"
-            , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ leafProbe ]) [ leafProbe ] "Lf.f"
+            ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ leafProbe, boolProbe ]) [ leafProbe, boolProbe ] "Lf.f"
+            , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ leafProbe, boolProbe ]) [ leafProbe, boolProbe ] "Lf.f"
+            , QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ boolProbe ]) [ boolProbe ] "Bl.f"
+            )
+         of
+            ( Ok wordMod, Ok valMod, Ok boolMod ) ->
+                let
+                    wTxt =
+                        Print.print wordMod
+
+                    vTxt =
+                        Print.print valMod
+
+                    bTxt =
+                        Print.print boolMod
+                in
+                String.contains "\tstorel 336, %s0\n" wTxt
+                    && String.contains "\tstorel 3, %s0\n" bTxt
+                    && not (String.contains "storew" wTxt)
+                    && not (String.contains "storew" bTxt)
+                    && String.contains "\tstorew 0, %s0\n" vTxt
+                    && String.contains "\tstorel 42, " vTxt
+
+            _ ->
+                False
+        )
+    , check "VR3b2 A LITERAL OUTSIDE i61 IS REFUSED, NOT TRUNCATED: `2^60` does not fit the word arm's i61 fixnum, so the emitter names AREA 4's boxing path instead of emitting `n * 8` (which would silently drop the top three bits). The VAL arm still compiles the same literal, so the refusal is the ARM's and not the program's"
+        (case
+            ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ bigProbe ]) [ bigProbe ] "Bg.f"
+            , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ bigProbe ]) [ bigProbe ] "Bg.f"
             )
          of
             ( Err msg, Ok _ ) ->
-                String.contains "QBE_VALREP=word is NOT IMPLEMENTED" msg
-                    && String.contains "AREA 2 (TAG WRITES)" msg
-                    && String.contains "a literal" msg
-                    && String.contains "handoff-perf-vr3b2-result" msg
-                    && not (String.contains "FRAME SLOT STRIDE" msg)
+                -- NOTE: the literal's own decimal spelling is NOT asserted —
+                -- this compiler's Int is a double, so `String.fromInt 2^60`
+                -- renders with JS's 17-digit rounding.  The BOUND is what is
+                -- pinned, by name.
+                String.contains "AREA 4 (ARITHMETIC" msg
+                    && String.contains "BOXED onto the heap" msg
+                    && String.contains "does not fit the word arm's i61 fixnum" msg
 
             _ ->
                 False
@@ -12936,6 +12966,33 @@ leafProbe =
         Lam
             { params = []
             , body = Lit (LNumber 42)
+            }
+    }
+
+
+{-| perf VR3b2 — THE AREA-2b PROBES: a boolean literal (an IMMEDIATE under the
+word arm — `...011` / `...100`, no payload word), and a fixnum literal ONE PAST
+i61 (`2^60`), which must be REFUSED rather than truncated: boxing it is area 4's
+overflow path, which does not exist yet.
+-}
+boolProbe : Defun
+boolProbe =
+    { key = "Bl.f"
+    , value =
+        Lam
+            { params = []
+            , body = Lit (LBoolean True)
+            }
+    }
+
+
+bigProbe : Defun
+bigProbe =
+    { key = "Bg.f"
+    , value =
+        Lam
+            { params = []
+            , body = Lit (LNumber 1152921504606846976)
             }
     }
 

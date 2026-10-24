@@ -17,7 +17,7 @@ module Mid.RtLayout exposing
     , retArityOffset, retArgsOffset, retEOffset, retFOffset, retKindOffset, retQbeFields, retSizeBytes, retValOffset
     , tagBoolean, tagCons, tagError, tagFloat, tagLambda, tagMark, tagNil, tagNumber, tagPrim, tagRecord, tagStream, tagString, tagSymbol, tagVector
     , ValLayout, valLayout
-    , wordLayout
+    , wordFixnumLimit, wordLayout
     , valQbeFields, valSizeBytes, valuePayloadWords, valueTagBytes, wordBytes
     )
 
@@ -443,6 +443,34 @@ wordLayout =
     , tagRecord = 1
     }
 
+
+
+-- ==================== THE WORD ARM'S FIXNUM RANGE (VR3b2) ====================
+-- A word-arm fixnum is an i61: the low 3 bits are the tag, so a value outside
+-- [-2^60, 2^60-1] does not fit and must be BOXED onto the heap — worklist area
+-- 4's overflow path, which does not exist yet.  These two bounds are what let a
+-- COMPILE-TIME literal be decided statically: inside the range `n * 8` is an
+-- exact i64 (no truncation, no overflow), outside it the emitter refuses the
+-- literal by name instead of silently dropping its top three bits.
+--
+-- Written as `0 - 2^60` rather than a negative literal because our own
+-- compiler (which compiles this file) does not implement `^` at all — MEASURED
+-- at VR3b2: `2 ^ tagBits` broke the self-host emit while every Elm-side gate
+-- stayed green.
+-- The bound is EXCLUSIVE IN MAGNITUDE and stated once: a word-arm fixnum is an
+-- `n` with `-wordFixnumLimit <= n < wordFixnumLimit`, i.e. 2^60.  It is not
+-- written as the inclusive pair [-2^60, 2^60-1] because THIS COMPILER'S Int IS
+-- A DOUBLE (the Elm runtime under node): 2^60-1 is not representable and rounds
+-- UP to 2^60, so an inclusive upper bound compares equal to the first
+-- out-of-range value and the check silently passes it — MEASURED at VR3b2, the
+-- `2^60` literal was emitted as `n * 8` instead of being refused.  A bound whose
+-- two spellings are the same number cannot express a range.
+wordFixnumLimit : Int
+wordFixnumLimit =
+    -- 2^60, spelled as a product: our own compiler's Elm parser REJECTS a
+    -- 19-digit integer literal outright ("err parse failed" from the self-host
+    -- emit, with every Elm-side gate green — MEASURED at VR3b2).
+    1024 * 1024 * 1024 * 1024 * 1024 * 1024
 
 
 -- ============================ Desc ============================

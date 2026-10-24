@@ -595,8 +595,17 @@ wordArmUnported exp =
             in
             fromBinders block.binders
 
+        Lit (LNumber _) ->
+            -- AREA 2, THE FIXNUM IMMEDIATE.  `lowerLitWord` owns the i61 range
+            -- decision (it refuses an out-of-range literal by NAME, as area 4's
+            -- boxing gap) so there is one place that decides, not two.
+            Nothing
+
+        Lit (LBoolean _) ->
+            Nothing
+
         Lit _ ->
-            Just (wordArea "AREA 2 (TAG WRITES)" "a literal — under the word arm a literal is a TAGGED IMMEDIATE (or a heap cell), not a tag word plus payload words")
+            Just (wordArea "AREA 3/5 (HEAP CELLS)" "a float, symbol or string literal — under the word arm each is a HEAP object behind one tagged pointer, not a tag word plus payload words")
 
         If block ->
             -- AREA 2, THE BOOLEAN TAG TEST (perf VR3b2).  The condition is a
@@ -4894,6 +4903,52 @@ memWidthName width =
 
 lowerLit : Lit -> Int -> S -> Result String S
 lowerLit lit dest s =
+    if wordArm s then
+        lowerLitWord lit dest s
+
+    else
+        lowerLitVal lit dest s
+
+
+{-| perf VR3b2, AREA 2 — THE IMMEDIATE TAG WRITES under the word arm.
+
+A word-arm literal is a TAGGED IMMEDIATE, not a tag word plus payload words: a
+fixnum is `n * 8` (tag `...000`, exact for every `n` in i61), `true`/`false` are
+the `...011`/`...100` immediates.  A literal that is NOT an immediate — a float
+cell, a symbol, a string — is a HEAP object and stays LOUD (areas 3/5), and so
+does a fixnum outside i61, because boxing it is area 4's overflow path.
+-}
+lowerLitWord : Lit -> Int -> S -> Result String S
+lowerLitWord lit dest s =
+    case lit of
+        LNumber n ->
+            if n < 0 - RtLayout.wordFixnumLimit || n >= RtLayout.wordFixnumLimit then
+                Err
+                    (wordArmUnsupported
+                        (wordArea
+                            "AREA 4 (ARITHMETIC — THE i61 OVERFLOW/BOXING PATH)"
+                            ("the literal " ++ String.fromInt n ++ " — it does not fit the word arm's i61 fixnum, so it has to be BOXED onto the heap, and the boxing path does not exist yet (emitting `n * 8` would silently drop its top three bits)")
+                        )
+                    )
+
+            else
+                Ok (emit (Store StoreL (Il.Con (n * 8)) (Il.Tmp (slotTmp dest))) s)
+
+        LBoolean b ->
+            Ok (emit (Store StoreL (Il.Con (if b then s.layout.tagTrue else s.layout.tagFalse)) (Il.Tmp (slotTmp dest))) s)
+
+        LFloat _ ->
+            Err (wordArmUnsupported (wordArea "AREA 5 (FLOATS)" "a float literal — the word arm heap-boxes a float as a [hdr | f64] cell, which does not exist yet"))
+
+        LSymbol _ ->
+            Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a symbol literal — under the word arm it is a heap object behind one tagged pointer, not a tag word plus a data pointer"))
+
+        LString _ ->
+            Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a string literal — under the word arm its byte length lives in the CELL and the value is one tagged pointer"))
+
+
+lowerLitVal : Lit -> Int -> S -> Result String S
+lowerLitVal lit dest s =
     let
         d =
             slotTmp dest
@@ -7298,13 +7353,19 @@ lowerHdTl isHd src dst s =
 
 storeNil : Int -> S -> S
 storeNil dst s =
-    let
-        ( d8, s1 ) =
-            freshTmp s
-    in
-    emit (Store StoreW (Il.Con s.layout.tagNil) (Il.Tmp (slotTmp dst))) s1
-        |> emit (Bin (Just d8) L Add (Il.Tmp (slotTmp dst)) (Il.Con 8))
-        |> emit (Store StoreL (Il.Con 0) (Il.Tmp d8))
+    if wordArm s then
+        -- perf VR3b2 (area 2): nil is the `...010` IMMEDIATE and the slot IS
+        -- one word, so there is no payload word to clear — one store.
+        emit (Store StoreL (Il.Con s.layout.tagNil) (Il.Tmp (slotTmp dst))) s
+
+    else
+        let
+            ( d8, s1 ) =
+                freshTmp s
+        in
+        emit (Store StoreW (Il.Con s.layout.tagNil) (Il.Tmp (slotTmp dst))) s1
+            |> emit (Bin (Just d8) L Add (Il.Tmp (slotTmp dst)) (Il.Con 8))
+            |> emit (Store StoreL (Il.Con 0) (Il.Tmp d8))
 
 
 -- The VM's jmpf test (interp.zig .jmpf): false iff the slot is a boolean with
