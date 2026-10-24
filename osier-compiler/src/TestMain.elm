@@ -1407,6 +1407,31 @@ checks rt runtimeMidText =
             _ ->
                 False
         )
+    , check "VR3b2 THE BOOLEAN TAG TEST IS PORTED IN THE SHARED HELPER, NOT IN `lowerIf`: `\\a b -> a && b` also emits `and`+compare on the word arm — the `jmpfFalse` helper both `&&`/`||` and `NotEqual` route through — with the FALSE IMMEDIATE (4) and the `storel 4` the short-circuit writes, while the val arm keeps the tag-word load and the payload compare"
+        (case
+            ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ andProbe ]) [ andProbe ] "Af.f"
+            , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ andProbe ]) [ andProbe ] "Af.f"
+            )
+         of
+            ( Ok wordMod, Ok valMod ) ->
+                let
+                    wTxt =
+                        Print.print wordMod
+
+                    vTxt =
+                        Print.print valMod
+                in
+                String.contains "=w and %t" wTxt
+                    && String.contains "=w ceqw %t" wTxt
+                    && String.contains ", 4\n" wTxt
+                    && String.contains "\tstorel 4, " wTxt
+                    && not (String.contains "loadw" wTxt)
+                    && String.contains "=w loadw %s" vTxt
+                    && String.contains "\tstorew 3, " vTxt
+
+            _ ->
+                False
+        )
     , check "VR3b2 A LITERAL OUTSIDE i61 IS REFUSED, NOT TRUNCATED: `2^60` does not fit the word arm's i61 fixnum, so the emitter names AREA 4's boxing path instead of emitting `n * 8` (which would silently drop the top three bits). The VAL arm still compiles the same literal, so the refusal is the ARM's and not the program's"
         (case
             ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ bigProbe ]) [ bigProbe ] "Bg.f"
@@ -12966,6 +12991,22 @@ leafProbe =
         Lam
             { params = []
             , body = Lit (LNumber 42)
+            }
+    }
+
+
+{-| perf VR3b2 — THE `&&` PROBE: `\a b -> a && b`.  Both operands are BOOLEAN
+tag tests (`jmpfFalse`), so this is the second site the `and`+compare port has
+to cover, and it is the one that proves the port lives in the shared helper
+rather than in `lowerIf` alone.
+-}
+andProbe : Defun
+andProbe =
+    { key = "Af.f"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "a" }, { id = 1, name = "b" } ]
+            , body = ShortAnd { left = Var 0, right = Var 1, falseLabel = "F", endLabel = "E" }
             }
     }
 

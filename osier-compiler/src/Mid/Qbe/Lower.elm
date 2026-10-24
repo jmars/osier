@@ -607,6 +607,22 @@ wordArmUnported exp =
         Lit _ ->
             Just (wordArea "AREA 3/5 (HEAP CELLS)" "a float, symbol or string literal — under the word arm each is a HEAP object behind one tagged pointer, not a tag word plus payload words")
 
+        ShortAnd block ->
+            case wordArmUnported block.left of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    wordArmUnported block.right
+
+        ShortOr block ->
+            case wordArmUnported block.left of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    wordArmUnported block.right
+
         If block ->
             -- AREA 2, THE BOOLEAN TAG TEST (perf VR3b2).  The condition is a
             -- Value test whose lowering is `readTag` + a compare; the two
@@ -7392,13 +7408,24 @@ jmpfFalse slot falseLbl trueLbl s =
         ( jfT, s6 ) =
             freshTmp s5
     in
-    emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp slot))) s6
-        |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagBoolean))
-        |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp slot)) (Il.Con 8))
-        |> emit (Load (Just pldT) W LoadW (Il.Tmp p8T))
-        |> emit (Cmp (Just iszT) W Ceq (Il.Tmp pldT) (Il.Con 0))
-        |> emit (Bin (Just jfT) W And (Il.Tmp isbT) (Il.Tmp iszT))
-        |> closeBlock (Jnz (Il.Tmp jfT) falseLbl trueLbl)
+    (if wordArm s then
+        -- perf VR3b2 (area 2): `false` is the `...100` IMMEDIATE, so the test
+        -- is the tag compare alone — the val arm's `isBool && payload == 0`
+        -- pair collapses to one compare, and the branch sense is preserved:
+        -- a FALSE value goes to falseLbl, everything else to trueLbl.
+        readTag tagT (Il.Tmp (slotTmp slot)) s6
+            |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagFalse))
+            |> closeBlock (Jnz (Il.Tmp isbT) falseLbl trueLbl)
+
+     else
+        emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp slot))) s6
+            |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagBoolean))
+            |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp slot)) (Il.Con 8))
+            |> emit (Load (Just pldT) W LoadW (Il.Tmp p8T))
+            |> emit (Cmp (Just iszT) W Ceq (Il.Tmp pldT) (Il.Con 0))
+            |> emit (Bin (Just jfT) W And (Il.Tmp isbT) (Il.Tmp iszT))
+            |> closeBlock (Jnz (Il.Tmp jfT) falseLbl trueLbl)
+    )
         |> startBlock trueLbl
 
 
