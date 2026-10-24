@@ -27,6 +27,17 @@ module Mid.Qbe.Liveness exposing (Analysis, Class, Site, Sites(..), allSitesEmpt
 -- fixpoint rule select the SAME frame-free defuns on the 16-group gate
 -- workload — the emits are BYTE-IDENTICAL.
 --
+-- THE EQUIVALENCE IS AN EMITTER PROPERTY, NOT A PROPERTY OF THIS ANALYSIS, so
+-- it must be re-established if the emitter changes.  It rests on TWO facts
+-- about the emitted IL, both of which a reader should check here rather than
+-- assume: (a) the `:ret` aggregate is 80 bytes (`rvs`), so its read covers
+-- SLOT 1 as well as slot 0; and (b) no defun body DEFINES `f+40..f+79` — the
+-- prologue does, once, and nothing writes it again.  Given (a) and (b), slot 1
+-- is live at every safepoint of every defun that has one, so the fixpoint
+-- could never have returned an empty set for a defun the linear tier admits.
+-- Drop either fact and the two rules diverge — and then the fixpoint is the
+-- NARROWER (safe) answer while tier 1 is WRONG, not merely faster.
+--
 -- WHAT TIER 2 ANSWERS: for ONE defun's EMITTED blocks, for every CALL that can
 -- reach a GC safepoint, WHICH FRAME SLOTS hold a live composite across it.
 -- "Live across" is the ordinary backward liveness dataflow over the block CFG
