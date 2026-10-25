@@ -1549,6 +1549,48 @@ checks rt rawMidText =
             _ ->
                 False
         )
+    , check "VR3c AREA 3 — THE COPY/SCAVENGE STRIDES AND THE VALUES TABLE ARE TWINNED. A Value cell is ONE word under the word arm, so: a value-ARRAY walk steps 8 not 40 (`gcScavValueArray`/`gcScanValueArray`), a values-table ROW is 16 B not 48 (name word @0 + ONE Value word @8, both = `wordBytes + valSizeBytes` of their instance, and 256 rows = 4096 B not 12288), the root accumulator slot is 8 B, `gcScavValue`/`gcMarkValue` read the whole word and dispatch on `w & 7` (`v - 1` is the block address, and the val arm's 4-byte tag read is asserted ABSENT), and `gcScavPtr` reads the KIND CODE out of the header's bits 24..27 while every CLASS reader masks bits 2..21 so the code cannot leak into the size class. The val text keeps every 40/48 spelling"
+        (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
+            ( Ok valText, Ok wordText ) ->
+                String.contains "word e = tab + iW * 48;" valText
+                    && String.contains "word e = tab + iW * 16;" wordText
+                    && not (String.contains "word e = tab + iW * 16;" valText)
+                    && String.contains "word tab = rawcall malloc(12288);" valText
+                    && String.contains "word tab = rawcall malloc(4096);" wordText
+                    && String.contains "mknum(baseW + 40)" valText
+                    && String.contains "mknum(baseW + 8)" wordText
+                    && String.contains "word acc = rawcall malloc(40);" valText
+                    && String.contains "word acc = rawcall malloc(8);" wordText
+                    -- the tag reads: byte-wise on the val arm, the whole word
+                    -- on the word arm, with the address `v - 1`
+                    && String.contains "byteload(payload(vaddr, 0), 0)" valText
+                    && not (String.contains "word tag = v & 7;" valText)
+                    && String.contains "word tag = v & 7;" wordText
+                    && String.contains "mknum(v - 1)" wordText
+                    -- the header reads: the code at bits 24..27, the class at
+                    -- bits 2..21 (mask 2^20-1), never the full 0..60 mask
+                    && String.contains "word kind = (flags >> 24) & 15;" wordText
+                    && not (String.contains "(flags >> 24)" valText)
+                    && String.contains "(flags >> 2) & 1048575;" wordText
+                    && String.contains "((flags >> 2) & 1048575) != clsW" wordText
+                    && not (String.contains "1048575" valText)
+                    -- the row sizes ARE the layout's: name word + one value
+                    && RtLayout.wordBytes
+                    + RtLayout.valLayout.valSizeBytes
+                    == 48
+                    && RtLayout.wordBytes
+                    + RtLayout.wordLayout.valSizeBytes
+                    == 16
+                    && 256
+                    * 16
+                    == 4096
+                    && 256
+                    * 48
+                    == 12288
+
+            _ ->
+                False
+        )
     , check "VR3b2 AREA 1 PORTED — THE FRAME SLOT STRIDE LOWERS UNDER THE WORD ARM. A defun whose whole body is one Value copy (`\\x -> x`) now emits a REAL module on the word instance: `type :val = align 8 { l }`, the frame block is `alloc8 (valSizeBytes * nslots)` = 16 for 2 slots, the slot address table steps by 8 (`%s0 =l add %f, 0`, `%s1 =l add %f, 8`), the param and result copies are 8-byte blits, and slot 0/1's materialisation is `storel 0` at both `%s0` and `%f + retKindOffset` = `%f + 8`. EXACT text, and the VAL-arm spellings (alloc8 80, a 40-byte blit, a `storew` tag) are asserted ABSENT — this is the row that would have gone red had any stride site still read a constant"
         (case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ idProbe ]) [ idProbe ] "Id.f" of
             Ok mod ->

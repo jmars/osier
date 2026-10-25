@@ -2527,7 +2527,12 @@ defun Rt.valScanGo(tabN : val, nameN : val, iN : val) -> val {
   if (mkbool(payload(iN, 0) >= 256)) {
     return mknum(0);
   }
+  // >>> QBE_VAL-ONLY
   word e = payload(tabN, 0) + payload(iN, 0) * 48;
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word e = payload(tabN, 0) + payload(iN, 0) * 16;
+  // <<< QBE_WORDVAL-ONLY
   word nm = wload(e, 0);
   if (mkbool(nm == 0)) {
     recur(tabN, nameN, mknum(payload(iN, 0) + 1));
@@ -2765,7 +2770,12 @@ defun Rt.valFreeGo(tabN : val, iN : val) -> val {
   if (mkbool(payload(iN, 0) >= 256)) {
     return mknum(0);
   }
+  // >>> QBE_VAL-ONLY
   word e = payload(tabN, 0) + payload(iN, 0) * 48;
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word e = payload(tabN, 0) + payload(iN, 0) * 16;
+  // <<< QBE_WORDVAL-ONLY
   if (mkbool(wload(e, 0) == 0)) {
     return mknum(e + 8);
   }
@@ -2791,7 +2801,12 @@ defun Rt.argvInstall(modeN : val, nargsN : val, argvN : val) -> val {
     return mknil;
   }
   word blk = rawcall malloc(24);
+  // >>> QBE_VAL-ONLY
   word acc = rawcall malloc(40);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word acc = rawcall malloc(8);
+  // <<< QBE_WORDVAL-ONLY
   vecstore(acc, 0, mknil);
   call Rt.rootPushValue(acc);
   wstore(blk, 0, payload(argvN, 0));
@@ -2839,6 +2854,7 @@ defun Rt.valSlot(tabN : val, nameN : val) -> val {
   return mknum(free - 8);
 }
 
+// >>> QBE_VAL-ONLY
 defun Rt.boot(dummy : val) -> val {
   word tab = rawcall malloc(12288);
   rawcall memset(tab, 0, 12288);
@@ -2859,6 +2875,46 @@ defun Rt.boot(dummy : val) -> val {
   wstore(e3 + 8, 2, 0);
   return mknum(0);
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// THE WORD-ARM TWIN (perf VR3c AREA 3): a table row is 16 bytes — the name word
+// at +0 and ONE Value word at +8 — so the table is 256 * 16 = 4096 bytes, and a
+// stream cannot be an inline 3-word Value any more.  A word-arm stream is a
+// `...001` pointer to a 2-word-header cell whose body is {fd, is_input<<32}, i.e.
+// the SAME two facts the val arm's payload words carry, in the SAME order.  The
+// cell is malloc'd (boot has no Mid heap yet, and the table's own storage is
+// C-heap too): a pointer outside [heapStart, cursor) is what the collector's
+// pointer walks already treat as "not mine" — gcMarkPtr returns at its range
+// test and gcScavPtr at its young-range test — so the shape is inert to the GC
+// exactly as the val arm's inline stream Value was.
+defun Rt.boot(dummy : val) -> val {
+  word tab = rawcall malloc(4096);
+  rawcall memset(tab, 0, 4096);
+  wstore(rawcall rt_glob_addr(), 3, tab);
+  word e1 = payload(call Rt.valSlot(mknum(tab), mknum(rawstr("*stinput*"))), 0);
+  word s1 = rawcall malloc(64);
+  wstore(s1, -2, payload(call Rt.kindHdr(mknum(11), mknum(1)), 0));
+  wstore(s1, -1, 2);
+  wstore(s1, 0, 0);
+  wstore(s1, 1, 1);
+  wstore(e1 + 8, 0, s1 + 1);
+  word e2 = payload(call Rt.valSlot(mknum(tab), mknum(rawstr("*stoutput*"))), 0);
+  word s2 = rawcall malloc(64);
+  wstore(s2, -2, payload(call Rt.kindHdr(mknum(11), mknum(1)), 0));
+  wstore(s2, -1, 2);
+  wstore(s2, 0, 1);
+  wstore(s2, 1, 0);
+  wstore(e2 + 8, 0, s2 + 1);
+  word e3 = payload(call Rt.valSlot(mknum(tab), mknum(rawstr("*sterror*"))), 0);
+  word s3 = rawcall malloc(64);
+  wstore(s3, -2, payload(call Rt.kindHdr(mknum(11), mknum(1)), 0));
+  wstore(s3, -1, 2);
+  wstore(s3, 0, 2);
+  wstore(s3, 1, 0);
+  wstore(e3 + 8, 0, s3 + 1);
+  return mknum(0);
+}
+// <<< QBE_WORDVAL-ONLY
 
 defun Rt.str(x : val) -> val {
   if (mkbool(tagis(x, 12))) {
@@ -5437,6 +5493,7 @@ defun Rt.vecStorePlain(vec : word, i : word, val : word) -> word {
 // work at all, and the two reads that could fault (the block map, the block
 // header) sit inside the arms that have already proved the address is an
 // in-range OLD block.
+// >>> QBE_VAL-ONLY
 defun Rt.vecStoreYoung(vec : word, i : word, val : word) -> word {
   word e = vec + i * 40;
   wstore(e, 0, wload(val, 0));
@@ -5504,6 +5561,69 @@ defun Rt.vecStoreYoung(vec : word, i : word, val : word) -> word {
   };
   return 0;
 }
+// <<< QBE_VAL-ONLY
+// THE WORD-ARM TWIN (perf VR3c AREA 3): the store is ONE word at an 8-byte
+// stride, and the value it stores is the whole tagged word — so "does the stored
+// value reference the young space?" is `(v & 7) == 1` and then the block address
+// `v - 1`, instead of the val arm's tag word plus one-or-two payload pointers.
+// `(tag == 1)` multiplying into `go` keeps the val arm's arithmetic shape (no
+// branch, no join).
+// >>> QBE_WORDVAL-ONLY
+defun Rt.vecStoreYoung(vec : word, i : word, val : word) -> word {
+  word e = vec + i * 8;
+  wstore(e, 0, wload(val, 0));
+  word regW = wload(rawcall rt_glob_addr(), 0);
+  word mapped = if (regW != 0) {
+    *Region region = regW;
+    word ys = region->youngStart;
+    word yc = region->youngCursor;
+    word plain = if ((region->young == 0) + ((vec >= ys) * (vec < region->youngEnd)) != 0) {
+      return 0;
+    } else {
+      word v = wload(val, 0);
+      word tag = v & 7;
+      // `...001` is the ONLY value word that names a heap block; every other
+      // tag (fixnum 0, nil 2, true 3, false 4, error 5, the reserved 6/7) is
+      // an immediate and cannot reference the young space, so `p` is ZERO for
+      // them by the same multiplication trick the val arm uses for p2 (a stray
+      // word can never land in the young range by accident).
+      word p = (tag == 1) * (v - 1);
+      word refs = (p >= ys) * (p < yc);
+      word inOld = (vec >= region->heapStart) * (vec < region->cursor);
+      word old = if (inOld != 0) {
+        word st = byteload(region->bmPtr + (vec - region->heapStart) / 64, 0);
+        word flags = wload(vec, -2);
+        word kind1 = (flags >> 1) & 1;
+        word rsClear = (flags / (1073741824 * 2147483648)) == 0;
+        word go = (tag == 1) * refs * (st == 1) * kind1 * rsClear;
+        word rec = if (go != 0) {
+          wstore(vec, -2, flags + (1073741824 * 2147483648));
+          word top = region->rsTop;
+          word full = if (mkbool(top >= region->rsEnd)) {
+            call Rt.die(rawstr("qbe-rt: midgc: remembered set overflow (capacity capBytes/64; raise the heap or report)"));
+            return 0;
+          } else {
+            return 0;
+          };
+          wstore(region->rsBase, top, vec);
+          region->rsTop = top + 1;
+          return 0;
+        } else {
+          return 0;
+        };
+        return 0;
+      } else {
+        return 0;
+      };
+      return 0;
+    };
+    return 0;
+  } else {
+    return 0;
+  };
+  return 0;
+}
+// <<< QBE_WORDVAL-ONLY
 //
 // Rt.gcPromoteAlloc: allocate an OLD-space block for a promoted young object.
 // Mirrors gcAlloc's old path WITHOUT its collect trigger (a scavenge must not
@@ -5622,9 +5742,20 @@ defun Rt.gcScavPtr(p : val) -> val {
   if (mkbool(flags > ((2147483648 * 2147483648) - 1))) {
     return mknum(wload(ptr, -1));
   }
+  // >>> QBE_VAL-ONLY
   word kind = (flags >> 1) & 1;
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word kind = (flags >> 24) & 15;
+  // <<< QBE_WORDVAL-ONLY
   word count = wload(ptr, -1);
+  // >>> QBE_VAL-ONLY
   word cls = (flags >> 2) & ((1073741824 * 2147483648) - 1);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word cls = (flags >> 2) & 1048575;
+  // <<< QBE_WORDVAL-ONLY
+
   word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
   val nb = call Rt.gcPromoteAlloc(mknum(cls), mknum(kind), mknum(count));
   word nw = payload(nb, 0);
@@ -5650,6 +5781,7 @@ defun Rt.gcScavPtr(p : val) -> val {
 // one pointer at word 1; 6 lambda, 14 record: words 1 and 3).  Tag 15 is the
 // POISON a forwarded young body carries: reaching it here means the walk
 // followed a stale reference, which is loud by design.
+// >>> QBE_VAL-ONLY
 defun Rt.gcScavValue(vaddr : val) -> val {
   word c = payload(vaddr, 0);
   word tag = byteload(c, 0) + (byteload(c, 1) * 256 + (byteload(c, 2) * 65536 + byteload(c, 3) * 16777216));
@@ -5689,6 +5821,31 @@ defun Rt.gcScavValue(vaddr : val) -> val {
   }
   return mknil;
 }
+// <<< QBE_VAL-ONLY
+// THE WORD-ARM TWIN (perf VR3c AREA 3): a value cell is ONE word, so there is
+// no tag word to read byte-wise and no payload pointer to follow — the cell
+// either names a heap block (`...001`, relocated and RE-TAGGED in place) or it
+// is an immediate and cannot move.  The POISON is still loud: a forwarded young
+// body is written with the value word 15, whose low three bits are `...111` —
+// a reserved tag, so a stale read dies here instead of returning plausible
+// bytes.  `v - 1` and `v & ~7` are the same address (the tag bits ARE 1); the
+// subtraction is spelled because this surface has no `~`.
+// >>> QBE_WORDVAL-ONLY
+defun Rt.gcScavValue(vaddr : val) -> val {
+  word c = payload(vaddr, 0);
+  word v = wload(c, 0);
+  word tag = v & 7;
+  if (mkbool(tag == 1)) {
+    wstore(c, 0, payload(call Rt.gcScavPtr(mknum(v - 1)), 0) + 1);
+    return mknil;
+  }
+  if (mkbool(tag == 7)) {
+    call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: scavenge read a POISONED (forwarded young) body at ")), mknum(c), mknum(wload(rawcall rt_glob_addr(), 0)));
+    return mknil;
+  }
+  return mknil;
+}
+// <<< QBE_WORDVAL-ONLY
 // Rt.gcScavValueArray: relocate each val cell of an array — self-recursion
 // only, one jmp per element (the gcScanValueArray shape).
 defun Rt.gcScavValueArray(base : val, cnt : val) -> val {
@@ -5698,7 +5855,12 @@ defun Rt.gcScavValueArray(base : val, cnt : val) -> val {
     return mknil;
   }
   call Rt.gcScavValue(mknum(baseW));
+  // >>> QBE_VAL-ONLY
   return call Rt.gcScavValueArray(mknum(baseW + 40), mknum(cntW - 1));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  return call Rt.gcScavValueArray(mknum(baseW + 8), mknum(cntW - 1));
+  // <<< QBE_WORDVAL-ONLY
 }
 // Rt.gcScavRoots: THE ROOT WALK — exactly Rt.gcMarkRoots' root set, but a
 // young pointer is COPIED and the slot that names it is UPDATED IN PLACE
@@ -5751,7 +5913,12 @@ defun Rt.gcScavValuesTab(i : val) -> val {
   if (mkbool(tab == 0)) {
     return mknil;
   }
+  // >>> QBE_VAL-ONLY
   word e = tab + iW * 48;
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word e = tab + iW * 16;
+  // <<< QBE_WORDVAL-ONLY
   if (mkbool(wload(e, 0) != 0)) {
     call Rt.gcScavValue(mknum(e + 8));
     return call Rt.gcScavValuesTab(mknum(iW + 1));
@@ -5928,7 +6095,12 @@ defun Rt.gcMarkValuesTab(i : val) -> val {
   if (mkbool(tab == 0)) {
     return mknil;
   }
+  // >>> QBE_VAL-ONLY
   word e = tab + iW * 48;
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word e = tab + iW * 16;
+  // <<< QBE_WORDVAL-ONLY
   if (mkbool(wload(e, 0) != 0)) {
     call Rt.gcMarkValue(mknum(e + 8));
     return call Rt.gcMarkValuesTab(mknum(iW + 1));
@@ -5942,7 +6114,12 @@ defun Rt.gcScanValueArray(base : val, cnt : val) -> val {
     return mknil;
   } else {
     call Rt.gcMarkValue(mknum(baseW));
+    // >>> QBE_VAL-ONLY
     return call Rt.gcScanValueArray(mknum(baseW + 40), mknum(cntW - 1));
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    return call Rt.gcScanValueArray(mknum(baseW + 8), mknum(cntW - 1));
+    // <<< QBE_WORDVAL-ONLY
   }
 }
 defun Rt.gcDrain(dummy : val) -> val {
@@ -5990,7 +6167,13 @@ defun Rt.gcSweep(cursor : val) -> val {
     // never appears here (young blocks are outside the swept range), so
     // without the mask a remembered block's `flags >> 2` is astronomically
     // past its class and the sweep's advance walks into garbage.
+    // >>> QBE_VAL-ONLY
     word cls = (flags >> 2) & ((1073741824 * 2147483648) - 1);
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    word cls = (flags >> 2) & 1048575;
+    // <<< QBE_WORDVAL-ONLY
+
     word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
     if (mkbool(marked == 1)) {
       wstore(cursorW, -2, flags - 1);
@@ -6104,6 +6287,7 @@ defun Rt.gcMarkPtr(p : val) -> val {
     return mknil;
   }
 }
+// >>> QBE_VAL-ONLY
 defun Rt.gcMarkValue(vaddr : val) -> val {
   word tag = byteload(payload(vaddr, 0), 0) + (byteload(payload(vaddr, 0), 1) * 256 + (byteload(payload(vaddr, 0), 2) * 65536 + byteload(payload(vaddr, 0), 3) * 16777216));
   word vaddrW = payload(vaddr, 0);
@@ -6145,6 +6329,25 @@ defun Rt.gcMarkValue(vaddr : val) -> val {
     }
   }
 }
+// <<< QBE_VAL-ONLY
+// THE WORD-ARM TWIN (perf VR3c AREA 3): the value word IS the object pointer,
+// so the mark walk marks the block and stops — the object's BODY is the drain's
+// job (gcDrain reads the header's scan bit and walks `count` words), which is
+// why the val arm's per-constructor payload ladder has no word-arm counterpart.
+// >>> QBE_WORDVAL-ONLY
+defun Rt.gcMarkValue(vaddr : val) -> val {
+  word v = wload(payload(vaddr, 0), 0);
+  word tag = v & 7;
+  if (mkbool(tag == 1)) {
+    return call Rt.gcMarkPtr(mknum(v - 1));
+  }
+  if (mkbool(tag == 7)) {
+    call Rt.die(rawstr("qbe-rt: midgc: unknown value tag in mark walk"));
+    return mknil;
+  }
+  return mknil;
+}
+// <<< QBE_WORDVAL-ONLY
 // ==================== THE VERIFIER (GC ARC unit 2) ====================
 // QBE_MIDGC_VERIFY=1 turns these on: after EVERY sweep, walk the swept range
 // and every free list and assert the invariants the collector's correctness
@@ -6205,7 +6408,13 @@ defun Rt.gcVerify(p : val, n : val) -> val {
   word flags = wload(pw, -2);
   // masked (GC NURSERY unit): a live remembered block carries the RS bit and
   // the unmasked shift would fail the class checks below spuriously.
+  // >>> QBE_VAL-ONLY
   word cls = (flags >> 2) & ((1073741824 * 2147483648) - 1);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word cls = (flags >> 2) & 1048575;
+  // <<< QBE_WORDVAL-ONLY
+
   word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
   word state = byteload(bm + (pw - heapStart) / 64, 0);
   // V1: the allocator's record of block starts must contain this address.
@@ -6277,7 +6486,13 @@ defun Rt.gcVerifyList(node : val, cls : val, acc : val) -> val {
     return mknil;
   }
   word flags = wload(nd, -2);
+  // >>> QBE_VAL-ONLY
   if (mkbool(((flags >> 2) & ((1073741824 * 2147483648) - 1)) != clsW)) {
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  if (mkbool(((flags >> 2) & 1048575) != clsW)) {
+  // <<< QBE_WORDVAL-ONLY
+
     call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V5: a free-list link is on the WRONG CLASS list at heap offset ")), mknum(nd - region->heapStart), mknum(regW));
     return mknil;
   }
