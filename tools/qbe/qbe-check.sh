@@ -2967,6 +2967,40 @@ else
   fi
 fi
 
+# ---- THE `tcall` TAIL-CALL INSTRUCTION'S BEHAVIOUR PROBE (Q1a) ----
+# WHY THIS ROW EXISTS.  QBE gained a `tcall` instruction (THIRD-PARTY.md's
+# second local patch): the callee returns to the CALLER's caller, so the frame
+# goes away and the stack does not grow.  The interesting failure of that is a
+# shape one instruction away — a `jmp` where the teardown should have been, the
+# teardown ahead of the argument loads, an sret pointer forwarded to the wrong
+# buffer — and a text pin cannot see any of them: it asserts the shape the
+# AUTHOR wrote.  So the oracle is a program that RUNS, and the decisive row in
+# it is an ASYMMETRY (1e7 tail hops complete under an 8 MiB stack; the same
+# fixture hand-mutated `tcall`->`call` dies of stack exhaustion).  A probe never
+# seen to fail is not evidence, so the runner gates the fail-before arm too.
+#
+# WHY IT IS INVOKED FROM HERE, AND WHY THE PRESENCE CHECK IS PART OF THE ROW.
+# A committed script is not a gate: without this row the probe runs only when
+# someone remembers, which is the same failure as no probe at all.  And a row
+# that SKIPS when its input is gone is worse than one that fails: the fixture is
+# the only test this instruction has, so deleting it has to turn the gate red
+# rather than quietly reduce what is covered.
+if [ -x "$ROOT/tools/qbe/tcall-probe.sh" ] \
+&& [ -f "$ROOT/tools/qbe/tcall.ssa" ] \
+&& [ -f "$ROOT/tools/qbe/tcall_main.c" ] \
+&& [ -d "$ROOT/tools/qbe/tcall-bad" ]; then
+  if tcall_out="$(TMPDIR="$TMP" "$ROOT/tools/qbe/tcall-probe.sh" 2>&1)"; then
+    echo "PASS tcall: $(printf '%s\n' "$tcall_out" | grep -c '^PASS') row(s) RUN and passed — $(printf '%s\n' "$tcall_out" | grep -c '^PASS fixture') fixture run under an 8 MiB stack, $(printf '%s\n' "$tcall_out" | grep -c '^PASS asymmetry') tcall->call asymmetry, $(printf '%s\n' "$tcall_out" | grep -c '^PASS refusal') named refusals, $(printf '%s\n' "$tcall_out" | grep -c '^PASS target') other targets"
+  else
+    echo "FAIL tcall: the tcall behaviour probe FAILED (a tail call no longer returns to the caller's caller, or a refusal stopped naming its condition)"
+    printf '%s\n' "$tcall_out" | sed 's/^/    /'
+    FAIL=1
+  fi
+else
+  echo "FAIL tcall: tools/qbe/tcall-probe.sh, tcall.ssa, tcall_main.c or tcall-bad/ is missing — the ONLY oracle that RUNS the tcall instruction was deleted"
+  FAIL=1
+fi
+
 # ---- THE WORD ARM'S BEHAVIOUR PROBE (perf VR3b3, wired here so it RUNS) ----
 # WHY THIS ROW EXISTS AT ALL.  Under QBE_VALREP=word no program compiled through
 # run.js can run: the runtime is always injected, so the emitted set always
