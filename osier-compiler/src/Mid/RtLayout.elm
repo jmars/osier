@@ -243,9 +243,16 @@ tagRecord =
 -- WHY A NEW FIELD AND NOT A WIDER `kind`.  The scan kind is ONE bit and the
 -- class ladder starts at bit 2; widening the kind would MOVE the class, which
 -- the invariant forbids.  Bits 24..27 are above every legal class and are
--- written by nothing on the val arm, so the val arm's headers carry code 0 —
--- "no code", which a word-arm reader refuses BY NAME rather than mistaking it
--- for a constructor (the mixed-representation trap).
+-- written by nothing on the val arm.
+--
+-- CODE 0 HAS EXACTLY ONE OWNER: NO CODE.  A header whose code is 0 is a
+-- VAL-ARM header, and no word-arm allocator writes 0 (`runtime.mid`'s seats:
+-- allocVector 10, allocCons 4, allocRaw 1, allocKind caller-supplied — with
+-- `Rt.kindHdr` the only writer of the field).  That is the part that is LANDED
+-- and checkable.  The REFUSAL is a promissory note and is stated as one: the
+-- only reader that will test for 0 is the word arm's `tagis`, which belongs to
+-- the emitter (VR3b3), so no runtime reader does it yet.  Saying "refuses BY
+-- NAME" without that qualifier would claim a seat nobody sits in.
 --
 -- THE SCAN BIT IS DERIVED FROM THE CODE, not carried twice: `heapKindScanned`
 -- below is the one statement of which codes have Value bodies (cons, lambda,
