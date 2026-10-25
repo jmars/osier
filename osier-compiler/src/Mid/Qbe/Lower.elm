@@ -691,6 +691,63 @@ wordArmUnported exp =
                     -- cannot let half-word code through.
                     Nothing
 
+                -- THE RAW-WORD FAMILY: ARM-INDEPENDENT BY CONSTRUCTION.
+                -- A raw word is 8 bytes in BOTH arms and these nodes carry no
+                -- `val` at all, so their emit sites never consult the layout
+                -- (MEASURED by reading each: `wordAddr` is `ptr + 8*index`
+                -- hardcoded, the byte/mem/C-call widths come from the FFI
+                -- declaration, and the static-data nodes are addresses).  They
+                -- are the runtime's own plumbing - VR3c's twinned strides live
+                -- in the runtime TEXT, not in these nodes - so refusing them
+                -- would report a lane boundary instead of a construct.
+                RawWordLoad _ ->
+                    Nothing
+
+                RawWordStore _ ->
+                    Nothing
+
+                RawByteLoad _ ->
+                    Nothing
+
+                RawByteStore _ ->
+                    Nothing
+
+                RawMemLoad _ ->
+                    Nothing
+
+                RawMemStore _ ->
+                    Nothing
+
+                RawCallRaw _ ->
+                    Nothing
+
+                RawCallExtern _ ->
+                    Nothing
+
+                RawCStr _ ->
+                    Nothing
+
+                RawSym _ ->
+                    Nothing
+
+                RawDataAddr _ ->
+                    Nothing
+
+                WithRoots _ ->
+                    Nothing
+
+                RawBin _ ->
+                    Nothing
+
+                RawCmp _ ->
+                    Nothing
+
+                RawUn _ ->
+                    Nothing
+
+                RawVecStore _ ->
+                    Nothing
+
                 _ ->
                     Just (wordArea (wordAreaName exp) (wordAreaWhat exp))
 
@@ -873,11 +930,44 @@ wordAreaName exp =
         Continue ->
             "AREA 2 (TAG TESTS)"
 
-        Unsafe _ ->
-            "AREA 3/6/7 (RAW NODES)"
+        Unsafe node ->
+            rawNodeArea node
 
         _ ->
             "AN UNPORTED CONSTRUCT"
+
+
+{-| WHICH WORKLIST AREA A REFUSED RAW NODE BELONGS TO.  `rawNodeName` says what
+it is; this says which port it waits on, so the refusal is a worklist entry and
+not a shrug.  The admitted families (payload, tag, alloc seats, vec, byte, the
+raw WORD family, static data, C calls) never reach this.
+-}
+rawNodeArea : UnsafeNode -> String
+rawNodeArea node =
+    case node of
+        RawCall _ ->
+            "AREA 6 (THE CALL ABI)"
+
+        RawCallAgg _ ->
+            "AREA 6 (THE CALL ABI)"
+
+        RawAllocN _ ->
+            "AREA 6 (THE CALL ABI)"
+
+        RawFltBin _ ->
+            "AREA 5 (FLOATS)"
+
+        RawFltCmp _ ->
+            "AREA 5 (FLOATS)"
+
+        RawIToF _ ->
+            "AREA 5 (FLOATS)"
+
+        RawLoadFlt _ ->
+            "AREA 5 (FLOATS)"
+
+        _ ->
+            "AREA 3 (PAYLOAD ACCESS)"
 
 
 wordAreaWhat : Exp -> String

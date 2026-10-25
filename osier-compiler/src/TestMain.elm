@@ -1811,6 +1811,9 @@ checks rt rawMidText =
                     && String.contains "AREA " msg
                     && String.contains "NOT IMPLEMENTED" msg
                     && not (String.contains "AREA 7 (THE Rt SURFACE)" msg)
+                    && String.contains "AREA 6 (THE CALL ABI)" msg
+                    && String.contains "Rt.copyWordsGo" msg
+                    && String.contains "a call" msg
 
             _ ->
                 False
