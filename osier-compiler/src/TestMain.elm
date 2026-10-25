@@ -27,6 +27,7 @@ import Mid.Ir exposing (Alt, AltKind(..), Binder, Defun, Exp(..), FfiWidth(..), 
 import Mid.Module as MidModule
 import Mid.Qbe.Il as Il
 import Mid.Qbe.Lower as QbeLower
+import Mid.Qbe.WordArmProbe as WordArmProbe
 import Mid.QbeModule as QbeModule
 import Mid.Qbe.Print as Print
 import Mid.Qbe.Types as QbeTypes
@@ -1800,6 +1801,22 @@ checks rt rawMidText =
             _ ->
                 False
         )
+    , check "VR3b3 FIX (BLOCKER 2) - THE BOOLEAN `tagis` FOLD KEEPS THE TAG AND THE COMPARE RESULT IN DISTINCT TEMPS. A boolean is ONE valtag with TWO word immediates, so `tagis(v, 3)` is the only tag test that emits an OR of two compares - and the only one where the tag temp and the compare result can be confused. The shipped code folded the first compare INTO the tag temp, so the second compared the 0/1 result against `tagFalse` and `tagis(false, tagBoolean)` answered FALSE; it is reachable through `Rt.deepEq`'s `tagis(a, 3)` the moment AREA 6 admits calls. This row pins that BOTH compares read the SAME tag temp (`%t1` twice) and that the OR and the result live elsewhere"
+        (case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ boolTagProbe ]) [ boolTagProbe ] "Bt.f" of
+            Ok mod ->
+                let
+                    txt =
+                        Print.print mod
+                in
+                String.contains "\t%t1 =w and %t0, 7\n\t%t2 =w ceqw %t1, 3\n\t%t4 =w ceqw %t1, 4\n\t%t2 =w or %t2, %t4\n" txt
+                    && not (String.contains "ceqw %t2, 4" txt)
+                    && not (String.contains "ceqw %t3, 4" txt)
+                    && String.contains "=l extsw %t2\n" txt
+                    && not (String.contains "loadw" txt)
+
+            Err _ ->
+                False
+        )
     , check "VR3b3 (supersedes VR3b2's wholesale gate) - THE Rt SURFACE IS CLASSIFIED PER DEFUN, AND STILL REFUSES. VR3b2 refused any program reaching `runtime.mid` wholesale because the runtime's stride-carrying defuns assumed 40-byte values; VR3c twinned those strides, so the blanket reason went stale and the refusal reported the LANE instead of the CONSTRUCT. The Rt set now gets the SAME pre-walk classifier the surface does: the refusal names the first un-ported Rt defun and its construct (`Rt.<key>: AREA ...`), and NOTHING is relaxed - an un-ported construct anywhere in the reachable Rt set still refuses before any IL is produced, which is why the SAME program still lowers on the val arm and still refuses on the word arm"
         (case
             ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.copyWords"
@@ -1852,10 +1869,21 @@ checks rt rawMidText =
             == 8
             && RtLayout.heapBodyStride RtLayout.valLayout
             == 40
-            && RtLayout.heapBodyOffset RtLayout.wordLayout 0
+            -- THE POINTER CONVENTION (BLOCKER 1): the untagged word IS the
+            -- body and the header is `heapHeaderOffset` = -16 BEFORE it, so a
+            -- kind read applies a NEGATIVE offset and a body unit is measured
+            -- from the body.  There is deliberately no block-relative offset
+            -- function left to reach for.
+            && RtLayout.heapHeaderOffset RtLayout.wordLayout
+            == -16
+            && RtLayout.heapHeaderOffset RtLayout.valLayout
+            == -16
+            && RtLayout.heapBodyUnitOffset RtLayout.wordLayout 0
+            == 0
+            && RtLayout.heapBodyUnitOffset RtLayout.wordLayout RtLayout.lenFieldWord
+            == 8
+            && RtLayout.heapBodyUnitOffset RtLayout.wordLayout 2
             == 16
-            && RtLayout.heapBodyOffset RtLayout.wordLayout RtLayout.lenFieldWord
-            == 24
             && RtLayout.payloadWordOffset RtLayout.valLayout RtLayout.lenFieldWord
             == RtLayout.lenFieldOffset
             && RtLayout.heapPtrTag RtLayout.wordLayout
@@ -1870,6 +1898,11 @@ checks rt rawMidText =
             == 0
             && (2 * 2 * 2) - 1
             == RtLayout.wordLayout.tagMask
+            -- F5: the boolean WRITE computes `tagTrue + (w == 0)` branch-free,
+            -- which is only right because the two immediates are ADJACENT.
+            && RtLayout.wordLayout.tagFalse
+            == RtLayout.wordLayout.tagTrue
+            + 1
             && List.length RtLayout.wordHeapCodes
             == 9
             && List.member RtLayout.tagString RtLayout.wordHeapCodes
@@ -1895,10 +1928,10 @@ checks rt rawMidText =
                         Print.print valMod
                 in
                 String.contains "call $q_Rt_x2eallocRaw(" wTxt
-                    && String.contains "\t%t4 =l loadl %t1\n\t%t5 =l sar %t4, 3\n\t%t6 =l add %t5, 16\n" wTxt
-                    && String.contains "\t%t7 =l add %t6, 0\n\tstorel $d0, %t7\n" wTxt
-                    && String.contains "\t%t8 =l add %t6, 8\n\tstorel 2, %t8\n" wTxt
-                    && String.contains "\t%t9 =l sub %t6, 16\n\t%t9 =l or %t9, 1\n" wTxt
+                    && String.contains "\t%t4 =l loadl %t1\n\t%t5 =l sar %t4, 3\n\t%t6 =l add %t5, 0\n" wTxt
+                    && String.contains "\tstorel $d0, %t6\n\t%t7 =l add %t5, 8\n" wTxt
+                    && String.contains "\tstorel 2, %t7\n" wTxt
+                    && String.contains "\t%t8 =l or %t5, 1\n" wTxt
                     && String.contains "\t%t0 =l shl 16, 3\n" wTxt
                     && not (String.contains "storew" wTxt)
                     && String.contains "storew 1, %s" vTxt
@@ -1925,7 +1958,7 @@ checks rt rawMidText =
                 String.contains "\t%t0 =l loadl %a0\n\t%t1 =w and %t0, 7\n\t%t2 =w ceqw %t1, 0\n" wTxt
                     && String.contains "\t%t3 =w ceqw %t1, 1\n" wTxt
                     && String.contains "\t%t4 =l sar %t0, 3\n" wTxt
-                    && String.contains "\t%t5 =l and %t0, -8\n\t%t6 =l add %t5, 16\n\t%t7 =l add %t6, 0\n\t%t4 =l loadl %t7\n" wTxt
+                    && String.contains "\t%t5 =l and %t0, -8\n\t%t6 =l add %t5, 0\n\t%t4 =l loadl %t6\n" wTxt
                     && String.contains "call $q_Rt_x2edie(l $d0)\n\thlt\n" wTxt
                     && String.contains "payload read on a word that is neither a fixnum" wTxt
                     && not (String.contains "loadw" wTxt)
@@ -1942,8 +1975,8 @@ checks rt rawMidText =
                     txt =
                         Print.print mod
                 in
-                String.contains "\t%t6 =l add %t5, 16\n\t%t7 =l add %t6, 8\n\t%t4 =l loadl %t7\n" txt
-                    && String.contains "=w loadw %t4\n" txt
+                String.contains "\t%t4 =l and %t0, -8\n\t%t5 =l add %t4, 8\n\t%t6 =w loadw %t5\n\t%t3 =l extsw %t6\n" txt
+                    && String.contains "i32 field read on a word that is not a heap object" txt
                     && String.contains "=l extsw %t" txt
                     && not (String.contains "storew" txt)
 
@@ -1958,10 +1991,10 @@ checks rt rawMidText =
                         Print.print mod
                 in
                 String.contains "\t%t1 =w and %t0, 7\n\t%t2 =w ceqw %t1, 1\n" txt
-                    && String.contains "\t%t5 =l and %t0, -8\n\t%t6 =l loadl %t5\n\t%t7 =w shr %t6, 24\n\t%t7 =w and %t7, 15\n" txt
-                    && String.contains "\t%t8 =w ceqw %t7, 0\n" txt
+                    && String.contains "\t%t5 =l and %t0, -8\n\t%t6 =l add %t5, -16\n\t%t7 =l loadl %t6\n\t%t8 =w shr %t7, 24\n\t%t8 =w and %t8, 15\n" txt
+                    && String.contains "\t%t9 =w ceqw %t8, 0\n" txt
                     && String.contains "a heap header carries KIND CODE 0" txt
-                    && String.contains "=w ceqw %t7, 4\n" txt
+                    && String.contains "=w ceqw %t8, 4\n" txt
                     && String.contains "=l extsw %t3\n" txt
                     && not (String.contains "loadw" txt)
 
@@ -13556,110 +13589,41 @@ bigProbe =
     }
 
 
-{-| perf VR3b3 — THE STRING-CELL PROBE: `\x -> "hi"`, whose body is a string
-LITERAL.  Under the word arm that is a HEAP BLOCK (code 1, a raw body): the
-`Rt.allocRaw` seat allocates the byte body, body unit 0 takes the static byte
-pointer, body unit `lenFieldWord` takes the length, and the value is the block
-OR'd with the heap tag.  On the val arm it is the same two words inside a
-40-byte Value record.  One probe, both arms, so the shapes are compared rather
-than asserted from memory.
+{-| perf VR3b3 — THE WORD-ARM BEHAVIOUR PROBES now live in ONE place,
+`Mid.Qbe.WordArmProbe`, because they have TWO consumers: these text rows (both
+arms) and `tools/qbe/word-arm-probe.sh` (which ASSEMBLES, LINKS and RUNS the
+emitted module — the only oracle that can see the word arm, since every real
+program stops at the runtime).  A probe defined twice would be two claims about
+one module.
 -}
 strProbe : Defun
 strProbe =
-    { key = "St.f"
-    , value =
-        Lam
-            { params = [ { id = 0, name = "x" } ]
-            , body = Lit (LString "hi")
-            }
-    }
+    WordArmProbe.defun WordArmProbe.Str
 
 
-{-| perf VR3b3 AREA B — THE PAYLOAD-READ PROBE: `\x -> mknum(payload(x, 0))`.
-The read has to DISPATCH on the value's low tag (a fixnum's payload is the word
-shifted down; a heap object's is a body word) and REFUSE loudly on anything
-else, which is what the emitted text must show.
--}
 payloadProbe : Defun
 payloadProbe =
-    { key = "Pl.f"
-    , value =
-        Lam
-            { params = [ { id = 0, name = "x" } ]
-            , body =
-                Unsafe
-                    (RawMkValue
-                        { tag = RtLayout.tagNumber
-                        , words = [ Unsafe (RawPayload { value = Var 0, word = 0 }) ]
-                        }
-                    )
-            }
-    }
+    WordArmProbe.defun WordArmProbe.Payload
 
 
-{-| perf VR3b3 AREA D — THE LENGTH PROBE: `\s -> mknum(payload32(s, 1))`.  Body
-unit `lenFieldWord` read as an i32, i.e. where a word-arm string keeps its
-length.  No string-specific arm anywhere: the placement is the contract.
--}
 lenProbe : Defun
 lenProbe =
-    { key = "Ln.f"
-    , value =
-        Lam
-            { params = [ { id = 0, name = "s" } ]
-            , body =
-                Unsafe
-                    (RawMkValue
-                        { tag = RtLayout.tagNumber
-                        , words = [ Unsafe (RawPayload32 { value = Var 0, word = RtLayout.lenFieldWord }) ]
-                        }
-                    )
-            }
-    }
+    WordArmProbe.defun WordArmProbe.Len
 
 
-{-| perf VR3b3 AREA C — THE KIND-TEST PROBE: `\v -> mkbool(tagis(v, 4))`, a
-CONS test.  Under the word arm the tag must be the shared heap tag AND the
-header's kind code must be 4, and a header whose code is 0 (NO CODE, a val-arm
-header) must REFUSE by name rather than answer "no".
--}
 tagProbe : Defun
 tagProbe =
-    { key = "Tg.f"
-    , value =
-        Lam
-            { params = [ { id = 0, name = "v" } ]
-            , body =
-                Unsafe
-                    (RawMkValue
-                        { tag = RtLayout.tagBoolean
-                        , words = [ Unsafe (RawTagIs { value = Var 0, tag = RtLayout.tagCons }) ]
-                        }
-                    )
-            }
-    }
+    WordArmProbe.defun WordArmProbe.TagHeap
 
 
-{-| perf VR3b3 AREA C — THE IMMEDIATE-TAG PROBE: `\v -> mkbool(tagis(v, 5))`, a
-NIL test.  Nil is VALTAG 5 and word IMMEDIATE 2, so the emitted compare must be
-against 2 (the instance's field) and never against 5 (the valtag): the two
-numberings meet here and nowhere else is that visible.
--}
 nilTagProbe : Defun
 nilTagProbe =
-    { key = "Nt.f"
-    , value =
-        Lam
-            { params = [ { id = 0, name = "v" } ]
-            , body =
-                Unsafe
-                    (RawMkValue
-                        { tag = RtLayout.tagBoolean
-                        , words = [ Unsafe (RawTagIs { value = Var 0, tag = RtLayout.tagNil }) ]
-                        }
-                    )
-            }
-    }
+    WordArmProbe.defun WordArmProbe.TagNil
+
+
+boolTagProbe : Defun
+boolTagProbe =
+    WordArmProbe.defun WordArmProbe.TagBool
 
 
 {-| perf VR3b2 — THE AREA-2 PROBE: `\b -> if b then b else b`, a defun whose

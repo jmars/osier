@@ -659,9 +659,6 @@ wordArmUnported exp =
                 RawPayload32 _ ->
                     Nothing
 
-                RawTagOf _ ->
-                    Nothing
-
                 RawTagIs _ ->
                     Nothing
 
@@ -669,12 +666,6 @@ wordArmUnported exp =
                     Nothing
 
                 RawAllocRaw _ ->
-                    Nothing
-
-                RawVecAddr _ ->
-                    Nothing
-
-                RawVecLoad _ ->
                     Nothing
 
                 RawStrByte _ ->
@@ -743,9 +734,6 @@ wordArmUnported exp =
                     Nothing
 
                 RawUn _ ->
-                    Nothing
-
-                RawVecStore _ ->
                     Nothing
 
                 _ ->
@@ -3216,7 +3204,11 @@ lowerRawVal node dest s =
         RawVecLoad load ->
             -- Element i's VALUE, blitted into the dest slot (a load never
             -- barriers).
-            rawWordArg load.vec s
+            if wordArm s then
+                Err (wordVecRefusal "vecload")
+
+            else
+                rawWordArg load.vec s
                 |> Result.andThen
                     (\( vecT, s1 ) ->
                         rawWordArg load.index s1
@@ -3236,7 +3228,11 @@ lowerRawVal node dest s =
             -- first — its address is the argument.
             -- `dest` is deliberately IGNORED: this node is an effect, and its
             -- let binder's slot stays zero (a valid Value; nothing reads it).
-            rawWordArg store.vec s
+            if wordArm s then
+                Err (wordVecRefusal "vecstore")
+
+            else
+                rawWordArg store.vec s
                 |> Result.andThen
                     (\( vecT, s1 ) ->
                         rawWordArg store.index s1
@@ -3612,16 +3608,18 @@ wordProducerMessage =
 -- ==================== THE WORD ARM'S CELL WRITER AND READERS (VR3b3) ====================
 -- AREA A (the writer below) and AREA B (the readers).  EVERY number here comes
 -- from `Mid.RtLayout`'s word-arm heap contract — `heapPtrTag`, `untagMask`,
--- `tagBits`, `heapHeaderBytes`, `heapBodyOffset` — and none is spelled: a
+-- `tagBits`, `heapHeaderBytes`, `heapHeaderOffset`, `heapBodyUnitOffset` — and
+-- none is spelled: a
 -- literal 1 / 3 / 8 / 16 / 24 in this section would be a second statement of
 -- the layout, which is the failure this arc exists to prevent.
 --
--- THE SHAPE.  A word-arm Value is ONE word, so reaching a heap object is always
--- untag (`w AND untagMask`) -> step past the 2-word header -> step into the
--- body.  A 40-byte Value's payload read is NOT that shape and neither is a
--- shifted field offset: the val arm's `payloadWordOffset` (a tag word then
--- payload words) has no word-arm meaning at all, which is why every read below
--- is a `if wordArm s then <block shape> else <record shape>` fork.
+-- THE SHAPE.  A word-arm Value is ONE word, and untagging it (`w AND
+-- untagMask`) yields the BODY, with the 2-word GC header `heapHeaderOffset`
+-- (= -16) BEFORE it (RtLayout's THE CONVENTION, which is the RUNTIME's: a seat
+-- returns `mknum(body)`).  A 40-byte Value's payload read is NOT that shape and
+-- neither is a shifted field offset: the val arm's `payloadWordOffset` (a tag
+-- word then payload words) has no word-arm meaning at all, which is why every
+-- read below is a `if wordArm s then <body shape> else <record shape>` fork.
 
 
 {-| The VALUE WORD at a slot address, into a fresh `l` temp. -}
@@ -3634,31 +3632,19 @@ wordValueWord base s =
     ( v, emit (Load (Just v) L LoadL base) s1 )
 
 
-{-| UNTAG: the BLOCK ADDRESS of a word-arm heap object (its low bits are the
-tag).  On the val arm this is the identity — `untagMask` is all ones — so the
-function is total, and only the word arm ever calls it. -}
-wordBlockAddr : Il.Arg -> S -> ( String, S )
-wordBlockAddr valueWord s =
+{-| UNTAG: THE BODY ADDRESS of a word-arm heap object — the untagged word IS
+the body, because a seat returns `mknum(body)` and the 2-word GC header sits
+`heapHeaderOffset` (= -16) BEFORE it (`RtLayout`'s THE CONVENTION, aligned to
+`runtime.mid`'s gcAlloc on the owner's decision).  On the val arm this is the
+identity — `untagMask` is all ones — so the function is total, and only the
+word arm ever calls it. -}
+wordBodyOf : Il.Arg -> S -> ( String, S )
+wordBodyOf valueWord s =
     let
         ( b, s1 ) =
             freshTmp s
     in
     ( b, emit (Bin (Just b) L And valueWord (Il.Con (RtLayout.untagMask s.layout))) s1 )
-
-
-{-| The BODY address of a word-arm heap object: the block past the 2-word GC
-header.  This is what the val arm's `payloadWordOffset 0` read RETURNS (a raw
-body pointer) and what every `vecaddr`/`vecload`/`byte` site consumes. -}
-wordBodyAddr : Il.Arg -> S -> ( String, S )
-wordBodyAddr valueWord s =
-    let
-        ( b, s1 ) =
-            wordBlockAddr valueWord s
-
-        ( t, s2 ) =
-            freshTmp s1
-    in
-    ( t, emit (Bin (Just t) L Add (Il.Tmp b) (Il.Con (RtLayout.heapHeaderBytes s.layout))) s2 )
 
 
 {-| The header's KIND CODE of a word-arm heap object, into a `w` temp — the ONE
@@ -3675,25 +3661,28 @@ structure; this function only computes the code and the "is it 0" flag.
 wordKindCode : Il.Arg -> S -> ( String, String, S )
 wordKindCode valueWord s =
     let
-        ( blk, s1 ) =
-            wordBlockAddr valueWord s
+        ( body, s1 ) =
+            wordBodyOf valueWord s
 
-        ( hdr, s2 ) =
+        ( hdrA, s2 ) =
             freshTmp s1
 
-        ( code, s3 ) =
+        ( hdr, s3 ) =
             freshTmp s2
+
+        ( code, s4 ) =
+            freshTmp s3
     in
     ( code
     , hdr
-    , s3
-        -- THE HEADER IS THE BLOCK'S FIRST TWO WORDS, so the reader adds
-        -- NOTHING to the untagged block address.  (MEASURED: subtracting
-        -- `heapHeaderBytes` here - the shape a reader that holds the BODY
-        -- needs - made the harness read the word BEFORE the block, see code 0
-        -- and refuse a perfectly good cons.  The text pin had blessed the
-        -- `sub ..., 16`.)
-        |> emit (Load (Just hdr) L LoadL (Il.Tmp blk))
+    , s4
+        -- THE HEADER IS `heapHeaderOffset` (= -16) FROM THE BODY, never at the
+        -- body and never at a block base: a seat RETURNS the body, so the two
+        -- header words precede it.  MEASURED (found by RUNNING): reading AT the
+        -- untagged address saw the body's first word as a "header" (code 0) and
+        -- refused a good cons; reading `block - 16` was off by a whole object.
+        |> emit (Bin (Just hdrA) L Add (Il.Tmp body) (Il.Con (RtLayout.heapHeaderOffset s.layout)))
+        |> emit (Load (Just hdr) L LoadL (Il.Tmp hdrA))
         |> emit (Bin (Just code) W Shr (Il.Tmp hdr) (Il.Con s.layout.heapKindShift))
         |> emit (Bin (Just code) W And (Il.Tmp code) (Il.Con s.layout.heapKindMask))
     )
@@ -3862,22 +3851,26 @@ storeWordStringCell words dest s0 =
                 s3 =
                     storeWordBodyWord bodyArg RtLayout.lenFieldWord len s2
 
-                ( blk, s4 ) =
+                ( taggedWord, s4 ) =
                     freshTmp s3
             in
             Ok
+                -- THE SEAT RETURNS THE BODY, so the Value word is `body OR
+                -- heapPtrTag` - NO header arithmetic here (BLOCKER 1: the
+                -- header is 16 bytes BEFORE the body, so subtracting it made
+                -- the value word point one whole object too low, and the real
+                -- allocator then aborted on the resulting body write).
                 (s4
-                    |> emit (Bin (Just blk) L Sub bodyArg (Il.Con (RtLayout.heapHeaderBytes s4.layout)))
-                    |> emit (Bin (Just blk) L Or (Il.Tmp blk) (Il.Con (RtLayout.heapPtrTag s4.layout)))
-                    |> storeWordWord (Il.Tmp blk) dest
+                    |> emit (Bin (Just taggedWord) L Or bodyArg (Il.Con (RtLayout.heapPtrTag s4.layout)))
+                    |> storeWordWord (Il.Tmp taggedWord) dest
                 )
 
         _ ->
             Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a string cell that is not exactly [byte pointer, length]"))
 
 
-{-| One BODY word of a word-arm heap block, at `heapBodyOffset`.  `bodyArg` is
-the body ADDRESS (what the allocation seats return). -}
+{-| One BODY word of a word-arm heap object, at `heapBodyUnitOffset`.  `bodyArg`
+IS the body address — what the allocation seats return. -}
 storeWordBodyWord : Il.Arg -> Int -> Il.Arg -> S -> S
 storeWordBodyWord bodyArg word value s0 =
     let
@@ -3889,24 +3882,104 @@ storeWordBodyWord bodyArg word value s0 =
         |> emit (Store StoreL value (Il.Tmp a))
 
 
-{-| A body word READ of a word-arm heap block, at `heapBodyOffset`. -}
-wordBodyRead : Il.Arg -> Int -> S -> ( String, S )
-wordBodyRead valueWord word s0 =
-    let
-        ( bodyArg, s1 ) =
-            wordBodyAddr valueWord s0
+{-| S3 (VR3b3 FIX): the vec family's input contract is a RAW ELEMENT-ARRAY
+ADDRESS, and on the word arm nothing can produce one: `payload(v, 0)` yields the
+first body VALUE WORD (a tagged value), and `elemAddr` would then use a tagged
+address as a base - a misaligned read into the wrong object.  The constructors
+refuse loudly (`wordCellRefusal`), but a pure READER (`Rt.deepEq`, `Rt.revGo`)
+contains no constructor, so once AREA 6 lands it would lower and read wrong.
+Refused by name until `vecload`/`vecstore` are re-expressed over the word arm's
+body (a real port, not a stride).
+-}
+wordVecRefusal : String -> String
+wordVecRefusal what =
+    wordArmUnsupported
+        (wordArea
+            "AREA 3 (PAYLOAD ACCESS)"
+            ("`"
+                ++ what
+                ++ "` - its input contract is a raw element-array address, which on the word arm nothing can produce: `payload(v, 0)` yields the first body VALUE WORD (a tagged value), so `elemAddr` would use a tagged address as a base and read into the wrong object"
+            )
+        )
 
-        ( a, s2 ) =
+
+{-| AREA B/D: the i32 FIELD of a word-arm payload word — the LOW HALF of body
+unit `i`, read AT ITS ADDRESS.  Deliberately NOT `wordPayloadWord` followed by a
+load: that function LOADS the 8-byte body word, so a second load would
+dereference its VALUE (MEASURED: `payload32(s, 1)` emitted `movq 8(%rax), %rax`
+then `movl (%rax), %eax`, i.e. it loaded the length 6 and then read memory at
+address 6 — a SEGV, found by the len probe the moment it ran).
+
+The shape test is the same tag test, and a word that is not a heap object
+REFUSES: an i32 FIELD exists only in a heap body (a fixnum's value lives in a
+register, and the val-arm sites that read `payload32` of a boolean are AREA 2's
+boolean test, which the word arm does on the TAG, not on a payload field).
+-}
+wordPayloadField32 : Il.Arg -> Int -> S -> ( Il.Arg, S )
+wordPayloadField32 base word s0 =
+    let
+        ( l, s1 ) =
+            wordValueWord base s0
+
+        ( t, s2 ) =
             freshTmp s1
 
-        ( t, s3 ) =
+        ( isHeap, s3 ) =
             freshTmp s2
+
+        ( heapLbl, s4 ) =
+            freshLbl "fheap" s3
+
+        ( badLbl, s5 ) =
+            freshLbl "fbad" s4
+
+        ( joinLbl, s6 ) =
+            freshLbl "fjoin" s5
+
+        ( r, s7 ) =
+            freshTmp s6
+
+        ( msgName, s8 ) =
+            freshData ("msg:" ++ wordField32Refusal)
+                (\n -> { name = n, align = Just 8, items = [ DStr wordField32Refusal, DByte 0 ], export_ = False })
+                s7
+
+        s9 =
+            s8
+                |> emit (Bin (Just t) W And (Il.Tmp l) (Il.Con s8.layout.tagMask))
+                |> emit (Cmp (Just isHeap) W Ceq (Il.Tmp t) (Il.Con (RtLayout.heapPtrTag s8.layout)))
+                |> closeBlock (Jnz (Il.Tmp isHeap) heapLbl badLbl)
+                |> startBlock badLbl
+                |> emit (Call Nothing (Base L) (Il.Sym ("q_" ++ mangle "Rt.die")) [ ArgVal (Base L) (Il.Sym msgName) ])
+                |> closeBlock Hlt
+                |> startBlock heapLbl
+
+        s10 =
+            let
+                ( bodyArg, sa ) =
+                    wordBodyOf (Il.Tmp l) s9
+
+                ( a, sb ) =
+                    freshTmp sa
+
+                ( wT, sc ) =
+                    freshTmp sb
+            in
+            sc
+                |> emit (Bin (Just a) L Add (Il.Tmp bodyArg) (Il.Con (RtLayout.heapBodyUnitOffset sc.layout word)))
+                |> emit (Load (Just wT) W LoadW (Il.Tmp a))
+                |> emit (Unary (Just r) L Extsw (Il.Tmp wT))
+                |> jumpTo joinLbl
+                |> startBlock joinLbl
     in
-    ( t
-    , s3
-        |> emit (Bin (Just a) L Add (Il.Tmp bodyArg) (Il.Con (RtLayout.heapBodyUnitOffset s3.layout word)))
-        |> emit (Load (Just t) L LoadL (Il.Tmp a))
-    )
+    ( Il.Tmp r, s10 )
+
+
+{-| The i32-field refusal's message: an i32 field is a body unit, so a word that
+is not a heap object has none. -}
+wordField32Refusal : String
+wordField32Refusal =
+    "qbe-rt: word arm: i32 field read on a word that is not a heap object (...001) - a fixnum's value lives in a register and has no field, and an immediate (nil/true/false/error) has no body. Refusing."
 
 
 {-| AREA B: the loud refusal a payload read emits when the word it was handed is
@@ -4000,7 +4073,7 @@ wordPayloadWord base word s0 =
         s15 =
             let
                 ( bodyArg, sa ) =
-                    wordBodyAddr (Il.Tmp l) s14
+                    wordBodyOf (Il.Tmp l) s14
 
                 ( a, sb ) =
                     freshTmp sa
@@ -4057,8 +4130,17 @@ wordTagIs base code s0 =
 
         RtLayout.WordImmediate tags ->
             -- The tag alone answers it: one compare, or (a boolean, which has
-            -- two immediates) the OR of two.  `t` is both the tag temp and the
-            -- result temp, which QBE allows (`%t =w or %t, %o`).
+            -- TWO immediates) the OR of two.
+            --
+            -- THE TAG AND THE COMPARE RESULT ARE DISTINCT TEMPS, and that is
+            -- load-bearing (VR3b3 FIX, BLOCKER 2).  Folding the compares into
+            -- `t` - the tag temp - destroyed the tag after the first compare, so
+            -- the second compared the 0/1 RESULT against `tagFalse` and
+            -- `tagis(v, tagBoolean)` answered FALSE for `false`; MEASURED, and
+            -- reachable through `Rt.deepEq`'s `tagis(a, 3)` the moment AREA 6
+            -- admits calls.  No text pin could see it (both spellings are two
+            -- compares and an `or`), which is why the probe set now carries a
+            -- boolean `tagis`.
             let
                 ( v, s1 ) =
                     wordValueWord base s0
@@ -4066,16 +4148,19 @@ wordTagIs base code s0 =
                 ( t, s2 ) =
                     freshTmp s1
 
-                ( ext, s3 ) =
+                ( is, s3 ) =
                     freshTmp s2
 
-                s4 =
-                    emit (Bin (Just t) W And (Il.Tmp v) (Il.Con s3.layout.tagMask)) s3
+                ( ext, s4 ) =
+                    freshTmp s3
 
                 s5 =
+                    emit (Bin (Just t) W And (Il.Tmp v) (Il.Con s4.layout.tagMask)) s4
+
+                s6 =
                     case tags of
                         [] ->
-                            emit (Bin (Just t) W Xor (Il.Tmp t) (Il.Tmp t)) s4
+                            emit (Bin (Just is) W Xor (Il.Tmp t) (Il.Tmp t)) s5
 
                         firstTag :: rest ->
                             List.foldl
@@ -4085,12 +4170,12 @@ wordTagIs base code s0 =
                                             freshTmp acc
                                     in
                                     emit (Cmp (Just o) W Ceq (Il.Tmp t) (Il.Con one)) sa
-                                        |> emit (Bin (Just t) W Or (Il.Tmp t) (Il.Tmp o))
+                                        |> emit (Bin (Just is) W Or (Il.Tmp is) (Il.Tmp o))
                                 )
-                                (emit (Cmp (Just t) W Ceq (Il.Tmp t) (Il.Con firstTag)) s4)
+                                (emit (Cmp (Just is) W Ceq (Il.Tmp t) (Il.Con firstTag)) s5)
                                 rest
             in
-            Ok ( Il.Tmp ext, emit (Unary (Just ext) L Extsw (Il.Tmp t)) s5 )
+            Ok ( Il.Tmp ext, emit (Unary (Just ext) L Extsw (Il.Tmp is)) s6 )
 
         RtLayout.WordHeapCode c ->
             let
@@ -4507,14 +4592,11 @@ midGcAllocSeat seatKey lenA s =
             ( word, s6 ) =
                 freshTmp s5
 
-            ( blk, s7 ) =
+            ( body, s7 ) =
                 freshTmp s6
-
-            ( body, s8 ) =
-                freshTmp s7
         in
         ( Il.Tmp body
-        , s8
+        , s7
             |> emit (Call (Just vp) (Agg "val") (Il.Sym ("q_" ++ mangle seatKey)) (padded ++ [ ArgVal (Base W) (Il.Con 1) ]))
             -- THE `:val` RESULT IS AN AGGREGATE TEMP, NOT A WORD.  QBE treats a
             -- temp of aggregate type as ADDRESSABLE, so using it directly in an
@@ -4524,8 +4606,9 @@ midGcAllocSeat seatKey lenA s =
             -- So the single word is LOADED out of it first; under the word arm
             -- `:val` is `{ l }`, one word at offset 0.
             |> emit (Load (Just word) L LoadL (Il.Tmp vp))
-            |> emit (Bin (Just blk) L Sar (Il.Tmp word) (Il.Con s.layout.tagBits))
-            |> emit (Bin (Just body) L Add (Il.Tmp blk) (Il.Con (RtLayout.heapHeaderBytes s.layout)))
+            -- THE SEAT RETURNS `mknum(BODY)`, so the fixnum untag IS the body
+            -- address: `sar tagBits`, and NO header arithmetic (BLOCKER 1).
+            |> emit (Bin (Just body) L Sar (Il.Tmp word) (Il.Con s.layout.tagBits))
         )
 
     else
@@ -4627,7 +4710,11 @@ rawWordArg exp s =
                     )
 
         Unsafe (RawVecAddr addr) ->
-            rawWordArg addr.vec s
+            if wordArm s then
+                Err (wordVecRefusal "vecaddr")
+
+            else
+                rawWordArg addr.vec s
                 |> Result.andThen
                     (\( vecT, s1 ) ->
                         rawWordArg addr.index s1
@@ -4642,27 +4729,32 @@ rawWordArg exp s =
                     )
 
         Unsafe (RawTagOf v) ->
-            -- AREA B (perf VR3b3): the tag of a Value.  The val arm's tag is a
-            -- whole word at offset 0; the word arm's is the value word's LOW
-            -- BITS, so this is `readTag` — the emitter's one tag reader — and
-            -- not a second masking site.
-            rawValueBase v s
-                |> Result.map
-                    (\( base, s1 ) ->
-                        if wordArm s1 then
-                            let
-                                ( t, s2 ) =
-                                    freshTmp s1
-                            in
-                            ( Il.Tmp t, readTag t base s2 )
+            -- S2 (VR3b3 FIX): REFUSED under the word arm.  `tagof` promises the
+            -- VALTAG (`Mid.Ir`'s `RawTagOf` contract), and on the word arm the
+            -- value word's low bits name the SHAPE (...001 = "a heap object"),
+            -- not the constructor - every heap object would answer 1, nil 2,
+            -- error 5.  A consumer comparing against valtag constants would be
+            -- silently wrong, so the honest answer is the loud one; `tagis` is
+            -- the reader that dispatches correctly (`wordTagIs`).
+            if wordArm s then
+                Err
+                    (wordArmUnsupported
+                        (wordArea
+                            "AREA 2 (TAG TESTS)"
+                            "`tagof(v)` - the word arm's value tag names the SHAPE (...001 = a heap object), not the VALTAG the node promises, so a consumer comparing against valtag constants would be silently wrong; `tagis` dispatches to the word encoding and is the reader to use"
+                        )
+                    )
 
-                        else
+            else
+                rawValueBase v s
+                    |> Result.map
+                        (\( base, s1 ) ->
                             let
                                 ( t, s2 ) =
                                     freshTmp s1
                             in
                             ( Il.Tmp t, emit (Load (Just t) W LoadW base) s2 )
-                    )
+                        )
 
         Unsafe (RawPayload p) ->
             -- AREA B (perf VR3b3): a payload word.  A 40-byte Value's payload
@@ -4703,23 +4795,7 @@ rawWordArg exp s =
                 -- LOW HALF of that 8-byte word: a string's `len` is body unit
                 -- `lenFieldWord`, read here with no string-specific arm.
                 rawValueBase p.value s
-                    |> Result.map
-                        (\( base, s1 ) ->
-                            let
-                                ( wordT, s2 ) =
-                                    wordPayloadWord base p.word s1
-
-                                ( wT, s3 ) =
-                                    freshTmp s2
-
-                                ( t, s4 ) =
-                                    freshTmp s3
-                            in
-                            ( Il.Tmp t
-                            , emit (Load (Just wT) W LoadW wordT) s4
-                                |> emit (Unary (Just t) L Extsw (Il.Tmp wT))
-                            )
-                        )
+                    |> Result.map (\( base, s1 ) -> wordPayloadField32 base p.word s1)
 
             else
                 rawValueBase p.value s
@@ -5397,32 +5473,67 @@ rawWordArg exp s =
                                 freshSlot s1
                         in
                         lowerVal sb.str vslot s2
-                            |> Result.map
+                            |> Result.andThen
                                 (\s3 ->
-                                    let
-                                        ( pT, s4 ) =
-                                            freshTmp s3
+                                    -- THE DATA POINTER IS A DIFFERENT SHAPE PER
+                                    -- ARM (VR3b3 FIX, S1).  val: payload word 0
+                                    -- of a 40-byte record, at slot+8.  word:
+                                    -- body unit 0 of the heap object the value
+                                    -- names, through the SAME reader as
+                                    -- `payload(s, 0)` - the val-arm `slot+8`
+                                    -- shape read the NEXT SLOT on the word arm,
+                                    -- where a slot is 8 bytes.
+                                    if wordArm s3 then
+                                        let
+                                            ( aT, s4 ) =
+                                                wordPayloadWord (Il.Tmp (slotTmp vslot)) 0 s3
+                                        in
+                                        Ok
+                                            (let
+                                                ( bT, s5 ) =
+                                                    freshTmp s4
 
-                                        ( aT, s5 ) =
-                                            freshTmp s4
+                                                ( wT, s6 ) =
+                                                    freshTmp s5
 
-                                        ( bT, s6 ) =
-                                            freshTmp s5
+                                                ( rT, s7 ) =
+                                                    freshTmp s6
+                                             in
+                                             ( Il.Tmp rT
+                                             , s7
+                                                |> emit (Bin (Just bT) L Add aT idxT)
+                                                |> emit (Load (Just wT) W LoadUb (Il.Tmp bT))
+                                                |> emit (Unary (Just rT) L Extuw (Il.Tmp wT))
+                                             )
+                                            )
 
-                                        ( wT, s7 ) =
-                                            freshTmp s6
+                                    else
+                                        Ok
+                                            (let
+                                                ( pT, s4 ) =
+                                                    freshTmp s3
 
-                                        ( rT, s8 ) =
-                                            freshTmp s7
-                                    in
-                                    ( Il.Tmp rT
-                                    , s8
-                                        |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con 8))
-                                        |> emit (Load (Just aT) L LoadL (Il.Tmp pT))
-                                        |> emit (Bin (Just bT) L Add (Il.Tmp aT) idxT)
-                                        |> emit (Load (Just wT) W LoadUb (Il.Tmp bT))
-                                        |> emit (Unary (Just rT) L Extuw (Il.Tmp wT))
-                                    )
+                                                ( aT, s5 ) =
+                                                    freshTmp s4
+
+                                                ( bT, s6 ) =
+                                                    freshTmp s5
+
+                                                ( wT, s7 ) =
+                                                    freshTmp s6
+
+                                                ( rT, s8 ) =
+                                                    freshTmp s7
+                                             in
+                                             ( Il.Tmp rT
+                                             , s8
+                                                |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con 8))
+                                                |> emit (Load (Just aT) L LoadL (Il.Tmp pT))
+                                                |> emit (Bin (Just bT) L Add (Il.Tmp aT) idxT)
+                                                |> emit (Load (Just wT) W LoadUb (Il.Tmp bT))
+                                                |> emit (Unary (Just rT) L Extuw (Il.Tmp wT))
+                                             )
+                                            )
                                 )
                     )
 

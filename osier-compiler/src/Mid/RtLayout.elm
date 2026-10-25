@@ -1,7 +1,7 @@
 module Mid.RtLayout exposing
     ( abiAlign
     , bodyWords
-    , heapBodyOffset, heapBodyStride, heapBodyUnitOffset, heapHeaderBytes, heapKindMask, heapKindScanned, heapKindShift, heapPtrTag
+    , heapBodyStride, heapBodyUnitOffset, heapHeaderBytes, heapHeaderOffset, heapKindMask, heapKindScanned, heapKindShift, heapPtrTag
     , i32Bytes
     , descArityOffset, descCacheOffset, descCodeOffset, descNcapsOffset, descQbeFields
     , descTotalBytes, direntNameOffset
@@ -318,21 +318,32 @@ bodyWords layout count scanKind =
 -- ALWAYS these three, in this order:
 --
 --   1. UNTAG.  The Value word's low bits are the tag (`tagMask`), and a heap
---      object's tag is `heapPtrTag` (`...001`), so the block address is
---      `w AND untagMask`.  On the val arm `untagMask` is all ones: the tag is a
+--      object's tag is `heapPtrTag` (`...001`), so `w AND untagMask` IS THE
+--      BODY ADDRESS.  On the val arm `untagMask` is all ones: the tag is a
 --      whole word and nothing is masked, which is why the val arm's readers
 --      never call this and the word arm's always do.
---   2. STEP PAST THE 2-WORD HEADER.  `heapHeaderBytes` — the same two words in
---      both arms (VR3c AREA 1: the header does not move; only the body strides
---      do).  It is DERIVED from `bodyWords layout 0 0`, i.e. "what a zero-body
---      object costs", so the header size and the body-size rule cannot drift.
---   3. STEP INTO THE BODY.  `heapBodyOffset layout i` — body unit `i`, a unit
---      being one Value slot (`heapBodyStride`): 8 bytes on the word arm, 40 on
---      the val arm.  This is the HEAP-BLOCK shape and it is deliberately NOT
---      `payloadWordOffset`, which is the shape of a 40-byte Value RECORD (a tag
---      word then payload words).  Under the word arm a Value IS one word, so a
---      payload read is steps 1-3; conflating the two is exactly the
---      silent-wrong-offset failure this module exists to prevent.
+--   2. THE HEADER IS *BEFORE* THE BODY, at `heapHeaderOffset` (= -16).  The
+--      2-word GC header is the same two words in both arms (VR3c AREA 1: the
+--      header does not move; only the body strides do), and it is DERIVED from
+--      `bodyWords layout 0 0` — "what a zero-body object costs" — so the header
+--      size and the body-size rule cannot drift.
+--   3. STEP INTO THE BODY.  `heapBodyUnitOffset layout i` — body unit `i`, a
+--      unit being one Value slot (`heapBodyStride`): 8 bytes on the word arm,
+--      40 on the val arm.  This is the HEAP-BODY shape and it is deliberately
+--      NOT `payloadWordOffset`, which is the shape of a 40-byte Value RECORD (a
+--      tag word then payload words).
+--
+-- THE CONVENTION IS THE RUNTIME'S, AND THE EMITTER ALIGNS TO IT (VR3b3 FIX,
+-- BLOCKER 1 — the owner's decision, and the reason is asymmetry of risk rather
+-- than preference).  `runtime.mid`'s `gcAlloc` writes the header at
+-- `cursor - 2`/`- 1` words and returns `mknum(cursor)` on EVERY path, so a
+-- seat's return value is the BODY address with the header 16 bytes BEFORE it;
+-- the VAL arm consumes it exactly that way and is corpus-proven at 159/159,
+-- and the word arm's `gcScavValue` twin re-tags `newbody + 1`.  So on the word
+-- arm a heap Value's untagged word IS THE BODY, not a block base.  The runtime
+-- side stays (changing it would put the whole working arm at risk to
+-- accommodate new code); this module states the emitter's side of the one
+-- convention so no site re-derives it.
 --
 -- WHAT IS NOT HERE.  The header's KIND CODE field (`heapKindShift`/
 -- `heapKindMask`, above) is read from the header word this section steps past,
@@ -371,19 +382,24 @@ heapBodyStride layout =
     layout.wordBytes * (1 + layout.valuePayloadWords)
 
 
--- The byte offset of body unit `i` inside a heap BLOCK (i.e. relative to the
--- BLOCK address, past the 2-word header).
-heapBodyOffset : ValLayout -> Int -> Int
-heapBodyOffset layout word =
-    heapHeaderBytes layout + heapBodyUnitOffset layout word
+-- THE HEADER'S OFFSET RELATIVE TO THE BODY — NEGATIVE, because the header
+-- precedes the body (see THE CONVENTION above).  THE ONE STATEMENT of the
+-- `-16` a kind read applies, so no site re-invents it and no site can apply
+-- `+16` by analogy with a block-based convention.
+--
+-- WHY THIS IS A FUNCTION AND NOT `heapHeaderBytes` NEGATED AT EACH SITE: the
+-- sign is the whole content of the convention.  MEASURED (VR3b3, found by
+-- RUNNING): the first emitted kind read subtracted `heapHeaderBytes` from a
+-- BLOCK base and so read the word BEFORE the object, saw code 0 and refused a
+-- perfectly good cons — while a text pin blessed the arithmetic.
+heapHeaderOffset : ValLayout -> Int
+heapHeaderOffset layout =
+    0 - heapHeaderBytes layout
 
 
--- The byte offset of body unit `i` RELATIVE TO THE BODY ADDRESS — for a reader
--- that already holds the body (what `Rt.allocRaw`/`allocKind` RETURN, and what
--- `payload(v, 0)` yields).  TWO functions because both bases are in use and
--- adding the header twice is a silent 16-byte over-read that no text pin can
--- see: MEASURED, the first emitted payload read was `loadl block+32` (the
--- header added twice), found only by RUNNING the module.
+-- The byte offset of body unit `i` RELATIVE TO THE BODY ADDRESS — what a seat
+-- RETURNS (`Rt.allocRaw`/`allocKind`/`allocVector`/`allocCons` all return
+-- `mknum(body)`) and what `payload(v, 0)` yields on the word arm.
 heapBodyUnitOffset : ValLayout -> Int -> Int
 heapBodyUnitOffset layout word =
     word * heapBodyStride layout
@@ -417,6 +433,14 @@ wordHeapCodes =
 --
 --   WordImmediate tags  the low-3-bit tags that name this valtag.  A boolean
 --                       has two; every other immediate exactly one.
+--
+--                       THE BOOLEAN WRITE ASSUMES THE TWO ARE ADJACENT
+--                       (`tagFalse == tagTrue + 1`) because it computes
+--                       `tagTrue + (w == 0)` branch-free (VR3b3 FIX F5: the
+--                       assumption was silent; it is now a PINNED property -
+--                       TestMain asserts the adjacency, so a future encoding
+--                       with a gap fails a test instead of writing the wrong
+--                       immediate).
 --   WordHeapCode code   the object is a heap block and `code` is its header
 --                       kind code — i.e. the valtag itself.
 --   WordNoForm why      the valtag has no word-arm encoding (the mark tag, the
@@ -476,8 +500,8 @@ wordTagShape code =
 --
 --   val   `payload32(s, 1)` = the i32 at `s + lenFieldOffset` (16) of a Value
 --         record whose payload word 1 is the length.
---   word  `payload32(s, 1)` = the i32 low half of `heapBodyOffset layout 1` of
---         the block `s` names, i.e. `(s AND untagMask) + 16 + 8`.
+--   word  `payload32(s, 1)` = the i32 low half of body unit 1 of the BODY `s`
+--         names, i.e. `(s AND untagMask) + 8`.
 --
 -- WHY THIS IS THE ANSWER AND NOT A CHOICE.  A word-arm string is a HEAP BLOCK
 -- with a RAW body (code 1, `heapKindScanned` false), so its body is not a Value
@@ -490,10 +514,15 @@ wordTagShape code =
 -- porting THEM (area B) ports every string site in `runtime.mid` at once.
 --
 -- PINNED BY: TestMain's kind-contract rows (the placement is stated here), the
--- emitter's emitted string cell text on BOTH arms, and the arithmetic identity
--- `lenFieldOffset == heapBodyOffset valLayout lenFieldWord`, which says the two
--- arms name the same field of the same logical record.  There is deliberately
--- NO second constant for the word arm's length word: `lenFieldWord` IS it.
+-- emitter's emitted string cell text on BOTH arms, and TWO arithmetic
+-- identities that say the arms name the same field of the same logical record:
+--   val   `payloadWordOffset valLayout lenFieldWord == lenFieldOffset` (16 = 16)
+--   word  `heapBodyUnitOffset wordLayout lenFieldWord == 8` (body unit 1)
+-- (VR3b3 FIX F1: this comment previously claimed
+-- `lenFieldOffset == heapBodyOffset valLayout lenFieldWord`, i.e. 16 == 56 —
+-- a FALSE identity, in the module whose whole job is the one true set of
+-- numbers.  The real pins are the two rows above.)  There is deliberately NO
+-- second constant for the word arm's length word: `lenFieldWord` IS it.
 
 
 
