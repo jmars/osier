@@ -208,6 +208,13 @@ type Inst
       Blit Arg Arg Int
     | -- %r =abity call target(args)
       Call (Maybe String) AbiTy Arg (List CallArg)
+    | -- tcall [abity] target(args)   (Q1a's tail-call instruction: NO result,
+      -- BLOCK-FINAL, followed by a bare `ret` — vendor/qbe/doc/il.txt and
+      -- parse.c's Ttcall arm.  The AbiTy is the CALLEE's return class and must
+      -- agree with the enclosing function's own; abi1 refuses a mismatch with
+      -- a named err(), so a tcall the backend cannot honour is a COMPILE
+      -- ERROR, never a silent fallback to an ordinary call.)
+      TailCall AbiTy Arg (List CallArg)
     | -- %r =l allocN bytes   (CONSTANT size)
       Alloc String Int
     | -- a pure marker kept for readability of the printed IL; prints as a
@@ -366,6 +373,9 @@ readsTmps inst =
         Call _ _ target args ->
             List.filterMap tmpName (target :: List.filterMap callArgArg args)
 
+        TailCall _ target args ->
+            List.filterMap tmpName (target :: List.filterMap callArgArg args)
+
         Alloc _ _ ->
             []
 
@@ -421,6 +431,9 @@ isSafepoint : Inst -> Bool
 isSafepoint inst =
     case inst of
         Call _ _ _ _ ->
+            True
+
+        TailCall _ _ _ ->
             True
 
         _ ->

@@ -406,6 +406,13 @@ allocCapable ctx inst =
             -- may be any defun, including an allocating one.
             True
 
+        TailCall _ _ _ ->
+            -- Q1b: a tcall is a CALL in every respect this analysis cares
+            -- about.  The enclosing defun is framed (PFrame) by construction —
+            -- the tcall path emits its own rt_frame_leave before the tcall —
+            -- so a tail-calling defun must never be classified frame-free.
+            True
+
         _ ->
             False
 
@@ -424,6 +431,11 @@ uses ctx inst =
 
         Call _ _ _ args ->
             List.foldl (\a acc -> Set.union acc (slotOf ctx a)) Set.empty (List.filterMap callArgOperand args)
+
+        TailCall _ target args ->
+            List.foldl (\a acc -> Set.union acc (slotOf ctx a))
+                (slotOf ctx target)
+                (List.filterMap callArgOperand args)
 
         _ ->
             Set.empty
@@ -628,6 +640,13 @@ escapesOf ctx blocks =
                         Call _ _ _ args ->
                             if List.any (isFrameAddr ctx) (List.filterMap callArgOperand args) then
                                 Just ("a call in @" ++ b.label ++ " takes a frame address")
+
+                            else
+                                Nothing
+
+                        TailCall _ _ args ->
+                            if List.any (isFrameAddr ctx) (List.filterMap callArgOperand args) then
+                                Just ("a tcall in @" ++ b.label ++ " takes a frame address")
 
                             else
                                 Nothing

@@ -318,6 +318,18 @@ printInst inst =
                 ++ String.join ", " (List.map printCallArg args)
                 ++ ")"
 
+        TailCall ty target args ->
+            -- Q1a's tail call. The return annotation is ALWAYS printed (the
+            -- grammar makes it optional; the backend's C4 check reads it, and
+            -- an omitted annotation means void, which our ABI never emits).
+            "\ttcall "
+                ++ printAbi ty
+                ++ " "
+                ++ printArg target
+                ++ "("
+                ++ String.join ", " (List.map printCallArg args)
+                ++ ")"
+
         Alloc r n ->
             "\t%" ++ r ++ " =l alloc8 " ++ String.fromInt n
 

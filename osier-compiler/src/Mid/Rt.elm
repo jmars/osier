@@ -1484,6 +1484,9 @@ rtDeps =
           -- dispatches via aggcall — RawCallAgg, NOT an rtDeps edge — and
           -- self-tails via recur).
         ( "Rt.tail-known", [ "Rt.copyWords" ] )
+        , -- Q1b stage 1: the tcall staging seat's only RawCall edge is the same
+          -- raw-word Value-array copy (allocvec is a raw node, not an edge).
+          ( "Rt.stage-tail", [ "Rt.copyWords" ] )
         , ( "Rt.bounce", [ "Rt.bounceGo" ] )
         , ( "Rt.bounceGo", [] )
         , -- ===== THE STAGE 7A MID HOST (QBE_MIDHOST).  One entry per host
@@ -1795,6 +1798,12 @@ rawAbi =
           -- helper/loop (Rt.bounceGo) is NOT rawAbi — recur needs the val
           -- self-tail.
           "Rt.tail-known"
+        , -- Q1b stage 1: the tcall STAGING seat.  An all-word signature
+          -- ((argblock, nargs) -> buf), so the B6 rule derives it; declaring
+          -- it here is what keeps the derived set and this table in step (the
+          -- B6 THE TABLE row asserts they agree over the shipped text), and
+          -- rawAbiArity is what checks both the defun and Lower's call site.
+          "Rt.stage-tail"
         , "Rt.bounce"
         , -- ===== THE STAGE 7A HOST's die family (QBE_MIDHOST).  These are not
           -- driver seats: they are declared so the B6 RULE's derived set (an
@@ -1866,6 +1875,9 @@ rawAbiArity =
           -- pointer) — both checked against the actual param count at
           -- lowerDefun (rawAbiArityAgree).
         ( "Rt.tail-known", 3 )
+        , -- Q1b stage 1: the tcall staging seat takes (argblock, nargs) — the
+          -- block to copy and its arg count — and returns the buffer address.
+          ( "Rt.stage-tail", 2 )
         , ( "Rt.bounce", 1 )
         , -- zighost Z2: the two vec-store writers take (vec, index, *Value) —
           -- three words, checked against both the defun and Lower's seam.
@@ -1911,6 +1923,9 @@ driverSeeds =
           -- census cannot seed them — the tail-known/bounce pair joins the
           -- driverSeeds roots (Rt.bounceGo is a closure edge off Rt.bounce).
         "Rt.tail-known"
+        , -- Q1b stage 1: the tcall staging seat, named directly by Lower's
+          -- tcall arm — the same "the census cannot seed it" argument.
+          "Rt.stage-tail"
         , "Rt.bounce"
         ]
 

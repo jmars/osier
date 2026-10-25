@@ -121,6 +121,9 @@ isBarrier inst =
         Call _ _ _ _ ->
             True
 
+        TailCall _ _ _ ->
+            True
+
         Store _ _ _ ->
             True
 
@@ -271,6 +274,22 @@ readsTmps inst =
 
         Blit src dst _ ->
             Set.union (argTmps src) (argTmps dst)
+
+        TailCall _ target args ->
+            List.foldl
+                (\ca acc ->
+                    case ca of
+                        ArgVal _ a ->
+                            Set.union acc (argTmps a)
+
+                        ArgEnv a ->
+                            Set.union acc (argTmps a)
+
+                        ArgEllipsis ->
+                            acc
+                )
+                (argTmps target)
+                args
 
         Call _ _ target args ->
             List.foldl

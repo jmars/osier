@@ -8236,6 +8236,37 @@ defun Rt.copyWordsGo(dst : word, src : word, cnt : word) -> word {
     recur(dst, src, cnt);
   }
 }
+// ===== Q1b STAGE 1: THE STAGING SEAT A `tcall` NEEDS =====================
+// Rt.stage-tail(argblock, nargs) -> buf stages ONE copy of the caller's
+// contiguous 40-byte-per-arg block into memory that SURVIVES the caller's
+// rt_frame_leave — the static tsbuf (globals word 12, malloc'd once in
+// Rt.boot) for <=3 args, the GC allocvec above that (or under
+// QBE_NOTTAILSTAGE=1, globals word 13).  It returns the buffer's address, and
+// the caller then `tcall`s the real callee with `buf + 40*i` as argument i.
+//
+// WHY A COPY AT ALL: a tcall returns straight to OUR caller, so our pooled
+// frame is left (returned to the pool) BEFORE the callee runs, and the
+// callee's rt_frame_enter may pop and MEMSET that same pooled block.  Passing
+// pointers into our own frame would therefore hand the callee its own
+// zeroing.  The copy is the whole reason the convention works.
+//
+// THE INVARIANT (unchanged from Rt.tail-known, and stated here because it now
+// guards a different consumer): at most ONE staged block is in flight, its
+// args are read EXACTLY ONCE — by the callee's prologue blit — and NO
+// collection runs between the copy below and that read (after returning buf
+// the caller emits only the frame-leave and the tcall).  A future editor
+// adding a GC alloc AFTER the copy breaks it SILENTLY: the moved args are
+// never re-read.  The callee side needs no change at all: `paramFacts.tailed`
+// already excludes a tail-called defun from the lazy pointer-read
+// optimization, so every tail-callee blits at entry.
+defun Rt.stage-tail(argblock : word, nargs : word) -> word {
+  word g = rawcall rt_glob_addr();
+  word tsbuf = wload(g, 12);
+  word noStage = wload(g, 13);
+  word buf = payload((mkbool(nargs <= 3) && mkbool(noStage == 0)) ? mknum(tsbuf) : mknum(allocvec(nargs)), 0);
+  call Rt.copyWords(buf, argblock, nargs * 5);
+  return buf;
+}
 // ===== the stage-6 B2 mid-tail family (VERBATIM rt.zig rt_tail_known /
 // bounce, rt.zig:932-977).  Rt.tail-known is a rawAbi WORD defun (code,
 // argblock, nargs) whose RESULT is the 80-byte `:ret` (Agg "ret" — the body

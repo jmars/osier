@@ -185,6 +185,7 @@ type alias S =
     , paramPtr : Dict Int Il.Arg -- VR1: binder id -> the incoming `l` pointer holding that param (ptrRead defuns only)
     , noCollect : Set String -- P5: the CALL SYMBOLS whose execution cannot reach a GC safepoint (Mid.Rt.allocating's complement + the non-collecting libc entries); a call to anything else is a safepoint
     , leafFree : Bool -- P5's A/B switch (QBE_NOLEAF=1 -> False = every surface defun keeps its pooled frame, i.e. the pre-P5 shape)
+    , tailEmit : Bool -- Q1b: may this defun emit a real `tcall`?  TRUE only for an RtGeneric (closure-ABI) body — the only ones whose own return is the 80-byte `:ret`, which is exactly the condition the backend's C4 re-checks
     }
 
 
@@ -313,6 +314,22 @@ rawAbiRetIsAgg key =
             False
 
 
+{-| Q1b: the static arity budget for a `tcall`.  Our ABI spends rdi on the
+hidden sret pointer (the 80-byte `:ret` is inmem) and rax on `env` when the
+callee is a closure; the remaining integer argument registers are rsi, rdx,
+rcx, r8, r9 — five.  The design's census (MEASURED over the 4,786 static
+tail-known sites of the self-emit) is 1→2113, 2→1759, 3→505, 4→169, 5→198,
+6→24, ... so a budget of 4 covers 95.0% of them, and the 240 arity-5+ sites
+keep a correct non-tail lowering — a STATIC, compile-time choice between two
+correct lowerings, never a fallback of an emitted tcall.  (Five would also fit
+a direct call, which passes no count word; the budget is held at the design's
+number so the census above stays the claim it was measured as.)
+-}
+maxTailCallArgs : Int
+maxTailCallArgs =
+    4
+
+
 {-| The rawAbi ARITY agreement check (stage 6 A1): Mid.Rt.rawAbiArity is the
 ONE place the raw-word defuns' param counts are declared.  Checked against
 the defun's ACTUAL params at lowerDefun AND against the generated call
@@ -321,6 +338,8 @@ touching the record, or a hand-wired call site left under-applied) is a
 compile Err, never the silent register-class miscompile the record exists to
 kill (the SEGV class the U2 review's nice-to-have 5 named).
 -}
+
+
 rawAbiArityAgree : String -> Int -> Result String ()
 rawAbiArityAgree key actual =
     case Dict.get key MidRt.rawAbiArity of
@@ -1224,6 +1243,10 @@ lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec _ mid
                     , paramPtr = Dict.empty
                     , noCollect = noCollect
                     , leafFree = leafFree
+                    , -- Q1b: the MODULE-level seed.  False here and set per
+                      -- defun by lowerFunBody: only an RtGeneric body may emit
+                      -- a tcall, and nothing outside a defun body lowers an App.
+                      tailEmit = False
                     }
 
                 -- THE MIDGC REFUSAL ARMS ARE GONE (stage 7 O2).  Two arms
@@ -2439,6 +2462,14 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , ptrRead = sOuter.ptrRead
             , noCollect = sOuter.noCollect
             , leafFree = sOuter.leafFree
+            , -- Q1b: a `tcall` is legal exactly where OUR OWN return convention is
+              -- the one the callee must produce into: the 80-byte `:ret` that
+              -- abi1 forwards as the hidden sret pointer.  That is RtGeneric —
+              -- every surface defun and every closure body — and nothing else:
+              -- a lean body returns `:val`, a rawAbi word body a word, and a
+              -- tcall from either is refused by the backend's C4 check (loudly,
+              -- naming the condition), so Mid must not emit one there.
+              tailEmit = rt == RtGeneric
             }
 
         -- the (empty) @start block, closed by its fallthrough to @body
@@ -7155,7 +7186,78 @@ directCall key args dest isTail s =
         bounceCallee =
             bounceSeat s
     in
-    if isTail then
+    if isTail && s.tailEmit && List.length args <= maxTailCallArgs then
+        -- ================= Q1b: A REAL TAIL CALL =================
+        -- `tcall :ret $q_F(l %b0, ..., l %bN)` — the callee returns straight
+        -- to OUR caller (abi1 forwards fn->retr as its hidden sret argument,
+        -- which is why C4 demands the callee's return class equal ours).
+        --
+        -- THE MID CONVENTION, in the order the instructions are emitted:
+        --   1. stageArgs: lower every arg into a ROOTED frame slot (an arg's
+        --      own lowering can contain calls — safepoints — and only slots
+        --      survive those), then copy them into ONE contiguous frame block.
+        --   2. Rt.stage-tail: copy that block into memory that SURVIVES our
+        --      rt_frame_leave (tsbuf for <=3 args, the GC allocvec above it).
+        --      This copy is not redundant: our pooled frame goes back to the
+        --      pool and the callee's frame-enter may pop and MEMSET the same
+        --      block, so a pointer into our own frame would hand the callee
+        --      its own zeroing.
+        --   3. %b<i> = %buf + 40*i — the argument pointers the callee blits
+        --      from at entry.
+        --   4. rt_frame_leave: our pooled frame is left HERE, before the jump.
+        --   5. the tcall (which tears down the machine frame and jumps), then
+        --      a bare `ret` — required by the IL grammar; emit.c suppresses it
+        --      because the block already ended in the jmp.
+        -- Between (2) and the callee's prologue blit NOTHING can collect, so
+        -- the unrooted staged copies are safe.  Keep it that way: do not add a
+        -- GC-allocating call to this sequence.
+        stageArgs args s
+            |> Result.andThen
+                (\( _, base, s1 ) ->
+                    let
+                        nargs =
+                            List.length args
+
+                        ( bp, s2 ) =
+                            freshTmp s1
+
+                        argPtrs =
+                            List.map (\i -> ( bp ++ "_" ++ String.fromInt i, i )) (List.range 0 (nargs - 1))
+                    in
+                    rawAbiArityAgree "Rt.stage-tail" 2
+                        |> Result.andThen
+                            (\_ ->
+                                Ok
+                                    (emit
+                                        (Call (Just bp)
+                                            (Base L)
+                                            (Il.Sym ("q_" ++ mangle "Rt.stage-tail"))
+                                            [ ArgVal (Base L) (Il.Tmp (slotTmp base))
+                                            , ArgVal (Base L) (Il.Con nargs)
+                                            ]
+                                        )
+                                        s2
+                                        |> (\sx ->
+                                                List.foldl
+                                                    (\( ptmp, i ) acc ->
+                                                        emit (Bin (Just ptmp) L Add (Il.Tmp bp) (Il.Con (sx.layout.valSizeBytes * i))) acc
+                                                    )
+                                                    sx
+                                                    argPtrs
+                                           )
+                                        |> emit (Call Nothing (Base W) (Il.Sym ("q_" ++ mangle "Rt.frame-leave")) [])
+                                        |> emit
+                                            (TailCall
+                                                (Agg "ret")
+                                                (Il.Sym ("q_" ++ mangle key))
+                                                (List.map (\( ptmp, _ ) -> ArgVal (Base L) (Il.Tmp ptmp)) argPtrs)
+                                            )
+                                        |> closeBlock (Ret Nothing)
+                                    )
+                            )
+                )
+
+    else if isTail then
         -- TAIL: rt_tail-known takes ONE contiguous argblock pointer + nargs, so
         -- the staged block stays (the callee copies out of it at entry — the
         -- argblock itself dies with the GC array Rt.tail-known builds).
