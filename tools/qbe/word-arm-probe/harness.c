@@ -166,8 +166,21 @@ int main(void)
         ok((w & 7) == HEAP_PTR_TAG,
            "A: a word-arm string literal is ONE tagged heap pointer (...001)");
         /* THE SEAT CONVENTION: the untagged value must be the BODY the seat
-         * returned, not a block base — this is the assertion that would have
-         * caught Blocker 1 (the emitter's `+16` / `-16` disagreement). */
+         * returned, not a block base.
+         *
+         * WHAT THIS ROW CAN AND CANNOT CATCH (measured by the VR3b3
+         * re-review, which grafted this probe onto the PRE-FIX emitter).  The
+         * probe as a whole fails there — 5 of 6 probes — but NOT through this
+         * assertion: on the paired-error emitter the old `+16` (consuming the
+         * seat's return) and the old `-16` (building the value word) CANCEL,
+         * so the stored word is still `body|1` and this check PASSES.  The
+         * load-bearing probes are the OTHER FIVE (str/payload/len/tagheap/
+         * tagbool), which fail on the out-of-bounds body writes, the wrong
+         * body word and the boolean fold.  This row catches the HALF-fixed
+         * state a later author can produce (a writer that keeps `-16` while
+         * the seat path drops `+16`, or the reverse) — a cancelling pair of
+         * errors looks exactly like a passing check, so do NOT treat the five
+         * behavioural probes as redundant with this arithmetic identity. */
         ok((long *)(uintptr_t)(w & UNTAG_MASK) == g_last_body,
            "A/SEAT: the untagged value word IS the body address the seat returned (header 16 B before it)");
         long *body = g_last_body;

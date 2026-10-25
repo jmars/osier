@@ -3730,10 +3730,13 @@ arm writes ONE word, and WHICH word depends on the code's SHAPE
     number is the i61 fixnum (`n` shifted up into the tag's free low bits), a
     boolean is `tagTrue + (x == 0)` (there is no payload word to carry the
     flag), nil and error are the tag alone.  NOTHING is allocated.
-  * `WordHeapCode` - a heap block: allocate through the code's Mid seat, write
-    the body through `heapBodyOffset`, and store `block OR heapPtrTag`.  The
-    header's kind code is written by the SEAT (`Rt.kindHdr`), which is why the
-    seat call is the place the code is named, not a second store here.
+  * `WordHeapCode` - a heap object: allocate through the code's Mid seat, write
+    the body through `heapBodyUnitOffset` (the seat RETURNS the body), and store
+    `body OR heapPtrTag` - the 2-word GC header is the SEAT's, at
+    `heapHeaderOffset` (16 bytes) BEFORE the body, so no site here computes a
+    header address or subtracts one.  The header's KIND CODE is written by the
+    seat (`Rt.kindHdr`), which is why the seat call is the place the code is
+    named, not a second store here.
 
 Which codes are writable is `wordCellRefusal`'s ONE statement; this function
 implements exactly that set.  A heap code whose body would have to carry a RAW

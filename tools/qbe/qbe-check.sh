@@ -2967,4 +2967,35 @@ else
   fi
 fi
 
+# ---- THE WORD ARM'S BEHAVIOUR PROBE (perf VR3b3, wired here so it RUNS) ----
+# WHY THIS ROW EXISTS AT ALL.  Under QBE_VALREP=word no program compiled through
+# run.js can run: the runtime is always injected, so the emitted set always
+# reaches Rt.main and the runtime's FIRST CALL stops the arm at AREA 6.  The
+# emitter's heap side (tag writes, payload reads, kind tests, the string cell)
+# therefore has no executable oracle on the arm it targets — and a TEXT pin
+# cannot be one, because on this arm a text pin asserts the shape the AUTHOR
+# wrote.  MEASURED: six bugs shipped past every text pin in VR3b3 before this
+# probe existed; it caught all six.
+#
+# WHY IT IS INVOKED FROM HERE.  A committed script is not a gate: the first
+# version of this row did not exist, so the probe ran only when someone
+# remembered — which is the same failure as the scratch harness it replaced
+# ("an oracle that has to be rebuilt by hand will not run again" becomes "an
+# oracle that has to be REMEMBERED will not run again").  qbe-check.sh is the
+# natural home: it already drives vendor qbe + cc, and the probe costs ~20 s.
+# Its own runner gates every probe on EXIT CODE, FAIL count and an exact PASS
+# count (a wrong offset dies as SIGSEGV/SIGABRT with no FAIL line).
+if [ -x "$ROOT/tools/qbe/word-arm-probe.sh" ]; then
+  if probe_out="$(TMPDIR="$TMP" "$ROOT/tools/qbe/word-arm-probe.sh" 2>&1)"; then
+    echo "PASS word-arm-probe: $(printf '%s\n' "$probe_out" | grep -c '^PASS ') probe(s) RUN and passed ($(printf '%s\n' "$probe_out" | grep -c '^PASS ') of 6, $(printf '%s\n' "$probe_out" | grep -oE '[0-9]+ checks' | grep -oE '^[0-9]+' | paste -sd+ | bc) checks) — the word arm's heap side executes against the runtime's seat convention"
+  else
+    echo "FAIL word-arm-probe: the word arm's behaviour probe FAILED (the heap side no longer runs correctly under QBE_VALREP=word)"
+    printf '%s\n' "$probe_out" | sed 's/^/    /'
+    FAIL=1
+  fi
+else
+  echo "FAIL word-arm-probe: tools/qbe/word-arm-probe.sh is missing or not executable — the ONLY oracle that runs word-arm code was deleted"
+  FAIL=1
+fi
+
 exit $FAIL

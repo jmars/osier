@@ -25,6 +25,17 @@
 #      implements on every path and the val arm consumes;
 #   4. the binary RUNS and its assertions are checked.
 #
+# WHAT THE PROBES CATCH, AND WHAT ONE ROW CANNOT (measured, VR3b3 re-review).
+# Grafted onto the PRE-FIX emitter this gate goes 5/6 RED — str (glibc abort on
+# the out-of-bounds body writes), payload (the heap-cons read wrong), len
+# (SEGV), tagheap (SEGV), tagbool (BLOCKER 2's fold), with tagnil correctly
+# green.  NOT through the `A/SEAT` row, though: on that emitter the old `+16`
+# (consuming the seat's return) and the old `-16` (building the value word)
+# CANCEL, so the seat identity still holds.  THE FIVE BEHAVIOURAL PROBES ARE THE
+# LOAD-BEARING PART; the seat row catches only the half-fixed state (one side
+# flipped, the other not).  A cancelling pair of errors looks like a passing
+# check, which is why none of these probes may be dropped as "redundant".
+#
 # THE EXIT CODE IS PART OF THE ASSERTION.  A wrong offset does not print FAIL —
 # it dies as SIGSEGV (139) or SIGABRT (134) — so each probe's exit status is
 # gated, and the probe's own PASS/FAIL lines are checked on top.  A gate that

@@ -34,6 +34,7 @@ compiler"), then node-lane retirement, the GADT-indexed AST, and the corpus/pape
 | what | command | expect at `00cc7da` |
 |---|---|---|
 | QBE structural + behavioural + GC-churn | `./tools/qbe/qbe-check.sh` | exit 0, **270 PASS / 0 FAIL** |
+| the WORD ARM'S HEAP SIDE, EXECUTED (perf VR3b3) | inside `./tools/qbe/qbe-check.sh` as the `word-arm-probe` row (**gating**); standalone: `tools/qbe/word-arm-probe.sh` | exit 0, **6 probes / 23 checks** — the only oracle that RUNS word-arm code, because every program stops at the runtime (AREA 6) |
 | the language gate | `tests/elm-fixtures/run-elm-gate.sh` | exit 0, **PASS=154 FAIL=0** |
 | unit rows | `node test-run.js` (in `osier-compiler/`) | exit 0, **111/111** |
 | the whole chain | `tools/osier-numbers.sh` | exit 0, `VERDICT: all checks pass` |
