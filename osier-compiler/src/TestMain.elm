@@ -1800,15 +1800,17 @@ checks rt rawMidText =
             _ ->
                 False
         )
-    , check "VR3b2 AREA 7 GATE — THE Rt SURFACE IS REFUSED WHOLESALE: a program carrying any Rt.* key is refused on the word arm with the runtime named, because `runtime.mid`'s stride-carrying defuns (gcAlloc's `2 + count + 4*count*kind`, apply's `args + rem*40`, the values table, argv, the printer) are VR3c's lane. The SAME program lowers on the val arm, so the gate is the arm's"
+    , check "VR3b3 (supersedes VR3b2's wholesale gate) - THE Rt SURFACE IS CLASSIFIED PER DEFUN, AND STILL REFUSES. VR3b2 refused any program reaching `runtime.mid` wholesale because the runtime's stride-carrying defuns assumed 40-byte values; VR3c twinned those strides, so the blanket reason went stale and the refusal reported the LANE instead of the CONSTRUCT. The Rt set now gets the SAME pre-walk classifier the surface does: the refusal names the first un-ported Rt defun and its construct (`Rt.<key>: AREA ...`), and NOTHING is relaxed - an un-ported construct anywhere in the reachable Rt set still refuses before any IL is produced, which is why the SAME program still lowers on the val arm and still refuses on the word arm"
         (case
             ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.copyWords"
             , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.copyWords"
             )
          of
             ( Err msg, Ok _ ) ->
-                String.contains "AREA 7 (THE Rt SURFACE)" msg
-                    && String.contains "runtime.mid" msg
+                String.contains "Rt." msg
+                    && String.contains "AREA " msg
+                    && String.contains "NOT IMPLEMENTED" msg
+                    && not (String.contains "AREA 7 (THE Rt SURFACE)" msg)
 
             _ ->
                 False
@@ -1834,6 +1836,150 @@ checks rt rawMidText =
                     && not (String.contains "%pv0" vTxt)
 
             _ ->
+                False
+        )
+    , check "VR3b3 AREA A/B/D - THE WORD ARM'S HEAP-ACCESS CONTRACT IS ONE SET OF DERIVED NUMBERS (not constants: layout-census.sh parses only `name = <digits>` at top level, so every word-arm heap number is a FUNCTION of the constants). The 2-word header does NOT move (16 B in BOTH arms, and it is `bodyWords layout 0 0` - what a zero-body object costs - so the header size and the body rule cannot drift); a heap body unit is one Value slot (8 word / 40 val); the untag mask is all ones on the val arm (nothing is masked there) and -8 on the word arm; and a word-arm string's LENGTH is body unit `lenFieldWord`, i.e. `heapBodyOffset wordLayout 1` = 24, the same field the val arm reaches at `lenFieldOffset` = 56 inside a 40-byte Value"
+        (RtLayout.heapHeaderBytes RtLayout.wordLayout
+            == 16
+            && RtLayout.heapHeaderBytes RtLayout.valLayout
+            == 16
+            && RtLayout.heapHeaderBytes RtLayout.valLayout
+            == RtLayout.bodyWords RtLayout.valLayout 0 0 * RtLayout.wordBytes
+            && RtLayout.heapBodyStride RtLayout.wordLayout
+            == 8
+            && RtLayout.heapBodyStride RtLayout.valLayout
+            == 40
+            && RtLayout.heapBodyOffset RtLayout.wordLayout 0
+            == 16
+            && RtLayout.heapBodyOffset RtLayout.wordLayout RtLayout.lenFieldWord
+            == 24
+            && RtLayout.payloadWordOffset RtLayout.valLayout RtLayout.lenFieldWord
+            == RtLayout.lenFieldOffset
+            && RtLayout.heapPtrTag RtLayout.wordLayout
+            == 1
+            && RtLayout.untagMask RtLayout.wordLayout
+            == -8
+            && RtLayout.untagMask RtLayout.valLayout
+            == -1
+            && RtLayout.wordLayout.tagBits
+            == 3
+            && RtLayout.valLayout.tagBits
+            == 0
+            && (2 * 2 * 2) - 1
+            == RtLayout.wordLayout.tagMask
+            && List.length RtLayout.wordHeapCodes
+            == 9
+            && List.member RtLayout.tagString RtLayout.wordHeapCodes
+            && List.member RtLayout.tagRecord RtLayout.wordHeapCodes
+            && not (List.member RtLayout.tagNumber RtLayout.wordHeapCodes)
+            && not (List.member RtLayout.tagBoolean RtLayout.wordHeapCodes)
+            && not (List.member RtLayout.tagNil RtLayout.wordHeapCodes)
+            && not (List.member RtLayout.tagError RtLayout.wordHeapCodes)
+            && not (List.member RtLayout.tagMark RtLayout.wordHeapCodes)
+        )
+    , check "VR3b3 AREA A + D - THE STRING CELL, EMITTED. Under the word arm a string literal is ONE tagged pointer to a heap block: `Rt.allocRaw` allocates the byte body, the body address is the untag PLUS the 2-word header (NO payload-word load - the seat returns `mknum(addr)`), body unit 0 takes the static byte pointer, body unit `lenFieldWord` (=1, at +24) takes the LENGTH, and the value is the block OR'd with the heap tag. The val arm keeps the 40-byte record: a tag word `storew 1` then the same two words at +8/+16. Neither arm writes the other's shape, and the word text carries no 32-bit tag store at all"
+        (case
+            ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ strProbe ]) [ strProbe ] "St.f"
+            , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ strProbe ]) [ strProbe ] "St.f"
+            )
+         of
+            ( Ok wordMod, Ok valMod ) ->
+                let
+                    wTxt =
+                        Print.print wordMod
+
+                    vTxt =
+                        Print.print valMod
+                in
+                String.contains "call $q_Rt_x2eallocRaw(" wTxt
+                    && String.contains "=l and %t" wTxt
+                    && String.contains ", -8\n" wTxt
+                    && String.contains ", 16\n" wTxt
+                    && String.contains ", 24\n" wTxt
+                    && String.contains "=l or %t" wTxt
+                    && String.contains "=l shl 3, 3\n" wTxt
+                    && not (String.contains "storew" wTxt)
+                    && String.contains "storew 1, %s" vTxt
+                    && not (String.contains "allocRaw" vTxt)
+                    && not (String.contains ", -8\n" vTxt)
+
+            _ ->
+                False
+        )
+    , check "VR3b3 AREA B - A WORD-ARM PAYLOAD READ IS A SHAPE, NOT AN OFFSET, AND A WRONG SHAPE REFUSES LOUDLY. `payload(x, 0)` emits: read the value word, mask the tag, branch on fixnum vs heap, and a THIRD path that calls `Rt.die` with the reason. The fixnum path is `sar 3` (the payload IS the value, shifted down out of the tag bits); the heap path is untag -> +16 (past the header) -> +8i (body unit) -> `loadl`. Nothing here is a shifted 40-byte offset, and the refusal is the safety property: a payload read on nil/true/false/error would otherwise read another layout's bits. The val arm keeps the blind record read"
+        (case
+            ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ payloadProbe ]) [ payloadProbe ] "Pl.f"
+            , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ payloadProbe ]) [ payloadProbe ] "Pl.f"
+            )
+         of
+            ( Ok wordMod, Ok valMod ) ->
+                let
+                    wTxt =
+                        Print.print wordMod
+
+                    vTxt =
+                        Print.print valMod
+                in
+                String.contains "\t%t0 =l loadl %a0\n\t%t1 =w and %t0, 7\n\t%t2 =w ceqw %t1, 0\n" wTxt
+                    && String.contains "\t%t3 =w ceqw %t1, 1\n" wTxt
+                    && String.contains "\t%t4 =l sar %t0, 3\n" wTxt
+                    && String.contains "\t%t5 =l and %t0, -8\n" wTxt
+                    && String.contains "call $q_Rt_x2edie(l $d0)\n\thlt\n" wTxt
+                    && String.contains "payload read on a word that is neither a fixnum" wTxt
+                    && not (String.contains "loadw" wTxt)
+                    && not (String.contains "payload read on a word" vTxt)
+                    && not (String.contains "sar " vTxt)
+
+            _ ->
+                False
+        )
+    , check "VR3b3 AREA D - THE WORD-ARM STRING LENGTH IS A CELL LOAD AT BODY UNIT `lenFieldWord`. `payload32(s, 1)` under the word arm is the same shape dispatch as `payload` and then the LOW HALF of body unit 1: untag -> +16 -> +24 -> `loadl` -> `loadw` -> `extsw`. There is no string-specific arm anywhere - the placement is the contract - which is why runtime.mid's string sites need no twin at all"
+        (case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ lenProbe ]) [ lenProbe ] "Ln.f" of
+            Ok mod ->
+                let
+                    txt =
+                        Print.print mod
+                in
+                String.contains "\t%t6 =l add %t5, 16\n\t%t7 =l add %t6, 24\n\t%t4 =l loadl %t7\n" txt
+                    && String.contains "=w loadw %t4\n" txt
+                    && String.contains "=l extsw %t8\n" txt
+                    && not (String.contains "storew" txt)
+
+            Err _ ->
+                False
+        )
+    , check "VR3b3 AREA C - `tagis` IS A HEADER-KIND READ, AND CODE 0 IS REFUSED BY NAME (VR3c's promissory note, discharged). `tagis(v, 4)` (cons) emits: mask the tag, compare with the shared heap tag 1, and ONLY THEN - inside that branch, because untagging a fixnum yields a small integer and an unconditional header load would fault - read the header, shift the code down, mask it, and REFUSE with `Rt.die` when the code is 0 (code 0 means NO CODE, a val-arm header; no word-arm allocator writes it). Then compare with 4. A tag MISMATCH is not an error: only the impossible code is"
+        (case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ tagProbe ]) [ tagProbe ] "Tg.f" of
+            Ok mod ->
+                let
+                    txt =
+                        Print.print mod
+                in
+                String.contains "\t%t1 =w and %t0, 7\n\t%t2 =w ceqw %t1, 1\n" txt
+                    && String.contains "\t%t5 =l and %t0, -8\n\t%t6 =l sub %t5, 16\n\t%t7 =l loadl %t6\n\t%t8 =w shr %t7, 24\n\t%t8 =w and %t8, 15\n" txt
+                    && String.contains "=w ceqw %t8, 0\n" txt
+                    && String.contains "a heap header carries KIND CODE 0" txt
+                    && String.contains "=w ceqw %t8, 4\n" txt
+                    && String.contains "=l extsw %t3\n" txt
+                    && not (String.contains "loadw" txt)
+
+            Err _ ->
+                False
+        )
+    , check "VR3b3 AREA C - THE VALTAG AND THE WORD IMMEDIATE ARE DIFFERENT NUMBERINGS, AND ONLY A `tagis` SHOWS IT. `tagis(v, 5)` is a NIL test: nil is VALTAG 5 and word IMMEDIATE 2 (`wordLayout.tagNil`), so the emitted compare is against 2 and the number 5 appears nowhere. A reader that reused the valtag as the immediate would compare against 5 and be wrong for EVERY nil - which is why `wordTagShape` reads the instance's own fields instead of restating them"
+        (case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ nilTagProbe ]) [ nilTagProbe ] "Nt.f" of
+            Ok mod ->
+                let
+                    txt =
+                        Print.print mod
+                in
+                String.contains "=w ceqw %t1, 2\n" txt
+                    && not (String.contains "=w ceqw %t1, 5\n" txt)
+                    && not (String.contains "=w ceqw %t2, 5\n" txt)
+                    && not (String.contains "shr" txt)
+                    && not (String.contains "loadw" txt)
+
+            Err _ ->
                 False
         )
     , check "B1fix copyWords is a rawAbi WORD pair: the WRAPPER (3 l params, ret l, frame-free) hands off to the LOOP, and the LOOP (3 l params, ret l, frame-free) is an in-frame self-tail with NO :val aggregate or 40-byte blit in its body — the per-word blit/boxing is gone (fails on the pre-fix :val copyWords, which had ret :val, a 40-byte blit, a self-CALL recur and no copyWordsGo)"
@@ -13404,6 +13550,112 @@ bigProbe =
         Lam
             { params = []
             , body = Lit (LNumber 1152921504606846976)
+            }
+    }
+
+
+{-| perf VR3b3 — THE STRING-CELL PROBE: `\x -> "hi"`, whose body is a string
+LITERAL.  Under the word arm that is a HEAP BLOCK (code 1, a raw body): the
+`Rt.allocRaw` seat allocates the byte body, body unit 0 takes the static byte
+pointer, body unit `lenFieldWord` takes the length, and the value is the block
+OR'd with the heap tag.  On the val arm it is the same two words inside a
+40-byte Value record.  One probe, both arms, so the shapes are compared rather
+than asserted from memory.
+-}
+strProbe : Defun
+strProbe =
+    { key = "St.f"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body = Lit (LString "hi")
+            }
+    }
+
+
+{-| perf VR3b3 AREA B — THE PAYLOAD-READ PROBE: `\x -> mknum(payload(x, 0))`.
+The read has to DISPATCH on the value's low tag (a fixnum's payload is the word
+shifted down; a heap object's is a body word) and REFUSE loudly on anything
+else, which is what the emitted text must show.
+-}
+payloadProbe : Defun
+payloadProbe =
+    { key = "Pl.f"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body =
+                Unsafe
+                    (RawMkValue
+                        { tag = RtLayout.tagNumber
+                        , words = [ Unsafe (RawPayload { value = Var 0, word = 0 }) ]
+                        }
+                    )
+            }
+    }
+
+
+{-| perf VR3b3 AREA D — THE LENGTH PROBE: `\s -> mknum(payload32(s, 1))`.  Body
+unit `lenFieldWord` read as an i32, i.e. where a word-arm string keeps its
+length.  No string-specific arm anywhere: the placement is the contract.
+-}
+lenProbe : Defun
+lenProbe =
+    { key = "Ln.f"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "s" } ]
+            , body =
+                Unsafe
+                    (RawMkValue
+                        { tag = RtLayout.tagNumber
+                        , words = [ Unsafe (RawPayload32 { value = Var 0, word = RtLayout.lenFieldWord }) ]
+                        }
+                    )
+            }
+    }
+
+
+{-| perf VR3b3 AREA C — THE KIND-TEST PROBE: `\v -> mkbool(tagis(v, 4))`, a
+CONS test.  Under the word arm the tag must be the shared heap tag AND the
+header's kind code must be 4, and a header whose code is 0 (NO CODE, a val-arm
+header) must REFUSE by name rather than answer "no".
+-}
+tagProbe : Defun
+tagProbe =
+    { key = "Tg.f"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "v" } ]
+            , body =
+                Unsafe
+                    (RawMkValue
+                        { tag = RtLayout.tagBoolean
+                        , words = [ Unsafe (RawTagIs { value = Var 0, tag = RtLayout.tagCons }) ]
+                        }
+                    )
+            }
+    }
+
+
+{-| perf VR3b3 AREA C — THE IMMEDIATE-TAG PROBE: `\v -> mkbool(tagis(v, 5))`, a
+NIL test.  Nil is VALTAG 5 and word IMMEDIATE 2, so the emitted compare must be
+against 2 (the instance's field) and never against 5 (the valtag): the two
+numberings meet here and nowhere else is that visible.
+-}
+nilTagProbe : Defun
+nilTagProbe =
+    { key = "Nt.f"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "v" } ]
+            , body =
+                Unsafe
+                    (RawMkValue
+                        { tag = RtLayout.tagBoolean
+                        , words = [ Unsafe (RawTagIs { value = Var 0, tag = RtLayout.tagNil }) ]
+                        }
+                    )
             }
     }
 

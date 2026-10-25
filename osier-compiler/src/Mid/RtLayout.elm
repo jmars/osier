@@ -1,7 +1,7 @@
 module Mid.RtLayout exposing
     ( abiAlign
     , bodyWords
-    , heapKindMask, heapKindScanned, heapKindShift
+    , heapBodyOffset, heapBodyStride, heapHeaderBytes, heapKindMask, heapKindScanned, heapKindShift, heapPtrTag
     , i32Bytes
     , descArityOffset, descCacheOffset, descCodeOffset, descNcapsOffset, descQbeFields
     , descTotalBytes, direntNameOffset
@@ -18,7 +18,9 @@ module Mid.RtLayout exposing
     , payloadBase, payloadWordOffset
     , retArityOffset, retArgsOffset, retEOffset, retFOffset, retKindOffset, retQbeFields, retSizeBytes, retValOffset
     , tagBoolean, tagCons, tagError, tagFloat, tagLambda, tagMark, tagNil, tagNumber, tagPrim, tagRecord, tagStream, tagString, tagSymbol, tagVector
+    , untagMask
     , ValLayout, valLayout
+    , WordTagShape(..), wordHeapCodes, wordTagShape
     , wordFixnumLimit, wordLayout
     , valQbeFields, valSizeBytes, valuePayloadWords, valueTagBytes, wordBytes
     )
@@ -297,9 +299,189 @@ heapKindScanned code =
 -- `runtime.mid`'s gcAlloc: val `2 + (countW + 4 * countW * kindW)` ==
 -- `bodyWords valLayout count 1`, and the word arm's `2 + countW` ==
 -- `bodyWords wordLayout count 1`.  TestMain pins both directions.
+--
+-- Everything below in this section is a FUNCTION, never a new constant: the
+-- parse contract above (layout-census.sh) demands that the set of top-level
+-- `name = <digits>` constants EQUALS its expected list, so a new number stated
+-- as a constant would be a census failure.  These are all DERIVED from the
+-- constants above, which is the point of them anyway.
 bodyWords : ValLayout -> Int -> Int -> Int
 bodyWords layout count scanKind =
     2 + count * (1 + layout.valuePayloadWords * scanKind)
+
+
+
+-- ============ THE WORD ARM'S HEAP ACCESS SHAPE (VR3b3 AREAS A, B, D) ============
+-- THE ONE STATEMENT of how a word-arm HEAP OBJECT is reached, so the emitter's
+-- construction sites (area A), its payload reads (area B) and its tag tests
+-- (area C) cannot each invent a different arithmetic.  The three steps are
+-- ALWAYS these three, in this order:
+--
+--   1. UNTAG.  The Value word's low bits are the tag (`tagMask`), and a heap
+--      object's tag is `heapPtrTag` (`...001`), so the block address is
+--      `w AND untagMask`.  On the val arm `untagMask` is all ones: the tag is a
+--      whole word and nothing is masked, which is why the val arm's readers
+--      never call this and the word arm's always do.
+--   2. STEP PAST THE 2-WORD HEADER.  `heapHeaderBytes` — the same two words in
+--      both arms (VR3c AREA 1: the header does not move; only the body strides
+--      do).  It is DERIVED from `bodyWords layout 0 0`, i.e. "what a zero-body
+--      object costs", so the header size and the body-size rule cannot drift.
+--   3. STEP INTO THE BODY.  `heapBodyOffset layout i` — body unit `i`, a unit
+--      being one Value slot (`heapBodyStride`): 8 bytes on the word arm, 40 on
+--      the val arm.  This is the HEAP-BLOCK shape and it is deliberately NOT
+--      `payloadWordOffset`, which is the shape of a 40-byte Value RECORD (a tag
+--      word then payload words).  Under the word arm a Value IS one word, so a
+--      payload read is steps 1-3; conflating the two is exactly the
+--      silent-wrong-offset failure this module exists to prevent.
+--
+-- WHAT IS NOT HERE.  The header's KIND CODE field (`heapKindShift`/
+-- `heapKindMask`, above) is read from the header word this section steps past,
+-- and `wordTagShape` below says which word shape a VALTAG has.  The collector's
+-- scan-vs-raw rule is still `heapKindScanned` and still bit 1 of the header;
+-- nothing in this section moves either.
+
+
+-- The byte size of the GC header — the same two words in both arms.
+heapHeaderBytes : ValLayout -> Int
+heapHeaderBytes layout =
+    bodyWords layout 0 0 * layout.wordBytes
+
+
+-- The tag a word-arm HEAP OBJECT carries in its Value word's low bits.  On the
+-- word instance every heap tag field reads this one number (`heapTagIsKind`
+-- says the tag does not name the kind); on the val instance this function is
+-- never read — every call site is inside a word-arm branch — and `tagCons` is
+-- 4 there, i.e. a KIND, which is why a reader must branch on `heapTagIsKind`
+-- before it may treat a tag as a pointer tag.
+heapPtrTag : ValLayout -> Int
+heapPtrTag layout =
+    layout.tagCons
+
+
+-- The mask that strips the low tag bits from a Value word: all ones on the val
+-- arm (nothing is masked there), `complement tagMask` on the word arm.
+untagMask : ValLayout -> Int
+untagMask layout =
+    0 - (layout.tagMask + 1)
+
+
+-- One body unit, in bytes: a Value slot (8 on the word arm, 40 on the val arm).
+heapBodyStride : ValLayout -> Int
+heapBodyStride layout =
+    layout.wordBytes * (1 + layout.valuePayloadWords)
+
+
+-- The byte offset of body unit `i` inside a heap BLOCK (past the 2-word header).
+heapBodyOffset : ValLayout -> Int -> Int
+heapBodyOffset layout word =
+    heapHeaderBytes layout + word * heapBodyStride layout
+
+
+-- THE CODES WHOSE WORD-ARM OBJECT IS A HEAP BLOCK — i.e. the VALTAGS that are
+-- not immediates.  Stated ONCE here because three readers need it and a fourth
+-- copy would be the drift this module exists to prevent: the emitter's tag
+-- tests (area C), its payload reads (area B) and the kind-contract test.
+--
+-- IT IS NOT `heapKindScanned`.  Scanned = "the body is Values"; this list =
+-- "the object is a heap block at all".  A string (1) and a float (12) are heap
+-- blocks with RAW bodies, so they are here and not there; an error (9) is
+-- scanned (a code-9 block's body would be Values) and on the word arm it is an
+-- IMMEDIATE instead — see `wordTagShape`, and the tension is named there.
+wordHeapCodes : List Int
+wordHeapCodes =
+    [ tagString, tagSymbol, tagCons, tagLambda, tagPrim, tagVector, tagStream, tagFloat, tagRecord ]
+
+
+-- WHICH WORD SHAPE A VALTAG HAS, which is what a word-arm tag test dispatches
+-- on (area C) and what a construction site must produce (area A).
+--
+-- THE VALTAGS ARE UNCHANGED — the contract above says the codes ARE the ValTag
+-- integers — but the WORD ENCODING of a valtag is not the valtag: a nil is
+-- valtag 5 and the word immediate `...010` (2), an error is valtag 9 and the
+-- word immediate `...101` (5), a boolean is valtag 3 and TWO immediates
+-- (`...011` true, `...100` false) because there is no payload word to carry the
+-- flag.  Those numbers are the word INSTANCE's own fields, read here rather
+-- than restated, so a change to the encoding moves this function with it.
+--
+--   WordImmediate tags  the low-3-bit tags that name this valtag.  A boolean
+--                       has two; every other immediate exactly one.
+--   WordHeapCode code   the object is a heap block and `code` is its header
+--                       kind code — i.e. the valtag itself.
+--   WordNoForm why      the valtag has no word-arm encoding (the mark tag, the
+--                       deliberately unused 13, anything outside the ValTag
+--                       enum): a word-arm reader must refuse it BY NAME rather
+--                       than test for a number nothing writes.
+type WordTagShape
+    = WordImmediate (List Int)
+    | WordHeapCode Int
+    | WordNoForm String
+
+
+wordTagShape : Int -> WordTagShape
+wordTagShape code =
+    if code == tagNumber then
+        WordImmediate [ wordLayout.tagNumber ]
+
+    else if code == tagBoolean then
+        -- `booleanSplit` is the instance's own statement that true and false are
+        -- two immediates (word) rather than one tag plus a payload bit (val).
+        if wordLayout.booleanSplit then
+            WordImmediate [ wordLayout.tagTrue, wordLayout.tagFalse ]
+
+        else
+            WordImmediate [ wordLayout.tagBoolean ]
+
+    else if code == tagNil then
+        WordImmediate [ wordLayout.tagNil ]
+
+    else if code == tagError then
+        -- THE ONE CONTRACT TENSION THIS FUNCTION EXPOSES, stated rather than
+        -- smoothed over: `heapKindScanned` lists error (9) because the VAL
+        -- arm's error is a heap object with a Value body, while `wordLayout`
+        -- encodes an error as the IMMEDIATE `...101` (5).  The instance is the
+        -- authority for the ENCODING, so an error is an immediate here; a
+        -- word-arm reader that ever needs a code-9 BLOCK would have to revisit
+        -- this line (nothing allocates one today: `Rt.allocKind`'s callers pass
+        -- 1, 4, 10 and the caller-supplied code, and the emitter passes the
+        -- codes it constructs).
+        WordImmediate [ wordLayout.tagError ]
+
+    else if List.member code wordHeapCodes then
+        WordHeapCode code
+
+    else if code == tagMark then
+        WordNoForm "the MARK tag (7) is a value-arm collector tag, not a word-arm constructor"
+
+    else
+        WordNoForm ("valtag " ++ String.fromInt code ++ " has no word-arm encoding (the ValTag enum has a gap at 13 and no code above record = 14)")
+
+
+-- ============ WHERE A WORD-ARM STRING KEEPS ITS LENGTH (VR3b3 AREA D) ============
+-- IN THE CELL, at body unit `lenFieldWord` (1) — the SAME unit the val arm's
+-- `lenFieldOffset` names inside a 40-byte Value, reached by the block shape
+-- above.  So the two arms state ONE number (`lenFieldWord`) and reach it two
+-- ways:
+--
+--   val   `payload32(s, 1)` = the i32 at `s + lenFieldOffset` (16) of a Value
+--         record whose payload word 1 is the length.
+--   word  `payload32(s, 1)` = the i32 low half of `heapBodyOffset layout 1` of
+--         the block `s` names, i.e. `(s AND untagMask) + 16 + 8`.
+--
+-- WHY THIS IS THE ANSWER AND NOT A CHOICE.  A word-arm string is a HEAP BLOCK
+-- with a RAW body (code 1, `heapKindScanned` false), so its body is not a Value
+-- and the length cannot be a Value word: it is a raw word in the body, which is
+-- exactly what body unit 1 is.  Body unit 0 is the byte pointer.  That is the
+-- same two-field record the val arm carries, one indirection cheaper — which is
+-- why the emitter's string construction (area A) writes `[bytes, len]` through
+-- the shared cell writer and the runtime's `payload32(str, 1)`/`payload(str, 0)`
+-- reads need NO twin at all: `payload`/`payload32` are layout-derived, so
+-- porting THEM (area B) ports every string site in `runtime.mid` at once.
+--
+-- PINNED BY: TestMain's kind-contract rows (the placement is stated here), the
+-- emitter's emitted string cell text on BOTH arms, and the arithmetic identity
+-- `lenFieldOffset == heapBodyOffset valLayout lenFieldWord`, which says the two
+-- arms name the same field of the same logical record.  There is deliberately
+-- NO second constant for the word arm's length word: `lenFieldWord` IS it.
 
 
 
@@ -356,6 +538,10 @@ type alias ValLayout =
     , valQbeFields : List String -- FLIPS { w, l, l, l, l } -> { l }
     , maxArity : Int -- UNCHANGED: the rt_callN dispatch bound, not a cell size
     , tagMask : Int -- FLIPS 0 -> 7 (VR3b2): the LOW-BIT MASK that extracts the tag (0 = the tag is a whole word)
+    , tagBits : Int -- FLIPS 0 -> 3 (VR3b3): the WIDTH of that mask, for the one reader that must SHIFT
+                    -- (a fixnum's payload is the value word ARITHMETIC-SHIFTED DOWN, and QBE has no
+                    -- shift-by-mask).  DERIVED from `tagMask` and pinned against it — a mask and a
+                    -- width are two statements of one fact, which is why the mask is the primary.
     , tagTrue : Int -- FLIPS 12 -> 3 (VR3b2): see `booleanSplit`
     , tagFalse : Int -- FLIPS 12 -> 4 (VR3b2): see `booleanSplit`
     , booleanSplit : Bool -- FLIPS False -> True (VR3b2): two IMMEDIATES vs one tag + a payload bit
@@ -389,6 +575,7 @@ valLayout =
     , valQbeFields = valQbeFields
     , maxArity = maxArity
     , tagMask = 0
+    , tagBits = 0
     , tagTrue = tagBoolean
     , tagFalse = tagBoolean
     , booleanSplit = False
@@ -535,6 +722,7 @@ wordLayout =
     , valQbeFields = [ "l" ]
     , maxArity = maxArity
     , tagMask = 7
+    , tagBits = 3
     , tagTrue = 3
     , tagFalse = 4
     , booleanSplit = True

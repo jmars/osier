@@ -599,8 +599,16 @@ wordArmUnported exp =
         Lit (LBoolean _) ->
             Nothing
 
+        Lit (LString _) ->
+            -- AREA 3, THE STRING CELL (perf VR3b3 area A/D).  A word-arm string
+            -- is one heap block with a RAW body: the byte pointer in body unit
+            -- 0 and the length in body unit `lenFieldWord`.  `storeWordCell`
+            -- owns the shape (and refuses a code whose body layout is not
+            -- settled), so this classifier only says the construct is ported.
+            Nothing
+
         Lit _ ->
-            Just (wordArea "AREA 3/5 (HEAP CELLS)" "a float, symbol or string literal — under the word arm each is a HEAP object behind one tagged pointer, not a tag word plus payload words")
+            Just (wordArea "AREA 3/5 (HEAP CELLS)" "a float or symbol literal — under the word arm each is a HEAP object behind one tagged pointer, not a tag word plus payload words")
 
         ShortAnd block ->
             case wordArmUnported block.left of
@@ -634,6 +642,57 @@ wordArmUnported exp =
 
                         Nothing ->
                             wordArmUnported block.elseBranch
+
+        Unsafe node ->
+            -- AREA 3 (PAYLOAD ACCESS), the RAW-NODE half (perf VR3b3 areas
+            -- B/C).  A raw node is a WORD producer, and the word arm now emits
+            -- the ones whose shape it has ported: the payload reads
+            -- (`RawPayload`/`RawPayload32`), the tag read (`RawTagOf`), the tag
+            -- test (`RawTagIs`) and the two allocator seats
+            -- (`RawAllocVector`/`RawAllocRaw`).  Everything else stays LOUD —
+            -- in particular every CALL node (area 6/7: the argument staging is
+            -- the ABI) and every arithmetic node (area 4).
+            case node of
+                RawPayload _ ->
+                    Nothing
+
+                RawPayload32 _ ->
+                    Nothing
+
+                RawTagOf _ ->
+                    Nothing
+
+                RawTagIs _ ->
+                    Nothing
+
+                RawAllocVector _ ->
+                    Nothing
+
+                RawAllocRaw _ ->
+                    Nothing
+
+                RawVecAddr _ ->
+                    Nothing
+
+                RawVecLoad _ ->
+                    Nothing
+
+                RawStrByte _ ->
+                    Nothing
+
+                RawMkValue _ ->
+                    -- The `mk*` WRITE path (area A).  The classifier admits the
+                    -- NODE; whether the CODE is writable is `wordCellRefusal`'s
+                    -- single statement, checked on the Result path
+                    -- (`storeValueWords`) so a heap code whose layout is not
+                    -- settled refuses at COMPILE time, and its nested word
+                    -- expressions still go through `rawWordArg`, which refuses
+                    -- anything un-ported.  So the belt still holds: this arm
+                    -- cannot let half-word code through.
+                    Nothing
+
+                _ ->
+                    Just (wordArea (wordAreaName exp) (wordAreaWhat exp))
 
         _ ->
             Just (wordArea (wordAreaName exp) (wordAreaWhat exp))
@@ -708,6 +767,52 @@ wordSurfaceUnported defuns keys =
                                 Just "a defun with a non-Lambda value (corrupt Mid tree)"
 
 
+{-| THE Rt SURFACE, CLASSIFIED BY THE SAME PRE-WALK WHITELIST (perf VR3b3).
+
+VR3b2 refused any program that reached `runtime.mid` WHOLESALE, and the reason
+it gave was true then: the runtime's stride-carrying defuns assumed 40-byte
+values.  VR3c twinned those strides, so that reason is now stale, and a blanket
+refusal cannot say WHERE a word-arm program actually stops — it reports the lane
+boundary instead of the construct, which is exactly what the next unit does not
+need.
+
+So the Rt set is walked with the SAME `wordArmUnported` classifier the surface
+gets, and the first Rt defun carrying an un-ported construct is named.  NOTHING
+IS RELAXED: a word-arm emit still cannot happen unless EVERY reachable Rt defun
+is fully ported, and an un-ported construct still refuses by name, before any IL
+is produced.  What changes is only the PRECISION of the refusal: it now names
+the defun and the construct (`Rt.main: AREA 6 (THE CALL ABI)`) instead of the
+whole namespace.
+-}
+wordRtUnported : Dict String Defun -> List String -> Maybe String
+wordRtUnported defuns keys =
+    case keys of
+        [] ->
+            Nothing
+
+        k :: rest ->
+            if isRtKey k then
+                case Dict.get k defuns of
+                    Nothing ->
+                        wordRtUnported defuns rest
+
+                    Just defun ->
+                        case defun.value of
+                            Lam lambda ->
+                                case wordArmUnported lambda.body of
+                                    Just what ->
+                                        Just (k ++ ": " ++ what)
+
+                                    Nothing ->
+                                        wordRtUnported defuns rest
+
+                            _ ->
+                                Just (k ++ ": a defun with a non-Lambda value (corrupt Mid tree)")
+
+            else
+                wordRtUnported defuns rest
+
+
 wordAreaName : Exp -> String
 wordAreaName exp =
     case exp of
@@ -769,7 +874,7 @@ wordAreaName exp =
             "AREA 2 (TAG TESTS)"
 
         Unsafe _ ->
-            "AREA 3 (PAYLOAD ACCESS)"
+            "AREA 3/6/7 (RAW NODES)"
 
         _ ->
             "AN UNPORTED CONSTRUCT"
@@ -835,8 +940,8 @@ wordAreaWhat exp =
         Continue ->
             "`continue` inside a loop"
 
-        Unsafe _ ->
-            "a raw node in a value position — the Mid runtime's lane"
+        Unsafe node ->
+            "the raw node `" ++ rawNodeName node ++ "`"
 
         _ ->
             "a construct the word arm has not ported"
@@ -1100,33 +1205,41 @@ lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec _ mid
                 -- surface-only Mid program) can be emitted.  That is the
                 -- honest state of the flip: area 7 is VR3c's, and until it
                 -- lands the word arm cannot produce a runnable program.
+                lowerKeys st0 =
+                    List.foldl
+                        (\key acc ->
+                            acc
+                                |> Result.andThen
+                                    (\st ->
+                                        case Dict.get key defuns of
+                                            Nothing ->
+                                                Err ("qbe: unknown global " ++ key)
+
+                                            Just defun ->
+                                                lowerDefun runtime defun st
+                                    )
+                        )
+                        (Ok st0)
+                        keys
+                        |> Result.map (\sFinal -> finishModule sFinal keys)
+
                 lowerAllKeys =
                     if wordArmLayout layout && List.any isRtKey keys then
-                        Err
-                            (wordArmUnsupported
-                                (wordArea
-                                    "AREA 7 (THE Rt SURFACE)"
-                                    "a program that reaches `runtime.mid` — its stride-carrying defuns (gcAlloc, apply, gcScav/copyWordsGo, the values table, argv, the printer) are VR3c's single-writer lane and still assume 40-byte values, so a word-arm program that reaches the runtime would link cleanly and read the wrong bytes at the wrong offset"
-                                )
-                            )
+                        -- PER-DEFUN, not wholesale (perf VR3b3): the Rt set gets
+                        -- the same pre-walk classification the surface does, so
+                        -- the refusal names the DEFUN and the CONSTRUCT the arm
+                        -- stops at.  Loudness is unchanged — an un-ported
+                        -- construct anywhere in the reachable Rt set still
+                        -- refuses before any IL is produced.
+                        case wordRtUnported defuns keys of
+                            Just what ->
+                                Err (wordArmUnsupported what)
+
+                            Nothing ->
+                                lowerKeys s0
 
                     else
-                        List.foldl
-                            (\key acc ->
-                                acc
-                                    |> Result.andThen
-                                        (\s ->
-                                            case Dict.get key defuns of
-                                                Nothing ->
-                                                    Err ("qbe: unknown global " ++ key)
-
-                                                Just defun ->
-                                                    lowerDefun runtime defun s
-                                        )
-                            )
-                            (Ok s0)
-                            keys
-                            |> Result.map (\sFinal -> finishModule sFinal keys)
+                        lowerKeys s0
             in
             -- ORDER MATTERS FOR THE ERROR, NOT FOR SAFETY.  The SURFACE
             -- constructs are checked first so a real program's refusal names
@@ -3406,34 +3519,604 @@ wordProducerMessage =
     "qbe: raw WORD node in a value position — word producers (rawAllocVector, rawVecAddr, rawTagOf, rawPayload) bind to let binders and are legal only in raw-argument positions"
 
 
+-- ==================== THE WORD ARM'S CELL WRITER AND READERS (VR3b3) ====================
+-- AREA A (the writer below) and AREA B (the readers).  EVERY number here comes
+-- from `Mid.RtLayout`'s word-arm heap contract — `heapPtrTag`, `untagMask`,
+-- `tagBits`, `heapHeaderBytes`, `heapBodyOffset` — and none is spelled: a
+-- literal 1 / 3 / 8 / 16 / 24 in this section would be a second statement of
+-- the layout, which is the failure this arc exists to prevent.
+--
+-- THE SHAPE.  A word-arm Value is ONE word, so reaching a heap object is always
+-- untag (`w AND untagMask`) -> step past the 2-word header -> step into the
+-- body.  A 40-byte Value's payload read is NOT that shape and neither is a
+-- shifted field offset: the val arm's `payloadWordOffset` (a tag word then
+-- payload words) has no word-arm meaning at all, which is why every read below
+-- is a `if wordArm s then <block shape> else <record shape>` fork.
+
+
+{-| The VALUE WORD at a slot address, into a fresh `l` temp. -}
+wordValueWord : Il.Arg -> S -> ( String, S )
+wordValueWord base s =
+    let
+        ( v, s1 ) =
+            freshTmp s
+    in
+    ( v, emit (Load (Just v) L LoadL base) s1 )
+
+
+{-| UNTAG: the BLOCK ADDRESS of a word-arm heap object (its low bits are the
+tag).  On the val arm this is the identity — `untagMask` is all ones — so the
+function is total, and only the word arm ever calls it. -}
+wordBlockAddr : Il.Arg -> S -> ( String, S )
+wordBlockAddr valueWord s =
+    let
+        ( b, s1 ) =
+            freshTmp s
+    in
+    ( b, emit (Bin (Just b) L And valueWord (Il.Con (RtLayout.untagMask s.layout))) s1 )
+
+
+{-| The BODY address of a word-arm heap object: the block past the 2-word GC
+header.  This is what the val arm's `payloadWordOffset 0` read RETURNS (a raw
+body pointer) and what every `vecaddr`/`vecload`/`byte` site consumes. -}
+wordBodyAddr : Il.Arg -> S -> ( String, S )
+wordBodyAddr valueWord s =
+    let
+        ( b, s1 ) =
+            wordBlockAddr valueWord s
+
+        ( t, s2 ) =
+            freshTmp s1
+    in
+    ( t, emit (Bin (Just t) L Add (Il.Tmp b) (Il.Con (RtLayout.heapHeaderBytes s.layout))) s2 )
+
+
+{-| The header's KIND CODE of a word-arm heap object, into a `w` temp — the ONE
+reader of bits `heapKindShift..heapKindMask` in the emitter.
+
+It ALSO refuses code 0 BY NAME (VR3b3 area C, discharging VR3c's promissory
+note).  Code 0's single owner is NO CODE — a val-arm header — and no word-arm
+allocator writes it (`Rt.allocKind` refuses 0 at run time).  So a word-arm
+reader that meets 0 has been handed a val-arm block or uninitialised memory;
+returning "not the code you asked for" would be the silent read of another
+layout's bytes.  The die is emitted by the CALLER, which owns the block
+structure; this function only computes the code and the "is it 0" flag.
+-}
+wordKindCode : Il.Arg -> S -> ( String, String, S )
+wordKindCode valueWord s =
+    let
+        ( blk, s1 ) =
+            wordBlockAddr valueWord s
+
+        ( hdrA, s2 ) =
+            freshTmp s1
+
+        ( hdr, s3 ) =
+            freshTmp s2
+
+        ( code, s4 ) =
+            freshTmp s3
+    in
+    ( code
+    , hdr
+    , s4
+        |> emit (Bin (Just hdrA) L Sub (Il.Tmp blk) (Il.Con (RtLayout.heapHeaderBytes s.layout)))
+        |> emit (Load (Just hdr) L LoadL (Il.Tmp hdrA))
+        |> emit (Bin (Just code) W Shr (Il.Tmp hdr) (Il.Con s.layout.heapKindShift))
+        |> emit (Bin (Just code) W And (Il.Tmp code) (Il.Con s.layout.heapKindMask))
+    )
+
+
+{-| WHICH CODES THE WORD ARM'S CELL WRITER CAN WRITE — the ONE statement of it,
+so the writer and every caller that can refuse at COMPILE time (the `mk*` path,
+which returns `Result`) cannot disagree about what is ported.
+
+The immediates (number, boolean, nil, error) need no heap object.  Of the heap
+codes only a STRING is writable here: its body is RAW (`heapKindScanned` false),
+so the two raw words it carries (byte pointer, length) are never traced by the
+collector and the cell is sound.  Every other heap code's body would hold a RAW
+word in a body the collector SCANS — see `storeWordCell`'s note.
+-}
+wordCellRefusal : Int -> Maybe String
+wordCellRefusal code =
+    case RtLayout.wordTagShape code of
+        RtLayout.WordNoForm why ->
+            Just ("a cell with " ++ why)
+
+        RtLayout.WordImmediate _ ->
+            Nothing
+
+        RtLayout.WordHeapCode c ->
+            if c == RtLayout.tagString then
+                Nothing
+
+            else
+                Just
+                    ("a heap cell with the kind code "
+                        ++ String.fromInt c
+                        ++ " - its body would carry a RAW word into a body the collector SCANS (the val arm keeps those as pointers in a 40-byte Value's payload and the val scanner relocates them per tag; the word arm's body is a flat run of Value slots), so the layout has to be settled in runtime.mid's constructors and the scan contract, not invented here"
+                    )
+
+
+{-| THE WORD ARM'S CELL WRITER (perf VR3b3, area A) - the ONE place the emitter
+writes a Value word.
+
+The val arm writes a 40-byte record (a tag word then payload words).  The word
+arm writes ONE word, and WHICH word depends on the code's SHAPE
+(`RtLayout.wordTagShape`):
+
+  * `WordImmediate` - the code's word encoding is a tag, not a heap object: a
+    number is the i61 fixnum (`n` shifted up into the tag's free low bits), a
+    boolean is `tagTrue + (x == 0)` (there is no payload word to carry the
+    flag), nil and error are the tag alone.  NOTHING is allocated.
+  * `WordHeapCode` - a heap block: allocate through the code's Mid seat, write
+    the body through `heapBodyOffset`, and store `block OR heapPtrTag`.  The
+    header's kind code is written by the SEAT (`Rt.kindHdr`), which is why the
+    seat call is the place the code is named, not a second store here.
+
+Which codes are writable is `wordCellRefusal`'s ONE statement; this function
+implements exactly that set.  A heap code whose body would have to carry a RAW
+word into a body the collector SCANS is refused there: inlining the body changes
+the object graph the collector walks, and keeping the val arm's
+pointer-in-payload makes the body word an address the scanner reads as a fixnum,
+i.e. an object nothing keeps alive.  That is a heap-LAYOUT decision
+(runtime.mid's constructors + the scan contract), so it refuses rather than
+emits something that links and corrupts.
+-}
+storeWordCell : Int -> List Il.Arg -> Int -> S -> Result String S
+storeWordCell code words dest s0 =
+    case RtLayout.wordTagShape code of
+        RtLayout.WordNoForm why ->
+            Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" ("a cell with " ++ why)))
+
+        RtLayout.WordImmediate tags ->
+            case words of
+                [] ->
+                    -- nil / error: the tag ALONE is the value.
+                    Ok (emit (Store StoreL (Il.Con (Maybe.withDefault 0 (List.head tags))) (Il.Tmp (slotTmp dest))) s0)
+
+                [ w ] ->
+                    if code == RtLayout.tagNumber then
+                        -- A FIXNUM: the value is shifted UP into the bits the
+                        -- tag leaves free (the exact inverse of the reader's
+                        -- SAR).  Inline, no runtime call, no allocation.
+                        let
+                            ( sh, s1 ) =
+                                freshTmp s0
+                        in
+                        Ok (storeWordWord (Il.Tmp sh) dest (emit (Bin (Just sh) L Shl w (Il.Con s0.layout.tagBits)) s1))
+
+                    else if code == RtLayout.tagBoolean then
+                        -- A BOOLEAN: one bit of information, TWO immediates
+                        -- (`booleanSplit`), so `tagTrue + (w == 0)` is
+                        -- branch-free: true when the word is non-zero, false
+                        -- when it is zero.
+                        let
+                            ( isZero, s1 ) =
+                                freshTmp s0
+
+                            ( v, s2 ) =
+                                freshTmp s1
+                        in
+                        Ok
+                            (storeWordWord (Il.Tmp v) dest
+                                (s2
+                                    |> emit (Cmp (Just isZero) W Ceq w (Il.Con 0))
+                                    |> emit (Bin (Just v) L Add (Il.Tmp isZero) (Il.Con s0.layout.tagTrue))
+                                )
+                            )
+
+                    else
+                        Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" ("a cell with the code " ++ String.fromInt code ++ " and one payload word - that code's word encoding is a bare immediate and has no payload")))
+
+                _ ->
+                    Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" ("a cell with the code " ++ String.fromInt code ++ " and " ++ String.fromInt (List.length words) ++ " payload words - that code's word encoding is a single immediate and has no payload")))
+
+        RtLayout.WordHeapCode c ->
+            if c == RtLayout.tagString then
+                storeWordStringCell words dest s0
+
+            else
+                Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" (Maybe.withDefault "an unwritable heap code" (wordCellRefusal code))))
+
+
+{-| The one store of a word-arm Value word.  Shared by every `storeWordCell`
+arm so the tag has ONE writer. -}
+storeWordWord : Il.Arg -> Int -> S -> S
+storeWordWord value dest s =
+    emit (Store StoreL value (Il.Tmp (slotTmp dest))) s
+
+
+{-| A word-arm STRING literal's cell (area A) and where its length lives (area
+D): body unit 0 is the byte pointer, body unit `lenFieldWord` is the length.
+
+The allocation is the EXISTING `Rt.allocRaw` seat — `nbytes` bytes, body words
+`ceil(nbytes / 8)`, word-arm code 1 (a raw body, `heapKindScanned` false).  No
+runtime.mid change is needed: the seat already allocates a byte body under both
+arms, and a string body IS a byte body.  The length is written as a raw word in
+the body, so `payload32(s, 1)` — a layout-derived read — finds it with no twin
+(runtime.mid's string sites are unchanged, which is why D settles a PLACEMENT
+rather than porting a site).
+-}
+storeWordStringCell : List Il.Arg -> Int -> S -> Result String S
+storeWordStringCell words dest s0 =
+    case words of
+        [ bytes, len ] ->
+            let
+                nbytes =
+                    case len of
+                        Il.Con n ->
+                            n
+
+                        _ ->
+                            0
+            in
+            if nbytes == 0 then
+                Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a string cell whose byte length is not a compile-time constant"))
+
+            else
+                let
+                    ( bodyArg, s1 ) =
+                        midGcAllocSeat "Rt.allocRaw" (Il.Con (nbytes + 1)) s0
+
+                    s2 =
+                        storeWordBodyWord bodyArg 0 bytes s1
+
+                    s3 =
+                        storeWordBodyWord bodyArg RtLayout.lenFieldWord len s2
+
+                    ( blk, s4 ) =
+                        freshTmp s3
+                in
+                Ok
+                    (s4
+                        |> emit (Bin (Just blk) L Sub bodyArg (Il.Con (RtLayout.heapHeaderBytes s4.layout)))
+                        |> emit (Bin (Just blk) L Or (Il.Tmp blk) (Il.Con (RtLayout.heapPtrTag s4.layout)))
+                        |> storeWordWord (Il.Tmp blk) dest
+                    )
+
+        _ ->
+            Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a string cell that is not exactly [byte pointer, length]"))
+
+
+{-| One BODY word of a word-arm heap block, at `heapBodyOffset`.  `bodyArg` is
+the body ADDRESS (what the allocation seats return). -}
+storeWordBodyWord : Il.Arg -> Int -> Il.Arg -> S -> S
+storeWordBodyWord bodyArg word value s0 =
+    let
+        ( a, s1 ) =
+            freshTmp s0
+    in
+    s1
+        |> emit (Bin (Just a) L Add bodyArg (Il.Con (RtLayout.heapBodyOffset s0.layout word)))
+        |> emit (Store StoreL value (Il.Tmp a))
+
+
+{-| A body word READ of a word-arm heap block, at `heapBodyOffset`. -}
+wordBodyRead : Il.Arg -> Int -> S -> ( String, S )
+wordBodyRead valueWord word s0 =
+    let
+        ( bodyArg, s1 ) =
+            wordBodyAddr valueWord s0
+
+        ( a, s2 ) =
+            freshTmp s1
+
+        ( t, s3 ) =
+            freshTmp s2
+    in
+    ( t
+    , s3
+        |> emit (Bin (Just a) L Add (Il.Tmp bodyArg) (Il.Con (RtLayout.heapBodyOffset s3.layout word)))
+        |> emit (Load (Just t) L LoadL (Il.Tmp a))
+    )
+
+
+{-| AREA B: the loud refusal a payload read emits when the word it was handed is
+neither a fixnum nor a heap object.  ASCII only (the emitted data item is a
+surface-language string literal, and a non-ASCII byte there is a parse error the
+val arm never sees — MEASURED at VR3c). -}
+wordPayloadRefusal : String
+wordPayloadRefusal =
+    "qbe-rt: word arm: payload read on a word that is neither a fixnum (...000) nor a heap object (...001) - nil/true/false/error have no payload, so this would read another layout's bits. Refusing."
+
+
+{-| AREA B, THE ONE PAYLOAD-WORD READER.  Under the word arm a payload word is
+NOT a shifted field offset of a 40-byte record: it is a SHAPE, decided by the
+value's low tag, and each shape reads different bytes.
+
+  * `...000` fixnum: the payload IS the value, arithmetic-shifted DOWN out of
+    the tag bits (`SAR`), and it exists only at word 0.
+  * `...001` heap object: untag, step past the 2-word header, step `word` body
+    units in, load 8 bytes.
+  * anything else (nil, true, false, error, reserved): REFUSE, loudly.  Those
+    have no payload word at all, so the val arm's blind read here is exactly the
+    silent read of another layout's bytes this arm must not reproduce.
+
+The two shapes need a branch (there is no arithmetic that covers both), and QBE
+has no `phi`, so the ONE result temp is assigned in each arm and used after the
+join — QBE's own SSA construction handles that.
+-}
+wordPayloadWord : Il.Arg -> Int -> S -> ( Il.Arg, S )
+wordPayloadWord base word s0 =
+    let
+        ( l, s1 ) =
+            wordValueWord base s0
+
+        ( t, s2 ) =
+            freshTmp s1
+
+        ( isFix, s3 ) =
+            freshTmp s2
+
+        ( isHeap, s4 ) =
+            freshTmp s3
+
+        ( heapLbl, s5 ) =
+            freshLbl "pheap" s4
+
+        ( badLbl, s6 ) =
+            freshLbl "pbad" s5
+
+        ( joinLbl, s7 ) =
+            freshLbl "pjoin" s6
+
+        ( fixLbl, s8 ) =
+            freshLbl "pfix" s7
+
+        ( chkLbl, s9 ) =
+            freshLbl "pchk" s8
+
+        ( r, s10 ) =
+            freshTmp s9
+
+        ( msgName, s11 ) =
+            freshData ("msg:" ++ wordPayloadRefusal)
+                (\n -> { name = n, align = Just 8, items = [ DStr wordPayloadRefusal, DByte 0 ], export_ = False })
+                s10
+
+        -- 1. the tag, and the FIRST branch: a fixnum (word 0 only) or not.
+        s12 =
+            emit (Bin (Just t) W And (Il.Tmp l) (Il.Con s11.layout.tagMask)) s11
+
+        s13 =
+            if word == 0 then
+                s12
+                    |> emit (Cmp (Just isFix) W Ceq (Il.Tmp t) (Il.Con s11.layout.tagNumber))
+                    |> closeBlock (Jnz (Il.Tmp isFix) fixLbl chkLbl)
+                    |> startBlock chkLbl
+
+            else
+                s12
+
+        -- 2. a heap object, or the loud refusal.
+        s14 =
+            s13
+                |> emit (Cmp (Just isHeap) W Ceq (Il.Tmp t) (Il.Con (RtLayout.heapPtrTag s11.layout)))
+                |> closeBlock (Jnz (Il.Tmp isHeap) heapLbl badLbl)
+                |> startBlock badLbl
+                |> emit (Call Nothing (Base L) (Il.Sym ("q_" ++ mangle "Rt.die")) [ ArgVal (Base L) (Il.Sym msgName) ])
+                |> closeBlock Hlt
+                |> startBlock heapLbl
+
+        -- 3. the heap arm: untag, past the header, `word` units in.
+        s15 =
+            let
+                ( bodyArg, sa ) =
+                    wordBodyAddr (Il.Tmp l) s14
+
+                ( a, sb ) =
+                    freshTmp sa
+            in
+            sb
+                |> emit (Bin (Just a) L Add (Il.Tmp bodyArg) (Il.Con (RtLayout.heapBodyOffset sb.layout word)))
+                |> emit (Load (Just r) L LoadL (Il.Tmp a))
+                |> jumpTo joinLbl
+
+        -- 4. the fixnum arm (word 0 only): shift the tag bits off.
+        s16 =
+            if word == 0 then
+                s15
+                    |> startBlock fixLbl
+                    |> emit (Bin (Just r) L Sar (Il.Tmp l) (Il.Con s11.layout.tagBits))
+                    |> jumpTo joinLbl
+
+            else
+                s15
+
+        s17 =
+            s16 |> startBlock joinLbl
+    in
+    ( Il.Tmp r, s17 )
+
+
+{-| AREA C: THE WORD-ARM TAG TEST (`tagis(v, code)`), the reader VR3c's fix
+and its review named as the promissory note.
+
+A VALTAG is what the caller asks about, and under the word arm its ENCODING is
+not the valtag (`RtLayout.wordTagShape`):
+
+  * `WordImmediate tags` — nil, true/false and error are IMMEDIATES: the test is
+    `(w AND tagMask) == tag`, one compare (two OR'd for a boolean, which has two
+    immediates).
+  * `WordHeapCode code` — a heap object: the tag must be `heapPtrTag` AND the
+    header's kind code must be `code`.  The header read is BRANCHED, never
+    unconditional: a fixnum untagged is a small integer, so reading a "header"
+    off it would fault.
+  * `WordNoForm why` — refused at COMPILE time by name.
+
+AND CODE 0 IS REFUSED BY NAME, which is the note this function discharges.
+Code 0's single owner is NO CODE (a val-arm header) and no word-arm allocator
+writes it, so a word-arm reader that meets 0 has been handed a val-arm block or
+uninitialised memory.  Returning "not the code you asked for" would hide that,
+so the read dies with the reason.  A tag MISMATCH is not an error (a tag test
+asks a question and gets an answer); only the impossible code is.
+-}
+wordTagIs : Il.Arg -> Int -> S -> Result String ( Il.Arg, S )
+wordTagIs base code s0 =
+    case RtLayout.wordTagShape code of
+        RtLayout.WordNoForm why ->
+            Err (wordArmUnsupported (wordArea "AREA 2 (TAG TESTS)" ("`tagis(v, " ++ String.fromInt code ++ ")` - " ++ why)))
+
+        RtLayout.WordImmediate tags ->
+            -- The tag alone answers it: one compare, or (a boolean, which has
+            -- two immediates) the OR of two.  `t` is both the tag temp and the
+            -- result temp, which QBE allows (`%t =w or %t, %o`).
+            let
+                ( v, s1 ) =
+                    wordValueWord base s0
+
+                ( t, s2 ) =
+                    freshTmp s1
+
+                ( ext, s3 ) =
+                    freshTmp s2
+
+                s4 =
+                    emit (Bin (Just t) W And (Il.Tmp v) (Il.Con s3.layout.tagMask)) s3
+
+                s5 =
+                    case tags of
+                        [] ->
+                            emit (Bin (Just t) W Xor (Il.Tmp t) (Il.Tmp t)) s4
+
+                        firstTag :: rest ->
+                            List.foldl
+                                (\one acc ->
+                                    let
+                                        ( o, sa ) =
+                                            freshTmp acc
+                                    in
+                                    emit (Cmp (Just o) W Ceq (Il.Tmp t) (Il.Con one)) sa
+                                        |> emit (Bin (Just t) W Or (Il.Tmp t) (Il.Tmp o))
+                                )
+                                (emit (Cmp (Just t) W Ceq (Il.Tmp t) (Il.Con firstTag)) s4)
+                                rest
+            in
+            Ok ( Il.Tmp ext, emit (Unary (Just ext) L Extsw (Il.Tmp t)) s5 )
+
+        RtLayout.WordHeapCode c ->
+            let
+                ( v, s1 ) =
+                    wordValueWord base s0
+
+                ( t, s2 ) =
+                    freshTmp s1
+
+                ( isHeap, s3 ) =
+                    freshTmp s2
+
+                ( isC, s4 ) =
+                    freshTmp s3
+
+                ( ext, s5 ) =
+                    freshTmp s4
+
+                ( heapLbl, s6 ) =
+                    freshLbl "kheap" s5
+
+                ( notLbl, s7 ) =
+                    freshLbl "knot" s6
+
+                ( badLbl, s8 ) =
+                    freshLbl "kzero" s7
+
+                ( okLbl, s9 ) =
+                    freshLbl "kok" s8
+
+                ( joinLbl, s10 ) =
+                    freshLbl "kjoin" s9
+
+                ( msgName, s11 ) =
+                    freshData ("msg:" ++ wordKindZeroRefusal)
+                        (\n -> { name = n, align = Just 8, items = [ DStr wordKindZeroRefusal, DByte 0 ], export_ = False })
+                        s10
+
+                -- 1. the tag says "a heap object" or it does not.  The header
+                --    read is INSIDE the heap branch: untagging a fixnum yields a
+                --    small integer, so an unconditional header load would fault.
+                s12 =
+                    s11
+                        |> emit (Bin (Just t) W And (Il.Tmp v) (Il.Con s11.layout.tagMask))
+                        |> emit (Cmp (Just isHeap) W Ceq (Il.Tmp t) (Il.Con (RtLayout.heapPtrTag s11.layout)))
+                        |> closeBlock (Jnz (Il.Tmp isHeap) heapLbl notLbl)
+                        |> startBlock notLbl
+                        |> emit (Bin (Just isC) W Xor (Il.Tmp isHeap) (Il.Tmp isHeap))
+                        |> jumpTo joinLbl
+
+                -- 2. the heap branch: the kind code, and CODE 0 REFUSED BY NAME.
+                ( hdrCode, _, s13 ) =
+                    wordKindCode (Il.Tmp v) (startBlock heapLbl s12)
+
+                ( isZero, s14 ) =
+                    freshTmp s13
+
+                s15 =
+                    s14
+                        |> emit (Cmp (Just isZero) W Ceq (Il.Tmp hdrCode) (Il.Con 0))
+                        |> closeBlock (Jnz (Il.Tmp isZero) badLbl okLbl)
+                        |> startBlock badLbl
+                        |> emit (Call Nothing (Base L) (Il.Sym ("q_" ++ mangle "Rt.die")) [ ArgVal (Base L) (Il.Sym msgName) ])
+                        |> closeBlock Hlt
+                        |> startBlock okLbl
+                        |> emit (Cmp (Just isC) W Ceq (Il.Tmp hdrCode) (Il.Con c))
+                        |> jumpTo joinLbl
+                        |> startBlock joinLbl
+                        |> emit (Unary (Just ext) L Extsw (Il.Tmp isC))
+            in
+            Ok ( Il.Tmp ext, s15 )
+
+
+-- The ONE refusal message of the kind-code reader: code 0 means NO CODE.
+wordKindZeroRefusal : String
+wordKindZeroRefusal =
+    "qbe-rt: word arm: a heap header carries KIND CODE 0, which means NO CODE (a val-arm header). No word-arm allocator writes 0, so this object is not a word-arm block. Refusing the kind read."
+
+
 -- The tag + payload words of a Value cell into the dest slot, temp supply
 -- threaded (each word's payload-address temp is fresh — a first cut
 -- allocated them all from one frozen state and every word shared a name).
 storeValueCell : Int -> List Il.Arg -> Int -> S -> S
-storeValueCell tag words dest s0 =
-    let
-        s1 =
-            emit (Store StoreW (Il.Con tag) (Il.Tmp (slotTmp dest))) s0
+storeValueCell code words dest s0 =
+    if wordArm s0 then
+        -- The word arm's writer CAN refuse (a heap code whose layout is not
+        -- settled).  Every call site is behind either the per-defun pre-walk
+        -- whitelist or the area-7 Rt gate, so a refusal here is a
+        -- belt-and-braces arm; it emits the POISON word (`...111`, the reserved
+        -- tag the collector and every reader die on) rather than a plausible
+        -- word, so a reach that slipped a gate fails at the first read instead
+        -- of silently.
+        case storeWordCell code words dest s0 of
+            Ok s1 ->
+                s1
 
-        go : Int -> S -> List Il.Arg -> S
-        go i acc ws =
-            case ws of
-                [] ->
-                    acc
+            Err _ ->
+                emit (Store StoreL (Il.Con s0.layout.tagMask) (Il.Tmp (slotTmp dest))) s0
 
-                w :: rest ->
-                    let
-                        ( pT, acc1 ) =
-                            freshTmp acc
+    else
+        let
+            s1 =
+                emit (Store StoreW (Il.Con code) (Il.Tmp (slotTmp dest))) s0
 
-                        acc2 =
-                            acc1
-                                |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp dest)) (Il.Con (RtLayout.payloadWordOffset s0.layout i)))
-                                |> emit (Store StoreL w (Il.Tmp pT))
-                    in
-                    go (i + 1) acc2 rest
-    in
-    go 0 s1 words
+            go : Int -> S -> List Il.Arg -> S
+            go i acc ws =
+                case ws of
+                    [] ->
+                        acc
+
+                    w :: rest ->
+                        let
+                            ( pT, acc1 ) =
+                                freshTmp acc
+
+                            acc2 =
+                                acc1
+                                    |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp dest)) (Il.Con (RtLayout.payloadWordOffset s0.layout i)))
+                                    |> emit (Store StoreL w (Il.Tmp pT))
+                        in
+                        go (i + 1) acc2 rest
+        in
+        go 0 s1 words
 
 
 {-| The Exp-level RawMkValue path: lower each word (float-typed words into
@@ -3442,6 +4125,39 @@ storeValueCell tag words dest s0 =
 -}
 storeValueWords : Int -> List Exp -> Int -> S -> Result String S
 storeValueWords tag words dest s0 =
+    if wordArm s0 then
+        -- AREA A (perf VR3b3): under the word arm a `mk*` cell is the ONE cell
+        -- writer, and its refusals are COMPILE-TIME here (this path returns
+        -- Result) rather than the writer's belt-and-braces poison.
+        case wordCellRefusal tag of
+            Just why ->
+                Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" why))
+
+            Nothing ->
+                List.foldl
+                    (\e acc ->
+                        Result.andThen
+                            (\( ws, st ) ->
+                                if isFloatWordExp e then
+                                    rawFltArg e st
+                                        |> Result.map (\( a, st2 ) -> ( ws ++ [ a ], st2 ))
+
+                                else
+                                    rawWordArg e st
+                                        |> Result.map (\( a, st2 ) -> ( ws ++ [ a ], st2 ))
+                            )
+                            acc
+                    )
+                    (Ok ( [], s0 ))
+                    words
+                    |> Result.andThen (\( ws, s1 ) -> storeWordCell tag ws dest s1)
+
+    else
+        storeValueWordsVal tag words dest s0
+
+
+storeValueWordsVal : Int -> List Exp -> Int -> S -> Result String S
+storeValueWordsVal tag words dest s0 =
     List.foldl
         (\e acc ->
             Result.andThen
@@ -3674,11 +4390,27 @@ midGcAllocSeat seatKey lenA s =
         ( t, s5 ) =
             freshTmp s4
     in
-    ( Il.Tmp t
-    , emit (Call (Just vp) (Agg "val") (Il.Sym ("q_" ++ mangle seatKey)) (padded ++ [ ArgVal (Base W) (Il.Con 1) ])) s5
-        |> emit (Bin (Just aT) L Add (Il.Tmp vp) (Il.Con (RtLayout.payloadWordOffset s.layout 0)))
-        |> emit (Load (Just t) L LoadL (Il.Tmp aT))
-    )
+    if wordArm s then
+        -- THE WORD ARM (perf VR3b3 area A).  The LEAN ABI's params are POINTERS
+        -- to Value slots in BOTH arms (the callee reads `payload(count, 0)`
+        -- through the pointer it was given), so the call's argument shape does
+        -- not move — only the RESULT does.  Under the word arm the seat returns
+        -- the block address as a FIXNUM (`mknum(addr)`), i.e. `addr` shifted up
+        -- into the tag's free bits, so the body address is the untag (no load)
+        -- plus the 2-word header.  That is what every caller consumes: a raw
+        -- BODY pointer.
+        let
+            ( body, s6 ) =
+                wordBodyAddr (Il.Tmp vp) (emit (Call (Just vp) (Agg "val") (Il.Sym ("q_" ++ mangle seatKey)) (padded ++ [ ArgVal (Base W) (Il.Con 1) ])) s5)
+        in
+        ( Il.Tmp body, s6 )
+
+    else
+        ( Il.Tmp t
+        , emit (Call (Just vp) (Agg "val") (Il.Sym ("q_" ++ mangle seatKey)) (padded ++ [ ArgVal (Base W) (Il.Con 1) ])) s5
+            |> emit (Bin (Just aT) L Add (Il.Tmp vp) (Il.Con (RtLayout.payloadWordOffset s.layout 0)))
+            |> emit (Load (Just t) L LoadL (Il.Tmp aT))
+        )
 
 
 {-| stage 6 P1b Step B — the slot base of a Value operand, when that operand
@@ -3787,32 +4519,53 @@ rawWordArg exp s =
                     )
 
         Unsafe (RawTagOf v) ->
+            -- AREA B (perf VR3b3): the tag of a Value.  The val arm's tag is a
+            -- whole word at offset 0; the word arm's is the value word's LOW
+            -- BITS, so this is `readTag` — the emitter's one tag reader — and
+            -- not a second masking site.
             rawValueBase v s
                 |> Result.map
                     (\( base, s1 ) ->
-                        let
-                            ( t, s2 ) =
-                                freshTmp s1
-                        in
-                        ( Il.Tmp t, emit (Load (Just t) W LoadW base) s2 )
+                        if wordArm s1 then
+                            let
+                                ( t, s2 ) =
+                                    freshTmp s1
+                            in
+                            ( Il.Tmp t, readTag t base s2 )
+
+                        else
+                            let
+                                ( t, s2 ) =
+                                    freshTmp s1
+                            in
+                            ( Il.Tmp t, emit (Load (Just t) W LoadW base) s2 )
                     )
 
         Unsafe (RawPayload p) ->
-            rawValueBase p.value s
-                |> Result.map
-                    (\( base, s1 ) ->
-                        let
-                            ( aT, s2 ) =
-                                freshTmp s1
+            -- AREA B (perf VR3b3): a payload word.  A 40-byte Value's payload
+            -- word `i` is at `payloadWordOffset i`; a word-arm payload is a
+            -- SHAPE decided by the value's low tag (`wordPayloadWord`), and a
+            -- read on a word that has no payload refuses loudly.
+            if wordArm s then
+                rawValueBase p.value s
+                    |> Result.map (\( base, s1 ) -> wordPayloadWord base p.word s1)
 
-                            ( t, s3 ) =
-                                freshTmp s2
-                        in
-                        ( Il.Tmp t
-                        , emit (Bin (Just aT) L Add base (Il.Con (RtLayout.payloadWordOffset s.layout p.word))) s3
-                            |> emit (Load (Just t) L LoadL (Il.Tmp aT))
+            else
+                rawValueBase p.value s
+                    |> Result.map
+                        (\( base, s1 ) ->
+                            let
+                                ( aT, s2 ) =
+                                    freshTmp s1
+
+                                ( t, s3 ) =
+                                    freshTmp s2
+                            in
+                            ( Il.Tmp t
+                            , emit (Bin (Just aT) L Add base (Il.Con (RtLayout.payloadWordOffset s.layout p.word))) s3
+                                |> emit (Load (Just t) L LoadL (Il.Tmp aT))
+                            )
                         )
-                    )
 
         -- ===== STEP 5 (osier-midprims): the scalar + string word producers
         Unsafe (RawPayload32 p) ->
@@ -3820,48 +4573,82 @@ rawWordArg exp s =
             -- word's low half + extsw to the l word class.  A 64-bit read
             -- here would compare garbage high halves against Zig-built
             -- Values (the extern-struct store never writes them).
-            rawValueBase p.value s
-                |> Result.map
-                    (\( base, s1 ) ->
-                        let
-                            ( aT, s2 ) =
-                                freshTmp s1
+            if wordArm s then
+                -- AREA B + D (perf VR3b3): the i32 field of a word-arm payload
+                -- word.  The shape dispatch is `wordPayloadWord`'s (the same
+                -- fixnum/heap split, the same refusal), and the field is the
+                -- LOW HALF of that 8-byte word: a string's `len` is body unit
+                -- `lenFieldWord`, read here with no string-specific arm.
+                rawValueBase p.value s
+                    |> Result.map
+                        (\( base, s1 ) ->
+                            let
+                                ( wordT, s2 ) =
+                                    wordPayloadWord base p.word s1
 
-                            ( wT, s3 ) =
-                                freshTmp s2
+                                ( wT, s3 ) =
+                                    freshTmp s2
 
-                            ( t, s4 ) =
-                                freshTmp s3
-                        in
-                        ( Il.Tmp t
-                        , emit (Bin (Just aT) L Add base (Il.Con (RtLayout.payloadWordOffset s.layout p.word))) s4
-                            |> emit (Load (Just wT) W LoadW (Il.Tmp aT))
-                            |> emit (Unary (Just t) L Extsw (Il.Tmp wT))
+                                ( t, s4 ) =
+                                    freshTmp s3
+                            in
+                            ( Il.Tmp t
+                            , emit (Load (Just wT) W LoadW wordT) s4
+                                |> emit (Unary (Just t) L Extsw (Il.Tmp wT))
+                            )
                         )
-                    )
+
+            else
+                rawValueBase p.value s
+                    |> Result.map
+                        (\( base, s1 ) ->
+                            let
+                                ( aT, s2 ) =
+                                    freshTmp s1
+
+                                ( wT, s3 ) =
+                                    freshTmp s2
+
+                                ( t, s4 ) =
+                                    freshTmp s3
+                            in
+                            ( Il.Tmp t
+                            , emit (Bin (Just aT) L Add base (Il.Con (RtLayout.payloadWordOffset s.layout p.word))) s4
+                                |> emit (Load (Just wT) W LoadW (Il.Tmp aT))
+                                |> emit (Unary (Just t) L Extsw (Il.Tmp wT))
+                            )
+                        )
 
         Unsafe (RawTagIs ti) ->
             -- tag == n as 0/1 (w), extended to the l word class — box it with
             -- RawMkValue tag 3 to branch (`If` reads a boolean Value).
-            rawValueBase ti.value s
-                |> Result.map
-                    (\( base, s1 ) ->
-                        let
-                            ( tagT, s2 ) =
-                                freshTmp s1
+            -- AREA C (perf VR3b3): under the word arm the VALTAG is dispatched
+            -- to its word ENCODING by `wordTagIs` (an immediate compare, or a
+            -- header kind-code read with code 0 refused by name).
+            if wordArm s then
+                rawValueBase ti.value s
+                    |> Result.andThen (\( base, s1 ) -> wordTagIs base ti.tag s1)
 
-                            ( isT, s3 ) =
-                                freshTmp s2
+            else
+                rawValueBase ti.value s
+                    |> Result.map
+                        (\( base, s1 ) ->
+                            let
+                                ( tagT, s2 ) =
+                                    freshTmp s1
 
-                            ( t, s4 ) =
-                                freshTmp s3
-                        in
-                        ( Il.Tmp t
-                        , emit (Load (Just tagT) W LoadW base) s4
-                            |> emit (Cmp (Just isT) W Ceq (Il.Tmp tagT) (Il.Con ti.tag))
-                            |> emit (Unary (Just t) L Extsw (Il.Tmp isT))
+                                ( isT, s3 ) =
+                                    freshTmp s2
+
+                                ( t, s4 ) =
+                                    freshTmp s3
+                            in
+                            ( Il.Tmp t
+                            , emit (Load (Just tagT) W LoadW base) s4
+                                |> emit (Cmp (Just isT) W Ceq (Il.Tmp tagT) (Il.Con ti.tag))
+                                |> emit (Unary (Just t) L Extsw (Il.Tmp isT))
+                            )
                         )
-                    )
 
         Unsafe (RawBin bin) ->
             -- RAdd..RDiv at `l` (i64 wrap/trunc); the Bitwise family at `w`
@@ -4960,8 +5747,20 @@ lowerLitWord lit dest s =
         LSymbol _ ->
             Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a symbol literal — under the word arm it is a heap object behind one tagged pointer, not a tag word plus a data pointer"))
 
-        LString _ ->
-            Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a string literal — under the word arm its byte length lives in the CELL and the value is one tagged pointer"))
+        LString str ->
+            -- A word-arm string is a HEAP BLOCK (perf VR3b3 area A): code 1 (a
+            -- RAW body), body unit 0 = the byte pointer, body unit
+            -- `lenFieldWord` = the length (area D's placement).  The bytes stay
+            -- the static data symbol — immutable, NUL-terminated, no copy — so
+            -- there is no cross-heap edge and nothing to scavenge, exactly as on
+            -- the val arm.
+            let
+                ( strname, s1 ) =
+                    freshData ("str:" ++ str)
+                        (\n -> { name = n, align = Just 8, items = [ DStr str, DByte 0 ], export_ = False })
+                        s
+            in
+            storeWordCell RtLayout.tagString [ Il.Sym strname, Il.Con (utf8ByteLength str) ] dest s1
 
 
 lowerLitVal : Lit -> Int -> S -> Result String S
