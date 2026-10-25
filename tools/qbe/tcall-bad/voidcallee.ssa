@@ -1,0 +1,8 @@
+# REFUSAL PROBE: the callee returns void but the enclosing function returns a
+# value, so our caller would read whatever happens to be in rax.
+# Expect: qbe exits non-zero with "the callee returns void".
+export function l $f(l %n) {
+@start
+	tcall $f(l %n)
+	ret
+}

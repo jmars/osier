@@ -1,0 +1,7 @@
+# REFUSAL PROBE: the callee returns l, the enclosing function returns w.
+# Expect: qbe exits non-zero with "the callee's return class does not match".
+export function w $f(l %n) {
+@start
+	tcall l $f(l %n)
+	ret
+}

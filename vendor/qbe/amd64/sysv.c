@@ -304,8 +304,9 @@ rarg(int ty, int *ni, int *ns)
  * exact state our caller left it in. nothing is ever degraded to a
  * call: an unmet condition is a compile error naming it. */
 static void
-seltcallchk(Fn *fn, AClass *ac, Ins *i0, Ins *i1, int ca)
+seltcallchk(Fn *fn, AClass *ac, Ins *i0, Ins *i1)
 {
+	Ins *i;
 	AClass *a, aret, fret;
 
 	/* no stack arguments: they would have to be written above
@@ -315,9 +316,11 @@ seltcallchk(Fn *fn, AClass *ac, Ins *i0, Ins *i1, int ca)
 			err("tcall cannot pass arguments on the stack");
 
 	/* no variadic calls: %al and the va save area have no tail
-	 * form */
-	if ((ca >> 12) & 1)
-		err("tcall cannot call a variadic function");
+	 * form. (ca's bit 12 covers the env marker too, and an env
+	 * tail call IS legal, so look for the `...` itself.) */
+	for (i=i0; i<i1; i++)
+		if (i->op == Oargv)
+			err("tcall cannot call a variadic function");
 
 	/* the callee's return convention must be the one our own
 	 * caller expects */
@@ -362,7 +365,7 @@ selcall(Fn *fn, Ins *i0, Ins *i1, RAlloc **rap, int tail)
 		ca = argsclass(i0, i1, ac, Oarg, 0, &env);
 
 	if (tail)
-		seltcallchk(fn, ac, i0, i1, ca);
+		seltcallchk(fn, ac, i0, i1);
 
 	for (stk=0, a=&ac[i1-i0]; a>ac;)
 		if ((--a)->inmem) {

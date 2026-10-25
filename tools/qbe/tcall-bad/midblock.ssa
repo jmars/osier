@@ -1,0 +1,8 @@
+# REFUSAL PROBE: a tcall must be the last instruction of its block.
+# Expect: qbe exits non-zero with "tcall must be the last instruction of its block".
+export function l $f(l %n) {
+@start
+	tcall l $f(l %n)
+	%x =l add %n, 1
+	ret %x
+}
