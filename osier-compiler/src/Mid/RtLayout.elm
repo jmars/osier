@@ -1,7 +1,7 @@
 module Mid.RtLayout exposing
     ( abiAlign
     , bodyWords
-    , heapBodyOffset, heapBodyStride, heapHeaderBytes, heapKindMask, heapKindScanned, heapKindShift, heapPtrTag
+    , heapBodyOffset, heapBodyStride, heapBodyUnitOffset, heapHeaderBytes, heapKindMask, heapKindScanned, heapKindShift, heapPtrTag
     , i32Bytes
     , descArityOffset, descCacheOffset, descCodeOffset, descNcapsOffset, descQbeFields
     , descTotalBytes, direntNameOffset
@@ -371,10 +371,22 @@ heapBodyStride layout =
     layout.wordBytes * (1 + layout.valuePayloadWords)
 
 
--- The byte offset of body unit `i` inside a heap BLOCK (past the 2-word header).
+-- The byte offset of body unit `i` inside a heap BLOCK (i.e. relative to the
+-- BLOCK address, past the 2-word header).
 heapBodyOffset : ValLayout -> Int -> Int
 heapBodyOffset layout word =
-    heapHeaderBytes layout + word * heapBodyStride layout
+    heapHeaderBytes layout + heapBodyUnitOffset layout word
+
+
+-- The byte offset of body unit `i` RELATIVE TO THE BODY ADDRESS — for a reader
+-- that already holds the body (what `Rt.allocRaw`/`allocKind` RETURN, and what
+-- `payload(v, 0)` yields).  TWO functions because both bases are in use and
+-- adding the header twice is a silent 16-byte over-read that no text pin can
+-- see: MEASURED, the first emitted payload read was `loadl block+32` (the
+-- header added twice), found only by RUNNING the module.
+heapBodyUnitOffset : ValLayout -> Int -> Int
+heapBodyUnitOffset layout word =
+    word * heapBodyStride layout
 
 
 -- THE CODES WHOSE WORD-ARM OBJECT IS A HEAP BLOCK — i.e. the VALTAGS that are

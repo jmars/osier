@@ -3678,20 +3678,22 @@ wordKindCode valueWord s =
         ( blk, s1 ) =
             wordBlockAddr valueWord s
 
-        ( hdrA, s2 ) =
+        ( hdr, s2 ) =
             freshTmp s1
 
-        ( hdr, s3 ) =
+        ( code, s3 ) =
             freshTmp s2
-
-        ( code, s4 ) =
-            freshTmp s3
     in
     ( code
     , hdr
-    , s4
-        |> emit (Bin (Just hdrA) L Sub (Il.Tmp blk) (Il.Con (RtLayout.heapHeaderBytes s.layout)))
-        |> emit (Load (Just hdr) L LoadL (Il.Tmp hdrA))
+    , s3
+        -- THE HEADER IS THE BLOCK'S FIRST TWO WORDS, so the reader adds
+        -- NOTHING to the untagged block address.  (MEASURED: subtracting
+        -- `heapHeaderBytes` here - the shape a reader that holds the BODY
+        -- needs - made the harness read the word BEFORE the block, see code 0
+        -- and refuse a perfectly good cons.  The text pin had blessed the
+        -- `sub ..., 16`.)
+        |> emit (Load (Just hdr) L LoadL (Il.Tmp blk))
         |> emit (Bin (Just code) W Shr (Il.Tmp hdr) (Il.Con s.layout.heapKindShift))
         |> emit (Bin (Just code) W And (Il.Tmp code) (Il.Con s.layout.heapKindMask))
     )
@@ -3785,14 +3787,25 @@ storeWordCell code words dest s0 =
                             ( isZero, s1 ) =
                                 freshTmp s0
 
-                            ( v, s2 ) =
+                            ( isZeroL, s2 ) =
                                 freshTmp s1
+
+                            ( v, s3 ) =
+                                freshTmp s2
                         in
                         Ok
                             (storeWordWord (Il.Tmp v) dest
-                                (s2
-                                    |> emit (Cmp (Just isZero) W Ceq w (Il.Con 0))
-                                    |> emit (Bin (Just v) L Add (Il.Tmp isZero) (Il.Con s0.layout.tagTrue))
+                                (s3
+                                    -- QBE's compare produces a `w` temp even at
+                                    -- `l` width, and a `w` temp may not be the
+                                    -- first operand of an `l` op (MEASURED:
+                                    -- `invalid type for first operand %t in
+                                    -- add` - the text pins could not see this,
+                                    -- the assembler could), so the flag is
+                                    -- widened before it is added.
+                                    |> emit (Cmp (Just isZero) L Ceq w (Il.Con 0))
+                                    |> emit (Unary (Just isZeroL) L Extsw (Il.Tmp isZero))
+                                    |> emit (Bin (Just v) L Add (Il.Tmp isZeroL) (Il.Con s0.layout.tagTrue))
                                 )
                             )
 
@@ -3833,37 +3846,31 @@ storeWordStringCell words dest s0 =
     case words of
         [ bytes, len ] ->
             let
-                nbytes =
-                    case len of
-                        Il.Con n ->
-                            n
+                -- THE CELL'S BODY IS TWO UNITS (byte pointer, length), NOT the
+                -- string's byte count: the bytes themselves stay the static data
+                -- symbol.  So the allocation is the BODY SIZE, which
+                -- `heapBodyUnitOffset layout 2` states (the offset of unit 2 is
+                -- where the body ends).  MEASURED: allocating `nbytes + 1`
+                -- instead gave a ONE-word body for "hi" and the second store
+                -- corrupted the C heap.
+                ( bodyArg, s1 ) =
+                    midGcAllocSeat "Rt.allocRaw" (Il.Con (RtLayout.heapBodyUnitOffset s0.layout 2)) s0
 
-                        _ ->
-                            0
+                s2 =
+                    storeWordBodyWord bodyArg 0 bytes s1
+
+                s3 =
+                    storeWordBodyWord bodyArg RtLayout.lenFieldWord len s2
+
+                ( blk, s4 ) =
+                    freshTmp s3
             in
-            if nbytes == 0 then
-                Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a string cell whose byte length is not a compile-time constant"))
-
-            else
-                let
-                    ( bodyArg, s1 ) =
-                        midGcAllocSeat "Rt.allocRaw" (Il.Con (nbytes + 1)) s0
-
-                    s2 =
-                        storeWordBodyWord bodyArg 0 bytes s1
-
-                    s3 =
-                        storeWordBodyWord bodyArg RtLayout.lenFieldWord len s2
-
-                    ( blk, s4 ) =
-                        freshTmp s3
-                in
-                Ok
-                    (s4
-                        |> emit (Bin (Just blk) L Sub bodyArg (Il.Con (RtLayout.heapHeaderBytes s4.layout)))
-                        |> emit (Bin (Just blk) L Or (Il.Tmp blk) (Il.Con (RtLayout.heapPtrTag s4.layout)))
-                        |> storeWordWord (Il.Tmp blk) dest
-                    )
+            Ok
+                (s4
+                    |> emit (Bin (Just blk) L Sub bodyArg (Il.Con (RtLayout.heapHeaderBytes s4.layout)))
+                    |> emit (Bin (Just blk) L Or (Il.Tmp blk) (Il.Con (RtLayout.heapPtrTag s4.layout)))
+                    |> storeWordWord (Il.Tmp blk) dest
+                )
 
         _ ->
             Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a string cell that is not exactly [byte pointer, length]"))
@@ -3878,7 +3885,7 @@ storeWordBodyWord bodyArg word value s0 =
             freshTmp s0
     in
     s1
-        |> emit (Bin (Just a) L Add bodyArg (Il.Con (RtLayout.heapBodyOffset s0.layout word)))
+        |> emit (Bin (Just a) L Add bodyArg (Il.Con (RtLayout.heapBodyUnitOffset s0.layout word)))
         |> emit (Store StoreL value (Il.Tmp a))
 
 
@@ -3897,7 +3904,7 @@ wordBodyRead valueWord word s0 =
     in
     ( t
     , s3
-        |> emit (Bin (Just a) L Add (Il.Tmp bodyArg) (Il.Con (RtLayout.heapBodyOffset s3.layout word)))
+        |> emit (Bin (Just a) L Add (Il.Tmp bodyArg) (Il.Con (RtLayout.heapBodyUnitOffset s3.layout word)))
         |> emit (Load (Just t) L LoadL (Il.Tmp a))
     )
 
@@ -3999,7 +4006,7 @@ wordPayloadWord base word s0 =
                     freshTmp sa
             in
             sb
-                |> emit (Bin (Just a) L Add (Il.Tmp bodyArg) (Il.Con (RtLayout.heapBodyOffset sb.layout word)))
+                |> emit (Bin (Just a) L Add (Il.Tmp bodyArg) (Il.Con (RtLayout.heapBodyUnitOffset sb.layout word)))
                 |> emit (Load (Just r) L LoadL (Il.Tmp a))
                 |> jumpTo joinLbl
 
@@ -4490,10 +4497,36 @@ midGcAllocSeat seatKey lenA s =
         -- plus the 2-word header.  That is what every caller consumes: a raw
         -- BODY pointer.
         let
-            ( body, s6 ) =
-                wordBodyAddr (Il.Tmp vp) (emit (Call (Just vp) (Agg "val") (Il.Sym ("q_" ++ mangle seatKey)) (padded ++ [ ArgVal (Base W) (Il.Con 1) ])) s5)
+            -- THE RETURN IS A FIXNUM, NOT A TAGGED POINTER.  VR3c's seats return
+            -- `mknum(blockaddr)` (the address shifted UP into the tag bits), so
+            -- the recovery is the FIXNUM untag - an arithmetic shift DOWN - and
+            -- NOT `untagMask`: masking `addr << 3` with `-8` returns `addr << 3`
+            -- again, i.e. eight times the address (MEASURED: the harness read a
+            -- header 8x off and SEGFAULTED on the payload probe; the text pins
+            -- could not see it because both spellings are one instruction).
+            ( word, s6 ) =
+                freshTmp s5
+
+            ( blk, s7 ) =
+                freshTmp s6
+
+            ( body, s8 ) =
+                freshTmp s7
         in
-        ( Il.Tmp body, s6 )
+        ( Il.Tmp body
+        , s8
+            |> emit (Call (Just vp) (Agg "val") (Il.Sym ("q_" ++ mangle seatKey)) (padded ++ [ ArgVal (Base W) (Il.Con 1) ]))
+            -- THE `:val` RESULT IS AN AGGREGATE TEMP, NOT A WORD.  QBE treats a
+            -- temp of aggregate type as ADDRESSABLE, so using it directly in an
+            -- integer op silently takes its ADDRESS (MEASURED: `sar %t1, 3`
+            -- assembled to `leaq -8(%rbp), %rax; sarq $3, %rax` - it shifted the
+            -- spill slot's address, and the harness SEGFAULTED on the store).
+            -- So the single word is LOADED out of it first; under the word arm
+            -- `:val` is `{ l }`, one word at offset 0.
+            |> emit (Load (Just word) L LoadL (Il.Tmp vp))
+            |> emit (Bin (Just blk) L Sar (Il.Tmp word) (Il.Con s.layout.tagBits))
+            |> emit (Bin (Just body) L Add (Il.Tmp blk) (Il.Con (RtLayout.heapHeaderBytes s.layout)))
+        )
 
     else
         ( Il.Tmp t

@@ -1895,12 +1895,11 @@ checks rt rawMidText =
                         Print.print valMod
                 in
                 String.contains "call $q_Rt_x2eallocRaw(" wTxt
-                    && String.contains "=l and %t" wTxt
-                    && String.contains ", -8\n" wTxt
-                    && String.contains ", 16\n" wTxt
-                    && String.contains ", 24\n" wTxt
-                    && String.contains "=l or %t" wTxt
-                    && String.contains "=l shl 3, 3\n" wTxt
+                    && String.contains "\t%t4 =l loadl %t1\n\t%t5 =l sar %t4, 3\n\t%t6 =l add %t5, 16\n" wTxt
+                    && String.contains "\t%t7 =l add %t6, 0\n\tstorel $d0, %t7\n" wTxt
+                    && String.contains "\t%t8 =l add %t6, 8\n\tstorel 2, %t8\n" wTxt
+                    && String.contains "\t%t9 =l sub %t6, 16\n\t%t9 =l or %t9, 1\n" wTxt
+                    && String.contains "\t%t0 =l shl 16, 3\n" wTxt
                     && not (String.contains "storew" wTxt)
                     && String.contains "storew 1, %s" vTxt
                     && not (String.contains "allocRaw" vTxt)
@@ -1926,7 +1925,7 @@ checks rt rawMidText =
                 String.contains "\t%t0 =l loadl %a0\n\t%t1 =w and %t0, 7\n\t%t2 =w ceqw %t1, 0\n" wTxt
                     && String.contains "\t%t3 =w ceqw %t1, 1\n" wTxt
                     && String.contains "\t%t4 =l sar %t0, 3\n" wTxt
-                    && String.contains "\t%t5 =l and %t0, -8\n" wTxt
+                    && String.contains "\t%t5 =l and %t0, -8\n\t%t6 =l add %t5, 16\n\t%t7 =l add %t6, 0\n\t%t4 =l loadl %t7\n" wTxt
                     && String.contains "call $q_Rt_x2edie(l $d0)\n\thlt\n" wTxt
                     && String.contains "payload read on a word that is neither a fixnum" wTxt
                     && not (String.contains "loadw" wTxt)
@@ -1943,9 +1942,9 @@ checks rt rawMidText =
                     txt =
                         Print.print mod
                 in
-                String.contains "\t%t6 =l add %t5, 16\n\t%t7 =l add %t6, 24\n\t%t4 =l loadl %t7\n" txt
+                String.contains "\t%t6 =l add %t5, 16\n\t%t7 =l add %t6, 8\n\t%t4 =l loadl %t7\n" txt
                     && String.contains "=w loadw %t4\n" txt
-                    && String.contains "=l extsw %t8\n" txt
+                    && String.contains "=l extsw %t" txt
                     && not (String.contains "storew" txt)
 
             Err _ ->
@@ -1959,10 +1958,10 @@ checks rt rawMidText =
                         Print.print mod
                 in
                 String.contains "\t%t1 =w and %t0, 7\n\t%t2 =w ceqw %t1, 1\n" txt
-                    && String.contains "\t%t5 =l and %t0, -8\n\t%t6 =l sub %t5, 16\n\t%t7 =l loadl %t6\n\t%t8 =w shr %t7, 24\n\t%t8 =w and %t8, 15\n" txt
-                    && String.contains "=w ceqw %t8, 0\n" txt
+                    && String.contains "\t%t5 =l and %t0, -8\n\t%t6 =l loadl %t5\n\t%t7 =w shr %t6, 24\n\t%t7 =w and %t7, 15\n" txt
+                    && String.contains "\t%t8 =w ceqw %t7, 0\n" txt
                     && String.contains "a heap header carries KIND CODE 0" txt
-                    && String.contains "=w ceqw %t8, 4\n" txt
+                    && String.contains "=w ceqw %t7, 4\n" txt
                     && String.contains "=l extsw %t3\n" txt
                     && not (String.contains "loadw" txt)
 
