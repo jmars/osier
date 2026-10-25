@@ -485,6 +485,7 @@ function compileGroups(groups) {
       qbeMidGcYoung: QBE_MIDGC_YOUNG,
       qbeLeafFree: QBE_LEAFFREE,
       qbeWordVal: QBE_WORDVAL,
+      qbeWordArmProbe: process.env.QBE_WORDARM_PROBE || '',
     },
   });
 
@@ -527,6 +528,19 @@ function usage() {
 
 function main() {
   const argv = process.argv.slice(2);
+
+  // QBE_WORDARM_PROBE=<name> (perf VR3b3): emit ONE word-arm BEHAVIOUR PROBE
+  // instead of compiling a program.  No sources, no entry — the probe's defun
+  // comes from Mid.Qbe.WordArmProbe, so what this writes is exactly what the
+  // emitter produces for that defun under QBE_VALREP=word, which
+  // tools/qbe/word-arm-probe.sh then assembles, links and RUNS.  This is the
+  // only route to a word-arm module that can execute: every real program stops
+  // at the runtime (AREA 6), because the runtime is always injected.
+  if (process.env.QBE_WORDARM_PROBE) {
+    if (argv.length !== 1) usage();
+    compileGroups([{ sources: [], mids: [], output: argv[0], entry: '' }]);
+    return;
+  }
 
   if (argv[0] === '--batch') {
     if (argv.length !== 2) usage();

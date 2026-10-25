@@ -1,0 +1,290 @@
+/* harness.c — RUN the word arm's emitted heap code, and GATE on it.
+ *
+ * WHY THIS IS IN THE TREE (perf VR3b3 FIX F2).  Under QBE_VALREP=word no
+ * program compiled through run.js can run: the runtime is always injected, so
+ * the emitted set always reaches Rt.main and the runtime's first call stops the
+ * arm at AREA 6.  That leaves the emitter's heap side — tag writes, payload
+ * reads, kind tests, the string cell — with NO executable oracle on the arm it
+ * targets, and text pins cannot replace one: on this arm a text pin asserts the
+ * SHAPE THE AUTHOR WROTE, so it cannot see a wrong shape one instruction away.
+ * MEASURED: five such bugs shipped past every pin in VR3b3's first commit, and
+ * a sixth (a boolean tagis fold) past the second.  This file is the instrument
+ * that caught all six; it must keep running.
+ *
+ * WHAT IS REAL AND WHAT IS STUBBED.  Real: the module `node run.js` emits for
+ * QBE_WORDARM_PROBE=<name> (the SAME Mid.Qbe.WordArmProbe defun TestMain pins),
+ * vendor/qbe, cc, and every assertion about what the code DID.  Stubbed: the
+ * four runtime seats the probe module calls —
+ *
+ *   Rt.frame-enter / frame-leave  a pooled frame: VR3c twinned it to
+ *                                 `8 * nslots`, zeroed — the stub does that.
+ *   Rt.allocRaw                   THE CONTRACT runtime.mid STATES (Blocker 1):
+ *                                 gcAlloc writes the header at cursor-2/-1
+ *                                 words and returns mknum(cursor), so the seat
+ *                                 returns the BODY ADDRESS with the 2-word
+ *                                 header `heapHeaderBytes` BEFORE it.  The
+ *                                 earlier stub returned a calloc BASE with the
+ *                                 header at +0 — the EMITTER's side of the
+ *                                 contract — which made the probe measure
+ *                                 emitter-internal consistency instead of
+ *                                 agreement with the runtime.  That is exactly
+ *                                 why it passed the bugs it should have caught.
+ *   Rt.die                        records the message and sets a flag.
+ *
+ * THE ABI IS READ FROM Mid/RtLayout, NOT GUESSED: `:ret` is
+ * `align 8 { :val, w, l, l, l, w }` = 48 B with kind at 8, so a >16 B aggregate
+ * return is SysV MEMORY class — a hidden sret pointer first, then the explicit
+ * `l` params (each a POINTER to the callee's Value slot).
+ *
+ * ONE MODULE PER BINARY: every emitted module exports the same preamble
+ * (qbe_meta, rt_glob, rt_call0..16), so two cannot be linked together.  The
+ * runner builds one binary per probe and gates on each EXIT CODE: a wrong
+ * offset fails as SIGSEGV/SIGABRT (139/134) with no FAIL line, so the exit
+ * status is part of the assertion, not a convenience.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <signal.h>
+#include <setjmp.h>
+
+/* ---- Mid.RtLayout's numbers, spelled once here ---- */
+#define HEAP_HEADER_BYTES 16
+#define HEAP_PTR_TAG 1
+#define UNTAG_MASK (-8L)
+
+struct Val { int64_t w; };
+struct Ret {
+    struct Val v;   /* 0  */
+    int32_t kind;   /* 8  */
+    int32_t pad0;
+    int64_t f;      /* 16 */
+    int64_t e;      /* 24 */
+    int64_t args;   /* 32 */
+    int32_t arity;  /* 40 */
+    int32_t pad1;   /* 44 */
+};                  /* 48 == retSizeBytes */
+
+/* ---- the seats the emitted module calls (stubs, per runtime.mid's contract) ---- */
+static long *g_frame;
+long *q_Rt_x2eframe_x2denter(long nslots)
+{
+    size_t n = (size_t)nslots * 8;
+    g_frame = calloc(1, n + 64);
+    return g_frame;
+}
+void q_Rt_x2eframe_x2dleave(void) { }
+
+/* The last block the seat handed out, and its BODY address — the harness
+ * compares the emitter's untagged value against this, which is the one
+ * NON-VACUOUS check of the seat convention (the emitter never writes a header,
+ * so asserting header bits here would only assert this stub). */
+static long *g_last_body;
+
+struct Val q_Rt_x2eallocRaw(long *a, long *b, long *c, int n)
+{
+    (void)b; (void)c; (void)n;
+    /* the lean ABI passes POINTERS to Value slots plus an arity word, so the
+     * byte count is `payload(a[0], 0)`: a fixnum, i.e. the word shifted down. */
+    long nbytes = a[0] >> 3;
+    long body_words = (nbytes + 7) / 8;
+    long *base = calloc(1, (size_t)(2 + body_words) * 8);
+    long *body = base + 2;                    /* header is 2 words BEFORE it */
+    /* the header word 0 the allocator writes: class 512, code 1, scan 0 */
+    base[0] = (long)((512L * 4L) + (1L << 24));
+    base[1] = body_words;
+    g_last_body = body;
+    struct Val v;
+    v.w = (int64_t)((uintptr_t)body) << 3;     /* mknum(body) */
+    return v;
+}
+
+static int g_died;
+static char g_die_msg[512];
+long q_Rt_x2edie(const char *msg)
+{
+    g_died = 1;
+    snprintf(g_die_msg, sizeof g_die_msg, "%s", msg);
+    return 0;
+}
+
+/* The refusal path ends in QBE `hlt`, which the assembler spells `ud2` — an
+ * EXPECTED death arrives as SIGILL.  Catch it and carry on: a refusal that
+ * cannot be observed is not a test.  SIGSEGV/SIGABRT are NOT caught: those are
+ * real failures and the runner gates on the exit code. */
+static sigjmp_buf g_jb;
+static void on_ill(int sig) { (void)sig; siglongjmp(g_jb, 1); }
+
+static int g_fail;
+static int g_checks;
+static void ok(int cond, const char *what)
+{
+    g_checks++;
+    printf("%s %s\n", cond ? "PASS" : "FAIL", what);
+    if (!cond) g_fail = 1;
+}
+static long *mk_block(int code, int scan, long w0, long w1)
+{
+    long *base = calloc(1, 4 * 8);
+    base[0] = (long)((512L * 4L) + ((long)scan << 1) + ((long)code << 24));
+    base[1] = 2;
+    base[2] = w0;
+    base[3] = w1;
+    return base;
+}
+/* the tagged Value word for a block whose BODY is base+2 */
+static long tagged(long *base) { return (long)((uintptr_t)(base + 2)) | HEAP_PTR_TAG; }
+static long *body_of(long *base) { return base + 2; }
+
+#if defined(PROBE_STR)
+void q_St_x2ef(struct Ret *out, long *x);
+#elif defined(PROBE_PAY)
+void q_Pl_x2ef(struct Ret *out, long *x);
+#elif defined(PROBE_LEN)
+void q_Ln_x2ef(struct Ret *out, long *x);
+#elif defined(PROBE_TAGHEAP)
+void q_Tg_x2ef(struct Ret *out, long *v);
+#elif defined(PROBE_TAGNIL)
+void q_Nt_x2ef(struct Ret *out, long *v);
+#elif defined(PROBE_TAGBOOL)
+void q_Bt_x2ef(struct Ret *out, long *v);
+#endif
+
+int main(void)
+{
+    signal(SIGILL, on_ill);
+
+#if defined(PROBE_STR)
+    /* ===== AREA A + D: the string literal's cell, against the REAL seat convention ===== */
+    {
+        long x = 0;
+        struct Ret r;
+        memset(&r, 0, sizeof r);
+        q_St_x2ef(&r, &x);
+        long w = r.v.w;
+        ok((w & 7) == HEAP_PTR_TAG,
+           "A: a word-arm string literal is ONE tagged heap pointer (...001)");
+        /* THE SEAT CONVENTION: the untagged value must be the BODY the seat
+         * returned, not a block base — this is the assertion that would have
+         * caught Blocker 1 (the emitter's `+16` / `-16` disagreement). */
+        ok((long *)(uintptr_t)(w & UNTAG_MASK) == g_last_body,
+           "A/SEAT: the untagged value word IS the body address the seat returned (header 16 B before it)");
+        long *body = g_last_body;
+        ok(strcmp((char *)body[0], "hi") == 0,
+           "A: body unit 0 is the static byte pointer");
+        ok(body[1] == 2,
+           "D: body unit lenFieldWord (1) is the LENGTH (2)");
+        ok(r.kind == 0, "A: the defun's :ret kind word is untouched");
+    }
+#elif defined(PROBE_PAY)
+    /* ===== AREA B: payload reads, all three shapes ===== */
+    {
+        long fix = 5L << 3;
+        struct Ret r;
+        q_Pl_x2ef(&r, &fix);
+        ok(r.v.w == (5L << 3), "B: payload(fixnum 5, 0) == 5, re-boxed as mknum(5)");
+
+        long *base = mk_block(4, 1, 0xDEAD, 0xBEEF);
+        long cell = tagged(base);
+        q_Pl_x2ef(&r, &cell);
+        ok(r.v.w == (0xDEADL << 3), "B: payload(heap cons, 0) == body unit 0 (untag is the body)");
+
+        g_died = 0;
+        long nil = 2;
+        if (sigsetjmp(g_jb, 1) == 0) {
+            q_Pl_x2ef(&r, &nil);
+            ok(0, "B: payload(nil, 0) must REFUSE - it returned instead");
+        }
+        ok(g_died == 1,
+           "B: payload(nil, 0) REFUSES (the wrong-shape read dies instead of reading another layout)");
+        ok(strstr(g_die_msg, "neither a fixnum") != NULL, "B: the refusal names the reason");
+    }
+#elif defined(PROBE_LEN)
+    /* ===== AREA D: the length is body unit lenFieldWord ===== */
+    {
+        long *base = mk_block(1, 0, 0, 0);
+        ((long *)body_of(base))[0] = (long)(uintptr_t)"abcdef";
+        ((long *)body_of(base))[1] = 6;
+        long cell = tagged(base);
+        struct Ret r;
+        q_Ln_x2ef(&r, &cell);
+        ok(r.v.w == (6L << 3), "D: payload32(str, lenFieldWord) == 6, re-boxed as mknum(6)");
+
+        long fix = 9L << 3;
+        g_died = 0;
+        if (sigsetjmp(g_jb, 1) == 0) {
+            q_Ln_x2ef(&r, &fix);
+            ok(0, "D: payload32(fixnum, 1) must REFUSE - a fixnum has no body unit 1");
+        }
+        ok(g_died == 1, "D: payload32(fixnum, 1) REFUSES (no body unit 1 of a number)");
+    }
+#elif defined(PROBE_TAGHEAP)
+    /* ===== AREA C: tagis on a heap object ===== */
+    {
+        struct Ret r;
+        long *cons = mk_block(4, 1, 0, 0);
+        long c = tagged(cons);
+        q_Tg_x2ef(&r, &c);
+        ok(r.v.w == 3, "C: tagis(cons, 4) is TRUE (immediate ...011)");
+
+        long *vec = mk_block(10, 1, 0, 0);
+        long v = tagged(vec);
+        q_Tg_x2ef(&r, &v);
+        ok(r.v.w == 4, "C: tagis(vector, 4) is FALSE (immediate ...100) - the CODE was read, not the tag");
+
+        long fix = 7L << 3;
+        g_died = 0;
+        q_Tg_x2ef(&r, &fix);
+        ok(g_died == 0 && r.v.w == 4,
+           "C: tagis(fixnum, 4) is FALSE and reads NO header (untagging a fixnum is a small int - an unconditional load would fault)");
+
+        long *nocode = mk_block(0, 0, 0, 0);
+        long n = tagged(nocode);
+        g_died = 0;
+        if (sigsetjmp(g_jb, 1) == 0) {
+            q_Tg_x2ef(&r, &n);
+            ok(0, "C: a code-0 header must REFUSE - it returned instead");
+        }
+        ok(g_died == 1,
+           "C: a header whose KIND CODE is 0 REFUSES BY NAME (code 0 means NO CODE - a val-arm header)");
+        ok(strstr(g_die_msg, "KIND CODE 0") != NULL, "C: the code-0 refusal says what it is");
+    }
+#elif defined(PROBE_TAGNIL)
+    /* ===== AREA C: the VALTAG vs the WORD IMMEDIATE ===== */
+    {
+        struct Ret r;
+        long nil = 2;
+        q_Nt_x2ef(&r, &nil);
+        ok(r.v.w == 3, "C: tagis(nil, 5) is TRUE - valtag 5 IS the word immediate 2");
+        long t = 3;
+        q_Nt_x2ef(&r, &t);
+        ok(r.v.w == 4, "C: tagis(true, 5) is FALSE");
+        long *cons = mk_block(4, 1, 0, 0);
+        long c = tagged(cons);
+        q_Nt_x2ef(&r, &c);
+        ok(r.v.w == 4, "C: tagis(cons, 5) is FALSE (a heap object is not the nil immediate)");
+    }
+#elif defined(PROBE_TAGBOOL)
+    /* ===== AREA C: THE TWO-IMMEDIATE FOLD (the probe BLOCKER 2 needed) ===== */
+    {
+        struct Ret r;
+        long t = 3;  /* true  = ...011 */
+        q_Bt_x2ef(&r, &t);
+        ok(r.v.w == 3, "C/BOOL: tagis(true, tagBoolean) is TRUE");
+        long f = 4;  /* false = ...100 */
+        q_Bt_x2ef(&r, &f);
+        ok(r.v.w == 3,
+           "C/BOOL: tagis(false, tagBoolean) is TRUE - BOTH immediates answer (the shipped fold answered FALSE here)");
+        long nil = 2;
+        q_Bt_x2ef(&r, &nil);
+        ok(r.v.w == 4, "C/BOOL: tagis(nil, tagBoolean) is FALSE");
+        long fix = 5L << 3;
+        q_Bt_x2ef(&r, &fix);
+        ok(r.v.w == 4, "C/BOOL: tagis(fixnum, tagBoolean) is FALSE");
+    }
+#endif
+    printf("%d checks\n", g_checks);
+    printf("%s\n", g_fail ? "WORD-ARM HEAP PROBE: FAIL" : "WORD-ARM HEAP PROBE: PASS");
+    return g_fail;
+}
