@@ -1533,6 +1533,16 @@ checks rt rawMidText =
                     && String.contains "return call Rt.gcAlloc(region, mknum(4), mknum(2));" wordText
                     && String.contains "defun Rt.allocKind(code : val, count : val) -> val {" wordText
                     && String.contains "return call Rt.gcAlloc(region, mknum(10), mknum(countW));" wordText
+                    -- CODE 0 HAS ONE OWNER (the reviewer's SHOULD-FIX 2): no
+                    -- word-arm allocator writes it.  allocRaw is a BYTE BUFFER
+                    -- (code 1 = string) on the word arm and the shared val
+                    -- spelling keeps 0; the general seat REFUSES 0 by name.
+                    && String.contains "return call Rt.gcAlloc(region, mknum(0), mknum(bodyWords));" valText
+                    && String.contains "return call Rt.gcAlloc(region, mknum(1), mknum(bodyWords));" wordText
+                    && not (String.contains "mknum(1), mknum(bodyWords)" valText)
+                    && String.contains "if (mkbool(payload(code, 0) == 0)) {" wordText
+                    && String.contains "code 0 means NO CODE (a val-arm header)" wordText
+                    && not (String.contains "code 0 means NO CODE" valText)
                     -- the SHIFT in the code is the layout's shift: 2^24 is the
                     -- one number both sides must spell the same way.
                     && RtLayout.heapKindShift
@@ -1555,6 +1565,20 @@ checks rt rawMidText =
                 String.contains "word e = tab + iW * 48;" valText
                     && String.contains "word e = tab + iW * 16;" wordText
                     && not (String.contains "word e = tab + iW * 16;" valText)
+                    -- Rt.vecStorePlain is NOT an edge case (the reviewer's
+                    -- SHOULD-FIX 1): the emitter calls it unconditionally on
+                    -- the record-literal paths, so it is TWINNED (8-byte stride,
+                    -- ONE store), not excused in the frontier list.
+                    && String.contains "word e = vec + i * 40;" valText
+                    && String.contains "word e = vec + i * 8;" wordText
+                    && List.length (List.filter (String.contains "wstore(e, 4, wload(val, 4));") (String.split "\n" valText))
+                    == 2
+                    && List.isEmpty (List.filter (String.contains "wstore(e, 4, wload(val, 4));") (String.split "\n" wordText))
+                    -- THE CLASS-READER CENSUS: exactly FOUR, each masked to bits
+                    -- 2..21 — a fifth reader (or one left at the val mask) is
+                    -- RED, because the kind code lives in bits 24..27.
+                    && List.length (List.filter (String.contains "(flags >> 2) & 1048575") (String.split "\n" wordText))
+                    == 4
                     && String.contains "word tab = rawcall malloc(12288);" valText
                     && String.contains "word tab = rawcall malloc(4096);" wordText
                     && String.contains "mknum(baseW + 40)" valText
@@ -1618,6 +1642,31 @@ checks rt rawMidText =
                     && String.contains "THE CALL STAGING" wordText
                     && String.contains "THE EXEC-PLAN / EFFECT-HOST BLOB" wordText
                     && not (String.contains "WHAT IS NOT TWINNED YET" valText)
+
+            _ ->
+                False
+        )
+    , check "VR3c FIX 2 + NICETY (ii) — THE TWO GUARDS THE REVIEW ASKED FOR. (a) CODE 0: the word-arm general allocation seat REFUSES it by name (code 0 means NO CODE, i.e. a val-arm header), which is what makes 'no word-arm allocator writes 0' an ENFORCED property rather than prose; the four seats pass 10 / 4 / 1 / caller-supplied. (b) THE CLASS FIELD'S 20-BIT BOUND: the word arm's class readers mask bits 2..21 because bits 24..27 carry the kind code, so a ceiling needing more classes would be SILENTLY TRUNCATED — gcInit now DIES on it, in the word arm only (the val arm's bits 0..60 mask never truncates). Both guards are asserted ABSENT from the val text, so the val arm's emitted IL cannot move"
+        (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
+            ( Ok valText, Ok wordText ) ->
+                -- (b) the bound: the guard, its reachability argument, and the
+                -- arithmetic the mask IS (2^20 classes, mask 2^20-1)
+                String.contains "if (mkbool(numClasses >= 1048576)) {" wordText
+                    && String.contains "the word arm's class field is bits 2..21" wordText
+                    && not (String.contains "numClasses >= 1048576" valText)
+                    && 1048576
+                    == 1024
+                    * 1024
+                    && 1048575
+                    == 1048576
+                    - 1
+                    -- the mask the readers use IS that bound minus one
+                    && List.length (List.filter (String.contains "(flags >> 2) & 1048575") (String.split "\n" wordText))
+                    == 4
+                    -- (a) code 0's single owner, both halves
+                    && String.contains "allocKind(0): code 0 means NO CODE" wordText
+                    && String.contains "return call Rt.gcAlloc(region, mknum(1), mknum(bodyWords));" wordText
+                    && String.contains "return call Rt.gcAlloc(region, mknum(0), mknum(bodyWords));" valText
 
             _ ->
                 False

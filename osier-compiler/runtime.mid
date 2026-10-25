@@ -4833,6 +4833,20 @@ defun Rt.gcInit(dummy : val) -> val {
     word capWords = capBytes / 8;
     word markEnd = 64 + capWords / 8 + 64;
     word numClasses = 1 + payload((capWords <= 4096) ? mknum((capWords + 7) / 8) : mknum(512 + (capWords - 4096 + 4095) / 4096), 0);
+    // >>> QBE_WORDVAL-ONLY
+    // THE CLASS FIELD'S 20-BIT BOUND, CHECKED (perf VR3c nicety ii): the word
+    // arm's class readers mask bits 2..21 (1048575), because bits 24..27 carry
+    // the KIND CODE.  A class that needs bit 22 or above would be SILENTLY
+    // TRUNCATED by that mask — the sweep's advance, the free-list index and the
+    // verifier would all disagree with the allocator.  The val arm's mask
+    // (bits 0..60) never truncates, so the guard exists only here.  The bound is
+    // reachable: QBE_HEAP_MB is user-settable and the ladder's second range is
+    // 4096-word granular, so ~32 GiB of ceiling is enough to cross it.
+    if (mkbool(numClasses >= 1048576)) {
+      call Rt.die(rawstr("qbe-rt: midgc: this ceiling needs more than 2^20 size classes; the word arm's class field is bits 2..21 (bits 24..27 hold the kind code)"));
+      return mknil;
+    }
+    // <<< QBE_WORDVAL-ONLY
     // THE BLOCK MAP (GC ARC unit 2, slot 25): one BYTE per 64-byte minimum
     // block, also sized for the CEILING.  It sits between the class table and
     // the heap, in the same mmap, and it is what lets the marker, the sweeper
@@ -4997,7 +5011,12 @@ defun Rt.allocRaw(nbytes : val) -> val {
   val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
   word nbytesW = payload(nbytes, 0);
   word bodyWords = (nbytesW + 7) / 8;
+  // >>> QBE_VAL-ONLY
   return call Rt.gcAlloc(region, mknum(0), mknum(bodyWords));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  return call Rt.gcAlloc(region, mknum(1), mknum(bodyWords));
+  // <<< QBE_WORDVAL-ONLY
 }
 // >>> QBE_WORDVAL-ONLY
 // ==================== THE WORD ARM'S ALLOCATION SEATS (VR3c AREA 2) ============
@@ -5005,12 +5024,26 @@ defun Rt.allocRaw(nbytes : val) -> val {
 // held n 40-byte Values and the tag named the constructor.  On the word arm the
 // tag is `...001` for every heap object, so the constructor has to be named AT
 // ALLOCATION TIME — it becomes the header's KIND CODE (bits 24..27) and decides
-// the scan bit.  `Rt.allocVector` (code 10) and `Rt.allocRaw` (code 0, raw
-// bytes) keep their meanings; the two seats below are what the emitter calls for
-// the constructors that had no seat of their own:
+// the scan bit.  EVERY seat passes a NON-ZERO code on the word arm, because
+// code 0 has exactly one owner (see the KIND-CONTRACT block above: 0 means NO
+// CODE — a val-arm header — and nothing on this arm writes it):
 //
 //   Rt.allocCons()          a 2-value cons cell: code 4, count 2, 32 B
 //   Rt.allocKind(code, n)   the general seat: code `code`, n body words/Values
+//   Rt.allocVector(n)       a vector of n Values: code 10
+//   Rt.allocRaw(bytes)      a BYTE BUFFER: code 1 (string/symbol bytes)
+//
+// WHY allocRaw IS CODE 1 AND NOT 0 (the reviewer's SHOULD-FIX 2): every caller
+// of it — the emitter's RawAllocRaw seat (a string literal's bytes) and every
+// `allocraw(...)` in this file (substring, concat, argv, read-file, intern) —
+// allocates the byte body of a STRING, so `string 1 raw` is the honest code and
+// code 0 stays free to mean "no code".  A caller that wants a DIFFERENT
+// constructor (a float cell = 12, a prim = 8, a stream = 11) uses allocKind.
+// NOT settled here, because it is VR3b3's payload design: WHERE a word-arm
+// string keeps its LENGTH.  The val arm keeps it inline (payload word 1); a
+// word-arm string's length has to live in or beside the cell, and if it becomes
+// a body word this seat's `count` moves by one.  The KIND is settled; the
+// payload shape is not silently assumed.
 //
 // The body is `2 + count` words in every case (gcAlloc's `total`), so a cons is
 // 4 words and a vector 2 + n — the body-size rule RtLayout.bodyWords states.
@@ -5024,6 +5057,14 @@ defun Rt.allocKind(code : val, count : val) -> val {
   word glob = rawcall rt_glob_addr();
   word regionW = wload(glob, 0);
   val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  // CODE 0 IS NOT A CONSTRUCTOR (perf VR3c FIX 2): it means NO CODE — a
+  // val-arm header — and it is the one code the word arm's readers will refuse.
+  // A general seat is the only place a caller could still ask for it, so the
+  // refusal lives HERE, loudly, instead of in prose.
+  if (mkbool(payload(code, 0) == 0)) {
+    call Rt.die(rawstr("qbe-rt: midgc: allocKind(0): code 0 means NO CODE (a val-arm header); every word-arm object names its constructor"));
+    return mknil;
+  }
   return call Rt.gcAlloc(region, code, count);
 }
 // <<< QBE_WORDVAL-ONLY
@@ -5047,9 +5088,17 @@ defun Rt.allocKind(code : val, count : val) -> val {
 //
 // THE KIND CODE IS THE OBJECT'S VALTAG INTEGER — the same numbering the val arm
 // writes into a Value's tag word — so a word-arm `tagis(v, 4)` is "read the
-// header, compare the code with 4".  Code 0 means NO CODE: the val arm writes
-// nothing there, so a word-arm reader that meets 0 is looking at a val-arm
-// header and must refuse it BY NAME rather than mistake it for a constructor.
+// header, compare the code with 4".
+//
+// CODE 0 HAS EXACTLY ONE OWNER: NO CODE.  The val arm writes nothing into bits
+// 24..27, so a header whose code is 0 is a VAL-ARM header, and NO word-arm
+// allocator writes it (allocVector 10, allocCons 4, allocRaw 1, allocKind
+// caller-supplied — see the seats block below; kindHdr is the only writer).
+// The refusal itself is a PROMISSORY NOTE, stated as such: no runtime reader
+// tests for code 0 yet, because the only reader that will is the word arm's
+// `tagis`, which is the emitter's (VR3b3).  What IS landed and checkable here
+// is that no word-arm allocator can produce code 0 — that is what makes the
+// future refusal sound rather than aspirational.
 //
 // THE SCAN BIT IS DERIVED FROM THE CODE (Rt.kindHdr below): the codes with
 // Value bodies are cons, lambda, error, vector and record; strings, symbols,
@@ -5100,10 +5149,11 @@ defun Rt.kindHdr(kind : val, cls : val) -> val {
 // >>> QBE_WORDVAL-ONLY
 // ==================== WHAT IS NOT TWINNED YET (VR3c's honest frontier) ==========
 // Every stride this unit owns is twinned: gcAlloc's body size and the six
-// header writers, gcPromoteAlloc, the scavenge copiers and value walks, the
-// values table and argv, and the frame slots.  THREE stride families are
-// deliberately NOT twinned, and in each case a twin here would be WRONG rather
-// than merely absent:
+// header writers, gcPromoteAlloc, the scavenge copiers and value walks, BOTH
+// vec-store seams (vecStorePlain and vecStoreYoung), the values table and argv,
+// and the frame slots.  THREE stride families are deliberately NOT twinned, and
+// in each case a twin here would be WRONG rather than merely absent — plus one
+// thing that LOOKS like a stride and is not:
 //
 //  1. THE CALL STAGING (`Rt.apply`, `Rt.applyTailGo`, `Rt.bounceGo`,
 //     `Rt.tail-known`): `buf + 40k`, `args + rem * 40` and the
@@ -5122,6 +5172,14 @@ defun Rt.kindHdr(kind : val, cls : val) -> val {
 //     BEFORE Lower).  Twinning the malloc literal while the checker keeps
 //     emitting 40-byte field offsets would produce a blob SMALLER than the
 //     offsets written into it — a silent overrun, not a port.
+//  AND ONE THING THAT IS NOT A STRIDE: the exec-plan DECODE records
+//     (`struct CmdState`, 40 bytes; `struct Redir`, 48 bytes; the `cmdsW`/
+//     `redirsW` arrays and their `i * 40` / `j * 48` indexing).  Those are plain
+//     C records of WORDS and pointers — no `val` field, nothing the
+//     representation sizes — so 40 and 48 there are the STRUCT sizes and must
+//     NOT be twinned.  (The `h + 8 + base * 40` sites in the effect host ARE
+//     Value strides; they are item 2.)
+//
 //  3. THE PRINTER (`Rt.pvV`/`pvS`/`pvRec`/`numText`): it walks values entirely
 //     through the layout-derived prims (`payload`, `payload32`, `vecload`,
 //     `reclen`, `tagis`), so it carries no stride of its own.  Its tag
@@ -5262,11 +5320,11 @@ defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
         word grew = payload((newEnd > heapEnd) ? call Rt.gcGrow(region, mknum(newEnd)) : mknil, 0);
         if (mkbool(cursor + phys * 8 < regionW->heapEnd)) {
           // >>> QBE_VAL-ONLY
-      wstore(cursor, -2, kindW * 2 + cls * 4);
-      // <<< QBE_VAL-ONLY
-      // >>> QBE_WORDVAL-ONLY
-      wstore(cursor, -2, payload(call Rt.kindHdr(mknum(kindW), mknum(cls)), 0));
-      // <<< QBE_WORDVAL-ONLY
+          wstore(cursor, -2, kindW * 2 + cls * 4);
+          // <<< QBE_VAL-ONLY
+          // >>> QBE_WORDVAL-ONLY
+          wstore(cursor, -2, payload(call Rt.kindHdr(mknum(kindW), mknum(cls)), 0));
+          // <<< QBE_WORDVAL-ONLY
           wstore(cursor, -1, countW);
           bytestore(regionW->bmPtr + (cursor - regionW->heapStart) / 64, 0, 1);
           regionW->cursor = cursor + phys * 8;
@@ -5467,6 +5525,7 @@ defun Rt.gcNumOut(label : val, n : val, region : val) -> val {
 // infinite regress.  A Value is 40 bytes = 5 words (RtLayout.valSizeBytes),
 // the vec index is a VALUE-unit index (Mid.Ir's RawVecStore contract), so the
 // element address is `vec + i * 40` and the store is words 0..4 of it.
+// >>> QBE_VAL-ONLY
 defun Rt.vecStorePlain(vec : word, i : word, val : word) -> word {
   word e = vec + i * 40;
   wstore(e, 0, wload(val, 0));
@@ -5476,6 +5535,21 @@ defun Rt.vecStorePlain(vec : word, i : word, val : word) -> word {
   wstore(e, 4, wload(val, 4));
   return 0;
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// THE WORD-ARM TWIN (perf VR3c FIX 1 — the reviewer's SHOULD-FIX 1): the element
+// address is `vec + i * 8` and the store is ONE word, because a Value IS one
+// word.  This defun is NOT an edge case: the emitter calls it UNCONDITIONALLY on
+// both record-literal paths (Mid/Qbe/Lower.elm's storeSym) and for every surface
+// `vecstore` in a non-young build, so a 40-byte store here would write past an
+// 8-byte-slotted vector's block on the NORMAL path — the reason it is twinned
+// rather than excused in the frontier list below.
+defun Rt.vecStorePlain(vec : word, i : word, val : word) -> word {
+  word e = vec + i * 8;
+  wstore(e, 0, wload(val, 0));
+  return 0;
+}
+// <<< QBE_WORDVAL-ONLY
 // >>> QBE_MIDGC_YOUNG-ONLY
 // ==================== THE NURSERY (GC NURSERY unit) ====================
 // QBE_MIDGC_YOUNG=1 BUILD-ONLY (run.js splices this whole region out unless
@@ -5594,13 +5668,13 @@ defun Rt.vecStoreYoung(vec : word, i : word, val : word) -> word {
   return 0;
 }
 // <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
 // THE WORD-ARM TWIN (perf VR3c AREA 3): the store is ONE word at an 8-byte
 // stride, and the value it stores is the whole tagged word — so "does the stored
 // value reference the young space?" is `(v & 7) == 1` and then the block address
 // `v - 1`, instead of the val arm's tag word plus one-or-two payload pointers.
 // `(tag == 1)` multiplying into `go` keeps the val arm's arithmetic shape (no
 // branch, no join).
-// >>> QBE_WORDVAL-ONLY
 defun Rt.vecStoreYoung(vec : word, i : word, val : word) -> word {
   word e = vec + i * 8;
   wstore(e, 0, wload(val, 0));
@@ -5787,7 +5861,6 @@ defun Rt.gcScavPtr(p : val) -> val {
   // >>> QBE_WORDVAL-ONLY
   word cls = (flags >> 2) & 1048575;
   // <<< QBE_WORDVAL-ONLY
-
   word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
   val nb = call Rt.gcPromoteAlloc(mknum(cls), mknum(kind), mknum(count));
   word nw = payload(nb, 0);
@@ -5854,6 +5927,7 @@ defun Rt.gcScavValue(vaddr : val) -> val {
   return mknil;
 }
 // <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
 // THE WORD-ARM TWIN (perf VR3c AREA 3): a value cell is ONE word, so there is
 // no tag word to read byte-wise and no payload pointer to follow — the cell
 // either names a heap block (`...001`, relocated and RE-TAGGED in place) or it
@@ -5862,7 +5936,6 @@ defun Rt.gcScavValue(vaddr : val) -> val {
 // a reserved tag, so a stale read dies here instead of returning plausible
 // bytes.  `v - 1` and `v & ~7` are the same address (the tag bits ARE 1); the
 // subtraction is spelled because this surface has no `~`.
-// >>> QBE_WORDVAL-ONLY
 defun Rt.gcScavValue(vaddr : val) -> val {
   word c = payload(vaddr, 0);
   word v = wload(c, 0);
@@ -6205,7 +6278,6 @@ defun Rt.gcSweep(cursor : val) -> val {
     // >>> QBE_WORDVAL-ONLY
     word cls = (flags >> 2) & 1048575;
     // <<< QBE_WORDVAL-ONLY
-
     word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
     if (mkbool(marked == 1)) {
       wstore(cursorW, -2, flags - 1);
@@ -6362,11 +6434,11 @@ defun Rt.gcMarkValue(vaddr : val) -> val {
   }
 }
 // <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
 // THE WORD-ARM TWIN (perf VR3c AREA 3): the value word IS the object pointer,
 // so the mark walk marks the block and stops — the object's BODY is the drain's
 // job (gcDrain reads the header's scan bit and walks `count` words), which is
 // why the val arm's per-constructor payload ladder has no word-arm counterpart.
-// >>> QBE_WORDVAL-ONLY
 defun Rt.gcMarkValue(vaddr : val) -> val {
   word v = wload(payload(vaddr, 0), 0);
   word tag = v & 7;
@@ -6446,7 +6518,6 @@ defun Rt.gcVerify(p : val, n : val) -> val {
   // >>> QBE_WORDVAL-ONLY
   word cls = (flags >> 2) & 1048575;
   // <<< QBE_WORDVAL-ONLY
-
   word phys = payload((cls <= 512) ? mknum(cls * 8) : mknum(4096 + (cls - 512) * 4096), 0);
   word state = byteload(bm + (pw - heapStart) / 64, 0);
   // V1: the allocator's record of block starts must contain this address.
@@ -6524,7 +6595,6 @@ defun Rt.gcVerifyList(node : val, cls : val, acc : val) -> val {
   // >>> QBE_WORDVAL-ONLY
   if (mkbool(((flags >> 2) & 1048575) != clsW)) {
   // <<< QBE_WORDVAL-ONLY
-
     call Rt.gcVD(mknum(rawstr("qbe-rt: midgc: VERIFY V5: a free-list link is on the WRONG CLASS list at heap offset ")), mknum(nd - region->heapStart), mknum(regW));
     return mknil;
   }
@@ -7378,6 +7448,7 @@ defun Rt.rootPopTo(wm : word) -> word {
 // branches both return a word (no phi), and a word-valued `?:`/`if` in a value
 // slot is a loud `wordProducerMessage` — so the `mknum`-to-slot-then-`payload`
 // round-trip IS the word-join-via-memory idiom, the minimal expressible form.
+// >>> QBE_WORDVAL-ONLY
 // WORD ARM (perf VR3c AREA 4): the HEADER does not move — 5 words / 40 bytes,
 // `base = hdr + 40`, the pooled-freelist index by `nslots`, and NO anchor words
 // (the P8 invariant).  Only the SLOT stride flips, 40 -> 8 bytes, in the two
@@ -7387,6 +7458,7 @@ defun Rt.rootPopTo(wm : word) -> word {
 // materialisation are VR3b2's frame-stride port, and the collector reaches the
 // slots through Rt.rootPushValueArray, whose Value stride is gcScanValueArray's
 // (AREA 3).
+// <<< QBE_WORDVAL-ONLY
 defun Rt.frameBlock(nslots : word) -> word {
   // >>> QBE_VAL-ONLY
   word bytes = 40 + 40 * nslots;

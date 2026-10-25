@@ -293,8 +293,22 @@ THE VAL ARM'S TEXT IS UNCHANGED BY CONSTRUCTION.  The marker lines themselves
 are dropped in BOTH arms and a region's body is kept only for its own arm, so
 `loadArm False` yields the byte-for-byte text the tree had before the twins
 existed — which is what keeps the val arm's emitted IL (and therefore the
-corpus baseline) inert.  A region that is unterminated or unbalanced is a LOUD
-refusal: a half-spliced runtime would link cleanly and read the wrong bytes.
+corpus baseline) inert.  THE RULE THAT KEEPS IT TRUE (perf VR3c, after review):
+a twin's PROSE belongs INSIDE its own region, and a twin never re-indents a
+line that the other arm keeps.  Both were violated once and are what the
+"byte-for-byte" claim costs: a lead comment sitting between the two regions
+survives into the val text, and a line-wise edit that re-indents a live val line
+makes the val text merely PARSE-identical (comments are emit-inert, so the
+emitted IL was byte-identical even then — but the claim in this comment would
+have been false as stated, and a doc that overclaims is the thing this repo
+keeps paying for).  Checked by diffing `spliceArm False`'s output against the
+pre-VR3c `runtime.mid`; it is byte-identical.
+
+A region that is unterminated or unbalanced is a LOUD refusal: a half-spliced
+runtime would link cleanly and read the wrong bytes.  The marker text and the
+die messages inside the regions must also be ASCII — the surface language
+rejects a non-ASCII byte in a string literal, which is how a twin that would
+have compiled on one arm only is caught at the parse instead of at run time.
 -}
 loadArm : Bool -> String -> Result String Runtime
 loadArm wordVal source =
