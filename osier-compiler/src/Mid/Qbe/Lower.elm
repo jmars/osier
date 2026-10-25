@@ -3761,11 +3761,73 @@ storeWordCell code words dest s0 =
                         -- A FIXNUM: the value is shifted UP into the bits the
                         -- tag leaves free (the exact inverse of the reader's
                         -- SAR).  Inline, no runtime call, no allocation.
-                        let
-                            ( sh, s1 ) =
-                                freshTmp s0
-                        in
-                        Ok (storeWordWord (Il.Tmp sh) dest (emit (Bin (Just sh) L Shl w (Il.Con s0.layout.tagBits)) s1))
+                        --
+                        -- F6 (VR3b3 FIX): THE `mk*` PATH IS RANGE-CHECKED TOO,
+                        -- not just `PrimApp`.  A word-arm fixnum is an i61, so a
+                        -- value whose top three bits are set would be SILENTLY
+                        -- TRUNCATED by the shift - the exact silent-wrong class
+                        -- this arm exists to prevent - and `mknum` is how every
+                        -- runtime site boxes a word.  A COMPILE-TIME constant is
+                        -- decided here (and refused by name, as a literal is);
+                        -- a dynamic word gets a round-trip check whose failure
+                        -- REFUSES loudly, because the alternative (boxing onto
+                        -- the heap) is AREA 4's overflow path and does not
+                        -- exist yet.
+                        case w of
+                            Il.Con n ->
+                                if n < 0 - RtLayout.wordFixnumLimit || n >= RtLayout.wordFixnumLimit then
+                                    Err
+                                        (wordArmUnsupported
+                                            (wordArea
+                                                "AREA 4 (ARITHMETIC - THE i61 OVERFLOW/BOXING PATH)"
+                                                -- NO DIGITS IN THE MESSAGE: this
+                                                -- compiler's Int IS A DOUBLE, so
+                                                -- `String.fromInt` prints 2^60 as
+                                                -- 1152921504606847000 (MEASURED) -
+                                                -- a message that names a number it
+                                                -- cannot print exactly is worse than
+                                                -- one that names the bound.
+                                                "mknum of a compile-time value at or beyond the i61 bound - it does not fit the word arm's fixnum, so it has to be BOXED onto the heap, and the boxing path does not exist yet (shifting it would silently drop its top three bits)"
+                                            )
+                                        )
+
+                                else
+                                    Ok (emit (Store StoreL (Il.Con (n * 8)) (Il.Tmp (slotTmp dest))) s0)
+
+                            _ ->
+                                let
+                                    ( sh, s1 ) =
+                                        freshTmp s0
+
+                                    ( back, s2 ) =
+                                        freshTmp s1
+
+                                    ( fits, s3 ) =
+                                        freshTmp s2
+
+                                    ( okLbl, s4 ) =
+                                        freshLbl "fixok" s3
+
+                                    ( badLbl, s5 ) =
+                                        freshLbl "fixbad" s4
+
+                                    ( msgName, s6 ) =
+                                        freshData ("msg:" ++ wordFixnumRefusal)
+                                            (\n -> { name = n, align = Just 8, items = [ DStr wordFixnumRefusal, DByte 0 ], export_ = False })
+                                            s5
+                                in
+                                Ok
+                                    (s6
+                                        |> emit (Bin (Just sh) L Shl w (Il.Con s0.layout.tagBits))
+                                        |> emit (Bin (Just back) L Sar (Il.Tmp sh) (Il.Con s0.layout.tagBits))
+                                        |> emit (Cmp (Just fits) L Ceq (Il.Tmp back) w)
+                                        |> closeBlock (Jnz (Il.Tmp fits) okLbl badLbl)
+                                        |> startBlock badLbl
+                                        |> emit (Call Nothing (Base L) (Il.Sym ("q_" ++ mangle "Rt.die")) [ ArgVal (Base L) (Il.Sym msgName) ])
+                                        |> closeBlock Hlt
+                                        |> startBlock okLbl
+                                        |> storeWordWord (Il.Tmp sh) dest
+                                    )
 
                     else if code == RtLayout.tagBoolean then
                         -- A BOOLEAN: one bit of information, TWO immediates
@@ -3980,6 +4042,13 @@ is not a heap object has none. -}
 wordField32Refusal : String
 wordField32Refusal =
     "qbe-rt: word arm: i32 field read on a word that is not a heap object (...001) - a fixnum's value lives in a register and has no field, and an immediate (nil/true/false/error) has no body. Refusing."
+
+
+{-| The `mknum` overflow refusal: a word-arm fixnum is an i61, so a value whose
+top three bits survive the shift cannot be represented.  ASCII only. -}
+wordFixnumRefusal : String
+wordFixnumRefusal =
+    "qbe-rt: word arm: mknum overflow - the value does not fit the i61 fixnum (its top three bits would be dropped by the tag shift) and boxing onto the heap is AREA 4's overflow path, which does not exist yet. Refusing instead of truncating."
 
 
 {-| AREA B: the loud refusal a payload read emits when the word it was handed is

@@ -1817,6 +1817,28 @@ checks rt rawMidText =
             Err _ ->
                 False
         )
+    , check "VR3b3 FIX F6 - THE `mk*` PATH IS RANGE-CHECKED TOO, NOT JUST `PrimApp`. A word-arm fixnum is an i61, so `mknum` of a value whose top three bits survive the tag shift would be SILENTLY TRUNCATED - and `mknum` is how every runtime site boxes a word. A COMPILE-TIME constant is refused by name (AREA 4, the boxing path that does not exist yet), and a DYNAMIC word gets a round-trip check whose failure REFUSES loudly instead of truncating. Both halves are pinned: `mknum(2^60)` must NOT emit, and the dynamic write must emit `shl`/`sar`/`ceql`/`jnz` plus the refusal"
+        ((case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ bigMkProbe ]) [ bigMkProbe ] "Bm.f" of
+            Err msg ->
+                String.contains "AREA 4 (ARITHMETIC" msg
+                    && String.contains "mknum of a compile-time value at or beyond the i61 bound" msg
+
+            Ok _ ->
+                False
+         )
+            && (case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ payloadProbe ]) [ payloadProbe ] "Pl.f" of
+                    Ok mod ->
+                        let
+                            txt =
+                                Print.print mod
+                        in
+                        String.contains "\t%t7 =l shl %t4, 3\n\t%t8 =l sar %t7, 3\n\t%t9 =w ceql %t8, %t4\n" txt
+                            && String.contains "mknum overflow" txt
+
+                    Err _ ->
+                        False
+               )
+        )
     , check "VR3b3 (supersedes VR3b2's wholesale gate) - THE Rt SURFACE IS CLASSIFIED PER DEFUN, AND STILL REFUSES. VR3b2 refused any program reaching `runtime.mid` wholesale because the runtime's stride-carrying defuns assumed 40-byte values; VR3c twinned those strides, so the blanket reason went stale and the refusal reported the LANE instead of the CONSTRUCT. The Rt set now gets the SAME pre-walk classifier the surface does: the refusal names the first un-ported Rt defun and its construct (`Rt.<key>: AREA ...`), and NOTHING is relaxed - an un-ported construct anywhere in the reachable Rt set still refuses before any IL is produced, which is why the SAME program still lowers on the val arm and still refuses on the word arm"
         (case
             ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.copyWords"
@@ -1928,11 +1950,11 @@ checks rt rawMidText =
                         Print.print valMod
                 in
                 String.contains "call $q_Rt_x2eallocRaw(" wTxt
-                    && String.contains "\t%t4 =l loadl %t1\n\t%t5 =l sar %t4, 3\n\t%t6 =l add %t5, 0\n" wTxt
-                    && String.contains "\tstorel $d0, %t6\n\t%t7 =l add %t5, 8\n" wTxt
-                    && String.contains "\tstorel 2, %t7\n" wTxt
-                    && String.contains "\t%t8 =l or %t5, 1\n" wTxt
-                    && String.contains "\t%t0 =l shl 16, 3\n" wTxt
+                    && String.contains "\t%t3 =l loadl %t0\n\t%t4 =l sar %t3, 3\n\t%t5 =l add %t4, 0\n" wTxt
+                    && String.contains "\tstorel $d0, %t5\n\t%t6 =l add %t4, 8\n" wTxt
+                    && String.contains "\tstorel 2, %t6\n" wTxt
+                    && String.contains "\t%t7 =l or %t4, 1\n" wTxt
+                    && String.contains "\tstorel 128, %s2\n" wTxt
                     && not (String.contains "storew" wTxt)
                     && String.contains "storew 1, %s" vTxt
                     && not (String.contains "allocRaw" vTxt)
@@ -13624,6 +13646,28 @@ nilTagProbe =
 boolTagProbe : Defun
 boolTagProbe =
     WordArmProbe.defun WordArmProbe.TagBool
+
+
+{-| F6's probe: `\x -> mknum(2^60)`, one past the word arm's i61 fixnum.  It must
+be REFUSED at compile time, not shifted (the shift would drop its top three
+bits) - the same decision `lowerLitWord` makes for a literal, now covering the
+`mk*` path too.
+-}
+bigMkProbe : Defun
+bigMkProbe =
+    { key = "Bm.f"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body =
+                Unsafe
+                    (RawMkValue
+                        { tag = RtLayout.tagNumber
+                        , words = [ Lit (LNumber 1152921504606846976) ]
+                        }
+                    )
+            }
+    }
 
 
 {-| perf VR3b2 — THE AREA-2 PROBE: `\b -> if b then b else b`, a defun whose
