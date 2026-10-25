@@ -2967,6 +2967,47 @@ else
   fi
 fi
 
+# ---- UPSTREAM'S OWN TESTSUITE (vendor/qbe/test/*.ssa) ----
+# WHY THIS ROW EXISTS.  vendor/qbe now carries TWO local patches (`copy.c`'s
+# class test, and the `tcall` instruction across 15 files).  Upstream ships 76
+# test/*.ssa files that exercise the passes we patched, and until this row
+# existed NOTHING in tools/ ran them: only tools/qbe-build.sh drives `make`, and
+# only to BUILD.  So a future vendor sync or a careless edit could break
+# upstream behaviour with every other gate in this file still green — our gates
+# check what WE depend on, not what the vendor already promised.
+#
+# THE ROW IS NOT JUST AN EXIT CODE.  `make check` prints "All is fine!" and
+# exits 0 when it ran the suite, but it would also print that after running
+# FEWER tests — test.sh enumerates test/[!_]*.ssa and skips silently if a file
+# is gone.  So the row also requires one result line per enumerated file and
+# zero [ko]: a suite that quietly shrank is a failure, not a pass.  (Upstream's
+# script writes its scratch to a hard-coded /tmp/qbe.zzzz and ignores TMPDIR;
+# that file is upstream's and is left unmodified.)
+if [ -x "$ROOT/vendor/qbe/tools/test.sh" ] && [ -f "$ROOT/vendor/qbe/qbe" ]; then
+  up_n=$(ls "$ROOT"/vendor/qbe/test/[!_]*.ssa 2>/dev/null | wc -l)
+  if [ "$up_n" -eq 0 ]; then
+    echo "FAIL upstream-suite: vendor/qbe/test/ holds no test cases — upstream's suite was deleted"
+    FAIL=1
+  elif ! up_out="$(make -C "$ROOT/vendor/qbe" check 2>&1)"; then
+    # upstream marks a red case with the failing stage ("[qbe fail]",
+    # "[run fail]", ...) and prints the case name on the line above it
+    echo "FAIL upstream-suite: upstream's own testsuite FAILED against the patched vendor"
+    printf '%s\n' "$up_out" | grep -B1 -E '\[[a-z ]+fail\]|^[0-9]+ of [0-9]+ tests failed!' | sed 's/^/    /'
+    FAIL=1
+  else
+    up_ok=$(printf '%s\n' "$up_out" | grep -c '\[ok\]')
+    if [ "$up_ok" -ne "$up_n" ]; then
+      echo "FAIL upstream-suite: only $up_ok of $up_n enumerated upstream test case(s) reported ok — the suite ran, but not all of it"
+      FAIL=1
+    else
+      echo "PASS upstream-suite: $up_ok/$up_n of upstream's own test/*.ssa pass against the patched vendor (2 local patches: copy.c's class test, the tcall instruction)"
+    fi
+  fi
+else
+  echo "FAIL upstream-suite: vendor/qbe/tools/test.sh is missing or not executable — upstream's own testsuite, the only oracle for the VENDOR as a whole, was deleted"
+  FAIL=1
+fi
+
 # ---- THE `tcall` TAIL-CALL INSTRUCTION'S BEHAVIOUR PROBE (Q1a) ----
 # WHY THIS ROW EXISTS.  QBE gained a `tcall` instruction (THIRD-PARTY.md's
 # second local patch): the callee returns to the CALLER's caller, so the frame
