@@ -5097,6 +5097,38 @@ defun Rt.kindHdr(kind : val, cls : val) -> val {
   return mknum(scan * 2 + c * 4 + k * 16777216);
 }
 // <<< QBE_WORDVAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// ==================== WHAT IS NOT TWINNED YET (VR3c's honest frontier) ==========
+// Every stride this unit owns is twinned: gcAlloc's body size and the six
+// header writers, gcPromoteAlloc, the scavenge copiers and value walks, the
+// values table and argv, and the frame slots.  THREE stride families are
+// deliberately NOT twinned, and in each case a twin here would be WRONG rather
+// than merely absent:
+//
+//  1. THE CALL STAGING (`Rt.apply`, `Rt.applyTailGo`, `Rt.bounceGo`,
+//     `Rt.tail-known`): `buf + 40k`, `args + rem * 40` and the
+//     `copyWords(.., rem * 5)` blits move one 40-byte Value per argument.  That
+//     is the CALLING CONVENTION, not a data stride: MEASURED at VR3b2, a
+//     `:val` parameter arrives IN A REGISTER at 8 bytes and BY VALUE ON THE
+//     STACK at 40, so the argument ABI and the staging buffer must flip
+//     TOGETHER — VR3b2's App area owns the ABI, VR3d owns the flip.  A twin
+//     here would change how a call is MADE while the callee still expects the
+//     old shape.
+//  2. THE EXEC-PLAN / EFFECT-HOST BLOB (`Rt.hostInit`'s
+//     `8 + (33031 * 40) + ...` and every `h + 8 + base * 40`): the slot array's
+//     stride is `sizeof(val)` AS THE .mid FRONT END COMPUTES IT, and
+//     `Mid.RtLang.Check` sizes `val` at 40 bytes under ANY knob (`TVal ->
+//     Ok ( 40, 8 )`, no layout parameter — VR3a's finding; LowerToIr runs
+//     BEFORE Lower).  Twinning the malloc literal while the checker keeps
+//     emitting 40-byte field offsets would produce a blob SMALLER than the
+//     offsets written into it — a silent overrun, not a port.
+//  3. THE PRINTER (`Rt.pvV`/`pvS`/`pvRec`/`numText`): it walks values entirely
+//     through the layout-derived prims (`payload`, `payload32`, `vecload`,
+//     `reclen`, `tagis`), so it carries no stride of its own.  Its tag
+//     DISPATCH is still the val arm's, because `tagis` is lowered by the .mid
+//     front end, which bakes the val arm's tag integers under any knob — that
+//     is VR3b3's lane (the surface lane's RawTagIs).
+// <<< QBE_WORDVAL-ONLY
 defun Rt.gcAlloc(region : val, kind : val, count : val) -> val {
   word kindW = payload(kind, 0);
   word countW = payload(count, 0);
@@ -7346,8 +7378,22 @@ defun Rt.rootPopTo(wm : word) -> word {
 // branches both return a word (no phi), and a word-valued `?:`/`if` in a value
 // slot is a loud `wordProducerMessage` — so the `mknum`-to-slot-then-`payload`
 // round-trip IS the word-join-via-memory idiom, the minimal expressible form.
+// WORD ARM (perf VR3c AREA 4): the HEADER does not move — 5 words / 40 bytes,
+// `base = hdr + 40`, the pooled-freelist index by `nslots`, and NO anchor words
+// (the P8 invariant).  Only the SLOT stride flips, 40 -> 8 bytes, in the two
+// places that size a frame: frameBlock's `bytes` and frame-enter's memset.
+// Everything BELOW `base` already follows the instance rather than this text:
+// the emitted slot address table, the param/capture/result blits and slot 0/1's
+// materialisation are VR3b2's frame-stride port, and the collector reaches the
+// slots through Rt.rootPushValueArray, whose Value stride is gcScanValueArray's
+// (AREA 3).
 defun Rt.frameBlock(nslots : word) -> word {
+  // >>> QBE_VAL-ONLY
   word bytes = 40 + 40 * nslots;
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word bytes = 40 + 8 * nslots;
+  // <<< QBE_WORDVAL-ONLY
   word g = payload((nslots < 8192) ? mknum(rawcall rt_glob_addr()) : mknum(0), 0);
   *FrameHdr h = payload((g != 0) ? mknum(wload(g, 16 + nslots)) : mknum(0), 0);
   word popped = if (h != 0) {
@@ -7363,7 +7409,12 @@ defun Rt.frameBlock(nslots : word) -> word {
 defun Rt.frame-enter(nslots : word) -> word {
   *FrameHdr hdr = call Rt.frameBlock(nslots);
   word base = [word](hdr) + 40;
+  // >>> QBE_VAL-ONLY
   rawcall memset(base, 0, 40 * nslots);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  rawcall memset(base, 0, 8 * nslots);
+  // <<< QBE_WORDVAL-ONLY
   hdr->live = nslots;
   word wm = call Rt.rootWatermark();
   hdr->wm = wm;

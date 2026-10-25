@@ -1591,6 +1591,37 @@ checks rt rawMidText =
             _ ->
                 False
         )
+    , check "VR3c AREA 4 — THE FRAME SITES FLIP AND THE HEADER DOES NOT: frameBlock's block is `40 + 8*nslots` and frame-enter's memset is `8*nslots` on the word arm (`40 + 40*nslots` / `40*nslots` on the val arm), while the 40-byte header, `base = hdr + 40` and the `nslots`-indexed pool are asserted IDENTICAL in both texts — the P8 invariant (an alloc8 block, 5 header words, no anchor words). The slot size and the header size are the LAYOUT's: 8 == `wordLayout.valSizeBytes` and 40 == 5 * `wordBytes`. The exec-plan blob and the printer are deliberately NOT twinned (their stride is the .mid front end's 40-byte `val`, which no knob moves, and the printer has no stride at all), and the runtime carries that list so the next unit cannot 'finish' the port into a silent overrun"
+        (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
+            ( Ok valText, Ok wordText ) ->
+                String.contains "word bytes = 40 + 40 * nslots;" valText
+                    && String.contains "rawcall memset(base, 0, 40 * nslots);" valText
+                    && not (String.contains "40 + 8 * nslots" valText)
+                    && String.contains "word bytes = 40 + 8 * nslots;" wordText
+                    && String.contains "rawcall memset(base, 0, 8 * nslots);" wordText
+                    && not (String.contains "40 + 40 * nslots" wordText)
+                    -- the header does NOT move: the same two lines in both arms
+                    && String.contains "word base = [word](hdr) + 40;" valText
+                    && String.contains "word base = [word](hdr) + 40;" wordText
+                    && String.contains "wstore(g, 16 + nslots, h->freeNext);" valText
+                    && String.contains "wstore(g, 16 + nslots, h->freeNext);" wordText
+                    -- the numbers ARE the layout's
+                    && RtLayout.wordLayout.valSizeBytes
+                    == 8
+                    && 5
+                    * RtLayout.wordBytes
+                    == 40
+                    && RtLayout.valLayout.valSizeBytes
+                    == 40
+                    -- and the frontier is stated where the next unit will look
+                    && String.contains "WHAT IS NOT TWINNED YET" wordText
+                    && String.contains "THE CALL STAGING" wordText
+                    && String.contains "THE EXEC-PLAN / EFFECT-HOST BLOB" wordText
+                    && not (String.contains "WHAT IS NOT TWINNED YET" valText)
+
+            _ ->
+                False
+        )
     , check "VR3b2 AREA 1 PORTED — THE FRAME SLOT STRIDE LOWERS UNDER THE WORD ARM. A defun whose whole body is one Value copy (`\\x -> x`) now emits a REAL module on the word instance: `type :val = align 8 { l }`, the frame block is `alloc8 (valSizeBytes * nslots)` = 16 for 2 slots, the slot address table steps by 8 (`%s0 =l add %f, 0`, `%s1 =l add %f, 8`), the param and result copies are 8-byte blits, and slot 0/1's materialisation is `storel 0` at both `%s0` and `%f + retKindOffset` = `%f + 8`. EXACT text, and the VAL-arm spellings (alloc8 80, a 40-byte blit, a `storew` tag) are asserted ABSENT — this is the row that would have gone red had any stride site still read a constant"
         (case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ idProbe ]) [ idProbe ] "Id.f" of
             Ok mod ->
