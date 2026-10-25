@@ -99,6 +99,37 @@ export function l $indirect(l %n, l %f) {
 }
 
 # ---------------------------------------------------------------------------
+# (c3) THE PARK: an indirect target that rega had to place in a CALLEE-SAVED
+# register, because it is live across an ordinary call in the same block.
+# The epilogue pops that register BEFORE the jump, so without emit's park the
+# `jmp *%rbx` would land on the caller's restored value — a jump to whatever
+# the caller had in rbx, i.e. a crash with no diagnostic.
+#
+# $busy IS LOAD-BEARING: it is what forces the allocation.  With no intervening
+# call rega coalesces %f straight into rax/rsi (both caller-saved) and this row
+# stops exercising the park at all — measured, that is exactly how the first
+# version of $indirect passed while the park was still untested.
+# ---------------------------------------------------------------------------
+export function l $busy(l %x) {
+@s
+	%r =l add %x, 0
+	ret %r
+}
+
+export function l $drive(l %n, l %f) {
+@s
+	%c =l ceql %n, 0
+	jnz %c, @base, @step
+@base
+	ret 42
+@step
+	%a =l call $busy(l %n)
+	%m =l sub %n, 1
+	tcall l %f(l %m, l %f)
+	ret
+}
+
+# ---------------------------------------------------------------------------
 # (d) env tail: the closure environment rides in rax, which the teardown must
 # not touch.
 # ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@ struct big { long a, b, c; };
 struct big sretA(long);
 
 long indirect(long, long);
+long drive(long, long);
 long envcall(long);
 long pressure(long, long);
 
@@ -36,6 +37,9 @@ ck(const char *what, long got, long want)
 		printf("FAIL %s: got %ld want %ld\n", what, got, want);
 		fails++;
 	}
+	/* unbuffered: a probe that CRASHES still says which check it was in,
+	 * and a lost stdout buffer reads as "0 checks ran" */
+	fflush(stdout);
 }
 
 /* $pressure's body, in C: 12 chained values, 6 products, and $sink6. */
@@ -79,6 +83,12 @@ main(void)
 
 	/* (c2) indirect tail through a function pointer, 1e5 deep. */
 	ck("indirect-tail", indirect(100000, (long)indirect), 0);
+
+	/* (c3) the same, with the target forced into a CALLEE-SAVED register by
+	 * an intervening call.  The epilogue pops that register before the jump,
+	 * so this row is the one that sees emit's park: without it the jump
+	 * lands on the caller's restored value. */
+	ck("park", drive(1000000, (long)drive), 42);
 
 	/* (d) env (rax) survives the teardown. */
 	ck("env-tail", envcall(37), 37 + 5 + 37);

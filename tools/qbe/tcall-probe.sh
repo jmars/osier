@@ -43,7 +43,7 @@ BAD="$ROOT/tools/qbe/tcall-bad"
 
 # the number of checks tcall_main.c prints; a dropped probe must not read as a
 # pass
-WANT_CHECKS=9
+WANT_CHECKS=10
 # 1e7 mutual hops: ~1e7 * any frame >= 48 B = ~480 MB against an 8 MiB cap
 STACK_KB=8192
 
