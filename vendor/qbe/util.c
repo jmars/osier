@@ -279,11 +279,12 @@ igroup(Blk *b, Ins *i, Ins **i0, Ins **i1)
 		*i1 = i;
 		return;
 	case Ocall:
+	case Otcall:
 	case_Oarg:
 		for (; i>ib && isarg((i-1)->op); i--)
 			;
 		*i0 = i;
-		for (; i<ie && i->op != Ocall; i++)
+		for (; i<ie && !iscall(i->op); i++)
 			;
 		assert(i < ie);
 		*i1 = i + 1;

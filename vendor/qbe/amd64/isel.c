@@ -96,7 +96,7 @@ fixarg(Ref *r, int k, Ins *i, Fn *fn)
 		a.offset.sym.id = intern(buf);
 		fn->mem[fn->nmem-1] = a;
 	}
-	else if (op == Ocall && r == &i->arg[0]
+	else if (iscall(op) && r == &i->arg[0]
 	&& rtype(r0) == RCon && fn->con[r0.val].type != CAddr) {
 		/* use a temporary register so that we
 		 * produce an indirect call
@@ -120,7 +120,7 @@ fixarg(Ref *r, int k, Ins *i, Fn *fn)
 		r1 = newtmp("isel", Kl, fn);
 		emit(Oaddr, Kl, r1, SLOT(s), R);
 	}
-	else if (op != Ocall && hascon(r0, &c, fn)
+	else if (!iscall(op) && hascon(r0, &c, fn)
 	&& c->type == CAddr && ((c->sym.type & SExt)
 	 || (T.apple && c->sym.type == SThr))) {
 		r1 = newtmp("isel", Kl, fn);
@@ -152,7 +152,7 @@ fixarg(Ref *r, int k, Ins *i, Fn *fn)
 		}
 	}
 	else if (!(isstore(op) && r == &i->arg[1])
-	&& !isload(op) && op != Ocall && rtype(r0) == RCon
+	&& !isload(op) && !iscall(op) && rtype(r0) == RCon
 	&& fn->con[r0.val].type == CAddr) {
 		/* turn address operands into
 		 * lea/mov instructions
@@ -422,6 +422,7 @@ sel(Ins i, Num *tn, Fn *fn)
 		goto Emit;
 	case Odbgloc:
 	case Ocall:
+	case Otcall:
 	case Osalloc:
 	case Ocopy:
 	case Oadd:

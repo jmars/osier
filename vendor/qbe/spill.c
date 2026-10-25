@@ -279,7 +279,7 @@ dopm(Blk *b, Ins *i, BSet *v)
 		bsset(v, i->arg[0].val);
 	} while (i != b->ins && regcpy(i-1));
 	bscopy(u, v);
-	if (i != b->ins && (i-1)->op == Ocall) {
+	if (i != b->ins && iscall((i-1)->op)) {
 		v->t[0] &= ~T.retregs((i-1)->arg[1], 0);
 		limit2(v, T.nrsave[0], T.nrsave[1], 0);
 		for (n=0, r=0; T.rsave[n]>=0; n++)
@@ -469,6 +469,16 @@ spill(Fn *fn)
 				}
 			bscopy(u, v);
 			limit2(v, 0, 0, w);
+			if (i->op == Otcall) {
+				/* a tcall clobbers the caller-save
+				 * registers except those carrying its
+				 * arguments; unlike a call there are no
+				 * copies after it for dopm() to group
+				 * it with, so do it here */
+				v->t[0] &= ~T.retregs(i->arg[1], 0);
+				limit2(v, T.nrsave[0], T.nrsave[1], 0);
+				v->t[0] |= T.argregs(i->arg[1], 0);
+			}
 			for (n=0; n<2; n++)
 				if (rtype(i->arg[n]) == RTmp) {
 					t = i->arg[n].val;

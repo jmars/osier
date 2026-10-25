@@ -9,6 +9,7 @@ struct E {
 	int fp;
 	uint64_t fsz;
 	int nclob;
+	int tailed; /* the block ended in a tcall's teardown+jmp */
 };
 
 #define CMP(X) \
@@ -242,6 +243,7 @@ getarg(char c, Ins *i)
 }
 
 static void emitins(Ins, E *);
+static void sysv_epilogue(E *);
 
 static void
 emitcopy(Ref r1, Ref r2, int k, E *e)
@@ -603,6 +605,41 @@ emitins(Ins i, E *e)
 			die("invalid call argument");
 		}
 		break;
+	case Otcall:
+		/* a tail call: abi1 emitted the argument copies
+		 * before this instruction, so they have already
+		 * read the frame; we can now tear it down and jump.
+		 * the callee returns to our caller. */
+		if (rtype(i.arg[0]) == RTmp
+		&& (e->fn->reg & BIT(i.arg[0].val))) {
+			/* the target register is callee-saved: the
+			 * epilogue is about to pop it, so park the
+			 * target in a caller-saved scratch register
+			 * (r11 is never an argument register) */
+			fprintf(e->f, "\tmovq %%%s, %%r11\n",
+				rname[i.arg[0].val][0]);
+			i.arg[0] = TMP(R11);
+		}
+		sysv_epilogue(e);
+		switch (rtype(i.arg[0])) {
+		case RCon:
+			con = &e->fn->con[i.arg[0].val];
+			fprintf(e->f, "\tjmp ");
+			emitcon(con, e);
+			if (con->type == CAddr
+			&& (con->sym.type & SExt)
+			&& !T.apple)
+				fprintf(e->f, "@plt");
+			fprintf(e->f, "\n");
+			break;
+		case RTmp:
+			emitf("jmp *%L0", &i, e);
+			break;
+		default:
+			die("invalid tcall argument");
+		}
+		e->tailed = 1;
+		break;
 	case Osalloc:
 		/* there is no good reason why this is here
 		 * maybe we should split Osalloc in 2 different
@@ -636,6 +673,32 @@ emitins(Ins i, E *e)
 		}
 		break;
 	}
+}
+
+/* the frame teardown shared by `ret` and `tcall`; the only
+ * difference between the two is the final ret/jmp */
+static void
+sysv_epilogue(E *e)
+{
+	Ins itmp;
+	int *r;
+
+	if (e->fn->dynalloc)
+		fprintf(e->f,
+			"\tmovq %%rbp, %%rsp\n"
+			"\tsubq $%"PRIu64", %%rsp\n",
+			e->fsz + e->nclob * 8);
+	for (r=&amd64_sysv_rclob[NCLR_SYSV]; r>amd64_sysv_rclob;)
+		if (e->fn->reg & BIT(*--r)) {
+			itmp.arg[0] = TMP(*r);
+			emitf("popq %L0", &itmp, e);
+		}
+	if (e->fp == RBP)
+		fputs("\tleave\n", e->f);
+	else if (e->fsz)
+		fprintf(e->f,
+			"\taddq $%"PRIu64", %%rsp\n",
+			e->fsz);
 }
 
 static void
@@ -708,30 +771,24 @@ amd64_sysv_emitfn(Fn *fn, FILE *f)
 				fprintf(f, ".p2align 4\n");
 			fprintf(f, "%sbb%d:\n", T.asloc, id0+b->id);
 		}
+		e->tailed = 0;
 		for (i=b->ins; i!=&b->ins[b->nins]; i++)
 			emitins(*i, e);
 		lbl = 1;
+		if (e->tailed) {
+			/* the tcall tore the frame down and jumped;
+			 * its block's terminator is unreachable (it is
+			 * a bare ret, or the jmp to the shared ret
+			 * block simpljmp builds out of one) */
+			e->tailed = 0;
+			continue;
+		}
 		switch (b->jmp.type) {
 		case Jhlt:
 			fprintf(f, "\tud2\n");
 			break;
 		case Jret0:
-			if (fn->dynalloc)
-				fprintf(f,
-					"\tmovq %%rbp, %%rsp\n"
-					"\tsubq $%"PRIu64", %%rsp\n",
-					e->fsz + e->nclob * 8);
-			for (r=&amd64_sysv_rclob[NCLR_SYSV]; r>amd64_sysv_rclob;)
-				if (fn->reg & BIT(*--r)) {
-					itmp.arg[0] = TMP(*r);
-					emitf("popq %L0", &itmp, e);
-				}
-			if (e->fp == RBP)
-				fputs("\tleave\n", f);
-			else if (e->fsz)
-				fprintf(f,
-					"\taddq $%"PRIu64", %%rsp\n",
-					e->fsz);
+			sysv_epilogue(e);
 			fputs("\tret\n", f);
 			break;
 		case Jjmp:

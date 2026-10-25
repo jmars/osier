@@ -90,11 +90,12 @@ SOFTWARE.
 
 ## QBE (qbe) — compiler backend, vendored verbatim
 
-**A verbatim vendoring with ONE recorded patch: every file under `vendor/qbe/`
-is byte-identical to upstream at the pinned commit except `copy.c`, which
-carries the local fix described under "Local patch" below. (Before
-2026-10-18 this section read "nothing is patched"; the patch landed the same
-day, and the file says so rather than leaving the claim standing.)**
+**A verbatim vendoring with TWO recorded patches: every file under `vendor/qbe/`
+is byte-identical to upstream at the pinned commit except the files named under
+"Local patches" below — `copy.c` (2026-10-18) and the eight files carrying the
+`tcall` instruction (2026-10-23). (Before 2026-10-18 this section read "nothing
+is patched"; each patch updated the claim the same day it landed, and the file
+says so rather than leaving the claim standing.)**
 
 - **Licence:** MIT — upstream's `LICENSE` opens with the copyright line
   `© 2015-2026 Quentin Carbonneaux <quentin@c9x.me>`; the file is reproduced
@@ -138,6 +139,35 @@ day, and the file says so rather than leaving the claim standing.)**
   `cross-rv64-lphi` row (a hand-written IL fixture with exactly this shape)
   is RED on the unpatched pin and GREEN with it. **A future pin bump must
   re-apply this patch or confirm upstream fixed it.**
+- **Local patch (2026-10-23) — the `tcall` tail-call instruction.** Files
+  touched: `ops.h`, `all.h`, `parse.c`, `util.c`, `live.c`, `spill.c`, `rega.c`,
+  `load.c`, `amd64/sysv.c`, `amd64/isel.c`, `amd64/emit.c`, `amd64/winabi.c`,
+  `arm64/abi.c`, `rv64/abi.c`. It adds one instruction, `tcall`, spelled
+  `tcall [ret-annotation] $f(args...)`: a call that returns to the CALLER's
+  caller, with no result, that must be the last instruction of its block and be
+  followed by a bare `ret`. It carries `call`'s pinned flag, so gcm/ifopt/gvn/
+  fold/promote treat it as an immovable effect by table. On amd64/sysv the
+  epilogue `ret` and `tcall` share (`sysv_epilogue`), and `tcall` emits that
+  teardown followed by `jmp`; the argument copies abi1 emits before it read the
+  frame, so the load-before-teardown order falls out of the existing lowering
+  order. **Every condition it cannot honour is a loud `err()` naming the
+  condition — never a silent fallback to `call`**: stack arguments, variadic
+  callees, a callee return convention that differs from the enclosing
+  function's (the callee returns to OUR caller, so they must agree, and the
+  check is per-tcall in abi1 so hand-written IL cannot bypass it), not
+  block-final, or not followed by a bare `ret`. A silent fallback would cancel
+  the unbounded-depth guarantee a tail call exists to provide, turning a
+  program that ran into one that overflows the stack at depth; the refusal is a
+  statement about a contract, not about an optimization. arm64, rv64 and the
+  win64 ABI `die()` loudly instead of emitting a wrong tail. **This is
+  additive and inert**: nothing in Mid emits `tcall` yet, and the corpus .ssa
+  gate stays byte-identical (159/159) across it. Upstream has no such
+  instruction in `master` (= this pin) or `dev`, so there is no commit to move
+  the pin to; a future pin bump must re-apply this patch or adopt a successor.
+  Verified: `make -C vendor/qbe check` → "All is fine!", and
+  `tools/qbe/tcall-probe.sh` (wired into `qbe-check.sh`) exercises it — the
+  decisive row being an ASYMMETRY under `ulimit -s 8192`: 1e7 `tcall` hops
+  complete, the same fixture hand-mutated to `call` dies of stack exhaustion.
 - **How it is built:** `tools/qbe-build.sh` → `vendor/qbe/qbe`. It drives
   upstream's own `Makefile` unmodified, with the system `cc` and `make`, and
   needs no network. Its artifacts (`qbe`, `*.o`, `config.h`) are covered by

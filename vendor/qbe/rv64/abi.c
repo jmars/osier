@@ -630,6 +630,8 @@ rv64_abi(Fn *fn)
 				selcall(fn, i0, i, &il);
 				i = i0;
 				break;
+			case Otcall:
+				die("tcall is not implemented on riscv64");
 			case Ovastart:
 				selvastart(fn, p, i->arg[0]);
 				break;
