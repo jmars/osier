@@ -612,10 +612,21 @@ emitins(Ins i, E *e)
 		 * the callee returns to our caller. */
 		if (rtype(i.arg[0]) == RTmp
 		&& (e->fn->reg & BIT(i.arg[0].val))) {
-			/* the target register is callee-saved: the
-			 * epilogue is about to pop it, so park the
-			 * target in a caller-saved scratch register
-			 * (r11 is never an argument register) */
+			/* park the target: the epilogue's pops run
+			 * between here and the jump.
+			 *
+			 * the test is WIDER than the hazard on purpose.
+			 * fn->reg is rega's set of every register it
+			 * ever mapped in this function, not the popped
+			 * set (amd64_sysv_rclob: rbx, r12-r15), so a
+			 * target in a caller-saved register is parked
+			 * for nothing. that is the safe direction: the
+			 * pop list is a SUBSET of fn->reg, so a target
+			 * the pops really do clobber is always parked,
+			 * and a spurious park costs one mov into r11,
+			 * which nothing between here and the jmp writes
+			 * (the pops skip r11, and dynalloc/leave touch
+			 * only rsp). */
 			fprintf(e->f, "\tmovq %%%s, %%r11\n",
 				rname[i.arg[0].val][0]);
 			i.arg[0] = TMP(R11);
