@@ -5057,7 +5057,15 @@ storeValueWords tag words dest s0 =
         -- Result) rather than the writer's belt-and-braces poison.
         case wordCellRefusal tag (List.length words) of
             Just why ->
-                Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" why))
+                -- The DEFUN is named, for the same reason `wordVecRefusal` names
+                -- it: a site refusal is only useful if the reader knows which
+                -- runtime defun has not been twinned yet (perf word-arm-area3rt).
+                Err
+                    (wordArmUnsupported
+                        (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
+                            ((if s0.defunKey == "" then "" else s0.defunKey ++ ": ") ++ why)
+                        )
+                    )
 
             Nothing ->
                 List.foldl

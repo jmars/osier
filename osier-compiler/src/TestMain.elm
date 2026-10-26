@@ -1884,37 +1884,38 @@ checks rt rawMidText =
                             txt =
                                 Print.print mod
                         in
-                        String.contains "\t%t7 =l shl %t4, 3\n\t%t8 =l sar %t7, 3\n\t%t9 =w ceql %t8, %t4\n" txt
+                        -- THE TEMP IDS MOVED when the payload reader gained its
+                        -- immediate arms (perf word-arm-area3rt); the CHECK is
+                        -- the same three instructions on one value.
+                        String.contains "\t%t12 =l shl %t8, 3\n\t%t13 =l sar %t12, 3\n\t%t14 =w ceql %t13, %t8\n" txt
                             && String.contains "mknum overflow" txt
 
                     Err _ ->
                         False
                )
         )
-    , check "VR3b3 (supersedes VR3b2's wholesale gate) - THE Rt SURFACE IS CLASSIFIED PER DEFUN, AND STILL REFUSES. VR3b2 refused any program reaching `runtime.mid` wholesale because the runtime's stride-carrying defuns assumed 40-byte values; VR3c twinned those strides, so the blanket reason went stale and the refusal reported the LANE instead of the CONSTRUCT. The Rt set now gets the SAME pre-walk classifier the surface does: the refusal names the first un-ported Rt defun and its construct (`Rt.<key>: AREA ...`), and NOTHING is relaxed - an un-ported construct anywhere in the reachable Rt set still refuses before any IL is produced, which is why the SAME program still lowers on the val arm and still refuses on the word arm"
+    , check "VR3b3 (supersedes VR3b2's wholesale gate) - THE Rt SURFACE IS CLASSIFIED PER DEFUN, AND STILL REFUSES. VR3b2 refused any program reaching `runtime.mid` wholesale because the runtime's stride-carrying defuns assumed 40-byte values; VR3c twinned those strides, so the blanket reason went stale and the refusal reported the LANE instead of the CONSTRUCT. The Rt set now gets the SAME pre-walk classifier the surface does, and behind it the cell writer's own judgment: the refusal names the DEFUN and its CONSTRUCT (`Rt.<key>: AREA 3 ...`), never the lane"
         (case
-            ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.con"
-            , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.con"
+            ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.recUpd"
+            , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.recUpd"
             )
          of
             ( Err msg, Ok _ ) ->
-                -- MEASURED AT AREA 3 (perf word-arm-area3rt): the PRE-WALK no
-                -- longer names anything on this route — the vector/cons ACCESS
-                -- path is ported, so `wordRtUnported` finds no un-ported
-                -- construct and the refusal now comes from the CONSTRUCTION
-                -- path's CELL WRITER (`storeWordCell`), which is
-                -- `wordCellRefusal`'s judgment: a heap code whose body would
-                -- carry a raw word into a body the collector SCANS.  The
-                -- ROW'S CLAIM — a word-arm emit is refused BY CONSTRUCT, never
-                -- by the lane — is unchanged; what moved is which layer states
-                -- it.  The construct is still named (AREA 3 + the kind code),
-                -- and the blanket AREA 7 message is still absent.
-                String.contains "AREA " msg
-                    && String.contains "NOT IMPLEMENTED" msg
-                    && not (String.contains "AREA 7 (THE Rt SURFACE)" msg)
+                -- MEASURED AT AREA 3 (perf word-arm-area3rt).  The subject moved
+                -- TWICE and each move was a real port: VR3b2 refused the lane,
+                -- AREA 6 left the CONSTRUCTION path (`Rt.con: ... vecstore`),
+                -- and this unit ported the vector/cons/closure/symbol/stream
+                -- cells — so `Rt.con` now EMITS on the word arm and the first
+                -- Rt defun that still refuses is the RECORD family, whose
+                -- word-arm body layout (a flat run of `count` Values with TWO
+                -- parallel arrays to place) is a layout decision this unit did
+                -- not take.  The ROW'S CLAIM is unchanged and is what it
+                -- asserts: the refusal is PER DEFUN and names the CONSTRUCT.
+                String.contains "Rt.recUpd: " msg
                     && String.contains "AREA 3 (HEAP-OBJECT CONSTRUCTION)" msg
-                    && String.contains "heap cell with the kind code" msg
-                    && String.contains "the layout has to be settled in runtime.mid's constructors" msg
+                    && String.contains "NOT IMPLEMENTED" msg
+                    && String.contains "heap cell with the kind code 14" msg
+                    && not (String.contains "AREA 7 (THE Rt SURFACE)" msg)
 
             _ ->
                 False
@@ -2039,10 +2040,19 @@ checks rt rawMidText =
                     vTxt =
                         Print.print valMod
                 in
+                -- (perf word-arm-area3rt) THE IMMEDIATE ARM JOINED THIS READ:
+                -- nil/true/false answer 0 (the val arm reads an UNWRITTEN
+                -- payload word there, i.e. zero), and ERROR still refuses.  So
+                -- the third path is now two: the zero arm and the die.  The
+                -- ROW'S CLAIM is unchanged — a payload read is a SHAPE, and a
+                -- shape with no payload refuses loudly — and the pins below are
+                -- the same shape with the arm added.
                 String.contains "\t%t0 =l loadl %s1\n\t%t1 =w and %t0, 7\n\t%t2 =w ceqw %t1, 0\n" wTxt
                     && String.contains "\t%t3 =w ceqw %t1, 1\n" wTxt
-                    && String.contains "\t%t4 =l sar %t0, 3\n" wTxt
-                    && String.contains "\t%t5 =l and %t0, -8\n\t%t6 =l add %t5, 0\n\t%t4 =l loadl %t6\n" wTxt
+                    && String.contains "\t%t8 =l sar %t0, 3\n" wTxt
+                    && String.contains "\t%t10 =l and %t0, -8\n\t%t11 =l add %t10, 0\n\t%t8 =l loadl %t11\n" wTxt
+                    && String.contains "\t%t4 =w ceqw %t1, 2\n\t%t5 =w ceqw %t1, 3\n\t%t6 =w ceqw %t1, 4\n\t%t7 =w or %t4, %t5\n\t%t7 =w or %t7, %t6\n\tjnz %t7, @pzero_2, @pbad_1\n" wTxt
+                    && String.contains "@pzero_2\n\t%t9 =w xor %t1, %t1\n\t%t8 =l extsw %t9\n" wTxt
                     && String.contains "call $q_Rt_x2edie(l $d0)\n\thlt\n" wTxt
                     && String.contains "payload read on a word that is neither a fixnum" wTxt
                     && not (String.contains "loadw" wTxt)
@@ -2059,7 +2069,7 @@ checks rt rawMidText =
                     txt =
                         Print.print mod
                 in
-                String.contains "\t%t4 =l and %t0, -8\n\t%t5 =l add %t4, 8\n\t%t6 =w loadw %t5\n\t%t3 =l extsw %t6\n" txt
+                String.contains "\t%t8 =l and %t0, -8\n\t%t9 =l add %t8, 8\n\t%t10 =w loadw %t9\n\t%t7 =l extsw %t10\n" txt
                     && String.contains "i32 field read on a word that is not a heap object" txt
                     && String.contains "=l extsw %t" txt
                     && not (String.contains "storew" txt)
@@ -7532,10 +7542,20 @@ checks rt rawMidText =
                 False
         )
     , check
-        "T7 extern arities: every key rtDeps mentions (subject or target) has a declared arity (J2's extern table is total over the Rt call graph)"
+        "T7 extern arities: every key rtDeps mentions (subject or target) has a declared arity (J2's extern table is total over the Rt call graph) — EXCEPT the WORD-ARM-ONLY seats, which by construction are absent from the val-spliced text the table is derived from; for those the row requires the stronger thing instead: each is DECLARED in the word-spliced text (perf word-arm-area3rt)"
         (List.all
-            (\k -> Dict.member k rt.externTypes)
+            (\k -> Dict.member k rt.externTypes || List.member k Rt.wordArmSeeds)
             (List.concatMap (\( k, deps ) -> k :: deps) (Dict.toList Rt.rtDeps))
+            && List.all
+                (\k ->
+                    case Rt.spliceArm True rawMidText of
+                        Ok wordText ->
+                            String.contains ("defun " ++ k ++ "(") wordText
+
+                        Err _ ->
+                            False
+                )
+                Rt.wordArmSeeds
         )
     , check
         "T7 extern arities are flag-stable (T12 hardening — the row used to be VACUOUS on a pipeline Err: rtProgram [] -> rtArities Dict.empty -> List.all vacuously true; it now FAILS on Err or an empty program): every combo's program parses and its arities agree per-key with the table derived at True/True/True (the table also covers the gcProgram seats program alone doesn't carry; a flag variant changing an arity must be a loud decision, not drift)"
