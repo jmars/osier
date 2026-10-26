@@ -11060,6 +11060,9 @@ b4Kids e =
                 RawVecBody r ->
                     [ r.value ]
 
+                RawVecLen r ->
+                    [ r.value ]
+
                 RawVecStore r ->
                     [ r.vec, r.index, r.value ]
 
@@ -13214,6 +13217,13 @@ cnode st node =
             in
             ( RawVecBody { r | value = v }, st1 )
 
+        RawVecLen r ->
+            let
+                ( v, st1 ) =
+                    cexp st r.value
+            in
+            ( RawVecLen { r | value = v }, st1 )
+
         RawVecStore r ->
             cnode3 st r .vec .index .value RawVecStore (\rec a b c -> { rec | vec = a, index = b, value = c })
 
@@ -14898,6 +14908,9 @@ rawCallSyms exp =
                     rawCallSyms a.vec ++ rawCallSyms a.index
 
                 RawVecBody b ->
+                    rawCallSyms b.value
+
+                RawVecLen b ->
                     rawCallSyms b.value
 
                 RawVecStore st ->

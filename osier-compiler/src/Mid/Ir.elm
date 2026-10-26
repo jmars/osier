@@ -424,6 +424,9 @@ type ValuePath
 --     temp, not a root): the builder fills/stores before the next
 --     allocation, and an unfilled element must never be scanned — the same
 --     contract values.zig's valVector/valCons bodies obey.
+--   * `RawVecLen` — the ELEMENT COUNT of a vector/record (perf
+--     word-arm-area3rt): `payload32(v, 1)` on the val arm, the GC header's count
+--     word on the word arm.  Distinct from `len32` (a string's BYTE length).
 --   * `RawVecBody` — the ELEMENT BASE of a Value (perf word-arm-area3rt): the
 --     val arm's `payload(v, 0)` (its element array), the word arm's BODY
 --     address.  It is what `vecload`/`vecstore`/`RawVecAddr` actually want,
@@ -485,6 +488,20 @@ type UnsafeNode
       -- arms — which is why the rewrite is TOTAL over the runtime's sites and
       -- needs no per-site judgment about which Values are heap vectors.
       RawVecBody { value : Exp }
+    | -- ===== AREA 3 (PAYLOAD ACCESS), the word arm's ELEMENT COUNT (perf
+      -- word-arm-area3rt, the review's BLOCKER 2).  The number of elements a
+      -- vector (or a record) holds: the val arm's `payload32(v, 1)` — its
+      -- payload word 1 IS the count — and, on the word arm, the GC HEADER's
+      -- count word, because an inline body has no room for a count and the
+      -- allocator already wrote it (`gcAlloc`: `wstore(cursor, -1, countW)`).
+      --
+      -- IT IS NOT `len32`.  `len32` is also `payload32(v, 1)` and stays exactly
+      -- as it is: for a STRING that word is the BYTE length, while the header's
+      -- count for a string is `ceil(bytes / 8)` — body WORDS, a different
+      -- number.  So the two readers must be distinct names, and the runtime's
+      -- ~10 sites each had to be classified as "a string's length" (len32) or
+      -- "an element count" (veclen).
+      RawVecLen { value : Exp }
     | RawStrByte { str : Exp, index : Exp }
     | WithRoots { binders : List Binder, body : Exp }
     | -- ===== STEP 5 (osier-midprims): the SCALAR + STRING nodes the prim

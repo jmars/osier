@@ -2732,10 +2732,16 @@ buildBuiltin b es =
         VecBody ->
             -- The element BASE of a Value (perf word-arm-area3rt).  It stays a
             -- NODE rather than being expanded here into `payload(v, 0)`: the
-            -- val arm's payload word 0 and the word arm's "untag, step past the
-            -- header" are different arithmetic, and only Lower knows the arm
-            -- (this pass runs before it, under both).
+            -- val arm's payload word 0 and the word arm's untag are different
+            -- arithmetic, and only Lower knows the arm (this pass runs before
+            -- it, under both).
             build1 (\v -> Unsafe (RawVecBody { value = v })) es
+
+        VecLen ->
+            -- The element COUNT (perf word-arm-area3rt, the review's BLOCKER 2).
+            -- A node for the same reason: `payload32(v, 1)` on the val arm, the
+            -- GC header's count word on the word arm.
+            build1 (\v -> Unsafe (RawVecLen { value = v })) es
 
         VecStore ->
             build3 (\vec idx v -> Unsafe (RawVecStore { vec = vec, index = idx, value = v })) es

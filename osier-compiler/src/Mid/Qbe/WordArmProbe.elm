@@ -45,11 +45,12 @@ type Module
     | TagBool
     | Call
     | Vec
+    | VecLen
 
 
 modules : List Module
 modules =
-    [ Str, Payload, Len, TagHeap, TagNil, TagBool, Call, Vec ]
+    [ Str, Payload, Len, TagHeap, TagNil, TagBool, Call, Vec, VecLen ]
 
 
 name : Module -> String
@@ -79,6 +80,9 @@ name m =
         Vec ->
             "vec"
 
+        VecLen ->
+            "veclen"
+
 
 {-| The probe's DEFUN KEY — what `QBE_WORDARM_PROBE` compiles as its entry. -}
 defun : Module -> Defun
@@ -107,6 +111,9 @@ defun m =
 
         Vec ->
             vecProbe
+
+        VecLen ->
+            vecLenProbe
 
 
 {-| A defun's declared arity — what the probe module's arity table must carry,
@@ -168,6 +175,26 @@ vecProbe =
                         , index = Unsafe (RawPayload { value = Var 1, word = 0 })
                         }
                     )
+            }
+    }
+
+
+{-| AREA 3's ELEMENT COUNT (perf word-arm-area3rt, the review's BLOCKER 2):
+`\v -> mknum(veclen(v))`.
+
+WHY IT EXISTS: `veclen` is the header-count reader — the one reader that makes a
+word-arm VECTOR's length correct at all — and a text pin cannot see whether it
+reads the header or the body (both are one load away).  The harness builds a
+code-10 block whose header count is 3 and whose body is three elements, so a
+reader that answered from the BODY would return element 0's value instead.
+-}
+vecLenProbe : Defun
+vecLenProbe =
+    { key = "Vl.f"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "v" } ]
+            , body = Unsafe (RawMkValue { tag = RtLayout.tagNumber, words = [ Unsafe (RawVecLen { value = Var 0 }) ] })
             }
     }
 

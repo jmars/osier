@@ -2176,6 +2176,9 @@ unsafeSafepoint selfKey selfArity node =
         RawVecBody v ->
             safepoint selfKey selfArity v.value
 
+        RawVecLen v ->
+            safepoint selfKey selfArity v.value
+
         RawVecStore v ->
             -- the write-barrier seat is malloc-class, NOT a GC
             -- safepoint (MEASUREDED in heap.zig dirtyVectorsAdd;

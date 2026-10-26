@@ -1318,6 +1318,9 @@ unsafeChildren node =
         RawVecBody r ->
             [ r.value ]
 
+        RawVecLen r ->
+            [ r.value ]
+
         RawVecStore r ->
             [ r.vec, r.index, r.value ]
 
@@ -1451,6 +1454,9 @@ unsafeRebuild node parts =
 
         ( RawVecBody r, a :: _ ) ->
             RawVecBody { r | value = a }
+
+        ( RawVecLen r, a :: _ ) ->
+            RawVecLen { r | value = a }
 
         ( RawVecStore r, a :: b :: c :: _ ) ->
             RawVecStore { r | vec = a, index = b, value = c }

@@ -896,6 +896,9 @@ wordArmUnported exp =
                 RawVecBody _ ->
                     Nothing
 
+                RawVecLen _ ->
+                    Nothing
+
                 RawVecAddr _ ->
                     Nothing
 
@@ -1741,6 +1744,9 @@ rawOperands node =
             [ r.vec, r.index ]
 
         RawVecBody r ->
+            [ r.value ]
+
+        RawVecLen r ->
             [ r.value ]
 
         RawVecStore r ->
@@ -3800,6 +3806,9 @@ lowerRawVal node dest s =
         RawVecBody _ ->
             Err wordProducerMessage
 
+        RawVecLen _ ->
+            Err wordProducerMessage
+
         -- step 5's word producers (and the float words, a class over) never
         -- appear in value positions either:
         RawPayload32 _ ->
@@ -4734,6 +4743,99 @@ wordPayloadWord base word s0 =
     ( Il.Tmp r, s17 )
 
 
+{-| AREA 3, THE ELEMENT COUNT ON THE WORD ARM (perf word-arm-area3rt, the
+review's BLOCKER 2).
+
+A word-arm vector's length is NOT in the body — the body IS the elements — so it
+lives where the ALLOCATOR put it: the GC header's count word, one word before the
+body (`gcAlloc`: `wstore(cursor, -1, countW)`).  `RtLayout` states the header's
+shape (`heapHeaderOffset` = -16 for word 0), so the count word's address is
+`body + heapHeaderOffset + wordBytes` — written as that sum rather than a second
+constant, so a header that ever gains a word moves this reader with it.
+
+THE SHAPE FORK IS `wordVecBody`'s, and for the same reason: a fixnum's "count" is
+not a length (it has no elements), and an immediate has neither — both REFUSE
+loudly.  Only a heap object answers, and it answers from the header.
+
+WHY THIS IS A SEPARATE READER FROM `len32`: a string's payload word 1 is its BYTE
+length on the val arm, but the header's count for a string is `ceil(bytes/8)` —
+body WORDS, a different number.  A single reader would have to know the code, and
+`payload32`-shaped code has no way to ask; so the two reads are two names and the
+runtime's sites are classified one by one.
+-}
+wordVecLen : Il.Arg -> S -> ( Il.Arg, S )
+wordVecLen base s0 =
+    let
+        ( l, s1 ) =
+            wordValueWord base s0
+
+        ( t, s2 ) =
+            freshTmp s1
+
+        ( isHeap, s3 ) =
+            freshTmp s2
+
+        ( heapLbl, s4 ) =
+            freshLbl "lheap" s3
+
+        ( badLbl, s5 ) =
+            freshLbl "lbad" s4
+
+        ( joinLbl, s6 ) =
+            freshLbl "ljoin" s5
+
+        ( r, s7 ) =
+            freshTmp s6
+
+        ( wT, s8 ) =
+            freshTmp s7
+
+        msgText =
+            (if s0.defunKey == "" then "" else s0.defunKey ++ ": ") ++ wordVecLenRefusal
+
+        ( msgName, s9 ) =
+            freshData ("msg:" ++ msgText)
+                (\n -> { name = n, align = Just 8, items = [ DStr msgText, DByte 0 ], export_ = False })
+                s8
+
+        s10 =
+            s9
+                |> emit (Bin (Just t) W And (Il.Tmp l) (Il.Con s9.layout.tagMask))
+                |> emit (Cmp (Just isHeap) W Ceq (Il.Tmp t) (Il.Con (RtLayout.heapPtrTag s9.layout)))
+                |> closeBlock (Jnz (Il.Tmp isHeap) heapLbl badLbl)
+                |> startBlock badLbl
+                |> emit (Call Nothing (Base L) (Il.Sym ("q_" ++ mangle "Rt.die")) [ ArgVal (Base L) (Il.Sym msgName) ])
+                |> closeBlock Hlt
+                |> startBlock heapLbl
+
+        s11 =
+            let
+                ( bodyArg, sa ) =
+                    wordBodyOf (Il.Tmp l) s10
+
+                ( a, sb ) =
+                    freshTmp sa
+            in
+            sb
+                |> emit
+                    (Bin (Just a) L Add
+                        (Il.Tmp bodyArg)
+                        (Il.Con (RtLayout.heapHeaderOffset sb.layout + RtLayout.wordBytes))
+                    )
+                |> emit (Load (Just wT) W LoadW (Il.Tmp a))
+                |> emit (Unary (Just r) L Extsw (Il.Tmp wT))
+                |> jumpTo joinLbl
+                |> startBlock joinLbl
+    in
+    ( Il.Tmp r, s11 )
+
+
+{-| The `veclen` refusal's message.  ASCII only. -}
+wordVecLenRefusal : String
+wordVecLenRefusal =
+    "qbe-rt: word arm: element count of a word that is not a heap object (...001) - a fixnum is a number and an immediate (nil/true/false/error) is not a collection, so neither has a length; a string's length is len32, not this. Refusing."
+
+
 {-| AREA 3 (PAYLOAD ACCESS), THE ELEMENT BASE ON THE WORD ARM (perf
 word-arm-area3rt).
 
@@ -5531,6 +5633,46 @@ rawWordArg exp s =
                             ( Il.Tmp t
                             , emit (Bin (Just aT) L Add base (Il.Con (RtLayout.payloadWordOffset s.layout 0))) s3
                                 |> emit (Load (Just t) L LoadL (Il.Tmp aT))
+                            )
+                        )
+
+        Unsafe (RawVecLen body) ->
+            -- THE ELEMENT COUNT (perf word-arm-area3rt, the review's BLOCKER 2).
+            --
+            -- THE VAL ARM IS THE SAME EMIT AS `payload32(v, 1)` — same temps,
+            -- same ops, same order — so a runtime site rewritten to `veclen(v)`
+            -- emits the val arm's .ssa BYTE FOR BYTE (the corpus is the proof,
+            -- and it is why this is a node rather than an arm-spliced defun: a
+            -- `call Rt.vecLen(..)` would move every one of those sites on the
+            -- val arm).
+            --
+            -- THE WORD ARM READS THE HEADER'S COUNT WORD.  `gcAlloc` writes
+            -- `wstore(cursor, -1, countW)` — header word 1, i.e. ONE word
+            -- before the body — because an inline body has no room for a count
+            -- of its own.  The low half is taken and sign-extended, exactly as
+            -- the val arm's `loadw` + `extsw` is: both arms answer an i32.
+            if wordArm s then
+                rawValueBase body.value s
+                    |> Result.map (\( base, s1 ) -> wordVecLen base s1)
+
+            else
+                rawValueBase body.value s
+                    |> Result.map
+                        (\( base, s1 ) ->
+                            let
+                                ( aT, s2 ) =
+                                    freshTmp s1
+
+                                ( wT, s3 ) =
+                                    freshTmp s2
+
+                                ( t, s4 ) =
+                                    freshTmp s3
+                            in
+                            ( Il.Tmp t
+                            , emit (Bin (Just aT) L Add base (Il.Con (RtLayout.payloadWordOffset s.layout 1))) s4
+                                |> emit (Load (Just wT) W LoadW (Il.Tmp aT))
+                                |> emit (Unary (Just t) L Extsw (Il.Tmp wT))
                             )
                         )
 
@@ -6531,6 +6673,9 @@ rawNodeName node =
 
         RawVecBody _ ->
             "rawVecBody"
+
+        RawVecLen _ ->
+            "rawVecLen"
 
         RawVecStore _ ->
             "rawVecStore"
@@ -8375,6 +8520,9 @@ isRawWordExp abi exp =
                 RawVecBody _ ->
                     True
 
+                RawVecLen _ ->
+                    True
+
                 RawTagOf _ ->
                     True
 
@@ -8765,6 +8913,9 @@ isWordCondNode abi node =
             True
 
         RawVecBody _ ->
+            True
+
+        RawVecLen _ ->
             True
 
         RawAllocVector _ ->

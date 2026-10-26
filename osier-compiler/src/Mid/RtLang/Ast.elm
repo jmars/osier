@@ -1283,6 +1283,7 @@ type Builtin
     | VecLoad
     | VecAddr
     | VecBody
+    | VecLen
     | VecStore
     | StrByte
     | ByteLoad
@@ -1343,6 +1344,12 @@ the DSL helper that builds the node):
   * VecLoad    `[word,word] -> val`   RawVecLoad (vec is a raw ADDRESS —
     the DSL's `wOf l` feeding carV/cdrV — and the result is a blitted VALUE)
   * VecAddr    `[word,word] -> word`  RawVecAddr
+  * VecLen     `[val] -> word`        RawVecLen — the ELEMENT COUNT of a
+    vector/record: the val arm's `payload32(v, 1)` (payload word 1 IS the
+    count), the word arm's GC-header count word (an inline body has no room for
+    one; the allocator writes it).  NOT `len32`: a STRING's payload word 1 is its
+    BYTE length while its header count is body WORDS, so the two reads cannot
+    share a name.
   * VecBody    `[val] -> word`        RawVecBody — the ELEMENT BASE of a
     Value: the val arm's `payload(v, 0)` (the separate element array) and the
     word arm's BODY address (a word-arm vector's elements are INLINE).  This
@@ -1421,6 +1428,9 @@ builtinClass b =
             Sig [ TWord, TWord ] TWord
 
         VecBody ->
+            Sig [ TVal ] TWord
+
+        VecLen ->
             Sig [ TVal ] TWord
 
         VecStore ->
@@ -1533,6 +1543,9 @@ builtinName b =
 
         VecBody ->
             "vecbody"
+
+        VecLen ->
+            "veclen"
 
         VecStore ->
             "vecstore"
@@ -1848,6 +1861,7 @@ allBuiltins =
     , VecLoad
     , VecAddr
     , VecBody
+    , VecLen
     , VecStore
     , StrByte
     , ByteLoad

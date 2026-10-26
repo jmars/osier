@@ -230,6 +230,9 @@ describe node =
         RawVecBody _ ->
             "rawVecBody (element base)"
 
+        RawVecLen _ ->
+            "rawVecLen (element count)"
+
         RawVecStore _ ->
             "rawVecStore (write-barrier contract)"
 

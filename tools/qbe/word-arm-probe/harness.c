@@ -164,6 +164,8 @@ long q_Bt_x2ef(long v);
 long q_Ca_x2ef(long v);
 #elif defined(PROBE_VEC)
 long q_Vc_x2ef(long v, long i);
+#elif defined(PROBE_VECLEN)
+long q_Vl_x2ef(long v);
 #endif
 
 int main(void)
@@ -372,6 +374,30 @@ int main(void)
         }
         ok(g_died == 1 && strstr(g_die_msg, "element base") != NULL,
            "V: vecbody(nil) REFUSES and names the reason (an immediate names no elements)");
+    }
+#elif defined(PROBE_VECLEN)
+    /* ===== AREA 3: THE ELEMENT COUNT, FROM THE HEADER (review BLOCKER 2) =====
+     *
+     * `veclen` is what makes a word-arm vector's length correct at all: the
+     * count is not in the body (the body IS the elements), it is the GC header's
+     * count word.  A reader that answered from the BODY would return element 0
+     * — which is why the block below is built with count 3 and DIFFERENT element
+     * values, so body-read and header-read cannot agree by accident.
+     */
+    {
+        long *base = mk_block3(10, 1, (5L << 3), (7L << 3), (9L << 3));
+        long v = tagged(base);
+        ok(q_Vl_x2ef(v) == (3L << 3),
+           "VL: veclen(code-10 block) == 3, the HEADER's count word - not element 0 (a body read would answer 5)");
+
+        g_died = 0;
+        long fix = 9L << 3;
+        if (sigsetjmp(g_jb, 1) == 0) {
+            (void)q_Vl_x2ef(fix);
+            ok(0, "VL: veclen(fixnum) must REFUSE - it returned instead");
+        }
+        ok(g_died == 1 && strstr(g_die_msg, "element count") != NULL,
+           "VL: veclen(fixnum) REFUSES and names the reason (a number has no elements)");
     }
 #endif
     printf("%d checks\n", g_checks);
