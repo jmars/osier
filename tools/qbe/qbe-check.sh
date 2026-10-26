@@ -1454,6 +1454,83 @@ lap_apply_gate() {
 }
 lap_apply_gate
 
+# ---- U3b stage 0(a): THE TWO STAGING SEATS MUST NEVER SHARE STORAGE (the
+#      tsbuf-aliasing gate) ----
+# WHY THIS ROW EXISTS.  There are TWO staging seats and they have OPPOSITE
+# storage rules: Rt.stage-tail (the STATIC tail path) stages into the shared
+# static buffer `tsbuf` (globals word 12) — sound there only because at most one
+# .tail-shaped call is ever in flight — while Rt.stage-apply (the F-site generic
+# path) must malloc.  The apply chain can hold TWO staged blocks at once: an
+# over-applied hop's staged args stay live while the hop runs ARBITRARY USER
+# CODE, and that user code can itself stage (a generic apply nested inside the
+# hop, and a static tail hop inside that).  If Rt.stage-apply ever used tsbuf,
+# the nested hops would overwrite the outer chain's staged args and hop 2 would
+# read the NESTED staging's argument — every pointer still valid, no crash, a
+# WRONG NUMBER.
+#
+# The hazard is closed BY CONSTRUCTION today (stage-apply's only allocation is
+# `malloc`; tsbuf is loaded only by stage-tail) and NOTHING ELSE WATCHES IT: the
+# lap-apply row above pins the block's MEMORY CLASS (GC vs C heap), not the
+# aliasing, and a tsbuf arm would satisfy that row.  This row is the only
+# witness, which is why it lands before U3b's deletions touch the staging family
+# (u3a-review SHOULD-FIX 1: "the row MUST land before U3b's deletions").
+#
+# THE FIXTURE (tools/qbe/fixtures/tsbufprobe.elm) is the NESTED shape, and the
+# row asserts BOTH halves of what makes it a test:
+#   * STRUCTURAL — the emitted .ssa must still contain calls to BOTH seats.  A
+#     fixture that stops reaching one of them is not a weaker test, it is no
+#     test, and the behavioural half would keep passing.
+#   * BEHAVIOURAL — the answer must be 42127 = 42*1000 + 1*100 + 2*10 + 7.  The
+#     last factor is the OUTER chain's second staged arg, read at hop 2, after
+#     the nested hops have staged twice.
+#
+# ASYMMETRY — MEASURED, both directions, on this tree.  The mutation is applied
+# to the EMITTED .ssa (no rebuild), the same technique the lap-apply row used:
+# (i) stage-apply's `malloc` + canary store replaced by a load of tsbuf, (ii)
+# apply-tail's provenance-canary guard bypassed, (iii) applyTailGo's two
+# `free(fslot - 8)` calls removed — (ii) and (iii) because with a tsbuf block
+# the canary would fire and the free would abort, i.e. the loud guards would
+# mask the class this row is about.
+#   PASS (clean tree): TsbufProbe.main -> "42127", rc 0.
+#   FAIL (mutated .ssa):  TsbufProbe.main -> "2127",  rc 0.  SILENT: the staged
+#     arg was read back as 2 (the nested staging's second arg) instead of 42.
+# The mutation is not runner-derivable, so it is recorded here and in the
+# handoff node, not repeated in CI.
+#
+# THE ROW FAILS (never skips) when the fixture or the runner is absent — a
+# deleted probe must not look like a pass.
+tsbuf_apply_gate() {
+  local fixture="$ROOT/tools/qbe/fixtures/tsbufprobe.elm" bin ssa out rc
+  [ -f "$fixture" ] || {
+    echo "FAIL tsbuf-apply: $fixture is missing — the ONLY fixture that holds two staged blocks at once (a generic tail apply nested inside an over-applied chain) was deleted"
+    FAIL=1; return; }
+  [ -x "$ROOT/tools/qbe/qbe-mk.sh" ] || {
+    echo "FAIL tsbuf-apply: tools/qbe/qbe-mk.sh is missing or not executable — no runner, so the staging seats' storage classes have no oracle"
+    FAIL=1; return; }
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" TsbufProbe.main "$TMP/tsbufapply")" || {
+    echo "FAIL tsbuf-apply: qbe-mk"; FAIL=1; return; }
+  [ -x "$bin" ] || {
+    echo "FAIL tsbuf-apply: qbe-mk produced no executable at $bin"; FAIL=1; return; }
+  ssa="$(dirname "$bin")/tsbufprobe.ssa"
+  [ -f "$ssa" ] || {
+    echo "FAIL tsbuf-apply: no emitted .ssa at $ssa — the structural half cannot be checked"
+    FAIL=1; return; }
+  grep -q 'call \$q_Rt_x2estage_x2dapply' "$ssa" || {
+    echo "FAIL tsbuf-apply: the emitted .ssa never calls q_Rt_x2estage_x2dapply — the fixture no longer stages a generic apply inside the chain, so the nested-block half of this row tests nothing"
+    FAIL=1; return; }
+  grep -q 'call \$q_Rt_x2estage_x2dtail' "$ssa" || {
+    echo "FAIL tsbuf-apply: the emitted .ssa never calls q_Rt_x2estage_x2dtail — the fixture no longer writes the shared static buffer inside the chain, so the aliasing half of this row tests nothing"
+    FAIL=1; return; }
+  out="$(timeout 60 "$bin" TsbufProbe.main 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ] || [ "$out" != "42127" ]; then
+    echo "FAIL tsbuf-apply: TsbufProbe.main exit=$rc out='$out' (golden 42127) — the F-site staging block aliases the shared static buffer tsbuf: a nested hop overwrote the outer chain's staged args. Rt.stage-apply must malloc, never stage into tsbuf (see this row's comment)"
+    FAIL=1; return
+  fi
+  echo "PASS tsbuf-apply: TsbufProbe.main prints 42127 (rc 0) with both staging seats exercised — two staged blocks were live at once and neither clobbered the other"
+}
+tsbuf_apply_gate
+
 # ---- stage 4: arity > 8 (the old rt_callN table stopped at rt_call8) ----
 # arity9: a 9-ary defun called DIRECTLY from the driver (rt_call9).  arity9apply:
 # apply9 add9 -> f 1..9 where f is a Var, so the 9-ary call goes through

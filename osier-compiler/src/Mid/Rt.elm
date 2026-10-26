@@ -1803,10 +1803,13 @@ rawAbi =
           -- staged block is inside the kind-2 registration Rt.apply-tail
           -- pushes (`live = nargs + 1` from the block base), so the collector
           -- rewrites it in place.  The defun's own `val f = vecload(fslot, 0)`
-          -- is a per-iteration READ, never live across a safepoint (the
-          -- saturated arm is alloc-free, the over arm's `rt_call2r` hop
-          -- re-reads it through `recur`, and the partial arm passes it to
-          -- Rt.applyPartGo BEFORE that call allocates).
+          -- is a per-iteration READ, never live across a safepoint — and the
+          -- claim is about the READ, not about the arm being alloc-free: the
+          -- saturated arm DOES allocate (the arg copy at runtime.mid:8137) and
+          -- simply never reads `f` after it; the over arm's `rt_call2r` hop
+          -- ends in a SELF `tcall` that re-derives the closure from cell 0 on
+          -- the next iteration; and the partial arm passes `f` to
+          -- Rt.applyPartGo BEFORE that call allocates.
           "Rt.applyTailGo"
         , -- ===== zighost Z3's CLOSURE CACHE.  Its signature is (word) -> val,
           -- so the B6 signature rule would put it on the VALUE side; this

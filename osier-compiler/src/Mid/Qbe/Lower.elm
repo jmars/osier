@@ -331,15 +331,20 @@ rawAbiRetIsAgg key =
 
 
 {-| Q1b: the static arity budget for a `tcall`.  Our ABI spends rdi on the
-hidden sret pointer (the 80-byte `:ret` is inmem) and rax on `env` when the
-callee is a closure; the remaining integer argument registers are rsi, rdx,
-rcx, r8, r9 — five.  The design's census (MEASURED over the 4,786 static
-tail-known sites of the self-emit) is 1→2113, 2→1759, 3→505, 4→169, 5→198,
-6→24, ... so a budget of 4 covers 95.0% of them, and the 240 arity-5+ sites
-keep a correct non-tail lowering — a STATIC, compile-time choice between two
-correct lowerings, never a fallback of an emitted tcall.  (Five would also fit
-a direct call, which passes no count word; the budget is held at the design's
-number so the census above stays the claim it was measured as.)
+hidden sret pointer (a closure body's result is an aggregate — the 40-byte
+`:val` on the value arm, which is inmem, so the pointer is a real argument
+register) and rax on `env` when the callee is a closure; the remaining integer
+argument registers are rsi, rdx, rcx, r8, r9 — five.  The design's census
+(MEASURED over the 4,786 static tail-call sites of the self-emit AT 81ae3fb,
+where every one of them was an `Rt.tail-known` request) is 1→2113, 2→1759,
+3→505, 4→169, 5→198, 6→24, ... so a budget of 4 covers 95.0% of them, and the
+240 arity-5+ sites keep a correct non-tail lowering — a STATIC, compile-time
+choice between two correct lowerings, never a fallback of an emitted tcall.
+U3a did not change the POPULATION: the same 240 sites take the ordinary call.
+What changed is the under-budget ones — they `tcall` the callee directly
+instead of asking Rt.tail-known to build a `.tail` request for it.  (Five would
+also fit a direct call, which passes no count word; the budget is held at the
+design's number so the census above stays the claim it was measured as.)
 -}
 maxTailCallArgs : Int
 maxTailCallArgs =
@@ -11361,26 +11366,30 @@ withPrologue layout pending =
                 PLeaf ->
                     Alloc "f" (layout.valSizeBytes * pending.nslots)
 
-        -- P5 / H3 — THE .done MARKER.  A surface defun returns the 80-byte
-        -- `:ret`, i.e. slots 0 AND 1, and slot 1 carries the .done/.tail
-        -- discriminator that rt_bounce and every caller test.  On a .done path
-        -- nothing writes it: the pooled frame's enter-side memset is what made
-        -- it read 0.  A frame-free defun has no memset, so it MATERIALIZES
-        -- that zero here.
+        -- P5 / H3 — THE RESULT AREA'S SECOND SLOT.  A surface defun's frame
+        -- reserves TWO result slots: slot 0 holds the finished Value, and slot
+        -- 1 is the `.done`/`.tail` discriminator of the pre-U3a 80-byte `:ret`
+        -- return shape.  On the VALUE arm slot 1 is VESTIGIAL — the body
+        -- returns `:val` (slot 0 alone, `closureRetClass`) and, since U3a,
+        -- nothing builds a `.tail` for a caller to test — but the frame still
+        -- reserves it and a frame-free defun has no enter-side memset to make
+        -- it read 0, so it is MATERIALIZED here.  U3b deletes the slot, this
+        -- store and this paragraph together.
         --
         -- The marker's offset is READ from Mid.RtLayout (`retKindOffset`), not
         -- spelled 40 here — the layout is defined once, and the same constant
         -- is what the emitted-text row in TestMain pins.
         --
         -- MEASURED, and it is why this is a 64-bit store and not a 32-bit one:
-        -- the reader loads EIGHT bytes at retKindOffset — `Rt.bounce`'s
-        -- `r->kind == 0` lowers to `movq 40(%rax), %rcx; cmpq $0, %rcx`
-        -- (vendor/qbe, the emitted .s of tests/elm-fixtures/arraybasic.elm).
-        -- A `storew 0` leaves the four PADDING bytes at 44..47 uninitialised,
-        -- the 64-bit compare sees a non-zero word, the .done path is missed,
-        -- and rt_bounce chases a .tail built out of stack garbage — MEASURED:
-        -- a wild jump into the heap (ASan: `PC is at a non-executable
-        -- region`) with only that one defun changed.  So: one `storel`.
+        -- the reader loads EIGHT bytes at retKindOffset — the pre-U3a
+        -- `Rt.bounce`'s `r->kind == 0` lowered to `movq 40(%rax), %rcx; cmpq
+        -- $0, %rcx` (vendor/qbe, the emitted .s of
+        -- tests/elm-fixtures/arraybasic.elm).  A `storew 0` leaves the four
+        -- PADDING bytes at 44..47 uninitialised, the 64-bit compare sees a
+        -- non-zero word, the .done path is missed, and rt_bounce chased a
+        -- .tail built out of stack garbage — MEASURED: a wild jump into the
+        -- heap (ASan: `PC is at a non-executable region`) with only that one
+        -- defun changed.  So: one `storel`, while the reader exists.
         -- The remaining words of slot 1 (f/e/args/arity) are read ONLY when
         -- the marker is non-zero, which this store rules out.
         --
