@@ -460,18 +460,27 @@ struct ApplyState {
   live : word;
   env : word;
 }
-// THE 80-BYTE `:ret` LAYOUT (midlang-u7) — the Agg "ret" cell Rt.tail-known and
-// both Rt.applyTailGo arms malloc, and that Rt.bounce / Rt.bounceGo chase.  The
-// word offsets are an ABI in three directions at once: the builder (this file),
-// the chaser (Rt.bounceGo's rt_callN switch), and Lower's @ret block, which
-// blits all 80 bytes out of slot 0 and frees the block (P1a) — so no offset
-// here may move.  TestMain's U7 rows pin this table; the 1e6-hop mutual-tail
-// run is the behavioural half.
+// THE 80-BYTE `:ret` LAYOUT (midlang-u7) — the Agg "ret" cell Rt.tail-known
+// mallocs, and that Rt.bounce / Rt.bounceGo chase.  The word offsets are an ABI
+// in three directions at once: the builder (this file), the chaser
+// (Rt.bounceGo's rt_callN switch), and Lower's @ret block, which blits all 80
+// bytes out of slot 0 and frees the block (P1a) — so no offset here may move.
+// TestMain's U7 rows pin this table.
+//
+// U3a: NOTHING BUILDS A `.tail` REQUEST ANY MORE, so this whole struct is
+// CALLER-LESS — Rt.tail-known's only remaining builder has no callers (the
+// arity-5+ static tail sites went non-tail) and Rt.bounce/Rt.bounceGo have
+// none (every closure call now returns the finished Value).  It stays because
+// the `:ret` TYPE must outlive tail-known's COMPILATION: deleting the builders
+// and the type together is U3b's job, and doing it here would mean the unit's
+// own gates could not tell a compile error from the deletion.  Both arms of
+// Rt.applyTailGo that used to malloc this cell now `tcall` instead, so the
+// only live malloc is Rt.tail-known's own.
 //
 //   slot 0..4  result  the `.done` Value payload (a `val` field = 5 words);
 //                      read by the chaser as a VALUE (`vecload(r, 0)` — a val
 //                      field read at offset 0 is the same node).  WRITTEN
-//                      WORD-WISE at all three malloc sites (five zeroing
+//                      WORD-WISE at the malloc sites (five zeroing
 //                      stores in the two tail arms, the five-word mkval payload
 //                      in the partial arm): that is a run of RawWordStores, NOT
 //                      a val field store, so those five lines keep the `wstore`
@@ -7720,137 +7729,120 @@ defun Rt.main(argc : word, argv : word) -> word {
   word fslot = rawcall malloc(8);
   word modelslot = rawcall malloc(40);
   word d0 = if (mkbool(arity == 0)) {
-    word r0 = aggcall ret rawsym("rt_call0")(code, 0);
-    word res0 = aggcall val rawsym("q_Rt_x2ebounce")(r0);
-    wstore(fslot, 0, res0);
+    word r0 = aggcall val rawsym("rt_call0")(code, 0);
+    wstore(fslot, 0, r0);
     return 0;
   } else {
     return 0;
   };
   word d1 = if (mkbool(arity == 1)) {
-    word r1 = aggcall ret rawsym("rt_call1")(code, 0, abuf);
-    word res1 = aggcall val rawsym("q_Rt_x2ebounce")(r1);
-    wstore(fslot, 0, res1);
+    word r1 = aggcall val rawsym("rt_call1")(code, 0, abuf);
+    wstore(fslot, 0, r1);
     return 0;
   } else {
     return 0;
   };
   word d2 = if (mkbool(arity == 2)) {
-    word r2 = aggcall ret rawsym("rt_call2")(code, 0, abuf, a1);
-    word res2 = aggcall val rawsym("q_Rt_x2ebounce")(r2);
-    wstore(fslot, 0, res2);
+    word r2 = aggcall val rawsym("rt_call2")(code, 0, abuf, a1);
+    wstore(fslot, 0, r2);
     return 0;
   } else {
     return 0;
   };
   word d3 = if (mkbool(arity == 3)) {
-    word r3 = aggcall ret rawsym("rt_call3")(code, 0, abuf, a1, a2);
-    word res3 = aggcall val rawsym("q_Rt_x2ebounce")(r3);
-    wstore(fslot, 0, res3);
+    word r3 = aggcall val rawsym("rt_call3")(code, 0, abuf, a1, a2);
+    wstore(fslot, 0, r3);
     return 0;
   } else {
     return 0;
   };
   word d4 = if (mkbool(arity == 4)) {
-    word r4 = aggcall ret rawsym("rt_call4")(code, 0, abuf, a1, a2, a3);
-    word res4 = aggcall val rawsym("q_Rt_x2ebounce")(r4);
-    wstore(fslot, 0, res4);
+    word r4 = aggcall val rawsym("rt_call4")(code, 0, abuf, a1, a2, a3);
+    wstore(fslot, 0, r4);
     return 0;
   } else {
     return 0;
   };
   word d5 = if (mkbool(arity == 5)) {
-    word r5 = aggcall ret rawsym("rt_call5")(code, 0, abuf, a1, a2, a3, a4);
-    word res5 = aggcall val rawsym("q_Rt_x2ebounce")(r5);
-    wstore(fslot, 0, res5);
+    word r5 = aggcall val rawsym("rt_call5")(code, 0, abuf, a1, a2, a3, a4);
+    wstore(fslot, 0, r5);
     return 0;
   } else {
     return 0;
   };
   word d6 = if (mkbool(arity == 6)) {
-    word r6 = aggcall ret rawsym("rt_call6")(code, 0, abuf, a1, a2, a3, a4, a5);
-    word res6 = aggcall val rawsym("q_Rt_x2ebounce")(r6);
-    wstore(fslot, 0, res6);
+    word r6 = aggcall val rawsym("rt_call6")(code, 0, abuf, a1, a2, a3, a4, a5);
+    wstore(fslot, 0, r6);
     return 0;
   } else {
     return 0;
   };
   word d7 = if (mkbool(arity == 7)) {
-    word r7 = aggcall ret rawsym("rt_call7")(code, 0, abuf, a1, a2, a3, a4, a5, a6);
-    word res7 = aggcall val rawsym("q_Rt_x2ebounce")(r7);
-    wstore(fslot, 0, res7);
+    word r7 = aggcall val rawsym("rt_call7")(code, 0, abuf, a1, a2, a3, a4, a5, a6);
+    wstore(fslot, 0, r7);
     return 0;
   } else {
     return 0;
   };
   word d8 = if (mkbool(arity == 8)) {
-    word r8 = aggcall ret rawsym("rt_call8")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7);
-    word res8 = aggcall val rawsym("q_Rt_x2ebounce")(r8);
-    wstore(fslot, 0, res8);
+    word r8 = aggcall val rawsym("rt_call8")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7);
+    wstore(fslot, 0, r8);
     return 0;
   } else {
     return 0;
   };
   word d9 = if (mkbool(arity == 9)) {
-    word r9 = aggcall ret rawsym("rt_call9")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8);
-    word res9 = aggcall val rawsym("q_Rt_x2ebounce")(r9);
-    wstore(fslot, 0, res9);
+    word r9 = aggcall val rawsym("rt_call9")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8);
+    wstore(fslot, 0, r9);
     return 0;
   } else {
     return 0;
   };
   word d10 = if (mkbool(arity == 10)) {
-    word r10 = aggcall ret rawsym("rt_call10")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9);
-    word res10 = aggcall val rawsym("q_Rt_x2ebounce")(r10);
-    wstore(fslot, 0, res10);
+    word r10 = aggcall val rawsym("rt_call10")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+    wstore(fslot, 0, r10);
     return 0;
   } else {
     return 0;
   };
   word d11 = if (mkbool(arity == 11)) {
-    word r11 = aggcall ret rawsym("rt_call11")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
-    word res11 = aggcall val rawsym("q_Rt_x2ebounce")(r11);
-    wstore(fslot, 0, res11);
+    word r11 = aggcall val rawsym("rt_call11")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
+    wstore(fslot, 0, r11);
     return 0;
   } else {
     return 0;
   };
   word d12 = if (mkbool(arity == 12)) {
-    word r12 = aggcall ret rawsym("rt_call12")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
-    word res12 = aggcall val rawsym("q_Rt_x2ebounce")(r12);
-    wstore(fslot, 0, res12);
+    word r12 = aggcall val rawsym("rt_call12")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
+    wstore(fslot, 0, r12);
     return 0;
   } else {
     return 0;
   };
   word d13 = if (mkbool(arity == 13)) {
-    word r13 = aggcall ret rawsym("rt_call13")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12);
-    word res13 = aggcall val rawsym("q_Rt_x2ebounce")(r13);
-    wstore(fslot, 0, res13);
+    word r13 = aggcall val rawsym("rt_call13")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12);
+    wstore(fslot, 0, r13);
     return 0;
   } else {
     return 0;
   };
   word d14 = if (mkbool(arity == 14)) {
-    word r14 = aggcall ret rawsym("rt_call14")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13);
-    word res14 = aggcall val rawsym("q_Rt_x2ebounce")(r14);
-    wstore(fslot, 0, res14);
+    word r14 = aggcall val rawsym("rt_call14")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13);
+    wstore(fslot, 0, r14);
     return 0;
   } else {
     return 0;
   };
   word d15 = if (mkbool(arity == 15)) {
-    word r15 = aggcall ret rawsym("rt_call15")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
-    word res15 = aggcall val rawsym("q_Rt_x2ebounce")(r15);
-    wstore(fslot, 0, res15);
+    word r15 = aggcall val rawsym("rt_call15")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
+    wstore(fslot, 0, r15);
     return 0;
   } else {
     return 0;
   };
   word d16 = if (mkbool(arity == 16)) {
-    word r16 = aggcall ret rawsym("rt_call16")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15);
-    word res16 = aggcall val rawsym("q_Rt_x2ebounce")(r16);
-    wstore(fslot, 0, res16);
+    word r16 = aggcall val rawsym("rt_call16")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15);
+    wstore(fslot, 0, r16);
     return 0;
   } else {
     return 0;
@@ -7886,18 +7878,24 @@ defun Rt.main(argc : word, argv : word) -> word {
 // ===== the stage-6 B1 apply family (VERBATIM rt.zig rt_apply / rt_apply_tail
 // / applyGo, rt.zig:793-927).  Rt.apply / Rt.apply-tail are rawAbi WRAPPERS
 // (3 word params — fslot *Value, args [*]Value, nargs) that root the caller's
-// args array, then hand off to a :val LOOP (Rt.applyGo / Rt.applyTailGo —
-// `recur` needs the val self-tail loop, which the rawAbi tail rejects).  The
-// loop's current closure lives in its OWN (rooted) frame as a :val PARAM, not
-// in the malloc'd state block — the over arm re-binds it via `recur(.., res)`
-// so no raw store ever writes a Value into a non-GC buffer.  The state block
-// carries the raw words — `struct ApplyState` (args/nargs/live/env) is the ONE
-// table for them, above.  The PARTIAL arm's env dance (rootPushPtr + the
-// RE-READ-AFTER-ALLOC, the cStrFill lesson)
-// is what keeps the applied-args/captures copy pointing at the POST-scavenge
-// env array.  The wrapper's `f` copy (vecload(fslot,0)) is NOT rooted: sound
-// only because no collect can run between the vecload and applyGo/applyTailGo's
-// param blit (scavenges are alloc-site-triggered; malloc(32)/
+// args array, then hand off to a :val LOOP.  The state block carries the raw
+// words — `struct ApplyState` (args/nargs/live/env) is the ONE table for them,
+// above.  The PARTIAL arms' env dance (rootPushPtr + the RE-READ-AFTER-ALLOC,
+// the cStrFill lesson) is what keeps the applied-args/captures copy pointing at
+// the POST-scavenge env array.
+//
+// U3a SPLIT THE TWO LOOPS' CONVENTIONS, deliberately, and the reason is the
+// tcall: `Rt.applyGo` is reached only by an ordinary `call` from Rt.apply, so
+// it keeps `(state : val, f : val)` — the loop-carried closure lives in its
+// OWN rooted frame slot, re-bound by `recur(.., res)`, and no raw store ever
+// writes a Value into a non-GC buffer.  `Rt.applyTailGo` is reached by a
+// `tcall`, which cannot pass a val at all (a val crosses as a pointer into the
+// caller's frame, and the tcall tears that frame down), so it takes
+// `(state : word, fslot : word)` and carries its closure in cell 0 of the
+// STAGED block — which Rt.apply-tail's kind-2 registration scans.  Same
+// guarantee, different seat.  Rt.apply's own `f` copy (vecload(fslot,0)) is
+// NOT rooted: sound only because no collect can run between the vecload and
+// applyGo's param blit (scavenges are alloc-site-triggered; malloc(32)/
 // Rt.rootPushValueArray/frame-pool pop are collect-free), after which `f`
 // is a ROOTED frame param whose interior pointers the collector rewrites in
 // place.
@@ -7962,12 +7960,17 @@ defun Rt.apply(fslot : word, args : word, nargs : word) -> val {
 //     wrong answer that does not exist today.  This seat is the ONE place that
 //     hazard can be introduced; do not add a tsbuf arm "for speed".
 //
-// OWNERSHIP: the block is the CALLER's frame's replacement, so Rt.apply-tail
-// owns it and frees it beside `free(state)` after the loop returns.  (U3a
-// moves that free into applyTailGo's exits, where the state's free already
-// goes — the saturated arm tcalls and never returns.)
+// OWNERSHIP: the block is the CALLER's frame's replacement, and U3a moved the
+// free into Rt.applyTailGo's exits, where the state's free already goes — the
+// saturated arm `tcall`s and never returns, so a free here would never run.
+// The 8 bytes BEFORE `buf` hold the provenance canary (see the guard).
 defun Rt.stage-apply(fslot : word, argblock : word, nargs : word) -> word {
-  word buf = rawcall malloc((nargs + 1) * 40);
+  word blk = rawcall malloc(8 + (nargs + 1) * 40);
+  // THE PROVENANCE CANARY (U3a): 0x56414c4c, "VALL" — the 8 bytes BEFORE the
+  // block Rt.apply-tail is handed.  See the guard there for what it proves and
+  // why `args == fslot + 40` could not.
+  wstore(blk, 0, 1447119948);
+  word buf = blk + 8;
   call Rt.copyWords(buf, fslot, 5);
   call Rt.copyWords(buf + 40, argblock, nargs * 5);
   return buf;
@@ -7986,6 +7989,18 @@ defun Rt.apply-tail(fslot : word, args : word, nargs : word) -> val {
     call Rt.die(rawstr("qbe-rt: Rt.apply-tail: args must be the staged block + 40 (Rt.stage-apply shape) - the pre-U2 (fslot, frame-args) convention is gone"));
     return mknil;
   }
+  // THE PROVENANCE GUARD (U3a review trap 3).  `args == fslot + 40` is TOTAL
+  // for what a CALLEE can see — it pins the SHAPE — but it says nothing about
+  // where `fslot` came from: a caller that passed `buf` of a GC block with the
+  // same shape would satisfy it, and then `free(fslot)` in Rt.applyTailGo
+  // would be C-heap corruption (freeing a nursery pointer) instead of a loud
+  // error.  Only Rt.stage-apply mallocs that block, and it writes 0x56414c4c
+  // ("VALL") in the 8 bytes immediately below the base.  This is the ONE place
+  // the provenance is checkable: after this defun the pointer is just a word.
+  if (wload(fslot - 8, 0) != 1447119948) {
+    call Rt.die(rawstr("qbe-rt: Rt.apply-tail: fslot is not a Rt.stage-apply block (its 8-byte canary is missing) - only that seat's malloc'd block may be freed here"));
+    return mknil;
+  }
   *ApplyState state = rawcall malloc(32);
   state->args = fslot + 40;
   state->nargs = nargs;
@@ -7994,17 +8009,24 @@ defun Rt.apply-tail(fslot : word, args : word, nargs : word) -> val {
   // range inside the caller's frame.  `live` is a superset of what any arm
   // reads (the over-applied arm rebinds args/nargs but never this word), which
   // the live-is-a-superset rule (ApplyState slot 2) covers.
+  //
+  // U3a: this registration is ALSO the reason Rt.applyTailGo may be a
+  // frame-free rawAbi body.  The loop carries the current closure in cell 0
+  // (the over-applied arm re-writes it there), and cell 0 is inside this
+  // range — so the collector rewrites it in place across the hops' safepoints
+  // without any frame slot of the loop's own.
   state->live = nargs + 1;
   call Rt.rootPushValueArray(fslot, [word](state) + 16);
-  val f = vecload(fslot, 0);
-  val r = call Rt.applyTailGo(mknum(state), f);
-  call Rt.rootPop();
-  rawcall free(state);
-  // The staged block is OURS to free (Rt.stage-apply malloc'd it and F's frame
-  // is gone) — and it must be freed AFTER the pop, never before: the registry
-  // is scanned by address and the block is registered until rootPop.
-  rawcall free(fslot);
-  return r;
+  // THE HANDOFF, and it is a TAIL CALL (U3a).  Two consequences, both
+  // load-bearing: (1) this defun's machine frame is REUSED by the loop, so a
+  // hop costs no stack; (2) NOTHING below this line can run, which is why the
+  // exit protocol (the pops and both frees) lives in the loop's arms.
+  //
+  // `[word](state)` and `fslot` are both WORDS: J16 refuses a `val` parameter
+  // on a TailDefun, because a val crosses a tcall as a pointer into the
+  // caller's frame and the tcall tears that frame down.  The loop re-reads the
+  // closure from `fslot` instead (cell 0 of the block registered above).
+  tailcall val Rt.applyTailGo([word](state), fslot);
 }
 defun Rt.applyGo(state : val, f : val) -> val {
   *ApplyState sp = payload(state, 0);
@@ -8031,17 +8053,15 @@ defun Rt.applyGo(state : val, f : val) -> val {
       } else {
         return mknil;
       };
-      word r = aggcall ret rawsym("rt_call2r")(fn, env, napp, args, rem);
-      word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-      return vecload(v, 0);
+      word r = aggcall val rawsym("rt_call2r")(fn, env, napp, args, rem);
+      return vecload(r, 0);
     } else {
       if (rem > nargs) {
         sp->env = env;
         return call Rt.applyPartGo(state, f);
       } else {
-        word r = aggcall ret rawsym("rt_call2r")(fn, env, napp, args, rem);
-        word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-        val res = vecload(v, 0);
+        word r = aggcall val rawsym("rt_call2r")(fn, env, napp, args, rem);
+        val res = vecload(r, 0);
         sp->args = args + rem * 40;
         sp->nargs = nargs - rem;
         recur(mknum(sp), res);
@@ -8049,13 +8069,41 @@ defun Rt.applyGo(state : val, f : val) -> val {
     }
   }
 }
-defun Rt.applyTailGo(state : val, f : val) -> val {
-  *ApplyState sp = payload(state, 0);
+defun Rt.applyTailGo(state : word, fslot : word) -> val {
+  // ================= THE GENERIC-APPLY TAIL LOOP (U3a) =================
+  // This is where the apply chain stops retaining frames.  It is entered by
+  // `Rt.apply-tail`'s `tcall`, and its SATURATED arm `tcall`s `rt_call2r`,
+  // which `tcall`s the closure's code — so a hop reuses ONE machine frame and
+  // the stack is flat over an unbounded chain (the clostail large-n row is the
+  // instrument; it used to pass only because the `.tail` trampoline chased the
+  // requests for us).
+  //
+  // WORD PARAMETERS, and why they are not a style choice: a `tcall` cannot
+  // pass a `val`.  A val crosses as a pointer to the CALLER's 40-byte storage
+  // and the tcall tears the caller's frame down, so J16 refuses a val
+  // parameter on a TailDefun outright (Mid.RtLang.Check).  `fslot` is
+  // therefore the ADDRESS of the cell holding the current closure, and the
+  // vecload that used to happen in Rt.apply-tail happens HERE, per iteration.
+  //
+  // THE LOOP-CARRIED CLOSURE IS ROOTED — by Rt.apply-tail's registration, not
+  // by a frame slot of ours.  `fslot` is the base of the staged block and the
+  // registration covers `nargs + 1` cells from it, so cell 0 (which the
+  // over-applied arm RE-WRITES with the next closure) is scanned and rewritten
+  // in place across every hop's safepoints.  That is what makes a FRAME-FREE
+  // rawAbi body sound here, and it is the one fact a future editor must not
+  // break: `Rt.apply-tail` must keep registering from the block BASE, not from
+  // `args`.
+  //
+  // `val f` below is a per-iteration READ of that cell, never live across a
+  // safepoint: the saturated arm allocates (the arg copy) and then never
+  // touches `f`; the over arm's `rt_call2r` hop re-reads it via `recur`; and
+  // the partial arm passes it to Rt.applyPartGo BEFORE that call allocates.
+  *ApplyState sp = state;
+  val f = vecload(fslot, 0);
   word code = payload(f, 0);
   word fn = wload(code, 0);
   word rem = payload32(f, 1);
   word env = payload(f, 2);
-  word envlen = payload32(f, 3);
   word args = sp->args;
   word nargs = sp->nargs;
   if (tagis(f, 6) == 0) {
@@ -8064,22 +8112,29 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
   } else {
     word arity = wload(code, 1) & 4294967295;
     word napp = arity - rem;
-    word capslen = envlen - napp;
     if (rem == nargs) {
-      // THE .tail NO-COLLECT INVARIANT (rt.zig:956-973, stated HERE at the
-      // Mid surface too): the .tail args live in the fresh `buf` allocvec
-      // array below, which is UNROOTED by convention.  Sound only because the
-      // callee prologue blit reads `buf` EXACTLY ONCE and NO collection runs
-      // between this allocvec and that blit — the tail from here is
-      // allocvec -> wstores (malloc, libc) -> return mknum(retbuf) -> the
-      // Lower @ret blit -> frame-leave (pool push, no collect) -> rt_bounce ->
-      // rt_callN (the generated bridge, prologue blit FIRST).  A future editor
-      // adding a GC alloc AFTER this allocvec (or in the Lower @ret block)
-      // breaks it SILENTLY — keep this arm alloc-free after the allocvec.
-      word total = arity + capslen;
+      // ================= THE SATURATED ARM: THE CHAIN ENDS HERE =============
+      // The exit protocol is spelled HERE, in Mid source, in exactly this LIFO
+      // order, because no Lower-side automatic sequence could express it:
+      //
+      //     dance-pop -> args-pop -> free(state) -> free(block) -> tailcall
+      //
+      // WHY THE COPY: the staged block is freed BEFORE the jump (it must be —
+      // nothing runs after a tcall), so the args `rt_call2r` hands the callee
+      // cannot live in it.  They are copied into a fresh GC array first.  That
+      // array is UNROOTED by convention, and the window to the callee's
+      // prologue blit must stay collection-free: allocvec -> copyWords
+      // (malloc, libc) -> rootPop (no collect) -> free, free (libc) -> the
+      // tcall's teardown -> rt_call2r's arity block (pointer arithmetic and a
+      // jmp/call) -> the callee's entry blit.  A future editor adding a GC
+      // alloc anywhere after this allocvec breaks it SILENTLY.
+      //
+      // WHY THE DANCE: `env` points into a GC block and the allocvec may
+      // scavenge it, so it is staged in `sp->env` (rooted, kind 0) and RE-READ
+      // afterwards — the cStrFill lesson, unchanged from the pre-U3a arm.
       sp->env = env;
       call Rt.rootPushPtr([word](sp) + 24);
-      word buf = allocvec(total);
+      word abuf = allocvec(rem);
       word env2 = sp->env;
       val chk = if (napp > 0) {
         if (env2 == 0) {
@@ -8091,51 +8146,56 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
       } else {
         return mknil;
       };
-      call Rt.copyWords(buf, env2, napp * 5);
-      call Rt.copyWords(buf + napp * 40, args, rem * 5);
-      call Rt.copyWords(buf + arity * 40, env2 + napp * 40, capslen * 5);
+      call Rt.copyWords(abuf, args, rem * 5);
       call Rt.rootPop();
-      word e = payload((capslen > 0) ? mknum(buf + arity * 40) : mknum(0), 0);
-      *Ret retbuf = rawcall malloc(80);
-      wstore(retbuf, 0, 0);
-      wstore(retbuf, 1, 0);
-      wstore(retbuf, 2, 0);
-      wstore(retbuf, 3, 0);
-      wstore(retbuf, 4, 0);
-      retbuf->kind = 1;
-      retbuf->code = fn;
-      retbuf->e = e;
-      retbuf->args = buf;
-      retbuf->arity = arity;
-      return mknum(retbuf);
+      // ...the DANCE-pop above, and the ARGS-pop here.  This second pop is the
+      // one Rt.apply-tail pushed; it must follow the copy (the registration is
+      // what kept the args current across the allocvec) and precede both frees
+      // (the registry is scanned by address, so the block may not be freed
+      // while it is registered).
+      call Rt.rootPop();
+      rawcall free(state);
+      // `fslot - 8`, NOT `fslot`: Rt.stage-apply's malloc'd pointer is the
+      // canary word, and the base it returns is 8 bytes into that allocation
+      // (see the guard at Rt.apply-tail).  Freeing the base would be
+      // `free(): invalid pointer` — the loud half of getting this wrong.
+      rawcall free(fslot - 8);
+      // THE HOP.  `rt_call2r(fn, env2, napp, abuf, rem)`: params 0..napp-1 are
+      // the applied captures (env2), the rest are the copied args — exactly
+      // the two-range convention the bridge exists for, with no interleave
+      // buffer and no malloc per hop.
+      tailcall val rawsym("rt_call2r")(fn, env2, napp, abuf, rem);
     } else {
       if (rem > nargs) {
+        // PARTIAL: the chain ends with a new closure, and this defun RETURNS
+        // it (the @ret block leaves the frame for us — no explicit leave, and
+        // none is possible: this body is frame-free).  Same LIFO order minus
+        // the terminator.
         sp->env = env;
-        val p = call Rt.applyPartGo(state, f);
-        *Ret retbuf = rawcall malloc(80);
-        // the ret cell's `result` is the closure value p WORD-WISE (the
-        // `.done` layout's five words): kind 6, then mkval's four payload
-        // words at +1 - code, the 32-bit remaining arity, env, the 32-bit
-        // cell count.  The offsets are OFFSET BY ONE from mkval's argument
-        // order, so they are spelled out rather than looped.
-        wstore(retbuf, 0, 6);
-        wstore(retbuf, 1, payload(p, 0));
-        wstore(retbuf, 2, payload32(p, 1));
-        wstore(retbuf, 3, payload(p, 2));
-        wstore(retbuf, 4, payload32(p, 3));
-        retbuf->kind = 0;
-        retbuf->code = 0;
-        retbuf->e = 0;
-        retbuf->args = 0;
-        retbuf->arity = 0;
-        return mknum(retbuf);
+        val p = call Rt.applyPartGo(mknum(state), f);
+        call Rt.rootPop();
+        rawcall free(state);
+        rawcall free(fslot - 8);
+        return p;
       } else {
-        word r = aggcall ret rawsym("rt_call2r")(fn, env, napp, args, rem);
-        word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-        val res = vecload(v, 0);
+        // OVER-APPLIED: this hop returned a CLOSURE, so the same chain
+        // continues with fewer args — and the continuation is a SELF TAIL CALL,
+        // not a `recur`.  That is forced, not preferred: the loop's parameters
+        // are WORDS (a tcall cannot pass a val), so they live in `l` registers,
+        // and `jmp @body` cannot re-enter with new register values — QBE has no
+        // phi here and `%a0` is defined by the signature.  Nothing needs to
+        // change in the registers anyway: the state block is the same block and
+        // `fslot` is the same cell, so the ENTIRE loop state is in memory.  The
+        // next closure is written into cell 0 of the staged block (registered
+        // by Rt.apply-tail, see the header) and the re-entry reads it back.
+        //
+        // NOTHING IS FREED HERE — the state and the staged block span the whole
+        // chain by design; only the two terminating arms free them.
+        word r = aggcall val rawsym("rt_call2r")(fn, env, napp, args, rem);
+        call Rt.copyWords(fslot, r, 5);
         sp->args = args + rem * 40;
         sp->nargs = nargs - rem;
-        recur(mknum(sp), res);
+        tailcall val Rt.applyTailGo(state, fslot);
       }
     }
   }
@@ -8194,88 +8254,71 @@ defun Rt.callArity(disp : val) -> val {
   word buf = dp->buf;
   word arity = dp->arity;
   if (mkbool(arity == 0)) {
-    word r = aggcall ret rawsym("rt_call0")(code, caps);
-    word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-    return vecload(v, 0);
+    word r = aggcall val rawsym("rt_call0")(code, caps);
+    return vecload(r, 0);
   } else {
     if (mkbool(arity == 1)) {
-      word r = aggcall ret rawsym("rt_call1")(code, caps, buf);
-      word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-      return vecload(v, 0);
+      word r = aggcall val rawsym("rt_call1")(code, caps, buf);
+      return vecload(r, 0);
     } else {
       if (mkbool(arity == 2)) {
-        word r = aggcall ret rawsym("rt_call2")(code, caps, buf, buf + 40);
-        word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-        return vecload(v, 0);
+        word r = aggcall val rawsym("rt_call2")(code, caps, buf, buf + 40);
+        return vecload(r, 0);
       } else {
         if (mkbool(arity == 3)) {
-          word r = aggcall ret rawsym("rt_call3")(code, caps, buf, buf + 40, buf + 80);
-          word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-          return vecload(v, 0);
+          word r = aggcall val rawsym("rt_call3")(code, caps, buf, buf + 40, buf + 80);
+          return vecload(r, 0);
         } else {
           if (mkbool(arity == 4)) {
-            word r = aggcall ret rawsym("rt_call4")(code, caps, buf, buf + 40, buf + 80, buf + 120);
-            word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-            return vecload(v, 0);
+            word r = aggcall val rawsym("rt_call4")(code, caps, buf, buf + 40, buf + 80, buf + 120);
+            return vecload(r, 0);
           } else {
             if (mkbool(arity == 5)) {
-              word r = aggcall ret rawsym("rt_call5")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160);
-              word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-              return vecload(v, 0);
+              word r = aggcall val rawsym("rt_call5")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160);
+              return vecload(r, 0);
             } else {
               if (mkbool(arity == 6)) {
-                word r = aggcall ret rawsym("rt_call6")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200);
-                word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                return vecload(v, 0);
+                word r = aggcall val rawsym("rt_call6")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200);
+                return vecload(r, 0);
               } else {
                 if (mkbool(arity == 7)) {
-                  word r = aggcall ret rawsym("rt_call7")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240);
-                  word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                  return vecload(v, 0);
+                  word r = aggcall val rawsym("rt_call7")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240);
+                  return vecload(r, 0);
                 } else {
                   if (mkbool(arity == 8)) {
-                    word r = aggcall ret rawsym("rt_call8")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280);
-                    word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                    return vecload(v, 0);
+                    word r = aggcall val rawsym("rt_call8")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280);
+                    return vecload(r, 0);
                   } else {
                     if (mkbool(arity == 9)) {
-                      word r = aggcall ret rawsym("rt_call9")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320);
-                      word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                      return vecload(v, 0);
+                      word r = aggcall val rawsym("rt_call9")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320);
+                      return vecload(r, 0);
                     } else {
                       if (mkbool(arity == 10)) {
-                        word r = aggcall ret rawsym("rt_call10")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360);
-                        word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                        return vecload(v, 0);
+                        word r = aggcall val rawsym("rt_call10")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360);
+                        return vecload(r, 0);
                       } else {
                         if (mkbool(arity == 11)) {
-                          word r = aggcall ret rawsym("rt_call11")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400);
-                          word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                          return vecload(v, 0);
+                          word r = aggcall val rawsym("rt_call11")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400);
+                          return vecload(r, 0);
                         } else {
                           if (mkbool(arity == 12)) {
-                            word r = aggcall ret rawsym("rt_call12")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440);
-                            word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                            return vecload(v, 0);
+                            word r = aggcall val rawsym("rt_call12")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440);
+                            return vecload(r, 0);
                           } else {
                             if (mkbool(arity == 13)) {
-                              word r = aggcall ret rawsym("rt_call13")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480);
-                              word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                              return vecload(v, 0);
+                              word r = aggcall val rawsym("rt_call13")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480);
+                              return vecload(r, 0);
                             } else {
                               if (mkbool(arity == 14)) {
-                                word r = aggcall ret rawsym("rt_call14")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520);
-                                word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                                return vecload(v, 0);
+                                word r = aggcall val rawsym("rt_call14")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520);
+                                return vecload(r, 0);
                               } else {
                                 if (mkbool(arity == 15)) {
-                                  word r = aggcall ret rawsym("rt_call15")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520, buf + 560);
-                                  word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                                  return vecload(v, 0);
+                                  word r = aggcall val rawsym("rt_call15")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520, buf + 560);
+                                  return vecload(r, 0);
                                 } else {
-                                  word r = aggcall ret rawsym("rt_call16")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520, buf + 560, buf + 600);
-                                  word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                                  return vecload(v, 0);
+                                  word r = aggcall val rawsym("rt_call16")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520, buf + 560, buf + 600);
+                                  return vecload(r, 0);
                                 }
                               }
                             }
@@ -8356,10 +8399,18 @@ defun Rt.stage-tail(argblock : word, nargs : word) -> word {
   return buf;
 }
 // ===== the stage-6 B2 mid-tail family (VERBATIM rt.zig rt_tail_known /
-// bounce, rt.zig:932-977).  Rt.tail-known is a rawAbi WORD defun (code,
+// bounce, rt.zig:932-977).  U3a LEFT THIS FAMILY WITHOUT CALLERS: the apply
+// chain `tcall`s (so no hop hands a request upward), the arity-5+ static tail
+// sites took the ordinary call, and every closure call now returns the
+// finished Value — so `Rt.tail-known` builds a `.tail` that nobody asks for,
+// `Rt.bounce` has nothing to unwrap, and `Rt.bounceGo`'s `kind == 1` arm is
+// unreachable.  They still COMPILE and are still correct (U3b deletes them
+// together with the `:ret` type they are the last builders of).
+//
+// Rt.tail-known is a rawAbi WORD defun (code,
 // argblock, nargs) whose RESULT is the 80-byte `:ret` (Agg "ret" — the body
 // leaves mknum(retbuf) in slot 0 and the Lower @ret block blits the 80 bytes
-// out, exactly Rt.apply-tail's saturated arm).  It stages the args into the
+// out; Rt.applyTailGo's saturated arm used to do the same and now `tcall`s).  It stages the args into the
 // STATIC buffer (globals word 12, malloc'd ONCE in Rt.main) for <=3 args —
 // the no-allocation path, the Zig `tail_stage[3]` .bss buffer's job — or the
 // GC allocvec fallback for >3 args (or QBE_NOTTAILSTAGE=1, globals word 13).
@@ -8383,10 +8434,10 @@ defun Rt.stage-tail(argblock : word, nargs : word) -> word {
 // SAME :val self-tail Rt.applyGo uses (recur needs the val path; the rawAbi
 // word tail rejects it).  CONSTANT NATIVE STACK: the loop is one C frame
 // (jmp @body per hop, no recursion), exactly the Zig `bounce` trampoline.
-// BOTH Mid dispatch sites route through it — Rt.main's entry dispatch and
-// Rt.callArity's apply dispatch now `rawsym("q_Rt_x2ebounce")` instead of the
-// Zig `rt_bounce` seat, so the clostail/1e6 mutual-tail entry chase runs the
-// MID bounce loop (the unit's oracle), not a Zig seat left in mixed mode.
+// U3a: NEITHER dispatch site bounces any more — Rt.main's entry dispatch and
+// Rt.callArity's apply dispatch read `rt_callN`'s returned `:val` directly, so
+// the trampoline is not on any path and the 1e6-hop chase is the tcall chain
+// itself (the clostail large-n row is what proves it).
 defun Rt.tail-known(code : word, argblock : word, nargs : word) -> val {
   word g = rawcall rt_glob_addr();
   word tsbuf = wload(g, 12);
@@ -8425,68 +8476,68 @@ defun Rt.bounceGo(r : val) -> val {
     word args = rp->args;
     word arity = rp->arity;
     if (mkbool(arity == 0)) {
-      word rr = aggcall ret rawsym("rt_call0")(f, e);
-      recur(mknum(rr));
+      word rr = aggcall val rawsym("rt_call0")(f, e);
+      return vecload(rr, 0);
     } else {
       if (mkbool(arity == 1)) {
-        word rr = aggcall ret rawsym("rt_call1")(f, e, args);
-        recur(mknum(rr));
+        word rr = aggcall val rawsym("rt_call1")(f, e, args);
+        return vecload(rr, 0);
       } else {
         if (mkbool(arity == 2)) {
-          word rr = aggcall ret rawsym("rt_call2")(f, e, args, args + 40);
-          recur(mknum(rr));
+          word rr = aggcall val rawsym("rt_call2")(f, e, args, args + 40);
+          return vecload(rr, 0);
         } else {
           if (mkbool(arity == 3)) {
-            word rr = aggcall ret rawsym("rt_call3")(f, e, args, args + 40, args + 80);
-            recur(mknum(rr));
+            word rr = aggcall val rawsym("rt_call3")(f, e, args, args + 40, args + 80);
+            return vecload(rr, 0);
           } else {
             if (mkbool(arity == 4)) {
-              word rr = aggcall ret rawsym("rt_call4")(f, e, args, args + 40, args + 80, args + 120);
-              recur(mknum(rr));
+              word rr = aggcall val rawsym("rt_call4")(f, e, args, args + 40, args + 80, args + 120);
+              return vecload(rr, 0);
             } else {
               if (mkbool(arity == 5)) {
-                word rr = aggcall ret rawsym("rt_call5")(f, e, args, args + 40, args + 80, args + 120, args + 160);
-                recur(mknum(rr));
+                word rr = aggcall val rawsym("rt_call5")(f, e, args, args + 40, args + 80, args + 120, args + 160);
+                return vecload(rr, 0);
               } else {
                 if (mkbool(arity == 6)) {
-                  word rr = aggcall ret rawsym("rt_call6")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200);
-                  recur(mknum(rr));
+                  word rr = aggcall val rawsym("rt_call6")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200);
+                  return vecload(rr, 0);
                 } else {
                   if (mkbool(arity == 7)) {
-                    word rr = aggcall ret rawsym("rt_call7")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240);
-                    recur(mknum(rr));
+                    word rr = aggcall val rawsym("rt_call7")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240);
+                    return vecload(rr, 0);
                   } else {
                     if (mkbool(arity == 8)) {
-                      word rr = aggcall ret rawsym("rt_call8")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280);
-                      recur(mknum(rr));
+                      word rr = aggcall val rawsym("rt_call8")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280);
+                      return vecload(rr, 0);
                     } else {
                       if (mkbool(arity == 9)) {
-                        word rr = aggcall ret rawsym("rt_call9")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320);
-                        recur(mknum(rr));
+                        word rr = aggcall val rawsym("rt_call9")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320);
+                        return vecload(rr, 0);
                       } else {
                         if (mkbool(arity == 10)) {
-                          word rr = aggcall ret rawsym("rt_call10")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360);
-                          recur(mknum(rr));
+                          word rr = aggcall val rawsym("rt_call10")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360);
+                          return vecload(rr, 0);
                         } else {
                           if (mkbool(arity == 11)) {
-                            word rr = aggcall ret rawsym("rt_call11")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400);
-                            recur(mknum(rr));
+                            word rr = aggcall val rawsym("rt_call11")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400);
+                            return vecload(rr, 0);
                           } else {
                             if (mkbool(arity == 12)) {
-                              word rr = aggcall ret rawsym("rt_call12")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440);
-                              recur(mknum(rr));
+                              word rr = aggcall val rawsym("rt_call12")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440);
+                              return vecload(rr, 0);
                             } else {
                               if (mkbool(arity == 13)) {
-                                word rr = aggcall ret rawsym("rt_call13")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480);
-                                recur(mknum(rr));
+                                word rr = aggcall val rawsym("rt_call13")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480);
+                                return vecload(rr, 0);
                               } else {
                                 if (mkbool(arity == 14)) {
-                                  word rr = aggcall ret rawsym("rt_call14")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480, args + 520);
-                                  recur(mknum(rr));
+                                  word rr = aggcall val rawsym("rt_call14")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480, args + 520);
+                                  return vecload(rr, 0);
                                 } else {
                                   if (mkbool(arity == 15)) {
-                                    word rr = aggcall ret rawsym("rt_call15")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480, args + 520, args + 560);
-                                    recur(mknum(rr));
+                                    word rr = aggcall val rawsym("rt_call15")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480, args + 520, args + 560);
+                                    return vecload(rr, 0);
                                   } else {
                                     // UNREACHABLE today: the compiler enforces
                                     // max arity 16 (the same convention as
@@ -8498,8 +8549,8 @@ defun Rt.bounceGo(r : val) -> val {
                                     // silent corruption, where Zig callArityRet's
                                     // else dies loudly (rt.zig:1005).  Kept as a
                                     // documented parity gap, not a B2 regression.
-                                    word rr = aggcall ret rawsym("rt_call16")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480, args + 520, args + 560, args + 600);
-                                    recur(mknum(rr));
+                                    word rr = aggcall val rawsym("rt_call16")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480, args + 520, args + 560, args + 600);
+                                    return vecload(rr, 0);
                                   }
                                 }
                               }
@@ -10469,13 +10520,15 @@ defun Rt.hostArity(tagN : val) -> val {
 // Rt.apply-at — THE applier seat, and the ONE place the two APPLIER TRAPS
 // (plan §4.1) are handled:
 //
-//   1. THE ENTRY IS Rt.callArity, NOT Rt.apply/Rt.applyGo.  applyGo's
-//      saturated arm builds a `:ret` TAIL and returns mknum(retbuf) — an
-//      UNFORCED tail, i.e. a heap address where a value is expected.  Our
-//      probe printed exactly that address and then SEGV'd.  Rt.callArity
-//      bounces it (rt_callN -> q_Rt_x2ebounce -> vecload(v,0)) and returns a
-//      REAL value.  TestMain pins this line: `Rt.apply`/`Rt.applyGo` must not
-//      appear in the host's applier.
+//   1. THE ENTRY IS Rt.callArity, NOT Rt.apply/Rt.applyGo.  (This was the
+//      pre-U3a reason: applyGo's saturated arm built a `:ret` TAIL and returned
+//      mknum(retbuf) — an UNFORCED tail, i.e. a heap address where a value is
+//      expected; the probe printed that address and SEGV'd.  U3a removed the
+//      `.tail` shape entirely, so the reason is now the SEAT and not the
+//      shape: Rt.callArity is the arity-dispatch seat this host is written
+//      against, and the shape it returns is `vecload(rt_callN(...), 0)` — a
+//      REAL value.  TestMain pins that `Rt.apply`/`Rt.applyGo` must not appear
+//      in the host's applier.)
 //   2. THE Disp's `arity` IS THE CLOSURE'S STATIC ARITY (wload(desc,1)), NOT
 //      `arity - rem`.  With `arity - rem` (0 for a global closure) the call
 //      passes zero args and returns garbage.  This is the silent-wrong.
@@ -10555,9 +10608,8 @@ defun Rt.apply-at(cN : val, bufN : val, nargsN : val) -> val {
           call Rt.die(rawstr("qbe-rt: closure env missing for applied args"));
           return mknil;
         }
-        word r = aggcall ret rawsym("rt_call2r")(wload(code, 0), env, napp, buf, rem);
-        word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-        return vecload(v, 0);
+        word r = aggcall val rawsym("rt_call2r")(wload(code, 0), env, napp, buf, rem);
+        return vecload(r, 0);
       } else {
         *Disp dp = rawcall malloc(32);
         dp->fn = wload(code, 0);

@@ -2137,7 +2137,12 @@ mono_field() {
   printf '%s\n' "$(mono_note "$1")" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1
 }
 mono_clones() {
-  grep -c '^function :ret \$[A-Za-z0-9_]*_x24' "$1" || true
+  # U3a: a clone is a SURFACE defun, so its result class is whatever the
+  # closure ABI uses — `:ret` before the flip, `:val` after it.  The row's
+  # claim is "the pass emitted a clone", not the class, so the pattern is
+  # class-agnostic on purpose: pinning one spelling here made three mono rows
+  # go red for an ABI change that did not touch the pass at all (MEASURED).
+  grep -cE '^function :(ret|val) \$[A-Za-z0-9_]*_x24' "$1" || true
 }
 # num <str>: a counter as an INTEGER. An empty or non-numeric capture becomes
 # 0 so a comparison can never pass just because a helper failed (an empty
@@ -2851,25 +2856,50 @@ if true; then
   fi
 fi
 
-# ---- cross-target smoke: the .ssa is target-NEUTRAL IL, so it must also
-#      COMPILE under qbe's other targets.  The behavioural gate runs on the
-#      HOST target only (amd64 here, MEASURED); this is the honest cheap half
-#      of the portability claim -- structurally portable, x86_64-measured.  A
-#      lowering that ever emits a host-specific pattern into the IL stops
-#      compiling here, loudly.  fib.ssa/float.ssa come from the rows above
-#      (a missing .ssa already failed that row); float covers the data-item
-#      lexer corners (Print.elm's d_ sigil).
+# ---- cross-target smoke: the emitted IL must be TARGET-NEUTRAL apart from the
+#      ONE instruction the other targets deliberately do not implement.
+#
+#      U3a changed what this row can honestly claim, and the change is stated
+#      rather than papered over.  Before U3a the emitted runtime contained NO
+#      `tcall` (Q1b's tcalls are emitted only where a program has a generic
+#      TAIL apply, and fib/float have none), so "the IL is target-neutral" was
+#      literally true and this row compiled both artifacts under arm64 and
+#      rv64.  U3a's conversion makes `tcall` UNCONDITIONAL in the runtime —
+#      rt_call2r's arity blocks (a hop must jump, or the chain grows a frame
+#      per hop) and the apply loop's own self-handoff — so no program's .ssa is
+#      arm64-assemblable any more, and the old assertion could only be restored
+#      by reverting the unit.  vendor/qbe refuses `tcall` on arm64/rv64 BY
+#      DESIGN ("a wrong tail is worse than none", tcall-probe.sh's target rows).
+#
+#      So the row now pins the SHARPER claim: each artifact's ONLY refusal is
+#      that one, named, and it is still a REFUSAL (a non-zero exit with the
+#      condition in the message) rather than a silent degradation.  A new
+#      host-specific pattern in the IL would show up as a DIFFERENT first
+#      error line and fail here exactly as before.  MEASURED: the first error
+#      line for fib.ssa and float.ssa on both targets is the tcall one, and
+#      the count of tcall sites is non-zero (a zero would make the row vacuous
+#      — a runtime with no tcall would be re-neutral and this row must say so
+#      out loud rather than pass on a stale premise).
 for tgt in arm64 rv64; do
   ok=1
   for s in "$TMP/fib/fib.ssa" "$TMP/float-lit/float.ssa"; do
     [ -s "$s" ] || continue
-    if ! "$ROOT/vendor/qbe/qbe" -t "$tgt" "$s" > /dev/null 2>"$TMP/xtgt.err"; then
-      echo "FAIL cross-$tgt: vendored qbe -t $tgt rejected $(basename "$s"): $(head -c 120 "$TMP/xtgt.err")"
+    want="tcall is not implemented on $( [ "$tgt" = arm64 ] && echo arm64 || echo riscv64 )"
+    if ! grep -q "$(printf '\t')tcall " "$s"; then
+      echo "FAIL cross-$tgt: $(basename "$s") contains no tcall — the IL is target-neutral again, so this row's premise (and its assertion) must be re-derived, not left green on a stale claim"
+      FAIL=1; ok=0
+      continue
+    fi
+    if "$ROOT/vendor/qbe/qbe" -t "$tgt" "$s" > /dev/null 2>"$TMP/xtgt.err"; then
+      echo "FAIL cross-$tgt: vendored qbe -t $tgt ACCEPTED $(basename "$s") — a tcall it does not implement was silently accepted"
+      FAIL=1; ok=0
+    elif ! grep -qF "$want" "$TMP/xtgt.err"; then
+      echo "FAIL cross-$tgt: vendored qbe -t $tgt rejected $(basename "$s") for a reason OTHER than the unimplemented tcall: $(head -c 120 "$TMP/xtgt.err")"
       FAIL=1; ok=0
     fi
   done
   if [ "$ok" = 1 ]; then
-    echo "PASS cross-$tgt: fib.ssa and float.ssa compile under qbe -t $tgt (the IL is target-neutral)"
+    echo "PASS cross-$tgt: fib.ssa and float.ssa are refused by qbe -t $tgt ONLY by the unimplemented tcall (the rest of the IL stays target-neutral)"
   fi
 done
 
@@ -3018,9 +3048,9 @@ run_midshape ffim-mem FfimMain.main tools/qbe/fixtures/ffim-mem.elm tools/qbe/fi
 # Rt.apply-at is the one Mid applier (closure + a rooted raw arg array ->
 # Rt.callArity).  Its FIRST caller is the new Mid effect host, and the failure
 # this row exists to catch is SILENT: the two neighbours of the right entry are
-# traps (Rt.apply/Rt.applyGo return an UNFORCED `:ret` tail, i.e. a heap
-# address where a value belongs; and a Disp arity of `arity - rem` passes zero
-# arguments), and neither is a crash.  So the oracle is a NUMBER: 417 =
+# traps (the WRONG SEAT — pre-U3a Rt.applyGo handed back an unforced `:ret`
+# tail, i.e. a heap address where a value belongs; and a Disp arity of
+# `arity - rem` passes zero arguments), and neither is a crash.  So the oracle is a NUMBER: 417 =
 # upd(msg 7, model 41) from a GLOBAL closure, 503 = a CAPTURING closure applied
 # to 3, and the row's own churn arm (run_mid re-runs at QBE_HEAP_MB=$CHURN_MB)
 # is the rooting half — the .mid churns 20 000 allocations between filling the

@@ -1787,6 +1787,27 @@ rawAbi =
           -- record is what checks every call site's 3 words.
           "Rt.vecStorePlain"
         , "Rt.vecStoreYoung"
+        , -- ===== U3a's TAIL LOOP.  Rt.applyTailGo was a lean `:val` defun with
+          -- TWO `val` parameters (state, f) until the apply chain's hops became
+          -- `tcall`s: J16 refuses a `val` parameter on a TailDefun, because a
+          -- val crosses a tcall as a pointer into the caller's frame and the
+          -- tcall tears that frame down.  So the loop's parameters are WORDS —
+          -- (state, fslot), where fslot is the address of the 40-byte cell
+          -- holding the current closure — and the signature (word, word) ->
+          -- val lands on the word side by OVERRIDE, exactly the shape
+          -- Rt.globalClosure below has.
+          --
+          -- WHY A FRAME-FREE rawAbi BODY IS SOUND HERE (the design's stated
+          -- reason for keeping the loop lean): the loop-carried closure must be
+          -- GC-scanned across the hops' safepoints, and it IS — cell 0 of the
+          -- staged block is inside the kind-2 registration Rt.apply-tail
+          -- pushes (`live = nargs + 1` from the block base), so the collector
+          -- rewrites it in place.  The defun's own `val f = vecload(fslot, 0)`
+          -- is a per-iteration READ, never live across a safepoint (the
+          -- saturated arm is alloc-free, the over arm's `rt_call2r` hop
+          -- re-reads it through `recur`, and the partial arm passes it to
+          -- Rt.applyPartGo BEFORE that call allocates).
+          "Rt.applyTailGo"
         , -- ===== zighost Z3's CLOSURE CACHE.  Its signature is (word) -> val,
           -- so the B6 signature rule would put it on the VALUE side; this
           -- override is load-bearing (that is the override's whole purpose),
@@ -1865,6 +1886,10 @@ rawAbiArity =
           -- lowerDefun both check this against the actual param count.
         ( "Rt.apply", 3 )
         , ( "Rt.apply-tail", 3 )
+        , -- U3a: the apply TAIL LOOP takes (state, fslot) — the ApplyState
+          -- pointer and the address of the closure cell — both words, which is
+          -- what makes it a legal `tcall` target (J16).
+          ( "Rt.applyTailGo", 2 )
         , -- ZIGHOST Z1: the root registry's eight word-ABI defuns.
           ( "Rt.rootGrow", 0 )
         , ( "Rt.rootPush", 3 )

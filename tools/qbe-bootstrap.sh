@@ -265,7 +265,13 @@ t4=$(now)
 # The trailing `\(` anchors the pattern: without it `rt_call2r` (the two-range
 # bridge, NOT an arity entry) matches as `rt_call2` and the count is off by one
 # — MEASURED on the first run of this check.
-expect_n="$(grep -cE '^export function :ret \$rt_call[0-9]+\(' "$SEED" || true)"
+# U3a: the arity entries' RESULT CLASS is the closure ABI's, and it moved from
+# `:ret` to `:val` with the apply-chain conversion — so the pattern is
+# class-agnostic.  The claim here is the COUNT ("the seed declares and the
+# binary defines the same number of rt_callN symbols"), which the class does
+# not touch; pinning the old spelling made this check die on the first seed
+# regenerated after the flip.
+expect_n="$(grep -cE '^export function :(ret|val) \$rt_call[0-9]+\(' "$SEED" || true)"
 if command -v nm >/dev/null 2>&1; then
   have_n="$(nm "$BIN" 2>/dev/null | grep -cE ' T rt_call[0-9]+$' || true)"
   say "qbe-bootstrap: rt_callN table — the seed exports $expect_n, the linked compiler defines $have_n"

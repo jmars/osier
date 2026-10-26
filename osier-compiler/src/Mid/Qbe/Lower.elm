@@ -272,9 +272,24 @@ rawAbiRetClass key =
         Agg "val"
 
     else if key == "Rt.apply-tail" then
-        -- stage 6 B1: Rt.apply-tail returns the 80-byte `:ret` (`.done`
-        -- value | `.tail` request) through sret — rt_apply_tail's C ABI.
-        Agg "ret"
+        -- U3a: `:val` (40 B).  It used to be the 80-byte `:ret` because its
+        -- body handed a `.tail` request upward for Rt.bounce to chase.  It now
+        -- `tcall`s Rt.applyTailGo, which returns the finished Value — and
+        -- abi1's C4 demands the tcall's class EQUAL the enclosing body's, so
+        -- the two flips are one fact.  (The `:ret` TYPE stays in RtLayout:
+        -- Rt.tail-known and Rt.bounce still COMPILE, they are merely
+        -- caller-less now — their deletion is U3b.)
+        Agg "val"
+
+    else if key == "Rt.applyTailGo" then
+        -- U3a: the generic-apply TAIL LOOP.  A `:val` result (the finished
+        -- value, or the partially-applied closure) through sret, and — the
+        -- part that matters — WORD-class parameters, because it is the target
+        -- of `Rt.apply-tail`'s `tcall` and J16 refuses a val parameter on a
+        -- TailDefun.  Declared rawAbi for exactly that reason (Mid.Rt.rawAbi),
+        -- the same override shape Rt.globalClosure has: an all-word parameter
+        -- list with an aggregate result.
+        Agg "val"
 
     else if key == "Rt.tail-known" then
         -- stage 6 B2: Rt.tail-known returns the 80-byte `:ret` (the .tail
@@ -361,19 +376,6 @@ rawAbiArityAgree key actual =
 
         Nothing ->
             Err ("qbe: rawAbi key " ++ key ++ " has no Mid.Rt.rawAbiArity entry — the record must cover every rawAbi key")
-
-
-{-| stage 6 B2: the bounce seat's symbol.  Under QBE_MIDDRIVER=1 every `rt_bounce`
-emission site retargets to the Mid rawAbi defun q_Rt_x2ebounce — the SAME
-`Agg "val"` (40-byte `.done` Value) result and a single `Base L` :ret-pointer
-arg, a pure symbol swap.  The default (Zig) seat stays `rt_bounce`.  ONE
-helper for ALL THREE sites (directCall's non-tail arm, the RawCall fat
-QBE_NORTLEAN route, the rtPrimSlots fat QBE_NORTLEAN route) so a missed site
-cannot drift from the other two.
--}
-bounceSeat : S -> String
-bounceSeat _ =
-    "q_" ++ mangle "Rt.bounce"
 
 
 emit : Il.Inst -> S -> S
@@ -546,6 +548,34 @@ wordArm s =
 wordArmLayout : RtLayout.ValLayout -> Bool
 wordArmLayout layout =
     layout == RtLayout.wordLayout
+
+
+{-| U3a — the CLOSURE ABI's return class, in ONE place: `lowerFunBody`'s ret
+type, `directCall`'s `tcall` annotation, and `directCall`'s ordinary-call
+result class all read it, so the three cannot disagree (a disagreement is a
+C4 err() at assembly or, worse, an 80-vs-40-byte blit).
+
+On the VALUE arm it is `:val` (40 B): a surface defun / closure body returns
+the finished Value, because nothing builds a `.tail` request any more.
+
+On the WORD arm it stays `:ret`, and that is a STATED GAP, not a choice:
+AREA 6 is unported, its behaviour probes and text rows pin today's bytes (a
+48-byte `:ret` returned through sret), and re-deriving the apply chain on a
+representation where `:val` is EIGHT bytes — i.e. an aggregate the amd64 ABI
+passes in a register — is AREA 6's work.  Consequence, named rather than
+hidden: a word-arm program that reaches the apply chain now emits
+`rt_callN`'s `:val` against a `:ret` closure and aborts at ASSEMBLY (loud),
+where it used to emit and die at run time on Rt.main's first call.  No gate
+assembles a word-arm program — the probes emit single defuns — so nothing
+here is exercised by one.
+-}
+closureRetClass : S -> AbiTy
+closureRetClass s =
+    if wordArm s then
+        Agg "ret"
+
+    else
+        Agg "val"
 
 
 {-| THE PER-DEFUN PRE-WALK CLASSIFIER (perf VR3b2) — which Mid.Ir constructs
@@ -2489,12 +2519,16 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , noCollect = sOuter.noCollect
             , leafFree = sOuter.leafFree
             , -- Q1b: a `tcall` is legal exactly where OUR OWN return convention is
-              -- the one the callee must produce into: the 80-byte `:ret` that
-              -- abi1 forwards as the hidden sret pointer.  That is RtGeneric —
-              -- every surface defun and every closure body — and nothing else:
-              -- a lean body returns `:val`, a rawAbi word body a word, and a
-              -- tcall from either is refused by the backend's C4 check (loudly,
-              -- naming the condition), so Mid must not emit one there.
+              -- the one the callee must produce into — abi1 forwards OUR hidden
+              -- sret pointer to the callee and C4 re-checks that the two
+              -- classes agree.  That is RtGeneric — every surface defun and
+              -- every closure body — and nothing else: a lean body returns
+              -- `:val`, a rawAbi word body a word, and a tcall from either is
+              -- refused by the backend's C4 check (loudly, naming the
+              -- condition), so Mid must not emit one there.
+              --
+              -- U3a moved the CLASS, not this rule: an RtGeneric body's return
+              -- is now `:val` (see retTy), so its tcalls are `tcall :val`.
               tailEmit = rt == RtGeneric
             , -- U1: the frame CLASS, as `proKind` below decides it — the one
               -- fact `lowerRawTailCall`'s frame-leave guard needs.  Spelled as
@@ -2532,7 +2566,21 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                     rawAbiRetClass key
 
                 RtGeneric ->
-                    Agg "ret"
+                    -- U3a — THE CLASS FLIP.  A surface defun / closure body
+                    -- used to return the 80-byte `:ret` (`.done` | `.tail`),
+                    -- because a tail call could only be expressed by RETURNING
+                    -- a request for Rt.bounce to chase.  Nothing builds a
+                    -- `.tail` any more (the apply chain `tcall`s, the static
+                    -- arity-5+ sites went non-tail, Rt.bounce is caller-less),
+                    -- so the closure ABI returns the finished Value: 40 bytes,
+                    -- `:val`.  That is what makes the F-site `tcall :val` into
+                    -- Rt.apply-tail legal at abi1's C4 (the callee's class must
+                    -- equal the enclosing body's).
+                    --
+                    -- The `@ret` block needs no change: an aggregate return is
+                    -- "ret the ADDRESS of the block in slot 0" either way, so
+                    -- only the declared TYPE and its width move.
+                    closureRetClass sOuter
 
         paramsList =
             case rt of
@@ -3558,15 +3606,14 @@ lowerRawVal node dest s =
                                 let
                                     ( rp, s2 ) =
                                         freshTmp s1
-
-                                    ( vp, s3 ) =
-                                        freshTmp s2
                                 in
+                                -- U3a: the generic-ABI callee returns the
+                                -- finished `:val` (no `.done`/`.tail` pair to
+                                -- unwrap), so there is no bounce here either —
+                                -- the same flip as directCall's non-tail arm.
                                 Ok
-                                    (s3
-                                        |> emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle call.sym)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots))
-                                        |> emit (Call (Just vp) (Agg "val") (Il.Sym (bounceSeat s)) [ ArgVal (Base L) (Il.Tmp rp) ])
-                                        |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
+                                    (emit (Call (Just rp) (Agg "val") (Il.Sym ("q_" ++ mangle call.sym)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots)) s2
+                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
                                     )
                         )
 
@@ -7232,30 +7279,41 @@ stageSlots slots s =
     )
 
 
--- Direct saturated call to a known defun.  NON-TAIL: `%r =:ret call q_<key>`
--- then `rt_bounce(l %r)` chases any .tail the callee returned up to a .done
--- value (constant native stack across the tail chain).  TAIL (cross-defun):
--- `rt_tail_known(code, argblock, nargs)` builds a .tail whose args live in a
--- fresh GC array (surviving our rt_frame_leave) and returns the :ret, blitted
--- into the return area (slot 0) for the @ret block to hand upward.
+{-| U3a: an ORDINARY call reached from a TAIL position still has to close the
+block.  Before this unit the non-tail lowering was unreachable in tail position
+(the tcall arm and the tail-known arm both terminated), so `lowerTail`'s App arm
+could hand the block straight to `@ret`; with the arity-5+ sites going non-tail
+the value is blitted into slot 0 and the block must `jmp @ret` itself.  MEASURED
+as the bug that made the first cut emit a function with no `@body` at all (a
+qbe `block @body is used undefined`) — an unterminated block is DROPPED, not
+an error.
+-}
+tailClose : Bool -> S -> S
+tailClose isTail s =
+    if isTail then
+        jumpTo "ret" s
+
+    else
+        s
+
+
+-- Direct saturated call to a known defun.  TWO lowerings, a STATIC choice:
+--
+--   * TAIL within the tcall budget (arity <= maxTailCallArgs): a real `tcall`
+--     after Rt.stage-tail + rt_frame_leave.  The callee returns straight to
+--     OUR caller, so the chain is constant-stack.
+--   * everything else (non-tail, arity over the budget, or a body class that
+--     cannot carry a `tcall`): an ordinary `call`.  U3a deleted the third
+--     answer — `Rt.tail-known` building a `.tail` request for Rt.bounce to
+--     chase — because nothing builds a `.tail` any more; the 240 arity-5+
+--     sites keep a correct, rlimit-bounded, growing lowering (one frame per
+--     hop, the design's priced 95%/240 split), and the non-tail call returns
+--     the finished Value with NO bounce.
 directCall : String -> List Exp -> Int -> Bool -> S -> Result String S
 directCall key args dest isTail s =
-    let
-        -- stage 6 B2: the tail-known seat retargets to the Mid rawAbi defun
-        -- (the SAME `:ret` aggregate result shape, a symbol swap, and the
-        -- nargs ARG CLASS is Base L — the rawAbi defun's params are `l`
-        -- registers, and QBE subtyping is `l`->`w` only, so a `w` arg to an
-        -- `l` param is a usecheck failure, the rtApply precedent).  B4 deleted
-        -- the Zig rt_tail_known seat, so this is unconditional.
-        ( tailCallee, nargsTy ) =
-            ( "q_" ++ mangle "Rt.tail-known", Base L )
-
-        bounceCallee =
-            bounceSeat s
-    in
     if isTail && s.tailEmit && List.length args <= maxTailCallArgs then
         -- ================= Q1b: A REAL TAIL CALL =================
-        -- `tcall :ret $q_F(l %b0, ..., l %bN)` — the callee returns straight
+        -- `tcall :val $q_F(l %b0, ..., l %bN)` — the callee returns straight
         -- to OUR caller (abi1 forwards fn->retr as its hidden sret argument,
         -- which is why C4 demands the callee's return class equal ours).
         --
@@ -7315,7 +7373,7 @@ directCall key args dest isTail s =
                                         |> emit (Call Nothing (Base W) (Il.Sym ("q_" ++ mangle "Rt.frame-leave")) [])
                                         |> emit
                                             (TailCall
-                                                (Agg "ret")
+                                                (closureRetClass s)
                                                 (Il.Sym ("q_" ++ mangle key))
                                                 (List.map (\( ptmp, _ ) -> ArgVal (Base L) (Il.Tmp ptmp)) argPtrs)
                                             )
@@ -7324,41 +7382,22 @@ directCall key args dest isTail s =
                             )
                 )
 
-    else if isTail then
-        -- TAIL: rt_tail-known takes ONE contiguous argblock pointer + nargs, so
-        -- the staged block stays (the callee copies out of it at entry — the
-        -- argblock itself dies with the GC array Rt.tail-known builds).
-        stageArgs args s
-            |> Result.andThen
-                (\( _, base, s1 ) ->
-                    let
-                        ( rp, s2 ) =
-                            freshTmp s1
-                    in
-                    rawAbiArityAgree "Rt.tail-known" 3
-                        |> Result.andThen
-                            (\_ ->
-                                Ok
-                                    (emit
-                                        (Call (Just rp)
-                                            (Agg "ret")
-                                            (Il.Sym tailCallee)
-                                            [ ArgVal (Base L) (Il.Sym ("q_" ++ mangle key))
-                                            , ArgVal (Base L) (Il.Tmp (slotTmp base))
-                                            , ArgVal nargsTy (Il.Con (List.length args))
-                                            ]
-                                        )
-                                        s2
-                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp 0)) (RtLayout.retSizeBytes s2.layout))
-                                        |> jumpTo "ret"
-                                    )
-                            )
-                )
-
     else
-        -- NON-TAIL: VR1 — each arg crosses as an `l` POINTER to the rooted
-        -- frame slot it was just lowered into.  The contiguous staging block
-        -- (and the 40-byte copy into it) is gone: the slot IS the argument.
+        -- NON-TAIL — and, since U3a, ALSO the arity-5+ STATIC TAIL site: a
+        -- tcall's register budget is four (rdi is spent on the hidden sret
+        -- pointer, rax on a closure's env), and the old answer for the 240
+        -- sites over that budget was `Rt.tail-known` — build a `.tail`
+        -- request, blit it into the return area, and let Rt.bounce chase it.
+        -- Nothing builds a `.tail` any more, so those sites take the ordinary
+        -- call: a CORRECT, rlimit-bounded, growing lowering (the design's
+        -- 95%/240 split, unchanged), one frame per hop instead of none.
+        -- Rt.tail-known is now CALLER-LESS; its deletion is U3b's.
+        --
+        -- VR1 — each arg crosses as an `l` POINTER to the rooted frame slot it
+        -- was just lowered into.  The contiguous staging block (and the
+        -- 40-byte copy into it) is gone: the slot IS the argument.  U3a: the
+        -- callee returns the finished 40-byte Value (a surface defun's body is
+        -- `:val` now), so there is no `.done` to unwrap and NO BOUNCE.
         lowerArgsToSlots args s
             |> Result.andThen
                 (\( slots, s1 ) ->
@@ -7368,16 +7407,28 @@ directCall key args dest isTail s =
 
                         ( vp, s3 ) =
                             freshTmp s2
+
+                        -- The WORD ARM still speaks `:ret` here (see
+                        -- `closureRetClass`), so its call keeps the old shape:
+                        -- ask for 80 bytes and BOUNCE whatever `.tail` the
+                        -- callee asked us to chase.  On the value arm the
+                        -- callee hands back the finished Value and there is
+                        -- nothing to bounce.
+                        wordArmCall =
+                            wordArm s
                     in
-                    rawAbiArityAgree "Rt.bounce" 1
-                        |> Result.andThen
-                            (\_ ->
-                                Ok
-                                    (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots)) s3
-                                        |> emit (Call (Just vp) (Agg "val") (Il.Sym bounceCallee) [ ArgVal (Base L) (Il.Tmp rp) ])
-                                        |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
-                                    )
-                            )
+                    Ok
+                        (if wordArmCall then
+                            emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots)) s2
+                                |> emit (Call (Just vp) (Agg "val") (Il.Sym ("q_" ++ mangle "Rt.bounce")) [ ArgVal (Base L) (Il.Tmp rp) ])
+                                |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
+                                |> tailClose isTail
+
+                         else
+                            emit (Call (Just rp) (Agg "val") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots)) s2
+                                |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
+                                |> tailClose isTail
+                        )
                 )
 
 
@@ -7432,18 +7483,19 @@ rtApply fslotTmp args dest isTail s =
                     |> Result.andThen
                         (\_ ->
                             if isTail && s.tailEmit then
-                                -- ================= U2: A REAL TAIL CALL =================
-                                -- `tcall :ret $q_Rt.apply-tail(l %buf, l %b0, l %b1, l n)`
-                                -- — the generic-apply tail site now RETURNS THROUGH
+                                -- ============ U2/U3a: A REAL TAIL CALL ============
+                                -- `tcall :val $q_Rt.apply-tail(l %buf, l %b0, l %b1, l n)`
+                                -- — the generic-apply tail site RETURNS THROUGH
                                 -- US instead of nesting two frames per hop.
                                 --
                                 -- LEGAL ONLY BECAUSE THE CLASSES MATCH: `Rt.apply-tail`
-                                -- is `rawAbiRetClass` Agg "ret" (80 B) and so is the
+                                -- is `rawAbiRetClass` Agg "val" (40 B) and so is the
                                 -- enclosing RtGeneric body (`s.tailEmit` is TRUE
-                                -- exactly there) — abi1's C4.  The NEXT hop
-                                -- (apply-tail -> applyTailGo, `:ret` vs lean `:val`)
-                                -- does NOT match and is U3a's class flip; do not
-                                -- widen this arm to it.
+                                -- exactly there) — abi1's C4.  U2 emitted `:ret`
+                                -- here because the body's class WAS `:ret`; U3a's
+                                -- flip moved both together, which is the only way
+                                -- the next hop (apply-tail -> applyTailGo) could
+                                -- become a tcall as well.
                                 --
                                 -- THE SEQUENCE, in emission order (the Mid
                                 -- convention, and the reason each step exists):
@@ -7453,13 +7505,17 @@ rtApply fslotTmp args dest isTail s =
                                 --      lowering may call — safepoints — and only
                                 --      slots survive those).
                                 --   2. Rt.stage-apply: copy the closure CELL and
-                                --      that block into ONE GC block shaped
-                                --      [closure, arg0..argN].  It SURVIVES our
+                                --      that block into ONE C-HEAP (malloc'd) block
+                                --      shaped [closure, arg0..argN].  It SURVIVES our
                                 --      rt_frame_leave (our pooled frame goes back
                                 --      to the pool and the callee's frame-enter
                                 --      may pop and MEMSET it).  NEVER the shared
                                 --      tsbuf — an over-applied chain can hold two
-                                --      staged blocks at once (see the seat).
+                                --      staged blocks at once (see the seat).  NOT
+                                --      the GC nursery either: the block must
+                                --      survive the applied callee's whole body,
+                                --      whose allocation volume is user-controlled
+                                --      (the lapprobe row; U2's fix).
                                 --   3. %b<i> = %buf + 40*i — the two argument
                                 --      pointers Rt.apply-tail takes as
                                 --      (fslot, args) = (buf, buf + 40).
@@ -10628,14 +10684,12 @@ rtPrimSlots prim slots dest s =
                 let
                     ( rp, s1 ) =
                         freshTmp s
-
-                    ( vp, s2 ) =
-                        freshTmp s1
                 in
+                -- U3a: same flip as the RawCall arm above — a generic-ABI
+                -- callee returns the finished `:val`.
                 Ok
-                    (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots)) s2
-                        |> emit (Call (Just vp) (Agg "val") (Il.Sym (bounceSeat s)) [ ArgVal (Base L) (Il.Tmp rp) ])
-                        |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
+                    (emit (Call (Just rp) (Agg "val") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots)) s1
+                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
                     )
 
         ( True, Err msg ) ->
@@ -11411,14 +11465,20 @@ rtCallFuncs layout =
             in
             { name = "rt_call" ++ String.fromInt n
             , export_ = True
-            , ret = Agg "ret"
+            -- U3a: the closure ABI returns the finished 40-byte Value, so
+            -- this bridge FORWARDS it — `:val` in, `:val` out, one blit — and
+            -- there is nothing left to bounce.  It deliberately does NOT
+            -- become a `tcall`: its only growing-stack consumer was
+            -- Rt.bounceGo (deleted with the trampoline), and every remaining
+            -- caller READS the returned value.
+            , ret = Agg "val"
             , envParam = False
             , params = params
             , blocks =
                 [ { label = "start"
                   , body =
                         loadArgs
-                            ++ [ Call (Just "r") (Agg "ret") (Il.Tmp "fn") callArgs ]
+                            ++ [ Call (Just "r") (Agg "val") (Il.Tmp "fn") callArgs ]
                   , jump = Ret (Just (Il.Tmp "r"))
                   }
                 ]
@@ -11463,6 +11523,42 @@ rtCallTwoRange layout =
 
         arityBlock : Int -> Block
         arityBlock n =
+            let
+                callArgs =
+                    ArgEnv (Il.Tmp "e")
+                        :: List.map
+                            (\i ->
+                                ArgVal (Base L)
+                                    (Il.Tmp
+                                        (if wordArmLayout layout then
+                                            "pv" ++ String.fromInt i
+
+                                         else
+                                            "p" ++ String.fromInt i
+                                        )
+                                    )
+                            )
+                            (List.range 0 (n - 1))
+
+                -- U3a — THE TCALL, and its budget.  The callee is the closure's
+                -- code pointer and it now returns the finished `:val` (the
+                -- closure ABI flipped), so this hop can JUMP: `rt_call2r`'s
+                -- frame is reused by the callee instead of stacking under it.
+                -- The budget is the same one `maxTailCallArgs` states for the
+                -- DSL — rdi is spent on the hidden sret pointer and rax on the
+                -- closure env, leaving four integer registers for params plus
+                -- the sret/env pair.  Arity 5+ keeps the ordinary call: the
+                -- callee then returns THROUGH this frame to this frame's
+                -- caller — a CONSTANT +1 per such hop, not growth (this func
+                -- was itself tcall'd into, so its frame is the loop's slot).
+                --
+                -- NOT under the word arm: there `:val` is 8 bytes, i.e. an
+                -- aggregate the amd64 ABI passes in a register, and the tcall's
+                -- class/`aggsize` rules would have to be re-measured.  AREA 6
+                -- owns that; the word arm keeps the ordinary call and its wall.
+                canTail =
+                    not (wordArmLayout layout) && n <= maxTailCallArgs
+            in
             { label = "arity" ++ String.fromInt n
             , body =
                 List.concatMap paramPtr (List.range 0 (n - 1))
@@ -11472,24 +11568,18 @@ rtCallTwoRange layout =
                         else
                             []
                        )
-                    ++ [ Call (Just "r") (Agg "ret") (Il.Tmp "code")
-                            (ArgEnv (Il.Tmp "e")
-                                :: List.map
-                                    (\i ->
-                                        ArgVal (Base L)
-                                            (Il.Tmp
-                                                (if wordArmLayout layout then
-                                                    "pv" ++ String.fromInt i
+                    ++ [ if canTail then
+                            TailCall (Agg "val") (Il.Tmp "code") callArgs
 
-                                                 else
-                                                    "p" ++ String.fromInt i
-                                                )
-                                            )
-                                    )
-                                    (List.range 0 (n - 1))
-                            )
+                         else
+                            Call (Just "r") (Agg "val") (Il.Tmp "code") callArgs
                        ]
-            , jump = Ret (Just (Il.Tmp "r"))
+            , jump =
+                if canTail then
+                    Ret Nothing
+
+                else
+                    Ret (Just (Il.Tmp "r"))
             }
 
         -- @c{k}: arity == k ? arity{k} : next.  k runs 1..maxArity-1; the last
@@ -11527,7 +11617,8 @@ rtCallTwoRange layout =
     in
     { name = "rt_call2r"
     , export_ = True
-    , ret = Agg "ret"
+    -- U3a: `:val` out — the callee returns the finished Value.
+    , ret = Agg "val"
     , envParam = False
     , params =
         [ ( "code", Base L )

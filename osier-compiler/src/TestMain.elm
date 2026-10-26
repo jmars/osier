@@ -1242,7 +1242,7 @@ checks rt rawMidText =
     -- shapes are pinned, not just "it links".
     , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main + the B0 frame pair + stage 7A's die family (dieErr/hostDieErr — hostDieUnported left BOTH the family and the runtime at 7E, the unit that gave every Task ctor a real arm) are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo/frame set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set; the frame pair is FRAME-FREE by construction — its only nodes are rawcall/raw-word loads/stores and rawAbi->rawAbi calls to its one non-allocating helper)"
         (Rt.rawAbi
-            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.tail-known", "Rt.stage-tail", "Rt.stage-apply", "Rt.bounce", "Rt.dieErr", "Rt.hostDieErr", "Rt.rootGrow", "Rt.rootPush", "Rt.rootPushPtr", "Rt.rootPushValue", "Rt.rootPushValueArray", "Rt.rootPop", "Rt.rootWatermark", "Rt.rootPopTo", "Rt.vecStorePlain", "Rt.vecStoreYoung", "Rt.globalClosure" ]
+            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.tail-known", "Rt.stage-tail", "Rt.stage-apply", "Rt.applyTailGo", "Rt.bounce", "Rt.dieErr", "Rt.hostDieErr", "Rt.rootGrow", "Rt.rootPush", "Rt.rootPushPtr", "Rt.rootPushValue", "Rt.rootPushValueArray", "Rt.rootPop", "Rt.rootWatermark", "Rt.rootPopTo", "Rt.vecStorePlain", "Rt.vecStoreYoung", "Rt.globalClosure" ]
             && not (Set.member "Rt.die" rt.allocating)
             && not (Set.member "Rt.halt" rt.allocating)
             && not (Set.member "Rt.cStrEq" rt.allocating)
@@ -1259,6 +1259,12 @@ checks rt rawMidText =
             && Set.member "Rt.apply" rt.allocating
             && Set.member "Rt.apply-tail" rt.allocating
             && Set.member "Rt.applyGo" rt.allocating
+            -- U3a: Rt.applyTailGo is the TAIL loop and it is rawAbi now (a
+            -- tcall target must have word-class parameters), so it is
+            -- FRAME-FREE — the rawAbi arm wins the frame decision before
+            -- `allocating` is consulted, exactly as for Rt.tail-known.  It
+            -- still reaches a safepoint (the saturated arm's arg allocvec), so
+            -- the classifier marks it allocating; the two facts coexist.
             && Set.member "Rt.applyTailGo" rt.allocating
             -- Rt.callArity is CONSERVATIVELY allocating (RawCallAgg is
             -- deny-by-default: the callee is unknown generated code) even
@@ -1878,9 +1884,9 @@ checks rt rawMidText =
                     vTxt =
                         Print.print valMod
                 in
-                String.contains "\t%va0 =l loadl %a0\n\t%r =:ret call %fn(env %e, l %va0)\n" wTxt
+                String.contains "\t%va0 =l loadl %a0\n\t%r =:val call %fn(env %e, l %va0)\n" wTxt
                     && String.contains "\t%pv0 =l loadl %p0\n" wTxt
-                    && String.contains "\t%r =:ret call %fn(env %e, l %a0)\n" vTxt
+                    && String.contains "\t%r =:val call %fn(env %e, l %a0)\n" vTxt
                     && not (String.contains "%va0" vTxt)
                     && not (String.contains "%pv0" vTxt)
 
@@ -2415,7 +2421,7 @@ checks rt rawMidText =
             Err _ ->
                 False
         )
-    , check "A4a MIDDRIVER emission — the 17-arm entry dispatch: $main calls the rt_callN dispatchers by NAME (aggcall ret rawsym) and q_Rt_x2ebounce (aggcall val, the stage-6 B2 Mid bounce — the driver's entry chase routes through the MID trampoline, not the Zig rt_bounce seat) — the RawCallAgg named-symbol shape, not a call into data"
+    , check "A4a MIDDRIVER emission — the 17-arm entry dispatch: $main calls the rt_callN dispatchers by NAME (aggcall val rawsym) and NO LONGER bounces them — U3a's class flip made every closure call return the finished Value, so the driver's entry chase has no trampoline to route through — the RawCallAgg named-symbol shape, not a call into data.  The q_Rt_x2ebounce NEGATIVE is the assertion: the trampoline is still in the tree (U3b deletes it) and this row is what keeps it off the entry path"
         (case QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 case funcByName "main" mod of
@@ -2423,7 +2429,7 @@ checks rt rawMidText =
                         callsSym "rt_call1" f
                             && callsSym "rt_call9" f
                             && callsSym "rt_call16" f
-                            && callsSym "q_Rt_x2ebounce" f
+                            && not (callsSym "q_Rt_x2ebounce" f)
                             && not (callsSym "rt_bounce" f)
 
                     Nothing ->
@@ -2791,7 +2797,7 @@ checks rt rawMidText =
     -- (RawCallAgg denies by default); Rt.copyWords is frame-free (raw
     -- word loads/stores only).  The dispatch reaches rt_callN/rt_bounce by
     -- NAME — the same corpus-proven shape the driver's saturated arm uses.
-    , check "B1 Rt.apply emission: Agg-val ret, 3 l params, frame-free alloc8, hands off to the val loop q_Rt_x2eapplyGo"
+    , check "B1/U3a Rt.apply + Rt.apply-tail emission: BOTH are Agg-val ret with 3 l params and a frame-free alloc8; Rt.apply CALLS the val loop q_Rt_x2eapplyGo (an ordinary call — its caller's frame stays live), while Rt.apply-tail TAIL-CALLS q_Rt_x2eapplyTailGo (a `tcall`, so its own frame is reused by the loop and a hop costs no stack).  That difference IS the unit: the non-tail wrapper may nest, the tail wrapper may not"
         (case QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "q_Rt_x2eapply" mod of
@@ -2808,10 +2814,11 @@ checks rt rawMidText =
                     && (case funcByName "q_Rt_x2eapply_x2dtail" mod of
                             Just f ->
                                 List.map Tuple.second f.params == [ Il.Base Il.L, Il.Base Il.L, Il.Base Il.L ]
-                                    && f.ret == Il.Agg "ret"
+                                    && f.ret == Il.Agg "val"
                                     && not (callsSym "rt_frame_enter" f)
                                     && frameBaseIsAlloc f
-                                    && callsSym "q_Rt_x2eapplyTailGo" f
+                                    && not (callsSym "q_Rt_x2eapplyTailGo" f)
+                                    && tailCallsSym "q_Rt_x2eapplyTailGo" f
 
                             Nothing ->
                                 False
@@ -2820,7 +2827,7 @@ checks rt rawMidText =
             Err _ ->
                 False
         )
-    , check "B1 loop/helper framing: the loops and the dispatch are FRAMED (they reach a safepoint), copyWords is frame-free, and the dispatch reaches rt_callN/q_Rt_x2ebounce by name (the stage-6 B2 retarget — the apply dispatch routes through the MID bounce, not the Zig rt_bounce seat)"
+    , check "B1/U3a loop/helper framing: Rt.applyGo is FRAMED (it reaches a safepoint and its loop-carried closure must be ROOTED, so it keeps a pooled frame), Rt.applyTailGo is FRAME-FREE (rawAbi: a `tcall` target must have word-class parameters, so the loop carries its closure in the registered staged block instead of a frame slot), copyWords is frame-free, and the dispatch reaches rt_callN by name with NO bounce (U3a de-bounced Rt.callArity; the trampoline is off every path)"
         (case QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.main" of
             Ok mod ->
                 (case funcByName "q_Rt_x2eapplyGo" mod of
@@ -2832,14 +2839,15 @@ checks rt rawMidText =
                 )
                     && (case funcByName "q_Rt_x2eapplyTailGo" mod of
                             Just f ->
-                                callsSym "q_Rt_x2eframe_x2denter" f
+                                -- FRAME-FREE: an alloc8 base and NO frame-enter.
+                                frameBaseIsAlloc f && not (callsSym "q_Rt_x2eframe_x2denter" f)
 
                             Nothing ->
                                 False
                        )
                     && (case funcByName "q_Rt_x2ecallArity" mod of
                             Just f ->
-                                callsSym "rt_call16" f && callsSym "q_Rt_x2ebounce" f && not (callsSym "rt_bounce" f)
+                                callsSym "rt_call16" f && not (callsSym "q_Rt_x2ebounce" f) && not (callsSym "rt_bounce" f)
 
                             Nothing ->
                                 False
@@ -5281,7 +5289,7 @@ checks rt rawMidText =
             && String.contains "val p = call Rt.applyPartGo(mknum(sp), cN);" body
             && String.contains "val f2 = call Rt.apply-at(cN, bufN, mknum(rem));" body
             && String.contains "recur(f2, mknum(buf + rem * 40), mknum(nargs - rem));" body
-            && String.contains "aggcall ret rawsym(\"rt_call2r\")(wload(code, 0), env, napp, buf, rem);" body
+            && String.contains "aggcall val rawsym(\"rt_call2r\")(wload(code, 0), env, napp, buf, rem);" body
             && String.contains "more arguments than an already fully applied closure" body
         )
     , check "7O3F APPLIER PIN (no silent case): the saturated arm's missing-env guard keeps the RUNTIME's message (`qbe-rt: closure env missing for applied args`) — one condition, one string, the same one applyGo's saturated arm raises — so a half-applied closure with no env still dies BY NAME on the host route instead of reading a garbage capture"
@@ -6548,7 +6556,7 @@ checks rt rawMidText =
             Err _ ->
                 False
         )
-    , check "M3fix-4 (a) EMIT: a user .mid `call` to ANOTHER user module's exported defun is accepted and emitted — the callee joins the reachable set (its RawCall edge) and the call uses the CALLEE's ABI (RtGeneric: :ret/rt_bounce), never the lean Rt shape"
+    , check "M3fix-4 (a) EMIT: a user .mid `call` to ANOTHER user module's exported defun is accepted and emitted — the callee joins the reachable set (its RawCall edge) and the call uses the CALLEE's ABI (RtGeneric: :val since U3a's class flip, and before it :ret/rt_bounce), never the lean Rt shape"
         (case QbeModule.loadUserMids rt
             [ "module A\nexport A.f : val -> val\ndefun A.f(a: val) -> val {\n  return call B.g(a);\n}"
             , "module B\nexport B.g : val -> val\ndefun B.g(a: val) -> val {\n  return mknum(payload(a, 0) + 5);\n}"
@@ -6564,8 +6572,8 @@ checks rt rawMidText =
                         -- the lean 4-arg shape against a 1-:val-param callee is
                         -- the ABI clash MEASURED as a SEGFAULT in the first cut
                         -- of this fix (the shape is keyed on the CALLEE).
-                        String.contains ":ret call $q_B_x2eg" ssa
-                            && not (String.contains ":val call $q_B_x2eg" ssa)
+                        String.contains ":val call $q_B_x2eg" ssa
+                            && not (String.contains ":ret call $q_B_x2eg" ssa)
 
                     Err _ ->
                         False
@@ -9817,17 +9825,17 @@ checks rt rawMidText =
         (b6Sig rt "module B6a\ndefun B6a.f(p : *word) -> word {\n  return p[0];\n}"
             == Ok "function l $q_B6a_x2ef(l %a0) {"
         )
-    , check "B6 ABI class (val -> the VALUE ABI): ONE `:val` in the signature (here the parameter) keeps the VALUE ABI — `function :ret` (the 80-byte sret), a frame and the blit.  VR1 changed the PARAMETER's register class: it crosses as an `l` POINTER to the caller's 40-byte Value, not as a by-value `:val` aggregate — the return path (the `:ret` sret) is unchanged"
+    , check "B6 ABI class (val -> the VALUE ABI): ONE `:val` in the signature (here the parameter) keeps the VALUE ABI — `function :val` (the 40-byte sret since U3a's class flip; it was `:ret`, the 80-byte one, while a tail call still returned a `.tail` request), a frame and the blit.  VR1 changed the PARAMETER's register class: it crosses as an `l` POINTER to the caller's 40-byte Value, not as a by-value `:val` aggregate — the return path's SHAPE is unchanged, only its width"
         (b6Sig rt "module B6a\ndefun B6a.f(v : val) -> val {\n  return v;\n}"
-            == Ok "function :ret $q_B6a_x2ef(l %a0) {"
+            == Ok "function :val $q_B6a_x2ef(l %a0) {"
         )
     , check "B6 ABI class (a val RESULT -> the VALUE ABI): the rule is PARAMS **AND** RESULT — a word parameter with a `val` result is still the value ABI (the ret path is the `:val` tail).  VR1: the parameter itself is still a 40-byte Value, so it crosses as an `l` POINTER (the class VR1 gave every value parameter)"
         (b6Sig rt "module B6a\ndefun B6a.f(w : word) -> val {\n  return mknum(1);\n}"
-            == Ok "function :ret $q_B6a_x2ef(l %a0) {"
+            == Ok "function :val $q_B6a_x2ef(l %a0) {"
         )
     , check "B6 ABI class (float -> the VALUE ABI): a `float` is a `d` register class, NOT a word, so it never gets the word ABI (no defun in the tree has a float parameter, so nothing moves).  VR1: the `val`-classed parameter crosses as an `l` POINTER to the boxed 40-byte Value"
         (b6Sig rt "module B6a\ndefun B6a.f(f : float) -> word {\n  return 1;\n}"
-            == Ok "function :ret $q_B6a_x2ef(l %a0) {"
+            == Ok "function :val $q_B6a_x2ef(l %a0) {"
         )
     , check "B6 ABI class (a struct param -> the WORD ABI): a struct VALUE is word-class (its fields are flat words), so `defun f(s : S) -> word` takes the word ABI — MEASURED: ONE `l` register (the address of the caller's storage), which the callee copies at entry"
         (b6Sig rt "module B6a\nstruct S { a : word; }\ndefun B6a.f(s : S) -> word {\n  return s.a;\n}"
@@ -14282,6 +14290,29 @@ callsSym sym f =
                 (\i ->
                     case i of
                         Il.Call _ _ (Il.Sym s) _ ->
+                            s == sym
+
+                        _ ->
+                            False
+                )
+                b.body
+        )
+        f.blocks
+
+
+{-| U3a: does a function's own blocks TAIL-CALL a symbol by name?  The
+sibling of `callsSym` for the one instruction whose whole point is that it is
+NOT a call: a `tcall` leaves the frame, so "the apply chain does not nest" is
+exactly "this hop is a tcall and not a call".
+-}
+tailCallsSym : String -> Il.Func -> Bool
+tailCallsSym sym f =
+    List.any
+        (\b ->
+            List.any
+                (\i ->
+                    case i of
+                        Il.TailCall _ (Il.Sym s) _ ->
                             s == sym
 
                         _ ->
