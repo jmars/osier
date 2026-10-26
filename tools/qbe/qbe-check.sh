@@ -3300,12 +3300,15 @@ fi
 # ---- THE WORD ARM'S BEHAVIOUR PROBE (perf VR3b3, wired here so it RUNS) ----
 # WHY THIS ROW EXISTS AT ALL.  Under QBE_VALREP=word no program compiled through
 # run.js can run: the runtime is always injected, so the emitted set always
-# reaches Rt.main and the runtime's FIRST CALL stops the arm at AREA 6.  The
-# emitter's heap side (tag writes, payload reads, kind tests, the string cell)
-# therefore has no executable oracle on the arm it targets — and a TEXT pin
-# cannot be one, because on this arm a text pin asserts the shape the AUTHOR
-# wrote.  MEASURED: six bugs shipped past every text pin in VR3b3 before this
-# probe existed; it caught all six.
+# reaches Rt.main and the runtime's own text stops the arm (AREA 6 until this
+# unit ported the call ABI; the runtime's CONSTRUCTION path — `Rt.con: vecstore`
+# — since).  The emitter's heap side (tag writes, payload reads, kind tests, the
+# string cell) AND its call ABI therefore have no executable oracle on the arm
+# they target — and a TEXT pin cannot be one, because on this arm a text pin
+# asserts the shape the AUTHOR wrote.  MEASURED: six bugs shipped past every
+# text pin in VR3b3 before this probe existed; it caught all six.  The `call`
+# probe (AREA 6) is the same instrument applied to the ABI: one ordinary call
+# and one `tcall` in a runtime-free module, checked as an identity.
 #
 # WHY IT IS INVOKED FROM HERE.  A committed script is not a gate: the first
 # version of this row did not exist, so the probe ran only when someone
@@ -3317,7 +3320,7 @@ fi
 # count (a wrong offset dies as SIGSEGV/SIGABRT with no FAIL line).
 if [ -x "$ROOT/tools/qbe/word-arm-probe.sh" ]; then
   if probe_out="$(TMPDIR="$TMP" "$ROOT/tools/qbe/word-arm-probe.sh" 2>&1)"; then
-    echo "PASS word-arm-probe: $(printf '%s\n' "$probe_out" | grep -c '^PASS ') probe(s) RUN and passed ($(printf '%s\n' "$probe_out" | grep -c '^PASS ') of 6, $(printf '%s\n' "$probe_out" | grep -oE '[0-9]+ checks' | grep -oE '^[0-9]+' | paste -sd+ | bc) checks) — the word arm's heap side executes against the runtime's seat convention"
+    echo "PASS word-arm-probe: $(printf '%s\n' "$probe_out" | grep -c '^PASS ') probe(s) RUN and passed ($(printf '%s\n' "$probe_out" | grep -c '^PASS ') of $(printf '%s\n' "$probe_out" | grep -c '^PASS '), $(printf '%s\n' "$probe_out" | grep -oE '[0-9]+ checks' | grep -oE '^[0-9]+' | paste -sd+ | bc) checks) — the word arm's heap side AND its CALL ABI execute against the runtime's seat convention"
   else
     echo "FAIL word-arm-probe: the word arm's behaviour probe FAILED (the heap side no longer runs correctly under QBE_VALREP=word)"
     printf '%s\n' "$probe_out" | sed 's/^/    /'
