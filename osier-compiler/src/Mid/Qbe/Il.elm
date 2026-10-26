@@ -17,8 +17,6 @@ module Mid.Qbe.Il exposing
     , DataDef
     , DataItem(..)
     , descType
-    , retType
-    , retTypes
     , valType
     )
 
@@ -62,17 +60,16 @@ type alias Module =
 
 
 -- THE LAYOUT IS DEFINED ONCE, IN Mid.RtLayout (handoff-osier-zigretire-plan
--- STAGE 2); these three type definitions are DERIVED from it — the emitted
--- IL cannot describe a different layout from the one that module states.
+-- STAGE 2); these type definitions are DERIVED from it — the emitted IL
+-- cannot describe a different layout from the one that module states.
 --
 -- `type :val = align 8 { w, l, l, l, l }` — the VM's 40-byte tagged Value
 -- (gc/types.zig: Value = extern struct { tag: ValTag, payload: union }),
 -- ABI-verified against the vendored qbe: aggregate params arrive as
 -- POINTERS, aggregate returns go through sret.
 -- VR3a: the ONE typedef that flips with the representation, so it is built
--- from the layout INSTANCE the module was emitted with.  `:ret`/`:desc` below
--- are NOT Values and stay constants (see Mid.RtLayout's TRAP-3 note; `:ret`'s
--- `retKindOffset` is the coupling VR3b must derive).
+-- from the layout INSTANCE the module was emitted with.  `:desc` below is NOT
+-- a Value and stays a constant.
 valType : RtLayout.ValLayout -> TypeDef
 valType layout =
     { name = "val"
@@ -81,35 +78,16 @@ valType layout =
     }
 
 
--- `type :ret = align 8 { :val, w, l, l, l, w }` — THE WORD ARM'S FROZEN
--- CLOSURE RETURN SHAPE, and nothing else.  U3b collapsed the `:ret` protocol:
--- on the VALUE arm a closure body returns `:val` (40 B, slot 0 alone), the
--- `.tail` request has no builder, and the kind word has no reader — so a value
--- module emits no `:ret` typedef at all and `retTypes` below is the ONLY way
--- the type reaches a module.  It survives for the WORD arm, where
--- `closureRetClass` still answers `:ret` and the shape is 48 bytes over an
--- 8-byte `:val` (AREA 6 owns that collapse; see Mid.Qbe.Lower).
--- MUST BE DEFINED AFTER `:val` (QBE requires a type to precede its uses).
-retType : TypeDef
-retType =
-    { name = "ret"
-    , align = Just RtLayout.abiAlign
-    , fields = RtLayout.retQbeFields
-    }
-
-
-{-| U3b: WHICH typedefs a module for this layout carries.  `:ret` is emitted
-only where a body can still RETURN one — the word arm.  A value module that
-carried it would be declaring a call-result shape nothing in it produces, and
-since U3b nothing in it can even name the shape (`aggcall ret` is refused).
--}
-retTypes : RtLayout.ValLayout -> List TypeDef
-retTypes layout =
-    if layout == RtLayout.wordLayout then
-        [ retType ]
-
-    else
-        []
+-- `:ret` IS DELETED, AND THE WORD ARM WAS ITS LAST USER (AREA 6).  U3b
+-- collapsed the `.tail` protocol and moved every closure body to `:val`; the
+-- one survivor was the WORD arm's 48-byte `:ret`, kept on the stated ground
+-- that collapsing it "would put a slot address in a register".  MEASURED
+-- FALSE (probe agg8.ssa, vendored qbe): an 8-byte aggregate return is REGISTER
+-- class and `ret %s0` still means "the value AT %s0" — qbe loads the word into
+-- rax.  So the word arm's body returns `:val` too, 8 bytes wide, and NO module
+-- emits a `:ret` typedef: the type, its QBE field list
+-- (`RtLayout.retQbeFields`) and its kind offset (`retKindOffset`) went with
+-- their last reader.  `closureRetClass` (Mid.Qbe.Lower) is now one answer.
 
 
 -- `type :desc = align 8 { l, w, w }` — a static function descriptor:

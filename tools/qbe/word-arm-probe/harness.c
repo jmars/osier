@@ -31,10 +31,14 @@
  *                                 why it passed the bugs it should have caught.
  *   Rt.die                        records the message and sets a flag.
  *
- * THE ABI IS READ FROM Mid/RtLayout, NOT GUESSED: `:ret` is
- * `align 8 { :val, w, l, l, l, w }` = 48 B with kind at 8, so a >16 B aggregate
- * return is SysV MEMORY class — a hidden sret pointer first, then the explicit
- * `l` params (each a POINTER to the callee's Value slot).
+ * THE ABI IS READ FROM Mid/RtLayout, NOT GUESSED — and since AREA 6 there is
+ * one answer on both arms: a probe defun takes its value parameters as `l`
+ * REGISTERS (on the word arm the register IS the one-word Value; on the value
+ * arm it is a pointer to the caller's 40-byte slot) and returns `:val`.  At 8
+ * bytes `:val` is REGISTER class, so the return arrives in %rax as the word
+ * itself — no sret block, no `:ret` kind word.  MEASURED (probe agg8.ssa): an
+ * 8-byte aggregate return puts the VALUE in the register, and `ret %s0` still
+ * means "the value AT %s0".
  *
  * ONE MODULE PER BINARY: every emitted module exports the same preamble
  * (qbe_meta, rt_glob, rt_call0..16), so two cannot be linked together.  The
@@ -55,16 +59,6 @@
 #define UNTAG_MASK (-8L)
 
 struct Val { int64_t w; };
-struct Ret {
-    struct Val v;   /* 0  */
-    int32_t kind;   /* 8  */
-    int32_t pad0;
-    int64_t f;      /* 16 */
-    int64_t e;      /* 24 */
-    int64_t args;   /* 32 */
-    int32_t arity;  /* 40 */
-    int32_t pad1;   /* 44 */
-};                  /* 48 B — Mid.RtLayout.retQbeFields over the 8-byte `:val` */
 
 /* ---- the seats the emitted module calls (stubs, per runtime.mid's contract) ---- */
 static long *g_frame;
@@ -137,18 +131,23 @@ static long *mk_block(int code, int scan, long w0, long w1)
 static long tagged(long *base) { return (long)((uintptr_t)(base + 2)) | HEAP_PTR_TAG; }
 static long *body_of(long *base) { return base + 2; }
 
+/* THE AREA 6 ABI: one `l` in, one `l` out.  A probe defun is a surface defun
+ * under the word arm, so its parameter IS the value word and its `:val` result
+ * IS the returned word (8 bytes = register class). */
 #if defined(PROBE_STR)
-void q_St_x2ef(struct Ret *out, long *x);
+long q_St_x2ef(long x);
 #elif defined(PROBE_PAY)
-void q_Pl_x2ef(struct Ret *out, long *x);
+long q_Pl_x2ef(long x);
 #elif defined(PROBE_LEN)
-void q_Ln_x2ef(struct Ret *out, long *x);
+long q_Ln_x2ef(long x);
 #elif defined(PROBE_TAGHEAP)
-void q_Tg_x2ef(struct Ret *out, long *v);
+long q_Tg_x2ef(long v);
 #elif defined(PROBE_TAGNIL)
-void q_Nt_x2ef(struct Ret *out, long *v);
+long q_Nt_x2ef(long v);
 #elif defined(PROBE_TAGBOOL)
-void q_Bt_x2ef(struct Ret *out, long *v);
+long q_Bt_x2ef(long v);
+#elif defined(PROBE_CALL)
+long q_Ca_x2ef(long v);
 #endif
 
 int main(void)
@@ -159,10 +158,7 @@ int main(void)
     /* ===== AREA A + D: the string literal's cell, against the REAL seat convention ===== */
     {
         long x = 0;
-        struct Ret r;
-        memset(&r, 0, sizeof r);
-        q_St_x2ef(&r, &x);
-        long w = r.v.w;
+        long w = q_St_x2ef(x);
         ok((w & 7) == HEAP_PTR_TAG,
            "A: a word-arm string literal is ONE tagged heap pointer (...001)");
         /* THE SEAT CONVENTION: the untagged value must be the BODY the seat
@@ -188,25 +184,25 @@ int main(void)
            "A: body unit 0 is the static byte pointer");
         ok(body[1] == 2,
            "D: body unit lenFieldWord (1) is the LENGTH (2)");
-        ok(r.kind == 0, "A: the defun's :ret kind word is untouched");
+        /* AREA 6: the defun returns `:val` at 8 bytes, so there IS no `:ret`
+         * kind word to be untouched — the old row here asserted one, and the
+         * type it belonged to is deleted (the value arm's row is the same
+         * absence).  The load-bearing checks above are unchanged. */
     }
 #elif defined(PROBE_PAY)
     /* ===== AREA B: payload reads, all three shapes ===== */
     {
         long fix = 5L << 3;
-        struct Ret r;
-        q_Pl_x2ef(&r, &fix);
-        ok(r.v.w == (5L << 3), "B: payload(fixnum 5, 0) == 5, re-boxed as mknum(5)");
+        ok(q_Pl_x2ef(fix) == (5L << 3), "B: payload(fixnum 5, 0) == 5, re-boxed as mknum(5)");
 
         long *base = mk_block(4, 1, 0xDEAD, 0xBEEF);
         long cell = tagged(base);
-        q_Pl_x2ef(&r, &cell);
-        ok(r.v.w == (0xDEADL << 3), "B: payload(heap cons, 0) == body unit 0 (untag is the body)");
+        ok(q_Pl_x2ef(cell) == (0xDEADL << 3), "B: payload(heap cons, 0) == body unit 0 (untag is the body)");
 
         g_died = 0;
         long nil = 2;
         if (sigsetjmp(g_jb, 1) == 0) {
-            q_Pl_x2ef(&r, &nil);
+            (void)q_Pl_x2ef(nil);
             ok(0, "B: payload(nil, 0) must REFUSE - it returned instead");
         }
         ok(g_died == 1,
@@ -220,14 +216,12 @@ int main(void)
         ((long *)body_of(base))[0] = (long)(uintptr_t)"abcdef";
         ((long *)body_of(base))[1] = 6;
         long cell = tagged(base);
-        struct Ret r;
-        q_Ln_x2ef(&r, &cell);
-        ok(r.v.w == (6L << 3), "D: payload32(str, lenFieldWord) == 6, re-boxed as mknum(6)");
+        ok(q_Ln_x2ef(cell) == (6L << 3), "D: payload32(str, lenFieldWord) == 6, re-boxed as mknum(6)");
 
         long fix = 9L << 3;
         g_died = 0;
         if (sigsetjmp(g_jb, 1) == 0) {
-            q_Ln_x2ef(&r, &fix);
+            (void)q_Ln_x2ef(fix);
             ok(0, "D: payload32(fixnum, 1) must REFUSE - a fixnum has no body unit 1");
         }
         ok(g_died == 1, "D: payload32(fixnum, 1) REFUSES (no body unit 1 of a number)");
@@ -235,28 +229,24 @@ int main(void)
 #elif defined(PROBE_TAGHEAP)
     /* ===== AREA C: tagis on a heap object ===== */
     {
-        struct Ret r;
         long *cons = mk_block(4, 1, 0, 0);
         long c = tagged(cons);
-        q_Tg_x2ef(&r, &c);
-        ok(r.v.w == 3, "C: tagis(cons, 4) is TRUE (immediate ...011)");
+        ok(q_Tg_x2ef(c) == 3, "C: tagis(cons, 4) is TRUE (immediate ...011)");
 
         long *vec = mk_block(10, 1, 0, 0);
         long v = tagged(vec);
-        q_Tg_x2ef(&r, &v);
-        ok(r.v.w == 4, "C: tagis(vector, 4) is FALSE (immediate ...100) - the CODE was read, not the tag");
+        ok(q_Tg_x2ef(v) == 4, "C: tagis(vector, 4) is FALSE (immediate ...100) - the CODE was read, not the tag");
 
         long fix = 7L << 3;
         g_died = 0;
-        q_Tg_x2ef(&r, &fix);
-        ok(g_died == 0 && r.v.w == 4,
+        ok(g_died == 0 && q_Tg_x2ef(fix) == 4,
            "C: tagis(fixnum, 4) is FALSE and reads NO header (untagging a fixnum is a small int - an unconditional load would fault)");
 
         long *nocode = mk_block(0, 0, 0, 0);
         long n = tagged(nocode);
         g_died = 0;
         if (sigsetjmp(g_jb, 1) == 0) {
-            q_Tg_x2ef(&r, &n);
+            (void)q_Tg_x2ef(n);
             ok(0, "C: a code-0 header must REFUSE - it returned instead");
         }
         ok(g_died == 1,
@@ -266,35 +256,56 @@ int main(void)
 #elif defined(PROBE_TAGNIL)
     /* ===== AREA C: the VALTAG vs the WORD IMMEDIATE ===== */
     {
-        struct Ret r;
         long nil = 2;
-        q_Nt_x2ef(&r, &nil);
-        ok(r.v.w == 3, "C: tagis(nil, 5) is TRUE - valtag 5 IS the word immediate 2");
+        ok(q_Nt_x2ef(nil) == 3, "C: tagis(nil, 5) is TRUE - valtag 5 IS the word immediate 2");
         long t = 3;
-        q_Nt_x2ef(&r, &t);
-        ok(r.v.w == 4, "C: tagis(true, 5) is FALSE");
+        ok(q_Nt_x2ef(t) == 4, "C: tagis(true, 5) is FALSE");
         long *cons = mk_block(4, 1, 0, 0);
         long c = tagged(cons);
-        q_Nt_x2ef(&r, &c);
-        ok(r.v.w == 4, "C: tagis(cons, 5) is FALSE (a heap object is not the nil immediate)");
+        ok(q_Nt_x2ef(c) == 4, "C: tagis(cons, 5) is FALSE (a heap object is not the nil immediate)");
     }
 #elif defined(PROBE_TAGBOOL)
     /* ===== AREA C: THE TWO-IMMEDIATE FOLD (the probe BLOCKER 2 needed) ===== */
     {
-        struct Ret r;
         long t = 3;  /* true  = ...011 */
-        q_Bt_x2ef(&r, &t);
-        ok(r.v.w == 3, "C/BOOL: tagis(true, tagBoolean) is TRUE");
+        ok(q_Bt_x2ef(t) == 3, "C/BOOL: tagis(true, tagBoolean) is TRUE");
         long f = 4;  /* false = ...100 */
-        q_Bt_x2ef(&r, &f);
-        ok(r.v.w == 3,
+        ok(q_Bt_x2ef(f) == 3,
            "C/BOOL: tagis(false, tagBoolean) is TRUE - BOTH immediates answer (the shipped fold answered FALSE here)");
         long nil = 2;
-        q_Bt_x2ef(&r, &nil);
-        ok(r.v.w == 4, "C/BOOL: tagis(nil, tagBoolean) is FALSE");
+        ok(q_Bt_x2ef(nil) == 4, "C/BOOL: tagis(nil, tagBoolean) is FALSE");
         long fix = 5L << 3;
-        q_Bt_x2ef(&r, &fix);
-        ok(r.v.w == 4, "C/BOOL: tagis(fixnum, tagBoolean) is FALSE");
+        ok(q_Bt_x2ef(fix) == 4, "C/BOOL: tagis(fixnum, tagBoolean) is FALSE");
+    }
+#elif defined(PROBE_CALL)
+    /* ===== AREA 6: THE CALL ABI, EXECUTED ===== */
+    {
+        /* The probe is `\x -> Ca.g(Ca.g(x))` and `Ca.g` is `\x -> x`, so the
+         * WHOLE chain is an identity — through one ORDINARY call (its argument
+         * crosses in a register and its `:val` result is blitted into a slot)
+         * and one TAIL call (the same ABI, C4-checked for class equality).
+         *
+         * WHAT EACH CHECK CATCHES, all of it measured-shape rather than
+         * author-shape:
+         *   * a POINTER-passed argument (the val arm's form) would make the
+         *     callee store the ADDRESS of the caller's slot, and the identity
+         *     would come back as a stack address — not `n * 8`, not even a
+         *     fixnum, so check 1 goes red;
+         *   * a 40-byte or sret-shaped return would leave the register holding
+         *     an address rather than the word (check 2 on a heap-tagged word
+         *     is the one that makes that visible, because the low 3 bits of a
+         *     stack address are 0);
+         *   * a lost argument (a slot number off by one, the U3b drift) breaks
+         *     the identity for at least one of the three inputs. */
+        ok(q_Ca_x2ef(7L << 3) == (7L << 3),
+           "6/CALL: an identity through a CALL returns the same value word (the argument crossed in a register, not as a pointer)");
+        ok(q_Ca_x2ef(0) == 0, "6/CALL: the fixnum ZERO round-trips (a leaked slot address cannot be 0)");
+        long *blk = mk_block(4, 1, 0x1111, 0x2222);
+        long cell = tagged(blk);
+        ok(q_Ca_x2ef(cell) == cell,
+           "6/CALL: a TAGGED HEAP WORD round-trips bit-exact (a sret/40-byte return or a pointer pass moves the low tag bits)");
+        ok((q_Ca_x2ef(cell) & 7) == HEAP_PTR_TAG,
+           "6/CALL: the returned word still carries the heap tag (...001) - the call did not retype it");
     }
 #endif
     printf("%d checks\n", g_checks);

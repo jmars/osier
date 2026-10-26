@@ -1426,20 +1426,29 @@ checks rt rawMidText =
             && String.contains "type :val = align 8 { w, l, l, l, l }\n"
                 (Print.print { layout = RtLayout.valLayout, types = [], datas = [], funcs = [] })
         )
-    -- U3b NARROWED THIS ROW TO THE ONE OFFSET THAT SURVIVED.  It used to pin
-    -- all six `.tail` offsets for both instances (40/48/56/64/72/80 val,
-    -- 8/16/24/32/40/48 word).  U3b deleted five of them WITH the protocol they
-    -- described — nothing builds or reads a `.tail` any more, so those numbers
-    -- describe a fiction.  `retKindOffset` survives because the WORD arm's
-    -- frozen `:ret` still has a kind word, and a frame-free word-arm defun
-    -- still materializes slot 1's zero.  The DERIVED-COUPLING claim is
-    -- therefore still live and still pinned for both instances: the kind word
-    -- sits immediately after the aggregate's first field, which IS a Value, so
-    -- its offset is `valSizeBytes` — 40 on the value arm, 8 on the word arm.
-    -- A `40` left as a constant is still the stale-40 trap this row makes loud.
-    , check "VR3b1 THE `:ret` COUPLING IS STILL DERIVED, NOT A CONSTANT (VR3a's finding, narrowed by U3b to the one surviving offset): the aggregate's first field IS a Value, so `retKindOffset` is `valSizeBytes` — 40 on the val arm (over the 40-byte Value) and 8 on the word arm (over `{ l }`). The five `.tail` offsets this row used to pin are DELETED with the protocol (U3b), not silently dropped"
-        (List.map RtLayout.retKindOffset [ RtLayout.valLayout, RtLayout.wordLayout ]
-            == [ 40, 8 ]
+    -- AREA 6 DELETED THE LAST OF IT.  U3b had narrowed this row to
+    -- `retKindOffset` — the one `:ret` offset with a live reader (the word
+    -- arm's frame-free kind-word store).  AREA 6 measured that arm's `:ret`
+    -- justification FALSE (an 8-byte aggregate return is REGISTER class and
+    -- `ret %s0` still means "the value AT %s0" — probe agg8.ssa), collapsed
+    -- the class, and deleted the type with its offsets.  The row's job is now
+    -- the ABSENCE: neither instance emits a `:ret` typedef, so no module can
+    -- declare a return shape nothing produces.  (A `:ret` in an emitted
+    -- module is the stale-shape trap this row makes loud.)
+    , check "AREA 6 — `:ret` IS GONE FROM BOTH ARMS: neither instance's module carries a `:ret` typedef, `closureRetClass` answers `:val` for both, and a defun's result area is ONE slot on both (`resultSlotBase`). The type's offsets (`retKindOffset`, `retQbeFields`) and the `retType`/`retTypes` projections are DELETED with their last reader — this row is the absence, and an emitted `:ret` is RED"
+        (let
+            wordTxt =
+                Print.print { layout = RtLayout.wordLayout, types = [], datas = [], funcs = [] }
+
+            valTxt =
+                Print.print { layout = RtLayout.valLayout, types = [], datas = [], funcs = [] }
+         in
+         not (String.contains "type :ret" wordTxt)
+            && not (String.contains "type :ret" valTxt)
+            && RtLayout.wordLayout.valSizeBytes
+            == 8
+            && RtLayout.valLayout.valSizeBytes
+            == 40
         )
     , check "VR3c AREA 1 — THE KIND CONTRACT IS ONE SET OF NUMBERS, PINNED ACROSS RtLayout AND runtime.mid. Under the word arm every heap object's value tag is `...001`, so WHICH object a pointer names is read from the 2-word GC header — and the codes ARE the ValTag integers both arms already use (cons 4, vector 10, ...). This row parses runtime.mid's own `// KIND-CONTRACT:` rows (word-arm splice) and compares every one with RtLayout: the field's shift/mask, each code against the TOP-LEVEL `tag*` constants, and each body class against `heapKindScanned`. A stale duplicate on EITHER side turns this RED instead of linking cleanly and reading another object's bytes. It also pins that the rows are WORD-ARM ONLY (the val text carries none) and that the val arm has NO kind field (0/0, the `tagMask` convention)"
         (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
@@ -1704,13 +1713,22 @@ checks rt rawMidText =
                         Print.print mod
                 in
                 String.contains "type :val = align 8 { l }\n" txt
-                    && String.contains "type :ret = align 8 { :val, w, l, l, l, w }\n" txt
+                    -- AREA 6: no `:ret` typedef, no kind word, no `%tzk`.
+                    && not (String.contains "type :ret" txt)
+                    && not (String.contains "%tzk" txt)
+                    -- TWO slots: the result and the PARAM (the word arm has no
+                    -- ptrRead, so the param owns a slot) — `alloc8 16`.
                     && String.contains "\t%f =l alloc8 16\n" txt
                     && String.contains "\t%s0 =l add %f, 0\n\t%s1 =l add %f, 8\n" txt
-                    && String.contains "\tstorel 0, %s0\n\t%tzk =l add %f, 8\n\tstorel 0, %tzk\n" txt
-                    && String.contains "\tblit %a0, %s0, 8\n" txt
+                    -- ONE zero store: slot 0's result materialisation.
+                    && String.contains "\tstorel 0, %s0\n" txt
+                    -- THE AREA 6 PARAM ABI: the incoming register IS the value
+                    -- word, so the prologue STORES it — a `blit` here would
+                    -- dereference the word as an address.
+                    && String.contains "\tstorel %a0, %s1\n" txt
+                    && String.contains "\tblit %s1, %s0, 8\n" txt
+                    && not (String.contains "blit %a0" txt)
                     && not (String.contains "alloc8 80" txt)
-                    && not (String.contains "blit %a0, %s0, 40" txt)
                     && not (String.contains "storew" txt)
 
             Err _ ->
@@ -1748,7 +1766,7 @@ checks rt rawMidText =
     -- is untouched (its `:ret` keeps slot 1).  This is the row that would go red
     -- if the slot-base change ever leaked onto the word arm, or if a marker
     -- store came back on the value arm.
-    , check "VR3b2 THE VAL ARM AFTER U3b: `\\x -> x` on the DEFAULT instance is a ONE-SLOT frame — `alloc8 40`, a 40-byte param blit, the `storel 0` .done materialisation at `%s0`, and NO `%tzk` store — while the word arm above keeps its 2-slot `alloc8 16` and its `%tzk` at `%f + 8`"
+    , check "VR3b2 THE VAL ARM AFTER U3b: `\\x -> x` on the DEFAULT instance is a ONE-SLOT frame — `alloc8 40`, a 40-byte param blit, the `storel 0` .done materialisation at `%s0`, and NO `%tzk` store — while the word arm above is `alloc8 16` with NO `%tzk` (AREA 6 deleted `:ret`, so slot 1 is its PARAM now, not a kind word)"
         (case QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ idProbe ]) [ idProbe ] "Id.f" of
             Ok mod ->
                 let
@@ -1880,13 +1898,20 @@ checks rt rawMidText =
             )
          of
             ( Err msg, Ok _ ) ->
+                -- AREA 6 PORTED THE CALL ABI, so the first un-ported Rt
+                -- construct is no longer a call: it is the runtime's
+                -- CONSTRUCTION path (a heap cell / a vector element access —
+                -- AREA 3, whose `payload(x, 0)` is the val arm's "vector ->
+                -- separate array" shape and has no word-arm meaning).  The
+                -- ROW'S CLAIM is unchanged and is what it asserts: the refusal
+                -- is PER DEFUN and names the CONSTRUCT, never the lane.
                 String.contains "Rt." msg
                     && String.contains "AREA " msg
                     && String.contains "NOT IMPLEMENTED" msg
                     && not (String.contains "AREA 7 (THE Rt SURFACE)" msg)
-                    && String.contains "AREA 6 (THE CALL ABI)" msg
-                    && String.contains "Rt.copyWordsGo" msg
-                    && String.contains "a call" msg
+                    && String.contains "AREA 3" msg
+                    && String.contains "Rt." msg
+                    && String.contains "vecstore" msg
 
             _ ->
                 False
@@ -2011,7 +2036,7 @@ checks rt rawMidText =
                     vTxt =
                         Print.print valMod
                 in
-                String.contains "\t%t0 =l loadl %a0\n\t%t1 =w and %t0, 7\n\t%t2 =w ceqw %t1, 0\n" wTxt
+                String.contains "\t%t0 =l loadl %s1\n\t%t1 =w and %t0, 7\n\t%t2 =w ceqw %t1, 0\n" wTxt
                     && String.contains "\t%t3 =w ceqw %t1, 1\n" wTxt
                     && String.contains "\t%t4 =l sar %t0, 3\n" wTxt
                     && String.contains "\t%t5 =l and %t0, -8\n\t%t6 =l add %t5, 0\n\t%t4 =l loadl %t6\n" wTxt

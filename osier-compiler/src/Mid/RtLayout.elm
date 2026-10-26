@@ -16,7 +16,6 @@ module Mid.RtLayout exposing
     , maxArity
     , metaArityOffset, metaCodeOffset, metaNameOffset, metaSizeBytes
     , payloadBase, payloadWordOffset
-    , retKindOffset, retQbeFields
     , tagBoolean, tagCons, tagError, tagFloat, tagLambda, tagMark, tagNil, tagNumber, tagPrim, tagRecord, tagStream, tagString, tagSymbol, tagVector
     , untagMask
     , ValLayout, valLayout
@@ -40,10 +39,10 @@ module Mid.RtLayout exposing
 -- struct's bytes at the wrong offset, silently.
 --
 -- THE DIRECTION OF TRUTH.  These values are the DEFINITION; the emitted IL is
--- DERIVED from them (`Mid.Qbe.Il.valType`/`retType`/`descType` are built out
--- of the field projections below, `Mid.Qbe.Lower` reads `valSizeBytes`,
--- `retKindOffset`, `maxArity` and the tag numbers, `Mid.RtPrims` reads the tag
--- numbers), and the ZIG side is checked against them:
+-- DERIVED from them (`Mid.Qbe.Il.valType`/`descType` are built out of the
+-- field projections below, `Mid.Qbe.Lower` reads `valSizeBytes`, `maxArity`
+-- and the tag numbers, `Mid.RtPrims` reads the tag numbers), and the ZIG side
+-- is checked against them:
 --
 --   * `tools/qbe/layout-census.sh --values` parses THIS file and compares the
 --     result against the values `vendor/osier-rt/src/gc/types.zig` and
@@ -557,18 +556,14 @@ wordTagShape code =
 --      the only thing VR3 changes about a map is the frame STRIDE, outside
 --      this record.  No field here is an input to a map's shape — do not add
 --      one.
---   3. THE ret/desc/meta AGGREGATES ARE NOT VALUES AND DO NOT FLIP, so they
+--   3. THE desc/meta AGGREGATES ARE NOT VALUES AND DO NOT FLIP, so they
 --      stay OUT of this record: a record mixing "flips with the
 --      representation" and "never flips" is exactly the silent-mismatch shape
---      this module's header was written to prevent.  ONE COUPLING SURVIVES and
---      is named here so it cannot go silent: the `:ret` aggregate's first
---      field IS a Value, so `retKindOffset` is `valSizeBytes` — a `:ret` over
---      a word Value is `{ l, w, l, l, l, w }` = 48 B with kind at 8, over the
---      val arm's 40-byte Value it is 80 B with kind at 40.  VR3b1 DISCHARGED
---      that finding by making the offsets FUNCTIONS OF THE INSTANCE; U3b then
---      deleted the five `.tail` ones with the protocol they described, leaving
---      `retKindOffset` as the only survivor (see the Ret section below).
---      `desc*`/`meta*`/`ep*`/`dirent*` carry no Value at all and stay put.
+--      this module's header was written to prevent.  THE ONE COUPLING THAT
+--      SURVIVED — the `:ret` aggregate's first field IS a Value, so its kind
+--      offset was `valSizeBytes` — is GONE with the type (AREA 6; see the Ret
+--      section below).  `desc*`/`meta*`/`ep*`/`dirent*` carry no Value at all
+--      and stay put.
 
 
 type alias ValLayout =
@@ -892,40 +887,25 @@ metaArityOffset =
 
 
 
--- ============================ Ret (the WORD arm's frozen return) ============================
--- `Mid.Qbe.Il.retType` is `align 8 { :val, w, l, l, l, w }`.  On the WORD arm
--- (`:val` = 8 bytes) that is 48 bytes, and it is the only place the type is
--- still EMITTED — `Il.retTypes` gives it to a module only for `wordLayout`.
--- The VALUE arm has no `:ret` at all any more: a closure body returns `:val`
--- (40 B, slot 0 alone), so `Il.retTypes valLayout` is empty.
+-- ============================ Ret (DELETED — AREA 6) ============================
+-- `:ret` IS GONE.  U3b deleted the `.tail` protocol (the builder, both
+-- chasers, `struct Ret`, the `Agg "ret"` result class, the 80-byte `@ret`
+-- blit) and moved every closure body to `:val`; the one survivor was the WORD
+-- arm's 48-byte `:ret`, and AREA 6 measured its stated justification FALSE.
 --
--- U3b DELETED THE `.tail` OFFSETS.  The aggregate used to be the bounce-loop
--- result — `:val @0` (the finished value), `kind @40`, `f @48`, `e @56`,
--- `args @64`, `arity @72` — and `retSizeBytes`/`retValOffset`/`retFOffset`/
--- `retEOffset`/`retArgsOffset`/`retArityOffset` described that tail.  U3b
--- deleted the builder (Rt.tail-known), both chasers (Rt.bounce/Rt.bounceGo),
--- `struct Ret`, the `Agg "ret"` result class and the `@ret` 80-byte blit, so
--- NOTHING BUILDS OR READS A `.tail` ANY MORE: those six offsets had no reader
--- left and went with the protocol they described.  A row that keeps pinning
--- them is testing a fiction.
+-- THE MEASUREMENT (probe agg8.ssa against the vendored qbe): an 8-byte
+-- aggregate return is REGISTER class, and `ret %s0` still means "the value AT
+-- %s0" — qbe loads the word into rax and the caller's `%t =:val call` temp is
+-- still the ADDRESS of a materialized 8-byte block, so the same IL text is
+-- correct at both widths.  The exception's premise ("collapsing it would put a
+-- slot address in a register") describes a NON-aggregate return; nobody was
+-- proposing one.
 --
--- ONE OFFSET SURVIVES, and only for the word arm: `retKindOffset`.  The word
--- arm's `:ret` still has a kind word (slot 1 of its result area), and a
--- frame-free word-arm defun still MATERIALIZES that slot's zero (Lower's
--- `leafTailZero`) because a frame-free body has no enter-side memset.  It is
--- DERIVED, not a constant — the kind word sits immediately after the first
--- field, so its offset IS `valSizeBytes` (40 on the value arm, 8 on the word
--- arm).  TestMain pins both instances.
---
--- (The `:ret` TYPE is still a module constant — its FIELD LIST does not flip
--- with the representation, only the size of its first field does; see
--- `retQbeFields` below and Mid.RtLayout's TRAP-3 note.)
-
-
-retKindOffset : ValLayout -> Int
-retKindOffset layout =
-    layout.valSizeBytes
-
+-- So the word arm's body returns `:val` (8 B) like the value arm's (40 B), and
+-- with the type went its last readers: `retQbeFields`, `retKindOffset` (whose
+-- only reader was Lower's `leafTailZero`, materializing slot 1's kind word)
+-- and the `:ret`-only result slot (`Lower.resultSlotBase` is now 1 on both
+-- arms).  `closureRetClass` is one answer for the whole tree.
 
 
 -- ============================ libc `struct dirent` ============================
@@ -1143,7 +1123,7 @@ payloadWordOffset layout word =
 
 
 -- ============================ derived: the QBE type field lists ============================
--- The emitter's `:val`/`:ret`/`:desc` type definitions are BUILT from the
+-- The emitter's `:val`/`:desc` type definitions are BUILT from the
 -- numbers above, so the .ssa cannot describe a different layout from the one
 -- this module states.  The field spellings are QBE's (`w` = 32-bit, `l` =
 -- 64-bit, `:val` = the nested aggregate).
@@ -1152,11 +1132,6 @@ payloadWordOffset layout word =
 valQbeFields : List String
 valQbeFields =
     "w" :: List.repeat valuePayloadWords "l"
-
-
-retQbeFields : List String
-retQbeFields =
-    ":val" :: "w" :: "l" :: "l" :: "l" :: "w" :: []
 
 
 descQbeFields : List String

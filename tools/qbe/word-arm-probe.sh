@@ -57,12 +57,13 @@ QBE="$ROOT/vendor/qbe/qbe"
 
 # probe name | entry symbol | -D flag | expected check count
 PROBES=(
-  "str|q_St_x2ef|PROBE_STR|5"
+  "str|q_St_x2ef|PROBE_STR|4"
   "payload|q_Pl_x2ef|PROBE_PAY|4"
   "len|q_Ln_x2ef|PROBE_LEN|2"
   "tagheap|q_Tg_x2ef|PROBE_TAGHEAP|5"
   "tagnil|q_Nt_x2ef|PROBE_TAGNIL|3"
   "tagbool|q_Bt_x2ef|PROBE_TAGBOOL|4"
+  "call|q_Ca_x2ef|PROBE_CALL|4"
 )
 
 [ -f "$CDIR/compiler.js" ] || { echo "word-arm-probe: $CDIR/compiler.js missing (run: osier-compiler/build.sh)" >&2; exit 2; }

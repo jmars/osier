@@ -22,13 +22,13 @@ module Mid.Qbe.Print exposing (print)
 -- plain ASCII by construction).
 
 import Char
-import Mid.Qbe.Il exposing (Module, Func, Block, Inst(..), Jump(..), Arg(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), UnaryOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..), descType, retTypes, valType)
+import Mid.Qbe.Il exposing (Module, Func, Block, Inst(..), Jump(..), Arg(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), UnaryOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..), descType, valType)
 
 
 print : Module -> String
 print m =
     String.join "\n"
-        (List.map printType (valType m.layout :: retTypes m.layout ++ m.types ++ [ descType ])
+        (List.map printType (valType m.layout :: m.types ++ [ descType ])
             ++ [ "" ]
             ++ List.map printData m.datas
             ++ [ "" ]

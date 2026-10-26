@@ -1,4 +1,4 @@
-module Mid.Qbe.WordArmProbe exposing (Module(..), modules, name, defun)
+module Mid.Qbe.WordArmProbe exposing (Module(..), modules, name, defun, defuns, arity)
 
 {-| Mid.Qbe.WordArmProbe — THE WORD ARM'S BEHAVIOUR PROBES, in ONE place.
 
@@ -22,7 +22,11 @@ consumers, ONE definition:
   * `TestMain` pins the emitted text of the same defun on BOTH arms.
 
 A probe must stay RUNTIME-FREE: no `RawCall`, no `RawCallAgg`, no `RawCallRaw`,
-no `RawAllocN`.  `Rt.allocRaw` is reached through the emitter's own seat call
+no `RawAllocN`.  A probe MAY however contain a CALL to another PROBE defun (the
+`call` probe does): that is `App` with a `GRef` head, the emitter's own
+closure-ABI call, and it is exactly the construct AREA 6 ported — the callee is
+a surface defun of the same module, not a runtime key, so the module stays
+runtime-free.  `Rt.allocRaw` is reached through the emitter's own seat call
 (`RawAllocRaw`/`midGcAllocSeat`), which is a plain `Call` the module emits
 itself — the probe script stubs that seat to the CONTRACT `runtime.mid` states.
 -}
@@ -39,11 +43,12 @@ type Module
     | TagHeap
     | TagNil
     | TagBool
+    | Call
 
 
 modules : List Module
 modules =
-    [ Str, Payload, Len, TagHeap, TagNil, TagBool ]
+    [ Str, Payload, Len, TagHeap, TagNil, TagBool, Call ]
 
 
 name : Module -> String
@@ -67,6 +72,9 @@ name m =
         TagBool ->
             "tagbool"
 
+        Call ->
+            "call"
+
 
 {-| The probe's DEFUN KEY — what `QBE_WORDARM_PROBE` compiles as its entry. -}
 defun : Module -> Defun
@@ -89,6 +97,36 @@ defun m =
 
         TagBool ->
             boolTagProbe
+
+        Call ->
+            callProbe
+
+
+{-| A defun's declared arity — what the probe module's arity table must carry,
+or `lowerApp` treats the call as under-applied and routes it through the
+runtime's generic apply instead of the direct call this probe exists to run.
+-}
+arity : Defun -> Int
+arity d =
+    case d.value of
+        Lam lambda ->
+            List.length lambda.params
+
+        _ ->
+            0
+
+
+{-| EVERY defun a probe's module needs, ENTRY FIRST (AREA 6's `call` probe is
+the first probe that is more than one defun: a CALL needs a callee).
+-}
+defuns : Module -> List Defun
+defuns m =
+    case m of
+        Call ->
+            [ callProbe, callCallee ]
+
+        _ ->
+            [ defun m ]
 
 
 {-| AREA A + D: `\x -> "hi"`.  A word-arm string literal is a HEAP OBJECT whose
@@ -212,5 +250,62 @@ boolTagProbe =
                         , words = [ Unsafe (RawTagIs { value = Var 0, tag = RtLayout.tagBoolean }) ]
                         }
                     )
+            }
+    }
+
+{-| AREA 6 — THE CALL ABI, EXECUTED.  `\x -> Ca.g(x) + nothing`: the body is a
+saturated `App` to another SURFACE defun of the same module, which is the ONE
+construct AREA 6 ported (`lowerApp` -> `directCall` -> `argOperands`).  What the
+probe proves by RUNNING:
+
+  * the ARGUMENT crosses as the VALUE WORD in an `l` register (the word arm's
+    `:val` is 8 bytes), not as a pointer to the caller's slot — a pointer would
+    make the callee's `storel %a0, %s1` prologue store the ADDRESS;
+  * the callee STORES that register into its own slot (`paramWords`) and reads
+    it back;
+  * the RESULT is the same `:val` class at 8 bytes — one word in a register, no
+    sret block and no `:ret` kind word (`closureRetClass` is one answer).
+
+`Ca.g` returns `x` unchanged, so the probe is an identity through a real call:
+the harness passes a tagged fixnum and checks the SAME word comes back, plus the
+arithmetic-free property that no slot address leaked (a leaked address is not
+`n * 8` and the check would see it).
+-}
+callProbe : Defun
+callProbe =
+    { key = "Ca.f"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body =
+                -- A NESTED call on purpose: the INNER `Ca.g(x)` is an ordinary
+                -- call (argOperands + a result blit into a slot) and the OUTER
+                -- one is in TAIL position (a real `tcall`, whose C4 class check
+                -- is the strictest form of the same ABI).  One probe, both
+                -- shapes.
+                App
+                    { fn = GRef { key = "Ca.g", force = False }
+                    , args =
+                        [ App
+                            { fn = GRef { key = "Ca.g", force = False }
+                            , args = [ Var 0 ]
+                            }
+                        ]
+                    }
+            }
+    }
+
+
+{-| The callee: `\x -> x`.  Two things matter here and both are the ABI: its
+parameter arrives as a WORD (so its prologue stores the register) and its body
+copies that word to the result slot.
+-}
+callCallee : Defun
+callCallee =
+    { key = "Ca.g"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body = Var 0
             }
     }

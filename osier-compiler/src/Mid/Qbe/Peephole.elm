@@ -25,7 +25,7 @@ module Mid.Qbe.Peephole exposing (optimize)
 
 import Char
 import Dict exposing (Dict)
-import Mid.Qbe.Il as Il exposing (Module, Func, Block, Inst(..), Jump(..), Arg(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..), descType, retTypes, valType)
+import Mid.Qbe.Il as Il exposing (Module, Func, Block, Inst(..), Jump(..), Arg(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..), descType, valType)
 import Set exposing (Set)
 
 

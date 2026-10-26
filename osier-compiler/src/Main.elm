@@ -182,6 +182,9 @@ probeModule rt wanted =
     case List.filter (\m -> WordArmProbe.name m == wanted) WordArmProbe.modules of
         m :: _ ->
             let
+                ds =
+                    WordArmProbe.defuns m
+
                 d =
                     WordArmProbe.defun m
             in
@@ -199,8 +202,8 @@ probeModule rt wanted =
                     False
                     True
                     QbeTypes.empty
-                    (Dict.fromList [ ( d.key, 0 ) ])
-                    [ d ]
+                    (Dict.fromList (List.map (\x -> ( x.key, WordArmProbe.arity x )) ds))
+                    ds
                     d.key
             of
                 Ok mod ->
