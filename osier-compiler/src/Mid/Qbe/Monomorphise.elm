@@ -1315,6 +1315,9 @@ unsafeChildren node =
         RawVecAddr r ->
             [ r.vec, r.index ]
 
+        RawVecBody r ->
+            [ r.value ]
+
         RawVecStore r ->
             [ r.vec, r.index, r.value ]
 
@@ -1445,6 +1448,9 @@ unsafeRebuild node parts =
 
         ( RawVecAddr r, a :: b :: _ ) ->
             RawVecAddr { r | vec = a, index = b }
+
+        ( RawVecBody r, a :: _ ) ->
+            RawVecBody { r | value = a }
 
         ( RawVecStore r, a :: b :: c :: _ ) ->
             RawVecStore { r | vec = a, index = b, value = c }

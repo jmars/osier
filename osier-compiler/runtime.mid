@@ -1025,10 +1025,10 @@ defun Rt.deepEq(a : val, bb : val) -> val {
     return mkbool(tagis(bb, 5));
   }
   if (mkbool(tagis(a, 4)) && mkbool(tagis(bb, 4))) {
-    if (mkbool(payload32(call Rt.deepEq(vecload(payload(a, 0), 0), vecload(payload(bb, 0), 0)), 0) == 0)) {
+    if (mkbool(payload32(call Rt.deepEq(vecload(vecbody(a), 0), vecload(vecbody(bb), 0)), 0) == 0)) {
       return false;
     }
-    recur(vecload(payload(a, 0), 1), vecload(payload(bb, 0), 1));
+    recur(vecload(vecbody(a), 1), vecload(vecbody(bb), 1));
   }
   if (mkbool(tagis(a, 14)) && mkbool(tagis(bb, 14))) {
     return mkbool(len32(a) == len32(bb)) && call Rt.vecEq(a, bb, mknum(0));
@@ -1060,10 +1060,10 @@ defun Rt.deepEq(a : val, bb : val) -> val {
     return mkbool(tagis(bb, 5));
   }
   if (mkbool(tagis(a, 4)) && mkbool(tagis(bb, 4))) {
-    if (mkbool(payload32(call Rt.deepEq(vecload(payload(a, 0), 0), vecload(payload(bb, 0), 0)), 0) == 0)) {
+    if (mkbool(payload32(call Rt.deepEq(vecload(vecbody(a), 0), vecload(vecbody(bb), 0)), 0) == 0)) {
       return false;
     }
-    recur(vecload(payload(a, 0), 1), vecload(payload(bb, 0), 1));
+    recur(vecload(vecbody(a), 1), vecload(vecbody(bb), 1));
   }
   if (mkbool(tagis(a, 10)) && mkbool(tagis(bb, 10))) {
     return mkbool(len32(a) == len32(bb)) && call Rt.vecEq(a, bb, mknum(0));
@@ -1095,7 +1095,7 @@ defun Rt.vecEq(a : val, bb : val, i : val) -> val {
   if (mkbool(payload(i, 0) >= len32(a))) {
     return true;
   }
-  if (mkbool(payload32(call Rt.deepEq(vecload(payload(a, 0), payload(i, 0)), vecload(payload(bb, 0), payload(i, 0))), 0) == 0)) {
+  if (mkbool(payload32(call Rt.deepEq(vecload(vecbody(a), payload(i, 0)), vecload(vecbody(bb), payload(i, 0))), 0) == 0)) {
     return false;
   }
   recur(a, bb, mknum(payload(i, 0) + 1));
@@ -1266,7 +1266,7 @@ defun Rt.toI32(x : val) -> val {
 
 defun Rt.revGo(l : val, acc : val) -> val {
   if (mkbool(tagis(l, 4))) {
-    return call Rt.revGo(vecload(payload(l, 0), 1), call Rt.cons(vecload(payload(l, 0), 0), acc));
+    return call Rt.revGo(vecload(vecbody(l), 1), call Rt.cons(vecload(vecbody(l), 0), acc));
   }
   return acc;
 }
@@ -1368,7 +1368,7 @@ defun Rt.countGo(l : val, n : val) -> val {
   if (mkbool(tagis(l, 5))) {
     return n;
   } else {
-    recur(vecload(payload(l, 0), 1), mknum(payload(n, 0) + 1));
+    recur(vecload(vecbody(l), 1), mknum(payload(n, 0) + 1));
   }
 }
 
@@ -1376,8 +1376,8 @@ defun Rt.fillGo(l : val, bufN : val, i : val) -> val {
   if (mkbool(tagis(l, 5))) {
     return mknil;
   }
-  bytestore(payload(bufN, 0), payload(i, 0), payload(vecload(payload(l, 0), 0), 0));
-  recur(vecload(payload(l, 0), 1), bufN, mknum(payload(i, 0) + 1));
+  bytestore(payload(bufN, 0), payload(i, 0), payload(vecload(vecbody(l), 0), 0));
+  recur(vecload(vecbody(l), 1), bufN, mknum(payload(i, 0) + 1));
 }
 
 @consArr
@@ -1494,8 +1494,8 @@ defun Rt.joinLen(sep : val, strs : val, acc : val) -> val {
   if (mkbool(tagis(strs, 5))) {
     return acc;
   }
-  val s = vecload(payload(strs, 0), 0);
-  val rest = vecload(payload(strs, 0), 1);
+  val s = vecload(vecbody(strs), 0);
+  val rest = vecload(vecbody(strs), 1);
   if (mkbool(tagis(rest, 5))) {
     recur(sep, rest, mknum(payload(acc, 0) + len32(s)));
   }
@@ -1510,8 +1510,8 @@ defun Rt.joinFill(strs : val, dstN : val, sep : val) -> val {
   if (mkbool(tagis(strs, 5))) {
     return dstN;
   }
-  val s = vecload(payload(strs, 0), 0);
-  val rest = vecload(payload(strs, 0), 1);
+  val s = vecload(vecbody(strs), 0);
+  val rest = vecload(vecbody(strs), 1);
   val p = call Rt.byteCopyGo(mknum(payload(dstN, 0)), mknum(payload(s, 0)), mknum(len32(s)));
   if (mkbool(tagis(rest, 5))) {
     return p;
@@ -1903,7 +1903,7 @@ defun Rt.pvRec(stN : val, vN : val, iN : val) -> val {
     return mknum(0);
   }
   call Rt.pvByte(stN, mknum(32));
-  call Rt.pvV(stN, vecload(payload(vN, 0), i));
+  call Rt.pvV(stN, vecload(vecbody(vN), i));
   return call Rt.pvRec(stN, vN, mknum(i + 1));
 }
 
@@ -1936,9 +1936,9 @@ defun Rt.pvV(stN : val, vN : val) -> val {
   }
   if (mkbool(tagis(vN, 4))) {
     call Rt.pvZ(stN, mknum(rawstr("[cons ")));
-    call Rt.pvV(stN, vecload(payload(vN, 0), 0));
+    call Rt.pvV(stN, vecload(vecbody(vN), 0));
     call Rt.pvZ(stN, mknum(rawstr(" . ")));
-    call Rt.pvV(stN, vecload(payload(vN, 0), 1));
+    call Rt.pvV(stN, vecload(vecbody(vN), 1));
     call Rt.pvZ(stN, mknum(rawstr("]")));
     return mknum(0);
   }
@@ -2015,11 +2015,11 @@ defun Rt.printValue(xN : val) -> val {
 
 defun Rt.assocGo(k : val, l : val) -> val {
   if (mkbool(tagis(l, 4))) {
-    val pair = vecload(payload(l, 0), 0);
-    if (mkbool(tagis(pair, 4)) && call Rt.deepEq(k, vecload(payload(pair, 0), 0))) {
+    val pair = vecload(vecbody(l), 0);
+    if (mkbool(tagis(pair, 4)) && call Rt.deepEq(k, vecload(vecbody(pair), 0))) {
       return pair;
     }
-    return call Rt.assocGo(k, vecload(payload(l, 0), 1));
+    return call Rt.assocGo(k, vecload(vecbody(l), 1));
   }
   if (mkbool(tagis(l, 5))) {
     return mknil;
@@ -2039,7 +2039,7 @@ defun Rt.recGetGo(rec : val, field : val, i : val) -> val {
   }
   val nameSym = vecload(payload(rec, 2), payload(i, 0));
   if (call Rt.symEq(nameSym, field, mknum(0))) {
-    return vecload(payload(rec, 0), payload(i, 0));
+    return vecload(vecbody(rec), payload(i, 0));
   }
   return call Rt.recGetGo(rec, field, mknum(payload(i, 0) + 1));
 }
@@ -2049,8 +2049,8 @@ defun Rt.recUpd(rec : val, field : val, newv : val) -> val {
   word nd = allocvec(reclen(rec));
   val ndN = mknum(nd);
   call Rt.recUpdCopy(rec, ndN, mknum(0));
-  vecstore(payload(ndN, 0), payload(find, 0), newv);
-  return mkval(14, vecaddr(payload(ndN, 0), 0), reclen(rec), payload(rec, 2));
+  vecstore(vecbody(ndN), payload(find, 0), newv);
+  return mkval(14, vecaddr(vecbody(ndN), 0), reclen(rec), payload(rec, 2));
 }
 
 defun Rt.recUpdFind(rec : val, field : val, i : val) -> val {
@@ -2068,7 +2068,7 @@ defun Rt.recUpdCopy(rec : val, newdata : val, i : val) -> val {
   if (mkbool(payload(i, 0) >= reclen(rec))) {
     return mknil;
   }
-  vecstore(payload(newdata, 0), payload(i, 0), vecload(payload(rec, 0), payload(i, 0)));
+  vecstore(vecbody(newdata), payload(i, 0), vecload(payload(rec, 0), payload(i, 0)));
   return call Rt.recUpdCopy(rec, newdata, mknum(payload(i, 0) + 1));
 }
 
@@ -2089,7 +2089,7 @@ defun Rt.recAppendDataGo(rec : val, newdata : val, packed : val) -> val {
   if (mkbool(payload(j, 0) > reclen(rec))) {
     return mknil;
   }
-  val store = mkbool(payload(j, 0) < payload(pos, 0)) ? vecstore(payload(newdata, 0), payload(j, 0), vecload(payload(rec, 0), payload(j, 0))) : (mkbool(payload(j, 0) == payload(pos, 0)) ? mknil : vecstore(payload(newdata, 0), payload(j, 0), vecload(payload(rec, 0), payload(j, 0) - 1)));
+  val store = mkbool(payload(j, 0) < payload(pos, 0)) ? vecstore(vecbody(newdata), payload(j, 0), vecload(payload(rec, 0), payload(j, 0))) : (mkbool(payload(j, 0) == payload(pos, 0)) ? mknil : vecstore(vecbody(newdata), payload(j, 0), vecload(payload(rec, 0), payload(j, 0) - 1)));
   return call Rt.recAppendDataGo(rec, newdata, mknum(payload(packed, 0) + 1));
 }
 
@@ -2099,7 +2099,7 @@ defun Rt.recAppendNamesGo(rec : val, newnames : val, packed : val) -> val {
   if (mkbool(payload(j, 0) > reclen(rec))) {
     return mknil;
   }
-  val store = mkbool(payload(j, 0) < payload(pos, 0)) ? vecstore(payload(newnames, 0), payload(j, 0), vecload(payload(rec, 2), payload(j, 0))) : (mkbool(payload(j, 0) == payload(pos, 0)) ? mknil : vecstore(payload(newnames, 0), payload(j, 0), vecload(payload(rec, 2), payload(j, 0) - 1)));
+  val store = mkbool(payload(j, 0) < payload(pos, 0)) ? vecstore(vecbody(newnames), payload(j, 0), vecload(payload(rec, 2), payload(j, 0))) : (mkbool(payload(j, 0) == payload(pos, 0)) ? mknil : vecstore(vecbody(newnames), payload(j, 0), vecload(payload(rec, 2), payload(j, 0) - 1)));
   return call Rt.recAppendNamesGo(rec, newnames, mknum(payload(packed, 0) + 1));
 }
 
@@ -2112,9 +2112,9 @@ defun Rt.recAppend(rec : val, field : val, newv : val) -> val {
   val packed = mknum(payload(pos, 0) * 65536);
   call Rt.recAppendDataGo(rec, ndN, packed);
   call Rt.recAppendNamesGo(rec, nnN, packed);
-  vecstore(payload(ndN, 0), payload(pos, 0), newv);
-  vecstore(payload(nnN, 0), payload(pos, 0), field);
-  return mkval(14, vecaddr(payload(ndN, 0), 0), reclen(rec) + 1, vecaddr(payload(nnN, 0), 0));
+  vecstore(vecbody(ndN), payload(pos, 0), newv);
+  vecstore(vecbody(nnN), payload(pos, 0), field);
+  return mkval(14, vecaddr(vecbody(ndN), 0), reclen(rec) + 1, vecaddr(vecbody(nnN), 0));
 }
 
 defun Rt.recInsert(rec : val, field : val, newv : val) -> val {
@@ -2136,7 +2136,7 @@ defun Rt.recToChainGo(rec : val, i : val, acc : val) -> val {
   if (mkbool(payload(i, 0) >= reclen(rec))) {
     return acc;
   }
-  return call Rt.recToChainGo(rec, mknum(payload(i, 0) + 1), call Rt.cons(call Rt.@p(vecload(payload(rec, 2), payload(i, 0)), vecload(payload(rec, 0), payload(i, 0))), acc));
+  return call Rt.recToChainGo(rec, mknum(payload(i, 0) + 1), call Rt.cons(call Rt.@p(vecload(payload(rec, 2), payload(i, 0)), vecload(vecbody(rec), payload(i, 0))), acc));
 }
 
 defun Rt.absvector(cnt : val) -> val {
@@ -2145,12 +2145,12 @@ defun Rt.absvector(cnt : val) -> val {
 }
 
 defun Rt.address->(vec : val, i : val, x : val) -> val {
-  vecstore(payload(vec, 0), payload(i, 0), x);
+  vecstore(vecbody(vec), payload(i, 0), x);
   return vec;
 }
 
 defun Rt.<-address(vec : val, i : val) -> val {
-  return vecload(payload(vec, 0), payload(i, 0));
+  return vecload(vecbody(vec), payload(i, 0));
 }
 
 defun Rt.assoc(k : val, l : val) -> val {
@@ -2158,7 +2158,7 @@ defun Rt.assoc(k : val, l : val) -> val {
 }
 
 defun Rt.snd(x : val) -> val {
-  return vecload(payload(x, 0), 1);
+  return vecload(vecbody(x), 1);
 }
 
 // ==================== THE STRING-STREAM REGISTRY (O5) ====================
@@ -3137,58 +3137,58 @@ defun Rt.epSymIs(sym : val, litN : val, i : val) -> val {
 defun Rt.epCount(vv : val, stN : val, accN : val) -> val {
   word cbufW = [*Scratch](payload(stN, 0))->cbuf;
   word limW = [*Scratch](payload(stN, 0))->lim;
-  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(payload(vv, 0), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(payload(vv, 0), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(payload(vv, 0), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(payload(vv, 0), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
+  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(vecbody(vv), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(vecbody(vv), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(vecbody(vv), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(vecbody(vv), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
   if (mkbool(payload(stV, 0) == 2)) {
     return mknum(-1);
   }
   if (mkbool(payload(stV, 0) == 0)) {
     return accN;
   }
-  val t1 = vecload(payload(vecload(payload(vv, 0), 1), 0), 1);
+  val t1 = vecload(vecbody(vecload(vecbody(vv), 1)), 1);
   if (mkbool(payload(accN, 0) > limW)) {
     return accN;
   }
   if (mkbool(tagis(t1, 4) == 0)) {
     return mknum(-1);
   }
-  recur(vecload(payload(t1, 0), 0), stN, mknum(payload(accN, 0) + 1));
+  recur(vecload(vecbody(t1), 0), stN, mknum(payload(accN, 0) + 1));
 }
 
 defun Rt.epElem(vv : val, iN : val, tgtN : val) -> val {
   if (mkbool(tagis(vv, 4) == 0)) {
     return mknil;
   }
-  if (mkbool(tagis(vecload(payload(vv, 0), 1), 5) != 0)) {
+  if (mkbool(tagis(vecload(vecbody(vv), 1), 5) != 0)) {
     return mknil;
   }
-  if (mkbool(tagis(vecload(payload(vv, 0), 1), 4) == 0)) {
+  if (mkbool(tagis(vecload(vecbody(vv), 1), 4) == 0)) {
     return mknil;
   }
   if (mkbool(payload(iN, 0) == payload(tgtN, 0))) {
-    return vecload(payload(vecload(payload(vv, 0), 1), 0), 0);
+    return vecload(vecbody(vecload(vecbody(vv), 1)), 0);
   }
-  val t1 = vecload(payload(vecload(payload(vv, 0), 1), 0), 1);
+  val t1 = vecload(vecbody(vecload(vecbody(vv), 1)), 1);
   if (mkbool(tagis(t1, 4) == 0)) {
     return mknil;
   }
-  recur(vecload(payload(t1, 0), 0), mknum(payload(iN, 0) + 1), tgtN);
+  recur(vecload(vecbody(t1), 0), mknum(payload(iN, 0) + 1), tgtN);
 }
 
 defun Rt.epNum(vv : val, cbufN : val) -> val {
   if (mkbool(tagis(vv, 4) == 0)) {
     return mknil;
   }
-  if (mkbool(tagis(vecload(payload(vv, 0), 0), 2) == 0)) {
+  if (mkbool(tagis(vecload(vecbody(vv), 0), 2) == 0)) {
     return mknil;
   }
-  if (call Rt.epSymIs(vecload(payload(vv, 0), 0), mknum(payload(cbufN, 0) + 16), mknum(0))) {
-    if (mkbool(tagis(vecload(payload(vv, 0), 1), 4) == 0)) {
+  if (call Rt.epSymIs(vecload(vecbody(vv), 0), mknum(payload(cbufN, 0) + 16), mknum(0))) {
+    if (mkbool(tagis(vecload(vecbody(vv), 1), 4) == 0)) {
       return mknil;
     }
-    if (mkbool(tagis(vecload(payload(vecload(payload(vv, 0), 1), 0), 0), 0) == 0)) {
+    if (mkbool(tagis(vecload(vecbody(vecload(vecbody(vv), 1)), 0), 0) == 0)) {
       return mknil;
     }
-    return vecload(payload(vecload(payload(vv, 0), 1), 0), 0);
+    return vecload(vecbody(vecload(vecbody(vv), 1)), 0);
   }
   return mknil;
 }
@@ -3196,17 +3196,17 @@ defun Rt.epStr(vv : val, cbufN : val) -> val {
   if (mkbool(tagis(vv, 4) == 0)) {
     return mknil;
   }
-  if (mkbool(tagis(vecload(payload(vv, 0), 0), 2) == 0)) {
+  if (mkbool(tagis(vecload(vecbody(vv), 0), 2) == 0)) {
     return mknil;
   }
-  if (call Rt.epSymIs(vecload(payload(vv, 0), 0), mknum(payload(cbufN, 0) + 8), mknum(0))) {
-    if (mkbool(tagis(vecload(payload(vv, 0), 1), 4) == 0)) {
+  if (call Rt.epSymIs(vecload(vecbody(vv), 0), mknum(payload(cbufN, 0) + 8), mknum(0))) {
+    if (mkbool(tagis(vecload(vecbody(vv), 1), 4) == 0)) {
       return mknil;
     }
-    if (mkbool(tagis(vecload(payload(vecload(payload(vv, 0), 1), 0), 0), 1) == 0)) {
+    if (mkbool(tagis(vecload(vecbody(vecload(vecbody(vv), 1)), 0), 1) == 0)) {
       return mknil;
     }
-    return vecload(payload(vecload(payload(vv, 0), 1), 0), 0);
+    return vecload(vecbody(vecload(vecbody(vv), 1)), 0);
   }
   return mknil;
 }
@@ -3214,17 +3214,17 @@ defun Rt.epSymOf(vv : val, cbufN : val) -> val {
   if (mkbool(tagis(vv, 4) == 0)) {
     return mknil;
   }
-  if (mkbool(tagis(vecload(payload(vv, 0), 0), 2) == 0)) {
+  if (mkbool(tagis(vecload(vecbody(vv), 0), 2) == 0)) {
     return mknil;
   }
-  if (call Rt.epSymIs(vecload(payload(vv, 0), 0), mknum(payload(cbufN, 0) + 24), mknum(0))) {
-    if (mkbool(tagis(vecload(payload(vv, 0), 1), 4) == 0)) {
+  if (call Rt.epSymIs(vecload(vecbody(vv), 0), mknum(payload(cbufN, 0) + 24), mknum(0))) {
+    if (mkbool(tagis(vecload(vecbody(vv), 1), 4) == 0)) {
       return mknil;
     }
-    if (mkbool(tagis(vecload(payload(vecload(payload(vv, 0), 1), 0), 0), 2) == 0)) {
+    if (mkbool(tagis(vecload(vecbody(vecload(vecbody(vv), 1)), 0), 2) == 0)) {
       return mknil;
     }
-    return vecload(payload(vecload(payload(vv, 0), 1), 0), 0);
+    return vecload(vecbody(vecload(vecbody(vv), 1)), 0);
   }
   return mknil;
 }
@@ -3267,21 +3267,21 @@ defun Rt.epProgGo(vv : val, stN : val, progN : val) -> val {
   word cbufW = [*Scratch](payload(stN, 0))->cbuf;
   word iW = [*Prog](payload(progN, 0))->nchains;
   word chainsW = [*Prog](payload(progN, 0))->chains;
-  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(payload(vv, 0), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(payload(vv, 0), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(payload(vv, 0), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(payload(vv, 0), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
+  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(vecbody(vv), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(vecbody(vv), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(vecbody(vv), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(vecbody(vv), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
   if (mkbool(payload(stV, 0) == 2)) {
     return mknum(-1);
   }
   if (mkbool(payload(stV, 0) == 0)) {
     return mknum(0);
   }
-  val t1 = vecload(payload(vecload(payload(vv, 0), 1), 0), 1);
+  val t1 = vecload(vecbody(vecload(vecbody(vv), 1)), 1);
   word chAddr = chainsW + (iW * 16);
-  val r = call Rt.epChain(vecload(payload(vecload(payload(vv, 0), 1), 0), 0), stN, mknum(chAddr));
+  val r = call Rt.epChain(vecload(vecbody(vecload(vecbody(vv), 1)), 0), stN, mknum(chAddr));
   if (mkbool(payload(r, 0) < 0)) {
     return mknum(-1);
   }
   [*Prog](payload(progN, 0))->nchains = iW + 1;
-  recur(vecload(payload(t1, 0), 0), stN, progN);
+  recur(vecload(vecbody(t1), 0), stN, progN);
 }
 
 defun Rt.epChain(e : val, stN : val, chAddrN : val) -> val {
@@ -3348,28 +3348,28 @@ defun Rt.epPipeGo(vv : val, stN : val, pipeN : val) -> val {
   word cbufW = [*Scratch](payload(stN, 0))->cbuf;
   word iW = [*Pipe](payload(pipeN, 0))->ncmds;
   word cmdsW = [*Pipe](payload(pipeN, 0))->cmds;
-  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(payload(vv, 0), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(payload(vv, 0), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(payload(vv, 0), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(payload(vv, 0), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
+  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(vecbody(vv), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(vecbody(vv), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(vecbody(vv), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(vecbody(vv), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
   if (mkbool(payload(stV, 0) == 2)) {
     return mknum(-1);
   }
   if (mkbool(payload(stV, 0) == 0)) {
     return mknum(0);
   }
-  val t1 = vecload(payload(vecload(payload(vv, 0), 1), 0), 1);
+  val t1 = vecload(vecbody(vecload(vecbody(vv), 1)), 1);
   word cAddr = cmdsW + (iW * 40);
-  val r = call Rt.epCmd(vecload(payload(vecload(payload(vv, 0), 1), 0), 0), stN, mknum(cAddr));
+  val r = call Rt.epCmd(vecload(vecbody(vecload(vecbody(vv), 1)), 0), stN, mknum(cAddr));
   if (mkbool(payload(r, 0) < 0)) {
     return mknum(-1);
   }
   [*Pipe](payload(pipeN, 0))->ncmds = iW + 1;
-  recur(vecload(payload(t1, 0), 0), stN, pipeN);
+  recur(vecload(vecbody(t1), 0), stN, pipeN);
 }
 
 defun Rt.epArgvGo(vv : val, stN : val, cAddrN : val) -> val {
   word cbufW = [*Scratch](payload(stN, 0))->cbuf;
   word argvW = [*CmdState](payload(cAddrN, 0))->argv;
   word jW = [*CmdState](payload(cAddrN, 0))->argc;
-  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(payload(vv, 0), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(payload(vv, 0), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(payload(vv, 0), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(payload(vv, 0), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
+  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(vecbody(vv), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(vecbody(vv), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(vecbody(vv), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(vecbody(vv), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
   if (mkbool(payload(stV, 0) == 2)) {
     call Rt.epFreeArgv(mknum([*CmdState](payload(cAddrN, 0))->argv), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->argc));
     [*CmdState](payload(cAddrN, 0))->argv = 0;
@@ -3378,7 +3378,7 @@ defun Rt.epArgvGo(vv : val, stN : val, cAddrN : val) -> val {
   if (mkbool(payload(stV, 0) == 0)) {
     return mknum(0);
   }
-  val sN = call Rt.epStr(vecload(payload(vecload(payload(vv, 0), 1), 0), 0), mknum(cbufW));
+  val sN = call Rt.epStr(vecload(vecbody(vecload(vecbody(vv), 1)), 0), mknum(cbufW));
   if (mkbool(tagis(sN, 1) == 0)) {
     call Rt.epFreeArgv(mknum([*CmdState](payload(cAddrN, 0))->argv), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->argc));
     [*CmdState](payload(cAddrN, 0))->argv = 0;
@@ -3394,20 +3394,20 @@ defun Rt.epArgvGo(vv : val, stN : val, cAddrN : val) -> val {
   call Rt.cStrFill(mknum(bufW), sN, mknum(0));
   wstore(argvW, jW, bufW);
   [*CmdState](payload(cAddrN, 0))->argc = jW + 1;
-  val t1 = vecload(payload(vecload(payload(vv, 0), 1), 0), 1);
+  val t1 = vecload(vecbody(vecload(vecbody(vv), 1)), 1);
   if (mkbool(tagis(t1, 4) == 0)) {
     call Rt.epFreeArgv(mknum([*CmdState](payload(cAddrN, 0))->argv), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->argc));
     [*CmdState](payload(cAddrN, 0))->argv = 0;
     return mknum(-1);
   }
-  recur(vecload(payload(t1, 0), 0), stN, cAddrN);
+  recur(vecload(vecbody(t1), 0), stN, cAddrN);
 }
 
 defun Rt.epRedirsGo(vv : val, stN : val, cAddrN : val) -> val {
   word cbufW = [*Scratch](payload(stN, 0))->cbuf;
   word arrW = [*CmdState](payload(cAddrN, 0))->redirs;
   word jW = [*CmdState](payload(cAddrN, 0))->nredirs;
-  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(payload(vv, 0), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(payload(vv, 0), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(payload(vv, 0), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(payload(vv, 0), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
+  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(vecbody(vv), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(vecbody(vv), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(vecbody(vv), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(vecbody(vv), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
   if (mkbool(payload(stV, 0) == 2)) {
     call Rt.epFreeRedirs(mknum([*CmdState](payload(cAddrN, 0))->redirs), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->nredirs));
     [*CmdState](payload(cAddrN, 0))->redirs = 0;
@@ -3417,8 +3417,8 @@ defun Rt.epRedirsGo(vv : val, stN : val, cAddrN : val) -> val {
     return mknum(0);
   }
   word rAddr = arrW + (jW * 48);
-  val r = call Rt.epRedir(vecload(payload(vecload(payload(vv, 0), 1), 0), 0), stN, mknum(rAddr));
-  val t1 = vecload(payload(vecload(payload(vv, 0), 1), 0), 1);
+  val r = call Rt.epRedir(vecload(vecbody(vecload(vecbody(vv), 1)), 0), stN, mknum(rAddr));
+  val t1 = vecload(vecbody(vecload(vecbody(vv), 1)), 1);
   if (mkbool(payload(r, 0) < 0)) {
     call Rt.epFreeRedirs(mknum([*CmdState](payload(cAddrN, 0))->redirs), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->nredirs));
     [*CmdState](payload(cAddrN, 0))->redirs = 0;
@@ -3430,7 +3430,7 @@ defun Rt.epRedirsGo(vv : val, stN : val, cAddrN : val) -> val {
     [*CmdState](payload(cAddrN, 0))->redirs = 0;
     return mknum(-1);
   }
-  recur(vecload(payload(t1, 0), 0), stN, cAddrN);
+  recur(vecload(vecbody(t1), 0), stN, cAddrN);
 }
 
 defun Rt.epRedir(e : val, stN : val, rAddrN : val) -> val {
@@ -7087,7 +7087,7 @@ defun Rt.epCmd(e : val, stN : val, cAddrN : val) -> val {
       return mknum(0);
     };
     if (mkbool(payload(rgo, 0) < 0)) { return mknum(-1); }
-    val subState = mkbool(tagis(subv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(payload(subv, 0), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(payload(subv, 0), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(payload(subv, 0), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(payload(subv, 0), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
+    val subState = mkbool(tagis(subv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(vecbody(subv), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(vecbody(subv), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(vecbody(subv), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(vecbody(subv), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
     if (mkbool(payload(subState, 0) == 2)) {
       val _u48 = if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
         return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum([*Prog]([*CmdState](payload(cAddrN, 0))->subprog)->chains), mknum(0));
@@ -10452,7 +10452,7 @@ defun Rt.apply-at(cN : val, bufN : val, nargsN : val) -> val {
 // is the only thing that reads it.
 defun Rt.hostCall(hN : val, contAddrN : val, nargsN : val) -> val {
   word h = payload(hN, 0);
-  val r = call Rt.apply-at(vecload(payload(contAddrN, 0), 0), mknum(h + 8 + (33027 * 40)), nargsN);
+  val r = call Rt.apply-at(vecload(vecbody(contAddrN), 0), mknum(h + 8 + (33027 * 40)), nargsN);
   vecstore(h + 8 + (33029 * 40), 0, r);
   return mknil;
 }
@@ -10603,7 +10603,7 @@ defun Rt.hostDispatch(hN : val, iN : val) -> val {
   if (len < 1) {
     return call Rt.hostDeactivate(hN, iN);
   }
-  val tag = vecload(payload(task, 0), 0);
+  val tag = vecload(vecbody(task), 0);
   if (tagis(tag, 2) == 0) {
     return call Rt.hostDeactivate(hN, iN);
   }

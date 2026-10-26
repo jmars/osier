@@ -2729,6 +2729,14 @@ buildBuiltin b es =
         VecAddr ->
             build2 (\vec idx -> Unsafe (RawVecAddr { vec = vec, index = idx })) es
 
+        VecBody ->
+            -- The element BASE of a Value (perf word-arm-area3rt).  It stays a
+            -- NODE rather than being expanded here into `payload(v, 0)`: the
+            -- val arm's payload word 0 and the word arm's "untag, step past the
+            -- header" are different arithmetic, and only Lower knows the arm
+            -- (this pass runs before it, under both).
+            build1 (\v -> Unsafe (RawVecBody { value = v })) es
+
         VecStore ->
             build3 (\vec idx v -> Unsafe (RawVecStore { vec = vec, index = idx, value = v })) es
 

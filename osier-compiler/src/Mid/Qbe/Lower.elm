@@ -886,6 +886,19 @@ wordArmUnported exp =
                 RawVecStore _ ->
                     Nothing
 
+                -- AREA 3 (PAYLOAD ACCESS), the ELEMENT-BASE half (perf
+                -- word-arm-area3rt).  `vecbody` is the base every `vecload`/
+                -- `vecstore`/`vecaddr` wants, and it is admitted because its
+                -- two arms are the same arithmetic the val arm already emitted
+                -- (see `RawVecBody`'s emit site).  `RawVecAddr` was refused by
+                -- the `_` fallback below, not by its own emit site, so it is
+                -- named here too — its arm is unchanged (it is `elemAddr`).
+                RawVecBody _ ->
+                    Nothing
+
+                RawVecAddr _ ->
+                    Nothing
+
                 _ ->
                     Just (wordArea (wordAreaName exp) (wordAreaWhat exp))
 
@@ -1712,6 +1725,9 @@ rawOperands node =
 
         RawVecAddr r ->
             [ r.vec, r.index ]
+
+        RawVecBody r ->
+            [ r.value ]
 
         RawVecStore r ->
             [ r.vec, r.index, r.value ]
@@ -3455,11 +3471,17 @@ lowerRawVal node dest s =
         RawVecLoad load ->
             -- Element i's VALUE, blitted into the dest slot (a load never
             -- barriers).
-            if wordArm s then
-                Err (wordVecRefusal s.defunKey "vecload")
-
-            else
-                rawWordArg load.vec s
+            --
+            -- AREA 3 (perf word-arm-area3rt): the ARM IS UNCHANGED — `elemAddr`
+            -- strides by the layout and the blit width is `valSizeBytes`, so at
+            -- 8 bytes this copies the one word that IS the element.  What the
+            -- refusal that used to stand here was really about is the BASE: a
+            -- word-arm site that computed one with `payload(v, 0)` gets element
+            -- 0, not an array.  That is fixed at the SITES (runtime.mid's
+            -- `vecbody(v)`, which is `payload(v, 0)` on the val arm and the
+            -- BODY on the word arm), not by refusing the node — and the audit
+            -- that makes it total is `vecbody`'s own contract.
+            rawWordArg load.vec s
                 |> Result.andThen
                     (\( vecT, s1 ) ->
                         rawWordArg load.index s1
@@ -3479,11 +3501,14 @@ lowerRawVal node dest s =
             -- first — its address is the argument.
             -- `dest` is deliberately IGNORED: this node is an effect, and its
             -- let binder's slot stays zero (a valid Value; nothing reads it).
-            if wordArm s then
-                Err (wordVecRefusal s.defunKey "vecstore")
-
-            else
-                rawWordArg store.vec s
+            -- AREA 3 (perf word-arm-area3rt): admitted on the same argument as
+            -- RawVecLoad — the BASE is the sites' business (`vecbody`), and the
+            -- seam (`Rt.vecStorePlain`/`Rt.vecStoreYoung`) is already twinned:
+            -- 8-byte stride, one word stored, the barrier reading the block
+            -- header at `-2` off the BODY.  The stored value is lowered into a
+            -- fresh ROOTED slot first — its address is the argument, and it is
+            -- an 8-byte slot on this arm.
+            rawWordArg store.vec s
                 |> Result.andThen
                     (\( vecT, s1 ) ->
                         rawWordArg store.index s1
@@ -3756,6 +3781,9 @@ lowerRawVal node dest s =
             Err wordProducerMessage
 
         RawVecAddr _ ->
+            Err wordProducerMessage
+
+        RawVecBody _ ->
             Err wordProducerMessage
 
         -- step 5's word producers (and the float words, a class over) never
@@ -4428,6 +4456,119 @@ wordPayloadWord base word s0 =
     ( Il.Tmp r, s17 )
 
 
+{-| AREA 3 (PAYLOAD ACCESS), THE ELEMENT BASE ON THE WORD ARM (perf
+word-arm-area3rt).
+
+`vecbody(v)` answers "where do this Value's elements start", and on the word arm
+the answer depends on the SHAPE, exactly as a payload read does:
+
+  * `...000` fixnum: the payload IS the base word — this is how a raw C pointer
+    travels through the runtime (`mknum(ptr)`), so it is returned
+    arithmetic-shifted DOWN out of the tag bits (`SAR`), the exact inverse of
+    the write.  A site that handed `payload(v, 0)` to `vecload` on the val arm
+    was doing the same thing for the same reason.
+  * `...001` heap object: the BODY — untag (`AND untagMask`), then step past the
+    2-word header.  NOT a payload LOAD: the body's first word IS element 0 on
+    this arm, so handing element 0 to `vecload` would use a tagged value as an
+    address, which is the mixed-representation read this arm exists to prevent.
+  * anything else (nil, true, false, error, reserved): REFUSE, loudly.  An
+    immediate has no elements, so the val arm's blind `payload(v, 0)` here would
+    read another layout's bytes.
+
+The branch structure and the single result temp are `wordPayloadWord`'s (QBE has
+no `phi`, so each arm assigns `r` and the join reads it) — the two functions are
+SIBLINGS and deliberately not folded into one: a payload read returns the VALUE
+WORD at a body unit, this returns the ADDRESS of body unit 0.
+-}
+wordVecBody : Il.Arg -> S -> ( Il.Arg, S )
+wordVecBody base s0 =
+    let
+        ( l, s1 ) =
+            wordValueWord base s0
+
+        ( t, s2 ) =
+            freshTmp s1
+
+        ( isFix, s3 ) =
+            freshTmp s2
+
+        ( isHeap, s4 ) =
+            freshTmp s3
+
+        ( heapLbl, s5 ) =
+            freshLbl "bheap" s4
+
+        ( badLbl, s6 ) =
+            freshLbl "bbad" s5
+
+        ( joinLbl, s7 ) =
+            freshLbl "bjoin" s6
+
+        ( fixLbl, s8 ) =
+            freshLbl "bfix" s7
+
+        ( chkLbl, s9 ) =
+            freshLbl "bchk" s8
+
+        ( r, s10 ) =
+            freshTmp s9
+
+        ( msgName, s11 ) =
+            freshData ("msg:" ++ wordVecBodyRefusal)
+                (\n -> { name = n, align = Just 8, items = [ DStr wordVecBodyRefusal, DByte 0 ], export_ = False })
+                s10
+
+        -- 1. the tag, and the FIRST branch: a fixnum (a base word) or not.
+        s12 =
+            s11
+                |> emit (Bin (Just t) W And (Il.Tmp l) (Il.Con s11.layout.tagMask))
+                |> emit (Cmp (Just isFix) W Ceq (Il.Tmp t) (Il.Con s11.layout.tagNumber))
+                |> closeBlock (Jnz (Il.Tmp isFix) fixLbl chkLbl)
+                |> startBlock chkLbl
+
+        -- 2. a heap object, or the loud refusal.
+        s13 =
+            s12
+                |> emit (Cmp (Just isHeap) W Ceq (Il.Tmp t) (Il.Con (RtLayout.heapPtrTag s12.layout)))
+                |> closeBlock (Jnz (Il.Tmp isHeap) heapLbl badLbl)
+                |> startBlock badLbl
+                |> emit (Call Nothing (Base L) (Il.Sym ("q_" ++ mangle "Rt.die")) [ ArgVal (Base L) (Il.Sym msgName) ])
+                |> closeBlock Hlt
+                |> startBlock heapLbl
+
+        -- 3. the heap arm: untag, then past the header.  `heapHeaderBytes` is
+        -- the POSITIVE size (the negative `heapHeaderOffset` is for a reader
+        -- standing on the body already); a base step adds it.
+        s14 =
+            let
+                ( u, sa ) =
+                    freshTmp s13
+            in
+            sa
+                |> emit (Bin (Just u) L And (Il.Tmp l) (Il.Con (RtLayout.untagMask sa.layout)))
+                |> emit (Bin (Just r) L Add (Il.Tmp u) (Il.Con (RtLayout.heapHeaderBytes sa.layout)))
+                |> jumpTo joinLbl
+
+        -- 4. the fixnum arm: shift the tag bits off.
+        s15 =
+            s14
+                |> startBlock fixLbl
+                |> emit (Bin (Just r) L Sar (Il.Tmp l) (Il.Con s12.layout.tagBits))
+                |> jumpTo joinLbl
+
+        s16 =
+            s15 |> startBlock joinLbl
+    in
+    ( Il.Tmp r, s16 )
+
+
+{-| The `vecbody` refusal's message: an immediate names no elements.  ASCII only
+(the emitted data item is a string the runtime prints). -}
+wordVecBodyRefusal : String
+wordVecBodyRefusal =
+    "qbe-rt: word arm: element base of a word that is neither a fixnum nor a heap object (...001) - an immediate (nil/true/false/error) has no elements, so a vecload/vecstore/vecaddr on it would read another layout's bytes. Refusing."
+
+
 {-| AREA C: THE WORD-ARM TAG TEST (`tagis(v, code)`), the reader VR3c's fix
 and its review named as the promissory note.
 
@@ -5038,11 +5179,13 @@ rawWordArg exp s =
                     )
 
         Unsafe (RawVecAddr addr) ->
-            if wordArm s then
-                Err (wordVecRefusal s.defunKey "vecaddr")
-
-            else
-                rawWordArg addr.vec s
+            -- AREA 3 (PAYLOAD ACCESS), the ELEMENT-ADDRESS half (perf
+            -- word-arm-area3rt).  The arm is UNCHANGED and it is `elemAddr`'s:
+            -- it strides by the LAYOUT, so at 8 bytes it is the word arm's
+            -- element address.  What was missing was not this node but a way to
+            -- produce the BASE it takes — `RawVecBody`, which is why the
+            -- refusal this arm used to raise is gone rather than relaxed.
+            rawWordArg addr.vec s
                 |> Result.andThen
                     (\( vecT, s1 ) ->
                         rawWordArg addr.index s1
@@ -5055,6 +5198,45 @@ rawWordArg exp s =
                                     ( Il.Tmp eT, s3 )
                                 )
                     )
+
+        Unsafe (RawVecBody body) ->
+            -- THE ELEMENT BASE of a Value (perf word-arm-area3rt).
+            --
+            -- THE VAL ARM IS THE SAME EMIT AS `payload(v, 0)` — same temps, same
+            -- ops, same order — so every runtime site rewritten to `vecbody(v)`
+            -- emits the val arm's .ssa BYTE FOR BYTE.  That is what keeps the
+            -- corpus at 159/159 with NO re-freeze; a rewrite that emitted
+            -- anything else here would MOVE the val arm, which is exactly the
+            -- defect the corpus exists to catch.
+            --
+            -- THE WORD ARM is the SHAPE fork `wordPayloadWord` makes, one step
+            -- earlier: a fixnum's payload IS the base word (a `mknum(ptr)` Value
+            -- carries a raw C pointer, and the runtime's staging buffers travel
+            -- that way), a heap object's base is its BODY (untag, then past the
+            -- 2-word header), and an immediate has neither — so it refuses
+            -- loudly, as a payload read does.  Note what is NOT here: no
+            -- `payloadWordOffset`, because on this arm a payload word is not a
+            -- shifted field of a 40-byte record.
+            if wordArm s then
+                rawValueBase body.value s
+                    |> Result.map (\( base, s1 ) -> wordVecBody base s1)
+
+            else
+                rawValueBase body.value s
+                    |> Result.map
+                        (\( base, s1 ) ->
+                            let
+                                ( aT, s2 ) =
+                                    freshTmp s1
+
+                                ( t, s3 ) =
+                                    freshTmp s2
+                            in
+                            ( Il.Tmp t
+                            , emit (Bin (Just aT) L Add base (Il.Con (RtLayout.payloadWordOffset s.layout 0))) s3
+                                |> emit (Load (Just t) L LoadL (Il.Tmp aT))
+                            )
+                        )
 
         Unsafe (RawTagOf v) ->
             -- S2 (VR3b3 FIX): REFUSED under the word arm.  `tagof` promises the
@@ -6050,6 +6232,9 @@ rawNodeName node =
 
         RawVecAddr _ ->
             "rawVecAddr"
+
+        RawVecBody _ ->
+            "rawVecBody"
 
         RawVecStore _ ->
             "rawVecStore"
@@ -7891,6 +8076,9 @@ isRawWordExp abi exp =
                 RawVecAddr _ ->
                     True
 
+                RawVecBody _ ->
+                    True
+
                 RawTagOf _ ->
                     True
 
@@ -8278,6 +8466,9 @@ isWordCondNode abi node =
             True
 
         RawVecAddr _ ->
+            True
+
+        RawVecBody _ ->
             True
 
         RawAllocVector _ ->

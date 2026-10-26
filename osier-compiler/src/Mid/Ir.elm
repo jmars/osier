@@ -424,6 +424,11 @@ type ValuePath
 --     temp, not a root): the builder fills/stores before the next
 --     allocation, and an unfilled element must never be scanned — the same
 --     contract values.zig's valVector/valCons bodies obey.
+--   * `RawVecBody` — the ELEMENT BASE of a Value (perf word-arm-area3rt): the
+--     val arm's `payload(v, 0)` (its element array), the word arm's BODY
+--     address.  It is what `vecload`/`vecstore`/`RawVecAddr` actually want,
+--     and it is the one place "where do this object's elements start" is
+--     answered for both representations.
 --   * `RawStrByte` — byte i of a string Value (str.data[i]).  LOWERED since
 --     step 5 (data pointer via RawPayload word 0, loadub, zero-extended —
 --     the first string prim sized it, exactly as the spike predicted).
@@ -459,6 +464,27 @@ type UnsafeNode
     | RawVecLoad { vec : Exp, index : Exp }
     | RawVecAddr { vec : Exp, index : Exp }
     | RawVecStore { vec : Exp, index : Exp, value : Exp }
+    | -- ===== AREA 3 (PAYLOAD ACCESS), the word arm's ELEMENT BASE (perf
+      -- word-arm-area3rt).  The ADDRESS of element 0 of the object a Value
+      -- names: the val arm's `payload(v, 0)` (a vector/record keeps its
+      -- elements in a SEPARATE array, so its payload word 0 IS that array's
+      -- base) and, on the word arm, the object's BODY (untag + the 2-word
+      -- header) — because a word-arm vector's elements are INLINE.
+      --
+      -- WHY IT IS A NODE AND NOT A MACRO: the two arms need different
+      -- ARITHMETIC (a fixnum's payload vs a header step), so the choice is
+      -- `Lower`'s (which knows the arm), not `LowerToIr`'s (which does not).
+      -- WHY IT EXISTS AT ALL: `vecload`/`vecstore`/`vecaddr` take a RAW
+      -- ELEMENT-ARRAY ADDRESS, and every runtime site produced one with
+      -- `payload(v, 0)` — an expression that means "the array base" on the val
+      -- arm and "element 0" on the word arm.  One node states the base
+      -- question once, so ~200 sites do not each re-answer it.
+      --
+      -- IT IS ALSO THE FIXNUM CASE: a `mknum(ptr)` Value carries a raw C
+      -- pointer as its payload, and `vecbody` of it is that pointer on BOTH
+      -- arms — which is why the rewrite is TOTAL over the runtime's sites and
+      -- needs no per-site judgment about which Values are heap vectors.
+      RawVecBody { value : Exp }
     | RawStrByte { str : Exp, index : Exp }
     | WithRoots { binders : List Binder, body : Exp }
     | -- ===== STEP 5 (osier-midprims): the SCALAR + STRING nodes the prim

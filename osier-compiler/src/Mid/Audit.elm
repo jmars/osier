@@ -227,6 +227,9 @@ describe node =
         RawVecAddr _ ->
             "rawVecAddr (element address)"
 
+        RawVecBody _ ->
+            "rawVecBody (element base)"
+
         RawVecStore _ ->
             "rawVecStore (write-barrier contract)"
 

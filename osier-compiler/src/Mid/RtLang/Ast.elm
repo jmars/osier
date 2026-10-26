@@ -1282,6 +1282,7 @@ type Builtin
     | TagIs
     | VecLoad
     | VecAddr
+    | VecBody
     | VecStore
     | StrByte
     | ByteLoad
@@ -1342,6 +1343,13 @@ the DSL helper that builds the node):
   * VecLoad    `[word,word] -> val`   RawVecLoad (vec is a raw ADDRESS —
     the DSL's `wOf l` feeding carV/cdrV — and the result is a blitted VALUE)
   * VecAddr    `[word,word] -> word`  RawVecAddr
+  * VecBody    `[val] -> word`        RawVecBody — the ELEMENT BASE of a
+    Value: the val arm's `payload(v, 0)` (the separate element array) and the
+    word arm's BODY address (a word-arm vector's elements are INLINE).  This
+    is the address `vecload`/`vecstore`/`vecaddr` want, so a site that read
+    one with `payload(v, 0)` says what it MEANS instead of what the val arm
+    happens to store there.  A `mknum(ptr)` Value yields the pointer on both
+    arms, so the rewrite is total over the runtime's sites.
   * VecStore   `[word,word,val] -> val`  RawVecStore — EFFECT: Lower ignores
     the dest (the binder slot stays zero); typed val because that is what
     the slot holds, read it and you get the DSL's dead-binder mistake
@@ -1411,6 +1419,9 @@ builtinClass b =
 
         VecAddr ->
             Sig [ TWord, TWord ] TWord
+
+        VecBody ->
+            Sig [ TVal ] TWord
 
         VecStore ->
             Sig [ TWord, TWord, TVal ] TVal
@@ -1519,6 +1530,9 @@ builtinName b =
 
         VecAddr ->
             "vecaddr"
+
+        VecBody ->
+            "vecbody"
 
         VecStore ->
             "vecstore"
@@ -1833,6 +1847,7 @@ allBuiltins =
     , TagIs
     , VecLoad
     , VecAddr
+    , VecBody
     , VecStore
     , StrByte
     , ByteLoad

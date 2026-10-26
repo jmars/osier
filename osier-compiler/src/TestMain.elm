@@ -111,11 +111,11 @@ checks rt rawMidText =
         )
     , check "gc-fixes2 F1: the four equality loops are recur-on-mismatch, not per-byte/per-element `&& call Rt.<self>` recursion (the 179.4s 8-MiB SIGSEGV's shape: 14,888 bytesEqGo frames)"
         (String.contains "recur(a, bb, mknum(payload(i, 0) + 1));" runtimeMidText
-            && String.contains "recur(vecload(payload(a, 0), 1), vecload(payload(bb, 0), 1));" runtimeMidText
+            && String.contains "recur(vecload(vecbody(a), 1), vecload(vecbody(bb), 1));" runtimeMidText
             && not (String.contains "&& call Rt.bytesEqGo(a, bb, mknum(payload(i, 0) + 1))" runtimeMidText)
             && not (String.contains "&& call Rt.symEq(a, bb, mknum(payload(i, 0) + 1))" runtimeMidText)
             && not (String.contains "&& call Rt.vecEq(a, bb, mknum(payload(i, 0) + 1))" runtimeMidText)
-            && not (String.contains "&& call Rt.deepEq(vecload(payload(a, 0), 1), vecload(payload(bb, 0), 1))" runtimeMidText)
+            && not (String.contains "&& call Rt.deepEq(vecload(vecbody(a), 1), vecload(vecbody(bb), 1))" runtimeMidText)
         )
     , check "utf8ByteLength 'héllo' == 6" (utf8ByteLength "héllo" == 6)
     , check "utf8ByteLength '🦀' == 4" (utf8ByteLength "🦀" == 4)
@@ -1893,25 +1893,28 @@ checks rt rawMidText =
         )
     , check "VR3b3 (supersedes VR3b2's wholesale gate) - THE Rt SURFACE IS CLASSIFIED PER DEFUN, AND STILL REFUSES. VR3b2 refused any program reaching `runtime.mid` wholesale because the runtime's stride-carrying defuns assumed 40-byte values; VR3c twinned those strides, so the blanket reason went stale and the refusal reported the LANE instead of the CONSTRUCT. The Rt set now gets the SAME pre-walk classifier the surface does: the refusal names the first un-ported Rt defun and its construct (`Rt.<key>: AREA ...`), and NOTHING is relaxed - an un-ported construct anywhere in the reachable Rt set still refuses before any IL is produced, which is why the SAME program still lowers on the val arm and still refuses on the word arm"
         (case
-            ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.copyWords"
-            , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.copyWords"
+            ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.con"
+            , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities (driverProg rt)) (driverProg rt) "Rt.con"
             )
          of
             ( Err msg, Ok _ ) ->
-                -- AREA 6 PORTED THE CALL ABI, so the first un-ported Rt
-                -- construct is no longer a call: it is the runtime's
-                -- CONSTRUCTION path (a heap cell / a vector element access —
-                -- AREA 3, whose `payload(x, 0)` is the val arm's "vector ->
-                -- separate array" shape and has no word-arm meaning).  The
-                -- ROW'S CLAIM is unchanged and is what it asserts: the refusal
-                -- is PER DEFUN and names the CONSTRUCT, never the lane.
-                String.contains "Rt." msg
-                    && String.contains "AREA " msg
+                -- MEASURED AT AREA 3 (perf word-arm-area3rt): the PRE-WALK no
+                -- longer names anything on this route — the vector/cons ACCESS
+                -- path is ported, so `wordRtUnported` finds no un-ported
+                -- construct and the refusal now comes from the CONSTRUCTION
+                -- path's CELL WRITER (`storeWordCell`), which is
+                -- `wordCellRefusal`'s judgment: a heap code whose body would
+                -- carry a raw word into a body the collector SCANS.  The
+                -- ROW'S CLAIM — a word-arm emit is refused BY CONSTRUCT, never
+                -- by the lane — is unchanged; what moved is which layer states
+                -- it.  The construct is still named (AREA 3 + the kind code),
+                -- and the blanket AREA 7 message is still absent.
+                String.contains "AREA " msg
                     && String.contains "NOT IMPLEMENTED" msg
                     && not (String.contains "AREA 7 (THE Rt SURFACE)" msg)
-                    && String.contains "AREA 3" msg
-                    && String.contains "Rt." msg
-                    && String.contains "vecstore" msg
+                    && String.contains "AREA 3 (HEAP-OBJECT CONSTRUCTION)" msg
+                    && String.contains "heap cell with the kind code" msg
+                    && String.contains "the layout has to be settled in runtime.mid's constructors" msg
 
             _ ->
                 False
@@ -11034,6 +11037,9 @@ b4Kids e =
                 RawVecAddr r ->
                     [ r.vec, r.index ]
 
+                RawVecBody r ->
+                    [ r.value ]
+
                 RawVecStore r ->
                     [ r.vec, r.index, r.value ]
 
@@ -13181,6 +13187,13 @@ cnode st node =
         RawVecAddr r ->
             cnode2 st r .vec .index RawVecAddr (\rec vec idx -> { rec | vec = vec, index = idx })
 
+        RawVecBody r ->
+            let
+                ( v, st1 ) =
+                    cexp st r.value
+            in
+            ( RawVecBody { r | value = v }, st1 )
+
         RawVecStore r ->
             cnode3 st r .vec .index .value RawVecStore (\rec a b c -> { rec | vec = a, index = b, value = c })
 
@@ -14863,6 +14876,9 @@ rawCallSyms exp =
 
                 RawVecAddr a ->
                     rawCallSyms a.vec ++ rawCallSyms a.index
+
+                RawVecBody b ->
+                    rawCallSyms b.value
 
                 RawVecStore st ->
                     rawCallSyms st.vec ++ rawCallSyms st.index ++ rawCallSyms st.value
