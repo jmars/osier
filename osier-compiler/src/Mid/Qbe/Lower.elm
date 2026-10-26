@@ -996,7 +996,7 @@ wordRtUnported defuns keys =
                             Lam lambda ->
                                 case wordArmUnported lambda.body of
                                     Just what ->
-                                        Debug.log ("WORDARMDUMP " ++ k ++ " :: " ++ what) (wordRtUnported defuns rest)
+                                        Just (k ++ ": " ++ what)
 
                                     Nothing ->
                                         wordRtUnported defuns rest
