@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# word-arm-diff.sh — THE ONLY ORACLE THAT SEES BOTH ARMS AT ONCE (perf
+# word-arm-area3rt).
+#
+# WHY THIS ROW EXISTS.  Every other word-arm instrument reads ONE arm: the text
+# pins assert the shape the author wrote, the corpus pins the val arm's bytes,
+# and word-arm-probe runs word-arm code against hand-written seats — none of them
+# compares the two REPRESENTATIONS.  They are SUPPOSED to differ (that is the
+# whole point of the arm), so a .ssa comparison is meaningless; the only shared
+# observable is the PROGRAM'S OUTPUT.
+#
+# WHAT IT DOES.  For each fixture: compile the same source TWICE — once on the
+# val arm (`QBE_ENTRY=M.main node run.js`) and once with `QBE_VALREP=word` —
+# assemble each through the SAME vendored qbe, link each with cc, RUN each with
+# the entry name, and gate on
+#   (a) both binaries building (a qbe or cc failure is a FAIL, not a skip),
+#   (b) IDENTICAL exit codes,
+#   (c) BYTE-IDENTICAL stdout,
+#   (d) the word-arm .ssa not being an `err ` payload (a refusal is not a run).
+# The exit code is part of the assertion because a wrong offset does not print
+# FAIL — it dies as SIGSEGV (139) or SIGABRT (134).
+#
+# Usage (from the repo root):  tools/qbe/word-arm-diff.sh
+# Exit: 0 = every fixture's two arms agreed; 1 = a mismatch or a build failure;
+#       2 = tooling missing.
+set -u
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+CDIR="$ROOT/osier-compiler"
+HERE="$ROOT/tools/qbe/word-arm-diff"
+QBE="$ROOT/vendor/qbe/qbe"
+
+[ -f "$CDIR/compiler.js" ] || { echo "word-arm-diff: $CDIR/compiler.js missing (run: osier-compiler/build.sh)" >&2; exit 2; }
+[ -x "$QBE" ] || { echo "word-arm-diff: $QBE missing (run: tools/qbe-build.sh)" >&2; exit 2; }
+command -v cc >/dev/null 2>&1 || { echo "word-arm-diff: cc missing" >&2; exit 2; }
+
+BUILD="$(mktemp -d "${TMPDIR:-/tmp}/word-arm-diff.XXXXXX")" || exit 2
+trap 'rm -rf "$BUILD"' EXIT
+
+fails=0
+for src in "$HERE"/*.elm; do
+  name="$(basename "$src" .elm)"
+  # the entry is the module's `main`, keyed by the module name in the source
+  mod="$(sed -n 's/^module \([A-Za-z0-9_]*\) .*/\1/p' "$src" | head -1)"
+  entry="$mod.main"
+
+  (cd "$CDIR" && QBE=1 QBE_ENTRY="$entry" node run.js "$src" "$BUILD/$name.val.ssa") >/dev/null 2>&1
+  (cd "$CDIR" && QBE_VALREP=word QBE_ENTRY="$entry" node run.js "$src" "$BUILD/$name.word.ssa") >/dev/null 2>&1
+
+  for arm in val word; do
+    ssa="$BUILD/$name.$arm.ssa"
+    if [ ! -s "$ssa" ]; then
+      echo "FAIL $name/$arm: no .ssa emitted"
+      fails=$((fails + 1))
+      continue
+    fi
+    case "$(head -c 4 "$ssa")" in
+      "err "*)
+        echo "FAIL $name/$arm: the compile REFUSED — $(head -c 200 "$ssa")"
+        fails=$((fails + 1))
+        continue
+        ;;
+    esac
+    if ! "$QBE" "$ssa" > "$BUILD/$name.$arm.s" 2> "$BUILD/$name.$arm.qerr"; then
+      echo "FAIL $name/$arm: qbe rejected the .ssa — $(head -1 "$BUILD/$name.$arm.qerr")"
+      fails=$((fails + 1))
+      continue
+    fi
+    if ! cc "$BUILD/$name.$arm.s" -o "$BUILD/$name.$arm" -lc 2> "$BUILD/$name.$arm.cerr"; then
+      echo "FAIL $name/$arm: cc failed — $(grep -m1 'undefined reference\|error' "$BUILD/$name.$arm.cerr")"
+      fails=$((fails + 1))
+      continue
+    fi
+  done
+
+  [ -x "$BUILD/$name.val" ] && [ -x "$BUILD/$name.word" ] || continue
+
+  "$BUILD/$name.val" "$entry" > "$BUILD/$name.val.out" 2>&1
+  vrc=$?
+  "$BUILD/$name.word" "$entry" > "$BUILD/$name.word.out" 2>&1
+  wrc=$?
+
+  if [ "$vrc" != "$wrc" ]; then
+    echo "FAIL $name: exit codes differ (val $vrc, word $wrc) — word stderr: $(head -1 "$BUILD/$name.word.out")"
+    fails=$((fails + 1))
+  elif ! cmp -s "$BUILD/$name.val.out" "$BUILD/$name.word.out"; then
+    echo "FAIL $name: stdout differs — val [$(cat "$BUILD/$name.val.out")] word [$(cat "$BUILD/$name.word.out")]"
+    fails=$((fails + 1))
+  else
+    echo "PASS $name: both arms exit $vrc and print the same bytes ($(wc -c < "$BUILD/$name.val.out") B)"
+  fi
+done
+
+if [ "$fails" != 0 ]; then
+  echo "word-arm-diff: $fails failure(s) — the two representations DISAGREE on a program's output"
+  exit 1
+fi
+exit 0

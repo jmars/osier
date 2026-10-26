@@ -3318,6 +3318,29 @@ fi
 # natural home: it already drives vendor qbe + cc, and the probe costs ~20 s.
 # Its own runner gates every probe on EXIT CODE, FAIL count and an exact PASS
 # count (a wrong offset dies as SIGSEGV/SIGABRT with no FAIL line).
+# ---- THE TWO ARMS' OUTPUTS MUST AGREE (perf word-arm-area3rt) ----
+# The companion row to word-arm-probe, and the only oracle in this file that
+# sees BOTH representations at once.  word-arm-probe runs word-arm code against
+# hand-written seats; this row compiles ONE source twice (val arm and
+# QBE_VALREP=word), assembles and links each, RUNS each, and requires identical
+# exit codes and byte-identical stdout.  A .ssa comparison would be meaningless —
+# the two representations are SUPPOSED to differ — so the program's OUTPUT is the
+# only shared observable.  It exists because the milestone it gates is the first
+# program the word arm ever ran: if a later twin moves a stride on either side,
+# this is the row that says so.
+if [ -x "$ROOT/tools/qbe/word-arm-diff.sh" ] && [ -d "$ROOT/tools/qbe/word-arm-diff" ]; then
+  if diff_out="$(TMPDIR="$TMP" "$ROOT/tools/qbe/word-arm-diff.sh" 2>&1)"; then
+    echo "PASS word-arm-diff: $(printf '%s\n' "$diff_out" | grep -c '^PASS ') program(s) RUN on BOTH arms with identical exit code and byte-identical stdout — the only row that compares the two representations"
+  else
+    echo "FAIL word-arm-diff: the two arms DISAGREE on a program's output (or one of them no longer builds)"
+    printf '%s\n' "$diff_out" | sed 's/^/    /'
+    FAIL=1
+  fi
+else
+  echo "FAIL word-arm-diff: tools/qbe/word-arm-diff.sh or its fixture dir is missing — the ONLY oracle that compares the two arms was deleted"
+  FAIL=1
+fi
+
 if [ -x "$ROOT/tools/qbe/word-arm-probe.sh" ]; then
   if probe_out="$(TMPDIR="$TMP" "$ROOT/tools/qbe/word-arm-probe.sh" 2>&1)"; then
     echo "PASS word-arm-probe: $(printf '%s\n' "$probe_out" | grep -c '^PASS ') probe(s) RUN and passed ($(printf '%s\n' "$probe_out" | grep -c '^PASS ') of $(printf '%s\n' "$probe_out" | grep -c '^PASS '), $(printf '%s\n' "$probe_out" | grep -oE '[0-9]+ checks' | grep -oE '^[0-9]+' | paste -sd+ | bc) checks) — the word arm's heap side AND its CALL ABI execute against the runtime's seat convention"
