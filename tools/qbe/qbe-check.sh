@@ -1306,6 +1306,97 @@ leak_apply_gate() {
 }
 leak_apply_gate
 
+# ---- THE GENERIC-APPLY TAIL CHAIN IS CONSTANT-STACK (the 2-frames-per-hop gate) ----
+# WHY THIS ROW EXISTS.  `clostail` is the ONE fixture whose chain routes through
+# the GENERIC apply path — main's tail call of a closure goes Rt.apply-tail ->
+# Rt.applyTailGo -> the callee, and every hop of the `f n` / `main (x-1)` pair
+# re-enters it.  Until this row existed it was checked only at n=5 (the `run
+# clostail` row above), where per-hop stack growth is INVISIBLE: 5 hops x 2.7 KB
+# is 13 KB.  What keeps that chain constant-stack is the .tail/bounce
+# TRAMPOLINE (a hop hands its .tail descriptor back to Rt.bounceGo, whose `recur`
+# loop runs the next hop after the previous hop's frames are GONE) — and NOTHING
+# gated it.  mutualtail/leaktail do not: they are STATIC chains that never route
+# through generic apply.  TestMain's B2 row pins that bounceGo is DELETED, not
+# that the stack is bounded.  So this is the only instrument on a property the
+# apply-chain rework must preserve (apply-chain-design.md §3), and it exists
+# BEFORE the deletion so a regression cannot land behind a green suite.
+#
+# THE BUDGET IS THE MUTUALTAIL DISCIPLINE: an OWNED 8 MiB stack
+# (`prlimit --stack=8388608`) + QBE_NO_RLIMIT=1, so the runtime's own 64 MiB
+# raise cannot mask growth.  `prlimit` (not a `( ulimit -s ... )` subshell) is
+# deliberate: it EXECS the binary, so /proc/$pid is the SUBJECT — a subshell
+# would make the sampler read bash's RSS and the bound would gate nothing.
+#
+# ASYMMETRY — MEASURED, both directions.  The mutation is the "relay scratch"
+# patch in Rt.applyTailGo's SATURATED arm: chase the hop's own .tail descriptor
+# through the hop's OWN frame (`Rt.bounceGo(...)`) and return a `.done` Ret,
+# instead of handing the descriptor back to the caller's trampoline — the
+# 2-frames-per-hop shape Q1b's blocked Stage 2 would have produced.  (It must
+# re-wrap as a `.done` Ret: apply-tail's rawAbi `ret` class cannot carry a
+# value, which is the C4 constraint that makes a tcall legal there only after
+# the class flip.)  Not runner-derivable, so it is recorded here and in the
+# handoff node, not repeated in CI.
+#   PASS (clean tree): n=1e6 -> rc 0, out "0", peak RSS 16276 kB; n=1e7 ->
+#     rc 0, 16276 kB.  FLAT across a 10x n: constant-stack, no per-hop leak.
+#   FAIL (relay patch, same tree): n=2000 -> rc 0; n=3000 -> rc 139 (SIGSEGV,
+#     no output) = ~2.7 KB of C stack per hop under the 8 MiB cap; n=1e5 and
+#     n=1e6 also rc 139.  n=0..2000 still print 0, so the build is CORRECT and
+#     the row is red on the STACK, not on a wrong answer.
+#
+# THE RSS HALF catches the other silent class: a forgotten rootPop/free on the
+# chain (the 32 B state / 80 B Ret / 640 B args buffer per hop).  The bound is
+# 32 MB = 2x the measured 16.28 MB peak (the GC heap, stable to +-30 kB over 5
+# runs), which fails on a >=16 B/hop leak at 1e6 hops and never flakes clean.
+clostail_gate() {
+  local fixture="$ROOT/tools/qbe/fixtures/clostail.elm" bin pid peak cur i out rc
+  [ -f "$fixture" ] || {
+    echo "FAIL clostail-big: $fixture is missing — the ONLY fixture whose tail chain routes through the generic apply path was deleted"
+    FAIL=1; return; }
+  [ -x "$ROOT/tools/qbe/qbe-mk.sh" ] || {
+    echo "FAIL clostail-big: tools/qbe/qbe-mk.sh is missing or not executable — no runner, so the apply chain's stack behaviour has no oracle"
+    FAIL=1; return; }
+  command -v prlimit >/dev/null 2>&1 || {
+    echo "FAIL clostail-big: prlimit is missing — the row cannot OWN an 8 MiB stack, and an inherited one measures nothing"
+    FAIL=1; return; }
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" ClosTail.main "$TMP/clostailbig")" || {
+    echo "FAIL clostail-big: qbe-mk"; FAIL=1; return; }
+  [ -x "$bin" ] || {
+    echo "FAIL clostail-big: qbe-mk produced no executable at $bin"; FAIL=1; return; }
+  QBE_NO_RLIMIT=1 prlimit --stack=8388608:8388608 "$bin" ClosTail.main 1000000 \
+    >"$TMP/clostailbig.out" 2>&1 &
+  pid=$!
+  peak=0
+  i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    cur="$(awk '/VmHWM/{print $2}' "/proc/$pid/status" 2>/dev/null)"
+    [ -n "$cur" ] && [ "$cur" -gt "$peak" ] && peak="$cur"
+    i=$((i + 1))
+    if [ "$i" -gt 3000 ]; then
+      kill "$pid" 2>/dev/null
+      echo "FAIL clostail-big: ClosTail.main(1e6) did not finish (killed after ~60s; the clean chain takes 0.3s)"
+      FAIL=1
+      wait "$pid" 2>/dev/null
+      return
+    fi
+    sleep 0.02
+  done
+  wait "$pid"
+  rc=$?
+  out="$(cat "$TMP/clostailbig.out")"
+  if [ "$rc" -ne 0 ] || [ "$out" != "0" ]; then
+    echo "FAIL clostail-big: ClosTail.main(1e6) under an OWNED 8 MiB stack exit=$rc out='$out' (golden 0) — the generic-apply tail chain grew the stack per hop (a relay instead of a tail call; see this row's comment for the measured asymmetry)"
+    FAIL=1
+    return
+  fi
+  if [ "$peak" -gt 32768 ]; then
+    echo "FAIL clostail-big: ClosTail.main(1e6) peak RSS ${peak}kB > 32MB — the apply chain leaks per hop (a forgotten rootPop/free on an apply arm)"
+    FAIL=1
+    return
+  fi
+  echo "PASS clostail-big: ClosTail.main(1e6) under an OWNED 8 MiB stack is constant-stack (rc 0, golden 0) and peak RSS ${peak}kB bounded (< 32MB)"
+}
+clostail_gate
+
 # ---- stage 4: arity > 8 (the old rt_callN table stopped at rt_call8) ----
 # arity9: a 9-ary defun called DIRECTLY from the driver (rt_call9).  arity9apply:
 # apply9 add9 -> f 1..9 where f is a Var, so the 9-ary call goes through
