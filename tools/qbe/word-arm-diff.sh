@@ -9,14 +9,27 @@
 # whole point of the arm), so a .ssa comparison is meaningless; the only shared
 # observable is the PROGRAM'S OUTPUT.
 #
+# WHAT IT CANNOT SEE, MEASURED (review BLOCKER 1).  A whole PROGRAM is the wrong
+# instrument for the emitter's ELEMENT paths: under the word arm an arg-taking
+# entry needs a `Lam`, which the surface lane refuses, so no fixture can
+# CONSTRUCT a heap vector/cons/float yet — the fixtures below exercise the boot
+# path and literal cells and nothing else.  MEASURED: flipping `wordVecBody`'s
+# heap arm to a 16-byte-wrong base left this row GREEN.  That gap is
+# `word-arm-probe`'s `vec` probe (a hand-built code-10 block driven through
+# `vecbody`), and the mutation that this row cannot see turns THAT red.  The two
+# rows are complements, not duplicates: this one proves the arms agree on a
+# program's OUTPUT, the probe proves the element machinery is right.
+#
 # WHAT IT DOES.  For each fixture: compile the same source TWICE — once on the
 # val arm (`QBE_ENTRY=M.main node run.js`) and once with `QBE_VALREP=word` —
 # assemble each through the SAME vendored qbe, link each with cc, RUN each with
 # the entry name, and gate on
 #   (a) both binaries building (a qbe or cc failure is a FAIL, not a skip),
 #   (b) IDENTICAL exit codes,
-#   (c) BYTE-IDENTICAL stdout,
-#   (d) the word-arm .ssa not being an `err ` payload (a refusal is not a run).
+#   (c) BYTE-IDENTICAL STDOUT (stderr is not compared — the exit code is),
+#   (d) the word-arm .ssa not being an `err ` payload (a refusal is not a run),
+#   (e) neither arm TIMING OUT: a wrong count or stride can loop instead of
+#       crashing, and a gate that hangs reports nothing.
 # The exit code is part of the assertion because a wrong offset does not print
 # FAIL — it dies as SIGSEGV (139) or SIGABRT (134).
 #
@@ -75,19 +88,27 @@ for src in "$HERE"/*.elm; do
 
   [ -x "$BUILD/$name.val" ] && [ -x "$BUILD/$name.word" ] || continue
 
-  "$BUILD/$name.val" "$entry" > "$BUILD/$name.val.out" 2>&1
+  # A TIMEOUT, AND IT FAILS (review SHOULD-FIX 1).  A wrong COUNT is exactly the
+  # class a wrong representation produces — and it does not crash, it LOOPS.  A
+  # gate that hangs is worse than one that reds: it burns the run and reports
+  # nothing.  `timeout` exits 124, which is != the other arm's code, so the
+  # comparison below turns it into a FAIL with the reason visible.
+  timeout 20 "$BUILD/$name.val" "$entry" > "$BUILD/$name.val.out" 2> "$BUILD/$name.val.err"
   vrc=$?
-  "$BUILD/$name.word" "$entry" > "$BUILD/$name.word.out" 2>&1
+  timeout 20 "$BUILD/$name.word" "$entry" > "$BUILD/$name.word.out" 2> "$BUILD/$name.word.err"
   wrc=$?
 
-  if [ "$vrc" != "$wrc" ]; then
-    echo "FAIL $name: exit codes differ (val $vrc, word $wrc) — word stderr: $(head -1 "$BUILD/$name.word.out")"
+  if [ "$vrc" = 124 ] || [ "$wrc" = 124 ]; then
+    echo "FAIL $name: TIMED OUT (val $vrc, word $wrc) — a wrong count/stride can loop instead of crashing; word stderr: $(head -1 "$BUILD/$name.word.err")"
+    fails=$((fails + 1))
+  elif [ "$vrc" != "$wrc" ]; then
+    echo "FAIL $name: exit codes differ (val $vrc, word $wrc) — word stderr: $(head -1 "$BUILD/$name.word.err")"
     fails=$((fails + 1))
   elif ! cmp -s "$BUILD/$name.val.out" "$BUILD/$name.word.out"; then
     echo "FAIL $name: stdout differs — val [$(cat "$BUILD/$name.val.out")] word [$(cat "$BUILD/$name.word.out")]"
     fails=$((fails + 1))
   else
-    echo "PASS $name: both arms exit $vrc and print the same bytes ($(wc -c < "$BUILD/$name.val.out") B)"
+    echo "PASS $name: both arms exit $vrc and print the same STDOUT bytes ($(wc -c < "$BUILD/$name.val.out") B; stderr is not compared, the exit code is)"
   fi
 done
 

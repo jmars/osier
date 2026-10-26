@@ -4745,10 +4745,12 @@ the answer depends on the SHAPE, exactly as a payload read does:
     arithmetic-shifted DOWN out of the tag bits (`SAR`), the exact inverse of
     the write.  A site that handed `payload(v, 0)` to `vecload` on the val arm
     was doing the same thing for the same reason.
-  * `...001` heap object: the BODY — untag (`AND untagMask`), then step past the
-    2-word header.  NOT a payload LOAD: the body's first word IS element 0 on
-    this arm, so handing element 0 to `vecload` would use a tagged value as an
-    address, which is the mixed-representation read this arm exists to prevent.
+  * `...001` heap object: the BODY — the untag (`AND untagMask`) and NOTHING
+    ELSE, because the seat-return convention already makes the untagged word the
+    body (`RtLayout` THE CONVENTION; `wordBodyOf` is the same one instruction).
+    NOT a payload LOAD: the body's first word IS element 0 on this arm, so
+    handing element 0 to `vecload` would use a tagged value as an address, which
+    is the mixed-representation read this arm exists to prevent.
   * anything else (nil, true, false, error, reserved): REFUSE, loudly.  An
     immediate has no elements, so the val arm's blind `payload(v, 0)` here would
     read another layout's bytes.
@@ -4814,17 +4816,25 @@ wordVecBody base s0 =
                 |> closeBlock Hlt
                 |> startBlock heapLbl
 
-        -- 3. the heap arm: untag, then past the header.  `heapHeaderBytes` is
-        -- the POSITIVE size (the negative `heapHeaderOffset` is for a reader
-        -- standing on the body already); a base step adds it.
+        -- 3. the heap arm: THE UNTAG **IS** THE BODY.  No header step.
+        --
+        -- THIS WAS WRONG AND THE `vec` PROBE CAUGHT IT (review BLOCKER 1's fix
+        -- earning its keep on its first run): the arm read
+        -- `(v AND untagMask) + heapHeaderBytes`, i.e. 16 bytes PAST the body —
+        -- element 2 where element 0 was asked for, on every heap object.  The
+        -- seat-return convention is what settles it: a seat returns
+        -- `mknum(BODY)` and the Value word is `body OR heapPtrTag`, so the
+        -- UNTAG *is* the body (`RtLayout`'s THE CONVENTION: body unit 0 is at
+        -- offset 0 from it, and the 2-word header sits `heapHeaderOffset` =
+        -- -16 BEFORE it).  `wordBodyOf` — what every payload read uses — is the
+        -- same one instruction, and a base cannot differ from it.
+        --
+        -- WHY NO ORACLE SAW IT: no word-arm program can construct a heap vector
+        -- yet, so the arm was unexecuted; the diff row runs programs and the
+        -- probe set had no element read.  Both are now closed.
         s14 =
-            let
-                ( u, sa ) =
-                    freshTmp s13
-            in
-            sa
-                |> emit (Bin (Just u) L And (Il.Tmp l) (Il.Con (RtLayout.untagMask sa.layout)))
-                |> emit (Bin (Just r) L Add (Il.Tmp u) (Il.Con (RtLayout.heapHeaderBytes sa.layout)))
+            s13
+                |> emit (Bin (Just r) L And (Il.Tmp l) (Il.Con (RtLayout.untagMask s13.layout)))
                 |> jumpTo joinLbl
 
         -- 4. the fixnum arm: shift the tag bits off.

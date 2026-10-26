@@ -127,6 +127,20 @@ static long *mk_block(int code, int scan, long w0, long w1)
     base[3] = w1;
     return base;
 }
+/* a block with THREE body words — what the vector probe needs (a code-10 block
+ * whose body IS its elements, so index 1 and 2 measure the STRIDE as well as
+ * the base).  The header's word 1 is the COUNT, which is where a word-arm
+ * vector's length lives. */
+static long *mk_block3(int code, int scan, long w0, long w1, long w2)
+{
+    long *base = calloc(1, 5 * 8);
+    base[0] = (long)((512L * 4L) + ((long)scan << 1) + ((long)code << 24));
+    base[1] = 3;
+    base[2] = w0;
+    base[3] = w1;
+    base[4] = w2;
+    return base;
+}
 /* the tagged Value word for a block whose BODY is base+2 */
 static long tagged(long *base) { return (long)((uintptr_t)(base + 2)) | HEAP_PTR_TAG; }
 static long *body_of(long *base) { return base + 2; }
@@ -148,6 +162,8 @@ long q_Nt_x2ef(long v);
 long q_Bt_x2ef(long v);
 #elif defined(PROBE_CALL)
 long q_Ca_x2ef(long v);
+#elif defined(PROBE_VEC)
+long q_Vc_x2ef(long v, long i);
 #endif
 
 int main(void)
@@ -319,6 +335,43 @@ int main(void)
            "6/CALL: a TAGGED HEAP WORD round-trips bit-exact (a sret/40-byte return or a pointer pass moves the low tag bits)");
         ok((q_Ca_x2ef(cell) & 7) == HEAP_PTR_TAG,
            "6/CALL: the returned word still carries the heap tag (...001) - the call did not retype it");
+    }
+#elif defined(PROBE_VEC)
+    /* ===== AREA 3: THE ELEMENT BASE, THROUGH `vecbody` =====
+     *
+     * THE INSTRUMENT THE DIFF ROW CANNOT BE.  `word-arm-diff` runs whole
+     * programs, and under the word arm no program can BUILD a heap vector yet
+     * (an arg-taking entry needs a `Lam`, refused on the surface lane), so it
+     * never reaches an element read.  MEASURED by the review: flipping
+     * `wordVecBody`'s heap arm to `heapHeaderOffset` — a 32-byte-wrong base for
+     * every heap object — left both the diff row and this probe set GREEN.
+     *
+     * So this probe hand-builds a code-10 block (exactly as probe B hand-builds
+     * a cons) and reads elements THROUGH the emitter's own `vecbody`.  Index 0
+     * catches a wrong BASE (with the flipped sign it reads the block's HEADER
+     * word instead of element 0); indices 1 and 2 catch a wrong STRIDE (a
+     * 40-byte stride reads past the 3-word body).
+     */
+    {
+        long *base = mk_block3(10, 1, (5L << 3), (7L << 3), (9L << 3));
+        long v = tagged(base);
+        ok(q_Vc_x2ef(v, 0L << 3) == (5L << 3),
+           "V: vecload(vecbody(code-10 block), 0) is element 0 - the BASE is the BODY (a header-relative base would read the header word)");
+        ok(q_Vc_x2ef(v, 1L << 3) == (7L << 3),
+           "V: ... index 1 is element 1 - the STRIDE is one word");
+        ok(q_Vc_x2ef(v, 2L << 3) == (9L << 3),
+           "V: ... index 2 is element 2");
+        /* A FIXNUM IS NOT A VECTOR: `vecbody` of one is its payload word (a
+         * `mknum(ptr)` carrier), so index 0 of mknum(0) is 0 — the loud die
+         * belongs to the IMMEDIATES, not to the numbers. */
+        g_died = 0;
+        long nil = 2;
+        if (sigsetjmp(g_jb, 1) == 0) {
+            (void)q_Vc_x2ef(nil, 0L << 3);
+            ok(0, "V: vecbody(nil) must REFUSE - it returned instead");
+        }
+        ok(g_died == 1 && strstr(g_die_msg, "element base") != NULL,
+           "V: vecbody(nil) REFUSES and names the reason (an immediate names no elements)");
     }
 #endif
     printf("%d checks\n", g_checks);

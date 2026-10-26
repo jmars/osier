@@ -44,11 +44,12 @@ type Module
     | TagNil
     | TagBool
     | Call
+    | Vec
 
 
 modules : List Module
 modules =
-    [ Str, Payload, Len, TagHeap, TagNil, TagBool, Call ]
+    [ Str, Payload, Len, TagHeap, TagNil, TagBool, Call, Vec ]
 
 
 name : Module -> String
@@ -74,6 +75,9 @@ name m =
 
         Call ->
             "call"
+
+        Vec ->
+            "vec"
 
 
 {-| The probe's DEFUN KEY — what `QBE_WORDARM_PROBE` compiles as its entry. -}
@@ -101,6 +105,9 @@ defun m =
         Call ->
             callProbe
 
+        Vec ->
+            vecProbe
+
 
 {-| A defun's declared arity — what the probe module's arity table must carry,
 or `lowerApp` treats the call as under-applied and routes it through the
@@ -127,6 +134,42 @@ defuns m =
 
         _ ->
             [ defun m ]
+
+
+{-| AREA 3's ELEMENT BASE (perf word-arm-area3rt, added by the review's BLOCKER
+1): `\v i -> vecload(vecbody(v), i)`.
+
+WHY IT EXISTS.  `word-arm-diff` compiles whole PROGRAMS, and under the word arm a
+program cannot construct a heap vector yet (an arg-taking entry needs a `Lam`,
+which the surface lane refuses) — so the diff row exercises the boot path and
+literal cells and NOTHING ELSE.  MEASURED by the reviewer: flipping `wordVecBody`'s
+heap arm from `+heapHeaderBytes` to `+heapHeaderOffset` — a 32-byte-wrong element
+base for EVERY heap object — left BOTH the diff row and this probe set GREEN.  No
+oracle in the tree could see a wrong element base.
+
+This probe is the cheapest instrument that can: the harness hand-builds a code-10
+block (the same way probe B hand-builds a cons) and drives an element read
+through `vecbody`, so the BASE is what is being measured — index 0 catches a wrong
+base, indices 1 and 2 catch a wrong STRIDE.
+-}
+vecProbe : Defun
+vecProbe =
+    { key = "Vc.f"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "v" }, { id = 1, name = "i" } ]
+            , body =
+                Unsafe
+                    (RawVecLoad
+                        { vec = Unsafe (RawVecBody { value = Var 0 })
+                        -- the INDEX is a raw word, so the probe takes it as a
+                        -- fixnum Value and unwraps it — which also exercises
+                        -- payload-of-fixnum on the way in.
+                        , index = Unsafe (RawPayload { value = Var 1, word = 0 })
+                        }
+                    )
+            }
+    }
 
 
 {-| AREA A + D: `\x -> "hi"`.  A word-arm string literal is a HEAP OBJECT whose

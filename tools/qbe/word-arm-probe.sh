@@ -64,6 +64,7 @@ PROBES=(
   "tagnil|q_Nt_x2ef|PROBE_TAGNIL|3"
   "tagbool|q_Bt_x2ef|PROBE_TAGBOOL|4"
   "call|q_Ca_x2ef|PROBE_CALL|4"
+  "vec|q_Vc_x2ef|PROBE_VEC|4"
 )
 
 [ -f "$CDIR/compiler.js" ] || { echo "word-arm-probe: $CDIR/compiler.js missing (run: osier-compiler/build.sh)" >&2; exit 2; }
