@@ -1220,9 +1220,10 @@ checks rt rawMidText =
         )
 
     -- STAGE 6 U1a: the RawCallAgg node (the aggregate call through a
-    -- runtime word).  Nothing emits it yet (EMIT-INERT — the corpus .ssa
-    -- is byte-identical); these rows pin the MECHANISM U4a's apply/bounce
-    -- port will call through.
+    -- runtime word).  These rows pin the MECHANISM the apply port calls
+    -- through.  U3b: the probe's shape is "val" — "ret" is now a LOUD
+    -- compile error in Lower (the `:ret` protocol is deleted), which is the
+    -- polarity this unit exists to keep: never a silent reinterpretation.
     , check "rt RawCallAgg classification: a defun containing one is a DIRECT safepoint (allocating — the callee is unknown generated code)"
         (rt.direct rawCallAggProbe)
     , check "rt RawCallAgg lowers to a word-target aggregate call returning the sret address"
@@ -1358,7 +1359,21 @@ checks rt rawMidText =
             Err _ ->
                 False
         )
-    , check "P5 PLeaf emission (THE H3 REGRESSION PIN): a leaf-qualified SURFACE defun emits NO pooled frame — no frame-enter call, no frame-leave call, an alloc8 block — and materialises BOTH non-tag-directed return reads as EIGHT-BYTE zero stores: `storel 0, %s0` (the .done result tag) and `storel 0, %tzk` at f+retKindOffset (the .done marker). EXACT emitted text, and the 4-byte `storew` spelling at that offset is asserted ABSENT: it is what shipped first and it cost a SEGV. runtime.mid's own `struct Ret { kind : word }` makes the marker an 8-byte word while QBE's :ret spells it `w` + 4 padding bytes, so Rt.bounce's `r->kind == 0` compiles to `movq 40(%rax)` + `cmpq $0, %rcx`; a storew leaves those padding bytes as stack garbage and rt_bounce chases a .tail built out of it (MEASURED: wild jump into the heap, one defun changed). This row would have failed at emit time."
+    -- U3b RE-SEATED THE H3 PIN, and the change IS the collapse.  The old row
+    -- pinned TWO eight-byte zero stores: `storel 0, %s0` (slot 0's .done result
+    -- tag) and `storel 0, %tzk` at f+retKindOffset (slot 1's .done marker) — the
+    -- second existing only because a surface defun returned the 80-byte `:ret`,
+    -- whose slot 1 carries the .tail discriminator a 64-bit reader compared
+    -- against zero (a 4-byte `storew` there left the padding bytes
+    -- uninitialised and cost a SEGV — the reason the row existed at all).
+    -- THE VALUE ARM NOW HAS NO SLOT 1: the body returns `:val` (40 B, one slot),
+    -- nothing builds a `.tail` for a caller to test, and that reader is deleted.
+    -- So the pin is: ONE slot of frame (`alloc8 40`, not 80), ONE zero store,
+    -- and NO marker store at all — the ABSENCE is now the assertion, the same
+    -- way the `storew` absence was.  The marker's own pin MOVED to the word
+    -- arm, whose `:ret` still has it (VR3b2's AREA 1 row below asserts `%tzk`
+    -- at `%f + 8`), so the SEGV lesson is still guarded where it still applies.
+    , check "P5 PLeaf emission (THE H3 REGRESSION PIN, re-seated by U3b): a leaf-qualified SURFACE defun emits NO pooled frame — no frame-enter call, no frame-leave call — and a ONE-SLOT alloc8 block whose single non-tag-directed return read is materialised as an EIGHT-BYTE zero store `storel 0, %s0`. U3b deleted the second store (slot 1's .done marker at f+retKindOffset) WITH the slot: the value arm returns `:val`, so there is no kind word and no 64-bit reader left to satisfy. The 4-byte `storew` spelling is still asserted ABSENT, and so is `%tzk` itself — a resurrected marker store is now the failure this row catches"
         (case QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ leafProbe ]) [ leafProbe ] "Lf.f" of
             Ok mod ->
                 case funcByName "q_Lf_x2ef" mod of
@@ -1369,13 +1384,9 @@ checks rt rawMidText =
                             txt =
                                 Print.print { layout = RtLayout.valLayout, types = [], datas = [], funcs = [ f ] }
                         in
-                        String.contains ("\t%f =l alloc8 " ++ String.fromInt (RtLayout.valLayout.valSizeBytes * 2) ++ "\n") txt
-                            && String.contains
-                                ("\tstorel 0, %s0\n\t%tzk =l add %f, "
-                                    ++ String.fromInt (RtLayout.retKindOffset RtLayout.valLayout)
-                                    ++ "\n\tstorel 0, %tzk\n"
-                                )
-                                txt
+                        String.contains ("\t%f =l alloc8 " ++ String.fromInt RtLayout.valLayout.valSizeBytes ++ "\n") txt
+                            && String.contains "\tstorel 0, %s0\n" txt
+                            && not (String.contains "%tzk" txt)
                             && not (String.contains "frame_x2denter" txt)
                             && not (String.contains "frame_x2dleave" txt)
                             && not (String.contains "storew 0, %tzk" txt)
@@ -1415,19 +1426,20 @@ checks rt rawMidText =
             && String.contains "type :val = align 8 { w, l, l, l, l }\n"
                 (Print.print { layout = RtLayout.valLayout, types = [], datas = [], funcs = [] })
         )
-    , check "VR3b1 THE `:ret` COUPLING IS DERIVED, NOT A CONSTANT (VR3a's finding): the aggregate's first field IS a Value, so retKindOffset/retFOffset/retEOffset/retArgsOffset/retArityOffset/retSizeBytes are FUNCTIONS of the instance — 40/48/56/64/72/80 on the val arm (the offsets the 40-byte representation has always emitted) and 8/16/24/32/40/48 on the word arm. A `40` left as a constant is the stale-40 trap this row exists to make loud"
-        (List.map
-            (\l ->
-                [ RtLayout.retKindOffset l
-                , RtLayout.retFOffset l
-                , RtLayout.retEOffset l
-                , RtLayout.retArgsOffset l
-                , RtLayout.retArityOffset l
-                , RtLayout.retSizeBytes l
-                ]
-            )
-            [ RtLayout.valLayout, RtLayout.wordLayout ]
-            == [ [ 40, 48, 56, 64, 72, 80 ], [ 8, 16, 24, 32, 40, 48 ] ]
+    -- U3b NARROWED THIS ROW TO THE ONE OFFSET THAT SURVIVED.  It used to pin
+    -- all six `.tail` offsets for both instances (40/48/56/64/72/80 val,
+    -- 8/16/24/32/40/48 word).  U3b deleted five of them WITH the protocol they
+    -- described — nothing builds or reads a `.tail` any more, so those numbers
+    -- describe a fiction.  `retKindOffset` survives because the WORD arm's
+    -- frozen `:ret` still has a kind word, and a frame-free word-arm defun
+    -- still materializes slot 1's zero.  The DERIVED-COUPLING claim is
+    -- therefore still live and still pinned for both instances: the kind word
+    -- sits immediately after the aggregate's first field, which IS a Value, so
+    -- its offset is `valSizeBytes` — 40 on the value arm, 8 on the word arm.
+    -- A `40` left as a constant is still the stale-40 trap this row makes loud.
+    , check "VR3b1 THE `:ret` COUPLING IS STILL DERIVED, NOT A CONSTANT (VR3a's finding, narrowed by U3b to the one surviving offset): the aggregate's first field IS a Value, so `retKindOffset` is `valSizeBytes` — 40 on the val arm (over the 40-byte Value) and 8 on the word arm (over `{ l }`). The five `.tail` offsets this row used to pin are DELETED with the protocol (U3b), not silently dropped"
+        (List.map RtLayout.retKindOffset [ RtLayout.valLayout, RtLayout.wordLayout ]
+            == [ 40, 8 ]
         )
     , check "VR3c AREA 1 — THE KIND CONTRACT IS ONE SET OF NUMBERS, PINNED ACROSS RtLayout AND runtime.mid. Under the word arm every heap object's value tag is `...001`, so WHICH object a pointer names is read from the 2-word GC header — and the codes ARE the ValTag integers both arms already use (cons 4, vector 10, ...). This row parses runtime.mid's own `// KIND-CONTRACT:` rows (word-arm splice) and compares every one with RtLayout: the field's shift/mask, each code against the TOP-LEVEL `tag*` constants, and each body class against `heapKindScanned`. A stale duplicate on EITHER side turns this RED instead of linking cleanly and reading another object's bytes. It also pins that the rows are WORD-ARM ONLY (the val text carries none) and that the val arm has NO kind field (0/0, the `tagMask` convention)"
         (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
@@ -1728,16 +1740,26 @@ checks rt rawMidText =
             _ ->
                 False
         )
-    , check "VR3b2 THE VAL ARM IS INERT ON THE SAME PROBE: `\\x -> x` on the DEFAULT instance is the 40-byte shape it has always been — `alloc8 80`, a 40-byte param blit, the `storel 0` .done materialisation at `%f + 40` — so the port above changed the word arm and nothing else"
+    -- U3b CHANGED THE VAL ARM'S SHAPE HERE, so "inert" is the wrong claim and
+    -- the row states the new one: `\x -> x` on the DEFAULT instance is now a
+    -- ONE-SLOT frame (`alloc8 40`, not 80), a 40-byte param blit, and the
+    -- `storel 0` .done materialisation at `%s0` — with NO `%tzk` store, because
+    -- the second result slot is gone.  The word arm's corresponding row above
+    -- is untouched (its `:ret` keeps slot 1).  This is the row that would go red
+    -- if the slot-base change ever leaked onto the word arm, or if a marker
+    -- store came back on the value arm.
+    , check "VR3b2 THE VAL ARM AFTER U3b: `\\x -> x` on the DEFAULT instance is a ONE-SLOT frame — `alloc8 40`, a 40-byte param blit, the `storel 0` .done materialisation at `%s0`, and NO `%tzk` store — while the word arm above keeps its 2-slot `alloc8 16` and its `%tzk` at `%f + 8`"
         (case QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ idProbe ]) [ idProbe ] "Id.f" of
             Ok mod ->
                 let
                     txt =
                         Print.print mod
                 in
-                String.contains "\t%f =l alloc8 80\n" txt
+                String.contains "\t%f =l alloc8 40\n" txt
                     && String.contains "\tblit %a0, %s0, 40\n" txt
-                    && String.contains "\t%tzk =l add %f, 40\n" txt
+                    && String.contains "\tstorel 0, %s0\n" txt
+                    && not (String.contains "%tzk" txt)
+                    && not (String.contains "alloc8 80" txt)
 
             Err _ ->
                 False
@@ -13831,7 +13853,10 @@ intLtProbe =
 runtime word, let-bound to a raw temp, with a plain number as the returned
 Value.  `fn` is rt_vec_alloc's address word (a legal raw-word producer
 standing in for a loaded code pointer); the IL row pins the emitted shape
-`Call (Just _) (Agg "ret") (ArgVal (Base L) (Il.Tmp _)) [ArgVal (Base L) (Il.Con 2)]`.
+`Call (Just _) (Agg "val") (ArgVal (Base L) (Il.Tmp _)) [ArgVal (Base L) (Il.Con 2)]`.
+U3b switched the probe's shape from "ret" to "val": `ret` is no longer a legal
+RawCallAgg shape (the `:ret` call-result protocol is gone), and this probe
+exists to pin the NODE's lowering, not the dead shape.
 -}
 rawCallAggProbe : Defun
 rawCallAggProbe =
@@ -13849,7 +13874,7 @@ rawCallAggProbe =
                                     (RawCallAgg
                                         { fn = Unsafe (RawAllocVector (Lit (LNumber 1)))
                                         , args = [ Lit (LNumber 2) ]
-                                        , shape = "ret"
+                                        , shape = "val"
                                         }
                                     )
                             }
@@ -14197,7 +14222,7 @@ rawCallAggCallShape f =
             List.any
                 (\i ->
                     case i of
-                        Il.Call (Just _) (Il.Agg "ret") (Il.Tmp _) args ->
+                        Il.Call (Just _) (Il.Agg "val") (Il.Tmp _) args ->
                             args == [ Il.ArgVal (Il.Base Il.L) (Il.Con 2) ]
 
                         _ ->

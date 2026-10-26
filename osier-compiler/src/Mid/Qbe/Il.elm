@@ -18,6 +18,7 @@ module Mid.Qbe.Il exposing
     , DataItem(..)
     , descType
     , retType
+    , retTypes
     , valType
     )
 
@@ -80,16 +81,14 @@ valType layout =
     }
 
 
--- `type :ret = align 8 { :val, w, l, l, l, w }` — the call-result shape every
--- generated function returns (the bounce-loop convention, transcribed from
--- tools/aot/runtime.zig's `Ret = .done | .tail`).  80 bytes, ABI-matched by
--- tools/qbe/rt.zig `Ret`; the FIELD OFFSETS are stated once, in
--- Mid.RtLayout (`retValOffset`/`retKindOffset`/`retFOffset`/`retEOffset`/
--- `retArgsOffset`/`retArityOffset`), and rt.zig asserts its own `Ret` against
--- them at comptime.  `.tail` is built by the runtime (rt_tail_known /
--- rt_apply_tail) so its env and args survive the caller's rt_frame_leave, and
--- chased by rt_bounce — which is why deep tail chains no longer grow the
--- native stack.
+-- `type :ret = align 8 { :val, w, l, l, l, w }` — THE WORD ARM'S FROZEN
+-- CLOSURE RETURN SHAPE, and nothing else.  U3b collapsed the `:ret` protocol:
+-- on the VALUE arm a closure body returns `:val` (40 B, slot 0 alone), the
+-- `.tail` request has no builder, and the kind word has no reader — so a value
+-- module emits no `:ret` typedef at all and `retTypes` below is the ONLY way
+-- the type reaches a module.  It survives for the WORD arm, where
+-- `closureRetClass` still answers `:ret` and the shape is 48 bytes over an
+-- 8-byte `:val` (AREA 6 owns that collapse; see Mid.Qbe.Lower).
 -- MUST BE DEFINED AFTER `:val` (QBE requires a type to precede its uses).
 retType : TypeDef
 retType =
@@ -97,6 +96,20 @@ retType =
     , align = Just RtLayout.abiAlign
     , fields = RtLayout.retQbeFields
     }
+
+
+{-| U3b: WHICH typedefs a module for this layout carries.  `:ret` is emitted
+only where a body can still RETURN one — the word arm.  A value module that
+carried it would be declaring a call-result shape nothing in it produces, and
+since U3b nothing in it can even name the shape (`aggcall ret` is refused).
+-}
+retTypes : RtLayout.ValLayout -> List TypeDef
+retTypes layout =
+    if layout == RtLayout.wordLayout then
+        [ retType ]
+
+    else
+        []
 
 
 -- `type :desc = align 8 { l, w, w }` — a static function descriptor:

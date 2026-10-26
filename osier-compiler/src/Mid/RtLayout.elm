@@ -16,7 +16,7 @@ module Mid.RtLayout exposing
     , maxArity
     , metaArityOffset, metaCodeOffset, metaNameOffset, metaSizeBytes
     , payloadBase, payloadWordOffset
-    , retArityOffset, retArgsOffset, retEOffset, retFOffset, retKindOffset, retQbeFields, retSizeBytes, retValOffset
+    , retKindOffset, retQbeFields
     , tagBoolean, tagCons, tagError, tagFloat, tagLambda, tagMark, tagNil, tagNumber, tagPrim, tagRecord, tagStream, tagString, tagSymbol, tagVector
     , untagMask
     , ValLayout, valLayout
@@ -42,7 +42,7 @@ module Mid.RtLayout exposing
 -- THE DIRECTION OF TRUTH.  These values are the DEFINITION; the emitted IL is
 -- DERIVED from them (`Mid.Qbe.Il.valType`/`retType`/`descType` are built out
 -- of the field projections below, `Mid.Qbe.Lower` reads `valSizeBytes`,
--- `retSizeBytes`, `maxArity` and the tag numbers, `Mid.RtPrims` reads the tag
+-- `retKindOffset`, `maxArity` and the tag numbers, `Mid.RtPrims` reads the tag
 -- numbers), and the ZIG side is checked against them:
 --
 --   * `tools/qbe/layout-census.sh --values` parses THIS file and compares the
@@ -562,12 +562,13 @@ wordTagShape code =
 --      representation" and "never flips" is exactly the silent-mismatch shape
 --      this module's header was written to prevent.  ONE COUPLING SURVIVES and
 --      is named here so it cannot go silent: the `:ret` aggregate's first
---      field IS a Value, so `retKindOffset` is `valSizeBytes` and
---      `retSizeBytes` is `valSizeBytes + 40`.  VR3b1 DISCHARGED that finding
---      by turning all six tail offsets into functions OF THE INSTANCE
---      (see the Ret section below) — a `:ret` over a word Value is
---      `{ l, w, l, l, l, w }` = 48 B with kind at 8.  `desc*`/`meta*`/`ep*`/
---      `dirent*` carry no Value at all and stay put.
+--      field IS a Value, so `retKindOffset` is `valSizeBytes` — a `:ret` over
+--      a word Value is `{ l, w, l, l, l, w }` = 48 B with kind at 8, over the
+--      val arm's 40-byte Value it is 80 B with kind at 40.  VR3b1 DISCHARGED
+--      that finding by making the offsets FUNCTIONS OF THE INSTANCE; U3b then
+--      deleted the five `.tail` ones with the protocol they described, leaving
+--      `retKindOffset` as the only survivor (see the Ret section below).
+--      `desc*`/`meta*`/`ep*`/`dirent*` carry no Value at all and stay put.
 
 
 type alias ValLayout =
@@ -891,68 +892,39 @@ metaArityOffset =
 
 
 
--- ============================ Ret (the bounce-loop result) ============================
--- `Mid.Qbe.Il.retType` is `align 8 { :val, w, l, l, l, w }` = 80 bytes on the
--- VAL arm:
---   :val  @0   the finished value when kind == `.done`;
---   kind  @40  the discriminator (0 = done, 1 = tail);
---   f     @48  the callee code pointer (`.tail`);
---   e     @56  the captures array, or null;
---   args  @64  a fresh GC array of `arity` Value structs (or the runtime's
---              static staging buffer for the known-tail path);
---   arity @72  the static arity == length of `args`.
+-- ============================ Ret (the WORD arm's frozen return) ============================
+-- `Mid.Qbe.Il.retType` is `align 8 { :val, w, l, l, l, w }`.  On the WORD arm
+-- (`:val` = 8 bytes) that is 48 bytes, and it is the only place the type is
+-- still EMITTED — `Il.retTypes` gives it to a module only for `wordLayout`.
+-- The VALUE arm has no `:ret` at all any more: a closure body returns `:val`
+-- (40 B, slot 0 alone), so `Il.retTypes valLayout` is empty.
 --
--- VR3b1 — THE COUPLING IS NOW DERIVED, NOT CONSTANT.  VR3a's finding: the
--- `:ret` aggregate's FIRST FIELD IS A VALUE, so retKindOffset IS
--- `valSizeBytes` and every offset after it moves with it; the tail
--- `{ w kind, pad, l f, l e, l args, w arity, pad }` is 40 bytes on top.  These
--- are therefore FUNCTIONS OF THE INSTANCE, and `40`/`80` appear nowhere as a
--- ret number any more — that pair left as constants is exactly the stale-40
--- trap the moment the word arm is ported (`:ret` over a word Value is
--- `{ l, w, l, l, l, w }` = 48 B, kind at 8).  TestMain pins both values for
--- BOTH instances, so a derivation that stops agreeing with the emitted IL is
--- loud.
+-- U3b DELETED THE `.tail` OFFSETS.  The aggregate used to be the bounce-loop
+-- result — `:val @0` (the finished value), `kind @40`, `f @48`, `e @56`,
+-- `args @64`, `arity @72` — and `retSizeBytes`/`retValOffset`/`retFOffset`/
+-- `retEOffset`/`retArgsOffset`/`retArityOffset` described that tail.  U3b
+-- deleted the builder (Rt.tail-known), both chasers (Rt.bounce/Rt.bounceGo),
+-- `struct Ret`, the `Agg "ret"` result class and the `@ret` 80-byte blit, so
+-- NOTHING BUILDS OR READS A `.tail` ANY MORE: those six offsets had no reader
+-- left and went with the protocol they described.  A row that keeps pinning
+-- them is testing a fiction.
+--
+-- ONE OFFSET SURVIVES, and only for the word arm: `retKindOffset`.  The word
+-- arm's `:ret` still has a kind word (slot 1 of its result area), and a
+-- frame-free word-arm defun still MATERIALIZES that slot's zero (Lower's
+-- `leafTailZero`) because a frame-free body has no enter-side memset.  It is
+-- DERIVED, not a constant — the kind word sits immediately after the first
+-- field, so its offset IS `valSizeBytes` (40 on the value arm, 8 on the word
+-- arm).  TestMain pins both instances.
 --
 -- (The `:ret` TYPE is still a module constant — its FIELD LIST does not flip
 -- with the representation, only the size of its first field does; see
--- `retQbeFields` below and Mid.RtLayout's TRAP-3 note.  The census's
--- MID_ONLY_NAMES list dropped these six names when they stopped being
--- constants, which is why they are pinned in TestMain instead.)
-
-
-retSizeBytes : ValLayout -> Int
-retSizeBytes layout =
-    layout.valSizeBytes + 40
-
-
-retValOffset : Int
-retValOffset =
-    0
+-- `retQbeFields` below and Mid.RtLayout's TRAP-3 note.)
 
 
 retKindOffset : ValLayout -> Int
 retKindOffset layout =
     layout.valSizeBytes
-
-
-retFOffset : ValLayout -> Int
-retFOffset layout =
-    layout.valSizeBytes + 8
-
-
-retEOffset : ValLayout -> Int
-retEOffset layout =
-    layout.valSizeBytes + 16
-
-
-retArgsOffset : ValLayout -> Int
-retArgsOffset layout =
-    layout.valSizeBytes + 24
-
-
-retArityOffset : ValLayout -> Int
-retArityOffset layout =
-    layout.valSizeBytes + 32
 
 
 

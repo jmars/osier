@@ -117,11 +117,12 @@ import Char.Extra exposing (utf8ByteLength)
 -- a second instance (VR3b's word arm) a change at the SEED rather than at the
 -- ~150 emit sites.
 --
--- SIZEOF(:ret) IS NOT A CONSTANT ANY MORE (VR3b1): the `:ret` aggregate's
--- first field IS a Value, so its size is `valSizeBytes + 40` — two pooled
--- frame slots (slot 0 the finished value, slot 1 the .tail discriminator +
--- payload) on the val arm, one-and-a-bit on the word arm.  It is read as
--- `RtLayout.retSizeBytes <instance>` at its three sites, never spelled here.
+-- SIZEOF(:ret) IS NOT READ HERE ANY MORE (U3b).  The `:ret` aggregate used to
+-- be the bounce-loop result — two pooled frame slots on the val arm (slot 0 the
+-- finished value, slot 1 the .tail discriminator + payload) — and its size was
+-- read as `RtLayout.retSizeBytes <instance>` at the @ret blit.  U3b deleted
+-- that blit, the builder and the class, so no site here needs the size; the
+-- type itself survives only for the WORD arm (see `closureRetClass`).
 
 
 -- P5: the non-GC libc entries this emitter names as CALL TARGETS, i.e. the
@@ -295,7 +296,7 @@ rawAbiRetClass key =
     -- request) is GONE with the defun.  NO rawAbi key returns `:ret` any
     -- more, so this function's aggregate answer is always `:val` — the
     -- `Agg "ret"` arm of lowerFunBody's @ret block below went with it, and
-    -- with it the last reader of `RtLayout.retSizeBytes`.
+    -- with it the last reader of the `.tail` offsets in Mid.RtLayout.
 
     else if key == "Rt.globalClosure" then
         -- ZIGHOST Z3: the closure-cache seat returns the 40-byte lambda
@@ -549,6 +550,26 @@ wordArm s =
 wordArmLayout : RtLayout.ValLayout -> Bool
 wordArmLayout layout =
     layout == RtLayout.wordLayout
+
+
+{-| U3b — THE RESULT AREA'S WIDTH IN SLOTS, the ONE statement of it.  A
+defun's frame reserves the result first: ONE slot on the value arm (the body
+returns `:val`, 40 bytes = one slot) and TWO on the word arm (its frozen
+`:ret` return shape puts a kind word in slot 1 — AREA 6).  Everything that
+numbers a slot reads this — the fresh-slot counter, the param and capture
+binder slots, the prologue's param/capture blits and the self-tail param
+blits — so the two arms cannot drift one slot apart.  (They DID drift once:
+U3b changed the counter and left `slotTmp (i + 2)` in the blits, and qbe
+caught it as `invalid type for second operand %s2 in blit0` — an UNDEFINED
+slot, because the frame was one slot shorter than the body believed.)
+-}
+resultSlotBase : RtLayout.ValLayout -> Int
+resultSlotBase layout =
+    if wordArmLayout layout then
+        2
+
+    else
+        1
 
 
 {-| U3a — the CLOSURE ABI's return class, in ONE place: `lowerFunBody`'s ret
@@ -2273,11 +2294,15 @@ lowerDefun runtime defun sOuter =
 
 
 -- ============================ FUNCTION BODY ============================
--- Frame layout: slot 0 result `:val`, slot 1 the `.tail` metadata (kind/f/e/
--- args/arity — the second half of the 80-byte `:ret` return), 2..N+1 params,
--- N+2..N+1+K captures, then temps.  Blocks: @start (prologue; jump @body),
--- @body (loop head for self-tail), ... interior ..., @ret (rt_frame_leave;
--- ret %s0 — returns the whole 80-byte `:ret` at slot 0).
+-- Frame layout: slot 0 is the RESULT, then params, then captures, then temps.
+-- U3b deleted the second result slot: slot 1 used to hold the `.tail` metadata
+-- (kind/f/e/args/arity — the second half of the 80-byte `:ret` return), so a
+-- frame's result area was `slotBase = 2`.  On the VALUE arm the result is
+-- `:val` — one slot — so `slotBase` is 1 and every later slot moves down one.
+-- It stays 2 on the WORD arm, whose frozen `:ret` return shape still has a
+-- kind word (AREA 6; see `closureRetClass`).
+-- Blocks: @start (prologue; jump @body), @body (loop head for self-tail),
+-- ... interior ..., @ret (rt_frame_leave; ret %s0 — returns slot 0).
 --
 -- THE Rt LEAN ARM (osier-midabi): when `rt` is Just _ the SAME slot layout
 -- addresses off a DIFFERENT base (the function's signature, return type and
@@ -2393,6 +2418,10 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             else
                 Set.empty
 
+        -- U3b: the result area's width — see `resultSlotBase`.
+        slotBase =
+            resultSlotBase sOuter.layout
+
         s0 =
             { blocks = []
             , curLabel = "start"
@@ -2401,21 +2430,22 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , lbl = 0
             , slot =
                 -- VR1: a ptrRead defun's params occupy NO frame slots — the
-                -- body reads them through `%a<i>`, so 2..N+1 (the params) are
+                -- body reads them through `%a<i>`, so the params' slots are
                 -- simply not reserved and the frame is N slots smaller (the
                 -- memset at rt_frame_enter is proportional to it).
                 if ptrReadD then
-                    2 + ncaps
+                    slotBase + ncaps
 
                 else
-                    2 + nparams + ncaps
+                    slotBase + nparams + ncaps
             , binderSlots =
                 Dict.fromList
                     ((if rawAbi then
                         -- rawAbi params are WORD registers, not frame slots —
-                        -- the slot counter still reserves 2..N+1 so the body's
-                        -- own temps get the SAME slot numbers as every other
-                        -- Rt defun (the slots are simply never written/read).
+                        -- the slot counter still reserves the params' slots so
+                        -- the body's own temps get the SAME slot numbers as
+                        -- every other Rt defun (the slots are simply never
+                        -- written/read).
                         []
 
                       else if ptrReadD then
@@ -2425,20 +2455,21 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                         []
 
                       else
-                        List.indexedMap (\i p -> ( p.id, i + 2 )) lambda.params
+                        List.indexedMap (\i p -> ( p.id, i + slotBase )) lambda.params
                      )
                         -- NOTE, because the two counters disagree on purpose: a
-                        -- capture is numbered ABOVE the params (nparams + 2 + j)
-                        -- even under ptrReadD, whose fresh-slot counter starts at
-                        -- 2 + ncaps with NO param reservation — so a ptrRead defun
-                        -- with captures would hand out temps that collide with
-                        -- these slots.  That is unreachable, and reachable only
-                        -- from one place: lowerDefun (:1528) passes captures = []
-                        -- to EVERY entry defun, so the capture list is always
-                        -- empty where ptrReadD can be true.  If an entry defun
-                        -- ever gets captures, the ptrRead slot base at :1660 must
-                        -- become 2 + nparams + ncaps to match.
-                        ++ List.indexedMap (\j cid -> ( cid, nparams + 2 + j )) captures
+                        -- capture is numbered ABOVE the params
+                        -- (nparams + slotBase + j) even under ptrReadD, whose
+                        -- fresh-slot counter starts at slotBase + ncaps with NO
+                        -- param reservation — so a ptrRead defun with captures
+                        -- would hand out temps that collide with these slots.
+                        -- That is unreachable, and reachable only from one place:
+                        -- lowerDefun (:1528) passes captures = [] to EVERY entry
+                        -- defun, so the capture list is always empty where
+                        -- ptrReadD can be true.  If an entry defun ever gets
+                        -- captures, the ptrRead slot base above must become
+                        -- slotBase + nparams + ncaps to match.
+                        ++ List.indexedMap (\j cid -> ( cid, nparams + slotBase + j )) captures
                     )
             , rawInt = Dict.empty
             , rawFloat = Dict.empty
@@ -5473,8 +5504,18 @@ rawWordArg exp s =
             -- A1: the callee may ALSO be a NAMED exported symbol (Il.Sym) —
             -- the generated-code call shape (rt_apply/rt_bounce by name),
             -- not just a loaded code pointer in a temp.
-            if call.shape /= "ret" && call.shape /= "val" then
-                Err ("qbe: rawCallAgg shape \"" ++ call.shape ++ "\" — only \"ret\" and \"val\" are legal")
+            -- U3b: `ret` IS NO LONGER A LEGAL SHAPE HERE.  `:ret` survives
+            -- only as the WORD arm's frozen closure return (see
+            -- `closureRetClass`), and the word arm cannot reach a RawCallAgg
+            -- at all (the ported-construct belt refuses everything but value
+            -- copies), so an `aggcall ret` on the value arm would name a type
+            -- the module no longer emits.  Loud, never a silent reinterpretation.
+            if call.shape /= "val" then
+                Err
+                    ("qbe: rawCallAgg shape \""
+                        ++ call.shape
+                        ++ "\" — only \"val\" is legal since U3b collapsed the `:ret` call-result shape into `:val` (the `.tail` protocol is gone; a `:ret` sret block has no producer left)"
+                    )
 
             else
                 lowerRawCallAgg call s
@@ -7187,7 +7228,7 @@ lowerSelfTail args s =
                 (\( slots, s1 ) ->
                     List.foldl
                         (\( slot, i ) acc ->
-                            emit (Blit (Il.Tmp (slotTmp slot)) (Il.Tmp (slotTmp (i + 2))) s.layout.valSizeBytes) acc
+                            emit (Blit (Il.Tmp (slotTmp slot)) (Il.Tmp (slotTmp (i + resultSlotBase s.layout))) s.layout.valSizeBytes) acc
                         )
                         s1
                         (List.indexedMap (\i slot -> ( slot, i )) slots)
@@ -11307,14 +11348,14 @@ withPrologue layout pending =
 
             else
                 List.map
-                    (\i -> Blit (Il.Tmp ("a" ++ String.fromInt i)) (Il.Tmp (slotTmp (i + 2))) layout.valSizeBytes)
+                    (\i -> Blit (Il.Tmp ("a" ++ String.fromInt i)) (Il.Tmp (slotTmp (i + resultSlotBase layout))) layout.valSizeBytes)
                     (List.range 0 (pending.nparams - 1))
 
         capBlitsPro =
             List.concatMap
                 (\j ->
                     [ Bin (Just ("e" ++ String.fromInt j)) L Add (Il.Tmp "env") (Il.Con (layout.valSizeBytes * j))
-                    , Blit (Il.Tmp ("e" ++ String.fromInt j)) (Il.Tmp (slotTmp (pending.nparams + 2 + j))) layout.valSizeBytes
+                    , Blit (Il.Tmp ("e" ++ String.fromInt j)) (Il.Tmp (slotTmp (pending.nparams + resultSlotBase layout + j))) layout.valSizeBytes
                     ]
                 )
                 (List.range 0 (pending.ncaps - 1))
@@ -11343,49 +11384,43 @@ withPrologue layout pending =
                 PLeaf ->
                     Alloc "f" (layout.valSizeBytes * pending.nslots)
 
-        -- P5 / H3 — THE RESULT AREA'S SECOND SLOT.  A surface defun's frame
-        -- reserves TWO result slots: slot 0 holds the finished Value, and slot
-        -- 1 is the `.done`/`.tail` discriminator of the pre-U3a 80-byte `:ret`
-        -- return shape.  On the VALUE arm slot 1 is VESTIGIAL — the body
-        -- returns `:val` (slot 0 alone, `closureRetClass`) and, since U3a,
-        -- nothing builds a `.tail` for a caller to test — but the frame still
-        -- reserves it and a frame-free defun has no enter-side memset to make
-        -- it read 0, so it is MATERIALIZED here.  U3b deletes the slot, this
-        -- store and this paragraph together.
+        -- P5 / H3 — THE RESULT AREA'S ZERO.  A frame-free defun has no
+        -- enter-side memset, so whatever the RETURN path reads without a tag
+        -- test of its own has to be MATERIALIZED here.  U3b cut that set down
+        -- to ONE read on the value arm: the `.done` result at slot 0, which is
+        -- read as the number 0 (tag 0) if nothing writes it.
         --
-        -- The marker's offset is READ from Mid.RtLayout (`retKindOffset`), not
-        -- spelled 40 here — the layout is defined once, and the same constant
-        -- is what the emitted-text row in TestMain pins.
+        -- SLOT 1 IS GONE ON THE VALUE ARM.  It used to carry the `.done`/
+        -- `.tail` discriminator of the 80-byte `:ret` return shape, and the
+        -- store here existed because a 64-bit reader compared that word
+        -- against zero (MEASURED: with a 4-byte `storew` the four padding
+        -- bytes at 44..47 stayed uninitialised, the compare saw non-zero, the
+        -- `.done` path was missed, and the pre-U3a `Rt.bounce` chased a
+        -- `.tail` built out of stack garbage — a wild jump into the heap,
+        -- ASan: `PC is at a non-executable region`, with only that one defun
+        -- changed).  U3b deleted the slot, the reader and the store together.
         --
-        -- MEASURED, and it is why this is a 64-bit store and not a 32-bit one:
-        -- the reader loads EIGHT bytes at retKindOffset — the pre-U3a
-        -- `Rt.bounce`'s `r->kind == 0` lowered to `movq 40(%rax), %rcx; cmpq
-        -- $0, %rcx` (vendor/qbe, the emitted .s of
-        -- tests/elm-fixtures/arraybasic.elm).  A `storew 0` leaves the four
-        -- PADDING bytes at 44..47 uninitialised, the 64-bit compare sees a
-        -- non-zero word, the .done path is missed, and rt_bounce chased a
-        -- .tail built out of stack garbage — MEASURED: a wild jump into the
-        -- heap (ASan: `PC is at a non-executable region`) with only that one
-        -- defun changed.  So: one `storel`, while the reader exists.
-        -- The remaining words of slot 1 (f/e/args/arity) are read ONLY when
-        -- the marker is non-zero, which this store rules out.
+        -- THE WORD ARM STILL HAS IT: its `:ret` return shape is frozen with a
+        -- kind word in slot 1 (`closureRetClass`; AREA 6), so a word-arm
+        -- PLeaf still materializes slot 1's zero at `retKindOffset`.  That is
+        -- the ONLY remaining reader of `RtLayout.retKindOffset`.
         --
-        -- SLOT 0 gets the same treatment for the same reason: the `.done`
-        -- result is the one thing the RETURN path reads without a tag test of
-        -- its own, and the pooled frame's memset is what made a never-written
-        -- slot 0 read as the number 0 (tag 0).  Two stores reproduce exactly
-        -- the two non-tag-directed reads the frame used to supply; every OTHER
-        -- slot is read tag-directed, which is the SAME argument the lean
-        -- frame-free arm (PAlloc) has always rested on: the block is never
-        -- registered as a root and a blit is a raw copy, so an unzeroed word
-        -- past a cell's last written one is never interpreted.
+        -- Every OTHER slot is read tag-directed, which is the SAME argument
+        -- the lean frame-free arm (PAlloc) has always rested on: the block is
+        -- never registered as a root and a blit is a raw copy, so an unzeroed
+        -- word past a cell's last written one is never interpreted.
         leafTailZero =
             case pending.pro of
                 PLeaf ->
-                    [ Store StoreL (Il.Con 0) (Il.Tmp (slotTmp 0))
-                    , Bin (Just "tzk") L Add (Il.Tmp "f") (Il.Con (RtLayout.retKindOffset layout))
-                    , Store StoreL (Il.Con 0) (Il.Tmp "tzk")
-                    ]
+                    [ Store StoreL (Il.Con 0) (Il.Tmp (slotTmp 0)) ]
+                        ++ (if wordArmLayout layout then
+                                [ Bin (Just "tzk") L Add (Il.Tmp "f") (Il.Con (RtLayout.retKindOffset layout))
+                                , Store StoreL (Il.Con 0) (Il.Tmp "tzk")
+                                ]
+
+                            else
+                                []
+                           )
 
                 _ ->
                     []

@@ -68,14 +68,20 @@ need() { command -v "$1" >/dev/null 2>&1 || { printf 'layout-census: %s not foun
 # (VR3b1) THE `:ret` TAIL OFFSETS LEFT THIS LIST, and it is not a silent drop:
 # `retKindOffset`/`retFOffset`/`retEOffset`/`retArgsOffset`/`retArityOffset`/
 # `retSizeBytes` stopped being constants when VR3a's coupling was discharged —
-# the `:ret` aggregate's first field IS a Value, so they are now FUNCTIONS OF
-# THE LAYOUT INSTANCE (`valSizeBytes` + k).  The census parses this file's
+# the `:ret` aggregate's first field IS a Value, so they were FUNCTIONS OF THE
+# LAYOUT INSTANCE (`valSizeBytes` + k).  The census parses this file's
 # `name = <digits>` constants and demands its name set EQUAL the parse, so a
-# derived function has no seat here by construction.  What replaces the leg:
-# TestMain's VR3b1 row pins all six values FOR BOTH INSTANCES
-# (40/48/56/64/72/80 val, 8/16/24/32/40/48 word), so the numbers are still
-# stated once and still loudly checked.  `retValOffset` (0) is still a
-# constant and stays below.
+# derived function has no seat here by construction.
+# (U3b) FIVE OF THE SIX ARE NOW DELETED OUTRIGHT, and `retValOffset` with them:
+# they described the `.tail` half of the aggregate (kind/f/e/args/arity and the
+# size), and U3b deleted the protocol they described — the builder, both
+# chasers, `struct Ret`, the `Agg "ret"` result class and the @ret 80-byte blit.
+# `retKindOffset` SURVIVES as the word arm's frozen `:ret` kind offset (its
+# frame-free defuns still materialize slot 1's zero), so it is the one name
+# from the old group that is still a derived FUNCTION, pinned for both
+# instances by TestMain's VR3b1 row (40 val, 8 word).  A census seat for a name
+# that no longer exists would be the stale-duplicate class this file guards
+# against, so nothing replaces the five.
 # (VR3c AREA 1) `heapKindShift`/`heapKindMask` are the WORD ARM's GC-header
 # kind-code field (bits 24..27 of the 2-word header).  They are MID_ONLY for the
 # same reason the ep* blob is: their readers are the Mid-written collector and
@@ -87,7 +93,6 @@ MID_ONLY_NAMES="descArityOffset descCacheOffset descCodeOffset descNcapsOffset d
 heapKindMask heapKindShift \
 direntNameOffset maxArity \
 metaArityOffset metaCodeOffset metaNameOffset metaSizeBytes \
-retValOffset \
 epChainOpIdx epChainPipeIdx epChainWords epCmdArgcIdx epCmdArgvIdx epCmdNredirsIdx epCmdRedirsIdx epCmdSubIdx epCmdWords epKindAppend epKindDup epKindHdoc epKindHstr epKindIn epKindOut epOpAnd epOpOr epOpSeq epPipeCmdArrIdx epPipeCmdCountIdx epProgChainsIdx epProgCountIdx epRedirBodyIdx epRedirDupfdIdx epRedirFdIdx epRedirKindIdx epRedirPathIdx epRedirTmpfdIdx epRedirWords"
 # COMPTIME: attested by a comptime row against layout_gen.zig, in a file the
 # probe cannot import (an `export fn main`/`pub fn main` collides with an
