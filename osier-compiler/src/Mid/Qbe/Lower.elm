@@ -7364,7 +7364,93 @@ rtApply fslotTmp args dest isTail s =
                 rawAbiArityAgree midKey 3
                     |> Result.andThen
                         (\_ ->
-                            if isTail then
+                            if isTail && s.tailEmit then
+                                -- ================= U2: A REAL TAIL CALL =================
+                                -- `tcall :ret $q_Rt.apply-tail(l %buf, l %b0, l %b1, l n)`
+                                -- — the generic-apply tail site now RETURNS THROUGH
+                                -- US instead of nesting two frames per hop.
+                                --
+                                -- LEGAL ONLY BECAUSE THE CLASSES MATCH: `Rt.apply-tail`
+                                -- is `rawAbiRetClass` Agg "ret" (80 B) and so is the
+                                -- enclosing RtGeneric body (`s.tailEmit` is TRUE
+                                -- exactly there) — abi1's C4.  The NEXT hop
+                                -- (apply-tail -> applyTailGo, `:ret` vs lean `:val`)
+                                -- does NOT match and is U3a's class flip; do not
+                                -- widen this arm to it.
+                                --
+                                -- THE SEQUENCE, in emission order (the Mid
+                                -- convention, and the reason each step exists):
+                                --   1. stageArgs: lower every arg into a ROOTED
+                                --      frame slot, then copy them into ONE
+                                --      contiguous frame block (an arg's own
+                                --      lowering may call — safepoints — and only
+                                --      slots survive those).
+                                --   2. Rt.stage-apply: copy the closure CELL and
+                                --      that block into ONE GC block shaped
+                                --      [closure, arg0..argN].  It SURVIVES our
+                                --      rt_frame_leave (our pooled frame goes back
+                                --      to the pool and the callee's frame-enter
+                                --      may pop and MEMSET it).  NEVER the shared
+                                --      tsbuf — an over-applied chain can hold two
+                                --      staged blocks at once (see the seat).
+                                --   3. %b<i> = %buf + 40*i — the two argument
+                                --      pointers Rt.apply-tail takes as
+                                --      (fslot, args) = (buf, buf + 40).
+                                --   4. rt_frame_leave: OUR frame is left HERE.
+                                --   5. the tcall (teardown + jmp), then a bare
+                                --      `ret` — required by the IL grammar; emit.c
+                                --      suppresses it because the block already
+                                --      ended in the jmp.
+                                -- Between (2) and the callee's read of `buf`
+                                -- NOTHING can collect, so the unrooted staged copy
+                                -- is safe.  Keep it that way.
+                                let
+                                    nargs =
+                                        List.length args
+
+                                    ( bp, s2 ) =
+                                        freshTmp s1
+
+                                    argPtrs =
+                                        List.map (\i -> ( bp ++ "_" ++ String.fromInt i, i )) (List.range 0 1)
+                                in
+                                rawAbiArityAgree "Rt.stage-apply" 3
+                                    |> Result.andThen
+                                        (\_ ->
+                                            Ok
+                                                (emit
+                                                    (Call (Just bp)
+                                                        (Base L)
+                                                        (Il.Sym ("q_" ++ mangle "Rt.stage-apply"))
+                                                        [ ArgVal (Base L) (Il.Tmp fslotTmp)
+                                                        , ArgVal (Base L) (Il.Tmp (slotTmp baseSlot))
+                                                        , ArgVal (Base L) (Il.Con nargs)
+                                                        ]
+                                                    )
+                                                    s2
+                                                    |> (\sx ->
+                                                            List.foldl
+                                                                (\( ptmp, i ) acc ->
+                                                                    emit (Bin (Just ptmp) L Add (Il.Tmp bp) (Il.Con (sx.layout.valSizeBytes * i))) acc
+                                                                )
+                                                                sx
+                                                                argPtrs
+                                                       )
+                                                    |> emit (Call Nothing (Base W) (Il.Sym ("q_" ++ mangle "Rt.frame-leave")) [])
+                                                    |> emit
+                                                        (TailCall
+                                                            retCls
+                                                            (Il.Sym callee)
+                                                            [ ArgVal (Base L) (Il.Tmp (bp ++ "_0"))
+                                                            , ArgVal (Base L) (Il.Tmp (bp ++ "_1"))
+                                                            , ArgVal (Base L) (Il.Con nargs)
+                                                            ]
+                                                        )
+                                                    |> closeBlock (Ret Nothing)
+                                                )
+                                        )
+
+                            else if isTail then
                                 let
                                     ( rp, s2 ) =
                                         freshTmp s1

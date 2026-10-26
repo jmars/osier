@@ -1487,6 +1487,8 @@ rtDeps =
         , -- Q1b stage 1: the tcall staging seat's only RawCall edge is the same
           -- raw-word Value-array copy (allocvec is a raw node, not an edge).
           ( "Rt.stage-tail", [ "Rt.copyWords" ] )
+        , -- U2: the F-site staging seat — same shape, same single edge.
+          ( "Rt.stage-apply", [ "Rt.copyWords" ] )
         , ( "Rt.bounce", [ "Rt.bounceGo" ] )
         , ( "Rt.bounceGo", [] )
         , -- ===== THE STAGE 7A MID HOST (QBE_MIDHOST).  One entry per host
@@ -1804,6 +1806,10 @@ rawAbi =
           -- B6 THE TABLE row asserts they agree over the shipped text), and
           -- rawAbiArity is what checks both the defun and Lower's call site.
           "Rt.stage-tail"
+        , -- U2: the F-site STAGING seat — an all-word signature
+          -- ((fslot, argblock, nargs) -> buf), derived by the B6 rule and
+          -- declared here for the same reason as Rt.stage-tail above.
+          "Rt.stage-apply"
         , "Rt.bounce"
         , -- ===== THE STAGE 7A HOST's die family (QBE_MIDHOST).  These are not
           -- driver seats: they are declared so the B6 RULE's derived set (an
@@ -1878,6 +1884,10 @@ rawAbiArity =
         , -- Q1b stage 1: the tcall staging seat takes (argblock, nargs) — the
           -- block to copy and its arg count — and returns the buffer address.
           ( "Rt.stage-tail", 2 )
+        , -- U2: the F-site staging seat takes (fslot, argblock, nargs) — the
+          -- closure cell, the caller's contiguous arg block, and the count —
+          -- and returns the staged block's address.
+          ( "Rt.stage-apply", 3 )
         , ( "Rt.bounce", 1 )
         , -- zighost Z2: the two vec-store writers take (vec, index, *Value) —
           -- three words, checked against both the defun and Lower's seam.
@@ -1926,6 +1936,8 @@ driverSeeds =
         , -- Q1b stage 1: the tcall staging seat, named directly by Lower's
           -- tcall arm — the same "the census cannot seed it" argument.
           "Rt.stage-tail"
+        , -- U2: the F-site staging seat, named directly by rtApply's tcall arm.
+          "Rt.stage-apply"
         , "Rt.bounce"
         ]
 

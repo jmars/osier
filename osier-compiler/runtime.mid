@@ -433,16 +433,23 @@ struct FrameHdr {
 // bytes both wrappers malloc.  TestMain's U7 rows pin this table to this
 // declaration.
 //
-//   slot 0  args    the caller's args array base — the ROOT_VALUE_ARRAY base
+//   slot 0  args    the caller's args array base.  Rt.apply: the caller's
+//                   args range in ITS frame, and the ROOT_VALUE_ARRAY base
 //                   registered by
-//                   `Rt.rootPushValueArray(args, [word](state) + 16)`
+//                   `Rt.rootPushValueArray(args, [word](state) + 16)`.  U2's
+//                   Rt.apply-tail: the `+40` of the staged block
+//                   Rt.stage-apply built (`buf + 40`), whose BASE is `buf` —
+//                   that is the word the registration is given, so cell 0
+//                   (the closure) is scanned too
 //   slot 1  nargs   the live args count; the over-applied arm RE-BINDS it (and
 //                   `args`) to the remaining args, then `recur`s
 //   slot 2  live    the element count the root SCAN reads, through the `np`
 //                   pointer at this word (`[word](state) + 16`): nargs at PUSH
-//                   time, deliberately NOT updated by the over-applied arm —
-//                   the registration keeps scanning the ORIGINAL range, whose
-//                   extra elements are live Values, so a superset is sound
+//                   time for Rt.apply, nargs + 1 for U2's Rt.apply-tail (the
+//                   staged block's closure cell is cell 0), deliberately NOT
+//                   updated by the over-applied arm — the registration keeps
+//                   scanning the ORIGINAL range, whose extra elements are live
+//                   Values, so a superset is sound
 //   slot 3  env     the partial arm's staging copy of the applied closure's
 //                   env, rooted via `Rt.rootPushPtr([word](sp) + 24)` and
 //                   RE-READ after the allocvec (the cStrFill lesson: the
@@ -7906,12 +7913,51 @@ defun Rt.apply(fslot : word, args : word, nargs : word) -> val {
   rawcall free(state);
   return r;
 }
+// Rt.stage-apply(fslot, argblock, nargs) -> buf — THE F-SITE STAGING SEAT
+// (U2 of apply-chain-design.md).  F's generic tail site is now a REAL `tcall`
+// into Rt.apply-tail, so F's pooled frame is LEFT before the jump: a pointer
+// into it would hand the callee its own zeroing (the Rt.stage-tail argument,
+// verbatim).  This seat copies the closure CELL and the caller's contiguous
+// arg block into ONE block shaped as
+//
+//     buf + 0    the closure Value (fslot's 5 words)
+//     buf + 40   arg 0 ... buf + 40*nargs   arg nargs-1
+//
+// which is exactly what Rt.apply-tail's registration scans (`live = nargs + 1`
+// from base `buf`) and what the loop reads (`args = buf + 40`).  The caller
+// passes `(buf, buf + 40, nargs)` — the existing 3-word convention with
+// `fslot = buf`.
+//
+// ALLOCVEC, ALWAYS — AND NEVER THE SHARED tsbuf (globals word 12).  The static
+// tsbuf is sound for the STATIC tail path only because at most ONE `.tail` is
+// in flight there.  An apply CHAIN can hold two at once: an intermediate static
+// tail hop inside an OVER-APPLIED chain would reuse tsbuf and CLOBBER the
+// chain's staged args — a silent wrong answer that does not exist today (the
+// apply path's args live in F's pooled frame, rooted by F's registration).
+// This seat is the ONE place that hazard can be introduced.  Keep it allocvec;
+// do not add the tsbuf arm "for speed".
+//
+// THE INVARIANT (U2's half of the no-collect window): between this seat's
+// allocvec and the callee's read of `buf` F emits ONLY the frame-leave and the
+// tcall, so nothing can collect in between.  The block is unrooted for that
+// span by convention, exactly as Rt.stage-tail's copies are.
+defun Rt.stage-apply(fslot : word, argblock : word, nargs : word) -> word {
+  word buf = allocvec(nargs + 1);
+  call Rt.copyWords(buf, fslot, 5);
+  call Rt.copyWords(buf + 40, argblock, nargs * 5);
+  return buf;
+}
 defun Rt.apply-tail(fslot : word, args : word, nargs : word) -> val {
   *ApplyState state = rawcall malloc(32);
   state->args = args;
   state->nargs = nargs;
-  state->live = nargs;
-  call Rt.rootPushValueArray(args, [word](state) + 16);
+  // U2: the registration roots the WHOLE staged block — cell 0 (the closure)
+  // as well as the args — because the base is now the block, not the args
+  // range inside the caller's frame.  `live` is a superset of what any arm
+  // reads (the over-applied arm rebinds args/nargs but never this word), which
+  // the live-is-a-superset rule (ApplyState slot 2) covers.
+  state->live = nargs + 1;
+  call Rt.rootPushValueArray(fslot, [word](state) + 16);
   val f = vecload(fslot, 0);
   val r = call Rt.applyTailGo(mknum(state), f);
   call Rt.rootPop();

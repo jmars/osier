@@ -101,10 +101,10 @@ checks rt rawMidText =
       -- apply + tail defuns + perf-gc1's Rt.gcClearClasses, after P1e deleted
       -- the frameZero loop), so an empty or truncated load turns it RED,
       -- loudly, before any vacuous row can.
-      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (352 defuns — Q1b added ONE: Rt.stage-tail, the tcall staging seat — L1 added TWO: Rt.pow/Rt.powGo, the `^` prim; perf U1 added THREE — perf U1 added THREE: Rt.join/Rt.joinLen/Rt.joinFill, the linear String.join; zighost Z2/Z3 added Rt.vecStorePlain/Rt.vecStoreYoung/Rt.globalClosure (GC NURSERY added the ten scavenge-family defuns; O5 added the five string-stream registry + the nine intern-table defuns + seat 3's values-table walk) — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
+      check "M1 anti-empty: the loaded runtime.mid parsed to the full surface program (353 defuns — Q1b added ONE: Rt.stage-tail, the tcall staging seat, and U2 added ONE: Rt.stage-apply, the F-site staging seat — L1 added TWO: Rt.pow/Rt.powGo, the `^` prim; perf U1 added THREE — perf U1 added THREE: Rt.join/Rt.joinLen/Rt.joinFill, the linear String.join; zighost Z2/Z3 added Rt.vecStorePlain/Rt.vecStoreYoung/Rt.globalClosure (GC NURSERY added the ten scavenge-family defuns; O5 added the five string-stream registry + the nine intern-table defuns + seat 3's values-table walk) — prof-fixes unit 1 added TWO: Rt.countGo/Rt.bytesOfGo, the O(1)-stack text walkers; GC-ARC F1 added the two stats-instrument defuns Rt.gcNum/Rt.gcNumOut, stage 7A added the 27-defun Mid effect host, stage 7B its 12 leaf/deadline defuns, stage 7C its 14 fd-table/poll defuns, stage 7D its 23 exec defuns and stage 7E its SEVEN dir/stat defuns — which also DELETED Rt.hostDieUnported, so the net is +6 — stage 7 O3-fix added ONE: Rt.applyPartGo, the shared capture/args interleave, and GC ARC unit 4 added ONE: Rt.gcEnvNum, the decimal reader behind QBE_MIDGC_MAXMB) + GC ARC unit 1b added ONE: Rt.gcGrow, the growth transcript"
         (case rt.parsedSource of
             Ok ast ->
-                List.length ast == 352
+                List.length ast == 353
 
             Err _ ->
                 False
@@ -1003,8 +1003,8 @@ checks rt rawMidText =
     -- added, each with a must-fail twin.  The Rt program is the runtime's
     -- Mid-side entry; the census seeds and the register-class checks are
     -- what keep "one prim end-to-end" honest.
-    , check "rt program: 312 defuns (Q1b added ONE: Rt.stage-tail) (L1 added Rt.pow/Rt.powGo), all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
-        (List.length (rtProgram rt True True True) == 312
+    , check "rt program: 313 defuns (Q1b added ONE: Rt.stage-tail; U2 added ONE: Rt.stage-apply) (L1 added Rt.pow/Rt.powGo), all Rt.*; cons 2-ary, substring 3-ary, con 3-ary, open 2-ary, glob 1-ary, read-file-as-string 1-ary, exec-run 3-ary (E added the record walk/rebuild defuns; stage 5 added the ADT constructor and the closure; stage 3 GROUP 1 added the fd prims write-byte/read-byte/open/close + readFull/cStrFill; stage 3 GROUP 2 added intern/value/str + floatCopy; stage 3 GROUP 3A added getpid/getcwd/cd/getenv/setenv + cStrLenGo/cStrCopyGo; GROUP 3B added glob + its 8 helpers; GROUP 3B-2a added exec-plan + its 20 ep* decode helpers; GROUP 3B-2b added the RUN defuns execGo + its 21 helpers; GROUP 3B-3 added read-file-as-string + readFileGo/memGo — the LAST rt_prim route); GROUP 3B-2c added exec-run (the slurp+result half; the rt_exec_run seat is deleted)"
+        (List.length (rtProgram rt True True True) == 313
             && List.all (\d -> String.startsWith "Rt." d.key) (rtProgram rt True True True)
             && List.any
                 (\d ->
@@ -1242,7 +1242,7 @@ checks rt rawMidText =
     -- shapes are pinned, not just "it links".
     , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main + the B0 frame pair + stage 7A's die family (dieErr/hostDieErr — hostDieUnported left BOTH the family and the runtime at 7E, the unit that gave every Task ctor a real arm) are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo/frame set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set; the frame pair is FRAME-FREE by construction — its only nodes are rawcall/raw-word loads/stores and rawAbi->rawAbi calls to its one non-allocating helper)"
         (Rt.rawAbi
-            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.tail-known", "Rt.stage-tail", "Rt.bounce", "Rt.dieErr", "Rt.hostDieErr", "Rt.rootGrow", "Rt.rootPush", "Rt.rootPushPtr", "Rt.rootPushValue", "Rt.rootPushValueArray", "Rt.rootPop", "Rt.rootWatermark", "Rt.rootPopTo", "Rt.vecStorePlain", "Rt.vecStoreYoung", "Rt.globalClosure" ]
+            == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.tail-known", "Rt.stage-tail", "Rt.stage-apply", "Rt.bounce", "Rt.dieErr", "Rt.hostDieErr", "Rt.rootGrow", "Rt.rootPush", "Rt.rootPushPtr", "Rt.rootPushValue", "Rt.rootPushValueArray", "Rt.rootPop", "Rt.rootWatermark", "Rt.rootPopTo", "Rt.vecStorePlain", "Rt.vecStoreYoung", "Rt.globalClosure" ]
             && not (Set.member "Rt.die" rt.allocating)
             && not (Set.member "Rt.halt" rt.allocating)
             && not (Set.member "Rt.cStrEq" rt.allocating)
@@ -1272,6 +1272,9 @@ checks rt rawMidText =
             -- rawAbi-frame-free regardless (the rawAbi arm wins the frame
             -- decision before `allocating` is consulted).
             && Set.member "Rt.tail-known" rt.allocating
+            -- U2: Rt.stage-apply allocvecs the staged block (a direct
+            -- safepoint) and stays rawAbi-frame-free regardless.
+            && Set.member "Rt.stage-apply" rt.allocating
             && Set.member "Rt.bounce" rt.allocating
             && Set.member "Rt.bounceGo" rt.allocating
             -- ZIGHOST Z1: the root registry is FRAME-FREE — the only seat its
@@ -7446,7 +7449,7 @@ checks rt rawMidText =
                 False
         )
     , check
-        "T17/T18/T20/T21/T22/T24 pipeline (the wave-9 + collector + never-scheduled + T24 key-set row, post-T24's one-hundred-sixty-two, + GC-ARC F1's two stats defuns = one-hundred-sixty-four, + stage 7 O3-fix's Rt.applyPartGo = one-hundred-sixty-five, + GC ARC unit 4's Rt.gcEnvNum = one-hundred-sixty-six, + GC ARC unit 1b's Rt.gcGrow = one-hundred-sixty-seven, + GC ARC unit 2's THREE verifier defuns Rt.gcVD/Rt.gcVerify/Rt.gcVerifyList = one-hundred-seventy, + prof-fixes unit 1's two STACK-DEPTH loop helpers Rt.countGo/Rt.bytesOfGo = one-hundred-seventy-two): surf is Ok with EXACTLY the one-hundred-seventy migrated keys under the default flags — T24 added the LAST THREE wall-class holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd), so the DSL-bodied set is now EMPTY — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) + GC NURSERY's TEN scavenge-family defuns = one-hundred-eighty-two, + O5's FIVE string-stream registry defuns = one-hundred-eighty-seven, + O5 seat 2's NINE intern-table defuns = one-hundred-ninety-six, + O5 seat 3's Rt.valScanGo = one-hundred-ninety-seven (a silently-lost or silently-added surface defun shows here)"
+        "T17/T18/T20/T21/T22/T24 pipeline (the wave-9 + collector + never-scheduled + T24 key-set row, post-T24's one-hundred-sixty-two, + GC-ARC F1's two stats defuns = one-hundred-sixty-four, + stage 7 O3-fix's Rt.applyPartGo = one-hundred-sixty-five, + GC ARC unit 4's Rt.gcEnvNum = one-hundred-sixty-six, + GC ARC unit 1b's Rt.gcGrow = one-hundred-sixty-seven, + GC ARC unit 2's THREE verifier defuns Rt.gcVD/Rt.gcVerify/Rt.gcVerifyList = one-hundred-seventy, + prof-fixes unit 1's two STACK-DEPTH loop helpers Rt.countGo/Rt.bytesOfGo = one-hundred-seventy-two): surf is Ok with EXACTLY the one-hundred-seventy migrated keys under the default flags — T24 added the LAST THREE wall-class holdouts (Rt.readFileGo, Rt.epCmd, Rt.childCd), so the DSL-bodied set is now EMPTY — the TWENTY exec-plan RUN keys (applyOneRedir, applyRedirects, bodyWriteGo, childBuiltin, childPwd, closeCmdTmpfds, closeOthersGo, closePipeTmpfds, closePipesGo, echoGo, envHome, exec-run, exec-plan, execGo, isChildBuiltin, mkTmpAt, openBodyTmpfile, runBuiltinInprocess, wireCmdGo, wirePipeGo — the RUN machinery incl. the 7-mode execGo state machine; childCd stays DSL-side) on top of the T16 ep* decode keys — the TWENTY ep* decode keys (epArgvGo, epChain, epCount, epCountStdin, epElem, epFreeArgv, epFreeChains, epFreeCmd, epFreeCmds, epFreeRedirs, epNum, epPipeGo, epPipeline, epProg, epProgGo, epRedir, epRedirsGo, epStr, epSymIs, epSymOf — the epUnwrap template written out; epCmd stays DSL-side) on top of the nine glob keys, the fd/process + string/value, records/vector, number/string and equality families, with the equality AND consArr guard families still collapsing into one dict entry per key; T18 adds the TWELVE collector keys (allocRaw, allocVector, collect, gcAlloc, gcAllocGo, gcDrain, gcInit, gcMarkPtr, gcMarkValue, gcMarkRoots, gcScanValueArray, gcSweep — the whole mark-sweep, the second DSL copy deleted) + GC NURSERY's TEN scavenge-family defuns = one-hundred-eighty-two, + O5's FIVE string-stream registry defuns = one-hundred-eighty-seven, + O5 seat 2's NINE intern-table defuns = one-hundred-ninety-six, + O5 seat 3's Rt.valScanGo = one-hundred-ninety-seven, + U2's Rt.stage-apply = one-hundred-ninety-eight (a silently-lost or silently-added surface defun shows here)"
         (case rt.surf [ Ast.ConsArr, Ast.Rec, Ast.EqPtrFast ] of
             Ok s ->
                 List.sort (Dict.keys s)
@@ -7504,7 +7507,7 @@ checks rt rawMidText =
                        , "Rt.rootPopTo", "Rt.rootPush", "Rt.rootPushPtr", "Rt.rootPushValue", "Rt.rootPushValueArray", "Rt.rootWatermark"
                        , "Rt.runBuiltinInprocess", "Rt.setenv"
                        , "Rt.shen.bytes->string", "Rt.shen.str->bytes", "Rt.snd", "Rt.ssClose", "Rt.ssIn", "Rt.ssInGo"
-                       , "Rt.ssReadbyte", "Rt.ssTab", "Rt.stage-tail", "Rt.str", "Rt.strOf", "Rt.string?"
+                       , "Rt.ssReadbyte", "Rt.ssTab", "Rt.stage-apply", "Rt.stage-tail", "Rt.str", "Rt.strOf", "Rt.string?"
                        , "Rt.substring", "Rt.symEq", "Rt.symLess", "Rt.symToStr", "Rt.tail-known"
                        , "Rt.toI32", "Rt.valEntry", "Rt.valFreeGo", "Rt.valScanGo", "Rt.valSlot", "Rt.value", "Rt.vecEq", "Rt.vecStorePlain", "Rt.vecStoreYoung", "Rt.wRaw", "Rt.wStr", "Rt.waitStatusCode"
                        , "Rt.wireCmdGo", "Rt.wirePipeGo", "Rt.write-byte"
@@ -7566,7 +7569,7 @@ checks rt rawMidText =
     -- is now the append below; the loud Err moved to the key-agreement walk
     -- (row C), which is the collision/rename class the orphan check guarded.
     , check
-        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the one-hundred-and-thirty appended keys (Q1b added ONE: Rt.stage-tail) (L1 added Rt.pow/Rt.powGo) (ZIGHOST Z1 added its eight root-registry defuns, Z4a its eight float-text defuns, Z4b its eight printer defuns, Z5 its boot pair) (the twenty stage-6 ABI keys + the fifty-three host defuns of stages 7A/7B/7C + stage 7 O3-fix's Rt.applyPartGo + O5's five string-stream registry defuns + O5 seat 2's nine intern-table defuns + O5 seat 3's Rt.valScanGo + O5 seat 4b's twelve entry-arg-parser/*argv* defuns) (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
+        "T25 splice identity (the byte-identity precondition the corpus proves at the byte level): the empty surface splices to the DSL list UNCHANGED, and with the SHIPPED surface exactly the one-hundred-and-thirty-one appended keys (Q1b added ONE: Rt.stage-tail; U2 added ONE: Rt.stage-apply) (L1 added Rt.pow/Rt.powGo) (ZIGHOST Z1 added its eight root-registry defuns, Z4a its eight float-text defuns, Z4b its eight printer defuns, Z5 its boot pair) (the twenty stage-6 ABI keys + the fifty-three host defuns of stages 7A/7B/7C + stage 7 O3-fix's Rt.applyPartGo + O5's five string-stream registry defuns + O5 seat 2's nine intern-table defuns + O5 seat 3's Rt.valScanGo + O5 seat 4b's twelve entry-arg-parser/*argv* defuns) (Rt.apply, Rt.apply-tail, Rt.applyGo, Rt.applyTailGo, Rt.bounce, Rt.bounceGo, Rt.cStrEq, Rt.cStrEqGo, Rt.callArity, Rt.copyWords, Rt.copyWordsGo, Rt.die, Rt.frame-enter, Rt.frame-leave, Rt.frameBlock, Rt.halt, Rt.main, Rt.metaGo, Rt.parseArgsGo, Rt.tail-known) are appended — for all 8 flag combos the spliced program's key ORDER is the DSL union list's ++ the sorted append set"
         (let
             d0 k =
                 { key = k, value = Lam { params = [], body = Lit (LNumber 0) } }
@@ -7621,7 +7624,7 @@ checks rt rawMidText =
                                                  , "Rt.rootGrow", "Rt.rootPop", "Rt.rootPopTo", "Rt.rootPush"
                                                  , "Rt.rootPushPtr", "Rt.rootPushValue", "Rt.rootPushValueArray", "Rt.rootWatermark"
                                                  , "Rt.ssClose", "Rt.ssIn"
-                                                 , "Rt.ssInGo", "Rt.ssReadbyte", "Rt.ssTab", "Rt.stage-tail", "Rt.tail-known"
+                                                 , "Rt.ssInGo", "Rt.ssReadbyte", "Rt.ssTab", "Rt.stage-apply", "Rt.stage-tail", "Rt.tail-known"
                                                  , "Rt.valEntry", "Rt.valFreeGo", "Rt.valScanGo", "Rt.valSlot"
                                                ]
 
@@ -9840,7 +9843,7 @@ checks rt rawMidText =
             )
             [ "Rt.apply", "Rt.apply-tail", "Rt.tail-known", "Rt.bounce" ]
         )
-    , check "B6 THE TABLE (totality + agreement, over the REAL runtime text): every declared rawAbi key is in the table, every table key the rule contributed (i.e. NOT a rawAbi key) has an all-word signature, and the TWENTY-TWO all-word surface defuns are exactly the rawAbi keys the rule derives (Q1b added ONE: Rt.stage-tail) (nine stage-6 + stage 7A's Rt.dieErr/hostDieErr + ZIGHOST Z1's eight root-registry defuns + ZIGHOST Z2's two vec-store writers — it was twelve until 7E deleted Rt.hostDieUnported with the unported set)"
+    , check "B6 THE TABLE (totality + agreement, over the REAL runtime text): every declared rawAbi key is in the table, every table key the rule contributed (i.e. NOT a rawAbi key) has an all-word signature, and the TWENTY-THREE all-word surface defuns are exactly the rawAbi keys the rule derives (Q1b added ONE: Rt.stage-tail; U2 added ONE: Rt.stage-apply) (nine stage-6 + stage 7A's Rt.dieErr/hostDieErr + ZIGHOST Z1's eight root-registry defuns + ZIGHOST Z2's two vec-store writers — it was twelve until 7E deleted Rt.hostDieUnported with the unported set)"
         (let
             surface =
                 Result.withDefault [] rt.parsedSource
@@ -9855,7 +9858,7 @@ checks rt rawMidText =
          in
          List.all (\k -> Set.member k rawSet) (Set.toList derived)
             && List.all (\d -> Dict.member d.key rt.abi) (List.filter (\d -> Set.member d.key rawSet) surface)
-            && Set.size derived == 22
+            && Set.size derived == 23
         )
 
     -- ---- B6: THE RAW-`Var` GAP (B3's pinned row, now CLOSED for a word binder) ----
