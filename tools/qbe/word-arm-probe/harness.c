@@ -199,15 +199,28 @@ int main(void)
         long cell = tagged(base);
         ok(q_Pl_x2ef(cell) == (0xDEADL << 3), "B: payload(heap cons, 0) == body unit 0 (untag is the body)");
 
-        g_died = 0;
+        /* NIL IS ZERO, NOT A REFUSAL (perf word-arm-area3rt).  The val arm's
+         * `payload(nil, 0)` reads an UNWRITTEN payload word — the slot is
+         * zeroed at frame entry and `mknil` writes only the tag — so the
+         * faithful word-arm answer is 0.  Runtime sites lean on it
+         * (`Rt.main`'s `payload(prc, 0) != 0`), and MEASURED: refusing here made
+         * `main = 7` die at that read.
+         *
+         * ERROR still refuses, and that is the half of the row that keeps it
+         * fail-able: a val-arm error's payload word 0 is a REAL message pointer,
+         * so a word-arm immediate has no equivalent read and must not invent
+         * one. */
         long nil = 2;
+        ok(q_Pl_x2ef(nil) == 0, "B: payload(nil, 0) == 0 (the val arm's unwritten payload word, ported)");
+
+        g_died = 0;
+        long err = 5; /* ...101, the error immediate */
         if (sigsetjmp(g_jb, 1) == 0) {
-            (void)q_Pl_x2ef(nil);
-            ok(0, "B: payload(nil, 0) must REFUSE - it returned instead");
+            (void)q_Pl_x2ef(err);
+            ok(0, "B: payload(error, 0) must REFUSE - it returned instead");
         }
-        ok(g_died == 1,
-           "B: payload(nil, 0) REFUSES (the wrong-shape read dies instead of reading another layout)");
-        ok(strstr(g_die_msg, "neither a fixnum") != NULL, "B: the refusal names the reason");
+        ok(g_died == 1 && strstr(g_die_msg, "neither a fixnum") != NULL,
+           "B: payload(error, 0) REFUSES and names the reason (its payload word 0 is a real pointer on the val arm)");
     }
 #elif defined(PROBE_LEN)
     /* ===== AREA D: the length is body unit lenFieldWord ===== */

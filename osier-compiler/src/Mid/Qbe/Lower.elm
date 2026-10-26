@@ -4462,24 +4462,27 @@ wordPayloadField32 base word s0 =
         s14 =
             s13
                 |> emit (Bin (Just t) W And (Il.Tmp l) (Il.Con s13.layout.tagMask))
-                |> (if word == 0 then
-                        emit (Cmp (Just isFix) W Ceq (Il.Tmp t) (Il.Con s13.layout.tagNumber))
-                            >> closeBlock (Jnz (Il.Tmp isFix) fixLbl chkLbl)
-                            >> startBlock chkLbl
-                            -- A BOOLEAN HAS **TWO** IMMEDIATES: `...011` true
-                            -- and `...100` false.  Testing only tagTrue let
-                            -- FALSE fall through to the heap test and die —
-                            -- MEASURED: Rt.metaGo answers `mkbool(0)` on a miss
-                            -- and Rt.main's `payload32(found, 0)` killed the
-                            -- first run of a real binary.
-                            >> emit (Cmp (Just isTrue) W Ceq (Il.Tmp t) (Il.Con s13.layout.tagTrue))
-                            >> emit (Cmp (Just isFalse) W Ceq (Il.Tmp t) (Il.Con s13.layout.tagFalse))
-                            >> emit (Bin (Just isBool) W Or (Il.Tmp isTrue) (Il.Tmp isFalse))
-                            >> closeBlock (Jnz (Il.Tmp isBool) boolLbl chk2Lbl)
-                            >> startBlock chk2Lbl
+                |> (\st ->
+                        if word == 0 then
+                            st
+                                |> emit (Cmp (Just isFix) W Ceq (Il.Tmp t) (Il.Con s13.layout.tagNumber))
+                                |> closeBlock (Jnz (Il.Tmp isFix) fixLbl chkLbl)
+                                |> startBlock chkLbl
+                                -- A BOOLEAN HAS **TWO** IMMEDIATES: `...011`
+                                -- true and `...100` false.  Testing only
+                                -- tagTrue let FALSE fall through to the heap
+                                -- test and die — MEASURED: Rt.metaGo answers
+                                -- `mkbool(0)` on a miss and Rt.main's
+                                -- `payload32(found, 0)` killed the first run of
+                                -- a real binary.
+                                |> emit (Cmp (Just isTrue) W Ceq (Il.Tmp t) (Il.Con s13.layout.tagTrue))
+                                |> emit (Cmp (Just isFalse) W Ceq (Il.Tmp t) (Il.Con s13.layout.tagFalse))
+                                |> emit (Bin (Just isBool) W Or (Il.Tmp isTrue) (Il.Tmp isFalse))
+                                |> closeBlock (Jnz (Il.Tmp isBool) boolLbl chk2Lbl)
+                                |> startBlock chk2Lbl
 
-                    else
-                        identity
+                        else
+                            st
                    )
 
         -- 2. a heap object, or the loud refusal.
