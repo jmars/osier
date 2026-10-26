@@ -26,6 +26,13 @@ long drive(long, long);
 long envcall(long);
 long pressure(long, long);
 
+/* (f) the 40-byte `:val` aggregate the compiler returns from every converted
+ * tail-chain hop.  Field 0 is a 32-bit tag at an 8-aligned offset, so the C
+ * shape is tag-then-padding-then-four-longs, exactly QBE's
+ * `type :val = align 8 { w, l, l, l, l }`. */
+struct val { unsigned tag; long a, b, c, d; };
+struct val valA(long);
+
 static int fails;
 
 static void
@@ -67,6 +74,7 @@ int
 main(void)
 {
 	struct big b;
+	struct val v;
 
 	/* (a)+(b) 1e7 mutual tail hops. the value proves the chain ran; the
 	 * STACK CAP proves it ran in constant stack. */
@@ -95,6 +103,14 @@ main(void)
 
 	/* (e) spilled arguments read from the frame before the teardown. */
 	ck("pressure", pressure(3, 5), want_pressure(3, 5));
+
+	/* (f) `tcall :val` — the 40-byte class, forwarded through two hops.
+	 * valA(5) -> valB(15, 5, 7): %u = 15 + 5 = 20. */
+	v = valA(5);
+	ck("tcall-val-tag", v.tag, 1);
+	ck("tcall-val-a", v.a, 20);
+	ck("tcall-val-bc", v.b * 100 + v.c, 7 * 100 + 15);
+	ck("tcall-val-d", v.d, 5);
 
 	if (fails) {
 		printf("tcall_main: %d FAILED\n", fails);

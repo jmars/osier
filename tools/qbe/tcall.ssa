@@ -200,3 +200,45 @@ function l $sink6(l %a, l %b, l %c, l %d, l %e, l %f) {
 	%r =l add %w, %z
 	ret %r
 }
+
+# ---------------------------------------------------------------------------
+# (f) `tcall :val` — the 40-byte tagged-Value return class.
+#
+# THIS SHAPE WAS ASSEMBLED BY NOTHING IN THE TREE until U3a.  The `:big` chain
+# above pins sret forwarding for a 24-byte aggregate, but the compiler's own
+# `:val` is `align 8 { w, l, l, l, l }` (40 bytes) and is the class U3a's
+# conversion puts on `Rt.apply-tail`, the generated `rt_callN` family and
+# `rt_call2r` — i.e. on every hop of the generic-apply tail chain.  The U1
+# review hand-assembled one in scratch and MEASURED the prebuilt qbe accepting
+# it (exit 0, `leave; jmp`, constants in esi/edx/ecx); this pair is that
+# measurement made permanent, so a regression in the aggregate class handling
+# (field-0 width, alignment, sret forwarding) is caught here rather than at
+# the first converted site.
+#
+# Two hops, so the hidden sret pointer must be forwarded through BOTH: a wrong
+# forwarding writes into the wrong buffer and the values come back garbage.
+# ---------------------------------------------------------------------------
+type :val = align 8 { w, l, l, l, l }
+
+export function :val $valA(l %k) {
+@start
+	%m =l mul %k, 3
+	tcall :val $valB(l %m, l %k, l 7)
+	ret
+}
+
+export function :val $valB(l %a, l %b, l %c) {
+@start
+	%p =l alloc8 40
+	%q =l add %p, 8
+	%r =l add %p, 16
+	%s =l add %p, 24
+	%t =l add %p, 32
+	%u =l add %a, %b
+	storew 1, %p
+	storel %u, %q
+	storel %c, %r
+	storel %a, %s
+	storel %b, %t
+	ret %p
+}

@@ -10855,6 +10855,38 @@ checks rt rawMidText =
         (u1CheckErr rt "U1Tail.go" u1RetShapeMid "v1 spells only `tailcall val ..`"
             && u1CheckErr rt "U1Tail.go" u1WordCallerMid "needs a `-> val` defun"
         )
+    , check "U1 T9 ARM-DSL (applyTailGo's exact nesting: a `tailcall` as the terminator of an if that is an ARM of the body's final if) CHECKS+LOWERS — the shape U3a's saturated arm takes, which the flat body-terminator rows T1a/T1b do not pin"
+        (case u1BodyOf rt u1ArmNestedMid of
+            Ok (If outer) ->
+                case outer.elseBranch of
+                    If inner ->
+                        case inner.thenBranch of
+                            Unsafe (RawTailCall _) ->
+                                True
+
+                            _ ->
+                                False
+
+                    _ ->
+                        False
+
+            _ ->
+                False
+        )
+    , check "U1 T10 ARM-EMIT (a RawTailCall as a tail-If ARM): the tcall block closes with `ret`, the other arm jumps @ret — so a future edit to checkIf's tailPos inheritance or lowerIfBranches' isTail handling breaks U3a's site shape while the flat rows stay green"
+        (case QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities (u1ArmProbe :: driverProg rt)) (u1ArmProbe :: driverProg rt) "Rt.dslArmProbe" of
+            Ok mod ->
+                case funcByName "q_Rt_x2edslArmProbe" mod of
+                    Just f ->
+                        String.contains "\ttcall :val $q_Rt_x2eapply(l 0, l 1, l 2)\n\tret\n"
+                            (Print.print { layout = RtLayout.valLayout, types = [], datas = [], funcs = [ f ] })
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
     ]
 
 
@@ -14938,6 +14970,52 @@ u1RetShapeMid =
 u1WordCallerMid : String
 u1WordCallerMid =
     "module U1Tail\ndefun U1Tail.go(n : val) -> word {\n  tailcall val rawsym(\"rt_call2r\")(0);\n}"
+
+
+{-| U1 T9: THE ARM-POSITION FIXTURE — `Rt.applyTailGo`'s exact nesting, the
+shape U3a's saturated arm takes: the body's terminator is an `if` whose ELSE
+arm's terminator is a second `if` whose THEN arm is the tail call
+(runtime.mid:8072's `if (rem == nargs) { ... } else { if (rem > nargs) ... }`
+with the saturated work in the first arm).  T1a/T1b pin only the flat
+body-terminator form, so without this row an edit to `checkIf`'s tailPos
+inheritance or to `lowerIfBranches`' isTail handling could break the site U3a
+writes while the flat rows stay green.  The condition is spelled
+`mkbool(payload(n, 0) == K)` so it parses the way runtime.mid's own conds do.
+-}
+u1ArmNestedMid : String
+u1ArmNestedMid =
+    "module U1Tail\ndefun U1Tail.go(n : val) -> val {\n  if (mkbool(payload(n, 0) == 0)) {\n    return mknil;\n  } else {\n    if (mkbool(payload(n, 0) == 1)) {\n      tailcall val rawsym(\"rt_call2r\")(0, 1, 2);\n    } else {\n      return mknil;\n    }\n  }\n}"
+
+
+{-| U1 T10's probe: the same node shape hand-built (a `RawTailCall` as a
+tail-If ARM), so the EMIT half is pinned on the IL text rather than only on
+the IR node.  `Rt.apply` is the one target legal on every axis in v1
+(all-word params, declared `-> val`, recorded `Agg "val"`), so this is a
+C4-consistent tcall — exactly what `u1TailProbe` uses.
+-}
+u1ArmProbe : Defun
+u1ArmProbe =
+    { key = "Rt.dslArmProbe"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body =
+                If
+                    { cond = Lit (LNumber 1)
+                    , thenBranch =
+                        Unsafe
+                            (RawTailCall
+                                { target = TailKey "Rt.apply"
+                                , args = [ Lit (LNumber 0), Lit (LNumber 1), Lit (LNumber 2) ]
+                                , shape = "val"
+                                }
+                            )
+                    , elseBranch = Lit (LNumber 0)
+                    , falseLabel = "armelse"
+                    , endLabel = "armend"
+                    }
+            }
+    }
 
 
 {-| The pipeline behind the parse/check/lower rows: a user `.mid` through
