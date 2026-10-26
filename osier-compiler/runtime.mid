@@ -8066,8 +8066,10 @@ defun Rt.applyTailGo(state : word, fslot : word) -> val {
   //
   // `val f` below is a per-iteration READ of that cell, never live across a
   // safepoint: the saturated arm allocates (the arg copy) and then never
-  // touches `f`; the over arm's `rt_call2r` hop re-reads it via `recur`; and
-  // the partial arm passes it to Rt.applyPartGo BEFORE that call allocates.
+  // touches `f`; the over arm's `rt_call2r` hop ends in a SELF `tcall` that
+  // re-derives the closure from cell 0 on the next iteration (the next closure
+  // is written there by `copyWords`, below); and the partial arm passes it to
+  // Rt.applyPartGo BEFORE that call allocates.
   *ApplyState sp = state;
   val f = vecload(fslot, 0);
   word code = payload(f, 0);

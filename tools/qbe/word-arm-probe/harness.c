@@ -64,7 +64,7 @@ struct Ret {
     int64_t args;   /* 32 */
     int32_t arity;  /* 40 */
     int32_t pad1;   /* 44 */
-};                  /* 48 == retSizeBytes */
+};                  /* 48 B — Mid.RtLayout.retQbeFields over the 8-byte `:val` */
 
 /* ---- the seats the emitted module calls (stubs, per runtime.mid's contract) ---- */
 static long *g_frame;

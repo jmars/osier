@@ -766,11 +766,13 @@ the SAME judgment:
 MEASURED agreement with the hand-maintained `Mid.Rt.rawAbi` key list: the
 nine all-word surface defuns in runtime.mid (frameBlock, frame-enter,
 frame-leave, die, halt, cStrEq, main, copyWords, copyWordsGo) are EXACTLY
-the all-word signatures AND are all in `rawAbi`; the four remaining `rawAbi`
-keys (apply, apply-tail, tail-known, bounce) return an AGGREGATE `val`, so
-they classify value-ABI by this rule and are kept word-ABI by the explicit
-set's OVERRIDE (Mid.Rt.abiTable merges the two).  That merge is load-bearing,
-not a safety net: without it those four keys would move the corpus.
+the all-word signatures AND are all in `rawAbi`; the four remaining
+AGGREGATE-returning `rawAbi` keys (apply, apply-tail, applyTailGo,
+globalClosure) return a `val`, so they classify value-ABI by this rule and are
+kept word-ABI by the explicit set's OVERRIDE (Mid.Rt.abiTable merges the two).
+That merge is load-bearing, not a safety net: without it those four keys would
+move the corpus.  (U3b deleted `tail-known` and `bounce`, the other two members
+of that group.)
 -}
 allWordSig : List Type -> Type -> Bool
 allWordSig paramTys retTy =
@@ -1248,9 +1250,13 @@ type FltCmpOp
     | FNe
 
 
-{-| The aggcall result shape: `ret` (the 80-B `:ret` bounce-loop call-result
-shape) or `val` (the 40-B tagged Value) — exactly the two strings Lower's
-RawCallAgg accepts.
+{-| The aggcall result shape: `val` (the tagged Value — 40 B on the value
+arm, 8 on the word arm) or `ret` (the 80-B `:ret` bounce-loop call-result
+shape).  `ret` SURVIVES AS A SPELLING ONLY: U3b deleted every `:ret`-returning
+callee and the whole `.tail` family, so Lower's RawCallAgg accepts `val` alone
+and REFUSES `ret` by name.  The constructor stays because the DSL front end
+still parses the keyword, and a construct that cannot be lowered must refuse
+loudly rather than fail to parse.
 -}
 type AggShape
     = AggRet
@@ -1462,7 +1468,7 @@ builtinClass b =
         RawSym ->
             -- (stage 6 A1b) the FUNCTION-symbol address form: `rawsym("...")` —
             -- the argument is a STRING LITERAL (EStr, class TVal) naming a
-            -- FUNCTION (a code label: rt_bounce/rt_callN/a q_Rt_* defun) and
+            -- FUNCTION (a code label: rt_callN/a q_Rt_* defun) and
             -- the result is the raw word pointer to that function, distinct
             -- from `rawstr`'s content-keyed DATA def.  The lowerer
             -- pattern-matches the EStr exactly as rawstr does.
@@ -1683,9 +1689,12 @@ rt_* seats (tools/qbe/rt.zig exports) called from Rt bodies today:
     the HOST's; rt_boot publishes its base into the GLOBALS BLOCK word 3)
 
 (The rt.zig exports NOT here — rt_string, rt_vec_alloc, rt_raw_alloc,
-rt_vec_store(_plain), rt_frame_enter/leave, rt_apply, rt_bounce,
-rt_tail_known, rt_prim — are reached through dedicated nodes and
-literals, never through `rawcall`.  The stage-6 A2 DRIVER seat rt_boot is
+rt_vec_store(_plain), rt_frame_enter/leave, rt_apply, rt_prim — are reached
+through dedicated nodes and literals, never through `rawcall`.  That file is
+GONE (zighost Z0 retired the Zig runtime; the same seats are now Mid defuns in
+runtime.mid), and two of its exports died before it: rt_bounce and
+rt_tail_known went with U3b's `.tail` family.  The stage-6 A2 DRIVER seat
+rt_boot is
 WORD-in/WORD-out by A2's shape deviation, so `rawcall` IS its route and it
 sits in the table below.  rt_root_push_value_array was the second such seat
 and is GONE at ZIGHOST Z1 with the rest of the family: the registry is Mid's,

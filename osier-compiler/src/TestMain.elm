@@ -13924,6 +13924,12 @@ producer, which lowers to `Il.Sym "rt_bounce"` (a CODE label, not a data
 def).  The pin checks the symbol's CONTENT (`Il.Sym "rt_bounce"`, not a dN
 data ref); the RawCStr data-def stand-in is rejected loudly by a separate
 row.  Before A1 the word arm rejected everything but a temp.
+
+`rt_bounce` IS A STAND-IN LABEL, not a live symbol: a RawSym is a string that
+lowers to `Il.Sym` verbatim and is never resolved here, so any function-symbol
+name pins the shape identically — and U3b deleted `Rt.bounce` from the tree.
+The name is kept (rather than churned across the six A1b rows that spell it)
+because the rows assert the SYMBOL'S CONTENT, which is the same for any name.
 -}
 rawCallAggSymProbe : Defun
 rawCallAggSymProbe =

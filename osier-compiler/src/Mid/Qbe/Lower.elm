@@ -40,18 +40,27 @@ module Mid.Qbe.Lower exposing (lower, lowerWith)
 -- ============================== THE CONTRACTS ==============================
 --
 -- CALLING CONVENTION (ABI-verified against the vendored qbe; see
--- docs/qbe-backend.md): a Value is the 40-byte aggregate `:val`; QBE passes
--- :val params as POINTERS and returns them through sret, exactly like a C
--- struct by value.  A function of arity N with K captures compiles to
+-- docs/qbe-backend.md).  On the SHIPPING (value) arm a Value is the 40-byte
+-- aggregate `:val`; QBE passes :val params as POINTERS and returns them
+-- through sret, exactly like a C struct by value.  A function of arity N with
+-- K captures compiles to
 --
---     function :ret $q_<mangled> [(env %env),] :val %a0 .. :val %a{N-1}
+--     function :val $q_<mangled> [(env %env),] l %a0 .. l %a{N-1}
 --
--- — it RETURNS the 80-byte `:ret` (`.done` value | `.tail` request) rather
--- than a bare `:val`, which is what carries the bounce loop (see TAIL CALLS
--- below).  (`env` only when K > 0 — QBE passes it in a register invisible to
--- C; the generated rt_callN dispatchers pass env to env-less top-level defuns
--- too, which just ignore it).  %a_i POINTS at the caller's staging copy; the
--- prologue blits each param into the frame before anything else can run.
+-- — each `%a_i` is an `l` POINTER to the caller's staging slot (VR1), and the
+-- body RETURNS the finished `:val` (40 B).  It does NOT return `:ret`: U3a
+-- flipped the class and U3b deleted the `.tail` request, its builders and the
+-- bounce loop that chased them, so nothing on this arm returns anything but
+-- the value.  (`env` only when K > 0 — QBE passes it in a register invisible
+-- to C; the generated rt_callN dispatchers pass env to env-less top-level
+-- defuns too, which just ignore it).
+--
+-- THE WORD ARM IS THE ONE EXCEPTION, and it is stated: its body still returns
+-- the frozen 48-byte `:ret` (a kind word after the 8-byte value word) because
+-- a word-arm `:val` is EIGHT bytes — an aggregate the amd64 ABI returns in a
+-- register — so `ret %s0` would put the slot ADDRESS in the return register.
+-- `closureRetClass` is the single statement of the class; AREA 6 owns the
+-- collapse (see Mid.RtLayout's worklist).
 --
 -- GC ROOTING (crux 2): every local lives in a RUNTIME-POOLED frame block
 -- from `rt_frame_enter(nslots) -> *Value`, registered as ONE
@@ -60,9 +69,10 @@ module Mid.Qbe.Lower exposing (lower, lowerWith)
 -- store/load pair into a callee-saved register (MEASURED on the vendored
 -- qbe: a non-escaping stack slot's store+reload ARE deleted across a call;
 -- the pooled-frame loop shape keeps them — evidence in the handoff node and
--- docs/qbe-backend.md).  Slot 0 = the `.done` value, slot 1 = the `.tail`
--- metadata (kind/f/e/args/arity — the second half of `:ret`), 2..N+1 params,
--- N+2..N+1+K captures, then expression temporaries.  A per-function GLOBAL
+-- docs/qbe-backend.md).  Slot 0 = the result value, 1..N params,
+-- N+1..N+K captures, then expression temporaries.  (The word arm's frame
+-- carries one extra result slot, slot 1 = the `:ret` kind word — see
+-- `resultSlotBase`.)  A per-function GLOBAL
 -- frame would also defeat promotion but CANNOT nest under recursion (a
 -- callee would zero its caller's frame) — hence the pool.
 --
@@ -76,18 +86,21 @@ module Mid.Qbe.Lower exposing (lower, lowerWith)
 -- rt_make_closure(desc, capBase, K) — rt re-reads them AFTER its internal
 -- allocations (the caller's rooted frame slots were GC-rewritten in place).
 --
--- TAIL CALLS (crux 1): QBE IL has NO tail-call instruction (vendor/qbe/doc/
--- il.txt: `tail` appears only in "width less than a word"; the CALL BNF has
--- no tail form; jump targets are intra-function).  So:
+-- TAIL CALLS (crux 1): the vendored qbe DOES have a tail call, but its own
+-- il.txt does not document it (the CALL BNF has no tail form; `tail` appears
+-- there only in "width less than a word").  The IMPLEMENTATION has it —
+-- parse.c's `tcall`/`Otcall` and amd64/emit.c's teardown+jmp — and Q1b uses
+-- it.  So:
 --   * a saturated App to the SAME defun in tail position = an IN-FRAME LOOP:
 --     args into temp slots, blit temps into the param slots, `jmp @body`.
 --     This stays the hot path — generality must not cost it.
---   * every other tail position (cross-defun call, rt_apply, thunk force)
---     returns a `.tail` via the `:ret` aggregate and is chased by the runtime
---     bounce loop (tools/qbe/rt.zig rt_bounce) — the AOT's Ret/.tail pattern
---     (tools/aot/runtime.zig) transcribed onto this backend.  A `.done` is
---     kind 0 + the value; a `.tail` is kind 1 + (f, e, args, arity), built by
---     rt_tail_known / rt_apply_tail so its args survive rt_frame_leave.
+--   * every other tail position (cross-defun call, rt_apply, thunk force) is
+--     a REAL `tcall` (Q1b) after Rt.stage-tail/Rt.frame-leave; over the
+--     four-register tcall budget (and in every non-tail position) the site is
+--     an ordinary `call` that returns the finished value.  U3b DELETED the
+--     `.tail` request, its builders (rt_tail_known / rt_apply_tail) and the
+--     runtime bounce loop that chased them: no site builds one and none is
+--     chased.
 --
 -- NO SSA: temporaries are assigned freely; QBE builds SSA itself.
 
@@ -127,8 +140,9 @@ import Char.Extra exposing (utf8ByteLength)
 
 -- P5: the non-GC libc entries this emitter names as CALL TARGETS, i.e. the
 -- ones a call may target without being a GC safepoint.  The list is EXACTLY
--- what the emitter emits: `free` (the :ret buffer release in a rawAbi @ret
--- block), a C-heap release that cannot run a collect or move the Mid heap.
+-- what the emitted runtime names (`rawcall free(...)` in runtime.mid — the
+-- apply chain's staged-block release), a C-heap release that cannot run a
+-- collect or move the Mid heap.
 -- NOTHING ELSE may join it without the same argument — every other target is
 -- a `q_*` symbol resolved against Mid.Rt.allocating, an indirect call, or a
 -- cffi extern, and those are all treated as safepoints (deny by default):
@@ -186,7 +200,7 @@ type alias S =
     , paramPtr : Dict Int Il.Arg -- VR1: binder id -> the incoming `l` pointer holding that param (ptrRead defuns only)
     , noCollect : Set String -- P5: the CALL SYMBOLS whose execution cannot reach a GC safepoint (Mid.Rt.allocating's complement + the non-collecting libc entries); a call to anything else is a safepoint
     , leafFree : Bool -- P5's A/B switch (QBE_NOLEAF=1 -> False = every surface defun keeps its pooled frame, i.e. the pre-P5 shape)
-    , tailEmit : Bool -- Q1b: may this defun emit a real `tcall`?  TRUE only for an RtGeneric (closure-ABI) body — the only ones whose own return is the 80-byte `:ret`, which is exactly the condition the backend's C4 re-checks
+    , tailEmit : Bool -- Q1b: may this defun emit a real `tcall`?  TRUE only for an RtGeneric (closure-ABI) body, which is exactly the condition the backend's C4 re-checks — C4 demands the CALLEE's return class EQUAL the enclosing body's, and `closureRetClass` is the one statement of that class (`:val` on the value arm, `:ret` on the word arm)
     , pooledFrame : Bool -- (U1) does this defun hold a POOLED frame (proKind PFrame)?  A DSL `tailcall` must see the block's own `Rt.frame-leave` before it: the pooled block goes back to the pool and the CALLEE's frame-enter may pop and memset the very same block, so a tcall that skipped the leave would orphan (leak) the caller's frame per hop.  A PAlloc block (frame-free lean, rawAbi) dies with the C frame and needs no leave.
     }
 
@@ -226,11 +240,14 @@ slot — vendor/qbe amd64/isel.c turns a constant-size alloc8 into Onop plus a
 slot assignment), unzeroed and unregistered as a root, which is sound exactly
 because the classification proved no safepoint is reachable in this body.
 `PLeaf` is the SAME frame-free shape for a SURFACE defun (perf P5): it adds
-the two things a surface defun needs that a lean one does not — slot 0 (the
-`.done` result) and slot 1 (the `.done`/`.tail` marker of the 80-byte `:ret`)
-are read by the RETURN path WITHOUT a tag test, which the pooled frame
-supplied by being memset at enter, so a PLeaf prologue materializes those two
-words with two 8-byte stores (see leafTailZero in withPrologue).
+the one thing a surface defun needs that a lean one does not — slot 0 (the
+result) is read by the RETURN path WITHOUT a tag test, which the pooled frame
+supplied by being memset at enter, so a PLeaf prologue materializes that word
+with one 8-byte store (see leafTailZero in withPrologue).  ON THE WORD ARM
+there is a second such word: slot 1 carries the frozen `:ret` kind
+(`closureRetClass`), so a word-arm PLeaf stores that one too — two stores on
+the word arm, one on the value arm, and `leafTailZero` is the one statement of
+which.
 -}
 type Pro
     = PFrame
@@ -1731,8 +1748,8 @@ rawOperands node =
 --     FRESH ROOTED frame slot of the caller, and the caller's frame stays live
 --     for the whole callee — so the collector rewrites the Value IN PLACE and
 --     the pointer stays valid at every safepoint the callee reaches.
---   * a CLOSURE call (rt_apply -> rt_call2r) and a TAIL call (rt_tail-known ->
---     rt_bounce -> rt_callN) pass pointers into GC ARRAYS (`buf`, the closure
+--   * a CLOSURE call (rt_apply -> rt_call2r) and a TAIL call (Rt.stage-tail ->
+--     the callee) pass pointers into GC ARRAYS (`buf`, the closure
 --     env, the apply args) — the MOVING collector relocates those, so a lazy
 --     read is a stale pointer.  Both paths are sound today only because the
 --     callee copies out at entry, before its first safepoint.
@@ -3554,8 +3571,7 @@ lowerRawVal node dest s =
             -- pairing — if the CALLEE can allocate, this caller is
             -- `allocating` too, so these slots are ROOTED (rt_frame_enter); if
             -- the callee is frame-free, no GC can run anywhere under this
-            -- call.  QBE_NORTLEAN=1 restores the fat :val-args/:ret/rt_bounce
-            -- shape.
+            -- call.  QBE_NORTLEAN=1 restores the fat :val-args shape.
             --
             -- THE ACCEPTANCE (M3fix-4) is MEMBERSHIP IN THIS PROGRAM's defun
             -- set (`s.defuns`) — the keys whose `q_` symbol the emission fold
@@ -3723,8 +3739,8 @@ lowerRawVal node dest s =
             -- <callee> [word args]` then a Blit of the 40-B :val into the
             -- dest slot, EXACTLY the rtApply non-tail shape (lowerApp's
             -- rtApply arm: `%v =:val call rt_apply(...)` + blit into dest).
-            -- This is how the driver turns rt_bounce/rt_parse_arg/
-            -- rt_run_program's sret results into Values.  Only shape "val"
+            -- This is how the driver turns rt_callN/rt_call2r's sret results
+            -- into Values.  Only shape "val"
             -- fits a :val slot — "ret" is 80 B and cannot blit into 40.
             if call.shape /= "val" then
                 Err "qbe: rawCallAgg in a VALUE position must be shape \"val\" (a 40-B :val fits the slot; \"ret\" is 80 B and cannot)"
@@ -5506,7 +5522,7 @@ rawWordArg exp s =
             -- NOT a safepoint-free seat — the callee is unknown generated
             -- code (Mid.Rt classifies the node conservatively allocating).
             -- A1: the callee may ALSO be a NAMED exported symbol (Il.Sym) —
-            -- the generated-code call shape (rt_apply/rt_bounce by name),
+            -- the generated-code call shape (rt_callN by name),
             -- not just a loaded code pointer in a temp.
             -- U3b: `ret` IS NO LONGER A LEGAL SHAPE HERE.  `:ret` survives
             -- only as the WORD arm's frozen closure return (see
@@ -5602,7 +5618,7 @@ rawWordArg exp s =
 
         Unsafe (RawSym name) ->
             -- (stage 6 A1b) the ADDRESS of a FUNCTION symbol: Il.Sym of the
-            -- name VERBATIM (rt_bounce/rt_callN/a q_Rt_* defun) — a CODE
+            -- name VERBATIM (rt_callN/a q_Rt_* defun) — a CODE
             -- label, not a data def.  This is the ONLY rawWordArg producer of
             -- a function Il.Sym; RawCStr/RawDataAddr above go through
             -- freshData and yield dN DATA defs.  `lowerRawCallAgg` accepts
@@ -7619,7 +7635,7 @@ rtApply fslotTmp args dest isTail s =
                                 Err
                                     ("qbe: internal — a generic apply in TAIL position inside "
                                         ++ s.defunKey
-                                        ++ ", whose body is not RtGeneric.  A `tcall` into Rt.apply-tail is legal only where the enclosing return class is the same 80-byte `:ret` (abi1's C4), and the pre-U2 call+blit+jump lowering is deleted because it would pass the old (fslot, frame-args) convention into the new Rt.apply-tail body."
+                                        ++ ", whose body is not RtGeneric.  A `tcall` into Rt.apply-tail is legal only where the enclosing return class EQUALS the callee's (abi1's C4 — `closureRetClass`, i.e. `:val` on the value arm), and the pre-U2 call+blit+jump lowering is deleted because it would pass the old (fslot, frame-args) convention into the new Rt.apply-tail body."
                                     )
 
                             else
@@ -7845,7 +7861,7 @@ rawWordOf exp s =
 
 {-| The shared RawCallAgg lowering (stage 6 A1/A1b): the callee is a FUNCTION
 — either the `RawSym` producer (an `Il.Sym` naming a code label VERBATIM:
-rt_bounce/rt_callN/rt_tail_known are called BY NAME with an aggregate result,
+rt_callN/rt_call2r are called BY NAME with an aggregate result,
 corpus-proven at Lower's directCall/rtApply arms) or a loaded code pointer in
 a raw temp.  A DATA symbol (`RawCStr`/`RawDataAddr`, or any `Il.Sym` not from
 a direct `RawSym`) and a constant (`Il.Con`) are NOT call targets and are
@@ -7915,7 +7931,7 @@ rawWordCallArgs args s =
 
 {-| U1 (handoff apply-chain) — THE DSL TAIL CALL: `tcall <shape> <callee>(words)`
 followed by a bare `ret`, BLOCK-FINAL (Q1a's `Il.TailCall`, the instruction
-Q1b stage 1 uses for Lower's own tail-known sites).  The block's `@ret` stays
+Q1b uses for Lower's own static tail sites).  The block's `@ret` stays
 emitted and unreachable — MEASURED as 11 bytes of `.text` per defun (U2's
 census), not per hop.
 
