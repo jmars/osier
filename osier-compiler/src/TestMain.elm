@@ -1272,9 +1272,13 @@ checks rt rawMidText =
             -- rawAbi-frame-free regardless (the rawAbi arm wins the frame
             -- decision before `allocating` is consulted).
             && Set.member "Rt.tail-known" rt.allocating
-            -- U2: Rt.stage-apply allocvecs the staged block (a direct
-            -- safepoint) and stays rawAbi-frame-free regardless.
-            && Set.member "Rt.stage-apply" rt.allocating
+            -- U2 (post-review): Rt.stage-apply MALLOCS the staged block, so it
+            -- reaches NO safepoint at all — it is frame-free by classification
+            -- as well as by the rawAbi arm.  That is the fix, not a detail: an
+            -- allocvec here put the block in the nursery, where the kind-2
+            -- registration never promotes it and the applied callee's own body
+            -- laps it (the lapprobe row).
+            && not (Set.member "Rt.stage-apply" rt.allocating)
             && Set.member "Rt.bounce" rt.allocating
             && Set.member "Rt.bounceGo" rt.allocating
             -- ZIGHOST Z1: the root registry is FRAME-FREE — the only seat its

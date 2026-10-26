@@ -7451,23 +7451,25 @@ rtApply fslotTmp args dest isTail s =
                                         )
 
                             else if isTail then
-                                let
-                                    ( rp, s2 ) =
-                                        freshTmp s1
-                                in
-                                Ok
-                                    (emit
-                                        (Call (Just rp)
-                                            retCls
-                                            (Il.Sym callee)
-                                            [ ArgVal (Base L) (Il.Tmp fslotTmp)
-                                            , ArgVal (Base L) (Il.Tmp (slotTmp baseSlot))
-                                            , ArgVal nargsTy (Il.Con (List.length args))
-                                            ]
-                                        )
-                                        s2
-                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp 0)) retSize)
-                                        |> jumpTo "ret"
+                                -- ================= A GUARD, NOT A CODE PATH =================
+                                -- PROVABLY UNREACHABLE (handoff-apply-chain-u2-review
+                                -- NICE-TO-HAVE 4), and the pre-U2 lowering that used to
+                                -- live here is DELETED rather than kept as a branch no gate
+                                -- reaches.  Every body that can hold a generic apply is
+                                -- RtGeneric: lowerFunBody classifies away from RtGeneric
+                                -- only for Rt.* keys, lowerClosure always passes
+                                -- RtGeneric, and the RtLang lane cannot express a generic
+                                -- apply at all (every App it lowers has a GRef head).  It
+                                -- is a GUARD because the alternative is worse than an
+                                -- error: the old shape would now feed Rt.apply-tail the
+                                -- pre-U2 (fslot, frame-args) convention, whose failure is a
+                                -- rooting gap — a range of `nargs` from the block drops the
+                                -- LAST ARG — and not a crash.  Loud here, loud in abi1's
+                                -- C4 if it ever fires.
+                                Err
+                                    ("qbe: internal — a generic apply in TAIL position inside "
+                                        ++ s.defunKey
+                                        ++ ", whose body is not RtGeneric.  A `tcall` into Rt.apply-tail is legal only where the enclosing return class is the same 80-byte `:ret` (abi1's C4), and the pre-U2 call+blit+jump lowering is deleted because it would pass the old (fslot, frame-args) convention into the new Rt.apply-tail body."
                                     )
 
                             else

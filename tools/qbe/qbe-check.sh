@@ -1397,6 +1397,63 @@ clostail_gate() {
 }
 clostail_gate
 
+# ---- U2: THE APPLY STAGING BLOCK MUST BE IN NON-GC MEMORY (the lap gate) ----
+# WHY THIS ROW EXISTS.  U2's F-site tcall stages [closure, args...] into one
+# block that Rt.apply-tail registers (kind 2, VALUE_ARRAY) and that the loop
+# reads ACROSS USER CODE: the over-applied arm runs `rt_call2r` — the applied
+# callee's whole body — and `recur`s, and the next iteration reads `sp->args`,
+# an INTERIOR pointer into that block.  The first version of the seat used
+# allocvec, which is YOUNG under the default nursery, and a kind-2 registration
+# NEVER PROMOTES the block it names (gcScavRoots walks the cells via
+# gcScavValueArray and never calls gcScavPtr on the base) while gcScavenge
+# resets youngCursor — so the block's storage is reusable as soon as a scavenge
+# ends, and the callee above is exactly what laps the nursery.  The old path
+# (young off) had the same hole for the same reason: kind-2 marking never marks
+# the block HEADER (gcScanValueArray marks the first CELL), so the block is
+# sweepable while live.  The fix is that Rt.stage-apply mallocs: a C-heap block
+# is neither young nor GC-owned, so the collector never moves it and never
+# frees it, and the kind-2 registration does its real job — rewriting the
+# CELLS' payload pointers in place.
+#
+# ASYMMETRY — MEASURED, both directions, through the fixture below (the
+# reviewer's probe; the reason this is a row and not a comment):
+#   RED on 2f58bfe (the allocvec seat): `qbe-rt: midgc: unknown value tag in
+#     mark walk`, rc 1, at the DEFAULT nursery, at QBE_MIDGC_YOUNG_MB=1 and
+#     under QBE_MIDGC_VERIFY=1.  With ONLY the 10 site lines reverted in the
+#     emitted .ssa to the pre-U2 shape, the same binary prints 300042.
+#   GREEN after the malloc fix: 300042 at the default nursery, at
+#     QBE_MIDGC_YOUNG_MB=1, under VERIFY=1, and with QBE_MIDGC_YOUNG=0.
+# The young-off arm is in the row deliberately: it is the regime where the
+# block is sweepable rather than lappable, and it must stay closed too.
+#
+# THE ROW FAILS (never skips) when the fixture or the runner is absent — a
+# deleted probe must not look like a pass.
+lap_apply_gate() {
+  local fixture="$ROOT/tools/qbe/fixtures/lapprobe.elm" bin out rc cfg
+  [ -f "$fixture" ] || {
+    echo "FAIL lap-apply: $fixture is missing — the ONLY fixture whose over-applied generic tail chain allocates across the staging block was deleted"
+    FAIL=1; return; }
+  [ -x "$ROOT/tools/qbe/qbe-mk.sh" ] || {
+    echo "FAIL lap-apply: tools/qbe/qbe-mk.sh is missing or not executable — no runner, so the staging block's memory class has no oracle"
+    FAIL=1; return; }
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" LapProbe.main "$TMP/lapapply")" || {
+    echo "FAIL lap-apply: qbe-mk"; FAIL=1; return; }
+  [ -x "$bin" ] || {
+    echo "FAIL lap-apply: qbe-mk produced no executable at $bin"; FAIL=1; return; }
+  for cfg in "" "QBE_MIDGC_YOUNG_MB=1" "QBE_MIDGC_VERIFY=1" "QBE_MIDGC_YOUNG=0"; do
+    env $cfg "$bin" LapProbe.main >"$TMP/lapapply.out" 2>&1
+    rc=$?
+    out="$(cat "$TMP/lapapply.out")"
+    if [ "$rc" -ne 0 ] || [ "$out" != "300042" ]; then
+      echo "FAIL lap-apply: LapProbe.main${cfg:+ ($cfg)} exit=$rc out='$out' (golden 300042) — the F-site staging block was lapped or swept while the applied callee ran; it must be malloc'd, never allocvec (see this row's comment)"
+      FAIL=1
+      return
+    fi
+  done
+  echo "PASS lap-apply: LapProbe.main prints 300042 in all 4 memory configurations (default nursery, YOUNG_MB=1, VERIFY=1, YOUNG=0) — the staged block survives a ~12 MB user allocation between hops"
+}
+lap_apply_gate
+
 # ---- stage 4: arity > 8 (the old rt_callN table stopped at rt_call8) ----
 # arity9: a 9-ary defun called DIRECTLY from the driver (rt_call9).  arity9apply:
 # apply9 add9 -> f 1..9 where f is a Var, so the 9-ary call goes through

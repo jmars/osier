@@ -1461,7 +1461,10 @@ rtDeps =
           -- aggcall (RawCallAgg — NOT rtDeps edges); malloc/rt_root_* are
           -- rawcall (RawCallRaw — NOT rtDeps edges).
           ( "Rt.apply", [ "Rt.applyGo", "Rt.rootPushValueArray", "Rt.rootPop" ] )
-        , ( "Rt.apply-tail", [ "Rt.applyTailGo", "Rt.rootPushValueArray", "Rt.rootPop" ] )
+        , -- U2 review fix: the CONVENTION GUARD's die is a RawCall edge too —
+          -- a caller that does not pass `fslot + 40` must die loudly, not scan
+          -- the wrong range.
+          ( "Rt.apply-tail", [ "Rt.applyTailGo", "Rt.rootPushValueArray", "Rt.rootPop", "Rt.die" ] )
         , -- STAGE 7 O3-fix: both apply LOOPS' partial arms (`rem > nargs`) now
           -- hand off to Rt.applyPartGo instead of spelling the capture/args
           -- interleave inline, so the edge is theirs AND the host applier's:

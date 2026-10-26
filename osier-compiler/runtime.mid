@@ -7928,28 +7928,66 @@ defun Rt.apply(fslot : word, args : word, nargs : word) -> val {
 // passes `(buf, buf + 40, nargs)` — the existing 3-word convention with
 // `fslot = buf`.
 //
-// ALLOCVEC, ALWAYS — AND NEVER THE SHARED tsbuf (globals word 12).  The static
-// tsbuf is sound for the STATIC tail path only because at most ONE `.tail` is
-// in flight there.  An apply CHAIN can hold two at once: an intermediate static
-// tail hop inside an OVER-APPLIED chain would reuse tsbuf and CLOBBER the
-// chain's staged args — a silent wrong answer that does not exist today (the
-// apply path's args live in F's pooled frame, rooted by F's registration).
-// This seat is the ONE place that hazard can be introduced.  Keep it allocvec;
-// do not add the tsbuf arm "for speed".
+// MALLOC, ALWAYS — NEVER THE GC (allocvec), NEVER THE SHARED tsbuf.  All three
+// are load-bearing, and the first one is the fix for a MEASURED corruption
+// (handoff-apply-chain-u2-review BLOCKER 1), so read this before changing it.
 //
-// THE INVARIANT (U2's half of the no-collect window): between this seat's
-// allocvec and the callee's read of `buf` F emits ONLY the frame-leave and the
-// tcall, so nothing can collect in between.  The block is unrooted for that
-// span by convention, exactly as Rt.stage-tail's copies are.
+//   * NOT allocvec: a GC block here is YOUNG (the nursery is on by default) and
+//     the kind-2 registration that roots it NEVER PROMOTES IT — gcScavRoots
+//     walks the CELLS via gcScavValueArray and never calls gcScavPtr on the
+//     base — while gcScavenge resets youngCursor, so the block's storage is
+//     reusable the moment a scavenge ends.  The block then has to survive
+//     UN-LAPPED, and that window is NOT small: the over-applied arm runs
+//     `rt_call2r` — ARBITRARY USER CODE — and `recur`s, and the next iteration
+//     reads `sp->args`, an INTERIOR pointer into this block.  So the window
+//     between staging and the last read contains the applied callee's whole
+//     body, whose allocation volume is USER-CONTROLLED.  MEASURED (the
+//     lapprobe row): an arity-1 closure applied to 2 args whose body builds a
+//     ~12 MB list corrupted the root scan at the DEFAULT nursery —
+//     "qbe-rt: midgc: unknown value tag in mark walk" — and the same code with
+//     ONLY the site reverted to the pre-U2 shape prints the right answer.
+//     Under the old path (young off, or a block bigger than the nursery) the
+//     same seat is sweepable while live for the same reason: kind-2 marking
+//     never marks the block header (gcScanValueArray marks the first CELL).
+//     A malloc'd block is neither young nor GC-owned, so BOTH regimes are
+//     closed by construction — the collector never moves it and never frees it.
+//   * The kind-2 registration still does its real job: it rewrites the CELLS'
+//     payload pointers IN PLACE across a scavenge, which is what keeps the
+//     staged Values current.  Immovability is what makes in-place rewriting
+//     sufficient.
+//   * NEVER tsbuf: the static buffer is sound for the STATIC tail path only
+//     because at most ONE `.tail` is in flight there.  An apply CHAIN can hold
+//     two at once — an intermediate static tail hop inside an OVER-APPLIED
+//     chain would reuse tsbuf and CLOBBER the chain's staged args, a silent
+//     wrong answer that does not exist today.  This seat is the ONE place that
+//     hazard can be introduced; do not add a tsbuf arm "for speed".
+//
+// OWNERSHIP: the block is the CALLER's frame's replacement, so Rt.apply-tail
+// owns it and frees it beside `free(state)` after the loop returns.  (U3a
+// moves that free into applyTailGo's exits, where the state's free already
+// goes — the saturated arm tcalls and never returns.)
 defun Rt.stage-apply(fslot : word, argblock : word, nargs : word) -> word {
-  word buf = allocvec(nargs + 1);
+  word buf = rawcall malloc((nargs + 1) * 40);
   call Rt.copyWords(buf, fslot, 5);
   call Rt.copyWords(buf + 40, argblock, nargs * 5);
   return buf;
 }
 defun Rt.apply-tail(fslot : word, args : word, nargs : word) -> val {
+  // THE CONVENTION, ENFORCED (review NICE-TO-HAVE 3) — and note it is a
+  // DIFFERENT convention from Rt.apply's under the same 3-word signature:
+  // Rt.apply registers (base = the caller's args range, live = nargs), while
+  // THIS defun registers (base = the staged block, live = nargs + 1, cell 0 =
+  // the closure).  The range is DERIVED from the block base and never from the
+  // `args` word, and a caller that hands us anything but `fslot + 40` is a
+  // LOUD error naming the shape — because the silent failure of getting it
+  // wrong is a rooting gap (a range of `nargs` from the block would drop the
+  // LAST ARG from the scan), not a crash.
+  if (args != fslot + 40) {
+    call Rt.die(rawstr("qbe-rt: Rt.apply-tail: args must be the staged block + 40 (Rt.stage-apply shape) - the pre-U2 (fslot, frame-args) convention is gone"));
+    return mknil;
+  }
   *ApplyState state = rawcall malloc(32);
-  state->args = args;
+  state->args = fslot + 40;
   state->nargs = nargs;
   // U2: the registration roots the WHOLE staged block — cell 0 (the closure)
   // as well as the args — because the base is now the block, not the args
@@ -7962,6 +8000,10 @@ defun Rt.apply-tail(fslot : word, args : word, nargs : word) -> val {
   val r = call Rt.applyTailGo(mknum(state), f);
   call Rt.rootPop();
   rawcall free(state);
+  // The staged block is OURS to free (Rt.stage-apply malloc'd it and F's frame
+  // is gone) — and it must be freed AFTER the pop, never before: the registry
+  // is scanned by address and the block is registered until rootPop.
+  rawcall free(fslot);
   return r;
 }
 defun Rt.applyGo(state : val, f : val) -> val {
