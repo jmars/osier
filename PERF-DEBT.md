@@ -85,9 +85,10 @@ alternated pairs, both arms.
 
 **Direction for the fix** (not yet designed in detail): cut the blits (read `f`'s fields
 from ONE staged copy rather than four calls), and reduce the frames (a single frame
-shared across the apply family, or an in-frame loop like `Rt.bounceGo`). Both are
-`Lower`/surface design work, not a loop swap — which is why `copyWords` (fixed for
-~17%) only moved 11.6× → 9.3×.
+shared across the apply family — the in-frame-loop half LANDED as
+`Rt.applyTailGo`, whose loop replaces the per-hop frames; `Rt.bounceGo` no longer
+exists). Both are `Lower`/surface design work, not a loop swap — which is why
+`copyWords` (fixed for ~17%) only moved 11.6× → 9.3×.
 
 **Leak — FIXED (stage-6 P1a).** The apply family also leaked **~704 B per saturated
 closure call**: `Rt.apply`/`Rt.apply-tail` malloc a 32-byte `state` block and never
@@ -178,26 +179,22 @@ handoff disclaims (P1d review should-fix 2).
 
 Measured on `mutual-tail` at 1e6 hops (constant stack, `md-mutual-tail`).
 
-**Named causes:**
-1. A **per-call `malloc(80)`** for the `Ret` in `Rt.tail-known` (the rawAbi `Agg "ret"`
-   convention inherited from B1's `Rt.apply-tail`).
-2. The **17-arm linear if-chain** on arity in the dispatch — Zig uses a jump table.
-3. `bounceGo`'s per-hop **mknum + blit** (the `:val`-shaped staging).
-
-**Direction:** a jump-table-shaped dispatch, and avoiding the per-call `malloc(80)`
-(the `Ret` could be staged in the frame or the globals scratch — but mind the
-single-`.tail`-in-flight invariant, which is *stated* at `Rt.tail-known`).
-
-**Leak — FIXED (see the commit that added the `free` in Lower's Agg-ret `@ret`
-block).** The per-call `malloc(80)` `Ret` was also a **leak**: nothing freed it
-(the Lower Agg-ret `@ret` block blit it out and dropped the pointer), while the
-Zig seat is heap-free (`Ret` returned by-value through sret) — ~80 MB leaked per
-1e6-hop chain, unbounded growth over a program run.  Fixed by a `free` in the
-shared Agg-ret `@ret` block **after** the `Blit`: the blit copies the 80 bytes
-out first, and libc `free` is not a GC alloc (no safepoint, no move), so the
-no-collect invariant holds.  One site covers all three `malloc(80)` arms
-(`Rt.apply-tail` ×2, `Rt.tail-known`).  The residual is one libc call per tail;
-eliminating the intermediate buffer entirely remains open for B4.
+**RESOLVED — THE `.tail` PROTOCOL IS DELETED (U3a + U3b).**  All three named
+causes went with it: there is no per-call `malloc(80)` (the `Ret` cell, its
+`free`, and the whole `Agg "ret"` `@ret` blit are gone), no `bounceGo` per-hop
+`mknum + blit`, and the dispatch this section priced is no longer on the tail
+path at all.  A static tail call within the tcall register budget `tcall`s the
+callee directly; the generic apply chain `tcall`s
+`Rt.apply-tail → Rt.applyTailGo → rt_call2r → the closure`; every closure body
+returns the finished `:val`.  The 17-arm linear if-chain survives only in
+`Rt.callArity` (the APPLIER seat, a different consumer).  What the tail path
+costs now is measured by `qbe-check.sh`'s `tail-perf` (6x bound against the
+frozen reference) and `clostail-big` (constant stack at 1e6 hops under an owned
+8 MiB stack), not by this section.
+The history is kept because the reasoning was right at the time: the leak was
+fixed by a `free` in the shared `@ret` block, and the residual it left — one
+libc call per tail — is what U3b's deletion removed entirely by removing the
+buffer.
 
 ### 3. frames — **1.6× → 1.4× (P1c) → 0.97× (P1e)** — the floor (lowest priority)
 

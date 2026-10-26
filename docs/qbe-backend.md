@@ -95,15 +95,22 @@ has no tail form; jump targets are intra-function only.
   churn 500000 (an allocating self-tail loop at the 16MB heap).  This stays
   the hot path.
 - **Every other tail position — cross-defun calls, `rt_apply`, thunk forces —
-  returns a `.tail` and is bounced.**  Every generated function returns the
-  80-byte `:ret` aggregate (`{ :val, w, l, l, l, w }` = `.done` value |
-  `.tail` request), transcribed from the AOT's `Ret = .done | .tail`
-  (tools/aot/runtime.zig).  `rt_bounce` chases a `.tail` chain at constant
-  native stack; `rt_tail_known` / `rt_apply_tail` build the `.tail` (fresh
-  self-contained env array, surviving the caller's `rt_frame_leave`).  The
-  mutual-tail check (`qbe-check.sh`) now ASSERTS unboundedness: `Mutual.even
-  1000000` completes, where the pre-bounce ceiling was 20k-40k hops (2
-  native frames/hop, QBE prologues ~200B).
+  is a real `tcall`, and the bounce protocol is DELETED (U3b).**  There is no
+  `.tail` request, no 80-byte `:ret` aggregate and no trampoline any more: a
+  static tail call within the tcall register budget `tcall`s the callee
+  directly, the generic apply chain `tcall`s `Rt.apply-tail → Rt.applyTailGo →
+  rt_call2r → the closure`, and every closure body returns the finished
+  40-byte `:val`.  Each hop REUSES one machine frame, so the chain is
+  constant-stack by construction rather than by chasing.  Two correct
+  non-tcalls remain and both are bounded, not growth: the 240 arity-5+ static
+  tail sites take the ordinary call (one frame per hop, rlimit-bounded — the
+  design's priced 95%/240 split), and `rt_call2r`'s arity-5+ blocks return
+  through its own frame.  The instruments: `Mutual.even 1000000` and
+  `ClosTail.main 1000000` under an OWNED 8 MiB stack (`clostail-big`), where
+  the pre-bounce ceiling was 20k-40k hops (2 native frames/hop, QBE prologues
+  ~200B).  HISTORY: the `.tail`/`rt_bounce` trampoline was the mechanism until
+  U3a/U3b (apply-chain-design.md) — `docs/qbe-backend.md`'s older rows that
+  describe it are describing that period.
 
 ## Crux 2 — GC rooting: pooled runtime frames, with both proofs
 
@@ -226,10 +233,12 @@ always escapes — meaning the `Con`/`rt_con` half is correct but cannot be exer
 
 ## What the next stage must settle
 
-1. **~~The bounce loop + depth guard~~** — DONE: cross-defun tails now bounce
-   (see Crux 1), and NON-tail deep recursion fails LOUD at the real C-stack
-   boundary — see "The native stack-depth guard" at the foot of this file
-   (handoff osier-natdepth).  Unlike the AOT's nat_depth cap there is no
+1. **~~The bounce loop + depth guard~~** — DONE, then SUPERSEDED: cross-defun
+   tails were bounced (see Crux 1), and U3a/U3b replaced the bounce with
+   direct `tcall`s and deleted the `.tail` protocol outright, so there is
+   nothing left to chase.  NON-tail deep recursion still fails LOUD at the real
+   C-stack boundary — see "The native stack-depth guard" at the foot of this
+   file (handoff osier-natdepth).  Unlike the AOT's nat_depth cap there is no
    interpreter to fall back to, so the guard names the failure instead of
    capping it.
 2. **Case/pattern matching** (the biggest coverage gap; `Mid.Ir.Case` with
@@ -748,8 +757,8 @@ too, i.e. a pre-existing frontend recursion limit, unrelated to this fix.
 
 ## The native stack-depth guard (handoff osier-natdepth)
 
-NON-tail recursion runs on the C stack — that is the documented limitation the
-bounce loop cannot remove (`n + deep (n-1)` keeps every frame live).  Until
+NON-tail recursion runs on the C stack — that is the documented limitation no
+tail-call mechanism can remove (`n + deep (n-1)` keeps every frame live).  Until
 this stage, a recursion deep enough to exhaust `RLIMIT_STACK` died with a BARE
 SIGSEGV: exit 139, empty stderr.  Non-zero, so never a silent wrong answer,
 but unnamed, unassertable by any gate, and silent about the remedy — and the
@@ -1249,14 +1258,15 @@ untouched and NO re-freeze epoch was opened):
    `rt_global_closure`'s) would sit above that frame's watermark and the next
    `rt_frame_leave` would silently unroot the whole table.
 
-2. **`rt_tail_known` staging for arity <= 3.** A `.tail`'s args are read
-   exactly once — by the CALLEE's prologue, before any of its code runs — and
-   the builder cannot run again in between (after `rt_tail_known` returns its
-   caller only blits the `:ret`, calls `rt_frame_leave` and rets).  So one
-   static staging buffer replaces the per-call GC array; arity > 3 keeps the
-   array.  The args were never GC-rooted in either shape; both rest on the
-   invariant the ABI already documents (no collection between the `.tail`
-   build and the callee's prologue blit).
+2. **~~`rt_tail_known` staging for arity <= 3~~** — LANDED as `Rt.stage-tail`,
+   and it SURVIVES the collapse: the STATIC tail path still stages into the
+   shared `tsbuf` for arity <= 3 (`QBE_NOTTAILSTAGE=1` forces the allocvec).
+   The invariant is unchanged and now stated at the seat: the staged args are
+   read exactly once, by the callee's prologue blit, with no collection in
+   between.  The GENERIC apply path does NOT share that buffer — `Rt.stage-apply`
+   mallocs, because an apply chain can hold two staged blocks at once and a
+   shared buffer would let a nested hop clobber the outer chain's args (the
+   `tsbuf-apply` row is the witness; U3b stage 0).
 
 ### Hatches (A/B on the same source, better: the same BINARY)
 

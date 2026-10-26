@@ -1344,8 +1344,12 @@ lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec _ mid
                 -- NOT COVERED BY EITHER (before or after): this says nothing
                 -- about whether every Mid-IMPLEMENTED prim is Mid-sound — that is
                 -- the corrected-criterion audit (plan.md §2.2), whose pure-program
-                -- half is pinned by probe-midgc-tail.sh (the transient tail array
-                -- is a scavenge trigger but not a hole).
+                -- half is pinned by the probe-midgc-* suite (19 scripts, run from
+                -- the repo root).  THE EXAMPLE THIS SENTENCE USED TO NAME IS GONE:
+                -- the transient `.tail` array (and `probe-midgc-tail.sh`, which
+                -- pinned it) belonged to the `.tail` staging that U3a/U3b deleted —
+                -- the apply chain now stages into ONE malloc'd block
+                -- (`Rt.stage-apply`), freed on every exit of `Rt.applyTailGo`.
                 -- THE Rt SURFACE GATE (perf VR3b2, worklist entry 7).  Every
                 -- Rt.* defun is `runtime.mid` text written against the 40-byte
                 -- layout — gcAlloc's `2 + count + 4*count*kind`, apply's
