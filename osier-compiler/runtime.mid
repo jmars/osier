@@ -1380,6 +1380,7 @@ defun Rt.fillGo(l : val, bufN : val, i : val) -> val {
   recur(vecload(vecbody(l), 1), bufN, mknum(payload(i, 0) + 1));
 }
 
+// >>> QBE_VAL-ONLY
 @consArr
 defun Rt.cons(car : val, cdr : val) -> val {
   return withroots [car, cdr] {
@@ -1398,6 +1399,37 @@ defun Rt.cons(car : val, cdr : val) -> val {
     vecstore(pair, 1, cdr);
     return mkval(4, vecaddr(pair, 0), vecaddr(pair, 1));
   };
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// THE WORD-ARM TWINS (perf word-arm-area3rt).  The cons cell IS its two body
+// words: `Rt.allocCons` allocates code 4 with count 2 (32 B, header included)
+// and returns the BODY, the two elements are stored INLINE, and the Value word
+// is `body OR ...001`.
+//
+// THE @consArr FUSION FLAG IS ABSENT HERE ON PURPOSE.  On the val arm the flag
+// picks between "payload word 0 = &pair[0], word 1 unwritten" and "two interior
+// pointers", i.e. between two ways of reaching a SEPARATE pair.  Inline, the
+// pair is the cell, so there is one shape and nothing to fuse — the flag keeps
+// its two defuns only because the flag is a build knob both arms must accept.
+@consArr
+defun Rt.cons(car : val, cdr : val) -> val {
+  return withroots [car, cdr] {
+    word pair = vecbody(call Rt.allocCons());
+    vecstore(pair, 0, car);
+    vecstore(pair, 1, cdr);
+    return mkval(4, pair);
+  };
+}
+
+@!consArr
+defun Rt.cons(car : val, cdr : val) -> val {
+  return withroots [car, cdr] {
+    word pair = vecbody(call Rt.allocCons());
+    vecstore(pair, 0, car);
+    vecstore(pair, 1, cdr);
+    return mkval(4, pair);
+  };
+// <<< QBE_WORDVAL-ONLY
 }
 
 @consArr
@@ -2139,10 +2171,21 @@ defun Rt.recToChainGo(rec : val, i : val, acc : val) -> val {
   return call Rt.recToChainGo(rec, mknum(payload(i, 0) + 1), call Rt.cons(call Rt.@p(vecload(payload(rec, 2), payload(i, 0)), vecload(vecbody(rec), payload(i, 0))), acc));
 }
 
+// >>> QBE_VAL-ONLY
 defun Rt.absvector(cnt : val) -> val {
   word vec = allocvec(payload(cnt, 0));
   return mkvec(vec, payload(cnt, 0));
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// THE WORD-ARM TWIN (perf word-arm-area3rt): ONE code-10 block of `cnt` body
+// words, its length in the header's count word (written by the seat), and the
+// Value word is the tagged BODY — the same three facts as Rt.con's twin.
+defun Rt.absvector(cnt : val) -> val {
+  word body = vecbody(call Rt.allocKind(mknum(10), mknum(payload(cnt, 0))));
+  return mkval(10, body);
+}
+// <<< QBE_WORDVAL-ONLY
 
 defun Rt.address->(vec : val, i : val, x : val) -> val {
   vecstore(vecbody(vec), payload(i, 0), x);
@@ -2284,6 +2327,21 @@ defun Rt.read-byte(stream : val) -> val {
   }
 }
 
+// >>> QBE_WORDVAL-ONLY
+// THE STREAM CELL (perf word-arm-area3rt).  A val-arm stream is a 40-byte Value
+// whose payload words are {fd, flags} — a small record, no separate array — so
+// the word arm's counterpart is a code-11 block whose BODY is those two raw
+// words (`heapKindScanned` false: nothing traces them).  Every reader is a
+// `payload(stream, 0)` / `payload(stream, 1)` / `payload32(stream, 1)`, which
+// reads body words 0 and 1 unchanged, so only the CONSTRUCTOR moves.
+defun Rt.mkStream(what : val, flags : val) -> val {
+  word body = vecbody(call Rt.allocKind(mknum(11), mknum(2)));
+  wstore(body, 0, payload(what, 0));
+  wstore(body, 1, payload(flags, 0));
+  return mkval(11, body);
+}
+// <<< QBE_WORDVAL-ONLY
+
 defun Rt.open(path : val, dir : val) -> val {
   if (call Rt.=(dir, "in")) {
     word len = len32(path);
@@ -2298,11 +2356,21 @@ defun Rt.open(path : val, dir : val) -> val {
           word h = rawcall rt_halt();
           return mknil;
         }
+        // >>> QBE_VAL-ONLY
         return mkval(11, idx, 1 + 4294967296 * 1);
+        // <<< QBE_VAL-ONLY
+        // >>> QBE_WORDVAL-ONLY
+        return call Rt.mkStream(mknum(idx), mknum(1));
+        // <<< QBE_WORDVAL-ONLY
       }
       return false;
     }
+    // >>> QBE_VAL-ONLY
     return mkval(11, fd, 1 + 4294967296 * 0);
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    return call Rt.mkStream(mknum(fd), mknum(0));
+    // <<< QBE_WORDVAL-ONLY
   } else {
     if (call Rt.=(dir, "out")) {
       word len = len32(path);
@@ -2310,7 +2378,12 @@ defun Rt.open(path : val, dir : val) -> val {
       val bufN = mknum(bufW);
       call Rt.cStrFill(bufN, path, mknum(0));
       word fd = rawcall openat(-100, bufW, 577, 438);
+      // >>> QBE_VAL-ONLY
       return mkbool(fd < 0) ? false : mkval(11, fd, 0 + 4294967296 * 0);
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      return mkbool(fd < 0) ? false : call Rt.mkStream(mknum(fd), mknum(0));
+      // <<< QBE_WORDVAL-ONLY
     }
     return mknum(0);
   }
@@ -2465,7 +2538,17 @@ defun Rt.intInsertAt(nN : val, dataPtrN : val, lenN : val) -> val {
   wstore(tab + n * 16, 0, store);
   wstore(tab + n * 16 + 8, 0, len);
   wstore(glob, 8209, n + 1);
+  // >>> QBE_VAL-ONLY
   return mkval(2, store);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // A symbol's body is ONE RAW word — the name pointer (code 2 is
+  // `heapKindScanned` false, so nothing traces it) — and `mkval(code, body)` is
+  // the tag, not a layout.
+  word sym = vecbody(call Rt.allocKind(mknum(2), mknum(1)));
+  wstore(sym, 0, store);
+  return mkval(2, sym);
+  // <<< QBE_WORDVAL-ONLY
 }
 
 defun Rt.intern(str : val) -> val {
@@ -2480,7 +2563,14 @@ defun Rt.intern(str : val) -> val {
   val found = call Rt.intFindGo(mknum(dataPtr), mknum(len), mknum(0));
   word hit = payload(found, 0);
   if (mkbool(hit != 0)) {
+    // >>> QBE_VAL-ONLY
     return mkval(2, hit);
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    word symHit = vecbody(call Rt.allocKind(mknum(2), mknum(1)));
+    wstore(symHit, 0, hit);
+    return mkval(2, symHit);
+    // <<< QBE_WORDVAL-ONLY
   }
   return call Rt.intInsert(mknum(dataPtr), mknum(len));
 }
@@ -6818,6 +6908,7 @@ defun Rt.shen.bytes->string(bs : val) -> val {
     return mknil;
   }
 }
+// >>> QBE_VAL-ONLY
 defun Rt.con(tag : val, argsPtr : val, cnt : val) -> val {
   word dataW = allocvec(payload(cnt, 0) + 1);
   word cntW = payload(cnt, 0);
@@ -6825,6 +6916,28 @@ defun Rt.con(tag : val, argsPtr : val, cnt : val) -> val {
   call Rt.conFill(mknum(dataW), argsPtr, mknum(cntW));
   return mkvec(dataW, cntW + 1);
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// THE WORD-ARM TWIN (perf word-arm-area3rt).  A vector's elements are INLINE,
+// so the "element array" and the vector CELL are the same block: `allocKind`
+// gives a code-10 block of `cnt + 1` body words (the ctor tag, then the
+// arguments), the header's count word carries the length (gcAlloc writes it —
+// the val arm's `mkvec(data, n)` payload word 1 has no word-arm counterpart),
+// and the Value word is `body OR ...001`.
+//
+// WHAT MOVED AND WHY IT IS NOT A STRIDE: the val arm allocates an UNTAGGED
+// array (`allocvec` = code 1 there) and then wraps it in a 40-byte Value; the
+// word arm allocates ONE code-10 object, because a `...001` word names the
+// block itself and the collector's scan kind must say "vector" for the body's
+// Value words to be traced.
+defun Rt.con(tag : val, argsPtr : val, cnt : val) -> val {
+  word cntW = payload(cnt, 0);
+  word body = vecbody(call Rt.allocKind(mknum(10), mknum(cntW + 1)));
+  vecstore(body, 0, tag);
+  call Rt.conFill(mknum(body), argsPtr, mknum(cntW));
+  return mkval(10, body);
+}
+// <<< QBE_WORDVAL-ONLY
 
 defun Rt.conFill(data : val, argsPtr : val, idx : val) -> val {
   word dataW = payload(data, 0);
@@ -6838,6 +6951,7 @@ defun Rt.conFill(data : val, argsPtr : val, idx : val) -> val {
   }
 }
 
+// >>> QBE_VAL-ONLY
 defun Rt.closure(desc : val, capBase : val, cnt : val) -> val {
   word dataW = allocvec(payload(cnt, 0));
   word cntW = payload(cnt, 0);
@@ -6846,6 +6960,42 @@ defun Rt.closure(desc : val, capBase : val, cnt : val) -> val {
   call Rt.closureFill(mknum(dataW), capBase, mknum(cntW));
   return mkval(6, descW, arityW, dataW, cntW);
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// THE WORD-ARM TWIN (perf word-arm-area3rt).  The closure keeps the val arm's
+// FOUR-FIELD shape — [desc, arity|ncaps<<32, caps, ncaps] — because every
+// reader in the apply chain reads exactly those words (`payload(f,0)` is the
+// descriptor, `payload32(f,1)` the arity, `payload(f,2)` the capture array,
+// `payload32(f,3)` its length) and the closure ENTRY reads captures at
+// `env + j * 8` (Lower's capBlitsPro).  What changes is WHERE the fields live
+// and HOW the capture array is named:
+//
+//   * the four fields are the object's BODY (code 6, count 4), so the body's
+//     words ARE the fields and the value word is `body OR ...001`;
+//   * the capture array is its own code-10 block (`allocKind`), and body word 2
+//     holds it TAGGED (`caps + 1`) because a code-6 body is SCANNED: an untagged
+//     raw pointer in it would be read as a fixnum and never marked, i.e. the
+//     captures would be collected while the closure still points at them.  The
+//     apply chain untags it (`payload(f, 2) - 1`) before handing it to
+//     `rt_call2r`, and a closure with NO captures stores the tag alone (1), so
+//     `env == 0` still means "no env" and the loud missing-env die still fires.
+//   * desc/arity/ncaps need no tag: a descriptor address and two small counts
+//     all have their low three bits clear, i.e. they read as fixnums to the
+//     scanner and are left alone — which is why the body is safe to scan.
+defun Rt.closure(desc : val, capBase : val, cnt : val) -> val {
+  word cntW = payload(cnt, 0);
+  word caps = vecbody(call Rt.allocKind(mknum(10), mknum(cntW)));
+  call Rt.closureFill(mknum(caps), capBase, mknum(cntW));
+  word descW = payload(desc, 0);
+  word arityW = wload(descW, 1);
+  word body = vecbody(call Rt.allocKind(mknum(6), mknum(4)));
+  wstore(body, 0, descW);
+  wstore(body, 1, arityW);
+  wstore(body, 2, caps + 1);
+  wstore(body, 3, cntW);
+  return mkval(6, body);
+}
+// <<< QBE_WORDVAL-ONLY
 
 defun Rt.closureFill(data : val, capBase : val, idx : val) -> val {
   word dataW = payload(data, 0);
@@ -6885,6 +7035,7 @@ defun Rt.globalClosure(desc : word) -> val {
   if (cache != 0) {
     return vecload(cache, 0);
   }
+  // >>> QBE_VAL-ONLY
   word slot = rawcall malloc(40);
   wstore(slot, 0, 6);
   wstore(slot, 1, desc);
@@ -6893,6 +7044,29 @@ defun Rt.globalClosure(desc : word) -> val {
   wstore(slot, 4, 0);
   wstore(desc, 2, slot);
   return vecload(slot, 0);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // THE WORD-ARM TWIN (perf word-arm-area3rt).  The val arm's slot is a 40-byte
+  // Value in C memory; here the cell is a 2-word HEADER plus a 4-word BODY, and
+  // `slot` is the malloc'd BASE — the header sits at `-2`/`-1` words off the
+  // body, which is the convention every seat and reader already uses (Rt.boot's
+  // streams do the same for the same reason: this block is C-heap, outside
+  // [heapStart, cursor), so the collector's range tests treat it as "not mine").
+  //
+  // THE FOUR BODY WORDS ARE THE CLOSURE'S FOUR FIELDS, and body word 2 holds the
+  // capture array TAGGED — 1 here, i.e. the tag alone, since a global closure
+  // has no captures and `payload(f, 2) - 1` must be 0 so the missing-env die
+  // keeps its meaning.
+  word slot = rawcall malloc(48);
+  wstore(slot, -2, payload(call Rt.kindHdr(mknum(6), mknum(5)), 0));
+  wstore(slot, -1, 4);
+  wstore(slot, 0, desc);
+  wstore(slot, 1, wload(desc, 1));
+  wstore(slot, 2, 1);
+  wstore(slot, 3, 0);
+  wstore(desc, 2, slot + 1);
+  return mknum(slot + 1);
+  // <<< QBE_WORDVAL-ONLY
 }
 
 defun Rt.bytesBuild(s : val, i : val, acc : val) -> val {
@@ -8003,7 +8177,17 @@ defun Rt.applyGo(state : val, f : val) -> val {
   word code = payload(f, 0);
   word fn = wload(code, 0);
   word rem = payload32(f, 1);
+  // >>> QBE_VAL-ONLY
   word env = payload(f, 2);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // UNTAG THE CAPTURE ARRAY (perf word-arm-area3rt): a code-6 body is SCANNED,
+  // so the closure stores its capture block TAGGED (`caps + 1`) and every
+  // reader of field 2 strips the tag here.  A closure with no captures stores
+  // the tag alone, so `env == 0` keeps meaning "no env" and the dies below keep
+  // firing.
+  word env = payload(f, 2) - 1;
+  // <<< QBE_WORDVAL-ONLY
   word args = sp->args;
   word nargs = sp->nargs;
   if (tagis(f, 6) == 0) {
@@ -8075,7 +8259,17 @@ defun Rt.applyTailGo(state : word, fslot : word) -> val {
   word code = payload(f, 0);
   word fn = wload(code, 0);
   word rem = payload32(f, 1);
+  // >>> QBE_VAL-ONLY
   word env = payload(f, 2);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // UNTAG THE CAPTURE ARRAY (perf word-arm-area3rt): a code-6 body is SCANNED,
+  // so the closure stores its capture block TAGGED (`caps + 1`) and every
+  // reader of field 2 strips the tag here.  A closure with no captures stores
+  // the tag alone, so `env == 0` keeps meaning "no env" and the dies below keep
+  // firing.
+  word env = payload(f, 2) - 1;
+  // <<< QBE_WORDVAL-ONLY
   word args = sp->args;
   word nargs = sp->nargs;
   if (tagis(f, 6) == 0) {
@@ -8217,7 +8411,24 @@ defun Rt.applyPartGo(state : val, f : val) -> val {
   call Rt.copyWords(envv + napp * 40, args, nargs * 5);
   call Rt.copyWords(envv + (napp + nargs) * 40, env2 + napp * 40, capslen * 5);
   call Rt.rootPop();
+  // >>> QBE_VAL-ONLY
   return mkval(6, code, rem - nargs, envv, total);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // THE PARTIAL APPLICATION'S CELL (perf word-arm-area3rt): the same four
+  // fields as Rt.closure's twin, with the freshly built capture block TAGGED in
+  // field 2.  NOTE WHAT IS *NOT* PORTED HERE: the three `copyWords` calls above
+  // stage one 40-byte Value per argument (`napp * 5`, `* 40`) — that is the CALL
+  // STAGING, which must flip together with the argument ABI and is VR3d's
+  // (VR3c's frontier item 1).  This twin makes the closure CELL correct; a
+  // partial application's staged arguments are the flip's.
+  word body = vecbody(call Rt.allocKind(mknum(6), mknum(4)));
+  wstore(body, 0, code);
+  wstore(body, 1, rem - nargs);
+  wstore(body, 2, envv + 1);
+  wstore(body, 3, total);
+  return mkval(6, body);
+  // <<< QBE_WORDVAL-ONLY
 }
 defun Rt.callArity(disp : val) -> val {
   *Disp dp = payload(disp, 0);
@@ -10417,14 +10628,24 @@ defun Rt.apply-at(cN : val, bufN : val, nargsN : val) -> val {
       sp->args = buf;
       sp->nargs = nargs;
       sp->live = nargs;
+      // >>> QBE_VAL-ONLY
       sp->env = payload(cN, 2);
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      sp->env = payload(cN, 2) - 1;
+      // <<< QBE_WORDVAL-ONLY
       val p = call Rt.applyPartGo(mknum(sp), cN);
       rawcall free(sp);
       return p;
     } else {
       word napp = arity - rem;
       if (napp > 0) {
+        // >>> QBE_VAL-ONLY
         word env = payload(cN, 2);
+        // <<< QBE_VAL-ONLY
+        // >>> QBE_WORDVAL-ONLY
+        word env = payload(cN, 2) - 1;
+        // <<< QBE_WORDVAL-ONLY
         if (env == 0) {
           call Rt.die(rawstr("qbe-rt: closure env missing for applied args"));
           return mknil;
@@ -10434,7 +10655,12 @@ defun Rt.apply-at(cN : val, bufN : val, nargsN : val) -> val {
       } else {
         *Disp dp = rawcall malloc(32);
         dp->fn = wload(code, 0);
+        // >>> QBE_VAL-ONLY
         dp->caps = payload(cN, 2);
+        // <<< QBE_VAL-ONLY
+        // >>> QBE_WORDVAL-ONLY
+        dp->caps = payload(cN, 2) - 1;
+        // <<< QBE_WORDVAL-ONLY
         dp->buf = buf;
         dp->arity = arity;
         val r = call Rt.callArity(mknum(dp));

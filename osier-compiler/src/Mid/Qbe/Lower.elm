@@ -3975,14 +3975,18 @@ wordKindCode valueWord s =
 so the writer and every caller that can refuse at COMPILE time (the `mk*` path,
 which returns `Result`) cannot disagree about what is ported.
 
-The immediates (number, boolean, nil, error) need no heap object.  Of the heap
-codes only a STRING is writable here: its body is RAW (`heapKindScanned` false),
-so the two raw words it carries (byte pointer, length) are never traced by the
-collector and the cell is sound.  Every other heap code's body would hold a RAW
-word in a body the collector SCANS — see `storeWordCell`'s note.
+The immediates (number, boolean, nil, error) need no heap object.  A STRING is
+written here as a whole cell: its body is RAW (`heapKindScanned` false), so the
+two raw words it carries (byte pointer, length) are never traced by the
+collector and the cell is sound.  Every other heap code is writable ONLY as
+`mkval(code, bodyBase)` — ONE word, the body its own Mid seat already allocated
+and filled (the seat-return convention, perf word-arm-area3rt) — because a body
+the emitter laid out itself would put the val arm's raw pointers into a body the
+collector SCANS.  The WORD COUNT is therefore part of the judgment, not just the
+code: `wordCellRefusal code wordCount`.
 -}
-wordCellRefusal : Int -> Maybe String
-wordCellRefusal code =
+wordCellRefusal : Int -> Int -> Maybe String
+wordCellRefusal code wordCount =
     case RtLayout.wordTagShape code of
         RtLayout.WordNoForm why ->
             Just ("a cell with " ++ why)
@@ -3994,11 +3998,25 @@ wordCellRefusal code =
             if c == RtLayout.tagString then
                 Nothing
 
+            else if wordCount == 1 then
+                -- THE SEAT-RETURN CONVENTION (perf word-arm-area3rt).  ONE word
+                -- means the CALLER already allocated the body through the
+                -- code's Mid seat — `Rt.allocCons`/`allocKind`/`allocVector`
+                -- return `mknum(body)` and write the 2-word header INCLUDING
+                -- this code — so the cell writer's whole job is the tag
+                -- (`body OR heapPtrTag`).  The scan contract is then the
+                -- ALLOCATOR's (the scan bit is derived from the code by
+                -- `Rt.kindHdr`), which is exactly why this is sound: the
+                -- emitter is not inventing a body, it is tagging one.
+                Nothing
+
             else
                 Just
                     ("a heap cell with the kind code "
                         ++ String.fromInt c
-                        ++ " - its body would carry a RAW word into a body the collector SCANS (the val arm keeps those as pointers in a 40-byte Value's payload and the val scanner relocates them per tag; the word arm's body is a flat run of Value slots), so the layout has to be settled in runtime.mid's constructors and the scan contract, not invented here"
+                        ++ " and "
+                        ++ String.fromInt wordCount
+                        ++ " payload words - a word-arm heap cell is written by its ALLOCATOR (one word: the body the seat returned), because a body the emitter laid out itself would have to carry the val arm's raw pointers into a body the collector SCANS. Settle the layout in runtime.mid's constructor, not here"
                     )
 
 
@@ -4157,7 +4175,46 @@ storeWordCell code words dest s0 =
                 storeWordStringCell words dest s0
 
             else
-                Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" (Maybe.withDefault "an unwritable heap code" (wordCellRefusal code))))
+                case words of
+                    [ body ] ->
+                        -- THE SEAT-RETURN CONVENTION, WRITTEN DOWN (perf
+                        -- word-arm-area3rt).  ONE word means the caller has
+                        -- ALREADY allocated and filled the body through the
+                        -- code's Mid seat (`Rt.allocCons`/`allocKind`/
+                        -- `allocVector`, which return `mknum(body)` and write
+                        -- the 2-word header INCLUDING this code) — so the only
+                        -- thing left is the tag: `body OR heapPtrTag`.
+                        --
+                        -- This is NOT the val arm's shape.  There, `mkval(code,
+                        -- w0, w1, ..)` writes a 40-byte Value whose payload
+                        -- words ARE w0, w1, ..; here the words are not a body,
+                        -- the CALLER's allocation is.  A site passing more than
+                        -- one word is therefore still refused below: it has not
+                        -- allocated a body, and inventing one here would be the
+                        -- layout decision `wordCellRefusal` exists to keep out
+                        -- of the emitter.
+                        let
+                            ( w, s1 ) =
+                                freshTmp s0
+                        in
+                        Ok
+                            (s1
+                                |> emit (Bin (Just w) L Or body (Il.Con (RtLayout.heapPtrTag s1.layout)))
+                                |> storeWordWord (Il.Tmp w) dest
+                            )
+
+                    _ ->
+                        -- The defun is NAMED: a site refusal is only useful if
+                        -- the reader knows which runtime defun has not been
+                        -- twinned yet (the same precision `wordVecRefusal` got).
+                        Err
+                            (wordArmUnsupported
+                                (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
+                                    ((if s0.defunKey == "" then "" else s0.defunKey ++ ": ")
+                                        ++ Maybe.withDefault "an unwritable heap code" (wordCellRefusal code (List.length words))
+                                    )
+                                )
+                            )
 
 
 {-| The one store of a word-arm Value word.  Shared by every `storeWordCell`
@@ -4780,7 +4837,7 @@ storeValueWords tag words dest s0 =
         -- AREA A (perf VR3b3): under the word arm a `mk*` cell is the ONE cell
         -- writer, and its refusals are COMPILE-TIME here (this path returns
         -- Result) rather than the writer's belt-and-braces poison.
-        case wordCellRefusal tag of
+        case wordCellRefusal tag (List.length words) of
             Just why ->
                 Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" why))
 
