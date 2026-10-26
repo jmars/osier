@@ -460,46 +460,16 @@ struct ApplyState {
   live : word;
   env : word;
 }
-// THE 80-BYTE `:ret` LAYOUT (midlang-u7) — the Agg "ret" cell Rt.tail-known
-// mallocs, and that Rt.bounce / Rt.bounceGo chase.  The word offsets are an ABI
-// in three directions at once: the builder (this file), the chaser
-// (Rt.bounceGo's rt_callN switch), and Lower's @ret block, which blits all 80
-// bytes out of slot 0 and frees the block (P1a) — so no offset here may move.
-// TestMain's U7 rows pin this table.
-//
-// U3a: NOTHING BUILDS A `.tail` REQUEST ANY MORE, so this whole struct is
-// CALLER-LESS — Rt.tail-known's only remaining builder has no callers (the
-// arity-5+ static tail sites went non-tail) and Rt.bounce/Rt.bounceGo have
-// none (every closure call now returns the finished Value).  It stays because
-// the `:ret` TYPE must outlive tail-known's COMPILATION: deleting the builders
-// and the type together is U3b's job, and doing it here would mean the unit's
-// own gates could not tell a compile error from the deletion.  Both arms of
-// Rt.applyTailGo that used to malloc this cell now `tcall` instead, so the
-// only live malloc is Rt.tail-known's own.
-//
-//   slot 0..4  result  the `.done` Value payload (a `val` field = 5 words);
-//                      read by the chaser as a VALUE (`vecload(r, 0)` — a val
-//                      field read at offset 0 is the same node).  WRITTEN
-//                      WORD-WISE at the malloc sites (five zeroing
-//                      stores in the two tail arms, the five-word mkval payload
-//                      in the partial arm): that is a run of RawWordStores, NOT
-//                      a val field store, so those five lines keep the `wstore`
-//                      spelling — re-spelling them would emit a different node
-//                      sequence
-//   slot 5  kind   0 = `result` is the finished Value; 1 = words 6..9 are a
-//                  known tail call
-//   slot 6  code   the callee's code pointer (rt_callN's first argument)
-//   slot 7  e      the callee's env / captures pointer
-//   slot 8  args   the staged args array base (the static tsbuf or an allocvec)
-//   slot 9  arity  the callee's arity — the rt_callN switch in Rt.bounceGo
-struct Ret {
-  result : val;
-  kind : word;
-  code : word;
-  e : word;
-  args : word;
-  arity : word;
-}
+// U3b DELETED `struct Ret` AND THE 80-BYTE `:ret` CELL IT VIEWED.  It was the
+// `.tail` request the bounce trampoline carried: slot 0..4 the finished Value,
+// slot 5 the `.done`/`.tail` discriminator, slot 6..9 the callee's code/e/args/
+// arity for a chained hop.  U3a made NOTHING build a `.tail` (the apply chain
+// `tcall`s, the arity-5+ static sites take the ordinary call, every closure
+// call returns the finished Value), so U3b deleted the last builder
+// (Rt.tail-known), the two chasers (Rt.bounce, Rt.bounceGo) and this view with
+// it.  The VALUE arm no longer has a `:ret` return shape at all: a closure
+// body's result is `:val`.  What survives is the WORD arm's frozen `:ret`
+// (see Mid.RtLayout's Ret section) — AREA 6 owns its collapse.
 // THE APPLY DISPATCH-BLOCK LAYOUT (midlang-u7) — the four words Rt.callArity
 // reads out of its `disp` value's payload.  MEASURED against those reads
 // (fn@0, caps@1, buf@2, arity@3).  This view is a PREFIX of the storage and its
@@ -5171,8 +5141,8 @@ defun Rt.kindHdr(kind : val, cls : val) -> val {
 // in each case a twin here would be WRONG rather than merely absent — plus one
 // thing that LOOKS like a stride and is not:
 //
-//  1. THE CALL STAGING (`Rt.apply`, `Rt.applyTailGo`, `Rt.bounceGo`,
-//     `Rt.tail-known`): `buf + 40k`, `args + rem * 40` and the
+//  1. THE CALL STAGING (`Rt.apply`, `Rt.applyTailGo`, `Rt.stage-apply`):
+//     `buf + 40k`, `args + rem * 40` and the
 //     `copyWords(.., rem * 5)` blits move one 40-byte Value per argument.  That
 //     is the CALLING CONVENTION, not a data stride: MEASURED at VR3b2, a
 //     `:val` parameter arrives IN A REGISTER at 8 bytes and BY VALUE ON THE
@@ -8381,11 +8351,12 @@ defun Rt.copyWordsGo(dst : word, src : word, cnt : word) -> word {
 // pointers into our own frame would therefore hand the callee its own
 // zeroing.  The copy is the whole reason the convention works.
 //
-// THE INVARIANT (unchanged from Rt.tail-known, and stated here because it now
-// guards a different consumer): at most ONE staged block is in flight, its
-// args are read EXACTLY ONCE — by the callee's prologue blit — and NO
-// collection runs between the copy below and that read (after returning buf
-// the caller emits only the frame-leave and the tcall).  A future editor
+// THE INVARIANT (inherited from the U3b-deleted Rt.tail-known, and stated here
+// because it guards a DIFFERENT consumer): at most ONE staged block is in
+// flight on THIS path — the static one — its args are read EXACTLY ONCE, by
+// the callee's prologue blit, and NO collection runs between the copy below
+// and that read (after returning buf the caller emits only the frame-leave and
+// the tcall).  A future editor
 // adding a GC alloc AFTER the copy breaks it SILENTLY: the moved args are
 // never re-read.  The callee side needs no change at all: `paramFacts.tailed`
 // already excludes a tail-called defun from the lazy pointer-read
@@ -8398,177 +8369,25 @@ defun Rt.stage-tail(argblock : word, nargs : word) -> word {
   call Rt.copyWords(buf, argblock, nargs * 5);
   return buf;
 }
-// ===== the stage-6 B2 mid-tail family (VERBATIM rt.zig rt_tail_known /
-// bounce, rt.zig:932-977).  U3a LEFT THIS FAMILY WITHOUT CALLERS: the apply
-// chain `tcall`s (so no hop hands a request upward), the arity-5+ static tail
-// sites took the ordinary call, and every closure call now returns the
-// finished Value — so `Rt.tail-known` builds a `.tail` that nobody asks for,
-// `Rt.bounce` has nothing to unwrap, and `Rt.bounceGo`'s `kind == 1` arm is
-// unreachable.  They still COMPILE and are still correct (U3b deletes them
-// together with the `:ret` type they are the last builders of).
+// ===== U3b DELETED THE BOUNCE TRAMPOLINE (stage-6 B2: rt.zig rt_tail_known /
+// bounce).  Rt.tail-known (the `.tail` builder), Rt.bounce (the one-hop
+// unwrapper) and Rt.bounceGo (the `recur` chase loop) are GONE, together with
+// `struct Ret` above and the `:ret` result class in Lower's rawAbiRetClass.
 //
-// Rt.tail-known is a rawAbi WORD defun (code,
-// argblock, nargs) whose RESULT is the 80-byte `:ret` (Agg "ret" — the body
-// leaves mknum(retbuf) in slot 0 and the Lower @ret block blits the 80 bytes
-// out; Rt.applyTailGo's saturated arm used to do the same and now `tcall`s).  It stages the args into the
-// STATIC buffer (globals word 12, malloc'd ONCE in Rt.main) for <=3 args —
-// the no-allocation path, the Zig `tail_stage[3]` .bss buffer's job — or the
-// GC allocvec fallback for >3 args (or QBE_NOTTAILSTAGE=1, globals word 13).
-// THE SINGLE-.tail-IN-FLIGHT + NO-COLLECT INVARIANT (rt.zig:956-973, stated
-// HERE at the Mid surface): the static buffer is SHARED and sound only
-// because at most ONE .tail is in flight — its args are read EXACTLY ONCE by
-// the callee's prologue blit, and the builder cannot run again before that
-// (after tail-known returns the builder only blits the 80-byte :ret into slot
-// 0, leaves its frame, and returns).  NO collection runs between the .tail
-// build and that blit — the fresh allocvec array (and the static buffer's
-// copies) are UNROOTED by convention and safe by it.  A future editor adding
-// a GC alloc AFTER the staging copy (or in the Lower @ret blit block) breaks
-// it SILENTLY — keep this defun alloc-free after the copy.
+// WHY THEY WERE DELETABLE, stated so a future reader does not re-derive it:
+// U3a made nothing BUILD a `.tail` request — the generic apply chain `tcall`s
+// straight into the callee (Rt.apply-tail -> Rt.applyTailGo -> rt_call2r ->
+// the closure), the arity-5+ static tail sites take the ordinary call, and
+// every closure call returns the finished Value.  With no builder, `Rt.bounce`
+// had nothing to unwrap and `Rt.bounceGo`'s kind==1 arm was unreachable, so
+// the 1e6-hop chase the trampoline used to perform is the tcall chain itself
+// (the `clostail-big` row is the instrument).  MEASURED at 3acd79a: 0 of 159
+// emitted corpus artifacts called either symbol.
 //
-// Rt.bounce is a rawAbi WORD defun (one word param, the 80-byte :ret pointer)
-// whose RESULT is the 40-byte `.done` Value (Agg "val").  Its body is the
-// single-iteration fast path (kind==0 -> the `result` Value, `struct Ret` above)
-// plus a hand-off to the :val self-tail loop Rt.bounceGo for an actual
-// tail chain (kind==1).  Rt.bounceGo dispatches one hop (aggcall :ret rt_callN
-// by arity — the callArityRet switch) and `recur`s on mknum(newRetPtr): the
-// SAME :val self-tail Rt.applyGo uses (recur needs the val path; the rawAbi
-// word tail rejects it).  CONSTANT NATIVE STACK: the loop is one C frame
-// (jmp @body per hop, no recursion), exactly the Zig `bounce` trampoline.
-// U3a: NEITHER dispatch site bounces any more — Rt.main's entry dispatch and
-// Rt.callArity's apply dispatch read `rt_callN`'s returned `:val` directly, so
-// the trampoline is not on any path and the 1e6-hop chase is the tcall chain
-// itself (the clostail large-n row is what proves it).
-defun Rt.tail-known(code : word, argblock : word, nargs : word) -> val {
-  word g = rawcall rt_glob_addr();
-  word tsbuf = wload(g, 12);
-  word noStage = wload(g, 13);
-  word buf = payload((mkbool(nargs <= 3) && mkbool(noStage == 0)) ? mknum(tsbuf) : mknum(allocvec(nargs)), 0);
-  call Rt.copyWords(buf, argblock, nargs * 5);
-  *Ret retbuf = rawcall malloc(80);
-  wstore(retbuf, 0, 0);
-  wstore(retbuf, 1, 0);
-  wstore(retbuf, 2, 0);
-  wstore(retbuf, 3, 0);
-  wstore(retbuf, 4, 0);
-  retbuf->kind = 1;
-  retbuf->code = code;
-  retbuf->e = 0;
-  retbuf->args = buf;
-  retbuf->arity = nargs;
-  return mknum(retbuf);
-}
-defun Rt.bounce(r : *Ret) -> val {
-  word kind = r->kind;
-  if (mkbool(kind == 0)) {
-    return r->result;
-  } else {
-    return call Rt.bounceGo(mknum(r));
-  }
-}
-defun Rt.bounceGo(r : val) -> val {
-  *Ret rp = payload(r, 0);
-  word kind = rp->kind;
-  if (mkbool(kind == 0)) {
-    return rp->result;
-  } else {
-    word f = rp->code;
-    word e = rp->e;
-    word args = rp->args;
-    word arity = rp->arity;
-    if (mkbool(arity == 0)) {
-      word rr = aggcall val rawsym("rt_call0")(f, e);
-      return vecload(rr, 0);
-    } else {
-      if (mkbool(arity == 1)) {
-        word rr = aggcall val rawsym("rt_call1")(f, e, args);
-        return vecload(rr, 0);
-      } else {
-        if (mkbool(arity == 2)) {
-          word rr = aggcall val rawsym("rt_call2")(f, e, args, args + 40);
-          return vecload(rr, 0);
-        } else {
-          if (mkbool(arity == 3)) {
-            word rr = aggcall val rawsym("rt_call3")(f, e, args, args + 40, args + 80);
-            return vecload(rr, 0);
-          } else {
-            if (mkbool(arity == 4)) {
-              word rr = aggcall val rawsym("rt_call4")(f, e, args, args + 40, args + 80, args + 120);
-              return vecload(rr, 0);
-            } else {
-              if (mkbool(arity == 5)) {
-                word rr = aggcall val rawsym("rt_call5")(f, e, args, args + 40, args + 80, args + 120, args + 160);
-                return vecload(rr, 0);
-              } else {
-                if (mkbool(arity == 6)) {
-                  word rr = aggcall val rawsym("rt_call6")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200);
-                  return vecload(rr, 0);
-                } else {
-                  if (mkbool(arity == 7)) {
-                    word rr = aggcall val rawsym("rt_call7")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240);
-                    return vecload(rr, 0);
-                  } else {
-                    if (mkbool(arity == 8)) {
-                      word rr = aggcall val rawsym("rt_call8")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280);
-                      return vecload(rr, 0);
-                    } else {
-                      if (mkbool(arity == 9)) {
-                        word rr = aggcall val rawsym("rt_call9")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320);
-                        return vecload(rr, 0);
-                      } else {
-                        if (mkbool(arity == 10)) {
-                          word rr = aggcall val rawsym("rt_call10")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360);
-                          return vecload(rr, 0);
-                        } else {
-                          if (mkbool(arity == 11)) {
-                            word rr = aggcall val rawsym("rt_call11")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400);
-                            return vecload(rr, 0);
-                          } else {
-                            if (mkbool(arity == 12)) {
-                              word rr = aggcall val rawsym("rt_call12")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440);
-                              return vecload(rr, 0);
-                            } else {
-                              if (mkbool(arity == 13)) {
-                                word rr = aggcall val rawsym("rt_call13")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480);
-                                return vecload(rr, 0);
-                              } else {
-                                if (mkbool(arity == 14)) {
-                                  word rr = aggcall val rawsym("rt_call14")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480, args + 520);
-                                  return vecload(rr, 0);
-                                } else {
-                                  if (mkbool(arity == 15)) {
-                                    word rr = aggcall val rawsym("rt_call15")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480, args + 520, args + 560);
-                                    return vecload(rr, 0);
-                                  } else {
-                                    // UNREACHABLE today: the compiler enforces
-                                    // max arity 16 (the same convention as
-                                    // Rt.callArity's table), so the innermost
-                                    // else is arity >= 16 only when arity == 16
-                                    // and routes correctly.  A HAND-BUILT :tail
-                                    // with arity > 16 would land here and read
-                                    // args+600..+760 PAST a smaller buffer —
-                                    // silent corruption, where Zig callArityRet's
-                                    // else dies loudly (rt.zig:1005).  Kept as a
-                                    // documented parity gap, not a B2 regression.
-                                    word rr = aggcall val rawsym("rt_call16")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480, args + 520, args + 560, args + 600);
-                                    return vecload(rr, 0);
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
+// THE STAGING SEATS STAY — Rt.stage-tail above (the STATIC tail path, tsbuf +
+// QBE_NOTTAILSTAGE) and Rt.stage-apply (the F-site generic path, malloc only)
+// both still have callers, and their opposite storage rules are what
+// qbe-check's `tsbuf-apply` row witnesses.
 
 // ==================== STAGE 7A: THE MID EFFECT HOST =======================
 // The CEK effect-manager state machine of src/effectloop.zig, PORTED (plan
@@ -10376,7 +10195,7 @@ defun Rt.hostStatRecord(hN : val, iN : val, stN : val) -> val {
 // ========================== THE STATE ------------------------------------
 // `hN` is the blob's ADDRESS boxed into a Value (`mknum(blob)`), and every
 // defun below unboxes it at the top (`payload(hN, 0)`) — the runtime's own
-// idiom (Rt.gcAlloc, Rt.tail-known).  Indices are boxed the same way.  It is a
+// idiom (Rt.gcAlloc, Rt.vecStorePlain).  Indices are boxed the same way.  It is a
 // number Value, so it cannot be mistaken for a GC pointer and the collector
 // never touches it.
 //
@@ -10697,7 +10516,7 @@ defun Rt.hostSpawnAt(hN : val, taskAddrN : val, iN : val) -> val {
 
 // Rt.hostSpawnFind — first INACTIVE slot (the Zig's first-inactive reuse), or
 // append.  `i` advances as a VALUE param: this is a short scan and a self-tail
-// `recur` on a changed Value is the runtime's own loop shape (Rt.bounceGo).
+// `recur` on a changed Value is the runtime's own loop shape (Rt.applyTailGo).
 defun Rt.hostSpawnFind(hN : val, taskAddrN : val, iN : val) -> val {
   word h = payload(hN, 0);
   word i = payload(iN, 0);

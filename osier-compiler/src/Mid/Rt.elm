@@ -112,11 +112,11 @@ absence is the safe default.
 
 THE RULE IS THE SIGNATURE (`RtAst.allWordSig`), not a hand list — with ONE
 merge: `rawAbi` keys are INSERTED even when their signature classifies
-value-ABI.  That is not a safety net, it is load-bearing and MEASURED: four of
-the thirteen raw-word keys (`Rt.apply`, `Rt.apply-tail`, `Rt.tail-known`,
-`Rt.bounce`) RETURN an aggregate `:val`/`:ret` through sret, so the signature
-rule alone would move them to the value ABI and move the corpus with them.
-The other nine are exactly the all-word signatures runtime.mid has.
+value-ABI.  That is not a safety net, it is load-bearing and MEASURED: three of
+the keys (`Rt.apply`, `Rt.apply-tail`, `Rt.applyTailGo`) RETURN an aggregate
+`:val` through sret, so the signature rule alone would move them to the value
+ABI and move the corpus with them.  The rest are exactly the all-word
+signatures runtime.mid has.
 
 The widths come from the CHECKER's ONE layout table (`Check.sizeofStruct`) —
 no second size rule exists.
@@ -1454,12 +1454,12 @@ rtDeps =
         , -- ===== the stage-6 B1 apply family.  Rt.apply/Rt.apply-tail are
           -- rawAbi WRAPPERS (root the caller's f/args, then hand off); their
           -- one RawCall edge each is the val-ABI LOOP.  The loops reach
-          -- Rt.callArity (the 17-arm rt_callN dispatch + rt_bounce) and
-          -- Rt.copyWords (the raw-word Value-array copy) and Rt.die (the
-          -- non-function/closure-env panics — already a driverSeed, so these
-          -- are closure edges, not new roots).  rt_callN/rt_bounce are
-          -- aggcall (RawCallAgg — NOT rtDeps edges); malloc/rt_root_* are
-          -- rawcall (RawCallRaw — NOT rtDeps edges).
+          -- Rt.callArity (the 17-arm rt_callN dispatch) and Rt.copyWords (the
+          -- raw-word Value-array copy) and Rt.die (the non-function/
+          -- closure-env panics — already a driverSeed, so these are closure
+          -- edges, not new roots).  rt_callN is an aggcall (RawCallAgg — NOT
+          -- an rtDeps edge); malloc/rt_root_* are rawcall (RawCallRaw — NOT
+          -- rtDeps edges).
           ( "Rt.apply", [ "Rt.applyGo", "Rt.rootPushValueArray", "Rt.rootPop" ] )
         , -- U2 review fix: the CONVENTION GUARD's die is a RawCall edge too —
           -- a caller that does not pass `fslot + 40` must die loudly, not scan
@@ -1480,20 +1480,11 @@ rtDeps =
           -- not allocvec/allocRaw, so both stay frame-free.
           ( "Rt.copyWords", [ "Rt.copyWordsGo" ] )
         , ( "Rt.copyWordsGo", [] )
-        , -- ===== the stage-6 B2 mid-tail family.  Rt.tail-known's only RawCall
-          -- edge is Rt.copyWords (the raw-word Value-array copy; its other
-          -- nodes are rawcall/aggcall/raw-word, NOT rtDeps edges).  Rt.bounce's
-          -- only RawCall edge is its :val loop helper Rt.bounceGo (which itself
-          -- dispatches via aggcall — RawCallAgg, NOT an rtDeps edge — and
-          -- self-tails via recur).
-        ( "Rt.tail-known", [ "Rt.copyWords" ] )
         , -- Q1b stage 1: the tcall staging seat's only RawCall edge is the same
           -- raw-word Value-array copy (allocvec is a raw node, not an edge).
           ( "Rt.stage-tail", [ "Rt.copyWords" ] )
         , -- U2: the F-site staging seat — same shape, same single edge.
           ( "Rt.stage-apply", [ "Rt.copyWords" ] )
-        , ( "Rt.bounce", [ "Rt.bounceGo" ] )
-        , ( "Rt.bounceGo", [] )
         , -- ===== THE STAGE 7A MID HOST (QBE_MIDHOST).  One entry per host
           -- defun, exactly its RawCall targets — the machine's call graph,
           -- declared by hand like every other Rt->Rt edge (`reach` never walks
@@ -1739,13 +1730,13 @@ sites AND surface `call` sites) emits a matching WORD call.
   * B6 CHANGED THIS SET'S ROLE: it is no longer the ONLY place the ABI class
     is declared.  The class is now DERIVED from the signature (`abiTable`
     below, plan Q7) for every surface and user defun; THIS set is the
-    OVERRIDE that keeps the FOUR aggregate-returning keys (Rt.apply,
-    Rt.apply-tail, Rt.tail-known, Rt.bounce — all-word parameters, `val`/
-    `:ret` results) on the word side, where the signature rule alone would
-    move them and the corpus with them.  The other nine keys are word-ABI
-    because their signatures say so; declaring them here as well is what makes
-    the two statements agree, and TestMain pins that they do (the `derived ==
-    rawAbi` row).
+    OVERRIDE that keeps the THREE aggregate-returning keys (Rt.apply,
+    Rt.apply-tail, Rt.applyTailGo — all-word parameters, `val` results) on the
+    word side, where the signature rule alone would move them and the corpus
+    with them.  The other keys are word-ABI because their signatures say so;
+    declaring them here as well is what makes the two statements agree, and
+    TestMain pins that they do (the `derived == rawAbi` row).  U3b removed
+    Rt.tail-known and Rt.bounce from this set with their bodies.
 -}
 rawAbi : Set String
 rawAbi =
@@ -1817,16 +1808,6 @@ rawAbi =
           -- and the ret class is Agg "val" (Lower.rawAbiRetClass) — the
           -- deleted Zig seat's sret ABI.
           "Rt.globalClosure"
-        , -- ===== the stage-6 B2 mid-tail family.  Rt.tail-known is a raw-word
-          -- defun whose RESULT is the 80-byte `:ret` (Agg "ret", the
-          -- rt_tail_known seat's C ABI — 3 word params code/argblock/nargs,
-          -- reached from Lower's directCall TAIL retarget).  Rt.bounce is a
-          -- raw-word defun whose RESULT is the 40-byte `.done` Value (Agg
-          -- "val", the rt_bounce seat's C ABI — 1 word param, the :ret
-          -- pointer, reached from Lower's bounce retarget).  Their :val
-          -- helper/loop (Rt.bounceGo) is NOT rawAbi — recur needs the val
-          -- self-tail.
-          "Rt.tail-known"
         , -- Q1b stage 1: the tcall STAGING seat.  An all-word signature
           -- ((argblock, nargs) -> buf), so the B6 rule derives it; declaring
           -- it here is what keeps the derived set and this table in step (the
@@ -1837,7 +1818,6 @@ rawAbi =
           -- ((fslot, argblock, nargs) -> buf), derived by the B6 rule and
           -- declared here for the same reason as Rt.stage-tail above.
           "Rt.stage-apply"
-        , "Rt.bounce"
         , -- ===== THE STAGE 7A HOST's die family (QBE_MIDHOST).  These are not
           -- driver seats: they are declared so the B6 RULE's derived set (an
           -- all-word SIGNATURE) and this table agree — they are word-ABI by
@@ -1907,11 +1887,6 @@ rawAbiArity =
           -- against the actual param count at lowerDefun (rawAbiArityAgree).
         ( "Rt.copyWords", 3 )
         , ( "Rt.copyWordsGo", 3 )
-        , -- stage 6 B2: Rt.tail-known takes the SAME 3 word params as the
-          -- Zig seat (code, argblock, nargs); Rt.bounce takes 1 (the :ret
-          -- pointer) — both checked against the actual param count at
-          -- lowerDefun (rawAbiArityAgree).
-        ( "Rt.tail-known", 3 )
         , -- Q1b stage 1: the tcall staging seat takes (argblock, nargs) — the
           -- block to copy and its arg count — and returns the buffer address.
           ( "Rt.stage-tail", 2 )
@@ -1919,7 +1894,6 @@ rawAbiArity =
           -- closure cell, the caller's contiguous arg block, and the count —
           -- and returns the staged block's address.
           ( "Rt.stage-apply", 3 )
-        , ( "Rt.bounce", 1 )
         , -- zighost Z2: the two vec-store writers take (vec, index, *Value) —
           -- three words, checked against both the defun and Lower's seam.
           ( "Rt.vecStorePlain", 3 )
@@ -1959,17 +1933,11 @@ driverSeeds =
           -- cannot seed them — the frame-pair precedent.
         "Rt.apply"
         , "Rt.apply-tail"
-        , -- stage 6 B2: Lower's directCall/bounce retarget (QBE_MIDDRIVER=1)
-          -- names q_Rt_x2etail_x2dknown / q_Rt_x2ebounce directly, so the
-          -- census cannot seed them — the tail-known/bounce pair joins the
-          -- driverSeeds roots (Rt.bounceGo is a closure edge off Rt.bounce).
-        "Rt.tail-known"
         , -- Q1b stage 1: the tcall staging seat, named directly by Lower's
           -- tcall arm — the same "the census cannot seed it" argument.
           "Rt.stage-tail"
         , -- U2: the F-site staging seat, named directly by rtApply's tcall arm.
           "Rt.stage-apply"
-        , "Rt.bounce"
         ]
 
 
@@ -2031,11 +1999,10 @@ safepoint selfKey selfArity e =
             -- an EDGE, not a direct safepoint, exactly like RawCall below.
             -- In TAIL position it is the SELF-TAIL LOOP (Lower's
             -- lowerSelfTail: stage the args into slots, blit the params,
-            -- jmp @body — no call, no rt_tail_known, so no staging
-            -- allocation at ANY arity); out of tail position it is the
-            -- saturated direct call + rt_bounce chase, which allocate
-            -- nothing themselves (the .tail staging allocation lives in
-            -- rt_tail_known, the CROSS-defun tail path, never taken here).
+            -- jmp @body — no call, no staging, so no allocation at ANY
+            -- arity); out of tail position it is the saturated direct call,
+            -- which allocates nothing itself (the staging allocation lives on
+            -- the CROSS-defun tail path, never taken here).
             -- The args are walked; the callee is SELF, and a loop re-runs
             -- THIS body, so any allocation the body can reach is already
             -- caught by this very walk — no cycle is introduced.
@@ -2137,8 +2104,8 @@ unsafeSafepoint selfKey selfArity node =
 
         RawCallAgg _ ->
             -- CONSERVATIVELY ALLOCATING, deny-by-default: the callee is
-            -- UNKNOWN GENERATED CODE (a runtime word — the stage-6
-            -- apply/bounce port's Desc code pointer), so the node allocates
+            -- UNKNOWN GENERATED CODE (a runtime word — the apply port's Desc
+            -- code pointer), so the node allocates
             -- nothing itself but its CALLEE can allocate, and an apply
             -- defun containing one must never classify frame-free (the
             -- stage-1 lesson: a False here silently misclassifies the

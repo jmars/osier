@@ -276,9 +276,9 @@ rawAbiRetClass key =
         -- body handed a `.tail` request upward for Rt.bounce to chase.  It now
         -- `tcall`s Rt.applyTailGo, which returns the finished Value — and
         -- abi1's C4 demands the tcall's class EQUAL the enclosing body's, so
-        -- the two flips are one fact.  (The `:ret` TYPE stays in RtLayout:
-        -- Rt.tail-known and Rt.bounce still COMPILE, they are merely
-        -- caller-less now — their deletion is U3b.)
+        -- the two flips are one fact.  U3b then deleted the `.tail` family
+        -- outright (Rt.tail-known/Rt.bounce/Rt.bounceGo) — see the note below
+        -- where the `Rt.tail-known` case used to be.
         Agg "val"
 
     else if key == "Rt.applyTailGo" then
@@ -291,15 +291,11 @@ rawAbiRetClass key =
         -- list with an aggregate result.
         Agg "val"
 
-    else if key == "Rt.tail-known" then
-        -- stage 6 B2: Rt.tail-known returns the 80-byte `:ret` (the .tail
-        -- request) through sret — rt_tail_known's C ABI.
-        Agg "ret"
-
-    else if key == "Rt.bounce" then
-        -- stage 6 B2: Rt.bounce returns the 40-byte `.done` Value through
-        -- sret — rt_bounce's C ABI.
-        Agg "val"
+    -- U3b: the `Rt.tail-known` case (`Agg "ret"`, the 80-byte `.tail`
+    -- request) is GONE with the defun.  NO rawAbi key returns `:ret` any
+    -- more, so this function's aggregate answer is always `:val` — the
+    -- `Agg "ret"` arm of lowerFunBody's @ret block below went with it, and
+    -- with it the last reader of `RtLayout.retSizeBytes`.
 
     else if key == "Rt.globalClosure" then
         -- ZIGHOST Z3: the closure-cache seat returns the 40-byte lambda
@@ -2576,8 +2572,9 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                     -- because a tail call could only be expressed by RETURNING
                     -- a request for Rt.bounce to chase.  Nothing builds a
                     -- `.tail` any more (the apply chain `tcall`s, the static
-                    -- arity-5+ sites went non-tail, Rt.bounce is caller-less),
-                    -- so the closure ABI returns the finished Value: 40 bytes,
+                    -- arity-5+ sites went non-tail, and U3b deleted the
+                    -- builders/chasers outright), so the closure ABI returns
+                    -- the finished Value: 40 bytes,
                     -- `:val`.  That is what makes the F-site `tcall :val` into
                     -- Rt.apply-tail legal at abi1's C4 (the callee's class must
                     -- equal the enclosing body's).
@@ -2738,33 +2735,18 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                                     Agg "val" ->
                                         startBlock "ret" s1 |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
 
-                                    Agg "ret" ->
-                                        -- THE .tail NO-COLLECT INVARIANT (stated
-                                        -- at the Mid surface too, applyTailGo's
-                                        -- saturated arm): this @ret block copies
-                                        -- the .tail args out of the fresh allocvec
-                                        -- array, which is UNROOTED and must be read
-                                        -- EXACTLY ONCE by the callee prologue blit
-                                        -- with NO collection in between.  Do NOT
-                                        -- add a GC alloc to this block — it would
-                                        -- break the invariant silently.
-                                        --
-                                        -- The `free(retBuf)` below is NOT a GC
-                                        -- alloc (libc free is not a safepoint: it
-                                        -- cannot collect, cannot move anything),
-                                        -- and it runs AFTER the blit has copied
-                                        -- the 80-byte :ret out of the malloc'd
-                                        -- buffer — the buffer is dead from here.
-                                        -- Without it every :ret producer leaks 80 B
-                                        -- per call (Rt.apply-tail x2, Rt.tail-known
-                                        -- — all three `malloc(80)` sites in
-                                        -- runtime.mid), unbounded over a tail loop.
-                                        startBlock "ret" s1
-                                            |> emit (Bin (Just "retAddr") L Add (Il.Tmp (slotTmp 0)) (Il.Con (RtLayout.payloadWordOffset s1.layout 0)))
-                                            |> emit (Load (Just "retBuf") L LoadL (Il.Tmp "retAddr"))
-                                            |> emit (Blit (Il.Tmp "retBuf") (Il.Tmp (slotTmp 0)) (RtLayout.retSizeBytes s1.layout))
-                                            |> emit (Call Nothing (Base W) (Il.Sym "free") [ ArgVal (Base L) (Il.Tmp "retBuf") ])
-                                            |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
+                                    -- U3b: NO `Agg "ret"` ARM.  It was the
+                                    -- 80-byte `.tail` blit (plus the P1a
+                                    -- `free` of the malloc'd cell): the body
+                                    -- left `mknum(retbuf)` in slot 0, this
+                                    -- block read the pointer back out of the
+                                    -- number's payload and copied 80 bytes
+                                    -- into the sret area.  With `struct Ret`
+                                    -- and `Rt.tail-known` deleted, no rawAbi
+                                    -- key can return `:ret`, so every
+                                    -- aggregate-returning rawAbi body takes the
+                                    -- `Agg "val"` arm above — slot 0 IS the
+                                    -- result and there is nothing to blit.
 
                                     _ ->
                                         startBlock "ret" s1 |> closeBlock (Ret (Just rawWordResult))
@@ -7313,7 +7295,7 @@ tailClose isTail s =
 --     chase — because nothing builds a `.tail` any more; the 240 arity-5+
 --     sites keep a correct, rlimit-bounded, growing lowering (one frame per
 --     hop, the design's priced 95%/240 split), and the non-tail call returns
---     the finished Value with NO bounce.
+--     the finished Value with NO bounce — U3b deleted the bounce itself.
 directCall : String -> List Exp -> Int -> Bool -> S -> Result String S
 directCall key args dest isTail s =
     if isTail && s.tailEmit && List.length args <= maxTailCallArgs then
@@ -7396,7 +7378,8 @@ directCall key args dest isTail s =
         -- Nothing builds a `.tail` any more, so those sites take the ordinary
         -- call: a CORRECT, rlimit-bounded, growing lowering (the design's
         -- 95%/240 split, unchanged), one frame per hop instead of none.
-        -- Rt.tail-known is now CALLER-LESS; its deletion is U3b's.
+        -- U3b deleted Rt.tail-known with the rest of the `.tail` family, so
+        -- this arm is the ONLY answer left over the tcall budget.
         --
         -- VR1 — each arg crosses as an `l` POINTER to the rooted frame slot it
         -- was just lowered into.  The contiguous staging block (and the
@@ -7410,23 +7393,21 @@ directCall key args dest isTail s =
                         ( rp, s2 ) =
                             freshTmp s1
 
-                        ( vp, s3 ) =
-                            freshTmp s2
-
                         -- The WORD ARM still speaks `:ret` here (see
-                        -- `closureRetClass`), so its call keeps the old shape:
-                        -- ask for 80 bytes and BOUNCE whatever `.tail` the
-                        -- callee asked us to chase.  On the value arm the
-                        -- callee hands back the finished Value and there is
-                        -- nothing to bounce.
+                        -- `closureRetClass`), so its call keeps the `:ret`
+                        -- result class — but U3b DELETED THE BOUNCE.  Nothing
+                        -- builds a `.tail` any more (U3a), so the callee's kind
+                        -- word is always 0 and `:ret`'s FIRST FIELD is the
+                        -- finished value: read it straight out of the sret
+                        -- block.  `Rt.bounce` no longer exists to chase a
+                        -- request nobody makes.
                         wordArmCall =
                             wordArm s
                     in
                     Ok
                         (if wordArmCall then
                             emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots)) s2
-                                |> emit (Call (Just vp) (Agg "val") (Il.Sym ("q_" ++ mangle "Rt.bounce")) [ ArgVal (Base L) (Il.Tmp rp) ])
-                                |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
+                                |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
                                 |> tailClose isTail
 
                          else
@@ -7438,9 +7419,10 @@ directCall key args dest isTail s =
 
 
 -- Generic application through the runtime (first-class closures, partials,
--- over-application).  NON-TAIL: rt_apply bounces internally and returns a
--- .done value.  TAIL: rt_apply_tail returns the :ret (.tail or .done), blitted
--- into the return area.
+-- over-application).  BOTH arms now hand back the finished `:val`: the non-tail
+-- Rt.apply returns applyGo's value, and the tail arm `tcall`s Rt.apply-tail
+-- (U3a), whose chain returns the value too — there is no `.tail` shape left to
+-- blit into the return area.
 --
 -- stage 6 B1: under QBE_MIDDRIVER=1 the generic apply routes to the Mid
 -- rawAbi defuns Rt.apply / Rt.apply-tail — the SAME aggregate result shapes
@@ -7463,23 +7445,18 @@ rtApply fslotTmp args dest isTail s =
 
         -- stage 6 B1fix (should-fix 1): the call site's aggregate class and
         -- sret size are DERIVED from rawAbiRetClass — the ONE source of truth
-        -- that lowerDefun's ret type (line ~1334) and the @ret blit (line
-        -- ~1435) also read.  The old code hard-wired `Agg "ret"`/`Agg "val"`
-        -- and `retSizeBytes`/`valSizeBytes` here in a second table: a
-        -- 40-vs-80-byte sret drift
-        -- (someone edits rawAbiRetClass, or adds a third aggregate class)
-        -- would silently read/write 40 B of adjacent memory at the blit.
-        -- Deriving both from the one function makes that drift impossible.
+        -- that lowerDefun's ret type also reads.  The old code hard-wired
+        -- `Agg "ret"`/`Agg "val"` and a second size table here: a 40-vs-80-byte
+        -- sret drift (someone edits rawAbiRetClass, or adds a third aggregate
+        -- class) would silently read/write 40 B of adjacent memory at the
+        -- blit.  Deriving both from the one function makes that drift
+        -- impossible.  U3b: with the `Agg "ret"` key gone there is exactly ONE
+        -- aggregate answer left, so the size is simply the module's `:val`.
         retCls =
             rawAbiRetClass midKey
 
         retSize =
-            case retCls of
-                Agg "ret" ->
-                    RtLayout.retSizeBytes s.layout
-
-                _ ->
-                    s.layout.valSizeBytes
+            s.layout.valSizeBytes
     in
     stageArgs args s
         |> Result.andThen
