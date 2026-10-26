@@ -978,6 +978,47 @@ wordSurfaceUnported defuns keys =
                                 Just "a defun with a non-Lambda value (corrupt Mid tree)"
 
 
+{-| THE Rt DEFUNS THAT REFUSE BY NAME UNDER THE WORD ARM, with the reason.
+
+WHY A LIST AND NOT A SITE REFUSAL.  A site refusal only fires where a construct is
+un-ported; these defuns contain NO refusing construct — every element access in
+them is right-kind after `vecbody` — yet they are still wrong on the word arm
+because they reach a SECOND array whose placement the arm has not decided. The
+record family is exactly that: `payload(rec, 2)` is the field-NAMES array, and a
+word-arm record body is a flat run of `count` Values, so where the names live
+(after the data? in a second block? interleaved?) is a LAYOUT, not a stride. A
+read that is merely unreachable today is what the polarity forbids shipping, so
+these refuse LOUDLY until the record-layout unit lands.
+
+THE AUDIT THAT PRODUCED IT (not recall): every `payload(x, <n>)` / `reclen(..)`
+site in the word-spliced text with a non-zero word index, grouped by defun —
+`grep -nE "payload\([a-zA-Z0-9_]+, [1-9]\)"` on the spliced text. The names-side
+reads are runtime.mid's recGetGo/recUpdFind/recAppendFind/recAppendNamesGo/
+recToChainGo (plus recUpd/recAppend, which BUILD the record), and the compiler
+side has one more (`recordAccessBody`, guarded separately). Nothing else in the
+runtime reads a non-zero payload word of a heap object: the closure's field 2 and
+the stream's word 1 are BODY units, which is the same number on both arms.
+-}
+wordArmDefunRefusals : List ( String, String )
+wordArmDefunRefusals =
+    let
+        why =
+            "the RECORD family is not ported to the word arm: a word-arm record body is a flat run of `count` Values, so the placement of its SECOND array (the field NAMES, `payload(rec, 2)` on the val arm) is a layout decision, not a stride. Twin it in the record-layout unit or keep it refused - a names-array read against a data-array body is the mixed-representation read this arm exists to prevent"
+    in
+    [ ( "Rt.recGetGo", why )
+    , ( "Rt.recUpd", why )
+    , ( "Rt.recUpdFind", why )
+    , ( "Rt.recUpdCopy", why )
+    , ( "Rt.recAppend", why )
+    , ( "Rt.recAppendFind", why )
+    , ( "Rt.recAppendDataGo", why )
+    , ( "Rt.recAppendNamesGo", why )
+    , ( "Rt.recToChain", why )
+    , ( "Rt.recToChainGo", why )
+    , ( "Rt.recInsert", why )
+    ]
+
+
 {-| THE Rt SURFACE, CLASSIFIED BY THE SAME PRE-WALK WHITELIST (perf VR3b3).
 
 VR3b2 refused any program that reached `runtime.mid` WHOLESALE, and the reason
@@ -1003,25 +1044,35 @@ wordRtUnported defuns keys =
 
         k :: rest ->
             if isRtKey k then
-                case Dict.get k defuns of
-                    Nothing ->
-                        wordRtUnported defuns rest
+                case List.filter (\( rk, _ ) -> rk == k) wordArmDefunRefusals of
+                    ( _, why ) :: _ ->
+                        Just (k ++ ": " ++ why)
 
-                    Just defun ->
-                        case defun.value of
-                            Lam lambda ->
-                                case wordArmUnported lambda.body of
-                                    Just what ->
-                                        Just (k ++ ": " ++ what)
-
-                                    Nothing ->
-                                        wordRtUnported defuns rest
-
-                            _ ->
-                                Just (k ++ ": a defun with a non-Lambda value (corrupt Mid tree)")
+                    [] ->
+                        wordRtUnportedBody defuns k rest
 
             else
-                wordRtUnported defuns rest
+                wordRtUnportedBody defuns k rest
+
+
+wordRtUnportedBody : Dict String Defun -> String -> List String -> Maybe String
+wordRtUnportedBody defuns k rest =
+    case Dict.get k defuns of
+        Nothing ->
+            wordRtUnported defuns rest
+
+        Just defun ->
+            case defun.value of
+                Lam lambda ->
+                    case wordArmUnported lambda.body of
+                        Just what ->
+                            Just (k ++ ": " ++ what)
+
+                        Nothing ->
+                            wordRtUnported defuns rest
+
+                _ ->
+                    Just (k ++ ": a defun with a non-Lambda value (corrupt Mid tree)")
 
 
 wordAreaName : Exp -> String
@@ -10322,8 +10373,15 @@ recordAccessBody layout recB rank field =
         recV =
             Var recB.id
 
+        -- THE ELEMENT BASE, NOT PAYLOAD WORD 0 (perf word-arm-area3rt).  This is
+        -- the ONE seat where the compiler itself spelled the val arm's
+        -- "vector -> separate array" idiom instead of the runtime's text, so the
+        -- runtime-wide rewrite could not reach it: on the word arm payload word 0
+        -- of a record is element 0, and using it as an array base reads the
+        -- wrong object.  `RawVecBody` is the same emit on the val arm (that is
+        -- what the node IS), so the val arm's .ssa does not move.
         positional =
-            Unsafe (RawVecLoad { vec = Unsafe (RawPayload { value = recV, word = 0 }), index = Lit (LNumber (Maybe.withDefault 0 rank)) })
+            Unsafe (RawVecLoad { vec = Unsafe (RawVecBody { value = recV }), index = Lit (LNumber (Maybe.withDefault 0 rank)) })
 
         walk =
             PrimApp { prim = "recGet", args = [ recV, Lit (LSymbol field) ] }

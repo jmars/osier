@@ -1911,10 +1911,21 @@ checks rt rawMidText =
                 -- parallel arrays to place) is a layout decision this unit did
                 -- not take.  The ROW'S CLAIM is unchanged and is what it
                 -- asserts: the refusal is PER DEFUN and names the CONSTRUCT.
-                String.contains "Rt.recUpd: " msg
-                    && String.contains "AREA 3 (HEAP-OBJECT CONSTRUCTION)" msg
+                -- AND THE PRE-WALK NOW FIRES FIRST, which is the stronger
+                -- statement: the record family REFUSES BY NAME (a named list
+                -- with the layout reason) instead of waiting for its
+                -- constructor to reach the cell writer.  That is the review's
+                -- "a wrong-kind read merely unreachable today is what the
+                -- polarity forbids shipping" — the readers are named, not
+                -- merely unlucky.
+                -- The defun named is whichever record defun the reachability
+                -- walk meets first (`Rt.recUpdCopy` on this route, `Rt.recUpd`
+                -- on run.js's — both are in the list), so the row asserts the
+                -- PREFIX AND the reason, not one spelling of the key.
+                String.contains "Rt.rec" msg
+                    && String.contains ": the RECORD family is not ported to the word arm" msg
+                    && String.contains "payload(rec, 2)" msg
                     && String.contains "NOT IMPLEMENTED" msg
-                    && String.contains "heap cell with the kind code 14" msg
                     && not (String.contains "AREA 7 (THE Rt SURFACE)" msg)
 
             _ ->

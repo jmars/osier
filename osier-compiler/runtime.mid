@@ -1034,11 +1034,7 @@ defun Rt.deepEq(a : val, bb : val) -> val {
     return mkbool(len32(a) == len32(bb)) && call Rt.vecEq(a, bb, mknum(0));
   }
   if (mkbool(tagis(a, 10)) && mkbool(tagis(bb, 10))) {
-    // THE ELEMENT COUNT, not the byte length (perf word-arm-area3rt): a
-    // word-arm vector's count lives in its GC header, so `len32` — payload word
-    // 1, which is a STRING's byte length — reads element 1 here. `veclen` is
-    // `payload32(v, 1)` on the val arm and the header count on the word arm.
-    return mkbool(veclen(a) == veclen(bb)) && call Rt.vecEq(a, bb, mknum(0));
+    return mkbool(len32(a) == len32(bb)) && call Rt.vecEq(a, bb, mknum(0));
   }
   return false;
 }
@@ -1070,11 +1066,7 @@ defun Rt.deepEq(a : val, bb : val) -> val {
     recur(vecload(vecbody(a), 1), vecload(vecbody(bb), 1));
   }
   if (mkbool(tagis(a, 10)) && mkbool(tagis(bb, 10))) {
-    // THE ELEMENT COUNT, not the byte length (perf word-arm-area3rt): a
-    // word-arm vector's count lives in its GC header, so `len32` — payload word
-    // 1, which is a STRING's byte length — reads element 1 here. `veclen` is
-    // `payload32(v, 1)` on the val arm and the header count on the word arm.
-    return mkbool(veclen(a) == veclen(bb)) && call Rt.vecEq(a, bb, mknum(0));
+    return mkbool(len32(a) == len32(bb)) && call Rt.vecEq(a, bb, mknum(0));
   }
   return false;
 }
@@ -1100,7 +1092,7 @@ defun Rt.symEq(a : val, bb : val, i : val) -> val {
 }
 
 defun Rt.vecEq(a : val, bb : val, i : val) -> val {
-  if (mkbool(payload(i, 0) >= veclen(a))) {
+  if (mkbool(payload(i, 0) >= len32(a))) {
     return true;
   }
   if (mkbool(payload32(call Rt.deepEq(vecload(vecbody(a), payload(i, 0)), vecload(vecbody(bb), payload(i, 0))), 0) == 0)) {
@@ -1990,7 +1982,7 @@ defun Rt.pvV(stN : val, vN : val) -> val {
   }
   if (mkbool(tagis(vN, 10))) {
     call Rt.pvZ(stN, mknum(rawstr("[vector ")));
-    call Rt.pvS(stN, call Rt.numText(mknum(veclen(vN))));
+    call Rt.pvS(stN, call Rt.numText(mknum(payload32(vN, 1))));
     call Rt.pvZ(stN, mknum(rawstr("]")));
     return mknum(0);
   }
@@ -2119,7 +2111,7 @@ defun Rt.recUpdCopy(rec : val, newdata : val, i : val) -> val {
   if (mkbool(payload(i, 0) >= reclen(rec))) {
     return mknil;
   }
-  vecstore(vecbody(newdata), payload(i, 0), vecload(payload(rec, 0), payload(i, 0)));
+  vecstore(vecbody(newdata), payload(i, 0), vecload(vecbody(rec), payload(i, 0)));
   return call Rt.recUpdCopy(rec, newdata, mknum(payload(i, 0) + 1));
 }
 
@@ -2140,7 +2132,7 @@ defun Rt.recAppendDataGo(rec : val, newdata : val, packed : val) -> val {
   if (mkbool(payload(j, 0) > reclen(rec))) {
     return mknil;
   }
-  val store = mkbool(payload(j, 0) < payload(pos, 0)) ? vecstore(vecbody(newdata), payload(j, 0), vecload(payload(rec, 0), payload(j, 0))) : (mkbool(payload(j, 0) == payload(pos, 0)) ? mknil : vecstore(vecbody(newdata), payload(j, 0), vecload(payload(rec, 0), payload(j, 0) - 1)));
+  val store = mkbool(payload(j, 0) < payload(pos, 0)) ? vecstore(vecbody(newdata), payload(j, 0), vecload(vecbody(rec), payload(j, 0))) : (mkbool(payload(j, 0) == payload(pos, 0)) ? mknil : vecstore(vecbody(newdata), payload(j, 0), vecload(vecbody(rec), payload(j, 0) - 1)));
   return call Rt.recAppendDataGo(rec, newdata, mknum(payload(packed, 0) + 1));
 }
 
@@ -10476,8 +10468,8 @@ defun Rt.hostInit(progAddrN : val) -> val {
   lp->poll = pp;
   call Rt.rootPushValueArray(blob + 8, blob);
   val prog = vecload(progAddr, 0);
-  vecstore(blob + 8, 0, vecload(payload(prog, 0), 1));
-  vecstore(blob + 8 + 40, 0, vecload(payload(prog, 0), 3));
+  vecstore(blob + 8, 0, vecload(vecbody(prog), 1));
+  vecstore(blob + 8 + 40, 0, vecload(vecbody(prog), 3));
   return mknum(blob);
 }
 
@@ -10487,7 +10479,7 @@ defun Rt.hostIsProgram(vN : val) -> val {
   if (tagis(vN, 10) == 0) {
     return mkbool(0);
   }
-  if (veclen(vN) != 4) {
+  if (payload32(vN, 1) != 4) {
     return mkbool(0);
   }
   word d = payload(vN, 0);
@@ -10814,8 +10806,8 @@ defun Rt.hostSpawnFromCmd(hN : val, curAddrN : val) -> val {
   if (tagis(cur, 4) == 0) {
     return mknil;
   } else {
-    vecstore(h + 8 + (33030 * 40), 0, vecload(payload(cur, 0), 0));
-    vecstore(curAddr, 0, vecload(payload(cur, 0), 1));
+    vecstore(h + 8 + (33030 * 40), 0, vecload(vecbody(cur), 0));
+    vecstore(curAddr, 0, vecload(vecbody(cur), 1));
     call Rt.hostSpawn(hN, mknum(h + 8 + (33030 * 40)));
     recur(hN, curAddrN);
   }
@@ -10858,7 +10850,7 @@ defun Rt.hostDispatch(hN : val, iN : val) -> val {
   if (tagis(task, 10) == 0) {
     return call Rt.hostDeactivate(hN, iN);
   }
-  word len = veclen(task);
+  word len = payload32(task, 1);
   if (len < 1) {
     return call Rt.hostDeactivate(hN, iN);
   }
@@ -11075,8 +11067,8 @@ defun Rt.hostDeliver(hN : val, iN : val) -> val {
   if (tagis(pair, 4) == 0) {
     return call Rt.hostDeactivate(hN, iN);
   } else {
-    vecstore(h + 8, 0, vecload(payload(pair, 0), 0));
-    vecstore(h + 8 + (33026 * 40), 0, vecload(payload(pair, 0), 1));
+    vecstore(h + 8, 0, vecload(vecbody(pair), 0));
+    vecstore(h + 8 + (33026 * 40), 0, vecload(vecbody(pair), 1));
     call Rt.hostDeactivate(hN, iN);
     return call Rt.hostSpawnFromCmd(hN, mknum(h + 8 + (33026 * 40)));
   }
@@ -11237,7 +11229,7 @@ defun Rt.hostRun(progAddrN : val, outAddrN : val) -> val {
   word h = payload(hN, 0);
   *Host lp = [*Host](h);
   val prog = vecload(progAddr, 0);
-  vecstore(h + 8 + (33026 * 40), 0, vecload(payload(prog, 0), 2));
+  vecstore(h + 8 + (33026 * 40), 0, vecload(vecbody(prog), 2));
   call Rt.hostSpawnFromCmd(hN, mknum(h + 8 + (33026 * 40)));
   call Rt.hostRunLoop(hN);
   call Rt.hostCleanupAll(hN);
