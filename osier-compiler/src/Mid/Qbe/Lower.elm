@@ -1287,6 +1287,20 @@ lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec _ mid
                         unique
                             (List.filter (\k -> not (List.member k surfaceKeys)) (MidRt.seeds usedPrims)
                                 ++ List.filter (\k -> not (List.member k surfaceKeys)) (unique (MidRt.gcSeeds ++ MidRt.conSeeds ++ MidRt.closureSeeds ++ MidRt.lowerSeatSeeds))
+                                -- THE WORD-ARM-ONLY SEATS (perf word-arm-area3rt):
+                                -- seeded ONLY on the word arm.  Every key exists in
+                                -- runtime.mid only inside a QBE_WORDVAL-ONLY region,
+                                -- and the checker resolves a seeded key against the
+                                -- spliced text and REFUSES an unknown global
+                                -- (MEASURED: `unknown global Rt.kindHdr` the moment
+                                -- the seat was seeded through a shared defun's edge
+                                -- on the val arm).
+                                ++ (if layout.heapTagIsKind then
+                                        List.filter (\k -> not (List.member k surfaceKeys)) (unique MidRt.wordArmSeeds)
+
+                                    else
+                                        []
+                                   )
                                 -- THE NURSERY SEEDS (GC NURSERY unit): the young
                                 -- defuns exist in the surface only when run.js
                                 -- kept the QBE_MIDGC_YOUNG-ONLY regions, so they
@@ -4174,6 +4188,9 @@ storeWordCell code words dest s0 =
             if c == RtLayout.tagString then
                 storeWordStringCell words dest s0
 
+            else if c == RtLayout.tagFloat then
+                storeWordFloatCell words dest s0
+
             else
                 case words of
                     [ body ] ->
@@ -4274,6 +4291,50 @@ storeWordStringCell words dest s0 =
             Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a string cell that is not exactly [byte pointer, length]"))
 
 
+{-| AREA 5's CELL (perf word-arm-area3rt, and only as much of it as the
+construction path needs): a word-arm FLOAT is a code-12 block whose body is the
+one f64 word — `heapKindScanned` false, so nothing traces it.
+
+WHY IT IS BUILT HERE AND NOT BY A RUNTIME `mkval(12, ..)`.  A float's single
+word is the DOUBLE, not a body base, so it must not go through the cell writer's
+one-word rule (which tags a body) — and a `d`-class operand cannot cross the lean
+ABI at all, so no runtime seat can receive it.  The shape is therefore the string
+cell's: ALLOCATE through a seat that returns the body (`Rt.allocFloat`, code 12,
+count 1), store the double at body unit 0 with `stored`, and tag the body.  NO
+DETOUR through a scratch slot: MEASURED, the first version boxed the double's
+address and called a `Rt.mkFloatCell` seat, which then had to tag its own cell
+with `mkval(12, body)` — i.e. it re-entered this writer with a BODY where a
+double was expected, and qbe rejected the result (`invalid type for first operand
+%t15 in stored`).
+-}
+storeWordFloatCell : List Il.Arg -> Int -> S -> Result String S
+storeWordFloatCell words dest s0 =
+    case words of
+        [ f ] ->
+            let
+                ( bodyArg, s1 ) =
+                    midGcAllocSeat "Rt.allocFloat" (Il.Con 1) s0
+
+                ( a, s2 ) =
+                    freshTmp s1
+
+                s3 =
+                    emit (Bin (Just a) L Add bodyArg (Il.Con (RtLayout.heapBodyUnitOffset s2.layout 0))) s2
+                        |> emit (Store StoreD f (Il.Tmp a))
+
+                ( taggedWord, s4 ) =
+                    freshTmp s3
+            in
+            Ok
+                (s4
+                    |> emit (Bin (Just taggedWord) L Or bodyArg (Il.Con (RtLayout.heapPtrTag s4.layout)))
+                    |> storeWordWord (Il.Tmp taggedWord) dest
+                )
+
+        _ ->
+            Err (wordArmUnsupported (wordArea "AREA 5 (FLOATS)" "a float cell that is not exactly one float word"))
+
+
 {-| One BODY word of a word-arm heap object, at `heapBodyUnitOffset`.  `bodyArg`
 IS the body address — what the allocation seats return. -}
 storeWordBodyWord : Il.Arg -> Int -> Il.Arg -> S -> S
@@ -4330,40 +4391,112 @@ wordPayloadField32 base word s0 =
         ( t, s2 ) =
             freshTmp s1
 
-        ( isHeap, s3 ) =
+        ( isFix, s3 ) =
             freshTmp s2
 
-        ( heapLbl, s4 ) =
-            freshLbl "fheap" s3
+        ( isTrue, s3c ) =
+            freshTmp s3
 
-        ( badLbl, s5 ) =
-            freshLbl "fbad" s4
+        ( isFalse, s3d ) =
+            freshTmp s3c
 
-        ( joinLbl, s6 ) =
-            freshLbl "fjoin" s5
+        ( isBool, s4 ) =
+            freshTmp s3d
 
-        ( r, s7 ) =
-            freshTmp s6
+        ( isHeap, s5 ) =
+            freshTmp s4
 
-        ( msgName, s8 ) =
-            freshData ("msg:" ++ wordField32Refusal)
-                (\n -> { name = n, align = Just 8, items = [ DStr wordField32Refusal, DByte 0 ], export_ = False })
-                s7
+        ( heapLbl, s6 ) =
+            freshLbl "fheap" s5
 
-        s9 =
-            s8
-                |> emit (Bin (Just t) W And (Il.Tmp l) (Il.Con s8.layout.tagMask))
-                |> emit (Cmp (Just isHeap) W Ceq (Il.Tmp t) (Il.Con (RtLayout.heapPtrTag s8.layout)))
+        ( badLbl, s7 ) =
+            freshLbl "fbad" s6
+
+        ( joinLbl, s8 ) =
+            freshLbl "fjoin" s7
+
+        ( fixLbl, s9 ) =
+            freshLbl "ffix" s8
+
+        ( boolLbl, s10 ) =
+            freshLbl "fbool" s9
+
+        ( chkLbl, s11 ) =
+            freshLbl "fchk" s10
+
+        ( chk2Lbl, s11b ) =
+            freshLbl "fchk2" s11
+
+        ( r, s12 ) =
+            freshTmp s11b
+
+        msgText =
+            (if s0.defunKey == "" then "" else s0.defunKey ++ ": ") ++ wordField32Refusal
+
+        ( msgName, s13 ) =
+            freshData ("msg:" ++ msgText)
+                (\n -> { name = n, align = Just 8, items = [ DStr msgText, DByte 0 ], export_ = False })
+                s12
+
+        -- 1. the tag, then the IMMEDIATE arms (word 0 only) and the heap arm.
+        --
+        -- THE FIXNUM ARM IS A REAL PORT, NOT A RELAXATION (perf
+        -- word-arm-area3rt).  `payload32(v, 0)` on a NUMBER is an idiom the
+        -- runtime uses constantly (`payload32(found, 0)` in Rt.main reads the
+        -- low half of a count returned as a fixnum): on the val arm it is a
+        -- 32-bit LOAD of the payload word, which works for any Value.  A
+        -- fixnum's word 0 on the word arm is its value in a register, so the
+        -- same read is the low 32 bits of the arithmetic-shifted value,
+        -- SIGN-EXTENDED exactly as the val arm's `loadw` + `extsw` is.
+        --
+        -- THE BOOLEAN ARM IS THE VAL ARM'S FIELD, PORTED.  A val-arm boolean is
+        -- `{tag 3, payload word 0 = 1 | 0}`, so `payload32(b, 0)` is its FLAG;
+        -- the word arm's boolean is an IMMEDIATE whose flag is the tag itself
+        -- (`...011` true, `...100` false), so the same read is `t == tagTrue`
+        -- as a word.
+        --
+        -- MEASURED (each cost one run of a real binary): without the fixnum
+        -- arm, `main = 7` dies at Rt.main's first `payload32` of a count;
+        -- without the boolean arm it dies in `Rt.cStrEq`, which returns
+        -- `payload32(eq, 0)` of its own boolean.
+        s14 =
+            s13
+                |> emit (Bin (Just t) W And (Il.Tmp l) (Il.Con s13.layout.tagMask))
+                |> (if word == 0 then
+                        emit (Cmp (Just isFix) W Ceq (Il.Tmp t) (Il.Con s13.layout.tagNumber))
+                            >> closeBlock (Jnz (Il.Tmp isFix) fixLbl chkLbl)
+                            >> startBlock chkLbl
+                            -- A BOOLEAN HAS **TWO** IMMEDIATES: `...011` true
+                            -- and `...100` false.  Testing only tagTrue let
+                            -- FALSE fall through to the heap test and die —
+                            -- MEASURED: Rt.metaGo answers `mkbool(0)` on a miss
+                            -- and Rt.main's `payload32(found, 0)` killed the
+                            -- first run of a real binary.
+                            >> emit (Cmp (Just isTrue) W Ceq (Il.Tmp t) (Il.Con s13.layout.tagTrue))
+                            >> emit (Cmp (Just isFalse) W Ceq (Il.Tmp t) (Il.Con s13.layout.tagFalse))
+                            >> emit (Bin (Just isBool) W Or (Il.Tmp isTrue) (Il.Tmp isFalse))
+                            >> closeBlock (Jnz (Il.Tmp isBool) boolLbl chk2Lbl)
+                            >> startBlock chk2Lbl
+
+                    else
+                        identity
+                   )
+
+        -- 2. a heap object, or the loud refusal.
+        s15 =
+            s14
+                |> emit (Cmp (Just isHeap) W Ceq (Il.Tmp t) (Il.Con (RtLayout.heapPtrTag s14.layout)))
                 |> closeBlock (Jnz (Il.Tmp isHeap) heapLbl badLbl)
                 |> startBlock badLbl
                 |> emit (Call Nothing (Base L) (Il.Sym ("q_" ++ mangle "Rt.die")) [ ArgVal (Base L) (Il.Sym msgName) ])
                 |> closeBlock Hlt
                 |> startBlock heapLbl
 
-        s10 =
+        -- 3. the heap arm: the LOW HALF of body unit `word`, sign-extended.
+        s16 =
             let
                 ( bodyArg, sa ) =
-                    wordBodyOf (Il.Tmp l) s9
+                    wordBodyOf (Il.Tmp l) s15
 
                 ( a, sb ) =
                     freshTmp sa
@@ -4376,9 +4509,44 @@ wordPayloadField32 base word s0 =
                 |> emit (Load (Just wT) W LoadW (Il.Tmp a))
                 |> emit (Unary (Just r) L Extsw (Il.Tmp wT))
                 |> jumpTo joinLbl
-                |> startBlock joinLbl
+
+        -- 4. the fixnum arm (word 0 only): shift the tag bits off, then take the
+        -- low half.  The `W And -1` is how this file narrows an `l` temp to the
+        -- `w` class (`extsw` takes a word); it is the same trick `readTag` uses
+        -- for its mask.
+        s17 =
+            if word == 0 then
+                let
+                    ( w32, sa ) =
+                        freshTmp s16
+                in
+                s16
+                    |> startBlock fixLbl
+                    |> emit (Bin (Just w32) L Sar (Il.Tmp l) (Il.Con s13.layout.tagBits))
+                    |> emit (Bin (Just w32) W And (Il.Tmp w32) (Il.Con -1))
+                    |> emit (Unary (Just r) L Extsw (Il.Tmp w32))
+                    |> jumpTo joinLbl
+
+            else
+                s16
+
+        -- 5. the boolean arm (word 0 only): the flag IS the tag, so the field is
+        -- the ALREADY-COMPUTED compare result (`isBool`, 0/1 in the `w` class),
+        -- widened to the word class exactly as the other arms' fields are.
+        s18 =
+            if word == 0 then
+                s17
+                    |> startBlock boolLbl
+                    |> emit (Unary (Just r) L Extsw (Il.Tmp isTrue))
+                    |> jumpTo joinLbl
+
+            else
+                s17
+
+        s19 =
+            s18 |> startBlock joinLbl
     in
-    ( Il.Tmp r, s10 )
+    ( Il.Tmp r, s19 )
 
 
 {-| The i32-field refusal's message: an i32 field is a body unit, so a word that
@@ -4435,14 +4603,29 @@ wordPayloadWord base word s0 =
         ( isHeap, s4 ) =
             freshTmp s3
 
+        ( isNil, s4b ) =
+            freshTmp s4
+
+        ( isTrue, s4c ) =
+            freshTmp s4b
+
+        ( isFalse, s4d ) =
+            freshTmp s4c
+
+        ( isZeroTag, s4e ) =
+            freshTmp s4d
+
         ( heapLbl, s5 ) =
-            freshLbl "pheap" s4
+            freshLbl "pheap" s4e
 
         ( badLbl, s6 ) =
             freshLbl "pbad" s5
 
+        ( zeroLbl, s6b ) =
+            freshLbl "pzero" s6
+
         ( joinLbl, s7 ) =
-            freshLbl "pjoin" s6
+            freshLbl "pjoin" s6b
 
         ( fixLbl, s8 ) =
             freshLbl "pfix" s7
@@ -4450,13 +4633,22 @@ wordPayloadWord base word s0 =
         ( chkLbl, s9 ) =
             freshLbl "pchk" s8
 
+        ( chk2Lbl, s9b ) =
+            freshLbl "pchk2" s9
+
         ( r, s10 ) =
-            freshTmp s9
+            freshTmp s9b
+
+        ( rw, s10b ) =
+            freshTmp s10
+
+        msgText =
+            (if s0.defunKey == "" then "" else s0.defunKey ++ ": ") ++ wordPayloadRefusal
 
         ( msgName, s11 ) =
-            freshData ("msg:" ++ wordPayloadRefusal)
-                (\n -> { name = n, align = Just 8, items = [ DStr wordPayloadRefusal, DByte 0 ], export_ = False })
-                s10
+            freshData ("msg:" ++ msgText)
+                (\n -> { name = n, align = Just 8, items = [ DStr msgText, DByte 0 ], export_ = False })
+                s10b
 
         -- 1. the tag, and the FIRST branch: a fixnum (word 0 only) or not.
         s12 =
@@ -4472,14 +4664,40 @@ wordPayloadWord base word s0 =
             else
                 s12
 
-        -- 2. a heap object, or the loud refusal.
+        -- 2. a heap object, an IMMEDIATE, or the loud refusal.
+        --
+        -- THE IMMEDIATE ARM IS THE VAL ARM'S VALUE, PORTED (perf
+        -- word-arm-area3rt).  On the val arm `payload(nil, i)`,
+        -- `payload(true, i)` and `payload(false, i)` all read an UNWRITTEN
+        -- payload word, i.e. ZERO — the slot is zeroed at frame entry and the
+        -- tag write is the whole of `mknil`/`mkbool`.  Sites lean on that
+        -- (`Rt.main`'s `payload(prc, 0) != 0`), so the faithful twin is 0, not
+        -- a refusal.  ERROR is NOT here: its payload word 0 is a real message
+        -- pointer on the val arm, so a word-arm error has no equivalent read
+        -- and still refuses by name.
         s14 =
             s13
                 |> emit (Cmp (Just isHeap) W Ceq (Il.Tmp t) (Il.Con (RtLayout.heapPtrTag s11.layout)))
-                |> closeBlock (Jnz (Il.Tmp isHeap) heapLbl badLbl)
+                |> closeBlock (Jnz (Il.Tmp isHeap) heapLbl chk2Lbl)
+                |> startBlock chk2Lbl
+                |> emit (Cmp (Just isNil) W Ceq (Il.Tmp t) (Il.Con s11.layout.tagNil))
+                |> emit (Cmp (Just isTrue) W Ceq (Il.Tmp t) (Il.Con s11.layout.tagTrue))
+                |> emit (Cmp (Just isFalse) W Ceq (Il.Tmp t) (Il.Con s11.layout.tagFalse))
+                |> emit (Bin (Just isZeroTag) W Or (Il.Tmp isNil) (Il.Tmp isTrue))
+                |> emit (Bin (Just isZeroTag) W Or (Il.Tmp isZeroTag) (Il.Tmp isFalse))
+                |> closeBlock (Jnz (Il.Tmp isZeroTag) zeroLbl badLbl)
                 |> startBlock badLbl
                 |> emit (Call Nothing (Base L) (Il.Sym ("q_" ++ mangle "Rt.die")) [ ArgVal (Base L) (Il.Sym msgName) ])
                 |> closeBlock Hlt
+                |> startBlock zeroLbl
+                -- `r` is an `l` temp in every other arm, so the zero is built
+                -- in its OWN `w` temp and widened — a temp has ONE class in
+                -- QBE, and MEASURED: assigning it in both classes makes the
+                -- assembler reject the shift in the fixnum arm ("invalid type
+                -- for first operand %t28 in shl").
+                |> emit (Bin (Just rw) W Xor (Il.Tmp t) (Il.Tmp t))
+                |> emit (Unary (Just r) L Extsw (Il.Tmp rw))
+                |> jumpTo joinLbl
                 |> startBlock heapLbl
 
         -- 3. the heap arm: untag, past the header, `word` units in.

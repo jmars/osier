@@ -12,6 +12,7 @@ module Mid.Rt
         , conSeeds
         , driverSeeds
         , lowerSeatSeeds
+        , wordArmSeeds
         , gcSeeds
         , youngGcSeeds
         , hostSeeds
@@ -1067,6 +1068,11 @@ rtDeps =
         , ( "Rt.gcAlloc", [ "Rt.gcAllocGo", "Rt.collect", "Rt.die", "Rt.gcNumOut", "Rt.gcGrow" ] )
         , ( "Rt.gcGrow", [ "Rt.gcNumOut" ] )
         , ( "Rt.gcAllocGo", [] )
+        , ( "Rt.kindHdr", [] )
+        , ( "Rt.allocKind", [ "Rt.gcInit", "Rt.gcAlloc", "Rt.die" ] )
+        , ( "Rt.allocCons", [ "Rt.gcInit", "Rt.gcAlloc" ] )
+        , ( "Rt.allocFloat", [ "Rt.gcInit", "Rt.gcAlloc" ] )
+        , ( "Rt.mkStream", [ "Rt.allocKind" ] )
         , ( "Rt.gcInit", [ "Rt.die", "Rt.gcEnvNum" ] )
         , ( "Rt.gcEnvNum", [ "Rt.gcEnvNum" ] )
         , ( "Rt.collect", [ "Rt.gcMarkRoots", "Rt.gcMarkValuesTab", "Rt.gcDrain", "Rt.gcSweep", "Rt.gcClearClasses", "Rt.gcNumOut", "Rt.die", "Rt.gcVerify" ] )
@@ -1102,8 +1108,19 @@ rtDeps =
         , ( "Rt.gcScavDrain", [ "Rt.gcScavDrain", "Rt.gcScavValueArray" ] )
         , ( "Rt.gcPromoteAlloc", [ "Rt.gcGrow", "Rt.gcNumOut", "Rt.die" ] )
         , -- ===== the Mid ADT constructor (zigretire stage 5)
+        -- (perf word-arm-area3rt) THE WORD-ARM-ONLY EDGES ARE IN THIS TABLE TOO.
+        -- A missing edge does not fail on the val arm — the callee simply is
+        -- not emitted there — so it links cleanly and then fails on the word
+        -- arm as an UNDEFINED SYMBOL at cc time.  MEASURED exactly that way:
+        -- `Rt.gcAlloc`'s word-arm header write calls `Rt.kindHdr` (VR3c added
+        -- the defun and the calls but not the edge), and the first word-arm
+        -- link of a real program died with `undefined reference to
+        -- q_Rt_x2ekindHdr`.  Every edge below is a call that exists in the
+        -- WORD-spliced text only.
           ( "Rt.con", [ "Rt.conFill" ] )
         , ( "Rt.conFill", [ "Rt.conFill" ] )
+        , ( "Rt.absvector", [] )
+        , ( "Rt.cons", [] )
         , -- ===== the Mid closure (zigretire stage 5 PART 2)
           ( "Rt.closure", [ "Rt.closureFill" ] )
         , ( "Rt.closureFill", [ "Rt.closureFill" ] )
@@ -1703,6 +1720,25 @@ used-prim census does not seed it).
 closureSeeds : List String
 closureSeeds =
     keepRtDependencies [ "Rt.closure" ]
+
+
+{-| (perf word-arm-area3rt) THE WORD-ARM-ONLY SEATS.  Every key here exists in
+runtime.mid ONLY inside a `QBE_WORDVAL-ONLY` region, so seeding it on the val arm
+is not "an unused defun" — the checker resolves the key and refuses the compile
+(`unknown global Rt.kindHdr`, MEASURED).  It therefore cannot ride the normal
+`rtDeps` edges: an edge on a SHARED defun (`Rt.con -> Rt.allocKind`) is followed
+on both arms.  These are ROOTS instead, added by `Lower.lowerArm` only when the
+word arm is on; their own `rtDeps` entries then pull in gcInit/gcAlloc/die.
+
+WHY THEY ARE NEEDED AT ALL: the seed walk is what decides which Rt defuns are
+EMITTED, and a runtime.mid call edge to a defun that is never seeded links
+cleanly on the val arm and dies as an undefined symbol on the word arm —
+MEASURED (`undefined reference to q_Rt_x2ekindHdr` on the first word-arm link of
+a real program, because VR3c added the defun and the calls but no seed).
+-}
+wordArmSeeds : List String
+wordArmSeeds =
+    keepRtDependencies [ "Rt.allocKind", "Rt.allocCons", "Rt.allocFloat", "Rt.kindHdr", "Rt.mkStream" ]
 
 
 {-| THE SEATS LOWER NAMES DIRECTLY (zighost Z2/Z3): the plain vec-store writer

@@ -1563,7 +1563,7 @@ checks rt rawMidText =
                     && String.contains "defun Rt.kindHdr(kind : val, cls : val) -> val {" wordText
                     && String.contains "word scan = (k == 4) + (k == 6) + (k == 9) + (k == 10) + (k == 14);" wordText
                     && String.contains "return mknum(scan * 2 + c * 4 + k * 16777216);" wordText
-                    && String.contains "defun Rt.allocCons() -> val {" wordText
+                    && String.contains "defun Rt.allocCons(dummy : val) -> val {" wordText
                     && String.contains "return call Rt.gcAlloc(region, mknum(4), mknum(2));" wordText
                     && String.contains "defun Rt.allocKind(code : val, count : val) -> val {" wordText
                     && String.contains "return call Rt.gcAlloc(region, mknum(10), mknum(countW));" wordText
