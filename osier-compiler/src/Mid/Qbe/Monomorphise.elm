@@ -117,7 +117,7 @@ module Mid.Qbe.Monomorphise exposing (Output, run)
 -- behaviour (golden + `QBE_HEAP_MB=16` churn) is the one that matters.
 
 import Dict exposing (Dict)
-import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), Lambda, LetBinder(..), Lit(..), UnsafeNode(..))
+import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), Lambda, LetBinder(..), Lit(..), TailTarget(..), UnsafeNode(..))
 import Mid.Qbe.Types as QbeTypes
 import Set exposing (Set)
 import Type.Env as Env exposing (Scheme)
@@ -1389,6 +1389,11 @@ unsafeChildren node =
             -- path), so the walk covers fn + args.
             call.fn :: call.args
 
+        -- U1: a tail call's operands are its arguments; the target is a NAME
+        -- (a defun key or an extern symbol), never a child expression.
+        RawTailCall tc ->
+            tc.args
+
         RawDataAddr _ ->
             []
 
@@ -1419,6 +1424,9 @@ unsafeRebuild node parts =
 
         ( RawCallAgg call, fn :: rest ) ->
             RawCallAgg { call | fn = fn, args = rest }
+
+        ( RawTailCall tc, _ ) ->
+            RawTailCall { tc | args = parts }
 
         ( RawBin r, a :: b :: _ ) ->
             RawBin { r | a = a, b = b }

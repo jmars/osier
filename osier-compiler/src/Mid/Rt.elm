@@ -2118,6 +2118,12 @@ unsafeSafepoint selfKey selfArity node =
             -- callee's collection).
             True
 
+        -- U1: a DSL `tailcall`'s callee is arbitrary generated code, exactly
+        -- like RawCallAgg's — conservatively ALLOCATING, deny-by-default, so a
+        -- defun containing one can never classify frame-free.
+        RawTailCall _ ->
+            True
+
         RawTagOf _ ->
             False
 

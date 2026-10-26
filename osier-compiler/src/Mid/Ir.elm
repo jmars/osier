@@ -3,6 +3,7 @@ module Mid.Ir exposing
     , Defun
     , Exp(..)
     , UnsafeNode(..)
+    , TailTarget(..)
     , FfiWidth(..)
     , MemWidth(..)
     , RawBinOp(..)
@@ -667,6 +668,43 @@ type UnsafeNode
       --     stack address in a returned pointer is a dangling pointer where a
       --     malloc block was merely leaked).
       RawAllocN Int
+    | -- (U1, handoff apply-chain) A CROSS-DEFUN TAIL CALL the DSL spelled
+      -- (`tailcall val <target>(words..)` — Ast's `TTailCall`): the callee
+      -- returns STRAIGHT TO OUR CALLER, so the node has NO result and is
+      -- BLOCK-FINAL.  It lowers to Q1a's `Il.TailCall` + a bare `ret`
+      -- (Qbe.Lower.lowerRawTailCall), which is the whole reason it exists:
+      -- `RawCall`'s self-tail arm could only ever express a LOOP, never the
+      -- relay a generic-apply hop needs.
+      --
+      -- `args` are WORD producers (the same `rawWordArg` discipline
+      -- `RawCallRaw`/`RawCallAgg` use), and `shape` is the CALLEE's return
+      -- class — "val" (the 40-byte tagged Value) is the ONLY one v1 emits;
+      -- "ret" stays in the vocabulary because the node mirrors `RawCallAgg`'s
+      -- and abi1's C4 check names the class it re-refuses.  A tcall's AbiTy
+      -- must equal the ENCLOSING function's, so the DSL checker admits this
+      -- node only in a `:val`-returning body.
+      --
+      -- CLASSIFIED CONSERVATIVELY ALLOCATING (Mid.Rt.unsafeSafepoint): the
+      -- callee is arbitrary generated code, exactly like `RawCallAgg`.
+      RawTailCall { target : TailTarget, args : List Exp, shape : String }
+
+
+{-| WHERE a `RawTailCall`'s code pointer comes from — the DSL's two target
+spellings, carried through so the MANGLING happens where the key space lives
+(and named so neither collides with the SURFACE `TailTarget`'s constructors —
+the selfhost lane's own type checker resolves constructor names by their bare
+spelling and will not unify two same-named ones)
+(`Qbe.Lower`, beside every other `q_` symbol):
+
+  * `TailKey key` — a program defun (`Rt.apply`): lowered to
+    `Il.Sym ("q_" ++ mangle key)`, the same symbol a `call` to that key
+    reaches.
+  * `TailSym sym` — an external code symbol, VERBATIM (`rt_call2r`, the
+    backend-generated arity bridge).
+-}
+type TailTarget
+    = TailKey String
+    | TailSym String
 
 
 {-| THE C CALL-BOUNDARY REGISTER CLASS (cffi plan §3), backend-neutral — the

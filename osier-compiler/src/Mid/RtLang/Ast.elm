@@ -31,6 +31,7 @@ module Mid.RtLang.Ast exposing
     , StructInit(..)
     , StructMember(..)
     , Sym
+    , TailTarget(..)
     , Term(..)
     , Type(..)
     , WordBinOp(..)
@@ -951,6 +952,18 @@ the block like `return` does (a block has exactly one terminator), and
 `Check` rejects either one outside a loop.  `diverges` counts all four, so
 the J7 "a mid-block if needs one diverging branch" rule admits
 `if (c) { break; }` as the mid-block statement it is.
+
+`TTailCall` (U1, handoff apply-chain) is `tailcall val target(args..);` —
+the DSL's TAIL CALL, and a TERMINATOR in exactly the sense above: it
+produces NO value (composing it into a value position is unrepresentable,
+not merely rejected) and nothing may follow it in its block.  It exists
+because `lowerTail`'s `RawCall` arm can express only the SELF-tail: a
+cross-defun tail call — the thing the generic-apply chain needs so a hop
+stops retaining frames — had no DSL spelling at all.  v1 is deliberately
+NARROW and is used by NOTHING: shape `val` only, arguments word-class only,
+arity <= 5, and TAIL POSITION only (the body's terminator, or an arm of an
+`if` that is itself in tail position).  Every one of those limits is a LOUD
+named refusal, never a silent fallback — see `Check.checkTailCall`.
 -}
 type Term
     = TRet Exp
@@ -958,6 +971,28 @@ type Term
     | TIf Exp Block (Maybe Block)
     | TBreak
     | TContinue
+    | TTailCall { target : TailTarget, shape : AggShape, args : List Exp }
+
+
+{-| U1 (handoff apply-chain) — WHERE a `tailcall`'s code pointer comes from.
+TWO spellings, and the split is the DSL's existing one (`call Key` vs
+`rawcall sym`), so neither form needs a string literal to be told apart:
+
+  * `TailDefun key` — `tailcall val Rt.apply(..)`: a DEFUN OF THE PROGRAM,
+    dotted like every `call` key.  The checker RESOLVES it (it must exist, its
+    declared result must be `:val`, and its params must be word-class) and the
+    lowerer emits that defun's own MANGLED symbol — the same name a `call`
+    reaches.  This is the form whose class rules are checkable, and therefore
+    the form the C4 face of the refusals lives on.
+  * `TailExtern sym` — `tailcall val rawsym("rt_call2r")(..)`: an EXTERNAL
+    code symbol, baked in VERBATIM (the `rawsym` literal slot — no computed
+    target).  The backend-generated `rt_call2r` family is the site this
+    exists for; nothing in the program can be resolved against it, so the
+    checker can only bound its ARITY and its arguments' classes.
+-}
+type TailTarget
+    = TailDefun Key
+    | TailExtern Sym
 
 
 

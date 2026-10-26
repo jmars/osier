@@ -305,6 +305,7 @@ import Mid.RtLang.Ast as Ast
         , StructInit(..)
         , StructMember(..)
         , Sym
+        , TailTarget(..)
         , Term(..)
         , Type(..)
         , WordBinOp(..)
@@ -398,6 +399,13 @@ type alias Ctx =
     , scope : Dict String Type
     , loops : Int -- (B4) the ENCLOSING loop depth: a break/continue needs one
     , abiWord : Bool -- (B4) is this defun's signature the WORD ABI (Ast.allWordSig)?
+    , tailPos : Bool
+      -- (U1) is the block being checked the defun's TAIL position?  TRUE for
+      -- the body and inherited by an `if` arm that is itself in tail
+      -- position; FALSE inside a loop body, a value block (`?:`/`withroots`)
+      -- and a MID-BLOCK `if` arm.  Only `tailcall` reads it: a tail call is
+      -- legal exactly where control leaves the defun, and nothing else in the
+      -- grammar can tell the two apart (a `return` is legal anywhere).
     , frameAddr : Dict String String
       -- (B4b) J13's provenance set: binder name -> the frame PLACE whose
       -- address it holds (`*S p = &s` -> p |-> "&s").  Populated at a bind
@@ -1968,6 +1976,7 @@ ctxOf env d =
     , scope = paramScope d.params
     , loops = 0
     , abiWord = Ast.allWordSig (List.map .ty d.params) d.ret
+    , tailPos = True
     , frameAddr = Dict.empty
     }
 
@@ -2073,7 +2082,11 @@ checkStmt ctx stmt =
                     Ok ctx
 
         SIf c t me ->
-            case checkIf ctx c t me of
+            -- U1: a mid-block `if`'s arms are NOT the defun's tail position —
+            -- control can fall out of the if into the continuation, so a
+            -- `tailcall` there would be a terminator in a non-final arm
+            -- (Check.checkTailCall's J16 refuses it).
+            case checkIf { ctx | tailPos = False } c t me of
                 Err msg ->
                     Err msg
 
@@ -2114,7 +2127,7 @@ checkStmt ctx stmt =
                     Err msg
 
                 Ok _ ->
-                    case checkBlock { ctx | loops = ctx.loops + 1 } b of
+                    case checkBlock { ctx | loops = ctx.loops + 1, tailPos = False } b of
                         Err msg ->
                             Err msg
 
@@ -2122,7 +2135,7 @@ checkStmt ctx stmt =
                             Ok ctx
 
         SDoWhile b c ->
-            case checkBlock { ctx | loops = ctx.loops + 1 } b of
+            case checkBlock { ctx | loops = ctx.loops + 1, tailPos = False } b of
                 Err msg ->
                     Err msg
 
@@ -2150,7 +2163,7 @@ checkStmt ctx stmt =
                                     Err msg
 
                                 Ok () ->
-                                    case checkBlock { ctx1 | loops = ctx1.loops + 1 } rec.body of
+                                    case checkBlock { ctx1 | loops = ctx1.loops + 1, tailPos = False } rec.body of
                                         Err msg ->
                                             Err msg
 
@@ -3167,6 +3180,9 @@ checkTerm ctx term =
         TRecur args ->
             checkRecur ctx args
 
+        TTailCall tc ->
+            checkTailCall ctx tc.target tc.shape tc.args
+
         TBreak ->
             breakLike ctx "break"
 
@@ -3206,6 +3222,13 @@ diverges b =
             True
 
         TRecur _ ->
+            True
+
+        -- U1: a tail call leaves the defun — control never falls past it — so
+        -- it diverges exactly as `return` does, which is what lets the J7
+        -- "a mid-block if needs one diverging branch" rule read an arm ending
+        -- in `tailcall` as the dead end it is.
+        TTailCall _ ->
             True
 
         -- B4: a loop LEAF ends the block — control leaves it for the loop's
@@ -3254,6 +3277,183 @@ breakLike ctx what =
                 ++ what
                 ++ ";' outside any loop — break/continue leave a loop, so there must be one enclosing them (the nearest loop is the one they leave, so nesting needs no labels)"
             )
+
+
+{-| U1 (handoff apply-chain) — J16, the `tailcall` TERMINATOR's judgments.
+
+WHY THIS EXISTS AT ALL.  `Lower` learned to emit a real cross-defun tail call
+(Q1b stage 1: `Il.TailCall`), but the DSL had NO spelling for one: `lowerTail`'s
+`RawCall` arm handles only the SELF-tail, and everything else lowers to an
+ordinary call plus `jmp @ret`.  The generic-apply chain needs the cross-defun
+form (a relay that keeps its own frame per hop is a silent stack regression),
+so the construct is built here — and used NOWHERE yet (zero runtime.mid uses,
+corpus byte-identical).  Its value at this commit is this list of refusals.
+
+THE RULES, each a loud named error and never a silent fallback:
+
+  1. TAIL POSITION ONLY.  A tail call transfers control out of this defun; a
+     `return` is legal anywhere, so the checker threads the one fact the
+     grammar cannot: `Ctx.tailPos`.  TRUE for the body and inherited by an `if`
+     arm that is itself in tail position; FALSE inside a loop body, a value
+     block (`?:`, `withroots`) and a MID-BLOCK `if` arm — there the block's
+     value is read by the continuation, and a `tailcall` has no value.
+  2. SHAPE `val` ONLY (v1).  The shape is the CALLEE's return class.  A
+     `ret`-class tail call is not expressible today: abi1's C4 check requires
+     the callee's class to equal the caller's, and the caller here is a
+     `:val`-returning body (`RtLeanRooted`/`RtLeanFree`, or a rawAbi key whose
+     recorded class is `Agg "val"`).  The `ret` spelling is refused BY NAME so
+     the reason is at the site, not in a backend err().
+  3. THE CALLER must declare `-> val` — the same rule from the other side.  A
+     `-> word` body lowers through `lowerTailWord`, which has no tcall seat at
+     all.
+  4. THE TARGET must RESOLVE (a `TailDefun` key is looked up in the program's
+     surfaces ∪ externs, exactly like a `call`), must declare `-> val` (THE C4
+     FACE — a word-result defun is refused by name), and must take WORD-CLASS
+     parameters.
+  5. THE ARGUMENTS must be WORD-CLASS.  A `val` argument cannot cross a tcall
+     in v1: QBE's teardown frees the dynalloc/scratch region BEFORE the `jmp`,
+     so a `val` living in an `alloc8`/scratch cell (or in a frame slot the
+     terminator's own `frame-leave` has already released) is freed storage by
+     the time the callee reads it — MEASURED in U0: the relay cannot be
+     `return bounce(...)` or an inline `rt_call2r`, both of which segfault at
+     n=1 needing the 80-byte descriptor.  Boxing into a 40-byte staged cell is
+     therefore NOT a v1 fallback; it is refused.
+  6. ARITY <= 5 raw words.  The ABI spends rdi on the hidden sret pointer and
+     rax on a closure's env, leaving rsi/rdx/rcx/r8/r9 — five integer argument
+     registers — and the saturated `rt_call2r` site passes exactly five
+     (`fn, env, napp, args, rem`).  More is REFUSED, not packed.
+
+Every limit is exercised by a TestMain row that FAILS if the refusal stops
+refusing (`U1 T1..T8`).
+-}
+checkTailCall : Ctx -> TailTarget -> AggShape -> List Exp -> Result String Type
+checkTailCall ctx target shape args =
+    if not ctx.tailPos then
+        Err
+            (ctx.key
+                ++ ": J16: 'tailcall' is a TERMINATOR and stands only in TAIL position — the body's own terminator, or an arm of an 'if' that is itself in tail position.  It produces NO value, so it cannot appear in a value block ('?:'/'withroots'), inside a loop body, or in a mid-block 'if' arm whose continuation would read a value it never produces"
+            )
+
+    else if shape /= AggVal then
+        Err
+            (ctx.key
+                ++ ": J16: 'tailcall ret ..' — v1 spells only `tailcall val ..`.  The shape is the CALLEE's return class and abi1's C4 check requires it to equal the caller's; a `:val`-returning body can only tail-call a `:val`-returning callee, and the `:ret` -> `:val` collapse that would let a `ret`-class body do this is a later unit's, not a spelling this one may accept"
+            )
+
+    else if ctx.ret /= TVal then
+        Err
+            (ctx.key
+                ++ ": J16: a 'tailcall' needs a `-> val` defun and this one declares '-> "
+                ++ typeStr ctx.ret
+                ++ "' — a word-result body lowers through the raw-WORD tail path, which has no tail-call seat, and the callee would have to return the same word class to satisfy C4"
+            )
+
+    else if List.length args > tailCallWordBudget then
+        Err
+            (ctx.key
+                ++ ": J16: 'tailcall' takes at most "
+                ++ String.fromInt tailCallWordBudget
+                ++ " raw word arguments and this one passes "
+                ++ String.fromInt (List.length args)
+                ++ " — the ABI spends rdi on the hidden sret pointer and rax on a closure's env, leaving five integer argument registers.  More arguments are REFUSED, not packed into a staged block"
+            )
+
+    else
+        case target of
+            TailExtern sym ->
+                if sym == "" then
+                    Err (ctx.key ++ ": J16: 'tailcall rawsym(\"..\")' — the extern symbol is empty, so the emitted call would target `$` (a symbol the assembler cannot resolve)")
+
+                else
+                    checkTailCallArgs ctx target args
+
+            TailDefun key ->
+                case resolveCall ctx.env key of
+                    Nothing ->
+                        Err
+                            (ctx.key
+                                ++ ": J16: tailcall target '"
+                                ++ key
+                                ++ "' resolves to no surface defun and no extern seat (unseeded key) — a tail call is a real call edge, so its target must be one the program actually defines"
+                            )
+
+                    Just ( paramTys, retTy ) ->
+                        if retTy /= TVal then
+                            Err
+                                (ctx.key
+                                    ++ ": J16: tailcall target '"
+                                    ++ key
+                                    ++ "' declares '-> "
+                                    ++ typeStr retTy
+                                    ++ "', and a 'tailcall val' requires a `:val`-returning callee — abi1's C4 check re-refuses a class mismatch, and the 80-byte `:ret` result could not be forwarded through this body's 40-byte `:val` return area anyway"
+                                )
+
+                        else if List.any (\t -> t /= TWord) paramTys then
+                            Err
+                                (ctx.key
+                                    ++ ": J16: tailcall target '"
+                                    ++ key
+                                    ++ "' takes a non-word parameter — a `val` argument cannot cross a tcall (the dynalloc/scratch region is freed before the `jmp`, and this terminator's own frame-leave has already released the frame slots), so v1 admits word-class parameters only"
+                                )
+
+                        else if List.length paramTys /= List.length args then
+                            Err
+                                (ctx.key
+                                    ++ ": J16: tailcall to '"
+                                    ++ key
+                                    ++ "' passes "
+                                    ++ String.fromInt (List.length args)
+                                    ++ " argument(s) but it declares "
+                                    ++ String.fromInt (List.length paramTys)
+                                    ++ " parameter(s)"
+                                )
+
+                        else
+                            checkTailCallArgs ctx target args
+
+
+{-| The ABI's five-register budget for a `tailcall` (rule 6 above).  Named
+here rather than spelled at the comparison so the TestMain arity row and the
+checker cannot drift apart.
+-}
+tailCallWordBudget : Int
+tailCallWordBudget =
+    5
+
+
+{-| Rule 5: every argument is a `:word`.  The classes come from the ONE
+expression checker, so a `val` argument (a binder, `mknil`, a `call`, a
+`?:` join) is refused by the class it actually has rather than by a
+hand-written shape list.
+-}
+checkTailCallArgs : Ctx -> TailTarget -> List Exp -> Result String Type
+checkTailCallArgs ctx target args =
+    case
+        checkArgs argOk
+            ctx
+            "J16"
+            ("tailcall to " ++ tailTargetName target)
+            (List.repeat (List.length args) TWord)
+            args
+    of
+        Ok () ->
+            -- the terminator's class: the defun's own (it produces no value
+            -- of its own — every term's class is the declared result, which
+            -- is how `TRet`/`TRecur`/`TIf` already read).
+            Ok ctx.ret
+
+        Err msg ->
+            Err msg
+
+
+tailTargetName : TailTarget -> String
+tailTargetName target =
+    case target of
+        TailDefun key ->
+            "'" ++ key ++ "'"
+
+        TailExtern sym ->
+            "rawsym(\"" ++ sym ++ "\")"
 
 
 {-| B4b — the WRITE side of J13's provenance set, at a DECLARATION: insert
@@ -3921,12 +4121,15 @@ checkExp ctx e =
                     Err msg
 
                 Ok _ ->
-                    case checkBlock ctx thn of
+                    -- U1: a VALUE block is not tail position — its terminator's
+                    -- value is the form's value, so a `tailcall` (which has
+                    -- none) is refused here by Check.checkTailCall's J16.
+                    case checkBlock { ctx | tailPos = False } thn of
                         Err msg ->
                             Err msg
 
                         Ok thnCls ->
-                            case checkBlock ctx els of
+                            case checkBlock { ctx | tailPos = False } els of
                                 Err msg ->
                                     Err msg
 
@@ -3951,7 +4154,7 @@ checkExp ctx e =
                     Err msg
 
                 Ok () ->
-                    checkBlock { ctx | scope = bindRoots ids ctx.scope } block
+                    checkBlock { ctx | scope = bindRoots ids ctx.scope, tailPos = False } block
 
         EField p f ->
             case structPointer ctx p of

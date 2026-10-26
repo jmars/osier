@@ -95,7 +95,7 @@ module Mid.Qbe.Lower exposing (lower, lowerWith)
 -- Il.Con (the integer-constant argument), and Elm cannot qualify constructors
 -- in patterns — exposing only one of the two keeps the pattern arms clean.)
 import IntegerLiteral
-import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), FfiWidth(..), Lambda, LetBinder(..), Lit(..), Match(..), MemWidth(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), Step(..), UnsafeNode(..), ValuePath(..))
+import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), FfiWidth(..), Lambda, LetBinder(..), Lit(..), Match(..), MemWidth(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), Step(..), TailTarget(..), UnsafeNode(..), ValuePath(..))
 import Mid.Rt as MidRt
 import Mid.RtGc as RtGc
 import Mid.RtLayout as RtLayout
@@ -186,6 +186,7 @@ type alias S =
     , noCollect : Set String -- P5: the CALL SYMBOLS whose execution cannot reach a GC safepoint (Mid.Rt.allocating's complement + the non-collecting libc entries); a call to anything else is a safepoint
     , leafFree : Bool -- P5's A/B switch (QBE_NOLEAF=1 -> False = every surface defun keeps its pooled frame, i.e. the pre-P5 shape)
     , tailEmit : Bool -- Q1b: may this defun emit a real `tcall`?  TRUE only for an RtGeneric (closure-ABI) body — the only ones whose own return is the 80-byte `:ret`, which is exactly the condition the backend's C4 re-checks
+    , pooledFrame : Bool -- (U1) does this defun hold a POOLED frame (proKind PFrame)?  A DSL `tailcall` must see the block's own `Rt.frame-leave` before it: the pooled block goes back to the pool and the CALLEE's frame-enter may pop and memset the very same block, so a tcall that skipped the leave would orphan (leak) the caller's frame per hop.  A PAlloc block (frame-free lean, rawAbi) dies with the C frame and needs no leave.
     }
 
 
@@ -961,6 +962,9 @@ rawNodeArea node =
         RawAllocN _ ->
             "AREA 6 (THE CALL ABI)"
 
+        RawTailCall _ ->
+            "AREA 6 (THE CALL ABI)"
+
         RawFltBin _ ->
             "AREA 5 (FLOATS)"
 
@@ -1247,6 +1251,10 @@ lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec _ mid
                       -- defun by lowerFunBody: only an RtGeneric body may emit
                       -- a tcall, and nothing outside a defun body lowers an App.
                       tailEmit = False
+
+                    -- U1: likewise module-level — no defun is being lowered, so
+                    -- there is no frame for a `tailcall` guard to look at.
+                    , pooledFrame = False
                     }
 
                 -- THE MIDGC REFUSAL ARMS ARE GONE (stage 7 O2).  Two arms
@@ -1526,6 +1534,21 @@ rawCallEdges defuns node =
             else
                 []
 
+        -- U1: a `tailcall` to a defun of this program is the same edge a
+        -- `rawcall` to it is (and the same one `rtDeps` declares for the Rt
+        -- lane); an extern target names no defun here.
+        RawTailCall tc ->
+            case tc.target of
+                TailKey key ->
+                    if Dict.member key defuns then
+                        [ key ]
+
+                    else
+                        []
+
+                TailSym _ ->
+                    []
+
         _ ->
             []
     )
@@ -1617,6 +1640,9 @@ rawOperands node =
 
         RawCallRaw call ->
             call.args
+
+        RawTailCall tc ->
+            tc.args
 
         -- cffi U2 — the typed C boundary's operands are its args, in order
         -- (the widths are NODE DATA, not expressions).
@@ -2470,6 +2496,20 @@ lowerFunBody entry key qname lambda captures rt sOuter =
               -- tcall from either is refused by the backend's C4 check (loudly,
               -- naming the condition), so Mid must not emit one there.
               tailEmit = rt == RtGeneric
+            , -- U1: the frame CLASS, as `proKind` below decides it — the one
+              -- fact `lowerRawTailCall`'s frame-leave guard needs.  Spelled as
+              -- the same two-constructor case so the guard cannot drift from
+              -- the prologue the defun actually emits.
+              pooledFrame =
+                case rt of
+                    RtLeanFree ->
+                        False
+
+                    RtRawWord ->
+                        False
+
+                    _ ->
+                        True
             }
 
         -- the (empty) @start block, closed by its fallthrough to @body
@@ -2791,6 +2831,13 @@ lowerTail exp s =
         Lam lambda ->
             lowerClosure lambda 0 s
                 |> Result.map (jumpTo "ret")
+
+        Unsafe (RawTailCall tc) ->
+            -- U1 (handoff apply-chain): the DSL's own tail call.  This is the
+            -- arm the construct exists for — `RawCall` below can only ever
+            -- express a SELF-tail loop, and a cross-defun relay lowered to a
+            -- `call` + `jmp @ret` keeps a frame per hop.
+            lowerRawTailCall tc s
 
         Unsafe (RawCall call) ->
             -- RawCall self-tail (zigretire stage 4): the collector's mark/sweep
@@ -3222,6 +3269,13 @@ lowerValValue id dest s =
 lowerRawVal : UnsafeNode -> Int -> S -> Result String S
 lowerRawVal node dest s =
     case node of
+        RawTailCall _ ->
+            -- U1: unreachable for checked input — the DSL's J16 admits a
+            -- `tailcall` only in TAIL position, and a value position would be
+            -- asking a terminator for a value.  Loud rather than lowered into
+            -- a slot the caller would then read.
+            Err "qbe: a `tailcall` in a VALUE position — it is a TERMINATOR and produces no value (the DSL checker refuses this shape before lowering; reaching here is a compiler bug)"
+
         RawMkValue mk ->
             -- Build a Value cell in the dest slot: the u32 tag, then payload
             -- word i at offset 8 + 8i (gc/types.zig's extern union behind the
@@ -5896,6 +5950,19 @@ rawNodeName node =
         RawAllocN _ ->
             "rawAllocN"
 
+        RawTailCall tc ->
+            "rawTailCall " ++ tc.shape ++ " -> " ++ tailTargetName tc.target
+
+
+tailTargetName : TailTarget -> String
+tailTargetName target =
+    case target of
+        TailKey key ->
+            key
+
+        TailSym sym ->
+            "rawsym(\"" ++ sym ++ "\")"
+
 
 -- &vec[index] — a fresh `l` temp holding vec + vs*index (the index may be a
 -- constant or a computed word; either way it enters as an `l` operand).
@@ -7737,19 +7804,137 @@ lowerRawCallAgg call s =
     callee
         |> Result.andThen
             (\( fnA, s1 ) ->
-                List.foldl
-                    (\e acc ->
-                        Result.andThen
-                            (\( args, st ) ->
-                                rawWordArg e st
-                                    |> Result.map (\( a, st2 ) -> ( args ++ [ ArgVal (Base L) a ], st2 ))
-                            )
-                            acc
-                    )
-                    (Ok ( [], s1 ))
-                    call.args
+                rawWordCallArgs call.args s1
                     |> Result.map (\( args, s2 ) -> ( fnA, args, s2 ))
             )
+
+
+{-| The shared raw-WORD argument lowering: every argument through
+`rawWordArg`, each a `Base L` word, in source order.  Shared by `RawCallAgg`
+and the DSL tail call (U1) so the two call shapes cannot disagree about how
+an argument crosses — and so the `tailcall`'s "word-class only" checker rule
+(J16) has exactly ONE emitter to be true about.
+-}
+rawWordCallArgs : List Exp -> S -> Result String ( List Il.CallArg, S )
+rawWordCallArgs args s =
+    List.foldl
+        (\e acc ->
+            Result.andThen
+                (\( accArgs, st ) ->
+                    rawWordArg e st
+                        |> Result.map (\( a, st2 ) -> ( accArgs ++ [ ArgVal (Base L) a ], st2 ))
+                )
+                acc
+        )
+        (Ok ( [], s ))
+        args
+
+
+{-| U1 (handoff apply-chain) — THE DSL TAIL CALL: `tcall <shape> <callee>(words)`
+followed by a bare `ret`, BLOCK-FINAL (Q1a's `Il.TailCall`, the instruction
+Q1b stage 1 uses for Lower's own tail-known sites).  The block's `@ret` stays
+emitted and unreachable — MEASURED as 11 bytes of `.text` per defun (U2's
+census), not per hop.
+
+THE CALLEE.  A `TailKey` defun is mangled here, beside every other `q_` name,
+and must be IN THIS COMPILE — a tcall to a defun that was never seeded would
+be an undefined symbol at assembly, so it is refused by name instead.  A
+`TailSym` symbol is baked in verbatim (the backend-generated `rt_call2r`
+family is its site).  An empty symbol is refused: it would emit `$()`.
+
+THE FRAME-LEAVE GUARD (the design's sixth refusal, and the one no other layer
+can state).  A `tcall` jumps out of this machine frame: the IL's own teardown
+frees the dynalloc/scratch region BEFORE the `jmp`, and — for a defun holding
+a POOLED frame — the pooled block would never go back to the pool, so a chain
+of hops would LEAK one block per hop (an RSS regression nothing in the gate
+surface sees, because each individual run still answers correctly).  The DSL
+spells its own exit protocol in Mid source (the LIFO order interleaves
+runtime-owned pops with the frame pop, which no Lower-side automatic leave can
+express), so this arm only CHECKS that the current block already emitted
+`Rt.frame-leave` before the terminator.  A PAlloc body (frame-free lean /
+rawAbi) owns no pooled block and needs none.
+-}
+lowerRawTailCall : { target : TailTarget, args : List Exp, shape : String } -> S -> Result String S
+lowerRawTailCall tc s =
+    if tc.shape /= "ret" && tc.shape /= "val" then
+        Err ("qbe: rawTailCall shape \"" ++ tc.shape ++ "\" — only \"ret\" and \"val\" are legal")
+
+    else if s.pooledFrame && not (emittedFrameLeave s) then
+        Err
+            ("qbe: `tailcall` in "
+                ++ s.qname
+                ++ " — this defun holds a POOLED frame and the block has not left it before the tail call.  The callee's frame-enter may pop and MEMSET the same pooled block, so the caller's frame must be left FIRST: spell `call Rt.frame-leave();` (after any registry pops it must follow) immediately before the `tailcall`.  Without it every hop orphans one pooled block — a leak no value check sees"
+            )
+
+    else
+        case tailCallCallee s tc.target of
+            Err msg ->
+                Err msg
+
+            Ok ( fnA, s0 ) ->
+                rawWordCallArgs tc.args s0
+                    |> Result.map
+                        (\( args, s1 ) ->
+                            let
+                                ( parked, s2 ) =
+                                    freshLbl "taildead" s1
+                            in
+                            -- `Ret Nothing` closes the block (the IL requires a
+                            -- terminator; emit.c suppresses the `ret` because
+                            -- the tcall already jumped).  The PARKED label is
+                            -- defensive: a caller that emitted after this term
+                            -- would otherwise reopen a block with this same
+                            -- label and produce a duplicate — the checker
+                            -- admits no such caller today, and the park makes
+                            -- one a no-op instead of an unassemblable module.
+                            startBlock parked
+                                (closeBlock (Ret Nothing)
+                                    (emit (TailCall (Agg tc.shape) fnA args) s2)
+                                )
+                        )
+
+
+{-| The tail call's callee, as an `Il.Arg`, plus the loud refusals: a defun
+key must be in this compile, an extern symbol must be a real name.  Mirrors
+`lowerRawCallAgg`'s callee rule (a `Con`/data symbol is never a call target)
+with the two extra facts only a tcall's target can carry.
+-}
+tailCallCallee : S -> TailTarget -> Result String ( Il.Arg, S )
+tailCallCallee s target =
+    case target of
+        TailKey key ->
+            if Dict.member key s.defuns then
+                Ok ( Il.Sym ("q_" ++ mangle key), s )
+
+            else
+                Err ("qbe: `tailcall` to " ++ key ++ " — not in this compile (Mid.Rt.driverSeeds/gcSeeds must seed it); the emitted tcall would name an undefined symbol")
+
+        TailSym sym ->
+            if sym == "" then
+                Err "qbe: `tailcall rawsym(\"\")` — an empty extern symbol would emit `$()`"
+
+            else
+                Ok ( Il.Sym sym, s )
+
+
+{-| Has the CURRENT block already emitted `Rt.frame-leave`?  The DSL spells
+its own exit protocol, so "before the terminator" is exactly "somewhere in
+this block's instruction list" — the pops that must FOLLOW the frame-leave
+(dance-pop -> frame-leave -> args-pop -> free) are in the same block, which is
+why the check cannot be "the immediately preceding instruction".
+-}
+emittedFrameLeave : S -> Bool
+emittedFrameLeave s =
+    List.any
+        (\inst ->
+            case inst of
+                Call _ _ (Il.Sym name) [] ->
+                    name == "q_" ++ mangle "Rt.frame-leave"
+
+                _ ->
+                    False
+        )
+        s.curBody
 
 
 

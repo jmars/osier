@@ -225,7 +225,7 @@ parser's commit semantics:
     silently hand back and the block would report a misleading
     missing-terminator error.
   * RESERVED at statement/defun positions: `word float val bool if return
-    recur else defun while do for break continue` (dispatch reads them
+    recur tailcall else defun while do for break continue` (dispatch reads them
     first — a statement cannot START with one of them as an expression).  Inside expressions T2's
     rules are unchanged EXCEPT T23's `if`, which is now the block-branch
     if EXPRESSION's keyword (an `if` token in expression position parses
@@ -237,6 +237,14 @@ parser's commit semantics:
   * `recur` is a TERM only, per the plan (L4): a mid-block `recur`
     becomes a second terminator and the exactly-one-terminator reject
     fires; the loop-state-completeness judgment on it is T5's (J4).
+  * `tailcall val <target>(words..);` (U1, handoff apply-chain) is a TERM
+    of the same kind, and the DSL's SECOND cross-defun tail form (`recur`
+    is the self-tail): it produces NO value and ends the block, so
+    `itemReduce` refuses anything after it exactly as it does after
+    `return`.  Its target is a `rawsym("sym")` extern or a `Mod.name` key,
+    its shape keyword is `val`/`ret` (the CHECKER admits `val` only in v1),
+    and its arguments are read by the ordinary expression parser — the
+    word-class judgment is the checker's J16, not this parser's.
 
 B4 — the LOOP FORMS (`while`/`do`-`while`/`for`/`break`/`continue`) — and
 the ONE grammar relaxation they took:
@@ -278,7 +286,7 @@ and — per the O(n) invariant in the token-plumbing section — NO
 -}
 
 import Dict exposing (Dict)
-import Mid.RtLang.Ast exposing (AggShape(..), ArrayInit(..), Block, Builtin(..), Decl(..), Defun, Effect(..), EnumEntry, Exp(..), Export, ExportSig, FfiParam, FfiSig, FfiTy(..), Field, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Module, OTy(..), PTy(..), Param, Program, SizeTarget(..), Stmt(..), StructInit(..), StructMember(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
+import Mid.RtLang.Ast exposing (AggShape(..), ArrayInit(..), Block, Builtin(..), Decl(..), Defun, Effect(..), EnumEntry, Exp(..), Export, ExportSig, FfiParam, FfiSig, FfiTy(..), Field, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Module, OTy(..), PTy(..), Param, Program, SizeTarget(..), Stmt(..), StructInit(..), StructMember(..), TailTarget(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
 import Parser exposing (DeadEnd, Problem(..))
 import ParserFast
 
@@ -2949,7 +2957,7 @@ blockInner : ParserFast.Parser ( List Stmt, Maybe Term, Bool )
 blockInner =
     ParserFast.validate
         (\( _, mterm, stray ) -> not stray && mterm /= Nothing)
-        "a block has exactly one terminator — `return e;`, `recur(..);` or a final `if (..) ..` — and nothing may follow it (Mid has no fall-through and no join)"
+        "a block has exactly one terminator — `return e;`, `recur(..);`, `tailcall ..;` or a final `if (..) ..` — and nothing may follow it (Mid has no fall-through and no join)"
         (ParserFast.loopWhileSucceedsOntoResultFromParser
             itemStep
             (succeed ( [], Nothing, False ))
@@ -3071,6 +3079,12 @@ itemStepAt offset src =
         Just ( "recur", _ ) ->
             ParserFast.map ITermEnd (spelled "recur" recurTail)
 
+        -- U1 (handoff apply-chain): the TAIL CALL, a terminator like `return`
+        -- — it ends the block, so `itemReduce` refuses anything after it with
+        -- the same message every other terminator gets.
+        Just ( "tailcall", _ ) ->
+            ParserFast.map ITermEnd (spelled "tailcall" tailCallTerm)
+
         -- B4: the loop STATEMENTS and the two loop LEAVES.
         Just ( "while", _ ) ->
             ParserFast.map IStmt (spelled "while" whileStmt)
@@ -3175,6 +3189,103 @@ recurTail =
         (\args _ -> TRecur args)
         argsInParens
         (spelled ";" (succeed ()))
+
+
+{-| `tailcall val target(args);` — U1's TAIL CALL (Ast's `TTailCall`), a
+TERMINATOR: the `;` closes the statement and `itemReduce` refuses any item
+after it.  The shape is read exactly as `aggcall`'s is (`val`/`ret`; the
+CHECKER refuses `ret` by name in v1), and the target is a `TailTarget` —
+`rawsym("sym")` for an external code symbol or a dotted `Mod.name` key for a
+program defun.
+-}
+tailCallTerm : ParserFast.Parser Term
+tailCallTerm =
+    ParserFast.map2
+        (\shape ( target, args ) ->
+            TTailCall { target = target, shape = shape, args = args }
+        )
+        tailShape
+        (ParserFast.map2 Tuple.pair
+            tailTarget
+            (ParserFast.map2 (\args _ -> args)
+                argsInParens
+                (spelled ";" (succeed ()))
+            )
+        )
+
+
+{-| The `val`/`ret` keyword after `tailcall` — `aggcall`'s shape reader,
+same two words and same message shape.  Both spellings PARSE so the checker
+can refuse `ret` with a message that names the class rule (C4) rather than
+the parser saying "expected `val`".
+-}
+tailShape : ParserFast.Parser AggShape
+tailShape =
+    ParserFast.offsetSourceAndThen tailShapeAt
+
+
+tailShapeAt : Int -> String -> ParserFast.Parser AggShape
+tailShapeAt offset src =
+    case tokenAtOff offset src of
+        Just ( "val", _ ) ->
+            spelled "val" (succeed AggVal)
+
+        Just ( "ret", _ ) ->
+            spelled "ret" (succeed AggRet)
+
+        Just ( tok, _ ) ->
+            ParserFast.problem
+                ("expected `val` or `ret` after `tailcall`, found `" ++ tok ++ "`")
+
+        Nothing ->
+            ParserFast.problem "expected `val` or `ret` after `tailcall`"
+
+
+{-| The target: `rawsym("sym")` (an EXTERNAL code symbol, verbatim — the same
+literal slot the builtin takes, read here so the target can never be a
+computed value expression) or a dotted/plain KEY naming a program defun.
+-}
+tailTarget : ParserFast.Parser TailTarget
+tailTarget =
+    ParserFast.offsetSourceAndThen tailTargetAt
+
+
+tailTargetAt : Int -> String -> ParserFast.Parser TailTarget
+tailTargetAt offset src =
+    case tokenAtOff offset src of
+        Just ( "rawsym", _ ) ->
+            spelled "rawsym"
+                (ParserFast.map
+                    (\e ->
+                        case e of
+                            EBuiltin RawSym [ EStr s ] ->
+                                TailExtern s
+
+                            _ ->
+                                -- unreachable: `rawSymCall` builds exactly
+                                -- `EBuiltin RawSym [ EStr s ]` from a string
+                                -- literal.  An empty symbol is REFUSED by the
+                                -- checker by name, so this arm cannot become a
+                                -- silent `$` target.
+                                TailExtern ""
+                    )
+                    rawSymCall
+                )
+
+        Just ( tok, _ ) ->
+            if isValidKey tok then
+                spelled tok (succeed (TailDefun tok))
+
+            else
+                ParserFast.problem
+                    ("expected a `rawsym(\"sym\")` extern or a `Mod.name` defun key after `tailcall`, found `"
+                        ++ tok
+                        ++ "`"
+                    )
+
+        Nothing ->
+            ParserFast.problem
+                "expected a `rawsym(\"sym\")` extern or a `Mod.name` defun key after `tailcall`"
 
 
 {-| `exp ;` — an expression and its REQUIRED semicolon (`spelled`'s

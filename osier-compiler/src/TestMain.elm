@@ -23,7 +23,7 @@ import Dict exposing (Dict)
 import Mid.Audit as Audit
 import IntegerLiteral exposing (IntegerLiteral(..))
 import ParserFast
-import Mid.Ir exposing (Alt, AltKind(..), Binder, Defun, Exp(..), FfiWidth(..), LetBinder(..), Lit(..), MemWidth(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), UnsafeNode(..), ValuePath)
+import Mid.Ir exposing (Alt, AltKind(..), Binder, Defun, Exp(..), FfiWidth(..), LetBinder(..), Lit(..), MemWidth(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), TailTarget(..), UnsafeNode(..), ValuePath)
 import Mid.Module as MidModule
 import Mid.Qbe.Il as Il
 import Mid.Qbe.Lower as QbeLower
@@ -10784,6 +10784,77 @@ checks rt rawMidText =
             && absent "skip"
             && not (String.contains "payload(call Rt.hostIsProgram" mid)
         )
+
+    -- ==================== U1 (handoff apply-chain): THE DSL `tailcall` ====================
+    -- THE CONSTRUCT IS INERT (zero runtime.mid uses, corpus byte-identical);
+    -- its PRODUCT is the refusal list below, so every negative row here is a
+    -- FAIL-IF-IT-STOPS-REFUSING pin rather than a description.
+    , check "U1 T1a PARSE->LOWER GOLDEN (the `tailcall` form reaches the IR as the node the source spelled): `tailcall val rawsym(\"rt_call2r\")(0, 1, 2, 3, 4);` in a `-> val` defun parses, passes J16 and lowers to `RawTailCall { target = TailSym \"rt_call2r\", args = FIVE words, shape = \"val\" }` (the IR spelling of the surface `rawsym(...)` target — a defun KEY would land as `TailKey`, so the assertion also pins that the two spellings did not collapse) — the node Qbe.Lower's lowerTail turns into Q1a's `tcall`.  Fails on a parse that swallowed the form (no node), a target that landed as a defun key, and an argument count that moved"
+        (case u1BodyOf rt u1OkMid of
+            Ok (Unsafe (RawTailCall tc)) ->
+                tc.shape
+                    == "val"
+                    && tc.target
+                    == TailSym "rt_call2r"
+                    && List.length tc.args
+                    == 5
+
+            _ ->
+                False
+        )
+    , check "U1 T1b EMIT GOLDEN (the `print` half, on a defun whose ABI return class is really `:val`): a `Rt.*` probe body that IS a RawTailCall emits `tcall :val $q_Rt_x2eapply(l 0, l 1, l 2)` — BLOCK-FINAL, followed by a bare `ret`, then the now-unreachable `@ret` block.  The target is the MANGLED defun symbol (what a `call` to `Rt.apply` reaches), not a literal.  A user `.mid` defun cannot carry this row's claim: its ABI return is `:ret`, so abi1's C4 would refuse the emitted tcall — which is exactly why the checker's `-> val` rule cannot be the whole story and the backend re-checks"
+        (case QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities (u1TailProbe :: driverProg rt)) (u1TailProbe :: driverProg rt) "Rt.dslTailProbe" of
+            Ok mod ->
+                case funcByName "q_Rt_x2edslTailProbe" mod of
+                    Just f ->
+                        let
+                            txt =
+                                Print.print { layout = RtLayout.valLayout, types = [], datas = [], funcs = [ f ] }
+                        in
+                        String.contains "\ttcall :val $q_Rt_x2eapply(l 0, l 1, l 2)\n\tret\n@ret\n\tret %s0\n" txt
+                            && not (String.contains "call $q_Rt_x2eapply" txt)
+
+                    Nothing ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "U1 T2 REFUSAL (val-argument shape, BY NAME): a `tailcall` with a `val` argument is refused naming the argument position and both classes — `J16: tailcall to rawsym(\"rt_call2r\") argument 2 needs word, got val`.  A `val` cannot cross a tcall in v1: QBE's teardown frees the dynalloc/scratch region BEFORE the `jmp` (and the terminator's own frame-leave has already released the frame slots), so the callee would read freed storage — U0 MEASURED the relay segfaulting at n=1 for exactly this reason.  Boxing into a 40-byte staged cell is refused, not implemented"
+        (u1CheckErr rt "U1Tail.go" u1ValArgMid "J16: tailcall to rawsym(\"rt_call2r\") argument 2 needs word, got val")
+    , check "U1 T3 REFUSAL (the C4 face — a WORD-RESULT defun as target): `tailcall val U1Tail.w(1);` where `U1Tail.w` declares `-> word` is refused BY NAME.  A tcall's AbiTy must equal the callee's return class and the caller's; a word-returning callee cannot be forwarded through a `:val` body's return area.  This is the same class rule abi1 re-checks at assembly, stated at the source so the reason is at the site"
+        (u1CheckErr rt "U1Tail.go" u1WordResultMid "J16: tailcall target 'U1Tail.w' declares '-> word'")
+    , check "U1 T4 REFUSAL (arity > 5, refused rather than packed): SIX word arguments are refused with the register budget spelled out.  The ABI spends rdi on the hidden sret pointer and rax on a closure's env, leaving rsi/rdx/rcx/r8/r9 — five — and the saturated `rt_call2r` site passes exactly five.  Packing them into a staged block is the fallback this row exists to keep OUT"
+        (u1CheckErr rt "U1Tail.go" u1SixArgMid "at most 5 raw word arguments")
+    , check "U1 T5a REFUSAL (NON-TERMINATOR position, the parse half): a statement after a `tailcall` is the exactly-one-terminator reject — the same message `return`/`recur` get, and it now NAMES `tailcall` among the terminator forms (a message that listed only three of four would be a lie the day someone reads it)"
+        (u1ParseErr u1AfterMid "exactly one terminator" && u1ParseErr u1AfterMid "`tailcall ..;`")
+    , check "U1 T5b REFUSAL (NON-TERMINATOR position, the check half): a `tailcall` in a MID-BLOCK `if` arm is refused by name — the arm's block is not the defun's tail position, so the continuation would read a value the terminator never produces.  The J7 divergence rule alone would ADMIT this shape (a tailcall diverges, like `return`), which is why the position is a separate judgment (Ctx.tailPos) and not a corollary of divergence"
+        (u1CheckErr rt "U1Tail.go" u1MidIfMid "J16: 'tailcall' is a TERMINATOR and stands only in TAIL position")
+    , check "U1 T6 REFUSAL (PFrame WITHOUT frame-leave — the refusal no other layer can state, pinned in BOTH directions): a `tailcall` in a POOLED-frame body that has not left its frame is a compile error naming the orphaned block; the SAME body with `call Rt.frame-leave();` before the terminator compiles.  The asymmetry is the proof: the guard is reading the block's own emitted sequence, not a flag"
+        (case u1LowerProbe rt True of
+            Err msg ->
+                -- the message names the defun by its EMITTED symbol (the name a
+                -- `.ssa` reader sees), which is what an operator greps for
+                String.contains "POOLED frame" msg
+                    && String.contains "q_Rt_x2edslTailProbeFramed" msg
+
+            Ok _ ->
+                False
+        )
+    , check "U1 T6 CONTROL (the guard's other direction, and the LIFO order it permits): the same framed probe WITH the frame-leave emits `call $q_Rt_x2eframe_x2dleave()` before the tcall (and the DEAD `@ret` block keeps its own leave — unreachable, which is U2's measured per-defun cost) and lowers Ok — the leave is not required to be the IMMEDIATELY preceding instruction (the real exit sequence interleaves registry pops and frees between them), so the guard reads the block, not the previous instruction"
+        (case u1LowerProbe rt False of
+            Ok txt ->
+                String.contains "call $q_Rt_x2eframe_x2dleave()\n\ttcall :val $q_Rt_x2eapply(l 0, l 1, l 2)\n\tret\n" txt
+
+            Err _ ->
+                False
+        )
+    , check "U1 T7 REFUSAL (a target that does not exist): `tailcall val U1Tail.missing(1);` is refused by name — a tail call is a real call edge, so its target must be a defun the program defines (or an extern symbol), never a name that would become an undefined symbol at assembly"
+        (u1CheckErr rt "U1Tail.go" u1MissingMid "resolves to no surface defun")
+    , check "U1 T8 REFUSAL (the CLASS rules around the shape, both directions): `tailcall ret ..` is refused (v1 spells `val` only — a `ret`-class tcall needs the `:ret`->`:val` collapse), and a `-> word` CALLER is refused even with a word-returning callee, because a word-result body lowers through the raw-WORD tail path, which has no tail-call seat at all"
+        (u1CheckErr rt "U1Tail.go" u1RetShapeMid "v1 spells only `tailcall val ..`"
+            && u1CheckErr rt "U1Tail.go" u1WordCallerMid "needs a `-> val` defun"
+        )
     ]
 
 
@@ -10971,6 +11042,10 @@ b4Kids e =
 
                 WithRoots r ->
                     [ r.body ]
+
+                -- U1: a tail call's operands are its arguments.
+                RawTailCall tc ->
+                    tc.args
 
                 RawDataAddr _ ->
                     []
@@ -12578,6 +12653,12 @@ censusTerm t =
         Ast.TContinue ->
             []
 
+        -- U1: the DSL's tail call — the TERM itself plus its arguments, so the
+        -- census (which pins the construct surface the corpus exercises) would
+        -- SEE one the day a `.mid` source starts using it.
+        Ast.TTailCall tc ->
+            "TTailCall" :: List.concatMap censusExp tc.args
+
 
 censusExp : Ast.Exp -> List String
 censusExp e =
@@ -13175,6 +13256,15 @@ cnode st node =
                     cexps st1 r.args
             in
             ( RawCallAgg { r | fn = f, args = args }, st2 )
+
+        -- U1: a tail call's arguments are ordinary expressions (its target is
+        -- a name, so there is nothing else to walk).
+        RawTailCall r ->
+            let
+                ( args, st1 ) =
+                    cexps st r.args
+            in
+            ( RawTailCall { r | args = args }, st1 )
 
         RawDataAddr _ ->
             ( node, st )
@@ -14765,6 +14855,12 @@ rawCallSyms exp =
                 RawCallAgg call ->
                     rawCallSyms call.fn ++ List.concatMap rawCallSyms call.args
 
+                -- U1: a tail call's ARGUMENTS are ordinary expressions; its
+                -- target is a NAME (a defun key or an extern symbol), never a
+                -- rawcall sym, so it contributes no entry here.
+                RawTailCall tc ->
+                    List.concatMap rawCallSyms tc.args
+
                 RawDataAddr _ ->
                     []
 
@@ -14778,3 +14874,205 @@ rawCallSyms exp =
                     []
 
 
+
+
+-- ==================== U1 (handoff apply-chain): the DSL `tailcall` ====================
+-- The construct is INERT at this commit — zero `runtime.mid` uses, corpus
+-- byte-identical — so what these helpers exercise is (a) the pipeline path a
+-- future site will take and (b) every refusal the checker and the emitter owe.
+-- The rows live at the end of `checks`; the SOURCES live here, one per
+-- judgment, so a row's fixture and its claim sit together.
+
+{-| U1 T1's source: the shape a real site takes — five raw words to the
+backend-generated `rt_call2r` arity bridge, in a `-> val` body. -}
+u1OkMid : String
+u1OkMid =
+    "module U1Tail\ndefun U1Tail.go(n : val) -> val {\n  tailcall val rawsym(\"rt_call2r\")(0, 1, 2, 3, 4);\n}"
+
+
+{-| U1 T2: the SECOND argument is a `val` (`mknil`), which v1 refuses by name. -}
+u1ValArgMid : String
+u1ValArgMid =
+    "module U1Tail\ndefun U1Tail.go(n : val) -> val {\n  tailcall val rawsym(\"rt_call2r\")(0, mknil, 2);\n}"
+
+
+{-| U1 T3: a `-> word` defun as the target — the C4 face. -}
+u1WordResultMid : String
+u1WordResultMid =
+    "module U1Tail\ndefun U1Tail.w() -> word {\n  return 0;\n}\ndefun U1Tail.go(n : val) -> val {\n  tailcall val U1Tail.w(1);\n}"
+
+
+{-| U1 T4: SIX word arguments — one past the five-register budget. -}
+u1SixArgMid : String
+u1SixArgMid =
+    "module U1Tail\ndefun U1Tail.go(n : val) -> val {\n  tailcall val rawsym(\"rt_call2r\")(0, 1, 2, 3, 4, 5);\n}"
+
+
+{-| U1 T5a: a statement AFTER the terminator (the parse fold's reject). -}
+u1AfterMid : String
+u1AfterMid =
+    "module U1Tail\ndefun U1Tail.go(n : val) -> val {\n  tailcall val rawsym(\"rt_call2r\")(0, 1, 2);\n  return mknil;\n}"
+
+
+{-| U1 T5b: a `tailcall` in a MID-BLOCK `if` arm.  The J7 divergence rule
+alone admits this shape (a tailcall diverges, like `return`), so the position
+is its own judgment. -}
+u1MidIfMid : String
+u1MidIfMid =
+    "module U1Tail\ndefun U1Tail.go(n : val) -> val {\n  if (mkbool(payload(n, 0) == 0)) {\n    tailcall val rawsym(\"rt_call2r\")(0, 1, 2);\n  }\n  return mknil;\n}"
+
+
+{-| U1 T7: a target the program does not define. -}
+u1MissingMid : String
+u1MissingMid =
+    "module U1Tail\ndefun U1Tail.go(n : val) -> val {\n  tailcall val U1Tail.missing(1);\n}"
+
+
+{-| U1 T8a: the `ret` shape (v1 spells `val` only). -}
+u1RetShapeMid : String
+u1RetShapeMid =
+    "module U1Tail\ndefun U1Tail.go(n : val) -> val {\n  tailcall ret rawsym(\"rt_call2r\")(0);\n}"
+
+
+{-| U1 T8b: a `-> word` CALLER, even with a word-returning callee. -}
+u1WordCallerMid : String
+u1WordCallerMid =
+    "module U1Tail\ndefun U1Tail.go(n : val) -> word {\n  tailcall val rawsym(\"rt_call2r\")(0);\n}"
+
+
+{-| The pipeline behind the parse/check/lower rows: a user `.mid` through
+`Rt.parseUserModule` + `Rt.checkLowerUserModule` (the REAL user lane), yielding
+the FIRST defun's body.  `Err` on any stage, so a row that reads the node can
+never pass over a source that did not reach the lowering. -}
+u1BodyOf : Rt.Runtime -> String -> Result String Exp
+u1BodyOf rt src =
+    case Rt.parseUserModule src of
+        Err e ->
+            Err e
+
+        Ok parsed ->
+            case Rt.checkLowerUserModule rt.exportedTypes parsed of
+                Err e ->
+                    Err e
+
+                Ok m ->
+                    case m.defuns of
+                        d :: _ ->
+                            case d.value of
+                                Lam l ->
+                                    Ok l.body
+
+                                _ ->
+                                    Err "u1BodyOf: defun value is not a Lam"
+
+                        [] ->
+                            Err "u1BodyOf: no defuns"
+
+
+{-| A refusal row: the pipeline must Err, the message must carry the fragment
+the judgment is pinned by, AND it must name the defun (so a fragment matched
+out of an unrelated defun cannot satisfy the row). -}
+u1CheckErr : Rt.Runtime -> String -> String -> String -> Bool
+u1CheckErr rt key src frag =
+    case u1BodyOf rt src of
+        Err msg ->
+            String.contains frag msg && String.contains (key ++ ":") msg
+
+        Ok _ ->
+            False
+
+
+{-| A parse-level refusal row (`Rt.parseUserModule` alone). -}
+u1ParseErr : String -> String -> Bool
+u1ParseErr src frag =
+    case Rt.parseUserModule src of
+        Err msg ->
+            String.contains frag msg
+
+        Ok _ ->
+            False
+
+
+{-| U1's emit probe: a `Rt.*` body that IS a tail call to `Rt.apply` with
+three literal word arguments.  `Rt.apply` is the ONE target legal on every
+axis in v1 today — an all-WORD parameter list (so word arguments cross
+correctly), a declared `-> val`, and a recorded ABI return class of
+`Agg "val"` — i.e. a C4-consistent tcall, which no user `.mid` defun can be
+(its ABI return is `:ret`).  The key is synthetic, so it collides with no
+runtime defun.
+-}
+u1TailProbe : Defun
+u1TailProbe =
+    u1TailDefun "Rt.dslTailProbe" False
+
+
+{-| The framed twin: the same body, optionally preceded by the DSL's own
+`call Rt.frame-leave();` — the T6 asymmetry's two arms. -}
+u1TailProbeFramed : Bool -> Defun
+u1TailProbeFramed skipLeave =
+    u1TailDefun "Rt.dslTailProbeFramed" (not skipLeave)
+
+
+u1TailDefun : String -> Bool -> Defun
+u1TailDefun key withLeave =
+    let
+        tailExp =
+            Unsafe
+                (RawTailCall
+                    { target = TailKey "Rt.apply"
+                    , args = [ Lit (LNumber 0), Lit (LNumber 1), Lit (LNumber 2) ]
+                    , shape = "val"
+                    }
+                )
+    in
+    { key = key
+    , value =
+        Lam
+            { -- ONE param: the lean ABI's own bound is 1..3 pointer args, so a
+              -- 0-ary `Rt.*` probe is refused before its body is walked (and
+              -- the probe is about the BODY, not the arity).
+              params = [ { id = 0, name = "x" } ]
+            , body =
+                if withLeave then
+                    Let
+                        { binders =
+                            [ LetBind
+                                { binder = { id = 1, name = "lv" }
+                                , value = Unsafe (RawCall { sym = "Rt.frame-leave", args = [] })
+                                }
+                            ]
+                        , body = tailExp
+                        }
+                else
+                    tailExp
+            }
+    }
+
+
+{-| T6's driver: lower the FRAMED probe (`Rt.dslTailProbeFramed`, forced into
+the runtime's ALLOCATING set so its body is `RtLeanRooted` = PFrame — the
+frame class the guard is about) and hand back the emitted text of that
+function alone, or the refusal.
+
+`skipLeave = True` is the arm that must be REFUSED; `False` is the control
+that must compile.  Nothing else differs between them. -}
+u1LowerProbe : Rt.Runtime -> Bool -> Result String String
+u1LowerProbe rt skipLeave =
+    let
+        prog =
+            u1TailProbeFramed skipLeave :: driverProg rt
+
+        framed =
+            { rt | allocating = Set.insert "Rt.dslTailProbeFramed" rt.allocating }
+    in
+    case QbeLower.lower framed False False False True True True True False False True QbeTypes.empty (rtArities prog) prog "Rt.dslTailProbeFramed" of
+        Err e ->
+            Err e
+
+        Ok mod ->
+            case funcByName "q_Rt_x2edslTailProbeFramed" mod of
+                Just f ->
+                    Ok (Print.print { layout = RtLayout.valLayout, types = [], datas = [], funcs = [ f ] })
+
+                Nothing ->
+                    Err "u1LowerProbe: the probe function was not emitted"

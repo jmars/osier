@@ -50,7 +50,7 @@ module Mid.Audit exposing (run)
 -- program unchanged on Ok, so a green audit is byte-identity-preserving —
 -- this step's whole oracle.
 
-import Mid.Ir exposing (Defun, Exp(..), FfiWidth(..), LetBinder(..), MemWidth(..), Program, UnsafeNode(..))
+import Mid.Ir exposing (Defun, Exp(..), FfiWidth(..), LetBinder(..), MemWidth(..), Program, TailTarget(..), UnsafeNode(..))
 
 
 run : Program -> Result String Program
@@ -306,6 +306,18 @@ describe node =
 
         RawCallAgg call ->
             "raw call aggregate " ++ call.shape
+
+        RawTailCall tc ->
+            "raw TAIL call "
+                ++ tc.shape
+                ++ " -> "
+                ++ (case tc.target of
+                        TailKey key ->
+                            key
+
+                        TailSym sym ->
+                            "rawsym(\"" ++ sym ++ "\")"
+                   )
 
         RawDataAddr _ ->
             "rawDataAddr (static data address)"
