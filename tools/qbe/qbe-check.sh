@@ -3366,6 +3366,52 @@ else
   FAIL=1
 fi
 
+# ---- RECORD INSERTION ACROSS COLLECTIONS, ON THE VAL (DEFAULT) ARM ----
+# WHY A HEAP LADDER AND A LITERAL EXPECTATION, when the file's other rows either
+# compare the two arms or read a golden.  The defect this row pins
+# (`Rt.recAppend`'s data array, unrooted across the names array's allocation) is
+# VAL-ARM code with no word-arm twin — the word arm refuses RecordUpdate
+# outright — so there is no second representation to be the oracle, and the
+# number IS the measurement.  What makes the row fail-able is the LADDER: the
+# pre-fix fixture SEGFAULTED at QBE_HEAP_MB=1 and 2 and answered 5999 of 6000 at
+# 4 and 8, so a single default-knob run would have passed it.  MEASURED RED
+# before the fix and GREEN after, at every rung.
+run_heap_ladder() {
+  local name="$1" fixture="$2" entry="$3" want="$4"
+  local bin
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" "$entry" "$TMP/$name")" || {
+    echo "FAIL $name: qbe-mk"; FAIL=1; return
+  }
+  local mb out rc first=""
+  for mb in 1 2 4 default; do
+    if [ "$mb" = "default" ]; then
+      out="$(timeout 120 "$bin" "$entry" 2>&1)"
+    else
+      out="$(timeout 120 env QBE_HEAP_MB="$mb" "$bin" "$entry" 2>&1)"
+    fi
+    rc=$?
+    if [ "$rc" != 0 ]; then
+      echo "FAIL $name: QBE_HEAP_MB=$mb exited $rc (a crash IS the defect: an unrooted or half-filled array walked by the collector) — $out"
+      FAIL=1
+      return
+    fi
+    if [ "$out" != "$want" ]; then
+      echo "FAIL $name: QBE_HEAP_MB=$mb printed '$out', expected '$want'"
+      FAIL=1
+      return
+    fi
+    first="$out"
+  done
+  echo "PASS $name: 4 heap rungs (QBE_HEAP_MB=1/2/4/default) all exit 0 and print '$first' — record insertion survives a collection on the DEFAULT arm"
+}
+
+if [ -f "$ROOT/tools/qbe/fixtures/recinschurn.elm" ]; then
+  run_heap_ladder recins-churn "tools/qbe/fixtures/recinschurn.elm" M.main '"6000/6000/0"' 
+else
+  echo "FAIL recins-churn: tools/qbe/fixtures/recinschurn.elm is missing — the ONLY oracle that collects under record INSERTION was deleted"
+  FAIL=1
+fi
+
 # ---- THE WORD ARM'S FIXNUM BOUNDARY, EXECUTED (perf word-arm-arith) ----
 # The one place the two arms must NOT agree, so it cannot be a word-arm-diff
 # row: a word-arm fixnum is an i61, so a result at or beyond 2^60 in magnitude
