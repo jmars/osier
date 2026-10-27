@@ -37,12 +37,22 @@
 # runs `==` on RECORDS — the fixture that was UNWRITABLE until the `=` prim was
 # ported, because `Rt.recEqGo` was correct-but-unexecuted without it.
 #
-# WHAT IS STILL OUT OF REACH, and therefore still the probes' job: a first-class
-# `Lam` CLOSURE (the classifier refuses `Lam`), a VECTOR built by the surface
-# (no prim constructs one from a program), a FLOAT (area 5), and CHAR/STRING
-# ORDERING (`"a" < "b"`), which the word arm refuses BY NAME rather than
-# answering through the numeric-only `Rt.<`.  So the `vec`, `veclen` and `call`
-# probes are complements to this row, not duplicates.
+# CLOSURES ARE COVERED TOO (perf word-arm-closures): `clo.elm` holds functions as
+# VALUES — a global reached through `Rt.globalClosure` and called twice (so the
+# descriptor CACHE hit is exercised, not just the miss), a capturing lambda
+# created twice with different captures, a higher-order call whose head is a
+# `Var` (the whole generic apply chain), and an UNDER-applied closure
+# (`Rt.applyPartGo`'s three-range interleave).  That fixture is why this row is
+# the closure unit's behavioural oracle: the closure machinery was textually
+# twinned by earlier units and never EXECUTED, and running it found two real
+# defects (`Rt.globalClosure`'s twin answered a fixnum-shaped closure and wrote
+# its header eight bytes off) that every pin in the tree was green over.
+#
+# WHAT IS STILL OUT OF REACH, and therefore still the probes' job: a VECTOR
+# built by the surface (no prim constructs one from a program), a FLOAT
+# (area 5), and CHAR/STRING ORDERING (`"a" < "b"`), which the word arm refuses
+# BY NAME rather than answering through the numeric-only `Rt.<`.  So the `vec`,
+# `veclen` and `call` probes are complements to this row, not duplicates.
 #
 # WHAT IT DOES.  For each fixture: compile the same source TWICE — once on the
 # val arm (`QBE_ENTRY=M.main node run.js`) and once with `QBE_VALREP=word` —

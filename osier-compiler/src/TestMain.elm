@@ -189,7 +189,6 @@ checks rt rawMidText =
                     , Con { tag = "Just", args = [ Lit (LNumber 1) ] }
                     , RecordGet (Var 0) "x"
                     , RecordUpdate { base = Var 0, updates = [ ( "x", Lit (LNumber 1) ) ] }
-                    , Lam { params = [], body = Lit (LNumber 1) }
                     , GRef { key = "M.f", force = False }
                     , StreamRef { varName = "*stoutput*" }
                     , Lit (LFloat 1.5)
@@ -281,7 +280,23 @@ checks rt rawMidText =
             && QbeLower.wordArmUnported (NotEqual { left = Lit (LNumber 5), right = PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }, falseLabel = "nef", endLabel = "nee" }) == Nothing
             && (QbeLower.wordArmUnported (NotEqual { left = Lit (LNumber 5), right = RecordGet (Var 0) "x", falseLabel = "nef", endLabel = "nee" }) /= Nothing)
             && (QbeLower.wordArmUnported (NotEqual { left = Lit (LFloat 1.5), right = Lit (LNumber 3), falseLabel = "nef", endLabel = "nee" }) /= Nothing)
-            -- and the refused set is exactly NINE named constructs: a
+            -- ============ CLOSURES (perf word-arm-closures) ============
+            -- `Lam` LEFT the refused set: a closure is created by
+            -- `lowerClosure` (contiguous capture staging in rooted frame slots
+            -- + `Rt.closure(desc, capBase, K)`, both arm-derived) and applied
+            -- through the generic apply chain, whose staging strides are the
+            -- same commit.
+            -- BOTH DIRECTIONS, as everywhere: the construct is admitted, and a
+            -- `Lam` whose BODY carries a construct this arm cannot express
+            -- still refuses — the classifier recurses into the body, so "the
+            -- closure is ported" can never be mistaken for "anything inside a
+            -- closure is".
+            && QbeLower.wordArmUnported (Lam { params = [], body = Lit (LNumber 1) }) == Nothing
+            && QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = Var 0 }) == Nothing
+            && QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = PrimApp { prim = "+", args = [ Var 0, Lit (LNumber 1) ] } }) == Nothing
+            && (QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = PrimApp { prim = "f/", args = [ Var 0, Lit (LNumber 2) ] } }) /= Nothing)
+            && (QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = RecordGet (Var 0) "f" }) /= Nothing)
+            -- and the refused set is exactly EIGHT named constructs: a
             -- classifier that admitted any of them would be silently wrong
             -- (each emits the 40-byte representation or a layout the arm has
             -- not decided).  The count is part of the row because a future
@@ -299,7 +314,13 @@ checks rt rawMidText =
             -- direction that still matters — a construct re-admitted without
             -- its port — so it moves with the port and the per-prim list above
             -- carries the positive half.
-            && List.length refused == 9
+            --
+            -- NINE -> EIGHT (perf word-arm-closures): `Lam` left.  `GRef` is
+            -- still refused here ON PURPOSE — it is the next commit of the
+            -- same unit, and a closure whose body reaches a global reference
+            -- refuses through the BODY recursion above until then, so the
+            -- intermediate state is loud rather than half-working.
+            && List.length refused == 8
             -- ... and the construct that LEFT the refused set (perf
             -- word-arm-records R1): a SYMBOL LITERAL is now admitted, because
             -- its cell is ported (code 2, a raw body `[byte pointer, length]`

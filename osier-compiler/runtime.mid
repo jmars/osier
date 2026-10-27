@@ -5373,15 +5373,16 @@ defun Rt.kindHdr(kind : val, cls : val) -> val {
 // in each case a twin here would be WRONG rather than merely absent — plus one
 // thing that LOOKS like a stride and is not:
 //
-//  1. THE CALL STAGING (`Rt.apply`, `Rt.applyTailGo`, `Rt.stage-apply`):
-//     `buf + 40k`, `args + rem * 40` and the
-//     `copyWords(.., rem * 5)` blits move one 40-byte Value per argument.  That
-//     is the CALLING CONVENTION, not a data stride: MEASURED at VR3b2, a
-//     `:val` parameter arrives IN A REGISTER at 8 bytes and BY VALUE ON THE
-//     STACK at 40, so the argument ABI and the staging buffer must flip
-//     TOGETHER — VR3b2's App area owns the ABI, VR3d owns the flip.  A twin
-//     here would change how a call is MADE while the callee still expects the
-//     old shape.
+//  1. ~~THE CALL STAGING~~ — PORTED (perf word-arm-closures).  This entry said
+//     the staging buffers (`Rt.stage-apply`'s block, `args + rem * 40`, the
+//     `copyWords(.., rem * 5)` blits) could not be twinned until the argument
+//     ABI flipped, and that VR3d owned the flip.  MEASURED: the ABI half was
+//     ALREADY done — `rt_callN`/`rt_call2r` load each pointer and pass the word
+//     (VR3b2), `RtGeneric`'s prologue stores the incoming word
+//     (`paramWords`), and the closure ENTRY already reads captures at
+//     `valSizeBytes * j`.  So the staging was the whole of what was left, and
+//     a closure could not RUN without it; there is no VR3d, and this unit took
+//     it.  The flip is five sites and one shape guard, each twinned in place.
 //  2. THE EXEC-PLAN / EFFECT-HOST BLOB (`Rt.hostInit`'s
 //     `8 + (33031 * 40) + ...` and every `h + 8 + base * 40`): the slot array's
 //     stride is `sizeof(val)` AS THE .mid FRONT END COMPUTES IT, and
@@ -7174,9 +7175,22 @@ defun Rt.closureFill(data : val, capBase : val, idx : val) -> val {
 // payload32, i.e. the low half, and a top-level defun's ncaps is 0.
 defun Rt.globalClosure(desc : word) -> val {
   word cache = wload(desc, 2);
+  // >>> QBE_VAL-ONLY
   if (cache != 0) {
     return vecload(cache, 0);
   }
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // THE CACHE HOLDS THE BODY, NOT A CELL (perf word-arm-closures).  On the val
+  // arm `cache` is the address of a 40-byte Value, so the hit is a vecload; here
+  // it is the closure's BODY address (see the store below), so the hit rebuilds
+  // the Value from it with the same `mkval(6, body)` the miss path returns.  A
+  // `vecload(cache, 0)` left here would answer the descriptor address — body
+  // word 0 — as the closure.
+  if (cache != 0) {
+    return mkval(6, cache);
+  }
+  // <<< QBE_WORDVAL-ONLY
   // >>> QBE_VAL-ONLY
   word slot = rawcall malloc(40);
   wstore(slot, 0, 6);
@@ -7199,15 +7213,41 @@ defun Rt.globalClosure(desc : word) -> val {
   // capture array TAGGED — 1 here, i.e. the tag alone, since a global closure
   // has no captures and `payload(f, 2) - 1` must be 0 so the missing-env die
   // keeps its meaning.
+  //
+  // THE HEADER SITS AT THE BLOCK'S FIRST TWO WORDS AND THE BODY AT THE THIRD
+  // (perf word-arm-closures, MEASURED).  This read `wstore(slot, -2, ...)` /
+  // `wstore(slot, -1, ...)` with the four fields at `slot + 0..3` and the body
+  // at `slot + 1` — i.e. the header was written EIGHT BYTES BEFORE the body
+  // while every reader (`wordKind`, `wordPayloadWord`) looks at `body - 16` and
+  // `body - 8`, so the kind read landed on the COUNT word and answered KIND
+  // CODE 0 ("this object is not a word-arm block").  It also wrote 16 bytes
+  // BELOW the malloc'd block, i.e. into the allocator's own chunk header.  The
+  // offset is now stated once: `slot` is the base, the header is `slot + 0` /
+  // `slot + 1`, the four fields are `slot + 2 .. slot + 5`, and the body is
+  // `slot + 16` bytes in — the same `[kind | count | fields]` shape the
+  // allocator writes, so a reader cannot tell this block from a GC one by
+  // layout (only by range, which is the point).
   word slot = rawcall malloc(48);
-  wstore(slot, -2, payload(call Rt.kindHdr(mknum(6), mknum(5)), 0));
-  wstore(slot, -1, 4);
-  wstore(slot, 0, desc);
-  wstore(slot, 1, wload(desc, 1));
-  wstore(slot, 2, 1);
-  wstore(slot, 3, 0);
-  wstore(desc, 2, slot + 1);
-  return mknum(slot + 1);
+  wstore(slot, 0, payload(call Rt.kindHdr(mknum(6), mknum(5)), 0));
+  wstore(slot, 1, 4);
+  wstore(slot, 2, desc);
+  wstore(slot, 3, wload(desc, 1));
+  wstore(slot, 4, 1);
+  wstore(slot, 5, 0);
+  wstore(desc, 2, slot + 16);
+  // THE VALUE IS A HEAP OBJECT, NOT A NUMBER (perf word-arm-closures, MEASURED).
+  // This line read `return mknum(slot + 1)` and that is a FIXNUM-SHAPED word:
+  // `mknum` shifts the pointer up into the tag's free bits, so the low three
+  // bits are 000 and every reader of a closure — `tagis(f, 6)`, `payload(f, 0)`,
+  // `payload32(f, 1)` — takes the fixnum arm and REFUSES ("i32 field read on a
+  // word that is not a heap object").  The cell's two sibling twins
+  // (`Rt.closure`, `Rt.applyPartGo`) already answer `mkval(6, body)`; this one
+  // is the C-heap special case and the C-heap-ness is about the block never
+  // being MOVED (it is outside [heapStart, cursor), so the collector's range
+  // tests treat it as "not mine"), not about how the Value is tagged.  The
+  // defect was invisible until this unit: nothing on the word arm could hold a
+  // first-class closure, so the twin was correct-by-unexecuted.
+  return mkval(6, slot + 16);
   // <<< QBE_WORDVAL-ONLY
 }
 
@@ -8251,14 +8291,34 @@ defun Rt.apply(fslot : word, args : word, nargs : word) -> val {
 // saturated arm `tcall`s and never returns, so a free here would never run.
 // The 8 bytes BEFORE `buf` hold the provenance canary (see the guard).
 defun Rt.stage-apply(fslot : word, argblock : word, nargs : word) -> word {
+  // >>> QBE_VAL-ONLY
   word blk = rawcall malloc(8 + (nargs + 1) * 40);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // THE STAGED BLOCK'S STRIDE IS THE VALUE STRIDE (perf word-arm-closures).
+  // The block's shape is the same on both arms — `[closure, arg0 .. argN]` —
+  // and only the CELL WIDTH moves: one word per cell, so one word for the
+  // closure cell and `nargs` for the args.  The 8-byte canary is a RAW word
+  // below the block and does not move.  A block still sized `* 40` here would
+  // over-allocate and then copy 5 words per cell, i.e. read 32 bytes past the
+  // caller's arg block and write garbage into the staged one — the loud
+  // `Rt.apply-tail` shape guard is what catches the mismatch, which is why it
+  // is twinned in the same commit.
+  word blk = rawcall malloc(8 + (nargs + 1) * 8);
+  // <<< QBE_WORDVAL-ONLY
   // THE PROVENANCE CANARY (U3a): 0x56414c4c, "VALL" — the 8 bytes BEFORE the
   // block Rt.apply-tail is handed.  See the guard there for what it proves and
   // why `args == fslot + 40` could not.
   wstore(blk, 0, 1447119948);
   word buf = blk + 8;
+  // >>> QBE_VAL-ONLY
   call Rt.copyWords(buf, fslot, 5);
   call Rt.copyWords(buf + 40, argblock, nargs * 5);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  call Rt.copyWords(buf, fslot, 1);
+  call Rt.copyWords(buf + 8, argblock, nargs);
+  // <<< QBE_WORDVAL-ONLY
   return buf;
 }
 defun Rt.apply-tail(fslot : word, args : word, nargs : word) -> val {
@@ -8271,10 +8331,23 @@ defun Rt.apply-tail(fslot : word, args : word, nargs : word) -> val {
   // LOUD error naming the shape — because the silent failure of getting it
   // wrong is a rooting gap (a range of `nargs` from the block would drop the
   // LAST ARG from the scan), not a crash.
+  // >>> QBE_VAL-ONLY
   if (args != fslot + 40) {
     call Rt.die(rawstr("qbe-rt: Rt.apply-tail: args must be the staged block + 40 (Rt.stage-apply shape) - the pre-U2 (fslot, frame-args) convention is gone"));
     return mknil;
   }
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // THE SHAPE GUARD'S CELL WIDTH IS THE VALUE STRIDE (perf word-arm-closures).
+  // `fslot` is `Rt.stage-apply`'s block, whose cells are one word here, so the
+  // args range starts at `fslot + 8` — the caller (Lower's `rtApply`) derives
+  // the same address from `s.layout.valSizeBytes`, and a guard left at `+ 40`
+  // would refuse a well-formed call, which is how this was found.
+  if (args != fslot + 8) {
+    call Rt.die(rawstr("qbe-rt: Rt.apply-tail: args must be the staged block + 8 (Rt.stage-apply's word-arm shape) - the pre-U2 (fslot, frame-args) convention is gone"));
+    return mknil;
+  }
+  // <<< QBE_WORDVAL-ONLY
   // THE PROVENANCE GUARD (U3a review trap 3).  `args == fslot + 40` is TOTAL
   // for what a CALLEE can see — it pins the SHAPE — but it says nothing about
   // where `fslot` came from: a caller that passed `buf` of a GC block with the
@@ -8288,7 +8361,14 @@ defun Rt.apply-tail(fslot : word, args : word, nargs : word) -> val {
     return mknil;
   }
   *ApplyState state = rawcall malloc(32);
+  // >>> QBE_VAL-ONLY
   state->args = fslot + 40;
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // The args range starts one CELL past the block base, and a cell is one word
+  // here — the same address the shape guard above compares against.
+  state->args = fslot + 8;
+  // <<< QBE_WORDVAL-ONLY
   state->nargs = nargs;
   // U2: the registration roots the WHOLE staged block — cell 0 (the closure)
   // as well as the args — because the base is now the block, not the args
@@ -8358,7 +8438,17 @@ defun Rt.applyGo(state : val, f : val) -> val {
       } else {
         word r = aggcall val rawsym("rt_call2r")(fn, env, napp, args, rem);
         val res = vecload(r, 0);
+        // >>> QBE_VAL-ONLY
         sp->args = args + rem * 40;
+        // <<< QBE_VAL-ONLY
+        // >>> QBE_WORDVAL-ONLY
+        // THE CONSUMED-ARGS ADVANCE IS A CELL COUNT TIMES THE VALUE STRIDE
+        // (perf word-arm-closures): `args` walks the caller's contiguous arg
+        // block, whose cells are one word on this arm.  Left at 40 the loop
+        // would step FIVE CELLS PER CONSUMED ARG and hand `rt_call2r` a
+        // pointer past the end of the block.
+        sp->args = args + rem * 8;
+        // <<< QBE_WORDVAL-ONLY
         sp->nargs = nargs - rem;
         recur(mknum(sp), res);
       }
@@ -8454,7 +8544,15 @@ defun Rt.applyTailGo(state : word, fslot : word) -> val {
       } else {
         return mknil;
       };
+      // >>> QBE_VAL-ONLY
       call Rt.copyWords(abuf, args, rem * 5);
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      // ONE WORD PER ARG (perf word-arm-closures): `abuf` is `allocvec(rem)`,
+      // which is a code-10 block of `rem` WORDS here, and the staged block it
+      // copies from has the same cell width.
+      call Rt.copyWords(abuf, args, rem);
+      // <<< QBE_WORDVAL-ONLY
       call Rt.rootPop();
       // ...the DANCE-pop above, and the ARGS-pop here.  This second pop is the
       // one Rt.apply-tail pushed; it must follow the copy (the registration is
@@ -8500,8 +8598,18 @@ defun Rt.applyTailGo(state : word, fslot : word) -> val {
         // NOTHING IS FREED HERE — the state and the staged block span the whole
         // chain by design; only the two terminating arms free them.
         word r = aggcall val rawsym("rt_call2r")(fn, env, napp, args, rem);
+        // >>> QBE_VAL-ONLY
         call Rt.copyWords(fslot, r, 5);
         sp->args = args + rem * 40;
+        // <<< QBE_VAL-ONLY
+        // >>> QBE_WORDVAL-ONLY
+        // THE NEXT CLOSURE IS ONE CELL, AND SO IS A CONSUMED ARG (perf
+        // word-arm-closures).  `r` is a `:val`, i.e. a pointer to ONE 8-byte
+        // word here, so cell 0 of the staged block is one word; and the args
+        // advance is the same stride `Rt.applyGo`'s over-applied arm takes.
+        call Rt.copyWords(fslot, r, 1);
+        sp->args = args + rem * 8;
+        // <<< QBE_WORDVAL-ONLY
         sp->nargs = nargs - rem;
         tailcall val Rt.applyTailGo(state, fslot);
       }
@@ -8549,9 +8657,23 @@ defun Rt.applyPartGo(state : val, f : val) -> val {
   call Rt.rootPushPtr([word](sp) + 24);
   word envv = allocvec(total);
   word env2 = sp->env;
+  // >>> QBE_VAL-ONLY
   call Rt.copyWords(envv, env2, napp * 5);
   call Rt.copyWords(envv + napp * 40, args, nargs * 5);
   call Rt.copyWords(envv + (napp + nargs) * 40, env2 + napp * 40, capslen * 5);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // THE INTERLEAVE IS THE SAME THREE RANGES WITH A ONE-WORD CELL (perf
+  // word-arm-closures).  `envv` is `allocvec(total)`, i.e. a code-10 block of
+  // `total` WORDS here, so each range's LENGTH is its cell count (the val
+  // arm's `* 5`) and each range's OFFSET is a cell count times 8 (the val
+  // arm's `* 40`).  A mixed spelling — a word LENGTH with a 40-byte OFFSET —
+  // writes each range over the previous one: the captures would overwrite the
+  // applied args, which the closure then reads as params.
+  call Rt.copyWords(envv, env2, napp);
+  call Rt.copyWords(envv + napp * 8, args, nargs);
+  call Rt.copyWords(envv + (napp + nargs) * 8, env2 + napp * 8, capslen);
+  // <<< QBE_WORDVAL-ONLY
   call Rt.rootPop();
   // >>> QBE_VAL-ONLY
   return mkval(6, code, rem - nargs, envv, total);
@@ -8559,11 +8681,13 @@ defun Rt.applyPartGo(state : val, f : val) -> val {
   // >>> QBE_WORDVAL-ONLY
   // THE PARTIAL APPLICATION'S CELL (perf word-arm-area3rt): the same four
   // fields as Rt.closure's twin, with the freshly built capture block TAGGED in
-  // field 2.  NOTE WHAT IS *NOT* PORTED HERE: the three `copyWords` calls above
-  // stage one 40-byte Value per argument (`napp * 5`, `* 40`) — that is the CALL
-  // STAGING, which must flip together with the argument ABI and is VR3d's
-  // (VR3c's frontier item 1).  This twin makes the closure CELL correct; a
-  // partial application's staged arguments are the flip's.
+  // field 2.  THE THREE `copyWords` CALLS ABOVE ARE TWINNED TOO (perf
+  // word-arm-closures): they were the CALL STAGING, which this twin used to
+  // leave to "VR3d" — and a partial application is exactly the shape that
+  // cannot work without them, since the interleave is what puts the applied
+  // captures in front of the applied args.  `envv` is `allocvec(total)`, i.e.
+  // a code-10 block of `total` WORDS on this arm, so both the lengths and the
+  // offsets move together.
   word body = vecbody(call Rt.allocKind(mknum(6), mknum(4)));
   wstore(body, 0, code);
   wstore(body, 1, rem - nargs);

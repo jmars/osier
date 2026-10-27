@@ -802,12 +802,34 @@ valLayout =
 --   6. THE `:ret` AGGREGATE.  Its FIRST FIELD IS A VALUE, so its tail offsets
 --      move with `valSizeBytes` (they are DERIVED below); plus the 80-byte sret
 --      path, slot 1's `.tail` metadata and rt_bounce.
---   7. THE Rt SURFACE (`runtime.mid` — VR3c's, single-writer, NOT this unit):
---      gcAlloc's `2 + count + 4*count*kind` sizing, apply's `args + rem*40`,
---      gcScav/copyWordsGo, the values-table builder AND walk, argv install, and
---      the printer internals (mknum/payload/tagis).  REFUSED WHOLESALE under
---      the word arm by Lower's area-7 gate — a program whose emitted set
---      contains any Rt key stops there, which today is every real program.
+--   7. THE Rt SURFACE (`runtime.mid`).  PARTLY PORTED.  The blanket area-7
+--      refusal this entry used to describe is GONE (perf VR3b3 replaced it with
+--      a per-defun pre-walk: `wordRtUnported` names the DEFUN and the CONSTRUCT
+--      the arm stops at), so the entry's job is now to say which strides are
+--      twinned and which are not.
+--      PORTED: gcAlloc's `2 + count + 4*count*kind` sizing (the word arm's
+--      `2 + count`), the six header writers, gcPromoteAlloc, gcScav/
+--      gcScavValueArray/copyWordsGo, the values-table builder and walk, the
+--      allocation seats (`allocKind`/`allocCons`/`allocSym`), the closure CELL
+--      (`Rt.closure`, `Rt.applyPartGo`'s cell), and — perf word-arm-closures —
+--      `Rt.globalClosure`'s CELL — the per-descriptor closure cache — which
+--      had never been EXECUTED and was measurably wrong (it answered a
+--      fixnum-shaped closure and wrote its header eight bytes off).  It is
+--      reachable WITHOUT the `GRef` construct: `lowerApp` materialises a global
+--      closure for any UNDER-APPLIED global head, and `App` is admitted.
+--      THE CALL STAGING (perf word-arm-closures): `Rt.stage-apply`'s block,
+--      `Rt.apply-tail`'s shape guard and `state->args`,
+--      `Rt.applyGo`/`Rt.applyTailGo`'s `args + rem*40`, and
+--      `Rt.applyPartGo`'s three-range interleave.  That group is the one
+--      VR3c's frontier note called "VR3d's"; there is no VR3d, and closures
+--      cannot RUN without it, so this unit took it.
+--      NOT PORTED: the ARGV INSTALL (`Rt.parseArgsGo`'s `bufW + j*40` and the
+--      entry-arg buffer `Rt.main` sizes), which is a separate lane and is
+--      reached-but-unexercised today (a word-arm program with arguments);
+--      the EXEC-PLAN / EFFECT-HOST blob (its stride is `sizeof(val)` as the
+--      .mid front end computes it, i.e. 40 under ANY knob — see the frontier
+--      note at `Rt.kindHdr`); and the printer internals where they read a
+--      payload without the layout-derived accessors.
 --   8. THE C FFI GLUE.  The tag/untag at the boundary — a fixnum's payload IS
 --      the C i64 after untag, and Values never cross raw (the extern
 --      declarations already encode C widths, so nothing there moves).
@@ -831,12 +853,25 @@ valLayout =
 --      `Rt.allocSym` (code 2) and never from the string seat (code 1) — a
 --      symbol indistinguishable from a string is the mixed-representation read
 --      this arm exists to prevent.
+--      `Lam` IS PORTED (perf word-arm-closures): an inner lambda is
+--      `lowerClosure` — contiguous capture staging in ROOTED frame slots, the
+--      closure's own QBE function through `lowerFunBody ... RtGeneric`, one
+--      `Rt.closure(desc, capBase, K)`.  The emitter needed NO change: the only
+--      thing the two arms disagree about is the closure's ENV ARRAY, and both
+--      halves of it already spell their stride as `valSizeBytes` (`captureBlits`
+--      writes the staging block, `capBlitsPro` reads it).  The RUNTIME did: the
+--      closure CELL was twinned (Rt.closure / Rt.applyPartGo) but the CALL
+--      STAGING was not (`Rt.stage-apply`'s block, `Rt.apply-tail`'s `+40` shape
+--      guard, `Rt.applyGo`/`Rt.applyTailGo`'s `args + rem*40`,
+--      `Rt.applyPartGo`'s three-range interleave).  See item 7's correction.
 --      NOT PORTED, each refused by name:
 --      `Con` (its vector is written through `storeValueCell`), the RECORD
 --      family (`RecordLit`/`RecordGet`/`RecordUpdate`, and a `VField` pattern
 --      bind — its second parallel NAMES array has no inline body layout, which
---      is a design decision, not a stride), `Lam`,
---      `GRef`, `StreamRef`, float literals, let-destructuring, `MTagEq`
+--      is a design decision, not a stride),
+--      `GRef` (the NEXT commit of this unit: `lowerGRefValue`'s
+--      `Rt.globalClosure(desc)`, whose word-arm twin had never been executed),
+--      `StreamRef`, float literals, let-destructuring, `MTagEq`
 --      (a constructor-tag pattern — it materialises the tag as a `symbol`,
 --      which is now ported, so what remains there is the tag-EQUALITY half),
 --      and `f/` (the float division, AREA 5 — `isFloatExp` also denies here,

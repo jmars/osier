@@ -973,6 +973,24 @@ wordArmUnported exp =
                 Nothing ->
                     wordArmUnportedArgs app.args
 
+        Lam lambda ->
+            -- An INNER lambda is `lowerClosure`: contiguous capture staging in
+            -- ROOTED frame slots (the slot stride is the instance's), the
+            -- closure's own QBE function through `lowerFunBody ... RtGeneric`
+            -- (whose prologue blits params and captures at `valSizeBytes`
+            -- strides), and one `Rt.closure(desc, capBase, K)` call.  What the
+            -- three boxed arguments carry is a RAW POINTER (`desc`, `capBase`)
+            -- or a count, and a raw pointer crossing as a number IS the
+            -- established `mknum(ptr)` wrap — the runtime reads it back with
+            -- `payload(·, 0)`, which is `sar 3` on this arm, the exact inverse
+            -- of `storeWordCell`'s `shl 3`.
+            --
+            -- The recursion is over the BODY, for the reason every other
+            -- compound construct recurses: the closure's body is lowered into
+            -- the same module, so a construct this arm cannot express must be
+            -- named HERE rather than discovered at its emit.
+            wordArmUnported lambda.body
+
         ListLit es ->
             -- ============ THE SURFACE LANE: A LIST LITERAL ============
             -- `lowerListLit` is `lowerVal (buildList es)` — a list literal has
@@ -1388,9 +1406,6 @@ wordAreaName exp =
         ListLit _ ->
             "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
 
-        Lam _ ->
-            "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
-
         GRef _ ->
             "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
 
@@ -1495,9 +1510,6 @@ wordAreaWhat exp =
 
         ListLit _ ->
             "a list literal — a cons chain of heap objects"
-
-        Lam _ ->
-            "a closure — a heap object under the word arm"
 
         GRef _ ->
             "a global reference — it materialises a closure or descriptor Value"
