@@ -1456,16 +1456,37 @@ checks rt rawMidText =
     , check "rt RawCallAgg classification: a defun containing one is a DIRECT safepoint (allocating — the callee is unknown generated code)"
         (rt.direct rawCallAggProbe)
     -- PERF WORD-ARM-CLOSURES: A CLOSURE ALLOCATES, SO IT IS A SAFEPOINT.
-    -- `Mid.Rt.safepoint` classifies a `Lam` (an inner lambda — `lowerClosure`,
-    -- which calls `Rt.closure` and therefore `allocKind`) and a `GRef` (a value
-    -- position — `Rt.globalClosure`, which mallocs a cell and may run the
-    -- collector's `allocKind` on the miss path) as DIRECT safepoints.  That is
-    -- what keeps a defun holding one FRAMED (rooted) instead of frame-free:
-    -- `Liveness.frameFree` reads `not allocSite`, so a wrong `False` here would
-    -- classify such a defun frame-free and DROP ITS ROOTS — silently, and only
-    -- under a collection.  Pinned as a property, not a count, and PROVEN
-    -- FAIL-ABLE: flipping either arm of `Mid.Rt.safepoint` to `False` turns
-    -- this row RED.
+    -- `Mid.Rt.safepoint` classifies a `Lam` and a `GRef` as DIRECT safepoints.
+    -- That is what keeps a defun holding one FRAMED (rooted) instead of
+    -- frame-free: `Liveness.frameFree` reads `not allocSite`, so a wrong `False`
+    -- here would classify such a defun frame-free and DROP ITS ROOTS —
+    -- silently, and only under a collection.  Pinned as a property, not a count,
+    -- with a negative control, and PROVEN FAIL-ABLE: flipping `safepoint`'s
+    -- `Lam` arm to `False` turns this row RED.
+    --
+    -- WHY THE TWO CONSTRUCTS, STATED ACCURATELY (perf word-arm-closures FIX —
+    -- the first cut of this comment claimed `Rt.globalClosure` "may run the
+    -- collector's allocKind on the miss path", WHICH IS FALSE, review
+    -- should-fix 3):
+    --   * `Lam` is a REAL allocation: `lowerClosure` emits `Rt.closure`, whose
+    --     word twin calls `allocKind` TWICE (the capture block, then the body).
+    --   * `GRef` is NOT: `Rt.globalClosure` is `malloc(48)` + `kindHdr`
+    --     arithmetic + `wstores` + `mkval(6, ..)` — the one-word heap arm of
+    --     `storeWordCell`, which allocates nothing.  The walker answers True for
+    --     it anyway (deny-by-default for an indirect/unknown edge), and the
+    --     EMITTER therefore may — and does — answer FRAME-FREE for a defun
+    --     whose only closure cost is a global VALUE: MEASURED, `main = add`
+    --     emits `%f =l alloc8 8` (PAlloc) on the word arm, not a frame-enter,
+    --     and SOUNDLY so, because there is no safepoint in the body.
+    --
+    -- SO WHAT IS THIS ROW FOR, given the emitted classifier is the one that
+    -- decides the frame?  It pins the DSL LANE's walker, which is a different
+    -- consumer (the `.mid` runtime's own defuns), and it pins the LAM property
+    -- — the one that matters, because a closure creation really does allocate.
+    -- THE TWO CLASSIFIERS WERE COMPARED: they AGREE on the Lam path (MEASURED on
+    -- both arms — a defun whose only allocation is a closure body opens
+    -- `q_Rt.frame-enter`, never `alloc8`), and the ONE divergence is the
+    -- pure-GRef shape above, where the emitter's answer is the sound one.
     , check "rt closure classification: a defun holding a `Lam` or a `GRef` is a DIRECT safepoint (it allocates, so it must stay framed)"
         (rt.direct closureProbe
             && rt.direct gRefProbe
@@ -14407,7 +14428,10 @@ closureProbe =
     }
 
 
-{-| A defun whose body materialises a GLOBAL closure (`Rt.globalClosure`).
+{-| A defun whose body materialises a GLOBAL closure (`Rt.globalClosure`).  This
+one is NOT an allocation (see the row's comment): it is the walker's
+deny-by-default answer for an edge it does not analyse, and the emitter is free
+to — and does — classify the same body frame-free.
 -}
 gRefProbe : Defun
 gRefProbe =

@@ -7125,18 +7125,42 @@ defun Rt.closure(desc : val, capBase : val, cnt : val) -> val {
 //   * desc/arity/ncaps need no tag: a descriptor address and two small counts
 //     all have their low three bits clear, i.e. they read as fixnums to the
 //     scanner and are left alone — which is why the body is safe to scan.
+// TWO ALLOCATIONS, SO THERE IS A SAFEPOINT BETWEEN THEM, AND THE FIRST ONE'S
+// RESULT IS A RAW WORD (perf word-arm-closures FIX, review BLOCKER).  `caps` is
+// a BODY address in the young heap; the collector scans only ROOT-REACHABLE
+// objects, and nothing referenced it across the body's `allocKind` — so a
+// scavenge landing on that second allocation (gcAlloc's trigger, or a young
+// fill) FREED it, reset `youngCursor`, and the body was then allocated INTO THE
+// SAME MEMORY: `wstore(body, 2, caps + 1)` wrote a self-reference and the
+// closure's capture array read back whatever reused the block.  SILENT, and at
+// DEFAULT settings (MEASURED: 6000 surviving capturing lambdas answer 19709031
+// on this arm against the val arm's 18003000).
+//
+// THE ROOT IS `withroots`, i.e. the mechanism this file already uses for
+// exactly this shape (`Rt.cons` roots its two Values across its one
+// allocation), and it costs no malloc.  A `rootPushPtr` dance would need a
+// C-heap slot to point at, i.e. a malloc/free pair on every closure creation —
+// the hottest allocation this arm has.  What is rooted is `mkval(10, caps)`,
+// the capture block AS A VALUE: the scavenge relocates a `...001` word and
+// re-tags it in place (`Rt.gcScavValue`'s word arm), so `vecbody(capsV)` after
+// the block IS the moved body.  NOTE THE RE-READ IS LOAD-BEARING — the whole
+// point of a root is that the address may CHANGE, so the old `caps` word is
+// dead from the moment the second allocation can collect.
 defun Rt.closure(desc : val, capBase : val, cnt : val) -> val {
   word cntW = payload(cnt, 0);
-  word caps = vecbody(call Rt.allocKind(mknum(10), mknum(cntW)));
-  call Rt.closureFill(mknum(caps), capBase, mknum(cntW));
-  word descW = payload(desc, 0);
-  word arityW = wload(descW, 1);
-  word body = vecbody(call Rt.allocKind(mknum(6), mknum(4)));
-  wstore(body, 0, descW);
-  wstore(body, 1, arityW);
-  wstore(body, 2, caps + 1);
-  wstore(body, 3, cntW);
-  return mkval(6, body);
+  val capsV = mkval(10, vecbody(call Rt.allocKind(mknum(10), mknum(cntW))));
+  return withroots [capsV] {
+    call Rt.closureFill(mknum(vecbody(capsV)), capBase, mknum(cntW));
+    word descW = payload(desc, 0);
+    word arityW = wload(descW, 1);
+    word body = vecbody(call Rt.allocKind(mknum(6), mknum(4)));
+    word caps = vecbody(capsV);
+    wstore(body, 0, descW);
+    wstore(body, 1, arityW);
+    wstore(body, 2, caps + 1);
+    wstore(body, 3, cntW);
+    return mkval(6, body);
+  };
 }
 // <<< QBE_WORDVAL-ONLY
 
@@ -8661,6 +8685,8 @@ defun Rt.applyPartGo(state : val, f : val) -> val {
   call Rt.copyWords(envv, env2, napp * 5);
   call Rt.copyWords(envv + napp * 40, args, nargs * 5);
   call Rt.copyWords(envv + (napp + nargs) * 40, env2 + napp * 40, capslen * 5);
+  call Rt.rootPop();
+  return mkval(6, code, rem - nargs, envv, total);
   // <<< QBE_VAL-ONLY
   // >>> QBE_WORDVAL-ONLY
   // THE INTERLEAVE IS THE SAME THREE RANGES WITH A ONE-WORD CELL (perf
@@ -8673,25 +8699,36 @@ defun Rt.applyPartGo(state : val, f : val) -> val {
   call Rt.copyWords(envv, env2, napp);
   call Rt.copyWords(envv + napp * 8, args, nargs);
   call Rt.copyWords(envv + (napp + nargs) * 8, env2 + napp * 8, capslen);
-  // <<< QBE_WORDVAL-ONLY
+  // THE BODY'S ALLOCATION IS A SAFEPOINT AND `envv` IS A RAW WORD (perf
+  // word-arm-closures FIX, review BLOCKER).  The val arm has NO second
+  // allocation here — `mkval(6, ..)` only writes a 40-byte record — so this
+  // window does not exist on that arm; on this arm `allocKind(6, 4)` can
+  // scavenge, and `envv` was referenced by nothing, so the capture block was
+  // FREED and its memory handed straight to the body: `envv + 1` then named
+  // the body itself.  SILENT, at default settings (MEASURED: 6000 surviving
+  // partials answer 20363304 against the val arm's 18633000).
+  //
+  // THE ROOT IS THE SLOT THIS DEFUN ALREADY PUSHED — `sp->env` — so the two
+  // allocations are rooted the SAME way and there is no second mechanism to
+  // keep in step: the slot is re-pointed at the NEW block (the old captures it
+  // held are dead from here; the copies above are done) and the alloc happens
+  // INSIDE the same rootPushPtr window, whose `rootPop` therefore moves two
+  // lines down.  RE-READING `sp->env` after the alloc is the point: the
+  // scavenge rewrites that word in place, so `envv` itself may be stale.
+  sp->env = envv;
+  word body = vecbody(call Rt.allocKind(mknum(6), mknum(4)));
+  word envv2 = sp->env;
   call Rt.rootPop();
-  // >>> QBE_VAL-ONLY
-  return mkval(6, code, rem - nargs, envv, total);
-  // <<< QBE_VAL-ONLY
-  // >>> QBE_WORDVAL-ONLY
   // THE PARTIAL APPLICATION'S CELL (perf word-arm-area3rt): the same four
   // fields as Rt.closure's twin, with the freshly built capture block TAGGED in
   // field 2.  THE THREE `copyWords` CALLS ABOVE ARE TWINNED TOO (perf
   // word-arm-closures): they were the CALL STAGING, which this twin used to
   // leave to "VR3d" — and a partial application is exactly the shape that
   // cannot work without them, since the interleave is what puts the applied
-  // captures in front of the applied args.  `envv` is `allocvec(total)`, i.e.
-  // a code-10 block of `total` WORDS on this arm, so both the lengths and the
-  // offsets move together.
-  word body = vecbody(call Rt.allocKind(mknum(6), mknum(4)));
+  // captures in front of the applied args.
   wstore(body, 0, code);
   wstore(body, 1, rem - nargs);
-  wstore(body, 2, envv + 1);
+  wstore(body, 2, envv2 + 1);
   wstore(body, 3, total);
   return mkval(6, body);
   // <<< QBE_WORDVAL-ONLY

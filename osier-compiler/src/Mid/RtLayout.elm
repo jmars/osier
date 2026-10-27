@@ -822,6 +822,23 @@ valLayout =
 --      `args + rem*40`, and `Rt.applyPartGo`'s three-range interleave.  That
 --      last group is the one VR3c's frontier note called "VR3d's"; there is no
 --      VR3d, and closures cannot RUN without it, so this unit took it.
+--      ALSO FOUND, AND DELIBERATELY NOT FIXED HERE (records lane): a SECOND
+--      instance of the same ROOTING shape perf word-arm-closures fixed twice in
+--      the closure path — an allocation held in a RAW WORD across a later
+--      allocation.  `Rt.recAppend` does `word nd = allocvec(reclen(rec) + 1)`
+--      and then `word nn = allocvec(reclen(rec) + 1)`, and `nd` is used after
+--      that second allocvec (`Rt.recAppendDataGo` writes into it, and the final
+--      `mkval(14, ..)` names it).  NO WORD SPLICE IS INVOLVED: this is the
+--      VAL arm's own code, so it is a val-arm defect too, and it is
+--      REACHED today through record-append (the word arm still refuses
+--      RecordUpdate).  NOT MEASURED — the reviewer marked it INTERPRETATION
+--      from source, and the qbe-check churn rows never allocate enough to cross
+--      a trigger — so the FIRST thing the records unit owes it is a COLLECTING
+--      fixture (the shape of tools/qbe/word-arm-gcchurn/hold.elm), not a patch.
+--      The reason it is not fixed here: it is a different construct family, its
+--      fix changes VAL-ARM emit (which this unit's corpus-identity constraint
+--      forbids), and the two closure sites had to be proved with a churn row
+--      before anything else in the class could be touched.
 --      NOT PORTED: the ARGV INSTALL (`Rt.parseArgsGo`'s `bufW + j*40` and the
 --      entry-arg buffer `Rt.main` sizes), which is a separate lane and is
 --      reached-but-unexercised today (a word-arm program with arguments);
