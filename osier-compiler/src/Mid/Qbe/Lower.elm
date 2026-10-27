@@ -973,6 +973,22 @@ wordArmUnported exp =
                 Nothing ->
                     wordArmUnportedArgs app.args
 
+        GRef _ ->
+            -- ============ CLOSURES (perf word-arm-closures) ============
+            -- A `GRef` in a VALUE position is `lowerGRefValue`, and its whole
+            -- emission is one call to `Rt.globalClosure(desc)` whose argument
+            -- is the descriptor's ADDRESS as a raw `l` word and whose result
+            -- is the module's `:val` class.  Both are arm-independent, and the
+            -- runtime half is now genuinely EXECUTED: the seat's word twin
+            -- builds a 2-word header plus a 4-word body at `mkval(6, body)`,
+            -- caches the BODY at `desc + 16`, and rebuilds the Value on the
+            -- cache hit.  That cell is C-heap — outside [heapStart, cursor) —
+            -- so the collector's range tests treat it as "not mine" and it is
+            -- never moved; the tagging is the same `...001` every heap object
+            -- carries.  The FORCED shape is a plain direct call, i.e. AREA 6's
+            -- own path.
+            Nothing
+
         Lam lambda ->
             -- An INNER lambda is `lowerClosure`: contiguous capture staging in
             -- ROOTED frame slots (the slot stride is the instance's), the
@@ -1406,9 +1422,6 @@ wordAreaName exp =
         ListLit _ ->
             "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
 
-        GRef _ ->
-            "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
-
         StreamRef _ ->
             "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
 
@@ -1510,9 +1523,6 @@ wordAreaWhat exp =
 
         ListLit _ ->
             "a list literal — a cons chain of heap objects"
-
-        GRef _ ->
-            "a global reference — it materialises a closure or descriptor Value"
 
         StreamRef _ ->
             "a stream reference — it materialises a symbol Value"

@@ -817,12 +817,11 @@ valLayout =
 --      fixnum-shaped closure and wrote its header eight bytes off).  It is
 --      reachable WITHOUT the `GRef` construct: `lowerApp` materialises a global
 --      closure for any UNDER-APPLIED global head, and `App` is admitted.
---      THE CALL STAGING (perf word-arm-closures): `Rt.stage-apply`'s block,
---      `Rt.apply-tail`'s shape guard and `state->args`,
---      `Rt.applyGo`/`Rt.applyTailGo`'s `args + rem*40`, and
---      `Rt.applyPartGo`'s three-range interleave.  That group is the one
---      VR3c's frontier note called "VR3d's"; there is no VR3d, and closures
---      cannot RUN without it, so this unit took it.
+--      THE CALL STAGING: `Rt.stage-apply`'s block, `Rt.apply-tail`'s shape
+--      guard and `state->args`, `Rt.applyGo`/`Rt.applyTailGo`'s
+--      `args + rem*40`, and `Rt.applyPartGo`'s three-range interleave.  That
+--      last group is the one VR3c's frontier note called "VR3d's"; there is no
+--      VR3d, and closures cannot RUN without it, so this unit took it.
 --      NOT PORTED: the ARGV INSTALL (`Rt.parseArgsGo`'s `bufW + j*40` and the
 --      entry-arg buffer `Rt.main` sizes), which is a separate lane and is
 --      reached-but-unexercised today (a word-arm program with arguments);
@@ -853,24 +852,26 @@ valLayout =
 --      `Rt.allocSym` (code 2) and never from the string seat (code 1) — a
 --      symbol indistinguishable from a string is the mixed-representation read
 --      this arm exists to prevent.
---      `Lam` IS PORTED (perf word-arm-closures): an inner lambda is
---      `lowerClosure` — contiguous capture staging in ROOTED frame slots, the
+--      CLOSURES ARE PORTED (perf word-arm-closures): `Lam` (an inner lambda ->
+--      `lowerClosure`: contiguous capture staging in ROOTED frame slots, the
 --      closure's own QBE function through `lowerFunBody ... RtGeneric`, one
---      `Rt.closure(desc, capBase, K)`.  The emitter needed NO change: the only
---      thing the two arms disagree about is the closure's ENV ARRAY, and both
---      halves of it already spell their stride as `valSizeBytes` (`captureBlits`
---      writes the staging block, `capBlitsPro` reads it).  The RUNTIME did: the
---      closure CELL was twinned (Rt.closure / Rt.applyPartGo) but the CALL
---      STAGING was not (`Rt.stage-apply`'s block, `Rt.apply-tail`'s `+40` shape
---      guard, `Rt.applyGo`/`Rt.applyTailGo`'s `args + rem*40`,
---      `Rt.applyPartGo`'s three-range interleave).  See item 7's correction.
+--      `Rt.closure(desc, capBase, K)`) and `GRef` (a value position ->
+--      `lowerGRefValue`'s `Rt.globalClosure(desc)`; a forced one is a direct
+--      call).  What made them one class and not two: a closure's ENV ARRAY is
+--      the only thing the two arms disagree about, and both emitters already
+--      spell its stride as `valSizeBytes` (`captureBlits`, `capBlitsPro`) — the
+--      emitter needed no change at all.  The RUNTIME did: the closure CELL was
+--      twinned (Rt.closure / Rt.applyPartGo) but the CALL STAGING was not
+--      (`Rt.stage-apply`'s block, `Rt.apply-tail`'s `+40` shape guard,
+--      `Rt.applyGo`/`Rt.applyTailGo`'s `args + rem*40`, `Rt.applyPartGo`'s
+--      three-range interleave), and `Rt.globalClosure`'s twin had never been
+--      EXECUTED — it returned a fixnum-shaped closure and wrote its header
+--      eight bytes off.  See item 7's correction below.
 --      NOT PORTED, each refused by name:
 --      `Con` (its vector is written through `storeValueCell`), the RECORD
 --      family (`RecordLit`/`RecordGet`/`RecordUpdate`, and a `VField` pattern
 --      bind — its second parallel NAMES array has no inline body layout, which
 --      is a design decision, not a stride),
---      `GRef` (the NEXT commit of this unit: `lowerGRefValue`'s
---      `Rt.globalClosure(desc)`, whose word-arm twin had never been executed),
 --      `StreamRef`, float literals, let-destructuring, `MTagEq`
 --      (a constructor-tag pattern — it materialises the tag as a `symbol`,
 --      which is now ported, so what remains there is the tag-EQUALITY half),
