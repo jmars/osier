@@ -117,6 +117,26 @@ checks rt rawMidText =
             && not (String.contains "&& call Rt.vecEq(a, bb, mknum(payload(i, 0) + 1))" runtimeMidText)
             && not (String.contains "&& call Rt.deepEq(vecload(vecbody(a), 1), vecload(vecbody(bb), 1))" runtimeMidText)
         )
+    , check "AREA 3 THE ELEMENT-COUNT SITES CALL `veclen`, AND THE OLD SPELLINGS ARE GONE (perf word-arm-area3rt, added by the re-review after a SILENT REVERT). A word-arm vector's or record's count lives in its GC HEADER; `len32`/`payload32(x, 1)`/`reclen` read payload word 1, which is ELEMENT 1 on the word arm. THIS ROW ASSERTS THE SYMBOL PROPERTY, NOT THE OUTPUT — and it exists because nothing else can: the corpus is VAL-ARM and `veclen`'s val emit is instruction-identical to `payload32(v, 1)`, so byte-identity is structurally blind to which spelling a site uses (MEASURED: a commit reverted all eight call sites and every gate stayed green). It is DEFUN-SCOPED, because a bare text search cannot tell a vector site from the STRING comparators that legitimately say `len32` (`Rt.bytesEqGo`, `Rt.deepEq`'s tag-1 arm). It reads BOTH splices: `pvRec` had to be ARM-SPLICED (its val arm keeps `reclen`, whose nil factor the val emit depends on), so the val text must still say `reclen` there while the word text says `veclen`"
+        (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
+            ( Ok valText, Ok wordText ) ->
+                List.all
+                    (\key ->
+                        -- `reclen(` — the CALL, not the word: pvRec's own
+                        -- comment explains `reclen` by name and a bare search
+                        -- would red on the explanation.
+                        String.contains "veclen(" (defunText key wordText)
+                            && not (String.contains "reclen(" (defunText key wordText))
+                    )
+                    [ "Rt.vecEq", "Rt.pvV", "Rt.pvRec", "Rt.hostIsProgram", "Rt.hostDispatch" ]
+                    && String.contains "veclen(" (defunText "Rt.deepEq" wordText)
+                    && List.length (String.indexes "veclen(" wordText) >= 8
+                    && not (String.contains "len32(a) == len32(bb)) && call Rt.vecEq" wordText)
+                    && String.contains "i >= reclen(vN)" valText
+
+            _ ->
+                False
+        )
     , check "utf8ByteLength 'héllo' == 6" (utf8ByteLength "héllo" == 6)
     , check "utf8ByteLength '🦀' == 4" (utf8ByteLength "🦀" == 4)
     , check "utf8ByteLength 'abcde' == 5" (utf8ByteLength "abcde" == 5)

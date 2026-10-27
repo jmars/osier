@@ -1031,10 +1031,18 @@ defun Rt.deepEq(a : val, bb : val) -> val {
     recur(vecload(vecbody(a), 1), vecload(vecbody(bb), 1));
   }
   if (mkbool(tagis(a, 14)) && mkbool(tagis(bb, 14))) {
-    return mkbool(len32(a) == len32(bb)) && call Rt.vecEq(a, bb, mknum(0));
+    // A RECORD'S FIELD COUNT, the same reader (perf word-arm-area3rt, the
+    // re-review's item 3): `len32` here was the SAME wrong-kind read as the
+    // vector arm below and the ten-site sweep missed it.  A record's count is
+    // its header's count word on the word arm exactly as a vector's is.
+    return mkbool(veclen(a) == veclen(bb)) && call Rt.vecEq(a, bb, mknum(0));
   }
   if (mkbool(tagis(a, 10)) && mkbool(tagis(bb, 10))) {
-    return mkbool(len32(a) == len32(bb)) && call Rt.vecEq(a, bb, mknum(0));
+    // THE ELEMENT COUNT, not the byte length (perf word-arm-area3rt): a
+    // word-arm vector's count lives in its GC HEADER, so `len32` — payload word
+    // 1, which is a STRING's byte length — reads element 1 here.  `veclen` is
+    // `payload32(v, 1)` on the val arm and the header count on the word arm.
+    return mkbool(veclen(a) == veclen(bb)) && call Rt.vecEq(a, bb, mknum(0));
   }
   return false;
 }
@@ -1066,7 +1074,11 @@ defun Rt.deepEq(a : val, bb : val) -> val {
     recur(vecload(vecbody(a), 1), vecload(vecbody(bb), 1));
   }
   if (mkbool(tagis(a, 10)) && mkbool(tagis(bb, 10))) {
-    return mkbool(len32(a) == len32(bb)) && call Rt.vecEq(a, bb, mknum(0));
+    // THE ELEMENT COUNT, not the byte length (perf word-arm-area3rt): a
+    // word-arm vector's count lives in its GC HEADER, so `len32` — payload word
+    // 1, which is a STRING's byte length — reads element 1 here.  `veclen` is
+    // `payload32(v, 1)` on the val arm and the header count on the word arm.
+    return mkbool(veclen(a) == veclen(bb)) && call Rt.vecEq(a, bb, mknum(0));
   }
   return false;
 }
@@ -1092,7 +1104,7 @@ defun Rt.symEq(a : val, bb : val, i : val) -> val {
 }
 
 defun Rt.vecEq(a : val, bb : val, i : val) -> val {
-  if (mkbool(payload(i, 0) >= len32(a))) {
+  if (mkbool(payload(i, 0) >= veclen(a))) {
     return true;
   }
   if (mkbool(payload32(call Rt.deepEq(vecload(vecbody(a), payload(i, 0)), vecload(vecbody(bb), payload(i, 0))), 0) == 0)) {
@@ -1931,7 +1943,23 @@ defun Rt.pvS(stN : val, vN : val) -> val {
 
 defun Rt.pvRec(stN : val, vN : val, iN : val) -> val {
   word i = payload(iN, 0);
+  // `reclen` IS `payload32(v, 1) * (1 - tagis(v, nil))` — the nil factor exists
+  // because a `{}` literal's payload words are unzeroed.  pvRec only ever sees a
+  // record (pvV dispatches on tag 14), so on the VAL arm the factor is 1 and the
+  // read is unchanged; the WORD arm must read the HEADER's count instead
+  // (perf word-arm-area3rt), and `reclen` is a payload read.
+  //
+  // ARM-SPLICED, NOT REWRITTEN: replacing the val arm's `reclen` with `veclen`
+  // would drop the nil factor from the VAL emit and move the corpus — MEASURED,
+  // and the corpus moving is a BUG report, not a re-freeze.  Every other site in
+  // this unit could be rewritten in place because `veclen`'s val arm IS
+  // `payload32(v, 1)`; this one could not.
+  // >>> QBE_VAL-ONLY
   if (mkbool(i >= reclen(vN))) {
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  if (mkbool(i >= veclen(vN))) {
+  // <<< QBE_WORDVAL-ONLY
     return mknum(0);
   }
   call Rt.pvByte(stN, mknum(32));
@@ -1982,7 +2010,7 @@ defun Rt.pvV(stN : val, vN : val) -> val {
   }
   if (mkbool(tagis(vN, 10))) {
     call Rt.pvZ(stN, mknum(rawstr("[vector ")));
-    call Rt.pvS(stN, call Rt.numText(mknum(payload32(vN, 1))));
+    call Rt.pvS(stN, call Rt.numText(mknum(veclen(vN))));
     call Rt.pvZ(stN, mknum(rawstr("]")));
     return mknum(0);
   }
@@ -10479,7 +10507,7 @@ defun Rt.hostIsProgram(vN : val) -> val {
   if (tagis(vN, 10) == 0) {
     return mkbool(0);
   }
-  if (payload32(vN, 1) != 4) {
+  if (veclen(vN) != 4) {
     return mkbool(0);
   }
   word d = payload(vN, 0);
@@ -10850,7 +10878,7 @@ defun Rt.hostDispatch(hN : val, iN : val) -> val {
   if (tagis(task, 10) == 0) {
     return call Rt.hostDeactivate(hN, iN);
   }
-  word len = payload32(task, 1);
+  word len = veclen(task);
   if (len < 1) {
     return call Rt.hostDeactivate(hN, iN);
   }
