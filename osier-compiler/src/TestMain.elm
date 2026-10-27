@@ -23,7 +23,7 @@ import Dict exposing (Dict)
 import Mid.Audit as Audit
 import IntegerLiteral exposing (IntegerLiteral(..))
 import ParserFast
-import Mid.Ir exposing (Alt, AltKind(..), Binder, Defun, Exp(..), FfiWidth(..), LetBinder(..), Lit(..), MemWidth(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), TailTarget(..), UnsafeNode(..), ValuePath)
+import Mid.Ir exposing (Alt, AltKind(..), Binder, Defun, Exp(..), FfiWidth(..), LetBinder(..), Lit(..), Match(..), MemWidth(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), Step(..), TailTarget(..), UnsafeNode(..), ValuePath(..))
 import Mid.Module as MidModule
 import Mid.Qbe.Il as Il
 import Mid.Qbe.Lower as QbeLower
@@ -158,6 +158,30 @@ checks rt rawMidText =
             nil =
                 PrimApp { prim = "emptylist", args = [ Lit (LNumber 0) ] }
 
+            -- a `Case` needs three records to build; the shapes below are the
+            -- MINIMUM that reaches the classifier's four arms (scrutinee,
+            -- matches, binds, body).
+            caseBase =
+                { scrutinee = Var 0
+                , scrutId = { id = 1, name = "x" }
+                , alts = []
+                , endLabel = "e0"
+                }
+
+            altBase =
+                { kind = AltOther
+                , matches = []
+                , binds = []
+                , body = Lit (LNumber 0)
+                , nextLabel = "n0"
+                }
+
+            caseExp ms bs =
+                Case { caseBase | alts = [ { altBase | matches = ms, binds = bs } ] }
+
+            caseWithBody body =
+                Case { caseBase | alts = [ { altBase | matches = [ MEmpty [] ], body = body } ] }
+
             refused =
                 List.filterMap
                     (\e -> QbeLower.wordArmUnported e)
@@ -191,6 +215,25 @@ checks rt rawMidText =
             -- than a port.
             && (QbeLower.wordArmUnported (ListLit [ PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ]) /= Nothing)
             && (QbeLower.wordArmUnported (Tup [ Lit (LNumber 1), PrimApp { prim = "*", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ]) /= Nothing)
+            -- A CASE is classified through its SCRUTINEE, its MATCHES, its
+            -- pattern BINDS and its BODIES — the list patterns below are the
+            -- shapes a cons program actually uses (nil and cons), plus a
+            -- literal match, whose literal is classified by the same `Lit` rule
+            -- the rest of the classifier uses.
+            && QbeLower.wordArmUnported (caseExp [ MEmpty [], MCons [ HdStep ], MCons [ HdStep, TlStep ] ] [])
+                == Nothing
+            && QbeLower.wordArmUnported (caseExp [ MLitEq [] (LNumber 3) ] []) == Nothing
+            -- ... and the two shapes this unit did NOT port still refuse BY
+            -- NAME rather than at the emit: a CONSTRUCTOR-TAG match (it
+            -- materialises the tag as a `symbol` literal — AREA 5) and a RECORD
+            -- field bind (the refused record family).
+            && (QbeLower.wordArmUnported (caseExp [ MTagEq [ IdxStep 0 ] "Just" ] []) /= Nothing)
+            && (QbeLower.wordArmUnported (caseExp [] [ ( { id = 1, name = "f" }, VField [] "f" ) ]) /= Nothing)
+            -- ... and the recursion reaches the BODY: a case whose body is an
+            -- arithmetic prim refuses, so "the scrutinee and the matches are
+            -- fine" cannot be mistaken for "the alternative is fine".
+            && (QbeLower.wordArmUnported (caseExp [ MEmpty [] ] []) == Nothing)
+            && (QbeLower.wordArmUnported (caseWithBody (PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] })) /= Nothing)
             -- and the refused set is exactly the eight named constructs: a
             -- classifier that admitted any of them would be silently wrong
             -- (each emits the 40-byte representation or a layout the arm has

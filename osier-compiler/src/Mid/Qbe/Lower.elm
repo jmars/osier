@@ -955,8 +955,96 @@ wordArmUnported exp =
             -- desugar, for the reason stated at `ListLit`.
             wordArmUnported (buildTuple es)
 
+        Case branch ->
+            -- ============ THE SURFACE LANE: A CASE ============
+            -- Every alternative is a tag test plus payload chases, and BOTH
+            -- halves are ported: `lowerTagMatch` goes through `wordTagIs`
+            -- (a word-tag compare for an IMMEDIATE valtag such as nil, a
+            -- GC-header KIND read for a heap one such as cons/vector — never a
+            -- bare tag compare, which would match every heap object), and the
+            -- chase family goes through `fieldBase` (payload word 0 IS the
+            -- element on this arm, so the base is its address).
+            --
+            -- What is NOT ported refuses here rather than at the emit:
+            --   * a CONSTRUCTOR-TAG match (`MTagEq`) materialises the tag as a
+            --     `symbol` literal, which is AREA 5's heap cell;
+            --   * a RECORD field bind (`VField`) is the refused record family —
+            --     its layout (the second parallel names array) is a design
+            --     question, not a stride.
+            case wordArmUnported branch.scrutinee of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    wordArmUnportedAlts branch.alts
+
         _ ->
             Just (wordArea (wordAreaName exp) (wordAreaWhat exp))
+
+
+{-| Every alternative of a `Case`: its matches, its pattern binds and its body.
+-}
+wordArmUnportedAlts : List Alt -> Maybe String
+wordArmUnportedAlts alts =
+    case alts of
+        [] ->
+            Nothing
+
+        alt :: rest ->
+            case wordArmUnportedMatches alt.matches of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    case wordArmUnportedBinds alt.binds of
+                        Just what ->
+                            Just what
+
+                        Nothing ->
+                            case wordArmUnported alt.body of
+                                Just what ->
+                                    Just what
+
+                                Nothing ->
+                                    wordArmUnportedAlts rest
+
+
+wordArmUnportedMatches : List Match -> Maybe String
+wordArmUnportedMatches matches =
+    case matches of
+        [] ->
+            Nothing
+
+        m :: rest ->
+            case m of
+                MTagEq _ _ ->
+                    Just (wordArea "AREA 3/5 (HEAP CELLS)" "a constructor-tag pattern — the tag is materialised as a `symbol` literal, and under the word arm a symbol is a heap object behind one tagged pointer (AREA 5)")
+
+                MLitEq _ lit ->
+                    case wordArmUnported (Lit lit) of
+                        Just what ->
+                            Just what
+
+                        Nothing ->
+                            wordArmUnportedMatches rest
+
+                _ ->
+                    wordArmUnportedMatches rest
+
+
+wordArmUnportedBinds : List ( Binder, ValuePath ) -> Maybe String
+wordArmUnportedBinds binds =
+    case binds of
+        [] ->
+            Nothing
+
+        ( _, path ) :: rest ->
+            case path of
+                VField _ _ ->
+                    Just (wordArea "AREA 3 (PAYLOAD ACCESS)" "a record field pattern — it is the RECORD family, whose word-arm body layout (the second, parallel field-NAMES array) is a design question this arm has not decided")
+
+                VPath _ ->
+                    wordArmUnportedBinds rest
 
 
 {-| Every argument of a prim application, left to right — the same recursion
@@ -9619,14 +9707,23 @@ lowerMatchTests matches scrutSlot scrutType failLbl s =
 lowerMatch : Match -> Int -> Maybe Rep.Type -> String -> S -> Result String S
 lowerMatch match scrutSlot scrutType failLbl s =
     case match of
+        -- THE EXPECTED VALUE IS A VALTAG, and it is the TOP-LEVEL constant, not
+        -- `s.layout.tagCons`.  MEASURED (this site, first run): the word
+        -- instance's `tagCons` field is the POINTER TAG (1 — every word-arm heap
+        -- object carries it), while the KIND that identifies a cons is the
+        -- VALTAG 4.  Passing `s.layout.tagCons` therefore asked "is this a
+        -- kind-1 block?" and every cons answered no, so `1 :: 2 :: []` fell
+        -- through both alternatives and died "non-exhaustive case" on a
+        -- well-formed value.  The val instance's fields equal the top-level
+        -- constants, so the val emit is unchanged (the corpus says so).
         MCons steps ->
-            Ok (lowerTagMatch steps scrutSlot s.layout.tagCons failLbl s)
+            lowerTagMatch steps scrutSlot RtLayout.tagCons failLbl s
 
         MEmpty steps ->
-            Ok (lowerTagMatch steps scrutSlot s.layout.tagNil failLbl s)
+            lowerTagMatch steps scrutSlot RtLayout.tagNil failLbl s
 
         MVector steps ->
-            Ok (lowerTagMatch steps scrutSlot s.layout.tagVector failLbl s)
+            lowerTagMatch steps scrutSlot RtLayout.tagVector failLbl s
 
         MTagEq steps tag ->
             -- UNIT B item 1: inline the payload-pointer compare when the
@@ -9650,7 +9747,16 @@ lowerMatch match scrutSlot scrutType failLbl s =
 
 -- Read the value at `steps`, test its tag == expected; pass -> passLbl,
 -- fail -> failLbl.
-lowerTagMatch : List Step -> Int -> Int -> String -> S -> S
+--
+-- THE TEST ITSELF IS ARM-SPLIT, and the word half is NOT a tag compare: under
+-- the word arm every heap object carries the SAME `...001` pointer tag, so
+-- `expected` names a KIND (cons = 4, vector = 10) that lives in the GC header,
+-- not in the word — while nil is an IMMEDIATE and stays a tag compare.
+-- `wordTagIs` is that reader, already written and probe-pinned for `tagis`, and
+-- `RtLayout.wordTagShape` is what decides which of the two a valtag is, so this
+-- site cannot disagree with the encoding.  A valtag with no word-arm encoding
+-- refuses at COMPILE time (hence the `Result`).
+lowerTagMatch : List Step -> Int -> Int -> String -> S -> Result String S
 lowerTagMatch steps scrutSlot expected failLbl s =
     let
         ( p, s1 ) =
@@ -9658,20 +9764,36 @@ lowerTagMatch steps scrutSlot expected failLbl s =
 
         sRead =
             readSteps steps scrutSlot p s1
-
-        ( tagT, s2 ) =
-            freshTmp sRead
-
-        ( isM, s3 ) =
-            freshTmp s2
-
-        ( passLbl, s4 ) =
-            freshLbl "cpass" s3
     in
-    emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp p))) s4
-        |> emit (Cmp (Just isM) W Ceq (Il.Tmp tagT) (Il.Con expected))
-        |> closeBlock (Jnz (Il.Tmp isM) passLbl failLbl)
-        |> startBlock passLbl
+    if wordArm s then
+        let
+            ( passLbl, s2 ) =
+                freshLbl "cpass" sRead
+        in
+        wordTagIs (Il.Tmp (slotTmp p)) expected s2
+            |> Result.map
+                (\( flag, s3 ) ->
+                    closeBlock (Jnz flag passLbl failLbl) s3
+                        |> startBlock passLbl
+                )
+
+    else
+        let
+            ( tagT, s2 ) =
+                freshTmp sRead
+
+            ( isM, s3 ) =
+                freshTmp s2
+
+            ( passLbl, s4 ) =
+                freshLbl "cpass" s3
+        in
+        Ok
+            (emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp p))) s4
+                |> emit (Cmp (Just isM) W Ceq (Il.Tmp tagT) (Il.Con expected))
+                |> closeBlock (Jnz (Il.Tmp isM) passLbl failLbl)
+                |> startBlock passLbl
+            )
 
 
 -- Read the value at `steps`, then run the REAL `=` prim against `lit` (the
@@ -9846,14 +9968,14 @@ lowerStep : Step -> Int -> Int -> S -> S
 lowerStep step src dst s =
     case step of
         FstStep ->
-            chaseField 8 src dst s
+            chaseField 0 src dst s
 
         SndStep ->
             if s.consArr then
                 chaseCdr src dst s
 
             else
-                chaseField 16 src dst s
+                chaseField 1 src dst s
 
         HdStep ->
             lowerHdTl True src dst s
@@ -9862,55 +9984,108 @@ lowerStep step src dst s =
             lowerHdTl False src dst s
 
         IdxStep j ->
+            -- Element `j` of an ADT vector.  `IdxStep` is produced ONLY for a
+            -- constructor pattern's arguments (`Mid.FromAst`'s ADT branch,
+            -- `IdxStep (j + 1)`), and `KindCon` is the only shape
+            -- `Mid.Qbe.Flatten` resolves it against, so the base is always a
+            -- VECTOR body — which is what `fieldBase` returns on both arms.
             let
-                ( dataT, s1 ) =
-                    freshTmp s
+                ( dataBase, s1 ) =
+                    fieldBase 0 src s
 
-                ( p8, s2 ) =
+                ( eT, s2 ) =
                     freshTmp s1
-
-                ( eT, s3 ) =
-                    freshTmp s2
             in
-            emit (Bin (Just p8) L Add (Il.Tmp (slotTmp src)) (Il.Con 8)) s3
-                |> emit (Load (Just dataT) L LoadL (Il.Tmp p8))
-                |> emit (Bin (Just eT) L Add (Il.Tmp dataT) (Il.Con (s.layout.valSizeBytes * j)))
+            emit (Bin (Just eT) L Add dataBase (Il.Con (s.layout.valSizeBytes * j))) s2
                 |> emit (Blit (Il.Tmp eT) (Il.Tmp (slotTmp dst)) s.layout.valSizeBytes)
+
+
+{-| THE BASE OF PAYLOAD WORD `n` OF THE VALUE IN SLOT `src` — the ONE statement
+of the difference between the arms for every pointer chase in the pattern
+matcher (perf word-arm-surface).
+
+`n` IS A PAYLOAD WORD INDEX, NOT A BYTE OFFSET, and that is load-bearing: the
+val arm's payload words are 8 bytes apart (each HOLDS a pointer into a separate
+array) while the Value itself is 40 bytes, so `payloadWordOffset` and
+`valSizeBytes` are two different strides and only the first one indexes a
+payload.  The word arm's are `wordBytes` apart.
+
+val arm: the payload word HOLDS A POINTER to a separate array, so the base is
+`[[src + payloadWordOffset n]]`.
+
+word arm: the slot holds ONE WORD — the TAGGED POINTER to the body — so the
+base is `untag([src]) + payloadWordOffset n`, the SAME `vecbody` identity the
+runtime states (`wordBodyOf` is the untag, and a word-arm body is INLINE, so
+"the array" and "the first element" are the same address).
+
+MEASURED, AND IT IS WHY THIS IS AN INDIRECTION AND NOT AN OFFSET: the first cut
+read `src + off` directly and `1 :: 2 :: []` printed the whole list instead of
+its head.  `src` is a FRAME SLOT address; `src + 8` is the NEXT FRAME SLOT, not
+the object's payload — and the slot allocator happened to hand the pattern
+matcher's own scratch slot that exact address, so the "car" read back a copy of
+the scrutinee.  A frame slot and a heap object are different memories.
+
+THE VAL ARM'S EMIT IS UNCHANGED BYTE FOR BYTE: `payloadWordOffset n` on the val
+instance is exactly the byte offset each caller already spelled (`8` for fst,
+`16` for snd), the base temp is allocated FIRST and the address temp second —
+the order every call site already used — so the corpus stays identical.
+-}
+fieldBase : Int -> Int -> S -> ( Il.Arg, S )
+fieldBase n src s =
+    if wordArm s then
+        let
+            ( v, s1 ) =
+                freshTmp s
+
+            ( body, s2 ) =
+                wordBodyOf (Il.Tmp v) (emit (Load (Just v) L LoadL (Il.Tmp (slotTmp src))) s1)
+
+            ( baseT, s3 ) =
+                freshTmp s2
+        in
+        ( Il.Tmp baseT
+        , emit (Bin (Just baseT) L Add (Il.Tmp body) (Il.Con (RtLayout.payloadWordOffset s.layout n))) s3
+        )
+
+    else
+        let
+            ( baseT, s1 ) =
+                freshTmp s
+
+            ( p8, s2 ) =
+                freshTmp s1
+        in
+        ( Il.Tmp baseT
+        , emit (Bin (Just p8) L Add (Il.Tmp (slotTmp src)) (Il.Con (RtLayout.payloadWordOffset s.layout n))) s2
+            |> emit (Load (Just baseT) L LoadL (Il.Tmp p8))
+        )
 
 
 -- fst/snd: blit the car body (at `off` in the cons Value) into dst.
 chaseField : Int -> Int -> Int -> S -> S
 chaseField off src dst s =
     let
-        ( ptrT, s1 ) =
-            freshTmp s
-
-        ( p8, s2 ) =
-            freshTmp s1
+        ( base, s1 ) =
+            fieldBase off src s
     in
-    emit (Bin (Just p8) L Add (Il.Tmp (slotTmp src)) (Il.Con off)) s2
-        |> emit (Load (Just ptrT) L LoadL (Il.Tmp p8))
-        |> emit (Blit (Il.Tmp ptrT) (Il.Tmp (slotTmp dst)) s.layout.valSizeBytes)
+    emit (Blit base (Il.Tmp (slotTmp dst)) s1.layout.valSizeBytes) s1
 
 
 -- (A) the cdr of a cons: element 1 of the 2-element array `car` heads
 -- (*(car + vs)).  The cons Value's cdr payload word is now NULL, so the cdr
 -- VALUE is derived through the car pointer, exactly like the Zig readers.
+-- Under the word arm the body is inline, so this is element 1 of the SAME base
+-- (`fieldBase 0` + one element) — see `fieldBase`.
 chaseCdr : Int -> Int -> S -> S
 chaseCdr src dst s =
     let
-        ( carT, s1 ) =
-            freshTmp s
+        ( carBase, s1 ) =
+            fieldBase 0 src s
 
-        ( p8, s2 ) =
+        ( cdrT, s2 ) =
             freshTmp s1
-
-        ( cdrT, s3 ) =
-            freshTmp s2
     in
-    emit (Bin (Just p8) L Add (Il.Tmp (slotTmp src)) (Il.Con 8)) s3
-        |> emit (Load (Just carT) L LoadL (Il.Tmp p8))
-        |> emit (Bin (Just cdrT) L Add (Il.Tmp carT) (Il.Con s.layout.valSizeBytes))
+    emit (Bin (Just cdrT) L Add carBase (Il.Con s.layout.valSizeBytes)) s2
         |> emit (Blit (Il.Tmp cdrT) (Il.Tmp (slotTmp dst)) s.layout.valSizeBytes)
 
 
@@ -9935,7 +10110,7 @@ lowerHdTl isHd src dst s =
         ( doneLbl, s5 ) =
             freshLbl "hdone" s4
     in
-    emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp src))) s5
+    readTag tagT (Il.Tmp (slotTmp src)) s5
         |> emit (Cmp (Just isnil) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagNil))
         |> closeBlock (Jnz (Il.Tmp isnil) nilLbl chaseLbl)
         |> startBlock nilLbl
@@ -9943,13 +10118,13 @@ lowerHdTl isHd src dst s =
         |> jumpTo doneLbl
         |> startBlock chaseLbl
         |> (if isHd then
-                chaseField 8 src dst
+                chaseField 0 src dst
 
             else if s.consArr then
                 chaseCdr src dst
 
             else
-                chaseField 16 src dst
+                chaseField 1 src dst
            )
         |> jumpTo doneLbl
         |> startBlock doneLbl
