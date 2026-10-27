@@ -61,6 +61,7 @@ import Mid.Ir exposing (Defun, Exp(..), LetBinder(..), Lit(..), Match, UnsafeNod
 import Mid.RtGc exposing (gcProgram)
 import Mid.RtLang.Ast as RtAst
 import Mid.RtLang.Check as RtCheck
+import Mid.RtLang.Error as MidErr
 import Mid.RtLang.LowerToIr
 import Mid.RtLang.Parse
 import Mid.RtPrims exposing (helperDefuns, primDefuns)
@@ -169,7 +170,8 @@ paramWords decls p =
 
 
 {-| (perf VR3c) The arm splice itself: keep one region kind, drop the other,
-drop every marker line, and refuse a malformed file loudly.  See `loadArm`.
+blank every dropped line (marker and unkept body alike — a dropped line leaves
+its ROW behind, see `loadArm`), and refuse a malformed file loudly.
 -}
 spliceArm : Bool -> String -> Result String String
 spliceArm wordVal source =
@@ -207,22 +209,22 @@ spliceArm wordVal source =
 
                 line :: rest ->
                     if startsAt beginVal line then
-                        go rest 1 (beganVal + 1) endedVal beganWord endedWord acc
+                        go rest 1 (beganVal + 1) endedVal beganWord endedWord ("" :: acc)
 
                     else if startsAt beginWord line then
-                        go rest 2 beganVal endedVal (beganWord + 1) endedWord acc
+                        go rest 2 beganVal endedVal (beganWord + 1) endedWord ("" :: acc)
 
                     else if startsAt endVal line then
-                        go rest 0 beganVal (endedVal + 1) beganWord endedWord acc
+                        go rest 0 beganVal (endedVal + 1) beganWord endedWord ("" :: acc)
 
                     else if startsAt endWord line then
-                        go rest 0 beganVal endedVal beganWord (endedWord + 1) acc
+                        go rest 0 beganVal endedVal beganWord (endedWord + 1) ("" :: acc)
 
                     else if region == 0 || kept region then
                         go rest region beganVal endedVal beganWord endedWord (line :: acc)
 
                     else
-                        go rest region beganVal endedVal beganWord endedWord acc
+                        go rest region beganVal endedVal beganWord endedWord ("" :: acc)
 
         -- a marker is a line whose FIRST NON-SPACE text is the marker (the
         -- regions sit inside indented blocks, so leading whitespace is
@@ -239,29 +241,7 @@ spliceArm wordVal source =
             else
                 String.startsWith marker line
     in
-    Result.map (String.join "\n") (go (splitLines source) 0 0 0 0 0 [])
-
-
-{-| `String.split` is NOT in this language's String surface (MEASURED: the
-self-host front end rejects it — Mid.RtLang.Parse's `firstSegment` note), and
-this module IS compiled by that front end, so the line split is spelled here
-with the two prims that do exist (`String.slice`, `String.length`).
--}
-splitLines : String -> List String
-splitLines s =
-    let
-        go : Int -> Int -> List String -> List String
-        go start i acc =
-            if i >= String.length s then
-                List.reverse (String.slice start i s :: acc)
-
-            else if String.slice i (i + 1) s == "\n" then
-                go (i + 1) (i + 1) (String.slice start i s :: acc)
-
-            else
-                go start (i + 1) acc
-    in
-    go 0 0 []
+    Result.map (String.join "\n") (go (RtAst.splitLines source) 0 0 0 0 0 [])
 
 
 load : String -> Result String Runtime
@@ -289,20 +269,31 @@ one is a BUILD flag and stays in the driver; this one is the per-compile
 `QBE_VALREP` knob, which is why it lives here, where `Mid.QbeModule`'s flags
 already reach the parse).
 
-THE VAL ARM'S TEXT IS UNCHANGED BY CONSTRUCTION.  The marker lines themselves
-are dropped in BOTH arms and a region's body is kept only for its own arm, so
-`loadArm False` yields the byte-for-byte text the tree had before the twins
-existed — which is what keeps the val arm's emitted IL (and therefore the
-corpus baseline) inert.  THE RULE THAT KEEPS IT TRUE (perf VR3c, after review):
-a twin's PROSE belongs INSIDE its own region, and a twin never re-indents a
-line that the other arm keeps.  Both were violated once and are what the
-"byte-for-byte" claim costs: a lead comment sitting between the two regions
-survives into the val text, and a line-wise edit that re-indents a live val line
-makes the val text merely PARSE-identical (comments are emit-inert, so the
-emitted IL was byte-identical even then — but the claim in this comment would
-have been false as stated, and a doc that overclaims is the thing this repo
-keeps paying for).  Checked by diffing `spliceArm False`'s output against the
-pre-VR3c `runtime.mid`; it is byte-identical.
+THE SPLICED TEXT KEEPS THE FILE'S ROWS (u12).  The marker lines are dropped in
+BOTH arms and a region's body is kept only for its own arm — but every dropped
+line is replaced by an EMPTY line, so row N of the spliced text is row N of
+`osier-compiler/runtime.mid` and a rejection rendered from that text names the
+row an editor of the file must go to.  Without it the splice shifted every
+later line up: MEASURED, a J10 planted at FILE row 3029 rendered `2973|` (56
+rows off, the first drop being the marker at file row 2530), i.e. a caret
+pointing at the wrong site — the failure class this arc exists to remove.
+`run.js`'s `spliceMidRegion` (the nursery build flag) carries the same rule for
+the same reason.
+
+WHAT THAT COSTS, AND WHAT IT DOES NOT.  The kept lines are byte-identical to the
+file's, and the emitted IL is unchanged — blank lines are whitespace, so the
+parse is unaffected and the corpus baseline stays byte-identical (MEASURED:
+`tools/osier-corpus-ssa.sh` 159/159 after the change).  What no longer holds is
+the older, stronger claim that `loadArm False`'s output was byte-for-byte the
+pre-VR3c file: it is now that file with every marker line and every word-arm
+line BLANKED rather than REMOVED, i.e. line-identical and emit-identical, not
+byte-identical.  THE RULE THAT KEEPS THE KEPT LINES TRUE (perf VR3c, after
+review): a twin's PROSE belongs INSIDE its own region, and a twin never
+re-indents a line that the other arm keeps.  Both were violated once: a lead
+comment sitting between the two regions survives into the val text, and a
+line-wise edit that re-indents a live val line makes the val text merely
+PARSE-identical (comments are emit-inert, so the emitted IL was byte-identical
+even then — but a doc that overclaims is the thing this repo keeps paying for).
 
 A region that is unterminated or unbalanced is a LOUD refusal: a half-spliced
 runtime would link cleanly and read the wrong bytes.  The marker text and the
@@ -314,7 +305,11 @@ loadArm : Bool -> String -> Result String Runtime
 loadArm wordVal source =
     case spliceArm wordVal source of
         Err msg ->
-            Err msg
+            -- the splice refusal is a runtime.mid failure like any other (a
+            -- half-spliced runtime is osier's own defect, never the user's
+            -- program), so it carries the lane's Note.  It is a plain string,
+            -- not a rendered payload: there is no banner to re-slot.
+            Err (withOwnRuntimeNote msg)
 
         Ok text ->
             loadText text
@@ -324,8 +319,13 @@ loadArm wordVal source =
 loadText : String -> Result String Runtime
 loadText source =
     case Mid.RtLang.Parse.parseModule source of
-        Err msg ->
-            Err msg
+        -- THE RUNTIME LANE'S PARSE EXIT (U10): the parser renders a SYNTAX
+        -- PROBLEM before any lane knows a file name, so the banner's PATH slot
+        -- holds the POSITION (`row:col`) and this lane PREFIXES `runtime.mid`
+        -- onto it — plus the own-runtime Note, because a broken runtime.mid is
+        -- osier's defect and must not read as the user's mistake.
+        Err rendered ->
+            Err (withOwnRuntimeNote (namePayload runtimeFile rendered))
 
         Ok module_ ->
             let
@@ -397,14 +397,21 @@ loadText source =
                 -- decl-less module the two entries are the same function
                 -- (`lowerAll decls [] defuns`, decls = []).
                 surf flags =
-                    case RtCheck.checkModule externTypes flags module_ of
-                        Err msg ->
-                            Err msg
+                    -- THE RUNTIME LANE'S EXIT (U10): the RECORD is rendered
+                    -- HERE, with `runtime.mid` in the banner and the
+                    -- own-runtime Note above it, because this is the lane that
+                    -- runs osier's OWN source.  `Check.checkModule` (the string
+                    -- door) renders the same record as `Rt.mid` — runtime.mid's
+                    -- HEADER name, which is all the checker knows about a file
+                    -- — so the lane takes the record and names the file itself.
+                    case RtCheck.checkModuleMidc externTypes flags module_ of
+                        Err e ->
+                            Err (renderRuntime module_.source e)
 
                         Ok () ->
                             case Mid.RtLang.LowerToIr.lowerModule module_ of
-                                Err msg ->
-                                    Err msg
+                                Err e ->
+                                    Err (renderRuntime module_.source e)
 
                                 Ok lowered ->
                                     Ok (activeSurf flags (List.map2 Tuple.pair ast lowered))
@@ -513,9 +520,14 @@ loadText source =
                     in
                     grow (Set.fromList (List.filter direct rtProgram |> List.map .key))
             in
-            case RtCheck.checkExports header.exports moduleArities of
-                Err msg ->
-                    Err msg
+            case RtCheck.checkExportsMidc header.exports moduleArities of
+                -- U13: the RECORD, rendered — banner (`runtime.mid`), the law,
+                -- the `Hint:` line U8 wrote into it, and the own-runtime Note
+                -- above the banner.  U10 could only propagate the STRING here
+                -- (Check exposed `checkExports` alone), which flattened the
+                -- record to `EXPORT: <rule>`: no banner, no file, no hint.
+                Err e ->
+                    Err (renderRuntime module_.source e)
 
                 Ok () ->
                     Ok
@@ -532,6 +544,248 @@ loadText source =
                         , abi = abiTable module_.decls ast
                         , hosted = List.any (\d -> d.key == "Rt.hostRun") ast
                         }
+
+
+-- ===================== THE LANES' FILE NAMES (U10) =====================
+
+
+{-| The RUNTIME lane's file name.  A CONSTANT, not a parameter: the lane is
+`load`/`loadArm`, whose text comes from osier-compiler/runtime.mid by contract
+(this module's header: the text arrives as `load`'s argument, never from a
+compiled-in blob), so there is exactly one file this lane can be reading.
+-}
+runtimeFile : String
+runtimeFile =
+    "runtime.mid"
+
+
+{-| plan-b's OWN-RUNTIME NOTE — the line the runtime lane puts ABOVE any
+rejection it reports.
+
+Why a line of its own rather than the record's `hint`: the note is about WHO
+OWNS the failure, not about how to fix it, and it must ride payloads that never
+became a `MidcError` at all (the arm-splice refusal, the parse payload's
+banner re-slot).  Above the banner, because the reader's first move on a broken
+runtime.mid is to look for their own program's mistake — the note answers
+before they start looking.
+-}
+ownRuntimeNote : String
+ownRuntimeNote =
+    "Note: this error is in osier's own runtime (runtime.mid), not in your program — please report it"
+
+
+{-| The runtime lane's own-runtime frame around a payload that has no banner of
+its own (the splice refusal, a parse payload's re-slotted banner).
+
+NOT used for a `MidcError` the lane renders: `renderRuntime` below puts the
+note above the record's own `runtime.mid` banner, which is what the export
+judgment gets since U13.
+-}
+withOwnRuntimeNote : String -> String
+withOwnRuntimeNote payload =
+    ownRuntimeNote ++ "\n" ++ payload
+
+
+{-| A structured Mid-c rejection as the RUNTIME lane prints it: the banner's
+path is `runtime.mid` and the own-runtime Note sits above the banner.  The
+snippet quotes `source` — the text the AST was actually parsed from, i.e. the
+SPLICED arm text — and its row numbers ARE rows of the committed runtime.mid
+because both splices (this module's `spliceArm` and `run.js`'s nursery
+`spliceMidRegion`) blank a dropped line instead of removing it (u12).  A splice
+that dropped lines outright would render a row an editor of the file cannot
+find: MEASURED before the fix, a break at file row 3029 printed `2973|`.
+-}
+renderRuntime : String -> MidErr.MidcError -> String
+renderRuntime source e =
+    withOwnRuntimeNote (MidErr.render { source = source, path = runtimeFile } e)
+
+
+{-| Put the LANE's file name on a payload `Mid.RtLang.Parse` already rendered.
+
+`Parse`'s entry points return the RENDERED `SYNTAX PROBLEM` and are TEXT-ONLY:
+the banner's PATH slot therefore carries the position (`row:col`) and no file
+name (U6's decision, Parse.elm:4240-4260).  The lane is the only place that
+knows which file the text came from, so it PREFIXES it — `<file>:<row>:<col>` —
+which keeps the position (it exists nowhere else in that payload) and names the
+file.  This is a re-slot, NOT a re-render: `Parse` does not hand its
+`MidcError` out, and rebuilding the rule/snippet here would be a second
+renderer.  The edit is safe by construction: the renderer's banner is
+`"-- " ++ title ++ " " ++ dashes ++ " " ++ path` (Error.elm's `banner`), so the
+PATH is the LAST space-delimited field of line 1.  The dash run keeps the
+length it was rendered with, so naming a file pushes the banner past
+`lineWidth` by the name's length — the renderer's own long-path behaviour
+(`banner` never wraps, it clamps the dashes at 1), and re-sizing the dashes
+here would mean re-deriving the renderer's formula in the lane.  A payload with
+no banner (a bare string) passes through untouched.
+-}
+namePayload : String -> String -> String
+namePayload file rendered =
+    case RtAst.splitLines rendered of
+        banner :: rest ->
+            if String.startsWith "-- " banner then
+                let
+                    cut =
+                        lastSpaceIndex banner
+
+                    renamed =
+                        String.slice 0 cut banner
+                            ++ " "
+                            ++ file
+                            ++ ":"
+                            ++ String.slice (cut + 1) (String.length banner) banner
+                in
+                String.join "\n" (renamed :: rest)
+
+            else
+                rendered
+
+        [] ->
+            rendered
+
+
+{-| The index of the last space in a string (0 when there is none — the
+degenerate banner then gets the file name in front of the whole line rather
+than crashing; no rendered banner can reach that, since `banner` always emits
+the two separators).
+-}
+lastSpaceIndex : String -> Int
+lastSpaceIndex s =
+    let
+        go : Int -> Int
+        go i =
+            if i <= 0 then
+                0
+
+            else if String.slice i (i + 1) s == " " then
+                i
+
+            else
+                go (i - 1)
+    in
+    go (String.length s - 1)
+
+
+{-| The USER lane's file name: `<HeaderName>.mid` — plan-b's spelling, and
+unambiguous because the header name is MANDATORY for a user module
+(`parseUserModule` rejects the headerless form) and it is the namespace every
+key is qualified by.
+
+A file whose header the PARSER could not read cannot hand its name back, so the
+scan below reconstructs it from the text (see `headerName`).  When even that
+finds nothing, the LANE's name is used: a made-up filename would be a lie, and
+"the user lane" is what is actually known.
+-}
+userFile : String -> String
+userFile source =
+    case headerName source of
+        Just name ->
+            name ++ ".mid"
+
+        Nothing ->
+            "user.mid"
+
+
+{-| The module name of a `.mid` whose PARSE FAILED — the one case where the
+name cannot be taken from the parsed header.
+
+The reconstruction is a LINE scan for the header, and it is sound because the
+grammar gives the word `module` no other role: the header is `module <ident>`
+as a top-level construct (`Parse.moduleNameLine`, entered by peeking that exact
+token), comments begin `//` (so a comment line's first token is never
+`module`), and no expression or statement begins with it.  The scan STOPS at
+the first other top-level construct (`defun`/`export`/`struct`/`enum`/`extern`),
+because the header is the FIRST construct a module may carry — so a broken
+headerless file whose body happens to contain a line starting with `module` is
+NOT named after that line.  INTERPRETATION, not a measurement of every possible
+text: a miss degrades to the lane's name (`userFile`) rather than to a wrong
+filename.
+-}
+headerName : String -> Maybe String
+headerName source =
+    let
+        go lines =
+            case lines of
+                [] ->
+                    Nothing
+
+                line :: rest ->
+                    case headerNameIn line of
+                        Just name ->
+                            Just name
+
+                        Nothing ->
+                            if startsTopLevel line then
+                                Nothing
+
+                            else
+                                go rest
+    in
+    go (RtAst.splitLines source)
+
+
+{-| Does this line open one of the module's other top-level constructs?  (The
+header, when there is one, comes before all of them.)
+-}
+startsTopLevel : String -> Bool
+startsTopLevel line =
+    let
+        body =
+            dropLeadingSpace line
+
+        kw word =
+            String.startsWith (word ++ " ") body || String.startsWith (word ++ "\t") body
+    in
+    kw "defun" || kw "export" || kw "struct" || kw "enum" || kw "extern"
+
+
+headerNameIn : String -> Maybe String
+headerNameIn line =
+    let
+        body =
+            dropLeadingSpace line
+    in
+    if String.startsWith "module " body || String.startsWith "module\t" body then
+        let
+            name =
+                firstWord (String.dropLeft 7 body)
+        in
+        if name == "" then
+            Nothing
+
+        else
+            Just name
+
+    else
+        Nothing
+
+
+dropLeadingSpace : String -> String
+dropLeadingSpace s =
+    if String.startsWith " " s || String.startsWith "\t" s then
+        dropLeadingSpace (String.dropLeft 1 s)
+
+    else
+        s
+
+
+{-| The text up to the first space or tab (the module name is one identifier —
+`Parse.moduleName` is `surfaceName`, no dots, no spaces).
+-}
+firstWord : String -> String
+firstWord s =
+    let
+        go : Int -> Int
+        go i =
+            if i >= String.length s then
+                i
+
+            else if String.slice i (i + 1) s == " " || String.slice i (i + 1) s == "\t" then
+                i
+
+            else
+                go (i + 1)
+    in
+    String.slice 0 (go 0) s
 
 
 -- ============================ USER .mid modules (M3) ============================
@@ -557,17 +811,21 @@ type alias UserModule =
 
 
 {-| A PARSED (not yet checked/lowered) user `.mid`: the namespace-qualified
-name, the export block, the file-scoped `struct`/`enum` decls, and the defun
-AST.  A RECORD rather than a tuple (A2: Elm caps tuples at 3) so the DECLS
-ride through — before A2 the parse result was a `(name, exports, ast)`
-3-tuple that silently DROPPED `module_.decls`, so a user `.mid` carrying a
-`struct` declaration parsed it into nothing before the checker.
+name, the export block, the file-scoped `struct`/`enum` decls, the defun
+AST, and the EXACT text the module was parsed from (verbatim — it rides
+out so `checkLowerUserModule` can put it on the `Ast.Module` it builds,
+which is what a later diagnostic quotes a snippet from).  A RECORD rather
+than a tuple (A2: Elm caps tuples at 3) so the DECLS ride through — before
+A2 the parse result was a `(name, exports, ast)` 3-tuple that silently
+DROPPED `module_.decls`, so a user `.mid` carrying a `struct` declaration
+parsed it into nothing before the checker.
 -}
 type alias ParsedUserModule =
     { name : String
     , exports : List RtAst.Export
     , decls : List RtAst.Decl
     , ast : RtAst.Program
+    , source : String
     }
 
 
@@ -582,24 +840,44 @@ build the cross-module extern table before the check+lower pass.
 -}
 parseUserModule : String -> Result String ParsedUserModule
 parseUserModule source =
+    let
+        -- THE LANE'S FILE NAME (U10) — `<HeaderName>.mid`, or the lane's own
+        -- name when the text carries no header line to read it from.  See
+        -- `userFile`.
+        file =
+            userFile source
+    in
     case Mid.RtLang.Parse.parseModule source of
-        Err msg ->
-            Err msg
+        -- THE USER LANE'S PARSE EXIT (U10): the parser renders the SYNTAX
+        -- PROBLEM and knows only the POSITION, so the lane prefixes the name it
+        -- reconstructed from the text — `<Name>.mid:<row>:<col>`.
+        Err rendered ->
+            Err (namePayload file rendered)
 
         Ok module_ ->
             case module_.header.name of
                 Nothing ->
-                    Err "user .mid: no `module Name` header — a user module needs a namespace to qualify its keys"
+                    -- no header came back, so `file` is the LANE's name here
+                    -- (`userFile`'s fallback): a `.mid` that never declared a
+                    -- namespace is exactly the file this lane cannot name.
+                    Err (MidErr.render { source = source, path = file } noHeaderError)
 
                 Just name ->
+                    let
+                        -- THE PARSED HEADER IS THE TRUTH for the banner path —
+                        -- `userFile`'s scan exists only for the parse failure
+                        -- above, where no header came back.
+                        renderNamed =
+                            MidErr.render { source = source, path = name ++ ".mid" }
+                    in
                     case firstKeyNotPrefixed name (List.map .key module_.defuns) of
                         Just bad ->
-                            Err (namespaceError name bad)
+                            Err (renderNamed (namespaceError name bad))
 
                         Nothing ->
                             case firstKeyNotPrefixed name (List.map .key module_.header.exports) of
                                 Just bad ->
-                                    Err (namespaceError name bad)
+                                    Err (renderNamed (namespaceError name bad))
 
                                 Nothing ->
                                     -- A2: the file-scoped `struct`/`enum`
@@ -612,12 +890,13 @@ parseUserModule source =
                                         , exports = module_.header.exports
                                         , decls = module_.decls
                                         , ast = module_.defuns
+                                        , source = source
                                         }
 
 
 {-| Check + lower a PARSED user module against the given extern table — the
 SAME decl-carrying pipeline as `runtime.mid` (`Check.checkExports` ->
-`Check.checkModule` -> `LowerToIr.lowerModule`; A2 fixed this — the user lane
+`Check.checkModuleMidc` -> `LowerToIr.lowerModule`; A2 fixed this — the user lane
 used to call the DECL-LESS `checkProgram`/`lowerProgram`, so a user `.mid`
 carrying `struct`/`enum` declarations had them dropped), with the runtime's
 own `surf` path.  `externs`
@@ -634,18 +913,42 @@ checkLowerUserModule externs parsed =
         arities =
             Dict.fromList (List.map (\d -> ( d.key, List.length d.params )) parsed.ast)
 
-        -- A2: a decl-carrying MODULE record — the SAME `Check.checkModule`
+        -- A2: a decl-carrying MODULE record — the SAME `Check.checkModuleMidc`
         -- the runtime lane uses, so a user `.mid`'s struct/enum decls reach
         -- the checker (J11/J14) and the lowerer (the field/index table).
+        --
+        -- THE SOURCE TEXT: `ParsedUserModule.source` is the text the parse
+        -- consumed and this record COPIES it, so the two cannot disagree —
+        -- the parsed one is the carrier across the parse/check split and this
+        -- one is the same string, which is what makes rendering a snippet from
+        -- either of them the same act.
         module_ =
             { header = { name = Just parsed.name, exports = parsed.exports }
             , decls = parsed.decls
             , defuns = parsed.ast
+            , source = parsed.source
             }
+
+        -- THE USER LANE'S EXIT (U10): every rejection renders with the file's
+        -- own name in the banner and the module text for the snippet.  The
+        -- header name is MANDATORY for a user module (`parseUserModule` rejects
+        -- the headerless form), so `<HeaderName>.mid` is the module's
+        -- namespace, not an invented path.
+        renderErr =
+            MidErr.render { source = parsed.source, path = parsed.name ++ ".mid" }
     in
-    RtCheck.checkExports parsed.exports arities
-        |> Result.andThen (\_ -> RtCheck.checkModule externs [] module_)
-        |> Result.andThen (\_ -> Mid.RtLang.LowerToIr.lowerModule module_)
+    -- U13: the export judgment rendered as a RECORD, with this lane's own
+    -- file name in the banner and the `Hint:` line U8 wrote into it.  It was
+    -- the one family a USER hits directly and the only one rendered as a bare
+    -- one-liner (`EXPORT: <rule>` — no banner, no file, no hint), because
+    -- `Check.elm` exposed only the string adapter.
+    RtCheck.checkExportsMidc parsed.exports arities
+        |> Result.mapError renderErr
+        |> Result.andThen
+            (\_ ->
+                RtCheck.checkModuleMidc externs [] module_ |> Result.mapError renderErr
+            )
+        |> Result.andThen (\_ -> Mid.RtLang.LowerToIr.lowerModule module_ |> Result.mapError renderErr)
         |> Result.map
             (\defuns ->
                 { name = parsed.name
@@ -675,15 +978,47 @@ firstKeyNotPrefixed name keys =
                 Just k
 
 
-namespaceError : String -> String -> String
+{-| THE NAMING PROBLEM of a key that is not qualified by its module's name —
+re-housed as a `MidcError` (tag `NS`, no span this arc: the `Defun`/`Export`
+key that would point at a position is not in hand at this site, and a
+synthesized span is never allowed).
+
+The three welded things split per the arc's policy: the RULE is the law
+(`not qualified by the module name`), the HINT is the fix, and the site —
+the module and the offending key — rides the rule itself because there is no
+`key` field value that would mean the right thing here (the offending key is
+NOT a key of this module; it is the one that fails to be).
+-}
+namespaceError : String -> String -> MidErr.MidcError
 namespaceError name bad =
-    "user .mid: module '"
-        ++ name
-        ++ "' — key '"
-        ++ bad
-        ++ "' is not qualified by the module name (every defun/export key must be '"
-        ++ name
-        ++ ".<fn>')"
+    { tag = "NS"
+    , title = MidErr.titleFor "NS"
+    , rule = "key '" ++ bad ++ "' is not qualified by the module name '" ++ name ++ "'"
+    , hint =
+        Just
+            ("every defun/export key must be spelled '"
+                ++ name
+                ++ ".<fn>' — a module owns only its own keys"
+            )
+    , key = Nothing
+    , span = Nothing
+    }
+
+
+{-| The user lane's OTHER naming problem: a `.mid` with no `module Name`
+header at all.  Same family and same render (`NS`), so the lane's two
+refusals read alike — this one has no name to put in the banner path, which
+is why its caller passes the LANE's name (`userFile`'s fallback).
+-}
+noHeaderError : MidErr.MidcError
+noHeaderError =
+    { tag = "NS"
+    , title = MidErr.titleFor "NS"
+    , rule = "no `module Name` header"
+    , hint = Just "a user module needs a namespace to qualify its keys — add `module <Name>` as the file's first line"
+    , key = Nothing
+    , span = Nothing
+    }
 
 
 {-| The three `program` switches as the surface language's ACTIVE flag set

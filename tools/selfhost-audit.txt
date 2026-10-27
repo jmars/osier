@@ -3,7 +3,7 @@
 # fix rows wave-by-wave (parse -> unknown-name -> type -> lowering),
 # re-run the script, watch failure rows drop.
 #
-# Group:    64 sources = the compiler's own frontend (src/{Lower,Type,
+# Group:    78 sources = the compiler's own frontend (src/{Lower,Type,
 #           Mid,Frontend} + the top-level helpers src/{Parser,
 #           ParserFast,ParserWithComments,Rope}.elm + src/{Char,List}/
 #           Extra.elm) + the parse closure pulled into src/Elm**/
@@ -12,13 +12,14 @@
 # Corpus:   src/Prelude.elm + src/Runtime.elm + core-libs/* (fixed side,
 #           NOT audited — always compiled as the corpus)
 # Compiler: node osier-compiler/run.js --batch (stock-built compiler.js)
-# Date:     2026-10-10T19:12:19Z
+# Date:     2026-10-26T10:41:48Z
 #
 # Columns: <RESULT>\t<file>\t<row:col>\t<message>
 # RESULT classes: OK | parse-error | unknown-name | type-error |
 #                 lowering-error | TOOLING-FAIL
 # Per-file rows show the FIRST error only (Main reports one per group).
 #
+OK	osier-compiler/src/IntegerLiteral.elm		
 OK	osier-compiler/src/Lower/Resolve.elm		
 OK	osier-compiler/src/Lower/Scope.elm		
 OK	osier-compiler/src/Lower/Expr.elm		
@@ -78,18 +79,31 @@ OK	osier-compiler/src/Mid/Module.elm
 OK	osier-compiler/src/Mid/Qbe/Il.elm		
 OK	osier-compiler/src/Mid/Qbe/Types.elm		
 OK	osier-compiler/src/Mid/Qbe/Flatten.elm		
+OK	osier-compiler/src/Mid/Qbe/Liveness.elm		
 OK	osier-compiler/src/Mid/Qbe/Lower.elm		
 OK	osier-compiler/src/Mid/Qbe/Peephole.elm		
 OK	osier-compiler/src/Mid/Qbe/Print.elm		
+OK	osier-compiler/src/Mid/Qbe/Monomorphise.elm		
+OK	osier-compiler/src/Mid/TaintCheck.elm		
 OK	osier-compiler/src/Mid/QbeModule.elm		
 OK	osier-compiler/selfhost/NativeMain.elm		
+OK	osier-compiler/src/Mid/Audit.elm		
+OK	osier-compiler/src/Mid/Rt.elm		
+OK	osier-compiler/src/Mid/RtPrims.elm		
+OK	osier-compiler/src/Mid/RtLayout.elm		
+OK	osier-compiler/src/Mid/RtGc.elm		
+OK	osier-compiler/src/Mid/RtLang/Ast.elm		
+OK	osier-compiler/src/Mid/RtLang/Error.elm		
+OK	osier-compiler/src/Mid/RtLang/Parse.elm		
+OK	osier-compiler/src/Mid/RtLang/Check.elm		
+OK	osier-compiler/src/Mid/RtLang/LowerToIr.elm		
 #
-# ===== whole-group pass (all 64 sources as one group) =====
+# ===== whole-group pass (all 78 sources as one group) =====
 WHOLE-GROUP	OK		
 #
 # ===== summary =====
-# files:          64
-# ok:             64
+# files:          78
+# ok:             78
 # parse-error:    0
 # unknown-name:   0
 # type-error:     0

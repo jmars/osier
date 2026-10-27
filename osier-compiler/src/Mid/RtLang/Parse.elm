@@ -278,7 +278,8 @@ and — per the O(n) invariant in the token-plumbing section — NO
 -}
 
 import Dict exposing (Dict)
-import Mid.RtLang.Ast exposing (AggShape(..), ArrayInit(..), Block, Builtin(..), Decl(..), Defun, Effect(..), EnumEntry, Exp(..), Export, ExportSig, FfiParam, FfiSig, FfiTy(..), Field, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Module, OTy(..), PTy(..), Param, Program, SizeTarget(..), Stmt(..), StructInit(..), StructMember(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName)
+import Mid.RtLang.Ast exposing (AggShape(..), ArrayInit(..), Block, Builtin(..), Decl(..), Defun, Effect(..), EnumEntry, Exp(..), Export, ExportSig, FfiParam, FfiSig, FfiTy(..), Field, Flag(..), FlagGuard(..), FltBinOp(..), FltCmpOp(..), Header, Located, Module, OTy(..), PTy(..), Param, Program, SizeTarget(..), Stmt(..), StructInit(..), StructMember(..), Term(..), Type(..), WordBinOp(..), WordCmpOp(..), builtinName, splitLines)
+import Mid.RtLang.Error as Error
 import Parser exposing (DeadEnd, Problem(..))
 import ParserFast
 
@@ -288,8 +289,8 @@ import ParserFast
 
 
 {-| Parse one surface expression and require it to be the whole input.
-The error is a rendered `row:col: message` list (ParserFast's DeadEnd
-surface) — loud, with position, as the checker T4 will also be.
+The error is the lane's RENDERED `SYNTAX PROBLEM` (`Mid.RtLang.Error`) —
+loud, with position, as the checker's errors are.
 -}
 parseExp : String -> Result String Exp
 parseExp src =
@@ -297,8 +298,13 @@ parseExp src =
 
 
 {-| The shared whole-input run for every `parse*` entry: the value on a
-full match, otherwise the rendered `row:col: message` list (ParserFast's
-DeadEnd surface) — loud, with position, as the checker T4 will also be.
+full match, otherwise the RENDERED `SYNTAX PROBLEM` — banner, the rule
+naming what the parser expected, a snippet with the position, the machine
+footer (`parseError` builds it, `Mid.RtLang.Error.render` prints it).
+
+The result stays a `String`: every `parse*` caller (`Mid.Rt`'s two lanes,
+TestMain's rows) takes the rendered message and frames it itself — the lane
+exits prefix `"err "`, which is the contract `run.js`/`qbe-mk.sh` read.
 -}
 resultOfRun : ParserFast.Parser res -> String -> Result String res
 resultOfRun parser src =
@@ -307,7 +313,11 @@ resultOfRun parser src =
             Ok res
 
         Err deadEnds ->
-            Err (String.join "; " (List.map deadEndToString deadEnds))
+            Err
+                (Error.render
+                    { source = src, path = deadEndLabel deadEnds }
+                    (parseError src deadEnds)
+                )
 
 
 {-| Parse a WHOLE PROGRAM (`defun*`) — `Mid.RtLang.Ast.Program`.
@@ -1565,11 +1575,20 @@ the `defun`/`@` dispatch.
 moduleTarget : ParserFast.Parser Module
 moduleTarget =
     followedBySkipWsComments
-        (ParserFast.map3
-            (\hdr declarations defs -> { header = hdr, decls = declarations, defuns = defs })
-            header
-            decls
-            programDefuns
+        -- `src` is not in scope inside the `map3` below, so the module text
+        -- the AST was parsed from is captured here (offsetSourceAndThen reads
+        -- the current offset/source WITHOUT consuming, so it cannot shift the
+        -- header/decl/defun dispatch).
+        (ParserFast.offsetSourceAndThen
+            (\_ src ->
+                ParserFast.map3
+                    (\hdr declarations defs ->
+                        { header = hdr, decls = declarations, defuns = defs, source = src }
+                    )
+                    header
+                    decls
+                    programDefuns
+            )
         )
 
 
@@ -2689,22 +2708,43 @@ flagNameAt offset src =
 {-| `defun Key(params) -> ty block` — everything after the guard slot.
 Builds a `List FlagGuard -> Defun` function so the guard arm (which sees
 its guard first, in source order) can hand `[guard]` in.
+
+The defun's HEADER span is measured here: `start` is this parser's entry
+offset — the `defun` keyword (a guarded defun enters `defunTail` after its
+guards, so the guards are NOT in the span) — and `end` is one past the body's
+opening `{` (see `defunBody`).  The body itself is not in the span; its errors
+carry their own statements' spans.
 -}
 defunTail : ParserFast.Parser (List FlagGuard -> Defun)
 defunTail =
-    ParserFast.map4
-        (\key params ty body flags ->
-            { key = key
-            , flags = flags
-            , params = params
-            , ret = ty
-            , body = body
-            }
+    ParserFast.offsetSourceAndThen
+        (\headerStart _ ->
+            ParserFast.map4
+                (\key params ty ( body, headerEnd ) flags ->
+                    { key = key
+                    , flags = flags
+                    , params = params
+                    , ret = ty
+                    , body = body
+                    , span = { start = headerStart, end = headerEnd }
+                    }
+                )
+                (spelled "defun" keyName)
+                (spelled "(" paramList)
+                (spelled ")" (spelled "->" surfaceType))
+                defunBody
         )
-        (spelled "defun" keyName)
-        (spelled "(" paramList)
-        (spelled ")" (spelled "->" surfaceType))
-        block
+
+
+{-| The body, with the offset just PAST its opening `{` — the end of the
+defun's header span.  The offset read is the position `block` is entered at,
+which is the `{` itself: every token reader consumes its own trailing
+whitespace and comments (`spelled`, Parse.elm:3770-3773), so `-> ty` has left
+the position on the brace.
+-}
+defunBody : ParserFast.Parser ( Block, Int )
+defunBody =
+    ParserFast.offsetSourceAndThen (\braceAt _ -> ParserFast.map (\b -> ( b, braceAt + 1 )) block)
 
 
 {-| The defun's key: a full dotted Rt name (`Rt.getpid`), VERBATIM — the
@@ -2929,14 +2969,19 @@ blockTarget =
 {-| `{ stmt* term }`.  The fold sees every item; the closing `}` is
 consumed AFTER the fold, so a block that never reached a terminator
 reports against the `}` (or the end of input) that exposed it.
+
+The `}`'s own offset is captured here, BEFORE it is consumed, and handed to the
+fold: it is the span of any node the fold had to SYNTHESIZE (`blockOfFold`'s
+unreachable fall-through term), so a synthesized node points at the `}` that
+ended the block — never at a user token it did not come from.
 -}
 block : ParserFast.Parser Block
 block =
     spelled "{"
         (ParserFast.map2
-            (\folded _ -> blockOfFold folded)
+            (\folded closeBrace -> blockOfFold closeBrace folded)
             blockInner
-            (spelled "}" (succeed ()))
+            (ParserFast.offsetSourceAndThen (\braceAt _ -> spelled "}" (succeed braceAt)))
         )
 
 
@@ -2945,7 +2990,7 @@ exactly one terminator and nothing after it (the module header has the
 mechanism).  Statements accumulate REVERSED (prepend is O(1)); the
 terminator arms consume only themselves — `block` owns the `}`.
 -}
-blockInner : ParserFast.Parser ( List Stmt, Maybe Term, Bool )
+blockInner : ParserFast.Parser ( List (Located Stmt), Maybe (Located Term), Bool )
 blockInner =
     ParserFast.validate
         (\( _, mterm, stray ) -> not stray && mterm /= Nothing)
@@ -2971,16 +3016,16 @@ loopBlock : ParserFast.Parser Block
 loopBlock =
     spelled "{"
         (ParserFast.map2
-            (\folded _ -> loopBlockOfFold folded)
+            (\folded closeBrace -> loopBlockOfFold closeBrace folded)
             loopInner
-            (spelled "}" (succeed ()))
+            (ParserFast.offsetSourceAndThen (\braceAt _ -> spelled "}" (succeed braceAt)))
         )
 
 
 {-| The loop body's fold: the SAME `itemStep`/`itemReduce` machinery, with
 `validate` refusing only a stray item AFTER the terminator.
 -}
-loopInner : ParserFast.Parser ( List Stmt, Maybe Term, Bool )
+loopInner : ParserFast.Parser ( List (Located Stmt), Maybe (Located Term), Bool )
 loopInner =
     ParserFast.validate
         (\( _, _, stray ) -> not stray)
@@ -2993,32 +3038,46 @@ loopInner =
         )
 
 
-loopBlockOfFold : ( List Stmt, Maybe Term, Bool ) -> Block
-loopBlockOfFold ( revStmts, mterm, _ ) =
+{-| `closeBrace` is the block's `}` offset, captured by `loopBlock` before it
+consumed the brace.  A body that reached no terminator is the fall-through —
+"next iteration" — so the fold SYNTHESIZES `continue` and gives it that `}`
+as its span: the synthesized node stands where the block ended, and pointing it
+at the user's `}` is the honest position (there is no `continue` token to point
+at, and inventing one would be a lie about the source).
+-}
+loopBlockOfFold : Int -> ( List (Located Stmt), Maybe (Located Term), Bool ) -> Block
+loopBlockOfFold closeBrace ( revStmts, mterm, _ ) =
     case mterm of
         Just term ->
             { stmts = List.reverse revStmts, term = term }
 
         Nothing ->
             -- the fall-through: this body's next iteration
-            { stmts = List.reverse revStmts, term = TContinue }
+            { stmts = List.reverse revStmts
+            , term = { node = TContinue, span = { start = closeBrace, end = closeBrace + 1 } }
+            }
 
 
 {-| One folded item: a statement, or the block's terminator (the `End`
 marks that nothing may follow it, not that it consumed the `}`).
+
+The node is BARE here and the span rides the `Located` wrapper `itemStep`
+returns — so the arms of `itemStepAt` (the grammar) stay exactly as they were
+and there is ONE place, `itemReduce`, where an item's span is put on the
+statement or terminator it came from.
 -}
 type Item
     = IStmt Stmt
     | ITermEnd Term
 
 
-itemReduce : Item -> ( List Stmt, Maybe Term, Bool ) -> ( List Stmt, Maybe Term, Bool )
+itemReduce : Located Item -> ( List (Located Stmt), Maybe (Located Term), Bool ) -> ( List (Located Stmt), Maybe (Located Term), Bool )
 itemReduce item ( revStmts, mterm, stray ) =
-    case item of
+    case item.node of
         IStmt stmt ->
             case mterm of
                 Nothing ->
-                    ( stmt :: revStmts, Nothing, stray )
+                    ( { node = stmt, span = item.span } :: revStmts, Nothing, stray )
 
                 Just _ ->
                     -- a statement AFTER the terminator: the fold must not
@@ -3029,15 +3088,19 @@ itemReduce item ( revStmts, mterm, stray ) =
         ITermEnd term ->
             case mterm of
                 Nothing ->
-                    ( revStmts, Just term, stray )
+                    ( revStmts, Just { node = term, span = item.span }, stray )
 
                 Just _ ->
                     -- a second terminator (e.g. a mid-block `return` or `recur`)
                     ( revStmts, mterm, True )
 
 
-blockOfFold : ( List Stmt, Maybe Term, Bool ) -> Block
-blockOfFold ( revStmts, mterm, _ ) =
+{-| `closeBrace` is the block's `}` offset (see `loopBlockOfFold`); the
+UNREACHABLE arm is the only synthesized node here and gets it — a documented
+point span on the `}` rather than a `{0, 0}` that would render as row 1.
+-}
+blockOfFold : Int -> ( List (Located Stmt), Maybe (Located Term), Bool ) -> Block
+blockOfFold closeBrace ( revStmts, mterm, _ ) =
     case mterm of
         Just term ->
             { stmts = List.reverse revStmts
@@ -3047,16 +3110,16 @@ blockOfFold ( revStmts, mterm, _ ) =
         Nothing ->
             -- unreachable: `validate` in blockInner rejects a fold that saw no terminator
             { stmts = List.reverse revStmts
-            , term = TRet (EInt 0)
+            , term = { node = TRet (EInt 0), span = { start = closeBrace, end = closeBrace + 1 } }
             }
 
 
 {-| Dispatch one item by peeking its first token (the reserved-word
 table and the handback set are in the module header).
 -}
-itemStep : ParserFast.Parser Item
+itemStep : ParserFast.Parser (Located Item)
 itemStep =
-    ParserFast.offsetSourceAndThen itemStepAt
+    spanned (ParserFast.offsetSourceAndThen itemStepAt)
 
 
 itemStepAt : Int -> String -> ParserFast.Parser Item
@@ -3560,7 +3623,7 @@ bind, a pointer bind, a struct bind or a store/effect statement.  A
 TERMINATOR (`return`/`recur`/`break`/`continue`/a final `if`) is not an
 initialiser, so those keyword arms are absent by construction.
 -}
-forInit : ParserFast.Parser (Maybe Stmt)
+forInit : ParserFast.Parser (Maybe (Located Stmt))
 forInit =
     ParserFast.offsetSourceAndThen
         (\offset src ->
@@ -3570,7 +3633,9 @@ forInit =
                 spelled ";" (succeed Nothing)
 
             else
-                ParserFast.map Just forHeadStmt
+                -- the init is a statement in its own right and carries its OWN
+                -- span (distinct from the `for` statement's) — U3's row
+                ParserFast.map Just (spanned forHeadStmt)
         )
 
 
@@ -3580,7 +3645,7 @@ expression, and a declaration there would shadow a binder once per
 iteration.  The step's own `;` is OPTIONAL (C has no separator after the
 step): `for (k = 0; k < 6; k = k + 1)` and `... k = k + 1;)` both parse.
 -}
-forStep : ParserFast.Parser (Maybe Stmt)
+forStep : ParserFast.Parser (Maybe (Located Stmt))
 forStep =
     ParserFast.offsetSourceAndThen
         (\offset src ->
@@ -3589,11 +3654,13 @@ forStep =
 
             else
                 ParserFast.map Just
-                    (ParserFast.map stmtOf
-                        (ParserFast.validate
-                            stmtOk
-                            "a store needs a field or index on its left — write `p->f = e;` or `p[i] = e;`"
-                            (ParserFast.map2 (\e tail -> ( e, tail )) expression forStepTail)
+                    (spanned
+                        (ParserFast.map stmtOf
+                            (ParserFast.validate
+                                stmtOk
+                                "a store needs a field or index on its left — write `p->f = e;` or `p[i] = e;`"
+                                (ParserFast.map2 (\e tail -> ( e, tail )) expression forStepTail)
+                            )
                         )
                     )
         )
@@ -3814,6 +3881,39 @@ match is exactly it: always Good, consumes nothing.
 succeed : res -> ParserFast.Parser res
 succeed res =
     ParserFast.symbol "" res
+
+
+{-| `parser`, wrapped with the SOURCE SPAN it was parsed from: `start` is the
+offset `parser` is entered at, `end` the offset it stopped at.
+
+The wrapper CONSUMES NOTHING of its own (`offsetSourceAndThen` only reads
+`state.offset`, ParserFast.elm:383-392, and `succeed` above is a zero-length
+symbol), so the grammar's one whitespace discipline is untouched by
+construction: every token reader still consumes its own trailing whitespace and
+comments, and `end` is therefore the NEXT TOKEN's offset — overhanging trailing
+space and comments (Ast's `Span` doc pins that convention and `renderSpan`
+trims it).
+
+Applied from OUTSIDE the parser it wraps, never inside a constructor arm: the
+arms of `itemStepAt` are the grammar and stay span-free, so there is exactly
+one place per node kind where a span is attached.
+-}
+spanned : ParserFast.Parser a -> ParserFast.Parser (Located a)
+spanned parser =
+    ParserFast.offsetSourceAndThen
+        (\start _ ->
+            ParserFast.map2
+                (\node end -> { node = node, span = { start = start, end = end } })
+                parser
+                currentOffset
+        )
+
+
+{-| The offset the parser is at right now — a peek, consuming nothing.
+-}
+currentOffset : ParserFast.Parser Int
+currentOffset =
+    ParserFast.offsetSourceAndThen (\offset _ -> succeed offset)
 
 
 {-| The longest token starting at offset `start` of `src`:
@@ -4087,11 +4187,119 @@ surfaceCharReport s =
 -- ============================ error rendering ============================
 
 
+{-| The lane's ONE `PARSE` error: ParserFast's dead ends as a `MidcError`.
+
+TAG `PARSE`, no KEY (a syntax error has no defun scope to name — the header or
+the defun it would name may be exactly what failed to parse), no HINT (the fix
+is "spell what the rule says is expected"; a syntax error has no alternative
+spelling to suggest). The SPAN is a POINT at the position the parser gave up
+at: `DeadEnd.row`/`DeadEnd.col` are already 1-based in ParserFast's own
+convention (ParserFast.elm:202), so `offsetOfRowCol` inverts `Ast.rowColOf`
+against the same source and `Ast.renderSpan` resolves the point back to that
+exact row/col — one caret, at the reported column. The reported position is
+RENDERED here, never re-derived.
+
+WHY THE RULE CARRIES EVERY DEAD END AND THE SPAN ONLY THE FIRST: ParserFast
+collects all the alternatives that failed at the FURTHEST position
+(`ExpectingOneOf`'s rope, ParserFast.elm:214-241), so several dead ends are
+several spellings that would have been accepted AT THAT ONE POSITION — they
+share the span by construction, and dropping all but the head would lose
+information the previous `"; "` join carried. `problemText`'s 14 `Problem`
+shapes stay distinct (this is a re-housing, not a collapse): each still names
+what the parser expected.
+
+The `[]` arm is unreachable through `ParserFast.run` (a `Bad` always carries at
+least one dead end) and exists so the type is total; it degrades to a `Nothing`
+span and says so, rather than inventing a position.
+-}
+parseError : String -> List DeadEnd -> Error.MidcError
+parseError src deadEnds =
+    case deadEnds of
+        de :: _ ->
+            let
+                at =
+                    offsetOfRowCol src de.row de.col
+            in
+            { tag = "PARSE"
+            , title = Error.titleFor "PARSE"
+            , rule = String.join "; " (List.map (\d -> problemText d.problem) deadEnds)
+            , hint = Nothing
+            , key = Nothing
+            , span = Just { start = at, end = at }
+            }
+
+        [] ->
+            { tag = "PARSE"
+            , title = Error.titleFor "PARSE"
+            , rule = "unknown parse error"
+            , hint = Nothing
+            , key = Nothing
+            , span = Nothing
+            }
+
+
+{-| The position as the banner's PATH slot: `"row:col"`.
+
+WHY NOT A FILE NAME: `Parse` is text-only — it is handed a `String` and never
+a path (the lanes that know `runtime.mid` vs `<Name>.mid` are `Mid.Rt`'s, and
+they frame this rendered string rather than re-rendering it). Rather than
+invent a name, the banner's path slot carries the one thing the parse lane
+does know, so the payload's FIRST line is self-locating — which is what a
+reader of a `cat`'d `.ssa` sees before the snippet.
+-}
+deadEndLabel : List DeadEnd -> String
+deadEndLabel deadEnds =
+    case deadEnds of
+        de :: _ ->
+            String.fromInt de.row ++ ":" ++ String.fromInt de.col
+
+        [] ->
+            ""
+
+
+{-| The UTF-16 offset of a 1-based `(row, col)` in `src` — the inverse of
+`Ast.rowColOf`, i.e. the number a point span needs so that `Ast.renderSpan`
+prints the position the parser reported.
+
+Only `\n` ends a row (ParserFast's own accounting: `skipWhileHelp` and
+`skipWhileWhitespaceHelp` step `row + 1, col = 1` on `\n` and count a `\r` as
+a COLUMN, ParserFast.elm:3079/:3177 — the same rule `rowColOf` uses), and a
+column past the end of its line clamps to the end of the text, because the
+parser can report one position past the last character.
+-}
+offsetOfRowCol : String -> Int -> Int -> Int
+offsetOfRowCol src row col =
+    let
+        lineStart =
+            String.length
+                (String.join "\n" (List.take (max 0 (row - 1)) (splitLines src)))
+                + (if row <= 1 then
+                    0
+
+                   else
+                    1
+                  )
+    in
+    min (String.length src) (lineStart + max 0 (col - 1))
+
+
+{-| One dead end as the COMPACT `row:col: message` fragment. NOT the lane's
+error surface (that is `parseError`): this form is for a position that has to
+ride INSIDE a `ParserFast.problem` message — the number-literal rejects below
+build `"malformed number literal `1.5.2`: <this>"`, where the position belongs
+in the sentence and a banner would nest a second render inside the rule.
+-}
 deadEndToString : DeadEnd -> String
 deadEndToString de =
     String.fromInt de.row ++ ":" ++ String.fromInt de.col ++ ": " ++ problemText de.problem
 
 
+{-| What the parser expected, per `Problem` shape — all 14 kept distinct, so a
+`SYNTAX PROBLEM`'s rule names the token (``expected `]` ``) rather than saying
+"parse failed". `Problem msg` passes our own custom rejections through
+verbatim (Parse.elm's `ParserFast.problem` sites, e.g. `"expected an FFI width
+(i32, u32, i64, u64, ptr, f64, void), found `u8`"`).
+-}
 problemText : Problem -> String
 problemText p =
     case p of

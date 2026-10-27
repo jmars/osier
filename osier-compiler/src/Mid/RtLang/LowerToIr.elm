@@ -95,8 +95,12 @@ module re-derives only what its OWN rules need (`diverges`, mirrored from
 Check's J7 predicate because the else-nesting rule reads it) and turns
 every should-be-impossible shape into a loud internal error naming the
 judgment that should have rejected it.  A CHECKED program cannot reach
-them; they exist so a lowerer/checker drift fails loudly instead of
-lowering a wrong tree.
+them — TRUE OF THE MATCHED PAIR only: the two entries are `checkProgram`
++ `lowerProgram` (decl-less) and `checkModule` + `lowerModule`
+(decl-carrying), and nothing in the signatures ties a checker to its
+lowerer, so a MIXED pair is reachable (the measured gap, with its repro,
+is written out at `internal` below); they exist so a lowerer/checker drift
+fails loudly instead of lowering a wrong tree.
 
 SELFHOST DISCIPLINE (the mid-lane hazard, Rt.elm:531-545): every helper is
 a TOP-LEVEL definition — the mutually recursive walk (`lowerExp` ⇄
@@ -143,6 +147,7 @@ import Mid.RtLang.Ast
         , builtinName
         )
 import Mid.RtLang.Check as Check
+import Mid.RtLang.Error as MidErr
 import Mid.RtLayout as RtLayout
 
 
@@ -263,8 +268,8 @@ assignedNames b =
 blockAssigned : Block -> Dict String ()
 blockAssigned b =
     List.foldl (\stmt acc -> Dict.union (stmtAssigned stmt) acc)
-        (termAssigned b.term)
-        b.stmts
+        (termAssigned b.term.node)
+        (List.map .node b.stmts)
 
 
 termAssigned : Term -> Dict String ()
@@ -341,7 +346,7 @@ stmtAssigned stmt =
             Dict.union
                 (case rec.init of
                     Just st ->
-                        stmtAssigned st
+                        stmtAssigned st.node
 
                     Nothing ->
                         Dict.empty
@@ -350,7 +355,7 @@ stmtAssigned stmt =
                     (Dict.union
                         (case rec.step of
                             Just st ->
-                                stmtAssigned st
+                                stmtAssigned st.node
 
                             Nothing ->
                                 Dict.empty
@@ -475,7 +480,7 @@ What is NOT rewritten is a block that merely falls THROUGH inside the body:
 its fall-through continues the enclosing block's flow (whose end gets the
 step once).  Nothing crosses into a NESTED loop — its continues are its own.
 -}
-forBody : Maybe Stmt -> Block -> Block
+forBody : Maybe (Ast.Located Stmt) -> Block -> Block
 forBody step body =
     case step of
         Nothing ->
@@ -489,15 +494,21 @@ forBody step body =
 leave the block.  A `TIf` with both arms explicit recurses into BOTH (each is
 an end of this block).
 -}
-forTail : Stmt -> Block -> Block
+forTail : Ast.Located Stmt -> Block -> Block
 forTail step b =
     let
         stmts1 =
             List.map (forStmt step) b.stmts
+
+        -- the block's terminator, wrapper and all: every rewrite below stands
+        -- in for it, so it keeps the terminator's span (`Ast.reposition` for a
+        -- different KIND of node, a record update for the same kind)
+        term =
+            b.term
     in
-    case b.term of
+    case term.node of
         TContinue ->
-            { stmts = stmts1 ++ [ step ], term = TContinue }
+            { stmts = stmts1 ++ [ step ], term = term }
 
         TIf c t Nothing ->
             -- the then-branch diverges (J7), so as a MID-BLOCK if it is legal
@@ -507,46 +518,49 @@ forTail step b =
             -- alone is a continue that SKIPS the step (MEASURED: exactly this
             -- arm, found by this row — one step store where there should be
             -- two, i.e. an infinite loop in the .ssa).
-            { stmts = stmts1 ++ [ SIf c (forContinueBlock step t) Nothing, step ]
-            , term = TContinue
+            { stmts = stmts1 ++ [ Ast.reposition term (SIf c (forContinueBlock step t) Nothing), step ]
+            , term = term
             }
 
         TIf c t (Just eb) ->
             { stmts = stmts1
-            , term = TIf c (forTail step t) (Just (forTail step eb))
+            , term = { term | node = TIf c (forTail step t) (Just (forTail step eb)) }
             }
 
         other ->
-            { stmts = stmts1, term = other }
+            { stmts = stmts1, term = term }
 
 
 {-| A block reached through a STATEMENT (an `if`'s branch): only its explicit
 `continue;` sites take the step.
 -}
-forContinueBlock : Stmt -> Block -> Block
+forContinueBlock : Ast.Located Stmt -> Block -> Block
 forContinueBlock step b =
     let
         stmts1 =
             List.map (forStmt step) b.stmts
+
+        term =
+            b.term
     in
-    case b.term of
+    case term.node of
         TContinue ->
-            { stmts = stmts1 ++ [ step ], term = TContinue }
+            { stmts = stmts1 ++ [ step ], term = term }
 
         TIf c t me ->
             { stmts = stmts1
-            , term = TIf c (forContinueBlock step t) (Maybe.map (forContinueBlock step) me)
+            , term = { term | node = TIf c (forContinueBlock step t) (Maybe.map (forContinueBlock step) me) }
             }
 
         other ->
-            { stmts = stmts1, term = other }
+            { stmts = stmts1, term = term }
 
 
-forStmt : Stmt -> Stmt -> Stmt
+forStmt : Ast.Located Stmt -> Ast.Located Stmt -> Ast.Located Stmt
 forStmt step stmt =
-    case stmt of
+    case stmt.node of
         SIf c t me ->
-            SIf c (forContinueBlock step t) (Maybe.map (forContinueBlock step) me)
+            { stmt | node = SIf c (forContinueBlock step t) (Maybe.map (forContinueBlock step) me) }
 
         _ ->
             -- a NESTED loop (or any other statement): its continues belong to
@@ -575,22 +589,32 @@ cannot be fallen past needs nothing).
 -}
 doWhileTail : Ast.Exp -> Block -> Block
 doWhileTail cond b =
-    case b.term of
+    let
+        term =
+            b.term
+    in
+    case term.node of
         TContinue ->
-            { stmts = b.stmts ++ [ doWhileTest cond ], term = TBreak }
+            { stmts = b.stmts ++ [ Ast.reposition term (doWhileTest cond term) ]
+            , term = { term | node = TBreak }
+            }
 
         TIf c t Nothing ->
             -- the then-branch diverges (J7), so as a mid-block if it is legal
             -- and its false path is the continuation: the test, then break.
             -- The branch is rewritten too — a `continue;` in it must still
             -- evaluate the condition (C's do-while rule).
-            { stmts = b.stmts ++ [ SIf c (doWhileContinue cond t) Nothing, doWhileTest cond ]
-            , term = TBreak
+            { stmts =
+                b.stmts
+                    ++ [ Ast.reposition term (SIf c (doWhileContinue cond t) Nothing)
+                       , Ast.reposition term (doWhileTest cond term)
+                       ]
+            , term = { term | node = TBreak }
             }
 
         TIf c t (Just eb) ->
             { stmts = b.stmts
-            , term = TIf c (doWhileTail cond t) (Just (doWhileTail cond eb))
+            , term = { term | node = TIf c (doWhileTail cond t) (Just (doWhileTail cond eb)) }
             }
 
         _ ->
@@ -602,26 +626,32 @@ a nested `if`): test, then leave-or-iterate.
 -}
 doWhileContinue : Ast.Exp -> Block -> Block
 doWhileContinue cond b =
-    if b.term == TContinue then
-        { stmts = List.map (doWhileStmt cond) b.stmts ++ [ doWhileTest cond ], term = TBreak }
+    let
+        term =
+            b.term
+    in
+    if term.node == TContinue then
+        { stmts = List.map (doWhileStmt cond) b.stmts ++ [ Ast.reposition term (doWhileTest cond term) ]
+        , term = { term | node = TBreak }
+        }
 
     else
         { stmts = List.map (doWhileStmt cond) b.stmts
         , term =
-            case b.term of
+            case term.node of
                 TIf c t me ->
-                    TIf c (doWhileContinue cond t) (Maybe.map (doWhileContinue cond) me)
+                    { term | node = TIf c (doWhileContinue cond t) (Maybe.map (doWhileContinue cond) me) }
 
                 other ->
-                    other
+                    term
         }
 
 
-doWhileStmt : Ast.Exp -> Stmt -> Stmt
+doWhileStmt : Ast.Exp -> Ast.Located Stmt -> Ast.Located Stmt
 doWhileStmt cond stmt =
-    case stmt of
+    case stmt.node of
         SIf c t me ->
-            SIf c (doWhileContinue cond t) (Maybe.map (doWhileContinue cond) me)
+            { stmt | node = SIf c (doWhileContinue cond t) (Maybe.map (doWhileContinue cond) me) }
 
         _ ->
             stmt
@@ -631,9 +661,9 @@ doWhileStmt cond stmt =
 `break` is the ENCLOSING block's term, so a false condition falls past this
 statement into it.
 -}
-doWhileTest : Ast.Exp -> Stmt
-doWhileTest cond =
-    SIf cond { stmts = [], term = TContinue } Nothing
+doWhileTest : Ast.Exp -> Ast.Located Term -> Stmt
+doWhileTest cond like =
+    SIf cond { stmts = [], term = { like | node = TContinue } } Nothing
 
 
 -- ============================ entry point ============================
@@ -646,7 +676,7 @@ delegate: no file-scoped decls, so the field/index/deref arms have no
 struct table to read (they can only fire on a structless program — the
 runtime lane, which uses none of the A2 spellings yet).
 -}
-lowerProgram : Program -> Result String (List Defun)
+lowerProgram : Program -> Result MidcError (List Defun)
 lowerProgram program =
     lowerAll [] [] program
 
@@ -657,12 +687,12 @@ field/index arms read the SAME struct table the A1 checker laid out from
 (`Check.fieldOffset`/`Check.sizeofStruct` — the one-table property: no
 second copy to skew).
 -}
-lowerModule : Module -> Result String (List Defun)
+lowerModule : Module -> Result MidcError (List Defun)
 lowerModule module_ =
     lowerAll module_.decls [] module_.defuns
 
 
-lowerAll : List Decl -> List Defun -> Program -> Result String (List Defun)
+lowerAll : List Decl -> List Defun -> Program -> Result MidcError (List Defun)
 lowerAll decls acc program =
     case program of
         [] ->
@@ -681,7 +711,7 @@ lowerAll decls acc program =
 params are binders with ids 1..n in order (the DSL's `p1..p5` convention),
 the body is the block's lowered value.
 -}
-lowerDefun : List Decl -> Ast.Defun -> Result String Defun
+lowerDefun : List Decl -> Ast.Defun -> Result MidcError Defun
 lowerDefun decls d =
     let
         params =
@@ -739,16 +769,16 @@ paramTypes params =
 -- ============================ blocks: L1/L2/L6 ============================
 
 
-lowerBlock : St -> Block -> Result String (St, Exp)
+lowerBlock : St -> Block -> Result MidcError (St, Exp)
 lowerBlock st b =
-    lowerRest st b.stmts b.term
+    lowerRest st (List.map .node b.stmts) b.term
 
 
 {-| Lower `stmts` followed by `term` as ONE expression: statements are
 folded right-to-left, each statement receiving the CONTINUATION (the rest
 of the block's lowered value) — which is what L6's else-nesting needs.
 -}
-lowerRest : St -> List Stmt -> Term -> Result String (St, Exp)
+lowerRest : St -> List Stmt -> Ast.Located Term -> Result MidcError (St, Exp)
 lowerRest st stmts term =
     case stmts of
         [] ->
@@ -761,7 +791,7 @@ lowerRest st stmts term =
 {-| Lower one statement against its continuation.  L1/L2 bind at a fresh
 binder and wrap the continuation in a 1-binder `Let`; L6 else-nests.
 -}
-lowerStmt : St -> Stmt -> (St -> Result String (St, Exp)) -> Result String (St, Exp)
+lowerStmt : St -> Stmt -> (St -> Result MidcError (St, Exp)) -> Result MidcError (St, Exp)
 lowerStmt st stmt cont =
     case stmt of
         SBind ty name e ->
@@ -1203,14 +1233,14 @@ lowerStmt st stmt cont =
                     -- and recurse into itself forever (MEASURED: a
                     -- `for (k = 0; ..)` blew the JS stack; the `for (; ..)`
                     -- form, which takes no continuation, was fine)
-                    lowerStmt st initStmt (forCont loopStmt cont)
+                    lowerStmt st initStmt.node (forCont loopStmt cont)
 
 
 {-| The `for` head's init continuation — a NAMED function for the reason
 stated at the call site (a lambda here captures `lowerStmt`'s reassigned
 `cont`).
 -}
-forCont : Stmt -> (St -> Result String (St, Exp)) -> St -> Result String (St, Exp)
+forCont : Stmt -> (St -> Result MidcError (St, Exp)) -> St -> Result MidcError (St, Exp)
 forCont loopStmt cont st =
     lowerStmt st loopStmt cont
 
@@ -1221,7 +1251,7 @@ body (a binder declared inside a loop is not visible after it; restoring the
 pre-body scope keeps that true of the lowerer's own table even though Check
 already refused such a read).
 -}
-lowerLoopStmt : St -> Ast.Exp -> Block -> (St -> Result String (St, Exp)) -> Result String (St, Exp)
+lowerLoopStmt : St -> Ast.Exp -> Block -> (St -> Result MidcError (St, Exp)) -> Result MidcError (St, Exp)
 lowerLoopStmt st c b cont =
     case lowerExp st c of
         Err msg ->
@@ -1260,7 +1290,7 @@ lowerLoopStmt st c b cont =
 continuation (the body of the pointer arm below, over the array's element
 class).
 -}
-arrayIndexStoreStmt : St -> Ast.Exp -> Ast.Exp -> Ast.Exp -> Ast.Type -> (St -> Result String (St, Exp)) -> Result String (St, Exp)
+arrayIndexStoreStmt : St -> Ast.Exp -> Ast.Exp -> Ast.Exp -> Ast.Type -> (St -> Result MidcError (St, Exp)) -> Result MidcError (St, Exp)
 arrayIndexStoreStmt st p i e elem cont =
     case lowerExp st p of
         Err msg ->
@@ -1298,7 +1328,7 @@ arrayIndexStoreStmt st p i e elem cont =
 {-| The pointer-base `p[i] = e;` arm (A2), unchanged — kept as its own
 function so the array arm above and this one share the statement shape.
 -}
-indexStoreOnPointer : St -> Ast.Exp -> Ast.Exp -> Ast.Exp -> (St -> Result String (St, Exp)) -> Result String (St, Exp)
+indexStoreOnPointer : St -> Ast.Exp -> Ast.Exp -> Ast.Exp -> (St -> Result MidcError (St, Exp)) -> Result MidcError (St, Exp)
 indexStoreOnPointer st p i e cont =
     case resolvePointee st p of
         Err msg ->
@@ -1360,9 +1390,9 @@ indexStoreOnPointer st p i e cont =
 
 {-| L3/L4/L5: the terminator IS the block's value.
 -}
-lowerTerm : St -> Term -> Result String (St, Exp)
+lowerTerm : St -> Ast.Located Term -> Result MidcError (St, Exp)
 lowerTerm st term =
-    case term of
+    case term.node of
         TRet e ->
             case lowerExp st e of
                 Err msg ->
@@ -1478,12 +1508,12 @@ dead end and the continuation is never spliced there; the shapes are:
     sequentially, so its binders get distinct ids.
 
 -}
-lowerBranch : St -> Block -> (St -> Result String (St, Exp)) -> Result String (St, Exp)
+lowerBranch : St -> Block -> (St -> Result MidcError (St, Exp)) -> Result MidcError (St, Exp)
 lowerBranch st b cont =
-    lowerBranchRest st b.stmts b.term cont
+    lowerBranchRest st (List.map .node b.stmts) b.term cont
 
 
-lowerBranchRest : St -> List Stmt -> Term -> (St -> Result String (St, Exp)) -> Result String (St, Exp)
+lowerBranchRest : St -> List Stmt -> Ast.Located Term -> (St -> Result MidcError (St, Exp)) -> Result MidcError (St, Exp)
 lowerBranchRest st stmts term cont =
     case stmts of
         [] ->
@@ -1493,9 +1523,9 @@ lowerBranchRest st stmts term cont =
             lowerStmt st s (\st1 -> lowerBranchRest st1 rest term cont)
 
 
-lowerBranchTerm : St -> Term -> (St -> Result String (St, Exp)) -> Result String (St, Exp)
+lowerBranchTerm : St -> Ast.Located Term -> (St -> Result MidcError (St, Exp)) -> Result MidcError (St, Exp)
 lowerBranchTerm st term cont =
-    case term of
+    case term.node of
         TRet e ->
             lowerExp st e
 
@@ -1560,7 +1590,7 @@ lowerBranchTerm st term cont =
                                                 Ok ( stF, ie )
 
                     else if elseDiv && not thenDiv then
-                        case lowerBlock st1 (maybeElse me) of
+                        case lowerBlock st1 (maybeElse term me) of
                             Err msg ->
                                 Err msg
 
@@ -1628,8 +1658,12 @@ lowerBranchTerm st term cont =
                                             )
 
 
-maybeElse : Maybe Block -> Block
-maybeElse me =
+{-| `like` is the terminating `if` this else-block stands in for: the
+synthesized term reuses ITS span, so no node in the tree carries a position the
+source does not have.
+-}
+maybeElse : Ast.Located Term -> Maybe Block -> Block
+maybeElse like me =
     case me of
         Just eb ->
             eb
@@ -1639,7 +1673,7 @@ maybeElse me =
             -- else needs a diverging then-branch, so this arm is only entered
             -- when the else diverges — which requires an else to exist).
             { stmts = []
-            , term = TRet (Ast.EBuiltin MkNil [])
+            , term = { like | node = TRet (Ast.EBuiltin MkNil []) }
             }
 
 
@@ -1654,7 +1688,7 @@ fire instead of a silent mis-nest.
 -}
 diverges : Block -> Bool
 diverges b =
-    case b.term of
+    case b.term.node of
         TRet _ ->
             True
 
@@ -1693,7 +1727,7 @@ divergesMaybe me =
 -- ============================ expressions ============================
 
 
-lowerExp : St -> Ast.Exp -> Result String (St, Exp)
+lowerExp : St -> Ast.Exp -> Result MidcError (St, Exp)
 lowerExp st e =
     case e of
         Ast.EInt i ->
@@ -1715,8 +1749,8 @@ lowerExp st e =
 
         Ast.ESizeof target ->
             case sizeofWords st target of
-                Err msg ->
-                    Err (internal st "sizeof" msg)
+                Err inner ->
+                    Err (internal st "sizeof" inner.rule)
 
                 Ok n ->
                     Ok ( st, Lit (LNumber n) )
@@ -1873,13 +1907,13 @@ lowerExp st e =
 
                 Just sig ->
                     case declaredArgWidths sym sig (List.length args) of
-                        Err msg ->
-                            Err (st.key ++ ": " ++ msg)
+                        Err inner ->
+                            Err { inner | key = Just st.key }
 
                         Ok widths ->
                             case ffiWidthOf sym sig.result of
-                                Err msg ->
-                                    Err (st.key ++ ": " ++ msg)
+                                Err inner ->
+                                    Err { inner | key = Just st.key }
 
                                 Ok resWidth ->
                                     lowerCall st args
@@ -2048,7 +2082,7 @@ lowerExp st e =
 {-| The pointer-base `p[i]` read (A2), unchanged — the arm body B3 could not
 destroy.
 -}
-indexLoadOnPointer : St -> Ast.Exp -> Ast.Exp -> Result String (St, Exp)
+indexLoadOnPointer : St -> Ast.Exp -> Ast.Exp -> Result MidcError (St, Exp)
 indexLoadOnPointer st p i =
     case resolvePointee st p of
         Err msg ->
@@ -2217,7 +2251,7 @@ the judge; this is the emission).  The identity rows emit NO node at all:
 Anything else is the checker's reject, so a fall-through here is an internal
 error and says so.
 -}
-lowerCast : St -> Ast.Type -> Ast.Exp -> Result String (St, Exp)
+lowerCast : St -> Ast.Type -> Ast.Exp -> Result MidcError (St, Exp)
 lowerCast st target inner =
     case lowerExp st inner of
         Err msg ->
@@ -2258,7 +2292,7 @@ the same numbers the checker validated) or the class width — `word`/`int`/
 pointer = 1, `val` = 5 inline words, `bool` = 1.  `float` is the checker's
 reject (no raw f64 seat), so it is an internal error here.
 -}
-sizeofWords : St -> Ast.SizeTarget -> Result String Int
+sizeofWords : St -> Ast.SizeTarget -> Result MidcError Int
 sizeofWords st target =
     case target of
         Ast.SizeStruct name ->
@@ -2267,7 +2301,10 @@ sizeofWords st target =
                     Ok n
 
                 Nothing ->
-                    Err ("no struct '" ++ name ++ "' in the layout table — Check J11 must reject it first")
+                    Err
+                        (internalMsg (Just st.key)
+                            ("no struct '" ++ name ++ "' in the layout table — Check J11 must reject it first")
+                        )
 
         Ast.SizeType ty ->
             case ty of
@@ -2277,7 +2314,10 @@ sizeofWords st target =
                             Ok n
 
                         Nothing ->
-                            Err ("no struct '" ++ sname ++ "' in the layout table — Check J11 must reject it first")
+                            Err
+                                (internalMsg (Just st.key)
+                                    ("no struct '" ++ sname ++ "' in the layout table — Check J11 must reject it first")
+                                )
 
                 Ast.TWord ->
                     Ok 1
@@ -2304,7 +2344,7 @@ sizeofWords st target =
                     Ok 5
 
                 Ast.TFloat ->
-                    Err "a float has no raw-memory word width (Check J1 must reject it first)"
+                    Err (internalMsg (Just st.key) "a float has no raw-memory word width (Check J1 must reject it first)")
 
 
 {-| The four operator families lower constructor-by-constructor onto the
@@ -2353,7 +2393,7 @@ shortOrLower left right st =
     )
 
 
-lower2 : St -> Ast.Exp -> Ast.Exp -> (Exp -> Exp -> St -> ( Exp, St )) -> Result String (St, Exp)
+lower2 : St -> Ast.Exp -> Ast.Exp -> (Exp -> Exp -> St -> ( Exp, St )) -> Result MidcError (St, Exp)
 lower2 st a b k =
     case lowerExp st a of
         Err msg ->
@@ -2385,7 +2425,7 @@ here means a hand-built declaration — a loud internal error naming the symbol,
 never a silent widening into `FW64`.  Returning a `Result` rather than a
 defaulted classifier is deliberate: the caller cannot forget to look.
 -}
-ffiWidthOf : String -> Ast.FfiTy -> Result String FfiWidth
+ffiWidthOf : String -> Ast.FfiTy -> Result MidcError FfiWidth
 ffiWidthOf sym t =
     case t of
         Ast.FI32 ->
@@ -2422,14 +2462,16 @@ ffiWidthOf sym t =
             subWordWidth sym "u16"
 
 
-subWordWidth : String -> String -> Result String FfiWidth
+subWordWidth : String -> String -> Result MidcError FfiWidth
 subWordWidth sym w =
     Err
-        ("cffi U6: `"
-            ++ w
-            ++ "` reached the CALL BOUNDARY of '"
-            ++ sym
-            ++ "' — a sub-word width is a struct FIELD width (a byte count and a sign rule), not a register class; C carries such a value in a 32-bit register, and this language spells that `i32`/`u32`"
+        (internalMsg (Just sym)
+            ("cffi U6: `"
+                ++ w
+                ++ "` reached the CALL BOUNDARY of '"
+                ++ sym
+                ++ "' — a sub-word width is a struct FIELD width (a byte count and a sign rule), not a register class; C carries such a value in a 32-bit register, and this language spells that `i32`/`u32`"
+            )
         )
 
 
@@ -2443,7 +2485,7 @@ already pinned the count against the same declaration, so a mismatch here is a
 loud internal error rather than a silent all-word fallback — the shape the
 whole unit exists to make unrepresentable.
 -}
-declaredArgWidths : String -> Ast.FfiSig -> Int -> Result String (List FfiWidth)
+declaredArgWidths : String -> Ast.FfiSig -> Int -> Result MidcError (List FfiWidth)
 declaredArgWidths sym sig got =
     case List.foldr (\p acc -> Result.map2 (::) (ffiWidthOf sym p.ty) acc) (Ok []) sig.params of
         Err msg ->
@@ -2453,7 +2495,7 @@ declaredArgWidths sym sig got =
             declaredArgWidthsHelp sym sig got fixed
 
 
-declaredArgWidthsHelp : String -> Ast.FfiSig -> Int -> List FfiWidth -> Result String (List FfiWidth)
+declaredArgWidthsHelp : String -> Ast.FfiSig -> Int -> List FfiWidth -> Result MidcError (List FfiWidth)
 declaredArgWidthsHelp sym sig got fixed =
     if sig.varargs then
         if List.length fixed <= got then
@@ -2469,19 +2511,21 @@ declaredArgWidthsHelp sym sig got fixed =
         internalArgWidths sym (List.length fixed) got
 
 
-internalArgWidths : String -> Int -> Int -> Result String (List FfiWidth)
+internalArgWidths : String -> Int -> Int -> Result MidcError (List FfiWidth)
 internalArgWidths sym declared got =
     Err
-        ("internal: J3 should have rejected rawcall '"
-            ++ sym
-            ++ "' — the declaration has "
-            ++ String.fromInt declared
-            ++ " parameter(s) and the call site has "
-            ++ String.fromInt got
+        (internalMsg (Just sym)
+            ("internal: J3 should have rejected rawcall '"
+                ++ sym
+                ++ "' — the declaration has "
+                ++ String.fromInt declared
+                ++ " parameter(s) and the call site has "
+                ++ String.fromInt got
+            )
         )
 
 
-lowerCall : St -> List Ast.Exp -> (List Exp -> St -> ( Exp, St )) -> Result String (St, Exp)
+lowerCall : St -> List Ast.Exp -> (List Exp -> St -> ( Exp, St )) -> Result MidcError (St, Exp)
 lowerCall st args k =
     case lowerArgs st args of
         Err msg ->
@@ -2497,7 +2541,7 @@ lowerCall st args k =
 
 {-| Arguments in source order, state threaded left to right.
 -}
-lowerArgs : St -> List Ast.Exp -> Result String (St, List Exp)
+lowerArgs : St -> List Ast.Exp -> Result MidcError (St, List Exp)
 lowerArgs st args =
     case args of
         [] ->
@@ -2517,7 +2561,7 @@ lowerArgs st args =
                             Ok ( st2, a1 :: es )
 
 
-resolveRoots : St -> List String -> Result String (St, List Binder)
+resolveRoots : St -> List String -> Result MidcError (St, List Binder)
 resolveRoots st ids =
     case ids of
         [] ->
@@ -2558,7 +2602,7 @@ aggShape shape =
 built by the `Ast.builtinClass` table's row — arity and classes were
 checked (J1), so a mismatched shape here is an internal error.
 -}
-lowerBuiltin : St -> Builtin -> List Ast.Exp -> Result String (St, Exp)
+lowerBuiltin : St -> Builtin -> List Ast.Exp -> Result MidcError (St, Exp)
 lowerBuiltin st b args =
     case lowerArgs st args of
         Err msg ->
@@ -2573,14 +2617,14 @@ lowerBuiltin st b args =
                     boxBuiltinArgs st b args es
             in
             case buildBuiltin b es2 of
-                Err msg ->
-                    Err (internal st ("builtin '" ++ builtinName b ++ "'") msg)
+                Err inner ->
+                    Err (internal st ("builtin '" ++ builtinName b ++ "'") inner.rule)
 
                 Ok ie ->
                     Ok ( st1, ie )
 
 
-buildBuiltin : Builtin -> List Exp -> Result String Exp
+buildBuiltin : Builtin -> List Exp -> Result MidcError Exp
 buildBuiltin b es =
     case b of
         MkNum ->
@@ -2616,7 +2660,7 @@ buildBuiltin b es =
                     Ok (Unsafe (RawMkValue { tag = tag, words = rest }))
 
                 _ ->
-                    Err "needs an int-literal tag (RawMkValue's tag is a constant in Mid.Ir)"
+                    Err (internalMsg Nothing "needs an int-literal tag (RawMkValue's tag is a constant in Mid.Ir)")
 
         Payload ->
             case es of
@@ -2624,7 +2668,7 @@ buildBuiltin b es =
                     Ok (Unsafe (RawPayload { value = v, word = i }))
 
                 _ ->
-                    Err "needs (value, int-literal index) — RawPayload's word is a constant"
+                    Err (internalMsg Nothing "needs (value, int-literal index) — RawPayload's word is a constant")
 
         Payload32 ->
             case es of
@@ -2632,7 +2676,7 @@ buildBuiltin b es =
                     Ok (Unsafe (RawPayload32 { value = v, word = i }))
 
                 _ ->
-                    Err "needs (value, int-literal index) — RawPayload32's word is a constant"
+                    Err (internalMsg Nothing "needs (value, int-literal index) — RawPayload32's word is a constant")
 
         Len32 ->
             -- The i32 len field = payload32(v, 1).
@@ -2649,7 +2693,7 @@ buildBuiltin b es =
                     Ok (Unsafe (RawTagIs { value = v, tag = t }))
 
                 _ ->
-                    Err "needs (value, int-literal tag) — RawTagIs's tag is a constant"
+                    Err (internalMsg Nothing "needs (value, int-literal tag) — RawTagIs's tag is a constant")
 
         VecLoad ->
             build2 (\vec idx -> Unsafe (RawVecLoad { vec = vec, index = idx })) es
@@ -2737,7 +2781,7 @@ buildBuiltin b es =
                     Ok (Unsafe (RawCStr s))
 
                 _ ->
-                    Err "rawstr needs a string literal (the content is static data — RawCStr)"
+                    Err (internalMsg Nothing "rawstr needs a string literal (the content is static data — RawCStr)")
 
         Ast.RawSym ->
             -- the FUNCTION-symbol address (stage 6 A1b): the symbol is the
@@ -2750,15 +2794,15 @@ buildBuiltin b es =
                     Ok (Unsafe (Mid.Ir.RawSym s))
 
                 _ ->
-                    Err "rawsym needs a string literal (the symbol is a static code label — RawSym)"
+                    Err (internalMsg Nothing "rawsym needs a string literal (the symbol is a static code label — RawSym)")
 
 
-arityBug : String
+arityBug : MidcError
 arityBug =
-    "lowered with the wrong arity — Check J1 must reject it first"
+    internalMsg Nothing "lowered with the wrong arity — Check J1 must reject it first"
 
 
-buildMk : Int -> List Exp -> Result String Exp
+buildMk : Int -> List Exp -> Result MidcError Exp
 buildMk tag es =
     case es of
         [ w ] ->
@@ -2768,7 +2812,7 @@ buildMk tag es =
             Err arityBug
 
 
-buildMk2 : Int -> List Exp -> Result String Exp
+buildMk2 : Int -> List Exp -> Result MidcError Exp
 buildMk2 tag es =
     case es of
         [ w1, w2 ] ->
@@ -2778,7 +2822,7 @@ buildMk2 tag es =
             Err arityBug
 
 
-build1 : (Exp -> Exp) -> List Exp -> Result String Exp
+build1 : (Exp -> Exp) -> List Exp -> Result MidcError Exp
 build1 k es =
     case es of
         [ a ] ->
@@ -2788,7 +2832,7 @@ build1 k es =
             Err arityBug
 
 
-build2 : (Exp -> Exp -> Exp) -> List Exp -> Result String Exp
+build2 : (Exp -> Exp -> Exp) -> List Exp -> Result MidcError Exp
 build2 k es =
     case es of
         [ a, b ] ->
@@ -2798,7 +2842,7 @@ build2 k es =
             Err arityBug
 
 
-build3 : (Exp -> Exp -> Exp -> Exp) -> List Exp -> Result String Exp
+build3 : (Exp -> Exp -> Exp -> Exp) -> List Exp -> Result MidcError Exp
 build3 k es =
     case es of
         [ a, b, c ] ->
@@ -2922,7 +2966,7 @@ pointer-valued `?:` join whose branches agree (J1), and the `[*T](w)` view cast
 LOUD internal error: the checker admitted a pointer here (J13 resolved `p`),
 so an unresolvable base is a lowering gap named, never a silent guess.
 -}
-resolvePointee : St -> Ast.Exp -> Result String PTy
+resolvePointee : St -> Ast.Exp -> Result MidcError PTy
 resolvePointee st e =
     case e of
         Ast.EVar name ->
@@ -3028,7 +3072,7 @@ width picks the load/store mnemonic and sign.  Taking the width from the same
 declaration the layout measured is what makes "laid out as `u16`, accessed as
 a word" unrepresentable — there is no second place to read it from.
 -}
-fieldInfo : St -> String -> String -> Result String ( Int, Ast.Field )
+fieldInfo : St -> String -> String -> Result MidcError ( Int, Ast.Field )
 fieldInfo st sname fname =
     case Check.fieldOffset st.decls sname fname of
         Just off ->
@@ -3281,7 +3325,7 @@ pointer, and the documented retention obligation).
 
 `size` comes from `Check.sizeofStruct` — the one layout table.
 -}
-structAlloc : St -> String -> Result String Exp
+structAlloc : St -> String -> Result MidcError Exp
 structAlloc st sname =
     case Check.sizeofStruct st.decls sname of
         Just size ->
@@ -3303,7 +3347,7 @@ gone; the emitted number for every word-class struct is the same one it always
 was).  Uninitialised raw memory is a silent-wrong-value generator, and this
 language has no `unsafe` marker to opt into it.
 -}
-structZero : St -> String -> Exp -> Result String Exp
+structZero : St -> String -> Exp -> Result MidcError Exp
 structZero st sname addr =
     case Check.structSizeBytes st.decls sname of
         Just size ->
@@ -3358,7 +3402,7 @@ walks: one 8-byte load/store per word is exact for a val slot too (a
 40-byte Value is five words, which is why the copy needs no Blit node and
 no class rule).
 -}
-structWordsAt : St -> String -> Int -> Result String (List Int)
+structWordsAt : St -> String -> Int -> Result MidcError (List Int)
 structWordsAt st sname bias =
     case fieldsOf st.decls sname of
         Nothing ->
@@ -3371,7 +3415,7 @@ structWordsAt st sname bias =
             fieldsWords st sname bias fields
 
 
-fieldsWords : St -> String -> Int -> List Ast.StructMember -> Result String (List Int)
+fieldsWords : St -> String -> Int -> List Ast.StructMember -> Result MidcError (List Int)
 fieldsWords st sname bias members =
     case members of
         [] ->
@@ -3430,7 +3474,7 @@ fieldsWords st sname bias members =
 `max(member widths)` words wide (the offset is the same for every member, so
 the first member's is the block's: MEASURED off the one table, never summed).
 -}
-unionWords : St -> String -> Int -> List Field -> Result String (List Int)
+unionWords : St -> String -> Int -> List Field -> Result MidcError (List Int)
 unionWords st sname bias ms =
     case ms of
         [] ->
@@ -3460,7 +3504,7 @@ unionWords st sname bias ms =
 `Check.layoutOf` advanced the cursor by (read through
 `Check.fieldWidth`, i.e. the ONE `fieldSize` rule).
 -}
-unionWidest : St -> String -> List Field -> Result String Int
+unionWidest : St -> String -> List Field -> Result MidcError Int
 unionWidest st sname ms =
     case ms of
         [] ->
@@ -3487,7 +3531,7 @@ unionWidest st sname ms =
 outer offset — a struct value is contiguous by the layout rule), everything
 else is `w` consecutive words at `off`.
 -}
-fieldWords : St -> Int -> Int -> Type -> Int -> Result String (List Int)
+fieldWords : St -> Int -> Int -> Type -> Int -> Result MidcError (List Int)
 fieldWords st bias off ty w =
     case ty of
         TStruct inner ->
@@ -3524,7 +3568,7 @@ wordCopy dst dOff src sOff =
 lowering (plan Q4).  `dstOff` is the field's offset when the destination is
 a FIELD of a bigger struct, 0 for a whole value.
 -}
-copyStores : St -> String -> Int -> Int -> Exp -> Exp -> Result String (List Exp)
+copyStores : St -> String -> Int -> Int -> Exp -> Exp -> Result MidcError (List Exp)
 copyStores st sname dstOff srcOff dst src =
     case structWordsAt st sname 0 of
         Err msg ->
@@ -3540,7 +3584,7 @@ field's offset), every other field is the single `fieldStore` node.  A
 one-node store of a struct's address would be silently wrong — that is the
 seam this function closes.
 -}
-fieldStoreNodes : St -> String -> String -> Exp -> Exp -> Result String (List Exp)
+fieldStoreNodes : St -> String -> String -> Exp -> Exp -> Result MidcError (List Exp)
 fieldStoreNodes st sname f base e =
     case fieldInfo st sname f of
         Err msg ->
@@ -3566,7 +3610,7 @@ fieldStoreNodes st sname f base e =
 initialiser expressions consumed (an `InitCopy`/`InitFields` operand is a
 real expression, lowered in order like any other).
 -}
-structInitNodes : St -> String -> Exp -> StructInit -> Result String ( St, List Exp )
+structInitNodes : St -> String -> Exp -> StructInit -> Result MidcError ( St, List Exp )
 structInitNodes st sname addr init =
     case init of
         InitZero ->
@@ -3594,7 +3638,7 @@ structInitNodes st sname addr init =
                             Ok ( st1, stores )
 
 
-initFieldsNodes : St -> String -> Exp -> List ( String, Ast.Exp ) -> List Exp -> Result String ( St, List Exp )
+initFieldsNodes : St -> String -> Exp -> List ( String, Ast.Exp ) -> List Exp -> Result MidcError ( St, List Exp )
 initFieldsNodes st sname addr fields acc =
     case fields of
         [] ->
@@ -3645,7 +3689,7 @@ execution of the declaration (a `word[4] a;` inside a loop body reuses one
 frame slot for every iteration — C's usual behaviour, not a guarantee), and
 (3) the address must not outlive the frame (`Check`'s escape rule).
 -}
-arrayAlloc : St -> Ast.Type -> Result String Exp
+arrayAlloc : St -> Ast.Type -> Result MidcError Exp
 arrayAlloc st aty =
     case sizeofWords st (Ast.SizeType aty) of
         Err msg ->
@@ -3666,7 +3710,7 @@ arrayAlloc st aty =
 and node `S s;` uses (uninitialised raw memory in a language with no `unsafe`
 marker is a silent-wrong-value generator).
 -}
-arrayZero : St -> Ast.Type -> Exp -> Result String Exp
+arrayZero : St -> Ast.Type -> Exp -> Result MidcError Exp
 arrayZero st aty addr =
     case sizeofWords st (Ast.SizeType aty) of
         Err msg ->
@@ -3687,7 +3731,7 @@ arrayZero st aty addr =
 expressions consumed (lowered in written order, like every other expression
 list).
 -}
-arrayInitNodes : St -> Ast.Type -> Exp -> ArrayInit -> Result String ( St, List Exp )
+arrayInitNodes : St -> Ast.Type -> Exp -> ArrayInit -> Result MidcError ( St, List Exp )
 arrayInitNodes st aty addr init =
     case init of
         AInitZero ->
@@ -3710,7 +3754,7 @@ arrayInitNodes st aty addr init =
                         )
 
 
-arrayElemStores : St -> Ast.Type -> Exp -> Int -> List Ast.Exp -> List Exp -> Result String ( St, List Exp )
+arrayElemStores : St -> Ast.Type -> Exp -> Int -> List Ast.Exp -> List Exp -> Result MidcError ( St, List Exp )
 arrayElemStores st elem addr i es acc =
     case es of
         [] ->
@@ -3752,7 +3796,7 @@ its lowered form (`i1`) decide where, exactly as the read does:
 The stride comes from `sizeofWords` (the ONE width walk).  A nested-array
 element cannot reach here — `Check` refuses to store or initialise one.
 -}
-arrayElemStore : St -> Ast.Type -> Exp -> Ast.Exp -> Exp -> Exp -> Result String (List Exp)
+arrayElemStore : St -> Ast.Type -> Exp -> Ast.Exp -> Exp -> Exp -> Result MidcError (List Exp)
 arrayElemStore st elem base astI i1 e =
     case elem of
         Ast.TVal ->
@@ -3812,7 +3856,7 @@ elemAddr base astI i1 stride =
   * word/pointer/bool -> `RawWordLoad` at `i * stride` (stride 1 for every
     scalar class, so the index IS the word offset — the `wload` contract).
 -}
-arrayElemLoad : St -> Ast.Type -> Exp -> Ast.Exp -> Exp -> Result String Exp
+arrayElemLoad : St -> Ast.Type -> Exp -> Ast.Exp -> Exp -> Result MidcError Exp
 arrayElemLoad st elem base astI i1 =
     case elem of
         Ast.TVal ->
@@ -3889,7 +3933,7 @@ maybeValueTy st e =
 binder (L2's `(b 107, rStore ..)` shape — a store's result slot must be a
 valid binder even though nothing reads it), then the continuation.
 -}
-withStores : String -> St -> List Exp -> (St -> Result String (St, Exp)) -> Result String (St, Exp)
+withStores : String -> St -> List Exp -> (St -> Result MidcError (St, Exp)) -> Result MidcError (St, Exp)
 withStores label st stores cont =
     case stores of
         [] ->
@@ -3913,7 +3957,7 @@ withStores label st stores cont =
 word-offset index; `*val` -> `vecload`; `*S` -> the index scaled by
 `sizeof S` (a word multiply, folded to a literal for a literal index).
 -}
-indexLoad : St -> PTy -> Exp -> Ast.Exp -> Exp -> Result String Exp
+indexLoad : St -> PTy -> Exp -> Ast.Exp -> Exp -> Result MidcError Exp
 indexLoad st pty p1 astI i1 =
     case pty of
         PWord ->
@@ -3936,7 +3980,7 @@ indexLoad st pty p1 astI i1 =
 
 {-| The index STORE node, matching `indexLoad`'s shape.
 -}
-indexStore : St -> PTy -> Exp -> Ast.Exp -> Exp -> Exp -> Result String Exp
+indexStore : St -> PTy -> Exp -> Ast.Exp -> Exp -> Exp -> Result MidcError Exp
 indexStore st pty p1 astI i1 e1 =
     case pty of
         PWord ->
@@ -4013,10 +4057,72 @@ typeStrOf ty =
 -- ============================ internal errors ============================
 
 
-{-| The loud internal error: names the defun, the nearest construct and the
-judgment that should have rejected the shape first.  Checked input cannot
-reach these.
+{-| The lane's ONE error record (`Mid.RtLang.Error`), aliased so every
+signature above reads `Result MidcError a` instead of a qualified name — the
+same alias `Mid.RtLang.Check` carries, for the same reason: this module
+CONSTRUCTS the record, it does not define its shape.
 -}
-internal : St -> String -> String -> String
+type alias MidcError =
+    MidErr.MidcError
+
+
+{-| The loud internal error: names the defun, the nearest construct and the
+judgment that should have rejected the shape first.  `tag` is `INTERNAL`,
+`title` comes from the one tag table, and there is no `span` — the lowerer
+walks a `Defun` whose statements it does not re-position, so it has no
+position to report (never a synthesized one).
+
+Every one of the ~39 sites above funnels through THIS function, so the
+record's shape is decided once.
+
+**TODO — THE PREMISE IS TRUE PER ENTRY POINT, FALSE ACROSS THEM (measured
+2026-10-25; NOT fixed here, it is a caller-contract gap, not a lowerer bug).**
+"Checked input cannot reach these" holds only when the checker and the
+lowerer are the SAME pair: `Check.checkProgram` + `lowerProgram` (decl-less)
+and `Check.checkModule` + `lowerModule` (decl-carrying) each reject every
+shape the sites below guard.  Nothing in the signatures ties the two
+entries together, so the MIXED pair is reachable and its input was CHECKED
+by the call that accepted it:
+
+    module P
+    struct S { a : word; }
+    defun P.g() -> word { return sizeof(S); }
+
+  * `Check.checkModule Dict.empty [] m` -> `Ok ()`
+  * `LowerToIr.lowerProgram m.defuns`   -> `Err` `P.g: INTERNAL: sizeof no
+    struct 'S' in the layout table — Check J11 must reject it first`
+
+(`lowerProgram` passes `[]` decls, so `st.decls` is empty and the layout
+lookup misses; the decl-less checker does reject the same source, which is
+why each same-entry pipeline is safe.)  The field site behaves the same:
+`defun P.f(p : *S) -> word { return p->a; }` -> `Ok ()` then `P.f:
+INTERNAL: field 'S.a' is not in the struct table — Check J13 must reject
+it first`.  So the messages' premise naming J11/J13 is FALSE under that
+pairing — the fix is a caller contract (make the decl-less entry take the
+decls, or stop exposing it), not a message rewrite.  No in-tree production
+caller makes the mixed pair today (`Mid.Rt` uses `lowerModule` at :406 and
+:665; `lowerProgram`'s callers are `TestMain`'s drivers), and the decl-less
+entry has already bitten once — `TestMain.elm:12506-12512` records
+guard-selection rows failing "for a reason that had nothing to do with
+guard selection".
+-}
+internal : St -> String -> String -> MidcError
 internal st what why =
-    st.key ++ ": RtLang internal: " ++ what ++ " " ++ why
+    internalMsg (Just st.key) (what ++ " " ++ why)
+
+
+{-| The same record where no lowering state (hence no defun key) is in
+scope: the FFI width helpers carry only the symbol name, and the builtin
+node builders carry nothing (their caller re-keys them at `lowerBuiltin`).
+`key = Nothing` renders the rule with no `key: ` prefix — which is what
+these sites' strings say today.
+-}
+internalMsg : Maybe String -> String -> MidcError
+internalMsg key msg =
+    { tag = "INTERNAL"
+    , title = MidErr.titleFor "INTERNAL"
+    , rule = msg
+    , hint = Nothing
+    , key = key
+    , span = Nothing
+    }

@@ -80,6 +80,19 @@ const MIDGC_YOUNG_END = '// <<< QBE_MIDGC_YOUNG-ONLY';
 
 // (O4) ONE region kind remains (QBE_MIDGC_YOUNG-ONLY, the nursery hatch).
 // The counters still make an unbalanced marker a LOUD compile refusal.
+//
+// A DROPPED LINE LEAVES ITS ROW BEHIND (u12).  When `keep` is false the region
+// is DROPPED, and the splice used to emit NOTHING for it — so every later line
+// shifted up and a rejection rendered from this text named a row that does not
+// exist in osier-compiler/runtime.mid (MEASURED: a break at file row 3029
+// rendered as 2973, 56 off — the same failure class as a caret pointing at the
+// wrong site, which is what this arc removes).  So a dropped line emits an
+// EMPTY line instead: every kept line stays byte-identical, every row AND
+// column of the file is preserved, and the region's tokens are still absent
+// (a blank line is whitespace — the parser skips it, and the corpus baseline
+// hashes emitted `.ssa`, not this text).  `keep = true` is untouched, byte for
+// byte.  The mirror of this rule lives in `Rt.spliceArm` (the per-compile arm
+// splice, the other seat that drops runtime.mid lines).
 function spliceMidRegion(text, begin, end, label, keep) {
   const out = [];
   let inside = false;
@@ -90,17 +103,17 @@ function spliceMidRegion(text, begin, end, label, keep) {
     if (!inside && t.startsWith(begin)) {
       inside = true;
       began += 1;
-      if (keep) out.push(line);
+      out.push(keep ? line : '');
       continue;
     }
     if (inside && t.startsWith(end)) {
       inside = false;
       ended += 1;
-      if (keep) out.push(line);
+      out.push(keep ? line : '');
       continue;
     }
     if (inside) {
-      if (keep) out.push(line);
+      out.push(keep ? line : '');
       continue;
     }
     out.push(line);

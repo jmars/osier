@@ -34,6 +34,7 @@ import Mid.Rt as Rt
 import Mid.RtGc as RtGc
 import Mid.RtLang.Ast as Ast
 import Mid.RtLang.Check as Check
+import Mid.RtLang.Error as MidErr
 import Mid.RtLang.LowerToIr as LowerToIr
 import Mid.RtLayout as RtLayout
 import Mid.RtPrims as RtPrims
@@ -3527,7 +3528,7 @@ checks rt rawMidText =
 
     -- whole defuns
     , check "parse: a full small defun end-to-end (typed params, bind, effect call, return)"
-        (Parse.parseProgram
+        (parseProgramBare
             "defun Rt.add2(x: word, n: word) -> word {\n  word s = x + n;\n  call Rt.bump(s);\n  return s;\n}"
             == Ok
                 [ { key = "Rt.add2"
@@ -3548,7 +3549,7 @@ checks rt rawMidText =
                 ]
         )
     , check "parse: an empty-param defun (the getpid shape) with a rawcall and mknum"
-        (Parse.parseProgram "defun Rt.getpid() -> val {\n  word w = rawcall getpid();\n  return mknum(w);\n}"
+        (parseProgramBare "defun Rt.getpid() -> val {\n  word w = rawcall getpid();\n  return mknum(w);\n}"
             == Ok
                 [ { key = "Rt.getpid"
                   , flags = []
@@ -3564,7 +3565,7 @@ checks rt rawMidText =
 
     -- guards
     , check "parse: the @rec guard lands on the defun's flags"
-        (Parse.parseProgram "@rec defun Rt.deepEq(a: val, b: val) -> val { return mkbool(1); }"
+        (parseProgramBare "@rec defun Rt.deepEq(a: val, b: val) -> val { return mkbool(1); }"
             == Ok
                 [ { key = "Rt.deepEq"
                   , flags = [ Ast.Guard Ast.Rec ]
@@ -3578,7 +3579,7 @@ checks rt rawMidText =
                 ]
         )
     , check "parse: @!eqPtrFast lands as GuardNot, @consArr as Guard (the flag spellings are Ast's, exact)"
-        (Parse.parseProgram "@!eqPtrFast defun Rt.eq(a: val, b: val) -> val { return mknil; }"
+        (parseProgramBare "@!eqPtrFast defun Rt.eq(a: val, b: val) -> val { return mknil; }"
             == Ok
                 [ { key = "Rt.eq"
                   , flags = [ Ast.GuardNot Ast.EqPtrFast ]
@@ -3590,7 +3591,7 @@ checks rt rawMidText =
                   , body = { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNil []) }
                   }
                 ]
-                && (Parse.parseProgram "@consArr defun Rt.cons(h: val, t: val) -> val { return mknil; }"
+                && (parseProgramBare "@consArr defun Rt.cons(h: val, t: val) -> val { return mknil; }"
                         == Ok
                             [ { key = "Rt.cons"
                               , flags = [ Ast.Guard Ast.ConsArr ]
@@ -3607,13 +3608,13 @@ checks rt rawMidText =
 
     -- the SIf/TIf discrimination (the block's central mechanism)
     , check "parse: a mid-block if without else keeps the statements after it (SIf, not the terminator)"
-        (Parse.parseBlock
+        (parseBlockBare
             "{\n  if (tagis(v, 2) == 1) { return mknum(0); }\n  word w = payload(v);\n  return mknum(w);\n}"
             == Ok
                 { stmts =
                     [ Ast.SIf
                         (Ast.EWordCmp Ast.WCeq (Ast.EBuiltin Ast.TagIs [ Ast.EVar "v", Ast.EInt 2 ]) (Ast.EInt 1))
-                        { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNum [ Ast.EInt 0 ]) }
+                        (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNum [ Ast.EInt 0 ]) })
                         Nothing
                     , Ast.SBind Ast.TWord "w" (Ast.EBuiltin Ast.Payload [ Ast.EVar "v", Ast.EInt 0 ])
                     ]
@@ -3621,60 +3622,60 @@ checks rt rawMidText =
                 }
         )
     , check "parse: a mid-block if with else (both branches diverge) still keeps the continuation"
-        (Parse.parseBlock "{ if (w == 0) { return mknum(1); } else { return mknum(2); }\n  wstore(p, 0, w);\n  return mkbool(w); }"
+        (parseBlockBare "{ if (w == 0) { return mknum(1); } else { return mknum(2); }\n  wstore(p, 0, w);\n  return mkbool(w); }"
             == Ok
                 { stmts =
                     [ Ast.SIf (Ast.EWordCmp Ast.WCeq (Ast.EVar "w") (Ast.EInt 0))
-                        { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNum [ Ast.EInt 1 ]) }
-                        (Just { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNum [ Ast.EInt 2 ]) })
+                        (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNum [ Ast.EInt 1 ]) })
+                        (Just (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNum [ Ast.EInt 2 ]) }))
                     , Ast.SEffect (Ast.EBuiltin Ast.WordStore [ Ast.EVar "p", Ast.EInt 0, Ast.EVar "w" ])
                     ]
                 , term = Ast.TRet (Ast.EBuiltin Ast.MkBool [ Ast.EVar "w" ])
                 }
         )
     , check "parse: a branch-final if is the block's terminator (TIf), with its else"
-        (Parse.parseBlock "{ if (w == 0) { return mknil; } else { return mkbool(w); } }"
+        (parseBlockBare "{ if (w == 0) { return mknil; } else { return mkbool(w); } }"
             == Ok
                 { stmts = []
                 , term =
                     Ast.TIf (Ast.EWordCmp Ast.WCeq (Ast.EVar "w") (Ast.EInt 0))
-                        { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNil []) }
-                        (Just { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkBool [ Ast.EVar "w" ]) })
+                        (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNil []) })
+                        (Just (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkBool [ Ast.EVar "w" ]) }))
                 }
         )
 
     -- recur and withroots
     , check "parse: recur(a, b); is the terminator with its arguments (recur() too)"
-        (Parse.parseBlock "{ recur(a, b); }" == Ok { stmts = [], term = Ast.TRecur [ Ast.EVar "a", Ast.EVar "b" ] }
-            && Parse.parseBlock "{ recur(); }"
+        (parseBlockBare "{ recur(a, b); }" == Ok { stmts = [], term = Ast.TRecur [ Ast.EVar "a", Ast.EVar "b" ] }
+            && parseBlockBare "{ recur(); }"
                 == Ok { stmts = [], term = Ast.TRecur [] }
         )
     , check "parse: withroots [ids] { block } end-to-end (the T2 deferral completed)"
-        (Parse.parseExp "withroots [x, y] { return vecload(x, 0); }"
+        (parseExpZero "withroots [x, y] { return vecload(x, 0); }"
             == Ok
                 (Ast.EWithRoots [ "x", "y" ]
-                    { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.VecLoad [ Ast.EVar "x", Ast.EInt 0 ]) }
+                    (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.VecLoad [ Ast.EVar "x", Ast.EInt 0 ]) })
                 )
         )
 
     -- else binding and program shape
     , check "parse: a braced inner if does not steal the else (the else binds to the outer if)"
-        (Parse.parseBlock "{ if (a == 1) { if (b == 2) { return mknil; } } else { return mkbool(1); } }"
+        (parseBlockBare "{ if (a == 1) { if (b == 2) { return mknil; } } else { return mkbool(1); } }"
             == Ok
                 { stmts = []
                 , term =
                     Ast.TIf (Ast.EWordCmp Ast.WCeq (Ast.EVar "a") (Ast.EInt 1))
-                        { stmts = []
+                        (noSpanBlock { stmts = []
                         , term =
                             Ast.TIf (Ast.EWordCmp Ast.WCeq (Ast.EVar "b") (Ast.EInt 2))
-                                { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNil []) }
+                                (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNil []) })
                                 Nothing
-                        }
-                        (Just { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkBool [ Ast.EInt 1 ]) })
+                        })
+                        (Just (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkBool [ Ast.EInt 1 ]) }))
                 }
         )
     , check "parse: a program is a list of defuns (the boundary handback between them)"
-        (case Parse.parseProgram "defun Rt.a() -> val { return mknil; }\n\ndefun Rt.b() -> val { return mknil; }" of
+        (case parseProgramBare "defun Rt.a() -> val { return mknil; }\n\ndefun Rt.b() -> val { return mknil; }" of
             Ok defuns ->
                 List.map .key defuns == [ "Rt.a", "Rt.b" ]
 
@@ -3682,11 +3683,11 @@ checks rt rawMidText =
                 False
         )
     , check "parse: the empty program (and whitespace-only) is zero defuns"
-        (Parse.parseProgram "" == Ok [] && Parse.parseProgram "\n  " == Ok [])
+        (parseProgramBare "" == Ok [] && parseProgramBare "\n  " == Ok [])
 
     -- rejects (each pins the message fragment -- a loud-but-wrong failure must not pass)
     , check "parse REJECTS a defun missing its `-> ty` (a silently-untyped defun)"
-        (case Parse.parseProgram "defun Rt.f(x: word) { return mknil; }" of
+        (case parseProgramBare "defun Rt.f(x: word) { return mknil; }" of
             Err msg ->
                 String.contains "expected `->`" msg
 
@@ -3694,7 +3695,7 @@ checks rt rawMidText =
                 False
         )
     , check "parse REJECTS a statement missing its trailing `;`"
-        (case Parse.parseProgram "defun Rt.f() -> val { word x = mknum(1) return mknil; }" of
+        (case parseProgramBare "defun Rt.f() -> val { word x = mknum(1) return mknil; }" of
             Err msg ->
                 String.contains "expected `;`" msg
 
@@ -3702,7 +3703,7 @@ checks rt rawMidText =
                 False
         )
     , check "parse REJECTS `if` without parentheses (the commit pins the reason, not a generic terminator error)"
-        (case Parse.parseBlock "{ if x { return mknil; } }" of
+        (case parseBlockBare "{ if x { return mknil; } }" of
             Err msg ->
                 String.contains "parentheses" msg
 
@@ -3710,7 +3711,7 @@ checks rt rawMidText =
                 False
         )
     , check "parse REJECTS a malformed param type (a type must be word, float or val)"
-        (case Parse.parseProgram "defun Rt.f(x: wurd) -> val { return mknil; }" of
+        (case parseProgramBare "defun Rt.f(x: wurd) -> val { return mknil; }" of
             Err msg ->
                 String.contains "expected a type" msg
 
@@ -3718,7 +3719,7 @@ checks rt rawMidText =
                 False
         )
     , check "parse REJECTS an unterminated block (the `}` after the term is required)"
-        (case Parse.parseProgram "defun Rt.f() -> val { return mknil;" of
+        (case parseProgramBare "defun Rt.f() -> val { return mknil;" of
             Err msg ->
                 String.contains "expected `}`" msg
 
@@ -3726,7 +3727,7 @@ checks rt rawMidText =
                 False
         )
     , check "parse REJECTS statements after the block's terminator (a silent drop/reorder would be a miscompile)"
-        (case Parse.parseBlock "{ return mknil; wstore(p, 0, w); }" of
+        (case parseBlockBare "{ return mknil; wstore(p, 0, w); }" of
             Err msg ->
                 String.contains "exactly one terminator" msg
 
@@ -3734,7 +3735,7 @@ checks rt rawMidText =
                 False
         )
     , check "parse REJECTS a mid-block recur (a second terminator; recur is a term only, plan L4)"
-        (case Parse.parseBlock "{ recur(a); recur(b); }" of
+        (case parseBlockBare "{ recur(a); recur(b); }" of
             Err msg ->
                 String.contains "exactly one terminator" msg
 
@@ -3742,7 +3743,7 @@ checks rt rawMidText =
                 False
         )
     , check "parse REJECTS an unknown @flag (the flag set is exactly Ast's three, never a String)"
-        (case Parse.parseProgram "@nope defun Rt.f() -> val { return mknil; }" of
+        (case parseProgramBare "@nope defun Rt.f() -> val { return mknil; }" of
             Err msg ->
                 String.contains "unknown flag" msg
 
@@ -3762,7 +3763,7 @@ checks rt rawMidText =
     -- pair and a positive control for the separator rule.
 
     , check "parse comment: a leading comment line above the first defun (the top of a defun)"
-        (case Parse.parseProgram "// Rt.getpid — the pid boxed as a val\ndefun Rt.getpid() -> val { return mknum(1); }" of
+        (case parseProgramBare "// Rt.getpid — the pid boxed as a val\ndefun Rt.getpid() -> val { return mknum(1); }" of
             Ok defuns ->
                 List.map .key defuns == [ "Rt.getpid" ]
 
@@ -3770,14 +3771,14 @@ checks rt rawMidText =
                 False
         )
     , check "parse comment: after a statement and at the top of the block — and it creates NO statement"
-        (Parse.parseBlock "{ // how the tag is read\n  word w = payload(v); // index 0\n  return mknum(w); }"
+        (parseBlockBare "{ // how the tag is read\n  word w = payload(v); // index 0\n  return mknum(w); }"
             == Ok
                 { stmts = [ Ast.SBind Ast.TWord "w" (Ast.EBuiltin Ast.Payload [ Ast.EVar "v", Ast.EInt 0 ]) ]
                 , term = Ast.TRet (Ast.EBuiltin Ast.MkNum [ Ast.EVar "w" ])
                 }
         )
     , check "parse comment: a comment line BETWEEN two statements (nothing is dropped or reordered)"
-        (Parse.parseBlock "{ word a = mknum(1);\n  // the second one\n  word b = mknum(2);\n  return b; }"
+        (parseBlockBare "{ word a = mknum(1);\n  // the second one\n  word b = mknum(2);\n  return b; }"
             == Ok
                 { stmts =
                     [ Ast.SBind Ast.TWord "a" (Ast.EBuiltin Ast.MkNum [ Ast.EInt 1 ])
@@ -3792,7 +3793,7 @@ checks rt rawMidText =
             && Parse.parseExp "a +// after the operator\n b" == Ok (Ast.EWordBin Ast.WAdd (Ast.EVar "a") (Ast.EVar "b"))
         )
     , check "parse comment: in the whitespace-legal header slots (inside the parameter list, after `->`)"
-        (case Parse.parseProgram "defun Rt.f(a: val, // the accumulator\n  b: val) -> // its class\nval { return mknil; }" of
+        (case parseProgramBare "defun Rt.f(a: val, // the accumulator\n  b: val) -> // its class\nval { return mknil; }" of
             Ok defuns ->
                 List.map .key defuns == [ "Rt.f" ]
 
@@ -3800,7 +3801,7 @@ checks rt rawMidText =
                 False
         )
     , check "parse comment: at end of file, after the closing brace"
-        (case Parse.parseProgram "defun Rt.f() -> val { return mknil; }\n// EOF\n" of
+        (case parseProgramBare "defun Rt.f() -> val { return mknil; }\n// EOF\n" of
             Ok defuns ->
                 List.map .key defuns == [ "Rt.f" ]
 
@@ -3808,17 +3809,17 @@ checks rt rawMidText =
                 False
         )
     , check "parse comment: between a branch's closing brace and its `else`"
-        (Parse.parseBlock "{ if (a == 1) { return mknil; } // the other arm\n else { return mkbool(1); } }"
+        (parseBlockBare "{ if (a == 1) { return mknil; } // the other arm\n else { return mkbool(1); } }"
             == Ok
                 { stmts = []
                 , term =
                     Ast.TIf (Ast.EWordCmp Ast.WCeq (Ast.EVar "a") (Ast.EInt 1))
-                        { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNil []) }
-                        (Just { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkBool [ Ast.EInt 1 ]) })
+                        (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNil []) })
+                        (Just (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkBool [ Ast.EInt 1 ]) }))
                 }
         )
     , check "parse comment: a comment COUNTS as the whitespace separator a token boundary needs"
-        (case Parse.parseProgram "defun //c\nRt.f() -> val { return mknil; }" of
+        (case parseProgramBare "defun //c\nRt.f() -> val { return mknil; }" of
             Ok defuns ->
                 List.map .key defuns == [ "Rt.f" ]
 
@@ -3826,7 +3827,7 @@ checks rt rawMidText =
                 False
         )
     , check "parse comment CONTROL: with no separator at all the tokens merge (`defunRt`) and the parse is LOUD"
-        (case Parse.parseProgram "defunRt.f() -> val { return mknil; }" of
+        (case parseProgramBare "defunRt.f() -> val { return mknil; }" of
             Err _ ->
                 True
 
@@ -3907,7 +3908,7 @@ checks rt rawMidText =
                 False
         )
     , check "parse U1: a pointer annotation in the type position (*Region as a param type)"
-        (case Parse.parseProgram "defun Rt.f(p: *Region) -> word { return wload(p, 0); }" of
+        (case parseProgramBare "defun Rt.f(p: *Region) -> word { return wload(p, 0); }" of
             Ok defuns ->
                 case defuns of
                     d :: _ ->
@@ -3933,7 +3934,7 @@ checks rt rawMidText =
             && Parse.parseExp "*p->f" == Ok (Ast.EDeref (Ast.EField (Ast.EVar "p") "f"))
         )
     , check "parse U1: field/index store statements (SFieldStore / SIndexStore, exact AST)"
-        (Parse.parseBlock "{ p->f = e;\n  p[i] = e;\n  return mknil; }"
+        (parseBlockBare "{ p->f = e;\n  p[i] = e;\n  return mknil; }"
             == Ok
                 { stmts =
                     [ Ast.SFieldStore (Ast.EVar "p") "f" (Ast.EVar "e")
@@ -3943,7 +3944,7 @@ checks rt rawMidText =
                 }
         )
     , check "parse U1: a pointer-typed binder (*Region r = e;) parses to SBind with a TPtr type"
-        (case Parse.parseBlock "{ *Region r = payload(v, 0);\n  return mknum(r); }" of
+        (case parseBlockBare "{ *Region r = payload(v, 0);\n  return mknum(r); }" of
             Ok b ->
                 case b.stmts of
                     Ast.SBind (Ast.TPtr (Ast.PStruct "Region")) "r" (Ast.EBuiltin Ast.Payload [ Ast.EVar "v", Ast.EInt 0 ]) :: _ ->
@@ -3982,7 +3983,7 @@ checks rt rawMidText =
                 False
         )
     , check "parse U1 REJECTS `*p = e;` (v1 has no deref-store — at statement start a `*` is a pointer bind, and `p` is no pointee)"
-        (case Parse.parseBlock "{ *p = e; return mknil; }" of
+        (case parseBlockBare "{ *p = e; return mknil; }" of
             Err msg ->
                 String.contains "pointer pointee" msg
 
@@ -4266,7 +4267,7 @@ checks rt rawMidText =
         )
     , checkErrModule "check cffi U2 J15 R-06 (the duplicate U1 deferred): one symbol declared TWICE is refused — the extern symbol namespace had no owner until this unit" "is declared twice" "extern access(path : ptr) -> i32;\nextern access(path : ptr, mode : i32) -> i64;\ndefun Rt.g() -> word {\n  return 0;\n}"
     , checkErrModule "check cffi U2 J15 R-07: a symbol that collides with a BUILTIN spelling is refused — the call site would resolve to the builtin, never to the C symbol" "is a BUILTIN" "extern wload(p : ptr) -> i64;\ndefun Rt.g() -> word {\n  return 0;\n}"
-    , checkErrModule "check cffi U2 J15 R-08: a symbol that is ALSO a rawcallArity row is refused — two tables for one symbol is the skew this repo keeps paying for" "is a rawcallArity row" "extern getpid() -> i32;\ndefun Rt.g() -> word {\n  return 0;\n}"
+    , checkErrModule "check cffi U2 J15 R-08: a symbol that is ALSO a rawcallArity row is refused — two tables for one symbol is the skew this repo keeps paying for" "is a `rawcallArity` row" "extern getpid() -> i32;\ndefun Rt.g() -> word {\n  return 0;\n}"
     , checkErrModule "check cffi U2 J3 R-11: a declared extern's ARITY is at least the declaration's FIXED parameters (2 declared, 1 passed)" "is declared extern with 2 fixed parameter(s), got 1" "extern access(path : ptr, mode : i32) -> i32;\ndefun Rt.g(p : word) -> word {\n  word r = rawcall access(p);\n  return r;\n}"
     , checkErrModule "check cffi U2 J3 R-14/R-16: the DECLARED class is what an argument is checked against — a word at an f64 slot is the existing wording" "needs float, got word" "extern fmodx(x : f64) -> i32;\ndefun Rt.g(p : word) -> word {\n  word r = rawcall fmodx(p);\n  return r;\n}"
     , checkErrModule "check cffi U2 J3 result class: an f64 RESULT is `float`, so binding it to a `word` is the existing word-slot reject (not a silent word read)" "declares word but its initializer is float" "extern fv() -> f64;\ndefun Rt.g() -> word {\n  word r = rawcall fv();\n  return r;\n}"
@@ -4508,6 +4509,26 @@ checks rt rawMidText =
         )
     , check "U5 LAYOUT PIN: sizeof(Region) == 38 words in runtime.mid's own declaration (slots 0..12 + GC-ARC F1's stats instrument at 13..23 + GC ARC unit 4's growth ceiling at 24 + GC ARC unit 2's block map at 25..27 + GC NURSERY's young/remembered-set family at 28..37 + GC NURSERY's young/remembered-set family at 28..37 — the mark stack starts at word 64, so it is NOT a field, and the digit scratch the printer writes into is at BYTE 320, outside the struct)"
         (Check.sizeofStruct (declsOf runtimeMidText) "Region" == Just 38)
+    -- (u12) THE SPLICE KEEPS THE FILE'S ROWS.  `spliceArm` drops the marker
+    -- lines (both arms) and the other arm's regions, and a rejection rendered
+    -- from the spliced text is rendered with ITS row — so a splice that
+    -- REMOVES a dropped line makes every later row a row runtime.mid does not
+    -- have (MEASURED before the fix: a break at file row 3029 rendered as
+    -- 2973).  The splice therefore BLANKS a dropped line; this row is what
+    -- notices if that ever becomes a removal again.  run.js's nursery splice
+    -- carries the same rule and is proven by the runtime lane's own probe,
+    -- not from here: test-run.js hands this module the RAW file.
+    , check "u12 ROW PIN: the arm splice keeps runtime.mid's ROWS — the val-arm text has exactly the file's line count, and every row is either the file's own line (byte-identical) or EMPTY (a blanked marker / word-arm twin), so a snippet row is a row of the committed file. WOULD FAIL: a splice that removes a dropped line (the counts diverge from the first drop on) or re-indents a kept one"
+        (let
+            rawLines =
+                String.split "\n" rawMidText
+
+            armLines =
+                String.split "\n" runtimeMidText
+         in
+         (List.length armLines == List.length rawLines)
+            && List.all identity (List.map2 (\r a -> a == "" || a == r) rawLines armLines)
+        )
     -- ==================== GC NURSERY: the hatch's own pins ====================
     -- The young defuns live ONLY inside the QBE_MIDGC_YOUNG-ONLY splice region
     -- (run.js drops them unless the build flag is set), so a young key leaking
@@ -6351,6 +6372,33 @@ checks rt rawMidText =
                         False
         )
 
+    , check "U13 M3 lane: a DUPLICATE EXPORT through the USER lane renders the RECORD — the module's file name in the banner AND U8's hint — not the bare `EXPORT: <rule>` one-liner (MEASURED before the fix: `err EXPORT: key 'UserMid2.boxedSum' is exported more than once`, no file, hint discarded)"
+        (case Rt.parseUserModule "module UserMid2\nexport UserMid2.f : val -> val\nexport UserMid2.f : val -> val\ndefun UserMid2.f(a: val) -> val {\n  return mknil;\n}" of
+            Ok parsed ->
+                case Rt.checkLowerUserModule rt.externTypes parsed of
+                    Err msg ->
+                        String.contains "UserMid2.mid" msg
+                            && String.contains "exported more than once" msg
+                            && String.contains "Hint: " msg
+                            && String.contains "delete the second export" msg
+
+                    Ok _ ->
+                        False
+
+            Err _ ->
+                False
+        )
+    , check "U13 runtime lane: a DUPLICATE EXPORT in the runtime text renders the RECORD too — the own-runtime Note above a `runtime.mid` banner and U8's hint (the same record, the lane's own path)"
+        (case Rt.load "module Rt\nexport Rt.f : val -> val\nexport Rt.f : val -> val\ndefun Rt.f(a: val) -> val { return mknil; }" of
+            Err msg ->
+                String.contains "osier's own runtime" msg
+                    && String.contains "runtime.mid" msg
+                    && String.contains "delete the second export" msg
+
+            Ok _ ->
+                False
+        )
+
     -- A2: THE USER-MODULE DECL GAP (A1's trade-off 3).  `parseUserModule` used
     -- to return a 3-tuple that silently DROPPED `module_.decls`, so a user .mid
     -- carrying a `struct` parsed it into nothing before the checker (the runtime
@@ -6412,26 +6460,35 @@ checks rt rawMidText =
                 False
         )
 
-    , check "M3 collision (a): a user key in the Rt.* namespace is a LOUD reject (the reserved compiler-internal namespace)"
+    , check "M3 collision (a): a user key in the Rt.* namespace is a LOUD reject (the reserved compiler-internal namespace) — U16: the payload is the RENDERED record (banner NAMING PROBLEM over the colliding key's own X.mid, the rule, the actionable Hint, the -- NS footer), not the hint-less `NS: key ...` one-liner it used to be"
         (case QbeModule.userCollisions Dict.empty [ mkUser "X" [ "Rt.foo" ] ] of
             Err msg ->
                 String.contains "reserved Rt.* namespace" msg
+                    && String.contains "-- NAMING PROBLEM" msg
+                    && String.contains " X.mid" msg
+                    && String.contains "Hint: rename the module or the defun" msg
+                    && String.contains "-- NS" msg
+                    && not (String.contains "NS: key" msg)
 
             Ok () ->
                 False
         )
-    , check "M3 collision (b): two user modules claiming the same key is a LOUD reject"
+    , check "M3 collision (b): two user modules claiming the same key is a LOUD reject — U16: rendered, and the banner names A.mid (the only name two files both declaring `module A` can honestly share)"
         (case QbeModule.userCollisions Dict.empty [ mkUser "A" [ "A.f" ], mkUser "A" [ "A.f" ] ] of
             Err msg ->
                 String.contains "defined by two modules" msg
+                    && String.contains " A.mid" msg
+                    && String.contains "Hint: a .mid key is namespaced by its module name" msg
 
             Ok () ->
                 False
         )
-    , check "M3 collision (bonus): a user key colliding with an Elm global is a LOUD reject"
+    , check "M3 collision (bonus): a user key colliding with an Elm global is a LOUD reject — U16: rendered over A.mid with the rename Hint, the same shape the two Mid.Rt lanes give this tag"
         (case QbeModule.userCollisions (Dict.fromList [ ( "A.f", 1 ) ]) [ mkUser "A" [ "A.f" ] ] of
             Err msg ->
                 String.contains "collides with an Elm global" msg
+                    && String.contains " A.mid" msg
+                    && String.contains "Hint: rename the .mid module or the Elm defun" msg
 
             Ok () ->
                 False
@@ -6446,7 +6503,7 @@ checks rt rawMidText =
     , check "M3fix privacy REJECT: a user .mid cannot `call Rt.getpid` (an UNEXPORTED runtime key) — the user lane's extern table is the runtime export block only"
         (case QbeModule.loadUserMids rt [ "module A\nexport A.f : val -> val\ndefun A.f(a: val) -> val {\n  return call Rt.getpid(a);\n}" ] of
             Err msg ->
-                String.contains "unseeded key" msg && String.contains "Rt.getpid" msg
+                String.contains "resolves to no defun and no extern" msg && String.contains "Rt.getpid" msg
 
             Ok _ ->
                 False
@@ -6759,6 +6816,10 @@ checks rt rawMidText =
     , checkErr "check: J1 REJECT — a bare word variable as an if condition (its representation is the lowering's)"
         "J1"
         "defun Rt.badvar(a: val) -> val {\n  word x = payload(a, 0);\n  if (x) { return mknil; } else { return mkbool(1); }\n}"
+    , checkErrHint "check: J1 REJECT — a POINTER if condition names the GENERAL branch rule, not only the float remedy (U13: the hint used to offer `mkflt` for a class `mkflt` cannot box, since this arm also receives pointer/struct/array)"
+        "must be val or word"
+        "only a `val`, a `bool`, or a word PRODUCER can branch"
+        "defun Rt.ptrcond(p: *word) -> val {\n  if (p) { return mknil; } else { return mkbool(1); }\n}"
     , checkErr "check: J1 REJECT — a builtin called with the wrong arity (mkstr needs 2)"
         "J1"
         "defun Rt.badmkstr(a: val) -> val {\n  val s = mkstr(a);\n  return s;\n}"
@@ -6796,6 +6857,16 @@ checks rt rawMidText =
     , checkErr "check: J2 REJECT — a call whose arity exceeds the callee's"
         "J2"
         "defun Rt.overcall() -> val {\n  return call Rt.one(mknum(1));\n}\n\ndefun Rt.one() -> val {\n  return mknum(1);\n}"
+    , check "check: J2 REJECT — an UNDERcall states the DECLARED arity and the SUPPLIED count, not the post-recursion tails (U13; MEASURED before the fix through the real lane: a 2-ary callee called with ONE argument rendered `takes 1 argument(s), got 0`)"
+        (case chkFlagsMidc [] "defun Rt.under(a: val) -> val {\n  return call Rt.two(a);\n}\n\ndefun Rt.two(a: val, b: val) -> val {\n  return mknil;\n}" of
+            Err e ->
+                -- BOTH numbers, one fragment: a fix that carries only one of
+                -- them (or carries them transposed) fails this row.
+                String.contains "call 'Rt.two' takes 2 argument(s), got 1" (MidErr.oneLine e)
+
+            Ok _ ->
+                False
+        )
     , checkErr "check: J2 REJECT — a val passed to a word-parameter callee"
         "J2"
         "defun Rt.wrongarg(a: val) -> val {\n  return call Rt.wid(a);\n}\n\ndefun Rt.wid(x: word) -> val {\n  return mknum(x);\n}"
@@ -8137,7 +8208,7 @@ checks rt rawMidText =
 
     -- ---- parse: the new key characters (each measured ambiguity pinned) ----
     , check "parse: defun Rt.*(a, b) lexes the * key verbatim and calls it -- a key-position * never touches the body's mul operator"
-        (Parse.parseProgram
+        (parseProgramBare
             "defun Rt.*(a: val, b: val) -> val {\n  return mknum(payload(a, 0) * payload(b, 0));\n}"
             == Ok
                 [ { key = "Rt.*"
@@ -8162,7 +8233,7 @@ checks rt rawMidText =
                 ]
         )
     , check "parse: defun Rt.number?(a) lexes the ? key verbatim -- a key-position ? never touches the expression layer's ?: join"
-        (Parse.parseProgram
+        (parseProgramBare
             "defun Rt.number?(a: val) -> val {\n  return mkbool(tagis(a, 0)) || false;\n}"
             == Ok
                 [ { key = "Rt.number?"
@@ -8260,7 +8331,7 @@ checks rt rawMidText =
     -- ---- the T10 parse additions: the guard conjunction ----
     , check
         "parse: a guard CONJUNCTION lands in source order — @rec @eqPtrFast defun Rt.=.. has flags [Guard Rec, Guard EqPtrFast]"
-        (Parse.parseProgram "@rec @eqPtrFast defun Rt.=(a: val, b: val) -> val { return mkbool(1); }"
+        (parseProgramBare "@rec @eqPtrFast defun Rt.=(a: val, b: val) -> val { return mkbool(1); }"
             == Ok
                 [ { key = "Rt.="
                   , flags = [ Ast.Guard Ast.Rec, Ast.Guard Ast.EqPtrFast ]
@@ -8275,7 +8346,7 @@ checks rt rawMidText =
         )
     , check
         "parse: @!rec @!eqPtrFast — the GuardNot polarities are preserved per guard in the conjunction"
-        (case Parse.parseProgram "@!rec @!eqPtrFast defun Rt.=(a: val) -> val { return mknil; }" of
+        (case parseProgramBare "@!rec @!eqPtrFast defun Rt.=(a: val) -> val { return mknil; }" of
             Ok [ d ] ->
                 d.flags == [ Ast.GuardNot Ast.Rec, Ast.GuardNot Ast.EqPtrFast ]
 
@@ -8284,7 +8355,7 @@ checks rt rawMidText =
         )
     , check
         "parse REJECTS an unknown flag inside a conjunction (@rec @bogus) — the SAME unknown-flag reject the head guard has"
-        (case Parse.parseProgram "@rec @bogus defun Rt.x(a: val) -> val { return mknil; }" of
+        (case parseProgramBare "@rec @bogus defun Rt.x(a: val) -> val { return mknil; }" of
             Err msg ->
                 String.contains "unknown flag" msg
 
@@ -8479,7 +8550,7 @@ checks rt rawMidText =
             src =
                 String.join "\n" (List.map defunSrc (List.range 1 n))
          in
-         case Parse.parseProgram src of
+         case parseProgramBare src of
             Err _ ->
                 False
 
@@ -8524,10 +8595,17 @@ checks rt rawMidText =
                )
         )
     , check
-        "check: J8 REJECT — a guarded variant PLUS an unguarded duplicate is TWO active under the guard's flags (fragment '2 flag-guarded defuns are active')"
+        "check: J8 REJECT — a guarded variant PLUS an unguarded duplicate is TWO active under the guard's flags; U13: the sentence names the COUNT and the KEY only, because `activeVariants` counts an UNGUARDED defun as active — so the SAME fragment is true for two defuns that carry no guard at all (the second half of this row), and 'flag-guarded' would have been a law neither case satisfies"
         (case chkFlags [ Ast.Rec ] "@rec defun Rt.k(a: val) -> val { return mknil; }\ndefun Rt.k(a: val) -> val { return mknil; }" of
             Err msg ->
-                String.contains "2 flag-guarded defuns are active" msg
+                String.contains "2 defuns are active at once for key 'Rt.k'" msg
+                    && (case chkFlags [] "defun Rt.k(a: val) -> val { return mknil; }\ndefun Rt.k(a: val) -> val { return mknil; }" of
+                            Err msg2 ->
+                                String.contains "2 defuns are active at once for key 'Rt.k'" msg2
+
+                            Ok _ ->
+                                False
+                       )
 
             Ok _ ->
                 False
@@ -8640,7 +8718,7 @@ checks rt rawMidText =
 
     -- ---- wall 2: the key charset (each measured ambiguity pinned) ----
     , check "parse: defun Rt.write-byte(..) lexes its - key verbatim, calls the Rt.= key, and passes -1 -- both walls in one defun"
-        (Parse.parseProgram
+        (parseProgramBare
             "defun Rt.write-byte(fd: val, b: val) -> val {\n  word r = rawcall write(1, b, 1);\n  return call Rt.=(r, -1);\n}"
             == Ok
                 [ { key = "Rt.write-byte"
@@ -8660,7 +8738,7 @@ checks rt rawMidText =
                 ]
         )
     , check "parse: defun Rt.address->(..) -> .. -- the key's trailing -> is not the header's arrow (the key stops at the '(')"
-        (Parse.parseProgram
+        (parseProgramBare
             "defun Rt.address->(v: val, i: val) -> val {\n  return vecload(v, i);\n}"
             == Ok
                 [ { key = "Rt.address->"
@@ -8675,7 +8753,7 @@ checks rt rawMidText =
                 ]
         )
     , check "parse: defun Rt.=(..) with a body binding `word t = a == b;` -- = is a key char, a bind = and a compare == in the body still parse"
-        (Parse.parseProgram
+        (parseProgramBare
             "defun Rt.=(a: val, b: val) -> val {\n  word t = a == b;\n  return mkbool(t);\n}"
             == Ok
                 [ { key = "Rt.="
@@ -8707,7 +8785,7 @@ checks rt rawMidText =
                 False
         )
     , check "parse REJECTS `defun Rt.(..)` -- an empty key segment (trailing dot)"
-        (case Parse.parseProgram "defun Rt.(x: val) -> val {\n  return 0;\n}" of
+        (case parseProgramBare "defun Rt.(x: val) -> val {\n  return 0;\n}" of
             Err msg ->
                 String.contains "expected a defun key" msg
 
@@ -8715,7 +8793,7 @@ checks rt rawMidText =
                 False
         )
     , check "parse: defun Rt.c-strlen(..) whose body subtracts -- the SAME - is a key separator in the header and binary minus in the body"
-        (Parse.parseProgram
+        (parseProgramBare
             "defun Rt.c-strlen(s: val) -> val {\n  word n = rawcall strlen(s);\n  return n - 1;\n}"
             == Ok
                 [ { key = "Rt.c-strlen"
@@ -8881,38 +8959,38 @@ checks rt rawMidText =
 
     -- ---- parse: shape and positions ----
     , check "parse: the block-branch if — `if (c) { return a; } else { return b; }` is EIfBlock (T23; else REQUIRED)"
-        (Parse.parseExp "if (c) { return a; } else { return b; }"
+        (parseExpZero "if (c) { return a; } else { return b; }"
             == Ok
                 (Ast.EIfBlock (Ast.EVar "c")
-                    { stmts = [], term = Ast.TRet (Ast.EVar "a") }
-                    { stmts = [], term = Ast.TRet (Ast.EVar "b") }
+                    (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EVar "a") })
+                    (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EVar "b") })
                 )
         )
     , check "parse: the block-branch if in a CALL ARGUMENT (a value slot like any atom; the comma still separates args)"
-        (Parse.parseExp "call Rt.f(if (c) { return 1; } else { return 2; }, w)"
+        (parseExpZero "call Rt.f(if (c) { return 1; } else { return 2; }, w)"
             == Ok
                 (Ast.ECall "Rt.f"
                     [ Ast.EIfBlock (Ast.EVar "c")
-                        { stmts = [], term = Ast.TRet (Ast.EInt 1) }
-                        { stmts = [], term = Ast.TRet (Ast.EInt 2) }
+                        (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EInt 1) })
+                        (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EInt 2) })
                     , Ast.EVar "w"
                     ]
                 )
         )
     , check "parse: the block-branch if NESTED — a branch block binds an inner block-if (a block's value needs a binder: a bare expression is not a term)"
-        (Parse.parseExp "if (c) { val t = if (d) { return 1; } else { return 2; }; return t; } else { return 0; }"
+        (parseExpZero "if (c) { val t = if (d) { return 1; } else { return 2; }; return t; } else { return 0; }"
             == Ok
                 (Ast.EIfBlock (Ast.EVar "c")
-                    { stmts =
+                    (noSpanBlock { stmts =
                         [ Ast.SBind Ast.TVal "t"
                             (Ast.EIfBlock (Ast.EVar "d")
-                                { stmts = [], term = Ast.TRet (Ast.EInt 1) }
-                                { stmts = [], term = Ast.TRet (Ast.EInt 2) }
+                                (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EInt 1) })
+                                (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EInt 2) })
                             )
                         ]
                     , term = Ast.TRet (Ast.EVar "t")
-                    }
-                    { stmts = [], term = Ast.TRet (Ast.EInt 0) }
+                    })
+                    (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EInt 0) })
                 )
         )
     , check "parse REJECTS a block-branch if with a missing `else` (an expression needs a value from both arms — no silent fall-through)"
@@ -8924,12 +9002,12 @@ checks rt rawMidText =
                 False
         )
     , check "parse: the STATEMENT if is untouched — the same tokens at statement position are SIf with an else block, never EIfBlock"
-        (case Parse.parseBlock "{ if (c) { return mknum(1); } else { return mknum(2); } return mknil; }" of
+        (case parseBlockBare "{ if (c) { return mknum(1); } else { return mknum(2); } return mknil; }" of
             Ok b ->
                 b.stmts
                     == [ Ast.SIf (Ast.EVar "c")
-                            { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNum [ Ast.EInt 1 ]) }
-                            (Just { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNum [ Ast.EInt 2 ]) })
+                            (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNum [ Ast.EInt 1 ]) })
+                            (Just (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EBuiltin Ast.MkNum [ Ast.EInt 2 ]) }))
                        ]
                     && (case b.term of
                             Ast.TRet (Ast.EBuiltin Ast.MkNil []) ->
@@ -8943,12 +9021,12 @@ checks rt rawMidText =
                 False
         )
     , check "parse: the ?: join is UNTOUCHED by the block-branch if — a ?: arm can BE one (the arm parses the atom, the outer `:` still binds)"
-        (Parse.parseExp "c ? if (a) { return 1; } else { return 2; } : d"
+        (parseExpZero "c ? if (a) { return 1; } else { return 2; } : d"
             == Ok
                 (Ast.EIf (Ast.EVar "c")
                     (Ast.EIfBlock (Ast.EVar "a")
-                        { stmts = [], term = Ast.TRet (Ast.EInt 1) }
-                        { stmts = [], term = Ast.TRet (Ast.EInt 2) }
+                        (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EInt 1) })
+                        (noSpanBlock { stmts = [], term = Ast.TRet (Ast.EInt 2) })
                     )
                     (Ast.EVar "d")
                 )
@@ -9113,7 +9191,7 @@ checks rt rawMidText =
     -- (they compare two spellings of the SAME program, so a moved tree fails
     -- them even where no corpus group spells either).
     , check "B1 parse: `int` IS `word` — a binder, a parameter and the result all parse to TWord (one class, two spellings)"
-        (Parse.parseProgram
+        (parseProgramBare
             "defun F.g(a: int) -> int {\n  int n = a;\n  return n;\n}"
             == Ok
                 [ { key = "F.g"
@@ -9132,7 +9210,7 @@ checks rt rawMidText =
             == Ok (Ast.ECast (Ast.TPtr Ast.PWord) (Ast.EInt 1))
         )
     , check "B1 parse: `bool b = (a == b);` is SBind TBool over an EWordCmp (the binder class, spelled ONLY in binder position)"
-        (Parse.parseProgram
+        (parseProgramBare
             "defun F.g(a: word, b: word) -> val {\n  bool c = (a == b);\n  return mknil;\n}"
             == Ok
                 [ { key = "F.g"
@@ -9147,7 +9225,7 @@ checks rt rawMidText =
                 ]
         )
     , check "B6 parse (REWRITTEN from B1's reject): `bool` IS a signature type now — the parameter parses as TBool and the CHECKER is what refuses it in a value-ABI signature (the two-row pair below)"
-        (Parse.parseProgram "defun F.g(b: bool) -> val {\n  return mknil;\n}"
+        (parseProgramBare "defun F.g(b: bool) -> val {\n  return mknil;\n}"
             == Ok
                 [ { key = "F.g"
                   , flags = []
@@ -9160,7 +9238,7 @@ checks rt rawMidText =
                   }
                 ]
         )
-    , checkErrModule "B6 check REJECT: a `bool` parameter in a VALUE-ABI signature — a bool is a 0/1 WORD register, and the `v : val` parameter forces the value ABI (a 40-byte Value slot is not a bool)" "is a bool, which is a 0/1 word REGISTER" "defun F.g(b: bool, v: val) -> word {\n  return 1;\n}"
+    , checkErrModule "B6 check REJECT: a `bool` parameter in a VALUE-ABI signature — a bool is a 0/1 WORD register, and the `v : val` parameter forces the value ABI (a 40-byte Value slot is not a bool)" "is a bool in a defun whose signature is not all word-class" "defun F.g(b: bool, v: val) -> word {\n  return 1;\n}"
     , checkOkModule "B6 check ACCEPT (the control): the same bool parameter and a bool RESULT are legal in an ALL-WORD signature — the word ABI is the only place a bool parameter can exist" "defun F.g(b: bool, w: word) -> bool {\n  return b;\n}"
     , check "B1 parse: `[T](e)` casts — [bool] of a word, [word] of a bool, [*S] of a word, [val], [int]"
         (Parse.parseExp "[bool](x)" == Ok (Ast.ECast Ast.TBool (Ast.EVar "x"))
@@ -9254,8 +9332,9 @@ checks rt rawMidText =
     , checkErr "B1 check REJECT: `sizeof(Nope)` — an unknown struct (the ONE table has no such entry)"
         "no such struct is declared"
         "defun F.g() -> val {\n  return mknum(sizeof(Nope));\n}"
-    , checkErr "B1 check REJECT: `sizeof(float)` — no raw f64 seat, the J11 float-field reason"
-        "no raw-memory f64 seat"
+    , checkErrHint "B1 check REJECT: `sizeof(float)` — no raw f64 seat, the J11 float-field reason.  U7 split it: the RULE says there is no answer, the HINT says what to ask instead (the seat rationale is a comment beside the arm)"
+        "sizeof(float) has no answer"
+        "no storage width"
         "defun F.g() -> val {\n  return mknum(sizeof(float));\n}"
 
     -- THE EMISSION ROWS.  Two of them are byte-identity pins between a NEW
@@ -9327,7 +9406,7 @@ checks rt rawMidText =
                 False
         )
     , check "B2 parse: `S s;` is a STRUCT-VALUE binder with ZEROED storage (SStructBind InitZero — a statement, not an SBind: the ALLOCATION is the point)"
-        (Parse.parseBlock "{ Outer o;\n  return 0; }"
+        (parseBlockBare "{ Outer o;\n  return 0; }"
             == Ok
                 { stmts =
                     [ Ast.SStructBind { sname = "Outer", name = "o", init = Ast.InitZero } ]
@@ -9335,7 +9414,7 @@ checks rt rawMidText =
                 }
         )
     , check "B2 parse: `Outer o = { a = 1; in_.k = 7; };` — the field-wise initialiser (name = expression, each `;`-terminated)"
-        (Parse.parseBlock "{ Outer o = { a = 1; in_ = t; };\n  return 0; }"
+        (parseBlockBare "{ Outer o = { a = 1; in_ = t; };\n  return 0; }"
             == Ok
                 { stmts =
                     [ Ast.SStructBind
@@ -9352,7 +9431,7 @@ checks rt rawMidText =
                 }
         )
     , check "B2 parse: `Outer c = o;` is a COPY initialiser and `c = o;` the aggregate ASSIGNMENT (`SVarStore`) — the same `=` tail, a different statement"
-        (Parse.parseBlock "{ Outer c = o;\n  c = o;\n  return 0; }"
+        (parseBlockBare "{ Outer c = o;\n  c = o;\n  return 0; }"
             == Ok
                 { stmts =
                     [ Ast.SStructBind { sname = "Outer", name = "c", init = Ast.InitCopy (Ast.EVar "o") }
@@ -9377,7 +9456,7 @@ checks rt rawMidText =
             == Ok (Ast.EAddrOf (Ast.EField (Ast.EField (Ast.EVar "p") "f") "g"))
         )
     , check "B2 parse: the `.` ROUTING MOVED NO KEY — a defun header and a `call` keep their dotted keys verbatim while a body's `p.f` splits (the two readers are different on purpose)"
-        (case Parse.parseProgram "defun Rt.a.b(p: *S) -> word {\n  return call Rt.getpid(p.f);\n}" of
+        (case parseProgramBare "defun Rt.a.b(p: *S) -> word {\n  return call Rt.getpid(p.f);\n}" of
             Ok [ d ] ->
                 d.key == "Rt.a.b" && d.body.term == Ast.TRet (Ast.ECall "Rt.getpid" [ Ast.EField (Ast.EVar "p") "f" ])
 
@@ -9392,21 +9471,21 @@ checks rt rawMidText =
         "struct S { a : word; }\ndefun Rt.g() -> word {\n  word w = 1;\n  *word p = &w;\n  return 0;\n}"
     , checkOkModule "B2 check accept CONTROL for the row above: `&` of a struct FIELD is legal and types as `*word` (the storage exists)"
         "struct S { a : word; }\ndefun Rt.g() -> word {\n  S s;\n  *word p = &s.a;\n  return *p;\n}"
-    , checkErrModule "B2 check REJECT: `&` of a VAL field — a GC-interior address exposed as a raw word is the unrooted-view hazard (vecaddr/payload are the sanctioned reads, plan Q11)" "unrooted-view hazard"
+    , checkErrModule "B2 check REJECT: `&` of a VAL field — a GC-interior address exposed as a raw word is the unrooted-view hazard (vecaddr/payload are the sanctioned reads, plan Q11)" "a val field has no raw address"
         "struct S { a : word; v : val; }\ndefun Rt.g() -> word {\n  S s;\n  *val p = &s.v;\n  return 0;\n}"
-    , checkErrModule "B2 check REJECT: `&p` of a POINTER — the pointer IS an address; the operand would have to be the address of the BINDER holding it, and a binder has no storage" "the pointer IS an address"
+    , checkErrModule "B2 check REJECT: `&p` of a POINTER — the pointer IS an address; the operand would have to be the address of the BINDER holding it, and a binder has no storage" "a pointer IS an address"
         "struct S { a : word; }\ndefun Rt.g(p: *S) -> word {\n  *word q = &p;\n  return 0;\n}"
     , checkErrModule "B2 check REJECT: `.` on a NON-STRUCT (`w.f` on a word) — field access needs a struct value or a struct pointer" "field access needs a struct pointer or a struct value"
         "defun Rt.g(w: word) -> word {\n  return w.f;\n}"
-    , checkErrModule "B2 check REJECT: a STRUCT RETURN (plan Q7 — the ret path is one word; the out-parameter is the way)" "a struct RETURN is REJECTED"
+    , checkErrModule "B2 check REJECT: a STRUCT RETURN (plan Q7 — the ret path is one word; the out-parameter is the way)" "a struct RETURN is not supported"
         "struct S { a : word; }\ndefun Rt.g() -> S {\n  S s;\n  return s;\n}"
     , checkOkModule "B6 check ACCEPT (REWRITTEN from B2's reject): a STRUCT PARAMETER by value in an ALL-WORD signature — the defun takes the word ABI, so the parameter has a register to live in (the caller passes its address; the callee copies it at entry)"
         "struct S { a : word; }\ndefun Rt.g(s: S) -> word {\n  return s.a;\n}"
-    , checkErrModule "B6 check REJECT: the same STRUCT PARAMETER in a VALUE-ABI signature — a struct parameter is legal ONLY where the whole signature is word-class (plan Q7), and the `v : val` parameter forces the value ABI" "a struct parameter is legal only in a WORD-ABI defun"
+    , checkErrModule "B6 check REJECT: the same STRUCT PARAMETER in a VALUE-ABI signature — a struct parameter is legal ONLY where the whole signature is word-class (plan Q7), and the `v : val` parameter forces the value ABI" "is a struct VALUE (S) in a defun whose signature is not all word-class"
         "struct S { a : word; }\ndefun Rt.g(s: S, v: val) -> word {\n  return s.a;\n}"
     , checkOkModule "B2 check accept CONTROL for the two rows above: a `*S` parameter and a `-> val` result are the legal spellings"
         "struct S { a : word; }\ndefun Rt.g(p: *S) -> val {\n  return mknum(p.a);\n}"
-    , checkErrModule "B2 check REJECT: copying a DIFFERENT struct (`T t = o;`) — a copy needs the SAME struct value" "the SAME struct"
+    , checkErrModuleHint "B2 check REJECT: copying a DIFFERENT struct (`T t = o;`) — a copy needs the SAME struct value.  U7 moved the law into the HINT, so the row pins the class sentence and the law" "is a T but its initializer is a S value" "a struct copy needs the SAME struct"
         "struct S { a : word; }\nstruct T { b : word; }\ndefun Rt.g() -> word {\n  S o;\n  T t = o;\n  return 0;\n}"
     , checkErrModule "B2 check REJECT: the same field initialised TWICE (`{ a = 1; a = 2; }`)" "initialised twice"
         "struct S { a : word; }\ndefun Rt.g() -> word {\n  S s = { a = 1; a = 2; };\n  return 0;\n}"
@@ -9521,14 +9600,14 @@ checks rt rawMidText =
 
     -- ================== B3: ARRAYS (plan Q5) ==================
     , check "B3 parse: `word[5] a;` is an ARRAY BINDER — the type is `TArray TWord 5` and the initialiser is AInitZero"
-        (Parse.parseBlock "{ word[5] a;\n  return 0; }"
+        (parseBlockBare "{ word[5] a;\n  return 0; }"
             == Ok
                 { stmts = [ Ast.SArrayBind { aty = Ast.TArray Ast.TWord 5, name = "a", init = Ast.AInitZero } ]
                 , term = Ast.TRet (Ast.EInt 0)
                 }
         )
     , check "B3 parse: `word[3][4] m = { .. };` NESTS with the LEFTMOST group OUTER — `TArray (TArray TWord 4) 3` (three rows of four), the row-major flat order"
-        (Parse.parseBlock "{ word[3][4] m = { 1, 2, 3 };\n  return 0; }"
+        (parseBlockBare "{ word[3][4] m = { 1, 2, 3 };\n  return 0; }"
             == Ok
                 { stmts =
                     [ Ast.SArrayBind
@@ -9541,7 +9620,7 @@ checks rt rawMidText =
                 }
         )
     , check "B3 parse: an UPPERCASE base is an array of STRUCTS — `S[2] xs;` is the same statement shape with a `TStruct` element"
-        (Parse.parseBlock "{ S[2] xs;\n  return 0; }"
+        (parseBlockBare "{ S[2] xs;\n  return 0; }"
             == Ok
                 { stmts = [ Ast.SArrayBind { aty = Ast.TArray (Ast.TStruct "S") 2, name = "xs", init = Ast.AInitZero } ]
                 , term = Ast.TRet (Ast.EInt 0)
@@ -9549,7 +9628,7 @@ checks rt rawMidText =
         )
     , check "B3 parse: the array type composes EVERYWHERE a type goes — a struct FIELD (`tab : word[3]`) and a `sizeof` operand (`sizeof(word[5])`)"
         ((Parse.parseModule "struct S { tab : word[3]; }\ndefun S.f() -> word {\n  return sizeof(word[5]);\n}"
-            |> Result.map (\m -> ( m.decls, m.defuns ))
+            |> Result.map (\m -> ( m.decls, List.map Ast.bareDefun m.defuns ))
          )
             == Ok
                 ( [ Ast.StructDecl { name = "S", members = [ Ast.MField { name = "tab", ty = Ast.TArray Ast.TWord 3, width = Nothing } ] } ]
@@ -9595,10 +9674,11 @@ checks rt rawMidText =
     , checkOkModule "B3 check ACCEPT: an ARRAY FIELD of a struct — `s.tab[1]`, and `&s.tab` decays to `*word`"
         "struct S { tab : word[3]; }\ndefun Rt.g() -> word {\n  S s;\n  s.tab[1] = 9;\n  *word p = &s.tab;\n  return p[1] + s.tab[1];\n}"
     , checkErr "B3 check REJECT: a PARTIAL initialiser — and C's `{0}` IS one: zero-filling the elements not spelled manufactures garbage-tag `val` handles"
-        "a PARTIAL initialiser is refused"
+        "is a word[5] but the initialiser has 2 element(s)"
         "defun Rt.g() -> word {\n  word[5] a = { 1, 2 };\n  return a[0];\n}"
-    , checkErr "B3 check REJECT: the SAME rule on a `val` array — the message names the garbage-tag trap and both zero-init spellings"
-        "garbage-tag trap"
+    , checkErrHint "B3 check REJECT: the SAME rule on a `val` array — the rule names the count and the hint names both zero-init spellings (the garbage-tag trap itself is the source comment beside the judgment)"
+        "is a val[4] but the initialiser has 1 element(s)"
+        "zero the WHOLE array"
         "defun Rt.g() -> val {\n  val[4] vs = { mknil };\n  return vs[0];\n}"
     , checkOk "B3 check ACCEPT (control for the two rows above): the FULL list of the same length is legal, and the bare declaration is the zeroed spelling"
         "defun Rt.g() -> word {\n  word[2] a = { 1, 2 };\n  word[4] b;\n  return a[1] + b[3];\n}"
@@ -9618,7 +9698,7 @@ checks rt rawMidText =
         "ARRAY VALUE"
         "defun Rt.g(a: word[3]) -> word {\n  return 0;\n}"
     , checkErr "B3 check REJECT: an ARRAY RETURN (the ret path is one word; a caller-supplied `*word` out-parameter is the way)"
-        "ARRAY RETURN is REJECTED"
+        "an ARRAY RETURN is not supported"
         "defun Rt.g() -> word[3] {\n  word[3] a;\n  return a;\n}"
     , checkErr "B3 check REJECT: a WHOLE-array assignment (`a = b;`) — that is an element-wise copy, not a v1 form"
         "cannot be assigned whole"
@@ -9626,9 +9706,56 @@ checks rt rawMidText =
     , checkErr "B3 check REJECT: a NESTED-array element store (`m[0] = n;`) — the leaves are what store"
         "cannot be stored whole"
         "defun Rt.g(n: *word) -> word {\n  word[2][3] m;\n  m[0] = *n;\n  return 0;\n}"
-    , checkErr "B3 check REJECT: a FLOAT array — no raw-memory f64 seat (the J11 float-field rule, same reason)"
-        "no raw-memory seat"
-        "defun Rt.g() -> word {\n  float[2] a;\n  return 0;\n}"
+    , check "B3 check REJECT: a FLOAT array — no raw-memory f64 seat (the J11 float-field rule, same reason); U13: its hint offers ONLY spellings that typecheck — the dropped `float f = itof(n);` is the float-BINDER J1 reject, pinned by the 'a float binder' row above"
+        (case chkFlagsMidc [] "defun Rt.g() -> word {\n  float[2] a;\n  return 0;\n}" of
+            Err e ->
+                String.contains "no raw-memory seat" (MidErr.oneLine e)
+                    && (case e.hint of
+                            Just h ->
+                                String.contains "boxed in a `val` array" h
+                                    && String.contains "mkflt" h
+                                    && not (String.contains "float f = itof" h)
+                                    && not (String.contains "no spelling of a float ARRAY" h)
+
+                            Nothing ->
+                                False
+                       )
+
+            Ok _ ->
+                False
+        )
+    , check "U16 float-array hint SCOPED BY POSITION (the local row above keeps the boxed-array spelling; this one must NOT): in a CAST TARGET no spelling of a float array compiles — `[val[2]]` is J10's cast matrix — so the hint says so and offers only the two remedies that typecheck there"
+        (case chkFlagsMidc [] "defun Rt.g(w : word) -> word {\n  val v = [float[2]](w);\n  return 0;\n}" of
+            Err e ->
+                String.contains "no raw-memory seat" (MidErr.oneLine e)
+                    && (case e.hint of
+                            Just h ->
+                                String.contains "no spelling of a float ARRAY compiles in this position" h
+                                    && String.contains "box each float in its own `val` local" h
+                                    && not (String.contains "boxed in a `val` array" h)
+
+                            Nothing ->
+                                False
+                       )
+
+            Ok _ ->
+                False
+        )
+    , check "U16 float-array hint SCOPED BY POSITION, nested-element case: `float[2][3] m;` reaches the float arm through the ELEMENT recursion (not the binder), so it gets the same caveat the cast target does — the boxed-array spelling is a LOCAL's, not an element's"
+        (case chkFlagsMidc [] "defun Rt.g() -> word {\n  float[2][3] m;\n  return 0;\n}" of
+            Err e ->
+                String.contains "no raw-memory seat" (MidErr.oneLine e)
+                    && (case e.hint of
+                            Just h ->
+                                String.contains "no spelling of a float ARRAY compiles in this position" h
+
+                            Nothing ->
+                                False
+                       )
+
+            Ok _ ->
+                False
+        )
     , check "B3 PIN full initialiser: `word[5] a = { .. };` emits malloc(40) then FIVE stores at word offsets 0..4 (one per element, in written order)"
         (case lowlModuleBody "defun Rt.g() -> word {\n  word[5] a = { 11, 12, 13, 14, 15 };\n  return a[0];\n}" of
             Ok body ->
@@ -9880,7 +10007,7 @@ checks rt rawMidText =
     , check "B6 STRUCT RETURN stays REJECTED (loudly, with the reason): the word ABI's ret path is ONE register, so a struct cannot come back — the message names the out-parameter, and B6 did not quietly open it"
         (case b6CheckErr rt "module B6s\nstruct S { a : word; }\ndefun B6s.f(s : S) -> S {\n  return s;\n}" of
             Err msg ->
-                String.contains "a struct RETURN is REJECTED" msg
+                String.contains "a struct RETURN is not supported" msg
 
             Ok _ ->
                 False
@@ -9893,7 +10020,7 @@ checks rt rawMidText =
     -- judgments), IR (the exact tree), .ssa (the block structure — and the
     -- absence of a phi), and the memory path.
     , check "B4 PARSE (exact AST): `while (c) {..}` is an `SWhile` STATEMENT whose body's fall-through is synthesized as `TContinue` — the relaxation is in the PARSER, so every Block the checker and lowerer read still has a terminator"
-        (Parse.parseProgram "defun Rt.w(i: word) -> word {\n  while (i < 3) {\n    i = i + 1;\n  }\n  return i;\n}"
+        (parseProgramBare "defun Rt.w(i: word) -> word {\n  while (i < 3) {\n    i = i + 1;\n  }\n  return i;\n}"
             == Ok
                 [ { key = "Rt.w"
                   , flags = []
@@ -9903,12 +10030,12 @@ checks rt rawMidText =
                         { stmts =
                             [ Ast.SWhile
                                 (Ast.EWordCmp Ast.WClts (Ast.EVar "i") (Ast.EInt 3))
-                                { stmts =
+                                (noSpanBlock { stmts =
                                     [ Ast.SVarStore "i"
                                         (Ast.EWordBin Ast.WAdd (Ast.EVar "i") (Ast.EInt 1))
                                     ]
                                 , term = Ast.TContinue
-                                }
+                                })
                             ]
                         , term = Ast.TRet (Ast.EVar "i")
                         }
@@ -9916,7 +10043,7 @@ checks rt rawMidText =
                 ]
         )
     , check "B4 PARSE (exact AST): `do {..} while (c);` keeps its CONDITION on the statement (`SDoWhile`) — C's continue-evaluates-the-condition rule needs it, so it is not desugared away in the parser"
-        (Parse.parseProgram "defun Rt.d(i: word) -> word {\n  do {\n    i = i + 1;\n  } while (i < 3);\n  return i;\n}"
+        (parseProgramBare "defun Rt.d(i: word) -> word {\n  do {\n    i = i + 1;\n  } while (i < 3);\n  return i;\n}"
             == Ok
                 [ { key = "Rt.d"
                   , flags = []
@@ -9925,12 +10052,12 @@ checks rt rawMidText =
                   , body =
                         { stmts =
                             [ Ast.SDoWhile
-                                { stmts =
+                                (noSpanBlock { stmts =
                                     [ Ast.SVarStore "i"
                                         (Ast.EWordBin Ast.WAdd (Ast.EVar "i") (Ast.EInt 1))
                                     ]
                                 , term = Ast.TContinue
-                                }
+                                })
                                 (Ast.EWordCmp Ast.WClts (Ast.EVar "i") (Ast.EInt 3))
                             ]
                         , term = Ast.TRet (Ast.EVar "i")
@@ -9939,7 +10066,7 @@ checks rt rawMidText =
                 ]
         )
     , check "B4 PARSE (exact AST): `for (init; c; step) {..}` carries BOTH head statements — `init` (`i = 0;`) and `step` (`i = i + 1`, its `;` optional as in C) — and an EMPTY body is `TContinue`"
-        (Parse.parseProgram "defun Rt.f(i: word) -> word {\n  for (i = 0; i < 3; i = i + 1) {\n  }\n  return i;\n}"
+        (parseProgramBare "defun Rt.f(i: word) -> word {\n  for (i = 0; i < 3; i = i + 1) {\n  }\n  return i;\n}"
             == Ok
                 [ { key = "Rt.f"
                   , flags = []
@@ -9948,14 +10075,16 @@ checks rt rawMidText =
                   , body =
                         { stmts =
                             [ Ast.SFor
-                                { init = Just (Ast.SVarStore "i" (Ast.EInt 0))
+                                { init = Just (noSpan (Ast.SVarStore "i" (Ast.EInt 0)))
                                 , cond = Ast.EWordCmp Ast.WClts (Ast.EVar "i") (Ast.EInt 3)
                                 , step =
                                     Just
-                                        (Ast.SVarStore "i"
-                                            (Ast.EWordBin Ast.WAdd (Ast.EVar "i") (Ast.EInt 1))
+                                        (noSpan
+                                            (Ast.SVarStore "i"
+                                                (Ast.EWordBin Ast.WAdd (Ast.EVar "i") (Ast.EInt 1))
+                                            )
                                         )
-                                , body = { stmts = [], term = Ast.TContinue }
+                                , body = (noSpanBlock { stmts = [], term = Ast.TContinue })
                                 }
                             ]
                         , term = Ast.TRet (Ast.EVar "i")
@@ -9964,7 +10093,7 @@ checks rt rawMidText =
                 ]
         )
     , check "B4 PARSE (exact AST): `break;`/`continue;` are TERMS (they end the block, like `return`), so `if (c) { break; }` parses as the ordinary mid-block if with a diverging branch"
-        (Parse.parseProgram "defun Rt.b(i: word) -> word {\n  while (i < 9) {\n    if (i == 4) { break; }\n    i = i + 1;\n  }\n  return i;\n}"
+        (parseProgramBare "defun Rt.b(i: word) -> word {\n  while (i < 9) {\n    if (i == 4) { break; }\n    i = i + 1;\n  }\n  return i;\n}"
             == Ok
                 [ { key = "Rt.b"
                   , flags = []
@@ -9974,15 +10103,15 @@ checks rt rawMidText =
                         { stmts =
                             [ Ast.SWhile
                                 (Ast.EWordCmp Ast.WClts (Ast.EVar "i") (Ast.EInt 9))
-                                { stmts =
+                                (noSpanBlock { stmts =
                                     [ Ast.SIf (Ast.EWordCmp Ast.WCeq (Ast.EVar "i") (Ast.EInt 4))
-                                        { stmts = [], term = Ast.TBreak }
+                                        (noSpanBlock { stmts = [], term = Ast.TBreak })
                                         Nothing
                                     , Ast.SVarStore "i"
                                         (Ast.EWordBin Ast.WAdd (Ast.EVar "i") (Ast.EInt 1))
                                     ]
                                 , term = Ast.TContinue
-                                }
+                                })
                             ]
                         , term = Ast.TRet (Ast.EVar "i")
                         }
@@ -9990,7 +10119,7 @@ checks rt rawMidText =
                 ]
         )
     , check "B4 PARSE: the fall-through relaxation is LOOP-BODY-ONLY — the same terminator-less block at a DEFUN's body is still the exactly-one-terminator reject (the invariant did not move)"
-        (case Parse.parseProgram "defun Rt.n() -> val {\n  word x = 1;\n}" of
+        (case parseProgramBare "defun Rt.n() -> val {\n  word x = 1;\n}" of
             Err msg ->
                 String.contains "exactly one terminator" msg
 
@@ -9998,7 +10127,7 @@ checks rt rawMidText =
                 False
         )
     , check "B4 PARSE: `goto` is REJECTED with the Q6 argument in the message (it is a COMMITTED failure, so the block's own terminator message cannot hide it)"
-        (case Parse.parseProgram "defun Rt.g() -> val {\n  goto done;\n  return mknil;\n}" of
+        (case parseProgramBare "defun Rt.g() -> val {\n  goto done;\n  return mknil;\n}" of
             Err msg ->
                 String.contains "`goto` is not in this language" msg
                     && String.contains "exactly TWO targets" msg
@@ -10007,7 +10136,7 @@ checks rt rawMidText =
                 False
         )
     , check "B4 PARSE: a DECLARATION in a `for` step is a parse reject (C's step is an expression; a declaration there would shadow a binder once per iteration)"
-        (case Parse.parseProgram "defun Rt.f(j: word) -> word {\n  for (j = 0; j < 2; word k = 1) {\n    j = j + 1;\n  }\n  return j;\n}" of
+        (case parseProgramBare "defun Rt.f(j: word) -> word {\n  for (j = 0; j < 2; word k = 1) {\n    j = j + 1;\n  }\n  return j;\n}" of
             Err _ ->
                 True
 
@@ -10059,7 +10188,7 @@ checks rt rawMidText =
     , check "B4 CHECK: a `val` local cannot be ASSIGNED, and the reject names the escape (`recur` params, the gcSweep idiom) — Mid.Ir has no node that stores a Value into a frame slot, so this is a stated cut, not a silent one"
         (case b6CheckErr rt "module B4v\ndefun B4v.f() -> val {\n  val v = mknum(1);\n  while (payload(v, 0) < 3) {\n    v = mknum(2);\n  }\n  return v;\n}" of
             Err msg ->
-                String.contains "cannot be ASSIGNED" msg
+                String.contains "local cannot be assigned" msg
                     && String.contains "recur` PARAMETER" msg
 
             Ok _ ->
@@ -10408,11 +10537,13 @@ checks rt rawMidText =
     , checkErr "B7 ENFORCED: `wload(v, 0)` — a val passed into a raw word ADDRESS slot (the other direction of \"word reading a val\": the copy IS a word, its class is not)"
         "builtin 'wload' argument"
         "defun Rt.b7w(v: val) -> val {\n  word n = wload(v, 0);\n  return mknum(n);\n}"
-    , checkErr "B7 ENFORCED: `==` on two vals — the compares are word,word -> bool, and the reject names the REMEDY (`call Rt.=` / `Rt.deepEq`), not just the class"
-        "there is no `==` on values"
+    , checkErrHint "B7 ENFORCED: `==` on two vals — the compares are word,word -> bool; the RULE names the class and the HINT names the REMEDY (`call Rt.=` / `Rt.deepEq`).  U7 moved the remedy out of the sentence into the `Hint:` line, so the row pins BOTH halves rather than dropping the second"
+        "operator '==' argument 1 needs word, got val"
+        "there is no `==` on values: compare them with `call Rt.=(a, b)` (a boxed bool) or `Rt.deepEq` (structural)"
         "defun Rt.b7eq(a: val, b: val) -> val {\n  val c = mkbool(a == b);\n  return c;\n}"
-    , checkErr "B7 ENFORCED: `<` on two vals — there is no value ORDERING at all (the six compares are the word family)"
-        "there is no `<` on values"
+    , checkErrHint "B7 ENFORCED: `<` on two vals — there is no value ORDERING at all (the six compares are the word family); the HINT says what to write instead"
+        "operator '<' argument 1 needs word, got val"
+        "there is no `<` on values: compare them with `call Rt.=(a, b)` (a boxed bool) or `Rt.deepEq` (structural)"
         "defun Rt.b7lt(a: val, b: val) -> val {\n  val c = mkbool(a < b);\n  return c;\n}"
     , checkErr "B7 ENFORCED (the judgment this unit adds): `if (mknil)` — a val condition must be a BOXED BOOL, and nil is provably not one; the value test is false only for a boolean with payload 0, so this branch is ALWAYS taken"
         "condition is mknil"
@@ -10591,7 +10722,7 @@ checks rt rawMidText =
         "is a MEMORY width: it is spellable as a struct FIELD type"
         "extern f(x : u16) -> i32;\ndefun Rt.g() -> word {\n  return 0;\n}"
     , checkErrModule "cffi U6 REJECT (J13, the address of a narrow field): `&p->events` is refused — the only pointer family here is `*word`, 8 bytes wide, so the address would licence overwriting the neighbouring fields; the message names the width and the remedy (read the field itself)"
-        "has no address: the only pointer family here is `*word`"
+        "a narrow field (u16, 2 bytes) has no address"
         "struct Pollfd { fd : i32; events : u16; revents : u16; }\ndefun Rt.g(p : *Pollfd) -> word {\n  *word q = &p->events;\n  return *q;\n}"
     , check "cffi U6 ACCEPT (the control): `&p->w` on a struct with NO narrow field is still legal (`*word`) — so the J13 reject above is about the declared WIDTH and not about `&` on a field (and note it fires for `i32` too: a 4-byte field has no 8-byte view either)"
         (case chkModuleFlags [] "struct S { w : word; x : word; }\ndefun Rt.g(p : *S) -> word {\n  *word q = &p->w;\n  return *q;\n}" of
@@ -10722,7 +10853,264 @@ checks rt rawMidText =
             && absent "skip"
             && not (String.contains "payload(call Rt.hostIsProgram" mid)
         )
+
+    -- ============ U1: the source-position seat's arithmetic ============
+    -- Every number below is HAND-COUNTED — over `spanRowsSrc` (the nine-line
+    -- snippet defined below this list, 149 chars) for the snippet rows, and
+    -- over its own one-line literal for the four rows that carry one (a
+    -- literal's quote/delimiter count is the thing those pin, so they must
+    -- control the whole line).  Offsets are read off that text by hand, and
+    -- the expected row/col/caret is then derived from those offsets, never
+    -- from the function under test.
+    -- The snippet is chosen so an off-by-one anywhere lands RED: it opens with
+    -- a COMMENT-ONLY line and then a BLANK line (row 1 and row 2 are both
+    -- non-code, so a row count that drops either shifts every later row), the
+    -- statement at offset 100 follows a `//` separator line (a comment costs a
+    -- row without being a row of its own), and two rows pin the overhang trim
+    -- (`end` is the NEXT token's offset — see `Ast.Span`).
+    , check "U1 rowColOf: a comment-only line and a blank line each cost exactly one row — offset 0 is row 1 col 1, the blank line at offset 19 is row 2 col 1, and the first token after both is row 3 col 1"
+        (Ast.rowColOf spanRowsSrc 0
+            == { row = 1, col = 1 }
+            && Ast.rowColOf spanRowsSrc 19
+            == { row = 2, col = 1 }
+            && Ast.rowColOf spanRowsSrc 20
+            == { row = 3, col = 1 }
+        )
+    , check "U1 rowColOf: the column is 1-based WITHIN its line — offset 5 (mid-comment) is row 1 col 6, offset 100 (the statement after the `// separator` line) is row 6 col 3, and EOF (offset 149) is row 9 col 2, one past the closing `}`"
+        (Ast.rowColOf spanRowsSrc 5
+            == { row = 1, col = 6 }
+            && Ast.rowColOf spanRowsSrc 100
+            == { row = 6, col = 3 }
+            && Ast.rowColOf spanRowsSrc 149
+            == { row = 9, col = 2 }
+        )
+    , check "U1 lineOf: the source line holding an offset, WITHOUT its newline — offset 100 is the statement after the separator, offset 121 is a multiline span's START line, and EOF is the last line"
+        (Ast.lineOf spanRowsSrc 100
+            == "  bind y = mknum(2);"
+            && Ast.lineOf spanRowsSrc 121
+            == "  call Rt.deepEq("
+            && Ast.lineOf spanRowsSrc 149
+            == "}"
+        )
+    , check "U1 renderSpan: a statement whose `end` overhangs to the NEXT TOKEN's line (offset 121, one line down) is still SINGLE-line — row 6, col 3, caret cols 3..21 over the 18-char `bind y = mknum(2);`, multiline False.  A row that counted `end` raw would report multiline True and print no caret"
+        (let
+            r =
+                Ast.renderSpan spanRowsSrc { start = 100, end = 121 }
+         in
+         r.row
+            == 6
+            && r.col
+            == 3
+            && r.startCol
+            == 3
+            && r.endCol
+            == 21
+            && r.multiline
+            == False
+            && r.line
+            == "  bind y = mknum(2);"
+        )
+    , check "U1 renderSpan: `end` overhanging a TRAILING `//` comment (and the next statement's line) trims back to the code — caret cols 3..21 over `bind x = mknum(1);` (18 chars), NOT to the 35-char line or to the comment, and still multiline False"
+        (let
+            r =
+                Ast.renderSpan spanRowsSrc { start = 47, end = 100 }
+         in
+         r.row
+            == 4
+            && r.col
+            == 3
+            && r.startCol
+            == 3
+            && r.endCol
+            == 21
+            && r.multiline
+            == False
+            && r.line
+            == "  bind x = mknum(1); // trailing note"
+        )
+    , check "U1 renderSpan: a genuine two-line `call` is multiline True — the `>`-margin signal, no caret line — and the caret math still CLAMPS to the start line (cols 3..18 over `call Rt.deepEq(`), never to the raw end at offset 147"
+        (let
+            r =
+                Ast.renderSpan spanRowsSrc { start = 121, end = 147 }
+         in
+         r.row
+            == 7
+            && r.col
+            == 3
+            && r.startCol
+            == 3
+            && r.endCol
+            == 18
+            && r.multiline
+            == True
+            && r.line
+            == "  call Rt.deepEq("
+        )
+    , check "U1 renderSpan: a span pointing only at INDENTATION whitespace (offsets 98..100) renders exactly ONE caret at startCol — cols 1..2, not a zero-width run and not the indentation's two columns"
+        (let
+            r =
+                Ast.renderSpan spanRowsSrc { start = 98, end = 100 }
+         in
+         r.row
+            == 6
+            && r.col
+            == 1
+            && r.startCol
+            == 1
+            && r.endCol
+            == 2
+            && r.multiline
+            == False
+        )
+    , check "U1 renderSpan: a span pointing only at a COMMENT (`// separator`, offsets 83..97) is empty code — one caret at startCol (cols 1..2) and multiline False, so a comment line never renders as a two-line node"
+        (let
+            r =
+                Ast.renderSpan spanRowsSrc { start = 83, end = 97 }
+         in
+         r.row
+            == 5
+            && r.col
+            == 1
+            && r.startCol
+            == 1
+            && r.endCol
+            == 2
+            && r.multiline
+            == False
+        )
+    , check "U1 renderSpan: a `//` inside a STRING LITERAL is content, not a comment — `bind p = rawstr(\"http://x\");` keeps its whole 28-char caret (cols 1..29).  FAIL-BEFORE a string-aware trim: the caret would stop at `http:`"
+        (let
+            r =
+                Ast.renderSpan "bind p = rawstr(\"http://x\");" { start = 0, end = 28 }
+         in
+         r.row
+            == 1
+            && r.col
+            == 1
+            && r.startCol
+            == 1
+            && r.endCol
+            == 29
+            && r.multiline
+            == False
+        )
+    , check "U1 renderSpan: a `//` that ABUTS a token character is not a comment (the parser's own rule, Parse.elm:2552-2572) — all four chars of `a//b` stay in the caret (cols 1..5), so the trim agrees with what the parser actually read"
+        (let
+            r =
+                Ast.renderSpan "a//b" { start = 0, end = 4 }
+         in
+         r.startCol
+            == 1
+            && r.endCol
+            == 5
+            && r.multiline
+            == False
+        )
+    , check "U1 renderSpan: a `//` inside a string that FOLLOWS a char literal holding a quote is still content — `bind s = strcat1('\"', \" //x\");` keeps its whole 30-char caret (cols 1..31).  FAIL-BEFORE a literal-aware trim: two quotes before the `//` read as two closed literals, so the caret stopped at `strcat1('\"', \"`"
+        (let
+            r =
+                Ast.renderSpan "bind s = strcat1('\"', \" //x\");" { start = 0, end = 30 }
+         in
+         r.row
+            == 1
+            && r.col
+            == 1
+            && r.startCol
+            == 1
+            && r.endCol
+            == 31
+            && r.multiline
+            == False
+        )
+    , check "U1 renderSpan: the same shape's OTHER direction — `bind a = '\"'; // note` really does end in a comment, so the caret stops at the 13-char code `bind a = '\"';` (cols 1..14) and never covers `// note`.  FAIL-BEFORE a literal-aware trim: the char literal's quote counted as ONE open string, so the comment stayed in the caret"
+        (let
+            r =
+                Ast.renderSpan "bind a = '\"'; // note" { start = 0, end = 21 }
+         in
+         r.row
+            == 1
+            && r.col
+            == 1
+            && r.startCol
+            == 1
+            && r.endCol
+            == 14
+            && r.multiline
+            == False
+        )
+    , check "U16 renderSpan TERMINATES on a span slice that CUTS an astral pair (start on the pair's LOW surrogate): `String.any`/`String.toList`/`String.foldr` step an extra unit back on a low surrogate inside `while (i--)` (elm/core 1.0.5, Elm/Kernel/String.js:190-208), so an unpaired one walks the index negative forever.  This row is a HANG-BEFORE, not merely a wrong value — MEASURED: the pre-fix spelling still running at 15s, exit 124 — and the suite is run under a wall-clock timeout so a regression is a loud 124, not a silent stall.  Value: multiline False, row 1, col 12, caret cols 12..15"
+        (let
+            r =
+                Ast.renderSpan "abcdefghij\u{1F600}xyz" { start = 11, end = 14 }
+         in
+         r.row
+            == 1
+            && r.col
+            == 12
+            && r.startCol
+            == 12
+            && r.endCol
+            == 15
+            && r.multiline
+            == False
+        )
+    , check "U16 renderSpan TERMINATES on the COMMENT-ABUT check when the unit before the `//` is an unpaired low surrogate (`😀// c` — an astral char abutting a comment, no space): the pre-fix `String.any isTokenChar (String.slice (i - 1) i run)` hangs on that 1-unit slice (MEASURED, exit 124 at 15s).  The trim still AGREES with the parser — `😀` is not a token character, so the `//` IS a comment — caret cols 1..3 over the emoji's two units, the comment dropped"
+        (let
+            r =
+                Ast.renderSpan "\u{1F600}// c" { start = 0, end = 6 }
+         in
+         r.row
+            == 1
+            && r.col
+            == 1
+            && r.startCol
+            == 1
+            && r.endCol
+            == 3
+            && r.multiline
+            == False
+        )
     ]
+        ++ u3SpanRows
+        ++ u5ErrorRows
+        ++ u15BannerRows
+        ++ u6ParseRows
+
+
+{-| The U1 span rows' source: nine lines, 149 chars, laid out so the position
+arithmetic is pinned against shapes real Mid-c text has — a leading comment-only
+line, a blank line, a `//` separator between statements, a trailing comment on a
+statement's own line, and a two-line `call`.
+
+MEASURED offsets (by hand, over `String.join "\n"` of the lines below):
+
+    0   "// leading comment"                        row 1
+    19  ""                                          row 2  (blank)
+    20  "defun Rt.demo() -> val {"                  row 3
+    45  "  bind x = mknum(1); // trailing note"      row 4  (code 47..65, comment at 66)
+    83  "  // separator"                            row 5
+    98  "  bind y = mknum(2);"                      row 6  (code 100..118)
+    119 "  call Rt.deepEq("                         row 7  (code 121..136)
+    137 "    x, y);"                                row 8
+    148 "}"                                         row 9
+
+Nothing parses it: U1 has no spans on the tree yet, so the rows hand the
+`Span` literals to `Ast.renderSpan` directly — which is also why a wrong
+number here is a wrong pin, not a wrong parse.
+-}
+spanRowsSrc : String
+spanRowsSrc =
+    String.join "\n"
+        [ "// leading comment"
+        , ""
+        , "defun Rt.demo() -> val {"
+        , "  bind x = mknum(1); // trailing note"
+        , "  // separator"
+        , "  bind y = mknum(2);"
+        , "  call Rt.deepEq("
+        , "    x, y);"
+        , "}"
+        ]
 
 
 {- The two rows above are the post-U6 review's second and third nice-to-haves,
@@ -11534,6 +11922,266 @@ check name ok =
         "FAIL " ++ name
 
 
+{-| A PARSE row compares the TREE, not the source positions: these two wrap
+`parseProgramBare`/`parseBlockBare` in `Ast.bareProgram`/`Ast.bareBlock`,
+which drop the `Located` wrappers (and a defun's header span), so every
+expected-tree literal stays written in the shape it always was — the U2
+`Bare*` aliases exist for exactly this.  The POSITION rows are the separate
+`renderSpan` family, which reads the spans these strips throw away.
+
+A row that feeds the parsed program to the checker or the lowerer must NOT use
+these: those want the real `Program`.
+-}
+parseProgramBare : String -> Result String Ast.BareProgram
+parseProgramBare src =
+    Result.map (\program -> List.map (\d -> { d | body = zeroBareBlock d.body }) (Ast.bareProgram program))
+        (Parse.parseProgram src)
+
+
+parseBlockBare : String -> Result String Ast.BareBlock
+parseBlockBare src =
+    Result.map (zeroBareBlock << Ast.bareBlock) (Parse.parseBlock src)
+
+
+{-| `Parse.parseExp` with every span inside its block-valued constructors
+(`EIfBlock`, `EWithRoots`) zeroed — an `Exp` carries no span of its own (D1),
+but its branch BLOCKS do, and a literal writes `noSpanBlock` zeros.
+-}
+parseExpZero : String -> Result String Ast.Exp
+parseExpZero src =
+    Result.map zeroExp (Parse.parseExp src)
+
+
+{-| Expected-tree literal wrappers.  `bareBlock` strips the `Located` wrappers
+of the block it is given, but a NESTED block — a loop body, an `if`'s branch —
+sits inside a STATEMENT, and the strip does not descend into statements, so
+such a literal must still be written in the `Block` shape.  These two build one
+from the bare shape: `noSpanBlock` for a block, `noSpan` for a single statement
+or terminator (`SFor`'s init/step).
+
+The span is a placeholder and is IGNORED: every row using these compares through
+`Ast.bareProgram`/`Ast.bareBlock`, which drops it.  Nothing here pins a
+position — the `renderSpan` rows are where a span is read.
+
+NOTE (MEASURED, Elm parser): an argument that applies a function to a RECORD
+literal must be parenthesized around the whole APPLICATION — `(noSpanBlock
+{ .. })` parses, `noSpanBlock ({ .. })` does not (it reads as two arguments).
+-}
+noSpan : a -> Ast.Located a
+noSpan node =
+    { node = node, span = { start = 0, end = 0 } }
+
+
+noSpanBlock : Ast.BareBlock -> Ast.Block
+noSpanBlock bare =
+    { stmts = List.map noSpan bare.stmts
+    , term = noSpan bare.term
+    }
+
+
+{-| Zero every span in a parsed block, RECURSIVELY.
+
+`Ast.bareBlock`/`Ast.bareProgram` strip only the wrappers they can see: a
+nested block — a loop body, an `if`'s branch, `EIfBlock`'s two arms — sits
+inside a STATEMENT, and the strip does not descend into statements.  So an
+exact-AST row that pins a nested block compares the REAL spans against the
+literal's `noSpanBlock` zeros and fails on the positions alone.  These walk the
+tree and zero them, which is what makes such a row a statement about the SHAPE.
+
+`zeroExp` walks EVERY constructor (no catch-all): a block can sit deep inside an
+expression — an `EIfBlock` in a call argument, in a `?:` arm — so reaching it
+means descending the whole expression tree.  A constructor added to `Exp` will
+fail to compile here rather than silently stop zeroing.
+-}
+zeroSpans : Ast.Block -> Ast.Block
+zeroSpans b =
+    { stmts = List.map zeroStmtSpan b.stmts
+    , term = zeroTermSpan b.term
+    }
+
+
+zeroBareBlock : Ast.BareBlock -> Ast.BareBlock
+zeroBareBlock b =
+    { stmts = List.map zeroStmt b.stmts
+    , term = zeroTerm b.term
+    }
+
+
+zeroStmtSpan : Ast.Located Ast.Stmt -> Ast.Located Ast.Stmt
+zeroStmtSpan loc =
+    { node = zeroStmt loc.node, span = noSpanValue }
+
+
+zeroTermSpan : Ast.Located Ast.Term -> Ast.Located Ast.Term
+zeroTermSpan loc =
+    { node = zeroTerm loc.node, span = noSpanValue }
+
+
+noSpanValue : Ast.Span
+noSpanValue =
+    { start = 0, end = 0 }
+
+
+zeroStmt : Ast.Stmt -> Ast.Stmt
+zeroStmt stmt =
+    case stmt of
+        Ast.SBind ty name e ->
+            Ast.SBind ty name (zeroExp e)
+
+        Ast.SEffect e ->
+            Ast.SEffect (zeroExp e)
+
+        Ast.SIf c t me ->
+            Ast.SIf (zeroExp c) (zeroSpans t) (Maybe.map zeroSpans me)
+
+        Ast.SFieldStore p f e ->
+            Ast.SFieldStore (zeroExp p) f (zeroExp e)
+
+        Ast.SIndexStore p i e ->
+            Ast.SIndexStore (zeroExp p) (zeroExp i) (zeroExp e)
+
+        Ast.SStructBind rec ->
+            Ast.SStructBind { rec | init = zeroStructInit rec.init }
+
+        Ast.SArrayBind rec ->
+            Ast.SArrayBind { rec | init = zeroArrayInit rec.init }
+
+        Ast.SVarStore name e ->
+            Ast.SVarStore name (zeroExp e)
+
+        Ast.SWhile c body ->
+            Ast.SWhile (zeroExp c) (zeroSpans body)
+
+        Ast.SDoWhile body c ->
+            Ast.SDoWhile (zeroSpans body) (zeroExp c)
+
+        Ast.SFor rec ->
+            Ast.SFor
+                { init = Maybe.map zeroStmtSpan rec.init
+                , cond = zeroExp rec.cond
+                , step = Maybe.map zeroStmtSpan rec.step
+                , body = zeroSpans rec.body
+                }
+
+
+zeroTerm : Ast.Term -> Ast.Term
+zeroTerm term =
+    case term of
+        Ast.TRet e ->
+            Ast.TRet (zeroExp e)
+
+        Ast.TRecur es ->
+            Ast.TRecur (List.map zeroExp es)
+
+        Ast.TIf c t me ->
+            Ast.TIf (zeroExp c) (zeroSpans t) (Maybe.map zeroSpans me)
+
+        Ast.TBreak ->
+            Ast.TBreak
+
+        Ast.TContinue ->
+            Ast.TContinue
+
+
+zeroExp : Ast.Exp -> Ast.Exp
+zeroExp e =
+    case e of
+        Ast.EInt _ ->
+            e
+
+        Ast.EFlt _ ->
+            e
+
+        Ast.EStr _ ->
+            e
+
+        Ast.EBool _ ->
+            e
+
+        Ast.EVar _ ->
+            e
+
+        Ast.EWordBin op a b ->
+            Ast.EWordBin op (zeroExp a) (zeroExp b)
+
+        Ast.EWordCmp op a b ->
+            Ast.EWordCmp op (zeroExp a) (zeroExp b)
+
+        Ast.EFltBin op a b ->
+            Ast.EFltBin op (zeroExp a) (zeroExp b)
+
+        Ast.EFltCmp op a b ->
+            Ast.EFltCmp op (zeroExp a) (zeroExp b)
+
+        Ast.EShortAnd a b ->
+            Ast.EShortAnd (zeroExp a) (zeroExp b)
+
+        Ast.EShortOr a b ->
+            Ast.EShortOr (zeroExp a) (zeroExp b)
+
+        Ast.EIf c a b ->
+            Ast.EIf (zeroExp c) (zeroExp a) (zeroExp b)
+
+        Ast.EIfBlock c t f ->
+            Ast.EIfBlock (zeroExp c) (zeroSpans t) (zeroSpans f)
+
+        Ast.ECall key es ->
+            Ast.ECall key (List.map zeroExp es)
+
+        Ast.ERawCall sym es ->
+            Ast.ERawCall sym (List.map zeroExp es)
+
+        Ast.EAggCall shape fn es ->
+            Ast.EAggCall shape (zeroExp fn) (List.map zeroExp es)
+
+        Ast.EBuiltin b es ->
+            Ast.EBuiltin b (List.map zeroExp es)
+
+        Ast.EWithRoots ids body ->
+            Ast.EWithRoots ids (zeroSpans body)
+
+        Ast.EField base f ->
+            Ast.EField (zeroExp base) f
+
+        Ast.EIndex base i ->
+            Ast.EIndex (zeroExp base) (zeroExp i)
+
+        Ast.EDeref x ->
+            Ast.EDeref (zeroExp x)
+
+        Ast.ECast ty x ->
+            Ast.ECast ty (zeroExp x)
+
+        Ast.ESizeof target ->
+            Ast.ESizeof target
+
+        Ast.EAddrOf x ->
+            Ast.EAddrOf (zeroExp x)
+
+
+zeroStructInit : Ast.StructInit -> Ast.StructInit
+zeroStructInit init =
+    case init of
+        Ast.InitZero ->
+            Ast.InitZero
+
+        Ast.InitFields fields ->
+            Ast.InitFields (List.map (\( f, e ) -> ( f, zeroExp e )) fields)
+
+        Ast.InitCopy e ->
+            Ast.InitCopy (zeroExp e)
+
+
+zeroArrayInit : Ast.ArrayInit -> Ast.ArrayInit
+zeroArrayInit init =
+    case init of
+        Ast.AInitZero ->
+            Ast.AInitZero
+
+        Ast.AInitFull es ->
+            Ast.AInitFull (List.map zeroExp es)
+
+
 {-| The T4/T5 rows' drivers: parse a surface program, then run the checker
 against an EMPTY extern table (the extern row calls `Check.checkProgram`
 directly with a table).  `checkOk` asserts acceptance; `checkErr` asserts
@@ -11544,12 +12192,30 @@ PARAMETER (T7 will derive it from `rt.program`'s three Bools).
 -}
 chkFlags : List Ast.Flag -> String -> Result String ()
 chkFlags flags src =
+    Result.mapError MidErr.oneLine (chkFlagsMidc flags src)
+
+
+{-| The RECORD a rejection hands back — the door a row uses when it pins the
+FIX separately from the RULE (U7 split them, and `oneLine` carries the rule
+only).  `chkFlags` above is this plus `oneLine`, which is why every existing
+fragment row kept its meaning.
+-}
+chkFlagsMidc : List Ast.Flag -> String -> Result MidErr.MidcError ()
+chkFlagsMidc flags src =
     case Parse.parseProgram src of
         Ok program ->
+            -- U7: the checker hands back a `MidcError`; these rows pin PROSE
+            -- FRAGMENTS of one line, so `chkFlags` reads the record's
+            -- single-line form (`"<key>: <tag>: <rule>"`).  The rendered
+            -- multi-line form (banner/snippet/caret) is what a USER sees
+            -- through `Check.checkModule` and is pinned by the U5/U6 render
+            -- rows and by the qbe-mk end-to-end probe, not here: a fragment
+            -- pin against a wrapped, snippet-bearing payload would pin the
+            -- WRAP as much as the judgment.
             Check.checkProgram Dict.empty flags program
 
         Err e ->
-            Err ("parse: " ++ e)
+            Err { tag = "PARSE", title = MidErr.titleFor "PARSE", rule = "parse: " ++ e, hint = Nothing, key = Nothing, span = Nothing }
 
 
 chk : String -> Result String ()
@@ -11591,6 +12257,30 @@ checkErr name frag src =
     checkErrFlags name [] frag src
 
 
+{-| A rejection whose RULE and its FIX are pinned SEPARATELY — the driver for
+the U7 split, where the sentence naming the law and the `Hint:` line naming the
+next move are two fields and `oneLine` shows only the first.  The row states
+both, so neither half can be dropped silently.
+-}
+checkErrHint : String -> String -> String -> String -> String
+checkErrHint name ruleFrag hintFrag src =
+    check name
+        (case chkFlagsMidc [] src of
+            Err e ->
+                String.contains ruleFrag (MidErr.oneLine e)
+                    && (case e.hint of
+                            Just h ->
+                                String.contains hintFrag h
+
+                            Nothing ->
+                                False
+                       )
+
+            Ok () ->
+                False
+        )
+
+
 {-| The A1 rows' drivers: parse a whole MODULE (decls + defuns) and run the
 decl-carrying checker (`Check.checkModule`).  `checkOkModule` asserts
 acceptance; `checkErrModule` asserts a rejection whose message names the
@@ -11599,12 +12289,23 @@ that did not even parse cannot pass the row vacuously.
 -}
 chkModuleFlags : List Ast.Flag -> String -> Result String ()
 chkModuleFlags flags src =
+    Result.mapError MidErr.oneLine (chkModuleFlagsMidc flags src)
+
+
+{-| `chkModuleFlags`' RECORD door — the module-lane twin of `chkFlagsMidc`,
+for a row that pins the RULE and the FIX separately (U7 split them).
+-}
+chkModuleFlagsMidc : List Ast.Flag -> String -> Result MidErr.MidcError ()
+chkModuleFlagsMidc flags src =
     case Parse.parseModule src of
         Ok module_ ->
-            Check.checkModule Dict.empty flags module_
+            -- U7: `chkModuleFlags` reads `oneLine`, for `chkFlags`' reason —
+            -- the row pins a prose fragment of ONE line.  `Check.checkModule`
+            -- (the rendered door) is exercised by the qbe-mk probe instead.
+            Check.checkModuleMidc Dict.empty flags module_
 
         Err e ->
-            Err ("parse: " ++ e)
+            Err { tag = "PARSE", title = MidErr.titleFor "PARSE", rule = "parse: " ++ e, hint = Nothing, key = Nothing, span = Nothing }
 
 
 checkOkModule : String -> String -> String
@@ -11625,6 +12326,28 @@ checkErrModule name frag src =
         (case chkModuleFlags [] src of
             Err msg ->
                 String.contains frag msg
+
+            Ok () ->
+                False
+        )
+
+
+{-| A MODULE-lane rejection whose rule and fix are pinned separately — the
+module twin of `checkErrHint`.
+-}
+checkErrModuleHint : String -> String -> String -> String -> String
+checkErrModuleHint name ruleFrag hintFrag src =
+    check name
+        (case chkModuleFlagsMidc [] src of
+            Err e ->
+                String.contains ruleFrag (MidErr.oneLine e)
+                    && (case e.hint of
+                            Just h ->
+                                String.contains hintFrag h
+
+                            Nothing ->
+                                False
+                       )
 
             Ok () ->
                 False
@@ -11953,7 +12676,7 @@ loweredRuntime src =
 
         Ok module_ ->
             Result.map (\defuns -> ( module_.defuns, defuns ))
-                (LowerToIr.lowerModule module_)
+                (LowerToIr.lowerModule module_ |> Result.mapError MidErr.oneLine)
 
 
 {-| Contract-4 return-taint floor (M4-enforce U1): parse an Elm module, then run
@@ -12011,10 +12734,10 @@ lowlFlags flags src =
         Ok program ->
             case Check.checkProgram Dict.empty flags program of
                 Err e ->
-                    Err e
+                    Err (MidErr.oneLine e)
 
                 Ok () ->
-                    LowerToIr.lowerProgram program
+                    LowerToIr.lowerProgram program |> Result.mapError MidErr.oneLine
 
 
 lowl : String -> Result String (List Defun)
@@ -12058,7 +12781,7 @@ lowlModuleBody src =
                 Ok () ->
                     case LowerToIr.lowerModule module_ of
                         Err e ->
-                            Err e
+                            Err (MidErr.oneLine e)
 
                         Ok (d :: _) ->
                             case d.value of
@@ -12426,7 +13149,7 @@ censusDecl d =
 
 censusBlock : Ast.Block -> List String
 censusBlock b =
-    List.concatMap censusStmt b.stmts ++ censusTerm b.term
+    List.concatMap (\stmt -> censusStmt stmt.node) b.stmts ++ censusTerm b.term.node
 
 
 censusStmt : Ast.Stmt -> List String
@@ -12466,9 +13189,9 @@ censusStmt s =
 
         Ast.SFor rec ->
             "SFor"
-                :: (Maybe.withDefault [] (Maybe.map censusStmt rec.init)
+                :: (Maybe.withDefault [] (Maybe.map (\stmt -> censusStmt stmt.node) rec.init)
                         ++ censusExp rec.cond
-                        ++ Maybe.withDefault [] (Maybe.map censusStmt rec.step)
+                        ++ Maybe.withDefault [] (Maybe.map (\stmt -> censusStmt stmt.node) rec.step)
                         ++ censusBlock rec.body
                    )
 
@@ -14763,3 +15486,1153 @@ rawCallSyms exp =
                     []
 
 
+
+
+-- ============ U3: the SPANS the parse attaches (position correctness) ============
+-- U1 pinned the offset->row/col arithmetic against HAND-BUILT `Span` literals.
+-- These rows pin the other half: the spans the PARSE actually attaches.  A
+-- correct renderer handed a wrong span prints a confident wrong position, and
+-- nothing in U1's rows can see that.
+--
+-- EVERY row below reads `Parse.parseProgram` — the REAL entry point — and
+-- NEVER `parseProgramBare`/`parseBlockBare`/`parseExpZero`: those ZERO the
+-- spans (U2's divergence D-D, and `zeroSpans` below descends the whole tree to
+-- do it), so a position row routed through them would PASS while pinning
+-- nothing.  That is the exact failure mode this unit exists to prevent.
+--
+-- Every number is HAND-COUNTED over the snippet literal the row names (each
+-- snippet's offset table sits beside its definition, below), and each row says
+-- in its own name what the number would be under the mutation it catches.
+u3SpanRows : List String
+u3SpanRows =
+    [ check "U3 SPAN START: a statement after TWO comment-only lines starts at its first TOKEN — `val x = mknum(1);` is span 53..73 and renders row 4, col 3, caret cols 3..20 (its 17 chars).  FAIL-BEFORE a span measured BEFORE the comment skip: offset 38 (`// about x`) is row 3 col 3.  FAIL-BEFORE a line-start span: offset 51 is col 1"
+        (case u3FirstDefun u3SpanCommentsSrc of
+            Just d ->
+                case d.body.stmts of
+                    s :: _ ->
+                        let
+                            r =
+                                Ast.renderSpan u3SpanCommentsSrc s.span
+                        in
+                        ( s.span.start, s.span.end )
+                            == ( 53, 73 )
+                            && r.row
+                            == 4
+                            && r.col
+                            == 3
+                            && r.startCol
+                            == 3
+                            && r.endCol
+                            == 20
+                            && r.multiline
+                            == False
+                            && r.line
+                            == "  val x = mknum(1);"
+
+                    [] ->
+                        False
+
+            Nothing ->
+                False
+        )
+    , check "U3 SPAN TRIM on a REAL span (the `spanCode` RECURSION): a statement whose `end` overhangs a `// separator` LINE is still SINGLE-line — span 24..59, where `end` is the NEXT TOKEN (`return`, row 4), i.e. 18 chars of comment line inside the overhang; it renders row 2 col 3, caret cols 3..20, multiline False.  FAIL-BEFORE a NON-recursive trim: the comment-only line survives the last-line strip, so spanCode still holds a `\\n` -> multiline True and NO caret line at all"
+        (case u3FirstDefun u3SpanSeparatorSrc of
+            Just d ->
+                case d.body.stmts of
+                    s :: _ ->
+                        let
+                            r =
+                                Ast.renderSpan u3SpanSeparatorSrc s.span
+                        in
+                        ( s.span.start, s.span.end )
+                            == ( 24, 59 )
+                            && r.row
+                            == 2
+                            && r.col
+                            == 3
+                            && r.endCol
+                            == 20
+                            && r.multiline
+                            == False
+                            && r.line
+                            == "  val x = mknum(1);"
+
+                    [] ->
+                        False
+
+            Nothing ->
+                False
+        )
+    , check "U3 MULTILINE: a two-line `call` statement is multiline True (the `>`-margin form, NO caret line) and its caret math still CLAMPS to the start line — span 24..53 renders row 2 col 3, endCol 18 over the 15-char `call Rt.deepEq(`.  FAIL-BEFORE the clamp (a caret measured to the raw `end`): endCol 32 = 3 + 29, a caret run four lines long"
+        (case u3FirstDefun u3SpanCallSrc of
+            Just d ->
+                case d.body.stmts of
+                    s :: _ ->
+                        let
+                            r =
+                                Ast.renderSpan u3SpanCallSrc s.span
+                        in
+                        ( s.span.start, s.span.end )
+                            == ( 24, 53 )
+                            && r.row
+                            == 2
+                            && r.col
+                            == 3
+                            && r.startCol
+                            == 3
+                            && r.endCol
+                            == 18
+                            && r.multiline
+                            == True
+                            && r.line
+                            == "  call Rt.deepEq("
+
+                    [] ->
+                        False
+
+            Nothing ->
+                False
+        )
+    , check "U3 FOR HEAD SPANS ARE THEIR OWN: the `for` statement is span 24..62 (row 2 col 3, multiline True), its INIT `i = 0;` is 29..36 (row 2 col 8, caret cols 8..14) and its STEP `i = i + 1` is 43..52 (row 2 col 22, caret cols 22..31) — three DISTINCT positions on ONE source line.  FAIL-BEFORE a head statement borrowing the `for`'s span: both would render col 3.  FAIL-BEFORE an init span taken from the `(`: col 7"
+        (case u3FirstDefun u3SpanForSrc of
+            Just d ->
+                case d.body.stmts of
+                    [ st ] ->
+                        case st.node of
+                            Ast.SFor f ->
+                                case ( f.init, f.step ) of
+                                    ( Just init, Just step ) ->
+                                        let
+                                            rFor =
+                                                Ast.renderSpan u3SpanForSrc st.span
+
+                                            rInit =
+                                                Ast.renderSpan u3SpanForSrc init.span
+
+                                            rStep =
+                                                Ast.renderSpan u3SpanForSrc step.span
+                                        in
+                                        ( st.span.start, st.span.end )
+                                            == ( 24, 62 )
+                                            && ( init.span.start, init.span.end )
+                                            == ( 29, 36 )
+                                            && ( step.span.start, step.span.end )
+                                            == ( 43, 52 )
+                                            && rFor.row
+                                            == 2
+                                            && rFor.col
+                                            == 3
+                                            && rFor.multiline
+                                            == True
+                                            && rInit.row
+                                            == 2
+                                            && rInit.col
+                                            == 8
+                                            && rInit.startCol
+                                            == 8
+                                            && rInit.endCol
+                                            == 14
+                                            && rInit.multiline
+                                            == False
+                                            && rStep.row
+                                            == 2
+                                            && rStep.col
+                                            == 22
+                                            && rStep.startCol
+                                            == 22
+                                            && rStep.endCol
+                                            == 31
+                                            && rStep.multiline
+                                            == False
+
+                                    _ ->
+                                        False
+
+                            _ ->
+                                False
+
+                    _ ->
+                        False
+
+            Nothing ->
+                False
+        )
+    , check "U3 SYNTHESIZED `continue` POINTS AT THE BRACE: a `while` body with no terminator gets `TContinue` spanned {65, 66} — the body's own `}` — which renders as a ONE-CARET run AT the brace: row 4 col 3, cols 3..4, multiline False.  The body's LAST REAL statement (`a = a + 1;`, span 52..65) is still single-line even though its `end` IS that brace offset.  FAIL-BEFORE a `{0,0}` point span: row 1 col 1, a lie about where the code is.  FAIL-BEFORE an off-by-one on the brace: col 2 or col 4"
+        (case u3FirstDefun u3SpanLoopSrc of
+            Just d ->
+                case d.body.stmts of
+                    [ st ] ->
+                        case st.node of
+                            Ast.SWhile _ body ->
+                                let
+                                    rTerm =
+                                        Ast.renderSpan u3SpanLoopSrc body.term.span
+
+                                    rLast =
+                                        case List.reverse body.stmts of
+                                            last :: _ ->
+                                                Just (Ast.renderSpan u3SpanLoopSrc last.span)
+
+                                            [] ->
+                                                Nothing
+                                in
+                                body.term.node
+                                    == Ast.TContinue
+                                    && ( body.term.span.start, body.term.span.end )
+                                    == ( 65, 66 )
+                                    && rTerm.row
+                                    == 4
+                                    && rTerm.col
+                                    == 3
+                                    && rTerm.startCol
+                                    == 3
+                                    && rTerm.endCol
+                                    == 4
+                                    && rTerm.multiline
+                                    == False
+                                    && rTerm.line
+                                    == "  }"
+                                    && (case rLast of
+                                            Just r ->
+                                                r.row
+                                                    == 3
+                                                    && r.col
+                                                    == 5
+                                                    && r.endCol
+                                                    == 15
+                                                    && r.multiline
+                                                    == False
+
+                                            Nothing ->
+                                                False
+                                       )
+
+                            _ ->
+                                False
+
+                    _ ->
+                        False
+
+            Nothing ->
+                False
+        )
+    , check "U3 `Defun.span` IS THE HEADER, NOT THE BODY: span 16..37 is exactly `defun Rt.a() -> val {` — start row 2 col 1 (row 1 is the comment line), caret cols 1..22, multiline False, and the span's TEXT begins with `defun`, ends with the opening `{` and contains no body statement.  FAIL-BEFORE a whole-DEFUN span: multiline True and the text would contain `mknum`.  FAIL-BEFORE a span starting at the file: row 1 col 1"
+        (case u3FirstDefun u3SpanCommentsSrc of
+            Just d ->
+                let
+                    r =
+                        Ast.renderSpan u3SpanCommentsSrc d.span
+
+                    text =
+                        String.slice d.span.start d.span.end u3SpanCommentsSrc
+                in
+                d.span
+                    == { start = 16, end = 37 }
+                    && r.row
+                    == 2
+                    && r.col
+                    == 1
+                    && r.startCol
+                    == 1
+                    && r.endCol
+                    == 22
+                    && r.multiline
+                    == False
+                    && r.line
+                    == "defun Rt.a() -> val {"
+                    && String.startsWith "defun" text
+                    && String.endsWith "{" text
+                    && not (String.contains "mknum" text)
+
+            Nothing ->
+                False
+        )
+    , check "U3 CRLF: a source whose lines end `\\r\\n` — `lineOf` KEEPS the `\\r` (only `\\n` splits, so the terminator's line text is `  return 0;\\r`) while the CARET does not count it: span 25..36 renders row 2 col 3, caret cols 3..12 over the 9-char `return 0;`.  FAIL-BEFORE a `\\r` that reached the caret: endCol 13.  FAIL-BEFORE a `\\r` counted as a line break: row 3"
+        (case u3FirstDefun u3SpanCrlfSrc of
+            Just d ->
+                let
+                    r =
+                        Ast.renderSpan u3SpanCrlfSrc d.body.term.span
+                in
+                ( d.body.term.span.start, d.body.term.span.end )
+                    == ( 25, 36 )
+                    && r.row
+                    == 2
+                    && r.col
+                    == 3
+                    && r.startCol
+                    == 3
+                    && r.endCol
+                    == 12
+                    && r.multiline
+                    == False
+                    && r.line
+                    == "  return 0;\u{000D}"
+                    && Ast.rowColOf u3SpanCrlfSrc 36
+                    == { row = 3, col = 1 }
+
+            Nothing ->
+                False
+        )
+    , check "U3 EOF AND EMPTY: an offset EQUAL to `String.length src` (35, no trailing newline) renders one past the last character — row 3 col 2, one caret at cols 2..3 over the line `}` — and an EMPTY source renders row 1 col 1 with an empty line: no crash, no nonsense row.  MEASURED: no parsed node's span END reaches `String.length` (a block always ends with `}`), which is why this row drives `Ast` directly; it also pins that the 35-char source it measures PARSES (term span 24..34)"
+        (let
+            eof =
+                String.length u3SpanNoNewlineSrc
+
+            rEof =
+                Ast.renderSpan u3SpanNoNewlineSrc { start = eof, end = eof }
+
+            rEmpty =
+                Ast.renderSpan "" { start = 0, end = 0 }
+         in
+         ( eof, Ast.rowColOf u3SpanNoNewlineSrc eof )
+            == ( 35, { row = 3, col = 2 } )
+            && Ast.lineOf u3SpanNoNewlineSrc eof
+            == "}"
+            && rEof.row
+            == 3
+            && rEof.col
+            == 2
+            && rEof.startCol
+            == 2
+            && rEof.endCol
+            == 3
+            && rEof.multiline
+            == False
+            && (case u3FirstDefun u3SpanNoNewlineSrc of
+                    Just d ->
+                        ( d.body.term.span.start, d.body.term.span.end )
+                            == ( 24, 34 )
+
+                    Nothing ->
+                        False
+               )
+            && Ast.rowColOf "" 0
+            == { row = 1, col = 1 }
+            && Ast.lineOf "" 0
+            == ""
+            && rEmpty.row
+            == 1
+            && rEmpty.col
+            == 1
+            && rEmpty.startCol
+            == 1
+            && rEmpty.endCol
+            == 2
+            && rEmpty.multiline
+            == False
+            && rEmpty.line
+            == ""
+        )
+    ]
+
+
+{-| The FIRST defun of a parsed program, or `Nothing` when the snippet does not
+parse (which turns the row RED rather than throwing).
+
+A SELECTOR, not a strip: the `Defun` it returns carries the header span and
+every nested block's spans exactly as the parser built them, and the rows read
+those through `Ast.renderSpan`.  It deliberately goes through
+`Parse.parseProgram` and NOT `parseProgramBare` — that one zeroes every span
+through `zeroSpans`, which is the thing the position rows exist to look at.
+-}
+u3FirstDefun : String -> Maybe Ast.Defun
+u3FirstDefun src =
+    case Parse.parseProgram src of
+        Ok (d :: _) ->
+            Just d
+
+        _ ->
+            Nothing
+
+
+{-| U3 row 1 + row 6's source: a leading COMMENT line, then the defun, then a
+comment-only line INSIDE the block, then a binder and the terminator.
+
+MEASURED offsets (by hand, over `String.join "\n"` of the lines below, 84
+chars):
+
+    0   "// leading note"                  row 1   (15 chars, `\n` at 15)
+    16  "defun Rt.a() -> val {"            row 2   (21 chars, `\n` at 37)
+    38  "  // about x"                     row 3   (12 chars, `\n` at 50)
+    51  "  val x = mknum(1);"              row 4   (19 chars, code at 53)
+    71  "  return x;"                      row 5   (11 chars, `\n` at 82)
+    83  "}"                                row 6
+
+The binder's span is 53..73: `end` is the NEXT TOKEN (`return`, offset 73),
+not the binder's own last character (69) — the `Span` end convention.  The
+defun's header span is 16..37: `defun` through the body's opening `{`, so it
+stops BEFORE the body's first statement at 53.
+-}
+u3SpanCommentsSrc : String
+u3SpanCommentsSrc =
+    String.join "\n"
+        [ "// leading note"
+        , "defun Rt.a() -> val {"
+        , "  // about x"
+        , "  val x = mknum(1);"
+        , "  return x;"
+        , "}"
+        ]
+
+
+{-| U3 row 2's source: a statement whose NEXT TOKEN is two lines down, with a
+`// separator` comment-only line between them — the shape the `spanCode`
+recursion exists for.
+
+MEASURED offsets (by hand, 70 chars):
+
+    0   "defun Rt.b() -> val {"            row 1   (21 chars, `\n` at 21)
+    22  "  val x = mknum(1);"              row 2   (19 chars, code at 24)
+    42  "  // separator"                   row 3   (14 chars, `\n` at 56)
+    57  "  return x;"                      row 4   (11 chars, `\n` at 68)
+    69  "}"                                row 5
+
+The binder's span is 24..59 — 35 chars of source for a 17-char statement, and
+the 14-char comment line is INSIDE that overhang.
+-}
+u3SpanSeparatorSrc : String
+u3SpanSeparatorSrc =
+    String.join "\n"
+        [ "defun Rt.b() -> val {"
+        , "  val x = mknum(1);"
+        , "  // separator"
+        , "  return x;"
+        , "}"
+        ]
+
+
+{-| U3 row 3's source: a `call` whose argument list is on the next line — the
+one shape where `multiline` must be True and the caret must still be computed
+against the START line.
+
+MEASURED offsets (by hand, 64 chars):
+
+    0   "defun Rt.c() -> val {"            row 1   (21 chars, `\n` at 21)
+    22  "  call Rt.deepEq("                row 2   (17 chars, code at 24)
+    40  "    x, y);"                       row 3   (10 chars, `\n` at 50)
+    51  "  return 0;"                      row 4   (11 chars, `\n` at 62)
+    63  "}"                                row 5
+
+The statement's span is 24..53 (29 chars across two lines); the start line's
+share of it is the 15-char `call Rt.deepEq(`.
+-}
+u3SpanCallSrc : String
+u3SpanCallSrc =
+    String.join "\n"
+        [ "defun Rt.c() -> val {"
+        , "  call Rt.deepEq("
+        , "    x, y);"
+        , "  return 0;"
+        , "}"
+        ]
+
+
+{-| U3 row 4's source: a `for` head carrying BOTH head statements, so init,
+condition and step sit on one line under three different columns.
+
+MEASURED offsets (by hand, 73 chars):
+
+    0   "defun Rt.d() -> val {"                      row 1  (21 chars, `\n` at 21)
+    22  "  for (i = 0; i < 3; i = i + 1) {"           row 2  (33 chars, `\n` at 55)
+        `for` at 24 (col 3), init `i = 0;` at 29 (col 8), step `i = i + 1` at 43 (col 22)
+    56  "  }"                                         row 3  (3 chars, `\n` at 59)
+    60  "  return 0;"                                row 4  (11 chars, `\n` at 71)
+    72  "}"                                           row 5
+
+The `for` span is 24..62 (its `end` is the `return` token); the init is 29..36
+(its `end` is the condition's `i` at 36, so the 7-char run trims to `i = 0;`);
+the step is 43..52 (its `end` is the head's `)` at 52, so its run is exactly
+the 9-char `i = i + 1`).  The body's `}` is at 58.
+-}
+u3SpanForSrc : String
+u3SpanForSrc =
+    String.join "\n"
+        [ "defun Rt.d() -> val {"
+        , "  for (i = 0; i < 3; i = i + 1) {"
+        , "  }"
+        , "  return 0;"
+        , "}"
+        ]
+
+
+{-| U3 row 5's source: a `while` body that HAS a real statement and NO
+terminator — the fall-through shape, so the fold synthesizes `continue`.
+
+MEASURED offsets (by hand, 80 chars):
+
+    0   "defun Rt.e(a: word) -> word {"     row 1  (29 chars, `\n` at 29)
+    30  "  while (a < 3) {"                 row 2  (17 chars, `\n` at 47)
+    48  "    a = a + 1;"                    row 3  (14 chars, code at 52)
+    63  "  }"                               row 4  (3 chars — the `}` at 65)
+    67  "  return a;"                       row 5  (11 chars, `\n` at 78)
+    79  "}"                                 row 6
+
+The synthesized `TContinue` gets {65, 66} (the `}`, one char wide); the body's
+last real statement is 52..65, its `end` being that same brace.
+-}
+u3SpanLoopSrc : String
+u3SpanLoopSrc =
+    String.join "\n"
+        [ "defun Rt.e(a: word) -> word {"
+        , "  while (a < 3) {"
+        , "    a = a + 1;"
+        , "  }"
+        , "  return a;"
+        , "}"
+        ]
+
+
+{-| U3 row 7's source: CRLF line endings throughout, no trailing newline.
+
+MEASURED offsets (by hand, 37 chars — `\r` is ONE char):
+
+    0   "defun Rt.j() -> val {"   row 1   (21 chars, `\r` at 21, `\n` at 22)
+    23  "  return 0;"             row 2   (11 chars, code at 25, `\r` at 34, `\n` at 35)
+    36  "}"                       row 3
+
+Only `\n` splits a line (`Ast.lineOf`), so row 2's line text is
+`"  return 0;\r"` — the `\r` is KEPT, and the caret must not count it.
+-}
+u3SpanCrlfSrc : String
+u3SpanCrlfSrc =
+    "defun Rt.j() -> val {\u{000D}\n  return 0;\u{000D}\n}"
+
+
+{-| U3 row 8's source: an ordinary LF program with NO trailing newline, so
+`String.length` is an offset a caller can really hold.
+
+MEASURED offsets (by hand, 35 chars):
+
+    0   "defun Rt.g() -> val {"   row 1   (21 chars, `\n` at 21)
+    22  "  return 0;"             row 2   (11 chars, code at 24, `\n` at 33)
+    34  "}"                       row 3
+
+The terminator's span is 24..34 (`end` is the `}` at 34, NOT the end of the
+file), so no parsed node reaches 35: the EOF row has to drive `Ast` itself.
+-}
+u3SpanNoNewlineSrc : String
+u3SpanNoNewlineSrc =
+    "defun Rt.g() -> val {\n  return 0;\n}"
+
+
+-- ==================== U5: THE ERROR MODULE'S RENDERER ====================
+--
+-- `Mid.RtLang.Error` (src/Mid/RtLang/Error.elm) is the lane's ONE renderer:
+-- `render { source, path } err` prints Elm's 0.19.1 multi-line form and
+-- `oneLine err` prints the tag-and-rule form the line-based consumers read.
+-- The rows below pin the FORMAT only — the parser's spans are U1/U2/U3's rows,
+-- so these feed hand-built `Ast.Span`s (or, in the one END-TO-END row, a real
+-- parsed one) and assert the rendered BYTES.
+
+u5ErrorRows : List String
+u5ErrorRows =
+    [ check "U5 R3 (plan-b) NO-SPAN DEGRADATION: a `span = Nothing` error renders banner, blank, rule, [blank, `Hint: ...`], footer and NO `NN|` gutter line — the path a LowerToIr internal or an export error takes, where there is no honest position to print.  WOULD FAIL: rendering a gutter for a `Nothing` span, a placeholder line, or a footer that is not the last line"
+        (let
+            e hint =
+                { tag = "J4"
+                , title = MidErr.titleFor "J4"
+                , rule = "`recur` takes 3 arguments, but this defun has 2"
+                , hint = hint
+                , key = Just "Rt.f"
+                , span = Nothing
+                }
+
+            bar =
+                "-- BAD ARITY " ++ String.repeat 58 "-" ++ " Wesc.mid"
+
+            plain =
+                MidErr.render { source = "  return 0;", path = "Wesc.mid" } (e Nothing)
+
+            hinted =
+                MidErr.render { source = "  return 0;", path = "Wesc.mid" }
+                    (e (Just "pass three arguments"))
+         in
+         plain
+            == String.join "\n"
+                [ bar
+                , ""
+                , "`recur` takes 3 arguments, but this defun has 2"
+                , "-- J4"
+                ]
+            && hinted
+            == String.join "\n"
+                [ bar
+                , ""
+                , "`recur` takes 3 arguments, but this defun has 2"
+                , ""
+                , "Hint: pass three arguments"
+                , "-- J4"
+                ]
+            && not (String.contains "|" plain)
+            && not (String.contains "^" plain)
+            && not (String.contains "|" hinted)
+        )
+    , check "U5 BANNER FORMULA: the bar is Elm's own — `-- <TITLE> ` + dashes + ` ` + path, dashes = max 1 (80 - (4 + len title + 1 + len path)) (Reporting/Error.hs `toMessageBar`), so the FIRST LINE IS EXACTLY 80 CHARS for two different title/path lengths, and the dash COUNT is the formula's.  Also pins the `max 1` clamp: a path too long for the bar gives ONE dash and a line PAST 80 (Elm's behaviour, not a wrap).  WOULD FAIL: a fixed dash count, a missing space, an 81-char bar, or a clamp that prints zero dashes"
+        (let
+            firstLine title path =
+                let
+                    e =
+                        { tag = "J1"
+                        , title = title
+                        , rule = "r"
+                        , hint = Nothing
+                        , key = Nothing
+                        , span = Nothing
+                        }
+
+                    lines =
+                        String.split "\n" (MidErr.render { source = "", path = path } e)
+                in
+                Maybe.withDefault "" (List.head lines)
+
+            -- The banner's OWN leading `--` is not part of the formula's run,
+            -- so the count starts after `"-- " ++ title ++ " "`.
+            dashes title path =
+                String.length
+                    (String.filter (\c -> c == '-')
+                        (String.dropLeft (3 + String.length title + 1) (firstLine title path))
+                    )
+
+            longPath =
+                String.repeat 90 "p"
+         in
+         MidErr.lineWidth
+            == 80
+            && String.length (firstLine "BAD LAYOUT" "Wesc.mid")
+            == 80
+            && String.length (firstLine "SYNTAX PROBLEM" "src/Wesc.mid")
+            == 80
+            && firstLine "BAD LAYOUT" "Wesc.mid"
+            == "-- BAD LAYOUT " ++ String.repeat 57 "-" ++ " Wesc.mid"
+            && dashes "BAD LAYOUT" "Wesc.mid"
+            == 57
+            && dashes "SYNTAX PROBLEM" "src/Wesc.mid"
+            == 49
+            && dashes "BAD LAYOUT" longPath
+            == 1
+            && String.length (firstLine "BAD LAYOUT" longPath)
+            == 106
+        )
+    , check "U5 SPAN RENDER, single-digit row: a hand-built span 38..56 over `  word n = mknum(1);` (row 3, col 3) renders the gutter `3|`, ONE margin space, the line verbatim, then a caret line of 18 `^` starting at the line's own column 3 — i.e. the whole rendered payload is exactly these seven lines.  WOULD FAIL: a gutter padded to a fixed width (`   3|`), a missing margin space (caret one column left), a caret measured to the raw `end` (21 carets), or a caret line before/after the wrong line"
+        (MidErr.render { source = u5SnippetSrc, path = "Wesc.mid" }
+            { tag = "J1"
+            , title = MidErr.titleFor "J1"
+            , rule = "a word binder's initializer must be a word"
+            , hint = Nothing
+            , key = Just "Rt.p"
+            , span = Just { start = 38, end = 56 }
+            }
+            == String.join "\n"
+                [ "-- TYPE MISMATCH " ++ String.repeat 54 "-" ++ " Wesc.mid"
+                , ""
+                , "a word binder's initializer must be a word"
+                , ""
+                , "3|   word n = mknum(1);"
+                , "3|   " ++ String.repeat 18 "^"
+                , "-- J1"
+                ]
+        )
+    , check "U5 SPAN RENDER, TWO-DIGIT row: the same source's row-12 statement (span 171..182) renders `12|` — the gutter's width is the digit count of the LAST DISPLAYED line number (Elm's `render` width, Code.hs:113), so a two-digit row widens the gutter and the caret line follows it.  WOULD FAIL: a gutter width taken from the ROW OF THE FIRST line or hardcoded to 1 (`12|` then a caret line one column short), or a `>` margin on a single-line span"
+        (MidErr.render { source = u5SnippetSrc, path = "Wesc.mid" }
+            { tag = "J1"
+            , title = MidErr.titleFor "J1"
+            , rule = "a word binder's initializer must be a word"
+            , hint = Nothing
+            , key = Just "Rt.p"
+            , span = Just { start = 171, end = 182 }
+            }
+            == String.join "\n"
+                [ "-- TYPE MISMATCH " ++ String.repeat 54 "-" ++ " Wesc.mid"
+                , ""
+                , "a word binder's initializer must be a word"
+                , ""
+                , "12|   word d = e;"
+                , "12|   " ++ String.repeat 11 "^"
+                , "-- J1"
+                ]
+        )
+    , check "U5 MULTILINE SPAN: a span crossing a newline (59..85) takes `>` as the margin and gets NO caret line at all — Elm's signal that the caret cannot be placed (`makeUnderline` returns Nothing when the region is multi-line, Code.hs:126-135).  WOULD FAIL: a caret line under a multiline span (which would underline the start line and claim the node ends there), or the ordinary space margin"
+        (let
+            rendered =
+                MidErr.render { source = u5SnippetSrc, path = "Wesc.mid" }
+                    { tag = "J1"
+                    , title = MidErr.titleFor "J1"
+                    , rule = "a word binder's initializer must be a word"
+                    , hint = Nothing
+                    , key = Just "Rt.p"
+                    , span = Just { start = 59, end = 85 }
+                    }
+         in
+         rendered
+            == String.join "\n"
+                [ "-- TYPE MISMATCH " ++ String.repeat 54 "-" ++ " Wesc.mid"
+                , ""
+                , "a word binder's initializer must be a word"
+                , ""
+                , "4|>  word m = n;"
+                , "-- J1"
+                ]
+            && not (String.contains "^" rendered)
+        )
+    , check "U5 END TO END through the PARSER: a real `val x = mknum(1);` statement's span (24..44, `end` being the next token `return`) renders row 2 col 3 with a 17-char caret under the statement's own text — the shape U7/U10's messages will carry.  WOULD FAIL: a span whose start is the line start or the `val` keyword's predecessor (col 1), or a caret that counts the `end` overhang (the trailing newline)"
+        (case Parse.parseProgram "defun Rt.q() -> val {\n  val x = mknum(1);\n  return x;\n}" of
+            Ok (d :: _) ->
+                case d.body.stmts of
+                    s :: _ ->
+                        MidErr.render
+                            { source = "defun Rt.q() -> val {\n  val x = mknum(1);\n  return x;\n}"
+                            , path = "Wesc.mid"
+                            }
+                            { tag = "J1"
+                            , title = MidErr.titleFor "J1"
+                            , rule = "a word binder's initializer must be a word"
+                            , hint = Nothing
+                            , key = Just "Rt.q"
+                            , span = Just s.span
+                            }
+                            == String.join "\n"
+                                [ "-- TYPE MISMATCH " ++ String.repeat 54 "-" ++ " Wesc.mid"
+                                , ""
+                                , "a word binder's initializer must be a word"
+                                , ""
+                                , "2|   val x = mknum(1);"
+                                , "2|   " ++ String.repeat 17 "^"
+                                , "-- J1"
+                                ]
+
+                    [] ->
+                        False
+
+            _ ->
+                False
+        )
+    , check "U5 `oneLine`: `\"<key>: <tag>: <rule>\"` with the key, `\"<tag>: <rule>\"` without it, and ALWAYS ONE LINE — the tag is on it, so the 33 J-tag TestMain pins and tools/qbe/qbe-check.sh's `grep -q` rows stay line-safe across any prose rewrite (that is the whole reason `tag` is a field, not a prefix parsed back out of prose).  WOULD FAIL: a key printed as `Nothing`, a dropped tag, a two-line result, or the prose wrapped at 80"
+        (let
+            e key =
+                { tag = "J12"
+                , title = MidErr.titleFor "J12"
+                , rule = "pointer arithmetic needs a word operand, but the left side is a `val`"
+                , hint = Just "unbox it through `payload(..)`"
+                , key = key
+                , span = Nothing
+                }
+
+            keyed =
+                MidErr.oneLine (e (Just "Wesc.run"))
+
+            bare =
+                MidErr.oneLine (e Nothing)
+         in
+         keyed
+            == "Wesc.run: J12: pointer arithmetic needs a word operand, but the left side is a `val`"
+            && bare
+            == "J12: pointer arithmetic needs a word operand, but the left side is a `val`"
+            && String.contains "J12" bare
+            && not (String.contains "\n" keyed)
+            && not (String.contains "\n" bare)
+            && not (String.contains "Hint" bare)
+        )
+    , check "U5 NO ANSI, EVER: a fully populated render (banner, caret, snippet) contains NO ESCAPE BYTE and no control character other than the newlines that separate its lines — this payload is written into `.ssa` files that tools/osier-corpus-ssa.sh hashes and that diffs compare, so Elm's colourised bar/`>`/caret would corrupt both.  WOULD FAIL: any `\\u{001B}` in the bar, margin or caret (Elm's `D.red`/`D.dullcyan`), or a stray `\\r`/tab riding a source line"
+        (let
+            rendered =
+                MidErr.render { source = u5SnippetSrc, path = "Wesc.mid" }
+                    { tag = "J1"
+                    , title = MidErr.titleFor "J1"
+                    , rule = "a word binder's initializer must be a word"
+                    , hint = Just "bind it through `payload(..)`"
+                    , key = Just "Rt.p"
+                    , span = Just { start = 38, end = 56 }
+                    }
+         in
+         not (String.contains "\u{001B}" rendered)
+            && String.all (\c -> c == '\n' || Char.toCode c >= 32) rendered
+        )
+    , check "U5 WORD WRAP: a rule longer than 80 chars is filled on spaces only — every rule line fits `lineWidth`, and the lines re-join to the ORIGINAL sentence (so nothing was dropped, hyphenated or split).  A rule that is ONE UNBREAKABLE TOKEN of 90 chars is NOT split: the token is emitted whole on its own line, that line EXCEEDS 80, and the preceding word stays on the line before it.  WOULD FAIL: a mid-word break (line 1 ends `initi`, line 2 starts `alizer`), a hyphenated break, a truncated rule, or a wrap that splits the 90-char token"
+        (let
+            ruleLines rule =
+                let
+                    lines =
+                        String.split "\n"
+                            (MidErr.render { source = "", path = "Wesc.mid" }
+                                { tag = "J1"
+                                , title = MidErr.titleFor "J1"
+                                , rule = rule
+                                , hint = Nothing
+                                , key = Nothing
+                                , span = Nothing
+                                }
+                            )
+                in
+                ( lines, List.take (List.length lines - 3) (List.drop 2 lines) )
+
+            sentence =
+                "a word binder's initializer must be a word producer, and the right side here is a `val`, which is a number slot"
+
+            token =
+                String.repeat 90 "x"
+
+            ( sentenceAll, sentenceRule ) =
+                ruleLines sentence
+
+            ( tokenAll, tokenRule ) =
+                ruleLines ("a " ++ token)
+         in
+         List.length sentenceRule
+            >= 2
+            && String.join " " sentenceRule
+            == sentence
+            && List.all (\l -> String.length l <= MidErr.lineWidth) sentenceAll
+            && tokenRule
+            == [ "a", token ]
+            && List.any (\l -> String.length l > MidErr.lineWidth) tokenRule
+            && List.all (\l -> String.length l <= MidErr.lineWidth) (List.take 2 tokenAll)
+        )
+    ]
+
+
+-- ==================== U15: THE BANNER'S CLAIM ====================
+--
+-- The banner is the LOUDEST line in a message, so it must not tell a false
+-- story. A `MidcError`'s `title` defaults to `titleFor tag` — one title per
+-- MACHINE tag — and several tags carry more than one failure KIND, so a site
+-- whose kind is not the tag's names its own title (`Check.withTitle`).
+--
+-- The rows below are END-TO-END on that claim: each builds a REAL rejection
+-- through the checker's own door (`chkFlagsMidc` / `chkModuleFlagsMidc` /
+-- `Check.checkExportsMidc`), renders it with `MidErr.render`, and pins the
+-- BANNER LINE — not the record, so a row cannot pass while `render` prints
+-- something else. Every row below FAILS under the pre-U15 mapping (MEASURED by
+-- restoring it: see the U15 result note).
+
+
+{-| The banner line of a rendered rejection — line 1 of `MidErr.render`.
+
+The `source` is `""` because only line 1 is read: the banner carries the TITLE
+and the PATH and nothing positional, so the snippet (which is where a source
+text would matter) is not under test here. `"Wesc.mid"` is the stand-in path the
+U5 rows use; the real lanes supply the module's own file name.
+-}
+u15Banner : MidErr.MidcError -> String
+u15Banner e =
+    Maybe.withDefault ""
+        (List.head
+            (String.split "\n" (MidErr.render { source = "", path = "Wesc.mid" } e))
+        )
+
+
+{-| Elm's bar for `title` at the stand-in path, from `MidErr.lineWidth` — the
+formula's own constant, not a second copy of 80 (the U5 BANNER FORMULA row
+pins the formula against literals; these rows pin which TITLE reaches it).
+-}
+u15Bar : String -> String
+u15Bar title =
+    "-- "
+        ++ title
+        ++ " "
+        ++ String.repeat
+            (max 1
+                (MidErr.lineWidth
+                    - (4 + String.length title + 1 + String.length "Wesc.mid")
+                )
+            )
+            "-"
+        ++ " Wesc.mid"
+
+
+u15BannerOfProgram : String -> String
+u15BannerOfProgram src =
+    case chkFlagsMidc [] src of
+        Err e ->
+            u15Banner e
+
+        Ok () ->
+            ""
+
+
+u15BannerOfModule : String -> String
+u15BannerOfModule src =
+    case chkModuleFlagsMidc [] src of
+        Err e ->
+            u15Banner e
+
+        Ok () ->
+            ""
+
+
+{-| A duplicate export at the module lane's export judgment — the record
+`Check.checkExportsMidc` builds, which is the one `Mid/Rt.elm` renders for a
+user `.mid`'s header.
+-}
+u15DuplicateExportBanner : String
+u15DuplicateExportBanner =
+    case
+        Check.checkExportsMidc
+            [ { key = "Wesc.f", sig = { ty = Ast.OVal, effects = [], taint = False } }
+            , { key = "Wesc.f", sig = { ty = Ast.OVal, effects = [], taint = False } }
+            ]
+            (Dict.fromList [ ( "Wesc.f", 0 ) ])
+    of
+        Err e ->
+            u15Banner e
+
+        Ok () ->
+            ""
+
+
+u15BannerRows : List String
+u15BannerRows =
+    [ check "U15 ARITY IS NOT A NAME: an UNDERcall (`Rt.two(a)` against a 2-ary callee) banners `-- BAD ARITY` and NOT `-- UNKNOWN NAME` — the tag is J2, whose default title is the RESOLUTION family's, and arity is the other half of that tag (Check.elm:118-125).  MEASURED end to end before U15 through tools/qbe/qbe-mk.sh: `err -- UNKNOWN NAME ---- UserMid.mid` over `call 'UserMid2.boxedSum' takes 2 argument(s), got 1`.  WOULD FAIL: the banner taken from the tag (UNKNOWN NAME), or a title that drops the arity claim"
+        (u15BannerOfProgram "defun Rt.under(a: val) -> val {\n  return call Rt.two(a);\n}\n\ndefun Rt.two(a: val, b: val) -> val {\n  return mknil;\n}"
+            == u15Bar "BAD ARITY"
+        )
+    , check "U15 ARITY IS NOT A NAME, the `rawcall` door: `rawcall getpid(1)` (table arity 0) banners `-- BAD ARITY` — the same split on J3, whose default is also the resolution family's.  WOULD FAIL: UNKNOWN NAME (J3's default)"
+        (u15BannerOfProgram "defun Rt.badrawarity() -> val {\n  word r = rawcall getpid(1);\n  return mknum(r);\n}"
+            == u15Bar "BAD ARITY"
+        )
+    , check "U15 ARITY IS NOT A TYPE (the CONTROL the other way): `Rt.wid(a)` passes a `val` to a `word` parameter — an ARGUMENT-CLASS reject on J2 banners `-- TYPE MISMATCH`, not UNKNOWN NAME and not BAD ARITY.  Pins that `checkArgsAt`'s two arms split, not just the arity one.  WOULD FAIL: one title for both arms"
+        (u15BannerOfProgram "defun Rt.wrongarg(a: val) -> val {\n  return call Rt.wid(a);\n}\n\ndefun Rt.wid(x: word) -> val {\n  return mknum(x);\n}"
+            == u15Bar "TYPE MISMATCH"
+        )
+    , check "U15 THE DIVERGENCE RULE IS NOT A LAYOUT JUDGMENT: a mid-block `if` whose both branches fall through banners `-- BAD CONTROL FLOW`.  J7 is the DIVERGENCE RULE (Check.elm:147) — a statement arrangement the lowering cannot express — and `BAD LAYOUT` is J11's memory-layout family (offsets, sizes, field widths); the two used to share a word in two different senses, so the loudest line named the wrong one.  WOULD FAIL: BAD LAYOUT (J7's old default)"
+        (u15BannerOfProgram "defun Rt.divboth(n: val) -> val {\n  if (mkbool(tagis(n, 1) == 1)) {\n    if (mkbool(tagis(n, 2) == 1)) { return mknum(1); }\n  }\n  else {\n    if (mkbool(tagis(n, 3) == 1)) { return mknum(2); }\n  }\n  return mknum(3);\n}"
+            == u15Bar "BAD CONTROL FLOW"
+        )
+    , check "U15 A DUPLICATE EXPORT IS NOT A BAD SIGNATURE: `key 'Wesc.f' is exported more than once` banners `-- NAMING PROBLEM` — a duplication, not a claim about a signature's shape.  U13's own before/after rendered this under `-- BAD SIGNATURE` (MEASURED).  WOULD FAIL: BAD SIGNATURE (`EXPORT`'s default)"
+        (u15DuplicateExportBanner == u15Bar "NAMING PROBLEM")
+    , check "U15 A SIGNATURE REJECT UNDER J11 BANNERS BAD SIGNATURE: `-> S` (a struct return) is a declared signature the value ABI cannot express, so it does not banner `-- BAD LAYOUT` — J11's default is the struct TABLE's layout, and a return type has no offset.  WOULD FAIL: BAD LAYOUT"
+        (u15BannerOfModule "struct S { a : word; }\ndefun Rt.g() -> S {\n  S s;\n  return s;\n}"
+            == u15Bar "BAD SIGNATURE"
+        )
+    , check "U15 AN UNKNOWN FIELD IS NOT A TYPE MISMATCH: `p->g` on a struct with no field `g` banners `-- UNKNOWN FIELD` — the name does not resolve, nothing about a class is wrong.  WOULD FAIL: TYPE MISMATCH (J13's default)"
+        (u15BannerOfModule "struct S { f : word; }\ndefun Rt.g(p: *S) -> word {\n  return p->g;\n}"
+            == u15Bar "UNKNOWN FIELD"
+        )
+    , check "U15 AN UNKNOWN STRUCT IS NOT BAD LAYOUT: `*Region p` with no `struct Region` banners `-- UNKNOWN STRUCT` — the name resolves in no table, so no layout was even attempted.  (`UNKNOWN STRUCT` was documented as a site title since U5 and NO site passed one; this is the row that keeps it passed.)  WOULD FAIL: BAD LAYOUT"
+        (u15BannerOfModule "defun Rt.g(v: val) -> word {\n  *Region p = payload(v, 0);\n  return 0;\n}"
+            == u15Bar "UNKNOWN STRUCT"
+        )
+    , check "U15 `&` OF A POINTER IS NOT A TYPE MISMATCH: `&p` banners `-- NOT ADDRESSABLE` — the operand IS an address and has none of its own; no class rule is violated.  WOULD FAIL: TYPE MISMATCH"
+        (u15BannerOfModule "struct S { a : word; }\ndefun Rt.g(p: *S) -> word {\n  *word q = &p;\n  return 0;\n}"
+            == u15Bar "NOT ADDRESSABLE"
+        )
+    , check "U15 A FRAME ADDRESS THAT ESCAPES IS NOT A TYPE MISMATCH: `return &s;` on a struct local banners `-- DANGLING POINTER` — the classes all agree; what is wrong is that the pointer outlives its storage.  WOULD FAIL: TYPE MISMATCH"
+        (u15BannerOfModule "struct S { a : word; }\ndefun Rt.a() -> *S {\n  S s;\n  return &s;\n}"
+            == u15Bar "DANGLING POINTER"
+        )
+    , check "U15 A FLOAT FIELD IS A TYPE REJECT, NOT A LAYOUT ONE: `struct S { f : float; }` banners `-- TYPE MISMATCH` — the field's declared type has no raw-memory seat (the same reason a float ARRAY is a J1 type reject), so the layout table never gets to place it.  WOULD FAIL: BAD LAYOUT (J11's default)"
+        (u15BannerOfModule "struct S { f : float; }\ndefun Rt.g() -> word {\n  return 0;\n}"
+            == u15Bar "TYPE MISMATCH"
+        )
+    , check "U15 A CONSTANT CONDITION IS NOT A TYPE MISMATCH: `if (true)` banners `-- BAD CONDITION` — the class is right and the VALUE is not a test.  WOULD FAIL: TYPE MISMATCH (J1's default)"
+        (u15BannerOfProgram "defun F.g() -> val {\n  if (true) {\n    return mknum(1);\n  } else {\n    return mknum(2);\n  }\n}"
+            == u15Bar "BAD CONDITION"
+        )
+    , check "U15 THE DEFAULT STILL HOLDS WHERE IT IS TRUE: a class reject under J13 (`p->f` storing a `val` into a `word` field) banners `-- TYPE MISMATCH` with NO site title — the control for the whole split, so a later edit cannot \"fix\" the table by overriding every J13 site.  WOULD FAIL: any site title on this arm"
+        (u15BannerOfModule "struct S { f : word; }\ndefun Rt.g(p: *S, v: val) -> word {\n  p->f = v;\n  return 0;\n}"
+            == u15Bar "TYPE MISMATCH"
+        )
+    ]
+
+
+{-| The U5 snippet rows' source: thirteen lines, 184 chars, no trailing newline.
+Eleven single-word binders keep the row numbers small enough to read while
+putting ONE statement on a two-digit row (12) and one on a one-digit row (3) —
+the gutter-width pair.
+
+MEASURED offsets (by hand, over `String.join "\n"` of the lines below):
+
+    0   "// u5 snippet"                     row 1   (13 chars, `\n` at 13)
+    14  "defun Rt.p() -> val {"             row 2   (21 chars, `\n` at 35)
+    36  "  word n = mknum(1);"              row 3   (20 chars, code at 38)
+    57  "  word m = n;"                     row 4   (13 chars, code at 59)
+    71  "  word k = m;"                     row 5   (13 chars, code at 73)
+    85  "  word j = k;"                     row 6
+    99  "  word i = j;"                     row 7
+    113 "  word h = i;"                     row 8
+    127 "  word g = h;"                     row 9
+    141 "  word f = g;"                     row 10
+    155 "  word e = f;"                     row 11
+    169 "  word d = e;"                     row 12  (13 chars, code at 171)
+    183 "}"                                 row 13
+
+The spans the rows feed: 38..56 is row 3's statement code (`end` is that line's
+`\n`, just past the `;`), 171..182 is row 12's whole code (`end` is its `\n`),
+and 59..85 crosses row 4 into row 5's text (`end` is row 5's `\n`, so the span
+is honestly multi-line).
+-}
+u5SnippetSrc : String
+u5SnippetSrc =
+    String.join "\n"
+        [ "// u5 snippet"
+        , "defun Rt.p() -> val {"
+        , "  word n = mknum(1);"
+        , "  word m = n;"
+        , "  word k = m;"
+        , "  word j = k;"
+        , "  word i = j;"
+        , "  word h = i;"
+        , "  word g = h;"
+        , "  word f = g;"
+        , "  word e = f;"
+        , "  word d = e;"
+        , "}"
+        ]
+
+
+-- ==================== U6: THE PARSE LANE'S SYNTAX PROBLEM ====================
+--
+-- `Parse.resultOfRun` used to join ParserFast's `DeadEnd`s into
+-- `"row:col: expected X"` fragments (`deadEndToString` + `problemText`, whose
+-- 14 `Problem` shapes are the vocabulary).  It now builds the lane's ONE
+-- `MidcError` (tag `PARSE`, key `Nothing`, hint `Nothing`) with the parser's
+-- own position as a POINT span and renders it through
+-- `Mid.RtLang.Error.render` — so a syntax error arrives in the same
+-- banner/rule/snippet/footer shape as every other Mid-c rejection, and the
+-- `"err "` prefix the lane exits add is unchanged.
+--
+-- The rows below pin the rendered BYTES (the banner's `row:col`, the gutter row
+-- number, the caret column, the footer), the POINT-span clamp at the end of the
+-- text, the one case where a position legitimately STAYS in the rule, and — one
+-- row per SURFACE FAMILY — that the rule still NAMES what was expected instead
+-- of collapsing to a bare "parse failed".
+
+u6ParseRows : List String
+u6ParseRows =
+    [ check "U6 R1 (plan-b's R2) END TO END: a module whose statement is missing `]` renders `-- SYNTAX PROBLEM`, the rule naming the expected token, the gutter at ROW 4 and ONE caret at COLUMN 28 — the parser's own position, past `b` and onto the `;` — then the `-- PARSE` footer.  WOULD FAIL: the pre-U6 form (`4:28: expected ]`, no banner, no snippet), a caret at the line start, a rule that repeats the position, or a gutter width taken from anywhere but the displayed row"
+        (Parse.parseModule u6ParseSrc == Err u6ParseExpect)
+    , check "U6 R2 THE POINT SPAN IS THE REPORTED POSITION, CLAMPED AT THE END OF THE TEXT: `1 +` fails at 1:4 — one column PAST the 3-char line — so the single caret sits one past the `+` (`offsetOfRowCol` clamps to `String.length`, which is where `Ast.rowColOf` still reads col 4).  WOULD FAIL: an unclamped offset (row 1 col 5, or a caret two columns right), a caret RUN longer than one `^` (a point span is zero-width by construction and `Ast` gives it one caret), or a dropped snippet"
+        (Parse.parseExp "1 +" == Err u6PlusExpect)
+    , check "U6 R3 THE ONE PLACE A POSITION STAYS INSIDE THE RULE: `1.5.2` rejects as a MALFORMED NUMBER whose rule carries the inner compact fragment (`1:4: unexpected input after the expression`) while the SPAN is the literal's own start (1:1).  `deadEndToString` survives for exactly this — a position that has to ride inside a `ParserFast.problem` sentence, where a second rendered banner would nest a render inside the rule.  WOULD FAIL: dropping the inner fragment, or moving the span to 1:4 (the position the parser gave up at is the LITERAL, and the message already says where inside it)"
+        (Parse.parseExp "1.5.2" == Err u6NumberExpect)
+    , check "U6 R4 SURFACE FAMILY — EXPRESSION (an unterminated call): the rule line is `expected `)` `, i.e. it names the TOKEN the parser wanted and starts its own line (the `\\n\\n` frame the render puts the rule in).  WOULD FAIL: a rule of `parse failed`, a rule carrying the old `1:8:` prefix, or the fragment buried mid-line"
+        (u6RuleStartsWith "expected `)`" (u6ErrOf (Parse.parseExp "mknum(1")))
+    , check "U6 R5 SURFACE FAMILY — EXPRESSION, TRAILING INPUT (`ExpectingEnd`): juxtaposition is not in the grammar, and the rule says exactly that instead of naming a token that would not have helped.  WOULD FAIL: the `ExpectingEnd` shape collapsed into `expected a token`, or the rule lost when the 14 shapes were re-housed"
+        (u6RuleStartsWith "unexpected input after the expression" (u6ErrOf (Parse.parseExp "a b")))
+    , check "U6 R6 SURFACE FAMILY — STATEMENT/BLOCK: `{ word x = ; }` renders `expected an expression, found `;`` — the custom `Problem` message (Parse.elm:766) passes through the rule VERBATIM, naming both what was wanted and what was found.  WOULD FAIL: a `Problem msg` branch that rewords or truncates our own rejections"
+        (u6RuleStartsWith "expected an expression, found `;`" (u6ErrOf (Parse.parseBlock "{ word x = ; }")))
+    , check "U6 R7 SURFACE FAMILY — DEFUN HEADER: `defun Rt.f( { }` renders `expected a name` (the parameter's binder name), so a broken header is reported where it broke, not at the body.  WOULD FAIL: a header error reported at the block, or the `Expecting` shape flattened into the token-less default"
+        (u6RuleStartsWith "expected a name" (u6ErrOf (Parse.parseDefun "defun Rt.f( { }")))
+    , check "U6 R8 SURFACE FAMILY — DECL (`extern` FFI width), AND THE LONG-RULE CASE: the rule names the whole ADMISSIBLE SET plus the found token — `expected an FFI width (i32, u32, i64, u64, ptr, f64, void), found `u8`` — and although the renderer WRAPS that rule at 80 columns, the fragment itself is never split across lines (the wrap breaks only at spaces, and this token set is one run).  WOULD FAIL: a wrap that breaks inside the pinned fragment (which is what a line-based consumer greps for), or a decl error losing its token list"
+        (let
+            msg =
+                u6ErrOf (Parse.parseModule "extern f(a : u8) -> i32;")
+         in
+         u6RuleStartsWith "expected an FFI width (i32, u32, i64, u64, ptr, f64, void), found `u8`" msg
+            && String.contains "\nexpected an FFI width (i32, u32, i64, u64, ptr, f64, void), found `u8` — `u8` is\n" msg
+        )
+    , check "U6 R9 SURFACE FAMILY — MODULE HEADER/EXPORT: a truncated export signature (`word -> ` with nothing after the arrow) renders `expected a type (a name), found `defun`` — the failure is reported at the NEXT token, which is what makes the message actionable.  WOULD FAIL: a header error swallowed into a generic parse failure, or the found token omitted"
+        (u6RuleStartsWith "expected a type (a name), found `defun`" (u6ErrOf (Parse.parseModule u6ExportSrc)))
+    , check "U6 R10 THE `Problem` SHAPES ARE NOT COLLAPSED: the six surface families above yield six DIFFERENT rule lines, every one of them non-empty and none of them a bare `parse failed` — the re-housing kept `problemText`'s vocabulary (14 branches, each naming what the parser expected) rather than routing them through one message.  WOULD FAIL: a single generic rule, two shapes sharing a rule, or an empty rule"
+        (let
+            rules =
+                List.map u6RuleLine
+                    [ u6ErrOf (Parse.parseExp "mknum(1")
+                    , u6ErrOf (Parse.parseExp "a b")
+                    , u6ErrOf (Parse.parseBlock "{ word x = ; }")
+                    , u6ErrOf (Parse.parseDefun "defun Rt.f( { }")
+                    , u6ErrOf (Parse.parseModule "extern f(a : u8) -> i32;")
+                    , u6ErrOf (Parse.parseModule u6ExportSrc)
+                    ]
+         in
+         List.all (\r -> r /= "" && not (String.contains "parse failed" r)) rules
+            && u6AllDistinct rules
+        )
+    ]
+
+
+{-| The U6 R1 source: a `.mid` module whose `withroots [..]` is missing its
+closing `]`, with a comment-only line and a blank line above the statement so
+the row/column arithmetic cannot be right by accident (a `{0,0}` or line-1
+position would be visibly wrong).  MEASURED: the parser reports 4:28, i.e. the
+`;` after `b` — the offset the point span is built from.
+-}
+u6ParseSrc : String
+u6ParseSrc =
+    String.join "\n"
+        [ "module Wesc"
+        , "// a comment line"
+        , "defun Wesc.run() -> word {"
+        , "  word xs = withroots [a, b;"
+        , "  return 0;"
+        , "}"
+        ]
+
+
+{-| MEASURED, verbatim (`Parse.parseModule u6ParseSrc`): seven lines, the banner
+carrying `4:28`, one caret at column 28, no trailing newline.
+-}
+u6ParseExpect : String
+u6ParseExpect =
+    "-- SYNTAX PROBLEM --------------------------------------------------------- 4:28\n\nexpected `]`\n\n4|   word xs = withroots [a, b;\n4|                            ^\n-- PARSE"
+
+
+{-| MEASURED, verbatim (`Parse.parseExp "1 +"`): the caret one column past the
+end of a 3-char line.
+-}
+u6PlusExpect : String
+u6PlusExpect =
+    "-- SYNTAX PROBLEM ---------------------------------------------------------- 1:4\n\nexpected an expression, found end of input\n\n1| 1 +\n1|    ^\n-- PARSE"
+
+
+{-| MEASURED, verbatim (`Parse.parseExp "1.5.2"`): the rule carries the inner
+`1:4` fragment, the span is the literal's own 1:1.
+-}
+u6NumberExpect : String
+u6NumberExpect =
+    "-- SYNTAX PROBLEM ---------------------------------------------------------- 1:1\n\nmalformed number literal `1.5.2`: 1:4: unexpected input after the expression\n\n1| 1.5.2\n1| ^\n-- PARSE"
+
+
+{-| A module header whose export signature is truncated after `->` — U6 R9's
+source (the parser then wants a type and finds `defun`).
+-}
+u6ExportSrc : String
+u6ExportSrc =
+    String.join "\n"
+        [ "module Wesc"
+        , "export Wesc.f : word -> "
+        , "defun Wesc.f(a : word) -> word { return a; }"
+        ]
+
+
+{-| The rendered error of a `parse*` call, or `""` when it (wrongly) accepted —
+so a row that stopped rejecting cannot pass on an empty string.
+-}
+u6ErrOf : Result String a -> String
+u6ErrOf r =
+    case r of
+        Err msg ->
+            msg
+
+        Ok _ ->
+            ""
+
+
+{-| The render's rule's FIRST line: banner, blank, rule (line index 2).  Read
+rather than searched, so a fragment that matches anywhere else in the payload
+(the snippet's own source line, say) cannot satisfy a row.
+-}
+u6RuleLine : String -> String
+u6RuleLine payload =
+    List.head (List.drop 2 (String.split "\n" payload)) |> Maybe.withDefault ""
+
+
+{-| True iff the render's rule STARTS with `frag` — i.e. `frag` is the rule's
+own opening text on its own line, not a substring found later in the payload.
+-}
+u6RuleStartsWith : String -> String -> Bool
+u6RuleStartsWith frag payload =
+    String.startsWith frag (u6RuleLine payload)
+
+
+{-| Pairwise distinct — Elm core has no `unique`, and the R10 point is exactly
+that no two surfaces produce the same rule.
+-}
+u6AllDistinct : List String -> Bool
+u6AllDistinct xs =
+    case xs of
+        x :: rest ->
+            not (List.member x rest) && u6AllDistinct rest
+
+        [] ->
+            True

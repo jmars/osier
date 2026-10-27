@@ -1,6 +1,8 @@
 module Mid.RtLang.Check exposing
     ( checkExports
+    , checkExportsMidc
     , checkModule
+    , checkModuleMidc
     , checkProgram
     , externSig
     , ffiTable
@@ -246,16 +248,42 @@ THE JUDGMENTS ENFORCED HERE (T5 adds J7-J10):
     U1 grammar, so at A1 the table is built and validated and the alias
     rule is the seat the constant-expression grammar lands into.
 
-POSITIONS — THE HONEST GAP, stated loudly.  The plan asks every rejection
-to carry `defun:line:col`.  MEASURED: the T1 AST carries NO source
-positions — no `Exp`/`Stmt`/`Term` constructor has one — so line:col is
-unproducible from this AST.  Errors therefore carry the best position the
-AST has: the DEFUN KEY, the judgment number, and the nearest NAMED
-construct (binder name, builtin/symbol/key spelling, operand classes).
-Retrofitting real positions means threading a position field through
-every `Ast` constructor and every `ParserFast` combinator — a T1+T2-sized
-change that would rewrite all of T2/T3's exact-AST rows; that is an
-owner decision, not something this unit does silently.
+POSITIONS — THE SEAT IS HERE, THE SENTENCE IS NOT.  The plan asks every
+rejection to carry `defun:line:col`.  MEASURED (before the span retype):
+the T1 AST carried NO source positions — no `Exp`/`Stmt`/`Term`
+constructor had one — so a rejection could only name the DEFUN KEY, the
+judgment number and the nearest NAMED construct (binder name,
+builtin/symbol/key spelling, operand classes).  Every message in this
+module still says exactly that, and this unit changes none of them.
+
+The spans have since landed in `Ast` (`Span` on `Defun.span`, a `Located
+Stmt`/`Located Term` at every point of a `Block`, and `Module.source`
+carrying the module text verbatim), and the checking context now carries
+the two values a position needs:
+
+  * `ctx.cur` — the span of the ENCLOSING located node being walked (the
+    `Located Stmt` or `Located Term` in hand, and `Defun.span` at the
+    defun walk).  STATEMENT-LEVEL BY DESIGN: a nested walk (a binder's
+    initialiser, a call's argument) keeps the enclosing statement's span,
+    so the caret underlines the STATEMENT LINE and the prose names the
+    operand.  `Exp` carries no span, so there is no subexpression caret
+    to offer — that is a stated gap, not an oversight.
+  * `ctx.src` — the module source text, so a rejection can quote the
+    offending line.
+
+NOTHING READS EITHER FIELD YET.  This is a DEAD SEAT, deliberately: it
+lands BEFORE the message migration so that each error site is touched
+once, in the unit that rewrites its message, rather than twice.  A dead
+seat is not a shipped feature — until that migration lands, a rejection
+still carries no position and no row in this tree can tell the
+difference.  Do not mistake the field's presence for the capability.
+
+The span is never SYNTHESIZED here: `cur` is threaded from the caller
+that HAS the `Located` node (`stmtsFold`, `checkBlock`, `forInit`,
+`checkForStep`), and `src` from `Module.source` down the walk
+(`checkModule` -> `checkAll` -> `checkDefun` -> `ctxOf`).  The decl-less
+`checkProgram` lane has no module text to thread; the value it carries
+and WHY that value is honest are stated at its construction site.
 
 SELFHOST DISCIPLINE (the mid-lane hazard, Rt.elm:531-545): every helper
 is a TOP-LEVEL definition — the mutually recursive walk
@@ -294,6 +322,7 @@ import Mid.RtLang.Ast as Ast
         , FltBinOp(..)
         , FltCmpOp(..)
         , Key
+        , Located
         , Module
         , OTy(..)
         , PTy(..)
@@ -318,6 +347,8 @@ import Mid.RtLang.Ast as Ast
         , splitArrow
         , wordCmpSig
         )
+
+import Mid.RtLang.Error as MidErr
 
 
 
@@ -405,8 +436,125 @@ type alias Ctx =
       -- REMOVES it (a `word`/`*T` binder may be reassigned by the auto-cell,
       -- so an alias cannot be assumed to survive a store).  Read only by the
       -- escape rule — it never affects typing.
+    , cur : Ast.Span
+      -- THE POSITION SEAT (see the POSITIONS note in the header): the span
+      -- of the ENCLOSING located node — the `Located Stmt` or `Located Term`
+      -- being walked, and `Defun.span` at the defun walk.  Statement-level
+      -- on purpose: a nested walk keeps the enclosing statement's span.
+      -- DEAD SEAT: no error site reads it yet, and it never affects typing.
+    , src : String
+      -- The module source text, verbatim (`Ast.Module.source`), so a
+      -- rejection can quote the line `cur` points at.  Carried, not
+      -- consulted; the decl-less lane carries the empty source for the
+      -- reason stated at that construction site.  Also a dead seat.
     }
 
+
+
+-- ============================ rejections ============================
+
+
+{-| The lane's ONE error record (`Mid.RtLang.Error`), aliased so every
+signature below reads `Result MidcError a` instead of a qualified name: this
+module CONSTRUCTS rejections, it does not define their shape.  The renderer and
+the tag-to-title table live there for the same reason the offset-to-position
+arithmetic lives in `Ast` — one implementation, not one per caller.
+-}
+type alias MidcError =
+    MidErr.MidcError
+
+
+{-| ONE rejection: the judgment tag, the ONE-SENTENCE rule, the FIX when there
+is one, the defun and the span.  Every message site in the walk below builds
+its error through these three constructors, so the record's shape — and the
+tag-to-title table that goes with it — is decided in ONE place.
+
+`span` is `ctx.cur`, the seat `Ctx` documents: the enclosing `Located Stmt` or
+`Located Term`, or `Defun.span` at the defun walk.  A site therefore never
+invents a position — the caller that HAS the located node supplies it — and the
+sentence names the operand, because D1 put the caret under the STATEMENT line
+and gave no `Exp` a span.  `key` is `Just ctx.key`: the defun is the locator in
+a file that holds hundreds of them (runtime.mid has ~358).
+
+THE RATIONALE IS NOT IN THE STRING.  Why a law exists — what the lowering does,
+which binder node reads back as what, which walker would misread it — lives in
+a source comment beside the judgment and cites the same J-tag.  The reader gets
+the law and the fix; the maintainer keeps the reason.
+-}
+reject : Ctx -> String -> String -> MidcError
+reject ctx tag rule =
+    { tag = tag
+    , title = MidErr.titleFor tag
+    , rule = rule
+    , hint = Nothing
+    , key = Just ctx.key
+    , span = Just ctx.cur
+    }
+
+
+{-| Attach the FIX, which the renderer prints as the `Hint:` line: the
+sentence a reader can ACT on, never the rationale (see `reject`).  Used as
+`reject ctx tag rule |> withHint "..."` so a site states the law first and the
+next move second, in that order on the page as in the message.
+-}
+withHint : String -> MidcError -> MidcError
+withHint hint e =
+    { e | hint = Just hint }
+
+
+{-| OVERRIDE the banner title, for a site whose failure KIND is not the one its
+tag is named for.  `reject` takes `title` from `MidErr.titleFor`, i.e. from the
+TAG, and a tag can carry more than one kind: J2 is resolution AND arity AND
+argument classes (Check.elm:118-125), J13 is the field/index/deref classes AND
+the frame-escape rule (Check.elm:200-215).  A tag is a MACHINE field — pinned
+by TestMain's tag rows and by `tools/qbe/qbe-check.sh`'s `grep -q` rows — so
+the split happens HERE, in the human-facing title, never by inventing a tag.
+
+MEASURED before this unit: every one of the 120 sites took the tag's default,
+so `call 'X' takes 2 argument(s), got 1` rendered under `-- UNKNOWN NAME` and a
+mid-block divergence-rule reject rendered under `-- BAD LAYOUT`.  Both banners
+were false, and the banner is the loudest line in the message.
+-}
+withTitle : String -> MidcError -> MidcError
+withTitle title e =
+    { e | title = title }
+
+
+{-| A rejection at the DEFUN walk, where the node in hand is the `Defun`
+itself rather than a walk context: the same record `reject` builds, with the
+defun's own header span (`Defun.span`) as the position.  This is the seat the
+signature judgments report against — the header line is what a duplicate
+parameter or an illegal parameter class is about.
+-}
+rejectDefun : Defun -> String -> String -> MidcError
+rejectDefun d tag rule =
+    { tag = tag
+    , title = MidErr.titleFor tag
+    , rule = rule
+    , hint = Nothing
+    , key = Just d.key
+    , span = Just d.span
+    }
+
+
+{-| A rejection from a MODULE-LEVEL judgment — the declaration and extern
+tables, which have no defun and no position: `key` and `span` are both
+`Nothing`, which is what the renderer's no-snippet path exists for.
+
+The `rule` is kept VERBATIM: this lane's sites pass the sentence itself, not a
+`"RtLang: <tag>: ..."` string, so there is no prefix to strip and nothing is
+ever truncated.  U8 moved the last of those welded strings into rule + hint;
+the drop-the-prefix tolerance U7 carried is gone with them.
+-}
+bare : String -> String -> MidcError
+bare tag msg =
+    { tag = tag
+    , title = MidErr.titleFor tag
+    , rule = msg
+    , hint = Nothing
+    , key = Nothing
+    , span = Nothing
+    }
 
 
 -- ============================ entry point ============================
@@ -414,28 +562,90 @@ type alias Ctx =
 
 {-| Check a whole parsed program (J1-J8, J10).  `externs` is J2's typed
 extern table (M2); `flags` is J8's ACTIVE flag set (T7 derives it from
-`Rt.program`'s three Bools).  `Ok ()` means every defun passed; `Err msg`
-is a loud compile error naming the defun and the judgment, fail-fast on
-the first rejection.
+`Rt.program`'s three Bools).  `Ok ()` means every defun passed; `Err e` is a
+loud compile error — the structured record, fail-fast on the first rejection.
+
+The record, not a string: a caller that has the module text renders it with
+`Mid.RtLang.Error.render` (which is what `checkModule` below does), and a
+caller that needs the tag as a machine field — TestMain's row drivers read
+`oneLine` — never has to parse prose.
 -}
-checkProgram : Dict Key ExportSig -> List Flag -> Program -> Result String ()
+checkProgram : Dict Key ExportSig -> List Flag -> Program -> Result MidcError ()
 checkProgram externs flags program =
-    checkModule externs flags
+    checkModuleMidc externs flags
         { header = { name = Nothing, exports = [] }
         , decls = []
         , defuns = program
+
+        -- `checkProgram` is handed a bare `Program`, not a `.mid` file: no
+        -- source text reaches this function at all, and the AST it checks was
+        -- itself carved out of a larger document by the caller.  Empty is the
+        -- honest value here (there IS no module text), not a stand-in for one
+        -- — a caller that wants a snippet must use the decl-carrying
+        -- `parseModule` lane, whose Module carries the real text.
+        --
+        -- THE TRAP THIS VALUE SETS (a named gap, not a fix): the records this
+        -- door produces can still carry `span = Just ...` — the defuns' spans
+        -- were measured against the CALLER's document — while `source` here is
+        -- "".  Every current caller of `checkProgram` reads `oneLine`, which
+        -- never touches the span, so nothing renders a bogus snippet TODAY.
+        -- A caller that feeds one of these records to `Mid.RtLang.Error.render`
+        -- prints a gutter of row 1 over an empty line: the span is a real
+        -- offset into a text this record does not hold.  Render only the
+        -- decl-carrying lane's records (`checkModule`/`checkModuleMidc`), or
+        -- render with the caller's own `{ source = ..., path = ... }`.
+        , source = ""
         }
 
 
-{-| Check a whole parsed MODULE (J1-J8, J10-J14) — the decl-carrying entry
-point `Rt.load` calls (the runtime.mid lane).  The file-scoped `decls`
-build the struct/enum tables (J11/J14) BEFORE the defuns walk, and the
-tables ride in `Env` for the field/index/deref/store and coercion
-judgments.  `checkProgram` is the headerless, decl-less delegate the
-existing defun-only rows (and the user-module lane) call.
+{-| Check a whole parsed MODULE (J1-J8, J10-J14) and hand back the RENDERED
+rejection — the banner / rule / snippet / hint / footer form `Mid.RtLang.Error`
+prints.  This is the door every existing caller uses (`Rt`'s two lanes
+propagate the string straight into the `.ssa` payload, which is why the arc's
+payoff arrives through THIS function and not only at a lane exit), and it is
+`checkModuleMidc` plus the two facts only a `Module` has: its text, for the
+snippet, and the name in its header, for the banner.
+
+A caller that wants the RECORD — to choose its own banner path, or to prepend
+the own-runtime note — calls `checkModuleMidc` and renders it itself.
 -}
 checkModule : Dict Key ExportSig -> List Flag -> Module -> Result String ()
 checkModule externs flags module_ =
+    Result.mapError
+        (MidErr.render { source = module_.source, path = modulePath module_ })
+        (checkModuleMidc externs flags module_)
+
+
+{-| The banner's path slot: `<HeaderName>.mid`, the plan's spelling for a user
+module (its header name is MANDATORY — Rt.elm:590-592 — so the spelling is
+unambiguous).  A module with no header name is not a file this lane can name,
+so it gets the LANE's name rather than an invented filename.
+
+NAMED GAP: the runtime lane's `runtime.mid` also carries a header (`module
+Rt`), so a rejection in osier's OWN runtime reads `Rt.mid` here.  This function
+cannot tell the two lanes apart — that is the lanes' knowledge, not the
+checker's — and U10 renders those two lanes itself with the real path and the
+own-runtime note.  A plausible-looking wrong filename would be worse than the
+module name the checker actually knows.
+-}
+modulePath : Module -> String
+modulePath module_ =
+    case module_.header.name of
+        Just name ->
+            name ++ ".mid"
+
+        Nothing ->
+            "mid-c"
+
+
+{-| Check a whole parsed MODULE and hand back the RECORD — the decl-carrying
+pipeline `Rt.load` runs (the runtime.mid lane).  The file-scoped `decls` build
+the struct/enum tables (J11/J14) BEFORE the defuns walk, and the tables ride in
+`Env` for the field/index/deref/store and coercion judgments.  `checkProgram`
+is the headerless, decl-less delegate the defun-only rows call.
+-}
+checkModuleMidc : Dict Key ExportSig -> List Flag -> Module -> Result MidcError ()
+checkModuleMidc externs flags module_ =
     case keyCheck module_.defuns of
         Err msg ->
             Err msg
@@ -451,7 +661,10 @@ checkModule externs flags module_ =
                             Err msg
 
                         Ok tables ->
-                            checkAll (envOf externs flags module_.defuns module_.decls tables) module_.defuns
+                            checkAll
+                                (envOf externs flags module_.defuns module_.decls tables)
+                                module_.source
+                                module_.defuns
 
 
 {-| THE KEY AGREEMENT (M2, plan.md §2.5) — the FORWARD half, loud now.
@@ -475,31 +688,64 @@ nothing imports, so the reverse check is vacuous by construction.
 -}
 checkExports : List Export -> Dict Key Int -> Result String ()
 checkExports exports arities =
+    Result.mapError MidErr.oneLine (checkExportsMidc exports arities)
+
+
+{-| The export judgment as a RECORD — the door `checkExports` renders, in the
+same shape `checkModule` renders `checkModuleMidc` (the callers of both
+propagate a `String` into the `.ssa` payload, so the string surface stays a
+RENDERING adapter, not a second judgment).
+
+EXPOSED since U13: `Mid.Rt`'s two lanes render THIS record with their own
+banner path (`runtime.mid` + the own-runtime note, `<Name>.mid` for a user
+module).  Before that they could only propagate `checkExports`'s string, so the
+one family a user meets directly was the one rendered as a bare
+`EXPORT: <rule>` line — no file, and U8's hint discarded.
+
+MODULE-LEVEL, hence `bare`: the walk has an `Export` and neither a defun nor a
+`Located` node, so `key` and `span` are both `Nothing` — the RULE carries the
+key itself, and these render with no snippet.  NAMED GAP: `Export` has no span
+in this arc (the plan's span table leaves it out), so the position half of
+these two judgments arrives with the AST work that adds it.
+-}
+checkExportsMidc : List Export -> Dict Key Int -> Result MidcError ()
+checkExportsMidc exports arities =
     case exports of
         [] ->
             Ok ()
 
         e :: rest ->
             if List.any (\e2 -> e2.key == e.key) rest then
-                Err ("RtLang: export: key '" ++ e.key ++ "' is exported more than once — one declared type per defun")
+                Err
+                    (bare "EXPORT"
+                        ("key '" ++ e.key ++ "' is exported more than once") |> withTitle "NAMING PROBLEM"
+                        |> withHint "one declared type per defun — delete the second export"
+                    )
 
             else
                 case Dict.get e.key arities of
                     Nothing ->
-                        Err ("RtLang: export: key '" ++ e.key ++ "' names no defun in the module — every export must name an existing defun")
+                        Err
+                            (bare "EXPORT"
+                                ("key '" ++ e.key ++ "' names no defun in the module") |> withTitle "UNKNOWN NAME"
+                                |> withHint "every export must name an existing defun — fix the key, or add the defun it claims"
+                            )
 
                     Just arity ->
                         if List.length (Tuple.first (splitArrow e.sig.ty)) == arity then
-                            checkExports rest arities
+                            checkExportsMidc rest arities
 
                         else
                             Err
-                                ("RtLang: export: key '"
-                                    ++ e.key
-                                    ++ "' declares arity "
-                                    ++ String.fromInt (List.length (Tuple.first (splitArrow e.sig.ty)))
-                                    ++ " but the defun has arity "
-                                    ++ String.fromInt arity
+                                (bare "EXPORT"
+                                    ("key '"
+                                        ++ e.key
+                                        ++ "' declares arity "
+                                        ++ String.fromInt (List.length (Tuple.first (splitArrow e.sig.ty)))
+                                        ++ " but the defun has arity "
+                                        ++ String.fromInt arity
+                                    )
+                                    |> withHint "make the export's arrow list match the defun's parameters"
                                 )
 
 
@@ -513,7 +759,7 @@ OWNERSHIP — a user key must not be `Rt.*`, a key must not collide with
 another module's — is the CALLER's collision rule (QbeModule, M3), not a
 shape judgment here.  Guard exclusivity is J8, right below.
 -}
-keyCheck : Program -> Result String ()
+keyCheck : Program -> Result MidcError ()
 keyCheck program =
     case program of
         [] ->
@@ -524,10 +770,16 @@ keyCheck program =
                 keyCheck rest
 
             else
+                -- NS RATIONALE: the runtime's keys are `Rt.*` and a user
+                -- module's are qualified by ITS module name, so a stray bare
+                -- `defun getpid()` is uncallable (nothing can spell its key)
+                -- and unlowerable.  NAMESPACE OWNERSHIP — a user key must not
+                -- be `Rt.*`, two modules must not collide — is the caller's
+                -- rule (QbeModule); this is only the SHAPE.
                 Err
-                    ("RtLang: defun key '"
-                        ++ d.key
-                        ++ "' must be namespace-qualified (a dotted 'Mod.name') — the runtime's keys are Rt.*, a user module's are its own name"
+                    (rejectDefun d "NS"
+                        ("defun key '" ++ d.key ++ "' must be namespace-qualified (a dotted 'Mod.name')")
+                        |> withHint "qualify it with its module name (`Rt.` for the runtime, its own name for a user module)"
                     )
 
 
@@ -550,12 +802,12 @@ program is carried through the recursion (`guardWalk`): counting a
 key-group's SECOND member against the already-walked tail would drop its
 active sibling and report a phantom "no active defun".
 -}
-guardCheck : List Flag -> Program -> Result String ()
+guardCheck : List Flag -> Program -> Result MidcError ()
 guardCheck flags program =
     guardWalk flags program program
 
 
-guardWalk : List Flag -> Program -> Program -> Result String ()
+guardWalk : List Flag -> Program -> Program -> Result MidcError ()
 guardWalk flags whole program =
     case program of
         [] ->
@@ -564,11 +816,30 @@ guardWalk flags whole program =
         d :: rest ->
             case activeVariants flags whole d.key of
                 0 ->
+                    -- J8 RATIONALE: with no active variant the Rt program
+                    -- silently LOSES the key while `rtDeps` still routes to
+                    -- it — a call to nothing, discovered at link time or
+                    -- never.
+                    --
+                    -- THE BANNER'S ONE OPEN READING, SETTLED (U16; the final
+                    -- review raised it and left the keep as INTERPRETATION).
+                    -- The complaint: this seat can be read as UNKNOWN NAME —
+                    -- "this key names nothing" — while the banner says NAMING
+                    -- PROBLEM.  The sentence that is true in EVERY case this
+                    -- arm fires: the key is KNOWN — `d` is a defun of it and
+                    -- `rejectDefun` spans that defun — and what it lacks is an
+                    -- ACTIVE variant, so the fault is the key's mapping to a
+                    -- defun (J8's subject) in both readings, and the reader's
+                    -- move is the one the hint states.  The rule text cannot
+                    -- mislead either: "under the active flag set" names the
+                    -- state that made the count 0, and a key with any
+                    -- UNGUARDED variant never reaches here (`activeVariants`
+                    -- counts an unguarded defun as active, `guardsHold []`), so
+                    -- a fired banner always has guards to look at.
                     Err
-                        (d.key
-                            ++ ": J8: no active defun for key '"
-                            ++ d.key
-                            ++ "' under the active flag set — every key must have exactly one active definition, else the Rt program silently loses it while rtDeps still routes to it"
+                        (rejectDefun d "J8"
+                            ("no active defun for key '" ++ d.key ++ "' under the active flag set")
+                            |> withHint "every key needs exactly one active definition — check the `@flag` guards on its variants"
                         )
 
                 1 ->
@@ -576,12 +847,18 @@ guardWalk flags whole program =
 
                 n ->
                     Err
-                        (d.key
-                            ++ ": J8: "
-                            ++ String.fromInt n
-                            ++ " flag-guarded defuns are active at once for key '"
-                            ++ d.key
-                            ++ "' — variants sharing one logical key must be mutually exclusive"
+                        -- The count is of ACTIVE variants, and `activeVariants`
+                        -- counts an UNGUARDED defun as active (`guardsHold []`
+                        -- holds), so the sentence must not claim the guards are
+                        -- what collided: two unguarded same-key defuns reach
+                        -- this arm with no flag-guard between them.
+                        (rejectDefun d "J8"
+                            (String.fromInt n
+                                ++ " defuns are active at once for key '"
+                                ++ d.key
+                                ++ "'"
+                            )
+                            |> withHint "variants sharing one logical key must be mutually exclusive — delete one, or put each behind a distinct `@flag`"
                         )
 
 
@@ -670,19 +947,19 @@ sameFlag a b =
                     False
 
 
-checkAll : Env -> Program -> Result String ()
-checkAll env program =
+checkAll : Env -> String -> Program -> Result MidcError ()
+checkAll env src program =
     case program of
         [] ->
             Ok ()
 
         d :: rest ->
-            case checkDefun env d of
+            case checkDefun env src d of
                 Err msg ->
                     Err msg
 
                 Ok () ->
-                    checkAll env rest
+                    checkAll env src rest
 
 
 envOf : Dict Key ExportSig -> List Flag -> Program -> List Decl -> ( StructTable, EnumTable ) -> Env
@@ -703,11 +980,11 @@ declarations (J11/J14).  Fail-fast: the first bad declaration names the
 judgment.  The two tables are the ones `Env` carries into every defun walk
 and the ones the lowerer (A2) consumes — one table, one layout truth.
 -}
-declCheck : List Decl -> Result String ( StructTable, EnumTable )
+declCheck : List Decl -> Result MidcError ( StructTable, EnumTable )
 declCheck decls =
     case externCheck decls of
-        Err msg ->
-            Err msg
+        Err e ->
+            Err e
 
         Ok () ->
             declTables decls
@@ -747,7 +1024,7 @@ atom the parameter parser refuses, and `ffiParamTy`'s message is the
 documented one.  They stay listed in the plan as the J15 wording should a
 future route (an imported/AST-built signature) reach this judgment.
 -}
-externCheck : List Decl -> Result String ()
+externCheck : List Decl -> Result MidcError ()
 externCheck decls =
     case decls of
         [] ->
@@ -786,34 +1063,34 @@ declaration the walk reaches first).  The third collision is a PREFIX rule
 (`rt_`/`q_Rt_`) rather than a list: a list of the runtime's own seats would
 rot the moment a seat is renamed.
 -}
-firstSymbolProblem : List Decl -> Sym -> Maybe String
+firstSymbolProblem : List Decl -> Sym -> Maybe MidcError
 firstSymbolProblem decls sym =
     if List.length (List.filter (\d -> externNameOf d == Just sym) decls) > 1 then
         Just
-            ("RtLang: J15: extern symbol '"
-                ++ sym
-                ++ "' is declared twice in this file — one symbol, one signature (delete the second declaration)"
+            (bare "J15"
+                ("extern symbol '" ++ sym ++ "' is declared twice in this file")
+                |> withHint "one symbol, one signature — delete the second declaration"
             )
 
     else if List.member sym (List.map builtinName allBuiltins) then
         Just
-            ("RtLang: J15: extern symbol '"
-                ++ sym
-                ++ "' is a BUILTIN — the call site resolves to the builtin, never to your symbol (rename the declaration or the C symbol)"
+            (bare "J15"
+                ("extern symbol '" ++ sym ++ "' is a BUILTIN")
+                |> withHint "the call site resolves to the builtin, never to your symbol — rename the declaration or the C symbol"
             )
 
     else if Dict.member sym rawcallArity then
         Just
-            ("RtLang: J15: extern symbol '"
-                ++ sym
-                ++ "' is declared here AND is a rawcallArity row — the declaration is authoritative; delete the table row (two tables is the skew this repo keeps paying for)"
+            (bare "J15"
+                ("extern symbol '" ++ sym ++ "' is declared here AND is a `rawcallArity` row")
+                |> withHint "the declaration is authoritative — delete the table row"
             )
 
     else if String.startsWith "rt_" sym || String.startsWith "q_Rt_" sym then
         Just
-            ("RtLang: J15: extern symbol '"
-                ++ sym
-                ++ "' names a MID RUNTIME seat (the 'rt_'/'q_Rt_' prefix belongs to the lowering's own symbols) — a C declaration cannot claim it, and classifying it as a C call would make the safepoint walker treat an ALLOCATING seat as allocation-free"
+            (bare "J15"
+                ("extern symbol '" ++ sym ++ "' names a MID RUNTIME seat (the 'rt_'/'q_Rt_' prefix)")
+                |> withHint "a C declaration cannot claim the lowering's own symbol — declare the seat under a name without that prefix"
             )
 
     else
@@ -835,7 +1112,7 @@ parsed: a `void` parameter is not a register class.  Total and cheap — the
 grammar already refuses it, so this is the J15 half of the plan's §4 row (and
 the reason it can never fire is stated in `externCheck`'s doc).
 -}
-externParamProblem : Sym -> FfiSig -> Maybe String
+externParamProblem : Sym -> FfiSig -> Maybe MidcError
 externParamProblem sym sig =
     case List.filter (\p -> p.ty == FVoid) sig.params of
         [] ->
@@ -843,9 +1120,9 @@ externParamProblem sym sig =
 
         _ ->
             Just
-                ("RtLang: J15: '"
-                    ++ sym
-                    ++ "': 'void' is a RESULT-only width — a parameter must name an actual register class"
+                (bare "J15"
+                    ("'" ++ sym ++ "': 'void' is a RESULT-only width") |> withTitle "BAD SIGNATURE"
+                    |> withHint "a parameter must name an actual register class"
                 )
 
 
@@ -909,29 +1186,36 @@ externSig decls sym =
                     externSig rest sym
 
 
-declTables : List Decl -> Result String ( StructTable, EnumTable )
+declTables : List Decl -> Result MidcError ( StructTable, EnumTable )
 declTables decls =
     case duplicateDeclName decls of
         Just name ->
+            -- Tagged J11: the DECLARATION NAMESPACE judgment.  A name clash
+            -- here is between two struct names, two enum names, or one of
+            -- each, and `duplicateDeclName` hands back only the NAME — so a
+            -- tag that claimed J14 for an enum pair would be a guess.  The
+            -- rule names both families instead.
+            --
+            -- J11 RATIONALE (why one namespace): a struct name is also a
+            -- TYPE spelling (`*S`, `S x`) and an enum name is also the stem
+            -- of its constants (`E.c`), so two declarations of one name make
+            -- `*S` and `S.c` ambiguous at the use site, not at the
+            -- declaration.  The judgment therefore lives in the table build.
             Err
-                ("RtLang: J11/J14: declaration name '"
-                    ++ name
-                    ++ "' is declared more than once — struct and enum names share ONE file-scoped namespace (a '*"
-                    ++ name
-                    ++ "' pointer and an '"
-                    ++ name
-                    ++ ".c' constant must never be ambiguous)"
+                (bare "J11"
+                    ("declaration name '" ++ name ++ "' is declared more than once") |> withTitle "NAMING PROBLEM"
+                    |> withHint "struct and enum names share ONE file-scoped namespace — rename one of the two"
                 )
 
         Nothing ->
             case structsOf decls of
-                Err msg ->
-                    Err msg
+                Err e ->
+                    Err e
 
                 Ok structs ->
                     case enumsOf decls of
-                        Err msg ->
-                            Err msg
+                        Err e ->
+                            Err e
 
                         Ok enums ->
                             Ok ( structs, enums )
@@ -982,7 +1266,7 @@ resolving pointer targets against the FULL struct-name set (order-
 independent forward references) and deriving each field's word offset and
 the struct's size.
 -}
-structsOf : List Decl -> Result String StructTable
+structsOf : List Decl -> Result MidcError StructTable
 structsOf decls =
     structsFold decls (structNames decls) Dict.empty
 
@@ -1005,7 +1289,7 @@ structNames decls =
         decls
 
 
-structsFold : List Decl -> List String -> StructTable -> Result String StructTable
+structsFold : List Decl -> List String -> StructTable -> Result MidcError StructTable
 structsFold decls names acc =
     structsFoldAll decls decls names acc
 
@@ -1016,7 +1300,7 @@ nested-struct field resolves its SIZE by re-reading the declarations, so
 being laid out (MEASURED — passing the case scrutinee type-checked and
 then rejected every nested struct as "names no declared struct").
 -}
-structsFoldAll : List Decl -> List Decl -> List String -> StructTable -> Result String StructTable
+structsFoldAll : List Decl -> List Decl -> List String -> StructTable -> Result MidcError StructTable
 structsFoldAll all remaining names acc =
     case remaining of
         [] ->
@@ -1087,16 +1371,19 @@ Nothing else in the pipeline knows what a union is: the lowerer reads the same
 table and a union member lowers to the ordinary `RawWordLoad`/address at the
 shared offset.
 -}
-layoutOf : List Decl -> List String -> String -> List StructMember -> Result String ( List StructField, Int, Int )
+layoutOf : List Decl -> List String -> String -> List StructMember -> Result MidcError ( List StructField, Int, Int )
 layoutOf decls names structName members =
     case duplicateMemberName members of
         Just f ->
+            -- J11 RATIONALE: the field namespace is the FLATTENED one — a
+            -- union block's members are promoted into it — so a duplicate is
+            -- either a repeated field or a union member colliding with a
+            -- sibling.  One name must mean one offset, or the lowerer's
+            -- `fieldOffset` lookup answers with whichever it meets first.
             Err
-                ("RtLang: J11: struct '"
-                    ++ structName
-                    ++ "' declares field '"
-                    ++ f
-                    ++ "' more than once — one name, one offset (a union block's members are promoted into the struct's own field namespace)"
+                (bare "J11"
+                    ("struct '" ++ structName ++ "' declares field '" ++ f ++ "' more than once") |> withTitle "NAMING PROBLEM"
+                    |> withHint "one name, one offset — rename one of them (a union block's members share this namespace)"
                 )
 
         Nothing ->
@@ -1106,36 +1393,60 @@ layoutOf decls names structName members =
 
                 Ok ( fields, size, align ) ->
                     if modBy 8 size /= 0 then
+                        -- J11 RATIONALE: a Mid struct VALUE is a WORD-QUANTISED
+                        -- block — the frame cell, the word-for-word copy and
+                        -- `sizeof` all speak words — so a 12-byte layout would
+                        -- be copied past its own end into whatever follows it.
+                        -- The byte table stays honest; this judgment is what
+                        -- makes the `/ 8` in `sizeofWords` exact.
                         Err
-                            ("RtLang: J11: struct '"
-                                ++ structName
-                                ++ "' is "
-                                ++ String.fromInt size
-                                ++ " bytes — not a whole number of 8-byte words. A Mid struct VALUE is a word-quantised block, so the word-for-word copy would write past this layout's end into whatever follows it; add a `_pad` field (or widen the tail) so the size is a multiple of 8"
+                            (bare "J11"
+                                ("struct '"
+                                    ++ structName
+                                    ++ "' is "
+                                    ++ String.fromInt size
+                                    ++ " bytes, which is not a whole number of 8-byte words"
+                                )
+                                |> withHint "add a `_pad` field (or widen the tail) so the size is a multiple of 8"
                             )
 
                     else
                         case List.filter (\f -> wordIndexed f.width && modBy 8 f.offset /= 0) fields of
                             bad :: _ ->
+                                -- J11 RATIONALE: a word-class field is
+                                -- ADDRESSED as `offset / 8` — the word-index
+                                -- form the word load/store, the word-for-word
+                                -- struct copy and `fieldLoad`/`fieldStore` all
+                                -- speak — so a field at byte 4 would silently
+                                -- be accessed at word 0 and truncate.  Only a
+                                -- field declaring a SUB-WORD width
+                                -- (`subWordWidthOf` -> `RawMemLoad`/
+                                -- `RawMemStore`) is byte-addressed, which is
+                                -- why the fix below is one of exactly two.
+                                -- The `_pad` half of the fix MOVES the field
+                                -- off the byte offset a C header would give
+                                -- it: a C layout that puts a word-class field
+                                -- at a sub-word boundary is not yet
+                                -- expressible byte-exactly, and that is the
+                                -- cost the hint's second option names.
                                 Err
-                                    ("RtLang: J11: struct '"
-                                        ++ structName
-                                        ++ "' places field '"
-                                        ++ bad.name
-                                        ++ "' at byte "
-                                        ++ String.fromInt bad.offset
-                                        ++ ", which is not a multiple of 8 — its access is addressed at `offset / 8` (the word-index form the word load/store and the word-for-word struct copy speak), so byte "
-                                        ++ String.fromInt bad.offset
-                                        ++ " would silently truncate to word "
-                                        ++ String.fromInt (bad.offset // 8)
-                                        ++ ". Either give the field an explicit sub-word width (i8/u8/i16/u16/i32/u32 — a byte-addressed access), or pad before it with a `_pad` field so it lands on an 8-byte boundary (note: that padding moves the field off the byte offset a C header would give it, so a struct whose C layout puts a word-class field at a sub-word boundary is not yet expressible byte-exactly)"
+                                    (bare "J11"
+                                        ("struct '"
+                                            ++ structName
+                                            ++ "' places field '"
+                                            ++ bad.name
+                                            ++ "' at byte "
+                                            ++ String.fromInt bad.offset
+                                            ++ ", which is not word-aligned"
+                                        )
+                                        |> withHint "give the field an explicit sub-word width (i8/u8/i16/u16/i32/u32), or pad before it with a `_pad` field so it lands on an 8-byte boundary"
                                     )
 
                             [] ->
                                 Ok ( fields, size, align )
 
 
-layoutOfSeen : List Decl -> List String -> List String -> String -> List StructMember -> Result String ( List StructField, Int, Int )
+layoutOfSeen : List Decl -> List String -> List String -> String -> List StructMember -> Result MidcError ( List StructField, Int, Int )
 layoutOfSeen decls names seen structName members =
     membersWalk decls names seen structName members 0 1 []
 
@@ -1145,7 +1456,7 @@ at (before alignment), `alignSoFar` the widest field alignment seen.  Each
 field is placed at `alignUp cursor fieldAlign` and the cursor moves to the end
 of the field's bytes.
 -}
-membersWalk : List Decl -> List String -> List String -> String -> List StructMember -> Int -> Int -> List StructField -> Result String ( List StructField, Int, Int )
+membersWalk : List Decl -> List String -> List String -> String -> List StructMember -> Int -> Int -> List StructField -> Result MidcError ( List StructField, Int, Int )
 membersWalk decls names seen structName members cursor alignSoFar acc =
     case members of
         [] ->
@@ -1207,7 +1518,7 @@ never skipped — skipping is what let the weaker rule look total.  (The walk
 reports the same error a moment later via `unionWalk`; doing it here means the
 block's OFFSET is never derived from a partial table.)
 -}
-unionAlignOf : List Decl -> List String -> List String -> String -> List Field -> Result String Int
+unionAlignOf : List Decl -> List String -> List String -> String -> List Field -> Result MidcError Int
 unionAlignOf decls names seen structName ms =
     case ms of
         [] ->
@@ -1275,21 +1586,21 @@ block's reach) and its alignment.  An EMPTY block is a reject: it has no
 member to place and no size, and silently contributing 0 would let a later
 field sit at an offset nothing declares.
 -}
-unionAt : List Decl -> List String -> List String -> String -> List Field -> Int -> Result String ( List StructField, Int, Int )
+unionAt : List Decl -> List String -> List String -> String -> List Field -> Int -> Result MidcError ( List StructField, Int, Int )
 unionAt decls names seen structName ms off =
     case ms of
         [] ->
             Err
-                ("RtLang: J11: struct '"
-                    ++ structName
-                    ++ "' has an EMPTY union block (`union { }`) — a block with no members has no size and no offset to share"
+                (bare "J11"
+                    ("struct '" ++ structName ++ "' has an EMPTY union block (`union { }`)")
+                    |> withHint "a block with no members has no size and no offset to share — declare at least one member"
                 )
 
         _ ->
             unionWalk decls names seen structName ms off 0 1 []
 
 
-unionWalk : List Decl -> List String -> List String -> String -> List Field -> Int -> Int -> Int -> List StructField -> Result String ( List StructField, Int, Int )
+unionWalk : List Decl -> List String -> List String -> String -> List Field -> Int -> Int -> Int -> List StructField -> Result MidcError ( List StructField, Int, Int )
 unionWalk decls names seen structName ms off widest alignSoFar placed =
     case ms of
         [] ->
@@ -1358,7 +1669,7 @@ Otherwise the `Type` decides: `word`/pointer/bool = 1 word (8 bytes, align 8);
 array = element bytes × count, its element's alignment; `float` is the
 existing J11 reject (Mid.Ir has no raw-memory f64 load node).
 -}
-fieldSizeOf : List Decl -> List String -> List String -> String -> Field -> Result String ( Int, Int )
+fieldSizeOf : List Decl -> List String -> List String -> String -> Field -> Result MidcError ( Int, Int )
 fieldSizeOf decls names seen structName f =
     case f.width of
         Just w ->
@@ -1368,23 +1679,35 @@ fieldSizeOf decls names seen structName f =
                         Ok sa
 
                     else
+                        -- J11 RATIONALE: a sub-word load WIDENS into a word
+                        -- register, so a narrow field's class is still `word`
+                        -- — a width narrows a field's bytes, it does not
+                        -- retype it.  (Unreachable from the grammar, which
+                        -- spells a width as `TWord` + width; the arm exists
+                        -- because the table must be TOTAL.)
                         Err
-                            ("RtLang: J11: struct '"
-                                ++ structName
-                                ++ "' declares field '"
-                                ++ f.name
-                                ++ "' with a memory width AND a non-word type ("
-                                ++ typeStr f.ty
-                                ++ ") — a narrow field's class IS a word (a sub-word load widens into the word register); a width narrows a `word` field, it does not retype one"
+                            (bare "J11"
+                                ("struct '"
+                                    ++ structName
+                                    ++ "' declares field '"
+                                    ++ f.name
+                                    ++ "' with a memory width AND a non-word type ("
+                                    ++ typeStr f.ty
+                                    ++ ")"
+                                )
+                                |> withHint "a width narrows a `word` field — declare the field's type as `word`"
                             )
 
                 Nothing ->
                     Err
-                        ("RtLang: J11: struct '"
-                            ++ structName
-                            ++ "' declares field '"
-                            ++ f.name
-                            ++ "' with a width that is not a MEMORY width — a field width is one of i8 u8 i16 u16 i32 u32 i64 u64 (write `*T` for a pointer field and `float` for f64)"
+                        (bare "J11"
+                            ("struct '"
+                                ++ structName
+                                ++ "' declares field '"
+                                ++ f.name
+                                ++ "' with a width that is not a MEMORY width"
+                            )
+                            |> withHint "a field width is one of i8 u8 i16 u16 i32 u32 i64 u64 — write `*T` for a pointer field and `float` for f64"
                         )
 
         Nothing ->
@@ -1394,7 +1717,7 @@ fieldSizeOf decls names seen structName f =
 {-| A field TYPE's (bytes, alignment) — the `width = Nothing` half of
 `fieldSizeOf`, with the J11 type rejections.
 -}
-fieldTySize : List Decl -> List String -> List String -> String -> Type -> Result String ( Int, Int )
+fieldTySize : List Decl -> List String -> List String -> String -> Type -> Result MidcError ( Int, Int )
 fieldTySize decls names seen structName ty =
     case ty of
         TWord ->
@@ -1415,11 +1738,9 @@ fieldTySize decls names seen structName ty =
 
             else
                 Err
-                    ("RtLang: J11: struct '"
-                        ++ structName
-                        ++ "' field type '*"
-                        ++ sname
-                        ++ "' names no declared struct — a pointer field must resolve in the file's struct table"
+                    (bare "J11"
+                        ("struct '" ++ structName ++ "' field type '*" ++ sname ++ "' names no declared struct") |> withTitle "UNKNOWN STRUCT"
+                        |> withHint ("a pointer field must resolve in the file's struct table — declare `struct " ++ sname ++ "`")
                     )
 
         TPtr _ ->
@@ -1441,11 +1762,13 @@ fieldTySize decls names seen structName ty =
             -- so this is the word-scaled case it always was.
             if n <= 0 then
                 Err
-                    ("RtLang: J11: struct '"
-                        ++ structName
-                        ++ "' has an array field of length "
-                        ++ String.fromInt n
-                        ++ " — a fixed array's length is at least 1 (there is no storage to take the address of)"
+                    (bare "J11"
+                        ("struct '"
+                            ++ structName
+                            ++ "' has an array field of length "
+                            ++ String.fromInt n
+                        )
+                        |> withHint "a fixed array's length is at least 1 — a zero-length array has no storage and no address"
                     )
 
             else
@@ -1457,10 +1780,14 @@ fieldTySize decls names seen structName ty =
                         Ok ( w * n, al )
 
         TFloat ->
+            -- J11 RATIONALE: Mid.Ir has no raw-memory f64 load/store node, so
+            -- a float field has no width to be given — NAMED rather than
+            -- silently word-typed, because a word-typed float field would
+            -- read the wrong bytes.
             Err
-                ("RtLang: J11: struct '"
-                    ++ structName
-                    ++ "' has a float field — Mid.Ir has no raw-memory f64 load node, so a float field cannot lower (named, not silently word-typed)"
+                (bare "J11"
+                    ("struct '" ++ structName ++ "' has a float field") |> withTitle "TYPE MISMATCH"
+                    |> withHint "store it boxed in a `val` field (`mkflt`), or as a raw `word`"
                 )
 
 
@@ -1471,26 +1798,27 @@ spells.  B5: the size is read off the SAME `layoutOfSeen` walk the top-level
 table uses — there is no second size rule, so a union block's `max`
 contribution is a fact in exactly one place.
 -}
-structSizeOf : List Decl -> List String -> List String -> String -> Result String ( Int, Int )
+structSizeOf : List Decl -> List String -> List String -> String -> Result MidcError ( Int, Int )
 structSizeOf decls names seen sname =
     if List.member sname seen then
         Err
-            ("RtLang: J11: struct '"
-                ++ sname
-                ++ "' contains itself BY VALUE ("
-                ++ String.join " -> " (List.reverse (sname :: seen))
-                ++ ") — infinite size; a recursive struct must recurse through a pointer (`next : *"
-                ++ sname
-                ++ "`)"
+            (bare "J11"
+                ("struct '"
+                    ++ sname
+                    ++ "' contains itself BY VALUE ("
+                    ++ String.join " -> " (List.reverse (sname :: seen))
+                    ++ ")"
+                )
+                |> withHint ("infinite size — a recursive struct must recurse through a pointer (`next : *" ++ sname ++ "`)")
             )
 
     else
         case membersOfDecl decls sname of
             Nothing ->
                 Err
-                    ("RtLang: J11: field type '"
-                        ++ sname
-                        ++ "' names no declared struct — a struct-value field must resolve in the file's struct table"
+                    (bare "J11"
+                        ("field type '" ++ sname ++ "' names no declared struct") |> withTitle "UNKNOWN STRUCT"
+                        |> withHint ("a struct-value field must resolve in the file's struct table — declare `struct " ++ sname ++ "`")
                     )
 
             Just members ->
@@ -1565,12 +1893,12 @@ firstRepeat names =
 duplicate constant name INSIDE one enum (constants are scoped per enum;
 two enums may each name a constant `ptr`).
 -}
-enumsOf : List Decl -> Result String EnumTable
+enumsOf : List Decl -> Result MidcError EnumTable
 enumsOf decls =
     enumsFold decls Dict.empty
 
 
-enumsFold : List Decl -> EnumTable -> Result String EnumTable
+enumsFold : List Decl -> EnumTable -> Result MidcError EnumTable
 enumsFold decls acc =
     case decls of
         [] ->
@@ -1587,12 +1915,13 @@ enumsFold decls acc =
                 EnumDecl e ->
                     case duplicateConstantName e.entries of
                         Just c ->
+                            -- J14: constants are scoped PER ENUM (two enums
+                            -- may each name one `ptr`), so this is a clash
+                            -- inside one declaration only.
                             Err
-                                ("RtLang: J14: enum '"
-                                    ++ e.name
-                                    ++ "' declares constant '"
-                                    ++ c
-                                    ++ "' more than once — one name, one value"
+                                (bare "J14"
+                                    ("enum '" ++ e.name ++ "' declares constant '" ++ c ++ "' more than once")
+                                    |> withHint "one name, one value — rename one of the two"
                                 )
 
                         Nothing ->
@@ -1766,19 +2095,27 @@ surfacesOf flags program =
         program
 
 
-checkDefun : Env -> Defun -> Result String ()
-checkDefun env d =
+checkDefun : Env -> String -> Defun -> Result MidcError ()
+checkDefun env src d =
     case duplicateParam d.params of
         Just name ->
-            Err (d.key ++ ": J5: duplicate parameter '" ++ name ++ "'")
+            -- J5: `paramScope` is a Dict, so a repeated name would silently
+            -- bind ONE of the two types and the second parameter would be
+            -- checked against the first's class.  The header line is the
+            -- position (both parameters are on it).
+            Err
+                (rejectDefun d "J5"
+                    ("parameter '" ++ name ++ "' is declared twice in this signature") |> withTitle "NAMING PROBLEM"
+                    |> withHint "rename one of the two parameters"
+                )
 
         Nothing ->
-            case validateSig (ctxOf env d) d.params d.ret of
+            case validateSig (ctxOf env src d) d.params d.ret of
                 Err msg ->
                     Err msg
 
                 Ok () ->
-                    case checkBlock (ctxOf env d) d.body of
+                    case checkBlock (ctxOf env src d) d.body of
                         Err msg ->
                             Err msg
 
@@ -1791,7 +2128,7 @@ checkDefun env d =
 SIGNATURE, before any use).  Raw pointees (`*word`/`*val`) and the
 non-pointer classes need nothing.
 -}
-validateSig : Ctx -> List Param -> Type -> Result String ()
+validateSig : Ctx -> List Param -> Type -> Result MidcError ()
 validateSig ctx params ret =
     let
         -- B6: the defun's ABI class, by the ONE rule (Ast.allWordSig), which
@@ -1808,22 +2145,21 @@ validateSig ctx params ret =
             -- ABI's tail is one register, and a struct return needs either a
             -- hidden ret buffer (new ABI) or N registers (a multi-value
             -- return Mid does not have).
+            -- J11 RATIONALE (plan Q7): the ret path is ONE word, so a
+            -- struct VALUE cannot come back — it would need a hidden ret
+            -- buffer (new ABI machinery, named v2) or N registers (a
+            -- multi-value return Mid does not have).
             Err
-                (ctx.key
-                    ++ ": J11: '-> "
-                    ++ sname
-                    ++ "' — a struct RETURN is REJECTED in v1 (plan Q7: the ret path is one word; a struct comes back through a caller-supplied '*"
-                    ++ sname
-                    ++ "' out-parameter)"
+                (reject ctx "J11" ("'-> " ++ sname ++ "' — a struct RETURN is not supported") |> withTitle "BAD SIGNATURE"
+                    |> withHint ("return it through a caller-supplied '*" ++ sname ++ "' out-parameter")
                 )
 
         TArray _ _ ->
+            -- J11 RATIONALE: the same one-word ret path as the struct
+            -- return above.
             Err
-                (ctx.key
-                    ++ ": J11: '-> "
-                    ++ typeStr ret
-                    ++ "' — an ARRAY RETURN is REJECTED in v1 (the ret path is one word; an array comes back through a caller-supplied '"
-                    ++ "*word` out-parameter or a heap array whose base is passed)"
+                (reject ctx "J11" ("'-> " ++ typeStr ret ++ "' — an ARRAY RETURN is not supported") |> withTitle "BAD SIGNATURE"
+                    |> withHint "return a `*word` to its base, or write through a caller-supplied out-parameter"
                 )
 
         _ ->
@@ -1833,16 +2169,21 @@ validateSig ctx params ret =
 
                 Ok () ->
                     if ret == TBool && not wordAbi then
+                        -- J11 RATIONALE: a bool RESULT is a 0/1 word
+                        -- register, so it needs the WORD ABI; a `val` (or
+                        -- `float`) anywhere in the signature forces the value
+                        -- ABI, whose tail is one 40-byte `:val` slot.
                         Err
-                            (ctx.key
-                                ++ ": J11: '-> bool' — a bool RESULT is a 0/1 word REGISTER, so it needs the WORD ABI; this defun's signature has a `val` (or `float`) in it, which forces the value ABI (one `:val` tail)"
+                            (reject ctx "J11"
+                                "'-> bool' needs the WORD ABI, and this defun's signature has a `val` (or `float`) in it" |> withTitle "BAD SIGNATURE"
+                                |> withHint "make every parameter and the result word-class — a bool is a 0/1 word register"
                             )
 
                     else
                         validateParams ctx wordAbi params
 
 
-validateParams : Ctx -> Bool -> List Param -> Result String ()
+validateParams : Ctx -> Bool -> List Param -> Result MidcError ()
 validateParams ctx wordAbi params =
     case params of
         [] ->
@@ -1862,34 +2203,47 @@ validateParams ctx wordAbi params =
                         Ok ()
 
                     else
+                        -- J11 RATIONALE (plan Q7): a struct parameter is
+                        -- legal only in a WORD-ABI defun, where the caller
+                        -- passes the struct's ADDRESS in one `l` register and
+                        -- the callee copies it into its own storage at entry
+                        -- (by-value semantics: the callee's writes never
+                        -- escape).  The value ABI has no register to carry it.
                         Err
-                            (ctx.key
-                                ++ ": J11: parameter '"
-                                ++ p.name
-                                ++ "' is a struct VALUE ("
-                                ++ sname
-                                ++ ") and this defun's signature is NOT all word-class, so it takes the value ABI — a struct parameter is legal only in a WORD-ABI defun (plan Q7; every parameter `word`/`int`/`bool`/`*T`/struct and the result `word`/`bool`/`*T`).  Make the signature all-word, or pass a '*"
-                                ++ sname
-                                ++ "'"
+                            (reject ctx "J11"
+                                ("parameter '"
+                                    ++ p.name
+                                    ++ "' is a struct VALUE ("
+                                    ++ sname
+                                    ++ ") in a defun whose signature is not all word-class"
+                                ) |> withTitle "BAD SIGNATURE"
+                                |> withHint ("make the signature all-word, or pass a '*" ++ sname ++ "'")
                             )
 
                 TArray _ _ ->
+                    -- J11 RATIONALE: B6's word ABI does not open this one —
+                    -- the question for an array BY VALUE is its ELEMENT
+                    -- COUNT, not its register class, and flattening a
+                    -- variable-length block into a fixed parameter list is
+                    -- not something the ABI can express.
                     Err
-                        (ctx.key
-                            ++ ": J11: parameter '"
-                            ++ p.name
-                            ++ "' is an ARRAY VALUE ("
-                            ++ typeStr p.ty
-                            ++ ") — an array parameter by value is still refused (B3's J11 rule; B6 does not open it: the flattening question there is the ELEMENT COUNT, not the register class).  Pass a `*word`/`*S` view of its base today"
+                        (reject ctx "J11"
+                            ("parameter '" ++ p.name ++ "' is an ARRAY VALUE (" ++ typeStr p.ty ++ ")") |> withTitle "BAD SIGNATURE"
+                            |> withHint "pass a `*word`/`*S` view of its base instead"
                         )
 
                 _ ->
                     if p.ty == TBool && not wordAbi then
+                        -- J11 RATIONALE: a bool is a 0/1 word register; the
+                        -- value ABI would hand it a 40-byte Value slot, which
+                        -- is not a bool.
                         Err
-                            (ctx.key
-                                ++ ": J11: parameter '"
-                                ++ p.name
-                                ++ "' is a bool, which is a 0/1 word REGISTER — it needs the WORD ABI, and this defun's signature has a `val` (or `float`) in it, which forces the value ABI (a 40-byte Value slot is not a bool)"
+                            (reject ctx "J11"
+                                ("parameter '"
+                                    ++ p.name
+                                    ++ "' is a bool in a defun whose signature is not all word-class"
+                                ) |> withTitle "BAD SIGNATURE"
+                                |> withHint "make the signature all-word — a bool is a 0/1 word register, not a value slot"
                             )
 
                     else
@@ -1901,13 +2255,45 @@ validateParams ctx wordAbi params =
                                 validateParams ctx wordAbi rest
 
 
+{-| WHERE a declared type is written — the one thing the float-ARRAY reject's
+hint depends on (U16).
+
+The boxed spelling that hint prescribes (`val[N] fa = { mkflt(..), .. }`) is
+MEASURED LEGAL in exactly two positions: a local BINDER (`float[2] fa;`,
+`checkStmt`'s SBind arm) and an ARRAY-BIND (`checkArrayBind`).  `validateType`
+also runs in positions where NO spelling of a float array compiles — a CAST
+TARGET (`castClass`, where `[val[2]]` hits J10's cast matrix) and a
+NESTED-ELEMENT position (`validateType`'s own recursion, `checkIndexStore`,
+`EIndex`'s element) — so the hint is chosen by SITE rather than widened for
+everyone: the legal positions keep the actionable spelling, and the others say
+what is true there.
+
+Two constructors, not a Bool: the arc's own lesson about `ArityCounts` — a
+raw `Bool` at a call site is a transposition waiting to compile.
+-}
+type TypeSite
+    = LocalTypeSite
+    | OtherTypeSite
+
+
 {-| The struct-name check inside a declared type (J11): a `*S` must
 resolve in the struct table.  Binders, params and returns all run this, so
 an unknown struct is caught at its declaration site, not only its first
 use.
+
+`validateType` is the POSITION-LESS door (it renders the honest caveat); the
+two positions where the boxed spelling is legal call `validateTypeAt` with
+`LocalTypeSite`.
 -}
-validateType : Ctx -> Type -> Result String ()
+validateType : Ctx -> Type -> Result MidcError ()
 validateType ctx ty =
+    validateTypeAt ctx OtherTypeSite ty
+
+
+{-| `validateType` with the position in hand (see `TypeSite`).
+-}
+validateTypeAt : Ctx -> TypeSite -> Type -> Result MidcError ()
+validateTypeAt ctx site ty =
     case ty of
         TPtr (PStruct sname) ->
             case Dict.get sname ctx.env.structs of
@@ -1916,10 +2302,8 @@ validateType ctx ty =
 
                 Nothing ->
                     Err
-                        (ctx.key
-                            ++ ": J11: pointer type '*"
-                            ++ sname
-                            ++ "' names no declared struct — every *S must resolve in the file's struct table"
+                        (reject ctx "J11" ("pointer type '*" ++ sname ++ "' names no declared struct") |> withTitle "UNKNOWN STRUCT"
+                            |> withHint ("declare `struct " ++ sname ++ "` in this module")
                         )
 
         TStruct sname ->
@@ -1929,38 +2313,85 @@ validateType ctx ty =
 
                 Nothing ->
                     Err
-                        (ctx.key
-                            ++ ": J11: type '"
-                            ++ sname
-                            ++ "' names no declared struct — a struct VALUE must resolve in the file's struct table"
+                        (reject ctx "J11" ("type '" ++ sname ++ "' names no declared struct") |> withTitle "UNKNOWN STRUCT"
+                            |> withHint ("declare `struct " ++ sname ++ "` in this module")
                         )
 
         TArray elem n ->
             if n <= 0 then
                 Err
-                    (ctx.key
-                        ++ ": J11: '"
-                        ++ typeStr (TArray elem n)
-                        ++ "' — a fixed array's length is at least 1 (a zero-length array has no storage, so no address and no elements)"
+                    (reject ctx "J11" ("'" ++ typeStr (TArray elem n) ++ "' — a fixed array's length is at least 1")
+                        |> withHint "declare at least one element — a zero-length array has no storage, so no address and no elements"
                     )
 
             else if elem == TFloat then
                 Err
-                    (ctx.key
-                        ++ ": J1: '"
-                        ++ typeStr (TArray elem n)
-                        ++ "' — a float array has no raw-memory seat (Mid.Ir has no f64 load/store node; the J11 float-field rule, same reason)"
+                    -- J1/J11: a float ARRAY has no seat for the same reason a
+                    -- float FIELD does not (J11's layout rule): Mid.Ir has no
+                    -- raw f64 load/store node, so there is no width to give an
+                    -- element.  The rationale is the J11 float-field rule's.
+                    --
+                    -- The hint names ONLY spellings that typecheck, and it is
+                    -- chosen by POSITION (`floatArrayHint`): this arm fires
+                    -- from a local binder, an array-bind, a CAST TARGET and
+                    -- nested-element positions, and the boxed array spelling is
+                    -- established only in the first two.  It used to offer
+                    -- `float f = itof(n);` as well, which is `SBind TFloat` and
+                    -- is rejected unconditionally by the float-BINDER arm below
+                    -- (`a float word cannot be bound to a name`) — a hint that
+                    -- sends the reader into a second error.
+                    (reject ctx "J1"
+                        ("'" ++ typeStr (TArray elem n) ++ "' is a float array, which has no raw-memory seat")
+                        |> withHint (floatArrayHint site)
                     )
 
             else
+                -- A nested array: its ELEMENT is a nested-element position,
+                -- not a local one, so the recursion keeps the position-less
+                -- door (see `TypeSite`).
                 validateType ctx elem
 
         _ ->
             Ok ()
 
 
-ctxOf : Env -> Defun -> Ctx
-ctxOf env d =
+{-| The float-ARRAY reject's hint, chosen by POSITION (`TypeSite`) — see that
+type for why the choice exists.
+
+THE LOCAL HINT IS UNCHANGED and its two spellings are measured: `mkflt(x)` is
+the box the float-BINDER hint itself prescribes, and the boxed array-bind is
+U13's own end-to-end probe (`val[2] fa = { mkflt(..), .. };`, EXIT 0 through
+qbe + cc).  It is not weakened here.
+
+THE OTHER HINT IS THE HONEST ONE where no boxed spelling compiles — a CAST
+TARGET (`[float[2]]`; following the local advice to `[val[2]]` then hits J10's
+cast matrix, a SECOND error) and a NESTED-ELEMENT position.  It prescribes only
+what typechecks there: boxing each float in its own `val` local (the
+float-BINDER arm's own remedy, MEASURED legal) or recomputing at each use, and
+it says plainly that the ARRAY has no spelling in that position rather than
+offering one that does not exist.
+
+`recompute each float at its use` is real advice for a scalar binder; for an
+INDEXED array the boxed-array spelling is the local advice above, which is
+exactly why the two positions do not share one sentence.
+-}
+floatArrayHint : TypeSite -> String
+floatArrayHint site =
+    case site of
+        LocalTypeSite ->
+            "hold the floats boxed in a `val` array — `mkflt(x)` is the box — or recompute each float at its use"
+
+        OtherTypeSite ->
+            "no spelling of a float ARRAY compiles in this position (a `val` cast target is not in the cast matrix, and a nested `val` array element is not established) — box each float in its own `val` local with `mkflt(x)`, or recompute each float at its use"
+
+
+{-| The initial context for one defun's walk.  `cur` starts at `d.span` — the
+defun HEADER span — which is what the signature judgments (J5's duplicate
+parameter, `validateSig`, `validateParams`) report against; the body walk
+retargets it per statement (see `checkBlock`/`stmtsFold`).
+-}
+ctxOf : Env -> String -> Defun -> Ctx
+ctxOf env src d =
     { env = env
     , key = d.key
     , params = d.params
@@ -1969,6 +2400,8 @@ ctxOf env d =
     , loops = 0
     , abiWord = Ast.allWordSig (List.map .ty d.params) d.ret
     , frameAddr = Dict.empty
+    , cur = d.span
+    , src = src
     }
 
 
@@ -1998,25 +2431,31 @@ duplicateParam params =
 {-| Check a block: statements left to right (scope threading — J5's
 strict order), then the terminator.  Returns the terminator's class (the
 block's value — `EWithRoots`'s value is its block's).
+
+`cur` is retargeted here to the node about to be judged — each statement's
+own span in `stmtsFold`, the terminator's own in the `checkTerm` call — so a
+rejection raised inside the block points at the line it is about.  A `Block`
+itself carries no span (only its points do), so there is nothing to set on
+entry.
 -}
-checkBlock : Ctx -> Block -> Result String Type
+checkBlock : Ctx -> Block -> Result MidcError Type
 checkBlock ctx b =
     case stmtsFold ctx b.stmts of
         Err msg ->
             Err msg
 
         Ok ctx2 ->
-            checkTerm ctx2 b.term
+            checkTerm { ctx2 | cur = b.term.span } b.term.node
 
 
-stmtsFold : Ctx -> List Stmt -> Result String Ctx
+stmtsFold : Ctx -> List (Located Stmt) -> Result MidcError Ctx
 stmtsFold ctx stmts =
     case stmts of
         [] ->
             Ok ctx
 
         s :: rest ->
-            case checkStmt ctx s of
+            case checkStmt { ctx | cur = s.span } s.node of
                 Err msg ->
                     Err msg
 
@@ -2024,23 +2463,31 @@ stmtsFold ctx stmts =
                     stmtsFold ctx2 rest
 
 
-checkStmt : Ctx -> Stmt -> Result String Ctx
+{-| Walk ONE statement.  Setting `cur` is the CALLER's job: every caller holds
+the `Located Stmt` and hands down the context with `cur` already set to that
+statement's span (`stmtsFold`, `forInit`, `checkForStep`), so this body — and
+every nested walk it starts — sees the enclosing STATEMENT, never a
+subexpression.
+-}
+checkStmt : Ctx -> Stmt -> Result MidcError Ctx
 checkStmt ctx stmt =
     case stmt of
         SBind ty name e ->
             if ty == TFloat then
                 Err
-                    (ctx.key
-                        ++ ": J1: binder '"
-                        ++ name
-                        ++ "' declares float — float words are not let-bindable (MEASURED: Lower's rawFltArg never yields a Var): recompute the float expression at each use, or bind it boxed via mkflt"
+                    -- J1: MEASURED — Lower's `rawFltArg` never yields a `Var`,
+                    -- so a float is a raw register word with no storage seat:
+                    -- there is nothing for a binder to name.
+                    (reject ctx "J1"
+                        ("binder '" ++ name ++ "' declares float, but a float word cannot be bound to a name")
+                        |> withHint "recompute the float expression at each use, or bind it boxed with `mkflt`"
                     )
 
             else if ty == TBool then
                 bindBool ctx name e
 
             else
-                case validateType ctx ty of
+                case validateTypeAt ctx LocalTypeSite ty of
                     Err msg ->
                         Err msg
 
@@ -2055,13 +2502,20 @@ checkStmt ctx stmt =
 
                                 else
                                     Err
-                                        (ctx.key
-                                            ++ ": J1: binder '"
-                                            ++ name
-                                            ++ "' declares "
-                                            ++ typeStr ty
-                                            ++ " but its initializer is "
-                                            ++ typeStr cls
+                                        -- J1: `coerce` is the whole matrix
+                                        -- (J12); a binder whose declared class
+                                        -- and initialiser class disagree is
+                                        -- the class confusion this module
+                                        -- exists to refuse.
+                                        (reject ctx "J1"
+                                            ("binder '"
+                                                ++ name
+                                                ++ "' declares "
+                                                ++ typeStr ty
+                                                ++ " but its initializer is "
+                                                ++ typeStr cls
+                                            )
+                                            |> withHint "give the initializer the declared class, or declare the class it has"
                                         )
 
         SEffect e ->
@@ -2083,8 +2537,13 @@ checkStmt ctx stmt =
 
                     else
                         Err
-                            (ctx.key
-                                ++ ": J7: a mid-block 'if' with both branches falling through — Mid has no join and Case is forbidden: bind through ?: or make it the last statement"
+                            -- J7: Mid has no join and `Case` is forbidden, so
+                            -- a mid-block `if` whose two arms both fall
+                            -- through leaves the continuation with no value
+                            -- path the lowering can express.
+                            (reject ctx "J7"
+                                "a mid-block 'if' with both branches falling through has no join"
+                                |> withHint "bind through `?:`, or make the `if` the last statement"
                             )
 
         SFieldStore p f e ->
@@ -2161,16 +2620,18 @@ checkStmt ctx stmt =
 {-| The `for` head's init statement (a declaration or a store/effect) — checked
 against the enclosing context so a binder it declares is visible to the
 condition, the body and the continuation (the flat-scope rule stated in
-Ast's `SFor` note).
+Ast's `SFor` note).  `cur` becomes the init statement's OWN span (the parser
+gives the head statements their own `Located` spans, distinct from the
+`for`'s), so a rejection inside the init points at the init.
 -}
-forInit : Ctx -> { init : Maybe Stmt, cond : Exp, step : Maybe Stmt, body : Block } -> Result String Ctx
+forInit : Ctx -> { init : Maybe (Located Stmt), cond : Exp, step : Maybe (Located Stmt), body : Block } -> Result MidcError Ctx
 forInit ctx rec =
     case rec.init of
         Nothing ->
             Ok ctx
 
         Just stmt ->
-            checkStmt ctx stmt
+            checkStmt { ctx | cur = stmt.span } stmt.node
 
 
 {-| The `for` STEP: absent, or ONE store/effect statement — checked like any
@@ -2179,21 +2640,33 @@ other statement.  A DECLARATION is refused by this rule (the parser's
 judgment, and a hand-built tree cannot smuggle one in): a binder declared in
 the step would be shadowed once per iteration, and a struct/array
 declaration there would allocate a block per iteration for no reason.
+
+`cur` becomes the step's own span for the recursive statement walk.  The
+SHAPE rejection below keeps the context the caller handed in — the enclosing
+`for` statement — which is honest rather than sloppy: the step is part of
+that statement, the caret underlines the `for` line, and the prose names the
+step.
 -}
-checkForStep : Ctx -> Maybe Stmt -> Result String ()
+checkForStep : Ctx -> Maybe (Located Stmt) -> Result MidcError ()
 checkForStep ctx step =
     case step of
         Nothing ->
             Ok ()
 
         Just stmt ->
-            if isStepShape stmt then
-                checkStmt ctx stmt |> Result.map (\_ -> ())
+            if isStepShape stmt.node then
+                checkStmt { ctx | cur = stmt.span } stmt.node
+                    |> Result.map (\_ -> ())
 
             else
                 Err
-                    (ctx.key
-                        ++ ": J1: the `for` STEP must be a store or an effect statement (C's step is an expression): a declaration there would shadow a binder once per iteration"
+                    -- J1: a binder declared in the step would be re-declared
+                    -- once per iteration and shadowed by the next one, so the
+                    -- step is a store/effect only (Parse.forStep refuses a
+                    -- declaration too — this is the checker's half).
+                    (reject ctx "J1"
+                        "the `for` STEP must be a store or an effect statement" |> withTitle "BAD CONTROL FLOW"
+                        |> withHint "move the declaration above the `for`, or into the body"
                     )
 
 isStepShape : Stmt -> Bool
@@ -2223,7 +2696,7 @@ literal, a float compare or a bool join are the three shapes whose values
 are NOT temps, and each is a loud reject here rather than a misread (or a
 QBE-layer failure) later.  See the module header for each reason.
 -}
-bindBool : Ctx -> String -> Exp -> Result String Ctx
+bindBool : Ctx -> String -> Exp -> Result MidcError Ctx
 bindBool ctx name e =
     case checkExp ctx e of
         Err msg ->
@@ -2232,11 +2705,13 @@ bindBool ctx name e =
         Ok cls ->
             if cls /= TBool then
                 Err
-                    (ctx.key
-                        ++ ": J1: binder '"
-                        ++ name
-                        ++ "' declares bool but its initializer is "
-                        ++ typeStr cls
+                    (reject ctx "J1"
+                        ("binder '"
+                            ++ name
+                            ++ "' declares bool but its initializer is "
+                            ++ typeStr cls
+                        )
+                        |> withHint "a bool binder needs a bool value: a comparison, a `[bool](w)` cast, or another bool binder"
                     )
 
             else if isBoolTemp e then
@@ -2244,10 +2719,22 @@ bindBool ctx name e =
 
             else
                 Err
-                    (ctx.key
-                        ++ ": J1: binder '"
-                        ++ name
-                        ++ "' declares bool but its initializer is not a bool TEMP — a bool binder is branchable precisely because every bool value is a raw 0/1 temp (a comparison, a [bool](w) cast, or another bool binder): a literal (a raw-Int binder reads back as a NUMBER), a float compare (not a raw-word binder node) and a ?: join (a slot) have no such representation.  Branch the comparison inline, or bind a `val`"
+                    -- J1: a bool binder is branchable PRECISELY because every
+                    -- bool value is a raw 0/1 temp — a comparison, a
+                    -- `[bool](w)` cast, or another bool binder.  The three
+                    -- shapes refused here have no such representation, and
+                    -- each would be misread rather than rejected later: a
+                    -- LITERAL (Lower's raw-Int binder reboxes as a NUMBER, and
+                    -- a value test then reads tag 0 — the always-then misread),
+                    -- a FLOAT compare (`RawFltCmp` is a word 0/1 but is not a
+                    -- raw-word binder node), and a `?:` JOIN (`If` is a slot,
+                    -- not a temp).
+                    (reject ctx "J1"
+                        ("binder '"
+                            ++ name
+                            ++ "' declares bool, but its initializer is not a bool TEMP"
+                        )
+                        |> withHint "branch the comparison inline (`if (a == b)`), or bind it `val`"
                     )
 
 
@@ -2288,26 +2775,24 @@ Three judgments, all fail-fast and all loud:
      `*S` is deliberately NOT accepted: the copy reads the VALUE's words,
      and a pointer would need a `*p` deref spelling this grammar lacks).
 -}
-checkStructBind : Ctx -> String -> String -> StructInit -> Result String Ctx
+checkStructBind : Ctx -> String -> String -> StructInit -> Result MidcError Ctx
 checkStructBind ctx sname name init =
     case Dict.get sname ctx.env.structs of
         Nothing ->
             Err
-                (ctx.key
-                    ++ ": J11: '"
-                    ++ sname
-                    ++ " "
-                    ++ name
-                    ++ "' — no such struct is declared in this module"
+                (reject ctx "J11" ("'" ++ sname ++ " " ++ name ++ "' — no such struct is declared in this module") |> withTitle "UNKNOWN STRUCT"
+                    |> withHint ("declare `struct " ++ sname ++ "` above this statement")
                 )
 
         Just info ->
             if Dict.member name ctx.scope then
                 Err
-                    (ctx.key
-                        ++ ": J5: '"
-                        ++ name
-                        ++ "' is already a binder in scope — a binder is a NEW id (shadowing is a rename, and a struct binder OWNS fresh storage)"
+                    -- J5: a binder is a NEW id (shadowing is a rename), and a
+                    -- struct binder OWNS fresh storage — re-declaring one is
+                    -- a mistake, never an overwrite.
+                    (reject ctx "J5"
+                        ("'" ++ name ++ "' is already a binder in scope") |> withTitle "NAMING PROBLEM"
+                        |> withHint "rename the new binder, or assign to the existing one"
                     )
 
             else
@@ -2319,7 +2804,7 @@ checkStructBind ctx sname name init =
                         Ok { ctx | scope = Dict.insert name (TStruct sname) ctx.scope }
 
 
-checkStructInit : Ctx -> String -> StructInfo -> String -> StructInit -> Result String ()
+checkStructInit : Ctx -> String -> StructInfo -> String -> StructInit -> Result MidcError ()
 checkStructInit ctx sname info name init =
     case init of
         InitZero ->
@@ -2339,32 +2824,33 @@ checkStructInit ctx sname info name init =
 
                     else
                         Err
-                            (ctx.key
-                                ++ ": J1: '"
-                                ++ name
-                                ++ "' is a "
-                                ++ sname
-                                ++ " but its initializer is a "
-                                ++ other
-                                ++ " value — a copy needs the SAME struct"
+                            (reject ctx "J1"
+                                ("'"
+                                    ++ name
+                                    ++ "' is a "
+                                    ++ sname
+                                    ++ " but its initializer is a "
+                                    ++ other
+                                    ++ " value"
+                                )
+                                |> withHint "a struct copy needs the SAME struct — copy the fields across instead"
                             )
 
                 Ok cls ->
                     Err
-                        (ctx.key
-                            ++ ": J1: '"
-                            ++ name
-                            ++ "' is a "
-                            ++ sname
-                            ++ " but its initializer is "
-                            ++ typeStr cls
-                            ++ " — a struct copy needs a struct VALUE of the same type (a '*"
-                            ++ sname
-                            ++ "' is not one)"
+                        (reject ctx "J1"
+                            ("'"
+                                ++ name
+                                ++ "' is a "
+                                ++ sname
+                                ++ " but its initializer is "
+                                ++ typeStr cls
+                            )
+                            |> withHint ("a struct copy needs a struct VALUE of the same type — a '*" ++ sname ++ "' is a pointer, not one")
                         )
 
 
-initFieldsWalk : Ctx -> String -> StructInfo -> String -> List ( String, Exp ) -> List String -> Result String ()
+initFieldsWalk : Ctx -> String -> StructInfo -> String -> List ( String, Exp ) -> List String -> Result MidcError ()
 initFieldsWalk ctx sname info name fields seen =
     case fields of
         [] ->
@@ -2373,24 +2859,16 @@ initFieldsWalk ctx sname info name fields seen =
         ( f, e ) :: rest ->
             if List.member f seen then
                 Err
-                    (ctx.key
-                        ++ ": J13: field '"
-                        ++ f
-                        ++ "' is initialised twice in '"
-                        ++ name
-                        ++ "' — one field, one initialiser"
+                    (reject ctx "J13" ("field '" ++ f ++ "' is initialised twice in '" ++ name ++ "'") |> withTitle "NAMING PROBLEM"
+                        |> withHint "one field, one initialiser — delete the second"
                     )
 
             else
                 case fieldTypeIn info.fields f of
                     Nothing ->
                         Err
-                            (ctx.key
-                                ++ ": J13: struct '"
-                                ++ sname
-                                ++ "' has no field '"
-                                ++ f
-                                ++ "' to initialise"
+                            (reject ctx "J13" ("struct '" ++ sname ++ "' has no field '" ++ f ++ "'") |> withTitle "UNKNOWN FIELD"
+                                |> withHint "spell a declared field, or drop the initialiser"
                             )
 
                     Just fty ->
@@ -2404,15 +2882,17 @@ initFieldsWalk ctx sname info name fields seen =
 
                                 else
                                     Err
-                                        (ctx.key
-                                            ++ ": J1: initialiser for field '"
-                                            ++ sname
-                                            ++ "."
-                                            ++ f
-                                            ++ "' needs "
-                                            ++ typeStr fty
-                                            ++ ", got "
-                                            ++ typeStr vcls
+                                        (reject ctx "J1"
+                                            ("initialiser for field '"
+                                                ++ sname
+                                                ++ "."
+                                                ++ f
+                                                ++ "' needs "
+                                                ++ typeStr fty
+                                                ++ ", got "
+                                                ++ typeStr vcls
+                                            )
+                                            |> withHint "give the field's class to the value, or declare the field with the class the value has"
                                         )
 
 
@@ -2436,21 +2916,22 @@ eN };`.  Four judgments, all loud:
 A nested-array element cannot be initialised from a value (`{{1,2},{3,4}}` is
 not in this grammar): the reject names the leaves' spelling.
 -}
-checkArrayBind : Ctx -> Type -> String -> ArrayInit -> Result String Ctx
+checkArrayBind : Ctx -> Type -> String -> ArrayInit -> Result MidcError Ctx
 checkArrayBind ctx aty name init =
     case aty of
         TArray elem n ->
-            case validateType ctx aty of
+            case validateTypeAt ctx LocalTypeSite aty of
                 Err msg ->
                     Err msg
 
                 Ok () ->
                     if Dict.member name ctx.scope then
                         Err
-                            (ctx.key
-                                ++ ": J5: '"
-                                ++ name
-                                ++ "' is already a binder in scope — a binder is a NEW id (shadowing is a rename, and an array binder OWNS fresh storage)"
+                            -- J5: as for a struct binder — the name must be
+                            -- NEW, and an array binder owns fresh storage.
+                            (reject ctx "J5"
+                                ("'" ++ name ++ "' is already a binder in scope") |> withTitle "NAMING PROBLEM"
+                                |> withHint "rename the new binder, or store into the existing array's elements"
                             )
 
                     else
@@ -2461,18 +2942,28 @@ checkArrayBind ctx aty name init =
                             AInitFull es ->
                                 if List.length es /= n then
                                     Err
-                                        (ctx.key
-                                            ++ ": J11: '"
-                                            ++ name
-                                            ++ "' is a "
-                                            ++ typeStr aty
-                                            ++ " but the initialiser has "
-                                            ++ String.fromInt (List.length es)
-                                            ++ " element(s) — a PARTIAL initialiser is refused (C's `{0}` included): zero-filling the elements you did not spell puts tag-0 handles in the `val` elements it skipped, a garbage-tag trap manufactured by the compiler.  Zero the WHOLE array with the bare declaration (`"
-                                            ++ typeStr aty
-                                            ++ " "
-                                            ++ name
-                                            ++ ";` — a memset) or `rawcall memset(base, 0, 40*N)`, or spell every element"
+                                        -- J11 RATIONALE: a PARTIAL initialiser (C's `{0}` included) is
+                                        -- refused because zero-filling the elements you did
+                                        -- not spell would put tag-0 handles in the `val`
+                                        -- elements it skipped — a garbage-tag trap
+                                        -- manufactured by the compiler.  The bare
+                                        -- declaration is the zeroing form.
+                                        (reject ctx "J11"
+                                            ("'"
+                                                ++ name
+                                                ++ "' is a "
+                                                ++ typeStr aty
+                                                ++ " but the initialiser has "
+                                                ++ String.fromInt (List.length es)
+                                                ++ " element(s)"
+                                            ) |> withTitle "TYPE MISMATCH"
+                                            |> withHint
+                                                ("spell every element, or zero the WHOLE array with the bare declaration (`"
+                                                    ++ typeStr aty
+                                                    ++ " "
+                                                    ++ name
+                                                    ++ ";` — a memset) or `rawcall memset(base, 0, 40*N)`"
+                                                )
                                         )
 
                                 else
@@ -2485,14 +2976,15 @@ checkArrayBind ctx aty name init =
 
         _ ->
             Err
-                (ctx.key
-                    ++ ": an ARRAY binder needs an array type, got "
-                    ++ typeStr aty
-                    ++ " — the parser only produces this statement from `T[N] id`, so this is a lowering/checker drift"
+                -- INTERNAL RATIONALE: the parser only produces this statement
+                -- from `T[N] id`, so reaching here is a lowering/checker
+                -- drift, not a user mistake.
+                (reject ctx "INTERNAL"
+                    ("an ARRAY binder needs an array type, got " ++ typeStr aty)
                 )
 
 
-arrayElemWalk : Ctx -> Type -> String -> List Exp -> Int -> Result String ()
+arrayElemWalk : Ctx -> Type -> String -> List Exp -> Int -> Result MidcError ()
 arrayElemWalk ctx elem name es i =
     case es of
         [] ->
@@ -2500,18 +2992,32 @@ arrayElemWalk ctx elem name es i =
 
         e :: rest ->
             if elem == TFloat then
-                Err (ctx.key ++ ": J1: a float array element has no raw-memory seat")
+                -- J1: the same seat question as a float binder (Lower's
+                -- `rawFltArg`) and as a float field (J11's layout rule) —
+                -- there is no raw f64 element width to store.
+                Err
+                    (reject ctx "J1"
+                        ("element "
+                            ++ String.fromInt i
+                            ++ " of '"
+                            ++ name
+                            ++ "' is a float, which has no raw-memory seat"
+                        )
+                        |> withHint "hold the floats in a boxed `val` array, or convert to word/int"
+                    )
 
             else if isArrayTy elem then
                 Err
-                    (ctx.key
-                        ++ ": J11: element "
-                        ++ String.fromInt i
-                        ++ " of '"
-                        ++ name
-                        ++ "' — an ARRAY element cannot be initialised from a value ("
-                        ++ typeStr elem
-                        ++ " is itself an array): declare the array bare (zeroed) and store the leaves (`a[i][j] = e;`)"
+                    (reject ctx "J11"
+                        ("element "
+                            ++ String.fromInt i
+                            ++ " of '"
+                            ++ name
+                            ++ "' cannot be initialised from a value ("
+                            ++ typeStr elem
+                            ++ " is itself an array)"
+                        ) |> withTitle "TYPE MISMATCH"
+                        |> withHint "declare the array bare (zeroed) and store the leaves (`a[i][j] = e;`)"
                     )
 
             else
@@ -2525,15 +3031,17 @@ arrayElemWalk ctx elem name es i =
 
                         else
                             Err
-                                (ctx.key
-                                    ++ ": J1: element "
-                                    ++ String.fromInt i
-                                    ++ " of '"
-                                    ++ name
-                                    ++ "' needs "
-                                    ++ typeStr elem
-                                    ++ ", got "
-                                    ++ typeStr cls
+                                (reject ctx "J1"
+                                    ("element "
+                                        ++ String.fromInt i
+                                        ++ " of '"
+                                        ++ name
+                                        ++ "' needs "
+                                        ++ typeStr elem
+                                        ++ ", got "
+                                        ++ typeStr cls
+                                    )
+                                    |> withHint "convert the element, or declare the array with the element class it holds"
                                 )
 
 
@@ -2553,11 +3061,14 @@ pointer destination is a loud reject naming the rule), and the source must
 be the SAME struct value class — this is a word-for-word copy into storage
 that already exists.
 -}
-checkVarStore : Ctx -> String -> Exp -> Result String Ctx
+checkVarStore : Ctx -> String -> Exp -> Result MidcError Ctx
 checkVarStore ctx name e =
     case Dict.get name ctx.scope of
         Nothing ->
-            Err (ctx.key ++ ": J5: unbound name '" ++ name ++ "' in an assignment")
+            Err
+                (reject ctx "J5" ("unbound name '" ++ name ++ "' in an assignment")
+                    |> withHint "declare the binder above this statement (scope is strict order)"
+                )
 
         Just (TStruct sname) ->
             case checkExp ctx e of
@@ -2570,53 +3081,60 @@ checkVarStore ctx name e =
 
                     else
                         Err
-                            (ctx.key
-                                ++ ": J1: '"
-                                ++ name
-                                ++ "' is a "
-                                ++ sname
-                                ++ " but the assigned value is a "
-                                ++ other
-                                ++ " — a struct copy needs the SAME struct"
+                            (reject ctx "J1"
+                                ("'"
+                                    ++ name
+                                    ++ "' is a "
+                                    ++ sname
+                                    ++ " but the assigned value is a "
+                                    ++ other
+                                )
+                                |> withHint "a struct copy needs the SAME struct — copy the fields across instead"
                             )
 
                 Ok cls ->
                     Err
-                        (ctx.key
-                            ++ ": J1: '"
-                            ++ name
-                            ++ "' is a "
-                            ++ sname
-                            ++ " but the assigned value is "
-                            ++ typeStr cls
-                            ++ " — a struct copy needs a struct VALUE of the same type"
+                        (reject ctx "J1"
+                            ("'"
+                                ++ name
+                                ++ "' is a "
+                                ++ sname
+                                ++ " but the assigned value is "
+                                ++ typeStr cls
+                            )
+                            |> withHint "a struct copy needs a struct VALUE of the same type"
                         )
 
         Just (TArray _ _) ->
             Err
-                (ctx.key
-                    ++ ": J1: '"
-                    ++ name
-                    ++ "' is an ARRAY VALUE — an array cannot be assigned whole (that is an element-wise copy, not in v1): store the elements (`a[i] = e;`)"
+                -- J1: assigning an array whole would be an element-wise copy,
+                -- which is not in v1 — the elements are the seat.
+                (reject ctx "J1"
+                    ("'" ++ name ++ "' is an ARRAY VALUE, which cannot be assigned whole")
+                    |> withHint "store the elements one at a time (`a[i] = e;`)"
                 )
 
         Just TVal ->
             -- B4: a loop-carried `val` is the ONE shape this tier cannot
             -- lower, and the reject says exactly why instead of lowering a
-            -- store that does not exist.
+            -- store that does not exist.  Mid.Ir has NO node that stores a
+            -- Value into a binder's frame slot — a `recur`'s argument blit is
+            -- the backend's own staging, derived from the `App` node, not a
+            -- node a `Loop` can carry — so a val loop-carried across a back
+            -- edge would silently keep its OLD value.
             Err
-                (ctx.key
-                    ++ ": J1: '"
-                    ++ name
-                    ++ "' is a val — a `val` local cannot be ASSIGNED.  Mid.Ir has no node that stores a Value into a binder's frame slot (a `recur`'s argument blit is the backend's own staging, derived from the `App` node, not a node a Loop can carry), so a val loop-carried across a back edge would silently keep its OLD value.  Carry the changing state as a `recur` PARAMETER (the gcSweep idiom: `recur(v2);` at the tail of the body) — or keep it in raw memory (`val[N]` with the Q11 rooting rule).  Word-class locals (`word`/`int`/`bool`/`*T`) ARE assignable: they become `allocN` cells"
+                (reject ctx "J1"
+                    ("'" ++ name ++ "' is a val, and a `val` local cannot be assigned")
+                    |> withHint "carry the changing state as a `recur` PARAMETER (`recur(v2);` at the tail of the body), or keep it in raw memory (`val[N]` under the Q11 rooting rules)"
                 )
 
         Just TFloat ->
             Err
-                (ctx.key
-                    ++ ": J1: '"
-                    ++ name
-                    ++ "' is float — a float binder has no storage to assign (J1's float rule: float words are not let-bindable), so it cannot be assigned either"
+                -- J1's float rule, from the store side: there is no storage
+                -- seat for a float word, so there is nothing to assign.
+                (reject ctx "J1"
+                    ("'" ++ name ++ "' is float, and a float binder has no storage to assign")
+                    |> withHint "recompute the float at each use, or bind it boxed with `mkflt`"
                 )
 
         Just cls ->
@@ -2638,11 +3156,16 @@ checkVarStore ctx name e =
 
                         else
                             Err
-                                (ctx.key
-                                    ++ ": J1: '"
-                                    ++ name
-                                    ++ "' is a bool, so it can only be assigned a bool TEMP (a comparison, a `[bool](w)` cast, or another bool binder) — got "
-                                    ++ typeStr cls2
+                                -- J1's bool closure, from the store side: the
+                                -- binder is branchable only while its value is
+                                -- a raw 0/1 temp (see `isBoolTemp`).
+                                (reject ctx "J1"
+                                    ("'"
+                                        ++ name
+                                        ++ "' is a bool, so it can only be assigned a bool TEMP, got "
+                                        ++ typeStr cls2
+                                    )
+                                    |> withHint "assign a comparison, a `[bool](w)` cast, or another bool binder"
                                 )
 
                     else if coerce cls cls2 then
@@ -2654,13 +3177,15 @@ checkVarStore ctx name e =
 
                     else
                         Err
-                            (ctx.key
-                                ++ ": J1: '"
-                                ++ name
-                                ++ "' is "
-                                ++ typeStr cls
-                                ++ " but the assigned value is "
-                                ++ typeStr cls2
+                            (reject ctx "J1"
+                                ("'"
+                                    ++ name
+                                    ++ "' is "
+                                    ++ typeStr cls
+                                    ++ " but the assigned value is "
+                                    ++ typeStr cls2
+                                )
+                                |> withHint "convert the value, or declare the binder with the class it holds"
                             )
 
 
@@ -2680,7 +3205,7 @@ place at all), and a `val` FIELD (`&s.v` — a GC-interior address exposed
 as a raw word is the unrooted-view hazard; `vecaddr`/`payload` are the
 sanctioned reads, plan Q11).
 -}
-checkAddrOf : Ctx -> Exp -> Result String Type
+checkAddrOf : Ctx -> Exp -> Result MidcError Type
 checkAddrOf ctx e =
     case e of
         EField base f ->
@@ -2692,12 +3217,8 @@ checkAddrOf ctx e =
                     case fieldIn info.fields f of
                         Nothing ->
                             Err
-                                (ctx.key
-                                    ++ ": J13: struct '"
-                                    ++ sname
-                                    ++ "' has no field '"
-                                    ++ f
-                                    ++ "' to take the address of"
+                                (reject ctx "J13" ("struct '" ++ sname ++ "' has no field '" ++ f ++ "'") |> withTitle "UNKNOWN FIELD"
+                                    |> withHint "take the address of a declared field"
                                 )
 
                         Just sf ->
@@ -2713,8 +3234,8 @@ checkAddrOf ctx e =
 
                 Ok (TPtr _) ->
                     Err
-                        (ctx.key
-                            ++ ": J13: '&' of a pointer — the pointer IS an address; `&p` would mean the address of the PARAMETER/BINDER holding it, and a binder has no storage in this lowering (spilling it is the named v2)"
+                        (reject ctx "J13" "'&' of a pointer — a pointer IS an address" |> withTitle "NOT ADDRESSABLE"
+                            |> withHint "use the pointer itself (`p`, not `&p`)"
                         )
 
                 Ok cls ->
@@ -2728,10 +3249,9 @@ checkAddrOf ctx e =
 
                         Nothing ->
                             Err
-                                (ctx.key
-                                    ++ ": J13: '&' needs a struct value, an array value or a struct field with storage, got "
-                                    ++ typeStr cls
-                                    ++ " — a scalar local, a parameter and a temporary have no address in this lowering (a struct local (`S s;`), an array local (`word[N] a;`) or a struct field is the memory-backed seat)"
+                                (reject ctx "J13"
+                                    ("'&' needs a struct value, an array value or a struct field with storage, got " ++ typeStr cls) |> withTitle "NOT ADDRESSABLE"
+                                    |> withHint "back it with a struct local (`S s;`), an array local (`word[N] a;`) or a struct field"
                                 )
 
 
@@ -2744,27 +3264,35 @@ past the field's end into its neighbour.  There is no `*u16` family and this
 unit does not add one; the field is read and written through `p->f`, which
 carries the width.
 -}
-checkAddrOfField : Ctx -> String -> String -> StructField -> Result String Type
+checkAddrOfField : Ctx -> String -> String -> StructField -> Result MidcError Type
 checkAddrOfField ctx sname f sf =
     case sf.width of
         Just width ->
             Err
-                (ctx.key
-                    ++ ": J13: '&"
-                    ++ sname
-                    ++ "."
-                    ++ f
-                    ++ "' — a narrow field ("
-                    ++ ffiFieldWidthName width
-                    ++ ", "
-                    ++ String.fromInt (Maybe.withDefault 4 (Maybe.map Tuple.first (widthSizeAlign width)))
-                    ++ " bytes) has no address: the only pointer family here is `*word`, whose reads and writes are 8 bytes wide, so the address would licence overwriting the neighbouring fields. Read and write the field itself (`"
-                    ++ sname
-                    ++ "."
-                    ++ f
-                    ++ "` / `p->"
-                    ++ f
-                    ++ "`), which carries the width"
+                -- J13 RATIONALE: the only pointer family here is `*word`, whose
+            -- reads and writes are 8 bytes wide — a pointer to a 2-byte field
+            -- would licence overwriting its neighbours.  The field's own
+            -- access carries the width instead.
+                (reject ctx "J13"
+                    ("'&"
+                        ++ sname
+                        ++ "."
+                        ++ f
+                        ++ "' — a narrow field ("
+                        ++ ffiFieldWidthName width
+                        ++ ", "
+                        ++ String.fromInt (Maybe.withDefault 4 (Maybe.map Tuple.first (widthSizeAlign width)))
+                        ++ " bytes) has no address"
+                    ) |> withTitle "NOT ADDRESSABLE"
+                    |> withHint
+                        ("read and write the field itself (`"
+                            ++ sname
+                            ++ "."
+                            ++ f
+                            ++ "` / `p->"
+                            ++ f
+                            ++ "`), which carries the width"
+                        )
                 )
 
         Nothing ->
@@ -2774,12 +3302,8 @@ checkAddrOfField ctx sname f sf =
 
                 TVal ->
                     Err
-                        (ctx.key
-                            ++ ": J13: '&"
-                            ++ sname
-                            ++ "."
-                            ++ f
-                            ++ "' — a val field has no raw address: exposing a GC-interior pointer as a word is the unrooted-view hazard (use vecaddr/payload, plan Q11)"
+                        (reject ctx "J13" ("'&" ++ sname ++ "." ++ f ++ "' — a val field has no raw address") |> withTitle "NOT ADDRESSABLE"
+                            |> withHint "use `vecaddr`/`payload` (plan Q11)"
                         )
 
                 ty2 ->
@@ -2841,7 +3365,7 @@ struct, and `e`'s class must COERCE to the field's (the J12 matrix — a
 field is a word, so it stores).  A bool into a `val` field is the ONE
 implicit coercion (`coerce`'s bool→val row, boxed at lowering).
 -}
-checkFieldStore : Ctx -> Exp -> String -> Exp -> Result String Ctx
+checkFieldStore : Ctx -> Exp -> String -> Exp -> Result MidcError Ctx
 checkFieldStore ctx p f e =
     case structPointer ctx p of
         Err msg ->
@@ -2851,12 +3375,8 @@ checkFieldStore ctx p f e =
             case fieldTypeIn info.fields f of
                 Nothing ->
                     Err
-                        (ctx.key
-                            ++ ": J13: struct '"
-                            ++ sname
-                            ++ "' has no field '"
-                            ++ f
-                            ++ "' to store"
+                        (reject ctx "J13" ("struct '" ++ sname ++ "' has no field '" ++ f ++ "'") |> withTitle "UNKNOWN FIELD"
+                            |> withHint "store to a declared field"
                         )
 
                 Just fty ->
@@ -2881,8 +3401,8 @@ checkFieldStore ctx p f e =
 
                                     else
                                         Err
-                                            (ctx.key
-                                                ++ ": J13: store to field '"
+                                            (reject ctx "J13"
+                                                ("store to field '"
                                                 ++ sname
                                                 ++ "."
                                                 ++ f
@@ -2890,6 +3410,8 @@ checkFieldStore ctx p f e =
                                                 ++ typeStr fty
                                                 ++ ", got "
                                                 ++ typeStr vcls
+                                                )
+                                                |> withHint "convert the value, or declare the field with the class it has"
                                             )
 
 
@@ -2898,7 +3420,7 @@ family (word/val/struct-scaled word), the index is a word offset, and `e`
 coerces to the element class (a `val` into a `*word` slot is the pinned
 reject).
 -}
-checkIndexStore : Ctx -> Exp -> Exp -> Exp -> Result String Ctx
+checkIndexStore : Ctx -> Exp -> Exp -> Exp -> Result MidcError Ctx
 checkIndexStore ctx p i e =
     case checkExp ctx p of
         Err msg ->
@@ -2923,10 +3445,12 @@ checkIndexStore ctx p i e =
                             case elem of
                                 TArray _ _ ->
                                     Err
-                                        (ctx.key
-                                            ++ ": J13: an ARRAY element cannot be stored whole ("
+                                        (reject ctx "J13"
+                                            ("an ARRAY element cannot be stored whole ("
                                             ++ typeStr elem
-                                            ++ " is itself an array, so the store would be an element-wise copy): store the leaves (`a[i][j] = e;`)"
+                                            ++ " is itself an array)"
+                                            )
+                                            |> withHint "store the leaves (`a[i][j] = e;`)"
                                         )
 
                                 _ ->
@@ -2940,11 +3464,9 @@ checkIndexStore ctx p i e =
 
                                             else
                                                 Err
-                                                    (ctx.key
-                                                        ++ ": J13: store to an array element needs "
-                                                        ++ typeStr elem
-                                                        ++ ", got "
-                                                        ++ typeStr vcls
+                                                    (reject ctx "J13"
+                                                        ("store to an array element needs " ++ typeStr elem ++ ", got " ++ typeStr vcls)
+                                                        |> withHint "convert the value, or declare the array with the element class it holds"
                                                     )
 
         Ok (TPtr pty) ->
@@ -2978,20 +3500,21 @@ checkIndexStore ctx p i e =
 
                                             else
                                                 Err
-                                                    (ctx.key
-                                                        ++ ": J13: store to '"
+                                                    (reject ctx "J13"
+                                                        ("store to '"
                                                         ++ typeStr (TPtr pty)
                                                         ++ "' element needs "
                                                         ++ typeStr elemTy
                                                         ++ ", got "
                                                         ++ typeStr vcls
+                                                        )
+                                                        |> withHint "convert the value"
                                                     )
 
         Ok cls ->
             Err
-                (ctx.key
-                    ++ ": J13: index store needs a pointer target, got "
-                    ++ typeStr cls
+                (reject ctx "J13" ("index store needs a pointer target, got " ++ typeStr cls)
+                    |> withHint "store through a pointer (`p[i] = e;`)"
                 )
 
 
@@ -2999,7 +3522,7 @@ checkIndexStore ctx p i e =
 pointer and return `(struct name, its layout)`.  Anything else is a loud
 reject (field access on a `*word`/`*val`/non-pointer).
 -}
-structPointer : Ctx -> Exp -> Result String ( String, StructInfo )
+structPointer : Ctx -> Exp -> Result MidcError ( String, StructInfo )
 structPointer ctx p =
     case checkExp ctx p of
         Err msg ->
@@ -3017,20 +3540,20 @@ structPointer ctx p =
 
         Ok (TPtr pty) ->
             Err
-                (ctx.key
-                    ++ ": J13: field access needs a struct pointer or a struct value, got "
-                    ++ typeStr (TPtr pty)
+                (reject ctx "J13"
+                    ("field access needs a struct pointer or a struct value, got " ++ typeStr (TPtr pty))
+                    |> withHint "dereference to the struct value first, or hold the struct as a `*S`"
                 )
 
         Ok cls ->
             Err
-                (ctx.key
-                    ++ ": J13: field access needs a struct pointer or a struct value, got "
-                    ++ typeStr cls
+                (reject ctx "J13"
+                    ("field access needs a struct pointer or a struct value, got " ++ typeStr cls)
+                    |> withHint "a scalar has no fields — spell the struct value or a `*S` pointer"
                 )
 
 
-structAt : Ctx -> String -> String -> Result String ( String, StructInfo )
+structAt : Ctx -> String -> String -> Result MidcError ( String, StructInfo )
 structAt ctx sname what =
     case Dict.get sname ctx.env.structs of
         Just info ->
@@ -3038,10 +3561,8 @@ structAt ctx sname what =
 
         Nothing ->
             Err
-                (ctx.key
-                    ++ ": J11: field access on '"
-                    ++ what
-                    ++ "' — no such struct is declared"
+                (reject ctx "J11" ("field access on '" ++ what ++ "' — no such struct is declared") |> withTitle "UNKNOWN STRUCT"
+                    |> withHint "declare the struct above this statement"
                 )
 
 
@@ -3083,7 +3604,7 @@ stride), `*S` -> word (struct-scaled — the WORD at the element base,
 `RawWordLoad { index = i * sizeofS }` per round-1 §3; v1 has no struct
 values to yield).
 -}
-indexClass : Ctx -> PTy -> Result String Type
+indexClass : Ctx -> PTy -> Result MidcError Type
 indexClass ctx pty =
     case pty of
         PWord ->
@@ -3099,18 +3620,16 @@ indexClass ctx pty =
 
                 Nothing ->
                     Err
-                        (ctx.key
-                            ++ ": J11: index access on '*"
-                            ++ sname
-                            ++ "' — no such struct is declared"
-                        )
+                        (reject ctx "J11" ("index access on '*" ++ sname ++ "' — no such struct is declared") |> withTitle "UNKNOWN STRUCT"
+                            |> withHint ("declare `struct " ++ sname ++ "` above this statement")
+                    )
 
 
 {-| J13 — the index of `p[i]` is a word offset (the `wload`/`vecload`
 contract; the struct-scaled `*S` index is still a WORD element index, the
 `sizeofS` multiply happens at lowering).
 -}
-wordIndex : Ctx -> Exp -> Result String ()
+wordIndex : Ctx -> Exp -> Result MidcError ()
 wordIndex ctx i =
     case checkExp ctx i of
         Err msg ->
@@ -3121,13 +3640,12 @@ wordIndex ctx i =
 
         Ok cls ->
             Err
-                (ctx.key
-                    ++ ": J13: index must be a word offset, got "
-                    ++ typeStr cls
+                (reject ctx "J13" ("index must be a word offset, got " ++ typeStr cls)
+                    |> withHint "convert the index with `[word](..)` or `int`"
                 )
 
 
-checkTerm : Ctx -> Term -> Result String Type
+checkTerm : Ctx -> Term -> Result MidcError Type
 checkTerm ctx term =
     case term of
         TRet e ->
@@ -3139,11 +3657,13 @@ checkTerm ctx term =
             case frameAddrOf ctx e of
                 Just why ->
                     Err
-                        (ctx.key
-                            ++ ": J13: 'return "
-                            ++ why
-                            ++ "' returns the ADDRESS of this frame's own storage — a struct/array local lives in an `allocN` block the frame reclaims at exit, so the caller would hold a dangling pointer (and the runtime is free to reuse those bytes).  Return a heap block instead (`rawcall malloc(..)`), write the result through an OUT-PARAMETER, or return the value by copy"
-                        )
+                        -- J13 RATIONALE: a struct/array local lives in an `allocN` block
+                            -- the frame reclaims at exit, so the caller would hold a
+                            -- DANGLING pointer — and the runtime is free to reuse
+                            -- those bytes.
+                            (reject ctx "J13" ("'return " ++ why ++ "' returns the ADDRESS of this frame's own storage") |> withTitle "DANGLING POINTER"
+                                |> withHint "return a heap block (`rawcall malloc(..)`), write the result through an OUT-PARAMETER, or return the value by copy"
+                            )
 
                 Nothing ->
                     case checkExp ctx e of
@@ -3156,12 +3676,14 @@ checkTerm ctx term =
 
                             else
                                 Err
-                                    (ctx.key
-                                        ++ ": J6: return is "
-                                        ++ typeStr cls
-                                        ++ " but '-> "
-                                        ++ typeStr ctx.ret
-                                        ++ "' is declared"
+                                    (reject ctx "J6"
+                                        ("return is "
+                                            ++ typeStr cls
+                                            ++ " but '-> "
+                                            ++ typeStr ctx.ret
+                                            ++ "' is declared"
+                                        )
+                                        |> withHint "return the declared class, or change the signature"
                                     )
 
         TRecur args ->
@@ -3184,8 +3706,12 @@ checkTerm ctx term =
 
                     else
                         Err
-                            (ctx.key
-                                ++ ": J7: a terminating 'if' without 'else' needs a diverging then-branch — the false path is the block's fall-through, and a falling then-branch leaves it with no value"
+                            -- J7: without an `else` the FALSE path is the
+                            -- block's fall-through, so the then-branch must
+                            -- diverge or that path leaves with no value.
+                            (reject ctx "J7"
+                                "a terminating 'if' without 'else' needs a diverging then-branch"
+                                |> withHint "add the `else`, or make the then-branch `return`/`recur`"
                             )
 
 
@@ -3201,7 +3727,7 @@ enclosing branch diverge — the branch can still fall through the inner
 -}
 diverges : Block -> Bool
 diverges b =
-    case b.term of
+    case b.term.node of
         TRet _ ->
             True
 
@@ -3242,17 +3768,19 @@ loop depth the statement walk threads (`Ctx.loops`), so a leaf in a loop's
 condition, in a defun body with no loop, or in a `for` head is a loud reject
 here rather than a backend error at emit time.
 -}
-breakLike : Ctx -> String -> Result String Type
+breakLike : Ctx -> String -> Result MidcError Type
 breakLike ctx what =
     if ctx.loops > 0 then
         Ok ctx.ret
 
     else
         Err
-            (ctx.key
-                ++ ": J7: '"
-                ++ what
-                ++ ";' outside any loop — break/continue leave a loop, so there must be one enclosing them (the nearest loop is the one they leave, so nesting needs no labels)"
+            -- J7: `break`/`continue` leave a loop, so one must enclose them.
+            -- The NEAREST loop is the one they leave, so nesting needs no
+            -- labels.
+            (reject ctx "J7"
+                ("'" ++ what ++ ";' outside any loop")
+                |> withHint "move it inside the loop's body (the nearest loop is the one it leaves)"
             )
 
 
@@ -3318,14 +3846,15 @@ structBaseIsPointer ctx p =
 message, so the three sites (`return`, a field store through a pointer, an
 index store through a pointer) cannot drift apart.
 -}
-frameEscapeMsg : Ctx -> String -> String -> String
+frameEscapeMsg : Ctx -> String -> String -> MidcError
 frameEscapeMsg ctx site why =
-    ctx.key
-        ++ ": J13: "
-        ++ site
-        ++ " — "
-        ++ why
-        ++ " is the ADDRESS of this frame's own storage, and it is being put somewhere that outlives the frame: a struct/array local lives in an `allocN` block the frame reclaims at exit (B4b moved those off `malloc`), so a pointer kept past its defun dangles into whatever the next call puts there.  Take the address of a HEAP block instead (`*T p = rawcall malloc(..)`), store into a SAME-FRAME aggregate (`s.f = &t`, `a[0] = &t`), or pass it as a CALL ARGUMENT while the owner is still live"
+    reject ctx "J13"
+        (site
+            ++ " — "
+            ++ why
+            ++ " is the ADDRESS of this frame's own storage, and it is being put somewhere that outlives the frame"
+        ) |> withTitle "DANGLING POINTER"
+        |> withHint "take the address of a HEAP block instead (`*T p = rawcall malloc(..)`), store into a SAME-FRAME aggregate (`s.f = &t`, `a[0] = &t`), or pass it as a CALL ARGUMENT while the owner is still live"
 
 
 {-| B4b/J13 — THE ESCAPE RULE: does `e` hand back the ADDRESS of THIS
@@ -3571,7 +4100,7 @@ wrong arity would silently stop being a loop (a plain call + bounce).
 The class check on each argument is the same contract as `call` (J2):
 the callee's declared parameter classes.
 -}
-checkRecur : Ctx -> List Exp -> Result String Type
+checkRecur : Ctx -> List Exp -> Result MidcError Type
 checkRecur ctx args =
     if List.length args == List.length ctx.params then
         case
@@ -3590,14 +4119,16 @@ checkRecur ctx args =
 
     else
         Err
-            (ctx.key
-                ++ ": J4: recur passes "
-                ++ String.fromInt (List.length args)
-                ++ " argument(s) but '"
-                ++ ctx.key
-                ++ "' declares "
-                ++ String.fromInt (List.length ctx.params)
-                ++ " parameter(s) — an unsaturated recur would be demoted to a plain call: the loop stops being a loop"
+            (reject ctx "J4"
+                ("recur passes "
+                    ++ String.fromInt (List.length args)
+                    ++ " argument(s) but '"
+                    ++ ctx.key
+                    ++ "' declares "
+                    ++ String.fromInt (List.length ctx.params)
+                    ++ " parameter(s)"
+                )
+                |> withHint "pass exactly the parameters: a recur of the wrong arity is demoted to a plain call, so the loop stops being a loop"
             )
 
 
@@ -3610,7 +4141,7 @@ a bare word VARIABLE and a word-VALUED join are rejects — see
 The divergence rules around it are J7's — checked by the SIf arm of
 `checkStmt` and the `TIf` arm of `checkTerm`, not here.
 -}
-checkIf : Ctx -> Exp -> Block -> Maybe Block -> Result String Type
+checkIf : Ctx -> Exp -> Block -> Maybe Block -> Result MidcError Type
 checkIf ctx c t me =
     case checkCond ctx c of
         Err msg ->
@@ -3635,7 +4166,7 @@ checkIf ctx c t me =
                             Ok tCls
 
 
-checkCond : Ctx -> Exp -> Result String Type
+checkCond : Ctx -> Exp -> Result MidcError Type
 checkCond ctx c =
     case checkExp ctx c of
         Err msg ->
@@ -3655,10 +4186,18 @@ checkCond ctx c =
             case unboxedValCond c of
                 Just what ->
                     Err
-                        (ctx.key
-                            ++ ": J1: 'if' condition is "
-                            ++ what
-                            ++ " — a `val` condition must be a BOXED BOOL (mkbool(..), `&&`/`||`, or a `val` binder/call that holds one).  The value test is false only for a boolean with payload 0 and TRUE for every other tag, so this branch is always taken: a silent wrong branch, not a test"
+                        -- J1/B7: the value test (`jmpf`) is FALSE only for a
+                        -- boolean with payload 0 and TRUE for every other tag,
+                        -- so one of these conditions is ALWAYS taken — a
+                        -- silent wrong branch, not a test.  `unboxedValCond`
+                        -- is the provable sliver (the fixed-tag `mk*`
+                        -- builders, a string literal).
+                        (reject ctx "J1"
+                            ("'if' condition is "
+                                ++ what
+                                ++ ", which is not a BOXED BOOL"
+                            )
+                            |> withHint "write `if (mkbool(a == b))`, `if (x && y)`, or branch on a `val` binder that holds a bool"
                         )
 
                 Nothing ->
@@ -3676,8 +4215,9 @@ checkCond ctx c =
             -- P1c.
             if isConstExp c then
                 Err
-                    (ctx.key
-                        ++ ": J1: 'if' condition is a CONSTANT bool — a constant branch is not a test (write the compare inline)"
+                    (reject ctx "J1"
+                        "'if' condition is a CONSTANT bool" |> withTitle "BAD CONDITION"
+                        |> withHint "a constant branch is not a test — write the compare inline"
                     )
 
             else
@@ -3717,27 +4257,40 @@ checkCond ctx c =
             case c of
                 EIf _ _ _ ->
                     Err
-                        (ctx.key
-                            ++ ": J1: 'if' condition is a word-valued '?:' join — a bare word test is needed (box it with mkbool or restructure)"
+                        (reject ctx "J1"
+                            "'if' condition is a word-valued '?:' join" |> withTitle "BAD CONDITION"
+                            |> withHint "box it with `mkbool(..)`, or restructure so the condition is the compare itself"
                         )
 
                 EIfBlock _ _ _ ->
                     Err
-                        (ctx.key
-                            ++ ": J1: 'if' condition is a word-valued 'if' join — a bare word test is needed (box it with mkbool or restructure)"
+                        (reject ctx "J1"
+                            "'if' condition is a word-valued 'if' join" |> withTitle "BAD CONDITION"
+                            |> withHint "box it with `mkbool(..)`, or restructure so the condition is the compare itself"
                         )
 
                 EVar _ ->
                     Err
-                        (ctx.key
-                            ++ ": J1: 'if' condition is a bare word variable — only a word PRODUCER (a compare/tagis/…) jumps directly; a binder's representation is the lowering's, not the checker's (write the compare inline, or bind it `bool` and branch on that)"
+                        -- J1: a word-VALUED join or a word VARIABLE has no
+                        -- bare test — admitting one would box the 0/1 as a
+                        -- NUMBER that `jmpf` silently misreads (tag 0 /=
+                        -- tagBoolean, so always truthy).  A binder whose
+                        -- initialiser is not a raw-word producer is slot-boxed
+                        -- as a number, and the checker cannot see the
+                        -- lowering's representation — a `bool` binder IS
+                        -- branchable because its representation is the
+                        -- CLASS's (see the TBool arm).
+                        (reject ctx "J1"
+                            "'if' condition is a bare word variable" |> withTitle "BAD CONDITION"
+                            |> withHint "only a word PRODUCER (a compare, tagis, a word builtin/rawcall) jumps directly — write the compare inline, or bind it `bool` and branch on that"
                         )
 
                 _ ->
                     if isConstExp c then
                         Err
-                            (ctx.key
-                                ++ ": J1: 'if' condition is a CONSTANT word — a constant branch is not a test (write the compare inline)"
+                            (reject ctx "J1"
+                                "'if' condition is a CONSTANT word" |> withTitle "BAD CONDITION"
+                                |> withHint "a constant branch is not a test — write the compare inline"
                             )
 
                     else
@@ -3745,9 +4298,15 @@ checkCond ctx c =
 
         Ok cls ->
             Err
-                (ctx.key
-                    ++ ": J1: 'if' condition must be val or word — a float word cannot branch, got "
-                    ++ typeStr cls
+                -- The rule and the hint are CLASS-NEUTRAL on purpose: this arm
+                -- receives every class that is neither `val`, `bool` nor
+                -- `word` — float, pointer, struct, array — and the hint used
+                -- to name only the float remedy, which is no remedy for the
+                -- other three.  The general rule is that a branch needs a
+                -- TEST, and the classes above have no bare test.
+                (reject ctx "J1"
+                    ("'if' condition must be val or word, got " ++ typeStr cls)
+                    |> withHint "only a `val`, a `bool`, or a word PRODUCER can branch — write the compare (`mkbool(a < b)`); a float must also be boxed (`mkflt`)"
                 )
 
 
@@ -3828,7 +4387,7 @@ family's, a form its table row's.  The forms whose class is COMPUTED are
 `EIf` and `EIfBlock` (T23): their branches must agree (checked right
 here) and the agreed class is the form's.
 -}
-checkExp : Ctx -> Exp -> Result String Type
+checkExp : Ctx -> Exp -> Result MidcError Type
 checkExp ctx e =
     case e of
         EInt _ ->
@@ -3860,7 +4419,11 @@ checkExp ctx e =
                     Ok ty
 
                 Nothing ->
-                    Err (ctx.key ++ ": J5: unbound name '" ++ name ++ "'")
+                    Err
+                        (reject ctx "J5"
+                            ("unbound name '" ++ name ++ "'")
+                            |> withHint "declare the binder above this use (scope is strict order), or check the spelling"
+                        )
 
         EAddrOf inner ->
             checkAddrOf ctx inner
@@ -3965,12 +4528,8 @@ checkExp ctx e =
 
                         Nothing ->
                             Err
-                                (ctx.key
-                                    ++ ": J13: struct '"
-                                    ++ sname
-                                    ++ "' has no field '"
-                                    ++ f
-                                    ++ "'"
+                                (reject ctx "J13" ("struct '" ++ sname ++ "' has no field '" ++ f ++ "'") |> withTitle "UNKNOWN FIELD"
+                                    |> withHint "spell a declared field"
                                 )
 
         EIndex p i ->
@@ -4008,9 +4567,8 @@ checkExp ctx e =
 
                 Ok cls ->
                     Err
-                        (ctx.key
-                            ++ ": J13: index access needs a pointer, got "
-                            ++ typeStr cls
+                        (reject ctx "J13" ("index access needs a pointer, got " ++ typeStr cls)
+                            |> withHint "index through a pointer (`p[i]`)"
                         )
 
         EDeref p ->
@@ -4023,16 +4581,14 @@ checkExp ctx e =
 
                 Ok (TPtr pty) ->
                     Err
-                        (ctx.key
-                            ++ ": J13: deref '*p' is '*word' only, got "
-                            ++ typeStr (TPtr pty)
+                        (reject ctx "J13" ("deref '*p' is '*word' only, got " ++ typeStr (TPtr pty))
+                            |> withHint "read the field instead (`p->f`)"
                         )
 
                 Ok cls ->
                     Err
-                        (ctx.key
-                            ++ ": J13: deref needs a '*word' pointer, got "
-                            ++ typeStr cls
+                        (reject ctx "J13" ("deref needs a '*word' pointer, got " ++ typeStr cls)
+                            |> withHint "take the pointer from a `*word` binder"
                         )
 
 
@@ -4048,15 +4604,16 @@ bool-valued `If` would put a raw word where the lowering expects a value
 two compares where they are branched or let the join be a `:val`
 (`mkbool(..)`), which is the shape the corpus already uses.
 -}
-joinClass : Ctx -> String -> Type -> Type -> Result String Type
+joinClass : Ctx -> String -> Type -> Type -> Result MidcError Type
 joinClass ctx what thnCls elsCls =
     if thnCls == elsCls then
         if thnCls == TBool then
             Err
-                (ctx.key
-                    ++ ": J1: "
-                    ++ what
-                    ++ " branches agree on bool — a bool value is a raw 0/1 TEMP, and a join needs a slot (it would be read back as a NUMBER): branch each compare where it is written, or make the join a `:val` with mkbool(..)"
+                -- J1: a bool VALUE is a raw 0/1 TEMP and a join needs a
+                -- slot, so the joined bool would be read back as a NUMBER.
+                (reject ctx "J1"
+                    (what ++ " branches agree on bool")
+                    |> withHint "branch each compare where it is written, or make the join a `:val` with `mkbool(..)`"
                 )
 
         else
@@ -4072,14 +4629,14 @@ joinClass ctx what thnCls elsCls =
 
     else
         Err
-            (ctx.key
-                ++ ": J1: "
-                ++ what
-                ++ " branches disagree — then is "
-                ++ typeStr thnCls
-                ++ ", else is "
-                ++ typeStr elsCls
-                ++ " (the value join needs ONE class)"
+            (reject ctx "J1"
+                (what
+                    ++ " branches disagree — then is "
+                    ++ typeStr thnCls
+                    ++ ", else is "
+                    ++ typeStr elsCls
+                )
+                |> withHint "a value join needs ONE class — convert one branch, or split the join"
             )
 
 
@@ -4107,7 +4664,7 @@ POINTER cast (`[*T2](p)`), which is J12's matrix spelled as a cast: go
 through a `word` binder, one named line.  A FLOAT<->INT conversion is the
 two explicit rows above, never implicit.
 -}
-castClass : Ctx -> Type -> Exp -> Result String Type
+castClass : Ctx -> Type -> Exp -> Result MidcError Type
 castClass ctx target inner =
     case validateType ctx target of
         Err msg ->
@@ -4139,12 +4696,14 @@ castClass ctx target inner =
 
                     else
                         Err
-                            (ctx.key
-                                ++ ": J10: cast to "
-                                ++ typeStr target
-                                ++ " from "
-                                ++ typeStr src
-                                ++ " is not in the cast matrix — legal: [word]/[int] of word|pointer|bool, [bool] of word|bool, [*T] of word, [float]/[word] of the other, [val] of bool; a `val` cast (either direction) and a pointer->pointer cast are REJECTS (go through a `word` binder)"
+                            -- J10 RATIONALE: the matrix is the set of casts whose emitted
+                            -- node exists — there is no `val` <-> word cast
+                            -- (boxing is `mkval`/`payload`) and no
+                            -- pointer->pointer cast (that is a `word` binder
+                            -- away), so listing the legal rows IS the law.
+                            (reject ctx "J10"
+                                ("cast to " ++ typeStr target ++ " from " ++ typeStr src ++ " is not in the cast matrix") |> withTitle "TYPE MISMATCH"
+                                |> withHint "legal: [word]/[int] of word|pointer|bool, [bool] of word|bool, [*T] of word, [float]/[word] of the other, [val] of bool"
                             )
 
 
@@ -4156,7 +4715,7 @@ word-quantised).  A struct reads the ONE table the checker already built
 a float FIELD: Mid.Ir has no raw-memory f64 load node, so a float's raw
 width is a number this language cannot honour.
 -}
-sizeofWords : Ctx -> SizeTarget -> Result String Int
+sizeofWords : Ctx -> SizeTarget -> Result MidcError Int
 sizeofWords ctx target =
     case target of
         SizeStruct name ->
@@ -4166,10 +4725,8 @@ sizeofWords ctx target =
 
                 Nothing ->
                     Err
-                        (ctx.key
-                            ++ ": J11: sizeof("
-                            ++ name
-                            ++ ") — no such struct is declared in this module"
+                        (reject ctx "J11" ("sizeof(" ++ name ++ ") — no such struct is declared in this module") |> withTitle "UNKNOWN STRUCT"
+                            |> withHint ("declare `struct " ++ name ++ "` in this module")
                         )
 
         SizeType ty ->
@@ -4181,10 +4738,8 @@ sizeofWords ctx target =
 
                         Nothing ->
                             Err
-                                (ctx.key
-                                    ++ ": J11: sizeof("
-                                    ++ sname
-                                    ++ ") — no such struct is declared in this module"
+                                (reject ctx "J11" ("sizeof(" ++ sname ++ ") — no such struct is declared in this module") |> withTitle "UNKNOWN STRUCT"
+                                    |> withHint ("declare `struct " ++ sname ++ "` in this module")
                                 )
 
                 TWord ->
@@ -4213,8 +4768,12 @@ sizeofWords ctx target =
 
                 TFloat ->
                     Err
-                        (ctx.key
-                            ++ ": J1: sizeof(float) — Mid.Ir has no raw-memory f64 seat, so a float's word width is not a thing this language can promise (the J11 float-field rule, same reason)"
+                        -- J1: Mid.Ir has no raw-memory f64 seat (the J11
+                        -- float-field rule, same reason), so a float's WORD
+                        -- width is not a thing this language can promise.
+                        (reject ctx "J1"
+                            "sizeof(float) has no answer"
+                            |> withHint "a float is a raw register word with no storage width — ask sizeof of a word/int/struct/pointer instead"
                         )
 
 
@@ -4225,7 +4784,7 @@ EXISTING values for the block's duration, it does not create them.  A
 unknown id is a reject.  Inside the block the ids are re-bound `:val` by
 `bindRoots` — T4's half, what the roots ARE.
 -}
-checkRoots : Ctx -> List String -> Result String ()
+checkRoots : Ctx -> List String -> Result MidcError ()
 checkRoots ctx ids =
     case ids of
         [] ->
@@ -4238,20 +4797,15 @@ checkRoots ctx ids =
 
                 Just cls ->
                     Err
-                        (ctx.key
-                            ++ ": J10: withroots id '"
-                            ++ id
-                            ++ "' is a "
-                            ++ typeStr cls
-                            ++ " binder — only val binders can be rooted"
+                        (reject ctx "J10"
+                            ("withroots id '" ++ id ++ "' is a " ++ typeStr cls ++ " binder") |> withTitle "TYPE MISMATCH"
+                            |> withHint "only val binders can be rooted"
                         )
 
                 Nothing ->
                     Err
-                        (ctx.key
-                            ++ ": J10: withroots id '"
-                            ++ id
-                            ++ "' is not a binder in scope"
+                        (reject ctx "J10" ("withroots id '" ++ id ++ "' is not a binder in scope")
+                            |> withHint "declare the val binder above this statement"
                         )
 
 
@@ -4269,7 +4823,7 @@ UNION externs, arity and per-argument classes against the callee's
 declared signature (extern seats: all-`:val`, matching today's Rt
 surface).
 -}
-checkCall : Ctx -> Key -> List Exp -> Result String Type
+checkCall : Ctx -> Key -> List Exp -> Result MidcError Type
 checkCall ctx key args =
     if isQualifiedKey key then
         case resolveCall ctx.env key of
@@ -4283,18 +4837,16 @@ checkCall ctx key args =
 
             Nothing ->
                 Err
-                    (ctx.key
-                        ++ ": J2: call target '"
-                        ++ key
-                        ++ "' resolves to no surface defun and no extern seat (unseeded key)"
+                    (reject ctx "J2"
+                        ("call target '" ++ key ++ "' resolves to no defun and no extern")
+                        |> withHint "spell an existing key, or declare the callee/`extern` in this module"
                     )
 
     else
         Err
-            (ctx.key
-                ++ ": J2: call target '"
-                ++ key
-                ++ "' must be a namespace-qualified 'Mod.name' key"
+            (reject ctx "J2"
+                ("call target '" ++ key ++ "' must be a namespace-qualified 'Mod.name' key") |> withTitle "NAMING PROBLEM"
+                |> withHint "qualify the callee with its module name (`Rt.` for the runtime)"
             )
 
 
@@ -4389,7 +4941,7 @@ project ty =
 R-08 (J15) forbids a symbol being in BOTH tables, so the order here is a
 defence, not a precedence rule; R-15's existing message is arm 2's.
 -}
-checkRawCall : Ctx -> Sym -> List Exp -> Result String Type
+checkRawCall : Ctx -> Sym -> List Exp -> Result MidcError Type
 checkRawCall ctx sym args =
     case Dict.get sym ctx.env.ffi of
         Just sig ->
@@ -4403,15 +4955,14 @@ checkRawCall ctx sym args =
 so the declared arm reads as the new rule and the old one stays visibly
 unchanged.
 -}
-checkRawCallTable : Ctx -> Sym -> List Exp -> Result String Type
+checkRawCallTable : Ctx -> Sym -> List Exp -> Result MidcError Type
 checkRawCallTable ctx sym args =
     case Dict.get sym rawcallArity of
         Nothing ->
             Err
-                (ctx.key
-                    ++ ": J3: rawcall symbol '"
-                    ++ sym
-                    ++ "' is in no signature table — add it to Ast.rawcallArity (stage-6 rawAbi seats must join the table when they land)"
+                (reject ctx "J3"
+                    ("rawcall symbol '" ++ sym ++ "' is in no signature table")
+                    |> withHint "declare it `extern` in this module, or add it to `Ast.rawcallArity`"
                 )
 
         Just n ->
@@ -4432,13 +4983,15 @@ checkRawCallTable ctx sym args =
 
             else
                 Err
-                    (ctx.key
-                        ++ ": J3: rawcall '"
-                        ++ sym
-                        ++ "' takes "
-                        ++ String.fromInt n
-                        ++ " word argument(s), got "
-                        ++ String.fromInt (List.length args)
+                    (reject ctx "J3"
+                        ("rawcall '"
+                            ++ sym
+                            ++ "' takes "
+                            ++ String.fromInt n
+                            ++ " word argument(s), got "
+                            ++ String.fromInt (List.length args)
+                        ) |> withTitle "BAD ARITY"
+                        |> withHint "pass exactly the arguments the table row declares"
                     )
 
 
@@ -4467,7 +5020,7 @@ everything (plan §3.1/§3.2's tables).
     lowered as a `d` temp (cffi U3), so R-16 is the existing word-binder
     wording — the checker never lets a `d` result into a word slot.
 -}
-checkExternCall : Ctx -> Sym -> FfiSig -> List Exp -> Result String Type
+checkExternCall : Ctx -> Sym -> FfiSig -> List Exp -> Result MidcError Type
 checkExternCall ctx sym sig args =
     let
         fixed =
@@ -4478,26 +5031,30 @@ checkExternCall ctx sym sig args =
     in
     if got < fixed then
         Err
-            (ctx.key
-                ++ ": J3: rawcall '"
-                ++ sym
-                ++ "' is declared extern with "
-                ++ String.fromInt fixed
-                ++ " fixed parameter(s), got "
-                ++ String.fromInt got
+            (reject ctx "J3"
+                ("rawcall '"
+                    ++ sym
+                    ++ "' is declared extern with "
+                    ++ String.fromInt fixed
+                    ++ " fixed parameter(s), got "
+                    ++ String.fromInt got
+                ) |> withTitle "BAD ARITY"
+                |> withHint "pass every declared parameter — `...` does not make the fixed half optional"
             )
 
     else if got > fixed && not sig.varargs then
         -- R-12: too MANY arguments, and the declaration has no `...` to
         -- absorb them.
         Err
-            (ctx.key
-                ++ ": J3: rawcall '"
-                ++ sym
-                ++ "' is declared extern with "
-                ++ String.fromInt fixed
-                ++ " parameter(s) and no '...', got "
-                ++ String.fromInt got
+            (reject ctx "J3"
+                ("rawcall '"
+                    ++ sym
+                    ++ "' is declared extern with "
+                    ++ String.fromInt fixed
+                    ++ " parameter(s) and no '...', got "
+                    ++ String.fromInt got
+                ) |> withTitle "BAD ARITY"
+                |> withHint "drop the extra arguments, or declare the extern with `...`"
             )
 
     else
@@ -4540,7 +5097,7 @@ from exactly those `d`-class arguments, and that count is the one thing on this
 path nothing on our side verifies.  The message says so and names the version,
 so a future reader sees a decision rather than an accident.
 -}
-firstVariadicProblem : Ctx -> Sym -> List Exp -> Maybe String
+firstVariadicProblem : Ctx -> Sym -> List Exp -> Maybe MidcError
 firstVariadicProblem ctx sym args =
     case args of
         [] ->
@@ -4552,11 +5109,14 @@ firstVariadicProblem ctx sym args =
                     Just msg
 
                 Ok TFloat ->
+                    -- J3: a `double` among the `...` arguments would change
+                    -- QBE's vector-register count (`%al`), and that count is
+                    -- the one thing on this path nothing on our side verifies
+                    -- (cffi U4's v1 hole, stated as a decision).
                     Just
-                        (ctx.key
-                            ++ ": J3: rawcall '"
-                            ++ sym
-                            ++ "' — a variadic argument must be word-class in this version: an `f64` among the '...' arguments changes QBE's vector-register count (%al), and that count is not built for it yet (cffi U4 v1 restriction).  Pass a pointer to the double, or declare a non-variadic extern"
+                        (reject ctx "J3"
+                            ("rawcall '" ++ sym ++ "' — a variadic argument must be word-class in this version, got float") |> withTitle "TYPE MISMATCH"
+                            |> withHint "pass a pointer to the double, or declare a non-variadic extern"
                         )
 
                 Ok cls ->
@@ -4565,11 +5125,13 @@ firstVariadicProblem ctx sym args =
 
                     else
                         Just
-                            (ctx.key
-                                ++ ": J3: rawcall '"
-                                ++ sym
-                                ++ "' takes word-class variadic arguments, got "
-                                ++ typeStr cls
+                            (reject ctx "J3"
+                                ("rawcall '"
+                                    ++ sym
+                                    ++ "' takes word-class variadic arguments, got "
+                                    ++ typeStr cls
+                                ) |> withTitle "TYPE MISMATCH"
+                                |> withHint "pass a word/int/pointer, or unbox the value first"
                             )
 
 
@@ -4634,7 +5196,7 @@ val").  The driver reaches the Value by PASSING the sret ADDRESS to the
 rt_is_program/rt_run_program/rt_print_value seats — no Mid :val binder is
 ever materialised, which is exactly the driver's shape.
 -}
-checkAggCall : Ctx -> AggShape -> Exp -> List Exp -> Result String Type
+checkAggCall : Ctx -> AggShape -> Exp -> List Exp -> Result MidcError Type
 checkAggCall ctx shape fnExp args =
     case checkExp ctx fnExp of
         Err msg ->
@@ -4657,9 +5219,11 @@ checkAggCall ctx shape fnExp args =
 
         Ok cls ->
             Err
-                (ctx.key
-                    ++ ": J1: aggcall fn must be word (the runtime code pointer), got "
-                    ++ typeStr cls
+                (reject ctx "J1"
+                    ("aggcall fn must be word (the runtime code pointer), got "
+                        ++ typeStr cls
+                    )
+                    |> withHint "pass the code pointer as a word"
                 )
 
 
@@ -4668,7 +5232,7 @@ arguments are checked positionally against `Sig`'s operand classes, the
 result is `Sig`'s.  The one variadic form (`mkval`) dispatches to
 `checkMkVal`.
 -}
-checkSig : Ctx -> String -> Sig -> List Exp -> Result String Type
+checkSig : Ctx -> String -> Sig -> List Exp -> Result MidcError Type
 checkSig ctx what sig args =
     case sig of
         Sig tys res ->
@@ -4688,11 +5252,15 @@ each payload word is `:word` OR `:float` (Lower's isFloatWordExp decides
 the store width), and a `:val` payload is a REJECT (a value cannot nest
 inside the raw payload words).  Result `:val`.
 -}
-checkMkVal : Ctx -> List Exp -> Result String Type
+checkMkVal : Ctx -> List Exp -> Result MidcError Type
 checkMkVal ctx args =
     case args of
         [] ->
-            Err (ctx.key ++ ": J1: builtin 'mkval' needs at least the tag word")
+            Err
+                (reject ctx "J1"
+                    "builtin 'mkval' needs at least the tag word" |> withTitle "BAD ARITY"
+                    |> withHint "write `mkval(tag, words..)`; for a fixed tag prefer `mknum`/`mkbool`/`mknil`"
+                )
 
         tag :: rest ->
             case checkExp ctx tag of
@@ -4704,13 +5272,13 @@ checkMkVal ctx args =
 
                 Ok cls ->
                     Err
-                        (ctx.key
-                            ++ ": J1: builtin 'mkval' tag must be word, got "
-                            ++ typeStr cls
+                        (reject ctx "J1"
+                            ("builtin 'mkval' tag must be word, got " ++ typeStr cls)
+                            |> withHint "the tag is a raw word — pass a `word`/`int` value"
                         )
 
 
-mkValWords : Ctx -> Int -> List Exp -> Result String Type
+mkValWords : Ctx -> Int -> List Exp -> Result MidcError Type
 mkValWords ctx i args =
     case args of
         [] ->
@@ -4722,11 +5290,16 @@ mkValWords ctx i args =
                     Err msg
 
                 Ok TVal ->
+                    -- J1: a value cannot NEST in the raw payload words — the
+                    -- payload is copied word-for-word, so a `val` there would
+                    -- be a raw pointer in the box.
                     Err
-                        (ctx.key
-                            ++ ": J1: builtin 'mkval' payload argument "
-                            ++ String.fromInt i
-                            ++ " is val — a value cannot nest in the raw payload words (word or float only)"
+                        (reject ctx "J1"
+                            ("builtin 'mkval' payload argument "
+                                ++ String.fromInt i
+                                ++ " is val"
+                            )
+                            |> withHint "the payload words are raw — pass word/int/float, or unbox with `payload(..)`"
                         )
 
                 Ok _ ->
@@ -4740,37 +5313,64 @@ compatibility predicate is `argOk` at every boundary: a pointer, and since
 B1 a bool, pass where a `word` is expected (both ARE words — the identity);
 nothing passes into a `:val` slot unwrapped.
 -}
-checkArgs : (Type -> Type -> Bool) -> Ctx -> String -> String -> List Type -> List Exp -> Result String ()
+checkArgs : (Type -> Type -> Bool) -> Ctx -> String -> String -> List Type -> List Exp -> Result MidcError ()
 checkArgs ok ctx jn what tys args =
+    checkArgsAt ok ctx jn what { declared = List.length tys, given = List.length args } 1 tys args
+
+
+{-| The two counts an arity rejection states.  A RECORD, not two more `Int`
+parameters: both are `Int`, so a transposed call site would compile and print
+`takes 1 argument(s), got 2` — the same class of lie this field exists to
+delete.
+-}
+type alias ArityCounts =
+    { declared : Int
+    , given : Int
+    }
+
+
+{-| `checkArgs` with the ARGUMENT INDEX and the ARITY COUNTS carried.  All
+three have to be carried: `tys` and `args` both shrink at each step, so nothing
+about the ORIGINAL call can be recovered from them at the terminal arms.
+
+MEASURED (the review's probe, /tmp/rev-p1): `boxedSum(a, b)` called as
+`boxedSum(a)` rendered `takes 1 argument(s), got 0`, because both terminals
+printed `List.length` of the POST-recursion tails — the truth was takes 2,
+got 1.  The index was the same bug one arm over (U7 fixed it); a count that
+lies is worse than no count, so the terminals now print what the CALLER
+supplied and what the CALLEE declared.
+-}
+checkArgsAt : (Type -> Type -> Bool) -> Ctx -> String -> String -> ArityCounts -> Int -> List Type -> List Exp -> Result MidcError ()
+checkArgsAt ok ctx jn what counts i tys args =
+    let
+        -- THE TWO ARMS OF THIS WALK ARE TWO DIFFERENT JUDGMENTS, and this is
+        -- the one place that knows it: the arity arm is BAD ARITY and the
+        -- class arm is TYPE MISMATCH, whatever tag the caller passes.  The
+        -- callers pass `jn` = the JUDGMENT that owns the check (J2 for `call`,
+        -- J3 for `rawcall`, J4 for `recur`, J1 for the builtin table), and
+        -- none of those tags names an arity disagreement — J2's own name is
+        -- resolution.  MEASURED before this unit: `boxedSum(a)` against a
+        -- 2-ary callee rendered `-- UNKNOWN NAME` over
+        -- `call 'UserMid2.boxedSum' takes 2 argument(s), got 1`.
+        arityMismatch =
+            reject ctx jn
+                (what
+                    ++ " takes "
+                    ++ String.fromInt counts.declared
+                    ++ " argument(s), got "
+                    ++ String.fromInt counts.given
+                )
+                |> withTitle "BAD ARITY"
+    in
     case ( tys, args ) of
         ( [], [] ) ->
             Ok ()
 
         ( [], _ ) ->
-            Err
-                (ctx.key
-                    ++ ": "
-                    ++ jn
-                    ++ ": "
-                    ++ what
-                    ++ " takes "
-                    ++ String.fromInt (List.length tys)
-                    ++ " argument(s), got "
-                    ++ String.fromInt (List.length args)
-                )
+            Err arityMismatch
 
         ( _, [] ) ->
-            Err
-                (ctx.key
-                    ++ ": "
-                    ++ jn
-                    ++ ": "
-                    ++ what
-                    ++ " takes "
-                    ++ String.fromInt (List.length tys)
-                    ++ " argument(s), got "
-                    ++ String.fromInt (List.length args)
-                )
+            Err arityMismatch
 
         ( t :: ts, a :: as_ ) ->
             case checkExp ctx a of
@@ -4779,21 +5379,20 @@ checkArgs ok ctx jn what tys args =
 
                 Ok cls ->
                     if ok t cls then
-                        checkArgs ok ctx jn what ts as_
+                        checkArgsAt ok ctx jn what counts (i + 1) ts as_
 
                     else
                         Err
-                            (ctx.key
-                                ++ ": "
-                                ++ jn
-                                ++ ": "
-                                ++ what
-                                ++ " argument "
-                                ++ String.fromInt (List.length tys - List.length ts + 1)
-                                ++ " needs "
-                                ++ typeStr t
-                                ++ ", got "
-                                ++ typeStr cls
+                            (reject ctx jn
+                                (what
+                                    ++ " argument "
+                                    ++ String.fromInt i
+                                    ++ " needs "
+                                    ++ typeStr t
+                                    ++ ", got "
+                                    ++ typeStr cls
+                                )
+                                |> withTitle "TYPE MISMATCH"
                             )
 
 
@@ -4996,7 +5595,7 @@ exists anywhere; struct-scaled math happens only through `p[i]`.  Both
 operands must be `:word` (the firewall catches the pointer; a float/val
 operand stays the J1 class reject).
 -}
-checkWordBin : Ctx -> WordBinOp -> Exp -> Exp -> Result String Type
+checkWordBin : Ctx -> WordBinOp -> Exp -> Exp -> Result MidcError Type
 checkWordBin ctx op a b =
     case checkExp ctx a of
         Err msg ->
@@ -5005,19 +5604,24 @@ checkWordBin ctx op a b =
         Ok aCls ->
             if isPtr aCls then
                 Err
-                    (ctx.key
-                        ++ ": J12: pointer arithmetic on '"
-                        ++ wordBinName op
-                        ++ "' — address math must happen on a word binder (bind `word w = p;` first); struct-scaled math happens only through p[i]"
+                    (reject ctx "J12"
+                        ("pointer arithmetic on '" ++ wordBinName op ++ "': address math must happen on a word binder")
+                        |> withHint "bind `word w = p;` first — struct-scaled math happens only through `p[i]`"
                     )
 
             else if not (isWordish aCls) then
                 Err
-                    (ctx.key
-                        ++ ": J1: operator '"
-                        ++ wordBinName op
-                        ++ "' needs word operands, got "
-                        ++ typeStr aCls
+                    -- J1: both operands of a word binary operator are
+                    -- `:word` (`isWordish`: word or bool); a float/val operand
+                    -- is the class reject, and a POINTER one is J12's
+                    -- firewall above.
+                    (reject ctx "J1"
+                        ("operator '"
+                            ++ wordBinName op
+                            ++ "' needs word operands, got "
+                            ++ typeStr aCls
+                        )
+                        |> withHint "convert the operand with `payload(..)`/`[word](..)`, or operate on the class it has"
                     )
 
             else
@@ -5028,19 +5632,20 @@ checkWordBin ctx op a b =
                     Ok bCls ->
                         if isPtr bCls then
                             Err
-                                (ctx.key
-                                    ++ ": J12: pointer arithmetic on '"
-                                    ++ wordBinName op
-                                    ++ "' — address math must happen on a word binder (bind `word w = p;` first); struct-scaled math happens only through p[i]"
+                                (reject ctx "J12"
+                                    ("pointer arithmetic on '" ++ wordBinName op ++ "': address math must happen on a word binder")
+                                    |> withHint "bind `word w = p;` first — struct-scaled math happens only through `p[i]`"
                                 )
 
                         else if not (isWordish bCls) then
                             Err
-                                (ctx.key
-                                    ++ ": J1: operator '"
-                                    ++ wordBinName op
-                                    ++ "' needs word operands, got "
-                                    ++ typeStr bCls
+                                (reject ctx "J1"
+                                    ("operator '"
+                                        ++ wordBinName op
+                                        ++ "' needs word operands, got "
+                                        ++ typeStr bCls
+                                    )
+                                    |> withHint "convert the operand with `payload(..)`/`[word](..)`, or operate on the class it has"
                                 )
 
                         else
@@ -5059,24 +5664,31 @@ The val test is a RE-CHECK of the two operand classes rather than a look at
 `msg`: the selfhost Prelude has no `String.contains` (see `isQualifiedKey`),
 and it costs nothing here — it runs only on the error path.
 -}
-checkWordCmp : Ctx -> WordCmpOp -> Exp -> Exp -> Result String Type
+checkWordCmp : Ctx -> WordCmpOp -> Exp -> Exp -> Result MidcError Type
 checkWordCmp ctx op a b =
+    -- J1: the LABEL is the operator alone.  The parenthetical this used to
+    -- carry ("yields a bool — branch on it directly, bind it `bool b = ..`,
+    -- or box with mkbool") described the RESULT's use, not the operand
+    -- mistake the message reports; the result class is `Ast.wordCmpSig`'s
+    -- (`TBool`, and a bool result IS branchable — see `checkCond`'s TBool
+    -- arm).
     case
         checkSig ctx
-            ("operator '"
-                ++ wordCmpName op
-                ++ "' (yields a bool — branch on it directly, bind it `bool b = ..`, or box with mkbool for a val)"
-            )
+            ("operator '" ++ wordCmpName op ++ "'")
             wordCmpSig
             [ a, b ]
     of
         Err msg ->
             Err
                 (if isValOperand ctx a || isValOperand ctx b then
-                    msg
-                        ++ " — there is no `"
-                        ++ wordCmpName op
-                        ++ "` on values: compare them with `call Rt.=(a, b)` (a boxed bool) or `Rt.deepEq` (structural) — plan Q11"
+                    { msg
+                        | hint =
+                            Just
+                                ("there is no `"
+                                    ++ wordCmpName op
+                                    ++ "` on values: compare them with `call Rt.=(a, b)` (a boxed bool) or `Rt.deepEq` (structural)"
+                                )
+                    }
 
                  else
                     msg

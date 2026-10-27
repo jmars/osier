@@ -88,6 +88,7 @@ import Mid.Qbe.Types as QbeTypes
 import Mid.Rt as MidRt
 import Mid.RtLayout as RtLayout
 import Mid.RtLang.Ast as RtAst
+import Mid.RtLang.Error as MidErr
 import Mid.TaintCheck as TaintCheck
 import Set exposing (Set)
 import Type.Check as Check
@@ -320,6 +321,23 @@ WHAT THE EMIT LEVEL DOES WITH THEM (M3fix-4 + M3-rtcall, MEASURED):
 
 An unknown key — one that names no defun of the program — stays a loud Err
 (`run_midref`'s `midcallmissing` row pins it).
+
+THE REFUSALS THIS FUNCTION CAN RETURN ARE THE LANE'S, NOT ITS OWN: both doors
+it calls (`MidRt.parseUserModule`, `MidRt.checkLowerUserModule`) hand back an
+already-RENDERED `MidcError` payload — banner, `<HeaderName>.mid` in the path
+slot, snippet, `Hint:`, `-- <tag>` footer (`Mid.Rt.elm`'s render seats) — so
+there is no message to re-house here, only to propagate, and `Result String`
+stays this function's contract for exactly that reason.
+
+NAMED GAP (recorded, not fixed): a `.mid` whose header DISAGREES with the name
+it is imported under is refused in `run.js` (`resolveMidImports`, run.js:246-256
+— "import X: <path> declares module Y (a .mid's module header must match the
+import name)"), i.e. in JS, before any Elm code sees the group. That refusal
+CANNOT reach this renderer without a `run.js` change, and this arc does not
+make one: what crosses into Elm is the mid TEXTS (`midsJson`, run.js:484) while
+the PATHS stay behind, so the Elm side holds neither a file name nor a position
+to render. It stays a one-line JS message — and it is the same naming family
+the `NS` tag covers below.
 -}
 loadUserMids : MidRt.Runtime -> List String -> Result String (List MidRt.UserModule)
 loadUserMids rt sources =
@@ -359,6 +377,45 @@ A loud reject for each, because a silent merge here is a silent miscompile:
 
 `Ok ()` = no collision; the caller then splices the user surface over `[]`
 (an ADD, never a REPLACE).
+
+THE MESSAGES ARE `NS` `MidcError`s (the NAMING-PROBLEM family `Mid.Rt.elm`'s
+own `namespaceError` sits in) RENDERED, banner to footer — `MidErr.render`,
+not `MidErr.oneLine` (U16).  It used to be the one-liner, and that was a
+measured DEFECT, not a preference: the SAME tag renders a full banner + rule +
+hint in both `Mid.Rt` lanes (`Rt.elm:875`/`:880`), so a user whose `.mid`
+claimed a reserved key read `NS: key 'Rt.foo' is in the reserved Rt.*
+namespace` — the actionable half of the message (`rename the module or the
+defun`) dropped by `oneLine`, which carries key/tag/rule only
+(`Error.elm:320-327`).  One tag, one family, one shape.
+
+THE PATH IS THE COLLIDING KEY'S OWN `.mid` (`keyPath`), which is the file a
+reader can act on; the banner is the only place it appears, and it is what
+`Mid.Rt`'s user lane already names (`<HeaderName>.mid`).  `ctx.source` is
+`""` because the record is SPANLESS by construction (see `collision`), and
+`render`'s `span = Nothing` path never reads the source — it drops the whole
+snippet block (banner, blank, rule, [blank, hint], footer) and a test pins
+that degradation.  So nothing here can print a gutter over text it does not
+have, and no `.mid` text has to be threaded in to render an honest message.
+
+The `err ` prefix is the DRIVER's (`Main.elm:94`, `run.js:561`), not this
+payload's: the payload still starts with the banner, so `head -c 4` and the
+`grep -q` consumers in `tools/qbe/` read the same framing they always did.
+
+`key = Nothing` is still the right value (see `collision`): `render` never
+prints `key` at all, and the RULE names the colliding key, so the message is
+self-contained in both forms.
+
+TAG, and why NOT `EXPORT`: all three refusals are about a KEY that may not be
+used in that namespace, and the reader's move is a rename — `titleFor "EXPORT"`
+is `BAD SIGNATURE`, which would mis-describe a collision the moment this seat
+is ever rendered multi-line, while `titleFor "NS"` is `NAMING PROBLEM` and is
+the tag `Mid.Rt.elm` already gives the module-name/qualification refusal.
+
+WHY THE REASONS ARE IN THIS COMMENT AND NOT IN THE MESSAGES: each string used
+to weld three things — the site (the key), the rule, and the rationale (why a
+silent merge would be a miscompile). The rule and the fix are what a reader can
+act on; the rationale is for whoever maintains the rules, so it lives above,
+beside the judgment that enforces it.
 -}
 userCollisions : Dict String Int -> List MidRt.UserModule -> Result String ()
 userCollisions globals modules =
@@ -371,32 +428,121 @@ userCollisions globals modules =
     in
     case firstMatch (\k -> String.startsWith "Rt." k) keys of
         Just k ->
+            -- (a) The reserved namespace holds the compiler's own runtime
+            -- (`rt_`/`q_Rt_` lowering symbols) AND every DSL seat
+            -- (`primDefuns`/`helperDefuns`/`gcProgram`), so a user key there
+            -- would let the splice's REPLACE arm swap an own-runtime defun for
+            -- a user one. Renaming is the only fix, hence the hint.
             Err
-                ("user .mid: key '"
-                    ++ k
-                    ++ "' is in the reserved Rt.* namespace (the compiler-internal runtime AND the DSL seats live there) — rename the module or the defun"
+                (MidErr.render
+                    { source = "", path = keyPath modules k }
+                    (collision
+                        ("key '"
+                            ++ k
+                            ++ "' is in the reserved Rt.* namespace"
+                        )
+                        "rename the module or the defun"
+                    )
                 )
 
         Nothing ->
             case firstDuplicate keys of
                 Just k ->
+                    -- (b) A .mid key is namespaced by its module name, so two
+                    -- modules may only claim one key by both being that module
+                    -- — which is one defun too many, not a merge.
                     Err
-                        ("user .mid: key '"
-                            ++ k
-                            ++ "' is defined by two modules — a .mid key is namespaced by its module name, so two modules may not claim the same key"
+                        (MidErr.render
+                            { source = "", path = keyPath modules k }
+                            (collision
+                                ("key '"
+                                    ++ k
+                                    ++ "' is defined by two modules"
+                                )
+                                "a .mid key is namespaced by its module name — drop one of the two definitions"
+                            )
                         )
 
                 Nothing ->
                     case firstMatch (\k -> Set.member k globalsSet) keys of
                         Just k ->
+                            -- (c) The bonus arm: `globals` is the merged Elm
+                            -- global table, so a .mid and a .elm module that
+                            -- both claim one key is caught here too (the
+                            -- splice would ADD a second defun under one name).
                             Err
-                                ("user .mid: key '"
-                                    ++ k
-                                    ++ "' collides with an Elm global (a .elm module already defines it) — rename the .mid module or the Elm defun"
+                                (MidErr.render
+                                    { source = "", path = keyPath modules k }
+                                    (collision
+                                        ("key '"
+                                            ++ k
+                                            ++ "' collides with an Elm global — a .elm module already defines it"
+                                        )
+                                        "rename the .mid module or the Elm defun"
+                                    )
                                 )
 
                         Nothing ->
                             Ok ()
+
+
+{-| The `.mid` the colliding key came from — the path the banner names.
+
+A key is namespaced by its module name (`Mid.Rt.parseUserModule` refuses an
+unqualified one), so exactly one module declares it in every case this seat
+reaches, INCLUDING rule (b): two modules claiming one key can only be two
+files both declaring `module A`, and `A.mid` is then the honest name for the
+file to look at (the rule says "two modules" in words).
+
+The `[]` arm is UNREACHABLE by construction — `keys` is built from these very
+modules — and is kept total rather than partial: a banner with a group name
+beats a banner with an empty path slot.
+-}
+keyPath : List MidRt.UserModule -> String -> String
+keyPath modules k =
+    case List.filter (\m -> List.any (\d -> d.key == k) m.defuns) modules of
+        m :: _ ->
+            m.name ++ ".mid"
+
+        [] ->
+            "the .mid group"
+
+
+{-| ONE collision refusal: the `MidcError` this boundary builds, in ONE place,
+the way `Mid.RtLang.Check`'s `reject`/`rejectDefun`/`bare` constructors decide
+the record's shape for the judgment walk. `span = Nothing` is not a stub — this
+seat has no position to offer (see `userCollisions`), and the record's
+`Nothing` path is the one the renderer documents for exactly this case.
+
+`key = Nothing` IS THE RIGHT VALUE HERE, argued rather than assumed: `key` is
+the DEFUN the error is IN — the locator a reader uses in a file holding
+hundreds of defuns — and a collision is not in a defun, it is about a key's
+right to exist at all. So the RULE names the colliding key instead, which keeps
+the message self-contained in the form it ships: `render` never prints `key`
+(banner, rule, snippet, hint, footer), so a rule saying "this key ..." would
+dangle there, and the one-line `oneLine` form prefixes `key` when it is set —
+no longer this seat's payload (U16 renders), but the record is shared with the
+seats that still read it. MEASURED with `key = Just k` (set first, from the
+brief's "key where in hand"): the payload read
+`err Rt.foo: NS: key 'Rt.foo' is in the reserved Rt.* namespace` — the key
+twice. This is also the shape `Mid.Rt.elm`'s sibling `NS` seat already takes
+(`namespaceError`, Rt.elm:1014-1027: rule names the key, `key = Nothing`), and
+the reversal is this record's `key = Just <the key the rule names>` plus the
+`collision` parameter that would then carry it.
+
+The tag is fixed here because all three rules are the same family: a key in a
+namespace it may not use. A future refusal of a DIFFERENT family at this
+boundary takes its own tag rather than bending this one.
+-}
+collision : String -> String -> MidErr.MidcError
+collision rule hint =
+    { tag = "NS"
+    , title = MidErr.titleFor "NS"
+    , rule = rule
+    , hint = Just hint
+    , key = Nothing
+    , span = Nothing
+    }
 
 
 {-| Inject the user modules' exported keys as Osier-side SCHEMES into the

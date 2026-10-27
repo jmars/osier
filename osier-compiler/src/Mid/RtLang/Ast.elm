@@ -2,6 +2,9 @@ module Mid.RtLang.Ast exposing
     ( AggShape(..)
     , Builtin(..)
     , Block
+    , BareBlock
+    , BareDefun
+    , BareProgram
     , Decl(..)
     , Defun
     , Effect(..)
@@ -19,6 +22,7 @@ module Mid.RtLang.Ast exposing
     , FltCmpOp(..)
     , Header
     , Key
+    , Located
     , Module
     , OTy(..)
     , PTy(..)
@@ -26,6 +30,7 @@ module Mid.RtLang.Ast exposing
     , Program
     , Sig(..)
     , SizeTarget(..)
+    , Span
     , Stmt(..)
     , ArrayInit(..)
     , StructInit(..)
@@ -37,13 +42,21 @@ module Mid.RtLang.Ast exposing
     , WordCmpOp(..)
     , allBuiltins
     , allWordSig
+    , bareBlock
+    , bareDefun
+    , bareProgram
     , builtinClass
     , builtinName
     , fltBinSig
     , fltCmpSig
+    , lineOf
     , rawcallArity
+    , renderSpan
+    , reposition
+    , rowColOf
     , shortSig
     , splitArrow
+    , splitLines
     , valArity
     , wordBinSig
     , wordClassTy
@@ -423,11 +436,19 @@ cross-module import: these declarations are
 FILE-SCOPED to their own `.mid` module — a `*S` in one module cannot name
 a struct declared in another (pointers cross a module boundary only as
 the opaque `word`/`*word` the plan §2.5 already pins).
+
+`source` is the EXACT module text this AST was parsed from, verbatim —
+never a re-render of the tree.  It rides the AST so that a diagnostic
+raised on a `Module` (which may be handed to it long after the load lane
+that read the file) can quote the offending line; today the text is only
+in scope inside the loaders.  It is carried, not consulted: nothing
+downstream reads it, so it cannot move an emitted byte.
 -}
 type alias Module =
     { header : Header
     , decls : List Decl
     , defuns : List Defun
+    , source : String
     }
 
 
@@ -780,6 +801,11 @@ allWordSig paramTys retTy =
 gated variants (the consArr/rec/eqPtrFast 4-defun variation, MEASURED at
 Rt.elm's `program`) share ONE key under mutually exclusive `flags` (J8), so
 rtDeps is untouched by the guards.
+
+`span` is the HEADER span — the `defun` keyword through the body's opening
+`{`, which is the whole of the declaration a reader can point at when the
+error is about the SIGNATURE (J5's duplicate parameter, `validateSig`).  It
+does NOT cover the body: a body error carries its own statement's span.
 -}
 type alias Defun =
     { key : Key
@@ -787,6 +813,7 @@ type alias Defun =
     , params : List Param
     , ret : Type
     , body : Block
+    , span : Span
     }
 
 
@@ -817,10 +844,21 @@ type FlagGuard
 {-| `stmt* term`.  A block has exactly one terminator — the lowering (plan
 L3/L4/L5) consumes it as the block's value; Mid has no fall-through and no
 join, and the surface keeps that honest by making the terminator explicit.
+
+BOTH slots are `Located` (U2): every statement and the terminator remember the
+source span they were parsed from, which is what a checker error points its
+caret at.  A node the PARSER synthesized (a loop body's implicit `continue`,
+the unreachable fall-through term) carries a span pointing at the block's own
+`}` — never at a user token, and never a lie about where the code is
+(Parse.elm's `block`/`loopBlock`).  The lowerer's own B4 rewrites reuse the
+span of the node they stand in for.
+
+`BareBlock` below is the SAME shape without the wrappers, for code that only
+wants the tree (the test suite's expected literals).
 -}
 type alias Block =
-    { stmts : List Stmt
-    , term : Term
+    { stmts : List (Located Stmt)
+    , term : Located Term
     }
 
 
@@ -865,7 +903,8 @@ through is a checker REJECT (J7), never a silent join.
   * `SFor { init, cond, step, body }` — `for (init; cond; step) { body }`
     (B4).  `init`/`step` are STATEMENTS (`word i = 0;`, `i = i + 1;`) and
     either may be absent, so C's `for (i = 0;; i = i + 1)` shape is
-    spellable.  A `continue` in `body` RUNS `step` before re-testing —
+    spellable.  Each carries its OWN span, separate from the `for`
+    statement's: an error inside the init points at the init (U2).  A `continue` in `body` RUNS `step` before re-testing —
     C semantics, produced by rewriting every `TContinue` in the body to
     `step; continue`.  SCOPE NOTE (stated, not hidden): `init` declares into
     the ENCLOSING block's scope — this language has one flat scope per defun
@@ -892,7 +931,7 @@ type Stmt
     | SVarStore String Exp
     | SWhile Exp Block
     | SDoWhile Block Exp
-    | SFor { init : Maybe Stmt, cond : Exp, step : Maybe Stmt, body : Block }
+    | SFor { init : Maybe (Located Stmt), cond : Exp, step : Maybe (Located Stmt), body : Block }
 
 
 {-| B2 — HOW a struct value is born, the three `S s ...` forms:
@@ -1807,3 +1846,585 @@ allBuiltins =
     , RawStr
     , RawSym
     ]
+
+
+-- ==================== THE SOURCE-POSITION SEAT (U1) ====================
+--
+-- The surface language reports errors against the source text it was parsed
+-- from.  This section is the WHOLE of the AST's part in that: a `Span` of raw
+-- offsets, the `Located` wrapper that will carry one (U2 retypes `Block` and
+-- `Defun` to use it — nothing in this section is referenced by the parse,
+-- check or lower paths yet), and the ONE function that turns an offset pair
+-- into the row/col/line/caret a renderer prints.
+
+
+{-| A source SPAN — `start` and `end` are UTF-16 CODE-UNIT OFFSETS into the
+module text, the parser's own unit (ParserFast.elm:373-380: "behind the scenes
+it is just a flat array of UTF-16 characters"; an Elm `String` offset and a
+`ParserFast` offset are therefore the same number, not two conventions to
+convert between).
+
+WHY OFFSETS RATHER THAN ROW/COLUMN RECORDED AT PARSE TIME (MEASURED): every
+Parse dispatch site is already the `offsetSourceAndThen` pattern — 58
+`ParserFast.offsetSourceAndThen` occurrences, none of them in a comment
+(`rg -c 'ParserFast\.offsetSourceAndThen' Parse.elm`), `itemStep` Parse.elm:3061
+and `atom` Parse.elm:729 among them — so a node's START offset is
+in hand with zero combinator churn, while a row/column would have to be derived
+from that same offset anyway to print the snippet line.  So the AST keeps the
+offsets and `renderSpan` computes the position once, at render time, from the
+source the error is reported against.
+
+END CONVENTION (pinned, and the reason `renderSpan` trims): `end` is the offset
+where the node's parser STOPPED, i.e. where the NEXT TOKEN begins.  Every token
+reader consumes its own trailing whitespace and `//` comments (`spelled`,
+Parse.elm:3770-3772), so `end` routinely OVERHANGS trailing spaces, a trailing
+comment, and even comment-only lines — it never reaches into the next token.
+A consumer must therefore never read `end` as "the node's last character"; the
+pair is only meaningful through `renderSpan`.
+-}
+type alias Span =
+    { start : Int
+    , end : Int
+    }
+
+
+{-| A node that remembers the span it was parsed from.  U1 introduces the
+wrapper only: U2 retypes `Block` (`stmts`/`term`) and gives `Defun` a header
+span, so the checker can name the STATEMENT an error is on.  Sub-expression
+(`Exp`) spans are deliberately NOT part of this arc — priced and deferred in
+the plan's D1 decision.
+-}
+type alias Located a =
+    { node : a
+    , span : Span
+    }
+
+
+{-| The lines of a source text, split on `\n` and keeping every empty run —
+`String.split "\n"` exactly, for callers that cannot have `String.split`.
+
+`String.split` is NOT in this language's String surface (MEASURED: the
+self-host front end rejects it — `Mid.RtLang.Parse`'s `firstSegment` note), and
+this module IS compiled by that front end, so the split is spelled with the two
+prims that do exist (`String.slice`, `String.length`).
+
+THE ONE HOME: `Mid.Rt` and `Mid.RtLang.Parse` both import this module, so the
+workaround lives here and nowhere else — it was `Mid.Rt`'s until the
+source-position seat below needed line splitting too, and the dependency
+direction (`Rt` imports `Ast`, `Parse` imports `Ast`) makes this module the
+owner.
+-}
+splitLines : String -> List String
+splitLines s =
+    let
+        go : Int -> Int -> List String -> List String
+        go start i acc =
+            if i >= String.length s then
+                List.reverse (String.slice start i s :: acc)
+
+            else if String.slice i (i + 1) s == "\n" then
+                go (i + 1) (i + 1) (String.slice start i s :: acc)
+
+            else
+                go start (i + 1) acc
+    in
+    go 0 0 []
+
+
+{-| The 1-based row/column of an offset — the SAME convention ParserFast
+reports a parse error's position in (`DeadEnd`'s `row`/`col` start at 1,
+ParserFast.elm:202), so a span-derived position and a parse error's position
+read as one coordinate system in one error surface.
+
+The row is the number of newlines before the offset, plus one; the column is
+the 1-based offset WITHIN its own line.  Both are counted over the same UTF-16
+units the offsets are in — one scan of the prefix (`newlinesIn`) yields the
+count and the last newline, because `String.indexes` is not in this language's
+String surface either.
+-}
+rowColOf : String -> Int -> { row : Int, col : Int }
+rowColOf src offset =
+    let
+        before =
+            newlinesIn 0 0 -1 (String.slice 0 offset src)
+    in
+    { row = before.count + 1
+    , col = offset - before.last
+    }
+
+
+{-| How many `\n` a text holds, and the offset of the LAST one (`-1` when it
+holds none) — exactly the two quantities `rowColOf` asks of it, read out of ONE
+left-to-right scan in 1-char slices.
+
+WHY NOT `String.indexes` (MEASURED): it is not in this language's String
+surface, and this module is compiled by the front end that lacks it (see
+`splitLines`).  The list of every newline offset was only ever read for its
+LENGTH and its LAST element, so the scan carries both and allocates nothing.
+
+The accumulators are threaded as ARGUMENTS rather than closed over by a
+let-bound `go` for one reason: this helper's result is a record, and a
+let-bound annotation with a record return type has no precedent in this group
+(`splitLines` above annotates a `List String` one), while a top-level signature
+returning a record is everywhere (`rowColOf`, `renderSpan`).
+-}
+newlinesIn : Int -> Int -> Int -> String -> { count : Int, last : Int }
+newlinesIn i count last text =
+    if i >= String.length text then
+        { count = count, last = last }
+
+    else if String.slice i (i + 1) text == "\n" then
+        newlinesIn (i + 1) (count + 1) i text
+
+    else
+        newlinesIn (i + 1) count last text
+
+
+{-| The source LINE containing `offset`, WITHOUT its terminating newline — the
+text a renderer prints in its gutter.
+
+Only `\n` splits a line (the parser's own row accounting, and what `rowColOf`
+counts), so a CRLF source's line keeps its trailing `\r`; an offset at or past
+the end of the text yields the last line, and empty input yields `""`.
+-}
+lineOf : String -> Int -> String
+lineOf src offset =
+    let
+        row =
+            (rowColOf src offset).row
+    in
+    splitLines src
+        |> List.drop (row - 1)
+        |> List.head
+        |> Maybe.withDefault ""
+
+
+{-| A span resolved against its source text — THE ONLY PLACE offset-to-position
+and offset-to-caret arithmetic happens (the arc's D2 decision: the error
+renderer formats AROUND this record and never sees a raw offset, so there is
+one caret implementation, not one per caller).
+
+  * `row`/`col` — where the span STARTS, 1-based (`col` equals `startCol` by
+    construction; both are returned because a banner prints `row:col` while a
+    gutter prints the caret run).
+  * `line` — the START line's text, no newline (a multiline span still shows
+    the line it starts on).
+  * `startCol`/`endCol` — the caret run: 1-based, INCLUSIVE start, EXCLUSIVE
+    end, so the caret is `endCol - startCol` wide and can never be empty.
+  * `multiline` — the node's own text crosses a newline, so a caret under the
+    start line would underline the wrong thing; the renderer switches to the
+    `>`-margin form and prints no caret.
+
+TRIM RULE (the caret and `multiline` both read it): `end` overhangs trailing
+whitespace and comments (see `Span`), so the span's text is cut back to the
+node's own text — trailing whitespace and any trailing `//` comment dropped —
+before either is measured.  A run left EMPTY (the span points only at
+whitespace, or only at a comment) still renders ONE caret at `startCol`: a
+zero-width caret would be invisible, and such a span is a real position (the
+parser synthesizes some), not a reason to print nothing.
+
+WHY `multiline` IS MEASURED ON THE TRIMMED TEXT, not on `end` itself: `end` is
+the next token's offset, so for a statement followed by a newline it crosses
+one on essentially EVERY span (MEASURED: `spelled` skips ws+comments after each
+token, Parse.elm:3770-3772).  Reading `end` raw would mark every statement
+multiline and suppress every caret; the flag has to answer "is the NODE
+multi-line", which is exactly the trimmed run.
+
+The newline test is `anyUnit`, NOT `String.any`: the text it reads is a SLICE
+of the source, and a slice can cut an astral pair — see `anyUnit`'s THE
+SURROGATE TRAP, which is a measured infinite loop, not a style preference.
+-}
+renderSpan :
+    String
+    -> Span
+    -> { row : Int, col : Int, line : String, startCol : Int, endCol : Int, multiline : Bool }
+renderSpan src span =
+    let
+        at =
+            rowColOf src span.start
+
+        lineText =
+            lineOf src span.start
+
+        lineStart =
+            span.start - (at.col - 1)
+
+        runOnStartLine =
+            String.slice (at.col - 1)
+                (min (String.length lineText) (span.end - lineStart))
+                lineText
+
+        caretWidth =
+            max 1 (String.length (spanCode runOnStartLine))
+    in
+    { row = at.row
+    , col = at.col
+    , line = lineText
+    , startCol = at.col
+    , endCol = at.col + caretWidth
+    , multiline = anyUnit (\unit -> unit == "\n") (spanCode (String.slice span.start span.end src))
+    }
+
+
+{-| A span's text cut back to the NODE's own text: trailing whitespace and
+trailing comments dropped (`renderSpan`'s trim rule).
+
+RECURSIVE, not a single trim, because `end` can overhang comment-ONLY lines as
+well as one trailing comment: a statement whose next token is three lines away
+(blank line, `//` separator line, indent) is still a one-line statement.
+-}
+spanCode : String -> String
+spanCode run =
+    let
+        trimmed =
+            dropTrailingSpace run
+
+        lastLine =
+            List.head (List.reverse (splitLines trimmed)) |> Maybe.withDefault ""
+    in
+    case commentStartIn lastLine of
+        Just at ->
+            spanCode (String.dropRight (String.length lastLine - at) trimmed)
+
+        Nothing ->
+            trimmed
+
+
+{-| A text without its TRAILING whitespace — `String.trimRight` for text this
+lane owns, spelled with the 1-char slice because `String.trimRight` is not in
+this language's String surface (see `splitLines`).
+
+THE CHARACTER SET IS THE SOURCE'S, and it is stated rather than implied: space,
+`\t`, `\r` and `\n` are the four whitespace characters a `.mid`/`.elm` source
+can carry BETWEEN tokens — the parser's own whitespace class is exactly
+space/`\n`/`\r` (ParserFast.elm:3177) and a tab can only sit inside a comment
+(`Error.elm`'s NO TAB EXPANSION note).  So this is `trimRight` on every input
+`spanCode` is handed, which is a slice of the source it was parsed from.
+-}
+dropTrailingSpace : String -> String
+dropTrailingSpace run =
+    let
+        go : Int -> String
+        go i =
+            if i <= 0 then
+                ""
+
+            else
+                case String.slice (i - 1) i run of
+                    " " ->
+                        go (i - 1)
+
+                    "\t" ->
+                        go (i - 1)
+
+                    "\r" ->
+                        go (i - 1)
+
+                    "\n" ->
+                        go (i - 1)
+
+                    _ ->
+                        String.slice 0 i run
+    in
+    go (String.length run)
+
+
+{-| Whether ANY one-unit slice of `text` satisfies `is` — the scan form of
+`String.any` this lane can actually run (see THE SURROGATE TRAP below).
+
+WHY THE PREDICATE TAKES A `String` AND NOT A `Char`: every function in this
+language's String surface that turns a String into a Char — `String.toList`,
+`String.any`, `String.foldr` — is one of the three that HANG on an unpaired
+surrogate, which is exactly what the callers here must survive.  So the scan
+hands `is` the 1-unit SLICE it tested, and the predicates compare strings
+(`== "\n"`, membership in the token set) instead of classifying a Char.
+
+THE SURROGATE TRAP (MEASURED, and the reason this function exists).  Elm's
+`String.any`/`String.toList`/`String.foldr` walk BACKWARD by UTF-16 unit and
+treat a LOW surrogate as the second half of a pair, stepping an extra unit
+back (elm/core 1.0.5, `Elm/Kernel/String.js:190-208`: `if (0xDC00 <= word &&
+word <= 0xDFFF) { i--; ... }` inside `while (i--)`).  A string holding an
+UNPAIRED LOW SURROGATE — exactly what a slice that starts on the second unit
+of an astral pair produces — walks `i` past 0, and `while (i--)` on a negative
+index never sees a falsy value again: an INFINITE LOOP.  MEASURED on the
+previous spellings of both call sites below: no output, process still running
+when the timeout killed it (exit 124) at 15s standalone and 20s against the
+real module; the same inputs return instantly under this scan.  This scan reads
+FORWARD by index, compares 1-unit slices, and never pairs units, so it
+terminates on every input.
+
+WHY `String.length` IN THE LOOP HEAD: it is O(1) in both lanes (a JS `length`,
+and the selfhost's own prim), so re-reading it per step is free — the same
+shape `splitLines` above uses.
+-}
+anyUnit : (String -> Bool) -> String -> Bool
+anyUnit is text =
+    let
+        go : Int -> Bool
+        go i =
+            if i >= String.length text then
+                False
+
+            else if is (String.slice i (i + 1) text) then
+                True
+
+            else
+                go (i + 1)
+    in
+    go 0
+
+
+{-| Where a `//` COMMENT begins in a piece of source text, if one does — the
+offset of its first slash, or `Nothing` when the text is all node.
+
+The ABUT rule is the parser's own (`tokenCharBefore`, Parse.elm:2574-2576): the
+character before the `//` is not a token character (`a//b` is `a`, then `/`,
+then `/b` — a loud parse error, never a comment).
+
+The LITERAL rule is NOT a condition the parser ever evaluates: `commentAt`
+(Parse.elm:2561-2566) tests only the abut rule, because it is only ever called
+at a token boundary, where no literal can be open — the parser's string-safety
+is POSITIONAL.  This routine has no position, only text, so it RECONSTRUCTS the
+parser's literal state left to right (`literalOpenAt`) and must agree with where
+the parser would have been; the rule is re-stated here rather than imported
+because Parse imports THIS module.
+
+A per-LINE scan is enough, which is why `spanCode` hands over a single line: no
+surface literal can contain a raw newline — a string's raw newline is a loud
+reject (`stringChunkAt`, Parse.elm:1015-1016) and a char literal is exactly ONE
+`isSurfaceChar` (ASCII 32..126, Parse.elm:1179-1181) — so a line boundary always
+closes whatever is open and no literal state has to cross one.
+
+WHAT IT STILL CANNOT SEE: the state is read from the text it is handed, so the
+text must BEGIN at or before the node's own first character — a delimiter opened
+before the first character passed in is invisible.  Both callers slice at a line
+start or at a token boundary (`renderSpan`'s `runOnStartLine`), where no literal
+can be open.  It also reads a `'` outside a string as a char literal
+unconditionally, exactly as `atomAt` does (Parse.elm:744); a stray `'` is a loud
+parse error, never text a caret is printed against.
+-}
+commentStartIn : String -> Maybe Int
+commentStartIn run =
+    commentStartFrom 0 run
+
+
+{-| The FIRST `//` at or after `i` that BOTH rules admit, or `Nothing`.
+
+A left-to-right scan rather than `String.indexes` and a filter over its result:
+that function is not in this language's String surface (see `splitLines`), and
+every caller reads only the FIRST admissible offset — which is the same offset
+the scan reaches first, since `String.indexes` also enumerates left to right.
+The scan also stops at the first hit, where the filtered form built the whole
+list and ran the (per-candidate) literal scan over every later `//` as well.
+-}
+commentStartFrom : Int -> String -> Maybe Int
+commentStartFrom i run =
+    if String.slice i (i + 2) run == "//" then
+        if (i == 0 || not (isTokenUnit (String.slice (i - 1) i run)))
+            && not (literalOpenAt i run)
+        then
+            Just i
+
+        else
+            commentStartFrom (i + 1) run
+
+    else if i >= String.length run then
+        Nothing
+
+    else
+        commentStartFrom (i + 1) run
+
+
+{-| The parser's token-character SET, which the comment-abut rule tests
+(`isTokenUnit` is the 1-unit membership test over it).
+
+WHY A STRING AND A SET SCAN, not `Char.isAlpha c || Char.isDigit c || c == '_'
+|| c == '.'`: the Char form needs a Char, and no String-surface function yields
+one without `toList`/`any`/`foldr` — the three that hang on an unpaired
+surrogate (`anyUnit`'s THE SURROGATE TRAP).  The scan reads the set with the
+same forward 1-unit slice the rest of this module uses.
+
+THE SET IS THE PARSER'S STATED CLASS — `[A-Za-z0-9_.]`, the class
+`tokenAtOff`'s doc names and the reason `Rt.getpid` reads as one token
+(Parse.elm's `isTokenChar` is the Char spelling of it).  Its ONLY divergence
+from that Char spelling is a non-ASCII LETTER: `Char.isAlpha` is ASCII
+`[A-Za-z]` in the SELF-HOST lane (Prelude.elm:1334-1354 —
+`charIsAlpha = charIsLower || charIsUpper`, both ASCII ranges) but the full
+Unicode table in the stock elm/core lane, so this set agrees with the lane the
+compiler is COMPILED BY and differs from the stock lane only for a non-ASCII
+letter sitting immediately before a `//`.  That shape cannot reach here from a
+parsed source: outside a literal the parser's token reader stops at a
+non-token unit, so `café//x` is a LOUD parse error (the `/` has no grammar
+position), and inside a string the literal rule below decides first — MEASURED
+on both shapes, see this unit's record.
+-}
+isTokenUnit : String -> Bool
+isTokenUnit unit =
+    String.length unit == 1 && anyUnit (\c -> c == unit) tokenChars
+
+
+{-| Every token character, one UTF-16 unit each.  A string rather than a list
+of Char literals because a `Char` cannot be turned back into a String-comparable
+unit here without `String.fromChar` per element — and because the SET is the
+thing a reader checks against the parser's class, so it should read as one.
+-}
+tokenChars : String
+tokenChars =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_."
+
+
+{-| Whether a string or char literal is OPEN at `at` — the literal state of the
+text before `at`, scanned left to right.  Quote PARITY would not do: a char
+literal may hold a quote (`'"'` is `EInt 34`, `charCodeAt` Parse.elm:1166-1181),
+so two quotes do not mean two closed literals.
+
+An INDEX scan over 1-unit slices (`literalScan`), not `String.toList` +
+`List.foldl`: the slice `String.slice 0 at run` can cut an astral pair, and
+`String.toList` of that is the measured hang (`anyUnit`'s THE SURROGATE TRAP).
+The state is threaded as an ARGUMENT for the reason `newlinesIn` above states:
+a top-level signature is what this group annotates, and a let-bound `go`
+returning a TUPLE has no precedent here.
+-}
+literalOpenAt : Int -> String -> Bool
+literalOpenAt at run =
+    literalScan 0 at run ( NoLiteral, False )
+
+
+{-| One unit of `literalOpenAt`'s scan: apply `literalStep` to the 1-unit slice
+at `i`, and stop at `at` with "is a literal open?".
+-}
+literalScan : Int -> Int -> String -> ( Literal, Bool ) -> Bool
+literalScan i at run state =
+    if i >= at then
+        case state of
+            ( NoLiteral, _ ) ->
+                False
+
+            _ ->
+                True
+
+    else
+        literalScan (i + 1) at run (literalStep (String.slice i (i + 1) run) state)
+
+
+{-| Which delimiter, if either, a left-to-right literal scan is inside. -}
+type Literal
+    = NoLiteral
+    | InString
+    | InChar
+
+
+{-| One UNIT of the literal scan — a 1-unit slice, not a Char (see
+`isTokenUnit` for why a Char is out of reach): `escaped` swallows whatever
+follows a backslash, a delimiter OPENS outside a literal, and only its own kind
+CLOSES.  Every test is string equality, so no character class is involved and
+the two lanes cannot disagree about it.
+-}
+literalStep : String -> ( Literal, Bool ) -> ( Literal, Bool )
+literalStep unit ( mode, escaped ) =
+    if escaped then
+        ( mode, False )
+
+    else
+        case mode of
+            NoLiteral ->
+                if unit == "\"" then
+                    ( InString, False )
+
+                else if unit == "'" then
+                    ( InChar, False )
+
+                else
+                    ( NoLiteral, False )
+
+            InString ->
+                if unit == "\\" then
+                    ( InString, True )
+
+                else if unit == "\"" then
+                    ( NoLiteral, False )
+
+                else
+                    ( InString, False )
+
+            InChar ->
+                if unit == "\\" then
+                    ( InChar, True )
+
+                else if unit == "'" then
+                    ( NoLiteral, False )
+
+                else
+                    ( InChar, False )
+
+
+{-| The `Block`/`Defun`/`Program` shapes WITHOUT the `Located` wrappers and
+without a defun's header span — the shape an expected-tree literal is written
+in.
+
+WHY THESE EXIST (the U1/U2 seam): U2 makes `Block` carry `Located` statements
+and terms, which is one atomic Elm type change, and every existing expected-tree
+literal in the test suite is written in TODAY's shape.  Naming that shape lets a
+row be written (or rewritten once) as `BareBlock`/`BareDefun`/`BareProgram` and
+survive the retype, so U2 changes the BODIES below and no row's data.
+
+A comparison therefore wraps the PARSE, not the literal: `Result.map
+Ast.bareProgram (Parse.parseProgram src) == Ok [ ..the old literal.. ]`.  The
+strips DROP the spans, so a row pins the tree, not the source positions — the
+position rows are the `renderSpan` family above, which is where a span is read.
+-}
+type alias BareBlock =
+    { stmts : List Stmt
+    , term : Term
+    }
+
+
+type alias BareDefun =
+    { key : Key
+    , flags : List FlagGuard
+    , params : List Param
+    , ret : Type
+    , body : BareBlock
+    }
+
+
+type alias BareProgram =
+    List BareDefun
+
+
+{-| A DIFFERENT node at `like`'s source position: `reposition like node`.
+
+The lowerer's B4 rewrites (LowerToIr's `forTail`/`doWhileTail`) synthesize
+statements where a block's terminator was — a `continue` test in place of the
+`continue`, a `break` term in place of the `if` that fell through.  Those nodes
+have no token of their own, and the honest position is the node they stand in
+for.  A SAME-KIND rewrite needs none of this (`{ located | node = ... }` keeps
+the span), and Elm's record update cannot change a field's TYPE — which is
+exactly the cross-kind case here, and the reason this is a function rather than
+a record update at the call sites: the lowerer never reads or writes a span.
+-}
+reposition : Located a -> b -> Located b
+reposition like node =
+    { node = node, span = like.span }
+
+
+bareBlock : Block -> BareBlock
+bareBlock block =
+    { stmts = List.map .node block.stmts
+    , term = block.term.node
+    }
+
+
+bareDefun : Defun -> BareDefun
+bareDefun defun =
+    { key = defun.key
+    , flags = defun.flags
+    , params = defun.params
+    , ret = defun.ret
+    , body = bareBlock defun.body
+    }
+
+
+bareProgram : Program -> BareProgram
+bareProgram program =
+    List.map bareDefun program
