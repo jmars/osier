@@ -1005,7 +1005,8 @@ wordArmDefunRefusals =
         why =
             "the RECORD family is not ported to the word arm: a word-arm record body is a flat run of `count` Values, so the placement of its SECOND array (the field NAMES, `payload(rec, 2)` on the val arm) is a layout decision, not a stride. Twin it in the record-layout unit or keep it refused - a names-array read against a data-array body is the mixed-representation read this arm exists to prevent"
     in
-    [ ( "Rt.recGetGo", why )
+    [ ( "Rt.recGet", why )
+    , ( "Rt.recGetGo", why )
     , ( "Rt.recUpd", why )
     , ( "Rt.recUpdFind", why )
     , ( "Rt.recUpdCopy", why )
