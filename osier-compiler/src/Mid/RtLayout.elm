@@ -722,11 +722,18 @@ valLayout =
 --      `jmpfFalse` helper (`&&`, `||`, `/=`, one match arm); and the WRITES for
 --      the immediates in `lowerLitWord` (a fixnum `n * 8`, refused by name
 --      outside i61 because boxing is area 4; `true`/`false` = tagTrue/tagFalse)
---      plus `storeNil`.  NOT PORTED: every HEAP-object tag — cons/string/
---      vector/record/float/lambda/stream/prim all collapse to `...001`, so a
---      heap-object test is a 2-word-HEADER KIND read (heapTagIsKind), which is
---      area 3/7's contract; and `storeValueCell`'s heap writes.  The .mid
---      surface lane's `RawTagIs`/`RawMkValue` are also un-ported
+--      plus `storeNil`.  THE HEAP-OBJECT HALF IS PORTED (perf
+--      word-arm-area3rt/word-arm-surface): every heap tag collapses to
+--      `...001`, so a heap-object test is a 2-word-HEADER KIND read
+--      (`heapTagIsKind`), and `wordTagIs` is the ONE reader of it — it
+--      dispatches on `wordTagShape`, answering an IMMEDIATE valtag with a
+--      word-tag compare and a heap one with a kind compare, and refusing a
+--      valtag that has no word encoding by name.  `readTag` is still the one
+--      place a tag is READ; `wordTagIs` is the one place a VALTAG is tested.
+--      NOT PORTED: `storeValueCell`'s heap writes — whether a CODE is writable
+--      is `wordCellRefusal`'s single statement (a body the emitter lays out
+--      itself would put val-arm raw pointers into a body the collector scans).
+--      The .mid surface lane's `RawTagIs`/`RawMkValue` are also un-ported
 --      (Mid.RtLang.LowerToIr names `valLayout` at 9 sites — VR3a's finding;
 --      that lane lowers BEFORE Lower runs, so its tag integers are baked into
 --      the Mid.Ir under any knob).
@@ -749,6 +756,25 @@ valLayout =
 --   8. THE C FFI GLUE.  The tag/untag at the boundary — a fixnum's payload IS
 --      the C i64 after untag, and Values never cross raw (the extern
 --      declarations already encode C widths, so nothing there moves).
+--   9. THE MID.Ir CONSTRUCT LANE (perf word-arm-surface) — the SURFACE of the
+--      Mid language, as opposed to item 7's runtime.  `Mid.Qbe.Lower`'s
+--      `wordArmUnported` is the belt: a defun carrying an un-ported construct
+--      refuses BEFORE its body walk, and the entry names the construct and the
+--      area.  PORTED: literals, `Var`, `Let`, `If`/`&&`/`||`/`/=`, `Loop`,
+--      `App`, and — via their desugars — `ListLit`, `Tup` and `Case` (the
+--      aggregate prims `cons`/`@p`/`emptylist`/`assoc`/`snd` reach the
+--      runtime's own twinned defuns through `rtPrimSlots`, which is
+--      arm-independent by construction), plus the payload chases behind them
+--      (`fieldBase`, one accessor: the val arm's payload word HOLDS a pointer,
+--      the word arm's IS the element).  NOT PORTED, each refused by name:
+--      `Con` (its vector is written through `storeValueCell` and its tag is an
+--      `LSymbol`), the RECORD family (`RecordLit`/`RecordGet`/`RecordUpdate`,
+--      and a `VField` pattern bind — its second parallel NAMES array has no
+--      inline body layout, which is a design decision, not a stride), `Lam`,
+--      `GRef`, `StreamRef`, float/symbol literals, let-destructuring, `MTagEq`
+--      (a constructor-tag pattern, same `LSymbol` reason), and every
+--      ARITHMETIC prim (area 4/5 — `isIntExp`/`isFloatExp` also deny there,
+--      because S4/S4f's raw local is reboxed in the 40-byte shape).
 wordLayout : ValLayout
 wordLayout =
     { valSizeBytes = 8
