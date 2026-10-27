@@ -10,15 +10,22 @@
 # observable is the PROGRAM'S OUTPUT.
 #
 # WHAT IT CANNOT SEE, MEASURED (review BLOCKER 1).  A whole PROGRAM is the wrong
-# instrument for the emitter's ELEMENT paths: under the word arm an arg-taking
-# entry needs a `Lam`, which the surface lane refuses, so no fixture can
-# CONSTRUCT a heap vector/cons/float yet — the fixtures below exercise the boot
-# path and literal cells and nothing else.  MEASURED: flipping `wordVecBody`'s
-# heap arm to a 16-byte-wrong base left this row GREEN.  That gap is
-# `word-arm-probe`'s `vec` probe (a hand-built code-10 block driven through
-# `vecbody`), and the mutation that this row cannot see turns THAT red.  The two
-# rows are complements, not duplicates: this one proves the arms agree on a
-# program's OUTPUT, the probe proves the element machinery is right.
+# instrument for the emitter's ELEMENT paths as long as the surface lane refused
+# every aggregate: under the word arm an arg-taking entry needs a `Lam`, which
+# the surface lane refuses, so no fixture could CONSTRUCT a heap object at all.
+# MEASURED: flipping `wordVecBody`'s heap arm to a 16-byte-wrong base left this
+# row GREEN.  That gap is `word-arm-probe`'s `vec` probe (a hand-built code-10
+# block driven through `vecbody`), and the mutation that this row cannot see
+# turns THAT red.  The two rows are complements, not duplicates: this one proves
+# the arms agree on a program's OUTPUT, the probe proves the element machinery
+# is right.
+#
+# THAT GAP HAS NARROWED (perf word-arm-surface): `cons.elm` builds a cons chain,
+# so this row now EXECUTES the heap-cell path, the element stores and the
+# printer's tag-4 walk — a wrong element base or stride in `Rt.cons`'s arm shows
+# up here as differing output or a SIGSEGV.  It still cannot reach an ARG-TAKING
+# entry (a `Lam` is refused), a vector built by the surface, or a float, so the
+# `vec`/`veclen` probes keep their job.
 #
 # WHAT IT DOES.  For each fixture: compile the same source TWICE — once on the
 # val arm (`QBE_ENTRY=M.main node run.js`) and once with `QBE_VALREP=word` —

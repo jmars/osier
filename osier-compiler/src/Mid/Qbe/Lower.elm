@@ -1,4 +1,4 @@
-module Mid.Qbe.Lower exposing (lower, lowerWith)
+module Mid.Qbe.Lower exposing (lower, lowerWith, wordArmUnported)
 
 -- Mid.Qbe.Lower — Mid.Ir -> Qbe.Il (native-backend stage 1; handoff-qbe-lower).
 --
@@ -905,8 +905,105 @@ wordArmUnported exp =
                 _ ->
                     Just (wordArea (wordAreaName exp) (wordAreaWhat exp))
 
+        PrimApp app ->
+            -- ============ THE SURFACE LANE: PRIM APPLICATIONS ============
+            -- A `PrimApp` is not ONE construct on this arm, so it is not
+            -- classified as one (perf word-arm-surface).  The AGGREGATE prims
+            -- — `cons`, `@p`, `emptylist`, `assoc`, `snd` and every other prim
+            -- with a Mid implementation — lower through `lowerArgsToSlots` ->
+            -- `rtPrimSlots`, whose emission is ARM-INDEPENDENT by construction:
+            -- the staged args are ROOTED frame slots, the callee is a
+            -- `:val`-returning Rt defun reached by the lean ABI (pointer args
+            -- in, one `valSizeBytes` blit out), and the only width it reads is
+            -- the layout's.  That is the same ground `App` is admitted on
+            -- (AREA 6) — the construct is ported because its EMIT SITE handles
+            -- the arm, not because it looked harmless.
+            --
+            -- The ARITHMETIC prims do NOT: `lowerArith`/`lowerCompare`/
+            -- `lowerNumEq` read the tag WORD and the payload at `+8`, i.e. the
+            -- 40-byte representation, in their inline arms.  Those stay
+            -- refused BY NAME (AREA 4/5) — see `wordArmPrimUnported`.
+            case wordArmPrimUnported app.prim of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    wordArmUnportedArgs app.args
+
+        ListLit es ->
+            -- ============ THE SURFACE LANE: A LIST LITERAL ============
+            -- `lowerListLit` is `lowerVal (buildList es)` — a list literal has
+            -- NO emission of its own, it desugars to a right-nested
+            -- `cons`/`emptylist` chain and those route through `rtPrimSlots`
+            -- into the runtime's own `Rt.cons`/`Rt.emptylist` (which ARE
+            -- twinned for this arm, perf word-arm-area3rt).  So the honest
+            -- classification is the one over the form the emitter will
+            -- actually see: classify the DESUGAR, not the sugar.  Classifying
+            -- `ListLit` as an opaque heap-object construction would refuse a
+            -- construct whose whole emission is a call this arm already
+            -- makes.
+            wordArmUnported (buildList es)
+
         _ ->
             Just (wordArea (wordAreaName exp) (wordAreaWhat exp))
+
+
+{-| Every argument of a prim application, left to right — the same recursion
+the other compound constructs use, so a nested refusal is named rather than
+swallowed.
+-}
+wordArmUnportedArgs : List Exp -> Maybe String
+wordArmUnportedArgs args =
+    case args of
+        [] ->
+            Nothing
+
+        a :: rest ->
+            case wordArmUnported a of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    wordArmUnportedArgs rest
+
+
+{-| THE PRIMS WHOSE EMIT SITE IS NOT ARM-CLEAN, refused by name.
+
+`lowerPrimApp` has three inline fast paths that emit the 40-byte
+representation directly, and each is gated on an operand TYPE rather than on
+the arm, so none of them can be reached safely under the word arm:
+
+  * `+ - *` -> `lowerArith` (a tag-word load plus a payload read at `+8`, and
+    `rawIntBin`/`rawFloatBin` for the proven-Int/proven-Float arms — the i61
+    tagging and the float cell are AREA 4/5);
+  * `< <= > >=` -> `lowerCompare` (the same tag/payload shape, plus
+    `reboxBoolean`);
+  * `=` -> `lowerNumEq` (the same, plus `reboxBoolean`);
+  * `f/` -> `rawFloatBin` when both operands are proven Float (AREA 5).
+
+A prim NOT listed here and carrying a Mid implementation takes the plain
+`rtPrimSlots` route, which is arm-clean (see the `PrimApp` case above).  A prim
+with NO Mid implementation has no arm-clean route at all on this tree
+(`rtPrimSlotsZig` emits `rt_prim_*` symbols the runtime no longer defines), so
+it refuses here rather than at the linker.
+-}
+wordArmPrimUnported : String -> Maybe String
+wordArmPrimUnported prim =
+    if List.member prim wordArmInlinePrims then
+        Just (wordArea "AREA 4 (ARITHMETIC)" ("the primitive `" ++ prim ++ "` — its inline arm reads the tag word and the payload at +8, i.e. the 40-byte representation, so arithmetic needs inline tag/untag and the i61 overflow/boxing path"))
+
+    else if MidRt.primImpl prim == Nothing then
+        Just (wordArea "AREA 4 (ARITHMETIC)" ("the primitive `" ++ prim ++ "` — it has no Mid implementation, so it has no arm-clean route (the Zig fallback would emit rt_prim_* symbols the runtime no longer defines)"))
+
+    else
+        Nothing
+
+
+{-| The prims `lowerPrimApp` gives an inline, representation-shaped arm to.
+-}
+wordArmInlinePrims : List String
+wordArmInlinePrims =
+    [ "+", "-", "*", "f/", "<", "<=", ">", ">=", "=" ]
 
 
 {-| THE TAG OF THE VALUE WHOSE ADDRESS IS `base`, into the `w` temp `t`

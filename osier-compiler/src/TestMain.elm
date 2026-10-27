@@ -137,6 +137,58 @@ checks rt rawMidText =
             _ ->
                 False
         )
+    , check "SURFACE LANE: the word-arm classifier ADMITS the aggregate prims and the constructs that desugar to them, AND STILL REFUSES the representation-shaped ones (perf word-arm-surface)"
+        -- WHY A ROW ON THE CLASSIFIER ITSELF.  `wordArmUnported` is the ONLY
+        -- gate between a surface construct and the emitter, and it is a pure
+        -- function — so the property "this construct is admitted" can be
+        -- asserted DIRECTLY, without a text search that cannot tell one call
+        -- site from another (the veclen lesson) and without a running program
+        -- that cannot reach the construct at all.  This row is the SOURCE half
+        -- of the pair; `tools/qbe/word-arm-diff/cons.elm` is the BEHAVIOURAL
+        -- half (both arms build, run, and print byte-identically).
+        --
+        -- BOTH SIDES ARE ASSERTED, because a row that only asserts ADMISSION
+        -- is satisfiable by deleting the classifier: the arithmetic prims must
+        -- still refuse (their inline arms read the 40-byte representation),
+        -- and so must every construct this unit did not port.
+        (let
+            cons =
+                PrimApp { prim = "cons", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
+
+            nil =
+                PrimApp { prim = "emptylist", args = [ Lit (LNumber 0) ] }
+
+            refused =
+                List.filterMap
+                    (\e -> QbeLower.wordArmUnported e)
+                    [ PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
+                    , PrimApp { prim = "=", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
+                    , PrimApp { prim = "<", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
+                    , PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
+                    , Con { tag = "Just", args = [ Lit (LNumber 1) ] }
+                    , RecordLit [ ( "x", Lit (LNumber 1) ) ]
+                    , RecordGet (Var 0) "x"
+                    , Lam { params = [], body = Lit (LNumber 1) }
+                    ]
+         in
+         QbeLower.wordArmUnported cons == Nothing
+            && QbeLower.wordArmUnported nil == Nothing
+            -- A LIST LITERAL IS CLASSIFIED BY ITS DESUGAR (a cons/emptylist
+            -- chain), which is exactly what `lowerListLit` emits — so a list
+            -- whose chain this arm can build is admitted and one whose cannot
+            -- is not.
+            && QbeLower.wordArmUnported (ListLit [ Lit (LNumber 1), Lit (LNumber 2) ]) == Nothing
+            && QbeLower.wordArmUnported (ListLit []) == Nothing
+            -- the SAME construct, one nested element away from the refusal:
+            -- an arithmetic prim INSIDE a list literal must still refuse, or
+            -- the desugar-classification would be a hole rather than a port.
+            && (QbeLower.wordArmUnported (ListLit [ PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ]) /= Nothing)
+            -- and the refused set is exactly the eight named constructs: a
+            -- classifier that admitted any of them would be silently wrong
+            -- (each emits the 40-byte representation or a layout the arm has
+            -- not decided).
+            && List.length refused == 8
+        )
     , check "utf8ByteLength 'héllo' == 6" (utf8ByteLength "héllo" == 6)
     , check "utf8ByteLength '🦀' == 4" (utf8ByteLength "🦀" == 4)
     , check "utf8ByteLength 'abcde' == 5" (utf8ByteLength "abcde" == 5)
