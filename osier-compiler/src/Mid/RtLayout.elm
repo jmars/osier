@@ -869,35 +869,48 @@ valLayout =
 --      `err qbe: unknown global referenced: M.main` for tests/elm-fixtures/
 --      execglob.elm, execenv.elm and progio.elm under QBE_VALREP=word.  The row
 --      is owed by the unit that twins the EXEC-PLAN / EFFECT-HOST blob below.
---      STILL OPEN, AND IT IS **VAL-ARM CODE** (perf word-arm-rawroot item 3):
---      a SECOND instance of the same ROOTING shape the closure class fixed
---      twice — an allocation held in a RAW WORD across a later allocation.
---      `Rt.recAppend` does `word nd = allocvec(reclen(rec) + 1)` and then
---      `word nn = allocvec(reclen(rec) + 1)`, and `nd` is used after that second
---      allocvec (`Rt.recAppendDataGo` writes into it, and the final
---      `mkval(14, ..)` names it).  NO WORD SPLICE IS INVOLVED, so the window is
---      the VAL arm's own and `allocvec` allocates on both arms.
---      ITS REACHABILITY IS THE PART THIS UNIT CAN CORRECT: the re-review called
---      it "reachable today on the val arm", and the construct IS admitted there
---      (the word arm still refuses RecordUpdate) — but the append runs only in
---      `Rt.recUpd`'s MISS arm, and a miss needs a field absent from the record's
---      runtime NAMES array.  MEASURED: this surface's records are CLOSED, so a
---      field-adding update is a TYPE ERROR (`{ r | c = i }` on a 2-field record
---      answers `record does not have field d`), and every admitted update HITS —
---      a 3000-iteration record-update churn at QBE_HEAP_MB=1/2/4/8 and at
---      DEFAULT knobs answers 3000/0 (i.e. no collection ever landed inside the
---      window, because the window never opened).  So it is LATENT on the val arm
---      too, and it stays open for the stated reason: the fix changes VAL-ARM
---      emit, i.e. it moves the corpus (159/159 BYTE-IDENTICAL with NO re-freeze
---      is this unit's constraint), so it belongs to a unit that is allowed a
---      deliberate, attributable re-freeze.  THE FIX SHAPE, so the records unit
---      does not rediscover it: the same two mechanisms the closure class proved
---      — bind the FIRST cell as a rooted val (`mkval(14, vecbody(nd))`) and
---      re-read it (`vecbody(..)`) after the second allocvec, or reorder so the
---      rooted binder exists before the second allocation — and it owes a
---      COLLECTING fixture FIRST, which needs a way to reach the miss arm (the
---      only lever found here is a record whose NAMES array lacks the field, and
---      no admitted surface construct builds one).
+--      `Rt.recAppend` IS FIXED (perf word-arm-rawroot item 3 FIX, a0c80c5), and
+--      the entry it replaces was WRONG IN THE DIRECTION THAT MISDIRECTS, so the
+--      correction is stated rather than quietly rewritten.  What this entry said
+--      (b306ef0): "NOT REACHABLE FROM THE SURFACE ... LATENT on the val arm",
+--      justified by a measurement showing that `{ r | c = i }` — the `=` UPDATE
+--      syntax — is a TYPE ERROR on a missing field.  THE MEASUREMENT WAS REAL AND
+--      THE INFERENCE WAS TOO WIDE: the surface ALSO has RECORD INSERTION
+--      `{ r | x <- v }` (Type/Infer.elm's free row extension; committed fixture
+--      tests/elm-fixtures/insrec.elm), and a ROW-POLYMORPHIC `ins r i = { r | x
+--      <- i }` makes the update's base a non-closed Var, so Lower takes the WALK
+--      arm (applyUpdates -> `recInsert` -> MISS -> this defun) — the very miss
+--      arm the entry claimed no admitted construct could build.  THE LESSON,
+--      recorded because it is the class this repo keeps paying for: before
+--      re-drawing a "latent / not reachable" line, enumerate the SURFACE
+--      SYNTAXES that reach the defun, not the one that was tried.
+--      SO IT WAS LIVE ON THE VAL (DEFAULT) ARM, and it SEGFAULTED: 6000
+--      insertions kept reachable and CONTENT-compared gave QBE_HEAP_MB=1
+--      SEGFAULT (rc 139), h2 SEGFAULT (rc 139), h4/h8 5999 of 6000 (one silently
+--      wrong record), default 6000 of 6000.  The control that isolates it: the
+--      same churn with `y <- i` on an EXISTING field always HITs (`Rt.recUpd`,
+--      ONE allocvec, no window) -> 6000 of 6000 at h1 and h2.
+--      TWO DEFECTS IN ONE SHAPE, and they had to be fixed together:
+--      (1) `word nd = allocvec(..); val ndN = mknum(nd); word nn = allocvec(..)`
+--          held `nd` as a RAW WORD across the second allocation, and `mknum` does
+--          NOT root it — a FIXNUM is not relocated;
+--      (2) the fills came LAST, so once (1) was fixed the array was ROOTED BUT
+--          EMPTY when the second allocation collected: promotion copies an
+--          unwritten body (the allocator does not zero a block, and a forwarded
+--          young body's word 0 is the POISON 15) and the drain walks that garbage
+--          as Values — MEASURED, loudly: "scavenge read a POISONED (forwarded
+--          young) body" at h1/h2/h8.  THE ROOT TURNED A SILENT WRONG ANSWER INTO
+--          A LOUD ONE, which is what exposed the second half; a fix that only
+--          roots the cell is INCOMPLETE.
+--      THE SHAPE NOW: root each cell as a `:val` binder (`mkval(10, ..)` — a
+--      frame slot the frame-enter root array scans), FILL IT through
+--      `vecbody(..)` while nothing can allocate, and only THEN allocate the
+--      second cell; every later read goes through `vecbody(..)` because a root's
+--      ADDRESS MAY MOVE.  The corpus moved by exactly 5 groups (insrec, mxint,
+--      records, rowgadt_setx, scopedup — the set of groups whose .ssa mentions
+--      `recAppend`, by set equality over all 159) and the re-freeze is
+--      deliberate and attributable.  ROW: tools/qbe/fixtures/recinschurn.elm +
+--      qbe-check's `run_heap_ladder` (h1/h2/h4/default), proven fail-able.
 --      NOT PORTED: the ARGV INSTALL (`Rt.parseArgsGo`'s `bufW + j*40` and the
 --      entry-arg buffer `Rt.main` sizes), which is a separate lane and is
 --      reached-but-unexercised today (a word-arm program with arguments);
