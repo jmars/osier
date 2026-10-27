@@ -2142,11 +2142,27 @@ defun Rt.recGet(rec : val, field : val) -> val {
 }
 
 defun Rt.recGetGo(rec : val, field : val, i : val) -> val {
+  // >>> QBE_VAL-ONLY
   if (mkbool(payload(i, 0) >= reclen(rec))) {
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // THE RECORD'S LENGTH IS `veclen - 1` (perf word-arm-records R3): the last
+  // body word is the NAMES base, a raw pointer, not a field.  The names array
+  // is a static array of name-byte POINTERS, so each element is read as a RAW
+  // WORD and boxed with `mknum` — the pointer-wrap idiom `vecbody` inverts on
+  // both arms, so `symEq`'s `payload(a, 0)` reads the pointer back with NO
+  // change to symEq.
+  if (mkbool(payload(i, 0) >= veclen(rec) - 1)) {
+  // <<< QBE_WORDVAL-ONLY
     word h = rawcall rt_halt();
     return mknil;
   }
+  // >>> QBE_VAL-ONLY
   val nameSym = vecload(payload(rec, 2), payload(i, 0));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  val nameSym = mknum(wload(wload(vecbody(rec), veclen(rec) - 1), payload(i, 0)));
+  // <<< QBE_WORDVAL-ONLY
   if (call Rt.symEq(nameSym, field, mknum(0))) {
     return vecload(vecbody(rec), payload(i, 0));
   }

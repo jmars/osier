@@ -10839,9 +10839,23 @@ closedRecordFieldType s rec field =
     Maybe.map Tuple.second (closedRecordField s rec field)
 
 
+{-| `tagis(value, tag)` as a BOXED BOOLEAN, for `If`/`falsyJump`.
+
+THE `tag` ARGUMENT IS A VALTAG, AND THE CALLER MUST PASS THE MODULE CONSTANT
+(perf word-arm-records R3).  `RawTagIs`'s `tag` is dispatched by `wordTagShape`,
+which is keyed on VALTAGS — and on the word arm the `ValLayout` INSTANCE's
+`tag*` fields are the WORD ENCODINGS, where every heap code collapses to
+`heapPtrTag` (1).  Passing `layout.tagRecord` therefore asks "is this a STRING"
+on the word arm: the same meaning drift that produced the poisoned record in R2.
+The val arm's instance fields ARE the valtags, so passing the constants changes
+nothing there — the val emit is byte-identical (the corpus is the proof).
+
+The BOXED-BOOLEAN tag is a valtag too (`wordTagShape tagBoolean` answers the two
+word immediates), so it is spelled as the constant for the same reason.
+-}
 boxTagIs : RtLayout.ValLayout -> Exp -> Int -> Exp
 boxTagIs layout value tag =
-    Unsafe (RawMkValue { tag = layout.tagBoolean, words = [ Unsafe (RawTagIs { value = value, tag = tag }) ] })
+    Unsafe (RawMkValue { tag = RtLayout.tagBoolean, words = [ Unsafe (RawTagIs { value = value, tag = tag }) ] })
 
 
 -- The shared access body: tag 14 -> positional (Just rank) or recGet walk;
@@ -10870,11 +10884,11 @@ recordAccessBody layout recB rank field =
             PrimApp { prim = "snd", args = [ PrimApp { prim = "assoc", args = [ Lit (LSymbol field), recV ] } ] }
     in
     If
-        { cond = boxTagIs layout recV layout.tagRecord
+        { cond = boxTagIs layout recV RtLayout.tagRecord
         , thenBranch = Maybe.withDefault walk (Maybe.map (\_ -> positional) rank)
         , elseBranch =
             If
-                { cond = boxTagIs layout recV layout.tagCons
+                { cond = boxTagIs layout recV RtLayout.tagCons
                 , thenBranch = chain
                 , elseBranch = walk
                 , falseLabel = "r4"
@@ -11069,11 +11083,11 @@ recordUpdateWalkExp layout baseB base updates =
         { binders = [ LetBind { binder = baseB, value = base } ]
         , body =
             If
-                { cond = boxTagIs layout baseV layout.tagRecord
+                { cond = boxTagIs layout baseV RtLayout.tagRecord
                 , thenBranch = walk
                 , elseBranch =
                     If
-                        { cond = boxTagIs layout baseV layout.tagCons
+                        { cond = boxTagIs layout baseV RtLayout.tagCons
                         , thenBranch = chain
                         , elseBranch = walk
                         , falseLabel = "u4"
