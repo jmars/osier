@@ -23,9 +23,18 @@
 # THAT GAP HAS NARROWED (perf word-arm-surface): `cons.elm` builds a cons chain,
 # so this row now EXECUTES the heap-cell path, the element stores and the
 # printer's tag-4 walk — a wrong element base or stride in `Rt.cons`'s arm shows
-# up here as differing output or a SIGSEGV.  It still cannot reach an ARG-TAKING
-# entry (a `Lam` is refused), a vector built by the surface, or a float, so the
-# `vec`/`veclen` probes keep their job.
+# up here as differing output or a SIGSEGV.  `case.elm` goes further: its `f p`
+# and `g xs` are ARG-TAKING top-level defuns CALLED from `main`, so the word
+# arm's argument path (a word in a register, stored by the callee's prologue)
+# and the tail call into it are exercised too — an earlier revision of this
+# paragraph said the row could not reach an arg-taking entry, which was true
+# when only `cons.elm`/`tup.elm` existed and false from the commit that added
+# `case.elm`.
+#
+# WHAT IS STILL OUT OF REACH, and therefore still the probes' job: a first-class
+# `Lam` CLOSURE (the classifier refuses `Lam`), a VECTOR built by the surface
+# (no prim constructs one from a program), and a FLOAT (area 5).  So the `vec`,
+# `veclen` and `call` probes are complements to this row, not duplicates.
 #
 # WHAT IT DOES.  For each fixture: compile the same source TWICE — once on the
 # val arm (`QBE_ENTRY=M.main node run.js`) and once with `QBE_VALREP=word` —

@@ -760,7 +760,7 @@ valLayout =
 --      Mid language, as opposed to item 7's runtime.  `Mid.Qbe.Lower`'s
 --      `wordArmUnported` is the belt: a defun carrying an un-ported construct
 --      refuses BEFORE its body walk, and the entry names the construct and the
---      area.  PORTED: literals, `Var`, `Let`, `If`/`&&`/`||`/`/=`, `Loop`,
+--      area.  PORTED: literals, `Var`, `Let`, `If`/`&&`/`||`, `Loop`,
 --      `App`, and — via their desugars — `ListLit`, `Tup` and `Case` (the
 --      aggregate prims `cons`/`@p`/`emptylist`/`assoc`/`snd` reach the
 --      runtime's own twinned defuns through `rtPrimSlots`, which is
@@ -775,6 +775,16 @@ valLayout =
 --      (a constructor-tag pattern, same `LSymbol` reason), and every
 --      ARITHMETIC prim (area 4/5 — `isIntExp`/`isFloatExp` also deny there,
 --      because S4/S4f's raw local is reboxed in the 40-byte shape).
+--      AND `/=` (`NotEqual`), which an earlier revision of this item listed as
+--      PORTED and is NOT: `wordArmUnported` has no `NotEqual` case, so it falls
+--      to the refusal fallback, and MEASURED `if 5 /= 3 then ..` under
+--      `QBE_VALREP=word` answers "AREA 2 (TAG TESTS) — `/=`.  It is not a
+--      trivial port either: `lowerNotEqual` delegates to `lowerNumEq`, whose
+--      GENERIC tail (the only tail reachable here, since the proven-Int and
+--      proven-Float fast paths are themselves denied under the arm) reads the
+--      tag word at `slot + 0` and the payload at `slot + 8` — the 40-byte
+--      shape — before routing `=` through `rtPrimSlots`.  Porting it means
+--      porting that inline, i.e. area 2/4.
 wordLayout : ValLayout
 wordLayout =
     { valSizeBytes = 8

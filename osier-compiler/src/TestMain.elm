@@ -192,7 +192,25 @@ checks rt rawMidText =
                     , Con { tag = "Just", args = [ Lit (LNumber 1) ] }
                     , RecordLit [ ( "x", Lit (LNumber 1) ) ]
                     , RecordGet (Var 0) "x"
+                    , RecordUpdate { base = Var 0, updates = [ ( "x", Lit (LNumber 1) ) ] }
                     , Lam { params = [], body = Lit (LNumber 1) }
+                    , GRef { key = "M.f", force = False }
+                    , StreamRef { varName = "*stoutput*" }
+                    , Lit (LFloat 1.5)
+                    , Lit (LSymbol "sym")
+                    , Let
+                        { binders =
+                            [ LetDestruct
+                                { scrutId = { id = 9, name = "$case" }
+                                , value = Var 0
+                                , matches = [ MCons [ HdStep ] ]
+                                , binds = []
+                                , badLabel = "lb"
+                                , okLabel = "lo"
+                                }
+                            ]
+                        , body = Var 0
+                        }
                     ]
          in
          QbeLower.wordArmUnported cons == Nothing
@@ -234,11 +252,15 @@ checks rt rawMidText =
             -- fine" cannot be mistaken for "the alternative is fine".
             && (QbeLower.wordArmUnported (caseExp [ MEmpty [] ] []) == Nothing)
             && (QbeLower.wordArmUnported (caseWithBody (PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] })) /= Nothing)
-            -- and the refused set is exactly the eight named constructs: a
+            -- and the refused set is exactly the FOURTEEN named constructs: a
             -- classifier that admitted any of them would be silently wrong
             -- (each emits the 40-byte representation or a layout the arm has
-            -- not decided).
-            && List.length refused == 8
+            -- not decided).  The count is part of the row because a future
+            -- refactor that ADMITS one of them (by adding a case to
+            -- `wordArmUnported`) would otherwise leave this row green: the
+            -- membership list is what is pinned, so it must cover the whole
+            -- refused surface, not just the shapes this unit happened to touch.
+            && List.length refused == 14
         )
     , check "utf8ByteLength 'héllo' == 6" (utf8ByteLength "héllo" == 6)
     , check "utf8ByteLength '🦀' == 4" (utf8ByteLength "🦀" == 4)

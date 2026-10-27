@@ -6651,8 +6651,38 @@ rawWordArg exp s =
                     )
 
         Unsafe (RawLoadFlt v) ->
-            -- payload word 0 of a VALUE as f64: loadd at slot+8.  A safe bit
-            -- read of ANY Value (no trap on a mistagged arg).
+            -- payload word 0 of a VALUE as f64: `loadd` at `slot + 8`.
+            --
+            -- THAT IS THE VAL ARM'S SHAPE, AND THE OLD COMMENT HERE WAS FALSE.
+            -- It read "a safe bit read of ANY Value (no trap on a mistagged
+            -- arg)", which is true only of a 40-byte Value: there `slot + 8` is
+            -- always a payload word, so a mistagged argument yields garbage
+            -- bits instead of a fault.  UNDER THE WORD ARM A SLOT IS EIGHT
+            -- BYTES, so `slot + 8` is the NEXT FRAME SLOT — the same shape as
+            -- the two defects perf word-arm-surface found, and a read of
+            -- another binder's value rather than of garbage.
+            --
+            -- IT IS NOT FORKED, AND IT IS NOT REFUSED — and the reason matters
+            -- because it is NOT the belt.  `wordArmUnported` admits `App`
+            -- WITHOUT recursing into its arguments (by design: a call's
+            -- argument lowering is the per-site check), so a raw node reached
+            -- only as a call argument is INVISIBLE to the classifier.  MEASURED
+            -- at 0cba46c: `case n of 1 -> ..` compiles and RUNS on the word arm,
+            -- and this node is emitted inside `Rt.=`'s float arm.  Refusing at
+            -- the site would refuse that whole working program (it does: a
+            -- trial fork turned `strcase.elm` and the number-literal case into
+            -- compile errors), which is the polarity's other failure — a loud
+            -- refusal on a construct the arm does not actually reach.
+            --
+            -- WHAT KEEPS IT SAFE IS REACHABILITY, STATED SO IT CAN BE CHECKED:
+            -- this is `Rt.=`'s float-vs-float arm (`tagis(a, 0) || tagis(a, 12)`
+            -- on BOTH operands, after the fixnum/fixnum arm has already
+            -- returned), and a word-arm float DOES NOT EXIST — it is AREA 5's
+            -- heap-boxed `[hdr | f64]` cell.  So the arm is dead on this arm.
+            -- WHEN AREA 5 LANDS, THIS SITE MUST BE FORKED IN THE SAME UNIT:
+            -- `wordPayloadWord`-style, because a word-arm float's bits live in
+            -- a body, not at `slot + 8`.  Its sibling `RawStrByte` above is the
+            -- model — it reads a body unit both arms HAVE, so it forks.
             let
                 ( vslot, s1 ) =
                     freshSlot s
@@ -10084,12 +10114,21 @@ fieldBase n src s =
         )
 
 
--- fst/snd: blit the car body (at `off` in the cons Value) into dst.
+-- fst/snd: blit PAYLOAD WORD `n` of the value in `src` into dst — `0` for the
+-- car (`FstStep`), `1` for the cdr when the cons carries two interior pointers
+-- (`SndStep` with `consArr`).  `n` is a WORD INDEX and not a byte offset, which
+-- is `fieldBase`'s contract and the reason `8`/`16` — the offsets every
+-- pre-unit caller spelled — are no longer accepted here: `8` would compile
+-- clean and mean "payload word 8", which is past the end of a cons on both
+-- arms.  THE NAME AND THE DOC CARRY THE UNIT because this wrapper is exactly
+-- where the old meaning used to live: it forwarded a byte offset to a function
+-- that had become index-parameterised, and a caller copying an old call site
+-- would have compiled and silently mis-read on BOTH arms.
 chaseField : Int -> Int -> Int -> S -> S
-chaseField off src dst s =
+chaseField n src dst s =
     let
         ( base, s1 ) =
-            fieldBase off src s
+            fieldBase n src s
     in
     emit (Blit base (Il.Tmp (slotTmp dst)) s1.layout.valSizeBytes) s1
 
