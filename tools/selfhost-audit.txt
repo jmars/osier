@@ -12,7 +12,7 @@
 # Corpus:   src/Prelude.elm + src/Runtime.elm + core-libs/* (fixed side,
 #           NOT audited — always compiled as the corpus)
 # Compiler: node osier-compiler/run.js --batch (stock-built compiler.js)
-# Date:     2026-10-27T18:27:12Z
+# Date:     2026-10-27T18:52:42Z
 #
 # Columns: <RESULT>\t<file>\t<row:col>\t<message>
 # RESULT classes: OK | parse-error | unknown-name | type-error |
