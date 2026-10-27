@@ -846,23 +846,58 @@ valLayout =
 --      `args + rem*40`, and `Rt.applyPartGo`'s three-range interleave.  That
 --      last group is the one VR3c's frontier note called "VR3d's"; there is no
 --      VR3d, and closures cannot RUN without it, so this unit took it.
---      ALSO FOUND, AND DELIBERATELY NOT FIXED HERE (records lane): a SECOND
---      instance of the same ROOTING shape perf word-arm-closures fixed twice in
---      the closure path — an allocation held in a RAW WORD across a later
---      allocation.  `Rt.recAppend` does `word nd = allocvec(reclen(rec) + 1)`
---      and then `word nn = allocvec(reclen(rec) + 1)`, and `nd` is used after
---      that second allocvec (`Rt.recAppendDataGo` writes into it, and the final
---      `mkval(14, ..)` names it).  NO WORD SPLICE IS INVOLVED: this is the
---      VAL arm's own code, so it is a val-arm defect too, and it is
---      REACHED today through record-append (the word arm still refuses
---      RecordUpdate).  NOT MEASURED — the reviewer marked it INTERPRETATION
---      from source, and the qbe-check churn rows never allocate enough to cross
---      a trigger — so the FIRST thing the records unit owes it is a COLLECTING
---      fixture (the shape of tools/qbe/word-arm-gcchurn/hold.elm), not a patch.
---      The reason it is not fixed here: it is a different construct family, its
---      fix changes VAL-ARM emit (which this unit's corpus-identity constraint
---      forbids), and the two closure sites had to be proved with a churn row
---      before anything else in the class could be touched.
+--      THE STRING FAMILY IS CLOSED (perf word-arm-rawroot item 1).  A word-arm
+--      string's BYTES are now INLINE in its own cell (units 2..; unit 0 is the
+--      cell's own byte base, unit 1 the length), so the two-block shape that was
+--      unsound in two independent ways is gone: the byte block was reachable
+--      only through a body the collector never walks, AND the byte pointer was a
+--      raw word held across `mkstr`'s own allocation.  `Rt.allocRaw` reserves the
+--      two units WITH the bytes and returns the byte base; `mkstr` allocates
+--      nothing; `Rt.gcScavPtr` re-derives the self-address on promotion behind
+--      the ownership test (a literal's cell names static data).  MEASURED,
+--      silently rc=0, before: 154 of 6000 surviving `String.join` strings at
+--      QBE_HEAP_MB=1 and 5699 at DEFAULT knobs (the val arm answers 6000 both
+--      ways); after: 6000, and tools/qbe/word-arm-gcchurn/str.elm is the row.
+--      `Rt.globBuildGo`'s `bufW` (the class's fourth pair-instance, WORD ARM
+--      only) is CLOSED TOO: `mkstr` no longer allocates, and the string value is
+--      bound BEFORE the two `Rt.intern` calls on the recur line, whose HIT path
+--      allocates a symbol cell on this arm (`allocKind(2, 1)`; the val arm's
+--      intern returns `mkval(2, hit)` and allocates nothing).  IT HAS NO
+--      COLLECTING ROW, and that is a REACHABILITY fact, not an omission: the
+--      only route to `Rt.glob` is the effect host's TaskGlob, and a
+--      `Platform.worker` program does not lower on this arm at all — MEASURED,
+--      `err qbe: unknown global referenced: M.main` for tests/elm-fixtures/
+--      execglob.elm, execenv.elm and progio.elm under QBE_VALREP=word.  The row
+--      is owed by the unit that twins the EXEC-PLAN / EFFECT-HOST blob below.
+--      STILL OPEN, AND IT IS **VAL-ARM CODE** (perf word-arm-rawroot item 3):
+--      a SECOND instance of the same ROOTING shape the closure class fixed
+--      twice — an allocation held in a RAW WORD across a later allocation.
+--      `Rt.recAppend` does `word nd = allocvec(reclen(rec) + 1)` and then
+--      `word nn = allocvec(reclen(rec) + 1)`, and `nd` is used after that second
+--      allocvec (`Rt.recAppendDataGo` writes into it, and the final
+--      `mkval(14, ..)` names it).  NO WORD SPLICE IS INVOLVED, so the window is
+--      the VAL arm's own and `allocvec` allocates on both arms.
+--      ITS REACHABILITY IS THE PART THIS UNIT CAN CORRECT: the re-review called
+--      it "reachable today on the val arm", and the construct IS admitted there
+--      (the word arm still refuses RecordUpdate) — but the append runs only in
+--      `Rt.recUpd`'s MISS arm, and a miss needs a field absent from the record's
+--      runtime NAMES array.  MEASURED: this surface's records are CLOSED, so a
+--      field-adding update is a TYPE ERROR (`{ r | c = i }` on a 2-field record
+--      answers `record does not have field d`), and every admitted update HITS —
+--      a 3000-iteration record-update churn at QBE_HEAP_MB=1/2/4/8 and at
+--      DEFAULT knobs answers 3000/0 (i.e. no collection ever landed inside the
+--      window, because the window never opened).  So it is LATENT on the val arm
+--      too, and it stays open for the stated reason: the fix changes VAL-ARM
+--      emit, i.e. it moves the corpus (159/159 BYTE-IDENTICAL with NO re-freeze
+--      is this unit's constraint), so it belongs to a unit that is allowed a
+--      deliberate, attributable re-freeze.  THE FIX SHAPE, so the records unit
+--      does not rediscover it: the same two mechanisms the closure class proved
+--      — bind the FIRST cell as a rooted val (`mkval(14, vecbody(nd))`) and
+--      re-read it (`vecbody(..)`) after the second allocvec, or reorder so the
+--      rooted binder exists before the second allocation — and it owes a
+--      COLLECTING fixture FIRST, which needs a way to reach the miss arm (the
+--      only lever found here is a record whose NAMES array lacks the field, and
+--      no admitted surface construct builds one).
 --      NOT PORTED: the ARGV INSTALL (`Rt.parseArgsGo`'s `bufW + j*40` and the
 --      entry-arg buffer `Rt.main` sizes), which is a separate lane and is
 --      reached-but-unexercised today (a word-arm program with arguments);
