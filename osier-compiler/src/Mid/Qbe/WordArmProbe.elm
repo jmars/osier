@@ -31,7 +31,7 @@ runtime-free.  `Rt.allocRaw` is reached through the emitter's own seat call
 itself — the probe script stubs that seat to the CONTRACT `runtime.mid` states.
 -}
 
-import Mid.Ir exposing (Defun, Exp(..), Lit(..), UnsafeNode(..))
+import Mid.Ir exposing (Defun, Exp(..), LetBinder(..), Lit(..), RawBinOp(..), UnsafeNode(..))
 import Mid.RtLayout as RtLayout
 
 
@@ -46,11 +46,12 @@ type Module
     | Call
     | Vec
     | VecLen
+    | Rec
 
 
 modules : List Module
 modules =
-    [ Str, Payload, Len, TagHeap, TagNil, TagBool, Call, Vec, VecLen ]
+    [ Str, Payload, Len, TagHeap, TagNil, TagBool, Call, Vec, VecLen, Rec ]
 
 
 name : Module -> String
@@ -82,6 +83,9 @@ name m =
 
         VecLen ->
             "veclen"
+
+        Rec ->
+            "rec"
 
 
 {-| The probe's DEFUN KEY — what `QBE_WORDARM_PROBE` compiles as its entry. -}
@@ -115,6 +119,9 @@ defun m =
         VecLen ->
             vecLenProbe
 
+        Rec ->
+            recProbe
+
 
 {-| A defun's declared arity — what the probe module's arity table must carry,
 or `lowerApp` treats the call as under-applied and routes it through the
@@ -138,6 +145,12 @@ defuns m =
     case m of
         Call ->
             [ callProbe, callCallee ]
+
+        Rec ->
+            -- THE RECORD LAYOUT's four reads, all reachable from the entry:
+            -- `lowerWith` emits only the REACHABLE set, so a defun the entry
+            -- does not call would not be in the module the harness links.
+            [ recProbe, recCountProbe, recElemProbe, recNamesBaseProbe, recNameProbe ]
 
         _ ->
             [ defun m ]
@@ -379,3 +392,183 @@ callCallee =
             , body = Var 0
             }
     }
+
+
+{-| THE RECORD LAYOUT (perf word-arm-records R0) — the FALSIFIABLE FIRST STEP
+of the record family's port, taken BEFORE a line of record lowering exists.
+
+WHY A HAND-BUILT BLOCK.  A word-arm record is ONE code-14 heap block whose body
+is `[data_0 .. data_{n-1} | namesBase]` and whose header count is `n + 1` — the
+field NAMES array base is the LAST body word, a raw pointer, deliberately not a
+Value.  NAMES-LAST IS LOAD-BEARING: it is what keeps `vecload(vecbody(rec), i)`
+meaning `data[i]` on BOTH arms, so `recordAccessBody`'s positional read needs no
+arm fork at all.  The price is an OFF-BY-ONE the layout owns: `veclen(rec)` is
+`n + 1`, so a bare `veclen` bound reads the names word as a value, and on a
+write it runs off the end of the block into the NEXT heap block.
+
+The four reads below are the design's own spelling, one per line, and the
+harness drives them against a block it builds BY HAND (no compiler output
+involved), so the layout is validated before anything depends on it:
+
+    reclen(rec)   = veclen(rec) - 1
+    data[i]       = vecload(vecbody(rec), i)
+    namesBase     = wload(vecbody(rec), veclen(rec) - 1)      -- the LAST body word
+    name_i        = wload(namesBase, i)                        -- a raw char* word
+
+`wload` (NOT `vecload`) on the names side is not a stylistic choice: the names
+array holds RAW POINTERS, so the read must produce a raw word.  `vecload` blits
+a `val` (8 bytes here) and would hand the pointer to the next reader as a
+FIXNUM-shaped Value, whose `payload` is the pointer shifted down by 3 — the
+mixed-representation read this arm exists to prevent.  `mknum(..)` at the
+boundary is the established pointer-wrap idiom (`vecbody` of a `mknum(ptr)` IS
+the pointer on both arms), which is what lets the runtime's `symEq` compare
+`name_i` against a field symbol with NO new prim.
+
+WHAT THIS PROBE CANNOT SEE, stated because the arc's rule is that a row states
+its own reach: the runtime's PRINTER (`Rt.pvRec`/`pvV`) cannot run in a probe
+module (it is not runtime-free — it needs the byte-stream seat and `numText`),
+so the byte-comparison of the rendered record is done by the HARNESS in the
+printer's format, from what these four reads return.  The printer's own
+word-arm splice is exercised by the `word-arm-diff` rows once a program can
+BUILD a record (R2/R3), and `symEq`'s byte walk is unchanged code.
+-}
+recProbe : Defun
+recProbe =
+    { key = "Rc.f"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "v" }, { id = 1, name = "i" } ]
+            , body =
+                -- ONE evaluation of each read, so every defun is REACHABLE
+                -- from the entry and therefore EMITTED.  The results are
+                -- deliberately unused: the harness calls each defun directly
+                -- (they are globalized with the entry), and what this body
+                -- adds is reachability plus one execution of each.
+                Let
+                    { binders =
+                        [ LetBind { binder = { id = 2, name = "n" }, value = recCall "Rc.n" [ Var 0 ] }
+                        , LetBind { binder = { id = 3, name = "b" }, value = recCall "Rc.b" [ Var 0 ] }
+                        , LetBind { binder = { id = 4, name = "e" }, value = recCall "Rc.e" [ Var 0, Var 1 ] }
+                        ]
+                    , body = recCall "Rc.k" [ Var 0, Var 1 ]
+                    }
+            }
+    }
+
+
+recCall : String -> List Exp -> Exp
+recCall key args =
+    App { fn = GRef { key = key, force = False }, args = args }
+
+
+{-| THE RECORD'S LENGTH: `mknum(veclen(v) - 1)`.
+
+This is the design's `reclen` word splice, spelled the way every runtime site
+will spell it.  The `- 1` is the whole point of the probe: the header count is
+`n + 1` because the names word is a body word, and a length reader that answered
+`3` for a two-field record is the off-by-one that corrupts the next block.
+-}
+recCountProbe : Defun
+recCountProbe =
+    { key = "Rc.n"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "v" } ]
+            , body = mknumWord recLenWord
+            }
+    }
+
+
+{-| `veclen(v) - 1` as a RAW WORD — the one spelling of a record's length.
+Every defun that uses it takes the record as parameter id 0 (`v`), which is
+what `Var 0` names here; a probe that renamed its record parameter would have
+to rename this too, and the harness's checks are what would fail.
+-}
+recLenWord : Exp
+recLenWord =
+    Unsafe
+        (RawBin
+            { op = RSub
+            , a = Unsafe (RawVecLen { value = Var 0 })
+            , b = Lit (LNumber 1)
+            }
+        )
+
+
+{-| THE DATA SIDE, UNCHANGED ON BOTH ARMS: `vecload(vecbody(v), i)` is
+`data[i]` — the positional read `recordAccessBody` already emits, which is why
+that site needs no fork.
+-}
+recElemProbe : Defun
+recElemProbe =
+    { key = "Rc.e"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "v" }, { id = 1, name = "i" } ]
+            , body =
+                Unsafe
+                    (RawVecLoad
+                        { vec = Unsafe (RawVecBody { value = Var 0 })
+                        , index = Unsafe (RawPayload { value = Var 1, word = 0 })
+                        }
+                    )
+            }
+    }
+
+
+{-| THE NAMES BASE: the LAST body word, `wload(vecbody(v), veclen(v) - 1)`,
+boxed as `mknum(ptr)` so it can cross the `:val` ABI.
+-}
+recNamesBaseProbe : Defun
+recNamesBaseProbe =
+    { key = "Rc.b"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "v" } ]
+            , body =
+                mknumWord
+                    (Unsafe
+                        (RawWordLoad
+                            { ptr = Unsafe (RawVecBody { value = Var 0 })
+                            , index = recLenWord
+                            }
+                        )
+                    )
+            }
+    }
+
+
+{-| ONE NAME: `wload(namesBase, i)` — a raw char* word, boxed with the SAME
+`mknum` wrap, which is what `symEq`'s `payload(·, 0)` reads back unchanged.
+-}
+recNameProbe : Defun
+recNameProbe =
+    { key = "Rc.k"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "v" }, { id = 1, name = "i" } ]
+            , body =
+                mknumWord
+                    (Unsafe
+                        (RawWordLoad
+                            { ptr =
+                                Unsafe
+                                    (RawWordLoad
+                                        { ptr = Unsafe (RawVecBody { value = Var 0 })
+                                        , index = recLenWord
+                                        }
+                                    )
+                            , index = Unsafe (RawPayload { value = Var 1, word = 0 })
+                            }
+                        )
+                    )
+            }
+    }
+
+
+{-| `mknum(word)` — the fixnum box (and, for a dynamic word, the round-trip
+range check `storeWordCell` emits).
+-}
+mknumWord : Exp -> Exp
+mknumWord w =
+    Unsafe (RawMkValue { tag = RtLayout.tagNumber, words = [ w ] })

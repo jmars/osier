@@ -166,6 +166,40 @@ long q_Ca_x2ef(long v);
 long q_Vc_x2ef(long v, long i);
 #elif defined(PROBE_VECLEN)
 long q_Vl_x2ef(long v);
+#elif defined(PROBE_REC)
+long q_Rc_x2ef(long v, long i);   /* the entry: evaluates every read */
+long q_Rc_x2en(long v);           /* mknum(veclen(v) - 1)      — reclen      */
+long q_Rc_x2ee(long v, long i);   /* vecload(vecbody(v), i)    — data[i]     */
+long q_Rc_x2eb(long v);           /* mknum(wload(body, n))     — namesBase   */
+long q_Rc_x2ek(long v, long i);   /* mknum(wload(namesBase, i)) — name_i     */
+#endif
+
+#if defined(PROBE_REC)
+/* THE PRINTER'S FORMAT, re-spelled for the ONE block shape this probe builds.
+ * `Rt.pvRec` walks `i < reclen` calling `pvV` per element between `[record`
+ * and `]`; `pvV` renders a fixnum through `numText` (decimal) and a string as
+ * `"` bytes `"`.  Both formats are copied EXACTLY, because the check below is a
+ * BYTE comparison against the val arm's own render — the printer itself cannot
+ * run in a probe module (it needs the byte-stream seat and numText).  A tag
+ * this probe does not build renders as `<?>`, which then FAILS the comparison
+ * loudly rather than passing something unrecognisable.
+ */
+static int render_elem(char *out, size_t cap, long w)
+{
+    if ((w & 7) == 0) {                     /* a fixnum: numText's decimal */
+        return snprintf(out, cap, "%ld", w >> 3);
+    }
+    if ((w & 7) == HEAP_PTR_TAG) {
+        long *body = (long *)(uintptr_t)(w & UNTAG_MASK);
+        long code = (body[-2] >> 24) & 15;  /* header word 0's KIND CODE */
+        if (code == 1) {                    /* a raw body: bytes, then length */
+            const char *bytes = (const char *)(uintptr_t)body[0];
+            long len = body[1];
+            return snprintf(out, cap, "\"%.*s\"", (int)len, bytes);
+        }
+    }
+    return snprintf(out, cap, "<?>");
+}
 #endif
 
 int main(void)
@@ -398,6 +432,82 @@ int main(void)
         }
         ok(g_died == 1 && strstr(g_die_msg, "element count") != NULL,
            "VL: veclen(fixnum) REFUSES and names the reason (a number has no elements)");
+    }
+#elif defined(PROBE_REC)
+    /* ===== THE RECORD LAYOUT, HAND-BUILT (perf word-arm-records R0) =====
+     *
+     * THE FALSIFIABLE FIRST STEP, and it is taken BEFORE a line of record
+     * lowering exists.  A word-arm record is ONE code-14 block whose body is
+     * `[data_0 .. data_{n-1} | namesBase]` with header count n+1; the harness
+     * builds exactly that by hand and drives the emitter's four reads against
+     * it.  If the layout is wrong the probe prints a wrong element count, a
+     * garbage names word, or dies on the kind test — with no compiler code to
+     * blame, which is the point: this is the cheap place to lose the argument.
+     */
+    {
+        /* THE VAL ARM'S RENDER of `{ x = 1, y = "hi" }` — MEASURED by running
+         * that program on the val arm (QBE=1 run.js -> qbe -> cc -> run), not
+         * guessed.  This is the byte string the last check compares against. */
+        static const char *want = "[record 1 \"hi\"]";
+
+        /* THE FIELD-NAMES ARRAY a word-arm record points at: a STATIC array of
+         * name-byte pointers (DRef words).  It is 8-aligned, so each element
+         * reads as a fixnum-tagged (`000`) word — the R3-risk, and the reason
+         * the length reader must be `reclen` and not a bare `veclen`. */
+        static const char *names_blob[2] = { "x", "y" };
+
+        long *hi = mk_block(1, 0, 0, 0);          /* the string cell: code 1 */
+        body_of(hi)[0] = (long)(uintptr_t)"hi";
+        body_of(hi)[1] = 2;
+        long hicell = tagged(hi);
+
+        /* ONE code-14 block, count 3 = two data words PLUS the names word. */
+        long *rec = mk_block3(14, 1, (1L << 3), hicell, (long)(uintptr_t)names_blob);
+        long r = tagged(rec);
+        long nb;
+        char *n0;
+        char *n1;
+
+        ok(q_Rc_x2en(r) == (2L << 3),
+           "R/LEN: reclen(record) == 2 for a two-field record - the header count is 3 and the names word is NOT a field (a bare veclen bound reads it as a value)");
+
+        ok(q_Rc_x2ee(r, 0L << 3) == (1L << 3),
+           "R/DATA: element 0 is the fixnum 1 - vecload(vecbody(rec), 0) IS data[0] on BOTH arms (names-last is what makes that true)");
+        ok(q_Rc_x2ee(r, 1L << 3) == hicell,
+           "R/DATA: element 1 is the string cell - one-word stride, and the names word did not move the data");
+
+        nb = q_Rc_x2eb(r) >> 3;
+        ok(nb == (long)(uintptr_t)names_blob,
+           "R/NAMES: the names base is the body word at index reclen - the LAST body word, and the static blob verbatim");
+
+        n0 = (char *)(uintptr_t)(q_Rc_x2ek(r, 0L << 3) >> 3);
+        n1 = (char *)(uintptr_t)(q_Rc_x2ek(r, 1L << 3) >> 3);
+        ok(strcmp(n0, "x") == 0,
+           "R/NAMES: name 0 is \"x\" - a RAW char* word read as wload(namesBase, 0), boxed with mknum (the wrap symEq's payload(.,0) reads back)");
+        ok(strcmp(n1, "y") == 0, "R/NAMES: name 1 is \"y\"");
+
+        ok((body_of(rec)[2] & 7) == 0,
+           "R/HAZARD: the names word AS A VALUE is fixnum-tagged (...000) - which is why `reclen` is the only record-length reader: a walk bounded by bare veclen copies/prints a pointer as a number");
+
+        /* THE KILL NUMBER.  The element COUNT comes from the probe's own
+         * reclen read and each element from its own element read, so a wrong
+         * length prints the wrong NUMBER of elements and a wrong stride prints
+         * the wrong element — the two failures this layout could have. */
+        {
+            char got[256];
+            int len = snprintf(got, sizeof got, "[record");
+            long cnt = q_Rc_x2en(r) >> 3;
+            long k;
+            for (k = 0; k < cnt; k++) {
+                len += snprintf(got + len, sizeof got - (size_t)len, " ");
+                len += render_elem(got + len, sizeof got - (size_t)len, q_Rc_x2ee(r, k << 3));
+            }
+            snprintf(got + len, sizeof got - (size_t)len, "]");
+            if (strcmp(got, want) != 0)
+                printf("    rendered [%s] want [%s]\n", got, want);
+            ok(strcmp(got, want) == 0,
+               "R/PRINT: the hand-built record RENDERS byte-identically to the val arm's `{ x = 1, y = \"hi\" }` -> [record 1 \"hi\"]");
+        }
     }
 #endif
     printf("%d checks\n", g_checks);

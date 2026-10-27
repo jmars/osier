@@ -55,17 +55,21 @@ CDIR="$ROOT/osier-compiler"
 HERE="$ROOT/tools/qbe/word-arm-probe"
 QBE="$ROOT/vendor/qbe/qbe"
 
-# probe name | entry symbol | -D flag | expected check count
+# probe name | entry symbol | -D flag | expected check count | extra symbols to globalize
 PROBES=(
-  "str|q_St_x2ef|PROBE_STR|4"
-  "payload|q_Pl_x2ef|PROBE_PAY|4"
-  "len|q_Ln_x2ef|PROBE_LEN|2"
-  "tagheap|q_Tg_x2ef|PROBE_TAGHEAP|5"
-  "tagnil|q_Nt_x2ef|PROBE_TAGNIL|3"
-  "tagbool|q_Bt_x2ef|PROBE_TAGBOOL|4"
-  "call|q_Ca_x2ef|PROBE_CALL|4"
-  "vec|q_Vc_x2ef|PROBE_VEC|4"
-  "veclen|q_Vl_x2ef|PROBE_VECLEN|2"
+  "str|q_St_x2ef|PROBE_STR|4|"
+  "payload|q_Pl_x2ef|PROBE_PAY|4|"
+  "len|q_Ln_x2ef|PROBE_LEN|2|"
+  "tagheap|q_Tg_x2ef|PROBE_TAGHEAP|5|"
+  "tagnil|q_Nt_x2ef|PROBE_TAGNIL|3|"
+  "tagbool|q_Bt_x2ef|PROBE_TAGBOOL|4|"
+  "call|q_Ca_x2ef|PROBE_CALL|4|"
+  "vec|q_Vc_x2ef|PROBE_VEC|4|"
+  "veclen|q_Vl_x2ef|PROBE_VECLEN|2|"
+  # THE RECORD LAYOUT (perf word-arm-records R0): FOUR reads, one entry.  The
+  # harness drives each directly, so every defun is globalized — the entry's
+  # Let body is what makes them reachable (and therefore emitted).
+  "rec|q_Rc_x2ef|PROBE_REC|8|q_Rc_x2en q_Rc_x2ee q_Rc_x2eb q_Rc_x2ek"
 )
 
 [ -f "$CDIR/compiler.js" ] || { echo "word-arm-probe: $CDIR/compiler.js missing (run: osier-compiler/build.sh)" >&2; exit 2; }
@@ -81,7 +85,7 @@ trap cleanup EXIT
 
 fails=0
 for spec in "${PROBES[@]}"; do
-  IFS='|' read -r name sym flag want <<<"$spec"
+  IFS='|' read -r name sym flag want extras <<<"$spec"
   ssa="$BUILD/$name.ssa"
   ( cd "$CDIR" && QBE_VALREP=word QBE_WORDARM_PROBE="$name" node run.js "$ssa" >/dev/null 2>"$BUILD/$name.emit.err" )
   if [ ! -s "$ssa" ]; then
@@ -98,7 +102,9 @@ for spec in "${PROBES[@]}"; do
     echo "FAIL $name: cc rejected the assembly: $(head -3 "$BUILD/$name.cc.err" | tr '\n' ' ')"
     fails=$((fails + 1)); continue
   fi
-  objcopy --globalize-symbol="$sym" "$BUILD/$name.o"
+  for gsym in $sym $extras; do
+    objcopy --globalize-symbol="$gsym" "$BUILD/$name.o"
+  done
   if ! cc -O1 -w -D"$flag" -o "$BUILD/p_$name" "$HERE/harness.c" "$BUILD/$name.o" 2>"$BUILD/$name.link.err"; then
     echo "FAIL $name: link failed: $(head -3 "$BUILD/$name.link.err" | tr '\n' ' ')"
     fails=$((fails + 1)); continue

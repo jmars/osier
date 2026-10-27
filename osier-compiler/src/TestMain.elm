@@ -2014,6 +2014,19 @@ checks rt rawMidText =
             Err _ ->
                 False
         )
+    , check "THE RECORD LAYOUT'S NAMES BASE IS THE LAST BODY WORD, AND THE INDEX THAT FINDS IT IS `veclen - 1` (perf word-arm-records R0). A word-arm record is ONE code-14 block whose body is `[data_0 .. data_{n-1} | namesBase]` with header count n+1, so the names base is `wload(vecbody(rec), veclen(rec) - 1)` - the `- 1` IS the layout, and dropping it reads PAST the block. THIS ROW ASSERTS THE SYMBOL PROPERTY OF THE EMITTED TEXT, not an output: the `sub ..., 1` is present AND the multiply that would spell the bare count is absent, so a `veclen` bound cannot come back silently. The val arm is not pinned here on purpose - the same expressions name different fields there, which is the arm difference itself; the word arm's BEHAVIOUR is `word-arm-probe`'s `rec` row, which byte-compares a hand-built block's render against the val arm's"
+        (case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities (WordArmProbe.defuns WordArmProbe.Rec)) (WordArmProbe.defuns WordArmProbe.Rec) "Rc.f" of
+            Ok mod ->
+                let
+                    txt =
+                        Print.print mod
+                in
+                String.contains "\t%t12 =l sub %t8, 1\n\t%t13 =l mul 8, %t12\n\t%t14 =l add %t4, %t13\n\t%t15 =l loadl %t14\n" txt
+                    && not (String.contains "=l mul 8, %t8\n" txt)
+
+            Err _ ->
+                False
+        )
     , check "VR3b3 FIX F6 - THE `mk*` PATH IS RANGE-CHECKED TOO, NOT JUST `PrimApp`. A word-arm fixnum is an i61, so `mknum` of a value whose top three bits survive the tag shift would be SILENTLY TRUNCATED - and `mknum` is how every runtime site boxes a word. A COMPILE-TIME constant is refused by name (AREA 4, the boxing path that does not exist yet), and a DYNAMIC word gets a round-trip check whose failure REFUSES loudly instead of truncating. Both halves are pinned: `mknum(2^60)` must NOT emit, and the dynamic write must emit `shl`/`sar`/`ceql`/`jnz` plus the refusal"
         ((case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ bigMkProbe ]) [ bigMkProbe ] "Bm.f" of
             Err msg ->
