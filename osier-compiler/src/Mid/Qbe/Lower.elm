@@ -4776,12 +4776,20 @@ wordPayloadField32 base word s0 =
         -- for its mask.
         s17 =
             if word == 0 then
+                -- THE FRESH TEMP MUST COME FROM THE STATE THE EMIT CHAIN RETURNS
+                -- (perf word-arm-surface).  MEASURED: allocating `w32` in a
+                -- `let` whose state was then DISCARDED (the chain started from
+                -- `s16` again) left the counter one behind, so the NEXT
+                -- `payload32` in the same defun was handed the same number — and
+                -- because this arm defines it `l` (`sar`) and then `w` (`and`),
+                -- qbe rejected the module: "invalid type for first operand
+                -- %t250 in and".  One `payload32` per defun never showed it;
+                -- `case s of "hi" -> ..` does (two reads in one body).
                 let
                     ( w32, sa ) =
-                        freshTmp s16
+                        freshTmp (startBlock fixLbl s16)
                 in
-                s16
-                    |> startBlock fixLbl
+                sa
                     |> emit (Bin (Just w32) L Sar (Il.Tmp l) (Il.Con s13.layout.tagBits))
                     |> emit (Bin (Just w32) W And (Il.Tmp w32) (Il.Con -1))
                     |> emit (Unary (Just r) L Extsw (Il.Tmp w32))
@@ -7537,10 +7545,22 @@ isUserAdt t =
 {-| THE PREDICATE, with the pass switch folded in so every consumer reads
 exactly one decision: an expression is Int-known iff the pass is ON and
 `isIntKnown` proves it.  There is no second place to forget `s.rep`.
+
+NEVER UNDER THE WORD ARM, and the reason is measured (perf word-arm-surface).
+S4's premise is that a raw `l` operand holds the number, and every reader and
+writer of that premise is 40-byte-shaped: `rawIntOf`'s boxed `Var` reads the
+payload at `slot + 8`, and `reboxArg` writes `tagNumber` at the slot and the
+payload at `slot + 8` — i.e. SIXTEEN bytes into an EIGHT-byte slot, clobbering
+the next one.  A program with no arithmetic at all reached it: `let ( a, b ) =
+( 1, "hi" )` proved `a` an Int from its literal, held it raw, reboxed it at the
+boundary, and the word arm printed `0` for `1`.  The val arm's tag/untag is AREA
+4's worklist item, so the honest state is "this optimisation does not exist
+here", and refusing it at the ONE decision point keeps the shape it would have
+had anyway: a frame slot written by `lowerLitWord`.
 -}
 isIntExp : S -> Exp -> Bool
 isIntExp s exp =
-    s.rep && isIntKnown s exp
+    s.rep && not (wordArm s) && isIntKnown s exp
 
 
 {-| Deny-by-default proof that `exp`'s VALUE is an Int.  Deliberately small:
@@ -7925,11 +7945,14 @@ floatData f s =
 
 
 {-| THE PREDICATE, with the pass switch folded in exactly as `isIntExp` does:
-one decision, one place to read `s.rep`.
+one decision, one place to read `s.rep` — and, for the same measured reason, one
+place to read the ARM.  `reboxFloat` writes a `tagFloat` word at the slot and
+the double at `slot + 8`, the 40-byte shape; a raw Float local on the word arm
+would clobber the next slot.  AREA 5 does not exist here yet.
 -}
 isFloatExp : S -> Exp -> Bool
 isFloatExp s exp =
-    s.rep && isFloatKnown s exp
+    s.rep && not (wordArm s) && isFloatKnown s exp
 
 
 {-| Deny-by-default proof that `exp`'s VALUE is `tagFloat`.  Each admitted
