@@ -157,7 +157,7 @@ defuns m =
             -- THE RECORD LAYOUT's four reads, all reachable from the entry:
             -- `lowerWith` emits only the REACHABLE set, so a defun the entry
             -- does not call would not be in the module the harness links.
-            [ recProbe, recCountProbe, recElemProbe, recNamesBaseProbe, recNameProbe ]
+            [ recProbe, recCountProbe, recElemProbe, recNamesBaseProbe, recNameProbe, recBuildProbe ]
 
         Sym ->
             [ symProbe, symTagProbe ]
@@ -459,6 +459,7 @@ recProbe =
                         [ LetBind { binder = { id = 2, name = "n" }, value = recCall "Rc.n" [ Var 0 ] }
                         , LetBind { binder = { id = 3, name = "b" }, value = recCall "Rc.b" [ Var 0 ] }
                         , LetBind { binder = { id = 4, name = "e" }, value = recCall "Rc.e" [ Var 0, Var 1 ] }
+                        , LetBind { binder = { id = 5, name = "l" }, value = recCall "Rc.l" [ Var 0 ] }
                         ]
                     , body = recCall "Rc.k" [ Var 0, Var 1 ]
                     }
@@ -643,5 +644,32 @@ symTagProbe =
                         , words = [ Unsafe (RawTagIs { value = Var 0, tag = RtLayout.tagSymbol }) ]
                         }
                     )
+            }
+    }
+
+
+{-| THE EMITTER'S RECORD BUILD (perf word-arm-records R2) — `{ x = 1, y = "hi" }`,
+lowered by `lowerRecordLitPos`'s word fork, so the harness inspects the block the
+EMITTER allocated: one code-14 block, header count `n + 1` (the names word is a
+body word), `[data_0 data_1 | namesBase]`.
+
+WHY THIS DEFUN EXISTS AT ALL, given `word-arm-diff` has a `rec.elm` row: a
+PROGRAM can only show the record's PRINT, and the print walks `veclen - 1`
+elements — it cannot see the names word, the header's count, or the kind code.
+Those are exactly the three things a wrong build gets wrong, so the probe reads
+them directly.  (The design's R7 risk: "a program-level diff row cannot see the
+names word at all".)
+-}
+recBuildProbe : Defun
+recBuildProbe =
+    { key = "Rc.l"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body =
+                RecordLit
+                    [ ( "x", Lit (LNumber 1) )
+                    , ( "y", Lit (LString "hi") )
+                    ]
             }
     }

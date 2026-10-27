@@ -586,7 +586,17 @@ type alias ValLayout =
     , heapKindShift : Int -- FLIPS 0 -> 24 (VR3c AREA 1): the header's KIND CODE field starts here (0 = there is NO kind field: the tag word IS the kind, so a reader branches on `heapTagIsKind` first — the `tagMask` rule)
     , heapKindMask : Int -- FLIPS 0 -> 15 (VR3c AREA 1): the kind code's width mask, meaningless on the val arm for the same reason
     , tagNumber : Int -- REINTERPRETED by VR3b (low-3-bit encoding), not renumbered
-    , tagString : Int
+    , -- THE `tag*` FIELDS ARE THE WORD ENCODING OF A VALTAG, NOT THE VALTAG.
+      -- On the val arm they ARE the valtag integers; on the word arm every HEAP
+      -- code collapses to `heapPtrTag` (1) because the constructor moved into
+      -- the header, so `wordLayout.tagRecord` is 1, not 14.  A site that needs
+      -- the KIND CODE (a header write, a `wordTagShape` argument) must use the
+      -- module CONSTANT — `RtLayout.tagRecord` — never `s.layout.tagRecord`.
+      -- MEASURED (perf word-arm-records R2): the record build wrote
+      -- `s.layout.tagRecord`, which on this arm is the STRING code, so the
+      -- cell writer took the string branch, refused, and the site emitted the
+      -- POISON word — a silent-wrong record that the probe caught.
+      tagString : Int
     , tagSymbol : Int
     , tagBoolean : Int
     , tagCons : Int

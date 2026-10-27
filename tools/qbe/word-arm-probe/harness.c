@@ -117,6 +117,36 @@ struct Val q_Rt_x2eallocSym(long *a, long *b, long *c, int n)
 }
 #endif
 
+#if defined(PROBE_REC)
+/* THE RECORD SEAT'S STUB, to the contract `runtime.mid` states: `Rt.allocRecord`
+ * takes the DATA field count and allocates `count + 1` body words (the names
+ * word is the last one), with the KIND CODE 14 and — because `heapKindScanned 14`
+ * — the scan bit SET, so the collector traces the body.  The `+ 1` is asserted
+ * below through the header's count word: a seat that allocated `count` words
+ * would make the names store land one word past the block. */
+struct Val q_Rt_x2eallocRecord(long *a, long *b, long *c, int n)
+{
+    (void)b; (void)c; (void)n;
+    long body_words = (a[0] >> 3) + 1;
+    long *base = calloc(1, (size_t)(2 + body_words) * 8);
+    long *body = base + 2;
+    base[0] = (long)((512L * 4L) + (1L << 1) + (14L << 24));  /* class, SCAN 1, code 14 */
+    base[1] = body_words;
+    g_last_body = body;
+    struct Val v;
+    v.w = (int64_t)((uintptr_t)body) << 3;    /* mknum(body) */
+    return v;
+}
+
+/* `Rt.vecStorePlain(vec, i, val)` — the word arm's ONE-WORD element store at
+ * `vec + i * 8`, `val` being the ADDRESS of the value's slot. */
+long q_Rt_x2evecStorePlain(long vec, long i, long *val)
+{
+    ((long *)(uintptr_t)vec)[i] = val[0];
+    return 0;
+}
+#endif
+
 static int g_died;
 static char g_die_msg[512];
 long q_Rt_x2edie(const char *msg)
@@ -198,6 +228,7 @@ long q_Rc_x2en(long v);           /* mknum(veclen(v) - 1)      — reclen      *
 long q_Rc_x2ee(long v, long i);   /* vecload(vecbody(v), i)    — data[i]     */
 long q_Rc_x2eb(long v);           /* mknum(wload(body, n))     — namesBase   */
 long q_Rc_x2ek(long v, long i);   /* mknum(wload(namesBase, i)) — name_i     */
+long q_Rc_x2el(long x);           /* { x = 1, y = "hi" } BUILT by the emitter */
 #endif
 
 #if defined(PROBE_REC)
@@ -533,6 +564,71 @@ int main(void)
                 printf("    rendered [%s] want [%s]\n", got, want);
             ok(strcmp(got, want) == 0,
                "R/PRINT: the hand-built record RENDERS byte-identically to the val arm's `{ x = 1, y = \"hi\" }` -> [record 1 \"hi\"]");
+        }
+
+        /* ===== THE BUILT RECORD (perf word-arm-records R2) =====
+         *
+         * The block above is the harness's; this one is the EMITTER's, through
+         * `lowerRecordLitPos`'s word fork and the `Rt.allocRecord` seat.  A
+         * program-level diff row can only see the record's PRINT, and the print
+         * walks `veclen - 1` elements — it cannot see the names word, the
+         * header's count, or the kind code, which are exactly what a wrong
+         * build gets wrong.
+         */
+        {
+            long b = q_Rc_x2el(0);
+            long *bb = (long *)(uintptr_t)(b & UNTAG_MASK);
+
+            ok((b & 7) == HEAP_PTR_TAG,
+               "R/BUILD: the built record is ONE tagged heap pointer (...001)");
+
+            ok(bb[-1] == 3,
+               "R/BUILD: the header's COUNT is n + 1 (3 for two fields) - the names word is a body word, so `veclen - 1` is the length (a seat that allocated n would put the names store past the block)");
+            ok(((bb[-2] >> 24) & 15) == 14,
+               "R/BUILD: the header's KIND CODE is 14 (tagRecord) - the module CONSTANT, not the instance field (on this arm `layout.tagRecord` is the heap shape tag 1, which is the STRING code)");
+            ok((bb[-2] & 2) != 0,
+               "R/BUILD: the header's SCAN bit is SET - a record body is Values (`heapKindScanned 14`), so the collector must trace data_0..data_{n-1}");
+
+            ok(q_Rc_x2ee(b, 0L << 3) == (1L << 3),
+               "R/BUILD: data[0] is the fixnum 1 - `vecload(vecbody(rec), i)` is data[i] on BOTH arms, which is why the positional read needs no fork");
+            {
+                long e1 = q_Rc_x2ee(b, 1L << 3);
+                long *sb = (long *)(uintptr_t)(e1 & UNTAG_MASK);
+                ok((e1 & 7) == HEAP_PTR_TAG && ((sb[-2] >> 24) & 15) == 1
+                        && strcmp((char *)(uintptr_t)sb[0], "hi") == 0,
+                   "R/BUILD: data[1] is the string cell the emitter built (code 1, bytes \"hi\") - a heap element in the data run, not a pointer to one");
+            }
+
+            ok(q_Rc_x2en(b) == (2L << 3),
+               "R/BUILD: reclen(built record) == 2 - the layout's off-by-one answered by the one accessor that owns it");
+
+            {
+                long nb2 = q_Rc_x2eb(b) >> 3;
+                const char *n0 = nb2 ? *(const char **)(uintptr_t)nb2 : 0;
+                const char *n1 = nb2 ? *((const char **)(uintptr_t)nb2 + 1) : 0;
+                ok(n0 && n1 && strcmp(n0, "x") == 0 && strcmp(n1, "y") == 0,
+                   "R/BUILD: the names base is the body's LAST word and points at the static DRef-word blob, in canonical (sorted) order: x, y");
+                /* TWO builds of the same row share ONE names array: the blob is
+                 * a content-keyed static data def, not a per-record allocation.
+                 * (It cannot be compared against THIS harness's blob — that is
+                 * a different object in a different module.) */
+                ok(q_Rc_x2eb(q_Rc_x2el(0)) >> 3 == nb2,
+                   "R/BUILD: the names array is the SAME static blob for a second build of the same row - content-keyed, not per-record");
+            }
+
+            {
+                char got[256];
+                int len = snprintf(got, sizeof got, "[record");
+                long cnt = q_Rc_x2en(b) >> 3;
+                long k;
+                for (k = 0; k < cnt; k++) {
+                    len += snprintf(got + len, sizeof got - (size_t)len, " ");
+                    len += render_elem(got + len, sizeof got - (size_t)len, q_Rc_x2ee(b, k << 3));
+                }
+                snprintf(got + len, sizeof got - (size_t)len, "]");
+                ok(strcmp(got, want) == 0,
+                   "R/BUILD: the BUILT record renders byte-identically to the val arm's");
+            }
         }
     }
 #elif defined(PROBE_SYM)

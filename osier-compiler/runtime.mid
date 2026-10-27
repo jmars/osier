@@ -1035,7 +1035,18 @@ defun Rt.deepEq(a : val, bb : val) -> val {
     // re-review's item 3): `len32` here was the SAME wrong-kind read as the
     // vector arm below and the ten-site sweep missed it.  A record's count is
     // its header's count word on the word arm exactly as a vector's is.
+    // >>> QBE_VAL-ONLY
     return mkbool(veclen(a) == veclen(bb)) && call Rt.vecEq(a, bb, mknum(0));
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    // NOT `vecEq` (perf word-arm-records R2): a word-arm record's body is
+    // `[data | namesBase]`, so `vecEq`'s `veclen` bound would compare the NAMES
+    // word as a value — and the names arrays of two equal records need not be
+    // the same object (a literal's is a static content-keyed blob, an appended
+    // record's is a runtime-built array).  `recEqGo` compares the DATA words
+    // and the counts, nothing else.
+    return call Rt.recEqGo(a, bb, mknum(0));
+    // <<< QBE_WORDVAL-ONLY
   }
   if (mkbool(tagis(a, 10)) && mkbool(tagis(bb, 10))) {
     // THE ELEMENT COUNT, not the byte length (perf word-arm-area3rt): a
@@ -1102,6 +1113,29 @@ defun Rt.symEq(a : val, bb : val, i : val) -> val {
   }
   recur(a, bb, mknum(payload(i, 0) + 1));
 }
+
+// >>> QBE_WORDVAL-ONLY
+// A RECORD'S STRUCTURAL EQUALITY (perf word-arm-records R2), over its DATA
+// words.  The count is `veclen - 1` (the names word is not a field), and the
+// names are deliberately NOT compared: two records with the same row carry the
+// same field names by construction, and the arrays themselves differ by
+// provenance (a literal's static content-keyed blob vs an appended record's
+// runtime-built array) — comparing them as values would make equality depend on
+// how the record was built, which is the `vecEq`-on-records defect this defun
+// replaces.
+defun Rt.recEqGo(a : val, bb : val, i : val) -> val {
+  if (mkbool(veclen(a) != veclen(bb))) {
+    return false;
+  }
+  if (mkbool(payload(i, 0) >= veclen(a) - 1)) {
+    return true;
+  }
+  if (mkbool(payload32(call Rt.deepEq(vecload(vecbody(a), payload(i, 0)), vecload(vecbody(bb), payload(i, 0))), 0) == 0)) {
+    return false;
+  }
+  return call Rt.recEqGo(a, bb, mknum(payload(i, 0) + 1));
+}
+// <<< QBE_WORDVAL-ONLY
 
 defun Rt.vecEq(a : val, bb : val, i : val) -> val {
   if (mkbool(payload(i, 0) >= veclen(a))) {
@@ -1958,7 +1992,11 @@ defun Rt.pvRec(stN : val, vN : val, iN : val) -> val {
   if (mkbool(i >= reclen(vN))) {
   // <<< QBE_VAL-ONLY
   // >>> QBE_WORDVAL-ONLY
-  if (mkbool(i >= veclen(vN))) {
+  // THE RECORD'S LENGTH IS `veclen - 1` (perf word-arm-records R2): the header
+  // count is `n + 1` because the LAST body word is the field-NAMES base, a raw
+  // pointer that is NOT a value to print.  A bare `veclen` here prints one
+  // extra element — the names word, which reads as a fixnum.
+  if (mkbool(i >= veclen(vN) - 1)) {
   // <<< QBE_WORDVAL-ONLY
     return mknum(0);
   }
@@ -5181,6 +5219,24 @@ defun Rt.allocCons(dummy : val) -> val {
   word regionW = wload(glob, 0);
   val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
   return call Rt.gcAlloc(region, mknum(4), mknum(2));
+}
+// THE RECORD BLOCK (perf word-arm-records R2).  A word-arm record is ONE
+// code-14 block whose body is `[data_0 .. data_{n-1} | namesBase]`: the field
+// VALUES in canonical order, then ONE raw word — the address of the field-NAMES
+// array.  NAMES LAST IS LOAD-BEARING: it keeps `vecload(vecbody(rec), i)`
+// meaning `data[i]` on BOTH arms, so the emitter's positional read needs no
+// fork.  The price is that the header count is `n + 1`, so EVERY record-length
+// reader must answer `veclen - 1` (see `Rt.pvRec` and `Rt.recEqGo`); a bare
+// `veclen` bound reads the names word as a value and, on a write, runs into the
+// NEXT heap block.
+//
+// THE `+ 1` LIVES HERE, in the seat and in its name's meaning, so no call site
+// can allocate `n` and store `n + 1` words.
+defun Rt.allocRecord(count : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word regionW = wload(glob, 0);
+  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  return call Rt.gcAlloc(region, mknum(14), mknum(payload(count, 0) + 1));
 }
 // THE SYMBOL CELL (perf word-arm-records R1).  A word-arm SYMBOL is a code-2
 // block whose body is the string cell's shape — `[byte pointer, length]` — so

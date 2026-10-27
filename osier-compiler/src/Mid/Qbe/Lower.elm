@@ -690,6 +690,18 @@ wordArmUnported exp =
             -- settled), so this classifier only says the construct is ported.
             Nothing
 
+        RecordLit fields ->
+            -- ============ THE SURFACE LANE: A RECORD LITERAL ============
+            -- PORTED (perf word-arm-records R2).  A word-arm record is ONE
+            -- code-14 block, `[data_0 .. data_{n-1} | namesBase]`, and the
+            -- emission is `lowerRecordLitPos`'s own word fork — so this arm
+            -- classifies the CONSTRUCT the emitter will see: every field VALUE.
+            -- The two desugar routes behind it (duplicate labels, and
+            -- `QBE_NOREC=1`) build a cons/`@p` chain whose symbol cars are the
+            -- symbol cells R1 ported, so classifying the values covers all
+            -- three routes; a field whose value is un-ported still refuses.
+            wordArmUnportedRecordFields fields
+
         Lit (LSymbol _) ->
             -- AREA 3, THE SYMBOL CELL (perf word-arm-records R1).  A word-arm
             -- symbol is one code-2 heap block whose body is ONE raw word (the
@@ -1053,6 +1065,25 @@ wordArmUnportedBinds binds =
 
                 VPath _ ->
                     wordArmUnportedBinds rest
+
+
+{-| Every field VALUE of a record literal, left to right — the same recursion
+the other compound constructs use.  The field NAMES are not expressions: they
+become the static names array (`RawDataAddr`), whose word arm R1 forked.
+-}
+wordArmUnportedRecordFields : List ( String, Exp ) -> Maybe String
+wordArmUnportedRecordFields fields =
+    case fields of
+        [] ->
+            Nothing
+
+        ( _, v ) :: rest ->
+            case wordArmUnported v of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    wordArmUnportedRecordFields rest
 
 
 {-| Every argument of a prim application, left to right — the same recursion
@@ -10915,8 +10946,19 @@ lowerRecordLitPos setters dest s =
                                 -- heap.  The data array allocates through the
                                 -- Mid seat Rt.allocVector (no cross-heap edge);
                                 -- rt_vec_alloc is no longer emitted by anything.
+                                --
+                                -- THE WORD ARM ALLOCATES A DIFFERENT OBJECT (perf
+                                -- word-arm-records R2): ONE code-14 block whose body
+                                -- is `[data_0 .. data_{n-1} | namesBase]`, so the
+                                -- seat is `Rt.allocRecord` — which adds the names
+                                -- word to the count itself (`n + 1`), because that
+                                -- `+ 1` is the layout and no call site may be able
+                                -- to disagree with it.
                                 ( dataArg, s2 ) =
-                                    midGcAllocSeat "Rt.allocVector" (Il.Con n) s1
+                                    midGcAllocSeat
+                                        (if wordArm s then "Rt.allocRecord" else "Rt.allocVector")
+                                        (Il.Con n)
+                                        s1
 
                                 -- The store goes to the PLAIN Mid seat
                                 -- (Rt.vecStorePlain, zighost Z2): the data array
@@ -10944,9 +10986,43 @@ lowerRecordLitPos setters dest s =
                                         (List.indexedMap (\i slot -> ( i, slot )) slots)
                             in
                             rawWordArg (Unsafe (RawDataAddr names)) s3
-                                |> Result.map
+                                |> Result.andThen
                                     (\( namesArg, s4 ) ->
-                                        storeValueCell s.layout.tagRecord [ dataArg, Il.Con n, namesArg ] dest s4
+                                        if wordArm s then
+                                            -- THE NAMES WORD, at body index `n`: a
+                                            -- RAW store of the static names-array
+                                            -- address (NOT a value store — the
+                                            -- word is a pointer the collector
+                                            -- skips, not a Value).  The address
+                                            -- is `elemAddr`, i.e. the layout's own
+                                            -- stride, never a hand-spelled `+8n`.
+                                            let
+                                                ( aT, s5 ) =
+                                                    elemAddr dataArg (Il.Con n) s4
+
+                                                s6 =
+                                                    emit (Store StoreL namesArg (Il.Tmp aT)) s5
+                                            in
+                                            -- the slot holds the TAGGED BODY: the
+                                            -- one-word heap arm of `storeWordCell`
+                                            -- ("the caller has already allocated
+                                            -- the body"), so the tag has ONE writer
+                                            -- on this arm too.
+                                            --
+                                            -- THE CODE IS THE MODULE CONSTANT, NOT
+                                            -- `s.layout.tagRecord`: on the word arm
+                                            -- the instance's `tag*` fields are the
+                                            -- WORD ENCODINGS (every heap code is
+                                            -- `heapPtrTag` = 1), so the instance
+                                            -- field would name the STRING code here.
+                                            -- MEASURED: that exact slip took the
+                                            -- string branch, refused, and the
+                                            -- poison-on-error path in
+                                            -- `storeValueCell` emitted `...111`.
+                                            storeWordCell RtLayout.tagRecord [ dataArg ] dest s6
+
+                                        else
+                                            Ok (storeValueCell s.layout.tagRecord [ dataArg, Il.Con n, namesArg ] dest s4)
                                     )
                         )
 

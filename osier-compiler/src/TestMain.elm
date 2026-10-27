@@ -128,7 +128,7 @@ checks rt rawMidText =
                         String.contains "veclen(" (defunText key wordText)
                             && not (String.contains "reclen(" (defunText key wordText))
                     )
-                    [ "Rt.vecEq", "Rt.pvV", "Rt.pvRec", "Rt.hostIsProgram", "Rt.hostDispatch" ]
+                    [ "Rt.vecEq", "Rt.pvV", "Rt.pvRec", "Rt.recEqGo", "Rt.hostIsProgram", "Rt.hostDispatch" ]
                     && String.contains "veclen(" (defunText "Rt.deepEq" wordText)
                     && List.length (String.indexes "veclen(" wordText) >= 8
                     && not (String.contains "len32(a) == len32(bb)) && call Rt.vecEq" wordText)
@@ -190,7 +190,6 @@ checks rt rawMidText =
                     , PrimApp { prim = "<", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
                     , PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
                     , Con { tag = "Just", args = [ Lit (LNumber 1) ] }
-                    , RecordLit [ ( "x", Lit (LNumber 1) ) ]
                     , RecordGet (Var 0) "x"
                     , RecordUpdate { base = Var 0, updates = [ ( "x", Lit (LNumber 1) ) ] }
                     , Lam { params = [], body = Lit (LNumber 1) }
@@ -259,7 +258,7 @@ checks rt rawMidText =
             -- `wordArmUnported`) would otherwise leave this row green: the
             -- membership list is what is pinned, so it must cover the whole
             -- refused surface, not just the shapes this unit happened to touch.
-            && List.length refused == 13
+            && List.length refused == 12
             -- ... and the construct that LEFT the refused set (perf
             -- word-arm-records R1): a SYMBOL LITERAL is now admitted, because
             -- its cell is ported (code 2, a raw body `[byte pointer, length]`
@@ -270,6 +269,18 @@ checks rt rawMidText =
             -- re-admitted without the port.
             && QbeLower.wordArmUnported (Lit (LSymbol "x")) == Nothing
             && QbeLower.wordArmUnported (Lit (LSymbol "aFieldName")) == Nothing
+            -- A RECORD LITERAL left the refused set too (perf word-arm-records
+            -- R2), because its emission is forked: ONE code-14 block,
+            -- `[data | namesBase]`.  BOTH DIRECTIONS: a record whose values are
+            -- all ported is admitted, and a record with an ARITHMETIC prim in a
+            -- field still refuses — the classifier recurses into every field
+            -- value, so "the record is ported" cannot be mistaken for "anything
+            -- inside a record is".
+            && QbeLower.wordArmUnported (RecordLit [ ( "x", Lit (LNumber 1) ), ( "y", Lit (LString "hi") ) ]) == Nothing
+            && QbeLower.wordArmUnported (RecordLit [ ( "x", Lit (LSymbol "s") ) ]) == Nothing
+            && QbeLower.wordArmUnported (RecordLit []) == Nothing
+            && (QbeLower.wordArmUnported (RecordLit [ ( "x", PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ]) /= Nothing)
+            && (QbeLower.wordArmUnported (RecordLit [ ( "x", Lit (LNumber 1) ), ( "y", RecordGet (Var 0) "z" ) ]) /= Nothing)
         )
     , check "utf8ByteLength 'héllo' == 6" (utf8ByteLength "héllo" == 6)
     , check "utf8ByteLength '🦀' == 4" (utf8ByteLength "🦀" == 4)
@@ -1755,6 +1766,74 @@ checks rt rawMidText =
                     && not (String.contains "defun Rt.allocSym" valText)
                     && not (String.contains "Rt.allocSym" valText)
                     && List.member "Rt.allocSym" Rt.wordArmSeeds
+
+            _ ->
+                False
+        )
+    , check "THE RECORD FAMILY'S WORD-ONLY SEATS AND ITS LENGTH SPLICE, IN BOTH SPLICES (perf word-arm-records R2). `Rt.allocRecord` allocates ONE code-14 block of `count + 1` body words — the `+ 1` IS the layout (the names word), so it lives in the seat and no call site can disagree with it; `Rt.recEqGo` compares DATA words against the `veclen - 1` bound and exists because `vecEq`'s `veclen` bound would compare the names word as a value; and `Rt.pvRec`'s word splice is `veclen(vN) - 1` while the VAL splice stays `reclen(vN)`. Each is asserted in the splice that must have it AND its absence asserted in the other, so a word-only defun cannot leak into the val arm (`unknown global`) and the val arm's text cannot move"
+        (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
+            ( Ok valText, Ok wordText ) ->
+                String.contains "defun Rt.allocRecord(count : val) -> val {" wordText
+                    && String.contains "return call Rt.gcAlloc(region, mknum(14), mknum(payload(count, 0) + 1));" wordText
+                    && not (String.contains "Rt.allocRecord" valText)
+                    && String.contains "defun Rt.recEqGo(a : val, bb : val, i : val) -> val {" wordText
+                    && not (String.contains "Rt.recEqGo" valText)
+                    && String.contains "if (mkbool(i >= veclen(vN) - 1)) {" wordText
+                    && String.contains "if (mkbool(i >= reclen(vN))) {" valText
+                    && not (String.contains "veclen(vN) - 1" valText)
+                    -- THE SEED ROOTS (the kindHdr lesson): both are word-only
+                    -- defuns, so the val arm must NOT seed them — a seeded key
+                    -- that the val splice does not contain is `unknown global`.
+                    && List.member "Rt.allocRecord" Rt.wordArmSeeds
+                    && List.member "Rt.recEqGo" Rt.wordArmSeeds
+                    -- ... and both are in `rtDeps`, because `allocating` is a
+                    -- fixed point over THAT table: a seat with no entry is
+                    -- declared non-collecting, so its call site would not be a
+                    -- safepoint and a value live in a register across the
+                    -- gcAlloc inside it would go stale.  MEASURED: Rt.allocSym
+                    -- shipped without one for a unit (nothing but a probe called
+                    -- it); Rt.allocRecord is called by every record literal.
+                    && Dict.get "Rt.allocRecord" Rt.rtDeps
+                    /= Nothing
+                    && Dict.get "Rt.allocSym" Rt.rtDeps
+                    /= Nothing
+                    && Dict.get "Rt.recEqGo" Rt.rtDeps
+                    /= Nothing
+                    && List.member "Rt.gcAlloc" (Maybe.withDefault [] (Dict.get "Rt.allocRecord" Rt.rtDeps))
+
+            _ ->
+                False
+        )
+    , check "THE EMITTED RECORD BUILD: ONE code-14 block, `[data | namesBase]`, tagged `...001` (perf word-arm-records R2). The seat is `Rt.allocRecord` (which owns the `+ 1`), the data words go through the ONE barrier-free element seat, the NAMES word is a RAW store at `elemAddr(body, n)` — the layout's own stride, never a hand-spelled `+8n` — and the slot holds the TAGGED BODY through the cell writer's one-word arm, so the tag has one writer on this arm too. The val arm keeps its two-block shape (a data ARRAY + a payload triple), which is what the fork is for"
+        (case
+            ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ recBuildProbe ]) [ recBuildProbe ] "Rc.l"
+            , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ recBuildProbe ]) [ recBuildProbe ] "Rc.l"
+            )
+         of
+            ( Ok wordMod, Ok valMod ) ->
+                let
+                    wTxt =
+                        Print.print wordMod
+
+                    vTxt =
+                        Print.print valMod
+                in
+                String.contains "call $q_Rt_x2eallocRecord(" wTxt
+                    && not (String.contains "allocVector" wTxt)
+                    -- the names store: elemAddr's `mul 8, 2` + `add` + `storel`
+                    -- of the static blob, at index n = 2.
+                    && String.contains "\t%t13 =l mul 8, 2\n\t%t14 =l add %t12, %t13\n\tstorel $d" wTxt
+                    -- the tag, OR'd from the body (the one-word heap arm).
+                    && String.contains "\t%t15 =l or %t12, 1\n\tstorel %t15, %s0\n" wTxt
+                    -- THE POISON WORD MUST NOT APPEAR: `storel 7` is what the
+                    -- cell writer emits when it REFUSES, and it shipped once in
+                    -- this unit (the site named `s.layout.tagRecord`, which on
+                    -- this arm is the STRING code, so the writer took the string
+                    -- branch and refused).  A text pin is the only oracle that
+                    -- sees it at COMPILE time.
+                    && not (String.contains "storel 7," wTxt)
+                    && String.contains "allocVector" vTxt
+                    && not (String.contains "allocRecord" vTxt)
 
             _ ->
                 False
@@ -14045,6 +14124,25 @@ nilTagProbe =
 boolTagProbe : Defun
 boolTagProbe =
     WordArmProbe.defun WordArmProbe.TagBool
+
+
+{-| THE RECORD BUILD probe's defun (perf word-arm-records R2): the emitter's own
+`{ x = 1, y = "hi" }`.  Defined in `Mid.Qbe.WordArmProbe` because it has TWO
+consumers — this text row and the probe script that RUNS it.
+-}
+recBuildProbe : Defun
+recBuildProbe =
+    { key = "Rc.l"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body =
+                RecordLit
+                    [ ( "x", Lit (LNumber 1) )
+                    , ( "y", Lit (LString "hi") )
+                    ]
+            }
+    }
 
 
 {-| F6's probe: `\x -> mknum(2^60)`, one past the word arm's i61 fixnum.  It must

@@ -69,7 +69,7 @@ PROBES=(
   # THE RECORD LAYOUT (perf word-arm-records R0): FOUR reads, one entry.  The
   # harness drives each directly, so every defun is globalized — the entry's
   # Let body is what makes them reachable (and therefore emitted).
-  "rec|q_Rc_x2ef|PROBE_REC|8|q_Rc_x2en q_Rc_x2ee q_Rc_x2eb q_Rc_x2ek"
+  "rec|q_Rc_x2ef|PROBE_REC|18|q_Rc_x2en q_Rc_x2ee q_Rc_x2eb q_Rc_x2ek q_Rc_x2el"
   # THE SYMBOL CELL (perf word-arm-records R1): the record family's dependency.
   "sym|q_Sy_x2ef|PROBE_SYM|8|q_Sy_x2eg"
 )

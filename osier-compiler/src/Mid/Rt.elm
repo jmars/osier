@@ -1072,6 +1072,17 @@ rtDeps =
         , ( "Rt.allocKind", [ "Rt.gcInit", "Rt.gcAlloc", "Rt.die" ] )
         , ( "Rt.allocCons", [ "Rt.gcInit", "Rt.gcAlloc" ] )
         , ( "Rt.allocFloat", [ "Rt.gcInit", "Rt.gcAlloc" ] )
+          -- THE RECORD FAMILY'S WORD-ONLY SEATS (perf word-arm-records
+          -- R1/R2).  THESE EDGES ARE NOT BOOKKEEPING: `allocating` below is a
+          -- fixed point over THIS table, and a seat with no entry is declared
+          -- NON-collecting, so its call site is not a safepoint and a value
+          -- live in a register across it goes stale when gcAlloc moves the
+          -- heap.  `Rt.allocSym` shipped without one for one unit (nothing
+          -- called it but a probe); `Rt.allocRecord` is called by every record
+          -- literal, so the omission would have been live.
+        , ( "Rt.allocSym", [ "Rt.gcInit", "Rt.gcAlloc" ] )
+        , ( "Rt.allocRecord", [ "Rt.gcInit", "Rt.gcAlloc" ] )
+        , ( "Rt.recEqGo", [ "Rt.recEqGo", "Rt.deepEq" ] )
         , ( "Rt.mkStream", [ "Rt.allocKind" ] )
         , ( "Rt.gcInit", [ "Rt.die", "Rt.gcEnvNum" ] )
         , ( "Rt.gcEnvNum", [ "Rt.gcEnvNum" ] )
@@ -1738,7 +1749,7 @@ a real program, because VR3c added the defun and the calls but no seed).
 -}
 wordArmSeeds : List String
 wordArmSeeds =
-    keepRtDependencies [ "Rt.allocKind", "Rt.allocCons", "Rt.allocFloat", "Rt.allocSym", "Rt.kindHdr", "Rt.mkStream" ]
+    keepRtDependencies [ "Rt.allocKind", "Rt.allocCons", "Rt.allocFloat", "Rt.allocSym", "Rt.allocRecord", "Rt.recEqGo", "Rt.kindHdr", "Rt.mkStream" ]
 
 
 {-| THE SEATS LOWER NAMES DIRECTLY (zighost Z2/Z3): the plain vec-store writer
