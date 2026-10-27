@@ -70,6 +70,8 @@ PROBES=(
   # harness drives each directly, so every defun is globalized — the entry's
   # Let body is what makes them reachable (and therefore emitted).
   "rec|q_Rc_x2ef|PROBE_REC|8|q_Rc_x2en q_Rc_x2ee q_Rc_x2eb q_Rc_x2ek"
+  # THE SYMBOL CELL (perf word-arm-records R1): the record family's dependency.
+  "sym|q_Sy_x2ef|PROBE_SYM|8|q_Sy_x2eg"
 )
 
 [ -f "$CDIR/compiler.js" ] || { echo "word-arm-probe: $CDIR/compiler.js missing (run: osier-compiler/build.sh)" >&2; exit 2; }

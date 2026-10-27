@@ -94,6 +94,29 @@ struct Val q_Rt_x2eallocRaw(long *a, long *b, long *c, int n)
     return v;
 }
 
+#if defined(PROBE_SYM)
+/* THE SYMBOL SEAT'S STUB, to the contract `runtime.mid` states: `Rt.allocSym`
+ * passes the BODY WORD COUNT, and `gcAlloc` writes the 2-word header INCLUDING
+ * the KIND CODE (2 = symbol) plus the scan bit `kindHdr` derives from it, then
+ * returns `mknum(body)`.  The header is written here from the SAME rule the
+ * runtime states, because the check below READS it: a cell allocated with the
+ * wrong code is indistinguishable from a string to `tagis(v, 2)`, which is the
+ * whole hazard this probe exists to see. */
+struct Val q_Rt_x2eallocSym(long *a, long *b, long *c, int n)
+{
+    (void)b; (void)c; (void)n;
+    long body_words = a[0] >> 3;              /* payload(count, 0) */
+    long *base = calloc(1, (size_t)(2 + body_words) * 8);
+    long *body = base + 2;
+    base[0] = (long)((512L * 4L) + (0L << 1) + (2L << 24));  /* class, scan 0, code 2 */
+    base[1] = body_words;
+    g_last_body = body;
+    struct Val v;
+    v.w = (int64_t)((uintptr_t)body) << 3;    /* mknum(body) */
+    return v;
+}
+#endif
+
 static int g_died;
 static char g_die_msg[512];
 long q_Rt_x2edie(const char *msg)
@@ -166,6 +189,9 @@ long q_Ca_x2ef(long v);
 long q_Vc_x2ef(long v, long i);
 #elif defined(PROBE_VECLEN)
 long q_Vl_x2ef(long v);
+#elif defined(PROBE_SYM)
+long q_Sy_x2ef(long x);           /* the entry: returns the emitted symbol cell */
+long q_Sy_x2eg(long v);           /* mkbool(tagis(v, tagSymbol)) — the READER */
 #elif defined(PROBE_REC)
 long q_Rc_x2ef(long v, long i);   /* the entry: evaluates every read */
 long q_Rc_x2en(long v);           /* mknum(veclen(v) - 1)      — reclen      */
@@ -507,6 +533,54 @@ int main(void)
                 printf("    rendered [%s] want [%s]\n", got, want);
             ok(strcmp(got, want) == 0,
                "R/PRINT: the hand-built record RENDERS byte-identically to the val arm's `{ x = 1, y = \"hi\" }` -> [record 1 \"hi\"]");
+        }
+    }
+#elif defined(PROBE_SYM)
+    /* ===== THE SYMBOL CELL (perf word-arm-records R1) =====
+     *
+     * The record family's dependency: a record's field NAMES are symbols.  A
+     * word-arm symbol is a HEAP BLOCK (a symbol Value cannot live in `.data`),
+     * so the record's names array holds raw name pointers and a symbol cell is
+     * materialised only in a Value position.  This probe EMITS the cell through
+     * the emitter's own writer and inspects it — the construction is the unit.
+     */
+    {
+        long sym = q_Sy_x2ef(0);
+        long *body;
+
+        ok((sym & 7) == HEAP_PTR_TAG,
+           "SYM: a word-arm symbol literal is ONE tagged heap pointer (...001)");
+
+        body = (long *)(uintptr_t)(sym & UNTAG_MASK);
+        ok(((body[-2] >> 24) & 15) == 2,
+           "SYM: the header's KIND CODE is 2 (tagSymbol) - the code IS the constructor on this arm, and it is what tagis(v, 2) reads");
+        ok((body[-2] & 2) == 0,
+           "SYM: the header's SCAN bit is 0 - a symbol body is RAW (bytes, length), so the collector must not trace it as Values");
+
+        ok(body[-1] == 1,
+           "SYM: the header's COUNT is 1 - the body is the name pointer ONLY, the shape `Rt.intern` already builds; a two-word literal beside a one-word interned symbol would make any future length reader an OVERRUN on the interned one");
+        ok(strcmp((char *)(uintptr_t)body[0], "x") == 0,
+           "SYM: body unit 0 is the static byte pointer - the printer's pvZ(payload(v, 0)) walks exactly these bytes, so the render is the name with no length reader needed");
+
+        ok(q_Sy_x2eg(sym) == 3,
+           "SYM/TAGIS: the emitter's own tagis(v, tagSymbol) answers TRUE for the cell it built");
+
+        /* THE DECOYS: the CODE is the only thing separating a symbol from a
+         * string on this arm, so a "symbol" written through the string's seat
+         * (code 1) has to answer FALSE - and so does a record. */
+        {
+            long *str = mk_block(1, 0, 0, 0);
+            long sc;
+            body_of(str)[0] = (long)(uintptr_t)"x";
+            body_of(str)[1] = 1;
+            sc = tagged(str);
+            ok(q_Sy_x2eg(sc) == 4,
+               "SYM/TAGIS: a code-1 cell with the SAME body words is NOT a symbol - the code, not the shape, is the constructor");
+        }
+        {
+            long *rec = mk_block3(14, 1, (1L << 3), 0, 0);
+            ok(q_Sy_x2eg(tagged(rec)) == 4,
+               "SYM/TAGIS: a code-14 record block is NOT a symbol");
         }
     }
 #endif

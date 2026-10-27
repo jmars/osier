@@ -766,15 +766,26 @@ valLayout =
 --      runtime's own twinned defuns through `rtPrimSlots`, which is
 --      arm-independent by construction), plus the payload chases behind them
 --      (`fieldBase`, one accessor: the val arm's payload word HOLDS a pointer,
---      the word arm's IS the element).  NOT PORTED, each refused by name:
---      `Con` (its vector is written through `storeValueCell` and its tag is an
---      `LSymbol`), the RECORD family (`RecordLit`/`RecordGet`/`RecordUpdate`,
---      and a `VField` pattern bind — its second parallel NAMES array has no
---      inline body layout, which is a design decision, not a stride), `Lam`,
---      `GRef`, `StreamRef`, float/symbol literals, let-destructuring, `MTagEq`
---      (a constructor-tag pattern, same `LSymbol` reason), and every
---      ARITHMETIC prim (area 4/5 — `isIntExp`/`isFloatExp` also deny there,
---      because S4/S4f's raw local is reboxed in the 40-byte shape).
+--      the word arm's IS the element).  SYMBOL LITERALS are PORTED (perf
+--      word-arm-records R1): a word-arm symbol is a code-2 block whose body is
+--      ONE raw word, the NUL-terminated name pointer — the shape `Rt.intern`
+--      already builds, so a literal and an interned symbol agree (`symEq`/
+--      `symLess`/`pvZ` walk the bytes and no length reader exists; a two-word
+--      literal would have made a future one an OVERRUN on the interned shape).
+--      The CODE is the constructor on this arm, so the cell comes from
+--      `Rt.allocSym` (code 2) and never from the string seat (code 1) — a
+--      symbol indistinguishable from a string is the mixed-representation read
+--      this arm exists to prevent.
+--      NOT PORTED, each refused by name:
+--      `Con` (its vector is written through `storeValueCell`), the RECORD
+--      family (`RecordLit`/`RecordGet`/`RecordUpdate`, and a `VField` pattern
+--      bind — its second parallel NAMES array has no inline body layout, which
+--      is a design decision, not a stride), `Lam`,
+--      `GRef`, `StreamRef`, float literals, let-destructuring, `MTagEq`
+--      (a constructor-tag pattern — it materialises the tag as a `symbol`,
+--      which is now ported, so what remains there is the tag-EQUALITY half),
+--      and every ARITHMETIC prim (area 4/5 — `isIntExp`/`isFloatExp` also deny
+--      there, because S4/S4f's raw local is reboxed in the 40-byte shape).
 --      AND `/=` (`NotEqual`), which an earlier revision of this item listed as
 --      PORTED and is NOT: `wordArmUnported` has no `NotEqual` case, so it falls
 --      to the refusal fallback, and MEASURED `if 5 /= 3 then ..` under

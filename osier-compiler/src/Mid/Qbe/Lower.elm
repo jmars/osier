@@ -690,8 +690,16 @@ wordArmUnported exp =
             -- settled), so this classifier only says the construct is ported.
             Nothing
 
+        Lit (LSymbol _) ->
+            -- AREA 3, THE SYMBOL CELL (perf word-arm-records R1).  A word-arm
+            -- symbol is one code-2 heap block whose body is ONE raw word (the
+            -- NUL-terminated name pointer) — the shape `Rt.intern` already
+            -- builds.  `storeWordCell` owns the shape, so this classifier only
+            -- says the construct is ported.
+            Nothing
+
         Lit _ ->
-            Just (wordArea "AREA 3/5 (HEAP CELLS)" "a float or symbol literal — under the word arm each is a HEAP object behind one tagged pointer, not a tag word plus payload words")
+            Just (wordArea "AREA 5 (FLOATS)" "a float literal — under the word arm it is a HEAP object behind one tagged pointer, not a tag word plus payload words")
 
         ShortAnd block ->
             case wordArmUnported block.left of
@@ -4548,6 +4556,66 @@ storeWordStringCell words dest s0 =
             Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a string cell that is not exactly [byte pointer, length]"))
 
 
+{-| A word-arm SYMBOL LITERAL's cell (perf word-arm-records R1): a code-2 block
+whose body is ONE raw word, the NUL-terminated name pointer.
+
+IT ALLOCATES, AND THAT IS WHY IT IS NOT IN `storeWordCell`.  `storeWordCell`'s
+one-word heap arm means the CALLER has already allocated and filled the body —
+and the runtime's own word-arm symbol construction says exactly that:
+`Rt.intern`/`Rt.intInsertAt` are `vecbody(allocKind(mknum(2), mknum(1)))` +
+`wstore(sym, 0, store)` + `mkval(2, sym)`, so their `mkval`'s word IS an
+allocated BODY.  A literal's word is the static name pointer, which is a
+different thing in the same position.  Routing both through one writer is the
+defect shape this arc keeps paying for (a parameter whose MEANING two sites
+disagree about), so the two live apart: `mkval(2, body)` keeps the generic arm,
+and this writer is named for what it does.  MEASURED, not hypothesised: the
+first cut put the allocating branch inside `storeWordCell` and every word-arm
+program's link into the runtime's intern path refused (2 words expected, 1
+passed) — the refusal was correct, and the lesson is that the two meanings
+cannot share a dispatch.
+
+THE SHAPE IS THE RUNTIME'S, MEASURED — NOT THE DESIGN'S.  The design priced this
+cell as the STRING cell's twin (`[byte pointer, length]`, two body words, "the
+length word kept so `len32(sym)` is honest the day one appears").  The runtime
+already builds word-arm symbols, and it builds them with ONE word:
+`Rt.intern`/`Rt.intInsertAt`'s word splices are `vecbody(allocKind(mknum(2),
+mknum(1)))` + `wstore(sym, 0, store)` + `mkval(2, sym)` — the name pointer
+only, because there IS no length reader (`symEq`/`symLess`/`pvZ` walk
+NUL-terminated bytes, `deepEq`'s symbol arm is `symEq`).
+
+A two-word LITERAL beside a one-word INTERNED symbol would make `len32(sym)`
+honest for literals and an OVERRUN for interned ones — the same off-by-one class
+this unit exists to kill, planted by the layout.  So the literal matches the
+runtime: ONE word, no length.  That is also why the emitter needs this writer at
+all rather than the string cell's: the CODE is the constructor on this arm
+(`tagis(v, 2)` reads it), so a symbol written through the string's seat (code 1)
+would be indistinguishable from a string — the mixed-representation read this
+arm exists to prevent.  The code lives in `Rt.allocSym`'s body, never in a
+caller's argument.
+
+THE BYTES ARE STATIC AND SHARED with the `sym:` data def `RawCStr`/`RawDataAddr`
+use, so a symbol's bytes are never copied and there is no cross-heap edge.
+-}
+storeWordSymbolLiteral : Il.Arg -> Int -> S -> Result String S
+storeWordSymbolLiteral bytes dest s0 =
+    let
+        -- THE SEAT TAKES THE BODY WORD COUNT (1: the name pointer).
+        ( bodyArg, s1 ) =
+            midGcAllocSeat "Rt.allocSym" (Il.Con 1) s0
+
+        s2 =
+            storeWordBodyWord bodyArg 0 bytes s1
+
+        ( taggedWord, s3 ) =
+            freshTmp s2
+    in
+    Ok
+        (s3
+            |> emit (Bin (Just taggedWord) L Or bodyArg (Il.Con (RtLayout.heapPtrTag s3.layout)))
+            |> storeWordWord (Il.Tmp taggedWord) dest
+        )
+
+
 {-| AREA 5's CELL (perf word-arm-area3rt, and only as much of it as the
 construction path needs): a word-arm FLOAT is a code-12 block whose body is the
 one f64 word — `heapKindScanned` false, so nothing traces it.
@@ -6540,23 +6608,41 @@ rawWordArg exp s =
                         (\n ->
                             { name = n
                             , align = Just 8
-                            , -- the names array is an array of SYMBOL Value
-                              -- structs (40 B each: tag 2, pad, name pointer,
-                              -- union padding) — the SAME layout a runtime
-                              -- dynamic names array (RawAllocVector of symbol
-                              -- Values) has, so Rt.recGet walks both with
-                              -- RawVecLoad.  Must match gc/types.zig's Value
-                              -- extern struct (tag u32@0, union@8).
+                            , -- THE TWO ARMS' NAMES ARRAYS CARRY DIFFERENT ELEMENT
+                              -- KINDS, deliberately (perf word-arm-records R1):
+                              --
+                              --   val   an array of SYMBOL VALUE structs (40 B
+                              --         each: tag 2, pad, name pointer, union
+                              --         padding) — the SAME layout a runtime
+                              --         dynamic names array has, so Rt.recGet
+                              --         walks both with RawVecLoad.  Must match
+                              --         gc/types.zig's Value extern struct
+                              --         (tag u32@0, union@8).
+                              --   word  an array of RAW NAME POINTERS (8 B
+                              --         each, `DRef` words).  A word-arm symbol
+                              --         is a heap block, so a symbol cannot live
+                              --         in `.data` at all; the array holds the
+                              --         NUL-terminated name bytes directly, and
+                              --         the runtime materialises a symbol cell
+                              --         only where a symbol is genuinely in a
+                              --         Value position (recToChain's cars).
+                              --         Each word is 8-aligned, so it reads as
+                              --         tag `000` — a fixnum-looking word the
+                              --         collector correctly skips.
                               items =
-                                List.concatMap
-                                    (\sn ->
-                                        [ DWord s.layout.tagSymbol
-                                        , DZero (RtLayout.abiAlign - s.layout.valueTagBytes)
-                                        , DRef sn
-                                        , DZero (s.layout.valSizeBytes - s.layout.payloadBase - s.layout.wordBytes)
-                                        ]
-                                    )
-                                    (List.reverse symNamesRev)
+                                if wordArm s then
+                                    List.map (\sn -> DRef sn) (List.reverse symNamesRev)
+
+                                else
+                                    List.concatMap
+                                        (\sn ->
+                                            [ DWord s.layout.tagSymbol
+                                            , DZero (RtLayout.abiAlign - s.layout.valueTagBytes)
+                                            , DRef sn
+                                            , DZero (s.layout.valSizeBytes - s.layout.payloadBase - s.layout.wordBytes)
+                                            ]
+                                        )
+                                        (List.reverse symNamesRev)
                             , export_ = False
                             }
                         )
@@ -7241,8 +7327,25 @@ lowerLitWord lit dest s =
         LFloat _ ->
             Err (wordArmUnsupported (wordArea "AREA 5 (FLOATS)" "a float literal — the word arm heap-boxes a float as a [hdr | f64] cell, which does not exist yet"))
 
-        LSymbol _ ->
-            Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a symbol literal — under the word arm it is a heap object behind one tagged pointer, not a tag word plus a data pointer"))
+        LSymbol str ->
+            -- A word-arm SYMBOL is a HEAP BLOCK (perf word-arm-records R1): code
+            -- 2 (the constructor, so `tagis(v, 2)` answers) with ONE raw body
+            -- word, the name pointer — the shape `Rt.intern` already builds,
+            -- which `storeWordSymbolCell` states and justifies.  The bytes stay
+            -- the static `sym:` data symbol (shared with RawCStr/RawDataAddr),
+            -- so there is no copy and no cross-heap edge.
+            --
+            -- The one place a word-arm SYMBOL VALUE is materialised from
+            -- nothing: the record family's names array holds raw name POINTERS
+            -- (see `RawDataAddr`), and `recToChain` materialises cells like this
+            -- one for the chain route's cars.
+            let
+                ( symname, s1 ) =
+                    freshData ("sym:" ++ str)
+                        (\n -> { name = n, align = Just 8, items = [ DStr str, DByte 0 ], export_ = False })
+                        s
+            in
+            storeWordSymbolLiteral (Il.Sym symname) dest s1
 
         LString str ->
             -- A word-arm string is a HEAP BLOCK (perf VR3b3 area A): code 1 (a

@@ -197,7 +197,6 @@ checks rt rawMidText =
                     , GRef { key = "M.f", force = False }
                     , StreamRef { varName = "*stoutput*" }
                     , Lit (LFloat 1.5)
-                    , Lit (LSymbol "sym")
                     , Let
                         { binders =
                             [ LetDestruct
@@ -252,7 +251,7 @@ checks rt rawMidText =
             -- fine" cannot be mistaken for "the alternative is fine".
             && (QbeLower.wordArmUnported (caseExp [ MEmpty [] ] []) == Nothing)
             && (QbeLower.wordArmUnported (caseWithBody (PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] })) /= Nothing)
-            -- and the refused set is exactly the FOURTEEN named constructs: a
+            -- and the refused set is exactly the THIRTEEN named constructs: a
             -- classifier that admitted any of them would be silently wrong
             -- (each emits the 40-byte representation or a layout the arm has
             -- not decided).  The count is part of the row because a future
@@ -260,7 +259,17 @@ checks rt rawMidText =
             -- `wordArmUnported`) would otherwise leave this row green: the
             -- membership list is what is pinned, so it must cover the whole
             -- refused surface, not just the shapes this unit happened to touch.
-            && List.length refused == 14
+            && List.length refused == 13
+            -- ... and the construct that LEFT the refused set (perf
+            -- word-arm-records R1): a SYMBOL LITERAL is now admitted, because
+            -- its cell is ported (code 2, a raw body `[byte pointer, length]`
+            -- — see the `sym` probe row).  The FLOAT literal beside it in the
+            -- list above is still refused by name, so the polarity holds in
+            -- BOTH directions: this row would go red if the symbol arm were
+            -- re-refused, and the refused-count would go red if it were
+            -- re-admitted without the port.
+            && QbeLower.wordArmUnported (Lit (LSymbol "x")) == Nothing
+            && QbeLower.wordArmUnported (Lit (LSymbol "aFieldName")) == Nothing
         )
     , check "utf8ByteLength 'héllo' == 6" (utf8ByteLength "héllo" == 6)
     , check "utf8ByteLength '🦀' == 4" (utf8ByteLength "🦀" == 4)
@@ -1734,6 +1743,47 @@ checks rt rawMidText =
                     -- over every ValTag integer this file defines.
                     && List.filter RtLayout.heapKindScanned [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14 ]
                     == [ 4, 6, 9, 10, 14 ]
+
+            _ ->
+                False
+        )
+    , check "THE SYMBOL CELL'S CONSTRUCTOR IS THE SEAT'S, NOT A CALLER'S (perf word-arm-records R1). On the word arm the header's KIND CODE *is* the constructor, so a symbol allocated through the string seat (code 1) would be INDISTINGUISHABLE from a string to `tagis(v, 2)` - the mixed-representation read this arm exists to prevent. The code therefore lives in `Rt.allocSym`'s body, and this row pins it in BOTH directions: the word splice allocates `mknum(2)` and the val splice does not carry the defun at all (so the val arm cannot name a defun its spliced text lacks - the `unknown global` class).  THE PROBE CANNOT SEE THIS: `word-arm-probe`'s `sym` row links against the harness's SEAT STUB (the runtime is not in a probe module), so it validates the EMITTER's cell and the header CONTRACT while this row is the only statement about the runtime's own code number.  MEASURED: flipping the seat to code 1 leaves the probe GREEN and this row RED"
+        (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
+            ( Ok valText, Ok wordText ) ->
+                String.contains "defun Rt.allocSym(count : val) -> val {" wordText
+                    && String.contains "return call Rt.gcAlloc(region, mknum(2), mknum(payload(count, 0)));" wordText
+                    && not (String.contains "defun Rt.allocSym" valText)
+                    && not (String.contains "Rt.allocSym" valText)
+                    && List.member "Rt.allocSym" Rt.wordArmSeeds
+
+            _ ->
+                False
+        )
+    , check "THE EMITTED SYMBOL CELL: a code-2 block with a ONE-WORD raw body (the name pointer), tagged `...001` (perf word-arm-records R1). `Rt.allocSym` (the seat, whose header carries code 2) then ONE body store and the tag. THE SHAPE IS THE RUNTIME'S, MEASURED, not the design's two-word `[bytes, length]`: `Rt.intern`'s word splice builds `allocKind(mknum(2), mknum(1))` + one store, and a two-word literal beside a one-word interned symbol would make any future length reader an OVERRUN on the interned one.  THE VAL ARM keeps its 40-byte record (`storew 2` + a payload pointer) and names no seat - the two arms' cells are pinned as the DIFFERENT shapes they are"
+        (case
+            ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities (WordArmProbe.defuns WordArmProbe.Sym)) (WordArmProbe.defuns WordArmProbe.Sym) "Sy.f"
+            , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities (WordArmProbe.defuns WordArmProbe.Sym)) (WordArmProbe.defuns WordArmProbe.Sym) "Sy.f"
+            )
+         of
+            ( Ok wordMod, Ok valMod ) ->
+                let
+                    wTxt =
+                        Print.print wordMod
+
+                    vTxt =
+                        Print.print valMod
+                in
+                String.contains "call $q_Rt_x2eallocSym(" wTxt
+                    && not (String.contains "allocRaw" wTxt)
+                    -- ONE body word (the name pointer) and no length word: the
+                    -- runtime's interned symbol is a 1-word code-2 block, so a
+                    -- 2-word literal would be a different shape for the same
+                    -- construct.
+                    && String.contains "storel 8, %s4\n\t%t0 =:val call $q_Rt_x2eallocSym(l %s4, l %s4, l %s4, w 1)\n" wTxt
+                    && String.contains "\t%t5 =l add %t4, 0\n\tstorel $d1, %t5\n" wTxt
+                    && String.contains "\t%t6 =l or %t4, 1\n" wTxt
+                    && not (String.contains "=l add %t4, 8" wTxt)
+                    && not (String.contains "allocSym" vTxt)
 
             _ ->
                 False

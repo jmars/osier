@@ -1738,7 +1738,7 @@ a real program, because VR3c added the defun and the calls but no seed).
 -}
 wordArmSeeds : List String
 wordArmSeeds =
-    keepRtDependencies [ "Rt.allocKind", "Rt.allocCons", "Rt.allocFloat", "Rt.kindHdr", "Rt.mkStream" ]
+    keepRtDependencies [ "Rt.allocKind", "Rt.allocCons", "Rt.allocFloat", "Rt.allocSym", "Rt.kindHdr", "Rt.mkStream" ]
 
 
 {-| THE SEATS LOWER NAMES DIRECTLY (zighost Z2/Z3): the plain vec-store writer

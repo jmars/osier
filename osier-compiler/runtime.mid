@@ -5182,6 +5182,23 @@ defun Rt.allocCons(dummy : val) -> val {
   val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
   return call Rt.gcAlloc(region, mknum(4), mknum(2));
 }
+// THE SYMBOL CELL (perf word-arm-records R1).  A word-arm SYMBOL is a code-2
+// block whose body is the string cell's shape — `[byte pointer, length]` — so
+// `payload(v, 0)` is the NUL-terminated name (what `symEq`/`pvZ`/`strbyte` walk,
+// unchanged) and `payload32(v, 1)` is the byte length (kept so a length reader
+// has an honest answer the day one appears; nothing reads it today).
+//
+// WHY ITS OWN SEAT AND NOT `allocRaw`: the CODE IS THE CONSTRUCTOR on this arm,
+// and a symbol is code 2 while `allocRaw` is the string's code 1.  A symbol
+// allocated as code 1 would be indistinguishable from a string to `tagis(v, 2)`
+// — the mixed-representation read this arm exists to prevent — so the code
+// cannot be the caller's afterthought.  `count` is the BODY word count (2).
+defun Rt.allocSym(count : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word regionW = wload(glob, 0);
+  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  return call Rt.gcAlloc(region, mknum(2), mknum(payload(count, 0)));
+}
 defun Rt.allocKind(code : val, count : val) -> val {
   word glob = rawcall rt_glob_addr();
   word regionW = wload(glob, 0);

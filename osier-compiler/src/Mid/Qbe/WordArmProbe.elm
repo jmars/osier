@@ -47,11 +47,12 @@ type Module
     | Vec
     | VecLen
     | Rec
+    | Sym
 
 
 modules : List Module
 modules =
-    [ Str, Payload, Len, TagHeap, TagNil, TagBool, Call, Vec, VecLen, Rec ]
+    [ Str, Payload, Len, TagHeap, TagNil, TagBool, Call, Vec, VecLen, Rec, Sym ]
 
 
 name : Module -> String
@@ -86,6 +87,9 @@ name m =
 
         Rec ->
             "rec"
+
+        Sym ->
+            "sym"
 
 
 {-| The probe's DEFUN KEY — what `QBE_WORDARM_PROBE` compiles as its entry. -}
@@ -122,6 +126,9 @@ defun m =
         Rec ->
             recProbe
 
+        Sym ->
+            symProbe
+
 
 {-| A defun's declared arity — what the probe module's arity table must carry,
 or `lowerApp` treats the call as under-applied and routes it through the
@@ -151,6 +158,9 @@ defuns m =
             -- `lowerWith` emits only the REACHABLE set, so a defun the entry
             -- does not call would not be in the module the harness links.
             [ recProbe, recCountProbe, recElemProbe, recNamesBaseProbe, recNameProbe ]
+
+        Sym ->
+            [ symProbe, symTagProbe ]
 
         _ ->
             [ defun m ]
@@ -572,3 +582,66 @@ range check `storeWordCell` emits).
 mknumWord : Exp -> Exp
 mknumWord w =
     Unsafe (RawMkValue { tag = RtLayout.tagNumber, words = [ w ] })
+
+
+{-| THE SYMBOL CELL (perf word-arm-records R1) — the record family's dependency:
+a record's field NAMES are symbols, and a word-arm symbol is a HEAP BLOCK (a
+word-arm symbol cannot live in `.data`, which is why the record's names array
+holds raw name POINTERS and a symbol Value is materialised only where a symbol
+is genuinely in a Value position).
+
+`Sym.f` RETURNS the emitted cell, so the harness inspects what the emitter's own
+`storeWordCell` path built: code 2 (the constructor), a raw body
+`[byte pointer, length]`, and the value word tagged `...001`.  `Sym.g` is the
+emitter's own word-arm tag test, fed the cell and two decoys by the harness —
+the code is the ONLY thing that distinguishes a symbol from a string on this
+arm, so a "symbol" allocated through the string seat (code 1) has to fail here.
+
+WHY THE CELL IS EMITTED RATHER THAN HAND-BUILT (unlike the `rec` probe): the
+construction IS the unit.  The harness still supplies the SEAT (`Rt.allocSym`)
+the way it supplies `Rt.allocRaw`, to the contract `runtime.mid` states —
+`gcAlloc` writes the 2-word header including the KIND CODE and returns
+`mknum(body)`.
+-}
+symProbe : Defun
+symProbe =
+    { key = "Sy.f"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body =
+                -- ONE call to `Sy.g` so it is REACHABLE (and therefore
+                -- emitted); the ENTRY returns the cell itself, which is what
+                -- the harness inspects.
+                Let
+                    { binders =
+                        [ LetBind
+                            { binder = { id = 1, name = "t" }
+                            , value = App { fn = GRef { key = "Sy.g", force = False }, args = [ Lit (LSymbol "x") ] }
+                            }
+                        ]
+                    , body = Lit (LSymbol "x")
+                    }
+            }
+    }
+
+
+{-| ` -> mkbool(tagis(v, tagSymbol))` — the emitter's word-arm tag test, so the
+harness asks the READER (not a C re-implementation) whether the cell it built is
+a symbol.
+-}
+symTagProbe : Defun
+symTagProbe =
+    { key = "Sy.g"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "v" } ]
+            , body =
+                Unsafe
+                    (RawMkValue
+                        { tag = RtLayout.tagBoolean
+                        , words = [ Unsafe (RawTagIs { value = Var 0, tag = RtLayout.tagSymbol }) ]
+                        }
+                    )
+            }
+    }
