@@ -11,8 +11,10 @@ module M exposing (main)
 -- heap cells, the element stores and the printer's tag-4 walk are all
 -- EXECUTED here, on both arms, and their output compared byte for byte.
 --
--- The tail is deliberately `[]` and not `3 :: 4 :: []`: nothing here needs
--- arithmetic, and an arithmetic prim is still refused by name (AREA 4), so a
--- longer chain would only make the fixture's refusal less specific.
+-- The tail is deliberately `[]` and not `3 :: 4 :: []`: this fixture exists to
+-- exercise the CONS cell, so it carries no arithmetic.  (The sentence that
+-- stood here — "an arithmetic prim is still refused by name (AREA 4)" — was
+-- true until perf word-arm-arith ported the arithmetic class; `arith.elm` is
+-- that fixture now, and it is the one to extend for arithmetic.)
 main =
     1 :: 2 :: []

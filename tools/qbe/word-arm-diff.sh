@@ -31,10 +31,18 @@
 # when only `cons.elm`/`tup.elm` existed and false from the commit that added
 # `case.elm`.
 #
+# ARITHMETIC IS COVERED TOO (perf word-arm-arith): `arith.elm` runs `+ - *`,
+# `//` (including its TRUNCATE-TOWARD-ZERO corners and the named `// 0` halt),
+# the four comparisons, `==`, `/=` and `negate` on both arms, and `receq.elm`
+# runs `==` on RECORDS — the fixture that was UNWRITABLE until the `=` prim was
+# ported, because `Rt.recEqGo` was correct-but-unexecuted without it.
+#
 # WHAT IS STILL OUT OF REACH, and therefore still the probes' job: a first-class
 # `Lam` CLOSURE (the classifier refuses `Lam`), a VECTOR built by the surface
-# (no prim constructs one from a program), and a FLOAT (area 5).  So the `vec`,
-# `veclen` and `call` probes are complements to this row, not duplicates.
+# (no prim constructs one from a program), a FLOAT (area 5), and CHAR/STRING
+# ORDERING (`"a" < "b"`), which the word arm refuses BY NAME rather than
+# answering through the numeric-only `Rt.<`.  So the `vec`, `veclen` and `call`
+# probes are complements to this row, not duplicates.
 #
 # WHAT IT DOES.  For each fixture: compile the same source TWICE — once on the
 # val arm (`QBE_ENTRY=M.main node run.js`) and once with `QBE_VALREP=word` —

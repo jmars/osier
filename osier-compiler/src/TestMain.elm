@@ -185,10 +185,7 @@ checks rt rawMidText =
             refused =
                 List.filterMap
                     (\e -> QbeLower.wordArmUnported e)
-                    [ PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
-                    , PrimApp { prim = "=", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
-                    , PrimApp { prim = "<", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
-                    , PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
+                    [ PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
                     , Con { tag = "Just", args = [ Lit (LNumber 1) ] }
                     , RecordGet (Var 0) "x"
                     , RecordUpdate { base = Var 0, updates = [ ( "x", Lit (LNumber 1) ) ] }
@@ -229,8 +226,17 @@ checks rt rawMidText =
             -- an arithmetic prim INSIDE a list literal or a tuple must still
             -- refuse, or the desugar-classification would be a hole rather
             -- than a port.
-            && (QbeLower.wordArmUnported (ListLit [ PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ]) /= Nothing)
-            && (QbeLower.wordArmUnported (Tup [ Lit (LNumber 1), PrimApp { prim = "*", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ]) /= Nothing)
+            -- (perf word-arm-arith: the two rows above USED to assert that an
+            -- arithmetic prim nested one level in still REFUSED.  It no longer
+            -- does — the prim is ported — so the rows below flip, and the
+            -- both-directions control moves to a prim that is still un-ported
+            -- (`f/`, the float division), which is the property that matters:
+            -- the desugar-classification RECURSES, so "the container is ported"
+            -- can never be mistaken for "anything inside it is".)
+            && QbeLower.wordArmUnported (ListLit [ PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ]) == Nothing
+            && QbeLower.wordArmUnported (Tup [ Lit (LNumber 1), PrimApp { prim = "*", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ]) == Nothing
+            && (QbeLower.wordArmUnported (ListLit [ PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ]) /= Nothing)
+            && (QbeLower.wordArmUnported (Tup [ Lit (LNumber 1), PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ]) /= Nothing)
             -- A CASE is classified through its SCRUTINEE, its MATCHES, its
             -- pattern BINDS and its BODIES — the list patterns below are the
             -- shapes a cons program actually uses (nil and cons), plus a
@@ -245,12 +251,37 @@ checks rt rawMidText =
             -- field bind (the refused record family).
             && (QbeLower.wordArmUnported (caseExp [ MTagEq [ IdxStep 0 ] "Just" ] []) /= Nothing)
             && (QbeLower.wordArmUnported (caseExp [] [ ( { id = 1, name = "f" }, VField [] "f" ) ]) /= Nothing)
-            -- ... and the recursion reaches the BODY: a case whose body is an
-            -- arithmetic prim refuses, so "the scrutinee and the matches are
-            -- fine" cannot be mistaken for "the alternative is fine".
+            -- ... and the recursion reaches the BODY, in BOTH directions: a
+            -- case whose body is an ARITHMETIC prim is now admitted (perf
+            -- word-arm-arith ported it), and a case whose body is the still
+            -- un-ported `f/` REFUSES — so "the scrutinee and the matches are
+            -- fine" can never be mistaken for "the alternative is fine".
             && (QbeLower.wordArmUnported (caseExp [ MEmpty [] ] []) == Nothing)
-            && (QbeLower.wordArmUnported (caseWithBody (PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] })) /= Nothing)
-            -- and the refused set is exactly the THIRTEEN named constructs: a
+            && QbeLower.wordArmUnported (caseWithBody (PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] })) == Nothing
+            && (QbeLower.wordArmUnported (caseWithBody (PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] })) /= Nothing)
+            -- ============ THE ARITHMETIC PRIM CLASS (perf word-arm-arith)
+            -- ============  Every prim `lowerPrimApp` gives an inline arm to
+            -- EXCEPT the float division is now ADMITTED, because under the word
+            -- arm `lowerArith`/`lowerCompare`/`lowerNumEq` skip their 40-byte
+            -- generic tail and call the runtime through `rtPrimSlots`.  The
+            -- list is spelled out rather than derived, so a prim that LOSES its
+            -- admission is RED here instead of silently changing the count.
+            && List.all (\p -> QbeLower.wordArmUnported (PrimApp { prim = p, args = [ Lit (LNumber 1), Lit (LNumber 2) ] }) == Nothing)
+                [ "+", "-", "*", "/", "<", "<=", ">", ">=", "=" ]
+            -- ... and the float division is the ONE that still refuses, by name:
+            -- it emits the heap-boxed float cell (AREA 5) and `Rt.f/` would
+            -- build the same cell, so it is refused at the classifier rather
+            -- than routed.
+            && (QbeLower.wordArmUnported (PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }) /= Nothing)
+            -- `/=` (NotEqual) is a NODE, not a prim: it is ported by the same
+            -- classification (it delegates to `lowerNumEq`, which takes the
+            -- `rtPrimSlots "="` route here) and it still RECURSES into its two
+            -- operands, so a `/= ` over an un-ported construct refuses.
+            && QbeLower.wordArmUnported (NotEqual { left = Lit (LNumber 5), right = Lit (LNumber 3), falseLabel = "nef", endLabel = "nee" }) == Nothing
+            && QbeLower.wordArmUnported (NotEqual { left = Lit (LNumber 5), right = PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }, falseLabel = "nef", endLabel = "nee" }) == Nothing
+            && (QbeLower.wordArmUnported (NotEqual { left = Lit (LNumber 5), right = RecordGet (Var 0) "x", falseLabel = "nef", endLabel = "nee" }) /= Nothing)
+            && (QbeLower.wordArmUnported (NotEqual { left = Lit (LFloat 1.5), right = Lit (LNumber 3), falseLabel = "nef", endLabel = "nee" }) /= Nothing)
+            -- and the refused set is exactly NINE named constructs: a
             -- classifier that admitted any of them would be silently wrong
             -- (each emits the 40-byte representation or a layout the arm has
             -- not decided).  The count is part of the row because a future
@@ -258,7 +289,17 @@ checks rt rawMidText =
             -- `wordArmUnported`) would otherwise leave this row green: the
             -- membership list is what is pinned, so it must cover the whole
             -- refused surface, not just the shapes this unit happened to touch.
-            && List.length refused == 12
+            --
+            -- IT WAS TWELVE, AND THREE OF THE THREE THAT LEFT WERE THE
+            -- ARITHMETIC CLASS (perf word-arm-arith): `+`, `=` and `<` stood
+            -- here as the representatives of an entire refused family, and the
+            -- family is now admitted by ONE fork in each of the three lowering
+            -- functions.  A count FROZEN at twelve would have made this
+            -- legitimate port a guard edit; what the count is FOR is the
+            -- direction that still matters — a construct re-admitted without
+            -- its port — so it moves with the port and the per-prim list above
+            -- carries the positive half.
+            && List.length refused == 9
             -- ... and the construct that LEFT the refused set (perf
             -- word-arm-records R1): a SYMBOL LITERAL is now admitted, because
             -- its cell is ported (code 2, a raw body `[byte pointer, length]`
@@ -279,7 +320,8 @@ checks rt rawMidText =
             && QbeLower.wordArmUnported (RecordLit [ ( "x", Lit (LNumber 1) ), ( "y", Lit (LString "hi") ) ]) == Nothing
             && QbeLower.wordArmUnported (RecordLit [ ( "x", Lit (LSymbol "s") ) ]) == Nothing
             && QbeLower.wordArmUnported (RecordLit []) == Nothing
-            && (QbeLower.wordArmUnported (RecordLit [ ( "x", PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ]) /= Nothing)
+            && QbeLower.wordArmUnported (RecordLit [ ( "x", PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ]) == Nothing
+            && (QbeLower.wordArmUnported (RecordLit [ ( "x", PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ]) /= Nothing)
             && (QbeLower.wordArmUnported (RecordLit [ ( "x", Lit (LNumber 1) ), ( "y", RecordGet (Var 0) "z" ) ]) /= Nothing)
         )
     , check "utf8ByteLength 'héllo' == 6" (utf8ByteLength "héllo" == 6)
@@ -1803,6 +1845,64 @@ checks rt rawMidText =
 
             _ ->
                 False
+        )
+    , check ("DEBUG word arith emit -> " ++ (let prog = rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ arithProbe ] in case QbeLower.lowerWith RtLayout.wordLayout rt False True True True True True True False False True QbeTypes.empty (rtArities prog) prog "Rt.arithProbe" of
+            Ok m -> "OK: " ++ (if String.contains "call $q_Rt_x2e_x2b(" (Print.print m) then "has Rt.+ call" else "NO Rt.+ call") ++ " | pinline=" ++ (if String.contains "@pinline_" (Print.print m) then "yes" else "no")
+            Err e -> "ERR: " ++ String.left 300 e)) True
+    , check "THE EMITTED ARITHMETIC: on the word arm `x + 1` is ONE `:val` call to `Rt.+` and NO inline tag/payload tail; on the val arm it is the tail and no call (perf word-arm-arith). The tail is the 40-byte shape — a tag-word `loadw`, the payload at `slot + 8`, the tag/payload write back — and under the word arm those addresses are the value word and the NEXT FRAME SLOT, so it is not a slow path there but a WRONG one. The operand is a PARAMETER so neither arm's operand-type fast path can fire and the two emissions differ only by the arm. The `@pinline_` label is the tail's own block label, so its presence/absence is a fact about which path was taken, not about which text happens to appear."
+        -- THE TWO ARMS NEED TWO RUNTIME SPLICES, not two layouts over one: the
+        -- reachable Rt set includes `Rt.con`, whose BODY is spliced per arm
+        -- (`allocvec` + `mkvec` on the val arm, `Rt.allocKind` + `mkval` on the
+        -- word arm), so lowering the val-spliced program under the word layout
+        -- refuses inside `Rt.con` before the probe is ever reached — MEASURED
+        -- while writing this row.
+        --
+        -- AND THE ASSERTION IS SCOPED TO THE PROBE'S OWN FUNCTION, not to the
+        -- module text: the runtime's own defuns use `+` (every `mknum(x + 1)`
+        -- in runtime.mid is a surface prim), so the VAL module legitimately
+        -- contains calls to `Rt.+` in Rt bodies.  A whole-module `contains`
+        -- would be a statement about the runtime, not about the lowering.
+        (case Rt.loadArm True rawMidText of
+            Err _ ->
+                False
+
+            Ok wordRt ->
+                let
+                    wordProg =
+                        rtProgram wordRt True True True ++ rtProgramGc wordRt True True True ++ [ arithProbe ]
+
+                    valProg =
+                        rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ arithProbe ]
+                in
+                case
+                    ( QbeLower.lowerWith RtLayout.wordLayout wordRt False True True True True True True False False True QbeTypes.empty (rtArities wordProg) wordProg "Rt.arithProbe"
+                    , QbeLower.lower rt False True True True True True True False False True QbeTypes.empty (rtArities valProg) valProg "Rt.arithProbe"
+                    )
+                 of
+                    ( Ok wordMod, Ok valMod ) ->
+                        case
+                            ( funcByName "q_Rt_x2earithProbe" wordMod
+                            , funcByName "q_Rt_x2earithProbe" valMod
+                            )
+                        of
+                            ( Just wf, Just vf ) ->
+                                -- THE DISTINGUISHING FACT IS THE INLINE TAIL,
+                                -- not the call: BOTH arms call `Rt.+` (the val
+                                -- arm's tail ends in the `pfb_` fallback for
+                                -- every operand pair it cannot prove numeric,
+                                -- and a PARAMETER is exactly that).  What the
+                                -- word arm must NOT have is the `pinline_`
+                                -- block — the tag-word load and the two
+                                -- `slot + 8` payload reads — at all.
+                                callsSym "q_Rt_x2e_x2b" wf
+                                    && not (hasBlockPrefix "pinline_" wf)
+                                    && hasBlockPrefix "pinline_" vf
+
+                            _ ->
+                                False
+
+                    _ ->
+                        False
         )
     , check "THE EMITTED RECORD BUILD: ONE code-14 block, `[data | namesBase]`, tagged `...001` (perf word-arm-records R2). The seat is `Rt.allocRecord` (which owns the `+ 1`), the data words go through the ONE barrier-free element seat, the NAMES word is a RAW store at `elemAddr(body, n)` — the layout's own stride, never a hand-spelled `+8n` — and the slot holds the TAGGED BODY through the cell writer's one-word arm, so the tag has one writer on this arm too. The val arm keeps its two-block shape (a data ARRAY + a payload triple), which is what the fork is for"
         (case
@@ -14234,6 +14334,27 @@ intLtProbe =
     }
 
 
+{-| THE ARITHMETIC PRIM'S EMIT (perf word-arm-arith): `x + 1` — one operand a
+PARAMETER, so no operand-type fast path can take it on either arm and the two
+emissions differ ONLY by the arm.
+
+The val arm must emit the inline tail (the `@pinline_` block: a tag-word load,
+the two payload reads at `slot + 8`, the i64 op, the tag/payload write) and no
+call to `Rt.+`; the word arm must emit ONE `:val` call to `Rt.+` and NO
+`@pinline_` block at all, because under that arm `lowerArith` skips the tail and
+`rtPrimSlots` reaches the runtime — whose `payload`/`mknum` are the layout's.
+-}
+arithProbe : Defun
+arithProbe =
+    { key = "Rt.arithProbe"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "x" } ]
+            , body = PrimApp { prim = "+", args = [ Var 0, Lit (LNumber 1) ] }
+            }
+    }
+
+
 {-| The RawCallAgg probe (stage 6 U1a): body = one aggregate call through a
 runtime word, let-bound to a raw temp, with a plain number as the returned
 Value.  `fn` is rt_vec_alloc's address word (a legal raw-word producer
@@ -14719,6 +14840,17 @@ symCount sym f =
             )
             f.blocks
         )
+
+
+{-| Does any block of this function carry a label starting with `prefix`?  The
+`pinline_`/`pfb_`/`pjoin_` labels ARE the arithmetic inline fast path's block
+names, so this answers "which path did the lowering take" without pinning any
+instruction text.  NOTE the labels carry NO `@`: the printer prefixes it, and
+`Il.Block.label` does not — MEASURED while writing the row this helper serves.
+-}
+hasBlockPrefix : String -> Il.Func -> Bool
+hasBlockPrefix prefix f =
+    List.any (\b -> String.startsWith prefix b.label) f.blocks
 
 
 funcByName : String -> Il.Module -> Maybe Il.Func

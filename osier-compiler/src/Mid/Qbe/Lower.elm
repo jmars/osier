@@ -10,7 +10,9 @@ module Mid.Qbe.Lower exposing (lower, lowerWith, wordArmUnported)
 --     semantics), GRef as a value (runtime closure), GRef force (0-arg thunk
 --     = direct call), Let (plain LetBind only), If, 2-ary integer PrimApp
 --     (`+ - * < <= > >= =` inline on the VM's exact semantics with an
---     rt_prim fallback for the float-promotion / non-numeric paths), and
+--     rt_prim fallback for the float-promotion / non-numeric paths — ON THE VAL
+--     ARM; under the word arm those prims route to the runtime unconditionally,
+--     perf word-arm-arith), and
 --     inner Lam (closures with captures — the env representation crux).
 --   stage 2 adds: Case (incl. inside a closure body), Con (ADT construction
 --     as the VM's vector[tag, args]), the match steps MCons/MEmpty/MVector/
@@ -729,6 +731,22 @@ wordArmUnported exp =
                 Nothing ->
                     wordArmUnported block.right
 
+        NotEqual block ->
+            -- AREA 2, THE `/=` OPERATOR (perf word-arm-arith).  It is PORTED by
+            -- the same classification that ported `=`: `lowerNotEqual`
+            -- delegates to `lowerNumEq` and then negates the tagged Boolean
+            -- through `jmpfFalse` (both arm-clean), and under the word arm
+            -- `lowerNumEq` takes the `rtPrimSlots "="` route into `Rt.=`, whose
+            -- word splices ARE the ported arm.  The WORKLIST said this was NOT
+            -- ported and gave the right reason at the time — "porting it means
+            -- porting that inline, i.e. area 2/4" — and this is that port.
+            case wordArmUnported block.left of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    wordArmUnported block.right
+
         If block ->
             -- AREA 2, THE BOOLEAN TAG TEST (perf VR3b2).  The condition is a
             -- Value test whose lowering is `readTag` + a compare; the two
@@ -939,10 +957,15 @@ wordArmUnported exp =
             -- (AREA 6) — the construct is ported because its EMIT SITE handles
             -- the arm, not because it looked harmless.
             --
-            -- The ARITHMETIC prims do NOT: `lowerArith`/`lowerCompare`/
-            -- `lowerNumEq` read the tag WORD and the payload at `+8`, i.e. the
-            -- 40-byte representation, in their inline arms.  Those stay
-            -- refused BY NAME (AREA 4/5) — see `wordArmPrimUnported`.
+            -- The ARITHMETIC prims do NOT take that route on the VAL arm:
+            -- `lowerArith`/`lowerCompare`/`lowerNumEq` read the tag WORD and
+            -- the payload at `+8`, i.e. the 40-byte representation, in their
+            -- inline arms.  UNDER THE WORD ARM THOSE ARMS ARE SKIPPED
+            -- (perf word-arm-arith): each of the three forks on `wordArm` and
+            -- takes this same `rtPrimSlots` route, whose runtime defuns reach
+            -- their operands through the layout-derived accessors.  So they
+            -- are NOT refused here any more; only the float-only `f/` is (see
+            -- `wordArmPrimUnported`), plus any prim with no Mid impl.
             case wordArmPrimUnported app.prim of
                 Just what ->
                     Just what
@@ -1107,17 +1130,22 @@ wordArmUnportedArgs args =
 
 {-| THE PRIMS WHOSE EMIT SITE IS NOT ARM-CLEAN, refused by name.
 
-`lowerPrimApp` has three inline fast paths that emit the 40-byte
-representation directly, and each is gated on an operand TYPE rather than on
-the arm, so none of them can be reached safely under the word arm:
+THE ARITHMETIC CLASS LEFT THIS LIST (perf word-arm-arith), and it left as ONE
+classification rather than a site sweep: `lowerPrimApp`'s inline fast paths are
+a VAL-ARM SHAPE (they read the tag word at `slot + 0` and the payload at
+`slot + 8`), and under the word arm the whole family takes the ordinary
+`rtPrimSlots` route instead — the same route the AGGREGATE prims are admitted
+on, where the runtime's own `Rt.+`/`Rt.-`/`Rt.*`/`Rt./`/`Rt.<`/`Rt.=` reach
+their operands through the layout-derived accessors (`payload`, `payload32`,
+`mknum`, `tagis`).  So `+ - * < <= > >= =` are no longer listed here and are no
+longer refused.
 
-  * `+ - *` -> `lowerArith` (a tag-word load plus a payload read at `+8`, and
-    `rawIntBin`/`rawFloatBin` for the proven-Int/proven-Float arms — the i61
-    tagging and the float cell are AREA 4/5);
-  * `< <= > >=` -> `lowerCompare` (the same tag/payload shape, plus
-    `reboxBoolean`);
-  * `=` -> `lowerNumEq` (the same, plus `reboxBoolean`);
-  * `f/` -> `rawFloatBin` when both operands are proven Float (AREA 5).
+What REMAINS, and why each still refuses:
+
+  * `f/` -> `rawFloatBin` when both operands are proven Float, i.e. the heap-
+    boxed float cell (AREA 5).  It keeps its inline branch in `lowerPrimApp`
+    and is refused here BY NAME, so the word arm never routes it to `Rt.f/`
+    (which is float-only and would build a float cell).
 
 A prim NOT listed here and carrying a Mid implementation takes the plain
 `rtPrimSlots` route, which is arm-clean (see the `PrimApp` case above).  A prim
@@ -1128,7 +1156,7 @@ it refuses here rather than at the linker.
 wordArmPrimUnported : String -> Maybe String
 wordArmPrimUnported prim =
     if List.member prim wordArmInlinePrims then
-        Just (wordArea "AREA 4 (ARITHMETIC)" ("the primitive `" ++ prim ++ "` — its inline arm reads the tag word and the payload at +8, i.e. the 40-byte representation, so arithmetic needs inline tag/untag and the i61 overflow/boxing path"))
+        Just (wordArea "AREA 5 (FLOATS)" ("the primitive `" ++ prim ++ "` — its inline arm emits the heap-boxed float cell, which does not exist under the word arm (and `Rt.f/` is float-only, so routing it to the runtime would build the same cell)"))
 
     else if MidRt.primImpl prim == Nothing then
         Just (wordArea "AREA 4 (ARITHMETIC)" ("the primitive `" ++ prim ++ "` — it has no Mid implementation, so it has no arm-clean route (the Zig fallback would emit rt_prim_* symbols the runtime no longer defines)"))
@@ -1137,11 +1165,18 @@ wordArmPrimUnported prim =
         Nothing
 
 
-{-| The prims `lowerPrimApp` gives an inline, representation-shaped arm to.
+{-| The prims `lowerPrimApp` gives an inline, representation-shaped arm to AND
+that the word arm must therefore not reach.
+
+ONE ENTRY.  `+ - * < <= > >= =` were the rest of this list until perf
+word-arm-arith; they left it in the same commit that made `lowerPrimApp` skip
+their inline arms under the word arm, because the list and the fork are two
+halves of one decision and a list entry without the fork is a refusal of a
+construct the arm now gets RIGHT.  What is left is float-only.
 -}
 wordArmInlinePrims : List String
 wordArmInlinePrims =
-    [ "+", "-", "*", "f/", "<", "<=", ">", ">=", "=" ]
+    [ "f/" ]
 
 
 {-| THE TAG OF THE VALUE WHOSE ADDRESS IS `base`, into the `w` temp `t`
@@ -1421,7 +1456,12 @@ wordAreaWhat exp =
             "a call — its argument staging, `:ret` aggregate and .tail metadata are not ported"
 
         PrimApp _ ->
-            "a primitive application — arithmetic needs inline tag/untag and the i61 overflow/boxing path"
+            -- Effectively unreachable now that the arithmetic class is ported:
+            -- `wordArmPrimUnported` names the prim and its own area, and every
+            -- other PrimApp takes the `rtPrimSlots` route.  Kept truthful
+            -- anyway, because a refusal that lies about its cause is worse than
+            -- none.
+            "a primitive application — a prim with no Mid implementation, or the float-only `f/` (see `wordArmPrimUnported`, which names it)"
 
         Case _ ->
             "a case — every alternative is a tag test, and under the word arm a tag test is `and`+compare (immediates) or a header-kind read (heap objects)"
@@ -2503,7 +2543,19 @@ calledPrims rec exp =
                     Set.union (go block.left) (go block.right)
 
                 NotEqual block ->
-                    Set.union (go block.left) (go block.right)
+                    -- `lowerNotEqual` is `lowerNumEq` + a negated Boolean, and
+                    -- `lowerNumEq`'s GENERIC tail calls `rtPrimSlots "="` —
+                    -- which is the tail every operand pair takes except two
+                    -- proven Ints (or two proven Floats).  So `=` must be
+                    -- seeded here or the call site has no `Rt.=` to link
+                    -- against.  MEASURED (perf word-arm-arith): without this
+                    -- arm `if "a" /= "b" then ..` REFUSED TO COMPILE on the
+                    -- VAL arm too, with the seed guard's own message — a
+                    -- latent census miss this unit's `=` port surfaced, not a
+                    -- word-arm problem.  Over-seeding the proven-Int case (where
+                    -- the fast path emits no call) is the convention this
+                    -- function already states at RecordGet.
+                    Set.union (Set.singleton "=") (Set.union (go block.left) (go block.right))
 
                 Loop block ->
                     Set.union (go block.cond) (go block.body)
@@ -8011,6 +8063,21 @@ reboxArg dest raw s =
 {-| REBOX a `w`-typed comparison result as a tagged Boolean Value.  The VM's
 booleans carry a WORD payload (`lowerLit`'s `LBoolean` arm stores `StoreW`), so
 this is that same shape, not a new one.
+
+VAL ARM ONLY, and the reason is the 40-byte shape it writes: `StoreW tagBoolean`
+at `slot + 0` then the payload at `slot + 8` is TWELVE bytes into an EIGHT-byte
+slot under the word arm — the next slot's value clobbered with a tag, the same
+defect class perf word-arm-surface found in `reboxArg`.  A word-arm boolean is
+ONE immediate (`tagTrue + (w == 0)`, `storeWordCell RtLayout.tagBoolean [w]`).
+
+NOTHING FORKS IT HERE, and what keeps that safe is REACHABILITY, not a belt —
+MEASURED, the same way `RawLoadFlt`'s note was: under the word arm every caller
+is either dead or refused.  `lowerCompare`/`lowerNumEq`'s proven-Int and
+proven-Float arms are denied by `isIntExp`/`isFloatExp` (which return False
+under the arm), and `lowerStrCmp` — the only remaining caller — refuses BY NAME
+at `lowerCompare`'s string branch before it can reach this function.  THE
+STANDING INSTRUCTION: whoever ports Char/String ordering to the word arm must
+fork this in the SAME unit, to `storeWordCell RtLayout.tagBoolean [ raw ]`.
 -}
 reboxBoolean : Int -> Il.Arg -> S -> S
 reboxBoolean dest raw s =
@@ -11342,6 +11409,37 @@ lowerRecordUpdate update dest s =
 
 lowerPrimApp : { prim : String, args : List Exp } -> Int -> S -> Result String S
 lowerPrimApp app dest s =
+    -- THE INLINE FAST PATHS ARE A VAL-ARM SHAPE (perf word-arm-arith).
+    --
+    -- `lowerArith`/`lowerCompare`/`lowerNumEq` end in a GENERIC tail that emits
+    -- the 40-byte Value directly — the tag word at `slot + 0`, the payload at
+    -- `slot + 8` — and each is gated on an operand TYPE, never on the arm.  So
+    -- under the word arm each of the three SKIPS that tail and calls the
+    -- runtime through `rtPrimSlots` instead, which is the SAME ground the
+    -- AGGREGATE prims are admitted on: `Rt.+`/`-`/`*`/`/`/`<`/`=` read their
+    -- operands through the layout-derived accessors (`payload`, `payload32`,
+    -- `mknum`, `tagis`), so they are arm-clean BY CONSTRUCTION rather than by a
+    -- site sweep.
+    --
+    -- THE FORK LIVES INSIDE EACH OF THE THREE, NOT HERE, and that is
+    -- deliberate: `lowerCompare`'s PROVEN-STRING branch must still be ENTERED
+    -- under the word arm so it can REFUSE by name (its inline byte loop reads
+    -- `slot + 8` and `slot + 16`; the numeric-only `Rt.<` answers False for
+    -- every string, the silent Char-ordering mislower).  Gating the whole call
+    -- here instead SKIPPED that branch, so the refusal was unreachable and the
+    -- word arm printed `0` for `"a" < "b"` — MEASURED, in this unit's first
+    -- cut.
+    --
+    -- THIS IS A CLASSIFICATION, NOT A NEW MECHANISM, and that is MEASURED:
+    -- `2 ^ 3` and `7 // 2` already built, linked and ran correctly under
+    -- `QBE_VALREP=word` before this unit, because `pow` and `/` have no inline
+    -- arm at all and so already took this route.  What was missing was only the
+    -- three forks.
+    --
+    -- `f/` KEEPS its inline branch and is NOT routed: it is float-only, and
+    -- under the word arm it is refused by name (AREA 5, `wordArmPrimUnported`)
+    -- with `isFloatExp` already denying, so the branch is unreachable there
+    -- rather than silently taken.
     if List.length app.args == 2 && List.member app.prim [ "+", "-", "*" ] then
         lowerArith app.prim app.args dest s
 
@@ -11463,6 +11561,20 @@ lowerArith prim args dest s =
         -- existing shape.
         rawIntBin (arithOp prim) (first args) (second args) s
             |> Result.map (\( r, s1 ) -> reboxArg dest r s1)
+
+    else if wordArm s then
+        -- ============ THE WORD ARM TAKES THE RUNTIME ROUTE ============
+        -- (perf word-arm-arith.)  The tail below emits the 40-byte shape — the
+        -- tag word at `slot + 0` and the payload at `slot + 8` — and under this
+        -- arm those are the value word and THE NEXT FRAME SLOT.  `Rt.+`/`-`/`*`
+        -- instead read their operands with `payload` (a fixnum's `SAR`, a heap
+        -- object's body load) and write the result with `mknum`, which is the
+        -- i61 shift AND its round-trip check: `+ - *` WRAP at i64 (L3's
+        -- semantics) for every result that fits, and a result outside i61
+        -- REFUSES LOUDLY by name instead of silently dropping its top three
+        -- bits — the boxed overflow path is AREA 4's and does not exist yet.
+        lowerArgsToSlots args s
+            |> Result.andThen (\( slots, s1 ) -> rtPrimSlots prim slots dest s1)
 
     else
         lowerArgs2 args s
@@ -11589,8 +11701,43 @@ lowerCompare op args dest s =
         -- non-number, which is the silent Char-ordering mislower this branch
         -- replaces.  Byte-lexicographic UTF-8 order IS code-point order, so
         -- this is real-Elm's Char/String ordering in the VM's byte model.
-        lowerArgs2 args s
-            |> Result.andThen (\( a1, a2, s1 ) -> lowerStrCmp op a1 a2 dest s1)
+        --
+        -- NOT UNDER THE WORD ARM (perf word-arm-arith): `lowerStrLess` reads
+        -- the byte pointer at `slot + 8` and the length at `slot + 16` of a
+        -- 40-byte Value, i.e. THE NEXT TWO FRAME SLOTS when a slot is one
+        -- word.  It cannot be routed to `Rt.<` either — that answers False for
+        -- any non-number, which is exactly the silent mislower this branch
+        -- exists to prevent — so it refuses BY NAME here, at the construct's
+        -- own emit site.  A real port is two accessor calls
+        -- (`payload(x, 0)` for the bytes, `payload32(x, 1)` for the length,
+        -- both already twinned); it is left out because this unit's scope is
+        -- the ARITHMETIC prim class and a fork here would need its own
+        -- behavioural fixture to be worth anything.
+        if wordArm s then
+            Err
+                (wordArmUnsupported
+                    (wordArea
+                        "AREA 3 (PAYLOAD ACCESS)"
+                        "Char/String ordering — its inline byte-lexicographic loop reads a Value's byte pointer at `slot + 8` and its length at `slot + 16`, i.e. the 40-byte shape, which under the word arm are the NEXT TWO FRAME SLOTS; and the numeric-only `Rt.<` answers False for any non-number, so routing it there would be the silent Char-ordering mislower the inline branch exists to prevent"
+                    )
+                )
+
+        else
+            lowerArgs2 args s
+                |> Result.andThen (\( a1, a2, s1 ) -> lowerStrCmp op a1 a2 dest s1)
+
+    else if wordArm s then
+        -- ============ THE WORD ARM TAKES THE RUNTIME ROUTE ============
+        -- (perf word-arm-arith.)  The tail below emits the 40-byte shape — the
+        -- tag word at `slot + 0`, the payload at `slot + 8` — and under this
+        -- arm those are the value word and THE NEXT FRAME SLOT.  `Rt.<`/`<=`/
+        -- `>`/`>=` read their operands with `payload`/`tagis` and answer through
+        -- `mkbool`, so the i64 compare and the Boolean are both the layout's.
+        -- The PROVEN-FLOAT and PROVEN-STRING branches above are the ones this
+        -- fork deliberately still lets run: the float one is dead (`isFloatExp`
+        -- denies here) and the string one REFUSES by name.
+        lowerArgsToSlots args s
+            |> Result.andThen (\( slots, s1 ) -> rtPrimSlots (cmpName op) slots dest s1)
 
     else
         lowerArgs2 args s
@@ -11931,6 +12078,18 @@ lowerNumEq args dest s =
                     in
                     reboxBoolean dest (Il.Tmp c) (emit (Cmp (Just c) L Ceq aa bb) s2)
                 )
+
+    else if wordArm s then
+        -- ============ THE WORD ARM TAKES THE RUNTIME ROUTE ============
+        -- (perf word-arm-arith.)  The tail below emits the 40-byte shape — the
+        -- tag word at `slot + 0`, the payload at `slot + 8` — and under this arm
+        -- those are the value word and THE NEXT FRAME SLOT.  `Rt.=` is the
+        -- PORTED deep-equality: every arm of it reads through `tagis`/
+        -- `payload`/`veclen`/`len32`, and its record arm is the word-spliced
+        -- `Rt.recEqGo` (perf word-arm-records R2), so this fork is what makes
+        -- `==` on records EXECUTE instead of merely compile.
+        lowerArgsToSlots args s
+            |> Result.andThen (\( slots, s1 ) -> rtPrimSlots "=" slots dest s1)
 
     else
         lowerArgs2 args s

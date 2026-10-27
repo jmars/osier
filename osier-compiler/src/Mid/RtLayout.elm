@@ -751,8 +751,32 @@ valLayout =
 --      string/vector `len`, record fields, float payload, argv, the exec-plan
 --      blob.  Under the word arm a field is a plain 8-byte load at 8i, and a
 --      fixnum's value is the word arithmetic-shifted.
---   4. ARITHMETIC.  Inline tag/untag (and + shift, no runtime call), the i61
---      overflow check and the boxing path, comparisons, div/mod, negate.
+--   4. ARITHMETIC.  PORTED (perf word-arm-arith), and ported as a
+--      CLASSIFICATION rather than by writing inline tag/untag: `lowerArith`/
+--      `lowerCompare`/`lowerNumEq`'s generic tails are a VAL-ARM SHAPE (the tag
+--      word at `slot + 0`, the payload at `slot + 8`), so under the word arm
+--      each of the three SKIPS its tail and calls the runtime through
+--      `rtPrimSlots` — `Rt.+`/`-`/`*`/`/`/`<`/`=` read their operands with
+--      `payload`/`payload32`/`tagis` and write with `mknum`, so they are
+--      arm-clean by construction.  `+ - *` WRAP at i64 (L3) for every result
+--      inside i61; a result outside it is a LOUD named refusal from `mknum`'s
+--      round-trip check, because the i61 overflow/boxing path is NOT ported
+--      (below).  `//` (prim `/`) was already on this route — `Rt./` carries
+--      L3-U2's two named halts (zero divisor, INT64_MIN // -1) and they are
+--      NOT duplicated here; `negate` is Mid/FromAst's `0 - x` desugar, so it
+--      needs no prim.  There is NO `%`/modulo operator in this language at all
+--      (`binaryPrims` maps `//` to the prim `/` and defines none), so nothing
+--      was ported for one.
+--      NOT PORTED: the inline tag/untag (the runtime call is the route here,
+--      not a slower spelling of it — a fast path would be a second arithmetic
+--      to keep in step), the i61 OVERFLOW/BOXING path (a word-arm value that
+--      does not fit the fixnum is boxed onto the heap, and that cell does not
+--      exist), and CHAR/STRING ORDERING (`"a" < "b"`), whose inline byte loop
+--      reads a Value's byte pointer at `slot + 8` and its length at
+--      `slot + 16` — it REFUSES by name at `lowerCompare`'s string branch,
+--      because `Rt.<` answers False for every non-number and routing it there
+--      would be the silent Char-ordering mislower that branch exists to
+--      prevent.  FLOATS are item 5.
 --   5. FLOATS.  The heap-boxed `[hdr | f64]` cell and Lower's `rawFloat` lane.
 --   6. THE `:ret` AGGREGATE.  Its FIRST FIELD IS A VALUE, so its tail offsets
 --      move with `valSizeBytes` (they are DERIVED below); plus the 80-byte sret
@@ -794,18 +818,15 @@ valLayout =
 --      `GRef`, `StreamRef`, float literals, let-destructuring, `MTagEq`
 --      (a constructor-tag pattern — it materialises the tag as a `symbol`,
 --      which is now ported, so what remains there is the tag-EQUALITY half),
---      and every ARITHMETIC prim (area 4/5 — `isIntExp`/`isFloatExp` also deny
---      there, because S4/S4f's raw local is reboxed in the 40-byte shape).
---      AND `/=` (`NotEqual`), which an earlier revision of this item listed as
---      PORTED and is NOT: `wordArmUnported` has no `NotEqual` case, so it falls
---      to the refusal fallback, and MEASURED `if 5 /= 3 then ..` under
---      `QBE_VALREP=word` answers "AREA 2 (TAG TESTS) — `/=`.  It is not a
---      trivial port either: `lowerNotEqual` delegates to `lowerNumEq`, whose
---      GENERIC tail (the only tail reachable here, since the proven-Int and
---      proven-Float fast paths are themselves denied under the arm) reads the
---      tag word at `slot + 0` and the payload at `slot + 8` — the 40-byte
---      shape — before routing `=` through `rtPrimSlots`.  Porting it means
---      porting that inline, i.e. area 2/4.
+--      and `f/` (the float division, AREA 5 — `isFloatExp` also denies here,
+--      because S4f's raw local is reboxed in the 40-byte shape).
+--      ARITHMETIC IS NOW PORTED (perf word-arm-arith; see item 4): `+ - *`,
+--      `< <= > >=`, `=` and `/=` are ADMITTED, because the three inline
+--      lowering functions skip their 40-byte tails under this arm and call the
+--      runtime instead.  `/=` (`NotEqual`) was listed here as NOT PORTED and
+--      the reason given was right — "porting it means porting that inline" —
+--      and that is what happened.  A row pins the admitted set BY NAME, so a
+--      prim losing its admission is RED rather than silently changing a count.
 wordLayout : ValLayout
 wordLayout =
     { valSizeBytes = 8
