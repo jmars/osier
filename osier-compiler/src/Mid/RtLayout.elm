@@ -858,17 +858,32 @@ valLayout =
 --      silently rc=0, before: 154 of 6000 surviving `String.join` strings at
 --      QBE_HEAP_MB=1 and 5699 at DEFAULT knobs (the val arm answers 6000 both
 --      ways); after: 6000, and tools/qbe/word-arm-gcchurn/str.elm is the row.
---      `Rt.globBuildGo`'s `bufW` (the class's fourth pair-instance, WORD ARM
---      only) is CLOSED TOO: `mkstr` no longer allocates, and the string value is
---      bound BEFORE the two `Rt.intern` calls on the recur line, whose HIT path
---      allocates a symbol cell on this arm (`allocKind(2, 1)`; the val arm's
---      intern returns `mkval(2, hit)` and allocates nothing).  IT HAS NO
---      COLLECTING ROW, and that is a REACHABILITY fact, not an omission: the
---      only route to `Rt.glob` is the effect host's TaskGlob, and a
---      `Platform.worker` program does not lower on this arm at all — MEASURED,
+--      `Rt.globBuildGo`'s `bufW` (the class's fourth pair-instance) is CLOSED on
+--      BOTH ARMS NOW, and the two arms were not the same defect: `mkstr` allocates
+--      nothing, and the string value is bound BEFORE the two `Rt.intern` calls on
+--      the recur line.  WORD ARM: `intern`'s HIT path allocates a symbol cell
+--      (`allocKind(2, 1)`), so the buffer really was live across two scavenge
+--      points — a live window, fixed by the binding.  VAL ARM: `intern`'s HIT
+--      path returns `mkval(2, hit)` and its MISS path (`intInsert` ->
+--      `intInsertAt`) mallocs its name and returns `mkval(2, store)` — MEASURED,
+--      `q_Rt_x2eintern`'s transitive closure in the val-arm artifact is 11 defuns
+--      and contains NO `gcAlloc` (its only callers there are allocRaw and
+--      allocVector), so this arm CANNOT collect inside `intern` and the window
+--      was EMPTY — empty BY INVARIANT (intern staying allocation-free), not by
+--      order, with the two arms one edit away from agreeing.  The binding makes
+--      the safety STRUCTURAL on both arms, which is why it is now ONE shared
+--      statement instead of two arm splices (perf word-arm-rawroot item 3 FIX's
+--      review, SHOULD-FIX; it moves the val-arm emit, so it carries its own
+--      re-freeze: 125 of 159 corpus groups, the set that DEFINES the changed
+--      defuns, by set equality).
+--      IT STILL HAS NO COLLECTING ROW, and that is a REACHABILITY fact, not an
+--      omission: the only route to `Rt.glob` is the effect host's TaskGlob, and a
+--      `Platform.worker` program does not lower on the WORD arm at all — MEASURED,
 --      `err qbe: unknown global referenced: M.main` for tests/elm-fixtures/
---      execglob.elm, execenv.elm and progio.elm under QBE_VALREP=word.  The row
---      is owed by the unit that twins the EXEC-PLAN / EFFECT-HOST blob below.
+--      execglob.elm, execenv.elm and progio.elm under QBE_VALREP=word (the VAL
+--      arm compiles and runs execglob, which is how the order above was read).
+--      The row is owed by the unit that twins the EXEC-PLAN / EFFECT-HOST blob
+--      below.
 --      `Rt.recAppend` IS FIXED (perf word-arm-rawroot item 3 FIX, a0c80c5), and
 --      the entry it replaces was WRONG IN THE DIRECTION THAT MISDIRECTS, so the
 --      correction is stated rather than quietly rewritten.  What this entry said
@@ -902,6 +917,19 @@ valLayout =
 --          young) body" at h1/h2/h8.  THE ROOT TURNED A SILENT WRONG ANSWER INTO
 --          A LOUD ONE, which is what exposed the second half; a fix that only
 --          roots the cell is INCOMPLETE.
+--          PRECISION, so nobody leans on loudness later: that is the COMMON case,
+--          NOT a guarantee.  `gcScavPtr` poisons a forwarded body's word 0 with
+--          15, and a garbage cell-0 tag in {0, 2, 3, 5, 7, 8, 11, 12} scavenges as
+--          a NO-OP and stays SILENT; the loud fire needs the recycled word to be
+--          exactly 15 (dead young memory retains the old poison, which churn
+--          reliably supplies).  THE STRENGTH OF THIS FIX IS FIX-BY-ORDER — fill
+--          before the next allocation — not the poison walk, which is only an
+--          instrument that happened to fire.
+--      `Rt.recUpd` NOW USES THE SAME HOLDER (its review's NICE-TO-HAVE): it was
+--      SAFE BY ORDER — ONE `allocvec`, fill before any allocation, pinned by the
+--      control row — but `mknum(nd)` is the exact textual shape that was a silent
+--      reclaim here, so the day it grows a second allocation it becomes the same
+--      bug.  Uniform discipline instead of a local argument.
 --      THE SHAPE NOW: root each cell as a `:val` binder (`mkval(10, ..)` — a
 --      frame slot the frame-enter root array scans), FILL IT through
 --      `vecbody(..)` while nothing can allocate, and only THEN allocate the
