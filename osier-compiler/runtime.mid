@@ -2737,8 +2737,18 @@ defun Rt.value(sym : val) -> val {
   if (mkbool(slot != 0)) {
     return vecload(slot, 0);
   }
+  // A SYMBOL'S NAME IS NOT A STRING CELL (perf word-arm-rawroot item 1): it is a
+  // NUL-terminated C string (a static literal or `Rt.intInsertAt`'s malloc), so
+  // it is not the BYTE BASE `mkstr` tags on the word arm.  `Rt.symToStr` builds
+  // the string the honest way — ONE cell, ONE copy of the name — and it is what
+  // the val arm's `mkstr(name, len)` is equivalent to.
+  // >>> QBE_VAL-ONLY
   val n = call Rt.cStrLenGo(mknum(payload(sym, 0)), mknum(0));
   return call Rt.intern(mkstr(payload(sym, 0), payload(n, 0)));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  return call Rt.intern(call Rt.symToStr(sym));
+  // <<< QBE_WORDVAL-ONLY
 }
 
 // ============== THE ENTRY-ARG PARSER (O5 seat 4b) =====================
@@ -3262,7 +3272,21 @@ defun Rt.globBuildGo(tblN : val, iN : val, acc : val) -> val {
   word bufW = allocraw(payload(lenN, 0) + 1);
   call Rt.cStrCopyGo(mknum(pW), mknum(bufW), mknum(0));
   rawcall free(pW);
+  // >>> QBE_VAL-ONLY
   recur(tblN, mknum(payload(iN, 0) - 1), call Rt.cons(call Rt.intern("cons"), call Rt.cons(call Rt.cons(call Rt.intern("string"), call Rt.cons(mkstr(bufW, payload(lenN, 0)), mknil)), call Rt.cons(acc, mknil))));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // THE STRING IS TAGGED BEFORE THE FIRST ALLOCATION ON THE LINE (perf
+  // word-arm-rawroot item 2).  `bufW` is a RAW WORD and `Rt.intern`'s HIT path
+  // ALLOCATES on this arm (`allocKind(2, 1)` for the symbol cell; the val arm's
+  // intern returns `mkval(2, hit)` and allocates nothing), so the buffer used to
+  // be live across TWO scavenge points before anything named it — one table hit
+  // plus one collection and the bytes were gone.  `mkstr` allocates NOTHING
+  // (item 1: it tags the cell `allocraw` made), so binding the value here is the
+  // whole fix: from `sN` on, the cell is a ROOTED frame slot.
+  val sN = mkstr(bufW, payload(lenN, 0));
+  recur(tblN, mknum(payload(iN, 0) - 1), call Rt.cons(call Rt.intern("cons"), call Rt.cons(call Rt.cons(call Rt.intern("string"), call Rt.cons(sN, mknil)), call Rt.cons(acc, mknil))));
+  // <<< QBE_WORDVAL-ONLY
 }
 
 defun Rt.glob(pattern : val) -> val {
@@ -5194,7 +5218,32 @@ defun Rt.allocRaw(nbytes : val) -> val {
   return call Rt.gcAlloc(region, mknum(0), mknum(bodyWords));
   // <<< QBE_VAL-ONLY
   // >>> QBE_WORDVAL-ONLY
-  return call Rt.gcAlloc(region, mknum(1), mknum(bodyWords));
+  // A WORD-ARM BYTE BUFFER IS A STRING CELL WITH ITS BYTES INLINE (perf
+  // word-arm-rawroot item 1).  It used to be a code-1 block of BYTES ONLY,
+  // wrapped by `mkstr` in a SECOND code-1 block holding `[byte pointer, length]`
+  // — and that pointer was the whole problem twice over: the byte block was
+  // reachable ONLY through a body the collector never walks (raw bodies are not
+  // scanned), and the pointer was a RAW WORD held across `mkstr`'s own
+  // allocation, so the bytes could be reclaimed BOTH during construction and at
+  // the first collection afterwards.  MEASURED, silently, rc=0: 154 of 6000
+  // surviving `String.join` strings at QBE_HEAP_MB=1, 5699 at DEFAULT knobs.
+  //
+  // ONE BLOCK, so there is nothing to keep alive: body unit 0 = the byte
+  // pointer, unit 1 = the length (`lenFieldWord`, where every reader already
+  // looks), units 2.. = the bytes.  Unit 0 names the cell's OWN bytes, so it is
+  // written here, once, and re-derived on promotion (Rt.gcScavPtr) — the bytes
+  // cannot outlive or precede their cell because they ARE the cell.
+  //
+  // THE RETURN IS THE BYTE BASE (body + 2 units), NOT the body: every caller of
+  // `allocraw(...)` fills bytes, and `mkstr` tags the block it is handed (the
+  // emitter's `storeWordStringCell`).  A caller that never calls `mkstr` (a
+  // scratch buffer: getenv, the stream registry, glob) simply wastes the two
+  // units and holds a well-formed zero-length string cell.
+  val cellV = call Rt.gcAlloc(region, mknum(1), mknum(2 + bodyWords));
+  word cell = payload(cellV, 0);
+  wstore(cell, 0, cell + 16);
+  wstore(cell, 1, 0);
+  return mknum(cell + 16);
   // <<< QBE_WORDVAL-ONLY
 }
 // >>> QBE_WORDVAL-ONLY
@@ -5214,19 +5263,21 @@ defun Rt.allocRaw(nbytes : val) -> val {
 //                           it: "rawCall to Rt.allocCons stages arity 0")
 //   Rt.allocKind(code, n)   the general seat: code `code`, n body words/Values
 //   Rt.allocVector(n)       a vector of n Values: code 10
-//   Rt.allocRaw(bytes)      a BYTE BUFFER: code 1 (string/symbol bytes)
+//   Rt.allocRaw(bytes)      a STRING CELL: code 1, `2 + ceil(bytes/8)` body
+//                           words, and it returns the BYTE BASE (body + 2
+//                           units) — see the seat's own body above
 //
 // WHY allocRaw IS CODE 1 AND NOT 0 (the reviewer's SHOULD-FIX 2): every caller
-// of it — the emitter's RawAllocRaw seat (a string literal's bytes) and every
-// `allocraw(...)` in this file (substring, concat, argv, read-file, intern) —
-// allocates the byte body of a STRING, so `string 1 raw` is the honest code and
-// code 0 stays free to mean "no code".  A caller that wants a DIFFERENT
-// constructor (a float cell = 12, a prim = 8, a stream = 11) uses allocKind.
-// NOT settled here, because it is VR3b3's payload design: WHERE a word-arm
-// string keeps its LENGTH.  The val arm keeps it inline (payload word 1); a
-// word-arm string's length has to live in or beside the cell, and if it becomes
-// a body word this seat's `count` moves by one.  The KIND is settled; the
-// payload shape is not silently assumed.
+// of it — the emitter's string-cell writers and every `allocraw(...)` in this
+// file (substring, concat, argv, read-file, glob) — is building a STRING, so
+// `string 1 raw` is the honest code and code 0 stays free to mean "no code".  A
+// caller that wants a DIFFERENT constructor (a float cell = 12, a prim = 8, a
+// stream = 11) uses allocKind.
+// WHERE A WORD-ARM STRING KEEPS ITS LENGTH IS NOW SETTLED (perf
+// word-arm-rawroot item 1): body unit `lenFieldWord` (= 1), and the BYTES are
+// inline in the same block, so this seat's `count` moved by the two units and
+// the whole two-block shape is gone.  The length is a body word, as the val arm
+// keeps it in payload word 1 — one number, two encodings, no third statement.
 //
 // The body is `2 + count` words in every case (gcAlloc's `total`), so a cons is
 // 4 words and a vector 2 + n — the body-size rule RtLayout.bodyWords states.
@@ -6084,6 +6135,29 @@ defun Rt.gcScavPtr(p : val) -> val {
   val nb = call Rt.gcPromoteAlloc(mknum(cls), mknum(kind), mknum(count));
   word nw = payload(nb, 0);
   val cp = call Rt.gcScavCopyWords(mknum(ptr - 16), mknum(nw - 16), mknum(phys));
+  // >>> QBE_WORDVAL-ONLY
+  // A STRING CELL'S BYTE POINTER IS ITS OWN BODY (perf word-arm-rawroot item 1).
+  // The bytes are INLINE at body + 2 units, so unit 0 of a cell that OWNS its
+  // bytes names its own body — and the copy above still holds the OLD address.
+  // Re-derive it HERE, at the ONE moment a body address changes (promotion on
+  // first survival; the mark-sweep never moves a block, and the young original
+  // is poisoned two lines down, so this is the last read of it).
+  //
+  // THE TEST IS THE OWNERSHIP TEST, not a guess: a cell owns its bytes iff unit 0
+  // named them (`ptr + 16`).  A string LITERAL's cell names the static data
+  // symbol — immortal, never moved — and must NOT be rewritten, or its bytes
+  // would be read out of its own (two-unit) body, past the end of the block.
+  //
+  // THE SHAPE IS THE CONDITIONAL-EFFECT BIND (this defun's own SHAPE note: a
+  // mid-block `if` whose arms both fall through is unrepresentable here), so the
+  // fixup's value is dead and the effects are the point.
+  val fixed = if (mkbool(kind == 1) && mkbool(wload(nw, 0) == ptr + 16)) {
+    wstore(nw, 0, nw + 16);
+    return mknil;
+  } else {
+    return mknil;
+  };
+  // <<< QBE_WORDVAL-ONLY
   wstore(ptr, -2, flags + (2147483648 * 2147483648));
   wstore(ptr, -1, nw);
   wstore(ptr, 0, 15);

@@ -1842,7 +1842,9 @@ checks rt rawMidText =
                     -- (code 1 = string) on the word arm and the shared val
                     -- spelling keeps 0; the general seat REFUSES 0 by name.
                     && String.contains "return call Rt.gcAlloc(region, mknum(0), mknum(bodyWords));" valText
-                    && String.contains "return call Rt.gcAlloc(region, mknum(1), mknum(bodyWords));" wordText
+                    && String.contains "val cellV = call Rt.gcAlloc(region, mknum(1), mknum(2 + bodyWords));" wordText
+                    && String.contains "wstore(cell, 0, cell + 16);" wordText
+                    && String.contains "return mknum(cell + 16);" wordText
                     && not (String.contains "mknum(1), mknum(bodyWords)" valText)
                     && String.contains "if (mkbool(payload(code, 0) == 0)) {" wordText
                     && String.contains "code 0 means NO CODE (a val-arm header)" wordText
@@ -1981,10 +1983,13 @@ checks rt rawMidText =
                 String.contains "call $q_Rt_x2eallocRecord(" wTxt
                     && not (String.contains "allocVector" wTxt)
                     -- the names store: elemAddr's `mul 8, 2` + `add` + `storel`
-                    -- of the static blob, at index n = 2.
-                    && String.contains "\t%t13 =l mul 8, 2\n\t%t14 =l add %t12, %t13\n\tstorel $d" wTxt
+                    -- of the static blob, at index n = 2.  (The temps are one
+                    -- higher than they were before perf word-arm-rawroot item 1:
+                    -- the probe's `"hi"` field cell gained the `sub 16` that
+                    -- turns the byte base into a body.)
+                    && String.contains "\t%t14 =l mul 8, 2\n\t%t15 =l add %t13, %t14\n\tstorel $d" wTxt
                     -- the tag, OR'd from the body (the one-word heap arm).
-                    && String.contains "\t%t15 =l or %t12, 1\n\tstorel %t15, %s0\n" wTxt
+                    && String.contains "\t%t16 =l or %t13, 1\n\tstorel %t16, %s0\n" wTxt
                     -- THE POISON WORD MUST NOT APPEAR: `storel 7` is what the
                     -- cell writer emits when it REFUSES, and it shipped once in
                     -- this unit (the site named `s.layout.tagRecord`, which on
@@ -2133,7 +2138,9 @@ checks rt rawMidText =
                     == 4
                     -- (a) code 0's single owner, both halves
                     && String.contains "allocKind(0): code 0 means NO CODE" wordText
-                    && String.contains "return call Rt.gcAlloc(region, mknum(1), mknum(bodyWords));" wordText
+                    && String.contains "val cellV = call Rt.gcAlloc(region, mknum(1), mknum(2 + bodyWords));" wordText
+                    && String.contains "wstore(cell, 0, cell + 16);" wordText
+                    && String.contains "return mknum(cell + 16);" wordText
                     && String.contains "return call Rt.gcAlloc(region, mknum(0), mknum(bodyWords));" valText
 
             _ ->
@@ -2456,7 +2463,7 @@ checks rt rawMidText =
             && not (List.member RtLayout.tagError RtLayout.wordHeapCodes)
             && not (List.member RtLayout.tagMark RtLayout.wordHeapCodes)
         )
-    , check "VR3b3 AREA A + D - THE STRING CELL, EMITTED. Under the word arm a string literal is ONE tagged pointer to a heap block: `Rt.allocRaw` allocates the byte body, the body address is the untag PLUS the 2-word header (NO payload-word load - the seat returns `mknum(addr)`), body unit 0 takes the static byte pointer, body unit `lenFieldWord` (=1, at +24) takes the LENGTH, and the value is the block OR'd with the heap tag. The val arm keeps the 40-byte record: a tag word `storew 1` then the same two words at +8/+16. Neither arm writes the other's shape, and the word text carries no 32-bit tag store at all"
+    , check "VR3b3 AREA A + D - THE STRING CELL, EMITTED (and, perf word-arm-rawroot item 1, the byte base it is now built from). Under the word arm a string literal is ONE tagged pointer to a heap block: `Rt.allocRaw` allocates it and returns the BYTE BASE = body + 2 units (NO payload-word load - the seat returns `mknum(addr)`), so the body is `base - 16`; body unit 0 takes the static byte pointer, body unit `lenFieldWord` (=1, at +8 off the body) takes the LENGTH, and the value is the body OR'd with the heap tag. A literal owns NO inline bytes (its byte count is 0), which is exactly what the promotion fixup's ownership test reads. The val arm keeps the 40-byte record: a tag word `storew 1` then the same two words at +8/+16. Neither arm writes the other's shape, and the word text carries no 32-bit tag store at all"
         (case
             ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ strProbe ]) [ strProbe ] "St.f"
             , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ strProbe ]) [ strProbe ] "St.f"
@@ -2471,11 +2478,16 @@ checks rt rawMidText =
                         Print.print valMod
                 in
                 String.contains "call $q_Rt_x2eallocRaw(" wTxt
-                    && String.contains "\t%t3 =l loadl %t0\n\t%t4 =l sar %t3, 3\n\t%t5 =l add %t4, 0\n" wTxt
-                    && String.contains "\tstorel $d0, %t5\n\t%t6 =l add %t4, 8\n" wTxt
-                    && String.contains "\tstorel 2, %t6\n" wTxt
-                    && String.contains "\t%t7 =l or %t4, 1\n" wTxt
-                    && String.contains "\tstorel 128, %s2\n" wTxt
+                    -- THE SEAT RETURNS THE BYTE BASE (perf word-arm-rawroot item 1):
+                    -- body + 2 units, so the body is `sub 16` and every body unit
+                    -- is an add off THAT.  The seat's argument is the BYTE COUNT,
+                    -- and a literal owns no inline bytes (0).
+                    && String.contains "\t%t3 =l loadl %t0\n\t%t4 =l sar %t3, 3\n\t%t5 =l sub %t4, 16\n" wTxt
+                    && String.contains "\t%t6 =l add %t5, 0\n" wTxt
+                    && String.contains "\tstorel $d0, %t6\n\t%t7 =l add %t5, 8\n" wTxt
+                    && String.contains "\tstorel 2, %t7\n" wTxt
+                    && String.contains "\t%t8 =l or %t5, 1\n" wTxt
+                    && String.contains "\tstorel 0, %s2\n" wTxt
                     && not (String.contains "storew" wTxt)
                     && String.contains "storew 1, %s" vTxt
                     && not (String.contains "allocRaw" vTxt)
@@ -2533,6 +2545,25 @@ checks rt rawMidText =
                     && not (String.contains "storew" txt)
 
             Err _ ->
+                False
+        )
+    , check "VR3b3 AREA A + D FOLLOW-UP (perf word-arm-rawroot item 1) - THE STRING'S BYTES ARE INLINE IN ITS OWN CELL, SO THERE IS NOTHING TO KEEP ALIVE. A word-arm byte buffer IS a string cell: `Rt.allocRaw` reserves `2 + bodyWords` (the two units AND the bytes), writes body unit 0 = the cell's OWN byte base and returns that byte base, so `mkstr` ALLOCATES NOTHING (it tags the block the caller filled) and a string is ONE block whose bytes move with it. The byte pointer is therefore a self-address, and the ONE place it can go stale is promotion, so `Rt.gcScavPtr` re-derives it there - behind the OWNERSHIP test, because a LITERAL's cell names the static data symbol (immortal, never moved) and rewriting that would read the literal's bytes out of its own two-unit body, past the end of the block. BOTH halves are word-arm-only: the val arm keeps the two-block shape (`allocraw` + a Value whose payload word 0 IS the byte pointer, which its walker already relocates)."
+        (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
+            ( Ok valText, Ok wordText ) ->
+                String.contains "val cellV = call Rt.gcAlloc(region, mknum(1), mknum(2 + bodyWords));" wordText
+                    && String.contains "wstore(cell, 0, cell + 16);" wordText
+                    && String.contains "return mknum(cell + 16);" wordText
+                    -- the fixup: the ownership test AND the re-derivation
+                    && String.contains "if (mkbool(kind == 1) && mkbool(wload(nw, 0) == ptr + 16)) {" wordText
+                    && String.contains "wstore(nw, 0, nw + 16);" wordText
+                    -- and the val arm carries neither: its strings are 40-byte
+                    -- records whose payload word 0 is a REAL heap pointer
+                    && not (String.contains "2 + bodyWords" valText)
+                    && not (String.contains "cell + 16" valText)
+                    && not (String.contains "nw + 16" valText)
+                    && String.contains "return call Rt.gcAlloc(region, mknum(0), mknum(bodyWords));" valText
+
+            _ ->
                 False
         )
     , check "VR3b3 AREA C - `tagis` IS A HEADER-KIND READ, AND CODE 0 IS REFUSED BY NAME (VR3c's promissory note, discharged). `tagis(v, 4)` (cons) emits: mask the tag, compare with the shared heap tag 1, and ONLY THEN - inside that branch, because untagging a fixnum yields a small integer and an unconditional header load would fault - read the header, shift the code down, mask it, and REFUSE with `Rt.die` when the code is 0 (code 0 means NO CODE, a val-arm header; no word-arm allocator writes it). Then compare with 4. A tag MISMATCH is not an error: only the impossible code is"

@@ -18,17 +18,23 @@
  *
  *   Rt.frame-enter / frame-leave  a pooled frame: VR3c twinned it to
  *                                 `8 * nslots`, zeroed — the stub does that.
- *   Rt.allocRaw                   THE CONTRACT runtime.mid STATES (Blocker 1):
- *                                 gcAlloc writes the header at cursor-2/-1
- *                                 words and returns mknum(cursor), so the seat
- *                                 returns the BODY ADDRESS with the 2-word
- *                                 header `heapHeaderBytes` BEFORE it.  The
- *                                 earlier stub returned a calloc BASE with the
- *                                 header at +0 — the EMITTER's side of the
- *                                 contract — which made the probe measure
- *                                 emitter-internal consistency instead of
- *                                 agreement with the runtime.  That is exactly
- *                                 why it passed the bugs it should have caught.
+ *   Rt.allocRaw                   THE CONTRACT runtime.mid STATES (Blocker 1,
+ *                                 and perf word-arm-rawroot item 1 for the
+ *                                 return): a word-arm byte buffer IS a string
+ *                                 cell whose bytes are INLINE, so the seat
+ *                                 reserves `2 + ceil(bytes/8)` body words with
+ *                                 the 2-word header `heapHeaderBytes` BEFORE
+ *                                 the body, writes body unit 0 = the cell's own
+ *                                 byte base, and returns `mknum(body + 2
+ *                                 units)` — the BYTE BASE, which is what every
+ *                                 `allocraw(...)` caller fills and what `mkstr`
+ *                                 turns into the value word.  The first stub
+ *                                 returned a calloc BASE with the header at +0
+ *                                 — the EMITTER's side of the contract — which
+ *                                 made the probe measure emitter-internal
+ *                                 consistency instead of agreement with the
+ *                                 runtime.  That is exactly why it passed the
+ *                                 bugs it should have caught.
  *   Rt.die                        records the message and sets a flag.
  *
  * THE ABI IS READ FROM Mid/RtLayout, NOT GUESSED — and since AREA 6 there is
@@ -82,15 +88,24 @@ struct Val q_Rt_x2eallocRaw(long *a, long *b, long *c, int n)
     /* the lean ABI passes POINTERS to Value slots plus an arity word, so the
      * byte count is `payload(a[0], 0)`: a fixnum, i.e. the word shifted down. */
     long nbytes = a[0] >> 3;
-    long body_words = (nbytes + 7) / 8;
+    long byte_words = (nbytes + 7) / 8;
+    /* THE CELL'S TWO UNITS ARE RESERVED WITH THE BYTES (perf word-arm-rawroot
+     * item 1): a word-arm byte buffer IS a string cell whose bytes are inline,
+     * so the count is `2 + ceil(bytes/8)` and the seat returns the BYTE BASE
+     * (body + 2 units), not the body.  `mkstr` allocates nothing and tags the
+     * block the caller filled; unit 0 is the cell's own byte base, which the
+     * real collector re-derives on promotion. */
+    long body_words = 2 + byte_words;
     long *base = calloc(1, (size_t)(2 + body_words) * 8);
     long *body = base + 2;                    /* header is 2 words BEFORE it */
     /* the header word 0 the allocator writes: class 512, code 1, scan 0 */
     base[0] = (long)((512L * 4L) + (1L << 24));
     base[1] = body_words;
+    body[0] = (long)(uintptr_t)(body + 2);    /* unit 0 = the cell's own bytes */
+    body[1] = 0;                              /* the length: the caller writes it */
     g_last_body = body;
     struct Val v;
-    v.w = (int64_t)((uintptr_t)body) << 3;     /* mknum(body) */
+    v.w = (int64_t)((uintptr_t)(body + 2)) << 3;   /* mknum(BYTE BASE) */
     return v;
 }
 
