@@ -3272,7 +3272,21 @@ defun Rt.globBuildGo(tblN : val, iN : val, acc : val) -> val {
   word bufW = allocraw(payload(lenN, 0) + 1);
   call Rt.cStrCopyGo(mknum(pW), mknum(bufW), mknum(0));
   rawcall free(pW);
+  // >>> QBE_VAL-ONLY
   recur(tblN, mknum(payload(iN, 0) - 1), call Rt.cons(call Rt.intern("cons"), call Rt.cons(call Rt.cons(call Rt.intern("string"), call Rt.cons(mkstr(bufW, payload(lenN, 0)), mknil)), call Rt.cons(acc, mknil))));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // THE STRING IS TAGGED BEFORE THE FIRST ALLOCATION ON THE LINE (perf
+  // word-arm-rawroot item 2).  `bufW` is a RAW WORD and `Rt.intern`'s HIT path
+  // ALLOCATES on this arm (`allocKind(2, 1)` for the symbol cell; the val arm's
+  // intern returns `mkval(2, hit)` and allocates nothing), so the buffer used to
+  // be live across TWO scavenge points before anything named it — one table hit
+  // plus one collection and the bytes were gone.  `mkstr` allocates NOTHING
+  // (item 1: it tags the cell `allocraw` made), so binding the value here is the
+  // whole fix: from `sN` on, the cell is a ROOTED frame slot.
+  val sN = mkstr(bufW, payload(lenN, 0));
+  recur(tblN, mknum(payload(iN, 0) - 1), call Rt.cons(call Rt.intern("cons"), call Rt.cons(call Rt.cons(call Rt.intern("string"), call Rt.cons(sN, mknil)), call Rt.cons(acc, mknil))));
+  // <<< QBE_WORDVAL-ONLY
 }
 
 defun Rt.glob(pattern : val) -> val {
