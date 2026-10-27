@@ -2230,14 +2230,48 @@ defun Rt.recAppendNamesGo(rec : val, newnames : val, packed : val) -> val {
 
 defun Rt.recAppend(rec : val, field : val, newv : val) -> val {
   val pos = call Rt.recAppendFind(rec, field, mknum(0));
-  word nd = allocvec(reclen(rec) + 1);
-  val ndN = mknum(nd);
-  word nn = allocvec(reclen(rec) + 1);
-  val nnN = mknum(nn);
   val packed = mknum(payload(pos, 0) * 65536);
+  // TWO DEFECTS IN ONE SHAPE, and they have to be fixed TOGETHER (perf
+  // word-arm-rawroot item 3 FIX, review BLOCKER 1).  This defun used to read
+  // `word nd = allocvec(..); val ndN = mknum(nd); word nn = allocvec(..);` and
+  // then fill BOTH arrays at the end.
+  //
+  // (1) `nd` WAS A RAW WORD ACROSS `nn`'s ALLOCATION, and `mknum(nd)` does NOT
+  //     root it: a FIXNUM is not relocated (`gcScavValue`'s tag-0 arm does
+  //     nothing), so a scavenge on `nn` reclaimed the data array out from under
+  //     a live record and the later `vecstore`/`vecload` walked freed memory.
+  //     MEASURED on the VAL arm — the arm everyone uses, because record
+  //     INSERTION (`{ r | x <- v }`) is admitted (`Type/Infer.elm`'s free row
+  //     extension; committed fixture tests/elm-fixtures/insrec.elm) and its row
+  //     polymorphism forces the WALK arm (`Rt.recInsert`'s MISS -> here): a
+  //     6000-insertion churn kept reachable and CONTENT-compared answered
+  //     QBE_HEAP_MB=1 SEGFAULT (rc 139), h2 SEGFAULT (rc 139), h4 `5999/6000`
+  //     (ONE SILENTLY WRONG RECORD), default 6000/6000.  The control that
+  //     isolates it: the same churn with `y <- i` on an EXISTING field always
+  //     HITs (`Rt.recUpd`, ONE allocvec, no window) and answered 6000/6000 at
+  //     h1 and h2.
+  // (2) A ROOTED ARRAY MUST NOT BE PROMOTED BEFORE IT IS FILLED.  Once `nd` IS
+  //     rooted (below), a scavenge on `nn`'s allocation promotes it — with its
+  //     elements STILL UNWRITTEN, because the fills used to come last.  The
+  //     allocator does not zero a body, so the promoted copy carries whatever
+  //     the previous occupant left (a forwarded young body's word 0 is the
+  //     POISON 15), and the drain walks that garbage as Values.  MEASURED with
+  //     the rooting alone in place: `qbe-rt: midgc: scavenge read a POISONED
+  //     (forwarded young) body` at h1/h2/h8 — the root turned a silent wrong
+  //     answer into a loud one, which is what exposed this half.
+  //
+  // THE SHAPE, then, is the closure fix's mechanism PLUS the order that makes it
+  // safe: root the cell as a `:val` binder (`mkval(10, ..)` — a frame slot the
+  // frame-enter root array scans, the walker relocating the element base on this
+  // arm), FILL IT through `vecbody(..)` while nothing can allocate, and only
+  // THEN allocate the second cell.  THE RE-READ IS LOAD-BEARING: a root's
+  // ADDRESS MAY MOVE, so every use goes through `vecbody(..)` rather than a
+  // word captured before the allocation.
+  val ndN = mkval(10, allocvec(reclen(rec) + 1));
   call Rt.recAppendDataGo(rec, ndN, packed);
-  call Rt.recAppendNamesGo(rec, nnN, packed);
   vecstore(vecbody(ndN), payload(pos, 0), newv);
+  val nnN = mkval(10, allocvec(reclen(rec) + 1));
+  call Rt.recAppendNamesGo(rec, nnN, packed);
   vecstore(vecbody(nnN), payload(pos, 0), field);
   return mkval(14, vecaddr(vecbody(ndN), 0), reclen(rec) + 1, vecaddr(vecbody(nnN), 0));
 }

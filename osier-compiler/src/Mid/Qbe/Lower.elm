@@ -687,9 +687,12 @@ wordArmUnported exp =
         Lit (LString _) ->
             -- AREA 3, THE STRING CELL (perf VR3b3 area A/D).  A word-arm string
             -- is one heap block with a RAW body: the byte pointer in body unit
-            -- 0 and the length in body unit `lenFieldWord`.  `storeWordCell`
-            -- owns the shape (and refuses a code whose body layout is not
-            -- settled), so this classifier only says the construct is ported.
+            -- 0 and the length in body unit `lenFieldWord`.  TWO writers own
+            -- the shape — `storeWordStringCell` for a runtime `mkstr` (the cell
+            -- `Rt.allocRaw` already allocated and the caller filled) and
+            -- `storeWordStringLiteral` for a literal (a two-unit cell pointing
+            -- at static bytes) — so this classifier only says the construct is
+            -- ported.
             Nothing
 
         RecordLit fields ->
@@ -4657,7 +4660,7 @@ storeWordStringCell words dest s0 =
                 )
 
         _ ->
-            Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a string cell that is not exactly [byte pointer, length]"))
+            Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a runtime mkstr that is not exactly (byte base, length) - the cell Rt.allocRaw returned and the length mkstr writes"))
 
 
 {-| The body of a string cell, from the BYTE BASE `Rt.allocRaw` returns (perf
@@ -5244,10 +5247,13 @@ not a length (it has no elements), and an immediate has neither — both REFUSE
 loudly.  Only a heap object answers, and it answers from the header.
 
 WHY THIS IS A SEPARATE READER FROM `len32`: a string's payload word 1 is its BYTE
-length on the val arm, but the header's count for a string is `ceil(bytes/8)` —
-body WORDS, a different number.  A single reader would have to know the code, and
-`payload32`-shaped code has no way to ask; so the two reads are two names and the
-runtime's sites are classified one by one.
+length on the val arm, but the header's count for a word-arm string is
+`2 + ceil(bytes/8)` — body WORDS (the byte pointer, the length, then the bytes,
+which are INLINE since perf word-arm-rawroot item 1), a different number.  A
+single reader would have to know the code, and `payload32`-shaped code has no way
+to ask; so the two reads are two names and the runtime's sites are classified one
+by one.  Nothing reads `veclen` of a string today, and this is the number it
+would answer.
 -}
 wordVecLen : Il.Arg -> S -> ( Il.Arg, S )
 wordVecLen base s0 =
