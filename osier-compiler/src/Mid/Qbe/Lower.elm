@@ -4611,54 +4611,111 @@ storeWordWord value dest s =
     emit (Store StoreL value (Il.Tmp (slotTmp dest))) s
 
 
-{-| A word-arm STRING literal's cell (area A) and where its length lives (area
-D): body unit 0 is the byte pointer, body unit `lenFieldWord` is the length.
+{-| THE RUNTIME'S `mkstr(bytes, len)` — the tag of a string cell `Rt.allocRaw`
+already allocated, whose BYTES ARE INLINE (perf word-arm-rawroot item 1).
 
-The allocation is the EXISTING `Rt.allocRaw` seat — `nbytes` bytes, body words
-`ceil(nbytes / 8)`, word-arm code 1 (a raw body, `heapKindScanned` false).  No
-runtime.mid change is needed: the seat already allocates a byte body under both
-arms, and a string body IS a byte body.  The length is written as a raw word in
-the body, so `payload32(s, 1)` — a layout-derived read — finds it with no twin
-(runtime.mid's string sites are unchanged, which is why D settles a PLACEMENT
-rather than porting a site).
+The cell is ONE code-1 block: body unit 0 = the byte pointer (the cell's own
+bytes, `body + 2 units`), unit `lenFieldWord` = the length, units 2.. = the
+bytes.  So the seat that handed the caller its byte base wrote unit 0 already
+and this writer has NOTHING TO ALLOCATE — which is the whole point: `mkstr` used
+to allocate the cell AFTER the caller had filled a separate byte block, so the
+byte pointer was a RAW WORD live across an allocation (a collection there
+reclaimed the bytes) and the block it named was reachable only through a body
+the collector never walks (a collection afterwards reclaimed them again).
+
+`bytes` is therefore the BYTE BASE — body + 2 units — and the body is
+`bytes - 2 units`.  MEASURED, before: 154 of 6000 surviving `String.join`
+strings at QBE_HEAP_MB=1; after: 6000, byte-identical to the val arm.
+
+A LITERAL is not this writer: its bytes are a static data symbol, so its cell
+owns none and is built by `storeWordStringLiteral`.
 -}
 storeWordStringCell : List Il.Arg -> Int -> S -> Result String S
 storeWordStringCell words dest s0 =
     case words of
         [ bytes, len ] ->
             let
-                -- THE CELL'S BODY IS TWO UNITS (byte pointer, length), NOT the
-                -- string's byte count: the bytes themselves stay the static data
-                -- symbol.  So the allocation is the BODY SIZE, which
-                -- `heapBodyUnitOffset layout 2` states (the offset of unit 2 is
-                -- where the body ends).  MEASURED: allocating `nbytes + 1`
-                -- instead gave a ONE-word body for "hi" and the second store
-                -- corrupted the C heap.
                 ( bodyArg, s1 ) =
-                    midGcAllocSeat "Rt.allocRaw" (Il.Con (RtLayout.heapBodyUnitOffset s0.layout 2)) s0
+                    byteBaseToBody bytes s0
 
                 s2 =
-                    storeWordBodyWord bodyArg 0 bytes s1
+                    storeWordBodyWord bodyArg RtLayout.lenFieldWord len s1
 
-                s3 =
-                    storeWordBodyWord bodyArg RtLayout.lenFieldWord len s2
-
-                ( taggedWord, s4 ) =
-                    freshTmp s3
+                ( taggedWord, s3 ) =
+                    freshTmp s2
             in
             Ok
-                -- THE SEAT RETURNS THE BODY, so the Value word is `body OR
-                -- heapPtrTag` - NO header arithmetic here (BLOCKER 1: the
-                -- header is 16 bytes BEFORE the body, so subtracting it made
-                -- the value word point one whole object too low, and the real
-                -- allocator then aborted on the resulting body write).
-                (s4
-                    |> emit (Bin (Just taggedWord) L Or bodyArg (Il.Con (RtLayout.heapPtrTag s4.layout)))
+                -- THE SEAT RETURNED THE BYTE BASE, so the body is one header and
+                -- two units BELOW it and the Value word is `body OR heapPtrTag`
+                -- - NO header arithmetic here (BLOCKER 1: the header is 16 bytes
+                -- BEFORE the body, so subtracting it made the value word point
+                -- one whole object too low, and the real allocator then aborted
+                -- on the resulting body write).
+                (s3
+                    |> emit (Bin (Just taggedWord) L Or bodyArg (Il.Con (RtLayout.heapPtrTag s3.layout)))
                     |> storeWordWord (Il.Tmp taggedWord) dest
                 )
 
         _ ->
             Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a string cell that is not exactly [byte pointer, length]"))
+
+
+{-| The body of a string cell, from the BYTE BASE `Rt.allocRaw` returns (perf
+word-arm-rawroot item 1): the two units below it are the byte pointer and the
+length, so `body = base - heapBodyUnitOffset layout 2`.
+
+ONE spelling, used by both string writers, so the offset is not restated.
+-}
+byteBaseToBody : Il.Arg -> S -> ( Il.Arg, S )
+byteBaseToBody base s0 =
+    let
+        ( body, s1 ) =
+            freshTmp s0
+    in
+    ( Il.Tmp body
+    , emit (Bin (Just body) L Sub base (Il.Con (RtLayout.heapBodyUnitOffset s0.layout 2))) s1
+    )
+
+
+{-| A word-arm STRING LITERAL's cell (area A) and where its length lives (area
+D): body unit 0 is the byte pointer, body unit `lenFieldWord` is the length.
+
+THE BYTES STAY THE STATIC DATA SYMBOL (perf word-arm-rawroot item 1 keeps it
+that way): immutable, NUL-terminated, never moved, so there is no cross-heap edge
+and nothing to scavenge — exactly as on the val arm.  The cell therefore owns NO
+inline bytes and is allocated at TWO units: `Rt.allocRaw(0)` reserves exactly
+`[byte pointer | length]`, and its returned byte base is one-past-the-block, so
+the body is derived from it like any other (`byteBaseToBody`).
+
+WHY THIS IS NOT `storeWordStringCell`: that writer tags a cell a caller FILLED,
+and takes the byte base as the cell's own bytes.  A literal's byte pointer is a
+static symbol, so it is written here and the promotion fixup in `Rt.gcScavPtr`
+recognises the difference by exactly this: unit 0 names `body + 2 units` iff the
+cell owns its bytes.
+-}
+storeWordStringLiteral : Il.Arg -> Int -> Int -> S -> Result String S
+storeWordStringLiteral byteSym nbytes dest s0 =
+    let
+        ( baseArg, s1 ) =
+            midGcAllocSeat "Rt.allocRaw" (Il.Con 0) s0
+
+        ( bodyArg, s2 ) =
+            byteBaseToBody baseArg s1
+
+        s3 =
+            storeWordBodyWord bodyArg 0 byteSym s2
+
+        s4 =
+            storeWordBodyWord bodyArg RtLayout.lenFieldWord (Il.Con nbytes) s3
+
+        ( taggedWord, s5 ) =
+            freshTmp s4
+    in
+    Ok
+        (s5
+            |> emit (Bin (Just taggedWord) L Or bodyArg (Il.Con (RtLayout.heapPtrTag s5.layout)))
+            |> storeWordWord (Il.Tmp taggedWord) dest
+        )
 
 
 {-| A word-arm SYMBOL LITERAL's cell (perf word-arm-records R1): a code-2 block
@@ -7458,14 +7515,15 @@ lowerLitWord lit dest s =
             -- `lenFieldWord` = the length (area D's placement).  The bytes stay
             -- the static data symbol — immutable, NUL-terminated, no copy — so
             -- there is no cross-heap edge and nothing to scavenge, exactly as on
-            -- the val arm.
+            -- the val arm; the cell owns no inline bytes (perf word-arm-rawroot
+            -- item 1), which is what `storeWordStringLiteral` states.
             let
                 ( strname, s1 ) =
                     freshData ("str:" ++ str)
                         (\n -> { name = n, align = Just 8, items = [ DStr str, DByte 0 ], export_ = False })
                         s
             in
-            storeWordCell RtLayout.tagString [ Il.Sym strname, Il.Con (utf8ByteLength str) ] dest s1
+            storeWordStringLiteral (Il.Sym strname) (utf8ByteLength str) dest s1
 
 
 lowerLitVal : Lit -> Int -> S -> Result String S

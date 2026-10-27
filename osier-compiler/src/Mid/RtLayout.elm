@@ -507,10 +507,34 @@ wordTagShape code =
 -- and the length cannot be a Value word: it is a raw word in the body, which is
 -- exactly what body unit 1 is.  Body unit 0 is the byte pointer.  That is the
 -- same two-field record the val arm carries, one indirection cheaper — which is
--- why the emitter's string construction (area A) writes `[bytes, len]` through
--- the shared cell writer and the runtime's `payload32(str, 1)`/`payload(str, 0)`
--- reads need NO twin at all: `payload`/`payload32` are layout-derived, so
--- porting THEM (area B) ports every string site in `runtime.mid` at once.
+-- why the runtime's `payload32(str, 1)`/`payload(str, 0)` reads need NO twin at
+-- all: `payload`/`payload32` are layout-derived, so porting THEM (area B) ports
+-- every string site in `runtime.mid` at once.
+--
+-- ======== AND WHERE ITS BYTES ARE: INLINE, IN THE SAME BLOCK (perf word-arm-rawroot) ========
+-- Units 2.. are the string's BYTES: `count = 2 + ceil(bytes / 8)`.  So a
+-- word-arm string is ONE block, and body unit 0 is the byte pointer TO ITS OWN
+-- BYTES (`body + heapBodyUnitOffset layout 2`), which is what makes the shape
+-- sound with a collector that never walks a raw body:
+--
+--   * NOTHING IS REACHABLE THROUGH THE BODY.  The alternative — a separate
+--     code-1 byte block named by unit 0 — was the shape until this unit, and it
+--     was unsound TWICE: the block was reachable ONLY through a body the
+--     collector does not scan (`gcScavDrain` scanCount 0, `gcMarkValue`), and
+--     the pointer was a RAW WORD held across `mkstr`'s own allocation, so the
+--     bytes could be reclaimed during construction as well.  MEASURED, silently,
+--     rc=0: 154 of 6000 surviving `String.join` strings at QBE_HEAP_MB=1 and
+--     5699 at DEFAULT knobs, where the val arm answers 6000.
+--   * THE SELF-ADDRESS IS RE-DERIVED, NOT TRACED.  Unit 0 is a self-address, so
+--     the ONE moment it can go stale is promotion, and `Rt.gcScavPtr` rewrites
+--     it there — behind the ownership test (`unit 0 == old body + 2 units`),
+--     because a LITERAL's cell names the static data symbol instead and must not
+--     be rewritten.
+--   * `mkstr` THEREFORE ALLOCATES NOTHING: `Rt.allocRaw` reserves the two units
+--     WITH the bytes and returns the BYTE BASE, and the emitter's
+--     `storeWordStringCell` only writes the length and the tag.  Every
+--     `allocraw(...)` site in `runtime.mid` is unchanged — `word buf = allocraw(n)`
+--     is the byte base it always was.
 --
 -- PINNED BY: TestMain's kind-contract rows (the placement is stated here), the
 -- emitter's emitted string cell text on BOTH arms, and TWO arithmetic

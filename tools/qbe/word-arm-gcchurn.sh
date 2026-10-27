@@ -55,6 +55,15 @@
 #     it pins: `sp->args = args + rem * 8` mutated to `rem * 40` in
 #     Rt.applyTailGo turns it RED (MEASURED, `[cons 10 . 400040000]` against
 #     `[cons 15 . 400140000]`).
+#   * `str` — A DIFFERENT CLASS, added by perf word-arm-rawroot item 1: not a
+#     raw word held across an allocation but a heap object whose BODY WAS NOT
+#     WALKED AT ALL.  A word-arm string's BYTES lived in a second young block
+#     reachable only through a body unit the collector never scans, so the bytes
+#     were reclaimed while the cell (and its length) survived.  MEASURED before
+#     the fix, silently, rc=0: `154/5846` at QBE_HEAP_MB=1 and `5699/301` at
+#     DEFAULT knobs — the second number is why the row runs at both, and the
+#     CONTENT comparison (`s == build i`, which walks the bytes) is why it can
+#     see the defect at all: the length lives in the cell and reads correctly.
 # A row that cannot fail is not a row; a row that claims the wrong failure is
 # worse.
 #
@@ -140,6 +149,10 @@ row over     h1      120
 #      numbers (250,000 closures cross the default 16 MiB trigger) ----
 row holdbig  default 300
 row partbig  default 300
+# ---- RUNTIME-BUILT STRING BYTES (perf word-arm-rawroot item 1): a separate
+#      defect class in the same file, and it fires at DEFAULT knobs too ----
+row str      h1      180
+row str      default 180
 
 if [ "$fails" != 0 ]; then
   echo "word-arm-gcchurn: $fails failure(s) — a closure is being read after a collection it did not survive"
