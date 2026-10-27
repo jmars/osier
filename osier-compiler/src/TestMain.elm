@@ -179,10 +179,18 @@ checks rt rawMidText =
             -- is not.
             && QbeLower.wordArmUnported (ListLit [ Lit (LNumber 1), Lit (LNumber 2) ]) == Nothing
             && QbeLower.wordArmUnported (ListLit []) == Nothing
+            -- A TUPLE is classified by ITS desugar too (`buildTuple`: a cons
+            -- spine whose tail is the fixnum 0, not nil), including the two
+            -- degenerate shapes `Tup []` (= 0) and `Tup [x]` (= x).
+            && QbeLower.wordArmUnported (Tup [ Lit (LNumber 1), Lit (LString "hi") ]) == Nothing
+            && QbeLower.wordArmUnported (Tup []) == Nothing
+            && QbeLower.wordArmUnported (Tup [ Var 0 ]) == Nothing
             -- the SAME construct, one nested element away from the refusal:
-            -- an arithmetic prim INSIDE a list literal must still refuse, or
-            -- the desugar-classification would be a hole rather than a port.
+            -- an arithmetic prim INSIDE a list literal or a tuple must still
+            -- refuse, or the desugar-classification would be a hole rather
+            -- than a port.
             && (QbeLower.wordArmUnported (ListLit [ PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ]) /= Nothing)
+            && (QbeLower.wordArmUnported (Tup [ Lit (LNumber 1), PrimApp { prim = "*", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ]) /= Nothing)
             -- and the refused set is exactly the eight named constructs: a
             -- classifier that admitted any of them would be silently wrong
             -- (each emits the 40-byte representation or a layout the arm has

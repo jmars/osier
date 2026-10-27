@@ -944,6 +944,17 @@ wordArmUnported exp =
             -- makes.
             wordArmUnported (buildList es)
 
+        Tup es ->
+            -- ============ THE SURFACE LANE: A TUPLE ============
+            -- Same shape as `ListLit`: `lowerTup` is `lowerVal (buildTuple es)`
+            -- — a tuple has no emission of its own either.  `buildTuple` is a
+            -- right-nested `cons` chain terminated by the fixnum 0 (NOT by
+            -- `emptylist`: Mid's tuple encoding is a cons spine whose tail is
+            -- the number 0, which is what `Tup []` and the last element both
+            -- are), so every part of it is already arm-clean.  Classify the
+            -- desugar, for the reason stated at `ListLit`.
+            wordArmUnported (buildTuple es)
+
         _ ->
             Just (wordArea (wordAreaName exp) (wordAreaWhat exp))
 
