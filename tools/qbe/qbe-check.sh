@@ -3341,6 +3341,31 @@ else
   FAIL=1
 fi
 
+# ---- CLOSURES UNDER COLLECTION (perf word-arm-closures FIX) ----
+# The ONE row that runs a closure ACROSS a collection, and it exists because
+# none of the others can: every other word-arm fixture allocates far below one
+# GC trigger, so a ROOTING defect is invisible to all of them.  MEASURED, and
+# this is why the row is not optional: the closure class shipped with a running
+# fixture, a source pin, a probe row and 368 green rows here, while the word arm
+# answered 19709031 where the val arm answers 18003000 — silently, rc=0, EMPTY
+# STDERR, at DEFAULT settings.  Six (fixture, heap) rows, both arms, compared on
+# exit code and stdout; four of them were MEASURED RED with the two rooting
+# fixes reverted.
+if [ -x "$ROOT/tools/qbe/word-arm-gcchurn.sh" ] && [ -d "$ROOT/tools/qbe/word-arm-gcchurn" ]; then
+  if churn_out="$(TMPDIR="$TMP" "$ROOT/tools/qbe/word-arm-gcchurn.sh" 2>&1)"; then
+    echo "PASS word-arm-gcchurn: $(printf '%s
+' "$churn_out" | grep -c '^PASS ') row(s) RUN on BOTH arms with identical exit code and byte-identical stdout, INCLUDING under QBE_HEAP_MB=1 and at DEFAULT knobs — the only row that runs a closure across a collection"
+  else
+    echo "FAIL word-arm-gcchurn: a closure does not survive a collection (or one arm no longer builds)"
+    printf '%s
+' "$churn_out" | sed 's/^/    /'
+    FAIL=1
+  fi
+else
+  echo "FAIL word-arm-gcchurn: tools/qbe/word-arm-gcchurn.sh or its fixture dir is missing — the ONLY row that runs a closure across a collection was deleted"
+  FAIL=1
+fi
+
 # ---- THE WORD ARM'S FIXNUM BOUNDARY, EXECUTED (perf word-arm-arith) ----
 # The one place the two arms must NOT agree, so it cannot be a word-arm-diff
 # row: a word-arm fixnum is an i61, so a result at or beyond 2^60 in magnitude
