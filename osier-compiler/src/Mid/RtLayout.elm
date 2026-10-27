@@ -778,6 +778,27 @@ valLayout =
 --      would be the silent Char-ordering mislower that branch exists to
 --      prevent.  FLOATS are item 5.
 --   5. FLOATS.  The heap-boxed `[hdr | f64]` cell and Lower's `rawFloat` lane.
+--      ONE TRAP IS WAITING THERE, recorded by perf word-arm-arith's review so
+--      the float unit inherits it instead of rediscovering it: THE CLASSIFIER IS
+--      BLIND TO THE SAFEPOINTS THE `mk*` CELL WRITERS INJECT.
+--      `Mid.Rt.unsafeSafepoint` classifies a `RawMkValue` as NON-safepoint (it
+--      scans `m.words` only), which is TRUE on the val arm — there a `mk*` is a
+--      tag word plus payload writes into a frame slot and allocates nothing.
+--      Under the word arm it is true for the IMMEDIATE codes (`mknum`/`mkbool`
+--      are shifts; nothing is allocated) and FALSE for the HEAP codes, because
+--      `storeWordStringCell`/`storeWordFloatCell` inject `midGcAllocSeat` calls
+--      (`Rt.allocRaw`, `Rt.allocFloat`) that the surface tree never shows.  So a
+--      defun whose ONLY allocation is a `mkstr`/`mkflt` cell classifies
+--      FRAME-FREE and DROPS ITS ROOTS — silently, and only once area 5 lets such
+--      a value be constructed at all, which is why nothing has caught it.
+--      IT DOES NOT BITE THE ARITHMETIC CLASS: every arithmetic op writes
+--      `mknum`/`mkbool` immediates, and the float arms that would allocate are
+--      unreachable until area 5 lands (no tag-12 value can be built).
+--      THE INSTRUCTION, the twin of the "fork in the same unit" note at Lower's
+--      `RawLoadFlt`/`reboxBoolean`: WHEN AREA 5 LANDS, count a word-arm
+--      heap-code `mk*` as a DIRECT safepoint in `unsafeSafepoint`, in the same
+--      unit, and pin it with a row — the alternative is a collector that
+--      reclaims a live string or float.
 --   6. THE `:ret` AGGREGATE.  Its FIRST FIELD IS A VALUE, so its tail offsets
 --      move with `valSizeBytes` (they are DERIVED below); plus the 80-byte sret
 --      path, slot 1's `.tail` metadata and rt_bounce.

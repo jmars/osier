@@ -1846,9 +1846,6 @@ checks rt rawMidText =
             _ ->
                 False
         )
-    , check ("DEBUG word arith emit -> " ++ (let prog = rtProgram rt True True True ++ rtProgramGc rt True True True ++ [ arithProbe ] in case QbeLower.lowerWith RtLayout.wordLayout rt False True True True True True True False False True QbeTypes.empty (rtArities prog) prog "Rt.arithProbe" of
-            Ok m -> "OK: " ++ (if String.contains "call $q_Rt_x2e_x2b(" (Print.print m) then "has Rt.+ call" else "NO Rt.+ call") ++ " | pinline=" ++ (if String.contains "@pinline_" (Print.print m) then "yes" else "no")
-            Err e -> "ERR: " ++ String.left 300 e)) True
     , check "THE EMITTED ARITHMETIC: on the word arm `x + 1` is ONE `:val` call to `Rt.+` and NO inline tag/payload tail; on the val arm it is the tail and no call (perf word-arm-arith). The tail is the 40-byte shape — a tag-word `loadw`, the payload at `slot + 8`, the tag/payload write back — and under the word arm those addresses are the value word and the NEXT FRAME SLOT, so it is not a slow path there but a WRONG one. The operand is a PARAMETER so neither arm's operand-type fast path can fire and the two emissions differ only by the arm. The `@pinline_` label is the tail's own block label, so its presence/absence is a fact about which path was taken, not about which text happens to appear."
         -- THE TWO ARMS NEED TWO RUNTIME SPLICES, not two layouts over one: the
         -- reachable Rt set includes `Rt.con`, whose BODY is spliced per arm

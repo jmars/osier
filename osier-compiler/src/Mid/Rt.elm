@@ -2173,6 +2173,19 @@ unsafeSafepoint selfKey selfArity node =
             safepoint selfKey selfArity p.value
 
         RawMkValue m ->
+            -- NON-SAFEPOINT ONLY WHERE THE CELL WRITER ALLOCATES NOTHING.  True
+            -- on the val arm (a `mk*` is a tag word plus payload writes into a
+            -- frame slot) and true under the word arm for the IMMEDIATE codes
+            -- (`mknum`/`mkbool` are shifts).  FALSE under the word arm for a
+            -- HEAP code: `storeWordStringCell`/`storeWordFloatCell` inject a
+            -- `midGcAllocSeat` call that this tree never shows, so a defun whose
+            -- only allocation is a `mkstr`/`mkflt` cell would classify
+            -- frame-free and DROP ITS ROOTS.  It cannot bite today (area 5
+            -- refuses every tag-12 value, so no word-arm float cell can be
+            -- built) and it does not bite the arithmetic class (every op writes
+            -- an immediate).  See the WORKLIST's item 5 in Mid.RtLayout for the
+            -- standing instruction: when area 5 lands, this arm must count a
+            -- word-arm heap-code `mk*` as a DIRECT safepoint, in the same unit.
             List.any (safepoint selfKey selfArity) m.words
 
         RawAllocVector _ ->

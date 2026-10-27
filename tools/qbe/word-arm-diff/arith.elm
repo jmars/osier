@@ -57,5 +57,20 @@ main =
       )
     , ( ( f (f 1), g 1000 1000000, 1000000 * 1000 )
       , ( f 1 == 2, f 1 /= 2, f 1 < f 2 )
+
+      -- THE i61 BOUNDARY, INSIDE EDGE (perf word-arm-arith, review finding 1).
+      -- A word-arm fixnum is an i61, so this is the LARGEST family of values the
+      -- arm can represent at all — 2^59 and 2^59 - 2^10 — and both must print
+      -- the same bytes on both arms.  IT HAS TO BE COMPUTED, not written: a
+      -- literal above 2^53 parses as `LNumberBig` and `lowerLitWord` REFUSES it
+      -- under the arm, so a near-boundary literal cannot exist and the boundary
+      -- is only reachable through the arithmetic this fixture is about.
+      --
+      -- THE OUTSIDE EDGE IS NOT HERE, deliberately: one more power of two
+      -- (`536870912 * 4294967296` = 2^61) makes the word arm EXIT 1 with the
+      -- named `mknum overflow` refusal while the val arm prints the i64 value —
+      -- the arms are SUPPOSED to diverge there, so that half lives in
+      -- `tools/qbe/word-arm-i61/` where the assertion can say so.
+      , ( 536870912 * 1073741824, 536870912 * 1073741824 - 1024, 0 - 536870912 * 1073741824 )
       )
     )

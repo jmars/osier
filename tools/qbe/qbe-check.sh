@@ -3341,6 +3341,31 @@ else
   FAIL=1
 fi
 
+# ---- THE WORD ARM'S FIXNUM BOUNDARY, EXECUTED (perf word-arm-arith) ----
+# The one place the two arms must NOT agree, so it cannot be a word-arm-diff
+# row: a word-arm fixnum is an i61, so a result at or beyond 2^60 in magnitude
+# has no fixnum encoding while the val arm carries the exact i64 value.  Before
+# this row the `mknum` round-trip refusal existed only at EMISSION level (a
+# TestMain row asserting the .ssa carries the `Rt.die` call) — a statement about
+# TEXT.  A refusal nobody has ever seen fire is not a tested refusal, and the
+# failure it guards against (silently dropping a fixnum's top three bits) is the
+# silent-wrong class this whole arm exists to prevent.  The script gates the
+# word arm on (exit 1 AND the named message), the val arm on the exact 2^61
+# product, and the INSIDE edge (2^59) on NOT being refused — so it cannot pass
+# by refusing everything large.
+if [ -x "$ROOT/tools/qbe/word-arm-i61.sh" ] && [ -d "$ROOT/tools/qbe/word-arm-i61" ]; then
+  if i61_out="$(TMPDIR="$TMP" "$ROOT/tools/qbe/word-arm-i61.sh" 2>&1)"; then
+    echo "PASS word-arm-i61: $(printf '%s\n' "$i61_out" | grep -c '^PASS ') row(s) — the i61 boundary EXECUTED: 2^61 halts with the NAMED refusal on the word arm, the val arm prints the exact i64 value, and 2^59 (the inside edge) is not refused"
+  else
+    echo "FAIL word-arm-i61: the word arm's fixnum boundary no longer behaves (a silent truncation, a crash instead of the named refusal, or an over-refusal)"
+    printf '%s\n' "$i61_out" | sed 's/^/    /'
+    FAIL=1
+  fi
+else
+  echo "FAIL word-arm-i61: tools/qbe/word-arm-i61.sh or its fixture dir is missing — the ONLY row that EXECUTES the i61 refusal was deleted"
+  FAIL=1
+fi
+
 if [ -x "$ROOT/tools/qbe/word-arm-probe.sh" ]; then
   if probe_out="$(TMPDIR="$TMP" "$ROOT/tools/qbe/word-arm-probe.sh" 2>&1)"; then
     echo "PASS word-arm-probe: $(printf '%s\n' "$probe_out" | grep -c '^PASS ') probe(s) RUN and passed ($(printf '%s\n' "$probe_out" | grep -c '^PASS ') of $(printf '%s\n' "$probe_out" | grep -c '^PASS '), $(printf '%s\n' "$probe_out" | grep -oE '[0-9]+ checks' | grep -oE '^[0-9]+' | paste -sd+ | bc) checks) — the word arm's heap side AND its CALL ABI execute against the runtime's seat convention"
