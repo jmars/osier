@@ -97,6 +97,24 @@ elif ! command -v cc >/dev/null 2>&1; then
   exit 2
 fi
 
+# ---- CWD GUARD (perf VR3b3 review, evidence hygiene) -----------------------
+# THE GATE'S RESULT DEPENDS ON WHERE YOU STAND, so it now REFUSES to stand
+# anywhere else.  MEASURED: run from inside tests/elm-fixtures/ it prints
+# PASS=182 FAIL=8 — the eight are the fixtures that resolve repo-root-relative
+# paths (the iofile fixture reads input/hello.txt and writes out/hello.out, and
+# the stream prims take plain paths, so they resolve against the process CWD).
+# A gate whose score depends on the caller's directory is one that will one day
+# be quoted wrong, and a silent 182/8 reads exactly like a regression.  The
+# matrix/manifest modes above are exempt: they emit a registry and touch no
+# fixture.  Callers already `cd "$ROOT"` (tools/osier-numbers.sh,
+# tools/osier-corpus-ssa.sh), so this changes nothing for them.
+if [ "$(pwd -P)" != "$(cd "$ROOT" && pwd -P)" ]; then
+  echo "error: run-elm-gate.sh MUST be run from the repo root ($ROOT)," >&2
+  echo "       not from $(pwd -P): eight fixtures resolve repo-root-relative paths and" >&2
+  echo "       would report a false PASS=182 FAIL=8.  Try: cd '$ROOT' && tests/elm-fixtures/run-elm-gate.sh" >&2
+  exit 2
+fi
+
 pass=0; fail=0
 
 # Derive a fixture's Elm MODULE NAME by scanning its `module X ...` header.

@@ -17,7 +17,6 @@ module Mid.Qbe.Il exposing
     , DataDef
     , DataItem(..)
     , descType
-    , retType
     , valType
     )
 
@@ -61,17 +60,16 @@ type alias Module =
 
 
 -- THE LAYOUT IS DEFINED ONCE, IN Mid.RtLayout (handoff-osier-zigretire-plan
--- STAGE 2); these three type definitions are DERIVED from it — the emitted
--- IL cannot describe a different layout from the one that module states.
+-- STAGE 2); these type definitions are DERIVED from it — the emitted IL
+-- cannot describe a different layout from the one that module states.
 --
 -- `type :val = align 8 { w, l, l, l, l }` — the VM's 40-byte tagged Value
 -- (gc/types.zig: Value = extern struct { tag: ValTag, payload: union }),
 -- ABI-verified against the vendored qbe: aggregate params arrive as
 -- POINTERS, aggregate returns go through sret.
 -- VR3a: the ONE typedef that flips with the representation, so it is built
--- from the layout INSTANCE the module was emitted with.  `:ret`/`:desc` below
--- are NOT Values and stay constants (see Mid.RtLayout's TRAP-3 note; `:ret`'s
--- `retKindOffset` is the coupling VR3b must derive).
+-- from the layout INSTANCE the module was emitted with.  `:desc` below is NOT
+-- a Value and stays a constant.
 valType : RtLayout.ValLayout -> TypeDef
 valType layout =
     { name = "val"
@@ -80,23 +78,16 @@ valType layout =
     }
 
 
--- `type :ret = align 8 { :val, w, l, l, l, w }` — the call-result shape every
--- generated function returns (the bounce-loop convention, transcribed from
--- tools/aot/runtime.zig's `Ret = .done | .tail`).  80 bytes, ABI-matched by
--- tools/qbe/rt.zig `Ret`; the FIELD OFFSETS are stated once, in
--- Mid.RtLayout (`retValOffset`/`retKindOffset`/`retFOffset`/`retEOffset`/
--- `retArgsOffset`/`retArityOffset`), and rt.zig asserts its own `Ret` against
--- them at comptime.  `.tail` is built by the runtime (rt_tail_known /
--- rt_apply_tail) so its env and args survive the caller's rt_frame_leave, and
--- chased by rt_bounce — which is why deep tail chains no longer grow the
--- native stack.
--- MUST BE DEFINED AFTER `:val` (QBE requires a type to precede its uses).
-retType : TypeDef
-retType =
-    { name = "ret"
-    , align = Just RtLayout.abiAlign
-    , fields = RtLayout.retQbeFields
-    }
+-- `:ret` IS DELETED, AND THE WORD ARM WAS ITS LAST USER (AREA 6).  U3b
+-- collapsed the `.tail` protocol and moved every closure body to `:val`; the
+-- one survivor was the WORD arm's 48-byte `:ret`, kept on the stated ground
+-- that collapsing it "would put a slot address in a register".  MEASURED
+-- FALSE (probe agg8.ssa, vendored qbe): an 8-byte aggregate return is REGISTER
+-- class and `ret %s0` still means "the value AT %s0" — qbe loads the word into
+-- rax.  So the word arm's body returns `:val` too, 8 bytes wide, and NO module
+-- emits a `:ret` typedef: the type, its QBE field list
+-- (`RtLayout.retQbeFields`) and its kind offset (`retKindOffset`) went with
+-- their last reader.  `closureRetClass` (Mid.Qbe.Lower) is now one answer.
 
 
 -- `type :desc = align 8 { l, w, w }` — a static function descriptor:
@@ -208,6 +199,13 @@ type Inst
       Blit Arg Arg Int
     | -- %r =abity call target(args)
       Call (Maybe String) AbiTy Arg (List CallArg)
+    | -- tcall [abity] target(args)   (Q1a's tail-call instruction: NO result,
+      -- BLOCK-FINAL, followed by a bare `ret` — vendor/qbe/doc/il.txt and
+      -- parse.c's Ttcall arm.  The AbiTy is the CALLEE's return class and must
+      -- agree with the enclosing function's own; abi1 refuses a mismatch with
+      -- a named err(), so a tcall the backend cannot honour is a COMPILE
+      -- ERROR, never a silent fallback to an ordinary call.)
+      TailCall AbiTy Arg (List CallArg)
     | -- %r =l allocN bytes   (CONSTANT size)
       Alloc String Int
     | -- a pure marker kept for readability of the printed IL; prints as a
@@ -366,6 +364,9 @@ readsTmps inst =
         Call _ _ target args ->
             List.filterMap tmpName (target :: List.filterMap callArgArg args)
 
+        TailCall _ target args ->
+            List.filterMap tmpName (target :: List.filterMap callArgArg args)
+
         Alloc _ _ ->
             []
 
@@ -421,6 +422,9 @@ isSafepoint : Inst -> Bool
 isSafepoint inst =
     case inst of
         Call _ _ _ _ ->
+            True
+
+        TailCall _ _ _ ->
             True
 
         _ ->

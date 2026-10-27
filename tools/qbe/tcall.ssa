@@ -1,0 +1,244 @@
+# tcall.ssa — the behaviour fixture for the `tcall` tail-call instruction (Q1a).
+#
+# HAND-WRITTEN IL on purpose: the tcall proof is pure C-ABI, with no Mid
+# lowering and no runtime.mid involved, so what runs is exactly this file.
+# tcall_main.c drives every probe and compares each result against the same
+# arithmetic written independently in C; tools/qbe/tcall-probe.sh builds it,
+# runs the ASYMMETRY, and checks the refusals.
+#
+# THE DECISIVE PROBE IS AN ASYMMETRY, not a result.  Under `ulimit -s 8192`
+# (8 MiB) `even`/`odd` must complete 1e7 hops — with a real tail call the stack
+# never grows.  The same file hand-mutated `tcall`->`call` (the transformation
+# lives in tcall-probe.sh, so it cannot drift from this file) must DIE of stack
+# exhaustion: 1e7 frames of any size at all is far past 8 MiB.  A probe never
+# seen to fail is not evidence, so the runner requires both halves.
+
+# a 24-byte aggregate: > 16 bytes, so it is returned in memory (sret) and rides
+# in the callee's hidden first argument.
+type :big = { l, l, l }
+
+# ---------------------------------------------------------------------------
+# (a)+(b) mutual recursion, and the constant-stack asymmetry.
+# even(n) tail-calls odd(n-1) and odd(n) tail-calls even(n-1).
+# ---------------------------------------------------------------------------
+export function l $even(l %n) {
+@start
+	%c =l ceql %n, 0
+	jnz %c, @base, @step
+@base
+	ret 1
+@step
+	%m =l sub %n, 1
+	tcall l $odd(l %m)
+	ret
+}
+
+export function l $odd(l %n) {
+@start
+	%c =l ceql %n, 0
+	jnz %c, @base, @step
+@base
+	ret 0
+@step
+	%m =l sub %n, 1
+	tcall l $even(l %m)
+	ret
+}
+
+# ---------------------------------------------------------------------------
+# (c) sret forwarding through TWO tail hops.
+# sretA is sret (it returns :big), and both hops tcall :big, so the callee's
+# hidden return pointer must be sretA's own fn->retr: the result has to land in
+# the ORIGINAL caller's buffer.  A wrong forwarding returns garbage, not a
+# crash — this is the only probe that sees it.
+# ---------------------------------------------------------------------------
+export function :big $sretA(l %k) {
+@start
+	%m =l mul %k, 3
+	tcall :big $sretB(l %m)
+	ret
+}
+
+export function :big $sretB(l %k) {
+@start
+	%m =l add %k, 1
+	tcall :big $sretC(l %m)
+	ret
+}
+
+export function :big $sretC(l %k) {
+@start
+	%p =l alloc8 24
+	%q =l add %p, 8
+	%r =l add %p, 16
+	%k1 =l add %k, 100
+	%k2 =l add %k, 1000
+	storel %k, %p
+	storel %k1, %q
+	storel %k2, %r
+	ret %p
+}
+
+# ---------------------------------------------------------------------------
+# (c2) indirect tail: the target is a function pointer, so emit must produce
+# `jmp *%reg`.  If rega put that pointer in a callee-saved register the
+# epilogue would pop it before the jump — the jump would land on the restored
+# value — so emit parks it in a scratch register.  This probe runs deep enough
+# to make a wrong jump immediate.
+# ---------------------------------------------------------------------------
+export function l $indirect(l %n, l %f) {
+@start
+	%c =l ceql %n, 0
+	jnz %c, @base, @step
+@base
+	ret 0
+@step
+	%m =l sub %n, 1
+	tcall l %f(l %m, l %f)
+	ret
+}
+
+# ---------------------------------------------------------------------------
+# (c3) THE PARK: an indirect target that rega had to place in a CALLEE-SAVED
+# register, because it is live across an ordinary call in the same block.
+# The epilogue pops that register BEFORE the jump, so without emit's park the
+# `jmp *%rbx` would land on the caller's restored value — a jump to whatever
+# the caller had in rbx, i.e. a crash with no diagnostic.
+#
+# $busy IS LOAD-BEARING: it is what forces the allocation.  With no intervening
+# call rega coalesces %f straight into rax/rsi (both caller-saved) and this row
+# stops exercising the park at all — measured, that is exactly how the first
+# version of $indirect passed while the park was still untested.
+# ---------------------------------------------------------------------------
+export function l $busy(l %x) {
+@s
+	%r =l add %x, 0
+	ret %r
+}
+
+export function l $drive(l %n, l %f) {
+@s
+	%c =l ceql %n, 0
+	jnz %c, @base, @step
+@base
+	ret 42
+@step
+	%a =l call $busy(l %n)
+	%m =l sub %n, 1
+	tcall l %f(l %m, l %f)
+	ret
+}
+
+# ---------------------------------------------------------------------------
+# (d) env tail: the closure environment rides in rax, which the teardown must
+# not touch.
+# ---------------------------------------------------------------------------
+export function l $envcall(l %n) {
+@start
+	%m =l add %n, 5
+	tcall l $envtarget(env %m, l %n)
+	ret
+}
+
+function l $envtarget(env %e, l %n) {
+@start
+	%r =l add %e, %n
+	ret %r
+}
+
+# ---------------------------------------------------------------------------
+# (e) an argument read from the FRAME across the teardown.
+#
+# Six values are live across an ordinary `call` in the same block, and only
+# five callee-saved registers exist, so at least one of them is SPILLED: the
+# tcall's argument copies then read the frame.  They are emitted before the
+# tcall, so they read the frame while it is still alive.  If the teardown ever
+# moved ahead of them, `leave` would have restored the CALLER's %rbp and the
+# load would read the caller's frame — a wrong number, not a crash.  (MEASURED
+# on the first version of this probe: with nothing live across a call, rega
+# coalesced every argument straight into its argument register and the probe
+# asserted nothing.  The `call` below is what makes it non-vacuous.)
+# ---------------------------------------------------------------------------
+export function l $pressure(l %a, l %b) {
+@start
+	%p0 =l add %a, %b
+	%p1 =l add %p0, 1
+	%p2 =l add %p1, 2
+	%p3 =l add %p2, 3
+	%p4 =l add %p3, 4
+	%p5 =l add %p4, 5
+	%p6 =l add %p5, 6
+	%p7 =l add %p6, 7
+	%p8 =l add %p7, 8
+	%p9 =l add %p8, 9
+	%p10 =l add %p9, 10
+	%p11 =l add %p10, 11
+	%s0 =l mul %p11, %p0
+	%s1 =l mul %p10, %p1
+	%s2 =l mul %p9, %p2
+	%s3 =l mul %p8, %p3
+	%s4 =l mul %p7, %p4
+	%s5 =l mul %p6, %p5
+	%t =l call $sink1(l %a)
+	%u =l add %s0, %t
+	tcall l $sink6(l %u, l %s1, l %s2, l %s3, l %s4, l %s5)
+	ret
+}
+
+function l $sink1(l %a) {
+@start
+	%r =l add %a, 1
+	ret %r
+}
+
+function l $sink6(l %a, l %b, l %c, l %d, l %e, l %f) {
+@start
+	%x =l add %a, %b
+	%y =l add %c, %d
+	%z =l add %e, %f
+	%w =l add %x, %y
+	%r =l add %w, %z
+	ret %r
+}
+
+# ---------------------------------------------------------------------------
+# (f) `tcall :val` — the 40-byte tagged-Value return class.
+#
+# THIS SHAPE WAS ASSEMBLED BY NOTHING IN THE TREE until U3a.  The `:big` chain
+# above pins sret forwarding for a 24-byte aggregate, but the compiler's own
+# `:val` is `align 8 { w, l, l, l, l }` (40 bytes) and is the class U3a's
+# conversion puts on `Rt.apply-tail`, the generated `rt_callN` family and
+# `rt_call2r` — i.e. on every hop of the generic-apply tail chain.  The U1
+# review hand-assembled one in scratch and MEASURED the prebuilt qbe accepting
+# it (exit 0, `leave; jmp`, constants in esi/edx/ecx); this pair is that
+# measurement made permanent, so a regression in the aggregate class handling
+# (field-0 width, alignment, sret forwarding) is caught here rather than at
+# the first converted site.
+#
+# Two hops, so the hidden sret pointer must be forwarded through BOTH: a wrong
+# forwarding writes into the wrong buffer and the values come back garbage.
+# ---------------------------------------------------------------------------
+type :val = align 8 { w, l, l, l, l }
+
+export function :val $valA(l %k) {
+@start
+	%m =l mul %k, 3
+	tcall :val $valB(l %m, l %k, l 7)
+	ret
+}
+
+export function :val $valB(l %a, l %b, l %c) {
+@start
+	%p =l alloc8 40
+	%q =l add %p, 8
+	%r =l add %p, 16
+	%s =l add %p, 24
+	%t =l add %p, 32
+	%u =l add %a, %b
+	storew 1, %p
+	storel %u, %q
+	storel %c, %r
+	storel %a, %s
+	storel %b, %t
+	ret %p
+}

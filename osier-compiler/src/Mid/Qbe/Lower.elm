@@ -1,4 +1,4 @@
-module Mid.Qbe.Lower exposing (lower, lowerWith)
+module Mid.Qbe.Lower exposing (lower, lowerWith, wordArmUnported)
 
 -- Mid.Qbe.Lower — Mid.Ir -> Qbe.Il (native-backend stage 1; handoff-qbe-lower).
 --
@@ -10,7 +10,9 @@ module Mid.Qbe.Lower exposing (lower, lowerWith)
 --     semantics), GRef as a value (runtime closure), GRef force (0-arg thunk
 --     = direct call), Let (plain LetBind only), If, 2-ary integer PrimApp
 --     (`+ - * < <= > >= =` inline on the VM's exact semantics with an
---     rt_prim fallback for the float-promotion / non-numeric paths), and
+--     rt_prim fallback for the float-promotion / non-numeric paths — ON THE VAL
+--     ARM; under the word arm those prims route to the runtime unconditionally,
+--     perf word-arm-arith), and
 --     inner Lam (closures with captures — the env representation crux).
 --   stage 2 adds: Case (incl. inside a closure body), Con (ADT construction
 --     as the VM's vector[tag, args]), the match steps MCons/MEmpty/MVector/
@@ -40,18 +42,25 @@ module Mid.Qbe.Lower exposing (lower, lowerWith)
 -- ============================== THE CONTRACTS ==============================
 --
 -- CALLING CONVENTION (ABI-verified against the vendored qbe; see
--- docs/qbe-backend.md): a Value is the 40-byte aggregate `:val`; QBE passes
--- :val params as POINTERS and returns them through sret, exactly like a C
--- struct by value.  A function of arity N with K captures compiles to
+-- docs/qbe-backend.md).  On the SHIPPING (value) arm a Value is the 40-byte
+-- aggregate `:val`; QBE passes :val params as POINTERS and returns them
+-- through sret, exactly like a C struct by value.  A function of arity N with
+-- K captures compiles to
 --
---     function :ret $q_<mangled> [(env %env),] :val %a0 .. :val %a{N-1}
+--     function :val $q_<mangled> [(env %env),] l %a0 .. l %a{N-1}
 --
--- — it RETURNS the 80-byte `:ret` (`.done` value | `.tail` request) rather
--- than a bare `:val`, which is what carries the bounce loop (see TAIL CALLS
--- below).  (`env` only when K > 0 — QBE passes it in a register invisible to
--- C; the generated rt_callN dispatchers pass env to env-less top-level defuns
--- too, which just ignore it).  %a_i POINTS at the caller's staging copy; the
--- prologue blits each param into the frame before anything else can run.
+-- — each `%a_i` is an `l` POINTER to the caller's staging slot (VR1), and the
+-- body RETURNS the finished `:val` (40 B).  It does NOT return `:ret`: U3a
+-- flipped the class and U3b deleted the `.tail` request, its builders and the
+-- bounce loop that chased them, so nothing on this arm returns anything but
+-- the value.  (`env` only when K > 0 — QBE passes it in a register invisible
+-- to C; the generated rt_callN dispatchers pass env to env-less top-level
+-- defuns too, which just ignore it).
+--
+-- THE WORD ARM RETURNS THE SAME CLASS, only narrower: `:val` at 8 bytes,
+-- which the amd64 ABI returns in a register.  AREA 6 measured the one
+-- remaining objection (see `closureRetClass`) and deleted `:ret` with its
+-- kind word, so a defun's result area is ONE slot on both arms.
 --
 -- GC ROOTING (crux 2): every local lives in a RUNTIME-POOLED frame block
 -- from `rt_frame_enter(nslots) -> *Value`, registered as ONE
@@ -60,9 +69,8 @@ module Mid.Qbe.Lower exposing (lower, lowerWith)
 -- store/load pair into a callee-saved register (MEASURED on the vendored
 -- qbe: a non-escaping stack slot's store+reload ARE deleted across a call;
 -- the pooled-frame loop shape keeps them — evidence in the handoff node and
--- docs/qbe-backend.md).  Slot 0 = the `.done` value, slot 1 = the `.tail`
--- metadata (kind/f/e/args/arity — the second half of `:ret`), 2..N+1 params,
--- N+2..N+1+K captures, then expression temporaries.  A per-function GLOBAL
+-- docs/qbe-backend.md).  Slot 0 = the result value, 1..N params,
+-- N+1..N+K captures, then expression temporaries.  A per-function GLOBAL
 -- frame would also defeat promotion but CANNOT nest under recursion (a
 -- callee would zero its caller's frame) — hence the pool.
 --
@@ -76,18 +84,21 @@ module Mid.Qbe.Lower exposing (lower, lowerWith)
 -- rt_make_closure(desc, capBase, K) — rt re-reads them AFTER its internal
 -- allocations (the caller's rooted frame slots were GC-rewritten in place).
 --
--- TAIL CALLS (crux 1): QBE IL has NO tail-call instruction (vendor/qbe/doc/
--- il.txt: `tail` appears only in "width less than a word"; the CALL BNF has
--- no tail form; jump targets are intra-function).  So:
+-- TAIL CALLS (crux 1): the vendored qbe DOES have a tail call, but its own
+-- il.txt does not document it (the CALL BNF has no tail form; `tail` appears
+-- there only in "width less than a word").  The IMPLEMENTATION has it —
+-- parse.c's `tcall`/`Otcall` and amd64/emit.c's teardown+jmp — and Q1b uses
+-- it.  So:
 --   * a saturated App to the SAME defun in tail position = an IN-FRAME LOOP:
 --     args into temp slots, blit temps into the param slots, `jmp @body`.
 --     This stays the hot path — generality must not cost it.
---   * every other tail position (cross-defun call, rt_apply, thunk force)
---     returns a `.tail` via the `:ret` aggregate and is chased by the runtime
---     bounce loop (tools/qbe/rt.zig rt_bounce) — the AOT's Ret/.tail pattern
---     (tools/aot/runtime.zig) transcribed onto this backend.  A `.done` is
---     kind 0 + the value; a `.tail` is kind 1 + (f, e, args, arity), built by
---     rt_tail_known / rt_apply_tail so its args survive rt_frame_leave.
+--   * every other tail position (cross-defun call, rt_apply, thunk force) is
+--     a REAL `tcall` (Q1b) after Rt.stage-tail/Rt.frame-leave; over the
+--     four-register tcall budget (and in every non-tail position) the site is
+--     an ordinary `call` that returns the finished value.  U3b DELETED the
+--     `.tail` request, its builders (rt_tail_known / rt_apply_tail) and the
+--     runtime bounce loop that chased them: no site builds one and none is
+--     chased.
 --
 -- NO SSA: temporaries are assigned freely; QBE builds SSA itself.
 
@@ -95,7 +106,7 @@ module Mid.Qbe.Lower exposing (lower, lowerWith)
 -- Il.Con (the integer-constant argument), and Elm cannot qualify constructors
 -- in patterns — exposing only one of the two keeps the pattern arms clean.)
 import IntegerLiteral
-import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), FfiWidth(..), Lambda, LetBinder(..), Lit(..), Match(..), MemWidth(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), Step(..), UnsafeNode(..), ValuePath(..))
+import Mid.Ir exposing (Alt, Binder, Defun, Exp(..), FfiWidth(..), Lambda, LetBinder(..), Lit(..), Match(..), MemWidth(..), RawBinOp(..), RawCmpOp(..), RawFltBinOp(..), RawFltCmpOp(..), RawUnOp(..), Step(..), TailTarget(..), UnsafeNode(..), ValuePath(..))
 import Mid.Rt as MidRt
 import Mid.RtGc as RtGc
 import Mid.RtLayout as RtLayout
@@ -117,17 +128,19 @@ import Char.Extra exposing (utf8ByteLength)
 -- a second instance (VR3b's word arm) a change at the SEED rather than at the
 -- ~150 emit sites.
 --
--- SIZEOF(:ret) IS NOT A CONSTANT ANY MORE (VR3b1): the `:ret` aggregate's
--- first field IS a Value, so its size is `valSizeBytes + 40` — two pooled
--- frame slots (slot 0 the finished value, slot 1 the .tail discriminator +
--- payload) on the val arm, one-and-a-bit on the word arm.  It is read as
--- `RtLayout.retSizeBytes <instance>` at its three sites, never spelled here.
+-- SIZEOF(:ret) IS NOT READ HERE ANY MORE (U3b), AND SINCE AREA 6 THE TYPE IS
+-- GONE ENTIRELY.  The `:ret` aggregate was the bounce-loop result — two pooled
+-- frame slots (slot 0 the finished value, slot 1 the `.tail` discriminator +
+-- payload) — and its size was read as `RtLayout.retSizeBytes <instance>` at the
+-- @ret blit.  U3b deleted that blit, the builder and the class; AREA 6 deleted
+-- the word arm's last use of the type itself (see `closureRetClass`).
 
 
 -- P5: the non-GC libc entries this emitter names as CALL TARGETS, i.e. the
 -- ones a call may target without being a GC safepoint.  The list is EXACTLY
--- what the emitter emits: `free` (the :ret buffer release in a rawAbi @ret
--- block), a C-heap release that cannot run a collect or move the Mid heap.
+-- what the emitted runtime names (`rawcall free(...)` in runtime.mid — the
+-- apply chain's staged-block release), a C-heap release that cannot run a
+-- collect or move the Mid heap.
 -- NOTHING ELSE may join it without the same argument — every other target is
 -- a `q_*` symbol resolved against Mid.Rt.allocating, an indirect call, or a
 -- cffi extern, and those are all treated as safepoints (deny by default):
@@ -185,6 +198,8 @@ type alias S =
     , paramPtr : Dict Int Il.Arg -- VR1: binder id -> the incoming `l` pointer holding that param (ptrRead defuns only)
     , noCollect : Set String -- P5: the CALL SYMBOLS whose execution cannot reach a GC safepoint (Mid.Rt.allocating's complement + the non-collecting libc entries); a call to anything else is a safepoint
     , leafFree : Bool -- P5's A/B switch (QBE_NOLEAF=1 -> False = every surface defun keeps its pooled frame, i.e. the pre-P5 shape)
+    , tailEmit : Bool -- Q1b: may this defun emit a real `tcall`?  TRUE only for an RtGeneric (closure-ABI) body, which is exactly the condition the backend's C4 re-checks — C4 demands the CALLEE's return class EQUAL the enclosing body's, and `closureRetClass` is the one statement of that class (`:val` on both arms)
+    , pooledFrame : Bool -- (U1) does this defun hold a POOLED frame (proKind PFrame)?  A DSL `tailcall` must see the block's own `Rt.frame-leave` before it: the pooled block goes back to the pool and the CALLEE's frame-enter may pop and memset the very same block, so a tcall that skipped the leave would orphan (leak) the caller's frame per hop.  A PAlloc block (frame-free lean, rawAbi) dies with the C frame and needs no leave.
     }
 
 
@@ -209,6 +224,7 @@ type alias PendingFunc =
     , ncaps : Int
     , pro : Pro
     , rawAbi : Bool -- RtRawWord (stage 6 U2): the prologue skips the param blits — the params live in `l` registers, not frame slots
+    , paramWords : Bool -- AREA 6: the incoming `l` registers ARE the VALUE WORDS (the word arm's RtGeneric ABI), so the prologue STORES each one into its slot instead of blitting from it as a pointer
     , ptrRead : Bool -- VR1: the prologue skips the param blits — the body reads them through the incoming `l` pointer
     , paramWidths : List Int -- B6: this defun's per-parameter word widths (a struct VALUE parameter is its layout size; the entry copy spills that many words)
     , entryKey : Maybe String -- Just key for top-level defuns (meta table)
@@ -223,11 +239,11 @@ slot — vendor/qbe amd64/isel.c turns a constant-size alloc8 into Onop plus a
 slot assignment), unzeroed and unregistered as a root, which is sound exactly
 because the classification proved no safepoint is reachable in this body.
 `PLeaf` is the SAME frame-free shape for a SURFACE defun (perf P5): it adds
-the two things a surface defun needs that a lean one does not — slot 0 (the
-`.done` result) and slot 1 (the `.done`/`.tail` marker of the 80-byte `:ret`)
-are read by the RETURN path WITHOUT a tag test, which the pooled frame
-supplied by being memset at enter, so a PLeaf prologue materializes those two
-words with two 8-byte stores (see leafTailZero in withPrologue).
+the one thing a surface defun needs that a lean one does not — slot 0 (the
+result) is read by the RETURN path WITHOUT a tag test, which the pooled frame
+supplied by being memset at enter, so a PLeaf prologue materializes that word
+with one 8-byte store (see leafTailZero in withPrologue).  ONE store on BOTH
+arms: the word arm's second one (slot 1's `:ret` kind word) went with `:ret`.
 -}
 type Pro
     = PFrame
@@ -270,19 +286,30 @@ rawAbiRetClass key =
         Agg "val"
 
     else if key == "Rt.apply-tail" then
-        -- stage 6 B1: Rt.apply-tail returns the 80-byte `:ret` (`.done`
-        -- value | `.tail` request) through sret — rt_apply_tail's C ABI.
-        Agg "ret"
-
-    else if key == "Rt.tail-known" then
-        -- stage 6 B2: Rt.tail-known returns the 80-byte `:ret` (the .tail
-        -- request) through sret — rt_tail_known's C ABI.
-        Agg "ret"
-
-    else if key == "Rt.bounce" then
-        -- stage 6 B2: Rt.bounce returns the 40-byte `.done` Value through
-        -- sret — rt_bounce's C ABI.
+        -- U3a: `:val` (40 B).  It used to be the 80-byte `:ret` because its
+        -- body handed a `.tail` request upward for Rt.bounce to chase.  It now
+        -- `tcall`s Rt.applyTailGo, which returns the finished Value — and
+        -- abi1's C4 demands the tcall's class EQUAL the enclosing body's, so
+        -- the two flips are one fact.  U3b then deleted the `.tail` family
+        -- outright (Rt.tail-known/Rt.bounce/Rt.bounceGo) — see the note below
+        -- where the `Rt.tail-known` case used to be.
         Agg "val"
+
+    else if key == "Rt.applyTailGo" then
+        -- U3a: the generic-apply TAIL LOOP.  A `:val` result (the finished
+        -- value, or the partially-applied closure) through sret, and — the
+        -- part that matters — WORD-class parameters, because it is the target
+        -- of `Rt.apply-tail`'s `tcall` and J16 refuses a val parameter on a
+        -- TailDefun.  Declared rawAbi for exactly that reason (Mid.Rt.rawAbi),
+        -- the same override shape Rt.globalClosure has: an all-word parameter
+        -- list with an aggregate result.
+        Agg "val"
+
+    -- U3b: the `Rt.tail-known` case (`Agg "ret"`, the 80-byte `.tail`
+    -- request) is GONE with the defun.  NO rawAbi key returns `:ret` any
+    -- more, so this function's aggregate answer is always `:val` — the
+    -- `Agg "ret"` arm of lowerFunBody's @ret block below went with it, and
+    -- with it the last reader of the `.tail` offsets in Mid.RtLayout.
 
     else if key == "Rt.globalClosure" then
         -- ZIGHOST Z3: the closure-cache seat returns the 40-byte lambda
@@ -313,6 +340,27 @@ rawAbiRetIsAgg key =
             False
 
 
+{-| Q1b: the static arity budget for a `tcall`.  Our ABI spends rdi on the
+hidden sret pointer (a closure body's result is an aggregate — the 40-byte
+`:val` on the value arm, which is inmem, so the pointer is a real argument
+register) and rax on `env` when the callee is a closure; the remaining integer
+argument registers are rsi, rdx, rcx, r8, r9 — five.  The design's census
+(MEASURED over the 4,786 static tail-call sites of the self-emit AT 81ae3fb,
+where every one of them was an `Rt.tail-known` request) is 1→2113, 2→1759,
+3→505, 4→169, 5→198, 6→24, ... so a budget of 4 covers 95.0% of them, and the
+240 arity-5+ sites keep a correct non-tail lowering — a STATIC, compile-time
+choice between two correct lowerings, never a fallback of an emitted tcall.
+U3a did not change the POPULATION: the same 240 sites take the ordinary call.
+What changed is the under-budget ones — they `tcall` the callee directly
+instead of asking Rt.tail-known to build a `.tail` request for it.  (Five would
+also fit a direct call, which passes no count word; the budget is held at the
+design's number so the census above stays the claim it was measured as.)
+-}
+maxTailCallArgs : Int
+maxTailCallArgs =
+    4
+
+
 {-| The rawAbi ARITY agreement check (stage 6 A1): Mid.Rt.rawAbiArity is the
 ONE place the raw-word defuns' param counts are declared.  Checked against
 the defun's ACTUAL params at lowerDefun AND against the generated call
@@ -321,6 +369,8 @@ touching the record, or a hand-wired call site left under-applied) is a
 compile Err, never the silent register-class miscompile the record exists to
 kill (the SEGV class the U2 review's nice-to-have 5 named).
 -}
+
+
 rawAbiArityAgree : String -> Int -> Result String ()
 rawAbiArityAgree key actual =
     case Dict.get key MidRt.rawAbiArity of
@@ -341,19 +391,6 @@ rawAbiArityAgree key actual =
 
         Nothing ->
             Err ("qbe: rawAbi key " ++ key ++ " has no Mid.Rt.rawAbiArity entry — the record must cover every rawAbi key")
-
-
-{-| stage 6 B2: the bounce seat's symbol.  Under QBE_MIDDRIVER=1 every `rt_bounce`
-emission site retargets to the Mid rawAbi defun q_Rt_x2ebounce — the SAME
-`Agg "val"` (40-byte `.done` Value) result and a single `Base L` :ret-pointer
-arg, a pure symbol swap.  The default (Zig) seat stays `rt_bounce`.  ONE
-helper for ALL THREE sites (directCall's non-tail arm, the RawCall fat
-QBE_NORTLEAN route, the rtPrimSlots fat QBE_NORTLEAN route) so a missed site
-cannot drift from the other two.
--}
-bounceSeat : S -> String
-bounceSeat _ =
-    "q_" ++ mangle "Rt.bounce"
 
 
 emit : Il.Inst -> S -> S
@@ -528,6 +565,45 @@ wordArmLayout layout =
     layout == RtLayout.wordLayout
 
 
+{-| U3b — THE RESULT AREA'S WIDTH IN SLOTS, the ONE statement of it.  A
+defun's frame reserves the result first: ONE slot, on BOTH arms.  (It was TWO
+on the word arm while that arm's frozen `:ret` put a kind word in slot 1;
+AREA 6 deleted `:ret` — see `closureRetClass` — so slot 1 has no owner on
+either arm.)  Everything that numbers a slot reads this — the fresh-slot
+counter, the param and capture binder slots, the prologue's param/capture
+blits and the self-tail param blits — so the arms cannot drift one slot apart.
+(They DID drift once: U3b changed the counter and left `slotTmp (i + 2)` in the
+blits, and qbe caught it as `invalid type for second operand %s2 in blit0` —
+an UNDEFINED slot, because the frame was one slot shorter than the body
+believed.)
+-}
+resultSlotBase : RtLayout.ValLayout -> Int
+resultSlotBase _ =
+    1
+
+
+{-| U3a — the CLOSURE ABI's return class, in ONE place: `lowerFunBody`'s ret
+type, `directCall`'s `tcall` annotation, and `directCall`'s ordinary-call
+result class all read it, so the three cannot disagree (a disagreement is a
+C4 err() at assembly or, worse, a wrong-width blit).
+
+IT IS `:val` ON BOTH ARMS, and the WORD arm is where that was decided (AREA
+6).  A closure body returns the finished Value — nothing builds a `.tail`
+request any more — so the only question was the aggregate's WIDTH: 40 bytes on
+the value arm, 8 on the word arm.  The word arm kept a 48-byte `:ret` until
+AREA 6 on the stated ground that "collapsing it would put a slot address in a
+register"; MEASURED FALSE against the vendored qbe (probe agg8.ssa): an
+8-byte aggregate return is REGISTER class and `ret %s0` still means "the value
+AT %s0", so qbe loads the word into rax and the caller's `%t =:val call` temp
+is still the ADDRESS of a materialized block.  The premise describes a
+NON-aggregate return, which nothing proposes.  With the type went its kind
+word, its result slot and every reader of its offsets.
+-}
+closureRetClass : S -> AbiTy
+closureRetClass _ =
+    Agg "val"
+
+
 {-| THE PER-DEFUN PRE-WALK CLASSIFIER (perf VR3b2) — which Mid.Ir constructs
 the word arm can emit TODAY.
 
@@ -554,6 +630,15 @@ wordArmUnported : Exp -> Maybe String
 wordArmUnported exp =
     case exp of
         Var _ ->
+            Nothing
+
+        App _ ->
+            -- AREA 6 (THE CALL ABI), ported: the arguments cross as WORDS on
+            -- this arm (`argOperands`) and the callee stores them into its
+            -- slots; the result is the same `:val` class at 8 bytes.  The
+            -- per-site emit is `lowerApp`, which classifies the head (a known
+            -- defun, a thunk, or a first-class value through Rt.apply) and
+            -- refuses anything it cannot express by name.
             Nothing
 
         NoTail inner ->
@@ -607,8 +692,28 @@ wordArmUnported exp =
             -- settled), so this classifier only says the construct is ported.
             Nothing
 
+        RecordLit fields ->
+            -- ============ THE SURFACE LANE: A RECORD LITERAL ============
+            -- PORTED (perf word-arm-records R2).  A word-arm record is ONE
+            -- code-14 block, `[data_0 .. data_{n-1} | namesBase]`, and the
+            -- emission is `lowerRecordLitPos`'s own word fork — so this arm
+            -- classifies the CONSTRUCT the emitter will see: every field VALUE.
+            -- The two desugar routes behind it (duplicate labels, and
+            -- `QBE_NOREC=1`) build a cons/`@p` chain whose symbol cars are the
+            -- symbol cells R1 ported, so classifying the values covers all
+            -- three routes; a field whose value is un-ported still refuses.
+            wordArmUnportedRecordFields fields
+
+        Lit (LSymbol _) ->
+            -- AREA 3, THE SYMBOL CELL (perf word-arm-records R1).  A word-arm
+            -- symbol is one code-2 heap block whose body is ONE raw word (the
+            -- NUL-terminated name pointer) — the shape `Rt.intern` already
+            -- builds.  `storeWordCell` owns the shape, so this classifier only
+            -- says the construct is ported.
+            Nothing
+
         Lit _ ->
-            Just (wordArea "AREA 3/5 (HEAP CELLS)" "a float or symbol literal — under the word arm each is a HEAP object behind one tagged pointer, not a tag word plus payload words")
+            Just (wordArea "AREA 5 (FLOATS)" "a float literal — under the word arm it is a HEAP object behind one tagged pointer, not a tag word plus payload words")
 
         ShortAnd block ->
             case wordArmUnported block.left of
@@ -619,6 +724,22 @@ wordArmUnported exp =
                     wordArmUnported block.right
 
         ShortOr block ->
+            case wordArmUnported block.left of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    wordArmUnported block.right
+
+        NotEqual block ->
+            -- AREA 2, THE `/=` OPERATOR (perf word-arm-arith).  It is PORTED by
+            -- the same classification that ported `=`: `lowerNotEqual`
+            -- delegates to `lowerNumEq` and then negates the tagged Boolean
+            -- through `jmpfFalse` (both arm-clean), and under the word arm
+            -- `lowerNumEq` takes the `rtPrimSlots "="` route into `Rt.=`, whose
+            -- word splices ARE the ported arm.  The WORKLIST said this was NOT
+            -- ported and gave the right reason at the time — "porting it means
+            -- porting that inline, i.e. area 2/4" — and this is that port.
             case wordArmUnported block.left of
                 Just what ->
                     Just what
@@ -643,6 +764,27 @@ wordArmUnported exp =
                         Nothing ->
                             wordArmUnported block.elseBranch
 
+        Loop block ->
+            -- AREA 2, THE LOOP.  Its condition is the SAME falsy test `lowerIf`
+            -- uses (`falsyJump` — one statement of the arm's tag question), its
+            -- body is an ordinary sub-expression and the back edge re-enters
+            -- the condition block.  No phi, so nothing about the arm changes
+            -- the shape.  `break`/`continue` are LEAVES that only close a block
+            -- and jump to a label the frame already owns — no value crosses, so
+            -- the arm cannot see them.
+            case wordArmUnported block.cond of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    wordArmUnported block.body
+
+        Break ->
+            Nothing
+
+        Continue ->
+            Nothing
+
         Unsafe node ->
             -- AREA 3 (PAYLOAD ACCESS), the RAW-NODE half (perf VR3b3 areas
             -- B/C).  A raw node is a WORD producer, and the word arm now emits
@@ -659,9 +801,6 @@ wordArmUnported exp =
                 RawPayload32 _ ->
                     Nothing
 
-                RawTagOf _ ->
-                    Nothing
-
                 RawTagIs _ ->
                     Nothing
 
@@ -669,12 +808,6 @@ wordArmUnported exp =
                     Nothing
 
                 RawAllocRaw _ ->
-                    Nothing
-
-                RawVecAddr _ ->
-                    Nothing
-
-                RawVecLoad _ ->
                     Nothing
 
                 RawStrByte _ ->
@@ -745,14 +878,339 @@ wordArmUnported exp =
                 RawUn _ ->
                     Nothing
 
+                -- ================= AREA 6: THE CALL ABI =================
+                -- Every node below was refused here until this unit, and each
+                -- is admitted only because its EMIT SITE now handles the word
+                -- arm.  The mapping, one line each, so a later reader can
+                -- check the claim against the site:
+                --
+                --   RawCall       `lowerRawCall` — args through `argOperands`
+                --                 (address on the val arm, WORD here), result
+                --                 `closureRetClass` + a valSizeBytes blit.
+                --   RawCallAgg    `lowerRawCallAgg` — unchanged: an aggregate
+                --                 result is a materialized block either way and
+                --                 `:val` is 8 bytes, so the blit width is the
+                --                 layout's.  Only shape "val" is legal (U3b).
+                --   RawAllocN     `Alloc t (8 * words)` — a raw STACK block,
+                --                 arm-independent by construction.
+                --   RawTailCall   `lowerRawTailCall` — the DSL's `tcall`; its
+                --                 argument rule is `rawWordArg`, and its C4
+                --                 class check reads `closureRetClass`, so a
+                --                 word-arm tcall is checked exactly like the
+                --                 val arm's.
+                --   RawVecLoad    the val arm's `blit e, dest, valSizeBytes`
+                --                 IS the word-arm read: `elemAddr` already
+                --                 strides by the layout, so at 8 bytes it
+                --                 copies the one word.
+                --   RawVecStore   unchanged: the runtime's ONE barrier seat
+                --                 twins the stride (VR3c twinned BOTH seams),
+                --                 and the third word is the address of the
+                --                 value's slot on both arms.
+                RawCall _ ->
+                    Nothing
+
+                RawCallAgg _ ->
+                    Nothing
+
+                RawAllocN _ ->
+                    Nothing
+
+                RawTailCall _ ->
+                    Nothing
+
+                RawVecLoad _ ->
+                    Nothing
+
                 RawVecStore _ ->
+                    Nothing
+
+                -- AREA 3 (PAYLOAD ACCESS), the ELEMENT-BASE half (perf
+                -- word-arm-area3rt).  `vecbody` is the base every `vecload`/
+                -- `vecstore`/`vecaddr` wants, and it is admitted because its
+                -- two arms are the same arithmetic the val arm already emitted
+                -- (see `RawVecBody`'s emit site).  `RawVecAddr` was refused by
+                -- the `_` fallback below, not by its own emit site, so it is
+                -- named here too — its arm is unchanged (it is `elemAddr`).
+                RawVecBody _ ->
+                    Nothing
+
+                RawVecLen _ ->
+                    Nothing
+
+                RawVecAddr _ ->
                     Nothing
 
                 _ ->
                     Just (wordArea (wordAreaName exp) (wordAreaWhat exp))
 
+        PrimApp app ->
+            -- ============ THE SURFACE LANE: PRIM APPLICATIONS ============
+            -- A `PrimApp` is not ONE construct on this arm, so it is not
+            -- classified as one (perf word-arm-surface).  The AGGREGATE prims
+            -- — `cons`, `@p`, `emptylist`, `assoc`, `snd` and every other prim
+            -- with a Mid implementation — lower through `lowerArgsToSlots` ->
+            -- `rtPrimSlots`, whose emission is ARM-INDEPENDENT by construction:
+            -- the staged args are ROOTED frame slots, the callee is a
+            -- `:val`-returning Rt defun reached by the lean ABI (pointer args
+            -- in, one `valSizeBytes` blit out), and the only width it reads is
+            -- the layout's.  That is the same ground `App` is admitted on
+            -- (AREA 6) — the construct is ported because its EMIT SITE handles
+            -- the arm, not because it looked harmless.
+            --
+            -- The ARITHMETIC prims do NOT take that route on the VAL arm:
+            -- `lowerArith`/`lowerCompare`/`lowerNumEq` read the tag WORD and
+            -- the payload at `+8`, i.e. the 40-byte representation, in their
+            -- inline arms.  UNDER THE WORD ARM THOSE ARMS ARE SKIPPED
+            -- (perf word-arm-arith): each of the three forks on `wordArm` and
+            -- takes this same `rtPrimSlots` route, whose runtime defuns reach
+            -- their operands through the layout-derived accessors.  So they
+            -- are NOT refused here any more; only the float-only `f/` is (see
+            -- `wordArmPrimUnported`), plus any prim with no Mid impl.
+            case wordArmPrimUnported app.prim of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    wordArmUnportedArgs app.args
+
+        GRef _ ->
+            -- ============ CLOSURES (perf word-arm-closures) ============
+            -- A `GRef` in a VALUE position is `lowerGRefValue`, and its whole
+            -- emission is one call to `Rt.globalClosure(desc)` whose argument
+            -- is the descriptor's ADDRESS as a raw `l` word and whose result
+            -- is the module's `:val` class.  Both are arm-independent, and the
+            -- runtime half is now genuinely EXECUTED: the seat's word twin
+            -- builds a 2-word header plus a 4-word body at `mkval(6, body)`,
+            -- caches the BODY at `desc + 16`, and rebuilds the Value on the
+            -- cache hit.  That cell is C-heap — outside [heapStart, cursor) —
+            -- so the collector's range tests treat it as "not mine" and it is
+            -- never moved; the tagging is the same `...001` every heap object
+            -- carries.  The FORCED shape is a plain direct call, i.e. AREA 6's
+            -- own path.
+            Nothing
+
+        Lam lambda ->
+            -- An INNER lambda is `lowerClosure`: contiguous capture staging in
+            -- ROOTED frame slots (the slot stride is the instance's), the
+            -- closure's own QBE function through `lowerFunBody ... RtGeneric`
+            -- (whose prologue blits params and captures at `valSizeBytes`
+            -- strides), and one `Rt.closure(desc, capBase, K)` call.  What the
+            -- three boxed arguments carry is a RAW POINTER (`desc`, `capBase`)
+            -- or a count, and a raw pointer crossing as a number IS the
+            -- established `mknum(ptr)` wrap — the runtime reads it back with
+            -- `payload(·, 0)`, which is `sar 3` on this arm, the exact inverse
+            -- of `storeWordCell`'s `shl 3`.
+            --
+            -- The recursion is over the BODY, for the reason every other
+            -- compound construct recurses: the closure's body is lowered into
+            -- the same module, so a construct this arm cannot express must be
+            -- named HERE rather than discovered at its emit.
+            wordArmUnported lambda.body
+
+        ListLit es ->
+            -- ============ THE SURFACE LANE: A LIST LITERAL ============
+            -- `lowerListLit` is `lowerVal (buildList es)` — a list literal has
+            -- NO emission of its own, it desugars to a right-nested
+            -- `cons`/`emptylist` chain and those route through `rtPrimSlots`
+            -- into the runtime's own `Rt.cons`/`Rt.emptylist` (which ARE
+            -- twinned for this arm, perf word-arm-area3rt).  So the honest
+            -- classification is the one over the form the emitter will
+            -- actually see: classify the DESUGAR, not the sugar.  Classifying
+            -- `ListLit` as an opaque heap-object construction would refuse a
+            -- construct whose whole emission is a call this arm already
+            -- makes.
+            wordArmUnported (buildList es)
+
+        Tup es ->
+            -- ============ THE SURFACE LANE: A TUPLE ============
+            -- Same shape as `ListLit`: `lowerTup` is `lowerVal (buildTuple es)`
+            -- — a tuple has no emission of its own either.  `buildTuple` is a
+            -- right-nested `cons` chain terminated by the fixnum 0 (NOT by
+            -- `emptylist`: Mid's tuple encoding is a cons spine whose tail is
+            -- the number 0, which is what `Tup []` and the last element both
+            -- are), so every part of it is already arm-clean.  Classify the
+            -- desugar, for the reason stated at `ListLit`.
+            wordArmUnported (buildTuple es)
+
+        Case branch ->
+            -- ============ THE SURFACE LANE: A CASE ============
+            -- Every alternative is a tag test plus payload chases, and BOTH
+            -- halves are ported: `lowerTagMatch` goes through `wordTagIs`
+            -- (a word-tag compare for an IMMEDIATE valtag such as nil, a
+            -- GC-header KIND read for a heap one such as cons/vector — never a
+            -- bare tag compare, which would match every heap object), and the
+            -- chase family goes through `fieldBase` (payload word 0 IS the
+            -- element on this arm, so the base is its address).
+            --
+            -- What is NOT ported refuses here rather than at the emit:
+            --   * a CONSTRUCTOR-TAG match (`MTagEq`) materialises the tag as a
+            --     `symbol` literal, which is AREA 5's heap cell;
+            --   * a RECORD field bind (`VField`) is the refused record family —
+            --     its layout (the second parallel names array) is a design
+            --     question, not a stride.
+            case wordArmUnported branch.scrutinee of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    wordArmUnportedAlts branch.alts
+
         _ ->
             Just (wordArea (wordAreaName exp) (wordAreaWhat exp))
+
+
+{-| Every alternative of a `Case`: its matches, its pattern binds and its body.
+-}
+wordArmUnportedAlts : List Alt -> Maybe String
+wordArmUnportedAlts alts =
+    case alts of
+        [] ->
+            Nothing
+
+        alt :: rest ->
+            case wordArmUnportedMatches alt.matches of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    case wordArmUnportedBinds alt.binds of
+                        Just what ->
+                            Just what
+
+                        Nothing ->
+                            case wordArmUnported alt.body of
+                                Just what ->
+                                    Just what
+
+                                Nothing ->
+                                    wordArmUnportedAlts rest
+
+
+wordArmUnportedMatches : List Match -> Maybe String
+wordArmUnportedMatches matches =
+    case matches of
+        [] ->
+            Nothing
+
+        m :: rest ->
+            case m of
+                MTagEq _ _ ->
+                    Just (wordArea "AREA 3/5 (HEAP CELLS)" "a constructor-tag pattern — the tag is materialised as a `symbol` literal, and under the word arm a symbol is a heap object behind one tagged pointer (AREA 5)")
+
+                MLitEq _ lit ->
+                    case wordArmUnported (Lit lit) of
+                        Just what ->
+                            Just what
+
+                        Nothing ->
+                            wordArmUnportedMatches rest
+
+                _ ->
+                    wordArmUnportedMatches rest
+
+
+wordArmUnportedBinds : List ( Binder, ValuePath ) -> Maybe String
+wordArmUnportedBinds binds =
+    case binds of
+        [] ->
+            Nothing
+
+        ( _, path ) :: rest ->
+            case path of
+                VField _ _ ->
+                    Just (wordArea "AREA 3 (PAYLOAD ACCESS)" "a record field pattern — it is the RECORD family, whose word-arm body layout (the second, parallel field-NAMES array) is a design question this arm has not decided")
+
+                VPath _ ->
+                    wordArmUnportedBinds rest
+
+
+{-| Every field VALUE of a record literal, left to right — the same recursion
+the other compound constructs use.  The field NAMES are not expressions: they
+become the static names array (`RawDataAddr`), whose word arm R1 forked.
+-}
+wordArmUnportedRecordFields : List ( String, Exp ) -> Maybe String
+wordArmUnportedRecordFields fields =
+    case fields of
+        [] ->
+            Nothing
+
+        ( _, v ) :: rest ->
+            case wordArmUnported v of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    wordArmUnportedRecordFields rest
+
+
+{-| Every argument of a prim application, left to right — the same recursion
+the other compound constructs use, so a nested refusal is named rather than
+swallowed.
+-}
+wordArmUnportedArgs : List Exp -> Maybe String
+wordArmUnportedArgs args =
+    case args of
+        [] ->
+            Nothing
+
+        a :: rest ->
+            case wordArmUnported a of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    wordArmUnportedArgs rest
+
+
+{-| THE PRIMS WHOSE EMIT SITE IS NOT ARM-CLEAN, refused by name.
+
+THE ARITHMETIC CLASS LEFT THIS LIST (perf word-arm-arith), and it left as ONE
+classification rather than a site sweep: `lowerPrimApp`'s inline fast paths are
+a VAL-ARM SHAPE (they read the tag word at `slot + 0` and the payload at
+`slot + 8`), and under the word arm the whole family takes the ordinary
+`rtPrimSlots` route instead — the same route the AGGREGATE prims are admitted
+on, where the runtime's own `Rt.+`/`Rt.-`/`Rt.*`/`Rt./`/`Rt.<`/`Rt.=` reach
+their operands through the layout-derived accessors (`payload`, `payload32`,
+`mknum`, `tagis`).  So `+ - * < <= > >= =` are no longer listed here and are no
+longer refused.
+
+What REMAINS, and why each still refuses:
+
+  * `f/` -> `rawFloatBin` when both operands are proven Float, i.e. the heap-
+    boxed float cell (AREA 5).  It keeps its inline branch in `lowerPrimApp`
+    and is refused here BY NAME, so the word arm never routes it to `Rt.f/`
+    (which is float-only and would build a float cell).
+
+A prim NOT listed here and carrying a Mid implementation takes the plain
+`rtPrimSlots` route, which is arm-clean (see the `PrimApp` case above).  A prim
+with NO Mid implementation has no arm-clean route at all on this tree
+(`rtPrimSlotsZig` emits `rt_prim_*` symbols the runtime no longer defines), so
+it refuses here rather than at the linker.
+-}
+wordArmPrimUnported : String -> Maybe String
+wordArmPrimUnported prim =
+    if List.member prim wordArmInlinePrims then
+        Just (wordArea "AREA 5 (FLOATS)" ("the primitive `" ++ prim ++ "` — its inline arm emits the heap-boxed float cell, which does not exist under the word arm (and `Rt.f/` is float-only, so routing it to the runtime would build the same cell)"))
+
+    else if MidRt.primImpl prim == Nothing then
+        Just (wordArea "AREA 4 (ARITHMETIC)" ("the primitive `" ++ prim ++ "` — it has no Mid implementation, so it has no arm-clean route (the Zig fallback would emit rt_prim_* symbols the runtime no longer defines)"))
+
+    else
+        Nothing
+
+
+{-| The prims `lowerPrimApp` gives an inline, representation-shaped arm to AND
+that the word arm must therefore not reach.
+
+ONE ENTRY.  `+ - * < <= > >= =` were the rest of this list until perf
+word-arm-arith; they left it in the same commit that made `lowerPrimApp` skip
+their inline arms under the word arm, because the list and the fork are two
+halves of one decision and a list entry without the fork is a refusal of a
+construct the arm now gets RIGHT.  What is left is float-only.
+-}
+wordArmInlinePrims : List String
+wordArmInlinePrims =
+    [ "f/" ]
 
 
 {-| THE TAG OF THE VALUE WHOSE ADDRESS IS `base`, into the `w` temp `t`
@@ -824,6 +1282,48 @@ wordSurfaceUnported defuns keys =
                                 Just "a defun with a non-Lambda value (corrupt Mid tree)"
 
 
+{-| THE Rt DEFUNS THAT REFUSE BY NAME UNDER THE WORD ARM, with the reason.
+
+WHY A LIST AND NOT A SITE REFUSAL.  A site refusal only fires where a construct is
+un-ported; these defuns contain NO refusing construct — every element access in
+them is right-kind after `vecbody` — yet they are still wrong on the word arm
+because they reach a SECOND array whose placement the arm has not decided. The
+record family is exactly that: `payload(rec, 2)` is the field-NAMES array, and a
+word-arm record body is a flat run of `count` Values, so where the names live
+(after the data? in a second block? interleaved?) is a LAYOUT, not a stride. A
+read that is merely unreachable today is what the polarity forbids shipping, so
+these refuse LOUDLY until the record-layout unit lands.
+
+THE AUDIT THAT PRODUCED IT (not recall): every `payload(x, <n>)` / `reclen(..)`
+site in the word-spliced text with a non-zero word index, grouped by defun —
+`grep -nE "payload\([a-zA-Z0-9_]+, [1-9]\)"` on the spliced text. The names-side
+reads are runtime.mid's recGetGo/recUpdFind/recAppendFind/recAppendNamesGo/
+recToChainGo (plus recUpd/recAppend, which BUILD the record), and the compiler
+side has one more (`recordAccessBody`, guarded separately). Nothing else in the
+runtime reads a non-zero payload word of a heap object: the closure's field 2 and
+the stream's word 1 are BODY units, which is the same number on both arms.
+-}
+wordArmDefunRefusals : List ( String, String )
+wordArmDefunRefusals =
+    let
+        why =
+            "the RECORD family is not ported to the word arm: a word-arm record body is a flat run of `count` Values, so the placement of its SECOND array (the field NAMES, `payload(rec, 2)` on the val arm) is a layout decision, not a stride. Twin it in the record-layout unit or keep it refused - a names-array read against a data-array body is the mixed-representation read this arm exists to prevent"
+    in
+    [ ( "Rt.recGet", why )
+    , ( "Rt.recGetGo", why )
+    , ( "Rt.recUpd", why )
+    , ( "Rt.recUpdFind", why )
+    , ( "Rt.recUpdCopy", why )
+    , ( "Rt.recAppend", why )
+    , ( "Rt.recAppendFind", why )
+    , ( "Rt.recAppendDataGo", why )
+    , ( "Rt.recAppendNamesGo", why )
+    , ( "Rt.recToChain", why )
+    , ( "Rt.recToChainGo", why )
+    , ( "Rt.recInsert", why )
+    ]
+
+
 {-| THE Rt SURFACE, CLASSIFIED BY THE SAME PRE-WALK WHITELIST (perf VR3b3).
 
 VR3b2 refused any program that reached `runtime.mid` WHOLESALE, and the reason
@@ -849,25 +1349,35 @@ wordRtUnported defuns keys =
 
         k :: rest ->
             if isRtKey k then
-                case Dict.get k defuns of
-                    Nothing ->
-                        wordRtUnported defuns rest
+                case List.filter (\( rk, _ ) -> rk == k) wordArmDefunRefusals of
+                    ( _, why ) :: _ ->
+                        Just (k ++ ": " ++ why)
 
-                    Just defun ->
-                        case defun.value of
-                            Lam lambda ->
-                                case wordArmUnported lambda.body of
-                                    Just what ->
-                                        Just (k ++ ": " ++ what)
-
-                                    Nothing ->
-                                        wordRtUnported defuns rest
-
-                            _ ->
-                                Just (k ++ ": a defun with a non-Lambda value (corrupt Mid tree)")
+                    [] ->
+                        wordRtUnportedBody defuns k rest
 
             else
-                wordRtUnported defuns rest
+                wordRtUnportedBody defuns k rest
+
+
+wordRtUnportedBody : Dict String Defun -> String -> List String -> Maybe String
+wordRtUnportedBody defuns k rest =
+    case Dict.get k defuns of
+        Nothing ->
+            wordRtUnported defuns rest
+
+        Just defun ->
+            case defun.value of
+                Lam lambda ->
+                    case wordArmUnported lambda.body of
+                        Just what ->
+                            Just (k ++ ": " ++ what)
+
+                        Nothing ->
+                            wordRtUnported defuns rest
+
+                _ ->
+                    Just (k ++ ": a defun with a non-Lambda value (corrupt Mid tree)")
 
 
 wordAreaName : Exp -> String
@@ -912,12 +1422,6 @@ wordAreaName exp =
         ListLit _ ->
             "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
 
-        Lam _ ->
-            "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
-
-        GRef _ ->
-            "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
-
         StreamRef _ ->
             "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
 
@@ -954,6 +1458,9 @@ rawNodeArea node =
         RawAllocN _ ->
             "AREA 6 (THE CALL ABI)"
 
+        RawTailCall _ ->
+            "AREA 6 (THE CALL ABI)"
+
         RawFltBin _ ->
             "AREA 5 (FLOATS)"
 
@@ -977,7 +1484,12 @@ wordAreaWhat exp =
             "a call — its argument staging, `:ret` aggregate and .tail metadata are not ported"
 
         PrimApp _ ->
-            "a primitive application — arithmetic needs inline tag/untag and the i61 overflow/boxing path"
+            -- Effectively unreachable now that the arithmetic class is ported:
+            -- `wordArmPrimUnported` names the prim and its own area, and every
+            -- other PrimApp takes the `rtPrimSlots` route.  Kept truthful
+            -- anyway, because a refusal that lies about its cause is worse than
+            -- none.
+            "a primitive application — a prim with no Mid implementation, or the float-only `f/` (see `wordArmPrimUnported`, which names it)"
 
         Case _ ->
             "a case — every alternative is a tag test, and under the word arm a tag test is `and`+compare (immediates) or a header-kind read (heap objects)"
@@ -1011,12 +1523,6 @@ wordAreaWhat exp =
 
         ListLit _ ->
             "a list literal — a cons chain of heap objects"
-
-        Lam _ ->
-            "a closure — a heap object under the word arm"
-
-        GRef _ ->
-            "a global reference — it materialises a closure or descriptor Value"
 
         StreamRef _ ->
             "a stream reference — it materialises a symbol Value"
@@ -1133,6 +1639,20 @@ lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec _ mid
                         unique
                             (List.filter (\k -> not (List.member k surfaceKeys)) (MidRt.seeds usedPrims)
                                 ++ List.filter (\k -> not (List.member k surfaceKeys)) (unique (MidRt.gcSeeds ++ MidRt.conSeeds ++ MidRt.closureSeeds ++ MidRt.lowerSeatSeeds))
+                                -- THE WORD-ARM-ONLY SEATS (perf word-arm-area3rt):
+                                -- seeded ONLY on the word arm.  Every key exists in
+                                -- runtime.mid only inside a QBE_WORDVAL-ONLY region,
+                                -- and the checker resolves a seeded key against the
+                                -- spliced text and REFUSES an unknown global
+                                -- (MEASURED: `unknown global Rt.kindHdr` the moment
+                                -- the seat was seeded through a shared defun's edge
+                                -- on the val arm).
+                                ++ (if layout.heapTagIsKind then
+                                        List.filter (\k -> not (List.member k surfaceKeys)) (unique MidRt.wordArmSeeds)
+
+                                    else
+                                        []
+                                   )
                                 -- THE NURSERY SEEDS (GC NURSERY unit): the young
                                 -- defuns exist in the surface only when run.js
                                 -- kept the QBE_MIDGC_YOUNG-ONLY regions, so they
@@ -1236,6 +1756,14 @@ lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec _ mid
                     , paramPtr = Dict.empty
                     , noCollect = noCollect
                     , leafFree = leafFree
+                    , -- Q1b: the MODULE-level seed.  False here and set per
+                      -- defun by lowerFunBody: only an RtGeneric body may emit
+                      -- a tcall, and nothing outside a defun body lowers an App.
+                      tailEmit = False
+
+                    -- U1: likewise module-level — no defun is being lowered, so
+                    -- there is no frame for a `tailcall` guard to look at.
+                    , pooledFrame = False
                     }
 
                 -- THE MIDGC REFUSAL ARMS ARE GONE (stage 7 O2).  Two arms
@@ -1273,8 +1801,12 @@ lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec _ mid
                 -- NOT COVERED BY EITHER (before or after): this says nothing
                 -- about whether every Mid-IMPLEMENTED prim is Mid-sound — that is
                 -- the corrected-criterion audit (plan.md §2.2), whose pure-program
-                -- half is pinned by probe-midgc-tail.sh (the transient tail array
-                -- is a scavenge trigger but not a hole).
+                -- half is pinned by the probe-midgc-* suite (19 scripts, run from
+                -- the repo root).  THE EXAMPLE THIS SENTENCE USED TO NAME IS GONE:
+                -- the transient `.tail` array (and `probe-midgc-tail.sh`, which
+                -- pinned it) belonged to the `.tail` staging that U3a/U3b deleted —
+                -- the apply chain now stages into ONE malloc'd block
+                -- (`Rt.stage-apply`), freed on every exit of `Rt.applyTailGo`.
                 -- THE Rt SURFACE GATE (perf VR3b2, worklist entry 7).  Every
                 -- Rt.* defun is `runtime.mid` text written against the 40-byte
                 -- layout — gcAlloc's `2 + count + 4*count*kind`, apply's
@@ -1515,6 +2047,21 @@ rawCallEdges defuns node =
             else
                 []
 
+        -- U1: a `tailcall` to a defun of this program is the same edge a
+        -- `rawcall` to it is (and the same one `rtDeps` declares for the Rt
+        -- lane); an extern target names no defun here.
+        RawTailCall tc ->
+            case tc.target of
+                TailKey key ->
+                    if Dict.member key defuns then
+                        [ key ]
+
+                    else
+                        []
+
+                TailSym _ ->
+                    []
+
         _ ->
             []
     )
@@ -1544,6 +2091,12 @@ rawOperands node =
 
         RawVecAddr r ->
             [ r.vec, r.index ]
+
+        RawVecBody r ->
+            [ r.value ]
+
+        RawVecLen r ->
+            [ r.value ]
 
         RawVecStore r ->
             [ r.vec, r.index, r.value ]
@@ -1607,6 +2160,9 @@ rawOperands node =
         RawCallRaw call ->
             call.args
 
+        RawTailCall tc ->
+            tc.args
+
         -- cffi U2 — the typed C boundary's operands are its args, in order
         -- (the widths are NODE DATA, not expressions).
         RawCallExtern call ->
@@ -1638,8 +2194,8 @@ rawOperands node =
 --     FRESH ROOTED frame slot of the caller, and the caller's frame stays live
 --     for the whole callee — so the collector rewrites the Value IN PLACE and
 --     the pointer stays valid at every safepoint the callee reaches.
---   * a CLOSURE call (rt_apply -> rt_call2r) and a TAIL call (rt_tail-known ->
---     rt_bounce -> rt_callN) pass pointers into GC ARRAYS (`buf`, the closure
+--   * a CLOSURE call (rt_apply -> rt_call2r) and a TAIL call (Rt.stage-tail ->
+--     the callee) pass pointers into GC ARRAYS (`buf`, the closure
 --     env, the apply args) — the MOVING collector relocates those, so a lazy
 --     read is a stale pointer.  Both paths are sound today only because the
 --     callee copies out at entry, before its first safepoint.
@@ -2009,7 +2565,19 @@ calledPrims rec exp =
                     Set.union (go block.left) (go block.right)
 
                 NotEqual block ->
-                    Set.union (go block.left) (go block.right)
+                    -- `lowerNotEqual` is `lowerNumEq` + a negated Boolean, and
+                    -- `lowerNumEq`'s GENERIC tail calls `rtPrimSlots "="` —
+                    -- which is the tail every operand pair takes except two
+                    -- proven Ints (or two proven Floats).  So `=` must be
+                    -- seeded here or the call site has no `Rt.=` to link
+                    -- against.  MEASURED (perf word-arm-arith): without this
+                    -- arm `if "a" /= "b" then ..` REFUSED TO COMPILE on the
+                    -- VAL arm too, with the seed guard's own message — a
+                    -- latent census miss this unit's `=` port surfaced, not a
+                    -- word-arm problem.  Over-seeding the proven-Int case (where
+                    -- the fast path emits no call) is the convention this
+                    -- function already states at RecordGet.
+                    Set.union (Set.singleton "=") (Set.union (go block.left) (go block.right))
 
                 Loop block ->
                     Set.union (go block.cond) (go block.body)
@@ -2205,11 +2773,15 @@ lowerDefun runtime defun sOuter =
 
 
 -- ============================ FUNCTION BODY ============================
--- Frame layout: slot 0 result `:val`, slot 1 the `.tail` metadata (kind/f/e/
--- args/arity — the second half of the 80-byte `:ret` return), 2..N+1 params,
--- N+2..N+1+K captures, then temps.  Blocks: @start (prologue; jump @body),
--- @body (loop head for self-tail), ... interior ..., @ret (rt_frame_leave;
--- ret %s0 — returns the whole 80-byte `:ret` at slot 0).
+-- Frame layout: slot 0 is the RESULT, then params, then captures, then temps.
+-- U3b deleted the second result slot: slot 1 used to hold the `.tail` metadata
+-- (kind/f/e/args/arity — the second half of the 80-byte `:ret` return), so a
+-- frame's result area was `slotBase = 2`.  On the VALUE arm the result is
+-- `:val` — one slot — so `slotBase` is 1 and every later slot moves down one.
+-- It stays 2 on the WORD arm, whose frozen `:ret` return shape still has a
+-- kind word (AREA 6; see `closureRetClass`).
+-- Blocks: @start (prologue; jump @body), @body (loop head for self-tail),
+-- ... interior ..., @ret (rt_frame_leave; ret %s0 — returns slot 0).
 --
 -- THE Rt LEAN ARM (osier-midabi): when `rt` is Just _ the SAME slot layout
 -- addresses off a DIFFERENT base (the function's signature, return type and
@@ -2299,14 +2871,31 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                             False
                    )
 
+        -- AREA 6: does a value parameter arrive as a WORD (not a pointer)?
+        -- Exactly the word arm's RtGeneric class — the closure ABI, whose
+        -- callers (directCall, RawCall, the generated rt_callN) load the word
+        -- out of the arg slot and pass it in the register.  The lean and
+        -- rawAbi classes are Rt->Rt internal conventions and stay
+        -- pointer/register as they were (their callee-side prologue blits, or
+        -- reads the register directly, and both are arm-independent).
+        paramWordsD =
+            rt == RtGeneric && wordArm sOuter
+
         -- VR1: this defun reads its value params THROUGH the incoming `l`
         -- pointers instead of blitting them into its own frame at entry.
         -- Only a top-level RtGeneric defun with at least one value param is
         -- eligible (a closure body is called through rt_callN with GC-array
         -- pointers, and an Rt key's lean/word ABI has no `:val` params at all).
+        --
+        -- AREA 6: NEVER ON THE WORD ARM.  `%a<i>` there IS the value word, so
+        -- a ptrRead body would dereference a fixnum as an address — the exact
+        -- silent-wrong shape the arm's polarity forbids.  The walk that builds
+        -- `sOuter.ptrRead` is arm-blind (it reasons about the val arm's
+        -- pointers), so the arm is excluded HERE, at the one seat that decides.
         ptrReadD =
             entry
                 && not rawAbi
+                && not (wordArm sOuter)
                 && not (isRtKey key)
                 && nparams > 0
                 && Set.member key sOuter.ptrRead
@@ -2325,6 +2914,10 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             else
                 Set.empty
 
+        -- U3b: the result area's width — see `resultSlotBase`.
+        slotBase =
+            resultSlotBase sOuter.layout
+
         s0 =
             { blocks = []
             , curLabel = "start"
@@ -2333,21 +2926,22 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , lbl = 0
             , slot =
                 -- VR1: a ptrRead defun's params occupy NO frame slots — the
-                -- body reads them through `%a<i>`, so 2..N+1 (the params) are
+                -- body reads them through `%a<i>`, so the params' slots are
                 -- simply not reserved and the frame is N slots smaller (the
                 -- memset at rt_frame_enter is proportional to it).
                 if ptrReadD then
-                    2 + ncaps
+                    slotBase + ncaps
 
                 else
-                    2 + nparams + ncaps
+                    slotBase + nparams + ncaps
             , binderSlots =
                 Dict.fromList
                     ((if rawAbi then
                         -- rawAbi params are WORD registers, not frame slots —
-                        -- the slot counter still reserves 2..N+1 so the body's
-                        -- own temps get the SAME slot numbers as every other
-                        -- Rt defun (the slots are simply never written/read).
+                        -- the slot counter still reserves the params' slots so
+                        -- the body's own temps get the SAME slot numbers as
+                        -- every other Rt defun (the slots are simply never
+                        -- written/read).
                         []
 
                       else if ptrReadD then
@@ -2357,20 +2951,21 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                         []
 
                       else
-                        List.indexedMap (\i p -> ( p.id, i + 2 )) lambda.params
+                        List.indexedMap (\i p -> ( p.id, i + slotBase )) lambda.params
                      )
                         -- NOTE, because the two counters disagree on purpose: a
-                        -- capture is numbered ABOVE the params (nparams + 2 + j)
-                        -- even under ptrReadD, whose fresh-slot counter starts at
-                        -- 2 + ncaps with NO param reservation — so a ptrRead defun
-                        -- with captures would hand out temps that collide with
-                        -- these slots.  That is unreachable, and reachable only
-                        -- from one place: lowerDefun (:1528) passes captures = []
-                        -- to EVERY entry defun, so the capture list is always
-                        -- empty where ptrReadD can be true.  If an entry defun
-                        -- ever gets captures, the ptrRead slot base at :1660 must
-                        -- become 2 + nparams + ncaps to match.
-                        ++ List.indexedMap (\j cid -> ( cid, nparams + 2 + j )) captures
+                        -- capture is numbered ABOVE the params
+                        -- (nparams + slotBase + j) even under ptrReadD, whose
+                        -- fresh-slot counter starts at slotBase + ncaps with NO
+                        -- param reservation — so a ptrRead defun with captures
+                        -- would hand out temps that collide with these slots.
+                        -- That is unreachable, and reachable only from one place:
+                        -- lowerDefun (:1528) passes captures = [] to EVERY entry
+                        -- defun, so the capture list is always empty where
+                        -- ptrReadD can be true.  If an entry defun ever gets
+                        -- captures, the ptrRead slot base above must become
+                        -- slotBase + nparams + ncaps to match.
+                        ++ List.indexedMap (\j cid -> ( cid, nparams + slotBase + j )) captures
                     )
             , rawInt = Dict.empty
             , rawFloat = Dict.empty
@@ -2451,6 +3046,32 @@ lowerFunBody entry key qname lambda captures rt sOuter =
             , ptrRead = sOuter.ptrRead
             , noCollect = sOuter.noCollect
             , leafFree = sOuter.leafFree
+            , -- Q1b: a `tcall` is legal exactly where OUR OWN return convention is
+              -- the one the callee must produce into — abi1 forwards OUR hidden
+              -- sret pointer to the callee and C4 re-checks that the two
+              -- classes agree.  That is RtGeneric — every surface defun and
+              -- every closure body — and nothing else: a lean body returns
+              -- `:val`, a rawAbi word body a word, and a tcall from either is
+              -- refused by the backend's C4 check (loudly, naming the
+              -- condition), so Mid must not emit one there.
+              --
+              -- U3a moved the CLASS, not this rule: an RtGeneric body's return
+              -- is now `:val` (see retTy), so its tcalls are `tcall :val`.
+              tailEmit = rt == RtGeneric
+            , -- U1: the frame CLASS, as `proKind` below decides it — the one
+              -- fact `lowerRawTailCall`'s frame-leave guard needs.  Spelled as
+              -- the same two-constructor case so the guard cannot drift from
+              -- the prologue the defun actually emits.
+              pooledFrame =
+                case rt of
+                    RtLeanFree ->
+                        False
+
+                    RtRawWord ->
+                        False
+
+                    _ ->
+                        True
             }
 
         -- the (empty) @start block, closed by its fallthrough to @body
@@ -2473,7 +3094,22 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                     rawAbiRetClass key
 
                 RtGeneric ->
-                    Agg "ret"
+                    -- U3a — THE CLASS FLIP.  A surface defun / closure body
+                    -- used to return the 80-byte `:ret` (`.done` | `.tail`),
+                    -- because a tail call could only be expressed by RETURNING
+                    -- a request for Rt.bounce to chase.  Nothing builds a
+                    -- `.tail` any more (the apply chain `tcall`s, the static
+                    -- arity-5+ sites went non-tail, and U3b deleted the
+                    -- builders/chasers outright), so the closure ABI returns
+                    -- the finished Value: 40 bytes,
+                    -- `:val`.  That is what makes the F-site `tcall :val` into
+                    -- Rt.apply-tail legal at abi1's C4 (the callee's class must
+                    -- equal the enclosing body's).
+                    --
+                    -- The `@ret` block needs no change: an aggregate return is
+                    -- "ret the ADDRESS of the block in slot 0" either way, so
+                    -- only the declared TYPE and its width move.
+                    closureRetClass sOuter
 
         paramsList =
             case rt of
@@ -2626,33 +3262,18 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                                     Agg "val" ->
                                         startBlock "ret" s1 |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
 
-                                    Agg "ret" ->
-                                        -- THE .tail NO-COLLECT INVARIANT (stated
-                                        -- at the Mid surface too, applyTailGo's
-                                        -- saturated arm): this @ret block copies
-                                        -- the .tail args out of the fresh allocvec
-                                        -- array, which is UNROOTED and must be read
-                                        -- EXACTLY ONCE by the callee prologue blit
-                                        -- with NO collection in between.  Do NOT
-                                        -- add a GC alloc to this block — it would
-                                        -- break the invariant silently.
-                                        --
-                                        -- The `free(retBuf)` below is NOT a GC
-                                        -- alloc (libc free is not a safepoint: it
-                                        -- cannot collect, cannot move anything),
-                                        -- and it runs AFTER the blit has copied
-                                        -- the 80-byte :ret out of the malloc'd
-                                        -- buffer — the buffer is dead from here.
-                                        -- Without it every :ret producer leaks 80 B
-                                        -- per call (Rt.apply-tail x2, Rt.tail-known
-                                        -- — all three `malloc(80)` sites in
-                                        -- runtime.mid), unbounded over a tail loop.
-                                        startBlock "ret" s1
-                                            |> emit (Bin (Just "retAddr") L Add (Il.Tmp (slotTmp 0)) (Il.Con (RtLayout.payloadWordOffset s1.layout 0)))
-                                            |> emit (Load (Just "retBuf") L LoadL (Il.Tmp "retAddr"))
-                                            |> emit (Blit (Il.Tmp "retBuf") (Il.Tmp (slotTmp 0)) (RtLayout.retSizeBytes s1.layout))
-                                            |> emit (Call Nothing (Base W) (Il.Sym "free") [ ArgVal (Base L) (Il.Tmp "retBuf") ])
-                                            |> closeBlock (Ret (Just (Il.Tmp (slotTmp 0))))
+                                    -- U3b: NO `Agg "ret"` ARM.  It was the
+                                    -- 80-byte `.tail` blit (plus the P1a
+                                    -- `free` of the malloc'd cell): the body
+                                    -- left `mknum(retbuf)` in slot 0, this
+                                    -- block read the pointer back out of the
+                                    -- number's payload and copied 80 bytes
+                                    -- into the sret area.  With `struct Ret`
+                                    -- and `Rt.tail-known` deleted, no rawAbi
+                                    -- key can return `:ret`, so every
+                                    -- aggregate-returning rawAbi body takes the
+                                    -- `Agg "val"` arm above — slot 0 IS the
+                                    -- result and there is nothing to blit.
 
                                     _ ->
                                         startBlock "ret" s1 |> closeBlock (Ret (Just rawWordResult))
@@ -2719,6 +3340,7 @@ lowerFunBody entry key qname lambda captures rt sOuter =
                             else
                                 proKind
                         , rawAbi = rawAbi
+                        , paramWords = paramWordsD
                         , ptrRead = ptrReadD
                         , paramWidths = widths
                         , entryKey =
@@ -2772,6 +3394,13 @@ lowerTail exp s =
         Lam lambda ->
             lowerClosure lambda 0 s
                 |> Result.map (jumpTo "ret")
+
+        Unsafe (RawTailCall tc) ->
+            -- U1 (handoff apply-chain): the DSL's own tail call.  This is the
+            -- arm the construct exists for — `RawCall` below can only ever
+            -- express a SELF-tail loop, and a cross-defun relay lowered to a
+            -- `call` + `jmp @ret` keeps a frame per hop.
+            lowerRawTailCall tc s
 
         Unsafe (RawCall call) ->
             -- RawCall self-tail (zigretire stage 4): the collector's mark/sweep
@@ -3203,6 +3832,13 @@ lowerValValue id dest s =
 lowerRawVal : UnsafeNode -> Int -> S -> Result String S
 lowerRawVal node dest s =
     case node of
+        RawTailCall _ ->
+            -- U1: unreachable for checked input — the DSL's J16 admits a
+            -- `tailcall` only in TAIL position, and a value position would be
+            -- asking a terminator for a value.  Loud rather than lowered into
+            -- a slot the caller would then read.
+            Err "qbe: a `tailcall` in a VALUE position — it is a TERMINATOR and produces no value (the DSL checker refuses this shape before lowering; reaching here is a compiler bug)"
+
         RawMkValue mk ->
             -- Build a Value cell in the dest slot: the u32 tag, then payload
             -- word i at offset 8 + 8i (gc/types.zig's extern union behind the
@@ -3216,6 +3852,16 @@ lowerRawVal node dest s =
         RawVecLoad load ->
             -- Element i's VALUE, blitted into the dest slot (a load never
             -- barriers).
+            --
+            -- AREA 3 (perf word-arm-area3rt): the ARM IS UNCHANGED — `elemAddr`
+            -- strides by the layout and the blit width is `valSizeBytes`, so at
+            -- 8 bytes this copies the one word that IS the element.  What the
+            -- refusal that used to stand here was really about is the BASE: a
+            -- word-arm site that computed one with `payload(v, 0)` gets element
+            -- 0, not an array.  That is fixed at the SITES (runtime.mid's
+            -- `vecbody(v)`, which is `payload(v, 0)` on the val arm and the
+            -- BODY on the word arm), not by refusing the node — and the audit
+            -- that makes it total is `vecbody`'s own contract.
             rawWordArg load.vec s
                 |> Result.andThen
                     (\( vecT, s1 ) ->
@@ -3236,6 +3882,13 @@ lowerRawVal node dest s =
             -- first — its address is the argument.
             -- `dest` is deliberately IGNORED: this node is an effect, and its
             -- let binder's slot stays zero (a valid Value; nothing reads it).
+            -- AREA 3 (perf word-arm-area3rt): admitted on the same argument as
+            -- RawVecLoad — the BASE is the sites' business (`vecbody`), and the
+            -- seam (`Rt.vecStorePlain`/`Rt.vecStoreYoung`) is already twinned:
+            -- 8-byte stride, one word stored, the barrier reading the block
+            -- header at `-2` off the BODY.  The stored value is lowered into a
+            -- fresh ROOTED slot first — its address is the argument, and it is
+            -- an 8-byte slot on this arm.
             rawWordArg store.vec s
                 |> Result.andThen
                     (\( vecT, s1 ) ->
@@ -3403,8 +4056,7 @@ lowerRawVal node dest s =
             -- pairing — if the CALLEE can allocate, this caller is
             -- `allocating` too, so these slots are ROOTED (rt_frame_enter); if
             -- the callee is frame-free, no GC can run anywhere under this
-            -- call.  QBE_NORTLEAN=1 restores the fat :val-args/:ret/rt_bounce
-            -- shape.
+            -- call.  QBE_NORTLEAN=1 restores the fat :val-args shape.
             --
             -- THE ACCEPTANCE (M3fix-4) is MEMBERSHIP IN THIS PROGRAM's defun
             -- set (`s.defuns`) — the keys whose `q_` symbol the emission fold
@@ -3475,17 +4127,22 @@ lowerRawVal node dest s =
 
                             else
                                 let
-                                    ( rp, s2 ) =
-                                        freshTmp s1
+                                    ( operands, s2 ) =
+                                        argOperands slots s1
 
-                                    ( vp, s3 ) =
+                                    ( rp, s3 ) =
                                         freshTmp s2
                                 in
+                                -- U3a: the generic-ABI callee returns the
+                                -- finished `:val` (no `.done`/`.tail` pair to
+                                -- unwrap), so there is no bounce here either —
+                                -- the same flip as directCall's non-tail arm.
+                                -- AREA 6: and the arguments cross through the
+                                -- SAME fork (`argOperands`) — address on the
+                                -- value arm, value word on the word arm.
                                 Ok
-                                    (s3
-                                        |> emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle call.sym)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots))
-                                        |> emit (Call (Just vp) (Agg "val") (Il.Sym (bounceSeat s)) [ ArgVal (Base L) (Il.Tmp rp) ])
-                                        |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
+                                    (emit (Call (Just rp) (closureRetClass s) (Il.Sym ("q_" ++ mangle call.sym)) operands) s3
+                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
                                     )
                         )
 
@@ -3505,6 +4162,12 @@ lowerRawVal node dest s =
             Err wordProducerMessage
 
         RawVecAddr _ ->
+            Err wordProducerMessage
+
+        RawVecBody _ ->
+            Err wordProducerMessage
+
+        RawVecLen _ ->
             Err wordProducerMessage
 
         -- step 5's word producers (and the float words, a class over) never
@@ -3573,8 +4236,8 @@ lowerRawVal node dest s =
             -- <callee> [word args]` then a Blit of the 40-B :val into the
             -- dest slot, EXACTLY the rtApply non-tail shape (lowerApp's
             -- rtApply arm: `%v =:val call rt_apply(...)` + blit into dest).
-            -- This is how the driver turns rt_bounce/rt_parse_arg/
-            -- rt_run_program's sret results into Values.  Only shape "val"
+            -- This is how the driver turns rt_callN/rt_call2r's sret results
+            -- into Values.  Only shape "val"
             -- fits a :val slot — "ret" is 80 B and cannot blit into 40.
             if call.shape /= "val" then
                 Err "qbe: rawCallAgg in a VALUE position must be shape \"val\" (a 40-B :val fits the slot; \"ret\" is 80 B and cannot)"
@@ -3612,16 +4275,18 @@ wordProducerMessage =
 -- ==================== THE WORD ARM'S CELL WRITER AND READERS (VR3b3) ====================
 -- AREA A (the writer below) and AREA B (the readers).  EVERY number here comes
 -- from `Mid.RtLayout`'s word-arm heap contract — `heapPtrTag`, `untagMask`,
--- `tagBits`, `heapHeaderBytes`, `heapBodyOffset` — and none is spelled: a
+-- `tagBits`, `heapHeaderBytes`, `heapHeaderOffset`, `heapBodyUnitOffset` — and
+-- none is spelled: a
 -- literal 1 / 3 / 8 / 16 / 24 in this section would be a second statement of
 -- the layout, which is the failure this arc exists to prevent.
 --
--- THE SHAPE.  A word-arm Value is ONE word, so reaching a heap object is always
--- untag (`w AND untagMask`) -> step past the 2-word header -> step into the
--- body.  A 40-byte Value's payload read is NOT that shape and neither is a
--- shifted field offset: the val arm's `payloadWordOffset` (a tag word then
--- payload words) has no word-arm meaning at all, which is why every read below
--- is a `if wordArm s then <block shape> else <record shape>` fork.
+-- THE SHAPE.  A word-arm Value is ONE word, and untagging it (`w AND
+-- untagMask`) yields the BODY, with the 2-word GC header `heapHeaderOffset`
+-- (= -16) BEFORE it (RtLayout's THE CONVENTION, which is the RUNTIME's: a seat
+-- returns `mknum(body)`).  A 40-byte Value's payload read is NOT that shape and
+-- neither is a shifted field offset: the val arm's `payloadWordOffset` (a tag
+-- word then payload words) has no word-arm meaning at all, which is why every
+-- read below is a `if wordArm s then <body shape> else <record shape>` fork.
 
 
 {-| The VALUE WORD at a slot address, into a fresh `l` temp. -}
@@ -3634,31 +4299,19 @@ wordValueWord base s =
     ( v, emit (Load (Just v) L LoadL base) s1 )
 
 
-{-| UNTAG: the BLOCK ADDRESS of a word-arm heap object (its low bits are the
-tag).  On the val arm this is the identity — `untagMask` is all ones — so the
-function is total, and only the word arm ever calls it. -}
-wordBlockAddr : Il.Arg -> S -> ( String, S )
-wordBlockAddr valueWord s =
+{-| UNTAG: THE BODY ADDRESS of a word-arm heap object — the untagged word IS
+the body, because a seat returns `mknum(body)` and the 2-word GC header sits
+`heapHeaderOffset` (= -16) BEFORE it (`RtLayout`'s THE CONVENTION, aligned to
+`runtime.mid`'s gcAlloc on the owner's decision).  On the val arm this is the
+identity — `untagMask` is all ones — so the function is total, and only the
+word arm ever calls it. -}
+wordBodyOf : Il.Arg -> S -> ( String, S )
+wordBodyOf valueWord s =
     let
         ( b, s1 ) =
             freshTmp s
     in
     ( b, emit (Bin (Just b) L And valueWord (Il.Con (RtLayout.untagMask s.layout))) s1 )
-
-
-{-| The BODY address of a word-arm heap object: the block past the 2-word GC
-header.  This is what the val arm's `payloadWordOffset 0` read RETURNS (a raw
-body pointer) and what every `vecaddr`/`vecload`/`byte` site consumes. -}
-wordBodyAddr : Il.Arg -> S -> ( String, S )
-wordBodyAddr valueWord s =
-    let
-        ( b, s1 ) =
-            wordBlockAddr valueWord s
-
-        ( t, s2 ) =
-            freshTmp s1
-    in
-    ( t, emit (Bin (Just t) L Add (Il.Tmp b) (Il.Con (RtLayout.heapHeaderBytes s.layout))) s2 )
 
 
 {-| The header's KIND CODE of a word-arm heap object, into a `w` temp — the ONE
@@ -3675,25 +4328,28 @@ structure; this function only computes the code and the "is it 0" flag.
 wordKindCode : Il.Arg -> S -> ( String, String, S )
 wordKindCode valueWord s =
     let
-        ( blk, s1 ) =
-            wordBlockAddr valueWord s
+        ( body, s1 ) =
+            wordBodyOf valueWord s
 
-        ( hdr, s2 ) =
+        ( hdrA, s2 ) =
             freshTmp s1
 
-        ( code, s3 ) =
+        ( hdr, s3 ) =
             freshTmp s2
+
+        ( code, s4 ) =
+            freshTmp s3
     in
     ( code
     , hdr
-    , s3
-        -- THE HEADER IS THE BLOCK'S FIRST TWO WORDS, so the reader adds
-        -- NOTHING to the untagged block address.  (MEASURED: subtracting
-        -- `heapHeaderBytes` here - the shape a reader that holds the BODY
-        -- needs - made the harness read the word BEFORE the block, see code 0
-        -- and refuse a perfectly good cons.  The text pin had blessed the
-        -- `sub ..., 16`.)
-        |> emit (Load (Just hdr) L LoadL (Il.Tmp blk))
+    , s4
+        -- THE HEADER IS `heapHeaderOffset` (= -16) FROM THE BODY, never at the
+        -- body and never at a block base: a seat RETURNS the body, so the two
+        -- header words precede it.  MEASURED (found by RUNNING): reading AT the
+        -- untagged address saw the body's first word as a "header" (code 0) and
+        -- refused a good cons; reading `block - 16` was off by a whole object.
+        |> emit (Bin (Just hdrA) L Add (Il.Tmp body) (Il.Con (RtLayout.heapHeaderOffset s.layout)))
+        |> emit (Load (Just hdr) L LoadL (Il.Tmp hdrA))
         |> emit (Bin (Just code) W Shr (Il.Tmp hdr) (Il.Con s.layout.heapKindShift))
         |> emit (Bin (Just code) W And (Il.Tmp code) (Il.Con s.layout.heapKindMask))
     )
@@ -3703,14 +4359,18 @@ wordKindCode valueWord s =
 so the writer and every caller that can refuse at COMPILE time (the `mk*` path,
 which returns `Result`) cannot disagree about what is ported.
 
-The immediates (number, boolean, nil, error) need no heap object.  Of the heap
-codes only a STRING is writable here: its body is RAW (`heapKindScanned` false),
-so the two raw words it carries (byte pointer, length) are never traced by the
-collector and the cell is sound.  Every other heap code's body would hold a RAW
-word in a body the collector SCANS — see `storeWordCell`'s note.
+The immediates (number, boolean, nil, error) need no heap object.  A STRING is
+written here as a whole cell: its body is RAW (`heapKindScanned` false), so the
+two raw words it carries (byte pointer, length) are never traced by the
+collector and the cell is sound.  Every other heap code is writable ONLY as
+`mkval(code, bodyBase)` — ONE word, the body its own Mid seat already allocated
+and filled (the seat-return convention, perf word-arm-area3rt) — because a body
+the emitter laid out itself would put the val arm's raw pointers into a body the
+collector SCANS.  The WORD COUNT is therefore part of the judgment, not just the
+code: `wordCellRefusal code wordCount`.
 -}
-wordCellRefusal : Int -> Maybe String
-wordCellRefusal code =
+wordCellRefusal : Int -> Int -> Maybe String
+wordCellRefusal code wordCount =
     case RtLayout.wordTagShape code of
         RtLayout.WordNoForm why ->
             Just ("a cell with " ++ why)
@@ -3722,11 +4382,25 @@ wordCellRefusal code =
             if c == RtLayout.tagString then
                 Nothing
 
+            else if wordCount == 1 then
+                -- THE SEAT-RETURN CONVENTION (perf word-arm-area3rt).  ONE word
+                -- means the CALLER already allocated the body through the
+                -- code's Mid seat — `Rt.allocCons`/`allocKind`/`allocVector`
+                -- return `mknum(body)` and write the 2-word header INCLUDING
+                -- this code — so the cell writer's whole job is the tag
+                -- (`body OR heapPtrTag`).  The scan contract is then the
+                -- ALLOCATOR's (the scan bit is derived from the code by
+                -- `Rt.kindHdr`), which is exactly why this is sound: the
+                -- emitter is not inventing a body, it is tagging one.
+                Nothing
+
             else
                 Just
                     ("a heap cell with the kind code "
                         ++ String.fromInt c
-                        ++ " - its body would carry a RAW word into a body the collector SCANS (the val arm keeps those as pointers in a 40-byte Value's payload and the val scanner relocates them per tag; the word arm's body is a flat run of Value slots), so the layout has to be settled in runtime.mid's constructors and the scan contract, not invented here"
+                        ++ " and "
+                        ++ String.fromInt wordCount
+                        ++ " payload words - a word-arm heap cell is written by its ALLOCATOR (one word: the body the seat returned), because a body the emitter laid out itself would have to carry the val arm's raw pointers into a body the collector SCANS. Settle the layout in runtime.mid's constructor, not here"
                     )
 
 
@@ -3741,10 +4415,13 @@ arm writes ONE word, and WHICH word depends on the code's SHAPE
     number is the i61 fixnum (`n` shifted up into the tag's free low bits), a
     boolean is `tagTrue + (x == 0)` (there is no payload word to carry the
     flag), nil and error are the tag alone.  NOTHING is allocated.
-  * `WordHeapCode` - a heap block: allocate through the code's Mid seat, write
-    the body through `heapBodyOffset`, and store `block OR heapPtrTag`.  The
-    header's kind code is written by the SEAT (`Rt.kindHdr`), which is why the
-    seat call is the place the code is named, not a second store here.
+  * `WordHeapCode` - a heap object: allocate through the code's Mid seat, write
+    the body through `heapBodyUnitOffset` (the seat RETURNS the body), and store
+    `body OR heapPtrTag` - the 2-word GC header is the SEAT's, at
+    `heapHeaderOffset` (16 bytes) BEFORE the body, so no site here computes a
+    header address or subtracts one.  The header's KIND CODE is written by the
+    seat (`Rt.kindHdr`), which is why the seat call is the place the code is
+    named, not a second store here.
 
 Which codes are writable is `wordCellRefusal`'s ONE statement; this function
 implements exactly that set.  A heap code whose body would have to carry a RAW
@@ -3772,11 +4449,73 @@ storeWordCell code words dest s0 =
                         -- A FIXNUM: the value is shifted UP into the bits the
                         -- tag leaves free (the exact inverse of the reader's
                         -- SAR).  Inline, no runtime call, no allocation.
-                        let
-                            ( sh, s1 ) =
-                                freshTmp s0
-                        in
-                        Ok (storeWordWord (Il.Tmp sh) dest (emit (Bin (Just sh) L Shl w (Il.Con s0.layout.tagBits)) s1))
+                        --
+                        -- F6 (VR3b3 FIX): THE `mk*` PATH IS RANGE-CHECKED TOO,
+                        -- not just `PrimApp`.  A word-arm fixnum is an i61, so a
+                        -- value whose top three bits are set would be SILENTLY
+                        -- TRUNCATED by the shift - the exact silent-wrong class
+                        -- this arm exists to prevent - and `mknum` is how every
+                        -- runtime site boxes a word.  A COMPILE-TIME constant is
+                        -- decided here (and refused by name, as a literal is);
+                        -- a dynamic word gets a round-trip check whose failure
+                        -- REFUSES loudly, because the alternative (boxing onto
+                        -- the heap) is AREA 4's overflow path and does not
+                        -- exist yet.
+                        case w of
+                            Il.Con n ->
+                                if n < 0 - RtLayout.wordFixnumLimit || n >= RtLayout.wordFixnumLimit then
+                                    Err
+                                        (wordArmUnsupported
+                                            (wordArea
+                                                "AREA 4 (ARITHMETIC - THE i61 OVERFLOW/BOXING PATH)"
+                                                -- NO DIGITS IN THE MESSAGE: this
+                                                -- compiler's Int IS A DOUBLE, so
+                                                -- `String.fromInt` prints 2^60 as
+                                                -- 1152921504606847000 (MEASURED) -
+                                                -- a message that names a number it
+                                                -- cannot print exactly is worse than
+                                                -- one that names the bound.
+                                                "mknum of a compile-time value at or beyond the i61 bound - it does not fit the word arm's fixnum, so it has to be BOXED onto the heap, and the boxing path does not exist yet (shifting it would silently drop its top three bits)"
+                                            )
+                                        )
+
+                                else
+                                    Ok (emit (Store StoreL (Il.Con (n * 8)) (Il.Tmp (slotTmp dest))) s0)
+
+                            _ ->
+                                let
+                                    ( sh, s1 ) =
+                                        freshTmp s0
+
+                                    ( back, s2 ) =
+                                        freshTmp s1
+
+                                    ( fits, s3 ) =
+                                        freshTmp s2
+
+                                    ( okLbl, s4 ) =
+                                        freshLbl "fixok" s3
+
+                                    ( badLbl, s5 ) =
+                                        freshLbl "fixbad" s4
+
+                                    ( msgName, s6 ) =
+                                        freshData ("msg:" ++ wordFixnumRefusal)
+                                            (\n -> { name = n, align = Just 8, items = [ DStr wordFixnumRefusal, DByte 0 ], export_ = False })
+                                            s5
+                                in
+                                Ok
+                                    (s6
+                                        |> emit (Bin (Just sh) L Shl w (Il.Con s0.layout.tagBits))
+                                        |> emit (Bin (Just back) L Sar (Il.Tmp sh) (Il.Con s0.layout.tagBits))
+                                        |> emit (Cmp (Just fits) L Ceq (Il.Tmp back) w)
+                                        |> closeBlock (Jnz (Il.Tmp fits) okLbl badLbl)
+                                        |> startBlock badLbl
+                                        |> emit (Call Nothing (Base L) (Il.Sym ("q_" ++ mangle "Rt.die")) [ ArgVal (Base L) (Il.Sym msgName) ])
+                                        |> closeBlock Hlt
+                                        |> startBlock okLbl
+                                        |> storeWordWord (Il.Tmp sh) dest
+                                    )
 
                     else if code == RtLayout.tagBoolean then
                         -- A BOOLEAN: one bit of information, TWO immediates
@@ -3819,8 +4558,50 @@ storeWordCell code words dest s0 =
             if c == RtLayout.tagString then
                 storeWordStringCell words dest s0
 
+            else if c == RtLayout.tagFloat then
+                storeWordFloatCell words dest s0
+
             else
-                Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" (Maybe.withDefault "an unwritable heap code" (wordCellRefusal code))))
+                case words of
+                    [ body ] ->
+                        -- THE SEAT-RETURN CONVENTION, WRITTEN DOWN (perf
+                        -- word-arm-area3rt).  ONE word means the caller has
+                        -- ALREADY allocated and filled the body through the
+                        -- code's Mid seat (`Rt.allocCons`/`allocKind`/
+                        -- `allocVector`, which return `mknum(body)` and write
+                        -- the 2-word header INCLUDING this code) — so the only
+                        -- thing left is the tag: `body OR heapPtrTag`.
+                        --
+                        -- This is NOT the val arm's shape.  There, `mkval(code,
+                        -- w0, w1, ..)` writes a 40-byte Value whose payload
+                        -- words ARE w0, w1, ..; here the words are not a body,
+                        -- the CALLER's allocation is.  A site passing more than
+                        -- one word is therefore still refused below: it has not
+                        -- allocated a body, and inventing one here would be the
+                        -- layout decision `wordCellRefusal` exists to keep out
+                        -- of the emitter.
+                        let
+                            ( w, s1 ) =
+                                freshTmp s0
+                        in
+                        Ok
+                            (s1
+                                |> emit (Bin (Just w) L Or body (Il.Con (RtLayout.heapPtrTag s1.layout)))
+                                |> storeWordWord (Il.Tmp w) dest
+                            )
+
+                    _ ->
+                        -- The defun is NAMED: a site refusal is only useful if
+                        -- the reader knows which runtime defun has not been
+                        -- twinned yet (the same precision `wordVecRefusal` got).
+                        Err
+                            (wordArmUnsupported
+                                (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
+                                    ((if s0.defunKey == "" then "" else s0.defunKey ++ ": ")
+                                        ++ Maybe.withDefault "an unwritable heap code" (wordCellRefusal code (List.length words))
+                                    )
+                                )
+                            )
 
 
 {-| The one store of a word-arm Value word.  Shared by every `storeWordCell`
@@ -3862,22 +4643,130 @@ storeWordStringCell words dest s0 =
                 s3 =
                     storeWordBodyWord bodyArg RtLayout.lenFieldWord len s2
 
-                ( blk, s4 ) =
+                ( taggedWord, s4 ) =
                     freshTmp s3
             in
             Ok
+                -- THE SEAT RETURNS THE BODY, so the Value word is `body OR
+                -- heapPtrTag` - NO header arithmetic here (BLOCKER 1: the
+                -- header is 16 bytes BEFORE the body, so subtracting it made
+                -- the value word point one whole object too low, and the real
+                -- allocator then aborted on the resulting body write).
                 (s4
-                    |> emit (Bin (Just blk) L Sub bodyArg (Il.Con (RtLayout.heapHeaderBytes s4.layout)))
-                    |> emit (Bin (Just blk) L Or (Il.Tmp blk) (Il.Con (RtLayout.heapPtrTag s4.layout)))
-                    |> storeWordWord (Il.Tmp blk) dest
+                    |> emit (Bin (Just taggedWord) L Or bodyArg (Il.Con (RtLayout.heapPtrTag s4.layout)))
+                    |> storeWordWord (Il.Tmp taggedWord) dest
                 )
 
         _ ->
             Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a string cell that is not exactly [byte pointer, length]"))
 
 
-{-| One BODY word of a word-arm heap block, at `heapBodyOffset`.  `bodyArg` is
-the body ADDRESS (what the allocation seats return). -}
+{-| A word-arm SYMBOL LITERAL's cell (perf word-arm-records R1): a code-2 block
+whose body is ONE raw word, the NUL-terminated name pointer.
+
+IT ALLOCATES, AND THAT IS WHY IT IS NOT IN `storeWordCell`.  `storeWordCell`'s
+one-word heap arm means the CALLER has already allocated and filled the body —
+and the runtime's own word-arm symbol construction says exactly that:
+`Rt.intern`/`Rt.intInsertAt` are `vecbody(allocKind(mknum(2), mknum(1)))` +
+`wstore(sym, 0, store)` + `mkval(2, sym)`, so their `mkval`'s word IS an
+allocated BODY.  A literal's word is the static name pointer, which is a
+different thing in the same position.  Routing both through one writer is the
+defect shape this arc keeps paying for (a parameter whose MEANING two sites
+disagree about), so the two live apart: `mkval(2, body)` keeps the generic arm,
+and this writer is named for what it does.  MEASURED, not hypothesised: the
+first cut put the allocating branch inside `storeWordCell` and every word-arm
+program's link into the runtime's intern path refused (2 words expected, 1
+passed) — the refusal was correct, and the lesson is that the two meanings
+cannot share a dispatch.
+
+THE SHAPE IS THE RUNTIME'S, MEASURED — NOT THE DESIGN'S.  The design priced this
+cell as the STRING cell's twin (`[byte pointer, length]`, two body words, "the
+length word kept so `len32(sym)` is honest the day one appears").  The runtime
+already builds word-arm symbols, and it builds them with ONE word:
+`Rt.intern`/`Rt.intInsertAt`'s word splices are `vecbody(allocKind(mknum(2),
+mknum(1)))` + `wstore(sym, 0, store)` + `mkval(2, sym)` — the name pointer
+only, because there IS no length reader (`symEq`/`symLess`/`pvZ` walk
+NUL-terminated bytes, `deepEq`'s symbol arm is `symEq`).
+
+A two-word LITERAL beside a one-word INTERNED symbol would make `len32(sym)`
+honest for literals and an OVERRUN for interned ones — the same off-by-one class
+this unit exists to kill, planted by the layout.  So the literal matches the
+runtime: ONE word, no length.  That is also why the emitter needs this writer at
+all rather than the string cell's: the CODE is the constructor on this arm
+(`tagis(v, 2)` reads it), so a symbol written through the string's seat (code 1)
+would be indistinguishable from a string — the mixed-representation read this
+arm exists to prevent.  The code lives in `Rt.allocSym`'s body, never in a
+caller's argument.
+
+THE BYTES ARE STATIC AND SHARED with the `sym:` data def `RawCStr`/`RawDataAddr`
+use, so a symbol's bytes are never copied and there is no cross-heap edge.
+-}
+storeWordSymbolLiteral : Il.Arg -> Int -> S -> Result String S
+storeWordSymbolLiteral bytes dest s0 =
+    let
+        -- THE SEAT TAKES THE BODY WORD COUNT (1: the name pointer).
+        ( bodyArg, s1 ) =
+            midGcAllocSeat "Rt.allocSym" (Il.Con 1) s0
+
+        s2 =
+            storeWordBodyWord bodyArg 0 bytes s1
+
+        ( taggedWord, s3 ) =
+            freshTmp s2
+    in
+    Ok
+        (s3
+            |> emit (Bin (Just taggedWord) L Or bodyArg (Il.Con (RtLayout.heapPtrTag s3.layout)))
+            |> storeWordWord (Il.Tmp taggedWord) dest
+        )
+
+
+{-| AREA 5's CELL (perf word-arm-area3rt, and only as much of it as the
+construction path needs): a word-arm FLOAT is a code-12 block whose body is the
+one f64 word — `heapKindScanned` false, so nothing traces it.
+
+WHY IT IS BUILT HERE AND NOT BY A RUNTIME `mkval(12, ..)`.  A float's single
+word is the DOUBLE, not a body base, so it must not go through the cell writer's
+one-word rule (which tags a body) — and a `d`-class operand cannot cross the lean
+ABI at all, so no runtime seat can receive it.  The shape is therefore the string
+cell's: ALLOCATE through a seat that returns the body (`Rt.allocFloat`, code 12,
+count 1), store the double at body unit 0 with `stored`, and tag the body.  NO
+DETOUR through a scratch slot: MEASURED, the first version boxed the double's
+address and called a `Rt.mkFloatCell` seat, which then had to tag its own cell
+with `mkval(12, body)` — i.e. it re-entered this writer with a BODY where a
+double was expected, and qbe rejected the result (`invalid type for first operand
+%t15 in stored`).
+-}
+storeWordFloatCell : List Il.Arg -> Int -> S -> Result String S
+storeWordFloatCell words dest s0 =
+    case words of
+        [ f ] ->
+            let
+                ( bodyArg, s1 ) =
+                    midGcAllocSeat "Rt.allocFloat" (Il.Con 1) s0
+
+                ( a, s2 ) =
+                    freshTmp s1
+
+                s3 =
+                    emit (Bin (Just a) L Add bodyArg (Il.Con (RtLayout.heapBodyUnitOffset s2.layout 0))) s2
+                        |> emit (Store StoreD f (Il.Tmp a))
+
+                ( taggedWord, s4 ) =
+                    freshTmp s3
+            in
+            Ok
+                (s4
+                    |> emit (Bin (Just taggedWord) L Or bodyArg (Il.Con (RtLayout.heapPtrTag s4.layout)))
+                    |> storeWordWord (Il.Tmp taggedWord) dest
+                )
+
+        _ ->
+            Err (wordArmUnsupported (wordArea "AREA 5 (FLOATS)" "a float cell that is not exactly one float word"))
+
+
+{-| One BODY word of a word-arm heap object, at `heapBodyUnitOffset`.  `bodyArg`
+IS the body address — what the allocation seats return. -}
 storeWordBodyWord : Il.Arg -> Int -> Il.Arg -> S -> S
 storeWordBodyWord bodyArg word value s0 =
     let
@@ -3889,24 +4778,230 @@ storeWordBodyWord bodyArg word value s0 =
         |> emit (Store StoreL value (Il.Tmp a))
 
 
-{-| A body word READ of a word-arm heap block, at `heapBodyOffset`. -}
-wordBodyRead : Il.Arg -> Int -> S -> ( String, S )
-wordBodyRead valueWord word s0 =
-    let
-        ( bodyArg, s1 ) =
-            wordBodyAddr valueWord s0
+{-| S3 (VR3b3 FIX): the vec family's input contract is a RAW ELEMENT-ARRAY
+ADDRESS, and on the word arm nothing can produce one: `payload(v, 0)` yields the
+first body VALUE WORD (a tagged value), and `elemAddr` would then use a tagged
+address as a base - a misaligned read into the wrong object.  The constructors
+refuse loudly (`wordCellRefusal`), but a pure READER (`Rt.deepEq`, `Rt.revGo`)
+contains no constructor, so once AREA 6 lands it would lower and read wrong.
+Refused by name until `vecload`/`vecstore` are re-expressed over the word arm's
+body (a real port, not a stride).
+-}
+wordVecRefusal : String -> String -> String
+wordVecRefusal who what =
+    wordArmUnsupported
+        (wordArea
+            "AREA 3 (PAYLOAD ACCESS)"
+            ((if who == "" then "" else who ++ ": ")
+                ++ "`"
+                ++ what
+                ++ "` - its input contract is a raw element-array address, which on the word arm nothing can produce: `payload(v, 0)` yields the first body VALUE WORD (a tagged value), so `elemAddr` would use a tagged address as a base and read into the wrong object"
+            )
+        )
 
-        ( a, s2 ) =
+
+{-| AREA B/D: the i32 FIELD of a word-arm payload word — the LOW HALF of body
+unit `i`, read AT ITS ADDRESS.  Deliberately NOT `wordPayloadWord` followed by a
+load: that function LOADS the 8-byte body word, so a second load would
+dereference its VALUE (MEASURED: `payload32(s, 1)` emitted `movq 8(%rax), %rax`
+then `movl (%rax), %eax`, i.e. it loaded the length 6 and then read memory at
+address 6 — a SEGV, found by the len probe the moment it ran).
+
+The shape test is the same tag test, and a word that is not a heap object
+REFUSES: an i32 FIELD exists only in a heap body (a fixnum's value lives in a
+register, and the val-arm sites that read `payload32` of a boolean are AREA 2's
+boolean test, which the word arm does on the TAG, not on a payload field).
+-}
+wordPayloadField32 : Il.Arg -> Int -> S -> ( Il.Arg, S )
+wordPayloadField32 base word s0 =
+    let
+        ( l, s1 ) =
+            wordValueWord base s0
+
+        ( t, s2 ) =
             freshTmp s1
 
-        ( t, s3 ) =
+        ( isFix, s3 ) =
             freshTmp s2
+
+        ( isTrue, s3c ) =
+            freshTmp s3
+
+        ( isFalse, s3d ) =
+            freshTmp s3c
+
+        ( isBool, s4 ) =
+            freshTmp s3d
+
+        ( isHeap, s5 ) =
+            freshTmp s4
+
+        ( heapLbl, s6 ) =
+            freshLbl "fheap" s5
+
+        ( badLbl, s7 ) =
+            freshLbl "fbad" s6
+
+        ( joinLbl, s8 ) =
+            freshLbl "fjoin" s7
+
+        ( fixLbl, s9 ) =
+            freshLbl "ffix" s8
+
+        ( boolLbl, s10 ) =
+            freshLbl "fbool" s9
+
+        ( chkLbl, s11 ) =
+            freshLbl "fchk" s10
+
+        ( chk2Lbl, s11b ) =
+            freshLbl "fchk2" s11
+
+        ( r, s12 ) =
+            freshTmp s11b
+
+        msgText =
+            (if s0.defunKey == "" then "" else s0.defunKey ++ ": ") ++ wordField32Refusal
+
+        ( msgName, s13 ) =
+            freshData ("msg:" ++ msgText)
+                (\n -> { name = n, align = Just 8, items = [ DStr msgText, DByte 0 ], export_ = False })
+                s12
+
+        -- 1. the tag, then the IMMEDIATE arms (word 0 only) and the heap arm.
+        --
+        -- THE FIXNUM ARM IS A REAL PORT, NOT A RELAXATION (perf
+        -- word-arm-area3rt).  `payload32(v, 0)` on a NUMBER is an idiom the
+        -- runtime uses constantly (`payload32(found, 0)` in Rt.main reads the
+        -- low half of a count returned as a fixnum): on the val arm it is a
+        -- 32-bit LOAD of the payload word, which works for any Value.  A
+        -- fixnum's word 0 on the word arm is its value in a register, so the
+        -- same read is the low 32 bits of the arithmetic-shifted value,
+        -- SIGN-EXTENDED exactly as the val arm's `loadw` + `extsw` is.
+        --
+        -- THE BOOLEAN ARM IS THE VAL ARM'S FIELD, PORTED.  A val-arm boolean is
+        -- `{tag 3, payload word 0 = 1 | 0}`, so `payload32(b, 0)` is its FLAG;
+        -- the word arm's boolean is an IMMEDIATE whose flag is the tag itself
+        -- (`...011` true, `...100` false), so the same read is `t == tagTrue`
+        -- as a word.
+        --
+        -- MEASURED (each cost one run of a real binary): without the fixnum
+        -- arm, `main = 7` dies at Rt.main's first `payload32` of a count;
+        -- without the boolean arm it dies in `Rt.cStrEq`, which returns
+        -- `payload32(eq, 0)` of its own boolean.
+        s14 =
+            s13
+                |> emit (Bin (Just t) W And (Il.Tmp l) (Il.Con s13.layout.tagMask))
+                |> (\st ->
+                        if word == 0 then
+                            st
+                                |> emit (Cmp (Just isFix) W Ceq (Il.Tmp t) (Il.Con s13.layout.tagNumber))
+                                |> closeBlock (Jnz (Il.Tmp isFix) fixLbl chkLbl)
+                                |> startBlock chkLbl
+                                -- A BOOLEAN HAS **TWO** IMMEDIATES: `...011`
+                                -- true and `...100` false.  Testing only
+                                -- tagTrue let FALSE fall through to the heap
+                                -- test and die — MEASURED: Rt.metaGo answers
+                                -- `mkbool(0)` on a miss and Rt.main's
+                                -- `payload32(found, 0)` killed the first run of
+                                -- a real binary.
+                                |> emit (Cmp (Just isTrue) W Ceq (Il.Tmp t) (Il.Con s13.layout.tagTrue))
+                                |> emit (Cmp (Just isFalse) W Ceq (Il.Tmp t) (Il.Con s13.layout.tagFalse))
+                                |> emit (Bin (Just isBool) W Or (Il.Tmp isTrue) (Il.Tmp isFalse))
+                                |> closeBlock (Jnz (Il.Tmp isBool) boolLbl chk2Lbl)
+                                |> startBlock chk2Lbl
+
+                        else
+                            st
+                   )
+
+        -- 2. a heap object, or the loud refusal.
+        s15 =
+            s14
+                |> emit (Cmp (Just isHeap) W Ceq (Il.Tmp t) (Il.Con (RtLayout.heapPtrTag s14.layout)))
+                |> closeBlock (Jnz (Il.Tmp isHeap) heapLbl badLbl)
+                |> startBlock badLbl
+                |> emit (Call Nothing (Base L) (Il.Sym ("q_" ++ mangle "Rt.die")) [ ArgVal (Base L) (Il.Sym msgName) ])
+                |> closeBlock Hlt
+                |> startBlock heapLbl
+
+        -- 3. the heap arm: the LOW HALF of body unit `word`, sign-extended.
+        s16 =
+            let
+                ( bodyArg, sa ) =
+                    wordBodyOf (Il.Tmp l) s15
+
+                ( a, sb ) =
+                    freshTmp sa
+
+                ( wT, sc ) =
+                    freshTmp sb
+            in
+            sc
+                |> emit (Bin (Just a) L Add (Il.Tmp bodyArg) (Il.Con (RtLayout.heapBodyUnitOffset sc.layout word)))
+                |> emit (Load (Just wT) W LoadW (Il.Tmp a))
+                |> emit (Unary (Just r) L Extsw (Il.Tmp wT))
+                |> jumpTo joinLbl
+
+        -- 4. the fixnum arm (word 0 only): shift the tag bits off, then take the
+        -- low half.  The `W And -1` is how this file narrows an `l` temp to the
+        -- `w` class (`extsw` takes a word); it is the same trick `readTag` uses
+        -- for its mask.
+        s17 =
+            if word == 0 then
+                -- THE FRESH TEMP MUST COME FROM THE STATE THE EMIT CHAIN RETURNS
+                -- (perf word-arm-surface).  MEASURED: allocating `w32` in a
+                -- `let` whose state was then DISCARDED (the chain started from
+                -- `s16` again) left the counter one behind, so the NEXT
+                -- `payload32` in the same defun was handed the same number — and
+                -- because this arm defines it `l` (`sar`) and then `w` (`and`),
+                -- qbe rejected the module: "invalid type for first operand
+                -- %t250 in and".  One `payload32` per defun never showed it;
+                -- `case s of "hi" -> ..` does (two reads in one body).
+                let
+                    ( w32, sa ) =
+                        freshTmp (startBlock fixLbl s16)
+                in
+                sa
+                    |> emit (Bin (Just w32) L Sar (Il.Tmp l) (Il.Con s13.layout.tagBits))
+                    |> emit (Bin (Just w32) W And (Il.Tmp w32) (Il.Con -1))
+                    |> emit (Unary (Just r) L Extsw (Il.Tmp w32))
+                    |> jumpTo joinLbl
+
+            else
+                s16
+
+        -- 5. the boolean arm (word 0 only): the flag IS the tag, so the field is
+        -- the ALREADY-COMPUTED compare result (`isBool`, 0/1 in the `w` class),
+        -- widened to the word class exactly as the other arms' fields are.
+        s18 =
+            if word == 0 then
+                s17
+                    |> startBlock boolLbl
+                    |> emit (Unary (Just r) L Extsw (Il.Tmp isTrue))
+                    |> jumpTo joinLbl
+
+            else
+                s17
+
+        s19 =
+            s18 |> startBlock joinLbl
     in
-    ( t
-    , s3
-        |> emit (Bin (Just a) L Add (Il.Tmp bodyArg) (Il.Con (RtLayout.heapBodyUnitOffset s3.layout word)))
-        |> emit (Load (Just t) L LoadL (Il.Tmp a))
-    )
+    ( Il.Tmp r, s19 )
+
+
+{-| The i32-field refusal's message: an i32 field is a body unit, so a word that
+is not a heap object has none. -}
+wordField32Refusal : String
+wordField32Refusal =
+    "qbe-rt: word arm: i32 field read on a word that is not a heap object (...001) - a fixnum's value lives in a register and has no field, and an immediate (nil/true/false/error) has no body. Refusing."
+
+
+{-| The `mknum` overflow refusal: a word-arm fixnum is an i61, so a value whose
+top three bits survive the shift cannot be represented.  ASCII only. -}
+wordFixnumRefusal : String
+wordFixnumRefusal =
+    "qbe-rt: word arm: mknum overflow - the value does not fit the i61 fixnum (its top three bits would be dropped by the tag shift) and boxing onto the heap is AREA 4's overflow path, which does not exist yet. Refusing instead of truncating."
 
 
 {-| AREA B: the loud refusal a payload read emits when the word it was handed is
@@ -3949,14 +5044,29 @@ wordPayloadWord base word s0 =
         ( isHeap, s4 ) =
             freshTmp s3
 
+        ( isNil, s4b ) =
+            freshTmp s4
+
+        ( isTrue, s4c ) =
+            freshTmp s4b
+
+        ( isFalse, s4d ) =
+            freshTmp s4c
+
+        ( isZeroTag, s4e ) =
+            freshTmp s4d
+
         ( heapLbl, s5 ) =
-            freshLbl "pheap" s4
+            freshLbl "pheap" s4e
 
         ( badLbl, s6 ) =
             freshLbl "pbad" s5
 
+        ( zeroLbl, s6b ) =
+            freshLbl "pzero" s6
+
         ( joinLbl, s7 ) =
-            freshLbl "pjoin" s6
+            freshLbl "pjoin" s6b
 
         ( fixLbl, s8 ) =
             freshLbl "pfix" s7
@@ -3964,13 +5074,22 @@ wordPayloadWord base word s0 =
         ( chkLbl, s9 ) =
             freshLbl "pchk" s8
 
+        ( chk2Lbl, s9b ) =
+            freshLbl "pchk2" s9
+
         ( r, s10 ) =
-            freshTmp s9
+            freshTmp s9b
+
+        ( rw, s10b ) =
+            freshTmp s10
+
+        msgText =
+            (if s0.defunKey == "" then "" else s0.defunKey ++ ": ") ++ wordPayloadRefusal
 
         ( msgName, s11 ) =
-            freshData ("msg:" ++ wordPayloadRefusal)
-                (\n -> { name = n, align = Just 8, items = [ DStr wordPayloadRefusal, DByte 0 ], export_ = False })
-                s10
+            freshData ("msg:" ++ msgText)
+                (\n -> { name = n, align = Just 8, items = [ DStr msgText, DByte 0 ], export_ = False })
+                s10b
 
         -- 1. the tag, and the FIRST branch: a fixnum (word 0 only) or not.
         s12 =
@@ -3986,21 +5105,47 @@ wordPayloadWord base word s0 =
             else
                 s12
 
-        -- 2. a heap object, or the loud refusal.
+        -- 2. a heap object, an IMMEDIATE, or the loud refusal.
+        --
+        -- THE IMMEDIATE ARM IS THE VAL ARM'S VALUE, PORTED (perf
+        -- word-arm-area3rt).  On the val arm `payload(nil, i)`,
+        -- `payload(true, i)` and `payload(false, i)` all read an UNWRITTEN
+        -- payload word, i.e. ZERO — the slot is zeroed at frame entry and the
+        -- tag write is the whole of `mknil`/`mkbool`.  Sites lean on that
+        -- (`Rt.main`'s `payload(prc, 0) != 0`), so the faithful twin is 0, not
+        -- a refusal.  ERROR is NOT here: its payload word 0 is a real message
+        -- pointer on the val arm, so a word-arm error has no equivalent read
+        -- and still refuses by name.
         s14 =
             s13
                 |> emit (Cmp (Just isHeap) W Ceq (Il.Tmp t) (Il.Con (RtLayout.heapPtrTag s11.layout)))
-                |> closeBlock (Jnz (Il.Tmp isHeap) heapLbl badLbl)
+                |> closeBlock (Jnz (Il.Tmp isHeap) heapLbl chk2Lbl)
+                |> startBlock chk2Lbl
+                |> emit (Cmp (Just isNil) W Ceq (Il.Tmp t) (Il.Con s11.layout.tagNil))
+                |> emit (Cmp (Just isTrue) W Ceq (Il.Tmp t) (Il.Con s11.layout.tagTrue))
+                |> emit (Cmp (Just isFalse) W Ceq (Il.Tmp t) (Il.Con s11.layout.tagFalse))
+                |> emit (Bin (Just isZeroTag) W Or (Il.Tmp isNil) (Il.Tmp isTrue))
+                |> emit (Bin (Just isZeroTag) W Or (Il.Tmp isZeroTag) (Il.Tmp isFalse))
+                |> closeBlock (Jnz (Il.Tmp isZeroTag) zeroLbl badLbl)
                 |> startBlock badLbl
                 |> emit (Call Nothing (Base L) (Il.Sym ("q_" ++ mangle "Rt.die")) [ ArgVal (Base L) (Il.Sym msgName) ])
                 |> closeBlock Hlt
+                |> startBlock zeroLbl
+                -- `r` is an `l` temp in every other arm, so the zero is built
+                -- in its OWN `w` temp and widened — a temp has ONE class in
+                -- QBE, and MEASURED: assigning it in both classes makes the
+                -- assembler reject the shift in the fixnum arm ("invalid type
+                -- for first operand %t28 in shl").
+                |> emit (Bin (Just rw) W Xor (Il.Tmp t) (Il.Tmp t))
+                |> emit (Unary (Just r) L Extsw (Il.Tmp rw))
+                |> jumpTo joinLbl
                 |> startBlock heapLbl
 
         -- 3. the heap arm: untag, past the header, `word` units in.
         s15 =
             let
                 ( bodyArg, sa ) =
-                    wordBodyAddr (Il.Tmp l) s14
+                    wordBodyOf (Il.Tmp l) s14
 
                 ( a, sb ) =
                     freshTmp sa
@@ -4025,6 +5170,222 @@ wordPayloadWord base word s0 =
             s16 |> startBlock joinLbl
     in
     ( Il.Tmp r, s17 )
+
+
+{-| AREA 3, THE ELEMENT COUNT ON THE WORD ARM (perf word-arm-area3rt, the
+review's BLOCKER 2).
+
+A word-arm vector's length is NOT in the body — the body IS the elements — so it
+lives where the ALLOCATOR put it: the GC header's count word, one word before the
+body (`gcAlloc`: `wstore(cursor, -1, countW)`).  `RtLayout` states the header's
+shape (`heapHeaderOffset` = -16 for word 0), so the count word's address is
+`body + heapHeaderOffset + wordBytes` — written as that sum rather than a second
+constant, so a header that ever gains a word moves this reader with it.
+
+THE SHAPE FORK IS `wordVecBody`'s, and for the same reason: a fixnum's "count" is
+not a length (it has no elements), and an immediate has neither — both REFUSE
+loudly.  Only a heap object answers, and it answers from the header.
+
+WHY THIS IS A SEPARATE READER FROM `len32`: a string's payload word 1 is its BYTE
+length on the val arm, but the header's count for a string is `ceil(bytes/8)` —
+body WORDS, a different number.  A single reader would have to know the code, and
+`payload32`-shaped code has no way to ask; so the two reads are two names and the
+runtime's sites are classified one by one.
+-}
+wordVecLen : Il.Arg -> S -> ( Il.Arg, S )
+wordVecLen base s0 =
+    let
+        ( l, s1 ) =
+            wordValueWord base s0
+
+        ( t, s2 ) =
+            freshTmp s1
+
+        ( isHeap, s3 ) =
+            freshTmp s2
+
+        ( heapLbl, s4 ) =
+            freshLbl "lheap" s3
+
+        ( badLbl, s5 ) =
+            freshLbl "lbad" s4
+
+        ( joinLbl, s6 ) =
+            freshLbl "ljoin" s5
+
+        ( r, s7 ) =
+            freshTmp s6
+
+        ( wT, s8 ) =
+            freshTmp s7
+
+        msgText =
+            (if s0.defunKey == "" then "" else s0.defunKey ++ ": ") ++ wordVecLenRefusal
+
+        ( msgName, s9 ) =
+            freshData ("msg:" ++ msgText)
+                (\n -> { name = n, align = Just 8, items = [ DStr msgText, DByte 0 ], export_ = False })
+                s8
+
+        s10 =
+            s9
+                |> emit (Bin (Just t) W And (Il.Tmp l) (Il.Con s9.layout.tagMask))
+                |> emit (Cmp (Just isHeap) W Ceq (Il.Tmp t) (Il.Con (RtLayout.heapPtrTag s9.layout)))
+                |> closeBlock (Jnz (Il.Tmp isHeap) heapLbl badLbl)
+                |> startBlock badLbl
+                |> emit (Call Nothing (Base L) (Il.Sym ("q_" ++ mangle "Rt.die")) [ ArgVal (Base L) (Il.Sym msgName) ])
+                |> closeBlock Hlt
+                |> startBlock heapLbl
+
+        s11 =
+            let
+                ( bodyArg, sa ) =
+                    wordBodyOf (Il.Tmp l) s10
+
+                ( a, sb ) =
+                    freshTmp sa
+            in
+            sb
+                |> emit
+                    (Bin (Just a) L Add
+                        (Il.Tmp bodyArg)
+                        (Il.Con (RtLayout.heapHeaderOffset sb.layout + RtLayout.wordBytes))
+                    )
+                |> emit (Load (Just wT) W LoadW (Il.Tmp a))
+                |> emit (Unary (Just r) L Extsw (Il.Tmp wT))
+                |> jumpTo joinLbl
+                |> startBlock joinLbl
+    in
+    ( Il.Tmp r, s11 )
+
+
+{-| The `veclen` refusal's message.  ASCII only. -}
+wordVecLenRefusal : String
+wordVecLenRefusal =
+    "qbe-rt: word arm: element count of a word that is not a heap object (...001) - a fixnum is a number and an immediate (nil/true/false/error) is not a collection, so neither has a length; a string's length is len32, not this. Refusing."
+
+
+{-| AREA 3 (PAYLOAD ACCESS), THE ELEMENT BASE ON THE WORD ARM (perf
+word-arm-area3rt).
+
+`vecbody(v)` answers "where do this Value's elements start", and on the word arm
+the answer depends on the SHAPE, exactly as a payload read does:
+
+  * `...000` fixnum: the payload IS the base word — this is how a raw C pointer
+    travels through the runtime (`mknum(ptr)`), so it is returned
+    arithmetic-shifted DOWN out of the tag bits (`SAR`), the exact inverse of
+    the write.  A site that handed `payload(v, 0)` to `vecload` on the val arm
+    was doing the same thing for the same reason.
+  * `...001` heap object: the BODY — the untag (`AND untagMask`) and NOTHING
+    ELSE, because the seat-return convention already makes the untagged word the
+    body (`RtLayout` THE CONVENTION; `wordBodyOf` is the same one instruction).
+    NOT a payload LOAD: the body's first word IS element 0 on this arm, so
+    handing element 0 to `vecload` would use a tagged value as an address, which
+    is the mixed-representation read this arm exists to prevent.
+  * anything else (nil, true, false, error, reserved): REFUSE, loudly.  An
+    immediate has no elements, so the val arm's blind `payload(v, 0)` here would
+    read another layout's bytes.
+
+The branch structure and the single result temp are `wordPayloadWord`'s (QBE has
+no `phi`, so each arm assigns `r` and the join reads it) — the two functions are
+SIBLINGS and deliberately not folded into one: a payload read returns the VALUE
+WORD at a body unit, this returns the ADDRESS of body unit 0.
+-}
+wordVecBody : Il.Arg -> S -> ( Il.Arg, S )
+wordVecBody base s0 =
+    let
+        ( l, s1 ) =
+            wordValueWord base s0
+
+        ( t, s2 ) =
+            freshTmp s1
+
+        ( isFix, s3 ) =
+            freshTmp s2
+
+        ( isHeap, s4 ) =
+            freshTmp s3
+
+        ( heapLbl, s5 ) =
+            freshLbl "bheap" s4
+
+        ( badLbl, s6 ) =
+            freshLbl "bbad" s5
+
+        ( joinLbl, s7 ) =
+            freshLbl "bjoin" s6
+
+        ( fixLbl, s8 ) =
+            freshLbl "bfix" s7
+
+        ( chkLbl, s9 ) =
+            freshLbl "bchk" s8
+
+        ( r, s10 ) =
+            freshTmp s9
+
+        ( msgName, s11 ) =
+            freshData ("msg:" ++ wordVecBodyRefusal)
+                (\n -> { name = n, align = Just 8, items = [ DStr wordVecBodyRefusal, DByte 0 ], export_ = False })
+                s10
+
+        -- 1. the tag, and the FIRST branch: a fixnum (a base word) or not.
+        s12 =
+            s11
+                |> emit (Bin (Just t) W And (Il.Tmp l) (Il.Con s11.layout.tagMask))
+                |> emit (Cmp (Just isFix) W Ceq (Il.Tmp t) (Il.Con s11.layout.tagNumber))
+                |> closeBlock (Jnz (Il.Tmp isFix) fixLbl chkLbl)
+                |> startBlock chkLbl
+
+        -- 2. a heap object, or the loud refusal.
+        s13 =
+            s12
+                |> emit (Cmp (Just isHeap) W Ceq (Il.Tmp t) (Il.Con (RtLayout.heapPtrTag s12.layout)))
+                |> closeBlock (Jnz (Il.Tmp isHeap) heapLbl badLbl)
+                |> startBlock badLbl
+                |> emit (Call Nothing (Base L) (Il.Sym ("q_" ++ mangle "Rt.die")) [ ArgVal (Base L) (Il.Sym msgName) ])
+                |> closeBlock Hlt
+                |> startBlock heapLbl
+
+        -- 3. the heap arm: THE UNTAG **IS** THE BODY.  No header step.
+        --
+        -- THIS WAS WRONG AND THE `vec` PROBE CAUGHT IT (review BLOCKER 1's fix
+        -- earning its keep on its first run): the arm read
+        -- `(v AND untagMask) + heapHeaderBytes`, i.e. 16 bytes PAST the body —
+        -- element 2 where element 0 was asked for, on every heap object.  The
+        -- seat-return convention is what settles it: a seat returns
+        -- `mknum(BODY)` and the Value word is `body OR heapPtrTag`, so the
+        -- UNTAG *is* the body (`RtLayout`'s THE CONVENTION: body unit 0 is at
+        -- offset 0 from it, and the 2-word header sits `heapHeaderOffset` =
+        -- -16 BEFORE it).  `wordBodyOf` — what every payload read uses — is the
+        -- same one instruction, and a base cannot differ from it.
+        --
+        -- WHY NO ORACLE SAW IT: no word-arm program can construct a heap vector
+        -- yet, so the arm was unexecuted; the diff row runs programs and the
+        -- probe set had no element read.  Both are now closed.
+        s14 =
+            s13
+                |> emit (Bin (Just r) L And (Il.Tmp l) (Il.Con (RtLayout.untagMask s13.layout)))
+                |> jumpTo joinLbl
+
+        -- 4. the fixnum arm: shift the tag bits off.
+        s15 =
+            s14
+                |> startBlock fixLbl
+                |> emit (Bin (Just r) L Sar (Il.Tmp l) (Il.Con s12.layout.tagBits))
+                |> jumpTo joinLbl
+
+        s16 =
+            s15 |> startBlock joinLbl
+    in
+    ( Il.Tmp r, s16 )
+
+
+{-| The `vecbody` refusal's message: an immediate names no elements.  ASCII only
+(the emitted data item is a string the runtime prints). -}
+wordVecBodyRefusal : String
+wordVecBodyRefusal =
+    "qbe-rt: word arm: element base of a word that is neither a fixnum nor a heap object (...001) - an immediate (nil/true/false/error) has no elements, so a vecload/vecstore/vecaddr on it would read another layout's bytes. Refusing."
 
 
 {-| AREA C: THE WORD-ARM TAG TEST (`tagis(v, code)`), the reader VR3c's fix
@@ -4057,8 +5418,17 @@ wordTagIs base code s0 =
 
         RtLayout.WordImmediate tags ->
             -- The tag alone answers it: one compare, or (a boolean, which has
-            -- two immediates) the OR of two.  `t` is both the tag temp and the
-            -- result temp, which QBE allows (`%t =w or %t, %o`).
+            -- TWO immediates) the OR of two.
+            --
+            -- THE TAG AND THE COMPARE RESULT ARE DISTINCT TEMPS, and that is
+            -- load-bearing (VR3b3 FIX, BLOCKER 2).  Folding the compares into
+            -- `t` - the tag temp - destroyed the tag after the first compare, so
+            -- the second compared the 0/1 RESULT against `tagFalse` and
+            -- `tagis(v, tagBoolean)` answered FALSE for `false`; MEASURED, and
+            -- reachable through `Rt.deepEq`'s `tagis(a, 3)` the moment AREA 6
+            -- admits calls.  No text pin could see it (both spellings are two
+            -- compares and an `or`), which is why the probe set now carries a
+            -- boolean `tagis`.
             let
                 ( v, s1 ) =
                     wordValueWord base s0
@@ -4066,16 +5436,19 @@ wordTagIs base code s0 =
                 ( t, s2 ) =
                     freshTmp s1
 
-                ( ext, s3 ) =
+                ( is, s3 ) =
                     freshTmp s2
 
-                s4 =
-                    emit (Bin (Just t) W And (Il.Tmp v) (Il.Con s3.layout.tagMask)) s3
+                ( ext, s4 ) =
+                    freshTmp s3
 
                 s5 =
+                    emit (Bin (Just t) W And (Il.Tmp v) (Il.Con s4.layout.tagMask)) s4
+
+                s6 =
                     case tags of
                         [] ->
-                            emit (Bin (Just t) W Xor (Il.Tmp t) (Il.Tmp t)) s4
+                            emit (Bin (Just is) W Xor (Il.Tmp t) (Il.Tmp t)) s5
 
                         firstTag :: rest ->
                             List.foldl
@@ -4085,12 +5458,12 @@ wordTagIs base code s0 =
                                             freshTmp acc
                                     in
                                     emit (Cmp (Just o) W Ceq (Il.Tmp t) (Il.Con one)) sa
-                                        |> emit (Bin (Just t) W Or (Il.Tmp t) (Il.Tmp o))
+                                        |> emit (Bin (Just is) W Or (Il.Tmp is) (Il.Tmp o))
                                 )
-                                (emit (Cmp (Just t) W Ceq (Il.Tmp t) (Il.Con firstTag)) s4)
+                                (emit (Cmp (Just is) W Ceq (Il.Tmp t) (Il.Con firstTag)) s5)
                                 rest
             in
-            Ok ( Il.Tmp ext, emit (Unary (Just ext) L Extsw (Il.Tmp t)) s5 )
+            Ok ( Il.Tmp ext, emit (Unary (Just ext) L Extsw (Il.Tmp is)) s6 )
 
         RtLayout.WordHeapCode c ->
             let
@@ -4226,9 +5599,17 @@ storeValueWords tag words dest s0 =
         -- AREA A (perf VR3b3): under the word arm a `mk*` cell is the ONE cell
         -- writer, and its refusals are COMPILE-TIME here (this path returns
         -- Result) rather than the writer's belt-and-braces poison.
-        case wordCellRefusal tag of
+        case wordCellRefusal tag (List.length words) of
             Just why ->
-                Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" why))
+                -- The DEFUN is named, for the same reason `wordVecRefusal` names
+                -- it: a site refusal is only useful if the reader knows which
+                -- runtime defun has not been twinned yet (perf word-arm-area3rt).
+                Err
+                    (wordArmUnsupported
+                        (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)"
+                            ((if s0.defunKey == "" then "" else s0.defunKey ++ ": ") ++ why)
+                        )
+                    )
 
             Nothing ->
                 List.foldl
@@ -4507,14 +5888,11 @@ midGcAllocSeat seatKey lenA s =
             ( word, s6 ) =
                 freshTmp s5
 
-            ( blk, s7 ) =
+            ( body, s7 ) =
                 freshTmp s6
-
-            ( body, s8 ) =
-                freshTmp s7
         in
         ( Il.Tmp body
-        , s8
+        , s7
             |> emit (Call (Just vp) (Agg "val") (Il.Sym ("q_" ++ mangle seatKey)) (padded ++ [ ArgVal (Base W) (Il.Con 1) ]))
             -- THE `:val` RESULT IS AN AGGREGATE TEMP, NOT A WORD.  QBE treats a
             -- temp of aggregate type as ADDRESSABLE, so using it directly in an
@@ -4524,8 +5902,9 @@ midGcAllocSeat seatKey lenA s =
             -- So the single word is LOADED out of it first; under the word arm
             -- `:val` is `{ l }`, one word at offset 0.
             |> emit (Load (Just word) L LoadL (Il.Tmp vp))
-            |> emit (Bin (Just blk) L Sar (Il.Tmp word) (Il.Con s.layout.tagBits))
-            |> emit (Bin (Just body) L Add (Il.Tmp blk) (Il.Con (RtLayout.heapHeaderBytes s.layout)))
+            -- THE SEAT RETURNS `mknum(BODY)`, so the fixnum untag IS the body
+            -- address: `sar tagBits`, and NO header arithmetic (BLOCKER 1).
+            |> emit (Bin (Just body) L Sar (Il.Tmp word) (Il.Con s.layout.tagBits))
         )
 
     else
@@ -4627,6 +6006,12 @@ rawWordArg exp s =
                     )
 
         Unsafe (RawVecAddr addr) ->
+            -- AREA 3 (PAYLOAD ACCESS), the ELEMENT-ADDRESS half (perf
+            -- word-arm-area3rt).  The arm is UNCHANGED and it is `elemAddr`'s:
+            -- it strides by the LAYOUT, so at 8 bytes it is the word arm's
+            -- element address.  What was missing was not this node but a way to
+            -- produce the BASE it takes — `RawVecBody`, which is why the
+            -- refusal this arm used to raise is gone rather than relaxed.
             rawWordArg addr.vec s
                 |> Result.andThen
                     (\( vecT, s1 ) ->
@@ -4641,28 +6026,112 @@ rawWordArg exp s =
                                 )
                     )
 
-        Unsafe (RawTagOf v) ->
-            -- AREA B (perf VR3b3): the tag of a Value.  The val arm's tag is a
-            -- whole word at offset 0; the word arm's is the value word's LOW
-            -- BITS, so this is `readTag` — the emitter's one tag reader — and
-            -- not a second masking site.
-            rawValueBase v s
-                |> Result.map
-                    (\( base, s1 ) ->
-                        if wordArm s1 then
-                            let
-                                ( t, s2 ) =
-                                    freshTmp s1
-                            in
-                            ( Il.Tmp t, readTag t base s2 )
+        Unsafe (RawVecBody body) ->
+            -- THE ELEMENT BASE of a Value (perf word-arm-area3rt).
+            --
+            -- THE VAL ARM IS THE SAME EMIT AS `payload(v, 0)` — same temps, same
+            -- ops, same order — so every runtime site rewritten to `vecbody(v)`
+            -- emits the val arm's .ssa BYTE FOR BYTE.  That is what keeps the
+            -- corpus at 159/159 with NO re-freeze; a rewrite that emitted
+            -- anything else here would MOVE the val arm, which is exactly the
+            -- defect the corpus exists to catch.
+            --
+            -- THE WORD ARM is the SHAPE fork `wordPayloadWord` makes, one step
+            -- earlier: a fixnum's payload IS the base word (a `mknum(ptr)` Value
+            -- carries a raw C pointer, and the runtime's staging buffers travel
+            -- that way), a heap object's base is its BODY (untag, then past the
+            -- 2-word header), and an immediate has neither — so it refuses
+            -- loudly, as a payload read does.  Note what is NOT here: no
+            -- `payloadWordOffset`, because on this arm a payload word is not a
+            -- shifted field of a 40-byte record.
+            if wordArm s then
+                rawValueBase body.value s
+                    |> Result.map (\( base, s1 ) -> wordVecBody base s1)
 
-                        else
+            else
+                rawValueBase body.value s
+                    |> Result.map
+                        (\( base, s1 ) ->
+                            let
+                                ( aT, s2 ) =
+                                    freshTmp s1
+
+                                ( t, s3 ) =
+                                    freshTmp s2
+                            in
+                            ( Il.Tmp t
+                            , emit (Bin (Just aT) L Add base (Il.Con (RtLayout.payloadWordOffset s.layout 0))) s3
+                                |> emit (Load (Just t) L LoadL (Il.Tmp aT))
+                            )
+                        )
+
+        Unsafe (RawVecLen body) ->
+            -- THE ELEMENT COUNT (perf word-arm-area3rt, the review's BLOCKER 2).
+            --
+            -- THE VAL ARM IS THE SAME EMIT AS `payload32(v, 1)` — same temps,
+            -- same ops, same order — so a runtime site rewritten to `veclen(v)`
+            -- emits the val arm's .ssa BYTE FOR BYTE (the corpus is the proof,
+            -- and it is why this is a node rather than an arm-spliced defun: a
+            -- `call Rt.vecLen(..)` would move every one of those sites on the
+            -- val arm).
+            --
+            -- THE WORD ARM READS THE HEADER'S COUNT WORD.  `gcAlloc` writes
+            -- `wstore(cursor, -1, countW)` — header word 1, i.e. ONE word
+            -- before the body — because an inline body has no room for a count
+            -- of its own.  The low half is taken and sign-extended, exactly as
+            -- the val arm's `loadw` + `extsw` is: both arms answer an i32.
+            if wordArm s then
+                rawValueBase body.value s
+                    |> Result.map (\( base, s1 ) -> wordVecLen base s1)
+
+            else
+                rawValueBase body.value s
+                    |> Result.map
+                        (\( base, s1 ) ->
+                            let
+                                ( aT, s2 ) =
+                                    freshTmp s1
+
+                                ( wT, s3 ) =
+                                    freshTmp s2
+
+                                ( t, s4 ) =
+                                    freshTmp s3
+                            in
+                            ( Il.Tmp t
+                            , emit (Bin (Just aT) L Add base (Il.Con (RtLayout.payloadWordOffset s.layout 1))) s4
+                                |> emit (Load (Just wT) W LoadW (Il.Tmp aT))
+                                |> emit (Unary (Just t) L Extsw (Il.Tmp wT))
+                            )
+                        )
+
+        Unsafe (RawTagOf v) ->
+            -- S2 (VR3b3 FIX): REFUSED under the word arm.  `tagof` promises the
+            -- VALTAG (`Mid.Ir`'s `RawTagOf` contract), and on the word arm the
+            -- value word's low bits name the SHAPE (...001 = "a heap object"),
+            -- not the constructor - every heap object would answer 1, nil 2,
+            -- error 5.  A consumer comparing against valtag constants would be
+            -- silently wrong, so the honest answer is the loud one; `tagis` is
+            -- the reader that dispatches correctly (`wordTagIs`).
+            if wordArm s then
+                Err
+                    (wordArmUnsupported
+                        (wordArea
+                            "AREA 2 (TAG TESTS)"
+                            "`tagof(v)` - the word arm's value tag names the SHAPE (...001 = a heap object), not the VALTAG the node promises, so a consumer comparing against valtag constants would be silently wrong; `tagis` dispatches to the word encoding and is the reader to use"
+                        )
+                    )
+
+            else
+                rawValueBase v s
+                    |> Result.map
+                        (\( base, s1 ) ->
                             let
                                 ( t, s2 ) =
                                     freshTmp s1
                             in
                             ( Il.Tmp t, emit (Load (Just t) W LoadW base) s2 )
-                    )
+                        )
 
         Unsafe (RawPayload p) ->
             -- AREA B (perf VR3b3): a payload word.  A 40-byte Value's payload
@@ -4703,23 +6172,7 @@ rawWordArg exp s =
                 -- LOW HALF of that 8-byte word: a string's `len` is body unit
                 -- `lenFieldWord`, read here with no string-specific arm.
                 rawValueBase p.value s
-                    |> Result.map
-                        (\( base, s1 ) ->
-                            let
-                                ( wordT, s2 ) =
-                                    wordPayloadWord base p.word s1
-
-                                ( wT, s3 ) =
-                                    freshTmp s2
-
-                                ( t, s4 ) =
-                                    freshTmp s3
-                            in
-                            ( Il.Tmp t
-                            , emit (Load (Just wT) W LoadW wordT) s4
-                                |> emit (Unary (Just t) L Extsw (Il.Tmp wT))
-                            )
-                        )
+                    |> Result.map (\( base, s1 ) -> wordPayloadField32 base p.word s1)
 
             else
                 rawValueBase p.value s
@@ -5204,10 +6657,20 @@ rawWordArg exp s =
             -- NOT a safepoint-free seat — the callee is unknown generated
             -- code (Mid.Rt classifies the node conservatively allocating).
             -- A1: the callee may ALSO be a NAMED exported symbol (Il.Sym) —
-            -- the generated-code call shape (rt_apply/rt_bounce by name),
+            -- the generated-code call shape (rt_callN by name),
             -- not just a loaded code pointer in a temp.
-            if call.shape /= "ret" && call.shape /= "val" then
-                Err ("qbe: rawCallAgg shape \"" ++ call.shape ++ "\" — only \"ret\" and \"val\" are legal")
+            -- U3b: `ret` IS NO LONGER A LEGAL SHAPE HERE.  `:ret` survives
+            -- only as the WORD arm's frozen closure return (see
+            -- `closureRetClass`), and the word arm cannot reach a RawCallAgg
+            -- at all (the ported-construct belt refuses everything but value
+            -- copies), so an `aggcall ret` on the value arm would name a type
+            -- the module no longer emits.  Loud, never a silent reinterpretation.
+            if call.shape /= "val" then
+                Err
+                    ("qbe: rawCallAgg shape \""
+                        ++ call.shape
+                        ++ "\" — only \"val\" is legal since U3b collapsed the `:ret` call-result shape into `:val` (the `.tail` protocol is gone; a `:ret` sret block has no producer left)"
+                    )
 
             else
                 lowerRawCallAgg call s
@@ -5250,23 +6713,41 @@ rawWordArg exp s =
                         (\n ->
                             { name = n
                             , align = Just 8
-                            , -- the names array is an array of SYMBOL Value
-                              -- structs (40 B each: tag 2, pad, name pointer,
-                              -- union padding) — the SAME layout a runtime
-                              -- dynamic names array (RawAllocVector of symbol
-                              -- Values) has, so Rt.recGet walks both with
-                              -- RawVecLoad.  Must match gc/types.zig's Value
-                              -- extern struct (tag u32@0, union@8).
+                            , -- THE TWO ARMS' NAMES ARRAYS CARRY DIFFERENT ELEMENT
+                              -- KINDS, deliberately (perf word-arm-records R1):
+                              --
+                              --   val   an array of SYMBOL VALUE structs (40 B
+                              --         each: tag 2, pad, name pointer, union
+                              --         padding) — the SAME layout a runtime
+                              --         dynamic names array has, so Rt.recGet
+                              --         walks both with RawVecLoad.  Must match
+                              --         gc/types.zig's Value extern struct
+                              --         (tag u32@0, union@8).
+                              --   word  an array of RAW NAME POINTERS (8 B
+                              --         each, `DRef` words).  A word-arm symbol
+                              --         is a heap block, so a symbol cannot live
+                              --         in `.data` at all; the array holds the
+                              --         NUL-terminated name bytes directly, and
+                              --         the runtime materialises a symbol cell
+                              --         only where a symbol is genuinely in a
+                              --         Value position (recToChain's cars).
+                              --         Each word is 8-aligned, so it reads as
+                              --         tag `000` — a fixnum-looking word the
+                              --         collector correctly skips.
                               items =
-                                List.concatMap
-                                    (\sn ->
-                                        [ DWord s.layout.tagSymbol
-                                        , DZero (RtLayout.abiAlign - s.layout.valueTagBytes)
-                                        , DRef sn
-                                        , DZero (s.layout.valSizeBytes - s.layout.payloadBase - s.layout.wordBytes)
-                                        ]
-                                    )
-                                    (List.reverse symNamesRev)
+                                if wordArm s then
+                                    List.map (\sn -> DRef sn) (List.reverse symNamesRev)
+
+                                else
+                                    List.concatMap
+                                        (\sn ->
+                                            [ DWord s.layout.tagSymbol
+                                            , DZero (RtLayout.abiAlign - s.layout.valueTagBytes)
+                                            , DRef sn
+                                            , DZero (s.layout.valSizeBytes - s.layout.payloadBase - s.layout.wordBytes)
+                                            ]
+                                        )
+                                        (List.reverse symNamesRev)
                             , export_ = False
                             }
                         )
@@ -5290,7 +6771,7 @@ rawWordArg exp s =
 
         Unsafe (RawSym name) ->
             -- (stage 6 A1b) the ADDRESS of a FUNCTION symbol: Il.Sym of the
-            -- name VERBATIM (rt_bounce/rt_callN/a q_Rt_* defun) — a CODE
+            -- name VERBATIM (rt_callN/a q_Rt_* defun) — a CODE
             -- label, not a data def.  This is the ONLY rawWordArg producer of
             -- a function Il.Sym; RawCStr/RawDataAddr above go through
             -- freshData and yield dN DATA defs.  `lowerRawCallAgg` accepts
@@ -5361,8 +6842,38 @@ rawWordArg exp s =
                     )
 
         Unsafe (RawLoadFlt v) ->
-            -- payload word 0 of a VALUE as f64: loadd at slot+8.  A safe bit
-            -- read of ANY Value (no trap on a mistagged arg).
+            -- payload word 0 of a VALUE as f64: `loadd` at `slot + 8`.
+            --
+            -- THAT IS THE VAL ARM'S SHAPE, AND THE OLD COMMENT HERE WAS FALSE.
+            -- It read "a safe bit read of ANY Value (no trap on a mistagged
+            -- arg)", which is true only of a 40-byte Value: there `slot + 8` is
+            -- always a payload word, so a mistagged argument yields garbage
+            -- bits instead of a fault.  UNDER THE WORD ARM A SLOT IS EIGHT
+            -- BYTES, so `slot + 8` is the NEXT FRAME SLOT — the same shape as
+            -- the two defects perf word-arm-surface found, and a read of
+            -- another binder's value rather than of garbage.
+            --
+            -- IT IS NOT FORKED, AND IT IS NOT REFUSED — and the reason matters
+            -- because it is NOT the belt.  `wordArmUnported` admits `App`
+            -- WITHOUT recursing into its arguments (by design: a call's
+            -- argument lowering is the per-site check), so a raw node reached
+            -- only as a call argument is INVISIBLE to the classifier.  MEASURED
+            -- at 0cba46c: `case n of 1 -> ..` compiles and RUNS on the word arm,
+            -- and this node is emitted inside `Rt.=`'s float arm.  Refusing at
+            -- the site would refuse that whole working program (it does: a
+            -- trial fork turned `strcase.elm` and the number-literal case into
+            -- compile errors), which is the polarity's other failure — a loud
+            -- refusal on a construct the arm does not actually reach.
+            --
+            -- WHAT KEEPS IT SAFE IS REACHABILITY, STATED SO IT CAN BE CHECKED:
+            -- this is `Rt.=`'s float-vs-float arm (`tagis(a, 0) || tagis(a, 12)`
+            -- on BOTH operands, after the fixnum/fixnum arm has already
+            -- returned), and a word-arm float DOES NOT EXIST — it is AREA 5's
+            -- heap-boxed `[hdr | f64]` cell.  So the arm is dead on this arm.
+            -- WHEN AREA 5 LANDS, THIS SITE MUST BE FORKED IN THE SAME UNIT:
+            -- `wordPayloadWord`-style, because a word-arm float's bits live in
+            -- a body, not at `slot + 8`.  Its sibling `RawStrByte` above is the
+            -- model — it reads a body unit both arms HAVE, so it forks.
             let
                 ( vslot, s1 ) =
                     freshSlot s
@@ -5397,32 +6908,67 @@ rawWordArg exp s =
                                 freshSlot s1
                         in
                         lowerVal sb.str vslot s2
-                            |> Result.map
+                            |> Result.andThen
                                 (\s3 ->
-                                    let
-                                        ( pT, s4 ) =
-                                            freshTmp s3
+                                    -- THE DATA POINTER IS A DIFFERENT SHAPE PER
+                                    -- ARM (VR3b3 FIX, S1).  val: payload word 0
+                                    -- of a 40-byte record, at slot+8.  word:
+                                    -- body unit 0 of the heap object the value
+                                    -- names, through the SAME reader as
+                                    -- `payload(s, 0)` - the val-arm `slot+8`
+                                    -- shape read the NEXT SLOT on the word arm,
+                                    -- where a slot is 8 bytes.
+                                    if wordArm s3 then
+                                        let
+                                            ( aT, s4 ) =
+                                                wordPayloadWord (Il.Tmp (slotTmp vslot)) 0 s3
+                                        in
+                                        Ok
+                                            (let
+                                                ( bT, s5 ) =
+                                                    freshTmp s4
 
-                                        ( aT, s5 ) =
-                                            freshTmp s4
+                                                ( wT, s6 ) =
+                                                    freshTmp s5
 
-                                        ( bT, s6 ) =
-                                            freshTmp s5
+                                                ( rT, s7 ) =
+                                                    freshTmp s6
+                                             in
+                                             ( Il.Tmp rT
+                                             , s7
+                                                |> emit (Bin (Just bT) L Add aT idxT)
+                                                |> emit (Load (Just wT) W LoadUb (Il.Tmp bT))
+                                                |> emit (Unary (Just rT) L Extuw (Il.Tmp wT))
+                                             )
+                                            )
 
-                                        ( wT, s7 ) =
-                                            freshTmp s6
+                                    else
+                                        Ok
+                                            (let
+                                                ( pT, s4 ) =
+                                                    freshTmp s3
 
-                                        ( rT, s8 ) =
-                                            freshTmp s7
-                                    in
-                                    ( Il.Tmp rT
-                                    , s8
-                                        |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con 8))
-                                        |> emit (Load (Just aT) L LoadL (Il.Tmp pT))
-                                        |> emit (Bin (Just bT) L Add (Il.Tmp aT) idxT)
-                                        |> emit (Load (Just wT) W LoadUb (Il.Tmp bT))
-                                        |> emit (Unary (Just rT) L Extuw (Il.Tmp wT))
-                                    )
+                                                ( aT, s5 ) =
+                                                    freshTmp s4
+
+                                                ( bT, s6 ) =
+                                                    freshTmp s5
+
+                                                ( wT, s7 ) =
+                                                    freshTmp s6
+
+                                                ( rT, s8 ) =
+                                                    freshTmp s7
+                                             in
+                                             ( Il.Tmp rT
+                                             , s8
+                                                |> emit (Bin (Just pT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con 8))
+                                                |> emit (Load (Just aT) L LoadL (Il.Tmp pT))
+                                                |> emit (Bin (Just bT) L Add (Il.Tmp aT) idxT)
+                                                |> emit (Load (Just wT) W LoadUb (Il.Tmp bT))
+                                                |> emit (Unary (Just rT) L Extuw (Il.Tmp wT))
+                                             )
+                                            )
                                 )
                     )
 
@@ -5602,6 +7148,12 @@ rawNodeName node =
         RawVecAddr _ ->
             "rawVecAddr"
 
+        RawVecBody _ ->
+            "rawVecBody"
+
+        RawVecLen _ ->
+            "rawVecLen"
+
         RawVecStore _ ->
             "rawVecStore"
 
@@ -5681,6 +7233,19 @@ rawNodeName node =
 
         RawAllocN _ ->
             "rawAllocN"
+
+        RawTailCall tc ->
+            "rawTailCall " ++ tc.shape ++ " -> " ++ tailTargetName tc.target
+
+
+tailTargetName : TailTarget -> String
+tailTargetName target =
+    case target of
+        TailKey key ->
+            key
+
+        TailSym sym ->
+            "rawsym(\"" ++ sym ++ "\")"
 
 
 -- &vec[index] — a fresh `l` temp holding vec + vs*index (the index may be a
@@ -5867,8 +7432,25 @@ lowerLitWord lit dest s =
         LFloat _ ->
             Err (wordArmUnsupported (wordArea "AREA 5 (FLOATS)" "a float literal — the word arm heap-boxes a float as a [hdr | f64] cell, which does not exist yet"))
 
-        LSymbol _ ->
-            Err (wordArmUnsupported (wordArea "AREA 3 (HEAP-OBJECT CONSTRUCTION)" "a symbol literal — under the word arm it is a heap object behind one tagged pointer, not a tag word plus a data pointer"))
+        LSymbol str ->
+            -- A word-arm SYMBOL is a HEAP BLOCK (perf word-arm-records R1): code
+            -- 2 (the constructor, so `tagis(v, 2)` answers) with ONE raw body
+            -- word, the name pointer — the shape `Rt.intern` already builds,
+            -- which `storeWordSymbolCell` states and justifies.  The bytes stay
+            -- the static `sym:` data symbol (shared with RawCStr/RawDataAddr),
+            -- so there is no copy and no cross-heap edge.
+            --
+            -- The one place a word-arm SYMBOL VALUE is materialised from
+            -- nothing: the record family's names array holds raw name POINTERS
+            -- (see `RawDataAddr`), and `recToChain` materialises cells like this
+            -- one for the chain route's cars.
+            let
+                ( symname, s1 ) =
+                    freshData ("sym:" ++ str)
+                        (\n -> { name = n, align = Just 8, items = [ DStr str, DByte 0 ], export_ = False })
+                        s
+            in
+            storeWordSymbolLiteral (Il.Sym symname) dest s1
 
         LString str ->
             -- A word-arm string is a HEAP BLOCK (perf VR3b3 area A): code 1 (a
@@ -6201,10 +7783,22 @@ isUserAdt t =
 {-| THE PREDICATE, with the pass switch folded in so every consumer reads
 exactly one decision: an expression is Int-known iff the pass is ON and
 `isIntKnown` proves it.  There is no second place to forget `s.rep`.
+
+NEVER UNDER THE WORD ARM, and the reason is measured (perf word-arm-surface).
+S4's premise is that a raw `l` operand holds the number, and every reader and
+writer of that premise is 40-byte-shaped: `rawIntOf`'s boxed `Var` reads the
+payload at `slot + 8`, and `reboxArg` writes `tagNumber` at the slot and the
+payload at `slot + 8` — i.e. SIXTEEN bytes into an EIGHT-byte slot, clobbering
+the next one.  A program with no arithmetic at all reached it: `let ( a, b ) =
+( 1, "hi" )` proved `a` an Int from its literal, held it raw, reboxed it at the
+boundary, and the word arm printed `0` for `1`.  The val arm's tag/untag is AREA
+4's worklist item, so the honest state is "this optimisation does not exist
+here", and refusing it at the ONE decision point keeps the shape it would have
+had anyway: a frame slot written by `lowerLitWord`.
 -}
 isIntExp : S -> Exp -> Bool
 isIntExp s exp =
-    s.rep && isIntKnown s exp
+    s.rep && not (wordArm s) && isIntKnown s exp
 
 
 {-| Deny-by-default proof that `exp`'s VALUE is an Int.  Deliberately small:
@@ -6491,6 +8085,21 @@ reboxArg dest raw s =
 {-| REBOX a `w`-typed comparison result as a tagged Boolean Value.  The VM's
 booleans carry a WORD payload (`lowerLit`'s `LBoolean` arm stores `StoreW`), so
 this is that same shape, not a new one.
+
+VAL ARM ONLY, and the reason is the 40-byte shape it writes: `StoreW tagBoolean`
+at `slot + 0` then the payload at `slot + 8` is TWELVE bytes into an EIGHT-byte
+slot under the word arm — the next slot's value clobbered with a tag, the same
+defect class perf word-arm-surface found in `reboxArg`.  A word-arm boolean is
+ONE immediate (`tagTrue + (w == 0)`, `storeWordCell RtLayout.tagBoolean [w]`).
+
+NOTHING FORKS IT HERE, and what keeps that safe is REACHABILITY, not a belt —
+MEASURED, the same way `RawLoadFlt`'s note was: under the word arm every caller
+is either dead or refused.  `lowerCompare`/`lowerNumEq`'s proven-Int and
+proven-Float arms are denied by `isIntExp`/`isFloatExp` (which return False
+under the arm), and `lowerStrCmp` — the only remaining caller — refuses BY NAME
+at `lowerCompare`'s string branch before it can reach this function.  THE
+STANDING INSTRUCTION: whoever ports Char/String ordering to the word arm must
+fork this in the SAME unit, to `storeWordCell RtLayout.tagBoolean [ raw ]`.
 -}
 reboxBoolean : Int -> Il.Arg -> S -> S
 reboxBoolean dest raw s =
@@ -6589,11 +8198,14 @@ floatData f s =
 
 
 {-| THE PREDICATE, with the pass switch folded in exactly as `isIntExp` does:
-one decision, one place to read `s.rep`.
+one decision, one place to read `s.rep` — and, for the same measured reason, one
+place to read the ARM.  `reboxFloat` writes a `tagFloat` word at the slot and
+the double at `slot + 8`, the 40-byte shape; a raw Float local on the word arm
+would clobber the next slot.  AREA 5 does not exist here yet.
 -}
 isFloatExp : S -> Exp -> Bool
 isFloatExp s exp =
-    s.rep && isFloatKnown s exp
+    s.rep && not (wordArm s) && isFloatKnown s exp
 
 
 {-| Deny-by-default proof that `exp`'s VALUE is `tagFloat`.  Each admitted
@@ -6872,7 +8484,7 @@ lowerSelfTail args s =
                 (\( slots, s1 ) ->
                     List.foldl
                         (\( slot, i ) acc ->
-                            emit (Blit (Il.Tmp (slotTmp slot)) (Il.Tmp (slotTmp (i + 2))) s.layout.valSizeBytes) acc
+                            emit (Blit (Il.Tmp (slotTmp slot)) (Il.Tmp (slotTmp (i + resultSlotBase s.layout))) s.layout.valSizeBytes) acc
                         )
                         s1
                         (List.indexedMap (\i slot -> ( slot, i )) slots)
@@ -6951,88 +8563,215 @@ stageSlots slots s =
     )
 
 
--- Direct saturated call to a known defun.  NON-TAIL: `%r =:ret call q_<key>`
--- then `rt_bounce(l %r)` chases any .tail the callee returned up to a .done
--- value (constant native stack across the tail chain).  TAIL (cross-defun):
--- `rt_tail_known(code, argblock, nargs)` builds a .tail whose args live in a
--- fresh GC array (surviving our rt_frame_leave) and returns the :ret, blitted
--- into the return area (slot 0) for the @ret block to hand upward.
+{-| AREA 6 — WHAT ONE ARGUMENT CROSSES AS, in ONE place.
+
+On the VALUE arm each argument is the ADDRESS of the rooted frame slot it was
+lowered into (VR1): the callee blits 40 bytes out of it at entry, and a
+pointer into the caller's live frame is what makes the lazy read sound.
+
+On the WORD arm a value parameter IS ONE WORD (`:val` is 8 bytes, VR1's
+word-arm convention), so the slot's WORD is loaded and the register carries
+the value itself.  Passing the address there would make the callee dereference
+a fixnum — the arm's silent-wrong shape, and the reason this is a fork and not
+a comment.
+
+BOTH arms hand the callee one `l` operand per argument; only its meaning
+flips, which is why every RtGeneric call site goes through here.
+-}
+argOperands : List Int -> S -> ( List Il.CallArg, S )
+argOperands slots s =
+    if wordArm s then
+        List.foldl
+            (\sl ( acc, st ) ->
+                let
+                    ( v, st1 ) =
+                        freshTmp st
+                in
+                ( acc ++ [ ArgVal (Base L) (Il.Tmp v) ]
+                , emit (Load (Just v) L LoadL (Il.Tmp (slotTmp sl))) st1
+                )
+            )
+            ( [], s )
+            slots
+
+    else
+        ( List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots, s )
+
+
+{-| U3a: an ORDINARY call reached from a TAIL position still has to close the
+block.  Before this unit the non-tail lowering was unreachable in tail position
+(the tcall arm and the tail-known arm both terminated), so `lowerTail`'s App arm
+could hand the block straight to `@ret`; with the arity-5+ sites going non-tail
+the value is blitted into slot 0 and the block must `jmp @ret` itself.  MEASURED
+as the bug that made the first cut emit a function with no `@body` at all (a
+qbe `block @body is used undefined`) — an unterminated block is DROPPED, not
+an error.
+-}
+tailClose : Bool -> S -> S
+tailClose isTail s =
+    if isTail then
+        jumpTo "ret" s
+
+    else
+        s
+
+
+-- Direct saturated call to a known defun.  TWO lowerings, a STATIC choice:
+--
+--   * TAIL within the tcall budget (arity <= maxTailCallArgs): a real `tcall`
+--     after Rt.stage-tail + rt_frame_leave.  The callee returns straight to
+--     OUR caller, so the chain is constant-stack.
+--   * everything else (non-tail, arity over the budget, or a body class that
+--     cannot carry a `tcall`): an ordinary `call`.  U3a deleted the third
+--     answer — `Rt.tail-known` building a `.tail` request for Rt.bounce to
+--     chase — because nothing builds a `.tail` any more; the 240 arity-5+
+--     sites keep a correct, rlimit-bounded, growing lowering (one frame per
+--     hop, the design's priced 95%/240 split), and the non-tail call returns
+--     the finished Value with NO bounce — U3b deleted the bounce itself.
 directCall : String -> List Exp -> Int -> Bool -> S -> Result String S
 directCall key args dest isTail s =
-    let
-        -- stage 6 B2: the tail-known seat retargets to the Mid rawAbi defun
-        -- (the SAME `:ret` aggregate result shape, a symbol swap, and the
-        -- nargs ARG CLASS is Base L — the rawAbi defun's params are `l`
-        -- registers, and QBE subtyping is `l`->`w` only, so a `w` arg to an
-        -- `l` param is a usecheck failure, the rtApply precedent).  B4 deleted
-        -- the Zig rt_tail_known seat, so this is unconditional.
-        ( tailCallee, nargsTy ) =
-            ( "q_" ++ mangle "Rt.tail-known", Base L )
-
-        bounceCallee =
-            bounceSeat s
-    in
-    if isTail then
-        -- TAIL: rt_tail-known takes ONE contiguous argblock pointer + nargs, so
-        -- the staged block stays (the callee copies out of it at entry — the
-        -- argblock itself dies with the GC array Rt.tail-known builds).
-        stageArgs args s
+    if isTail && s.tailEmit && List.length args <= maxTailCallArgs then
+        -- ================= Q1b: A REAL TAIL CALL =================
+        -- `tcall :val $q_F(l %b0, ..., l %bN)` — the callee returns straight
+        -- to OUR caller (abi1 forwards fn->retr as its hidden sret argument,
+        -- which is why C4 demands the callee's return class equal ours).
+        --
+        -- THE MID CONVENTION, in the order the instructions are emitted:
+        --   1. stageArgs: lower every arg into a ROOTED frame slot (an arg's
+        --      own lowering can contain calls — safepoints — and only slots
+        --      survive those), then copy them into ONE contiguous frame block.
+        --   2. Rt.stage-tail: copy that block into memory that SURVIVES our
+        --      rt_frame_leave (tsbuf for <=3 args, the GC allocvec above it).
+        --      This copy is not redundant: our pooled frame goes back to the
+        --      pool and the callee's frame-enter may pop and MEMSET the same
+        --      block, so a pointer into our own frame would hand the callee
+        --      its own zeroing.
+        --   3. %b<i> = %buf + 40*i — the argument pointers the callee blits
+        --      from at entry.
+        --   4. rt_frame_leave: our pooled frame is left HERE, before the jump.
+        --   5. the tcall (which tears down the machine frame and jumps), then
+        --      a bare `ret` — required by the IL grammar; emit.c suppresses it
+        --      because the block already ended in the jmp.
+        -- Between (2) and the callee's prologue blit NOTHING can collect, so
+        -- the unrooted staged copies are safe.  Keep it that way: do not add a
+        -- GC-allocating call to this sequence.
+        --
+        -- AREA 6 — THE WORD ARM NEEDS NO STAGING AT ALL, and the reason is the
+        -- convention, not a shortcut: its arguments cross in REGISTERS, so
+        -- there is nothing that has to survive our rt_frame_leave.  The words
+        -- are loaded out of their rooted slots BEFORE the leave (QBE spills a
+        -- temp live across a call to its own machine frame, which the leave
+        -- does not touch — the leave releases the POOLED block), and the
+        -- staged copy exists only to keep POINTERS valid, which this arm never
+        -- passes.  Keeping Rt.stage-tail here would be a copy of data nobody
+        -- reads, and its `nargs * sizeof(val)` count is the one place the
+        -- runtime's own stride would then have to be right for nothing.
+        lowerArgsToSlots args s
             |> Result.andThen
-                (\( _, base, s1 ) ->
-                    let
-                        ( rp, s2 ) =
-                            freshTmp s1
-                    in
-                    rawAbiArityAgree "Rt.tail-known" 3
-                        |> Result.andThen
-                            (\_ ->
-                                Ok
-                                    (emit
-                                        (Call (Just rp)
-                                            (Agg "ret")
-                                            (Il.Sym tailCallee)
-                                            [ ArgVal (Base L) (Il.Sym ("q_" ++ mangle key))
-                                            , ArgVal (Base L) (Il.Tmp (slotTmp base))
-                                            , ArgVal nargsTy (Il.Con (List.length args))
-                                            ]
-                                        )
-                                        s2
-                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp 0)) (RtLayout.retSizeBytes s2.layout))
-                                        |> jumpTo "ret"
-                                    )
+                (\( slots, s1 ) ->
+                    if wordArm s then
+                        let
+                            ( operands, s2 ) =
+                                argOperands slots s1
+                        in
+                        Ok
+                            (emit (Call Nothing (Base W) (Il.Sym ("q_" ++ mangle "Rt.frame-leave")) []) s2
+                                |> emit (TailCall (closureRetClass s) (Il.Sym ("q_" ++ mangle key)) operands)
+                                |> closeBlock (Ret Nothing)
                             )
+
+                    else
+                        let
+                            ( _, base, s2 ) =
+                                stageSlots slots s1
+
+                            nargs =
+                                List.length args
+
+                            ( bp, s3 ) =
+                                freshTmp s2
+
+                            argPtrs =
+                                List.map (\i -> ( bp ++ "_" ++ String.fromInt i, i )) (List.range 0 (nargs - 1))
+                        in
+                        rawAbiArityAgree "Rt.stage-tail" 2
+                            |> Result.andThen
+                                (\_ ->
+                                    Ok
+                                        (emit
+                                            (Call (Just bp)
+                                                (Base L)
+                                                (Il.Sym ("q_" ++ mangle "Rt.stage-tail"))
+                                                [ ArgVal (Base L) (Il.Tmp (slotTmp base))
+                                                , ArgVal (Base L) (Il.Con nargs)
+                                                ]
+                                            )
+                                            s3
+                                            |> (\sx ->
+                                                    List.foldl
+                                                        (\( ptmp, i ) acc ->
+                                                            emit (Bin (Just ptmp) L Add (Il.Tmp bp) (Il.Con (sx.layout.valSizeBytes * i))) acc
+                                                        )
+                                                        sx
+                                                        argPtrs
+                                               )
+                                            |> emit (Call Nothing (Base W) (Il.Sym ("q_" ++ mangle "Rt.frame-leave")) [])
+                                            |> emit
+                                                (TailCall
+                                                    (closureRetClass s)
+                                                    (Il.Sym ("q_" ++ mangle key))
+                                                    (List.map (\( ptmp, _ ) -> ArgVal (Base L) (Il.Tmp ptmp)) argPtrs)
+                                                )
+                                            |> closeBlock (Ret Nothing)
+                                        )
+                                )
                 )
 
     else
-        -- NON-TAIL: VR1 — each arg crosses as an `l` POINTER to the rooted
-        -- frame slot it was just lowered into.  The contiguous staging block
-        -- (and the 40-byte copy into it) is gone: the slot IS the argument.
+        -- NON-TAIL — and, since U3a, ALSO the arity-5+ STATIC TAIL site: a
+        -- tcall's register budget is four (rdi is spent on the hidden sret
+        -- pointer, rax on a closure's env), and the old answer for the 240
+        -- sites over that budget was `Rt.tail-known` — build a `.tail`
+        -- request, blit it into the return area, and let Rt.bounce chase it.
+        -- Nothing builds a `.tail` any more, so those sites take the ordinary
+        -- call: a CORRECT, rlimit-bounded, growing lowering (the design's
+        -- 95%/240 split, unchanged), one frame per hop instead of none.
+        -- U3b deleted Rt.tail-known with the rest of the `.tail` family, so
+        -- this arm is the ONLY answer left over the tcall budget.
+        --
+        -- VR1 — each arg crosses as an `l` POINTER to the rooted frame slot it
+        -- was just lowered into.  The contiguous staging block (and the
+        -- 40-byte copy into it) is gone: the slot IS the argument.  U3a: the
+        -- callee returns the finished Value (a surface defun's body is `:val`
+        -- now), so there is no `.done` to unwrap and NO BOUNCE.
+        --
+        -- AREA 6 made the two arms ONE shape again: the argument's MEANING
+        -- flips (address vs word — `argOperands`) and the width flips (40 vs
+        -- 8), but the result class is `:val` on both, so the call, the blit
+        -- and the tail close are written once.
         lowerArgsToSlots args s
             |> Result.andThen
                 (\( slots, s1 ) ->
                     let
-                        ( rp, s2 ) =
-                            freshTmp s1
+                        ( operands, s2 ) =
+                            argOperands slots s1
 
-                        ( vp, s3 ) =
+                        ( rp, s3 ) =
                             freshTmp s2
                     in
-                    rawAbiArityAgree "Rt.bounce" 1
-                        |> Result.andThen
-                            (\_ ->
-                                Ok
-                                    (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots)) s3
-                                        |> emit (Call (Just vp) (Agg "val") (Il.Sym bounceCallee) [ ArgVal (Base L) (Il.Tmp rp) ])
-                                        |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
-                                    )
-                            )
+                    Ok
+                        (emit (Call (Just rp) (closureRetClass s) (Il.Sym ("q_" ++ mangle key)) operands) s3
+                            |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
+                            |> tailClose isTail
+                        )
                 )
 
 
 -- Generic application through the runtime (first-class closures, partials,
--- over-application).  NON-TAIL: rt_apply bounces internally and returns a
--- .done value.  TAIL: rt_apply_tail returns the :ret (.tail or .done), blitted
--- into the return area.
+-- over-application).  BOTH arms now hand back the finished `:val`: the non-tail
+-- Rt.apply returns applyGo's value, and the tail arm `tcall`s Rt.apply-tail
+-- (U3a), whose chain returns the value too — there is no `.tail` shape left to
+-- blit into the return area.
 --
 -- stage 6 B1: under QBE_MIDDRIVER=1 the generic apply routes to the Mid
 -- rawAbi defuns Rt.apply / Rt.apply-tail — the SAME aggregate result shapes
@@ -7055,23 +8794,18 @@ rtApply fslotTmp args dest isTail s =
 
         -- stage 6 B1fix (should-fix 1): the call site's aggregate class and
         -- sret size are DERIVED from rawAbiRetClass — the ONE source of truth
-        -- that lowerDefun's ret type (line ~1334) and the @ret blit (line
-        -- ~1435) also read.  The old code hard-wired `Agg "ret"`/`Agg "val"`
-        -- and `retSizeBytes`/`valSizeBytes` here in a second table: a
-        -- 40-vs-80-byte sret drift
-        -- (someone edits rawAbiRetClass, or adds a third aggregate class)
-        -- would silently read/write 40 B of adjacent memory at the blit.
-        -- Deriving both from the one function makes that drift impossible.
+        -- that lowerDefun's ret type also reads.  The old code hard-wired
+        -- `Agg "ret"`/`Agg "val"` and a second size table here: a 40-vs-80-byte
+        -- sret drift (someone edits rawAbiRetClass, or adds a third aggregate
+        -- class) would silently read/write 40 B of adjacent memory at the
+        -- blit.  Deriving both from the one function makes that drift
+        -- impossible.  U3b: with the `Agg "ret"` key gone there is exactly ONE
+        -- aggregate answer left, so the size is simply the module's `:val`.
         retCls =
             rawAbiRetClass midKey
 
         retSize =
-            case retCls of
-                Agg "ret" ->
-                    RtLayout.retSizeBytes s.layout
-
-                _ ->
-                    s.layout.valSizeBytes
+            s.layout.valSizeBytes
     in
     stageArgs args s
         |> Result.andThen
@@ -7079,24 +8813,117 @@ rtApply fslotTmp args dest isTail s =
                 rawAbiArityAgree midKey 3
                     |> Result.andThen
                         (\_ ->
-                            if isTail then
+                            if isTail && s.tailEmit then
+                                -- ============ U2/U3a: A REAL TAIL CALL ============
+                                -- `tcall :val $q_Rt.apply-tail(l %buf, l %b0, l %b1, l n)`
+                                -- — the generic-apply tail site RETURNS THROUGH
+                                -- US instead of nesting two frames per hop.
+                                --
+                                -- LEGAL ONLY BECAUSE THE CLASSES MATCH: `Rt.apply-tail`
+                                -- is `rawAbiRetClass` Agg "val" (40 B) and so is the
+                                -- enclosing RtGeneric body (`s.tailEmit` is TRUE
+                                -- exactly there) — abi1's C4.  U2 emitted `:ret`
+                                -- here because the body's class WAS `:ret`; U3a's
+                                -- flip moved both together, which is the only way
+                                -- the next hop (apply-tail -> applyTailGo) could
+                                -- become a tcall as well.
+                                --
+                                -- THE SEQUENCE, in emission order (the Mid
+                                -- convention, and the reason each step exists):
+                                --   1. stageArgs: lower every arg into a ROOTED
+                                --      frame slot, then copy them into ONE
+                                --      contiguous frame block (an arg's own
+                                --      lowering may call — safepoints — and only
+                                --      slots survive those).
+                                --   2. Rt.stage-apply: copy the closure CELL and
+                                --      that block into ONE C-HEAP (malloc'd) block
+                                --      shaped [closure, arg0..argN].  It SURVIVES our
+                                --      rt_frame_leave (our pooled frame goes back
+                                --      to the pool and the callee's frame-enter
+                                --      may pop and MEMSET it).  NEVER the shared
+                                --      tsbuf — an over-applied chain can hold two
+                                --      staged blocks at once (see the seat).  NOT
+                                --      the GC nursery either: the block must
+                                --      survive the applied callee's whole body,
+                                --      whose allocation volume is user-controlled
+                                --      (the lapprobe row; U2's fix).
+                                --   3. %b<i> = %buf + 40*i — the two argument
+                                --      pointers Rt.apply-tail takes as
+                                --      (fslot, args) = (buf, buf + 40).
+                                --   4. rt_frame_leave: OUR frame is left HERE.
+                                --   5. the tcall (teardown + jmp), then a bare
+                                --      `ret` — required by the IL grammar; emit.c
+                                --      suppresses it because the block already
+                                --      ended in the jmp.
+                                -- Between (2) and the callee's read of `buf`
+                                -- NOTHING can collect, so the unrooted staged copy
+                                -- is safe.  Keep it that way.
                                 let
-                                    ( rp, s2 ) =
+                                    nargs =
+                                        List.length args
+
+                                    ( bp, s2 ) =
                                         freshTmp s1
+
+                                    argPtrs =
+                                        List.map (\i -> ( bp ++ "_" ++ String.fromInt i, i )) (List.range 0 1)
                                 in
-                                Ok
-                                    (emit
-                                        (Call (Just rp)
-                                            retCls
-                                            (Il.Sym callee)
-                                            [ ArgVal (Base L) (Il.Tmp fslotTmp)
-                                            , ArgVal (Base L) (Il.Tmp (slotTmp baseSlot))
-                                            , ArgVal nargsTy (Il.Con (List.length args))
-                                            ]
+                                rawAbiArityAgree "Rt.stage-apply" 3
+                                    |> Result.andThen
+                                        (\_ ->
+                                            Ok
+                                                (emit
+                                                    (Call (Just bp)
+                                                        (Base L)
+                                                        (Il.Sym ("q_" ++ mangle "Rt.stage-apply"))
+                                                        [ ArgVal (Base L) (Il.Tmp fslotTmp)
+                                                        , ArgVal (Base L) (Il.Tmp (slotTmp baseSlot))
+                                                        , ArgVal (Base L) (Il.Con nargs)
+                                                        ]
+                                                    )
+                                                    s2
+                                                    |> (\sx ->
+                                                            List.foldl
+                                                                (\( ptmp, i ) acc ->
+                                                                    emit (Bin (Just ptmp) L Add (Il.Tmp bp) (Il.Con (sx.layout.valSizeBytes * i))) acc
+                                                                )
+                                                                sx
+                                                                argPtrs
+                                                       )
+                                                    |> emit (Call Nothing (Base W) (Il.Sym ("q_" ++ mangle "Rt.frame-leave")) [])
+                                                    |> emit
+                                                        (TailCall
+                                                            retCls
+                                                            (Il.Sym callee)
+                                                            [ ArgVal (Base L) (Il.Tmp (bp ++ "_0"))
+                                                            , ArgVal (Base L) (Il.Tmp (bp ++ "_1"))
+                                                            , ArgVal (Base L) (Il.Con nargs)
+                                                            ]
+                                                        )
+                                                    |> closeBlock (Ret Nothing)
+                                                )
                                         )
-                                        s2
-                                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp 0)) retSize)
-                                        |> jumpTo "ret"
+
+                            else if isTail then
+                                -- ================= A GUARD, NOT A CODE PATH =================
+                                -- PROVABLY UNREACHABLE (handoff-apply-chain-u2-review
+                                -- NICE-TO-HAVE 4), and the pre-U2 lowering that used to
+                                -- live here is DELETED rather than kept as a branch no gate
+                                -- reaches.  Every body that can hold a generic apply is
+                                -- RtGeneric: lowerFunBody classifies away from RtGeneric
+                                -- only for Rt.* keys, lowerClosure always passes
+                                -- RtGeneric, and the RtLang lane cannot express a generic
+                                -- apply at all (every App it lowers has a GRef head).  It
+                                -- is a GUARD because the alternative is worse than an
+                                -- error: the old shape would now feed Rt.apply-tail the
+                                -- pre-U2 (fslot, frame-args) convention, whose failure is a
+                                -- rooting gap — a range of `nargs` from the block drops the
+                                -- LAST ARG — and not a crash.  Loud here, loud in abi1's
+                                -- C4 if it ever fires.
+                                Err
+                                    ("qbe: internal — a generic apply in TAIL position inside "
+                                        ++ s.defunKey
+                                        ++ ", whose body is not RtGeneric.  A `tcall` into Rt.apply-tail is legal only where the enclosing return class EQUALS the callee's (abi1's C4 — `closureRetClass`, i.e. `:val` on the value arm), and the pre-U2 call+blit+jump lowering is deleted because it would pass the old (fslot, frame-args) convention into the new Rt.apply-tail body."
                                     )
 
                             else
@@ -7214,6 +9041,12 @@ isRawWordExp abi exp =
                 RawVecAddr _ ->
                     True
 
+                RawVecBody _ ->
+                    True
+
+                RawVecLen _ ->
+                    True
+
                 RawTagOf _ ->
                     True
 
@@ -7322,7 +9155,7 @@ rawWordOf exp s =
 
 {-| The shared RawCallAgg lowering (stage 6 A1/A1b): the callee is a FUNCTION
 — either the `RawSym` producer (an `Il.Sym` naming a code label VERBATIM:
-rt_bounce/rt_callN/rt_tail_known are called BY NAME with an aggregate result,
+rt_callN/rt_call2r are called BY NAME with an aggregate result,
 corpus-proven at Lower's directCall/rtApply arms) or a loaded code pointer in
 a raw temp.  A DATA symbol (`RawCStr`/`RawDataAddr`, or any `Il.Sym` not from
 a direct `RawSym`) and a constant (`Il.Con`) are NOT call targets and are
@@ -7364,19 +9197,137 @@ lowerRawCallAgg call s =
     callee
         |> Result.andThen
             (\( fnA, s1 ) ->
-                List.foldl
-                    (\e acc ->
-                        Result.andThen
-                            (\( args, st ) ->
-                                rawWordArg e st
-                                    |> Result.map (\( a, st2 ) -> ( args ++ [ ArgVal (Base L) a ], st2 ))
-                            )
-                            acc
-                    )
-                    (Ok ( [], s1 ))
-                    call.args
+                rawWordCallArgs call.args s1
                     |> Result.map (\( args, s2 ) -> ( fnA, args, s2 ))
             )
+
+
+{-| The shared raw-WORD argument lowering: every argument through
+`rawWordArg`, each a `Base L` word, in source order.  Shared by `RawCallAgg`
+and the DSL tail call (U1) so the two call shapes cannot disagree about how
+an argument crosses — and so the `tailcall`'s "word-class only" checker rule
+(J16) has exactly ONE emitter to be true about.
+-}
+rawWordCallArgs : List Exp -> S -> Result String ( List Il.CallArg, S )
+rawWordCallArgs args s =
+    List.foldl
+        (\e acc ->
+            Result.andThen
+                (\( accArgs, st ) ->
+                    rawWordArg e st
+                        |> Result.map (\( a, st2 ) -> ( accArgs ++ [ ArgVal (Base L) a ], st2 ))
+                )
+                acc
+        )
+        (Ok ( [], s ))
+        args
+
+
+{-| U1 (handoff apply-chain) — THE DSL TAIL CALL: `tcall <shape> <callee>(words)`
+followed by a bare `ret`, BLOCK-FINAL (Q1a's `Il.TailCall`, the instruction
+Q1b uses for Lower's own static tail sites).  The block's `@ret` stays
+emitted and unreachable — MEASURED as 11 bytes of `.text` per defun (U2's
+census), not per hop.
+
+THE CALLEE.  A `TailKey` defun is mangled here, beside every other `q_` name,
+and must be IN THIS COMPILE — a tcall to a defun that was never seeded would
+be an undefined symbol at assembly, so it is refused by name instead.  A
+`TailSym` symbol is baked in verbatim (the backend-generated `rt_call2r`
+family is its site).  An empty symbol is refused: it would emit `$()`.
+
+THE FRAME-LEAVE GUARD (the design's sixth refusal, and the one no other layer
+can state).  A `tcall` jumps out of this machine frame: the IL's own teardown
+frees the dynalloc/scratch region BEFORE the `jmp`, and — for a defun holding
+a POOLED frame — the pooled block would never go back to the pool, so a chain
+of hops would LEAK one block per hop (an RSS regression nothing in the gate
+surface sees, because each individual run still answers correctly).  The DSL
+spells its own exit protocol in Mid source (the LIFO order interleaves
+runtime-owned pops with the frame pop, which no Lower-side automatic leave can
+express), so this arm only CHECKS that the current block already emitted
+`Rt.frame-leave` before the terminator.  A PAlloc body (frame-free lean /
+rawAbi) owns no pooled block and needs none.
+-}
+lowerRawTailCall : { target : TailTarget, args : List Exp, shape : String } -> S -> Result String S
+lowerRawTailCall tc s =
+    if tc.shape /= "ret" && tc.shape /= "val" then
+        Err ("qbe: rawTailCall shape \"" ++ tc.shape ++ "\" — only \"ret\" and \"val\" are legal")
+
+    else if s.pooledFrame && not (emittedFrameLeave s) then
+        Err
+            ("qbe: `tailcall` in "
+                ++ s.qname
+                ++ " — this defun holds a POOLED frame and the block has not left it before the tail call.  The callee's frame-enter may pop and MEMSET the same pooled block, so the caller's frame must be left FIRST: spell `call Rt.frame-leave();` (after any registry pops it must follow) immediately before the `tailcall`.  Without it every hop orphans one pooled block — a leak no value check sees"
+            )
+
+    else
+        case tailCallCallee s tc.target of
+            Err msg ->
+                Err msg
+
+            Ok ( fnA, s0 ) ->
+                rawWordCallArgs tc.args s0
+                    |> Result.map
+                        (\( args, s1 ) ->
+                            let
+                                ( parked, s2 ) =
+                                    freshLbl "taildead" s1
+                            in
+                            -- `Ret Nothing` closes the block (the IL requires a
+                            -- terminator; emit.c suppresses the `ret` because
+                            -- the tcall already jumped).  The PARKED label is
+                            -- defensive: a caller that emitted after this term
+                            -- would otherwise reopen a block with this same
+                            -- label and produce a duplicate — the checker
+                            -- admits no such caller today, and the park makes
+                            -- one a no-op instead of an unassemblable module.
+                            startBlock parked
+                                (closeBlock (Ret Nothing)
+                                    (emit (TailCall (Agg tc.shape) fnA args) s2)
+                                )
+                        )
+
+
+{-| The tail call's callee, as an `Il.Arg`, plus the loud refusals: a defun
+key must be in this compile, an extern symbol must be a real name.  Mirrors
+`lowerRawCallAgg`'s callee rule (a `Con`/data symbol is never a call target)
+with the two extra facts only a tcall's target can carry.
+-}
+tailCallCallee : S -> TailTarget -> Result String ( Il.Arg, S )
+tailCallCallee s target =
+    case target of
+        TailKey key ->
+            if Dict.member key s.defuns then
+                Ok ( Il.Sym ("q_" ++ mangle key), s )
+
+            else
+                Err ("qbe: `tailcall` to " ++ key ++ " — not in this compile (Mid.Rt.driverSeeds/gcSeeds must seed it); the emitted tcall would name an undefined symbol")
+
+        TailSym sym ->
+            if sym == "" then
+                Err "qbe: `tailcall rawsym(\"\")` — an empty extern symbol would emit `$()`"
+
+            else
+                Ok ( Il.Sym sym, s )
+
+
+{-| Has the CURRENT block already emitted `Rt.frame-leave`?  The DSL spells
+its own exit protocol, so "before the terminator" is exactly "somewhere in
+this block's instruction list" — the pops that must FOLLOW the frame-leave
+(dance-pop -> frame-leave -> args-pop -> free) are in the same block, which is
+why the check cannot be "the immediately preceding instruction".
+-}
+emittedFrameLeave : S -> Bool
+emittedFrameLeave s =
+    List.any
+        (\inst ->
+            case inst of
+                Call _ _ (Il.Sym name) [] ->
+                    name == "q_" ++ mangle "Rt.frame-leave"
+
+                _ ->
+                    False
+        )
+        s.curBody
 
 
 
@@ -7483,6 +9434,12 @@ isWordCondNode abi node =
             True
 
         RawVecAddr _ ->
+            True
+
+        RawVecBody _ ->
+            True
+
+        RawVecLen _ ->
             True
 
         RawAllocVector _ ->
@@ -7730,37 +9687,14 @@ lowerLoop block dest s =
             let
                 ( cslot, s4 ) =
                     freshSlot sEnter
-
-                ( tagT, s5 ) =
-                    freshTmp s4
-
-                ( isbT, s6 ) =
-                    freshTmp s5
-
-                ( pldT, s7 ) =
-                    freshTmp s6
-
-                ( p8T, s8 ) =
-                    freshTmp s7
-
-                ( iszT, s9 ) =
-                    freshTmp s8
-
-                ( jfT, s10 ) =
-                    freshTmp s9
             in
-            lowerVal block.cond cslot (startBlock topLbl (jumpTo topLbl s10))
+            lowerVal block.cond cslot (startBlock topLbl (jumpTo topLbl s4))
                 |> Result.map
                     (\st ->
-                        emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp cslot))) st
-                            |> emit (Cmp (Just isbT) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagBoolean))
-                            |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp cslot)) (Il.Con 8))
-                            |> emit (Load (Just pldT) W LoadW (Il.Tmp p8T))
-                            |> emit (Cmp (Just iszT) W Ceq (Il.Tmp pldT) (Il.Con 0))
-                            |> emit (Bin (Just jfT) W And (Il.Tmp isbT) (Il.Tmp iszT))
-                            -- the VM's jmpf test: `jfT` is 1 for a FALSY value,
-                            -- so a nonzero test EXITS the loop
-                            |> closeBlock (Jnz (Il.Tmp jfT) exitLbl bodyLbl)
+                        -- the VM's jmpf test: a FALSY value EXITS the loop.  The
+                        -- test itself is `falsyJump` — the same one `lowerIf`
+                        -- uses, so the arm's tag question is asked in one place.
+                        falsyJump cslot exitLbl bodyLbl st
                     )
                 |> Result.andThen (\st -> lowerBody st)
 
@@ -8049,14 +9983,23 @@ lowerMatchTests matches scrutSlot scrutType failLbl s =
 lowerMatch : Match -> Int -> Maybe Rep.Type -> String -> S -> Result String S
 lowerMatch match scrutSlot scrutType failLbl s =
     case match of
+        -- THE EXPECTED VALUE IS A VALTAG, and it is the TOP-LEVEL constant, not
+        -- `s.layout.tagCons`.  MEASURED (this site, first run): the word
+        -- instance's `tagCons` field is the POINTER TAG (1 — every word-arm heap
+        -- object carries it), while the KIND that identifies a cons is the
+        -- VALTAG 4.  Passing `s.layout.tagCons` therefore asked "is this a
+        -- kind-1 block?" and every cons answered no, so `1 :: 2 :: []` fell
+        -- through both alternatives and died "non-exhaustive case" on a
+        -- well-formed value.  The val instance's fields equal the top-level
+        -- constants, so the val emit is unchanged (the corpus says so).
         MCons steps ->
-            Ok (lowerTagMatch steps scrutSlot s.layout.tagCons failLbl s)
+            lowerTagMatch steps scrutSlot RtLayout.tagCons failLbl s
 
         MEmpty steps ->
-            Ok (lowerTagMatch steps scrutSlot s.layout.tagNil failLbl s)
+            lowerTagMatch steps scrutSlot RtLayout.tagNil failLbl s
 
         MVector steps ->
-            Ok (lowerTagMatch steps scrutSlot s.layout.tagVector failLbl s)
+            lowerTagMatch steps scrutSlot RtLayout.tagVector failLbl s
 
         MTagEq steps tag ->
             -- UNIT B item 1: inline the payload-pointer compare when the
@@ -8080,7 +10023,16 @@ lowerMatch match scrutSlot scrutType failLbl s =
 
 -- Read the value at `steps`, test its tag == expected; pass -> passLbl,
 -- fail -> failLbl.
-lowerTagMatch : List Step -> Int -> Int -> String -> S -> S
+--
+-- THE TEST ITSELF IS ARM-SPLIT, and the word half is NOT a tag compare: under
+-- the word arm every heap object carries the SAME `...001` pointer tag, so
+-- `expected` names a KIND (cons = 4, vector = 10) that lives in the GC header,
+-- not in the word — while nil is an IMMEDIATE and stays a tag compare.
+-- `wordTagIs` is that reader, already written and probe-pinned for `tagis`, and
+-- `RtLayout.wordTagShape` is what decides which of the two a valtag is, so this
+-- site cannot disagree with the encoding.  A valtag with no word-arm encoding
+-- refuses at COMPILE time (hence the `Result`).
+lowerTagMatch : List Step -> Int -> Int -> String -> S -> Result String S
 lowerTagMatch steps scrutSlot expected failLbl s =
     let
         ( p, s1 ) =
@@ -8088,20 +10040,36 @@ lowerTagMatch steps scrutSlot expected failLbl s =
 
         sRead =
             readSteps steps scrutSlot p s1
-
-        ( tagT, s2 ) =
-            freshTmp sRead
-
-        ( isM, s3 ) =
-            freshTmp s2
-
-        ( passLbl, s4 ) =
-            freshLbl "cpass" s3
     in
-    emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp p))) s4
-        |> emit (Cmp (Just isM) W Ceq (Il.Tmp tagT) (Il.Con expected))
-        |> closeBlock (Jnz (Il.Tmp isM) passLbl failLbl)
-        |> startBlock passLbl
+    if wordArm s then
+        let
+            ( passLbl, s2 ) =
+                freshLbl "cpass" sRead
+        in
+        wordTagIs (Il.Tmp (slotTmp p)) expected s2
+            |> Result.map
+                (\( flag, s3 ) ->
+                    closeBlock (Jnz flag passLbl failLbl) s3
+                        |> startBlock passLbl
+                )
+
+    else
+        let
+            ( tagT, s2 ) =
+                freshTmp sRead
+
+            ( isM, s3 ) =
+                freshTmp s2
+
+            ( passLbl, s4 ) =
+                freshLbl "cpass" s3
+        in
+        Ok
+            (emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp p))) s4
+                |> emit (Cmp (Just isM) W Ceq (Il.Tmp tagT) (Il.Con expected))
+                |> closeBlock (Jnz (Il.Tmp isM) passLbl failLbl)
+                |> startBlock passLbl
+            )
 
 
 -- Read the value at `steps`, then run the REAL `=` prim against `lit` (the
@@ -8276,14 +10244,14 @@ lowerStep : Step -> Int -> Int -> S -> S
 lowerStep step src dst s =
     case step of
         FstStep ->
-            chaseField 8 src dst s
+            chaseField 0 src dst s
 
         SndStep ->
             if s.consArr then
                 chaseCdr src dst s
 
             else
-                chaseField 16 src dst s
+                chaseField 1 src dst s
 
         HdStep ->
             lowerHdTl True src dst s
@@ -8292,55 +10260,117 @@ lowerStep step src dst s =
             lowerHdTl False src dst s
 
         IdxStep j ->
+            -- Element `j` of an ADT vector.  `IdxStep` is produced ONLY for a
+            -- constructor pattern's arguments (`Mid.FromAst`'s ADT branch,
+            -- `IdxStep (j + 1)`), and `KindCon` is the only shape
+            -- `Mid.Qbe.Flatten` resolves it against, so the base is always a
+            -- VECTOR body — which is what `fieldBase` returns on both arms.
             let
-                ( dataT, s1 ) =
-                    freshTmp s
+                ( dataBase, s1 ) =
+                    fieldBase 0 src s
 
-                ( p8, s2 ) =
+                ( eT, s2 ) =
                     freshTmp s1
-
-                ( eT, s3 ) =
-                    freshTmp s2
             in
-            emit (Bin (Just p8) L Add (Il.Tmp (slotTmp src)) (Il.Con 8)) s3
-                |> emit (Load (Just dataT) L LoadL (Il.Tmp p8))
-                |> emit (Bin (Just eT) L Add (Il.Tmp dataT) (Il.Con (s.layout.valSizeBytes * j)))
+            emit (Bin (Just eT) L Add dataBase (Il.Con (s.layout.valSizeBytes * j))) s2
                 |> emit (Blit (Il.Tmp eT) (Il.Tmp (slotTmp dst)) s.layout.valSizeBytes)
 
 
--- fst/snd: blit the car body (at `off` in the cons Value) into dst.
-chaseField : Int -> Int -> Int -> S -> S
-chaseField off src dst s =
-    let
-        ( ptrT, s1 ) =
-            freshTmp s
+{-| THE BASE OF PAYLOAD WORD `n` OF THE VALUE IN SLOT `src` — the ONE statement
+of the difference between the arms for every pointer chase in the pattern
+matcher (perf word-arm-surface).
 
-        ( p8, s2 ) =
-            freshTmp s1
+`n` IS A PAYLOAD WORD INDEX, NOT A BYTE OFFSET, and that is load-bearing: the
+val arm's payload words are 8 bytes apart (each HOLDS a pointer into a separate
+array) while the Value itself is 40 bytes, so `payloadWordOffset` and
+`valSizeBytes` are two different strides and only the first one indexes a
+payload.  The word arm's are `wordBytes` apart.
+
+val arm: the payload word HOLDS A POINTER to a separate array, so the base is
+`[[src + payloadWordOffset n]]`.
+
+word arm: the slot holds ONE WORD — the TAGGED POINTER to the body — so the
+base is `untag([src]) + payloadWordOffset n`, the SAME `vecbody` identity the
+runtime states (`wordBodyOf` is the untag, and a word-arm body is INLINE, so
+"the array" and "the first element" are the same address).
+
+MEASURED, AND IT IS WHY THIS IS AN INDIRECTION AND NOT AN OFFSET: the first cut
+read `src + off` directly and `1 :: 2 :: []` printed the whole list instead of
+its head.  `src` is a FRAME SLOT address; `src + 8` is the NEXT FRAME SLOT, not
+the object's payload — and the slot allocator happened to hand the pattern
+matcher's own scratch slot that exact address, so the "car" read back a copy of
+the scrutinee.  A frame slot and a heap object are different memories.
+
+THE VAL ARM'S EMIT IS UNCHANGED BYTE FOR BYTE: `payloadWordOffset n` on the val
+instance is exactly the byte offset each caller already spelled (`8` for fst,
+`16` for snd), the base temp is allocated FIRST and the address temp second —
+the order every call site already used — so the corpus stays identical.
+-}
+fieldBase : Int -> Int -> S -> ( Il.Arg, S )
+fieldBase n src s =
+    if wordArm s then
+        let
+            ( v, s1 ) =
+                freshTmp s
+
+            ( body, s2 ) =
+                wordBodyOf (Il.Tmp v) (emit (Load (Just v) L LoadL (Il.Tmp (slotTmp src))) s1)
+
+            ( baseT, s3 ) =
+                freshTmp s2
+        in
+        ( Il.Tmp baseT
+        , emit (Bin (Just baseT) L Add (Il.Tmp body) (Il.Con (RtLayout.payloadWordOffset s.layout n))) s3
+        )
+
+    else
+        let
+            ( baseT, s1 ) =
+                freshTmp s
+
+            ( p8, s2 ) =
+                freshTmp s1
+        in
+        ( Il.Tmp baseT
+        , emit (Bin (Just p8) L Add (Il.Tmp (slotTmp src)) (Il.Con (RtLayout.payloadWordOffset s.layout n))) s2
+            |> emit (Load (Just baseT) L LoadL (Il.Tmp p8))
+        )
+
+
+-- fst/snd: blit PAYLOAD WORD `n` of the value in `src` into dst — `0` for the
+-- car (`FstStep`), `1` for the cdr when the cons carries two interior pointers
+-- (`SndStep` with `consArr`).  `n` is a WORD INDEX and not a byte offset, which
+-- is `fieldBase`'s contract and the reason `8`/`16` — the offsets every
+-- pre-unit caller spelled — are no longer accepted here: `8` would compile
+-- clean and mean "payload word 8", which is past the end of a cons on both
+-- arms.  THE NAME AND THE DOC CARRY THE UNIT because this wrapper is exactly
+-- where the old meaning used to live: it forwarded a byte offset to a function
+-- that had become index-parameterised, and a caller copying an old call site
+-- would have compiled and silently mis-read on BOTH arms.
+chaseField : Int -> Int -> Int -> S -> S
+chaseField n src dst s =
+    let
+        ( base, s1 ) =
+            fieldBase n src s
     in
-    emit (Bin (Just p8) L Add (Il.Tmp (slotTmp src)) (Il.Con off)) s2
-        |> emit (Load (Just ptrT) L LoadL (Il.Tmp p8))
-        |> emit (Blit (Il.Tmp ptrT) (Il.Tmp (slotTmp dst)) s.layout.valSizeBytes)
+    emit (Blit base (Il.Tmp (slotTmp dst)) s1.layout.valSizeBytes) s1
 
 
 -- (A) the cdr of a cons: element 1 of the 2-element array `car` heads
 -- (*(car + vs)).  The cons Value's cdr payload word is now NULL, so the cdr
 -- VALUE is derived through the car pointer, exactly like the Zig readers.
+-- Under the word arm the body is inline, so this is element 1 of the SAME base
+-- (`fieldBase 0` + one element) — see `fieldBase`.
 chaseCdr : Int -> Int -> S -> S
 chaseCdr src dst s =
     let
-        ( carT, s1 ) =
-            freshTmp s
+        ( carBase, s1 ) =
+            fieldBase 0 src s
 
-        ( p8, s2 ) =
+        ( cdrT, s2 ) =
             freshTmp s1
-
-        ( cdrT, s3 ) =
-            freshTmp s2
     in
-    emit (Bin (Just p8) L Add (Il.Tmp (slotTmp src)) (Il.Con 8)) s3
-        |> emit (Load (Just carT) L LoadL (Il.Tmp p8))
-        |> emit (Bin (Just cdrT) L Add (Il.Tmp carT) (Il.Con s.layout.valSizeBytes))
+    emit (Bin (Just cdrT) L Add carBase (Il.Con s.layout.valSizeBytes)) s2
         |> emit (Blit (Il.Tmp cdrT) (Il.Tmp (slotTmp dst)) s.layout.valSizeBytes)
 
 
@@ -8365,7 +10395,7 @@ lowerHdTl isHd src dst s =
         ( doneLbl, s5 ) =
             freshLbl "hdone" s4
     in
-    emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp src))) s5
+    readTag tagT (Il.Tmp (slotTmp src)) s5
         |> emit (Cmp (Just isnil) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagNil))
         |> closeBlock (Jnz (Il.Tmp isnil) nilLbl chaseLbl)
         |> startBlock nilLbl
@@ -8373,13 +10403,13 @@ lowerHdTl isHd src dst s =
         |> jumpTo doneLbl
         |> startBlock chaseLbl
         |> (if isHd then
-                chaseField 8 src dst
+                chaseField 0 src dst
 
             else if s.consArr then
                 chaseCdr src dst
 
             else
-                chaseField 16 src dst
+                chaseField 1 src dst
            )
         |> jumpTo doneLbl
         |> startBlock doneLbl
@@ -8407,6 +10437,22 @@ storeNil dst s =
 -- the true branch's block.
 jmpfFalse : Int -> String -> String -> S -> S
 jmpfFalse slot falseLbl trueLbl s =
+    startBlock trueLbl (falsyJump slot falseLbl trueLbl s)
+
+
+{-| The BLOCK-CLOSING half of `jmpfFalse`, on its own for the one caller that
+must supply its own next block: `lowerLoop`'s condition test, whose true branch
+is the loop body's label and is started by the body's own lowering (starting it
+here as well would emit a DUPLICATE block label — invalid QBE).
+
+Keeping the test in ONE function is what makes the loop condition arm-correct:
+the val arm's `isBool && payload == 0` pair and the word arm's single
+`tagFalse` compare are the same question, and before AREA 6 `lowerLoop` spelled
+the val arm's pair INLINE — a word-arm loop would have read a tag WORD off a
+one-word value and tested a payload word that does not exist.
+-}
+falsyJump : Int -> String -> String -> S -> S
+falsyJump slot falseLbl trueLbl s =
     let
         ( tagT, s1 ) =
             freshTmp s
@@ -8444,7 +10490,6 @@ jmpfFalse slot falseLbl trueLbl s =
             |> emit (Bin (Just jfT) W And (Il.Tmp isbT) (Il.Tmp iszT))
             |> closeBlock (Jnz (Il.Tmp jfT) falseLbl trueLbl)
     )
-        |> startBlock trueLbl
 
 
 -- The unreachable (in well-typed Elm) non-exhaustive failure arm: raise via a
@@ -8883,9 +10928,23 @@ closedRecordFieldType s rec field =
     Maybe.map Tuple.second (closedRecordField s rec field)
 
 
+{-| `tagis(value, tag)` as a BOXED BOOLEAN, for `If`/`falsyJump`.
+
+THE `tag` ARGUMENT IS A VALTAG, AND THE CALLER MUST PASS THE MODULE CONSTANT
+(perf word-arm-records R3).  `RawTagIs`'s `tag` is dispatched by `wordTagShape`,
+which is keyed on VALTAGS — and on the word arm the `ValLayout` INSTANCE's
+`tag*` fields are the WORD ENCODINGS, where every heap code collapses to
+`heapPtrTag` (1).  Passing `layout.tagRecord` therefore asks "is this a STRING"
+on the word arm: the same meaning drift that produced the poisoned record in R2.
+The val arm's instance fields ARE the valtags, so passing the constants changes
+nothing there — the val emit is byte-identical (the corpus is the proof).
+
+The BOXED-BOOLEAN tag is a valtag too (`wordTagShape tagBoolean` answers the two
+word immediates), so it is spelled as the constant for the same reason.
+-}
 boxTagIs : RtLayout.ValLayout -> Exp -> Int -> Exp
 boxTagIs layout value tag =
-    Unsafe (RawMkValue { tag = layout.tagBoolean, words = [ Unsafe (RawTagIs { value = value, tag = tag }) ] })
+    Unsafe (RawMkValue { tag = RtLayout.tagBoolean, words = [ Unsafe (RawTagIs { value = value, tag = tag }) ] })
 
 
 -- The shared access body: tag 14 -> positional (Just rank) or recGet walk;
@@ -8897,8 +10956,15 @@ recordAccessBody layout recB rank field =
         recV =
             Var recB.id
 
+        -- THE ELEMENT BASE, NOT PAYLOAD WORD 0 (perf word-arm-area3rt).  This is
+        -- the ONE seat where the compiler itself spelled the val arm's
+        -- "vector -> separate array" idiom instead of the runtime's text, so the
+        -- runtime-wide rewrite could not reach it: on the word arm payload word 0
+        -- of a record is element 0, and using it as an array base reads the
+        -- wrong object.  `RawVecBody` is the same emit on the val arm (that is
+        -- what the node IS), so the val arm's .ssa does not move.
         positional =
-            Unsafe (RawVecLoad { vec = Unsafe (RawPayload { value = recV, word = 0 }), index = Lit (LNumber (Maybe.withDefault 0 rank)) })
+            Unsafe (RawVecLoad { vec = Unsafe (RawVecBody { value = recV }), index = Lit (LNumber (Maybe.withDefault 0 rank)) })
 
         walk =
             PrimApp { prim = "recGet", args = [ recV, Lit (LSymbol field) ] }
@@ -8907,11 +10973,11 @@ recordAccessBody layout recB rank field =
             PrimApp { prim = "snd", args = [ PrimApp { prim = "assoc", args = [ Lit (LSymbol field), recV ] } ] }
     in
     If
-        { cond = boxTagIs layout recV layout.tagRecord
+        { cond = boxTagIs layout recV RtLayout.tagRecord
         , thenBranch = Maybe.withDefault walk (Maybe.map (\_ -> positional) rank)
         , elseBranch =
             If
-                { cond = boxTagIs layout recV layout.tagCons
+                { cond = boxTagIs layout recV RtLayout.tagCons
                 , thenBranch = chain
                 , elseBranch = walk
                 , falseLabel = "r4"
@@ -8983,8 +11049,19 @@ lowerRecordLitPos setters dest s =
                                 -- heap.  The data array allocates through the
                                 -- Mid seat Rt.allocVector (no cross-heap edge);
                                 -- rt_vec_alloc is no longer emitted by anything.
+                                --
+                                -- THE WORD ARM ALLOCATES A DIFFERENT OBJECT (perf
+                                -- word-arm-records R2): ONE code-14 block whose body
+                                -- is `[data_0 .. data_{n-1} | namesBase]`, so the
+                                -- seat is `Rt.allocRecord` — which adds the names
+                                -- word to the count itself (`n + 1`), because that
+                                -- `+ 1` is the layout and no call site may be able
+                                -- to disagree with it.
                                 ( dataArg, s2 ) =
-                                    midGcAllocSeat "Rt.allocVector" (Il.Con n) s1
+                                    midGcAllocSeat
+                                        (if wordArm s then "Rt.allocRecord" else "Rt.allocVector")
+                                        (Il.Con n)
+                                        s1
 
                                 -- The store goes to the PLAIN Mid seat
                                 -- (Rt.vecStorePlain, zighost Z2): the data array
@@ -9012,9 +11089,43 @@ lowerRecordLitPos setters dest s =
                                         (List.indexedMap (\i slot -> ( i, slot )) slots)
                             in
                             rawWordArg (Unsafe (RawDataAddr names)) s3
-                                |> Result.map
+                                |> Result.andThen
                                     (\( namesArg, s4 ) ->
-                                        storeValueCell s.layout.tagRecord [ dataArg, Il.Con n, namesArg ] dest s4
+                                        if wordArm s then
+                                            -- THE NAMES WORD, at body index `n`: a
+                                            -- RAW store of the static names-array
+                                            -- address (NOT a value store — the
+                                            -- word is a pointer the collector
+                                            -- skips, not a Value).  The address
+                                            -- is `elemAddr`, i.e. the layout's own
+                                            -- stride, never a hand-spelled `+8n`.
+                                            let
+                                                ( aT, s5 ) =
+                                                    elemAddr dataArg (Il.Con n) s4
+
+                                                s6 =
+                                                    emit (Store StoreL namesArg (Il.Tmp aT)) s5
+                                            in
+                                            -- the slot holds the TAGGED BODY: the
+                                            -- one-word heap arm of `storeWordCell`
+                                            -- ("the caller has already allocated
+                                            -- the body"), so the tag has ONE writer
+                                            -- on this arm too.
+                                            --
+                                            -- THE CODE IS THE MODULE CONSTANT, NOT
+                                            -- `s.layout.tagRecord`: on the word arm
+                                            -- the instance's `tag*` fields are the
+                                            -- WORD ENCODINGS (every heap code is
+                                            -- `heapPtrTag` = 1), so the instance
+                                            -- field would name the STRING code here.
+                                            -- MEASURED: that exact slip took the
+                                            -- string branch, refused, and the
+                                            -- poison-on-error path in
+                                            -- `storeValueCell` emitted `...111`.
+                                            storeWordCell RtLayout.tagRecord [ dataArg ] dest s6
+
+                                        else
+                                            Ok (storeValueCell s.layout.tagRecord [ dataArg, Il.Con n, namesArg ] dest s4)
                                     )
                         )
 
@@ -9061,11 +11172,11 @@ recordUpdateWalkExp layout baseB base updates =
         { binders = [ LetBind { binder = baseB, value = base } ]
         , body =
             If
-                { cond = boxTagIs layout baseV layout.tagRecord
+                { cond = boxTagIs layout baseV RtLayout.tagRecord
                 , thenBranch = walk
                 , elseBranch =
                     If
-                        { cond = boxTagIs layout baseV layout.tagCons
+                        { cond = boxTagIs layout baseV RtLayout.tagCons
                         , thenBranch = chain
                         , elseBranch = walk
                         , falseLabel = "u4"
@@ -9320,6 +11431,37 @@ lowerRecordUpdate update dest s =
 
 lowerPrimApp : { prim : String, args : List Exp } -> Int -> S -> Result String S
 lowerPrimApp app dest s =
+    -- THE INLINE FAST PATHS ARE A VAL-ARM SHAPE (perf word-arm-arith).
+    --
+    -- `lowerArith`/`lowerCompare`/`lowerNumEq` end in a GENERIC tail that emits
+    -- the 40-byte Value directly — the tag word at `slot + 0`, the payload at
+    -- `slot + 8` — and each is gated on an operand TYPE, never on the arm.  So
+    -- under the word arm each of the three SKIPS that tail and calls the
+    -- runtime through `rtPrimSlots` instead, which is the SAME ground the
+    -- AGGREGATE prims are admitted on: `Rt.+`/`-`/`*`/`/`/`<`/`=` read their
+    -- operands through the layout-derived accessors (`payload`, `payload32`,
+    -- `mknum`, `tagis`), so they are arm-clean BY CONSTRUCTION rather than by a
+    -- site sweep.
+    --
+    -- THE FORK LIVES INSIDE EACH OF THE THREE, NOT HERE, and that is
+    -- deliberate: `lowerCompare`'s PROVEN-STRING branch must still be ENTERED
+    -- under the word arm so it can REFUSE by name (its inline byte loop reads
+    -- `slot + 8` and `slot + 16`; the numeric-only `Rt.<` answers False for
+    -- every string, the silent Char-ordering mislower).  Gating the whole call
+    -- here instead SKIPPED that branch, so the refusal was unreachable and the
+    -- word arm printed `0` for `"a" < "b"` — MEASURED, in this unit's first
+    -- cut.
+    --
+    -- THIS IS A CLASSIFICATION, NOT A NEW MECHANISM, and that is MEASURED:
+    -- `2 ^ 3` and `7 // 2` already built, linked and ran correctly under
+    -- `QBE_VALREP=word` before this unit, because `pow` and `/` have no inline
+    -- arm at all and so already took this route.  What was missing was only the
+    -- three forks.
+    --
+    -- `f/` KEEPS its inline branch and is NOT routed: it is float-only, and
+    -- under the word arm it is refused by name (AREA 5, `wordArmPrimUnported`)
+    -- with `isFloatExp` already denying, so the branch is unreachable there
+    -- rather than silently taken.
     if List.length app.args == 2 && List.member app.prim [ "+", "-", "*" ] then
         lowerArith app.prim app.args dest s
 
@@ -9441,6 +11583,20 @@ lowerArith prim args dest s =
         -- existing shape.
         rawIntBin (arithOp prim) (first args) (second args) s
             |> Result.map (\( r, s1 ) -> reboxArg dest r s1)
+
+    else if wordArm s then
+        -- ============ THE WORD ARM TAKES THE RUNTIME ROUTE ============
+        -- (perf word-arm-arith.)  The tail below emits the 40-byte shape — the
+        -- tag word at `slot + 0` and the payload at `slot + 8` — and under this
+        -- arm those are the value word and THE NEXT FRAME SLOT.  `Rt.+`/`-`/`*`
+        -- instead read their operands with `payload` (a fixnum's `SAR`, a heap
+        -- object's body load) and write the result with `mknum`, which is the
+        -- i61 shift AND its round-trip check: `+ - *` WRAP at i64 (L3's
+        -- semantics) for every result that fits, and a result outside i61
+        -- REFUSES LOUDLY by name instead of silently dropping its top three
+        -- bits — the boxed overflow path is AREA 4's and does not exist yet.
+        lowerArgsToSlots args s
+            |> Result.andThen (\( slots, s1 ) -> rtPrimSlots prim slots dest s1)
 
     else
         lowerArgs2 args s
@@ -9567,8 +11723,43 @@ lowerCompare op args dest s =
         -- non-number, which is the silent Char-ordering mislower this branch
         -- replaces.  Byte-lexicographic UTF-8 order IS code-point order, so
         -- this is real-Elm's Char/String ordering in the VM's byte model.
-        lowerArgs2 args s
-            |> Result.andThen (\( a1, a2, s1 ) -> lowerStrCmp op a1 a2 dest s1)
+        --
+        -- NOT UNDER THE WORD ARM (perf word-arm-arith): `lowerStrLess` reads
+        -- the byte pointer at `slot + 8` and the length at `slot + 16` of a
+        -- 40-byte Value, i.e. THE NEXT TWO FRAME SLOTS when a slot is one
+        -- word.  It cannot be routed to `Rt.<` either — that answers False for
+        -- any non-number, which is exactly the silent mislower this branch
+        -- exists to prevent — so it refuses BY NAME here, at the construct's
+        -- own emit site.  A real port is two accessor calls
+        -- (`payload(x, 0)` for the bytes, `payload32(x, 1)` for the length,
+        -- both already twinned); it is left out because this unit's scope is
+        -- the ARITHMETIC prim class and a fork here would need its own
+        -- behavioural fixture to be worth anything.
+        if wordArm s then
+            Err
+                (wordArmUnsupported
+                    (wordArea
+                        "AREA 3 (PAYLOAD ACCESS)"
+                        "Char/String ordering — its inline byte-lexicographic loop reads a Value's byte pointer at `slot + 8` and its length at `slot + 16`, i.e. the 40-byte shape, which under the word arm are the NEXT TWO FRAME SLOTS; and the numeric-only `Rt.<` answers False for any non-number, so routing it there would be the silent Char-ordering mislower the inline branch exists to prevent"
+                    )
+                )
+
+        else
+            lowerArgs2 args s
+                |> Result.andThen (\( a1, a2, s1 ) -> lowerStrCmp op a1 a2 dest s1)
+
+    else if wordArm s then
+        -- ============ THE WORD ARM TAKES THE RUNTIME ROUTE ============
+        -- (perf word-arm-arith.)  The tail below emits the 40-byte shape — the
+        -- tag word at `slot + 0`, the payload at `slot + 8` — and under this
+        -- arm those are the value word and THE NEXT FRAME SLOT.  `Rt.<`/`<=`/
+        -- `>`/`>=` read their operands with `payload`/`tagis` and answer through
+        -- `mkbool`, so the i64 compare and the Boolean are both the layout's.
+        -- The PROVEN-FLOAT and PROVEN-STRING branches above are the ones this
+        -- fork deliberately still lets run: the float one is dead (`isFloatExp`
+        -- denies here) and the string one REFUSES by name.
+        lowerArgsToSlots args s
+            |> Result.andThen (\( slots, s1 ) -> rtPrimSlots (cmpName op) slots dest s1)
 
     else
         lowerArgs2 args s
@@ -9910,6 +12101,18 @@ lowerNumEq args dest s =
                     reboxBoolean dest (Il.Tmp c) (emit (Cmp (Just c) L Ceq aa bb) s2)
                 )
 
+    else if wordArm s then
+        -- ============ THE WORD ARM TAKES THE RUNTIME ROUTE ============
+        -- (perf word-arm-arith.)  The tail below emits the 40-byte shape — the
+        -- tag word at `slot + 0`, the payload at `slot + 8` — and under this arm
+        -- those are the value word and THE NEXT FRAME SLOT.  `Rt.=` is the
+        -- PORTED deep-equality: every arm of it reads through `tagis`/
+        -- `payload`/`veclen`/`len32`, and its record arm is the word-spliced
+        -- `Rt.recEqGo` (perf word-arm-records R2), so this fork is what makes
+        -- `==` on records EXECUTE instead of merely compile.
+        lowerArgsToSlots args s
+            |> Result.andThen (\( slots, s1 ) -> rtPrimSlots "=" slots dest s1)
+
     else
         lowerArgs2 args s
         |> Result.andThen
@@ -10070,14 +12273,12 @@ rtPrimSlots prim slots dest s =
                 let
                     ( rp, s1 ) =
                         freshTmp s
-
-                    ( vp, s2 ) =
-                        freshTmp s1
                 in
+                -- U3a: same flip as the RawCall arm above — a generic-ABI
+                -- callee returns the finished `:val`.
                 Ok
-                    (emit (Call (Just rp) (Agg "ret") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots)) s2
-                        |> emit (Call (Just vp) (Agg "val") (Il.Sym (bounceSeat s)) [ ArgVal (Base L) (Il.Tmp rp) ])
-                        |> emit (Blit (Il.Tmp vp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
+                    (emit (Call (Just rp) (Agg "val") (Il.Sym ("q_" ++ mangle key)) (List.map (\sl -> ArgVal (Base L) (Il.Tmp (slotTmp sl))) slots)) s1
+                        |> emit (Blit (Il.Tmp rp) (Il.Tmp (slotTmp dest)) s.layout.valSizeBytes)
                     )
 
         ( True, Err msg ) ->
@@ -10704,23 +12905,37 @@ withPrologue layout pending =
             -- rawAbi params are `l` REGISTERS (never blitted into slots —
             -- the body reads them through `s.rawWord`); VR1's ptrRead defuns
             -- are `l` POINTERS read in place through `s.paramPtr`; every other
-            -- ABI blits the incoming `%a<i>` pointers into their frame slots.
+            -- ABI copies the incoming `%a<i>` into its frame slot.
+            --
+            -- AREA 6: WHAT `%a<i>` IS DEPENDS ON THE ARM.  On the value arm it
+            -- is a POINTER to the caller's 40-byte slot, so the copy is a
+            -- `blit`.  On the word arm a value parameter IS ONE WORD (`:val` is
+            -- 8 bytes, VR1's word-arm convention), so the copy is a plain
+            -- 8-byte `storel` of the register — a `blit` there would dereference
+            -- the VALUE WORD as an address (the word arm's silent-wrong shape).
+            -- `paramWords` is set for exactly the RtGeneric class on the word
+            -- arm (see lowerFunBody).
             if pending.rawAbi then
                 structParamCopies
 
             else if pending.ptrRead then
                 []
 
+            else if pending.paramWords then
+                List.map
+                    (\i -> Store StoreL (Il.Tmp ("a" ++ String.fromInt i)) (Il.Tmp (slotTmp (i + resultSlotBase layout))))
+                    (List.range 0 (pending.nparams - 1))
+
             else
                 List.map
-                    (\i -> Blit (Il.Tmp ("a" ++ String.fromInt i)) (Il.Tmp (slotTmp (i + 2))) layout.valSizeBytes)
+                    (\i -> Blit (Il.Tmp ("a" ++ String.fromInt i)) (Il.Tmp (slotTmp (i + resultSlotBase layout))) layout.valSizeBytes)
                     (List.range 0 (pending.nparams - 1))
 
         capBlitsPro =
             List.concatMap
                 (\j ->
                     [ Bin (Just ("e" ++ String.fromInt j)) L Add (Il.Tmp "env") (Il.Con (layout.valSizeBytes * j))
-                    , Blit (Il.Tmp ("e" ++ String.fromInt j)) (Il.Tmp (slotTmp (pending.nparams + 2 + j))) layout.valSizeBytes
+                    , Blit (Il.Tmp ("e" ++ String.fromInt j)) (Il.Tmp (slotTmp (pending.nparams + resultSlotBase layout + j))) layout.valSizeBytes
                     ]
                 )
                 (List.range 0 (pending.ncaps - 1))
@@ -10749,45 +12964,32 @@ withPrologue layout pending =
                 PLeaf ->
                     Alloc "f" (layout.valSizeBytes * pending.nslots)
 
-        -- P5 / H3 — THE .done MARKER.  A surface defun returns the 80-byte
-        -- `:ret`, i.e. slots 0 AND 1, and slot 1 carries the .done/.tail
-        -- discriminator that rt_bounce and every caller test.  On a .done path
-        -- nothing writes it: the pooled frame's enter-side memset is what made
-        -- it read 0.  A frame-free defun has no memset, so it MATERIALIZES
-        -- that zero here.
+        -- P5 / H3 — THE RESULT AREA'S ZERO.  A frame-free defun has no
+        -- enter-side memset, so whatever the RETURN path reads without a tag
+        -- test of its own has to be MATERIALIZED here.  U3b cut that set down
+        -- to ONE read on the value arm: the `.done` result at slot 0, which is
+        -- read as the number 0 (tag 0) if nothing writes it.
         --
-        -- The marker's offset is READ from Mid.RtLayout (`retKindOffset`), not
-        -- spelled 40 here — the layout is defined once, and the same constant
-        -- is what the emitted-text row in TestMain pins.
+        -- SLOT 1 IS GONE, ON BOTH ARMS.  It used to carry the `.done`/
+        -- `.tail` discriminator of the 80-byte `:ret` return shape, and the
+        -- store here existed because a 64-bit reader compared that word
+        -- against zero (MEASURED: with a 4-byte `storew` the four padding
+        -- bytes at 44..47 stayed uninitialised, the compare saw non-zero, the
+        -- `.done` path was missed, and the pre-U3a `Rt.bounce` chased a
+        -- `.tail` built out of stack garbage — a wild jump into the heap,
+        -- ASan: `PC is at a non-executable region`, with only that one defun
+        -- changed).  U3b deleted the slot, the reader and the store on the
+        -- value arm; AREA 6 deleted the word arm's `:ret` and its kind word
+        -- with it (`closureRetClass`), so ONE store is the whole of this.
         --
-        -- MEASURED, and it is why this is a 64-bit store and not a 32-bit one:
-        -- the reader loads EIGHT bytes at retKindOffset — `Rt.bounce`'s
-        -- `r->kind == 0` lowers to `movq 40(%rax), %rcx; cmpq $0, %rcx`
-        -- (vendor/qbe, the emitted .s of tests/elm-fixtures/arraybasic.elm).
-        -- A `storew 0` leaves the four PADDING bytes at 44..47 uninitialised,
-        -- the 64-bit compare sees a non-zero word, the .done path is missed,
-        -- and rt_bounce chases a .tail built out of stack garbage — MEASURED:
-        -- a wild jump into the heap (ASan: `PC is at a non-executable
-        -- region`) with only that one defun changed.  So: one `storel`.
-        -- The remaining words of slot 1 (f/e/args/arity) are read ONLY when
-        -- the marker is non-zero, which this store rules out.
-        --
-        -- SLOT 0 gets the same treatment for the same reason: the `.done`
-        -- result is the one thing the RETURN path reads without a tag test of
-        -- its own, and the pooled frame's memset is what made a never-written
-        -- slot 0 read as the number 0 (tag 0).  Two stores reproduce exactly
-        -- the two non-tag-directed reads the frame used to supply; every OTHER
-        -- slot is read tag-directed, which is the SAME argument the lean
-        -- frame-free arm (PAlloc) has always rested on: the block is never
-        -- registered as a root and a blit is a raw copy, so an unzeroed word
-        -- past a cell's last written one is never interpreted.
+        -- Every OTHER slot is read tag-directed, which is the SAME argument
+        -- the lean frame-free arm (PAlloc) has always rested on: the block is
+        -- never registered as a root and a blit is a raw copy, so an unzeroed
+        -- word past a cell's last written one is never interpreted.
         leafTailZero =
             case pending.pro of
                 PLeaf ->
-                    [ Store StoreL (Il.Con 0) (Il.Tmp (slotTmp 0))
-                    , Bin (Just "tzk") L Add (Il.Tmp "f") (Il.Con (RtLayout.retKindOffset layout))
-                    , Store StoreL (Il.Con 0) (Il.Tmp "tzk")
-                    ]
+                    [ Store StoreL (Il.Con 0) (Il.Tmp (slotTmp 0)) ]
 
                 _ ->
                     []
@@ -10853,14 +13055,20 @@ rtCallFuncs layout =
             in
             { name = "rt_call" ++ String.fromInt n
             , export_ = True
-            , ret = Agg "ret"
+            -- U3a: the closure ABI returns the finished 40-byte Value, so
+            -- this bridge FORWARDS it — `:val` in, `:val` out, one blit — and
+            -- there is nothing left to bounce.  It deliberately does NOT
+            -- become a `tcall`: its only growing-stack consumer was
+            -- Rt.bounceGo (deleted with the trampoline), and every remaining
+            -- caller READS the returned value.
+            , ret = Agg "val"
             , envParam = False
             , params = params
             , blocks =
                 [ { label = "start"
                   , body =
                         loadArgs
-                            ++ [ Call (Just "r") (Agg "ret") (Il.Tmp "fn") callArgs ]
+                            ++ [ Call (Just "r") (Agg "val") (Il.Tmp "fn") callArgs ]
                   , jump = Ret (Just (Il.Tmp "r"))
                   }
                 ]
@@ -10905,6 +13113,42 @@ rtCallTwoRange layout =
 
         arityBlock : Int -> Block
         arityBlock n =
+            let
+                callArgs =
+                    ArgEnv (Il.Tmp "e")
+                        :: List.map
+                            (\i ->
+                                ArgVal (Base L)
+                                    (Il.Tmp
+                                        (if wordArmLayout layout then
+                                            "pv" ++ String.fromInt i
+
+                                         else
+                                            "p" ++ String.fromInt i
+                                        )
+                                    )
+                            )
+                            (List.range 0 (n - 1))
+
+                -- U3a — THE TCALL, and its budget.  The callee is the closure's
+                -- code pointer and it now returns the finished `:val` (the
+                -- closure ABI flipped), so this hop can JUMP: `rt_call2r`'s
+                -- frame is reused by the callee instead of stacking under it.
+                -- The budget is the same one `maxTailCallArgs` states for the
+                -- DSL — rdi is spent on the hidden sret pointer and rax on the
+                -- closure env, leaving four integer registers for params plus
+                -- the sret/env pair.  Arity 5+ keeps the ordinary call: the
+                -- callee then returns THROUGH this frame to this frame's
+                -- caller — a CONSTANT +1 per such hop, not growth (this func
+                -- was itself tcall'd into, so its frame is the loop's slot).
+                --
+                -- NOT under the word arm: there `:val` is 8 bytes, i.e. an
+                -- aggregate the amd64 ABI passes in a register, and the tcall's
+                -- class/`aggsize` rules would have to be re-measured.  AREA 6
+                -- owns that; the word arm keeps the ordinary call and its wall.
+                canTail =
+                    not (wordArmLayout layout) && n <= maxTailCallArgs
+            in
             { label = "arity" ++ String.fromInt n
             , body =
                 List.concatMap paramPtr (List.range 0 (n - 1))
@@ -10914,24 +13158,18 @@ rtCallTwoRange layout =
                         else
                             []
                        )
-                    ++ [ Call (Just "r") (Agg "ret") (Il.Tmp "code")
-                            (ArgEnv (Il.Tmp "e")
-                                :: List.map
-                                    (\i ->
-                                        ArgVal (Base L)
-                                            (Il.Tmp
-                                                (if wordArmLayout layout then
-                                                    "pv" ++ String.fromInt i
+                    ++ [ if canTail then
+                            TailCall (Agg "val") (Il.Tmp "code") callArgs
 
-                                                 else
-                                                    "p" ++ String.fromInt i
-                                                )
-                                            )
-                                    )
-                                    (List.range 0 (n - 1))
-                            )
+                         else
+                            Call (Just "r") (Agg "val") (Il.Tmp "code") callArgs
                        ]
-            , jump = Ret (Just (Il.Tmp "r"))
+            , jump =
+                if canTail then
+                    Ret Nothing
+
+                else
+                    Ret (Just (Il.Tmp "r"))
             }
 
         -- @c{k}: arity == k ? arity{k} : next.  k runs 1..maxArity-1; the last
@@ -10969,7 +13207,8 @@ rtCallTwoRange layout =
     in
     { name = "rt_call2r"
     , export_ = True
-    , ret = Agg "ret"
+    -- U3a: `:val` out — the callee returns the finished Value.
+    , ret = Agg "val"
     , envParam = False
     , params =
         [ ( "code", Base L )

@@ -1,0 +1,8 @@
+# REFUSAL PROBE: a variadic callee needs %al and the va save area, which have
+# no tail form.
+# Expect: qbe exits non-zero with "tcall cannot call a variadic function".
+export function l $f(l %n) {
+@start
+	tcall l $f(l 1, ...)
+	ret
+}

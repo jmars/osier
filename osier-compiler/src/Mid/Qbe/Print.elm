@@ -22,13 +22,13 @@ module Mid.Qbe.Print exposing (print)
 -- plain ASCII by construction).
 
 import Char
-import Mid.Qbe.Il exposing (Module, Func, Block, Inst(..), Jump(..), Arg(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), UnaryOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..), descType, retType, valType)
+import Mid.Qbe.Il exposing (Module, Func, Block, Inst(..), Jump(..), Arg(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), UnaryOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..), descType, valType)
 
 
 print : Module -> String
 print m =
     String.join "\n"
-        (List.map printType (valType m.layout :: retType :: m.types ++ [ descType ])
+        (List.map printType (valType m.layout :: m.types ++ [ descType ])
             ++ [ "" ]
             ++ List.map printData m.datas
             ++ [ "" ]
@@ -313,6 +313,18 @@ printInst inst =
                     "\t"
             )
                 ++ "call "
+                ++ printArg target
+                ++ "("
+                ++ String.join ", " (List.map printCallArg args)
+                ++ ")"
+
+        TailCall ty target args ->
+            -- Q1a's tail call. The return annotation is ALWAYS printed (the
+            -- grammar makes it optional; the backend's C4 check reads it, and
+            -- an omitted annotation means void, which our ABI never emits).
+            "\ttcall "
+                ++ printAbi ty
+                ++ " "
                 ++ printArg target
                 ++ "("
                 ++ String.join ", " (List.map printCallArg args)

@@ -3,6 +3,7 @@ module Mid.Ir exposing
     , Defun
     , Exp(..)
     , UnsafeNode(..)
+    , TailTarget(..)
     , FfiWidth(..)
     , MemWidth(..)
     , RawBinOp(..)
@@ -423,6 +424,14 @@ type ValuePath
 --     temp, not a root): the builder fills/stores before the next
 --     allocation, and an unfilled element must never be scanned — the same
 --     contract values.zig's valVector/valCons bodies obey.
+--   * `RawVecLen` — the ELEMENT COUNT of a vector/record (perf
+--     word-arm-area3rt): `payload32(v, 1)` on the val arm, the GC header's count
+--     word on the word arm.  Distinct from `len32` (a string's BYTE length).
+--   * `RawVecBody` — the ELEMENT BASE of a Value (perf word-arm-area3rt): the
+--     val arm's `payload(v, 0)` (its element array), the word arm's BODY
+--     address.  It is what `vecload`/`vecstore`/`RawVecAddr` actually want,
+--     and it is the one place "where do this object's elements start" is
+--     answered for both representations.
 --   * `RawStrByte` — byte i of a string Value (str.data[i]).  LOWERED since
 --     step 5 (data pointer via RawPayload word 0, loadub, zero-extended —
 --     the first string prim sized it, exactly as the spike predicted).
@@ -458,6 +467,41 @@ type UnsafeNode
     | RawVecLoad { vec : Exp, index : Exp }
     | RawVecAddr { vec : Exp, index : Exp }
     | RawVecStore { vec : Exp, index : Exp, value : Exp }
+    | -- ===== AREA 3 (PAYLOAD ACCESS), the word arm's ELEMENT BASE (perf
+      -- word-arm-area3rt).  The ADDRESS of element 0 of the object a Value
+      -- names: the val arm's `payload(v, 0)` (a vector/record keeps its
+      -- elements in a SEPARATE array, so its payload word 0 IS that array's
+      -- base) and, on the word arm, the object's BODY (untag + the 2-word
+      -- header) — because a word-arm vector's elements are INLINE.
+      --
+      -- WHY IT IS A NODE AND NOT A MACRO: the two arms need different
+      -- ARITHMETIC (a fixnum's payload vs a header step), so the choice is
+      -- `Lower`'s (which knows the arm), not `LowerToIr`'s (which does not).
+      -- WHY IT EXISTS AT ALL: `vecload`/`vecstore`/`vecaddr` take a RAW
+      -- ELEMENT-ARRAY ADDRESS, and every runtime site produced one with
+      -- `payload(v, 0)` — an expression that means "the array base" on the val
+      -- arm and "element 0" on the word arm.  One node states the base
+      -- question once, so ~200 sites do not each re-answer it.
+      --
+      -- IT IS ALSO THE FIXNUM CASE: a `mknum(ptr)` Value carries a raw C
+      -- pointer as its payload, and `vecbody` of it is that pointer on BOTH
+      -- arms — which is why the rewrite is TOTAL over the runtime's sites and
+      -- needs no per-site judgment about which Values are heap vectors.
+      RawVecBody { value : Exp }
+    | -- ===== AREA 3 (PAYLOAD ACCESS), the word arm's ELEMENT COUNT (perf
+      -- word-arm-area3rt, the review's BLOCKER 2).  The number of elements a
+      -- vector (or a record) holds: the val arm's `payload32(v, 1)` — its
+      -- payload word 1 IS the count — and, on the word arm, the GC HEADER's
+      -- count word, because an inline body has no room for a count and the
+      -- allocator already wrote it (`gcAlloc`: `wstore(cursor, -1, countW)`).
+      --
+      -- IT IS NOT `len32`.  `len32` is also `payload32(v, 1)` and stays exactly
+      -- as it is: for a STRING that word is the BYTE length, while the header's
+      -- count for a string is `ceil(bytes / 8)` — body WORDS, a different
+      -- number.  So the two readers must be distinct names, and the runtime's
+      -- ~10 sites each had to be classified as "a string's length" (len32) or
+      -- "an element count" (veclen).
+      RawVecLen { value : Exp }
     | RawStrByte { str : Exp, index : Exp }
     | WithRoots { binders : List Binder, body : Exp }
     | -- ===== STEP 5 (osier-midprims): the SCALAR + STRING nodes the prim
@@ -667,6 +711,43 @@ type UnsafeNode
       --     stack address in a returned pointer is a dangling pointer where a
       --     malloc block was merely leaked).
       RawAllocN Int
+    | -- (U1, handoff apply-chain) A CROSS-DEFUN TAIL CALL the DSL spelled
+      -- (`tailcall val <target>(words..)` — Ast's `TTailCall`): the callee
+      -- returns STRAIGHT TO OUR CALLER, so the node has NO result and is
+      -- BLOCK-FINAL.  It lowers to Q1a's `Il.TailCall` + a bare `ret`
+      -- (Qbe.Lower.lowerRawTailCall), which is the whole reason it exists:
+      -- `RawCall`'s self-tail arm could only ever express a LOOP, never the
+      -- relay a generic-apply hop needs.
+      --
+      -- `args` are WORD producers (the same `rawWordArg` discipline
+      -- `RawCallRaw`/`RawCallAgg` use), and `shape` is the CALLEE's return
+      -- class — "val" (the 40-byte tagged Value) is the ONLY one v1 emits;
+      -- "ret" stays in the vocabulary because the node mirrors `RawCallAgg`'s
+      -- and abi1's C4 check names the class it re-refuses.  A tcall's AbiTy
+      -- must equal the ENCLOSING function's, so the DSL checker admits this
+      -- node only in a `:val`-returning body.
+      --
+      -- CLASSIFIED CONSERVATIVELY ALLOCATING (Mid.Rt.unsafeSafepoint): the
+      -- callee is arbitrary generated code, exactly like `RawCallAgg`.
+      RawTailCall { target : TailTarget, args : List Exp, shape : String }
+
+
+{-| WHERE a `RawTailCall`'s code pointer comes from — the DSL's two target
+spellings, carried through so the MANGLING happens where the key space lives
+(and named so neither collides with the SURFACE `TailTarget`'s constructors —
+the selfhost lane's own type checker resolves constructor names by their bare
+spelling and will not unify two same-named ones)
+(`Qbe.Lower`, beside every other `q_` symbol):
+
+  * `TailKey key` — a program defun (`Rt.apply`): lowered to
+    `Il.Sym ("q_" ++ mangle key)`, the same symbol a `call` to that key
+    reaches.
+  * `TailSym sym` — an external code symbol, VERBATIM (`rt_call2r`, the
+    backend-generated arity bridge).
+-}
+type TailTarget
+    = TailKey String
+    | TailSym String
 
 
 {-| THE C CALL-BOUNDARY REGISTER CLASS (cffi plan §3), backend-neutral — the

@@ -1,7 +1,7 @@
 module Mid.RtLayout exposing
     ( abiAlign
     , bodyWords
-    , heapBodyOffset, heapBodyStride, heapBodyUnitOffset, heapHeaderBytes, heapKindMask, heapKindScanned, heapKindShift, heapPtrTag
+    , heapBodyStride, heapBodyUnitOffset, heapHeaderBytes, heapHeaderOffset, heapKindMask, heapKindScanned, heapKindShift, heapPtrTag
     , i32Bytes
     , descArityOffset, descCacheOffset, descCodeOffset, descNcapsOffset, descQbeFields
     , descTotalBytes, direntNameOffset
@@ -16,7 +16,6 @@ module Mid.RtLayout exposing
     , maxArity
     , metaArityOffset, metaCodeOffset, metaNameOffset, metaSizeBytes
     , payloadBase, payloadWordOffset
-    , retArityOffset, retArgsOffset, retEOffset, retFOffset, retKindOffset, retQbeFields, retSizeBytes, retValOffset
     , tagBoolean, tagCons, tagError, tagFloat, tagLambda, tagMark, tagNil, tagNumber, tagPrim, tagRecord, tagStream, tagString, tagSymbol, tagVector
     , untagMask
     , ValLayout, valLayout
@@ -40,10 +39,10 @@ module Mid.RtLayout exposing
 -- struct's bytes at the wrong offset, silently.
 --
 -- THE DIRECTION OF TRUTH.  These values are the DEFINITION; the emitted IL is
--- DERIVED from them (`Mid.Qbe.Il.valType`/`retType`/`descType` are built out
--- of the field projections below, `Mid.Qbe.Lower` reads `valSizeBytes`,
--- `retSizeBytes`, `maxArity` and the tag numbers, `Mid.RtPrims` reads the tag
--- numbers), and the ZIG side is checked against them:
+-- DERIVED from them (`Mid.Qbe.Il.valType`/`descType` are built out of the
+-- field projections below, `Mid.Qbe.Lower` reads `valSizeBytes`, `maxArity`
+-- and the tag numbers, `Mid.RtPrims` reads the tag numbers), and the ZIG side
+-- is checked against them:
 --
 --   * `tools/qbe/layout-census.sh --values` parses THIS file and compares the
 --     result against the values `vendor/osier-rt/src/gc/types.zig` and
@@ -318,21 +317,32 @@ bodyWords layout count scanKind =
 -- ALWAYS these three, in this order:
 --
 --   1. UNTAG.  The Value word's low bits are the tag (`tagMask`), and a heap
---      object's tag is `heapPtrTag` (`...001`), so the block address is
---      `w AND untagMask`.  On the val arm `untagMask` is all ones: the tag is a
+--      object's tag is `heapPtrTag` (`...001`), so `w AND untagMask` IS THE
+--      BODY ADDRESS.  On the val arm `untagMask` is all ones: the tag is a
 --      whole word and nothing is masked, which is why the val arm's readers
 --      never call this and the word arm's always do.
---   2. STEP PAST THE 2-WORD HEADER.  `heapHeaderBytes` — the same two words in
---      both arms (VR3c AREA 1: the header does not move; only the body strides
---      do).  It is DERIVED from `bodyWords layout 0 0`, i.e. "what a zero-body
---      object costs", so the header size and the body-size rule cannot drift.
---   3. STEP INTO THE BODY.  `heapBodyOffset layout i` — body unit `i`, a unit
---      being one Value slot (`heapBodyStride`): 8 bytes on the word arm, 40 on
---      the val arm.  This is the HEAP-BLOCK shape and it is deliberately NOT
---      `payloadWordOffset`, which is the shape of a 40-byte Value RECORD (a tag
---      word then payload words).  Under the word arm a Value IS one word, so a
---      payload read is steps 1-3; conflating the two is exactly the
---      silent-wrong-offset failure this module exists to prevent.
+--   2. THE HEADER IS *BEFORE* THE BODY, at `heapHeaderOffset` (= -16).  The
+--      2-word GC header is the same two words in both arms (VR3c AREA 1: the
+--      header does not move; only the body strides do), and it is DERIVED from
+--      `bodyWords layout 0 0` — "what a zero-body object costs" — so the header
+--      size and the body-size rule cannot drift.
+--   3. STEP INTO THE BODY.  `heapBodyUnitOffset layout i` — body unit `i`, a
+--      unit being one Value slot (`heapBodyStride`): 8 bytes on the word arm,
+--      40 on the val arm.  This is the HEAP-BODY shape and it is deliberately
+--      NOT `payloadWordOffset`, which is the shape of a 40-byte Value RECORD (a
+--      tag word then payload words).
+--
+-- THE CONVENTION IS THE RUNTIME'S, AND THE EMITTER ALIGNS TO IT (VR3b3 FIX,
+-- BLOCKER 1 — the owner's decision, and the reason is asymmetry of risk rather
+-- than preference).  `runtime.mid`'s `gcAlloc` writes the header at
+-- `cursor - 2`/`- 1` words and returns `mknum(cursor)` on EVERY path, so a
+-- seat's return value is the BODY address with the header 16 bytes BEFORE it;
+-- the VAL arm consumes it exactly that way and is corpus-proven at 159/159,
+-- and the word arm's `gcScavValue` twin re-tags `newbody + 1`.  So on the word
+-- arm a heap Value's untagged word IS THE BODY, not a block base.  The runtime
+-- side stays (changing it would put the whole working arm at risk to
+-- accommodate new code); this module states the emitter's side of the one
+-- convention so no site re-derives it.
 --
 -- WHAT IS NOT HERE.  The header's KIND CODE field (`heapKindShift`/
 -- `heapKindMask`, above) is read from the header word this section steps past,
@@ -371,19 +381,24 @@ heapBodyStride layout =
     layout.wordBytes * (1 + layout.valuePayloadWords)
 
 
--- The byte offset of body unit `i` inside a heap BLOCK (i.e. relative to the
--- BLOCK address, past the 2-word header).
-heapBodyOffset : ValLayout -> Int -> Int
-heapBodyOffset layout word =
-    heapHeaderBytes layout + heapBodyUnitOffset layout word
+-- THE HEADER'S OFFSET RELATIVE TO THE BODY — NEGATIVE, because the header
+-- precedes the body (see THE CONVENTION above).  THE ONE STATEMENT of the
+-- `-16` a kind read applies, so no site re-invents it and no site can apply
+-- `+16` by analogy with a block-based convention.
+--
+-- WHY THIS IS A FUNCTION AND NOT `heapHeaderBytes` NEGATED AT EACH SITE: the
+-- sign is the whole content of the convention.  MEASURED (VR3b3, found by
+-- RUNNING): the first emitted kind read subtracted `heapHeaderBytes` from a
+-- BLOCK base and so read the word BEFORE the object, saw code 0 and refused a
+-- perfectly good cons — while a text pin blessed the arithmetic.
+heapHeaderOffset : ValLayout -> Int
+heapHeaderOffset layout =
+    0 - heapHeaderBytes layout
 
 
--- The byte offset of body unit `i` RELATIVE TO THE BODY ADDRESS — for a reader
--- that already holds the body (what `Rt.allocRaw`/`allocKind` RETURN, and what
--- `payload(v, 0)` yields).  TWO functions because both bases are in use and
--- adding the header twice is a silent 16-byte over-read that no text pin can
--- see: MEASURED, the first emitted payload read was `loadl block+32` (the
--- header added twice), found only by RUNNING the module.
+-- The byte offset of body unit `i` RELATIVE TO THE BODY ADDRESS — what a seat
+-- RETURNS (`Rt.allocRaw`/`allocKind`/`allocVector`/`allocCons` all return
+-- `mknum(body)`) and what `payload(v, 0)` yields on the word arm.
 heapBodyUnitOffset : ValLayout -> Int -> Int
 heapBodyUnitOffset layout word =
     word * heapBodyStride layout
@@ -417,6 +432,14 @@ wordHeapCodes =
 --
 --   WordImmediate tags  the low-3-bit tags that name this valtag.  A boolean
 --                       has two; every other immediate exactly one.
+--
+--                       THE BOOLEAN WRITE ASSUMES THE TWO ARE ADJACENT
+--                       (`tagFalse == tagTrue + 1`) because it computes
+--                       `tagTrue + (w == 0)` branch-free (VR3b3 FIX F5: the
+--                       assumption was silent; it is now a PINNED property -
+--                       TestMain asserts the adjacency, so a future encoding
+--                       with a gap fails a test instead of writing the wrong
+--                       immediate).
 --   WordHeapCode code   the object is a heap block and `code` is its header
 --                       kind code — i.e. the valtag itself.
 --   WordNoForm why      the valtag has no word-arm encoding (the mark tag, the
@@ -476,8 +499,8 @@ wordTagShape code =
 --
 --   val   `payload32(s, 1)` = the i32 at `s + lenFieldOffset` (16) of a Value
 --         record whose payload word 1 is the length.
---   word  `payload32(s, 1)` = the i32 low half of `heapBodyOffset layout 1` of
---         the block `s` names, i.e. `(s AND untagMask) + 16 + 8`.
+--   word  `payload32(s, 1)` = the i32 low half of body unit 1 of the BODY `s`
+--         names, i.e. `(s AND untagMask) + 8`.
 --
 -- WHY THIS IS THE ANSWER AND NOT A CHOICE.  A word-arm string is a HEAP BLOCK
 -- with a RAW body (code 1, `heapKindScanned` false), so its body is not a Value
@@ -490,10 +513,15 @@ wordTagShape code =
 -- porting THEM (area B) ports every string site in `runtime.mid` at once.
 --
 -- PINNED BY: TestMain's kind-contract rows (the placement is stated here), the
--- emitter's emitted string cell text on BOTH arms, and the arithmetic identity
--- `lenFieldOffset == heapBodyOffset valLayout lenFieldWord`, which says the two
--- arms name the same field of the same logical record.  There is deliberately
--- NO second constant for the word arm's length word: `lenFieldWord` IS it.
+-- emitter's emitted string cell text on BOTH arms, and TWO arithmetic
+-- identities that say the arms name the same field of the same logical record:
+--   val   `payloadWordOffset valLayout lenFieldWord == lenFieldOffset` (16 = 16)
+--   word  `heapBodyUnitOffset wordLayout lenFieldWord == 8` (body unit 1)
+-- (VR3b3 FIX F1: this comment previously claimed
+-- `lenFieldOffset == heapBodyOffset valLayout lenFieldWord`, i.e. 16 == 56 —
+-- a FALSE identity, in the module whose whole job is the one true set of
+-- numbers.  The real pins are the two rows above.)  There is deliberately NO
+-- second constant for the word arm's length word: `lenFieldWord` IS it.
 
 
 
@@ -528,17 +556,14 @@ wordTagShape code =
 --      the only thing VR3 changes about a map is the frame STRIDE, outside
 --      this record.  No field here is an input to a map's shape — do not add
 --      one.
---   3. THE ret/desc/meta AGGREGATES ARE NOT VALUES AND DO NOT FLIP, so they
+--   3. THE desc/meta AGGREGATES ARE NOT VALUES AND DO NOT FLIP, so they
 --      stay OUT of this record: a record mixing "flips with the
 --      representation" and "never flips" is exactly the silent-mismatch shape
---      this module's header was written to prevent.  ONE COUPLING SURVIVES and
---      is named here so it cannot go silent: the `:ret` aggregate's first
---      field IS a Value, so `retKindOffset` is `valSizeBytes` and
---      `retSizeBytes` is `valSizeBytes + 40`.  VR3b1 DISCHARGED that finding
---      by turning all six tail offsets into functions OF THE INSTANCE
---      (see the Ret section below) — a `:ret` over a word Value is
---      `{ l, w, l, l, l, w }` = 48 B with kind at 8.  `desc*`/`meta*`/`ep*`/
---      `dirent*` carry no Value at all and stay put.
+--      this module's header was written to prevent.  THE ONE COUPLING THAT
+--      SURVIVED — the `:ret` aggregate's first field IS a Value, so its kind
+--      offset was `valSizeBytes` — is GONE with the type (AREA 6; see the Ret
+--      section below).  `desc*`/`meta*`/`ep*`/`dirent*` carry no Value at all
+--      and stay put.
 
 
 type alias ValLayout =
@@ -561,7 +586,17 @@ type alias ValLayout =
     , heapKindShift : Int -- FLIPS 0 -> 24 (VR3c AREA 1): the header's KIND CODE field starts here (0 = there is NO kind field: the tag word IS the kind, so a reader branches on `heapTagIsKind` first — the `tagMask` rule)
     , heapKindMask : Int -- FLIPS 0 -> 15 (VR3c AREA 1): the kind code's width mask, meaningless on the val arm for the same reason
     , tagNumber : Int -- REINTERPRETED by VR3b (low-3-bit encoding), not renumbered
-    , tagString : Int
+    , -- THE `tag*` FIELDS ARE THE WORD ENCODING OF A VALTAG, NOT THE VALTAG.
+      -- On the val arm they ARE the valtag integers; on the word arm every HEAP
+      -- code collapses to `heapPtrTag` (1) because the constructor moved into
+      -- the header, so `wordLayout.tagRecord` is 1, not 14.  A site that needs
+      -- the KIND CODE (a header write, a `wordTagShape` argument) must use the
+      -- module CONSTANT — `RtLayout.tagRecord` — never `s.layout.tagRecord`.
+      -- MEASURED (perf word-arm-records R2): the record build wrote
+      -- `s.layout.tagRecord`, which on this arm is the STRING code, so the
+      -- cell writer took the string branch, refused, and the site emitted the
+      -- POISON word — a silent-wrong record that the probe caught.
+      tagString : Int
     , tagSymbol : Int
     , tagBoolean : Int
     , tagCons : Int
@@ -697,11 +732,18 @@ valLayout =
 --      `jmpfFalse` helper (`&&`, `||`, `/=`, one match arm); and the WRITES for
 --      the immediates in `lowerLitWord` (a fixnum `n * 8`, refused by name
 --      outside i61 because boxing is area 4; `true`/`false` = tagTrue/tagFalse)
---      plus `storeNil`.  NOT PORTED: every HEAP-object tag — cons/string/
---      vector/record/float/lambda/stream/prim all collapse to `...001`, so a
---      heap-object test is a 2-word-HEADER KIND read (heapTagIsKind), which is
---      area 3/7's contract; and `storeValueCell`'s heap writes.  The .mid
---      surface lane's `RawTagIs`/`RawMkValue` are also un-ported
+--      plus `storeNil`.  THE HEAP-OBJECT HALF IS PORTED (perf
+--      word-arm-area3rt/word-arm-surface): every heap tag collapses to
+--      `...001`, so a heap-object test is a 2-word-HEADER KIND read
+--      (`heapTagIsKind`), and `wordTagIs` is the ONE reader of it — it
+--      dispatches on `wordTagShape`, answering an IMMEDIATE valtag with a
+--      word-tag compare and a heap one with a kind compare, and refusing a
+--      valtag that has no word encoding by name.  `readTag` is still the one
+--      place a tag is READ; `wordTagIs` is the one place a VALTAG is tested.
+--      NOT PORTED: `storeValueCell`'s heap writes — whether a CODE is writable
+--      is `wordCellRefusal`'s single statement (a body the emitter lays out
+--      itself would put val-arm raw pointers into a body the collector scans).
+--      The .mid surface lane's `RawTagIs`/`RawMkValue` are also un-ported
 --      (Mid.RtLang.LowerToIr names `valLayout` at 9 sites — VR3a's finding;
 --      that lane lowers BEFORE Lower runs, so its tag integers are baked into
 --      the Mid.Ir under any knob).
@@ -709,21 +751,156 @@ valLayout =
 --      string/vector `len`, record fields, float payload, argv, the exec-plan
 --      blob.  Under the word arm a field is a plain 8-byte load at 8i, and a
 --      fixnum's value is the word arithmetic-shifted.
---   4. ARITHMETIC.  Inline tag/untag (and + shift, no runtime call), the i61
---      overflow check and the boxing path, comparisons, div/mod, negate.
+--   4. ARITHMETIC.  PORTED (perf word-arm-arith), and ported as a
+--      CLASSIFICATION rather than by writing inline tag/untag: `lowerArith`/
+--      `lowerCompare`/`lowerNumEq`'s generic tails are a VAL-ARM SHAPE (the tag
+--      word at `slot + 0`, the payload at `slot + 8`), so under the word arm
+--      each of the three SKIPS its tail and calls the runtime through
+--      `rtPrimSlots` — `Rt.+`/`-`/`*`/`/`/`<`/`=` read their operands with
+--      `payload`/`payload32`/`tagis` and write with `mknum`, so they are
+--      arm-clean by construction.  `+ - *` WRAP at i64 (L3) for every result
+--      inside i61; a result outside it is a LOUD named refusal from `mknum`'s
+--      round-trip check, because the i61 overflow/boxing path is NOT ported
+--      (below).  `//` (prim `/`) was already on this route — `Rt./` carries
+--      L3-U2's two named halts (zero divisor, INT64_MIN // -1) and they are
+--      NOT duplicated here; `negate` is Mid/FromAst's `0 - x` desugar, so it
+--      needs no prim.  There is NO `%`/modulo operator in this language at all
+--      (`binaryPrims` maps `//` to the prim `/` and defines none), so nothing
+--      was ported for one.
+--      NOT PORTED: the inline tag/untag (the runtime call is the route here,
+--      not a slower spelling of it — a fast path would be a second arithmetic
+--      to keep in step), the i61 OVERFLOW/BOXING path (a word-arm value that
+--      does not fit the fixnum is boxed onto the heap, and that cell does not
+--      exist), and CHAR/STRING ORDERING (`"a" < "b"`), whose inline byte loop
+--      reads a Value's byte pointer at `slot + 8` and its length at
+--      `slot + 16` — it REFUSES by name at `lowerCompare`'s string branch,
+--      because `Rt.<` answers False for every non-number and routing it there
+--      would be the silent Char-ordering mislower that branch exists to
+--      prevent.  FLOATS are item 5.
 --   5. FLOATS.  The heap-boxed `[hdr | f64]` cell and Lower's `rawFloat` lane.
+--      ONE TRAP IS WAITING THERE, recorded by perf word-arm-arith's review so
+--      the float unit inherits it instead of rediscovering it: THE CLASSIFIER IS
+--      BLIND TO THE SAFEPOINTS THE `mk*` CELL WRITERS INJECT.
+--      `Mid.Rt.unsafeSafepoint` classifies a `RawMkValue` as NON-safepoint (it
+--      scans `m.words` only), which is TRUE on the val arm — there a `mk*` is a
+--      tag word plus payload writes into a frame slot and allocates nothing.
+--      Under the word arm it is true for the IMMEDIATE codes (`mknum`/`mkbool`
+--      are shifts; nothing is allocated) and FALSE for the HEAP codes, because
+--      `storeWordStringCell`/`storeWordFloatCell` inject `midGcAllocSeat` calls
+--      (`Rt.allocRaw`, `Rt.allocFloat`) that the surface tree never shows.  So a
+--      defun whose ONLY allocation is a `mkstr`/`mkflt` cell classifies
+--      FRAME-FREE and DROPS ITS ROOTS — silently, and only once area 5 lets such
+--      a value be constructed at all, which is why nothing has caught it.
+--      IT DOES NOT BITE THE ARITHMETIC CLASS: every arithmetic op writes
+--      `mknum`/`mkbool` immediates, and the float arms that would allocate are
+--      unreachable until area 5 lands (no tag-12 value can be built).
+--      THE INSTRUCTION, the twin of the "fork in the same unit" note at Lower's
+--      `RawLoadFlt`/`reboxBoolean`: WHEN AREA 5 LANDS, count a word-arm
+--      heap-code `mk*` as a DIRECT safepoint in `unsafeSafepoint`, in the same
+--      unit, and pin it with a row — the alternative is a collector that
+--      reclaims a live string or float.
 --   6. THE `:ret` AGGREGATE.  Its FIRST FIELD IS A VALUE, so its tail offsets
 --      move with `valSizeBytes` (they are DERIVED below); plus the 80-byte sret
 --      path, slot 1's `.tail` metadata and rt_bounce.
---   7. THE Rt SURFACE (`runtime.mid` — VR3c's, single-writer, NOT this unit):
---      gcAlloc's `2 + count + 4*count*kind` sizing, apply's `args + rem*40`,
---      gcScav/copyWordsGo, the values-table builder AND walk, argv install, and
---      the printer internals (mknum/payload/tagis).  REFUSED WHOLESALE under
---      the word arm by Lower's area-7 gate — a program whose emitted set
---      contains any Rt key stops there, which today is every real program.
+--   7. THE Rt SURFACE (`runtime.mid`).  PARTLY PORTED.  The blanket area-7
+--      refusal this entry used to describe is GONE (perf VR3b3 replaced it with
+--      a per-defun pre-walk: `wordRtUnported` names the DEFUN and the CONSTRUCT
+--      the arm stops at), so the entry's job is now to say which strides are
+--      twinned and which are not.
+--      PORTED: gcAlloc's `2 + count + 4*count*kind` sizing (the word arm's
+--      `2 + count`), the six header writers, gcPromoteAlloc, gcScav/
+--      gcScavValueArray/copyWordsGo, the values-table builder and walk, the
+--      allocation seats (`allocKind`/`allocCons`/`allocSym`), the closure CELL
+--      (`Rt.closure`, `Rt.applyPartGo`'s cell), and — perf word-arm-closures —
+--      `Rt.globalClosure`'s CELL — the per-descriptor closure cache — which
+--      had never been EXECUTED and was measurably wrong (it answered a
+--      fixnum-shaped closure and wrote its header eight bytes off).  It is
+--      reachable WITHOUT the `GRef` construct: `lowerApp` materialises a global
+--      closure for any UNDER-APPLIED global head, and `App` is admitted.
+--      THE CALL STAGING: `Rt.stage-apply`'s block, `Rt.apply-tail`'s shape
+--      guard and `state->args`, `Rt.applyGo`/`Rt.applyTailGo`'s
+--      `args + rem*40`, and `Rt.applyPartGo`'s three-range interleave.  That
+--      last group is the one VR3c's frontier note called "VR3d's"; there is no
+--      VR3d, and closures cannot RUN without it, so this unit took it.
+--      ALSO FOUND, AND DELIBERATELY NOT FIXED HERE (records lane): a SECOND
+--      instance of the same ROOTING shape perf word-arm-closures fixed twice in
+--      the closure path — an allocation held in a RAW WORD across a later
+--      allocation.  `Rt.recAppend` does `word nd = allocvec(reclen(rec) + 1)`
+--      and then `word nn = allocvec(reclen(rec) + 1)`, and `nd` is used after
+--      that second allocvec (`Rt.recAppendDataGo` writes into it, and the final
+--      `mkval(14, ..)` names it).  NO WORD SPLICE IS INVOLVED: this is the
+--      VAL arm's own code, so it is a val-arm defect too, and it is
+--      REACHED today through record-append (the word arm still refuses
+--      RecordUpdate).  NOT MEASURED — the reviewer marked it INTERPRETATION
+--      from source, and the qbe-check churn rows never allocate enough to cross
+--      a trigger — so the FIRST thing the records unit owes it is a COLLECTING
+--      fixture (the shape of tools/qbe/word-arm-gcchurn/hold.elm), not a patch.
+--      The reason it is not fixed here: it is a different construct family, its
+--      fix changes VAL-ARM emit (which this unit's corpus-identity constraint
+--      forbids), and the two closure sites had to be proved with a churn row
+--      before anything else in the class could be touched.
+--      NOT PORTED: the ARGV INSTALL (`Rt.parseArgsGo`'s `bufW + j*40` and the
+--      entry-arg buffer `Rt.main` sizes), which is a separate lane and is
+--      reached-but-unexercised today (a word-arm program with arguments);
+--      the EXEC-PLAN / EFFECT-HOST blob (its stride is `sizeof(val)` as the
+--      .mid front end computes it, i.e. 40 under ANY knob — see the frontier
+--      note at `Rt.kindHdr`); and the printer internals where they read a
+--      payload without the layout-derived accessors.
 --   8. THE C FFI GLUE.  The tag/untag at the boundary — a fixnum's payload IS
 --      the C i64 after untag, and Values never cross raw (the extern
 --      declarations already encode C widths, so nothing there moves).
+--   9. THE MID.Ir CONSTRUCT LANE (perf word-arm-surface) — the SURFACE of the
+--      Mid language, as opposed to item 7's runtime.  `Mid.Qbe.Lower`'s
+--      `wordArmUnported` is the belt: a defun carrying an un-ported construct
+--      refuses BEFORE its body walk, and the entry names the construct and the
+--      area.  PORTED: literals, `Var`, `Let`, `If`/`&&`/`||`, `Loop`,
+--      `App`, and — via their desugars — `ListLit`, `Tup` and `Case` (the
+--      aggregate prims `cons`/`@p`/`emptylist`/`assoc`/`snd` reach the
+--      runtime's own twinned defuns through `rtPrimSlots`, which is
+--      arm-independent by construction), plus the payload chases behind them
+--      (`fieldBase`, one accessor: the val arm's payload word HOLDS a pointer,
+--      the word arm's IS the element).  SYMBOL LITERALS are PORTED (perf
+--      word-arm-records R1): a word-arm symbol is a code-2 block whose body is
+--      ONE raw word, the NUL-terminated name pointer — the shape `Rt.intern`
+--      already builds, so a literal and an interned symbol agree (`symEq`/
+--      `symLess`/`pvZ` walk the bytes and no length reader exists; a two-word
+--      literal would have made a future one an OVERRUN on the interned shape).
+--      The CODE is the constructor on this arm, so the cell comes from
+--      `Rt.allocSym` (code 2) and never from the string seat (code 1) — a
+--      symbol indistinguishable from a string is the mixed-representation read
+--      this arm exists to prevent.
+--      CLOSURES ARE PORTED (perf word-arm-closures): `Lam` (an inner lambda ->
+--      `lowerClosure`: contiguous capture staging in ROOTED frame slots, the
+--      closure's own QBE function through `lowerFunBody ... RtGeneric`, one
+--      `Rt.closure(desc, capBase, K)`) and `GRef` (a value position ->
+--      `lowerGRefValue`'s `Rt.globalClosure(desc)`; a forced one is a direct
+--      call).  What made them one class and not two: a closure's ENV ARRAY is
+--      the only thing the two arms disagree about, and both emitters already
+--      spell its stride as `valSizeBytes` (`captureBlits`, `capBlitsPro`) — the
+--      emitter needed no change at all.  The RUNTIME did: the closure CELL was
+--      twinned (Rt.closure / Rt.applyPartGo) but the CALL STAGING was not
+--      (`Rt.stage-apply`'s block, `Rt.apply-tail`'s `+40` shape guard,
+--      `Rt.applyGo`/`Rt.applyTailGo`'s `args + rem*40`, `Rt.applyPartGo`'s
+--      three-range interleave), and `Rt.globalClosure`'s twin had never been
+--      EXECUTED — it returned a fixnum-shaped closure and wrote its header
+--      eight bytes off.  See item 7's correction below.
+--      NOT PORTED, each refused by name:
+--      `Con` (its vector is written through `storeValueCell`), the RECORD
+--      family (`RecordLit`/`RecordGet`/`RecordUpdate`, and a `VField` pattern
+--      bind — its second parallel NAMES array has no inline body layout, which
+--      is a design decision, not a stride),
+--      `StreamRef`, float literals, let-destructuring, `MTagEq`
+--      (a constructor-tag pattern — it materialises the tag as a `symbol`,
+--      which is now ported, so what remains there is the tag-EQUALITY half),
+--      and `f/` (the float division, AREA 5 — `isFloatExp` also denies here,
+--      because S4f's raw local is reboxed in the 40-byte shape).
+--      ARITHMETIC IS NOW PORTED (perf word-arm-arith; see item 4): `+ - *`,
+--      `< <= > >=`, `=` and `/=` are ADMITTED, because the three inline
+--      lowering functions skip their 40-byte tails under this arm and call the
+--      runtime instead.  `/=` (`NotEqual`) was listed here as NOT PORTED and
+--      the reason given was right — "porting it means porting that inline" —
+--      and that is what happened.  A row pins the admitted set BY NAME, so a
+--      prim losing its admission is RED rather than silently changing a count.
 wordLayout : ValLayout
 wordLayout =
     { valSizeBytes = 8
@@ -862,69 +1039,25 @@ metaArityOffset =
 
 
 
--- ============================ Ret (the bounce-loop result) ============================
--- `Mid.Qbe.Il.retType` is `align 8 { :val, w, l, l, l, w }` = 80 bytes on the
--- VAL arm:
---   :val  @0   the finished value when kind == `.done`;
---   kind  @40  the discriminator (0 = done, 1 = tail);
---   f     @48  the callee code pointer (`.tail`);
---   e     @56  the captures array, or null;
---   args  @64  a fresh GC array of `arity` Value structs (or the runtime's
---              static staging buffer for the known-tail path);
---   arity @72  the static arity == length of `args`.
+-- ============================ Ret (DELETED — AREA 6) ============================
+-- `:ret` IS GONE.  U3b deleted the `.tail` protocol (the builder, both
+-- chasers, `struct Ret`, the `Agg "ret"` result class, the 80-byte `@ret`
+-- blit) and moved every closure body to `:val`; the one survivor was the WORD
+-- arm's 48-byte `:ret`, and AREA 6 measured its stated justification FALSE.
 --
--- VR3b1 — THE COUPLING IS NOW DERIVED, NOT CONSTANT.  VR3a's finding: the
--- `:ret` aggregate's FIRST FIELD IS A VALUE, so retKindOffset IS
--- `valSizeBytes` and every offset after it moves with it; the tail
--- `{ w kind, pad, l f, l e, l args, w arity, pad }` is 40 bytes on top.  These
--- are therefore FUNCTIONS OF THE INSTANCE, and `40`/`80` appear nowhere as a
--- ret number any more — that pair left as constants is exactly the stale-40
--- trap the moment the word arm is ported (`:ret` over a word Value is
--- `{ l, w, l, l, l, w }` = 48 B, kind at 8).  TestMain pins both values for
--- BOTH instances, so a derivation that stops agreeing with the emitted IL is
--- loud.
+-- THE MEASUREMENT (probe agg8.ssa against the vendored qbe): an 8-byte
+-- aggregate return is REGISTER class, and `ret %s0` still means "the value AT
+-- %s0" — qbe loads the word into rax and the caller's `%t =:val call` temp is
+-- still the ADDRESS of a materialized 8-byte block, so the same IL text is
+-- correct at both widths.  The exception's premise ("collapsing it would put a
+-- slot address in a register") describes a NON-aggregate return; nobody was
+-- proposing one.
 --
--- (The `:ret` TYPE is still a module constant — its FIELD LIST does not flip
--- with the representation, only the size of its first field does; see
--- `retQbeFields` below and Mid.RtLayout's TRAP-3 note.  The census's
--- MID_ONLY_NAMES list dropped these six names when they stopped being
--- constants, which is why they are pinned in TestMain instead.)
-
-
-retSizeBytes : ValLayout -> Int
-retSizeBytes layout =
-    layout.valSizeBytes + 40
-
-
-retValOffset : Int
-retValOffset =
-    0
-
-
-retKindOffset : ValLayout -> Int
-retKindOffset layout =
-    layout.valSizeBytes
-
-
-retFOffset : ValLayout -> Int
-retFOffset layout =
-    layout.valSizeBytes + 8
-
-
-retEOffset : ValLayout -> Int
-retEOffset layout =
-    layout.valSizeBytes + 16
-
-
-retArgsOffset : ValLayout -> Int
-retArgsOffset layout =
-    layout.valSizeBytes + 24
-
-
-retArityOffset : ValLayout -> Int
-retArityOffset layout =
-    layout.valSizeBytes + 32
-
+-- So the word arm's body returns `:val` (8 B) like the value arm's (40 B), and
+-- with the type went its last readers: `retQbeFields`, `retKindOffset` (whose
+-- only reader was Lower's `leafTailZero`, materializing slot 1's kind word)
+-- and the `:ret`-only result slot (`Lower.resultSlotBase` is now 1 on both
+-- arms).  `closureRetClass` is one answer for the whole tree.
 
 
 -- ============================ libc `struct dirent` ============================
@@ -1142,7 +1275,7 @@ payloadWordOffset layout word =
 
 
 -- ============================ derived: the QBE type field lists ============================
--- The emitter's `:val`/`:ret`/`:desc` type definitions are BUILT from the
+-- The emitter's `:val`/`:desc` type definitions are BUILT from the
 -- numbers above, so the .ssa cannot describe a different layout from the one
 -- this module states.  The field spellings are QBE's (`w` = 32-bit, `l` =
 -- 64-bit, `:val` = the nested aggregate).
@@ -1151,11 +1284,6 @@ payloadWordOffset layout word =
 valQbeFields : List String
 valQbeFields =
     "w" :: List.repeat valuePayloadWords "l"
-
-
-retQbeFields : List String
-retQbeFields =
-    ":val" :: "w" :: "l" :: "l" :: "l" :: "w" :: []
 
 
 descQbeFields : List String

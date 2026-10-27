@@ -3,13 +3,6 @@
 #include <stdarg.h>
 
 enum {
-	Ksb = 4, /* matches Oarg/Opar/Jret */
-	Kub,
-	Ksh,
-	Kuh,
-	Kc,
-	K0,
-
 	Ke = -2, /* erroneous mode */
 	Km = Kl, /* memory pointer */
 };
@@ -49,6 +42,7 @@ enum Token {
 
 	Tblit,
 	Tcall,
+	Ttcall,
 	Tenv,
 	Tphi,
 	Tjmp,
@@ -109,6 +103,7 @@ static char *kwmap[Ntok] = {
 	[Talloc2] = "alloc2",
 	[Tblit] = "blit",
 	[Tcall] = "call",
+	[Ttcall] = "tcall",
 	[Tenv] = "env",
 	[Tphi] = "phi",
 	[Tjmp] = "jmp",
@@ -629,6 +624,7 @@ parseline(PState ps)
 		if (isstore(t)) {
 		case Tblit:
 		case Tcall:
+		case Ttcall:
 		case Ovastart:
 			/* operations without result */
 			r = R;
@@ -688,6 +684,9 @@ parseline(PState ps)
 	case Thlt:
 		curb->jmp.type = Jhlt;
 	Close:
+		if (curi > insb && (curi-1)->op == Otcall
+		&& curb->jmp.type != Jret0)
+			err("tcall must be followed by a bare ret");
 		expect(Tnl);
 		closeblk();
 		return PLbl;
@@ -707,6 +706,33 @@ parseline(PState ps)
 				err("column number too big");
 		} else
 			arg[1] = INT(0);
+		goto Ins;
+	}
+	if (op == Ttcall) {
+		curf->leaf = 0;
+		k = Kw;
+		ty = -1;
+		/* optional return annotation of the CALLEE,
+		 * it must agree with our own (checked in abi1) */
+		switch (peek()) {
+		case Tsb: case Tub: case Tsh: case Tuh:
+		case Tw: case Tl: case Ts: case Td:
+		case Ttyp:
+			k = parsecls(&ty);
+			if (k == Kc)
+				arg[1] = TYPE(ty);
+			else
+				arg[1] = INT(k);
+			break;
+		default:
+			break;
+		}
+		arg[0] = parseref();
+		parserefl(1);
+		op = Otcall;
+		expect(Tnl);
+		if (k >= Ksb)
+			k = Kw;
 		goto Ins;
 	}
 	if (op == Tcall) {
@@ -793,6 +819,8 @@ parseline(PState ps)
 		if (op >= NPubOp)
 			err("invalid instruction");
 	Ins:
+		if (curi > insb && (curi-1)->op == Otcall)
+			err("tcall must be the last instruction of its block");
 		if (curi - insb >= NIns)
 			err("too many instructions");
 		curi->op = op;
@@ -866,6 +894,8 @@ typecheck(Fn *fn)
 				if (k == Ke)
 					err("invalid instruction type in %s",
 						optab[i->op].name);
+				if (i->op == Otcall && n == 1)
+					continue; /* return annotation */
 				if (rtype(r) == RType)
 					continue;
 				if (rtype(r) != -1 && k == Kx)
@@ -934,6 +964,7 @@ parsefn(Lnk *lnk)
 		rcls = parsecls(&curf->retty);
 	else
 		rcls = K0;
+	curf->retcls = rcls;
 	if (next() != Tglo)
 		err("function name expected");
 	curf->name = strf(PFn, "%s", tokval.str);

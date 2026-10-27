@@ -1,0 +1,10 @@
+# REFUSAL PROBE: the callee returns a 16-byte aggregate, the enclosing
+# function a 24-byte one — both sret, but not the same buffer layout.
+# Expect: qbe exits non-zero with "aggregate return does not match".
+type :big = { l, l, l }
+type :small = { l, l }
+export function :big $f(l %n) {
+@start
+	tcall :small $f(l %n)
+	ret
+}

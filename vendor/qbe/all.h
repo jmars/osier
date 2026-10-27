@@ -204,12 +204,26 @@ enum {
 #define isretbh(j) INRANGE(j, Jretsb, Jretuh)
 #define isxsel(o) INRANGE(o, Oxsel, Oxsel1)
 
+/* not a macro: callers pass expressions with side effects */
+static inline int iscall(int o)
+{
+	return o == Ocall || o == Otcall;
+}
+
 enum {
 	Kx = -1, /* "top" class (see usecheck() and clsmerge()) */
 	Kw,
 	Kl,
 	Ks,
-	Kd
+	Kd,
+	Ksb, /* sub-word classes, aggregate returns, and the void
+	      * return of a function; only the parser produces
+	      * these (see parsecls()) */
+	Kub,
+	Ksh,
+	Kuh,
+	Kc,
+	K0
 };
 
 #define KWIDE(k) ((k)&1)
@@ -406,6 +420,7 @@ struct Fn {
 	int nmem;
 	uint nblk;
 	int retty; /* index in typ[], -1 if no aggregate return */
+	char retcls; /* class of the return value, K0 if none */
 	Ref retr;
 	Blk **rpo;
 	bits reg;

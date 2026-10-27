@@ -1,0 +1,8 @@
+# REFUSAL PROBE: a seventh integer argument goes on the stack, and a tail call
+# cannot write the incoming argument area.
+# Expect: qbe exits non-zero with "tcall cannot pass arguments on the stack".
+export function l $f(l %n) {
+@start
+	tcall l $f(l 1, l 2, l 3, l 4, l 5, l 6, l 7)
+	ret
+}

@@ -15,6 +15,12 @@ port module Main exposing (main)
 --     A/B switches (see run.js).  `qbeWordVal` is `QBE_VALREP=word` (VR3b1):
 --     it selects the WORD value-representation instance, which the emitter
 --     does not lower yet — it stops with a loud error naming the construct.
+--   {qbeWordArmProbe} — `QBE_WORDARM_PROBE=<name>` (perf VR3b3): emit ONE
+--     word-arm BEHAVIOUR PROBE (`Mid.Qbe.WordArmProbe`) instead of compiling
+--     the groups.  This is the CLI route `tools/qbe/word-arm-probe.sh` uses to
+--     produce a module it can ASSEMBLE AND RUN — the only oracle that sees the
+--     word arm at all, because every real program stops at the runtime
+--     (AREA 6).  Empty = the ordinary compile path.
 --
 -- P8 (osier-delete-zinc): this driver is QBE-ONLY.  The ZINC-csexp output
 -- paths (the direct AST lowerer `Lower.Module` and the middle-tier driver
@@ -29,10 +35,16 @@ port module Main exposing (main)
 -- Emits over the `emit` port a single JSON ARRAY of per-group strings; run.js
 -- writes each element to its group's output file.
 
+import Dict
 import Json.Decode as JD
 import Json.Encode as JE
+import Mid.Qbe.Lower as QbeLower
+import Mid.Qbe.Print as QbePrint
+import Mid.Qbe.Types as QbeTypes
+import Mid.Qbe.WordArmProbe as WordArmProbe
 import Mid.QbeModule as QbeModule
 import Mid.Rt as MidRt
+import Mid.RtLayout as RtLayout
 import Platform
 
 
@@ -59,6 +71,7 @@ type alias Flags =
     , qbeMidGcYoung : Bool
     , qbeLeafFree : Bool
     , qbeWordVal : Bool
+    , qbeWordArmProbe : String
     }
 
 
@@ -94,6 +107,10 @@ compileAll flags =
             encodeStrings [ "err " ++ msg ]
 
         Ok rt ->
+          if flags.qbeWordArmProbe /= "" then
+            encodeStrings [ probeModule rt flags.qbeWordArmProbe ]
+
+          else
             case
                 ( ( JD.decodeString (JD.list JD.string) flags.corpusSourcesJson
                   , JD.decodeString (JD.list (JD.list JD.string)) flags.groupsJson
@@ -152,6 +169,55 @@ toQbeFlags flags =
     , leafFree = flags.qbeLeafFree
     , eqPtrFast = flags.qbeEqPtrFast
     }
+
+
+{-| `QBE_WORDARM_PROBE=<name>`: emit ONE behaviour probe's module under the WORD
+arm, for `tools/qbe/word-arm-probe.sh` to assemble and RUN.  The probe's defun
+comes from `Mid.Qbe.WordArmProbe` (the SAME definitions TestMain pins), and the
+lowering is the ordinary `Mid.Qbe.Lower.lowerWith` call with the word instance —
+so what runs is exactly what the emitter produces, not a hand-written module.
+-}
+probeModule : MidRt.Runtime -> String -> String
+probeModule rt wanted =
+    case List.filter (\m -> WordArmProbe.name m == wanted) WordArmProbe.modules of
+        m :: _ ->
+            let
+                ds =
+                    WordArmProbe.defuns m
+
+                d =
+                    WordArmProbe.defun m
+            in
+            case
+                QbeLower.lowerWith RtLayout.wordLayout
+                    rt
+                    False
+                    False
+                    False
+                    True
+                    True
+                    True
+                    True
+                    False
+                    False
+                    True
+                    QbeTypes.empty
+                    (Dict.fromList (List.map (\x -> ( x.key, WordArmProbe.arity x )) ds))
+                    ds
+                    d.key
+            of
+                Ok mod ->
+                    QbePrint.print mod
+
+                Err msg ->
+                    "err " ++ msg
+
+        [] ->
+            "err QBE_WORDARM_PROBE="
+                ++ wanted
+                ++ " is not a probe (known: "
+                ++ String.join ", " (List.map WordArmProbe.name WordArmProbe.modules)
+                ++ ")"
 
 
 encodeStrings : List String -> String

@@ -1,0 +1,8 @@
+# REFUSAL PROBE: a tcall must be followed by a BARE ret — returning a value
+# would claim the block produced one.
+# Expect: qbe exits non-zero with "tcall must be followed by a bare ret".
+export function l $f(l %n) {
+@start
+	tcall l $f(l %n)
+	ret %n
+}

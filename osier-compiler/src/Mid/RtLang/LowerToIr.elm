@@ -140,6 +140,7 @@ import Mid.RtLang.Ast
         , Program
         , Stmt(..)
         , StructInit(..)
+        , TailTarget(..)
         , Term(..)
         , Type(..)
         , WordBinOp(..)
@@ -292,6 +293,12 @@ termAssigned term =
                             Dict.empty
                     )
                 )
+
+        -- U1: a tail call's arguments are ordinary expressions, so their
+        -- assignments count for the auto-cell judgment exactly as a `return`'s
+        -- would.
+        TTailCall tc ->
+            List.foldl (\e acc -> Dict.union (expAssigned e) acc) Dict.empty tc.args
 
         TBreak ->
             Dict.empty
@@ -1416,6 +1423,12 @@ lowerTerm st term =
                 Ok ( st1, es ) ->
                     Ok ( st1, App { fn = GRef { key = st.key, force = False }, args = es } )
 
+        -- U1: the DSL's TAIL CALL.  The terminator's value IS the raw node —
+        -- `lowerTail` (Qbe.Lower) turns it into `tcall` + a bare `ret`, so the
+        -- block never reaches `@ret` and the node produces no value of its own.
+        TTailCall tc ->
+            lowerTailCall st tc
+
         -- B4: the loop leaves — a bare `Break`/`Continue` node.  The backend
         -- resolves which loop from its own enclosing-loop stack, so nesting
         -- needs no labels in the tree.
@@ -1536,6 +1549,17 @@ lowerBranchTerm st term cont =
 
                 Ok ( st1, es ) ->
                     Ok ( st1, App { fn = GRef { key = st.key, force = False }, args = es } )
+
+        -- U1: UNREACHABLE for checked input — `Check.checkTailCall` admits a
+        -- `tailcall` only in TAIL position, and a branch block here is a
+        -- mid-block `if`'s arm, which the checker marks `tailPos = False`.
+        -- Loud rather than silently lowered: a tail call spliced with a
+        -- continuation would be asked for a value it does not have.
+        TTailCall _ ->
+            Err
+                (internalMsg (Just st.key)
+                    "lower: a `tailcall` reached a spliced branch block — it is a TERMINATOR and the checker (J16) admits it only in tail position.  This is a compiler bug, not a source error"
+                )
 
         TBreak ->
             Ok ( st, Break )
@@ -1693,6 +1717,12 @@ diverges b =
             True
 
         TRecur _ ->
+            True
+
+        -- U1: a tail call never falls past its block — KEEP IN SYNC with
+        -- Check.diverges, which admits the J7 shapes this predicate picks the
+        -- else-nesting for.
+        TTailCall _ ->
             True
 
         -- B4: a loop leaf ends the block (control leaves for the loop's exit
@@ -2584,6 +2614,51 @@ resolveRoots st ids =
                         )
 
 
+{-| U1 — the `tailcall` terminator's lowering: the block's VALUE is the raw
+tail-call node.  The target is carried as a KEY (not a symbol) because the
+key space and `mangle` live in `Qbe.Lower`, beside every other `q_` name; the
+arguments go through the ordinary expression lowering, and their WORD-class
+ness is the checker's J16 judgment rather than this pass's (this pass would
+happily lower a `val` argument — which is exactly why the checker must not).
+-}
+lowerTailCall : St -> { target : TailTarget, shape : AggShape, args : List Ast.Exp } -> Result MidcError ( St, Exp )
+lowerTailCall st tc =
+    case lowerArgs st tc.args of
+        Err msg ->
+            Err msg
+
+        Ok ( st1, es ) ->
+            Ok
+                ( st1
+                , Unsafe
+                    (RawTailCall
+                        { target = irTailTarget tc.target
+                        , args = es
+                        , shape = aggShape tc.shape
+                        }
+                    )
+                )
+
+
+{-| The surface target -> the IR target.  A NAMED function with an explicit
+signature, not an inline `case`: the two `TailTarget` types live in different
+modules and the selfhost lane's own type checker will not unify them from a
+record literal alone (MEASURED: it reads the record's expected type from
+`lowerTailCall`'s annotation and then rejects the IR constructor inside it —
+`cannot unify Mid.Ir.TailTarget with Mid.RtLang.Ast.TailTarget`).  Naming the
+conversion makes the two types explicit at the one place they meet, which is
+also where a reader wants to see that they are the same two shapes.
+-}
+irTailTarget : TailTarget -> Mid.Ir.TailTarget
+irTailTarget target =
+    case target of
+        TailDefun key ->
+            Mid.Ir.TailKey key
+
+        TailExtern sym ->
+            Mid.Ir.TailSym sym
+
+
 aggShape : AggShape -> String
 aggShape shape =
     case shape of
@@ -2700,6 +2775,20 @@ buildBuiltin b es =
 
         VecAddr ->
             build2 (\vec idx -> Unsafe (RawVecAddr { vec = vec, index = idx })) es
+
+        VecBody ->
+            -- The element BASE of a Value (perf word-arm-area3rt).  It stays a
+            -- NODE rather than being expanded here into `payload(v, 0)`: the
+            -- val arm's payload word 0 and the word arm's untag are different
+            -- arithmetic, and only Lower knows the arm (this pass runs before
+            -- it, under both).
+            build1 (\v -> Unsafe (RawVecBody { value = v })) es
+
+        VecLen ->
+            -- The element COUNT (perf word-arm-area3rt, the review's BLOCKER 2).
+            -- A node for the same reason: `payload32(v, 1)` on the val arm, the
+            -- GC header's count word on the word arm.
+            build1 (\v -> Unsafe (RawVecLen { value = v })) es
 
         VecStore ->
             build3 (\vec idx v -> Unsafe (RawVecStore { vec = vec, index = idx, value = v })) es

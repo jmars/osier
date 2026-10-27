@@ -61,6 +61,13 @@ encode m =
     else if List.any hasSingleTy m.funcs then
         Err "obj: an `s` (single-precision) type reaches the encoder; only w/l/d appear in the measured census, and no `s` instruction is implemented"
 
+    else if List.any hasTailCall m.funcs then
+        -- Q1b: a tcall needs the epilogue-then-jmp sequence (the callee returns
+        -- to OUR caller).  The encoder has no seat for it yet, and this path is
+        -- not gated, so it REFUSES LOUDLY rather than emitting a wrong call —
+        -- the same polarity the vendored qbe enforces on its own side.
+        Err "obj: a `tcall` reaches the encoder, which has no tail-call seat yet (the .ssa/qbe path does) — refusing rather than emitting an ordinary call"
+
     else
         case typeTable m of
             Err e ->
@@ -128,6 +135,21 @@ isSingle t =
             False
 
 
+hasTailCall : Func -> Bool
+hasTailCall f =
+    List.any (\b -> List.any isTailCall b.body) f.blocks
+
+
+isTailCall : Inst -> Bool
+isTailCall inst =
+    case inst of
+        TailCall _ _ _ ->
+            True
+
+        _ ->
+            False
+
+
 isAgg : AbiTy -> Bool
 isAgg t =
     case t of
@@ -153,7 +175,7 @@ type alias TyInfo =
 
 typeTable : Module -> Result String (Dict String TyInfo)
 typeTable m =
-    typeTableGo (Il.valType m.layout :: Il.retType :: m.types ++ [ Il.descType ]) Dict.empty
+    typeTableGo (Il.valType m.layout :: m.types ++ [ Il.descType ]) Dict.empty
 
 
 typeTableGo : List Il.TypeDef -> Dict String TyInfo -> Result String (Dict String TyInfo)
@@ -679,6 +701,14 @@ planInst types inst p =
                 , slots = Dict.insert r { disp = -(cur + extent), ty = L } p.slots
             }
 
+        TailCall _ _ _ ->
+            -- no result, so no sret buffer: the callee returns straight to our
+            -- caller and writes into OUR caller's buffer (abi1 forwards
+            -- fn->retr as its hidden first argument).  Unreachable behind the
+            -- up-front refusal; kept total so a future seat cannot fall through
+            -- the frame-slot arithmetic.
+            p
+
         Call dst ty _ args ->
             let
                 p1 =
@@ -1031,6 +1061,12 @@ inst i e =
 
         Call dst ty target args ->
             call dst ty target args e
+
+        TailCall _ _ _ ->
+            -- UNREACHABLE: `encode` refuses any module holding a tcall before
+            -- this pass runs.  Emitting nothing here would be a silent wrong
+            -- call, so the guard above is the thing that keeps this honest.
+            e
 
         Alloc r n ->
             alloc r n e

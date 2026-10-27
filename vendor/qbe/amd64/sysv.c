@@ -299,8 +299,54 @@ rarg(int ty, int *ni, int *ns)
 		return TMP(XMM0 + (*ns)++);
 }
 
+/* a tcall: the callee returns straight to our caller, so every
+ * condition below is about whether we can leave the stack in the
+ * exact state our caller left it in. nothing is ever degraded to a
+ * call: an unmet condition is a compile error naming it. */
 static void
-selcall(Fn *fn, Ins *i0, Ins *i1, RAlloc **rap)
+seltcallchk(Fn *fn, AClass *ac, Ins *i0, Ins *i1)
+{
+	Ins *i;
+	AClass *a, aret, fret;
+
+	/* no stack arguments: they would have to be written above
+	 * our own return address, which the IL cannot address */
+	for (a=&ac[i1-i0]; a>ac;)
+		if ((--a)->inmem)
+			err("tcall cannot pass arguments on the stack");
+
+	/* no variadic calls: %al and the va save area have no tail
+	 * form. (ca's bit 12 covers the env marker too, and an env
+	 * tail call IS legal, so look for the `...` itself.) */
+	for (i=i0; i<i1; i++)
+		if (i->op == Oargv)
+			err("tcall cannot call a variadic function");
+
+	/* the callee's return convention must be the one our own
+	 * caller expects */
+	if (rtype(i1->arg[1]) == RType) {
+		if (fn->retcls != Kc || fn->retty < 0)
+			err("tcall: the callee returns an aggregate, "
+				"the enclosing function does not");
+		typclass(&aret, &typ[i1->arg[1].val]);
+		typclass(&fret, &typ[fn->retty]);
+		if (aret.inmem != fret.inmem || aret.size != fret.size
+		|| (!aret.inmem && (aret.cls[0] != fret.cls[0]
+			|| aret.cls[1] != fret.cls[1])))
+			err("tcall: the callee's aggregate return does "
+				"not match the enclosing function's");
+	} else if (req(i1->arg[1], R)) {
+		/* the callee returns void */
+		if (fn->retcls != K0)
+			err("tcall: the callee returns void, "
+				"the enclosing function returns a value");
+	} else if (fn->retcls != (int)i1->arg[1].val)
+		err("tcall: the callee's return class does not "
+			"match the enclosing function's");
+}
+
+static void
+selcall(Fn *fn, Ins *i0, Ins *i1, RAlloc **rap, int tail)
 {
 	Ins *i;
 	AClass *ac, *a, aret;
@@ -312,12 +358,14 @@ selcall(Fn *fn, Ins *i0, Ins *i1, RAlloc **rap)
 	env = R;
 	ac = alloc((i1-i0) * sizeof ac[0]);
 
-	if (!req(i1->arg[1], R)) {
-		assert(rtype(i1->arg[1]) == RType);
+	if (rtype(i1->arg[1]) == RType) {
 		typclass(&aret, &typ[i1->arg[1].val]);
 		ca = argsclass(i0, i1, ac, Oarg, &aret, &env);
 	} else
 		ca = argsclass(i0, i1, ac, Oarg, 0, &env);
+
+	if (tail)
+		seltcallchk(fn, ac, i0, i1);
 
 	for (stk=0, a=&ac[i1-i0]; a>ac;)
 		if ((--a)->inmem) {
@@ -333,7 +381,16 @@ selcall(Fn *fn, Ins *i0, Ins *i1, RAlloc **rap)
 		emit(Osalloc, Kl, R, r, R);
 	}
 
-	if (!req(i1->arg[1], R)) {
+	if (tail) {
+		/* no result: the callee returns to our caller. when
+		 * the callee returns an aggregate it takes a hidden
+		 * pointer, and the one we must hand it is our own
+		 * fn->retr: the callee then writes the result
+		 * straight into our caller's buffer */
+		ra = 0;
+		if (rtype(i1->arg[1]) == RType && aret.inmem)
+			ca += 1;
+	} else if (!req(i1->arg[1], R)) {
 		if (aret.inmem) {
 			/* get the return location from eax
 			 * it saves one callee-save reg */
@@ -377,7 +434,7 @@ selcall(Fn *fn, Ins *i0, Ins *i1, RAlloc **rap)
 		}
 	}
 
-	emit(Ocall, i1->cls, R, i1->arg[0], CALL(ca));
+	emit(tail ? Otcall : Ocall, i1->cls, R, i1->arg[0], CALL(ca));
 
 	if (!req(R, env))
 		emit(Ocopy, Kl, TMP(RAX), env, R);
@@ -385,7 +442,9 @@ selcall(Fn *fn, Ins *i0, Ins *i1, RAlloc **rap)
 		emit(Ocopy, Kw, TMP(RAX), getcon((ca >> 8) & 15, fn), R);
 
 	ni = ns = 0;
-	if (ra && aret.inmem)
+	if (tail && rtype(i1->arg[1]) == RType && aret.inmem)
+		emit(Ocopy, Kl, rarg(Kl, &ni, &ns), fn->retr, R); /* forward ours */
+	else if (ra && aret.inmem)
 		emit(Ocopy, Kl, rarg(Kl, &ni, &ns), ra->i.to, R); /* pass hidden argument */
 
 	for (i=i0, a=ac; i<i1; i++, a++) {
@@ -692,10 +751,14 @@ amd64_sysv_abi(Fn *fn)
 				emiti(*i);
 				break;
 			case Ocall:
+			case Otcall:
+				if (i->op == Otcall && i+1 != &b->ins[b->nins])
+					err("tcall must be the last "
+						"instruction of its block");
 				for (i0=i; i0>b->ins; i0--)
 					if (!isarg((i0-1)->op))
 						break;
-				selcall(fn, i0, i, &ral);
+				selcall(fn, i0, i, &ral, i->op == Otcall);
 				i = i0;
 				break;
 			case Ovastart:

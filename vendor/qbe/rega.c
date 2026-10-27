@@ -306,7 +306,7 @@ dopm(Blk *b, Ins *i, RMap *m)
 		move(i->arg[0].val, i->to, m);
 	} while (i != b->ins && regcpy(i-1));
 	assert(m0.n <= m->n);
-	if (i != b->ins && (i-1)->op == Ocall) {
+	if (i != b->ins && iscall((i-1)->op)) {
 		def = T.retregs((i-1)->arg[1], 0) | T.rglob;
 		for (r=0; T.rsave[r]>=0; r++)
 			if (!(BIT(T.rsave[r]) & def))
@@ -374,10 +374,20 @@ doblk(Blk *b, RMap *cur)
 		rf = -1;
 		switch (i->op) {
 		case Ocall:
+		case Otcall:
 			rs = T.argregs(i->arg[1], 0) | T.rglob;
 			for (r=0; T.rsave[r]>=0; r++)
 				if (!(BIT(T.rsave[r]) & rs))
 					rfree(cur, T.rsave[r]);
+			if (i->op == Otcall)
+				/* nothing follows a tcall for dopm()
+				 * to claim them with, so claim its
+				 * argument registers here */
+				for (r=0; T.rsave[r]>=0; r++)
+					if ((BIT(T.rsave[r]) & rs)
+					&& !bshas(cur->b, T.rsave[r]))
+						radd(cur, T.rsave[r],
+							T.rsave[r]);
 			break;
 		case Ocopy:
 			if (regcpy(i)) {

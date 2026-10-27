@@ -36,6 +36,7 @@ module Mid.RtLang.Ast exposing
     , StructInit(..)
     , StructMember(..)
     , Sym
+    , TailTarget(..)
     , Term(..)
     , Type(..)
     , WordBinOp(..)
@@ -786,11 +787,13 @@ the SAME judgment:
 MEASURED agreement with the hand-maintained `Mid.Rt.rawAbi` key list: the
 nine all-word surface defuns in runtime.mid (frameBlock, frame-enter,
 frame-leave, die, halt, cStrEq, main, copyWords, copyWordsGo) are EXACTLY
-the all-word signatures AND are all in `rawAbi`; the four remaining `rawAbi`
-keys (apply, apply-tail, tail-known, bounce) return an AGGREGATE `val`, so
-they classify value-ABI by this rule and are kept word-ABI by the explicit
-set's OVERRIDE (Mid.Rt.abiTable merges the two).  That merge is load-bearing,
-not a safety net: without it those four keys would move the corpus.
+the all-word signatures AND are all in `rawAbi`; the four remaining
+AGGREGATE-returning `rawAbi` keys (apply, apply-tail, applyTailGo,
+globalClosure) return a `val`, so they classify value-ABI by this rule and are
+kept word-ABI by the explicit set's OVERRIDE (Mid.Rt.abiTable merges the two).
+That merge is load-bearing, not a safety net: without it those four keys would
+move the corpus.  (U3b deleted `tail-known` and `bounce`, the other two members
+of that group.)
 -}
 allWordSig : List Type -> Type -> Bool
 allWordSig paramTys retTy =
@@ -990,6 +993,18 @@ the block like `return` does (a block has exactly one terminator), and
 `Check` rejects either one outside a loop.  `diverges` counts all four, so
 the J7 "a mid-block if needs one diverging branch" rule admits
 `if (c) { break; }` as the mid-block statement it is.
+
+`TTailCall` (U1, handoff apply-chain) is `tailcall val target(args..);` —
+the DSL's TAIL CALL, and a TERMINATOR in exactly the sense above: it
+produces NO value (composing it into a value position is unrepresentable,
+not merely rejected) and nothing may follow it in its block.  It exists
+because `lowerTail`'s `RawCall` arm can express only the SELF-tail: a
+cross-defun tail call — the thing the generic-apply chain needs so a hop
+stops retaining frames — had no DSL spelling at all.  v1 is deliberately
+NARROW and is used by NOTHING: shape `val` only, arguments word-class only,
+arity <= 5, and TAIL POSITION only (the body's terminator, or an arm of an
+`if` that is itself in tail position).  Every one of those limits is a LOUD
+named refusal, never a silent fallback — see `Check.checkTailCall`.
 -}
 type Term
     = TRet Exp
@@ -997,6 +1012,28 @@ type Term
     | TIf Exp Block (Maybe Block)
     | TBreak
     | TContinue
+    | TTailCall { target : TailTarget, shape : AggShape, args : List Exp }
+
+
+{-| U1 (handoff apply-chain) — WHERE a `tailcall`'s code pointer comes from.
+TWO spellings, and the split is the DSL's existing one (`call Key` vs
+`rawcall sym`), so neither form needs a string literal to be told apart:
+
+  * `TailDefun key` — `tailcall val Rt.apply(..)`: a DEFUN OF THE PROGRAM,
+    dotted like every `call` key.  The checker RESOLVES it (it must exist, its
+    declared result must be `:val`, and its params must be word-class) and the
+    lowerer emits that defun's own MANGLED symbol — the same name a `call`
+    reaches.  This is the form whose class rules are checkable, and therefore
+    the form the C4 face of the refusals lives on.
+  * `TailExtern sym` — `tailcall val rawsym("rt_call2r")(..)`: an EXTERNAL
+    code symbol, baked in VERBATIM (the `rawsym` literal slot — no computed
+    target).  The backend-generated `rt_call2r` family is the site this
+    exists for; nothing in the program can be resolved against it, so the
+    checker can only bound its ARITY and its arguments' classes.
+-}
+type TailTarget
+    = TailDefun Key
+    | TailExtern Sym
 
 
 
@@ -1252,9 +1289,13 @@ type FltCmpOp
     | FNe
 
 
-{-| The aggcall result shape: `ret` (the 80-B `:ret` bounce-loop call-result
-shape) or `val` (the 40-B tagged Value) — exactly the two strings Lower's
-RawCallAgg accepts.
+{-| The aggcall result shape: `val` (the tagged Value — 40 B on the value
+arm, 8 on the word arm) or `ret` (the 80-B `:ret` bounce-loop call-result
+shape).  `ret` SURVIVES AS A SPELLING ONLY: U3b deleted every `:ret`-returning
+callee and the whole `.tail` family, so Lower's RawCallAgg accepts `val` alone
+and REFUSES `ret` by name.  The constructor stays because the DSL front end
+still parses the keyword, and a construct that cannot be lowered must refuse
+loudly rather than fail to parse.
 -}
 type AggShape
     = AggRet
@@ -1280,6 +1321,8 @@ type Builtin
     | TagIs
     | VecLoad
     | VecAddr
+    | VecBody
+    | VecLen
     | VecStore
     | StrByte
     | ByteLoad
@@ -1340,6 +1383,19 @@ the DSL helper that builds the node):
   * VecLoad    `[word,word] -> val`   RawVecLoad (vec is a raw ADDRESS —
     the DSL's `wOf l` feeding carV/cdrV — and the result is a blitted VALUE)
   * VecAddr    `[word,word] -> word`  RawVecAddr
+  * VecLen     `[val] -> word`        RawVecLen — the ELEMENT COUNT of a
+    vector/record: the val arm's `payload32(v, 1)` (payload word 1 IS the
+    count), the word arm's GC-header count word (an inline body has no room for
+    one; the allocator writes it).  NOT `len32`: a STRING's payload word 1 is its
+    BYTE length while its header count is body WORDS, so the two reads cannot
+    share a name.
+  * VecBody    `[val] -> word`        RawVecBody — the ELEMENT BASE of a
+    Value: the val arm's `payload(v, 0)` (the separate element array) and the
+    word arm's BODY address (a word-arm vector's elements are INLINE).  This
+    is the address `vecload`/`vecstore`/`vecaddr` want, so a site that read
+    one with `payload(v, 0)` says what it MEANS instead of what the val arm
+    happens to store there.  A `mknum(ptr)` Value yields the pointer on both
+    arms, so the rewrite is total over the runtime's sites.
   * VecStore   `[word,word,val] -> val`  RawVecStore — EFFECT: Lower ignores
     the dest (the binder slot stays zero); typed val because that is what
     the slot holds, read it and you get the DSL's dead-binder mistake
@@ -1410,6 +1466,12 @@ builtinClass b =
         VecAddr ->
             Sig [ TWord, TWord ] TWord
 
+        VecBody ->
+            Sig [ TVal ] TWord
+
+        VecLen ->
+            Sig [ TVal ] TWord
+
         VecStore ->
             Sig [ TWord, TWord, TVal ] TVal
 
@@ -1466,7 +1528,7 @@ builtinClass b =
         RawSym ->
             -- (stage 6 A1b) the FUNCTION-symbol address form: `rawsym("...")` —
             -- the argument is a STRING LITERAL (EStr, class TVal) naming a
-            -- FUNCTION (a code label: rt_bounce/rt_callN/a q_Rt_* defun) and
+            -- FUNCTION (a code label: rt_callN/a q_Rt_* defun) and
             -- the result is the raw word pointer to that function, distinct
             -- from `rawstr`'s content-keyed DATA def.  The lowerer
             -- pattern-matches the EStr exactly as rawstr does.
@@ -1517,6 +1579,12 @@ builtinName b =
 
         VecAddr ->
             "vecaddr"
+
+        VecBody ->
+            "vecbody"
+
+        VecLen ->
+            "veclen"
 
         VecStore ->
             "vecstore"
@@ -1687,9 +1755,12 @@ rt_* seats (tools/qbe/rt.zig exports) called from Rt bodies today:
     the HOST's; rt_boot publishes its base into the GLOBALS BLOCK word 3)
 
 (The rt.zig exports NOT here — rt_string, rt_vec_alloc, rt_raw_alloc,
-rt_vec_store(_plain), rt_frame_enter/leave, rt_apply, rt_bounce,
-rt_tail_known, rt_prim — are reached through dedicated nodes and
-literals, never through `rawcall`.  The stage-6 A2 DRIVER seat rt_boot is
+rt_vec_store(_plain), rt_frame_enter/leave, rt_apply, rt_prim — are reached
+through dedicated nodes and literals, never through `rawcall`.  That file is
+GONE (zighost Z0 retired the Zig runtime; the same seats are now Mid defuns in
+runtime.mid), and two of its exports died before it: rt_bounce and
+rt_tail_known went with U3b's `.tail` family.  The stage-6 A2 DRIVER seat
+rt_boot is
 WORD-in/WORD-out by A2's shape deviation, so `rawcall` IS its route and it
 sits in the table below.  rt_root_push_value_array was the second such seat
 and is GONE at ZIGHOST Z1 with the rest of the family: the registry is Mid's,
@@ -1828,6 +1899,8 @@ allBuiltins =
     , TagIs
     , VecLoad
     , VecAddr
+    , VecBody
+    , VecLen
     , VecStore
     , StrByte
     , ByteLoad

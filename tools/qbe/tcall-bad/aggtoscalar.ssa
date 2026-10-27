@@ -1,0 +1,9 @@
+# REFUSAL PROBE: the callee returns an aggregate, the enclosing function a
+# scalar.
+# Expect: qbe exits non-zero with "the callee returns an aggregate".
+type :big = { l, l, l }
+export function l $f(l %n) {
+@start
+	tcall :big $f(l %n)
+	ret
+}

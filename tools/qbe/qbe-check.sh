@@ -1306,6 +1306,231 @@ leak_apply_gate() {
 }
 leak_apply_gate
 
+# ---- THE GENERIC-APPLY TAIL CHAIN IS CONSTANT-STACK (the 2-frames-per-hop gate) ----
+# WHY THIS ROW EXISTS.  `clostail` is the ONE fixture whose chain routes through
+# the GENERIC apply path — main's tail call of a closure goes Rt.apply-tail ->
+# Rt.applyTailGo -> the callee, and every hop of the `f n` / `main (x-1)` pair
+# re-enters it.  Until this row existed it was checked only at n=5 (the `run
+# clostail` row above), where per-hop stack growth is INVISIBLE: 5 hops x 2.7 KB
+# is 13 KB.  What keeps that chain constant-stack is the .tail/bounce
+# TRAMPOLINE (a hop hands its .tail descriptor back to Rt.bounceGo, whose `recur`
+# loop runs the next hop after the previous hop's frames are GONE) — and NOTHING
+# gated it.  mutualtail/leaktail do not: they are STATIC chains that never route
+# through generic apply.  TestMain's B2 row pins that bounceGo is DELETED, not
+# that the stack is bounded.  So this is the only instrument on a property the
+# apply-chain rework must preserve (apply-chain-design.md §3), and it exists
+# BEFORE the deletion so a regression cannot land behind a green suite.
+#
+# THE BUDGET IS THE MUTUALTAIL DISCIPLINE: an OWNED 8 MiB stack
+# (`prlimit --stack=8388608`) + QBE_NO_RLIMIT=1, so the runtime's own 64 MiB
+# raise cannot mask growth.  `prlimit` (not a `( ulimit -s ... )` subshell) is
+# deliberate: it EXECS the binary, so /proc/$pid is the SUBJECT — a subshell
+# would make the sampler read bash's RSS and the bound would gate nothing.
+#
+# ASYMMETRY — MEASURED, both directions.  The mutation is the "relay scratch"
+# patch in Rt.applyTailGo's SATURATED arm: chase the hop's own .tail descriptor
+# through the hop's OWN frame (`Rt.bounceGo(...)`) and return a `.done` Ret,
+# instead of handing the descriptor back to the caller's trampoline — the
+# 2-frames-per-hop shape Q1b's blocked Stage 2 would have produced.  (It must
+# re-wrap as a `.done` Ret: apply-tail's rawAbi `ret` class cannot carry a
+# value, which is the C4 constraint that makes a tcall legal there only after
+# the class flip.)  Not runner-derivable, so it is recorded here and in the
+# handoff node, not repeated in CI.
+#   PASS (clean tree): n=1e6 -> rc 0, out "0", peak RSS 16276 kB; n=1e7 ->
+#     rc 0, 16276 kB.  FLAT across a 10x n: constant-stack, no per-hop leak.
+#   FAIL (relay patch, same tree): n=2000 -> rc 0; n=3000 -> rc 139 (SIGSEGV,
+#     no output) = ~2.7 KB of C stack per hop under the 8 MiB cap; n=1e5 and
+#     n=1e6 also rc 139.  n=0..2000 still print 0, so the build is CORRECT and
+#     the row is red on the STACK, not on a wrong answer.
+#
+# THE RSS HALF catches the other silent class: a forgotten rootPop/free on the
+# chain (the 32 B state / 80 B Ret / 640 B args buffer per hop).  The bound is
+# 32 MB = 2x the measured 16.28 MB peak (the GC heap, stable to +-30 kB over 5
+# runs), which fails on a >=16 B/hop leak at 1e6 hops and never flakes clean.
+clostail_gate() {
+  local fixture="$ROOT/tools/qbe/fixtures/clostail.elm" bin pid peak cur i out rc
+  [ -f "$fixture" ] || {
+    echo "FAIL clostail-big: $fixture is missing — the ONLY fixture whose tail chain routes through the generic apply path was deleted"
+    FAIL=1; return; }
+  [ -x "$ROOT/tools/qbe/qbe-mk.sh" ] || {
+    echo "FAIL clostail-big: tools/qbe/qbe-mk.sh is missing or not executable — no runner, so the apply chain's stack behaviour has no oracle"
+    FAIL=1; return; }
+  command -v prlimit >/dev/null 2>&1 || {
+    echo "FAIL clostail-big: prlimit is missing — the row cannot OWN an 8 MiB stack, and an inherited one measures nothing"
+    FAIL=1; return; }
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" ClosTail.main "$TMP/clostailbig")" || {
+    echo "FAIL clostail-big: qbe-mk"; FAIL=1; return; }
+  [ -x "$bin" ] || {
+    echo "FAIL clostail-big: qbe-mk produced no executable at $bin"; FAIL=1; return; }
+  QBE_NO_RLIMIT=1 prlimit --stack=8388608:8388608 "$bin" ClosTail.main 1000000 \
+    >"$TMP/clostailbig.out" 2>&1 &
+  pid=$!
+  peak=0
+  i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    cur="$(awk '/VmHWM/{print $2}' "/proc/$pid/status" 2>/dev/null)"
+    [ -n "$cur" ] && [ "$cur" -gt "$peak" ] && peak="$cur"
+    i=$((i + 1))
+    if [ "$i" -gt 3000 ]; then
+      kill "$pid" 2>/dev/null
+      echo "FAIL clostail-big: ClosTail.main(1e6) did not finish (killed after ~60s; the clean chain takes 0.3s)"
+      FAIL=1
+      wait "$pid" 2>/dev/null
+      return
+    fi
+    sleep 0.02
+  done
+  wait "$pid"
+  rc=$?
+  out="$(cat "$TMP/clostailbig.out")"
+  if [ "$rc" -ne 0 ] || [ "$out" != "0" ]; then
+    echo "FAIL clostail-big: ClosTail.main(1e6) under an OWNED 8 MiB stack exit=$rc out='$out' (golden 0) — the generic-apply tail chain grew the stack per hop (a relay instead of a tail call; see this row's comment for the measured asymmetry)"
+    FAIL=1
+    return
+  fi
+  if [ "$peak" -gt 32768 ]; then
+    echo "FAIL clostail-big: ClosTail.main(1e6) peak RSS ${peak}kB > 32MB — the apply chain leaks per hop (a forgotten rootPop/free on an apply arm)"
+    FAIL=1
+    return
+  fi
+  echo "PASS clostail-big: ClosTail.main(1e6) under an OWNED 8 MiB stack is constant-stack (rc 0, golden 0) and peak RSS ${peak}kB bounded (< 32MB)"
+}
+clostail_gate
+
+# ---- U2: THE APPLY STAGING BLOCK MUST BE IN NON-GC MEMORY (the lap gate) ----
+# WHY THIS ROW EXISTS.  U2's F-site tcall stages [closure, args...] into one
+# block that Rt.apply-tail registers (kind 2, VALUE_ARRAY) and that the loop
+# reads ACROSS USER CODE: the over-applied arm runs `rt_call2r` — the applied
+# callee's whole body — and `recur`s, and the next iteration reads `sp->args`,
+# an INTERIOR pointer into that block.  The first version of the seat used
+# allocvec, which is YOUNG under the default nursery, and a kind-2 registration
+# NEVER PROMOTES the block it names (gcScavRoots walks the cells via
+# gcScavValueArray and never calls gcScavPtr on the base) while gcScavenge
+# resets youngCursor — so the block's storage is reusable as soon as a scavenge
+# ends, and the callee above is exactly what laps the nursery.  The old path
+# (young off) had the same hole for the same reason: kind-2 marking never marks
+# the block HEADER (gcScanValueArray marks the first CELL), so the block is
+# sweepable while live.  The fix is that Rt.stage-apply mallocs: a C-heap block
+# is neither young nor GC-owned, so the collector never moves it and never
+# frees it, and the kind-2 registration does its real job — rewriting the
+# CELLS' payload pointers in place.
+#
+# ASYMMETRY — MEASURED, both directions, through the fixture below (the
+# reviewer's probe; the reason this is a row and not a comment):
+#   RED on 2f58bfe (the allocvec seat): `qbe-rt: midgc: unknown value tag in
+#     mark walk`, rc 1, at the DEFAULT nursery, at QBE_MIDGC_YOUNG_MB=1 and
+#     under QBE_MIDGC_VERIFY=1.  With ONLY the 10 site lines reverted in the
+#     emitted .ssa to the pre-U2 shape, the same binary prints 300042.
+#   GREEN after the malloc fix: 300042 at the default nursery, at
+#     QBE_MIDGC_YOUNG_MB=1, under VERIFY=1, and with QBE_MIDGC_YOUNG=0.
+# The young-off arm is in the row deliberately: it is the regime where the
+# block is sweepable rather than lappable, and it must stay closed too.
+#
+# THE ROW FAILS (never skips) when the fixture or the runner is absent — a
+# deleted probe must not look like a pass.
+lap_apply_gate() {
+  local fixture="$ROOT/tools/qbe/fixtures/lapprobe.elm" bin out rc cfg
+  [ -f "$fixture" ] || {
+    echo "FAIL lap-apply: $fixture is missing — the ONLY fixture whose over-applied generic tail chain allocates across the staging block was deleted"
+    FAIL=1; return; }
+  [ -x "$ROOT/tools/qbe/qbe-mk.sh" ] || {
+    echo "FAIL lap-apply: tools/qbe/qbe-mk.sh is missing or not executable — no runner, so the staging block's memory class has no oracle"
+    FAIL=1; return; }
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" LapProbe.main "$TMP/lapapply")" || {
+    echo "FAIL lap-apply: qbe-mk"; FAIL=1; return; }
+  [ -x "$bin" ] || {
+    echo "FAIL lap-apply: qbe-mk produced no executable at $bin"; FAIL=1; return; }
+  for cfg in "" "QBE_MIDGC_YOUNG_MB=1" "QBE_MIDGC_VERIFY=1" "QBE_MIDGC_YOUNG=0"; do
+    env $cfg "$bin" LapProbe.main >"$TMP/lapapply.out" 2>&1
+    rc=$?
+    out="$(cat "$TMP/lapapply.out")"
+    if [ "$rc" -ne 0 ] || [ "$out" != "300042" ]; then
+      echo "FAIL lap-apply: LapProbe.main${cfg:+ ($cfg)} exit=$rc out='$out' (golden 300042) — the F-site staging block was lapped or swept while the applied callee ran; it must be malloc'd, never allocvec (see this row's comment)"
+      FAIL=1
+      return
+    fi
+  done
+  echo "PASS lap-apply: LapProbe.main prints 300042 in all 4 memory configurations (default nursery, YOUNG_MB=1, VERIFY=1, YOUNG=0) — the staged block survives a ~12 MB user allocation between hops"
+}
+lap_apply_gate
+
+# ---- U3b stage 0(a): THE TWO STAGING SEATS MUST NEVER SHARE STORAGE (the
+#      tsbuf-aliasing gate) ----
+# WHY THIS ROW EXISTS.  There are TWO staging seats and they have OPPOSITE
+# storage rules: Rt.stage-tail (the STATIC tail path) stages into the shared
+# static buffer `tsbuf` (globals word 12) — sound there only because at most one
+# .tail-shaped call is ever in flight — while Rt.stage-apply (the F-site generic
+# path) must malloc.  The apply chain can hold TWO staged blocks at once: an
+# over-applied hop's staged args stay live while the hop runs ARBITRARY USER
+# CODE, and that user code can itself stage (a generic apply nested inside the
+# hop, and a static tail hop inside that).  If Rt.stage-apply ever used tsbuf,
+# the nested hops would overwrite the outer chain's staged args and hop 2 would
+# read the NESTED staging's argument — every pointer still valid, no crash, a
+# WRONG NUMBER.
+#
+# The hazard is closed BY CONSTRUCTION today (stage-apply's only allocation is
+# `malloc`; tsbuf is loaded only by stage-tail) and NOTHING ELSE WATCHES IT: the
+# lap-apply row above pins the block's MEMORY CLASS (GC vs C heap), not the
+# aliasing, and a tsbuf arm would satisfy that row.  This row is the only
+# witness, which is why it lands before U3b's deletions touch the staging family
+# (u3a-review SHOULD-FIX 1: "the row MUST land before U3b's deletions").
+#
+# THE FIXTURE (tools/qbe/fixtures/tsbufprobe.elm) is the NESTED shape, and the
+# row asserts BOTH halves of what makes it a test:
+#   * STRUCTURAL — the emitted .ssa must still contain calls to BOTH seats.  A
+#     fixture that stops reaching one of them is not a weaker test, it is no
+#     test, and the behavioural half would keep passing.
+#   * BEHAVIOURAL — the answer must be 42127 = 42*1000 + 1*100 + 2*10 + 7.  The
+#     last factor is the OUTER chain's second staged arg, read at hop 2, after
+#     the nested hops have staged twice.
+#
+# ASYMMETRY — MEASURED, both directions, on this tree.  The mutation is applied
+# to the EMITTED .ssa (no rebuild), the same technique the lap-apply row used:
+# (i) stage-apply's `malloc` + canary store replaced by a load of tsbuf, (ii)
+# apply-tail's provenance-canary guard bypassed, (iii) applyTailGo's two
+# `free(fslot - 8)` calls removed — (ii) and (iii) because with a tsbuf block
+# the canary would fire and the free would abort, i.e. the loud guards would
+# mask the class this row is about.
+#   PASS (clean tree): TsbufProbe.main -> "42127", rc 0.
+#   FAIL (mutated .ssa):  TsbufProbe.main -> "2127",  rc 0.  SILENT: the staged
+#     arg was read back as 2 (the nested staging's second arg) instead of 42.
+# The mutation is not runner-derivable, so it is recorded here and in the
+# handoff node, not repeated in CI.
+#
+# THE ROW FAILS (never skips) when the fixture or the runner is absent — a
+# deleted probe must not look like a pass.
+tsbuf_apply_gate() {
+  local fixture="$ROOT/tools/qbe/fixtures/tsbufprobe.elm" bin ssa out rc
+  [ -f "$fixture" ] || {
+    echo "FAIL tsbuf-apply: $fixture is missing — the ONLY fixture that holds two staged blocks at once (a generic tail apply nested inside an over-applied chain) was deleted"
+    FAIL=1; return; }
+  [ -x "$ROOT/tools/qbe/qbe-mk.sh" ] || {
+    echo "FAIL tsbuf-apply: tools/qbe/qbe-mk.sh is missing or not executable — no runner, so the staging seats' storage classes have no oracle"
+    FAIL=1; return; }
+  bin="$("$ROOT/tools/qbe/qbe-mk.sh" "$fixture" TsbufProbe.main "$TMP/tsbufapply")" || {
+    echo "FAIL tsbuf-apply: qbe-mk"; FAIL=1; return; }
+  [ -x "$bin" ] || {
+    echo "FAIL tsbuf-apply: qbe-mk produced no executable at $bin"; FAIL=1; return; }
+  ssa="$(dirname "$bin")/tsbufprobe.ssa"
+  [ -f "$ssa" ] || {
+    echo "FAIL tsbuf-apply: no emitted .ssa at $ssa — the structural half cannot be checked"
+    FAIL=1; return; }
+  grep -q 'call \$q_Rt_x2estage_x2dapply' "$ssa" || {
+    echo "FAIL tsbuf-apply: the emitted .ssa never calls q_Rt_x2estage_x2dapply — the fixture no longer stages a generic apply inside the chain, so the nested-block half of this row tests nothing"
+    FAIL=1; return; }
+  grep -q 'call \$q_Rt_x2estage_x2dtail' "$ssa" || {
+    echo "FAIL tsbuf-apply: the emitted .ssa never calls q_Rt_x2estage_x2dtail — the fixture no longer writes the shared static buffer inside the chain, so the aliasing half of this row tests nothing"
+    FAIL=1; return; }
+  out="$(timeout 60 "$bin" TsbufProbe.main 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ] || [ "$out" != "42127" ]; then
+    echo "FAIL tsbuf-apply: TsbufProbe.main exit=$rc out='$out' (golden 42127) — the F-site staging block aliases the shared static buffer tsbuf: a nested hop overwrote the outer chain's staged args. Rt.stage-apply must malloc, never stage into tsbuf (see this row's comment)"
+    FAIL=1; return
+  fi
+  echo "PASS tsbuf-apply: TsbufProbe.main prints 42127 (rc 0) with both staging seats exercised — two staged blocks were live at once and neither clobbered the other"
+}
+tsbuf_apply_gate
+
 # ---- stage 4: arity > 8 (the old rt_callN table stopped at rt_call8) ----
 # arity9: a 9-ary defun called DIRECTLY from the driver (rt_call9).  arity9apply:
 # apply9 add9 -> f 1..9 where f is a Var, so the 9-ary call goes through
@@ -1989,7 +2214,12 @@ mono_field() {
   printf '%s\n' "$(mono_note "$1")" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1
 }
 mono_clones() {
-  grep -c '^function :ret \$[A-Za-z0-9_]*_x24' "$1" || true
+  # U3a: a clone is a SURFACE defun, so its result class is whatever the
+  # closure ABI uses — `:ret` before the flip, `:val` after it.  The row's
+  # claim is "the pass emitted a clone", not the class, so the pattern is
+  # class-agnostic on purpose: pinning one spelling here made three mono rows
+  # go red for an ABI change that did not touch the pass at all (MEASURED).
+  grep -cE '^function :(ret|val) \$[A-Za-z0-9_]*_x24' "$1" || true
 }
 # num <str>: a counter as an INTEGER. An empty or non-numeric capture becomes
 # 0 so a comparison can never pass just because a helper failed (an empty
@@ -2703,25 +2933,50 @@ if true; then
   fi
 fi
 
-# ---- cross-target smoke: the .ssa is target-NEUTRAL IL, so it must also
-#      COMPILE under qbe's other targets.  The behavioural gate runs on the
-#      HOST target only (amd64 here, MEASURED); this is the honest cheap half
-#      of the portability claim -- structurally portable, x86_64-measured.  A
-#      lowering that ever emits a host-specific pattern into the IL stops
-#      compiling here, loudly.  fib.ssa/float.ssa come from the rows above
-#      (a missing .ssa already failed that row); float covers the data-item
-#      lexer corners (Print.elm's d_ sigil).
+# ---- cross-target smoke: the emitted IL must be TARGET-NEUTRAL apart from the
+#      ONE instruction the other targets deliberately do not implement.
+#
+#      U3a changed what this row can honestly claim, and the change is stated
+#      rather than papered over.  Before U3a the emitted runtime contained NO
+#      `tcall` (Q1b's tcalls are emitted only where a program has a generic
+#      TAIL apply, and fib/float have none), so "the IL is target-neutral" was
+#      literally true and this row compiled both artifacts under arm64 and
+#      rv64.  U3a's conversion makes `tcall` UNCONDITIONAL in the runtime —
+#      rt_call2r's arity blocks (a hop must jump, or the chain grows a frame
+#      per hop) and the apply loop's own self-handoff — so no program's .ssa is
+#      arm64-assemblable any more, and the old assertion could only be restored
+#      by reverting the unit.  vendor/qbe refuses `tcall` on arm64/rv64 BY
+#      DESIGN ("a wrong tail is worse than none", tcall-probe.sh's target rows).
+#
+#      So the row now pins the SHARPER claim: each artifact's ONLY refusal is
+#      that one, named, and it is still a REFUSAL (a non-zero exit with the
+#      condition in the message) rather than a silent degradation.  A new
+#      host-specific pattern in the IL would show up as a DIFFERENT first
+#      error line and fail here exactly as before.  MEASURED: the first error
+#      line for fib.ssa and float.ssa on both targets is the tcall one, and
+#      the count of tcall sites is non-zero (a zero would make the row vacuous
+#      — a runtime with no tcall would be re-neutral and this row must say so
+#      out loud rather than pass on a stale premise).
 for tgt in arm64 rv64; do
   ok=1
   for s in "$TMP/fib/fib.ssa" "$TMP/float-lit/float.ssa"; do
     [ -s "$s" ] || continue
-    if ! "$ROOT/vendor/qbe/qbe" -t "$tgt" "$s" > /dev/null 2>"$TMP/xtgt.err"; then
-      echo "FAIL cross-$tgt: vendored qbe -t $tgt rejected $(basename "$s"): $(head -c 120 "$TMP/xtgt.err")"
+    want="tcall is not implemented on $( [ "$tgt" = arm64 ] && echo arm64 || echo riscv64 )"
+    if ! grep -q "$(printf '\t')tcall " "$s"; then
+      echo "FAIL cross-$tgt: $(basename "$s") contains no tcall — the IL is target-neutral again, so this row's premise (and its assertion) must be re-derived, not left green on a stale claim"
+      FAIL=1; ok=0
+      continue
+    fi
+    if "$ROOT/vendor/qbe/qbe" -t "$tgt" "$s" > /dev/null 2>"$TMP/xtgt.err"; then
+      echo "FAIL cross-$tgt: vendored qbe -t $tgt ACCEPTED $(basename "$s") — a tcall it does not implement was silently accepted"
+      FAIL=1; ok=0
+    elif ! grep -qF "$want" "$TMP/xtgt.err"; then
+      echo "FAIL cross-$tgt: vendored qbe -t $tgt rejected $(basename "$s") for a reason OTHER than the unimplemented tcall: $(head -c 120 "$TMP/xtgt.err")"
       FAIL=1; ok=0
     fi
   done
   if [ "$ok" = 1 ]; then
-    echo "PASS cross-$tgt: fib.ssa and float.ssa compile under qbe -t $tgt (the IL is target-neutral)"
+    echo "PASS cross-$tgt: fib.ssa and float.ssa are refused by qbe -t $tgt ONLY by the unimplemented tcall (the rest of the IL stays target-neutral)"
   fi
 done
 
@@ -2870,9 +3125,9 @@ run_midshape ffim-mem FfimMain.main tools/qbe/fixtures/ffim-mem.elm tools/qbe/fi
 # Rt.apply-at is the one Mid applier (closure + a rooted raw arg array ->
 # Rt.callArity).  Its FIRST caller is the new Mid effect host, and the failure
 # this row exists to catch is SILENT: the two neighbours of the right entry are
-# traps (Rt.apply/Rt.applyGo return an UNFORCED `:ret` tail, i.e. a heap
-# address where a value belongs; and a Disp arity of `arity - rem` passes zero
-# arguments), and neither is a crash.  So the oracle is a NUMBER: 417 =
+# traps (the WRONG SEAT — pre-U3a Rt.applyGo handed back an unforced `:ret`
+# tail, i.e. a heap address where a value belongs; and a Disp arity of
+# `arity - rem` passes zero arguments), and neither is a crash.  So the oracle is a NUMBER: 417 =
 # upd(msg 7, model 41) from a GLOBAL closure, 503 = a CAPTURING closure applied
 # to 3, and the row's own churn arm (run_mid re-runs at QBE_HEAP_MB=$CHURN_MB)
 # is the rooting half — the .mid churns 20 000 allocations between filling the
@@ -2965,6 +3220,188 @@ else
   if [ "$mg_ok" = 1 ]; then
     echo "PASS midgc-guard: the Mid collector refuses each of its $(echo "$midgc_guard_offs" | wc -w) incompatible flag(s) — $midgc_guard_offs (enumerated from run.js, not hand-copied)"
   fi
+fi
+
+# ---- UPSTREAM'S OWN TESTSUITE (vendor/qbe/test/*.ssa) ----
+# WHY THIS ROW EXISTS.  vendor/qbe now carries TWO local patches (`copy.c`'s
+# class test, and the `tcall` instruction across 15 files).  Upstream ships 76
+# test/*.ssa files that exercise the passes we patched, and until this row
+# existed NOTHING in tools/ ran them: only tools/qbe-build.sh drives `make`, and
+# only to BUILD.  So a future vendor sync or a careless edit could break
+# upstream behaviour with every other gate in this file still green — our gates
+# check what WE depend on, not what the vendor already promised.
+#
+# THE ROW IS NOT JUST AN EXIT CODE.  `make check` prints "All is fine!" and
+# exits 0 when it ran the suite, but it would also print that after running
+# FEWER tests — test.sh enumerates test/[!_]*.ssa and skips silently if a file
+# is gone.  So the row also requires one result line per enumerated file and
+# zero [ko]: a suite that quietly shrank is a failure, not a pass.  (Upstream's
+# script writes its scratch to a hard-coded /tmp/qbe.zzzz and ignores TMPDIR;
+# that file is upstream's and is left unmodified.)
+if [ -x "$ROOT/vendor/qbe/tools/test.sh" ] && [ -f "$ROOT/vendor/qbe/qbe" ]; then
+  up_n=$(ls "$ROOT"/vendor/qbe/test/[!_]*.ssa 2>/dev/null | wc -l)
+  if [ "$up_n" -eq 0 ]; then
+    echo "FAIL upstream-suite: vendor/qbe/test/ holds no test cases — upstream's suite was deleted"
+    FAIL=1
+  elif ! up_out="$(make -C "$ROOT/vendor/qbe" check 2>&1)"; then
+    # upstream marks a red case with the failing stage ("[qbe fail]",
+    # "[run fail]", ...) and prints the case name on the line above it
+    echo "FAIL upstream-suite: upstream's own testsuite FAILED against the patched vendor"
+    printf '%s\n' "$up_out" | grep -B1 -E '\[[a-z ]+fail\]|^[0-9]+ of [0-9]+ tests failed!' | sed 's/^/    /'
+    FAIL=1
+  else
+    up_ok=$(printf '%s\n' "$up_out" | grep -c '\[ok\]')
+    if [ "$up_ok" -ne "$up_n" ]; then
+      echo "FAIL upstream-suite: only $up_ok of $up_n enumerated upstream test case(s) reported ok — the suite ran, but not all of it"
+      FAIL=1
+    else
+      echo "PASS upstream-suite: $up_ok/$up_n of upstream's own test/*.ssa pass against the patched vendor (2 local patches: copy.c's class test, the tcall instruction)"
+    fi
+  fi
+else
+  echo "FAIL upstream-suite: vendor/qbe/tools/test.sh is missing or not executable — upstream's own testsuite, the only oracle for the VENDOR as a whole, was deleted"
+  FAIL=1
+fi
+
+# ---- THE `tcall` TAIL-CALL INSTRUCTION'S BEHAVIOUR PROBE (Q1a) ----
+# WHY THIS ROW EXISTS.  QBE gained a `tcall` instruction (THIRD-PARTY.md's
+# second local patch): the callee returns to the CALLER's caller, so the frame
+# goes away and the stack does not grow.  The interesting failure of that is a
+# shape one instruction away — a `jmp` where the teardown should have been, the
+# teardown ahead of the argument loads, an sret pointer forwarded to the wrong
+# buffer — and a text pin cannot see any of them: it asserts the shape the
+# AUTHOR wrote.  So the oracle is a program that RUNS, and the decisive row in
+# it is an ASYMMETRY (1e7 tail hops complete under an 8 MiB stack; the same
+# fixture hand-mutated `tcall`->`call` dies of stack exhaustion).  A probe never
+# seen to fail is not evidence, so the runner gates the fail-before arm too.
+#
+# WHY IT IS INVOKED FROM HERE, AND WHY THE PRESENCE CHECK IS PART OF THE ROW.
+# A committed script is not a gate: without this row the probe runs only when
+# someone remembers, which is the same failure as no probe at all.  And a row
+# that SKIPS when its input is gone is worse than one that fails: the fixture is
+# the only test this instruction has, so deleting it has to turn the gate red
+# rather than quietly reduce what is covered.
+if [ -x "$ROOT/tools/qbe/tcall-probe.sh" ] \
+&& [ -f "$ROOT/tools/qbe/tcall.ssa" ] \
+&& [ -f "$ROOT/tools/qbe/tcall_main.c" ] \
+&& [ -d "$ROOT/tools/qbe/tcall-bad" ]; then
+  if tcall_out="$(TMPDIR="$TMP" "$ROOT/tools/qbe/tcall-probe.sh" 2>&1)"; then
+    echo "PASS tcall: $(printf '%s\n' "$tcall_out" | grep -c '^PASS') row(s) RUN and passed — $(printf '%s\n' "$tcall_out" | grep -c '^PASS fixture') fixture run under an 8 MiB stack, $(printf '%s\n' "$tcall_out" | grep -c '^PASS asymmetry') tcall->call asymmetry, $(printf '%s\n' "$tcall_out" | grep -c '^PASS refusal') named refusals, $(printf '%s\n' "$tcall_out" | grep -c '^PASS target') other targets"
+  else
+    echo "FAIL tcall: the tcall behaviour probe FAILED (a tail call no longer returns to the caller's caller, or a refusal stopped naming its condition)"
+    printf '%s\n' "$tcall_out" | sed 's/^/    /'
+    FAIL=1
+  fi
+else
+  echo "FAIL tcall: tools/qbe/tcall-probe.sh, tcall.ssa, tcall_main.c or tcall-bad/ is missing — the ONLY oracle that RUNS the tcall instruction was deleted"
+  FAIL=1
+fi
+
+# ---- THE WORD ARM'S BEHAVIOUR PROBE (perf VR3b3, wired here so it RUNS) ----
+# WHY THIS ROW EXISTS AT ALL.  Under QBE_VALREP=word no program compiled through
+# run.js can run: the runtime is always injected, so the emitted set always
+# reaches Rt.main and the runtime's own text stops the arm (AREA 6 until this
+# unit ported the call ABI; the runtime's CONSTRUCTION path — `Rt.con: vecstore`
+# — since).  The emitter's heap side (tag writes, payload reads, kind tests, the
+# string cell) AND its call ABI therefore have no executable oracle on the arm
+# they target — and a TEXT pin cannot be one, because on this arm a text pin
+# asserts the shape the AUTHOR wrote.  MEASURED: six bugs shipped past every
+# text pin in VR3b3 before this probe existed; it caught all six.  The `call`
+# probe (AREA 6) is the same instrument applied to the ABI: one ordinary call
+# and one `tcall` in a runtime-free module, checked as an identity.
+#
+# WHY IT IS INVOKED FROM HERE.  A committed script is not a gate: the first
+# version of this row did not exist, so the probe ran only when someone
+# remembered — which is the same failure as the scratch harness it replaced
+# ("an oracle that has to be rebuilt by hand will not run again" becomes "an
+# oracle that has to be REMEMBERED will not run again").  qbe-check.sh is the
+# natural home: it already drives vendor qbe + cc, and the probe costs ~20 s.
+# Its own runner gates every probe on EXIT CODE, FAIL count and an exact PASS
+# count (a wrong offset dies as SIGSEGV/SIGABRT with no FAIL line).
+# ---- THE TWO ARMS' OUTPUTS MUST AGREE (perf word-arm-area3rt) ----
+# The companion row to word-arm-probe, and the only oracle in this file that
+# sees BOTH representations at once.  word-arm-probe runs word-arm code against
+# hand-written seats; this row compiles ONE source twice (val arm and
+# QBE_VALREP=word), assembles and links each, RUNS each, and requires identical
+# exit codes and byte-identical stdout.  A .ssa comparison would be meaningless —
+# the two representations are SUPPOSED to differ — so the program's OUTPUT is the
+# only shared observable.  It exists because the milestone it gates is the first
+# program the word arm ever ran: if a later twin moves a stride on either side,
+# this is the row that says so.
+if [ -x "$ROOT/tools/qbe/word-arm-diff.sh" ] && [ -d "$ROOT/tools/qbe/word-arm-diff" ]; then
+  if diff_out="$(TMPDIR="$TMP" "$ROOT/tools/qbe/word-arm-diff.sh" 2>&1)"; then
+    echo "PASS word-arm-diff: $(printf '%s\n' "$diff_out" | grep -c '^PASS ') program(s) RUN on BOTH arms with identical exit code and byte-identical stdout — the only row that compares the two representations"
+  else
+    echo "FAIL word-arm-diff: the two arms DISAGREE on a program's output (or one of them no longer builds)"
+    printf '%s\n' "$diff_out" | sed 's/^/    /'
+    FAIL=1
+  fi
+else
+  echo "FAIL word-arm-diff: tools/qbe/word-arm-diff.sh or its fixture dir is missing — the ONLY oracle that compares the two arms was deleted"
+  FAIL=1
+fi
+
+# ---- CLOSURES UNDER COLLECTION (perf word-arm-closures FIX) ----
+# The ONE row that runs a closure ACROSS a collection, and it exists because
+# none of the others can: every other word-arm fixture allocates far below one
+# GC trigger, so a ROOTING defect is invisible to all of them.  MEASURED, and
+# this is why the row is not optional: the closure class shipped with a running
+# fixture, a source pin, a probe row and 368 green rows here, while the word arm
+# answered 19709031 where the val arm answers 18003000 — silently, rc=0, EMPTY
+# STDERR, at DEFAULT settings.  Six (fixture, heap) rows, both arms, compared on
+# exit code and stdout; four of them were MEASURED RED with the two rooting
+# fixes reverted.
+if [ -x "$ROOT/tools/qbe/word-arm-gcchurn.sh" ] && [ -d "$ROOT/tools/qbe/word-arm-gcchurn" ]; then
+  if churn_out="$(TMPDIR="$TMP" "$ROOT/tools/qbe/word-arm-gcchurn.sh" 2>&1)"; then
+    echo "PASS word-arm-gcchurn: $(printf '%s
+' "$churn_out" | grep -c '^PASS ') row(s) RUN on BOTH arms with identical exit code and byte-identical stdout, INCLUDING under QBE_HEAP_MB=1 and at DEFAULT knobs — the only row that runs a closure across a collection"
+  else
+    echo "FAIL word-arm-gcchurn: a closure does not survive a collection (or one arm no longer builds)"
+    printf '%s
+' "$churn_out" | sed 's/^/    /'
+    FAIL=1
+  fi
+else
+  echo "FAIL word-arm-gcchurn: tools/qbe/word-arm-gcchurn.sh or its fixture dir is missing — the ONLY row that runs a closure across a collection was deleted"
+  FAIL=1
+fi
+
+# ---- THE WORD ARM'S FIXNUM BOUNDARY, EXECUTED (perf word-arm-arith) ----
+# The one place the two arms must NOT agree, so it cannot be a word-arm-diff
+# row: a word-arm fixnum is an i61, so a result at or beyond 2^60 in magnitude
+# has no fixnum encoding while the val arm carries the exact i64 value.  Before
+# this row the `mknum` round-trip refusal existed only at EMISSION level (a
+# TestMain row asserting the .ssa carries the `Rt.die` call) — a statement about
+# TEXT.  A refusal nobody has ever seen fire is not a tested refusal, and the
+# failure it guards against (silently dropping a fixnum's top three bits) is the
+# silent-wrong class this whole arm exists to prevent.  The script gates the
+# word arm on (exit 1 AND the named message), the val arm on the exact 2^61
+# product, and the INSIDE edge (2^59) on NOT being refused — so it cannot pass
+# by refusing everything large.
+if [ -x "$ROOT/tools/qbe/word-arm-i61.sh" ] && [ -d "$ROOT/tools/qbe/word-arm-i61" ]; then
+  if i61_out="$(TMPDIR="$TMP" "$ROOT/tools/qbe/word-arm-i61.sh" 2>&1)"; then
+    echo "PASS word-arm-i61: $(printf '%s\n' "$i61_out" | grep -c '^PASS ') row(s) — the i61 boundary EXECUTED: 2^61 halts with the NAMED refusal on the word arm, the val arm prints the exact i64 value, and 2^59 (the inside edge) is not refused"
+  else
+    echo "FAIL word-arm-i61: the word arm's fixnum boundary no longer behaves (a silent truncation, a crash instead of the named refusal, or an over-refusal)"
+    printf '%s\n' "$i61_out" | sed 's/^/    /'
+    FAIL=1
+  fi
+else
+  echo "FAIL word-arm-i61: tools/qbe/word-arm-i61.sh or its fixture dir is missing — the ONLY row that EXECUTES the i61 refusal was deleted"
+  FAIL=1
+fi
+
+if [ -x "$ROOT/tools/qbe/word-arm-probe.sh" ]; then
+  if probe_out="$(TMPDIR="$TMP" "$ROOT/tools/qbe/word-arm-probe.sh" 2>&1)"; then
+    echo "PASS word-arm-probe: $(printf '%s\n' "$probe_out" | grep -c '^PASS ') probe(s) RUN and passed ($(printf '%s\n' "$probe_out" | grep -c '^PASS ') of $(printf '%s\n' "$probe_out" | grep -c '^PASS '), $(printf '%s\n' "$probe_out" | grep -oE '[0-9]+ checks' | grep -oE '^[0-9]+' | paste -sd+ | bc) checks) — the word arm's heap side AND its CALL ABI execute against the runtime's seat convention"
+  else
+    echo "FAIL word-arm-probe: the word arm's behaviour probe FAILED (the heap side no longer runs correctly under QBE_VALREP=word)"
+    printf '%s\n' "$probe_out" | sed 's/^/    /'
+    FAIL=1
+  fi
+else
+  echo "FAIL word-arm-probe: tools/qbe/word-arm-probe.sh is missing or not executable — the ONLY oracle that runs word-arm code was deleted"
+  FAIL=1
 fi
 
 exit $FAIL

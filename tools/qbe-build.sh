@@ -2,8 +2,9 @@
 # qbe-build.sh — build the VENDORED QBE backend (vendor/qbe) with the system C
 # compiler.  No network, no dependency beyond cc + make; re-runnable.
 #
-# vendor/qbe is byte-identical upstream QBE, pinned (see THIRD-PARTY.md for the
-# commit and its verification).  This script never patches it -- it only drives
+# vendor/qbe is upstream QBE at the pinned commit plus the recorded local
+# patches listed in THIRD-PARTY.md (`copy.c`'s class test; the `tcall`
+# instruction).  This script patches nothing itself -- it only drives
 # upstream's own POSIX Makefile, in-tree:
 #
 #   make -C vendor/qbe qbe

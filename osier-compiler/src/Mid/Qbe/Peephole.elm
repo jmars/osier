@@ -25,7 +25,7 @@ module Mid.Qbe.Peephole exposing (optimize)
 
 import Char
 import Dict exposing (Dict)
-import Mid.Qbe.Il as Il exposing (Module, Func, Block, Inst(..), Jump(..), Arg(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..), descType, retType, valType)
+import Mid.Qbe.Il as Il exposing (Module, Func, Block, Inst(..), Jump(..), Arg(..), Ty(..), AbiTy(..), BinOp(..), CmpOp(..), LoadOp(..), StoreTy(..), CallArg(..), TypeDef, DataDef, DataItem(..), descType, valType)
 import Set exposing (Set)
 
 
@@ -119,6 +119,9 @@ isBarrier : Il.Inst -> Bool
 isBarrier inst =
     case inst of
         Call _ _ _ _ ->
+            True
+
+        TailCall _ _ _ ->
             True
 
         Store _ _ _ ->
@@ -271,6 +274,22 @@ readsTmps inst =
 
         Blit src dst _ ->
             Set.union (argTmps src) (argTmps dst)
+
+        TailCall _ target args ->
+            List.foldl
+                (\ca acc ->
+                    case ca of
+                        ArgVal _ a ->
+                            Set.union acc (argTmps a)
+
+                        ArgEnv a ->
+                            Set.union acc (argTmps a)
+
+                        ArgEllipsis ->
+                            acc
+                )
+                (argTmps target)
+                args
 
         Call _ _ target args ->
             List.foldl

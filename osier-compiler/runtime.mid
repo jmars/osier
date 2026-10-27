@@ -433,16 +433,23 @@ struct FrameHdr {
 // bytes both wrappers malloc.  TestMain's U7 rows pin this table to this
 // declaration.
 //
-//   slot 0  args    the caller's args array base — the ROOT_VALUE_ARRAY base
+//   slot 0  args    the caller's args array base.  Rt.apply: the caller's
+//                   args range in ITS frame, and the ROOT_VALUE_ARRAY base
 //                   registered by
-//                   `Rt.rootPushValueArray(args, [word](state) + 16)`
+//                   `Rt.rootPushValueArray(args, [word](state) + 16)`.  U2's
+//                   Rt.apply-tail: the `+40` of the staged block
+//                   Rt.stage-apply built (`buf + 40`), whose BASE is `buf` —
+//                   that is the word the registration is given, so cell 0
+//                   (the closure) is scanned too
 //   slot 1  nargs   the live args count; the over-applied arm RE-BINDS it (and
 //                   `args`) to the remaining args, then `recur`s
 //   slot 2  live    the element count the root SCAN reads, through the `np`
 //                   pointer at this word (`[word](state) + 16`): nargs at PUSH
-//                   time, deliberately NOT updated by the over-applied arm —
-//                   the registration keeps scanning the ORIGINAL range, whose
-//                   extra elements are live Values, so a superset is sound
+//                   time for Rt.apply, nargs + 1 for U2's Rt.apply-tail (the
+//                   staged block's closure cell is cell 0), deliberately NOT
+//                   updated by the over-applied arm — the registration keeps
+//                   scanning the ORIGINAL range, whose extra elements are live
+//                   Values, so a superset is sound
 //   slot 3  env     the partial arm's staging copy of the applied closure's
 //                   env, rooted via `Rt.rootPushPtr([word](sp) + 24)` and
 //                   RE-READ after the allocvec (the cStrFill lesson: the
@@ -453,37 +460,16 @@ struct ApplyState {
   live : word;
   env : word;
 }
-// THE 80-BYTE `:ret` LAYOUT (midlang-u7) — the Agg "ret" cell Rt.tail-known and
-// both Rt.applyTailGo arms malloc, and that Rt.bounce / Rt.bounceGo chase.  The
-// word offsets are an ABI in three directions at once: the builder (this file),
-// the chaser (Rt.bounceGo's rt_callN switch), and Lower's @ret block, which
-// blits all 80 bytes out of slot 0 and frees the block (P1a) — so no offset
-// here may move.  TestMain's U7 rows pin this table; the 1e6-hop mutual-tail
-// run is the behavioural half.
-//
-//   slot 0..4  result  the `.done` Value payload (a `val` field = 5 words);
-//                      read by the chaser as a VALUE (`vecload(r, 0)` — a val
-//                      field read at offset 0 is the same node).  WRITTEN
-//                      WORD-WISE at all three malloc sites (five zeroing
-//                      stores in the two tail arms, the five-word mkval payload
-//                      in the partial arm): that is a run of RawWordStores, NOT
-//                      a val field store, so those five lines keep the `wstore`
-//                      spelling — re-spelling them would emit a different node
-//                      sequence
-//   slot 5  kind   0 = `result` is the finished Value; 1 = words 6..9 are a
-//                  known tail call
-//   slot 6  code   the callee's code pointer (rt_callN's first argument)
-//   slot 7  e      the callee's env / captures pointer
-//   slot 8  args   the staged args array base (the static tsbuf or an allocvec)
-//   slot 9  arity  the callee's arity — the rt_callN switch in Rt.bounceGo
-struct Ret {
-  result : val;
-  kind : word;
-  code : word;
-  e : word;
-  args : word;
-  arity : word;
-}
+// U3b DELETED `struct Ret` AND THE 80-BYTE `:ret` CELL IT VIEWED.  It was the
+// `.tail` request the bounce trampoline carried: slot 0..4 the finished Value,
+// slot 5 the `.done`/`.tail` discriminator, slot 6..9 the callee's code/e/args/
+// arity for a chained hop.  U3a made NOTHING build a `.tail` (the apply chain
+// `tcall`s, the arity-5+ static sites take the ordinary call, every closure
+// call returns the finished Value), so U3b deleted the last builder
+// (Rt.tail-known), the two chasers (Rt.bounce, Rt.bounceGo) and this view with
+// it.  The VALUE arm no longer has a `:ret` return shape at all: a closure
+// body's result is `:val`.  What survives is the WORD arm's frozen `:ret`
+// (see Mid.RtLayout's Ret section) — AREA 6 owns its collapse.
 // THE APPLY DISPATCH-BLOCK LAYOUT (midlang-u7) — the four words Rt.callArity
 // reads out of its `disp` value's payload.  MEASURED against those reads
 // (fn@0, caps@1, buf@2, arity@3).  This view is a PREFIX of the storage and its
@@ -1039,16 +1025,35 @@ defun Rt.deepEq(a : val, bb : val) -> val {
     return mkbool(tagis(bb, 5));
   }
   if (mkbool(tagis(a, 4)) && mkbool(tagis(bb, 4))) {
-    if (mkbool(payload32(call Rt.deepEq(vecload(payload(a, 0), 0), vecload(payload(bb, 0), 0)), 0) == 0)) {
+    if (mkbool(payload32(call Rt.deepEq(vecload(vecbody(a), 0), vecload(vecbody(bb), 0)), 0) == 0)) {
       return false;
     }
-    recur(vecload(payload(a, 0), 1), vecload(payload(bb, 0), 1));
+    recur(vecload(vecbody(a), 1), vecload(vecbody(bb), 1));
   }
   if (mkbool(tagis(a, 14)) && mkbool(tagis(bb, 14))) {
-    return mkbool(len32(a) == len32(bb)) && call Rt.vecEq(a, bb, mknum(0));
+    // A RECORD'S FIELD COUNT, the same reader (perf word-arm-area3rt, the
+    // re-review's item 3): `len32` here was the SAME wrong-kind read as the
+    // vector arm below and the ten-site sweep missed it.  A record's count is
+    // its header's count word on the word arm exactly as a vector's is.
+    // >>> QBE_VAL-ONLY
+    return mkbool(veclen(a) == veclen(bb)) && call Rt.vecEq(a, bb, mknum(0));
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    // NOT `vecEq` (perf word-arm-records R2): a word-arm record's body is
+    // `[data | namesBase]`, so `vecEq`'s `veclen` bound would compare the NAMES
+    // word as a value — and the names arrays of two equal records need not be
+    // the same object (a literal's is a static content-keyed blob, an appended
+    // record's is a runtime-built array).  `recEqGo` compares the DATA words
+    // and the counts, nothing else.
+    return call Rt.recEqGo(a, bb, mknum(0));
+    // <<< QBE_WORDVAL-ONLY
   }
   if (mkbool(tagis(a, 10)) && mkbool(tagis(bb, 10))) {
-    return mkbool(len32(a) == len32(bb)) && call Rt.vecEq(a, bb, mknum(0));
+    // THE ELEMENT COUNT, not the byte length (perf word-arm-area3rt): a
+    // word-arm vector's count lives in its GC HEADER, so `len32` — payload word
+    // 1, which is a STRING's byte length — reads element 1 here.  `veclen` is
+    // `payload32(v, 1)` on the val arm and the header count on the word arm.
+    return mkbool(veclen(a) == veclen(bb)) && call Rt.vecEq(a, bb, mknum(0));
   }
   return false;
 }
@@ -1074,13 +1079,17 @@ defun Rt.deepEq(a : val, bb : val) -> val {
     return mkbool(tagis(bb, 5));
   }
   if (mkbool(tagis(a, 4)) && mkbool(tagis(bb, 4))) {
-    if (mkbool(payload32(call Rt.deepEq(vecload(payload(a, 0), 0), vecload(payload(bb, 0), 0)), 0) == 0)) {
+    if (mkbool(payload32(call Rt.deepEq(vecload(vecbody(a), 0), vecload(vecbody(bb), 0)), 0) == 0)) {
       return false;
     }
-    recur(vecload(payload(a, 0), 1), vecload(payload(bb, 0), 1));
+    recur(vecload(vecbody(a), 1), vecload(vecbody(bb), 1));
   }
   if (mkbool(tagis(a, 10)) && mkbool(tagis(bb, 10))) {
-    return mkbool(len32(a) == len32(bb)) && call Rt.vecEq(a, bb, mknum(0));
+    // THE ELEMENT COUNT, not the byte length (perf word-arm-area3rt): a
+    // word-arm vector's count lives in its GC HEADER, so `len32` — payload word
+    // 1, which is a STRING's byte length — reads element 1 here.  `veclen` is
+    // `payload32(v, 1)` on the val arm and the header count on the word arm.
+    return mkbool(veclen(a) == veclen(bb)) && call Rt.vecEq(a, bb, mknum(0));
   }
   return false;
 }
@@ -1105,11 +1114,34 @@ defun Rt.symEq(a : val, bb : val, i : val) -> val {
   recur(a, bb, mknum(payload(i, 0) + 1));
 }
 
-defun Rt.vecEq(a : val, bb : val, i : val) -> val {
-  if (mkbool(payload(i, 0) >= len32(a))) {
+// >>> QBE_WORDVAL-ONLY
+// A RECORD'S STRUCTURAL EQUALITY (perf word-arm-records R2), over its DATA
+// words.  The count is `veclen - 1` (the names word is not a field), and the
+// names are deliberately NOT compared: two records with the same row carry the
+// same field names by construction, and the arrays themselves differ by
+// provenance (a literal's static content-keyed blob vs an appended record's
+// runtime-built array) — comparing them as values would make equality depend on
+// how the record was built, which is the `vecEq`-on-records defect this defun
+// replaces.
+defun Rt.recEqGo(a : val, bb : val, i : val) -> val {
+  if (mkbool(veclen(a) != veclen(bb))) {
+    return false;
+  }
+  if (mkbool(payload(i, 0) >= veclen(a) - 1)) {
     return true;
   }
-  if (mkbool(payload32(call Rt.deepEq(vecload(payload(a, 0), payload(i, 0)), vecload(payload(bb, 0), payload(i, 0))), 0) == 0)) {
+  if (mkbool(payload32(call Rt.deepEq(vecload(vecbody(a), payload(i, 0)), vecload(vecbody(bb), payload(i, 0))), 0) == 0)) {
+    return false;
+  }
+  return call Rt.recEqGo(a, bb, mknum(payload(i, 0) + 1));
+}
+// <<< QBE_WORDVAL-ONLY
+
+defun Rt.vecEq(a : val, bb : val, i : val) -> val {
+  if (mkbool(payload(i, 0) >= veclen(a))) {
+    return true;
+  }
+  if (mkbool(payload32(call Rt.deepEq(vecload(vecbody(a), payload(i, 0)), vecload(vecbody(bb), payload(i, 0))), 0) == 0)) {
     return false;
   }
   recur(a, bb, mknum(payload(i, 0) + 1));
@@ -1280,7 +1312,7 @@ defun Rt.toI32(x : val) -> val {
 
 defun Rt.revGo(l : val, acc : val) -> val {
   if (mkbool(tagis(l, 4))) {
-    return call Rt.revGo(vecload(payload(l, 0), 1), call Rt.cons(vecload(payload(l, 0), 0), acc));
+    return call Rt.revGo(vecload(vecbody(l), 1), call Rt.cons(vecload(vecbody(l), 0), acc));
   }
   return acc;
 }
@@ -1382,7 +1414,7 @@ defun Rt.countGo(l : val, n : val) -> val {
   if (mkbool(tagis(l, 5))) {
     return n;
   } else {
-    recur(vecload(payload(l, 0), 1), mknum(payload(n, 0) + 1));
+    recur(vecload(vecbody(l), 1), mknum(payload(n, 0) + 1));
   }
 }
 
@@ -1390,10 +1422,11 @@ defun Rt.fillGo(l : val, bufN : val, i : val) -> val {
   if (mkbool(tagis(l, 5))) {
     return mknil;
   }
-  bytestore(payload(bufN, 0), payload(i, 0), payload(vecload(payload(l, 0), 0), 0));
-  recur(vecload(payload(l, 0), 1), bufN, mknum(payload(i, 0) + 1));
+  bytestore(payload(bufN, 0), payload(i, 0), payload(vecload(vecbody(l), 0), 0));
+  recur(vecload(vecbody(l), 1), bufN, mknum(payload(i, 0) + 1));
 }
 
+// >>> QBE_VAL-ONLY
 @consArr
 defun Rt.cons(car : val, cdr : val) -> val {
   return withroots [car, cdr] {
@@ -1412,6 +1445,37 @@ defun Rt.cons(car : val, cdr : val) -> val {
     vecstore(pair, 1, cdr);
     return mkval(4, vecaddr(pair, 0), vecaddr(pair, 1));
   };
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// THE WORD-ARM TWINS (perf word-arm-area3rt).  The cons cell IS its two body
+// words: `Rt.allocCons` allocates code 4 with count 2 (32 B, header included)
+// and returns the BODY, the two elements are stored INLINE, and the Value word
+// is `body OR ...001`.
+//
+// THE @consArr FUSION FLAG IS ABSENT HERE ON PURPOSE.  On the val arm the flag
+// picks between "payload word 0 = &pair[0], word 1 unwritten" and "two interior
+// pointers", i.e. between two ways of reaching a SEPARATE pair.  Inline, the
+// pair is the cell, so there is one shape and nothing to fuse — the flag keeps
+// its two defuns only because the flag is a build knob both arms must accept.
+@consArr
+defun Rt.cons(car : val, cdr : val) -> val {
+  return withroots [car, cdr] {
+    word pair = vecbody(call Rt.allocCons(mknum(0)));
+    vecstore(pair, 0, car);
+    vecstore(pair, 1, cdr);
+    return mkval(4, pair);
+  };
+}
+
+@!consArr
+defun Rt.cons(car : val, cdr : val) -> val {
+  return withroots [car, cdr] {
+    word pair = vecbody(call Rt.allocCons(mknum(0)));
+    vecstore(pair, 0, car);
+    vecstore(pair, 1, cdr);
+    return mkval(4, pair);
+  };
+// <<< QBE_WORDVAL-ONLY
 }
 
 @consArr
@@ -1508,8 +1572,8 @@ defun Rt.joinLen(sep : val, strs : val, acc : val) -> val {
   if (mkbool(tagis(strs, 5))) {
     return acc;
   }
-  val s = vecload(payload(strs, 0), 0);
-  val rest = vecload(payload(strs, 0), 1);
+  val s = vecload(vecbody(strs), 0);
+  val rest = vecload(vecbody(strs), 1);
   if (mkbool(tagis(rest, 5))) {
     recur(sep, rest, mknum(payload(acc, 0) + len32(s)));
   }
@@ -1524,8 +1588,8 @@ defun Rt.joinFill(strs : val, dstN : val, sep : val) -> val {
   if (mkbool(tagis(strs, 5))) {
     return dstN;
   }
-  val s = vecload(payload(strs, 0), 0);
-  val rest = vecload(payload(strs, 0), 1);
+  val s = vecload(vecbody(strs), 0);
+  val rest = vecload(vecbody(strs), 1);
   val p = call Rt.byteCopyGo(mknum(payload(dstN, 0)), mknum(payload(s, 0)), mknum(len32(s)));
   if (mkbool(tagis(rest, 5))) {
     return p;
@@ -1913,11 +1977,31 @@ defun Rt.pvS(stN : val, vN : val) -> val {
 
 defun Rt.pvRec(stN : val, vN : val, iN : val) -> val {
   word i = payload(iN, 0);
+  // `reclen` IS `payload32(v, 1) * (1 - tagis(v, nil))` — the nil factor exists
+  // because a `{}` literal's payload words are unzeroed.  pvRec only ever sees a
+  // record (pvV dispatches on tag 14), so on the VAL arm the factor is 1 and the
+  // read is unchanged; the WORD arm must read the HEADER's count instead
+  // (perf word-arm-area3rt), and `reclen` is a payload read.
+  //
+  // ARM-SPLICED, NOT REWRITTEN: replacing the val arm's `reclen` with `veclen`
+  // would drop the nil factor from the VAL emit and move the corpus — MEASURED,
+  // and the corpus moving is a BUG report, not a re-freeze.  Every other site in
+  // this unit could be rewritten in place because `veclen`'s val arm IS
+  // `payload32(v, 1)`; this one could not.
+  // >>> QBE_VAL-ONLY
   if (mkbool(i >= reclen(vN))) {
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // THE RECORD'S LENGTH IS `veclen - 1` (perf word-arm-records R2): the header
+  // count is `n + 1` because the LAST body word is the field-NAMES base, a raw
+  // pointer that is NOT a value to print.  A bare `veclen` here prints one
+  // extra element — the names word, which reads as a fixnum.
+  if (mkbool(i >= veclen(vN) - 1)) {
+  // <<< QBE_WORDVAL-ONLY
     return mknum(0);
   }
   call Rt.pvByte(stN, mknum(32));
-  call Rt.pvV(stN, vecload(payload(vN, 0), i));
+  call Rt.pvV(stN, vecload(vecbody(vN), i));
   return call Rt.pvRec(stN, vN, mknum(i + 1));
 }
 
@@ -1950,9 +2034,9 @@ defun Rt.pvV(stN : val, vN : val) -> val {
   }
   if (mkbool(tagis(vN, 4))) {
     call Rt.pvZ(stN, mknum(rawstr("[cons ")));
-    call Rt.pvV(stN, vecload(payload(vN, 0), 0));
+    call Rt.pvV(stN, vecload(vecbody(vN), 0));
     call Rt.pvZ(stN, mknum(rawstr(" . ")));
-    call Rt.pvV(stN, vecload(payload(vN, 0), 1));
+    call Rt.pvV(stN, vecload(vecbody(vN), 1));
     call Rt.pvZ(stN, mknum(rawstr("]")));
     return mknum(0);
   }
@@ -1964,7 +2048,7 @@ defun Rt.pvV(stN : val, vN : val) -> val {
   }
   if (mkbool(tagis(vN, 10))) {
     call Rt.pvZ(stN, mknum(rawstr("[vector ")));
-    call Rt.pvS(stN, call Rt.numText(mknum(payload32(vN, 1))));
+    call Rt.pvS(stN, call Rt.numText(mknum(veclen(vN))));
     call Rt.pvZ(stN, mknum(rawstr("]")));
     return mknum(0);
   }
@@ -1988,10 +2072,21 @@ defun Rt.pvV(stN : val, vN : val) -> val {
     call Rt.pvZ(stN, mknum(rawstr("]")));
     return mknum(0);
   }
+  // >>> QBE_VAL-ONLY
   if (mkbool(tagis(vN, 7))) {
     call Rt.pvZ(stN, mknum(rawstr("mark")));
     return mknum(0);
   }
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // NO MARK BRANCH ON THE WORD ARM (perf word-arm-area3rt).  The mark tag is a
+  // VAL-ARM collector artifact — a poisoned 40-byte Value the marker leaves in
+  // a dead cell — and a word-arm mark is a HEADER BIT, never a value word, so
+  // no word-arm value can carry it.  The tag is also `WordNoForm` (there is no
+  // word encoding to test), so the honest twin is to DROP the test rather than
+  // refuse the whole printer: a `...111` word still falls through to the
+  // "unknown value tag" die below, which is loud.
+  // <<< QBE_WORDVAL-ONLY
   if (mkbool(tagis(vN, 12))) {
     call Rt.pvS(stN, call Rt.floatText(vN));
     return mknum(0);
@@ -2029,11 +2124,11 @@ defun Rt.printValue(xN : val) -> val {
 
 defun Rt.assocGo(k : val, l : val) -> val {
   if (mkbool(tagis(l, 4))) {
-    val pair = vecload(payload(l, 0), 0);
-    if (mkbool(tagis(pair, 4)) && call Rt.deepEq(k, vecload(payload(pair, 0), 0))) {
+    val pair = vecload(vecbody(l), 0);
+    if (mkbool(tagis(pair, 4)) && call Rt.deepEq(k, vecload(vecbody(pair), 0))) {
       return pair;
     }
-    return call Rt.assocGo(k, vecload(payload(l, 0), 1));
+    return call Rt.assocGo(k, vecload(vecbody(l), 1));
   }
   if (mkbool(tagis(l, 5))) {
     return mknil;
@@ -2047,13 +2142,29 @@ defun Rt.recGet(rec : val, field : val) -> val {
 }
 
 defun Rt.recGetGo(rec : val, field : val, i : val) -> val {
+  // >>> QBE_VAL-ONLY
   if (mkbool(payload(i, 0) >= reclen(rec))) {
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // THE RECORD'S LENGTH IS `veclen - 1` (perf word-arm-records R3): the last
+  // body word is the NAMES base, a raw pointer, not a field.  The names array
+  // is a static array of name-byte POINTERS, so each element is read as a RAW
+  // WORD and boxed with `mknum` — the pointer-wrap idiom `vecbody` inverts on
+  // both arms, so `symEq`'s `payload(a, 0)` reads the pointer back with NO
+  // change to symEq.
+  if (mkbool(payload(i, 0) >= veclen(rec) - 1)) {
+  // <<< QBE_WORDVAL-ONLY
     word h = rawcall rt_halt();
     return mknil;
   }
+  // >>> QBE_VAL-ONLY
   val nameSym = vecload(payload(rec, 2), payload(i, 0));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  val nameSym = mknum(wload(wload(vecbody(rec), veclen(rec) - 1), payload(i, 0)));
+  // <<< QBE_WORDVAL-ONLY
   if (call Rt.symEq(nameSym, field, mknum(0))) {
-    return vecload(payload(rec, 0), payload(i, 0));
+    return vecload(vecbody(rec), payload(i, 0));
   }
   return call Rt.recGetGo(rec, field, mknum(payload(i, 0) + 1));
 }
@@ -2063,8 +2174,8 @@ defun Rt.recUpd(rec : val, field : val, newv : val) -> val {
   word nd = allocvec(reclen(rec));
   val ndN = mknum(nd);
   call Rt.recUpdCopy(rec, ndN, mknum(0));
-  vecstore(payload(ndN, 0), payload(find, 0), newv);
-  return mkval(14, vecaddr(payload(ndN, 0), 0), reclen(rec), payload(rec, 2));
+  vecstore(vecbody(ndN), payload(find, 0), newv);
+  return mkval(14, vecaddr(vecbody(ndN), 0), reclen(rec), payload(rec, 2));
 }
 
 defun Rt.recUpdFind(rec : val, field : val, i : val) -> val {
@@ -2082,7 +2193,7 @@ defun Rt.recUpdCopy(rec : val, newdata : val, i : val) -> val {
   if (mkbool(payload(i, 0) >= reclen(rec))) {
     return mknil;
   }
-  vecstore(payload(newdata, 0), payload(i, 0), vecload(payload(rec, 0), payload(i, 0)));
+  vecstore(vecbody(newdata), payload(i, 0), vecload(vecbody(rec), payload(i, 0)));
   return call Rt.recUpdCopy(rec, newdata, mknum(payload(i, 0) + 1));
 }
 
@@ -2103,7 +2214,7 @@ defun Rt.recAppendDataGo(rec : val, newdata : val, packed : val) -> val {
   if (mkbool(payload(j, 0) > reclen(rec))) {
     return mknil;
   }
-  val store = mkbool(payload(j, 0) < payload(pos, 0)) ? vecstore(payload(newdata, 0), payload(j, 0), vecload(payload(rec, 0), payload(j, 0))) : (mkbool(payload(j, 0) == payload(pos, 0)) ? mknil : vecstore(payload(newdata, 0), payload(j, 0), vecload(payload(rec, 0), payload(j, 0) - 1)));
+  val store = mkbool(payload(j, 0) < payload(pos, 0)) ? vecstore(vecbody(newdata), payload(j, 0), vecload(vecbody(rec), payload(j, 0))) : (mkbool(payload(j, 0) == payload(pos, 0)) ? mknil : vecstore(vecbody(newdata), payload(j, 0), vecload(vecbody(rec), payload(j, 0) - 1)));
   return call Rt.recAppendDataGo(rec, newdata, mknum(payload(packed, 0) + 1));
 }
 
@@ -2113,7 +2224,7 @@ defun Rt.recAppendNamesGo(rec : val, newnames : val, packed : val) -> val {
   if (mkbool(payload(j, 0) > reclen(rec))) {
     return mknil;
   }
-  val store = mkbool(payload(j, 0) < payload(pos, 0)) ? vecstore(payload(newnames, 0), payload(j, 0), vecload(payload(rec, 2), payload(j, 0))) : (mkbool(payload(j, 0) == payload(pos, 0)) ? mknil : vecstore(payload(newnames, 0), payload(j, 0), vecload(payload(rec, 2), payload(j, 0) - 1)));
+  val store = mkbool(payload(j, 0) < payload(pos, 0)) ? vecstore(vecbody(newnames), payload(j, 0), vecload(payload(rec, 2), payload(j, 0))) : (mkbool(payload(j, 0) == payload(pos, 0)) ? mknil : vecstore(vecbody(newnames), payload(j, 0), vecload(payload(rec, 2), payload(j, 0) - 1)));
   return call Rt.recAppendNamesGo(rec, newnames, mknum(payload(packed, 0) + 1));
 }
 
@@ -2126,9 +2237,9 @@ defun Rt.recAppend(rec : val, field : val, newv : val) -> val {
   val packed = mknum(payload(pos, 0) * 65536);
   call Rt.recAppendDataGo(rec, ndN, packed);
   call Rt.recAppendNamesGo(rec, nnN, packed);
-  vecstore(payload(ndN, 0), payload(pos, 0), newv);
-  vecstore(payload(nnN, 0), payload(pos, 0), field);
-  return mkval(14, vecaddr(payload(ndN, 0), 0), reclen(rec) + 1, vecaddr(payload(nnN, 0), 0));
+  vecstore(vecbody(ndN), payload(pos, 0), newv);
+  vecstore(vecbody(nnN), payload(pos, 0), field);
+  return mkval(14, vecaddr(vecbody(ndN), 0), reclen(rec) + 1, vecaddr(vecbody(nnN), 0));
 }
 
 defun Rt.recInsert(rec : val, field : val, newv : val) -> val {
@@ -2150,21 +2261,32 @@ defun Rt.recToChainGo(rec : val, i : val, acc : val) -> val {
   if (mkbool(payload(i, 0) >= reclen(rec))) {
     return acc;
   }
-  return call Rt.recToChainGo(rec, mknum(payload(i, 0) + 1), call Rt.cons(call Rt.@p(vecload(payload(rec, 2), payload(i, 0)), vecload(payload(rec, 0), payload(i, 0))), acc));
+  return call Rt.recToChainGo(rec, mknum(payload(i, 0) + 1), call Rt.cons(call Rt.@p(vecload(payload(rec, 2), payload(i, 0)), vecload(vecbody(rec), payload(i, 0))), acc));
 }
 
+// >>> QBE_VAL-ONLY
 defun Rt.absvector(cnt : val) -> val {
   word vec = allocvec(payload(cnt, 0));
   return mkvec(vec, payload(cnt, 0));
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// THE WORD-ARM TWIN (perf word-arm-area3rt): ONE code-10 block of `cnt` body
+// words, its length in the header's count word (written by the seat), and the
+// Value word is the tagged BODY — the same three facts as Rt.con's twin.
+defun Rt.absvector(cnt : val) -> val {
+  word body = vecbody(call Rt.allocKind(mknum(10), mknum(payload(cnt, 0))));
+  return mkval(10, body);
+}
+// <<< QBE_WORDVAL-ONLY
 
 defun Rt.address->(vec : val, i : val, x : val) -> val {
-  vecstore(payload(vec, 0), payload(i, 0), x);
+  vecstore(vecbody(vec), payload(i, 0), x);
   return vec;
 }
 
 defun Rt.<-address(vec : val, i : val) -> val {
-  return vecload(payload(vec, 0), payload(i, 0));
+  return vecload(vecbody(vec), payload(i, 0));
 }
 
 defun Rt.assoc(k : val, l : val) -> val {
@@ -2172,7 +2294,7 @@ defun Rt.assoc(k : val, l : val) -> val {
 }
 
 defun Rt.snd(x : val) -> val {
-  return vecload(payload(x, 0), 1);
+  return vecload(vecbody(x), 1);
 }
 
 // ==================== THE STRING-STREAM REGISTRY (O5) ====================
@@ -2298,6 +2420,31 @@ defun Rt.read-byte(stream : val) -> val {
   }
 }
 
+// >>> QBE_WORDVAL-ONLY
+// THE STREAM CELL (perf word-arm-area3rt).  A val-arm stream is a 40-byte Value
+// whose payload words are {fd, flags} — a small record, no separate array — so
+// the word arm's counterpart is a code-11 block whose BODY is those two raw
+// words (`heapKindScanned` false: nothing traces them).  Every reader is a
+// `payload(stream, 0)` / `payload(stream, 1)` / `payload32(stream, 1)`, which
+// reads body words 0 and 1 unchanged, so only the CONSTRUCTOR moves.
+// THE FLOAT CELL'S ALLOCATION (perf word-arm-area3rt, the part of AREA 5 the
+// construction path needs).  Code 12, `count` body words (one f64 word), raw
+// body — the emitter fills the double and tags the body itself, exactly as it
+// does for a string cell, because a `d`-class operand cannot cross this ABI.
+defun Rt.allocFloat(count : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word regionW = wload(glob, 0);
+  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  return call Rt.gcAlloc(region, mknum(12), mknum(payload(count, 0)));
+}
+defun Rt.mkStream(what : val, flags : val) -> val {
+  word body = vecbody(call Rt.allocKind(mknum(11), mknum(2)));
+  wstore(body, 0, payload(what, 0));
+  wstore(body, 1, payload(flags, 0));
+  return mkval(11, body);
+}
+// <<< QBE_WORDVAL-ONLY
+
 defun Rt.open(path : val, dir : val) -> val {
   if (call Rt.=(dir, "in")) {
     word len = len32(path);
@@ -2312,11 +2459,21 @@ defun Rt.open(path : val, dir : val) -> val {
           word h = rawcall rt_halt();
           return mknil;
         }
+        // >>> QBE_VAL-ONLY
         return mkval(11, idx, 1 + 4294967296 * 1);
+        // <<< QBE_VAL-ONLY
+        // >>> QBE_WORDVAL-ONLY
+        return call Rt.mkStream(mknum(idx), mknum(1));
+        // <<< QBE_WORDVAL-ONLY
       }
       return false;
     }
+    // >>> QBE_VAL-ONLY
     return mkval(11, fd, 1 + 4294967296 * 0);
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    return call Rt.mkStream(mknum(fd), mknum(0));
+    // <<< QBE_WORDVAL-ONLY
   } else {
     if (call Rt.=(dir, "out")) {
       word len = len32(path);
@@ -2324,7 +2481,12 @@ defun Rt.open(path : val, dir : val) -> val {
       val bufN = mknum(bufW);
       call Rt.cStrFill(bufN, path, mknum(0));
       word fd = rawcall openat(-100, bufW, 577, 438);
+      // >>> QBE_VAL-ONLY
       return mkbool(fd < 0) ? false : mkval(11, fd, 0 + 4294967296 * 0);
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      return mkbool(fd < 0) ? false : call Rt.mkStream(mknum(fd), mknum(0));
+      // <<< QBE_WORDVAL-ONLY
     }
     return mknum(0);
   }
@@ -2479,7 +2641,17 @@ defun Rt.intInsertAt(nN : val, dataPtrN : val, lenN : val) -> val {
   wstore(tab + n * 16, 0, store);
   wstore(tab + n * 16 + 8, 0, len);
   wstore(glob, 8209, n + 1);
+  // >>> QBE_VAL-ONLY
   return mkval(2, store);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // A symbol's body is ONE RAW word — the name pointer (code 2 is
+  // `heapKindScanned` false, so nothing traces it) — and `mkval(code, body)` is
+  // the tag, not a layout.
+  word sym = vecbody(call Rt.allocKind(mknum(2), mknum(1)));
+  wstore(sym, 0, store);
+  return mkval(2, sym);
+  // <<< QBE_WORDVAL-ONLY
 }
 
 defun Rt.intern(str : val) -> val {
@@ -2494,7 +2666,14 @@ defun Rt.intern(str : val) -> val {
   val found = call Rt.intFindGo(mknum(dataPtr), mknum(len), mknum(0));
   word hit = payload(found, 0);
   if (mkbool(hit != 0)) {
+    // >>> QBE_VAL-ONLY
     return mkval(2, hit);
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    word symHit = vecbody(call Rt.allocKind(mknum(2), mknum(1)));
+    wstore(symHit, 0, hit);
+    return mkval(2, symHit);
+    // <<< QBE_WORDVAL-ONLY
   }
   return call Rt.intInsert(mknum(dataPtr), mknum(len));
 }
@@ -3151,58 +3330,58 @@ defun Rt.epSymIs(sym : val, litN : val, i : val) -> val {
 defun Rt.epCount(vv : val, stN : val, accN : val) -> val {
   word cbufW = [*Scratch](payload(stN, 0))->cbuf;
   word limW = [*Scratch](payload(stN, 0))->lim;
-  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(payload(vv, 0), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(payload(vv, 0), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(payload(vv, 0), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(payload(vv, 0), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
+  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(vecbody(vv), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(vecbody(vv), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(vecbody(vv), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(vecbody(vv), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
   if (mkbool(payload(stV, 0) == 2)) {
     return mknum(-1);
   }
   if (mkbool(payload(stV, 0) == 0)) {
     return accN;
   }
-  val t1 = vecload(payload(vecload(payload(vv, 0), 1), 0), 1);
+  val t1 = vecload(vecbody(vecload(vecbody(vv), 1)), 1);
   if (mkbool(payload(accN, 0) > limW)) {
     return accN;
   }
   if (mkbool(tagis(t1, 4) == 0)) {
     return mknum(-1);
   }
-  recur(vecload(payload(t1, 0), 0), stN, mknum(payload(accN, 0) + 1));
+  recur(vecload(vecbody(t1), 0), stN, mknum(payload(accN, 0) + 1));
 }
 
 defun Rt.epElem(vv : val, iN : val, tgtN : val) -> val {
   if (mkbool(tagis(vv, 4) == 0)) {
     return mknil;
   }
-  if (mkbool(tagis(vecload(payload(vv, 0), 1), 5) != 0)) {
+  if (mkbool(tagis(vecload(vecbody(vv), 1), 5) != 0)) {
     return mknil;
   }
-  if (mkbool(tagis(vecload(payload(vv, 0), 1), 4) == 0)) {
+  if (mkbool(tagis(vecload(vecbody(vv), 1), 4) == 0)) {
     return mknil;
   }
   if (mkbool(payload(iN, 0) == payload(tgtN, 0))) {
-    return vecload(payload(vecload(payload(vv, 0), 1), 0), 0);
+    return vecload(vecbody(vecload(vecbody(vv), 1)), 0);
   }
-  val t1 = vecload(payload(vecload(payload(vv, 0), 1), 0), 1);
+  val t1 = vecload(vecbody(vecload(vecbody(vv), 1)), 1);
   if (mkbool(tagis(t1, 4) == 0)) {
     return mknil;
   }
-  recur(vecload(payload(t1, 0), 0), mknum(payload(iN, 0) + 1), tgtN);
+  recur(vecload(vecbody(t1), 0), mknum(payload(iN, 0) + 1), tgtN);
 }
 
 defun Rt.epNum(vv : val, cbufN : val) -> val {
   if (mkbool(tagis(vv, 4) == 0)) {
     return mknil;
   }
-  if (mkbool(tagis(vecload(payload(vv, 0), 0), 2) == 0)) {
+  if (mkbool(tagis(vecload(vecbody(vv), 0), 2) == 0)) {
     return mknil;
   }
-  if (call Rt.epSymIs(vecload(payload(vv, 0), 0), mknum(payload(cbufN, 0) + 16), mknum(0))) {
-    if (mkbool(tagis(vecload(payload(vv, 0), 1), 4) == 0)) {
+  if (call Rt.epSymIs(vecload(vecbody(vv), 0), mknum(payload(cbufN, 0) + 16), mknum(0))) {
+    if (mkbool(tagis(vecload(vecbody(vv), 1), 4) == 0)) {
       return mknil;
     }
-    if (mkbool(tagis(vecload(payload(vecload(payload(vv, 0), 1), 0), 0), 0) == 0)) {
+    if (mkbool(tagis(vecload(vecbody(vecload(vecbody(vv), 1)), 0), 0) == 0)) {
       return mknil;
     }
-    return vecload(payload(vecload(payload(vv, 0), 1), 0), 0);
+    return vecload(vecbody(vecload(vecbody(vv), 1)), 0);
   }
   return mknil;
 }
@@ -3210,17 +3389,17 @@ defun Rt.epStr(vv : val, cbufN : val) -> val {
   if (mkbool(tagis(vv, 4) == 0)) {
     return mknil;
   }
-  if (mkbool(tagis(vecload(payload(vv, 0), 0), 2) == 0)) {
+  if (mkbool(tagis(vecload(vecbody(vv), 0), 2) == 0)) {
     return mknil;
   }
-  if (call Rt.epSymIs(vecload(payload(vv, 0), 0), mknum(payload(cbufN, 0) + 8), mknum(0))) {
-    if (mkbool(tagis(vecload(payload(vv, 0), 1), 4) == 0)) {
+  if (call Rt.epSymIs(vecload(vecbody(vv), 0), mknum(payload(cbufN, 0) + 8), mknum(0))) {
+    if (mkbool(tagis(vecload(vecbody(vv), 1), 4) == 0)) {
       return mknil;
     }
-    if (mkbool(tagis(vecload(payload(vecload(payload(vv, 0), 1), 0), 0), 1) == 0)) {
+    if (mkbool(tagis(vecload(vecbody(vecload(vecbody(vv), 1)), 0), 1) == 0)) {
       return mknil;
     }
-    return vecload(payload(vecload(payload(vv, 0), 1), 0), 0);
+    return vecload(vecbody(vecload(vecbody(vv), 1)), 0);
   }
   return mknil;
 }
@@ -3228,17 +3407,17 @@ defun Rt.epSymOf(vv : val, cbufN : val) -> val {
   if (mkbool(tagis(vv, 4) == 0)) {
     return mknil;
   }
-  if (mkbool(tagis(vecload(payload(vv, 0), 0), 2) == 0)) {
+  if (mkbool(tagis(vecload(vecbody(vv), 0), 2) == 0)) {
     return mknil;
   }
-  if (call Rt.epSymIs(vecload(payload(vv, 0), 0), mknum(payload(cbufN, 0) + 24), mknum(0))) {
-    if (mkbool(tagis(vecload(payload(vv, 0), 1), 4) == 0)) {
+  if (call Rt.epSymIs(vecload(vecbody(vv), 0), mknum(payload(cbufN, 0) + 24), mknum(0))) {
+    if (mkbool(tagis(vecload(vecbody(vv), 1), 4) == 0)) {
       return mknil;
     }
-    if (mkbool(tagis(vecload(payload(vecload(payload(vv, 0), 1), 0), 0), 2) == 0)) {
+    if (mkbool(tagis(vecload(vecbody(vecload(vecbody(vv), 1)), 0), 2) == 0)) {
       return mknil;
     }
-    return vecload(payload(vecload(payload(vv, 0), 1), 0), 0);
+    return vecload(vecbody(vecload(vecbody(vv), 1)), 0);
   }
   return mknil;
 }
@@ -3281,21 +3460,21 @@ defun Rt.epProgGo(vv : val, stN : val, progN : val) -> val {
   word cbufW = [*Scratch](payload(stN, 0))->cbuf;
   word iW = [*Prog](payload(progN, 0))->nchains;
   word chainsW = [*Prog](payload(progN, 0))->chains;
-  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(payload(vv, 0), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(payload(vv, 0), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(payload(vv, 0), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(payload(vv, 0), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
+  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(vecbody(vv), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(vecbody(vv), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(vecbody(vv), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(vecbody(vv), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
   if (mkbool(payload(stV, 0) == 2)) {
     return mknum(-1);
   }
   if (mkbool(payload(stV, 0) == 0)) {
     return mknum(0);
   }
-  val t1 = vecload(payload(vecload(payload(vv, 0), 1), 0), 1);
+  val t1 = vecload(vecbody(vecload(vecbody(vv), 1)), 1);
   word chAddr = chainsW + (iW * 16);
-  val r = call Rt.epChain(vecload(payload(vecload(payload(vv, 0), 1), 0), 0), stN, mknum(chAddr));
+  val r = call Rt.epChain(vecload(vecbody(vecload(vecbody(vv), 1)), 0), stN, mknum(chAddr));
   if (mkbool(payload(r, 0) < 0)) {
     return mknum(-1);
   }
   [*Prog](payload(progN, 0))->nchains = iW + 1;
-  recur(vecload(payload(t1, 0), 0), stN, progN);
+  recur(vecload(vecbody(t1), 0), stN, progN);
 }
 
 defun Rt.epChain(e : val, stN : val, chAddrN : val) -> val {
@@ -3362,28 +3541,28 @@ defun Rt.epPipeGo(vv : val, stN : val, pipeN : val) -> val {
   word cbufW = [*Scratch](payload(stN, 0))->cbuf;
   word iW = [*Pipe](payload(pipeN, 0))->ncmds;
   word cmdsW = [*Pipe](payload(pipeN, 0))->cmds;
-  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(payload(vv, 0), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(payload(vv, 0), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(payload(vv, 0), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(payload(vv, 0), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
+  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(vecbody(vv), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(vecbody(vv), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(vecbody(vv), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(vecbody(vv), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
   if (mkbool(payload(stV, 0) == 2)) {
     return mknum(-1);
   }
   if (mkbool(payload(stV, 0) == 0)) {
     return mknum(0);
   }
-  val t1 = vecload(payload(vecload(payload(vv, 0), 1), 0), 1);
+  val t1 = vecload(vecbody(vecload(vecbody(vv), 1)), 1);
   word cAddr = cmdsW + (iW * 40);
-  val r = call Rt.epCmd(vecload(payload(vecload(payload(vv, 0), 1), 0), 0), stN, mknum(cAddr));
+  val r = call Rt.epCmd(vecload(vecbody(vecload(vecbody(vv), 1)), 0), stN, mknum(cAddr));
   if (mkbool(payload(r, 0) < 0)) {
     return mknum(-1);
   }
   [*Pipe](payload(pipeN, 0))->ncmds = iW + 1;
-  recur(vecload(payload(t1, 0), 0), stN, pipeN);
+  recur(vecload(vecbody(t1), 0), stN, pipeN);
 }
 
 defun Rt.epArgvGo(vv : val, stN : val, cAddrN : val) -> val {
   word cbufW = [*Scratch](payload(stN, 0))->cbuf;
   word argvW = [*CmdState](payload(cAddrN, 0))->argv;
   word jW = [*CmdState](payload(cAddrN, 0))->argc;
-  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(payload(vv, 0), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(payload(vv, 0), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(payload(vv, 0), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(payload(vv, 0), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
+  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(vecbody(vv), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(vecbody(vv), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(vecbody(vv), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(vecbody(vv), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
   if (mkbool(payload(stV, 0) == 2)) {
     call Rt.epFreeArgv(mknum([*CmdState](payload(cAddrN, 0))->argv), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->argc));
     [*CmdState](payload(cAddrN, 0))->argv = 0;
@@ -3392,7 +3571,7 @@ defun Rt.epArgvGo(vv : val, stN : val, cAddrN : val) -> val {
   if (mkbool(payload(stV, 0) == 0)) {
     return mknum(0);
   }
-  val sN = call Rt.epStr(vecload(payload(vecload(payload(vv, 0), 1), 0), 0), mknum(cbufW));
+  val sN = call Rt.epStr(vecload(vecbody(vecload(vecbody(vv), 1)), 0), mknum(cbufW));
   if (mkbool(tagis(sN, 1) == 0)) {
     call Rt.epFreeArgv(mknum([*CmdState](payload(cAddrN, 0))->argv), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->argc));
     [*CmdState](payload(cAddrN, 0))->argv = 0;
@@ -3408,20 +3587,20 @@ defun Rt.epArgvGo(vv : val, stN : val, cAddrN : val) -> val {
   call Rt.cStrFill(mknum(bufW), sN, mknum(0));
   wstore(argvW, jW, bufW);
   [*CmdState](payload(cAddrN, 0))->argc = jW + 1;
-  val t1 = vecload(payload(vecload(payload(vv, 0), 1), 0), 1);
+  val t1 = vecload(vecbody(vecload(vecbody(vv), 1)), 1);
   if (mkbool(tagis(t1, 4) == 0)) {
     call Rt.epFreeArgv(mknum([*CmdState](payload(cAddrN, 0))->argv), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->argc));
     [*CmdState](payload(cAddrN, 0))->argv = 0;
     return mknum(-1);
   }
-  recur(vecload(payload(t1, 0), 0), stN, cAddrN);
+  recur(vecload(vecbody(t1), 0), stN, cAddrN);
 }
 
 defun Rt.epRedirsGo(vv : val, stN : val, cAddrN : val) -> val {
   word cbufW = [*Scratch](payload(stN, 0))->cbuf;
   word arrW = [*CmdState](payload(cAddrN, 0))->redirs;
   word jW = [*CmdState](payload(cAddrN, 0))->nredirs;
-  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(payload(vv, 0), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(payload(vv, 0), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(payload(vv, 0), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(payload(vv, 0), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
+  val stV = mkbool(tagis(vv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(vecbody(vv), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(vecbody(vv), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(vecbody(vv), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(vecbody(vv), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
   if (mkbool(payload(stV, 0) == 2)) {
     call Rt.epFreeRedirs(mknum([*CmdState](payload(cAddrN, 0))->redirs), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->nredirs));
     [*CmdState](payload(cAddrN, 0))->redirs = 0;
@@ -3431,8 +3610,8 @@ defun Rt.epRedirsGo(vv : val, stN : val, cAddrN : val) -> val {
     return mknum(0);
   }
   word rAddr = arrW + (jW * 48);
-  val r = call Rt.epRedir(vecload(payload(vecload(payload(vv, 0), 1), 0), 0), stN, mknum(rAddr));
-  val t1 = vecload(payload(vecload(payload(vv, 0), 1), 0), 1);
+  val r = call Rt.epRedir(vecload(vecbody(vecload(vecbody(vv), 1)), 0), stN, mknum(rAddr));
+  val t1 = vecload(vecbody(vecload(vecbody(vv), 1)), 1);
   if (mkbool(payload(r, 0) < 0)) {
     call Rt.epFreeRedirs(mknum([*CmdState](payload(cAddrN, 0))->redirs), mknum(0), mknum([*CmdState](payload(cAddrN, 0))->nredirs));
     [*CmdState](payload(cAddrN, 0))->redirs = 0;
@@ -3444,7 +3623,7 @@ defun Rt.epRedirsGo(vv : val, stN : val, cAddrN : val) -> val {
     [*CmdState](payload(cAddrN, 0))->redirs = 0;
     return mknum(-1);
   }
-  recur(vecload(payload(t1, 0), 0), stN, cAddrN);
+  recur(vecload(vecbody(t1), 0), stN, cAddrN);
 }
 
 defun Rt.epRedir(e : val, stN : val, rAddrN : val) -> val {
@@ -5028,7 +5207,11 @@ defun Rt.allocRaw(nbytes : val) -> val {
 // code 0 has exactly one owner (see the KIND-CONTRACT block above: 0 means NO
 // CODE — a val-arm header — and nothing on this arm writes it):
 //
-//   Rt.allocCons()          a 2-value cons cell: code 4, count 2, 32 B
+//   Rt.allocCons(dummy)     a 2-value cons cell: code 4, count 2, 32 B (the
+//                           dummy is not decoration: the lean ABI passes 1..3
+//                           pointer args, so a 0-arity defun cannot be CALLED —
+//                           MEASURED the moment Rt.cons's word-arm twin reached
+//                           it: "rawCall to Rt.allocCons stages arity 0")
 //   Rt.allocKind(code, n)   the general seat: code `code`, n body words/Values
 //   Rt.allocVector(n)       a vector of n Values: code 10
 //   Rt.allocRaw(bytes)      a BYTE BUFFER: code 1 (string/symbol bytes)
@@ -5047,11 +5230,46 @@ defun Rt.allocRaw(nbytes : val) -> val {
 //
 // The body is `2 + count` words in every case (gcAlloc's `total`), so a cons is
 // 4 words and a vector 2 + n — the body-size rule RtLayout.bodyWords states.
-defun Rt.allocCons() -> val {
+defun Rt.allocCons(dummy : val) -> val {
   word glob = rawcall rt_glob_addr();
   word regionW = wload(glob, 0);
   val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
   return call Rt.gcAlloc(region, mknum(4), mknum(2));
+}
+// THE RECORD BLOCK (perf word-arm-records R2).  A word-arm record is ONE
+// code-14 block whose body is `[data_0 .. data_{n-1} | namesBase]`: the field
+// VALUES in canonical order, then ONE raw word — the address of the field-NAMES
+// array.  NAMES LAST IS LOAD-BEARING: it keeps `vecload(vecbody(rec), i)`
+// meaning `data[i]` on BOTH arms, so the emitter's positional read needs no
+// fork.  The price is that the header count is `n + 1`, so EVERY record-length
+// reader must answer `veclen - 1` (see `Rt.pvRec` and `Rt.recEqGo`); a bare
+// `veclen` bound reads the names word as a value and, on a write, runs into the
+// NEXT heap block.
+//
+// THE `+ 1` LIVES HERE, in the seat and in its name's meaning, so no call site
+// can allocate `n` and store `n + 1` words.
+defun Rt.allocRecord(count : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word regionW = wload(glob, 0);
+  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  return call Rt.gcAlloc(region, mknum(14), mknum(payload(count, 0) + 1));
+}
+// THE SYMBOL CELL (perf word-arm-records R1).  A word-arm SYMBOL is a code-2
+// block whose body is the string cell's shape — `[byte pointer, length]` — so
+// `payload(v, 0)` is the NUL-terminated name (what `symEq`/`pvZ`/`strbyte` walk,
+// unchanged) and `payload32(v, 1)` is the byte length (kept so a length reader
+// has an honest answer the day one appears; nothing reads it today).
+//
+// WHY ITS OWN SEAT AND NOT `allocRaw`: the CODE IS THE CONSTRUCTOR on this arm,
+// and a symbol is code 2 while `allocRaw` is the string's code 1.  A symbol
+// allocated as code 1 would be indistinguishable from a string to `tagis(v, 2)`
+// — the mixed-representation read this arm exists to prevent — so the code
+// cannot be the caller's afterthought.  `count` is the BODY word count (2).
+defun Rt.allocSym(count : val) -> val {
+  word glob = rawcall rt_glob_addr();
+  word regionW = wload(glob, 0);
+  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  return call Rt.gcAlloc(region, mknum(2), mknum(payload(count, 0)));
 }
 defun Rt.allocKind(code : val, count : val) -> val {
   word glob = rawcall rt_glob_addr();
@@ -5155,15 +5373,16 @@ defun Rt.kindHdr(kind : val, cls : val) -> val {
 // in each case a twin here would be WRONG rather than merely absent — plus one
 // thing that LOOKS like a stride and is not:
 //
-//  1. THE CALL STAGING (`Rt.apply`, `Rt.applyTailGo`, `Rt.bounceGo`,
-//     `Rt.tail-known`): `buf + 40k`, `args + rem * 40` and the
-//     `copyWords(.., rem * 5)` blits move one 40-byte Value per argument.  That
-//     is the CALLING CONVENTION, not a data stride: MEASURED at VR3b2, a
-//     `:val` parameter arrives IN A REGISTER at 8 bytes and BY VALUE ON THE
-//     STACK at 40, so the argument ABI and the staging buffer must flip
-//     TOGETHER — VR3b2's App area owns the ABI, VR3d owns the flip.  A twin
-//     here would change how a call is MADE while the callee still expects the
-//     old shape.
+//  1. ~~THE CALL STAGING~~ — PORTED (perf word-arm-closures).  This entry said
+//     the staging buffers (`Rt.stage-apply`'s block, `args + rem * 40`, the
+//     `copyWords(.., rem * 5)` blits) could not be twinned until the argument
+//     ABI flipped, and that VR3d owned the flip.  MEASURED: the ABI half was
+//     ALREADY done — `rt_callN`/`rt_call2r` load each pointer and pass the word
+//     (VR3b2), `RtGeneric`'s prologue stores the incoming word
+//     (`paramWords`), and the closure ENTRY already reads captures at
+//     `valSizeBytes * j`.  So the staging was the whole of what was left, and
+//     a closure could not RUN without it; there is no VR3d, and this unit took
+//     it.  The flip is five sites and one shape guard, each twinned in place.
 //  2. THE EXEC-PLAN / EFFECT-HOST BLOB (`Rt.hostInit`'s
 //     `8 + (33031 * 40) + ...` and every `h + 8 + base * 40`): the slot array's
 //     stride is `sizeof(val)` AS THE .mid FRONT END COMPUTES IT, and
@@ -6832,6 +7051,7 @@ defun Rt.shen.bytes->string(bs : val) -> val {
     return mknil;
   }
 }
+// >>> QBE_VAL-ONLY
 defun Rt.con(tag : val, argsPtr : val, cnt : val) -> val {
   word dataW = allocvec(payload(cnt, 0) + 1);
   word cntW = payload(cnt, 0);
@@ -6839,6 +7059,28 @@ defun Rt.con(tag : val, argsPtr : val, cnt : val) -> val {
   call Rt.conFill(mknum(dataW), argsPtr, mknum(cntW));
   return mkvec(dataW, cntW + 1);
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// THE WORD-ARM TWIN (perf word-arm-area3rt).  A vector's elements are INLINE,
+// so the "element array" and the vector CELL are the same block: `allocKind`
+// gives a code-10 block of `cnt + 1` body words (the ctor tag, then the
+// arguments), the header's count word carries the length (gcAlloc writes it —
+// the val arm's `mkvec(data, n)` payload word 1 has no word-arm counterpart),
+// and the Value word is `body OR ...001`.
+//
+// WHAT MOVED AND WHY IT IS NOT A STRIDE: the val arm allocates an UNTAGGED
+// array (`allocvec` = code 1 there) and then wraps it in a 40-byte Value; the
+// word arm allocates ONE code-10 object, because a `...001` word names the
+// block itself and the collector's scan kind must say "vector" for the body's
+// Value words to be traced.
+defun Rt.con(tag : val, argsPtr : val, cnt : val) -> val {
+  word cntW = payload(cnt, 0);
+  word body = vecbody(call Rt.allocKind(mknum(10), mknum(cntW + 1)));
+  vecstore(body, 0, tag);
+  call Rt.conFill(mknum(body), argsPtr, mknum(cntW));
+  return mkval(10, body);
+}
+// <<< QBE_WORDVAL-ONLY
 
 defun Rt.conFill(data : val, argsPtr : val, idx : val) -> val {
   word dataW = payload(data, 0);
@@ -6852,6 +7094,7 @@ defun Rt.conFill(data : val, argsPtr : val, idx : val) -> val {
   }
 }
 
+// >>> QBE_VAL-ONLY
 defun Rt.closure(desc : val, capBase : val, cnt : val) -> val {
   word dataW = allocvec(payload(cnt, 0));
   word cntW = payload(cnt, 0);
@@ -6860,6 +7103,66 @@ defun Rt.closure(desc : val, capBase : val, cnt : val) -> val {
   call Rt.closureFill(mknum(dataW), capBase, mknum(cntW));
   return mkval(6, descW, arityW, dataW, cntW);
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// THE WORD-ARM TWIN (perf word-arm-area3rt).  The closure keeps the val arm's
+// FOUR-FIELD shape — [desc, arity|ncaps<<32, caps, ncaps] — because every
+// reader in the apply chain reads exactly those words (`payload(f,0)` is the
+// descriptor, `payload32(f,1)` the arity, `payload(f,2)` the capture array,
+// `payload32(f,3)` its length) and the closure ENTRY reads captures at
+// `env + j * 8` (Lower's capBlitsPro).  What changes is WHERE the fields live
+// and HOW the capture array is named:
+//
+//   * the four fields are the object's BODY (code 6, count 4), so the body's
+//     words ARE the fields and the value word is `body OR ...001`;
+//   * the capture array is its own code-10 block (`allocKind`), and body word 2
+//     holds it TAGGED (`caps + 1`) because a code-6 body is SCANNED: an untagged
+//     raw pointer in it would be read as a fixnum and never marked, i.e. the
+//     captures would be collected while the closure still points at them.  The
+//     apply chain untags it (`payload(f, 2) - 1`) before handing it to
+//     `rt_call2r`, and a closure with NO captures stores the tag alone (1), so
+//     `env == 0` still means "no env" and the loud missing-env die still fires.
+//   * desc/arity/ncaps need no tag: a descriptor address and two small counts
+//     all have their low three bits clear, i.e. they read as fixnums to the
+//     scanner and are left alone — which is why the body is safe to scan.
+// TWO ALLOCATIONS, SO THERE IS A SAFEPOINT BETWEEN THEM, AND THE FIRST ONE'S
+// RESULT IS A RAW WORD (perf word-arm-closures FIX, review BLOCKER).  `caps` is
+// a BODY address in the young heap; the collector scans only ROOT-REACHABLE
+// objects, and nothing referenced it across the body's `allocKind` — so a
+// scavenge landing on that second allocation (gcAlloc's trigger, or a young
+// fill) FREED it, reset `youngCursor`, and the body was then allocated INTO THE
+// SAME MEMORY: `wstore(body, 2, caps + 1)` wrote a self-reference and the
+// closure's capture array read back whatever reused the block.  SILENT, and at
+// DEFAULT settings (MEASURED: 6000 surviving capturing lambdas answer 19709031
+// on this arm against the val arm's 18003000).
+//
+// THE ROOT IS `withroots`, i.e. the mechanism this file already uses for
+// exactly this shape (`Rt.cons` roots its two Values across its one
+// allocation), and it costs no malloc.  A `rootPushPtr` dance would need a
+// C-heap slot to point at, i.e. a malloc/free pair on every closure creation —
+// the hottest allocation this arm has.  What is rooted is `mkval(10, caps)`,
+// the capture block AS A VALUE: the scavenge relocates a `...001` word and
+// re-tags it in place (`Rt.gcScavValue`'s word arm), so `vecbody(capsV)` after
+// the block IS the moved body.  NOTE THE RE-READ IS LOAD-BEARING — the whole
+// point of a root is that the address may CHANGE, so the old `caps` word is
+// dead from the moment the second allocation can collect.
+defun Rt.closure(desc : val, capBase : val, cnt : val) -> val {
+  word cntW = payload(cnt, 0);
+  val capsV = mkval(10, vecbody(call Rt.allocKind(mknum(10), mknum(cntW))));
+  return withroots [capsV] {
+    call Rt.closureFill(mknum(vecbody(capsV)), capBase, mknum(cntW));
+    word descW = payload(desc, 0);
+    word arityW = wload(descW, 1);
+    word body = vecbody(call Rt.allocKind(mknum(6), mknum(4)));
+    word caps = vecbody(capsV);
+    wstore(body, 0, descW);
+    wstore(body, 1, arityW);
+    wstore(body, 2, caps + 1);
+    wstore(body, 3, cntW);
+    return mkval(6, body);
+  };
+}
+// <<< QBE_WORDVAL-ONLY
 
 defun Rt.closureFill(data : val, capBase : val, idx : val) -> val {
   word dataW = payload(data, 0);
@@ -6896,9 +7199,23 @@ defun Rt.closureFill(data : val, capBase : val, idx : val) -> val {
 // payload32, i.e. the low half, and a top-level defun's ncaps is 0.
 defun Rt.globalClosure(desc : word) -> val {
   word cache = wload(desc, 2);
+  // >>> QBE_VAL-ONLY
   if (cache != 0) {
     return vecload(cache, 0);
   }
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // THE CACHE HOLDS THE BODY, NOT A CELL (perf word-arm-closures).  On the val
+  // arm `cache` is the address of a 40-byte Value, so the hit is a vecload; here
+  // it is the closure's BODY address (see the store below), so the hit rebuilds
+  // the Value from it with the same `mkval(6, body)` the miss path returns.  A
+  // `vecload(cache, 0)` left here would answer the descriptor address — body
+  // word 0 — as the closure.
+  if (cache != 0) {
+    return mkval(6, cache);
+  }
+  // <<< QBE_WORDVAL-ONLY
+  // >>> QBE_VAL-ONLY
   word slot = rawcall malloc(40);
   wstore(slot, 0, 6);
   wstore(slot, 1, desc);
@@ -6907,6 +7224,55 @@ defun Rt.globalClosure(desc : word) -> val {
   wstore(slot, 4, 0);
   wstore(desc, 2, slot);
   return vecload(slot, 0);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // THE WORD-ARM TWIN (perf word-arm-area3rt).  The val arm's slot is a 40-byte
+  // Value in C memory; here the cell is a 2-word HEADER plus a 4-word BODY, and
+  // `slot` is the malloc'd BASE — the header sits at `-2`/`-1` words off the
+  // body, which is the convention every seat and reader already uses (Rt.boot's
+  // streams do the same for the same reason: this block is C-heap, outside
+  // [heapStart, cursor), so the collector's range tests treat it as "not mine").
+  //
+  // THE FOUR BODY WORDS ARE THE CLOSURE'S FOUR FIELDS, and body word 2 holds the
+  // capture array TAGGED — 1 here, i.e. the tag alone, since a global closure
+  // has no captures and `payload(f, 2) - 1` must be 0 so the missing-env die
+  // keeps its meaning.
+  //
+  // THE HEADER SITS AT THE BLOCK'S FIRST TWO WORDS AND THE BODY AT THE THIRD
+  // (perf word-arm-closures, MEASURED).  This read `wstore(slot, -2, ...)` /
+  // `wstore(slot, -1, ...)` with the four fields at `slot + 0..3` and the body
+  // at `slot + 1` — i.e. the header was written EIGHT BYTES BEFORE the body
+  // while every reader (`wordKind`, `wordPayloadWord`) looks at `body - 16` and
+  // `body - 8`, so the kind read landed on the COUNT word and answered KIND
+  // CODE 0 ("this object is not a word-arm block").  It also wrote 16 bytes
+  // BELOW the malloc'd block, i.e. into the allocator's own chunk header.  The
+  // offset is now stated once: `slot` is the base, the header is `slot + 0` /
+  // `slot + 1`, the four fields are `slot + 2 .. slot + 5`, and the body is
+  // `slot + 16` bytes in — the same `[kind | count | fields]` shape the
+  // allocator writes, so a reader cannot tell this block from a GC one by
+  // layout (only by range, which is the point).
+  word slot = rawcall malloc(48);
+  wstore(slot, 0, payload(call Rt.kindHdr(mknum(6), mknum(5)), 0));
+  wstore(slot, 1, 4);
+  wstore(slot, 2, desc);
+  wstore(slot, 3, wload(desc, 1));
+  wstore(slot, 4, 1);
+  wstore(slot, 5, 0);
+  wstore(desc, 2, slot + 16);
+  // THE VALUE IS A HEAP OBJECT, NOT A NUMBER (perf word-arm-closures, MEASURED).
+  // This line read `return mknum(slot + 1)` and that is a FIXNUM-SHAPED word:
+  // `mknum` shifts the pointer up into the tag's free bits, so the low three
+  // bits are 000 and every reader of a closure — `tagis(f, 6)`, `payload(f, 0)`,
+  // `payload32(f, 1)` — takes the fixnum arm and REFUSES ("i32 field read on a
+  // word that is not a heap object").  The cell's two sibling twins
+  // (`Rt.closure`, `Rt.applyPartGo`) already answer `mkval(6, body)`; this one
+  // is the C-heap special case and the C-heap-ness is about the block never
+  // being MOVED (it is outside [heapStart, cursor), so the collector's range
+  // tests treat it as "not mine"), not about how the Value is tagged.  The
+  // defect was invisible until this unit: nothing on the word arm could hold a
+  // first-class closure, so the twin was correct-by-unexecuted.
+  return mkval(6, slot + 16);
+  // <<< QBE_WORDVAL-ONLY
 }
 
 defun Rt.bytesBuild(s : val, i : val, acc : val) -> val {
@@ -7101,7 +7467,7 @@ defun Rt.epCmd(e : val, stN : val, cAddrN : val) -> val {
       return mknum(0);
     };
     if (mkbool(payload(rgo, 0) < 0)) { return mknum(-1); }
-    val subState = mkbool(tagis(subv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(payload(subv, 0), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(payload(subv, 0), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(payload(subv, 0), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(payload(subv, 0), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
+    val subState = mkbool(tagis(subv, 4) == 0) ? mknum(2) : (mkbool(tagis(vecload(vecbody(subv), 0), 2) == 0) ? mknum(2) : (call Rt.epSymIs(vecload(vecbody(subv), 0), mknum(cbufW), mknum(0)) ? (mkbool(tagis(vecload(vecbody(subv), 1), 5) != 0) ? mknum(0) : (mkbool(tagis(vecload(vecbody(subv), 1), 4) != 0) ? mknum(1) : mknum(2))) : mknum(2)));
     if (mkbool(payload(subState, 0) == 2)) {
       val _u48 = if (mkbool([*CmdState](payload(cAddrN, 0))->subprog != 0)) {
         return call Rt.epFreeChains(mknum([*CmdState](payload(cAddrN, 0))->subprog), mknum([*Prog]([*CmdState](payload(cAddrN, 0))->subprog)->chains), mknum(0));
@@ -7713,137 +8079,120 @@ defun Rt.main(argc : word, argv : word) -> word {
   word fslot = rawcall malloc(8);
   word modelslot = rawcall malloc(40);
   word d0 = if (mkbool(arity == 0)) {
-    word r0 = aggcall ret rawsym("rt_call0")(code, 0);
-    word res0 = aggcall val rawsym("q_Rt_x2ebounce")(r0);
-    wstore(fslot, 0, res0);
+    word r0 = aggcall val rawsym("rt_call0")(code, 0);
+    wstore(fslot, 0, r0);
     return 0;
   } else {
     return 0;
   };
   word d1 = if (mkbool(arity == 1)) {
-    word r1 = aggcall ret rawsym("rt_call1")(code, 0, abuf);
-    word res1 = aggcall val rawsym("q_Rt_x2ebounce")(r1);
-    wstore(fslot, 0, res1);
+    word r1 = aggcall val rawsym("rt_call1")(code, 0, abuf);
+    wstore(fslot, 0, r1);
     return 0;
   } else {
     return 0;
   };
   word d2 = if (mkbool(arity == 2)) {
-    word r2 = aggcall ret rawsym("rt_call2")(code, 0, abuf, a1);
-    word res2 = aggcall val rawsym("q_Rt_x2ebounce")(r2);
-    wstore(fslot, 0, res2);
+    word r2 = aggcall val rawsym("rt_call2")(code, 0, abuf, a1);
+    wstore(fslot, 0, r2);
     return 0;
   } else {
     return 0;
   };
   word d3 = if (mkbool(arity == 3)) {
-    word r3 = aggcall ret rawsym("rt_call3")(code, 0, abuf, a1, a2);
-    word res3 = aggcall val rawsym("q_Rt_x2ebounce")(r3);
-    wstore(fslot, 0, res3);
+    word r3 = aggcall val rawsym("rt_call3")(code, 0, abuf, a1, a2);
+    wstore(fslot, 0, r3);
     return 0;
   } else {
     return 0;
   };
   word d4 = if (mkbool(arity == 4)) {
-    word r4 = aggcall ret rawsym("rt_call4")(code, 0, abuf, a1, a2, a3);
-    word res4 = aggcall val rawsym("q_Rt_x2ebounce")(r4);
-    wstore(fslot, 0, res4);
+    word r4 = aggcall val rawsym("rt_call4")(code, 0, abuf, a1, a2, a3);
+    wstore(fslot, 0, r4);
     return 0;
   } else {
     return 0;
   };
   word d5 = if (mkbool(arity == 5)) {
-    word r5 = aggcall ret rawsym("rt_call5")(code, 0, abuf, a1, a2, a3, a4);
-    word res5 = aggcall val rawsym("q_Rt_x2ebounce")(r5);
-    wstore(fslot, 0, res5);
+    word r5 = aggcall val rawsym("rt_call5")(code, 0, abuf, a1, a2, a3, a4);
+    wstore(fslot, 0, r5);
     return 0;
   } else {
     return 0;
   };
   word d6 = if (mkbool(arity == 6)) {
-    word r6 = aggcall ret rawsym("rt_call6")(code, 0, abuf, a1, a2, a3, a4, a5);
-    word res6 = aggcall val rawsym("q_Rt_x2ebounce")(r6);
-    wstore(fslot, 0, res6);
+    word r6 = aggcall val rawsym("rt_call6")(code, 0, abuf, a1, a2, a3, a4, a5);
+    wstore(fslot, 0, r6);
     return 0;
   } else {
     return 0;
   };
   word d7 = if (mkbool(arity == 7)) {
-    word r7 = aggcall ret rawsym("rt_call7")(code, 0, abuf, a1, a2, a3, a4, a5, a6);
-    word res7 = aggcall val rawsym("q_Rt_x2ebounce")(r7);
-    wstore(fslot, 0, res7);
+    word r7 = aggcall val rawsym("rt_call7")(code, 0, abuf, a1, a2, a3, a4, a5, a6);
+    wstore(fslot, 0, r7);
     return 0;
   } else {
     return 0;
   };
   word d8 = if (mkbool(arity == 8)) {
-    word r8 = aggcall ret rawsym("rt_call8")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7);
-    word res8 = aggcall val rawsym("q_Rt_x2ebounce")(r8);
-    wstore(fslot, 0, res8);
+    word r8 = aggcall val rawsym("rt_call8")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7);
+    wstore(fslot, 0, r8);
     return 0;
   } else {
     return 0;
   };
   word d9 = if (mkbool(arity == 9)) {
-    word r9 = aggcall ret rawsym("rt_call9")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8);
-    word res9 = aggcall val rawsym("q_Rt_x2ebounce")(r9);
-    wstore(fslot, 0, res9);
+    word r9 = aggcall val rawsym("rt_call9")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8);
+    wstore(fslot, 0, r9);
     return 0;
   } else {
     return 0;
   };
   word d10 = if (mkbool(arity == 10)) {
-    word r10 = aggcall ret rawsym("rt_call10")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9);
-    word res10 = aggcall val rawsym("q_Rt_x2ebounce")(r10);
-    wstore(fslot, 0, res10);
+    word r10 = aggcall val rawsym("rt_call10")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+    wstore(fslot, 0, r10);
     return 0;
   } else {
     return 0;
   };
   word d11 = if (mkbool(arity == 11)) {
-    word r11 = aggcall ret rawsym("rt_call11")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
-    word res11 = aggcall val rawsym("q_Rt_x2ebounce")(r11);
-    wstore(fslot, 0, res11);
+    word r11 = aggcall val rawsym("rt_call11")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
+    wstore(fslot, 0, r11);
     return 0;
   } else {
     return 0;
   };
   word d12 = if (mkbool(arity == 12)) {
-    word r12 = aggcall ret rawsym("rt_call12")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
-    word res12 = aggcall val rawsym("q_Rt_x2ebounce")(r12);
-    wstore(fslot, 0, res12);
+    word r12 = aggcall val rawsym("rt_call12")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
+    wstore(fslot, 0, r12);
     return 0;
   } else {
     return 0;
   };
   word d13 = if (mkbool(arity == 13)) {
-    word r13 = aggcall ret rawsym("rt_call13")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12);
-    word res13 = aggcall val rawsym("q_Rt_x2ebounce")(r13);
-    wstore(fslot, 0, res13);
+    word r13 = aggcall val rawsym("rt_call13")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12);
+    wstore(fslot, 0, r13);
     return 0;
   } else {
     return 0;
   };
   word d14 = if (mkbool(arity == 14)) {
-    word r14 = aggcall ret rawsym("rt_call14")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13);
-    word res14 = aggcall val rawsym("q_Rt_x2ebounce")(r14);
-    wstore(fslot, 0, res14);
+    word r14 = aggcall val rawsym("rt_call14")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13);
+    wstore(fslot, 0, r14);
     return 0;
   } else {
     return 0;
   };
   word d15 = if (mkbool(arity == 15)) {
-    word r15 = aggcall ret rawsym("rt_call15")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
-    word res15 = aggcall val rawsym("q_Rt_x2ebounce")(r15);
-    wstore(fslot, 0, res15);
+    word r15 = aggcall val rawsym("rt_call15")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14);
+    wstore(fslot, 0, r15);
     return 0;
   } else {
     return 0;
   };
   word d16 = if (mkbool(arity == 16)) {
-    word r16 = aggcall ret rawsym("rt_call16")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15);
-    word res16 = aggcall val rawsym("q_Rt_x2ebounce")(r16);
-    wstore(fslot, 0, res16);
+    word r16 = aggcall val rawsym("rt_call16")(code, 0, abuf, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15);
+    wstore(fslot, 0, r16);
     return 0;
   } else {
     return 0;
@@ -7879,18 +8228,24 @@ defun Rt.main(argc : word, argv : word) -> word {
 // ===== the stage-6 B1 apply family (VERBATIM rt.zig rt_apply / rt_apply_tail
 // / applyGo, rt.zig:793-927).  Rt.apply / Rt.apply-tail are rawAbi WRAPPERS
 // (3 word params — fslot *Value, args [*]Value, nargs) that root the caller's
-// args array, then hand off to a :val LOOP (Rt.applyGo / Rt.applyTailGo —
-// `recur` needs the val self-tail loop, which the rawAbi tail rejects).  The
-// loop's current closure lives in its OWN (rooted) frame as a :val PARAM, not
-// in the malloc'd state block — the over arm re-binds it via `recur(.., res)`
-// so no raw store ever writes a Value into a non-GC buffer.  The state block
-// carries the raw words — `struct ApplyState` (args/nargs/live/env) is the ONE
-// table for them, above.  The PARTIAL arm's env dance (rootPushPtr + the
-// RE-READ-AFTER-ALLOC, the cStrFill lesson)
-// is what keeps the applied-args/captures copy pointing at the POST-scavenge
-// env array.  The wrapper's `f` copy (vecload(fslot,0)) is NOT rooted: sound
-// only because no collect can run between the vecload and applyGo/applyTailGo's
-// param blit (scavenges are alloc-site-triggered; malloc(32)/
+// args array, then hand off to a :val LOOP.  The state block carries the raw
+// words — `struct ApplyState` (args/nargs/live/env) is the ONE table for them,
+// above.  The PARTIAL arms' env dance (rootPushPtr + the RE-READ-AFTER-ALLOC,
+// the cStrFill lesson) is what keeps the applied-args/captures copy pointing at
+// the POST-scavenge env array.
+//
+// U3a SPLIT THE TWO LOOPS' CONVENTIONS, deliberately, and the reason is the
+// tcall: `Rt.applyGo` is reached only by an ordinary `call` from Rt.apply, so
+// it keeps `(state : val, f : val)` — the loop-carried closure lives in its
+// OWN rooted frame slot, re-bound by `recur(.., res)`, and no raw store ever
+// writes a Value into a non-GC buffer.  `Rt.applyTailGo` is reached by a
+// `tcall`, which cannot pass a val at all (a val crosses as a pointer into the
+// caller's frame, and the tcall tears that frame down), so it takes
+// `(state : word, fslot : word)` and carries its closure in cell 0 of the
+// STAGED block — which Rt.apply-tail's kind-2 registration scans.  Same
+// guarantee, different seat.  Rt.apply's own `f` copy (vecload(fslot,0)) is
+// NOT rooted: sound only because no collect can run between the vecload and
+// applyGo's param blit (scavenges are alloc-site-triggered; malloc(32)/
 // Rt.rootPushValueArray/frame-pool pop are collect-free), after which `f`
 // is a ROOTED frame param whose interior pointers the collector rewrites in
 // place.
@@ -7906,24 +8261,179 @@ defun Rt.apply(fslot : word, args : word, nargs : word) -> val {
   rawcall free(state);
   return r;
 }
+// Rt.stage-apply(fslot, argblock, nargs) -> buf — THE F-SITE STAGING SEAT
+// (U2 of apply-chain-design.md).  F's generic tail site is now a REAL `tcall`
+// into Rt.apply-tail, so F's pooled frame is LEFT before the jump: a pointer
+// into it would hand the callee its own zeroing (the Rt.stage-tail argument,
+// verbatim).  This seat copies the closure CELL and the caller's contiguous
+// arg block into ONE block shaped as
+//
+//     buf + 0    the closure Value (fslot's 5 words)
+//     buf + 40   arg 0 ... buf + 40*nargs   arg nargs-1
+//
+// which is exactly what Rt.apply-tail's registration scans (`live = nargs + 1`
+// from base `buf`) and what the loop reads (`args = buf + 40`).  The caller
+// passes `(buf, buf + 40, nargs)` — the existing 3-word convention with
+// `fslot = buf`.
+//
+// MALLOC, ALWAYS — NEVER THE GC (allocvec), NEVER THE SHARED tsbuf.  All three
+// are load-bearing, and the first one is the fix for a MEASURED corruption
+// (handoff-apply-chain-u2-review BLOCKER 1), so read this before changing it.
+//
+//   * NOT allocvec: a GC block here is YOUNG (the nursery is on by default) and
+//     the kind-2 registration that roots it NEVER PROMOTES IT — gcScavRoots
+//     walks the CELLS via gcScavValueArray and never calls gcScavPtr on the
+//     base — while gcScavenge resets youngCursor, so the block's storage is
+//     reusable the moment a scavenge ends.  The block then has to survive
+//     UN-LAPPED, and that window is NOT small: the over-applied arm runs
+//     `rt_call2r` — ARBITRARY USER CODE — and `recur`s, and the next iteration
+//     reads `sp->args`, an INTERIOR pointer into this block.  So the window
+//     between staging and the last read contains the applied callee's whole
+//     body, whose allocation volume is USER-CONTROLLED.  MEASURED (the
+//     lapprobe row): an arity-1 closure applied to 2 args whose body builds a
+//     ~12 MB list corrupted the root scan at the DEFAULT nursery —
+//     "qbe-rt: midgc: unknown value tag in mark walk" — and the same code with
+//     ONLY the site reverted to the pre-U2 shape prints the right answer.
+//     Under the old path (young off, or a block bigger than the nursery) the
+//     same seat is sweepable while live for the same reason: kind-2 marking
+//     never marks the block header (gcScanValueArray marks the first CELL).
+//     A malloc'd block is neither young nor GC-owned, so BOTH regimes are
+//     closed by construction — the collector never moves it and never frees it.
+//   * The kind-2 registration still does its real job: it rewrites the CELLS'
+//     payload pointers IN PLACE across a scavenge, which is what keeps the
+//     staged Values current.  Immovability is what makes in-place rewriting
+//     sufficient.
+//   * NEVER tsbuf: the static buffer is sound for the STATIC tail path only
+//     because at most ONE `.tail` is in flight there.  An apply CHAIN can hold
+//     two at once — an intermediate static tail hop inside an OVER-APPLIED
+//     chain would reuse tsbuf and CLOBBER the chain's staged args, a silent
+//     wrong answer that does not exist today.  This seat is the ONE place that
+//     hazard can be introduced; do not add a tsbuf arm "for speed".
+//
+// OWNERSHIP: the block is the CALLER's frame's replacement, and U3a moved the
+// free into Rt.applyTailGo's exits, where the state's free already goes — the
+// saturated arm `tcall`s and never returns, so a free here would never run.
+// The 8 bytes BEFORE `buf` hold the provenance canary (see the guard).
+defun Rt.stage-apply(fslot : word, argblock : word, nargs : word) -> word {
+  // >>> QBE_VAL-ONLY
+  word blk = rawcall malloc(8 + (nargs + 1) * 40);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // THE STAGED BLOCK'S STRIDE IS THE VALUE STRIDE (perf word-arm-closures).
+  // The block's shape is the same on both arms — `[closure, arg0 .. argN]` —
+  // and only the CELL WIDTH moves: one word per cell, so one word for the
+  // closure cell and `nargs` for the args.  The 8-byte canary is a RAW word
+  // below the block and does not move.  A block still sized `* 40` here would
+  // over-allocate and then copy 5 words per cell, i.e. read 32 bytes past the
+  // caller's arg block and write garbage into the staged one — the loud
+  // `Rt.apply-tail` shape guard is what catches the mismatch, which is why it
+  // is twinned in the same commit.
+  word blk = rawcall malloc(8 + (nargs + 1) * 8);
+  // <<< QBE_WORDVAL-ONLY
+  // THE PROVENANCE CANARY (U3a): 0x56414c4c, "VALL" — the 8 bytes BEFORE the
+  // block Rt.apply-tail is handed.  See the guard there for what it proves and
+  // why `args == fslot + 40` could not.
+  wstore(blk, 0, 1447119948);
+  word buf = blk + 8;
+  // >>> QBE_VAL-ONLY
+  call Rt.copyWords(buf, fslot, 5);
+  call Rt.copyWords(buf + 40, argblock, nargs * 5);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  call Rt.copyWords(buf, fslot, 1);
+  call Rt.copyWords(buf + 8, argblock, nargs);
+  // <<< QBE_WORDVAL-ONLY
+  return buf;
+}
 defun Rt.apply-tail(fslot : word, args : word, nargs : word) -> val {
+  // THE CONVENTION, ENFORCED (review NICE-TO-HAVE 3) — and note it is a
+  // DIFFERENT convention from Rt.apply's under the same 3-word signature:
+  // Rt.apply registers (base = the caller's args range, live = nargs), while
+  // THIS defun registers (base = the staged block, live = nargs + 1, cell 0 =
+  // the closure).  The range is DERIVED from the block base and never from the
+  // `args` word, and a caller that hands us anything but `fslot + 40` is a
+  // LOUD error naming the shape — because the silent failure of getting it
+  // wrong is a rooting gap (a range of `nargs` from the block would drop the
+  // LAST ARG from the scan), not a crash.
+  // >>> QBE_VAL-ONLY
+  if (args != fslot + 40) {
+    call Rt.die(rawstr("qbe-rt: Rt.apply-tail: args must be the staged block + 40 (Rt.stage-apply shape) - the pre-U2 (fslot, frame-args) convention is gone"));
+    return mknil;
+  }
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // THE SHAPE GUARD'S CELL WIDTH IS THE VALUE STRIDE (perf word-arm-closures).
+  // `fslot` is `Rt.stage-apply`'s block, whose cells are one word here, so the
+  // args range starts at `fslot + 8` — the caller (Lower's `rtApply`) derives
+  // the same address from `s.layout.valSizeBytes`, and a guard left at `+ 40`
+  // would refuse a well-formed call, which is how this was found.
+  if (args != fslot + 8) {
+    call Rt.die(rawstr("qbe-rt: Rt.apply-tail: args must be the staged block + 8 (Rt.stage-apply's word-arm shape) - the pre-U2 (fslot, frame-args) convention is gone"));
+    return mknil;
+  }
+  // <<< QBE_WORDVAL-ONLY
+  // THE PROVENANCE GUARD (U3a review trap 3).  `args == fslot + 40` is TOTAL
+  // for what a CALLEE can see — it pins the SHAPE — but it says nothing about
+  // where `fslot` came from: a caller that passed `buf` of a GC block with the
+  // same shape would satisfy it, and then `free(fslot)` in Rt.applyTailGo
+  // would be C-heap corruption (freeing a nursery pointer) instead of a loud
+  // error.  Only Rt.stage-apply mallocs that block, and it writes 0x56414c4c
+  // ("VALL") in the 8 bytes immediately below the base.  This is the ONE place
+  // the provenance is checkable: after this defun the pointer is just a word.
+  if (wload(fslot - 8, 0) != 1447119948) {
+    call Rt.die(rawstr("qbe-rt: Rt.apply-tail: fslot is not a Rt.stage-apply block (its 8-byte canary is missing) - only that seat's malloc'd block may be freed here"));
+    return mknil;
+  }
   *ApplyState state = rawcall malloc(32);
-  state->args = args;
+  // >>> QBE_VAL-ONLY
+  state->args = fslot + 40;
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // The args range starts one CELL past the block base, and a cell is one word
+  // here — the same address the shape guard above compares against.
+  state->args = fslot + 8;
+  // <<< QBE_WORDVAL-ONLY
   state->nargs = nargs;
-  state->live = nargs;
-  call Rt.rootPushValueArray(args, [word](state) + 16);
-  val f = vecload(fslot, 0);
-  val r = call Rt.applyTailGo(mknum(state), f);
-  call Rt.rootPop();
-  rawcall free(state);
-  return r;
+  // U2: the registration roots the WHOLE staged block — cell 0 (the closure)
+  // as well as the args — because the base is now the block, not the args
+  // range inside the caller's frame.  `live` is a superset of what any arm
+  // reads (the over-applied arm rebinds args/nargs but never this word), which
+  // the live-is-a-superset rule (ApplyState slot 2) covers.
+  //
+  // U3a: this registration is ALSO the reason Rt.applyTailGo may be a
+  // frame-free rawAbi body.  The loop carries the current closure in cell 0
+  // (the over-applied arm re-writes it there), and cell 0 is inside this
+  // range — so the collector rewrites it in place across the hops' safepoints
+  // without any frame slot of the loop's own.
+  state->live = nargs + 1;
+  call Rt.rootPushValueArray(fslot, [word](state) + 16);
+  // THE HANDOFF, and it is a TAIL CALL (U3a).  Two consequences, both
+  // load-bearing: (1) this defun's machine frame is REUSED by the loop, so a
+  // hop costs no stack; (2) NOTHING below this line can run, which is why the
+  // exit protocol (the pops and both frees) lives in the loop's arms.
+  //
+  // `[word](state)` and `fslot` are both WORDS: J16 refuses a `val` parameter
+  // on a TailDefun, because a val crosses a tcall as a pointer into the
+  // caller's frame and the tcall tears that frame down.  The loop re-reads the
+  // closure from `fslot` instead (cell 0 of the block registered above).
+  tailcall val Rt.applyTailGo([word](state), fslot);
 }
 defun Rt.applyGo(state : val, f : val) -> val {
   *ApplyState sp = payload(state, 0);
   word code = payload(f, 0);
   word fn = wload(code, 0);
   word rem = payload32(f, 1);
+  // >>> QBE_VAL-ONLY
   word env = payload(f, 2);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // UNTAG THE CAPTURE ARRAY (perf word-arm-area3rt): a code-6 body is SCANNED,
+  // so the closure stores its capture block TAGGED (`caps + 1`) and every
+  // reader of field 2 strips the tag here.  A closure with no captures stores
+  // the tag alone, so `env == 0` keeps meaning "no env" and the dies below keep
+  // firing.
+  word env = payload(f, 2) - 1;
+  // <<< QBE_WORDVAL-ONLY
   word args = sp->args;
   word nargs = sp->nargs;
   if (tagis(f, 6) == 0) {
@@ -7943,31 +8453,79 @@ defun Rt.applyGo(state : val, f : val) -> val {
       } else {
         return mknil;
       };
-      word r = aggcall ret rawsym("rt_call2r")(fn, env, napp, args, rem);
-      word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-      return vecload(v, 0);
+      word r = aggcall val rawsym("rt_call2r")(fn, env, napp, args, rem);
+      return vecload(r, 0);
     } else {
       if (rem > nargs) {
         sp->env = env;
         return call Rt.applyPartGo(state, f);
       } else {
-        word r = aggcall ret rawsym("rt_call2r")(fn, env, napp, args, rem);
-        word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-        val res = vecload(v, 0);
+        word r = aggcall val rawsym("rt_call2r")(fn, env, napp, args, rem);
+        val res = vecload(r, 0);
+        // >>> QBE_VAL-ONLY
         sp->args = args + rem * 40;
+        // <<< QBE_VAL-ONLY
+        // >>> QBE_WORDVAL-ONLY
+        // THE CONSUMED-ARGS ADVANCE IS A CELL COUNT TIMES THE VALUE STRIDE
+        // (perf word-arm-closures): `args` walks the caller's contiguous arg
+        // block, whose cells are one word on this arm.  Left at 40 the loop
+        // would step FIVE CELLS PER CONSUMED ARG and hand `rt_call2r` a
+        // pointer past the end of the block.
+        sp->args = args + rem * 8;
+        // <<< QBE_WORDVAL-ONLY
         sp->nargs = nargs - rem;
         recur(mknum(sp), res);
       }
     }
   }
 }
-defun Rt.applyTailGo(state : val, f : val) -> val {
-  *ApplyState sp = payload(state, 0);
+defun Rt.applyTailGo(state : word, fslot : word) -> val {
+  // ================= THE GENERIC-APPLY TAIL LOOP (U3a) =================
+  // This is where the apply chain stops retaining frames.  It is entered by
+  // `Rt.apply-tail`'s `tcall`, and its SATURATED arm `tcall`s `rt_call2r`,
+  // which `tcall`s the closure's code — so a hop reuses ONE machine frame and
+  // the stack is flat over an unbounded chain (the clostail large-n row is the
+  // instrument; it used to pass only because the `.tail` trampoline chased the
+  // requests for us).
+  //
+  // WORD PARAMETERS, and why they are not a style choice: a `tcall` cannot
+  // pass a `val`.  A val crosses as a pointer to the CALLER's 40-byte storage
+  // and the tcall tears the caller's frame down, so J16 refuses a val
+  // parameter on a TailDefun outright (Mid.RtLang.Check).  `fslot` is
+  // therefore the ADDRESS of the cell holding the current closure, and the
+  // vecload that used to happen in Rt.apply-tail happens HERE, per iteration.
+  //
+  // THE LOOP-CARRIED CLOSURE IS ROOTED — by Rt.apply-tail's registration, not
+  // by a frame slot of ours.  `fslot` is the base of the staged block and the
+  // registration covers `nargs + 1` cells from it, so cell 0 (which the
+  // over-applied arm RE-WRITES with the next closure) is scanned and rewritten
+  // in place across every hop's safepoints.  That is what makes a FRAME-FREE
+  // rawAbi body sound here, and it is the one fact a future editor must not
+  // break: `Rt.apply-tail` must keep registering from the block BASE, not from
+  // `args`.
+  //
+  // `val f` below is a per-iteration READ of that cell, never live across a
+  // safepoint: the saturated arm allocates (the arg copy) and then never
+  // touches `f`; the over arm's `rt_call2r` hop ends in a SELF `tcall` that
+  // re-derives the closure from cell 0 on the next iteration (the next closure
+  // is written there by `copyWords`, below); and the partial arm passes it to
+  // Rt.applyPartGo BEFORE that call allocates.
+  *ApplyState sp = state;
+  val f = vecload(fslot, 0);
   word code = payload(f, 0);
   word fn = wload(code, 0);
   word rem = payload32(f, 1);
+  // >>> QBE_VAL-ONLY
   word env = payload(f, 2);
-  word envlen = payload32(f, 3);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // UNTAG THE CAPTURE ARRAY (perf word-arm-area3rt): a code-6 body is SCANNED,
+  // so the closure stores its capture block TAGGED (`caps + 1`) and every
+  // reader of field 2 strips the tag here.  A closure with no captures stores
+  // the tag alone, so `env == 0` keeps meaning "no env" and the dies below keep
+  // firing.
+  word env = payload(f, 2) - 1;
+  // <<< QBE_WORDVAL-ONLY
   word args = sp->args;
   word nargs = sp->nargs;
   if (tagis(f, 6) == 0) {
@@ -7976,22 +8534,29 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
   } else {
     word arity = wload(code, 1) & 4294967295;
     word napp = arity - rem;
-    word capslen = envlen - napp;
     if (rem == nargs) {
-      // THE .tail NO-COLLECT INVARIANT (rt.zig:956-973, stated HERE at the
-      // Mid surface too): the .tail args live in the fresh `buf` allocvec
-      // array below, which is UNROOTED by convention.  Sound only because the
-      // callee prologue blit reads `buf` EXACTLY ONCE and NO collection runs
-      // between this allocvec and that blit — the tail from here is
-      // allocvec -> wstores (malloc, libc) -> return mknum(retbuf) -> the
-      // Lower @ret blit -> frame-leave (pool push, no collect) -> rt_bounce ->
-      // rt_callN (the generated bridge, prologue blit FIRST).  A future editor
-      // adding a GC alloc AFTER this allocvec (or in the Lower @ret block)
-      // breaks it SILENTLY — keep this arm alloc-free after the allocvec.
-      word total = arity + capslen;
+      // ================= THE SATURATED ARM: THE CHAIN ENDS HERE =============
+      // The exit protocol is spelled HERE, in Mid source, in exactly this LIFO
+      // order, because no Lower-side automatic sequence could express it:
+      //
+      //     dance-pop -> args-pop -> free(state) -> free(block) -> tailcall
+      //
+      // WHY THE COPY: the staged block is freed BEFORE the jump (it must be —
+      // nothing runs after a tcall), so the args `rt_call2r` hands the callee
+      // cannot live in it.  They are copied into a fresh GC array first.  That
+      // array is UNROOTED by convention, and the window to the callee's
+      // prologue blit must stay collection-free: allocvec -> copyWords
+      // (malloc, libc) -> rootPop (no collect) -> free, free (libc) -> the
+      // tcall's teardown -> rt_call2r's arity block (pointer arithmetic and a
+      // jmp/call) -> the callee's entry blit.  A future editor adding a GC
+      // alloc anywhere after this allocvec breaks it SILENTLY.
+      //
+      // WHY THE DANCE: `env` points into a GC block and the allocvec may
+      // scavenge it, so it is staged in `sp->env` (rooted, kind 0) and RE-READ
+      // afterwards — the cStrFill lesson, unchanged from the pre-U3a arm.
       sp->env = env;
       call Rt.rootPushPtr([word](sp) + 24);
-      word buf = allocvec(total);
+      word abuf = allocvec(rem);
       word env2 = sp->env;
       val chk = if (napp > 0) {
         if (env2 == 0) {
@@ -8003,51 +8568,74 @@ defun Rt.applyTailGo(state : val, f : val) -> val {
       } else {
         return mknil;
       };
-      call Rt.copyWords(buf, env2, napp * 5);
-      call Rt.copyWords(buf + napp * 40, args, rem * 5);
-      call Rt.copyWords(buf + arity * 40, env2 + napp * 40, capslen * 5);
+      // >>> QBE_VAL-ONLY
+      call Rt.copyWords(abuf, args, rem * 5);
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      // ONE WORD PER ARG (perf word-arm-closures): `abuf` is `allocvec(rem)`,
+      // which is a code-10 block of `rem` WORDS here, and the staged block it
+      // copies from has the same cell width.
+      call Rt.copyWords(abuf, args, rem);
+      // <<< QBE_WORDVAL-ONLY
       call Rt.rootPop();
-      word e = payload((capslen > 0) ? mknum(buf + arity * 40) : mknum(0), 0);
-      *Ret retbuf = rawcall malloc(80);
-      wstore(retbuf, 0, 0);
-      wstore(retbuf, 1, 0);
-      wstore(retbuf, 2, 0);
-      wstore(retbuf, 3, 0);
-      wstore(retbuf, 4, 0);
-      retbuf->kind = 1;
-      retbuf->code = fn;
-      retbuf->e = e;
-      retbuf->args = buf;
-      retbuf->arity = arity;
-      return mknum(retbuf);
+      // ...the DANCE-pop above, and the ARGS-pop here.  This second pop is the
+      // one Rt.apply-tail pushed; it must follow the copy (the registration is
+      // what kept the args current across the allocvec) and precede both frees
+      // (the registry is scanned by address, so the block may not be freed
+      // while it is registered).
+      call Rt.rootPop();
+      rawcall free(state);
+      // `fslot - 8`, NOT `fslot`: Rt.stage-apply's malloc'd pointer is the
+      // canary word, and the base it returns is 8 bytes into that allocation
+      // (see the guard at Rt.apply-tail).  Freeing the base would be
+      // `free(): invalid pointer` — the loud half of getting this wrong.
+      rawcall free(fslot - 8);
+      // THE HOP.  `rt_call2r(fn, env2, napp, abuf, rem)`: params 0..napp-1 are
+      // the applied captures (env2), the rest are the copied args — exactly
+      // the two-range convention the bridge exists for, with no interleave
+      // buffer and no malloc per hop.
+      tailcall val rawsym("rt_call2r")(fn, env2, napp, abuf, rem);
     } else {
       if (rem > nargs) {
+        // PARTIAL: the chain ends with a new closure, and this defun RETURNS
+        // it (the @ret block leaves the frame for us — no explicit leave, and
+        // none is possible: this body is frame-free).  Same LIFO order minus
+        // the terminator.
         sp->env = env;
-        val p = call Rt.applyPartGo(state, f);
-        *Ret retbuf = rawcall malloc(80);
-        // the ret cell's `result` is the closure value p WORD-WISE (the
-        // `.done` layout's five words): kind 6, then mkval's four payload
-        // words at +1 - code, the 32-bit remaining arity, env, the 32-bit
-        // cell count.  The offsets are OFFSET BY ONE from mkval's argument
-        // order, so they are spelled out rather than looped.
-        wstore(retbuf, 0, 6);
-        wstore(retbuf, 1, payload(p, 0));
-        wstore(retbuf, 2, payload32(p, 1));
-        wstore(retbuf, 3, payload(p, 2));
-        wstore(retbuf, 4, payload32(p, 3));
-        retbuf->kind = 0;
-        retbuf->code = 0;
-        retbuf->e = 0;
-        retbuf->args = 0;
-        retbuf->arity = 0;
-        return mknum(retbuf);
+        val p = call Rt.applyPartGo(mknum(state), f);
+        call Rt.rootPop();
+        rawcall free(state);
+        rawcall free(fslot - 8);
+        return p;
       } else {
-        word r = aggcall ret rawsym("rt_call2r")(fn, env, napp, args, rem);
-        word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-        val res = vecload(v, 0);
+        // OVER-APPLIED: this hop returned a CLOSURE, so the same chain
+        // continues with fewer args — and the continuation is a SELF TAIL CALL,
+        // not a `recur`.  That is forced, not preferred: the loop's parameters
+        // are WORDS (a tcall cannot pass a val), so they live in `l` registers,
+        // and `jmp @body` cannot re-enter with new register values — QBE has no
+        // phi here and `%a0` is defined by the signature.  Nothing needs to
+        // change in the registers anyway: the state block is the same block and
+        // `fslot` is the same cell, so the ENTIRE loop state is in memory.  The
+        // next closure is written into cell 0 of the staged block (registered
+        // by Rt.apply-tail, see the header) and the re-entry reads it back.
+        //
+        // NOTHING IS FREED HERE — the state and the staged block span the whole
+        // chain by design; only the two terminating arms free them.
+        word r = aggcall val rawsym("rt_call2r")(fn, env, napp, args, rem);
+        // >>> QBE_VAL-ONLY
+        call Rt.copyWords(fslot, r, 5);
         sp->args = args + rem * 40;
+        // <<< QBE_VAL-ONLY
+        // >>> QBE_WORDVAL-ONLY
+        // THE NEXT CLOSURE IS ONE CELL, AND SO IS A CONSUMED ARG (perf
+        // word-arm-closures).  `r` is a `:val`, i.e. a pointer to ONE 8-byte
+        // word here, so cell 0 of the staged block is one word; and the args
+        // advance is the same stride `Rt.applyGo`'s over-applied arm takes.
+        call Rt.copyWords(fslot, r, 1);
+        sp->args = args + rem * 8;
+        // <<< QBE_WORDVAL-ONLY
         sp->nargs = nargs - rem;
-        recur(mknum(sp), res);
+        tailcall val Rt.applyTailGo(state, fslot);
       }
     }
   }
@@ -8093,11 +8681,57 @@ defun Rt.applyPartGo(state : val, f : val) -> val {
   call Rt.rootPushPtr([word](sp) + 24);
   word envv = allocvec(total);
   word env2 = sp->env;
+  // >>> QBE_VAL-ONLY
   call Rt.copyWords(envv, env2, napp * 5);
   call Rt.copyWords(envv + napp * 40, args, nargs * 5);
   call Rt.copyWords(envv + (napp + nargs) * 40, env2 + napp * 40, capslen * 5);
   call Rt.rootPop();
   return mkval(6, code, rem - nargs, envv, total);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // THE INTERLEAVE IS THE SAME THREE RANGES WITH A ONE-WORD CELL (perf
+  // word-arm-closures).  `envv` is `allocvec(total)`, i.e. a code-10 block of
+  // `total` WORDS here, so each range's LENGTH is its cell count (the val
+  // arm's `* 5`) and each range's OFFSET is a cell count times 8 (the val
+  // arm's `* 40`).  A mixed spelling — a word LENGTH with a 40-byte OFFSET —
+  // writes each range over the previous one: the captures would overwrite the
+  // applied args, which the closure then reads as params.
+  call Rt.copyWords(envv, env2, napp);
+  call Rt.copyWords(envv + napp * 8, args, nargs);
+  call Rt.copyWords(envv + (napp + nargs) * 8, env2 + napp * 8, capslen);
+  // THE BODY'S ALLOCATION IS A SAFEPOINT AND `envv` IS A RAW WORD (perf
+  // word-arm-closures FIX, review BLOCKER).  The val arm has NO second
+  // allocation here — `mkval(6, ..)` only writes a 40-byte record — so this
+  // window does not exist on that arm; on this arm `allocKind(6, 4)` can
+  // scavenge, and `envv` was referenced by nothing, so the capture block was
+  // FREED and its memory handed straight to the body: `envv + 1` then named
+  // the body itself.  SILENT, at default settings (MEASURED: 6000 surviving
+  // partials answer 20363304 against the val arm's 18633000).
+  //
+  // THE ROOT IS THE SLOT THIS DEFUN ALREADY PUSHED — `sp->env` — so the two
+  // allocations are rooted the SAME way and there is no second mechanism to
+  // keep in step: the slot is re-pointed at the NEW block (the old captures it
+  // held are dead from here; the copies above are done) and the alloc happens
+  // INSIDE the same rootPushPtr window, whose `rootPop` therefore moves two
+  // lines down.  RE-READING `sp->env` after the alloc is the point: the
+  // scavenge rewrites that word in place, so `envv` itself may be stale.
+  sp->env = envv;
+  word body = vecbody(call Rt.allocKind(mknum(6), mknum(4)));
+  word envv2 = sp->env;
+  call Rt.rootPop();
+  // THE PARTIAL APPLICATION'S CELL (perf word-arm-area3rt): the same four
+  // fields as Rt.closure's twin, with the freshly built capture block TAGGED in
+  // field 2.  THE THREE `copyWords` CALLS ABOVE ARE TWINNED TOO (perf
+  // word-arm-closures): they were the CALL STAGING, which this twin used to
+  // leave to "VR3d" — and a partial application is exactly the shape that
+  // cannot work without them, since the interleave is what puts the applied
+  // captures in front of the applied args.
+  wstore(body, 0, code);
+  wstore(body, 1, rem - nargs);
+  wstore(body, 2, envv2 + 1);
+  wstore(body, 3, total);
+  return mkval(6, body);
+  // <<< QBE_WORDVAL-ONLY
 }
 defun Rt.callArity(disp : val) -> val {
   *Disp dp = payload(disp, 0);
@@ -8106,88 +8740,71 @@ defun Rt.callArity(disp : val) -> val {
   word buf = dp->buf;
   word arity = dp->arity;
   if (mkbool(arity == 0)) {
-    word r = aggcall ret rawsym("rt_call0")(code, caps);
-    word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-    return vecload(v, 0);
+    word r = aggcall val rawsym("rt_call0")(code, caps);
+    return vecload(r, 0);
   } else {
     if (mkbool(arity == 1)) {
-      word r = aggcall ret rawsym("rt_call1")(code, caps, buf);
-      word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-      return vecload(v, 0);
+      word r = aggcall val rawsym("rt_call1")(code, caps, buf);
+      return vecload(r, 0);
     } else {
       if (mkbool(arity == 2)) {
-        word r = aggcall ret rawsym("rt_call2")(code, caps, buf, buf + 40);
-        word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-        return vecload(v, 0);
+        word r = aggcall val rawsym("rt_call2")(code, caps, buf, buf + 40);
+        return vecload(r, 0);
       } else {
         if (mkbool(arity == 3)) {
-          word r = aggcall ret rawsym("rt_call3")(code, caps, buf, buf + 40, buf + 80);
-          word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-          return vecload(v, 0);
+          word r = aggcall val rawsym("rt_call3")(code, caps, buf, buf + 40, buf + 80);
+          return vecload(r, 0);
         } else {
           if (mkbool(arity == 4)) {
-            word r = aggcall ret rawsym("rt_call4")(code, caps, buf, buf + 40, buf + 80, buf + 120);
-            word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-            return vecload(v, 0);
+            word r = aggcall val rawsym("rt_call4")(code, caps, buf, buf + 40, buf + 80, buf + 120);
+            return vecload(r, 0);
           } else {
             if (mkbool(arity == 5)) {
-              word r = aggcall ret rawsym("rt_call5")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160);
-              word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-              return vecload(v, 0);
+              word r = aggcall val rawsym("rt_call5")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160);
+              return vecload(r, 0);
             } else {
               if (mkbool(arity == 6)) {
-                word r = aggcall ret rawsym("rt_call6")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200);
-                word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                return vecload(v, 0);
+                word r = aggcall val rawsym("rt_call6")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200);
+                return vecload(r, 0);
               } else {
                 if (mkbool(arity == 7)) {
-                  word r = aggcall ret rawsym("rt_call7")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240);
-                  word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                  return vecload(v, 0);
+                  word r = aggcall val rawsym("rt_call7")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240);
+                  return vecload(r, 0);
                 } else {
                   if (mkbool(arity == 8)) {
-                    word r = aggcall ret rawsym("rt_call8")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280);
-                    word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                    return vecload(v, 0);
+                    word r = aggcall val rawsym("rt_call8")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280);
+                    return vecload(r, 0);
                   } else {
                     if (mkbool(arity == 9)) {
-                      word r = aggcall ret rawsym("rt_call9")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320);
-                      word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                      return vecload(v, 0);
+                      word r = aggcall val rawsym("rt_call9")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320);
+                      return vecload(r, 0);
                     } else {
                       if (mkbool(arity == 10)) {
-                        word r = aggcall ret rawsym("rt_call10")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360);
-                        word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                        return vecload(v, 0);
+                        word r = aggcall val rawsym("rt_call10")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360);
+                        return vecload(r, 0);
                       } else {
                         if (mkbool(arity == 11)) {
-                          word r = aggcall ret rawsym("rt_call11")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400);
-                          word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                          return vecload(v, 0);
+                          word r = aggcall val rawsym("rt_call11")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400);
+                          return vecload(r, 0);
                         } else {
                           if (mkbool(arity == 12)) {
-                            word r = aggcall ret rawsym("rt_call12")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440);
-                            word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                            return vecload(v, 0);
+                            word r = aggcall val rawsym("rt_call12")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440);
+                            return vecload(r, 0);
                           } else {
                             if (mkbool(arity == 13)) {
-                              word r = aggcall ret rawsym("rt_call13")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480);
-                              word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                              return vecload(v, 0);
+                              word r = aggcall val rawsym("rt_call13")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480);
+                              return vecload(r, 0);
                             } else {
                               if (mkbool(arity == 14)) {
-                                word r = aggcall ret rawsym("rt_call14")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520);
-                                word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                                return vecload(v, 0);
+                                word r = aggcall val rawsym("rt_call14")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520);
+                                return vecload(r, 0);
                               } else {
                                 if (mkbool(arity == 15)) {
-                                  word r = aggcall ret rawsym("rt_call15")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520, buf + 560);
-                                  word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                                  return vecload(v, 0);
+                                  word r = aggcall val rawsym("rt_call15")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520, buf + 560);
+                                  return vecload(r, 0);
                                 } else {
-                                  word r = aggcall ret rawsym("rt_call16")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520, buf + 560, buf + 600);
-                                  word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-                                  return vecload(v, 0);
+                                  word r = aggcall val rawsym("rt_call16")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520, buf + 560, buf + 600);
+                                  return vecload(r, 0);
                                 }
                               }
                             }
@@ -8236,169 +8853,57 @@ defun Rt.copyWordsGo(dst : word, src : word, cnt : word) -> word {
     recur(dst, src, cnt);
   }
 }
-// ===== the stage-6 B2 mid-tail family (VERBATIM rt.zig rt_tail_known /
-// bounce, rt.zig:932-977).  Rt.tail-known is a rawAbi WORD defun (code,
-// argblock, nargs) whose RESULT is the 80-byte `:ret` (Agg "ret" — the body
-// leaves mknum(retbuf) in slot 0 and the Lower @ret block blits the 80 bytes
-// out, exactly Rt.apply-tail's saturated arm).  It stages the args into the
-// STATIC buffer (globals word 12, malloc'd ONCE in Rt.main) for <=3 args —
-// the no-allocation path, the Zig `tail_stage[3]` .bss buffer's job — or the
-// GC allocvec fallback for >3 args (or QBE_NOTTAILSTAGE=1, globals word 13).
-// THE SINGLE-.tail-IN-FLIGHT + NO-COLLECT INVARIANT (rt.zig:956-973, stated
-// HERE at the Mid surface): the static buffer is SHARED and sound only
-// because at most ONE .tail is in flight — its args are read EXACTLY ONCE by
-// the callee's prologue blit, and the builder cannot run again before that
-// (after tail-known returns the builder only blits the 80-byte :ret into slot
-// 0, leaves its frame, and returns).  NO collection runs between the .tail
-// build and that blit — the fresh allocvec array (and the static buffer's
-// copies) are UNROOTED by convention and safe by it.  A future editor adding
-// a GC alloc AFTER the staging copy (or in the Lower @ret blit block) breaks
-// it SILENTLY — keep this defun alloc-free after the copy.
+// ===== Q1b STAGE 1: THE STAGING SEAT A `tcall` NEEDS =====================
+// Rt.stage-tail(argblock, nargs) -> buf stages ONE copy of the caller's
+// contiguous 40-byte-per-arg block into memory that SURVIVES the caller's
+// rt_frame_leave — the static tsbuf (globals word 12, malloc'd once in
+// Rt.boot) for <=3 args, the GC allocvec above that (or under
+// QBE_NOTTAILSTAGE=1, globals word 13).  It returns the buffer's address, and
+// the caller then `tcall`s the real callee with `buf + 40*i` as argument i.
 //
-// Rt.bounce is a rawAbi WORD defun (one word param, the 80-byte :ret pointer)
-// whose RESULT is the 40-byte `.done` Value (Agg "val").  Its body is the
-// single-iteration fast path (kind==0 -> the `result` Value, `struct Ret` above)
-// plus a hand-off to the :val self-tail loop Rt.bounceGo for an actual
-// tail chain (kind==1).  Rt.bounceGo dispatches one hop (aggcall :ret rt_callN
-// by arity — the callArityRet switch) and `recur`s on mknum(newRetPtr): the
-// SAME :val self-tail Rt.applyGo uses (recur needs the val path; the rawAbi
-// word tail rejects it).  CONSTANT NATIVE STACK: the loop is one C frame
-// (jmp @body per hop, no recursion), exactly the Zig `bounce` trampoline.
-// BOTH Mid dispatch sites route through it — Rt.main's entry dispatch and
-// Rt.callArity's apply dispatch now `rawsym("q_Rt_x2ebounce")` instead of the
-// Zig `rt_bounce` seat, so the clostail/1e6 mutual-tail entry chase runs the
-// MID bounce loop (the unit's oracle), not a Zig seat left in mixed mode.
-defun Rt.tail-known(code : word, argblock : word, nargs : word) -> val {
+// WHY A COPY AT ALL: a tcall returns straight to OUR caller, so our pooled
+// frame is left (returned to the pool) BEFORE the callee runs, and the
+// callee's rt_frame_enter may pop and MEMSET that same pooled block.  Passing
+// pointers into our own frame would therefore hand the callee its own
+// zeroing.  The copy is the whole reason the convention works.
+//
+// THE INVARIANT (inherited from the U3b-deleted Rt.tail-known, and stated here
+// because it guards a DIFFERENT consumer): at most ONE staged block is in
+// flight on THIS path — the static one — its args are read EXACTLY ONCE, by
+// the callee's prologue blit, and NO collection runs between the copy below
+// and that read (after returning buf the caller emits only the frame-leave and
+// the tcall).  A future editor
+// adding a GC alloc AFTER the copy breaks it SILENTLY: the moved args are
+// never re-read.  The callee side needs no change at all: `paramFacts.tailed`
+// already excludes a tail-called defun from the lazy pointer-read
+// optimization, so every tail-callee blits at entry.
+defun Rt.stage-tail(argblock : word, nargs : word) -> word {
   word g = rawcall rt_glob_addr();
   word tsbuf = wload(g, 12);
   word noStage = wload(g, 13);
   word buf = payload((mkbool(nargs <= 3) && mkbool(noStage == 0)) ? mknum(tsbuf) : mknum(allocvec(nargs)), 0);
   call Rt.copyWords(buf, argblock, nargs * 5);
-  *Ret retbuf = rawcall malloc(80);
-  wstore(retbuf, 0, 0);
-  wstore(retbuf, 1, 0);
-  wstore(retbuf, 2, 0);
-  wstore(retbuf, 3, 0);
-  wstore(retbuf, 4, 0);
-  retbuf->kind = 1;
-  retbuf->code = code;
-  retbuf->e = 0;
-  retbuf->args = buf;
-  retbuf->arity = nargs;
-  return mknum(retbuf);
+  return buf;
 }
-defun Rt.bounce(r : *Ret) -> val {
-  word kind = r->kind;
-  if (mkbool(kind == 0)) {
-    return r->result;
-  } else {
-    return call Rt.bounceGo(mknum(r));
-  }
-}
-defun Rt.bounceGo(r : val) -> val {
-  *Ret rp = payload(r, 0);
-  word kind = rp->kind;
-  if (mkbool(kind == 0)) {
-    return rp->result;
-  } else {
-    word f = rp->code;
-    word e = rp->e;
-    word args = rp->args;
-    word arity = rp->arity;
-    if (mkbool(arity == 0)) {
-      word rr = aggcall ret rawsym("rt_call0")(f, e);
-      recur(mknum(rr));
-    } else {
-      if (mkbool(arity == 1)) {
-        word rr = aggcall ret rawsym("rt_call1")(f, e, args);
-        recur(mknum(rr));
-      } else {
-        if (mkbool(arity == 2)) {
-          word rr = aggcall ret rawsym("rt_call2")(f, e, args, args + 40);
-          recur(mknum(rr));
-        } else {
-          if (mkbool(arity == 3)) {
-            word rr = aggcall ret rawsym("rt_call3")(f, e, args, args + 40, args + 80);
-            recur(mknum(rr));
-          } else {
-            if (mkbool(arity == 4)) {
-              word rr = aggcall ret rawsym("rt_call4")(f, e, args, args + 40, args + 80, args + 120);
-              recur(mknum(rr));
-            } else {
-              if (mkbool(arity == 5)) {
-                word rr = aggcall ret rawsym("rt_call5")(f, e, args, args + 40, args + 80, args + 120, args + 160);
-                recur(mknum(rr));
-              } else {
-                if (mkbool(arity == 6)) {
-                  word rr = aggcall ret rawsym("rt_call6")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200);
-                  recur(mknum(rr));
-                } else {
-                  if (mkbool(arity == 7)) {
-                    word rr = aggcall ret rawsym("rt_call7")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240);
-                    recur(mknum(rr));
-                  } else {
-                    if (mkbool(arity == 8)) {
-                      word rr = aggcall ret rawsym("rt_call8")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280);
-                      recur(mknum(rr));
-                    } else {
-                      if (mkbool(arity == 9)) {
-                        word rr = aggcall ret rawsym("rt_call9")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320);
-                        recur(mknum(rr));
-                      } else {
-                        if (mkbool(arity == 10)) {
-                          word rr = aggcall ret rawsym("rt_call10")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360);
-                          recur(mknum(rr));
-                        } else {
-                          if (mkbool(arity == 11)) {
-                            word rr = aggcall ret rawsym("rt_call11")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400);
-                            recur(mknum(rr));
-                          } else {
-                            if (mkbool(arity == 12)) {
-                              word rr = aggcall ret rawsym("rt_call12")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440);
-                              recur(mknum(rr));
-                            } else {
-                              if (mkbool(arity == 13)) {
-                                word rr = aggcall ret rawsym("rt_call13")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480);
-                                recur(mknum(rr));
-                              } else {
-                                if (mkbool(arity == 14)) {
-                                  word rr = aggcall ret rawsym("rt_call14")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480, args + 520);
-                                  recur(mknum(rr));
-                                } else {
-                                  if (mkbool(arity == 15)) {
-                                    word rr = aggcall ret rawsym("rt_call15")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480, args + 520, args + 560);
-                                    recur(mknum(rr));
-                                  } else {
-                                    // UNREACHABLE today: the compiler enforces
-                                    // max arity 16 (the same convention as
-                                    // Rt.callArity's table), so the innermost
-                                    // else is arity >= 16 only when arity == 16
-                                    // and routes correctly.  A HAND-BUILT :tail
-                                    // with arity > 16 would land here and read
-                                    // args+600..+760 PAST a smaller buffer —
-                                    // silent corruption, where Zig callArityRet's
-                                    // else dies loudly (rt.zig:1005).  Kept as a
-                                    // documented parity gap, not a B2 regression.
-                                    word rr = aggcall ret rawsym("rt_call16")(f, e, args, args + 40, args + 80, args + 120, args + 160, args + 200, args + 240, args + 280, args + 320, args + 360, args + 400, args + 440, args + 480, args + 520, args + 560, args + 600);
-                                    recur(mknum(rr));
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
+// ===== U3b DELETED THE BOUNCE TRAMPOLINE (stage-6 B2: rt.zig rt_tail_known /
+// bounce).  Rt.tail-known (the `.tail` builder), Rt.bounce (the one-hop
+// unwrapper) and Rt.bounceGo (the `recur` chase loop) are GONE, together with
+// `struct Ret` above and the `:ret` result class in Lower's rawAbiRetClass.
+//
+// WHY THEY WERE DELETABLE, stated so a future reader does not re-derive it:
+// U3a made nothing BUILD a `.tail` request — the generic apply chain `tcall`s
+// straight into the callee (Rt.apply-tail -> Rt.applyTailGo -> rt_call2r ->
+// the closure), the arity-5+ static tail sites take the ordinary call, and
+// every closure call returns the finished Value.  With no builder, `Rt.bounce`
+// had nothing to unwrap and `Rt.bounceGo`'s kind==1 arm was unreachable, so
+// the 1e6-hop chase the trampoline used to perform is the tcall chain itself
+// (the `clostail-big` row is the instrument).  MEASURED at 3acd79a: 0 of 159
+// emitted corpus artifacts called either symbol.
+//
+// THE STAGING SEATS STAY — Rt.stage-tail above (the STATIC tail path, tsbuf +
+// QBE_NOTTAILSTAGE) and Rt.stage-apply (the F-site generic path, malloc only)
+// both still have callers, and their opposite storage rules are what
+// qbe-check's `tsbuf-apply` row witnesses.
 
 // ==================== STAGE 7A: THE MID EFFECT HOST =======================
 // The CEK effect-manager state machine of src/effectloop.zig, PORTED (plan
@@ -10206,7 +10711,7 @@ defun Rt.hostStatRecord(hN : val, iN : val, stN : val) -> val {
 // ========================== THE STATE ------------------------------------
 // `hN` is the blob's ADDRESS boxed into a Value (`mknum(blob)`), and every
 // defun below unboxes it at the top (`payload(hN, 0)`) — the runtime's own
-// idiom (Rt.gcAlloc, Rt.tail-known).  Indices are boxed the same way.  It is a
+// idiom (Rt.gcAlloc, Rt.vecStorePlain).  Indices are boxed the same way.  It is a
 // number Value, so it cannot be mistaken for a GC pointer and the collector
 // never touches it.
 //
@@ -10241,8 +10746,8 @@ defun Rt.hostInit(progAddrN : val) -> val {
   lp->poll = pp;
   call Rt.rootPushValueArray(blob + 8, blob);
   val prog = vecload(progAddr, 0);
-  vecstore(blob + 8, 0, vecload(payload(prog, 0), 1));
-  vecstore(blob + 8 + 40, 0, vecload(payload(prog, 0), 3));
+  vecstore(blob + 8, 0, vecload(vecbody(prog), 1));
+  vecstore(blob + 8 + 40, 0, vecload(vecbody(prog), 3));
   return mknum(blob);
 }
 
@@ -10252,7 +10757,7 @@ defun Rt.hostIsProgram(vN : val) -> val {
   if (tagis(vN, 10) == 0) {
     return mkbool(0);
   }
-  if (payload32(vN, 1) != 4) {
+  if (veclen(vN) != 4) {
     return mkbool(0);
   }
   word d = payload(vN, 0);
@@ -10350,13 +10855,15 @@ defun Rt.hostArity(tagN : val) -> val {
 // Rt.apply-at — THE applier seat, and the ONE place the two APPLIER TRAPS
 // (plan §4.1) are handled:
 //
-//   1. THE ENTRY IS Rt.callArity, NOT Rt.apply/Rt.applyGo.  applyGo's
-//      saturated arm builds a `:ret` TAIL and returns mknum(retbuf) — an
-//      UNFORCED tail, i.e. a heap address where a value is expected.  Our
-//      probe printed exactly that address and then SEGV'd.  Rt.callArity
-//      bounces it (rt_callN -> q_Rt_x2ebounce -> vecload(v,0)) and returns a
-//      REAL value.  TestMain pins this line: `Rt.apply`/`Rt.applyGo` must not
-//      appear in the host's applier.
+//   1. THE ENTRY IS Rt.callArity, NOT Rt.apply/Rt.applyGo.  (This was the
+//      pre-U3a reason: applyGo's saturated arm built a `:ret` TAIL and returned
+//      mknum(retbuf) — an UNFORCED tail, i.e. a heap address where a value is
+//      expected; the probe printed that address and SEGV'd.  U3a removed the
+//      `.tail` shape entirely, so the reason is now the SEAT and not the
+//      shape: Rt.callArity is the arity-dispatch seat this host is written
+//      against, and the shape it returns is `vecload(rt_callN(...), 0)` — a
+//      REAL value.  TestMain pins that `Rt.apply`/`Rt.applyGo` must not appear
+//      in the host's applier.)
 //   2. THE Disp's `arity` IS THE CLOSURE'S STATIC ARITY (wload(desc,1)), NOT
 //      `arity - rem`.  With `arity - rem` (0 for a global closure) the call
 //      passes zero args and returns garbage.  This is the silent-wrong.
@@ -10424,25 +10931,39 @@ defun Rt.apply-at(cN : val, bufN : val, nargsN : val) -> val {
       sp->args = buf;
       sp->nargs = nargs;
       sp->live = nargs;
+      // >>> QBE_VAL-ONLY
       sp->env = payload(cN, 2);
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      sp->env = payload(cN, 2) - 1;
+      // <<< QBE_WORDVAL-ONLY
       val p = call Rt.applyPartGo(mknum(sp), cN);
       rawcall free(sp);
       return p;
     } else {
       word napp = arity - rem;
       if (napp > 0) {
+        // >>> QBE_VAL-ONLY
         word env = payload(cN, 2);
+        // <<< QBE_VAL-ONLY
+        // >>> QBE_WORDVAL-ONLY
+        word env = payload(cN, 2) - 1;
+        // <<< QBE_WORDVAL-ONLY
         if (env == 0) {
           call Rt.die(rawstr("qbe-rt: closure env missing for applied args"));
           return mknil;
         }
-        word r = aggcall ret rawsym("rt_call2r")(wload(code, 0), env, napp, buf, rem);
-        word v = aggcall val rawsym("q_Rt_x2ebounce")(r);
-        return vecload(v, 0);
+        word r = aggcall val rawsym("rt_call2r")(wload(code, 0), env, napp, buf, rem);
+        return vecload(r, 0);
       } else {
         *Disp dp = rawcall malloc(32);
         dp->fn = wload(code, 0);
+        // >>> QBE_VAL-ONLY
         dp->caps = payload(cN, 2);
+        // <<< QBE_VAL-ONLY
+        // >>> QBE_WORDVAL-ONLY
+        dp->caps = payload(cN, 2) - 1;
+        // <<< QBE_WORDVAL-ONLY
         dp->buf = buf;
         dp->arity = arity;
         val r = call Rt.callArity(mknum(dp));
@@ -10460,7 +10981,7 @@ defun Rt.apply-at(cN : val, bufN : val, nargsN : val) -> val {
 // is the only thing that reads it.
 defun Rt.hostCall(hN : val, contAddrN : val, nargsN : val) -> val {
   word h = payload(hN, 0);
-  val r = call Rt.apply-at(vecload(payload(contAddrN, 0), 0), mknum(h + 8 + (33027 * 40)), nargsN);
+  val r = call Rt.apply-at(vecload(vecbody(contAddrN), 0), mknum(h + 8 + (33027 * 40)), nargsN);
   vecstore(h + 8 + (33029 * 40), 0, r);
   return mknil;
 }
@@ -10526,7 +11047,7 @@ defun Rt.hostSpawnAt(hN : val, taskAddrN : val, iN : val) -> val {
 
 // Rt.hostSpawnFind — first INACTIVE slot (the Zig's first-inactive reuse), or
 // append.  `i` advances as a VALUE param: this is a short scan and a self-tail
-// `recur` on a changed Value is the runtime's own loop shape (Rt.bounceGo).
+// `recur` on a changed Value is the runtime's own loop shape (Rt.applyTailGo).
 defun Rt.hostSpawnFind(hN : val, taskAddrN : val, iN : val) -> val {
   word h = payload(hN, 0);
   word i = payload(iN, 0);
@@ -10563,8 +11084,8 @@ defun Rt.hostSpawnFromCmd(hN : val, curAddrN : val) -> val {
   if (tagis(cur, 4) == 0) {
     return mknil;
   } else {
-    vecstore(h + 8 + (33030 * 40), 0, vecload(payload(cur, 0), 0));
-    vecstore(curAddr, 0, vecload(payload(cur, 0), 1));
+    vecstore(h + 8 + (33030 * 40), 0, vecload(vecbody(cur), 0));
+    vecstore(curAddr, 0, vecload(vecbody(cur), 1));
     call Rt.hostSpawn(hN, mknum(h + 8 + (33030 * 40)));
     recur(hN, curAddrN);
   }
@@ -10607,11 +11128,11 @@ defun Rt.hostDispatch(hN : val, iN : val) -> val {
   if (tagis(task, 10) == 0) {
     return call Rt.hostDeactivate(hN, iN);
   }
-  word len = payload32(task, 1);
+  word len = veclen(task);
   if (len < 1) {
     return call Rt.hostDeactivate(hN, iN);
   }
-  val tag = vecload(payload(task, 0), 0);
+  val tag = vecload(vecbody(task), 0);
   if (tagis(tag, 2) == 0) {
     return call Rt.hostDeactivate(hN, iN);
   }
@@ -10824,8 +11345,8 @@ defun Rt.hostDeliver(hN : val, iN : val) -> val {
   if (tagis(pair, 4) == 0) {
     return call Rt.hostDeactivate(hN, iN);
   } else {
-    vecstore(h + 8, 0, vecload(payload(pair, 0), 0));
-    vecstore(h + 8 + (33026 * 40), 0, vecload(payload(pair, 0), 1));
+    vecstore(h + 8, 0, vecload(vecbody(pair), 0));
+    vecstore(h + 8 + (33026 * 40), 0, vecload(vecbody(pair), 1));
     call Rt.hostDeactivate(hN, iN);
     return call Rt.hostSpawnFromCmd(hN, mknum(h + 8 + (33026 * 40)));
   }
@@ -10986,7 +11507,7 @@ defun Rt.hostRun(progAddrN : val, outAddrN : val) -> val {
   word h = payload(hN, 0);
   *Host lp = [*Host](h);
   val prog = vecload(progAddr, 0);
-  vecstore(h + 8 + (33026 * 40), 0, vecload(payload(prog, 0), 2));
+  vecstore(h + 8 + (33026 * 40), 0, vecload(vecbody(prog), 2));
   call Rt.hostSpawnFromCmd(hN, mknum(h + 8 + (33026 * 40)));
   call Rt.hostRunLoop(hN);
   call Rt.hostCleanupAll(hN);

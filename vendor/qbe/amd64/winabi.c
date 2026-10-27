@@ -571,6 +571,8 @@ static void lower_args_for_block(Fn* func,
         case Ocall:
           instr = lower_call(func, block, instr, pextra_alloc);
           break;
+        case Otcall:
+          die("tcall is not implemented on the win64 abi");
         case Ovastart:
           lower_vastart(func, param_reg_usage, instr->arg[0]);
           --instr;

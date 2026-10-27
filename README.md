@@ -40,15 +40,17 @@ no runtime object to build. The evidence chain is `tools/osier-numbers.sh`.
 ## Recursion and the native stack
 
 The QBE native backend gives **proper tail calls**. A saturated self-call in
-tail position compiles to an in-frame loop, and every other tail position
-(cross-defun calls, partial applications, thunk forces) returns a `.tail` that
-a bounce loop chases — so tail recursion, **including mutual tail recursion**,
-runs in constant native stack. This is verified, not asserted:
-`tools/qbe/qbe-check.sh`'s mutual-tail check runs `Mutual.even 1000000` —
-1,000,000 hops of mutual recursion — to completion against a pinned golden;
-before the bounce loop the same shape died between 20k–40k hops on an 8 MB
-stack. This is stronger than Elm's own treatment, which optimises self-tail
-calls only.
+tail position compiles to an in-frame loop; every other tail position
+(cross-defun calls, partial applications, thunk forces) compiles to a real
+tail call (`tcall`) that REUSES the caller's frame — so tail recursion,
+**including mutual tail recursion**, runs in constant native stack. This is
+verified, not asserted: `tools/qbe/qbe-check.sh`'s mutual-tail check runs
+`Mutual.even 1000000` — 1,000,000 hops of mutual recursion — to completion
+against a pinned golden, and its `clostail-big` row runs a 1,000,000-hop
+GENERIC apply chain under an owned 8 MiB stack. Before tail calls reached
+those positions the same shapes died between 20k–40k hops on an 8 MB stack.
+This is stronger than Elm's own treatment, which optimises self-tail calls
+only.
 
 **Non-tail recursion is not optimised and consumes native stack — one frame per
 call.** That is inherent, not a defect of this implementation: a non-tail call
@@ -67,7 +69,7 @@ As a mitigation — explicitly **not** a guarantee — the native runtime raises
 the stack soft limit to 64 MB at startup (`Rt.main` in
 `osier-compiler/runtime.mid`). That net covers
 every C-stack exhaustion up to 64 MB, and deep non-tail recursion can still
-exhaust it and crash. The backend mechanism (in-frame loops, the bounce loop,
+exhaust it and crash. The backend mechanism (in-frame loops, tail calls,
 frame rooting) is described in [docs/qbe-backend.md](docs/qbe-backend.md).
 
 ## Evidence chain

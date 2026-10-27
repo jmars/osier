@@ -12,6 +12,7 @@ module Mid.Rt
         , conSeeds
         , driverSeeds
         , lowerSeatSeeds
+        , wordArmSeeds
         , gcSeeds
         , youngGcSeeds
         , hostSeeds
@@ -113,11 +114,11 @@ absence is the safe default.
 
 THE RULE IS THE SIGNATURE (`RtAst.allWordSig`), not a hand list — with ONE
 merge: `rawAbi` keys are INSERTED even when their signature classifies
-value-ABI.  That is not a safety net, it is load-bearing and MEASURED: four of
-the thirteen raw-word keys (`Rt.apply`, `Rt.apply-tail`, `Rt.tail-known`,
-`Rt.bounce`) RETURN an aggregate `:val`/`:ret` through sret, so the signature
-rule alone would move them to the value ABI and move the corpus with them.
-The other nine are exactly the all-word signatures runtime.mid has.
+value-ABI.  That is not a safety net, it is load-bearing and MEASURED: three of
+the keys (`Rt.apply`, `Rt.apply-tail`, `Rt.applyTailGo`) RETURN an aggregate
+`:val` through sret, so the signature rule alone would move them to the value
+ABI and move the corpus with them.  The rest are exactly the all-word
+signatures runtime.mid has.
 
 The widths come from the CHECKER's ONE layout table (`Check.sizeofStruct`) —
 no second size rule exists.
@@ -1402,6 +1403,22 @@ rtDeps =
         , ( "Rt.gcAlloc", [ "Rt.gcAllocGo", "Rt.collect", "Rt.die", "Rt.gcNumOut", "Rt.gcGrow" ] )
         , ( "Rt.gcGrow", [ "Rt.gcNumOut" ] )
         , ( "Rt.gcAllocGo", [] )
+        , ( "Rt.kindHdr", [] )
+        , ( "Rt.allocKind", [ "Rt.gcInit", "Rt.gcAlloc", "Rt.die" ] )
+        , ( "Rt.allocCons", [ "Rt.gcInit", "Rt.gcAlloc" ] )
+        , ( "Rt.allocFloat", [ "Rt.gcInit", "Rt.gcAlloc" ] )
+          -- THE RECORD FAMILY'S WORD-ONLY SEATS (perf word-arm-records
+          -- R1/R2).  THESE EDGES ARE NOT BOOKKEEPING: `allocating` below is a
+          -- fixed point over THIS table, and a seat with no entry is declared
+          -- NON-collecting, so its call site is not a safepoint and a value
+          -- live in a register across it goes stale when gcAlloc moves the
+          -- heap.  `Rt.allocSym` shipped without one for one unit (nothing
+          -- called it but a probe); `Rt.allocRecord` is called by every record
+          -- literal, so the omission would have been live.
+        , ( "Rt.allocSym", [ "Rt.gcInit", "Rt.gcAlloc" ] )
+        , ( "Rt.allocRecord", [ "Rt.gcInit", "Rt.gcAlloc" ] )
+        , ( "Rt.recEqGo", [ "Rt.recEqGo", "Rt.deepEq" ] )
+        , ( "Rt.mkStream", [ "Rt.allocKind" ] )
         , ( "Rt.gcInit", [ "Rt.die", "Rt.gcEnvNum" ] )
         , ( "Rt.gcEnvNum", [ "Rt.gcEnvNum" ] )
         , ( "Rt.collect", [ "Rt.gcMarkRoots", "Rt.gcMarkValuesTab", "Rt.gcDrain", "Rt.gcSweep", "Rt.gcClearClasses", "Rt.gcNumOut", "Rt.die", "Rt.gcVerify" ] )
@@ -1437,8 +1454,19 @@ rtDeps =
         , ( "Rt.gcScavDrain", [ "Rt.gcScavDrain", "Rt.gcScavValueArray" ] )
         , ( "Rt.gcPromoteAlloc", [ "Rt.gcGrow", "Rt.gcNumOut", "Rt.die" ] )
         , -- ===== the Mid ADT constructor (zigretire stage 5)
+        -- (perf word-arm-area3rt) THE WORD-ARM-ONLY EDGES ARE IN THIS TABLE TOO.
+        -- A missing edge does not fail on the val arm — the callee simply is
+        -- not emitted there — so it links cleanly and then fails on the word
+        -- arm as an UNDEFINED SYMBOL at cc time.  MEASURED exactly that way:
+        -- `Rt.gcAlloc`'s word-arm header write calls `Rt.kindHdr` (VR3c added
+        -- the defun and the calls but not the edge), and the first word-arm
+        -- link of a real program died with `undefined reference to
+        -- q_Rt_x2ekindHdr`.  Every edge below is a call that exists in the
+        -- WORD-spliced text only.
           ( "Rt.con", [ "Rt.conFill" ] )
         , ( "Rt.conFill", [ "Rt.conFill" ] )
+        , ( "Rt.absvector", [] )
+        , ( "Rt.cons", [] )
         , -- ===== the Mid closure (zigretire stage 5 PART 2)
           ( "Rt.closure", [ "Rt.closureFill" ] )
         , ( "Rt.closureFill", [ "Rt.closureFill" ] )
@@ -1789,14 +1817,17 @@ rtDeps =
         , -- ===== the stage-6 B1 apply family.  Rt.apply/Rt.apply-tail are
           -- rawAbi WRAPPERS (root the caller's f/args, then hand off); their
           -- one RawCall edge each is the val-ABI LOOP.  The loops reach
-          -- Rt.callArity (the 17-arm rt_callN dispatch + rt_bounce) and
-          -- Rt.copyWords (the raw-word Value-array copy) and Rt.die (the
-          -- non-function/closure-env panics — already a driverSeed, so these
-          -- are closure edges, not new roots).  rt_callN/rt_bounce are
-          -- aggcall (RawCallAgg — NOT rtDeps edges); malloc/rt_root_* are
-          -- rawcall (RawCallRaw — NOT rtDeps edges).
+          -- Rt.callArity (the 17-arm rt_callN dispatch) and Rt.copyWords (the
+          -- raw-word Value-array copy) and Rt.die (the non-function/
+          -- closure-env panics — already a driverSeed, so these are closure
+          -- edges, not new roots).  rt_callN is an aggcall (RawCallAgg — NOT
+          -- an rtDeps edge); malloc/rt_root_* are rawcall (RawCallRaw — NOT
+          -- rtDeps edges).
           ( "Rt.apply", [ "Rt.applyGo", "Rt.rootPushValueArray", "Rt.rootPop" ] )
-        , ( "Rt.apply-tail", [ "Rt.applyTailGo", "Rt.rootPushValueArray", "Rt.rootPop" ] )
+        , -- U2 review fix: the CONVENTION GUARD's die is a RawCall edge too —
+          -- a caller that does not pass `fslot + 40` must die loudly, not scan
+          -- the wrong range.
+          ( "Rt.apply-tail", [ "Rt.applyTailGo", "Rt.rootPushValueArray", "Rt.rootPop", "Rt.die" ] )
         , -- STAGE 7 O3-fix: both apply LOOPS' partial arms (`rem > nargs`) now
           -- hand off to Rt.applyPartGo instead of spelling the capture/args
           -- interleave inline, so the edge is theirs AND the host applier's:
@@ -1812,15 +1843,11 @@ rtDeps =
           -- not allocvec/allocRaw, so both stay frame-free.
           ( "Rt.copyWords", [ "Rt.copyWordsGo" ] )
         , ( "Rt.copyWordsGo", [] )
-        , -- ===== the stage-6 B2 mid-tail family.  Rt.tail-known's only RawCall
-          -- edge is Rt.copyWords (the raw-word Value-array copy; its other
-          -- nodes are rawcall/aggcall/raw-word, NOT rtDeps edges).  Rt.bounce's
-          -- only RawCall edge is its :val loop helper Rt.bounceGo (which itself
-          -- dispatches via aggcall — RawCallAgg, NOT an rtDeps edge — and
-          -- self-tails via recur).
-        ( "Rt.tail-known", [ "Rt.copyWords" ] )
-        , ( "Rt.bounce", [ "Rt.bounceGo" ] )
-        , ( "Rt.bounceGo", [] )
+        , -- Q1b stage 1: the tcall staging seat's only RawCall edge is the same
+          -- raw-word Value-array copy (allocvec is a raw node, not an edge).
+          ( "Rt.stage-tail", [ "Rt.copyWords" ] )
+        , -- U2: the F-site staging seat — same shape, same single edge.
+          ( "Rt.stage-apply", [ "Rt.copyWords" ] )
         , -- ===== THE STAGE 7A MID HOST (QBE_MIDHOST).  One entry per host
           -- defun, exactly its RawCall targets — the machine's call graph,
           -- declared by hand like every other Rt->Rt edge (`reach` never walks
@@ -2041,6 +2068,25 @@ closureSeeds =
     keepRtDependencies [ "Rt.closure" ]
 
 
+{-| (perf word-arm-area3rt) THE WORD-ARM-ONLY SEATS.  Every key here exists in
+runtime.mid ONLY inside a `QBE_WORDVAL-ONLY` region, so seeding it on the val arm
+is not "an unused defun" — the checker resolves the key and refuses the compile
+(`unknown global Rt.kindHdr`, MEASURED).  It therefore cannot ride the normal
+`rtDeps` edges: an edge on a SHARED defun (`Rt.con -> Rt.allocKind`) is followed
+on both arms.  These are ROOTS instead, added by `Lower.lowerArm` only when the
+word arm is on; their own `rtDeps` entries then pull in gcInit/gcAlloc/die.
+
+WHY THEY ARE NEEDED AT ALL: the seed walk is what decides which Rt defuns are
+EMITTED, and a runtime.mid call edge to a defun that is never seeded links
+cleanly on the val arm and dies as an undefined symbol on the word arm —
+MEASURED (`undefined reference to q_Rt_x2ekindHdr` on the first word-arm link of
+a real program, because VR3c added the defun and the calls but no seed).
+-}
+wordArmSeeds : List String
+wordArmSeeds =
+    keepRtDependencies [ "Rt.allocKind", "Rt.allocCons", "Rt.allocFloat", "Rt.allocSym", "Rt.allocRecord", "Rt.recEqGo", "Rt.kindHdr", "Rt.mkStream" ]
+
+
 {-| THE SEATS LOWER NAMES DIRECTLY (zighost Z2/Z3): the plain vec-store writer
 and the per-Desc closure-cache slot.  Neither is a prim (so the used-prim
 census does not seed them) and neither is a collector defun (so `gcSeeds`
@@ -2066,13 +2112,13 @@ sites AND surface `call` sites) emits a matching WORD call.
   * B6 CHANGED THIS SET'S ROLE: it is no longer the ONLY place the ABI class
     is declared.  The class is now DERIVED from the signature (`abiTable`
     below, plan Q7) for every surface and user defun; THIS set is the
-    OVERRIDE that keeps the FOUR aggregate-returning keys (Rt.apply,
-    Rt.apply-tail, Rt.tail-known, Rt.bounce — all-word parameters, `val`/
-    `:ret` results) on the word side, where the signature rule alone would
-    move them and the corpus with them.  The other nine keys are word-ABI
-    because their signatures say so; declaring them here as well is what makes
-    the two statements agree, and TestMain pins that they do (the `derived ==
-    rawAbi` row).
+    OVERRIDE that keeps the THREE aggregate-returning keys (Rt.apply,
+    Rt.apply-tail, Rt.applyTailGo — all-word parameters, `val` results) on the
+    word side, where the signature rule alone would move them and the corpus
+    with them.  The other keys are word-ABI because their signatures say so;
+    declaring them here as well is what makes the two statements agree, and
+    TestMain pins that they do (the `derived == rawAbi` row).  U3b removed
+    Rt.tail-known and Rt.bounce from this set with their bodies.
 -}
 rawAbi : Set String
 rawAbi =
@@ -2093,10 +2139,10 @@ rawAbi =
         , -- ===== the stage-6 B1 apply family.  Rt.apply/Rt.apply-tail are
           -- raw-word defuns whose RESULT is an AGGREGATE (the stage-6 B1
           -- rawAbi-ret-class extension — Mid.Qbe.Lower.rawAbiRetClass maps
-          -- them to Agg "val"/Agg "ret"): 3 word params (fslot *Value,
+          -- them to Agg "val"): 3 word params (fslot *Value,
           -- args [*]Value, nargs), reached from Lower's rtApply retarget.
-          -- Their LOOP bodies (Rt.applyGo/Rt.applyTailGo) are :val defuns
-          -- (recur needs the val self-tail), NOT rawAbi.
+          -- U3a flipped their class to `:val` and U3b deleted the `:ret` one
+          -- outright, so NO rawAbi key returns `:ret` any more.
           "Rt.apply"
         , "Rt.apply-tail"
         , -- ===== the stage-6 B1fix copyWords WORD pair.  Rt.copyWords (the
@@ -2114,23 +2160,46 @@ rawAbi =
           -- record is what checks every call site's 3 words.
           "Rt.vecStorePlain"
         , "Rt.vecStoreYoung"
+        , -- ===== U3a's TAIL LOOP.  Rt.applyTailGo was a lean `:val` defun with
+          -- TWO `val` parameters (state, f) until the apply chain's hops became
+          -- `tcall`s: J16 refuses a `val` parameter on a TailDefun, because a
+          -- val crosses a tcall as a pointer into the caller's frame and the
+          -- tcall tears that frame down.  So the loop's parameters are WORDS —
+          -- (state, fslot), where fslot is the address of the 40-byte cell
+          -- holding the current closure — and the signature (word, word) ->
+          -- val lands on the word side by OVERRIDE, exactly the shape
+          -- Rt.globalClosure below has.
+          --
+          -- WHY A FRAME-FREE rawAbi BODY IS SOUND HERE (the design's stated
+          -- reason for keeping the loop lean): the loop-carried closure must be
+          -- GC-scanned across the hops' safepoints, and it IS — cell 0 of the
+          -- staged block is inside the kind-2 registration Rt.apply-tail
+          -- pushes (`live = nargs + 1` from the block base), so the collector
+          -- rewrites it in place.  The defun's own `val f = vecload(fslot, 0)`
+          -- is a per-iteration READ, never live across a safepoint — and the
+          -- claim is about the READ, not about the arm being alloc-free: the
+          -- saturated arm DOES allocate (the arg copy at runtime.mid:8107) and
+          -- simply never reads `f` after it; the over arm's `rt_call2r` hop
+          -- ends in a SELF `tcall` that re-derives the closure from cell 0 on
+          -- the next iteration; and the partial arm passes `f` to
+          -- Rt.applyPartGo BEFORE that call allocates.
+          "Rt.applyTailGo"
         , -- ===== zighost Z3's CLOSURE CACHE.  Its signature is (word) -> val,
           -- so the B6 signature rule would put it on the VALUE side; this
           -- override is load-bearing (that is the override's whole purpose),
           -- and the ret class is Agg "val" (Lower.rawAbiRetClass) — the
           -- deleted Zig seat's sret ABI.
           "Rt.globalClosure"
-        , -- ===== the stage-6 B2 mid-tail family.  Rt.tail-known is a raw-word
-          -- defun whose RESULT is the 80-byte `:ret` (Agg "ret", the
-          -- rt_tail_known seat's C ABI — 3 word params code/argblock/nargs,
-          -- reached from Lower's directCall TAIL retarget).  Rt.bounce is a
-          -- raw-word defun whose RESULT is the 40-byte `.done` Value (Agg
-          -- "val", the rt_bounce seat's C ABI — 1 word param, the :ret
-          -- pointer, reached from Lower's bounce retarget).  Their :val
-          -- helper/loop (Rt.bounceGo) is NOT rawAbi — recur needs the val
-          -- self-tail.
-          "Rt.tail-known"
-        , "Rt.bounce"
+        , -- Q1b stage 1: the tcall STAGING seat.  An all-word signature
+          -- ((argblock, nargs) -> buf), so the B6 rule derives it; declaring
+          -- it here is what keeps the derived set and this table in step (the
+          -- B6 THE TABLE row asserts they agree over the shipped text), and
+          -- rawAbiArity is what checks both the defun and Lower's call site.
+          "Rt.stage-tail"
+        , -- U2: the F-site STAGING seat — an all-word signature
+          -- ((fslot, argblock, nargs) -> buf), derived by the B6 rule and
+          -- declared here for the same reason as Rt.stage-tail above.
+          "Rt.stage-apply"
         , -- ===== THE STAGE 7A HOST's die family (QBE_MIDHOST).  These are not
           -- driver seats: they are declared so the B6 RULE's derived set (an
           -- all-word SIGNATURE) and this table agree — they are word-ABI by
@@ -2182,6 +2251,10 @@ rawAbiArity =
           -- lowerDefun both check this against the actual param count.
         ( "Rt.apply", 3 )
         , ( "Rt.apply-tail", 3 )
+        , -- U3a: the apply TAIL LOOP takes (state, fslot) — the ApplyState
+          -- pointer and the address of the closure cell — both words, which is
+          -- what makes it a legal `tcall` target (J16).
+          ( "Rt.applyTailGo", 2 )
         , -- ZIGHOST Z1: the root registry's eight word-ABI defuns.
           ( "Rt.rootGrow", 0 )
         , ( "Rt.rootPush", 3 )
@@ -2196,12 +2269,13 @@ rawAbiArity =
           -- against the actual param count at lowerDefun (rawAbiArityAgree).
         ( "Rt.copyWords", 3 )
         , ( "Rt.copyWordsGo", 3 )
-        , -- stage 6 B2: Rt.tail-known takes the SAME 3 word params as the
-          -- Zig seat (code, argblock, nargs); Rt.bounce takes 1 (the :ret
-          -- pointer) — both checked against the actual param count at
-          -- lowerDefun (rawAbiArityAgree).
-        ( "Rt.tail-known", 3 )
-        , ( "Rt.bounce", 1 )
+        , -- Q1b stage 1: the tcall staging seat takes (argblock, nargs) — the
+          -- block to copy and its arg count — and returns the buffer address.
+          ( "Rt.stage-tail", 2 )
+        , -- U2: the F-site staging seat takes (fslot, argblock, nargs) — the
+          -- closure cell, the caller's contiguous arg block, and the count —
+          -- and returns the staged block's address.
+          ( "Rt.stage-apply", 3 )
         , -- zighost Z2: the two vec-store writers take (vec, index, *Value) —
           -- three words, checked against both the defun and Lower's seam.
           ( "Rt.vecStorePlain", 3 )
@@ -2241,12 +2315,11 @@ driverSeeds =
           -- cannot seed them — the frame-pair precedent.
         "Rt.apply"
         , "Rt.apply-tail"
-        , -- stage 6 B2: Lower's directCall/bounce retarget (QBE_MIDDRIVER=1)
-          -- names q_Rt_x2etail_x2dknown / q_Rt_x2ebounce directly, so the
-          -- census cannot seed them — the tail-known/bounce pair joins the
-          -- driverSeeds roots (Rt.bounceGo is a closure edge off Rt.bounce).
-        "Rt.tail-known"
-        , "Rt.bounce"
+        , -- Q1b stage 1: the tcall staging seat, named directly by Lower's
+          -- tcall arm — the same "the census cannot seed it" argument.
+          "Rt.stage-tail"
+        , -- U2: the F-site staging seat, named directly by rtApply's tcall arm.
+          "Rt.stage-apply"
         ]
 
 
@@ -2308,11 +2381,10 @@ safepoint selfKey selfArity e =
             -- an EDGE, not a direct safepoint, exactly like RawCall below.
             -- In TAIL position it is the SELF-TAIL LOOP (Lower's
             -- lowerSelfTail: stage the args into slots, blit the params,
-            -- jmp @body — no call, no rt_tail_known, so no staging
-            -- allocation at ANY arity); out of tail position it is the
-            -- saturated direct call + rt_bounce chase, which allocate
-            -- nothing themselves (the .tail staging allocation lives in
-            -- rt_tail_known, the CROSS-defun tail path, never taken here).
+            -- jmp @body — no call, no staging, so no allocation at ANY
+            -- arity); out of tail position it is the saturated direct call,
+            -- which allocates nothing itself (the staging allocation lives on
+            -- the CROSS-defun tail path, never taken here).
             -- The args are walked; the callee is SELF, and a loop re-runs
             -- THIS body, so any allocation the body can reach is already
             -- caught by this very walk — no cycle is introduced.
@@ -2414,13 +2486,19 @@ unsafeSafepoint selfKey selfArity node =
 
         RawCallAgg _ ->
             -- CONSERVATIVELY ALLOCATING, deny-by-default: the callee is
-            -- UNKNOWN GENERATED CODE (a runtime word — the stage-6
-            -- apply/bounce port's Desc code pointer), so the node allocates
+            -- UNKNOWN GENERATED CODE (a runtime word — the apply port's Desc
+            -- code pointer), so the node allocates
             -- nothing itself but its CALLEE can allocate, and an apply
             -- defun containing one must never classify frame-free (the
             -- stage-1 lesson: a False here silently misclassifies the
             -- apply defuns and hands them unrooted scratch across the
             -- callee's collection).
+            True
+
+        -- U1: a DSL `tailcall`'s callee is arbitrary generated code, exactly
+        -- like RawCallAgg's — conservatively ALLOCATING, deny-by-default, so a
+        -- defun containing one can never classify frame-free.
+        RawTailCall _ ->
             True
 
         RawTagOf _ ->
@@ -2430,6 +2508,19 @@ unsafeSafepoint selfKey selfArity node =
             safepoint selfKey selfArity p.value
 
         RawMkValue m ->
+            -- NON-SAFEPOINT ONLY WHERE THE CELL WRITER ALLOCATES NOTHING.  True
+            -- on the val arm (a `mk*` is a tag word plus payload writes into a
+            -- frame slot) and true under the word arm for the IMMEDIATE codes
+            -- (`mknum`/`mkbool` are shifts).  FALSE under the word arm for a
+            -- HEAP code: `storeWordStringCell`/`storeWordFloatCell` inject a
+            -- `midGcAllocSeat` call that this tree never shows, so a defun whose
+            -- only allocation is a `mkstr`/`mkflt` cell would classify
+            -- frame-free and DROP ITS ROOTS.  It cannot bite today (area 5
+            -- refuses every tag-12 value, so no word-arm float cell can be
+            -- built) and it does not bite the arithmetic class (every op writes
+            -- an immediate).  See the WORKLIST's item 5 in Mid.RtLayout for the
+            -- standing instruction: when area 5 lands, this arm must count a
+            -- word-arm heap-code `mk*` as a DIRECT safepoint, in the same unit.
             List.any (safepoint selfKey selfArity) m.words
 
         RawAllocVector _ ->
@@ -2440,6 +2531,12 @@ unsafeSafepoint selfKey selfArity node =
 
         RawVecAddr v ->
             safepoint selfKey selfArity v.vec || safepoint selfKey selfArity v.index
+
+        RawVecBody v ->
+            safepoint selfKey selfArity v.value
+
+        RawVecLen v ->
+            safepoint selfKey selfArity v.value
 
         RawVecStore v ->
             -- the write-barrier seat is malloc-class, NOT a GC

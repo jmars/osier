@@ -304,9 +304,31 @@ render ctx e =
 
                 Nothing ->
                     []
-            , [ "-- " ++ e.tag ]
+            , [ footer e ]
             ]
         )
+
+
+{-| The machine footer, `-- <key>: <tag>` when the record knows its defun and
+`-- <tag>` otherwise.
+
+WHY THE KEY IS ON THIS LINE (plan-b's decision, UNIMPLEMENTED until now): the
+tag alone does not locate anything in a file holding hundreds of defuns —
+`runtime.mid` has ~358 — and the banner names the FILE, not the defun.  The
+key rides beside the tag because both are machine fields a reader may grep,
+while the prose above stays the human sentence.  MEASURED: rows written
+against the old flattened form (`<key>: J16: ...`) went red the moment the
+lanes started rendering records instead of strings, which is how the omission
+surfaced.
+-}
+footer : MidcError -> String
+footer e =
+    case e.key of
+        Just key ->
+            "-- " ++ key ++ ": " ++ e.tag
+
+        Nothing ->
+            "-- " ++ e.tag
 
 
 {-| The single-line form the line-based consumers read: `"<key>: <tag>: <rule>"`,
