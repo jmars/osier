@@ -2171,8 +2171,16 @@ defun Rt.recGetGo(rec : val, field : val, i : val) -> val {
 
 defun Rt.recUpd(rec : val, field : val, newv : val) -> val {
   val find = call Rt.recUpdFind(rec, field, mknum(0));
-  word nd = allocvec(reclen(rec));
-  val ndN = mknum(nd);
+  // THE SAME HOLDER DISCIPLINE AS `Rt.recAppend` (perf word-arm-rawroot item 3
+  // FIX + its review's NICE-TO-HAVE).  This defun is SAFE TODAY BY ORDER — ONE
+  // `allocvec`, and `recUpdCopy`/`vecstore`/`mkval` allocate nothing, so no
+  // safepoint can land between the allocation and the fill — but `mknum(nd)` is
+  // the exact TEXTUAL SHAPE that was a silent reclaim in `recAppend`: a fixnum
+  // is never relocated, so the day this defun grows a second allocation the
+  // array becomes invisible to the collector.  Uniform discipline instead of a
+  // local argument: the cell is a `:val` holder (a frame slot the frame-enter
+  // root array scans) and every read goes through `vecbody(..)`.
+  val ndN = mkval(10, allocvec(reclen(rec)));
   call Rt.recUpdCopy(rec, ndN, mknum(0));
   vecstore(vecbody(ndN), payload(find, 0), newv);
   return mkval(14, vecaddr(vecbody(ndN), 0), reclen(rec), payload(rec, 2));
@@ -3306,21 +3314,32 @@ defun Rt.globBuildGo(tblN : val, iN : val, acc : val) -> val {
   word bufW = allocraw(payload(lenN, 0) + 1);
   call Rt.cStrCopyGo(mknum(pW), mknum(bufW), mknum(0));
   rawcall free(pW);
-  // >>> QBE_VAL-ONLY
-  recur(tblN, mknum(payload(iN, 0) - 1), call Rt.cons(call Rt.intern("cons"), call Rt.cons(call Rt.cons(call Rt.intern("string"), call Rt.cons(mkstr(bufW, payload(lenN, 0)), mknil)), call Rt.cons(acc, mknil))));
-  // <<< QBE_VAL-ONLY
-  // >>> QBE_WORDVAL-ONLY
-  // THE STRING IS TAGGED BEFORE THE FIRST ALLOCATION ON THE LINE (perf
-  // word-arm-rawroot item 2).  `bufW` is a RAW WORD and `Rt.intern`'s HIT path
-  // ALLOCATES on this arm (`allocKind(2, 1)` for the symbol cell; the val arm's
-  // intern returns `mkval(2, hit)` and allocates nothing), so the buffer used to
-  // be live across TWO scavenge points before anything named it — one table hit
-  // plus one collection and the bytes were gone.  `mkstr` allocates NOTHING
-  // (item 1: it tags the cell `allocraw` made), so binding the value here is the
-  // whole fix: from `sN` on, the cell is a ROOTED frame slot.
+  // THE STRING IS TAGGED BEFORE THE FIRST CALL ON THE LINE, ON BOTH ARMS (perf
+  // word-arm-rawroot item 2 for the word arm, and its review's SHOULD-FIX for
+  // this one).  `bufW` is a RAW WORD, and the line's first two calls are
+  // `Rt.intern`:
+  //
+  //   WORD ARM  — `intern`'s HIT path ALLOCATES a symbol cell
+  //               (`allocKind(2, 1)`), so the buffer used to be live across TWO
+  //               scavenge points before anything named it: one table hit plus
+  //               one collection and the bytes were gone.
+  //   VAL ARM   — the HIT path returns `mkval(2, hit)` and the MISS path
+  //               (`intInsert` -> `intInsertAt`) mallocs its name and returns
+  //               `mkval(2, store)`; MEASURED, `q_Rt_x2eintern`'s transitive
+  //               closure in the val-arm artifact is 11 defuns and contains NO
+  //               `gcAlloc` (whose only callers there are allocRaw and
+  //               allocVector), so this arm CANNOT collect inside `intern`
+  //               today.  So the val-arm window is EMPTY — but empty by
+  //               INVARIANT (intern's body staying allocation-free), not by
+  //               order, and the two arms are one edit away from agreeing.
+  //
+  // Binding the value first makes the safety STRUCTURAL on both arms instead:
+  // `mkstr` allocates NOTHING (item 1 tags the cell `allocraw` made; on the val
+  // arm it writes a 40-byte Value into a frame slot), so from `sN` on the string
+  // is a ROOTED slot and the two `intern` calls can do whatever they like.  This
+  // is also why the two splices are gone: one statement now serves both arms.
   val sN = mkstr(bufW, payload(lenN, 0));
   recur(tblN, mknum(payload(iN, 0) - 1), call Rt.cons(call Rt.intern("cons"), call Rt.cons(call Rt.cons(call Rt.intern("string"), call Rt.cons(sN, mknil)), call Rt.cons(acc, mknil))));
-  // <<< QBE_WORDVAL-ONLY
 }
 
 defun Rt.glob(pattern : val) -> val {

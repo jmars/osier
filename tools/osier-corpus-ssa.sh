@@ -64,6 +64,13 @@ MANIFEST="$(ELM_GATE_MANIFEST_ONLY=1 "$GATE" 2>/dev/null)" || {
 # One plan line per group: <name>|<src1 elm> <src2 elm> ...|<entry>
 # (the output file the manifest names is IGNORED — every .ssa goes to scratch,
 # so nothing can clobber a committed artifact; see the stage-4 lesson).
+#
+# THE PLAN IS NOT ONE LINE PER ARTIFACT: the gate can register the same output
+# twice (sub.elm is registered twice today), so the plan carries 160 emissions
+# over 159 unique names and the second emit OVERWRITES the first.  Harmless here
+# (both emissions are of the same group, so the hash is the same either way) but
+# it matters for anyone reproducing an enumeration: "re-emit all 159" is really
+# 160 emissions, and counting the emissions is not counting the artifacts.
 jq -r '.groups[] | [(.output | split("/")[-1] | sub("\\.(csexp|ssa)$"; "")),
                    (.sources | join(" ")), .entry] | join("|")' \
   "$MANIFEST" > "$WORK/plan.tsv"
