@@ -707,6 +707,20 @@ wordArmUnported exp =
             -- three routes; a field whose value is un-ported still refuses.
             wordArmUnportedRecordFields fields
 
+        RecordGet rec _ ->
+            -- ============ THE SURFACE LANE: A RECORD FIELD READ ============
+            -- PORTED (perf word-arm-records R3).  `lowerRecordGet` binds the
+            -- record, then tag-tests it (`boxTagIs` with the VALTAG constants):
+            -- tag 14 -> the POSITIONAL `data[rank]` read (one `RawVecLoad` off
+            -- `RawVecBody`, both of which absorb the arm — NAMES LAST is what
+            -- makes that read need no fork) or the `Rt.recGet` NAME WALK, whose
+            -- word splice reads the names base from the record's LAST body word
+            -- and bounds by `veclen - 1`; tag 4 -> the assoc/snd chain (the
+            -- QBE_NOREC/host route, already ported).  The field NAME is not an
+            -- expression — it becomes a `symbol` literal (R1) — so the record
+            -- is the only subexpression to classify.
+            wordArmUnported rec
+
         Lit (LSymbol _) ->
             -- AREA 3, THE SYMBOL CELL (perf word-arm-records R1).  A word-arm
             -- symbol is one code-2 heap block whose body is ONE raw word (the
@@ -1121,7 +1135,15 @@ wordArmUnportedBinds binds =
         ( _, path ) :: rest ->
             case path of
                 VField _ _ ->
-                    Just (wordArea "AREA 3 (PAYLOAD ACCESS)" "a record field pattern — it is the RECORD family, whose word-arm body layout (the second, parallel field-NAMES array) is a design question this arm has not decided")
+                    -- ============ A RECORD FIELD PATTERN ============
+                    -- PORTED (perf word-arm-records R3).  It has no emission of
+                    -- its own: `lowerPath`'s `VField` arm binds the record into
+                    -- a ROOTED slot and then calls `recordAccessBody` — the
+                    -- SAME tag test + positional/walk read a `.field` read uses
+                    -- (`RecordGet`, below).  So this bind needs exactly what the
+                    -- read needed and nothing more, and its STEPS are pointer
+                    -- chases (`readSteps`), which are `VPath`'s own machinery.
+                    wordArmUnportedBinds rest
 
                 VPath _ ->
                     wordArmUnportedBinds rest
@@ -1305,6 +1327,14 @@ recToChainGo (plus recUpd/recAppend, which BUILD the record), and the compiler
 side has one more (`recordAccessBody`, guarded separately). Nothing else in the
 runtime reads a non-zero payload word of a heap object: the closure's field 2 and
 the stream's word 1 are BODY units, which is the same number on both arms.
+
+TEN ENTRIES, NOT TWELVE (perf word-arm-records R3): `Rt.recGet`/`Rt.recGetGo`
+LEFT the list in the commit that ported the READ.  Each now carries a
+`QBE_WORDVAL-ONLY` splice that reads the names base from the record's LAST body
+word and bounds by `veclen - 1` (the layout's own length reader), so the reason
+above — a layout not decided — is no longer true OF THEM; it is still true of
+the UPDATE half (`recUpd`/`recAppend`/`recInsert`/`recToChain` and their
+helpers), which must WRITE the same layout and copy both arrays.
 -}
 wordArmDefunRefusals : List ( String, String )
 wordArmDefunRefusals =
@@ -1312,9 +1342,7 @@ wordArmDefunRefusals =
         why =
             "the RECORD family is not ported to the word arm: a word-arm record body is a flat run of `count` Values, so the placement of its SECOND array (the field NAMES, `payload(rec, 2)` on the val arm) is a layout decision, not a stride. Twin it in the record-layout unit or keep it refused - a names-array read against a data-array body is the mixed-representation read this arm exists to prevent"
     in
-    [ ( "Rt.recGet", why )
-    , ( "Rt.recGetGo", why )
-    , ( "Rt.recUpd", why )
+    [ ( "Rt.recUpd", why )
     , ( "Rt.recUpdFind", why )
     , ( "Rt.recUpdCopy", why )
     , ( "Rt.recAppend", why )

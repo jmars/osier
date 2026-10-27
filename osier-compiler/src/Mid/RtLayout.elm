@@ -984,11 +984,27 @@ valLayout =
 --      three-range interleave), and `Rt.globalClosure`'s twin had never been
 --      EXECUTED — it returned a fixnum-shaped closure and wrote its header
 --      eight bytes off.  See item 7's correction below.
+--      RECORDS: THE BLOCK, THE BUILD AND THE READ ARE PORTED (perf
+--      word-arm-records R2/R3).  The layout is ONE code-14 heap block whose
+--      body is `[data_0 .. data_{n-1} | namesBase]` — the field VALUES in
+--      canonical order, then ONE raw word, the address of the field-NAMES array
+--      — with the header count `n + 1`.  NAMES LAST is load-bearing: it keeps
+--      `vecload(vecbody(rec), i) == data[i]` on BOTH arms, so the positional
+--      read (`recordAccessBody`) needs no fork at all and every arm fork is
+--      confined to the NAMES side.  The price is that every record LENGTH
+--      reader answers `veclen - 1` (`Rt.pvRec`, `Rt.recEqGo`, `Rt.recGetGo`);
+--      a bare `veclen` bound reads the names word as a field and, on a WRITE,
+--      runs into the NEXT heap block.  `Rt.allocRecord` owns the `+ 1` and
+--      `Rt.recGetGo`'s word splice owns the names-base read
+--      (`vecload(vecbody(rec), veclen(rec) - 1)`) — there is no third
+--      spelling.  Kind 14 was already in `heapKindScanned`, so the collector
+--      needed no change.
 --      NOT PORTED, each refused by name:
 --      `Con` (its vector is written through `storeValueCell`), the RECORD
---      family (`RecordLit`/`RecordGet`/`RecordUpdate`, and a `VField` pattern
---      bind — its second parallel NAMES array has no inline body layout, which
---      is a design decision, not a stride),
+--      family's UPDATE half (`RecordUpdate`, whose closed form is
+--      `lowerRecordUpdateClosed`'s hand-spelled `slot + 8` / `*valSizeBytes`
+--      chase — the val arm's payload-indirection + byte-stride + separate-array
+--      triple, wrong differently on each leg here),
 --      `StreamRef`, float literals, let-destructuring, `MTagEq`
 --      (a constructor-tag pattern — it materialises the tag as a `symbol`,
 --      which is now ported, so what remains there is the tag-EQUALITY half),

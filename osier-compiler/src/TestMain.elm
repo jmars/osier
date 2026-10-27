@@ -129,7 +129,7 @@ checks rt rawMidText =
                         String.contains "veclen(" (defunText key wordText)
                             && not (String.contains "reclen(" (defunText key wordText))
                     )
-                    [ "Rt.vecEq", "Rt.pvV", "Rt.pvRec", "Rt.recEqGo", "Rt.hostIsProgram", "Rt.hostDispatch" ]
+                    [ "Rt.vecEq", "Rt.pvV", "Rt.pvRec", "Rt.recEqGo", "Rt.recGetGo", "Rt.hostIsProgram", "Rt.hostDispatch" ]
                     && String.contains "veclen(" (defunText "Rt.deepEq" wordText)
                     && List.length (String.indexes "veclen(" wordText) >= 8
                     && not (String.contains "len32(a) == len32(bb)) && call Rt.vecEq" wordText)
@@ -188,7 +188,6 @@ checks rt rawMidText =
                     (\e -> QbeLower.wordArmUnported e)
                     [ PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
                     , Con { tag = "Just", args = [ Lit (LNumber 1) ] }
-                    , RecordGet (Var 0) "x"
                     , RecordUpdate { base = Var 0, updates = [ ( "x", Lit (LNumber 1) ) ] }
                     , StreamRef { varName = "*stoutput*" }
                     , Lit (LFloat 1.5)
@@ -244,12 +243,18 @@ checks rt rawMidText =
             && QbeLower.wordArmUnported (caseExp [ MEmpty [], MCons [ HdStep ], MCons [ HdStep, TlStep ] ] [])
                 == Nothing
             && QbeLower.wordArmUnported (caseExp [ MLitEq [] (LNumber 3) ] []) == Nothing
-            -- ... and the two shapes this unit did NOT port still refuse BY
-            -- NAME rather than at the emit: a CONSTRUCTOR-TAG match (it
-            -- materialises the tag as a `symbol` literal — AREA 5) and a RECORD
-            -- field bind (the refused record family).
+            -- ... and the shape this unit did NOT port still refuses BY NAME
+            -- rather than at the emit: a CONSTRUCTOR-TAG match (it
+            -- materialises the tag as a `symbol` literal — AREA 5).
+            --
+            -- THE RECORD FIELD BIND LEFT THIS PAIR (perf word-arm-records R3):
+            -- a `VField` bind has NO emission of its own — `lowerPath` binds the
+            -- record into a rooted slot and calls `recordAccessBody`, the same
+            -- access body a `.field` read uses — so it is admitted exactly when
+            -- the READ is, and the positive assertion lives with `RecordGet`'s
+            -- (below) rather than here.
             && (QbeLower.wordArmUnported (caseExp [ MTagEq [ IdxStep 0 ] "Just" ] []) /= Nothing)
-            && (QbeLower.wordArmUnported (caseExp [] [ ( { id = 1, name = "f" }, VField [] "f" ) ]) /= Nothing)
+            && QbeLower.wordArmUnported (caseExp [] [ ( { id = 1, name = "f" }, VField [] "f" ) ]) == Nothing
             -- ... and the recursion reaches the BODY, in BOTH directions: a
             -- case whose body is an ARITHMETIC prim is now admitted (perf
             -- word-arm-arith ported it), and a case whose body is the still
@@ -278,7 +283,7 @@ checks rt rawMidText =
             -- operands, so a `/= ` over an un-ported construct refuses.
             && QbeLower.wordArmUnported (NotEqual { left = Lit (LNumber 5), right = Lit (LNumber 3), falseLabel = "nef", endLabel = "nee" }) == Nothing
             && QbeLower.wordArmUnported (NotEqual { left = Lit (LNumber 5), right = PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }, falseLabel = "nef", endLabel = "nee" }) == Nothing
-            && (QbeLower.wordArmUnported (NotEqual { left = Lit (LNumber 5), right = RecordGet (Var 0) "x", falseLabel = "nef", endLabel = "nee" }) /= Nothing)
+            && (QbeLower.wordArmUnported (NotEqual { left = Lit (LNumber 5), right = Con { tag = "Just", args = [ Lit (LNumber 1) ] }, falseLabel = "nef", endLabel = "nee" }) /= Nothing)
             && (QbeLower.wordArmUnported (NotEqual { left = Lit (LFloat 1.5), right = Lit (LNumber 3), falseLabel = "nef", endLabel = "nee" }) /= Nothing)
             -- ============ CLOSURES (perf word-arm-closures) ============
             -- `Lam` and `GRef` LEFT the refused set together, because they are
@@ -295,7 +300,7 @@ checks rt rawMidText =
             && QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = Var 0 }) == Nothing
             && QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = PrimApp { prim = "+", args = [ Var 0, Lit (LNumber 1) ] } }) == Nothing
             && (QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = PrimApp { prim = "f/", args = [ Var 0, Lit (LNumber 2) ] } }) /= Nothing)
-            && (QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = RecordGet (Var 0) "f" }) /= Nothing)
+            && (QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = Con { tag = "Just", args = [ Lit (LNumber 1) ] } }) /= Nothing)
             && QbeLower.wordArmUnported (GRef { key = "M.f", force = False }) == Nothing
             && QbeLower.wordArmUnported (GRef { key = "M.f", force = True }) == Nothing
             -- and the refused set is exactly SEVEN named constructs: a
@@ -322,7 +327,11 @@ checks rt rawMidText =
             -- as two commits so each construct's evidence is its own.  The
             -- count moved by exactly the two entries the positive assertions
             -- cover, so a future re-refusal of either is RED here twice over.
-            && List.length refused == 7
+            --
+            -- SEVEN -> SIX (perf word-arm-records R3): `RecordGet` left with
+            -- the READ's port; `RecordUpdate` is the one record construct still
+            -- standing in the list, and it leaves in its own commit.
+            && List.length refused == 6
             -- ... and the construct that LEFT the refused set (perf
             -- word-arm-records R1): a SYMBOL LITERAL is now admitted, because
             -- its cell is ported (code 2, a raw body `[byte pointer, length]`
@@ -345,7 +354,22 @@ checks rt rawMidText =
             && QbeLower.wordArmUnported (RecordLit []) == Nothing
             && QbeLower.wordArmUnported (RecordLit [ ( "x", PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ]) == Nothing
             && (QbeLower.wordArmUnported (RecordLit [ ( "x", PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ]) /= Nothing)
-            && (QbeLower.wordArmUnported (RecordLit [ ( "x", Lit (LNumber 1) ), ( "y", RecordGet (Var 0) "z" ) ]) /= Nothing)
+            && (QbeLower.wordArmUnported (RecordLit [ ( "x", Lit (LNumber 1) ), ( "y", RecordGet (Var 0) "z" ) ]) == Nothing)
+            -- A RECORD FIELD READ left the refused set too (perf
+            -- word-arm-records R3).  Its emission is a tag test plus either the
+            -- POSITIONAL `data[rank]` load (no fork: NAMES LAST keeps
+            -- `vecload(vecbody(rec), i) == data[i]` on both arms) or the
+            -- `Rt.recGet` name walk, whose word splice reads the names base from
+            -- the record's LAST body word.  BOTH DIRECTIONS again: the read is
+            -- admitted over any record this arm can build, and it REFUSES when
+            -- the record expression itself refuses — the classifier recurses
+            -- into the record, so "the read is ported" cannot be mistaken for
+            -- "anything it reads is".
+            && QbeLower.wordArmUnported (RecordGet (Var 0) "x") == Nothing
+            && QbeLower.wordArmUnported (RecordGet (RecordLit [ ( "x", Lit (LNumber 1) ) ]) "x") == Nothing
+            && QbeLower.wordArmUnported (RecordGet (RecordLit [ ( "x", Lit (LString "hi") ) ]) "x") == Nothing
+            && (QbeLower.wordArmUnported (RecordGet (RecordLit [ ( "x", PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ]) "x") /= Nothing)
+            && (QbeLower.wordArmUnported (RecordGet (Con { tag = "Just", args = [ Lit (LNumber 1) ] }) "x") /= Nothing)
         )
     , check "utf8ByteLength 'héllo' == 6" (utf8ByteLength "héllo" == 6)
     , check "utf8ByteLength '🦀' == 4" (utf8ByteLength "🦀" == 4)
@@ -1907,6 +1931,31 @@ checks rt rawMidText =
                     && Dict.get "Rt.recEqGo" Rt.rtDeps
                     /= Nothing
                     && List.member "Rt.gcAlloc" (Maybe.withDefault [] (Dict.get "Rt.allocRecord" Rt.rtDeps))
+
+            _ ->
+                False
+        )
+    , check "THE RECORD READ'S NAMES SIDE, IN BOTH SPLICES (perf word-arm-records R3). A word-arm record has no `payload(rec, 2)` — its whole body is `[data_0 .. data_{n-1} | namesBase]` — so `Rt.recGetGo`'s word splice takes the names base from the LAST body word and bounds the walk by `veclen - 1` (the header count is n+1, so a bare `veclen` reads the names word as a field, and one past the end runs into the NEXT heap block). BOTH DIRECTIONS: the word splice carries the two `veclen - 1` spellings and NOT the val arm's `payload(rec, 2)`; the val splice is still exactly the val arm's, with no `veclen - 1`"
+        (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
+            ( Ok valText, Ok wordText ) ->
+                let
+                    wordGet =
+                        defunText "Rt.recGetGo" wordText
+
+                    valGet =
+                        defunText "Rt.recGetGo" valText
+                in
+                String.contains "if (mkbool(payload(i, 0) >= veclen(rec) - 1)) {" wordGet
+                    && String.contains "val nameSym = mknum(wload(wload(vecbody(rec), veclen(rec) - 1), payload(i, 0)));" wordGet
+                    && not (String.contains "payload(rec, 2)" wordGet)
+                    && String.contains "if (mkbool(payload(i, 0) >= reclen(rec))) {" valGet
+                    && String.contains "val nameSym = vecload(payload(rec, 2), payload(i, 0));" valGet
+                    && not (String.contains "veclen(rec) - 1" valGet)
+                    -- the walk is REACHED from the entry point and steps by
+                    -- one; a missing `+ 1` would LOOP rather than red here, so
+                    -- the behavioural half is the `recget.elm` diff row.
+                    && String.contains "return call Rt.recGetGo(rec, field, mknum(0));" wordText
+                    && String.contains "return call Rt.recGetGo(rec, field, mknum(payload(i, 0) + 1));" wordGet
 
             _ ->
                 False
