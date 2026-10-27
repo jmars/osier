@@ -3372,10 +3372,14 @@ fi
 # (`Rt.recAppend`'s data array, unrooted across the names array's allocation) is
 # VAL-ARM code with no word-arm twin — the word arm refuses RecordUpdate
 # outright — so there is no second representation to be the oracle, and the
-# number IS the measurement.  What makes the row fail-able is the LADDER: the
-# pre-fix fixture SEGFAULTED at QBE_HEAP_MB=1 and 2 and answered 5999 of 6000 at
-# 4 and 8, so a single default-knob run would have passed it.  MEASURED RED
-# before the fix and GREEN after, at every rung.
+# number IS the measurement.
+#
+# THE RUNGS ARE THE WHOLE INSTRUMENT, and they are MEASURED, not chosen: pre-fix
+# the fixture SEGFAULTED (rc 139) at QBE_HEAP_MB=1 and 2, answered 6000/5999/1
+# (one silently wrong record) at 4 AND AT 8, and answered 6000/6000/0 at DEFAULT
+# knobs.  So a default-knob row WOULD HAVE PASSED the segfault entirely, rung 8
+# is not decoration (it covers the (4, default] band a variant could fire in
+# alone), and the ladder is what makes the row fail-able at all.
 run_heap_ladder() {
   local name="$1" fixture="$2" entry="$3" want="$4"
   local bin
@@ -3383,7 +3387,7 @@ run_heap_ladder() {
     echo "FAIL $name: qbe-mk"; FAIL=1; return
   }
   local mb out rc first=""
-  for mb in 1 2 4 default; do
+  for mb in 1 2 4 8 default; do
     if [ "$mb" = "default" ]; then
       out="$(timeout 120 "$bin" "$entry" 2>&1)"
     else
@@ -3402,7 +3406,7 @@ run_heap_ladder() {
     fi
     first="$out"
   done
-  echo "PASS $name: 4 heap rungs (QBE_HEAP_MB=1/2/4/default) all exit 0 and print '$first' — record insertion survives a collection on the DEFAULT arm"
+  echo "PASS $name: 5 heap rungs (QBE_HEAP_MB=1/2/4/8/default) all exit 0 and print '$first' — record insertion survives a collection on the DEFAULT arm"
 }
 
 if [ -f "$ROOT/tools/qbe/fixtures/recinschurn.elm" ]; then
