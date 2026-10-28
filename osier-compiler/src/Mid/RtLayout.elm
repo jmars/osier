@@ -999,7 +999,29 @@ valLayout =
 --      (`vecload(vecbody(rec), veclen(rec) - 1)`) — there is no third
 --      spelling.  Kind 14 was already in `heapKindScanned`, so the collector
 --      needed no change.
---      THE RECORD FAMILY IS COMPLETE (perf word-arm-records R4).  The UPDATE
+--      THE RECORD FAMILY IS **NOT** COMPLETE, AND THE CLAIM THAT IT WAS IS
+--      WITHDRAWN (perf word-arm-records R4 review BLOCKER 3).  The READ, BUILD
+--      and UPDATE constructs all EMIT and the one-shot fixtures are green on
+--      both arms, but the word arm's `Rt.recAppend` FAILS UNDER CHURN at
+--      QBE_HEAP_MB=1, and that row is now WIRED so the claim cannot drift again:
+--      `tools/qbe/word-arm-gcchurn/rec.elm` (6000 insertions, each kept
+--      reachable and content-compared through a whole-record `==` AND a field
+--      read) prints 6000/6000/0 on the val arm at both heaps, 6000/6000/0 on the
+--      word arm at DEFAULT knobs, and SEGFAULTS on the word arm at h1.
+--      WHAT WAS FOUND AND FIXED BY IT: an old-to-young store with no write
+--      barrier (the names block allocated AFTER the record, so a promotion at
+--      the names allocation left the record old and its names base young) —
+--      fixed by allocating the names block FIRST; and, before that, a
+--      rooted-but-unfilled body word promoted as garbage — fixed by filling the
+--      record before any further allocation.  WHAT IS STILL OPEN: the h1
+--      failure survives both, and survives the names block being SCANNED
+--      instead of raw (which segfaults for a different reason: a name pointer is
+--      not a Value-shaped word), so the remaining window is neither the fill
+--      order nor the scan bit nor the allocation order.  THREE ATTEMPTS HAVE
+--      FAILED; the next one should start from the churn row, not from a
+--      hypothesis.
+--      THE READ, BUILD AND UPDATE HALF, stated with the same honesty (perf
+--      word-arm-records R3/R4).  The UPDATE
 --      half landed as the same one-block build: `lowerRecordUpdateClosed`'s tag
 --      tests go through a `recordTagBranch` seat (`wordTagIs` here, the val
 --      arm's `Load W` + `Cmp` there), its field COPY goes through `fieldBase 0`
@@ -1016,23 +1038,12 @@ valLayout =
 --      names block is a code-1 raw word array, and the naming lie is stated at
 --      the site: code 1 buys the SCAN BIT, which is the only property the
 --      collector reads.  `Rt.recInsert` needs no twin (it forwards).
---      `wordArmDefunRefusals` IS EMPTY.
---      ONE DEFECT IS OPEN, AND IT IS MEASURED: the word arm's `Rt.recAppend` is
---      NOT COLLECTION-SAFE under churn.  `tools/qbe/word-arm-gcchurn/rec.elm`
---      (6000 insertions, each kept reachable and CONTENT-compared through both
---      the data words and a field read) is committed and RED: the val arm prints
---      `6000/6000/0` at QBE_HEAP_MB=1 and at default knobs, the word arm
---      SEGFAULTS at h1 (rc 139) and dies at default with `mknum overflow`.  It
---      is NOT wired into `qbe-check` for that reason (a red row would red the
---      gate; a skip would be a proof-shaped lie).  WHAT IS KNOWN: the record
---      block is complete before the names allocation only because of the
---      placeholder store (`wstore(.., veclen(ndN) - 1, 0)`) added in the same
---      commit that found it, and that alone did not fix it — so the remaining
---      window is either the names block itself (a code-1 UNSCANNED block held as
---      a raw word across `recAppendNamesGo`, or reached only through a tagged
---      body word that a promotion of the RECORD may re-tag) or the mask's
---      assumption that a promoted base is still 8-aligned.  THE NEXT UNIT'S
---      FIRST ACT is to make that fixture green at BOTH heaps, then wire it in.
+--      `wordArmDefunRefusals` IS EMPTY — the refusal LIST is empty, which is a
+--      statement about the classifier's by-name gate and NOT about correctness.
+--      The correctness statement is the paragraph above: the churn row is red at
+--      h1.  (This distinction is the review's blocker 3: the list went empty and
+--      the worklist said COMPLETE, while the implementer's own churn fixture
+--      recorded RED.  A worklist that over-claims is worse than none.)
 --      NOT PORTED, each refused by name:
 --      `Con` (its vector is written through `storeValueCell`),
 --      `StreamRef`, float literals, let-destructuring, `MTagEq`

@@ -23,14 +23,15 @@ module M exposing (main)
 -- OUTPUT is `examined/matched/mismatched`; expected 6000/6000/0 at every heap
 -- size, on both arms.
 --
--- STATUS: **THIS FIXTURE IS RED ON THE WORD ARM AND IS NOT WIRED INTO THE GATE.**
--- MEASURED (perf word-arm-records R4): val `6000/6000/0` at h1 and default; word
--- h1 SEGFAULT (rc 139), word DEFAULT dies with `qbe-rt: word arm: mknum
--- overflow`.  The 6000-insert churn is the first thing that allocates a record
--- AND a names block 6000 times, so it is the shape that finds the window the
--- one-shot fixtures cannot.  It is committed so the defect is a runnable
--- reproduction rather than a paragraph; wiring it in is the NEXT unit's first
--- act, and it must go green at BOTH heaps before it is a row.
+-- STATUS: **WIRED, AND RED AT h1.**  This row is in
+-- `tools/qbe/word-arm-gcchurn.sh` (h1 + default) so the defect cannot go
+-- unmentioned again.  MEASURED (perf word-arm-records R4, after the review's
+-- blockers 1-2 and three attempts at this one): val `6000/6000/0` at BOTH heaps;
+-- word `6000/6000/0` at DEFAULT knobs and SEGFAULT (rc 139) at QBE_HEAP_MB=1.
+-- Fixed on the way here: the record-then-names allocation order (an old-to-young
+-- names store with no barrier) and a rooted-but-unfilled body word promoted as
+-- garbage.  The remaining window is neither the fill order nor the allocation
+-- order nor the scan bit (a SCANNED names block segfaults for its own reason).
 
 ins r i =
     { r | x <- i }
