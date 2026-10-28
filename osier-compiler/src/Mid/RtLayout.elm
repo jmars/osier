@@ -1017,6 +1017,22 @@ valLayout =
 --      the site: code 1 buys the SCAN BIT, which is the only property the
 --      collector reads.  `Rt.recInsert` needs no twin (it forwards).
 --      `wordArmDefunRefusals` IS EMPTY.
+--      ONE DEFECT IS OPEN, AND IT IS MEASURED: the word arm's `Rt.recAppend` is
+--      NOT COLLECTION-SAFE under churn.  `tools/qbe/word-arm-gcchurn/rec.elm`
+--      (6000 insertions, each kept reachable and CONTENT-compared through both
+--      the data words and a field read) is committed and RED: the val arm prints
+--      `6000/6000/0` at QBE_HEAP_MB=1 and at default knobs, the word arm
+--      SEGFAULTS at h1 (rc 139) and dies at default with `mknum overflow`.  It
+--      is NOT wired into `qbe-check` for that reason (a red row would red the
+--      gate; a skip would be a proof-shaped lie).  WHAT IS KNOWN: the record
+--      block is complete before the names allocation only because of the
+--      placeholder store (`wstore(.., veclen(ndN) - 1, 0)`) added in the same
+--      commit that found it, and that alone did not fix it — so the remaining
+--      window is either the names block itself (a code-1 UNSCANNED block held as
+--      a raw word across `recAppendNamesGo`, or reached only through a tagged
+--      body word that a promotion of the RECORD may re-tag) or the mask's
+--      assumption that a promoted base is still 8-aligned.  THE NEXT UNIT'S
+--      FIRST ACT is to make that fixture green at BOTH heaps, then wire it in.
 --      NOT PORTED, each refused by name:
 --      `Con` (its vector is written through `storeValueCell`),
 --      `StreamRef`, float literals, let-destructuring, `MTagEq`

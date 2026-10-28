@@ -2444,6 +2444,15 @@ defun Rt.recAppend(rec : val, field : val, newv : val) -> val {
   val ndN = mkval(14, vecbody(call Rt.allocRecord(mknum(veclen(rec)))));
   call Rt.recAppendDataGo(rec, ndN, packed);
   vecstore(vecbody(ndN), payload(pos, 0), newv);
+  // THE RECORD MUST BE COMPLETE BEFORE THE NAMES ALLOCATION (perf
+  // word-arm-records R4, the rawroot item-3 shape found HERE by the collecting
+  // ladder).  `allocKind` below is a SAFEPOINT, and a rooted-but-UNWRITTEN body
+  // word is promoted as GARBAGE: `gcScavValue` reads the names slot's tag, and
+  // a stale word whose low bits are 1 relocates a bogus pointer (MEASURED:
+  // QBE_HEAP_MB=1 SEGFAULT) while tag 7 dies on the poison check.  So the slot
+  // gets a 0 — a fixnum-shaped word the walk skips — before the allocation, and
+  // is overwritten with the tagged base immediately after.
+  wstore(vecbody(ndN), veclen(ndN) - 1, 0);
   word nn = vecbody(call Rt.allocKind(mknum(1), mknum(veclen(rec))));
   wstore(vecbody(ndN), veclen(ndN) - 1, nn + 1);
   call Rt.recAppendNamesGo(rec, mknum(nn), packed);

@@ -153,6 +153,13 @@ row partbig  default 300
 #      defect class in the same file, and it fires at DEFAULT knobs too ----
 row str      h1      180
 row str      default 180
+# ---- NOT WIRED: RUNTIME-BUILT RECORD NAMES ARRAYS (perf word-arm-records R4).
+#      `rec.elm` is COMMITTED AND RED, deliberately not a row: it FAILS on the
+#      word arm today (h1 SEGFAULT rc 139; DEFAULT `mknum overflow`), which is a
+#      REAL DEFECT in `Rt.recAppend`'s word twin, not a missing feature.  A row
+#      here would red the gate; a skip would be a proof-shaped lie.  The fixture
+#      and the measurement are recorded in Mid/RtLayout.elm's worklist so the
+#      next unit starts from them instead of rediscovering them.
 
 if [ "$fails" != 0 ]; then
   echo "word-arm-gcchurn: $fails failure(s) — a closure is being read after a collection it did not survive"
