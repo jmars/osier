@@ -3214,8 +3214,10 @@ defun Rt.argErrInt(aN : val) -> val {
 }
 
 // Rt.parseArg: ONE entry argument -> the Value the entry is called with,
-// written into the 40-byte slot at `dst` (the caller's abuf entry) with the
-// raw `vecstore` node.  Returns mknum(0) on success, mknum(2) after the
+// written into the slot at `dst` (the caller's abuf entry) with the raw
+// `vecstore` node — ONE Value at the ARM's stride, which is why the pitch
+// belongs to the caller (`Rt.parseArgsGo`) and not to this defun.  Returns
+// mknum(0) on success, mknum(2) after the
 // refusal line — the exit code stays the driver's (Rt.parseArgsGo's rc),
 // exactly as the seat had it.
 //
@@ -8414,7 +8416,27 @@ defun Rt.parseArgsGo(blk : val, j : val) -> val {
   }
   word bufW = wload(payload(blk, 0), 0);
   word argvW = wload(payload(blk, 0), 1);
+  // THE ENTRY-ARG BUFFER'S PITCH IS THE LAYOUT'S, TWINNED (perf
+  // word-arm-corpusrun).  It used to be a PRIVATE 40 on both arms — "agreed by
+  // writer and reader, so correct" — and that was WRONG IN THE DIRECTION THAT
+  // DROPS LIVE VALUES: `Rt.main` registers the buffer with
+  // `Rt.rootPushValueArray(abuf, abuf + 640)`, and a kind-2 root's COUNT is the
+  // number of VALUES the collector scans at the layout's stride (8 on the word
+  // arm), so at a 40-byte pitch the scan covered `8 * nargs` bytes of a region
+  // whose args sit at `40 * j` — arg 1 was OUTSIDE the root for any nargs <= 5,
+  // and a float arg is a HEAP cell, so a scavenge in the window between the
+  // registration and `rt_callN` would have handed the entry a stale Value.
+  // Twinning the pitch makes the region exactly `nargs` Values, which is what
+  // the registration already says.  The WRITER below and the READERS in
+  // `Rt.main` (`a1 .. a15`) move TOGETHER or the entry reads its arguments from
+  // the wrong cells — `word-arm-corpusrun.sh` is the row that catches a
+  // one-sided move (120 registered argument vectors, both arms, stdout+rc).
+  // >>> QBE_VAL-ONLY
   word argPtr = bufW + (payload(j, 0) * 40);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word argPtr = bufW + (payload(j, 0) * 8);
+  // <<< QBE_WORDVAL-ONLY
   word argStr = wload(argvW, 2 + payload(j, 0));
   word rc = payload(call Rt.parseArg(mknum(argPtr), mknum(argStr)), 0);
   if (mkbool(rc != 0)) {
@@ -8508,9 +8530,21 @@ defun Rt.main(argc : word, argv : word) -> word {
   wstore(pblk, 2, entry_nargs);
   val prc = call Rt.parseArgsGo(mknum(pblk), mknum(0));
   word pre = if (mkbool(payload(prc, 0) != 0)) { rawcall exit(2); return 0; } else { return 0; };
+  // THE ENTRY-ARG ROOT, AND WHAT IT COVERS (perf word-arm-corpusrun).
+  // A kind-2 registration's COUNT is the number of VALUES the collector scans
+  // at the LAYOUT's stride (`Rt.gcScavRoots`/`gcMarkRoots` read the i32 at `np`
+  // and call `gcScanValueArray`), so the region must be a real Value array: the
+  // args at `a1 .. a15`, one per 40 bytes on the val arm and one per 8 on the
+  // word arm.  The count cell (word 80 = byte 640) is OUTSIDE the scanned
+  // region on BOTH arms — 16 args is the most `Rt.main` admits (`nargs > 16` is
+  // the usage error), so the region is 40*16 = 640 bytes on the val arm (the
+  // cell starts AT 640) and 8*16 = 128 on the word arm.  That matters: the cell
+  // holds a raw i64 count, not a Value, and a scan that reached it would read
+  // it as one.  TestMain pins the arithmetic per arm.
   wstore(abuf, 80, entry_nargs);
   call Rt.rootPushValueArray(abuf, abuf + 640);
   call Rt.argvInstall(mknum(argvMode), mknum(nargs), mknum(argv));
+  // >>> QBE_VAL-ONLY
   word a1 = abuf + 40;
   word a2 = abuf + 80;
   word a3 = abuf + 120;
@@ -8526,6 +8560,24 @@ defun Rt.main(argc : word, argv : word) -> word {
   word a13 = abuf + 520;
   word a14 = abuf + 560;
   word a15 = abuf + 600;
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word a1 = abuf + 8;
+  word a2 = abuf + 16;
+  word a3 = abuf + 24;
+  word a4 = abuf + 32;
+  word a5 = abuf + 40;
+  word a6 = abuf + 48;
+  word a7 = abuf + 56;
+  word a8 = abuf + 64;
+  word a9 = abuf + 72;
+  word a10 = abuf + 80;
+  word a11 = abuf + 88;
+  word a12 = abuf + 96;
+  word a13 = abuf + 104;
+  word a14 = abuf + 112;
+  word a15 = abuf + 120;
+  // <<< QBE_WORDVAL-ONLY
   word fslot = rawcall malloc(8);
   word modelslot = rawcall malloc(40);
   word d0 = if (mkbool(arity == 0)) {

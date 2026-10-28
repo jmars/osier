@@ -557,22 +557,42 @@ pitch against an 8-byte slot array, argument *k* is read from slot *5k*.
   why `Rt.frameBlock` keeps `40 + 8 * nslots` on the word arm and only the slot
   term moves. `Rt.main`'s `mblk = malloc(40)` — a five-word `{base, entry,
   metaN, code, arity}` block, not a Value.
-* **P (17).** `Rt.main`'s ENTRY-ARGUMENT buffer and its writer
-  `Rt.parseArgsGo`: `malloc(648)`, `wstore(abuf, 80, entry_nargs)` (byte 640),
-  `rootPushValueArray(abuf, abuf + 640)`, `a1 … a15 = abuf + 40 … + 600`, and
-  `bufW + (payload(j, 0) * 40)`. **This one is correct on both arms and twinning
-  it would be an optimization, not a port** — MEASURED, not argued: the writer
-  and the reader use the SAME pitch, so `rt_callN`'s `buf + 40k` addresses the
-  cell `Rt.parseArg` filled, and the collector's registration over-scans
-  harmlessly (80 cells at the word arm's 8-byte stride over a 640-byte region
-  whose unwritten cells are `memset` zeros, and a zero word is the fixnum 0, so
-  `gcMarkValue` sees nothing to move). Probed on this tree: a three-argument
-  entry `M.go 1 2 3` answers `123` with rc 0 on BOTH arms
-  (`QBE_VALREP=word`), and `$main`'s word-arm emit really does carry
-  `%t318 =l add %t240, 40` feeding `$rt_call3`.
-  **THIS IS THE ROW THAT SHOWS WHY A TEXT SCAN IS NOT A CLASSIFICATION**: P and T
-  are the same characters — `base + k * 40` — and only the question "whose
-  stride is this?" tells them apart.
+* **P (17) — TWINNED, AND THIS BULLET WAS THE FILE'S ONE WRONG ANSWER.** What it
+  said: the entry-argument buffer (`Rt.main`'s `malloc(648)`,
+  `wstore(abuf, 80, entry_nargs)`, `rootPushValueArray(abuf, abuf + 640)`,
+  `a1 … a15 = abuf + 40 … + 600`, `Rt.parseArgsGo`'s
+  `bufW + (payload(j, 0) * 40)`) is "correct on both arms", because "the writer
+  and the reader use the SAME pitch" and "the collector's registration
+  over-scans harmlessly (80 cells at the word arm's 8-byte stride over a
+  640-byte region whose unwritten cells are `memset` zeros)". **BOTH HALVES ARE
+  FALSE FROM THE CODE**, and the direction of the error is the one that DROPS
+  LIVE VALUES:
+  - A kind-2 root's COUNT is the i32 at its `np` (`Rt.gcScavRoots` /
+    `Rt.gcMarkRoots`), and `np` is `abuf + 640` — the cell
+    `wstore(abuf, 80, entry_nargs)` writes, so the count is `entry_nargs`, NOT
+    80. `malloc(648)` is never `memset`, so the region's unwritten cells are not
+    "memset zeros" either.
+  - With the scan stride being the LAYOUT's (8 on the word arm), a count of
+    `nargs` covers `8 * nargs` bytes of a region whose args sit at `40 * j`:
+    **arg 1 is outside the root for any `nargs <= 5`**, arg 2 for `nargs <= 10`.
+    A float entry argument is a HEAP cell (`Rt.parseArg` -> `mkflt`), so a
+    scavenge in the window `[rootPushValueArray, rt_callN]` — the window
+    `Rt.argvInstall` allocates in — would have handed the entry a STALE Value.
+  - The `M.go 1 2 3` probe could not see it: fixnum arguments are immediates and
+    nothing forced a collection in that window.
+  THE FIX (perf word-arm-corpusrun): the pitch is the layout's on both arms —
+  `Rt.parseArgsGo` writes at `8 * j` and `Rt.main`'s readers are
+  `a1 … a15 = abuf + 8 … + 120` under `QBE_WORDVAL-ONLY`, with the val arm's
+  `40 * j` / `+ 40 … + 600` untouched. The registration then says exactly what
+  the region is: `nargs` Values at the arm's stride, and the count cell at byte
+  640 is outside both regions (8\*16 = 128 on the word arm, 40\*16 = 640 on the
+  val arm — the cell starts AT 640). See "THE ENTRY-ARGS ROOT GAP" below for the
+  measurement, the pins and the part that cannot be exercised by a collection
+  today.
+  **AND THE ROW IS STILL WHY A TEXT SCAN IS NOT A CLASSIFICATION**: P and T are
+  the same characters — `base + k * 40` — and only the question "whose stride is
+  this?" tells them apart. The text scan answered it wrong; the CODE answered it
+  right.
 * **D (1).** `Rt.main`'s `modelslot = malloc(40)` — ONE Value cell. The word arm
   reads it through `vecload`, which is layout-derived, so it reads correctly at
   offset 0 out of an over-allocated 40-byte block. Over-allocation is not a
@@ -823,3 +843,80 @@ both arms returned; `B` is the byte length of the byte-identical stdout.
   taskpure                 1    0        identical, 3 B
   taskseq                  1    0        identical, 2 B
 ```
+
+## THE ENTRY-ARGS ROOT GAP (perf word-arm-corpusrun): THE DOC WAS WRONG, AND IN THE DIRECTION THAT DROPS LIVE VALUES
+
+This section replaces the P bullet's old verdict. The hostpath review called it
+FLIP-GATING and it was right: the flip makes the word arm the DEFAULT for exactly
+the arg-heavy invocations (selfhost binaries take several entry args), so a root
+that under-covers is the worst thing to turn on.
+
+### What the code says (read, not inferred)
+
+| claim | verdict |
+| --- | --- |
+| "the registration over-scans harmlessly (80 cells …)" | **FALSE.** A kind-2 root reads its COUNT from the 4 bytes at `np` (`Rt.gcScavRoots` ~:6669, `gcMarkRoots` ~:6837). `np` is `abuf + 640`; `wstore(abuf, 80, entry_nargs)` writes word 80 = byte 640, and `wstore`'s index IS a word index, so the count is **`entry_nargs`**, not 80. |
+| "over a 640-byte region whose unwritten cells are `memset` zeros" | **FALSE.** `abuf = malloc(648)` and nothing memsets it. The "80 cells at the word arm's 8-byte stride" is the count 80, which never happens. |
+| the scan covers the args | **FALSE ON THE WORD ARM.** The scan stride is the layout's (8) and the count is `nargs`, so it covers `[abuf, abuf + 8*nargs)` while `Rt.parseArgsGo` wrote the args at `40 * j`. Arg 1 is outside for `nargs <= 5`; arg 2 for `nargs <= 10`. |
+| "agreed by writer and reader, so correct" | **TRUE AND INSUFFICIENT.** It is true of the ENTRY CALL (`a_j = abuf + 40j` reads what the writer wrote), which is why `M.go 1 2 3` answered `123` on both arms. It says nothing about the COLLECTOR, which reads the region at a different stride. A third reader with its own convention is what the "agreed" argument missed. |
+
+The live values at risk are FLOAT entry arguments — the only heap-boxed entry
+args (`Rt.parseArg` -> `mkflt`); ints are immediates. The exposing window is
+`[rootPushValueArray(abuf, abuf+640), rt_callN]`, i.e. `Rt.argvInstall`'s
+allocations: a scavenge there moves a float cell and leaves `abuf`'s slot naming
+the old block — a stale Value, rc 0, silent.
+
+### The fix, and why this shape rather than the cheaper one
+
+The pitch is now the layout's on both arms: `Rt.parseArgsGo` writes at `8 * j`,
+`Rt.main`'s readers are `a1 … a15 = abuf + 8 … + 120` under
+`QBE_WORDVAL-ONLY`; the val arm's `40 * j` / `+ 40 … + 600` are untouched (the
+corpus is still **159/159 BYTE-IDENTICAL**, no re-freeze). The abuf `malloc(648)`
+and the count cell at byte 640 do NOT move: the region is now `nargs` Values at
+the arm's stride (128 B at the 16-arg bound on the word arm, 640 B on the val
+arm) and the count cell starts exactly where the val arm's region ends — outside
+both, which it must be, since it holds a raw i64 count rather than a Value.
+
+THE CHEAPER SHAPE, CONSIDERED AND REJECTED: keep the 40 pitch and register
+`count = 5 * nargs` on the word arm (a stride-8 scan over `40 * nargs` bytes hits
+each arg at slot `5j`, and the zeros between are the fixnum 0). It is correct and
+it is ONE line — but it keeps a private pitch whose count must be re-derived on
+every future layout change, i.e. exactly the second convention that produced this
+defect, and it makes the region un-walkable by anything else. The twin matches
+the runtime's other arg arrays (`Rt.apply`/`Rt.stage-apply` register `nargs`
+Values at the layout's stride).
+
+### The oracles (two, and both are proven fail-able)
+
+1. **TEXT, both sides, per arm** — TestMain's two new `ENTRY-ARG PIN` rows: the
+   word splice carries `* 8` and `+ 8 … + 120` and NEITHER splice carries the
+   other's pitch, and the ARITHMETIC row pins that the count and the region agree
+   per arm and that the count cell lies outside both. MEASURED FAIL-ABLE: with
+   the word reader block reverted to `+ 40` (writer left at `8 * j`), the suite
+   is `1 FAIL` and it is exactly `ENTRY-ARG PIN`; restored, `1147/1147`.
+2. **RUN** — `word-arm-corpusrun.sh`'s 120 registered argument vectors, which
+   execute the writer/reader pair on both arms. MEASURED FAIL-ABLE: the same
+   one-sided revert turns `sub [10 3]` and `sub [3 10]` RED (stdout differs,
+   rc equal), and the full revert is `125/125`. NOTE the sensitivity is ONE
+   group — most corpus entries are arity 0 or 1, so their argument path never
+   reads `a1` — which is why the text pin exists as well as the run.
+
+### THE GAP, STATED RATHER THAN PAPERED OVER
+
+**No fixture can force a scavenge inside `[rootPush, rt_callN]` with today's
+knobs**, so the root-coverage half is closed BY CONSTRUCTION (count == region ==
+the cells the writer filled, pinned per arm) and not by a collection. Measured
+reasoning, not a guess: the window's Mid-heap allocations are `Rt.argvInstall`'s
+per-argv-entry string + cons cells — O(1) KB for the 16-arg maximum — while the
+nursery is at least 1 MB (`QBE_MIDGC_YOUNG_MB`'s smallest non-zero value is 1;
+the default is `clamp(heapBytes/8, 4 MB, 512 MB)`, and it is clamped to the old
+ceiling). A fixture that churns AFTER the entry is called proves nothing here:
+the args are in the callee's rooted frame by then, so such a row would be a TEST
+THAT CANNOT FAIL, which is why it was not written. What would observe it: a
+collect-at-next-allocation stress knob (none exists) or an `argvInstall` that
+allocated megabytes (it does not).
+
+Also recorded, because it is adjacent and NOT this class: the window
+`[Rt.parseArgsGo, rootPushValueArray]` is unrooted on BOTH arms (the float cells
+exist before the registration). It is pre-existing, it is not made worse by the
+flip, and closing it is its own unit.

@@ -6639,6 +6639,83 @@ checks rt rawMidText =
             && -- the sibling's own twin is still there: this row is about BOTH
                String.contains "word pair = vecbody(call Rt.allocCons(mknum(0)));" (defunText "Rt.cons" wordText)
         )
+    -- ==================== THE ENTRY-ARGUMENT ROOT (perf word-arm-corpusrun) ====================
+    --
+    -- WHY THIS IS FLIP-GATING, and why the doc's old P-class claim was WRONG IN
+    -- THE DIRECTION THAT DROPS LIVE VALUES.  `Rt.main` stages the entry's
+    -- arguments in a malloc'd buffer and registers it with
+    -- `Rt.rootPushValueArray(abuf, abuf + 640)` — a KIND-2 root, whose COUNT is
+    -- the i32 at `np` and whose scan stride is the LAYOUT's
+    -- (`Rt.gcScavRoots`/`gcMarkRoots` -> `gcScanValueArray`).  The old text said
+    -- the registration "over-scans harmlessly (80 cells at the word arm's 8-byte
+    -- stride over a 640-byte region whose unwritten cells are memset zeros)".
+    -- Both halves are false from the code: the count is `entry_nargs` (not 80),
+    -- `malloc(648)` is never memset, and at a private 40-byte pitch the scan
+    -- covered `8 * nargs` bytes of a region whose args sit at `40 * j` — so arg
+    -- 1 was OUTSIDE the root for any nargs <= 5.  A float arg is a HEAP cell, so
+    -- the flip would have made a scavenge hand the entry a STALE Value in exactly
+    -- the arg-heavy invocations the flip turns on.  The fix twins the pitch so
+    -- the region IS `nargs` Values; the two rows below are the property (both
+    -- sides of the writer/reader pair, per arm) and the arithmetic (count and
+    -- region agree on both arms, and the count cell is outside both).
+    , check "ENTRY-ARG PIN: the entry-argument buffer is a Value array AT THE LAYOUT'S STRIDE on both arms — the WORD splice writes each argument at `8 * j` (`Rt.parseArgsGo`) and reads it back through `a1 .. a15 = abuf + 8 .. + 120`, the VAL splice keeps `40 * j` and `+ 40 .. + 600`, and NEITHER splice carries the other's pitch.  BOTH SIDES ARE ASSERTED IN ONE ROW because a one-sided move is the defect shape: the writer and the readers must move together, and `word-arm-corpusrun.sh` is the row that catches a one-sided move at RUN time (`sub 10 3` / `sub 3 10` go red, MEASURED)"
+        (let
+            wordText =
+                splicedOr True rawMidText
+
+            valText =
+                splicedOr False rawMidText
+
+            argLoop src =
+                codeLines (defunText "Rt.parseArgsGo" src)
+
+            mainBody src =
+                codeLines (defunText "Rt.main" src)
+
+            wordReads =
+                List.map (\i -> "word a" ++ String.fromInt i ++ " = abuf + " ++ String.fromInt (8 * i) ++ ";") (List.range 1 15)
+
+            valReads =
+                List.map (\i -> "word a" ++ String.fromInt i ++ " = abuf + " ++ String.fromInt (40 * i) ++ ";") (List.range 1 15)
+         in
+         String.contains "word argPtr = bufW + (payload(j, 0) * 8);" (argLoop wordText)
+            && String.contains "word argPtr = bufW + (payload(j, 0) * 40);" (argLoop valText)
+            && not (String.contains "word argPtr = bufW + (payload(j, 0) * 40);" (argLoop wordText))
+            && not (String.contains "word argPtr = bufW + (payload(j, 0) * 8);" (argLoop valText))
+            && List.all (\l -> String.contains l (mainBody wordText)) wordReads
+            && List.all (\l -> String.contains l (mainBody valText)) valReads
+            && not (List.any (\l -> String.contains l (mainBody wordText)) valReads)
+        )
+    , check "ENTRY-ARG PIN (the arithmetic, so the count and the region AGREE rather than merely being twinned): `Rt.main` admits at most 16 entry args (`nargs > 16` is the usage error) and registers `nargs` Values from `abuf`; at the arm's own stride that region is 8*16 = 128 bytes on the word arm and 40*16 = 640 on the val arm, and the COUNT CELL (`wstore(abuf, 80, entry_nargs)` = byte 640) therefore lies OUTSIDE both — which it must, because the cell holds a raw i64 count and a scan that reached it would read it as a Value.  The registration line is SHARED (`rootPushValueArray(abuf, abuf + 640)`) and that is correct only because the count and the region now agree on both arms"
+        (let
+            wordText =
+                splicedOr True rawMidText
+
+            valText =
+                splicedOr False rawMidText
+
+            mainBody src =
+                codeLines (defunText "Rt.main" src)
+
+            countCellByte =
+                8 * 80
+
+            bound src =
+                String.contains "mkbool(nargs > 16)" (mainBody src)
+
+            -- the region the registration asks the collector to scan, at each
+            -- arm's own stride, for the largest argument count `Rt.main` admits
+            region pitch =
+                pitch * 16
+         in
+         bound wordText
+            && bound valText
+            && String.contains "wstore(abuf, 80, entry_nargs);" (mainBody wordText)
+            && String.contains "call Rt.rootPushValueArray(abuf, abuf + 640);" (mainBody wordText)
+            && String.contains "call Rt.rootPushValueArray(abuf, abuf + 640);" (mainBody valText)
+            && region 8 < countCellByte
+            && region 40 <= countCellByte
+        )
     , check "7A LAYOUT PIN (stage 7C extended the blob by two words, stage 7D widened the eval stride by one): sizeof(struct Host) == 232748 words == 1861984 bytes == Rt.hostInit's `8 + (33031 * 40) + (6 * 8) + (128 * 4224) + 16` (nslots + the slot array + nevals..clrBase + the eval table + 7C's npoll/poll).  A field added to struct Host without the malloc line is a RED ROW, not a heap overflow"
         (Check.sizeofStruct (declsOf runtimeMidText) "Host" == Just 232748
             && String.contains "word bytes = 8 + (33031 * 40) + (6 * 8) + (128 * 4224) + 16;" runtimeMidText

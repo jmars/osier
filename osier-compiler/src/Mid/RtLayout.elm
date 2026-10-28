@@ -1043,13 +1043,23 @@ valLayout =
 --      `recAppend`, by set equality over all 159) and the re-freeze is
 --      deliberate and attributable.  ROW: tools/qbe/fixtures/recinschurn.elm +
 --      qbe-check's `run_heap_ladder` (h1/h2/h4/default), proven fail-able.
---      NOT PORTED: the ARGV INSTALL (`Rt.parseArgsGo`'s `bufW + j*40` and the
---      entry-arg buffer `Rt.main` sizes), which is a separate lane and is
---      reached-but-unexercised today (a word-arm program with arguments);
---      the EXEC-PLAN / EFFECT-HOST blob (its stride is `sizeof(val)` as the
---      .mid front end computes it, i.e. 40 under ANY knob — see the frontier
---      note at `Rt.kindHdr`); and the printer internals where they read a
---      payload without the layout-derived accessors.
+--      PORTED SINCE (perf word-arm-corpusrun): the ARGV INSTALL
+--      (`Rt.parseArgsGo`'s `bufW + j*40` and `Rt.main`'s `a1 .. a15`).  This
+--      entry used to call it "a separate lane, reached-but-unexercised" — and
+--      the frontier doc's P bullet went further and called it CORRECT on both
+--      arms.  BOTH READINGS WERE WRONG, in the direction that drops live
+--      values: the pitch is read by a KIND-2 GC ROOT whose count is `nargs`
+--      and whose scan stride is the layout's, so at a 40-byte pitch the word
+--      arm's root covered `[abuf, abuf + 8*nargs)` while the args sat at
+--      `40 * j` — arg 1 was outside the root for `nargs <= 5`.  Twinned in the
+--      same unit that MEASURED it (both sides, both arms, pinned by two
+--      TestMain rows and by the corpus run's 120 argument vectors); the
+--      frontier's "THE ENTRY-ARGS ROOT GAP" section carries the verdict, the
+--      evidence and the part no collection can reach today.
+--      NOT PORTED: the EXEC-PLAN / EFFECT-HOST blob (its stride is
+--      `sizeof(val)` as the .mid front end computes it, i.e. 40 under ANY
+--      knob — see the frontier note at `Rt.kindHdr`); and the printer internals
+--      where they read a payload without the layout-derived accessors.
 --   8. THE C FFI GLUE.  The tag/untag at the boundary — a fixnum's payload IS
 --      the C i64 after untag, and Values never cross raw (the extern
 --      declarations already encode C widths, so nothing there moves).
