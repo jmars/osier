@@ -491,6 +491,16 @@ loadText source =
                         deps1 =
                             rtDeps
 
+                        -- THE SEATS ARE A SEPARATE GROWTH SOURCE (perf
+                        -- word-arm-records H1 FIX).  A defun that CALLS an
+                        -- allocation seat can collect, so it must join; the
+                        -- seats THEMSELVES must not (see `allocationSeats`).
+                        seats =
+                            Set.fromList allocationSeats
+
+                        seatDeps1 =
+                            Dict.fromList allocSeatDeps
+
                         -- fixed point: k allocates iff k has a DIRECT
                         -- safepoint or any rtDeps edge of k lands in the set.
                         grow : Set String -> Set String
@@ -499,16 +509,16 @@ loadText source =
                                 new =
                                     List.foldl
                                         (\d set ->
-                                            case Dict.get d.key deps1 of
-                                                Just deps ->
-                                                    if List.any (\dep -> Set.member dep set) deps then
-                                                        Set.insert d.key set
+                                            let
+                                                deps =
+                                                    Maybe.withDefault [] (Dict.get d.key deps1)
+                                                        ++ Maybe.withDefault [] (Dict.get d.key seatDeps1)
+                                            in
+                                            if List.any (\dep -> Set.member dep set || Set.member dep seats) deps then
+                                                Set.insert d.key set
 
-                                                    else
-                                                        set
-
-                                                Nothing ->
-                                                    set
+                                            else
+                                                set
                                         )
                                         acc
                                         rtProgram
@@ -2343,6 +2353,71 @@ driverSeeds =
 -- handled (a future Mid.Ir node forces this walker's arm to exist,
 -- which is the point of writing it over the tree instead of over a
 -- hand-maintained key list).
+{-| THE ALLOCATION SEATS — the defuns a NORMAL Rt defun calls to allocate.
+
+WHY THIS LIST EXISTS (perf word-arm-records H1 FIX).  `allocating`'s fixed point
+was seeded ONLY from `direct` bodies (a defun containing an `allocvec`/`allocraw`
+PRIM).  In the Rt lane a `call` is an EDGE, and NO defun in the gc/alloc family
+contains an alloc prim — `Rt.gcAlloc` moves the cursor through `rawcall`/`wstore`,
+not through a prim — so the seed set was EMPTY for the whole allocation family and
+every seat CALLER classified `RtLeanFree` (an unrooted `alloc8` frame) however many
+`rtDeps` rows named the seat.  MEASURED consequence: the word arm's `Rt.recAppend`
+kept `rec` in a slot the scavenger cannot see, and the first promotion inside
+`Rt.allocKind` left it pointing at the FORWARDED record — SIGSEGV at
+QBE_HEAP_MB=1, green at default knobs because no scavenge runs.
+
+THE SEATS THEMSELVES DO NOT JOIN `allocating`.  Each holds no Value across its own
+`gcAlloc` call (the call is the last statement of the seat's body), so a rooted
+frame would be pure cost — and inside the gc family it would be a hazard, not a
+cost.  They are a SEPARATE growth source that admits their CALLERS.
+
+THE ANTI-STALENESS ORACLE IS A ROW, not this comment: TestMain pins the FRAME
+CLASS of the defuns that call a seat (`q_Rt_x2erecAppend`/`q_Rt_x2erecUpd` contain
+`frame_x2denter`) and pins that the seats do NOT.  A defun that loses its rooted
+frame — a stale row, a missing seat, a new seat nobody listed — is RED there,
+whatever the cause.
+-}
+allocationSeats : List String
+allocationSeats =
+    [ "Rt.allocKind"
+    , "Rt.allocCons"
+    , "Rt.allocVector"
+    , "Rt.allocRaw"
+    , "Rt.allocSym"
+    , "Rt.allocFloat"
+    , "Rt.allocRecord"
+    , "Rt.mkStream"
+    ]
+
+{-| THE CLASSIFICATION-ONLY SEAT EDGES — which defuns CALL an allocation seat.
+
+WHY NOT `rtDeps`.  `rtDeps` has TWO consumers: emit-reachability
+(`keepRtDependencies`) and this classification's fixed point.  The seats are
+WORD-ONLY defuns (`QBE_WORDVAL-ONLY`), so naming one in a SHARED defun's row makes
+the VAL arm try to emit it — MEASURED: `err qbe: unknown global Rt.allocRecord` for
+every record fixture, the moment the row was extended.  So the edge that matters
+HERE lives in its own table, read by the fixed point only.
+
+WHY THE SEAT KEYS CAN BE ABSENT FROM `rtDeps` AND STILL CORRECT: the val twins
+spell the alloc PRIM (`allocvec(...)`), a DIRECT safepoint, so on that arm these
+defuns are members by the `direct` seed already — the edges below only ADD
+membership on the arm that needs it, and set membership is idempotent.
+
+THIS TABLE CANNOT GO STALE THE SAME WAY `rtDeps` DID, and the reason is a ROW, not
+this comment: TestMain pins the FRAME CLASS of these defuns in the emitted text
+(`q_Rt_x2erecAppend` and `q_Rt_x2erecUpd` must contain `frame_x2denter`, and the
+seats must NOT), so a defun that silently loses its rooted frame is RED whatever
+the cause — a missing entry here, a stale `rtDeps` row, or a new seat nobody
+listed.
+-}
+allocSeatDeps : List ( String, List String )
+allocSeatDeps =
+    [ ( "Rt.recAppend", [ "Rt.allocKind", "Rt.allocRecord" ] )
+    , ( "Rt.recUpd", [ "Rt.allocRecord" ] )
+    , ( "Rt.recToChainGo", [ "Rt.allocSym" ] )
+    , ( "Rt.con", [ "Rt.allocKind" ] )
+    ]
+
 direct : Defun -> Bool
 direct d =
     case d.value of
