@@ -283,35 +283,45 @@ emits its own.
 Note `Runtime.*` — a core-lib defun reached by the effect host, so this class was
 never only "programs that destructure in a `let`".
 
-### float literal — 9 groups, 9 alone (AREA 5)
+### STEP 0 — the float-literal refusal is STALE, and that is MEASURED, not read
 
-`cmporder floatarith floatcmp floatfun floatineq floatlit floatmix mxint strunit`
+BEFORE ANY EMITTER CODE, the question this arc asks first: does the refusal
+describe a path the emitter takes? The float literal had TWO texts:
 
-The **`mk*` SAFEPOINT TRAP IS INHERITED BY THIS UNIT** — WORKLIST item 5, and it
-is a correctness precondition, not a note: `Mid.Rt.unsafeSafepoint` classifies a
-`RawMkValue` as a non-safepoint (it scans `m.words`), which is true on the val
-arm and **false** for the word arm's HEAP codes, because
-`storeWordStringCell`/`storeWordFloatCell` inject `midGcAllocSeat` calls
-(`Rt.allocRaw`, `Rt.allocFloat`) that the surface tree never shows. So a defun
-whose only allocation is a `mkstr`/`mkflt` cell classifies FRAME-FREE and drops
-its roots. The float unit inherits the obligation to count a word-arm heap-code
-`mk*` as a DIRECT safepoint **in the same unit**.
+* emit site (`Lower.elm:7586`) — `a float literal — the word arm heap-boxes a
+  float as a [hdr | f64] cell, WHICH DOES NOT EXIST YET`;
+* classifier (`Lower.elm:784`) — `a float literal — under the word arm it is a
+  HEAP object behind one tagged pointer, not a tag word plus payload words`.
 
-**TWO groups are blocked by an EMIT SITE, not the classifier** — `strunit` AND
-`cmporder`: both refusal lines carry no defun name (`a float literal — the word
-arm heap-boxes a float as a [hdr | f64] cell`). This section named only `strunit`
-until the frontier review's item 2; the census has carried the identical unnamed
-line for `cmporder` since the first run, so the App-without-arg-recursion gap is
-wider than the note said. That is the already-recorded gap that `wordArmUnported`
-admits `App` WITHOUT recursing into its arguments — a raw node reached only as a
-call argument is invisible to the belt. Worth fixing while in there.
+The first half of both is a correct DESCRIPTION. The claim is the last three
+words of the first — and it is FALSE: `storeWordFloatCell` (`Lower.elm:4890`)
+has built exactly that cell since perf word-arm-area3rt, for the runtime's
+`mkflt` lane, allocating through `Rt.allocFloat` (`runtime.mid:2718`) and storing
+the f64 at body unit 0. The second text is not a claim at all, which is the same
+shape `Con`'s refusal had.
 
-### prim `f/` — 2 groups, 1 alone (AREA 5)
+`f/` is stale the same way, and it names the same cell: `wordArmPrimUnported`'s
+entry says "`Rt.f/` is float-only, so routing it to the runtime would build the
+same cell" — and `Rt.f/` IS `mkflt(fload(asF a) f/ fload(asF b))`, i.e. exactly
+the two writers that exist. So the class is **two classifier admissions**, and
+the unit's real work is finding the FRESH defect an admission exposes — which is
+what every previous class in this arc turned out to be.
 
-`floatdiv floatpartial`, defuns `Floatdiv.main` and `/.curried`. Same area; it
-cannot be ported before the float cell exists. (First-only this read `2 alone`;
-the per-defun walk shows `floatdiv` also carries a float literal, so `f/` on its
-own moves ONE group — `floatpartial`.)
+THE FRESH DEFECT, AND HOW IT WAS FOUND. Admitting the literal in a scratch build
+emitted the cell correctly and then CRASHED at run time: `RawLoadFlt` (`fload`)
+read `slot + 8` unconditionally — the val arm's 40-byte payload word, which on
+this arm is THE NEXT FRAME SLOT — and it carried its own standing instruction
+("WHEN AREA 5 LANDS, THIS SITE MUST BE FORKED IN THE SAME UNIT"). It is the site
+EVERY float reader goes through: `Rt.asF`, `Rt.toI32`, `Rt.fRender` (hence
+`Rt.floatText` and the whole printer) and the float arms of
+`Rt.+ - * f/ < <= > >= =`. So the port is the cell's admission PLUS the read's
+fork, and the read is where the defect was.
+
+MEASURED, with the fork switched off (`if False && wordArm s2`) and
+`compiler.js` rebuilt: `floatlit`, `floatarith` and `strunit` died **SIGABRT
+(134) with empty stdout AND empty stderr**, while `floatcmp` still PASSED — it
+compares a float and never prints one. That asymmetry is why the unit carries a
+TEXT pin as well as a behavioural row.
 
 ## The word-arm DIFF fixtures' neighbourhood
 
