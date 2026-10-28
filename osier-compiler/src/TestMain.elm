@@ -1547,6 +1547,46 @@ checks rt rawMidText =
     -- calls.  A :val-shaped arg or an under-applied call here is a SILENT
     -- MISCOMPILE (the callee reads a garbage register), so the emitted
     -- shapes are pinned, not just "it links".
+    , check "THE ALLOCATION SEATS ADMIT THEIR CALLERS, AND STAY FRAME-FREE THEMSELVES (perf word-arm-records H1 FIX). This is the row the h1 churn defect needed and did not have: the CLASSIFICATION was the untested surface, not the mask. A defun that CALLS an allocation seat can collect, so it must be in `allocating` and get a REGISTERED frame — the seats are word-only defuns whose bodies contain no alloc PRIM, so before this fix the fixed point could not reach them and every seat caller lowered to an unrooted `alloc8` frame whose slots the scavenger cannot see (MEASURED: `Rt.recAppend`'s `rec` went stale on the first promotion inside `Rt.allocKind`, SIGSEGV at QBE_HEAP_MB=1, green at default knobs because no scavenge runs). The seats THEMSELVES must NOT be members: each holds no Value across its own `gcAlloc` (the call is its last statement) and a rooted frame inside the gc family would be a hazard, not a cost. BOTH DIRECTIONS, so neither a missing seat edge nor an over-eager seed can pass"
+        -- THE FRAME CLASS IS ASSERTED ON THE EMITTED WORD TEXT, not on set
+        -- membership: `allocating` is computed over the DEFAULT (val) splice, so
+        -- a membership row cannot see this defect at all — the val twin spells
+        -- the alloc PRIM and was always a member.  What was wrong is that the
+        -- word arm's LEAF TIER judged the seat calls non-collecting and
+        -- overrode the rooted classification to PLeaf.  The emitted prologue is
+        -- the only surface that shows which decision won.
+        ((case Rt.loadArm True rawMidText of
+            Err _ ->
+                False
+
+            Ok wordRt ->
+                let
+                    wordProg =
+                        rtProgram wordRt True True True ++ rtProgramGc wordRt True True True
+                in
+                case QbeLower.lowerWith RtLayout.wordLayout wordRt False True True True True True True False False True QbeTypes.empty (rtArities wordProg) wordProg "Rt.recAppend" of
+                    Err _ ->
+                        False
+
+                    Ok mod ->
+                        case funcByName "q_Rt_x2erecAppend" mod of
+                            Nothing ->
+                                False
+
+                            Just f ->
+                                -- THE PROLOGUE IS THE DECISION: a rooted
+                                -- defun opens with a pooled-frame call; a
+                                -- frame-free one allocates its own stack block.
+                                callsSym "q_Rt_x2eframe_x2denter" f
+                                    && not (hasAlloc8 f)
+        )
+            && not (Set.member "Rt.allocKind" rt.allocating)
+            && not (Set.member "Rt.allocRecord" rt.allocating)
+            && not (Set.member "Rt.allocCons" rt.allocating)
+            && not (Set.member "Rt.allocVector" rt.allocating)
+            && not (Set.member "Rt.allocSym" rt.allocating)
+            && not (Set.member "Rt.gcAlloc" rt.allocating)
+        )
     , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main + the B0 frame pair + stage 7A's die family (dieErr/hostDieErr — hostDieUnported left BOTH the family and the runtime at 7E, the unit that gave every Task ctor a real arm) are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo/frame set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set; the frame pair is FRAME-FREE by construction — its only nodes are rawcall/raw-word loads/stores and rawAbi->rawAbi calls to its one non-allocating helper)"
         (Rt.rawAbi
             == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.stage-tail", "Rt.stage-apply", "Rt.applyTailGo", "Rt.dieErr", "Rt.hostDieErr", "Rt.rootGrow", "Rt.rootPush", "Rt.rootPushPtr", "Rt.rootPushValue", "Rt.rootPushValueArray", "Rt.rootPop", "Rt.rootWatermark", "Rt.rootPopTo", "Rt.vecStorePlain", "Rt.vecStoreYoung", "Rt.globalClosure" ]
@@ -15721,6 +15761,24 @@ rawCallAggCallShape f =
 inline byte-lexicographic compare (`lowerStrLess`); the numeric compare paths
 never emit one.
 -}
+hasAlloc8 : Il.Func -> Bool
+hasAlloc8 f =
+    List.any
+        (\b ->
+            List.any
+                (\i ->
+                    case i of
+                        Il.Alloc _ _ ->
+                            True
+
+                        _ ->
+                            False
+                )
+                b.body
+        )
+        f.blocks
+
+
 hasLoadUb : Il.Func -> Bool
 hasLoadUb f =
     List.any
