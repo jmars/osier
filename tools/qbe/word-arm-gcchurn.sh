@@ -277,6 +277,24 @@ row flt      h1      240  1
 row flt      h2      240  1
 row flt      h4      240  1
 row flt      default 240  1
+# ---- THE HOST EVENT LOOP (perf word-arm-hostpath): the blob's ROOTED SLOT ARRAY,
+#      scanned at the layout's stride.  The model is a record that grows a string
+#      every step, so the model cell itself MOVES at every collection — which is
+#      the only thing that exercises the slot array's scan.  A stride that
+#      disagrees with the array's element width rewrites a slot the program does
+#      not read and leaves the one it does read pointing at the reused block, so
+#      the symptom is a wrong model at rc 0, empty stderr — the class's own shape.
+#      MEASURED (QBE_MIDGC_STATS=1, `row()`'s scavenge-OR-full-collect metric),
+#      val/word collections: h1 180/188, h2 88/94, h4 44/46, default 3/3.
+#      EVERY RUNG IS DECLARED COLLECTING, and the default one was checked rather
+#      than assumed: the first draft of this comment called it a REGRESSION row
+#      on a 512 MiB measurement, and the row then reported 3 collections on BOTH
+#      arms at the real default.  A count taken at the wrong knob is not a
+#      measurement of this one.
+row host     h1      300  1
+row host     h2      300  1
+row host     h4      300  1
+row host     default 300  1
 
 if [ "$fails" != 0 ]; then
   echo "word-arm-gcchurn: $fails failure(s) — a closure is being read after a collection it did not survive"

@@ -738,7 +738,34 @@ struct HostEv {
 }
 struct Host {
   nslots : i32;
+  // THE SLOT ARRAY'S ELEMENT TYPE IS THE VALUE STRIDE (perf word-arm-hostpath).
+  // This ONE field is where every `h + 8 + (base * 40)` in the host family comes
+  // from, and it is the site a text scan for `40` cannot see: `Mid.RtLang.Check`
+  // sizes a `val` field at 40 bytes under ANY knob (`fieldTySize`'s
+  // `TVal -> Ok ( 40, 8 )`, no layout parameter), so `evals`/`npoll`/`poll` land
+  // at 1321296/1861968/1861976 because of this line.  Twinning the malloc
+  // literal while leaving the field `val[33031]` would size the blob 804992
+  // bytes with the checker still writing `evals` at 1321296 — the silent
+  // overrun this file's own frontier note (the "NOT TWINNED YET" block's item 2)
+  // names, not a port.
+  //
+  // SO THE WORD ARM'S `struct Host` HAS NO `val` FIELD AT ALL, and that is what
+  // makes the checker's hardcoded 40 HARMLESS here rather than fixed: nothing in
+  // this arm's blob is laid out by it.  The residual is stated rather than
+  // papered over — `TVal -> Ok ( 40, 8 )` is still the answer for any FUTURE
+  // `val` field, and TestMain's row asserting that the word-arm splice declares
+  // no `val` field is the seat that keeps this arm from ever having one.
+  //
+  // `word[33031]` is also the honest type on this arm: no code reads `lp->slots`
+  // by name (every access is raw address arithmetic through `vecstore`/
+  // `vecload`, which are layout-derived), so the field exists for its OFFSET
+  // and nothing else.
+  // >>> QBE_VAL-ONLY
   slots : val[33031];
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  slots : word[33031];
+  // <<< QBE_WORDVAL-ONLY
   nevals : word;
   nactive : word;
   quit : word;
@@ -1478,6 +1505,7 @@ defun Rt.cons(car : val, cdr : val) -> val {
 // <<< QBE_WORDVAL-ONLY
 }
 
+// >>> QBE_VAL-ONLY
 @consArr
 defun Rt.@p(car : val, cdr : val) -> val {
   return withroots [car, cdr] {
@@ -1497,6 +1525,48 @@ defun Rt.@p(car : val, cdr : val) -> val {
     return mkval(4, vecaddr(pair, 0), vecaddr(pair, 1));
   };
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// THE WORD-ARM TWINS OF THE TUPLE PRIM (perf word-arm-hostpath), and they are
+// `Rt.cons`'s twins VERBATIM because `Rt.@p`'s val body is `Rt.cons`'s val body
+// verbatim — the two defuns are the same constructor under two names (`@p` is
+// the pair the host's record builder uses: `Rt.hostStatRecord` conses
+// `@p(intern("size"), v)`).  `Rt.cons` was twinned by perf word-arm-area3rt and
+// THIS ONE WAS MISSED, which is the sibling-armed shape: a fix applied to one
+// of two identical bodies leaves the other silently on the old arm.
+//
+// WHAT THE OMISSION DID, MEASURED rather than argued: `allocvec(2)` on this arm
+// allocates a RAW block (code 1), so `mkval(4, ..)` tagged a cell whose HEADER
+// KIND is 1 — a pair that answers `tagis(pair, 4)` FALSE.  `Rt.assocGo` guards
+// its pair test on exactly that, so every host-built record read answered NIL,
+// and `Rt.snd(nil)` then refused BY NAME ("element base of a word that is
+// neither a fixnum nor a heap object").  It is the first defect the host path
+// could reach only once it RAN: `Io.stat` + one field read is the minimal
+// reproducer, and it is why `dirunit`/`statplus`/`statunit` refused after the
+// stride port landed while the other four host groups already agreed.
+//
+// THE @consArr FUSION FLAG IS ABSENT FOR `Rt.cons`'s reason: inline, the pair
+// IS the cell, so there is one shape and nothing to fuse.
+@consArr
+defun Rt.@p(car : val, cdr : val) -> val {
+  return withroots [car, cdr] {
+    word pair = vecbody(call Rt.allocCons(mknum(0)));
+    vecstore(pair, 0, car);
+    vecstore(pair, 1, cdr);
+    return mkval(4, pair);
+  };
+}
+
+@!consArr
+defun Rt.@p(car : val, cdr : val) -> val {
+  return withroots [car, cdr] {
+    word pair = vecbody(call Rt.allocCons(mknum(0)));
+    vecstore(pair, 0, car);
+    vecstore(pair, 1, cdr);
+    return mkval(4, pair);
+  };
+}
+// <<< QBE_WORDVAL-ONLY
 
 // THE CONCATENATION (text-fix): ONE buffer of len(a)+len(b)+1, TWO byte
 // copies, ZERO cons cells — where this used to be bytesOf -> appendL ->
@@ -9113,6 +9183,15 @@ defun Rt.applyPartGo(state : val, f : val) -> val {
   return mkval(6, body);
   // <<< QBE_WORDVAL-ONLY
 }
+// THE ARGUMENT PITCH IS THE VALUE STRIDE (perf word-arm-hostpath).  The
+// `rt_callN` chain below loads argument k through `buf + PITCH*k`, and `buf` is
+// whatever `Rt.apply-at` handed it — a slice of `struct Host`'s ROOTED SLOT
+// ARRAY.  On the word arm a slot is one word, so the pitch is 8 and the k-th
+// argument is `buf + 8k`; at the val arm's 40 argument k would be read from slot
+// 5k.  THIS DEFUN IS THE ONE THE CLASS'S CIRCULATING COUNTS MISSED (it is 15 of
+// the host path's 54 stride lines and 120 individual offsets), and it is the
+// reason the defect is a SILENT WRONG ANSWER rather than a crash: a wrong
+// argument reads a neighbouring slot, which is usually another live Value.
 defun Rt.callArity(disp : val) -> val {
   *Disp dp = payload(disp, 0);
   word code = dp->fn;
@@ -9128,62 +9207,137 @@ defun Rt.callArity(disp : val) -> val {
       return vecload(r, 0);
     } else {
       if (mkbool(arity == 2)) {
+        // >>> QBE_VAL-ONLY
         word r = aggcall val rawsym("rt_call2")(code, caps, buf, buf + 40);
+        // <<< QBE_VAL-ONLY
+        // >>> QBE_WORDVAL-ONLY
+        word r = aggcall val rawsym("rt_call2")(code, caps, buf, buf + 8);
+        // <<< QBE_WORDVAL-ONLY
         return vecload(r, 0);
       } else {
         if (mkbool(arity == 3)) {
+          // >>> QBE_VAL-ONLY
           word r = aggcall val rawsym("rt_call3")(code, caps, buf, buf + 40, buf + 80);
+          // <<< QBE_VAL-ONLY
+          // >>> QBE_WORDVAL-ONLY
+          word r = aggcall val rawsym("rt_call3")(code, caps, buf, buf + 8, buf + 16);
+          // <<< QBE_WORDVAL-ONLY
           return vecload(r, 0);
         } else {
           if (mkbool(arity == 4)) {
+            // >>> QBE_VAL-ONLY
             word r = aggcall val rawsym("rt_call4")(code, caps, buf, buf + 40, buf + 80, buf + 120);
+            // <<< QBE_VAL-ONLY
+            // >>> QBE_WORDVAL-ONLY
+            word r = aggcall val rawsym("rt_call4")(code, caps, buf, buf + 8, buf + 16, buf + 24);
+            // <<< QBE_WORDVAL-ONLY
             return vecload(r, 0);
           } else {
             if (mkbool(arity == 5)) {
+              // >>> QBE_VAL-ONLY
               word r = aggcall val rawsym("rt_call5")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160);
+              // <<< QBE_VAL-ONLY
+              // >>> QBE_WORDVAL-ONLY
+              word r = aggcall val rawsym("rt_call5")(code, caps, buf, buf + 8, buf + 16, buf + 24, buf + 32);
+              // <<< QBE_WORDVAL-ONLY
               return vecload(r, 0);
             } else {
               if (mkbool(arity == 6)) {
+                // >>> QBE_VAL-ONLY
                 word r = aggcall val rawsym("rt_call6")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200);
+                // <<< QBE_VAL-ONLY
+                // >>> QBE_WORDVAL-ONLY
+                word r = aggcall val rawsym("rt_call6")(code, caps, buf, buf + 8, buf + 16, buf + 24, buf + 32, buf + 40);
+                // <<< QBE_WORDVAL-ONLY
                 return vecload(r, 0);
               } else {
                 if (mkbool(arity == 7)) {
+                  // >>> QBE_VAL-ONLY
                   word r = aggcall val rawsym("rt_call7")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240);
+                  // <<< QBE_VAL-ONLY
+                  // >>> QBE_WORDVAL-ONLY
+                  word r = aggcall val rawsym("rt_call7")(code, caps, buf, buf + 8, buf + 16, buf + 24, buf + 32, buf + 40, buf + 48);
+                  // <<< QBE_WORDVAL-ONLY
                   return vecload(r, 0);
                 } else {
                   if (mkbool(arity == 8)) {
+                    // >>> QBE_VAL-ONLY
                     word r = aggcall val rawsym("rt_call8")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280);
+                    // <<< QBE_VAL-ONLY
+                    // >>> QBE_WORDVAL-ONLY
+                    word r = aggcall val rawsym("rt_call8")(code, caps, buf, buf + 8, buf + 16, buf + 24, buf + 32, buf + 40, buf + 48, buf + 56);
+                    // <<< QBE_WORDVAL-ONLY
                     return vecload(r, 0);
                   } else {
                     if (mkbool(arity == 9)) {
+                      // >>> QBE_VAL-ONLY
                       word r = aggcall val rawsym("rt_call9")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320);
+                      // <<< QBE_VAL-ONLY
+                      // >>> QBE_WORDVAL-ONLY
+                      word r = aggcall val rawsym("rt_call9")(code, caps, buf, buf + 8, buf + 16, buf + 24, buf + 32, buf + 40, buf + 48, buf + 56, buf + 64);
+                      // <<< QBE_WORDVAL-ONLY
                       return vecload(r, 0);
                     } else {
                       if (mkbool(arity == 10)) {
+                        // >>> QBE_VAL-ONLY
                         word r = aggcall val rawsym("rt_call10")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360);
+                        // <<< QBE_VAL-ONLY
+                        // >>> QBE_WORDVAL-ONLY
+                        word r = aggcall val rawsym("rt_call10")(code, caps, buf, buf + 8, buf + 16, buf + 24, buf + 32, buf + 40, buf + 48, buf + 56, buf + 64, buf + 72);
+                        // <<< QBE_WORDVAL-ONLY
                         return vecload(r, 0);
                       } else {
                         if (mkbool(arity == 11)) {
+                          // >>> QBE_VAL-ONLY
                           word r = aggcall val rawsym("rt_call11")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400);
+                          // <<< QBE_VAL-ONLY
+                          // >>> QBE_WORDVAL-ONLY
+                          word r = aggcall val rawsym("rt_call11")(code, caps, buf, buf + 8, buf + 16, buf + 24, buf + 32, buf + 40, buf + 48, buf + 56, buf + 64, buf + 72, buf + 80);
+                          // <<< QBE_WORDVAL-ONLY
                           return vecload(r, 0);
                         } else {
                           if (mkbool(arity == 12)) {
+                            // >>> QBE_VAL-ONLY
                             word r = aggcall val rawsym("rt_call12")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440);
+                            // <<< QBE_VAL-ONLY
+                            // >>> QBE_WORDVAL-ONLY
+                            word r = aggcall val rawsym("rt_call12")(code, caps, buf, buf + 8, buf + 16, buf + 24, buf + 32, buf + 40, buf + 48, buf + 56, buf + 64, buf + 72, buf + 80, buf + 88);
+                            // <<< QBE_WORDVAL-ONLY
                             return vecload(r, 0);
                           } else {
                             if (mkbool(arity == 13)) {
+                              // >>> QBE_VAL-ONLY
                               word r = aggcall val rawsym("rt_call13")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480);
+                              // <<< QBE_VAL-ONLY
+                              // >>> QBE_WORDVAL-ONLY
+                              word r = aggcall val rawsym("rt_call13")(code, caps, buf, buf + 8, buf + 16, buf + 24, buf + 32, buf + 40, buf + 48, buf + 56, buf + 64, buf + 72, buf + 80, buf + 88, buf + 96);
+                              // <<< QBE_WORDVAL-ONLY
                               return vecload(r, 0);
                             } else {
                               if (mkbool(arity == 14)) {
+                                // >>> QBE_VAL-ONLY
                                 word r = aggcall val rawsym("rt_call14")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520);
+                                // <<< QBE_VAL-ONLY
+                                // >>> QBE_WORDVAL-ONLY
+                                word r = aggcall val rawsym("rt_call14")(code, caps, buf, buf + 8, buf + 16, buf + 24, buf + 32, buf + 40, buf + 48, buf + 56, buf + 64, buf + 72, buf + 80, buf + 88, buf + 96, buf + 104);
+                                // <<< QBE_WORDVAL-ONLY
                                 return vecload(r, 0);
                               } else {
                                 if (mkbool(arity == 15)) {
+                                  // >>> QBE_VAL-ONLY
                                   word r = aggcall val rawsym("rt_call15")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520, buf + 560);
+                                  // <<< QBE_VAL-ONLY
+                                  // >>> QBE_WORDVAL-ONLY
+                                  word r = aggcall val rawsym("rt_call15")(code, caps, buf, buf + 8, buf + 16, buf + 24, buf + 32, buf + 40, buf + 48, buf + 56, buf + 64, buf + 72, buf + 80, buf + 88, buf + 96, buf + 104, buf + 112);
+                                  // <<< QBE_WORDVAL-ONLY
                                   return vecload(r, 0);
                                 } else {
+                                  // >>> QBE_VAL-ONLY
                                   word r = aggcall val rawsym("rt_call16")(code, caps, buf, buf + 40, buf + 80, buf + 120, buf + 160, buf + 200, buf + 240, buf + 280, buf + 320, buf + 360, buf + 400, buf + 440, buf + 480, buf + 520, buf + 560, buf + 600);
+                                  // <<< QBE_VAL-ONLY
+                                  // >>> QBE_WORDVAL-ONLY
+                                  word r = aggcall val rawsym("rt_call16")(code, caps, buf, buf + 8, buf + 16, buf + 24, buf + 32, buf + 40, buf + 48, buf + 56, buf + 64, buf + 72, buf + 80, buf + 88, buf + 96, buf + 104, buf + 112, buf + 120);
+                                  // <<< QBE_WORDVAL-ONLY
                                   return vecload(r, 0);
                                 }
                               }
@@ -9721,7 +9875,12 @@ defun Rt.hostReadFileComplete(hN : val, iN : val) -> val {
   lp->evals[i].rf.bcap = 0;
   lp->evals[i].rf.tmp = 0;
   lp->evals[i].etag = 0;
+  // >>> QBE_VAL-ONLY
   vecstore(h + 8 + ((lp->evals[i].base + 1) * 40), 0, s);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  vecstore(h + 8 + ((lp->evals[i].base + 1) * 8), 0, s);
+  // <<< QBE_WORDVAL-ONLY
   return call Rt.hostCompleteOk(hN, iN);
 }
 
@@ -9740,7 +9899,12 @@ defun Rt.hostLeafReadFile(hN : val, iN : val, pathN : val) -> val {
   word fd = rawcall openat(-100, buf, 2048, 0);   // O_RDONLY|O_NONBLOCK
   if (mkbool(fd < 0)) {
     val empty = "";
+    // >>> QBE_VAL-ONLY
     vecstore(h + 8 + ((lp->evals[i].base + 1) * 40), 0, empty);
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    vecstore(h + 8 + ((lp->evals[i].base + 1) * 8), 0, empty);
+    // <<< QBE_WORDVAL-ONLY
     return call Rt.hostCompleteOk(hN, iN);
   }
   lp->evals[i].rf.fd = fd;
@@ -9837,7 +10001,12 @@ defun Rt.hostSleepComplete(hN : val, iN : val) -> val {
   word i = payload(iN, 0);
   *Host lp = [*Host](h);
   lp->evals[i].etag = 0;
+  // >>> QBE_VAL-ONLY
   vecstore(h + 8 + ((lp->evals[i].base + 1) * 40), 0, mknil);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  vecstore(h + 8 + ((lp->evals[i].base + 1) * 8), 0, mknil);
+  // <<< QBE_WORDVAL-ONLY
   return call Rt.hostCompleteOk(hN, iN);
 }
 // Complete every expired sleep, EARLIEST FIRST; each completion may deliver
@@ -10685,7 +10854,12 @@ defun Rt.hostExecComplete(hN : val, iN : val) -> val {
   word h = payload(hN, 0);
   word i = payload(iN, 0);
   *Host lp = [*Host](h);
+  // >>> QBE_VAL-ONLY
   word resAddr = h + 8 + ((lp->evals[i].base + 1) * 40);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word resAddr = h + 8 + ((lp->evals[i].base + 1) * 8);
+  // <<< QBE_WORDVAL-ONLY
   word code = lp->evals[i].ex.code;
   word olen = lp->evals[i].ex.blen;
   word elen = lp->evals[i].ex.elen;
@@ -10794,8 +10968,18 @@ defun Rt.hostLeafExec(hN : val, iN : val, planN : val) -> val {
     rawcall free(cbuf);
     word chains = [*Prog](progW)->chains;
     call Rt.epFreeChains(mknum(progW), mknum(chains), mknum(0));
-    word tv = payload(vecload(h + 8 + (lp->evals[i].base * 40), 0), 0);
+    // >>> QBE_VAL-ONLY
+    word tv = vecbody(vecload(h + 8 + (lp->evals[i].base * 40), 0));
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    word tv = vecbody(vecload(h + 8 + (lp->evals[i].base * 8), 0));
+    // <<< QBE_WORDVAL-ONLY
+    // >>> QBE_VAL-ONLY
     vecstore(h + 8 + ((lp->evals[i].base + 1) * 40), 0, call Rt.exec-plan(vecload(tv, 1)));
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    vecstore(h + 8 + ((lp->evals[i].base + 1) * 8), 0, call Rt.exec-plan(vecload(tv, 1)));
+    // <<< QBE_WORDVAL-ONLY
     return call Rt.hostCompleteOk(hN, iN);
   }
   word argc = [*CmdState](cmdAddr)->argc;
@@ -10915,7 +11099,12 @@ defun Rt.hostLeafListDir(hN : val, iN : val, pathN : val) -> val {
   word h = payload(hN, 0);
   word i = payload(iN, 0);
   *Host lp = [*Host](h);
+  // >>> QBE_VAL-ONLY
   word resAddr = h + 8 + ((lp->evals[i].base + 1) * 40);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word resAddr = h + 8 + ((lp->evals[i].base + 1) * 8);
+  // <<< QBE_WORDVAL-ONLY
   word len = len32(pathN);
   word pb = allocraw(len + 2);
   call Rt.cStrFill(mknum(pb), pathN, mknum(0));
@@ -10991,7 +11180,12 @@ defun Rt.hostListDirChunk(hN : val, iN : val, cellN : val) -> val {
     dd->off = off + rlen;
     recur(hN, iN, cellN);                  // '.' / '..': skipped, not listed
   }
+  // >>> QBE_VAL-ONLY
   word resAddr = h + 8 + ((lp->evals[i].base + 1) * 40);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word resAddr = h + 8 + ((lp->evals[i].base + 1) * 8);
+  // <<< QBE_WORDVAL-ONLY
   val nm = call Rt.hostCStrOf(mknum(nptr), mknum(nlen));
   val isDirV = call Rt.hostDirIsDir(mknum(dd->fd), mknum(nptr), mknum(dtype));
   vecstore(resAddr, 0, call Rt.hostDirRecord(nm, isDirV, vecload(resAddr, 0)));
@@ -11083,7 +11277,12 @@ defun Rt.hostStatRecord(hN : val, iN : val, stN : val) -> val {
   val fMtime = call Rt.cons(call Rt.@p(call Rt.intern("mtimeMs"), mknum(ms)), fDir);
   val fMode = call Rt.cons(call Rt.@p(call Rt.intern("mode"), mknum(mode)), fMtime);
   val fSize = call Rt.cons(call Rt.@p(call Rt.intern("size"), mknum(sz)), fMode);
+  // >>> QBE_VAL-ONLY
   word resAddr = h + 8 + ((lp->evals[i].base + 1) * 40);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word resAddr = h + 8 + ((lp->evals[i].base + 1) * 8);
+  // <<< QBE_WORDVAL-ONLY
   vecstore(resAddr, 0, fSize);
   return mknil;
 }
@@ -11106,6 +11305,17 @@ defun Rt.hostStatRecord(hN : val, iN : val, stN : val) -> val {
 // 4 + 512 + 1 + the 11-word effect union, 7D's HostEX growing it by `code`) +
 // 16 (7C's npoll and poll), i.e. 1861984 in stage 7D.
 //
+// THE SLOT ARRAY IS THE ONLY TERM THAT MOVES (perf word-arm-hostpath), and it
+// moves as a FAMILY, not as a literal: the array's element width comes from
+// `struct Host`'s `slots` field, so the size here, the five scratch-cell
+// addresses (`33026..33030`), the eval `base` slots and the applier's argument
+// slice are all the same stride written in different places.  On this arm the
+// blob is 804992 bytes = 8 + (33031 * 8) + (6 * 8) + (128 * 4224) + 16, and
+// `128 * 4224` does NOT move: `struct HostEv` holds no `val` (its 256
+// `HostFrame`s are two WORDS each), so the eval table's stride is
+// arm-independent.  Twinning the literal alone would have sized a blob smaller
+// than the offsets `Check` writes into it — see `struct Host`'s `slots` field.
+//
 // THE fd TABLE IS A SECOND, SEPARATE ALLOCATION (7C) and it DOES use `sizeof`
 // — a fresh block has no established literal-and-pin discipline to inherit, and
 // `sizeof(HostPoll) * 8` cannot drift from the declaration the way a hand-added
@@ -11114,7 +11324,12 @@ defun Rt.hostStatRecord(hN : val, iN : val, stN : val) -> val {
 // zero is the property that a NEVER-REGISTERED cell can never be polled.
 defun Rt.hostInit(progAddrN : val) -> val {
   word progAddr = payload(progAddrN, 0);
+  // >>> QBE_VAL-ONLY
   word bytes = 8 + (33031 * 40) + (6 * 8) + (128 * 4224) + 16;
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word bytes = 8 + (33031 * 8) + (6 * 8) + (128 * 4224) + 16;
+  // <<< QBE_WORDVAL-ONLY
   word blob = rawcall malloc(bytes);
   rawcall memset(blob, 0, bytes);
   *Host lp = [*Host](blob);
@@ -11127,7 +11342,12 @@ defun Rt.hostInit(progAddrN : val) -> val {
   call Rt.rootPushValueArray(blob + 8, blob);
   val prog = vecload(progAddr, 0);
   vecstore(blob + 8, 0, vecload(vecbody(prog), 1));
+  // >>> QBE_VAL-ONLY
   vecstore(blob + 8 + 40, 0, vecload(vecbody(prog), 3));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  vecstore(blob + 8 + 8, 0, vecload(vecbody(prog), 3));
+  // <<< QBE_WORDVAL-ONLY
   return mknum(blob);
 }
 
@@ -11140,7 +11360,7 @@ defun Rt.hostIsProgram(vN : val) -> val {
   if (veclen(vN) != 4) {
     return mkbool(0);
   }
-  word d = payload(vN, 0);
+  word d = vecbody(vN);
   if (d == 0) {
     return mkbool(0);
   }
@@ -11285,9 +11505,14 @@ defun Rt.hostArity(tagN : val) -> val {
 // saturated arm), and the rem == 0 over-application above.
 //
 // `bufN` is the caller's argument area as a BOXED raw address: `nargs`
-// CONTIGUOUS 40-byte cells that the caller keeps reachable from a registered
-// root (Rt.callArity needs buf + 40k, which is why a slice of the rooted slot
-// array IS the argument buffer — no copy, no second referee).
+// CONTIGUOUS Value cells that the caller keeps reachable from a registered
+// root (Rt.callArity needs buf + STRIDE*k, which is why a slice of the rooted
+// slot array IS the argument buffer — no copy, no second referee).  THE CELL
+// WIDTH IS THE LAYOUT'S (perf word-arm-hostpath): on the word arm these are
+// 8-byte cells, so the over-applied arm's `recur` steps by 8 and `Rt.callArity`
+// reads argument k at `buf + 8k`.  This is the site the class was really about —
+// `buf` is a slice of `struct Host`'s slot array, so the applier and the blob
+// must agree on the stride or argument k is read from slot 5k.
 defun Rt.apply-at(cN : val, bufN : val, nargsN : val) -> val {
   word buf = payload(bufN, 0);
   word nargs = payload(nargsN, 0);
@@ -11304,7 +11529,12 @@ defun Rt.apply-at(cN : val, bufN : val, nargsN : val) -> val {
       return mknil;
     }
     val f2 = call Rt.apply-at(cN, bufN, mknum(rem));
+    // >>> QBE_VAL-ONLY
     recur(f2, mknum(buf + rem * 40), mknum(nargs - rem));
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    recur(f2, mknum(buf + rem * 8), mknum(nargs - rem));
+    // <<< QBE_WORDVAL-ONLY
   } else {
     if (nargs < rem) {
       *ApplyState sp = rawcall malloc(32);
@@ -11361,8 +11591,18 @@ defun Rt.apply-at(cN : val, bufN : val, nargsN : val) -> val {
 // is the only thing that reads it.
 defun Rt.hostCall(hN : val, contAddrN : val, nargsN : val) -> val {
   word h = payload(hN, 0);
+  // >>> QBE_VAL-ONLY
   val r = call Rt.apply-at(vecload(vecbody(contAddrN), 0), mknum(h + 8 + (33027 * 40)), nargsN);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  val r = call Rt.apply-at(vecload(vecbody(contAddrN), 0), mknum(h + 8 + (33027 * 8)), nargsN);
+  // <<< QBE_WORDVAL-ONLY
+  // >>> QBE_VAL-ONLY
   vecstore(h + 8 + (33029 * 40), 0, r);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  vecstore(h + 8 + (33029 * 8), 0, r);
+  // <<< QBE_WORDVAL-ONLY
   return mknil;
 }
 
@@ -11376,7 +11616,12 @@ defun Rt.hostClearGo(hN : val) -> val {
   if (lp->clr >= 258) {
     return mknil;
   } else {
+    // >>> QBE_VAL-ONLY
     vecstore(h + 8 + ((lp->clrBase + lp->clr) * 40), 0, mknil);
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    vecstore(h + 8 + ((lp->clrBase + lp->clr) * 8), 0, mknil);
+    // <<< QBE_WORDVAL-ONLY
     lp->clr = lp->clr + 1;
     recur(hN);
   }
@@ -11421,7 +11666,12 @@ defun Rt.hostSpawnAt(hN : val, taskAddrN : val, iN : val) -> val {
   lp->evals[i].etag = 0;
   lp->nactive = lp->nactive + 1;
   call Rt.hostClearFrom(hN, mknum(base));
+  // >>> QBE_VAL-ONLY
   vecstore(h + 8 + (base * 40), 0, vecload(taskAddr, 0));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  vecstore(h + 8 + (base * 8), 0, vecload(taskAddr, 0));
+  // <<< QBE_WORDVAL-ONLY
   return mknil;
 }
 
@@ -11464,9 +11714,19 @@ defun Rt.hostSpawnFromCmd(hN : val, curAddrN : val) -> val {
   if (tagis(cur, 4) == 0) {
     return mknil;
   } else {
+    // >>> QBE_VAL-ONLY
     vecstore(h + 8 + (33030 * 40), 0, vecload(vecbody(cur), 0));
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    vecstore(h + 8 + (33030 * 8), 0, vecload(vecbody(cur), 0));
+    // <<< QBE_WORDVAL-ONLY
     vecstore(curAddr, 0, vecload(vecbody(cur), 1));
+    // >>> QBE_VAL-ONLY
     call Rt.hostSpawn(hN, mknum(h + 8 + (33030 * 40)));
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    call Rt.hostSpawn(hN, mknum(h + 8 + (33030 * 8)));
+    // <<< QBE_WORDVAL-ONLY
     recur(hN, curAddrN);
   }
 }
@@ -11489,7 +11749,12 @@ defun Rt.hostPushFrame(hN : val, iN : val, kindN : val) -> val {
     lp->evals[i].frames[n].kind = kind;
     lp->evals[i].frames[n].cont = slot;
     lp->evals[i].nframes = n + 1;
+    // >>> QBE_VAL-ONLY
     vecstore(h + 8 + (slot * 40), 0, vecload(h + 8 + (33030 * 40), 0));
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    vecstore(h + 8 + (slot * 8), 0, vecload(h + 8 + (33030 * 8), 0));
+    // <<< QBE_WORDVAL-ONLY
     return mknil;
   }
 }
@@ -11502,8 +11767,18 @@ defun Rt.hostDispatch(hN : val, iN : val) -> val {
   word i = payload(iN, 0);
   *Host lp = [*Host](h);
   word base = lp->evals[i].base;
+  // >>> QBE_VAL-ONLY
   word taskAddr = h + 8 + (base * 40);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word taskAddr = h + 8 + (base * 8);
+  // <<< QBE_WORDVAL-ONLY
+  // >>> QBE_VAL-ONLY
   word resAddr = taskAddr + 40;
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  word resAddr = taskAddr + 8;
+  // <<< QBE_WORDVAL-ONLY
   val task = vecload(taskAddr, 0);
   if (tagis(task, 10) == 0) {
     return call Rt.hostDeactivate(hN, iN);
@@ -11523,7 +11798,7 @@ defun Rt.hostDispatch(hN : val, iN : val) -> val {
   }
   // A FRESH data pointer: the arity probe above allocates (mknum), so a raw
   // copy of the vector's data base taken before it is stale after it.
-  word tv = payload(task, 0);
+  word tv = vecbody(task);
   if (call Rt.cStrEq(nm, rawstr("TaskSucceed")) != 0) {
     vecstore(resAddr, 0, vecload(tv, 1));
     return call Rt.hostCompleteOk(hN, iN);
@@ -11535,7 +11810,12 @@ defun Rt.hostDispatch(hN : val, iN : val) -> val {
   if (call Rt.cStrEq(nm, rawstr("TaskAndThen")) != 0) {
     val cont = vecload(tv, 1);
     val inner = vecload(tv, 2);
+    // >>> QBE_VAL-ONLY
     vecstore(h + 8 + (33030 * 40), 0, cont);
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    vecstore(h + 8 + (33030 * 8), 0, cont);
+    // <<< QBE_WORDVAL-ONLY
     call Rt.hostPushFrame(hN, iN, mknum(0));
     vecstore(taskAddr, 0, inner);
     return mknil;
@@ -11543,7 +11823,12 @@ defun Rt.hostDispatch(hN : val, iN : val) -> val {
   if (call Rt.cStrEq(nm, rawstr("TaskOnError")) != 0) {
     val cont = vecload(tv, 1);
     val inner = vecload(tv, 2);
+    // >>> QBE_VAL-ONLY
     vecstore(h + 8 + (33030 * 40), 0, cont);
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    vecstore(h + 8 + (33030 * 8), 0, cont);
+    // <<< QBE_WORDVAL-ONLY
     call Rt.hostPushFrame(hN, iN, mknum(1));
     vecstore(taskAddr, 0, inner);
     return mknil;
@@ -11670,14 +11955,34 @@ defun Rt.hostCompleteOk(hN : val, iN : val) -> val {
     word cs = lp->evals[i].frames[n].cont;
     lp->evals[i].nframes = n;
     if (kind == 1) {
+      // >>> QBE_VAL-ONLY
       vecstore(h + 8 + (cs * 40), 0, mknil);
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      vecstore(h + 8 + (cs * 8), 0, mknil);
+      // <<< QBE_WORDVAL-ONLY
       recur(hN, iN);
     } else {
+      // >>> QBE_VAL-ONLY
       word contAddr = h + 8 + (cs * 40);
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      word contAddr = h + 8 + (cs * 8);
+      // <<< QBE_WORDVAL-ONLY
+      // >>> QBE_VAL-ONLY
       vecstore(h + 8 + (33027 * 40), 0, vecload(h + 8 + ((lp->evals[i].base + 1) * 40), 0));
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      vecstore(h + 8 + (33027 * 8), 0, vecload(h + 8 + ((lp->evals[i].base + 1) * 8), 0));
+      // <<< QBE_WORDVAL-ONLY
       call Rt.hostCall(hN, mknum(contAddr), mknum(1));
       vecstore(contAddr, 0, mknil);
+      // >>> QBE_VAL-ONLY
       vecstore(h + 8 + (lp->evals[i].base * 40), 0, vecload(h + 8 + (33029 * 40), 0));
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      vecstore(h + 8 + (lp->evals[i].base * 8), 0, vecload(h + 8 + (33029 * 8), 0));
+      // <<< QBE_WORDVAL-ONLY
       return mknil;
     }
   }
@@ -11698,14 +12003,34 @@ defun Rt.hostCompleteErr(hN : val, iN : val) -> val {
     word cs = lp->evals[i].frames[n].cont;
     lp->evals[i].nframes = n;
     if (kind == 0) {
+      // >>> QBE_VAL-ONLY
       vecstore(h + 8 + (cs * 40), 0, mknil);
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      vecstore(h + 8 + (cs * 8), 0, mknil);
+      // <<< QBE_WORDVAL-ONLY
       recur(hN, iN);
     } else {
+      // >>> QBE_VAL-ONLY
       word contAddr = h + 8 + (cs * 40);
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      word contAddr = h + 8 + (cs * 8);
+      // <<< QBE_WORDVAL-ONLY
+      // >>> QBE_VAL-ONLY
       vecstore(h + 8 + (33027 * 40), 0, vecload(h + 8 + ((lp->evals[i].base + 1) * 40), 0));
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      vecstore(h + 8 + (33027 * 8), 0, vecload(h + 8 + ((lp->evals[i].base + 1) * 8), 0));
+      // <<< QBE_WORDVAL-ONLY
       call Rt.hostCall(hN, mknum(contAddr), mknum(1));
       vecstore(contAddr, 0, mknil);
+      // >>> QBE_VAL-ONLY
       vecstore(h + 8 + (lp->evals[i].base * 40), 0, vecload(h + 8 + (33029 * 40), 0));
+      // <<< QBE_VAL-ONLY
+      // >>> QBE_WORDVAL-ONLY
+      vecstore(h + 8 + (lp->evals[i].base * 8), 0, vecload(h + 8 + (33029 * 8), 0));
+      // <<< QBE_WORDVAL-ONLY
       return mknil;
     }
   }
@@ -11718,17 +12043,47 @@ defun Rt.hostDeliver(hN : val, iN : val) -> val {
   word h = payload(hN, 0);
   word i = payload(iN, 0);
   *Host lp = [*Host](h);
+  // >>> QBE_VAL-ONLY
   vecstore(h + 8 + (33027 * 40), 0, vecload(h + 8 + ((lp->evals[i].base + 1) * 40), 0));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  vecstore(h + 8 + (33027 * 8), 0, vecload(h + 8 + ((lp->evals[i].base + 1) * 8), 0));
+  // <<< QBE_WORDVAL-ONLY
+  // >>> QBE_VAL-ONLY
   vecstore(h + 8 + (33028 * 40), 0, vecload(h + 8, 0));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  vecstore(h + 8 + (33028 * 8), 0, vecload(h + 8, 0));
+  // <<< QBE_WORDVAL-ONLY
+  // >>> QBE_VAL-ONLY
   call Rt.hostCall(hN, mknum(h + 8 + 40), mknum(2));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  call Rt.hostCall(hN, mknum(h + 8 + 8), mknum(2));
+  // <<< QBE_WORDVAL-ONLY
+  // >>> QBE_VAL-ONLY
   val pair = vecload(h + 8 + (33029 * 40), 0);
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  val pair = vecload(h + 8 + (33029 * 8), 0);
+  // <<< QBE_WORDVAL-ONLY
   if (tagis(pair, 4) == 0) {
     return call Rt.hostDeactivate(hN, iN);
   } else {
     vecstore(h + 8, 0, vecload(vecbody(pair), 0));
+    // >>> QBE_VAL-ONLY
     vecstore(h + 8 + (33026 * 40), 0, vecload(vecbody(pair), 1));
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    vecstore(h + 8 + (33026 * 8), 0, vecload(vecbody(pair), 1));
+    // <<< QBE_WORDVAL-ONLY
     call Rt.hostDeactivate(hN, iN);
+    // >>> QBE_VAL-ONLY
     return call Rt.hostSpawnFromCmd(hN, mknum(h + 8 + (33026 * 40)));
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    return call Rt.hostSpawnFromCmd(hN, mknum(h + 8 + (33026 * 8)));
+    // <<< QBE_WORDVAL-ONLY
   }
 }
 
@@ -11887,8 +12242,18 @@ defun Rt.hostRun(progAddrN : val, outAddrN : val) -> val {
   word h = payload(hN, 0);
   *Host lp = [*Host](h);
   val prog = vecload(progAddr, 0);
+  // >>> QBE_VAL-ONLY
   vecstore(h + 8 + (33026 * 40), 0, vecload(vecbody(prog), 2));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  vecstore(h + 8 + (33026 * 8), 0, vecload(vecbody(prog), 2));
+  // <<< QBE_WORDVAL-ONLY
+  // >>> QBE_VAL-ONLY
   call Rt.hostSpawnFromCmd(hN, mknum(h + 8 + (33026 * 40)));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  call Rt.hostSpawnFromCmd(hN, mknum(h + 8 + (33026 * 8)));
+  // <<< QBE_WORDVAL-ONLY
   call Rt.hostRunLoop(hN);
   call Rt.hostCleanupAll(hN);
   vecstore(outAddr, 0, vecload(h + 8, 0));

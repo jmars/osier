@@ -1416,7 +1416,9 @@ wordSurfaceUnportedOne defuns k =
         -- THE AUDIT LIST IS CONSULTED FOR THE SURFACE TOO (perf
         -- word-arm-letdestr): a core-lib defun whose every construct is ADMITTED
         -- can still be wrong on this arm, and the refusal has to name it.  The
-        -- first entry, `Runtime.program`, is that case — see the list.
+        -- list is EMPTY since perf word-arm-hostpath (its last entry,
+        -- `Runtime.program`, is ported) — the arm remains live and TestMain
+        -- proves it with a planted entry.
         List.map (\why -> k ++ ": " ++ why) (List.filterMap (\( rk, why ) -> if rk == k then Just why else Nothing) wordArmDefunRefusals)
 
     else
@@ -1473,10 +1475,38 @@ is ported to the word arm.
 -}
 wordArmDefunRefusals : List ( String, String )
 wordArmDefunRefusals =
-    [ ( "Runtime.program"
-      , "THE HOST PROGRAM PATH (perf word-arm-letdestr) — `Runtime.program` is the ONE defun that builds the `Program` vector (`vector[Program, m0, c0, update]`) the HOST EVENT LOOP drives, and that loop's state is a 1.3 MB MALLOC'D BLOB laid out with the val arm's 40-byte Value stride: `Rt.hostInit` sizes it `8 + 33031 * 40 + ...`, writes the model to `blob + 8` and the update fn to `blob + 8 + 40`, and `Rt.hostDispatch`/`hostRunLoop`/`hostRun` read the same hardcoded 40s — while `rootPushValueArray(blob + 8, blob)` registers that array for the COLLECTOR, whose scan stride IS the layout's (8 on this arm). The blob is therefore a val-arm structure, not a stride: twinning it is a unit of its own (its size, its TestMain layout pin and every `* 40` move together). MEASURED before this refusal (the destructuring port made the path reachable): a `Platform.program` whose model is the Int 7 prints `7` on the val arm and `[vector 4]` on the word arm — the Program vector itself, rc 0, no stderr."
-      )
-    ]
+    []
+
+
+-- THE LIST IS EMPTY, AND THAT IS THE MEASURED STATE (perf word-arm-hostpath).
+--
+-- Its LAST entry was `Runtime.program` — THE HOST PROGRAM PATH, 7 corpus groups,
+-- the only class left in the census.  It was the first entry that was not a
+-- construct: every node inside `Runtime.program` was already admitted, and the
+-- defun was wrong for a reason the per-construct classifier cannot see, namely
+-- that the HOST EVENT LOOP it feeds kept its state in ONE malloc'd blob laid out
+-- with the val arm's 40-byte Value stride.
+--
+-- THAT IS NOW TWINNED, and the reason is worth recording because it was NOT the
+-- literal the old text named.  The stride's origin is `struct Host`'s
+-- `slots : val[33031]` — the ONE `val` field in the whole runtime — and
+-- `Mid.RtLang.Check` sizes a `val` field at 40 bytes under any knob, so twinning
+-- `Rt.hostInit`'s malloc alone would have sized the blob SMALLER than the field
+-- offsets the checker writes into it.  The word arm's `struct Host` therefore
+-- carries `slots : word[33031]` (spliced), and the blob, the five scratch cells,
+-- the eval `base` slots, `Rt.apply-at`'s argument slice and `Rt.callArity`'s
+-- `rt_callN` pitch all moved with it: 54 stride lines in three defun families
+-- (see `tools/qbe/WORD-ARM-FRONTIER.md`'s STEP-0 table — the circulating counts
+-- of 32, 29 and "about 30" were all undercounts of the same family, and none of
+-- them included `Rt.callArity`).
+--
+-- THE LIST ITSELF STAYS.  An empty list is the honest value, not a dead seat: it
+-- is the only mechanism the classifier has for "this whole defun is wrong for a
+-- reason that is not a construct", and deleting it would delete the next such
+-- reason's home.  TestMain pins BOTH directions — the list is empty, AND a
+-- defun-level refusal placed in it still refuses by name through
+-- `wordSurfaceUnported`/`wordRtUnported` — so the seat is proven live rather
+-- than merely present.
 
 
 {-| THE Rt SURFACE, CLASSIFIED BY THE SAME PRE-WALK WHITELIST (perf VR3b3).

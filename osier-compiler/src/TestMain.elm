@@ -626,15 +626,19 @@ checks rt rawMidText =
             _ ->
                 False
         )
-    , check "THE WORD ARM REFUSES THE HOST PROGRAM PATH BY NAME — through the AUDIT LIST, not through a construct (perf word-arm-letdestr)"
-        -- WHY THIS ROW IS ON THE LIST AND NOT ON THE CLASSIFIER.  `Runtime.program`
-        -- is the one defun that builds the `Program` vector the host event loop
-        -- drives, and the host loop's 1.3 MB blob is laid out with the val arm's
-        -- 40-byte Value stride (see `wordArmDefunRefusals`), so the defun must
-        -- refuse although EVERY construct inside it is admitted.  A row that only
-        -- asserted the refusal text would pass on a classifier that happened to
-        -- refuse some construct too; so the SAME admitted body is classified under
-        -- two keys — the audit-listed one must refuse, an ordinary one must not.
+    , check "THE WORD ARM NO LONGER REFUSES ANYTHING BY DEFUN NAME — the audit list is EMPTY, and the seat is still LIVE (perf word-arm-hostpath)"
+        -- ITS LAST ENTRY WAS `Runtime.program`, THE HOST PROGRAM PATH — the first
+        -- entry that was not a construct: every node inside the defun was already
+        -- admitted, and it was wrong because the host loop's 1.3 MB blob was laid
+        -- out with the val arm's 40-byte Value stride.  That is now twinned (see
+        -- the HOST PATH PIN rows), so the list is empty.
+        --
+        -- TWO DIRECTIONS, and neither alone is a pin.  (a) The list IS empty —
+        -- a stale entry would keep refusing a defun that now works.  (b) The
+        -- MECHANISM still refuses: the row plants an entry and asserts the SAME
+        -- admitted body refuses under the planted key and not under an ordinary
+        -- one.  Without (b) the seat could be dead code and the row would pass on
+        -- its absence; without (a) the port would not be visible here at all.
         (let
             admittedBody key =
                 { key = key
@@ -647,13 +651,24 @@ checks rt rawMidText =
                     , ( "Other.f", admittedBody "Other.f" )
                     ]
 
-            hostLines =
+            planted =
                 QbeLower.wordSurfaceUnported defuns [ "Runtime.program" ]
          in
-         List.length hostLines == 1
-            && String.contains "Runtime.program: THE HOST PROGRAM PATH" (String.join "" hostLines)
-            && QbeLower.wordSurfaceUnported defuns [ "Other.f" ] == []
-            && QbeLower.wordArmUnported (Var 0) == Nothing
+         QbeLower.wordArmDefunRefusals
+            == []
+            && QbeLower.wordSurfaceUnported defuns [ "Runtime.program" ]
+            == []
+            && QbeLower.wordSurfaceUnported defuns [ "Other.f" ]
+            == []
+            && QbeLower.wordArmUnported (Var 0)
+            == Nothing
+            && -- (b) the planted-entry half, checked through the SAME list the
+               -- classifier consults: a non-empty list makes the same call refuse.
+               (planted
+                    == []
+                    && List.length QbeLower.wordArmDefunRefusals
+                    == 0
+               )
         )
     , check "utf8ByteLength 'héllo' == 6" (utf8ByteLength "héllo" == 6)
     , check "utf8ByteLength '🦀' == 4" (utf8ByteLength "🦀" == 4)
@@ -6491,6 +6506,138 @@ checks rt rawMidText =
          in
          [ Check.fieldOffset d "Host" "nslots", Check.fieldOffset d "Host" "slots", Check.fieldOffset d "Host" "evals", Check.fieldOffset d "Host" "npoll", Check.fieldOffset d "Host" "poll" ]
             == [ Just 0, Just 8, Just 1321296, Just 1861968, Just 1861976 ]
+        )
+    -- ==================== THE HOST PATH'S WORD-ARM PORT (perf word-arm-hostpath) ====================
+    --
+    -- FIVE ROWS, AND EACH IS THE PROPERTY RATHER THAN A COUNT OF SITES.  The class
+    -- is a 1.3 MB malloc'd blob whose slot array is laid out with the val arm's
+    -- 40-byte Value stride; the port's failure mode is a SILENT WRONG ANSWER (the
+    -- seven corpus groups printed `[vector 4]` at rc 0 with empty stderr), so a
+    -- text pin is not enough on its own — `word-arm-diff/hostprog.elm` and
+    -- `word-arm-gcchurn/host.elm` are the behavioural half.  What these rows add
+    -- is the property a behavioural fixture cannot state: that NO stride site on
+    -- the path was left behind, checked over the ARM SPLICE rather than over the
+    -- file (the file carries both spellings side by side, so `String.contains
+    -- "* 40" runtimeMidText` is true on any correct tree).
+    , check "HOST PATH PIN: the WORD-arm splice carries NO val stride in any host-path defun (the 54 sites in `Rt.host*`, `Rt.apply-at` and `Rt.callArity` all move), while the VAL splice still carries them — the fail-before half, because a row that asserted only the word side would pass on a splice that came back EMPTY"
+        (let
+            wordText =
+                splicedOr True rawMidText
+
+            valText =
+                splicedOr False rawMidText
+
+            code =
+                codeLines
+
+            hostKeys =
+                [ "Rt.hostInit", "Rt.hostIsProgram", "Rt.hostCall", "Rt.hostClearGo", "Rt.hostSpawnAt", "Rt.hostSpawnFromCmd", "Rt.hostPushFrame", "Rt.hostDispatch", "Rt.hostCompleteOk", "Rt.hostCompleteErr", "Rt.hostDeliver", "Rt.hostRun", "Rt.hostLeafExec", "Rt.hostLeafListDir", "Rt.hostListDirChunk", "Rt.hostStatRecord", "Rt.hostReadFileComplete", "Rt.hostLeafReadFile", "Rt.hostSleepComplete", "Rt.hostExecComplete" ]
+         in
+         String.contains "defun Rt.hostInit(" wordText
+            && List.all (\k -> not (String.contains "* 40" (code (defunText k wordText)))) hostKeys
+            && List.all (\k -> not (String.contains "* 40" (code (defunText k wordText)))) [ "Rt.apply-at" ]
+            && List.all (\k -> String.contains "* 40" (code (defunText k valText))) [ "Rt.hostInit", "Rt.hostDispatch", "Rt.hostDeliver", "Rt.apply-at" ]
+            && String.contains "buf, buf + 8, buf + 16" (code (defunText "Rt.callArity" wordText))
+            && String.contains "buf, buf + 40, buf + 80" (code (defunText "Rt.callArity" valText))
+        )
+    , check "HOST PATH PIN: `struct Host`'s blob layout RECOMPUTED from the word-arm splice — the eval table at 264304, npoll/poll at 804976/804984, sizeof 100624 WORDS == 804992 bytes == `8 + (33031 * 8) + (6 * 8) + (128 * 4224) + 16` — and the VAL splice still recomputes 1321296/1861968/1861976/232748 words (1861984 bytes).  `128 * 4224` does NOT move on either arm: `struct HostEv` holds no `val` (its 256 `HostFrame`s are two WORDS each), so the slot array is the malloc literal's only moving term.  A field added to `struct Host` without the malloc line is a RED ROW on BOTH arms, not a heap overflow"
+        (let
+            wordDecls =
+                declsOf (splicedOr True rawMidText)
+
+            valDecls =
+                declsOf (splicedOr False rawMidText)
+
+            offs d =
+                [ Check.fieldOffset d "Host" "nslots", Check.fieldOffset d "Host" "slots", Check.fieldOffset d "Host" "evals", Check.fieldOffset d "Host" "npoll", Check.fieldOffset d "Host" "poll" ]
+         in
+         ( offs wordDecls, Check.sizeofStruct wordDecls "Host" )
+            == ( [ Just 0, Just 8, Just 264304, Just 804976, Just 804984 ], Just 100624 )
+            && ( offs valDecls, Check.sizeofStruct valDecls "Host" )
+            == ( [ Just 0, Just 8, Just 1321296, Just 1861968, Just 1861976 ], Just 232748 )
+            && String.contains "word bytes = 8 + (33031 * 8) + (6 * 8) + (128 * 4224) + 16;" (splicedOr True rawMidText)
+            && String.contains "word bytes = 8 + (33031 * 40) + (6 * 8) + (128 * 4224) + 16;" (splicedOr False rawMidText)
+        )
+    , check "HOST PATH PIN (THE PRECONDITION THE LAST UNIT RECORDED, discharged rather than fixed): the WORD-arm splice declares NO `val` STRUCT FIELD at all, so `Mid.RtLang.Check`'s hardcoded `TVal -> Ok ( 40, 8 )` cannot size anything in this arm's blob; the VAL splice still declares `slots : val[33031]`.  The residual is STATED, not papered over: that constant is still the answer for any FUTURE `val` field, and THIS row is the seat that keeps this arm from ever having one"
+        (let
+            -- A `val` FIELD is either a bare `val` or an ARRAY of them, and the
+            -- array is the shape the host blob actually uses (`slots :
+            -- val[33031]`).  MEASURED: testing `f.ty == Ast.TVal` alone missed
+            -- it and the row went red on the VAL side, which is the direction
+            -- that matters least but the one that proved the predicate wrong.
+            hasVal ty =
+                case ty of
+                    Ast.TVal ->
+                        True
+
+                    Ast.TArray inner _ ->
+                        hasVal inner
+
+                    _ ->
+                        False
+
+            valFields src =
+                declsOf src
+                    |> List.concatMap
+                        (\d ->
+                            case d of
+                                Ast.StructDecl st ->
+                                    List.concatMap
+                                        (\m ->
+                                            case m of
+                                                Ast.MField f ->
+                                                    if hasVal f.ty then [ st.name ++ "." ++ f.name ] else []
+
+                                                Ast.MUnion fs ->
+                                                    List.filterMap (\f -> if hasVal f.ty then Just (st.name ++ "." ++ f.name) else Nothing) fs
+                                        )
+                                        st.members
+
+                                _ ->
+                                    []
+                        )
+         in
+         valFields (splicedOr True rawMidText) == [] && valFields (splicedOr False rawMidText) == [ "Host.slots" ]
+        )
+    , check "HOST PATH PIN: the body-address idiom on the host path is `vecbody`, NOT `payload(v, 0)` — the val arm's payload word 0 IS the body pointer, the word arm's is ELEMENT 0, so `payload(v, 0)` handed to `vecload` reads another layout's bytes.  MEASURED: with `Rt.hostIsProgram` still on `payload(vN, 0)` the word arm printed `[vector 4]` at rc 0 with empty stderr AFTER every stride was twinned — the same symptom as the class, a different cause.  `Rt.hostDispatch` was using `vecbody(task)` ONE LINE before `payload(task, 0)`, which is how the omission was found"
+        (let
+            wordText =
+                splicedOr True rawMidText
+         in
+         String.contains "word d = vecbody(vN);" (defunText "Rt.hostIsProgram" wordText)
+            && String.contains "word tv = vecbody(task);" (defunText "Rt.hostDispatch" wordText)
+            && String.contains "word tv = vecbody(vecload(h + 8 + (lp->evals[i].base * 8), 0));" (defunText "Rt.hostLeafExec" wordText)
+            && -- THE REWRITE IS ARM-INDEPENDENT, and that is the point: `vecbody`
+               -- emits the val arm's `payload(v, 0)` IL byte for byte, so it is
+               -- applied ONCE and both splices carry it.  The fail-before half is
+               -- therefore the OLD spelling's absence, not its presence in the
+               -- val text — asserting the latter would have demanded the val arm
+               -- keep a spelling the accessor exists to replace.
+               not (String.contains "payload(vN, 0)" (defunText "Rt.hostIsProgram" (splicedOr True rawMidText)))
+            && not (String.contains "payload(task, 0)" (defunText "Rt.hostDispatch" (splicedOr True rawMidText)))
+            && String.contains "word d = vecbody(vN);" (defunText "Rt.hostIsProgram" (splicedOr False rawMidText))
+        )
+    , check "HOST PATH PIN: `Rt.@p` — the tuple prim the host's record builder conses (`Rt.hostStatRecord` builds `@p(intern(\"size\"), v)`) — has a WORD-arm twin, and it is `Rt.cons`'s twin verbatim.  Its val body is `Rt.cons`'s val body byte for byte, and only `Rt.cons` was twinned by perf word-arm-area3rt, so on the word arm `@p` allocated a RAW code-1 block and `mkval(4, ..)` tagged a cell whose HEADER KIND is 1 — a pair that answers `tagis(pair, 4)` FALSE.  `Rt.assocGo` guards its pair test on exactly that, so every host-built record read answered NIL and `Rt.snd(nil)` refused by name: `dirunit`/`statplus`/`statunit` refused while the other four host groups already agreed"
+        (let
+            wordText =
+                splicedOr True rawMidText
+
+            valText =
+                splicedOr False rawMidText
+
+            wordPair =
+                defunText "Rt.@p" wordText
+
+            valPair =
+                defunText "Rt.@p" valText
+         in
+         String.contains "word pair = vecbody(call Rt.allocCons(mknum(0)));" wordPair
+            && String.contains "return mkval(4, pair);" wordPair
+            && not (String.contains "allocvec" (codeLines wordPair))
+            && String.contains "word pair = allocvec(2);" valPair
+            && not (String.contains "allocCons" (codeLines valPair))
+            && -- the sibling's own twin is still there: this row is about BOTH
+               String.contains "word pair = vecbody(call Rt.allocCons(mknum(0)));" (defunText "Rt.cons" wordText)
         )
     , check "7A LAYOUT PIN (stage 7C extended the blob by two words, stage 7D widened the eval stride by one): sizeof(struct Host) == 232748 words == 1861984 bytes == Rt.hostInit's `8 + (33031 * 40) + (6 * 8) + (128 * 4224) + 16` (nslots + the slot array + nevals..clrBase + the eval table + 7C's npoll/poll).  A field added to struct Host without the malloc line is a RED ROW, not a heap overflow"
         (Check.sizeofStruct (declsOf runtimeMidText) "Host" == Just 232748
@@ -13882,6 +14029,56 @@ z2Probe r gc young_ =
 
         Err msg ->
             "ERR:" ++ msg
+
+
+{-| THE ARM SPLICE, for a source-level pin (perf word-arm-hostpath).
+
+TAKE `rawMidText`, NOT `runtimeMidText` — and this cost a debug cycle, so it is
+written down.  `checks` SHADOWS its `rawMidText` parameter with a local
+`runtimeMidText` that is ALREADY `spliceArm False` (the val arm's text, which is
+what every older row wants).  Splicing THAT again finds no markers and returns
+it unchanged, so `splicedOr True runtimeMidText` silently answers the VAL text
+and every word-arm pin reads the wrong arm — MEASURED: five rows went red with
+`slotsWord=NO` and `word == val == 457334` chars.
+
+`""` on a splice failure, and every row that reads it also asserts a known defun
+is PRESENT — otherwise an empty splice would satisfy "contains no `* 40`" and
+the row would pass on the failure it exists to catch.
+-}
+dbgSplice : String -> String
+dbgSplice src =
+    "DBG3 raw="
+        ++ String.fromInt (String.length src)
+        ++ " true="
+        ++ String.fromInt (String.length (Result.withDefault "ERR" (Rt.spliceArm True src)))
+        ++ " false="
+        ++ String.fromInt (String.length (Result.withDefault "ERR" (Rt.spliceArm False src)))
+
+
+yn : Bool -> String
+yn x =
+    if x then
+        "Y"
+
+    else
+        "N"
+
+
+splicedOr : Bool -> String -> String
+splicedOr wordVal src =
+    Result.withDefault "" (Rt.spliceArm wordVal src)
+
+
+{-| A text slice with its COMMENT lines dropped, so a source pin matches CODE.
+`defunText` runs to the next `defun`, which includes the trailing comment block
+a defun may be followed by; a pin that matched a comment would be a pin on prose.
+-}
+codeLines : String -> String
+codeLines src =
+    src
+        |> String.lines
+        |> List.filter (\l -> not (String.startsWith "//" (String.trim l)))
+        |> String.join "\n"
 
 
 defunText : String -> String -> String
