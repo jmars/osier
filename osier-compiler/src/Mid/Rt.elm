@@ -2091,10 +2091,20 @@ EMITTED, and a runtime.mid call edge to a defun that is never seeded links
 cleanly on the val arm and dies as an undefined symbol on the word arm —
 MEASURED (`undefined reference to q_Rt_x2ekindHdr` on the first word-arm link of
 a real program, because VR3c added the defun and the calls but no seed).
+
+`Rt.symToStr` IS THE SECOND KIND (perf word-arm-letdestr): its DEFUN is not
+inside a splice region — it exists on both arms — but only the WORD arm's
+`Rt.value` CALLS it (the val splice is `cStrLenGo` + a direct `mkstr`), and
+`Rt.value`'s `rtDeps` row cannot carry the edge without emitting a dead defun on
+the val arm for every program that looks a symbol up (MEASURED: the corpus moved
+8 `exec*` .ssa hashes, all of them only gaining `q_Rt_x2esymToStr`).  So it is
+seeded HERE, where the seed exists only under `layout.heapTagIsKind`.  MEASURED
+without it: `taskpure`/`taskseq` died at LINK, `undefined reference to
+q_Rt_x2esymToStr`.
 -}
 wordArmSeeds : List String
 wordArmSeeds =
-    keepRtDependencies [ "Rt.allocKind", "Rt.allocCons", "Rt.allocFloat", "Rt.allocSym", "Rt.allocRecord", "Rt.recEqGo", "Rt.kindHdr", "Rt.mkStream" ]
+    keepRtDependencies [ "Rt.allocKind", "Rt.allocCons", "Rt.allocFloat", "Rt.allocSym", "Rt.allocRecord", "Rt.recEqGo", "Rt.kindHdr", "Rt.mkStream", "Rt.symToStr" ]
 
 
 {-| THE SEATS LOWER NAMES DIRECTLY (zighost Z2/Z3): the plain vec-store writer

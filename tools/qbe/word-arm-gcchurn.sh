@@ -241,6 +241,18 @@ row con      h1      240  1
 row con      h2      240  1
 row con      h4      240  1
 row con      default 240  0   # regression row: 0 scavenges, see above
+# ---- `let` DESTRUCTURING (perf word-arm-letdestr): the class allocates nothing
+#      itself, but `lowerBind` puts every pattern variable in a ROOTED slot and
+#      the pattern's tag test is a CALL on this arm (`Rt.=`), so the binds are
+#      live across the body's allocations.  MEASURED (QBE_MIDGC_STATS=1, counting
+#      scavenges AND full collects) on both arms: 80/174 at h1, 72/164 at h2,
+#      62/82 at h4 and 4/7 at DEFAULT — so here even the default rung COLLECTS,
+#      and all four are collecting rungs (min 1) rather than the regression rows
+#      `rec`/`con` needed at the default knob.
+row letd     h1      240  1
+row letd     h2      240  1
+row letd     h4      240  1
+row letd     default 240  1
 
 if [ "$fails" != 0 ]; then
   echo "word-arm-gcchurn: $fails failure(s) — a closure is being read after a collection it did not survive"

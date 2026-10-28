@@ -183,25 +183,30 @@ checks rt rawMidText =
             caseWithBody body =
                 Case { caseBase | alts = [ { altBase | matches = [ MEmpty [] ], body = body } ] }
 
+            -- a `let` destructuring, with the three walks parametrised so the
+            -- BOTH-DIRECTIONS controls below can put an un-ported construct in
+            -- each one (perf word-arm-letdestr).
+            letDestr v ms bs =
+                Let
+                    { binders =
+                        [ LetDestruct
+                            { scrutId = { id = 9, name = "$case" }
+                            , value = v
+                            , matches = ms
+                            , binds = bs
+                            , badLabel = "lb"
+                            , okLabel = "lo"
+                            }
+                        ]
+                    , body = Var 0
+                    }
+
             refused =
                 List.filterMap
                     (\e -> QbeLower.wordArmUnported e)
                     [ PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
                     , StreamRef { varName = "*stoutput*" }
                     , Lit (LFloat 1.5)
-                    , Let
-                        { binders =
-                            [ LetDestruct
-                                { scrutId = { id = 9, name = "$case" }
-                                , value = Var 0
-                                , matches = [ MCons [ HdStep ] ]
-                                , binds = []
-                                , badLabel = "lb"
-                                , okLabel = "lo"
-                                }
-                            ]
-                        , body = Var 0
-                        }
                     ]
          in
          QbeLower.wordArmUnported cons == Nothing
@@ -349,12 +354,35 @@ checks rt rawMidText =
             -- refusal was never revisited.  `MTagEq` was never a member of
             -- `refused` (it has its own line above), so the two classes that
             -- left together took this count from five to four and that line
-            -- from `/= Nothing` to `== Nothing`.  THE FOUR THAT REMAIN, so the
+            -- from `/= Nothing` to `== Nothing`.
+            --
+            -- FOUR -> THREE (perf word-arm-letdestr): a `let` DESTRUCTURING
+            -- pattern left — the FIFTH class in this file whose stated reason
+            -- was a DESCRIPTION rather than a gap ("it is a tag test plus
+            -- payload reads"), and the census showed it was the largest class
+            -- left (26 groups, all 26 alone).  THE THREE THAT REMAIN, so the
             -- number is not something a reader has to trust: `f/` (the float
-            -- division, AREA 5), `StreamRef` (the effect stream's symbol cell),
-            -- a FLOAT literal (AREA 5) and a `let` DESTRUCTURING pattern
-            -- (AREA 2/3).
-            && List.length refused == 4
+            -- division, AREA 5), `StreamRef` (the effect stream's symbol cell)
+            -- and a FLOAT literal (AREA 5).
+            && List.length refused == 3
+            -- A `let` DESTRUCTURING PATTERN is admitted over every shape the
+            -- matcher can express, and each of the three walks still BITES
+            -- (perf word-arm-letdestr).  The port is an ADMISSION, not an
+            -- emitter change: `lowerLetDestruct` runs the `Case` matcher's own
+            -- `lowerMatchTests`/`lowerBinds`, so a pattern is expressible here
+            -- exactly when the equivalent `case` alt is — which is what these
+            -- pairs assert, one pair per walk.
+            && QbeLower.wordArmUnported (letDestr (Var 0) [ MCons [ HdStep ] ] [ ( { id = 2, name = "h" }, VPath [ HdStep ] ) ]) == Nothing
+            && QbeLower.wordArmUnported (letDestr (Var 0) [ MTagEq [ IdxStep 0 ] "Just" ] [ ( { id = 2, name = "n" }, VPath [ IdxStep 1 ] ) ]) == Nothing
+            && QbeLower.wordArmUnported (letDestr (Var 0) [ MEmpty [] ] [ ( { id = 2, name = "f" }, VField [] "f" ) ]) == Nothing
+            -- THE SCRUTINEE walk: a destructuring of an un-ported value refuses.
+            && (QbeLower.wordArmUnported (letDestr (Lit (LFloat 1.5)) [ MCons [ HdStep ] ] []) /= Nothing)
+            && QbeLower.wordArmUnported (letDestr (Con { tag = "Just", args = [ Lit (LNumber 1) ] }) [ MCons [ HdStep ] ] []) == Nothing
+            -- THE MATCH walk: a destructuring whose pattern matches on a float
+            -- LITERAL refuses (the literal is classified by the same `Lit` rule
+            -- the `Case` row uses).
+            && (QbeLower.wordArmUnported (letDestr (Var 0) [ MLitEq [] (LFloat 1.5) ] []) /= Nothing)
+            && QbeLower.wordArmUnported (letDestr (Var 0) [ MLitEq [] (LNumber 3) ] []) == Nothing
             -- ... and the construct that LEFT the refused set (perf
             -- word-arm-records R1): a SYMBOL LITERAL is now admitted, because
             -- its cell is ported (code 2, a raw body `[byte pointer, length]`
@@ -489,6 +517,114 @@ checks rt rawMidText =
 
             Err _ ->
                 False
+        )
+    , check "A `let` DESTRUCTURING EMITS THE MATCHER'S OWN CHASE — the layout-derived tag test and payload chase on BOTH arms, and the SAME chase the equivalent `case` emits (perf word-arm-letdestr)"
+        -- WHY A ROW HERE, GIVEN THE CLASSIFIER ROW ABOVE.  That row pins the
+        -- ADMISSION; the port's claim is stronger and is the thing a later
+        -- reader will doubt — that the destructuring has NO EMISSION OF ITS OWN,
+        -- i.e. `lowerLetDestruct` runs the `Case` matcher's `lowerMatchTests` /
+        -- `lowerBinds`.  So the SAME pattern is lowered TWICE, once as a `let`
+        -- destructuring and once as a one-alt `case`, and the row asserts the
+        -- two functions carry the SAME layout-derived instructions on the word
+        -- arm.  A fork that gave the destructuring its own stride would diverge
+        -- from the case function HERE — the shape of the `fieldBase` defect this
+        -- arc already paid for once.
+        --
+        -- THE PROPERTY, NOT A COUNT: on the word arm a cons tag test reads the
+        -- GC HEADER's kind (`shr heapKindShift`) and a payload chase UNTAGS the
+        -- body (`and untagMask`); on the val arm the tag is a whole WORD and the
+        -- payload word HOLDS a pointer, so neither instruction exists and the
+        -- tag test is a `ceqw ... tagCons` instead.  Both directions are
+        -- asserted, so neither arm can pass by the other's route.
+        (let
+            arities =
+                rtArities [ letDestrProbe, caseDestrProbe ]
+
+            prog =
+                [ letDestrProbe, caseDestrProbe ]
+
+            -- ONE ENTRY KEY PER LOWERING, deliberately: the module a lowering
+            -- returns holds only the defuns REACHABLE from its entry, so the
+            -- destructuring and its `case` twin are compiled as two separate
+            -- modules rather than made mutually reachable (which would change
+            -- the very shape the row compares).
+            valOf entry =
+                QbeLower.lower rt False False False True True True True False False True QbeTypes.empty arities prog entry
+
+            wordOf entry =
+                case Rt.loadArm True rawMidText of
+                    Ok wordRt ->
+                        QbeLower.lowerWith RtLayout.wordLayout wordRt False True True True True True True False False True QbeTypes.empty arities prog entry
+
+                    Err _ ->
+                        Err "no word-arm runtime"
+         in
+         case ( valOf "Ld.f", wordOf "Ld.f" ) of
+            ( Ok valLetMod, Ok wordLetMod ) ->
+                case ( valOf "Cd.f", wordOf "Cd.f" ) of
+                    ( Ok valCaseMod, Ok wordCaseMod ) ->
+                        case ( funcByName "q_Ld_x2ef" valLetMod, funcByName "q_Ld_x2ef" wordLetMod ) of
+                            ( Just valLet, Just wordLet ) ->
+                                case ( funcByName "q_Cd_x2ef" valCaseMod, funcByName "q_Cd_x2ef" wordCaseMod ) of
+                                    ( Just valCase, Just wordCase ) ->
+                                        -- the WORD arm: untag + kind read, on BOTH functions
+                                        hasSlotUntagChase wordLet
+                                            && hasSlotUntagChase wordCase
+                                            && hasKindRead wordLet
+                                            && hasKindRead wordCase
+                                            -- the VAL arm: neither, and its own tag compare instead
+                                            && not (hasSlotUntagChase valLet)
+                                            && not (hasSlotUntagChase valCase)
+                                            && not (hasKindRead valLet)
+                                            && not (hasKindRead valCase)
+                                            && hasValTagCmp valLet
+                                            && hasValTagCmp valCase
+                                            -- and both really are the same construct: the
+                                            -- non-exhaustive die arm is emitted by the
+                                            -- destructuring AND by the case
+                                            && callsSym "q_Rt_x2edie" wordLet
+                                            && callsSym "q_Rt_x2edie" wordCase
+
+                                    _ ->
+                                        False
+
+                            _ ->
+                                False
+
+                    _ ->
+                        False
+
+            _ ->
+                False
+        )
+    , check "THE WORD ARM REFUSES THE HOST PROGRAM PATH BY NAME — through the AUDIT LIST, not through a construct (perf word-arm-letdestr)"
+        -- WHY THIS ROW IS ON THE LIST AND NOT ON THE CLASSIFIER.  `Runtime.program`
+        -- is the one defun that builds the `Program` vector the host event loop
+        -- drives, and the host loop's 1.3 MB blob is laid out with the val arm's
+        -- 40-byte Value stride (see `wordArmDefunRefusals`), so the defun must
+        -- refuse although EVERY construct inside it is admitted.  A row that only
+        -- asserted the refusal text would pass on a classifier that happened to
+        -- refuse some construct too; so the SAME admitted body is classified under
+        -- two keys — the audit-listed one must refuse, an ordinary one must not.
+        (let
+            admittedBody key =
+                { key = key
+                , value = Lam { params = [ { id = 0, name = "x" } ], body = Var 0 }
+                }
+
+            defuns =
+                Dict.fromList
+                    [ ( "Runtime.program", admittedBody "Runtime.program" )
+                    , ( "Other.f", admittedBody "Other.f" )
+                    ]
+
+            hostLines =
+                QbeLower.wordSurfaceUnported defuns [ "Runtime.program" ]
+         in
+         List.length hostLines == 1
+            && String.contains "Runtime.program: THE HOST PROGRAM PATH" (String.join "" hostLines)
+            && QbeLower.wordSurfaceUnported defuns [ "Other.f" ] == []
+            && QbeLower.wordArmUnported (Var 0) == Nothing
         )
     , check "utf8ByteLength 'héllo' == 6" (utf8ByteLength "héllo" == 6)
     , check "utf8ByteLength '🦀' == 4" (utf8ByteLength "🦀" == 4)
@@ -2181,9 +2317,14 @@ checks rt rawMidText =
                     && String.contains "return call Rt.recUpd(rec, field, newv);" wordText
                     && String.contains "return call Rt.recUpd(rec, field, newv);" valText
                     && String.contains "return call Rt.recAppend(rec, field, newv);" wordText
-                    -- THE DELIVERABLE: the family's by-name refusal list is
-                    -- EMPTY.  A re-refusal of any of the twelve is RED here.
-                    && List.isEmpty QbeLower.wordArmDefunRefusals
+                    -- THE DELIVERABLE: NO `Rt.rec*` KEY IS IN THE BY-NAME
+                    -- REFUSAL LIST.  A re-refusal of any of the twelve is RED
+                    -- here.  (The assertion used to be `List.isEmpty` on the
+                    -- whole list, which was only equivalent while the list was
+                    -- empty for every family; perf word-arm-letdestr added a
+                    -- SURFACE entry — `Runtime.program`, the host path — so the
+                    -- row now states the property it always meant.)
+                    && not (List.any (\( k, _ ) -> String.startsWith "Rt.rec" k) QbeLower.wordArmDefunRefusals)
 
             _ ->
                 False
@@ -15247,6 +15388,61 @@ leafProbe =
     }
 
 
+{-| perf word-arm-letdestr — THE DESTRUCTURING PROBE: `\p -> let ( h :: _ ) = p in h`.
+One cons match, one head bind.  Its twin below is the SAME pattern written as a
+one-alt `case`, which is what lets the row assert that the two lowerings carry the
+same layout-derived chase rather than merely both being accepted.
+-}
+letDestrProbe : Defun
+letDestrProbe =
+    { key = "Ld.f"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "p" } ]
+            , body =
+                Let
+                    { binders =
+                        [ LetDestruct
+                            { scrutId = { id = 1, name = "$case" }
+                            , value = Var 0
+                            , matches = [ MCons [ HdStep ] ]
+                            , binds = [ ( { id = 2, name = "h" }, VPath [ HdStep ] ) ]
+                            , badLabel = "lb"
+                            , okLabel = "lo"
+                            }
+                        ]
+                    , body = Var 2
+                    }
+            }
+    }
+
+
+{-| The `case` twin of `letDestrProbe`: same matches, same binds, same body.
+-}
+caseDestrProbe : Defun
+caseDestrProbe =
+    { key = "Cd.f"
+    , value =
+        Lam
+            { params = [ { id = 0, name = "p" } ]
+            , body =
+                Case
+                    { scrutinee = Var 0
+                    , scrutId = { id = 1, name = "$case" }
+                    , alts =
+                        [ { kind = AltOther
+                          , matches = [ MCons [ HdStep ] ]
+                          , binds = [ ( { id = 2, name = "h" }, VPath [ HdStep ] ) ]
+                          , body = Var 2
+                          , nextLabel = "n1"
+                          }
+                        ]
+                    , endLabel = "e1"
+                    }
+            }
+    }
+
+
 {-| perf VR3b2 — THE `&&` PROBE: `\a b -> a && b`.  Both operands are BOOLEAN
 tag tests (`jmpfFalse`), so this is the second site the `and`+compare port has
 to cover, and it is the one that proves the port lives in the shared helper
@@ -15911,6 +16107,92 @@ hasAlloc8 f =
                 b.body
         )
         f.blocks
+
+
+{-| Is there an instruction satisfying `p` anywhere in the function?  The
+`has*` predicates below are all this, one instruction shape each — so a row can
+assert a PROPERTY of the emitted code without matching a whole line of text (the
+temp names and slot numbers are not part of the property).
+-}
+anyInst : (Il.Inst -> Bool) -> Il.Func -> Bool
+anyInst p f =
+    List.any (\b -> List.any p b.body) f.blocks
+
+
+{-| THE WORD ARM'S PAYLOAD CHASE, as a two-instruction PAIR: a `loadl` of a
+FRAME SLOT followed IMMEDIATELY by the untag of exactly that word (`and
+untagMask`).  `fieldBase`'s word arm is that pair — load the slot's tagged word,
+untag it, add the payload offset — so the pair is what distinguishes the CHASE
+from the tag test's own untag.
+
+WHY THE PAIR AND NOT "AN UNTAG ANYWHERE", MEASURED: the first version of this
+predicate asked only the latter, and it went GREEN over a mutation that deleted
+`fieldBase`'s untag entirely — the tag test (`wordTagIs` -> `wordKindCode`) emits
+its OWN `and untagMask`, reached through `add ... heapHeaderOffset` rather than
+through a slot load, so the weaker predicate was satisfied by the other site.
+The adjacency is what makes this predicate see the chase.
+-}
+hasSlotUntagChase : Il.Func -> Bool
+hasSlotUntagChase f =
+    List.any chaseInBlock f.blocks
+
+
+chaseInBlock : Il.Block -> Bool
+chaseInBlock b =
+    case b.body of
+        i :: j :: rest ->
+            isSlotUntagPair i j || chaseInBlock { b | body = j :: rest }
+
+        _ ->
+            False
+
+
+isSlotUntagPair : Il.Inst -> Il.Inst -> Bool
+isSlotUntagPair i j =
+    case ( i, j ) of
+        ( Il.Load (Just x) Il.L Il.LoadL _, Il.Bin _ Il.L Il.And (Il.Tmp y) (Il.Con m) ) ->
+            x == y && m == RtLayout.untagMask RtLayout.wordLayout
+
+        _ ->
+            False
+
+
+{-| THE WORD ARM'S KIND READ: the `shr heapKindShift` that takes a heap object's
+kind code out of its GC header.  Its presence means the tag test went through
+`wordTagIs`'s header path (nil is an immediate, cons/vector are kinds), which is
+the difference between a real tag test and a bare tag compare that would match
+every heap object.
+-}
+hasKindRead : Il.Func -> Bool
+hasKindRead f =
+    anyInst
+        (\i ->
+            case i of
+                Il.Bin _ Il.W Il.Shr _ (Il.Con sh) ->
+                    sh == RtLayout.wordLayout.heapKindShift
+
+                _ ->
+                    False
+        )
+        f
+
+
+{-| THE VAL ARM'S TAG TEST: `%t =w ceqw %tag, tagCons`.  The val arm's tag is a
+whole word, so this is what a cons test looks like there — the positive half of
+the val-arm side of the discriminator pair above.
+-}
+hasValTagCmp : Il.Func -> Bool
+hasValTagCmp f =
+    anyInst
+        (\i ->
+            case i of
+                Il.Cmp _ Il.W Il.Ceq _ (Il.Con t) ->
+                    t == RtLayout.tagCons
+
+                _ ->
+                    False
+        )
+        f
 
 
 hasLoadUb : Il.Func -> Bool

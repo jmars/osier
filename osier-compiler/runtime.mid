@@ -2747,7 +2747,15 @@ defun Rt.open(path : val, dir : val) -> val {
         return mkval(11, idx, 1 + 4294967296 * 1);
         // <<< QBE_VAL-ONLY
         // >>> QBE_WORDVAL-ONLY
-        return call Rt.mkStream(mknum(idx), mknum(1));
+        // THE FLAGS WORD IS THE VAL ARM'S PACKED ONE (perf word-arm-letdestr):
+        // `1 + 2^32 * isString`, because `Rt.read-byte`/`Rt.close` test
+        // `payload(stream, 1) > 1` on BOTH arms (a stream cell's body word 1 IS
+        // that packed word — see `Rt.mkStream`).  MEASURED before the fix: the
+        // twin passed the RAW flags (`mknum(1)`), so a string stream's
+        // `1 > 1` was FALSE, `read-byte` took the FILE arm on the registry
+        // INDEX as an fd (fd 0 = stdin) and answered -1 — a silent wrong byte,
+        // rc 0, on `fdstream`'s string-stream probe.
+        return call Rt.mkStream(mknum(idx), mknum(1 + 4294967296));
         // <<< QBE_WORDVAL-ONLY
       }
       return false;
@@ -2756,7 +2764,7 @@ defun Rt.open(path : val, dir : val) -> val {
     return mkval(11, fd, 1 + 4294967296 * 0);
     // <<< QBE_VAL-ONLY
     // >>> QBE_WORDVAL-ONLY
-    return call Rt.mkStream(mknum(fd), mknum(0));
+    return call Rt.mkStream(mknum(fd), mknum(1 + 4294967296 * 0));
     // <<< QBE_WORDVAL-ONLY
   } else {
     if (call Rt.=(dir, "out")) {

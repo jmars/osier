@@ -155,6 +155,8 @@ SHORT = {
         "prim `f/` (area 5)",
     "AREA 2/3 (DESTRUCTURING) — a `let` destructuring pattern":
         "let-destructuring",
+    "THE HOST PROGRAM PATH (perf word-arm-letdestr)":
+        "host program path (`Runtime.program`)",
 }
 
 def short(c):

@@ -1,4 +1,4 @@
-module Mid.Qbe.Lower exposing (lower, lowerWith, wordArmDefunRefusals, wordArmUnported)
+module Mid.Qbe.Lower exposing (lower, lowerWith, wordArmDefunRefusals, wordArmUnported, wordSurfaceUnported)
 
 -- Mid.Qbe.Lower — Mid.Ir -> Qbe.Il (native-backend stage 1; handoff-qbe-lower).
 --
@@ -656,14 +656,48 @@ wordArmUnportedList exp =
             wordArmUnportedList inner
 
         Let block ->
+            -- ============ AREA 2/3: A `let` DESTRUCTURING PATTERN ============
+            -- PORTED (perf word-arm-letdestr), and it is the FIFTH class in a
+            -- row whose refusal was STALE rather than a representation gap —
+            -- the same shape `Con`, `MTagEq` and the arithmetic family had.
+            --
+            -- THE CRUX THE CENSUS NAMED, ANSWERED: does the existing-binder
+            -- path have a word-arm fork, or is it the pattern matcher's own
+            -- `lowerBind`/`lowerPath`?  IT IS THE MATCHER'S PATH, and there is
+            -- no fork to write.  `lowerLetDestruct` is the `Case` matcher's
+            -- emission with a different control-flow epilogue:
+            --   * the scrutinee is `lowerVal` (arm-forked at every site),
+            --   * the TESTS are `lowerMatchTests` — the SAME `lowerMatch` a
+            --     `Case` alt runs, i.e. `lowerTagMatch` -> `wordTagIs` for
+            --     MCons/MEmpty/MVector and the forked tag-equality for MTagEq,
+            --   * the BINDS are `lowerBinds` -> `lowerBind` -> `lowerPath` ->
+            --     `readSteps` -> `fieldBase`/`chaseField`/`chaseCdr`/`lowerHdTl`
+            --     — the one chase family `fieldBase`'s doc calls "the ONE
+            --     statement of the difference between the arms",
+            --   * the non-exhaustive arm is `Rt.die` through the raw-word ABI.
+            -- So every layout decision this construct needs was already made
+            -- for `Case`, which is why porting it is an admission here rather
+            -- than an emitter change.  (MEASURED, not inferred: the 26 corpus
+            -- groups in tools/qbe/WORD-ARM-FRONTIER.md compile on both arms and
+            -- tools/qbe/word-arm-diff/letdestr.elm runs byte-identically on
+            -- both.)
+            --
+            -- WHAT IT STILL REFUSES: everything the three walks refuse.  The
+            -- scrutinee, each match's literal and each binder's PATH are
+            -- classified by the same helpers the `Case` arm uses, so an
+            -- un-ported construct anywhere inside a destructuring still refuses
+            -- by name — "the pattern is ported" can never be read as "anything
+            -- it binds is".
             let
                 fromBinder b =
                     case b of
                         LetBind bind ->
                             wordArmUnportedList bind.value
 
-                        LetDestruct _ ->
-                            [ wordArea "AREA 2/3 (DESTRUCTURING)" "a `let` destructuring pattern — it is a tag test plus payload reads" ]
+                        LetDestruct d ->
+                            wordArmUnportedList d.value
+                                ++ wordArmUnportedMatches d.matches
+                                ++ wordArmUnportedBinds d.binds
             in
             List.concatMap fromBinder block.binders ++ wordArmUnportedList block.body
 
@@ -1317,6 +1351,13 @@ wordSurfaceUnportedOne defuns k =
         -- states a stronger fact than "this node is un-ported".
         []
 
+    else if List.any (\( rk, _ ) -> rk == k) wordArmDefunRefusals then
+        -- THE AUDIT LIST IS CONSULTED FOR THE SURFACE TOO (perf
+        -- word-arm-letdestr): a core-lib defun whose every construct is ADMITTED
+        -- can still be wrong on this arm, and the refusal has to name it.  The
+        -- first entry, `Runtime.program`, is that case — see the list.
+        List.map (\why -> k ++ ": " ++ why) (List.filterMap (\( rk, why ) -> if rk == k then Just why else Nothing) wordArmDefunRefusals)
+
     else
         case Dict.get k defuns of
             Nothing ->
@@ -1331,7 +1372,13 @@ wordSurfaceUnportedOne defuns k =
                         [ k ++ ": a defun with a non-Lambda value (corrupt Mid tree)" ]
 
 
-{-| THE Rt DEFUNS THAT REFUSE BY NAME UNDER THE WORD ARM, with the reason.
+{-| THE DEFUNS THAT REFUSE BY NAME UNDER THE WORD ARM EVEN THOUGH EVERY
+CONSTRUCT INSIDE THEM IS ADMITTED, with the reason — Rt defuns AND core-lib
+surface defuns (`wordSurfaceUnportedOne` consults this list too, since perf
+word-arm-letdestr).
+
+WHY THIS LIST EXISTS AT ALL: the classifier is per-CONSTRUCT, so it cannot state
+"this whole defun is wrong for a reason that is not a construct".
 
 WHY A LIST AND NOT A SITE REFUSAL.  A site refusal only fires where a construct is
 un-ported; these defuns contain NO refusing construct — every element access in
@@ -1365,7 +1412,10 @@ is ported to the word arm.
 -}
 wordArmDefunRefusals : List ( String, String )
 wordArmDefunRefusals =
-    []
+    [ ( "Runtime.program"
+      , "THE HOST PROGRAM PATH (perf word-arm-letdestr) — `Runtime.program` is the ONE defun that builds the `Program` vector (`vector[Program, m0, c0, update]`) the HOST EVENT LOOP drives, and that loop's state is a 1.3 MB MALLOC'D BLOB laid out with the val arm's 40-byte Value stride: `Rt.hostInit` sizes it `8 + 33031 * 40 + ...`, writes the model to `blob + 8` and the update fn to `blob + 8 + 40`, and `Rt.hostDispatch`/`hostRunLoop`/`hostRun` read the same hardcoded 40s — while `rootPushValueArray(blob + 8, blob)` registers that array for the COLLECTOR, whose scan stride IS the layout's (8 on this arm). The blob is therefore a val-arm structure, not a stride: twinning it is a unit of its own (its size, its TestMain layout pin and every `* 40` move together). MEASURED before this refusal (the destructuring port made the path reachable): a `Platform.program` whose model is the Int 7 prints `7` on the val arm and `[vector 4]` on the word arm — the Program vector itself, rc 0, no stderr."
+      )
+    ]
 
 
 {-| THE Rt SURFACE, CLASSIFIED BY THE SAME PRE-WALK WHITELIST (perf VR3b3).
