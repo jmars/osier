@@ -1084,12 +1084,35 @@ valLayout =
 --      the worklist said COMPLETE, while the implementer's own churn fixture
 --      recorded RED.  A worklist that over-claims is worse than none.)
 --      NOT PORTED, each refused by name:
---      `Con` (its vector is written through `storeValueCell`),
---      `StreamRef`, float literals, let-destructuring, `MTagEq`
---      (a constructor-tag pattern — it materialises the tag as a `symbol`,
---      which is now ported, so what remains there is the tag-EQUALITY half),
---      and `f/` (the float division, AREA 5 — `isFloatExp` also denies here,
---      because S4f's raw local is reboxed in the 40-byte shape).
+--      `StreamRef`, float literals, let-destructuring, and `f/` (the float
+--      division, AREA 5 — `isFloatExp` also denies here, because S4f's raw
+--      local is reboxed in the 40-byte shape).
+--      `Con` AND `MTagEq` LEFT THIS LIST (perf word-arm-frontier), and the way
+--      they left is the entry's own lesson.  Both were blanket refusals whose
+--      STATED REASON had gone stale under them — `Con`'s said "its vector is
+--      written through `storeValueCell`", which is true only of the HEAP arm of
+--      that writer and `lowerCon` calls it with `tagNumber` (an IMMEDIATE, whose
+--      word-arm arm is the `shl 3` `mknum` wrap the closure ABI already uses),
+--      and `MTagEq`'s said "the tag is materialised as a `symbol` literal",
+--      which R1 had already ported.  MEASURED BEFORE PORTING: the two classes
+--      were 41 and 39 of the 51 blocked corpus groups by first refusal, and
+--      admitting both moved the word arm from 74 to 88 compiling groups out of
+--      159 — the largest single move this arm has had.  What actually remained
+--      was ONE accessor-sized decision, not a representation: `lowerMatch`'s
+--      MTagEq inline compares PAYLOAD POINTERS at `slot + 8`, which on this arm
+--      is the NEXT FRAME SLOT, so this arm runs the runtime's `=` instead (byte
+--      equality, correct without the `sym:` pointer-identity licence the inline
+--      rests on).  `Con` needed NO emitter change at all.  THE LESSON, stated
+--      because this is the third class to leave a stale refusal behind it (the
+--      arithmetic family was the first): a blanket refusal is a claim about the
+--      ARM at the time it was written, and nothing re-tests it — so a construct
+--      that reaches the top of the refusal ranking must be RE-MEASURED, not
+--      re-read.
+--      THE NEXT FRONTIER, MEASURED (the same sweep, re-run after the port):
+--      let-destructuring 26 groups, float literals 9, `f/` 2 — and every one of
+--      those 37 groups is now blocked by ONE class only, which is the first time
+--      that has been true.  A `let` DESTRUCTURING pattern is a tag test plus
+--      payload reads, i.e. `wordTagIs` plus `fieldBase`, both of which exist.
 --      ARITHMETIC IS NOW PORTED (perf word-arm-arith; see item 4): `+ - *`,
 --      `< <= > >=`, `=` and `/=` are ADMITTED, because the three inline
 --      lowering functions skip their 40-byte tails under this arm and call the
@@ -1097,6 +1120,13 @@ valLayout =
 --      the reason given was right — "porting it means porting that inline" —
 --      and that is what happened.  A row pins the admitted set BY NAME, so a
 --      prim losing its admission is RED rather than silently changing a count.
+--      THE REFUSAL NOW NAMES EVERY BLOCKER (perf word-arm-frontier), and that
+--      is an INSTRUMENT change, not a relaxation: `wordSurfaceUnported` and
+--      `wordRtUnported` return LISTS.  The first-only form reported whichever
+--      blocker came first in key order, so the 26 groups above looked
+--      `MTagEq`-blocked when every one of them also applied `Ok`/`Err`/`Just` —
+--      a ranking cannot be built from a first element.  A non-empty list still
+--      refuses before any IL is produced.
 wordLayout : ValLayout
 wordLayout =
     { valSizeBytes = 8

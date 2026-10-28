@@ -190,6 +190,25 @@ row recupd   h1      300
 row recupd   h2      300
 row recupd   h4      300
 row recupd   default 300   # regression only: 1 scavenge, at the END (see above)
+# ---- USER ADTs (perf word-arm-frontier): the `Con`/`MTagEq` pair's collecting
+#      row.  A word-arm constructor value is ONE code-10 block whose body word 0
+#      is a REAL symbol cell and whose arguments are inline body words, so this
+#      row holds three allocation windows across a collection that no other row
+#      in the tree reaches: the tag symbol's own cell, the vector block itself
+#      between `Rt.con`'s `allocKind` and its `Rt.conFill`, and the argument
+#      strings staged in the caller's frame and passed to `Rt.con` as
+#      `mknum(cbase)`.  The check is a PATTERN MATCH (the tag test plus the
+#      element binds) AND a whole-value `==`, so a reclaimed tag cell answers the
+#      wrong alternative instead of crashing, and a wrong element stride prints a
+#      wrong number.
+#      THE RUNGS ARE MEASURED, NOT ASSUMED (QBE_MIDGC_STATS=1): 18/13/6 scavenges
+#      at h1/h2/h4 on the word arm (16 at h1 on the val arm), and ZERO at
+#      `default` on BOTH arms — so `default` is a REGRESSION row and must not be
+#      counted as collection coverage (the same labelling `rec` needed).
+row con      h1      240
+row con      h2      240
+row con      h4      240
+row con      default 240   # regression only: 0 scavenges, see above
 
 if [ "$fails" != 0 ]; then
   echo "word-arm-gcchurn: $fails failure(s) — a closure is being read after a collection it did not survive"

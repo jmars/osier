@@ -1049,6 +1049,40 @@ wordArmUnported exp =
             -- named HERE rather than discovered at its emit.
             wordArmUnported lambda.body
 
+        Con con ->
+            -- ============ THE SURFACE LANE: A CONSTRUCTOR APPLICATION ============
+            -- PORTED (perf word-arm-frontier).  This was a blanket refusal whose
+            -- STATED REASON had gone stale, and the measurement is what found it:
+            -- the entry said "under the word arm a heap object is one tagged
+            -- pointer, not a tag word plus payload words", which is true and is
+            -- not a reason — every part of `lowerCon` had already been ported by
+            -- an earlier unit, on routes that are named at the site:
+            --   * the TAG is `lowerLit (LSymbol tag)`, i.e. the code-2 symbol
+            --     cell `storeWordSymbolLiteral` writes (R1) — the same shape
+            --     `Rt.intern` builds, allocated through `Rt.allocSym`;
+            --   * the ARGUMENTS are `lowerArgsToSlots` (ROOTED frame slots) staged
+            --     contiguous by `stageSlots`, and the two boxed arguments are
+            --     `storeValueCell tagNumber`, whose word-arm arm is `shl 3` —
+            --     i.e. exactly the `mknum(ptr)` wrap the closure ABI already
+            --     uses for `desc`/`capBase`, and `Rt.con`'s word twin reads them
+            --     back with `payload(·, 0)` = `sar 3`;
+            --   * the ALLOCATION is `Rt.con`'s, whose word splice was written in
+            --     perf word-arm-area3rt (ONE code-10 block of `cnt + 1` body
+            --     words, `vecstore(body, 0, tag)` then `Rt.conFill` from the
+            --     staged block).
+            -- So the classifier does what it does for every other compound
+            -- construct: it recurses into the ARGUMENTS, so a constructor
+            -- carrying an un-ported value still refuses here rather than at its
+            -- emit.
+            --
+            -- MEASURED, not inferred (perf word-arm-frontier): `Circle 7` /
+            -- `Square 3 4` / a nested `Wrap (Square 3 4)` / a `String` payload /
+            -- a `Tree` built by 6000 inserts all compile, assemble, link and run
+            -- BYTE-IDENTICALLY on both arms, and
+            -- `tools/qbe/word-arm-gcchurn/con.elm` holds 6000 of them reachable
+            -- across 18 scavenges at QBE_HEAP_MB=1 (6000/6000/0 on both arms).
+            wordArmUnportedArgs con.args
+
         ListLit es ->
             -- ============ THE SURFACE LANE: A LIST LITERAL ============
             -- `lowerListLit` is `lowerVal (buildList es)` — a list literal has
@@ -1137,7 +1171,18 @@ wordArmUnportedMatches matches =
         m :: rest ->
             case m of
                 MTagEq _ _ ->
-                    Just (wordArea "AREA 3/5 (HEAP CELLS)" "a constructor-tag pattern — the tag is materialised as a `symbol` literal, and under the word arm a symbol is a heap object behind one tagged pointer (AREA 5)")
+                    -- ============ THE SURFACE LANE: A TAG TEST ============
+                    -- PORTED (perf word-arm-frontier).  The stated reason was
+                    -- "the tag is materialised as a `symbol` literal, and under
+                    -- the word arm a symbol is a heap object behind one tagged
+                    -- pointer (AREA 5)" — the FIRST half of which is true and was
+                    -- already ported by R1 (`LSymbol` is admitted by this very
+                    -- classifier, `storeWordSymbolLiteral` writes the code-2
+                    -- cell), and the second half of which is a description, not a
+                    -- blocker.  What actually remained was the TAG-EQUALITY half,
+                    -- and `lowerMatch` now forks it: on this arm the test is the
+                    -- runtime's `=` (`lowerEqMatch`), not the pointer inline.
+                    Nothing
 
                 MLitEq _ lit ->
                     case wordArmUnported (Lit lit) of
@@ -10147,7 +10192,33 @@ lowerMatch match scrutSlot scrutType failLbl s =
             -- so pointer equality == name equality.  Anything else (a non-Var
             -- scrutinee — Gap E; a nested path; a non-ADT scrutinee) keeps the
             -- real `=` call.
-            if s.typeSpec && steps == [ IdxStep 0 ] && (Maybe.map isUserAdt scrutType == Just True) then
+            --
+            -- THE WORD ARM NEVER INLINES IT (perf word-arm-frontier), and this
+            -- is a CORRECTNESS fork, not a perf choice:
+            --   * the inline's whole emission is "the name pointer is the
+            --     payload WORD of the symbol Value", read at `slot + 8`.  On the
+            --     word arm a slot holds ONE word (the tagged body), so `slot + 8`
+            --     is the NEXT FRAME SLOT — the exact `fieldBase` defect this arc
+            --     already paid for once.  The name there is BODY WORD 0
+            --     (`fieldBase 0` plus a load): a different accessor, not a
+            --     different constant;
+            --   * the inline is LICENSED by pointer identity of the compiler's
+            --     content-keyed `sym:` blobs.  That licence survives `Con` (a
+            --     constructor's tag symbol and the pattern's literal both come
+            --     from the same `freshData "sym:"` dedup), but it is a licence
+            --     the runtime's symbols do not have to honour: `Rt.intern` builds
+            --     a code-2 cell whose name is a MALLOC'd copy.  `Rt.=`'s symbol
+            --     arm is `payload(a,0) == payload(b,0) || Rt.symEq(a, b, 0)`, and
+            --     on the word arm `payload(v, 0)` IS the name pointer while
+            --     `strbyte`/`symEq` are UNCHANGED (stated at `Rt.allocSym`), so
+            --     the runtime route is byte-correct without that licence on
+            --     EITHER arm.
+            -- The cost is a call per tag test.  A word-arm inline is a follow-up,
+            -- and if it is written it must go through ONE named accessor
+            -- (`symbolNamePtr`: val = the payload word, word = body word 0) —
+            -- the two arms' payload word means two different things, which is
+            -- the rule `fieldBase`'s doc states.
+            if (s.typeSpec && steps == [ IdxStep 0 ] && (Maybe.map isUserAdt scrutType == Just True)) && not (wordArm s) then
                 lowerPtrEqMatch steps scrutSlot tag failLbl s
 
             else
@@ -10247,6 +10318,12 @@ lowerEqMatch steps scrutSlot lit failLbl s =
 -- materialized `LSymbol tag` literal, then compare the PAYLOAD POINTERS — not
 -- the tags — and jump on equality.  Licensed by lowerMatch: only a user-ADT
 -- scrutinee at `steps == [IdxStep 0]`, where pointer equality == name equality.
+--
+-- VAL ARM ONLY (perf word-arm-frontier).  `+8` is the 40-byte shape; on the word
+-- arm the name is body word 0 behind the tagged pointer, so `lowerMatch` never
+-- reaches this function there.  The doc above ("the payload pointer at +8") is
+-- therefore a statement about ONE arm — the reason a word-arm version of it must
+-- be a named accessor rather than this constant.
 lowerPtrEqMatch : List Step -> Int -> String -> String -> S -> Result String S
 lowerPtrEqMatch steps scrutSlot tag failLbl s =
     let

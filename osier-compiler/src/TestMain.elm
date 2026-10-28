@@ -187,7 +187,6 @@ checks rt rawMidText =
                 List.filterMap
                     (\e -> QbeLower.wordArmUnported e)
                     [ PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
-                    , Con { tag = "Just", args = [ Lit (LNumber 1) ] }
                     , StreamRef { varName = "*stoutput*" }
                     , Lit (LFloat 1.5)
                     , Let
@@ -252,7 +251,14 @@ checks rt rawMidText =
             -- access body a `.field` read uses — so it is admitted exactly when
             -- the READ is, and the positive assertion lives with `RecordGet`'s
             -- (below) rather than here.
-            && (QbeLower.wordArmUnported (caseExp [ MTagEq [ IdxStep 0 ] "Just" ] []) /= Nothing)
+            -- A CONSTRUCTOR-TAG MATCH left the refused set in perf
+            -- word-arm-frontier: what remained of it after R1 ported the SYMBOL
+            -- cell was the TAG-EQUALITY half, and `lowerMatch` now forks it — the
+            -- word arm runs the runtime's `=` (byte equality, correct without the
+            -- `sym:` pointer-identity licence) instead of the val arm's `slot + 8`
+            -- pointer inline.  The EMITTED half of that fork is pinned by its own
+            -- row below; this is the classifier's half.
+            && QbeLower.wordArmUnported (caseExp [ MTagEq [ IdxStep 0 ] "Just" ] []) == Nothing
             && QbeLower.wordArmUnported (caseExp [] [ ( { id = 1, name = "f" }, VField [] "f" ) ]) == Nothing
             -- ... and the recursion reaches the BODY, in BOTH directions: a
             -- case whose body is an ARITHMETIC prim is now admitted (perf
@@ -282,7 +288,11 @@ checks rt rawMidText =
             -- operands, so a `/= ` over an un-ported construct refuses.
             && QbeLower.wordArmUnported (NotEqual { left = Lit (LNumber 5), right = Lit (LNumber 3), falseLabel = "nef", endLabel = "nee" }) == Nothing
             && QbeLower.wordArmUnported (NotEqual { left = Lit (LNumber 5), right = PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }, falseLabel = "nef", endLabel = "nee" }) == Nothing
-            && (QbeLower.wordArmUnported (NotEqual { left = Lit (LNumber 5), right = Con { tag = "Just", args = [ Lit (LNumber 1) ] }, falseLabel = "nef", endLabel = "nee" }) /= Nothing)
+            -- (a constructor operand was the un-ported representative of this
+            -- recursion until perf word-arm-frontier ported `Con`; the control
+            -- for "the operand recursion still bites" is the FLOAT literal on
+            -- the next line, which is still refused.)
+            && QbeLower.wordArmUnported (NotEqual { left = Lit (LNumber 5), right = Con { tag = "Just", args = [ Lit (LNumber 1) ] }, falseLabel = "nef", endLabel = "nee" }) == Nothing
             && (QbeLower.wordArmUnported (NotEqual { left = Lit (LFloat 1.5), right = Lit (LNumber 3), falseLabel = "nef", endLabel = "nee" }) /= Nothing)
             -- ============ CLOSURES (perf word-arm-closures) ============
             -- `Lam` and `GRef` LEFT the refused set together, because they are
@@ -299,10 +309,10 @@ checks rt rawMidText =
             && QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = Var 0 }) == Nothing
             && QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = PrimApp { prim = "+", args = [ Var 0, Lit (LNumber 1) ] } }) == Nothing
             && (QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = PrimApp { prim = "f/", args = [ Var 0, Lit (LNumber 2) ] } }) /= Nothing)
-            && (QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = Con { tag = "Just", args = [ Lit (LNumber 1) ] } }) /= Nothing)
+            && QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = Con { tag = "Just", args = [ Lit (LNumber 1) ] } }) == Nothing
             && QbeLower.wordArmUnported (GRef { key = "M.f", force = False }) == Nothing
             && QbeLower.wordArmUnported (GRef { key = "M.f", force = True }) == Nothing
-            -- and the refused set is exactly SEVEN named constructs: a
+            -- and the refused set is exactly FOUR named constructs: a
             -- classifier that admitted any of them would be silently wrong
             -- (each emits the 40-byte representation or a layout the arm has
             -- not decided).  The count is part of the row because a future
@@ -330,7 +340,21 @@ checks rt rawMidText =
             -- SEVEN -> SIX (perf word-arm-records R3): `RecordGet` left with
             -- the READ's port; `RecordUpdate` is the one record construct still
             -- standing in the list, and it leaves in its own commit.
-            && List.length refused == 5
+            --
+            -- FIVE -> FOUR (perf word-arm-frontier): `Con` left with the
+            -- CONSTRUCTOR-APPLICATION port — the third entry in this list whose
+            -- stated reason had gone stale under it (after the arithmetic
+            -- family), which is why the measurement came first: every part of
+            -- `lowerCon` had already been ported by an earlier unit and the
+            -- refusal was never revisited.  `MTagEq` was never a member of
+            -- `refused` (it has its own line above), so the two classes that
+            -- left together took this count from five to four and that line
+            -- from `/= Nothing` to `== Nothing`.  THE FOUR THAT REMAIN, so the
+            -- number is not something a reader has to trust: `f/` (the float
+            -- division, AREA 5), `StreamRef` (the effect stream's symbol cell),
+            -- a FLOAT literal (AREA 5) and a `let` DESTRUCTURING pattern
+            -- (AREA 2/3).
+            && List.length refused == 4
             -- ... and the construct that LEFT the refused set (perf
             -- word-arm-records R1): a SYMBOL LITERAL is now admitted, because
             -- its cell is ported (code 2, a raw body `[byte pointer, length]`
@@ -368,7 +392,7 @@ checks rt rawMidText =
             && QbeLower.wordArmUnported (RecordGet (RecordLit [ ( "x", Lit (LNumber 1) ) ]) "x") == Nothing
             && QbeLower.wordArmUnported (RecordGet (RecordLit [ ( "x", Lit (LString "hi") ) ]) "x") == Nothing
             && (QbeLower.wordArmUnported (RecordGet (RecordLit [ ( "x", PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ]) "x") /= Nothing)
-            && (QbeLower.wordArmUnported (RecordGet (Con { tag = "Just", args = [ Lit (LNumber 1) ] }) "x") /= Nothing)
+            && QbeLower.wordArmUnported (RecordGet (Con { tag = "Just", args = [ Lit (LNumber 1) ] }) "x") == Nothing
             -- A RECORD UPDATE left the refused set in the same unit that ported
             -- its emission (perf word-arm-records R4) — the CLOSED form rebuilds
             -- the one-block layout, and the WALK form reaches the runtime's own
@@ -381,7 +405,90 @@ checks rt rawMidText =
             && QbeLower.wordArmUnported (RecordUpdate { base = RecordLit [ ( "x", Lit (LNumber 1) ) ], updates = [ ( "x", Lit (LSymbol "s") ) ] }) == Nothing
             && QbeLower.wordArmUnported (RecordUpdate { base = Var 0, updates = [ ( "x", PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ] }) == Nothing
             && (QbeLower.wordArmUnported (RecordUpdate { base = Var 0, updates = [ ( "x", PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ] }) /= Nothing)
-            && (QbeLower.wordArmUnported (RecordUpdate { base = Con { tag = "Just", args = [ Lit (LNumber 1) ] }, updates = [ ( "x", Lit (LNumber 1) ) ] }) /= Nothing)
+            && QbeLower.wordArmUnported (RecordUpdate { base = Con { tag = "Just", args = [ Lit (LNumber 1) ] }, updates = [ ( "x", Lit (LNumber 1) ) ] }) == Nothing
+        )
+    , check "THE WORD ARM'S CONSTRUCTOR-TAG TEST IS THE RUNTIME'S `=`, AND THE VAL ARM KEEPS ITS POINTER INLINE (perf word-arm-frontier)"
+        -- WHY THIS ROW IS NOT A TEXT PIN ON A CONSTANT.  `lowerMatch`'s MTagEq
+        -- has TWO routes and the choice between them is the whole port: the val
+        -- arm inlines a PAYLOAD-POINTER compare (`slot + 8`, the 40-byte shape,
+        -- licensed by the `sym:` blobs' pointer identity), and on the word arm
+        -- `slot + 8` is the NEXT FRAME SLOT — the exact defect `fieldBase`'s doc
+        -- records — so the word arm runs the runtime's `=` instead, whose symbol
+        -- arm is byte-correct without that licence.  A row asserting "the word
+        -- arm emits some tag test" would pass on the WRONG route; this asserts
+        -- WHICH route, in BOTH directions, on the SAME defun.
+        --
+        -- THE LICENCE HAS TO BE PRESENT FOR THE FORK TO BE VISIBLE: with
+        -- `QbeTypes.empty` the scrutinee's type is unknown, the inline is
+        -- denied on both arms, and both would take the `=` route — the row would
+        -- then be green over a word arm that never forked at all.  So the table
+        -- names the scrutinee's binder as a USER ADT (`isUserAdt`), which is
+        -- exactly the condition `lowerMatch` tests.
+        --
+        -- ASYMMETRY, MEASURED ON THIS TREE: with `not (wordArm s)` removed from
+        -- the fork condition the word half goes RED (the word arm inlines and
+        -- stops calling `=`), and with the whole condition inverted the val half
+        -- goes RED (the val arm stops inlining).  Neither half can pass by the
+        -- other's route.
+        (let
+            mtagProbe =
+                { key = "Mt.f"
+                , value =
+                    Lam
+                        { params = [ { id = 0, name = "s" } ]
+                        , body =
+                            Case
+                                { scrutinee = Var 0
+                                , scrutId = { id = 1, name = "$case" }
+                                , alts =
+                                    [ { kind = AltOther
+                                      , matches = [ MTagEq [ IdxStep 0 ] "A" ]
+                                      , binds = []
+                                      , body = Lit (LNumber 1)
+                                      , nextLabel = "n1"
+                                      }
+                                    ]
+                                , endLabel = "e1"
+                                }
+                        }
+                }
+
+            mtagTable =
+                { defuns =
+                    Dict.singleton "Mt.f"
+                        { defunType = QbeTypes.Monotype (Rep.TCon "Int" [])
+                        , binders = QbeTypes.Binders (Dict.singleton 0 (Rep.TCon "Shape" []))
+                        }
+                , notes = []
+                }
+         in
+         case Rt.loadArm True rawMidText of
+            Ok wordRt ->
+                let
+                    prog =
+                        mtagProbe :: rtProgram wordRt True True True ++ rtProgramGc wordRt True True True
+
+                    arities =
+                        rtArities prog
+                in
+                case
+                    ( QbeLower.lowerWith RtLayout.wordLayout wordRt False True True True True True True False False True mtagTable arities prog "Mt.f"
+                    , QbeLower.lower wordRt False True True True True True True False False True mtagTable arities prog "Mt.f"
+                    )
+                of
+                    ( Ok wordMod, Ok valMod ) ->
+                        case ( funcByName "q_Mt_x2ef" wordMod, funcByName "q_Mt_x2ef" valMod ) of
+                            ( Just wf, Just vf ) ->
+                                callsSym "q_Rt_x2e_x3d" wf && not (callsSym "q_Rt_x2e_x3d" vf)
+
+                            _ ->
+                                False
+
+                    _ ->
+                        False
+
+            Err _ ->
+                False
         )
     , check "utf8ByteLength 'héllo' == 6" (utf8ByteLength "héllo" == 6)
     , check "utf8ByteLength '🦀' == 4" (utf8ByteLength "🦀" == 4)
