@@ -2366,15 +2366,28 @@ kept `rec` in a slot the scavenger cannot see, and the first promotion inside
 `Rt.allocKind` left it pointing at the FORWARDED record — SIGSEGV at
 QBE_HEAP_MB=1, green at default knobs because no scavenge runs.
 
-THE SEATS THEMSELVES DO NOT JOIN `allocating`.  Each holds no Value across its own
-`gcAlloc` call (the call is the last statement of the seat's body), so a rooted
-frame would be pure cost — and inside the gc family it would be a hazard, not a
-cost.  They are a SEPARATE growth source that admits their CALLERS.
+THE SEVEN TRUE SEATS DO NOT JOIN `allocating`: each holds no Value across its own
+`gcAlloc` call (the call is the last statement of its body), so a rooted frame
+would be pure cost.  For `gcAlloc`/`gcInit` — the cursor movers — a registered
+frame would be a HAZARD, not a cost, which is why neither is in this list.
 
-THE ANTI-STALENESS ORACLE IS A ROW, not this comment: TestMain pins the FRAME
-CLASS of the defuns that call a seat (`q_Rt_x2erecAppend`/`q_Rt_x2erecUpd` contain
-`frame_x2denter`) and pins that the seats do NOT.  A defun that loses its rooted
-frame — a stale row, a missing seat, a new seat nobody listed — is RED there,
+`Rt.mkStream` IS THE ONE SEAT THAT DOES JOIN, AND IT MUST (perf word-arm-records
+H1 review FINDING 2).  Its body is `allocKind` FIRST and then
+`payload(what, 0)`/`payload(flags, 0)` — it holds two `:val`s ACROSS its own seat
+call, the exact shape this class is about, so the "seats hold nothing" invariant is
+FALSE for it and its safety rests on being rooted, not on the invariant.  MEASURED
+(per-arm dump, `QBE_VALREP=word` vs default): `Rt.mkStream` is frame-free on the VAL
+arm (it is absent from the val splice entirely) and ROOTED on the WORD arm, where it
+joins through its OWN `rtDeps` row naming `Rt.allocKind` — i.e. a caller can be
+admitted through EITHER table, which is why it is listed here as well: so that ITS
+callers join too.  Removing it from this list, or "restoring" it to frame-free to
+match the old comment, would CREATE the defect.
+
+THE ANTI-STALENESS ORACLE IS A ROW, not this comment: TestMain pins the FRAME CLASS
+of the defuns that call a seat (`q_Rt_x2erecAppend` and `q_Rt_x2erecUpd` open with a
+pooled-frame call and no `alloc8`) AND pins every one of the nine seat keys over the
+WORD load's `allocating` — with `Rt.mkStream` asserted as the stated exception.  A
+defun that loses its rooted frame, or a seat that joins silently, is RED there
 whatever the cause.
 -}
 allocationSeats : List String
@@ -2410,28 +2423,44 @@ seats are not members, so a defun that silently loses its rooted frame is RED
 whatever the cause — a missing entry here, a stale `rtDeps` row, or a new seat
 nobody listed.
 
-=== THE CLASS AUDIT (perf word-arm-records H1 FIX, Step 2) ===
+=== THE CLASS AUDIT (perf word-arm-records H1 FIX, Step 2; corrected by its review) ===
 
-Every word-arm Rt defun that allocates — directly or through a seat — with its
-MEASURED classification (dumped from `runtime.allocating` on the shipped tree) and
-its verdict.  The question each row answers: does it hold a `:val` across a
-collecting call, and if so is its frame registered?
+Every Rt defun that allocates — directly or through a seat — with its MEASURED
+frame class on BOTH ARMS and its verdict.
 
-| defun | allocates by | measured | verdict |
-|---|---|---|---|
-| `Rt.recAppend` | seats allocKind+allocRecord | **ROOTED** | FIXED. Was frame-free: `rec` went stale on the first promotion inside `allocKind` (the h1 SEGV). |
-| `Rt.recUpd` | seat allocRecord | **ROOTED** | FIXED (same class; measured RED at 60000 iterations pre-fix). |
-| `Rt.recToChainGo` | seat allocSym | **ROOTED** | SAFE, and already was: its `rtDeps` row names `Rt.cons`/`Rt.@p`, both allocating, so it was a member before this fix. The `allocSym` edge is belt-and-braces — stated so nobody reads it as the thing that fixed it. |
-| `Rt.con` | seat allocKind (word arm) | **ROOTED** | SAFE, and already was: the val twin spells the alloc PRIM (`allocvec`), which seeds it directly, and `allocating` is arm-blind. The entry is belt-and-braces. |
-| `Rt.recInsert` | forwards to recUpd/recAppend | **ROOTED** | SAFE by inheritance (its row names both). |
-| `Rt.applyTailGo` | `allocvec` in its arg-copy arm | **ROOTED** | SAFE. The diagnosis listed it as "plausibly safe-by-reread"; measured, it is simply a member. |
-| `Rt.stage-tail` | `allocvec` prim directly | **ROOTED** | SAFE by the `direct` seed. |
-| `Rt.intern` | seat allocKind (word HIT path) | frame-free | SAFE BY NON-USE, and it is a LATENT risk: at the `allocKind` call its only `:val` (`str`) is already reduced to `dataPtr`/`len` and never read again. A future edit that reads `str` after the allocation makes this the same defect — and nothing would catch it, because intern is effect-host-only on this arm today (no surface fixture reaches it). |
-| `Rt.intInsertAt` | seat allocKind (word arm) | frame-free | SAFE BY C-HEAP: the only live word across the allocation is `store`, a `malloc`'d buffer — outside the GC heap, so the scavenger's range test never moves it. |
-| `Rt.mkStream` | seat allocKind | frame-free | SAFE BY VALUE, and the tightest call in the table: it reads `payload(what, 0)`/`payload(flags, 0)` AFTER the allocation, so it is in the class by shape — but all three of its call sites pass `mknum(...)` FIXNUMS, and a fixnum is never relocated. A caller passing a heap `:val` would make it a stale read. |
-| `Rt.snd` | — | frame-free | NOT IN THE CLASS, measured: its body is one `vecload(vecbody(x), 1)` and calls no seat at all. The diagnosis's list carried it as a hypothesis; the body scan refutes it. |
-| the walkers (`recUpdFind`/`recUpdCopy`/`recAppendFind`/`recAppendDataGo`/`recAppendNamesGo`), `intInsert`/`intInsertGo`/`intGrow`/`intTab` | — | frame-free | NOT IN THE CLASS: they allocate nothing (malloc only, which is C-heap). |
-| the seats themselves (`allocKind`/`allocRecord`/`allocSym`/`allocCons`/`allocVector`/`allocRaw`) and `gcAlloc`/`gcInit` | their own `gcAlloc` | frame-free | CORRECT, and MUST stay so: each holds no `:val` across its own allocation (the call is the last statement), and a registered frame inside the collector would be a hazard, not a cost. |
+THE DUMP IS PER ARM AND DIFFED, and that is the METHOD, not a detail (review
+FINDING 1).  `allocating` is computed from the SPLICED program each arm loads
+(`Main.elm` calls `MidRt.loadArm` per arm), so the val and word classifications are
+DIFFERENT SETS.  A single-arm dump — the first version of this table — cannot see
+the whole defect class, which IS an arm asymmetry.  Measured by dumping
+`runtime.allocating` through a scratch compiler under each arm and diffing: exactly
+TWO defuns differ, and both are rows this table had wrong or missing.
+
+| defun | allocates by | val | word | verdict |
+|---|---|---|---|---|
+| `Rt.recAppend` | seats allocKind+allocRecord | ROOTED | ROOTED | FIXED. Was word-frame-free: `rec` went stale on the first promotion inside `allocKind` (the h1 SEGV). |
+| `Rt.recUpd` | seat allocRecord | ROOTED | ROOTED | FIXED (same class; measured RED at 60000 iterations pre-fix). |
+| `Rt.recToChainGo` | seat allocSym | ROOTED | ROOTED | SAFE, and already was: its `rtDeps` row names `Rt.cons`/`Rt.@p`, both allocating. The `allocSym` edge is belt-and-braces — stated so nobody reads it as the fix. |
+| `Rt.con` | seat allocKind (word) | ROOTED | ROOTED | SAFE, and already was: the val twin spells the alloc PRIM (`allocvec`). Belt-and-braces entry. |
+| `Rt.recInsert` | forwards to recUpd/recAppend | ROOTED | ROOTED | SAFE by inheritance. |
+| `Rt.applyTailGo` | `allocvec` in its arg-copy arm | ROOTED | ROOTED | SAFE (member by the `direct` seed). |
+| `Rt.stage-tail` | `allocvec` prim directly | ROOTED | ROOTED | SAFE (member by the `direct` seed). |
+| `Rt.shen.str->bytes` | reaches `Rt.cons` via `bytesBuild` | ROOTED | ROOTED | SAFE (member through the `rtDeps` chain). Was ABSENT from the first table (review FINDING 1, second-order). |
+| `Rt.mkStream` | seat allocKind (word) | frame-free | **ROOTED** | SAFE ON THE WORD ARM **BECAUSE IT IS ROOTED** — and it is the one seat that MUST be. Its `allocKind` call is its FIRST statement and it reads `payload(what,0)`/`payload(flags,0)` AFTER it, so it holds two `:vals` across the allocation. The first version of this table called it frame-free and listed it as a latent risk; that was WRONG (review FINDING 2) and "restoring" it to frame-free would create the defect. It is frame-free on the val arm only because it is absent from the val splice. |
+| `Rt.absvector` | seat allocKind (word twin) | ROOTED | **frame-free** | SAFE BY NON-USE today, and it was MISSING from the first table entirely (review FINDING 1) — the arm asymmetry this table exists to catch, invisible to a single-arm dump. Its word body is `vecbody(allocKind(...))` then `mkval(10, body)`; `cnt` is consumed in the ARGUMENTS and only the fresh body is read after, so nothing is live across the call. Aggravator: its `rtDeps` row is EMPTY, so nothing propagates allocating through it either. The condition that would break it: reading `cnt` (or any `:val`) after the allocation. |
+| `Rt.intern` | seat allocKind (word HIT path) | frame-free | frame-free | SAFE BY NON-USE, latent: at the `allocKind` call its only `:val` (`str`) is already reduced to `dataPtr`/`len` and never read again. Effect-host-only on this arm, so no surface fixture reaches it. |
+| `Rt.intInsertAt` | seat allocKind (word) | frame-free | frame-free | SAFE BY C-HEAP: the only live word across the allocation is a `malloc`'d buffer, outside the GC heap, so the scavenger's range test never moves it. |
+| `Rt.intInsert` | reaches `allocKind` via `intInsertAt` | frame-free | frame-free | SAFE BY NON-USE. The first table's reason ("allocate nothing — malloc only") was FALSE: it DOES reach a seat, one call deeper (review FINDING 1, second-order). |
+| `Rt.intInsertGo` | reaches `allocKind` via `intInsertAt` | frame-free | frame-free | SAFE BY NON-USE: it reads its `:val` params after `intGrow`, which is C-heap only. Same FALSE reason corrected as `intInsert`. |
+| `Rt.value` | reaches `allocKind` via `intern` | frame-free | frame-free | SAFE BY NON-USE. ABSENT from the first table (review FINDING 1, second-order). |
+| `Rt.snd` | — | frame-free | frame-free | NOT IN THE CLASS, measured: its body is one `vecload(vecbody(x), 1)` and calls no seat. The diagnosis listed it as a hypothesis; the body scan refutes it. |
+| the record walkers (`recUpdFind`/`recUpdCopy`/`recAppendFind`/`recAppendDataGo`/`recAppendNamesGo`), `intGrow`/`intTab` | — | frame-free | frame-free | NOT IN THE CLASS: they allocate nothing. |
+| the SEVEN true seats (`allocKind`/`allocRecord`/`allocSym`/`allocCons`/`allocVector`/`allocRaw`/`allocFloat`) and `gcAlloc`/`gcInit` | their own `gcAlloc` | frame-free | frame-free | CORRECT, and must stay so: each holds no `:val` across its own allocation, and for `gcAlloc`/`gcInit` a registered frame would be a hazard. `Rt.mkStream` is NOT in this group — see its row. |
+
+SUMMARY OF THE CORRECTED COUNT: on the WORD arm, 3 defuns are latent (absvector,
+intern, intInsertAt — plus the non-use-only `intInsert`/`intInsertGo`/`value`
+reached one call deeper); the first table's "3 latent" counted `mkStream`, which is
+rooted, and missed `absvector`, which is not.
 -}
 allocSeatDeps : List ( String, List String )
 allocSeatDeps =

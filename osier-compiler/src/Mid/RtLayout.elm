@@ -1034,10 +1034,31 @@ valLayout =
 --      `recupd/h1 h2 h4 default` all `20000/20000/0`, corpus .ssa BYTE-IDENTICAL
 --      159/159 (no re-freeze).  THE CLASS AUDIT — every word-arm Rt defun that
 --      allocates, with its MEASURED frame class and verdict — is in `Mid/Rt.elm`
---      above `allocSeatDeps`; it names the three latent risks that remain
---      (`intern` safe-by-non-use, `mkStream` safe-by-value, `intInsertAt`
---      safe-by-C-heap) and the oracle that pins the class
---      (`q_Rt_x2erecAppend` must open with a pooled-frame call and no `alloc8`).
+--      above `allocSeatDeps`, and it is taken PER ARM AND DIFFED — `allocating`
+--      is computed from the spliced program each arm loads, so the two arms are
+--      DIFFERENT SETS and a single-arm dump cannot see the class, which IS an arm
+--      asymmetry.  Two defuns differ between the arms: `Rt.mkStream` (ROOTED on
+--      the word arm and the one seat that MUST be — it reads its `:val` params
+--      after its own `allocKind` call) and `Rt.absvector` (frame-free on the word
+--      arm, safe by non-use, and MISSING from the first version of the table
+--      because that dump was not per-arm).  The oracle that pins the class:
+--      `q_Rt_x2erecAppend`/`q_Rt_x2erecUpd` must open with a pooled-frame call and
+--      no `alloc8`, and every seat key is asserted over the WORD load's
+--      `allocating` with `Rt.mkStream` as the stated exception.
+--
+--      A LANDMINE FOR THE NEXT UNIT (perf word-arm-records H1 review FINDING 6,
+--      recorded not fixed): the seat split also feeds `noCollect`
+--      (`Lower.elm`'s complement of `allocating`), so a FRAME-FREE seat caller is
+--      "cannot collect" for `Liveness` on the word arm — INCLUDING when a SURFACE
+--      defun calls it.  Surface defuns are saved today by an UNDOCUMENTED
+--      accident: a lean seat call passes a frame-slot ADDRESS, `escapesOf` counts
+--      that as an escape, and the frame is kept.  MEASURED with two adversarial
+--      word-arm probes (a nested record literal, and a record held across
+--      `vectorMake` — scratch `osier-scratch/absvec/`): both emit `frame-enter`
+--      and pass 6000/6000/0 at h1 with 12 scavenges.  If the lean ABI ever stops
+--      passing slot addresses, that protection vanishes with NO oracle naming it.
+--      The fix is one comment at `noCollect`/`escapesOf` pinning the dependency,
+--      or a row; it belongs to the unit that next touches either.
 --      THE READ, BUILD AND UPDATE HALF, stated with the same honesty (perf
 --      word-arm-records R3/R4).  The UPDATE
 --      half landed as the same one-block build: `lowerRecordUpdateClosed`'s tag
