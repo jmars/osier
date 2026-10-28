@@ -33,7 +33,11 @@
 #
 # WHAT IT ASSERTS, per (fixture, heap) row: both arms BUILD (a qbe or cc failure
 # is a FAIL, not a skip), neither arm TIMES OUT (a wrong count/stride can loop
-# instead of crashing), the EXIT CODES match, and STDOUT is BYTE-IDENTICAL.  The
+# instead of crashing), the EXIT CODES match, STDOUT is BYTE-IDENTICAL, and — for
+# a row declared a COLLECTING rung — that BOTH arms actually collected at least
+# once (the scavenge count is read off the arm's `QBE_MIDGC_STATS=1` transcript,
+# not asserted in a comment: a rung that collects zero times cannot fail on a
+# rooting defect and must not be credited as coverage).  The
 # expected value is deliberately NOT spelled here: the val arm IS the oracle —
 # it is the representation the program was written against — so a hard-coded
 # number would be a second thing to keep in step, and a wrong one would bless a
@@ -109,9 +113,13 @@ build() {
   return 0
 }
 
-# row <fixture> <heap> <timeout-s> — one (fixture, heap) pair, both arms.
+# row <fixture> <heap> <timeout-s> <min-scavenges> — one (fixture, heap) pair,
+# both arms.  `min-scavenges` is 1 for a COLLECTING rung and 0 for a REGRESSION
+# row, and it is ASSERTED on both arms: the counts used to be comments, so a rung
+# that stopped collecting stayed green while proving nothing (the same failure
+# the record ladder's `default` row was relabelled for).
 row() {
-  local fx="$1" heap="$2" secs="$3"
+  local fx="$1" heap="$2" secs="$3" min="${4:-0}"
   local src="$HERE/$fx.elm"
   local label="$fx/$heap"
   if [ ! -f "$src" ]; then
@@ -127,37 +135,61 @@ row() {
     h4) envs=(QBE_HEAP_MB=4) ;;
     h8) envs=(QBE_HEAP_MB=8) ;;
   esac
-  env "${envs[@]}" timeout "$secs" "$BUILD/$fx.$heap.val" M.main > "$BUILD/$fx.$heap.val.out" 2> "$BUILD/$fx.$heap.val.err"
+  # QBE_MIDGC_STATS=1 is how a rung proves it COLLECTED: the runtime prints one
+  # `midgc: scavenge s=N ...` line per scavenge to stderr (fd 2), so the count is
+  # read off the arm's own transcript and not off a comment.  The knob only
+  # writes that transcript — stdout, exit code and the values are untouched, so
+  # the parity comparison below is still between the two representations.
+  env "${envs[@]}" QBE_MIDGC_STATS=1 timeout "$secs" "$BUILD/$fx.$heap.val" M.main > "$BUILD/$fx.$heap.val.out" 2> "$BUILD/$fx.$heap.val.err"
   local vrc=$?
-  env "${envs[@]}" timeout "$secs" "$BUILD/$fx.$heap.word" M.main > "$BUILD/$fx.$heap.word.out" 2> "$BUILD/$fx.$heap.word.err"
+  env "${envs[@]}" QBE_MIDGC_STATS=1 timeout "$secs" "$BUILD/$fx.$heap.word" M.main > "$BUILD/$fx.$heap.word.out" 2> "$BUILD/$fx.$heap.word.err"
   local wrc=$?
+  local vsc wsc
+  # A COLLECTION IS EITHER KIND: a young-only scavenge (`midgc: scavenge s=`) or a
+  # full mark-sweep (`midgc: c=`).  Counting scavenges alone was MEASURED wrong on
+  # the first run of this assertion — `str/default` reports zero scavenges on both
+  # arms and is nevertheless a row the pre-fix defect showed up in, because what
+  # it crossed at the default knob was the FULL-collect trigger.  The metric has
+  # to be "did this rung collect at all", not "did it scavenge".
+  vsc="$(grep -cE '^midgc: (scavenge|c=)' "$BUILD/$fx.$heap.val.err" 2>/dev/null)"
+  wsc="$(grep -cE '^midgc: (scavenge|c=)' "$BUILD/$fx.$heap.word.err" 2>/dev/null)"
+  vsc="${vsc:-0}"; wsc="${wsc:-0}"
   if [ "$vrc" = 124 ] || [ "$wrc" = 124 ]; then
     fail "$label: TIMED OUT (val $vrc, word $wrc) — a wrong stride can loop instead of crashing; word stderr: $(head -1 "$BUILD/$fx.$heap.word.err")"
   elif [ "$vrc" != "$wrc" ]; then
     fail "$label: exit codes differ (val $vrc, word $wrc) — word stderr: $(head -1 "$BUILD/$fx.$heap.word.err")"
   elif ! cmp -s "$BUILD/$fx.$heap.val.out" "$BUILD/$fx.$heap.word.out"; then
     fail "$label: stdout differs — val [$(cat "$BUILD/$fx.$heap.val.out")] word [$(cat "$BUILD/$fx.$heap.word.out")].  THE VAL ARM IS THE ORACLE: this is a wrong number, not a missing feature."
+  elif [ "$min" != 0 ] && { [ "$vsc" -lt "$min" ] || [ "$wsc" -lt "$min" ]; }; then
+    fail "$label: collected only $vsc (val) / $wsc (word) times, and this rung is declared a COLLECTING rung (min $min) — a rung that collects nothing cannot fail on a rooting defect, so it must not be counted as coverage"
   else
-    pass "$label: both arms exit $vrc and print the same STDOUT bytes ($(wc -c < "$BUILD/$fx.$heap.val.out") B: $(cat "$BUILD/$fx.$heap.val.out" | cut -c1-24))"
+    pass "$label: both arms exit $vrc and print the same STDOUT bytes ($(wc -c < "$BUILD/$fx.$heap.val.out") B: $(cat "$BUILD/$fx.$heap.val.out" | cut -c1-24)); collections val $vsc / word $wsc"
   fi
 }
 
 # ---- the two ROOTING sites, at a heap small enough to collect constantly ----
-row hold     h1      120
-row partial  h1      120
+row hold     h1      120  1
+row partial  h1      120  1
 # ---- the interleaved-siblings shape (two creations, one expression) ----
-row churn    h1      120
+row churn    h1      120  1
 # ---- the OVER-applied arm (rem < nargs), which no fixture exercised ----
-row over     h1      120
+row over     h1      120  1
 # ---- and the same two sites at DEFAULT KNOBS: the defect is not a small-heap
 #      artefact, and these are the rows that reproduce the review's headline
 #      numbers (250,000 closures cross the default 16 MiB trigger) ----
-row holdbig  default 300
-row partbig  default 300
+row holdbig  default 300  1
+row partbig  default 300  1
 # ---- RUNTIME-BUILT STRING BYTES (perf word-arm-rawroot item 1): a separate
-#      defect class in the same file, and it fires at DEFAULT knobs too ----
-row str      h1      180
-row str      default 180
+#      defect class in the same file.  THE DEFAULT ROW IS A REGRESSION ROW NOW,
+#      AND THAT IS MEASURED, NOT ASSUMED: the pre-fix defect printed
+#      `5699/301` at the default knob, but on THIS tree the fixture crosses
+#      NEITHER trigger at that knob: `QBE_MIDGC_STATS=1` reports 0 scavenges AND
+#      0 full collects on both arms.  WHY the pre-fix run collected there and
+#      this one does not is NOT established here (it is not needed for the row);
+#      what IS established is that the default rung proves nothing about rooting,
+#      so it is a REGRESSION row and h1 is this class's collecting rung.
+row str      h1      180  1
+row str      default 180  0   # regression row: MEASURED 0 collections on BOTH arms
 # ---- RUNTIME-BUILT RECORD NAMES ARRAYS (perf word-arm-records R4): the update
 #      family's ONE new allocation window, and the row that FOUND TWO DEFECTS in
 #      the twins that wrote it (the R3/R4 review's blockers 1 and 2).  Both heaps,
@@ -175,10 +207,10 @@ row str      default 180
 #      cannot fail on a rooting defect — it was green BEFORE the fix.  It is kept
 #      as a REGRESSION row (the default knob must keep producing the right
 #      answer) and MUST NOT be counted as collection coverage.
-row rec      h1      240
-row rec      h2      240
-row rec      h4      240
-row rec      default 240   # regression only: 0 scavenges, see above
+row rec      h1      240  1
+row rec      h2      240  1
+row rec      h4      240  1
+row rec      default 240  0   # regression row: 0 scavenges, see above
 # ---- THE HIT PATH (perf word-arm-records H1 FIX): `{ r | y <- i }` on an
 #      EXISTING field never reaches recAppend, so it is the UPDATE family's own
 #      window — `Rt.recUpd` allocates through `Rt.allocRecord` and holds `rec`
@@ -186,10 +218,10 @@ row rec      default 240   # regression only: 0 scavenges, see above
 #      iterations while green at 6000 (it allocates less per iteration, so the
 #      young trigger is crossed later), which is why the rung set is the full
 #      ladder and the iteration count is higher than the insertion fixture's.
-row recupd   h1      300
-row recupd   h2      300
-row recupd   h4      300
-row recupd   default 300   # regression only: 1 scavenge, at the END (see above)
+row recupd   h1      300  1
+row recupd   h2      300  1
+row recupd   h4      300  1
+row recupd   default 300  0   # regression row: 1 scavenge, at the END (see above)
 # ---- USER ADTs (perf word-arm-frontier): the `Con`/`MTagEq` pair's collecting
 #      row.  A word-arm constructor value is ONE code-10 block whose body word 0
 #      is a REAL symbol cell and whose arguments are inline body words, so this
@@ -205,10 +237,10 @@ row recupd   default 300   # regression only: 1 scavenge, at the END (see above)
 #      at h1/h2/h4 on the word arm (16 at h1 on the val arm), and ZERO at
 #      `default` on BOTH arms — so `default` is a REGRESSION row and must not be
 #      counted as collection coverage (the same labelling `rec` needed).
-row con      h1      240
-row con      h2      240
-row con      h4      240
-row con      default 240   # regression only: 0 scavenges, see above
+row con      h1      240  1
+row con      h2      240  1
+row con      h4      240  1
+row con      default 240  0   # regression row: 0 scavenges, see above
 
 if [ "$fails" != 0 ]; then
   echo "word-arm-gcchurn: $fails failure(s) — a closure is being read after a collection it did not survive"

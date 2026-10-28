@@ -20,10 +20,14 @@
 #                   blocker: the group is a compile_error row, or invalid)
 #   WORD-BLOCKED    val emitted, word refused               (a real blocker)
 #
-# The refusal text is then split into one line per (defun, construct) — the
-# classifier reports EVERY blocker since perf word-arm-frontier, not just the
-# first — and the lines are folded by CONSTRUCT CLASS.  The table printed is
-# both numbers a ranking needs:
+# The refusal text is then split into one line per (defun, construct) and the
+# lines are folded by CONSTRUCT CLASS.  The classifier reports EVERY blocker —
+# at DEFUN granularity too, since the word-arm-frontier review's item 1: the
+# per-defun walk used to short-circuit on its first refusal, so the group set
+# was the union of per-defun FIRST blockers and a group carrying two blockers in
+# one defun lost one of them.  MEASURED inside the frontier census itself: it
+# promised 15 movable groups for `Con`+`MTagEq` and 14 moved.  The table printed
+# is both numbers a ranking needs:
 #
 #   GROUPS  how many blocked groups carry this class among their blockers
 #   ALONE   how many groups this class blocks ON ITS OWN, i.e. how many groups
@@ -32,9 +36,12 @@
 #           cannot produce: 26 groups carry a constructor-tag pattern as their
 #           FIRST blocker and 0 of them are blocked by it alone.
 #
-# NOT A GATE.  It exits 0 whatever it finds: a refusal is the arm's current
+# NOT A GATE.  It exits 0 whatever it FINDS: a refusal is the arm's current
 # state, not a regression.  The gates are qbe-check.sh, the corpus baseline and
-# the ladders.
+# the ladders.  It exits 2 when the INSTRUMENT fails — a group whose emit
+# produced no output at all (crashed or empty) cannot be classified, and
+# counting it as "both arms emitted" is the same failure as crediting a rung
+# that collected zero.
 #
 # Usage (from the repo root):
 #   tools/qbe/word-arm-refusals.sh            # the table
@@ -108,10 +115,19 @@ POST = (" — the word arm stops at its un-ported constructs instead of emitting
         "ported/un-ported table is in handoff-perf-vr3b2-result.")
 
 def read(p):
+    """The emit's output, or None if the emit produced NOTHING.
+
+    A MISSING OR EMPTY output is an INSTRUMENT FAILURE, not a result: the old
+    form returned "" here and is_err("") is False, so a crashed word emit was
+    silently counted as BOTH (and a zero-byte .ssa as BOTH too) — the only trace
+    was the header's group count.  A rung that collected nothing must not be
+    credited as coverage, so this refuses instead.
+    """
     try:
-        return open(p, errors="replace").read().strip()
+        t = open(p, errors="replace").read().strip()
     except FileNotFoundError:
-        return ""
+        return None
+    return t if t else None
 
 def is_err(t):
     return t.startswith("err")
@@ -147,12 +163,24 @@ def short(c):
             return v
     return c[:110]
 
-names = sorted({os.path.basename(f)[:-4] for f in glob.glob(os.path.join(worddir, "*.ssa"))})
+# NAMES FROM THE VAL ARM, deliberately: the val arm is the baseline and must
+# answer for EVERY group, so a word emit that crashed before writing anything
+# still shows up (as a missing word output) instead of dropping out of the
+# population — a census whose denominator silently shrinks is the same bug as a
+# first-only refusal.
+names = sorted({os.path.basename(f)[:-4] for f in glob.glob(os.path.join(valdir, "*.ssa"))})
+stray = sorted({os.path.basename(f)[:-4] for f in glob.glob(os.path.join(worddir, "*.ssa"))} - set(names))
 both = same = 0
 blocked = {}
+missing = []
 for n in names:
     v = read(os.path.join(valdir, n + ".ssa"))
     w = read(os.path.join(worddir, n + ".ssa"))
+    if v is None or w is None:
+        # NOT a finding: a crashed or empty emit is the INSTRUMENT failing, and
+        # classifying it would credit a group nobody measured.
+        missing.append("%s (%s)" % (n, ", ".join(a for a, t in (("val", v), ("word", w)) if t is None)))
+        continue
     if not is_err(w):
         both += 1
     elif is_err(v):
@@ -162,6 +190,18 @@ for n in names:
                   "refusal is masking the val arm's error" % n)
     else:
         blocked[n] = refusal_lines(w)
+
+for n in stray:
+    print("NOTE %s: the WORD arm wrote an .ssa the val arm did not — the arms disagree about "
+          "whether this group compiles at all" % n)
+
+if missing:
+    print("word-arm-refusals: %d group(s) produced NO output — the emit crashed or wrote an empty file, "
+          "so this census cannot classify them (not a refusal, an instrument failure):" % len(missing),
+          file=sys.stderr)
+    for m in missing:
+        print("  " + m, file=sys.stderr)
+    sys.exit(2)
 
 print("word-arm refusal census over %d corpus groups" % len(names))
 print("  BOTH           %3d  (emit IL on both arms)" % both)

@@ -625,12 +625,23 @@ WHAT IS PORTED (perf VR3b2, area 1 — the frame slot stride):
     `valSizeBytes`.
 NOTHING ELSE.  In particular a LITERAL is a tag WRITE (area 2) and is refused
 here by name, so the arm's admitted language is exactly what has been ported.
+
+IT RETURNS EVERY BLOCKER, NOT THE FIRST (perf word-arm-frontier review, item 1).
+The walk used to short-circuit on its first refusal, which made the per-defun
+answer FIRST-ONLY: a defun carrying a constructor-tag pattern AND a float
+literal reported one of them, and a census built from that answer promises a
+group that a port of the reported class cannot move.  MEASURED inside the
+frontier census itself — its BEFORE table promised 15 movable groups for
+`Con`+`MTagEq` and 14 moved, the 15th reappearing as float-blocked only once the
+first class stopped refusing.  So the walk collects a LIST and every consumer
+reads all of it; `wordArmUnported` below is the first-element view kept for the
+classifier's own unit rows.
 -}
-wordArmUnported : Exp -> Maybe String
-wordArmUnported exp =
+wordArmUnportedList : Exp -> List String
+wordArmUnportedList exp =
     case exp of
         Var _ ->
-            Nothing
+            []
 
         App _ ->
             -- AREA 6 (THE CALL ABI), ported: the arguments cross as WORDS on
@@ -639,50 +650,37 @@ wordArmUnported exp =
             -- per-site emit is `lowerApp`, which classifies the head (a known
             -- defun, a thunk, or a first-class value through Rt.apply) and
             -- refuses anything it cannot express by name.
-            Nothing
+            []
 
         NoTail inner ->
-            wordArmUnported inner
+            wordArmUnportedList inner
 
         Let block ->
             let
                 fromBinder b =
                     case b of
                         LetBind bind ->
-                            wordArmUnported bind.value
+                            wordArmUnportedList bind.value
 
                         LetDestruct _ ->
-                            Just (wordArea "AREA 2/3 (DESTRUCTURING)" "a `let` destructuring pattern — it is a tag test plus payload reads")
-
-                fromBinders bs =
-                    case bs of
-                        [] ->
-                            wordArmUnported block.body
-
-                        b :: rest ->
-                            case fromBinder b of
-                                Just what ->
-                                    Just what
-
-                                Nothing ->
-                                    fromBinders rest
+                            [ wordArea "AREA 2/3 (DESTRUCTURING)" "a `let` destructuring pattern — it is a tag test plus payload reads" ]
             in
-            fromBinders block.binders
+            List.concatMap fromBinder block.binders ++ wordArmUnportedList block.body
 
         Lit (LNumber _) ->
             -- AREA 2, THE FIXNUM IMMEDIATE.  `lowerLitWord` owns the i61 range
             -- decision (it refuses an out-of-range literal by NAME, as area 4's
             -- boxing gap) so there is one place that decides, not two.
-            Nothing
+            []
 
         Lit (LNumberBig _) ->
             -- Same seat as `LNumber`: an immediate number needs no heap object
             -- here, and `lowerLitWord` owns the (area-4) decision about one it
             -- cannot inline.  Under the VALUE arm `lowerLitVal` emits it.
-            Nothing
+            []
 
         Lit (LBoolean _) ->
-            Nothing
+            []
 
         Lit (LString _) ->
             -- AREA 3, THE STRING CELL (perf VR3b3 area A/D).  A word-arm string
@@ -693,7 +691,7 @@ wordArmUnported exp =
             -- `storeWordStringLiteral` for a literal (a two-unit cell pointing
             -- at static bytes) — so this classifier only says the construct is
             -- ported.
-            Nothing
+            []
 
         RecordLit fields ->
             -- ============ THE SURFACE LANE: A RECORD LITERAL ============
@@ -719,7 +717,7 @@ wordArmUnported exp =
             -- QBE_NOREC/host route, already ported).  The field NAME is not an
             -- expression — it becomes a `symbol` literal (R1) — so the record
             -- is the only subexpression to classify.
-            wordArmUnported rec
+            wordArmUnportedList rec
 
         RecordUpdate update ->
             -- ============ THE SURFACE LANE: A RECORD UPDATE ============
@@ -739,12 +737,7 @@ wordArmUnported exp =
             -- twins are not written yet.  So this arm classifies the construct
             -- the emitter will see and the refusal for the other route names
             -- the defun, not the construct.
-            case wordArmUnported update.base of
-                Just what ->
-                    Just what
-
-                Nothing ->
-                    wordArmUnportedRecordFields update.updates
+            wordArmUnportedList update.base ++ wordArmUnportedRecordFields update.updates
 
         Lit (LSymbol _) ->
             -- AREA 3, THE SYMBOL CELL (perf word-arm-records R1).  A word-arm
@@ -752,26 +745,16 @@ wordArmUnported exp =
             -- NUL-terminated name pointer) — the shape `Rt.intern` already
             -- builds.  `storeWordCell` owns the shape, so this classifier only
             -- says the construct is ported.
-            Nothing
+            []
 
         Lit _ ->
-            Just (wordArea "AREA 5 (FLOATS)" "a float literal — under the word arm it is a HEAP object behind one tagged pointer, not a tag word plus payload words")
+            [ wordArea "AREA 5 (FLOATS)" "a float literal — under the word arm it is a HEAP object behind one tagged pointer, not a tag word plus payload words" ]
 
         ShortAnd block ->
-            case wordArmUnported block.left of
-                Just what ->
-                    Just what
-
-                Nothing ->
-                    wordArmUnported block.right
+            wordArmUnportedList block.left ++ wordArmUnportedList block.right
 
         ShortOr block ->
-            case wordArmUnported block.left of
-                Just what ->
-                    Just what
-
-                Nothing ->
-                    wordArmUnported block.right
+            wordArmUnportedList block.left ++ wordArmUnportedList block.right
 
         NotEqual block ->
             -- AREA 2, THE `/=` OPERATOR (perf word-arm-arith).  It is PORTED by
@@ -782,29 +765,16 @@ wordArmUnported exp =
             -- word splices ARE the ported arm.  The WORKLIST said this was NOT
             -- ported and gave the right reason at the time — "porting it means
             -- porting that inline, i.e. area 2/4" — and this is that port.
-            case wordArmUnported block.left of
-                Just what ->
-                    Just what
-
-                Nothing ->
-                    wordArmUnported block.right
+            wordArmUnportedList block.left ++ wordArmUnportedList block.right
 
         If block ->
             -- AREA 2, THE BOOLEAN TAG TEST (perf VR3b2).  The condition is a
             -- Value test whose lowering is `readTag` + a compare; the two
             -- BRANCHES are ordinary sub-expressions and are classified here,
             -- so an If only emits when everything inside it does.
-            case wordArmUnported block.cond of
-                Just what ->
-                    Just what
-
-                Nothing ->
-                    case wordArmUnported block.thenBranch of
-                        Just what ->
-                            Just what
-
-                        Nothing ->
-                            wordArmUnported block.elseBranch
+            wordArmUnportedList block.cond
+                ++ wordArmUnportedList block.thenBranch
+                ++ wordArmUnportedList block.elseBranch
 
         Loop block ->
             -- AREA 2, THE LOOP.  Its condition is the SAME falsy test `lowerIf`
@@ -814,18 +784,13 @@ wordArmUnported exp =
             -- the shape.  `break`/`continue` are LEAVES that only close a block
             -- and jump to a label the frame already owns — no value crosses, so
             -- the arm cannot see them.
-            case wordArmUnported block.cond of
-                Just what ->
-                    Just what
-
-                Nothing ->
-                    wordArmUnported block.body
+            wordArmUnportedList block.cond ++ wordArmUnportedList block.body
 
         Break ->
-            Nothing
+            []
 
         Continue ->
-            Nothing
+            []
 
         Unsafe node ->
             -- AREA 3 (PAYLOAD ACCESS), the RAW-NODE half (perf VR3b3 areas
@@ -838,22 +803,22 @@ wordArmUnported exp =
             -- the ABI) and every arithmetic node (area 4).
             case node of
                 RawPayload _ ->
-                    Nothing
+                    []
 
                 RawPayload32 _ ->
-                    Nothing
+                    []
 
                 RawTagIs _ ->
-                    Nothing
+                    []
 
                 RawAllocVector _ ->
-                    Nothing
+                    []
 
                 RawAllocRaw _ ->
-                    Nothing
+                    []
 
                 RawStrByte _ ->
-                    Nothing
+                    []
 
                 RawMkValue _ ->
                     -- The `mk*` WRITE path (area A).  The classifier admits the
@@ -864,7 +829,7 @@ wordArmUnported exp =
                     -- expressions still go through `rawWordArg`, which refuses
                     -- anything un-ported.  So the belt still holds: this arm
                     -- cannot let half-word code through.
-                    Nothing
+                    []
 
                 -- THE RAW-WORD FAMILY: ARM-INDEPENDENT BY CONSTRUCTION.
                 -- A raw word is 8 bytes in BOTH arms and these nodes carry no
@@ -876,49 +841,49 @@ wordArmUnported exp =
                 -- in the runtime TEXT, not in these nodes - so refusing them
                 -- would report a lane boundary instead of a construct.
                 RawWordLoad _ ->
-                    Nothing
+                    []
 
                 RawWordStore _ ->
-                    Nothing
+                    []
 
                 RawByteLoad _ ->
-                    Nothing
+                    []
 
                 RawByteStore _ ->
-                    Nothing
+                    []
 
                 RawMemLoad _ ->
-                    Nothing
+                    []
 
                 RawMemStore _ ->
-                    Nothing
+                    []
 
                 RawCallRaw _ ->
-                    Nothing
+                    []
 
                 RawCallExtern _ ->
-                    Nothing
+                    []
 
                 RawCStr _ ->
-                    Nothing
+                    []
 
                 RawSym _ ->
-                    Nothing
+                    []
 
                 RawDataAddr _ ->
-                    Nothing
+                    []
 
                 WithRoots _ ->
-                    Nothing
+                    []
 
                 RawBin _ ->
-                    Nothing
+                    []
 
                 RawCmp _ ->
-                    Nothing
+                    []
 
                 RawUn _ ->
-                    Nothing
+                    []
 
                 -- ================= AREA 6: THE CALL ABI =================
                 -- Every node below was refused here until this unit, and each
@@ -949,22 +914,22 @@ wordArmUnported exp =
                 --                 and the third word is the address of the
                 --                 value's slot on both arms.
                 RawCall _ ->
-                    Nothing
+                    []
 
                 RawCallAgg _ ->
-                    Nothing
+                    []
 
                 RawAllocN _ ->
-                    Nothing
+                    []
 
                 RawTailCall _ ->
-                    Nothing
+                    []
 
                 RawVecLoad _ ->
-                    Nothing
+                    []
 
                 RawVecStore _ ->
-                    Nothing
+                    []
 
                 -- AREA 3 (PAYLOAD ACCESS), the ELEMENT-BASE half (perf
                 -- word-arm-area3rt).  `vecbody` is the base every `vecload`/
@@ -974,16 +939,16 @@ wordArmUnported exp =
                 -- the `_` fallback below, not by its own emit site, so it is
                 -- named here too — its arm is unchanged (it is `elemAddr`).
                 RawVecBody _ ->
-                    Nothing
+                    []
 
                 RawVecLen _ ->
-                    Nothing
+                    []
 
                 RawVecAddr _ ->
-                    Nothing
+                    []
 
                 _ ->
-                    Just (wordArea (wordAreaName exp) (wordAreaWhat exp))
+                    [ wordArea (wordAreaName exp) (wordAreaWhat exp) ]
 
         PrimApp app ->
             -- ============ THE SURFACE LANE: PRIM APPLICATIONS ============
@@ -1008,12 +973,7 @@ wordArmUnported exp =
             -- their operands through the layout-derived accessors.  So they
             -- are NOT refused here any more; only the float-only `f/` is (see
             -- `wordArmPrimUnported`), plus any prim with no Mid impl.
-            case wordArmPrimUnported app.prim of
-                Just what ->
-                    Just what
-
-                Nothing ->
-                    wordArmUnportedArgs app.args
+            wordArmPrimUnported app.prim ++ wordArmUnportedArgs app.args
 
         GRef _ ->
             -- ============ CLOSURES (perf word-arm-closures) ============
@@ -1029,7 +989,7 @@ wordArmUnported exp =
             -- never moved; the tagging is the same `...001` every heap object
             -- carries.  The FORCED shape is a plain direct call, i.e. AREA 6's
             -- own path.
-            Nothing
+            []
 
         Lam lambda ->
             -- An INNER lambda is `lowerClosure`: contiguous capture staging in
@@ -1047,7 +1007,7 @@ wordArmUnported exp =
             -- compound construct recurses: the closure's body is lowered into
             -- the same module, so a construct this arm cannot express must be
             -- named HERE rather than discovered at its emit.
-            wordArmUnported lambda.body
+            wordArmUnportedList lambda.body
 
         Con con ->
             -- ============ THE SURFACE LANE: A CONSTRUCTOR APPLICATION ============
@@ -1095,7 +1055,7 @@ wordArmUnported exp =
             -- `ListLit` as an opaque heap-object construction would refuse a
             -- construct whose whole emission is a call this arm already
             -- makes.
-            wordArmUnported (buildList es)
+            wordArmUnportedList (buildList es)
 
         Tup es ->
             -- ============ THE SURFACE LANE: A TUPLE ============
@@ -1106,7 +1066,7 @@ wordArmUnported exp =
             -- the number 0, which is what `Tup []` and the last element both
             -- are), so every part of it is already arm-clean.  Classify the
             -- desugar, for the reason stated at `ListLit`.
-            wordArmUnported (buildTuple es)
+            wordArmUnportedList (buildTuple es)
 
         Case branch ->
             -- ============ THE SURFACE LANE: A CASE ============
@@ -1124,51 +1084,38 @@ wordArmUnported exp =
             --   * a RECORD field bind (`VField`) is the refused record family —
             --     its layout (the second parallel names array) is a design
             --     question, not a stride.
-            case wordArmUnported branch.scrutinee of
-                Just what ->
-                    Just what
-
-                Nothing ->
-                    wordArmUnportedAlts branch.alts
+            wordArmUnportedList branch.scrutinee ++ wordArmUnportedAlts branch.alts
 
         _ ->
-            Just (wordArea (wordAreaName exp) (wordAreaWhat exp))
+            [ wordArea (wordAreaName exp) (wordAreaWhat exp) ]
+
+
+{-| The FIRST blocker in walk order, or `Nothing`.  The classifier's unit rows
+read this view; every PLANNING consumer reads `wordArmUnportedList`, because a
+first-only answer is what made the census over-promise (see the docstring above).
+-}
+wordArmUnported : Exp -> Maybe String
+wordArmUnported exp =
+    List.head (wordArmUnportedList exp)
 
 
 {-| Every alternative of a `Case`: its matches, its pattern binds and its body.
 -}
-wordArmUnportedAlts : List Alt -> Maybe String
+wordArmUnportedAlts : List Alt -> List String
 wordArmUnportedAlts alts =
-    case alts of
-        [] ->
-            Nothing
-
-        alt :: rest ->
-            case wordArmUnportedMatches alt.matches of
-                Just what ->
-                    Just what
-
-                Nothing ->
-                    case wordArmUnportedBinds alt.binds of
-                        Just what ->
-                            Just what
-
-                        Nothing ->
-                            case wordArmUnported alt.body of
-                                Just what ->
-                                    Just what
-
-                                Nothing ->
-                                    wordArmUnportedAlts rest
+    List.concatMap
+        (\alt ->
+            wordArmUnportedMatches alt.matches
+                ++ wordArmUnportedBinds alt.binds
+                ++ wordArmUnportedList alt.body
+        )
+        alts
 
 
-wordArmUnportedMatches : List Match -> Maybe String
+wordArmUnportedMatches : List Match -> List String
 wordArmUnportedMatches matches =
-    case matches of
-        [] ->
-            Nothing
-
-        m :: rest ->
+    List.concatMap
+        (\m ->
             case m of
                 MTagEq _ _ ->
                     -- ============ THE SURFACE LANE: A TAG TEST ============
@@ -1182,27 +1129,21 @@ wordArmUnportedMatches matches =
                     -- blocker.  What actually remained was the TAG-EQUALITY half,
                     -- and `lowerMatch` now forks it: on this arm the test is the
                     -- runtime's `=` (`lowerEqMatch`), not the pointer inline.
-                    Nothing
+                    []
 
                 MLitEq _ lit ->
-                    case wordArmUnported (Lit lit) of
-                        Just what ->
-                            Just what
-
-                        Nothing ->
-                            wordArmUnportedMatches rest
+                    wordArmUnportedList (Lit lit)
 
                 _ ->
-                    wordArmUnportedMatches rest
+                    []
+        )
+        matches
 
 
-wordArmUnportedBinds : List ( Binder, ValuePath ) -> Maybe String
+wordArmUnportedBinds : List ( Binder, ValuePath ) -> List String
 wordArmUnportedBinds binds =
-    case binds of
-        [] ->
-            Nothing
-
-        ( _, path ) :: rest ->
+    List.concatMap
+        (\( _, path ) ->
             case path of
                 VField _ _ ->
                     -- ============ A RECORD FIELD PATTERN ============
@@ -1213,48 +1154,30 @@ wordArmUnportedBinds binds =
                     -- (`RecordGet`, below).  So this bind needs exactly what the
                     -- read needed and nothing more, and its STEPS are pointer
                     -- chases (`readSteps`), which are `VPath`'s own machinery.
-                    wordArmUnportedBinds rest
+                    []
 
                 VPath _ ->
-                    wordArmUnportedBinds rest
+                    []
+        )
+        binds
 
 
 {-| Every field VALUE of a record literal, left to right — the same recursion
 the other compound constructs use.  The field NAMES are not expressions: they
 become the static names array (`RawDataAddr`), whose word arm R1 forked.
 -}
-wordArmUnportedRecordFields : List ( String, Exp ) -> Maybe String
+wordArmUnportedRecordFields : List ( String, Exp ) -> List String
 wordArmUnportedRecordFields fields =
-    case fields of
-        [] ->
-            Nothing
-
-        ( _, v ) :: rest ->
-            case wordArmUnported v of
-                Just what ->
-                    Just what
-
-                Nothing ->
-                    wordArmUnportedRecordFields rest
+    List.concatMap (\( _, v ) -> wordArmUnportedList v) fields
 
 
 {-| Every argument of a prim application, left to right — the same recursion
 the other compound constructs use, so a nested refusal is named rather than
 swallowed.
 -}
-wordArmUnportedArgs : List Exp -> Maybe String
+wordArmUnportedArgs : List Exp -> List String
 wordArmUnportedArgs args =
-    case args of
-        [] ->
-            Nothing
-
-        a :: rest ->
-            case wordArmUnported a of
-                Just what ->
-                    Just what
-
-                Nothing ->
-                    wordArmUnportedArgs rest
+    List.concatMap wordArmUnportedList args
 
 
 {-| THE PRIMS WHOSE EMIT SITE IS NOT ARM-CLEAN, refused by name.
@@ -1282,16 +1205,16 @@ with NO Mid implementation has no arm-clean route at all on this tree
 (`rtPrimSlotsZig` emits `rt_prim_*` symbols the runtime no longer defines), so
 it refuses here rather than at the linker.
 -}
-wordArmPrimUnported : String -> Maybe String
+wordArmPrimUnported : String -> List String
 wordArmPrimUnported prim =
     if List.member prim wordArmInlinePrims then
-        Just (wordArea "AREA 5 (FLOATS)" ("the primitive `" ++ prim ++ "` — its inline arm emits the heap-boxed float cell, which does not exist under the word arm (and `Rt.f/` is float-only, so routing it to the runtime would build the same cell)"))
+        [ wordArea "AREA 5 (FLOATS)" ("the primitive `" ++ prim ++ "` — its inline arm emits the heap-boxed float cell, which does not exist under the word arm (and `Rt.f/` is float-only, so routing it to the runtime would build the same cell)") ]
 
     else if MidRt.primImpl prim == Nothing then
-        Just (wordArea "AREA 4 (ARITHMETIC)" ("the primitive `" ++ prim ++ "` — it has no Mid implementation, so it has no arm-clean route (the Zig fallback would emit rt_prim_* symbols the runtime no longer defines)"))
+        [ wordArea "AREA 4 (ARITHMETIC)" ("the primitive `" ++ prim ++ "` — it has no Mid implementation, so it has no arm-clean route (the Zig fallback would emit rt_prim_* symbols the runtime no longer defines)") ]
 
     else
-        Nothing
+        []
 
 
 {-| The prims `lowerPrimApp` gives an inline, representation-shaped arm to AND
@@ -1346,16 +1269,18 @@ produced it is far more expensive.
 -}
 dedupStrings : List String -> List String
 dedupStrings xs =
-    List.foldr
-        (\x acc ->
-            if List.member x acc then
-                acc
+    List.reverse
+        (List.foldl
+            (\x acc ->
+                if List.member x acc then
+                    acc
 
-            else
-                x :: acc
+                else
+                    x :: acc
+            )
+            []
+            xs
         )
-        []
-        xs
 
 
 {-| The same classifier over the whole reachable SURFACE, returning EVERY
@@ -1373,8 +1298,11 @@ the source of all 26 shows `Ok`/`Err`/`Just` APPLIED — porting `MTagEq` alone
 would have moved none of them.  A ranking can only be built from the set.
 
 NOTHING IS RELAXED: a non-empty list refuses before any IL is produced, exactly
-as a `Just` did.  The order is preserved (surface key order), so the first line
-is still the construct the port is actually about.
+as a `Just` did.  The order is preserved (surface key order, then walk order
+within a defun), so the first line is still the construct the port is actually
+about — and EVERY construct is listed, per defun as well as per group (perf
+word-arm-frontier review, item 1: the per-defun answer used to be first-only,
+which is what let the census promise a group the named class could not move).
 -}
 wordSurfaceUnported : Dict String Defun -> List String -> List String
 wordSurfaceUnported defuns keys =
@@ -1397,12 +1325,7 @@ wordSurfaceUnportedOne defuns k =
             Just defun ->
                 case defun.value of
                     Lam lambda ->
-                        case wordArmUnported lambda.body of
-                            Just what ->
-                                [ k ++ ": " ++ what ]
-
-                            Nothing ->
-                                []
+                        List.map (\what -> k ++ ": " ++ what) (wordArmUnportedList lambda.body)
 
                     _ ->
                         [ k ++ ": a defun with a non-Lambda value (corrupt Mid tree)" ]
@@ -1490,12 +1413,7 @@ wordRtUnportedBody defuns k =
         Just defun ->
             case defun.value of
                 Lam lambda ->
-                    case wordArmUnported lambda.body of
-                        Just what ->
-                            [ k ++ ": " ++ what ]
-
-                        Nothing ->
-                            []
+                    List.map (\what -> k ++ ": " ++ what) (wordArmUnportedList lambda.body)
 
                 _ ->
                     [ k ++ ": a defun with a non-Lambda value (corrupt Mid tree)" ]
