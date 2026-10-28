@@ -3366,6 +3366,31 @@ else
   FAIL=1
 fi
 
+# ---- THE WHOLE CORPUS, RUN ON BOTH ARMS (perf word-arm-corpusrun) ----
+# The row that turns the census's BOTH column into coverage.  word-arm-refusals
+# counts EMITS ("nothing refuses"); this row builds every one of those groups
+# BOTH ways and RUNS both binaries, comparing exit code and stdout bytes.  The
+# distinction is not academic and this arc has its own proof: the host path
+# compiled on the word arm for a whole unit while 7 groups printed `[vector 4]`
+# with rc 0 and NO stderr.  A refusal count cannot see that; a run can.
+# MEASURED FAIL-ABLE: mutating ONE token of Rt.callArity's arity-2 word twin
+# (`buf + 8` -> `buf + 40`) turns it red on asyncorder/asyncpure (word rc 139
+# against val rc 0), and the row is green on the reverted tree — 125/125.
+# COST: ~2 min (250 emits, 250 builds, 126 runs) — the same order as the two
+# rows above it, and it is the only row whose denominator is the corpus.
+if [ -x "$ROOT/tools/qbe/word-arm-corpusrun.sh" ]; then
+  if corpus_out="$(TMPDIR="$TMP" "$ROOT/tools/qbe/word-arm-corpusrun.sh" 2>&1)"; then
+    echo "PASS word-arm-corpusrun: $(printf '%s\n' "$corpus_out" | awk '/IDENTICAL/{print $3}') of the corpus's BOTH groups BUILT and RAN on both arms with identical exit code and byte-identical stdout ($(printf '%s\n' "$corpus_out" | awk '/argument vectors/{for(i=1;i<=NF;i++) if($i=="argument") print $(i-1)}' | tr -d '(') argument vectors from the gate's own registry) — the row that makes BOTH coverage instead of a refusal count"
+  else
+    echo "FAIL word-arm-corpusrun: the two arms DISAGREE on a corpus program's output (or a group no longer builds on one arm)"
+    printf '%s\n' "$corpus_out" | sed 's/^/    /'
+    FAIL=1
+  fi
+else
+  echo "FAIL word-arm-corpusrun: tools/qbe/word-arm-corpusrun.sh is missing — the ONLY row that runs the corpus on both arms was deleted"
+  FAIL=1
+fi
+
 # ---- RECORD INSERTION ACROSS COLLECTIONS, ON THE VAL (DEFAULT) ARM ----
 # WHY A HEAP LADDER AND A LITERAL EXPECTATION, when the file's other rows either
 # compare the two arms or read a golden.  The defect this row pins

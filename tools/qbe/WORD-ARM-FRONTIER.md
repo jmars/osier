@@ -586,3 +586,240 @@ pitch against an 8-byte slot array, argument *k* is read from slot *5k*.
 `{kind, cont}`, two WORDS. `HostEv` holds no `val`, so the eval table's stride is
 arm-independent and the malloc literal's only moving term is the slot array.
 `sizeof(HostPoll) * 8` is likewise arm-independent.
+
+## THE CORPUS RUN (perf word-arm-corpusrun): ALL 125 BOTH GROUPS, RUN ON BOTH ARMS
+
+`tools/qbe/word-arm-corpusrun.sh`.  This is the first corpus-wide BEHAVIOURAL
+test the word arm has ever had, and it exists because **`WORD-BLOCKED=0` proves
+nothing refuses, not that anything is correct**.  The census counts EMITS; the
+running coverage before this row was 21 `word-arm-diff` fixtures + 12 gcchurn
+rows + two hand-run subsets (26 `let`-destructuring, 7 host) — not the corpus.
+This arc's own evidence that the difference is real is the host path: 7 groups
+printed `[vector 4]` with **rc 0 and no stderr** and the census was green over
+them.  So: every group the census calls `BOTH` is built **both ways** (val:
+`QBE_VALREP` unset; word: `QBE_VALREP=word`), assembled through the same
+vendored qbe, linked with cc, and RUN on both ways.
+
+### What the number is now
+
+| | |
+| --- | --- |
+| groups the census calls `BOTH` | **125** |
+| RUN on both arms | **125** (126 runs: `sub` is registered twice) |
+| **IDENTICAL** — same exit code AND byte-identical stdout | **125** |
+| DIFFERING | **0** |
+| crashed or hung (a timeout is a FAILURE, not a skip) | **0** |
+| stderr also byte-identical | **126 / 126 runs** |
+| `SAME-ERROR` groups (not runnable on either arm) | 34 |
+
+So the sentence the flip turns on is: **125 of the 125 BOTH groups are PROVEN to
+behave identically on the two arms**, not "125 groups emit IL".  122 of the 125
+exit 0; 3 exit 1 identically (`execmal` — the malformed-exec-plan halt fixture,
+whose only observable is its diagnostic; and `rowgadt_select`/`rowgadt_setx`,
+which are `compile_clean` groups run with no argument — see the convention note).
+
+### The conventions, stated because a corpus run's numbers are only as good as them
+
+* **ARGUMENT VECTORS COME FROM THE GATE'S OWN REGISTRY.**  A group is a fixture
+  + an entry, and the values the entry is called with are declared per CHECK, not
+  per group, so the vectors are read from `ELM_GATE_MATRIX=1`: every distinct
+  `(args, stdin)` registered for the group's `(fixture, entry)` by a RUNNING
+  helper (`run`/`run2`/`run_io`) is run on both arms — 120 vectors.  That is
+  strictly more than one run per group, and it is the part that matters for the
+  entry-argument path (`sub` is registered twice with the arguments SWAPPED).
+* **THE SIX `compile_clean` GROUPS ARE RUN WITH NO ARGUMENT AND LABELLED.**  The
+  gate never runs them by design (their value cannot be driven from argv), so
+  their entry is called with an argument it was never given.  That is undefined
+  INPUT, not a representation difference: both arms get the same bytes and both
+  behave the same way (`rowgadt_select`/`rowgadt_setx` die with the same
+  `non-exhaustive case` and rc 1), but the row is marked `no-vector` in the table
+  so nobody reads it as a driven run.
+* **CWD IS THE REPO ROOT**, which is the gate's own convention and a hard
+  requirement: eight fixtures resolve repo-root-relative paths (`iofile` writes
+  `tests/elm-fixtures/out/hello.out`), and the gate refuses to run anywhere else
+  for exactly that reason.
+* **STDIN** is the registered file for a `run_io` row and `/dev/null` otherwise
+  (the gate lets a `natrun` row inherit stdin; that is not a property of the
+  program).  **TIMEOUT 20 s, and a timeout is a FAILURE** — a wrong count or
+  stride LOOPS instead of crashing, and a gate that hangs reports nothing.
+* **STDERR IS COMPARED, INFORMATIONALLY, NOT FATALLY.**  The arms are allowed
+  different diagnostics; what is asserted is exit code + stdout.  It is measured
+  because a row whose only observable is its diagnostic (`execmal`) would
+  otherwise be credited as identical on rc alone.  MEASURED: it is byte-identical
+  on all 126 runs, so no row needed the weaker reading.
+
+### A TEST THAT CANNOT FAIL IS NOT A TEST — the asymmetry, measured
+
+The row was PROVEN fail-able in both directions before it was believed.  With ONE
+TOKEN of the word arm mutated — `Rt.callArity`'s arity-2 word twin,
+`buf + 8` -> `buf + 40` (`runtime.mid`, the stride the whole 54-line family
+exists to get right) — and `compiler.js` rebuilt:
+
+```
+  ... IDENTICAL                123
+  ... DIFFERING                  2
+  asyncorder  [no args] EXIT val=0 word=139   (SIGSEGV)
+  asyncpure   [no args] EXIT val=0 word=139
+```
+
+exit 1.  Reverted, the row is `125 / 125 identical`, exit 0.  So the green is a
+measurement, not a tautology — and note how FEW groups that mutation moved: a
+representation defect can be invisible to 123 of 125 groups, which is exactly why
+this row is a floor over the corpus and not a proof that every site is right.
+
+### What this number does NOT mean
+
+1. **One vector per group, mostly.**  The 125 groups carry 120 registered
+   vectors, so a group registered once is proven for THAT argument vector, not
+   for every input it can take.  The word arm's own diff/gcchurn fixtures
+   (`tools/qbe/word-arm-diff/`, `word-arm-gcchurn/`) stay the instruments for the
+   shapes the corpus does not build.
+2. **It does not cover the 34 `SAME-ERROR` groups** (they refuse on both arms —
+   a language behaviour, not an arm gap) and it cannot: there is no binary.
+3. **It says nothing about collections.**  These fixtures allocate far below one
+   GC trigger, so a ROOTING defect is invisible here — that is
+   `word-arm-gcchurn.sh`'s axis, and the corpus run does not replace it.
+4. **STREAMS ARE NOW RUN, AND THAT CLOSES THE CENSUS'S BOTH-COLUMN CAVEAT.**
+   The floats unit recorded that 14 groups (`execbig execchain execenv execglob
+   execmal execnofile execpipe execsubchain ioecho iofile readfile taskattempt
+   taskpure taskseq`) contain a `StreamRef` and sat in `BOTH` on EMIT-ONLY
+   evidence, and that `fdstream` was val-only in the gate.  All 14 now RUN on
+   both arms here and are identical, `fdstream` included.  What remains true is
+   narrower and should still be carried into VR3d's record: the `App`-argument
+   walk that would make `StreamRef` a CENSUS class is still OFF — the floats
+   unit MEASURED that turning it on moves 14 groups under a new class and takes
+   BOTH from 118 to 102 — so streams are covered by THIS row, not by the
+   classifier, and this row is the only place they are RUN.
+
+### The table
+
+`VECS` is the number of argument vectors run for the group; `RC` is the exit code
+both arms returned; `B` is the byte length of the byte-identical stdout.
+
+```
+  adtcase                  1    0        identical, 3 B
+  adteval                  1    0        identical, 3 B
+  appendres                1    0        identical, 2 B
+  applytwice               1    0        identical, 3 B
+  arraybasic               1    0        identical, 6 B
+  arraystress              1    0        identical, 8 B
+  asyncorder               1    0        identical, 11 B
+  asyncpure                1    0        identical, 6 B
+  biglist                  1    0        identical, 8 B
+  bitwise                  1    0        identical, 4 B
+  boolcase                 1    0        identical, 2 B
+  closure                  1    0        identical, 2 B
+  cmporder                 1    0        identical, 56 B
+  const                    1    0        identical, 3 B
+  countcase                1    0        identical, 2 B
+  countdown                1    0        identical, 2 B
+  crossref                 1    0        identical, 3 B
+  curry                    1    0        identical, 2 B
+  dictbasic                1    0        identical, 6 B
+  dictstress               1    0        identical, 8 B
+  dirunit                  1    0        identical, 28 B
+  div                      1    0        identical, 3 B
+  eqlist                   1    0        identical, 5 B
+  execbig                  1    0        identical, 13 B
+  execchain                1    0        identical, 23 B
+  execenv                  1    0        identical, 15 B
+  execglob                 1    0        identical, 267 B
+  execmal                  1    1        identical, 0 B
+  execnofile               1    0        identical, 54 B
+  execpipe                 1    0        identical, 8 B
+  execsubchain             1    0        identical, 10 B
+  extrec                   1    0        identical, 3 B
+  fastexec                 1    0        identical, 9 B
+  fdstream                 1    0        identical, 2 B
+  fib                      1    0        identical, 3 B
+  floatarith               1    0        identical, 4 B
+  floatcmp                 1    0        identical, 5 B
+  floatdiv                 1    0        identical, 4 B
+  floatfun                 1    0        identical, 5 B
+  floatineq                1    0        identical, 5 B
+  floatlit                 1    0        identical, 4 B
+  floatmix                 1    0        identical, 4 B
+  floatpartial             1    0        identical, 4 B
+  insrec                   1    0        identical, 4 B
+  ioecho                   1    0        identical, 14 B
+  iofile                   1    0        identical, 14 B
+  letcase                  1    0        identical, 2 B
+  letclosure               1    0        identical, 3 B
+  letdeeprec               1    0        identical, 6 B
+  letread                  1    0        identical, 3 B
+  lexselftail              1    0        identical, 7 B
+  liftcapconfl             1    0        identical, 3 B
+  liftcapconfl2            1    0        identical, 3 B
+  liftcycshadows           1    0        identical, 2 B
+  liftdelegate             1    0        identical, 2 B
+  liftdelegmut             1    0        identical, 2 B
+  liftdisjoint             1    0        identical, 3 B
+  liftdisjointshadow       1    0        identical, 2 B
+  liftenclosing            1    0        identical, 4 B
+  liftfirstclass           1    0        identical, 4 B
+  liftfwd                  1    0        identical, 2 B
+  liftfwdback              1    0        identical, 2 B
+  liftfwdmix               1    0        identical, 3 B
+  liftmodfwd               1    0        identical, 4 B
+  liftmutual               1    0        identical, 3 B
+  liftnested               1    0        identical, 5 B
+  liftnestedfinal          1    0        identical, 5 B
+  liftnestedrec            1    0        identical, 4 B
+  liftnestedtuple          1    0        identical, 5 B
+  liftprelfwdfn            1    0        identical, 5 B
+  liftprelude              1    0        identical, 2 B
+  liftpreludefwd           1    0        identical, 2 B
+  liftrelaxleak            1    0        identical, 4 B
+  liftself                 1    0        identical, 4 B
+  liftseqcap               1    0        identical, 2 B
+  liftshadow               1    0        identical, 3 B
+  liftstaycall             1    0        identical, 4 B
+  liftstayfwd              1    0        identical, 4 B
+  listcase                 1    0        identical, 3 B
+  multimod                 1    0        identical, 3 B
+  mxint                    1    0        identical, 4 B
+  mxstring                 1    0        identical, 20 B
+  nested                   1    0        identical, 2 B
+  nowunit                  1    0        identical, 18 B
+  opvalue                  1    0        identical, 2 B
+  overapply                1    0        identical, 3 B
+  p2pad                    1    0        identical, 72 B
+  partial                  1    0        identical, 2 B
+  patterns                 1    0        identical, 5 B
+  readfile                 1    0        identical, 55 B
+  recalias                 1    0        identical, 3 B
+  records                  1    0        identical, 3 B
+  refutpos                 1    0        identical, 2 B
+  remrec                   1    0        identical, 2 B
+  resultmaybe              1    0        identical, 60 B
+  rmprobe                  1    0        identical, 2 B
+  rowgadt_dup_rebuild      1    0        identical, 2 B  (no-vector)
+  rowgadt_eval             1    0        identical, 16 B
+  rowgadt_fsm              1    0        identical, 10 B
+  rowgadt_fsm_nested       1    0        identical, 10 B
+  rowgadt_het              1    0        identical, 6 B
+  rowgadt_hget             1    0        identical, 2 B  (no-vector)
+  rowgadt_hget_bare        1    0        identical, 2 B  (no-vector)
+  rowgadt_l3i              1    0        identical, 4 B
+  rowgadt_l3iii            1    0        identical, 2 B
+  rowgadt_select           1    1        identical, 0 B  (no-vector)
+  rowgadt_setx             1    1        identical, 0 B  (no-vector)
+  rowgadt_shape_rebuild    1    0        identical, 2 B  (no-vector)
+  rowpoly                  1    0        identical, 3 B
+  rtl1                     1    0        identical, 2 B
+  rtl2                     1    0        identical, 3 B
+  scopedup                 1    0        identical, 3 B
+  selfqual                 1    0        identical, 3 B
+  setops                   1    0        identical, 4 B
+  shortcircuit             1    0        identical, 2 B
+  statplus                 1    0        identical, 14 B
+  statunit                 1    0        identical, 77 B
+  strings                  1    0        identical, 14 B
+  strunit                  1    0        identical, 69 B
+  sub                      2    0        identical on every vector
+  subpartial               1    0        identical, 2 B
+  symeq                    1    0        identical, 2 B
+  taskattempt              1    0        identical, 7 B
+  taskpure                 1    0        identical, 3 B
+  taskseq                  1    0        identical, 2 B
+```
