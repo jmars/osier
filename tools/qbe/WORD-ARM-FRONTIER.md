@@ -470,3 +470,119 @@ does, and `letpat.elm` is the one that does not.)
    layout's, so the blob size, the slot array stride and every `* 40` move
    together. `StreamRef` is the classifier's remaining CONTROL (not a plan), and
    the `App`-argument walk that would name it in a census owes 14 runs first.
+
+## STEP 0 (perf word-arm-hostpath): THE HOST PATH'S SITE COUNT, ENUMERATED
+
+The count was never established, and this section exists because three different
+numbers were in circulation and **all three were undercounts of the same
+family**. The brief said 32, an implementer's record said 29, and a raw
+word-boundary `\b40\b` scan over the `Rt.host*` defuns numbers about 30. What
+none of them did was decide **region membership** — which is what actually
+separates a site that must be twinned from a `40` that must not.
+
+### The enumeration, and what decides membership
+
+Every code line in `osier-compiler/runtime.mid` carrying a word-boundary `40`
+(comment lines excluded), classified by (i) the defun that owns it and (ii)
+whether it is a **Value stride** — an address into an array of `val`s, whose
+element width IS the layout's — or one of the four things that merely look like
+one. Counted on the tree at `5ec1e95`:
+
+| class | lines | occurrences of a literal `40` | twin? |
+|---|---|---|---|
+| **T — Value stride, host family** (`Rt.host*`) | 38 | 44 | **YES** |
+| **T — Value stride, `Rt.apply-at`** | 1 | 1 | **YES** |
+| **T — Value stride, `Rt.callArity`** | 15 | 15 (+105 more `buf + 80…600`) | **YES** |
+| **B — byte offset / buffer length** | 3 | 3 | no |
+| **C — C-struct stride** | 7 | 7 | **must NOT** |
+| **S — a struct that is genuinely 40 bytes of words** | 2 | 2 | no |
+| **P — a private 40-byte pitch, agreed by writer and reader** | 17 | 17 | no |
+| **D — dead / over-allocated single cell** | 1 | 1 | no |
+
+**54 stride lines must be twinned**, in three defun families. That is the
+number this file now carries, and it is a count of LINES because a line is the
+unit the arm splice works in (one line may carry two strides — `Rt.hostCompleteOk`'s
+`vecstore(h + 8 + (33027 * 40), 0, vecload(h + 8 + ((lp->evals[i].base + 1) * 40), 0))`
+carries two, and both move).
+
+**THE LAYOUT SOURCE IS NOT A `40` AT ALL**, and a text scan cannot see it: the
+stride's origin is `struct Host`'s `slots : val[33031]` (`runtime.mid:741`).
+`Mid.RtLang.Check` sizes a `val` field at 40 bytes under ANY knob
+(`fieldTySize`'s `TVal -> Ok ( 40, 8 )`, no layout parameter — `Check.elm:1757`),
+so `lp->evals`, `lp->npoll` and `lp->poll` land at 1321296 / 1861968 / 1861976
+because of that ONE field. Twinning the malloc literal while leaving the field
+`val[33031]` is the silent overrun the file's own note (`runtime.mid:5743-5756`)
+names: the blob would be 804992 bytes with the checker still writing `evals` at
+1321296. **The port's first move is therefore not a `40` — it is that field**,
+and the word arm's `struct Host` carries no `val` field at all, which is what
+makes the checker's hardcoded 40 harmless here rather than fixed.
+
+### T — the 54 stride lines, by defun
+
+`Rt.hostInit` 2 (the malloc literal `8 + (33031 * 40) + (6 * 8) + (128 * 4224) + 16`,
+and `blob + 8 + 40` — the update-fn slot); `Rt.hostReadFileComplete`,
+`Rt.hostLeafReadFile`, `Rt.hostSleepComplete`, `Rt.hostExecComplete`,
+`Rt.hostLeafListDir`, `Rt.hostListDirChunk`, `Rt.hostStatRecord`,
+`Rt.hostLeafExec` (2) 1 each — all `h + 8 + ((lp->evals[i].base [+ 1]) * 40)`;
+`Rt.hostCall` 2 (33027, 33029); `Rt.hostClearGo` 1; `Rt.hostSpawnAt` 1;
+`Rt.hostSpawnFromCmd` 2 (33030 ×2); `Rt.hostPushFrame` 1 line / 2 strides;
+`Rt.hostDispatch` 4 lines (base, `taskAddr + 40`, 33030 ×2);
+`Rt.hostCompleteOk` 4 lines / 6 strides; `Rt.hostCompleteErr` 4 / 6;
+`Rt.hostDeliver` 6 (33027, 33028, `h + 8 + 40`, 33029, 33026 ×2);
+`Rt.hostRun` 2 (33026 ×2); `Rt.apply-at` 1 (`buf + rem * 40`);
+`Rt.callArity` 15 (`buf + 40` … `buf + 600`, the `rt_callN` dispatch chain).
+
+**`Rt.callArity` is the site the three circulating counts all missed**, and it
+is not a rounding error: it is 15 of the 54 lines and 120 individual offsets.
+It is also the one that makes the class a SILENT-WRONG rather than a crash:
+`Rt.apply-at`'s `napp == 0` arm — the arm every global closure of arity ≥ 2
+takes — hands `Rt.callArity` a slice of the ROOTED SLOT ARRAY as `buf`, and
+`rt_callN` loads each argument through the pointer it is given. At a 40-byte
+pitch against an 8-byte slot array, argument *k* is read from slot *5k*.
+
+### B, C, S, P, D — the `40`s that must NOT be twinned
+
+* **B (3).** `Rt.fRender`'s `strfromd(s + 72, 40, fmt, …)` — a buffer LENGTH.
+  `Rt.epChain`'s `cbufW + 40` and `Rt.hostEpCbuf`'s `c + 40` — BYTE offsets into
+  the 336-byte interned-symbol cbuf (`"cons"`@0, `"string"`@8, … `"and"`@40).
+* **C (7).** `Rt.epPipeline`'s `malloc(cnt * 40)`, `Rt.epPipeGo`'s `iW * 40`,
+  `Rt.epFreeCmds`, `Rt.wirePipeGo`, `Rt.closePipeTmpfds`, `Rt.closeOthersGo`,
+  `Rt.execGo`'s `*CmdState cmdN = [word](cmdsArr) + (iW * 40)` — the exec-plan
+  DECODE records. `struct CmdState` is five `word` fields = 40 bytes, `struct
+  Redir` six = 48: plain C records with **no `val` field**, so their 40 and 48
+  are STRUCT sizes and twin to nothing. (`runtime.mid:5752` already said so; this
+  table is the measurement that keeps it true.)
+* **S (2).** `Rt.frame-enter`'s `base = [word](hdr) + 40` — `struct FrameHdr` is
+  `live/wm/next/freeNext/_pad`, five words = 40 bytes **on both arms**, which is
+  why `Rt.frameBlock` keeps `40 + 8 * nslots` on the word arm and only the slot
+  term moves. `Rt.main`'s `mblk = malloc(40)` — a five-word `{base, entry,
+  metaN, code, arity}` block, not a Value.
+* **P (17).** `Rt.main`'s ENTRY-ARGUMENT buffer and its writer
+  `Rt.parseArgsGo`: `malloc(648)`, `wstore(abuf, 80, entry_nargs)` (byte 640),
+  `rootPushValueArray(abuf, abuf + 640)`, `a1 … a15 = abuf + 40 … + 600`, and
+  `bufW + (payload(j, 0) * 40)`. **This one is correct on both arms and twinning
+  it would be an optimization, not a port** — MEASURED, not argued: the writer
+  and the reader use the SAME pitch, so `rt_callN`'s `buf + 40k` addresses the
+  cell `Rt.parseArg` filled, and the collector's registration over-scans
+  harmlessly (80 cells at the word arm's 8-byte stride over a 640-byte region
+  whose unwritten cells are `memset` zeros, and a zero word is the fixnum 0, so
+  `gcMarkValue` sees nothing to move). Probed on this tree: a three-argument
+  entry `M.go 1 2 3` answers `123` with rc 0 on BOTH arms
+  (`QBE_VALREP=word`), and `$main`'s word-arm emit really does carry
+  `%t318 =l add %t240, 40` feeding `$rt_call3`.
+  **THIS IS THE ROW THAT SHOWS WHY A TEXT SCAN IS NOT A CLASSIFICATION**: P and T
+  are the same characters — `base + k * 40` — and only the question "whose
+  stride is this?" tells them apart.
+* **D (1).** `Rt.main`'s `modelslot = malloc(40)` — ONE Value cell. The word arm
+  reads it through `vecload`, which is layout-derived, so it reads correctly at
+  offset 0 out of an over-allocated 40-byte block. Over-allocation is not a
+  defect.
+
+### What the count does NOT include, and must not be read as including
+
+`struct HostEv`'s 4224-byte stride (`128 * 4224` in the malloc, `sizeof(HostEv)
+== 528 words`) does **not** move: it is four header words + 256 two-word
+`HostFrame`s + `etag` + an 11-word effect union, and `HostFrame` is
+`{kind, cont}`, two WORDS. `HostEv` holds no `val`, so the eval table's stride is
+arm-independent and the malloc literal's only moving term is the slot array.
+`sizeof(HostPoll) * 8` is likewise arm-independent.
