@@ -121,7 +121,12 @@ row() {
   build "$src" val "$fx.$heap.val" || return
   build "$src" word "$fx.$heap.word" || return
   local envs=()
-  [ "$heap" = "h1" ] && envs=(QBE_HEAP_MB=1)
+  case "$heap" in
+    h1) envs=(QBE_HEAP_MB=1) ;;
+    h2) envs=(QBE_HEAP_MB=2) ;;
+    h4) envs=(QBE_HEAP_MB=4) ;;
+    h8) envs=(QBE_HEAP_MB=8) ;;
+  esac
   env "${envs[@]}" timeout "$secs" "$BUILD/$fx.$heap.val" M.main > "$BUILD/$fx.$heap.val.out" 2> "$BUILD/$fx.$heap.val.err"
   local vrc=$?
   env "${envs[@]}" timeout "$secs" "$BUILD/$fx.$heap.word" M.main > "$BUILD/$fx.$heap.word.out" 2> "$BUILD/$fx.$heap.word.err"
@@ -162,7 +167,20 @@ row str      default 180
 #      both arms at both heaps - and this row is why the family could not be
 #      called complete before it was here.
 row rec      h1      240
+row rec      h2      240
+row rec      h4      240
 row rec      default 240
+# ---- THE HIT PATH (perf word-arm-records H1 FIX): `{ r | y <- i }` on an
+#      EXISTING field never reaches recAppend, so it is the UPDATE family's own
+#      window — `Rt.recUpd` allocates through `Rt.allocRecord` and holds `rec`
+#      across it.  The diagnosis measured this path SEGFAULTING at 60000
+#      iterations while green at 6000 (it allocates less per iteration, so the
+#      young trigger is crossed later), which is why the rung set is the full
+#      ladder and the iteration count is higher than the insertion fixture's.
+row recupd   h1      300
+row recupd   h2      300
+row recupd   h4      300
+row recupd   default 300
 
 if [ "$fails" != 0 ]; then
   echo "word-arm-gcchurn: $fails failure(s) — a closure is being read after a collection it did not survive"
