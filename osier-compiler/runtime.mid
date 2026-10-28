@@ -2161,7 +2161,18 @@ defun Rt.recGetGo(rec : val, field : val, i : val) -> val {
   val nameSym = vecload(payload(rec, 2), payload(i, 0));
   // <<< QBE_VAL-ONLY
   // >>> QBE_WORDVAL-ONLY
-  val nameSym = mknum(wload(wload(vecbody(rec), veclen(rec) - 1), payload(i, 0)));
+  // THE BASE IS MASKED (perf word-arm-records R4's fact 1, retrofitted here by
+  // the R3/R4 review's BLOCKER 2): a literal's names array is a STATIC address
+  // (`...000`) while one the RUNTIME built is stored TAGGED (`base + 1`), so an
+  // unmasked read of the second is misaligned by one and `mknum` refuses the
+  // shifted word.  MEASURED before the mask: `(ins {x=1,y=2}).x` printed
+  // correctly on the val arm and died `mknum overflow` on the word arm, while
+  // the POSITIONAL read of the same record passed — the defect is exactly this
+  // route's names read.  `nw - (nw & 7)` is the identity on the static address
+  // and the untag on the heap one, and it is the SAME idiom the five update
+  // twins spell.
+  word nw = wload(vecbody(rec), veclen(rec) - 1);
+  val nameSym = mknum(wload(nw - (nw & 7), payload(i, 0)));
   // <<< QBE_WORDVAL-ONLY
   if (call Rt.symEq(nameSym, field, mknum(0))) {
     return vecload(vecbody(rec), payload(i, 0));
@@ -2345,11 +2356,12 @@ defun Rt.recAppendNamesGo(rec : val, newnames : val, packed : val) -> val {
   }
   word nw = wload(vecbody(rec), veclen(rec) - 1);
   word names = nw - (nw & 7);
-  // `newnames` IS A BOXED RAW BASE HERE (`mknum(base)`), the layout's own
-  // pointer-wrap idiom — the twin cannot take a `word` parameter, because a
-  // mixed word/val signature cannot cross the lean ABI (MEASURED: the first cut
-  // refused with "raw word binder read in a VALUE position").
-  word dst = payload(newnames, 0);
+  // `newnames` IS A VALUE ON BOTH ARMS — a vector of raw name words here, the
+  // names vector there — so its base is `vecbody(..)` and no `mknum` boxing is
+  // needed.  (The first cut gave this twin a `word` parameter and could not
+  // cross the lean ABI; the second boxed the base with `mknum`; allocating the
+  // block as a VECTOR VALUE, above, is what made the honest spelling available.)
+  word dst = vecbody(newnames);
   // THE INSERT SLOT IS SKIPPED, and the shift is done on the SOURCE INDEX rather
   // than by branching on the STORE: this surface requires every block to end in
   // a terminator, so a value-less `if` around the `wstore` is not expressible —
@@ -2438,31 +2450,40 @@ defun Rt.recAppend(rec : val, field : val, newv : val) -> val {
 defun Rt.recAppend(rec : val, field : val, newv : val) -> val {
   val pos = call Rt.recAppendFind(rec, field, mknum(0));
   val packed = mknum(payload(pos, 0) * 65536);
+  // THE NAMES BLOCK IS ALLOCATED FIRST, AND THAT ORDER IS THE WHOLE FIX (perf
+  // word-arm-records R4's churn row).  The obvious order — record, then names —
+  // stores a YOUNG pointer into a record that the names allocation's own
+  // SAFEPOINT may have just PROMOTED, with no write barrier: the remembered set
+  // never learns, the next scavenge reclaims the names block, and the record
+  // keeps a dangling names base.  MEASURED: QBE_HEAP_MB=1 SEGFAULT / "scavenge
+  // read a POISONED body" after ~2000 insertions; the design's §2 sentence "the
+  // write barrier needs nothing" is FALSE for a runtime-built names array.
+  // Allocating the names block FIRST makes every pointer stored into the record
+  // young-to-young, which needs no barrier at all.
+  //
+  // THE BLOCK'S HEADER CODE IS 1 (raw body, UNSCANNED) AND THE HOLDER'S CODE IS
+  // 10, and that split is deliberate.  The header code decides the SCAN BIT,
+  // the only property the collector reads: unscanned is CORRECT here (the body
+  // holds name addresses, no Values) and it is also what keeps the walk away
+  // from words that are pointers only by convention — MEASURED: with the header
+  // at code 10 the scavenge WALKS this body and QBE_HEAP_MB=1 SEGFAULTS, because
+  // `gcScavValue` reads a name pointer's low three bits and a name is not
+  // guaranteed to be a Value-shaped word.  The HOLDER is code 10 because a
+  // `:val` frame slot is the only root this surface has and there is no code
+  // that means "raw word array"; the holder never escapes this defun (its only
+  // reader is `vecbody`), so the transient lie is confined to three statements.
+  // The parameter of `recAppendNamesGo` therefore means the same thing on both
+  // arms — a Value whose `vecbody` is the names array.
+  val nnN = mkval(10, vecbody(call Rt.allocKind(mknum(1), mknum(veclen(rec)))));
+  call Rt.recAppendNamesGo(rec, nnN, packed);
+  wstore(vecbody(nnN), payload(pos, 0), payload(field, 0));
   // `allocRecord(veclen(rec))` reserves `veclen + 1` = n+1 data words PLUS the
   // names word: the result has one MORE field than the base, and the `+ 1`
   // stays in the seat.
   val ndN = mkval(14, vecbody(call Rt.allocRecord(mknum(veclen(rec)))));
   call Rt.recAppendDataGo(rec, ndN, packed);
   vecstore(vecbody(ndN), payload(pos, 0), newv);
-  // THE RECORD MUST BE COMPLETE BEFORE THE NAMES ALLOCATION (perf
-  // word-arm-records R4, the rawroot item-3 shape found HERE by the collecting
-  // ladder).  `allocKind` below is a SAFEPOINT, and a rooted-but-UNWRITTEN body
-  // word is promoted as GARBAGE: `gcScavValue` reads the names slot's tag, and
-  // a stale word whose low bits are 1 relocates a bogus pointer (MEASURED:
-  // QBE_HEAP_MB=1 SEGFAULT) while tag 7 dies on the poison check.  So the slot
-  // gets a 0 — a fixnum-shaped word the walk skips — before the allocation, and
-  // is overwritten with the tagged base immediately after.
-  wstore(vecbody(ndN), veclen(ndN) - 1, 0);
-  word nn = vecbody(call Rt.allocKind(mknum(1), mknum(veclen(rec))));
-  wstore(vecbody(ndN), veclen(ndN) - 1, nn + 1);
-  call Rt.recAppendNamesGo(rec, mknum(nn), packed);
-  // THE NEW NAME GOES INTO THE NAMES BLOCK, at the insert position — re-read
-  // from the record's LAST body word (masked) rather than reusing `nn`, so no
-  // raw word is held across the copy call.  MEASURED: the first cut wrote it at
-  // `vecbody(ndN)` + pos, i.e. into the record's DATA slot, and the printed
-  // record answered `[]` for the inserted field.
-  word nb = wload(vecbody(ndN), veclen(ndN) - 1);
-  wstore(nb - (nb & 7), payload(pos, 0), wload(payload(field, 0), 0));
+  wstore(vecbody(ndN), veclen(ndN) - 1, vecbody(nnN) + 1);
   return ndN;
 }
 // <<< QBE_WORDVAL-ONLY
@@ -2513,9 +2534,14 @@ defun Rt.recToChainGo(rec : val, i : val, acc : val) -> val {
   word nw = wload(vecbody(rec), veclen(rec) - 1);
   word namesBase = nw - (nw & 7);
   word nameWord = wload(namesBase, idx);
-  word symBlock = vecbody(call Rt.allocSym(mknum(2)));
+  // ONE WORD, WHICH IS EVERY OTHER CODE-2 PRODUCER'S SHAPE (the R3/R4 review's
+  // SHOULD-FIX 1).  A word-arm symbol's body is ONE raw word — the name `char*`
+  // — in `Rt.intInsertAt` (`allocKind(2, 1)`) and in the emitter's literals
+  // (`Rt.allocSym(1)`), and this twin was the only two-word producer, which
+  // re-planted the mixed-shape-one-code defect the layout exists to kill.  No
+  // length reader exists, so the second word bought nothing.
+  word symBlock = vecbody(call Rt.allocSym(mknum(1)));
   wstore(symBlock, 0, nameWord);
-  wstore(symBlock, 1, payload(call Rt.cStrLenGo(mknum(nameWord), mknum(0)), 0));
   val symVal = mkval(2, symBlock);
   val dataVal = vecload(vecbody(rec), idx);
   return call Rt.recToChainGo(rec, mknum(idx + 1), call Rt.cons(call Rt.cons(symVal, dataVal), acc));
@@ -5575,10 +5601,13 @@ defun Rt.allocRecord(count : val) -> val {
   return call Rt.gcAlloc(region, mknum(14), mknum(payload(count, 0) + 1));
 }
 // THE SYMBOL CELL (perf word-arm-records R1).  A word-arm SYMBOL is a code-2
-// block whose body is the string cell's shape — `[byte pointer, length]` — so
-// `payload(v, 0)` is the NUL-terminated name (what `symEq`/`pvZ`/`strbyte` walk,
-// unchanged) and `payload32(v, 1)` is the byte length (kept so a length reader
-// has an honest answer the day one appears; nothing reads it today).
+// block whose body is ONE raw word — the NUL-terminated name's `char*` — so
+// `payload(v, 0)` IS the name (what `symEq`/`pvZ`/`strbyte` walk, unchanged).
+// THERE IS NO LENGTH WORD, and this comment used to claim one (an R1-era
+// description of a two-word `[byte pointer, length]` body that no producer ever
+// built; the R3/R4 review caught the comment and the one producer that had
+// followed it).  A future length reader must walk the bytes — `Rt.cStrLenGo` —
+// exactly as `symEq` does.
 //
 // WHY ITS OWN SEAT AND NOT `allocRaw`: the CODE IS THE CONSTRUCTOR on this arm,
 // and a symbol is code 2 while `allocRaw` is the string's code 1.  A symbol
