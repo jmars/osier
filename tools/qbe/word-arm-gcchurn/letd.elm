@@ -22,8 +22,14 @@ module M exposing (main)
 --     an IMMEDIATE (n) and a HEAP OBJECT (s, a runtime-built string cell);
 --   * `noise = churn 12`     — an ALLOCATION WINDOW between the bind and its
 --     use, so a scavenge lands while n and s are live in their slots;
---   * `( u, v ) = ( n, s )`  — a SECOND destructuring over the BOUND values, so
---     a slot written at the wrong width is re-read as a scrutinee;
+--   * `( u, v ) = pair n s`  — a SECOND destructuring over the BOUND values, so
+--     a slot written at the wrong width is re-read as a scrutinee.  THROUGH A
+--     DEFUN, and that is load-bearing: `( u, v ) = ( n, s )` is a TUPLE of
+--     Vars, which Flatten's `destructPlan` resolves (depth-1 `KindTuple`
+--     binds), so the destructuring never reaches the emitter — MEASURED by the
+--     word-arm-letdestr review, which found the comment claiming a window that
+--     did not exist.  `pair` makes the scrutinee an APPLICATION, which Flatten
+--     cannot see through;
 --   * the checks compare `s` against a REBUILT string (`String.fromInt n`),
 --     which walks the bytes — a reclaimed or wrongly-strided string cell reads
 --     the wrong CONTENT while its length still looks right.
@@ -57,6 +63,10 @@ churn k =
         String.append (String.fromInt k) (churn (k - 1))
 
 
+pair a b =
+    ( a, b )
+
+
 step xs examined matched mismatched =
     case xs of
         [] ->
@@ -74,7 +84,7 @@ step xs examined matched mismatched =
                     churn 12
 
                 ( u, v ) =
-                    ( n, s )
+                    pair n s
             in
             if (s == String.fromInt n) && (u == n) && (v == s) && (noise == churn 12) then
                 step rest (examined + 1) (matched + 1) mismatched

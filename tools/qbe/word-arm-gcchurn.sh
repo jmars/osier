@@ -198,9 +198,13 @@ row str      default 180  0   # regression row: MEASURED 0 collections on BOTH a
 #      SEGFAULT (rc 139), word default `mknum overflow`.  AFTER: 6000/6000/0 on
 #      both arms at both heaps - and this row is why the family could not be
 #      called complete before it was here.
-#      THE RUNGS ARE NOT EQUAL, AND THE SCAVENGE COUNTS SAY SO (perf
-#      word-arm-records H1 review FINDING 4, measured with QBE_MIDGC_STATS=1):
-#      rec 15/9/4/**0** and recupd 22/16/10/1 scavenges at h1/h2/h4/default.
+#      THE RUNGS ARE NOT EQUAL, AND THE COLLECTION COUNTS SAY SO (perf
+#      word-arm-records H1 review FINDING 4, measured with QBE_MIDGC_STATS=1 and
+#      re-measured under `row()`'s metric — SCAVENGES **OR** FULL COLLECTS, which
+#      is what the assertion counts; the original scavenge-only figures 15/9/4/0
+#      and 22/16/10/1 are the same rows, lower because a young-only count misses
+#      the full sweeps): rec 30/18/8/**0** word (36/28/18/0 val) and recupd
+#      44/32/20/1 word (46/36/26/3 val) at h1/h2/h4/default.
 #      h1/h2/h4 are REAL COLLECTING RUNGS at three distinct heap sizes and they
 #      are what covers the defect.  `default` collects ZERO times for `rec`
 #      (recupd's single one fires at the END, on the whole live set), so it
@@ -233,10 +237,13 @@ row recupd   default 300  0   # regression row: 1 scavenge, at the END (see abov
 #      element binds) AND a whole-value `==`, so a reclaimed tag cell answers the
 #      wrong alternative instead of crashing, and a wrong element stride prints a
 #      wrong number.
-#      THE RUNGS ARE MEASURED, NOT ASSUMED (QBE_MIDGC_STATS=1): 18/13/6 scavenges
-#      at h1/h2/h4 on the word arm (16 at h1 on the val arm), and ZERO at
-#      `default` on BOTH arms — so `default` is a REGRESSION row and must not be
-#      counted as collection coverage (the same labelling `rec` needed).
+#      THE RUNGS ARE MEASURED, NOT ASSUMED (QBE_MIDGC_STATS=1, counting SCAVENGES
+#      AND FULL COLLECTS — `row()`'s metric): 36/26/12 collections at h1/h2/h4 on
+#      the word arm (32/22/14 on the val arm), and ZERO at `default` on BOTH arms
+#      — so `default` is a REGRESSION row and must not be counted as collection
+#      coverage (the same labelling `rec` needed).  The scavenge-only figures this
+#      comment used to quote (18/13/6, 16 at h1 on the val arm) were the same
+#      rows under the narrower metric.
 row con      h1      240  1
 row con      h2      240  1
 row con      h4      240  1
@@ -245,8 +252,8 @@ row con      default 240  0   # regression row: 0 scavenges, see above
 #      itself, but `lowerBind` puts every pattern variable in a ROOTED slot and
 #      the pattern's tag test is a CALL on this arm (`Rt.=`), so the binds are
 #      live across the body's allocations.  MEASURED (QBE_MIDGC_STATS=1, counting
-#      scavenges AND full collects) on both arms: 80/174 at h1, 72/164 at h2,
-#      62/82 at h4 and 4/7 at DEFAULT — so here even the default rung COLLECTS,
+#      scavenges AND full collects) on both arms: 82/174 at h1, 74/164 at h2,
+#      64/82 at h4 and 6/7 at DEFAULT — so here even the default rung COLLECTS,
 #      and all four are collecting rungs (min 1) rather than the regression rows
 #      `rec`/`con` needed at the default knob.
 row letd     h1      240  1

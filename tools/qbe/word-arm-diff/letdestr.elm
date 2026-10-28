@@ -8,9 +8,16 @@ module M exposing (main)
 -- Flatten substitutes the components and the `LetDestruct` node is gone before
 -- lowering.  It therefore says nothing about the destructuring path at all.
 --
--- SO EVERY SCRUTINEE HERE IS A CALL RESULT.  `pair`/`shp` are separate defuns,
--- so Flatten cannot see through them and the emitter really does emit the
--- pattern: a tag test plus payload chases into the SCRUTINEE's slot.
+-- SO EVERY SCRUTINEE HERE IS A CALL RESULT — `pair`, `shp` and `listOf` are
+-- separate defuns, so Flatten cannot see through them (`shapeOf` answers
+-- "unknown" for an application) and the emitter really does emit the pattern: a
+-- tag test plus payload chases into the SCRUTINEE's slot.  THIS IS LOAD-BEARING
+-- AND WAS MEASURED WRONG ONCE: the list pattern below was written
+-- `( x :: xs ) = [ 7, 8, 9 ]` — a LITERAL scrutinee — and Flatten's
+-- `destructPlan` resolves a depth-1 `KindList` bind, so that destructuring was
+-- compiled away and the emitter never saw it, while this header claimed every
+-- scrutinee was a call.  The word-arm-letdestr REVIEW caught it; `listOf` is the
+-- fix, and the same trap is what makes `letpat.elm` prove nothing.
 --
 -- WHAT EACH SHAPE EXERCISES (the classifier's three walks, one per shape):
 --   * `( a, b ) = pair 3`      — a TUPLE pattern: MCons on the cons spine (the
@@ -20,9 +27,10 @@ module M exposing (main)
 --     EQUALITY, i.e. `Rt.=` on the word arm) then IdxStep binds, which is the
 --     one place the element stride (`valSizeBytes * j`) and the vector base
 --     (`fieldBase 0`) are both read.
---   * `( x :: xs ) = ...`      — a LIST pattern: MCons, then the car and the
+--   * `( x :: xs ) = listOf 7` — a LIST pattern: MCons, then the car and the
 --     CDR (the `chaseCdr` path, which derives the tail through the car pointer
---     and is a different chase from `fieldBase`'s).
+--     and is a different chase from `fieldBase`'s).  A CALL, not a list literal
+--     — see the header note.
 --   * `( ( p, q ), r )`        — a NESTED pattern: two levels of binds, so a
 --     bind's slot is itself the scrutinee of the next chase.
 --   * `rr = { f = n, g = s }` with `f = rr.f` — a record FIELD pattern's
@@ -50,6 +58,10 @@ shp n =
     Mk n "s"
 
 
+listOf n =
+    n :: (n + 1) :: (n + 2) :: []
+
+
 sum xs =
     case xs of
         [] ->
@@ -68,7 +80,7 @@ main =
             shp a
 
         ( x :: xs ) =
-            [ 7, 8, 9 ]
+            listOf 7
 
         ( ( p, q ), r ) =
             ( pair 20, "t" )

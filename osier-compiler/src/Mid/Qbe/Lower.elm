@@ -1729,13 +1729,18 @@ lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec _ mid
                             (List.filter (\k -> not (List.member k surfaceKeys)) (MidRt.seeds usedPrims)
                                 ++ List.filter (\k -> not (List.member k surfaceKeys)) (unique (MidRt.gcSeeds ++ MidRt.conSeeds ++ MidRt.closureSeeds ++ MidRt.lowerSeatSeeds))
                                 -- THE WORD-ARM-ONLY SEATS (perf word-arm-area3rt):
-                                -- seeded ONLY on the word arm.  Every key exists in
-                                -- runtime.mid only inside a QBE_WORDVAL-ONLY region,
-                                -- and the checker resolves a seeded key against the
-                                -- spliced text and REFUSES an unknown global
-                                -- (MEASURED: `unknown global Rt.kindHdr` the moment
-                                -- the seat was seeded through a shared defun's edge
-                                -- on the val arm).
+                                -- seeded ONLY on the word arm.  MOST of the keys
+                                -- exist in runtime.mid only inside a QBE_WORDVAL-ONLY
+                                -- region, and the checker resolves a seeded key
+                                -- against the spliced text and REFUSES an unknown
+                                -- global (MEASURED: `unknown global Rt.kindHdr` the
+                                -- moment the seat was seeded through a shared defun's
+                                -- edge on the val arm).  NOT ALL OF THEM, though
+                                -- (perf word-arm-letdestr): `Rt.symToStr` is an
+                                -- always-present defun whose only caller is the WORD
+                                -- arm's `Rt.value` splice, so it is seeded here for
+                                -- the arm, not for its region — see
+                                -- `Mid.Rt.wordArmSeeds`' "SECOND KIND" paragraph.
                                 ++ (if layout.heapTagIsKind then
                                         List.filter (\k -> not (List.member k surfaceKeys)) (unique MidRt.wordArmSeeds)
 
