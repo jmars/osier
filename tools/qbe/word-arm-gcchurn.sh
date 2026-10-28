@@ -166,10 +166,19 @@ row str      default 180
 #      SEGFAULT (rc 139), word default `mknum overflow`.  AFTER: 6000/6000/0 on
 #      both arms at both heaps - and this row is why the family could not be
 #      called complete before it was here.
+#      THE RUNGS ARE NOT EQUAL, AND THE SCAVENGE COUNTS SAY SO (perf
+#      word-arm-records H1 review FINDING 4, measured with QBE_MIDGC_STATS=1):
+#      rec 15/9/4/**0** and recupd 22/16/10/1 scavenges at h1/h2/h4/default.
+#      h1/h2/h4 are REAL COLLECTING RUNGS at three distinct heap sizes and they
+#      are what covers the defect.  `default` collects ZERO times for `rec`
+#      (recupd's single one fires at the END, on the whole live set), so it
+#      cannot fail on a rooting defect — it was green BEFORE the fix.  It is kept
+#      as a REGRESSION row (the default knob must keep producing the right
+#      answer) and MUST NOT be counted as collection coverage.
 row rec      h1      240
 row rec      h2      240
 row rec      h4      240
-row rec      default 240
+row rec      default 240   # regression only: 0 scavenges, see above
 # ---- THE HIT PATH (perf word-arm-records H1 FIX): `{ r | y <- i }` on an
 #      EXISTING field never reaches recAppend, so it is the UPDATE family's own
 #      window — `Rt.recUpd` allocates through `Rt.allocRecord` and holds `rec`
@@ -180,7 +189,7 @@ row rec      default 240
 row recupd   h1      300
 row recupd   h2      300
 row recupd   h4      300
-row recupd   default 300
+row recupd   default 300   # regression only: 1 scavenge, at the END (see above)
 
 if [ "$fails" != 0 ]; then
   echo "word-arm-gcchurn: $fails failure(s) — a closure is being read after a collection it did not survive"
