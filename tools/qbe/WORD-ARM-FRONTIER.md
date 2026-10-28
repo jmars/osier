@@ -482,28 +482,42 @@ separates a site that must be twinned from a `40` that must not.
 
 ### The enumeration, and what decides membership
 
-Every code line in `osier-compiler/runtime.mid` carrying a word-boundary `40`
-(comment lines excluded), classified by (i) the defun that owns it and (ii)
-whether it is a **Value stride** — an address into an array of `val`s, whose
-element width IS the layout's — or one of the four things that merely look like
-one. Counted on the tree at `5ec1e95`:
+THE UNIVERSE, COUNTED (this paragraph was WRONG and is corrected here, per the
+hostpath review's NICE 3 — the thesis stood, the arithmetic did not). A raw
+word-boundary `\b40\b` scan over non-comment lines of
+`osier-compiler/runtime.mid` at `5ec1e95` finds **87 lines / 95 occurrences**.
+The table below classifies **84** of those lines. The other **3** are the frame
+SIZING expressions — `Rt.frameBlock`'s two `40 + … * nslots` byte-size lines and
+`Rt.frame-enter`'s `memset(base, 0, 40 * nslots)` — which are a different shape
+(the header is 40 bytes on BOTH arms; only the slot term moves) and are covered
+by their own rows, so they are not in a class here. An earlier revision said
+"every code line carrying a word-boundary 40" over a table that summed to 84;
+that statement is what is fixed, not the classification.
 
-| class | lines | occurrences of a literal `40` | twin? |
+Each line is classified by (i) the defun that owns it and (ii) whether it is a
+**Value stride** — an address into an array of `val`s, whose element width IS
+the layout's — or one of the four things that merely look like one.
+
+| class | lines | unit, stated | twin? |
 |---|---|---|---|
-| **T — Value stride, host family** (`Rt.host*`) | 38 | 44 | **YES** |
-| **T — Value stride, `Rt.apply-at`** | 1 | 1 | **YES** |
-| **T — Value stride, `Rt.callArity`** | 15 | 15 (+105 more `buf + 80…600`) | **YES** |
-| **B — byte offset / buffer length** | 3 | 3 | no |
-| **C — C-struct stride** | 7 | 7 | **must NOT** |
-| **S — a struct that is genuinely 40 bytes of words** | 2 | 2 | no |
-| **P — a private 40-byte pitch, agreed by writer and reader** | 17 | 17 | no |
-| **D — dead / over-allocated single cell** | 1 | 1 | no |
+| **T — Value stride, host family** (`Rt.host*`) | 38 | lines carrying a literal `40` (44 occurrences) | **YES** |
+| **T — Value stride, `Rt.apply-at`** | 1 | lines carrying a literal `40` | **YES** |
+| **T — Value stride, `Rt.callArity`** | 15 | lines carrying a literal `40` (+105 more `buf + 80…600` on the same lines) | **YES** |
+| **B — byte offset / buffer length** | 3 | lines carrying a literal `40` | no |
+| **C — C-struct stride** | 7 | lines carrying a literal `40` | **must NOT** |
+| **S — a struct that is genuinely 40 bytes of words** | 2 | lines carrying a literal `40` | no |
+| **P — the entry-argument family** (a pitch plus its readers) | 17 | **NOT** lines carrying a literal `40`: the lines of `Rt.main`/`Rt.parseArgsGo`/`Rt.parseArg` that carry `40`..`600`, of which only **2** carry the literal `40` (`a1 = abuf + 40`, `bufW + j * 40`) | **YES — perf word-arm-corpusrun** (see below; the old "no" was the defect) |
+| **D — dead / over-allocated single cell** | 1 | lines carrying a literal `40` | no |
 
 **54 stride lines must be twinned**, in three defun families. That is the
-number this file now carries, and it is a count of LINES because a line is the
-unit the arm splice works in (one line may carry two strides — `Rt.hostCompleteOk`'s
+number this file carried at `5ec1e95`, and it is a count of LINES because a line
+is the unit the arm splice works in (one line may carry two strides —
+`Rt.hostCompleteOk`'s
 `vecstore(h + 8 + (33027 * 40), 0, vecload(h + 8 + ((lp->evals[i].base + 1) * 40), 0))`
-carries two, and both move).
+carries two, and both move). **The P row's `no` was the one wrong answer in this
+table**, and it was wrong in the direction that DROPS LIVE VALUES: the pitch is
+read by a KIND-2 GC ROOT, not only by its own writer — see "THE ENTRY-ARGS ROOT
+GAP" below.
 
 **THE LAYOUT SOURCE IS NOT A `40` AT ALL**, and a text scan cannot see it: the
 stride's origin is `struct Host`'s `slots : val[33031]` (`runtime.mid:741`).

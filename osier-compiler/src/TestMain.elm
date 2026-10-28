@@ -637,8 +637,19 @@ checks rt rawMidText =
         -- a stale entry would keep refusing a defun that now works.  (b) The
         -- MECHANISM still refuses: the row plants an entry and asserts the SAME
         -- admitted body refuses under the planted key and not under an ordinary
-        -- one.  Without (b) the seat could be dead code and the row would pass on
-        -- its absence; without (a) the port would not be visible here at all.
+        -- one.
+        --
+        -- (b) WAS A TAUTOLOGY AND IS NOW A TEST (perf word-arm-corpusrun, the
+        -- review's SHOULD-FIX 2).  It used to compute `planted` through the
+        -- SHIPPED list and then assert `planted == []` — which was implied by
+        -- `wordArmDefunRefusals == []`, the row's own first conjunct.  DELETING
+        -- the audit-list branch in `wordSurfaceUnportedOne` left the row GREEN
+        -- while this comment and Lower.elm's both claimed the row proved it.  It
+        -- now goes through `wordSurfaceUnportedWith`, so the list is a PARAMETER:
+        -- the planted entry lives in a list the production path never sees, and
+        -- the assertion is that the SAME admitted body refuses under the planted
+        -- key and is admitted under an ordinary one.  MEASURED fail-able: with the
+        -- branch deleted the planted call answers [] and this row goes RED.
         (let
             admittedBody key =
                 { key = key
@@ -651,8 +662,11 @@ checks rt rawMidText =
                     , ( "Other.f", admittedBody "Other.f" )
                     ]
 
+            plantedList =
+                [ ( "Runtime.program", "PLANTED: the audit list must refuse this defun by name" ) ]
+
             planted =
-                QbeLower.wordSurfaceUnported defuns [ "Runtime.program" ]
+                QbeLower.wordSurfaceUnportedWith plantedList defuns [ "Runtime.program" ]
          in
          QbeLower.wordArmDefunRefusals
             == []
@@ -662,12 +676,13 @@ checks rt rawMidText =
             == []
             && QbeLower.wordArmUnported (Var 0)
             == Nothing
-            && -- (b) the planted-entry half, checked through the SAME list the
-               -- classifier consults: a non-empty list makes the same call refuse.
+            && -- (b) the planted-entry half, through a list the production path
+               -- never sees: the SAME admitted body refuses by name under the
+               -- planted key, and is admitted under an ordinary one.
                (planted
+                    == [ "Runtime.program: PLANTED: the audit list must refuse this defun by name" ]
+                    && QbeLower.wordSurfaceUnportedWith plantedList defuns [ "Other.f" ]
                     == []
-                    && List.length QbeLower.wordArmDefunRefusals
-                    == 0
                )
         )
     , check "utf8ByteLength 'héllo' == 6" (utf8ByteLength "héllo" == 6)
@@ -6536,6 +6551,17 @@ checks rt rawMidText =
          String.contains "defun Rt.hostInit(" wordText
             && List.all (\k -> not (String.contains "* 40" (code (defunText k wordText)))) hostKeys
             && List.all (\k -> not (String.contains "* 40" (code (defunText k wordText)))) [ "Rt.apply-at" ]
+            && -- AND THE BARE `+ 40` FORMS, which `* 40` cannot see (review NICE 4):
+               -- `Rt.hostDispatch`'s `resAddr = taskAddr + 40` and `Rt.hostDeliver`'s
+               -- `mknum(h + 8 + 40)` are strides written as an ADD, so a regression
+               -- there tripped no pin and only the behavioural rows
+               -- (hostprog/gcchurn-host) could see it.  MEASURED: the word splice
+               -- of all 20 host defuns plus Rt.apply-at carries NO `+ 40` at all
+               -- (`Rt.callArity`'s `buf + 40` and `Rt.main`'s `a5 = abuf + 40` are
+               -- legitimate 5*8 offsets, and both are pinned by their OWN rows),
+               -- so the ban is exact rather than over-broad.
+               List.all (\k -> not (String.contains "+ 40" (code (defunText k wordText)))) (hostKeys ++ [ "Rt.apply-at" ])
+            && List.all (\k -> String.contains "+ 40" (code (defunText k valText))) [ "Rt.hostDispatch", "Rt.hostDeliver" ]
             && List.all (\k -> String.contains "* 40" (code (defunText k valText))) [ "Rt.hostInit", "Rt.hostDispatch", "Rt.hostDeliver", "Rt.apply-at" ]
             && String.contains "buf, buf + 8, buf + 16" (code (defunText "Rt.callArity" wordText))
             && String.contains "buf, buf + 40, buf + 80" (code (defunText "Rt.callArity" valText))

@@ -1,4 +1,4 @@
-module Mid.Qbe.Lower exposing (lower, lowerWith, wordArmDefunRefusals, wordArmUnported, wordSurfaceUnported)
+module Mid.Qbe.Lower exposing (lower, lowerWith, wordArmDefunRefusals, wordArmUnported, wordSurfaceUnported, wordSurfaceUnportedWith)
 
 -- Mid.Qbe.Lower — Mid.Ir -> Qbe.Il (native-backend stage 1; handoff-qbe-lower).
 --
@@ -1401,25 +1401,41 @@ which is what let the census promise a group the named class could not move).
 -}
 wordSurfaceUnported : Dict String Defun -> List String -> List String
 wordSurfaceUnported defuns keys =
-    List.concatMap (wordSurfaceUnportedOne defuns) keys
+    wordSurfaceUnportedWith wordArmDefunRefusals defuns keys
 
 
-wordSurfaceUnportedOne : Dict String Defun -> String -> List String
-wordSurfaceUnportedOne defuns k =
+{-| THE SAME WALK WITH THE REFUSAL LIST AS A PARAMETER (perf word-arm-corpusrun,
+the review's SHOULD-FIX 2).  It exists because the LIST is now EMPTY, and a pin
+that calls `wordSurfaceUnported` with the shipped list cannot test the audit-list
+branch at all: its "planted entry" assertion was implied by the emptiness of the
+very list the branch consults, so DELETING the branch left the row green while
+two comments claimed the row proved it.  A TAUTOLOGY IS NOT A TEST.  Threading
+the list through lets the row plant an entry in a list the production path never
+sees, which is the only shape that can observe the branch.
+-}
+wordSurfaceUnportedWith : List ( String, String ) -> Dict String Defun -> List String -> List String
+wordSurfaceUnportedWith refusals defuns keys =
+    List.concatMap (wordSurfaceUnportedOne refusals defuns) keys
+
+
+wordSurfaceUnportedOne : List ( String, String ) -> Dict String Defun -> String -> List String
+wordSurfaceUnportedOne refusals defuns k =
     if isRtKey k then
         -- An Rt key reached as the ENTRY (a TestMain probe into the runtime) is
         -- not a surface defun: it is refused wholesale by the area-7 gate, which
         -- states a stronger fact than "this node is un-ported".
         []
 
-    else if List.any (\( rk, _ ) -> rk == k) wordArmDefunRefusals then
+    else if List.any (\( rk, _ ) -> rk == k) refusals then
         -- THE AUDIT LIST IS CONSULTED FOR THE SURFACE TOO (perf
         -- word-arm-letdestr): a core-lib defun whose every construct is ADMITTED
         -- can still be wrong on this arm, and the refusal has to name it.  The
         -- list is EMPTY since perf word-arm-hostpath (its last entry,
-        -- `Runtime.program`, is ported) — the arm remains live and TestMain
-        -- proves it with a planted entry.
-        List.map (\why -> k ++ ": " ++ why) (List.filterMap (\( rk, why ) -> if rk == k then Just why else Nothing) wordArmDefunRefusals)
+        -- `Runtime.program`, is ported) — the arm remains live, and TestMain
+        -- proves it by planting an entry through `wordSurfaceUnportedWith`, which
+        -- is why this branch takes the list as a PARAMETER rather than reading
+        -- the constant.
+        List.map (\why -> k ++ ": " ++ why) (List.filterMap (\( rk, why ) -> if rk == k then Just why else Nothing) refusals)
 
     else
         case Dict.get k defuns of

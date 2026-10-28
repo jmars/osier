@@ -344,8 +344,8 @@ if groups_bad:
         for r in rows:
             if r["name"] != n or not bad(r):
                 continue
-            print("  %-28s [%s] %s" % (n, r["args"] or "no args", r["res"]))
-            if r["res"] == "STDOUT":
+            print("  %-28s [%s] %s" % (n, r["args"] or "no args", base(r["res"])))
+            if base(r["res"]) == "STDOUT":
                 print("      " + first_diff(r["id"]))
             else:
                 err = os.path.join(W, "runs", "%d.word.err" % r["id"])
