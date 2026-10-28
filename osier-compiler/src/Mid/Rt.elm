@@ -2494,9 +2494,39 @@ safepoint : Bool -> String -> Int -> Exp -> Bool
 safepoint arm selfKey selfArity e =
     case e of
         Lit (LString _) ->
+            -- A STRING LITERAL IS AN ALLOCATION ON THE WORD ARM, and `True` is
+            -- the answer the VAL arm has always given — kept, because it is in
+            -- the val arm's FROZEN classification and because the direction is
+            -- safe: over-approximating a frame costs a registration,
+            -- under-approximating drops roots.  On the word arm the `True` is
+            -- now true for a reason rather than by luck
+            -- (`storeWordStringLiteral` -> `Rt.allocRaw`).
             True
 
+        Lit (LFloat _) ->
+            -- ARM-AWARE, like the `RawMkValue` arm above (perf word-arm-floats
+            -- review SHOULD-FIX 1).  The trap this unit discharged one node over
+            -- was re-armed here: the classifier now ADMITS `Lit (LFloat _)`, and
+            -- under the word arm that literal is `storeWordFloatCell` ->
+            -- `midGcAllocSeat "Rt.allocFloat"` — an allocation the `.mid` tree
+            -- never shows.  On the val arm it is `reboxFloat`: a tag word plus
+            -- `stored`, nothing allocated, which is why the answer is `False`
+            -- there and the val emit does not move.
+            arm && (RtLayout.wordLitAllocSeat RtLayout.tagFloat /= Nothing)
+
+        Lit (LSymbol _) ->
+            -- THE PRE-EXISTING HALF, and it was armed by perf word-arm-records
+            -- R1 (`storeWordSymbolLiteral` -> `Rt.allocSym`) — nobody noticed
+            -- because no `.mid` body contains a symbol literal.  A LITERAL has
+            -- no caller to allocate its cell, which is exactly what
+            -- `wordLitAllocSeat` states; `mkval(2, body)` (a `mk*` node) still
+            -- allocates nothing, and `wordMkAllocSeat` still says so.
+            arm && (RtLayout.wordLitAllocSeat RtLayout.tagSymbol /= Nothing)
+
         Lit _ ->
+            -- The IMMEDIATES: `mknum`/`mkbool` are shifts and a big number is
+            -- refused by name under this arm.  Nothing to allocate, so this is
+            -- the arm that keeps the answer from being "True for every literal".
             False
 
         Var _ ->

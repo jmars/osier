@@ -1886,6 +1886,77 @@ checks rt rawMidText =
                 False
         )
         )
+    , check "THE SAFEPOINT WALKER'S `Lit` ARM IS ARM-AWARE — a float or a symbol literal ALLOCATES on the word arm, an immediate does not on either (perf word-arm-floats review)"
+        -- SHOULD-FIX 1 OF THE REVIEW, and the trap is the one this unit
+        -- discharged ONE IR NODE OVER.  `Mid.Rt.safepoint` answered `True` for
+        -- `Lit (LString _)` and `False` for every other literal, which under the
+        -- word arm is false for floats (`storeWordFloatCell` -> `Rt.allocFloat`,
+        -- and the classifier now ADMITS the literal, so a `.mid` defun could
+        -- hold one) and was ALREADY false for symbols since R1
+        -- (`storeWordSymbolLiteral` -> `Rt.allocSym`; nobody noticed because no
+        -- `.mid` body contains one).  Both are now read from ONE statement,
+        -- `RtLayout.wordLitAllocSeat`, under the arm.
+        --
+        -- THE VAL ARM MUST NOT MOVE, and that is asserted rather than assumed:
+        -- there a literal is a tag word plus payload writes and allocates
+        -- nothing, so both answers are `False` and the corpus stays byte-identical.
+        --
+        -- THE STRING CASE IS STATED BECAUSE THE REVIEW'S PHRASING IS TRUE OF THE
+        -- NODE AND FALSE OF THE LITERAL: "a string-literal-only defun must not be
+        -- framed" holds for a `mkstr` (its word IS a body the caller allocated,
+        -- so it tags and allocates nothing — `mkStrProbe`, asserted below) but
+        -- NOT for a string LITERAL, whose writer allocates the cell itself
+        -- (`storeWordStringLiteral` -> `Rt.allocRaw`) and whose val answer has
+        -- always been the conservative `True`.  So the control the row carries
+        -- for "not every literal allocates" is the IMMEDIATE, and the `mkstr`
+        -- node keeps its own negative control in the row below.
+        ((case ( Rt.loadArm False rawMidText, Rt.loadArm True rawMidText ) of
+            ( Ok valRt, Ok wordRt ) ->
+                -- the new half, BOTH directions
+                wordRt.direct floatLitProbe
+                    && not (valRt.direct floatLitProbe)
+                    && wordRt.direct symLitProbe
+                    && not (valRt.direct symLitProbe)
+                    -- negative control: an IMMEDIATE literal allocates nothing on
+                    -- either arm, so the row cannot pass by answering True for
+                    -- every literal
+                    && not (wordRt.direct intLitProbe)
+                    && not (valRt.direct intLitProbe)
+                    -- the NODE that does not allocate, beside the LITERAL that does
+                    && not (wordRt.direct mkStrProbe)
+                    && wordRt.direct strLitProbe
+                    && valRt.direct strLitProbe
+
+            _ ->
+                False
+        )
+        )
+    , check "THE `mk*` AND LITERAL SEAT TABLES ARE EXHAUSTIVE OVER THE WORD-ARM HEAP CODES — a new allocating writer cannot be added without this row going red (perf word-arm-floats review)"
+        -- THE COUPLING IS OTHERWISE HAND-KEPT: `RtLayout.wordMkAllocSeat` and
+        -- `Lower`'s `storeWordCell` dispatch agree exactly today, and the row
+        -- above pins three codes — so a future writer added to the dispatch with
+        -- no seat row would silently re-arm the classifier blindness this unit
+        -- discharged.  This row pins the WHOLE code space instead of the three
+        -- codes anybody happened to think of: every heap code must answer
+        -- `Nothing` except the one that allocates, and the LITERAL table must
+        -- name exactly the three writers that allocate their own cell.
+        (List.all (\c -> RtLayout.wordMkAllocSeat c == Nothing)
+            (List.filter (\c -> c /= RtLayout.tagFloat) RtLayout.wordHeapCodes)
+            && RtLayout.wordMkAllocSeat RtLayout.tagFloat
+            == Just "Rt.allocFloat"
+            && List.all
+                (\c ->
+                    (RtLayout.wordLitAllocSeat c /= Nothing)
+                        == List.member c [ RtLayout.tagFloat, RtLayout.tagSymbol, RtLayout.tagString ]
+                )
+                RtLayout.wordHeapCodes
+            -- and the two tables cannot disagree in the direction that matters:
+            -- a code whose `mk*` node allocates must also have an allocating
+            -- LITERAL writer (the literal writer is the one that has no caller to
+            -- allocate for it).
+            && List.all (\c -> RtLayout.wordMkAllocSeat c == Nothing || RtLayout.wordLitAllocSeat c /= Nothing)
+                RtLayout.wordHeapCodes
+        )
     , check "A WORD-ARM `mkflt` IS A DIRECT SAFEPOINT AND A `mkstr` IS NOT — the cell writer's allocation, PER ARM (perf word-arm-floats)"
         -- WHY THIS ROW EXISTS, AND WHY IT IS THE ONE THAT PINS THE RULE.  The
         -- standing instruction this discharges (Mid/RtLayout's WORKLIST item 5)
@@ -15759,6 +15830,47 @@ mkStrProbe =
         Lam
             { params = []
             , body = Unsafe (RawMkValue { tag = RtLayout.tagString, words = [] })
+            }
+    }
+
+
+{-| perf word-arm-floats review — THE LITERAL-ONLY PROBES.  The walker's `Lit`
+arm is the same question as `RawMkValue`'s one IR node over, and the answers
+differ per VARIANT, so each variant needs its own probe: a symbol literal (an
+allocating writer on the word arm since R1), a string literal (allocating on the
+word arm, and the val arm's frozen conservative `True`) and an immediate (which
+must stay non-allocating on BOTH arms, or the row could pass by answering True
+for every literal).
+-}
+symLitProbe : Defun
+symLitProbe =
+    { key = "Sl.f"
+    , value =
+        Lam
+            { params = []
+            , body = Lit (LSymbol "x")
+            }
+    }
+
+
+strLitProbe : Defun
+strLitProbe =
+    { key = "Tl.f"
+    , value =
+        Lam
+            { params = []
+            , body = Lit (LString "hi")
+            }
+    }
+
+
+intLitProbe : Defun
+intLitProbe =
+    { key = "Nl.f"
+    , value =
+        Lam
+            { params = []
+            , body = Lit (LNumber 1)
             }
     }
 

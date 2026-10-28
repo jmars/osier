@@ -19,7 +19,7 @@ module Mid.RtLayout exposing
     , tagBoolean, tagCons, tagError, tagFloat, tagLambda, tagMark, tagNil, tagNumber, tagPrim, tagRecord, tagStream, tagString, tagSymbol, tagVector
     , untagMask
     , ValLayout, valLayout
-    , WordTagShape(..), wordHeapCodes, wordMkAllocSeat, wordTagShape
+    , WordTagShape(..), wordHeapCodes, wordLitAllocSeat, wordMkAllocSeat, wordTagShape
     , wordFixnumLimit, wordLayout
     , valQbeFields, valSizeBytes, valuePayloadWords, valueTagBytes, wordBytes
     )
@@ -530,6 +530,52 @@ wordMkAllocSeat : Int -> Maybe String
 wordMkAllocSeat code =
     if code == tagFloat then
         Just "Rt.allocFloat"
+
+    else
+        Nothing
+
+
+-- ============ WHICH LITERAL WRITERS ALLOCATE ON THE WORD ARM (perf word-arm-floats review) ============
+--
+-- THE SAME QUESTION AS `wordMkAllocSeat`, ONE IR NODE OVER, and it has to be
+-- asked separately because the answer is DIFFERENT for two of the codes.  A
+-- `mk*` node's words are a BODY THE CALLER ALLOCATED (the seat-return
+-- convention), so `mkval(2, body)` tags and allocates nothing.  A LITERAL has no
+-- caller: its writer allocates the cell itself, so
+--
+--   * `LFloat`  -> `storeWordFloatCell`     -> `Rt.allocFloat`  ALLOCATES
+--   * `LSymbol` -> `storeWordSymbolLiteral` -> `Rt.allocSym`    ALLOCATES
+--     (and this one is PRE-EXISTING since R1: `storeWordSymbolLiteral`'s own
+--     docstring says it allocates "and that is why it is not in storeWordCell")
+--   * `LString` -> `storeWordStringLiteral` -> `Rt.allocRaw`    ALLOCATES
+--     (two units, NO inline bytes — the bytes stay the static `str:` symbol)
+--   * `LNumber`/`LNumberBig`/`LBoolean` -> immediates, nothing.
+--
+-- WHY THIS MATTERS AND WHY IT IS HERE.  `Mid.Rt.safepoint`'s `Lit` arm answered
+-- `True` for `LString` and `False` for EVERY other literal.  Under the word arm
+-- that is false for floats (armed by the unit that admitted them: the classifier
+-- now accepts `Lit (LFloat _)`, so a `.mid` defun could hold one) and false for
+-- symbols (armed since R1, and nobody noticed because no `.mid` body contains
+-- one).  A defun whose only allocation is such a literal would classify
+-- FRAME-FREE and DROP ITS ROOTS — the exact trap `wordMkAllocSeat` discharges
+-- for the `mk*` node.
+--
+-- THE VAL ARM IS NOT IN THIS TABLE, deliberately: there a literal is a tag word
+-- plus payload writes and allocates nothing, so `Mid.Rt` reads this ONLY when
+-- the arm is the word one.  (`LString` keeps its blanket `True` on BOTH arms
+-- because that answer is in the val arm's frozen classification — see the
+-- walker's note; over-approximating a frame is safe, under-approximating is the
+-- defect.)
+wordLitAllocSeat : Int -> Maybe String
+wordLitAllocSeat code =
+    if code == tagFloat then
+        Just "Rt.allocFloat"
+
+    else if code == tagSymbol then
+        Just "Rt.allocSym"
+
+    else if code == tagString then
+        Just "Rt.allocRaw"
 
     else
         Nothing

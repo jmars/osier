@@ -19,11 +19,18 @@ module M exposing (main)
 -- heap pointer tag.  Each shows up here as a different number, a crash, or (the
 -- silent one) the value of a neighbouring slot.
 --
--- EVERY VALUE IS PRODUCED BY A DEFUN, deliberately.  A tuple of literals would
--- be resolved by Flatten before the emitter ever saw it — the mistake perf
--- word-arm-letdestr's review caught in two of its own fixtures — so the shapes
--- that matter (a float RETURNED from a call, a float ARGUMENT to a call) are
--- calls and nothing else.  The literals are only the defuns' operands.
+-- THE LOAD-BEARING SHAPES ARE CALLS, and the literals that remain cannot vanish.
+-- A tuple of literals would be resolved by Flatten before the emitter ever saw
+-- it — the mistake perf word-arm-letdestr's review caught in two of its own
+-- fixtures — so every shape this fixture is ABOUT (a float RETURNED from a
+-- call, a float ARGUMENT to a call, a float compared through `Rt.<`/`Rt.=` on
+-- two `asF`-converted operands) is a call and nothing else.  The values that ARE
+-- bare literals (`a`, `e`, `big`, `small`, `lst`'s elements) stay literals on
+-- purpose: the program's result is PRINTED, so the printer walks every one of
+-- them and none can be optimized away — the letdestr vanish-defect is
+-- structurally impossible here rather than merely unlikely.  This paragraph
+-- previously claimed "EVERY VALUE IS PRODUCED BY A DEFUN", which was false for
+-- those five (perf word-arm-floats review, nice-to-have 3).
 --
 -- THE SHAPES, and why each is here:
 --   * `bump`/`twice`/`half`  — a float literal in a body, `*`, `+` and `f/`
