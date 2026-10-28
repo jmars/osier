@@ -548,7 +548,7 @@ wordArmUnsupported : String -> String
 wordArmUnsupported what =
     "qbe: QBE_VALREP=word is NOT IMPLEMENTED (perf VR3b2): the emitter cannot lower "
         ++ what
-        ++ " — the word arm stops at its first un-ported construct instead of emitting half-word code (nothing was emitted). The worklist is beside `wordLayout` in Mid/RtLayout.elm; the ported/un-ported table is in handoff-perf-vr3b2-result."
+        ++ " — the word arm stops at its un-ported constructs instead of emitting half-word code (nothing was emitted). The worklist is beside `wordLayout` in Mid/RtLayout.elm; the ported/un-ported table is in handoff-perf-vr3b2-result."
 
 
 {-| Is this emit running for the 8-byte tagged-word instance?  ONE predicate,
@@ -1294,42 +1294,73 @@ wordArea area what =
     area ++ " — " ++ what
 
 
-{-| The same classifier over the whole reachable SURFACE, so the refusal names
-the first surface construct the port has not reached rather than whichever
-defun happened to be lowered first.  Rt keys are not walked here — they are
-refused wholesale by the area-7 gate, which states a stronger fact.
+{-| Drop repeated lines, keeping the first occurrence's position.  A key can be
+reached twice (the same defun under two keys), and a refusal that names the same
+construct twice reads as two blockers.  O(n^2) on a list of tens — the walk that
+produced it is far more expensive.
 -}
-wordSurfaceUnported : Dict String Defun -> List String -> Maybe String
-wordSurfaceUnported defuns keys =
-    case keys of
-        [] ->
-            Nothing
-
-        k :: rest ->
-            if isRtKey k then
-                -- An Rt key reached as the ENTRY (a TestMain probe into the
-                -- runtime) is not a surface defun: it is refused wholesale by
-                -- the area-7 gate, which states a stronger fact than "this
-                -- node is un-ported".
-                wordSurfaceUnported defuns rest
+dedupStrings : List String -> List String
+dedupStrings xs =
+    List.foldr
+        (\x acc ->
+            if List.member x acc then
+                acc
 
             else
-                case Dict.get k defuns of
-                    Nothing ->
-                        wordSurfaceUnported defuns rest
+                x :: acc
+        )
+        []
+        xs
 
-                    Just defun ->
-                        case defun.value of
-                            Lam lambda ->
-                                case wordArmUnported lambda.body of
-                                    Just what ->
-                                        Just what
 
-                                    Nothing ->
-                                        wordSurfaceUnported defuns rest
+{-| The same classifier over the whole reachable SURFACE, returning EVERY
+un-ported construct (one `defun: AREA ..` line each), not just the first.
+Rt keys are not walked here — they are refused by the area-7 gate below, which
+states a stronger fact.
 
-                            _ ->
-                                Just "a defun with a non-Lambda value (corrupt Mid tree)"
+WHY THE WHOLE LIST AND NOT THE FIRST (perf word-arm-frontier, MEASURED).  The
+first-only form is not merely terse, it is MISLEADING as a planning instrument:
+it reports the refusal that comes first in `surfaceKeys` order, so a program
+carrying BOTH a constructor-tag pattern and a constructor application is counted
+as blocked by the pattern.  MEASURED over the 159 corpus groups: the
+first-refusal table named 26 groups `MTagEq`-blocked and 14 `Con`-blocked, while
+the source of all 26 shows `Ok`/`Err`/`Just` APPLIED — porting `MTagEq` alone
+would have moved none of them.  A ranking can only be built from the set.
+
+NOTHING IS RELAXED: a non-empty list refuses before any IL is produced, exactly
+as a `Just` did.  The order is preserved (surface key order), so the first line
+is still the construct the port is actually about.
+-}
+wordSurfaceUnported : Dict String Defun -> List String -> List String
+wordSurfaceUnported defuns keys =
+    List.concatMap (wordSurfaceUnportedOne defuns) keys
+
+
+wordSurfaceUnportedOne : Dict String Defun -> String -> List String
+wordSurfaceUnportedOne defuns k =
+    if isRtKey k then
+        -- An Rt key reached as the ENTRY (a TestMain probe into the runtime) is
+        -- not a surface defun: it is refused wholesale by the area-7 gate, which
+        -- states a stronger fact than "this node is un-ported".
+        []
+
+    else
+        case Dict.get k defuns of
+            Nothing ->
+                []
+
+            Just defun ->
+                case defun.value of
+                    Lam lambda ->
+                        case wordArmUnported lambda.body of
+                            Just what ->
+                                [ k ++ ": " ++ what ]
+
+                            Nothing ->
+                                []
+
+                    _ ->
+                        [ k ++ ": a defun with a non-Lambda value (corrupt Mid tree)" ]
 
 
 {-| THE Rt DEFUNS THAT REFUSE BY NAME UNDER THE WORD ARM, with the reason.
@@ -1386,43 +1417,43 @@ is produced.  What changes is only the PRECISION of the refusal: it now names
 the defun and the construct (`Rt.main: AREA 6 (THE CALL ABI)`) instead of the
 whole namespace.
 -}
-wordRtUnported : Dict String Defun -> List String -> Maybe String
+wordRtUnported : Dict String Defun -> List String -> List String
 wordRtUnported defuns keys =
-    case keys of
-        [] ->
-            Nothing
-
-        k :: rest ->
-            if isRtKey k then
-                case List.filter (\( rk, _ ) -> rk == k) wordArmDefunRefusals of
-                    ( _, why ) :: _ ->
-                        Just (k ++ ": " ++ why)
-
-                    [] ->
-                        wordRtUnportedBody defuns k rest
-
-            else
-                wordRtUnportedBody defuns k rest
+    List.concatMap (wordRtUnportedOne defuns) keys
 
 
-wordRtUnportedBody : Dict String Defun -> String -> List String -> Maybe String
-wordRtUnportedBody defuns k rest =
+wordRtUnportedOne : Dict String Defun -> String -> List String
+wordRtUnportedOne defuns k =
+    if isRtKey k then
+        case List.filter (\( rk, _ ) -> rk == k) wordArmDefunRefusals of
+            ( _, why ) :: _ ->
+                [ k ++ ": " ++ why ]
+
+            [] ->
+                wordRtUnportedBody defuns k
+
+    else
+        wordRtUnportedBody defuns k
+
+
+wordRtUnportedBody : Dict String Defun -> String -> List String
+wordRtUnportedBody defuns k =
     case Dict.get k defuns of
         Nothing ->
-            wordRtUnported defuns rest
+            []
 
         Just defun ->
             case defun.value of
                 Lam lambda ->
                     case wordArmUnported lambda.body of
                         Just what ->
-                            Just (k ++ ": " ++ what)
+                            [ k ++ ": " ++ what ]
 
                         Nothing ->
-                            wordRtUnported defuns rest
+                            []
 
                 _ ->
-                    Just (k ++ ": a defun with a non-Lambda value (corrupt Mid tree)")
+                    [ k ++ ": a defun with a non-Lambda value (corrupt Mid tree)" ]
 
 
 wordAreaName : Exp -> String
@@ -1891,35 +1922,34 @@ lowerArm layout runtime rep primDirect midCons rtLean consArr rec typeSpec _ mid
                         |> Result.map (\sFinal -> finishModule sFinal keys)
 
                 lowerAllKeys =
-                    if wordArmLayout layout && List.any isRtKey keys then
-                        -- PER-DEFUN, not wholesale (perf VR3b3): the Rt set gets
-                        -- the same pre-walk classification the surface does, so
-                        -- the refusal names the DEFUN and the CONSTRUCT the arm
-                        -- stops at.  Loudness is unchanged — an un-ported
-                        -- construct anywhere in the reachable Rt set still
-                        -- refuses before any IL is produced.
-                        case wordRtUnported defuns keys of
-                            Just what ->
-                                Err (wordArmUnsupported what)
+                    lowerKeys s0
 
-                            Nothing ->
-                                lowerKeys s0
+                -- THE Rt SET, SAME CLASSIFIER (perf VR3b3): per-defun, so the
+                -- refusal names the DEFUN and the CONSTRUCT the arm stops at.
+                -- Loudness is unchanged — an un-ported construct anywhere in
+                -- the reachable Rt set still refuses before any IL is produced.
+                rtUnported =
+                    if List.any isRtKey keys then
+                        wordRtUnported defuns keys
 
                     else
-                        lowerKeys s0
+                        []
             in
             -- ORDER MATTERS FOR THE ERROR, NOT FOR SAFETY.  The SURFACE
-            -- constructs are checked first so a real program's refusal names
-            -- the construct the port is actually about (area 2's tag write,
-            -- area 4's arithmetic) instead of the blanket runtime gate above;
-            -- both refuse before any defun is lowered, so no IL is emitted.
+            -- constructs come first so a real program's refusal names the
+            -- construct the port is actually about (area 2's tag write, area 4's
+            -- arithmetic) instead of the blanket runtime gate; both refuse
+            -- before any defun is lowered, so no IL is emitted.  BOTH SETS are
+            -- reported (perf word-arm-frontier): the ranking a planning unit
+            -- needs is over the SET of blockers, and the surface-only form hid
+            -- every Rt blocker behind the first surface one.
             if wordArmLayout layout then
-                case wordSurfaceUnported defuns surfaceKeys of
-                    Just what ->
-                        Err (wordArmUnsupported what)
-
-                    Nothing ->
+                case dedupStrings (wordSurfaceUnported defuns surfaceKeys ++ rtUnported) of
+                    [] ->
                         lowerAllKeys
+
+                    whats ->
+                        Err (wordArmUnsupported (String.join "; " whats))
 
             else
                 lowerAllKeys
