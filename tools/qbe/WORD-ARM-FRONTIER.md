@@ -394,6 +394,23 @@ collecting ladder above). Both fixtures route every float through a DEFUN, so
 Flatten cannot substitute the literal away — the mistake the previous unit's
 review caught in its own fixtures.
 
+### The census after the float port
+
+```
+BOTH           118
+SAME-ERROR      34
+WORD-BLOCKED     7
+
+GROUPS  ALONE  CLASS
+     7      7  host program path (`Runtime.program`)
+```
+
+The float-literal and `f/` classes are GONE (0 groups). 107 -> 118 compiling
+groups; WORD-BLOCKED 18 -> 7. The only class left is the host blob, which is a
+`runtime.mid` STRIDE job (the event loop's state is one malloc'd blob laid out
+with the val arm's 40-byte stride and registered with a collector whose scan
+stride is the layout's), not a construct the classifier refuses.
+
 ## The word-arm DIFF fixtures' neighbourhood
 
 The 17 (now 18) `tools/qbe/word-arm-diff/*.elm` fixtures are green on both
@@ -440,7 +457,16 @@ does, and `letpat.elm` is the one that does not.)
    groups it unblocked are wrong at RUN time (the host loop's 40-byte-stride
    blob) and now refuse by name. The word arm went from 88 to 107 compiling
    groups; WORD-BLOCKED 37 -> 18.
-5. The class after that is **floats** (10 groups carry a float literal, 9 of them
-   blocked by nothing else, plus 2 `f/` groups of which one is the same group),
-   and it carries the `mk*`-as-safepoint obligation from WORKLIST item 5 in the
-   same unit.
+5. **Floats (10 groups) and `f/` (2)** were the class after that, and they are
+   **PORTED**: all 11 groups run byte-identically on both arms, the `mk*`
+   safepoint obligation from WORKLIST item 5 is discharged in the same unit, and
+   the fresh defect was the READ (`fload`), not the cell — which already existed
+   under a refusal that said it did not. The word arm went 107 -> 118 compiling
+   groups; WORD-BLOCKED 18 -> 7.
+6. **The one class left is the host program path** (7 groups, 7 alone,
+   `Runtime.program`), and it is the first frontier in this arc that is NOT a
+   classifier admission: the event loop's state is one malloc'd blob laid out
+   with the val arm's 40-byte stride while the collector scans it at the
+   layout's, so the blob size, the slot array stride and every `* 40` move
+   together. `StreamRef` is the classifier's remaining CONTROL (not a plan), and
+   the `App`-argument walk that would name it in a census owes 14 runs first.
