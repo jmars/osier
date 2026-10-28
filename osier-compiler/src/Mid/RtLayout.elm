@@ -19,7 +19,7 @@ module Mid.RtLayout exposing
     , tagBoolean, tagCons, tagError, tagFloat, tagLambda, tagMark, tagNil, tagNumber, tagPrim, tagRecord, tagStream, tagString, tagSymbol, tagVector
     , untagMask
     , ValLayout, valLayout
-    , WordTagShape(..), wordHeapCodes, wordTagShape
+    , WordTagShape(..), wordHeapCodes, wordMkAllocSeat, wordTagShape
     , wordFixnumLimit, wordLayout
     , valQbeFields, valSizeBytes, valuePayloadWords, valueTagBytes, wordBytes
     )
@@ -491,6 +491,50 @@ wordTagShape code =
         WordNoForm ("valtag " ++ String.fromInt code ++ " has no word-arm encoding (the ValTag enum has a gap at 13 and no code above record = 14)")
 
 
+-- ============ WHICH `mk*` CODES ALLOCATE ON THE WORD ARM (perf word-arm-floats) ============
+--
+-- THE QUESTION, and why it must be answered ONCE.  A `mk*` node is the val arm's
+-- tag-word-plus-payload write into a frame slot, which allocates NOTHING.  Under
+-- the word arm the same node is a HEAP CELL, and building one may call an
+-- allocation seat — a call injected by the EMITTER, so it is invisible in the
+-- `.mid` tree.  `Mid.Rt.unsafeSafepoint` classifies a `RawMkValue` from that
+-- tree, and it treated every `mk*` as a NON-safepoint.  That is correct exactly
+-- when the writer allocates nothing; where it allocates, a defun whose only
+-- allocation is the cell classifies FRAME-FREE and DROPS ITS ROOTS — silently.
+-- The classifier cannot see the emitter, so the fact lives HERE and the
+-- classifier reads it (WORKLIST item 5's standing instruction).
+--
+-- THE ENUMERATION IS OVER THE WRITERS, not over the codes:
+--
+--   * `tagFloat` (12) -> `storeWordFloatCell` -> `Rt.allocFloat`.  ALLOCATES.
+--     The double is a `d`-class operand and cannot cross the lean ABI, so the
+--     emitter has to allocate the cell itself, fill body unit 0 and tag it.
+--   * `tagString` (1) -> `storeWordStringCell` -> NOTHING.  Since perf
+--     word-arm-rawroot a word-arm string's bytes are INLINE in the cell
+--     `Rt.allocRaw` already allocated and `mkstr` only writes body unit 0 (the
+--     byte base) and the length.  THE `mkstr` HALF OF THE OLD WORKLIST NOTE IS
+--     STALE, and this is the sixth stale claim this arc has found: it was true
+--     of the TWO-BLOCK shape that unit removed, where `mkstr` allocated the cell
+--     after the caller had filled a separate byte block.
+--   * every other heap code -> `storeWordCell`'s ONE-WORD arm -> NOTHING: the
+--     caller has already allocated and filled the body (the seat-return
+--     convention), so the writer only ORs in the heap pointer tag.  `mkval(2,
+--     body)` — the runtime's own symbol construction — is that shape, which is
+--     why a symbol LITERAL has its own allocating writer and this list has no
+--     symbol row.
+--   * the IMMEDIATE codes (`mknum`/`mkbool`) -> shifts, nothing.
+--
+-- IT RETURNS THE SEAT RATHER THAN A BOOL so that a TestMain row can assert WHICH
+-- seat the rule claims, and so a future allocating code's row documents itself.
+wordMkAllocSeat : Int -> Maybe String
+wordMkAllocSeat code =
+    if code == tagFloat then
+        Just "Rt.allocFloat"
+
+    else
+        Nothing
+
+
 -- ============ WHERE A WORD-ARM STRING KEEPS ITS LENGTH (VR3b3 AREA D) ============
 -- IN THE CELL, at body unit `lenFieldWord` (1) — the SAME unit the val arm's
 -- `lenFieldOffset` names inside a 40-byte Value, reached by the block shape
@@ -801,28 +845,42 @@ valLayout =
 --      because `Rt.<` answers False for every non-number and routing it there
 --      would be the silent Char-ordering mislower that branch exists to
 --      prevent.  FLOATS are item 5.
---   5. FLOATS.  The heap-boxed `[hdr | f64]` cell and Lower's `rawFloat` lane.
---      ONE TRAP IS WAITING THERE, recorded by perf word-arm-arith's review so
---      the float unit inherits it instead of rediscovering it: THE CLASSIFIER IS
---      BLIND TO THE SAFEPOINTS THE `mk*` CELL WRITERS INJECT.
---      `Mid.Rt.unsafeSafepoint` classifies a `RawMkValue` as NON-safepoint (it
---      scans `m.words` only), which is TRUE on the val arm — there a `mk*` is a
---      tag word plus payload writes into a frame slot and allocates nothing.
---      Under the word arm it is true for the IMMEDIATE codes (`mknum`/`mkbool`
---      are shifts; nothing is allocated) and FALSE for the HEAP codes, because
---      `storeWordStringCell`/`storeWordFloatCell` inject `midGcAllocSeat` calls
---      (`Rt.allocRaw`, `Rt.allocFloat`) that the surface tree never shows.  So a
---      defun whose ONLY allocation is a `mkstr`/`mkflt` cell classifies
---      FRAME-FREE and DROPS ITS ROOTS — silently, and only once area 5 lets such
---      a value be constructed at all, which is why nothing has caught it.
---      IT DOES NOT BITE THE ARITHMETIC CLASS: every arithmetic op writes
---      `mknum`/`mkbool` immediates, and the float arms that would allocate are
---      unreachable until area 5 lands (no tag-12 value can be built).
---      THE INSTRUCTION, the twin of the "fork in the same unit" note at Lower's
---      `RawLoadFlt`/`reboxBoolean`: WHEN AREA 5 LANDS, count a word-arm
---      heap-code `mk*` as a DIRECT safepoint in `unsafeSafepoint`, in the same
---      unit, and pin it with a row — the alternative is a collector that
---      reclaims a live string or float.
+--   5. FLOATS.  PORTED (perf word-arm-floats): the heap-boxed `[hdr | f64]`
+--      cell, the literal that builds it, `f/`, and the READ the whole class
+--      stands on.
+--      THE CELL AND THE LITERAL ARE ONE WRITER.  `storeWordFloatCell` (built by
+--      perf word-arm-area3rt for the runtime's `mkflt` lane) allocates through
+--      `Rt.allocFloat`, stores the f64 at body unit 0 and tags the body; the
+--      literal arm of `lowerLitWord` loads the double from the shared `flt:`
+--      static data item and hands it to that writer, so the two arms' literal
+--      paths differ only in WHO writes the Value (`reboxFloat` there, the cell
+--      writer here).
+--      THE FRESH DEFECT THE ADMISSION EXPOSED WAS THE READ, NOT THE CELL:
+--      `RawLoadFlt` (`fload`) read `slot + 8` unconditionally — the val arm's
+--      payload shape, which on this arm is THE NEXT FRAME SLOT — and every float
+--      reader in the runtime goes through it (`Rt.asF`, `Rt.toI32`,
+--      `Rt.fRender` hence `Rt.floatText` and the printer, and the float arms of
+--      `Rt.+ - * f/ < <= > >= =`).  It is forked to `wordFloatPayload`: untag,
+--      body unit 0, `loadd`, with a NAMED `Rt.die` for a word that is not a heap
+--      object.  MEASURED with the fork off: SIGABRT (134), empty stdout.
+--      THE `mk*` SAFEPOINT TRAP IS DISCHARGED, AND THE INSTRUCTION THIS ENTRY
+--      CARRIED IS NOW A FACT IN ONE PLACE.  `Mid.Rt.unsafeSafepoint` treats a
+--      `RawMkValue` as a non-safepoint only when the arm's cell writer allocates
+--      nothing; the arm is threaded into the walker (`loadArm` -> `loadText` ->
+--      `directArm`/`safepoint`/`unsafeSafepoint`) and the answer is
+--      `wordMkAllocSeat`, which names `Rt.allocFloat` for `tagFloat` and NOTHING
+--      for every other code — `mkstr` allocates nothing since perf
+--      word-arm-rawroot put the bytes inline in the block `Rt.allocRaw` already
+--      made, which is the part of this entry's old wording that had gone stale.
+--      A row pins it per arm in both directions, on the real defun (`Rt.asF`:
+--      ROOTED on the word arm, frame-free on the val arm) as well as on
+--      synthetic `mkflt`/`mkstr` probes.  THE CHURN LADDER IS COVERAGE, NOT THE
+--      PROOF, and that is measured: with the arm reverted to non-safepoint, all
+--      four `flt` rungs stay GREEN, because every current `.mid` `mkflt` site
+--      consumes its live value BEFORE the allocation (safe by order).
+--      STILL NOT PORTED IN THIS AREA: the raw-`d` LOCAL lane (`isFloatExp`
+--      denies it under this arm, because `reboxFloat` writes the 40-byte shape)
+--      and the i61 BOXING path (item 4).
 --   6. THE `:ret` AGGREGATE.  Its FIRST FIELD IS A VALUE, so its tail offsets
 --      move with `valSizeBytes` (they are DERIVED below); plus the 80-byte sret
 --      path, slot 1's `.tail` metadata and rt_bounce.
@@ -1083,10 +1141,16 @@ valLayout =
 --      h1.  (This distinction is the review's blocker 3: the list went empty and
 --      the worklist said COMPLETE, while the implementer's own churn fixture
 --      recorded RED.  A worklist that over-claims is worse than none.)
---      NOT PORTED, each refused by name:
---      `StreamRef`, float literals, let-destructuring, and `f/` (the float
---      division, AREA 5 — `isFloatExp` also denies here, because S4f's raw
---      local is reboxed in the 40-byte shape).
+--      NOT PORTED, refused by name: `StreamRef` — AND IT IS THE ONLY ONE.  A
+--      float literal, `f/` and `let`-destructuring all left this list in perf
+--      word-arm-floats and perf word-arm-letdestr, each as an ADMISSION whose
+--      stated reason had gone stale.  `StreamRef` is here as the classifier's
+--      remaining control rather than as a planned port: its site is
+--      `lowerLit (LSymbol v)` + `rtPrimSlots "value"`, i.e. ported pieces, but
+--      the 14 corpus groups whose defuns contain one have never been RUN on this
+--      arm, and admitting a construct on emit-only evidence is the mistake the
+--      let-destructuring unit paid for.  See `wordArmUnportedList`'s `App` arm
+--      for what enabling the argument walk would cost.
 --      `Con` AND `MTagEq` LEFT THIS LIST (perf word-arm-frontier), and the way
 --      they left is the entry's own lesson.  Both were blanket refusals whose
 --      STATED REASON had gone stale under them — `Con`'s said "its vector is
@@ -1108,11 +1172,20 @@ valLayout =
 --      ARM at the time it was written, and nothing re-tests it — so a construct
 --      that reaches the top of the refusal ranking must be RE-MEASURED, not
 --      re-read.
---      THE NEXT FRONTIER, MEASURED (the same sweep, re-run after the port):
---      let-destructuring 26 groups, float literals 9, `f/` 2 — and every one of
---      those 37 groups is now blocked by ONE class only, which is the first time
---      that has been true.  A `let` DESTRUCTURING pattern is a tag test plus
---      payload reads, i.e. `wordTagIs` plus `fieldBase`, both of which exist.
+--      THE FRONTIER, MEASURED AGAIN AFTER THE FLOAT/F/ PORT (perf
+--      word-arm-floats, `tools/qbe/word-arm-refusals.sh --groups`): 118 groups
+--      compile on both arms (74 -> 88 -> 107 -> 118 over this arc's four ports),
+--      34 refuse identically on both, and SEVEN are word-blocked — all of them
+--      by ONE class, the host program path (`Runtime.program`, refused by name
+--      since perf word-arm-letdestr).  So the classifier's remaining classes are
+--      GONE from the census: the frontier is no longer a construct list, it is
+--      the host blob's val-arm stride, which is a runtime.mid layout job.
+--      THE PER-DEFUN VIEW IS NOT THE WHOLE STORY, and the last two units
+--      measured the difference twice: 26 let-destructuring groups were
+--      "26 alone" and 19 moved, because 7 emitted cleanly and were WRONG at run
+--      time; and the App-argument walk (which the classifier still does not do)
+--      was measured in this unit to turn 5 groups out of BOTH into WORD-BLOCKED,
+--      because `StreamRef` reaches it.  A census reads EMITS.
 --      ARITHMETIC IS NOW PORTED (perf word-arm-arith; see item 4): `+ - *`,
 --      `< <= > >=`, `=` and `/=` are ADMITTED, because the three inline
 --      lowering functions skip their 40-byte tails under this arm and call the

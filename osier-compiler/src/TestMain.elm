@@ -201,13 +201,16 @@ checks rt rawMidText =
                     , body = Var 0
                     }
 
+            -- THE STILL-REFUSED SET IS ONE CONSTRUCT (perf word-arm-floats):
+            -- `StreamRef`, and it is here as a CONTROL rather than as a class
+            -- anybody planned to port — see the count's note below.
+            streamRef =
+                StreamRef { varName = "*stoutput*" }
+
             refused =
                 List.filterMap
                     (\e -> QbeLower.wordArmUnported e)
-                    [ PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
-                    , StreamRef { varName = "*stoutput*" }
-                    , Lit (LFloat 1.5)
-                    ]
+                    [ streamRef ]
          in
          QbeLower.wordArmUnported cons == Nothing
             && QbeLower.wordArmUnported nil == Nothing
@@ -230,14 +233,18 @@ checks rt rawMidText =
             -- (perf word-arm-arith: the two rows above USED to assert that an
             -- arithmetic prim nested one level in still REFUSED.  It no longer
             -- does — the prim is ported — so the rows below flip, and the
-            -- both-directions control moves to a prim that is still un-ported
-            -- (`f/`, the float division), which is the property that matters:
-            -- the desugar-classification RECURSES, so "the container is ported"
-            -- can never be mistaken for "anything inside it is".)
+            -- both-directions control moves to a construct that is still
+            -- un-ported, which is the property that matters: the
+            -- desugar-classification RECURSES, so "the container is ported" can
+            -- never be mistaken for "anything inside it is".
+            -- PERF WORD-ARM-FLOATS MOVED THE CONTROL AGAIN, from `f/` (ported
+            -- with the float cell) to `StreamRef`, which is now the only
+            -- construct this classifier refuses at all.)
             && QbeLower.wordArmUnported (ListLit [ PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ]) == Nothing
+            && QbeLower.wordArmUnported (ListLit [ Lit (LFloat 1.5) ]) == Nothing
             && QbeLower.wordArmUnported (Tup [ Lit (LNumber 1), PrimApp { prim = "*", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ]) == Nothing
-            && (QbeLower.wordArmUnported (ListLit [ PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ]) /= Nothing)
-            && (QbeLower.wordArmUnported (Tup [ Lit (LNumber 1), PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ]) /= Nothing)
+            && (QbeLower.wordArmUnported (ListLit [ streamRef ]) /= Nothing)
+            && (QbeLower.wordArmUnported (Tup [ Lit (LNumber 1), streamRef ]) /= Nothing)
             -- A CASE is classified through its SCRUTINEE, its MATCHES, its
             -- pattern BINDS and its BODIES — the list patterns below are the
             -- shapes a cons program actually uses (nil and cons), plus a
@@ -272,21 +279,25 @@ checks rt rawMidText =
             -- fine" can never be mistaken for "the alternative is fine".
             && (QbeLower.wordArmUnported (caseExp [ MEmpty [] ] []) == Nothing)
             && QbeLower.wordArmUnported (caseWithBody (PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] })) == Nothing
-            && (QbeLower.wordArmUnported (caseWithBody (PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] })) /= Nothing)
+            && (QbeLower.wordArmUnported (caseWithBody streamRef) /= Nothing)
             -- ============ THE ARITHMETIC PRIM CLASS (perf word-arm-arith)
-            -- ============  Every prim `lowerPrimApp` gives an inline arm to
-            -- EXCEPT the float division is now ADMITTED, because under the word
-            -- arm `lowerArith`/`lowerCompare`/`lowerNumEq` skip their 40-byte
+            -- ============  Every prim `lowerPrimApp` gives an inline arm to is
+            -- now ADMITTED, because under the word arm
+            -- `lowerArith`/`lowerCompare`/`lowerNumEq` skip their 40-byte
             -- generic tail and call the runtime through `rtPrimSlots`.  The
             -- list is spelled out rather than derived, so a prim that LOSES its
             -- admission is RED here instead of silently changing the count.
+            -- `f/` IS THE LAST MEMBER TO JOIN (perf word-arm-floats), and it
+            -- joined the way the rest did: the refusal described a cell that
+            -- did not exist, the cell landed, and `Rt.f/` — `mkflt(fload(asF a)
+            -- f/ fload(asF b))` — became an arm-clean route with no emitter
+            -- change at all.
             && List.all (\p -> QbeLower.wordArmUnported (PrimApp { prim = p, args = [ Lit (LNumber 1), Lit (LNumber 2) ] }) == Nothing)
-                [ "+", "-", "*", "/", "<", "<=", ">", ">=", "=" ]
-            -- ... and the float division is the ONE that still refuses, by name:
-            -- it emits the heap-boxed float cell (AREA 5) and `Rt.f/` would
-            -- build the same cell, so it is refused at the classifier rather
-            -- than routed.
-            && (QbeLower.wordArmUnported (PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }) /= Nothing)
+                [ "+", "-", "*", "/", "f/", "<", "<=", ">", ">=", "=" ]
+            -- ... and the prim class has NO refusing member left, so the
+            -- control for "a PrimApp still recurses into its ARGUMENTS" is the
+            -- argument shape itself (a `StreamRef` inside a `PrimApp`).
+            && (QbeLower.wordArmUnported (PrimApp { prim = "cons", args = [ streamRef, Lit (LNumber 2) ] }) /= Nothing)
             -- `/=` (NotEqual) is a NODE, not a prim: it is ported by the same
             -- classification (it delegates to `lowerNumEq`, which takes the
             -- `rtPrimSlots "="` route here) and it still RECURSES into its two
@@ -294,11 +305,12 @@ checks rt rawMidText =
             && QbeLower.wordArmUnported (NotEqual { left = Lit (LNumber 5), right = Lit (LNumber 3), falseLabel = "nef", endLabel = "nee" }) == Nothing
             && QbeLower.wordArmUnported (NotEqual { left = Lit (LNumber 5), right = PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }, falseLabel = "nef", endLabel = "nee" }) == Nothing
             -- (a constructor operand was the un-ported representative of this
-            -- recursion until perf word-arm-frontier ported `Con`; the control
-            -- for "the operand recursion still bites" is the FLOAT literal on
-            -- the next line, which is still refused.)
+            -- recursion until perf word-arm-frontier ported `Con`, and the
+            -- FLOAT literal was it until perf word-arm-floats ported the cell;
+            -- the control is now `StreamRef`, the last refused construct.)
             && QbeLower.wordArmUnported (NotEqual { left = Lit (LNumber 5), right = Con { tag = "Just", args = [ Lit (LNumber 1) ] }, falseLabel = "nef", endLabel = "nee" }) == Nothing
-            && (QbeLower.wordArmUnported (NotEqual { left = Lit (LFloat 1.5), right = Lit (LNumber 3), falseLabel = "nef", endLabel = "nee" }) /= Nothing)
+            && (QbeLower.wordArmUnported (NotEqual { left = streamRef, right = Lit (LNumber 3), falseLabel = "nef", endLabel = "nee" }) /= Nothing)
+            && QbeLower.wordArmUnported (NotEqual { left = Lit (LFloat 1.5), right = Lit (LNumber 3), falseLabel = "nef", endLabel = "nee" }) == Nothing
             -- ============ CLOSURES (perf word-arm-closures) ============
             -- `Lam` and `GRef` LEFT the refused set together, because they are
             -- ONE class: a closure is created by `lowerClosure` (contiguous
@@ -313,7 +325,8 @@ checks rt rawMidText =
             && QbeLower.wordArmUnported (Lam { params = [], body = Lit (LNumber 1) }) == Nothing
             && QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = Var 0 }) == Nothing
             && QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = PrimApp { prim = "+", args = [ Var 0, Lit (LNumber 1) ] } }) == Nothing
-            && (QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = PrimApp { prim = "f/", args = [ Var 0, Lit (LNumber 2) ] } }) /= Nothing)
+            && (QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = streamRef }) /= Nothing)
+            && QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = PrimApp { prim = "f/", args = [ Var 0, Lit (LNumber 2) ] } }) == Nothing
             && QbeLower.wordArmUnported (Lam { params = [ { id = 0, name = "x" } ], body = Con { tag = "Just", args = [ Lit (LNumber 1) ] } }) == Nothing
             && QbeLower.wordArmUnported (GRef { key = "M.f", force = False }) == Nothing
             && QbeLower.wordArmUnported (GRef { key = "M.f", force = True }) == Nothing
@@ -360,11 +373,20 @@ checks rt rawMidText =
             -- pattern left — the FIFTH class in this file whose stated reason
             -- was a DESCRIPTION rather than a gap ("it is a tag test plus
             -- payload reads"), and the census showed it was the largest class
-            -- left (26 groups, all 26 alone).  THE THREE THAT REMAIN, so the
-            -- number is not something a reader has to trust: `f/` (the float
-            -- division, AREA 5), `StreamRef` (the effect stream's symbol cell)
-            -- and a FLOAT literal (AREA 5).
-            && List.length refused == 3
+            -- left (26 groups, all 26 alone).
+            --
+            -- THREE -> ONE (perf word-arm-floats): the FLOAT literal and `f/`
+            -- left together, because they were ONE class — the heap-boxed
+            -- `[hdr | f64]` cell — and the refusal for both said the cell "does
+            -- not exist yet" while `storeWordFloatCell` had built it since perf
+            -- word-arm-area3rt.  THE ONE THAT REMAINS, named so the number is
+            -- not something a reader has to trust: `StreamRef` (the effect
+            -- stream's symbol cell) — and it is a CONTROL here, not a plan:
+            -- its emit site (`lowerLit (LSymbol v)` + `rtPrimSlots "value"`) is
+            -- built from ported pieces, and the reason it is still refused is
+            -- that nobody has RUN the 14 corpus groups whose defuns contain one
+            -- (see the `App` arm's note in `wordArmUnportedList`).
+            && List.length refused == 1
             -- A `let` DESTRUCTURING PATTERN is admitted over every shape the
             -- matcher can express, and each of the three walks still BITES
             -- (perf word-arm-letdestr).  The port is an ADMISSION, not an
@@ -376,12 +398,19 @@ checks rt rawMidText =
             && QbeLower.wordArmUnported (letDestr (Var 0) [ MTagEq [ IdxStep 0 ] "Just" ] [ ( { id = 2, name = "n" }, VPath [ IdxStep 1 ] ) ]) == Nothing
             && QbeLower.wordArmUnported (letDestr (Var 0) [ MEmpty [] ] [ ( { id = 2, name = "f" }, VField [] "f" ) ]) == Nothing
             -- THE SCRUTINEE walk: a destructuring of an un-ported value refuses.
-            && (QbeLower.wordArmUnported (letDestr (Lit (LFloat 1.5)) [ MCons [ HdStep ] ] []) /= Nothing)
+            && (QbeLower.wordArmUnported (letDestr streamRef [ MCons [ HdStep ] ] []) /= Nothing)
+            && QbeLower.wordArmUnported (letDestr (Lit (LFloat 1.5)) [ MCons [ HdStep ] ] []) == Nothing
             && QbeLower.wordArmUnported (letDestr (Con { tag = "Just", args = [ Lit (LNumber 1) ] }) [ MCons [ HdStep ] ] []) == Nothing
-            -- THE MATCH walk: a destructuring whose pattern matches on a float
-            -- LITERAL refuses (the literal is classified by the same `Lit` rule
-            -- the `Case` row uses).
-            && (QbeLower.wordArmUnported (letDestr (Var 0) [ MLitEq [] (LFloat 1.5) ] []) /= Nothing)
+            -- THE MATCH WALK HAS NO REFUSING SHAPE LEFT (perf word-arm-floats),
+            -- AND THAT IS STATED RATHER THAN PAPERED OVER: a match's only
+            -- subexpression is its literal, every `Lit` is now ported (number,
+            -- big number, float, string, symbol, boolean), and `MTagEq` is
+            -- admitted.  So the pair below is a POSITIVE assertion and its
+            -- control is GONE — a float literal in a pattern is now admitted
+            -- like any other literal.  The recursion itself is still pinned by
+            -- the scrutinee walk above, which is where an un-ported construct
+            -- can still sit.
+            && QbeLower.wordArmUnported (letDestr (Var 0) [ MLitEq [] (LFloat 1.5) ] []) == Nothing
             && QbeLower.wordArmUnported (letDestr (Var 0) [ MLitEq [] (LNumber 3) ] []) == Nothing
             -- ... and the construct that LEFT the refused set (perf
             -- word-arm-records R1): a SYMBOL LITERAL is now admitted, because
@@ -404,7 +433,7 @@ checks rt rawMidText =
             && QbeLower.wordArmUnported (RecordLit [ ( "x", Lit (LSymbol "s") ) ]) == Nothing
             && QbeLower.wordArmUnported (RecordLit []) == Nothing
             && QbeLower.wordArmUnported (RecordLit [ ( "x", PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ]) == Nothing
-            && (QbeLower.wordArmUnported (RecordLit [ ( "x", PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ]) /= Nothing)
+            && (QbeLower.wordArmUnported (RecordLit [ ( "x", streamRef ) ]) /= Nothing)
             && (QbeLower.wordArmUnported (RecordLit [ ( "x", Lit (LNumber 1) ), ( "y", RecordGet (Var 0) "z" ) ]) == Nothing)
             -- A RECORD FIELD READ left the refused set too (perf
             -- word-arm-records R3).  Its emission is a tag test plus either the
@@ -419,7 +448,7 @@ checks rt rawMidText =
             && QbeLower.wordArmUnported (RecordGet (Var 0) "x") == Nothing
             && QbeLower.wordArmUnported (RecordGet (RecordLit [ ( "x", Lit (LNumber 1) ) ]) "x") == Nothing
             && QbeLower.wordArmUnported (RecordGet (RecordLit [ ( "x", Lit (LString "hi") ) ]) "x") == Nothing
-            && (QbeLower.wordArmUnported (RecordGet (RecordLit [ ( "x", PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ]) "x") /= Nothing)
+            && (QbeLower.wordArmUnported (RecordGet (RecordLit [ ( "x", streamRef ) ]) "x") /= Nothing)
             && QbeLower.wordArmUnported (RecordGet (Con { tag = "Just", args = [ Lit (LNumber 1) ] }) "x") == Nothing
             -- A RECORD UPDATE left the refused set in the same unit that ported
             -- its emission (perf word-arm-records R4) — the CLOSED form rebuilds
@@ -432,7 +461,7 @@ checks rt rawMidText =
             && QbeLower.wordArmUnported (RecordUpdate { base = Var 0, updates = [ ( "x", Lit (LNumber 1) ) ] }) == Nothing
             && QbeLower.wordArmUnported (RecordUpdate { base = RecordLit [ ( "x", Lit (LNumber 1) ) ], updates = [ ( "x", Lit (LSymbol "s") ) ] }) == Nothing
             && QbeLower.wordArmUnported (RecordUpdate { base = Var 0, updates = [ ( "x", PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ] }) == Nothing
-            && (QbeLower.wordArmUnported (RecordUpdate { base = Var 0, updates = [ ( "x", PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ] }) /= Nothing)
+            && (QbeLower.wordArmUnported (RecordUpdate { base = Var 0, updates = [ ( "x", streamRef ) ] }) /= Nothing)
             && QbeLower.wordArmUnported (RecordUpdate { base = Con { tag = "Just", args = [ Lit (LNumber 1) ] }, updates = [ ( "x", Lit (LNumber 1) ) ] }) == Nothing
         )
     , check "THE WORD ARM'S CONSTRUCTOR-TAG TEST IS THE RUNTIME'S `=`, AND THE VAL ARM KEEPS ITS POINTER INLINE (perf word-arm-frontier)"
@@ -1857,6 +1886,206 @@ checks rt rawMidText =
                 False
         )
         )
+    , check "A WORD-ARM `mkflt` IS A DIRECT SAFEPOINT AND A `mkstr` IS NOT — the cell writer's allocation, PER ARM (perf word-arm-floats)"
+        -- WHY THIS ROW EXISTS, AND WHY IT IS THE ONE THAT PINS THE RULE.  The
+        -- standing instruction this discharges (Mid/RtLayout's WORKLIST item 5)
+        -- was a warning, not a test: `unsafeSafepoint` treated EVERY `mk*` as a
+        -- non-safepoint, which is true on the val arm (a tag word plus payload
+        -- writes) and FALSE on the word arm for a cell the writer allocates —
+        -- the emitter's `storeWordFloatCell` calls `Rt.allocFloat`, a call the
+        -- `.mid` tree never shows, so a defun whose only allocation is a float
+        -- cell classified FRAME-FREE and dropped its roots.  A CHURN RUNG
+        -- CANNOT PIN THIS AND MEASUREMENT SAYS SO: with the arm reverted to
+        -- non-safepoint, `tools/qbe/word-arm-gcchurn/flt.elm` stays GREEN at
+        -- every rung, because each current `.mid` `mkflt` site consumes its live
+        -- value BEFORE the allocation (safe by order, the shape the worklist
+        -- predicted).  So the pin is the CLASSIFICATION, per arm, in BOTH
+        -- directions, plus the EMITTED prologue of the real defun it is about.
+        --
+        -- THE NEGATIVE CONTROL IS `mkstr`, and it is load-bearing: the rule is
+        -- "the codes whose word writer calls a seat", NOT "every heap code".
+        -- `mkstr` allocates nothing since perf word-arm-rawroot put the bytes
+        -- inline in the block `Rt.allocRaw` already made, and rooting the
+        -- collector's own defuns would be the other polarity's failure.
+        ((case ( Rt.loadArm False rawMidText, Rt.loadArm True rawMidText ) of
+            ( Ok valRt, Ok wordRt ) ->
+                let
+                    valProg =
+                        rtProgram valRt True True True ++ rtProgramGc valRt True True True
+
+                    wordProg =
+                        rtProgram wordRt True True True ++ rtProgramGc wordRt True True True
+
+                    -- THE PROLOGUE IS THE DECISION (the seat row's own helper):
+                    -- a rooted defun opens with the pooled-frame call; a
+                    -- frame-free one allocates its own stack block.
+                    rootedArm isWord fn entry =
+                        case
+                            (if isWord then
+                                QbeLower.lowerWith RtLayout.wordLayout wordRt False True True True True True True False False True QbeTypes.empty (rtArities wordProg) wordProg entry
+
+                             else
+                                QbeLower.lower valRt False True True True True True True False False True QbeTypes.empty (rtArities valProg) valProg entry
+                            )
+                        of
+                            Err _ ->
+                                False
+
+                            Ok mod ->
+                                case funcByName fn mod of
+                                    Nothing ->
+                                        False
+
+                                    Just f ->
+                                        callsSym "q_Rt_x2eframe_x2denter" f && not (hasAlloc8 f)
+                in
+                -- the rule's ONE statement, by code: the seat it names, and the
+                -- codes it must NOT name
+                RtLayout.wordMkAllocSeat RtLayout.tagFloat
+                    == Just "Rt.allocFloat"
+                    && RtLayout.wordMkAllocSeat RtLayout.tagString
+                    == Nothing
+                    && RtLayout.wordMkAllocSeat RtLayout.tagSymbol
+                    == Nothing
+                    -- the classifier, per arm, BOTH directions
+                    && wordRt.direct mkFloatProbe
+                    && not (valRt.direct mkFloatProbe)
+                    && not (wordRt.direct mkStrProbe)
+                    && not (valRt.direct mkStrProbe)
+                    -- and the REAL defun the rule is about: `Rt.asF` is
+                    -- `tagis(x, 12) ? x : mkflt(itof(payload(x, 0)))`, i.e. its
+                    -- only allocation is the float cell
+                    && Set.member "Rt.asF" wordRt.allocating
+                    && not (Set.member "Rt.asF" valRt.allocating)
+                    && rootedArm True "q_Rt_x2easF" "Rt.asF"
+                    && not (rootedArm False "q_Rt_x2easF" "Rt.asF")
+
+            _ ->
+                False
+        )
+        )
+    , check "THE WORD ARM FORKS `fload` — the double is read out of the float cell's BODY, and a word that is not a heap object REFUSES by name (perf word-arm-floats)"
+        -- THE SITE THE ADMISSION EXPOSED, and the reason the float port is not
+        -- one classifier arm.  `fload` read `slot + 8` unconditionally: correct
+        -- for a 40-byte Value, and on this arm the NEXT FRAME SLOT.  Every float
+        -- reader in the runtime goes through it (`Rt.asF`, `Rt.toI32`,
+        -- `Rt.fRender` — hence the printer — and the float arms of
+        -- `Rt.+ - * f/ < <= > >= =`), so the fork is `wordFloatPayload`: untag,
+        -- body unit 0, `loadd`, with a named `Rt.die` for a non-heap word.
+        --
+        -- THE DEFUN IS `Rt.toI32`, AND THAT IS LOAD-BEARING: its body is
+        -- `tagis(x, 12) ? mknum(ftoi32(fload(x))) : (tagis(x, 0) ? x : 0)` —
+        -- the ONLY untag or double load in it comes from `fload`.  `Rt.asF`
+        -- would NOT do (it reads `payload(x, 0)`, whose word-arm reader untags
+        -- for its own reasons) and neither would `Rt.fRender` (its two
+        -- `payload(.., 0)` reads untag the same way) — the "second thing doing
+        -- the same job" trap this arc keeps paying for.
+        --
+        -- THE PROPERTY IS THE UNTAG AND THE NAMED REFUSAL, in BOTH directions:
+        -- the word arm untags (`and untagMask`) and carries the `Rt.die` refusal
+        -- for a word that is not a heap object; the val arm does neither.  A
+        -- `loadd` is NOT the discriminator — BOTH arms load a double, from
+        -- different addresses (`slot + 8` there, the cell's body unit 0 here) —
+        -- so the row does not pretend it is, and the val arm's address is
+        -- pinned where it always was: by the corpus byte-identity gate.
+        -- PROVEN FAIL-ABLE by the behavioural oracle rather than by this text:
+        -- with the fork switched off, `word-arm-diff/floatlit` and three gate
+        -- groups died SIGABRT (134) with empty stdout, and `floatcmp` still
+        -- PASSED — the crash only happens where the double is actually READ.
+        ((case ( Rt.loadArm False rawMidText, Rt.loadArm True rawMidText ) of
+            ( Ok valRt, Ok wordRt ) ->
+                let
+                    valProg =
+                        rtProgram valRt True True True ++ rtProgramGc valRt True True True
+
+                    wordProg =
+                        rtProgram wordRt True True True ++ rtProgramGc wordRt True True True
+
+                    reader isWord =
+                        case
+                            (if isWord then
+                                QbeLower.lowerWith RtLayout.wordLayout wordRt False True True True True True True False False True QbeTypes.empty (rtArities wordProg) wordProg "Rt.toI32"
+
+                             else
+                                QbeLower.lower valRt False True True True True True True False False True QbeTypes.empty (rtArities valProg) valProg "Rt.toI32"
+                            )
+                        of
+                            Err _ ->
+                                Nothing
+
+                            Ok mod ->
+                                funcByName "q_Rt_x2etoI32" mod
+                in
+                case ( reader False, reader True ) of
+                    ( Just valF, Just wordF ) ->
+                        hasBodyUntag wordF
+                            && hasLoadD wordF
+                            && callsSym "q_Rt_x2edie" wordF
+                            && not (hasBodyUntag valF)
+                            && not (callsSym "q_Rt_x2edie" valF)
+
+                    _ ->
+                        False
+
+            _ ->
+                False
+        )
+        )
+    , check "A FLOAT LITERAL IS A HEAP CELL THE EMITTER ALLOCATES ON THE WORD ARM, and a tag word on the val arm (perf word-arm-floats)"
+        -- THE CLASSIFIER ADMISSION'S EMIT, pinned on both arms.  The refusal
+        -- this replaces said the cell "does not exist yet" — it did — so the
+        -- row's job is to prove the literal now takes the CELL route on this arm
+        -- and did NOT take it on the other: the word function allocates through
+        -- `Rt.allocFloat`, tags the body with the heap pointer tag and reads the
+        -- double with a `loadd`; the val function writes `storew tagFloat` and
+        -- allocates NOTHING.
+        --
+        -- THE FRAME CLASS IS PART OF THE CLAIM: a float literal is the one
+        -- literal that ALLOCATES on this arm, so the defun must be ROOTED here
+        -- and frame-free on the val arm — the asymmetry that makes the
+        -- `unsafeSafepoint` half of this unit necessary rather than tidy.
+        ((case ( Rt.loadArm False rawMidText, Rt.loadArm True rawMidText ) of
+            ( Ok valRt, Ok wordRt ) ->
+                let
+                    valProg =
+                        rtProgram valRt True True True ++ rtProgramGc valRt True True True ++ [ floatLitProbe ]
+
+                    wordProg =
+                        rtProgram wordRt True True True ++ rtProgramGc wordRt True True True ++ [ floatLitProbe ]
+
+                    lit isWord =
+                        case
+                            (if isWord then
+                                QbeLower.lowerWith RtLayout.wordLayout wordRt False True True True True True True False False True QbeTypes.empty (rtArities wordProg) wordProg "Fl.f"
+
+                             else
+                                QbeLower.lower valRt False True True True True True True False False True QbeTypes.empty (rtArities valProg) valProg "Fl.f"
+                            )
+                        of
+                            Err _ ->
+                                Nothing
+
+                            Ok mod ->
+                                funcByName "q_Fl_x2ef" mod
+                in
+                case ( lit False, lit True ) of
+                    ( Just valF, Just wordF ) ->
+                        callsSym "q_Rt_x2eallocFloat" wordF
+                            && hasHeapPtrTagOr wordF
+                            && hasLoadD wordF
+                            && callsSym "q_Rt_x2eframe_x2denter" wordF
+                            && not (callsSym "q_Rt_x2eallocFloat" valF)
+                            && hasFloatTagStore valF
+                            && not (callsSym "q_Rt_x2eframe_x2denter" valF)
+
+                    _ ->
+                        False
+
+            _ ->
+                False
+        )
+        )
+
     , check "rawAbi set + classification: Rt.cStrEq/Rt.die/Rt.halt/Rt.main + the B0 frame pair + stage 7A's die family (dieErr/hostDieErr — hostDieUnported left BOTH the family and the runtime at 7E, the unit that gave every Task ctor a real arm) are the word-ABI keys and the die/halt/cStrEq/metaGo/parseArgsGo/frame set are frame-free (a die path must not reach a safepoint; the meta-walk compare and the A4a arg loop are non-allocating — their only seat calls are rawcall, which the classifier treats alloc-free — so they stay frame-free; Rt.main stays rawAbi frame-free regardless of its RawCallAgg dispatch, because the rawAbi arm is checked before the allocating set; the frame pair is FRAME-FREE by construction — its only nodes are rawcall/raw-word loads/stores and rawAbi->rawAbi calls to its one non-allocating helper)"
         (Rt.rawAbi
             == Set.fromList [ "Rt.cStrEq", "Rt.die", "Rt.halt", "Rt.main", "Rt.frame-enter", "Rt.frame-leave", "Rt.frameBlock", "Rt.apply", "Rt.apply-tail", "Rt.copyWords", "Rt.copyWordsGo", "Rt.stage-tail", "Rt.stage-apply", "Rt.applyTailGo", "Rt.dieErr", "Rt.hostDieErr", "Rt.rootGrow", "Rt.rootPush", "Rt.rootPushPtr", "Rt.rootPushValue", "Rt.rootPushValueArray", "Rt.rootPop", "Rt.rootWatermark", "Rt.rootPopTo", "Rt.vecStorePlain", "Rt.vecStoreYoung", "Rt.globalClosure" ]
@@ -15486,6 +15715,54 @@ bigProbe =
     }
 
 
+{-| perf word-arm-floats — THE FLOAT-LITERAL PROBE: `\_ -> 2.5`, the smallest
+defun that contains the construct the class ports.
+
+It is a LITERAL and nothing else, deliberately: the row's claim is about the CELL
+the literal is written as on each arm (a heap block the EMITTER allocates on the
+word arm, a tag word plus a payload word on the val arm), so any other construct
+in the body would be a second thing the row's properties could be satisfied by.
+-}
+floatLitProbe : Defun
+floatLitProbe =
+    { key = "Fl.f"
+    , value =
+        Lam
+            { params = []
+            , body = Lit (LFloat 2.5)
+            }
+    }
+
+
+{-| perf word-arm-floats — THE `mk*` CLASSIFICATION PROBES, one per cell writer
+the rule distinguishes: a `mkflt` (the word writer ALLOCATES: `Rt.allocFloat`)
+and a `mkstr` (it does NOT: since perf word-arm-rawroot the bytes are inline in
+the block `Rt.allocRaw` already made).  The pair is what stops the rule from
+being read as "every heap code allocates" — a reading that would root the
+collector's own defuns.
+-}
+mkFloatProbe : Defun
+mkFloatProbe =
+    { key = "Mf.f"
+    , value =
+        Lam
+            { params = []
+            , body = Unsafe (RawMkValue { tag = RtLayout.tagFloat, words = [] })
+            }
+    }
+
+
+mkStrProbe : Defun
+mkStrProbe =
+    { key = "Ms.f"
+    , value =
+        Lam
+            { params = []
+            , body = Unsafe (RawMkValue { tag = RtLayout.tagString, words = [] })
+            }
+    }
+
+
 {-| perf VR3b3 — THE WORD-ARM BEHAVIOUR PROBES now live in ONE place,
 `Mid.Qbe.WordArmProbe`, because they have TWO consumers: these text rows (both
 arms) and `tools/qbe/word-arm-probe.sh` (which ASSEMBLES, LINKS and RUNS the
@@ -16170,6 +16447,81 @@ hasKindRead f =
             case i of
                 Il.Bin _ Il.W Il.Shr _ (Il.Con sh) ->
                     sh == RtLayout.wordLayout.heapKindShift
+
+                _ ->
+                    False
+        )
+        f
+
+
+{-| A `loadd` anywhere in the function: the FLOAT READ.  On the val arm only the
+literal path loads a double (from the `flt:` static data item); on the word arm
+`fload` loads one out of a CELL BODY, which is why the pair
+`hasBodyUntag`/`hasLoadD` is the word-arm `fload` signature and their absence is
+the val arm's.
+-}
+hasLoadD : Il.Func -> Bool
+hasLoadD f =
+    anyInst
+        (\i ->
+            case i of
+                Il.Load _ Il.D Il.LoadD _ ->
+                    True
+
+                _ ->
+                    False
+        )
+        f
+
+
+{-| THE UNTAG, `and untagMask` — the word arm's "step into the body" step.  Used
+with `hasLoadD` to pin `fload`'s fork: the word arm untags and reads the body,
+the val arm does neither.
+-}
+hasBodyUntag : Il.Func -> Bool
+hasBodyUntag f =
+    anyInst
+        (\i ->
+            case i of
+                Il.Bin _ Il.L Il.And _ (Il.Con m) ->
+                    m == RtLayout.untagMask RtLayout.wordLayout
+
+                _ ->
+                    False
+        )
+        f
+
+
+{-| The word-arm TAG WRITE of a heap cell: `or body, heapPtrTag`.  The val arm
+has no such instruction — its tag is a separate word — so this is the positive
+half of the float-literal row's discriminator.
+-}
+hasHeapPtrTagOr : Il.Func -> Bool
+hasHeapPtrTagOr f =
+    anyInst
+        (\i ->
+            case i of
+                Il.Bin _ Il.L Il.Or _ (Il.Con m) ->
+                    m == RtLayout.heapPtrTag RtLayout.wordLayout
+
+                _ ->
+                    False
+        )
+        f
+
+
+{-| The VAL arm's float write: `storew tagFloat, slot`.  Present only where the
+40-byte representation writes a float Value, so it is the val-arm half of the
+same discriminator (and its ABSENCE on the word arm is what proves the literal
+did not keep the val route).
+-}
+hasFloatTagStore : Il.Func -> Bool
+hasFloatTagStore f =
+    anyInst
+        (\i ->
+            case i of
+                Il.Store Il.StoreW (Il.Con t) _ ->
+                    t == RtLayout.tagFloat
 
                 _ ->
                     False

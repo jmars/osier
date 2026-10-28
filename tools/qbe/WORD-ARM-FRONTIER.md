@@ -323,6 +323,77 @@ MEASURED, with the fork switched off (`if False && wordArm s2`) and
 compares a float and never prints one. That asymmetry is why the unit carries a
 TEXT pin as well as a behavioural row.
 
+### float literal + `f/` — PORTED: all 11 groups run byte-identically on both arms
+
+`cmporder floatarith floatcmp floatdiv floatfun floatineq floatlit floatmix
+mxint strunit` (float literal) and `floatdiv floatpartial` (`f/`), defuns
+`Floatarith.main Floatcmp.main Floatdiv.main Floatfun.area Floatineq.main
+Floatlit.main Floatmix.main MxInt.circleArea MxInt.main`, `/.curried`,
+`Runtime.*` none.
+
+**WHAT IT EXPOSED: THE READ, NOT THE CELL — `RawLoadFlt` (`fload`).** The site
+read `slot + 8` unconditionally: the val arm's 40-byte payload word, which on
+this arm is THE NEXT FRAME SLOT. It carried its own standing instruction ("WHEN
+AREA 5 LANDS, THIS SITE MUST BE FORKED IN THE SAME UNIT") and every float reader
+in the runtime goes through it — `Rt.asF`, `Rt.toI32`, `Rt.fRender` (hence
+`Rt.floatText` and the whole printer) and the float arms of
+`Rt.+ - * f/ < <= > >= =`. It is forked to `wordFloatPayload`: untag, body unit
+0, `loadd`, plus a NAMED `Rt.die` for a word that is not a heap object.
+
+**PROVEN BY ASYMMETRY, not asserted.** With the fork switched off
+(`if False && wordArm s2`) and `compiler.js` rebuilt: `floatlit`, `floatarith`
+and `strunit` died **SIGABRT (134) with empty stdout AND empty stderr** — and
+`floatcmp` still PASSED, because it compares a float and never prints one. That
+last row is why the text pin exists beside the behavioural one.
+
+**THE `mk*` SAFEPOINT OBLIGATION, DISCHARGED IN THE SAME UNIT.** WORKLIST item 5
+recorded that `Mid.Rt.unsafeSafepoint` treats a `RawMkValue` as a non-safepoint,
+which is true on the val arm and false for a word-arm cell whose writer
+allocates. The arm is now threaded into the walker (`loadArm` -> `loadText` ->
+`directArm`/`safepoint`/`unsafeSafepoint`) and the answer is ONE statement,
+`RtLayout.wordMkAllocSeat`, which names `Rt.allocFloat` for `tagFloat` and
+NOTHING for every other code. **THE OLD WORDING WAS HALF STALE TOO**: `mkstr`
+allocates nothing since perf word-arm-rawroot put a string's bytes inline in the
+block `Rt.allocRaw` already made, so a blanket "heap codes allocate" rule would
+have rooted the collector's own defuns — the negative control the row asserts.
+MEASURED per arm: `Rt.asF` (whose only allocation is its `mkflt`) opens
+`call $q_Rt_x2eframe_x2denter` on the word arm and a bare `alloc8 120` on the val
+arm.
+
+**AND THE CHURN LADDER IS COVERAGE, NOT THE PROOF — MEASURED, NOT ASSUMED.**
+With `unsafeSafepoint`'s arm reverted to non-safepoint, all four
+`tools/qbe/word-arm-gcchurn/flt.elm` rungs stay GREEN (h1 136/182, h2 126/170,
+h4 62/84, default 4/7 collections; `6000/6000/0` both arms), because every
+current `.mid` `mkflt` site consumes its live value BEFORE the allocation — safe
+by order, the shape the worklist predicted. So the rule's pin is the
+CLASSIFICATION row (per arm, both directions, on synthetic `mkflt`/`mkstr` probes
+AND on the real defun), and the ladder is what keeps the new allocation window
+running under collection.
+
+**THE APP-ARGUMENT WALK: MEASURED, AND NOT ENABLED.** `wordArmUnportedList`
+admits `App` without recursing into its arguments, which is why `strunit` and
+`cmporder` used to refuse with an UNNAMED line. Walking them was tried here and
+REVERTED, with the reason measured: it turns 5 corpus groups out of BOTH into
+WORD-BLOCKED, because `StreamRef` reaches the walk and the classifier has no arm
+for it — it falls through to the catch-all, whose text is a SEVENTH stale blanket
+refusal (the site is `lowerLit (LSymbol v)` + `rtPrimSlots "value"`, both ported).
+Admitting it on emit-only evidence would repeat the let-destructuring mistake, so
+the walk stays off and the finding is recorded: **enabling it owes a `StreamRef`
+decision plus runs of the 14 groups it blocks** (`execbig execchain execenv
+execglob execmal execnofile execpipe execsubchain ioecho iofile readfile
+taskattempt taskpure taskseq`, defuns `Runtime.readLineGo`/`Runtime.writeString`).
+
+**THE RESULT.** All 11 groups emit, link and print BYTE-IDENTICALLY on both arms
+(`2.0`, `4.0`, `true`, `3.5`, `true`, `3.5`, `12.0` for `area 2.0`, `3.5`,
+`175`, the `strunit` digit string ending `|42.5|2.0`, and `cmporder`'s
+`LT GT EQ …`). The two oracles are `tools/qbe/word-arm-diff/floatlit.elm` (a
+DIFFERENTIAL over the literal, `+ - * f/`, `<`, `==` against an Int, the
+shortest-round-trip printer path `0.1 + 0.2`, `1e300`'s 64-byte truncation, and
+float cells inside cons cells) and `tools/qbe/word-arm-gcchurn/flt.elm` (the
+collecting ladder above). Both fixtures route every float through a DEFUN, so
+Flatten cannot substitute the literal away — the mistake the previous unit's
+review caught in its own fixtures.
+
 ## The word-arm DIFF fixtures' neighbourhood
 
 The 17 (now 18) `tools/qbe/word-arm-diff/*.elm` fixtures are green on both

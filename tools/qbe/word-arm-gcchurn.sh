@@ -260,6 +260,23 @@ row letd     h1      240  1
 row letd     h2      240  1
 row letd     h4      240  1
 row letd     default 240  1
+# ---- FLOAT CELLS (perf word-arm-floats): the class's allocation window is NEW
+#      — on the val arm a float literal allocates NOTHING (`storew tagFloat` +
+#      `stored slot+8`), while on the word arm it is a code-12 block the EMITTER
+#      allocates (`storeWordFloatCell` -> `q_Rt_x2eallocFloat`).  So every defun
+#      that mentions a float gained a safepoint, and the runtime's own frame
+#      decision had to learn it (`Mid.Rt.unsafeSafepoint`'s `RawMkValue` arm).
+#      The fixture holds a RUNTIME-BUILT string and a RUNTIME-BUILT float cell
+#      across an allocation window and re-reads both, comparing the float
+#      against `i / 2.0` — a value computed through `Rt.f/`, i.e. `fload` +
+#      `mkflt` on the OTHER side of the window — so a reclaimed or mis-strided
+#      cell disagrees instead of matching itself.  THE RUNGS ARE MEASURED, NOT
+#      ASSUMED (QBE_MIDGC_STATS=1, `row()`'s scavenge-OR-full-collect metric):
+#      see the comment rows below for the counts.
+row flt      h1      240  1
+row flt      h2      240  1
+row flt      h4      240  1
+row flt      default 240  1
 
 if [ "$fails" != 0 ]; then
   echo "word-arm-gcchurn: $fails failure(s) — a closure is being read after a collection it did not survive"

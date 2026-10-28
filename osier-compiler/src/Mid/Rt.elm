@@ -60,6 +60,7 @@ module Mid.Rt
 import Dict exposing (Dict)
 import Mid.Ir exposing (Defun, Exp(..), LetBinder(..), Lit(..), Match, UnsafeNode(..), ValuePath(..))
 import Mid.RtGc exposing (gcProgram)
+import Mid.RtLayout as RtLayout
 import Mid.RtLang.Ast as RtAst
 import Mid.RtLang.Check as RtCheck
 import Mid.RtLang.Error as MidErr
@@ -313,12 +314,12 @@ loadArm wordVal source =
             Err (withOwnRuntimeNote msg)
 
         Ok text ->
-            loadText text
+            loadText wordVal text
 
 
 -- the parse half of `loadArm`, unchanged: the hoisted per-process parse.
-loadText : String -> Result String Runtime
-loadText source =
+loadText : Bool -> String -> Result String Runtime
+loadText wordVal source =
     case Mid.RtLang.Parse.parseModule source of
         -- THE RUNTIME LANE'S PARSE EXIT (U10): the parser renders a SYNTAX
         -- PROBLEM before any lane knows a file name, so the banner's PATH slot
@@ -529,7 +530,7 @@ loadText source =
                             else
                                 grow new
                     in
-                    grow (Set.fromList (List.filter direct rtProgram |> List.map .key))
+                    grow (Set.fromList (List.filter (directArm wordVal) rtProgram |> List.map .key))
             in
             case RtCheck.checkExportsMidc header.exports moduleArities of
                 -- U13: the RECORD, rendered — banner (`runtime.mid`), the law,
@@ -551,7 +552,7 @@ loadText source =
                         , externTypes = externTypes
                         , exportedTypes = exportedSigs
                         , allocating = allocating
-                        , direct = direct
+                        , direct = directArm wordVal
                         , abi = abiTable module_.decls ast
                         , hosted = List.any (\d -> d.key == "Rt.hostRun") ast
                         }
@@ -2480,17 +2481,17 @@ allocSeatDeps =
     , ( "Rt.con", [ "Rt.allocKind" ] )
     ]
 
-direct : Defun -> Bool
-direct d =
+directArm : Bool -> Defun -> Bool
+directArm arm d =
     case d.value of
         Lam l ->
-            safepoint d.key (List.length l.params) l.body
+            safepoint arm d.key (List.length l.params) l.body
 
         _ ->
             True
 
-safepoint : String -> Int -> Exp -> Bool
-safepoint selfKey selfArity e =
+safepoint : Bool -> String -> Int -> Exp -> Bool
+safepoint arm selfKey selfArity e =
     case e of
         Lit (LString _) ->
             True
@@ -2511,7 +2512,7 @@ safepoint selfKey selfArity e =
             True
 
         NoTail inner ->
-            safepoint selfKey selfArity inner
+            safepoint arm selfKey selfArity inner
 
         App app ->
             -- A SATURATED, NON-FORCED GRef-App on THIS defun's own key is
@@ -2539,7 +2540,7 @@ safepoint selfKey selfArity e =
             case app.fn of
                 GRef r ->
                     if r.key == selfKey && not r.force && List.length app.args == selfArity then
-                        List.any (safepoint selfKey selfArity) app.args
+                        List.any (safepoint arm selfKey selfArity) app.args
 
                     else
                         True
@@ -2551,10 +2552,10 @@ safepoint selfKey selfArity e =
             True
 
         Let b ->
-            List.any (\v -> safepoint selfKey selfArity (letValue v)) b.binders || safepoint selfKey selfArity b.body
+            List.any (\v -> safepoint arm selfKey selfArity (letValue v)) b.binders || safepoint arm selfKey selfArity b.body
 
         Case c ->
-            safepoint selfKey selfArity c.scrutinee || List.any (\alt -> List.any (safepointMatch) alt.matches || List.any (\( _, p ) -> safepointPath p) alt.binds || safepoint selfKey selfArity alt.body) c.alts
+            safepoint arm selfKey selfArity c.scrutinee || List.any (\alt -> List.any (safepointMatch) alt.matches || List.any (\( _, p ) -> safepointPath p) alt.binds || safepoint arm selfKey selfArity alt.body) c.alts
 
         Con _ ->
             True
@@ -2566,30 +2567,30 @@ safepoint selfKey selfArity e =
             True
 
         RecordGet root _ ->
-            safepoint selfKey selfArity root
+            safepoint arm selfKey selfArity root
 
         RecordUpdate r ->
-            safepoint selfKey selfArity r.base || List.any (\( _, v ) -> safepoint selfKey selfArity v) r.updates
+            safepoint arm selfKey selfArity r.base || List.any (\( _, v ) -> safepoint arm selfKey selfArity v) r.updates
 
         ListLit _ ->
             True
 
         If b ->
-            safepoint selfKey selfArity b.cond || safepoint selfKey selfArity b.thenBranch || safepoint selfKey selfArity b.elseBranch
+            safepoint arm selfKey selfArity b.cond || safepoint arm selfKey selfArity b.thenBranch || safepoint arm selfKey selfArity b.elseBranch
 
         ShortAnd b ->
-            safepoint selfKey selfArity b.left || safepoint selfKey selfArity b.right
+            safepoint arm selfKey selfArity b.left || safepoint arm selfKey selfArity b.right
 
         ShortOr b ->
-            safepoint selfKey selfArity b.left || safepoint selfKey selfArity b.right
+            safepoint arm selfKey selfArity b.left || safepoint arm selfKey selfArity b.right
 
         NotEqual b ->
-            safepoint selfKey selfArity b.left || safepoint selfKey selfArity b.right
+            safepoint arm selfKey selfArity b.left || safepoint arm selfKey selfArity b.right
 
         Loop b ->
             -- (B4) both subtrees are ordinary code; Break/Continue allocate
             -- and call nothing at all.
-            safepoint selfKey selfArity b.cond || safepoint selfKey selfArity b.body
+            safepoint arm selfKey selfArity b.cond || safepoint arm selfKey selfArity b.body
 
         Break ->
             False
@@ -2598,16 +2599,16 @@ safepoint selfKey selfArity e =
             False
 
         Unsafe node ->
-            unsafeSafepoint selfKey selfArity node
+            unsafeSafepoint arm selfKey selfArity node
 
-unsafeSafepoint : String -> Int -> UnsafeNode -> Bool
-unsafeSafepoint selfKey selfArity node =
+unsafeSafepoint : Bool -> String -> Int -> UnsafeNode -> Bool
+unsafeSafepoint arm selfKey selfArity node =
     case node of
         RawCall c ->
             -- edge, not a direct safepoint: the FIXED POINT below
             -- resolves it (a call to a non-allocating helper is
             -- allocation-free).
-            List.any (safepoint selfKey selfArity) c.args
+            List.any (safepoint arm selfKey selfArity) c.args
 
         RawCallRaw _ ->
             False
@@ -2642,38 +2643,51 @@ unsafeSafepoint selfKey selfArity node =
             False
 
         RawPayload p ->
-            safepoint selfKey selfArity p.value
+            safepoint arm selfKey selfArity p.value
 
         RawMkValue m ->
-            -- NON-SAFEPOINT ONLY WHERE THE CELL WRITER ALLOCATES NOTHING.  True
-            -- on the val arm (a `mk*` is a tag word plus payload writes into a
-            -- frame slot) and true under the word arm for the IMMEDIATE codes
-            -- (`mknum`/`mkbool` are shifts).  FALSE under the word arm for a
-            -- HEAP code: `storeWordStringCell`/`storeWordFloatCell` inject a
-            -- `midGcAllocSeat` call that this tree never shows, so a defun whose
-            -- only allocation is a `mkstr`/`mkflt` cell would classify
-            -- frame-free and DROP ITS ROOTS.  It cannot bite today (area 5
-            -- refuses every tag-12 value, so no word-arm float cell can be
-            -- built) and it does not bite the arithmetic class (every op writes
-            -- an immediate).  See the WORKLIST's item 5 in Mid.RtLayout for the
-            -- standing instruction: when area 5 lands, this arm must count a
-            -- word-arm heap-code `mk*` as a DIRECT safepoint, in the same unit.
-            List.any (safepoint selfKey selfArity) m.words
+            -- NON-SAFEPOINT ONLY WHERE THE CELL WRITER ALLOCATES NOTHING, and
+            -- THAT IS AN ARM QUESTION (perf word-arm-floats, discharging the
+            -- standing instruction this arm carried).
+            --
+            -- The val arm's `mk*` is a tag word plus payload writes into a frame
+            -- slot: nothing is allocated, so `m.words` is the whole walk.
+            -- UNDER THE WORD ARM a `mk*` is a HEAP CELL and the writer may call
+            -- an allocation seat — a call the `.mid` tree never shows, because
+            -- it is injected by the EMITTER (`storeWordFloatCell` ->
+            -- `midGcAllocSeat "Rt.allocFloat"`).  A defun whose only allocation
+            -- is such a cell therefore classified FRAME-FREE and dropped its
+            -- roots: silent, and only reachable once the arm could build the
+            -- cell at all.
+            --
+            -- WHICH CODES ALLOCATE IS ONE STATEMENT, `RtLayout.wordMkAllocSeat`,
+            -- and it is stated there rather than here because the answer is a
+            -- property of the WRITERS (float allocates; `mkstr` does NOT since
+            -- perf word-arm-rawroot put the bytes inline in the block
+            -- `Rt.allocRaw` already made; the generic one-word arm tags a body
+            -- the CALLER allocated).  A bool here would be a second copy of that
+            -- enumeration — the drift this repo keeps paying for — so this arm
+            -- asks for the SEAT and treats any answer as a DIRECT safepoint.
+            if arm && (RtLayout.wordMkAllocSeat m.tag /= Nothing) then
+                True
+
+            else
+                List.any (safepoint arm selfKey selfArity) m.words
 
         RawAllocVector _ ->
             True
 
         RawVecLoad v ->
-            safepoint selfKey selfArity v.vec || safepoint selfKey selfArity v.index
+            safepoint arm selfKey selfArity v.vec || safepoint arm selfKey selfArity v.index
 
         RawVecAddr v ->
-            safepoint selfKey selfArity v.vec || safepoint selfKey selfArity v.index
+            safepoint arm selfKey selfArity v.vec || safepoint arm selfKey selfArity v.index
 
         RawVecBody v ->
-            safepoint selfKey selfArity v.value
+            safepoint arm selfKey selfArity v.value
 
         RawVecLen v ->
-            safepoint selfKey selfArity v.value
+            safepoint arm selfKey selfArity v.value
 
         RawVecStore v ->
             -- the write-barrier seat is malloc-class, NOT a GC
@@ -2681,64 +2695,64 @@ unsafeSafepoint selfKey selfArity node =
             -- the consspike record), so the store alone does not
             -- frame a defun — address-> stores into an existing
             -- vector frame-free.
-            safepoint selfKey selfArity v.vec || safepoint selfKey selfArity v.index || safepoint selfKey selfArity v.value
+            safepoint arm selfKey selfArity v.vec || safepoint arm selfKey selfArity v.index || safepoint arm selfKey selfArity v.value
 
         RawStrByte b ->
-            safepoint selfKey selfArity b.str || safepoint selfKey selfArity b.index
+            safepoint arm selfKey selfArity b.str || safepoint arm selfKey selfArity b.index
 
         WithRoots _ ->
             True
 
         RawPayload32 p ->
-            safepoint selfKey selfArity p.value
+            safepoint arm selfKey selfArity p.value
 
         RawTagIs t ->
-            safepoint selfKey selfArity t.value
+            safepoint arm selfKey selfArity t.value
 
         RawBin r ->
-            safepoint selfKey selfArity r.a || safepoint selfKey selfArity r.b
+            safepoint arm selfKey selfArity r.a || safepoint arm selfKey selfArity r.b
 
         RawUn r ->
-            safepoint selfKey selfArity r.v
+            safepoint arm selfKey selfArity r.v
 
         RawCmp r ->
-            safepoint selfKey selfArity r.a || safepoint selfKey selfArity r.b
+            safepoint arm selfKey selfArity r.a || safepoint arm selfKey selfArity r.b
 
         RawFltBin r ->
-            safepoint selfKey selfArity r.a || safepoint selfKey selfArity r.b
+            safepoint arm selfKey selfArity r.a || safepoint arm selfKey selfArity r.b
 
         RawFltCmp r ->
-            safepoint selfKey selfArity r.a || safepoint selfKey selfArity r.b
+            safepoint arm selfKey selfArity r.a || safepoint arm selfKey selfArity r.b
 
         RawIToF x ->
-            safepoint selfKey selfArity x
+            safepoint arm selfKey selfArity x
 
         RawLoadFlt x ->
-            safepoint selfKey selfArity x
+            safepoint arm selfKey selfArity x
 
         RawAllocRaw _ ->
             True
 
         RawByteLoad b ->
-            safepoint selfKey selfArity b.ptr || safepoint selfKey selfArity b.index
+            safepoint arm selfKey selfArity b.ptr || safepoint arm selfKey selfArity b.index
 
         RawByteStore b ->
-            safepoint selfKey selfArity b.ptr || safepoint selfKey selfArity b.index || safepoint selfKey selfArity b.value
+            safepoint arm selfKey selfArity b.ptr || safepoint arm selfKey selfArity b.index || safepoint arm selfKey selfArity b.value
 
         RawWordLoad w ->
-            safepoint selfKey selfArity w.ptr || safepoint selfKey selfArity w.index
+            safepoint arm selfKey selfArity w.ptr || safepoint arm selfKey selfArity w.index
 
         RawWordStore w ->
-            safepoint selfKey selfArity w.ptr || safepoint selfKey selfArity w.index || safepoint selfKey selfArity w.value
+            safepoint arm selfKey selfArity w.ptr || safepoint arm selfKey selfArity w.index || safepoint arm selfKey selfArity w.value
 
         RawMemLoad m ->
             -- cffi U6: a width-typed load allocates nothing.
-            safepoint selfKey selfArity m.ptr
+            safepoint arm selfKey selfArity m.ptr
 
         RawMemStore m ->
             -- cffi U6: a width-typed store allocates nothing; the VALUE still
             -- rides through (a sibling operand may itself allocate).
-            safepoint selfKey selfArity m.ptr || safepoint selfKey selfArity m.value
+            safepoint arm selfKey selfArity m.ptr || safepoint arm selfKey selfArity m.value
 
         RawDataAddr _ ->
             False

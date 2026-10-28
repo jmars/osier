@@ -650,6 +650,35 @@ wordArmUnportedList exp =
             -- per-site emit is `lowerApp`, which classifies the head (a known
             -- defun, a thunk, or a first-class value through Rt.apply) and
             -- refuses anything it cannot express by name.
+            --
+            -- THE ARGUMENTS ARE NOT WALKED, AND THAT IS A KNOWN GAP WITH A
+            -- MEASURED COST (perf word-arm-floats).  A raw node reached ONLY as
+            -- a call argument is invisible to this classifier, so its refusal
+            -- comes from the emit site and — when the site has no `defunKey`
+            -- in scope — does NOT NAME THE DEFUN: the float census's
+            -- `<emit site, unnamed>` rows for `strunit` and `cmporder` were
+            -- exactly that, and they were reachable only through the float
+            -- literal that this unit ports (the port makes them emit, so they
+            -- are no longer unnamed rows).
+            --
+            -- WALKING `app.args` HERE WAS TRIED IN THIS UNIT AND REVERTED, with
+            -- the reason measured: it turns 5 corpus groups out of BOTH and
+            -- into WORD-BLOCKED, because `StreamRef` reaches this walk and the
+            -- classifier has NO ARM FOR IT — it falls through to the catch-all
+            -- below, whose text ("a stream reference — it materialises a symbol
+            -- Value") is a SEVENTH stale blanket refusal.  The site
+            -- (`lowerVal`'s StreamRef arm) is `lowerLit (LSymbol v)` +
+            -- `rtPrimSlots "value"`, i.e. the symbol cell R1 ported and
+            -- `Rt.value`, whose WORD splice is live enough that perf
+            -- word-arm-letdestr had to seed `Rt.symToStr` for it.  So the entry
+            -- looks stale — but the 14 groups it blocks
+            -- (`Runtime.readLineGo`/`Runtime.writeString`: execbig execchain
+            -- execenv execglob execmal execnofile execpipe execsubchain ioecho
+            -- iofile readfile taskattempt taskpure taskseq) have NEVER BEEN RUN
+            -- on the word arm, and admitting a construct on emit-only evidence
+            -- is the mistake the let-destructuring unit paid for.  Enabling
+            -- this walk therefore OWES a StreamRef decision plus those 14 runs
+            -- in the same commit, and that is its own unit.
             []
 
         NoTail inner ->
@@ -781,8 +810,26 @@ wordArmUnportedList exp =
             -- says the construct is ported.
             []
 
-        Lit _ ->
-            [ wordArea "AREA 5 (FLOATS)" "a float literal — under the word arm it is a HEAP object behind one tagged pointer, not a tag word plus payload words" ]
+        Lit (LFloat _) ->
+            -- ============ AREA 5: A FLOAT LITERAL ============
+            -- PORTED (perf word-arm-floats), and it is the SIXTH class in a row
+            -- whose refusal described a path that already worked.  The refusal
+            -- said "the word arm heap-boxes a float as a `[hdr | f64]` cell,
+            -- WHICH DOES NOT EXIST YET" — and the cell does exist:
+            -- `storeWordFloatCell` (below) has built it since perf
+            -- word-arm-area3rt, for the runtime's `mkflt` lane, allocating
+            -- through `Rt.allocFloat`.  The literal is the same cell with a
+            -- different PRODUCER of the double (a `flt:` static data item
+            -- instead of an expression), so this arm is an ADMISSION and the
+            -- emitter work is `lowerLitWord`'s LFloat arm routing through that
+            -- writer.
+            --
+            -- THE FRESH DEFECT THE ADMISSION EXPOSED IS NOT HERE, it is in
+            -- `RawLoadFlt` (`fload`): the site every float READER goes through
+            -- (`Rt.+`, `Rt.<`, `Rt.asF`, `Rt.fRender`) and which carried a
+            -- standing "when area 5 lands, fork this in the same unit"
+            -- instruction.  It is forked in this unit; see that site.
+            []
 
         ShortAnd block ->
             wordArmUnportedList block.left ++ wordArmUnportedList block.right
@@ -1226,12 +1273,24 @@ their operands through the layout-derived accessors (`payload`, `payload32`,
 `mknum`, `tagis`).  So `+ - * < <= > >= =` are no longer listed here and are no
 longer refused.
 
-What REMAINS, and why each still refuses:
+NOTHING REMAINS: `f/` LEFT THIS LIST (perf word-arm-floats), and it left the
+same way the arithmetic family did — the refusal described a path that no longer
+existed.  Its text said "its inline arm emits the heap-boxed float cell, which
+does not exist under the word arm (and `Rt.f/` is float-only, so routing it to
+the runtime would build the same cell)" — and BOTH halves are now false: the
+cell exists (`storeWordFloatCell`), and `Rt.f/` is exactly `mkflt(fload(asF a)
+f/ fload(asF b))`, i.e. the two writers this unit ported.  So `f/` needs no
+emitter change at all: `lowerPrimApp`'s inline branch is already denied on this
+arm by `isFloatExp` (which is `s.rep && not (wordArm s) && ..`, the ONE place
+the arm is read for the raw-float pass), so the prim falls through to the
+ordinary `rtPrimSlots` route into `Rt.f/`.  MEASURED: `floatdiv` (7.0 / 2.0) and
+`floatpartial` (`((/) 7.0) 2.0`, whose refusal named the generated `/.curried`
+defun) both emit, link and print `3.5` on both arms, byte-identically.
 
-  * `f/` -> `rawFloatBin` when both operands are proven Float, i.e. the heap-
-    boxed float cell (AREA 5).  It keeps its inline branch in `lowerPrimApp`
-    and is refused here BY NAME, so the word arm never routes it to `Rt.f/`
-    (which is float-only and would build a float cell).
+THE LIST BELOW IS THEREFORE EMPTY, and that is stated rather than left to be
+inferred: it protects NOTHING today.  It stays because it is the seat the NEXT
+inline, representation-shaped prim must be listed in on the day it is written —
+a memberless belt is a reminder, not a guarantee.
 
 A prim NOT listed here and carrying a Mid implementation takes the plain
 `rtPrimSlots` route, which is arm-clean (see the `PrimApp` case above).  A prim
@@ -1254,15 +1313,17 @@ wordArmPrimUnported prim =
 {-| The prims `lowerPrimApp` gives an inline, representation-shaped arm to AND
 that the word arm must therefore not reach.
 
-ONE ENTRY.  `+ - * < <= > >= =` were the rest of this list until perf
-word-arm-arith; they left it in the same commit that made `lowerPrimApp` skip
-their inline arms under the word arm, because the list and the fork are two
-halves of one decision and a list entry without the fork is a refusal of a
-construct the arm now gets RIGHT.  What is left is float-only.
+EMPTY, AND DELIBERATELY SO.  `+ - * < <= > >= =` left it at perf
+word-arm-arith, in the same commit that made `lowerPrimApp` skip their inline
+arms under the word arm, because the list and the fork are two halves of one
+decision and a list entry without the fork is a refusal of a construct the arm
+now gets RIGHT.  `f/` — the last member — left it at perf word-arm-floats, when
+the float cell it was refused for landed.  So an entry here is only ever added
+together with the arm fork that makes the inline arm unreachable.
 -}
 wordArmInlinePrims : List String
 wordArmInlinePrims =
-    [ "f/" ]
+    []
 
 
 {-| THE TAG OF THE VALUE WHOSE ADDRESS IS `base`, into the `w` temp `t`
@@ -4915,6 +4976,85 @@ storeWordFloatCell words dest s0 =
             Err (wordArmUnsupported (wordArea "AREA 5 (FLOATS)" "a float cell that is not exactly one float word"))
 
 
+{-| AREA 5: `fload(v)` ON THE WORD ARM — the f64 at body unit 0 of a code-12
+cell, read as a `d` operand.
+
+WHY A SHAPE TEST AND NOT A BLIND UNTAG.  On the val arm `fload` reads
+`slot + 8` of ANY Value: a 40-byte record always has a payload word there, so a
+mistagged argument answers garbage BITS rather than a fault.  Under the word arm
+there is no such word — `v` is either a tagged heap pointer, a fixnum, or an
+immediate — so the read has to name its shape, and the honest answer for the
+three non-heap shapes is a LOUD refusal, not the zero the payload reader answers:
+`payload(nil, i)` reads an unwritten (zeroed) slot on the val arm, but `fload`
+of an immediate would read a DOUBLE out of nothing.
+
+THE REACHABLE DOMAIN IS FLOAT CELLS ONLY, and it is stated rather than assumed:
+every `fload` site in `runtime.mid` is a float arm (`Rt.asF` after its
+`tagis(x, 12)` test, `Rt.toI32` after the same test, `Rt.fRender` on the value
+`Rt.floatText` was handed, and the float arms of `Rt.+ - * f/ < <= > >= =` where
+both operands have already been converted by `Rt.asF`).  So the refusal arm is
+unreachable from a well-formed program and is there for the mistagged case — the
+direction the arc always chooses: loud, never a wrong bit pattern.
+
+THE CODE IS NOT TESTED (only the SHAPE): a word-arm heap block's kind is its
+header, and `tagis`/`wordTagIs` is the ONE place a tag is tested.  A second
+kind test here would be the duplicate reader this module's own layout note
+forbids; the shape test is what the READ requires, and the caller's `tagis` is
+what the SEMANTICS requires.
+-}
+wordFloatPayload : Il.Arg -> S -> ( Il.Arg, S )
+wordFloatPayload valueWord s0 =
+    let
+        ( l, s1 ) =
+            wordValueWord valueWord s0
+
+        ( t, s2 ) =
+            freshTmp s1
+
+        ( isHeap, s3 ) =
+            freshTmp s2
+
+        ( okLbl, s4 ) =
+            freshLbl "fltok" s3
+
+        ( badLbl, s5 ) =
+            freshLbl "fltbad" s4
+
+        ( r, s6 ) =
+            freshTmp s5
+
+        msgText =
+            (if s0.defunKey == "" then "" else s0.defunKey ++ ": ") ++ wordFloatRefusal
+
+        ( msgName, s7 ) =
+            freshData ("msg:" ++ msgText)
+                (\n -> { name = n, align = Just 8, items = [ DStr msgText, DByte 0 ], export_ = False })
+                s6
+    in
+    ( Il.Tmp r
+    , s7
+        |> emit (Bin (Just t) W And (Il.Tmp l) (Il.Con s0.layout.tagMask))
+        |> emit (Cmp (Just isHeap) W Ceq (Il.Tmp t) (Il.Con (RtLayout.heapPtrTag s7.layout)))
+        |> closeBlock (Jnz (Il.Tmp isHeap) okLbl badLbl)
+        |> startBlock badLbl
+        |> emit (Call Nothing (Base L) (Il.Sym ("q_" ++ mangle "Rt.die")) [ ArgVal (Base L) (Il.Sym msgName) ])
+        |> closeBlock Hlt
+        |> startBlock okLbl
+        |> (\s8 ->
+                let
+                    ( bodyArg, s9 ) =
+                        wordBodyOf (Il.Tmp l) s8
+
+                    ( a, s10 ) =
+                        freshTmp s9
+                in
+                s10
+                    |> emit (Bin (Just a) L Add (Il.Tmp bodyArg) (Il.Con (RtLayout.heapBodyUnitOffset s10.layout 0)))
+                    |> emit (Load (Just r) D LoadD (Il.Tmp a))
+           )
+    )
+
+
 {-| One BODY word of a word-arm heap object, at `heapBodyUnitOffset`.  `bodyArg`
 IS the body address — what the allocation seats return. -}
 storeWordBodyWord : Il.Arg -> Int -> Il.Arg -> S -> S
@@ -5161,6 +5301,15 @@ val arm never sees — MEASURED at VR3c). -}
 wordPayloadRefusal : String
 wordPayloadRefusal =
     "qbe-rt: word arm: payload read on a word that is neither a fixnum (...000) nor a heap object (...001) - nil/true/false/error have no payload, so this would read another layout's bits. Refusing."
+
+
+{-| AREA 5: the loud refusal `fload` emits under the word arm when the word it
+was handed is not a heap object.  ASCII only, for `wordPayloadRefusal`'s reason
+(the emitted data item is a surface-language string literal).
+-}
+wordFloatRefusal : String
+wordFloatRefusal =
+    "qbe-rt: word arm: fload on a word that is not a heap object - a word-arm float is a code-12 [hdr | f64] cell, so its double lives in the cell's body unit 0; a fixnum or an immediate has no f64 word to read, and reading one out of the tag bits would print a wrong number. Refusing."
 
 
 {-| AREA B, THE ONE PAYLOAD-WORD READER.  Under the word arm a payload word is
@@ -6995,38 +7144,31 @@ rawWordArg exp s =
                     )
 
         Unsafe (RawLoadFlt v) ->
-            -- payload word 0 of a VALUE as f64: `loadd` at `slot + 8`.
+            -- `fload(v)` — payload word 0 of a float VALUE, read as an f64.
             --
-            -- THAT IS THE VAL ARM'S SHAPE, AND THE OLD COMMENT HERE WAS FALSE.
-            -- It read "a safe bit read of ANY Value (no trap on a mistagged
-            -- arg)", which is true only of a 40-byte Value: there `slot + 8` is
-            -- always a payload word, so a mistagged argument yields garbage
-            -- bits instead of a fault.  UNDER THE WORD ARM A SLOT IS EIGHT
-            -- BYTES, so `slot + 8` is the NEXT FRAME SLOT — the same shape as
-            -- the two defects perf word-arm-surface found, and a read of
-            -- another binder's value rather than of garbage.
+            -- THE VAL ARM reads `slot + 8`, and the old comment here called that
+            -- "a safe bit read of ANY Value (no trap on a mistagged arg)".  That
+            -- is true only of a 40-byte Value: there `slot + 8` is always a
+            -- payload word.  UNDER THE WORD ARM A SLOT IS EIGHT BYTES, so
+            -- `slot + 8` is the NEXT FRAME SLOT — the same shape as the two
+            -- defects perf word-arm-surface found, and a read of another
+            -- binder's value rather than of garbage.
             --
-            -- IT IS NOT FORKED, AND IT IS NOT REFUSED — and the reason matters
-            -- because it is NOT the belt.  `wordArmUnported` admits `App`
-            -- WITHOUT recursing into its arguments (by design: a call's
-            -- argument lowering is the per-site check), so a raw node reached
-            -- only as a call argument is INVISIBLE to the classifier.  MEASURED
-            -- at 0cba46c: `case n of 1 -> ..` compiles and RUNS on the word arm,
-            -- and this node is emitted inside `Rt.=`'s float arm.  Refusing at
-            -- the site would refuse that whole working program (it does: a
-            -- trial fork turned `strcase.elm` and the number-literal case into
-            -- compile errors), which is the polarity's other failure — a loud
-            -- refusal on a construct the arm does not actually reach.
+            -- THIS IS THE SITE AREA 5 WAS OWED, and it is why the float port is
+            -- not one arm in `lowerLitWord`.  The standing instruction here
+            -- ("WHEN AREA 5 LANDS, THIS SITE MUST BE FORKED IN THE SAME UNIT")
+            -- is discharged by `wordFloatPayload`: a word-arm float is a code-12
+            -- heap block whose body unit 0 is the f64, so the read is untag ->
+            -- body unit 0 -> `loadd`, with a LOUD refusal on a word that is not
+            -- a heap object.  MEASURED before the fork: `main = 2.0` linked and
+            -- ran on the word arm and printed a value read from the neighbouring
+            -- slot, rc 0 and no stderr — the silent-wrong class.
             --
-            -- WHAT KEEPS IT SAFE IS REACHABILITY, STATED SO IT CAN BE CHECKED:
-            -- this is `Rt.=`'s float-vs-float arm (`tagis(a, 0) || tagis(a, 12)`
-            -- on BOTH operands, after the fixnum/fixnum arm has already
-            -- returned), and a word-arm float DOES NOT EXIST — it is AREA 5's
-            -- heap-boxed `[hdr | f64]` cell.  So the arm is dead on this arm.
-            -- WHEN AREA 5 LANDS, THIS SITE MUST BE FORKED IN THE SAME UNIT:
-            -- `wordPayloadWord`-style, because a word-arm float's bits live in
-            -- a body, not at `slot + 8`.  Its sibling `RawStrByte` above is the
-            -- model — it reads a body unit both arms HAVE, so it forks.
+            -- EVERY float reader goes through here (`Rt.asF`, `Rt.toI32`,
+            -- `Rt.fRender` — hence `Rt.floatText` and the printer — and the
+            -- float arms of `Rt.=`/`Rt.<`/`Rt.<=`/`Rt.>`/`Rt.>=`/`Rt.+`/`-`/
+            -- `*`/`f/`), which is what makes this the unit's second emitter
+            -- change rather than an optional one.
             let
                 ( vslot, s1 ) =
                     freshSlot s
@@ -7034,17 +7176,21 @@ rawWordArg exp s =
             lowerVal v vslot s1
                 |> Result.map
                     (\s2 ->
-                        let
-                            ( aT, s3 ) =
-                                freshTmp s2
+                        if wordArm s2 then
+                            wordFloatPayload (Il.Tmp (slotTmp vslot)) s2
 
-                            ( t, s4 ) =
-                                freshTmp s3
-                        in
-                        ( Il.Tmp t
-                        , emit (Bin (Just aT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con 8)) s4
-                            |> emit (Load (Just t) D LoadD (Il.Tmp aT))
-                        )
+                        else
+                            let
+                                ( aT, s3 ) =
+                                    freshTmp s2
+
+                                ( t, s4 ) =
+                                    freshTmp s3
+                            in
+                            ( Il.Tmp t
+                            , emit (Bin (Just aT) L Add (Il.Tmp (slotTmp vslot)) (Il.Con 8)) s4
+                                |> emit (Load (Just t) D LoadD (Il.Tmp aT))
+                            )
                     )
 
         Unsafe (RawStrByte sb) ->
@@ -7582,8 +7728,31 @@ lowerLitWord lit dest s =
         LBoolean b ->
             Ok (emit (Store StoreL (Il.Con (if b then s.layout.tagTrue else s.layout.tagFalse)) (Il.Tmp (slotTmp dest))) s)
 
-        LFloat _ ->
-            Err (wordArmUnsupported (wordArea "AREA 5 (FLOATS)" "a float literal — the word arm heap-boxes a float as a [hdr | f64] cell, which does not exist yet"))
+        LFloat f ->
+            -- AREA 5, THE HEAP-BOXED FLOAT LITERAL (perf word-arm-floats).  The
+            -- val arm's two steps with the CELL WRITER swapped: the double is
+            -- loaded from the shared `flt:` static data item (the same
+            -- `floatData` key `rawFloatOf` resolves to, so a literal has ONE
+            -- data item), then handed to `storeWordFloatCell`, which allocates
+            -- the code-12 block through `Rt.allocFloat`, stores the f64 at body
+            -- unit 0 and tags the body.
+            --
+            -- THE ALLOCATION IS VISIBLE TO THE FRAME DECISION, and that is the
+            -- difference from the val arm rather than a detail: this emits a
+            -- real `q_Rt_x2eallocFloat` call, `Rt.allocFloat` is in
+            -- `runtime.allocating`, so a surface defun whose only heap object
+            -- is a float literal is ROOTED here and frame-free on the val arm.
+            -- The double itself is an `l`/`d` temp across that call, never a
+            -- `:val`, so there is no rooting question at this site.
+            let
+                ( fname, s1 ) =
+                    floatData f s
+
+                ( x, s2 ) =
+                    freshTmp s1
+            in
+            Ok (emit (Load (Just x) D LoadD (Il.Sym fname)) s2)
+                |> Result.andThen (\s3 -> storeWordFloatCell [ Il.Tmp x ] dest s3)
 
         LSymbol str ->
             -- A word-arm SYMBOL is a HEAP BLOCK (perf word-arm-records R1): code
