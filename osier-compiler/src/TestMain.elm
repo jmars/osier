@@ -1958,7 +1958,16 @@ checks rt rawMidText =
                         defunText "Rt.recGetGo" valText
                 in
                 String.contains "if (mkbool(payload(i, 0) >= veclen(rec) - 1)) {" wordGet
-                    && String.contains "val nameSym = mknum(wload(wload(vecbody(rec), veclen(rec) - 1), payload(i, 0)));" wordGet
+                    -- THE BASE IS MASKED (the R3/R4 review's BLOCKER 2): a
+                    -- literal's names array is a static `...000` address and a
+                    -- runtime-built one is stored `base + 1`, so the read is
+                    -- `wload(nw - (nw & 7), i)` — the SAME idiom the update
+                    -- twins spell.  An unmasked read here is a walk read of an
+                    -- INSERTED record misaligned by one (MEASURED: `mknum
+                    -- overflow` on the word arm, correct on the val arm).
+                    && String.contains "word nw = wload(vecbody(rec), veclen(rec) - 1);" wordGet
+                    && String.contains "val nameSym = mknum(wload(nw - (nw & 7), payload(i, 0)));" wordGet
+                    && not (String.contains "wload(wload(vecbody(rec)" wordGet)
                     && not (String.contains "payload(rec, 2)" wordGet)
                     && String.contains "if (mkbool(payload(i, 0) >= reclen(rec))) {" valGet
                     && String.contains "val nameSym = vecload(payload(rec, 2), payload(i, 0));" valGet
