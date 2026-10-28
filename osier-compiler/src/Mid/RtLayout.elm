@@ -999,12 +999,26 @@ valLayout =
 --      (`vecload(vecbody(rec), veclen(rec) - 1)`) — there is no third
 --      spelling.  Kind 14 was already in `heapKindScanned`, so the collector
 --      needed no change.
+--      THE RECORD FAMILY IS COMPLETE (perf word-arm-records R4).  The UPDATE
+--      half landed as the same one-block build: `lowerRecordUpdateClosed`'s tag
+--      tests go through a `recordTagBranch` seat (`wordTagIs` here, the val
+--      arm's `Load W` + `Cmp` there), its field COPY goes through `fieldBase 0`
+--      + `elemAddr` instead of the val arm's `slot + 8` payload indirection and
+--      `* valSizeBytes` stride, its allocation is `Rt.allocRecord(n)` and its
+--      wrap is the literal build's.  The runtime's nine twins
+--      (`recUpd`/`recUpdFind`/`recUpdCopy`/`recAppend`/`recAppendFind`/
+--      `recAppendDataGo`/`recAppendNamesGo`/`recToChain`/`recToChainGo`) bound by
+--      `veclen - 1` and MASK the names base (`nw - (nw & 7)`), because a
+--      literal's names array is a static `...000` address the collector's body
+--      walk skips as a fixnum while a runtime-built one MUST be stored `base + 1`
+--      (`gcScavValue` does NOTHING for tag 0 — the block would be reclaimed and
+--      the record left with a dangling names base, silently).  A runtime-built
+--      names block is a code-1 raw word array, and the naming lie is stated at
+--      the site: code 1 buys the SCAN BIT, which is the only property the
+--      collector reads.  `Rt.recInsert` needs no twin (it forwards).
+--      `wordArmDefunRefusals` IS EMPTY.
 --      NOT PORTED, each refused by name:
---      `Con` (its vector is written through `storeValueCell`), the RECORD
---      family's UPDATE half (`RecordUpdate`, whose closed form is
---      `lowerRecordUpdateClosed`'s hand-spelled `slot + 8` / `*valSizeBytes`
---      chase — the val arm's payload-indirection + byte-stride + separate-array
---      triple, wrong differently on each leg here),
+--      `Con` (its vector is written through `storeValueCell`),
 --      `StreamRef`, float literals, let-destructuring, `MTagEq`
 --      (a constructor-tag pattern — it materialises the tag as a `symbol`,
 --      which is now ported, so what remains there is the tag-EQUALITY half),
