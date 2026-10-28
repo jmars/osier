@@ -1,4 +1,4 @@
-module Mid.Qbe.Lower exposing (lower, lowerWith, wordArmUnported)
+module Mid.Qbe.Lower exposing (lower, lowerWith, wordArmDefunRefusals, wordArmUnported)
 
 -- Mid.Qbe.Lower — Mid.Ir -> Qbe.Il (native-backend stage 1; handoff-qbe-lower).
 --
@@ -721,6 +721,31 @@ wordArmUnported exp =
             -- is the only subexpression to classify.
             wordArmUnported rec
 
+        RecordUpdate update ->
+            -- ============ THE SURFACE LANE: A RECORD UPDATE ============
+            -- PORTED FOR A CLOSED ROW (perf word-arm-records R4).  The closed
+            -- form (`lowerRecordUpdateClosed`) is the one-block BUILD again —
+            -- `Rt.allocRecord(n)` so the names word is inside the block, the
+            -- data stores through the plain seat, ONE raw names store at index
+            -- `n`, the tagged body through the cell writer — and its tag test
+            -- and its field COPY go through `recordTagBranch`/`fieldBase` +
+            -- `elemAddr` rather than the val arm's `slot + 8` payload
+            -- indirection and `* valSizeBytes` stride (both wrong differently
+            -- on a one-word slot).
+            --
+            -- WHAT THIS ARM DOES NOT REACH: the WALK form (a non-closed base,
+            -- `recordUpdateWalkExp` -> `applyUpdates` -> `Rt.recInsert`) still
+            -- refuses BY NAME at the Rt gate, because the runtime's update
+            -- twins are not written yet.  So this arm classifies the construct
+            -- the emitter will see and the refusal for the other route names
+            -- the defun, not the construct.
+            case wordArmUnported update.base of
+                Just what ->
+                    Just what
+
+                Nothing ->
+                    wordArmUnportedRecordFields update.updates
+
         Lit (LSymbol _) ->
             -- AREA 3, THE SYMBOL CELL (perf word-arm-records R1).  A word-arm
             -- symbol is one code-2 heap block whose body is ONE raw word (the
@@ -1332,27 +1357,16 @@ TEN ENTRIES, NOT TWELVE (perf word-arm-records R3): `Rt.recGet`/`Rt.recGetGo`
 LEFT the list in the commit that ported the READ.  Each now carries a
 `QBE_WORDVAL-ONLY` splice that reads the names base from the record's LAST body
 word and bounds by `veclen - 1` (the layout's own length reader), so the reason
-above — a layout not decided — is no longer true OF THEM; it is still true of
-the UPDATE half (`recUpd`/`recAppend`/`recInsert`/`recToChain` and their
-helpers), which must WRITE the same layout and copy both arrays.
+above — a layout not decided — is no longer true OF THEM; the CHAIN half
+(`recToChain`/`recToChainGo`) was the last holdout, and it is now twinned too
+(perf word-arm-records R4): its car is a genuine Value position, so the word
+twin MATERIALIZES a symbol cell per element and walks the SAME one-block
+layout.  The list is now EMPTY — every `Rt.rec*` defun the record family owns
+is ported to the word arm.
 -}
 wordArmDefunRefusals : List ( String, String )
 wordArmDefunRefusals =
-    let
-        why =
-            "the RECORD family is not ported to the word arm: a word-arm record body is a flat run of `count` Values, so the placement of its SECOND array (the field NAMES, `payload(rec, 2)` on the val arm) is a layout decision, not a stride. Twin it in the record-layout unit or keep it refused - a names-array read against a data-array body is the mixed-representation read this arm exists to prevent"
-    in
-    [ ( "Rt.recUpd", why )
-    , ( "Rt.recUpdFind", why )
-    , ( "Rt.recUpdCopy", why )
-    , ( "Rt.recAppend", why )
-    , ( "Rt.recAppendFind", why )
-    , ( "Rt.recAppendDataGo", why )
-    , ( "Rt.recAppendNamesGo", why )
-    , ( "Rt.recToChain", why )
-    , ( "Rt.recToChainGo", why )
-    , ( "Rt.recInsert", why )
-    ]
+    []
 
 
 {-| THE Rt SURFACE, CLASSIFIED BY THE SAME PRE-WALK WHITELIST (perf VR3b3).
@@ -11285,6 +11299,37 @@ recordUpdateWalkExp layout baseB base updates =
 -- reusing base's names pointer.  Direct IL so the update VALUES lower BEFORE
 -- the data array allocates (their lowering can allocate; the data temp is only
 -- live across alloc-free stores).
+--
+-- THE TAG TEST IS A SEAT, NOT A SITE (perf word-arm-records R4): `recordTagBranch`
+-- below opens both of this function's tag-test blocks (record vs cons), so the
+-- two cannot drift from each other or from a `case`'s `lowerTagMatch`.
+recordTagBranch : Int -> String -> String -> Int -> S -> Result String S
+recordTagBranch slot yesLbl noLbl tag s =
+    if wordArm s then
+        -- The valtag names a GC-header KIND here, and every heap object carries
+        -- the SAME `...001` pointer tag, so `wordTagIs` (which `wordTagShape`
+        -- dispatches) is the only correct reader — and it DIES by name on a
+        -- header code 0, i.e. a val-arm block, rather than answering "not the
+        -- code you asked for".
+        wordTagIs (Il.Tmp (slotTmp slot)) tag s
+            |> Result.map (\( flag, s1 ) -> closeBlock (Jnz flag yesLbl noLbl) s1)
+
+    else
+        let
+            ( tagT, s1 ) =
+                freshTmp s
+
+            ( isT, s2 ) =
+                freshTmp s1
+        in
+        Ok
+            (s2
+                |> emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp slot)))
+                |> emit (Cmp (Just isT) W Ceq (Il.Tmp tagT) (Il.Con tag))
+                |> closeBlock (Jnz (Il.Tmp isT) yesLbl noLbl)
+            )
+
+
 lowerRecordUpdateClosed : Binder -> List String -> List String -> List ( String, Binder ) -> Int -> S -> Result String S
 lowerRecordUpdateClosed baseB baseNames resultNames updPairs dest s =
     let
@@ -11317,140 +11362,200 @@ lowerRecordUpdateClosed baseB baseNames resultNames updPairs dest s =
         |> Result.andThen
             (\s2 ->
                 let
-                    ( tagT, s3 ) =
-                        freshTmp s2
+                    ( recLbl, s3 ) =
+                        freshLbl "updrec" s2
 
-                    ( is14T, s4 ) =
-                        freshTmp s3
+                    ( notRecLbl, s4 ) =
+                        freshLbl "updchain" s3
 
-                    ( recLbl, s5 ) =
-                        freshLbl "updrec" s4
+                    ( joinLbl, s5 ) =
+                        freshLbl "updjoin" s4
+                in
+                recordTagBranch baseSlot recLbl notRecLbl RtLayout.tagRecord s5
+                    |> Result.andThen
+                        (\s6 ->
+                            let
+                                -- tag-14 arm: allocate, copy/store, wrap.  The
+                                -- update values were pre-lowered into rooted
+                                -- slots, so the data array allocates AFTER them
+                                -- (same load-bearing order as lowerRecordLitPos).
+                                --
+                                -- THE SEAT IS THE ARM'S (perf word-arm-records
+                                -- R4): the word arm builds the SAME one-block
+                                -- record a literal build does, so it allocates
+                                -- `Rt.allocRecord(n)` — whose `+ 1` IS the names
+                                -- word, in the seat and in its name — and NOT
+                                -- `Rt.allocVector(n)`, which is a word short and
+                                -- would put the names store past the block.
+                                ( ndArg, s7 ) =
+                                    midGcAllocSeat
+                                        (if wordArm s6 then
+                                            "Rt.allocRecord"
 
-                    ( notRecLbl, s6 ) =
-                        freshLbl "updchain" s5
-
-                    ( joinLbl, s7 ) =
-                        freshLbl "updjoin" s6
-
-                    s8 =
-                        s7
-                            |> emit (Load (Just tagT) W LoadW (Il.Tmp (slotTmp baseSlot)))
-                            |> emit (Cmp (Just is14T) W Ceq (Il.Tmp tagT) (Il.Con s.layout.tagRecord))
-                            |> closeBlock (Jnz (Il.Tmp is14T) recLbl notRecLbl)
-
-                    -- tag-14 arm: allocate, copy/store, wrap.  The update values
-                    -- were pre-lowered into rooted slots, so the data array allocates
-                    -- AFTER them (same load-bearing order as lowerRecordLitPos).
-                    -- The allocation goes through the Mid seat Rt.allocVector.
-                    ( ndArg, s10 ) =
-                        midGcAllocSeat "Rt.allocVector" (Il.Con n) (startBlock recLbl s8)
-
-                    -- The plain store seat (see lowerRecordLitPos).
-                    storeSym =
-                        Il.Sym ("q_" ++ mangle "Rt.vecStorePlain")
-
-                    storeOne : Int -> String -> S -> Result String S
-                    storeOne rank name st =
-                        case slotFor name of
-                            Just uslot ->
-                                Ok
-                                    (emit
-                                        (Call Nothing (Base W) storeSym
-                                            [ ArgVal (Base L) ndArg
-                                            , ArgVal (Base W) (Il.Con rank)
-                                            , ArgVal (Base L) (Il.Tmp (slotTmp uslot))
-                                            ]
+                                         else
+                                            "Rt.allocVector"
                                         )
-                                        st
-                                    )
+                                        (Il.Con n)
+                                        (startBlock recLbl s6)
 
-                            Nothing ->
-                                -- copy base's value for this field: read
-                                -- base.data[baseRankOf name] (the base's data
-                                -- array is in the BASE's canonical order, which
-                                -- differs from the RESULT's when `<-` inserted
-                                -- a field).
-                                case baseRankOf name of
-                                    Nothing ->
-                                        Err ("qbe: record update field " ++ name ++ " is absent from a closed base row (corrupt Mid tree)")
+                                -- The plain store seat (see lowerRecordLitPos).
+                                storeSym =
+                                    Il.Sym ("q_" ++ mangle "Rt.vecStorePlain")
 
-                                    Just brank ->
-                                        let
-                                            ( dataT, st1 ) =
-                                                freshTmp st
-
-                                            ( p8T, st2 ) =
-                                                freshTmp st1
-
-                                            ( elemT, st3 ) =
-                                                freshTmp st2
-                                        in
-                                        Ok
-                                            (st3
-                                                |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp baseSlot)) (Il.Con 8))
-                                                |> emit (Load (Just dataT) L LoadL (Il.Tmp p8T))
-                                                |> emit (Bin (Just elemT) L Add (Il.Tmp dataT) (Il.Con (s.layout.valSizeBytes * brank)))
-                                                |> emit
+                                storeOne : Int -> String -> S -> Result String S
+                                storeOne rank name st =
+                                    case slotFor name of
+                                        Just uslot ->
+                                            Ok
+                                                (emit
                                                     (Call Nothing (Base W) storeSym
                                                         [ ArgVal (Base L) ndArg
                                                         , ArgVal (Base W) (Il.Con rank)
-                                                        , ArgVal (Base L) (Il.Tmp elemT)
+                                                        , ArgVal (Base L) (Il.Tmp (slotTmp uslot))
                                                         ]
                                                     )
+                                                    st
+                                                )
+
+                                        Nothing ->
+                                            -- copy base's value for this field:
+                                            -- read base.data[baseRankOf name]
+                                            -- (the base's data array is in the
+                                            -- BASE's canonical order, which
+                                            -- differs from the RESULT's when
+                                            -- `<-` inserted a field).
+                                            case baseRankOf name of
+                                                Nothing ->
+                                                    Err ("qbe: record update field " ++ name ++ " is absent from a closed base row (corrupt Mid tree)")
+
+                                                Just brank ->
+                                                    if wordArm st then
+                                                        -- THE WORD ARM HAS NO
+                                                        -- PAYLOAD INDIRECTION
+                                                        -- AND NO 40-BYTE STRIDE
+                                                        -- (perf word-arm-records
+                                                        -- R4).  The value word
+                                                        -- IS the body, so the
+                                                        -- field is
+                                                        -- `elemAddr body brank`:
+                                                        -- the layout's own
+                                                        -- stride through the
+                                                        -- SHARED accessors, no
+                                                        -- hand-spelled `+ 8`
+                                                        -- (which is the next
+                                                        -- FRAME SLOT here) and
+                                                        -- no `* valSizeBytes`.
+                                                        let
+                                                            ( dataArg, st1 ) =
+                                                                fieldBase 0 baseSlot st
+
+                                                            ( elemT, st2 ) =
+                                                                elemAddr dataArg (Il.Con brank) st1
+                                                        in
+                                                        Ok
+                                                            (emit
+                                                                (Call Nothing (Base W) storeSym
+                                                                    [ ArgVal (Base L) ndArg
+                                                                    , ArgVal (Base W) (Il.Con rank)
+                                                                    , ArgVal (Base L) (Il.Tmp elemT)
+                                                                    ]
+                                                                )
+                                                                st2
+                                                            )
+
+                                                    else
+                                                        let
+                                                            ( dataT, st1 ) =
+                                                                freshTmp st
+
+                                                            ( p8T, st2 ) =
+                                                                freshTmp st1
+
+                                                            ( elemT, st3 ) =
+                                                                freshTmp st2
+                                                        in
+                                                        Ok
+                                                            (st3
+                                                                |> emit (Bin (Just p8T) L Add (Il.Tmp (slotTmp baseSlot)) (Il.Con 8))
+                                                                |> emit (Load (Just dataT) L LoadL (Il.Tmp p8T))
+                                                                |> emit (Bin (Just elemT) L Add (Il.Tmp dataT) (Il.Con (s.layout.valSizeBytes * brank)))
+                                                                |> emit
+                                                                    (Call Nothing (Base W) storeSym
+                                                                        [ ArgVal (Base L) ndArg
+                                                                        , ArgVal (Base W) (Il.Con rank)
+                                                                        , ArgVal (Base L) (Il.Tmp elemT)
+                                                                        ]
+                                                                    )
+                                                            )
+
+                                wrap : S -> Result String S
+                                wrap st =
+                                    -- The result's names array is content-keyed
+                                    -- on the RESULT field set (base ++
+                                    -- `<-`-inserted fields), NOT the base's — an
+                                    -- insertion extends the row.
+                                    rawWordArg (Unsafe (RawDataAddr resultNames)) st
+                                        |> Result.andThen
+                                            (\( namesArg, st1 ) ->
+                                                if wordArm st1 then
+                                                    -- THE ONE-BLOCK BUILD (perf
+                                                    -- word-arm-records R4): the
+                                                    -- names blob's address is a
+                                                    -- RAW body word at index `n`
+                                                    -- (a pointer the collector
+                                                    -- skips, not a Value), and
+                                                    -- the slot holds the TAGGED
+                                                    -- BODY through the cell
+                                                    -- writer's one-word arm —
+                                                    -- the same two statements
+                                                    -- lowerRecordLitPos makes.
+                                                    let
+                                                        ( aT, st2 ) =
+                                                            elemAddr ndArg (Il.Con n) st1
+                                                    in
+                                                    storeWordCell RtLayout.tagRecord [ ndArg ] dest (emit (Store StoreL namesArg (Il.Tmp aT)) st2)
+                                                        |> Result.map (jumpTo joinLbl)
+
+                                                else
+                                                    Ok
+                                                        (storeValueCell s.layout.tagRecord [ ndArg, Il.Con n, namesArg ] dest st1
+                                                            |> jumpTo joinLbl
+                                                        )
                                             )
-
-                    wrap : S -> Result String S
-                    wrap st =
-                        -- The result's names array is content-keyed on the
-                        -- RESULT field set (base ++ `<-`-inserted fields), NOT
-                        -- the base's — an insertion extends the row.
-                        rawWordArg (Unsafe (RawDataAddr resultNames)) st
-                            |> Result.map
-                                (\( namesArg, st1 ) ->
-                                    storeValueCell s.layout.tagRecord [ ndArg, Il.Con n, namesArg ] dest st1
-                                        |> jumpTo joinLbl
-                                )
-                in
-                List.foldl
-                    (\( rank, name ) acc -> Result.andThen (storeOne rank name) acc)
-                    (Ok s10)
-                    (List.indexedMap (\rank name -> ( rank, name )) resultNames)
-                    |> Result.andThen wrap
-                    |> Result.andThen
-                        (\sRec ->
-                            -- not-rec arm: tag 4 -> chain prepend; else -> recUpd walk.
-                            let
-                                ( tagT2, s11 ) =
-                                    freshTmp sRec
-
-                                ( is4T, s12 ) =
-                                    freshTmp s11
-
-                                ( chainLbl, s13 ) =
-                                    freshLbl "updassoc" s12
-
-                                ( walkLbl, s14 ) =
-                                    freshLbl "updwalk" s13
-
-                                s15 =
-                                    s14
-                                        |> startBlock notRecLbl
-                                        |> emit (Load (Just tagT2) W LoadW (Il.Tmp (slotTmp baseSlot)))
-                                        |> emit (Cmp (Just is4T) W Ceq (Il.Tmp tagT2) (Il.Con s.layout.tagCons))
-                                        |> closeBlock (Jnz (Il.Tmp is4T) chainLbl walkLbl)
-
-                                chain =
-                                    buildRecordUpdate { base = baseV, updates = List.map (\( f, b ) -> ( f, Var b.id )) updPairs }
-
-                                walk =
-                                    applyUpdates baseV (List.map (\( f, b ) -> ( f, Var b.id )) updPairs)
                             in
-                            lowerVal chain dest (startBlock chainLbl s15)
-                                |> Result.map (jumpTo joinLbl)
+                            List.foldl
+                                (\( rank, name ) acc -> Result.andThen (storeOne rank name) acc)
+                                (Ok s7)
+                                (List.indexedMap (\rank name -> ( rank, name )) resultNames)
+                                |> Result.andThen wrap
                                 |> Result.andThen
-                                    (\s16 ->
-                                        lowerVal walk dest (startBlock walkLbl s16)
-                                            |> Result.map (\s17 -> startBlock joinLbl (jumpTo joinLbl s17))
+                                    (\sRec ->
+                                        -- not-rec arm: tag 4 -> chain prepend;
+                                        -- else -> recUpd walk.
+                                        let
+                                            ( chainLbl, s8 ) =
+                                                freshLbl "updassoc" sRec
+
+                                            ( walkLbl, s9 ) =
+                                                freshLbl "updwalk" s8
+
+                                            chain =
+                                                buildRecordUpdate { base = baseV, updates = List.map (\( f, b ) -> ( f, Var b.id )) updPairs }
+
+                                            walk =
+                                                applyUpdates baseV (List.map (\( f, b ) -> ( f, Var b.id )) updPairs)
+                                        in
+                                        recordTagBranch baseSlot chainLbl walkLbl RtLayout.tagCons (startBlock notRecLbl s9)
+                                            |> Result.andThen
+                                                (\s10 ->
+                                                    lowerVal chain dest (startBlock chainLbl s10)
+                                                        |> Result.map (jumpTo joinLbl)
+                                                        |> Result.andThen
+                                                            (\s11 ->
+                                                                lowerVal walk dest (startBlock walkLbl s11)
+                                                                    |> Result.map (\s12 -> startBlock joinLbl (jumpTo joinLbl s12))
+                                                            )
+                                                )
                                     )
                         )
             )

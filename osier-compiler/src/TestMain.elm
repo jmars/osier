@@ -129,7 +129,7 @@ checks rt rawMidText =
                         String.contains "veclen(" (defunText key wordText)
                             && not (String.contains "reclen(" (defunText key wordText))
                     )
-                    [ "Rt.vecEq", "Rt.pvV", "Rt.pvRec", "Rt.recEqGo", "Rt.recGetGo", "Rt.hostIsProgram", "Rt.hostDispatch" ]
+                    [ "Rt.vecEq", "Rt.pvV", "Rt.pvRec", "Rt.recEqGo", "Rt.recGetGo", "Rt.recUpd", "Rt.recUpdFind", "Rt.recUpdCopy", "Rt.recAppend", "Rt.recAppendFind", "Rt.recAppendDataGo", "Rt.recAppendNamesGo", "Rt.recToChainGo", "Rt.hostIsProgram", "Rt.hostDispatch" ]
                     && String.contains "veclen(" (defunText "Rt.deepEq" wordText)
                     && List.length (String.indexes "veclen(" wordText) >= 8
                     && not (String.contains "len32(a) == len32(bb)) && call Rt.vecEq" wordText)
@@ -188,7 +188,6 @@ checks rt rawMidText =
                     (\e -> QbeLower.wordArmUnported e)
                     [ PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] }
                     , Con { tag = "Just", args = [ Lit (LNumber 1) ] }
-                    , RecordUpdate { base = Var 0, updates = [ ( "x", Lit (LNumber 1) ) ] }
                     , StreamRef { varName = "*stoutput*" }
                     , Lit (LFloat 1.5)
                     , Let
@@ -331,7 +330,7 @@ checks rt rawMidText =
             -- SEVEN -> SIX (perf word-arm-records R3): `RecordGet` left with
             -- the READ's port; `RecordUpdate` is the one record construct still
             -- standing in the list, and it leaves in its own commit.
-            && List.length refused == 6
+            && List.length refused == 5
             -- ... and the construct that LEFT the refused set (perf
             -- word-arm-records R1): a SYMBOL LITERAL is now admitted, because
             -- its cell is ported (code 2, a raw body `[byte pointer, length]`
@@ -370,6 +369,19 @@ checks rt rawMidText =
             && QbeLower.wordArmUnported (RecordGet (RecordLit [ ( "x", Lit (LString "hi") ) ]) "x") == Nothing
             && (QbeLower.wordArmUnported (RecordGet (RecordLit [ ( "x", PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ]) "x") /= Nothing)
             && (QbeLower.wordArmUnported (RecordGet (Con { tag = "Just", args = [ Lit (LNumber 1) ] }) "x") /= Nothing)
+            -- A RECORD UPDATE left the refused set in the same unit that ported
+            -- its emission (perf word-arm-records R4) — the CLOSED form rebuilds
+            -- the one-block layout, and the WALK form reaches the runtime's own
+            -- `Rt.recInsert`/`recAppend` twins.  BOTH DIRECTIONS: admitted over
+            -- any base and value this arm can build, and REFUSED when either
+            -- refuses (the classifier recurses into the base AND every update
+            -- value, so "the update is ported" cannot be mistaken for "anything
+            -- inside an update is").
+            && QbeLower.wordArmUnported (RecordUpdate { base = Var 0, updates = [ ( "x", Lit (LNumber 1) ) ] }) == Nothing
+            && QbeLower.wordArmUnported (RecordUpdate { base = RecordLit [ ( "x", Lit (LNumber 1) ) ], updates = [ ( "x", Lit (LSymbol "s") ) ] }) == Nothing
+            && QbeLower.wordArmUnported (RecordUpdate { base = Var 0, updates = [ ( "x", PrimApp { prim = "+", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ] }) == Nothing
+            && (QbeLower.wordArmUnported (RecordUpdate { base = Var 0, updates = [ ( "x", PrimApp { prim = "f/", args = [ Lit (LNumber 1), Lit (LNumber 2) ] } ) ] }) /= Nothing)
+            && (QbeLower.wordArmUnported (RecordUpdate { base = Con { tag = "Just", args = [ Lit (LNumber 1) ] }, updates = [ ( "x", Lit (LNumber 1) ) ] }) /= Nothing)
         )
     , check "utf8ByteLength 'héllo' == 6" (utf8ByteLength "héllo" == 6)
     , check "utf8ByteLength '🦀' == 4" (utf8ByteLength "🦀" == 4)
@@ -1960,6 +1972,39 @@ checks rt rawMidText =
             _ ->
                 False
         )
+    , check "THE RECORD UPDATE FAMILY'S WORD TWINS, AND THE REFUSAL LIST IT EMPTIED (perf word-arm-records R4). Every `Rt.rec*` defun the record family owns is now arm-spliced: the UPDATE half bounds by `veclen - 1` (the header count is n+1, so a bare `veclen` bound reads the names word as a field and, in the data copy, runs one word PAST the block into the next one), the NAMES half masks the base (`nw - (nw & 7)`: a literal's names array is a STATIC address the collector's body walk skips as a fixnum, a runtime-built one must be stored TAGGED or `gcScavValue` does nothing and the block is reclaimed), and `Rt.recInsert` needs NO twin (it only forwards to three defuns that have one). The row also pins the LIST ITSELF EMPTY — the family's by-name refusal list is the unit's deliverable, so a re-refusal is RED here rather than a quiet narrowing of the port"
+        (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
+            ( Ok valText, Ok wordText ) ->
+                let
+                    wordOnly key =
+                        defunText key wordText
+
+                    valOnly key =
+                        defunText key valText
+                in
+                List.all (\k -> String.contains "veclen(" (wordOnly k) && not (String.contains "reclen(" (wordOnly k)))
+                    [ "Rt.recUpd", "Rt.recUpdFind", "Rt.recUpdCopy", "Rt.recAppend", "Rt.recAppendFind", "Rt.recAppendDataGo", "Rt.recAppendNamesGo", "Rt.recToChainGo" ]
+                    && List.all (\k -> String.contains "reclen(" (valOnly k) && not (String.contains "veclen(" (valOnly k)))
+                        [ "Rt.recUpd", "Rt.recUpdFind", "Rt.recUpdCopy", "Rt.recAppend", "Rt.recAppendFind", "Rt.recAppendDataGo", "Rt.recAppendNamesGo", "Rt.recToChainGo" ]
+                    && String.contains "call Rt.allocRecord(mknum(veclen(rec)))" (wordOnly "Rt.recAppend")
+                    && String.contains "call Rt.allocRecord(mknum(veclen(rec) - 1))" (wordOnly "Rt.recUpd")
+                    && not (String.contains "allocRecord" valText)
+                    && String.contains "word nw = wload(vecbody(rec), veclen(rec) - 1);" (wordOnly "Rt.recUpdFind")
+                    && String.contains "nw - (nw & 7)" (wordOnly "Rt.recAppendFind")
+                    && String.contains "val nameSym = vecload(payload(rec, 2), payload(i, 0));" (valOnly "Rt.recUpdFind")
+                    -- `Rt.recInsert` is ONE shared body: it only forwards to
+                    -- the three defuns above, so it has no names-side text of
+                    -- its own and must NOT be spliced.
+                    && String.contains "return call Rt.recUpd(rec, field, newv);" wordText
+                    && String.contains "return call Rt.recUpd(rec, field, newv);" valText
+                    && String.contains "return call Rt.recAppend(rec, field, newv);" wordText
+                    -- THE DELIVERABLE: the family's by-name refusal list is
+                    -- EMPTY.  A re-refusal of any of the twelve is RED here.
+                    && List.isEmpty QbeLower.wordArmDefunRefusals
+
+            _ ->
+                False
+        )
     , check "THE EMITTED ARITHMETIC: on the word arm `x + 1` is ONE `:val` call to `Rt.+` and NO inline tag/payload tail; on the val arm it is the tail and no call (perf word-arm-arith). The tail is the 40-byte shape — a tag-word `loadw`, the payload at `slot + 8`, the tag/payload write back — and under the word arm those addresses are the value word and the NEXT FRAME SLOT, so it is not a slow path there but a WRONG one. The operand is a PARAMETER so neither arm's operand-type fast path can fire and the two emissions differ only by the arm. The `@pinline_` label is the tail's own block label, so its presence/absence is a fact about which path was taken, not about which text happens to appear."
         -- THE TWO ARMS NEED TWO RUNTIME SPLICES, not two layouts over one: the
         -- reachable Rt set includes `Rt.con`, whose BODY is spliced per arm
@@ -2425,10 +2470,19 @@ checks rt rawMidText =
                 -- walk meets first (`Rt.recUpdCopy` on this route, `Rt.recUpd`
                 -- on run.js's — both are in the list), so the row asserts the
                 -- PREFIX AND the reason, not one spelling of the key.
-                String.contains "Rt.rec" msg
-                    && String.contains ": the RECORD family is not ported to the word arm" msg
-                    && String.contains "payload(rec, 2)" msg
+                -- THE SUBJECT MOVED AND THE RECORD FAMILY LEFT (perf
+                -- word-arm-records R4): `wordArmDefunRefusals` is EMPTY, so a
+                -- refusal here can no longer be the record family's — it is
+                -- whatever other Rt defun the reachability walk meets first.
+                -- What the row asserts is the PRECISION property, unchanged:
+                -- the refusal names the DEFUN and the CONSTRUCT
+                -- (`<defun>: <area> — <what>`), never the namespace and never
+                -- the record list.  A re-refusal of the record family is RED
+                -- here AND in the R4 row's `List.isEmpty`.
+                String.contains ": " msg
+                    && String.contains "AREA" msg
                     && String.contains "NOT IMPLEMENTED" msg
+                    && not (String.contains ": the RECORD family is not ported to the word arm" msg)
                     && not (String.contains "AREA 7 (THE Rt SURFACE)" msg)
 
             _ ->

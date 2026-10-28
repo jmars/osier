@@ -2169,6 +2169,7 @@ defun Rt.recGetGo(rec : val, field : val, i : val) -> val {
   return call Rt.recGetGo(rec, field, mknum(payload(i, 0) + 1));
 }
 
+// >>> QBE_VAL-ONLY
 defun Rt.recUpd(rec : val, field : val, newv : val) -> val {
   val find = call Rt.recUpdFind(rec, field, mknum(0));
   // THE SAME HOLDER DISCIPLINE AS `Rt.recAppend` (perf word-arm-rawroot item 3
@@ -2185,7 +2186,26 @@ defun Rt.recUpd(rec : val, field : val, newv : val) -> val {
   vecstore(vecbody(ndN), payload(find, 0), newv);
   return mkval(14, vecaddr(vecbody(ndN), 0), reclen(rec), payload(rec, 2));
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+defun Rt.recUpd(rec : val, field : val, newv : val) -> val {
+  val find = call Rt.recUpdFind(rec, field, mknum(0));
+  // ONE BLOCK, so the update is ONE allocation: `allocRecord(veclen - 1)`
+  // reserves `n` data words PLUS the names word (the `+ 1` is the seat's), the
+  // data is copied through the unchanged `vecstore` text, and the names word is
+  // copied VERBATIM — tagged or not, it is the same word the base carried, so a
+  // record's names provenance survives an update.  `ndN` is a `:val` holder (a
+  // rooted frame slot), which is the same discipline `Rt.recAppend` uses; the
+  // only allocation happens before it exists and nothing allocates after it.
+  val ndN = mkval(14, vecbody(call Rt.allocRecord(mknum(veclen(rec) - 1))));
+  call Rt.recUpdCopy(rec, ndN, mknum(0));
+  vecstore(vecbody(ndN), payload(find, 0), newv);
+  wstore(vecbody(ndN), veclen(ndN) - 1, wload(vecbody(rec), veclen(rec) - 1));
+  return ndN;
+}
+// <<< QBE_WORDVAL-ONLY
 
+// >>> QBE_VAL-ONLY
 defun Rt.recUpdFind(rec : val, field : val, i : val) -> val {
   if (mkbool(payload(i, 0) >= reclen(rec))) {
     return mknum(-1);
@@ -2196,7 +2216,27 @@ defun Rt.recUpdFind(rec : val, field : val, i : val) -> val {
   }
   return call Rt.recUpdFind(rec, field, mknum(payload(i, 0) + 1));
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// THE NAMES-SIDE ACCESSOR, SPELLED AT ITS SITES (perf word-arm-records R4): the
+// base is the record's LAST body word, MASKED (`nw - (nw & 7)`) because a
+// static blob is `...000` and a runtime-built block is `...001`; the element is
+// a RAW char* word boxed with `mknum`, so `symEq`'s byte walk reads it with NO
+// change to `symEq`.
+defun Rt.recUpdFind(rec : val, field : val, i : val) -> val {
+  if (mkbool(payload(i, 0) >= veclen(rec) - 1)) {
+    return mknum(-1);
+  }
+  word nw = wload(vecbody(rec), veclen(rec) - 1);
+  val nameSym = mknum(wload(nw - (nw & 7), payload(i, 0)));
+  if (call Rt.symEq(nameSym, field, mknum(0))) {
+    return mknum(payload(i, 0));
+  }
+  return call Rt.recUpdFind(rec, field, mknum(payload(i, 0) + 1));
+}
+// <<< QBE_WORDVAL-ONLY
 
+// >>> QBE_VAL-ONLY
 defun Rt.recUpdCopy(rec : val, newdata : val, i : val) -> val {
   if (mkbool(payload(i, 0) >= reclen(rec))) {
     return mknil;
@@ -2204,7 +2244,22 @@ defun Rt.recUpdCopy(rec : val, newdata : val, i : val) -> val {
   vecstore(vecbody(newdata), payload(i, 0), vecload(vecbody(rec), payload(i, 0)));
   return call Rt.recUpdCopy(rec, newdata, mknum(payload(i, 0) + 1));
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// ONLY THE BOUND MOVES: both the read and the write are `vecbody`-based, which
+// is the same expression on this arm.  `veclen - 1` is load-bearing — with a
+// bare `veclen` this loop copies the base's NAMES WORD into the new block's
+// names slot and then runs one word PAST the block.
+defun Rt.recUpdCopy(rec : val, newdata : val, i : val) -> val {
+  if (mkbool(payload(i, 0) >= veclen(rec) - 1)) {
+    return mknil;
+  }
+  vecstore(vecbody(newdata), payload(i, 0), vecload(vecbody(rec), payload(i, 0)));
+  return call Rt.recUpdCopy(rec, newdata, mknum(payload(i, 0) + 1));
+}
+// <<< QBE_WORDVAL-ONLY
 
+// >>> QBE_VAL-ONLY
 defun Rt.recAppendFind(rec : val, field : val, i : val) -> val {
   if (mkbool(payload(i, 0) >= reclen(rec))) {
     return mknum(payload(i, 0));
@@ -2215,7 +2270,24 @@ defun Rt.recAppendFind(rec : val, field : val, i : val) -> val {
   }
   return call Rt.recAppendFind(rec, field, mknum(payload(i, 0) + 1));
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// The insert POSITION: the same walk as `Rt.recUpdFind`, but it answers the
+// first index whose name sorts AFTER the new field (or `n`, the append end).
+defun Rt.recAppendFind(rec : val, field : val, i : val) -> val {
+  if (mkbool(payload(i, 0) >= veclen(rec) - 1)) {
+    return mknum(payload(i, 0));
+  }
+  word nw = wload(vecbody(rec), veclen(rec) - 1);
+  val nameSym = mknum(wload(nw - (nw & 7), payload(i, 0)));
+  if (call Rt.symLess(field, nameSym, mknum(0))) {
+    return mknum(payload(i, 0));
+  }
+  return call Rt.recAppendFind(rec, field, mknum(payload(i, 0) + 1));
+}
+// <<< QBE_WORDVAL-ONLY
 
+// >>> QBE_VAL-ONLY
 defun Rt.recAppendDataGo(rec : val, newdata : val, packed : val) -> val {
   val j = mknum(payload(packed, 0) & 65535);
   val pos = mknum(payload(packed, 0) >>> 16);
@@ -2225,7 +2297,23 @@ defun Rt.recAppendDataGo(rec : val, newdata : val, packed : val) -> val {
   val store = mkbool(payload(j, 0) < payload(pos, 0)) ? vecstore(vecbody(newdata), payload(j, 0), vecload(vecbody(rec), payload(j, 0))) : (mkbool(payload(j, 0) == payload(pos, 0)) ? mknil : vecstore(vecbody(newdata), payload(j, 0), vecload(vecbody(rec), payload(j, 0) - 1)));
   return call Rt.recAppendDataGo(rec, newdata, mknum(payload(packed, 0) + 1));
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// The data half of the insertion: the loop covers `j = 0 .. n` INCLUSIVE (the
+// result has n+1 data words), so its bound is `> veclen - 1`.  Both sides are
+// `vecbody` reads/stores, i.e. the same text as the val arm.
+defun Rt.recAppendDataGo(rec : val, newdata : val, packed : val) -> val {
+  val j = mknum(payload(packed, 0) & 65535);
+  val pos = mknum(payload(packed, 0) >>> 16);
+  if (mkbool(payload(j, 0) > veclen(rec) - 1)) {
+    return mknil;
+  }
+  val store = mkbool(payload(j, 0) < payload(pos, 0)) ? vecstore(vecbody(newdata), payload(j, 0), vecload(vecbody(rec), payload(j, 0))) : (mkbool(payload(j, 0) == payload(pos, 0)) ? mknil : vecstore(vecbody(newdata), payload(j, 0), vecload(vecbody(rec), payload(j, 0) - 1)));
+  return call Rt.recAppendDataGo(rec, newdata, mknum(payload(packed, 0) + 1));
+}
+// <<< QBE_WORDVAL-ONLY
 
+// >>> QBE_VAL-ONLY
 defun Rt.recAppendNamesGo(rec : val, newnames : val, packed : val) -> val {
   val j = mknum(payload(packed, 0) & 65535);
   val pos = mknum(payload(packed, 0) >>> 16);
@@ -2235,7 +2323,47 @@ defun Rt.recAppendNamesGo(rec : val, newnames : val, packed : val) -> val {
   val store = mkbool(payload(j, 0) < payload(pos, 0)) ? vecstore(vecbody(newnames), payload(j, 0), vecload(payload(rec, 2), payload(j, 0))) : (mkbool(payload(j, 0) == payload(pos, 0)) ? mknil : vecstore(vecbody(newnames), payload(j, 0), vecload(payload(rec, 2), payload(j, 0) - 1)));
   return call Rt.recAppendNamesGo(rec, newnames, mknum(payload(packed, 0) + 1));
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// The names half, AND THE ONE PLACE THE TWO ARMS' PARAMETERS MEAN DIFFERENT
+// THINGS — so the word twin takes `newnames` as a WORD (a raw base), not as a
+// Value: the destination here is a block of raw char* words, and a `val`
+// parameter would have to name a Value the block is not (there is no code that
+// means "raw word array").  The twin is arm-spliced as a WHOLE DEFUN, so the
+// two signatures never coexist in one emit; the alternative — reinterpreting
+// the val arm's `val` parameter — is the "a parameter whose meaning two sites
+// disagree about" defect this arc exists to prevent.
+//
+// The stores are `wstore` of a RAW WORD (not `vecstore`, which would treat the
+// element as the ADDRESS of a Value), and both sides go through the masked
+// names accessor.
+defun Rt.recAppendNamesGo(rec : val, newnames : val, packed : val) -> val {
+  val j = mknum(payload(packed, 0) & 65535);
+  val pos = mknum(payload(packed, 0) >>> 16);
+  if (mkbool(payload(j, 0) > veclen(rec) - 1)) {
+    return mknil;
+  }
+  word nw = wload(vecbody(rec), veclen(rec) - 1);
+  word names = nw - (nw & 7);
+  // `newnames` IS A BOXED RAW BASE HERE (`mknum(base)`), the layout's own
+  // pointer-wrap idiom — the twin cannot take a `word` parameter, because a
+  // mixed word/val signature cannot cross the lean ABI (MEASURED: the first cut
+  // refused with "raw word binder read in a VALUE position").
+  word dst = payload(newnames, 0);
+  // THE INSERT SLOT IS SKIPPED, and the shift is done on the SOURCE INDEX rather
+  // than by branching on the STORE: this surface requires every block to end in
+  // a terminator, so a value-less `if` around the `wstore` is not expressible —
+  // the ternary selects an index (a Value) and the store stays a statement.
+  if (mkbool(payload(j, 0) == payload(pos, 0))) {
+    return call Rt.recAppendNamesGo(rec, newnames, mknum(payload(packed, 0) + 1));
+  }
+  val src = mkbool(payload(j, 0) > payload(pos, 0)) ? mknum(payload(j, 0) - 1) : j;
+  wstore(dst, payload(j, 0), wload(names, payload(src, 0)));
+  return call Rt.recAppendNamesGo(rec, newnames, mknum(payload(packed, 0) + 1));
+}
+// <<< QBE_WORDVAL-ONLY
 
+// >>> QBE_VAL-ONLY
 defun Rt.recAppend(rec : val, field : val, newv : val) -> val {
   val pos = call Rt.recAppendFind(rec, field, mknum(0));
   val packed = mknum(payload(pos, 0) * 65536);
@@ -2283,6 +2411,52 @@ defun Rt.recAppend(rec : val, field : val, newv : val) -> val {
   vecstore(vecbody(nnN), payload(pos, 0), field);
   return mkval(14, vecaddr(vecbody(ndN), 0), reclen(rec) + 1, vecaddr(vecbody(nnN), 0));
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// THE WORD TWIN OF THE RUNTIME INSERT (perf word-arm-records R4): ONE code-14
+// block, `[data_0 .. data_n | namesBase]`, plus ONE raw word block of char*
+// name pointers.  The val arm's TWO separate arrays are the same two things
+// here, with the names array's placement decided by the record layout.
+//
+// THE NAMES BLOCK'S KIND CODE IS 1, AND THE NAME LIES (stated, not hidden): a
+// word-arm block whose body is raw, unscanned words has no code of its own —
+// code 1 is the string cell's, whose unit 0 is a self-address and unit 1 a
+// length.  What code 1 BUYS is the SCAN BIT (0), the only property the
+// collector reads, and it is CORRECT here: the body holds static/C-heap name
+// addresses, no Values.  What the lie costs is confined and checkable: this
+// block is NEVER in a Value position — it is reachable only as a record's last
+// body word — so no `tagis` can see it.  `Rt.allocRaw` cannot be used instead:
+// its cell reserves unit 0 for its own byte self-address, so it cannot BE a
+// word array.  THE REAL FIX, if a second consumer ever appears, is a code of
+// its own in the KIND-CONTRACT block (and a row for it), not a second reuse.
+//
+// ORDER, and it is load-bearing: the names block's base is written into the
+// record's LAST body word, TAGGED (`+ 1`), BEFORE it is filled — so there is no
+// raw word held across an allocation AND the block is reachable through the
+// record's scanned body from the instant it exists (`gcScavValue` relocates a
+// `...001` body word and does NOTHING for a `...000` one).
+defun Rt.recAppend(rec : val, field : val, newv : val) -> val {
+  val pos = call Rt.recAppendFind(rec, field, mknum(0));
+  val packed = mknum(payload(pos, 0) * 65536);
+  // `allocRecord(veclen(rec))` reserves `veclen + 1` = n+1 data words PLUS the
+  // names word: the result has one MORE field than the base, and the `+ 1`
+  // stays in the seat.
+  val ndN = mkval(14, vecbody(call Rt.allocRecord(mknum(veclen(rec)))));
+  call Rt.recAppendDataGo(rec, ndN, packed);
+  vecstore(vecbody(ndN), payload(pos, 0), newv);
+  word nn = vecbody(call Rt.allocKind(mknum(1), mknum(veclen(rec))));
+  wstore(vecbody(ndN), veclen(ndN) - 1, nn + 1);
+  call Rt.recAppendNamesGo(rec, mknum(nn), packed);
+  // THE NEW NAME GOES INTO THE NAMES BLOCK, at the insert position — re-read
+  // from the record's LAST body word (masked) rather than reusing `nn`, so no
+  // raw word is held across the copy call.  MEASURED: the first cut wrote it at
+  // `vecbody(ndN)` + pos, i.e. into the record's DATA slot, and the printed
+  // record answered `[]` for the inserted field.
+  word nb = wload(vecbody(ndN), veclen(ndN) - 1);
+  wstore(nb - (nb & 7), payload(pos, 0), wload(payload(field, 0), 0));
+  return ndN;
+}
+// <<< QBE_WORDVAL-ONLY
 
 defun Rt.recInsert(rec : val, field : val, newv : val) -> val {
   val find = call Rt.recUpdFind(rec, field, mknum(0));
@@ -2292,6 +2466,7 @@ defun Rt.recInsert(rec : val, field : val, newv : val) -> val {
   return call Rt.recAppend(rec, field, newv);
 }
 
+// >>> QBE_VAL-ONLY
 defun Rt.recToChain(rec : val) -> val {
   if (mkbool(tagis(rec, 14))) {
     return call Rt.recToChainGo(rec, mknum(0), mknil);
@@ -2305,6 +2480,38 @@ defun Rt.recToChainGo(rec : val, i : val, acc : val) -> val {
   }
   return call Rt.recToChainGo(rec, mknum(payload(i, 0) + 1), call Rt.cons(call Rt.@p(vecload(payload(rec, 2), payload(i, 0)), vecload(vecbody(rec), payload(i, 0))), acc));
 }
+// <<< QBE_VAL-ONLY
+// >>> QBE_WORDVAL-ONLY
+// THE CHAIN TWIN (perf word-arm-records R4): the same association-list walk as
+// the val arm, over the SAME one-block layout the readers use.  The names base
+// is the record's LAST body word, masked; each car is a MATERIALIZED symbol cell
+// (code 2, `[namePtr, len]`) because a chain car is a genuine Value position
+// (the design's §2 rule) and a raw char* word there would read as a fixnum.  The
+// pair is a cons cell (`Rt.cons(sym, data)`), which is what the val arm's `@p`
+// is — so no `@p` twin is needed.
+defun Rt.recToChain(rec : val) -> val {
+  if (mkbool(tagis(rec, 14))) {
+    return call Rt.recToChainGo(rec, mknum(0), mknil);
+  }
+  return rec;
+}
+
+defun Rt.recToChainGo(rec : val, i : val, acc : val) -> val {
+  word idx = payload(i, 0);
+  if (mkbool(idx >= veclen(rec) - 1)) {
+    return acc;
+  }
+  word nw = wload(vecbody(rec), veclen(rec) - 1);
+  word namesBase = nw - (nw & 7);
+  word nameWord = wload(namesBase, idx);
+  word symBlock = vecbody(call Rt.allocSym(mknum(2)));
+  wstore(symBlock, 0, nameWord);
+  wstore(symBlock, 1, payload(call Rt.cStrLenGo(mknum(nameWord), mknum(0)), 0));
+  val symVal = mkval(2, symBlock);
+  val dataVal = vecload(vecbody(rec), idx);
+  return call Rt.recToChainGo(rec, mknum(idx + 1), call Rt.cons(call Rt.cons(symVal, dataVal), acc));
+}
+// <<< QBE_WORDVAL-ONLY
 
 // >>> QBE_VAL-ONLY
 defun Rt.absvector(cnt : val) -> val {
