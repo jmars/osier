@@ -2404,11 +2404,34 @@ defuns are members by the `direct` seed already — the edges below only ADD
 membership on the arm that needs it, and set membership is idempotent.
 
 THIS TABLE CANNOT GO STALE THE SAME WAY `rtDeps` DID, and the reason is a ROW, not
-this comment: TestMain pins the FRAME CLASS of these defuns in the emitted text
-(`q_Rt_x2erecAppend` and `q_Rt_x2erecUpd` must contain `frame_x2denter`, and the
-seats must NOT), so a defun that silently loses its rooted frame is RED whatever
-the cause — a missing entry here, a stale `rtDeps` row, or a new seat nobody
-listed.
+this comment: TestMain pins the FRAME CLASS of `q_Rt_x2erecAppend` in the emitted
+WORD text (a pooled-frame call in the prologue and NO `alloc8`), and pins that the
+seats are not members, so a defun that silently loses its rooted frame is RED
+whatever the cause — a missing entry here, a stale `rtDeps` row, or a new seat
+nobody listed.
+
+=== THE CLASS AUDIT (perf word-arm-records H1 FIX, Step 2) ===
+
+Every word-arm Rt defun that allocates — directly or through a seat — with its
+MEASURED classification (dumped from `runtime.allocating` on the shipped tree) and
+its verdict.  The question each row answers: does it hold a `:val` across a
+collecting call, and if so is its frame registered?
+
+| defun | allocates by | measured | verdict |
+|---|---|---|---|
+| `Rt.recAppend` | seats allocKind+allocRecord | **ROOTED** | FIXED. Was frame-free: `rec` went stale on the first promotion inside `allocKind` (the h1 SEGV). |
+| `Rt.recUpd` | seat allocRecord | **ROOTED** | FIXED (same class; measured RED at 60000 iterations pre-fix). |
+| `Rt.recToChainGo` | seat allocSym | **ROOTED** | SAFE, and already was: its `rtDeps` row names `Rt.cons`/`Rt.@p`, both allocating, so it was a member before this fix. The `allocSym` edge is belt-and-braces — stated so nobody reads it as the thing that fixed it. |
+| `Rt.con` | seat allocKind (word arm) | **ROOTED** | SAFE, and already was: the val twin spells the alloc PRIM (`allocvec`), which seeds it directly, and `allocating` is arm-blind. The entry is belt-and-braces. |
+| `Rt.recInsert` | forwards to recUpd/recAppend | **ROOTED** | SAFE by inheritance (its row names both). |
+| `Rt.applyTailGo` | `allocvec` in its arg-copy arm | **ROOTED** | SAFE. The diagnosis listed it as "plausibly safe-by-reread"; measured, it is simply a member. |
+| `Rt.stage-tail` | `allocvec` prim directly | **ROOTED** | SAFE by the `direct` seed. |
+| `Rt.intern` | seat allocKind (word HIT path) | frame-free | SAFE BY NON-USE, and it is a LATENT risk: at the `allocKind` call its only `:val` (`str`) is already reduced to `dataPtr`/`len` and never read again. A future edit that reads `str` after the allocation makes this the same defect — and nothing would catch it, because intern is effect-host-only on this arm today (no surface fixture reaches it). |
+| `Rt.intInsertAt` | seat allocKind (word arm) | frame-free | SAFE BY C-HEAP: the only live word across the allocation is `store`, a `malloc`'d buffer — outside the GC heap, so the scavenger's range test never moves it. |
+| `Rt.mkStream` | seat allocKind | frame-free | SAFE BY VALUE, and the tightest call in the table: it reads `payload(what, 0)`/`payload(flags, 0)` AFTER the allocation, so it is in the class by shape — but all three of its call sites pass `mknum(...)` FIXNUMS, and a fixnum is never relocated. A caller passing a heap `:val` would make it a stale read. |
+| `Rt.snd` | — | frame-free | NOT IN THE CLASS, measured: its body is one `vecload(vecbody(x), 1)` and calls no seat at all. The diagnosis's list carried it as a hypothesis; the body scan refutes it. |
+| the walkers (`recUpdFind`/`recUpdCopy`/`recAppendFind`/`recAppendDataGo`/`recAppendNamesGo`), `intInsert`/`intInsertGo`/`intGrow`/`intTab` | — | frame-free | NOT IN THE CLASS: they allocate nothing (malloc only, which is C-heap). |
+| the seats themselves (`allocKind`/`allocRecord`/`allocSym`/`allocCons`/`allocVector`/`allocRaw`) and `gcAlloc`/`gcInit` | their own `gcAlloc` | frame-free | CORRECT, and MUST stay so: each holds no `:val` across its own allocation (the call is the last statement), and a registered frame inside the collector would be a hazard, not a cost. |
 -}
 allocSeatDeps : List ( String, List String )
 allocSeatDeps =

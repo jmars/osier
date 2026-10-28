@@ -1020,6 +1020,24 @@ valLayout =
 --      order nor the scan bit nor the allocation order.  THREE ATTEMPTS HAVE
 --      FAILED; the next one should start from the churn row, not from a
 --      hypothesis.
+--      **RESOLVED (perf word-arm-records H1 FIX).**  The three attempts failed
+--      because each worked INSIDE the defun: the defect was the defun's FRAME
+--      CLASS.  `runtime.allocating`'s fixed point was seeded only from `direct`
+--      bodies (a defun containing an `allocvec` PRIM), and in the Rt lane a
+--      `call` is an EDGE — so no seat was reachable from the seed, every seat
+--      CALLER classified `RtLeanFree`, and `Rt.recAppend`'s `rec` sat in an
+--      unrooted `alloc8` frame the scavenger cannot see.  FIXED at the root:
+--      `Mid.Rt.allocationSeats` is a separate growth source for the fixed point
+--      and `allocSeatDeps` carries the seat call edges (its own table, because
+--      `rtDeps` also drives emit-reachability and the seats are WORD-ONLY).
+--      MEASURED after: `rec/h1 h2 h4 default` all `6000/6000/0` on BOTH arms,
+--      `recupd/h1 h2 h4 default` all `20000/20000/0`, corpus .ssa BYTE-IDENTICAL
+--      159/159 (no re-freeze).  THE CLASS AUDIT — every word-arm Rt defun that
+--      allocates, with its MEASURED frame class and verdict — is in `Mid/Rt.elm`
+--      above `allocSeatDeps`; it names the three latent risks that remain
+--      (`intern` safe-by-non-use, `mkStream` safe-by-value, `intInsertAt`
+--      safe-by-C-heap) and the oracle that pins the class
+--      (`q_Rt_x2erecAppend` must open with a pooled-frame call and no `alloc8`).
 --      THE READ, BUILD AND UPDATE HALF, stated with the same honesty (perf
 --      word-arm-records R3/R4).  The UPDATE
 --      half landed as the same one-block build: `lowerRecordUpdateClosed`'s tag
