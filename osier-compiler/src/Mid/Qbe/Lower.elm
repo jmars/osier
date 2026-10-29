@@ -8035,24 +8035,62 @@ lowerLit lit dest s =
 A word-arm literal is a TAGGED IMMEDIATE, not a tag word plus payload words: a
 fixnum is `n * 8` (tag `...000`, exact for every `n` in i61), `true`/`false` are
 the `...011`/`...100` immediates.  A literal that is NOT an immediate — a float
-cell, a symbol, a string — is a HEAP object and stays LOUD (areas 3/5), and so
-does a fixnum outside i61, because boxing it is area 4's overflow path.
+cell, a symbol, a string — is a HEAP object and stays LOUD (areas 3/5).  A fixnum
+outside i61 is not an immediate either, and since AREA 4 it is BOXED rather than
+refused — but `LNumber` cannot reach that boundary at all (see the arm below), and
+`LNumberBig`, the arm that can, boxes it there.
 -}
 lowerLitWord : Lit -> Int -> S -> Result String S
 lowerLitWord lit dest s =
     case lit of
         LNumber n ->
-            if n < 0 - RtLayout.wordFixnumLimit || n >= RtLayout.wordFixnumLimit then
-                Err
-                    (wordArmUnsupported
-                        (wordArea
-                            "AREA 4 (ARITHMETIC — THE i61 OVERFLOW/BOXING PATH)"
-                            ("the literal " ++ String.fromInt n ++ " — it does not fit the word arm's i61 fixnum, so it has to be BOXED onto the heap, and the boxing path does not exist yet (emitting `n * 8` would silently drop its top three bits)")
-                        )
-                    )
+            -- AREA 4 REVIEW FIX (perf word-arm-area4): `Il.Con (n * 8)` is safe
+            -- only while the product is a number EVERY host's printer spells
+            -- exactly, and the node host's `String.fromInt` prints the SHORTEST
+            -- decimal that round-trips as a double — which stops being the exact
+            -- integer once the product needs 17 digits.  MEASURED end to end
+            -- before this gate: `main = 2251799813685269` (2^51 + 21, a legal
+            -- `SmallInteger` literal) emitted `storel 18014398509482150` where
+            -- the exact product is ...152, and the binary DIED at its first
+            -- payload read; the val arm printed it exactly.
+            --
+            -- `LNumber` is bounded by the parser's `SmallInteger` at 2^53, and
+            -- `String.fromInt` is exact for every |n| <= 2^53 on BOTH hosts (the
+            -- selfhost's `fromInt` is `Rt.numText`, word-exact), so the limb
+            -- rebuild below is exact over the whole domain.  The gate is 2^50:
+            -- `n * 8` then stays under 2^53, the zone every host prints exactly.
+            if n <= 1125899906842624 && n >= -1125899906842624 then
+                Ok (emit (Store StoreL (Il.Con (n * 8)) (Il.Tmp (slotTmp dest))) s)
+
+            else if n <= 9007199254740992 && n >= -9007199254740992 then
+                -- INSIDE i61 (so still an UNBOXED fixnum — the value semantics
+                -- do not move) but past the printer's exact range: rebuild the
+                -- i64 from limbs and SHIFT AT RUNTIME, the shape storeWordCell's
+                -- inside-i61 else-arm already uses.
+                let
+                    ( v, s1 ) =
+                        emitExactWord n s
+
+                    ( sh, s2 ) =
+                        freshTmp s1
+                in
+                Ok (emit (Bin (Just sh) L Shl v (Il.Con s1.layout.tagBits)) s2
+                        |> (\st -> storeWordWord (Il.Tmp sh) dest st)
+                   )
 
             else
-                Ok (emit (Store StoreL (Il.Con (n * 8)) (Il.Tmp (slotTmp dest))) s)
+                -- ABOVE 2^53, which the PARSER cannot produce: `SmallInteger` is
+                -- bounded there and a bigger literal arrives as `LNumberBig`
+                -- DIGITS.  So this is a probe or a compiler bug — and it must be
+                -- LOUD, because the limb bridge above is `String.fromInt`, which
+                -- is itself lossy above 2^53 on this host: routing this case
+                -- through it would emit a different number wearing the right
+                -- spelling, which is the defect this arm was fixed for.
+                Err
+                    ("the literal "
+                        ++ String.fromInt n
+                        ++ " is a raw `LNumber` above the parser's SmallInteger bound (2^53), where no host's `String.fromInt` is guaranteed to spell the exact integer — a real literal that big reaches the emitter as `LNumberBig` DIGITS, never as a host number, so this is a compiler bug or a probe. Refusing rather than emitting a rounded constant."
+                    )
 
         LNumberBig digits ->
             -- AREA 4 (perf word-arm-area4): A BIG LITERAL IS NOW EXACT ON BOTH

@@ -3177,23 +3177,51 @@ checks rt rawMidText =
             _ ->
                 False
         )
-    , check "VR3b2 A LITERAL OUTSIDE i61 IS REFUSED, NOT TRUNCATED: `2^60` does not fit the word arm's i61 fixnum, so the emitter names AREA 4's boxing path instead of emitting `n * 8` (which would silently drop the top three bits). The VAL arm still compiles the same literal, so the refusal is the ARM's and not the program's"
-        (case
+    , check "AREA 4 REVIEW FIX — A RAW `LNumber` ABOVE THE PARSER'S SmallInteger BOUND IS REFUSED, NOT ROUNDED (perf word-arm-area4). `SmallInteger` stops at 2^53 and a bigger literal reaches the emitter as `LNumberBig` DIGITS, so a host-`Int` literal above 2^53 is a PROBE or a compiler bug — and it must be loud, because the limb bridge every exact word-arm path uses is `String.fromInt`, which on this host prints the shortest round-tripping DOUBLE decimal and stops being the exact integer at 17 digits. The row this replaces (VR3b2) pinned the same refusal with the claim 'the emitter names AREA 4's boxing path instead' — stale once AREA 4 existed, and it read as if a REAL big literal were refused (it BOXES now: the intbig rows and the bigMkProbe row pin that). The guard is load-bearing, MEASURED: with the arm's old i61 test deleted and no guard in its place, the 2^60 probe fell through to the limb path and emitted a rounded fixnum — this row was the ONE red row of a 1149-row run"
+        ((case
             ( QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ bigProbe ]) [ bigProbe ] "Bg.f"
             , QbeLower.lower rt False False False True True True True False False True QbeTypes.empty (rtArities [ bigProbe ]) [ bigProbe ] "Bg.f"
             )
-         of
+          of
             ( Err msg, Ok _ ) ->
                 -- NOTE: the literal's own decimal spelling is NOT asserted —
                 -- this compiler's Int is a double, so `String.fromInt 2^60`
                 -- renders with JS's 17-digit rounding.  The BOUND is what is
-                -- pinned, by name.
-                String.contains "AREA 4 (ARITHMETIC" msg
-                    && String.contains "BOXED onto the heap" msg
-                    && String.contains "does not fit the word arm's i61 fixnum" msg
+                -- pinned, by name, plus the two facts that make the refusal the
+                -- right answer rather than a truncation.
+                String.contains "above the parser's SmallInteger bound (2^53)" msg
+                    && String.contains "is a compiler bug or a probe" msg
+                    && String.contains "Refusing rather than emitting a rounded constant" msg
+                    && not (String.contains "BOXED onto the heap" msg)
 
             _ ->
                 False
+         )
+            && (case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ bandLitProbe ]) [ bandLitProbe ] "Bn.f" of
+                    -- THE BAND LITERAL: 2^51 + 21, INSIDE the parser's domain
+                    -- (|n| <= 2^53) and INSIDE i61 (so it must stay an UNBOXED
+                    -- fixnum) but far above the printer's exact range for
+                    -- `n * 8`.  Its limbs are (21, 2^25, 0), so the LOW limb is
+                    -- non-zero — the digits a shortest-repr misprint corrupts are
+                    -- always the LOW ones, and this value's low limb is where the
+                    -- MEASURED wrong constant (...150 for the exact ...152) came
+                    -- from.  Asserted by CON operands and the trailing `, 21`, so
+                    -- no temp id is pinned.
+                    Ok mod ->
+                        let
+                            txt =
+                                Print.print mod
+                        in
+                        String.contains "=l mul 33554432, 67108864" txt
+                            && String.contains ", 21\n" txt
+                            && String.contains "=l mul 0, 4503599627370496" txt
+                            && String.contains "=l shl " txt
+                            && not (String.contains "18014398509482150" txt)
+                            && not (String.contains "call $q_Rt_x2eboxInt(" txt)
+
+                    Err _ ->
+                        False
+               )
         )
     , check "VR3b3 FIX (BLOCKER 2) - THE BOOLEAN `tagis` FOLD KEEPS THE TAG AND THE COMPARE RESULT IN DISTINCT TEMPS. A boolean is ONE valtag with TWO word immediates, so `tagis(v, 3)` is the only tag test that emits an OR of two compares - and the only one where the tag temp and the compare result can be confused. The shipped code folded the first compare INTO the tag temp, so the second compared the 0/1 result against `tagFalse` and `tagis(false, tagBoolean)` answered FALSE; it is reachable through `Rt.deepEq`'s `tagis(a, 3)` the moment AREA 6 admits calls. This row pins that BOTH compares read the SAME tag temp (`%t1` twice) and that the OR and the result live elsewhere"
         (case QbeLower.lowerWith RtLayout.wordLayout rt False False False True True True True False False True QbeTypes.empty (rtArities [ boolTagProbe ]) [ boolTagProbe ] "Bt.f" of
@@ -16358,6 +16386,25 @@ intLitProbe =
         Lam
             { params = []
             , body = Lit (LNumber 1)
+            }
+    }
+
+
+{-| perf word-arm-area4 REVIEW FIX — THE BAND LITERAL PROBE: `\_ -> 2^51 + 21`,
+the smallest defun that contains a literal INSIDE the parser's `SmallInteger`
+domain and inside i61, but above the range where `n * 8` is a decimal the host
+printer spells exactly.  It is the value the blocker was measured on: the
+ungated arm emitted `storel 18014398509482150` where the exact product is
+`...152`, and the binary died at its first payload read.  Its limbs are
+`(21, 2^25, 0)`, so the row can pin the LOW limb as well as the high one.
+-}
+bandLitProbe : Defun
+bandLitProbe =
+    { key = "Bn.f"
+    , value =
+        Lam
+            { params = []
+            , body = Lit (LNumber 2251799813685269)
             }
     }
 
