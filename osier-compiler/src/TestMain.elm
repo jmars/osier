@@ -6812,6 +6812,87 @@ checks rt rawMidText =
          [ Check.fieldOffset d "Host" "nslots", Check.fieldOffset d "Host" "slots", Check.fieldOffset d "Host" "evals", Check.fieldOffset d "Host" "npoll", Check.fieldOffset d "Host" "poll" ]
             == [ Just 0, Just 8, Just 1321296, Just 1861968, Just 1861976 ]
         )
+    -- ==================== THE SCANNED-BODY COUNTS (the poisoned-body fix) ====================
+    --
+    -- A word-arm closure cell is ONE code-6 SCANNED block whose body words 1 and
+    -- 3 are COUNTS (`Rt.closure`: `arity|ncaps<<32` and `cnt`; `Rt.applyPartGo`:
+    -- `rem - nargs` and `total`), and the collector's drain walks EVERY body word
+    -- as a Value — so a RAW count ≡ 7 (mod 8) IS the reserved poison tag and the
+    -- collect reports "POISONED (forwarded young) body" (or "unknown value tag in
+    -- mark walk" under QBE_MIDGC_YOUNG=0) for the arithmetic `rem - nargs == 7` /
+    -- `cnt == 7`.  MEASURED, both fingerprints, by
+    -- `tools/qbe/word-arm-gcchurn/closchurn.elm` — which is the behavioural half;
+    -- this row states what a fixture cannot: that NO store into a closure body
+    -- and NO reader of those two words was left at the raw spelling.  It is
+    -- checked over the ARM SPLICE, not over the file (the file carries both
+    -- spellings side by side, so a `String.contains` on `runtimeMidText` would
+    -- pass on any tree, correct or not), and `codeLines` strips the comments
+    -- because this fix's comments NAME the spellings they forbid.
+    , check "THE SCANNED-BODY COUNTS ARE LEGAL VALUES, IN BOTH SPLICES (the poisoned-body fix, 2026-10-29). THE PROPERTY, NOT A COUNT: every `wstore` into a closure BODY in the word splice stores a LEGAL VALUE — a scaled count (`* 8`), a tagged young pointer (`+ 1`), a zero, or a static descriptor address — and every reader of body word 1 / 3 divides by 8. The five READERS are `Rt.applyGo`, `Rt.applyTailGo`, `Rt.applyPartGo` (both words) and `Rt.apply-at` — the FIFTH is the host applier, the site a four-site sweep misses and the one whose unscaled read makes `nargs > rem` true for every call. BOTH DIRECTIONS: the val splice keeps the bare reads and the raw `mkval`, i.e. the fix moves the WORD arm only, and the row is RED on the pre-fix tree in all five body stores and all five readers"
+        (case ( Rt.spliceArm False rawMidText, Rt.spliceArm True rawMidText ) of
+            ( Ok valText, Ok wordText ) ->
+                let
+                    wCode key =
+                        codeLines (defunText key wordText)
+
+                    vCode key =
+                        codeLines (defunText key valText)
+
+                    -- (defun, the closure variable it reads, the body word)
+                    countReads =
+                        [ ( "Rt.applyGo", "f", "1" )
+                        , ( "Rt.applyTailGo", "f", "1" )
+                        , ( "Rt.applyPartGo", "f", "1" )
+                        , ( "Rt.applyPartGo", "f", "3" )
+                        , ( "Rt.apply-at", "cN", "1" )
+                        ]
+
+                    read = \( key, v, idx ) -> "payload32(" ++ v ++ ", " ++ idx ++ ")"
+
+                    -- the store must be one of these, and each name says WHICH
+                    -- legal word it is (a comment cannot: it would be the thing
+                    -- that drifts)
+                    legalBodyStore l =
+                        List.any (\s -> String.contains s l)
+                            [ "* 8" -- a count, scaled to a fixnum
+                            , "+ 1" -- a young pointer, tagged
+                            , ", 0)" -- a zero count / the empty tag
+                            , ", 1)" -- the tag alone (no captures)
+                            , ", desc)" -- a static descriptor address
+                            , ", descW)" -- a static descriptor address
+                            , ", code)" -- a static descriptor address
+                            ]
+
+                    bodyStores =
+                        List.concatMap (\k -> String.lines (wCode k))
+                            [ "Rt.closure", "Rt.applyPartGo", "Rt.globalClosure" ]
+                            |> List.filter
+                                (\l ->
+                                    String.contains "wstore(body," l
+                                        || List.any (\i -> String.contains ("wstore(slot, " ++ i ++ ",") l) [ "2", "3", "4", "5" ]
+                                )
+                in
+                String.contains "defun Rt.applyGo(" wordText
+                    && not (List.isEmpty bodyStores)
+                    && List.all legalBodyStore bodyStores
+                    && List.all (\( key, v, idx ) -> String.contains (read ( key, v, idx ) ++ " / 8") (wCode key)) countReads
+                    && List.all (\( key, v, idx ) -> not (String.contains (read ( key, v, idx ) ++ ";") (wCode key))) countReads
+                    && String.contains "wstore(body, 1, (arityW & 4294967295) * 8);" (wCode "Rt.closure")
+                    && String.contains "wstore(body, 3, cntW * 8);" (wCode "Rt.closure")
+                    && String.contains "wstore(body, 1, (rem - nargs) * 8);" (wCode "Rt.applyPartGo")
+                    && String.contains "wstore(body, 3, total * 8);" (wCode "Rt.applyPartGo")
+                    && String.contains "wstore(slot, 3, (wload(desc, 1) & 4294967295) * 8);" (wCode "Rt.globalClosure")
+                    && -- THE VAL ARM DID NOT MOVE: the same five defuns keep the
+                       -- bare reads there, and the raw `mkval` cells are untouched
+                       List.all (\( key, v, idx ) -> String.contains (read ( key, v, idx ) ++ ";") (vCode key)) countReads
+                    && List.all (\( key, v, idx ) -> not (String.contains (read ( key, v, idx ) ++ " / 8") (vCode key))) countReads
+                    && String.contains "return mkval(6, descW, arityW, dataW, cntW);" (vCode "Rt.closure")
+                    && String.contains "return mkval(6, code, rem - nargs, envv, total);" (vCode "Rt.applyPartGo")
+                    && String.contains "wstore(slot, 2, wload(desc, 1));" (vCode "Rt.globalClosure")
+
+            _ ->
+                False
+        )
     -- ==================== THE HOST PATH'S WORD-ARM PORT (perf word-arm-hostpath) ====================
     --
     -- FIVE ROWS, AND EACH IS THE PROPERTY RATHER THAN A COUNT OF SITES.  The class

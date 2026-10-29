@@ -1124,6 +1124,21 @@ valLayout =
 --      `sizeof(val)` as the .mid front end computes it, i.e. 40 under ANY
 --      knob — see the frontier note at `Rt.kindHdr`); and the printer internals
 --      where they read a payload without the layout-derived accessors.
+--      THE SCANNED-BODY INVARIANT (the poisoned-body fix): **a SCANNED body
+--      holds only LEGAL VALUES.**  The scan bit is DERIVED from the kind code
+--      (`Rt.kindHdr`'s five-code set: 4, 6, 9, 10, 14), and the drain then walks
+--      EVERY body word as a Value — so a raw word in a scanned body is a
+--      collector INPUT, not a layout detail.  A word ≡ 7 (mod 8) is the reserved
+--      poison tag (the collect reports a forwarded body), a word ≡ 1 (mod 8) is
+--      read as a pointer and silently no-op'd.  MEASURED, both fingerprints, in
+--      the one seat that broke it: a word-arm closure cell is ONE code-6 block
+--      whose body words 1 and 3 are COUNTS, so `Rt.closure` and
+--      `Rt.applyPartGo` now store `count * 8` and the FIVE readers
+--      (`Rt.applyGo`, `Rt.applyTailGo`, `Rt.applyPartGo` twice, `Rt.apply-at`)
+--      divide by 8 — pinned by `tools/qbe/word-arm-gcchurn/closchurn.elm`'s six
+--      ladder rows and by a TestMain row that asserts the PROPERTY over every
+--      store into a closure body in both splices.  The rule for the next writer
+--      is at `runtime.mid`'s KIND-CONTRACT block and at `Rt.closure`.
 --   8. THE C FFI GLUE.  The tag/untag at the boundary — a fixnum's payload IS
 --      the C i64 after untag, and Values never cross raw (the extern
 --      declarations already encode C widths, so nothing there moves).
