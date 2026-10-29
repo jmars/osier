@@ -3392,6 +3392,31 @@ else
   FAIL=1
 fi
 
+# ---- THE `tcall` CLASS CONDITION ON THE WORD ARM (perf word-arm-area6) ----
+# WHY THIS ROW EXISTS.  The word arm's `rt_call2r` did not `tcall` its callee,
+# on a recorded reason that was MEASURED FALSE: "the word arm emits a tcall in a
+# block that LOADED its argument first, and QBE rejects exactly that".  It does
+# not — the one shape QBE refuses is a CLASS MISMATCH — so the arm now tcalls,
+# and this row guards the two things that make that legal: the class condition
+# (refused BY NAME in both directions) and the shape (no tcall block may load
+# its argument, because gcm's sink pass appends dead copies AFTER a tcall in any
+# block that both loads and tcalls — the real refusal the first cut hit, and
+# one no gate could see before).  Its fail-before is derived from the real emit
+# rather than asserted, so the row proves the shape matters and not just that
+# the author wrote it.  The stack half of the same fix is `clostail-big` below.
+if [ -x "$ROOT/tools/qbe/tcall-class-probe.sh" ]; then
+  if tclass_out="$(TMPDIR="$TMP" "$ROOT/tools/qbe/tcall-class-probe.sh" 2>&1)"; then
+    echo "PASS tcall-class: $(printf '%s\n' "$tclass_out" | grep -c '^PASS') row(s) — legal shape assembles, $(printf '%s\n' "$tclass_out" | grep -c '^PASS class-mismatch') named class refusals (both directions), $(printf '%s\n' "$tclass_out" | grep -c '^PASS derived-fail-before') derived fail-before refused, and the word arm's own emit has no tcall block that loads"
+  else
+    echo "FAIL tcall-class: the word arm's tcall shape/class probe FAILED — a tcall block loads its argument, a class mismatch was accepted or refused without naming the condition, or the emit stopped assembling"
+    printf '%s\n' "$tclass_out" | sed 's/^/    /'
+    FAIL=1
+  fi
+else
+  echo "FAIL tcall-class: tools/qbe/tcall-class-probe.sh is missing — the ONLY oracle on the word arm's tcall CLASS condition was deleted"
+  FAIL=1
+fi
+
 # ---- THE WORD ARM'S BEHAVIOUR PROBE (perf VR3b3, wired here so it RUNS) ----
 # WHY THIS ROW EXISTS AT ALL.  Under QBE_VALREP=word no program compiled through
 # run.js can run: the runtime is always injected, so the emitted set always
