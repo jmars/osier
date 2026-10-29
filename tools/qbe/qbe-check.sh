@@ -1065,36 +1065,52 @@ frame_perf_gate
 # boxing fails BOTH the grep and the count.  The memset count carries the
 # P1e shape: 0 would mean the bulk zero is gone (or was never emitted), 2+
 # that something re-introduced a second zeroing pass.
+# PER ARM (VR3d's flip).  This pin was written when the val arm was the
+# default, and two of its three assertions are VAL-ARM SHAPES: `storew 3,` is
+# how the 40-byte arm boxes a cond (a word-arm boolean is one immediate, so that
+# grep can never fire there and asserting it would be vacuous), and the
+# instruction bound was calibrated on the val arm's frameBlock.  MEASURED on the
+# flipped tree, same fixture: val 67 instructions / word 143, both with ZERO
+# `storew 3,` and exactly ONE memset in frame-enter.  So the row now runs BOTH
+# arms and asserts each arm's own content: the boxed-cond grep and the 80 bound
+# on the val arm (the P1c/P1e shape they were measured for), and the memset plus
+# a bound on the word arm.
 frame_wordcond_pin() {
-  local ssa fb fe fb3 fb_i fe_memset ok
-  ssa="$TMP/frame-wordcond.ssa"
-  (cd "$ROOT/osier-compiler" && QBE=1 QBE_ENTRY=Fib.fib node run.js "$ROOT/tests/elm-fixtures/fib.elm" "$ssa") >/dev/null 2>&1
-  if [ ! -s "$ssa" ]; then
-    echo "FAIL frame-wordcond: fib .ssa missing (compile failed)"
-    FAIL=1; return
-  fi
-  fb="$(sed -n '/^function l \$q_Rt_x2eframeBlock(/,/^}/p' "$ssa")"
-  # P1e deleted Rt.frameZero (the per-slot loop) for a single memset in
-  # Rt.frame-enter, so this pin tracks frameBlock ALONE and asserts the
-  # memset the zeroing became.  It keeps the vacuity guard for both: a defun
-  # that vanished would otherwise make "0 matches" read as a pass.
-  fe="$(sed -n '/^function l \$q_Rt_x2eframe_x2denter(/,/^}/p' "$ssa")"
-  if [ -z "$fb" ] || [ -z "$fe" ]; then
-    echo "FAIL frame-wordcond: frameBlock/frame-enter defun not found in fib .ssa (the pin is vacuous)"
-    FAIL=1; return
-  fi
-  fb3="$(printf '%s\n' "$fb" | grep -c 'storew 3,')"
-  fb_i="$(printf '%s\n' "$fb" | awk '{ line=$0; sub(/^[ \t]+/,"",line); if (line !~ /^@/ && line !~ /^#/ && line !~ /^function/ && line !~ /^}/) c++ } END { print c+0 }')"
-  fe_memset="$(printf '%s\n' "$fe" | grep -c 'call \$memset')"
-  ok=1
-  if [ "$fb3" -ne 0 ]; then echo "FAIL frame-wordcond: frameBlock still boxes a cond (storew 3 x $fb3)"; ok=0; fi
-  if [ "$fb_i" -gt 80 ]; then echo "FAIL frame-wordcond: frameBlock instruction count $fb_i > 80 (boxed-cond shape)"; ok=0; fi
-  if [ "$fe_memset" -ne 1 ]; then echo "FAIL frame-wordcond: frame-enter does not bulk-zero with exactly ONE memset call (found $fe_memset)"; ok=0; fi
-  if [ "$ok" -eq 1 ]; then
-    echo "PASS frame-wordcond: frameBlock emits no mkbool shape (storew 3 x $fb3, $fb_i instructions, bound 80) and frame-enter bulk-zeroes with one memset call"
-  else
-    FAIL=1
-  fi
+  local arm ssa fb fe fb3 fb_i fe_memset bound ok bad
+  bad=0
+  for arm in val word; do
+    ssa="$TMP/frame-wordcond-$arm.ssa"
+    (cd "$ROOT/osier-compiler" && QBE=1 QBE_VALREP="$arm" QBE_ENTRY=Fib.fib node run.js "$ROOT/tests/elm-fixtures/fib.elm" "$ssa") >/dev/null 2>&1
+    if [ ! -s "$ssa" ]; then
+      echo "FAIL frame-wordcond: fib .ssa missing on the $arm arm (compile failed)"
+      bad=1; continue
+    fi
+    fb="$(sed -n '/^function l \$q_Rt_x2eframeBlock(/,/^}/p' "$ssa")"
+    # P1e deleted Rt.frameZero (the per-slot loop) for a single memset in
+    # Rt.frame-enter, so this pin tracks frameBlock ALONE and asserts the
+    # memset the zeroing became.  It keeps the vacuity guard for both: a defun
+    # that vanished would otherwise make "0 matches" read as a pass.
+    fe="$(sed -n '/^function l \$q_Rt_x2eframe_x2denter(/,/^}/p' "$ssa")"
+    if [ -z "$fb" ] || [ -z "$fe" ]; then
+      echo "FAIL frame-wordcond: frameBlock/frame-enter defun not found in the $arm arm's fib .ssa (the pin is vacuous)"
+      bad=1; continue
+    fi
+    fb3="$(printf '%s\n' "$fb" | grep -c 'storew 3,')"
+    fb_i="$(printf '%s\n' "$fb" | awk '{ line=$0; sub(/^[ \t]+/,"",line); if (line !~ /^@/ && line !~ /^#/ && line !~ /^function/ && line !~ /^}/) c++ } END { print c+0 }')"
+    fe_memset="$(printf '%s\n' "$fe" | grep -c 'call \$memset')"
+    bound=160
+    [ "$arm" = val ] && bound=80
+    ok=1
+    if [ "$arm" = val ] && [ "$fb3" -ne 0 ]; then echo "FAIL frame-wordcond(val): frameBlock still boxes a cond (storew 3 x $fb3)"; ok=0; fi
+    if [ "$fb_i" -gt "$bound" ]; then echo "FAIL frame-wordcond($arm): frameBlock instruction count $fb_i > $bound"; ok=0; fi
+    if [ "$fe_memset" -ne 1 ]; then echo "FAIL frame-wordcond($arm): frame-enter does not bulk-zero with exactly ONE memset call (found $fe_memset)"; ok=0; fi
+    if [ "$ok" -eq 1 ]; then
+      echo "PASS frame-wordcond($arm): frameBlock $fb_i instructions (bound $bound), storew-3 x $fb3, and frame-enter bulk-zeroes with one memset call"
+    else
+      bad=1
+    fi
+  done
+  [ "$bad" -eq 0 ] || FAIL=1
 }
 frame_wordcond_pin
 
@@ -1529,7 +1545,14 @@ tsbuf_apply_gate() {
   fi
   echo "PASS tsbuf-apply: TsbufProbe.main prints 42127 (rc 0) with both staging seats exercised — two staged blocks were live at once and neither clobbered the other"
 }
-tsbuf_apply_gate
+# VAL ARM, EXPLICITLY (VR3d's flip): this row's STRUCTURAL half requires the
+# emit to call BOTH staging seats, and the word-arm emit of this fixture never
+# reaches `Rt.stage-tail` (the static tail path stages differently there), so the
+# row's own "a fixture that stops reaching one of them is not a weaker test, it is
+# no test" guard fires — correctly.  The aliasing hazard on the WORD arm
+# therefore has NO oracle; that is a recorded gap (WORD-ARM-FRONTIER.md, the flip
+# section), not a green row.
+QBE_VALREP=val tsbuf_apply_gate
 
 # ---- stage 4: arity > 8 (the old rt_callN table stopped at rt_call8) ----
 # arity9: a 9-ary defun called DIRECTLY from the driver (rt_call9).  arity9apply:
@@ -1663,7 +1686,13 @@ if [ -f "$S" ]; then
         | grep -c '(%rbx)')
   c=$(sed -n '/^q_Fib_x2efib:/,/end function q_Fib_x2efib/p' "$S" \
         | grep -c 'callq q_Fib_x2efib')
-  if [ "$n" -ge 20 ] && [ "$c" -eq 2 ]; then
+  # THE FLOOR IS PER ARM (VR3d's flip).  MEASURED on the flipped tree: 66
+  # frame-pointer ops on the val arm, 19 on the word arm (8-byte slots need
+  # fewer stores per frame), against 0 for a promoted/absent frame.  A floor of
+  # 10 keeps the row a real test of "the roots are stored around the recursive
+  # callq" on BOTH arms instead of pinning the val arm's count as if it were a
+  # property of the source.
+  if [ "$n" -ge 10 ] && [ "$c" -eq 2 ]; then
     echo "PASS root-stores: $n frame-pointer memory ops around $c recursive callq in fib.s"
   else
     echo "FAIL root-stores: only $n frame-pointer ops around $c calls (promotion?)"
@@ -1832,12 +1861,20 @@ AGGPRIMS="storew 14
 cons
 emptylist"
 
-qbe_ssa tools/qbe/fixtures/flatten.elm   Flatten.main   "$TMP/flat-on.ssa"  on
-qbe_ssa tools/qbe/fixtures/flatten.elm   Flatten.main   "$TMP/flat-off.ssa" off
-qbe_ssa tools/qbe/fixtures/noflatten.elm NoFlatten.main "$TMP/noflat-on.ssa"  on
-qbe_ssa tools/qbe/fixtures/noflatten.elm NoFlatten.main "$TMP/noflat-off.ssa" off
-qbe_ssa tools/qbe/fixtures/flatnest.elm  FlatNest.main  "$TMP/flatnest-on.ssa"  on
-qbe_ssa tools/qbe/fixtures/flatnest.elm  FlatNest.main  "$TMP/flatnest-off.ssa" off
+# VAL ARM, EXPLICITLY (VR3d's flip): `agg_count`'s record probe is the literal
+# `storew 14`, i.e. the 40-byte arm's tag-14 RawMkValue.  A word-arm record is a
+# heap CELL whose kind code lives in the 2-word header, so this row's constant
+# has no word-arm counterpart and the A/B below would read 0->0 on that arm
+# (both directions red, for the wrong reason).  Naming the arm keeps the row a
+# real test of the pass it names; the WORD arm's flatten shape is NOT pinned by
+# this row — that gap is recorded in tools/qbe/WORD-ARM-FRONTIER.md's flip
+# section.
+QBE_VALREP=val qbe_ssa tools/qbe/fixtures/flatten.elm   Flatten.main   "$TMP/flat-on.ssa"  on
+QBE_VALREP=val qbe_ssa tools/qbe/fixtures/flatten.elm   Flatten.main   "$TMP/flat-off.ssa" off
+QBE_VALREP=val qbe_ssa tools/qbe/fixtures/noflatten.elm NoFlatten.main "$TMP/noflat-on.ssa"  on
+QBE_VALREP=val qbe_ssa tools/qbe/fixtures/noflatten.elm NoFlatten.main "$TMP/noflat-off.ssa" off
+QBE_VALREP=val qbe_ssa tools/qbe/fixtures/flatnest.elm  FlatNest.main  "$TMP/flatnest-on.ssa"  on
+QBE_VALREP=val qbe_ssa tools/qbe/fixtures/flatnest.elm  FlatNest.main  "$TMP/flatnest-off.ssa" off
 
 if [ -s "$TMP/flat-on.ssa" ] && [ -s "$TMP/flat-off.ssa" ]; then
   f_bad=0
@@ -2035,10 +2072,17 @@ qbe_ssa_rep() { # <fixture> <entry> <out.ssa> <on|off>
     (cd "$ROOT/osier-compiler" && QBE=1 QBE_ENTRY="$2" node run.js "$ROOT/$1" "$3") >/dev/null 2>&1
   fi
 }
+# VAL ARM, EXPLICITLY (VR3d's flip), AND IT IS NOT A RETREAT: S4's "unbox a
+# proven Int local" is a change to the 40-byte representation — on the word arm
+# an Int local IS one word, so the pass emits BYTE-IDENTICAL code with and
+# without it (MEASURED on the flipped tree: NoRep.chain and NoRep.floatLocal are
+# cmp-identical ON vs OFF).  An A/B whose two arms cannot differ is not a test,
+# so this row names the arm it measures.  The word arm's own coverage of these
+# locals is the corpusrun/diff rows (behaviour), not this counter.
 for pair in slotCount:slot chain:chain capture:cap polyLocal:poly boxed:box floatLocal:float floatParam:floatp floatCapture:floatc; do
   e="${pair%%:*}"; n="${pair##*:}"
-  qbe_ssa_rep tools/qbe/fixtures/norep.elm "NoRep.$e" "$TMP/norep-$n-on.ssa"  on
-  qbe_ssa_rep tools/qbe/fixtures/norep.elm "NoRep.$e" "$TMP/norep-$n-off.ssa" off
+  QBE_VALREP=val qbe_ssa_rep tools/qbe/fixtures/norep.elm "NoRep.$e" "$TMP/norep-$n-on.ssa"  on
+  QBE_VALREP=val qbe_ssa_rep tools/qbe/fixtures/norep.elm "NoRep.$e" "$TMP/norep-$n-off.ssa" off
 done
 # pass A DELETES the per-call staging block, so it deletes FRAME SLOTS too
 # (stageSlots reserves one slot per argument, per call).  The FIXTURE-STRENGTH
@@ -2061,7 +2105,7 @@ qbe_ssa_norep_offpd() {
 if [ -s "$TMP/norep-slot-on.ssa" ] && [ -s "$TMP/norep-slot-off.ssa" ]; then
   s_on=$(frame_slots "$TMP/norep-slot-on.ssa")
   s_off=$(frame_slots "$TMP/norep-slot-off.ssa")
-  qbe_ssa_norep_offpd tools/qbe/fixtures/norep.elm NoRep.slotCount "$TMP/norep-slot-offpd.ssa"
+  QBE_VALREP=val qbe_ssa_norep_offpd tools/qbe/fixtures/norep.elm NoRep.slotCount "$TMP/norep-slot-offpd.ssa"
   s_off_pd=$(frame_slots "$TMP/norep-slot-offpd.ssa")
   p_on=$(rtprim_sites "$TMP/norep-slot-on.ssa")
   p_off=$(rtprim_sites "$TMP/norep-slot-off.ssa")
@@ -2106,7 +2150,7 @@ if [ -s "$TMP/norep-slot-on.ssa" ] && [ -s "$TMP/norep-slot-off.ssa" ]; then
   fl_off=$(rtprim_sites "$TMP/norep-float-off.ssa")
   fs_on=$(frame_slots "$TMP/norep-float-on.ssa")
   fs_off=$(frame_slots "$TMP/norep-float-off.ssa")
-  qbe_ssa_norep_offpd tools/qbe/fixtures/norep.elm NoRep.floatLocal "$TMP/norep-float-offpd.ssa"
+  QBE_VALREP=val qbe_ssa_norep_offpd tools/qbe/fixtures/norep.elm NoRep.floatLocal "$TMP/norep-float-offpd.ssa"
   fs_off_pd=$(frame_slots "$TMP/norep-float-offpd.ssa")
   if cmp -s "$TMP/norep-float-on.ssa" "$TMP/norep-float-off.ssa"; then
     echo "FAIL norep-float-fired: floatLocal .ssa is BYTE-IDENTICAL on and off — the Float locals were NOT unboxed"
@@ -2256,8 +2300,16 @@ mono_fn_sym() {
     END { print c+0 }
   ' "$1"
 }
-qbe_ssa_mono tools/qbe/fixtures/mono.elm Mono.main "$TMP/mono-main-on.ssa" on
-qbe_ssa_mono tools/qbe/fixtures/mono.elm Mono.main "$TMP/mono-main-off.ssa" off
+# VAL ARM, EXPLICITLY (VR3d's flip).  The pass is NOT inert on the word arm —
+# MEASURED, Mono.main's emits differ ON vs OFF — but this row's DISCRIMINATOR is
+# the clone's `prim=`/`sym=` fallback COUNT, which is counted out of the emitted
+# call shapes (`rt_prim`/`q_Rt_*`); on the word arm the clone keeps the same
+# count because the fallbacks themselves route differently, so the counter reads
+# 6 vs 6 while the pass did fire.  Naming the arm keeps the row measuring the
+# thing it names; the word-arm mono behaviour is covered by mono-refuse-* and by
+# the corpus rows.
+QBE_VALREP=val qbe_ssa_mono tools/qbe/fixtures/mono.elm Mono.main "$TMP/mono-main-on.ssa" on
+QBE_VALREP=val qbe_ssa_mono tools/qbe/fixtures/mono.elm Mono.main "$TMP/mono-main-off.ssa" off
 # the FIRING entry: two clones (fib at Int, foldPair at Int), and the clone's
 # own body must have LOST the arithmetic fallbacks while the still-polymorphic
 # original keeps them.
@@ -3045,7 +3097,12 @@ run_midshape ffiw-u32 Ffiw32uMain.main tools/qbe/fixtures/ffiw-u32.elm tools/qbe
 # the Mid route's allocation seats number the surrounding temps differently.
 # The MIDGC_OFF=1 pin that carried the first flip attempt is GONE: the default
 # route is the Mid one now, and this row asserts ITS emission.
-run_midshape ffid-f64 FfidMain.main tools/qbe/fixtures/ffid-f64.elm tools/qbe/fixtures/ffid-f64.mid '=w call $strfromd(l %t3, l 16, l $d0, d %t6)' extsw
+# VAL ARM, EXPLICITLY (VR3d's flip): the expected call SHAPE below is the
+# 40-byte arm's FFI boundary (the by-value arg widths and the `d` operand it
+# passes), and a word-arm emit spells that boundary differently.  The word arm's
+# FFI glue has its own behavioural rows (word-arm-probe's 11 probes); this row is
+# the val arm's structural pin of the DECLARED boundary.
+QBE_VALREP=val run_midshape ffid-f64 FfidMain.main tools/qbe/fixtures/ffid-f64.elm tools/qbe/fixtures/ffid-f64.mid '=w call $strfromd(l %t3, l 16, l $d0, d %t6)' extsw
 # The RESULT half on its own: `atof(ptr) -> f64` takes no `d` argument, so the
 # only thing this row can be reading is the `=d call`.  MEASURED failure shape
 # (a mutation emitting `=l call` here): QBE refuses the program outright —
@@ -3074,7 +3131,7 @@ run_midshape ffiv-void FfivMain.main tools/qbe/fixtures/ffiv-void.elm tools/qbe/
 # `snprintf` is the printf shape; `fcntl` is the shape the effect-loop port
 # needs (`effectloop.zig:117`), with the variadic argument a real argument
 # rather than a format operand.
-run_midshape ffis-vararg FfisMain.main tools/qbe/fixtures/ffis-vararg.elm tools/qbe/fixtures/ffis-vararg.mid '=w call $snprintf(l %t3, l 32, l $d0, ..., l 1, l 2)' extsw
+QBE_VALREP=val run_midshape ffis-vararg FfisMain.main tools/qbe/fixtures/ffis-vararg.elm tools/qbe/fixtures/ffis-vararg.mid '=w call $snprintf(l %t3, l 32, l $d0, ..., l 1, l 2)' extsw
 run_midshape ffic-vararg FficMain.main tools/qbe/fixtures/ffic-vararg.elm tools/qbe/fixtures/ffic-vararg.mid '=w call $fcntl(w 1, w 3, ..., l 0)' extsw
 
 # ---- cffi U6: WIDTH-TYPED MEMORY (plan §8 U6) — the offsets are MEASURED ----
@@ -3138,7 +3195,14 @@ run_midshape ffim-mem FfimMain.main tools/qbe/fixtures/ffim-mem.elm tools/qbe/fi
 # arity - rem` the same row prints `[cons 1407343666249120 . [cons 500 . []]]`,
 # and routing through Rt.apply is refused at compile time by J2.  Both were run
 # as mutations of runtime.mid.
-run_midhost hostapply HostApply.main tools/qbe/fixtures/hostapply.elm tools/qbe/fixtures/Whost.mid
+# VAL ARM, EXPLICITLY (VR3d's flip): Whost.mid is a FIXTURE that hand-computes
+# the 40-byte Value stride (`vecstore(blob + 8 + 40*k, 0, v)`, `mknum(blob + 48)`,
+# `malloc(400)` for an 8-cell block) — it cannot be spelled arm-agnostically in
+# the .mid DSL, and on the word arm it reads the wrong slots (MEASURED on the
+# flipped tree: `[cons 7 . ...]` where the golden's first element is 417 — the
+# model word never reached the closure).  The WORD arm's host-applier oracle is
+# word-arm-diff's hostprog.elm, which is stride-twin and runs on BOTH arms.
+QBE_VALREP=val run_midhost hostapply HostApply.main tools/qbe/fixtures/hostapply.elm tools/qbe/fixtures/Whost.mid
 
 # ---- THE BOOLEAN PAYLOAD'S WIDTH (the route's silent-wrong) ----
 # A bool Value's payload is a WORD — `boolean: i32` in the Zig `Value` union
@@ -3159,7 +3223,14 @@ run_midhost hostapply HostApply.main tools/qbe/fixtures/hostapply.elm tools/qbe/
 # that widened back to `loadl` moves slot 1 to 4294967296, and a `payload` that
 # narrowed moves slots 0/3 — and slots 4/5 pin that the everyday `mkbool` path
 # still reads 1/0 through the same op.
-run_mid boolpay BoolPayMain.main tools/qbe/fixtures/boolpay.elm tools/qbe/fixtures/boolpay.mid
+# VAL ARM, EXPLICITLY (VR3d's flip): boolpay.mid's whole subject is the 40-byte
+# arm's boolean PAYLOAD WORD (`mkval(5, mknum(2^32))` — low half false, high half
+# 1) and the width contract of `payload32` vs `payload`.  A word-arm boolean is an
+# IMMEDIATE with no payload word, and the emitter REFUSES that cell by name
+# (AREA 3: "a cell with the code 5 and one payload word ... that code's word
+# encoding is a bare immediate and has no payload") — so the row cannot exist on
+# that arm, and the refusal is the arm's correct answer, not a defect.
+QBE_VALREP=val run_mid boolpay BoolPayMain.main tools/qbe/fixtures/boolpay.elm tools/qbe/fixtures/boolpay.mid
 
 # THE EMITTED WIDTHS, on the fixture's own two defuns (a golden alone cannot
 # say WHERE the width came from, and a bare "the .ssa contains a loadw" would
