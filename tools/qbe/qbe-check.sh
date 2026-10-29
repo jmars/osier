@@ -1016,9 +1016,33 @@ run interleave Interleave.main tools/qbe/fixtures/interleave.elm
 # instead of a live QBE_MIDDRIVER=0 build.  The ratio is Mid-vs-FROZEN-Zig, so
 # it may read slightly differently than the live measurement (frame 0.97x,
 # apply 1.6x, tail 1.5x measured against the LIVE Zig arm just before B4); the
-# bounds are KEPT, not retuned to taste.  ASYMMETRY is preserved: a degraded
-# Mid arm (QBE_NORTLEAN=1, the fat ABI) still exceeds the bound (shown once,
-# for this gate, in the B4 handoff evidence — not as a permanent row).
+# bounds are KEPT, not retuned to taste.
+#
+# VR3d RE-BASE, PER ARM (the flip made the word arm the default, and this gate
+# had only ever been read on the val arm).  MEASURED on the flipped tree,
+# median of 7 alternating pairs against the same frozen reference:
+#
+#   gate            val arm        word arm (THE DEFAULT)   bound
+#   frame  fib 28   0.83x (38/46)  2.34x (110/47)           2.5x
+#   apply  n=5e6    1.51x (496/328) 3.01x (987/328)         12x
+#   tail   1e6      0.82x (47/57)  1.44x (82/57)            6x
+#
+# THE WORD ARM IS ~2-3x SLOWER THAN THE VAL ARM ON ALL THREE CALL-FAMILY PATHS,
+# and that is a fact about this point in the arc, not a defect: the word arm's
+# win is the value STRIDE, and its frame path is still the 40-byte arm's shape
+# (frameBlock is 143 instructions on the word arm vs 67 on the val arm —
+# `frame-wordcond` prints both).  VR4/VR5/VR6 are the units that pay this back.
+# WHAT IT MEANS FOR THE BOUND: the frame gate now sits 7% under its bound on the
+# default arm, so it is nearly binding — a rebase decision for the owner, and
+# the reason this table is here rather than in a handoff.
+#
+# ASYMMETRY, AND ITS HONEST STATE: the B4 probe (QBE_NORTLEAN=1, the fat ABI)
+# is GONE — the Mid collector REFUSES it ("the Mid routes hard-code the lean
+# call shape"), so that degraded arm no longer exists to be measured.
+# QBE_NOREP=1 is the nearest hatch and it is INERT on the word arm (MEASURED
+# 2.39x vs the clean 2.34x — S4's unboxing does nothing there).  So the
+# "fails before" direction is currently UNPROVEN on the word arm; the val arm's
+# B4 evidence still stands.  Recorded rather than papered over.
 frame_perf_gate() {
   local bin_on on_times=() ref_times=() i s e on_med ref_med ratio out_on out_ref ref_bin
   bin_on="$("$ROOT/tools/qbe/qbe-mk.sh" tests/elm-fixtures/fib.elm Fib.fib "$TMP/perf-on")" || {
