@@ -1383,12 +1383,32 @@ defun Rt.numText(n : val) -> val {
     word ln = nd + 1;
     word sb = allocraw(ln + 1);
     bytestore(sb, 0, 45);
+    // >>> QBE_VAL-ONLY
     call Rt.numFill(mknum(sb + ln - 1), mknum(nw));
+    // <<< QBE_VAL-ONLY
+    // >>> QBE_WORDVAL-ONLY
+    // `n`, NOT `mknum(nw)` (perf word-arm-area4).  Under the word arm a value
+    // outside i61 is BOXED, so `mknum(nw)` is an ALLOCATION — and it would run
+    // with `sb` (a raw byte pointer into a cell nothing can reach yet) live
+    // across it: the exact rawroot defect that cost 5699 of 6000 surviving
+    // strings in perf word-arm-rawroot.  `n` already holds nw and
+    // `Rt.numFill` reads it with `payload(m, 0)`, so passing the Value is the
+    // same number with no round-trip and no allocation.  THE VAL ARM KEEPS
+    // `mknum(nw)`: its emit is frozen (corpus 159/159 byte-identical) and there
+    // the round-trip allocates nothing.
+    call Rt.numFill(mknum(sb + ln - 1), n);
+    // <<< QBE_WORDVAL-ONLY
     bytestore(sb, ln, 0);
     return mkstr(sb, ln);
   }
   word bp = allocraw(nd + 1);
+  // >>> QBE_VAL-ONLY
   call Rt.numFill(mknum(bp + nd - 1), mknum(nw));
+  // <<< QBE_VAL-ONLY
+  // >>> QBE_WORDVAL-ONLY
+  // `n` for `mknum(nw)`, for the reason stated at the negative branch above.
+  call Rt.numFill(mknum(bp + nd - 1), n);
+  // <<< QBE_WORDVAL-ONLY
   bytestore(bp, nd, 0);
   return mkstr(bp, nd);
 }
@@ -2796,6 +2816,45 @@ defun Rt.mkStream(what : val, flags : val) -> val {
   wstore(body, 0, payload(what, 0));
   wstore(body, 1, payload(flags, 0));
   return mkval(11, body);
+}
+// ==================== AREA 4: THE BOXED INTEGER (perf word-arm-area4) ============
+// A word-arm fixnum is an i61: its low three bits are the tag, so an i64 value
+// outside [-2^60, 2^60) cannot live inline.  This seat stores such a value on
+// the heap instead — ONE code-13 block whose body is ONE raw word, the i64.
+//
+// WHY THE CODE IS 13: the ValTag enum's deliberate gap (record moved to 14 and
+// left 13 unwritten).  `Mid/RtLayout.tagBigInt` states it, and the KIND-CONTRACT
+// block below carries the row, so the two statements cannot drift.
+//
+// THE SCAN BIT IS FALSE, AND THAT IS THE DECISION RATHER THAN A CONSEQUENCE.  The
+// body is one raw i64 — not a Value and not a pointer — so the block must NOT be
+// scanned.  `heapKindScanned` does not list code 13 and `Rt.kindHdr` derives
+// header bit 1 from it, so the header says raw by construction.  A scanned body
+// here would walk an integer as a pointer: the silent-corruption class this arm
+// exists to prevent.
+//
+// THE PARAMETER IS A RAW WORD, NOT A `val`, AND THAT IS LOAD-BEARING.  The
+// caller is the EMITTER's cell writer, which is holding the i64 as a raw `l`
+// operand precisely because it does not fit a fixnum — so there is no Value to
+// hand over, and a `val` parameter would have to be a slot whose word the callee
+// then re-interpreted by tag (a raw 2^60 has tag `...000`, so `payload` would
+// shift it and answer a different number).  A `word` parameter crosses the lean
+// ABI as the word itself.  The `-> val` result makes this a rawAbi AGG-returning
+// defun, the `Rt.globalClosure` shape (`Mid.Rt.rawAbi`/`rawAbiRetClass`).
+//
+// IT IS A REAL SAFEPOINT, so `Mid/RtLayout.wordMkAllocSeat` names it for
+// `tagNumber` and the classifier roots any defun holding a `mknum`.  That is
+// the THIRD place the `mk*`-as-safepoint rule has had to hold (after the
+// `RawMkValue` arm and the `Lit` arm), and the reason it is stated in the table
+// rather than here is the same as before: the emitter injects this call, so the
+// `.mid` tree cannot show it.
+defun Rt.boxInt(n : word) -> val {
+  word glob = rawcall rt_glob_addr();
+  word regionW = wload(glob, 0);
+  val region = (mkbool(regionW != 0)) ? mknum(regionW) : call Rt.gcInit(mknum(0));
+  word body = vecbody(call Rt.allocKind(mknum(13), mknum(1)));
+  wstore(body, 0, n);
+  return mkval(13, body);
 }
 // <<< QBE_WORDVAL-ONLY
 
@@ -5762,6 +5821,7 @@ defun Rt.allocKind(code : val, count : val) -> val {
 // KIND-CONTRACT: vector 10 scanned
 // KIND-CONTRACT: stream 11 raw
 // KIND-CONTRACT: float 12 raw
+// KIND-CONTRACT: bigint 13 raw
 // KIND-CONTRACT: record 14 scanned
 //
 // THE BODY-SIZE RULE IS `2 + count` WORDS.  A body unit is ONE word, so a cons

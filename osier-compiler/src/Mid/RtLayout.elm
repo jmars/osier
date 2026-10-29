@@ -16,7 +16,7 @@ module Mid.RtLayout exposing
     , maxArity
     , metaArityOffset, metaCodeOffset, metaNameOffset, metaSizeBytes
     , payloadBase, payloadWordOffset
-    , tagBoolean, tagCons, tagError, tagFloat, tagLambda, tagMark, tagNil, tagNumber, tagPrim, tagRecord, tagStream, tagString, tagSymbol, tagVector
+    , tagBigInt, tagBoolean, tagCons, tagError, tagFloat, tagLambda, tagMark, tagNil, tagNumber, tagPrim, tagRecord, tagStream, tagString, tagSymbol, tagVector
     , untagMask
     , ValLayout, valLayout
     , WordTagShape(..), wordHeapCodes, wordLitAllocSeat, wordMkAllocSeat, wordTagShape
@@ -436,7 +436,7 @@ heapBodyUnitOffset layout word =
 -- IMMEDIATE instead — see `wordTagShape`, and the tension is named there.
 wordHeapCodes : List Int
 wordHeapCodes =
-    [ tagString, tagSymbol, tagCons, tagLambda, tagPrim, tagVector, tagStream, tagFloat, tagRecord ]
+    [ tagString, tagSymbol, tagCons, tagLambda, tagPrim, tagVector, tagStream, tagFloat, tagRecord, tagBigInt ]
 
 
 -- WHICH WORD SHAPE A VALTAG HAS, which is what a word-arm tag test dispatches
@@ -546,10 +546,25 @@ wordTagShape code =
 --
 -- IT RETURNS THE SEAT RATHER THAN A BOOL so that a TestMain row can assert WHICH
 -- seat the rule claims, and so a future allocating code's row documents itself.
+--
+-- AREA 4, THE THIRD PLACE THE RULE HOLDS: `tagNumber` IS NOW AN ALLOCATING CODE.
+-- A word-arm fixnum is an i61, so a `mknum` whose word is DYNAMIC and falls
+-- outside i61 has to BOX the value onto the heap instead of dropping its top
+-- three bits — and boxing allocates.  That is not visible in the `.mid` tree
+-- (`storeWordCell`'s fixnum arm injects the allocation), so this table is where
+-- the classifier learns it.  THE ANSWER IS THE HONEST ONE RATHER THAN AN
+-- OVER-APPROXIMATION IN THE WRONG DIRECTION: a mknum node really can allocate,
+-- so a defun holding one is ROOTED.  The cost is a registered frame on defuns
+-- whose fixnum never overflows; the alternative is a dropped root on the one
+-- that does.  (`wordLitAllocSeat` carries the same row for the literal node —
+-- the second time the reviewer's "look one node over" rule paid for itself.)
 wordMkAllocSeat : Int -> Maybe String
 wordMkAllocSeat code =
     if code == tagFloat then
         Just "Rt.allocFloat"
+
+    else if code == tagNumber then
+        Just "Rt.boxInt"
 
     else
         Nothing
@@ -569,7 +584,9 @@ wordMkAllocSeat code =
 --     docstring says it allocates "and that is why it is not in storeWordCell")
 --   * `LString` -> `storeWordStringLiteral` -> `Rt.allocRaw`    ALLOCATES
 --     (two units, NO inline bytes — the bytes stay the static `str:` symbol)
---   * `LNumber`/`LNumberBig`/`LBoolean` -> immediates, nothing.
+--   * `LNumberBig` -> the SAME boxing seat as a dynamic `mknum`: an i61 fixnum
+--     cannot hold it, so the literal is boxed onto the heap.  ALLOCATES.
+--   * `LNumber`/`LBoolean` -> immediates, nothing.
 --
 -- WHY THIS MATTERS AND WHY IT IS HERE.  `Mid.Rt.safepoint`'s `Lit` arm answered
 -- `True` for `LString` and `False` for EVERY other literal.  Under the word arm

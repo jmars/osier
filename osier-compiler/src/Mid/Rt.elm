@@ -2105,7 +2105,7 @@ q_Rt_x2esymToStr`.
 -}
 wordArmSeeds : List String
 wordArmSeeds =
-    keepRtDependencies [ "Rt.allocKind", "Rt.allocCons", "Rt.allocFloat", "Rt.allocSym", "Rt.allocRecord", "Rt.recEqGo", "Rt.kindHdr", "Rt.mkStream", "Rt.symToStr" ]
+    keepRtDependencies [ "Rt.allocKind", "Rt.allocCons", "Rt.allocFloat", "Rt.allocSym", "Rt.allocRecord", "Rt.boxInt", "Rt.recEqGo", "Rt.kindHdr", "Rt.mkStream", "Rt.symToStr" ]
 
 
 {-| THE SEATS LOWER NAMES DIRECTLY (zighost Z2/Z3): the plain vec-store writer
@@ -2244,6 +2244,14 @@ rawAbi =
         , "Rt.rootPop"
         , "Rt.rootWatermark"
         , "Rt.rootPopTo"
+        , -- ===== AREA 4 (perf word-arm-area4): the BOXED INTEGER seat.  An
+          -- all-word PARAMETER with a `:val` RESULT, i.e. exactly the
+          -- `Rt.globalClosure` shape — so the B6 signature rule would move it
+          -- to the value ABI and the override is load-bearing, and the ret
+          -- class is `Agg "val"` (Lower.rawAbiRetClass).  The parameter is a
+          -- raw i64 because that is what the emitter holds when a value does
+          -- not fit the i61 fixnum.
+          "Rt.boxInt"
         ]
 
 
@@ -2267,6 +2275,7 @@ rawAbiArity =
         , ( "Rt.frame-enter", 1 )
         , ( "Rt.frame-leave", 0 )
         , ( "Rt.frameBlock", 1 )
+        , ( "Rt.boxInt", 1 )
         , -- stage 6 B1: Rt.apply/Rt.apply-tail take the SAME 3 word params
           -- as the Zig seats (fslot, args, nargs) — the retarget site and
           -- lowerDefun both check this against the actual param count.
@@ -2411,6 +2420,11 @@ allocationSeats =
     , "Rt.allocFloat"
     , "Rt.allocRecord"
     , "Rt.mkStream"
+    , -- AREA 4 (perf word-arm-area4): the boxed-integer seat.  It is a real
+      -- allocation (a code-13 block), so every defun that can reach it must
+      -- join `allocating` — including `Rt.+`/`-`/`*`/`/`/`powGo`, whose only
+      -- allocation is the `mknum` that closes them.
+      "Rt.boxInt"
     ]
 
 {-| THE CLASSIFICATION-ONLY SEAT EDGES — which defuns CALL an allocation seat.

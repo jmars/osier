@@ -311,6 +311,13 @@ rawAbiRetClass key =
     -- `Agg "ret"` arm of lowerFunBody's @ret block below went with it, and
     -- with it the last reader of the `.tail` offsets in Mid.RtLayout.
 
+    else if key == "Rt.boxInt" then
+        -- AREA 4 (perf word-arm-area4): the boxed-integer seat returns the
+        -- tagged Value (a code-13 heap pointer) through sret, so the emitter
+        -- stores the loaded word straight into the destination slot.  Its one
+        -- word param is the raw i64 that did not fit the fixnum.
+        Agg "val"
+
     else if key == "Rt.globalClosure" then
         -- ZIGHOST Z3: the closure-cache seat returns the 40-byte lambda
         -- Value through sret, exactly the deleted Zig seat's C ABI
@@ -4650,34 +4657,52 @@ storeWordCell code words dest s0 =
                         -- tag leaves free (the exact inverse of the reader's
                         -- SAR).  Inline, no runtime call, no allocation.
                         --
-                        -- F6 (VR3b3 FIX): THE `mk*` PATH IS RANGE-CHECKED TOO,
-                        -- not just `PrimApp`.  A word-arm fixnum is an i61, so a
-                        -- value whose top three bits are set would be SILENTLY
-                        -- TRUNCATED by the shift - the exact silent-wrong class
-                        -- this arm exists to prevent - and `mknum` is how every
-                        -- runtime site boxes a word.  A COMPILE-TIME constant is
-                        -- decided here (and refused by name, as a literal is);
-                        -- a dynamic word gets a round-trip check whose failure
-                        -- REFUSES loudly, because the alternative (boxing onto
-                        -- the heap) is AREA 4's overflow path and does not
-                        -- exist yet.
+                        -- AREA 4 (perf word-arm-area4): THE ONE OVERFLOW CHECK
+                        -- PER ARITHMETIC WRITE, and now it BOXES instead of
+                        -- refusing.
+                        --
+                        -- THE CHECK IS A ROUND TRIP, and that is what makes it
+                        -- work for BOTH kinds of word this node is handed.  A
+                        -- word-arm fixnum is an i61, so `w << 3 >> 3 == w`
+                        -- exactly when `w` fits.  Two populations reach here:
+                        --
+                        --   * a NUMBER that may be out of range — the result of
+                        --     an arithmetic op, which is the case this unit
+                        --     exists for; it fails the round trip and is BOXED;
+                        --   * a POINTER carried as a fixnum — the seat-return
+                        --     convention (`mknum(body)`, `mknum(cell + 16)`,
+                        --     `mknum(buf)`), which is how EVERY heap address in
+                        --     the runtime travels.  A user-space address on
+                        --     x86-64 is below 2^47, so `p << 3` cannot overflow
+                        --     and the round trip HOLDS: a pointer never boxes.
+                        --     That is a PRECONDITION of this arm and it is
+                        --     stated as one, not assumed: the check COMPUTES the
+                        --     answer, and the only thing taken on faith is that
+                        --     no heap address reaches 2^60 (the address space
+                        --     does not allow it).
+                        --
+                        -- SO THE FAILURE BRANCH IS THE BOXING SEAT.  `Rt.boxInt`
+                        -- allocates a code-13 cell holding the raw i64, which is
+                        -- why `wordMkAllocSeat` names it for `tagNumber` and why
+                        -- every defun whose only allocation is a `mknum` is now
+                        -- ROOTED on the word arm (the third place the
+                        -- `mk*`-as-safepoint rule has had to hold).
                         case w of
                             Il.Con n ->
                                 if n < 0 - RtLayout.wordFixnumLimit || n >= RtLayout.wordFixnumLimit then
-                                    Err
-                                        (wordArmUnsupported
-                                            (wordArea
-                                                "AREA 4 (ARITHMETIC - THE i61 OVERFLOW/BOXING PATH)"
-                                                -- NO DIGITS IN THE MESSAGE: this
-                                                -- compiler's Int IS A DOUBLE, so
-                                                -- `String.fromInt` prints 2^60 as
-                                                -- 1152921504606847000 (MEASURED) -
-                                                -- a message that names a number it
-                                                -- cannot print exactly is worse than
-                                                -- one that names the bound.
-                                                "mknum of a compile-time value at or beyond the i61 bound - it does not fit the word arm's fixnum, so it has to be BOXED onto the heap, and the boxing path does not exist yet (shifting it would silently drop its top three bits)"
-                                            )
-                                        )
+                                    -- A COMPILE-TIME constant outside i61.  `n`
+                                    -- is host-exact (it is a double that came
+                                    -- from a host Int), so the i64 is rebuilt
+                                    -- from base-2^26 LIMBS rather than emitted
+                                    -- as an `Il.Con` — `String.fromInt` prints
+                                    -- 2^60 as 1152921504606847000 (MEASURED), so
+                                    -- a `Con` at this magnitude is a different
+                                    -- number wearing the right spelling.
+                                    let
+                                        ( v, s1 ) =
+                                            emitExactWord n s0
+                                    in
+                                    Ok (boxWordInt v dest s1)
 
                                 else
                                     Ok (emit (Store StoreL (Il.Con (n * 8)) (Il.Tmp (slotTmp dest))) s0)
@@ -4696,25 +4721,25 @@ storeWordCell code words dest s0 =
                                     ( okLbl, s4 ) =
                                         freshLbl "fixok" s3
 
-                                    ( badLbl, s5 ) =
-                                        freshLbl "fixbad" s4
+                                    ( boxLbl, s5 ) =
+                                        freshLbl "fixbox" s4
 
-                                    ( msgName, s6 ) =
-                                        freshData ("msg:" ++ wordFixnumRefusal)
-                                            (\n -> { name = n, align = Just 8, items = [ DStr wordFixnumRefusal, DByte 0 ], export_ = False })
-                                            s5
+                                    ( joinLbl, s6 ) =
+                                        freshLbl "fixjoin" s5
                                 in
                                 Ok
                                     (s6
                                         |> emit (Bin (Just sh) L Shl w (Il.Con s0.layout.tagBits))
                                         |> emit (Bin (Just back) L Sar (Il.Tmp sh) (Il.Con s0.layout.tagBits))
                                         |> emit (Cmp (Just fits) L Ceq (Il.Tmp back) w)
-                                        |> closeBlock (Jnz (Il.Tmp fits) okLbl badLbl)
-                                        |> startBlock badLbl
-                                        |> emit (Call Nothing (Base L) (Il.Sym ("q_" ++ mangle "Rt.die")) [ ArgVal (Base L) (Il.Sym msgName) ])
-                                        |> closeBlock Hlt
+                                        |> closeBlock (Jnz (Il.Tmp fits) okLbl boxLbl)
+                                        |> startBlock boxLbl
+                                        |> (\st -> boxWordInt w dest st)
+                                        |> jumpTo joinLbl
                                         |> startBlock okLbl
                                         |> storeWordWord (Il.Tmp sh) dest
+                                        |> jumpTo joinLbl
+                                        |> startBlock joinLbl
                                     )
 
                     else if code == RtLayout.tagBoolean then
@@ -5099,6 +5124,184 @@ wordFloatPayload valueWord s0 =
                     |> emit (Load (Just r) D LoadD (Il.Tmp a))
            )
     )
+
+
+{-| DOES A BIG LITERAL FIT THE WORD ARM'S i61 FIXNUM?  DECIDED ON THE DIGITS.
+
+The bound is `Mid/RtLayout.wordFixnumLimit` (2^60) and it is EXCLUSIVE IN
+MAGNITUDE: a fixnum is `-limit <= n < limit`.  It cannot be decided with host
+arithmetic — this compiler's `Int` is a double, so 2^60-1 rounds UP to 2^60 and
+the comparison would pass the first out-of-range value (the VR3b2 defect,
+MEASURED).  So the decision is LEXICAL, on the same decimal digit string the
+parser validated: strip leading zeros, compare lengths, then compare
+lexicographically.  `String.fromInt wordFixnumLimit` is exact (2^60 IS
+representable as a double), which is what makes the bound spellable as a digit
+string at all.
+
+`limit` itself fits when the literal is NEGATIVE (`-2^60 << 3` is INT64_MIN,
+which sar-round-trips) and does not when it is positive (`2^60 << 3` overflows).
+That asymmetry is the bound's whole content and it is stated once here.
+-}
+bigLiteralFitsFixnum : String -> Bool
+bigLiteralFitsFixnum digits =
+    let
+        ( negative, magnitude ) =
+            if String.startsWith "-" digits then
+                ( True, String.dropLeft 1 digits )
+
+            else
+                ( False, digits )
+
+        -- the decimal of `wordFixnumLimit`, exact on this host (a power of two)
+        limitDigits =
+            "1152921504606846976"
+
+        leadingZeros str =
+            if String.startsWith "0" str then
+                1 + leadingZeros (String.dropLeft 1 str)
+
+            else
+                0
+
+        normalised =
+            String.dropLeft (leadingZeros magnitude) magnitude
+
+        bound =
+            if String.length normalised /= String.length limitDigits then
+                String.length normalised < String.length limitDigits
+
+            else
+                normalised < limitDigits
+
+        equalBound =
+            normalised == limitDigits
+    in
+    if normalised == "" then
+        True
+
+    else if bound then
+        True
+
+    else if equalBound then
+        negative
+
+    else
+        False
+
+
+{-| AREA 4 (perf word-arm-area4): THE BOXING SEAT — store `w` into `dest` as a
+BOXED integer, the i64 living in a code-13 heap cell instead of the fixnum's
+tag bits.
+
+`w` is a raw `l` operand holding the i64, NOT a Value: the whole reason this
+function exists is that `w` does not fit the i61 fixnum, so there is no
+fixnum-shaped word to hand over.  `Rt.boxInt` therefore takes a `word` parameter
+(its own docstring states why a `val` one would be wrong) and returns the tagged
+Value through sret, exactly as `Rt.globalClosure` does — so the loaded word IS
+the Value and no untag follows.
+
+THIS IS THE ALLOCATION THE CLASSIFIER CANNOT SEE.  It is a real safepoint, which
+is why `Mid/RtLayout.wordMkAllocSeat` answers `Just "Rt.boxInt"` for
+`tagNumber`; that table is the one statement `Mid.Rt.unsafeSafepoint` reads.
+-}
+boxWordInt : Il.Arg -> Int -> S -> S
+boxWordInt w dest s0 =
+    let
+        ( vp, s1 ) =
+            freshTmp s0
+
+        ( v, s2 ) =
+            freshTmp s1
+    in
+    s2
+        |> emit (Call (Just vp) (Agg "val") (Il.Sym ("q_" ++ mangle "Rt.boxInt")) [ ArgVal (Base L) w ])
+        -- The `:val` result is an ADDRESSABLE aggregate temp, so the one word
+        -- is LOADED out of it rather than used directly (the same measured
+        -- trap `midGcAllocSeat` records: an aggregate temp used in an integer
+        -- op takes its own ADDRESS).
+        |> emit (Load (Just v) L LoadL (Il.Tmp vp))
+        |> storeWordWord (Il.Tmp v) dest
+
+
+{-| THE EXACT i64 OF A HOST `Int`, as an `l` operand — the emission a value at
+or beyond 2^53 needs, because `Il.Con` carries a host `Int` and its PRINTING
+loses the low digits (`String.fromInt` answers 1152921504606847000 for 2^60 —
+MEASURED; the same trap `lowerLitVal`'s `LNumberBig` arm avoids with limbs).
+
+Three base-2^26 limbs, which is how `IntegerLiteral.limbsOf` splits a decimal
+literal: each limb is host-exact, `2^26` and `2^52` are exact constants, and the
+intermediate products WRAP in two's complement — which is exactly the i64 bit
+pattern wanted.  A NEGATIVE `n` is `0 - v`, the same wrap `lowerLitVal` uses.
+
+DOMAIN: any `n` this compiler can hold, i.e. a double.  The limb split is exact
+for a double because each limb is an integer below 2^26 and the quotient chain
+is exact (`n / 2^26` and `n / 2^52` are exact for a value whose magnitude is at
+least 2^52; below that the value is already host-exact and `Con` would do, but
+this function is only reached above 2^60).
+-}
+emitExactWord : Int -> S -> ( Il.Arg, S )
+emitExactWord n s0 =
+    let
+        ( l0, s1 ) =
+            freshTmp s0
+
+        ( l1, s2 ) =
+            freshTmp s1
+
+        ( l2, s3 ) =
+            freshTmp s2
+
+        ( t1, s4 ) =
+            freshTmp s3
+
+        ( t2, s5 ) =
+            freshTmp s4
+
+        ( t3, s6 ) =
+            freshTmp s5
+
+        ( t4, s7 ) =
+            freshTmp s6
+
+        ( t5, s8 ) =
+            freshTmp s7
+
+        magnitude =
+            if n < 0 then
+                0 - n
+
+            else
+                n
+
+        -- `//` is truncating integer division, and both operands are integral
+        -- doubles, so every quotient here is EXACT (no rounding to lose).
+        q1 =
+            magnitude // 67108864
+
+        limb2 =
+            q1 // 67108864
+
+        limb1 =
+            q1 - limb2 * 67108864
+
+        limb0 =
+            magnitude - q1 * 67108864
+
+        s9 =
+            s8
+                |> emit (Bin (Just t1) L Mul (Il.Con limb1) (Il.Con 67108864))
+                |> emit (Bin (Just t2) L Add (Il.Tmp t1) (Il.Con limb0))
+                |> emit (Bin (Just t3) L Mul (Il.Con limb2) (Il.Con 4503599627370496))
+                |> emit (Bin (Just t4) L Add (Il.Tmp t3) (Il.Tmp t2))
+
+        s10 =
+            if n < 0 then
+                emit (Bin (Just t5) L Sub (Il.Con 0) (Il.Tmp t4)) s9
+
+            else
+                s9
+    in
+    ( (if n < 0 then Il.Tmp t5 else Il.Tmp t4), s10 )
 
 
 {-| One BODY word of a word-arm heap object, at `heapBodyUnitOffset`.  `bodyArg`
@@ -5764,54 +5967,27 @@ wordTagIs base code s0 =
         RtLayout.WordNoForm why ->
             Err (wordArmUnsupported (wordArea "AREA 2 (TAG TESTS)" ("`tagis(v, " ++ String.fromInt code ++ ")` - " ++ why)))
 
+        -- AREA 4 (perf word-arm-area4): A NUMBER HAS **TWO** WORD ENCODINGS, so
+        -- `tagis(v, 0)` is the one immediate test that is not a tag compare.
+        -- A value inside i61 is the `...000` fixnum; one outside it is a
+        -- code-13 heap block.  Both ARE numbers, and `tagis(v, 0)` is the
+        -- runtime's numeric predicate — it is what `Rt.+ - * / = < <= > >=`,
+        -- `Rt.asF`, `Rt.numText`'s callers and `Rt.number?` all ask.  Answering
+        -- the fixnum tag alone would say "not a number" for every boxed value,
+        -- i.e. the printer would stop printing it and `=` would stop comparing
+        -- it.  So this ONE reader is extended: fixnum OR kind code 13.
+        --
+        -- IT IS STILL ONE PLACE.  `wordTagShape tagNumber` keeps its
+        -- `WordImmediate [0]` row, because that is the encoding a CONSTRUCTION
+        -- site must produce for a value that fits; the second encoding is a
+        -- question only a READER can be asked, and this is the reader.
         RtLayout.WordImmediate tags ->
-            -- The tag alone answers it: one compare, or (a boolean, which has
-            -- TWO immediates) the OR of two.
-            --
-            -- THE TAG AND THE COMPARE RESULT ARE DISTINCT TEMPS, and that is
-            -- load-bearing (VR3b3 FIX, BLOCKER 2).  Folding the compares into
-            -- `t` - the tag temp - destroyed the tag after the first compare, so
-            -- the second compared the 0/1 RESULT against `tagFalse` and
-            -- `tagis(v, tagBoolean)` answered FALSE for `false`; MEASURED, and
-            -- reachable through `Rt.deepEq`'s `tagis(a, 3)` the moment AREA 6
-            -- admits calls.  No text pin could see it (both spellings are two
-            -- compares and an `or`), which is why the probe set now carries a
-            -- boolean `tagis`.
-            let
-                ( v, s1 ) =
-                    wordValueWord base s0
+            if code == RtLayout.tagNumber then
+                wordNumberTagIs base s0
 
-                ( t, s2 ) =
-                    freshTmp s1
+            else
+                wordImmediateTagIs base tags s0
 
-                ( is, s3 ) =
-                    freshTmp s2
-
-                ( ext, s4 ) =
-                    freshTmp s3
-
-                s5 =
-                    emit (Bin (Just t) W And (Il.Tmp v) (Il.Con s4.layout.tagMask)) s4
-
-                s6 =
-                    case tags of
-                        [] ->
-                            emit (Bin (Just is) W Xor (Il.Tmp t) (Il.Tmp t)) s5
-
-                        firstTag :: rest ->
-                            List.foldl
-                                (\one acc ->
-                                    let
-                                        ( o, sa ) =
-                                            freshTmp acc
-                                    in
-                                    emit (Cmp (Just o) W Ceq (Il.Tmp t) (Il.Con one)) sa
-                                        |> emit (Bin (Just is) W Or (Il.Tmp is) (Il.Tmp o))
-                                )
-                                (emit (Cmp (Just is) W Ceq (Il.Tmp t) (Il.Con firstTag)) s5)
-                                rest
-            in
-            Ok ( Il.Tmp ext, emit (Unary (Just ext) L Extsw (Il.Tmp is)) s6 )
 
         RtLayout.WordHeapCode c ->
             let
@@ -5883,6 +6059,153 @@ wordTagIs base code s0 =
                         |> emit (Unary (Just ext) L Extsw (Il.Tmp isC))
             in
             Ok ( Il.Tmp ext, s15 )
+
+
+{-| THE IMMEDIATE HALF of `wordTagIs`: the tag alone answers it, with one compare
+or (a boolean, which has TWO immediates) the OR of two.
+
+THE TAG AND THE COMPARE RESULT ARE DISTINCT TEMPS, and that is load-bearing
+(VR3b3 FIX, BLOCKER 2).  Folding the compares into `t` - the tag temp -
+destroyed the tag after the first compare, so the second compared the 0/1
+RESULT against `tagFalse` and `tagis(v, tagBoolean)` answered FALSE for `false`;
+MEASURED, and reachable through `Rt.deepEq`'s `tagis(a, 3)` the moment AREA 6
+admits calls.  No text pin could see it (both spellings are two compares and an
+`or`), which is why the probe set now carries a boolean `tagis`.
+-}
+wordImmediateTagIs : Il.Arg -> List Int -> S -> Result String ( Il.Arg, S )
+wordImmediateTagIs base tags s0 =
+    let
+        ( v, s1 ) =
+            wordValueWord base s0
+
+        ( t, s2 ) =
+            freshTmp s1
+
+        ( is, s3 ) =
+            freshTmp s2
+
+        ( ext, s4 ) =
+            freshTmp s3
+
+        s5 =
+            emit (Bin (Just t) W And (Il.Tmp v) (Il.Con s4.layout.tagMask)) s4
+
+        s6 =
+            case tags of
+                [] ->
+                    emit (Bin (Just is) W Xor (Il.Tmp t) (Il.Tmp t)) s5
+
+                firstTag :: rest ->
+                    List.foldl
+                        (\one acc ->
+                            let
+                                ( o, sa ) =
+                                    freshTmp acc
+                            in
+                            emit (Cmp (Just o) W Ceq (Il.Tmp t) (Il.Con one)) sa
+                                |> emit (Bin (Just is) W Or (Il.Tmp is) (Il.Tmp o))
+                        )
+                        (emit (Cmp (Just is) W Ceq (Il.Tmp t) (Il.Con firstTag)) s5)
+                        rest
+    in
+    Ok ( Il.Tmp ext, emit (Unary (Just ext) L Extsw (Il.Tmp is)) s6 )
+
+
+{-| AREA 4: `tagis(v, 0)` — "is this a NUMBER?", where a word-arm number has TWO
+encodings: the `...000` i61 fixnum, and a code-13 heap block for a value that
+did not fit.  Answering only the fixnum tag would make every boxed value answer
+"not a number", and `tagis(v, 0)` is the numeric predicate the whole runtime
+asks (`Rt.+ - * / = < <= > >=`, `Rt.asF`, `Rt.toI32`, `Rt.number?`, and the
+printer's dispatch), so that would stop the printer printing and `=` comparing.
+
+THE HEAP HALF IS BRANCHED, for `wordTagIs`'s reason: untagging a fixnum yields a
+small integer, so an unconditional header load would fault.  A heap object that
+is NOT code 13 (a cons, a string) answers FALSE — and its header's code is read
+by the same `wordKindCode`, which is what keeps code 0 a loud refusal here too.
+-}
+wordNumberTagIs : Il.Arg -> S -> Result String ( Il.Arg, S )
+wordNumberTagIs base s0 =
+    let
+        ( v, s1 ) =
+            wordValueWord base s0
+
+        ( t, s2 ) =
+            freshTmp s1
+
+        ( isFix, s3 ) =
+            freshTmp s2
+
+        ( isHeap, s4 ) =
+            freshTmp s3
+
+        ( isBoxed, s5 ) =
+            freshTmp s4
+
+        -- ONE result temp, assigned in BOTH arms before the join: QBE has no
+        -- phi and demands dominance, so a temp defined only in the `not` arm
+        -- and read after the join is "used undefined" (MEASURED: `%t5 is used
+        -- undefined in @nok_3` on `intbig`).
+        ( isEither, s7 ) =
+            freshTmp s5
+
+        ( ext, s8 ) =
+            freshTmp s7
+
+        ( heapLbl, s9 ) =
+            freshLbl "nheap" s8
+
+        ( notLbl, s10 ) =
+            freshLbl "nnot" s9
+
+        ( badLbl, s11 ) =
+            freshLbl "nzero" s10
+
+        ( okLbl, s12 ) =
+            freshLbl "nok" s11
+
+        ( joinLbl, s13 ) =
+            freshLbl "njoin" s12
+
+        ( msgName, s14 ) =
+            freshData ("msg:" ++ wordKindZeroRefusal)
+                (\n -> { name = n, align = Just 8, items = [ DStr wordKindZeroRefusal, DByte 0 ], export_ = False })
+                s13
+
+        -- 1. the tag: a fixnum answers YES outright; a heap object has to be
+        --    asked about its kind; anything else is not a number.
+        s15 =
+            s14
+                |> emit (Bin (Just t) W And (Il.Tmp v) (Il.Con s14.layout.tagMask))
+                |> emit (Cmp (Just isFix) W Ceq (Il.Tmp t) (Il.Con s14.layout.tagNumber))
+                |> emit (Cmp (Just isHeap) W Ceq (Il.Tmp t) (Il.Con (RtLayout.heapPtrTag s14.layout)))
+                |> closeBlock (Jnz (Il.Tmp isHeap) heapLbl notLbl)
+                |> startBlock notLbl
+                |> emit (Bin (Just isEither) W Or (Il.Tmp isFix) (Il.Tmp isFix))
+                |> jumpTo joinLbl
+
+        -- 2. the heap branch: a code-13 block is a boxed number, and code 0 is
+        --    refused by name (it means NO CODE — a val-arm header).
+        ( hdrCode, _, s16 ) =
+            wordKindCode (Il.Tmp v) (startBlock heapLbl s15)
+
+        ( isZero, s17 ) =
+            freshTmp s16
+    in
+    Ok
+        ( Il.Tmp ext
+        , s17
+            |> emit (Cmp (Just isZero) W Ceq (Il.Tmp hdrCode) (Il.Con 0))
+            |> closeBlock (Jnz (Il.Tmp isZero) badLbl okLbl)
+            |> startBlock badLbl
+            |> emit (Call Nothing (Base L) (Il.Sym ("q_" ++ mangle "Rt.die")) [ ArgVal (Base L) (Il.Sym msgName) ])
+            |> closeBlock Hlt
+            |> startBlock okLbl
+            |> emit (Cmp (Just isBoxed) W Ceq (Il.Tmp hdrCode) (Il.Con RtLayout.tagBigInt))
+            |> emit (Bin (Just isEither) W Or (Il.Tmp isBoxed) (Il.Tmp isBoxed))
+            |> jumpTo joinLbl
+            |> startBlock joinLbl
+            |> emit (Unary (Just ext) L Extsw (Il.Tmp isEither))
+        )
 
 
 -- The ONE refusal message of the kind-code reader: code 0 means NO CODE.
@@ -7754,22 +8077,74 @@ lowerLitWord lit dest s =
                 Ok (emit (Store StoreL (Il.Con (n * 8)) (Il.Tmp (slotTmp dest))) s)
 
         LNumberBig digits ->
-            -- L3-U1/U3 BOUNDARY, stated rather than papered over: a literal
-            -- above 2^53 is above the parser's OLD bound, so it never reached
-            -- this arm before, and under the word arm it needs the exact i61
-            -- range decision plus an exact `n * 8` (both AREA 4 work).  Until
-            -- that exists the word arm REFUSES it by name — never a rounded
-            -- `n * 8`, which is the VR3b2 trap this whole unit removes.
-            Err
-                (wordArmUnsupported
-                    (wordArea
-                        "AREA 4 (ARITHMETIC — THE i61 OVERFLOW/BOXING PATH)"
-                        ("the literal "
+            -- AREA 4 (perf word-arm-area4): A BIG LITERAL IS NOW EXACT ON BOTH
+            -- SIDES OF THE i61 BOUNDARY.  The range decision is made on the
+            -- DIGITS — never on a host number, which is the VR3b2 trap this
+            -- removes — and the value is then built from base-2^26 limbs, so a
+            -- literal like 2^60-1 keeps every digit.  Inside i61 it is shifted
+            -- up into the tag bits like any other fixnum; outside it is BOXED.
+            --
+            -- `bigmul` (2^60-1) and `above53` (2^53+1) are the inside rows;
+            -- `maxi64`, `hexmax`, `mini64` are the boxed ones.  MEASURED
+            -- fail-before: this arm was an EMIT refusal, so the whole `intbig`
+            -- module refused to build on the word arm.
+            case IntegerLiteral.limbsOf digits of
+                Nothing ->
+                    Err
+                        ("LNumberBig \""
                             ++ digits
-                            ++ " — it is above 2^53, so its i61 range check and its `n * 8` fixnum shift have to be done in the exact domain (AREA 4); emitting them from a host number would silently round it"
+                            ++ "\" is not a decimal digit string — the parser validates before this form exists, so this is a compiler bug"
                         )
-                    )
-                )
+
+                Just limbs ->
+                    let
+                        ( t1, s1 ) =
+                            freshTmp s
+
+                        ( t2, s2 ) =
+                            freshTmp s1
+
+                        ( t3, s3 ) =
+                            freshTmp s2
+
+                        ( t4, s4 ) =
+                            freshTmp s3
+
+                        ( t5, s5 ) =
+                            freshTmp s4
+
+                        s6 =
+                            s5
+                                |> emit (Bin (Just t1) L Mul (Il.Con limbs.l1) (Il.Con 67108864))
+                                |> emit (Bin (Just t2) L Add (Il.Tmp t1) (Il.Con limbs.l0))
+                                |> emit (Bin (Just t3) L Mul (Il.Con limbs.l2) (Il.Con 4503599627370496))
+                                |> emit (Bin (Just t4) L Add (Il.Tmp t3) (Il.Tmp t2))
+
+                        s7 =
+                            if limbs.negative then
+                                emit (Bin (Just t5) L Sub (Il.Con 0) (Il.Tmp t4)) s6
+
+                            else
+                                s6
+
+                        value =
+                            if limbs.negative then
+                                Il.Tmp t5
+
+                            else
+                                Il.Tmp t4
+                    in
+                    if bigLiteralFitsFixnum digits then
+                        let
+                            ( sh, s8 ) =
+                                freshTmp s7
+                        in
+                        Ok (emit (Bin (Just sh) L Shl value (Il.Con s7.layout.tagBits)) s8
+                                |> (\st -> storeWordWord (Il.Tmp sh) dest st)
+                           )
+
+                    else
+                        Ok (boxWordInt value dest s7)
 
         LBoolean b ->
             Ok (emit (Store StoreL (Il.Con (if b then s.layout.tagTrue else s.layout.tagFalse)) (Il.Tmp (slotTmp dest))) s)
