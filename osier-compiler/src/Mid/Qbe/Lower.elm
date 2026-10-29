@@ -8071,7 +8071,10 @@ lowerLitWord lit dest s =
             -- `String.fromInt` is exact for every |n| <= 2^53 on BOTH hosts (the
             -- selfhost's `fromInt` is `Rt.numText`, word-exact), so the limb
             -- rebuild below is exact over the whole domain.  The gate is 2^50:
-            -- `n * 8` then stays under 2^53, the zone every host prints exactly.
+            -- `n * 8` then stays AT OR UNDER 2^53 (at the gate's own boundary,
+            -- n = 2^50, the product IS 2^53 — which is inside the exact zone;
+            -- "under" was the wrong word, and `storeWordCell`'s parallel
+            -- comment says "at or below"), the zone every host prints exactly.
             if n <= 1125899906842624 && n >= -1125899906842624 then
                 Ok (emit (Store StoreL (Il.Con (n * 8)) (Il.Tmp (slotTmp dest))) s)
 
@@ -8867,12 +8870,14 @@ ONE immediate (`tagTrue + (w == 0)`, `storeWordCell RtLayout.tagBoolean [w]`).
 
 NOTHING FORKS IT HERE, and what keeps that safe is REACHABILITY, not a belt —
 MEASURED, the same way `RawLoadFlt`'s note was: under the word arm every caller
-is either dead or refused.  `lowerCompare`/`lowerNumEq`'s proven-Int and
+is either dead or denied.  `lowerCompare`/`lowerNumEq`'s proven-Int and
 proven-Float arms are denied by `isIntExp`/`isFloatExp` (which return False
-under the arm), and `lowerStrCmp` — the only remaining caller — refuses BY NAME
-at `lowerCompare`'s string branch before it can reach this function.  THE
-STANDING INSTRUCTION: whoever ports Char/String ordering to the word arm must
-fork this in the SAME unit, to `storeWordCell RtLayout.tagBoolean [ raw ]`.
+under the arm), and `lowerStrCmp` — the caller this doc used to instruct a
+future port to fork — DOES fork now (VR3d, the Char/String-ordering port): it
+calls `storeWordCell RtLayout.tagBoolean [ flag ]` under the word arm and
+reaches this function only on the val arm.  The standing instruction is
+therefore DISCHARGED, and what remains is the reachability argument above: a
+new caller under the word arm must fork the same way.
 -}
 reboxBoolean : Int -> Il.Arg -> S -> S
 reboxBoolean dest raw s =
@@ -12341,12 +12346,11 @@ lowerPrimApp app dest s =
     --
     -- THE FORK LIVES INSIDE EACH OF THE THREE, NOT HERE, and that is
     -- deliberate: `lowerCompare`'s PROVEN-STRING branch must still be ENTERED
-    -- under the word arm so it can REFUSE by name (its inline byte loop reads
-    -- `slot + 8` and `slot + 16`; the numeric-only `Rt.<` answers False for
-    -- every string, the silent Char-ordering mislower).  Gating the whole call
-    -- here instead SKIPPED that branch, so the refusal was unreachable and the
-    -- word arm printed `0` for `"a" < "b"` — MEASURED, in this unit's first
-    -- cut.
+    -- under the word arm — it is where the byte-lexicographic loop LIVES, and
+    -- (VR3d) where it now lowers that loop with the arm's own readers instead
+    -- of refusing.  Gating the whole call here instead SKIPPED that branch,
+    -- which at VR3b was the refusal becoming unreachable and the word arm
+    -- printing `0` for `"a" < "b"` — MEASURED, in that unit's first cut.
     --
     -- THIS IS A CLASSIFICATION, NOT A NEW MECHANISM, and that is MEASURED:
     -- `2 ^ 3` and `7 // 2` already built, linked and ran correctly under
@@ -12620,29 +12624,21 @@ lowerCompare op args dest s =
         -- replaces.  Byte-lexicographic UTF-8 order IS code-point order, so
         -- this is real-Elm's Char/String ordering in the VM's byte model.
         --
-        -- NOT UNDER THE WORD ARM (perf word-arm-arith): `lowerStrLess` reads
-        -- the byte pointer at `slot + 8` and the length at `slot + 16` of a
-        -- 40-byte Value, i.e. THE NEXT TWO FRAME SLOTS when a slot is one
-        -- word.  It cannot be routed to `Rt.<` either — that answers False for
-        -- any non-number, which is exactly the silent mislower this branch
-        -- exists to prevent — so it refuses BY NAME here, at the construct's
-        -- own emit site.  A real port is two accessor calls
-        -- (`payload(x, 0)` for the bytes, `payload32(x, 1)` for the length,
-        -- both already twinned); it is left out because this unit's scope is
-        -- the ARITHMETIC prim class and a fork here would need its own
-        -- behavioural fixture to be worth anything.
-        if wordArm s then
-            Err
-                (wordArmUnsupported
-                    (wordArea
-                        "AREA 3 (PAYLOAD ACCESS)"
-                        "Char/String ordering — its inline byte-lexicographic loop reads a Value's byte pointer at `slot + 8` and its length at `slot + 16`, i.e. the 40-byte shape, which under the word arm are the NEXT TWO FRAME SLOTS; and the numeric-only `Rt.<` answers False for any non-number, so routing it there would be the silent Char-ordering mislower the inline branch exists to prevent"
-                    )
-                )
-
-        else
-            lowerArgs2 args s
-                |> Result.andThen (\( a1, a2, s1 ) -> lowerStrCmp op a1 a2 dest s1)
+        -- PORTED TO THE WORD ARM AT VR3d (perf word-arm-flip), which is what
+        -- let the flip land: this branch used to REFUSE BY NAME under the arm
+        -- because `lowerStrLess` read the byte pointer at `slot + 8` and the
+        -- length at `slot + 16` of a 40-byte Value — THE NEXT TWO FRAME SLOTS
+        -- when a slot is one word — and routing it to the numeric-only `Rt.<`
+        -- would have been the silent Char-ordering mislower the inline branch
+        -- exists to prevent.  The port is the two accessor calls the old
+        -- refusal named (`payload(x, 0)` for the bytes, `payload32(x, 1)` for
+        -- the length, both already twinned), applied INSIDE `lowerStrLess` so
+        -- the loop below stays one implementation, plus the boolean rebox fork
+        -- in `lowerStrCmp` (a word-arm boolean is one immediate).  Its
+        -- behavioural oracle is qbe-check's `charord` row — which was RED on
+        -- the flipped tree at this exact refusal and green after the port.
+        lowerArgs2 args s
+            |> Result.andThen (\( a1, a2, s1 ) -> lowerStrCmp op a1 a2 dest s1)
 
     else if wordArm s then
         -- ============ THE WORD ARM TAKES THE RUNTIME ROUTE ============
@@ -12807,17 +12803,51 @@ lowerStrCmp op aSlot bSlot dest s =
             op == Csle || op == Csge
     in
     lowerStrLess x y s
-        |> Result.map
+        |> Result.andThen
             (\( resT, s1 ) ->
-                if neg then
+                if wordArm s1 then
+                    -- THE WORD ARM'S BOOLEAN IS ONE IMMEDIATE (VR3d): the
+                    -- standing instruction `reboxBoolean`'s doc carried —
+                    -- "whoever ports Char/String ordering to the word arm must
+                    -- fork this in the SAME unit" — discharged here, because
+                    -- that function writes the 40-byte shape (tag word at
+                    -- `slot + 0`, payload at `slot + 8`), which is TWELVE bytes
+                    -- into an eight-byte slot on this arm.  `storeWordCell
+                    -- tagBoolean [flag]` is `tagTrue + (flag == 0)`, the same
+                    -- encoding `mkbool` uses.
+                    --
+                    -- The flag is WIDENED to `l` first: `lowerStrLess` leaves a
+                    -- `w` temp and a `w` temp may not be an `l` op's first
+                    -- operand (MEASURED in storeWordCell's own boolean arm).
+                    let
+                        ( rawL, s2 ) =
+                            freshTmp s1
+
+                        s3 =
+                            emit (Unary (Just rawL) L Extuw (Il.Tmp resT)) s2
+                    in
+                    if neg then
+                        let
+                            ( rT, s4 ) =
+                                freshTmp s3
+                        in
+                        storeWordCell RtLayout.tagBoolean
+                            [ Il.Tmp rT ]
+                            dest
+                            (emit (Bin (Just rT) L Xor (Il.Con 1) (Il.Tmp rawL)) s4)
+
+                    else
+                        storeWordCell RtLayout.tagBoolean [ Il.Tmp rawL ] dest s3
+
+                else if neg then
                     let
                         ( rT, s2 ) =
                             freshTmp s1
                     in
-                    reboxBoolean dest (Il.Tmp rT) (emit (Bin (Just rT) W Xor (Il.Con 1) (Il.Tmp resT)) s2)
+                    Ok (reboxBoolean dest (Il.Tmp rT) (emit (Bin (Just rT) W Xor (Il.Con 1) (Il.Tmp resT)) s2))
 
                 else
-                    reboxBoolean dest (Il.Tmp resT) s1
+                    Ok (reboxBoolean dest (Il.Tmp resT) s1)
             )
 
 
@@ -12922,31 +12952,67 @@ lowerStrLess xSlot ySlot s =
 
         ( y16, s30 ) =
             freshTmp s29
+
+        -- THE DATA POINTER AND THE LENGTH, PER ARM (VR3d's port of Char/String
+        -- ordering to the word arm; the rest of the loop below is arm-blind).
+        --
+        --   val  : payload word 0 at `slot + 8` (the byte pointer), payload
+        --          word 1's i32 at `slot + 16` (the length).
+        --   word : body unit 0 of the heap object the value names, and the i32
+        --          field of body unit `lenFieldWord` — the SAME two readers
+        --          `RawStrByte` and `RawPayload32` already lower this arm
+        --          with, so a string's bytes and length have ONE definition
+        --          per arm in this module, not two.
+        reads =
+            if wordArm s30 then
+                let
+                    ( dX, sA ) =
+                        wordPayloadWord (Il.Tmp (slotTmp xSlot)) 0 s30
+
+                    ( dY, sB ) =
+                        wordPayloadWord (Il.Tmp (slotTmp ySlot)) 0 sA
+
+                    ( lX, sC ) =
+                        wordPayloadField32 (Il.Tmp (slotTmp xSlot)) RtLayout.lenFieldWord sB
+
+                    ( lY, sD ) =
+                        wordPayloadField32 (Il.Tmp (slotTmp ySlot)) RtLayout.lenFieldWord sC
+                in
+                { dx = dX, dy = dY, lx = lX, ly = lY, st = sD }
+
+            else
+                { dx = Il.Tmp dxT
+                , dy = Il.Tmp dyT
+                , lx = Il.Tmp lxT
+                , ly = Il.Tmp lyT
+                , st =
+                    s30
+                        |> emit (Bin (Just x8) L Add (Il.Tmp (slotTmp xSlot)) (Il.Con 8))
+                        |> emit (Load (Just dxT) L LoadL (Il.Tmp x8))
+                        |> emit (Bin (Just y8) L Add (Il.Tmp (slotTmp ySlot)) (Il.Con 8))
+                        |> emit (Load (Just dyT) L LoadL (Il.Tmp y8))
+                        |> emit (Bin (Just x16) L Add (Il.Tmp (slotTmp xSlot)) (Il.Con 16))
+                        |> emit (Load (Just lxw) W LoadW (Il.Tmp x16))
+                        |> emit (Unary (Just lxT) L Extsw (Il.Tmp lxw))
+                        |> emit (Bin (Just y16) L Add (Il.Tmp (slotTmp ySlot)) (Il.Con 16))
+                        |> emit (Load (Just lyw) W LoadW (Il.Tmp y16))
+                        |> emit (Unary (Just lyT) L Extsw (Il.Tmp lyw))
+                }
     in
     Ok
         ( resT
-        , emit (Bin (Just x8) L Add (Il.Tmp (slotTmp xSlot)) (Il.Con 8)) s30
-            |> emit (Load (Just dxT) L LoadL (Il.Tmp x8))
-            |> emit (Bin (Just y8) L Add (Il.Tmp (slotTmp ySlot)) (Il.Con 8))
-            |> emit (Load (Just dyT) L LoadL (Il.Tmp y8))
-            |> emit (Bin (Just x16) L Add (Il.Tmp (slotTmp xSlot)) (Il.Con 16))
-            |> emit (Load (Just lxw) W LoadW (Il.Tmp x16))
-            |> emit (Unary (Just lxT) L Extsw (Il.Tmp lxw))
-            |> emit (Bin (Just y16) L Add (Il.Tmp (slotTmp ySlot)) (Il.Con 16))
-            |> emit (Load (Just lyw) W LoadW (Il.Tmp y16))
-            |> emit (Unary (Just lyT) L Extsw (Il.Tmp lyw))
-            |> emit (Store StoreL (Il.Con 0) (Il.Tmp (slotTmp idxSlot)))
+        , emit (Store StoreL (Il.Con 0) (Il.Tmp (slotTmp idxSlot))) reads.st
             |> closeBlock (Jmp loopLbl)
             |> startBlock loopLbl
             |> emit (Load (Just iT) L LoadL (Il.Tmp (slotTmp idxSlot)))
-            |> emit (Cmp (Just geX) L Csle (Il.Tmp lxT) (Il.Tmp iT))
-            |> emit (Cmp (Just geY) L Csle (Il.Tmp lyT) (Il.Tmp iT))
+            |> emit (Cmp (Just geX) L Csle reads.lx (Il.Tmp iT))
+            |> emit (Cmp (Just geY) L Csle reads.ly (Il.Tmp iT))
             |> emit (Bin (Just doneT) W Or (Il.Tmp geX) (Il.Tmp geY))
             |> closeBlock (Jnz (Il.Tmp doneT) tieLbl bodyLbl)
             |> startBlock bodyLbl
-            |> emit (Bin (Just axT) L Add (Il.Tmp dxT) (Il.Tmp iT))
+            |> emit (Bin (Just axT) L Add reads.dx (Il.Tmp iT))
             |> emit (Load (Just baT) W LoadUb (Il.Tmp axT))
-            |> emit (Bin (Just bxT) L Add (Il.Tmp dyT) (Il.Tmp iT))
+            |> emit (Bin (Just bxT) L Add reads.dy (Il.Tmp iT))
             |> emit (Load (Just bbT) W LoadUb (Il.Tmp bxT))
             |> emit (Cmp (Just neT) W Cne (Il.Tmp baT) (Il.Tmp bbT))
             |> closeBlock (Jnz (Il.Tmp neT) diffLbl nextLbl)
@@ -12959,7 +13025,7 @@ lowerStrLess xSlot ySlot s =
             |> emit (Store StoreW (Il.Tmp ltDiff) (Il.Tmp (slotTmp resSlot)))
             |> jumpTo joinLbl
             |> startBlock tieLbl
-            |> emit (Cmp (Just ltTie) L Cslt (Il.Tmp lxT) (Il.Tmp lyT))
+            |> emit (Cmp (Just ltTie) L Cslt reads.lx reads.ly)
             |> emit (Store StoreW (Il.Tmp ltTie) (Il.Tmp (slotTmp resSlot)))
             |> jumpTo joinLbl
             |> startBlock joinLbl
@@ -14038,10 +14104,35 @@ rtCallTwoRange layout =
                 -- caller — a CONSTANT +1 per such hop, not growth (this func
                 -- was itself tcall'd into, so its frame is the loop's slot).
                 --
-                -- NOT under the word arm: there `:val` is 8 bytes, i.e. an
-                -- aggregate the amd64 ABI passes in a register, and the tcall's
-                -- class/`aggsize` rules would have to be re-measured.  AREA 6
-                -- owns that; the word arm keeps the ordinary call and its wall.
+                -- NOT under the word arm — and VR3d RE-MEASURED the reason
+                -- instead of re-reading it, because the flip made this the
+                -- DEFAULT arm's shape.  The old reason ("`:val` is 8 bytes, an
+                -- aggregate the amd64 ABI passes in a register, and the
+                -- tcall's class/`aggsize` rules would have to be re-measured")
+                -- is HALF right: the rules are not the problem, the EMITTED
+                -- SHAPE is.  Dropping the `not (wordArmLayout layout)` here
+                -- makes the word arm emit `tcall :val %code(env %e, l %pv0)`
+                -- in a block that LOADED `%pv0` first, and the vendored QBE
+                -- REJECTS exactly that: "tcall must be the last instruction of
+                -- its block" (its isel checks the input block's last
+                -- instruction and the load-argument shape does not survive it).
+                -- A one-line mutation of the val arm's own `.ssa` (insert
+                -- `%pv0 =l loadl %p0` before its tcall) reproduces the refusal;
+                -- an `add` in the same position does not.  So this is AREA 6
+                -- work (a closure-call ABI whose args are words QBE will tcall
+                -- with), not a switch.
+                --
+                -- WHAT THAT COSTS, MEASURED on the flipped tree (clostail-big's
+                -- own instrument: an OWNED 8 MiB stack via prlimit +
+                -- QBE_NO_RLIMIT=1): the generic-apply tail chain on the word
+                -- arm is NOT constant-stack — n=8000 rc 0, n=9000 rc 139
+                -- (SIGSEGV) — i.e. ~1 KB of stack per hop, because every hop
+                -- of a RE-ENTERED chain stacks one `rt_call2r` frame.  The
+                -- "constant +1 per such hop" this comment used to claim is
+                -- true only for a chain that does not re-enter; the closure
+                -- tail chain does.  The val arm is FLAT at n=1e6 (16276 kB
+                -- peak).  This is the flip's one open defect: see the
+                -- qbe-check `clostail-big` row.
                 canTail =
                     not (wordArmLayout layout) && n <= maxTailCallArgs
             in
