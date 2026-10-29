@@ -1087,3 +1087,147 @@ Also recorded, because it is adjacent and NOT this class: the window
 `[Rt.parseArgsGo, rootPushValueArray]` is unrooted on BOTH arms (the float cells
 exist before the registration). It is pre-existing, it is not made worse by the
 flip, and closing it is its own unit.
+
+## THE FLIP (perf word-arm-flip, VR3d): THE WORD ARM IS THE DEFAULT — and it is NOT yet verifiable green
+
+**This section SUPERSEDES every "the word arm is not the default" reading above,
+including the `PASS=179 FAIL=11` gate table.** Records here are append-only; the
+measurements they record were true of the trees they were taken on.
+
+### What moved
+
+`osier-compiler/run.js`: `QBE_WORDVAL = process.env.QBE_VALREP !== 'val'` — an
+unset `QBE_VALREP` is the 8-byte arm and the 40-byte arm must be asked for by
+name. An unknown value is REFUSED (exit 2), the same polarity the five
+word-arm instruments took at flip prep: `QBE_VALREP=Word` must not quietly
+measure the other arm. `selfhost/NativeMain.elm`'s hand-copied default vector
+moves with it (`wordVal = True`) — the seed IS that file's own emit, so a twin
+left at `False` makes the native lane emit one arm and the stock lane the
+other, and the `.ssa` fixed point stops closing on its first run.
+
+MEASURED (fib.elm): unset == word byte-identical, val differs, val stable,
+`QBE_VALREP=Word` exits 2. Before the flip, unset == val.
+
+### The gate, on all three arms (MEASURED, repo root)
+
+| arm | result |
+| --- | --- |
+| `QBE_VALREP=word` | **PASS=190 FAIL=0**, rc 0 |
+| unset (the default — the same arm) | **PASS=190 FAIL=0**, rc 0 |
+| `QBE_VALREP=val` | **PASS=190 FAIL=0**, rc 0 |
+
+The eleven rows that were red at flip prep (`PASS=179 FAIL=11`, the AREA 4
+table above) are GREEN: AREA 4 landed, so the flip did NOT need the
+"pin those 11 rows val-only" decision. The val arm stays a full participant
+because it is the DIFFERENTIAL ORACLE for every word-arm row — a val arm that
+dies at the flip makes every comparison vacuous.
+
+### The corpus re-freeze, and why the moved set is the right shape
+
+`tools/osier-corpus-ssa.sh --freeze`: 159 artifacts, **125 hash lines moved**
+(git's own 125 ins / 125 del). Enumerated by NAME (order-preserving), never by a
+content→index map — two groups can emit identical bytes and a content map
+collapses them:
+
+```
+old names 159 = new names 159          (name sets EQUAL)
+moved 125   unmoved 34
+defines 125 (the emit is real IL)      err 34 (first 4 bytes "err ")
+SET EQUALITY  moved == defines   TRUE
+SET EQUALITY  unmoved == err     TRUE
+partition: 125 + 34 = 159, disjoint, covering
+```
+
+The flip changes the REPRESENTATION, which is text in every emitting group's
+`.ssa`, so every group that emits MUST move; the 34 refusals are front-end/type
+errors decided before any arm exists, so they must NOT move. `moved == defines`
+is the claim that the flip moved the emit and nothing else — no group changed
+class, none started or stopped refusing.
+
+**The goldens did NOT re-freeze.** A moved golden is a DEFECT, and on this tree
+none moved: every golden row runs on the (now word) default arm and still prints
+the frozen bytes.
+
+### The seed re-freeze, with the deferred `wordFixnumLimit` re-spelling
+
+`tools/qbe-bootstrap.sh --freeze` at the flipped tree: **25,259,694 →
+38,148,638 B** (the word arm's IL is ~51% larger — one tagged word per value
+costs more instructions than a payload struct; the RUNTIME is what this arm
+makes cheaper, not the emit). `--status`: abi FRESH + exact FRESH. `--check`:
+rc 0.
+
+The re-spelling rides it because `gc:layout` digests the census block:
+`wordFixnumLimit` is now `1152921504606846976` (was a six-factor product), it
+JOINED the census's seat list (it had been invisible: the parser wants `name =`
+followed immediately by `    <digits>`, and the old spelling put a comment
+between them), and `mid_values` now prints `$1` instead of `($0 + 0)` because
+awk's CONVFMT (`%.6g`) would have printed `1.15292e+18`. Marker
+`8217660e… → e03c508c… → bb739cd1…`. Also fixed on the way: `layout-census.sh
+--check` was RED at HEAD because AREA 4 added `tagBigInt` without a seat.
+
+### Rows that only ever measured the VAL arm, and now say so
+
+A full `qbe-check` on the flipped tree was 19 FAIL / 345 PASS. Eighteen were
+rows whose SUBJECT is a 40-byte-arm shape; each now NAMES its arm instead of
+inheriting "the default", because an inherited default silently changes a row's
+subject at the flip while the row keeps printing its headline:
+
+| row | why it is val-arm-shaped (measured) |
+| --- | --- |
+| `hostapply` | `Whost.mid` hand-computes 40-byte strides; on the word arm it printed `[cons 7 …]` for a golden `[cons 417 …]`. The word arm's applier oracle is `word-arm-diff`'s `hostprog.elm` (stride-twin, runs on BOTH arms). |
+| `boolpay`, `BOOLPAY-SHAPE` | the fixture's subject IS the 40-byte boolean payload word (`mkval(5, 2^32)`); the word arm refuses that cell by name — the arm's correct answer. |
+| `flatten-structural`, `noflatten-structural` | the probe constant is `storew 14`, the 40-byte arm's tag-14 `RawMkValue`. A word-arm record is a heap cell whose kind code is in the header. |
+| `norep-*` (5 rows) | S4's unboxed Int locals are a change to the 40-byte representation: on the word arm `NoRep.chain`/`NoRep.floatLocal` are **cmp-identical** ON vs OFF. An A/B whose arms cannot differ is not a test. |
+| `mono-fired` | the pass is NOT inert (the emits differ) but the row's discriminator is the clone's `prim=`/`sym=` fallback COUNT, which the word arm routes differently (6 vs 6 while the pass fired). |
+| `ffid-f64`, `ffis-vararg` | the expected call SHAPE is the 40-byte arm's FFI boundary. |
+| `tsbuf-apply` | its structural half needs the emit to call BOTH staging seats; the word-arm emit never reaches `Rt.stage-tail`, so the row's own "no test" guard fired. **The tsbuf aliasing hazard has NO oracle on the word arm** — a recorded gap. |
+
+Two more were REBASED rather than pinned, because their claim is real on both
+arms: `frame-wordcond` now runs both (val 67 instructions / bound 80 + the
+boxed-cond grep; word 143 / bound 160 + the memset — `storew 3,` is a val-arm
+spelling and asserting it on the word arm would be vacuous), and `root-stores`'
+floor is 10 (MEASURED: val 66 frame-pointer ops, word 19, promoted 0).
+
+### The three ratio gates, per arm
+
+| gate | val arm | word arm (THE DEFAULT) | bound |
+| --- | --- | --- | --- |
+| frame, fib 28 | 0.83x (38/46 ms) | **2.34x** (110/47 ms) | 2.5x |
+| apply, n=5e6 | 1.51x (496/328) | **3.01x** (987/328) | 12x |
+| tail, 1e6 | 0.82x (47/57) | **1.44x** (82/57) | 6x |
+
+**The word arm is 2-3x SLOWER than the val arm on every call-family path**, and
+its frame gate sits 7% under the bound — i.e. nearly binding on the new default.
+That is a fact about this point in the arc (its win is the value stride; its
+frame path still carries the 40-byte shape — `frame-wordcond` prints both), and
+VR4/VR5/VR6 are the units that pay it back. The bound is NOT retuned here. The
+B4 asymmetry probe (`QBE_NORTLEAN=1`) no longer exists — the Mid collector
+refuses the fat ABI — and `QBE_NOREP=1` is inert on the word arm (2.39x vs
+2.34x), so **that bound's "fails before" direction is currently unproven on the
+word arm**.
+
+### THE FLIP IS NOT VERIFIABLE GREEN: three measured word-arm defects
+
+1. **`clostail-big` is RED on the default arm.** The generic-apply tail chain is
+   NOT constant-stack: n=8000 rc 0, **n=9000 SIGSEGV** under an owned 8 MiB
+   stack (val flat at n=1e6, 16276 kB). Cause: `Lower.elm`'s `rtCallTwoRange`
+   has `canTail = not (wordArmLayout layout) && …`, so every word-arm arity
+   block CALLS the callee and each hop of a RE-ENTERED chain stacks one frame.
+   The naive fix is REFUTED, measured: enabling the tcall emits
+   `tcall :val %code(env %e, l %pv0)` in a block that LOADED `%pv0` first and
+   the vendored QBE rejects it ("tcall must be the last instruction of its
+   block") — reproduced by a one-line mutation of the val arm's own `.ssa` (an
+   `add` in the same position does not reproduce it). **AREA 6 work.**
+2. **The word-arm seed cannot run the whole-compiler emit.** At a 16 GB ceiling:
+   `midgc: scavenge read a POISONED (forwarded young) body … (collect 22)`; at
+   32 GB: `this ceiling needs more than 2^20 size classes; the word arm's class
+   field is bits 2..21`. A rooting/scan gap of the class this arc has fixed
+   twice, plus an allocator ceiling limit.
+3. **Consequence: the `.ssa` fixed point does not close on the word arm** — the
+   seed-built compiler cannot re-emit the seed, so the tree's strongest single
+   oracle is unverified until (2) is fixed. The committed seed is still the
+   honest freeze (it IS the default arm's emit); the defect is in the runtime.
+
+`WORD-BLOCKED = 0` was never evidence that the arm is CORRECT, and this is the
+sharpest instance yet: the census is unchanged by the flip (125 / 34 / 0) while
+a 1e6-hop tail chain and the whole-compiler emit both fail.
